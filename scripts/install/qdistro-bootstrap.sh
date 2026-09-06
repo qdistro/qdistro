@@ -1982,33 +1982,75 @@ chain_state_completed() {
 # lines from earlier runs (see chain_state_prune_stale).
 CHAIN_UNRECORDED=""
 CHAIN_RUN_RECORDED=""
+
+# chain_record_failed <name> <msg> [tmp] — a successful installer whose
+# record write failed. Hoisted (bash has no local functions) so it does
+# not leak a `_chain_*` name into every shell that sources this file
+# (image/config.sh sources us into the kiwi chroot).
+chain_record_failed() {
+    local name="$1" msg="$2" tmp="${3:-}"
+    warn "$msg; step '$name' ran OK but is not recorded"
+    [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+    CHAIN_UNRECORDED="${CHAIN_UNRECORDED:+$CHAIN_UNRECORDED }$name"
+    return 0
+}
+
 chain_state_record() {
-    local name="$1" tmp
+    local name="$1" tmp=""
     # Every way the write can fail lands here: the step ran OK, the record
     # did not happen, the completeness check will say exactly that.
-    _chain_unrecorded() {
-        warn "$1; step '$name' ran OK but is not recorded"
-        [ -z "${tmp:-}" ] || rm -f "$tmp" 2>/dev/null || true
-        CHAIN_UNRECORDED="${CHAIN_UNRECORDED:+$CHAIN_UNRECORDED }$name"
-        return 0
-    }
     if [ -e "$CHAIN_STATE_FILE" ] && [ ! -f "$CHAIN_STATE_FILE" ]; then
-        _chain_unrecorded "$CHAIN_STATE_FILE exists but is not a regular file"; return 0
+        chain_record_failed "$name" "$CHAIN_STATE_FILE exists but is not a regular file"; return 0
     fi
     install -d -m 0755 "$QDISTRO_STATE_DIR" 2>/dev/null \
-        || { _chain_unrecorded "could not create state dir $QDISTRO_STATE_DIR"; return 0; }
+        || { chain_record_failed "$name" "could not create state dir $QDISTRO_STATE_DIR"; return 0; }
     tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
-        || { tmp=""; _chain_unrecorded "could not create a state temp file in $QDISTRO_STATE_DIR"; return 0; }
+        || { chain_record_failed "$name" "could not create a state temp file in $QDISTRO_STATE_DIR"; return 0; }
     {
         chain_state_completed
         printf '%s\n' "$name"
     } | awk 'NF && !seen[$0]++' > "$tmp" \
-        || { _chain_unrecorded "could not write $tmp"; return 0; }
+        || { chain_record_failed "$name" "could not write $tmp" "$tmp"; return 0; }
     chmod 0644 "$tmp" 2>/dev/null || true
     mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
-        || { _chain_unrecorded "could not rename $tmp to $CHAIN_STATE_FILE"; return 0; }
+        || { chain_record_failed "$name" "could not rename $tmp to $CHAIN_STATE_FILE" "$tmp"; return 0; }
     CHAIN_RUN_RECORDED="${CHAIN_RUN_RECORDED:+$CHAIN_RUN_RECORDED
 }$name"
+}
+
+# chain_state_unrecord <name> — drop <name> from the state file ATOMICALLY
+# (same temp-then-rename as chain_state_record). No-op if the file is
+# absent or does not list <name>. run_installer_step calls this BEFORE
+# executing the installer so a current failure cannot be masked by an
+# earlier success: a crash or die mid-step, a failed --rerun-step, or a
+# failed --from-step all leave the name unrecorded, and --resume re-runs
+# it (codex r3 N1). Unexpected names (dev-only / retired) are never
+# passed here -- we only unrecord a step we are about to run.
+# Return 1 if the name WAS present and could not be dropped (fail-closed:
+# do not run the installer against a stale success we failed to invalidate).
+chain_state_unrecord() {
+    local name="$1" tmp keep="" n present=""
+    [ -f "$CHAIN_STATE_FILE" ] || return 0
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if [ "$n" = "$name" ]; then
+            present=1
+            continue
+        fi
+        keep="${keep:+$keep
+}$n"
+    done <<EOF
+$(chain_state_completed)
+EOF
+    [ -n "$present" ] || return 0
+    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
+        || { warn "could not drop stale record '$name': could not create a state temp file in $QDISTRO_STATE_DIR"; return 1; }
+    printf '%s\n' "$keep" | awk 'NF' > "$tmp" \
+        || { warn "could not drop stale record '$name': could not write $tmp"; rm -f "$tmp"; return 1; }
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
+        || { warn "could not drop stale record '$name': could not rename $tmp to $CHAIN_STATE_FILE"; rm -f "$tmp"; return 1; }
+    return 0
 }
 
 # chain_state_prune_stale <expected> — after a FULL run, drop from the record
@@ -2040,9 +2082,11 @@ $(chain_state_completed)
 EOF
     tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
         || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; return 0; }
-    printf '%s\n' "$keep" | awk 'NF' > "$tmp"
+    printf '%s\n' "$keep" | awk 'NF' > "$tmp" \
+        || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; rm -f "$tmp"; return 0; }
     chmod 0644 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$CHAIN_STATE_FILE"
+    mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
+        || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; rm -f "$tmp"; return 0; }
 }
 
 # chain_resume_validate — fail-closed validation of the state file for a
@@ -2108,8 +2152,11 @@ chain_expected_names() {
 #               on EVERY run until the operator deletes the line.
 #
 # <this-run> (a full run passes CHAIN_RUN_RECORDED) is what "recorded" means
-# for the missing check: the file may still carry lines from earlier runs.
-# Other modes judge the file (--resume's whole point is the earlier lines).
+# for the missing check: the file may still carry unexpected lines from
+# earlier runs. Other modes judge the file (--resume's whole point is the
+# earlier lines). run_installer_step unrecords a step before attempting
+# it, so a scoped failure or a die mid-full-run cannot leave a stale
+# expected success that those modes would then treat as complete.
 #
 # A step that ran OK but whose record could not be written (CHAIN_UNRECORDED)
 # is a gap of the first kind, named as a record failure so the operator fixes
@@ -2162,7 +2209,15 @@ EOF
 $seen
 EOF
     if [ -z "$missing" ] && [ -z "$unexpected" ]; then
-        log "installer chain complete: $n_expected of $n_expected expected steps recorded, nothing unexpected, in $CHAIN_STATE_FILE"
+        # Scoped runs may finish with a complete *record* after executing
+        # only the selected steps; say so, so "complete" is not read as
+        # "this process ran the whole chain" (opus r3 N23).
+        case "$mode" in
+            only|from)
+                log "installer chain record is complete: $n_expected of $n_expected expected steps recorded, nothing unexpected, in $CHAIN_STATE_FILE" ;;
+            *)
+                log "installer chain complete: $n_expected of $n_expected expected steps recorded, nothing unexpected, in $CHAIN_STATE_FILE" ;;
+        esac
         return 0
     fi
     # The gap, spelled out once for every classification below.
@@ -2200,6 +2255,14 @@ EOF
 # default warn-and-continue safe on a hardened profile.
 run_installer_step() {
     local name="$1" installer="$2" src_dir="$3"
+    # Drop any earlier success for this step before we try it. A stale
+    # line left in place would make --resume skip the step after a crash
+    # or die (prune never ran), and would make a failed --rerun-step /
+    # --from-step report "complete" from the old record (codex r3 N1).
+    if ! chain_state_unrecord "$name"; then
+        fail_or_warn "could not drop stale record for [$name] before re-running it (state: $CHAIN_STATE_FILE)"
+        return 0
+    fi
     if [ -x "$installer" ]; then
         log "  -> [$name] $(basename "$installer")"
         # Core op: installer-chain step. Non-fatal by default
@@ -2252,12 +2315,15 @@ install_python_modules() {
     fi
 
     # A FULL run promises the whole chain and is judged on what THIS run
-    # records (CHAIN_RUN_RECORDED); afterwards chain_state_prune_stale drops
-    # the earlier-run lines this run did not re-record and keeps the ones the
-    # profile does not expect, so a leftover dev-only/retired step is
-    # reported on every run until cleaned up (chain_completeness_check).
+    # records (CHAIN_RUN_RECORDED). Each attempted step is unrecorded
+    # first (run_installer_step), so a crash or die mid-loop cannot leave
+    # a stale success that --resume would skip. Afterwards
+    # chain_state_prune_stale drops any remaining expected lines this run
+    # did not re-record and keeps the ones the profile does not expect,
+    # so a leftover dev-only/retired step is reported on every run until
+    # cleaned up (chain_completeness_check).
     if [ "$mode" = full ] && [ -n "$(chain_state_completed)" ]; then
-        log "installer chain: full run -- previously recorded: $(chain_state_completed | tr '\n' ' ')(judging this run's record; stale lines are dropped afterwards)"
+        log "installer chain: full run -- previously recorded: $(chain_state_completed | tr '\n' ' ')(judging this run's record; attempted steps are unrecorded first)"
     fi
     CHAIN_RUN_RECORDED=""
 

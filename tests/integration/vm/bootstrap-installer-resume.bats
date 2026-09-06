@@ -585,3 +585,70 @@ EOF
     # nothing was moved INTO the directory
     [ -z "$(ls -A "$STATE_DIR/installer-chain.state")" ]
 }
+
+# --- codex r3 N1: stale success must not survive a current failure ----------
+# The post-loop prune only runs if the loop finishes. A STRICT die inside
+# the loop, a failed --rerun-step, and a failed --from-step all used to
+# leave the old line in place: --resume then skipped the failed step, and
+# a scoped run reported "complete" from the leftover record.
+
+@test "completeness: --rerun-step of a failed step on a complete machine does not report complete (codex r3 N1)" {
+    _run_chain ''
+    [ "$status" -eq 0 ]
+    grep -qx pwd "$STATE_DIR/installer-chain.state"
+    : > "$TRACE"
+    _break_step install-pwd-for-vm.sh
+    _run_chain 'RERUN_STEP=pwd'
+    # scoped is report-only (does not die), but must not claim complete
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain not complete after a scoped run"* ]]
+    [[ "$output" == *"not recorded as installed: pwd."* ]]
+    [[ "$output" != *"installer chain complete"* ]]
+    [[ "$output" != *"record is complete"* ]]
+    ! grep -qx pwd "$STATE_DIR/installer-chain.state"
+    [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
+}
+
+@test "completeness: --from-step of a failed step on a complete machine does not report complete (codex r3 N1)" {
+    _run_chain ''
+    [ "$status" -eq 0 ]
+    : > "$TRACE"
+    _break_step install-pwd-for-vm.sh
+    _run_chain 'FROM_STEP=pwd'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain not complete after a scoped run"* ]]
+    [[ "$output" == *"not recorded as installed: pwd."* ]]
+    [[ "$output" != *"installer chain complete"* ]]
+    ! grep -qx pwd "$STATE_DIR/installer-chain.state"
+    grep -q "install-pwd-for-vm.sh" "$TRACE"
+    # later steps still ran (non-strict) and were re-recorded
+    grep -q "install-tier5b-for-vm.sh" "$TRACE"
+    grep -qx qsu "$STATE_DIR/installer-chain.state"
+}
+
+@test "completeness: strict full abort on a complete machine unrecords the failed step; --resume re-runs it (codex r3 N1)" {
+    _run_chain ''
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    grep -qx pwd "$STATE_DIR/installer-chain.state"
+    : > "$TRACE"
+    _break_step install-pwd-for-vm.sh
+    _run_chain 'STRICT=1'
+    [ "$status" -ne 0 ]
+    grep -q "install-pwd-for-vm.sh" "$TRACE"
+    # died at pwd; later steps did not run, prune never ran
+    ! grep -q "install-qsu-for-vm.sh" "$TRACE"
+    ! grep -qx pwd "$STATE_DIR/installer-chain.state"
+    grep -qx broker "$STATE_DIR/installer-chain.state"
+    # fix pwd; --resume must re-run exactly pwd, not skip it
+    cat > "$FAKE_QD/scripts/install/install-pwd-for-vm.sh" <<EOF
+#!/bin/bash
+echo "install-pwd-for-vm.sh \$1" >> "$TRACE"
+exit 0
+EOF
+    : > "$TRACE"
+    _run_chain 'RESUME=1'
+    [ "$status" -eq 0 ]
+    [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
+    grep -qx pwd "$STATE_DIR/installer-chain.state"
+}

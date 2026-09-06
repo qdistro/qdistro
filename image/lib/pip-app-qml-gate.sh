@@ -14,13 +14,21 @@
 # source checkout can never stand in for the installed package.
 # $QDISTRO_PYTHON overrides the interpreter (tests).
 pip_app_qml_gate() {
-    local app f found
+    local app f found py="${QDISTRO_PYTHON:-python3}"
     for app in "$@"; do
+        if ! "$py" -P -c 'import importlib, sys; importlib.import_module(sys.argv[1])' "$app" 2>/dev/null; then
+            echo "[qdistro-image] FATAL: $app is not importable after pip install;" \
+                 "not a missing QML file, the package itself did not land. Aborting build." >&2
+            return 1
+        fi
         for f in qml/Main.qml qml/shim/qmldir; do
-            found="$("${QDISTRO_PYTHON:-python3}" -P -c "
-import importlib.resources as r, functools
-p = functools.reduce(lambda a, b: a / b, '$f'.split('/'), r.files('$app'))
-print(p if p.is_file() else '')" 2>/dev/null || true)"
+            found="$("$py" -P -c "
+import importlib.resources as r, functools, sys
+p = functools.reduce(lambda a, b: a / b, sys.argv[1].split('/'), r.files(sys.argv[2]))
+print(p if p.is_file() else '')" "$f" "$app")" || {
+                echo "[qdistro-image] FATAL: $app QML probe failed for $f. Aborting build." >&2
+                return 1
+            }
             if [ -z "$found" ]; then
                 echo "[qdistro-image] FATAL: $app installed without its QML ($f is not inside the installed package);" \
                      "it would crash at first launch. Fix $app's pyproject [tool.setuptools.package-data]. Aborting build." >&2

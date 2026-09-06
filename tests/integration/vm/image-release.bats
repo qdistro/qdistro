@@ -694,4 +694,10 @@ GF
     # a source checkout in the CWD must not stand in for an installed package (-P)
     run bash -c 'cd "$2" && source "$1" && pip_app_qml_gate fakeapp' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
     [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: fakeapp is not importable"* ]]
+    # a name that is not a package at all is not misdiagnosed as missing QML
+    run bash -c 'source "$1"; pip_app_qml_gate definitely_not_a_pkg' _ "$IMAGE/lib/pip-app-qml-gate.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: definitely_not_a_pkg is not importable"* ]]
+    [[ "$output" != *"without its QML"* ]]
 }

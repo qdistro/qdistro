@@ -369,10 +369,13 @@ expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
 # image this verifier never logs in through qdgreeter, so with the greeter
 # on tty3 the locker is legitimately inactive/dead with NRestarts=0. The
 # row therefore adjudicates by session state: session up -> must hold
-# active/running; no session -> must be inactive, never failed, never
-# restarted (a locker that started and died without a session IS flapping).
-# Until run 29 this row demanded `active` unconditionally, which no
-# password-gated image can satisfy; it had never passed.
+# active/running; session exactly inactive -> locker must be loaded,
+# inactive/dead, never restarted (a locker that started and died without
+# a session IS flapping; a missing unit would otherwise look identical
+# to "never started"; a failed/activating session is not the no-login
+# state and fails this row). Until run 29 this row demanded `active`
+# unconditionally, which no password-gated image can satisfy; it had
+# never passed.
 expect "qdlocker.service is healthy: holds active/running with a session, inactive and never failed without one" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c '
         sess=\$(systemctl --user is-active qdwin-session.target)
@@ -383,14 +386,16 @@ expect "qdlocker.service is healthy: holds active/running with a session, inacti
             done
             sleep 3
         fi
-        read as ss nr <<EOF2
-\$(systemctl --user show -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
+        read load as ss nr <<EOF2
+\$(systemctl --user show -p LoadState -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
 EOF2
-        echo \"qdwin-session.target=\$sess qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
+        echo \"qdwin-session.target=\$sess qdlocker LoadState=\$load ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
         if [ \"\$sess\" = active ]; then
             [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]
+        elif [ \"\$sess\" = inactive ]; then
+            [ \"\$load\" = loaded ] && [ \"\$as\" = inactive ] && [ \"\$ss\" = dead ] && [ \"\${nr:-99}\" -eq 0 ]
         else
-            [ \"\$as\" = inactive ] && [ \"\$ss\" = dead ] && [ \"\${nr:-99}\" -eq 0 ]
+            false
         fi'"
 
 # NOT asserted here: the locked-session VT escape
