@@ -43,11 +43,12 @@ Notes:
               offline plumbing. Runs first in the host gate. Missing bats =>
               skip+warn; any failure => EXIT_BATS (35).
   qci image   Static image-content checklist (image/verify-contents.sh) first,
-              then the boot/install flow (image/verify.sh, image/install-test.sh).
-              Boot/install stages are recorded as blocked when no built image
-              is present. --root inspects an extracted tree instead of the
-              built artifact; --idempotency runs install twice; --no-boot
-              runs only the static checklist.
+              then boot-verify (image/verify.sh --stick) of the published
+              bundle/*.raw.xz. Boot is recorded as blocked when no built
+              image is present. install-test.sh is inert while
+              installiso=false (no row; not a skip). --root inspects an
+              extracted tree instead of the built artifact; --no-boot runs
+              only the static checklist. Part of `qci full` (todo/iso/14 F).
   qci registry-check  Validate tests/registry.tsv (pilot): each path exists
               and each gate is one qci knows. Advisory only, not enforced.
   qci release-manifest  Assert the source manifest is release-grade (R1): every
@@ -159,12 +160,12 @@ Environment:
   QCI_RELEASE=1             Release-profile mode (RC battery): a `blocked` or
                             `skip` row in
                             a release-relevant gate (vm-smoke / bats / gui /
-                            release-manifest / bootstrap-release-profile) is
-                            FATAL, not exit-0. "Green" then
+                            release-manifest / bootstrap-release-profile / image)
+                            is FATAL, not exit-0. "Green" then
                             means every required row ran — a missing prerequisite
                             or skipped scenario cannot pass as success. Escalates an otherwise-passing
                             run to EXIT_RELEASE (15); a real failure keeps its own
-                            class. Infra gates and the D1-dropped `image` gate are
+                            class. Infra gates (preflight/selftest/lint/…) are
                             excluded.
 EOF
 }

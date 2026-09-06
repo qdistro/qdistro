@@ -97,7 +97,7 @@ cleanup *args:
 
 # --- full battery ------------------------------------------------------------
 
-# preflight + host + release gates + vm-smoke + bats + gui, one report.
+# preflight + host + release gates + image + vm-smoke + bats + gui, one report.
 # `just full`  /  `just full --keep-on-fail`  /  `just full --delete-failed-vm`
 full *args:
     {{qci}} full "$@"

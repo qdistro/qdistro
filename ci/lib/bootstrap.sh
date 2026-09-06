@@ -101,11 +101,12 @@ QCI_OFFLINE="${QCI_OFFLINE:-0}"
 # not exercised; both escalate an otherwise-passing release run to EXIT_RELEASE.
 # Normal developer runs retain their non-fatal skip/blocked taxonomy. Scoped to
 # the gates where incomplete rows invalidate release evidence;
-# infra gates (preflight/selftest/lint/registry-check/affected/edit-guard) and
-# the D1-dropped `image` gate are intentionally excluded.
+# infra gates (preflight/selftest/lint/registry-check/affected/edit-guard)
+# stay excluded. `image` joined the tester battery in todo/iso/14 Phase F:
+# a blocked/skip row there means the published bytes were not proven.
 QCI_RELEASE="${QCI_RELEASE:-0}"
 [ "$QCI_RELEASE" = 1 ] && export QCI_RELEASE
-QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile"
+QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile image"
 
 # QCI_ALLOW_TEST_EDITS=1 sanctions edits to the `qci edit-guard` protected
 # paths (tests/**, ci/prompts/**, selinux/**). Same effect as the

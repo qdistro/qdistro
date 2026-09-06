@@ -15,6 +15,13 @@ gate_full() {
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_bootstrap_release_profile; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    # Tester image (todo/iso/14 Phase F): prove the published .raw.xz. This
+    # gate uses its own disk (the kiwi artifact), not the per-run golden, so
+    # it is NOT in the golden-sharing cascade below. A missing artifact
+    # records blocked rows and returns 0 in normal mode; QCI_RELEASE=1
+    # escalates those blocked rows.
+    gate_image; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # VM-dependent gates share ONE infra resource (libvirt provisioning + the
     # per-run golden). When one fails with EXIT_VM_PROVISION that is a single
     # infra root cause; running the rest into the same wall books N independent

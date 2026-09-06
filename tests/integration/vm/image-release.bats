@@ -674,10 +674,15 @@ GF
     [ "$status" -eq 2 ]; [[ "$output" == *"not a directory"* ]]
 }
 
-@test "ci image gate: with no install ISO the install stages are recorded as skipped, not run" {
+@test "ci image gate: with no install ISO the install stages are omitted, not skipped or run" {
     local g="$REPO/ci/lib/gates/image.sh"
-    grep -q 'record_skip image install-test.sh image' "$g"
+    # Phase F: a skip row would fail QCI_RELEASE=1 for a designed-absent ISO.
+    if grep -q 'record_skip image install-test.sh' "$g"; then
+        echo "install-test must not record_skip (fatal-gate skip) when no ISO" >&2
+        return 1
+    fi
     grep -q 'installiso=false' "$g"
+    grep -q 'inert until the post-v1 installable ISO returns' "$g"
     # Phase E: the published artifact is the checksummed xz; verify.sh --stick
     grep -q 'select-artifact.sh' "$g"
     grep -q 'qdistro_materialize_raw' "$g"
@@ -686,6 +691,16 @@ GF
     grep -q 'record_result image select-artifact fail' "$g"
     # B2: gate passes the xz into verify.sh so --stick dd is the same digest
     grep -q 'QDISTRO_RESOLVED_XZ' "$g"
+}
+
+@test "ci: image is in gate_full and QCI_RELEASE_FATAL_GATES, outside the golden cascade" {
+    local d="$REPO/ci/lib/dispatch.sh" b="$REPO/ci/lib/bootstrap.sh"
+    # gate_image is called from gate_full, not from the golden-sharing loop.
+    grep -q 'gate_image' "$d"
+    awk '/^gate_full\(\)/{f=1} f{print} /^}/{if(f)exit}' "$d" | grep -q 'gate_image'
+    awk '/for gate_fn in/{print; exit}' "$d" | grep -q 'gate_vm_smoke gate_bats gate_gui'
+    awk '/for gate_fn in/{print; exit}' "$d" | grep -qv 'gate_image'
+    grep -q 'QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile image"' "$b"
 }
 
 @test "verify-contents: a qdgreeter package without its QML is a MISS (run 28's crash-looping greeter)" {

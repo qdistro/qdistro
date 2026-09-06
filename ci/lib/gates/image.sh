@@ -159,7 +159,7 @@ gate_image() {
     local v_log="$RDIR/host/image-verify.log"
     log "image: boot-verify (image/verify.sh)"
     # --stick: Phase E grow/USB/persist/login/secure-boot/nested/dd matrix.
-    # Stays out of `qci full` until Phase F (todo/iso/14).
+    # In `qci full` since Phase F (todo/iso/14).
     # Pass the xz when Stage A resolved one, so --stick's dd extra is the
     # same digest (iso/14 Phase E independent B2). verify.sh re-materialises
     # via the from-xz cache. Pin login/persist/grow so a caller env cannot
@@ -186,11 +186,10 @@ gate_image() {
     local iso
     iso="$(ls "$build_dir"/*.install.iso 2>/dev/null | head -1)"
     if [ -z "$iso" ]; then
-        local why="no .install.iso next to $img: the tester image is built with installiso=false (todo/iso/13), so install-test.sh (and --idempotency, which re-runs it) is inert until the post-v1 installable ISO returns; not a missing prerequisite"
-        record_skip image install-test.sh image "$why"
-        if [ "$idempotency" = 1 ]; then
-            record_skip image install-test.sh-2nd image "$why"
-        fi
+        # Inert, not skipped: a skip row in QCI_RELEASE_FATAL_GATES would
+        # fail the release battery for a designed-absent ISO (todo/iso/14
+        # Phase F). Do not record a row.
+        log "image: no .install.iso next to $img: tester image is installiso=false (todo/iso/13); install-test.sh is inert until the post-v1 installable ISO returns (not a skip row)"
         return "$rc"
     fi
 
