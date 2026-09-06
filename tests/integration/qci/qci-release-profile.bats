@@ -74,12 +74,31 @@ row_note_has() {
     printf 'preflight\toptional-tool\tskip\t0\tpass\ttool\t\toptional\tunit\n' >> "$rows"
 
     run bash -c '
-        QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile"
+        QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile image"
         source "$1/ci/lib/run.sh"
         release_profile_incomplete_rows "$2"
     ' _ "$REPO_ROOT_SRC" "$rows"
     [ "$status" -eq 0 ]
     [ "$output" = "skip:gui/app-compat" ]
+}
+
+@test "release-profile: a blocked image verify row is incomplete; an install-test skip would be too" {
+    local rows="$RR/results.tsv"
+    printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\tcategory\n' > "$rows"
+    printf 'image\tverify.sh\tblocked\t40\tvm_provision\timage\t\tno published artifact\tgui\n' >> "$rows"
+    printf 'image\tinstall-test.sh\tskip\t0\tpass\timage\t\tinstalliso=false\tgui\n' >> "$rows"
+
+    run bash -c '
+        QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile image"
+        source "$1/ci/lib/run.sh"
+        release_profile_incomplete_rows "$2"
+    ' _ "$REPO_ROOT_SRC" "$rows"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *blocked:image/verify.sh* ]]
+    # The function still treats skip as incomplete; the gate must not emit
+    # that install-test skip (see image-release.bats). This fixture proves
+    # why emitting it would fail QCI_RELEASE=1.
+    [[ "$output" == *skip:image/install-test.sh* ]]
 }
 
 # NB: the "a genuinely-green release run is NOT falsely escalated by

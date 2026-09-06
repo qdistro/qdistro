@@ -164,7 +164,18 @@ modifiable source.
 
 ## Distribution model
 
-qdistro is **not** published as an ISO image. Users:
+qdistro is **not** published as an installable ISO. An install ISO that
+a tester boots from a stick offers a wipe of the internal disk; that
+path is post-v1.
+
+**Tester releases** are a single xz-compressed raw disk image
+(`qdistro-<version>-<snapshot>.raw.xz` plus its `.sha256`): write it to
+a USB stick or boot it as a VM disk. Dev profile, default password
+`qdistro`, sshd off, UEFI-only, 32 GB minimum. The download page states
+the flash line, the VM line, and the caveats. Signing is post-v1. No
+public download is published yet (GitHub Releases is the intended host).
+
+**From source**, developers:
 
 1. Install openSUSE Tumbleweed from its official ISO, terminal-only.
 2. Run the `qdistro-bootstrap` script, which:
@@ -180,4 +191,6 @@ installation is inspectable shell or Python.
 Bootstrap-on-top preserves Tumbleweed's normal update and rollback path, gives
 admin full access to the underlying system for things qdistro does not wrap,
 and aligns with the modifiability principle — everything qdistro adds is an
-inspectable script or package.
+inspectable script or package. The tester image runs that same bootstrap
+chain in the kiwi chroot (`image/config.sh` sources
+`scripts/install/qdistro-bootstrap.sh`).

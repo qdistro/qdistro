@@ -31,7 +31,7 @@ is a full, persistent install).
   created by kiwi at build time. The xz collapses the free space, so the
   download is a few GB.
 - **UEFI-only.** `firmware="uefi"`. Legacy BIOS/CSM is out of scope and is
-  stated as such on the download page (Phase F). `target_removable="true"`
+  stated as such on the download page. `target_removable="true"`
   so grub2-install `--removable` writes `EFI/BOOT/bootx64.efi` (the firmware
   fallback path) and does not create a machine NVRAM boot entry that would
   not travel with the stick.
@@ -39,9 +39,10 @@ is a full, persistent install).
   ISO from a stick is offered a wipe of their internal disk. The installable
   ISO is post-v1 and gets a kiwi profile when it returns; `installboot` and
   `install-test.sh` stay for it and are inert until then: the CI image gate
-  records install-test as *skipped* when no `.install.iso` exists, and its
-  `--idempotency` flag (a second install pass) has no effect on the image
-  gate until the ISO returns. Not a missing stage.
+  emits no install-test row when `installiso="false"` (not a skip: a skip
+  in `QCI_RELEASE_FATAL_GATES` would fail the release battery). The
+  `--idempotency` flag has no effect on the image gate until the ISO
+  returns. Not a missing stage.
 - **Profile: dev.** The tester image is built with `QDISTRO_PROFILE=dev`
   (baked passwordless `admin` sudoers; `config.sh` prints
   `WARN: dev profile …` in the build log). `QDISTRO_PROFILE` accepts only
@@ -156,8 +157,9 @@ QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30-40 min cold: clone + bake + kiwi (1
 
 Or through CI: `qci` image gate = resolve `bundle/*.raw.xz` (digest +
 `xz -t` + decompress) → `extract-root.sh` → `verify-contents.sh` →
-`verify.sh --stick` on the **same** decompressed raw (install-test skipped
-without an ISO). Stays out of `qci full` until Phase F.
+`verify.sh --stick` on the **same** decompressed raw (install-test is
+inert without an ISO: no row, not a skip). Part of `qci full`; a
+blocked/skip image row is fatal under `QCI_RELEASE=1` (todo/iso/14 F).
 
 **Do not run `verify.sh` while a builder VM is up** on the same
 `qemu:///session` daemon: tearing down the verify VM restarts session

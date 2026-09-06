@@ -136,10 +136,8 @@ gate_image() {
         [ -n "$root" ] && why="$why --root was given, so the inspected tree has no provable source image;"
         [ -z "$raw" ] && why="$why no bundle/*.raw.xz or single top-level .raw under $build_dir;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh and rerun without --root"
-        record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why"
-        if [ "$idempotency" = 1 ]; then
-            record_blocked image install-test.sh-2nd "$EXIT_VM_PROVISION" image "$why"
-        fi
+        # install-test is inert while installiso=false: no row (not blocked,
+        # not skip). A blocked/skip row here is fatal under QCI_RELEASE=1.
         return "$rc"
     fi
     local have_virsh=0
@@ -148,10 +146,6 @@ gate_image() {
     if [ "$have_virsh" = 0 ]; then
         local why="needs VM: libvirt session unavailable;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
-        record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
-        if [ "$idempotency" = 1 ]; then
-            record_blocked image install-test.sh-2nd "$EXIT_VM_PROVISION" image "$why idempotency (double-install) needs a built image + VM"
-        fi
         return "$rc"
     fi
 
@@ -159,7 +153,7 @@ gate_image() {
     local v_log="$RDIR/host/image-verify.log"
     log "image: boot-verify (image/verify.sh)"
     # --stick: Phase E grow/USB/persist/login/secure-boot/nested/dd matrix.
-    # Stays out of `qci full` until Phase F (todo/iso/14).
+    # In `qci full` since Phase F (todo/iso/14).
     # Pass the xz when Stage A resolved one, so --stick's dd extra is the
     # same digest (iso/14 Phase E independent B2). verify.sh re-materialises
     # via the from-xz cache. Pin login/persist/grow so a caller env cannot
@@ -178,19 +172,24 @@ gate_image() {
     fi
 
     # The tester build is the raw alone: config.xml sets installiso="false"
-    # (todo/iso/13), so no .install.iso exists next to the raw and there is
-    # nothing for install-test.sh to boot. That is the designed shape of the
-    # artifact, not a missing prerequisite: record it as a skip with the
-    # reason, and only run the install stages when an ISO from THIS build
-    # (same directory as the raw) is present.
-    local iso
-    iso="$(ls "$build_dir"/*.install.iso 2>/dev/null | head -1)"
-    if [ -z "$iso" ]; then
-        local why="no .install.iso next to $img: the tester image is built with installiso=false (todo/iso/13), so install-test.sh (and --idempotency, which re-runs it) is inert until the post-v1 installable ISO returns; not a missing prerequisite"
-        record_skip image install-test.sh image "$why"
-        if [ "$idempotency" = 1 ]; then
-            record_skip image install-test.sh-2nd image "$why"
-        fi
+    # (todo/iso/13). install-test.sh is inert: no row (not skip, not blocked).
+    # Do not `ls | head -1` a leftover `$build_dir/*.install.iso` — that is
+    # the same shape Phase E forbade for the published raw, and would run
+    # install-test against the tester xz if an old ISO sat in the build dir.
+    if grep -q 'installiso="false"' "$IMAGE_DIR/config.xml" 2>/dev/null; then
+        log "image: installiso=false (todo/iso/13); install-test.sh is inert until the post-v1 installable ISO returns (not a skip/blocked row)"
+        return "$rc"
+    fi
+    local iso=""
+    local iso_dir
+    iso_dir="$(dirname "$img")"
+    [ -n "${QDISTRO_RESOLVED_XZ:-}" ] && iso_dir="$(dirname "$QDISTRO_RESOLVED_XZ")"
+    iso="$(find "$iso_dir" -maxdepth 1 -name '*.install.iso' -type f 2>/dev/null)"
+    local n_iso
+    n_iso="$(printf '%s\n' "$iso" | grep -c . || true)"
+    if [ "${n_iso:-0}" -ne 1 ]; then
+        log "image: installiso is on but $iso_dir has ${n_iso:-0} .install.iso files; install-test.sh not run"
+        record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "installiso is not false but no unique .install.iso next to the published artifact ($iso_dir)"
         return "$rc"
     fi
 

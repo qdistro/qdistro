@@ -23,6 +23,8 @@ setup() {
     gate_release_manifest() { return 0; }
     gate_bootstrap_release_profile() { return 0; }
     record_blocked() { printf '%s\n' "$1" >> "$BLOCKED"; }
+    # image is in full (todo/iso/14 F) but not in the golden-sharing cascade.
+    gate_image() { echo image >> "$CALLS"; return "${IMAGE_RC:-0}"; }
     gate_vm_smoke() { echo vm-smoke >> "$CALLS"; return "${VM_SMOKE_RC:-0}"; }
     gate_bats() { echo bats >> "$CALLS"; return "${BATS_RC:-0}"; }
     gate_gui() { echo gui >> "$CALLS"; return "${GUI_RC:-0}"; }
@@ -35,24 +37,24 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
 @test "all VM gates run when none fail infra; no blocked rows" {
     run gate_full
     [ "$status" -eq 0 ]
-    [ "$(cat "$CALLS")" = "$(printf 'vm-smoke\nbats\ngui')" ]
+    [ "$(cat "$CALLS")" = "$(printf 'image\nvm-smoke\nbats\ngui')" ]
     [ ! -s "$BLOCKED" ]
 }
 
-@test "vm-smoke vm-provision failure blocks bats + gui (not run)" {
+@test "vm-smoke vm-provision failure blocks bats + gui (not run); image already ran" {
     VM_SMOKE_RC=40 run gate_full
     [ "$status" -eq 40 ]
-    # Only vm-smoke ran; bats + gui were NOT invoked.
-    [ "$(cat "$CALLS")" = "vm-smoke" ]
-    # Both downstream VM gates were recorded blocked-on-infra.
+    # image is independent of the golden; it ran first. bats + gui were NOT invoked.
+    [ "$(cat "$CALLS")" = "$(printf 'image\nvm-smoke')" ]
+    # Both downstream golden-sharing gates were recorded blocked-on-infra.
     [ "$(cat "$BLOCKED")" = "$(printf 'bats\ngui')" ]
 }
 
 @test "bats vm-provision failure blocks only gui" {
     BATS_RC=40 run gate_full
     [ "$status" -eq 40 ]
-    # vm-smoke + bats ran; gui did not.
-    [ "$(cat "$CALLS")" = "$(printf 'vm-smoke\nbats')" ]
+    # image + vm-smoke + bats ran; gui did not.
+    [ "$(cat "$CALLS")" = "$(printf 'image\nvm-smoke\nbats')" ]
     [ "$(cat "$BLOCKED")" = "gui" ]
 }
 
@@ -60,6 +62,13 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
     # A plain bats failure (EXIT_BATS=35, not vm-provision) still runs gui.
     BATS_RC=35 run gate_full
     [ "$status" -eq 35 ]
-    [ "$(cat "$CALLS")" = "$(printf 'vm-smoke\nbats\ngui')" ]
+    [ "$(cat "$CALLS")" = "$(printf 'image\nvm-smoke\nbats\ngui')" ]
+    [ ! -s "$BLOCKED" ]
+}
+
+@test "image vm-provision failure does NOT cascade onto the golden gates" {
+    IMAGE_RC=40 run gate_full
+    [ "$status" -eq 40 ]
+    [ "$(cat "$CALLS")" = "$(printf 'image\nvm-smoke\nbats\ngui')" ]
     [ ! -s "$BLOCKED" ]
 }

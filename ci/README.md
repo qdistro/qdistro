@@ -65,13 +65,14 @@ vitest tags), and the per-suite relabel action items.
 | `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
 | `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. Normal disposable runs provision both GUI profiles: admin/non-qdwin scenarios use the admin compositor harness, while qdwin-dependent rows use `QDISTRO_VM_GUI_SESSION=qdwin`. The agent scenarios run **in parallel** (one disposable VM each). |
 | `gui-admin` | Run the GUI gate in admin/non-qdwin mode: qdwin/qdshell, qdlocker, qdwin-noctalia, and tier-4/5 scenarios are recorded as intentional skips while qdistro admin/broker GUI scenarios still run. |
-| `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `vm-smoke`, `bats`, and `gui`. |
+| `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `image`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
 
 `QCI_RELEASE=1` strengthens `full`: every `skip` or `blocked` row from a
 release-relevant gate is fatal. Release evidence is green only when the
-required VM, Bats, GUI, manifest, and bootstrap-contract rows actually ran.
+required VM, Bats, GUI, manifest, bootstrap-contract, and tester-image
+rows actually ran.
 
 ## Typical run
 
