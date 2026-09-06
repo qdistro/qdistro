@@ -74,6 +74,30 @@ systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/nul
 systemctl disable --now greetd.service 2>/dev/null || true
 systemctl mask greetd.service 2>/dev/null || true
 
+# ---- 0b. CI extras (iso/14 Phase G intermediate) ---------------------------
+# The tester kiwi image already has gcc/meson (config.sh compiles in-chroot)
+# but not bats/ydotool/tesseract/rage/jeepney/silo-egress tools. The ci kiwi
+# profile bakes those in; until a ci-profile image is imported, a tester
+# image used as the qci base still needs them. Idempotent: zypper is a
+# no-op on packages already installed (baked baseweed, or a ci image).
+# Gate on bats: the tester image lacks it, baked/ci bases already have it.
+# A full zypper of this list on every baked golden would be a refresh tax
+# for no package change.
+if command -v bats >/dev/null 2>&1; then
+    log "CI extras already present (bats); skipping zypper"
+else
+    log "ensuring CI extras (bats/ydotool/...; tester image used as qci base)..."
+    if ! zypper -n install --no-recommends \
+            bats ydotool tesseract-ocr rage-encryption rsync \
+            python313-jeepney python313-six Mesa-demo-egl \
+            wireguard-tools nftables dnsmasq \
+            >/tmp/qdistro-ci-extras.log 2>&1; then
+        log "  ERROR: zypper install of CI extras failed"
+        tail -80 /tmp/qdistro-ci-extras.log | sed 's/^/[bootstrap]   zypper: /'
+        exit 3
+    fi
+fi
+
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
 mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser,qdgreeter,qnotebook}

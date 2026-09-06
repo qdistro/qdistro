@@ -57,6 +57,15 @@ case "$QDISTRO_PROFILE" in
     dev|release) ;;
     *) printf '\033[1;31m[in-vm] FATAL:\033[0m QDISTRO_PROFILE must be dev or release, got: %s\n' "$QDISTRO_PROFILE" >&2; exit 1 ;;
 esac
+# Kiwi XML profile (todo/iso/14 Phase G). Orthogonal to QDISTRO_PROFILE.
+# tester = published stick (default). ci = tester plus bats/ydotool extras
+# and greetd masked. Forwarded into the builder so build.sh can pass
+# --profile ci.
+QDISTRO_KIWI_PROFILE="${QDISTRO_KIWI_PROFILE:-tester}"
+case "$QDISTRO_KIWI_PROFILE" in
+    tester|ci) ;;
+    *) printf '\033[1;31m[in-vm] FATAL:\033[0m QDISTRO_KIWI_PROFILE must be tester or ci, got: %s\n' "$QDISTRO_KIWI_PROFILE" >&2; exit 1 ;;
+esac
 LOGS="$HERE/logs/in-vm-$(date +%y%m%d-%H%M%S)"
 mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
@@ -164,6 +173,9 @@ else
     # the resulting name on stdout. We pass a fixed prefix and recover
     # the real name from its output.
     PREFIX="qdistro-builder"
+    # --from-baked always, even after Phase G switched qci workers to the
+    # kiwi tester image: using that image as the builder backing is circular
+    # (you need a built image to build the image).
     # --from-baked: baseweed-baked.qcow2 has qga enabled via device-units
     # (baseweed.qcow2 doesn't) and the qdistro deps preinstalled so the
     # in-VM zypper for kiwi-ng is fast.
@@ -311,7 +323,7 @@ log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
 set +e
-log "  building with QDISTRO_PROFILE=$QDISTRO_PROFILE"
+log "  building with QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_KIWI_PROFILE=$QDISTRO_KIWI_PROFILE"
 # Retry on stall. Measured 2026-09-04: fetching repo metadata / the repo gpg
 # key from download.opensuse.org hangs outright on roughly half of attempts on
 # a flaky uplink -- an A/B of 6 runs failed 1/3 at 1 connection and 1/3 at 5,
@@ -452,7 +464,7 @@ for attempt in \$(seq 1 $KIWI_TRIES); do
     started=\$(date +%s)
     # setsid: the build leads its own process group, so the group can be
     # killed as a whole without touching this shell (the guest agent's child).
-    env QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_BUILD_DIR=/build/out \\
+    env QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_KIWI_PROFILE=$QDISTRO_KIWI_PROFILE QDISTRO_BUILD_DIR=/build/out \\
         setsid bash build.sh --no-sync >/root/kiwi-build.log 2>&1 &
     kpid=\$!
     last_active=\$started

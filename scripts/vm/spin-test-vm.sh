@@ -5,7 +5,9 @@
 # Pipeline:
 #   1. build-baseweed-from-scratch.sh   (if baseweed-admin.qcow2 absent)
 #   2. build-baked-baseweed.sh          (if baseweed-baked.qcow2 absent)
-#   3. clone-baseweed.sh --from-baked   (fresh disposable VM)
+#   3. clone-baseweed.sh --from-kiwi or --from-baked
+#      (QDISTRO_VM_BASE=auto|kiwi|baked; auto uses the imported tester
+#       image if present — iso/14 Phase G — else baseweed-baked)
 #   4. tarball + HTTP-stage the three sibling repos
 #   5. fresh-vm-bootstrap.sh in VM      (build qdwin, build daemons,
 #                                        install broker + qdshell)
@@ -89,13 +91,21 @@ fi
 exec 9>&-
 
 # Stage 3.
+# shellcheck source=lib/vm-base.sh
+. "$SCRIPT_DIR/lib/vm-base.sh"
 if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
     log "stage 3: cloning a fresh VM from run-golden ($QCI_RUN_GOLDEN_BACKING)..."
     VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" \
             --from-run-golden="$QCI_RUN_GOLDEN_BACKING" | tail -1)
 else
-    log "stage 3: cloning a fresh VM from baked..."
-    VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-baked | tail -1)
+    VM_BASE_KIND="$(qdistro_vm_base_kind)" || exit $?
+    if [ "$VM_BASE_KIND" = kiwi ]; then
+        log "stage 3: cloning a fresh VM from kiwi tester image ($(qdistro_kiwi_base_path); QDISTRO_VM_BASE=${QDISTRO_VM_BASE:-auto})..."
+        VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-kiwi | tail -1)
+    else
+        log "stage 3: cloning a fresh VM from baked..."
+        VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-baked | tail -1)
+    fi
 fi
 log "    VM = $VM"
 

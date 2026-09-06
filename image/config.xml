@@ -35,6 +35,17 @@
     <specification>qdistro desktop (Tumbleweed remix)</specification>
   </description>
 
+  <!-- kiwi XML profiles (todo/iso/14 Phase G). Orthogonal to QDISTRO_PROFILE
+       (dev/release, the bootstrap chain). tester is the published stick/VM
+       image (import=true: the default build). ci is additive: extra test
+       packages plus config.sh masks greetd so admin's user manager starts
+       the compositor the way fresh-vm-bootstrap.sh does. Pass
+       QDISTRO_KIWI_PROFILE=ci to build.sh / build-in-vm.sh. -->
+  <profiles>
+    <profile name="tester" description="Tester USB and VM raw image" import="true"/>
+    <profile name="ci" description="CI golden base: tester plus bats/ydotool extras; greetd masked"/>
+  </profiles>
+
   <preferences>
     <version>0.1.0</version>
     <packagemanager>zypper</packagemanager>
@@ -259,6 +270,43 @@
     <package name="qt6-qml-devel"/>
     <package name="qt6-quick-devel"/>
     <package name="qt6-declarative-devel"/>
+  </packages>
+
+  <!-- CI extras (Phase G). The tester image already ships gcc/meson (config.sh
+       compiles qdwin in-chroot). These are what fresh-vm-bootstrap.sh and the
+       bats/gui lanes still need on top: in-VM bats, synthetic input, OCR,
+       backup/rage, silo-egress tools, jeepney. Additive under the ci profile. -->
+  <packages type="image" profiles="ci">
+    <package name="bats"/>
+    <package name="ydotool"/>
+    <package name="tesseract-ocr"/>
+    <package name="rage-encryption"/>
+    <package name="rsync"/>
+    <package name="python313-jeepney"/>
+    <package name="python313-six"/>
+    <package name="Mesa-demo-egl"/>
+    <package name="wireguard-tools"/>
+    <package name="nftables"/>
+    <package name="dnsmasq"/>
+    <package name="libguestfs"/>
+    <package name="guestfs-tools"/>
+    <package name="Mesa-libEGL-devel"/>
+    <package name="Mesa-libGLESv2-devel"/>
+    <package name="Mesa-libGLESv3-devel"/>
+    <package name="liblcms2-devel"/>
+    <package name="libdisplay-info-devel"/>
+    <package name="libX11-devel"/>
+    <package name="libxcb-devel"/>
+    <package name="cairo-devel"/>
+    <package name="libpng16-devel"/>
+    <package name="libpng16-compat-devel"/>
+    <package name="pango-devel"/>
+    <package name="fontconfig-devel"/>
+    <package name="glib2-devel"/>
+    <package name="libva-devel"/>
+    <package name="qt6-base-devel"/>
+    <package name="qt6-svg-devel"/>
+    <package name="qt6-shadertools"/>
   </packages>
 
   <packages type="bootstrap">

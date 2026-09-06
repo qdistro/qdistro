@@ -27,6 +27,14 @@ elif what == 'oem': print(' '.join(sorted(c.tag for c in t.find('oemconfig'))))
 elif what == 'repos':
     for r in root.findall('repository'): print(r.get('alias'), r.find('source').get('path'))
 elif what == 'version': print(root.findtext('preferences/version'))
+elif what == 'profiles':
+    for p in root.findall('profiles/profile'):
+        print(p.get('name'), p.get('import') or '-', p.get('description') or '')
+elif what == 'ci-packages':
+    for pkgs in root.findall('packages'):
+        if pkgs.get('profiles') == 'ci':
+            for p in pkgs.findall('package'):
+                print(p.get('name'))
 PY
 }
 
@@ -69,6 +77,42 @@ fake_tree() {
 @test "config.xml: UEFI-only, removable target (USB fallback EFI/BOOT)" {
     [ "$(xml type-attr firmware)" = uefi ]
     [ "$(xml type-attr target_removable)" = true ]
+}
+
+@test "config.xml: comments must not contain a double hyphen" {
+    # kiwi's XML parser rejects comments containing -- (Phase E landmine).
+    python3 - "$IMAGE/config.xml" <<'PY'
+import re, sys, pathlib
+t = pathlib.Path(sys.argv[1]).read_text()
+for m in re.finditer(r'<!--(.*?)-->', t, re.S):
+    assert '--' not in m.group(1), m.group(1)[:80]
+PY
+}
+
+@test "config.xml: kiwi profiles tester (default) and ci (additive extras)" {
+    run xml profiles
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tester true "* ]]
+    [[ "$output" == *"ci - "* ]]
+    run xml ci-packages
+    [ "$status" -eq 0 ]
+    [[ "$output" == *bats* ]]
+    [[ "$output" == *ydotool* ]]
+    [[ "$output" == *tesseract-ocr* ]]
+    [[ "$output" == *rage-encryption* ]]
+    # tester packages must NOT be gated on a profile (the published stick)
+    python3 - "$IMAGE/config.xml" <<'PY'
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+found = False
+for pkgs in root.findall('packages'):
+    if pkgs.get('type') == 'image' and not pkgs.get('profiles'):
+        names = {p.get('name') for p in pkgs.findall('package')}
+        assert 'kernel-default' in names
+        assert 'bats' not in names
+        found = True
+assert found
+PY
 }
 
 @test "config.xml: both repositories pin the same Tumbleweed snapshot over https" {
@@ -508,6 +552,20 @@ chain_root() {
     [ "$(grep -n 'QDISTRO_PROFILE must be dev or release' "$c" | cut -d: -f1)" -lt "$(grep -n 'qdistro_write_release' "$c" | head -1 | cut -d: -f1)" ]
     grep -q '/etc/qdistro/release "\$kiwi_iversion" "\$QDISTRO_IMAGE_PROFILE"' "$c"
     ! grep -q 'hardened profile' "$c"
+    # Phase G: tester enables greetd; ci masks it. Both paths exist; the
+    # greeter binary gate is independent of the unit.
+    grep -q 'systemctl enable greetd.service' "$c"
+    grep -q 'systemctl mask greetd.service' "$c"
+    [ "$(grep -n 'kiwi_is_ci=0' "$c" | head -1 | cut -d: -f1)" -lt "$(grep -n 'systemctl enable greetd.service' "$c" | head -1 | cut -d: -f1)" ]
+}
+
+@test "build.sh: QDISTRO_KIWI_PROFILE=ci passes --profile ci; junk is fatal" {
+    grep -q 'QDISTRO_KIWI_PROFILE must be tester or ci' "$IMAGE/build.sh"
+    grep -q 'KIWI_PROFILE_ARGS+=(--profile ci)' "$IMAGE/build.sh"
+    grep -q 'QDISTRO_KIWI_PROFILE' "$IMAGE/build-in-vm.sh"
+    # builder stays on baked even when qci workers use the kiwi image
+    grep -q 'clone-baseweed.sh" "$PREFIX" --from-baked' "$IMAGE/build-in-vm.sh"
+    ! grep -q -- '--from-kiwi' "$IMAGE/build-in-vm.sh"
 }
 
 # A 1 MiB "raw" (half random, half zeros) bundled the way kiwi does it:

@@ -397,7 +397,24 @@ rm -f "$ADMIN_USER_UNITS/default.target.wants/qdwin-session.target"
 chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
 echo "[qdistro-image] qdwin session: VM-installer units kept; qdlocker wired into qdwin-session.target.wants; target auto-start suppressed (greeter starts it)"
 
-systemctl enable greetd.service
+# kiwi_profiles comes from /.profile (sourced at the top). The ci kiwi
+# profile is the CI golden base: greetd would grab the DRM seat and block
+# admin's lingering user manager from starting the compositor (the same
+# reason fresh-vm-bootstrap.sh masks greetd). Mask it; still ship the
+# greeter binary so tester vs ci differs by packages + this unit, not by
+# a missing greeter. tester (default) enables greetd as before.
+kiwi_is_ci=0
+_kp=",$(printf '%s' "${kiwi_profiles:-}" | tr ' ,' ',,'),"
+case "$_kp" in
+    *,ci,*) kiwi_is_ci=1 ;;
+esac
+if [ "$kiwi_is_ci" = 1 ]; then
+    echo "[qdistro-image] kiwi profile ci: masking greetd (CI golden; admin user manager starts the compositor)"
+    systemctl disable greetd.service 2>/dev/null || true
+    systemctl mask greetd.service
+else
+    systemctl enable greetd.service
+fi
 # Tear down any pre-existing tty4 LXQt+labwc fallback (the passwordless escape
 # hatch has been removed). Idempotent — keeps the removal correct even if an
 # image build ever runs over a reused/rooted tree.

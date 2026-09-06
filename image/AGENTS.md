@@ -129,10 +129,10 @@ its presence.
 
 | File | What it does |
 | --- | --- |
-| `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. |
-| `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules (permissive), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd, compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
+| `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. Kiwi XML profiles: `tester` (default, import=true, the published stick) and `ci` (additive: bats/ydotool extras; config.sh masks greetd). Orthogonal to `QDISTRO_PROFILE` (dev/release). |
+| `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules (permissive), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd (enabled on tester; **masked** on kiwi profile `ci` so admin's user manager starts the compositor), compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
 | `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the five sibling repos into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
-| `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). |
+| `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder; always `--from-baked`, never the kiwi tester image — that would be circular), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). Forwards `QDISTRO_KIWI_PROFILE` (tester\|ci). |
 | `lib/build-guard.sh` | liveness (log mtime / CPU ticks / D-state / uplink bytes), kill-tree and mount/loop cleanup used by the retry loop. |
 | `lib/release-stamp.sh` | `qdistro_write_release`: manifest + os-release → `/etc/qdistro/release`, refusing anything but the five expected repos with 40-hex commits, or a version mismatch. |
 | `lib/release-proof.sh` | `qdistro_prove_release`: the host-side proof of the copied-out artifact (raw size, checksum file naming and matching, `xz -l` size, `xz -t`). |
@@ -164,6 +164,16 @@ blocked/skip image row is fatal under `QCI_RELEASE=1` (todo/iso/14 F).
 **Do not run `verify.sh` while a builder VM is up** on the same
 `qemu:///session` daemon: tearing down the verify VM restarts session
 `virtqemud` and crashes the builder (run 30).
+
+**CI base (iso/14 Phase G intermediate).** `scripts/vm/import-kiwi-base.sh`
+converts a tester `.raw`/`.raw.xz` to `qdistro-kiwi-base.qcow2`. qci
+workers (`spin-test-vm.sh`) clone that with `--from-kiwi` (OVMF) when
+`QDISTRO_VM_BASE=auto` (default) and the qcow2 exists, then
+`fresh-vm-bootstrap.sh` still overlays current source. `build-in-vm.sh`
+always clones `baseweed-baked` (using the tester image as the builder
+backing is circular). A `ci` kiwi profile (`QDISTRO_KIWI_PROFILE=ci`)
+bakes bats/ydotool extras and masks greetd; until that image is built
+and imported, bootstrap zypper-installs the extras on a tester base.
 
 - `QDISTRO_BUILD_DIR` defaults to `/var/tmp/qdistro-build`. **Never `/tmp`**:
   it is a tmpfs on the build hosts and the 28 GiB raw does not fit in RAM.
