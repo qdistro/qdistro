@@ -27,17 +27,45 @@ qdistro_kiwi_base_ok() {
     qemu-img info "$kiwi" 2>/dev/null | grep -q 'file format: qcow2'
 }
 
+# Canonicalize a qemu-img backing-file string: strip "(actual path:…)",
+# resolve relative names against $2 (the overlay that named it), then
+# readlink -m. Same rules as ci/lib/vm.sh backing_referrer_state.
+qdistro_canonicalize_backing() {
+    local stored="$1" overlay="$2" stripped real
+    stripped="${stored%% (actual path:*}"
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    [ -n "$stripped" ] || return 1
+    case "$stripped" in
+        /*) real=$(readlink -m -- "$stripped" 2>/dev/null) ;;
+        *)  real=$(readlink -m -- "$(dirname -- "$overlay")/$stripped" 2>/dev/null) ;;
+    esac
+    [ -n "$real" ] || return 1
+    printf '%s\n' "$real"
+}
+
 # True if $1 is the imported kiwi base or a qcow2 overlay whose backing
 # chain includes it. Per-run goldens are overlays; workers clone from the
 # golden disk, not from --from-kiwi, and still need OVMF.
+# Walk each chain member and canonicalize it; do not grep realpath out of
+# qemu-img's stored-string dump (symlink / relative -b miss that grep).
 qdistro_backing_needs_ovmf() {
-    local disk="$1" kiwi disk_real kiwi_real
+    local disk="$1" kiwi kiwi_real line stored member overlay
     kiwi="$(qdistro_kiwi_base_path)"
-    [ -n "$disk" ] && [ -f "$disk" ] && [ -f "$kiwi" ] || return 1
-    disk_real="$(realpath -e -- "$disk" 2>/dev/null)" || return 1
-    kiwi_real="$(realpath -e -- "$kiwi" 2>/dev/null)" || return 1
-    [ "$disk_real" = "$kiwi_real" ] && return 0
-    qemu-img info --backing-chain -U "$disk" 2>/dev/null | grep -qF "$kiwi_real"
+    [ -n "$disk" ] && [ -e "$disk" ] && [ -e "$kiwi" ] || return 1
+    kiwi_real=$(readlink -m -- "$kiwi" 2>/dev/null) || return 1
+    overlay=$(readlink -m -- "$disk" 2>/dev/null) || overlay="$disk"
+    [ "$overlay" = "$kiwi_real" ] && return 0
+    while IFS= read -r line; do
+        case "$line" in
+            "image: "*|"backing file: "*)
+                stored="${line#*: }"
+                member="$(qdistro_canonicalize_backing "$stored" "$overlay")" || continue
+                [ "$member" = "$kiwi_real" ] && return 0
+                ;;
+        esac
+    done < <(qemu-img info --backing-chain -U "$disk" 2>/dev/null)
+    return 1
 }
 
 qdistro_vm_base_kind() {

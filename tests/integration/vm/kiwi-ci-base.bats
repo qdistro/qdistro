@@ -126,6 +126,8 @@ setup() {
     grep -q 'qdistro_backing_needs_ovmf' "$VM/clone-baseweed.sh"
     grep -q 'NEED_BAKED' "$VM/spin-test-vm.sh"
     grep -q 'skipped (kiwi base or run-golden' "$VM/spin-test-vm.sh"
+    grep -q 'imported kiwi base' "$REPO/ci/lib/gates/preflight.sh"
+    grep -q 'qdistro_kiwi_base_ok' "$REPO/ci/lib/gates/preflight.sh"
 }
 
 @test "backing-needs-ovmf: a golden overlay on the kiwi base is UEFI; an unrelated qcow2 is not" {
@@ -149,6 +151,25 @@ setup() {
         source "$1"
         qdistro_backing_needs_ovmf "$2"
     ' _ "$VM/lib/vm-base.sh" "$T/img/qdistro-kiwi-base.qcow2"
+    [ "$status" -eq 0 ]
+    # symlink dest: qemu-img stores the -b string, probe must still match
+    mkdir -p "$T/realimg" "$T/linkimg"
+    qemu-img create -f qcow2 "$T/realimg/qdistro-kiwi-base.qcow2" 8M >/dev/null
+    echo 'DIGEST=dead' > "$T/realimg/qdistro-kiwi-base.qcow2.stamp"
+    ln -s "$T/realimg/qdistro-kiwi-base.qcow2" "$T/linkimg/qdistro-kiwi-base.qcow2"
+    ln -s "$T/realimg/qdistro-kiwi-base.qcow2.stamp" "$T/linkimg/qdistro-kiwi-base.qcow2.stamp"
+    qemu-img create -f qcow2 -F qcow2 -b "$T/linkimg/qdistro-kiwi-base.qcow2" "$T/linkimg/golden.qcow2" >/dev/null
+    run env QDWIN_IMG_DIR="$T/linkimg" bash -c '
+        source "$1"
+        qdistro_backing_needs_ovmf "$2"
+    ' _ "$VM/lib/vm-base.sh" "$T/linkimg/golden.qcow2"
+    [ "$status" -eq 0 ]
+    # relative -b
+    ( cd "$T/realimg" && qemu-img create -f qcow2 -F qcow2 -b ./qdistro-kiwi-base.qcow2 rel-golden.qcow2 ) >/dev/null
+    run env QDWIN_IMG_DIR="$T/realimg" bash -c '
+        source "$1"
+        qdistro_backing_needs_ovmf "$2"
+    ' _ "$VM/lib/vm-base.sh" "$T/realimg/rel-golden.qcow2"
     [ "$status" -eq 0 ]
 }
 

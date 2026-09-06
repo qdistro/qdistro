@@ -148,6 +148,10 @@ if [ ! -f "$BACKING" ]; then
     fi
     exit 1
 fi
+# Store a canonical -b so qemu-img's backing-file string matches
+# qdistro_backing_needs_ovmf's realpath (symlink images dir, relative
+# QDISTRO_KIWI_BASE). Workers clone --from-run-golden and need that match.
+BACKING="$(readlink -m -- "$BACKING")"
 if [ "$FROM_KIWI" = 1 ]; then
     if ! qemu-img info "$BACKING" 2>/dev/null | grep -q 'file format: qcow2'; then
         echo "ERROR: kiwi base $BACKING is not qcow2 — import it via $SCRIPT_DIR/import-kiwi-base.sh (do not point QDISTRO_KIWI_BASE at a raw)" >&2
