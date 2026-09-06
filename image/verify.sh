@@ -169,6 +169,32 @@ shoot 00-just-booted
 qga() {
     virsh -c "$URI" qemu-agent-command "$VM" "$1" 2>/dev/null
 }
+# qga_root <shell> — run <shell> as ROOT in the guest through the agent
+# (guest-exec + guest-exec-status), print its stdout, relay its stderr, and
+# return its exit code. This is the verifier's root channel: it works on every
+# profile (the release image deletes admin's sudoers rule), so an assertion
+# that needs root reads through here, not through `sudo -n` over SSH.
+# The status polling has a 60 s deadline (each agent call is bounded by
+# libvirt, not by this shell); a timeout or an agent error returns 97/98
+# (never 0).
+command -v jq >/dev/null 2>&1 || die "jq not installed; install with: sudo zypper in jq"
+qga_root() {
+    local cmd="$1" out pid st="" deadline
+    out=$(qga "$(jq -cn --arg c "$cmd" '{execute:"guest-exec",arguments:{path:"/bin/bash",arg:["-c",$c],"capture-output":true}}')")
+    pid=$(printf '%s' "$out" | jq -r '.return.pid // empty' 2>/dev/null)
+    [ -n "$pid" ] || { echo "qga_root: guest-exec failed: $out" >&2; return 97; }
+    deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        st=$(qga "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}")
+        [ "$(printf '%s' "$st" | jq -r '.return.exited' 2>/dev/null)" = true ] && break
+        sleep 1
+    done
+    [ "$(printf '%s' "$st" | jq -r '.return.exited' 2>/dev/null)" = true ] \
+        || { echo "qga_root: timed out after 60s: $cmd" >&2; return 98; }
+    printf '%s' "$st" | jq -r '.return."out-data" // empty' | base64 -d
+    printf '%s' "$st" | jq -r '.return."err-data" // empty' | base64 -d >&2
+    return "$(printf '%s' "$st" | jq -r '.return.exitcode // 99')"
+}
 log "waiting for qemu-guest-agent (max 180s)..."
 qga_deadline=$(( $(date +%s) + 180 ))
 qga_up=0
@@ -228,6 +254,26 @@ shoot 01-ssh-ready
 # (exit 1). We accept `running` OR `degraded` as "settled" — a degraded manager
 # has still finished its startup transaction, and the individual assertions
 # below are what should adjudicate any unit failure, not this gate.
+# The SYSTEM manager first: sshd is started through the agent within a few
+# seconds of boot now (run 28 onward), so the assertions can otherwise run
+# while Type=notify units are still activating -- run 29 sampled the admin
+# broker four seconds before it finished starting and failed two rows that
+# run 28 had passed. Bounded; running or degraded both mean "startup done".
+sys_wait_deadline=$(( $(date +%s) + 180 ))
+log "waiting for the system manager to finish startup (max 180s)..."
+sys_state=""
+while [ "$(date +%s)" -lt "$sys_wait_deadline" ]; do
+    sys_state="$(remote 'systemctl is-system-running' 2>/dev/null || true)"
+    case "$sys_state" in
+        running|degraded) log "system manager settled (is-system-running=$sys_state)"; break ;;
+    esac
+    sleep 3
+done
+case "$sys_state" in
+    running|degraded) ;;
+    *) warn "system manager did not settle within 180s (is-system-running='$sys_state'); running assertions anyway" ;;
+esac
+
 user_mgr_check() {
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-system-running" 2>/dev/null
 }
@@ -317,18 +363,40 @@ expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
 # during an active window. So after first reaching active we settle, then
 # require ActiveState=active AND SubState=running AND a low restart count
 # (NRestarts<=1) so a flapping locker fails the gate.
-expect "qdlocker.service reaches and holds active/running (not flapping)" \
+#
+# qdlocker is WantedBy qdwin-session.target, which only a real greeter
+# authentication starts (see the VT-escape note below): on the shipped
+# image this verifier never logs in through qdgreeter, so with the greeter
+# on tty3 the locker is legitimately inactive/dead with NRestarts=0. The
+# row therefore adjudicates by session state: session up -> must hold
+# active/running; session exactly inactive -> locker must be loaded,
+# inactive/dead, never restarted (a locker that started and died without
+# a session IS flapping; a missing unit would otherwise look identical
+# to "never started"; a failed/activating session is not the no-login
+# state and fails this row). Until run 29 this row demanded `active`
+# unconditionally, which no password-gated image can satisfy; it had
+# never passed.
+expect "qdlocker.service is healthy: holds active/running with a session, inactive and never failed without one" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c '
-        for i in 1 2 3 4 5 6 7 8 9 10; do
-            [ \"\$(systemctl --user is-active qdlocker.service)\" = active ] && break
-            sleep 1
-        done
-        sleep 3
-        read as ss nr <<EOF2
-\$(systemctl --user show -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
+        sess=\$(systemctl --user is-active qdwin-session.target)
+        if [ \"\$sess\" = active ]; then
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                [ \"\$(systemctl --user is-active qdlocker.service)\" = active ] && break
+                sleep 1
+            done
+            sleep 3
+        fi
+        read load as ss nr <<EOF2
+\$(systemctl --user show -p LoadState -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
 EOF2
-        echo \"qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
-        [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]'"
+        echo \"qdwin-session.target=\$sess qdlocker LoadState=\$load ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
+        if [ \"\$sess\" = active ]; then
+            [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]
+        elif [ \"\$sess\" = inactive ]; then
+            [ \"\$load\" = loaded ] && [ \"\$as\" = inactive ] && [ \"\$ss\" = dead ] && [ \"\${nr:-99}\" -eq 0 ]
+        else
+            false
+        fi'"
 
 # NOT asserted here: the locked-session VT escape
 # (tests/integration/vm/probes/vt-escape-lockdown.sh). Two reasons, both
@@ -336,11 +404,12 @@ EOF2
 # back without fixing them first:
 #
 #  1. It needs root. This verifier's `remote` is an SSH login as admin, and
-#     the canonical build is release-profile, which deliberately deletes
-#     /etc/sudoers.d/99-admin (image/config.sh) — so `sudo -n` cannot work.
-#     The other `sudo -n` assertions in this file are a pre-existing
-#     profile/verifier mismatch, not a precedent to copy. Weakening the
-#     shipped image's sudo policy to suit the verifier is not an option.
+#     a release-profile build deliberately deletes /etc/sudoers.d/99-admin
+#     (image/config.sh) — so `sudo -n` cannot work there. Root IS available
+#     profile-independently through the guest agent (qga_root above; the
+#     Phase D rows use it), and the older `sudo -n` rows in this file should
+#     migrate to it rather than be copied. Weakening the shipped image's sudo
+#     policy to suit the verifier is not an option.
 #  2. It would measure the wrong process. The shipped greetd config has only
 #     a `_greeter` default_session and its initial_session is commented out,
 #     and image/config.sh removes qdwin-session's default-target enablement
@@ -357,6 +426,42 @@ EOF2
 
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
+
+# One chain (todo/iso/14 Phase D): the image ran the bootstrap's installer
+# chain, so the isolation ladder above tier 2 is on the stick. Tier 3 is the
+# top of the SUPPORTED ladder (spawn helper + group + polkit action); the
+# tier-4 host control script is what spawn-tier4.sh falls back to on an
+# installed image (experimental tier, host launch code only).
+# The spawn/cleanup helpers are symlinks into /root/qdistro-src (mode 0700:
+# admin cannot resolve them, root can; the helper runs as root via polkit).
+# So: the link and its target's name from admin's view, the target's
+# executability from root's.
+expect "tier-3 spawn helper installed (chain step tier3)" \
+    remote 'test -L /usr/local/bin/qdistro-tier3-spawn && [ "$(readlink /usr/local/bin/qdistro-tier3-spawn)" = /root/qdistro-src/qdistro/tier3/spawn-tier3.sh ] && getent group qdistro-tier3 >/dev/null && test -f /usr/share/polkit-1/actions/org.qdistro.tier3.policy'
+expect "tier-3 spawn/cleanup helper targets executable (root view)" \
+    qga_root 'test -x /root/qdistro-src/qdistro/tier3/spawn-tier3.sh && test -x /root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh && test -x /usr/local/bin/qdistro-tier3-spawn'
+# passwd -S needs root; an empty or unexpected status line is a FAIL (the
+# case pattern matches the second field exactly, so silence cannot pass).
+expect "tier-3 silo users exist with locked passwords" \
+    qga_root 'for u in user1 user2; do id -u "$u" >/dev/null || exit 1; s=$(passwd -S "$u") || exit 1; case "$s" in "$u L "*|"$u LK "*) ;; *) echo "not locked: ${s:-<no output>}"; exit 1;; esac; done'
+expect "tier-3 runtime dir created at boot by tmpfiles" \
+    remote 'test -d /run/qdistro-tier3'
+expect "tier-4 host control script installed (chain step tier4-host)" \
+    remote 'test -f /usr/share/qdistro/tier4-vm/tier4_control.py && test -f /usr/share/qdistro/tier4-vm/tier4_chrome.py'
+expect "sdk (qdistro_app) importable" \
+    remote 'python3 -c "import qdistro_app"'
+# The DONE bar, on the booted image: the steps recorded as installed equal
+# the bootstrap's chain for this image's profile (dev-only steps excluded
+# outside dev). chain_expected_names is the bootstrap's own definition, read
+# from the on-image source tree -- under /root, hence the root channel.
+expect "installer chain record equals the bootstrap chain for this profile" \
+    qga_root 'p=$(sed -n "s/^PROFILE=//p" /etc/qdistro/release); [ -n "$p" ] || { echo "no PROFILE in /etc/qdistro/release"; exit 1; };
+            exp=$(QDISTRO_PROFILE="$p" bash -c ". /root/qdistro-src/qdistro/scripts/install/qdistro-bootstrap.sh; resolve_profile >/dev/null; chain_expected_names") || { echo "chain_expected_names failed"; exit 1; };
+            rec=$(grep -vE "^[[:space:]]*(#|$)" /var/lib/qdistro/bootstrap/installer-chain.state);
+            [ -n "$exp" ] && [ "$exp" = "$rec" ] && { echo "chain ($p): $(echo $exp)"; exit 0; };
+            echo "expected: $(echo $exp)"; echo "recorded: $(echo $rec)"; exit 1'
+expect "no media/multimachine/recall artefacts (not in the chain)" \
+    remote 'for f in /etc/systemd/system/qdistro-media-exec.socket /usr/local/bin/qdistro-mm-broker /usr/local/bin/qdistro-recall; do test -e "$f" && exit 1; done; exit 0'
 expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'
 
 # Priority 0/1 journal entries. The single benign one we tolerate is the
@@ -371,6 +476,8 @@ remote 'sudo -n journalctl -b -p err --no-pager'         > "$VERIFY_DIR/journal/
 remote 'sudo -n journalctl -u qdistro-admin-broker --no-pager' > "$VERIFY_DIR/journal/broker.log" 2>&1 || true
 remote 'sudo -n journalctl -u greetd --no-pager'         > "$VERIFY_DIR/journal/greetd.log"    2>&1 || true
 remote 'systemctl --failed --no-pager'                   > "$VERIFY_DIR/journal/failed-units.log" 2>&1 || true
+remote 'cat /var/lib/qdistro/bootstrap/installer-chain.state' > "$VERIFY_DIR/journal/installer-chain.state" 2>&1 || true
+remote 'cat /etc/qdistro/release'                        > "$VERIFY_DIR/journal/release.txt"       2>&1 || true
 remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service' \
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 

@@ -13,19 +13,20 @@ setup() {
     HARDEN_VT="$REPO/scripts/install/harden-compositor-vt.sh"
     CONFIG_SH="$REPO/image/config.sh"
     [ -f "$LIB" ]
-    # The chain: every installer image/config.sh runs (the INSTALLERS array
-    # plus the qdwin-session installer it calls directly).
-    # From the EXECUTED array entries (not comments, which may name a
-    # deliberately omitted installer) plus the one direct call.
-    CHAIN=$( { awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -oE '^\s*"scripts/install/install-[a-z0-9-]+\.sh' | tr -d ' "';
+    BOOT="$REPO/scripts/install/qdistro-bootstrap.sh"
+    # The chain: every installer the bootstrap's installer_chain_entries names
+    # (image/config.sh runs the SAME functions -- todo/iso/14 Phase D -- so
+    # there is one list) plus the qdwin-session installer config.sh calls
+    # directly. Read from the executed definition, not from comments.
+    CHAIN=$( { bash -c '. "$1"; installer_chain_entries' _ "$BOOT" | awk -F'|' 'NF{print $2}';
                grep -oE '^bash "\$QD/scripts/install/install-[a-z0-9-]+\.sh"' "$CONFIG_SH" | grep -oE 'scripts/install/install-[a-z0-9-]+\.sh'; } | sort -u)
-    # Cardinality from the array itself (+1 for the direct qdwin-session
-    # call), so an installer added to the array is in the walk or the count
+    # Cardinality from the chain itself (+1 for the direct qdwin-session
+    # call), so an installer added to the chain is in the walk or the count
     # check goes red.
-    local n_array
-    n_array=$(awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -oE '^\s*"scripts/install/install-[a-z0-9-]+\.sh' | sort -u | wc -l)
-    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_array + 1 )) ] || [ "$n_array" -lt 10 ]; then
-        echo "chain parse mismatch: array=$n_array parsed: $CHAIN" >&2; return 1
+    local n_chain
+    n_chain=$(bash -c '. "$1"; installer_chain_names' _ "$BOOT" | grep -c .)
+    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_chain + 1 )) ] || [ "$n_chain" -lt 15 ]; then
+        echo "chain parse mismatch: chain=$n_chain parsed: $CHAIN" >&2; return 1
     fi
 }
 
@@ -60,16 +61,53 @@ setup() {
     [ "$bad" = 0 ]
 }
 
-@test "offline: the image chain is fatal (no fail-open loop, missing installer aborts)" {
-    run awk '/^for entry in "\$\{INSTALLERS\[@\]\}"; do/,/^done/' "$CONFIG_SH"
-    [ -n "$output" ]
-    [[ "$output" != *"WARN"* ]]
-    [[ "$output" != *"|| echo"* ]]
-    [[ "$output" == *"FATAL: chain installer missing"* ]]
-    [[ "$output" == *"FATAL: \$installer failed"* ]]
-    grep -q '^export QDISTRO_OFFLINE_INSTALL=1' "$CONFIG_SH"
+@test "offline: the image runs the bootstrap's chain -- strict, offline, recorded on the image; no parallel list" {
+    # Phase D: config.sh has no INSTALLERS array and invokes no chain
+    # installer itself; the only install-*.sh it runs directly is the
+    # qdwin-session one (same contract).
+    ! grep -q '^INSTALLERS=(' "$CONFIG_SH"
+    run bash -c 'grep -vE "^[[:space:]]*#" "$1" | grep -oE "scripts/install/install-[a-z0-9-]+\.sh" | sort -u' _ "$CONFIG_SH"
+    [ "$output" = "scripts/install/install-qdwin-session-for-vm.sh" ]
+    # The bootstrap is driven through its ENVIRONMENT forms (the source
+    # clobbers the internal names), strict, with the state dir on the image.
+    grep -q '^export QDISTRO_REPO_ROOT="\$SRC"$' "$CONFIG_SH"
+    grep -q '^export QDISTRO_PROFILE="\$QDISTRO_IMAGE_PROFILE"$' "$CONFIG_SH"
+    grep -q '^export QDISTRO_STRICT=1$' "$CONFIG_SH"
+    grep -q '^export QDISTRO_STATE_DIR=/var/lib/qdistro/bootstrap$' "$CONFIG_SH"
+    grep -q '^export QDISTRO_OFFLINE_INSTALL=1$' "$CONFIG_SH"
+    ! grep -qE '^(REPO_ROOT|STRICT|RESUME|FROM_STEP|RERUN_STEP)=' "$CONFIG_SH"
+    grep -q '^\. "\$QD/scripts/install/qdistro-bootstrap.sh"$' "$CONFIG_SH"
+    grep -q '^resolve_profile || ' "$CONFIG_SH"
+    grep -q '^install_python_modules$' "$CONFIG_SH"
+    # order: exports, source, globals asserted, profile resolved, chain
+    local l_exp l_src l_assert l_prof l_chain
+    l_exp=$(grep -n '^export QDISTRO_STRICT=1$' "$CONFIG_SH" | cut -d: -f1)
+    l_src=$(grep -n '^\. "\$QD/scripts/install/qdistro-bootstrap.sh"$' "$CONFIG_SH" | cut -d: -f1)
+    l_assert=$(grep -n 'bootstrap globals did not take the exported values' "$CONFIG_SH" | cut -d: -f1)
+    l_prof=$(grep -n '^resolve_profile || ' "$CONFIG_SH" | cut -d: -f1)
+    l_chain=$(grep -n '^install_python_modules$' "$CONFIG_SH" | cut -d: -f1)
+    [ "$l_exp" -lt "$l_src" ] && [ "$l_src" -lt "$l_assert" ] && [ "$l_assert" -lt "$l_prof" ] && [ "$l_prof" -lt "$l_chain" ]
+    # The offline flag is exported before the source (the chain reads it).
+    [ "$(grep -n '^export QDISTRO_OFFLINE_INSTALL=1$' "$CONFIG_SH" | cut -d: -f1)" -lt "$l_src" ]
     grep -q '^export QDWIN_SESSION_AUTOSTART=0' "$CONFIG_SH"
     ! grep -q 'SHIMS' "$CONFIG_SH"
+    # No fail-open remnant: nothing in config.sh tolerates a chain failure.
+    ! grep -q 'verify failed, expected in chroot' "$CONFIG_SH"
+}
+
+@test "offline: sourcing the bootstrap with config.sh's exports yields the globals it relies on" {
+    # The plan's [codex r2] point, pinned: the ENV forms take; the internal
+    # names would be clobbered by the source.
+    run env QDISTRO_REPO_ROOT=/tmp/x QDISTRO_STRICT=1 QDISTRO_STATE_DIR=/tmp/y QDISTRO_PROFILE=release \
+        REPO_ROOT=/clobbered STRICT=clobbered \
+        bash -c '. "$1"; resolve_profile >/dev/null; printf "%s|%s|%s|%s|%s\n" "$REPO_ROOT" "$STRICT" "$QDISTRO_STATE_DIR" "$CHAIN_STATE_FILE" "$QDISTRO_PROFILE"' _ "$BOOT"
+    [ "$status" -eq 0 ]
+    [ "$output" = "/tmp/x|1|/tmp/y|/tmp/y/installer-chain.state|release" ]
+    # dev maps to dev (phone admitted); an unknown profile is refused.
+    run env QDISTRO_PROFILE=dev bash -c '. "$1"; resolve_profile && is_dev && echo dev-ok' _ "$BOOT"
+    [ "$output" = "dev-ok" ]
+    run env QDISTRO_PROFILE=hardened bash -c '. "$1"; resolve_profile' _ "$BOOT"
+    [ "$status" -ne 0 ]
 }
 
 @test "offline: the library mirrors the hardener's corroboration rule" {

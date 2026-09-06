@@ -77,6 +77,26 @@ systemctl enable NetworkManager.service
 # no network). Lets the VM test harness drive the guest (e.g. start sshd) over
 # `virsh qemu-agent-command` without baking network-reachable SSH on by default.
 systemctl enable qemu-guest-agent.service
+# openSUSE's packaged default (/usr/etc/sysconfig/qemu-ga) passes
+# --block-rpcs=guest-exec,guest-exec-status, so the agent answered
+# guest-ping and guest-file-* but refused the one call verify.sh needs to
+# start sshd (every Phase A-C verify.sh run died at that baseline). The
+# admin override file the unit reads after the vendor default
+# (EnvironmentFile=-/etc/sysconfig/qemu-ga, expanded into ExecStart as
+# ${FILTER_RPC_ARGS}; image/verify-contents.sh pins both lines of the unit
+# and that the vendor list is exactly those two RPCs, so "" is the vendor
+# list minus them). Exposure: none new -- the agent listens only on the
+# virtio-serial port, which exists only when a hypervisor created the VM,
+# and that hypervisor already holds the disk. On real hardware the unit's
+# BindsTo= device never appears and the agent does not run.
+install -d -m 0755 /etc/sysconfig
+cat > /etc/sysconfig/qemu-ga <<'EOF'
+# qdistro image: allow every guest-agent RPC (the vendor default blocks
+# guest-exec/guest-exec-status). image/verify.sh drives the booted VM with
+# guest-exec; the channel is hypervisor-only (virtio-serial). See config.sh.
+FILTER_RPC_ARGS=""
+EOF
+chmod 0644 /etc/sysconfig/qemu-ga
 
 # Sudoers policy is profile-gated. This config.sh bakes a RELEASE image by
 # default, which must NOT ship `admin ALL=(ALL) NOPASSWD: ALL` — a baked-in
@@ -115,61 +135,81 @@ meson setup build --wipe --prefix=/usr
 meson compile -C build
 
 cd "$QD"
-INSTALLERS=(
-    "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
-    "scripts/install/install-user-relay-for-vm.sh      $QD/user_relay"
-    # F4-b: without this the relay template is on the image and nothing
-    # ever starts it — qdistro-session-manager is what creates silos, starts
-    # qdistro-user-relay@<uid>, and (F4-a) issues each silo's relay bus-name
-    # policy. It is already in qdistro-bootstrap.sh's chain; the kiwi image
-    # staged the relay but not its only driver.
-    "scripts/install/install-session-manager.sh        $QD/session_manager"
-    "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
-    "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
-    "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
-    "scripts/install/install-media-for-vm.sh           $QD/media"
-    "scripts/install/install-multimachine-for-vm.sh    $QD/multimachine"
-    "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge"
-    "scripts/install/install-portal-backend-for-vm.sh  $QD"
-    "scripts/install/install-phone-for-vm.sh           $QD/phone"
-    "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
-    # install-recall-for-vm.sh is deliberately NOT here: recall is cut from
-    # v1 and the installer refuses to run without QDISTRO_ENABLE_POSTV1_RECALL=1
-    # (exit 2). Under the fail-open loop that refusal was logged as "verify
-    # failed" on every build; under the fatal chain it would abort the build.
-    # The tester image ships without recall (todo/iso/14 Phase B).
-    # Also deliberately absent: the admin approval-queue TUI (admin_app/,
-    # tui/). Neither chain has ever installed it; the tester image ships
-    # without it and the download page says so (todo/iso/14 Phase B item 4).
-    "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
-)
-# Offline-install contract (todo/iso/14 Phase B): every installer in the
-# chain sources scripts/install/lib/qdistro-offline.sh. With this flag set
-# AND the root corroborated as a chroot (positive evidence: kiwi bind-mounts
-# the builder's /proc here first), file drops and `systemctl enable` run as
-# normal while every operation that needs a running system manager or bus
-# (`start`, `daemon-reload`, `busctl`, `loginctl`, readiness probes) is
-# skipped with a logged "[offline] skipped" line. Any other non-zero exit is
-# a real failure, so the chain is FATAL: a missing installer or one that
-# fails aborts the build. The old fail-open loop ("verify failed, expected
-# in chroot") hid five installers failing per build and made a green build
-# mean nothing about completeness.
+# ---------------------------------------------------------------------------
+# The installer chain: ONE chain, the bootstrap's (todo/iso/14 Phase D).
+#
+# config.sh used to carry its own INSTALLERS array, and todo/iso/03 found the
+# two lists installing different products (the image had media, multimachine
+# and recall, which the bootstrap does not install; it lacked sdk and the
+# whole isolation ladder above tier 2). Now the image runs the bootstrap's
+# own chain functions, so what a tester's stick installs and what
+# qdistro-bootstrap.sh installs on a machine are the same list by
+# construction, and the list is stated once (installer_chain_entries;
+# `qdistro-bootstrap.sh --list-steps` prints it).
+#
+# Sourcing contract (documented at the top of the bootstrap): sourcing runs
+# its globals, which are (re)initialised from their QDISTRO_* environment
+# forms, so those are what we set -- never the internal names (REPO_ROOT,
+# STRICT, QDISTRO_STATE_DIR is both), which the source would clobber.
+#   QDISTRO_REPO_ROOT   the synced sources; the chain runs $REPO_ROOT/qdistro
+#   QDISTRO_PROFILE     dev|release, the validated image profile: `phone` is
+#                       a dev-only step (decision D4) and follows the same
+#                       guard here as on a machine install; in release the
+#                       bootstrap's source-tree trust gate also runs (the
+#                       synced tree is root-owned, mode 0755/0644).
+#   QDISTRO_STRICT=1    every chain step is FATAL on failure (the bootstrap
+#                       default is warn-and-continue); an image with a
+#                       missing installer is not a tester image.
+#   QDISTRO_STATE_DIR   the resume state file, ON the image: each succeeded
+#                       step is recorded in installer-chain.state, so the
+#                       booted system can `qdistro-bootstrap.sh --resume`,
+#                       verify-contents.sh can diff the record against the
+#                       chain (the Phase D DONE bar), and the bootstrap's own
+#                       end-of-run completeness check (iso2 02 F1) has the
+#                       evidence it judges -- fatal here regardless of
+#                       profile, via STRICT.
+# Offline-install contract (Phase B): every installer in the chain sources
+# scripts/install/lib/qdistro-offline.sh. With this flag set AND the root
+# corroborated as a chroot (positive evidence: kiwi bind-mounts the builder's
+# /proc here first), file drops and `systemctl enable` run as normal while
+# every operation that needs a running system manager or bus (`start`,
+# `daemon-reload`, `busctl`, `loginctl`, readiness probes) is skipped with a
+# logged "[offline] skipped" line. Any other non-zero exit is a real failure.
+#
+# Deliberately NOT installed, because the bootstrap chain does not install
+# them: recall (cut from v1, decision D2; its installer refuses without
+# QDISTRO_ENABLE_POSTV1_RECALL=1), media and multimachine (audit
+# recommendation DEMOTE, fable-release/13 rows 11d/11e; never promoted into
+# the chain), the admin approval-queue TUI (admin_app/, tui/; neither chain
+# has ever installed it). verify-contents.sh asserts their artefacts are
+# absent. What IS installed is stated in image/AGENTS.md ("What the chain
+# installs").
+export QDISTRO_REPO_ROOT="$SRC"
+export QDISTRO_PROFILE="$QDISTRO_IMAGE_PROFILE"
+export QDISTRO_STRICT=1
+export QDISTRO_STATE_DIR=/var/lib/qdistro/bootstrap
 export QDISTRO_OFFLINE_INSTALL=1
-for entry in "${INSTALLERS[@]}"; do
-    # shellcheck disable=SC2086
-    set -- $entry
-    installer="$1"
-    src_dir="$2"
-    if [ ! -x "$installer" ]; then
-        echo "[qdistro-image] FATAL: chain installer missing or not executable: $installer" >&2
-        exit 1
-    fi
-    echo "[qdistro-image] -> $installer $src_dir"
-    if ! bash "$installer" "$src_dir"; then
-        echo "[qdistro-image] FATAL: $installer failed; the image would be incomplete. Aborting build." >&2
-        exit 1
-    fi
-done
+# shellcheck source=../scripts/install/qdistro-bootstrap.sh
+. "$QD/scripts/install/qdistro-bootstrap.sh"
+# The source redefined log/warn/die (die exits 1: fatal, as every step of
+# this script is) and set REPO_ROOT/STRICT/QDISTRO_STATE_DIR from the
+# exports above. Assert that before running anything as root from them.
+if [ "$REPO_ROOT" != "$SRC" ] || [ "$STRICT" != 1 ] \
+        || [ "$QDISTRO_STATE_DIR" != /var/lib/qdistro/bootstrap ]; then
+    echo "[qdistro-image] FATAL: bootstrap globals did not take the exported values" \
+         "(REPO_ROOT=$REPO_ROOT STRICT=$STRICT QDISTRO_STATE_DIR=$QDISTRO_STATE_DIR). Aborting build." >&2
+    exit 1
+fi
+# resolve_profile validates the exported profile (the canonical names this
+# script admits are fixed points of it; the alias forms were refused above).
+resolve_profile || { echo "[qdistro-image] FATAL: bootstrap rejected QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2; exit 1; }
+echo "[qdistro-image] installer chain (bootstrap's, profile=$QDISTRO_PROFILE, strict, offline): $(installer_chain_names | tr '\n' ' ')"
+# Runs every chain step through run_installer_step (fatal under STRICT) and
+# then chain_completeness_check: the recorded steps must equal the chain
+# minus dev-only steps outside dev, or the build dies.
+install_python_modules
+echo "[qdistro-image] installer chain recorded on the image:"
+sed 's/^/[qdistro-image]   /' /var/lib/qdistro/bootstrap/installer-chain.state
 
 sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
 for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
@@ -262,6 +302,13 @@ if [ ! -x /usr/bin/qdgreeter ]; then
     exit 1
 fi
 echo "[qdistro-image] /usr/bin/qdgreeter present: $(command -v qdgreeter)"
+# ...and each app's QML (Main.qml + the shim module it imports) is INSIDE
+# its installed package: run 28 booted to a crash-looping greeter because
+# qdgreeter's wheel shipped no QML (todo/iso/14 Phase D). The gate lives in
+# image/lib so the host test suite can exercise it against fake packages.
+# shellcheck source=lib/pip-app-qml-gate.sh
+. "$QD/image/lib/pip-app-qml-gate.sh"
+pip_app_qml_gate qdgreeter qdlocker || exit 1
 
 # Production session units. As of 2026-06-16 the VM installer above
 # (install-qdwin-session-for-vm.sh) is the SINGLE SOURCE for the deploy-

@@ -27,9 +27,17 @@
 #   9.  pip-installs qdgreeter, qdlocker, qdbrowser, qterminator,
 #       qnotebook, qfileman.
 #  10.  Runs the existing scripts/install/install-*.sh installer chain
-#       (broker, session-manager, polkit, pwd, qsu, browser-bridge, phone,
-#       print, snapshots, tier3, tier5). Recall is cut from v1 and is not in
-#       the bootstrap chain.
+#       (sdk, broker, session-manager, user-relay, polkit, pwd, qsu,
+#       browser-bridge, portal-backend, phone [dev only], print, snapshots,
+#       tier3, tier4-host, tier5, tier5b), then checks it is COMPLETE: the
+#       SET of steps recorded as succeeded must equal the chain (minus
+#       dev-only steps outside dev) -- nothing missing, nothing extra (a
+#       dev-only or retired step left behind by an earlier install is a
+#       gap too). Incomplete is FATAL in daily-driver/release and under
+#       --strict, a WARN in dev. Recall is cut from v1 and is not in
+#       the bootstrap chain. image/config.sh runs the SAME functions inside
+#       the kiwi chroot (see "Sourcing contract" below), so the image and a
+#       machine install lay down one product (todo/iso/14 Phase D).
 #  11.  Installs qdlocker systemd user service for admin.
 #  12.  Installs locker configuration via deploy/install-locker-config.sh.
 #  13.  (Tumbleweed) loads SELinux policy modules; hardened profiles require
@@ -142,6 +150,18 @@
 #   --list-steps           print the ordered installer-chain step names and
 #                          exit (no install performed).
 #   -h, --help             show help and exit
+#
+# Sourcing contract (image/config.sh, the test harnesses): this file may be
+#   SOURCED; main() runs only when it is executed. Sourcing still runs
+#   `set -euo pipefail`, sources lib/qdistro-profile.sh, defines log/warn/die
+#   and (re)initialises every global from its QDISTRO_* env form -- so a
+#   caller sets QDISTRO_REPO_ROOT, QDISTRO_PROFILE, QDISTRO_STRICT,
+#   QDISTRO_STATE_DIR in the ENVIRONMENT before sourcing, never the internal
+#   names (REPO_ROOT, STRICT, ...), which the source would clobber. After
+#   sourcing, call resolve_profile, then install_python_modules to run the
+#   chain with the completeness check. QDISTRO_OFFLINE_INSTALL=1 (exported)
+#   makes every chain installer honour the offline contract
+#   (lib/qdistro-offline.sh) inside a corroborated chroot.
 #
 # Equivalent env vars (CLI wins): QDISTRO_ADMIN_PASSWORD,
 #   QDISTRO_USER_NAME, QDISTRO_USER_PASSWORD, QDISTRO_REPO_ROOT,
@@ -1955,17 +1975,118 @@ chain_state_completed() {
 # state file (rename is atomic on the same filesystem) so a crash mid-write
 # never leaves a half-written/truncated state file. Idempotent: re-recording an
 # already-present name does not duplicate it.
+# A record that cannot be written is a warning HERE and a gap in
+# chain_completeness_check, which names it as such (CHAIN_UNRECORDED).
+# CHAIN_RUN_RECORDED is every name recorded by THIS process, in order: a
+# full run is judged against it, not against the file, which may carry
+# lines from earlier runs (see chain_state_prune_stale).
+CHAIN_UNRECORDED=""
+CHAIN_RUN_RECORDED=""
+
+# chain_record_failed <name> <msg> [tmp] — a successful installer whose
+# record write failed. Hoisted (bash has no local functions) so it does
+# not leak a `_chain_*` name into every shell that sources this file
+# (image/config.sh sources us into the kiwi chroot).
+chain_record_failed() {
+    local name="$1" msg="$2" tmp="${3:-}"
+    warn "$msg; step '$name' ran OK but is not recorded"
+    [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+    CHAIN_UNRECORDED="${CHAIN_UNRECORDED:+$CHAIN_UNRECORDED }$name"
+    return 0
+}
+
 chain_state_record() {
-    local name="$1" tmp
-    install -d -m 0755 "$QDISTRO_STATE_DIR"
-    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX")" \
-        || { warn "could not create state temp file in $QDISTRO_STATE_DIR; step '$name' not recorded"; return 0; }
+    local name="$1" tmp=""
+    # Every way the write can fail lands here: the step ran OK, the record
+    # did not happen, the completeness check will say exactly that.
+    if [ -e "$CHAIN_STATE_FILE" ] && [ ! -f "$CHAIN_STATE_FILE" ]; then
+        chain_record_failed "$name" "$CHAIN_STATE_FILE exists but is not a regular file"; return 0
+    fi
+    install -d -m 0755 "$QDISTRO_STATE_DIR" 2>/dev/null \
+        || { chain_record_failed "$name" "could not create state dir $QDISTRO_STATE_DIR"; return 0; }
+    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
+        || { chain_record_failed "$name" "could not create a state temp file in $QDISTRO_STATE_DIR"; return 0; }
     {
         chain_state_completed
         printf '%s\n' "$name"
-    } | awk 'NF && !seen[$0]++' > "$tmp"
+    } | awk 'NF && !seen[$0]++' > "$tmp" \
+        || { chain_record_failed "$name" "could not write $tmp" "$tmp"; return 0; }
     chmod 0644 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$CHAIN_STATE_FILE"
+    mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
+        || { chain_record_failed "$name" "could not rename $tmp to $CHAIN_STATE_FILE" "$tmp"; return 0; }
+    CHAIN_RUN_RECORDED="${CHAIN_RUN_RECORDED:+$CHAIN_RUN_RECORDED
+}$name"
+}
+
+# chain_state_unrecord <name> — drop <name> from the state file ATOMICALLY
+# (same temp-then-rename as chain_state_record). No-op if the file is
+# absent or does not list <name>. run_installer_step calls this BEFORE
+# executing the installer so a current failure cannot be masked by an
+# earlier success: a crash or die mid-step, a failed --rerun-step, or a
+# failed --from-step all leave the name unrecorded, and --resume re-runs
+# it (codex r3 N1). Unexpected names (dev-only / retired) are never
+# passed here -- we only unrecord a step we are about to run.
+# Return 1 if the name WAS present and could not be dropped (fail-closed:
+# do not run the installer against a stale success we failed to invalidate).
+chain_state_unrecord() {
+    local name="$1" tmp keep="" n present=""
+    [ -f "$CHAIN_STATE_FILE" ] || return 0
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if [ "$n" = "$name" ]; then
+            present=1
+            continue
+        fi
+        keep="${keep:+$keep
+}$n"
+    done <<EOF
+$(chain_state_completed)
+EOF
+    [ -n "$present" ] || return 0
+    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
+        || { warn "could not drop stale record '$name': could not create a state temp file in $QDISTRO_STATE_DIR"; return 1; }
+    printf '%s\n' "$keep" | awk 'NF' > "$tmp" \
+        || { warn "could not drop stale record '$name': could not write $tmp"; rm -f "$tmp"; return 1; }
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
+        || { warn "could not drop stale record '$name': could not rename $tmp to $CHAIN_STATE_FILE"; rm -f "$tmp"; return 1; }
+    return 0
+}
+
+# chain_state_prune_stale <expected> — after a FULL run, drop from the record
+# every line that this profile expects and this run did NOT record: such a
+# line is a step that succeeded on an earlier run and failed (or was not
+# recorded) now, and left in place it would mask the failure in
+# chain_completeness_check and make a later --resume skip the step. Lines
+# the profile does NOT expect (a dev-only or retired step left by an earlier
+# install) are KEPT: they are the only evidence that the artifacts are on
+# disk, and the completeness check keeps reporting them on every run until
+# the operator cleans up and deletes the line. (An earlier draft truncated
+# the whole file at the start of a full run; the second run then found
+# nothing unexpected -- opus round 2 B5.) Unwritable: warn; the check reports
+# the gap either way.
+chain_state_prune_stale() {
+    local expected="$1" n keep="" tmp
+    [ -f "$CHAIN_STATE_FILE" ] || return 0
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if printf '%s\n' "$expected" | grep -qxF -- "$n" \
+                && ! printf '%s\n' "$CHAIN_RUN_RECORDED" | grep -qxF -- "$n"; then
+            log "installer chain: dropping stale record '$n' (recorded by an earlier run, not by this one)"
+            continue
+        fi
+        keep="${keep:+$keep
+}$n"
+    done <<EOF
+$(chain_state_completed)
+EOF
+    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
+        || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; return 0; }
+    printf '%s\n' "$keep" | awk 'NF' > "$tmp" \
+        || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; rm -f "$tmp"; return 0; }
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
+        || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; rm -f "$tmp"; return 0; }
 }
 
 # chain_resume_validate — fail-closed validation of the state file for a
@@ -1996,11 +2117,152 @@ chain_step_completed() {
     chain_state_completed | grep -qxF "$1"
 }
 
+# chain_expected_names — the step names this run is expected to end with
+# recorded complete: every chain step, minus the dev-only steps when the
+# profile is not dev (they are skipped, not failed).
+chain_expected_names() {
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if chain_step_dev_only "$n" && ! is_dev; then continue; fi
+        printf '%s\n' "$n"
+    done < <(installer_chain_names)
+}
+
+# chain_completeness_check <mode> — the end-of-run check the resume state
+# file makes possible (iso2 02 F1): compare the steps RECORDED complete
+# against chain_expected_names, in BOTH directions:
+#
+#   missing     expected but not recorded. The state file is written only
+#               on success (run_installer_step), so a step that failed, was
+#               skipped as missing, or whose record could not be written is
+#               a gap here even when the per-step classification was a
+#               warning. Nothing else reads the record; without this check a
+#               warn-and-continue run exits 0 with the permission broker
+#               absent.
+#   unexpected  recorded but not expected: a dev-only step (phone) recorded
+#               by an earlier --profile=dev install on a machine now being
+#               installed as daily-driver/release -- its artifacts are still
+#               on disk and the profile promises they are not -- or a step
+#               name this bootstrap no longer knows (retired). A full run
+#               never removes what it does not install, so this is reported
+#               with the cleanup the operator must do; the record is the only
+#               evidence the product statement has, so they stay in the
+#               record (chain_state_prune_stale keeps them) and are reported
+#               on EVERY run until the operator deletes the line.
+#
+# <this-run> (a full run passes CHAIN_RUN_RECORDED) is what "recorded" means
+# for the missing check: the file may still carry unexpected lines from
+# earlier runs. Other modes judge the file (--resume's whole point is the
+# earlier lines). run_installer_step unrecords a step before attempting
+# it, so a scoped failure or a die mid-full-run cannot leave a stale
+# expected success that those modes would then treat as complete.
+#
+# A step that ran OK but whose record could not be written (CHAIN_UNRECORDED)
+# is a gap of the first kind, named as a record failure so the operator fixes
+# the state dir rather than re-running the installer.
+#
+# The comparison is of SETS, not order: --resume and --rerun-step append in
+# run order, so a legitimately recovered machine has a reordered record.
+# (The image verifiers compare order exactly because a fresh build runs the
+# chain once, in order.)
+#
+#   full / resume  the run promised the whole chain: a gap of either kind is
+#                  FATAL in the hardened profiles (daily-driver, release) and
+#                  under --strict / QDISTRO_STRICT, a WARN in dev (a
+#                  disposable VM may be brought up piecewise; the gap is
+#                  still logged and --resume finishes it).
+#   only / from    the operator scoped the run to part of the chain, so an
+#                  incomplete record is expected and only REPORTED (the
+#                  fatal form would make --rerun-step unusable on a machine
+#                  that has not finished installing).
+#
+# Prints the gap by name so the operator's next command is `--resume`,
+# `--rerun-step <name>` or the named cleanup, not a log search.
+chain_completeness_check() {
+    local mode="${1:-full}" this_run="${2:-}" expected recorded seen missing unexpected unrecorded n n_expected
+    expected="$(chain_expected_names)"
+    seen="$(chain_state_completed)"
+    if [ "$mode" = full ]; then recorded="$this_run"; else recorded="$seen"; fi
+    n_expected="$(printf '%s\n' "$expected" | grep -c .)"
+    missing=""
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if ! printf '%s\n' "$recorded" | grep -qxF -- "$n"; then
+            missing="${missing:+$missing }$n"
+        fi
+    done <<EOF
+$expected
+EOF
+    unexpected=""
+    local devonly="" unknown=""
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if ! printf '%s\n' "$expected" | grep -qxF -- "$n"; then
+            if chain_step_dev_only "$n"; then
+                unexpected="${unexpected:+$unexpected }$n(dev-only)"; devonly=1
+            else
+                unexpected="${unexpected:+$unexpected }$n(unknown)"; unknown=1
+            fi
+        fi
+    done <<EOF
+$seen
+EOF
+    if [ -z "$missing" ] && [ -z "$unexpected" ]; then
+        # Scoped runs may finish with a complete *record* after executing
+        # only the selected steps; say so, so "complete" is not read as
+        # "this process ran the whole chain" (opus r3 N23).
+        case "$mode" in
+            only|from)
+                log "installer chain record is complete: $n_expected of $n_expected expected steps recorded, nothing unexpected, in $CHAIN_STATE_FILE" ;;
+            *)
+                log "installer chain complete: $n_expected of $n_expected expected steps recorded, nothing unexpected, in $CHAIN_STATE_FILE" ;;
+        esac
+        return 0
+    fi
+    # The gap, spelled out once for every classification below.
+    local gap=""
+    if [ -n "$missing" ]; then
+        gap="not recorded as installed: $missing."
+        unrecorded=""
+        for n in $missing; do
+            case " $CHAIN_UNRECORDED " in *" $n "*) unrecorded="${unrecorded:+$unrecorded }$n" ;; esac
+        done
+        [ -z "$unrecorded" ] || gap="$gap (of these, ran OK but the record could not be written: $unrecorded -- fix $QDISTRO_STATE_DIR, then --rerun-step them.)"
+    fi
+    if [ -n "$unexpected" ]; then
+        gap="${gap:+$gap }recorded but not part of the '$QDISTRO_PROFILE' chain: $unexpected --"
+        [ -z "$devonly" ] || gap="$gap a dev-only step was installed by an earlier --profile=dev run: remove what its scripts/install/install-<step>-for-vm.sh laid down;"
+        [ -z "$unknown" ] || gap="$gap an unknown step is one this bootstrap no longer has (retired);"
+        gap="$gap then delete that line from $CHAIN_STATE_FILE (it is kept, and reported, until you do)."
+    fi
+    case "$mode" in
+        only|from)
+            warn "installer chain not complete after a scoped run (--rerun-step/--from-step): $gap (run --resume to finish the chain)"
+            return 0 ;;
+    esac
+    if is_hardened || [ -n "$STRICT" ]; then
+        die "installer chain INCOMPLETE in '$QDISTRO_PROFILE' profile: $gap A system with this record is not the product; fix the cause and run --resume (or --rerun-step <name>). State: $CHAIN_STATE_FILE"
+    fi
+    warn "installer chain INCOMPLETE (dev profile continues): $gap Run --resume to finish. State: $CHAIN_STATE_FILE"
+    return 0
+}
+
 # run_installer_step <name> <installer-rel-path> <src-dir> — execute one chain
 # step (relative to the already-cwd'd qdistro dir) and, on success, record it
-# in the state file. Same fatal/warn classification as before.
+# in the state file. Same fatal/warn classification as before; the END of the
+# chain is then judged by chain_completeness_check, which is what makes the
+# default warn-and-continue safe on a hardened profile.
 run_installer_step() {
     local name="$1" installer="$2" src_dir="$3"
+    # Drop any earlier success for this step before we try it. A stale
+    # line left in place would make --resume skip the step after a crash
+    # or die (prune never ran), and would make a failed --rerun-step /
+    # --from-step report "complete" from the old record (codex r3 N1).
+    if ! chain_state_unrecord "$name"; then
+        fail_or_warn "could not drop stale record for [$name] before re-running it (state: $CHAIN_STATE_FILE)"
+        return 0
+    fi
     if [ -x "$installer" ]; then
         log "  -> [$name] $(basename "$installer")"
         # Core op: installer-chain step. Non-fatal by default
@@ -2052,6 +2314,19 @@ install_python_modules() {
         fi
     fi
 
+    # A FULL run promises the whole chain and is judged on what THIS run
+    # records (CHAIN_RUN_RECORDED). Each attempted step is unrecorded
+    # first (run_installer_step), so a crash or die mid-loop cannot leave
+    # a stale success that --resume would skip. Afterwards
+    # chain_state_prune_stale drops any remaining expected lines this run
+    # did not re-record and keeps the ones the profile does not expect,
+    # so a leftover dev-only/retired step is reported on every run until
+    # cleaned up (chain_completeness_check).
+    if [ "$mode" = full ] && [ -n "$(chain_state_completed)" ]; then
+        log "installer chain: full run -- previously recorded: $(chain_state_completed | tr '\n' ' ')(judging this run's record; attempted steps are unrecorded first)"
+    fi
+    CHAIN_RUN_RECORDED=""
+
     log "installing Python modules + systemd units..."
     local name installer src_suffix from_reached=""
     while IFS='|' read -r name installer src_suffix; do
@@ -2079,6 +2354,15 @@ install_python_modules() {
         fi
         run_installer_step "$name" "$installer" "$QD$src_suffix"
     done < <(installer_chain_entries)
+
+    # Recorded steps vs the chain, both directions (iso2 02 F1). Fatal in
+    # hardened profiles and under --strict.
+    if [ "$mode" = full ]; then
+        chain_state_prune_stale "$(chain_expected_names)"
+        chain_completeness_check full "$CHAIN_RUN_RECORDED"
+    else
+        chain_completeness_check "$mode"
+    fi
 }
 
 # ---------------------------------------------------------------------------

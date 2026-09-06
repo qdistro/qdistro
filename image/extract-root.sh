@@ -43,6 +43,15 @@ for p in "$RAW" "$DEST"; do
     esac
 done
 export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
+# The pip-installed apps (qdgreeter, qdlocker) land in the system python's
+# versioned site-packages (/usr/lib/python3.N/...); copy-out takes literal
+# paths and guestfish's `glob` expands only the last component, so ask the
+# image for N first. awk, not `head -1`: this script runs under pipefail.
+# Highest minor wins numerically (lexically "3.9" > "3.13"), should an
+# image ever carry two interpreters.
+PYLIB="$(printf 'glob echo /usr/lib/python3*\n' | guestfish --ro -a "$RAW" -i \
+         | awk '/^\/usr\/lib\/python3\.[0-9]+\/?$/ { p=$0; sub(/\/$/, "", p); n=p; sub(/.*python3\./, "", n); if (n+0 > best) { best=n+0; v=p } } END { print v }')"
+[ -n "$PYLIB" ] || echo "extract-root: WARN: no /usr/lib/python3.N in the image; the [qdgreeter]/[qdlocker] package rows will MISS" >&2
 PATHS=(
     /etc
     /usr/bin/qdgreeter /usr/bin/qdlocker /usr/bin/qterminator /usr/bin/qfileman
@@ -50,13 +59,21 @@ PATHS=(
     /usr/local
     /usr/lib/qdistro /usr/lib/systemd /usr/lib/os-release
     /usr/lib64/weston
+    /usr/etc/sysconfig/qemu-ga
     /usr/share/quickshell /usr/share/qdistro /usr/share/polkit-1
     /usr/share/xdg-desktop-portal /usr/share/dbus-1 /usr/share/applications
     /usr/share/metainfo /usr/share/icons/hicolor /usr/share/selinux
+    /usr/share/fonts/truetype
     /home/admin/.config /home/admin/weston.ini
     /var/lib/systemd/linger /var/lib/qdistro /var/lib/selinux
     /root/qdistro-src
 )
+# (The chain's sdk step installs qdistro_app under /usr/local/lib/python3.N/
+# site-packages -- openSUSE's purelib for non-RPM installs -- so /usr/local
+# above already carries the [sdk] row's file.) The two pip apps go to /usr:
+if [ -n "$PYLIB" ]; then
+    PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")
+fi
 # The copy includes the image's /etc (shadow with the baked test-password
 # hash, generated SSH host keys). File modes survive the copy, and the tree
 # itself is made private to the invoking user.
@@ -72,9 +89,13 @@ rm -rf "$DEST"; mkdir -p "$DEST"; chmod 0700 "$DEST"
         echo "-copy-out $p $DEST${p%/*}"
     done
 } | guestfish --ro -a "$RAW" -i
-# /root/qdistro-src is only checked for presence of its three dirs; keep it
-# small on the host by dropping everything below the second level.
+# /root/qdistro-src is checked for presence of its three dirs, and for the
+# targets of the tier-3 spawn/cleanup symlinks (check_link resolves them);
+# keep it small on the host by dropping everything else below the second
+# level. Add an exemption here when a checklist row resolves into the tree.
 if [ -d "$DEST/root/qdistro-src" ]; then
-    find "$DEST/root/qdistro-src" -mindepth 2 -delete 2>/dev/null || true
+    find "$DEST/root/qdistro-src" -mindepth 2 \
+        -not -path '*/qdistro/tier3' -not -path '*/qdistro/tier3/*' \
+        -delete 2>/dev/null || true
 fi
 echo "extract-root: $RAW -> $DEST ($(du -sh "$DEST" | cut -f1))"

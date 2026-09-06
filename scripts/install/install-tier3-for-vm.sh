@@ -30,6 +30,13 @@
 # fresh-vm-bootstrap.sh's $SRC).
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): live operations are
+# skipped and logged inside a corroborated chroot (the kiwi image build).
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "[install-tier3] must run as root" >&2
     exit 2
@@ -128,9 +135,16 @@ done
 #
 # tmpfiles.d entry persists the dir across reboots (systemd-tmpfiles
 # recreates it on boot before any user services start).
-install -d -o "$ADMIN_USER" -g "$TIER3_GROUP" -m 0710 /run/qdistro-tier3 2>/dev/null \
-    || install -d -o root -g "$TIER3_GROUP" -m 0710 /run/qdistro-tier3
-echo "[install-tier3] socket dir /run/qdistro-tier3 ($(stat -c '%U:%G %a' /run/qdistro-tier3))"
+if is_offline; then
+    # /run is a tmpfs on the booted image; a directory made here would land
+    # in the image's empty /run mount point and never be seen. The
+    # tmpfiles.d entry below is what creates it at boot.
+    echo "[offline] skipped (runtime dir; systemd-tmpfiles creates it at boot): /run/qdistro-tier3" >&2
+else
+    install -d -o "$ADMIN_USER" -g "$TIER3_GROUP" -m 0710 /run/qdistro-tier3 2>/dev/null \
+        || install -d -o root -g "$TIER3_GROUP" -m 0710 /run/qdistro-tier3
+    echo "[install-tier3] socket dir /run/qdistro-tier3 ($(stat -c '%U:%G %a' /run/qdistro-tier3))"
+fi
 
 install -d /etc/tmpfiles.d
 cat > /etc/tmpfiles.d/qdistro-tier3.conf <<EOF
@@ -165,7 +179,10 @@ for pair in spawn-tier3.sh:qdistro-tier3-spawn \
     dst_name="${pair##*:}"
     src="$TIER3_DIR/$src_basename"
     dst="/usr/local/bin/$dst_name"
-    [ -x "$src" ] || { echo "[install-tier3] WARN: $src missing or not executable"; continue; }
+    # A helper the repo ships but the tree lacks (or lost its exec bit in
+    # the sync) is a broken tree: fail the step, so the chain records a gap
+    # instead of a half-installed tier (todo/iso/14 Phase D review).
+    [ -x "$src" ] || { echo "[install-tier3] FATAL: $src missing or not executable" >&2; exit 1; }
     ln -sf "$src" "$dst"
     echo "[install-tier3] linked $dst → $src"
 done
@@ -223,7 +240,6 @@ chmod 0644 "$POLKIT_DIR/org.qdistro.tier3.policy"
 echo "[install-tier3] installed polkit policy at $POLKIT_DIR/org.qdistro.tier3.policy"
 
 # Reload polkit so the new policy takes effect immediately.
-systemctl reload polkit.service 2>/dev/null || \
-    pkill -HUP polkitd 2>/dev/null || true
+sd_reload_polkit
 
 echo "[install-tier3] done."

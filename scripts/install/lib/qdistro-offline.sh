@@ -101,6 +101,21 @@ sd_reload_dbus() {
         || true
 }
 
+# sd_reload_polkit — ask polkitd to re-read /usr/share/polkit-1/actions after
+# a policy drop; live only, best-effort as the tier installers always were
+# (polkitd enumerates actions on its next start anyway, so a failed reload
+# is not an incomplete install). Offline the action file is on disk and the
+# booted image's polkitd reads it at start.
+sd_reload_polkit() {
+    if is_offline; then
+        printf '[offline] skipped (needs a running system manager): reload polkit actions\n' >&2
+        return 0
+    fi
+    systemctl reload polkit.service 2>/dev/null \
+        || pkill -HUP polkitd 2>/dev/null \
+        || true
+}
+
 # sd_enable [--global] <unit...> — always: `systemctl enable` only writes
 # wants-symlinks, which works in a chroot and is what the booted image obeys.
 sd_enable() { systemctl enable "$@"; }

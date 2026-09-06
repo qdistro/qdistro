@@ -23,6 +23,13 @@
 # fresh-vm-bootstrap.sh's $SRC).
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): live operations are
+# skipped and logged inside a corroborated chroot (the kiwi image build).
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "[install-tier5] must run as root" >&2
     exit 2
@@ -50,7 +57,10 @@ for tool in spawn-tier5.sh:qdistro-tier5-spawn \
     dst_name="${tool##*:}"
     src="$TIER5_DIR/$src_basename"
     dst="/usr/local/bin/$dst_name"
-    [ -x "$src" ] || { echo "[install-tier5] WARN: $src missing or not executable"; continue; }
+    # A helper the repo ships but the tree lacks (or lost its exec bit in
+    # the sync) is a broken tree: fail the step, so the chain records a gap
+    # instead of a half-installed tier (todo/iso/14 Phase D review).
+    [ -x "$src" ] || { echo "[install-tier5] FATAL: $src missing or not executable" >&2; exit 1; }
     cat > "$dst" <<EOF
 #!/bin/bash
 exec "$src" "\$@"
@@ -109,7 +119,6 @@ chmod 0644 "$POLKIT_DIR/org.qdistro.tier5.policy"
 echo "[install-tier5] installed polkit policy at $POLKIT_DIR/org.qdistro.tier5.policy"
 
 # Reload polkit so the new policy takes effect immediately.
-systemctl reload polkit.service 2>/dev/null || \
-    pkill -HUP polkitd 2>/dev/null || true
+sd_reload_polkit
 
 echo "[install-tier5] done."

@@ -46,6 +46,58 @@ is a full, persistent install).
   what keeps the shared credential local; `verify-contents.sh` fails an image
   with an sshd wants-link. The hardened install stays the bootstrap's track.
 
+## What the chain installs (the product statement `todo/iso/03` asked for)
+
+**One chain.** `config.sh` carries no installer list. It exports
+`QDISTRO_REPO_ROOT`, `QDISTRO_PROFILE`, `QDISTRO_STRICT=1`,
+`QDISTRO_STATE_DIR` and `QDISTRO_OFFLINE_INSTALL=1`, sources
+`scripts/install/qdistro-bootstrap.sh` and runs its `install_python_modules`,
+so the image installs exactly what `qdistro-bootstrap.sh` installs on a
+machine, by construction. The list lives once, in `installer_chain_entries`
+(`qdistro-bootstrap.sh --list-steps` prints it); the image records every
+succeeded step in `/var/lib/qdistro/bootstrap/installer-chain.state`, and
+the bootstrap's end-of-run completeness check dies (strict) if the record
+is short. `verify-contents.sh` diffs that record against the chain for the
+image's profile and `verify.sh` repeats the diff on the booted image.
+
+| step | what lands | tester image (dev) | release profile |
+|---|---|---|---|
+| `sdk` | `qdistro_app` in the system python | yes | yes |
+| `broker`, `session-manager`, `user-relay`, `polkit`, `pwd`, `qsu`, `browser-bridge`, `portal-backend`, `print`, `snapshots` | the permission arbiter, silo launcher, relay, credential vault, root-exec helper, browser bridge, portals, print proxy, backups | yes | yes |
+| `phone` | phone companion daemon (cut from v1, decision D4) | yes, dev-only guard | **no** (skipped, not a gap) |
+| `tier3` | `qdistro-tier3` group, locked silo users `user1`/`user2`, `/usr/local/bin/qdistro-tier3-spawn`, tmpfiles entry, polkit action | yes | yes |
+| `tier4-host`, `tier5`, `tier5b` | host launch code only: `tier4_control.py` and siblings, the tier-5/5b spawn wrappers, domain templates and polkit action | yes | yes |
+
+**Tiers.** The stick supports **tiers 0–3** (`doc/isolation-tiers.md`,
+decision D3). Tiers 4 and 5 are present but **experimental**: the chain
+installs the host side only. The guest base image is not in the image;
+build it on the booted system with `qdistro-bootstrap.sh --tier4-base`
+(or `qdistro-tier5-build-guest-image`), which needs KVM on the hardware.
+
+**Not installed, and asserted absent** by `verify-contents.sh`: `recall`
+(cut from v1, decision D2), `media` and `multimachine` (audit
+recommendation DEMOTE, never promoted into the chain), the admin
+approval-queue TUI (neither chain has ever installed it). Adding any of
+them to the image means adding it to the bootstrap chain, where the
+decision is recorded.
+
+**Guest agent.** `/etc/sysconfig/qemu-ga` clears the vendor
+`--block-rpcs=guest-exec,guest-exec-status` so `verify.sh` can start sshd
+over the hypervisor-only virtio-serial channel; on hardware the agent's
+device never appears and it does not run. The same channel is
+`verify.sh`'s root channel (`qga_root`): an assertion that needs root
+(anything under `/root`, `passwd -S`, sourcing the on-image bootstrap)
+reads through it on every profile, not through `sudo -n` over SSH, which
+the release profile deliberately breaks. `verify-contents.sh` pins the
+unit's `EnvironmentFile`/`ExecStart` lines and that the vendor default
+blocks exactly those two RPCs.
+
+**Pip apps ship their QML.** qdgreeter and qdlocker are pip-installed into
+`/usr`; each must carry `qml/Main.qml` INSIDE its package (package-data),
+or it installs fine and dies at first launch. Run 28 booted to a
+crash-looping greeter that way; `config.sh` now fails the build on it and
+the checklist has a row per app.
+
 ## Tumbleweed snapshot pin and provenance
 
 `config.xml` pins both repositories to
@@ -72,7 +124,7 @@ its presence.
 | File | What it does |
 | --- | --- |
 | `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), UEFI grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. |
-| `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run the **fatal** installer chain (its `INSTALLERS` array; every entry honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules (permissive), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd, compositor-VT hardening (`--offline`). A missing or failing installer aborts the build. |
+| `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules (permissive), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd, compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
 | `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the five sibling repos into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
 | `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). |
 | `lib/build-guard.sh` | liveness (log mtime / CPU ticks / D-state / uplink bytes), kill-tree and mount/loop cleanup used by the retry loop. |
@@ -81,7 +133,7 @@ its presence.
 | `iterate-kiwi.sh` | pushes local `config.xml`/`config.sh`/`build.sh` into a running builder VM and re-runs kiwi (skips the clone). |
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
-| `verify.sh` | boots the `.raw` rootlessly (`qemu:///session`, qcow2 overlay), SSH over a `passt` forward, journal-side assertions, screenshots. `QDISTRO_IMAGE` names the artifact; otherwise exactly one candidate may exist. |
+| `verify.sh` | boots the `.raw` rootlessly (`qemu:///session`, qcow2 overlay), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` names the artifact; otherwise exactly one candidate may exist. |
 | `install-test.sh` | drives the *install ISO* (post-v1); inert while `installiso="false"`. |
 | `root/` | kiwi overlay tree. `etc/os-release.qdistro` is the branding override (its `VERSION_ID` must equal `config.xml` `<version>`; the build checks). `root/qdistro-src/` and `root/qdistro-source-manifest` are generated (gitignored). |
 | `logs/` | (gitignored) per-run build / verify logs and screenshots. |
@@ -134,21 +186,27 @@ the host. Green means:
 
 1. **Build.** `build-in-vm.sh` exits 0 iff kiwi and the bundle step
    succeeded, the raw and `bundle/*.raw.xz` copied out with the sizes seen
-   inside the VM, and `release-artifact.txt` reads `RESULT: PASS`. The chain
-   inside `config.sh` is fatal, so a green build is a complete image; the
-   full kiwi log is pulled to `logs/in-vm-*/kiwi-build.full.log`.
+   inside the VM, and `release-artifact.txt` reads `RESULT: PASS`. The
+   bootstrap chain runs strict and checks its own completeness, so a green
+   build is a complete image; the full kiwi log is pulled to
+   `logs/in-vm-*/kiwi-build.full.log`.
 2. **Static checklist.** `extract-root.sh && verify-contents.sh
    $QDISTRO_BUILD_DIR/extracted` prints one OK/MISS line per row and
    `RESULT: PASS|FAIL`. Rows include every chain installer's artefacts,
    the wants-links, the SELinux module store, `/etc/qdistro/release`
-   content, sshd-not-enabled, and the sudoers rule matching the profile.
+   content, sshd-not-enabled, the sudoers and phone rows matching the
+   profile, the absence of media/multimachine/recall, and the chain record
+   diffed against `installer_chain_names`.
 3. **Boot-verify.** `verify.sh` boots the raw and prints `pass: N / M`.
+   The first image to reach that summary was run 28 (Phase D); before it,
+   every run died at the sshd-start baseline on the vendor RPC filter.
    Known benign: `RDSEED32 is broken. Disabling the corresponding CPUID
    bit` trips the priority-0/1 journal check under kvm.
 
 Hermetic host tests: `tests/integration/vm/image-release.bats` (config
 pins, manifest, release stamp, checklist rows), `build-guard.bats`,
-`offline-install.bats`.
+`offline-install.bats` (the chain contract, config.sh's sourcing form),
+`bootstrap-installer-resume.bats` (the chain and its completeness check).
 
 ## What not to do here
 
@@ -167,9 +225,13 @@ pins, manifest, release stamp, checklist rows), `build-guard.bats`,
   `history/<id>/`; `build.sh --snapshot-id` is the check.
 - **Don't change the `admin` username** without auditing every
   `qdistro/scripts/install/install-*.sh`.
+- **Don't add an installer list to `config.sh`.** The chain is the
+  bootstrap's `installer_chain_entries`; a step the image needs goes there
+  (with its decision), and `offline-install.bats` fails a `config.sh` that
+  invokes a chain installer itself.
 - **Don't add a chain installer that needs a live system manager.** It must
   source `scripts/install/lib/qdistro-offline.sh` and skip live-only work
-  under `is_offline`; the chain is fatal.
+  under `is_offline`; the chain is strict in the image.
 
 ## Iteration loop for an agent
 

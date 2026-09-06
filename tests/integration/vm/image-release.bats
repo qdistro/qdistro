@@ -290,6 +290,155 @@ fake_root() {
     [[ "$output" == *"OK   release profile: no passwordless sudoers"* ]]
 }
 
+# chain_root <profile> [<state-content>] -- fake_root plus the Phase D rows'
+# inputs: the chain record (default: exactly what the bootstrap expects for
+# the profile) and the artefacts of the once-missing steps.
+chain_root() {
+    local profile=$1
+    fake_root "$profile"
+    mkdir -p "$T/root/var/lib/qdistro/bootstrap"
+    if [ $# -ge 2 ]; then
+        printf '%s\n' "$2" > "$T/root/var/lib/qdistro/bootstrap/installer-chain.state"
+    else
+        QDISTRO_PROFILE="$profile" bash -c '. "$1"; resolve_profile >/dev/null; chain_expected_names' _ \
+            "$REPO/scripts/install/qdistro-bootstrap.sh" > "$T/root/var/lib/qdistro/bootstrap/installer-chain.state"
+    fi
+    mkdir -p "$T/root/etc/sysconfig"; printf 'FILTER_RPC_ARGS=""\n' > "$T/root/etc/sysconfig/qemu-ga"
+    mkdir -p "$T/root/etc/tmpfiles.d" "$T/root/usr/local/bin" "$T/root/usr/local/lib/qdistro" \
+        "$T/root/usr/share/polkit-1/actions" "$T/root/usr/share/qdistro/tier4-vm" \
+        "$T/root/usr/share/qdistro/tier5" "$T/root/usr/share/qdistro/tier5b" \
+        "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/qdistro/tier3" \
+        "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system"
+    : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
+    mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
+    : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim/qmldir"
+    : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/Main.qml"
+    mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim"; : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim/qmldir"
+    mkdir -p "$T/root/usr/share/fonts/truetype"; : > "$T/root/usr/share/fonts/truetype/DejaVuSans.ttf"
+    # the vendor qemu-ga default and the unit lines the override relies on
+    # (copied from the run-28 image)
+    printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/usr/etc/sysconfig/qemu-ga"
+    printf '[Service]\nEnvironmentFile=-/usr/etc/sysconfig/qemu-ga\nEnvironmentFile=-/etc/sysconfig/qemu-ga\nExecStart=-/usr/bin/qemu-ga -p /dev/virtio-ports/org.qemu.guest_agent.0 ${FILTER_RPC_ARGS}\n' \
+        > "$T/root/usr/lib/systemd/system/qemu-guest-agent.service"
+    : > "$T/root/root/qdistro-src/qdistro/tier3/spawn-tier3.sh"; : > "$T/root/root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh"
+    ln -sfn /root/qdistro-src/qdistro/tier3/spawn-tier3.sh "$T/root/usr/local/bin/qdistro-tier3-spawn"
+    ln -sfn /root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh "$T/root/usr/local/bin/qdistro-tier3-cleanup"
+    : > "$T/root/usr/local/lib/qdistro/spawn-common.sh"; : > "$T/root/etc/tmpfiles.d/qdistro-tier3.conf"
+    : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier3.policy"; : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier5.policy"
+    printf 'qdistro-tier3:x:499:admin,user1,user2\n' > "$T/root/etc/group"
+    printf 'user1:x:1002:100::/home/user1:/bin/bash\nuser2:x:1003:100::/home/user2:/bin/bash\n' > "$T/root/etc/passwd"
+    printf 'user1:!:20000::::::\nuser2:!:20000::::::\n' > "$T/root/etc/shadow"
+    local f
+    for f in tier4_control.py tier4_chrome.py tier4_publisher_identity.py; do : > "$T/root/usr/share/qdistro/tier4-vm/$f"; done
+    for f in tier5-spawn tier5-cleanup tier5-build-guest-image tier5b-spawn tier5b-cleanup tier5b-build-guest-image; do : > "$T/root/usr/local/bin/qdistro-$f"; done
+    : > "$T/root/usr/share/qdistro/tier5/domain-template.xml"; : > "$T/root/usr/share/qdistro/tier5b/domain-template.xml"
+}
+
+@test "verify-contents: Phase D rows -- the once-missing steps' artefacts and the chain record all pass on a complete tree" {
+    chain_root dev
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"OK   [sdk] qdistro_app package"* ]]
+    [[ "$output" == *"OK   [qdgreeter] QML shipped with the package"* ]]
+    [[ "$output" == *"OK   [qdlocker] QML shipped with the package"* ]]
+    [[ "$output" == *"OK   [qdlocker] QML shim module shipped"* ]]
+    [[ "$output" == *"OK   [fonts] DejaVu"* ]]
+    [[ "$output" == *"OK   [tier3] spawn helper"* ]]
+    [[ "$output" == *"OK   [tier3] user1 password locked"* ]]
+    [[ "$output" == *"OK   [tier3] admin in group"* ]]
+    [[ "$output" == *"OK   [tier4-host] control script"* ]]
+    [[ "$output" == *"OK   [tier5] polkit action"* ]]
+    [[ "$output" == *"OK   [tier5b] domain template"* ]]
+    [[ "$output" == *"OK   [qemu-ga] guest-exec allowed"* ]]
+    [[ "$output" == *"OK   [qemu-ga] unit reads the override"* ]]
+    [[ "$output" == *"OK   [qemu-ga] unit passes the filter"* ]]
+    [[ "$output" == *"OK   [qemu-ga] vendor default blocks only guest-exec"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 16 steps): sdk broker"*"phone"*"tier5b"* ]]
+    [[ "$output" == *"OK   [media] socket unit not shipped: absent as required"* ]]
+    [[ "$output" == *"OK   [multimachine] broker CLI not shipped: absent as required"* ]]
+    # dev: phone rows are requirements (the fixture has no phone unit, so MISS)
+    [[ "$output" == *"MISS [phone] unit (dev profile)"* ]]
+    [[ "$output" != *"[phone] unit not shipped"* ]]
+}
+
+@test "verify-contents: Phase D rows -- release profile expects 15 steps and NO phone; media present is a FAIL" {
+    chain_root release
+    mkdir -p "$T/root/etc/systemd/system"; : > "$T/root/etc/systemd/system/qdistro-media-exec.socket"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (release profile, 15 steps):"* ]]
+    [[ "$output" != *"(release profile, 15 steps):"*"phone"* ]]
+    [[ "$output" == *"OK   [phone] unit not shipped (release profile): absent as required"* ]]
+    [[ "$output" == *"FAIL [media] socket unit not shipped: must be absent but exists"* ]]
+    [ "$status" -eq 1 ]
+    # a release image that carries phone fails
+    : > "$T/root/etc/systemd/system/qdistro-phone.service"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"FAIL [phone] unit not shipped (release profile): must be absent but exists"* ]]
+}
+
+@test "verify-contents: chain record -- a short, reordered, extra-step or missing record is a MISS with the diff" {
+    # short: tier4-host never recorded
+    chain_root dev "$(QDISTRO_PROFILE=dev bash -c '. "$1"; resolve_profile >/dev/null; chain_expected_names' _ "$REPO/scripts/install/qdistro-bootstrap.sh" | grep -vx tier4-host)"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MISS [chain] record differs from the bootstrap chain (dev profile):"* ]]
+    [[ "$output" == *"< tier4-host"* ]]
+    # dev record on a release image (phone recorded where it must not be)
+    chain_root release "$(QDISTRO_PROFILE=dev bash -c '. "$1"; resolve_profile >/dev/null; chain_expected_names' _ "$REPO/scripts/install/qdistro-bootstrap.sh")"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [chain] record differs from the bootstrap chain (release profile):"* ]]
+    [[ "$output" == *"> phone"* ]]
+    # an unknown step recorded
+    chain_root dev "$(printf 'sdk\nbogus\n')"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"> bogus"* ]]
+    # no record at all
+    chain_root dev; rm "$T/root/var/lib/qdistro/bootstrap/installer-chain.state"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [chain] record: "*"installer-chain.state absent"* ]]
+    # blank lines and comments in the record are tolerated
+    chain_root dev "$(printf '# written by config.sh\n\n%s\n' "$(QDISTRO_PROFILE=dev bash -c '. "$1"; resolve_profile >/dev/null; chain_expected_names' _ "$REPO/scripts/install/qdistro-bootstrap.sh")")"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 16 steps)"* ]]
+}
+
+@test "verify-contents: tier-3 content rows -- unlocked silo password or admin outside the group is a MISS" {
+    chain_root dev
+    printf 'user1:$6$abc:20000::::::\nuser2:!:20000::::::\n' > "$T/root/etc/shadow"
+    printf 'qdistro-tier3:x:499:user1,user2\n' > "$T/root/etc/group"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [tier3] user1 password locked"* ]]
+    [[ "$output" == *"OK   [tier3] user2 password locked"* ]]
+    [[ "$output" == *"MISS [tier3] admin in group"* ]]
+    [[ "$output" == *"OK   [tier3] group exists"* ]]
+    # the qemu-ga row wants the filter CLEARED, not merely present
+    printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/etc/sysconfig/qemu-ga"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [qemu-ga] guest-exec allowed"* ]]
+}
+
+@test "extract-root: copies every path the Phase D rows resolve and keeps the tier-3 link targets through the prune" {
+    # Round-1 review (opus B1/B2): the chain_root fixture can assert shapes
+    # the extraction never produces. Pin the extractor's side of the contract.
+    local x="$IMAGE/extract-root.sh"
+    grep -q '^    /usr/local$' "$x"                      # sdk package + tier helpers
+    grep -q 'PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")' "$x"   # pip apps' QML rows
+    grep -q '^    /usr/etc/sysconfig/qemu-ga$' "$x"      # vendor default row
+    grep -q '^    /usr/share/fonts/truetype$' "$x"        # fonts row
+    grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
+    grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
+    grep -q '^    /root/qdistro-src$' "$x"
+    grep -q -- "-not -path '\*/qdistro/tier3' -not -path '\*/qdistro/tier3/\*'" "$x"
+    # and the prune really keeps them: run its find on a mock tree
+    local m="$BATS_TEST_TMPDIR/prune"
+    mkdir -p "$m/root/qdistro-src/qdistro/tier3" "$m/root/qdistro-src/qdistro/scripts/install" "$m/root/qdistro-src/qdwin/src"
+    : > "$m/root/qdistro-src/qdistro/tier3/spawn-tier3.sh"; : > "$m/root/qdistro-src/qdistro/scripts/install/x.sh"; : > "$m/root/qdistro-src/qdwin/src/a.c"
+    find "$m/root/qdistro-src" -mindepth 2 -not -path '*/qdistro/tier3' -not -path '*/qdistro/tier3/*' -delete 2>/dev/null || true
+    [ -f "$m/root/qdistro-src/qdistro/tier3/spawn-tier3.sh" ]
+    [ ! -e "$m/root/qdistro-src/qdistro/scripts" ]
+    [ ! -e "$m/root/qdistro-src/qdwin/src" ]
+    [ -d "$m/root/qdistro-src/qdwin" ]
+}
+
 @test "verify-contents: a missing or truncated /etc/qdistro/release is a MISS, not a pass" {
     mkdir -p "$T/root/etc"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
@@ -333,7 +482,7 @@ fake_root() {
     grep -q 'FATAL: could not write /etc/qdistro/release' "$c"
     # ordering: the stamp precedes the chain, so a build that cannot say what
     # went in never gets as far as installing it
-    [ "$(grep -n 'qdistro_write_release' "$c" | head -1 | cut -d: -f1)" -lt "$(grep -n '^INSTALLERS=(' "$c" | cut -d: -f1)" ]
+    [ "$(grep -n 'qdistro_write_release' "$c" | head -1 | cut -d: -f1)" -lt "$(grep -n '^install_python_modules$' "$c" | cut -d: -f1)" ]
     # sshd stays off: nothing in config.sh enables it
     ! grep -qE 'systemctl (enable|start).*sshd' "$c"
     # the dev-profile sudoers warning still prints
@@ -514,4 +663,41 @@ GF
     local g="$REPO/ci/lib/gates/image.sh"
     grep -q 'record_skip image install-test.sh image' "$g"
     grep -q 'installiso=false' "$g"
+}
+
+@test "verify-contents: a qdgreeter package without its QML is a MISS (run 28's crash-looping greeter)" {
+    chain_root dev
+    rm "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"MISS [qdgreeter] QML shipped with the package"* ]]
+    [[ "$output" == *"OK   [qdlocker] QML shipped with the package"* ]]
+}
+
+@test "pip-app-qml-gate: passes a package with Main.qml + shim/qmldir, fails one missing either, ignores the CWD" {
+    grep -q '^pip_app_qml_gate qdgreeter qdlocker || exit 1$' "$IMAGE/config.sh"
+    local site="$BATS_TEST_TMPDIR/site"
+    mkdir -p "$site/fakeapp/qml/shim" "$site/noshim/qml" "$site/noqml"
+    : > "$site/fakeapp/__init__.py"; : > "$site/fakeapp/qml/Main.qml"; : > "$site/fakeapp/qml/shim/qmldir"
+    : > "$site/noshim/__init__.py";  : > "$site/noshim/qml/Main.qml"
+    : > "$site/noqml/__init__.py"
+    run bash -c 'source "$1"; PYTHONPATH="$2" pip_app_qml_gate fakeapp' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"fakeapp QML present: $site/fakeapp/qml/Main.qml"* ]]
+    [[ "$output" == *"fakeapp QML present: $site/fakeapp/qml/shim/qmldir"* ]]
+    run bash -c 'source "$1"; PYTHONPATH="$2" pip_app_qml_gate fakeapp noshim' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: noshim installed without its QML (qml/shim/qmldir is not inside the installed package)"* ]]
+    run bash -c 'source "$1"; PYTHONPATH="$2" pip_app_qml_gate noqml' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"noqml installed without its QML (qml/Main.qml"* ]]
+    # a source checkout in the CWD must not stand in for an installed package (-P)
+    run bash -c 'cd "$2" && source "$1" && pip_app_qml_gate fakeapp' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: fakeapp is not importable"* ]]
+    # a name that is not a package at all is not misdiagnosed as missing QML
+    run bash -c 'source "$1"; pip_app_qml_gate definitely_not_a_pkg' _ "$IMAGE/lib/pip-app-qml-gate.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: definitely_not_a_pkg is not importable"* ]]
+    [[ "$output" != *"without its QML"* ]]
 }
