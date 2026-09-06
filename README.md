@@ -27,8 +27,9 @@ a USB stick or boot it as a VM disk. That image is the **dev** profile,
 default password `qdistro`, sshd off, **UEFI-only**, 32 GB minimum stick.
 How to flash it, how to boot it in a VM, the checksum, and the honest
 caveats: the [download page](https://qdistro.org/download/). There is no
-signed release yet; `sha256sum -c` the sibling `.sha256` is the integrity
-check.
+signed release yet and **no public download is published yet**;
+`sha256sum -c` the sibling `.sha256` is the integrity check once you
+have the file.
 
 The from-source path below is for developers iterating on a Tumbleweed
 VM. The full-stack integration and GUI test suites still run in disposable

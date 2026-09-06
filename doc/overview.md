@@ -172,7 +172,8 @@ path is post-v1.
 (`qdistro-<version>-<snapshot>.raw.xz` plus its `.sha256`): write it to
 a USB stick or boot it as a VM disk. Dev profile, default password
 `qdistro`, sshd off, UEFI-only, 32 GB minimum. The download page states
-the flash line, the VM line, and the caveats. Signing is post-v1.
+the flash line, the VM line, and the caveats. Signing is post-v1. No
+public download is published yet (GitHub Releases is the intended host).
 
 **From source**, developers:
 

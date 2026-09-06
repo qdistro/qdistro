@@ -681,8 +681,18 @@ GF
         echo "install-test must not record_skip (fatal-gate skip) when no ISO" >&2
         return 1
     fi
-    grep -q 'installiso=false' "$g"
+    grep -q 'installiso="false"' "$g"
     grep -q 'inert until the post-v1 installable ISO returns' "$g"
+    # No leftover ISO discovery via ls|head-1 of the whole build dir.
+    if grep -E 'ls "\$build_dir"/\*\.install\.iso' "$g"; then
+        echo "install-test must not ls|head-1 leftover ISOs in \$build_dir" >&2
+        return 1
+    fi
+    # No-artifact path must not record_blocked install-test (fatal extra row).
+    if grep -n 'record_blocked image install-test.sh' "$g" | grep -v 'installiso is not false'; then
+        echo "install-test record_blocked must only fire when installiso is on" >&2
+        return 1
+    fi
     # Phase E: the published artifact is the checksummed xz; verify.sh --stick
     grep -q 'select-artifact.sh' "$g"
     grep -q 'qdistro_materialize_raw' "$g"

@@ -39,9 +39,10 @@ is a full, persistent install).
   ISO from a stick is offered a wipe of their internal disk. The installable
   ISO is post-v1 and gets a kiwi profile when it returns; `installboot` and
   `install-test.sh` stay for it and are inert until then: the CI image gate
-  records install-test as *skipped* when no `.install.iso` exists, and its
-  `--idempotency` flag (a second install pass) has no effect on the image
-  gate until the ISO returns. Not a missing stage.
+  emits no install-test row when `installiso="false"` (not a skip: a skip
+  in `QCI_RELEASE_FATAL_GATES` would fail the release battery). The
+  `--idempotency` flag has no effect on the image gate until the ISO
+  returns. Not a missing stage.
 - **Profile: dev.** The tester image is built with `QDISTRO_PROFILE=dev`
   (baked passwordless `admin` sudoers; `config.sh` prints
   `WARN: dev profile …` in the build log). `QDISTRO_PROFILE` accepts only
