@@ -66,6 +66,11 @@ fake_tree() {
     [ -z "$(xml type-attr compressed)" ]
 }
 
+@test "config.xml: UEFI-only, removable target (USB fallback EFI/BOOT)" {
+    [ "$(xml type-attr firmware)" = uefi ]
+    [ "$(xml type-attr target_removable)" = true ]
+}
+
 @test "config.xml: both repositories pin the same Tumbleweed snapshot over https" {
     run xml repos
     [ "${#lines[@]}" -eq 2 ]
@@ -315,6 +320,10 @@ chain_root() {
     : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/Main.qml"
     mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim"; : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim/qmldir"
     mkdir -p "$T/root/usr/share/fonts/truetype"; : > "$T/root/usr/share/fonts/truetype/DejaVuSans.ttf"
+    mkdir -p "$T/root/boot/grub2" "$T/root/boot/efi/EFI/BOOT"
+    printf 'UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee / btrfs defaults 0 1\nUUID=ffffffff-0000-1111-2222-333333333333 swap swap defaults 0 0\n' > "$T/root/etc/fstab"
+    printf 'linux /boot/vmlinuz root=UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee quiet\n' > "$T/root/boot/grub2/grub.cfg"
+    : > "$T/root/boot/efi/EFI/BOOT/bootx64.efi"
     # the vendor qemu-ga default and the unit lines the override relies on
     # (copied from the run-28 image)
     printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/usr/etc/sysconfig/qemu-ga"
@@ -352,6 +361,10 @@ chain_root() {
     [[ "$output" == *"OK   [qemu-ga] unit reads the override"* ]]
     [[ "$output" == *"OK   [qemu-ga] unit passes the filter"* ]]
     [[ "$output" == *"OK   [qemu-ga] vendor default blocks only guest-exec"* ]]
+    [[ "$output" == *"OK   [identity] fstab uses UUID"* ]]
+    [[ "$output" == *"OK   [identity] grub root=UUID"* ]]
+    [[ "$output" == *"OK   [identity] EFI/BOOT fallback loader"* ]]
+    [[ "$output" == *"OK   [identity] swap in fstab by UUID"* ]]
     [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 16 steps): sdk broker"*"phone"*"tier5b"* ]]
     [[ "$output" == *"OK   [media] socket unit not shipped: absent as required"* ]]
     [[ "$output" == *"OK   [multimachine] broker CLI not shipped: absent as required"* ]]
@@ -424,6 +437,8 @@ chain_root() {
     grep -q 'PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")' "$x"   # pip apps' QML rows
     grep -q '^    /usr/etc/sysconfig/qemu-ga$' "$x"      # vendor default row
     grep -q '^    /usr/share/fonts/truetype$' "$x"        # fonts row
+    grep -q '^    /boot/grub2/grub.cfg$' "$x"             # identity: root=UUID
+    grep -q '^    /boot/efi/EFI$' "$x"                    # identity: EFI/BOOT
     grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
     grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
     grep -q '^    /root/qdistro-src$' "$x"
@@ -663,6 +678,14 @@ GF
     local g="$REPO/ci/lib/gates/image.sh"
     grep -q 'record_skip image install-test.sh image' "$g"
     grep -q 'installiso=false' "$g"
+    # Phase E: the published artifact is the checksummed xz; verify.sh --stick
+    grep -q 'select-artifact.sh' "$g"
+    grep -q 'qdistro_materialize_raw' "$g"
+    grep -q 'verify.sh --stick' "$g" || grep -q 'verify.sh" --stick' "$g"
+    # B1: a present-but-bad artifact FAILs, does not inspect a stale extract
+    grep -q 'record_result image select-artifact fail' "$g"
+    # B2: gate passes the xz into verify.sh so --stick dd is the same digest
+    grep -q 'QDISTRO_RESOLVED_XZ' "$g"
 }
 
 @test "verify-contents: a qdgreeter package without its QML is a MISS (run 28's crash-looping greeter)" {
@@ -700,4 +723,98 @@ GF
     [ "$status" -ne 0 ]
     [[ "$output" == *"FATAL: definitely_not_a_pkg is not importable"* ]]
     [[ "$output" != *"without its QML"* ]]
+}
+
+@test "verify-contents: identity rows fail closed on a kernel device name or a missing EFI fallback" {
+    chain_root dev
+    printf '/dev/sda2 / btrfs defaults 0 1\nUUID=ffffffff-0000-1111-2222-333333333333 swap swap defaults 0 0\n' > "$T/root/etc/fstab"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [identity] fstab uses UUID: kernel device name"* ]]
+    chain_root dev
+    printf 'linux /boot/vmlinuz root=/dev/sda2 quiet\n' > "$T/root/boot/grub2/grub.cfg"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [identity] grub root=UUID: kernel device name"* ]]
+    chain_root dev
+    rm "$T/root/boot/efi/EFI/BOOT/bootx64.efi"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS [identity] EFI/BOOT fallback loader"* ]]
+}
+
+@test "select-artifact: prefers the unique bundle xz, refuses two, never find|head-1" {
+    source "$IMAGE/lib/select-artifact.sh"
+    mkdir -p "$T/build/bundle"
+    # two raws and one xz: the published file wins
+    : > "$T/build/a.raw"; : > "$T/build/b.raw"
+    fixture_bundle qdistro-0.1.0-20260902.raw.xz
+    mv "$T/b/qdistro-0.1.0-20260902.raw.xz" "$T/build/bundle/"
+    mv "$T/b/qdistro-0.1.0-20260902.raw.xz.sha256" "$T/build/bundle/"
+    QDISTRO_BUILD_DIR="$T/build" QDISTRO_IMAGE= qdistro_resolve_image
+    [ "$QDISTRO_RESOLVED_KIND" = xz ]
+    [ "$QDISTRO_RESOLVED_PATH" = "$T/build/bundle/qdistro-0.1.0-20260902.raw.xz" ]
+    [ -n "$QDISTRO_RESOLVED_DIGEST" ]
+    # two xz: refuse
+    cp "$T/build/bundle/qdistro-0.1.0-20260902.raw.xz" "$T/build/bundle/other.raw.xz"
+    cp "$T/build/bundle/qdistro-0.1.0-20260902.raw.xz.sha256" "$T/build/bundle/other.raw.xz.sha256"
+    QDISTRO_BUILD_DIR="$T/build" QDISTRO_IMAGE= run qdistro_resolve_image
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"2 .raw.xz"* ]]
+}
+
+@test "select-artifact: digest lookup, checksum mismatch, and materialise+cmp-ends" {
+    source "$IMAGE/lib/select-artifact.sh"
+    mkdir -p "$T/build/bundle"
+    fixture_bundle qdistro-0.1.0-20260902.raw.xz
+    mv "$T/b/"* "$T/build/bundle/"
+    local sum
+    sum="$(awk '{print $1}' "$T/build/bundle/qdistro-0.1.0-20260902.raw.xz.sha256")"
+    QDISTRO_BUILD_DIR="$T/build" QDISTRO_IMAGE="$sum" qdistro_resolve_image
+    [ "$QDISTRO_RESOLVED_KIND" = xz ]
+    [ "$QDISTRO_RESOLVED_DIGEST" = "$sum" ]
+    QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw
+    [ -f "$QDISTRO_RESOLVED_DISK" ]
+    [ "$(stat -c %s "$QDISTRO_RESOLVED_DISK")" -eq 1048576 ]
+    # reuse: second call does not rewrite
+    local first_ino
+    first_ino="$(stat -c %i "$QDISTRO_RESOLVED_DISK")"
+    QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw
+    [ "$(stat -c %i "$QDISTRO_RESOLVED_DISK")" = "$first_ino" ]
+    qdistro_cmp_ends "$QDISTRO_RESOLVED_DISK" "$QDISTRO_RESOLVED_DISK"
+    # dd from xz onto a new file, then cmp ends
+    QDISTRO_BUILD_DIR="$T/build" qdistro_dd_from_xz "$T/build/published/dd-test.raw"
+    [ -f "$T/build/published/dd-test.raw" ]
+    qdistro_cmp_ends "$T/build/published/dd-test.raw" "$QDISTRO_RESOLVED_DISK"
+    # checksum mismatch
+    sed -i 's/^[0-9a-f]*/0000000000000000000000000000000000000000000000000000000000000000/' \
+        "$T/build/bundle/qdistro-0.1.0-20260902.raw.xz.sha256"
+    QDISTRO_BUILD_DIR="$T/build" QDISTRO_IMAGE="$T/build/bundle/qdistro-0.1.0-20260902.raw.xz" \
+        run qdistro_resolve_image
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"sha256 mismatch"* ]] || [[ "$output" == *"disagrees"* ]]
+}
+
+@test "select-artifact: explicit raw is used as-is; a digest on a raw is refused" {
+    source "$IMAGE/lib/select-artifact.sh"
+    mkdir -p "$T/build"
+    : > "$T/build/only.raw"
+    QDISTRO_BUILD_DIR="$T/build" QDISTRO_IMAGE="$T/build/only.raw" qdistro_resolve_image
+    [ "$QDISTRO_RESOLVED_KIND" = raw ]
+    [ "$QDISTRO_RESOLVED_DISK" = "$(realpath "$T/build/only.raw")" ]
+    QDISTRO_BUILD_DIR="$T/build" QDISTRO_IMAGE="$T/build/only.raw" \
+        QDISTRO_IMAGE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        run qdistro_resolve_image
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is a raw, not the checksummed xz"* ]]
+}
+
+@test "verify.sh never locates an image with find | head -1" {
+    ! grep -E 'find .*\| *head -1' "$IMAGE/verify.sh"
+    grep -q 'select-artifact.sh' "$IMAGE/verify.sh"
+    grep -q 'qdistro_resolve_image' "$IMAGE/verify.sh"
+}
+
+@test "verify.sh persist requires the guest agent to drop; --stick dd does not SKIP to green" {
+    grep -q 'guest agent never dropped after virsh reboot' "$IMAGE/verify.sh"
+    grep -q 'will not rediscover' "$IMAGE/verify.sh"
+    grep -q 'refusing --stick --keep' "$IMAGE/verify.sh"
+    ! grep -q 'SKIP: stick extra dd' "$IMAGE/verify.sh"
 }

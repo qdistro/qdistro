@@ -30,6 +30,11 @@ is a full, persistent install).
   to grow, and a stick copied to a larger one grows again. 2 GiB swap is
   created by kiwi at build time. The xz collapses the free space, so the
   download is a few GB.
+- **UEFI-only.** `firmware="uefi"`. Legacy BIOS/CSM is out of scope and is
+  stated as such on the download page (Phase F). `target_removable="true"`
+  so grub2-install `--removable` writes `EFI/BOOT/bootx64.efi` (the firmware
+  fallback path) and does not create a machine NVRAM boot entry that would
+  not travel with the stick.
 - **No install ISO.** `installiso="false"`: a tester who boots an install
   ISO from a stick is offered a wipe of their internal disk. The installable
   ISO is post-v1 and gets a kiwi profile when it returns; `installboot` and
@@ -123,7 +128,7 @@ its presence.
 
 | File | What it does |
 | --- | --- |
-| `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), UEFI grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. |
+| `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. |
 | `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules (permissive), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd, compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
 | `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the five sibling repos into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
 | `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). |
@@ -133,7 +138,9 @@ its presence.
 | `iterate-kiwi.sh` | pushes local `config.xml`/`config.sh`/`build.sh` into a running builder VM and re-runs kiwi (skips the clone). |
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
-| `verify.sh` | boots the `.raw` rootlessly (`qemu:///session`, qcow2 overlay), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` names the artifact; otherwise exactly one candidate may exist. |
+| `lib/select-artifact.sh` | resolve the published artifact (explicit path, 64-hex digest, or unique `bundle/*.raw.xz`); `sha256sum -c` + `xz -t` + decompress to `$BUILD_DIR/published/from-xz-<digest12>.raw`. Sourced by `verify.sh` and the image gate. Never `find \| head -1`. |
+| `verify.sh` | boots the resolved disk rootlessly (`qemu:///session`, 64 GiB qcow2 overlay so first-boot repart grows the 28 GiB raw), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Default also: UUID identity, EFI/BOOT, persist marker + btrfs snapshot across a reboot, greeter login (locker session-up). Snapper is packaged but has no root config. `--stick` adds USB / second-disk / hub / Secure Boot / nested-KVM / first-boot power-off / `xzcat \| dd`. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` is a path or the xz digest. |
+| `hardware-run.md` | template for the maintainer's real-stick run (Secure Boot, WPA2/WPA3, silos). Fill in and copy the filled note to `logs/`. |
 | `install-test.sh` | drives the *install ISO* (post-v1); inert while `installiso="false"`. |
 | `root/` | kiwi overlay tree. `etc/os-release.qdistro` is the branding override (its `VERSION_ID` must equal `config.xml` `<version>`; the build checks). `root/qdistro-src/` and `root/qdistro-source-manifest` are generated (gitignored). |
 | `logs/` | (gitignored) per-run build / verify logs and screenshots. |
@@ -143,11 +150,18 @@ its presence.
 ```sh
 cd image/
 QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30-40 min cold: clone + bake + kiwi (17-26) + xz bundle (~6) + copy-out + host proof
-./verify.sh                            # ~5 min: rootless boot + SSH assertions + screenshots
+./verify.sh                            # ~10-15 min: 64 GiB overlay + assertions + greeter login + persist reboot
+# ./verify.sh --stick                  # + USB / SB / nested / power-off / dd (~45 min); image gate uses this
 ```
 
-Or through CI: `qci` image gate = `extract-root.sh` → `verify-contents.sh`
-→ `verify.sh` on the **same** raw (install-test skipped without an ISO).
+Or through CI: `qci` image gate = resolve `bundle/*.raw.xz` (digest +
+`xz -t` + decompress) → `extract-root.sh` → `verify-contents.sh` →
+`verify.sh --stick` on the **same** decompressed raw (install-test skipped
+without an ISO). Stays out of `qci full` until Phase F.
+
+**Do not run `verify.sh` while a builder VM is up** on the same
+`qemu:///session` daemon: tearing down the verify VM restarts session
+`virtqemud` and crashes the builder (run 30).
 
 - `QDISTRO_BUILD_DIR` defaults to `/var/tmp/qdistro-build`. **Never `/tmp`**:
   it is a tmpfs on the build hosts and the 28 GiB raw does not fit in RAM.

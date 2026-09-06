@@ -50,9 +50,17 @@
          profile when it returns; installboot and install-test.sh stay for it.
          bundle_format names the release artifact <name>-<version>-<id>.raw.xz
          when build.sh runs `kiwi-ng result bundle` with the snapshot as bundle id. -->
+    <!-- firmware="uefi": tester images are UEFI-only (todo/iso/14 Phase E).
+         Legacy BIOS/CSM is out of scope, stated on the download page.
+         target_removable="true": the product is a USB stick; grub2-install
+         (removable) writes EFI/BOOT/bootx64.efi (the firmware fallback
+         path) and does not create a machine NVRAM boot entry that would
+         not travel with the stick. Run 30 already had that path without
+         the attribute (shim); setting it makes the intent explicit. -->
     <type image="oem"
           filesystem="btrfs"
           firmware="uefi"
+          target_removable="true"
           installiso="false"
           installboot="install"
           bundle_format="%N-%v-%I"

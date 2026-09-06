@@ -34,35 +34,51 @@ gate_image() {
         record_blocked image verify-contents "$EXIT_PREFLIGHT" image "image/verify-contents.sh missing"
         return "$EXIT_PREFLIGHT"
     fi
-    # Resolve the tree to inspect: explicit --root, else an extracted tree
-    # under the build dir, else nothing (boot-only build present).
+    # Resolve the tree to inspect: explicit --root, else extract from the
+    # published artifact. The tester download is bundle/*.raw.xz + .sha256
+    # (todo/iso/14 Phase E item 6): verify the digest, decompress, and
+    # inspect THAT raw. A top-level *.raw is the fallback when no bundle
+    # exists (a half-copied build). Never `find | head -1`.
     local static_root="$root"
-    # A built .raw and no explicit --root: ALWAYS extract the checklist's
-    # paths from THAT raw (image/extract-root.sh, guestfish copy-out; seconds,
-    # ~100 MB) into $build_dir/extracted, replacing whatever was there. An
-    # older extracted tree must never be inspected in place of a newer raw
-    # (Phase B review): a rebuilt-broken raw next to yesterday's clean tree
-    # would otherwise pass.
-    local raw="" nraws
-    nraws="$(ls "$build_dir"/*.raw 2>/dev/null | wc -l)"
-    if [ "$nraws" -gt 1 ] && [ -z "$static_root" ]; then
-        # Two raws make "the built artifact" ambiguous; never pick one by name.
-        record_result image extract-root fail "$EXIT_BUILD" build image "" "$nraws .raw files under $build_dir; cannot tell which was built -- pass --root or remove the stale one"
-        return "$EXIT_BUILD"
-    fi
-    [ "$nraws" = 1 ] && raw="$(ls "$build_dir"/*.raw)"
     # `extracted_fresh` is the FACT that Stage B keys on (not the path string
     # of $static_root, which a stale fallback tree would also satisfy).
-    local extracted_fresh=0
+    local extracted_fresh=0 raw="" published=""
+    if [ -z "$static_root" ] && [ -f "$IMAGE_DIR/lib/select-artifact.sh" ]; then
+        # shellcheck source=../../../image/lib/select-artifact.sh
+        . "$IMAGE_DIR/lib/select-artifact.sh"
+        local sel_log="$RDIR/host/image-select-artifact.log"
+        mkdir -p "$(dirname "$sel_log")"
+        if QDISTRO_BUILD_DIR="$build_dir" qdistro_resolve_image >"$sel_log" 2>&1 \
+           && QDISTRO_BUILD_DIR="$build_dir" qdistro_materialize_raw >>"$sel_log" 2>&1; then
+            published="$QDISTRO_RESOLVED_PATH"
+            raw="$QDISTRO_RESOLVED_DISK"
+            kv image_published "$published"
+            kv image_resolved_kind "${QDISTRO_RESOLVED_KIND:-}"
+            kv image_digest "${QDISTRO_RESOLVED_DIGEST:-}"
+        else
+            # A present-but-bad artifact (checksum mismatch, two xz, two
+            # raws, xz -t fail) must FAIL, not fall through to yesterday's
+            # extracted tree (iso/14 Phase E independent B1). Only "no
+            # files at all" may use the pre-extracted fallback.
+            local n_xz n_raw
+            n_xz="$(find "$build_dir/bundle" -maxdepth 1 -name '*.raw.xz' -type f 2>/dev/null | wc -l)"
+            n_raw="$(find "$build_dir" -maxdepth 1 -name '*.raw' -type f 2>/dev/null | wc -l)"
+            if [ -n "${QDISTRO_IMAGE:-}" ] || [ "${n_xz:-0}" -ge 1 ] || [ "${n_raw:-0}" -ge 1 ]; then
+                record_result image select-artifact fail "$EXIT_BUILD" build image "$sel_log" "published artifact present but unusable (checksum/ambiguous/decompress); not inspecting a stale extracted tree (see $sel_log)"
+                return "$EXIT_BUILD"
+            fi
+            log "image: no published artifact to materialise ($(tr '\n' ' ' <"$sel_log"))"
+        fi
+    fi
     if [ -z "$static_root" ] && [ -n "$raw" ] && [ -f "$IMAGE_DIR/extract-root.sh" ]; then
         local ex_log="$RDIR/host/image-extract-root.log"
         mkdir -p "$(dirname "$ex_log")"
-        log "image: extracting checklist paths from $raw"
+        log "image: extracting checklist paths from $raw (published ${published:-none})"
         if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" "$raw" > "$ex_log" 2>&1; then
             static_root="$build_dir/extracted"
             extracted_fresh=1
         else
-            record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection (image/extract-root.sh needs guestfish/libguestfs; see $ex_log)"
+            record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the published raw for inspection (image/extract-root.sh needs guestfish/libguestfs; see $ex_log)"
             return "$EXIT_BUILD"
         fi
     fi
@@ -104,24 +120,21 @@ gate_image() {
     # --- Stage B: boot-verify + install-test (needs VM + built image) -------
     # These are NOT runnable without libvirt and a built artifact. Guard each
     # and degrade to record_blocked with a precise reason.
-    # The artifact to boot is the ONE the static stage selected ($raw, the
-    # sole top-level .raw). Re-discovering it here with a broader find could
-    # boot a stale qcow2 or nested raw while the static stage judged another
-    # file (Phase B review); verify.sh is told the exact path.
-    # Boot ONLY the artifact Stage A inspected: the sole top-level raw that
-    # extract-root.sh just unpacked. With --root, or with a pre-extracted
-    # fallback tree, there is no provable link between the inspected tree
-    # and any bootable file, so booting one would judge two different
-    # artifacts as if they were one (round-4 review); that case is BLOCKED
-    # with the reason, not silently booted.
+    # Boot ONLY the artifact Stage A inspected: the raw qdistro_materialize_raw
+    # produced from the checksummed xz (or the sole top-level raw when there
+    # is no bundle). With --root, or with a pre-extracted fallback tree, there
+    # is no provable link between the inspected tree and any bootable file,
+    # so booting one would judge two different artifacts as if they were one
+    # (round-4 review); that case is BLOCKED with the reason, not silently
+    # booted.
     local img=""
     if [ -z "$root" ] && [ -n "$raw" ] && [ "$extracted_fresh" = 1 ]; then
         img="$raw"
     fi
     if [ -z "$img" ]; then
-        local why="boot needs the built raw Stage A inspected:"
+        local why="boot needs the published raw Stage A inspected:"
         [ -n "$root" ] && why="$why --root was given, so the inspected tree has no provable source image;"
-        [ -z "$raw" ] && why="$why no single top-level .raw under $build_dir;"
+        [ -z "$raw" ] && why="$why no bundle/*.raw.xz or single top-level .raw under $build_dir;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh and rerun without --root"
         record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why"
         if [ "$idempotency" = 1 ]; then
@@ -145,7 +158,17 @@ gate_image() {
     # Prerequisites present: run the existing boot/install flow.
     local v_log="$RDIR/host/image-verify.log"
     log "image: boot-verify (image/verify.sh)"
-    QDISTRO_IMAGE="$img" bash "$IMAGE_DIR/verify.sh" > "$v_log" 2>&1
+    # --stick: Phase E grow/USB/persist/login/secure-boot/nested/dd matrix.
+    # Stays out of `qci full` until Phase F (todo/iso/14).
+    # Pass the xz when Stage A resolved one, so --stick's dd extra is the
+    # same digest (iso/14 Phase E independent B2). verify.sh re-materialises
+    # via the from-xz cache. Pin login/persist/grow so a caller env cannot
+    # silently skip the default matrix.
+    local verify_src="$img"
+    [ "${QDISTRO_RESOLVED_KIND:-}" = xz ] && [ -n "${QDISTRO_RESOLVED_XZ:-}" ] && verify_src="$QDISTRO_RESOLVED_XZ"
+    QDISTRO_IMAGE="$verify_src" \
+      QDISTRO_VERIFY_LOGIN=1 QDISTRO_VERIFY_PERSIST=1 QDISTRO_VERIFY_GROW_GIB=64 \
+      bash "$IMAGE_DIR/verify.sh" --stick > "$v_log" 2>&1
     local v_rc=$?
     if [ "$v_rc" -eq 0 ]; then
         record_result image verify.sh pass 0 pass image "$v_log" "boot-verify passed"

@@ -732,6 +732,48 @@ check_line "[qemu-ga] unit passes the filter"  /usr/lib/systemd/system/qemu-gues
 check_line "[qemu-ga] vendor default blocks only guest-exec" /usr/etc/sysconfig/qemu-ga '^FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"$'
 
 echo
+echo "-- removable identity (todo/iso/14 Phase E) --"
+# A stick that moves from /dev/sda to /dev/sdb (or sits next to another USB
+# disk) must still find root, swap and the ESP. kiwi already writes UUID=
+# into fstab and root=UUID= into grub.cfg; these rows pin that so a later
+# description change cannot silently switch to kernel device names.
+# EFI/BOOT/bootx64.efi is the firmware fallback path (target_removable);
+# firmware that never looks at EFI/opensuse still boots the stick.
+REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+fstab_file="$(file_in_image "$ROOT/etc/fstab" || true)"
+if [ -z "$fstab_file" ]; then
+    printf 'MISS [identity] fstab uses UUID: %s/etc/fstab absent\n' "$ROOT"
+    FAIL=1
+elif grep -E '^[[:space:]]*[^#[:space:]]' "$fstab_file" | grep -Eq '/dev/(sd|vd|nvme|mmcblk)'; then
+    printf 'MISS [identity] fstab uses UUID: kernel device name in %s\n' "$fstab_file"
+    FAIL=1
+elif ! grep -qE '^(UUID|PARTUUID)=' "$fstab_file"; then
+    printf 'MISS [identity] fstab uses UUID: no UUID=/PARTUUID= line in %s\n' "$fstab_file"
+    FAIL=1
+else
+    printf 'OK   [identity] fstab uses UUID: %s\n' "$fstab_file"
+    REQUIRED_OK=$((REQUIRED_OK + 1))
+fi
+REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+grub_file="$(file_in_image "$ROOT/boot/grub2/grub.cfg" || true)"
+if [ -z "$grub_file" ]; then
+    printf 'MISS [identity] grub root=UUID: %s/boot/grub2/grub.cfg absent\n' "$ROOT"
+    FAIL=1
+elif grep -E '^[[:space:]]*(linux|linuxefi)[/[:space:]]' "$grub_file" | grep -Eq '/dev/(sd|vd|nvme)'; then
+    printf 'MISS [identity] grub root=UUID: kernel device name in linux line\n'
+    FAIL=1
+elif ! grep -E '^[[:space:]]*(linux|linuxefi)[/[:space:]]' "$grub_file" | grep -q 'root=UUID='; then
+    printf 'MISS [identity] grub root=UUID: no root=UUID= on a linux line\n'
+    FAIL=1
+else
+    printf 'OK   [identity] grub root=UUID: %s\n' "$grub_file"
+    REQUIRED_OK=$((REQUIRED_OK + 1))
+fi
+check_req_any "[identity] EFI/BOOT fallback loader" \
+    /boot/efi/EFI/BOOT/bootx64.efi /boot/efi/EFI/BOOT/BOOTX64.EFI
+check_line "[identity] swap in fstab by UUID" /etc/fstab '^UUID=[^ ]+[[:space:]]+swap[[:space:]]'
+
+echo
 echo "-- installer chain record (the Phase D DONE bar) --"
 # config.sh ran the bootstrap's chain with QDISTRO_STATE_DIR on the image, so
 # /var/lib/qdistro/bootstrap/installer-chain.state lists every step that
