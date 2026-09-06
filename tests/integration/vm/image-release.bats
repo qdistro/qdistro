@@ -681,7 +681,11 @@ GF
     # Phase E: the published artifact is the checksummed xz; verify.sh --stick
     grep -q 'select-artifact.sh' "$g"
     grep -q 'qdistro_materialize_raw' "$g"
-    grep -q 'verify.sh" --stick' "$g"
+    grep -q 'verify.sh --stick' "$g" || grep -q 'verify.sh" --stick' "$g"
+    # B1: a present-but-bad artifact FAILs, does not inspect a stale extract
+    grep -q 'record_result image select-artifact fail' "$g"
+    # B2: gate passes the xz into verify.sh so --stick dd is the same digest
+    grep -q 'QDISTRO_RESOLVED_XZ' "$g"
 }
 
 @test "verify-contents: a qdgreeter package without its QML is a MISS (run 28's crash-looping greeter)" {
@@ -806,4 +810,11 @@ GF
     ! grep -E 'find .*\| *head -1' "$IMAGE/verify.sh"
     grep -q 'select-artifact.sh' "$IMAGE/verify.sh"
     grep -q 'qdistro_resolve_image' "$IMAGE/verify.sh"
+}
+
+@test "verify.sh persist requires the guest agent to drop; --stick dd does not SKIP to green" {
+    grep -q 'guest agent never dropped after virsh reboot' "$IMAGE/verify.sh"
+    grep -q 'will not rediscover' "$IMAGE/verify.sh"
+    grep -q 'refusing --stick --keep' "$IMAGE/verify.sh"
+    ! grep -q 'SKIP: stick extra dd' "$IMAGE/verify.sh"
 }

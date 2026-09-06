@@ -56,8 +56,17 @@ gate_image() {
             kv image_resolved_kind "${QDISTRO_RESOLVED_KIND:-}"
             kv image_digest "${QDISTRO_RESOLVED_DIGEST:-}"
         else
-            # No published artifact is not a FAIL of the gate's own logic;
-            # fall through to the pre-extracted-tree / blocked path below.
+            # A present-but-bad artifact (checksum mismatch, two xz, two
+            # raws, xz -t fail) must FAIL, not fall through to yesterday's
+            # extracted tree (iso/14 Phase E independent B1). Only "no
+            # files at all" may use the pre-extracted fallback.
+            local n_xz n_raw
+            n_xz="$(find "$build_dir/bundle" -maxdepth 1 -name '*.raw.xz' -type f 2>/dev/null | wc -l)"
+            n_raw="$(find "$build_dir" -maxdepth 1 -name '*.raw' -type f 2>/dev/null | wc -l)"
+            if [ -n "${QDISTRO_IMAGE:-}" ] || [ "${n_xz:-0}" -ge 1 ] || [ "${n_raw:-0}" -ge 1 ]; then
+                record_result image select-artifact fail "$EXIT_BUILD" build image "$sel_log" "published artifact present but unusable (checksum/ambiguous/decompress); not inspecting a stale extracted tree (see $sel_log)"
+                return "$EXIT_BUILD"
+            fi
             log "image: no published artifact to materialise ($(tr '\n' ' ' <"$sel_log"))"
         fi
     fi
@@ -151,7 +160,15 @@ gate_image() {
     log "image: boot-verify (image/verify.sh)"
     # --stick: Phase E grow/USB/persist/login/secure-boot/nested/dd matrix.
     # Stays out of `qci full` until Phase F (todo/iso/14).
-    QDISTRO_IMAGE="$img" bash "$IMAGE_DIR/verify.sh" --stick > "$v_log" 2>&1
+    # Pass the xz when Stage A resolved one, so --stick's dd extra is the
+    # same digest (iso/14 Phase E independent B2). verify.sh re-materialises
+    # via the from-xz cache. Pin login/persist/grow so a caller env cannot
+    # silently skip the default matrix.
+    local verify_src="$img"
+    [ "${QDISTRO_RESOLVED_KIND:-}" = xz ] && [ -n "${QDISTRO_RESOLVED_XZ:-}" ] && verify_src="$QDISTRO_RESOLVED_XZ"
+    QDISTRO_IMAGE="$verify_src" \
+      QDISTRO_VERIFY_LOGIN=1 QDISTRO_VERIFY_PERSIST=1 QDISTRO_VERIFY_GROW_GIB=64 \
+      bash "$IMAGE_DIR/verify.sh" --stick > "$v_log" 2>&1
     local v_rc=$?
     if [ "$v_rc" -eq 0 ]; then
         record_result image verify.sh pass 0 pass image "$v_log" "boot-verify passed"

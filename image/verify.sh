@@ -650,7 +650,7 @@ if [ "$GROW_GIB" -gt 0 ]; then
     expect "root btrfs grew onto the ${GROW_GIB} GiB disk (repart)" \
         qga_root 'sz=$(df -B1 / | awk "NR==2{print \$2}"); echo SIZE=$sz; [ -n "$sz" ] && [ "$sz" -gt 42949672960 ]'
     expect "kiwi oem-repart ran this boot (or recorded a resize)" \
-        qga_root 'journalctl -b --no-pager | grep -Eiq "kiwi-oem-repart|dracut-kiwi-oem-repart|Resizing.*filesystem|System resize|expanded.*btrfs|resized root"'
+        qga_root 'journalctl -b --no-pager | grep -Eiq "Resize device id|resized root|expanded.*btrfs|dracut-kiwi-oem-repart|kiwi-oem-repart"'
 fi
 expect "no failed systemd units after first boot" \
     qga_root 'out=$(systemctl --failed --legend=no --plain --no-pager | awk "NF && \$1 != \"UNIT\""); [ -z "$out" ] || { echo "$out"; exit 1; }'
@@ -681,6 +681,9 @@ shoot 04-after-60s
 # branch is the one that has been unexercised since the P01 boot path.
 if [ "$DO_LOGIN" = 1 ]; then
     log "logging in through qdgreeter (send-key password)"
+    sess_before="$(remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-session.target" 2>/dev/null || true)"
+    expect "qdwin-session.target is inactive immediately before send-key" \
+        [ "${sess_before:-inactive}" = inactive ]
     shoot 05-before-login
     for ch in Q D I S T R O; do
         virsh -c "$URI" send-key "$VM" --codeset linux --holdtime 40 "KEY_$ch" >/dev/null
@@ -749,13 +752,20 @@ if [ "$DO_PERSIST" = 1 ]; then
     shoot 07-before-reboot
     virsh -c "$URI" reboot "$VM"
     # Wait for the agent to drop, then come back (a fast poll can race
-    # and see the pre-reboot agent).
+    # and see the pre-reboot agent). If ping never fails, persist checks
+    # would pass on the same boot (iso/14 Phase E independent B3).
     sleep 8
     drop_deadline=$(( $(date +%s) + 60 ))
+    dropped=0
     while [ "$(date +%s)" -lt "$drop_deadline" ]; do
-        qga '{"execute":"guest-ping"}' | grep -q '"return"' || break
-        sleep 2
+        if qga '{"execute":"guest-ping"}' | grep -q '"return"'; then
+            sleep 2
+            continue
+        fi
+        dropped=1
+        break
     done
+    [ "$dropped" = 1 ] || { shoot 99-reboot-never-dropped; die "guest agent never dropped after virsh reboot; persist checks would be same-boot"; }
     qga_deadline=$(( $(date +%s) + 180 ))
     qga_up=0
     while [ "$(date +%s)" -lt "$qga_deadline" ]; do
@@ -792,6 +802,9 @@ TOTAL=$((PASS+FAIL))
     echo "=========================================="
 } | tee -a "$VERIFY_DIR/report.txt"
 
+if [ "$KEEP" = 1 ] && [ "$STICK" = 1 ]; then
+    die "refusing --stick --keep: extras would be skipped and the matrix would still exit 0"
+fi
 if [ "$KEEP" = 1 ]; then
     log "VM left running (--keep). To tear down: $0 --teardown"
 else
@@ -808,10 +821,13 @@ if [ "$STICK" = 1 ] && [ -z "${QDISTRO_VERIFY_PARENT:-}" ] && [ "$KEEP" != 1 ]; 
     export QDISTRO_IMAGE="$IMG"
     export QDISTRO_BUILD_DIR="$BUILD_DIR"
     extra_fail=0
+    extra_n=0
     run_extra() {
         local name="$1"; shift
-        log "stick extra: $name $*"
+        extra_n=$((extra_n + 1))
+        log "stick extra: $name $* (port=$((SSH_PORT + extra_n)))"
         if QDISTRO_VERIFY_VM="${VM}-${name}" \
+           QDISTRO_VERIFY_PORT=$((SSH_PORT + extra_n)) \
            QDISTRO_VERIFY_LOGIN=0 QDISTRO_VERIFY_PERSIST=0 \
            bash "$HERE/verify.sh" "$@"; then
             echo "PASS: stick extra $name" | tee -a "$VERIFY_DIR/report.txt"
@@ -829,13 +845,8 @@ if [ "$STICK" = 1 ] && [ -z "${QDISTRO_VERIFY_PARENT:-}" ] && [ "$KEEP" != 1 ]; 
     if [ -n "${QDISTRO_RESOLVED_XZ:-}" ]; then
         QDISTRO_IMAGE="$QDISTRO_RESOLVED_XZ" run_extra dd --dd --no-grow
     else
-        _xzs=( )
-        mapfile -t _xzs < <(find "$BUILD_DIR/bundle" -maxdepth 1 -name '*.raw.xz' -type f 2>/dev/null | sort)
-        if [ "${#_xzs[@]}" -eq 1 ]; then
-            QDISTRO_IMAGE="${_xzs[0]}" run_extra dd --dd --no-grow
-        else
-            echo "SKIP: stick extra dd (no unique published xz)" | tee -a "$VERIFY_DIR/report.txt"
-        fi
+        echo "FAIL: stick extra dd (parent did not resolve a published xz; will not rediscover)" | tee -a "$VERIFY_DIR/report.txt"
+        extra_fail=$((extra_fail + 1))
     fi
     [ "$extra_fail" -eq 0 ] || FAIL=$((FAIL + extra_fail))
     TOTAL=$((PASS + FAIL))
