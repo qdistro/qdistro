@@ -11,9 +11,17 @@
 # pixels"). Screenshots are evidence, not assertion fuel.
 #
 # Usage:
-#   ./verify.sh                 # full lifecycle
+#   ./verify.sh                 # boot + Phase E default (grow, UUID, persist, greeter login)
 #   ./verify.sh --keep          # leave the VM running for manual poking
 #   ./verify.sh --teardown      # destroy + undefine + clean up
+#   ./verify.sh --stick         # default plus USB / second-disk / hub / Secure Boot /
+#                               # nested-KVM / first-boot power-off / xzcat|dd
+#   ./verify.sh --usb|--secure-boot|--second-usb|--usb-hub|--nested|--power-off|--dd
+#
+# Artifact selection (todo/iso/14 Phase E item 5): QDISTRO_IMAGE is a path
+# (.raw / .raw.xz / .qcow2) or a 64-hex digest of the published xz.
+# QDISTRO_IMAGE_SHA256 pins the digest when the path is the xz. Never
+# `find | head -1`.
 
 set -euo pipefail
 
@@ -35,34 +43,79 @@ log()  { printf '\033[1;36m[verify]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[verify] WARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[verify] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# shellcheck source=lib/select-artifact.sh
+. "$HERE/lib/select-artifact.sh"
+
+KEEP=0
+STICK=0
+BUS=virtio
+SECUREBOOT=0
+EXTRA_USB=0
+USB_HUB=0
+POWEROFF=0
+DO_DD=0
+NESTED=0
+# 64 GiB overlay: the raw is 28 GiB; first-boot repart must grow the btrfs
+# root. 0 = overlay matches the backing size (no grow).
+GROW_GIB="${QDISTRO_VERIFY_GROW_GIB:-64}"
+DO_LOGIN="${QDISTRO_VERIFY_LOGIN:-1}"
+DO_PERSIST="${QDISTRO_VERIFY_PERSIST:-1}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep) KEEP=1 ;;
+        --teardown)
+            virsh -c "$URI" destroy "$VM" 2>/dev/null || true
+            virsh -c "$URI" undefine "$VM" --nvram 2>/dev/null || true
+            rm -f "$BUILD_DIR/$VM.qcow2" "$BUILD_DIR/$VM-extra.qcow2"
+            exit 0
+            ;;
+        --stick) STICK=1 ;;
+        --usb) BUS=usb ;;
+        --secure-boot) SECUREBOOT=1 ;;
+        --second-usb) EXTRA_USB=1; BUS=usb ;;
+        --usb-hub) USB_HUB=1; BUS=usb ;;
+        --power-off) POWEROFF=1 ;;
+        --dd) DO_DD=1 ;;
+        --nested) NESTED=1 ;;
+        --no-grow) GROW_GIB=0 ;;
+        --no-login) DO_LOGIN=0 ;;
+        --no-persist) DO_PERSIST=0 ;;
+        *) die "unknown flag: $1" ;;
+    esac
+    shift
+done
+
 teardown() {
     log "tearing down VM $VM"
     virsh -c "$URI" destroy   "$VM" 2>/dev/null || true
     virsh -c "$URI" undefine  "$VM" --nvram 2>/dev/null || true
-    rm -f "$BUILD_DIR/$VM.qcow2"
+    rm -f "$BUILD_DIR/$VM.qcow2" "$BUILD_DIR/$VM-extra.qcow2"
 }
 
-case "${1:-}" in
-  --teardown) teardown; exit 0 ;;
-esac
-
 #-- 0. Locate the built image -------------------------------------------------
-# QDISTRO_IMAGE names the artifact explicitly (the CI gate passes the raw it
-# just inspected statically, so both stages judge the SAME file). Without
-# it exactly one candidate may exist: picking "the first find hit" among a
-# stale qcow2 and a fresh raw booted an arbitrary artifact (Phase B review).
-if [ -n "${QDISTRO_IMAGE:-}" ]; then
-    IMG="$QDISTRO_IMAGE"
-    [ -f "$IMG" ] || die "QDISTRO_IMAGE does not exist: $IMG"
-else
-    mapfile -t _imgs < <(find "$BUILD_DIR" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -F "$VM" | grep -v -- '-verify-' | sort)
-    case "${#_imgs[@]}" in
-        1) IMG="${_imgs[0]}" ;;
-        0) die "no image in $BUILD_DIR; run build.sh first" ;;
-        *) die "${#_imgs[@]} images under $BUILD_DIR (${_imgs[*]}); set QDISTRO_IMAGE to the one to boot" ;;
-    esac
+# Prefer the published xz (bundle/*.raw.xz + .sha256); otherwise exactly
+# one top-level .raw. A digest selects the matching checksum file.
+qdistro_resolve_image || die "could not resolve image (see select-artifact)"
+qdistro_materialize_raw || die "could not materialise raw (see select-artifact)"
+IMG="$QDISTRO_RESOLVED_DISK"
+log "image: $IMG (kind=${QDISTRO_RESOLVED_KIND} published=${QDISTRO_RESOLVED_PATH})"
+if [ -n "${QDISTRO_RESOLVED_DIGEST:-}" ]; then
+    log "digest: $QDISTRO_RESOLVED_DIGEST"
 fi
-log "image: $IMG"
+
+if [ "$DO_DD" = 1 ]; then
+    [ "$QDISTRO_RESOLVED_KIND" = xz ] || die "--dd needs the published .raw.xz (got kind=$QDISTRO_RESOLVED_KIND)"
+    DD_IMG="$BUILD_DIR/published/dd-${QDISTRO_RESOLVED_DIGEST:0:12}.raw"
+    if [ -f "$DD_IMG" ]; then
+        log "reusing dd target $DD_IMG"
+        qdistro_cmp_ends "$DD_IMG" "$IMG" || die "existing dd target does not match materialised raw"
+    else
+        qdistro_dd_from_xz "$DD_IMG" || die "xzcat | dd / readback failed"
+    fi
+    IMG="$DD_IMG"
+    log "dd image: $IMG (direct-raw boot of the published digest)"
+fi
 
 mkdir -p "$VERIFY_DIR/screenshots" "$VERIFY_DIR/journal"
 
@@ -76,26 +129,112 @@ case "$IMG" in
   *.qcow2) FMT=qcow2 ;;
   *) die "unknown image format: $IMG" ;;
 esac
-qemu-img create -F "$FMT" -b "$IMG" -f qcow2 "$OVERLAY" >/dev/null
-log "overlay: $OVERLAY (backing $IMG)"
+DISK_FMT=qcow2
+if [ "$DO_DD" = 1 ]; then
+    # Direct-raw boot of the dd target (todo/iso/14 Phase E item 5). No
+    # overlay: the published bytes are the disk. Persist is off on this extra.
+    OVERLAY="$IMG"
+    DISK_FMT=raw
+    log "direct-raw disk: $OVERLAY"
+elif [ "$GROW_GIB" -gt 0 ]; then
+    qemu-img create -f qcow2 -F "$FMT" -b "$IMG" -o "size=${GROW_GIB}G" "$OVERLAY" >/dev/null
+    log "overlay: $OVERLAY (backing $IMG, virtual size ${GROW_GIB}G — grow test)"
+else
+    qemu-img create -F "$FMT" -b "$IMG" -f qcow2 "$OVERLAY" >/dev/null
+    log "overlay: $OVERLAY (backing $IMG)"
+fi
+if [ "$EXTRA_USB" = 1 ]; then
+    qemu-img create -f qcow2 "$BUILD_DIR/$VM-extra.qcow2" 1G >/dev/null
+    log "second USB disk: $BUILD_DIR/$VM-extra.qcow2 (empty 1G)"
+fi
 
 #-- 2. Locate UEFI firmware (qemu:///session needs an absolute path) ----------
-for c in /usr/share/qemu/ovmf-x86_64-4m.bin \
-         /usr/share/qemu/ovmf-x86_64-code.bin \
-         /usr/share/qemu/ovmf-x86_64.bin \
-         /usr/share/OVMF/OVMF_CODE.fd ; do
-    [ -f "$c" ] && OVMF="$c" && break
-done
-[ -n "${OVMF:-}" ] || die "no OVMF firmware (install qemu-ovmf-x86_64 or OVMF)"
-log "uefi firmware: $OVMF"
+# Default: OVMF without Secure Boot (the Phase A–D path). --secure-boot uses
+# the openSUSE-enrolled SMM vars so shim on the image can verify.
+OVMF=""
+OVMF_VARS=""
+OVMF_SECURE=""
+if [ "$SECUREBOOT" = 1 ]; then
+    for c in /usr/share/qemu/ovmf-x86_64-smm-opensuse-code.bin \
+             /usr/share/qemu/ovmf-x86_64-smm-opensuse.bin; do
+        [ -f "$c" ] && OVMF="$c" && break
+    done
+    for v in /usr/share/qemu/ovmf-x86_64-smm-opensuse-vars.bin \
+             /usr/share/qemu/ovmf-x86_64-smm-opensuse-vars.qcow2; do
+        [ -f "$v" ] && OVMF_VARS="$v" && break
+    done
+    OVMF_SECURE=yes
+    [ -n "$OVMF" ] && [ -n "$OVMF_VARS" ] || die "no openSUSE-enrolled OVMF (qemu-ovmf-x86_64 smm-opensuse)"
+else
+    for c in /usr/share/qemu/ovmf-x86_64-4m.bin \
+             /usr/share/qemu/ovmf-x86_64-code.bin \
+             /usr/share/qemu/ovmf-x86_64.bin \
+             /usr/share/OVMF/OVMF_CODE.fd ; do
+        [ -f "$c" ] && OVMF="$c" && break
+    done
+    for v in /usr/share/qemu/ovmf-x86_64-4m-vars.bin \
+             /usr/share/qemu/ovmf-x86_64-vars.bin \
+             /usr/share/OVMF/OVMF_VARS.fd; do
+        [ -f "$v" ] && OVMF_VARS="$v" && break
+    done
+    [ -n "$OVMF" ] || die "no OVMF firmware (install qemu-ovmf-x86_64 or OVMF)"
+fi
+log "uefi firmware: $OVMF vars=${OVMF_VARS:-none} secureboot=$SECUREBOOT"
 
 #-- 3. Domain XML (rootless qemu:///session, SSH port forward 2299->22) ------
 NVRAM="$VERIFY_DIR/$VM.nvram.fd"
-# Seed nvram from the matching template if present so secure-boot vars
-# don't trip kiwi's UEFI bootloader.
-for tpl in /usr/share/qemu/ovmf-x86_64-vars.bin /usr/share/qemu/ovmf-x86_64-4m-vars.bin /usr/share/OVMF/OVMF_VARS.fd; do
-    [ -f "$tpl" ] && cp "$tpl" "$NVRAM" && break
-done
+if [ -n "$OVMF_VARS" ]; then
+    cp "$OVMF_VARS" "$NVRAM"
+else
+    # Seed nvram from the matching template if present so secure-boot vars
+    # don't trip kiwi's UEFI bootloader.
+    for tpl in /usr/share/qemu/ovmf-x86_64-vars.bin /usr/share/qemu/ovmf-x86_64-4m-vars.bin /usr/share/OVMF/OVMF_VARS.fd; do
+        [ -f "$tpl" ] && cp "$tpl" "$NVRAM" && break
+    done
+fi
+LOADER_ATTRS="readonly='yes' type='pflash'"
+[ "$SECUREBOOT" = 1 ] && LOADER_ATTRS="$LOADER_ATTRS secure='yes'"
+FEATURES="<acpi/><apic/>"
+[ "$SECUREBOOT" = 1 ] && FEATURES="$FEATURES<smm state='on'/>"
+
+DISK_BUS="$BUS"
+DISK_DEV=vda
+[ "$BUS" = usb ] && DISK_DEV=sda
+DISK_XML="
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='$DISK_FMT'/>
+      <source file='$OVERLAY'/>
+      <target dev='$DISK_DEV' bus='$DISK_BUS'/>
+      <boot order='1'/>
+    </disk>"
+USB_CTRL=""
+if [ "$BUS" = usb ]; then
+    USB_CTRL="<controller type='usb' index='0' model='qemu-xhci'/>"
+    if [ "$USB_HUB" = 1 ]; then
+        USB_CTRL="$USB_CTRL
+    <hub type='usb'>
+      <address type='usb' bus='0' port='1'/>
+    </hub>"
+        DISK_XML="
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='$DISK_FMT'/>
+      <source file='$OVERLAY'/>
+      <target dev='$DISK_DEV' bus='usb'/>
+      <boot order='1'/>
+      <address type='usb' bus='0' port='1.1'/>
+    </disk>"
+    fi
+fi
+EXTRA_DISK_XML=""
+if [ "$EXTRA_USB" = 1 ]; then
+    EXTRA_DISK_XML="
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='$BUILD_DIR/$VM-extra.qcow2'/>
+      <target dev='sdb' bus='usb'/>
+    </disk>"
+fi
+
 DOMAIN_XML=$(cat <<XML
 <domain type='kvm'>
   <name>$VM</name>
@@ -103,19 +242,16 @@ DOMAIN_XML=$(cat <<XML
   <vcpu>2</vcpu>
   <os>
     <type arch='x86_64' machine='q35'>hvm</type>
-    <loader readonly='yes' type='pflash'>$OVMF</loader>
-    <nvram template='$OVMF'>$NVRAM</nvram>
-    <boot dev='hd'/>
+    <loader $LOADER_ATTRS>$OVMF</loader>
+    <nvram template='$OVMF_VARS'>$NVRAM</nvram>
   </os>
-  <features><acpi/><apic/></features>
+  <features>$FEATURES</features>
   <cpu mode='host-passthrough'/>
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='$OVERLAY'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
+    $USB_CTRL
+    $DISK_XML
+    $EXTRA_DISK_XML
     <interface type='user'>
       <backend type='passt'/>
       <model type='virtio'/>
@@ -137,7 +273,8 @@ XML
 #-- 4. Define + start ---------------------------------------------------------
 log "defining $VM"
 echo "$DOMAIN_XML" | virsh -c "$URI" define /dev/stdin
-log "starting $VM"
+BOOT_T0=$(date +%s)
+log "starting $VM (boot t0=$BOOT_T0 bus=$BUS secureboot=$SECUREBOOT grow=${GROW_GIB}G)"
 virsh -c "$URI" start "$VM"
 
 #-- 5. Screenshot helper ------------------------------------------------------
@@ -203,6 +340,26 @@ while [ "$(date +%s)" -lt "$qga_deadline" ]; do
     sleep 3
 done
 [ "$qga_up" = 1 ] || { shoot 99-qga-timeout; die "guest agent never responded; cannot start sshd (see $VERIFY_DIR/screenshots/99-qga-timeout.png)"; }
+QGA_T=$(( $(date +%s) - BOOT_T0 ))
+log "guest agent up in ${QGA_T}s"
+if [ "$POWEROFF" = 1 ]; then
+    # Hard power-off during first boot, then a successful second boot
+    # (todo/iso/14 Phase E item 4). Destroy is qemu -s, not ACPI.
+    log "POWER-OFF: destroying $VM during first boot, then restarting"
+    virsh -c "$URI" destroy "$VM"
+    sleep 2
+    BOOT_T0=$(date +%s)
+    virsh -c "$URI" start "$VM"
+    qga_deadline=$(( $(date +%s) + 180 ))
+    qga_up=0
+    while [ "$(date +%s)" -lt "$qga_deadline" ]; do
+        if qga '{"execute":"guest-ping"}' | grep -q '"return"'; then qga_up=1; break; fi
+        sleep 3
+    done
+    [ "$qga_up" = 1 ] || { shoot 99-qga-timeout-after-poweroff; die "guest agent never responded after hard power-off"; }
+    QGA_T=$(( $(date +%s) - BOOT_T0 ))
+    log "guest agent up after power-off in ${QGA_T}s"
+fi
 log "guest agent up; starting sshd over the agent channel"
 exec_out=$(qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}')
 qga_pid=$(printf '%s' "$exec_out" | grep -oE '"pid":[0-9]+' | grep -oE '[0-9]+' | head -1)
@@ -319,9 +476,10 @@ expect "hostname is qdistro"         remote "grep -qx qdistro /etc/hostname"
 expect "greetd.service active"       remote 'systemctl is-active greetd.service'
 expect "default target is graphical" remote 'systemctl get-default | grep -qx graphical.target'
 
-# qdistro admin broker on the system bus
-expect "qdistro-admin-broker active" remote 'systemctl is-active qdistro-admin-broker.service || sudo -n systemctl is-active qdistro-admin-broker.service'
-expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | grep -q org.qdistro.AdminBroker1"
+# qdistro admin broker on the system bus. Root channel (qga_root), not
+# `sudo -n` over SSH: the release profile deletes admin's sudoers rule.
+expect "qdistro-admin-broker active" qga_root 'systemctl is-active qdistro-admin-broker.service'
+expect "broker owns dbus name"       qga_root 'busctl list --no-pager | grep -q org.qdistro.AdminBroker1'
 
 # Greeter boot path: greetd execs /usr/bin/qdgreeter (greetd-config.toml),
 # which after auth runs qdwin-session-launcher -> `systemctl --user start
@@ -329,7 +487,7 @@ expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | gr
 expect "qdgreeter binary present" \
     remote 'test -x /usr/bin/qdgreeter'
 expect "greetd execs an existing greeter (no exec failure in journal)" \
-    remote 'sudo -n journalctl -u greetd -b --no-pager | grep -Eiq "No such file|exec.*qdgreeter.*fail|failed to execute" && exit 1 || exit 0'
+    qga_root 'journalctl -u greetd -b --no-pager | grep -Eiq "No such file|exec.*qdgreeter.*fail|failed to execute" && exit 1 || exit 0'
 expect "qdwin-session.target user unit installed" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user cat qdwin-session.target >/dev/null 2>&1"
 expect "qdshell wanted by qdwin-session.target" \
@@ -467,17 +625,47 @@ expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'
 # Priority 0/1 journal entries. The single benign one we tolerate is the
 # kernel's "RDSEED32 is broken" CPUID-quirk notice on qemu hosts.
 expect "no unexpected priority=0/1 errors in journal" \
-    remote 'sudo -n journalctl -b -p emerg..alert --no-pager -q | grep -v "RDSEED32 is broken" | grep -q . && exit 1 || exit 0'
+    qga_root 'journalctl -b -p emerg..alert --no-pager -q | grep -v "RDSEED32 is broken" | grep -q . && exit 1 || exit 0'
+
+#-- Phase E: removable identity, grow, first-boot observability --------------
+# fstab / GRUB / swap must name UUID (or PARTUUID), never a kernel name:
+# a stick that moved from /dev/sda to /dev/sdb (or a second USB disk) would
+# otherwise fail to find root. Asserted on the booted image so initrd
+# discovery is the same contract (todo/iso/14 Phase E item 3).
+expect "fstab uses UUID/PARTUUID, never /dev/sdX or /dev/vdX" \
+    qga_root 'grep -E "^[[:space:]]*[^#[:space:]]" /etc/fstab | grep -E "/dev/(sd|vd|nvme|mmcblk)" && exit 1
+              grep -qE "^(UUID|PARTUUID)=" /etc/fstab'
+expect "grub linux lines use root=UUID= (not a kernel device name)" \
+    qga_root 'grep -E "^[[:space:]]*(linux|linuxefi)[/[:space:]]" /boot/grub2/grub.cfg | grep -E "/dev/(sd|vd|nvme)" && exit 1
+              grep -E "^[[:space:]]*(linux|linuxefi)[/[:space:]]" /boot/grub2/grub.cfg | grep -q "root=UUID="'
+expect "swap is active and fstab names it by UUID" \
+    qga_root 'swapon --show=NAME,UUID --noheadings | grep -q .
+              grep -E "^UUID=[^ ]+[[:space:]]+swap[[:space:]]" /etc/fstab >/dev/null'
+expect "EFI fallback path EFI/BOOT/bootx64.efi is present" \
+    qga_root 'test -f /boot/efi/EFI/BOOT/bootx64.efi || test -f /boot/efi/EFI/BOOT/BOOTX64.EFI'
+
+# Grow: 64 GiB overlay of a 28 GiB raw. After first-boot repart the root
+# btrfs must be clearly larger than the built size (~25.5 GiB of root).
+if [ "$GROW_GIB" -gt 0 ]; then
+    expect "root btrfs grew onto the ${GROW_GIB} GiB disk (repart)" \
+        qga_root 'sz=$(df -B1 / | awk "NR==2{print \$2}"); echo SIZE=$sz; [ -n "$sz" ] && [ "$sz" -gt 42949672960 ]'
+    expect "kiwi oem-repart ran this boot (or recorded a resize)" \
+        qga_root 'journalctl -b --no-pager | grep -Eiq "kiwi-oem-repart|dracut-kiwi-oem-repart|Resizing.*filesystem|System resize|expanded.*btrfs|resized root"'
+fi
+expect "no failed systemd units after first boot" \
+    qga_root 'out=$(systemctl --failed --legend=no --plain --no-pager | awk "NF && \$1 != \"UNIT\""); [ -z "$out" ] || { echo "$out"; exit 1; }'
+printf 'boot: guest-agent %ss (bus=%s grow=%sG sb=%s)\n' "$QGA_T" "$BUS" "$GROW_GIB" "$SECUREBOOT" \
+    | tee -a "$VERIFY_DIR/report.txt" >/dev/null
 
 #-- 9. Capture journals + systemctl state for evidence -----------------------
 log "capturing journals + systemd state"
-remote 'sudo -n journalctl -b --no-pager'                > "$VERIFY_DIR/journal/full.log"      2>&1 || true
-remote 'sudo -n journalctl -b -p err --no-pager'         > "$VERIFY_DIR/journal/errors.log"    2>&1 || true
-remote 'sudo -n journalctl -u qdistro-admin-broker --no-pager' > "$VERIFY_DIR/journal/broker.log" 2>&1 || true
-remote 'sudo -n journalctl -u greetd --no-pager'         > "$VERIFY_DIR/journal/greetd.log"    2>&1 || true
-remote 'systemctl --failed --no-pager'                   > "$VERIFY_DIR/journal/failed-units.log" 2>&1 || true
-remote 'cat /var/lib/qdistro/bootstrap/installer-chain.state' > "$VERIFY_DIR/journal/installer-chain.state" 2>&1 || true
-remote 'cat /etc/qdistro/release'                        > "$VERIFY_DIR/journal/release.txt"       2>&1 || true
+qga_root 'journalctl -b --no-pager'                > "$VERIFY_DIR/journal/full.log"      2>&1 || true
+qga_root 'journalctl -b -p err --no-pager'         > "$VERIFY_DIR/journal/errors.log"    2>&1 || true
+qga_root 'journalctl -u qdistro-admin-broker --no-pager' > "$VERIFY_DIR/journal/broker.log" 2>&1 || true
+qga_root 'journalctl -u greetd --no-pager'         > "$VERIFY_DIR/journal/greetd.log"    2>&1 || true
+qga_root 'systemctl --failed --no-pager'           > "$VERIFY_DIR/journal/failed-units.log" 2>&1 || true
+qga_root 'cat /var/lib/qdistro/bootstrap/installer-chain.state' > "$VERIFY_DIR/journal/installer-chain.state" 2>&1 || true
+qga_root 'cat /etc/qdistro/release'                > "$VERIFY_DIR/journal/release.txt"       2>&1 || true
 remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service' \
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 
@@ -486,6 +674,109 @@ sleep 30
 shoot 03-after-30s
 sleep 30
 shoot 04-after-60s
+
+#-- 10. Greeter login (N19) + persistence + nested KVM -----------------------
+# qdgreeter forcePasswordFocus() on startup; username is read-only "admin".
+# Type the baked password and Enter, then the locker row's session-up
+# branch is the one that has been unexercised since the P01 boot path.
+if [ "$DO_LOGIN" = 1 ]; then
+    log "logging in through qdgreeter (send-key password)"
+    shoot 05-before-login
+    for ch in Q D I S T R O; do
+        virsh -c "$URI" send-key "$VM" --codeset linux --holdtime 40 "KEY_$ch" >/dev/null
+        sleep 0.08
+    done
+    virsh -c "$URI" send-key "$VM" --codeset linux --holdtime 40 KEY_ENTER >/dev/null
+    login_deadline=$(( $(date +%s) + 90 ))
+    sess=""
+    while [ "$(date +%s)" -lt "$login_deadline" ]; do
+        sess="$(remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-session.target" 2>/dev/null || true)"
+        [ "$sess" = active ] && break
+        sleep 2
+    done
+    shoot 06-after-login
+    expect "qdgreeter login started qdwin-session.target" \
+        [ "$sess" = active ]
+    # Re-assert the locker now that a session is up (the crash-loop branch).
+    expect "qdlocker.service holds active/running after greeter login (NRestarts<=1)" \
+        remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c '
+            sess=\$(systemctl --user is-active qdwin-session.target)
+            read load as ss nr <<EOF2
+\$(systemctl --user show -p LoadState -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
+EOF2
+            echo \"qdwin-session.target=\$sess qdlocker LoadState=\$load ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
+            [ \"\$sess\" = active ] && [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]'"
+fi
+
+if [ "$NESTED" = 1 ]; then
+    expect "nested KVM: /dev/kvm is usable in the guest" \
+        qga_root 'test -c /dev/kvm && test -w /dev/kvm'
+    expect "nested KVM: qemu -accel kvm starts" \
+        qga_root 'rm -f /tmp/qdistro-nested-kvm.pid
+                  qemu-system-x86_64 -accel kvm -machine q35 -cpu host -m 32 -nographic -display none -serial none -monitor none -nodefaults -S -daemonize -pidfile /tmp/qdistro-nested-kvm.pid
+                  rc=$?
+                  if [ -f /tmp/qdistro-nested-kvm.pid ]; then kill "$(cat /tmp/qdistro-nested-kvm.pid)" 2>/dev/null || true; rm -f /tmp/qdistro-nested-kvm.pid; fi
+                  [ $rc -eq 0 ]'
+    # Opt-in spawn: stub disk, define-only. spawn-tier4.sh talks to
+    # qemu:///session as admin (not qemu:///system). The tester image
+    # does not ship the guest base (--tier4-base); this proves the host
+    # spawn path can define a nested domain.
+    expect "tier-4 opt-in spawn defines a nested domain (stub disk, define-only)" \
+        qga_root 'set -e
+                  qemu-img create -f qcow2 /tmp/qdistro-t4-stub.qcow2 64M >/dev/null
+                  # spawn-tier4.sh uses qemu:///session as admin; linger is on
+                  # but virtqemud is socket-activated and may not be up yet.
+                  as_admin() { runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin LIBVIRT_DEFAULT_URI=qemu:///session "$@"; }
+                  as_admin systemctl --user start virtqemud.socket virtqemud.service 2>/dev/null || true
+                  for i in 1 2 3 4 5 6 7 8 9 10; do
+                    as_admin virsh list >/dev/null 2>&1 && break
+                    sleep 1
+                  done
+                  export TIER4_GUEST_DISK=/tmp/qdistro-t4-stub.qcow2
+                  export TIER4_DOMAIN_DEFINE_ONLY=1
+                  bash /root/qdistro-src/qdistro/tier4-vm/spawn-tier4.sh qdistro-verify-t4
+                  as_admin virsh undefine qdistro-verify-t4 2>/dev/null || true'
+fi
+
+if [ "$DO_PERSIST" = 1 ]; then
+    log "writing persistence marker + btrfs snapshot, then rebooting"
+    expect "wrote persist marker and btrfs snapshot" \
+        qga_root 'mkdir -p /var/lib/qdistro
+                  echo persist-ok > /var/lib/qdistro/verify-persist-marker
+                  test -s /var/lib/qdistro/verify-persist-marker
+                  btrfs subvolume snapshot / /verify-persist-snap
+                  btrfs subvolume list / | grep -q verify-persist-snap'
+    shoot 07-before-reboot
+    virsh -c "$URI" reboot "$VM"
+    # Wait for the agent to drop, then come back (a fast poll can race
+    # and see the pre-reboot agent).
+    sleep 8
+    drop_deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$drop_deadline" ]; do
+        qga '{"execute":"guest-ping"}' | grep -q '"return"' || break
+        sleep 2
+    done
+    qga_deadline=$(( $(date +%s) + 180 ))
+    qga_up=0
+    while [ "$(date +%s)" -lt "$qga_deadline" ]; do
+        if qga '{"execute":"guest-ping"}' | grep -q '"return"'; then qga_up=1; break; fi
+        sleep 3
+    done
+    [ "$qga_up" = 1 ] || { shoot 99-qga-timeout-reboot; die "guest agent never came back after reboot"; }
+    qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}' >/dev/null || true
+    ssh_deadline=$(( $(date +%s) + 180 ))
+    while [ "$(date +%s)" -lt "$ssh_deadline" ]; do
+        remote 'true' 2>/dev/null && break
+        sleep 4
+    done
+    expect "persist marker survived reboot" \
+        qga_root 'grep -qx persist-ok /var/lib/qdistro/verify-persist-marker'
+    expect "btrfs snapshot survived reboot" \
+        qga_root 'btrfs subvolume list / | grep -q verify-persist-snap && test -d /verify-persist-snap'
+    expect "swap still active after reboot" \
+        qga_root 'swapon --show --noheadings | grep -q .'
+    shoot 08-after-reboot
+fi
 
 #-- 11. Report -----------------------------------------------------------------
 TOTAL=$((PASS+FAIL))
@@ -501,10 +792,54 @@ TOTAL=$((PASS+FAIL))
     echo "=========================================="
 } | tee -a "$VERIFY_DIR/report.txt"
 
-if [ "${1:-}" = --keep ]; then
+if [ "$KEEP" = 1 ]; then
     log "VM left running (--keep). To tear down: $0 --teardown"
 else
     teardown
+fi
+
+# --stick: extra boots of the SAME published bytes (USB / SB / nested /
+# power-off / dd). Each re-exec uses a unique VM name and skips login +
+# persist (those are proven on the default virtio boot). Nested and
+# power-off are their own boots so a failure is attributed.
+if [ "$STICK" = 1 ] && [ -z "${QDISTRO_VERIFY_PARENT:-}" ] && [ "$KEEP" != 1 ]; then
+    log "stick matrix: extra boots of $IMG"
+    export QDISTRO_VERIFY_PARENT=1
+    export QDISTRO_IMAGE="$IMG"
+    export QDISTRO_BUILD_DIR="$BUILD_DIR"
+    extra_fail=0
+    run_extra() {
+        local name="$1"; shift
+        log "stick extra: $name $*"
+        if QDISTRO_VERIFY_VM="${VM}-${name}" \
+           QDISTRO_VERIFY_LOGIN=0 QDISTRO_VERIFY_PERSIST=0 \
+           bash "$HERE/verify.sh" "$@"; then
+            echo "PASS: stick extra $name" | tee -a "$VERIFY_DIR/report.txt"
+        else
+            echo "FAIL: stick extra $name" | tee -a "$VERIFY_DIR/report.txt"
+            extra_fail=$((extra_fail + 1))
+        fi
+    }
+    run_extra usb --usb
+    run_extra usb2 --second-usb
+    run_extra hub --usb-hub
+    run_extra sb --secure-boot --no-grow
+    run_extra nested --nested --no-grow
+    run_extra poweroff --power-off
+    if [ -n "${QDISTRO_RESOLVED_XZ:-}" ]; then
+        QDISTRO_IMAGE="$QDISTRO_RESOLVED_XZ" run_extra dd --dd --no-grow
+    else
+        _xzs=( )
+        mapfile -t _xzs < <(find "$BUILD_DIR/bundle" -maxdepth 1 -name '*.raw.xz' -type f 2>/dev/null | sort)
+        if [ "${#_xzs[@]}" -eq 1 ]; then
+            QDISTRO_IMAGE="${_xzs[0]}" run_extra dd --dd --no-grow
+        else
+            echo "SKIP: stick extra dd (no unique published xz)" | tee -a "$VERIFY_DIR/report.txt"
+        fi
+    fi
+    [ "$extra_fail" -eq 0 ] || FAIL=$((FAIL + extra_fail))
+    TOTAL=$((PASS + FAIL))
+    echo "stick extras: $extra_fail failed" | tee -a "$VERIFY_DIR/report.txt"
 fi
 
 [ "$FAIL" -eq 0 ]

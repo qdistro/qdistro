@@ -64,6 +64,8 @@ PATHS=(
     /usr/share/xdg-desktop-portal /usr/share/dbus-1 /usr/share/applications
     /usr/share/metainfo /usr/share/icons/hicolor /usr/share/selinux
     /usr/share/fonts/truetype
+    /boot/grub2/grub.cfg
+    /boot/efi/EFI
     /home/admin/.config /home/admin/weston.ini
     /var/lib/systemd/linger /var/lib/qdistro /var/lib/selinux
     /root/qdistro-src
