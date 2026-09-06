@@ -6,6 +6,7 @@
 #   ./clone-baseweed.sh <name-prefix>                       # default: pixman baseline
 #   ./clone-baseweed.sh <name-prefix> --gpu                 # virtio-gpu accel3d for §6.8 dmabuf tests
 #   ./clone-baseweed.sh <name-prefix> --from-baked          # back from baseweed-baked.qcow2 (skips zypper install-deps)
+#   ./clone-baseweed.sh <name-prefix> --from-kiwi            # back from imported tester image (UEFI; iso/14 Phase G)
 #   ./clone-baseweed.sh <name-prefix> --from-enforcing-baked # baseweed-enforcing-baked: SELinux=enforcing config + SSH-bootstrapped
 #
 # Outputs the new VM name to stdout. With --from-enforcing-baked, the
@@ -13,8 +14,8 @@
 # "ssh_port=NNNN" so the caller can drive the VM via:
 #     ssh -i ~/.ssh/qdistro_enforcing_id_ed25519 \
 #         -p NNNN -o StrictHostKeyChecking=no root@127.0.0.1
-# Flags can appear in any order; --from-baked and --from-enforcing-baked
-# are mutually exclusive.
+# Flags can appear in any order; --from-baked, --from-kiwi and
+# --from-enforcing-baked are mutually exclusive.
 #
 # Host prereq for accel3d=yes:
 #   - /dev/dri/renderD128 with the invoking user in the 'render' group
@@ -32,9 +33,12 @@ set -euo pipefail
 # Force session URI so we do not silently query system libvirtd.
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///session}"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 PREFIX=""
 GPU=0
 FROM_BAKED=0
+FROM_KIWI=0
 FROM_ENFORCING=0
 FROM_GOLDEN=""
 EXTRA_NIC_XML=""
@@ -42,6 +46,7 @@ for arg in "$@"; do
     case "$arg" in
         --gpu)                   GPU=1 ;;
         --from-baked)            FROM_BAKED=1 ;;
+        --from-kiwi)             FROM_KIWI=1 ;;
         --from-enforcing-baked)  FROM_ENFORCING=1 ;;
         # Per-run golden backing: an already-built qcow2 (compositor built once
         # per run) used as the backing for this clone, skipping fresh-vm-bootstrap.
@@ -66,15 +71,19 @@ for arg in "$@"; do
     esac
 done
 if [ -z "$PREFIX" ]; then
-    echo "usage: $0 <name-prefix> [--gpu] [--from-baked|--from-enforcing-baked]" >&2
+    echo "usage: $0 <name-prefix> [--gpu] [--from-baked|--from-kiwi|--from-enforcing-baked]" >&2
     exit 2
 fi
-if [ "$FROM_BAKED" = 1 ] && [ "$FROM_ENFORCING" = 1 ]; then
-    echo "ERROR: --from-baked and --from-enforcing-baked are mutually exclusive" >&2
+from_count=0
+[ "$FROM_BAKED" = 1 ] && from_count=$((from_count + 1))
+[ "$FROM_KIWI" = 1 ] && from_count=$((from_count + 1))
+[ "$FROM_ENFORCING" = 1 ] && from_count=$((from_count + 1))
+if [ "$from_count" -gt 1 ]; then
+    echo "ERROR: --from-baked, --from-kiwi and --from-enforcing-baked are mutually exclusive" >&2
     exit 2
 fi
-if [ -n "$FROM_GOLDEN" ] && { [ "$FROM_BAKED" = 1 ] || [ "$FROM_ENFORCING" = 1 ]; }; then
-    echo "ERROR: --from-run-golden is mutually exclusive with --from-baked/--from-enforcing-baked" >&2
+if [ -n "$FROM_GOLDEN" ] && [ "$from_count" -gt 0 ]; then
+    echo "ERROR: --from-run-golden is mutually exclusive with --from-baked/--from-kiwi/--from-enforcing-baked" >&2
     exit 2
 fi
 if [ -n "$FROM_GOLDEN" ]; then
@@ -99,12 +108,18 @@ VM="${PREFIX}-$(date +%y%m%d-%H%M%S)-$$-$RANDOM"
 TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}"
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
+# shellcheck source=lib/vm-base.sh
+. "$SCRIPT_DIR/lib/vm-base.sh"
+
 if [ -n "$FROM_GOLDEN" ]; then
     BACKING="$FROM_GOLDEN"
     BACKING_NAME=run-golden
 elif [ "$FROM_ENFORCING" = 1 ]; then
     BACKING="$IMG/baseweed-enforcing-baked.qcow2"
     BACKING_NAME=baseweed-enforcing-baked
+elif [ "$FROM_KIWI" = 1 ]; then
+    BACKING="$(qdistro_kiwi_base_path)"
+    BACKING_NAME=qdistro-kiwi-base
 elif [ "$FROM_BAKED" = 1 ]; then
     BACKING="$IMG/baseweed-baked.qcow2"
     BACKING_NAME=baseweed-baked
@@ -124,12 +139,24 @@ fi
 if [ ! -f "$BACKING" ]; then
     if [ "$FROM_ENFORCING" = 1 ]; then
         echo "ERROR: $BACKING not found — build it first via build-enforcing-baseweed.sh" >&2
+    elif [ "$FROM_KIWI" = 1 ]; then
+        echo "ERROR: $BACKING not found — import it first via $SCRIPT_DIR/import-kiwi-base.sh" >&2
     elif [ "$FROM_BAKED" = 1 ]; then
         echo "ERROR: $BACKING not found — build it first via build-baked-baseweed.sh" >&2
     else
         echo "ERROR: $BACKING not found" >&2
     fi
     exit 1
+fi
+# Store a canonical -b so qemu-img's backing-file string matches
+# qdistro_backing_needs_ovmf's realpath (symlink images dir, relative
+# QDISTRO_KIWI_BASE). Workers clone --from-run-golden and need that match.
+BACKING="$(readlink -m -- "$BACKING")"
+if [ "$FROM_KIWI" = 1 ]; then
+    if ! qemu-img info "$BACKING" 2>/dev/null | grep -q 'file format: qcow2'; then
+        echo "ERROR: kiwi base $BACKING is not qcow2 — import it via $SCRIPT_DIR/import-kiwi-base.sh (do not point QDISTRO_KIWI_BASE at a raw)" >&2
+        exit 1
+    fi
 fi
 if [ -f "$IMG/${VM}.qcow2" ] || virsh -c qemu:///session dominfo "$VM" >/dev/null 2>&1; then
     echo "ERROR: VM '$VM' already exists" >&2
@@ -151,7 +178,7 @@ _clone_cleanup() {
     virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
     virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
         || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
-    rm -f "$IMG/${VM}.qcow2" 2>/dev/null || true
+    rm -f "$IMG/${VM}.qcow2" "$IMG/${VM}.nvram.fd" 2>/dev/null || true
 }
 trap '_rc=$?; _clone_cleanup; exit $_rc' EXIT
 trap '_clone_cleanup; exit 130' INT
@@ -170,9 +197,11 @@ qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
 if [ "$FROM_ENFORCING" = 1 ]; then
     : # no-op: enforcing config is already baked in
 elif [ -n "$FROM_GOLDEN" ]; then
-    : # no-op: the run-golden was built from baseweed-baked, which is already
-      # permissive — skip the per-clone libguestfs launch (a hot-path cost once
-      # the compile is removed).
+    : # no-op: the run-golden was built from a permissive base (baked or
+      # the tester image). Skip the per-clone libguestfs launch.
+elif [ "$FROM_KIWI" = 1 ]; then
+    : # no-op: the tester image is QDISTRO_PROFILE=dev (SELinux permissive).
+      # virt-customize on a 28 GiB overlay is a multi-minute cost for no change.
 else
     virt-customize --no-network -a "$IMG/${VM}.qcow2" \
         --edit '/etc/selinux/config:s/SELINUX=enforcing/SELINUX=permissive/' \
@@ -370,6 +399,37 @@ sys.stdout.write(src[:m.end()] + inject + src[m.end():])
     fi
 fi
 
+# Tester image is UEFI-only. The template is BIOS (SeaBIOS, i440fx). Rewrite
+# <os> to OVMF with an explicit loader path (qemu:///session cannot guess).
+# Per-run golden *workers* clone with --from-run-golden, not --from-kiwi;
+# if that golden's backing chain is the kiwi base they still need OVMF or
+# they BIOS-boot a GPT/ESP disk (independent review blocker).
+NEEDS_OVMF=0
+if [ "$FROM_KIWI" = 1 ]; then
+    NEEDS_OVMF=1
+elif [ -n "$FROM_GOLDEN" ] && qdistro_backing_needs_ovmf "$BACKING"; then
+    NEEDS_OVMF=1
+fi
+if [ "$NEEDS_OVMF" = 1 ]; then
+    # shellcheck source=lib/ovmf.sh
+    . "$SCRIPT_DIR/lib/ovmf.sh"
+    qdistro_find_ovmf || {
+        echo "ERROR: kiwi/UEFI clone needs OVMF (install qemu-ovmf-x86_64)" >&2
+        exit 1
+    }
+    NVRAM="$IMG/${VM}.nvram.fd"
+    cp "$QDISTRO_OVMF_VARS" "$NVRAM"
+    export QDISTRO_OVMF QDISTRO_OVMF_VARS QDISTRO_NVRAM="$NVRAM"
+    XML=$(printf '%s' "$XML" | qdistro_inject_ovmf_os) || {
+        echo "ERROR: kiwi/UEFI clone: OVMF <os> inject failed" >&2
+        exit 1
+    }
+    if ! grep -q "<loader" <<<"$XML" || ! grep -Fq "$QDISTRO_OVMF" <<<"$XML"; then
+        echo "ERROR: kiwi/UEFI clone: OVMF loader did not land in domain XML" >&2
+        exit 1
+    fi
+fi
+
 printf '%s' "$XML" | virsh -c qemu:///session define /dev/stdin >/dev/null
 virsh -c qemu:///session start "$VM" >/dev/null
 
@@ -377,7 +437,6 @@ virsh -c qemu:///session start "$VM" >/dev/null
 #    Under --from-enforcing-baked, qga is denied by SELinux; the wait
 #    is short-circuited and the caller is expected to reach the VM via
 #    SSH on the printed port.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VM_TOOLS="$(cd "$SCRIPT_DIR/../.." && pwd)/scripts/vm"
 if [ "$FROM_ENFORCING" = 1 ]; then
     # Wait for SSH to actually accept. The TCP listener is up

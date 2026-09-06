@@ -5,7 +5,9 @@
 # Pipeline:
 #   1. build-baseweed-from-scratch.sh   (if baseweed-admin.qcow2 absent)
 #   2. build-baked-baseweed.sh          (if baseweed-baked.qcow2 absent)
-#   3. clone-baseweed.sh --from-baked   (fresh disposable VM)
+#   3. clone-baseweed.sh --from-kiwi or --from-baked
+#      (QDISTRO_VM_BASE=auto|kiwi|baked; auto uses the imported tester
+#       image if present — iso/14 Phase G — else baseweed-baked)
 #   4. tarball + HTTP-stage the three sibling repos
 #   5. fresh-vm-bootstrap.sh in VM      (build qdwin, build daemons,
 #                                        install broker + qdshell)
@@ -58,35 +60,48 @@ for sib in qdwin qdshell qnotebook; do
     fi
 done
 
-# Stages 1/2 build the SHARED baseweed images. Under parallel spins, multiple
-# workers must not enter the build scripts at once (they share partial-file
-# names and would clobber each other). Serialize behind a host flock and
-# re-check inside the lock so only the first worker builds; the rest wait, then
-# see the images present. The fast path (images already exist) still pays only a
-# lock acquire.
-mkdir -p "$IMG"
-exec 9>"$IMG/.baseweed-build.lock"
-if flock -w 2400 9; then
-    # Stage 1.
-    if [ ! -f "$IMG/baseweed-admin.qcow2" ]; then
-        log "stage 1: building baseweed-admin.qcow2 from scratch (~5-10 min)..."
-        bash "$REPO/scripts/vm/build-baseweed-from-scratch.sh" >&2
-    else
-        log "stage 1: baseweed-admin.qcow2 already present"
-    fi
+# shellcheck source=lib/vm-base.sh
+. "$SCRIPT_DIR/lib/vm-base.sh"
 
-    # Stage 2.
-    if [ ! -f "$IMG/baseweed-baked.qcow2" ]; then
-        log "stage 2: baking dependencies onto overlay (~15-25 min)..."
-        bash "$REPO/scripts/vm/build-baked-baseweed.sh" >&2
-    else
-        log "stage 2: baseweed-baked.qcow2 already present"
-    fi
-    flock -u 9
+# Stages 1/2 build the SHARED baseweed images. Skip when this spin will
+# not clone baked: a kiwi import (or a per-run golden clone) does not
+# need baseweed-baked.qcow2, and requiring it would make "kiwi replaces
+# baked as the base" still pay a 15–25 min bake (opus N4).
+NEED_BAKED=1
+if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
+    NEED_BAKED=0
 else
-    log "WARN: could not acquire baseweed build lock within 40 min; proceeding (images assumed present)"
+    VM_BASE_KIND="$(qdistro_vm_base_kind)" || exit $?
+    [ "$VM_BASE_KIND" = kiwi ] && NEED_BAKED=0
 fi
-exec 9>&-
+mkdir -p "$IMG"
+if [ "$NEED_BAKED" = 1 ]; then
+    # Under parallel spins, multiple workers must not enter the build
+    # scripts at once (they share partial-file names). Serialize behind a
+    # host flock; the fast path (images already exist) still pays only a
+    # lock acquire.
+    exec 9>"$IMG/.baseweed-build.lock"
+    if flock -w 2400 9; then
+        if [ ! -f "$IMG/baseweed-admin.qcow2" ]; then
+            log "stage 1: building baseweed-admin.qcow2 from scratch (~5-10 min)..."
+            bash "$REPO/scripts/vm/build-baseweed-from-scratch.sh" >&2
+        else
+            log "stage 1: baseweed-admin.qcow2 already present"
+        fi
+        if [ ! -f "$IMG/baseweed-baked.qcow2" ]; then
+            log "stage 2: baking dependencies onto overlay (~15-25 min)..."
+            bash "$REPO/scripts/vm/build-baked-baseweed.sh" >&2
+        else
+            log "stage 2: baseweed-baked.qcow2 already present"
+        fi
+        flock -u 9
+    else
+        log "WARN: could not acquire baseweed build lock within 40 min; proceeding (images assumed present)"
+    fi
+    exec 9>&-
+else
+    log "stage 1/2: skipped (kiwi base or run-golden; no baseweed-baked needed)"
+fi
 
 # Stage 3.
 if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
@@ -94,8 +109,13 @@ if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
     VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" \
             --from-run-golden="$QCI_RUN_GOLDEN_BACKING" | tail -1)
 else
-    log "stage 3: cloning a fresh VM from baked..."
-    VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-baked | tail -1)
+    if [ "$VM_BASE_KIND" = kiwi ]; then
+        log "stage 3: cloning a fresh VM from kiwi tester image ($(qdistro_kiwi_base_path); QDISTRO_VM_BASE=${QDISTRO_VM_BASE:-auto})..."
+        VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-kiwi | tail -1)
+    else
+        log "stage 3: cloning a fresh VM from baked..."
+        VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-baked | tail -1)
+    fi
 fi
 log "    VM = $VM"
 
@@ -117,7 +137,7 @@ cleanup_spin() {
         virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
         virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
             || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
-        rm -f "$IMG/$VM.qcow2" 2>/dev/null || true
+        rm -f "$IMG/$VM.qcow2" "$IMG/$VM.nvram.fd" 2>/dev/null || true
     fi
 }
 trap cleanup_spin EXIT

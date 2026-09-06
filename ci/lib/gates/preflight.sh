@@ -106,7 +106,26 @@ gate_preflight() {
     check_required "vm-exec" "[ -x '$VM_TOOLS/vm-exec' ]"
     check_required "vm-start-and-wait" "[ -x '$VM_TOOLS/vm-start-and-wait' ]"
     check_required "spin-test-vm.sh" "[ -x '$VM_TOOLS/spin-test-vm.sh' ]"
-    check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
+    # shellcheck source=../../../scripts/vm/lib/vm-base.sh
+    . "$VM_TOOLS/lib/vm-base.sh"
+    case "${QDISTRO_VM_BASE:-auto}" in
+        kiwi)
+            check_required "imported kiwi base" "test -f '$(qdistro_kiwi_base_path)' && test -f '$(qdistro_kiwi_base_path).stamp'"
+            ;;
+        baked)
+            check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
+            ;;
+        auto|"")
+            if qdistro_kiwi_base_ok; then
+                check_required "imported kiwi base" "test -f '$(qdistro_kiwi_base_path)' && test -f '$(qdistro_kiwi_base_path).stamp'"
+            else
+                check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
+            fi
+            ;;
+        *)
+            check_required "QDISTRO_VM_BASE auto|kiwi|baked" "false"
+            ;;
+    esac
     # Disk-space floor: the libvirt images volume (goldens + worker overlays) and
     # the run-dir filesystem. Floor justified by observed artifact sizes — a bats
     # golden backing is ~5-6 GiB, the two GUI goldens ~0.8 GiB each, plus a pool of

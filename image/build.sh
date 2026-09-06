@@ -231,9 +231,17 @@ if ! grep -q "^SNAPSHOT=$SNAPSHOT\$" "$MANIFEST"; then
     exit 2
 fi
 
-echo "[build] kiwi-ng building OEM image $VERSION on Tumbleweed $SNAPSHOT -> $BUILD_DIR"
+KIWI_PROFILE_ARGS=()
+case "${QDISTRO_KIWI_PROFILE:-tester}" in
+    tester) ;;
+    ci) KIWI_PROFILE_ARGS+=(--profile ci) ;;
+    *) echo "[build] ERROR: QDISTRO_KIWI_PROFILE must be tester or ci, got: ${QDISTRO_KIWI_PROFILE}" >&2; exit 2 ;;
+esac
+
+echo "[build] kiwi-ng building OEM image $VERSION on Tumbleweed $SNAPSHOT -> $BUILD_DIR (kiwi profile ${QDISTRO_KIWI_PROFILE:-tester})"
 mkdir -p "$HERE/logs"
 kiwi-ng --debug \
+  "${KIWI_PROFILE_ARGS[@]}" \
   --type oem \
   system build \
     --description "$HERE" \
