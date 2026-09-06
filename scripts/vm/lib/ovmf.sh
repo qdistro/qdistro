@@ -46,6 +46,9 @@ for label, p in (("OVMF", ovmf), ("OVMF_VARS", vars_tpl), ("NVRAM", nvram)):
     if any(c in p for c in "<>&\"'\''"):
         sys.stderr.write("ovmf: refusing %s path with XML metacharacters\n" % label)
         sys.exit(2)
+    if not os.path.isabs(p):
+        sys.stderr.write("ovmf: %s path is not absolute (qemu:///session cannot guess firmware): %s\n" % (label, p))
+        sys.exit(2)
 
 def repl(m):
     body = m.group(1)

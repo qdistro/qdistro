@@ -28,9 +28,7 @@ setup() {
     [[ "$output" == *"qdistro-kiwi-base.qcow2"* ]]
 }
 
-@test "vm-base: auto prefers kiwi when the qcow2 exists, else baked" {
-    # shellcheck source=../../../scripts/vm/lib/vm-base.sh
-    source "$VM/lib/vm-base.sh"
+@test "vm-base: auto prefers a stamped qcow2, not a leftover empty file" {
     mkdir -p "$T/img"
     run env QDWIN_IMG_DIR="$T/img" QDISTRO_VM_BASE=auto bash -c '
         source "$1"
@@ -38,7 +36,16 @@ setup() {
     ' _ "$VM/lib/vm-base.sh"
     [ "$status" -eq 0 ]
     [ "$output" = baked ]
+    # leftover empty dest without stamp must NOT flip auto off baked
     : > "$T/img/qdistro-kiwi-base.qcow2"
+    run env QDWIN_IMG_DIR="$T/img" QDISTRO_VM_BASE=auto bash -c '
+        source "$1"
+        qdistro_vm_base_kind
+    ' _ "$VM/lib/vm-base.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" = baked ]
+    qemu-img create -f qcow2 "$T/img/qdistro-kiwi-base.qcow2" 4M >/dev/null
+    echo 'DIGEST=dead' > "$T/img/qdistro-kiwi-base.qcow2.stamp"
     run env QDWIN_IMG_DIR="$T/img" QDISTRO_VM_BASE=auto bash -c '
         source "$1"
         qdistro_vm_base_kind
@@ -84,6 +91,10 @@ setup() {
     run bash -c 'source "$1"; printf %s "$2" | qdistro_inject_ovmf_os' _ "$VM/lib/ovmf.sh" "$xml"
     [ "$status" -eq 2 ]
     [[ "$output" == *"XML metacharacters"* ]]
+    export QDISTRO_OVMF=ovmf.bin QDISTRO_OVMF_VARS=/usr/share/qemu/ovmf-x86_64-4m-vars.bin QDISTRO_NVRAM=/tmp/fake.nvram.fd
+    run bash -c 'source "$1"; printf %s "$2" | qdistro_inject_ovmf_os' _ "$VM/lib/ovmf.sh" "$xml"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not absolute"* ]]
 }
 
 @test "import-kiwi-base: converts a tiny raw to a stamped qcow2 and is idempotent on the same digest" {
@@ -108,8 +119,47 @@ setup() {
     grep -q -- '--from-kiwi' "$VM/spin-test-vm.sh"
     grep -q -- '--from-baked' "$VM/spin-test-vm.sh"
     grep -q 'QCI_RUN_GOLDEN_BACKING' "$VM/spin-test-vm.sh"
+    grep -q 'nvram.fd' "$VM/spin-test-vm.sh"
     # golden clone still wins over the base kind
     awk '/QCI_RUN_GOLDEN_BACKING/{f=1} f{print; if(/from-run-golden/){found=1; exit}} END{exit found?0:1}' "$VM/spin-test-vm.sh"
+    # workers still get OVMF when that golden is kiwi-backed
+    grep -q 'qdistro_backing_needs_ovmf' "$VM/clone-baseweed.sh"
+    grep -q 'NEED_BAKED' "$VM/spin-test-vm.sh"
+    grep -q 'skipped (kiwi base or run-golden' "$VM/spin-test-vm.sh"
+}
+
+@test "backing-needs-ovmf: a golden overlay on the kiwi base is UEFI; an unrelated qcow2 is not" {
+    command -v qemu-img >/dev/null
+    mkdir -p "$T/img"
+    qemu-img create -f qcow2 "$T/img/qdistro-kiwi-base.qcow2" 8M >/dev/null
+    echo 'DIGEST=dead' > "$T/img/qdistro-kiwi-base.qcow2.stamp"
+    qemu-img create -f qcow2 -F qcow2 -b "$T/img/qdistro-kiwi-base.qcow2" "$T/img/golden.qcow2" >/dev/null
+    qemu-img create -f qcow2 "$T/img/other.qcow2" 8M >/dev/null
+    run env QDWIN_IMG_DIR="$T/img" bash -c '
+        source "$1"
+        qdistro_backing_needs_ovmf "$2"
+    ' _ "$VM/lib/vm-base.sh" "$T/img/golden.qcow2"
+    [ "$status" -eq 0 ]
+    run env QDWIN_IMG_DIR="$T/img" bash -c '
+        source "$1"
+        qdistro_backing_needs_ovmf "$2"
+    ' _ "$VM/lib/vm-base.sh" "$T/img/other.qcow2"
+    [ "$status" -ne 0 ]
+    run env QDWIN_IMG_DIR="$T/img" bash -c '
+        source "$1"
+        qdistro_backing_needs_ovmf "$2"
+    ' _ "$VM/lib/vm-base.sh" "$T/img/qdistro-kiwi-base.qcow2"
+    [ "$status" -eq 0 ]
+}
+
+@test "clone-baseweed: --from-kiwi refuses a raw QDISTRO_KIWI_BASE" {
+    mkdir -p "$T/img"
+    { head -c 1048576 /dev/zero; } > "$T/img/not-qcow2.raw"
+    run env QDWIN_IMG_DIR="$T/img" QDISTRO_KIWI_BASE="$T/img/not-qcow2.raw" \
+        bash "$VM/clone-baseweed.sh" x --from-kiwi
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not qcow2"* ]]
+    [[ "$output" == *"import-kiwi-base.sh"* ]]
 }
 
 @test "bootstrap: ensures CI extras after masking greetd, before fetching tarballs" {

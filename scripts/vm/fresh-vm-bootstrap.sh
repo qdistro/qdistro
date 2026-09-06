@@ -86,7 +86,19 @@ systemctl mask greetd.service 2>/dev/null || true
 if command -v bats >/dev/null 2>&1; then
     log "CI extras already present (bats); skipping zypper"
 else
-    log "ensuring CI extras (bats/ydotool/...; tester image used as qci base)..."
+    log "ensuring CI extras (bats/ydotool/...; tester image used as qci base; needs guest egress to the pinned snapshot repos, not the host tarball server)..."
+    log "waiting for guest network before zypper (qga-up is not DHCP/DNS)..."
+    _net_ok=0
+    for _ in $(seq 1 30); do
+        if getent hosts download.opensuse.org >/dev/null 2>&1; then
+            _net_ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$_net_ok" != 1 ]; then
+        log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
+    fi
     if ! zypper -n install --no-recommends \
             bats ydotool tesseract-ocr rage-encryption rsync \
             python313-jeepney python313-six Mesa-demo-egl \

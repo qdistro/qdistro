@@ -108,6 +108,9 @@ VM="${PREFIX}-$(date +%y%m%d-%H%M%S)-$$-$RANDOM"
 TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}"
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
+# shellcheck source=lib/vm-base.sh
+. "$SCRIPT_DIR/lib/vm-base.sh"
+
 if [ -n "$FROM_GOLDEN" ]; then
     BACKING="$FROM_GOLDEN"
     BACKING_NAME=run-golden
@@ -115,8 +118,6 @@ elif [ "$FROM_ENFORCING" = 1 ]; then
     BACKING="$IMG/baseweed-enforcing-baked.qcow2"
     BACKING_NAME=baseweed-enforcing-baked
 elif [ "$FROM_KIWI" = 1 ]; then
-    # shellcheck source=lib/vm-base.sh
-    . "$SCRIPT_DIR/lib/vm-base.sh"
     BACKING="$(qdistro_kiwi_base_path)"
     BACKING_NAME=qdistro-kiwi-base
 elif [ "$FROM_BAKED" = 1 ]; then
@@ -146,6 +147,12 @@ if [ ! -f "$BACKING" ]; then
         echo "ERROR: $BACKING not found" >&2
     fi
     exit 1
+fi
+if [ "$FROM_KIWI" = 1 ]; then
+    if ! qemu-img info "$BACKING" 2>/dev/null | grep -q 'file format: qcow2'; then
+        echo "ERROR: kiwi base $BACKING is not qcow2 — import it via $SCRIPT_DIR/import-kiwi-base.sh (do not point QDISTRO_KIWI_BASE at a raw)" >&2
+        exit 1
+    fi
 fi
 if [ -f "$IMG/${VM}.qcow2" ] || virsh -c qemu:///session dominfo "$VM" >/dev/null 2>&1; then
     echo "ERROR: VM '$VM' already exists" >&2
@@ -186,9 +193,8 @@ qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
 if [ "$FROM_ENFORCING" = 1 ]; then
     : # no-op: enforcing config is already baked in
 elif [ -n "$FROM_GOLDEN" ]; then
-    : # no-op: the run-golden was built from baseweed-baked, which is already
-      # permissive — skip the per-clone libguestfs launch (a hot-path cost once
-      # the compile is removed).
+    : # no-op: the run-golden was built from a permissive base (baked or
+      # the tester image). Skip the per-clone libguestfs launch.
 elif [ "$FROM_KIWI" = 1 ]; then
     : # no-op: the tester image is QDISTRO_PROFILE=dev (SELinux permissive).
       # virt-customize on a 28 GiB overlay is a multi-minute cost for no change.
@@ -391,22 +397,31 @@ fi
 
 # Tester image is UEFI-only. The template is BIOS (SeaBIOS, i440fx). Rewrite
 # <os> to OVMF with an explicit loader path (qemu:///session cannot guess).
+# Per-run golden *workers* clone with --from-run-golden, not --from-kiwi;
+# if that golden's backing chain is the kiwi base they still need OVMF or
+# they BIOS-boot a GPT/ESP disk (independent review blocker).
+NEEDS_OVMF=0
 if [ "$FROM_KIWI" = 1 ]; then
+    NEEDS_OVMF=1
+elif [ -n "$FROM_GOLDEN" ] && qdistro_backing_needs_ovmf "$BACKING"; then
+    NEEDS_OVMF=1
+fi
+if [ "$NEEDS_OVMF" = 1 ]; then
     # shellcheck source=lib/ovmf.sh
     . "$SCRIPT_DIR/lib/ovmf.sh"
     qdistro_find_ovmf || {
-        echo "ERROR: --from-kiwi needs OVMF (install qemu-ovmf-x86_64)" >&2
+        echo "ERROR: kiwi/UEFI clone needs OVMF (install qemu-ovmf-x86_64)" >&2
         exit 1
     }
     NVRAM="$IMG/${VM}.nvram.fd"
     cp "$QDISTRO_OVMF_VARS" "$NVRAM"
     export QDISTRO_OVMF QDISTRO_OVMF_VARS QDISTRO_NVRAM="$NVRAM"
     XML=$(printf '%s' "$XML" | qdistro_inject_ovmf_os) || {
-        echo "ERROR: --from-kiwi: OVMF <os> inject failed" >&2
+        echo "ERROR: kiwi/UEFI clone: OVMF <os> inject failed" >&2
         exit 1
     }
     if ! grep -q "<loader" <<<"$XML" || ! grep -Fq "$QDISTRO_OVMF" <<<"$XML"; then
-        echo "ERROR: --from-kiwi: OVMF loader did not land in domain XML" >&2
+        echo "ERROR: kiwi/UEFI clone: OVMF loader did not land in domain XML" >&2
         exit 1
     fi
 fi

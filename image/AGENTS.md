@@ -166,14 +166,17 @@ blocked/skip image row is fatal under `QCI_RELEASE=1` (todo/iso/14 F).
 `virtqemud` and crashes the builder (run 30).
 
 **CI base (iso/14 Phase G intermediate).** `scripts/vm/import-kiwi-base.sh`
-converts a tester `.raw`/`.raw.xz` to `qdistro-kiwi-base.qcow2`. qci
-workers (`spin-test-vm.sh`) clone that with `--from-kiwi` (OVMF) when
-`QDISTRO_VM_BASE=auto` (default) and the qcow2 exists, then
-`fresh-vm-bootstrap.sh` still overlays current source. `build-in-vm.sh`
-always clones `baseweed-baked` (using the tester image as the builder
-backing is circular). A `ci` kiwi profile (`QDISTRO_KIWI_PROFILE=ci`)
-bakes bats/ydotool extras and masks greetd; until that image is built
-and imported, bootstrap zypper-installs the extras on a tester base.
+converts a tester `.raw`/`.raw.xz` to `qdistro-kiwi-base.qcow2`. When
+that stamped qcow2 exists, `QDISTRO_VM_BASE=auto` (default) clones the
+golden *and* its workers from it under OVMF (`--from-kiwi` for the
+golden build; `--from-run-golden` still injects OVMF if the backing
+chain is the kiwi base — the BIOS template cannot boot a UEFI-only
+disk). `fresh-vm-bootstrap.sh` still overlays current source.
+`build-in-vm.sh` always clones `baseweed-baked` (using the tester image
+as the builder backing is circular). A `ci` kiwi profile
+(`QDISTRO_KIWI_PROFILE=ci`) bakes bats/ydotool extras and masks greetd;
+until that image is built and imported, bootstrap zypper-installs the
+extras on a tester base (needs guest egress).
 
 - `QDISTRO_BUILD_DIR` defaults to `/var/tmp/qdistro-build`. **Never `/tmp`**:
   it is a tmpfs on the build hosts and the 28 GiB raw does not fit in RAM.
