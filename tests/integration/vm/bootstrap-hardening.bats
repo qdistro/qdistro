@@ -245,7 +245,8 @@ run_boot() { run bash "$BOOT" "$@"; }
 }
 
 @test "hardening: RDP cert dir is 0700 and private key 0600" {
-    grep -q "install -d -o admin -g admin -m 0700 /home/admin/qdwin-rdp" "$FRESH"
+    grep -q 'id -gn admin' "$FRESH"
+    grep -q 'install -d -o admin -g "$_admin_grp" -m 0700 /home/admin/qdwin-rdp' "$FRESH"
     grep -q "chmod 0600 /home/admin/qdwin-rdp/rdp.key" "$FRESH"
 }
 

@@ -117,6 +117,13 @@ if ! ls /etc/zypp/repos.d/*.repo >/dev/null 2>&1; then
     qdistro_write_snapshot_repos /etc/qdistro/release || exit 3
 fi
 
+# Tester-as-base still needs extras zypper. Fail closed before the DNS
+# wait so QCI_OFFLINE=1 does not burn 60s then die.
+if ! command -v bats >/dev/null 2>&1 && [ "${QCI_OFFLINE:-0}" = 1 ]; then
+    log "ERROR: tester-as-base needs CI extras (bats) and QCI_OFFLINE=1 forbids zypper; import a ci-profile kiwi base or run with egress"
+    exit 3
+fi
+
 # qga-up is not DHCP/DNS. Later zypper (qnotebook, extras, weston deps)
 # needs guest egress even when bats is already present.
 log "waiting for guest network before zypper (qga-up is not DHCP/DNS)..."
@@ -144,13 +151,6 @@ fi
 if command -v bats >/dev/null 2>&1; then
     log "CI extras already present (bats); skipping zypper"
 else
-    # QCI_OFFLINE is forwarded by spin-test-vm.sh. A tester-as-base golden
-    # still needs this zypper; fail closed before the 60s DNS wait so an
-    # offline run does not die later with a truncated zypper log and no $SRC.
-    if [ "${QCI_OFFLINE:-0}" = 1 ]; then
-        log "ERROR: tester-as-base needs CI extras (bats) and QCI_OFFLINE=1 forbids zypper; import a ci-profile kiwi base or run with egress"
-        exit 3
-    fi
     log "ensuring CI extras (bats/ydotool/...; tester image used as qci base; needs guest egress to the pinned snapshot repos, not the host tarball server)..."
     if ! zypper -n install --no-recommends \
             bats ydotool tesseract-ocr rage-encryption rsync \
