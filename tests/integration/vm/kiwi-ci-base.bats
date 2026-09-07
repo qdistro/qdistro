@@ -247,12 +247,17 @@ setup() {
     grep -q 'bats ydotool tesseract-ocr rage-encryption rsync' "$b"
     grep -q 'QCI_OFFLINE=1 forbids zypper' "$b"
     grep -q "QCI_OFFLINE=" "$VM/spin-test-vm.sh"
-    local extras_line fetch_line mask_line offline_line
+    grep -q 'no zypper repos in the image' "$b"
+    grep -q 'qdistro-snapshot-oss.repo' "$b"
+    grep -q 'download.opensuse.org/history/' "$b"
+    local extras_line fetch_line mask_line offline_line repos_line
     extras_line="$(grep -n 'ensuring CI extras' "$b" | head -1 | cut -d: -f1)"
     fetch_line="$(grep -n 'fetching tarballs' "$b" | head -1 | cut -d: -f1)"
     mask_line="$(grep -n 'masking jeos-firstboot + greetd' "$b" | head -1 | cut -d: -f1)"
     offline_line="$(grep -n 'QCI_OFFLINE=1 forbids zypper' "$b" | head -1 | cut -d: -f1)"
-    [ "$mask_line" -lt "$offline_line" ]
+    repos_line="$(grep -n 'no zypper repos in the image' "$b" | head -1 | cut -d: -f1)"
+    [ "$mask_line" -lt "$repos_line" ]
+    [ "$repos_line" -lt "$extras_line" ]
     [ "$offline_line" -lt "$extras_line" ]
     [ "$extras_line" -lt "$fetch_line" ]
 }

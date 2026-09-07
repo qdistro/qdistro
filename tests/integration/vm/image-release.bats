@@ -115,6 +115,28 @@ assert found
 PY
 }
 
+@test "snapshot-repos: writes oss+nonoss history URLs from SNAPSHOT= and refuses junk" {
+    grep -q 'qdistro_write_snapshot_repos /etc/qdistro/release' "$IMAGE/config.sh"
+    grep -q 'image/lib/snapshot-repos.sh' "$IMAGE/config.sh"
+    mkdir -p "$T/repos.d"
+    printf 'SNAPSHOT=rolling\n' > "$T/bad-release"
+    run env QDISTRO_ZYPP_REPOS_D="$T/repos.d" bash -c '
+        source "$1"
+        qdistro_write_snapshot_repos "$2"
+    ' _ "$IMAGE/lib/snapshot-repos.sh" "$T/bad-release"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"SNAPSHOT="* ]]
+    printf 'SNAPSHOT=20260902\nPROFILE=dev\n' > "$T/good-release"
+    run env QDISTRO_ZYPP_REPOS_D="$T/repos.d" bash -c '
+        source "$1"
+        qdistro_write_snapshot_repos "$2"
+    ' _ "$IMAGE/lib/snapshot-repos.sh" "$T/good-release"
+    [ "$status" -eq 0 ]
+    grep -q 'history/20260902/tumbleweed/repo/oss/' "$T/repos.d/qdistro-snapshot-oss.repo"
+    grep -q 'history/20260902/tumbleweed/repo/non-oss/' "$T/repos.d/qdistro-snapshot-nonoss.repo"
+    grep -q '^gpgcheck=1$' "$T/repos.d/qdistro-snapshot-oss.repo"
+}
+
 @test "config.xml: both repositories pin the same Tumbleweed snapshot over https" {
     run xml repos
     [ "${#lines[@]}" -eq 2 ]
