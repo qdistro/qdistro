@@ -86,6 +86,13 @@ systemctl mask greetd.service 2>/dev/null || true
 if command -v bats >/dev/null 2>&1; then
     log "CI extras already present (bats); skipping zypper"
 else
+    # QCI_OFFLINE is forwarded by spin-test-vm.sh. A tester-as-base golden
+    # still needs this zypper; fail closed before the 60s DNS wait so an
+    # offline run does not die later with a truncated zypper log and no $SRC.
+    if [ "${QCI_OFFLINE:-0}" = 1 ]; then
+        log "ERROR: tester-as-base needs CI extras (bats) and QCI_OFFLINE=1 forbids zypper; import a ci-profile kiwi base or run with egress"
+        exit 3
+    fi
     log "ensuring CI extras (bats/ydotool/...; tester image used as qci base; needs guest egress to the pinned snapshot repos, not the host tarball server)..."
     log "waiting for guest network before zypper (qga-up is not DHCP/DNS)..."
     _net_ok=0

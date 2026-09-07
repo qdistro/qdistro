@@ -6,7 +6,7 @@
 #   1. build-baseweed-from-scratch.sh   (if baseweed-admin.qcow2 absent)
 #   2. build-baked-baseweed.sh          (if baseweed-baked.qcow2 absent)
 #   3. clone-baseweed.sh --from-kiwi or --from-baked
-#      (QDISTRO_VM_BASE=auto|kiwi|baked; auto uses the imported tester
+#      (QDISTRO_VM_BASE=auto|kiwi|baked; auto uses the imported kiwi
 #       image if present — iso/14 Phase G — else baseweed-baked)
 #   4. tarball + HTTP-stage the three sibling repos
 #   5. fresh-vm-bootstrap.sh in VM      (build qdwin, build daemons,
@@ -110,7 +110,7 @@ if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
             --from-run-golden="$QCI_RUN_GOLDEN_BACKING" | tail -1)
 else
     if [ "$VM_BASE_KIND" = kiwi ]; then
-        log "stage 3: cloning a fresh VM from kiwi tester image ($(qdistro_kiwi_base_path); QDISTRO_VM_BASE=${QDISTRO_VM_BASE:-auto})..."
+        log "stage 3: cloning a fresh VM from kiwi image ($(qdistro_kiwi_base_path); QDISTRO_VM_BASE=${QDISTRO_VM_BASE:-auto})..."
         VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-kiwi | tail -1)
     else
         log "stage 3: cloning a fresh VM from baked..."
@@ -268,9 +268,12 @@ case "${QDISTRO_BUILD_TIER2_IMAGES:-0}" in 1|true|yes|on) _T2_IMAGES=1 ;; *) _T2
 # scenario found its apps absent. Normalize + forward it into the same stage-5
 # env so `QDWIN_APP_DEPS=1 qci gui` actually produces an app-deps golden.
 case "${QDWIN_APP_DEPS:-0}" in 1|true|yes|on) _APP_DEPS=1 ;; *) _APP_DEPS=0 ;; esac
+case "${QCI_OFFLINE:-0}" in 1|true|yes|on) _OFFLINE=1 ;; *) _OFFLINE=0 ;; esac
 # QDWIN_EXTRA_MESON_OPTS (optional) is forwarded verbatim to the in-guest qdwin
 # meson setup — used by the A1-min straddle test build (-Denable_test_place=true).
-"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_APP_DEPS='$_APP_DEPS' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' bash /root/fresh-vm-bootstrap.sh" >&2
+# QCI_OFFLINE is forwarded so a tester-as-base golden fails closed before
+# zypper instead of waiting 60s for DNS that will not come.
+"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_APP_DEPS='$_APP_DEPS' QCI_OFFLINE='$_OFFLINE' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' bash /root/fresh-vm-bootstrap.sh" >&2
 
 fi  # end stages 4-5 (skipped in run-golden mode)
 
