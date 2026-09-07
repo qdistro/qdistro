@@ -6,7 +6,7 @@
 #   ./clone-baseweed.sh <name-prefix>                       # default: pixman baseline
 #   ./clone-baseweed.sh <name-prefix> --gpu                 # virtio-gpu accel3d for §6.8 dmabuf tests
 #   ./clone-baseweed.sh <name-prefix> --from-baked          # back from baseweed-baked.qcow2 (skips zypper install-deps)
-#   ./clone-baseweed.sh <name-prefix> --from-kiwi            # back from imported tester image (UEFI; iso/14 Phase G)
+#   ./clone-baseweed.sh <name-prefix> --from-kiwi            # back from imported kiwi image (UEFI; iso/14 Phase G)
 #   ./clone-baseweed.sh <name-prefix> --from-enforcing-baked # baseweed-enforcing-baked: SELinux=enforcing config + SSH-bootstrapped
 #
 # Outputs the new VM name to stdout. With --from-enforcing-baked, the

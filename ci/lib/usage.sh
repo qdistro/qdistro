@@ -151,10 +151,11 @@ Environment:
                             ~/.local/share/libvirt/images.
   QDISTRO_VM_BASE           auto|kiwi|baked. Which backing image spin-test-vm
                             clones for qci workers. auto (default): imported
-                            tester qcow2 if present (scripts/vm/import-kiwi-base.sh),
-                            else baseweed-baked. kiwi requires the import.
-                            baked always uses baseweed-baked. The kiwi builder
-                            (build-in-vm.sh) always clones baked. iso/14 Phase G.
+                            kiwi qcow2 if present (scripts/vm/import-kiwi-base.sh;
+                            tester or ci profile), else baseweed-baked. kiwi
+                            requires the import. baked always uses
+                            baseweed-baked. The kiwi builder (build-in-vm.sh)
+                            always clones baked. iso/14 Phase G.
   QCI_OFFLINE=1             Host-only / no-egress posture for VM tests. Records
                             a source tarball + sha256 in manifest.txt, exports
                             the gate down to scenarios so external-network tests
