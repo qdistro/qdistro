@@ -1,6 +1,7 @@
 #!/bin/bash
-# import-kiwi-base.sh — turn a tester .raw / .raw.xz into the CI backing
-# image $QDWIN_IMG_DIR/qdistro-kiwi-base.qcow2 (iso/14 Phase G intermediate).
+# import-kiwi-base.sh — turn a kiwi .raw / .raw.xz (tester or ci profile)
+# into the CI backing image $QDWIN_IMG_DIR/qdistro-kiwi-base.qcow2
+# (iso/14 Phase G intermediate).
 #
 # The qcow2 is sparse (qemu-img convert -S 64k, no cluster compression) so
 # clone-baseweed.sh --from-kiwi can overlay it the same way --from-baked

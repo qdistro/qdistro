@@ -74,6 +74,71 @@ systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/nul
 systemctl disable --now greetd.service 2>/dev/null || true
 systemctl mask greetd.service 2>/dev/null || true
 
+# ---- 0a. Snapshot zypper repos (iso/14 Phase G.2) --------------------------
+# kiwi OEM leaves /etc/zypp/repos.d empty. Bootstrap still zyppers
+# (qnotebook, weston deps, extras on a tester-as-base). Keep this
+# function body in sync with image/lib/snapshot-repos.sh (this script
+# runs before $SRC exists, so it cannot source that file).
+qdistro_write_snapshot_repos() {
+    local release="${1:-/etc/qdistro/release}"
+    local snap repo_dir
+    if [ ! -s "$release" ]; then
+        echo "[bootstrap] ERROR: $release missing or empty; cannot pin snapshot repos" >&2
+        return 1
+    fi
+    snap="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' "$release" | head -n1)"
+    if [ -z "$snap" ]; then
+        echo "[bootstrap] ERROR: $release has no SNAPSHOT=<YYYYMMDD> line" >&2
+        return 1
+    fi
+    repo_dir="${QDISTRO_ZYPP_REPOS_D:-/etc/zypp/repos.d}"
+    mkdir -p "$repo_dir"
+    cat > "$repo_dir/qdistro-snapshot-oss.repo" <<EOF
+[qdistro-snapshot-oss]
+name=qdistro Tumbleweed OSS $snap
+enabled=1
+autorefresh=0
+baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/oss/
+gpgcheck=1
+EOF
+    cat > "$repo_dir/qdistro-snapshot-nonoss.repo" <<EOF
+[qdistro-snapshot-nonoss]
+name=qdistro Tumbleweed NonOSS $snap
+enabled=1
+autorefresh=0
+baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/non-oss/
+gpgcheck=1
+EOF
+    chmod 0644 "$repo_dir/qdistro-snapshot-oss.repo" "$repo_dir/qdistro-snapshot-nonoss.repo"
+    return 0
+}
+if ! ls /etc/zypp/repos.d/*.repo >/dev/null 2>&1; then
+    log "no zypper repos in the image; writing snapshot repos from /etc/qdistro/release"
+    qdistro_write_snapshot_repos /etc/qdistro/release || exit 3
+fi
+
+# Tester-as-base still needs extras zypper. Fail closed before the DNS
+# wait so QCI_OFFLINE=1 does not burn 60s then die.
+if ! command -v bats >/dev/null 2>&1 && [ "${QCI_OFFLINE:-0}" = 1 ]; then
+    log "ERROR: tester-as-base needs CI extras (bats) and QCI_OFFLINE=1 forbids zypper; import a ci-profile kiwi base or run with egress"
+    exit 3
+fi
+
+# qga-up is not DHCP/DNS. Later zypper (qnotebook, extras, weston deps)
+# needs guest egress even when bats is already present.
+log "waiting for guest network before zypper (qga-up is not DHCP/DNS)..."
+_net_ok=0
+for _ in $(seq 1 30); do
+    if getent hosts download.opensuse.org >/dev/null 2>&1; then
+        _net_ok=1
+        break
+    fi
+    sleep 2
+done
+if [ "$_net_ok" != 1 ]; then
+    log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
+fi
+
 # ---- 0b. CI extras (iso/14 Phase G intermediate) ---------------------------
 # The tester kiwi image already has gcc/meson (config.sh compiles in-chroot)
 # but not bats/ydotool/tesseract/rage/jeepney/silo-egress tools. The ci kiwi
@@ -87,18 +152,6 @@ if command -v bats >/dev/null 2>&1; then
     log "CI extras already present (bats); skipping zypper"
 else
     log "ensuring CI extras (bats/ydotool/...; tester image used as qci base; needs guest egress to the pinned snapshot repos, not the host tarball server)..."
-    log "waiting for guest network before zypper (qga-up is not DHCP/DNS)..."
-    _net_ok=0
-    for _ in $(seq 1 30); do
-        if getent hosts download.opensuse.org >/dev/null 2>&1; then
-            _net_ok=1
-            break
-        fi
-        sleep 2
-    done
-    if [ "$_net_ok" != 1 ]; then
-        log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
-    fi
     if ! zypper -n install --no-recommends \
             bats ydotool tesseract-ocr rage-encryption rsync \
             python313-jeepney python313-six Mesa-demo-egl \
@@ -292,7 +345,11 @@ if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.ke
         log "generating RDP TLS cert/key (winpr-makecert)..."
         # Cert dir 0700 (private-key directory must not be group/world
         # traversable); the private key itself is forced to 0600 below.
-        install -d -o admin -g admin -m 0700 /home/admin/qdwin-rdp
+        # kiwi XML puts admin in group users; baked baseweed uses group
+        # admin. Use the account's primary group so bootstrap-on-kiwi
+        # does not die with "install: invalid group 'admin'".
+        _admin_grp="$(id -gn admin)"
+        install -d -o admin -g "$_admin_grp" -m 0700 /home/admin/qdwin-rdp
         runuser -u admin -- winpr-makecert -rdp -path /home/admin/qdwin-rdp \
             >/dev/null 2>&1 || log "  WARN: winpr-makecert failed"
         # winpr-makecert names files <hostname>.{crt,key}; rename.
@@ -301,7 +358,7 @@ if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.ke
                  mv "$f" rdp.crt 2>/dev/null; break; done \
             && for f in *.key; do [ "$f" = rdp.key ] && continue; \
                  mv "$f" rdp.key 2>/dev/null; break; done)
-        chown -R admin:admin /home/admin/qdwin-rdp 2>/dev/null || true
+        chown -R "admin:$_admin_grp" /home/admin/qdwin-rdp 2>/dev/null || true
         # Lock down: dir 0700, private key 0600, cert 0644 (public).
         chmod 0700 /home/admin/qdwin-rdp 2>/dev/null || true
         [ -f /home/admin/qdwin-rdp/rdp.key ] && chmod 0600 /home/admin/qdwin-rdp/rdp.key 2>/dev/null || true

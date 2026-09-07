@@ -59,6 +59,17 @@ rm -f /root/qdistro-source-manifest
 echo "[qdistro-image] /etc/qdistro/release:"
 sed 's/^/[qdistro-image]   /' /etc/qdistro/release
 
+# kiwi does not persist description <repository> entries into the packed
+# image (iso/14 Phase G.2: /etc/zypp/repos.d is empty). Bootstrap still
+# zyppers. Write the same history/<snapshot>/ URLs config.xml pinned.
+. "$QD/image/lib/snapshot-repos.sh"
+if ! qdistro_write_snapshot_repos /etc/qdistro/release; then
+    echo "[qdistro-image] FATAL: could not write snapshot zypper repos. Aborting build." >&2
+    exit 1
+fi
+echo "[qdistro-image] snapshot zypper repos:"
+sed 's/^/[qdistro-image]   /' /etc/zypp/repos.d/qdistro-snapshot-oss.repo /etc/zypp/repos.d/qdistro-snapshot-nonoss.repo
+
 # jeos-firstboot fights us for tty1 and blocks multi-user.target on
 # openSUSE JeOS-derived images. Mask before greetd takes over.
 systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true

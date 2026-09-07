@@ -6,7 +6,7 @@
 #   ./clone-baseweed.sh <name-prefix>                       # default: pixman baseline
 #   ./clone-baseweed.sh <name-prefix> --gpu                 # virtio-gpu accel3d for §6.8 dmabuf tests
 #   ./clone-baseweed.sh <name-prefix> --from-baked          # back from baseweed-baked.qcow2 (skips zypper install-deps)
-#   ./clone-baseweed.sh <name-prefix> --from-kiwi            # back from imported tester image (UEFI; iso/14 Phase G)
+#   ./clone-baseweed.sh <name-prefix> --from-kiwi            # back from imported kiwi image (UEFI; iso/14 Phase G)
 #   ./clone-baseweed.sh <name-prefix> --from-enforcing-baked # baseweed-enforcing-baked: SELinux=enforcing config + SSH-bootstrapped
 #
 # Outputs the new VM name to stdout. With --from-enforcing-baked, the
@@ -148,9 +148,10 @@ if [ ! -f "$BACKING" ]; then
     fi
     exit 1
 fi
-# Store a canonical -b so qemu-img's backing-file string matches
-# qdistro_backing_needs_ovmf's realpath (symlink images dir, relative
-# QDISTRO_KIWI_BASE). Workers clone --from-run-golden and need that match.
+# Store a canonical -b (readlink -m) so new overlays keep an absolute
+# backing path. The OVMF probe walks and canonicalizes both sides, so a
+# stored symlink or relative -b still injects; this is the default for
+# new goldens (symlink images dir, relative QDISTRO_KIWI_BASE).
 BACKING="$(readlink -m -- "$BACKING")"
 if [ "$FROM_KIWI" = 1 ]; then
     if ! qemu-img info "$BACKING" 2>/dev/null | grep -q 'file format: qcow2'; then

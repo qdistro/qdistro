@@ -132,7 +132,7 @@
   <users>
     <user name="root"  password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted" home="/root"/>
     <user name="admin" password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted"
-          home="/home/admin" id="1000" groups="users,wheel,video,audio,input,kvm,libvirt"/>
+          home="/home/admin" id="1000" groups="admin,users,wheel,video,audio,input,kvm,libvirt"/>
     <user name="user"  password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted"
           home="/home/user"  id="1001" groups="users,video,audio,input"/>
   </users>
