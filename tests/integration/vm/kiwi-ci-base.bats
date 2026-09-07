@@ -250,6 +250,7 @@ setup() {
     grep -q 'no zypper repos in the image' "$b"
     grep -q 'qdistro-snapshot-oss.repo' "$b"
     grep -q 'download.opensuse.org/history/' "$b"
+    grep -q 'id -gn admin' "$b"
     local extras_line fetch_line mask_line offline_line repos_line
     extras_line="$(grep -n 'ensuring CI extras' "$b" | head -1 | cut -d: -f1)"
     fetch_line="$(grep -n 'fetching tarballs' "$b" | head -1 | cut -d: -f1)"

@@ -345,7 +345,11 @@ if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.ke
         log "generating RDP TLS cert/key (winpr-makecert)..."
         # Cert dir 0700 (private-key directory must not be group/world
         # traversable); the private key itself is forced to 0600 below.
-        install -d -o admin -g admin -m 0700 /home/admin/qdwin-rdp
+        # kiwi XML puts admin in group users; baked baseweed uses group
+        # admin. Use the account's primary group so bootstrap-on-kiwi
+        # does not die with "install: invalid group 'admin'".
+        _admin_grp="$(id -gn admin)"
+        install -d -o admin -g "$_admin_grp" -m 0700 /home/admin/qdwin-rdp
         runuser -u admin -- winpr-makecert -rdp -path /home/admin/qdwin-rdp \
             >/dev/null 2>&1 || log "  WARN: winpr-makecert failed"
         # winpr-makecert names files <hostname>.{crt,key}; rename.
@@ -354,7 +358,7 @@ if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.ke
                  mv "$f" rdp.crt 2>/dev/null; break; done \
             && for f in *.key; do [ "$f" = rdp.key ] && continue; \
                  mv "$f" rdp.key 2>/dev/null; break; done)
-        chown -R admin:admin /home/admin/qdwin-rdp 2>/dev/null || true
+        chown -R "admin:$_admin_grp" /home/admin/qdwin-rdp 2>/dev/null || true
         # Lock down: dir 0700, private key 0600, cert 0644 (public).
         chmod 0700 /home/admin/qdwin-rdp 2>/dev/null || true
         [ -f /home/admin/qdwin-rdp/rdp.key ] && chmod 0600 /home/admin/qdwin-rdp/rdp.key 2>/dev/null || true
