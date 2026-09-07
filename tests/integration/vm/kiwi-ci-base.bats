@@ -291,6 +291,9 @@ setup() {
     run bash "$VM/vm-exec" "$vm" 'test -f /etc/qdistro/release && cat /etc/qdistro/release'
     local rc=$status
     # Worker path qci actually uses: overlay of the golden, not --from-kiwi.
+    # The golden domain must be shut off first: qemu refuses a second
+    # writer on the golden qcow2 (shared write lock).
+    virsh -c qemu:///session destroy "$vm" >/dev/null 2>&1 || true
     worker="$(bash "$VM/clone-baseweed.sh" qdistro-kg-w --from-run-golden="$imgdir/${vm}.qcow2")"
     [ -n "$worker" ]
     virsh -c qemu:///session dumpxml "$worker" | grep -q '<loader'
