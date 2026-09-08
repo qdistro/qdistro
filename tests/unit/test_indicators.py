@@ -19,8 +19,8 @@ from qdlocker import indicators as I
 REPO = Path(__file__).resolve().parents[2]
 
 
-def node(state: str, **props) -> dict:
-    return {"type": "PipeWire:Interface:Node", "id": 1,
+def node(state: str, *, node_id: int = 1, **props) -> dict:
+    return {"type": "PipeWire:Interface:Node", "id": node_id,
             "info": {"state": state, "props": props}}
 
 
@@ -574,6 +574,85 @@ def test_device_only_evidence_is_not_presented_as_client_attribution():
     s = I.summarise_capture(ok, nodes, fresh=True)
     assert s["attributed"] is True
     assert s["activeDetail"] == "mic:zoom"
+
+
+def test_device_node_remains_visible_beside_attributed_stream():
+    """A real pw-record graph contains both the source and consumer nodes.
+
+    PipeWire node metadata alone does not prove which device feeds a stream,
+    so fail visibly rather than hiding possibly independent device activity.
+    """
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", **{
+            "media.class": "Audio/Source",
+            "node.description": "Built-in Audio Analog Stereo",
+            "object.serial": 48,
+        }),
+        node("running", **{
+            "media.class": "Stream/Input/Audio",
+            "application.process.binary": "pw-record",
+            "node.driver-id": 48,
+        }),
+    ]))
+
+    s = I.summarise_capture(ok, nodes, fresh=True)
+
+    assert s["attributed"] is False
+    assert s["activeCount"] == 2
+    assert s["activeDetail"] == (
+        "mic:Built-in Audio Analog Stereo (device active, client unknown), "
+        "mic:pw-record")
+
+
+def test_driver_id_serial_collision_cannot_hide_an_active_microphone():
+    """node.driver-id is not source linkage and may equal another serial."""
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", node_id=48, **{
+            "media.class": "Audio/Source",
+            "node.description": "Built-in Microphone",
+            "object.serial": 70,
+        }),
+        node("running", node_id=49, **{
+            "media.class": "Audio/Source",
+            "node.description": "USB Microphone",
+            "object.serial": 48,
+        }),
+        node("running", node_id=60, **{
+            "media.class": "Stream/Input/Audio",
+            "application.process.binary": "pw-record",
+            "node.driver-id": 48,
+        }),
+    ]))
+
+    s = I.summarise_capture(ok, nodes, fresh=True)
+
+    assert s["attributed"] is False
+    assert s["activeCount"] == 3
+    assert s["activeDetail"] == (
+        "mic:Built-in Microphone (device active, client unknown), "
+        "mic:USB Microphone (device active, client unknown), mic:pw-record")
+
+
+def test_one_anonymous_stream_makes_combined_capture_unattributed():
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", **{
+            "media.class": "Stream/Input/Audio",
+            "application.process.binary": "pw-record",
+        }),
+        node("running", **{
+            "media.class": "Stream/Input/Video",
+            "node.description": "unnamed camera stream",
+            "media.role": "Camera",
+        }),
+    ]))
+
+    s = I.summarise_capture(ok, nodes, fresh=True)
+
+    assert s["attributed"] is False
+    assert "client unknown" in s["activeDetail"]
 
 
 def test_failed_observer_is_distinguishable_from_a_quiet_one(qapp_offscreen,

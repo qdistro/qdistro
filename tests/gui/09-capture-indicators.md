@@ -44,6 +44,20 @@ qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running |
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 qdlocker_drain_lock_state
 
+# The qdwin golden intentionally has no work silos: adding one globally changes
+# unrelated shell UI baselines.  Own a dedicated, denied-egress fixture for this
+# scenario and remove it in Cleanup.
+SILO=${QDLOCKER_09_SILO:-qdlocker09}
+SILO_UID=${QDLOCKER_09_SILO_UID:-3909}
+"$QDWIN_VM_EXEC" "$VMNAME" "
+  runuser -u admin -- busctl --system call \
+    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 CreateSilo si '$SILO' '$SILO_UID'
+  runuser -u admin -- busctl --system call \
+    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 SetSiloEgress ss '$SILO' none
+"
+
 qdwin_screenshot /tmp/qdlocker-09-step0-baseline.png
 read -r SW SH < <(qdlocker_screenshot_dimensions /tmp/qdlocker-09-step0-baseline.png)
 
@@ -423,11 +437,11 @@ assert_ind capture_observer ok
 ### Step 8 — silo egress, including transient `Stopping` and an unreachable manager
 
 ```bash
-SILO=${QDLOCKER_09_SILO:-work}
+SILO=${QDLOCKER_09_SILO:-qdlocker09}
 "$QDWIN_VM_EXEC" "$VMNAME" "
-  busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+  runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
     org.qdistro.SessionManager1 SetSiloEgress ss '$SILO' 'direct'
-  busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+  runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
     org.qdistro.SessionManager1 StartSilo s '$SILO'
 "
 sleep 4
@@ -437,7 +451,8 @@ qdwin_screenshot /tmp/qdlocker-09-step8-egress.png
 
 # Sample DURING the transient Stopping state (30s grace window).
 "$QDWIN_VM_EXEC" "$VMNAME" "
-  setsid busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+  setsid runuser -u admin -- busctl --system call \
+    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
     org.qdistro.SessionManager1 StopSilo si '$SILO' 30 >/dev/null 2>&1 &
 "
 sleep 4
@@ -590,7 +605,8 @@ a J28 regression — do not report it as a J28 failure.
 ## Cleanup
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" '
+SILO=${QDLOCKER_09_SILO:-qdlocker09}
+"$QDWIN_VM_EXEC" "$VMNAME" "
   pkill -u admin -x pw-record 2>/dev/null || true
   pkill -u admin -x parec 2>/dev/null || true
   pkill -u admin -x gst-launch-1.0 2>/dev/null || true
@@ -599,7 +615,19 @@ a J28 regression — do not report it as a J28 failure.
   rm -rf /tmp/qdlocker-09-brokenbin
   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
   systemctl start qdistro-session-manager.service 2>/dev/null || true
-'
+  runuser -u admin -- busctl --system call \
+    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 SetSiloEgress ss '$SILO' none 2>/dev/null || true
+  runuser -u admin -- busctl --system call \
+    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 StopSilo si '$SILO' 0 2>/dev/null || true
+  for i in \$(seq 1 20); do
+    runuser -u admin -- busctl --system call \
+      org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+      org.qdistro.SessionManager1 DeleteSilo s '$SILO' >/dev/null 2>&1 && break
+    sleep 1
+  done
+"
 qdlocker_drain_lock_state
 sleep 2
 ```

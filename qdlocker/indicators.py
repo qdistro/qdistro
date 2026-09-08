@@ -355,10 +355,11 @@ def summarise_capture(ok: bool, nodes: list[dict], fresh: bool,
         "activeLabel": (", ".join(shown) + f" +{extra}") if extra > 0 else ", ".join(shown),
         "activeDetail": ", ".join(_entry_text(e) for e in entries),
         "anyActive": bool(entries),
-        # True only when at least one piece of evidence names its own client.
-        # Device-node-only evidence is real activity but unattributed, and the
-        # UI must not present it with the same certainty.
-        "attributed": any(e.get("evidence") == "client" for e in entries),
+        # Claim attribution only when every displayed capture names its own
+        # client.  One anonymous stream makes the combined banner uncertain,
+        # even if another simultaneous stream is named.
+        "attributed": bool(entries) and all(
+            e.get("evidence") == "client" for e in entries),
         "unverifiedKinds": unverified,
         "unverifiedLabel": ", ".join(KIND_LABELS[k] for k in unverified),
         "anyUnverified": bool(unverified),
