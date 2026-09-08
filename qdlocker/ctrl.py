@@ -16,10 +16,16 @@ Commands (one per connection, newline-terminated):
   unlock-result       `last=<success|failed|none>`
   prompt-text         masked prompt buffer (`*` per char + length);
                        never returns plaintext.
+  indicators          one-line live state of the lock-surface capture /
+                       egress indicators (J28), as seen by the RUNNING
+                       observer — so the GUI gate can assert its lock-edge
+                       rescan, timeout and freshness behaviour instead of
+                       re-deriving from a separate process.
 
-Finding 02: `status`, `unlock-result` and `prompt-text` are introspection
+Finding 02: `status`, `unlock-result`, `prompt-text` and `indicators` are introspection
 commands — they expose live lock state and, via prompt-text/prompt-len, a
-password-LENGTH side channel. They exist only for the GUI test harness and are
+password-LENGTH side channel; `indicators` additionally discloses whether a
+capture is live. They exist only for the GUI test harness and are
 served ONLY when introspection is enabled (constructor `introspection=True`).
 app.py authorizes that solely via a root-owned marker
 (`/etc/qdistro/locker-ctrl-introspection`) so a same-uid process cannot forge
@@ -84,6 +90,11 @@ class CtrlState:
         self._pam_ready = controller.pamReady
         self._unlock_in_progress = controller.unlockInProgress
         self._last_outcome: AuthOutcome | None = None
+        # J28 indicator snapshot, refreshed from the observer's `changed`
+        # signal. Defaults to a FAILED reading, not an empty one: a harness
+        # that reads this before the observer has published anything must not
+        # see something that looks like a healthy quiet machine.
+        self._indicators = "capture_observer=failed egress_observer=failed"
 
     def set_locked(self, value: bool) -> None:
         with self._lock:
@@ -104,6 +115,14 @@ class CtrlState:
     def set_last_outcome(self, value: AuthOutcome) -> None:
         with self._lock:
             self._last_outcome = value
+
+    def set_indicators(self, value: str) -> None:
+        with self._lock:
+            self._indicators = value
+
+    def indicators(self) -> str:
+        with self._lock:
+            return self._indicators
 
     def status(self) -> str:
         with self._lock:
@@ -133,6 +152,7 @@ class CtrlSocket(QObject):
         path: Path | None = None,
         parent: QObject | None = None,
         introspection: bool = False,
+        indicators=None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
@@ -153,6 +173,10 @@ class CtrlSocket(QObject):
         controller._unlockInProgressChanged.connect(self._on_unlock_in_progress_changed)
         if hasattr(bridge, "lockedChangedForCtrl"):
             bridge.lockedChangedForCtrl.connect(self._on_locked_changed)
+        self._indicators = indicators
+        if indicators is not None:
+            indicators.changed.connect(self._on_indicators_changed)
+            self._on_indicators_changed()
 
         # Tighten umask so the bind creates the socket with 0o600
         # regardless of the inherited umask. The chmod afterwards is
@@ -310,6 +334,14 @@ class CtrlSocket(QObject):
             except OSError:
                 pass
 
+    def _on_indicators_changed(self) -> None:
+        if self._indicators is None:
+            return
+        try:
+            self._state.set_indicators(self._indicators.snapshot_line())
+        except Exception:  # never let an introspection readout kill the locker
+            log.exception("indicator snapshot failed")
+
     def _handle(self, line: str) -> str:
         if not line:
             return "error: empty command"
@@ -326,13 +358,15 @@ class CtrlSocket(QObject):
         # app.py authorizes via a root-owned marker for the GUI test harness).
         # In production they are unavailable, so the prompt-length side channel
         # and live-state readout do not exist.
-        if cmd in ("status", "unlock-result", "prompt-text"):
+        if cmd in ("status", "unlock-result", "prompt-text", "indicators"):
             if not self._introspection:
                 return "error: command unavailable"
             if cmd == "status":
                 return self._state.status()
             if cmd == "unlock-result":
                 return self._state.unlock_result()
+            if cmd == "indicators":
+                return self._state.indicators()
             # prompt-text: never return plaintext — only a length-revealing
             # mask. Scenario 05 asserts on this exact form.
             return self._state.prompt_text()

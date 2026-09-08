@@ -33,6 +33,7 @@ from .auth import AuthBackend
 from .controller import LockController
 from .ctrl import CtrlSocket
 from .idle import IdleWatcher
+from .indicators import LockIndicators
 from .logind import LogindWatcher
 from .pwd_lifecycle import PwdLifecycleNotifier
 from .wayland import LockerClient, LockerEvents
@@ -582,6 +583,20 @@ def main(argv: list[str] | None = None) -> int:
     client = LockerClient(events)
     bridge.attach(client)
 
+    # Live-capture / egress indicators. These observe only while locked, and
+    # drop any pre-lock reading on every lock edge, so nothing seen while the
+    # machine was unlocked can be presented as locked-machine state.
+    #
+    # Deliberately wired to lockedChangedForCtrl, NOT lockedChanged:
+    # lockedChanged mirrors lock *intent* and is emitted before
+    # client.set_locked() reaches qdwin, and it does NOT re-fire when the
+    # compositor's authoritative locked_changed(1) arrives (the intent mirror
+    # is already true). lockedChangedForCtrl fires on ready, on lock intent
+    # AND on every compositor confirmation, so the confirmation invalidates
+    # the intent-time scan and launches a fresh one from the locked machine.
+    indicators = LockIndicators()
+    bridge.lockedChangedForCtrl.connect(indicators.set_locked)
+
     engine = QQmlApplicationEngine()
     qdshell_path = _qdshell_import_path()
     if qdshell_path:
@@ -589,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     engine.addImportPath(str(QML_ROOT))
     engine.rootContext().setContextProperty("controller", controller)
     engine.rootContext().setContextProperty("bridge", bridge)
+    engine.rootContext().setContextProperty("indicators", indicators)
     engine.load(QUrl.fromLocalFile(str(QML_ROOT / "Main.qml")))
 
     if not engine.rootObjects():
@@ -682,7 +698,8 @@ def main(argv: list[str] | None = None) -> int:
         # user unit. A root-owned marker cannot be forged without root.
         introspection = _introspection_authorized()
         ctrl = CtrlSocket(controller, bridge, parent=app,
-                          introspection=introspection)
+                          introspection=introspection,
+                          indicators=indicators)
 
     app.aboutToQuit.connect(client.disconnect)
     if ctrl is not None:

@@ -21,7 +21,124 @@ Item {
   id: root
   property var lockController
 
+  // Live-capture / network-egress indicators (contextProperty "indicators",
+  // see app.py and qdlocker/indicators.py). If the context property is missing
+  // the banner says so rather than rendering nothing: a lock surface that
+  // cannot observe capture must not look like a quiet machine.
+  property var lockIndicators: (typeof indicators !== "undefined") ? indicators : null
+
   Rectangle { anchors.fill: parent; color: Color.mSurface }
+
+  // Security indicator banner — sessions.md requires non-suppressible state
+  // for live mic/camera/screencast/system-audio/virtual-input capture and
+  // qdistro network egress. Nothing gates this on a setting.
+  //
+  // Three distinct severities, because they mean different things:
+  //   * observed capture (red) — a running PipeWire capture node, named by
+  //     its own client where the graph attributes one, otherwise reported as
+  //     device-level activity with the client unknown;
+  //   * observer failed (red) — no reading at all, which is NOT the same as
+  //     a quiet machine and must not look like one;
+  //   * coverage disclosure (dim) — the standing statement of what this
+  //     cannot see: direct /dev/snd + /dev/video grants, weston_capture_v1
+  //     grabs and virtual input are unmonitored, so "nothing observed" is
+  //     never "nothing is happening". See qdlocker/indicators.py.
+  Rectangle {
+    id: securityBanner
+    // objectName: addressable from tests/unit/test_indicators.py, which loads
+    // this component under a real QQmlEngine and drives a fake observer.
+    objectName: "securityBanner"
+    anchors.top: parent.top
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.topMargin: Style.fontSizeXXL
+    width: Math.min(parent.width * 0.9, 900)
+    height: bannerRows.implicitHeight + Style.fontSizeXXL
+    radius: Style.radiusXS
+    readonly property bool capturing: root.lockIndicators
+                                      ? root.lockIndicators.captureActive : false
+    // No usable reading: the observer object is missing entirely, or its last
+    // scan failed / was killed / aged out. This is deliberately NOT the same
+    // condition as "healthy scan, nothing observed" — that one is the dim
+    // coverage disclosure below.
+    readonly property bool observerDead: !root.lockIndicators
+                                         || !root.lockIndicators.captureObserverOk
+    color: (capturing || observerDead) ? Qt.alpha(Color.mError, 0.18)
+                                       : Qt.alpha(Color.mOnSurfaceVariant, 0.10)
+    border.color: (capturing || observerDead) ? Color.mError
+                                              : Qt.alpha(Color.mOnSurfaceVariant, 0.35)
+    border.width: Style.borderM
+
+    Column {
+      id: bannerRows
+      anchors.centerIn: parent
+      width: parent.width - Style.fontSizeXXL
+      spacing: Style.fontSizeS
+
+      // Observer missing or not producing a usable reading — say so loudly.
+      // A wedged/killed/stale scan lands here, not in the dim row below.
+      Text {
+        width: parent.width
+        objectName: "captureFailedRow"
+        visible: securityBanner.observerDead
+        text: !root.lockIndicators
+              ? "⚠ capture monitoring unavailable — mic, camera and screen capture are NOT being observed"
+              : "⚠ capture monitoring FAILED — the last scan produced no usable reading; nothing is being observed"
+        wrapMode: Text.WordWrap
+        color: Color.mError
+        font.pointSize: Style.fontSizeL
+      }
+
+      // Positively observed capture. "LIVE CAPTURE" only when the graph
+      // attributes a client; device-level evidence says so instead.
+      Text {
+        width: parent.width
+        objectName: "captureActiveRow"
+        visible: securityBanner.capturing
+        text: (root.lockIndicators && root.lockIndicators.captureAttributed
+               ? "⚠ LIVE CAPTURE: " : "⚠ CAPTURE ACTIVITY: ")
+              + (root.lockIndicators ? root.lockIndicators.captureDetail : "")
+        wrapMode: Text.WordWrap
+        color: Color.mError
+        font.pointSize: Style.fontSizeL
+      }
+
+      // Standing coverage disclosure. Deliberatelylow-key relative to the rows
+      // above: it is always true, so it must not compete with a real event.
+      Text {
+        width: parent.width
+        objectName: "capturePartialRow"
+        visible: root.lockIndicators
+                 && root.lockIndicators.captureObserverOk
+                 && root.lockIndicators.captureUnverified
+        text: "capture monitoring: partial — no capture observed for "
+              + (root.lockIndicators ? root.lockIndicators.captureUnverifiedLabel : "")
+              + "; direct device grants and virtual input are not monitored"
+        wrapMode: Text.WordWrap
+        color: Color.mOnSurfaceVariant
+        font.pointSize: Style.fontSizeM
+      }
+
+      // Active silo network egress, and its own unverified case.
+      Text {
+        width: parent.width
+        visible: root.lockIndicators ? root.lockIndicators.egressActive : false
+        text: "network egress: " + (root.lockIndicators
+                                    ? root.lockIndicators.egressLabel : "")
+        wrapMode: Text.WordWrap
+        color: Color.mPrimary
+        font.pointSize: Style.fontSizeM
+      }
+      Text {
+        width: parent.width
+        objectName: "egressUnverifiedRow"
+        visible: root.lockIndicators ? root.lockIndicators.egressUnverified : false
+        text: "⚠ network egress state unverified (session manager unreachable)"
+        wrapMode: Text.WordWrap
+        color: Color.mError
+        font.pointSize: Style.fontSizeM
+      }
+    }
+  }
 
   // Clock — updated by a Timer (`new Date()` in a binding is not
   // reactive).
