@@ -102,6 +102,7 @@ def test_tier1_tier2_direct_admin_untagged_is_dev_only():
 
 def test_vm_secctx_integration_tests_do_not_use_dev_override():
     tests = [
+        ROOT / "tier3/spawn-tier3.sh",
         ROOT / "tests/integration/vm/s44-tier4-secctx-exec.sh",
         ROOT / "tests/integration/vm/s46-tier4-clipboard-gate.sh",
         ROOT / "tests/integration/vm/s110-tier4-waypipe-display.sh",

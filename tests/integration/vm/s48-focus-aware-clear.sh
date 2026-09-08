@@ -296,6 +296,23 @@ else
     fail "no weston clear_selection / set_keyboard_focus follow-up log"
 fi
 
+# Verify actual paste bytes in addition to the compositor/shell breadcrumbs.
+if ! runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        WAYLAND_DISPLAY=wayland-1 sh -c 'command -v wl-paste' >/dev/null 2>&1; then
+    fail "wl-paste absent; cannot assert destination clipboard empty after focus-clear"
+else
+    PASTE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        WAYLAND_DISPLAY=wayland-1 timeout 10 wl-paste -n 2>/dev/null)
+    PASTE_RC=$?
+    if [ "$PASTE_RC" -eq 124 ]; then
+        fail "destination wl-paste timed out after focus-clear (data-source path wedged)"
+    elif [ -n "$PASTE" ]; then
+        fail "destination paste still returned data after focus-clear: '$PASTE'"
+    else
+        pass "destination paste empty after focus-clear"
+    fi
+fi
+
 # --- 12. selection-state post-inject ---------------------------------
 STATE_POST=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     qs "${QS_IPC_ARGS[@]}" call tier3focus selectionState 2>&1 | head -1)

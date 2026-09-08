@@ -824,6 +824,7 @@ setup() {
     assert_output_contains "PASS: qdshell cleared the admin selection on cross-silo focus"
     assert_output_contains "PASS: weston processed clear_selection request"
     assert_output_contains "PASS: ctrl selection-state cleared post-focus-change"
+    assert_output_contains "PASS: destination paste empty after focus-clear"
     assert_output_contains "PASS: spec/10 v14 focus-aware selection clear end-to-end"
 }
 

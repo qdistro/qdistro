@@ -371,11 +371,20 @@ fi
 if journal_after | grep -qE "src_app=$APPID|clipboard.*$APPID|clipboard.*vm-$VM_TAG"; then
     pass "clipboard decision bound source window identity (src_app=$APPID in audit)"
 else
+    AUDIT_SOURCE=""
+    if command -v sqlite3 >/dev/null 2>&1 \
+       && [ -r /var/lib/qdistro/audit/audit.sqlite ]; then
+        AUDIT_SOURCE=$(sqlite3 /var/lib/qdistro/audit/audit.sqlite \
+            "select source from audit where action='qdistro.clipboard.transfer:vm-$VM_TAG:admin' order by id desc limit 1;" \
+            2>/dev/null || true)
+    fi
+    if echo "$AUDIT_SOURCE" | grep -q "src_app=$APPID"; then
+        pass "clipboard decision bound source window identity (src_app=$APPID in audit)"
     # The exact audit-row shape (src_app=...) is pinned by the broker
     # unit tests (test_broker_clipboard_receive.py::TestAuditShape); here
     # the live broker may log differently. Fail loudly only if there is
     # NO journal evidence the decision happened at all.
-    if journal_after | grep -qE "clipboard.*deny|CheckClipboardTransfer|clipboard_default_deny"; then
+    elif journal_after | grep -qE "clipboard.*deny|CheckClipboardTransfer|clipboard_default_deny"; then
         pass "clipboard decision bound source window identity (src_app=$APPID in audit)"
         echo "  (note: exact src_app= not in journal on this build; audit-row shape covered by unit tests)" >&2
     else

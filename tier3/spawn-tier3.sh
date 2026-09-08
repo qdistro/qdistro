@@ -167,7 +167,7 @@ if [ -n "${PKEXEC_UID:-}" ]; then
         TIER3_GROUP TIER3_ADMIN_USER \
         TIER3_NO_REAP TIER3_REAP_AGE \
         TIER3_SECCTX TIER3_SECCTX_ENGINE TIER3_SECCTX_APPID TIER3_SECCTX_INSTANCE \
-        TIER3_OUTER_DISPLAY; do
+        TIER3_OUTER_DISPLAY QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED; do
         if [ -n "${!danger:-}" ]; then
             echo "[tier3] FAIL: env knob '$danger' not allowed via pkexec (PKEXEC_UID=$PKEXEC_UID set)" >&2
             exit 2
