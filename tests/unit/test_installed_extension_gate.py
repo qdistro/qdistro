@@ -87,6 +87,20 @@ _FAKE_GATE = """(function (root) {
 """
 
 
+# Probe used by the behavioural gate test below. It loads gate.js the way
+# the extension does (a bare `self` carrying qdistroApi) with EMPTY stored
+# config, and requires isOriginAllowed to deny.
+#
+# This deliberately does NOT live in the installer. An earlier revision of
+# the fix ran exactly this check inside
+# scripts/install/stage-browser-extension-source.sh, which runs as root: it
+# turned a modified checkout into arbitrary root code execution, and a gate
+# calling process.exit(0) could force it to report success. Here it runs as
+# the invoking user against a checked-out commit, so an evasive gate only
+# makes its own test fail.
+_GATE_PROBE_JS = 'import fs from "node:fs";\nconst scope = { qdistroApi: { storage: {\n  // Empty stored config: no modules, no origin_allowlist. Both the\n  // callback and Promise shapes, since the two repos differ.\n  local: { get: (_k, cb) => { if (cb) cb({}); return Promise.resolve({}); } },\n  onChanged: { addListener: () => {} },\n} } };\nconst src = fs.readFileSync(process.argv[2], "utf8");\nnew Function("self", "globalThis", src)(scope, scope);\nawait new Promise((r) => setTimeout(r, 0));\nconst g = scope.qdistroGate;\nif (!g || typeof g.isOriginAllowed !== "function") {\n  console.error("gate.js did not export qdistroGate.isOriginAllowed");\n  process.exit(1);\n}\nfor (const url of ["https://anything.example/", "http://plain.test/", ""]) {\n  if (g.isOriginAllowed(url) !== false) {\n    console.error("allowed " + JSON.stringify(url) + " with an empty allowlist");\n    process.exit(1);\n  }\n}\nconsole.log("DENIED");'
+
+
 def _fake_repo(root: Path, name: str, gate_line: str | None) -> Path:
     """Build a minimal extension checkout the staging script accepts as a
     repo (package.json + src/ + a background that loads the gate), with
@@ -227,31 +241,59 @@ class TestStagingRefusesUngatedTrees:
         dest = tmp_path / "dest"
         r = _run_stage(dest, src_root)
         assert r.returncode == 4, r.stdout + r.stderr
-        assert "not referenced" in r.stderr
+        assert "not loaded by" in r.stderr
         assert not (dest / "chromium").exists()
 
-    def test_refuses_a_gate_whose_closed_line_is_dead_code(self, tmp_path):
-        """The textual check alone can be satisfied by a line that never
-        runs. The behavioural probe (empty allowlist must deny) is what
-        actually decides."""
+    def test_a_comment_does_not_satisfy_the_gate_is_loaded_check(self, tmp_path):
+        """The loaded-check strips comments first, so merely *mentioning*
+        `src/gate.js` in prose does not count as wiring it in."""
         src_root = tmp_path / "src"
         src_root.mkdir()
         repo = _fake_repo(src_root, "qdchrome-extension", GATE_CLOSED_LINE)
+        (repo / "src" / "background.js").write_text(
+            '// the origin gate lives in src/gate.js\n'
+            'importScripts("src/api.js");\n', encoding="utf-8")
+        dest = tmp_path / "dest"
+        r = _run_stage(dest, src_root)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "not loaded by" in r.stderr
+        assert not (dest / "chromium").exists()
+
+    def test_the_stager_never_executes_the_source_tree(self, tmp_path):
+        """Regression for a defect this fix introduced and removed.
+
+        An earlier revision ran a behavioural probe here: it loaded
+        gate.js under node and asserted an empty allowlist denies. But
+        this script runs as ROOT from the installer, so that turned a
+        modified checkout into arbitrary root code execution — and it was
+        defeatable in the direction that mattered, because a gate calling
+        ``process.exit(0)`` ended the probe with status 0 and was then
+        staged as proven-gated.
+
+        The behavioural proof moved to TestRealExtensionRepos below (and
+        each repo's own vitest suite), which run unprivileged. The stager
+        must stay data-only: this drives it with a gate that would write a
+        marker file and exit 0 if it were ever evaluated.
+        """
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        repo = _fake_repo(src_root, "qdchrome-extension", GATE_CLOSED_LINE)
+        marker = tmp_path / "EXECUTED"
         gate = repo / "src" / "gate.js"
-        # An early unconditional allow, with the closed-by-default line
-        # left intact below it — exactly what a grep-only check misses.
         gate.write_text(
-            gate.read_text(encoding="utf-8").replace(
-                "    const list = state.allowlist;",
-                "    const list = state.allowlist;\n    if (true) return true;"),
+            'if (typeof process !== "undefined") {\n'
+            f'  process.getBuiltinModule("node:fs").writeFileSync({str(marker)!r}, "x");\n'
+            '  process.exit(0);\n'
+            '}\n' + gate.read_text(encoding="utf-8"),
             encoding="utf-8")
         dest = tmp_path / "dest"
         r = _run_stage(dest, src_root)
-        if shutil.which("node") is None:
-            pytest.skip("node unavailable; the behavioural probe is skipped")
-        assert r.returncode == 4, r.stdout + r.stderr
-        assert "still allows origins" in r.stderr
-        assert not (dest / "chromium").exists()
+        assert not marker.exists(), (
+            "the stager evaluated gate.js — it runs as root and must never "
+            "execute a source checkout")
+        # It still stages: the tree is structurally gated. The point is only
+        # that no code from it ran.
+        assert r.returncode == 0, r.stdout + r.stderr
 
     def test_one_bad_tree_does_not_destroy_a_good_existing_install(self, tmp_path):
         """Validation happens before the destination is touched, so a
@@ -319,6 +361,27 @@ class TestRealExtensionRepos:
         assert GATE_CLOSED_LINE.strip() in gate, (
             f"{repo}/src/gate.js does not close the origin allowlist by "
             "default — an empty allowlist must deny (J11)")
+
+    @pytest.mark.parametrize("repo", ["qdchrome-extension", "qdfirefox-extension"])
+    def test_repo_gate_behaves_closed_with_empty_storage(self, repo, tmp_path):
+        """BEHAVIOURAL proof, not a source-text match: load the real
+        gate.js and require that it denies when nothing is stored.
+
+        The source-line check in the stager cannot establish this — see
+        _GATE_PROBE_JS for why the check does not live there."""
+        src = _sibling(repo)
+        if src is None:
+            pytest.skip(f"{repo} not checked out next to this tree")
+        if shutil.which("node") is None:
+            pytest.skip("node not available")
+        probe = tmp_path / "probe.mjs"
+        probe.write_text(_GATE_PROBE_JS, encoding="utf-8")
+        r = subprocess.run(
+            ["node", str(probe), str(src / "src" / "gate.js")],
+            capture_output=True, text=True, check=False, timeout=60)
+        assert r.returncode == 0 and "DENIED" in r.stdout, (
+            f"{repo}/src/gate.js does not deny with an empty allowlist:\n"
+            + r.stdout + r.stderr)
 
     @pytest.mark.parametrize("repo,sub", [("qdchrome-extension", "chromium"),
                                           ("qdfirefox-extension", "firefox")])

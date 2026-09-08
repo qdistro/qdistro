@@ -45,86 +45,116 @@ set -euo pipefail
 DEST="${1:?usage: stage-browser-extension-source.sh <dest-dir> [source-root]}"
 SRC_ROOT="${2:-${QDISTRO_EXTENSION_SRC_ROOT:-}}"
 
-# The destination is wiped, so refuse anything that isn't a plausible
-# staging directory. The production caller passes a constant; this
-# guards a hand-run with a mistyped or unexpectedly-resolved path.
+# The destination is REPLACED, so refuse anything that isn't a plausible
+# staging directory. The production caller passes a constant; this guards a
+# hand-run with a mistyped or unexpectedly-resolved path. Checks are on the
+# CANONICAL path (`realpath -m`, which resolves symlinked parents and `..`
+# components without requiring the leaf to exist) — a lexical check would
+# pass /usr/share/qdistro/../../../etc.
 case "$DEST" in
     /*) ;;
     *) echo "[stage-browser-extension] destination must be absolute: $DEST" >&2; exit 2 ;;
 esac
-case "$DEST" in
-    */.|*/..|*/) echo "[stage-browser-extension] refusing relative-suffix destination: $DEST" >&2; exit 2 ;;
-esac
-if [ "$(printf '%s' "$DEST" | tr -cd / | wc -c)" -lt 3 ]; then
-    echo "[stage-browser-extension] refusing shallow destination: $DEST" >&2
+DEST_CANON="$(realpath -m -- "$DEST" 2>/dev/null || true)"
+if [ -z "$DEST_CANON" ]; then
+    echo "[stage-browser-extension] cannot canonicalize destination: $DEST" >&2
+    exit 2
+fi
+if [ "$(printf '%s' "$DEST_CANON" | tr -cd / | wc -c)" -lt 3 ]; then
+    echo "[stage-browser-extension] refusing shallow destination: $DEST_CANON" >&2
     echo "[stage-browser-extension] (expected something like /usr/share/qdistro/browser-extension)" >&2
     exit 2
 fi
-if [ -L "$DEST" ]; then
-    echo "[stage-browser-extension] refusing symlinked destination: $DEST" >&2
+case "$DEST_CANON" in
+    /usr/share/qdistro/*|/tmp/*|/var/tmp/*|"${TMPDIR:-/nonexistent}"/*) ;;
+    *)
+        echo "[stage-browser-extension] refusing destination outside the staging roots: $DEST_CANON" >&2
+        echo "[stage-browser-extension] (production is /usr/share/qdistro/browser-extension; tests use a tmpdir)" >&2
+        exit 2 ;;
+esac
+if [ -L "$DEST_CANON" ]; then
+    echo "[stage-browser-extension] refusing symlinked destination: $DEST_CANON" >&2
     exit 2
 fi
+# Everything below operates on the canonical path.
+DEST="$DEST_CANON"
 
-# The source line that proves the gate is closed by default. A textual
-# check alone is weak (it can match a dead function) and brittle (an
-# equivalent refactor would be rejected), so it is only the first of
-# three checks — see assert_gated below.
+# The source line that proves the gate is closed by default.
+#
+# NOTE ON WHAT THIS CAN AND CANNOT ESTABLISH. An earlier revision of this
+# script also ran a behavioural probe here: it loaded gate.js under node and
+# asserted that an empty allowlist denies. That was removed, and deliberately
+# not replaced with a "safer sandbox":
+#
+#   * This script runs as ROOT from the installer. Evaluating JavaScript out
+#     of a source checkout at that privilege turns a modified checkout into
+#     arbitrary root code execution — a far worse defect than the one the
+#     probe was checking for. `new Function(...)` with a substituted
+#     `globalThis` is not a sandbox: node's `process` stays reachable.
+#   * It was also trivially defeatable in the direction that matters. A gate
+#     that called `process.exit(0)` before exporting anything ended the probe
+#     with status 0, so a hostile tree could satisfy the probe and still run
+#     an open gate in the browser. An assertion an adversary can force to
+#     succeed is worse than no assertion, because it is quoted as proof.
+#
+# So the install-time checks here are STATIC and structural only. They
+# establish that the tree ships a gate that will load and that its
+# closed-by-default line is present — enough to catch the J11 defect (an
+# installed extension with no gate at all) and enough to catch a reverted
+# default. They are NOT proof that the gate behaves correctly against a
+# hostile tree; nothing an installer can do textually is.
+#
+# The behavioural proof lives where it can run unprivileged and against a
+# known commit:
+#   * each extension repo's own vitest suite (`tests/gate.test.js` asserts
+#     the empty-allowlist deny and the `*` opt-in), run by the CI host gate;
+#   * `tests/unit/test_installed_extension_gate.py::TestRealExtensionRepos`,
+#     which loads each repo's real gate.js under node, as the invoking user,
+#     and requires it to deny with empty storage;
+#   * and the integrity of the tree itself comes from R4's signed source
+#     manifest + pinned commit, not from this script reading the code.
 GATE_CLOSED_RE='^[[:space:]]*if \(!list\.length\) return false;'
 
-# Behavioural probe: load gate.js the way the extension does (a bare
-# `self` carrying qdistroApi) with EMPTY storage, and require that
-# isOriginAllowed denies. This is what actually matters; the grep above
-# only catches the case where node is unavailable. Node is present on a
-# qdistro image and in CI, but the probe is skipped rather than fatal if
-# it is missing, so the textual check stays as the floor.
-probe_gate_denies() {
-    local gate="$1"
-    command -v node >/dev/null 2>&1 || return 2
-    node --input-type=module -e '
-const fs = await import("node:fs");
-const gate = process.argv[1];
-const scope = {
-  qdistroApi: {
-    storage: {
-      // Empty stored config: no modules, no origin_allowlist. Both the
-      // callback and Promise shapes, since the two repos differ.
-      local: { get: (_k, cb) => { if (cb) cb({}); return Promise.resolve({}); } },
-      onChanged: { addListener: () => {} },
-    },
-  },
-};
-const src = fs.readFileSync(gate, "utf8");
-new Function("self", "globalThis", src)(scope, scope);
-await new Promise((r) => setTimeout(r, 0));
-const g = scope.qdistroGate;
-if (!g || typeof g.isOriginAllowed !== "function") {
-  console.error("gate.js did not export qdistroGate.isOriginAllowed");
-  process.exit(1);
-}
-for (const url of ["https://anything.example/", "http://plain.test/", ""]) {
-  if (g.isOriginAllowed(url) !== false) {
-    console.error(`isOriginAllowed(${JSON.stringify(url)}) allowed with an empty allowlist`);
-    process.exit(1);
-  }
-}
-' "$gate" >/dev/null 2>&1
+# A source-only extension checkout contains directories and regular files.
+# Anything else — symlinks, devices, fifos — is refused rather than copied:
+# `cp -r` would preserve a symlink, and a root `chmod` on a staged
+# `scripts/build-extension.sh` that is a symlink would then change the mode
+# of whatever it points at.
+assert_plain_tree() {
+    local src="$1" name="$2" bad
+    bad="$(find "$src" -path "$src/.git" -prune -o \
+                       -path "$src/node_modules" -prune -o \
+                       ! -type d ! -type f -print 2>/dev/null | head -5)"
+    if [ -n "$bad" ]; then
+        echo "[stage-browser-extension] REFUSING to stage $name: source tree contains" >&2
+        echo "[stage-browser-extension] symlinks or special files:" >&2
+        printf '[stage-browser-extension]   %s\n' $bad >&2
+        exit 4
+    fi
 }
 
 assert_gated() {
     # $1 = source repo checkout, $2 = human name
     local src="$1" name="$2" gate="$1/src/gate.js"
-    if [ ! -f "$gate" ]; then
+    if [ ! -f "$gate" ] || [ -L "$gate" ]; then
         echo "[stage-browser-extension] REFUSING to stage $name: no src/gate.js in $src" >&2
         echo "[stage-browser-extension] an extension with no module/origin gate is ungated (J11)" >&2
         exit 4
     fi
-    # The gate must actually be LOADED. A gate.js that nothing pulls in
-    # is not a gate: every privileged call site consults
-    # root.qdistroGate, so an unloaded gate is an absent one.
-    if ! grep -rqF "src/gate.js" "$src/src" "$src/manifest.json" \
-            "$src/manifest.chromium.json" 2>/dev/null; then
-        echo "[stage-browser-extension] REFUSING to stage $name: src/gate.js is not referenced by" >&2
-        echo "[stage-browser-extension] the background wiring or the manifest — it would never load" >&2
+    # The gate must actually be LOADED. A gate.js that nothing pulls in is
+    # not a gate: every privileged call site consults root.qdistroGate, so an
+    # unloaded gate is an absent one. Comments are stripped first so a mere
+    # mention of the path does not satisfy this.
+    # NB: captured into a variable rather than piped into `grep -q`. Under
+    # `set -o pipefail`, grep -q exits at the first match, SIGPIPEs sed, and
+    # the pipeline reports failure — which would read as "gate not loaded"
+    # for exactly the large, correct files it is meant to accept.
+    local wiring
+    wiring="$(_uncommented "$src/src/background.js" "$src/manifest.json" \
+                           "$src/manifest.chromium.json")"
+    if ! printf '%s' "$wiring" | grep -qF "src/gate.js"; then
+        echo "[stage-browser-extension] REFUSING to stage $name: src/gate.js is not loaded by" >&2
+        echo "[stage-browser-extension] the background wiring or the manifest — it would never run" >&2
         exit 4
     fi
     if ! grep -qE "$GATE_CLOSED_RE" "$gate"; then
@@ -133,17 +163,16 @@ assert_gated() {
         echo "[stage-browser-extension]   if (!list.length) return false;" >&2
         exit 4
     fi
-    local probe_rc=0
-    probe_gate_denies "$gate" || probe_rc=$?
-    case "$probe_rc" in
-        0) ;;
-        2) echo "[stage-browser-extension] WARN: node unavailable; $name gate checked textually only" >&2 ;;
-        *)
-            echo "[stage-browser-extension] REFUSING to stage $name: with an EMPTY origin allowlist," >&2
-            echo "[stage-browser-extension] $gate still allows origins (J11). The gate is not closed" >&2
-            echo "[stage-browser-extension] by default at runtime, whatever the source text says." >&2
-            exit 4 ;;
-    esac
+}
+
+# Concatenate the given files with // and /* */ comments stripped. Used so
+# the gate-is-loaded check cannot be satisfied by a comment or a docstring.
+_uncommented() {
+    local f
+    for f in "$@"; do
+        [ -f "$f" ] || continue
+        sed -e 's://.*::' "$f"
+    done
 }
 
 copy_source() {
@@ -180,6 +209,7 @@ for pair in qdchrome-extension:chromium qdfirefox-extension:firefox; do
         echo "[stage-browser-extension] WARN: $repo not checked out; nothing staged for it" >&2
         continue
     fi
+    assert_plain_tree "$repo_src" "$dest_name"
     assert_gated "$repo_src" "$dest_name"
     found_src+=("$repo_src")
     found_name+=("$dest_name")
@@ -204,14 +234,29 @@ done
 # from the repo does not uninstall it, so the destination is REPLACED,
 # not merged into — an in-place upgrade must not leave the ungated
 # extension loadable.
+# This is two renames, not one atomic exchange (renameat2/RENAME_EXCHANGE is
+# not reachable from portable shell), so the window between them is handled
+# explicitly: if the second rename fails, the previous tree is put back. The
+# alternative — leaving $DEST absent — would turn a transient failure into a
+# host with no extension source and no record of why.
 old=""
-if [ -e "$DEST" ]; then
+if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     old="$(mktemp -d "$(dirname "$DEST")/.$(basename "$DEST").old.XXXXXX")"
-    mv "$DEST" "$old/tree"
+    mv -- "$DEST" "$old/tree"
 fi
-mv "$staging" "$DEST"
+if ! mv -- "$staging" "$DEST"; then
+    echo "[stage-browser-extension] staging swap failed; restoring the previous tree" >&2
+    if [ -n "$old" ] && [ -e "$old/tree" ]; then
+        rm -rf -- "$DEST"
+        mv -- "$old/tree" "$DEST" \
+            || echo "[stage-browser-extension] RESTORE FAILED: previous tree left at $old/tree" >&2
+        rm -rf -- "$old"
+    fi
+    exit 5
+fi
 trap - EXIT
-[ -n "$old" ] && rm -rf "$old"
+rm -rf -- "$staging"
+[ -n "$old" ] && rm -rf -- "$old"
 
 if [ "${#found_src[@]}" -eq 0 ]; then
     echo "[stage-browser-extension] WARN: no browser-extension source installed under $DEST" >&2
