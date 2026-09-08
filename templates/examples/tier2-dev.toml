@@ -15,6 +15,9 @@ enforced = "true"
 # Containerfile is resolved relative to the recipes dir shipped with
 # qdistro (/usr/lib/qdistro/templates/recipes), or an absolute path.
 containerfile = "Containerfile.tier2-dev"
+# The recipe consumes the shared snapshot pin and repo configurator from the
+# tier2 asset directory.
+context = "tier2"
 # Plain egress during build is acceptable in this slice but must be
 # recorded honestly: the recording proxy ("record"/"replay") is a later
 # slice. "unrestricted" keeps the claim true.

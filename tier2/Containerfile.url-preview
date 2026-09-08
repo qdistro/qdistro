@@ -17,6 +17,11 @@
 # bind-mounted at run time (not baked), same as the other tier-2 images.
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
+# Replace the rolling repositories inherited from the base before zypper reads
+# metadata. The shared helper pins both repos and leaves GPG checks enabled.
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+
 # Runtime deps: the weston stack (nested compositor + qdwin-shell.so publisher;
 # the `weston` package ships the `weston-terminal` binary used as the pager host,
 # same as the weston-terminal image) + `less` (the pager) + curl +
@@ -36,7 +41,7 @@ RUN zypper --non-interactive --gpg-auto-import-keys refresh \
         less \
         curl \
         ca-certificates \
- && update-ca-certificates 2>/dev/null || true \
+ && { update-ca-certificates 2>/dev/null || true; } \
  && zypper clean --all \
  && rm -rf /var/cache/zypp/* /var/log/*.log
 

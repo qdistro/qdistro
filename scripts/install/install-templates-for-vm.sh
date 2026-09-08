@@ -177,13 +177,13 @@ if [ ! -f /etc/qdistro/templates/tier2-dev.toml ] \
 fi
 
 # tier2-browser recipe build context (fableplan2 task 02): the recipe COPYs
-# the SHARED tier2/entrypoint.sh + tier2/weston.ini, and its policy declares
+# shared tier2 build assets, and its policy declares
 # [template.build].context = "tier2", which qdistro-template-build resolves
 # to /usr/lib/qdistro/tier2. Install those assets from the single source
 # (tier2/) so the browser candidate builds without hand-duplicated copies.
 if [ -d "$UMBRELLA/tier2" ]; then
     install -d -m 0755 /usr/lib/qdistro/tier2
-    for asset in weston.ini entrypoint.sh; do
+    for asset in weston.ini entrypoint.sh SNAPSHOT configure-snapshot-repos.sh; do
         [ -f "$UMBRELLA/tier2/$asset" ] \
             && install -m 0644 "$UMBRELLA/tier2/$asset" "/usr/lib/qdistro/tier2/$asset"
     done

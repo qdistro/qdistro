@@ -14,6 +14,12 @@
 # is bind-mounted at run time (not baked), same as weston-terminal.
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
+# The base tag is rolling, including its repo definitions. Replace those
+# definitions before zypper reads metadata so this image uses qdistro's pinned
+# Tumbleweed snapshot and retains normal RPM/repository signature checks.
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+
 # Runtime deps: identical weston stack to the weston-terminal image (so the
 # nested compositor + qdwin-shell.so publisher behave the same). The `weston`
 # package ships the `weston-terminal` binary (the viewer host) — same as the

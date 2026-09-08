@@ -18,12 +18,31 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$SCRIPT_DIR"
 
 log() { printf '[build-tier2] %s\n' "$*" >&2; }
 
 if ! command -v podman >/dev/null 2>&1; then
     log "FATAL: podman not in PATH"
+    exit 2
+fi
+
+# Keep the container build pin tied to the image release pin. A snapshot bump
+# must update both in one change; refusing a mismatch avoids silently drifting
+# tier-2 packages back to a different distribution state.
+if [ ! -x "$REPO_ROOT/image/build.sh" ] || [ ! -s SNAPSHOT ]; then
+    log "FATAL: qdistro image snapshot source or tier2/SNAPSHOT is missing"
+    exit 2
+fi
+tier2_snapshot="$(<SNAPSHOT)"
+image_snapshot="$(bash "$REPO_ROOT/image/build.sh" --snapshot-id)" || {
+    log "FATAL: could not read qdistro's pinned image snapshot"
+    exit 2
+}
+if [[ ! "$tier2_snapshot" =~ ^[0-9]{8}$ ]] \
+        || [ "$tier2_snapshot" != "$image_snapshot" ]; then
+    log "FATAL: tier2/SNAPSHOT ($tier2_snapshot) does not match image snapshot ($image_snapshot)"
     exit 2
 fi
 

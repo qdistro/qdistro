@@ -22,6 +22,11 @@
 # candidate validation.
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
+# The build context is the shared tier2 directory. Replace rolling repository
+# definitions before zypper reads metadata, using qdistro's pinned snapshot.
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+
 # Runtime floor + Chromium. --no-recommends keeps the closure tight; hard
 # RPM Requires (nss, the GTK stack Chromium links) are pulled regardless, but
 # the ones the slice depends on are listed explicitly so a base/repo change

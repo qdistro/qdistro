@@ -8,11 +8,12 @@
 # immutable digest, validated by the tier2-dev probes (process starts,
 # gcc present, hello-world compiles and runs), then manually promoted.
 #
-# NOTE: a fully reproducible "derived" template would pin the base by digest
-# (FROM ...@sha256:...) + a snapshot zypper repo. This slice uses :latest +
-# an un-snapshotted refresh, which network_mode = "unrestricted" honestly
-# reflects; digest-pinning the base is a cheap future tightening.
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
+
+# The build context is the shared tier2 directory. Replace rolling repository
+# definitions before zypper reads metadata, using qdistro's pinned snapshot.
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
 
 # Minimal C/dev toolchain. --no-recommends keeps the closure tight so
 # the recipe stays reproducible and the candidate image small. The

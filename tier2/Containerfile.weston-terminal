@@ -11,6 +11,11 @@
 # (qdistro.tier2, <container>/<app>, <launch-token>).
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
+# Replace the rolling repositories inherited from the base before zypper reads
+# metadata. The shared helper pins both repos and leaves GPG checks enabled.
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+
 # Runtime deps. weston pulls libpipewire-0_3 + pipewire-backend
 # transitively on Tumbleweed; we list them explicitly so a future weston
 # rebuild on a slimmer base still works. (The weston package may also ship
