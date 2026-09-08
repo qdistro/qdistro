@@ -43,9 +43,9 @@ a daemon thread; it posts events back via the user-supplied callback
 which must itself be thread-safe (typically `bridge.inject_lock_requested`
 which goes through a Qt QueuedConnection signal).
 
-If dbus-next is unavailable, or logind cannot be reached, the watcher
-logs at WARNING and exits cleanly — the lid-close path is degraded but
-the rest of the locker still works.
+If dbus-next is unavailable the watcher reports degraded automatic locking.
+Transient bus/logind failures reconnect with bounded backoff; each connection
+owns its signal subscriptions, pending tasks and sleep inhibitor.
 """
 
 from __future__ import annotations
@@ -66,6 +66,9 @@ REASON_SUSPEND = 2
 # default InhibitDelayMaxSec (5s) so we release the fd cooperatively
 # rather than letting logind time us out.
 _LOCK_CONFIRM_TIMEOUT_S = 4.0
+_CONNECT_TIMEOUT_S = 5.0
+_RECONNECT_MIN_S = 1.0
+_RECONNECT_MAX_S = 30.0
 
 
 class LogindWatcher:
@@ -73,6 +76,8 @@ class LogindWatcher:
         self,
         on_lock: Callable[[int], None],
         on_unlock: Callable[[], None] | None = None,
+        *,
+        lock_on_lid: bool = True,
     ) -> None:
         """on_lock(reason) is invoked from the asyncio thread when
         logind signals Session.Lock or PrepareForSleep(start=True).
@@ -80,6 +85,7 @@ class LogindWatcher:
         with QueuedConnection)."""
         self._on_lock = on_lock
         self._on_unlock = on_unlock
+        self._lock_on_lid = lock_on_lid
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
@@ -88,8 +94,11 @@ class LogindWatcher:
         self._lock_confirmed: asyncio.Event | None = None
         # Held delay-inhibitor fd (an int). None when not held.
         self._inhibit_fd: int | None = None
+        self._inhibit_lock = asyncio.Lock()
         # The Manager interface proxy, used to (re)acquire the inhibitor.
         self._mgr = None
+        self._ready = threading.Event()
+        self._stop_requested = threading.Event()
 
     def start(self) -> bool:
         """Spawn the asyncio thread. Returns True if the thread was
@@ -97,13 +106,20 @@ class LogindWatcher:
         and is logged but does not propagate failures here)."""
         if self._thread is not None and self._thread.is_alive():
             return True
+        self._stop_requested.clear()
         self._thread = threading.Thread(
             target=self._run, name="qdlocker-logind", daemon=True
         )
         self._thread.start()
         return True
 
+    @property
+    def automatic_lock_ready(self) -> bool:
+        """Whether sleep subscription and its delay inhibitor are established."""
+        return self._ready.is_set()
+
     def stop(self) -> None:
+        self._stop_requested.set()
         if self._loop is None or self._stop_event is None:
             return
         try:
@@ -140,8 +156,12 @@ class LogindWatcher:
     # ----- delay-inhibitor helpers (run on the asyncio thread) -----
 
     async def _acquire_inhibitor(self) -> None:
-        """Take a logind sleep *delay* inhibitor. Best-effort: on any
-        failure the fd stays None and suspend proceeds uninhibited."""
+        """Serialize resume and retry acquisition so only one fd is owned."""
+        async with self._inhibit_lock:
+            await self._acquire_inhibitor_locked()
+
+    async def _acquire_inhibitor_locked(self) -> None:
+        """Take a sleep delay inhibitor; retain sleep signals on failure."""
         if self._inhibit_fd is not None:
             return
         if self._mgr is None:
@@ -171,12 +191,14 @@ class LogindWatcher:
                       "no inhibitor (suspend will not wait)", fd)
             self._inhibit_fd = None
             return
+        self._ready.set()
         log.info("logind sleep delay-inhibitor acquired (fd=%s)",
                  self._inhibit_fd)
 
     def _release_inhibitor(self) -> None:
         """Close (release) the held delay-inhibitor fd, if any. Closing
         the fd is what tells logind we are done delaying."""
+        self._ready.clear()
         fd = self._inhibit_fd
         self._inhibit_fd = None
         if fd is None:
@@ -240,103 +262,231 @@ class LogindWatcher:
         self._loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
         self._lock_confirmed = asyncio.Event()
-
+        self._inhibit_lock = asyncio.Lock()
+        if self._stop_requested.is_set():
+            self._stop_event.set()
+        stop = asyncio.create_task(self._stop_event.wait())
+        connection = None
+        delay = _RECONNECT_MIN_S
         try:
-            # negotiate_unix_fd=True is REQUIRED: Manager.Inhibit replies
-            # with a UnixFD (the delay-inhibitor handle). Without fd
-            # negotiation, dbus-next cannot unmarshal that reply and the
-            # connection drops with EOFError. (The lid/suspend signal
-            # subscriptions work either way; the inhibitor needs this.)
-            bus = await MessageBus(
-                bus_type=BusType.SYSTEM, negotiate_unix_fd=True
-            ).connect()
-        except Exception:
-            log.exception("could not connect to system bus; lid-close lock unavailable")
-            return
+            while not self._stop_event.is_set():
+                connection = asyncio.create_task(self._watch_connection(
+                    lambda: MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True)
+                ))
+                done, _ = await asyncio.wait(
+                    (connection, stop), return_when=asyncio.FIRST_COMPLETED
+                )
+                if stop in done:
+                    break
+                try:
+                    await connection
+                    delay = _RECONNECT_MIN_S
+                except Exception:
+                    log.exception("logind unavailable; automatic locking degraded; "
+                                  "reconnecting in %.1fs", delay)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), delay)
+                except TimeoutError:
+                    pass
+                delay = min(delay * 2, _RECONNECT_MAX_S)
+        finally:
+            if connection is not None:
+                connection.cancel()
+            stop.cancel()
+            await asyncio.gather(*(t for t in (connection, stop) if t is not None),
+                                 return_exceptions=True)
+            self._ready.clear()
+            self._mgr = None
+            self._loop = None
 
-        try:
-            # Find this user's session path via Manager.GetSessionByPID($PID).
-            mgr_intro = await bus.introspect(
-                "org.freedesktop.login1", "/org/freedesktop/login1"
-            )
-            mgr_obj = bus.get_proxy_object(
-                "org.freedesktop.login1", "/org/freedesktop/login1", mgr_intro
-            )
-            mgr = mgr_obj.get_interface("org.freedesktop.login1.Manager")
+    async def _watch_connection(self, bus_factory) -> None:
+        """One generation: discard all callbacks/tasks before reconnecting."""
+        bus = bus_factory()
+        changed = asyncio.Event()
+        tasks: set[asyncio.Task] = set()
+        subscriptions = []
+        active = True
+        session_path = None
+        sleep_task = None
+        sleeping = False
+
+        def completed(task) -> None:
+            tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                log.error("logind sleep callback failed", exc_info=task.exception())
+
+        def sleep_changed(start: bool) -> None:
+            nonlocal sleep_task, sleeping
+            if not active:
+                return
+            sleeping = start
+            previous = sleep_task
+
+            async def transition() -> None:
+                # A resume can arrive while the previous lock confirmation is
+                # pending. Finish its cleanup before acquiring the next fd.
+                if previous is not None:
+                    previous.cancel()
+                    await asyncio.gather(previous, return_exceptions=True)
+                if active:
+                    if start:
+                        await self._on_prepare_for_sleep_async()
+                    else:
+                        await self._on_resume_async()
+
+            sleep_task = asyncio.create_task(transition())
+            tasks.add(sleep_task)
+            sleep_task.add_done_callback(completed)
+
+        def owner_changed(name: str, old_owner: str, new_owner: str) -> None:
+            if active and name == "org.freedesktop.login1" and old_owner != new_owner:
+                changed.set()
+
+        def session_new(session_id: str, path: str) -> None:
+            if active and session_path is None:
+                changed.set()
+
+        def session_removed(session_id: str, path: str) -> None:
+            if active and path == session_path:
+                changed.set()
+
+        def subscribe(proxy, signal, callback) -> None:
+            getattr(proxy, "on_" + signal)(callback)
+            subscriptions.append((proxy, signal, callback))
+
+        async def setup() -> None:
+            nonlocal session_path
+            await bus.connect()
+            # Register owner changes before introspecting logind so a restart
+            # during setup also invalidates this connection generation.
+            intro = await bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus")
+            obj = bus.get_proxy_object("org.freedesktop.DBus", "/org/freedesktop/DBus", intro)
+            subscribe(obj.get_interface("org.freedesktop.DBus"),
+                      "name_owner_changed", owner_changed)
+            intro = await bus.introspect("org.freedesktop.login1", "/org/freedesktop/login1")
+            obj = bus.get_proxy_object("org.freedesktop.login1", "/org/freedesktop/login1", intro)
+            mgr = obj.get_interface("org.freedesktop.login1.Manager")
             self._mgr = mgr
-
+            subscribe(mgr, "prepare_for_sleep", sleep_changed)
+            subscribe(mgr, "session_new", session_new)
+            subscribe(mgr, "session_removed", session_removed)
+            await self._acquire_inhibitor()
             try:
-                session_path = await mgr.call_get_session_by_pid(  # type: ignore[attr-defined]
-                    os.getpid()
+                session_path = await self._subscribe_session(
+                    bus, mgr, subscriptions, lambda: active
                 )
             except Exception:
-                log.exception("logind GetSessionByPID failed; lid lock unavailable")
-                return
+                log.exception("session lock subscription unavailable; suspend protection remains active")
+            if self._inhibit_fd is not None:
+                self._ready.set()
+                log.info("logind automatic sleep locking ready; session=%s", session_path)
+            else:
+                log.warning("logind automatic locking degraded: no sleep delay inhibitor")
 
-            log.info("logind session=%s", session_path)
+        async def retry_inhibitor() -> None:
+            # Keep the manager sleep signal live even if Inhibit is temporarily
+            # unavailable. Retry without reacquiring during an active suspend.
+            while True:
+                await asyncio.sleep(_RECONNECT_MAX_S)
+                if not sleeping:
+                    await self._acquire_inhibitor()
 
-            # Take the sleep delay inhibitor up front so the very first
-            # suspend after startup is already guarded.
-            await self._acquire_inhibitor()
+        waiters = []
+        try:
+            await asyncio.wait_for(setup(), _CONNECT_TIMEOUT_S)
+            retry_task = asyncio.create_task(retry_inhibitor())
+            tasks.add(retry_task)
+            waiters = [asyncio.create_task(bus.wait_for_disconnect()),
+                       asyncio.create_task(changed.wait())]
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                await task
+        finally:
+            active = False
+            self._ready.clear()
+            for proxy, signal, callback in reversed(subscriptions):
+                try:
+                    getattr(proxy, "off_" + signal)(callback)
+                except Exception:
+                    log.debug("could not remove logind %s subscription", signal, exc_info=True)
+            for task in (*tasks, *waiters):
+                task.cancel()
+            await asyncio.gather(*tasks, *waiters, return_exceptions=True)
+            self._release_inhibitor()
+            self._mgr = None
+            try:
+                bus.disconnect()
+            except Exception:
+                pass
+            if self._stop_event is None or not self._stop_event.is_set():
+                log.warning("logind connection ended; automatic locking unavailable until reconnected")
 
-            # Subscribe to Session.Lock on the per-session object.
-            sess_intro = await bus.introspect(
-                "org.freedesktop.login1", session_path
-            )
-            sess_obj = bus.get_proxy_object(
-                "org.freedesktop.login1", session_path, sess_intro
-            )
-            sess = sess_obj.get_interface("org.freedesktop.login1.Session")
+    async def _subscribe_session(self, bus, mgr, subscriptions=None,
+                                 is_active=lambda: True) -> str | None:
+        try:
+            session_path = await mgr.call_get_session_by_pid(os.getpid())
+        except Exception:
+            # systemd user services live outside the session scope. The
+            # launcher imports XDG_SESSION_ID; resolve it through logind and
+            # verify ownership before subscribing to its signals.
+            session_id = os.environ.get("XDG_SESSION_ID")
+            session_path = None
+            if session_id:
+                try:
+                    session_path = await mgr.call_get_session(session_id)
+                except Exception:
+                    log.warning("XDG_SESSION_ID=%s no longer resolves; finding active session",
+                                session_id)
+            if session_path is None:
+                # A long-lived user service retains an old environment after
+                # login-session replacement. Choose only one active, local
+                # Wayland seat session owned by this uid; ambiguity degrades
+                # lid locking instead of binding an arbitrary session.
+                candidates = []
+                for _, uid, _, seat, path in await mgr.call_list_sessions():
+                    if uid != os.getuid() or not seat:
+                        continue
+                    intro = await bus.introspect("org.freedesktop.login1", path)
+                    obj = bus.get_proxy_object("org.freedesktop.login1", path, intro)
+                    candidate = obj.get_interface("org.freedesktop.login1.Session")
+                    actual_uid, _ = await candidate.get_user()
+                    if (actual_uid == os.getuid() and await candidate.get_active()
+                            and await candidate.get_type() == "wayland"
+                            and not await candidate.get_remote()):
+                        candidates.append(path)
+                if len(candidates) != 1:
+                    log.warning("cannot identify one owned active Wayland session (%d candidates); "
+                                "session lock unavailable", len(candidates))
+                    return None
+                session_path = candidates[0]
+        intro = await bus.introspect("org.freedesktop.login1", session_path)
+        obj = bus.get_proxy_object("org.freedesktop.login1", session_path, intro)
+        sess = obj.get_interface("org.freedesktop.login1.Session")
+        uid, _ = await sess.get_user()
+        if uid != os.getuid():
+            log.error("refusing logind session owned by uid=%s", uid)
+            return
 
-            def _on_lock_signal() -> None:
-                log.info("logind Session.Lock received -> reason=lid")
+        def on_lock() -> None:
+            if is_active() and self._lock_on_lid:
                 try:
                     self._on_lock(REASON_LID)
                 except Exception:
                     log.exception("on_lock callback raised")
 
-            def _on_unlock_signal() -> None:
-                log.info("logind Session.Unlock received")
-                if self._on_unlock is not None:
-                    try:
-                        self._on_unlock()
-                    except Exception:
-                        log.exception("on_unlock callback raised")
+        def on_unlock() -> None:
+            if is_active() and self._on_unlock is not None:
+                try:
+                    self._on_unlock()
+                except Exception:
+                    log.exception("on_unlock callback raised")
 
-            try:
-                sess.on_lock(_on_lock_signal)  # type: ignore[attr-defined]
-            except Exception:
-                log.exception("could not subscribe to Session.Lock")
-
-            try:
-                sess.on_unlock(_on_unlock_signal)  # type: ignore[attr-defined]
-            except Exception:
-                # Not all logind versions emit Unlock; log at debug.
-                log.debug("Session.Unlock subscription unavailable")
-
-            # Subscribe to PrepareForSleep(start). start=True is the
-            # pre-suspend phase where the delay inhibitor still holds the
-            # transition; start=False is post-resume. The signal handler
-            # is sync (dbus-next calls it on the loop), so we schedule the
-            # async work as a task on the running loop.
-            def _on_prepare_for_sleep(start: bool) -> None:
-                if start:
-                    self._loop.create_task(self._on_prepare_for_sleep_async())
-                else:
-                    self._loop.create_task(self._on_resume_async())
-
-            try:
-                mgr.on_prepare_for_sleep(_on_prepare_for_sleep)  # type: ignore[attr-defined]
-            except Exception:
-                log.exception("could not subscribe to PrepareForSleep")
-
-            log.info("logind watcher ready")
-            await self._stop_event.wait()
-        finally:
-            # Release the inhibitor before tearing the bus down so we
-            # don't leak a held fd / block a sleep that races shutdown.
-            self._release_inhibitor()
-            try:
-                await bus.disconnect()
-            except Exception:
-                pass
+        sess.on_lock(on_lock)
+        if subscriptions is not None:
+            subscriptions.append((sess, "lock", on_lock))
+        if self._on_unlock is not None:
+            sess.on_unlock(on_unlock)
+            if subscriptions is not None:
+                subscriptions.append((sess, "unlock", on_unlock))
+        log.info("logind session=%s lid_lock=%s", session_path, self._lock_on_lid)
+        return session_path

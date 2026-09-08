@@ -48,6 +48,20 @@ The locker:
 - Auths via `fprintd` on the system bus and `python-pam` as the
   password fallback (mirrors `qdistro/doc/sessions.md:39-40`).
 
+Automatic locking subscribes to logind's manager-wide `PrepareForSleep`
+signal and holds a sleep delay inhibitor until qdwin confirms the lock.
+`lid_action=ignore` disables only lid-triggered locking. A systemd user
+service without a PID-associated session still protects suspend; lid
+signals use an owned session resolved through `XDG_SESSION_ID`, or one
+unambiguous active local Wayland seat session when that identifier is stale.
+
+The watcher reconnects after bus/logind loss and session replacement,
+cancelling old callbacks and pending lock-confirmation tasks before taking
+a new inhibitor. `LogindWatcher.automatic_lock_ready` reports whether the
+sleep subscription has an inhibitor; the journal identifies degraded and
+restored automatic-lock readiness. Manual and compositor idle locking
+remain independent of logind readiness.
+
 The reciprocal compositor wiring is documented in
 [`../qdwin/doc/locker.md`](../qdwin/doc/locker.md).
 

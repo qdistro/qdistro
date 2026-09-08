@@ -659,17 +659,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Logind subscription — covers HandleLidSwitch=lock (Session.Lock)
     # and PrepareForSleep(start=True) (suspend pre-lock).
-    _logind: LogindWatcher | None = None
-    if config.get("lid_action", "lock") == "lock":
-        _logind = LogindWatcher(
-            on_lock=bridge.inject_lock_requested,
-        )
-        # Release the suspend delay inhibitor only once the compositor
-        # confirms the lock surface is committed.
-        bridge.set_lock_confirmed_cb(_logind.notify_lock_confirmed)
-        _logind.start()
-    else:
-        log.info("lid_action=ignore: skipping logind subscription")
+    _logind = LogindWatcher(
+        on_lock=bridge.inject_lock_requested,
+        lock_on_lid=config.get("lid_action", "lock") == "lock",
+    )
+    # Release the suspend delay inhibitor only once the compositor
+    # confirms the lock surface is committed, regardless of lid policy.
+    bridge.set_lock_confirmed_cb(_logind.notify_lock_confirmed)
+    _logind.start()
 
     # Keep a strong ref so the ctrl socket isn't GC'd while
     # app.exec() runs. Parented on `app` for cleanup on quit.
