@@ -170,8 +170,10 @@ if [ ! -f /etc/qdistro/template-retention.toml ] \
     install -m 0644 "$UMBRELLA/deploy/etc/qdistro/template-retention.toml" \
         /etc/qdistro/template-retention.toml
 fi
-if [ ! -f /etc/qdistro/templates/tier2-dev.toml ] \
-        && [ -f "$SRC/examples/tier2-dev.toml" ]; then
+# These VM policies are shipped configuration coupled to the installed
+# Containerfiles and build assets. Reinstall them on cached VMs so a recipe
+# that gains a COPY input cannot retain an incompatible old build context.
+if [ -f "$SRC/examples/tier2-dev.toml" ]; then
     install -m 0644 "$SRC/examples/tier2-dev.toml" \
         /etc/qdistro/templates/tier2-dev.toml
 fi
@@ -188,8 +190,7 @@ if [ -d "$UMBRELLA/tier2" ]; then
             && install -m 0644 "$UMBRELLA/tier2/$asset" "/usr/lib/qdistro/tier2/$asset"
     done
 fi
-if [ ! -f /etc/qdistro/templates/tier2-browser.toml ] \
-        && [ -f "$SRC/examples/tier2-browser.toml" ]; then
+if [ -f "$SRC/examples/tier2-browser.toml" ]; then
     install -m 0644 "$SRC/examples/tier2-browser.toml" \
         /etc/qdistro/templates/tier2-browser.toml
 fi

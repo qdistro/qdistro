@@ -28,22 +28,33 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 2
 fi
 
-# Keep the container build pin tied to the image release pin. A snapshot bump
-# must update both in one change; refusing a mismatch avoids silently drifting
-# tier-2 packages back to a different distribution state.
-if [ ! -x "$REPO_ROOT/image/build.sh" ] || [ ! -s SNAPSHOT ]; then
-    log "FATAL: qdistro image snapshot source or tier2/SNAPSHOT is missing"
+# Validate the local pin even when probes copy tier2/ alone to a temporary
+# build directory. When the qdistro image source is beside us, additionally
+# require the two pins to agree; a snapshot bump must update both atomically.
+if [ ! -s SNAPSHOT ]; then
+    log "FATAL: tier2/SNAPSHOT is missing"
     exit 2
 fi
 tier2_snapshot="$(<SNAPSHOT)"
-image_snapshot="$(bash "$REPO_ROOT/image/build.sh" --snapshot-id)" || {
-    log "FATAL: could not read qdistro's pinned image snapshot"
+if [[ ! "$tier2_snapshot" =~ ^[0-9]{8}$ ]]; then
+    log "FATAL: tier2/SNAPSHOT must contain exactly YYYYMMDD"
     exit 2
-}
-if [[ ! "$tier2_snapshot" =~ ^[0-9]{8}$ ]] \
-        || [ "$tier2_snapshot" != "$image_snapshot" ]; then
-    log "FATAL: tier2/SNAPSHOT ($tier2_snapshot) does not match image snapshot ($image_snapshot)"
-    exit 2
+fi
+if [ -e "$REPO_ROOT/image/config.xml" ] \
+        || [ -e "$REPO_ROOT/image/build.sh" ]; then
+    if [ ! -x "$REPO_ROOT/image/build.sh" ] \
+            || [ ! -s "$REPO_ROOT/image/config.xml" ]; then
+        log "FATAL: adjacent qdistro image snapshot source is incomplete"
+        exit 2
+    fi
+    image_snapshot="$(bash "$REPO_ROOT/image/build.sh" --snapshot-id)" || {
+        log "FATAL: could not read qdistro's pinned image snapshot"
+        exit 2
+    }
+    if [ "$tier2_snapshot" != "$image_snapshot" ]; then
+        log "FATAL: tier2/SNAPSHOT ($tier2_snapshot) does not match image snapshot ($image_snapshot)"
+        exit 2
+    fi
 fi
 
 discover_workloads() {
