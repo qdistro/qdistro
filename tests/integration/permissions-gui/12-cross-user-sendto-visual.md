@@ -24,6 +24,8 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_user_unit_active qstub-notepad.service work2'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_socket /run/user/3000/bus'
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action LIKE 'app.send-to:%';
 SQL_EOF

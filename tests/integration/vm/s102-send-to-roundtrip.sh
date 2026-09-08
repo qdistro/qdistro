@@ -144,6 +144,7 @@ with open(f"/tmp/s102/ready-{friendly}.txt", "w") as f:
 print(f"[s102/{friendly}] claimed {r.service_name} silo={silo}", flush=True)
 GLib.MainLoop().run()
 PYEOF
+chmod 0644 /tmp/s102/receiver.py
 
 start_receiver() {
     local friendly="$1"

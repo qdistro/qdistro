@@ -278,7 +278,11 @@ def test_user_relay_is_in_the_production_install_chains():
     assert "user-relay|scripts/install/install-user-relay-for-vm.sh|/user_relay" \
         in bootstrap
     image = (_REPO / "image" / "config.sh").read_text()
-    assert "install-user-relay-for-vm.sh" in image
+    # The image sources and executes the canonical bootstrap chain.  It no
+    # longer duplicates each installer filename in config.sh, which was the
+    # drift this test originally guarded against.
+    assert '. "$QD/scripts/install/qdistro-bootstrap.sh"' in image
+    assert "install_python_modules" in image
     vmboot = (_REPO / "scripts" / "vm" / "fresh-vm-bootstrap.sh").read_text()
     assert "install-user-relay-for-vm.sh" in vmboot
 

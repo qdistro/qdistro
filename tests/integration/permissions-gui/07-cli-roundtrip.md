@@ -134,12 +134,18 @@ $VMEXEC "$VM" 'cat /tmp/07-revoke-miss.txt'
 - Exit code `1`.
 - stderr (or combined output) contains `no cached approval with id=99999`.
 
-### S5 — `qdistro-approvals audit-gc --retention-days 0` clears audit
+### S5 — `qdistro-approvals audit-gc --retention-days 1` clears old audit rows
 
 ```bash
-# Set a retention-days of 0 so every row is older than the cutoff
-# and gets deleted.
-$VMEXEC "$VM" 'qdistro-approvals audit-gc --retention-days 0 > /tmp/07-audit-gc.txt 2>&1; echo exit=$?'
+# Age this scenario's three rows by two days, then exercise the broker's safe
+# minimum retention window. RunAuditGc deliberately rejects 0 because it would
+# erase current incident history.
+SQL_AGE_B64=$(base64 -w0 <<'SQL_EOF'
+UPDATE audit SET ts = ts - 172800;
+SQL_EOF
+)
+$VMEXEC "$VM" "echo $SQL_AGE_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" 'qdistro-approvals audit-gc --retention-days 1 > /tmp/07-audit-gc.txt 2>&1; echo exit=$?'
 $VMEXEC "$VM" 'cat /tmp/07-audit-gc.txt'
 SQL_COUNT_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT COUNT(*) FROM audit;
@@ -150,7 +156,7 @@ $VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
 
 **Assert:**
 - Exit code `0`.
-- stdout reports `deleted N row(s) older than 0d` with N ≥ 3
+- stdout reports `deleted N row(s) older than 1d` with N ≥ 3
  (seeded 2 + 1 revoke row from S3).
 - Audit row count afterwards is `0`.
 

@@ -252,6 +252,8 @@ class = "local-runtime"
 command = "true"
 timeout = 30
 EOF
+chmod 0644 "$RECIPES_DIR/$CONTAINERFILE_NAME" \
+    "$ETC_TEMPLATES/$TEMPLATE.toml"
 RID1=$(build_promote) || { echo "[s64] $PASSCOUNT passes, $FAILCOUNT failures"; exit 1; }
 [ -f "/var/lib/qdistro/bindings/${SILO}.toml" ] || fail "no binding after gen1 promote"
 

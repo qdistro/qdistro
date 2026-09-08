@@ -109,7 +109,41 @@ if [ -f "$SRC/systemd/qdistro-templates-tmpfiles.conf" ]; then
 fi
 
 # On-disk model: dirs (security trees owner-only) + defaults.
-install -d -m 0755 /etc/qdistro/templates /var/lib/qdistro/templates
+install -d -m 0755 /etc/qdistro/templates
+install -d -o admin -g admin -m 0700 /var/lib/qdistro/templates
+
+# State snapshots are read-only btrfs subvolumes owned by admin.  GC runs as
+# that same account so it can also reach the rootless podman store.  Permit a
+# directory owner to remove child subvolumes; ordinary directory permissions
+# still scope where that is possible. Btrfs mount options are filesystem-wide
+# and come from its first mount, so persist this on every btrfs fstab entry
+# (including /), rather than only on the later /var subvolume mount.
+var_mount=$(findmnt -n -o TARGET --target /var 2>/dev/null || true)
+if [ -n "$var_mount" ] \
+        && [ "$(findmnt -n -o FSTYPE --target /var 2>/dev/null || true)" = btrfs ]; then
+    if ! findmnt -n -o OPTIONS --target /var | tr ',' '\n' \
+            | grep -qx user_subvol_rm_allowed; then
+        mount -o remount,user_subvol_rm_allowed "$var_mount"
+    fi
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/etc/fstab")
+lines = path.read_text().splitlines()
+changed = False
+for index, line in enumerate(lines):
+    fields = line.split()
+    if len(fields) >= 4 and not line.lstrip().startswith("#") \
+            and fields[2] == "btrfs":
+        options = fields[3].split(",")
+        if "user_subvol_rm_allowed" not in options:
+            fields[3] += ",user_subvol_rm_allowed"
+            lines[index] = " ".join(fields)
+            changed = True
+if changed:
+    path.write_text("\n".join(lines) + "\n")
+PY
+fi
 install -d -m 0700 /var/lib/qdistro/bindings /var/lib/qdistro/pins \
     /var/lib/qdistro/identity
 # NB: do NOT create or chown /var/lib/qdistro/audit here. It is the SHARED

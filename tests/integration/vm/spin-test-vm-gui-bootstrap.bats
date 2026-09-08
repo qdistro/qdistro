@@ -121,10 +121,11 @@ in_file() {
     in_file "perl-Net-DBus" "$GUI_SPIN"
 }
 
-@test "gui-spin: configures autologin (greetd masked, agetty on tty1)" {
+@test "gui-spin: starts labwc from admin's lingering user manager" {
     in_file "systemctl mask greetd.service" "$GUI_SPIN"
-    in_file "getty@tty1.service.d/autologin.conf" "$GUI_SPIN"
-    in_file "--autologin admin" "$GUI_SPIN"
+    in_file "qdistro-labwc.service" "$GUI_SPIN"
+    in_file "UnsetEnvironment=WAYLAND_DISPLAY DISPLAY" "$GUI_SPIN"
+    in_file "systemctl --user enable --now qdistro-labwc.service" "$GUI_SPIN"
 }
 
 # --- display-resolution fix (item 2) -----------------------------------

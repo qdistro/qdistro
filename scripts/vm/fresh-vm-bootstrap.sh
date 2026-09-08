@@ -57,6 +57,22 @@ SRC=/root/qdistro-src
 
 log() { echo "[bootstrap] $*"; }
 
+# The historical baseweed image gave admin a private primary group named
+# `admin`; the Kiwi image uses `users` instead.  A number of test-only probes
+# deliberately stage private files as admin:admin, and the template installer
+# uses that private group to keep authored policy away from ordinary users.
+# Preserve that contract on every disposable CI VM without changing admin's
+# primary group.
+if ! getent group admin >/dev/null; then
+    groupadd admin
+fi
+usermod -aG admin admin
+
+# GUI and PAM integration scenarios exercise the real qdlocker stack with a
+# documented disposable-VM credential.  Imported Kiwi images do not inherit
+# the old baseweed password, so pin it here before any golden is captured.
+printf '%s\n' 'admin:Pa_ssw0rd45' | chpasswd
+
 install -d -o root -g root -m 0755 /etc/qdistro
 cat > /etc/qdistro/profile <<EOF
 QDISTRO_PROFILE=$QDISTRO_PROFILE

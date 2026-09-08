@@ -410,14 +410,61 @@ def _collect_state_snapshots(layout: qt.Layout, now: float,
 
 
 def _rm_snapshot_payload(path: str) -> None:
+    """Remove a snapshot payload and fail if it still exists.
+
+    An unprivileged btrfs delete can fail when the filesystem was mounted
+    without ``user_subvol_rm_allowed``.  ``shutil.rmtree`` can remove a plain
+    directory after that failure, but it cannot remove the subvolume root.
+    Never let that best-effort fallback turn a retained payload into a false
+    deletion record.
+    """
     btrfs = qt.resolve_btrfs()
+    btrfs_error = ""
     if btrfs:
+        probe = subprocess.run([btrfs, "subvolume", "show", path],
+                               capture_output=True, text=True)
+        is_subvolume = probe.returncode == 0
         rc = subprocess.run([btrfs, "subvolume", "delete", path],
                             capture_output=True, text=True)
         if rc.returncode == 0:
             return
+        btrfs_error = rc.stderr.strip()
+        # An owner may delete child subvolumes with the btrfs
+        # user_subvol_rm_allowed mount option, but a read-only snapshot must
+        # first be made writable. Restore the flag if the retry still fails so
+        # a failed GC does not silently weaken the retained rollback payload.
+        ro = subprocess.run([btrfs, "property", "get", "-ts", path, "ro"],
+                            capture_output=True, text=True)
+        if ro.returncode == 0:
+            # A successful subvolume-scoped property query is independent
+            # confirmation even when `subvolume show` itself was unavailable.
+            is_subvolume = True
+        if ro.returncode == 0 and ro.stdout.strip() == "ro=true":
+            writable = subprocess.run(
+                [btrfs, "property", "set", "-ts", path, "ro", "false"],
+                capture_output=True, text=True)
+            if writable.returncode == 0:
+                retry = subprocess.run([btrfs, "subvolume", "delete", path],
+                                       capture_output=True, text=True)
+                if retry.returncode == 0:
+                    return
+                restored = subprocess.run(
+                    [btrfs, "property", "set", "-ts", path, "ro", "true"],
+                    capture_output=True, text=True)
+                btrfs_error = retry.stderr.strip() or btrfs_error
+                if restored.returncode != 0:
+                    restore_error = restored.stderr.strip()
+                    btrfs_error += (
+                        f"; restoring read-only property failed: {restore_error}")
+        if is_subvolume:
+            raise qt.TemplateError(
+                f"snapshot subvolume deletion failed for {path}: {btrfs_error}")
     import shutil
     shutil.rmtree(path, ignore_errors=True)
+    if os.path.exists(path):
+        detail = f": {btrfs_error}" if btrfs_error else ""
+        raise qt.TemplateError(
+            f"snapshot payload deletion failed for {path}{detail}")
 
 
 def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,

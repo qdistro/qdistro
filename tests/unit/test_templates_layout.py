@@ -6,11 +6,10 @@ write is atomic (temp + rename, never in-place)."""
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
-
 import qdistro_templates as qt
-
 
 # --------------------------------------------------------------------------
 # TOML round-trip
@@ -480,3 +479,10 @@ def test_resolve_btrfs_none_when_genuinely_absent(monkeypatch):
     monkeypatch.setattr(qt.shutil, "which", lambda n: None)
     monkeypatch.setattr(qt.os.path, "isfile", lambda p: False)
     assert qt.resolve_btrfs() is None
+
+
+def test_template_installer_remounts_filesystem_containing_var():
+    installer = Path(__file__).parents[2] / "scripts/install/install-templates-for-vm.sh"
+    source = installer.read_text()
+    assert "findmnt -n -o TARGET --target /var" in source
+    assert 'mount -o remount,user_subvol_rm_allowed "$var_mount"' in source

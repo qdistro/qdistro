@@ -80,7 +80,11 @@ setup() {
 
 @test "deploy-units: installer enables the session TARGET (not the services directly)" {
     SESSION_INSTALL="$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh"
-    grep -Eq "systemctl --user enable qdwin-session.target" "$SESSION_INSTALL"
+    # The shared offline/live helper replaced the literal systemctl command.
+    # Pin both the target selection and the helper invocation so the target
+    # cannot disappear from the enabled unit set during another refactor.
+    grep -Eq 'SESSION_UNITS="qdwin-session.target \$SESSION_UNITS"' "$SESSION_INSTALL"
+    grep -Eq 'user_unit_enable admin .*\$SESSION_UNITS' "$SESSION_INSTALL"
 }
 
 @test "deploy-units: the VM target wiring mirrors deploy (PartOf/Requires/After)" {
@@ -150,8 +154,10 @@ setup() {
 # --- #19: image stages + verifies /usr/bin/qdgreeter --------------------
 
 @test "#19: build.sh syncs qdgreeter (and qdlocker) into the image overlay" {
-    grep -Eq 'for repo in .*qdgreeter' "$IMAGE_BUILD"
-    grep -Eq 'for repo in .*qdlocker' "$IMAGE_BUILD"
+    # The repository list is declared once and consumed by the sync loop.
+    # Assert both halves so a dead declaration cannot satisfy this guard.
+    grep -Eq '^SYNC_REPOS=.*qdgreeter.*qdlocker' "$IMAGE_BUILD"
+    grep -Eq 'for repo in \$SYNC_REPOS' "$IMAGE_BUILD"
 }
 
 @test "#19: config.sh pip-installs qdgreeter and hard-fails if /usr/bin/qdgreeter is missing" {

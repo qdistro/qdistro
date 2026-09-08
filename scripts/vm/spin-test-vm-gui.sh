@@ -18,8 +18,9 @@
 # stack. greetd stays masked here; this script then selects which session
 # admin's user manager leaves running, via QDISTRO_VM_GUI_SESSION:
 #
-#   labwc (default) — disables the qdwin units and runs labwc+lxqt on wayland-0
-#                     for the permissions-gui admin-app scenarios.
+#   labwc (default) — disables the qdwin units and runs labwc+lxqt from the
+#                     lingering admin user manager on wayland-0 for the
+#                     permissions-gui admin-app scenarios.
 #   qdwin           — keeps the production qdwin compositor + qdshell session on
 #                     wayland-1 (the one fresh-vm-bootstrap.sh already started),
 #                     for the qdwin/qdshell GUI lanes (taskbar isolation menu,
@@ -104,7 +105,7 @@ echo "[gui-spin] gui session profile: $SESSION"
 # labwc/qdwin install, §8b virtio-gpu dracut/grub, autologin + session config)
 # is already BAKED into the gui golden disk, and the staged source ($SRC) does
 # NOT exist on a clone — so re-running it would fail and/or duplicate work. A
-# clone boots straight into the baked session (getty autologin → labwc, or the
+# clone boots straight into the baked session (admin user unit → labwc, or the
 # enabled noctalia user units → qdwin). We only VERIFY, fail-closed and
 # profile-aware, that the baked session + the surface scenarios depend on came
 # up, then exit. The full-build path (golden build / QCI_NO_GOLDEN) is below.
@@ -511,26 +512,32 @@ exec /usr/local/bin/startlxqtwayland
 WRAP
 chmod +x /usr/local/bin/greetd-labwc-wrap
 
-# 8. greetd's initial_session has historically failed on this image
-#    (greeter session never reaches a seat — investigation pending,
-#    `todo/permissions-gui-vm-bootstrap.md`). Workaround: use a
-#    plain agetty autologin on tty1 + admin's .bash_profile that
-#    execs labwc. This gives admin a real PAM/logind session with
-#    a seat and labwc starts cleanly.
-mkdir -p /etc/systemd/system/getty@tty1.service.d
-cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<'EOF2'
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty -o '-p -f -- \\u' --noclear --autologin admin %I $TERM
-EOF2
+# 8. Run labwc from admin's lingering user manager. The former tty1 agetty
+#    autologin path exits immediately on current Tumbleweed after login(1), so
+#    getty hits its start limit and no compositor survives a golden reboot.
+#    The user manager is already kept alive by loginctl linger, and admin has
+#    the seat/render/input groups needed by labwc, making it a stable boot-time
+#    owner for the test compositor.
+mkdir -p /home/admin/.config/systemd/user
+cat > /home/admin/.config/systemd/user/qdistro-labwc.service <<'EOF2'
+[Unit]
+Description=qdistro labwc GUI test session
+After=default.target
 
-cat > /home/admin/.bash_profile <<'EOF2'
-# Auto-exec labwc when logged in on tty1 (test-VM autologin).
-if [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
-    exec /usr/local/bin/greetd-labwc-wrap
-fi
+[Service]
+UnsetEnvironment=WAYLAND_DISPLAY DISPLAY
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_SESSION_TYPE=wayland
+Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
+Environment=WLR_NO_HARDWARE_CURSORS=1
+ExecStart=/usr/local/bin/startlxqtwayland
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
 EOF2
-chown admin:users /home/admin/.bash_profile
+chown -R admin:users /home/admin/.config/systemd/user
 fi  # end labwc-only steps 6-8
 
 # 8b. Display-resolution fix — make virtio_gpu the DRM driver instead
@@ -617,12 +624,14 @@ fi
 systemctl mask greetd.service 2>/dev/null || true
 
 if [ "$SESSION" = labwc ]; then
-    # labwc: getty@tty1 autologin execs labwc on wayland-0; the qdwin session
-    # units would race it for the DRM seat, so disable them.
+    # labwc: admin's lingering user manager starts labwc on wayland-0; the
+    # qdwin session units would race it for the DRM seat, so disable them.
     systemctl set-default multi-user.target >/dev/null
     systemctl daemon-reload
-    systemctl restart getty@tty1.service
+    systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
     runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service 2>/dev/null' || true
+    runuser -l admin -c 'systemctl --user daemon-reload'
+    runuser -l admin -c 'systemctl --user enable --now qdistro-labwc.service'
 
     # Wait up to 30s for admin's wayland-0 socket to appear (labwc up).
     for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do

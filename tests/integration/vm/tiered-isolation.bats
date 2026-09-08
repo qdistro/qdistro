@@ -1123,7 +1123,7 @@ setup() {
     # CreateSilo inside s101 then failed with "silo 'work' already
     # exists"). `userdel` and `rm -rf` of /var/lib stay as root.
     vm_run "runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StopSilo si work 2 >/dev/null 2>&1 || true; runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 DeleteSilo s work >/dev/null 2>&1 || true; userdel -r work 2>/dev/null || true; rm -rf /var/lib/qdistro/silos/work 2>/dev/null || true"
-    vm_run "curl -fsS -o /tmp/s101.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && systemctl restart qdistro-session-manager.service && sleep 1 && runuser -u admin -- bash /tmp/s101.sh 2>&1"
+    vm_run "curl -fsS -o /tmp/s101.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s101-session-lifecycle.sh && chmod 0755 /tmp/s101.sh && systemctl restart qdistro-session-manager.service && sleep 1 && runuser -u admin -- bash /tmp/s101.sh 2>&1"
     assert_success
     if [[ "$output" == *"FAIL: qdistro-session-manager.service failed to start"* ]]; then
         fail_loud "qdistro-session-manager not installed on this VM (older bootstrap)"

@@ -47,6 +47,7 @@ while b"\n" not in buf:
     buf += c
 print(buf.decode().strip())
 PYEOF
+chmod 0644 /tmp/media_client.py
 
 run_client() {  # op device [label]  -- as user1
     runuser -u user1 -- python3 /tmp/media_client.py "$@" 2>&1

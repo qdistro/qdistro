@@ -177,6 +177,8 @@ class = "local-runtime"
 command = "true"
 timeout = 30
 EOF
+    chmod 0644 "$RECIPES_DIR/$CONTAINERFILE_NAME" \
+        "$ETC_TEMPLATES/$TEMPLATE.toml"
 
     # Broker: allow the SILO spawn gate for our app. The silo path uses the
     # qdistro.tier2.spawn:<workload>/<app> action; the gate now runs AS ADMIN

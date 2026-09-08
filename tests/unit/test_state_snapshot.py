@@ -11,16 +11,13 @@ mechanism is exercised in the VM.
 from __future__ import annotations
 
 import os
-import time
-
-import qdistro_templates as qt
-import qdistro_state_snapshot as ss
-import qdistro_resolve_binding as rb
-import qdistro_template_promote as promote
-import qdistro_template_gc as gc
 
 import pytest
-
+import qdistro_resolve_binding as rb
+import qdistro_state_snapshot as ss
+import qdistro_template_gc as gc
+import qdistro_template_promote as promote
+import qdistro_templates as qt
 
 GEN_A = "sha256:" + "a" * 64
 GEN_B = "sha256:" + "b" * 64
@@ -426,6 +423,75 @@ def test_gc_deletes_expired_snapshot_keeps_metadata(tmp_path):
     assert meta["restore_eligible"] == "false"
     assert "deleted_at" in meta
     assert ss.find_restore_snapshot(layout, silo, GEN_A) is None
+
+
+def test_gc_does_not_record_deletion_when_snapshot_payload_remains(
+        tmp_path, monkeypatch):
+    """A failed btrfs deletion must preserve truthful rollback metadata."""
+    layout = _layout(tmp_path)
+    silo = "gmail"
+    _state(layout, silo, "A-PROFILE")
+    result = ss.take_pre_activation_snapshot(
+        layout, silo, incoming_generation=GEN_B, outgoing_generation=GEN_A,
+        template=TEMPLATE, state_path=layout.default_state_path(silo),
+        policy="availability", now=1000.0)
+    meta_path = os.path.join(ss.snapshots_dir(layout, silo), result["id"],
+                             "meta.toml")
+
+    class FailedDelete:
+        returncode = 1
+        stdout = ""
+        stderr = "Operation not permitted"
+
+    monkeypatch.setattr(qt, "resolve_btrfs", lambda: "/usr/bin/btrfs")
+    monkeypatch.setattr(gc.subprocess, "run", lambda *args, **kwargs: FailedDelete())
+    # Model a btrfs subvolume root: rmtree may remove its contents but cannot
+    # unlink the subvolume itself.
+    monkeypatch.setattr("shutil.rmtree", lambda *args, **kwargs: None)
+
+    far_future = 1000.0 + (ss.SNAPSHOT_WINDOW_DAYS + 1) * 86400
+    with pytest.raises(qt.TemplateError, match="Operation not permitted"):
+        gc.gc(layout=layout, now=far_future,
+              rmi=lambda d: True, image_exists=lambda d: True)
+
+    assert os.path.isdir(result["path"])
+    meta = qt.read_toml(meta_path)
+    assert meta["restore_eligible"] == "true"
+    assert "deleted_at" not in meta
+
+
+def test_snapshot_delete_retry_failure_never_recursively_empties_subvolume(
+        tmp_path, monkeypatch):
+    payload = tmp_path / "snapshot"
+    payload.mkdir()
+    (payload / "cookies").write_text("rollback-state")
+
+    class Result:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    results = iter([
+        Result(1, stderr="subvolume show unavailable"),
+        Result(1, stderr="Read-only file system"),
+        Result(0, stdout="ro=true\n"),          # independently confirms it
+        Result(0),                              # temporarily writable
+        Result(1, stderr="Operation not permitted"),
+        Result(1, stderr="property restore failed"),
+    ])
+    monkeypatch.setattr(qt, "resolve_btrfs", lambda: "/usr/bin/btrfs")
+    monkeypatch.setattr(gc.subprocess, "run", lambda *args, **kwargs: next(results))
+    recursive_deletes = []
+    monkeypatch.setattr("shutil.rmtree",
+                        lambda *args, **kwargs: recursive_deletes.append(args))
+
+    with pytest.raises(qt.TemplateError, match="property restore failed"):
+        gc._rm_snapshot_payload(str(payload))
+
+    assert payload.is_dir()
+    assert (payload / "cookies").read_text() == "rollback-state"
+    assert recursive_deletes == []
 
 
 def test_gc_keeps_unexpired_snapshot(tmp_path):

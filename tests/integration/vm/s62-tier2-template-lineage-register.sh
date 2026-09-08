@@ -161,6 +161,8 @@ class = "local-runtime"
 command = "true"
 timeout = 30
 EOF
+chmod 0644 "$RECIPES_DIR/$CONTAINERFILE_NAME" \
+    "$ETC_TEMPLATES/$TEMPLATE.toml"
 
 # --- 4. author the broker spawn allow rule + settle ------------------
 install -d -m 0755 "$RULE_DIR"
