@@ -181,7 +181,7 @@ fi
 
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
-mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser,qdgreeter,qnotebook}
+mkdir -p "$SRC"
 for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qnotebook; do
     if ! wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz"; then
         # qdlocker + qdbrowser + qdgreeter + qnotebook are optional during the rollout; older
@@ -191,11 +191,16 @@ for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qnotebook; do
         # but the broker / pwd / session-manager paths still come up.
         if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ] || [ "$repo" = "qdgreeter" ] || [ "$repo" = "qnotebook" ]; then
             log "$repo tarball not staged; skipping"
-            rmdir "$SRC/$repo" 2>/dev/null || true
+            rm -rf "$SRC/$repo"
             continue
         fi
         echo "[bootstrap] failed to fetch $HOST/$repo.tar.gz"; exit 2
     fi
+    # A cached base can contain files deleted from the current checkout.  Do
+    # not overlay the new archive on that stale tree: security removals such
+    # as browser_bridge/extension must remain removed in every fresh VM.
+    rm -rf "$SRC/$repo"
+    mkdir -p "$SRC/$repo"
     tar -xzf "/tmp/$repo.tar.gz" -C "$SRC/$repo"
     rm -f "/tmp/$repo.tar.gz"
 done
