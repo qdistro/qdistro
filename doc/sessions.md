@@ -194,12 +194,109 @@ design target. No mechanism currently expresses or evaluates any row of it.
 | VR / immersive session | prefer presence/idle policy, not desktop lock alone |
 | Recall viewing (post-v1; cut from v1) | revoke viewer grant and clear decrypted results |
 
-Planned lock UI indicators: the lock surface should show non-suppressible
-state for live microphone, camera, screencast/screen capture, system-audio
-capture, virtual input or accessibility control, and qdistro-specific network
-egress. v1 does not yet wire the authoritative qdwin capture feed or
-session-manager egress feed into `qdlocker`, so those indicators are not a
-current shipped guarantee.
+### Lock UI indicators (partial lock-time capture observation)
+
+The lock surface must show non-suppressible state for live microphone,
+camera, screencast/screen capture, system-audio capture, virtual input or
+accessibility control, and qdistro-specific network egress.
+
+`qdlocker` owns the runtime lock surface, so that is where the indicators
+live (`qdlocker/qdlocker/indicators.py` + `qml/LockUI.qml`). qdshell carries
+an older, **experimental** derivation of the same idea
+(`Services/Qdistro/CaptureStateService.qml`, `SiloEgressService.qml`,
+`Modules/LockScreen/`) attached to its `WlSessionLock` lock screen — the
+deprecated path qdwin does not implement. That copy is not equivalent (it
+differs in polling, timeouts, freshness horizon and process lifecycle) and
+is not a lock guarantee; it must be reconciled with qdlocker's before any
+consumer instantiates it.
+
+What is observable:
+
+- **Network egress** — `SessionManager1.ListSilos` (row semantics in the
+ D-Bus section below). The session manager is authoritative; an
+ unreachable one renders as *unverified*, not as "no egress".
+- **Microphone, camera, screencast, system-audio capture** — the PipeWire
+ graph, read with `pw-dump`. The *kind* is derived from node properties
+ (`stream.capture.sink` and a `.monitor` name for system audio,
+ `media.role`/`device.api`/name hints for camera, qdwin's own
+ `weston.pipewire-N` for screencast). Where those hints are absent the
+ classification is a best guess from node metadata, not a link-graph
+ conclusion — an open review finding, recorded in
+ `todo/fable-release/12-j28-multi-output-lock-indicators.md`'s sibling
+ review notes, is that ambiguous cases should render as a generic
+ uncertain kind instead. PipeWire is the widest observation point
+ available because silos get a bind-mounted view of admin's `pipewire-0`
+ socket, per-session daemons link upward into admin's graph, and qdwin's
+ view-stream path pins a forwarded toplevel onto a weston
+ `backend-pipewire` output whose node is named `weston.pipewire-N`.
+- **Virtual input / accessibility control** — **not observable at all.**
+ qdwin filters the `zwp_virtual_keyboard` / `zwp_input_method` globals but
+ emits no event for a bound client.
+
+**Fail visible, not fail silent.** Selected running PipeWire nodes are
+evidence of capture *activity*: where the graph carries a client, the client
+is named; where only a source *device* node is running, the activity is real
+but the client is not established, and the surface says so rather than
+implying attribution. There is no trustworthy *negative* for any kind:
+
+- a policy-approved fullscreen session may hold a direct device grant
+ (`devices.md`, `games.md`: `/dev/video*`, or `audio` group + `/dev/snd/*`)
+ and never appear in the graph at all;
+- a direct `weston_capture_v1` screen grab does not appear either;
+- virtual input has no observer.
+
+So **no kind is ever reported as "clear"**. Each kind is either `active`
+(positively observed) or `unverified`, and a dead, failed, killed or stale
+observer drives every kind to `unverified`. The surface distinguishes three
+severities: observed capture, observer-failed, and a standing coverage
+disclosure ("capture monitoring: partial — … direct device grants and
+virtual input are not monitored"), so a healthy quiet scan never reads the
+same as a dead observer, and neither reads as an all-clear.
+
+The lock surface observes only while locked. It re-marks its reading stale
+on both the lock *intent* edge and the compositor's authoritative
+`locked_changed`, so a scan launched while the machine was still unlocked
+cannot survive as locked-machine state. No setting gates any of it.
+
+**Runtime requirements.** The observer shells out to `pw-dump` and
+`busctl`. Both ship in the release image (`image/config.xml`
+`pipewire-tools`) and in the bootstrap chain
+(`scripts/install/install-deps.sh`), and `qdlocker/indicators.py` ships in
+the qdlocker wheel that both chains pip-install. If either tool were
+absent the indicator would read "unverified" forever — honest, but useless
+— so the live gate asserts their presence explicitly.
+
+**Known gaps (not shipped guarantees):**
+
+- **Multi-output.** qdlocker paints one fullscreen window and qdwin
+ fullscreens it onto `qdwin_primary_output()`, so the indicators appear on
+ the primary output only. The other outputs are covered by qdwin's opaque
+ lock curtain, which spans the union bounding box of the outputs present
+ when it was installed, and all non-lock layers are unset globally — so a
+ secondary output is uniformly black rather than showing stale desktop
+ content. An output hot-plugged *while locked* is **not** covered: qdwin
+ re-installs the curtain on output removal but not on output creation. Options and costs are in
+ `todo/fable-release/12-j28-multi-output-lock-indicators.md`; the same note
+ records two pre-existing qdwin defects found alongside (output hotplug
+ while locked does not re-install the curtain, and
+ `qdwin_locker_surface_v1.configure` is documented but never sent).
+- **No live gate has been run.** The derivation is unit-tested and the live
+ scenario is written (`qdlocker/tests/gui/09-capture-indicators.md`), but it
+ has not been executed against a real qdwin + qdlocker + PipeWire graph.
+ It asserts the state of the running observer through an
+ introspection-gated `indicators` ctrl verb plus banner pixels. Its
+ quiet-lock, mic start/stop-while-locked, observer-timeout and egress
+ (including transient `Stopping` and an unreachable session manager) and
+ locked-restart steps are unconditional; system audio, camera, screencast
+ and the second-output step SKIP with a printed reason when the VM cannot
+ provide a default sink, a camera node, a manually driven view stream or a
+ second head. Output hotplug while locked is a manual check, not a gate.
+
+Making a kind report "clear" requires a real authoritative feed first: a
+qdwin event enumerating `weston_capture_v1` / view-stream clients and bound
+virtual-input/IME clients, and a device-grant registry covering direct
+`/dev/video*` and `/dev/snd/*` opens. Until those exist, a permanent
+"unverified" is the honest reading, not a bug.
 
 User sessions do not run independent screenlockers and must not prompt for the
 admin/root password. When locked, the only unlock path is the admin locker.
@@ -366,10 +463,12 @@ transient `Stopping` / `Deleting` states followed by the resting
 `Stopped` / row-deletion; treat unknown state strings as "transient,
 wait."
 
-The planned lock-screen network-egress indicator will consume the same
-`ListSilos` rows. Active tier-3 rows with `egress: null` should be shown as
+The lock-screen network-egress indicator consumes these same `ListSilos`
+rows (`qdlocker/qdlocker/indicators.py`, and qdshell's `SiloEgressService`
+for its own surfaces). Active tier-3 rows with `egress: null` should be shown as
 legacy host egress, `direct` and `wg:NAME` by their policy, and `none` as
-intentionally dark. This is not wired into the v1 `qdlocker` UI yet.
+intentionally dark. A `ListSilos` call that fails renders as *unverified*
+on the lock surface rather than as "no egress".
 
 Error names live under `org.qdistro.SessionManager1.*`:
 `UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,
