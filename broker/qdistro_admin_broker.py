@@ -986,6 +986,9 @@ class Broker(dbus.service.Object):
         # inconclusive and before falling back to the admin prompt.
         # The executor runs in a separate process; if its socket is
         # unreachable, the broker falls through to admin prompt silently.
+        self._hook_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="broker-hooks")
+        self._hook_slots = threading.BoundedSemaphore(4)
         self.hooks = HookClient(enabled=HOOKS_ENABLED)
         if HOOKS_ENABLED:
             print("[broker] hooks: enabled, executor socket at "
@@ -2496,11 +2499,12 @@ class Broker(dbus.service.Object):
 
     def _decide_check(self, *, uid: int, pid: int, exe: str, action_s: str,
                       details: dict, lin_app: str, lin_engine: str) -> str:
-        """Shared rules→cache→hooks resolution for the synchronous
+        """Shared rules→cache resolution for the synchronous
         permission gates. The (uid, pid, exe, lin_app, lin_engine) subject
         is the process being decided FOR — the D-Bus caller in
         CheckPermission, or the launcher-attested originating client in
         CheckPermissionForClient. Returns "allow"/"deny"/"unknown"."""
+        details = dict(details, app_id=lin_app, sandbox_engine=lin_engine)
         argv = _argv_from_details(details)
         rule = self.rules.match(
             uid=uid, action=action_s, exe=exe,
@@ -2510,7 +2514,10 @@ class Broker(dbus.service.Object):
             argv=argv,
         )
         if rule is not None:
-            return "allow" if rule.decision == "allow" else "deny"
+            return self._record_check(
+                uid=uid, pid=pid, exe=exe, action=action_s,
+                allowed=rule.decision == "allow", details=details,
+                source="rule", scope=rule.scope, rule_path=rule.source_path)
         # Tier launch is rules-only: a stale approval cache row or hook
         # verdict must not mint a new sandboxed process. Disposable spawn
         # (qdistro.dispose.spawn:<workload>) joins the same fail-closed set
@@ -2539,47 +2546,32 @@ class Broker(dbus.service.Object):
         row = self.cache.lookup_detail(uid, action_s, exe, argv,
                                        sandboxed=sandboxed)
         if row is not None:
-            return "allow" if bool(row["decision"]) else "deny"
-        # Consult Python hooks when rules and cache are both
-        # inconclusive. CheckPermission is a fast-path; the hook
-        # query adds an AF_UNIX round-trip but stays within the 2s
-        # D-Bus ceiling thanks to the hook timeout (default 5s, but
-        # CheckPermission callers expect <2s — the hook executor
-        # timeout is capped at HOOK_CALL_TIMEOUT_S which is 4s on
-        # the executor side). Treat errors as "unknown" (fall through).
-        try:
-            hook_event: dict[str, Any] = dict(_sanitize_details(details))
-            hook_event["caller_uid"] = uid
-            hook_event["caller_pid"] = pid
-            hook_event["caller_exe"] = exe
-            hook_event["action_full"] = action_s
-            hook_resp = self.hooks.query(action_s, hook_event)
-            if hook_resp is not None:
-                verdict = hook_resp.get("verdict")
-                reason = hook_resp.get("reason", "")[:256]
-                # Only audit an ACTIONABLE verdict. A non-None hook
-                # response with a missing/unknown verdict falls through to
-                # "unknown" (admin prompt) and must NOT write a
-                # decision=False row that reads like a deny — mirrors the
-                # _enqueue path, which audits only when a verdict decides.
-                if verdict in ("allow", "transform", "deny"):
-                    try:
-                        self.audit.log(
-                            caller_uid=uid, caller_pid=pid, caller_exe=exe,
-                            action=action_s,
-                            decision=(verdict in ("allow", "transform")),
-                            scope=None, approver_uid=None,
-                            source=f"hook verdict={verdict} reason={reason}")
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[broker] qdistro.audit.failure: check_hook "
-                              f"path, reason={e!r}", flush=True)
-                if verdict in ("allow", "transform"):
-                    return "allow"
-                if verdict == "deny":
-                    return "deny"
-        except Exception:  # noqa: BLE001
-            pass
+            return self._record_check(
+                uid=uid, pid=pid, exe=exe, action=action_s,
+                allowed=bool(row["decision"]), details=details,
+                source=f"cache grant_id={row['id']}", scope=row.get("scope"),
+                approver_uid=row.get("approver_uid"))
+        # Hooks can run for seconds. Only RequestPermission consults them,
+        # on a bounded worker pool; synchronous gates never wait on executor IO.
         return "unknown"
+
+    def _record_check(self, *, uid, pid, exe, action, allowed, details,
+                      source, scope=None, rule_path=None, approver_uid=None,
+                      request_id=None):
+        context = {key: _selector_from_details(details, key)
+                   for key in ("app_id", "sandbox_engine", "mime_type")}
+        try:
+            self.audit.log(
+                caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                action=action, decision=allowed, scope=scope,
+                source=source + " context=" + json.dumps(context, sort_keys=True),
+                rule_path=rule_path, approver_uid=approver_uid,
+                request_id=request_id, argv=_argv_from_details(details))
+        except Exception as exc:
+            print(f"[broker] qdistro.audit.failure: {source}: {exc!r}", flush=True)
+            if AUDIT_REQUIRED:
+                return "deny"
+        return "allow" if allowed else "deny"
 
     def _resolve_client_for_portal(self, client_pid: int,
                                    client_starttime: int):
@@ -3821,7 +3813,7 @@ class Broker(dbus.service.Object):
                 "Request rejected.",
                 name=BUS_NAME + ".RateLimited",
             )
-        # --- Phase 1 (synchronous, fast): rules / cache / hooks ------
+        # --- Phase 1 (synchronous, fast): rules / cache ------------
         #
         # Resolution order per spec/07: rules first, cache second,
         # hooks third, prompt last. A rule-matched decision is
@@ -3851,7 +3843,6 @@ class Broker(dbus.service.Object):
         # actions additionally use tier-specific synthetic action strings.
         matched_rule = None
         cached_row = None
-        hook_verdict = None
         if not one_shot:
             argv = _argv_from_details(details)
             # Permission lineage (finding P0-1): resolve the live caller
@@ -3890,23 +3881,8 @@ class Broker(dbus.service.Object):
         # a hostile caller can inject ANSI escapes or newlines that
         # draw fake approval banners inside the detail pane.
         clean_details = _sanitize_details(details)
-
-        # Hook consultation: when rules and cache are both inconclusive,
-        # ask the sandboxed hook executor before falling through to the
-        # admin prompt. Done outside the lock and before creating a
-        # _Request — the hook query is I/O-bound (AF_UNIX round-trip)
-        # and we don't want to hold the lock during it.
-        if not one_shot and matched_rule is None and cached_row is None:
-            try:
-                hook_event: dict[str, Any] = dict(clean_details)
-                hook_event["caller_uid"] = uid
-                hook_event["caller_pid"] = pid
-                hook_event["caller_exe"] = exe
-                hook_event["action_full"] = action_s
-                hook_verdict = self.hooks.query(action_s, hook_event)
-            except Exception as e:  # noqa: BLE001
-                print(f"[broker] hook query failed: {e!r}", flush=True)
-                hook_verdict = None
+        if not one_shot:
+            clean_details.update(app_id=lin_app, sandbox_engine=lin_engine)
 
         # --- Phase 2 (synchronous, fast): allocate rid + _Request ----
         #
@@ -3933,18 +3909,6 @@ class Broker(dbus.service.Object):
             elif cached_row is not None:
                 req.decision = bool(cached_row["decision"])
                 req.layered_pending = False
-            elif hook_verdict is not None:
-                verdict_val = hook_verdict.get("verdict")
-                if verdict_val == "allow":
-                    req.decision = True
-                elif verdict_val == "deny":
-                    req.decision = False
-                # "transform" is treated as allow (the payload mutation
-                # is out-of-band; the broker's decision is binary).
-                elif verdict_val == "transform":
-                    req.decision = True
-                if req.decision is not None:
-                    req.layered_pending = False
             self._pending[rid] = req
 
         if req.decision is None:
@@ -3985,72 +3949,104 @@ class Broker(dbus.service.Object):
             else:
                 with self._lock:
                     req.layered_pending = False
-            self.RequestPending(rid)
+            if one_shot or not self._start_hook(req):
+                self.RequestPending(rid)
             return rid
 
-        # Decided immediately — record it. We hold the lock during the
-        # audit write so a concurrent RevokeApproval can't see "cache
-        # row gone" before the audit row lands (the "waiter sees True
-        # means trail exists" invariant).
+        # Audit before returning the decided request. A rule hit is history,
+        # never an independent human approval with discarded selectors.
         with self._lock:
             if matched_rule is not None:
-                rule_scope = matched_rule.scope
-                print(f"[broker] rule match: uid={uid} action={action_s!r} exe={exe!r} "
-                      f"-> {req.decision} (rule={matched_rule.name!r} "
-                      f"at {matched_rule.source_path}, scope={rule_scope})",
-                      flush=True)
-                try:
-                    self.audit.log(
-                        caller_uid=uid, caller_pid=pid, caller_exe=exe,
-                        action=action_s, decision=req.decision,
-                        scope=rule_scope, source="rule", approver_uid=None,
-                        rule_path=matched_rule.source_path,
-                        request_id=rid,
-                        argv=argv if argv else None,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    print(f"[broker] qdistro.audit.failure: rule path, reason={e!r}", flush=True)
-                # If the rule specified a scope, materialize a cache row
-                # so subsequent requests hit the cheaper cache path.
-                if req.decision and rule_scope:
-                    try:
-                        self.cache.store(uid, action_s, exe, rule_scope,
-                                         True, 0,  # approver_uid=0: rules have no human approver
-                                         argv=argv)
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[broker] rule cache.store failed: {e}", flush=True)
-            elif cached_row is not None:
-                scope_s = cached_row.get("scope") if cached_row else None
-                print(f"[broker] cache hit: uid={uid} action={action_s!r} exe={exe!r} "
-                      f"-> {req.decision} (scope={scope_s})", flush=True)
-                try:
-                    self.audit.log(
-                        caller_uid=uid, caller_pid=pid, caller_exe=exe,
-                        action=action_s, decision=req.decision,
-                        scope=scope_s, source="cache", approver_uid=None,
-                        request_id=rid,
-                        argv=argv if argv else None,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    print(f"[broker] qdistro.audit.failure: cache path, reason={e!r}", flush=True)
-            elif hook_verdict is not None:
-                verdict_val = hook_verdict.get("verdict", "")
-                reason = hook_verdict.get("reason", "")
-                print(f"[broker] hook verdict: uid={uid} action={action_s!r} "
-                      f"exe={exe!r} -> {verdict_val} "
-                      f"(reason={reason!r})", flush=True)
-                try:
-                    self.audit.log(
-                        caller_uid=uid, caller_pid=pid, caller_exe=exe,
-                        action=action_s, decision=req.decision,
-                        scope=None, source=f"hook verdict={verdict_val} reason={reason}",
-                        approver_uid=None,
-                        request_id=rid,
-                        argv=argv if argv else None,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    print(f"[broker] qdistro.audit.failure: hook path, reason={e!r}", flush=True)
+                result = self._record_check(
+                    uid=uid, pid=pid, exe=exe, action=action_s,
+                    allowed=req.decision, details=clean_details, source="rule",
+                    scope=matched_rule.scope, rule_path=matched_rule.source_path,
+                    request_id=rid)
+            else:
+                result = self._record_check(
+                    uid=uid, pid=pid, exe=exe, action=action_s,
+                    allowed=req.decision, details=clean_details,
+                    source=f"cache grant_id={cached_row['id']}",
+                    scope=cached_row.get("scope"),
+                    approver_uid=cached_row.get("approver_uid"), request_id=rid)
+            req.decision = result == "allow"
         return rid
+
+    def _start_hook(self, req):
+        pool = getattr(self, "_hook_pool", None)
+        hooks = getattr(self, "hooks", None)
+        if pool is None or hooks is None or not hooks.enabled:
+            return False
+        if not self._hook_slots.acquire(blocking=False):
+            return False  # Saturation falls through to explicit admin approval.
+        event = dict(req.details)
+        event.update(caller_uid=req.uid, caller_pid=req.pid,
+                     caller_exe=req.exe, action_full=req.action)
+        try:
+            future = pool.submit(hooks.query, req.action, event)
+        except RuntimeError:
+            self._hook_slots.release()
+            return False
+        def complete(future):
+            try:
+                return self._apply_hook(req.id, future)
+            finally:
+                self._hook_slots.release()
+        def done(future):
+            GLib.idle_add(complete, future)
+        future.add_done_callback(done)
+        return True
+
+    def _apply_hook(self, rid, future):
+        try:
+            response = future.result()
+        except Exception:
+            response = None
+        with self._lock:
+            req = self._pending.get(rid)
+            if req is None or req.decision is not None:
+                return False  # Cancelled, reaped, or already decided by admin.
+            verdict = response.get("verdict") if isinstance(response, dict) else None
+            if verdict not in ("allow", "deny"):
+                # This binary permission API cannot apply a transformation.
+                self.RequestPending(rid)
+                return False
+            live_exe, live_start = _read_proc_identity(req.pid)
+            live_uid = _read_proc_uid(req.pid)
+            valid = (req.start_time > 0 and live_start == req.start_time
+                     and live_exe == req.exe and live_uid == req.uid)
+            # Policy may have changed while the executor was working. A
+            # freshly installed rule or human grant still precedes hooks.
+            current = "unknown"
+            if valid:
+                engine, app = self._lineage_selectors(
+                    req.pid, req.details.get("sandbox_engine", ""),
+                    req.details.get("app_id", ""), req.action, req.uid, req.exe)
+                valid = (engine == req.details.get("sandbox_engine", "")
+                         and app == req.details.get("app_id", ""))
+                if valid:
+                    current = self._decide_check(
+                        uid=req.uid, pid=req.pid, exe=req.exe, action_s=req.action,
+                        details=req.details, lin_app=app, lin_engine=engine)
+            if current != "unknown":
+                result = current
+            else:
+                reason = str(response.get("reason", ""))[:256]
+                result = self._record_check(
+                    uid=req.uid, pid=req.pid, exe=req.exe, action=req.action,
+                    allowed=valid and verdict == "allow", details=req.details,
+                    source=f"hook verdict={verdict} identity_valid={valid} reason={reason}",
+                    request_id=rid)
+            req.decision = result == "allow"
+            waiters = list(req.waiters)
+            req.waiters.clear()
+        self.RequestDecided(rid, result)
+        for reply, _error in waiters:
+            try:
+                reply(req.decision)
+            except Exception as exc:
+                print(f"[broker] hook reply failed: {exc!r}", flush=True)
+        return False
 
     def _apply_layered_identity(self, rid: int, future) -> bool:
         """GLib idle callback: apply layered-identity IO results.

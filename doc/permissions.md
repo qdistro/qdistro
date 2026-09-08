@@ -48,11 +48,32 @@ machinery:
  — the caller typically refuses the immediate attempt because there is no
  authority to invoke admin's attention synchronously.
 
-- **`RequestPermission(action, details) → rid`** — enqueues an admin prompt.
- The caller either waits via `WaitForDecision(rid)` or fires and forgets
- ("please change the policy so next time this works"). On allow, the broker
- writes a cache row; the next `CheckPermission` on the same `(uid, action,
- exe)` returns `"allow"` silently.
+- **`RequestPermission(action, details) → rid`** — returns a request ID
+ immediately. Rules and existing human approvals decide first. Otherwise,
+ a bounded, separate worker pool consults hooks without blocking D-Bus
+ dispatch. Four hook calls can be admitted at once; saturation, unavailable
+ executor, invalid verdict or timeout falls through to the admin prompt.
+ The hook socket has a five-second whole-operation deadline. A late result
+ cannot overwrite an admin decision and must match the request's live PID,
+ starttime, executable and uid. A binary permission gate accepts only `allow`
+ or `deny`; a `transform` response cannot authorize bytes it has not transformed.
+ The caller waits via `WaitForDecision(rid)` or fires and forgets. Only an
+ explicit human approval with reusable scope writes an approval-cache row.
+ Rule and hook decisions remain per-request; changing or removing a rule
+ therefore removes its authority immediately.
+
+Both fast APIs (`CheckPermission` and `CheckPermissionForClient`) record
+rule/cache decisions with subject, argv, selector context and rule/grant
+reference. With `audit_required` enabled, a failed audit write denies the
+operation. An unknown result is not an authorization and must refuse the
+immediate operation.
+
+The approval-cache migration removes legacy uid-0 allow entries because old
+rule grants and genuine root-helper approvals used the same representation.
+Their origin cannot be established safely, so those entries require fresh
+approval. Existing human-uid approvals and all denial entries survive; rules
+never wrote cached denials. Newly created root-helper approvals survive
+subsequent restarts.
 
 Pattern for actions where the caller must not block on human attention:
 

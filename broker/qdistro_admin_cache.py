@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     approver_uid INTEGER NOT NULL,
     scope        TEXT
 );
+CREATE TABLE IF NOT EXISTS approval_migrations (name TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS approvals_lookup
   ON approvals(caller_uid, action, match_kind);
 """
@@ -79,6 +80,17 @@ def _migrate(conn) -> None:
       'argv_exact' for the spec/21 actual-argv-tuple match.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(approvals)").fetchall()}
+    with conn:
+        if conn.execute("SELECT 1 FROM approval_migrations WHERE name = ?",
+                        ("remove_ambiguous_rule_grants",)).fetchone() is None:
+            # Old rule allows and root-helper human allows both used uid 0.
+            # Their provenance cannot be recovered reliably. Require reapproval
+            # for that ambiguous subset. Rules never cached denials: preserve
+            # those, along with identifiable human-uid grants.
+            conn.execute("DELETE FROM approvals WHERE approver_uid = 0 "
+                         "AND decision = 1")
+            conn.execute("INSERT INTO approval_migrations(name) VALUES (?)",
+                         ("remove_ambiguous_rule_grants",))
     if "scope" not in cols:
         conn.execute("ALTER TABLE approvals ADD COLUMN scope TEXT")
     if "argv" not in cols:

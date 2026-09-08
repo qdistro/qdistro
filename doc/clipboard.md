@@ -17,6 +17,25 @@ This means:
 The model emerges from Wayland itself; no qdistro clipboard daemon is needed
 for intra-compositor use.
 
+## Receive authorization and shell recovery
+
+qdwin guards each clipboard data source independently of qdshell availability.
+At receive time it reads the source resource and the active offer resource's
+Wayland clients. Both must have direct tracked toplevels; focus and another
+connection with the same app ID are not identity substitutes. Unmapped helper
+or proxy connections deny until an explicit authenticated mapping exists.
+
+Only an explicit shell allow delivers the pending bytes. Shell loss, endpoint
+loss, allocation failure, missing timer, and the two-second receive deadline
+close the destination FD. Pending decisions do not survive shell replacement.
+
+qdshell serializes identity verification through one Process with an immutable
+active request. Its cache key includes the complete peer/security tuple, not
+just PID; successful attestations expire after 30 seconds, unsuccessful ones
+retry after one second. Context changes, destroyed handles, and compositor
+reconnection cannot inherit an old result. The verification busctl deadline is
+200 ms. These checks remain separate from set-time and focus-clear policy.
+
 ## Handed-off windows — no special case
 
 A handed-off app's clipboard naturally becomes the target compositor's

@@ -96,7 +96,9 @@ class AuditLog:
         self._conn.executescript(SCHEMA)
         _migrate(self._conn)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        # Audit also runs on synchronous permission gates. A competing writer
+        # must cause a bounded persistence failure, not stall all D-Bus calls.
+        self._conn.execute("PRAGMA busy_timeout=50")
         os.chmod(db_path, 0o600)
 
     def log(self, *, caller_uid: int, caller_pid: int, caller_exe: str,

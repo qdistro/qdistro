@@ -5,10 +5,10 @@ Covers:
 - Hook allow -> request allowed without admin prompt
 - Hook deny -> request denied without admin prompt
 - Hook null -> falls through to admin prompt
-- Hook transform -> treated as allow
+- Hook transform -> requires explicit admin decision
 - Executor unreachable -> falls through to admin prompt
 - Audit trail records hook verdicts
-- CheckPermission fast-path also consults hooks
+- CheckPermission fast-path performs no hook IO
 - HookClient unit behavior (disabled, unreachable, real executor)
 
 Strategy: most tests use a _MockHookClient that returns canned
@@ -17,6 +17,8 @@ a real executor process for full-stack verification.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import queue
 import json
 import os
 import socket
@@ -54,6 +56,32 @@ from qdistro_hook_executor import (  # noqa: E402
 ADMIN_UID = B.ADMIN_UID
 USER_UID = 1001
 PEER_EXE = "/usr/bin/testapp"
+_IDENTITIES = {}
+_BROKERS = []
+_CALLBACKS = queue.Queue()
+
+
+@pytest.fixture(autouse=True)
+def async_hook_dispatch(monkeypatch):
+    """Drive worker completion without changing existing verdict assertions.
+
+    Peers in this harness have synthetic kernel identities. The review
+    regressions separately exercise identity drift and nonblocking returns.
+    """
+    _IDENTITIES.clear()
+    _BROKERS.clear()
+    monkeypatch.setattr(B, '_read_proc_identity',
+                        lambda pid: _IDENTITIES.get(pid, ('?', 0, -1))[:2])
+    monkeypatch.setattr(B, '_read_proc_uid',
+                        lambda pid: _IDENTITIES.get(pid, ('?', 0, -1))[2])
+    monkeypatch.setattr(B.GLib, 'idle_add',
+                        lambda fn, *args: _CALLBACKS.put((fn, args)))
+    yield
+    for broker in _BROKERS:
+        broker._hook_pool.shutdown(wait=True)
+    while not _CALLBACKS.empty():
+        _CALLBACKS.get_nowait()
+
 
 
 # ---------------------------------------------------------------------------
@@ -106,17 +134,30 @@ class _StubBroker(Broker):
         self._peer_uid = USER_UID
         self._peer_pid = 100
         self._peer_exe = PEER_EXE
-        self._peer_start = 0
+        self._peer_start = 42
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         self.rules_reloaded_signals: list[int] = []
         self.hooks = hook_client or _MockHookClient(enabled=False)
+        self._hook_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._hook_slots = threading.BoundedSemaphore(2)
+        _BROKERS.append(self)
+        _IDENTITIES[self._peer_pid] = (self._peer_exe, self._peer_start, self._peer_uid)
 
     def set_peer(self, uid: int, pid: int = 100,
                  exe: str = PEER_EXE) -> None:
         self._peer_uid = uid
         self._peer_pid = pid
         self._peer_exe = exe
+        _IDENTITIES[pid] = (exe, self._peer_start, uid)
+
+    def RequestPermission(self, action, details, **kwargs):
+        rid = super().RequestPermission(action, details, **kwargs)
+        deadline = time.monotonic() + 6
+        while self._pending[rid].decision is None and rid not in self.pending_signals:
+            fn, args = _CALLBACKS.get(timeout=max(.01, deadline - time.monotonic()))
+            fn(*args)
+        return rid
 
     def _peer_info(self, sender, conn):
         return (self._peer_uid, self._peer_pid, self._peer_exe,
@@ -214,7 +255,7 @@ class TestBrokerEnqueueHooks:
         req = broker._pending[rid]
         assert req.decision is None
 
-    def test_hook_transform_treated_as_allow(self, tmp_path, rules_dir):
+    def test_hook_transform_cannot_authorize_untransformed_operation(self, tmp_path, rules_dir):
         mock = _MockHookClient(
             verdict={"verdict": "transform",
                      "new_payload_size": 100,
@@ -223,9 +264,10 @@ class TestBrokerEnqueueHooks:
         broker.set_peer(uid=USER_UID)
         rid = broker.RequestPermission("org.qdistro.test.hook", {})
 
-        assert rid not in broker.pending_signals
+        assert rid in broker.pending_signals
         req = broker._pending[rid]
-        assert req.decision is True  # transform -> allow
+        assert req.decision is None
+        assert broker.audit.recent(10) == []
 
     def test_no_hooks_falls_through(self, tmp_path, rules_dir):
         """Disabled hooks -> null verdict -> admin prompt."""
@@ -372,40 +414,43 @@ class TestHooksDisabled:
 
 
 # ---------------------------------------------------------------------------
-# CheckPermission also consults hooks
+# CheckPermission does not consult hooks
 # ---------------------------------------------------------------------------
 
 class TestCheckPermissionHooks:
-    def test_check_permission_hook_allow(self, tmp_path, rules_dir):
+    def test_check_permission_ignores_hook_allow(self, tmp_path, rules_dir):
         mock = _MockHookClient(verdict={"verdict": "allow"})
         broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
         broker.set_peer(uid=USER_UID)
         result = broker.CheckPermission("org.qdistro.test.check", {})
-        assert result == "allow"
+        assert result == "unknown"
 
-    def test_check_permission_hook_deny(self, tmp_path, rules_dir):
+        assert mock.queries == []
+        assert broker.audit.recent(10) == []
+
+    def test_check_permission_ignores_hook_deny(self, tmp_path, rules_dir):
         mock = _MockHookClient(
             verdict={"verdict": "deny", "reason": "no"})
         broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
         broker.set_peer(uid=USER_UID)
         result = broker.CheckPermission("org.qdistro.test.check", {})
-        assert result == "deny"
+        assert result == "unknown"
 
-    def test_check_permission_hook_allow_writes_audit_row(
+        assert mock.queries == []
+        assert broker.audit.recent(10) == []
+
+    def test_unknown_then_async_hook_allow_writes_audit_row(
             self, tmp_path, rules_dir):
-        """The CheckPermission fast-path must audit hook verdicts.
-
-        Regression: _decide_check() called audit.log() with the wrong
-        keyword names (uid/pid/exe instead of caller_uid/caller_pid/
-        caller_exe and no approver_uid), so every call raised TypeError
-        that a bare `except: pass` swallowed — hook decisions reached via
-        CheckPermission left NO audit row.
-        """
+        """Fast unknown produces no decision; the async hook grant is audited."""
         mock = _MockHookClient(verdict={"verdict": "allow"})
         broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
         broker.set_peer(uid=USER_UID)
         assert broker.CheckPermission("org.qdistro.test.checkaudit", {}) \
-            == "allow"
+            == "unknown"
+        assert mock.queries == []
+        assert broker.audit.recent(10) == []
+        rid = broker.RequestPermission("org.qdistro.test.checkaudit", {})
+        assert broker._pending[rid].decision is True
 
         rows = broker.audit.recent(10)
         assert len(rows) >= 1
@@ -415,14 +460,18 @@ class TestCheckPermissionHooks:
         assert last["decision"] is True
         assert "hook" in last["source"]
 
-    def test_check_permission_hook_deny_writes_audit_row(
+    def test_unknown_then_async_hook_deny_writes_audit_row(
             self, tmp_path, rules_dir):
         mock = _MockHookClient(
             verdict={"verdict": "deny", "reason": "blocked"})
         broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
         broker.set_peer(uid=USER_UID)
         assert broker.CheckPermission(
-            "org.qdistro.test.checkaudit_deny", {}) == "deny"
+            "org.qdistro.test.checkaudit_deny", {}) == "unknown"
+        assert mock.queries == []
+        assert broker.audit.recent(10) == []
+        rid = broker.RequestPermission("org.qdistro.test.checkaudit_deny", {})
+        assert broker._pending[rid].decision is False
 
         rows = broker.audit.recent(10)
         assert len(rows) >= 1
@@ -432,13 +481,16 @@ class TestCheckPermissionHooks:
         assert "hook" in last["source"]
         assert "blocked" in last["source"]
 
-    def test_check_permission_hook_transform(self, tmp_path, rules_dir):
+    def test_check_permission_ignores_hook_transform(self, tmp_path, rules_dir):
         mock = _MockHookClient(
             verdict={"verdict": "transform"})
         broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
         broker.set_peer(uid=USER_UID)
         result = broker.CheckPermission("org.qdistro.test.check", {})
-        assert result == "allow"
+        assert result == "unknown"
+
+        assert mock.queries == []
+        assert broker.audit.recent(10) == []
 
     def test_check_permission_hook_null(self, tmp_path, rules_dir):
         mock = _MockHookClient(verdict=None)
@@ -639,7 +691,7 @@ class TestEndToEndWithRealExecutor:
         stop.set()
         t.join(timeout=5)
 
-    def test_e2e_check_permission_hook(self, tmp_path, rules_dir,
+    def test_e2e_fast_unknown_then_async_hook_allow(self, tmp_path, rules_dir,
                                         hook_dir):
         (hook_dir / "cp_hook.py").write_text(textwrap.dedent("""\
             def on_org_qdistro_test_e2e_cp(event):
@@ -669,7 +721,10 @@ class TestEndToEndWithRealExecutor:
         broker.set_peer(uid=USER_UID)
         result = broker.CheckPermission(
             "org.qdistro.test.e2e.cp", {})
-        assert result == "allow"
+        assert result == "unknown"
+        rid = broker.RequestPermission("org.qdistro.test.e2e.cp", {})
+        assert broker._pending[rid].decision is True
+        assert broker.audit.recent(1)[0]["decision"] is True
 
         stop.set()
         t.join(timeout=5)

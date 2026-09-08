@@ -174,18 +174,20 @@ class TestPerUidIsolation:
 # ---- audit trail ---------------------------------------------------------
 
 class TestAuditTrail:
-    def test_check_permission_does_not_write_audit(self, broker, rules_dir):
-        """CheckPermission is a fast-path read; only RequestPermission /
-        explicit logged actions write audit. This pins that contract so
-        a hot-loop hook caller doesn't bloat the audit table."""
+    def test_check_permission_records_each_completed_decision(self, broker, rules_dir):
+        """Every authorized hook invocation has its own attributable audit row."""
         _write_rule(rules_dir, decision="allow",
                     action="hook.allowed:wallpaperChange",
                     uid=USER1_UID)
         broker.rules.reload()
         broker.set_peer(uid=USER1_UID)
         for _ in range(50):
-            broker.CheckPermission("hook.allowed:wallpaperChange", {})
-        assert len(broker.audit.recent(100)) == 0
+            assert broker.CheckPermission("hook.allowed:wallpaperChange", {}) == "allow"
+        rows = broker.audit.recent(100)
+        assert len(rows) == 50
+        assert all(row["caller_uid"] == USER1_UID and row["decision"] is True
+                   and row["action"] == "hook.allowed:wallpaperChange"
+                   and row["rule_path"] for row in rows)
 
 
 # ---- rate limiting -------------------------------------------------------

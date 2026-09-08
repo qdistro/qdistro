@@ -52,3 +52,15 @@ teardown_file() {
     assert_output_contains "PASS: legacy (egress unset) silo has no netns — host networking unchanged"
     assert_output_contains "PASS: § task3 per-silo netns + WireGuard egress end-to-end"
 }
+
+@test "nft reconcile: real kernel repair preserves sets rollback and packet isolation" {
+    stage_vm_driver "probes/nft-reconcile-probe.py"
+    vm_run "curl -fsS -o /tmp/nft-reconcile-probe.py http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/nft-reconcile-probe.py && python3 /tmp/nft-reconcile-probe.py /usr/libexec/qdistro/qdistro_session_manager.py"
+    assert_success
+    assert_output_contains "PASS: production batch accepted by kernel"
+    assert_output_contains "PASS: repeated reconcile preserves both dynamic sets"
+    assert_output_contains "PASS: packets: DNS/public allowed; host/sibling/LAN and unsolicited silo ingress denied"
+    assert_output_contains "PASS: damaged-chain repair restores packet isolation and preserves dynamic sets"
+    assert_output_contains "PASS: invalid transaction rolls back without losing prior packet protection"
+    assert_output_contains "PASS: init-namespace UID backstop drops real traffic"
+}

@@ -21,6 +21,7 @@ import json
 import os
 import socket
 import struct
+import time
 from typing import Any
 
 SOCKET_PATH = os.environ.get("QDISTRO_HOOK_SOCKET",
@@ -34,9 +35,17 @@ _LEN_SIZE = struct.calcsize(_LEN_FMT)
 MAX_FRAME_SIZE = 4 * 1024 * 1024
 
 
-def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
+def _set_remaining_timeout(conn: socket.socket, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("hook operation deadline exceeded")
+    conn.settimeout(remaining)
+
+
+def _recv_exact(conn: socket.socket, n: int, deadline: float) -> bytes | None:
     buf = bytearray()
     while len(buf) < n:
+        _set_remaining_timeout(conn, deadline)
         chunk = conn.recv(n - len(buf))
         if not chunk:
             return None
@@ -44,14 +53,14 @@ def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
     return bytes(buf)
 
 
-def _recv_frame(conn: socket.socket) -> bytes | None:
-    hdr = _recv_exact(conn, _LEN_SIZE)
+def _recv_frame(conn: socket.socket, deadline: float) -> bytes | None:
+    hdr = _recv_exact(conn, _LEN_SIZE, deadline)
     if hdr is None:
         return None
     (length,) = struct.unpack(_LEN_FMT, hdr)
     if length > MAX_FRAME_SIZE:
         return None
-    return _recv_exact(conn, length)
+    return _recv_exact(conn, length, deadline)
 
 
 def _send_frame(conn: socket.socket, data: bytes) -> bool:
@@ -111,13 +120,15 @@ class HookClient:
 
     def _do_query(self, action: str, event: dict) -> dict | None:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.settimeout(self._timeout_s)
+        deadline = time.monotonic() + self._timeout_s
         try:
+            _set_remaining_timeout(conn, deadline)
             conn.connect(self._socket_path)
             req = json.dumps({"action": action, "event": event})
+            _set_remaining_timeout(conn, deadline)
             if not _send_frame(conn, req.encode("utf-8")):
                 return None
-            raw = _recv_frame(conn)
+            raw = _recv_frame(conn, deadline)
             if raw is None:
                 return None
             resp = json.loads(raw)

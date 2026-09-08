@@ -1116,48 +1116,18 @@ class _SystemOps:
                         "peer", "name", str(peer_if)], check=True)
 
     def _nft_ensure_table(self) -> None:
-        # Self-healing + fail-closed (codex #1). A dedicated table so per-silo
-        # changes never touch other firewall state; two sets drive the rules and
-        # per-silo apply/teardown is just an element add/del. We VERIFY the
-        # backstop drop rule + masquerade rule are actually present (not merely
-        # that the table exists), and rebuild the scaffold if the table is
-        # missing or partial — a stale/partial table would otherwise silently
-        # disable the backstop. Raises on failure so the caller fails closed.
-        listing = subprocess.run(
-            ["nft", "list", "table", "inet", self._NFT_TABLE],
-            capture_output=True, text=True)
-        out = listing.stdout
-        if (listing.returncode == 0
-                and "skuid @blocked_uids drop" in out            # out chain rule
-                and "hook input" in out                          # host-protect
-                and "@nat_subnets ip daddr" in out               # forward drop rule
-                and "masquerade" in out):                        # post rule
-            return                               # healthy (rules present, not
-            #                                      merely the chains)
-        # (Re)build. `add table`/`add set` are idempotent and PRESERVE existing
-        # set elements, so other silos' backstop/nat entries survive a rebuild;
-        # we then delete+re-add each chain so its rule is present exactly once.
+        # Reconcile the owned chains on every ensure. nft commits the whole
+        # batch atomically: a failed repair retains the old rules. Dynamic
+        # set membership is never flushed, including other silos' entries.
         base = (
             f"add table inet {self._NFT_TABLE}\n"
             f"add set inet {self._NFT_TABLE} blocked_uids {{ type uid; }}\n"
             f"add set inet {self._NFT_TABLE} nat_subnets "
             f"{{ type ipv4_addr; flags interval; }}\n")
-        r = subprocess.run(["nft", "-f", "-"], input=base,
-                           capture_output=True, text=True)
-        # `nft add` of an existing table/set is idempotent, but tolerate a
-        # benign "exists" just in case a partial table is present; fail closed
-        # on anything else (a broken scaffold must not silently disable the
-        # backstop).
-        if r.returncode != 0 and not _nft_benign(r.stderr):
-            raise RuntimeError(
-                f"nft egress scaffold (table/sets) failed: {r.stderr.strip()}")
-        # NB: the forward-hook chain is named `forward`, not `fwd` — `fwd` is a
-        # reserved nft keyword (the netdev fwd verdict) and fails to parse as a
-        # chain identifier (nft v1.1.6).
         for chain in ("out", "in", "forward", "post"):
-            subprocess.run(["nft", "delete", "chain", "inet", self._NFT_TABLE,
-                            chain], check=False, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
+            base += (f"add chain inet {self._NFT_TABLE} {chain}\n"
+                     f"flush chain inet {self._NFT_TABLE} {chain}\n"
+                     f"delete chain inet {self._NFT_TABLE} {chain}\n")
         # The set of destinations a `direct` silo must NOT reach: every other
         # silo's /30 (all from 10.128.0.0/9 ⊂ 10/8), the host's own LAN, plus
         # bogons that are local/management surfaces — link-local 169.254/16
@@ -1206,7 +1176,7 @@ class _SystemOps:
             f"{{ type nat hook postrouting priority srcnat; }}\n"
             f"add rule inet {self._NFT_TABLE} post "
             f"ip saddr @nat_subnets masquerade\n")
-        r = subprocess.run(["nft", "-f", "-"], input=chains,
+        r = subprocess.run(["nft", "-f", "-"], input=base + chains,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(
