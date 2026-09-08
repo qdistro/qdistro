@@ -3966,6 +3966,10 @@ class Broker(dbus.service.Object):
                     scope=matched_rule.scope, rule_path=matched_rule.source_path,
                     request_id=rid)
             else:
+                # req.decision can only be set above by a matching rule or a
+                # cache row. Keep that invariant explicit for both the type
+                # checker and any future decision source added here.
+                assert cached_row is not None
                 result = self._record_check(
                     uid=uid, pid=pid, exe=exe, action=action_s,
                     allowed=req.decision, details=clean_details,

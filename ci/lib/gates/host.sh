@@ -354,7 +354,10 @@ gate_host() {
     _qd_pre='# ALWAYS clear any stale coverage artifact (see comment above).
 rm -f .coverage .coverage.* .coverage-report.json
 if python3 -c "import pytest_cov" 2>/dev/null; then
-    _COV_FLAGS="--cov=. --cov-report=term-missing --cov-report=json:.coverage-report.json --cov-append"
+    # Collect in every isolated batch, but render reports once after all
+    # batches. Asking pytest-cov to regenerate both reports per batch made the
+    # otherwise-successful suite consume the entire host-step timeout.
+    _COV_FLAGS="--cov=. --cov-append --cov-report="
 else
     _COV_FLAGS=""
 fi'
@@ -370,7 +373,11 @@ python3 -m pytest \
     tests/unit/test_admin_widgets_logic.py \
     tests/unit/test_broker_subscriber_restart.py \
     tests/unit/test_broker_upload_lineage.py || rc=1
-if [ -n "$_COV_FLAGS" ] && [ -f .coverage-report.json ]; then
+if [ -n "$_COV_FLAGS" ]; then
+    python3 -m coverage report --show-missing || true
+    python3 -m coverage json -o .coverage-report.json || true
+fi
+if [ -f .coverage-report.json ]; then
     python3 -c "
 import json, sys
 try:
