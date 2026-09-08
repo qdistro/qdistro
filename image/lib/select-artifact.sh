@@ -201,9 +201,9 @@ qdistro_verify_xz_checksum() {
 }
 
 # Turn a resolved xz into a raw the rest of the pipeline can boot / extract.
-# Idempotent: a from-xz-<digest12>.raw of the uncompressed size is reused.
+# Reuse only after comparing every byte with a fresh decompression.
 qdistro_materialize_raw() {
-    local build_dir dest tmp unc
+    local build_dir dest tmp unc digest
     build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
     case "${QDISTRO_RESOLVED_KIND:-}" in
         raw|qcow2)
@@ -220,30 +220,29 @@ qdistro_materialize_raw() {
     # Not next to the kiwi *.raw: extract-root.sh and a human `ls *.raw`
     # still see exactly one top-level raw. The published bytes live here.
     mkdir -p "$build_dir/published"
-    dest="$build_dir/published/from-xz-${QDISTRO_RESOLVED_DIGEST:0:12}.raw"
-    if [ -f "$dest" ]; then
-        if [ "$(stat -c %s "$dest")" = "$unc" ]; then
-            echo "select-artifact: reusing $dest ($unc bytes)" >&2
-            QDISTRO_RESOLVED_DISK="$dest"
-            return 0
-        fi
-        echo "select-artifact: $dest size $(stat -c %s "$dest") != xz uncompressed $unc; recompressing" >&2
-        rm -f "$dest"
-    fi
-    tmp="$dest.partial"
-    rm -f "$tmp"
-    echo "select-artifact: decompressing $QDISTRO_RESOLVED_XZ -> $dest ($unc bytes)" >&2
+    dest="$build_dir/published/from-xz-${QDISTRO_RESOLVED_DIGEST}.raw"
+    tmp="$(mktemp "$dest.partial.XXXXXXXX")" || return 2
+    echo "select-artifact: decompressing $QDISTRO_RESOLVED_XZ for full raw verification ($unc bytes)" >&2
     if ! xz -dc -T0 "$QDISTRO_RESOLVED_XZ" > "$tmp"; then
         rm -f "$tmp"
         echo "select-artifact: xz -dc failed" >&2
         return 2
     fi
-    if [ "$(stat -c %s "$tmp")" != "$unc" ]; then
-        echo "select-artifact: decompressed size $(stat -c %s "$tmp") != xz -l $unc" >&2
+    digest="$(sha256sum "$QDISTRO_RESOLVED_XZ")" || { rm -f "$tmp"; return 2; }
+    if [ "${digest%% *}" != "$QDISTRO_RESOLVED_DIGEST" ] || [ "$(stat -c %s "$tmp")" != "$unc" ]; then
+        echo "select-artifact: artifact changed or decompressed size disagrees" >&2
         rm -f "$tmp"
         return 2
     fi
-    mv -f "$tmp" "$dest"
+    # Unique temporary files and atomic rename keep interrupted/concurrent
+    # writers from publishing partial bytes. Never trust a cached sidecar hash.
+    if [ ! -L "$dest" ] && [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+        rm -f "$tmp"
+        echo "select-artifact: verified all bytes of $dest" >&2
+    elif ! mv -f "$tmp" "$dest"; then
+        rm -f "$tmp"
+        return 2
+    fi
     QDISTRO_RESOLVED_DISK="$dest"
     return 0
 }

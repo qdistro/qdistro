@@ -618,6 +618,8 @@ expect "installer chain record equals the bootstrap chain for this profile" \
             rec=$(grep -vE "^[[:space:]]*(#|$)" /var/lib/qdistro/bootstrap/installer-chain.state);
             [ -n "$exp" ] && [ "$exp" = "$rec" ] && { echo "chain ($p): $(echo $exp)"; exit 0; };
             echo "expected: $(echo $exp)"; echo "recorded: $(echo $rec)"; exit 1'
+expect "SELinux runtime matches image profile" \
+    qga_root 'p=$(sed -n "s/^PROFILE=//p" /etc/qdistro/release); case "$p" in dev) want=Permissive ;; release) want=Enforcing ;; *) exit 1 ;; esac; mode=$(getenforce) || exit 1; echo "SELinux: $mode (expected $want for $p)"; [ "$mode" = "$want" ]'
 expect "no media/multimachine/recall artefacts (not in the chain)" \
     remote 'for f in /etc/systemd/system/qdistro-media-exec.socket /usr/local/bin/qdistro-mm-broker /usr/local/bin/qdistro-recall; do test -e "$f" && exit 1; done; exit 0'
 expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'

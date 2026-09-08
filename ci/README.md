@@ -108,6 +108,22 @@ qdistro/ci/bin/qci snapshot-daily
 # default VM name: qdistro-daily-$(date -u +%F)
 ```
 
+## Image release identity
+
+The image gate in `full` checks the image's five clean `SOURCE` commits
+against `release-manifest/manifest.snapshot` before boot qualification. It
+also checks the version and Tumbleweed snapshot against `image/config.xml`,
+and the profile against `QDISTRO_PROFILE` (default `release`). A pinned dev
+tester remains supported with `QDISTRO_PROFILE=dev`; dirty source stamps do
+not qualify as release evidence. Standalone `QCI_RELEASE=1 qci image` captures
+the configured release manifest for the same check. The run records the
+expected manifest/profile, selected artifact digest and expected/observed
+identities in `host/image-release-identity.log`.
+
+Cached raw images are compared in full against fresh decompression before
+reuse. Verification therefore needs room for another uncompressed image,
+even when a cached raw already exists.
+
 ## Parallelism & per-run golden image
 
 The `bats` and `gui` gates run their disposable VMs **concurrently** in a bounded

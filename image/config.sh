@@ -222,7 +222,13 @@ install_python_modules
 echo "[qdistro-image] installer chain recorded on the image:"
 sed 's/^/[qdistro-image]   /' /var/lib/qdistro/bootstrap/installer-chain.state
 
-sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
+# Kiwi sources only the installer chain, not bootstrap main()'s SELinux
+# setup. Configure the on-disk mode explicitly; never setenforce in a chroot.
+. "$QD/image/lib/selinux-mode.sh"
+qdistro_image_selinux_mode /etc/selinux/config "$QDISTRO_IMAGE_PROFILE" || {
+    echo "[qdistro-image] FATAL: could not establish SELinux profile mode" >&2
+    exit 1
+}
 for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     if [ -d "$QD/$pol" ] && [ -x "$QD/$pol/install-policy.sh" ]; then
         # tier1 module references types defined by broker module; if it

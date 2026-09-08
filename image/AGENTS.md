@@ -130,7 +130,7 @@ its presence.
 | File | What it does |
 | --- | --- |
 | `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. Kiwi XML profiles: `tester` (default, import=true, the published stick) and `ci` (additive: bats/ydotool extras; config.sh masks greetd). Orthogonal to `QDISTRO_PROFILE` (dev/release). |
-| `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules (permissive), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd (enabled on tester; **masked** on kiwi profile `ci` so admin's user manager starts the compositor), compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
+| `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules and explicit global mode (dev permissive, release enforcing), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd (enabled on tester; **masked** on kiwi profile `ci` so admin's user manager starts the compositor), compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
 | `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the five sibling repos into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
 | `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder; always `--from-baked`, never the kiwi tester image — that would be circular), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). Forwards `QDISTRO_KIWI_PROFILE` (tester\|ci). |
 | `lib/build-guard.sh` | liveness (log mtime / CPU ticks / D-state / uplink bytes), kill-tree and mount/loop cleanup used by the retry loop. |
@@ -139,7 +139,7 @@ its presence.
 | `iterate-kiwi.sh` | pushes local `config.xml`/`config.sh`/`build.sh` into a running builder VM and re-runs kiwi (skips the clone). |
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
-| `lib/select-artifact.sh` | resolve the published artifact (explicit path, 64-hex digest, or unique `bundle/*.raw.xz`); `sha256sum -c` + `xz -t` + decompress to `$BUILD_DIR/published/from-xz-<digest12>.raw`. Sourced by `verify.sh` and the image gate. Never `find \| head -1`. |
+| `lib/select-artifact.sh` | resolve the published artifact (explicit path, 64-hex digest, or unique `bundle/*.raw.xz`); `sha256sum -c` + `xz -t` + decompress to `$BUILD_DIR/published/from-xz-<digest>.raw`; reuse requires a full byte comparison against fresh decompression, with unique temporary files and atomic publication. Sourced by `verify.sh` and the image gate. Never `find \| head -1`. |
 | `verify.sh` | boots the resolved disk rootlessly (`qemu:///session`, 64 GiB qcow2 overlay so first-boot repart grows the 28 GiB raw), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Default also: UUID identity, EFI/BOOT, persist marker + btrfs snapshot across a reboot, greeter login (locker session-up). Snapper is packaged but has no root config. `--stick` adds USB / second-disk / hub / Secure Boot / nested-KVM / first-boot power-off / `xzcat \| dd`. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` is a path or the xz digest. |
 | `hardware-run.md` | template for the maintainer's real-stick run (Secure Boot, WPA2/WPA3, silos). Fill in and copy the filled note to `logs/`. |
 | `install-test.sh` | drives the *install ISO* (post-v1); inert while `installiso="false"`. |
@@ -158,7 +158,12 @@ QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30-40 min cold: clone + bake + kiwi (1
 Or through CI: `qci` image gate = resolve `bundle/*.raw.xz` (digest +
 `xz -t` + decompress) → `extract-root.sh` → `verify-contents.sh` →
 `verify.sh --stick` on the **same** decompressed raw (install-test is
-inert without an ISO: no row, not a skip). Part of `qci full`; a
+inert without an ISO: no row, not a skip). The full run also compares the
+image's five clean source commits with its captured release manifest, and
+checks version/snapshot against config.xml and profile against
+`QDISTRO_PROFILE` (default release; pass `dev` explicitly for a pinned tester).
+Expected/observed identities and the artifact digest are recorded in the run.
+Part of `qci full`; a
 blocked/skip image row is fatal under `QCI_RELEASE=1` (todo/iso/14 F).
 
 **Do not run `verify.sh` while a builder VM is up** on the same
@@ -204,9 +209,12 @@ A tester-as-base still zypper-installs extras (needs guest egress);
   [../doc/overview.md](../doc/overview.md).
 - **dbus-broker, not dbus-daemon.** `qdistro-dbus-reload.service` lands via
   `install-broker-for-qdwin.sh`.
-- **SELinux permissive.** The policy modules (broker, pwd, session_manager,
-  tier1) load permissive; enforcing is a separate milestone
-  ([../doc/permissions.md](../doc/permissions.md)).
+- **SELinux mode follows the image profile.** Kiwi explicitly writes global
+  permissive for dev and enforcing for release, because sourcing the bootstrap
+  installer chain does not run its separate SELinux setup. Static inspection
+  checks the config and boot verification requires the matching runtime mode.
+  The session-manager policy still declares its domain permissive; global
+  enforcing does not remove that separate policy rollout limitation.
 - **`admin` (not `jan`).** The installers hardcode `admin` uid 1000; keep
   this image consistent with them.
 

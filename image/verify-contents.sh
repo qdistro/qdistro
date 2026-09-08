@@ -499,6 +499,18 @@ echo "-- SELinux policy modules / files --"
 # Modules ship as compiled .pp under /usr/share/selinux or get loaded
 # into the active store under /etc/selinux/targeted/active/modules.
 check_glob_req "SELinux config present" "/etc/selinux/config"
+REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+selinux_file="$(file_in_image "$ROOT/etc/selinux/config" 2>/dev/null || true)"
+selinux_mode=""
+case "$image_profile" in dev) selinux_mode=permissive ;; release) selinux_mode=enforcing ;; esac
+if [ -n "$selinux_file" ] && [ -n "$selinux_mode" ] \
+    && [ "$(grep -E '^[[:space:]]*SELINUX[[:space:]]*=' "$selinux_file")" = "SELINUX=$selinux_mode" ]; then
+    printf 'OK   SELinux profile mode: %s (%s)\n' "$selinux_mode" "$image_profile"
+    REQUIRED_OK=$((REQUIRED_OK + 1))
+else
+    printf 'MISS SELinux profile mode: expected %s (%s)\n' "$selinux_mode" "$image_profile"
+    FAIL=1
+fi
 check_glob_opt "qdistro SELinux .pp modules" \
     "/usr/share/selinux/*/qdistro_*.pp"
 check_glob_opt "qdistro SELinux .pp (packages dir)" \
@@ -507,7 +519,7 @@ check_glob_opt "qdistro SELinux .pp (packages dir)" \
 # policy installs are fatal on failure, but the policy installer SKIPs with
 # exit 0 when selinux-policy-devel is absent, so an image built without it
 # would ship every qdistro service unconfined and still be green (Phase B
-# round-2 review). SELINUX= is permissive today (Phase C); this is about
+# round-2 review). The profile mode is checked above; this is about
 # completeness, not enforcement.
 check_req "[selinux] qdistro_broker module"          /etc/selinux/targeted/active/modules/400/qdistro_broker
 check_req "[selinux] qdistro_pwd module"             /etc/selinux/targeted/active/modules/400/qdistro_pwd

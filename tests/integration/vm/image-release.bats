@@ -923,3 +923,200 @@ GF
     grep -q 'refusing --stick --keep' "$IMAGE/verify.sh"
     ! grep -q 'SKIP: stick extra dd' "$IMAGE/verify.sh"
 }
+
+@test "select-artifact: first middle and last byte cache corruption is repaired" {
+    source "$IMAGE/lib/select-artifact.sh"
+    fixture_bundle qdistro-0.1.0-20260902.raw.xz
+    QDISTRO_IMAGE="$T/b/qdistro-0.1.0-20260902.raw.xz" qdistro_resolve_image
+    QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw
+    local offset
+    for offset in 0 524288 1048575; do
+        printf X | dd of="$QDISTRO_RESOLVED_DISK" bs=1 seek="$offset" conv=notrunc status=none
+        ! cmp -s "$QDISTRO_RESOLVED_DISK" "$T/raw"
+        QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw
+        cmp "$QDISTRO_RESOLVED_DISK" "$T/raw"
+    done
+}
+
+@test "select-artifact: concurrent materializations and abandoned partial do not change returned bytes" {
+    source "$IMAGE/lib/select-artifact.sh"
+    fixture_bundle qdistro-0.1.0-20260902.raw.xz
+    QDISTRO_IMAGE="$T/b/qdistro-0.1.0-20260902.raw.xz" qdistro_resolve_image
+    mkdir -p "$T/build/published"
+    printf incomplete > "$T/build/published/from-xz-$QDISTRO_RESOLVED_DIGEST.raw.partial.abandoned"
+    (QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw && cmp "$QDISTRO_RESOLVED_DISK" "$T/raw") &
+    local first=$!
+    (QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw && cmp "$QDISTRO_RESOLVED_DISK" "$T/raw") &
+    local second=$!
+    wait "$first"
+    wait "$second"
+    cmp "$T/build/published/from-xz-$QDISTRO_RESOLVED_DIGEST.raw" "$T/raw"
+}
+
+@test "image SELinux: both profiles explicitly establish their mode and static checker rejects weakening" {
+    source "$IMAGE/lib/selinux-mode.sh"
+    local profile mode
+    for profile in dev release; do
+        fake_root "$profile"
+        mkdir -p "$T/root/etc/selinux"
+        printf 'SELINUXTYPE=targeted\nSELINUX=disabled\n SELINUX = permissive\n' > "$T/root/etc/selinux/config"
+        qdistro_image_selinux_mode "$T/root/etc/selinux/config" "$profile"
+        mode=enforcing; [ "$profile" != dev ] || mode=permissive
+        [ "$(grep '^SELINUX=' "$T/root/etc/selinux/config")" = "SELINUX=$mode" ]
+        grep -qx 'SELINUXTYPE=targeted' "$T/root/etc/selinux/config"
+        run bash "$IMAGE/verify-contents.sh" "$T/root"
+        [[ "$output" == *"OK   SELinux profile mode: $mode ($profile)"* ]]
+        echo SELINUX=disabled >> "$T/root/etc/selinux/config"
+        run bash "$IMAGE/verify-contents.sh" "$T/root"
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"MISS SELinux profile mode:"* ]]
+    done
+    run qdistro_image_selinux_mode "$T/missing" release
+    [ "$status" -ne 0 ]
+    grep -q '^qdistro_image_selinux_mode /etc/selinux/config "\$QDISTRO_IMAGE_PROFILE"' "$IMAGE/config.sh"
+}
+
+identity_fixture() {
+    fake_root release
+    sed -i "s/ DIRTY .*$/ clean/" "$T/root/etc/qdistro/release"
+    # The fixture stamp uses 20260902, so fix only the test XML's pin.
+    sed -E 's@/history/[0-9]{8}/@/history/20260902/@g' "$IMAGE/config.xml" > "$T/identity.xml"
+    awk '/^SOURCE / {print $2, $3}' "$T/root/etc/qdistro/release" > "$T/expected-manifest"
+}
+
+identity_check() {
+    python3 "$IMAGE/lib/verify-release-identity.py" "$T/expected-manifest" \
+        "$T/root" "$T/identity.xml" --profile "${1:-release}"
+}
+
+@test "release identity: matches all five pins and admits explicitly requested clean dev tester" {
+    identity_fixture
+    run identity_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SOURCE qdlocker: expected="*"observed="* ]]
+    sed -i 's/^PROFILE=release/PROFILE=dev/' "$T/root/etc/qdistro/release"
+    run identity_check dev
+    [ "$status" -eq 0 ]
+    run identity_check release
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"image identity mismatch: PROFILE"* ]]
+}
+
+@test "release identity: stale pin missing component dirty state and wrong snapshot fail" {
+    local repo
+    for repo in qdwin qdlocker; do
+        identity_fixture
+        sed -i "s/^SOURCE $repo [0-9a-f]*/SOURCE $repo 0000000000000000000000000000000000000000/" "$T/root/etc/qdistro/release"
+        run identity_check
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"image identity mismatch: $repo"* ]]
+    done
+    identity_fixture
+    sed -i '/^qdlocker /d' "$T/expected-manifest"
+    run identity_check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"expected manifest missing components"* ]]
+    identity_fixture
+    sed -i 's/ clean$/ DIRTY diff-sha256=0123456789abcdef untracked=0/' "$T/root/etc/qdistro/release"
+    run identity_check dev
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"exactly one clean source"* ]]
+    identity_fixture
+    sed -i 's/^SNAPSHOT=.*/SNAPSHOT=19990101/' "$T/root/etc/qdistro/release"
+    run identity_check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"image identity mismatch: SNAPSHOT"* ]]
+}
+
+@test "image gate: captured manifest mismatch fails even when content checklist passes" {
+    identity_fixture
+    local product_image="$IMAGE"
+    IMAGE="$T/image"
+    mkdir -p "$IMAGE/lib" "$T/run/release-manifest" "$T/run/host"
+    cp "$product_image/lib/verify-release-identity.py" "$IMAGE/lib/"
+    cp "$T/identity.xml" "$IMAGE/config.xml"
+    printf '#!/bin/bash\nexit 0\n' > "$IMAGE/verify-contents.sh"
+    cp "$T/expected-manifest" "$T/run/release-manifest/manifest.snapshot"
+    IMAGE_DIR="$IMAGE"
+    RDIR="$T/run"; EXIT_OK=0; EXIT_BUILD=1; EXIT_RELEASE=7
+    qci_assert_run_dir() { return 0; }
+    kv() { :; }
+    log() { :; }
+    record_result() { printf '%s\n' "$*"; }
+    record_blocked() { printf '%s\n' "$*"; }
+    source "$REPO/ci/lib/gates/image.sh"
+    run gate_image --root "$T/root" --no-boot
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"release-identity pass"* ]]
+    sed -i 's/^SOURCE qdlocker [0-9a-f]*/SOURCE qdlocker 0000000000000000000000000000000000000000/' "$T/root/etc/qdistro/release"
+    run gate_image --root "$T/root" --no-boot
+    [ "$status" -eq 7 ]
+    [[ "$output" == *"verify-contents pass"*"release-identity fail"* ]]
+    grep -q 'image identity mismatch: qdlocker' "$RDIR/host/image-release-identity.log"
+}
+
+@test "release identity: absolute provenance symlink resolves inside image and never reads host" {
+    identity_fixture
+    mv "$T/root/etc/qdistro/release" "$T/root/image-release"
+    ln -s /image-release "$T/root/etc/qdistro/release"
+    run identity_check
+    [ "$status" -eq 0 ]
+    rm "$T/root/etc/qdistro/release"
+    cp "$T/root/image-release" "$T/host-release"
+    ln -s "$T/host-release" "$T/root/etc/qdistro/release"
+    run identity_check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"image path missing"* ]]
+}
+
+@test "select-artifact: interrupted decompression does not publish partial bytes or destroy verified cache" {
+    source "$IMAGE/lib/select-artifact.sh"
+    fixture_bundle qdistro-0.1.0-20260902.raw.xz
+    QDISTRO_IMAGE="$T/b/qdistro-0.1.0-20260902.raw.xz" qdistro_resolve_image
+    QDISTRO_BUILD_DIR="$T/build" qdistro_materialize_raw
+    mkdir "$T/bin"
+    cat > "$T/bin/xz" <<'SH'
+#!/bin/bash
+if [ "$1" = -dc ]; then printf incomplete; exit 1; fi
+exec "$REAL_XZ" "$@"
+SH
+    chmod +x "$T/bin/xz"
+    local real_xz; real_xz="$(command -v xz)"
+    REAL_XZ="$real_xz" PATH="$T/bin:$PATH" QDISTRO_BUILD_DIR="$T/build" run qdistro_materialize_raw
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"xz -dc failed"* ]]
+    cmp "$QDISTRO_RESOLVED_DISK" "$T/raw"
+    [ "$(find "$T/build/published" -name '*.partial.*' | wc -l)" -eq 0 ]
+}
+
+
+@test "image gate: captured manifest without inspectable tree stays blocked" {
+    IMAGE_DIR="$T/no-image"
+    RDIR="$T/run"
+    QDISTRO_BUILD_DIR="$T/no-build"
+    mkdir -p "$IMAGE_DIR" "$RDIR/release-manifest" "$RDIR/host"
+    printf '#!/bin/bash\nexit 2\n' > "$IMAGE_DIR/verify-contents.sh"
+    printf 'captured manifest\n' > "$RDIR/release-manifest/manifest.snapshot"
+    EXIT_OK=0; EXIT_BUILD=1; EXIT_RELEASE=7; EXIT_VM_PROVISION=4
+    qci_assert_run_dir() { return 0; }
+    kv() { :; }
+    log() { :; }
+    record_result() { printf 'result %s\n' "$*"; }
+    record_blocked() { printf 'blocked %s\n' "$*"; }
+    source "$REPO/ci/lib/gates/image.sh"
+    for QCI_RELEASE in 0 1; do
+        run gate_image --no-boot
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"blocked image verify-contents"* ]]
+        [[ "$output" != *"release-identity"* ]]
+        [ ! -f "$RDIR/host/image-release-identity.log" ]
+        run gate_image
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"blocked image verify-contents"*"blocked image verify.sh"* ]]
+        [[ "$output" != *"release-identity"* ]]
+    done
+    # An explicitly invalid root is still a content failure, not blocked.
+    run gate_image --root "$T/missing-root" --no-boot
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"result image verify-contents fail"* ]]
+}

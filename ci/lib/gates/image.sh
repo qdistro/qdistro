@@ -112,6 +112,31 @@ gate_image() {
             "no extracted image tree to inspect; pass --root <dir> or extract under $build_dir (needs built image)"
     fi
 
+    # A full run already captured this manifest for its source gate. Release
+    # image-only runs capture the same configured input here before checking.
+    local identity_manifest="$RDIR/release-manifest/manifest.snapshot"
+    if [ -n "$static_root" ] && [ -d "$static_root" ] \
+        && { [ -f "$identity_manifest" ] || [ "${QCI_RELEASE:-0}" = 1 ]; }; then
+        local identity_log="$RDIR/host/image-release-identity.log"
+        if [ ! -f "$identity_manifest" ]; then
+            mkdir -p "$(dirname "$identity_manifest")"
+            if ! cp "${QDISTRO_RELEASE_MANIFEST:-${QDISTRO_SOURCE_MANIFEST:-$QDISTRO_REPO/scripts/install/source-manifest.txt}}" "$identity_manifest"; then
+                record_result image release-identity fail "$EXIT_RELEASE" release image "$identity_log" "expected release manifest unavailable"
+                return "$EXIT_RELEASE"
+            fi
+        fi
+        kv image_expected_manifest "$identity_manifest"
+        kv image_expected_profile "${QDISTRO_PROFILE:-release}"
+        if python3 "$IMAGE_DIR/lib/verify-release-identity.py" "$identity_manifest" \
+            "$static_root" "$IMAGE_DIR/config.xml" \
+            --profile "${QDISTRO_PROFILE:-release}" > "$identity_log" 2>&1; then
+            record_result image release-identity pass 0 pass image "$identity_log" "image sources and build inputs match run manifest; digest=${QDISTRO_RESOLVED_DIGEST:-unavailable}"
+        else
+            record_result image release-identity fail "$EXIT_RELEASE" release image "$identity_log" "image does not match captured release identity"
+            return "$EXIT_RELEASE"
+        fi
+    fi
+
     if [ "$no_boot" = 1 ]; then
         log "image: --no-boot set; skipping boot/install stages"
         return "$rc"
