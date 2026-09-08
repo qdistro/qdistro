@@ -45,7 +45,7 @@ ALLOWED = {
     "ppid": 100,
     "parent_exe": "/usr/lib64/firefox/firefox",
     "parent_selinux": "user_u:user_r:user_t:s0",
-    "extension_id": "qdistro@qdistro.local",
+    "extension_id": "qdistro-firefox@qdistro.local",
     "allowed": True,
 }
 

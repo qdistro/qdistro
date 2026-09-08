@@ -89,7 +89,7 @@ ALLOWED = {
     "ppid": 100,
     "parent_exe": "/usr/lib64/firefox/firefox",
     "parent_selinux": "user_u:user_r:user_t:s0",
-    "extension_id": "qdistro@qdistro.local",
+    "extension_id": "qdistro-firefox@qdistro.local",
     "allowed": True,
 }
 DENIED = {**ALLOWED, "allowed": False}
@@ -164,7 +164,7 @@ class TestPwdFill:
         assert call["method"] == "Fill"
         body = json.loads(call["body"][0])
         assert body["url"] == "https://example.com/login"
-        assert body["extension_id"] == "qdistro@qdistro.local"
+        assert body["extension_id"] == "qdistro-firefox@qdistro.local"
         assert body["parent_exe"] == "/usr/lib64/firefox/firefox"
         assert "parent_selinux" not in body
 
@@ -277,7 +277,7 @@ class TestClipboardSet:
             "selection_anchor": "code",
             "is_code": True,
         }
-        assert body["extension_id"] == "qdistro@qdistro.local"
+        assert body["extension_id"] == "qdistro-firefox@qdistro.local"
         assert body["parent_exe"] == "/usr/lib64/firefox/firefox"
 
     def test_missing_source_url_rejected(self):
@@ -989,7 +989,7 @@ class TestDesktopIntegrations:
         body = json.loads(call["body"][0])
         for k, v in fields.items():
             assert body[k] == v
-        assert body["extension_id"] == "qdistro@qdistro.local"
+        assert body["extension_id"] == "qdistro-firefox@qdistro.local"
 
     def test_parent_not_allowed(self):
         bb._dbus_client = FakeDBus()

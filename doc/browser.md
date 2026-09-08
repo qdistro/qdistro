@@ -174,49 +174,68 @@ P0-1 fixed this path: the bridge parses argv at startup and treats the
 browser-supplied extension identity as authoritative. Stdio-provided extension
 identity is not trusted for policy.
 
-#### Firefox extension artifacts (two, by install mode — one legacy)
+#### Firefox extension artifacts (one canonical)
 
-There are **two** Firefox extension artifacts, deliberately distinct, each
-authorized by its own `qdistro-browser-install --firefox-mode`:
+There is **one** canonical Firefox extension:
 
-| Mode | Source of truth | gecko id | Status |
-|------|-----------------|----------|--------|
-| `bundled` (installer default) | `browser_bridge/extension/` (MV2, shipped next to the installer) | `qdistro@qdistro.local` | **legacy** — flat tree, no `src/`, no `gate.js`, no origin allowlist (J11) |
-| `standalone` | the `qdfirefox-extension` repo (MV3, first-class containers) | `qdistro-firefox@qdistro.local` | the maintained one; what v1 users load |
+| Mode | Source of truth | gecko id |
+|------|-----------------|----------|
+| `standalone` (default, only) | the `qdfirefox-extension` repo (MV3, first-class containers) | `qdistro-firefox@qdistro.local` |
 
-`bundled` being the *default install mode* is a compatibility default, not a
-recommendation: the v1 procedure
-([browser-extension-install.md](browser-extension-install.md)) requires
-`--firefox-mode standalone`.
+`qdistro_browser_install.py` pins that id as a cross-repo contract (asserted
+by the unit suite against `qdfirefox-extension/manifest.json` when the repo is
+checked out). The policy-match example below uses it.
 
-`qdistro_browser_install.py` reads the bundled id from
-`browser_bridge/extension/manifest.firefox.json` and pins the standalone id as
-a cross-repo contract (asserted by the unit suite). The policy-match example
-below shows the **bundled** id purely because it is the CLI default — a v1
-install matches `qdistro-firefox@qdistro.local`.
+**Both shipped extensions close the origin allowlist by default.** They did
+not always: J11 landed the closed-by-default gate in `qdchrome-extension`
+only, and `qdfirefox-extension` — whose `src/gate.js` was otherwise
+byte-identical, down to the test name `"allows all origins when empty"` —
+kept treating an empty allowlist as "all origins". That was drift, not a
+deliberately different Firefox posture: the two repos are maintained as
+parallel copies (the byte-identical `tests/fixtures/golden-frames.js` and its
+cross-repo drift guard exist precisely because of that), and J11 simply
+patched one of the two. The Firefox port is
+`qdfirefox-extension` `fix/j11-firefox-allowlist-closed`; the stager below
+will not install a tree that is open by default, so the two land together.
 
-> **J11 caveat (open).** `install-browser-bridge-for-vm.sh` copies the
-> *bundled* tree to `/usr/share/qdistro/browser-extension/`, and that tree has
-> no `src/`, no `gate.js` and no origin allowlist at all — an origin gate
-> exists only in the standalone repos, which no installer ships. Those two
-> gates are **not** equivalent: `qdchrome-extension` is closed by default (an
-> empty allowlist denies every origin; an explicit `*` opts into all), while
-> `qdfirefox-extension` treats an empty allowlist as "all origins" until the
-> user populates it — J11's closed-by-default change landed in qdchrome only.
-> See the per-artifact table in
-> [browser-extension-install.md](browser-extension-install.md). So the
-> extension the installer puts on disk has no gate at all, and `bundled` is
-> also the installer's DEFAULT `--firefox-mode`. Tracked as J11 in
-> `todo/fable-release/10-reachability-audit-2026-07-26.md` and fixed
-> separately; [browser-extension-install.md](browser-extension-install.md)
-> steers users at the standalone artifacts in the meantime.
+**A second, `bundled` artifact used to exist and was the default — it was
+retired for J11.** It was vendored at `browser_bridge/extension/`: an MV2
+tree that predated the split into the `qdchrome-extension` /
+`qdfirefox-extension` repos, kept alive with occasional cross-cutting sweeps
+but never given the module/origin gate (`src/gate.js`) those repos grew. It
+therefore had **no origin allowlist at all**, while shipping an `<all_urls>`
+content script that could drive `pwd.fill` / `pwd.save` / `page.extract` /
+`cookies.export`. And it was the only extension any install path actually
+laid down (`install-browser-bridge-for-vm.sh` copied it to
+`/usr/share/qdistro/browser-extension/`), so the closed-by-default allowlist
+shipped exclusively in repos nothing packaged. The tree is deleted,
+`--firefox-mode bundled` is a hard error, and the installer now stages the
+`qdchrome-extension` / `qdfirefox-extension` sources with a fail-closed gate
+assertion (`scripts/install/stage-browser-extension-source.sh`, pinned by
+`tests/unit/test_installed_extension_gate.py`). The stager requires each tree's
+`src/gate.js` to exist, to be referenced by the background wiring or the
+manifest (an unloaded gate is an absent one), to carry the closed-by-default
+source line, and — when `node` is available — to *behave* closed: loaded with
+empty storage, `isOriginAllowed()` must deny.
+
+None of that uninstalls anything, though, so the id is also **revoked at the
+bridge**: `REVOKED_EXTENSION_IDS` in `qdistro_browser_bridge.py` refuses
+`qdistro@qdistro.local` even from an allowlisted Firefox, with a distinct
+`extension_revoked` error. That is the lever that reaches a host upgraded in
+place, which still has the fork loaded in a profile and an existing
+`~/.mozilla/native-messaging-hosts/qdistro.json` naming it — the installer
+never rewrites per-user manifests.
+
+**Residual, acknowledged:** a user who built the *pre-J11 qdfirefox* extension
+cannot be reached this way — the fixed build carries the same gecko id, and v1
+has no signed update channel, so there is no revocation or auto-update for it.
+Rebuilding and reloading from the staged source is the only remedy.
 
 The Chromium extension (`qdchrome-extension`) does **not** build a Firefox
 artifact: it formerly emitted an MV2 build under the same
 `qdistro@qdistro.local` id as the bundled extension — a drift trap (two
 distinct codebases, one id) — so that target was removed. Firefox ships from
-one of the two sources above only, and for v1 that means the **standalone**
-one: the bundled row is the legacy artifact (see the J11 caveat above).
+`qdfirefox-extension` only.
 
 ### 4. Daemon policy (Phase 9 — not implemented)
 
@@ -664,7 +683,7 @@ Historical fix-plan details were pruned from the public repo. Summary:
 | P0-2 | `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` env-var bypasses the trust boundary | High | ✅ landed (commit `0c3a7a8`) |
 | P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High | ✅ landed (commit `0c3a7a8`) |
 | P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | ✅ landed — optional browsers default-off, admin opt-in via root-owned `/etc/qdistro/browser-bridge-allowlist.conf` (see note) |
-| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | ✅ standalone manifests tightened to the minimal serviced-op set + closed-set test (bundled copy follow-up) — see note |
+| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | ✅ manifests tightened to the minimal serviced-op set + closed-set test (the bundled copy was deleted for J11) — see note |
 | P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | ✅ closed for v1 by R4 — manual load documented in [browser-extension-install.md](browser-extension-install.md); signed distribution is post-v1 (see note) |
 
 **P0-4/5/6 disposition (D5 op-set freeze + D2 Recall cut, 2026-06-12):**
@@ -703,9 +722,9 @@ Historical fix-plan details were pruned from the public repo. Summary:
   `scripting.executeScript`, pwd-fill is a static content script) were dropped,
   and a `tests/manifest.test.js` closed-set/absent/host-pin pins the minimal
   surface against silent regrowth. The bundled `browser_bridge/extension` copy
-  is now aligned too: its manifests also drop `activeTab` and `webNavigation`,
-  and `browser_bridge/extension/tests/manifest.permissions.test.js` pins the
-  absent permissions, host grants, and empty optional-permission buckets.
+  that was also aligned here has since been **deleted** (J11 — it had no
+  origin gate and was the only extension the installer laid down); see
+  "Firefox extension artifacts".
 - **P0-6 — closed for v1 as "manual load", not as "solved".** CRX signing key
   custody, `update.xml` hosting, and the Windows AD/Azure-AD enrollment
   requirement are distribution concerns, not bridge-security defects. R4

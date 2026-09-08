@@ -126,13 +126,57 @@ class TestVerifyParent:
             selinux_reader=lambda _p: "user_u:user_r:user_t:s0",
             argv=["/usr/lib/qdistro/browser-bridge",
                   "/path/to/manifest.json",
-                  "qdistro@qdistro.local"],
+                  "qdistro-firefox@qdistro.local"],
         )
         assert ident["allowed"] is True
         assert ident["ppid"] == 4242
         assert ident["parent_exe"] == "/usr/lib64/firefox/firefox"
         assert ident["parent_selinux"].startswith("user_u")
+        assert ident["extension_id"] == "qdistro-firefox@qdistro.local"
+
+    def test_revoked_extension_id_is_denied_from_an_allowed_browser(self):
+        """J11: `qdistro@qdistro.local` was the ungated vendored fork.
+        Deleting the tree and dropping the id from the installer does
+        not uninstall anything — a host upgraded in place still has the
+        fork loaded and an existing per-user native-messaging manifest
+        naming it. The bridge is what an upgrade definitely replaces, so
+        it refuses the id even from an allowlisted Firefox."""
+        ident = bb.verify_parent(
+            ppid_fn=lambda: 4242,
+            exe_reader=lambda _p: "/usr/lib64/firefox/firefox",
+            selinux_reader=lambda _p: "user_u:user_r:user_t:s0",
+            argv=["/usr/lib/qdistro/browser-bridge",
+                  "/path/to/manifest.json",
+                  "qdistro@qdistro.local"],
+        )
         assert ident["extension_id"] == "qdistro@qdistro.local"
+        assert ident["allowed"] is False
+        assert ident["revoked_extension"] is True
+
+    def test_revoked_extension_gets_its_own_dispatch_error(self):
+        """`parent_not_allowed` would send the user hunting the browser
+        allowlist; the real cause is the extension."""
+        ident = bb.verify_parent(
+            ppid_fn=lambda: 4242,
+            exe_reader=lambda _p: "/usr/lib64/firefox/firefox",
+            selinux_reader=lambda _p: "",
+            argv=["/usr/lib/qdistro/browser-bridge", "/m.json",
+                  "qdistro@qdistro.local"],
+        )
+        r = bb.dispatch({"op": "qdistro.ping"}, ident)
+        assert r["ok"] is False
+        assert r["error"] == "extension_revoked"
+
+    def test_current_extension_id_is_not_revoked(self):
+        ident = bb.verify_parent(
+            ppid_fn=lambda: 4242,
+            exe_reader=lambda _p: "/usr/lib64/firefox/firefox",
+            selinux_reader=lambda _p: "",
+            argv=["/usr/lib/qdistro/browser-bridge", "/m.json",
+                  "qdistro-firefox@qdistro.local"],
+        )
+        assert ident["allowed"] is True
+        assert ident["revoked_extension"] is False
 
     def test_allowed_chromium(self):
         # Valid Chrome extension id = 32 lowercase a-p chars (P04
@@ -425,9 +469,9 @@ class TestParseExtensionIdFromArgv:
     def test_firefox_argv2_name_at_host(self):
         eid = bb.parse_extension_id_from_argv(
             ["bridge", "/path/to/manifest.json",
-             "qdistro@qdistro.local"],
+             "qdistro-firefox@qdistro.local"],
             parent_exe="/usr/lib64/firefox/firefox")
-        assert eid == "qdistro@qdistro.local"
+        assert eid == "qdistro-firefox@qdistro.local"
 
     def test_firefox_argv2_uuid_in_braces(self):
         eid = bb.parse_extension_id_from_argv(
@@ -488,7 +532,7 @@ class TestDispatch:
 
     def test_ping_handler(self):
         identity = {**self._ALLOWED,
-                    "extension_id": "qdistro@qdistro.local"}
+                    "extension_id": "qdistro-firefox@qdistro.local"}
         resp = bb.dispatch(
             {"op": "qdistro.ping", "echo": "hello",
              # Stdio extension_id is ignored — bridge trusts only argv.
@@ -499,7 +543,7 @@ class TestDispatch:
         assert resp["pong"] is True
         assert resp["echo"] == "hello"
         assert resp["parent_exe"] == "/usr/lib64/firefox/firefox"
-        assert resp["extension_id"] == "qdistro@qdistro.local"
+        assert resp["extension_id"] == "qdistro-firefox@qdistro.local"
 
     def test_denied_parent_short_circuits(self):
         resp = bb.dispatch(

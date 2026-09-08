@@ -101,7 +101,7 @@ from qdistro_pwd_vault import (  # type: ignore  # noqa: E402
 # ---------------------------------------------------------------------------
 
 BROWSER_EXE = "/usr/lib64/firefox/firefox"
-EXTENSION_ID = "qdistro@qdistro.local"
+EXTENSION_ID = "qdistro-firefox@qdistro.local"
 ORIGIN = "https://bank.example"
 URL = "https://bank.example/login"
 USERNAME = "alice@bank.example"
@@ -668,7 +668,7 @@ class TestRealBridgeIdentityDerivation:
         """Firefox passes the host-manifest path as argv[1] and the
         extension id as argv[2]; verify_parent must surface exactly that
         id (not a stdio-supplied one) and mark a browser parent allowed."""
-        ext = "qdistro@qdistro.local"
+        ext = "qdistro-firefox@qdistro.local"
         identity = bb.verify_parent(
             ppid_fn=lambda: PPID_BROWSER,
             exe_reader=lambda _p: BROWSER_EXE,
@@ -685,7 +685,7 @@ class TestRealBridgeIdentityDerivation:
             exe_reader=lambda _p: "/usr/bin/python3",
             selinux_reader=lambda _p: "",
             allowlist=(BROWSER_EXE,),
-            argv=["bridge", "/path/host.json", "qdistro@qdistro.local"])
+            argv=["bridge", "/path/host.json", "qdistro-firefox@qdistro.local"])
         assert identity["allowed"] is False
 
     def test_derived_identity_drives_full_approval(self, daemon, monkeypatch):
@@ -696,7 +696,7 @@ class TestRealBridgeIdentityDerivation:
         up end to end without a hand-built identity dict."""
         dmn, _ = daemon
         _attest_real(monkeypatch, dmn)
-        ext = "qdistro@qdistro.local"
+        ext = "qdistro-firefox@qdistro.local"
         identity = bb.verify_parent(
             ppid_fn=lambda: PPID_BROWSER,
             exe_reader=lambda _p: BROWSER_EXE,

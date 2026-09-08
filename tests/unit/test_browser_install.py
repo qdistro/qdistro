@@ -24,22 +24,17 @@ sys.modules["qdistro_browser_install"] = bi
 spec.loader.exec_module(bi)
 
 
-# Gecko id of the BUNDLED Firefox extension this installer authorizes.
-# The installer ships next to browser_bridge/extension/ and the README
-# directs users to run `qdistro-browser-install --browsers firefox` to
-# authorize that bundled extension (built from manifest.firefox.json), so
-# the installer default MUST equal the bundled manifest's gecko id.
-BUNDLED_GECKO_ID = "qdistro@qdistro.local"
+# Gecko id of the RETIRED "bundled" Firefox extension, which lived
+# vendored at browser_bridge/extension/. That tree was an abandoned fork
+# of the pre-split Phase-9a extension with no origin gate at all, and it
+# was the only extension any install path laid down (J11). It is deleted;
+# this constant remains only so the tests below can assert it never comes
+# back as an authorized id.
+RETIRED_BUNDLED_GECKO_ID = "qdistro@qdistro.local"
 
-# Gecko id of the STANDALONE qdfirefox extension (a separate artifact
-# shipped from the qdfirefox-extension repo). The native-host/standalone
-# install mode must authorize THIS id.
+# Gecko id of the qdfirefox extension (shipped from the
+# qdfirefox-extension repo) — now the ONLY canonical Firefox artifact.
 STANDALONE_GECKO_ID = "qdistro-firefox@qdistro.local"
-
-# Path to the bundled Firefox manifest (single source of truth).
-_BUNDLED_FIREFOX_MANIFEST = (
-    Path(__file__).resolve().parent.parent.parent
-    / "browser_bridge" / "extension" / "manifest.firefox.json")
 
 # Canonical standalone manifest in the sibling qdfirefox-extension repo.
 # Checked by the cross-repo contract test when present.
@@ -73,58 +68,50 @@ def _gecko_id(path: Path) -> str:
             .get("gecko", {}).get("id"))
 
 
-def _bundled_manifest_gecko_id() -> str:
-    return _gecko_id(_BUNDLED_FIREFOX_MANIFEST)
-
-
-# ---- extension-id single source of truth (finding #13) -----------
+# ---- extension-id single source of truth (finding #13 + J11) -----
 
 class TestFirefoxExtensionIdContract:
-    def test_installer_default_equals_bundled_manifest_id(self):
-        """The installer default and the BUNDLED extension's gecko id must
-        be EQUAL. This is the real contract: the installer authorizes the
-        bundled extension, so allowed_extensions must list its id.
+    def test_installer_default_is_the_qdfirefox_id(self):
+        """The installer default MUST equal the id of the extension it
+        actually authorizes. Since J11 that is the qdfirefox extension:
+        the vendored "bundled" MV2 fork it used to default to had no
+        origin gate and has been deleted."""
+        assert bi.DEFAULT_FIREFOX_EXTENSION_ID == STANDALONE_GECKO_ID
 
-        Regression for finding #13's broken remediation, which set the
-        default to the *standalone* qdfirefox id (qdistro-firefox@...)
-        while the bundled manifest still declares qdistro@qdistro.local —
-        the native-messaging host would then reject the bundled extension.
-        """
-        assert _BUNDLED_FIREFOX_MANIFEST.exists()
-        bundled_id = _bundled_manifest_gecko_id()
-        # Read BOTH sources and assert they are EQUAL (not merely != old).
-        assert bi.DEFAULT_FIREFOX_EXTENSION_ID == bundled_id
-        assert bundled_id == BUNDLED_GECKO_ID
+    def test_retired_bundled_id_is_not_authorized_anywhere(self):
+        """The deleted fork's id must not survive as a default or a mode.
+        Authorizing it would let a rebuilt copy of the ungated fork reach
+        the native-messaging host."""
+        assert bi.DEFAULT_FIREFOX_EXTENSION_ID != RETIRED_BUNDLED_GECKO_ID
+        assert RETIRED_BUNDLED_GECKO_ID not in set(bi.FIREFOX_MODE_IDS.values())
 
-    def test_default_rendered_manifest_uses_bundled_id(self):
+    def test_default_rendered_manifest_uses_the_qdfirefox_id(self):
         """render_manifest('firefox') with no explicit id must emit the
-        bundled extension's id in allowed_extensions."""
+        qdfirefox extension's id in allowed_extensions."""
         body = bi.render_manifest("firefox", bridge_path="/x/bridge")
-        assert body["allowed_extensions"] == [_bundled_manifest_gecko_id()]
+        assert body["allowed_extensions"] == [STANDALONE_GECKO_ID]
 
 
-# ---- bundled vs standalone install modes (finding #13) -----------
+# ---- firefox install modes (finding #13 + J11) -------------------
 
 class TestFirefoxInstallModes:
-    """Finding #13 (corrected): the generic installer authorized only the
-    BUNDLED id, leaving the separately-shipped standalone qdfirefox
-    extension unauthorized. The installer must expose an explicit
-    standalone mode whose default id is the standalone gecko id, while the
-    bundled mode keeps the bundled gecko id."""
+    """Finding #13: the generic installer authorized only the bundled id,
+    leaving the separately-shipped qdfirefox extension unauthorized. J11:
+    the bundled artifact turned out to be the ungated fork and was
+    retired, leaving `standalone` as the only mode."""
 
-    def test_mode_ids_are_distinct(self):
-        bundled = bi.firefox_extension_id_for_mode("bundled")
-        standalone = bi.firefox_extension_id_for_mode("standalone")
-        assert bundled == BUNDLED_GECKO_ID
-        assert standalone == STANDALONE_GECKO_ID
-        # The whole point of #13: the two artifacts have DIFFERENT ids.
-        assert bundled != standalone
+    def test_bundled_mode_is_retired_and_fails_closed(self):
+        """`--firefox-mode bundled` must be a hard error, not an alias.
+        Silently authorizing a different artifact than the caller asked
+        for is how the wrong extension gets installed."""
+        assert "bundled" not in bi.FIREFOX_MODE_IDS
+        with pytest.raises(ValueError):
+            bi.firefox_extension_id_for_mode("bundled")
 
-    def test_bundled_mode_default_equals_bundled_manifest_id(self):
-        """Bundled-mode default MUST equal the bundled
-        manifest.firefox.json gecko id."""
-        assert (bi.firefox_extension_id_for_mode("bundled")
-                == _bundled_manifest_gecko_id())
+    def test_default_mode_is_standalone(self):
+        assert bi.DEFAULT_FIREFOX_MODE == "standalone"
+        assert (bi.firefox_extension_id_for_mode("standalone")
+                == STANDALONE_GECKO_ID)
 
     def test_standalone_mode_default_equals_standalone_manifest_id(self):
         """Cross-repo CONTRACT TEST: the standalone-mode default MUST equal
@@ -156,12 +143,17 @@ class TestFirefoxInstallModes:
         body = json.loads(path.read_text())
         assert body["allowed_extensions"] == [STANDALONE_GECKO_ID]
 
-    def test_cli_default_mode_writes_bundled_id(self, tmp_path):
+    def test_cli_default_mode_writes_the_qdfirefox_id(self, tmp_path):
         rc = bi.main(["--home", str(tmp_path), "--browsers", "firefox"])
         assert rc == 0
         path = (tmp_path / ".mozilla/native-messaging-hosts/qdistro.json")
         body = json.loads(path.read_text())
-        assert body["allowed_extensions"] == [BUNDLED_GECKO_ID]
+        assert body["allowed_extensions"] == [STANDALONE_GECKO_ID]
+
+    def test_cli_rejects_the_retired_bundled_mode(self, tmp_path):
+        with pytest.raises(SystemExit):
+            bi.main(["--home", str(tmp_path), "--browsers", "firefox",
+                     "--firefox-mode", "bundled"])
 
     def test_cli_explicit_id_overrides_mode(self, tmp_path):
         rc = bi.main(["--home", str(tmp_path), "--browsers", "firefox",
@@ -213,13 +205,13 @@ def _qdchrome_repo() -> Path | None:
 
 
 class TestFirefoxArtifactCanonicalization:
-    """The two canonical Firefox artifacts (bundled, standalone) are the
-    only ones. qdchrome-extension must not reintroduce a third Firefox
-    build sharing the bundled id."""
+    """There is exactly ONE canonical Firefox artifact — the qdfirefox
+    extension. qdchrome-extension must not reintroduce a second Firefox
+    build under the retired bundled id."""
 
-    def test_only_two_canonical_firefox_ids(self):
+    def test_one_canonical_firefox_id(self):
         ids = set(bi.FIREFOX_MODE_IDS.values())
-        assert ids == {BUNDLED_GECKO_ID, STANDALONE_GECKO_ID}
+        assert ids == {STANDALONE_GECKO_ID}
 
     def test_qdchrome_ships_no_firefox_manifest(self):
         """Cross-repo guard: skipped only when the sibling repo isn't
@@ -228,8 +220,9 @@ class TestFirefoxArtifactCanonicalization:
         if repo is None:
             pytest.skip("qdchrome-extension repo not in tree")
         assert not (repo / "manifest.firefox.json").exists(), (
-            "qdchrome-extension/manifest.firefox.json reappeared — it "
-            "collides with the bundled extension's qdistro@qdistro.local id")
+            "qdchrome-extension/manifest.firefox.json reappeared — "
+            "qdchrome is Chromium-only; Firefox ships from "
+            "qdfirefox-extension")
 
     def test_qdchrome_build_script_has_no_firefox_target(self):
         repo = _qdchrome_repo()
@@ -337,11 +330,11 @@ class TestManifestRendering:
     def test_firefox_shape(self):
         body = bi.render_firefox_manifest(
             "/usr/lib/qdistro/browser-bridge",
-            "qdistro@qdistro.local")
+            STANDALONE_GECKO_ID)
         assert body["name"] == "qdistro"
         assert body["type"] == "stdio"
         assert body["path"] == "/usr/lib/qdistro/browser-bridge"
-        assert body["allowed_extensions"] == ["qdistro@qdistro.local"]
+        assert body["allowed_extensions"] == [STANDALONE_GECKO_ID]
         assert "allowed_origins" not in body
 
     def test_chromium_shape(self):
@@ -416,7 +409,7 @@ class TestInstall:
         assert path.exists()
         body = json.loads(path.read_text())
         assert body["name"] == "qdistro"
-        assert body["allowed_extensions"] == ["qdistro@qdistro.local"]
+        assert body["allowed_extensions"] == [STANDALONE_GECKO_ID]
         # 0644 — manifest is read by the user's browser process.
         assert (path.stat().st_mode & 0o777) == 0o644
 

@@ -12,7 +12,11 @@
 #   /usr/libexec/qdistro/qdistro_*_daemon.py          # 9e session daemons
 #   /usr/lib/qdistro/browser-bridge                   # exec-stub
 #   /usr/local/bin/qdistro-browser-install            # admin CLI
-#   /usr/share/qdistro/browser-extension/             # WebExtension src
+#   /usr/share/qdistro/browser-extension/{chromium,firefox}/
+#                                                     # WebExtension src,
+#                                                     # staged from the
+#                                                     # qdchrome-/qdfirefox-
+#                                                     # extension repos ONLY
 #   /etc/systemd/user/qdistro-{downloads,mpris,...}.service
 #
 # The bridge "binary" at /usr/lib/qdistro/browser-bridge is a tiny
@@ -135,13 +139,37 @@ exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_browser_install.py "$@"
 CLI
 chmod 0755 "$DEST_BIN/qdistro-browser-install"
 
-# WebExtension source tree (admin can pack via build-extension.sh
-# inside this dir; per-user installs are out of scope for this
-# script — they need browser-side "Load Temporary Add-on" or AMO sign).
+# WebExtension source trees. Per-user installs are out of scope for this
+# script (v1 has no signed extension channel — the user builds from this
+# source and loads it by hand), but WHICH source we lay down is a
+# security decision, so it is fail-closed:
+# stage-browser-extension-source.sh refuses to stage any tree whose
+# origin allowlist is not closed by default (J11), and REPLACES
+# $DEST_SHARE so an in-place upgrade cannot leave the old ungated fork
+# behind.
+STAGE_EXT="$(cd "$(dirname "$0")" && pwd)/stage-browser-extension-source.sh"
+if [ ! -f "$STAGE_EXT" ]; then
+    echo "[install-browser-bridge] missing $STAGE_EXT" >&2
+    exit 2
+fi
+# $SRC is <source-root>/qdistro/browser_bridge, so the sibling extension
+# checkouts are two levels up — the same idiom the qdbrowser /
+# browser_daemons lookups above use. QDISTRO_EXTENSION_SRC_ROOT overrides
+# (needed under a git worktree, whose parent dir is .worktrees/).
+bash "$STAGE_EXT" "$DEST_SHARE" \
+    "${QDISTRO_EXTENSION_SRC_ROOT:-$(cd "$SRC/../.." 2>/dev/null && pwd || echo "")}"
+
+# The ungated fork used to live at "$SRC/extension" and was copied to
+# $DEST_SHARE blindly. Its continued presence means the qdistro source
+# checkout predates its deletion — refuse, so no install path can
+# reintroduce it. Checked AFTER the staging call above on purpose: the
+# destination purge is the thing a pre-J11 host most needs, and it must
+# not be skipped just because the source tree is also stale.
 if [ -d "$SRC/extension" ]; then
-    cp -r "$SRC/extension/." "$DEST_SHARE/"
-    [ -f "$DEST_SHARE/build-extension.sh" ] && \
-        chmod 0755 "$DEST_SHARE/build-extension.sh"
+    echo "[install-browser-bridge] REFUSING to install: $SRC/extension still exists." >&2
+    echo "[install-browser-bridge] That vendored extension fork was deleted (J11) because it" >&2
+    echo "[install-browser-bridge] had no origin gate. Update the qdistro source checkout." >&2
+    exit 4
 fi
 
 # Stage the outer qdbrowser python package, so probes (and the bridge

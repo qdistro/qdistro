@@ -30,12 +30,21 @@ table is a summary, not an exhaustive install record):
 | `/usr/libexec/qdistro/qdistro_browser_bridge.py` | the bridge itself |
 | `/usr/libexec/qdistro/qdistro_browser_install.py` | the manifest writer |
 | `/usr/local/bin/qdistro-browser-install` | CLI front for the above |
-| `/usr/share/qdistro/browser-extension/` | source of the *bundled* extension — **not the extension this page installs**, see the warning below |
+| `/usr/share/qdistro/browser-extension/{chromium,firefox}/` | source of the two maintained extensions, staged from the pinned repos and gate-checked at install time (J11) — this **is** what this page builds from |
 
 It does **not** install any extension into any browser profile, and it
 writes no packed artifact: there is no `/usr/share/qdistro/extensions/`
 directory on a v1 install. Loading the extension is a manual user step in
 each browser.
+
+What it *does* guarantee about the source it stages is that the extension has
+a working, closed-by-default origin gate:
+`scripts/install/stage-browser-extension-source.sh` refuses to stage a tree
+whose `src/gate.js` is missing, is not referenced by the background wiring or
+the manifest (an unloaded gate is an absent one), or does not deny on an empty
+allowlist — checked textually and, where `node` is present, by actually
+loading the gate with empty storage. A tree that fails any of those aborts the
+install rather than being staged (exit 4).
 
 ### Where the extension source comes from
 
@@ -122,53 +131,55 @@ this script is the whole integrity story for the artifact — see
 v1 release key is published (`doc/release-signing.md`), step 1 has nothing to
 verify against, and what you are trusting is your own copy of the source.
 
-## The three extension artifacts
+## The two extension artifacts
 
 | Artifact | Source | Browser | Extension id |
 |---|---|---|---|
-| bundled | `qdistro/browser_bridge/extension/` | Firefox (MV2) | `qdistro@qdistro.local` |
-| standalone Firefox | `qdfirefox-extension` | Firefox (MV3) | `qdistro-firefox@qdistro.local` |
+| Firefox | `qdfirefox-extension` | Firefox (MV3) | `qdistro-firefox@qdistro.local` |
 | Chromium | `qdchrome-extension` | Chromium family (MV3) | `ammgnkddbnjdhikklpljgiclldedgncf` |
 
-The two Firefox artifacts are distinct on purpose (see browser.md,
-"Firefox extension artifacts"); the standalone one is the maintained
-first-class build and the one this page uses. The bundled tree's Chromium
-manifest carries no `key` field, so it has no stable Chromium id — for
-Chromium-family browsers use `qdchrome-extension`.
+Both are staged for you under `/usr/share/qdistro/browser-extension/` — but
+build from a verified export of the pinned repo as described above, not from
+the root-owned staged copy.
 
-> **Do not load the copy the installer leaves in
-> `/usr/share/qdistro/browser-extension/`.** That directory is a copy of the
-> *bundled* tree, and the bundled tree is an older, flat extension: no `src/`
-> directory, no `gate.js`, and therefore **no origin allowlist at all**. The
-> origin gate lives only in the standalone repos, which no installer ships. So
-> the extension the installer puts on disk is not the extension this page
-> tells you to build, and it is the weakest of the three. Build from the
-> manifest-pinned standalone repos as described below.
+> **There used to be a third — do not go looking for it.** A *bundled* Firefox
+> MV2 artifact lived at `qdistro/browser_bridge/extension/` under gecko id
+> `qdistro@qdistro.local`, and it was what the installer actually copied to
+> `/usr/share/qdistro/browser-extension/`. It was a flat, older tree: no
+> `src/`, no `gate.js`, **no origin allowlist at all** — so the origin gate
+> shipped only in repos no installer touched. That was **J11**
+> (`todo/fable-release/10-reachability-audit-2026-07-26.md`).
 >
-> That mismatch is tracked as **J11** in
-> `todo/fable-release/10-reachability-audit-2026-07-26.md` and is being fixed
-> separately (deciding which extension actually ships, and shipping it). Until
-> that lands, treat `/usr/share/qdistro/browser-extension/` as dead weight on
-> disk, not as an install source.
+> It is now deleted. `--firefox-mode bundled` is a hard error, the installer
+> stages the two maintained repos instead, and the id `qdistro@qdistro.local`
+> is **revoked by the bridge** — it is refused even from an allowlisted
+> Firefox, with an `extension_revoked` error. If you are upgrading a host that
+> had the old tree loaded in a Firefox profile, that revocation is what stops
+> it; remove it from `about:addons` and load the current one.
 
-### The origin gate differs per artifact — check yours
+### The origin gate: closed by default on both
 
 The gate (`src/gate.js`) decides which page origins the content-script-initiated
-ops may run on. **It is not the same in the two standalone extensions**, and
-the doc-of-record for this is the code:
+ops may run on.
 
 | Artifact | Empty / unset allowlist | Opt-in to all origins |
 |---|---|---|
 | `qdchrome-extension` | **denies every origin** — closed by default (J11) | an explicit `*` entry |
-| `qdfirefox-extension` | **allows every origin** | n/a — empty already means all |
-| bundled legacy tree | no gate exists at all | n/a |
+| `qdfirefox-extension` | **denies every origin** — closed by default (J11) | an explicit `*` entry |
 
-So on Firefox a fresh install is **open until you populate the allowlist**:
-open the extension's options page and list the origins you want the
-password/page-extract content scripts to act on. J11's closed-by-default
-change landed in `qdchrome-extension` only; extending it to Firefox is not
-part of this page's scope, and until it lands the Firefox default is stated
-here rather than papered over.
+**A fresh install is therefore closed until you populate the allowlist**: open
+the extension's options page and list the origins you want the password /
+page-extract content scripts to act on, or enter `*` on its own line to opt
+into all origins deliberately. Until you do, page-initiated ops are refused —
+that is the intended posture, not a malfunction.
+
+The two gates have not always agreed. J11 landed the closed-by-default change
+in `qdchrome-extension` only, and `qdfirefox-extension` — whose `gate.js` was
+otherwise byte-identical — kept treating an empty allowlist as "all origins".
+That was drift rather than a deliberately different Firefox posture, and it is
+fixed on `qdfirefox-extension`'s `fix/j11-firefox-allowlist-closed`. The
+installer will not stage a tree that is open by default, so the two land
+together.
 
 ## Firefox
 
@@ -183,9 +194,10 @@ qdistro-browser-install --browsers firefox --firefox-mode standalone
 #    ("allowed_extensions": ["qdistro-firefox@qdistro.local"])
 ```
 
-`--firefox-mode standalone` is **not** optional here: the installer's default
-mode is `bundled`, which writes `allowed_extensions: ["qdistro@qdistro.local"]`
-— the id of the gate-less bundled tree, not of the extension you just built.
+`--firefox-mode standalone` is now the default and the only mode, so it can be
+omitted; it is spelled out above because older instructions defaulted to
+`bundled`, which wrote `allowed_extensions: ["qdistro@qdistro.local"]` — the
+id of the deleted gate-less tree. That mode is now a hard error.
 
 Then, in Firefox: `about:debugging` → **This Firefox** → **Load Temporary
 Add-on…** → select `dist/firefox/manifest.json`. Verify with the toolbar
@@ -211,11 +223,10 @@ way around that in v1:
   add-on from signing on release Firefox. The script is scaffolding for the
   post-v1 signed channel, **not** a v1 install path.
 
-**Populate the origin allowlist after loading.** `qdfirefox-extension`'s gate
-treats an *empty* allowlist as "all origins", so until you list origins in the
-extension's options page the password / page-extract content scripts are live
-on every site the `<all_urls>` grant covers. (`qdchrome-extension` is the other
-way round — closed until you add entries; see the gate table above.)
+**Populate the origin allowlist after loading.** The gate is closed by
+default, so until you list origins in the extension's options page the
+password / page-extract content scripts refuse on every site. Add the origins
+you want, or a single `*` to opt into all of them deliberately.
 
 **Temporary loading also bypasses the normal install UX.** `about:debugging`
 is a developer mechanism: it does not show the installation-time permission
