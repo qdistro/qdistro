@@ -1,0 +1,12 @@
+#!/usr/bin/python3
+"""Installed entry point for the R9 display carrier."""
+from pathlib import Path
+import sys
+
+source_tree = Path(__file__).resolve().parents[1]
+if (source_tree / "multimachine/display_carrier.py").is_file():
+    sys.path.insert(0, str(source_tree))
+
+from multimachine.display_carrier_endpoint import main
+
+raise SystemExit(main())

@@ -1,0 +1,34 @@
+[Unit]
+Description=qdistro multi-machine primary display dock owner
+Documentation=https://codeberg.org/qdistro/qdistro
+After=user@1000.service
+Wants=user@1000.service
+ConditionPathExists=/etc/qdistro/multimachine/display-dock.conf
+ConditionPathExists=/etc/qdistro/multimachine/pairing-authority.ed25519.pub
+
+[Service]
+Type=simple
+User=admin
+EnvironmentFile=/etc/qdistro/multimachine/display-dock.conf
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+RuntimeDirectory=qdistro-mm-display-dock
+RuntimeDirectoryMode=0700
+StateDirectory=qdistro-mm-display-dock
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/qdistro-mm-display-dock --local-machine-id ${QD_MM_MACHINE_ID}
+Restart=on-failure
+RestartSec=1
+TimeoutStopSec=40
+KillMode=mixed
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/qdistro-mm-display-dock /var/lib/qdistro-mm-display-dock
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

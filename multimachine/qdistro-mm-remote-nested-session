@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+from pathlib import Path
+import sys
+
+source_tree = Path(__file__).resolve().parent.parent
+source_module = source_tree / "multimachine/remote_nested_supervisor.py"
+if source_module.is_file():
+    sys.path.insert(0, str(source_tree))
+from multimachine.remote_nested_supervisor import main
+
+raise SystemExit(main())

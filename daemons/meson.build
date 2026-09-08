@@ -43,6 +43,21 @@ qdwin_shell_protocol_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
+# qdwin_nested_v1 client header + protocol code for the R6 viewer publisher.
+qdwin_nested_xml = files(qdistro_protocols_dir / 'qdwin-nested-v1.xml')
+qdwin_nested_client_header = custom_target(
+  'qdwin-nested-v1-client-header',
+  input: qdwin_nested_xml,
+  output: 'qdwin-nested-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+qdwin_nested_protocol_code = custom_target(
+  'qdwin-nested-v1-private-code',
+  input: qdwin_nested_xml,
+  output: 'qdwin-nested-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 # security-context-v1 (qdistro-secctx-exec).
 security_context_xml = files(
   wayland_protocols_dir / 'staging/security-context/security-context-v1.xml',
@@ -82,6 +97,7 @@ dep_freerdp_shadow = dependency('freerdp-shadow3', required: false)
 dep_freerdp        = dependency('freerdp3',        required: false)
 dep_winpr          = dependency('winpr3',          required: false)
 dep_pipewire       = dependency('libpipewire-0.3', required: false)
+dep_threads        = dependency('threads')
 
 pw_target_resolver = static_library(
   'qdistro-pw-target-resolver',
@@ -93,6 +109,17 @@ pw_target_resolver_test = executable(
   link_with: pw_target_resolver,
 )
 test('pw-target-resolver', pw_target_resolver_test)
+
+mm_remote_frame_protocol = static_library(
+  'qdistro-mm-remote-frame-protocol',
+  'nested-pixelfeed/mm-remote-frame.c',
+)
+mm_remote_frame_protocol_test = executable(
+  'test-mm-remote-frame-protocol',
+  'nested-pixelfeed/test-mm-remote-frame.c',
+  link_with: mm_remote_frame_protocol,
+)
+test('mm-remote-frame-protocol', mm_remote_frame_protocol_test)
 
 if dep_freerdp_shadow.found() and dep_freerdp.found() and dep_winpr.found() and dep_pipewire.found()
   executable('qdistro-forward',
@@ -128,9 +155,52 @@ if dep_pipewire.found()
     install: true,
     install_dir: get_option('bindir'),
   )
+
+  # R6 source helper: strictly resolves the local Weston PipeWire producer,
+  # copies BGRx into bounded controller frames, and injects authenticated
+  # return input through the peer-credential-vouched local QDNI sink.
+  executable('qdistro-mm-remote-source-helper',
+    sources: [
+      'nested-pixelfeed/qdistro-mm-remote-source-helper.c',
+    ],
+    link_with: [mm_remote_frame_protocol, pw_target_resolver],
+    dependencies: [dep_pipewire, dep_threads],
+    install: true,
+    install_dir: get_option('bindir'),
+  )
 else
-  message('qdistro-nested-pixelfeed skipped — libpipewire-0.3 not found')
+  message('qdistro nested pixelfeed/source helper skipped — libpipewire-0.3 not found')
 endif
+
+# R6 viewer-local remote frame feeder. It deliberately has no PipeWire
+# dependency: authenticated remote frames become freshly allocated local SHM
+# buffers and pass through qdwin's existing same-uid bind_proxy_pixels gate.
+executable('qdistro-mm-remote-pixelfeed',
+  sources: [
+    'nested-pixelfeed/qdistro-mm-remote-pixelfeed.c',
+    qdwin_shell_client_header,
+    qdwin_shell_protocol_code,
+  ],
+  link_with: mm_remote_frame_protocol,
+  dependencies: [dep_wayland_client],
+  install: true,
+  install_dir: get_option('bindir'),
+)
+
+# R6 viewer publisher. It terminates authenticated controller messages into a
+# local qdwin proxy plus same-uid frame/QDNI sockets. Remote paths and object
+# identifiers never enter either local protocol.
+executable('qdistro-mm-remote-viewer-helper',
+  sources: [
+    'nested-pixelfeed/qdistro-mm-remote-viewer-helper.c',
+    qdwin_nested_client_header,
+    qdwin_nested_protocol_code,
+  ],
+  link_with: mm_remote_frame_protocol,
+  dependencies: [dep_wayland_client],
+  install: true,
+  install_dir: get_option('bindir'),
+)
 
 # qdistro-secctx-exec: wp_security_context_v1 wrapper for non-secctx
 # clients. Required for tier-3+ sandboxing.

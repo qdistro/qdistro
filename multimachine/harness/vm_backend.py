@@ -19,6 +19,7 @@ but does NOT undefine the domain — the caller owns VM teardown).
 from __future__ import annotations
 
 import base64
+import os
 import re
 import shlex
 import subprocess
@@ -163,7 +164,10 @@ class QciVMBackend:
               mode: int = 0o644) -> None:
         b64 = base64.b64encode(local.read_bytes()).decode()
         g = shlex.quote(guest)
-        temporary = shlex.quote(guest + ".qdistro-push-tmp")
+        # Separate harness processes may stage to the same pre-provisioned VM.
+        # A per-process pathname keeps their atomic renames independent.
+        temporary = shlex.quote(
+            guest + f".qdistro-push-{os.getpid()}-tmp")
         # vm-exec currently carries the transfer command through QGA argv, so
         # this remains test-apparatus transport rather than a production secret
         # channel.  Stage mode-0600 credentials atomically: there is no window
@@ -172,6 +176,42 @@ class QciVMBackend:
             vm, f"umask 077; rm -f {temporary}; "
             f"printf '%s' '{b64}' | base64 -d > {temporary} && "
             f"chmod {mode:04o} {temporary} && mv -f {temporary} {g}")
+
+    def _push_large(self, vm: str, local: Path, guest: str,
+                    mode: int = 0o644, chunk_size: int = 48 * 1024) -> None:
+        """Atomically stage a file without exceeding QGA's argv limit.
+
+        ``_push`` is intentionally simple but base64-expands its whole payload
+        into one guest command.  Large compositor sources exceed the host's
+        exec argument limit before vm-exec can run.  Transfer bounded chunks
+        with the existing atomic primitive, append them in order in the guest,
+        then publish the completed file with one rename.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        data = local.read_bytes()
+        if len(data) <= chunk_size:
+            self._push(vm, local, guest, mode=mode)
+            return
+
+        guest_tmp = guest + f".qdistro-large-{os.getpid()}-tmp"
+        guest_chunk = guest_tmp + ".chunk"
+        quoted_tmp = shlex.quote(guest_tmp)
+        quoted_chunk = shlex.quote(guest_chunk)
+        quoted_guest = shlex.quote(guest)
+        self._vmexec(vm, f"umask 077; rm -f {quoted_tmp} {quoted_chunk}")
+        with tempfile.TemporaryDirectory(prefix="qdistro-vm-push-") as tmp:
+            local_chunk = Path(tmp) / "chunk"
+            for offset in range(0, len(data), chunk_size):
+                local_chunk.write_bytes(data[offset:offset + chunk_size])
+                self._push(vm, local_chunk, guest_chunk, mode=0o600)
+                self._vmexec(
+                    vm, f"dd if={quoted_chunk} of={quoted_tmp} "
+                        "oflag=append conv=notrunc status=none && "
+                        f"rm -f {quoted_chunk}")
+        self._vmexec(
+            vm, f"chmod {mode:04o} {quoted_tmp} && "
+                f"mv -f {quoted_tmp} {quoted_guest}")
 
     def _guest_link_dev(self, vm: str) -> str:
         """The guest's default-route NIC (e.g. ens2) — the configured
@@ -296,8 +336,24 @@ class QciVMBackend:
         for mod in (
                 "__init__.py", "sidechannel.py", "bridge.py", "viewer.py",
                 "control_source.py", "mm_broker.py", "mm_pairing_authority.py",
-                "mm_session_launcher.py", "origin_authority.py",
-                "rdp_client_wrapper.py"):
+                "mm_remote_session_authority.py",
+                "mm_display_authority.py",
+                "mm_display_carrier_launcher.py",
+                "mm_remote_session_launcher.py", "mm_session_launcher.py",
+                "origin_authority.py", "rdp_client_wrapper.py",
+                "remote_adapter.py", "remote_adapter_transport.py",
+                "remote_nested_protocol.py", "remote_nested_service.py",
+                "remote_nested_supervisor.py", "remote_nested_registry.py",
+                "remote_display_slot.py", "display_slot_controller.py",
+                "display_dock_rpc.py", "display_dock_session.py",
+                "display_dock_service.py", "mm_display_dock_daemon.py",
+                "display_shell_mailbox.py",
+                "display_shell_service.py",
+                "display_carrier.py",
+                "display_panel_agent.py",
+                "display_panel_endpoint.py",
+                "mm_display_panel_launcher.py",
+                "display_carrier_endpoint.py"):
             self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
         for mod in ("__init__.py", "viewer_broker.py"):
             self._push(

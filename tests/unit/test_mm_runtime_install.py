@@ -25,3 +25,61 @@ def test_installer_ships_trusted_session_launcher() -> None:
     assert "mm_session_launcher.py" in text
     assert '"$SRC/qdistro-mm-session-launcher"' in text
     assert "/usr/local/bin/qdistro-mm-session-launcher" in text
+
+
+def test_installer_ships_remote_adapter_core() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "remote_adapter.py" in text
+    assert "remote_nested_protocol.py" in text
+    assert "remote_nested_service.py" in text
+    assert "remote_nested_supervisor.py" in text
+    assert "remote_nested_registry.py" in text
+    assert '"$SRC/qdistro-mm-remote-nested-controller"' in text
+    assert "/usr/local/bin/qdistro-mm-remote-nested-controller" in text
+    assert '"$SRC/qdistro-mm-remote-nested-session"' in text
+    assert "/usr/local/bin/qdistro-mm-remote-nested-session" in text
+
+
+def test_installer_ships_remote_session_authority_and_launcher() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "mm_remote_session_authority.py" in text
+    assert "mm_remote_session_launcher.py" in text
+    assert '"$SRC/qdistro-mm-remote-session-launcher"' in text
+    assert "/usr/local/bin/qdistro-mm-remote-session-launcher" in text
+    assert "remote_adapter_transport.py" in text
+    assert '"$SRC/qdistro-mm-remote-adapter"' in text
+    assert "/usr/local/bin/qdistro-mm-remote-adapter" in text
+
+
+def test_installer_ships_r9_display_authority_and_slot_controller() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "mm_display_authority.py" in text
+    assert "remote_display_slot.py" in text
+    assert "display_slot_controller.py" in text
+    assert "display_shell_mailbox.py" in text
+    assert "display_shell_service.py" in text
+    assert "mm_display_carrier_launcher.py" in text
+    assert "display_carrier.py" in text
+    assert "display_carrier_endpoint.py" in text
+    assert '"$SRC/qdistro-mm-display-carrier-launcher"' in text
+    assert "/usr/local/bin/qdistro-mm-display-carrier-launcher" in text
+    assert '"$SRC/qdistro-mm-display-carrier"' in text
+    assert "/usr/local/bin/qdistro-mm-display-carrier" in text
+    assert "display_panel_agent.py" in text
+    assert "display_panel_endpoint.py" in text
+    assert "mm_display_panel_launcher.py" in text
+    assert '"$SRC/qdistro-mm-display-panel-launcher"' in text
+    assert "/usr/local/bin/qdistro-mm-display-panel-launcher" in text
+    assert '"$SRC/qdistro-mm-display-panel"' in text
+    assert "/usr/local/bin/qdistro-mm-display-panel" in text
+    assert "display_dock_session.py" in text
+    assert "display_dock_service.py" in text
+    assert "display_dock_rpc.py" in text
+    assert "mm_display_dock_daemon.py" in text
+    assert '"$SRC/qdistro-mm-display-dock"' in text
+    assert "/usr/local/bin/qdistro-mm-display-dock" in text
+    assert '"$SRC/qdistro-mm-display-dock.service"' in text
+    assert "/etc/systemd/system/qdistro-mm-display-dock.service" in text
+    assert '"$SRC/qdistro-mm-display-tmpfiles.conf"' in text
+    assert "/usr/lib/tmpfiles.d/qdistro-mm-display.conf" in text
+    assert "systemd-tmpfiles --create" in text

@@ -1,0 +1,12 @@
+#!/usr/bin/python3
+"""Installed entry point for the trusted R9 display-carrier launcher."""
+from pathlib import Path
+import sys
+
+source_tree = Path(__file__).resolve().parents[1]
+if (source_tree / "multimachine/mm_display_carrier_launcher.py").is_file():
+    sys.path.insert(0, str(source_tree))
+
+from multimachine.mm_display_carrier_launcher import main
+
+raise SystemExit(main())
