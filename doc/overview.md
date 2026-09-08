@@ -111,9 +111,11 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
 - The `qdistro_app` SDK — Python library that first-party apps integrate with.
 - The remote-output thin client (on secondary machines) — **VM-gated and
   incomplete**. `install-multimachine-for-vm.sh` is not in the bootstrap chain,
-  and even where it runs it installs the broker/session/wrapper subset and
-  **not** `multimachine/viewer.py`; live viewer assembly stays under the VM
-  harness. There is no thin client to install on a secondary machine today.
+  and its runtime remains inert until explicitly provisioned by the session
+  orchestrator. The installer now includes broker, session, remote-adapter,
+  display-carrier, panel and dock components, but does not install
+  `multimachine/viewer.py`; that viewer assembly remains in the VM harness.
+  These components do not constitute a stock secondary-machine setup flow.
 
 ### Infrastructure — commodity C/C++
 

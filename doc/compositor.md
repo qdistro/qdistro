@@ -9,6 +9,12 @@ For wire-level protocol detail (qdwin_shell_v1, qdwin_nested_manager_v1, etc.)
 see the qdwin repository's `doc/protocol.md`. This document covers the
 architectural shape only.
 
+The current `qdwin_shell_v1` version is 34. Mainline opcodes remain stable:
+`request_set_position` is since 30, `toplevel_app_id` since 31,
+`prepare_output_capture` since 32, and `capture_served_stale` since 33.
+Remote identity, remote-output input authorization and state-drain messages
+are appended at version 34; qdshell binds 34 and gates the new requests at 34.
+
 ## Why libweston
 
 The compositor is qdistro's **trusted computing base**. Every line in it runs

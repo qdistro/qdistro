@@ -135,6 +135,14 @@ Other properties:
 - Manual "Lock now" from the admin panel or shortcut.
 - System suspend.
 
+The logind watcher always subscribes to `PrepareForSleep` and manages its
+sleep inhibitor, independently of `lid_action`. Ignoring lid events therefore
+does not disable suspend locking. A user service without a logind session for
+its PID still retains the sleep subscription; session-specific signals use an
+owned `XDG_SESSION_ID` or one unambiguous active local Wayland session. The
+watcher reconnects and discards stale callbacks when logind or the session
+changes.
+
 ### Lock scope
 
 A single lock covers the whole machine. No per-user locks. Matches the

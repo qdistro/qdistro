@@ -190,8 +190,9 @@ The set-side gate fires on every clipboard set:
  The focus-first order is *not* a guarantee that the setter had focus. For the
  regular `wl_data_device` path Wayland does restrict selection-setting to a
  focused client, but **qdwin's primary-selection implementation applies no such
- check**: `qdwin_primary_device_set_selection` discards both `client` and
- `serial`, accepts the source, and broadcasts offers to every device on the
+ focus check**: `qdwin_primary_device_set_selection` does not authenticate
+ the setter against keyboard focus. It rejects stale serials and a source
+ already attached to another seat, then broadcasts offers to devices on the
  seat. So an untagged, unfocused client can set the primary selection and be
  attributed to whatever toplevel currently holds keyboard focus. A tagged
  source is still recovered correctly via the secctx sidecar; the exposure is
@@ -230,7 +231,9 @@ keyboard focus. On every focus change, qdshell clears any active selection
 whose source silo differs from the newly focused silo. This is the
 Qubes-style mitigation for the "admin → silo paste-receive" direction.
 
-A finer-grained **receive-time gate** wraps `wl_data_offer.receive` and calls
+A finer-grained **receive-time gate** identifies the sender from its source
+resource and the receiver from the active offer resource, independently of
+keyboard focus. It defers the source's send callback and calls
 `CheckClipboardReceive(source_silo, dest_silo, mime_type, source_app_id,
 dest_app_id, source_sandbox_engine, identity_verified, source_pid,
 source_starttime)`. Rules can specify `mime_type:` (with fnmatch glob support —

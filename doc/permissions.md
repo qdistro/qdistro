@@ -9,14 +9,15 @@
  qdistro_app SDK / caller in the user's session
  |
  v
- (D-Bus call to org.qdistro.AdminBroker1 on the system bus)
+ (D-Bus call to com.qdistro.AdminBroker1 on the system bus)
  |
  v
  qdistro-admin-broker: policy pipeline
  1. Declarative rules (YAML only) -> allow / deny
- 2. Python hooks (if rules inconclusive) -> same actions
+ 2. Existing human approvals (cache) -> allow / deny
+ 3. Python hooks (async RequestPermission only) -> allow / deny
     [not reachable on a stock install — see "Python hooks" below]
- 3. admin approval queue (the Qt admin app / admin TUI decide)
+ 4. admin approval queue (the Qt admin app / admin TUI decide)
  |
  v
  response: allow / deny / unknown
@@ -26,7 +27,7 @@
 ```
 
 **The relationship to polkit runs the other way round.** The broker contains no
-polkit code and never escalates to a polkit prompt; step 3 is the broker's own
+polkit code and never escalates to a polkit prompt; step 4 is the broker's own
 approval queue. It is `qdistro-polkit-agent` that faces polkit: it registers as
 a polkit `AuthenticationAgent`, receives *upstream* polkit actions (mostly
 `org.freedesktop.*`), maps each action ID into a qdistro-namespaced string
@@ -66,7 +67,7 @@ authentication agent is registered whenever its applicable default is
 | `tier3.{spawn,cleanup}` | `auth_admin_keep` | `auth_admin_keep` |
 | `tier5.{spawn,cleanup}` | `auth_admin_keep` | `yes` |
 
-So for an active admin session, eight of the ten prompt through the agent and
+So for an active admin session, seven of the ten prompt through the agent and
 therefore land in the broker's queue; `print.access` and the two tier5 actions
 are allowed outright for the active session and only prompt for a non-active or
 other-uid caller.
@@ -108,9 +109,9 @@ them.
 
 ## Two broker entry points — synchronous check vs long-term ask
 
-The broker exposes two D-Bus methods. The distinction is about *user
-experience*, not different policy engines — both use the same rules and cache
-machinery:
+The broker exposes synchronous checks and asynchronous requests. Both use
+rules and the human-approval cache; only requests consult hooks before the
+admin prompt:
 
 - **`CheckPermission(action, details) → "allow" | "deny" | "unknown"`** — a
  synchronous fast-path lookup. Runs rules + cache only; never enqueues an
@@ -156,9 +157,10 @@ elif verdict == "deny": refuse with a policy-deny error
 else: # "unknown"
  refuse immediately
  broker.RequestPermission(action, details_with_debug_info)
- # fire-and-forget; admin sees the prompt in their queue,
- # approves when they get to it, caller retries later and
- # the cache row from admin's allow makes it instant.
+ # fire-and-forget; if no hook decides, admin sees the prompt.
+ # A reusable human approval makes a later check immediate.
+ # Hook-only decisions are per-request: consumers needing those
+ # must use RequestPermission + WaitForDecision for the operation.
 ```
 
 The split lets the same policy engine serve both "never-block-the-user"
@@ -264,8 +266,9 @@ silently does not apply. The exact vocabulary:
 Rules are matched top-to-bottom; first match wins. Unmatched requests do **not**
 fall through to a polkit prompt — the broker has no polkit escalation path.
 What an unmatched request does depends on the entry point: `CheckPermission`
-returns `"unknown"`, `RequestPermission` enqueues an item for admin's approval
-queue, and the clipboard gates hit their own default (deny — see
+returns `"unknown"` after its cache miss, `RequestPermission` consults the
+cache and asynchronous hooks before admin's approval queue, and the clipboard
+gates hit their own default (deny — see
 [clipboard.md](clipboard.md)).
 
 String selectors (`action`, `exe`, `app_id`, `mime_type`, `sandbox_engine`)
@@ -287,8 +290,9 @@ selectors.
 > **Status: the hook surface is inert on a stock install.** Both halves exist in
 > the repo — the executor (`broker/qdistro_hook_executor.py`) and its unit
 > (`deploy/systemd/services/qdistro-hook-executor.service`) — and the broker
-> does build a `HookClient` with hooks enabled by default and consults it on the
-> two permission paths. But **no installer installs either half**:
+> does build a `HookClient` with hooks enabled by default and consults it from
+> asynchronous permission requests. Synchronous checks never perform hook IO.
+> But **no installer installs either half**:
 > `install-broker-for-qdwin.sh` copies `qdistro_hook_client.py` and not
 > `qdistro_hook_executor.py`, and nothing installs or enables the unit. On a
 > real install the executor socket never exists, the client fails to connect,
@@ -297,8 +301,8 @@ selectors.
 > **The residual risk this leaves.** A hooks directory is not a working policy
 > surface in v1. An admin who drops a `00-deny-secrets.py` into
 > `/etc/qdistro/hooks/` on a bootstrapped machine gets **no denial** — the file
-> is never loaded and the request is decided by rules and the approval queue
-> alone, with no error and no log line naming the missing executor. Do not rely
+> is never loaded and the request is decided by rules, existing human grants
+> and the approval queue alone, with no error and no log line naming the missing executor. Do not rely
 > on hooks for any enforcement until the installer chain ships them. Everything
 > in the rest of this section describes the code as written, and is accurate
 > only once the executor is installed and running by hand.
@@ -317,7 +321,10 @@ def on_clipboard_send(event):
  return None # fall through
 ```
 
-Hooks are consulted when rules are inconclusive. Admin-authored Python
+Hooks are consulted by asynchronous requests after rules and cache are
+inconclusive. The clipboard transformation example above is design vocabulary:
+no clipboard gate dispatches it, and a binary permission request cannot apply
+its payload rewrite. Admin-authored Python
 evaluated in the broker's own process would be effectively privileged code, so
 the design is a **sandboxed hook executor**: hooks run under a dedicated
 unprivileged uid (`User=qdistro-hooks`) under a `SystemCallFilter=` seccomp
@@ -541,8 +548,9 @@ from a bootstrapped machine:
   (`qdistro_hook_executor.py`) runs as a dedicated uid, listens on an
   AF_UNIX socket, loads `.py` hooks from `/etc/qdistro/hooks/`,
   hot-reloads on file change, returns `allow/deny/transform/null`
-  verdicts.  The broker consults hooks after rules+cache are
-  inconclusive and before the admin prompt.  The systemd service unit
+  verdicts. The broker consults hooks asynchronously after rules+cache are
+  inconclusive and before the admin prompt; binary gates cannot authorize a
+  `transform` result.  The systemd service unit
   provides `ProtectSystem=strict`, `PrivateNetwork=true`,
   `NoNewPrivileges=true` and a `SystemCallFilter=` allow-list.
   Neither `qdistro_hook_executor.py` nor
@@ -599,8 +607,11 @@ bind to the trusted launcher:
 client's `(pid, starttime, uid, exe, selinux_label)` at secctx-bind time
 (`SO_PEERCRED` + `/proc`) and forwards it on the
 `qdwin_shell_v1.toplevel_peer_identity` event (protocol v22). qdshell
-caches the tuple per toplevel handle and, on each clipboard / handoff
-decision, calls broker `VerifyClientIdentity`, which re-resolves the live
+stores the tuple per toplevel handle. Clipboard decisions use serialized
+`VerifyClientIdentity` calls and a cache keyed by the full peer/security tuple:
+success expires after 30 seconds, failure retries after one second, and
+identity or connection changes invalidate outstanding results. Handoff has its
+own verification path. `VerifyClientIdentity` re-resolves the live
 process against `/proc` and returns true only if the field-22 starttime
 (the always-enforced anti-PID-reuse anchor) matches; the uid, exe, and
 SELinux-label axes are each additionally enforced only when both the
