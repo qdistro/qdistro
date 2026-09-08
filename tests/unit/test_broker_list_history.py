@@ -122,16 +122,18 @@ class TestExistingFields:
             source="cache", approver_uid=None,
             request_id=7, rule_path="/etc/qdistro/rules.d/foo.yaml",
             selinux_subj_type="qdistro_broker_t",
+            context='{"mime_type": "text/plain"}',
             argv=["/u/b/foo", "--bar"])
         rows = broker.ListHistory(50)
         r = rows[0]
         for k in ("ts", "caller_uid", "caller_pid", "caller_exe",
                   "action", "decision", "scope", "source",
                   "approver_uid", "rule_path", "request_id",
-                  "selinux_subj_type", "argv"):
+                  "selinux_subj_type", "argv", "context"):
             assert k in r, f"missing key {k!r}"
         assert int(r["caller_uid"]) == 42
         assert str(r["caller_exe"]) == "/u/b/foo"
         assert str(r["scope"]) == "1h"
         assert str(r["rule_path"]) == "/etc/qdistro/rules.d/foo.yaml"
         assert list(r["argv"]) == ["/u/b/foo", "--bar"]
+        assert str(r["context"]) == '{"mime_type": "text/plain"}'

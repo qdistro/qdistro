@@ -121,6 +121,10 @@ cat > "$TMPXML" <<EOF
       <image compression='off'/>
     </graphics>
     <audio id='1' type='spice'/>
+    <!-- A backend alone exposes no guest audio device.  The ICH9 codec gives
+         PipeWire a real sink/source so capture-indicator tests exercise an
+         actual recording stream, matching qdistro's desktop hardware model. -->
+    <sound model='ich9'><audio id='1'/></sound>
 $VIDEO_XML
     <redirdev bus='usb' type='spicevmc'/>
     <redirdev bus='usb' type='spicevmc'/>

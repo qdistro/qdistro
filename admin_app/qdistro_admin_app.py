@@ -990,6 +990,7 @@ class BrokerBridge(QObject):
                 "decision":          bool(r["decision"]),
                 "scope":             str(r["scope"]) if r["scope"] else None,
                 "source":            str(r["source"]),
+                "context":           str(r.get("context", "")),
                 "approver_uid":      int(r["approver_uid"]) if r["approver_uid"] else None,
                 "rule_path":         str(r["rule_path"]) if r["rule_path"] else None,
                 "request_id":        int(r["request_id"]) if r["request_id"] else None,
@@ -3489,7 +3490,11 @@ class HistoryTab(QWidget):
                 QStandardItem(str(h.get("caller_exe", "-"))),
                 QStandardItem(decision_str),
                 QStandardItem(str(h.get("scope", "-"))),
-                QStandardItem(str(h.get("source", "-"))),
+                QStandardItem(
+                    str(h.get("source", "-"))
+                    + ((" context=" + str(h["context"]))
+                       if h.get("context") else "")
+                ),
                 QStandardItem(argv_str),
             ]
             # Stash the raw history entry on column 0

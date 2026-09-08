@@ -137,7 +137,9 @@ admin prompt:
 
 Both fast APIs (`CheckPermission` and `CheckPermissionForClient`) record
 rule/cache decisions with subject, argv, selector context and rule/grant
-reference. With `audit_required` enabled, a failed audit write denies the
+reference. The stable `source` token identifies the decision origin; the
+`context` JSON column carries selectors and the cache grant id without changing
+that token. With `audit_required` enabled, a failed audit write denies the
 operation. An unknown result is not an authorization and must refuse the
 immediate operation.
 

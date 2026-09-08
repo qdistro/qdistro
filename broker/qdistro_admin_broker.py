@@ -2549,7 +2549,7 @@ class Broker(dbus.service.Object):
             return self._record_check(
                 uid=uid, pid=pid, exe=exe, action=action_s,
                 allowed=bool(row["decision"]), details=details,
-                source=f"cache grant_id={row['id']}", scope=row.get("scope"),
+                source="cache", scope=row.get("scope"), grant_id=row["id"],
                 approver_uid=row.get("approver_uid"))
         # Hooks can run for seconds. Only RequestPermission consults them,
         # on a bounded worker pool; synchronous gates never wait on executor IO.
@@ -2557,14 +2557,17 @@ class Broker(dbus.service.Object):
 
     def _record_check(self, *, uid, pid, exe, action, allowed, details,
                       source, scope=None, rule_path=None, approver_uid=None,
-                      request_id=None):
+                      request_id=None, grant_id=None):
         context = {key: _selector_from_details(details, key)
                    for key in ("app_id", "sandbox_engine", "mime_type")}
+        if grant_id is not None:
+            context["grant_id"] = int(grant_id)
         try:
             self.audit.log(
                 caller_uid=uid, caller_pid=pid, caller_exe=exe,
                 action=action, decision=allowed, scope=scope,
-                source=source + " context=" + json.dumps(context, sort_keys=True),
+                source=source,
+                context=json.dumps(context, sort_keys=True),
                 rule_path=rule_path, approver_uid=approver_uid,
                 request_id=request_id, argv=_argv_from_details(details))
         except Exception as exc:
@@ -3966,7 +3969,7 @@ class Broker(dbus.service.Object):
                 result = self._record_check(
                     uid=uid, pid=pid, exe=exe, action=action_s,
                     allowed=req.decision, details=clean_details,
-                    source=f"cache grant_id={cached_row['id']}",
+                    source="cache", grant_id=cached_row["id"],
                     scope=cached_row.get("scope"),
                     approver_uid=cached_row.get("approver_uid"), request_id=rid)
             req.decision = result == "allow"
@@ -5030,6 +5033,7 @@ class Broker(dbus.service.Object):
                 "decision":      dbus.Boolean(bool(r["decision"])),
                 "scope":         dbus.String(r["scope"] or ""),
                 "source":        dbus.String(r["source"] or ""),
+                "context":       dbus.String(r.get("context") or ""),
                 "approver_uid":  dbus.Int32(r["approver_uid"] or 0),
                 "rule_path":     dbus.String(r["rule_path"] or ""),
                 "request_id":    dbus.Int32(r["request_id"] or 0),

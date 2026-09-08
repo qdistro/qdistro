@@ -44,6 +44,16 @@ in_file() {
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
+@test "gui-spin: template provides a guest sound card for live capture tests" {
+    run grep -Fq "<sound model='ich9'><audio id='1'/></sound>" "$TEMPLATE"
+    [ "$status" -eq 0 ]
+
+    # Existing hosts keep their already-defined template domain.  Clone-time
+    # reconciliation ensures those workers gain the sound card too.
+    run grep -Fq "if ! grep -q '<sound '" "$REPO_ROOT/scripts/vm/clone-baseweed.sh"
+    [ "$status" -eq 0 ]
+}
+
 @test "gui-spin: provisions work fixtures as durable active silos" {
     # The session manager owns the Linux-account creation.  A bare useradd
     # creates no silos.yaml row, so the first reconcile purges the relay grant

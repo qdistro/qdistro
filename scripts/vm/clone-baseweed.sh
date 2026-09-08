@@ -289,6 +289,26 @@ while i < len(src):
 sys.stdout.write("".join(out))
 ')
 
+# Old, already-defined qdistro-template domains carry an audio backend but no
+# guest sound device.  Do not let that persistent host state make fresh CI
+# workers silently lack PipeWire sources: add the same ICH9 device as the
+# current template definition to the clone XML.  Custom templates that already
+# provide any sound device keep their chosen model unchanged.
+if ! grep -q '<sound ' <<<"$XML"; then
+    XML=$(python3 -c '
+import re, sys
+src = sys.stdin.read()
+inject = "    <sound model=\"ich9\"><audio id=\"1\"/></sound>\n"
+if not re.search(r"<audio\b[^>]*\bid=[\"\x27]1[\"\x27]", src):
+    inject = "    <audio id=\"1\" type=\"spice\"/>\n" + inject
+idx = src.rfind("</devices>")
+if idx == -1:
+    sys.stderr.write("ERROR: cloned XML has no </devices> for sound device\n")
+    sys.exit(2)
+sys.stdout.write(src[:idx] + inject + src[idx:])
+' <<<"$XML") || exit 1
+fi
+
 if [ "$GPU" = 1 ]; then
     # virtio-gpu accel3d=yes. Outer weston picks up
     # gl-renderer when started with `renderer=gl` and zwp_linux_dmabuf_v1

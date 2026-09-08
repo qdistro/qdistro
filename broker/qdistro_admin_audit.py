@@ -17,7 +17,8 @@ Schema (see  A):
         scope TEXT             -- once|1h|24h|forever|forever_exe|
                                -- forever_argv|forever_basename|
                                -- forever_prefix|NULL
-        source TEXT            -- 'prompt' | 'cache'
+        source TEXT            -- stable decision origin token
+        context TEXT           -- JSON selectors used for the decision
         approver_uid INTEGER   -- NULL when source='cache'
 
 Indexed on ts DESC for "recent first" queries.
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS audit (
     decision     INTEGER NOT NULL,
     scope        TEXT,
     source       TEXT NOT NULL,
+    context      TEXT,
     approver_uid INTEGER,
     rule_path    TEXT,
     request_id   INTEGER,
@@ -72,6 +74,11 @@ def _migrate(conn) -> None:
         # `apt-get install evil`. JSON-encoded list when set, NULL for
         # rows that don't carry argv (clipboard / handoff / activation).
         conn.execute("ALTER TABLE audit ADD COLUMN argv TEXT")
+    if "context" not in cols:
+        # Keep the stable decision-source token (rule/cache/prompt) separate
+        # from the selector context used to reach that decision.  Consumers
+        # compare source exactly, while context is structured JSON.
+        conn.execute("ALTER TABLE audit ADD COLUMN context TEXT")
 
 
 class AuditLog:
@@ -107,7 +114,8 @@ class AuditLog:
             rule_path: str | None = None,
             request_id: int | None = None,
             selinux_subj_type: str | None = None,
-            argv: list | tuple | None = None) -> None:
+            argv: list | tuple | None = None,
+            context: str | None = None) -> None:
         argv_text: str | None
         if argv is None:
             argv_text = None
@@ -120,12 +128,12 @@ class AuditLog:
                 INSERT INTO audit
                   (ts, caller_uid, caller_pid, caller_exe, action,
                    decision, scope, source, approver_uid, rule_path,
-                   request_id, selinux_subj_type, argv)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   request_id, selinux_subj_type, argv, context)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (int(time.time()), caller_uid, caller_pid, caller_exe, action,
                  1 if decision else 0, scope, source, approver_uid, rule_path,
-                 request_id, selinux_subj_type, argv_text),
+                 request_id, selinux_subj_type, argv_text, context),
             )
 
     def recent(self, limit: int = 200) -> list[dict]:
@@ -142,7 +150,7 @@ class AuditLog:
                 """
                 SELECT ts, caller_uid, caller_pid, caller_exe, action,
                        decision, scope, source, approver_uid, rule_path,
-                       request_id, selinux_subj_type, argv
+                       request_id, selinux_subj_type, argv, context
                 FROM audit ORDER BY ts DESC, id DESC LIMIT ?
                 """,
                 (limit,),
@@ -152,7 +160,7 @@ class AuditLog:
         for row in rows:
             (ts, uid, pid, exe, action, decision, scope, source,
              approver_uid, rule_path, request_id,
-             selinux_subj_type, argv_text) = row
+             selinux_subj_type, argv_text, context) = row
             argv = None
             if argv_text:
                 try:
@@ -175,6 +183,7 @@ class AuditLog:
                 "request_id": request_id,
                 "selinux_subj_type": selinux_subj_type,
                 "argv": argv,
+                "context": context,
             })
         return out
 

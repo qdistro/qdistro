@@ -80,6 +80,7 @@ AUDIT_COLS = {
     "id", "ts", "caller_uid", "caller_pid", "caller_exe", "action",
     "decision", "scope", "source", "approver_uid", "rule_path",
     "request_id", "selinux_subj_type", "argv",
+    "context",
 }
 
 

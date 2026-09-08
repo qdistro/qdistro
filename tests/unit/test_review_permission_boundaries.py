@@ -95,9 +95,10 @@ def test_fast_decisions_are_audited(broker, tmp_path, monkeypatch, source, allow
     row, = broker.audit.recent()
     assert row['caller_pid'] == 123 and row['caller_uid'] == 2000
     assert row['action'] == 'review.audit' and row['decision'] == allowed
-    assert source in row['source'] and 'text/plain' in row['source']
+    assert row['source'] == source
+    assert 'text/plain' in row['context']
     if source == 'cache':
-        assert 'grant_id=' in row['source']
+        assert '"grant_id":' in row['context']
     else:
         assert row['rule_path'].endswith('rule.yaml')
 
@@ -110,6 +111,26 @@ def test_required_audit_failure_denies_fast_grant(broker, monkeypatch):
         raise OSError('disk full')
     monkeypatch.setattr(broker.audit, 'log', fail)
     assert broker.CheckPermission('review.audit', {}) == 'deny'
+
+
+def test_rule_request_audit_keeps_source_token_and_selector_context(broker,
+                                                                    tmp_path):
+    (tmp_path / 'rules' / 'rule.yaml').write_text(
+        '- name: gate\n  decision: allow\n  match:\n'
+        '    action: review.request\n    mime_type: text/plain\n')
+    broker.rules.reload()
+
+    rid = broker._enqueue(
+        2000, 123, '/bin/tool', 0, 'review.request',
+        {'mime_type': 'text/plain'}, delegated=False)
+
+    assert broker._pending[rid].decision is True
+    row, = broker.audit.recent()
+    assert row['source'] == 'rule'
+    assert row['rule_path'].endswith('rule.yaml')
+    assert row['context'] == (
+        '{"app_id": "", "mime_type": "text/plain", '
+        '"sandbox_engine": ""}')
 
 
 def install_hooks(broker, monkeypatch, query):
