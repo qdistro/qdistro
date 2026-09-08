@@ -35,24 +35,40 @@ data and program contexts separate: work, home, dev, client projects, browser
 profiles, credentials, and task-specific state. The simplification is on the
 human-authentication and machine-policy axis, not on the data-separation axis.
 
-**One configuration.** Settings live in a single, system-wide place rather than
-being duplicated per component or per uid. Appearance — UI theme and colours,
-fonts, icons, cursors — together with monitor arrangement is defined once and
-shared by *every* component: qdgreeter, the lock screen, qdshell, first-party
-apps, and the desktops inside embedded VMs. There is no per-app theming to keep
-in sync; change the font once and the greeter, locker, panel, and VM windows
-all follow when their sessions next start. The canonical store is admin-owned —
-changing the system theme is an admin action — though a small set of values may
-be overridden per uid where it makes sense ([ui.md](ui.md)). The per-user accent
+**One configuration — the goal, not yet the v1 implementation.** The intent is
+that settings live in a single, system-wide place rather than being duplicated
+per component or per uid: appearance — UI theme and colours, fonts, icons,
+cursors — together with monitor arrangement defined once, in an admin-owned
+canonical store, and shared by every component, with a small set of values
+overridable per uid where it makes sense ([ui.md](ui.md)). The per-user accent
 colour is the deliberate exception: it is the visual cue that tells silos apart,
 so it is *meant* to differ per user.
 
-**Many sessions.** qdistro supports both coarse session separation and
-Qubes-style mixed desktops. A TTY session has its own compositor, shell, panel,
-clipboard surface, and notifications. A mixed session shows windows from
-multiple silos on one compositor, with silo identity carried by trusted chrome
-and cross-silo actions mediated by the broker. Both modes are valid; the owner
-chooses based on task, performance, and desired mental separation.
+> **Status: system-wide theming is not implemented.** What ships is per-component
+> configuration. qdshell's settings are per-uid, in `~/.config/qdshell/`.
+> qdgreeter and qdlocker do not read a shared store at all — each carries a
+> *static, hardcoded copy* of qdshell's default dark palette
+> (`qdgreeter/qml/shim/Color.qml`, `qdlocker/qdlocker/qml/shim/Color.qml`, both
+> self-labelled "No dynamic theme loading"). Changing the qdshell theme does not
+> change the greeter or the locker, and there is no theme-propagation path into
+> the desktops inside embedded VMs. Treat every "change it once and everything
+> follows" statement on this page as a design target, not shipped behaviour.
+
+**Many sessions.** qdistro's model has both coarse session separation and
+Qubes-style mixed desktops. A separate TTY session would have its own
+compositor, shell, panel, clipboard surface, and notifications. A mixed session
+shows windows from multiple silos on one compositor, with cross-silo actions
+mediated by the broker. Both modes are valid in the design; the owner chooses
+based on task, performance, and desired mental separation.
+
+> **Status: only the mixed mode exists, and only its brokering half.** v1 boots
+> one compositor on tty3; the additional per-TTY sessions are unimplemented
+> ([sessions.md](sessions.md)). Within the mixed desktop, the cross-silo
+> *brokering* is real (clipboard gates, activation gate), but the trusted
+> **chrome** that would make silo identity visible is not: no client attaches
+> qdwin's decoration protocol, so silo-coloured window chrome is not painted
+> ([compositor.md](compositor.md)). Silo identity is enforced in policy today,
+> not shown to the user.
 
 Sessions are not the same as silos. A development session may attach a
 source-code silo without commit authority. A commit session may attach the same
@@ -89,17 +105,44 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
 - All first-party apps — terminal, notebook, file manager, settings, etc.
 - The admin session-manager daemon — user lifecycle, device grants, policy.
 - The PyQt polkit AuthenticationAgent.
-- The PyQt locker, hosted by the admin compositor.
+- The PyQt locker (qdlocker) — a separate process and repo that connects to the
+  admin compositor as an ordinary Wayland client and binds `qdwin_locker_v1`;
+  it is not hosted inside the compositor or the shell ([sessions.md](sessions.md)).
 - The `qdistro_app` SDK — Python library that first-party apps integrate with.
-- The remote-output thin client (on secondary machines).
+- The remote-output thin client (on secondary machines) — **VM-gated and
+  incomplete**. `install-multimachine-for-vm.sh` is not in the bootstrap chain,
+  and even where it runs it installs the broker/session/wrapper subset and
+  **not** `multimachine/viewer.py`; live viewer assembly stays under the VM
+  harness. There is no thin client to install on a secondary machine today.
 
-### Infrastructure — commodity C, used as-is
+### Infrastructure — commodity C/C++
+
+Mostly used as-is, with one significant exception: **libweston is not**. qdistro
+carries a full patched weston tree, including security and KMS changes that are
+not all recorded as `.patch` files, and qdwin is a custom shell plugin rather
+than stock configuration. See [compositor.md](compositor.md) for what is patched
+and for the install-time branch that decides whether a given machine runs the
+vendored tree or the distro one.
 
 - **libweston** — the Wayland reference compositor as a library; qdistro's
  compositor (qdwin) is a libweston shell plugin (see
  [compositor](compositor.md)).
-- **PipeWire** — audio and camera virtualization, per-client streams.
-- **NetworkManager** — network configuration (admin-side only).
+- **PipeWire** — stock desktop audio (with wireplumber, as the distro ships
+ them), plus screen-pixel transport for the compositor's capture outputs via
+ libweston's `backend-pipewire`. The *device-mediation* role described in
+ [devices.md](devices.md) — per-user virtual sinks/sources, an admin-owned
+ daemon owning ALSA/V4L2/libcamera, policy-gated per-client streams — is **not
+ implemented**. qdistro ships no PipeWire mediation code, no qdistro
+ wireplumber policy, and no libcamera integration; the packages are installed
+ with distro defaults.
+- **NetworkManager** — network configuration, at **upstream's** defaults.
+ qdistro adds no NM-specific restriction: no D-Bus policy override for
+ `org.freedesktop.NetworkManager`, no NM polkit rule, and no installer touches
+ it. Privileged NM operations are still gated — by NM's own polkit actions, and
+ where the qdistro polkit agent is registered (admin's session) those prompts
+ route into the broker's approval queue. What is *not* true is a qdistro-added
+ "admin-only" boundary; the absence of NM clients in silos today is topology,
+ not enforcement (see [networking.md](networking.md)).
 - **systemd** — service management, user sessions, logind, timers.
 - **D-Bus** — IPC, configured per qdistro conventions (see [qbus](qbus.md)).
 - **polkit** — authorization layer.
@@ -109,8 +152,15 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
 - **waypipe**, **FreeRDP** — remote-output transports.
 - **qemu / libvirt** — VMs for the highest isolation tiers.
 - **xdg-desktop-portal** — standard permission gating for sandboxed apps.
-- **Tailscale** — mesh VPN providing phone ↔ laptop transport
- (see [phone](phone.md)).
+
+Named in the design but **not shipped**, and not installed by
+`qdistro-bootstrap`:
+
+- **Tailscale** — planned mesh VPN for phone ↔ laptop transport. Nothing in
+ `scripts/` installs or configures it; its only non-doc mention in the tree is
+ a comment in the phone daemon, and the phone feature is itself cut from v1
+ (see [phone](phone.md)). Do not expect a working phone transport on a v1
+ install.
 
 ## Target hardware
 
@@ -146,9 +196,12 @@ This principle drives distribution-level choices:
 
 Exceptions are infrastructure where product behaviour does not live:
 
-- Compositor core via CFFI to `libweston` (C). Performance-critical, commodity;
- the qdwin plugin is small C, and upstream libweston owns DRM, surfaces,
- and input.
+- Compositor core in C: qdwin is a libweston shell plugin (`qdwin-shell.so`)
+ that libweston dlopens in-process, as described under "Infrastructure" above.
+ Performance-critical, commodity; the qdwin plugin is small C, and upstream
+ libweston owns DRM, surfaces, and input. (An earlier plan to drive libweston
+ from Python over CFFI was abandoned; the only CFFI artefact left in the tree
+ is a dead Phase-6.0 spike that nothing builds, installs, or imports.)
 - PipeWire, systemd, kernel modules, libvirt/qemu — commodity C infra.
 - SIP-built Python bindings for C++ Qt libraries — thin C++ glue with thick
  pure-Python logic on top. If a future Qt 6 feature has no Python binding
@@ -179,7 +232,8 @@ public download is published yet (GitHub Releases is the intended host).
 
 1. Install openSUSE Tumbleweed from its official ISO, terminal-only.
 2. Run the `qdistro-bootstrap` script, which:
- - Installs required packages (Qt6, PipeWire, libvirt, Tailscale, etc.).
+ - Installs required packages (Qt6, PipeWire, libvirt, FreeRDP, etc. — not
+ Tailscale; see the tech-stack note above).
  - Sets up SELinux policy.
  - Creates the admin user and initial subvolumes.
  - Installs first-party apps from git.

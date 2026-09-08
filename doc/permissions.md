@@ -6,33 +6,105 @@
  user app requests something sensitive
  |
  v
- qdistro_app SDK / PyQt agent in the user's session
+ qdistro_app SDK / caller in the user's session
  |
  v
- (connects to qbus-admin daemon)
+ (D-Bus call to org.qdistro.AdminBroker1 on the system bus)
  |
  v
- qbus-admin broker: policy pipeline
- 1. Declarative rules (YAML / TOML) -> allow / deny / prompt / transform
+ qdistro-admin-broker: policy pipeline
+ 1. Declarative rules (YAML only) -> allow / deny
  2. Python hooks (if rules inconclusive) -> same actions
- 3. polkit agent (interactive admin prompt)
+    [not reachable on a stock install — see "Python hooks" below]
+ 3. admin approval queue (the Qt admin app / admin TUI decide)
  |
  v
- response: allow / deny / ...
+ response: allow / deny / unknown
  |
  v
  caller acts on response
 ```
 
-Every qdistro action is polkit-namespaced: `org.qdistro.device.camera.claim`,
-`org.qdistro.clipboard.send`, `org.qdistro.window.handoff`,
-`org.qdistro.network.join_interactive`, etc. polkit rules route them all to
-the admin PyQt agent by default.
+**The relationship to polkit runs the other way round.** The broker contains no
+polkit code and never escalates to a polkit prompt; step 3 is the broker's own
+approval queue. It is `qdistro-polkit-agent` that faces polkit: it registers as
+a polkit `AuthenticationAgent`, receives *upstream* polkit actions (mostly
+`org.freedesktop.*`), maps each action ID into a qdistro-namespaced string
+(`org.freedesktop.X` → `qdistro.X`; anything else → `qdistro.external.<id>`),
+and then calls the broker's `RequestPermission` to get a decision.
+
+A real `org.qdistro.*` polkit namespace does exist, but it is **narrow and
+per-subsystem**, and it does not cover the cross-silo verbs this page used to
+advertise. Twenty action IDs exist in the tree:
+
+| Source | Actions |
+|---|---|
+| `pwd/org.qdistro.pwd.policy` | 1 — `org.qdistro.pwd.unlock` |
+| `print/org.qdistro.print.policy` | 5 — `print.{access,attach-usb,detach-usb,cancel-job,purge-jobs}` |
+| generated inline by `install-tier3-for-vm.sh` | 2 — `tier3.{spawn,cleanup}` |
+| generated inline by `install-tier5-for-vm.sh` | 2 — `tier5.{spawn,cleanup}` |
+| `qdbrowser/polkit/org.qdistro.qdbrowser.policy` | 10 — tabs/downloads/cookies/history/bookmarks/page-extract. **Present in the repo but installed by nothing**: no script copies it to `/usr/share/polkit-1/actions`, and `qdbrowser`'s `pyproject.toml` packages only the Python package. |
+
+So **ten actions ship and ten do not**. Each is scoped to a single subsystem;
+none is a cross-silo policy verb. They are not all the same shape:
+only the tier-3 and tier-5 actions carry an
+`org.freedesktop.policykit.exec.path` annotation, i.e. are true `pkexec` helper
+gates. `pwd.unlock` and the five print actions define an authorization ID with
+no exec path, checked by the owning daemon; qdbrowser's ten (uninstalled) are
+checked from application code via `pkcheck`.
+
+**These actions do reach the qdistro agent**, and that follows from their
+`<defaults>`, not from any `.rules` file. An action invokes whatever
+authentication agent is registered whenever its applicable default is
+`auth_admin` / `auth_admin_keep`:
+
+| Action | `allow_any` | `allow_active` |
+|---|---|---|
+| `pwd.unlock` | `auth_admin` | `auth_admin_keep` |
+| `print.{attach-usb,detach-usb,cancel-job,purge-jobs}` | `auth_admin` | `auth_admin_keep` |
+| `print.access` | `auth_admin` | `yes` |
+| `tier3.{spawn,cleanup}` | `auth_admin_keep` | `auth_admin_keep` |
+| `tier5.{spawn,cleanup}` | `auth_admin_keep` | `yes` |
+
+So for an active admin session, eight of the ten prompt through the agent and
+therefore land in the broker's queue; `print.access` and the two tier5 actions
+are allowed outright for the active session and only prompt for a non-active or
+other-uid caller.
+
+Three `.rules` files ship. None of them is what wires an action to the agent —
+two **grant**, and the third mostly bypasses the agent for admin:
+
+- `pwd/qdistro-pwd.rules` (installed as `50-qdistro-pwd.rules`) short-circuits
+  admin/root to `YES` on `org.qdistro.pwd.unlock` so the admin's own CLI does
+  not trigger a prompt loop, and returns `AUTH_ADMIN_KEEP` otherwise — which is
+  what the action's own default already said. Its net effect is *less* agent
+  involvement, not more.
+- `pwd/qdistro-pwd-fprint.rules` **grants** the `qdistro-pwd` uid implicit `YES`
+  on three `net.reactivated.fprint.*` actions, so fingerprint-gated unseal does
+  not prompt for a password.
+- `50-qdistro-locker-idle.rules`, written inline by
+  `install-qdwin-session-for-vm.sh`, likewise **grants**: admin gets `YES` on
+  `org.freedesktop.login1.lock-sessions` so the locker can lock its own logind
+  session without a root-password prompt.
+
+Everything else in the qdistro action vocabulary is broker-internal. Strings
+such as `qdistro.clipboard.transfer:<source>:<dest>` are **rule-matching keys,
+not registered polkit actions**; writing a polkit policy or `.rules` file
+against them has no effect, and `org.qdistro.device.camera.claim`,
+`org.qdistro.clipboard.send`, `org.qdistro.window.handoff` and
+`org.qdistro.network.join_interactive` — previously listed here as live
+examples — are registered nowhere at all. A polkit-visible namespace for
+qdistro's own verbs is a design goal that is not implemented; note also that an
+unregistered `org.qdistro.*` id fed through the agent would map to
+`qdistro.external.org.qdistro.*`, not to itself.
 
 Actions operate on [resources](resources.md) and resource verbs. The action
-string remains the polkit namespace, but `details` should carry manifest-shaped
-resource identity, labels, typed security fields, lock state, workflow/run
-identity, and requested attachment semantics rather than a flat tag bag.
+string is the broker's rule-matching key. `details` is **intended** to carry
+manifest-shaped resource identity, labels, typed security fields, lock state,
+workflow/run identity, and requested attachment semantics rather than a flat
+tag bag; the shipped rule engine reads only the string selectors listed under
+"Declarative rules" from it, and lock state and workflow context are not among
+them.
 
 ## Two broker entry points — synchronous check vs long-term ask
 
@@ -97,14 +169,31 @@ the broker's decision logic.
 
 When admin deletes a cache row via `RevokeApproval(id)` or `RevokeAllForUid
 (uid)`, the broker emits a D-Bus signal `ApprovalRevoked(caller_uid, action,
-exe)` — one per deleted row. Subscribers that granted resources on the
-strength of the row listen for this and tear down immediately.
+exe)` — one per deleted row. The intent is that subscribers which granted
+resources on the strength of the row listen for this and tear down immediately.
 
-qdshell is the first consumer: on a matching `(caller_uid, action)`, it calls
-`qdwin_view_stream_v1.destroy()` on affected open streams so remote peers
-lose access at the same instant the cache row disappears.
-
-Without this signal, revocation would be lazy.
+> **Status: the only consumer refreshes UI; nothing tears down, so revocation
+> is lazy.** The broker half ships and is exercised by the GUI acceptance tests.
+> There is exactly one subscriber — the Qt admin app, which on the signal
+> restarts a 250 ms coalescer that refreshes its Cache tab and updates the tray
+> icon, so it does not render rows the broker no longer holds. That is display
+> consistency, not enforcement, and the admin app itself ships in no production
+> installer ([sessions.md](sessions.md#admin-panel-operations)).
+>
+> **qdshell is not a consumer**, contrary to what this section used to say: it
+> has no `ApprovalRevoked` handler, and it never opens `qdwin_view_stream_v1`
+> streams in the first place (the only `subscribe_view_stream` callers in the
+> tree are a C test client and the VM-gated multimachine components). No
+> component anywhere destroys a stream, closes an fd, or releases a resource in
+> response to the signal.
+>
+> **The residual risk this leaves.** Revoking an approval deletes the cache row,
+> so the *next* `CheckPermission` for that `(uid, action, exe)` stops returning
+> `allow`. It does **not** interrupt anything already running on the strength of
+> the old row — an in-flight capture, stream, or held resource survives until the
+> holder next re-checks or exits. Read "Revoke" in the admin app as "stop
+> granting this from now on", not as "cut off access now". Wiring a first
+> consumer (qdshell tearing down affected view streams) is the tracked follow-up.
 
 ## Admin PyQt polkit agent
 
@@ -126,49 +215,93 @@ Briefly:
  (Approve / Deny / Rule-from-this / Defer).
 - Non-modal — admin's other work is never blocked.
 - Keyboard-first triage; notifications don't steal focus.
-- Scope picker (once / 1h / 24h / forever / forever-this-argv) in the detail
- pane.
+- Scope picker in the detail pane. The full vocabulary is `once`, `1h`, `24h`,
+ `forever`, `forever_exe`, `forever_argv`, `forever_basename`,
+ `forever_prefix`. Note there is **no `per-session` scope** — nothing is
+ revoked on session stop.
 
 ## Declarative rules
 
-Admin authors rules in YAML or TOML, loaded by `qdistro-admin-broker` at
-startup and on SIGHUP.
+Admin authors rules in **YAML** (`.yaml` / `.yml`) under
+`/etc/qdistro/rules.d/`, loaded by `qdistro-admin-broker` at startup, on
+SIGHUP, and on inotify change. **TOML is not supported** — this page previously
+offered it, and a `.toml` file is simply not read.
 
 Rule shape:
 
 ```yaml
-- match:
-    action: org.qdistro.clipboard.send
-    source_user: work-user
-    target_user: dev-user
-    mime: text/plain
+- name: allow-work-to-dev-plain-text
+  match:
+    action: "qdistro.clipboard.transfer:work-user:dev-user"
+    mime_type: text/plain
   decision: allow
 
-- match:
-    action: org.qdistro.device.camera.claim
-    user: work-user
-    app: /usr/bin/notebook
-  decision: allow_session
-
-- match:
-    action: org.qdistro.device.microphone.claim
-  decision: prompt
+- name: deny-notebook-camera
+  match:
+    uid: 2000
+    exe: /usr/bin/notebook
+  decision: deny
 ```
 
-Rules are matched top-to-bottom; first match wins. Unmatched requests fall
-through to the polkit prompt.
+The loader is **strict and fail-per-entry**: an unrecognised key raises and the
+entry is dropped with a message in `load_errors()`, while the rest of the file
+loads. So a rule that looks plausible but uses a key the engine does not know
+silently does not apply. The exact vocabulary:
+
+- Top-level keys: `name`, `decision`, `match`, `scope`, `rationale`.
+- `match` keys: `uid`, `action`, `exe`, `app_id`, `sandbox_engine`,
+  `mime_type`, `argv_exact`, `argv_basename`, `argv_prefix`. Earlier examples
+  on this page used `source_user`, `target_user`, `mime`, `user` and `app` —
+  **none of those exist**, and a rule using them would have been rejected at
+  load. Source/destination silo is expressed inside the clipboard `action`
+  string, not as separate keys.
+- `decision:` accepts exactly `allow` and `deny`
+  (`qdistro_admin_rules._VALID_DECISIONS`). `prompt`, `allow_session`,
+  `transform`, `warn`, `contaminate` and `declassify` are **not writable as
+  rule decisions today** — they are model vocabulary, described below, with no
+  rule-engine implementation.
+
+Rules are matched top-to-bottom; first match wins. Unmatched requests do **not**
+fall through to a polkit prompt — the broker has no polkit escalation path.
+What an unmatched request does depends on the entry point: `CheckPermission`
+returns `"unknown"`, `RequestPermission` enqueues an item for admin's approval
+queue, and the clipboard gates hit their own default (deny — see
+[clipboard.md](clipboard.md)).
 
 String selectors (`action`, `exe`, `app_id`, `mime_type`, `sandbox_engine`)
 accept fnmatch-style globs when the value contains `*`; exact match
 otherwise.
 
-The policy model is ABAC-shaped: subject identity, action, resource metadata,
-typed security fields, environment, lock state, and workflow context are policy
-inputs. Policy returns allow, deny, prompt, warn, transform, contaminate, or
-declassify. Labels are the fast selector path; annotations are not routine
+The intended policy model is ABAC-shaped: subject identity, action, resource
+metadata, typed security fields, environment, lock state, and workflow context
+as policy inputs, returning allow, deny, prompt, warn, transform, contaminate,
+or declassify. That is the target model, not the shipped engine. The v1 rule
+engine matches on string selectors only (`action`, `exe`, `app_id`,
+`mime_type`, `sandbox_engine`, plus user/silo fields) and returns only
+allow/deny; **lock state and workflow context are not policy inputs anywhere in
+the broker**. Labels are the fast selector path; annotations are not routine
 selectors.
 
 ## Python hooks
+
+> **Status: the hook surface is inert on a stock install.** Both halves exist in
+> the repo — the executor (`broker/qdistro_hook_executor.py`) and its unit
+> (`deploy/systemd/services/qdistro-hook-executor.service`) — and the broker
+> does build a `HookClient` with hooks enabled by default and consults it on the
+> two permission paths. But **no installer installs either half**:
+> `install-broker-for-qdwin.sh` copies `qdistro_hook_client.py` and not
+> `qdistro_hook_executor.py`, and nothing installs or enables the unit. On a
+> real install the executor socket never exists, the client fails to connect,
+> and every hook consultation silently falls through to the next stage.
+>
+> **The residual risk this leaves.** A hooks directory is not a working policy
+> surface in v1. An admin who drops a `00-deny-secrets.py` into
+> `/etc/qdistro/hooks/` on a bootstrapped machine gets **no denial** — the file
+> is never loaded and the request is decided by rules and the approval queue
+> alone, with no error and no log line naming the missing executor. Do not rely
+> on hooks for any enforcement until the installer chain ships them. Everything
+> in the rest of this section describes the code as written, and is accurate
+> only once the executor is installed and running by hand.
 
 For logic rules cannot express (e.g., "if clipboard content matches a git
 SHA, auto-route to dev-user's terminal"), admin drops Python files in a
@@ -184,12 +317,15 @@ def on_clipboard_send(event):
  return None # fall through
 ```
 
-Hooks run when rules are inconclusive. Hooks run inside (or next to)
-`qdistro-admin-broker`, which is privileged, so admin-authored Python in
-that context is effectively privileged code. The deployed model is a
-**sandboxed hook executor**: hooks run in a dedicated unprivileged uid with
-seccomp, with an API surface restricted to a well-defined hook protocol;
-the broker IPCs to the executor.
+Hooks are consulted when rules are inconclusive. Admin-authored Python
+evaluated in the broker's own process would be effectively privileged code, so
+the design is a **sandboxed hook executor**: hooks run under a dedicated
+unprivileged uid (`User=qdistro-hooks`) under a `SystemCallFilter=` seccomp
+allow-list, with an API surface restricted to a well-defined hook
+protocol, and the broker IPCs to the executor over an AF_UNIX socket rather
+than importing hook files itself. That separation is how the executor is
+written; per the status note above, neither the executor nor its unit is
+installed by any installer, so on a stock install nothing runs at all.
 
 ### Execution order
 
@@ -232,7 +368,8 @@ admin, slower drift into ad-hoc code.
 
 ## Workflows — universal orchestration engine
 
-The `qbus-admin` broker's rule + hook system extends into a **universal
+The design intent is that `qdistro-admin-broker`'s rule + hook system extends
+into a **universal
 orchestration engine**, not a clipboard-only policy box. Clipboard policy
 is one instance of a framework that coordinates across all qdistro primitives
 — clipboard, window handoff, device claims, file access, secret delivery to
@@ -325,20 +462,41 @@ the right uid.
  admin approves. Auto-run workflows are opt-in per workflow per admin
  decision.
 
-New grants and new cross-silo approvals require admin unlock. A previously
-approved activity may continue while locked only when the grant explicitly has
-lock-continuation semantics and the relevant indicators remain visible.
+**Planned, not implemented:** new grants and new cross-silo approvals should
+require admin unlock, and a previously approved activity should continue while
+locked only when the grant explicitly carries lock-continuation semantics with
+the relevant indicators visible. No part of this ships. Lock state is not a
+policy input to the broker, the approval-cache schema has no lock-continuation
+field, and neither the broker nor the session manager consults lock state on
+any grant path — so today a grant decision is made the same way whether the
+machine is locked or unlocked. See [sessions.md](sessions.md) for the same gap
+stated from the lock side.
 
 ## xdg-desktop-portal
 
 qdistro implements a **custom portal backend** on top of this framework.
-Upstream Flatpak / GTK / Qt apps already use portals for clipboard, camera,
-screenshot, and file-picker. The qdistro portal backend routes those
-requests through `qbus-admin` instead of the usual same-user approval. It
-is a PyQt service registered as `org.freedesktop.impl.portal.qdistro`.
+Upstream Flatpak / GTK / Qt apps already use portals for file-picker, access
+prompts, and notifications. The qdistro portal backend routes those requests
+through the broker instead of the usual same-user approval. It is a
+`dbus-python` + GLib service (not PyQt, as this page previously said —
+`daemons/qdistro_portal_backend.py` imports `dbus`, `dbus.service` and
+`gi.repository.GLib`, and no Qt at all) registered as
+`org.freedesktop.impl.portal.qdistro`.
 
-> Status (2026-05-16): doc-only. No portal backend ships yet; SDK
-> callers use direct D-Bus today.
+> **Status (2026-07-26): ships, with a narrower interface set than portals
+> generally imply.** `portal-backend` is an unconditional step in the bootstrap
+> installer chain; it installs `daemons/qdistro_portal_backend.py`, the
+> `qdistro-portal-backend.service` user unit, the D-Bus activation file, and the
+> `qdistro.portal` descriptor.
+>
+> The descriptor declares exactly three interfaces — `Access`, `FileChooser`,
+> and `Notification`. **There is no `ScreenCast` and no `Camera` portal
+> interface in the tree**, so no camera or screen-capture request is
+> portal-mediated on qdistro, and the `Screenshot` path is deliberately
+> unfinished (the backend returns an error rather than a URI until compositor
+> capture is wired). Any statement anywhere in the docs that implies
+> portal-mediated camera or screencast approval is wrong. The installer also
+> does not `systemctl enable` the unit; it relies on D-Bus activation.
 
 ## What's implemented vs planned
 
@@ -363,7 +521,10 @@ Implemented and exercised by tests today:
   ordering, hot-reload via inotify and SIGHUP, `SaveRule` validation,
   `ReloadRules`, `ListRules`.
 - Signals: `RequestPending`, `RequestDecided`, `ApprovalRevoked` (one
-  per row), `RulesReloaded`.
+  per row), `RulesReloaded`. `ApprovalRevoked`'s only subscriber is the
+  Qt admin app, which refreshes its Cache tab and tray icon; **no
+  component tears anything down on it**, so revocation takes effect at
+  the next check, not immediately (see "Revocation as a signal").
 - Scope vocabulary: `once`, `1h`, `24h`, `forever`, `forever_exe`,
   `forever_argv`, `forever_basename`, `forever_prefix`.
 - Cross-silo clipboard policy (`CheckClipboardTransfer`): same-silo
@@ -373,14 +534,21 @@ Implemented and exercised by tests today:
 - Per-uid + per-action rate limiting (`.RateLimited` D-Bus error).
 - Audit log with `source ∈ {prompt, cache, rule, revoke, hook,
   clipboard_same_silo, clipboard_rule, clipboard_default_deny}`.
+Written and unit-tested, but **not installed by any installer**, so absent
+from a bootstrapped machine:
+
 - **Python hooks executor** — sandboxed hook executor
-  (`qdistro_hook_executor.py`) runs as a dedicated uid, listens on
+  (`qdistro_hook_executor.py`) runs as a dedicated uid, listens on an
   AF_UNIX socket, loads `.py` hooks from `/etc/qdistro/hooks/`,
   hot-reloads on file change, returns `allow/deny/transform/null`
   verdicts.  The broker consults hooks after rules+cache are
-  inconclusive and before the admin prompt.  Systemd service unit
+  inconclusive and before the admin prompt.  The systemd service unit
   provides `ProtectSystem=strict`, `PrivateNetwork=true`,
-  `NoNewPrivileges=true` sandboxing.
+  `NoNewPrivileges=true` and a `SystemCallFilter=` allow-list.
+  Neither `qdistro_hook_executor.py` nor
+  `qdistro-hook-executor.service` is copied or enabled by the installer
+  chain; the broker's hook client fails to connect and every hook
+  consultation falls through. See the status note under "Python hooks".
 
 ## Security context (secctx) identity contract
 
@@ -463,7 +631,12 @@ broker-owned helper identity.
 
 Doc-only / not yet wired:
 
-- **xdg-desktop-portal backend** (`org.freedesktop.impl.portal.qdistro`).
+- **Portal camera + screencast mediation.** The portal backend itself ships
+  (see above), but only for `Access`, `FileChooser`, and `Notification`;
+  `ScreenCast` and `Camera` interfaces do not exist, and `Screenshot`
+  returns an error pending compositor capture.
+- **Lock-conditional policy.** Lock state is not a broker policy input and
+  there is no lock-continuation field in the approval schema.
 - **Workflow engine** (triggers / steps / roles / secrets-needed) — the
   rule engine is the seed; the full orchestration framework is future.
 - **Notification surface / tray-counter / mobile admin** — current Qt
