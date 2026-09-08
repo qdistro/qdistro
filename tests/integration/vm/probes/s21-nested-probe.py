@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """§6.8 S0/S1 probe — bind qdwin_nested_v1 + advertise a toplevel.
 
-The outer compositor under test is qdwin with §6.8 S0/S1 stub at v2
-(string node identifiers).  We simulate "nested weston" as a plain
+The outer compositor under test is qdwin with the v3 nested protocol
+(authenticated origin identity).  We simulate "nested weston" as a plain
 wayland-client that binds qdwin_nested_manager_v1 and calls
 advertise_toplevel(pw_node='probe:0:probe-output',
 input_sink='', app_id="test.nested.app", title="hello", origin_uid=1000).

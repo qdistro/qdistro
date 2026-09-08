@@ -146,7 +146,7 @@ setup() {
     vm_run "bash /root/s21-nested-v1-bind.sh"
     assert_success
     assert_output_contains "PASS: weston + qdwin started"
-    assert_output_contains "PASS: bound qdwin_nested_manager_v1 v2"
+    assert_output_contains "PASS: bound qdwin_nested_manager_v1 v3"
     assert_output_contains "PASS: received configured(800x600)"
     assert_output_contains "PASS: set_title/set_app_id/set_geometry accepted"
     assert_output_contains "PASS: §6.8 S0 stub probe"
