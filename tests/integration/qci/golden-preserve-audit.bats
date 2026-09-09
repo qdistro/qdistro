@@ -16,6 +16,7 @@ setup() {
     TMP="$(mktemp -d)"
     RDIR="$TMP/run"; mkdir -p "$RDIR/vm" "$RDIR/host"
     QDWIN_IMG_DIR="$TMP/images"; mkdir -p "$QDWIN_IMG_DIR"
+    export QDWIN_IMG_DIR
     BIN="$TMP/bin"; mkdir -p "$BIN"
     cat > "$BIN/qemu-img" <<'EOF'
 #!/usr/bin/env bash
@@ -36,6 +37,10 @@ EOF
 #!/usr/bin/env bash
 case "$*" in
     *"list --all --name"*) printf '%s\n' "${VIRSH_DEFINED_NAMES:-}" ;;
+esac
+case "$1" in
+    domstate) printf 'shut off\n' ;;
+    domblklist) printf 'file disk vda %s/%s.qcow2\n' "$QDWIN_IMG_DIR" "$2" ;;
 esac
 exit 0
 EOF
@@ -107,7 +112,8 @@ mk_overlay() { : > "$QDWIN_IMG_DIR/$1"; echo "$2" > "$QDWIN_IMG_DIR/$1.backing";
     mk_overlay "qci-bats-worker.qcow2" "$g"
     VIRSH_DEFINED_NAMES=qci-bats-worker
     export VIRSH_DEFINED_NAMES
-    touch -d '2 hours ago' "$g" "$QDWIN_IMG_DIR/qci-bats-worker.qcow2"
+    touch -d '2 hours ago' "$g"
+    touch "$QDWIN_IMG_DIR/qci-bats-worker.qcow2"
 
     gate_cleanup --age-hours 1
 
