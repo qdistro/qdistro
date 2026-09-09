@@ -552,6 +552,29 @@ class TestWindowTitle:
         win.refresh()
         assert win.windowTitle() == "admin approvals"
 
+    def test_pending_signal_title_waits_for_visible_model_refresh(self, qapp):
+        """The title must not get ahead of the deferred approvals pane."""
+        from qdistro_admin_app import MainWindow
+        broker = _make_stub_broker()
+        win = MainWindow(broker)
+        assert win.model.rowCount() == 0
+
+        broker.get_pending.return_value = [
+            {"id": 1, "uid": 2000, "pid": 100, "exe": "/usr/bin/qsu",
+             "action": "qsu.exec:root", "details": {}},
+        ]
+        win._on_new_pending(1)
+
+        # Tray/notification state sees the signal immediately, but the title
+        # remains tied to the still-empty visible model until refresh runs.
+        assert win.notifications.pending_count == 1
+        assert win.model.rowCount() == 0
+        assert win.windowTitle() == "admin approvals"
+
+        win.refresh()
+        assert win.model.rowCount() == 1
+        assert win.windowTitle() == "admin approvals (1 pending)"
+
 
 # ---------------------------------------------------------------------------
 # StatusNotifierItem — unit tests

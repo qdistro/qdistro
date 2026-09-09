@@ -57,7 +57,12 @@ sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hello \
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
+# Wait for both halves of the asynchronous update: the broker owns the
+# request, then the already-running Qt app has consumed RequestPending and
+# rebuilt its model.  Capturing immediately after vm-exec returns races the
+# queued Qt refresh and can photograph the old empty frame.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action qsu.exec:root 20 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals \\(1 pending\\)$" admin :0 20 1'
 $VMGUI "$VM" screenshot /tmp/44-s1-pending.png
 ```
 
@@ -135,7 +140,8 @@ sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hi \
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action qsu.exec:root 20 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals \\(1 pending\\)$" admin :0 20 1'
 $VMGUI "$VM" screenshot /tmp/44-s4-pending.png
 ```
 
@@ -164,7 +170,8 @@ sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hello world \
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action qsu.exec:root 20 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals \\(1 pending\\)$" admin :0 20 1'
 $VMGUI "$VM" screenshot /tmp/44-s5-pending.png
 ```
 

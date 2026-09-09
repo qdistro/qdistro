@@ -2326,8 +2326,15 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
     def _update_window_title(self) -> None:
-        """Set window title including pending count when > 0."""
-        count = self.notifications.pending_count
+        """Set the title from rows the approvals pane actually displays.
+
+        Notification/tray bookkeeping can learn about a request before the
+        coalesced model refresh runs.  Using that earlier count made the title
+        claim ``(1 pending)`` while the visible list was still empty.  The
+        model count makes the title a truthful readiness signal for both users
+        and GUI automation.
+        """
+        count = self.model.rowCount()
         if count > 0:
             self.setWindowTitle(f"admin approvals ({count} pending)")
         else:

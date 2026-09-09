@@ -5138,9 +5138,19 @@ if dbus is not None:
             pass
 
         def _emit_changed(self, name: str, state: str) -> None:
-            # Called from the store under its lock; emit on the dbus
-            # connection from the same thread (GLib main loop).
-            self.SiloChanged(name, state)
+            # Most store mutations run on the GLib thread. StopSilo teardown
+            # runs on a worker so the main loop can keep answering ListSilos
+            # while the silo is transiently Stopping; marshal its signals back
+            # to the D-Bus thread.
+            if threading.current_thread() is threading.main_thread():
+                self.SiloChanged(name, state)
+                return
+
+            def emit_on_main() -> bool:
+                self.SiloChanged(name, state)
+                return False
+
+            GLib.idle_add(emit_on_main)
 
         # ---- methods --------------------------------------------------
 
@@ -5280,20 +5290,60 @@ if dbus is not None:
                 raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
+                             async_callbacks=("_reply", "_error"),
                              sender_keyword="sender",
                              connection_keyword="conn")
-        def StopSilo(self, name, grace_s, sender=None, conn=None):
+        def StopSilo(self, name, grace_s, _reply, _error,
+                     sender=None, conn=None):
             caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("stop", name, caller, e)
-                raise _to_dbus_exception(e) from e
-            try:
-                self.store.stop(str(name), int(grace_s), caller=caller)
-                log.info("StopSilo name=%s grace_s=%d", name, int(grace_s))
-            except SessionError as e:
-                raise _to_dbus_exception(e) from e
+                _error(_to_dbus_exception(e))
+                return
+
+            silo_name = str(name)
+            grace = int(grace_s)
+
+            def reply_on_main() -> bool:
+                _reply()
+                return False
+
+            def schedule_error(dbus_exc) -> None:
+                def error_on_main() -> bool:
+                    _error(dbus_exc)
+                    return False
+
+                GLib.idle_add(error_on_main)
+
+            def stop_on_worker() -> None:
+                try:
+                    self.store.stop(silo_name, grace, caller=caller)
+                    log.info("StopSilo name=%s grace_s=%d", silo_name, grace)
+                except SessionError as exc:
+                    schedule_error(_to_dbus_exception(exc))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    # Persistence and OS adapters can still raise unexpected
+                    # failures (for example OSError while saving silos.yaml).
+                    # Never strand the async D-Bus caller without either
+                    # callback; keep typed SessionError names above and map
+                    # everything else to one generic service failure.
+                    log.exception("StopSilo name=%s failed unexpectedly",
+                                  silo_name)
+                    schedule_error(dbus.DBusException(
+                        f"stop of silo {silo_name!r} failed: {exc}",
+                        name=f"{BUS_NAME}.Failed",
+                    ))
+                    return
+                GLib.idle_add(reply_on_main)
+
+            threading.Thread(
+                target=stop_on_worker,
+                name=f"stop-silo-{silo_name}",
+                daemon=True,
+            ).start()
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              sender_keyword="sender",
