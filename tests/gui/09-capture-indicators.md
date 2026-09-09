@@ -449,33 +449,48 @@ assert_ind egress_active 1
 assert_ind_contains egress_detail "$SILO"
 qdwin_screenshot /tmp/qdlocker-09-step8-egress.png
 
+# Keep a genuine process alive through SIGTERM so StopSilo's grace window is
+# real and long enough to observe. The process lives in the silo's production
+# cgroup; StopSilo will SIGKILL it after the requested grace period.
+"$QDWIN_VM_EXEC" "$VMNAME" "
+  setsid sh -c 'trap \"\" TERM; while :; do sleep 1; done' \
+    >/tmp/qdlocker-09-stop-fixture.log 2>&1 &
+  fixture_pid=\$!
+  echo \"\$fixture_pid\" > '/sys/fs/cgroup/qdistro-silos/$SILO/cgroup.procs'
+  echo \"\$fixture_pid\" > /tmp/qdlocker-09-stop-fixture.pid
+  grep -qx \"\$fixture_pid\" '/sys/fs/cgroup/qdistro-silos/$SILO/cgroup.procs'
+" || { echo "FAIL: could not plant the Stopping-state workload" >&2; exit 1; }
+
 # Sample DURING the transient Stopping state (30s grace window).
 "$QDWIN_VM_EXEC" "$VMNAME" "
   setsid runuser -u admin -- busctl --system call \
     org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
     org.qdistro.SessionManager1 StopSilo si '$SILO' 30 >/dev/null 2>&1 &
 "
-sleep 4
 # Correlate: the TARGET silo must be in Stopping in the SAME window in which
 # the indicator still shows it. Another active silo, or a sample taken before
 # the state transition, must not be able to satisfy this.
 # Reuse the production parser (the installed module) rather than hand-rolling
 # busctl string surgery in the harness.
 "$QDWIN_VM_EXEC" "$VMNAME" "cd / && runuser -u admin -- python3 -I -c \"
-import subprocess, sys
+import subprocess, time
 from qdlocker import indicators as I
-out = subprocess.run(I.EGRESS_CMD, capture_output=True, text=True)
-ok, rows = I.parse_list_silos(out.stdout)
-assert ok, 'ListSilos unreadable'
-row = [r for r in rows if r.get('name') == '$SILO']
-assert row, 'silo $SILO absent from ListSilos'
-state = row[0].get('state')
+deadline = time.monotonic() + 10
+state = None
+while time.monotonic() < deadline:
+    out = subprocess.run(I.EGRESS_CMD, capture_output=True, text=True)
+    ok, rows = I.parse_list_silos(out.stdout)
+    row = [r for r in rows if r.get('name') == '$SILO'] if ok else []
+    state = row[0].get('state') if row else None
+    if state == 'Stopping':
+        break
+    time.sleep(0.2)
 assert state == 'Stopping', (
-    'silo $SILO is ' + str(state) + ', not Stopping — the sample missed the '
-    'transient window. Re-run with a longer grace; this step cannot pass '
-    'without observing Stopping.')
+    'silo $SILO never became externally observable as Stopping; last state='
+    + str(state))
 print('ok: silo $SILO is Stopping')
 \"" || exit 1
+sleep 4
 assert_ind egress_active 1              # still live: Stopping is not dark
 assert_ind_contains egress_detail "$SILO"
 
@@ -611,6 +626,13 @@ SILO=${QDLOCKER_09_SILO:-qdlocker09}
   pkill -u admin -x parec 2>/dev/null || true
   pkill -u admin -x gst-launch-1.0 2>/dev/null || true
   pkill -u admin -x qdistro-test-window 2>/dev/null || true
+  if [ -s /tmp/qdlocker-09-stop-fixture.pid ]; then
+    fixture_pid=\$(cat /tmp/qdlocker-09-stop-fixture.pid)
+    if grep -Fq "/qdistro-silos/$SILO" "/proc/\$fixture_pid/cgroup" 2>/dev/null; then
+      kill -KILL "\$fixture_pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f /tmp/qdlocker-09-stop-fixture.pid /tmp/qdlocker-09-stop-fixture.log
   rm -f /home/admin/.config/systemd/user/qdlocker.service.d/91-break-pwdump.conf
   rm -rf /tmp/qdlocker-09-brokenbin
   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
