@@ -494,7 +494,7 @@ RET
     # Re-establish a clean two-generation rollback chain (active A, prev [B]).
     cli template-promote "$SILO" --rollback "$genB" >/dev/null 2>&1 || true
     cli template-promote "$SILO" --rollback "$genA" >/dev/null 2>&1 || true
-    local i cur other a pid wrc killed=0
+    local i cur other a pid wrc killed=0 grouped gkill
     for i in 1 2 3 4 5; do
         cur="$(active_gen)"
         if [ "$cur" = "$genA" ]; then other="$genB"; else other="$genA"; fi
@@ -509,16 +509,35 @@ RET
         # reaches the real process, then WAIT for quiescence before observing.
         setsid bash -c "$(promote_cmd "$other")" >/dev/null 2>&1 &
         pid=$!
+        # Wait for setsid(2) to have actually run before timing anything: the
+        # child is only its own process-group leader once it has. Without this,
+        # a kill that fell through to the bare-PID fallback could hit a
+        # launcher that had not yet BECOME the promote, `wait` would still
+        # report 137, and the crash counter below would record a crash that
+        # never happened. pgid == pid is only possible post-setsid (a plain
+        # background child inherits the SHELL's pgid, which is the shell's pid).
+        grouped=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ] \
+                && { grouped=1; break; }
+            sleep 0.02
+        done
         sleep "0.0$((RANDOM % 9 + 1))"
-        kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+        gkill=0
+        if [ "$grouped" -eq 1 ] && kill -9 -- "-$pid" 2>/dev/null; then
+            gkill=1                       # the GROUP kill is the one that counts
+        else
+            kill -9 "$pid" 2>/dev/null || true    # best-effort cleanup only
+        fi
         # 2>/dev/null suppresses the shell's "Killed" job notice (which would
         # otherwise land in every CI log) WITHOUT losing the status.
         wait "$pid" 2>/dev/null; wrc=$?
-        # 128+SIGKILL(9): the kill actually landed on a LIVE promote, i.e. this
-        # iteration really did crash one. A clean rc means the promote finished
-        # first — legal, but it exercised nothing, so count the real ones and
-        # require at least one below rather than silently fuzzing nothing.
-        [ "$wrc" -eq 137 ] && killed=$((killed + 1))
+        # Count an iteration as a real crash ONLY when the process-group kill
+        # itself succeeded AND the child died of SIGKILL (128+9). Either half
+        # alone is not proof: a failed group kill means there was no promote
+        # group to crash, and a clean rc means the promote finished first —
+        # legal, but it exercised nothing.
+        [ "$gkill" -eq 1 ] && [ "$wrc" -eq 137 ] && killed=$((killed + 1))
         await_group_gone "$pid" \
             || fail "crash-consistency" "a killed promote survived the kill (iteration $i)"
         a="$(active_gen 2>/dev/null)"

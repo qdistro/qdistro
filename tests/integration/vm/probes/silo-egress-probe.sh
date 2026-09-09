@@ -326,14 +326,17 @@ DEADLINE = time.monotonic() + 15.0
 attempt = 0
 last = "no attempt made"
 while True:
-    remaining = DEADLINE - time.monotonic()
-    if remaining <= 0:
-        break
     if attempt:
         # Never hot-spin: under a flood of non-matching datagrams recv()
         # returns instantly, and an unpaced loop would burn a core and churn
         # tens of thousands of transaction ids inside the deadline.
         time.sleep(min(0.2, max(0.0, DEADLINE - time.monotonic())))
+    # Recomputed AFTER the pacing sleep, and used directly as the socket
+    # timeout, so DEADLINE really is a hard bound: a stale pre-sleep value
+    # would let a descheduled process start one more 2s attempt past it.
+    remaining = DEADLINE - time.monotonic()
+    if remaining <= 0:
+        break
     attempt += 1
     # RANDOM id, not a counter: a counter walks a predictable space and can
     # collide with whatever else is answering on that address.
@@ -343,16 +346,30 @@ while True:
         q += bytes([len(part)]) + part
     q += b"\x00" + struct.pack(">HH", 16, 3)     # QTYPE=TXT, QCLASS=CHAOS
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Per-attempt timeout never overshoots the overall deadline.
-    s.settimeout(max(0.05, min(2.0, remaining)))
     try:
+        s.settimeout(min(2.0, remaining))
         s.connect((ip, 53))
         s.send(q)
         data = s.recv(512)
-        if len(data) >= 4 and data[:2] == q[:2] and (data[2] & 0x80):
+        if len(data) < 12 or data[:2] != q[:2] or not (data[2] & 0x80):
+            last = (f"attempt {attempt}: not a matching DNS response "
+                    f"(header={data[:4].hex()})")
+            continue
+        rcode = data[3] & 0x0F
+        ancount = int.from_bytes(data[6:8], "big")
+        # Require the LOCAL record, not merely "some reply": dnsmasq answers
+        # version.bind itself, so NOERROR + an answer is the proof that this
+        # process served it. A REFUSED/empty reply here would mean the *.bind
+        # identification records are gone (dnsmasq built with NO_ID or run
+        # with --no-ident) and the query silently became a forwarded/refused
+        # one -- exactly the "looks alive, proves nothing" state the old
+        # `IN A example.com` probe was in. Fail visibly instead.
+        if rcode == 0 and ancount >= 1:
             sys.exit(0)
-        last = (f"attempt {attempt}: not a matching DNS response "
-                f"(header={data[:4].hex()})")
+        last = (f"attempt {attempt}: version.bind answered rcode={rcode} "
+                f"ancount={ancount} (expected NOERROR with an answer; a "
+                f"dnsmasq without *.bind ID records cannot be liveness-probed "
+                f"this way)")
     except OSError as e:
         last = f"attempt {attempt}: {type(e).__name__}: {e}"
     finally:
