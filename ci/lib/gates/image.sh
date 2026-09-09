@@ -127,7 +127,17 @@ gate_image() {
         fi
         kv image_expected_manifest "$identity_manifest"
         kv image_expected_profile "${QDISTRO_PROFILE:-release}"
-        if python3 "$IMAGE_DIR/lib/verify-release-identity.py" "$identity_manifest" \
+        # gate_release_manifest snapshots the configured file even when it has
+        # no active pins, recording that state as blocked on development hosts.
+        # Do not reinterpret that expected prerequisite gap as a malformed
+        # identity and abort image boot qualification. Any active line still
+        # goes through the strict verifier, including malformed/incomplete input.
+        if ! grep -qEv '^[[:space:]]*(#|$)' "$identity_manifest"; then
+            printf 'BLOCKED: captured release manifest has no active source pins\n' \
+                > "$identity_log"
+            record_blocked image release-identity "$EXIT_RELEASE" image \
+                "captured release manifest is unpopulated; populate and sign it for identity qualification" "$identity_log"
+        elif python3 "$IMAGE_DIR/lib/verify-release-identity.py" "$identity_manifest" \
             "$static_root" "$IMAGE_DIR/config.xml" \
             --profile "${QDISTRO_PROFILE:-release}" > "$identity_log" 2>&1; then
             record_result image release-identity pass 0 pass image "$identity_log" "image sources and build inputs match run manifest; digest=${QDISTRO_RESOLVED_DIGEST:-unavailable}"

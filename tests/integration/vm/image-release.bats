@@ -1055,6 +1055,42 @@ identity_check() {
     grep -q 'image identity mismatch: qdlocker' "$RDIR/host/image-release-identity.log"
 }
 
+@test "image gate: unpopulated captured manifest stays blocked while malformed active input fails" {
+    identity_fixture
+    local product_image="$IMAGE"
+    IMAGE="$T/image"
+    mkdir -p "$IMAGE/lib" "$T/run/release-manifest" "$T/run/host"
+    cp "$product_image/lib/verify-release-identity.py" "$IMAGE/lib/"
+    cp "$T/identity.xml" "$IMAGE/config.xml"
+    printf '#!/bin/bash\nexit 0\n' > "$IMAGE/verify-contents.sh"
+    printf '# release pins pending\n\n  # still no active pins\n' \
+        > "$T/run/release-manifest/manifest.snapshot"
+    IMAGE_DIR="$IMAGE"
+    RDIR="$T/run"; EXIT_OK=0; EXIT_BUILD=1; EXIT_RELEASE=7
+    qci_assert_run_dir() { return 0; }
+    kv() { :; }
+    log() { :; }
+    record_result() { printf '%s\n' "$*"; }
+    record_blocked() { printf 'blocked %s\n' "$*"; }
+    source "$REPO/ci/lib/gates/image.sh"
+
+    run gate_image --root "$T/root" --no-boot
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"blocked image release-identity 7 image"* ]]
+    [[ "$output" != *"release-identity fail"* ]]
+    grep -q '^BLOCKED: captured release manifest has no active source pins$' \
+        "$RDIR/host/image-release-identity.log"
+
+    # An active line means the operator supplied identity input. It remains
+    # strict even when malformed or incomplete.
+    printf 'not-a-valid-pin\n' > "$RDIR/release-manifest/manifest.snapshot"
+    run gate_image --root "$T/root" --no-boot
+    [ "$status" -eq 7 ]
+    [[ "$output" == *"release-identity fail"* ]]
+    grep -q 'expected manifest missing components' \
+        "$RDIR/host/image-release-identity.log"
+}
+
 @test "release identity: absolute provenance symlink resolves inside image and never reads host" {
     identity_fixture
     mv "$T/root/etc/qdistro/release" "$T/root/image-release"
