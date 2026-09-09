@@ -302,8 +302,8 @@ fi
 pass "direct silo cannot reach the host (input chain protects host services)"
 
 # 4b-vi. the per-silo resolver actually ANSWERS (not just a bound socket): send
-#        a real DNS query to host_ip:53 from inside the netns and accept ANY
-#        response (NOERROR/SERVFAIL/REFUSED all prove liveness without WAN).
+#        a real DNS query to host_ip:53 from inside the netns and require the
+#        resolver's OWN locally-served answer.
 # The claim here is that the per-silo resolver PROCESS is alive and answering,
 # not that the internet is reachable. The old probe sent ONE un-retried
 # `IN A example.com` datagram with a 3s deadline -- and this dnsmasq runs
@@ -318,7 +318,8 @@ pass "direct silo cannot reach the host (input chain protects host services)"
 # so it is a deterministic LOCAL liveness test. Retried under a hard overall
 # deadline, one datagram per fresh connected socket -- connected so only
 # (host_ip, 53) can reply, and the reply must be a real DNS RESPONSE (QR set)
-# carrying our transaction id. Any rcode proves the process answered.
+# carrying our transaction id, with NOERROR and an answer record -- i.e. THIS
+# dnsmasq served it, not an upstream and not a refusal.
 if ip netns exec "$NS_DIR" python3 - "$DIR_HOST_IP" <<'PY' ; then
 import os, socket, struct, sys, time
 ip = sys.argv[1]
