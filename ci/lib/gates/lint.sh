@@ -17,8 +17,9 @@
 # Missing shellcheck/bats => recorded as skip with a clear message.
 # Shellcheck and scenario structure remain migration metrics. Bats parse errors,
 # broken documentation links, and strict flake findings return a nonzero class.
-# preflight deliberately ignores that return; standalone `qci lint` and affected
-# runs receive it.
+# preflight records the rows without letting them skew its own host-dependency
+# accounting, but exports the rc as QCI_LINT_RC and gate_full folds it into the
+# run exit; standalone `qci lint` and affected runs receive it directly.
 # ---------------------------------------------------------------------------
 lint_shell_files() {
     # Bounded, first-party set; excludes vendored/build trees. Tracked
@@ -79,8 +80,16 @@ gate_lint() {
     # 2. bats syntax validation (no VM): bats --count parses each file.
     if command -v bats >/dev/null 2>&1; then
         local bf bats_files=() bad=0 nbf
+        # Reuse the gate's own discovery (declared projects only) instead of a
+        # second, narrower find: sibling repos' vm suites were never parse-checked
+        # here. The two HOST integration suites directly under tests/integration
+        # (backup-e2e, backup-rehearse-e2e) are appended explicitly — they are in
+        # no run lane yet (see todo/astra-tests item 4), so syntax validation is
+        # currently the ONLY automated check they get.
         while IFS= read -r bf; do [ -n "$bf" ] && bats_files+=("$bf"); done \
-            < <(find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
+            < <({ bats_discover_files
+                  find "$QDISTRO_REPO/tests/integration" -maxdepth 1 -name '*.bats' -type f
+                } | sort -u)
         { echo; echo "## bats syntax (bats --count over ${#bats_files[@]} files)"; } >> "$log_path"
         # helpers.bash hard-requires VM_NAME at `load` time; supply a dummy so
         # bats --count exercises real parsing instead of failing on the guard.

@@ -198,13 +198,19 @@ gui_scenario_uses_legacy_ctrl() {
     grep -qE 'qdwin_ctrl|socat[^|]*qdshell\.sock' "$file"
 }
 
+# Enumerate every GUI scenario file across the workspace. qdistro's own two
+# directories are anchored on $QDISTRO_REPO, not "$WORKSPACE"/qdistro: from a
+# renamed checkout the latter dispatched the CANONICAL sibling's scenarios (and,
+# via collect_repo_state, recorded the canonical HEAD), and from a linked
+# worktree it found none at all and the gate passed on siblings alone.
+# gui_scenario_rel was already fixed for this; these two globs were missed.
 agent_scenarios() {
     local f
     for f in \
         "$WORKSPACE"/qdwin/tests/gui/[0-9][0-9]-*.md \
         "$WORKSPACE"/qdwin/tests/apps/[0-9][0-9]-*.md \
-        "$WORKSPACE"/qdistro/tests/integration/permissions-gui/[0-9][0-9]-*.md \
-        "$WORKSPACE"/qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
+        "$QDISTRO_REPO"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
+        "$QDISTRO_REPO"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
         "$WORKSPACE"/qdlocker/tests/gui/[0-9][0-9]-*.md
     do
         [ -f "$f" ] && printf '%s\n' "$f"
@@ -773,6 +779,66 @@ agent_artifact_status() {
     esac
 }
 
+# Extract WHY a scenario reported SKIP, from the artifacts the agent left.
+#
+# gui_agent_verdict is pure (status + rc only) and returns the fixed note "agent
+# scenario skipped", which gui_run_scenario wrote verbatim into results.tsv. So
+# every skipped GUI scenario looked identical in the results, and report.py's
+# dependency-missing detector could not tell a GOLDEN-IMAGE GAP ("foot is not
+# installed in the guest") from a legitimately not-applicable scenario. The
+# latest full run's qdlocker/tests/gui/01-lock-cycle.md is exactly the first
+# kind, and it cost 747 seconds to reach that conclusion invisibly.
+#
+# Sources, in order of preference:
+#   1. text after the verdict token in status.txt (agents that write "SKIP <why>")
+#   2. the report.md "Result: ..." line (the observed house style)
+#   3. the first non-empty prose line of report.md that is not its heading
+# Backticks and markdown links are flattened, ALL control characters and Unicode
+# line separators are stripped (the value lands in a TSV column that report.py
+# reads with splitlines(), which breaks on far more than \n), and the result is
+# length-capped. Input is also size-bounded before parsing — the cap on the
+# OUTPUT is not a bound on how much is read. Echoes nothing when no reason can be
+# found — the caller then keeps its generic note.
+# Args: artifact_dir
+gui_skip_reason() {
+    local adir=$1 reason=""
+    # head -c bounds the READ. A status.txt of arbitrarily many blank lines, or a
+    # report.md whose first "record" is gigabytes long, would otherwise be parsed
+    # in full before the output cap ever applied.
+    local _cap=65536
+    if [ -f "$adir/status.txt" ] && [ ! -L "$adir/status.txt" ]; then
+        # "SKIP foo not installed" -> "foo not installed"; bare "SKIP" -> "".
+        reason=$(head -c "$_cap" < "$adir/status.txt" | tr -d '\r' \
+            | awk 'NF { $1=""; sub(/^[[:space:]]+/, ""); print; exit }')
+    fi
+    if [ -z "$reason" ] && [ -f "$adir/report.md" ] && [ ! -L "$adir/report.md" ]; then
+        reason=$(head -c "$_cap" < "$adir/report.md" | awk '
+            NR > 40 { exit }
+            /^[[:space:]]*Result:/ { sub(/^[[:space:]]*Result:[[:space:]]*/, ""); print; exit }
+        ')
+    fi
+    if [ -z "$reason" ] && [ -f "$adir/report.md" ] && [ ! -L "$adir/report.md" ]; then
+        reason=$(head -c "$_cap" < "$adir/report.md" | awk '
+            NR > 40 { exit }
+            /^[[:space:]]*#/ { next }
+            NF { print; exit }
+        ')
+    fi
+    [ -n "$reason" ] || return 0
+    # Flatten markdown noise, then strip EVERY control character and the Unicode
+    # line separators. Removing only tab/LF is not enough: report.py reads the
+    # TSV with Python splitlines(), which also breaks on \x0b \x0c \x1c \x1d
+    # \x1e \x85 U+2028 U+2029. An agent-written reason containing one of those
+    # would split a single result into two malformed report rows (and an ESC
+    # would inject a terminal escape sequence into the report). This text comes
+    # from an artifact the agent wrote, so it is untrusted input to the TSV.
+    reason=$(printf '%s' "$reason" \
+        | sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g; s/`//g' \
+        | tr -d '[:cntrl:]' \
+        | sed -E 's/\xc2\x85|\xe2\x80\xa8|\xe2\x80\xa9/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+    printf '%s' "${reason:0:300}"
+}
+
 # Copy the guest-side waiter library (ci/lib/guest/gui-waiters.sh) into a
 # disposable VM at /tmp/qci-gui-waiters.sh so markdown scenarios (and the agent)
 # can `source /tmp/qci-gui-waiters.sh`. Delivered base64 over vm-exec — NOT a
@@ -847,8 +913,12 @@ await_vmexec_success() {
 }
 
 # Pure status/rc -> verdict mapper for one agent scenario attempt. FAIL CLOSED:
-# a pass is recorded ONLY for an explicit PASS with rc=0. SKIP passes through as
-# skip. Everything else — FAIL/ERROR, UNKNOWN (agent exited without a parseable
+# a pass is recorded ONLY for an explicit PASS with rc=0. A SKIP is honoured ONLY
+# with rc=0 — a SKIP artifact left behind by a process that timed out, was killed,
+# or died in its tooling is NOT an intentional skip, and accepting it masked a
+# real 721s rc=124 timeout as skip/exit-0 in full-20260628T111224Z-3231467
+# (scenario-attempts.tsv row 19 vs results.tsv row 149). SKIP with a nonzero rc is
+# therefore a hard failure, classified like any other. Everything else — FAIL/ERROR, UNKNOWN (agent exited without a parseable
 # status.txt/report verdict), PASS-with-nonzero-rc (claimed PASS but the runner
 # returned nonzero), or any malformed combination — is a hard GUI failure, never
 # a silent green. The agent prompt's contract is "return 0 only when every
@@ -862,8 +932,10 @@ gui_agent_verdict() {
     case "$status:$rc" in
         PASS:0)
             printf 'pass\tagent scenario passed' ;;
-        SKIP:*)
+        SKIP:0)
             printf 'skip\tagent scenario skipped' ;;
+        SKIP:*)
+            printf 'fail\tagent status=SKIP rc=%s (skip artifact with nonzero rc — fail closed)' "$rc" ;;
         FAIL:*|ERROR:*)
             printf 'fail\tagent status=%s rc=%s' "$status" "$rc" ;;
         *)
@@ -906,18 +978,19 @@ gui_agent_verdict() {
 #                     complete successfully, so the contradiction stays red;
 #                     a fresh-VM retry may resolve the provider-only epilogue.
 #                                                                            retriable
-#   agent-timeout     UNKNOWN + rc=124, no connectivity marker: the agent ran out
+#   agent-timeout     UNKNOWN or SKIP + rc=124, no connectivity marker: the agent ran out
 #                     of budget. DELIBERATELY NOT auto-retriable — a slow agent can
 #                     equally mean the PRODUCT hung, and retrying could flake-pass a
 #                     real hang (codex). Surfaced for human triage / a Phase-5
 #                     scenario split instead.                              report-only
 #   unknown           anything else (incl. PASS:nonzero without the exact provider
-#                     marker, or a partial PASS/SKIP report with rc=124 —
+#                     marker, or a SKIP artifact with a nonzero rc that is not 124 —
 #                     inconsistent, NOT an unambiguous infra retry)
 #                                                                            NEVER retry
 # Keying on the PARSED status=UNKNOWN (not merely "no status.txt") is deliberate:
 # a partial report.md verdict + rc=124 is an inconsistent agent result, not an
 # infra timeout. Pure (args only) => host-testable (gui-retry-classify.bats).
+# A nonzero-rc SKIP reaches here because gui_agent_verdict now fails it closed.
 # Args: status agent_rc transport_marker(0/1) agent_tooling_marker(0/1, optional)
 #       agent_api_marker(0/1, optional)
 gui_classify_failure() {
@@ -945,6 +1018,16 @@ gui_classify_failure() {
             # selected-model-capacity error while finalizing its response.
             if [ "$rc" != 0 ] && [ "$api" = 1 ]; then
                 printf 'agent-api-after-verdict'; return
+            fi ;;
+        SKIP)
+            # Only reachable with a nonzero rc (gui_agent_verdict accepts SKIP:0
+            # as a skip). The SKIP file is not evidence the process finished, so
+            # the rc decides: 124 is a budget timeout, exactly as for UNKNOWN, and
+            # is report-only for the same product-hang-masking reason. Anything
+            # else stays `unknown` and is never auto-retried.
+            if [ "$rc" = 124 ]; then
+                if [ "$transport" = 1 ]; then printf 'transport-timeout'; else printf 'agent-timeout'; fi
+                return
             fi ;;
         UNKNOWN)
             # LLM-provider connectivity loss is pure infra and rc-independent (the
@@ -1375,8 +1458,14 @@ gui_run_scenario() {
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
     # not the silent pass it used to be.
-    local verdict note
+    local verdict note skip_why
     IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
+    # A skip's REASON is the whole value of the row; without it every skipped
+    # scenario reads the same and a missing golden dependency is invisible.
+    if [ "$verdict" = skip ]; then
+        skip_why=$(gui_skip_reason "$adir")
+        [ -n "$skip_why" ] && note="$note: $skip_why"
+    fi
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
     local classifier="" transport=0 tooling=0 api=0 extnet=0
@@ -1466,6 +1555,10 @@ gui_run_scenario() {
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
+                if [ "$verdictN" = skip ]; then
+                    skip_why=$(gui_skip_reason "$adirN")
+                    [ -n "$skip_why" ] && noteN="$noteN: $skip_why"
+                fi
                 if [ "$verdictN" = fail ]; then
                     gui_detect_transport_marker "$logN" && transportN=1
                     gui_detect_agent_tooling_marker "$logN" && toolingN=1
@@ -1742,7 +1835,12 @@ record_agent_identity() {
     kv qci_agent_timeout_s "${QCI_AGENT_TIMEOUT:-0}"
     model=$(gui_agent_model_from_cmd "$cmd")
     [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
-    kv qci_agent_model "${model:-haiku}"
+    # `unknown`, never a guessed default. QCI_AGENT_CMD is an arbitrary wrapper;
+    # when neither --model/-m nor QCI_AGENT_MODEL names one, the effective model
+    # is genuinely undetermined, and recording "haiku" made a debug rerun with a
+    # stronger model indistinguishable from a CI row in exactly the comparison
+    # this key exists to support.
+    kv qci_agent_model "${model:-unknown}"
     # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then

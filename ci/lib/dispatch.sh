@@ -8,7 +8,13 @@
 gate_full() {
     qci_assert_run_dir || return $?
     local rc=$EXIT_OK step_rc
+    QCI_LINT_RC=0
     gate_preflight || return $?
+    # gate_preflight runs gate_lint for its rows but keeps it out of its own
+    # required/optional accounting; the rc arrives here. Without this, a blocking
+    # lint failure — bats parse error, broken documentation link, strict flake
+    # finding — recorded a `fail` row that no exit path ever read.
+    [ "$rc" -eq 0 ] && [ "${QCI_LINT_RC:-0}" -ne 0 ] && rc=$QCI_LINT_RC
     gate_host; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_release_manifest; step_rc=$?

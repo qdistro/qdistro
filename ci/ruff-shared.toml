@@ -90,3 +90,24 @@ ignore = [
 #     path begins "../<repo>/..." and the glob must spell that prefix.
 [lint.per-file-ignores]
 "**/tests/*" = ["B011"]      # asserts are intentional in tests (any repo)
+
+# --- multimachine/ and media/: NEW RATCHET, added 2026-09-09 -----------------
+# These two qdistro dirs were absent from host_ruff_targets() entirely, so they
+# had never been linted — 71 .py files in multimachine/, 2 in media/, and both
+# media/ files are listed security-sensitive in ci/entrypoint-inventory.tsv.
+# Adding them to the blocking target list surfaced 125 pre-existing hits in 14
+# codes; per the profile's ratchet convention those codes are scoped-out HERE
+# (not weakened globally) so the dirs are linted from today for everything else
+# — F821 undefined-name above all, which is enforced with no scope-outs.
+# Counts on calibration day 2026-09-09:
+#   I001 44, UP035 28, UP037 17, UP042 9, B905 6, F841 5, F401 5, UP022 4,
+#   B008 2, UP041 1, UP031 1, E741 1, E402 1, E401 1.
+# Clear a code and delete it from this list; the gate then blocks it here too.
+"**/multimachine/*" = [
+    "I001", "UP035", "UP037", "UP042", "B905", "F841", "F401",
+    "UP022", "B008", "UP041", "UP031", "E741", "E402", "E401",
+]
+"**/media/*" = [
+    "I001", "UP035", "UP037", "UP042", "B905", "F841", "F401",
+    "UP022", "B008", "UP041", "UP031", "E741", "E402", "E401",
+]

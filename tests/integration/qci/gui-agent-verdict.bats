@@ -7,7 +7,10 @@
 #
 # Contract under test (FAIL CLOSED):
 #   - Only an explicit PASS with rc=0 is a pass.
-#   - Any SKIP (any rc) is a skip.
+#   - SKIP with rc=0 is a skip; SKIP with a NONZERO rc is a fail (a skip artifact
+#     left behind by a timed-out/killed process is not an intentional skip — this
+#     is the hole that recorded a 721s rc=124 scenario as skip/exit-0 in
+#     full-20260628T111224Z-3231467).
 #   - FAIL/ERROR (any rc) is a fail.
 #   - UNKNOWN (agent exited without a parseable verdict) is a fail — at EVERY rc,
 #     including rc=0, which used to be a silent pass (the fail-open hole this
@@ -53,8 +56,16 @@ artifact_status() {
     [ "$(verdict SKIP 0)" = skip ]
 }
 
-@test "verdict: SKIP:1 -> skip (skip regardless of rc)" {
-    [ "$(verdict SKIP 1)" = skip ]
+@test "verdict: SKIP:1 -> fail (skip artifact, nonzero rc)" {
+    [ "$(verdict SKIP 1)" = fail ]
+}
+
+@test "verdict: SKIP:124 -> fail (masked timeout, the June 28 regression)" {
+    [ "$(verdict SKIP 124)" = fail ]
+}
+
+@test "verdict: a nonzero-SKIP note retains the raw rc" {
+    gui_agent_verdict SKIP 124 | cut -f2 | grep -q 'rc=124'
 }
 
 @test "verdict: FAIL:0 -> fail" {

@@ -92,7 +92,27 @@ latest_run_dir() {
     head -1 "$dir/results.tsv" | grep -qx 'gate	subject	status	exit_code	exit_class	kind	log	notes	category'
     # Per-repo commit/dirty state is captured for the triage handoff.
     [ -f "$dir/repo-state.tsv" ]
-    head -1 "$dir/repo-state.tsv" | grep -qx 'repo	branch	head	dirty_files	status_log'
+    head -1 "$dir/repo-state.tsv" | grep -qx 'repo	branch	head	dirty_files	status_log	head_full	root'
+}
+
+@test "contract: rows emitted by the NEW skip/blocked paths carry known classes" {
+    # The `qci lint` fixture below never reaches bats_run_one's companion skip row
+    # or gate_image's --no-boot rows, so those two paths were free to invent a
+    # class. They did: `skip` is a STATUS not a class, and EXIT_USAGE=2 has no
+    # entry in exit_class_name and rendered as the bogus `unknown(2)`.
+    source "$REPO_ROOT/ci/lib/core.sh"
+    # The literal class values those two call sites now pass.
+    [ "$(exit_class_name 0)" = pass ]
+    [ "$(exit_class_name 40)" = vm_provision ]
+    # ...and the values they used to pass are NOT valid classes.
+    [[ "$(exit_class_name 2)" == unknown* ]]
+    # Guard the call sites themselves, so a revert is caught here.
+    grep -q 'record_result bats "$base (skipped cases)" skip 0 pass bats' \
+        "$REPO_ROOT/ci/lib/gates/bats.sh"
+    ! grep -q 'record_blocked image boot-verify "$EXIT_USAGE"' \
+        "$REPO_ROOT/ci/lib/gates/image.sh"
+    grep -q 'record_blocked image boot-verify "$EXIT_VM_PROVISION"' \
+        "$REPO_ROOT/ci/lib/gates/image.sh"
 }
 
 @test "contract: results.tsv exit_class column is always a known class name" {

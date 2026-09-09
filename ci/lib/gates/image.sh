@@ -149,6 +149,22 @@ gate_image() {
 
     if [ "$no_boot" = 1 ]; then
         log "image: --no-boot set; skipping boot/install stages"
+        # Record the OMITTED stages explicitly. Returning silently left no trace
+        # in results.tsv, and release completeness is a scan over results.tsv —
+        # so a static-only developer run produced a row set indistinguishable
+        # from one that actually booted and installed. Absence of a failure row
+        # is not evidence a required stage ran. QCI_RELEASE=1 escalates these
+        # blocked rows, so --no-boot can no longer qualify a boot-required run.
+        # EXIT_VM_PROVISION, matching the other blocked rows for these SAME two
+        # stages (verify.sh / install-test.sh below): the VM-backed stage did not
+        # run. EXIT_USAGE (2) is not in the exit-class table at all and would
+        # render as the bogus class `unknown(2)`. This records rows only; the
+        # gate's return value is unchanged, so gate_full's vm-provision infra
+        # cascade is not triggered by a --no-boot developer run.
+        record_blocked image boot-verify "$EXIT_VM_PROVISION" image \
+            "stage omitted: --no-boot (static-only developer mode; no boot evidence for this run)"
+        record_blocked image install-test "$EXIT_VM_PROVISION" image \
+            "stage omitted: --no-boot (static-only developer mode; no install evidence for this run)"
         return "$rc"
     fi
 

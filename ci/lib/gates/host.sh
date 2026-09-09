@@ -59,14 +59,26 @@ host_pytest_cmd() {
             ;;
         glob:*)
             # Non-recursive shell glob, unsorted, empty-glob-safe.
+            # An empty glob ran ZERO pytest processes and exited 0 — a green row
+            # for a suite that does not exist. qdistro is caught indirectly by its
+            # positive coverage floor, but qdbrowser-pytest (glob mode, no floor)
+            # turned a moved tests/ directory into a pass. Discovering nothing is
+            # now a failure; run_logged converts the FAIL: line into a fail row.
+            printf '_n=0\n'
             printf 'for t in %s; do\n' "${_hp_discover#glob:}"
             printf '    [ -e "$t" ] || continue\n'
+            printf '    _n=$((_n + 1))\n'
             printf '    %s%s "$t" || rc=1\n' "$_pytest" "${_hp_args:+ $_hp_args}"
             printf 'done\n'
+            printf '[ "$_n" -gt 0 ] || { echo "FAIL: no test files discovered by glob: %s"; rc=1; }\n' \
+                "${_hp_discover#glob:}"
             ;;
         find:*)
             # Recursive find, sorted, batched (_hp_batch files per process).
+            # Same empty-discovery guard as glob: above.
             printf 'mapfile -t _f < <(find %s | sort)\n' "${_hp_discover#find:}"
+            printf '[ "${#_f[@]}" -gt 0 ] || { echo "FAIL: no test files discovered by find: %s"; rc=1; }\n' \
+                "${_hp_discover#find:}"
             printf 'for ((_i=0; _i<${#_f[@]}; _i+=%s)); do\n' "$_hp_batch"
             printf '    %s%s "${_f[@]:_i:%s}" || rc=1\n' "$_pytest" "${_hp_args:+ $_hp_args}" "$_hp_batch"
             printf 'done\n'
@@ -95,10 +107,13 @@ host_pytest_cmd() {
 # contribute <repo>/<pkg> + <repo>/tests.
 host_ruff_targets() {
     local d
+    # multimachine/ (71 .py) and media/ (2, both listed security-sensitive in
+    # ci/entrypoint-inventory.tsv) were absent from this "blocking" list and so
+    # were never linted at all.
     for d in broker browser_bridge cli tui qsu polkit user_relay pwd print \
              phone recall browser_daemons daemons snapshots sdk admin_app \
              session_manager workflow templates plugins scripts ci deploy \
-             tier4-vm tier5b-vm; do
+             multimachine media tier4-vm tier5b-vm; do
         [ -d "$QDISTRO_REPO/$d" ] && printf '%s\n' "$QDISTRO_REPO/$d"
     done
     local repo
@@ -196,6 +211,13 @@ coverage_floor_check() {
     #    tab shifting fields) must fail the gate, never fall through to an
     #    accidental PASS via an errored numeric comparison. Empty cell == 0.
     [ -n "$floor" ] || floor=0
+    # A floor is a PERCENTAGE: it must be digits AND within 0..100. The bound is
+    # not cosmetic. The comparison below used to be bash arithmetic, where a
+    # digit string is not simply a number: "010" is OCTAL 8 (so an 010 floor
+    # silently enforced 8%), "08" is an arithmetic ERROR that aborted the helper
+    # with no result row at all, and a 19-digit floor OVERFLOWED to a negative
+    # threshold that everything passed. Rejecting >100 here, stripping to base
+    # 10 below, and doing the comparison in Python removes all three.
     case "$floor" in
         ''|*[!0-9]*)
             { printf 'COVERAGE-FLOOR: %s INVALID floor=%s in %s (must be a non-negative integer)\n' "$project" "$floor" "$(rel_path "$floors_tsv")"; } > "$log_path"
@@ -204,6 +226,14 @@ coverage_floor_check() {
             return "$EXIT_HOST"
             ;;
     esac
+    # Strip leading zeros in base 10 (never octal) and reject out-of-range.
+    floor=$((10#$floor))
+    if [ "$floor" -gt 100 ]; then
+        { printf 'COVERAGE-FLOOR: %s INVALID floor=%s in %s (must be 0..100)\n' "$project" "$floor" "$(rel_path "$floors_tsv")"; } > "$log_path"
+        log "coverage-floor: $project INVALID floor='$floor' (>100)"
+        record_result host "$project-coverage-floor" fail "$EXIT_HOST" "$(exit_class_name "$EXIT_HOST")" coverage "$log_path" "malformed floor='$floor' in coverage-floors.tsv (must be 0..100)"
+        return "$EXIT_HOST"
+    fi
 
     # 3. With the floor known and valid, handle a missing/unreadable JSON.
     if [ ! -f "$json" ] || [ ! -r "$json" ]; then
@@ -226,20 +256,33 @@ coverage_floor_check() {
     #    to the istanbul (vitest coverage-final.json, which has NO 'totals' key)
     #    per-file 's' statement maps. The JSON path is passed as argv (NOT
     #    string-interpolated into the python source).
-    local pct
-    pct=$(python3 -c "
+    # Python does BOTH the measurement and the comparison, emitting
+    # '<display> <ok|below>'. Bash never compares the number: rounding it to an
+    # integer let 79.6 clear an 80 floor, and rounding it to hundredths still let
+    # 79.999 clear it. The verdict here is computed from the UNROUNDED value;
+    # the two-decimal display string is for the row only.
+    local pct pct_cmp
+    read -r pct pct_cmp <<<"$(python3 -c "
 import json, sys
 path = sys.argv[1]
+floor = float(sys.argv[2])
+
+def emit(value):
+    # '<display> <ok|below>'. The verdict compares the UNROUNDED value; the
+    # display string is presentation only, so no rounding can move a
+    # measurement across the floor.
+    print('%.2f %s' % (value, 'ok' if value >= floor else 'below'))
+
 d = json.load(open(path))
 try:
     # KeyError here (not .get) is what triggers the istanbul fallback: an
     # istanbul coverage-final.json has no top-level 'totals' key.
     tot = d['totals']
     try:
-        print(round(float(tot['percent_covered'])))
+        emit(float(tot['percent_covered']))
     except (KeyError, TypeError, ValueError):
         disp = tot.get('percent_covered_display')
-        print(round(float(disp)) if disp not in (None, '') else 0)
+        emit(float(disp) if disp not in (None, '') else 0.0)
 except (KeyError, TypeError):
     # istanbul/vitest: compute line % from the per-file 's' statement maps.
     total = covered = 0
@@ -247,9 +290,9 @@ except (KeyError, TypeError):
         s = v.get('s', {}) if isinstance(v, dict) else {}
         total += len(s)
         covered += sum(1 for n in s.values() if n > 0)
-    print(round(100 * covered / total) if total else 0)
-" "$json" 2>/dev/null)
-    [ -n "$pct" ] || pct='?'
+    emit(100.0 * covered / total if total else 0.0)
+" "$json" "$floor" 2>/dev/null)"
+    if [ -z "$pct" ] || [ -z "$pct_cmp" ]; then pct='?'; pct_cmp=''; fi
     {
         printf 'COVERAGE-SUMMARY: %s measured=%s%% floor=%s%%\n' "$project" "$pct" "$floor"
         printf 'floor-note: %s\n' "${note:-}"
@@ -261,11 +304,11 @@ except (KeyError, TypeError):
     fi
     # Positive floor: block when measured is not a clean number (parse failed →
     # fail closed) or is strictly below the floor.
-    if [ "$pct" = "?" ] || ! [ "$pct" -ge 0 ] 2>/dev/null; then
+    if [ "$pct" = "?" ] || { [ "$pct_cmp" != ok ] && [ "$pct_cmp" != below ]; }; then
         record_result host "$project-coverage-floor" fail "$EXIT_HOST" "$(exit_class_name "$EXIT_HOST")" coverage "$log_path" "could not parse coverage; floor=$floor% (failing closed)"
         return "$EXIT_HOST"
     fi
-    if [ "$pct" -lt "$floor" ]; then
+    if [ "$pct_cmp" = below ]; then
         record_result host "$project-coverage-floor" fail "$EXIT_HOST" "$(exit_class_name "$EXIT_HOST")" coverage "$log_path" "measured=$pct% BELOW floor=$floor%"
         rc=$EXIT_HOST
     else
@@ -494,8 +537,16 @@ fi'
         local _extdir=$1 _destdir=$2 _label=$3
         if [ -f "$_extdir/package.json" ] \
             && node -e "require('$_extdir/node_modules/@vitest/coverage-v8/package.json')" 2>/dev/null; then
-            # Run coverage report-only; copy JSON artifact to run dir.
-            echo "npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json 2>/dev/null; _ec=\$?; [ -f coverage/coverage-final.json ] && mkdir -p \"$_destdir\" && cp coverage/coverage-final.json \"$_destdir/$_label-coverage.json\" || true; exit 0"
+            # Run coverage, then publish the artifact ONLY if this attempt
+            # actually produced it. Previously `_ec` was captured and never
+            # read, stderr was discarded, and any pre-existing
+            # coverage/coverage-final.json left by an earlier run was copied
+            # regardless — so a FAILED coverage attempt could publish an old
+            # high number that then satisfied the positive floor below. The
+            # qdistro side already had a stale-artifact fix; the extensions did
+            # not. Now: delete the old dir first, keep stderr in the log, and
+            # copy only on a clean exit with a freshly written file.
+            echo "rm -rf coverage; npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json; _ec=\$?; if [ \"\$_ec\" -eq 0 ] && [ -f coverage/coverage-final.json ]; then mkdir -p \"$_destdir\" && cp coverage/coverage-final.json \"$_destdir/$_label-coverage.json\"; else echo \"coverage attempt failed (rc=\$_ec) or produced no coverage-final.json; publishing NO artifact so the floor fails closed\"; fi; exit 0"
         else
             echo "true"
         fi

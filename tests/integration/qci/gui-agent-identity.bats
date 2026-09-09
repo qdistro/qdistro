@@ -57,9 +57,13 @@ teardown() {
     [ ! -s "$KV_OUT" ]
 }
 
-@test "record_agent_identity: Haiku is the fallback when no model is specified" {
+@test "record_agent_identity: an undetermined model records unknown, never a guess" {
+    # QCI_AGENT_CMD is an arbitrary wrapper. When it names no model, the
+    # effective model is genuinely undetermined; recording a plausible default
+    # made a debug rerun indistinguishable from a CI row.
     QCI_AGENT_CMD='myagent --run {prompt}' record_agent_identity
-    grep -q '^qci_agent_model=haiku' "$KV_OUT"
+    grep -q '^qci_agent_model=unknown' "$KV_OUT"
+    ! grep -q '^qci_agent_model=haiku' "$KV_OUT"
 }
 
 @test "run_agent_command: relative tool outputs stay in a cleaned temporary cwd" {

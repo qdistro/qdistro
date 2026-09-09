@@ -49,6 +49,28 @@ if [ -n "${WORKSPACE:-}" ]; then
     unset _repo_proj _repo_var
 fi
 
+# Resolve one project name to the checkout qci is ACTUALLY running against.
+# For every sibling this is $WORKSPACE/<name>; for qdistro it is the
+# authoritative $QDISTRO_REPO discovered from the dispatcher's own location,
+# which is NOT always $WORKSPACE/qdistro (a renamed checkout, a copied fixture,
+# or a linked worktree). Hardcoding "$WORKSPACE"/qdistro made `qci gui` from a
+# renamed checkout dispatch the CANONICAL sibling's scenario files, and made a
+# linked worktree find zero qdistro scenarios and pass on the siblings alone.
+# Every path that means "this project's tree" must go through here.
+# Resolved from the CURRENT WORKSPACE/QDISTRO_REPO on every call rather than from
+# the <NAME>_REPO vars exported above: those are baked once, at source time, for
+# the agent's child shell, and a caller that overrides WORKSPACE for one call
+# (contract fixtures do exactly this) must see the override.
+# Args: project name. Echoes the absolute root; empty + rc 1 if unresolvable.
+project_root() {
+    local proj=$1
+    if [ "$proj" = qdistro ] && [ -n "${QDISTRO_REPO:-}" ]; then
+        printf '%s' "$QDISTRO_REPO"; return 0
+    fi
+    if [ -n "${WORKSPACE:-}" ]; then printf '%s' "$WORKSPACE/$proj"; return 0; fi
+    return 1
+}
+
 EXIT_OK=0
 EXIT_USAGE=2
 EXIT_PREFLIGHT=10

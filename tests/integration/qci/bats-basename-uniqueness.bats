@@ -10,6 +10,10 @@ setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
     TMP="$(mktemp -d)"
     mkdir -p "$TMP/vm" "$TMP/other"
+    # bootstrap.sh supplies PROJECTS and project_root, which bats_discover_files
+    # now iterates instead of globbing "$WORKSPACE"/*.
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/bootstrap.sh"
     # shellcheck disable=SC1090
     source "$REPO_ROOT/ci/lib/gates/bats.sh"
 }
@@ -63,4 +67,54 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
     # qdistro's own dir is not listed twice
     count=$(printf '%s\n' "$output" | grep -c 'shell-modules.bats' || true)
     [ "$count" -eq 1 ]
+}
+
+@test "discover ignores a stray checkout beside the workspace" {
+    # The 2026-09-08 incident: a review checkout named qdistro-ci-host-20260908
+    # sat beside the canonical tree, the "$WORKSPACE"/*/tests/integration/vm glob
+    # scheduled it, every basename collided, and the uniqueness guard failed the
+    # ENTIRE bats gate. A stray with UNIQUE basenames would instead have added
+    # unintended tests silently. Only declared PROJECTS are scheduled now.
+    mkdir -p "$TMP/ws/qdistro/tests/integration/vm" \
+             "$TMP/ws/qdistro-ci-host-20260908/tests/integration/vm" \
+             "$TMP/ws/some-review-copy/tests/integration/vm"
+    : > "$TMP/ws/qdistro/tests/integration/vm/shell-modules.bats"
+    : > "$TMP/ws/qdistro-ci-host-20260908/tests/integration/vm/shell-modules.bats"
+    : > "$TMP/ws/some-review-copy/tests/integration/vm/only-here.bats"
+    QDISTRO_REPO="$TMP/ws/qdistro" WORKSPACE="$TMP/ws" \
+        run bats_discover_files
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/ws/qdistro/tests/integration/vm/shell-modules.bats"* ]]
+    [[ "$output" != *"qdistro-ci-host-20260908"* ]]
+    [[ "$output" != *"only-here.bats"* ]]
+    # ...and the whole set still passes the uniqueness guard, which the glob did not.
+    mapfile -t files < <(printf '%s\n' "$output")
+    run assert_unique_bats_basenames "${files[@]}"
+    [ "$status" -eq 0 ]
+}
+
+@test "discover honours an explicitly opted-in extra root" {
+    # A deliberate side-by-side worktree is still runnable — explicitly.
+    mkdir -p "$TMP/ws/qdistro/tests/integration/vm" \
+             "$TMP/extra/tests/integration/vm"
+    : > "$TMP/ws/qdistro/tests/integration/vm/shell-modules.bats"
+    : > "$TMP/extra/tests/integration/vm/extra-suite.bats"
+    QDISTRO_REPO="$TMP/ws/qdistro" WORKSPACE="$TMP/ws" \
+        QCI_EXTRA_BATS_ROOTS="$TMP/extra" run bats_discover_files
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"extra-suite.bats"* ]]
+}
+
+@test "discover follows a RENAMED qdistro checkout, not the canonical sibling" {
+    # QDISTRO_REPO is authoritative: qci run from a renamed/copied checkout must
+    # schedule ITS suites, never the canonical tree's next door.
+    mkdir -p "$TMP/ws/qdistro/tests/integration/vm" \
+             "$TMP/ws/qdistro-work/tests/integration/vm"
+    : > "$TMP/ws/qdistro/tests/integration/vm/canonical-only.bats"
+    : > "$TMP/ws/qdistro-work/tests/integration/vm/renamed-only.bats"
+    QDISTRO_REPO="$TMP/ws/qdistro-work" WORKSPACE="$TMP/ws" \
+        run bats_discover_files
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"renamed-only.bats"* ]]
+    [[ "$output" != *"canonical-only.bats"* ]]
 }

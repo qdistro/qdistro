@@ -48,6 +48,22 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "classify: SKIP:124 -> agent-timeout (a skip artifact never excuses a timeout)" {
+    [ "$(gui_classify_failure SKIP 124 0)" = agent-timeout ]
+    run gui_classifier_retriable agent-timeout
+    [ "$status" -ne 0 ]
+}
+
+@test "classify: SKIP:124 + transport marker -> transport-timeout (retriable)" {
+    [ "$(gui_classify_failure SKIP 124 1)" = transport-timeout ]
+}
+
+@test "classify: SKIP:1 -> unknown (inconsistent, never retried)" {
+    [ "$(gui_classify_failure SKIP 1 0)" = unknown ]
+    run gui_classifier_retriable unknown
+    [ "$status" -ne 0 ]
+}
+
 @test "classify: UNKNOWN:124 + NO connectivity marker -> agent-timeout (NOT retriable)" {
     [ "$(gui_classify_failure UNKNOWN 124 0)" = agent-timeout ]
     run gui_classifier_retriable agent-timeout

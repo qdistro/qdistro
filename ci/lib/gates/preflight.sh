@@ -95,8 +95,11 @@ gate_preflight() {
     }
 
     local p
+    # project_root, not "$WORKSPACE/$p": qdistro's own root is the discovered
+    # $QDISTRO_REPO, so a renamed checkout or linked worktree is checked for
+    # real instead of silently passing on the canonical sibling next door.
     for p in "${PROJECTS[@]}"; do
-        check_required "repo $p" "[ -d '$WORKSPACE/$p' ]"
+        check_required "repo $p" "[ -d '$(project_root "$p")' ]"
     done
     check_required "python3" "command -v python3"
     check_required "git" "command -v git"
@@ -160,9 +163,14 @@ gate_preflight() {
         echo "## qci overlays"
         ls -1 "${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"/qci-*.qcow2 2>/dev/null || true
     } >> "$report"
-    # Static pre-VM lint runs as part of preflight, but only ever records
-    # results (warn/skip) — it must not change preflight's required/optional
-    # pass-fail accounting, so we deliberately ignore its return code.
-    gate_lint || true
+    # Static pre-VM lint runs as part of preflight, but must not change
+    # preflight's own required/optional pass-fail accounting — a host-dependency
+    # report and a documentation-link failure are different questions. So its rc
+    # is EXPORTED rather than discarded: gate_full folds QCI_LINT_RC into the run
+    # exit below. Before that, `gate_lint || true` here plus no blocking lint in
+    # gate_full meant a red lint row (bats parse error, broken doc link, strict
+    # flake finding) could not make `qci full` exit nonzero at all.
+    gate_lint; QCI_LINT_RC=$?
+    [ "$QCI_LINT_RC" -eq 0 ] || log "preflight: lint returned $QCI_LINT_RC (advisory here; gate_full enforces it)"
     return "$rc"
 }

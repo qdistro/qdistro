@@ -28,7 +28,7 @@ init_run() {
         printf '\n'
     } > "$RDIR/manifest.txt"
     printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\tcategory\n' > "$RDIR/results.tsv"
-    printf 'repo\tbranch\thead\tdirty_files\tstatus_log\n' > "$RDIR/repo-state.tsv"
+    printf 'repo\tbranch\thead\tdirty_files\tstatus_log\thead_full\troot\n' > "$RDIR/repo-state.tsv"
     printf 'gate\tsubject\tprovision_s\twork_s\ttotal_s\trc\tvm\n' > "$RDIR/timings.tsv"
     # Additive observability siblings (Phase 2 of the test-infra hardening
     # roadmap). These are OBSERVABILITY ONLY — they gate nothing — so they are
@@ -368,22 +368,35 @@ record_result() {
         "$(rel_path "$log_path")" "$notes" "$category" >> "$(record_dest results)"
 }
 
+# Record, per project, the tree this run ACTUALLY used. Two provenance bugs are
+# closed here:
+#   - the root came from "$WORKSPACE/$project", so a renamed qdistro checkout
+#     recorded the CANONICAL sibling's branch/HEAD — provenance describing a tree
+#     that was never tested. project_root resolves qdistro through $QDISTRO_REPO.
+#   - the guard was `[ -d "$repo/.git" ]`, which is false for a LINKED WORKTREE
+#     (whose .git is a file), so a worktree run recorded no provenance at all.
+#     `git rev-parse --git-dir` is the supported detection and covers both.
+# The resolved root and the FULL SHA are recorded alongside the short head so a
+# result can be attributed to an exact tree without guessing.
 collect_repo_state() {
-    local project repo branch head dirty status_log
+    local project repo branch head head_full dirty status_log
     for project in "${PROJECTS[@]}"; do
-        repo="$WORKSPACE/$project"
-        [ -d "$repo/.git" ] || continue
+        repo=$(project_root "$project") || continue
+        [ -d "$repo" ] || continue
+        git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || continue
         status_log="$RDIR/repos/$project.status.txt"
         branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
         head=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo "?")
+        head_full=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "?")
         dirty=$(git -C "$repo" status --short 2>/dev/null | wc -l | tr -d ' ')
         {
             git -C "$repo" status --short --branch 2>/dev/null || true
             echo
             git -C "$repo" log -1 --oneline 2>/dev/null || true
         } > "$status_log"
-        printf '%s\t%s\t%s\t%s\t%s\n' \
-            "$project" "$branch" "$head" "$dirty" "$(rel_path "$status_log")" >> "$RDIR/repo-state.tsv"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$project" "$branch" "$head" "$dirty" "$(rel_path "$status_log")" \
+            "$head_full" "$repo" >> "$RDIR/repo-state.tsv"
     done
 }
 

@@ -993,8 +993,8 @@ def generate_md(run_dir: Path) -> str:
 
     if repos:
         lines.append("## Repo State")
-        lines.append("| repo | branch | head | dirty | status |")
-        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append("| repo | branch | head | dirty | status | root |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
         for row in repos:
             status = md_link(run_dir, row.get("status_log", ""), "status")
             lines.append(
@@ -1006,6 +1006,7 @@ def generate_md(run_dir: Path) -> str:
                         row.get("head", ""),
                         row.get("dirty_files", ""),
                         status,
+                        f"`{row['root']}`" if row.get("root") else "",
                     ]
                 )
                 + " |"

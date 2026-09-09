@@ -40,6 +40,33 @@ bats_job_count() {
     printf '%s\n' "$jobs"
 }
 
+# Count the TAP `# skip` directives in a bats log. Bats emits `ok N desc # skip
+# [reason]` for a skipped case and exits 0, so this is the only evidence a
+# passing file left any assertion unrun. Anchored on `ok ` + the TAP directive so
+# a test DESCRIPTION containing the word "skip" is not counted.
+bats_tap_skip_count() {
+    local log=$1 n
+    [ -f "$log" ] || { printf '0'; return 0; }
+    # grep -c exits 1 on zero matches, so the count is taken first and defaulted
+    # here; `grep -c ... || printf 0` would emit "0" TWICE on a no-skip log.
+    n=$(grep -cE '^ok [0-9]+ .*# skip' "$log" 2>/dev/null) || n=0
+    printf '%s' "${n:-0}"
+}
+
+# Distinct skip reasons from a bats log, comma-joined and length-capped so the
+# notes column stays one readable line. Cases skipped with no reason are counted
+# under "(no reason given)".
+bats_tap_skip_reasons() {
+    local log=$1 out
+    [ -f "$log" ] || return 0
+    # `paste -sd'; '` would cycle through BOTH delimiters; join on ';' and space
+    # it afterwards. Tabs are stripped so the value cannot break the TSV column.
+    out=$(grep -oE '^ok [0-9]+ .*# skip.*' "$log" 2>/dev/null \
+        | sed -E 's/^.*# skip[[:space:]]*//; s/^$/(no reason given)/' \
+        | tr -d '\t' | sort -u | paste -sd';' - | sed 's/;/; /g')
+    printf '%s' "${out:0:400}"
+}
+
 # Run one bats file against an already-up VM; collect artifacts and record the
 # pass/fail row. Returns 0 on pass, EXIT_BATS on failure. Does NOT acquire or
 # release the VM — the caller owns its lifecycle. Safe to run backgrounded:
@@ -69,7 +96,29 @@ bats_run_one() {
     gate_rc=$?
     collect_vm_artifacts "$vm" "bats-${base%.bats}"
     if [ "$gate_rc" -eq 0 ]; then
-        record_result bats "$base" pass 0 pass bats "$log_path" "VM=$vm"
+        # Bats `skip` exits 0, so a file whose cases ALL skipped used to record an
+        # indistinguishable `pass` row. The latest full run hid 30 skipped cases
+        # this way — 10 of 41 in tiered-isolation.bats (tier-4/tier-5, tier-1,
+        # broker and session-manager ENFORCING checks) and 16 of 24 in
+        # shell-modules.bats — inside two green rows, where the release
+        # completeness scan (which reads results.tsv only) could never see them.
+        # The pass row is kept as-is for row-count stability; a COMPANION skip row
+        # carries the count and reasons, so QCI_RELEASE escalation and the report
+        # both see them. Its exit_class column is `pass` (the class NAME for exit
+        # 0, per exit_class_name in ci/lib/core.sh) — `skip` is a STATUS, not an
+        # exit class, and putting it in column 5 would break the known-class
+        # contract asserted by qci-runner-contract.bats.
+        local n_skip skip_reasons
+        n_skip=$(bats_tap_skip_count "$log_path")
+        if [ "${n_skip:-0}" -gt 0 ]; then
+            skip_reasons=$(bats_tap_skip_reasons "$log_path")
+            record_result bats "$base" pass 0 pass bats "$log_path" \
+                "VM=$vm skipped_cases=$n_skip"
+            record_result bats "$base (skipped cases)" skip 0 pass bats "$log_path" \
+                "$n_skip case(s) skipped inside a passing file: $skip_reasons"
+        else
+            record_result bats "$base" pass 0 pass bats "$log_path" "VM=$vm"
+        fi
         return 0
     fi
     record_result bats "$base" fail "$EXIT_BATS" bats bats "$log_path" "VM=$vm raw_rc=$gate_rc"
@@ -127,24 +176,36 @@ assert_unique_bats_basenames() {
     [ "$dup" -eq 0 ]
 }
 
-# Discover scheduled bats files: qdistro's tests/integration/vm plus
-# sibling repos' tests/integration/vm/*.bats. Sibling files are later
+# Discover scheduled bats files: one tests/integration/vm directory per DECLARED
+# project, qdistro's resolved through $QDISTRO_REPO. Sibling files are later
 # gated on the golden actually containing that app.
+#
+# This iterates PROJECTS rather than globbing "$WORKSPACE"/*/tests/integration/vm.
+# The glob scheduled ANY directory that happened to sit beside the workspace: on
+# 2026-09-08 a review checkout named `qdistro-ci-host-20260908` was discovered
+# alongside the canonical tree, every basename collided, and the duplicate-basename
+# guard failed the ENTIRE bats gate (full-20260908T221526Z-2608262). The guard did
+# its job — but a stray checkout with unique basenames would instead have ADDED
+# unintended tests to a run, silently. Declared projects only; extra roots are
+# opt-in through QCI_EXTRA_BATS_ROOTS (colon-separated repo roots), so a
+# deliberate side-by-side worktree is still runnable, explicitly.
 bats_discover_files() {
-    local ws="${WORKSPACE:-}" dir
-    if [ -z "$ws" ]; then
-        ws=$(cd "$QDISTRO_REPO/.." && pwd)
-    fi
+    local proj dir root extra _extra_roots=()
     {
-        find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f
-        for dir in "$ws"/*/tests/integration/vm; do
+        for proj in "${PROJECTS[@]}"; do
+            root=$(project_root "$proj") || continue
+            dir="$root/tests/integration/vm"
             [ -d "$dir" ] || continue
-            case "$dir" in
-                "$QDISTRO_REPO"/tests/integration/vm) continue ;;
-            esac
             find "$dir" -maxdepth 1 -name '*.bats' -type f
         done
-    } | sort
+        IFS=':' read -r -a _extra_roots <<< "${QCI_EXTRA_BATS_ROOTS:-}"
+        for extra in "${_extra_roots[@]}"; do
+            [ -n "$extra" ] || continue
+            dir="$extra/tests/integration/vm"
+            [ -d "$dir" ] || continue
+            find "$dir" -maxdepth 1 -name '*.bats' -type f
+        done
+    } | sort -u
 }
 
 # Map a sibling bats path to a short app id, or empty for qdistro's own files.
@@ -167,6 +228,13 @@ bats_sibling_app_probe_cmd() {
 
 # If this sibling bats file's app is known-missing in the golden, record
 # SKIP and return 0. Return 1 if the caller should run the file.
+#
+# The note WORDING matters: report.py's dependency-missing detector
+# (_DEP_MISSING_RE) is what stops a golden-image gap hiding behind a green
+# "mostly skipped" run, and it requires "no module NAMED". The previous wording,
+# "golden image lacks $app (no module / PyQt6-WebEngine)", matched none of the
+# detector's vocabulary, so these skips were never counted as dependency gaps.
+# "not installed" and "not importable" are both in that vocabulary.
 # $1=vm (may be empty to consult cache only), $2=file.
 bats_skip_if_sibling_app_missing() {
     local vm=$1 file=$2 app cache probe
@@ -177,7 +245,7 @@ bats_skip_if_sibling_app_missing() {
     if [ -f "$cache" ]; then
         if [ "$(cat "$cache")" = missing ]; then
             record_result bats "$(basename "$file")" skip 0 pass bats "" \
-                "golden image lacks $app (no module / PyQt6-WebEngine)"
+                "$app not installed in the golden image ($app / PyQt6-WebEngine not importable)"
             return 0
         fi
         return 1
@@ -191,7 +259,7 @@ bats_skip_if_sibling_app_missing() {
     fi
     printf 'missing\n' > "$cache"
     record_result bats "$(basename "$file")" skip 0 pass bats "" \
-        "golden image lacks $app (no module / PyQt6-WebEngine)"
+        "$app not installed in the golden image ($app / PyQt6-WebEngine not importable)"
     return 0
 }
 
