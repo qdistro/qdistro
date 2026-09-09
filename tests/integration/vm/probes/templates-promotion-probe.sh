@@ -452,18 +452,26 @@ promote_cmd() {
     fi
 }
 
-# Wait (bounded) until no promote process is left running. A kill -9 is
-# asynchronous; observing the binding while a survivor is mid-write would make
-# this scenario race against itself.
-await_promote_quiescent() {
-    local deadline=$((SECONDS + 15))
+# Wait (bounded) for the killed promote's OWN process group to be gone. A
+# kill -9 is asynchronous; observing the binding while a survivor is mid-write
+# would make this scenario race against itself.
+#
+# Deliberately targeted at the group we created, and deliberately FAIL-CLOSED:
+# a name-wide `pkill` fallback would both over-match and -- far worse -- turn a
+# kill that never landed into a green run by tidying up after itself, which is
+# exactly the bug this scenario is being repaired for. If the group outlives
+# the deadline that is a real defect in the fuzz; say so and return nonzero.
+await_group_gone() {
+    local pgid=$1 deadline=$((SECONDS + 15))
     while [ "$SECONDS" -lt "$deadline" ]; do
-        pgrep -u "$(id -u)" -f 'qdistro[-_]template[-_]promote' >/dev/null 2>&1 || return 0
+        kill -0 -- "-$pgid" 2>/dev/null || return 0
         sleep 0.2
     done
-    pkill -9 -u "$(id -u)" -f 'qdistro[-_]template[-_]promote' 2>/dev/null || true
-    sleep 0.5
-    ! pgrep -u "$(id -u)" -f 'qdistro[-_]template[-_]promote' >/dev/null 2>&1
+    echo "--- survivors still in process group $pgid ---" >&2
+    ps -eo pid,pgid,stat,args 2>/dev/null \
+        | awk -v g="$pgid" '$2 == g' | head -10 >&2
+    kill -9 -- "-$pgid" 2>/dev/null || true
+    return 1
 }
 
 scenario_crash_consistency() {
@@ -486,7 +494,7 @@ RET
     # Re-establish a clean two-generation rollback chain (active A, prev [B]).
     cli template-promote "$SILO" --rollback "$genB" >/dev/null 2>&1 || true
     cli template-promote "$SILO" --rollback "$genA" >/dev/null 2>&1 || true
-    local i cur other a
+    local i cur other a pid wrc killed=0
     for i in 1 2 3 4 5; do
         cur="$(active_gen)"
         if [ "$cur" = "$genA" ]; then other="$genB"; else other="$genA"; fi
@@ -500,11 +508,18 @@ RET
         # correctly refuses). Put the promote in its own session so the kill
         # reaches the real process, then WAIT for quiescence before observing.
         setsid bash -c "$(promote_cmd "$other")" >/dev/null 2>&1 &
-        local pid=$!
+        pid=$!
         sleep "0.0$((RANDOM % 9 + 1))"
         kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        await_promote_quiescent \
+        # 2>/dev/null suppresses the shell's "Killed" job notice (which would
+        # otherwise land in every CI log) WITHOUT losing the status.
+        wait "$pid" 2>/dev/null; wrc=$?
+        # 128+SIGKILL(9): the kill actually landed on a LIVE promote, i.e. this
+        # iteration really did crash one. A clean rc means the promote finished
+        # first — legal, but it exercised nothing, so count the real ones and
+        # require at least one below rather than silently fuzzing nothing.
+        [ "$wrc" -eq 137 ] && killed=$((killed + 1))
+        await_group_gone "$pid" \
             || fail "crash-consistency" "a killed promote survived the kill (iteration $i)"
         a="$(active_gen 2>/dev/null)"
         case "$a" in
@@ -517,6 +532,8 @@ RET
     # recovery: a clean promote after the crashes still works. Keep stderr:
     # a swallowed refusal reason turned every failure here into an unactionable
     # one-liner.
+    [ "$killed" -gt 0 ] || fail "crash-consistency" \
+        "no iteration SIGKILLed a live promote — the crash fuzz crashed nothing"
     local rec_out rec_rc=0
     cur="$(active_gen)"; if [ "$cur" = "$genA" ]; then other="$genB"; else other="$genA"; fi
     rec_out="$(cli template-promote "$SILO" --rollback "$other" 2>&1)" || rec_rc=$?

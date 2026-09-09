@@ -304,49 +304,66 @@ pass "direct silo cannot reach the host (input chain protects host services)"
 # 4b-vi. the per-silo resolver actually ANSWERS (not just a bound socket): send
 #        a real DNS query to host_ip:53 from inside the netns and accept ANY
 #        response (NOERROR/SERVFAIL/REFUSED all prove liveness without WAN).
-# DNS is UDP: a single un-retried datagram is not a liveness test, it is a
-# coin flip. Under `qci full` at QCI_JOBS=8 this step timed out on one lost
-# packet while dnsmasq was demonstrably bound (the assertion right above
-# passed) -- a CPU-starved guest can easily miss a 3s deadline on the first
-# try. Retry with a bounded overall deadline and a fresh transaction id per
-# attempt: the invariant under test is "the resolver answers", not "the
-# resolver answers the first datagram".
+# The claim here is that the per-silo resolver PROCESS is alive and answering,
+# not that the internet is reachable. The old probe sent ONE un-retried
+# `IN A example.com` datagram with a 3s deadline -- and this dnsmasq runs
+# WITHOUT --no-resolv (see qdistro_session_manager._SystemOps.dns_start), so
+# that query is FORWARDED to the host's upstream resolvers. It therefore
+# measured upstream DNS latency, not resolver liveness, which is how it timed
+# out under `qci full` at QCI_JOBS=8 immediately after the assertion above had
+# proven dnsmasq was bound with a live pidfile.
+#
+# `CHAOS TXT version.bind` is answered by dnsmasq ITSELF with no upstream
+# lookup (verified against this exact production argv: answered in 0.000s),
+# so it is a deterministic LOCAL liveness test. Retried under a hard overall
+# deadline, one datagram per fresh connected socket -- connected so only
+# (host_ip, 53) can reply, and the reply must be a real DNS RESPONSE (QR set)
+# carrying our transaction id. Any rcode proves the process answered.
 if ip netns exec "$NS_DIR" python3 - "$DIR_HOST_IP" <<'PY' ; then
-import socket, struct, sys, time
+import os, socket, struct, sys, time
 ip = sys.argv[1]
-DEADLINE = time.monotonic() + 20.0
+DEADLINE = time.monotonic() + 15.0
 attempt = 0
-last = ""
-while time.monotonic() < DEADLINE:
+last = "no attempt made"
+while True:
+    remaining = DEADLINE - time.monotonic()
+    if remaining <= 0:
+        break
+    if attempt:
+        # Never hot-spin: under a flood of non-matching datagrams recv()
+        # returns instantly, and an unpaced loop would burn a core and churn
+        # tens of thousands of transaction ids inside the deadline.
+        time.sleep(min(0.2, max(0.0, DEADLINE - time.monotonic())))
     attempt += 1
-    txid = 0x1234 + attempt
-    # minimal A query for "example.com."
+    # RANDOM id, not a counter: a counter walks a predictable space and can
+    # collide with whatever else is answering on that address.
+    txid = int.from_bytes(os.urandom(2), "big")
     q = struct.pack(">HHHHHH", txid, 0x0100, 1, 0, 0, 0)
-    for part in (b"example", b"com"):
+    for part in (b"version", b"bind"):
         q += bytes([len(part)]) + part
-    q += b"\x00" + struct.pack(">HH", 1, 1)
+    q += b"\x00" + struct.pack(">HH", 16, 3)     # QTYPE=TXT, QCLASS=CHAOS
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(3)
+    # Per-attempt timeout never overshoots the overall deadline.
+    s.settimeout(max(0.05, min(2.0, remaining)))
     try:
-        s.sendto(q, (ip, 53))
-        # Accept ANY response carrying our transaction id (NOERROR/SERVFAIL/
-        # REFUSED all prove liveness without WAN). Ignore stragglers from an
-        # earlier attempt rather than treating them as a mismatch.
-        while True:
-            data, _ = s.recvfrom(512)
-            if len(data) >= 2 and data[:2] == q[:2]:
-                sys.exit(0)
+        s.connect((ip, 53))
+        s.send(q)
+        data = s.recv(512)
+        if len(data) >= 4 and data[:2] == q[:2] and (data[2] & 0x80):
+            sys.exit(0)
+        last = (f"attempt {attempt}: not a matching DNS response "
+                f"(header={data[:4].hex()})")
     except OSError as e:
         last = f"attempt {attempt}: {type(e).__name__}: {e}"
     finally:
         s.close()
-print(f"no DNS answer from {ip}:53 after {attempt} attempt(s); last={last}",
-      file=sys.stderr)
+print(f"no CHAOS TXT version.bind answer from {ip}:53 after {attempt} "
+      f"attempt(s); last={last}", file=sys.stderr)
 sys.exit(2)
 PY
     pass "direct silo per-silo resolver answers DNS on $DIR_HOST_IP:53"
 else
-    # Diagnostics: a real regression and a lost datagram look identical in the
+    # Diagnostics: a dead resolver and a transient miss look identical in the
     # bare failure line, so dump what the resolver/socket state actually was.
     echo "--- resolver diagnostics ---" >&2
     ss -H -ulpn 2>/dev/null | grep ":53" >&2 || true
