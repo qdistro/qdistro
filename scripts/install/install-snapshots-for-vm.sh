@@ -54,7 +54,12 @@ if ! command -v rage >/dev/null 2>&1; then
     # VM surfaces it in the backup-btrfs-e2e lane).
     rage_gpg_flags=()
     is_dev && rage_gpg_flags=( --no-gpg-checks )
-    if ! zypper -n "${rage_gpg_flags[@]}" install rage-encryption; then
+    # A freshly assembled image has no previously trusted key for the pinned
+    # history repositories written by image/config.sh.  Import the key carried
+    # by their signed metadata noninteractively; GPG checking remains enabled
+    # outside the explicitly relaxed dev profile.
+    if ! zypper -n --gpg-auto-import-keys "${rage_gpg_flags[@]}" \
+            install rage-encryption; then
         msg="[install-snapshots] rage-encryption install failed; backups cannot encrypt until 'rage' is present"
         if is_dev; then
             echo "$msg (dev profile: continuing)" >&2
