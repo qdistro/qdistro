@@ -442,7 +442,30 @@ fi'
         'find:tests/unit -name "test_*.py"' 30 \
         'PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1' \
         '${_COV_FLAGS}' "$_qd_pre" "$_qd_post")
+    # DEDICATED budget for this one step. The gate-wide 600s is a WEDGE
+    # DETECTOR sized for the ~20 short host steps (lint, meson, per-repo
+    # pytest) -- it is not a budget the qdistro unit suite should be racing,
+    # and it killed the suite at 75% in full-20260909T184348Z-1476587 after
+    # passing at 549s/560s in the two runs before it.
+    #
+    # Measured on the runner (2026-09-09, `--durations` over all nine batches,
+    # ci/runs/full-20260909T184348Z-1476587 evidence):
+    #   * 629s total, of which 131s was ONE test -- the fake-ssh backup shim
+    #     exec'ing a real sync(1), i.e. a host-wide page-cache flush inside a
+    #     unit test. That is fixed at source (tests/unit/test_backup_service.py)
+    #     and was also the single largest source of run-to-run VARIANCE, which
+    #     is what made the old budget marginal (67s in one run, 131s in the
+    #     next).
+    #   * ~370s of the remainder is DELIBERATE wall-clock: multimachine
+    #     fail-closed negative controls that must exhaust the production poll
+    #     budget (30s/15s/10s/5s) to prove the gate closes. Shortening those
+    #     would weaken the assertion, not the runtime.
+    # So ~500s is the honest cost of ~3600 tests here. 1800s is ~3.6x that:
+    # a wedge detector with real headroom. Override: QCI_QDISTRO_PYTEST_TIMEOUT.
+    local _pytest_saved_to="$RUN_STEP_TIMEOUT"
+    RUN_STEP_TIMEOUT="${QCI_QDISTRO_PYTEST_TIMEOUT:-1800}"
     run_logged host qdistro-pytest "$EXIT_HOST" pytest "$QDISTRO_REPO" "$c" "qdistro unit tests"; step_rc=$?
+    RUN_STEP_TIMEOUT="$_pytest_saved_to"
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
     # Publish the coverage report as a run artifact WHEN AVAILABLE (report-only

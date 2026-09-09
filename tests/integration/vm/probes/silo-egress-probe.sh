@@ -304,22 +304,53 @@ pass "direct silo cannot reach the host (input chain protects host services)"
 # 4b-vi. the per-silo resolver actually ANSWERS (not just a bound socket): send
 #        a real DNS query to host_ip:53 from inside the netns and accept ANY
 #        response (NOERROR/SERVFAIL/REFUSED all prove liveness without WAN).
+# DNS is UDP: a single un-retried datagram is not a liveness test, it is a
+# coin flip. Under `qci full` at QCI_JOBS=8 this step timed out on one lost
+# packet while dnsmasq was demonstrably bound (the assertion right above
+# passed) -- a CPU-starved guest can easily miss a 3s deadline on the first
+# try. Retry with a bounded overall deadline and a fresh transaction id per
+# attempt: the invariant under test is "the resolver answers", not "the
+# resolver answers the first datagram".
 if ip netns exec "$NS_DIR" python3 - "$DIR_HOST_IP" <<'PY' ; then
-import socket, struct, sys
+import socket, struct, sys, time
 ip = sys.argv[1]
-# minimal A query for "example.com."
-q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
-for part in (b"example", b"com"):
-    q += bytes([len(part)]) + part
-q += b"\x00" + struct.pack(">HH", 1, 1)
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.settimeout(3)
-s.sendto(q, (ip, 53))
-data, _ = s.recvfrom(512)
-sys.exit(0 if len(data) >= 2 and data[:2] == q[:2] else 2)
+DEADLINE = time.monotonic() + 20.0
+attempt = 0
+last = ""
+while time.monotonic() < DEADLINE:
+    attempt += 1
+    txid = 0x1234 + attempt
+    # minimal A query for "example.com."
+    q = struct.pack(">HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+    for part in (b"example", b"com"):
+        q += bytes([len(part)]) + part
+    q += b"\x00" + struct.pack(">HH", 1, 1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(3)
+    try:
+        s.sendto(q, (ip, 53))
+        # Accept ANY response carrying our transaction id (NOERROR/SERVFAIL/
+        # REFUSED all prove liveness without WAN). Ignore stragglers from an
+        # earlier attempt rather than treating them as a mismatch.
+        while True:
+            data, _ = s.recvfrom(512)
+            if len(data) >= 2 and data[:2] == q[:2]:
+                sys.exit(0)
+    except OSError as e:
+        last = f"attempt {attempt}: {type(e).__name__}: {e}"
+    finally:
+        s.close()
+print(f"no DNS answer from {ip}:53 after {attempt} attempt(s); last={last}",
+      file=sys.stderr)
+sys.exit(2)
 PY
     pass "direct silo per-silo resolver answers DNS on $DIR_HOST_IP:53"
 else
+    # Diagnostics: a real regression and a lost datagram look identical in the
+    # bare failure line, so dump what the resolver/socket state actually was.
+    echo "--- resolver diagnostics ---" >&2
+    ss -H -ulpn 2>/dev/null | grep ":53" >&2 || true
+    cat "/run/qdistro/silo-dns/$NS_DIR.pid" 2>/dev/null >&2 || true
     err "direct silo resolver did not answer a DNS query on $DIR_HOST_IP:53"
 fi
 

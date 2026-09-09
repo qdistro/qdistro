@@ -437,6 +437,35 @@ RET
     pass "gc-pin-safety"
 }
 
+# The exact promote invocation, as a string, so it can be handed to a
+# `setsid bash -c` in its own session (see scenario_crash_consistency).
+promote_cmd() {
+    # Mirror cli()'s dispatch exactly: the installed tool when present, the
+    # source module otherwise. Diverging here would fuzz a different code path
+    # than every other scenario in this probe.
+    if command -v qdistro-template-promote >/dev/null 2>&1; then
+        printf 'qdistro-template-promote %q --rollback %q' "$SILO" "$1"
+    else
+        printf 'PYTHONPATH=%q python3 %q %q --rollback %q' \
+            "$TEMPLATES_SRC" "$TEMPLATES_SRC/qdistro_template_promote.py" \
+            "$SILO" "$1"
+    fi
+}
+
+# Wait (bounded) until no promote process is left running. A kill -9 is
+# asynchronous; observing the binding while a survivor is mid-write would make
+# this scenario race against itself.
+await_promote_quiescent() {
+    local deadline=$((SECONDS + 15))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        pgrep -u "$(id -u)" -f 'qdistro[-_]template[-_]promote' >/dev/null 2>&1 || return 0
+        sleep 0.2
+    done
+    pkill -9 -u "$(id -u)" -f 'qdistro[-_]template[-_]promote' 2>/dev/null || true
+    sleep 0.5
+    ! pgrep -u "$(id -u)" -f 'qdistro[-_]template[-_]promote' >/dev/null 2>&1
+}
+
 scenario_crash_consistency() {
     # kill -9 a promote at random points; the binding must ALWAYS be valid
     # and either the old or the new generation — never partial — because the
@@ -461,11 +490,22 @@ RET
     for i in 1 2 3 4 5; do
         cur="$(active_gen)"
         if [ "$cur" = "$genA" ]; then other="$genB"; else other="$genA"; fi
-        ( cli template-promote "$SILO" --rollback "$other" >/dev/null 2>&1 ) &
+        # `( ... ) &` + `kill -9 $!` kills the SUBSHELL, not the promote it is
+        # waiting on: python keeps running, orphaned, straight into the next
+        # iteration and the recovery promote below. That orphan -- not the
+        # crash-consistency invariant -- is what failed this scenario under
+        # `qci full` at QCI_JOBS=8 (a leftover promote flips the binding after
+        # the recovery step reads active_gen, so --rollback names a generation
+        # that is now ACTIVE and no longer in previous_generations, and promote
+        # correctly refuses). Put the promote in its own session so the kill
+        # reaches the real process, then WAIT for quiescence before observing.
+        setsid bash -c "$(promote_cmd "$other")" >/dev/null 2>&1 &
         local pid=$!
         sleep "0.0$((RANDOM % 9 + 1))"
-        kill -9 "$pid" 2>/dev/null || true
+        kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
+        await_promote_quiescent \
+            || fail "crash-consistency" "a killed promote survived the kill (iteration $i)"
         a="$(active_gen 2>/dev/null)"
         case "$a" in
             "$genA"|"$genB") ;;
@@ -474,10 +514,14 @@ RET
         cli resolve-binding "$SILO" >/dev/null 2>&1 \
             || fail "crash-consistency" "binding unparseable after kill"
     done
-    # recovery: a clean promote after the crashes still works
+    # recovery: a clean promote after the crashes still works. Keep stderr:
+    # a swallowed refusal reason turned every failure here into an unactionable
+    # one-liner.
+    local rec_out rec_rc=0
     cur="$(active_gen)"; if [ "$cur" = "$genA" ]; then other="$genB"; else other="$genA"; fi
-    cli template-promote "$SILO" --rollback "$other" >/dev/null 2>&1 \
-        || fail "crash-consistency" "recovery promote after crashes failed"
+    rec_out="$(cli template-promote "$SILO" --rollback "$other" 2>&1)" || rec_rc=$?
+    [ "$rec_rc" -eq 0 ] \
+        || fail "crash-consistency" "recovery promote after crashes failed (rc=$rec_rc): $rec_out"
     pass "crash-consistency"
 }
 

@@ -170,6 +170,13 @@ class TestSshTargetExecution:
             "done\n"
             "shift   # drop the host token\n"
             f"echo \"$1\" >> {oplog}   # record the remote op (mkdir/mv/sync/...)\n"
+            # `sync` is the REMOTE durability barrier. Executing it for real
+            # here runs sync(1) on the CI HOST, flushing every dirty page on the
+            # box -- observed at 60-131s inside this one unit test on the qci
+            # runner (dominating the whole host pytest step). The assertion only
+            # needs the op RECORDED in the oplog above, so stub it out; the real
+            # remote sync is proven by the VM backup lane.
+            "case \"$1\" in sync) exit 0 ;; esac\n"
             "exec \"$@\"\n")
         ssh.chmod(0o755)
         self._oplog = oplog
