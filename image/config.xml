@@ -68,6 +68,47 @@
          path) and does not create a machine NVRAM boot entry that would
          not travel with the stick. Run 30 already had that path without
          the attribute (shim); setting it makes the intent explicit. -->
+    <!-- kernelcmdline carries `security=selinux selinux=1` because
+         openSUSE Tumbleweed's default active LSM is AppArmor. Without
+         these two words the kernel never initialises SELinux at all:
+         `/etc/selinux/config` still says enforcing (image/lib/selinux-mode.sh
+         writes it), the static verify-contents check still passes, and
+         `getenforce` reports Disabled — so every qdistro policy module the
+         build installs (qdistro_broker, qdistro_pwd, qdistro_session_manager,
+         qdistro_tier1) is inert and the whole tier-1 confinement story is a
+         claim with nothing behind it. That is the single assertion that has
+         been failing image/verify.sh ("SELinux runtime matches image
+         profile"); see todo/fable-6/01-isolation-tiers-0-3.md C1.
+
+         Enforcing vs permissive is NOT pinned here on purpose. No
+         `enforcing=` word is passed, so /etc/selinux/config governs, which
+         keeps the profile split intact: QDISTRO_PROFILE=dev -> permissive,
+         release -> enforcing (image/lib/selinux-mode.sh). Passing
+         `enforcing=` on the cmdline would override the profile and make the
+         dev lane untestable.
+
+         NO `.autorelabel` IS NEEDED, and adding one would be a no-op that
+         creates false confidence. Two independent reasons:
+         (1) kiwi already relabels the finished image. Because no
+             config.sh-era disk script (POST_DISK_SYNC_SCRIPT) exists here,
+             kiwi's disk builder calls SystemSetup.setup_selinux_file_contexts(),
+             which chroots into the assembled root and runs
+             `setfiles -F -p <file_contexts> /` over the whole tree, using the
+             image's OWN file_contexts — i.e. after config.sh has installed the
+             qdistro policy modules, so qdistro types are in scope. Verified on
+             the shipped raw: /usr/lib/systemd/systemd is init_exec_t,
+             /etc/passwd is passwd_file_t, /usr/sbin/sshd is sshd_exec_t, and
+             /usr/libexec/qdistro/qdistro_admin_broker.py carries the custom
+             qdistro_broker_exec_t. The filesystem is labelled, not virgin.
+         (2) Nothing in this image would consume a `.autorelabel` flag even if
+             it were dropped. systemd 261 as shipped has no autorelabel code
+             (no such string in the PID1 binary) and the image ships neither
+             selinux-autorelabel.service nor selinux-autorelabel-mark.service.
+             The empty /etc/selinux/.autorelabel the policy RPM leaves behind
+             is read by nothing.
+         selinux_policy="targeted" states explicitly what kiwi otherwise
+         defaults to, so the setfiles pass can never silently pick another
+         store. -->
     <type image="oem"
           filesystem="btrfs"
           firmware="uefi"
@@ -75,7 +116,8 @@
           installiso="false"
           installboot="install"
           bundle_format="%N-%v-%I"
-          kernelcmdline="quiet"
+          kernelcmdline="quiet security=selinux selinux=1"
+          selinux_policy="targeted"
           efipartsize="512">
       <!-- kernelcmdline deliberately does NOT carry a systemd.default_vt
            setting. That is not a systemd option (no such key in logind's
