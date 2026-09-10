@@ -174,5 +174,24 @@ Environment:
                             run to EXIT_RELEASE (15); a real failure keeps its own
                             class. Infra gates (preflight/selftest/lint/…) are
                             excluded.
+  QCI_HOST_STEP_TIMEOUT     Per-step wall budget for the `host` gate, in seconds
+                            (default 600). It does NOT cover the qdistro pytest
+                            step, which carries its own budget below — raising
+                            this knob alone does not give pytest more time.
+  QCI_QDISTRO_PYTEST_TIMEOUT  Wall budget for the `qdistro-pytest` host step, in
+                            seconds (default 1800). Independent of
+                            QCI_HOST_STEP_TIMEOUT on purpose: the suite's honest
+                            cost is ~550s across ten batches, so the shared 600s
+                            step budget left no headroom and a single slow test
+                            killed the whole gate. 1800s is ~3.3x the honest
+                            cost, which keeps the step a wedge detector while
+                            making it insensitive to normal variance. Set BOTH
+                            knobs when you want every host step slower.
+  QCI_EXTRA_BATS_ROOTS      Colon-separated extra repo roots to discover bats
+                            files under, e.g. /path/a:/path/b. Discovery
+                            normally covers only the declared PROJECTS checkouts
+                            (see `bats_discover_files`), so an out-of-tree suite
+                            is invisible unless it is opted in here. Roots that
+                            do not exist are ignored; results are de-duplicated.
 EOF
 }

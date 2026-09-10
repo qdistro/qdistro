@@ -647,8 +647,12 @@ Scenario file:
   another path; tools including ImageMagick are expected to write there directly.
 - In reports, link to sibling evidence with relative paths (for example
   \`step2.png\`), never with the absolute temporary artifact-directory prefix.
-- Before returning, write \`$artifact_dir/status.txt\`
-  containing exactly one word: PASS, FAIL, ERROR, or SKIP.
+- Before returning, write \`$artifact_dir/status.txt\`. Its FIRST word is the
+  verdict — exactly one of PASS, FAIL, ERROR, SKIP. For SKIP, put a one-line
+  reason on the SAME line after the word (\`SKIP foot is not installed in the
+  guest image\`); that reason is what the run report shows, and a bare \`SKIP\`
+  makes every skipped scenario read alike. For the other three verdicts write
+  the word alone.
 - WRITE status.txt FIRST as soon as you have a verdict, then other evidence.
 - Do NOT write evidence under any other \`ci/runs/...\` path. Do NOT drop
   trailing segments from the path above. A truncated path is a harness error.
@@ -697,8 +701,31 @@ Rules:
   accidentally writes a relative temporary output stays there instead of
   polluting the source checkout. Required evidence must still be saved under the
   artifact directory above.
-- Execute setup, steps, assertions, and cleanup serially.
-- Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
+- Execute setup, steps, assertions, and cleanup serially, in ONE guest shell
+  invocation. Scenario setup helpers commonly arm an \`EXIT\` trap that restores
+  the compositor's shell role; if you run Setup in one \`vm-exec\`/\`guest-exec\`
+  and the Steps in another, that trap fires the instant Setup's shell exits and
+  silently tears down the state your Steps depend on. What then looks like a
+  missing precondition is your own teardown.
+- Exit code follows the verdict, and the harness is strict about it:
+  - PASS — every required assertion passed. Exit 0.
+  - SKIP — exit 0, with \`SKIP <reason>\` in status.txt. A SKIP recorded with a
+    NONZERO exit is a hard failure, not a skip: a skip artifact left by a
+    process that timed out or was killed is not an intentional skip.
+  - FAIL — a product-behaviour assertion did not hold. Exit nonzero.
+  - ERROR — you could not reach a verdict. Exit nonzero.
+- SKIP is deliberately NARROW. Use it only when a package, binary, service,
+  helper, or image capability this scenario requires is verifiably ABSENT here,
+  and you can name it and name the check that showed it absent
+  (\`command -v foot\`, \`rpm -q ydotool\`, \`systemctl status ...\`). No amount of
+  correct driving on your part would make the scenario runnable.
+  These are NOT skips — record ERROR (nonzero) instead: your own commands were
+  malformed or their state did not survive into a later command; a required
+  process started and then died or stopped responding; a command ran but
+  returned output you did not expect; anything you simply did not observe while
+  the dependency itself was present. Calling one of those a SKIP turns a real
+  defect green, which is worse than a red row. When torn between SKIP and
+  ERROR, choose ERROR.
 - Diagnose your OWN tooling before blaming the product:
   - First confirm your setup/driver commands actually executed. A shell
     parser/usage error from one of your own commands (e.g. \`option requires an
@@ -832,10 +859,9 @@ gui_skip_reason() {
     # would split a single result into two malformed report rows (and an ESC
     # would inject a terminal escape sequence into the report). This text comes
     # from an artifact the agent wrote, so it is untrusted input to the TSV.
-    reason=$(printf '%s' "$reason" \
-        | sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g; s/`//g' \
-        | tr -d '[:cntrl:]' \
-        | sed -E 's/\xc2\x85|\xe2\x80\xa8|\xe2\x80\xa9/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+    # Shared with the bats companion-row path via tsv_note_sanitize (ci/lib/core.sh)
+    # so the two note paths cannot drift apart (they did: bats stripped only \t).
+    reason=$(printf '%s' "$reason" | tsv_note_sanitize)
     printf '%s' "${reason:0:300}"
 }
 

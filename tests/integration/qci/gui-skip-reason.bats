@@ -17,6 +17,7 @@ setup() {
     ADIR="$BATS_TEST_TMPDIR/artifacts"
     mkdir -p "$ADIR"
     # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/core.sh"
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
 }
 

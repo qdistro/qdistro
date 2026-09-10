@@ -60,10 +60,27 @@ bats_tap_skip_reasons() {
     local log=$1 out
     [ -f "$log" ] || return 0
     # `paste -sd'; '` would cycle through BOTH delimiters; join on ';' and space
-    # it afterwards. Tabs are stripped so the value cannot break the TSV column.
+    # it afterwards.
+    #
+    # A bats `skip "..."` reason routinely interpolates command output (the
+    # compositor-shell reason embeds a VM name), so it is untrusted text landing
+    # in a TSV column that report.py reads with Python splitlines(). Stripping
+    # only \t — as this did — left \r \v \f \x1c \x1d \x1e \x85 and
+    # U+2028/U+2029, any of which splits one companion row into two malformed
+    # report rows or truncates its `category`. tsv_note_sanitize (ci/lib/core.sh)
+    # is the SHARED strip that gui_skip_reason already used; both note paths now
+    # go through it so the two cannot drift apart again.
+    #
+    # Sanitising happens per-reason, BEFORE sort -u, so a reason whose only
+    # difference from another was a stripped control character dedupes correctly
+    # and the join delimiter is applied to already-clean values.
     out=$(grep -oE '^ok [0-9]+ .*# skip.*' "$log" 2>/dev/null \
-        | sed -E 's/^.*# skip[[:space:]]*//; s/^$/(no reason given)/' \
-        | tr -d '\t' | sort -u | paste -sd';' - | sed 's/;/; /g')
+        | sed -E 's/^.*# skip[[:space:]]*//' \
+        | while IFS= read -r _r; do
+              _r=$(printf '%s' "$_r" | tsv_note_sanitize)
+              printf '%s\n' "${_r:-(no reason given)}"
+          done \
+        | sort -u | paste -sd';' - | sed 's/;/; /g')
     printf '%s' "${out:0:400}"
 }
 
