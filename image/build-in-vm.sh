@@ -52,6 +52,11 @@ HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
 # accident. A tester build passes QDISTRO_PROFILE=dev explicitly (iso/14
 # Phase A item 5). The value is validated so a typo cannot silently select
 # the other image instead of failing.
+if [ -n "${QDISTRO_PROFILE:-}" ]; then
+    QDISTRO_PROFILE_ORIGIN="explicitly requested"
+else
+    QDISTRO_PROFILE_ORIGIN="DEFAULTED - not requested by this invocation"
+fi
 QDISTRO_PROFILE="${QDISTRO_PROFILE:-release}"
 case "$QDISTRO_PROFILE" in
     dev|release) ;;
@@ -324,6 +329,18 @@ log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
 set +e
 log "  building with QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_KIWI_PROFILE=$QDISTRO_KIWI_PROFILE"
+# State the profile unmissably. QDISTRO_PROFILE defaults to release on purpose
+# (an unqualified build must not bake default credentials), but the quiet form
+# of that default shipped a release-stamped tester image once already, so the
+# banner names both the value AND whether it was chosen or defaulted.
+if [ "$QDISTRO_PROFILE" = dev ]; then
+    printf '\033[1;33m[in-vm] ===== BAKING PROFILE: dev (%s) =====\033[0m\n' "$QDISTRO_PROFILE_ORIGIN"
+    printf '\033[1;33m[in-vm]       dev = passwordless admin sudoers + SELINUX=permissive. The tester image.\033[0m\n'
+else
+    printf '\033[1;36m[in-vm] ===== BAKING PROFILE: release (%s) =====\033[0m\n' "$QDISTRO_PROFILE_ORIGIN"
+    printf '\033[1;36m[in-vm]       release = no passwordless sudoers + SELINUX=enforcing.\033[0m\n'
+    printf '\033[1;36m[in-vm]       The TESTER image is dev: QDISTRO_PROFILE=dev ./build-in-vm.sh\033[0m\n'
+fi
 # Retry on stall. Measured 2026-09-04: fetching repo metadata / the repo gpg
 # key from download.opensuse.org hangs outright on roughly half of attempts on
 # a flaky uplink -- an A/B of 6 runs failed 1/3 at 1 connection and 1/3 at 5,
@@ -642,6 +659,22 @@ log "checking release artifact $host_xz"
     > "$LOGS/release-artifact.txt" 2>&1 \
     || { cat "$LOGS/release-artifact.txt"; die "release artifact check failed; see $LOGS/release-artifact.txt"; }
 cat "$LOGS/release-artifact.txt"
+
+#-- 11b. Prove the baked profile is the profile we asked for ------------------
+# The release proof above checks the artifact's name, checksum, integrity and
+# size -- everything except WHICH PRODUCT it is. QDISTRO_PROFILE decides the
+# passwordless sudoers rule and, since the SELinux cmdline landed, whether the
+# image boots permissive or enforcing; both are security-relevant and neither
+# is visible in the filename. A tester build that forgets QDISTRO_PROFILE=dev
+# silently gets the release default, which is exactly how the 0.1.0-20260902
+# image shipped PROFILE=release against a recorded dev direction. Fail the
+# build rather than publish an artifact that is not what was asked for.
+log "checking baked profile stamp against the requested profile"
+. "$HERE/lib/profile-proof.sh"
+( qdistro_prove_profile "$host_raw" "$QDISTRO_PROFILE" ) \
+    > "$LOGS/profile-proof.txt" 2>&1 \
+    || { cat "$LOGS/profile-proof.txt"; die "baked profile does not match QDISTRO_PROFILE=$QDISTRO_PROFILE; see $LOGS/profile-proof.txt"; }
+cat "$LOGS/profile-proof.txt"
 
 if [ "$KEEP_RUNNING" = 1 ]; then
     virsh start "$VM" || warn "--keep: could not restart $VM"

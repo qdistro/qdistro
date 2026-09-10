@@ -33,6 +33,21 @@ case "$QDISTRO_IMAGE_PROFILE" in
     dev|release) ;;
     *) echo "[qdistro-image] FATAL: QDISTRO_PROFILE must be dev or release, got: $QDISTRO_IMAGE_PROFILE" >&2; exit 1 ;;
 esac
+# State it unmissably in the build log, and state what it DECIDES. The profile
+# is not cosmetic: it selects the passwordless sudoers rule and the SELinux
+# runtime mode written into /etc/selinux/config below. build-in-vm.sh asserts
+# this same value back out of the finished raw (image/lib/profile-proof.sh).
+echo "[qdistro-image] ============================================================"
+if [ "$QDISTRO_IMAGE_PROFILE" = dev ]; then
+    echo "[qdistro-image]  PROFILE = dev      (the TESTER image)"
+    echo "[qdistro-image]    -> passwordless admin sudoers baked"
+    echo "[qdistro-image]    -> SELINUX=permissive in /etc/selinux/config"
+else
+    echo "[qdistro-image]  PROFILE = release  (the safe default)"
+    echo "[qdistro-image]    -> no passwordless sudoers"
+    echo "[qdistro-image]    -> SELINUX=enforcing in /etc/selinux/config"
+fi
+echo "[qdistro-image] ============================================================"
 
 if [ -f /etc/os-release.qdistro ]; then
     rm -f /etc/os-release
