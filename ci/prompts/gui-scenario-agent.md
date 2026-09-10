@@ -57,6 +57,16 @@ Procedure:
    Calling one of those a SKIP turns a real defect green, which is strictly
    worse than a red row. When in doubt between SKIP and ERROR, choose ERROR.
 
+   Two concrete examples:
+   - Good SKIP: `SKIP foot is not installed in this golden image (command -v
+     foot -> not found)`, exit 0. The dependency is named, the check is named,
+     and no driving would have made the scenario runnable.
+   - Bad SKIP (record ERROR instead): "the helper client bound the protocol but
+     was gone by the time I ran the steps". Something started and then
+     disappeared. That is a defect somewhere -- possibly in your own driving
+     (see step 9), possibly in the product -- and calling it a skip makes it
+     invisible. Exit nonzero with ERROR.
+
 9. Run Setup, Steps, Assertions, and Cleanup as ONE guest shell invocation.
    Scenario setup helpers commonly arm an `EXIT` trap that restores the
    compositor's shell role; splitting Setup and Steps across separate

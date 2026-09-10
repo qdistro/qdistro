@@ -726,6 +726,15 @@ Rules:
   the dependency itself was present. Calling one of those a SKIP turns a real
   defect green, which is worse than a red row. When torn between SKIP and
   ERROR, choose ERROR.
+- Two concrete examples:
+  - Good SKIP: status.txt = \`SKIP foot is not installed in this golden image
+    (command -v foot -> not found)\`, exit 0. The dependency is named, the check
+    is named, and no driving would have made the scenario runnable.
+  - Bad SKIP, record ERROR instead: "the helper client bound the protocol but
+    was gone by the time I ran the steps". Something started and then
+    disappeared; that is a defect somewhere -- possibly your own driving, see
+    the single-guest-shell rule above -- and calling it a skip makes it
+    invisible. Exit nonzero with ERROR.
 - Diagnose your OWN tooling before blaming the product:
   - First confirm your setup/driver commands actually executed. A shell
     parser/usage error from one of your own commands (e.g. \`option requires an
