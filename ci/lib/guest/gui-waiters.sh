@@ -67,17 +67,38 @@
 # propagates that 141 out of this function and CONVERTS A SUCCESSFUL WAIT INTO A
 # FAILURE. That is precisely the bug class this whole file exists to remove, so
 # the line cap is applied with mapfile over a here-string instead.
+#
+# SCOPE: this claim is about _await_print_observed ONLY. Several _probe_*
+# helpers below still use early-closing pipelines (`| head -n1`, `| grep -m1`).
+# They are safe AS CALLED, because _await evaluates them in an `if` condition
+# and decides success from the captured value; but calling a _probe_* directly
+# under `set -e -o pipefail` is NOT safe. Fix those before using one standalone.
 : "${QCI_AWAIT_OBSERVED_MAX_LINES:=20}"
 : "${QCI_AWAIT_OBSERVED_MAX_BYTES:=8192}"
 
-# _await_positive_int <value> <fallback> — echo <value> if it is a positive
-# integer, else <fallback>. A malformed cap must not abort a passing waiter.
+# _await_positive_int <value> <fallback> — echo <value> canonicalized as a
+# positive base-10 integer, else <fallback>. A malformed cap must never abort a
+# passing waiter, so every rejection falls back rather than failing.
+#
+# Digit-only is NOT sufficient validation, because the callers use these values
+# in arithmetic and array-slice contexts:
+#   - "08" is digit-only but reads as OCTAL in $(( )), so it errors with
+#     "value too great for base" and, under set -e, kills a successful waiter.
+#   - "000" is digit-only and positive-looking but is zero.
+#   - a 30-digit string overflows a 64-bit shell integer ("integer expected").
+# Hence: bound the length first, then force base 10, then require >= 1.
 _await_positive_int() {
-    case $1 in
-        '' | *[!0-9]* ) printf '%s\n' "$2" ;;
-        0 )             printf '%s\n' "$2" ;;
-        * )             printf '%s\n' "$1" ;;
+    local v=$1 fallback=$2 n
+    case $v in
+        '' | *[!0-9]* ) printf '%s\n' "$fallback"; return 0 ;;
     esac
+    # Bound BEFORE any arithmetic: bash integers are 64-bit, and an overlong
+    # literal makes $(( )) fail rather than wrap.
+    if [ "${#v}" -gt 18 ]; then printf '%s\n' "$fallback"; return 0; fi
+    # 10# forces base 10, so a leading zero is a leading zero, not octal.
+    n=$((10#$v))
+    if [ "$n" -lt 1 ]; then printf '%s\n' "$fallback"; return 0; fi
+    printf '%s\n' "$n"
 }
 
 _await_print_observed() {

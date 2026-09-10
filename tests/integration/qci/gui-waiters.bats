@@ -301,3 +301,35 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"[await] observed: hello"* ]]
 }
+
+@test "_await: a digit-only but malformed cap cannot abort a passing wait" {
+    # Round-2 review: digit-only is not enough. "08" is octal in $(( )), "000"
+    # is zero, and an overlong digit string overflows a 64-bit shell integer.
+    # Each of these previously either aborted a SUCCESSFUL waiter under
+    # `set -euo pipefail` or silently applied a cap of zero.
+    local v
+    for v in 08 000 0000000000000000000000000000 ; do
+        run bash -c '
+            set -euo pipefail
+            . '"$REPO_ROOT/ci/lib/guest/gui-waiters.sh"'
+            QCI_AWAIT_OBSERVED_MAX_LINES='"$v"'
+            multi() { printf "l1\nl2\nl3\n"; }
+            _await "capped" 5 1 multi
+            echo "SURVIVED"
+        '
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"SURVIVED"* ]]
+        [[ "$output" == *"[await] observed: l1"* ]]
+    done
+}
+
+@test "_await_positive_int: canonicalizes and rejects per contract" {
+    source "$REPO_ROOT/ci/lib/guest/gui-waiters.sh"
+    [ "$(_await_positive_int 08 20)" = "8" ]      # octal-looking -> base 10
+    [ "$(_await_positive_int 000 20)" = "20" ]    # zero -> fallback
+    [ "$(_await_positive_int 0 20)" = "20" ]
+    [ "$(_await_positive_int "" 20)" = "20" ]
+    [ "$(_await_positive_int abc 20)" = "20" ]
+    [ "$(_await_positive_int 5 20)" = "5" ]
+    [ "$(_await_positive_int 999999999999999999999999 20)" = "20" ]  # overflow
+}
