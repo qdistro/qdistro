@@ -250,3 +250,54 @@ setup() {
     [[ "$output" == *"truncated, 45 more line(s)"* ]]
     [[ "$output" != *"50"* ]]
 }
+
+# --- Regressions for the observation-cap defects found in codex sol review ---
+# (todo/reviews/out-59-qga.md). The pre-existing cap test above uses 50 SHORT
+# lines, which fit in the pipe buffer, so it could not catch either bug.
+
+@test "_await: a large success under set -euo pipefail does NOT become a failure" {
+    # The original cap used `printf | head`, which closes the read end early.
+    # printf then takes SIGPIPE (141) and, under pipefail, that 141 propagated
+    # out of a SUCCESSFUL wait. Output must exceed the pipe buffer (64 KiB) for
+    # the race to bite, hence 200k lines rather than 50.
+    run bash -c '
+        set -euo pipefail
+        . '"$REPO_ROOT/ci/lib/guest/gui-waiters.sh"'
+        QCI_AWAIT_OBSERVED_MAX_LINES=5
+        big() { seq 1 200000; }
+        _await "huge" 5 1 big
+        echo "SURVIVED rc=$?"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SURVIVED rc=0"* ]]
+    [[ "$output" == *"[await] OK after"* ]]
+    [[ "$output" == *"truncated, 199995 more line(s)"* ]]
+}
+
+@test "_await: a single oversized line is byte-capped, not emitted whole" {
+    # The line cap alone is defeated by one long line (e.g. a whole dbus reply),
+    # which is the case that can reach qga's per-stream capture cap.
+    run bash -c '
+        set -euo pipefail
+        . '"$REPO_ROOT/ci/lib/guest/gui-waiters.sh"'
+        QCI_AWAIT_OBSERVED_MAX_BYTES=200
+        oneline() { printf "x%.0s" $(seq 1 200000); echo; }
+        _await "oneline" 5 1 oneline
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"more byte(s)"* ]]
+    # Whole-line emission was 200048 bytes; the cap must hold it far below that.
+    [ "${#output}" -lt 1000 ]
+}
+
+@test "_await: a malformed cap falls back instead of aborting a passing wait" {
+    run bash -c '
+        set -euo pipefail
+        . '"$REPO_ROOT/ci/lib/guest/gui-waiters.sh"'
+        QCI_AWAIT_OBSERVED_MAX_LINES=notanumber
+        QCI_AWAIT_OBSERVED_MAX_BYTES=-5
+        _await "smallprobe" 5 1 echo hello
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[await] observed: hello"* ]]
+}

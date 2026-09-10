@@ -51,23 +51,72 @@
 # observed state" on timeout, so a probe that echoes the value it saw produces a
 # self-explaining failure. Bounded by the wall clock via SECONDS. Returns 0 when
 # ready, 1 on timeout.
-# _await_print_observed <text> — echo a probe's success observation, capped at
-# QCI_AWAIT_OBSERVED_MAX_LINES lines so a chatty probe (e.g. a whole dbus reply)
-# cannot bury a scenario transcript. Truncation is ANNOUNCED, never silent, and
-# only ever applies to the SUCCESS path — a timeout still reports the last
-# observed state in full.
+# _await_print_observed <text> — echo a probe's success observation, bounded so
+# a chatty probe (e.g. a whole dbus reply) cannot bury a scenario transcript.
+# Two independent caps apply, in order:
+#   QCI_AWAIT_OBSERVED_MAX_LINES (default 20)  — line count
+#   QCI_AWAIT_OBSERVED_MAX_BYTES (default 8192) — total bytes, which is the cap
+#     that actually protects the qga guest-exec capture path, since ONE long
+#     line defeats a line cap entirely.
+# Truncation is ANNOUNCED, never silent, and only ever applies to the SUCCESS
+# path — a timeout still reports the last observed state in full.
+#
+# NO PIPELINES HERE, DELIBERATELY. The obvious `printf ... | head -n N` closes
+# the read end early, so printf takes SIGPIPE and the command substitution
+# yields 141. Under `set -euo pipefail` — which scenarios run with — pipefail
+# propagates that 141 out of this function and CONVERTS A SUCCESSFUL WAIT INTO A
+# FAILURE. That is precisely the bug class this whole file exists to remove, so
+# the line cap is applied with mapfile over a here-string instead.
 : "${QCI_AWAIT_OBSERVED_MAX_LINES:=20}"
+: "${QCI_AWAIT_OBSERVED_MAX_BYTES:=8192}"
+
+# _await_positive_int <value> <fallback> — echo <value> if it is a positive
+# integer, else <fallback>. A malformed cap must not abort a passing waiter.
+_await_positive_int() {
+    case $1 in
+        '' | *[!0-9]* ) printf '%s\n' "$2" ;;
+        0 )             printf '%s\n' "$2" ;;
+        * )             printf '%s\n' "$1" ;;
+    esac
+}
+
 _await_print_observed() {
-    local text=$1 total shown
-    total=$(printf '%s\n' "$text" | wc -l)
-    if [ "$total" -le "$QCI_AWAIT_OBSERVED_MAX_LINES" ]; then
-        printf '[await] observed: %s\n' "$text"
-        return 0
+    # Byte-scoped for the whole function: under LC_ALL=C, ${#s} and ${s:0:n}
+    # count bytes rather than characters, which is what the qga stream cap
+    # measures. `local` restores the caller's locale on return.
+    local LC_ALL=C
+    local text=$1 max_lines max_bytes total shown dropped_lines dropped_bytes
+    local -a lines
+
+    max_lines=$(_await_positive_int "${QCI_AWAIT_OBSERVED_MAX_LINES}" 20)
+    max_bytes=$(_await_positive_int "${QCI_AWAIT_OBSERVED_MAX_BYTES}" 8192)
+
+    mapfile -t lines <<< "$text"
+    total=${#lines[@]}
+
+    if [ "$total" -le "$max_lines" ]; then
+        shown=$text
+        dropped_lines=0
+    else
+        printf -v shown '%s\n' "${lines[@]:0:$max_lines}"
+        shown=${shown%$'\n'}
+        dropped_lines=$((total - max_lines))
     fi
-    shown=$(printf '%s\n' "$text" | head -n "$QCI_AWAIT_OBSERVED_MAX_LINES")
+
+    dropped_bytes=0
+    if [ "${#shown}" -gt "$max_bytes" ]; then
+        dropped_bytes=$((${#shown} - max_bytes))
+        shown=${shown:0:$max_bytes}
+    fi
+
     printf '[await] observed: %s\n' "$shown"
-    printf '[await] observed: ... (truncated, %s more line(s))\n' \
-        "$((total - QCI_AWAIT_OBSERVED_MAX_LINES))"
+    if [ "$dropped_lines" -gt 0 ]; then
+        printf '[await] observed: ... (truncated, %s more line(s))\n' "$dropped_lines"
+    fi
+    if [ "$dropped_bytes" -gt 0 ]; then
+        printf '[await] observed: ... (truncated, %s more byte(s))\n' "$dropped_bytes"
+    fi
+    return 0
 }
 
 _await() {
