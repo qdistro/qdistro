@@ -525,9 +525,15 @@ runs when in fact all six self-killed identically (`todo/reviews/out-59-qga.md`)
 Safe forms, in order of preference:
 
 ```bash
-# BEST — kill a validated PID your Setup recorded. Sharper than any pattern,
-# and it cannot collateral-kill an unrelated process on a shared VM.
-$VMEXEC "$VM" 'p=$(cat /tmp/my-helper.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) : ;; *) kill "$p" 2>/dev/null || true ;; esac'
+# BEST — kill a PID your Setup recorded, verified by IDENTITY. A bare PID is
+# not an identity: a helper can exit early and the kernel can recycle its
+# number onto an unrelated process before Teardown runs. Record the PID plus
+# its /proc starttime (field 22) and compare both before killing. Reject 0
+# (`kill 0` signals your OWN process group) and 1.
+#   Setup:    echo $! > /tmp/my-helper.pid
+#             sed 's/.*) //' /proc/$!/stat | cut -d' ' -f20 > /tmp/my-helper.starttime
+#   Teardown: compare the live starttime to the recorded one, then kill.
+# See permissions-gui/59 Teardown for the full form.
 
 # GOOD — bracket the first character: the literal pattern text never equals
 # the string being matched, so the qga shell cannot match itself.

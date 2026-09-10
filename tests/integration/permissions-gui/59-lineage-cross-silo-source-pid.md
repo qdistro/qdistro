@@ -71,7 +71,19 @@ sleep 1
 
 # A long-lived `work` process supplies the source pid. sleep keeps a stable
 # (pid, starttime, exe) for the duration of the scenario.
-$VMEXEC "$VM" 'runuser -u work -- bash -c "setsid sleep 600 >/dev/null 2>&1 & echo \$! >/tmp/cross-silo-src-helper.pid"; true'
+# Record the helper's PID **and its /proc starttime**. A bare PID is not an
+# identity: `sleep 600` can expire during a slow scenario and the kernel can
+# recycle the number onto an unrelated process before Teardown runs. The
+# (pid, starttime) pair is the standard cheap identity check.
+HELPER_B64=$(base64 -w0 <<'EOF'
+runuser -u work -- bash -c 'setsid sleep 600 >/dev/null 2>&1 & echo $! >/tmp/cross-silo-src-helper.pid'
+p=$(cat /tmp/cross-silo-src-helper.pid)
+# Field 22 of /proc/PID/stat is starttime. Strip through the last ")" first so a
+# comm containing spaces cannot shift the field offsets.
+sed 's/.*) //' "/proc/$p/stat" | cut -d' ' -f20 > /tmp/cross-silo-src-helper.starttime
+EOF
+)
+$VMEXEC "$VM" "echo $HELPER_B64 | base64 -d | bash"
 sleep 1
 ```
 
@@ -276,7 +288,26 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
 # Kill the recorded PID rather than pattern-matching "sleep 600": the pattern
 # both self-matched this command's qga shell and would have killed any unrelated
 # `sleep 600` on the VM. The pidfile was written by Setup.
-$VMEXEC "$VM" 'p=$(cat /tmp/cross-silo-src-helper.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) : ;; *) kill "$p" 2>/dev/null || true ;; esac; rm -f /tmp/cross-silo-src-helper.pid; true'
+TEARDOWN_B64=$(base64 -w0 <<'EOF'
+p=$(cat /tmp/cross-silo-src-helper.pid 2>/dev/null || true)
+want=$(cat /tmp/cross-silo-src-helper.starttime 2>/dev/null || true)
+case "$p" in
+    "" | *[!0-9]* ) p="" ;;
+esac
+# Reject 0 (kill 0 signals our OWN process group) and 1 (init) outright.
+if [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; then
+    got=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f20)
+    if [ -n "$want" ] && [ "$got" = "$want" ]; then
+        kill "$p" 2>/dev/null || true
+    else
+        echo "[teardown] PID $p is not the recorded helper (starttime $got != $want); not killing" >&2
+    fi
+fi
+rm -f /tmp/cross-silo-src-helper.pid /tmp/cross-silo-src-helper.starttime
+true
+EOF
+)
+$VMEXEC "$VM" "echo $TEARDOWN_B64 | base64 -d | bash"
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'sed -i "/lineage_enforce/d" /etc/qdistro/broker.conf 2>/dev/null || true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'

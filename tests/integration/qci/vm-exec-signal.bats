@@ -22,19 +22,36 @@ setup() {
     : > "$STATE"
 }
 
-# make_virsh <status-json> — a fake virsh answering guest-exec with pid 4242 and
-# every guest-exec-status with the given JSON. Records each status call so we can
-# assert vm-exec stopped polling instead of grinding through its retry budget.
+# make_virsh <terminal-json> [nonterminal-count] — a fake virsh answering
+# guest-exec with pid 4242, then <nonterminal-count> (default 1)
+# {"exited":false} status responses, then the terminal response, then the
+# reaped-PID error for any FURTHER call. That last part matters: terminal
+# status is one-shot in qga, so a correct vm-exec must never poll again, and
+# an incorrect one is caught here rather than passing on a forgiving stub.
 make_virsh() {
+    local terminal=$1 nonterm=${2:-1}
+    printf '%s' "$terminal" > "$BATS_TEST_TMPDIR/terminal.json"
+    printf '%s' "$nonterm" > "$BATS_TEST_TMPDIR/nonterm"
     cat > "$FAKEBIN/virsh" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do
     case "\$a" in
         *guest-exec-status*)
             echo "status" >> "$STATE"
-            cat <<'JSON'
-$1
-JSON
+            n=\$(wc -l < "$STATE")
+            nonterm=\$(cat "$BATS_TEST_TMPDIR/nonterm")
+            if [ "\$n" -le "\$nonterm" ]; then
+                echo '{"return":{"exited":false}}'
+            elif [ "\$n" -eq \$((nonterm + 1)) ]; then
+                cat "$BATS_TEST_TMPDIR/terminal.json"
+            elif grep -q '"error"' "$BATS_TEST_TMPDIR/terminal.json"; then
+                # An ERROR response is not one-shot -- qga will keep returning it.
+                # Only a successful terminal status reaps the bookkeeping.
+                cat "$BATS_TEST_TMPDIR/terminal.json"
+            else
+                # One-shot: metadata already reaped by the terminal response.
+                echo '{"error":{"class":"GenericError","desc":"PID ld does not exist"}}'
+            fi
             exit 0
             ;;
         *'"guest-exec"'*)
@@ -48,14 +65,17 @@ EOF
     chmod +x "$FAKEBIN/virsh"
 }
 
+status_calls() { wc -l < "$STATE"; }
+
 @test "vm-exec: a signal-terminated command exits 128+N instead of polling a reaped PID" {
     make_virsh '{"return":{"exited":true,"signal":15}}'
     PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'pkill -f whatever'
     [ "$status" -eq 143 ]                       # 128 + SIGTERM
     [[ "$output" == *"terminated by signal 15"* ]]
-    # Exactly one status call: terminal status is one-shot, so a second call
-    # would have hit the reaped-PID error that caused the original 30-retry loop.
-    [ "$(wc -l < "$STATE")" -eq 1 ]
+    # One nonterminal poll then the terminal one. A third call would mean it
+    # kept polling past terminal status and hit the reaped-PID error -- the
+    # original 30-retry loop.
+    [ "$(status_calls)" -eq 2 ]
 }
 
 @test "vm-exec: a normal exitcode still wins and is returned unchanged" {
@@ -72,13 +92,63 @@ EOF
     [[ "$output" != *"terminated by signal"* ]]
 }
 
-@test "vm-exec: a stale-PID error explains the pkill self-match instead of blaming qga" {
-    make_virsh '{"error":{"class":"GenericError","desc":"PID ld does not exist"}}'
-    # Keep the retry budget tiny so the test does not sit through the backoff.
-    PATH="$FAKEBIN:$PATH" QDISTRO_VM_AGENT_MAX_ERRORS=2 run timeout 120 "$VM_EXEC" fake-vm 'pkill -f whatever'
+@test "vm-exec: a GENERIC semantic error still retries, and is described honestly" {
+    # Not every qga error is terminal. A generic error is worth retrying -- but
+    # it must not be reported as "not responding": an error RESPONSE proves qga
+    # is alive and serving RPCs. (The reaped-PID error is terminal instead; see
+    # the dedicated test below.)
+    make_virsh '{"error":{"class":"GenericError","desc":"something transient"}}' 0
+    PATH="$FAKEBIN:$PATH" QDISTRO_VM_AGENT_MAX_ERRORS=2 run timeout 120 "$VM_EXEC" fake-vm 'true'
     [ "$status" -ne 0 ]
     [[ "$output" == *"semantic error"* ]]
     [[ "$output" != *"not responding"* ]]
-    [[ "$output" == *"pkill -f"* ]]
+    # It retried rather than failing on the first error.
+    [ "$(status_calls)" -ge 2 ]
+}
+
+# --- Round-2 review additions (todo/reviews/out-round2.md) ---
+
+@test "vm-exec: partial stdout/stderr of a killed command is still decoded" {
+    # A killed command's partial output is often the most useful evidence, and
+    # out-data "errorAAA" is valid base64 that the old `grep -q "error"` check
+    # misread as a QMP error -- which made the signal branch unreachable.
+    # decodes to "j\xab\x00" plus "partial-stderr".
+    make_virsh '{"return":{"exited":true,"signal":9,"out-data":"errorAAA","err-data":"cGFydGlhbC1zdGRlcnI="}}'
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'kill -9 $$'
+    [ "$status" -eq 137 ]                       # 128 + SIGKILL
+    [[ "$output" == *"partial-stderr"* ]]
+    [[ "$output" == *"terminated by signal 9"* ]]
+    [ "$(status_calls)" -eq 2 ]
+}
+
+@test "vm-exec: an inherited TERMSIG cannot fabricate a signal death" {
+    # TERMSIG is poll state. An exported TERMSIG in the caller's environment
+    # used to survive into the exit reporting and claim a signal death for a
+    # command that exited normally on its first status call.
+    make_virsh '{"return":{"exited":true,"exitcode":0}}' 0
+    PATH="$FAKEBIN:$PATH" TERMSIG=15 run timeout 60 "$VM_EXEC" fake-vm true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"terminated by signal"* ]]
+}
+
+@test "vm-exec: an out-of-range signal is a protocol error, never success" {
+    # signal 128 would compute exit 256, which the caller observes as 0 --
+    # a killed command reported as a clean pass.
+    make_virsh '{"return":{"exited":true,"signal":128}}'
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'whatever'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsupported signal value"* ]]
+}
+
+@test "vm-exec: a reaped-PID error fails immediately instead of retrying" {
+    # Terminal status is one-shot, so retrying a reaped PID can never recover;
+    # it only burns the 30-retry budget and then blames the guest agent.
+    make_virsh '{"error":{"class":"GenericError","desc":"PID ld does not exist"}}' 0
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'pkill -f whatever'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"reaped"* ]]
+    [[ "$output" != *"not responding"* ]]
     [[ "$output" == *"[p]attern"* ]]
+    # Immediately: exactly one status call, no retry storm.
+    [ "$(status_calls)" -eq 1 ]
 }

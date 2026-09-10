@@ -139,6 +139,10 @@ fi
 # so host suspend/resume cannot jump elapsed past TIMEOUT in one poll.
 WAIT_COUNT=0
 ERROR_COUNT=0
+# Poll state, not inherited state: an exported TERMSIG in the caller's
+# environment would otherwise survive into step 6 and report a signal death for
+# a command that exited normally on its very first status call.
+TERMSIG=null
 ELAPSED=0
 PREV_UPTIME=$(read_uptime_s)
 while true; do
@@ -190,7 +194,23 @@ while true; do
         exit 1
     fi
 
-    if echo "$RESULT" | grep -q "error"; then
+    # Detect a QMP error STRUCTURALLY. `grep -q "error"` matched anywhere in the
+    # response, including inside base64 payloads -- `out-data: "errorAAA"` is
+    # valid base64 for a perfectly good terminal result, and misreading it as an
+    # error made the signal branch below unreachable and re-entered retries.
+    if [ "$(echo "$RESULT" | jq -r 'has("error")' 2>/dev/null)" = "true" ]; then
+        # A reaped-PID error is TERMINAL, not transient. qga removes the process
+        # bookkeeping in the same response that reports terminal status, so
+        # retrying this answer can never restore it -- it only burns the retry
+        # budget and then blames the guest agent.
+        if printf '%s' "$RESULT" | grep -q "does not exist"; then
+            echo "[vm-exec] ERROR: guest agent has no bookkeeping for PID $PID (reaped)." >&2
+            echo "[vm-exec] HINT: terminal status is one-shot; this cannot be retried." >&2
+            echo "[vm-exec] HINT: If the command used 'pkill -f <pattern>', it matched its OWN" >&2
+            echo "[vm-exec] HINT: qga shell (run as /bin/sh -c '<the whole command>') and killed it." >&2
+            echo "[vm-exec] HINT: Kill a validated PID from a pidfile, or bracket the pattern: '[p]attern'." >&2
+            exit 1
+        fi
         ERROR_COUNT=$((ERROR_COUNT + 1))
         if [ "$ERROR_COUNT" -lt "$AGENT_MAX_ERRORS" ]; then
             sleep_s=2
@@ -206,14 +226,7 @@ while true; do
         # serving RPCs. A stale-PID loop here almost always means the command
         # killed its own qga-spawned shell -- see the `pkill -f` note below.
         echo "[vm-exec] ERROR: Guest agent returned a semantic error after $ERROR_COUNT attempts: $RESULT" >&2
-        case $RESULT in
-            *"does not exist"*)
-                echo "[vm-exec] HINT: qga no longer has bookkeeping for this PID." >&2
-                echo "[vm-exec] HINT: If the command used 'pkill -f <pattern>', it matched its OWN" >&2
-                echo "[vm-exec] HINT: qga shell (run as /bin/sh -c '<the whole command>') and killed it." >&2
-                echo "[vm-exec] HINT: Kill a validated PID from a pidfile, or bracket the pattern: '[p]attern'." >&2
-                ;;
-        esac
+
         exit 1
     fi
     ERROR_COUNT=0
@@ -232,8 +245,19 @@ while true; do
     # result as terminal, exactly like an exitcode.
     TERMSIG=$(echo "$RESULT" | jq -r '.return.signal')
     if [ "$TERMSIG" != "null" ]; then
-        EXITCODE=$((128 + TERMSIG))
-        break
+        # The QAPI field is typed plain `int`, so do not turn malformed protocol
+        # data into a plausible status. Notably signal 128 would compute exit
+        # 256, which the caller observes as 0 -- a kill reported as success.
+        case $TERMSIG in
+            '' | *[!0-9]* ) : ;;
+            * ) if [ "$TERMSIG" -ge 1 ] && [ "$TERMSIG" -le 127 ]; then
+                    EXITCODE=$((128 + TERMSIG))
+                    break
+                fi ;;
+        esac
+        echo "[vm-exec] ERROR: guest agent reported an unsupported signal value: $TERMSIG" >&2
+        TERMSIG=null
+        exit 125
     fi
     WAIT_COUNT=$((WAIT_COUNT + 1))
     if [ $WAIT_COUNT -gt 0 ] && [ $((WAIT_COUNT % 30)) -eq 0 ]; then

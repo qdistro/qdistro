@@ -118,7 +118,7 @@ $VMEXEC "$VM" "runuser -u admin -- virsh qemu-agent-command $VM4 \
 ### S5 — cleanup fallback
 
 ```bash
-$VMEXEC "$VM" "pkill -u root -f \"spawn-tier4.sh.*$VM4\" 2>/dev/null || true; \
+$VMEXEC "$VM" "pkill -u root -f \"[s]pawn-tier4.sh.*$VM4\" 2>/dev/null || true; \
                runuser -u admin -- virsh destroy $VM4 2>/dev/null || true; \
                runuser -u admin -- virsh undefine $VM4 2>/dev/null || true; \
                rm -f /home/admin/.local/share/libvirt/images/$VM4.qcow2"

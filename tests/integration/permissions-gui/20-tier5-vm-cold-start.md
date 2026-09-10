@@ -52,7 +52,7 @@ VM5="qdistro-tier5-s20-$RANDOM"
 echo "VM5=$VM5"
 
 # Drain any leftover tier-5 spawn.
-$VMEXEC "$VM" 'pkill -u root -f spawn-tier5.sh 2>/dev/null || true; sleep 1'
+$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh" 2>/dev/null || true; sleep 1'
 ```
 
 ## Steps
@@ -226,7 +226,7 @@ assertion for this scenario.
 ### S6 — cleanup
 
 ```bash
-$VMEXEC "$VM" "pkill -u root -f \"spawn-tier5.sh.*$VM5\" 2>/dev/null || true; sleep 2"
+$VMEXEC "$VM" "pkill -u root -f \"[s]pawn-tier5.sh.*$VM5\" 2>/dev/null || true; sleep 2"
 $VMEXEC "$VM" "runuser -u admin -- virsh destroy $VM5 2>/dev/null || true; \
                runuser -u admin -- virsh undefine $VM5 2>/dev/null || true; \
                rm -f /home/admin/.local/share/libvirt/images/$VM5.qcow2"

@@ -39,7 +39,7 @@ VM4="qdistro-tier4-rdp-s56-$RANDOM"
 echo "VM4=$VM4"
 
 # Drain leftovers from prior runs.
-$VMEXEC "$VM" 'pkill -u root -f "spawn-tier4.sh.*rdp" 2>/dev/null || true; sleep 1'
+$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier4.sh.*rdp" 2>/dev/null || true; sleep 1'
 ```
 
 This scenario requires the tier-4 outer stack: the qdwin/qdshell
@@ -149,7 +149,7 @@ clients delay input channel activity until focus.
 ### S5 — cleanup
 
 ```bash
-$VMEXEC "$VM" "pkill -u root -f \"spawn-tier4.sh.*$VM4\" 2>/dev/null || true; sleep 3"
+$VMEXEC "$VM" "pkill -u root -f \"[s]pawn-tier4.sh.*$VM4\" 2>/dev/null || true; sleep 3"
 $VMEXEC "$VM" "runuser -u admin -- virsh destroy $VM4 2>/dev/null || true; \
                runuser -u admin -- virsh undefine $VM4 2>/dev/null || true; \
                rm -f /home/admin/.local/share/libvirt/images/$VM4.qcow2"
