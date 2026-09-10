@@ -139,6 +139,7 @@ its presence.
 | `iterate-kiwi.sh` | pushes local `config.xml`/`config.sh`/`build.sh` into a running builder VM and re-runs kiwi (skips the clone). |
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
+| `lib/profile-proof.sh` | reads `/etc/qdistro/release` back OUT of the finished raw and fails the build when the baked `PROFILE` is not the `QDISTRO_PROFILE` that was requested. `build-in-vm.sh` runs it beside the release proof. The release proof checks the artifact's name, checksum, integrity and size — everything except *which product it is*; profile is not in the filename, so this is the only place a mis-profiled image can be caught. |
 | `lib/select-artifact.sh` | resolve the published artifact (explicit path, 64-hex digest, or unique `bundle/*.raw.xz`); `sha256sum -c` + `xz -t` + decompress to `$BUILD_DIR/published/from-xz-<digest>.raw`; reuse requires a full byte comparison against fresh decompression, with unique temporary files and atomic publication. Sourced by `verify.sh` and the image gate. Never `find \| head -1`. |
 | `verify.sh` | boots the resolved disk rootlessly (`qemu:///session`, 64 GiB qcow2 overlay so first-boot repart grows the 28 GiB raw), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Default also: UUID identity, EFI/BOOT, persist marker + btrfs snapshot across a reboot, greeter login (locker session-up). Snapper is packaged but has no root config. `--stick` adds USB / second-disk / hub / Secure Boot / nested-KVM / first-boot power-off / `xzcat \| dd`. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` is a path or the xz digest. |
 | `hardware-run.md` | template for the maintainer's real-stick run (Secure Boot, WPA2/WPA3, silos). Fill in and copy the filled note to `logs/`. |
@@ -192,7 +193,18 @@ A tester-as-base still zypper-installs extras (needs guest egress);
 - `QDISTRO_PROFILE` is a shell variable read by `config.sh`, not a kiwi
   profile. The default is `release` (no passwordless sudo) so an unqualified
   build never produces the dev image by accident; the tester image passes
-  `dev` explicitly.
+  `dev` explicitly. **The default's own failure mode is the quiet one**: a
+  tester build that forgets `QDISTRO_PROFILE=dev` gets a release-stamped
+  artifact and nothing says so — that is how the 0.1.0-20260902 image shipped
+  `PROFILE=release` against this file's own recorded `dev` direction, for the
+  whole life of the image. Three things now make that loud rather than silent:
+  `config.sh` and `build-in-vm.sh` each print a banner naming the profile *and
+  what it decides* (the sudoers rule and the `SELINUX=` line), `build-in-vm.sh`
+  says whether the value was **explicitly requested or defaulted**, and
+  `lib/profile-proof.sh` asserts the baked stamp against the request and fails
+  the build on a mismatch. Since the profile also selects the SELinux runtime
+  mode (`dev` permissive / `release` enforcing), it is security-relevant on
+  both sides.
 - `build-in-vm.sh --teardown <vm>` wipes a builder VM; `./verify.sh
   --teardown` its verify VM.
 
