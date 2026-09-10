@@ -30,6 +30,10 @@ setup() {
 # an incorrect one is caught here rather than passing on a forgiving stub.
 make_virsh() {
     local terminal=$1 nonterm=${2:-1}
+    # Reset the call ledger: a test that reconfigures the fake (e.g. loops over
+    # several bodies) must not resume a previous body's call count, or it lands
+    # in the post-terminal reaped branch instead of the shape under test.
+    : > "$STATE"
     printf '%s' "$terminal" > "$BATS_TEST_TMPDIR/terminal.json"
     printf '%s' "$nonterm" > "$BATS_TEST_TMPDIR/nonterm"
     cat > "$FAKEBIN/virsh" <<EOF
@@ -151,4 +155,51 @@ status_calls() { wc -l < "$STATE"; }
     [[ "$output" == *"[p]attern"* ]]
     # Immediately: exactly one status call, no retry storm.
     [ "$(status_calls)" -eq 1 ]
+}
+
+# --- Round-3 review additions (todo/reviews/out-round3.md) ---
+# Every response body must be validated BEFORE any field is read.
+
+@test "vm-exec: an EMPTY status response never returns success" {
+    # The worst shape: jq accepts empty input with status 0 and emits nothing,
+    # so EXITCODE became "", "" != "null" broke the poll loop, and the script
+    # fell off the end returning 0 -- a command whose status was never
+    # established reported as a clean PASS.
+    make_virsh '' 0
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'true'
+    [ "$status" -eq 76 ]
+    [[ "$output" == *"malformed or empty"* ]]
+}
+
+@test "vm-exec: a malformed non-JSON status response is a protocol error" {
+    make_virsh 'this is not json at all' 0
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'true'
+    [ "$status" -eq 76 ]
+    [[ "$output" == *"malformed or empty"* ]]
+}
+
+@test "vm-exec: valid JSON of the WRONG shape is rejected, not polled to timeout" {
+    # {} and null are valid JSON but carry no return/error member. These used to
+    # yield null fields and poll until the overall command timeout.
+    local body
+    for body in '{}' 'null' '[]' '"a string"' '{"return":42}' '{"error":"oops"}'; do
+        make_virsh "$body" 0
+        PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'true'
+        [ "$status" -eq 76 ]
+        [[ "$output" == *"malformed or empty"* ]]
+    done
+}
+
+@test "vm-exec: a non-numeric exitcode or signal is a protocol error" {
+    # The QAPI fields are typed int; a string "08" previously reached the
+    # shell's octal-sensitive arithmetic ("010" scored 136 instead of 138).
+    local body
+    for body in '{"return":{"exited":true,"signal":"010"}}' \
+                '{"return":{"exited":true,"signal":"08"}}' \
+                '{"return":{"exited":true,"exitcode":"0"}}'; do
+        make_virsh "$body"
+        PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'true'
+        [ "$status" -eq 76 ]
+        [[ "$output" == *"malformed or empty"* ]]
+    done
 }

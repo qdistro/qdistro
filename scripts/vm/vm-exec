@@ -198,12 +198,47 @@ while true; do
     # response, including inside base64 payloads -- `out-data: "errorAAA"` is
     # valid base64 for a perfectly good terminal result, and misreading it as an
     # error made the signal branch below unreachable and re-entered retries.
-    if [ "$(echo "$RESULT" | jq -r 'has("error")' 2>/dev/null)" = "true" ]; then
+    # Parse and VALIDATE the whole body ONCE, before touching any field.
+    #
+    # jq accepts EMPTY input with status 0 and emits nothing. Reading fields
+    # straight out of an unvalidated body therefore made EXITCODE the empty
+    # string, and since "" != "null" that BROKE THE POLL LOOP and let the script
+    # fall off the end returning 0 -- a command whose status was never
+    # established reported as SUCCESS. A wrong-but-valid shape ({} or null)
+    # polled to the overall timeout instead of being rejected.
+    #
+    # Emits: "<kind> <exitcode> <signal>", where the numeric fields are "-" when
+    # absent and "bad" when present with a non-numeric type. jq renders numbers
+    # canonically, which is also what makes leading-zero values ("08", "010")
+    # impossible to reach the shell's octal-sensitive arithmetic.
+    RESP_PARSE=$(printf '%s' "$RESULT" | jq -r '
+        if type != "object" then "bad - -"
+        elif (has("error") and ((.error|type) == "object")) then "error - -"
+        elif (has("return") and ((.return|type) == "object")) then
+            ((if (.return|has("exitcode"))
+                then (if (.return.exitcode|type) == "number" then (.return.exitcode|tostring) else "bad" end)
+                else "-" end) as $ec
+            | (if (.return|has("signal"))
+                then (if (.return.signal|type) == "number" then (.return.signal|tostring) else "bad" end)
+                else "-" end) as $sg
+            | "return \($ec) \($sg)")
+        else "bad - -" end' 2>/dev/null) || RESP_PARSE=""
+    read -r RESP_KIND RESP_EXITCODE RESP_SIGNAL <<< "${RESP_PARSE:-}"
+    if [ -z "${RESP_KIND:-}" ] || [ "$RESP_KIND" = "bad" ] \
+       || [ "$RESP_EXITCODE" = "bad" ] || [ "$RESP_SIGNAL" = "bad" ]; then
+        echo "[vm-exec] ERROR: guest agent returned a malformed or empty status response." >&2
+        echo "[vm-exec] body: ${RESULT:-<empty>}" >&2
+        exit 76   # EX_PROTOCOL
+    fi
+
+    if [ "$RESP_KIND" = "error" ]; then
         # A reaped-PID error is TERMINAL, not transient. qga removes the process
         # bookkeeping in the same response that reports terminal status, so
         # retrying this answer can never restore it -- it only burns the retry
         # budget and then blames the guest agent.
-        if printf '%s' "$RESULT" | grep -q "does not exist"; then
+        # Anchored on .error.desc, not the whole body, so an unrelated payload
+        # cannot be read as a reaping.
+        if printf '%s' "$RESULT" | jq -e '.error.desc | test("does not exist")' >/dev/null 2>&1; then
             echo "[vm-exec] ERROR: guest agent has no bookkeeping for PID $PID (reaped)." >&2
             echo "[vm-exec] HINT: terminal status is one-shot; this cannot be retried." >&2
             echo "[vm-exec] HINT: If the command used 'pkill -f <pattern>', it matched its OWN" >&2
@@ -231,8 +266,8 @@ while true; do
     fi
     ERROR_COUNT=0
 
-    EXITCODE=$(echo "$RESULT" | jq -r '.return.exitcode')
-    if [ "$EXITCODE" != "null" ]; then
+    if [ "$RESP_EXITCODE" != "-" ]; then
+        EXITCODE=$RESP_EXITCODE
         break
     fi
     # A signal-terminated command reports {"exited":true,"signal":N} and has NO
@@ -243,21 +278,18 @@ while true; do
     # permissions-gui/59 look like a flaky guest agent for six runs when the
     # agent was healthy throughout (todo/reviews/out-59-qga.md). Treat a signal
     # result as terminal, exactly like an exitcode.
-    TERMSIG=$(echo "$RESULT" | jq -r '.return.signal')
-    if [ "$TERMSIG" != "null" ]; then
-        # The QAPI field is typed plain `int`, so do not turn malformed protocol
-        # data into a plausible status. Notably signal 128 would compute exit
-        # 256, which the caller observes as 0 -- a kill reported as success.
-        case $TERMSIG in
-            '' | *[!0-9]* ) : ;;
-            * ) if [ "$TERMSIG" -ge 1 ] && [ "$TERMSIG" -le 127 ]; then
-                    EXITCODE=$((128 + TERMSIG))
-                    break
-                fi ;;
-        esac
-        echo "[vm-exec] ERROR: guest agent reported an unsupported signal value: $TERMSIG" >&2
-        TERMSIG=null
-        exit 125
+    if [ "$RESP_SIGNAL" != "-" ]; then
+        # Already known to be a JSON number. Range-check it before arithmetic:
+        # do not turn malformed protocol data into a plausible status. Signal
+        # 128 would compute exit 256, which the caller observes as 0 -- a killed
+        # command reported as a clean pass.
+        if [ "$RESP_SIGNAL" -ge 1 ] 2>/dev/null && [ "$RESP_SIGNAL" -le 127 ] 2>/dev/null; then
+            TERMSIG=$RESP_SIGNAL
+            EXITCODE=$((128 + TERMSIG))
+            break
+        fi
+        echo "[vm-exec] ERROR: guest agent reported an unsupported signal value: $RESP_SIGNAL" >&2
+        exit 76   # EX_PROTOCOL
     fi
     WAIT_COUNT=$((WAIT_COUNT + 1))
     if [ $WAIT_COUNT -gt 0 ] && [ $((WAIT_COUNT % 30)) -eq 0 ]; then

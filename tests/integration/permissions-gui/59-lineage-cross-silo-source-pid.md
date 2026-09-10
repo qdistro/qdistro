@@ -43,11 +43,31 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 # Clean slate: drop scenario rules + any prior enforce flag, restart broker
 # in the default (shadow) posture.
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
-# NOTE: `pkill -f cross-silo-src-helper` would match this command's OWN qga
-# shell -- vm-exec runs everything as `/bin/sh -c '<the whole command>'`, so the
-# pattern appears in the shell's argv and pkill SIGTERMs it. Bracket the first
-# character so the literal pattern never equals the text being matched.
-$VMEXEC "$VM" 'pkill -f "[c]ross-silo-src-helper" 2>/dev/null; true'
+# Drain a helper left behind by a previous run, BY IDENTITY.
+#
+# A `pkill -f cross-silo-src-helper` here would be doubly wrong. First it would
+# match this command's OWN qga shell -- vm-exec runs everything as
+# `/bin/sh -c '<the whole command>'`, so the pattern is in the shell's argv and
+# pkill SIGTERMs it. Second, even bracketed it would match NOTHING: the helper's
+# argv is `sleep 600`; the pidfile name never appears in its command line. So
+# the drain has to go through the recorded (pid, starttime) pair, exactly like
+# Teardown -- pattern matching cannot identify this process at all.
+DRAIN_B64=$(base64 -w0 <<'EOF'
+p=$(cat /tmp/cross-silo-src-helper.pid 2>/dev/null || true)
+want=$(cat /tmp/cross-silo-src-helper.starttime 2>/dev/null || true)
+case "$p" in "" | *[!0-9]* ) p="" ;; esac
+if [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ -n "$want" ]; then
+    got=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f20)
+    if [ "$got" = "$want" ]; then
+        echo "[setup] draining stale helper pid $p"
+        kill "$p" 2>/dev/null || true
+    fi
+fi
+rm -f /tmp/cross-silo-src-helper.pid /tmp/cross-silo-src-helper.starttime
+true
+EOF
+)
+$VMEXEC "$VM" "echo $DRAIN_B64 | base64 -d | bash"
 $VMEXEC "$VM" 'test -f /etc/qdistro/broker.conf && sed -i "/lineage_enforce/d" /etc/qdistro/broker.conf || true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
@@ -76,11 +96,22 @@ sleep 1
 # recycle the number onto an unrelated process before Teardown runs. The
 # (pid, starttime) pair is the standard cheap identity check.
 HELPER_B64=$(base64 -w0 <<'EOF'
+set -u
 runuser -u work -- bash -c 'setsid sleep 600 >/dev/null 2>&1 & echo $! >/tmp/cross-silo-src-helper.pid'
 p=$(cat /tmp/cross-silo-src-helper.pid)
-# Field 22 of /proc/PID/stat is starttime. Strip through the last ")" first so a
-# comm containing spaces cannot shift the field offsets.
-sed 's/.*) //' "/proc/$p/stat" | cut -d' ' -f20 > /tmp/cross-silo-src-helper.starttime
+# Field 22 of /proc/PID/stat is starttime. Strip through the LAST ")" first, so
+# a comm containing spaces or ")" cannot shift the field offsets; after that
+# strip, state is the first token and starttime is token 20.
+st=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f20)
+# The helper must still be alive for its starttime to mean anything. If it died
+# between the pidfile write and this read, FAIL LOUDLY rather than recording an
+# empty identity -- an empty starttime would make Teardown decline to kill and
+# silently leak the process for its full 600s.
+if [ -z "$st" ]; then
+    echo "[setup] FATAL: helper pid $p is already gone; cannot record identity" >&2
+    exit 1
+fi
+printf '%s\n' "$st" > /tmp/cross-silo-src-helper.starttime
 EOF
 )
 $VMEXEC "$VM" "echo $HELPER_B64 | base64 -d | bash"
