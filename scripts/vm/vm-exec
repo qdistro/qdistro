@@ -215,12 +215,21 @@ while true; do
         if type != "object" then "bad - -"
         elif (has("error") and ((.error|type) == "object")) then "error - -"
         elif (has("return") and ((.return|type) == "object")) then
-            ((if (.return|has("exitcode"))
-                then (if (.return.exitcode|type) == "number" then (.return.exitcode|tostring) else "bad" end)
-                else "-" end) as $ec
-            | (if (.return|has("signal"))
-                then (if (.return.signal|type) == "number" then (.return.signal|tostring) else "bad" end)
-                else "-" end) as $sg
+            # INTEGER, not merely "number": jq types 0.0 as a number and renders
+            # it "0.0", which the shell cannot compare numerically -- the failed
+            # comparison sits in an `if`, so the script fell through and returned
+            # 0. A fractional exitcode could therefore manufacture SUCCESS, the
+            # very class this validator exists to stop.
+            (def intfield(v):
+                if (v|type) != "number" then "bad"
+                elif (v|floor) != v then "bad"
+                # Emit floor, NOT the original: jq 1.8 renders the integral
+                # value 0.0 as the string "0.0", which is still not something
+                # the shell can compare numerically. Rendering floor guarantees
+                # an integer literal on every jq version.
+                else (v|floor|tostring) end;
+            (if (.return|has("exitcode")) then intfield(.return.exitcode) else "-" end) as $ec
+            | (if (.return|has("signal")) then intfield(.return.signal) else "-" end) as $sg
             | "return \($ec) \($sg)")
         else "bad - -" end' 2>/dev/null) || RESP_PARSE=""
     read -r RESP_KIND RESP_EXITCODE RESP_SIGNAL <<< "${RESP_PARSE:-}"

@@ -203,3 +203,32 @@ status_calls() { wc -l < "$STATE"; }
         [[ "$output" == *"malformed or empty"* ]]
     done
 }
+
+# --- Round-4 review addition (todo/reviews/out-round4.md) ---
+
+@test "vm-exec: an integral-but-float exitcode is parsed, never silently 0" {
+    # jq 1.8 types 0.0/3.0 as "number" AND calls them integral, but renders them
+    # "0.0"/"3.0". The shell cannot compare those numerically; the failed
+    # comparison sits in an `if`, so the script fell through and returned 0 --
+    # a FAILING command reported as a clean pass. Rendering floor fixes it.
+    make_virsh '{"return":{"exited":true,"exitcode":3.0}}'
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'exit 3'
+    [ "$status" -eq 3 ]
+}
+
+@test "vm-exec: an integral-but-float signal still maps to 128+N" {
+    make_virsh '{"return":{"exited":true,"signal":15.0}}'
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'pkill -f x'
+    [ "$status" -eq 143 ]
+}
+
+@test "vm-exec: a genuinely fractional exitcode or signal is a protocol error" {
+    local body
+    for body in '{"return":{"exited":true,"exitcode":1.5}}' \
+                '{"return":{"exited":true,"signal":15.5}}'; do
+        make_virsh "$body"
+        PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'true'
+        [ "$status" -eq 76 ]
+        [[ "$output" == *"malformed or empty"* ]]
+    done
+}
