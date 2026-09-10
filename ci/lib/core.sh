@@ -57,3 +57,36 @@ rel_path() {
 kv() {
     printf '%s=%s\n' "$1" "$2" >> "$RDIR/manifest.txt"
 }
+
+# Sanitise one agent/test-authored string for a TSV notes column.
+#
+# The notes column is read back by report.py with Python `splitlines()`, which
+# breaks on far more than \n: \r \v \f \x1c \x1d \x1e \x85 and the Unicode
+# separators U+2028/U+2029. A reason string that interpolates command output (a
+# bats `skip "..."` message, or an agent-written status.txt) can therefore split
+# ONE result row into two malformed report rows, or truncate its `category`; an
+# ESC would inject a terminal escape sequence into the rendered report.
+#
+# Both the GUI skip-reason path (gui_skip_reason) and the bats companion-row path
+# (bats_tap_skip_reasons) feed such text into the same column, so they share this
+# helper rather than each carrying a partial strip. Markdown noise (inline code
+# backticks, `[text](link)`) is flattened first because these strings are
+# frequently lifted out of a markdown report. Whitespace is collapsed and
+# trimmed; nothing is length-capped here (each caller owns its own cap).
+#
+# Control characters are REPLACED WITH A SPACE, not deleted: deleting them
+# silently welds two words together ("policy\x0bprereq" -> "policyprereq"),
+# which is both unreadable and a dedupe hazard for the bats path, where two
+# reasons differing only by a stray separator must collapse to one. The
+# collapse-and-trim pass afterwards means a replaced character costs nothing
+# when it sat next to existing whitespace.
+#
+# Reads the string from stdin, writes the sanitised form to stdout with no
+# trailing newline (the final `tr -d` covers the case where the caller does not
+# use command substitution). Pure text transform => host-testable.
+tsv_note_sanitize() {
+    sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g; s/`//g' \
+        | tr '[:cntrl:]' ' ' \
+        | sed -E 's/\xc2\x85|\xe2\x80\xa8|\xe2\x80\xa9/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//' \
+        | tr -d '\n'
+}

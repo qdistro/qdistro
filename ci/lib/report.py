@@ -397,6 +397,19 @@ def nonactionable_failure_reason(row: dict[str, str]) -> str | None:
     # so agent prose cannot spoof it.
     if status == "blocked" and "blocked-on-infra" in notes:
         return "blocked on upstream VM-provision infra failure (single root cause)"
+    # Operator-selected static-only mode: `qci image --no-boot` DELIBERATELY omits
+    # the boot-verify and install-test stages, and image.sh records that omission
+    # as two blocked rows so results.tsv can never look like a run that actually
+    # booted. Those rows are the operator's own choice, exactly like an
+    # unpopulated release manifest -- counting them made a deliberate
+    # `image --no-boot` developer run report "actionable failures: 2"
+    # (image-20260909T180223Z-1394016/report.md:12) while its exit code was
+    # correctly 0. Keys on the runner-generated note prefix, so agent/test prose
+    # cannot spoof it; QCI_RELEASE=1 still escalates these rows (that escalation
+    # is a separate awk pass over results.tsv, not this report-only bucket), so a
+    # release cut cannot be qualified by a --no-boot run.
+    if status == "blocked" and notes.startswith("stage omitted: --no-boot"):
+        return "stage omitted by operator (--no-boot static-only run)"
     # NOTE: edit-guard failures are deliberately NOT bucketed here. An
     # unsanctioned protected-path edit is deterministic but still human-required
     # (sanction with --allow-test-edits, fix the tooling, or revert), and a

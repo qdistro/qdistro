@@ -17,6 +17,7 @@ setup() {
     ADIR="$BATS_TEST_TMPDIR/artifacts"
     mkdir -p "$ADIR"
     # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/core.sh"
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
 }
 
@@ -162,4 +163,70 @@ m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 sys.exit(0 if m._DEP_MISSING_RE.search('agent scenario skipped') else 1)
 "
     [ "$status" -ne 0 ]
+}
+
+# --- the prompt/harness contract itself -------------------------------------
+#
+# These pin the RUNTIME prompt (write_agent_prompt) against the code that reads
+# what it asks the agent to write. The documented template
+# ci/prompts/gui-scenario-agent.md is not sourced at runtime, so the two drifted:
+# the prompt said "Exit nonzero on ... missing precondition" and "status.txt
+# containing exactly one word" while the merged harness accepts SKIP only with
+# rc=0 and lifts the reason from the rest of that line. A literal-minded agent
+# obeying that prompt produced a false red on
+# qdwin/tests/gui/21-wm-policy-bystander.md in full-20260909T224527Z-2330163.
+
+_render_prompt() {
+    RDIR="$BATS_TEST_TMPDIR/run"
+    QDISTRO_REPO="$BATS_TEST_TMPDIR/qdistro"
+    mkdir -p "$RDIR" "$QDISTRO_REPO"
+    write_agent_prompt \
+        qci-vm-1 "$QDISTRO_REPO/tests/gui/21.md" "$BATS_TEST_TMPDIR/prompt.txt" \
+        "$ADIR" "$BATS_TEST_TMPDIR/scratch" slug
+    cat "$BATS_TEST_TMPDIR/prompt.txt"
+}
+
+@test "runtime prompt states the SKIP-with-rc=0 rule the harness enforces" {
+    local p; p=$(_render_prompt)
+    # gui_agent_verdict accepts SKIP ONLY with rc=0; a nonzero-rc SKIP is a fail.
+    [ "$(gui_agent_verdict SKIP 0 | cut -f1)" = skip ]
+    [ "$(gui_agent_verdict SKIP 1 | cut -f1)" = fail ]
+    printf '%s' "$p" | grep -q 'SKIP.*exit 0'
+    printf '%s' "$p" | grep -qi 'NONZERO exit is a hard failure'
+}
+
+@test "runtime prompt no longer tells the agent to exit nonzero on a precondition" {
+    local p; p=$(_render_prompt)
+    ! printf '%s' "$p" | grep -q 'Return nonzero on FAIL or ERROR'
+    ! printf '%s' "$p" | grep -qi 'exit nonzero on .*missing precondition'
+}
+
+@test "runtime prompt asks for a same-line SKIP reason that gui_skip_reason reads" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'SKIP <reason>'
+    # The syntax the prompt asks for must survive BOTH readers: the verdict
+    # parser must see SKIP, and the reason parser must see the rest of the line.
+    printf 'SKIP foot is not installed in this golden image (command -v foot -> not found)\n' \
+        > "$ADIR/status.txt"
+    [ "$(agent_artifact_status "$ADIR" /dev/null)" = SKIP ]
+    [ "$(gui_status_file_verdict "$ADIR/status.txt")" = SKIP ]
+    [ "$(gui_skip_reason "$ADIR")" = "foot is not installed in this golden image (command -v foot -> not found)" ]
+}
+
+@test "runtime prompt keeps SKIP narrow and routes agent-side failures to ERROR" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -qi 'SKIP is deliberately NARROW'
+    printf '%s' "$p" | grep -qi 'choose ERROR'
+    # The qdwin/21 shape -- a process that started and then died -- must be named
+    # as NOT a skip, or the S2 fix turns that real defect green.
+    printf '%s' "$p" | grep -qi 'started and then died'
+    # ERROR stays a hard failure however the agent exits.
+    [ "$(gui_agent_verdict ERROR 0 | cut -f1)" = fail ]
+    [ "$(gui_agent_verdict ERROR 1 | cut -f1)" = fail ]
+}
+
+@test "runtime prompt requires one guest shell (the qdwin/21 EXIT-trap teardown)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'ONE guest shell'
+    printf '%s' "$p" | grep -qi 'EXIT.*trap'
 }
