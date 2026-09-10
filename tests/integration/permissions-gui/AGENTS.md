@@ -56,7 +56,8 @@ transcript, re-print it yourself (e.g. `journalctl --after-cursor "$cur" ... |
 grep -E ...`). Never mark a step FAIL merely because the waiter's stdout looked
 empty — that misreads a *passing* gate as a failure. (If you need a waiter's
 stdout clean for machine parsing, set `QCI_AWAIT_QUIET=1` for that call; it
-silences only the success announcement, never a timeout.) The `qci lint` gate's `flake-smells` check flags `sleep`
+silences only the success announcement, never a timeout. Set it per call, never
+`export` it — a process-wide quiet hides every waiter's evidence.) The `qci lint` gate's `flake-smells` check flags `sleep`
 +grep / one-shot `systemctl`/`virsh` patterns to migrate here.
 
 ## Environment

@@ -22,7 +22,10 @@
 # STDOUT CONTRACT: grade a waiter by its EXIT STATUS, never by parsing its
 # stdout. A caller that must capture a probe's payload for machine parsing sets
 # QCI_AWAIT_QUIET=1 to suppress the success announcement — never to make a
-# failure quieter (timeouts still go to stderr regardless).
+# failure quieter (timeouts still go to stderr regardless). Set it PER CALL
+# (`QCI_AWAIT_QUIET=1 await_file ...`); exporting it silences every waiter's
+# success evidence in the whole process, which is how a passing gate became
+# invisible in the first place.
 #
 # CRITICAL — this is hardening, NOT masking: a waiter only rides out
 # nondeterministic READINESS. It must wait for the SAME condition the assertion
