@@ -202,13 +202,37 @@ while true; do
             sleep "$sleep_s"
             continue
         fi
-        echo "[vm-exec] ERROR: Guest agent returned error after $ERROR_COUNT attempts: $RESULT" >&2
+        # NOT "not responding": an error response proves qga is alive and
+        # serving RPCs. A stale-PID loop here almost always means the command
+        # killed its own qga-spawned shell -- see the `pkill -f` note below.
+        echo "[vm-exec] ERROR: Guest agent returned a semantic error after $ERROR_COUNT attempts: $RESULT" >&2
+        case $RESULT in
+            *"does not exist"*)
+                echo "[vm-exec] HINT: qga no longer has bookkeeping for this PID." >&2
+                echo "[vm-exec] HINT: If the command used 'pkill -f <pattern>', it matched its OWN" >&2
+                echo "[vm-exec] HINT: qga shell (run as /bin/sh -c '<the whole command>') and killed it." >&2
+                echo "[vm-exec] HINT: Kill a validated PID from a pidfile, or bracket the pattern: '[p]attern'." >&2
+                ;;
+        esac
         exit 1
     fi
     ERROR_COUNT=0
 
     EXITCODE=$(echo "$RESULT" | jq -r '.return.exitcode')
     if [ "$EXITCODE" != "null" ]; then
+        break
+    fi
+    # A signal-terminated command reports {"exited":true,"signal":N} and has NO
+    # `exitcode` field. Reading only `.return.exitcode` therefore saw null and
+    # kept polling -- but qga REAPS the process metadata in the very response
+    # that reports terminal status, so every later poll returned
+    # `PID <n> does not exist` until the retry budget ran out. That is what made
+    # permissions-gui/59 look like a flaky guest agent for six runs when the
+    # agent was healthy throughout (todo/reviews/out-59-qga.md). Treat a signal
+    # result as terminal, exactly like an exitcode.
+    TERMSIG=$(echo "$RESULT" | jq -r '.return.signal')
+    if [ "$TERMSIG" != "null" ]; then
+        EXITCODE=$((128 + TERMSIG))
         break
     fi
     WAIT_COUNT=$((WAIT_COUNT + 1))
@@ -234,6 +258,9 @@ if [ "$ERR_DATA" != "null" ] && [ -n "$ERR_DATA" ]; then
 fi
 
 # 6. Return the command's exit code
+if [ "${TERMSIG:-null}" != "null" ]; then
+    echo "[vm-exec] ERROR: command was terminated by signal $TERMSIG (exit $EXITCODE)" >&2
+fi
 if [ "$EXITCODE" -ne 0 ]; then
     exit "$EXITCODE"
 fi

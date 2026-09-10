@@ -43,7 +43,11 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 # Clean slate: drop scenario rules + any prior enforce flag, restart broker
 # in the default (shadow) posture.
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
-$VMEXEC "$VM" 'pkill -f cross-silo-src-helper 2>/dev/null; true'
+# NOTE: `pkill -f cross-silo-src-helper` would match this command's OWN qga
+# shell -- vm-exec runs everything as `/bin/sh -c '<the whole command>'`, so the
+# pattern appears in the shell's argv and pkill SIGTERMs it. Bracket the first
+# character so the literal pattern never equals the text being matched.
+$VMEXEC "$VM" 'pkill -f "[c]ross-silo-src-helper" 2>/dev/null; true'
 $VMEXEC "$VM" 'test -f /etc/qdistro/broker.conf && sed -i "/lineage_enforce/d" /etc/qdistro/broker.conf || true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
@@ -269,7 +273,10 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -f "sleep 600" 2>/dev/null; rm -f /tmp/cross-silo-src-helper.pid; true'
+# Kill the recorded PID rather than pattern-matching "sleep 600": the pattern
+# both self-matched this command's qga shell and would have killed any unrelated
+# `sleep 600` on the VM. The pidfile was written by Setup.
+$VMEXEC "$VM" 'p=$(cat /tmp/cross-silo-src-helper.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) : ;; *) kill "$p" 2>/dev/null || true ;; esac; rm -f /tmp/cross-silo-src-helper.pid; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'sed -i "/lineage_enforce/d" /etc/qdistro/broker.conf 2>/dev/null || true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'

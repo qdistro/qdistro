@@ -509,6 +509,40 @@ vm-exec "$VM" "echo $B64 | base64 -d | bash"
 This matches what each scenario's Setup would do itself, but running
 it centrally keeps weaker scenarios honest.
 
+**Hard rule: never `pkill -f <plain-pattern>` in a bare `$VMEXEC` command.**
+`vm-exec` runs every command as `/bin/sh -c '<the whole command string>'`, so
+the shell's own argv CONTAINS your pattern. `pkill -f` excludes only itself,
+never its parent, so it SIGTERMs the very shell running it. A trailing `; true`
+cannot rescue an already-terminated shell. qga then correctly reports
+`{"exited":true,"signal":15}` and reaps the process metadata in that same
+response, so every later poll returns `PID <n> does not exist`.
+
+This is deterministic, but whether the RUN fails depends on whether the driving
+agent aborts on the failed command or ignores it — which is why
+permissions-gui/59 looked like a 2-pass/4-flake guest-agent problem across six
+runs when in fact all six self-killed identically (`todo/reviews/out-59-qga.md`).
+
+Safe forms, in order of preference:
+
+```bash
+# BEST — kill a validated PID your Setup recorded. Sharper than any pattern,
+# and it cannot collateral-kill an unrelated process on a shared VM.
+$VMEXEC "$VM" 'p=$(cat /tmp/my-helper.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) : ;; *) kill "$p" 2>/dev/null || true ;; esac'
+
+# GOOD — bracket the first character: the literal pattern text never equals
+# the string being matched, so the qga shell cannot match itself.
+$VMEXEC "$VM" 'pkill -f "[d]bus-monitor.*qdistro" 2>/dev/null; true'
+
+# ALSO SAFE — a user selector that excludes the root-owned qga shell. This is
+# the only reason permissions-gui/58 passes where 59 failed.
+$VMEXEC "$VM" 'pkill -u work -f my-helper 2>/dev/null; true'
+```
+
+The base64 drain block above is safe for a different reason: the pattern lives
+inside the decoded script, while the qga shell's argv is only
+`echo <b64> | base64 -d | bash`. Copying one of those lines into a direct
+`$VMEXEC` removes that protection.
+
 **Hard rule for new scenarios**: if your Setup installs files under
 `/etc/qdistro/rules.d/`, also `rm -f` your own scenario's prefix in
 Setup (defensive) AND in Teardown (cleanup). Don't rely on the
