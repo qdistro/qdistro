@@ -185,3 +185,46 @@ setup() {
     run await_domain_gone dom 5 1
     [ "$status" -eq 0 ]
 }
+
+# --- success must be OBSERVABLE -------------------------------------------
+# Regression for permissions-gui/59 S2 (run full-20260909T224527Z): the broker
+# HAD logged `lineage_enforce=True` 1s after the restart, but the waiter
+# returned 0 in silence, the step was graded by grepping the command's stdout,
+# and an empty stdout was read as a product failure. A passing gate must say so.
+
+@test "_await: announces SUCCESS on stdout with the probe's observation" {
+    probe() { echo "matched: [broker] lineage_enforce=True"; return 0; }
+    run _await "the posture line" 2 1 probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[await] OK"* ]]
+    [[ "$output" == *"the posture line"* ]]
+    [[ "$output" == *"matched: [broker] lineage_enforce=True"* ]]
+}
+
+@test "_await: success line goes to STDOUT (not stderr)" {
+    probe() { echo "ready=yes"; return 0; }
+    local out err
+    out=$(_await "the thing" 2 1 probe 2>"$BATS_TEST_TMPDIR/err")
+    err=$(cat "$BATS_TEST_TMPDIR/err")
+    [[ "$out" == *"[await] OK"* ]]
+    [[ "$out" == *"ready=yes"* ]]
+    [ -z "$err" ]
+}
+
+@test "await_journal_line_after_cursor: prints the matched journal line on success" {
+    journalctl() { echo "[broker] lineage_enforce=True (False=shadow/audit-only)"; }
+    export -f journalctl
+    run await_journal_line_after_cursor "s=cur;i=1" "lineage_enforce=True" 2 1 \
+        -u qdistro-admin-broker.service
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"lineage_enforce=True"* ]]
+}
+
+@test "await_journal_line_after_cursor: a shadow-mode line does NOT satisfy the enforce pattern" {
+    journalctl() { echo "[broker] lineage_enforce=False (False=shadow/audit-only)"; }
+    export -f journalctl
+    run await_journal_line_after_cursor "s=cur;i=1" "lineage_enforce=True" 1 1 \
+        -u qdistro-admin-broker.service
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+}

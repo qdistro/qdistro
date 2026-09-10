@@ -46,7 +46,15 @@ await_journal_line_after_cursor "$cur" 'toplevel_added.*app_id=foo' 30 1 --user
 Every waiter is bounded and fails LOUD (expected-vs-last-observed + elapsed) when
 the condition never holds — it rides out nondeterministic *readiness*, it never
 hides a real failure. Wait for the SAME condition your assertion checks; never
-`|| true` a waiter. The `qci lint` gate's `flake-smells` check flags `sleep`
+`|| true` a waiter.
+
+**A waiter's EXIT STATUS is the verdict, not its stdout.** On success it prints
+`[await] OK after <n>s: ...` plus what the probe observed; on timeout it prints
+`[await] TIMEOUT ...` **to stderr**. Grade the step with `if await_...; then` (or
+`|| { echo FAIL; exit 1; }`), and if you need the underlying evidence in the
+transcript, re-print it yourself (e.g. `journalctl --after-cursor "$cur" ... |
+grep -E ...`). Never mark a step FAIL merely because the waiter's stdout looked
+empty — that misreads a *passing* gate as a failure. The `qci lint` gate's `flake-smells` check flags `sleep`
 +grep / one-shot `systemctl`/`virsh` patterns to migrate here.
 
 ## Environment

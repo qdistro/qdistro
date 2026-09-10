@@ -11,7 +11,11 @@
 #   - returns 0 the instant the condition is observed (fast on a quiet host,
 #     tolerant on a loaded one — this is what collapses the 8-vs-25 variance);
 #   - on TIMEOUT prints, to stderr, the thing it was waiting for, the LAST
-#     observed state, and the elapsed seconds, then returns nonzero.
+#     observed state, and the elapsed seconds, then returns nonzero;
+#   - on SUCCESS prints, to stdout, `[await] OK after <n>s: <what>` plus the
+#     probe's own observation (`[await] observed: ...`) — so a step graded by
+#     reading the command's output sees the evidence instead of empty stdout.
+#     The EXIT STATUS remains the verdict; the print is evidence, not the gate.
 #
 # CRITICAL — this is hardening, NOT masking: a waiter only rides out
 # nondeterministic READINESS. It must wait for the SAME condition the assertion
@@ -42,6 +46,21 @@ _await() {
     local start=$SECONDS last="" elapsed
     while :; do
         if last=$("$@" 2>&1); then
+            # Report the SUCCESS as loudly as the timeout. A waiter that
+            # returned 0 in silence is indistinguishable, on stdout, from a
+            # waiter that never ran — and a scenario (or an agent driving one)
+            # that grades the step by grepping the command's output then reads
+            # the empty stdout as a FAILURE even though the condition held.
+            # That is exactly how permissions-gui/59 S2 failed while the broker
+            # had in fact logged `lineage_enforce=True` 1s after the restart.
+            # Printing the probe's own observation makes the evidence visible
+            # without weakening anything: it is emitted ONLY on the path where
+            # the probe already exited 0.
+            elapsed=$((SECONDS - start))
+            printf '[await] OK after %ss: %s\n' "$elapsed" "$desc"
+            if [ -n "$last" ]; then
+                printf '[await] observed: %s\n' "$last"
+            fi
             return 0
         fi
         elapsed=$((SECONDS - start))

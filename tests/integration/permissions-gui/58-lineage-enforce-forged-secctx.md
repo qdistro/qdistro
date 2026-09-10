@@ -95,10 +95,19 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
 cur=$(journalctl -u qdistro-admin-broker.service -n0 --show-cursor 2>/dev/null | sed -n "s/^-- cursor: //p")
 [ -n "$cur" ] || { echo "FAIL: could not capture journal cursor"; exit 1; }
 systemctl restart qdistro-admin-broker.service
-await_journal_line_after_cursor "$cur" "lineage_enforce" 30 1 -u qdistro-admin-broker.service'
+await_journal_line_after_cursor "$cur" "lineage_enforce=True" 30 1 \
+  -u qdistro-admin-broker.service \
+  || { echo "S2 FAIL: broker never logged lineage_enforce=True after restart"; exit 1; }
+journalctl -u qdistro-admin-broker.service --after-cursor "$cur" --no-pager -o cat \
+  | grep -E "lineage_enforce=True"'
 ```
 
-**Assert**: the journal line reads `lineage_enforce=True`.
+**Assert**: the command exits 0 and prints the broker startup line
+`[broker] lineage_enforce=True (False=shadow/audit-only)`. The waiter's EXIT
+STATUS is the gate — a miss prints `S2 FAIL` and exits nonzero. Do not grade
+this step by looking for text the waiter itself printed. (The pattern pins
+`=True`: a bare `lineage_enforce` also matches the shadow-mode `=False` line,
+so the posture switch could pass without having taken effect.)
 
 ### S3 — enforce mode: forged claim from unregistered caller is denied
 
