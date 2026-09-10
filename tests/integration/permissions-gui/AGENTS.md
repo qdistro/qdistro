@@ -54,7 +54,9 @@ hides a real failure. Wait for the SAME condition your assertion checks; never
 `|| { echo FAIL; exit 1; }`), and if you need the underlying evidence in the
 transcript, re-print it yourself (e.g. `journalctl --after-cursor "$cur" ... |
 grep -E ...`). Never mark a step FAIL merely because the waiter's stdout looked
-empty — that misreads a *passing* gate as a failure. The `qci lint` gate's `flake-smells` check flags `sleep`
+empty — that misreads a *passing* gate as a failure. (If you need a waiter's
+stdout clean for machine parsing, set `QCI_AWAIT_QUIET=1` for that call; it
+silences only the success announcement, never a timeout.) The `qci lint` gate's `flake-smells` check flags `sleep`
 +grep / one-shot `systemctl`/`virsh` patterns to migrate here.
 
 ## Environment

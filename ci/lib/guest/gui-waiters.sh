@@ -13,9 +13,16 @@
 #   - on TIMEOUT prints, to stderr, the thing it was waiting for, the LAST
 #     observed state, and the elapsed seconds, then returns nonzero;
 #   - on SUCCESS prints, to stdout, `[await] OK after <n>s: <what>` plus the
-#     probe's own observation (`[await] observed: ...`) — so a step graded by
-#     reading the command's output sees the evidence instead of empty stdout.
-#     The EXIT STATUS remains the verdict; the print is evidence, not the gate.
+#     probe's own observation (`[await] observed: ...`, capped at
+#     QCI_AWAIT_OBSERVED_MAX_LINES lines with an ANNOUNCED truncation) — so a
+#     step graded by reading the command's output sees the evidence instead of
+#     empty stdout. The EXIT STATUS remains the verdict; the print is evidence,
+#     not the gate.
+#
+# STDOUT CONTRACT: grade a waiter by its EXIT STATUS, never by parsing its
+# stdout. A caller that must capture a probe's payload for machine parsing sets
+# QCI_AWAIT_QUIET=1 to suppress the success announcement — never to make a
+# failure quieter (timeouts still go to stderr regardless).
 #
 # CRITICAL — this is hardening, NOT masking: a waiter only rides out
 # nondeterministic READINESS. It must wait for the SAME condition the assertion
@@ -41,6 +48,25 @@
 # observed state" on timeout, so a probe that echoes the value it saw produces a
 # self-explaining failure. Bounded by the wall clock via SECONDS. Returns 0 when
 # ready, 1 on timeout.
+# _await_print_observed <text> — echo a probe's success observation, capped at
+# QCI_AWAIT_OBSERVED_MAX_LINES lines so a chatty probe (e.g. a whole dbus reply)
+# cannot bury a scenario transcript. Truncation is ANNOUNCED, never silent, and
+# only ever applies to the SUCCESS path — a timeout still reports the last
+# observed state in full.
+: "${QCI_AWAIT_OBSERVED_MAX_LINES:=20}"
+_await_print_observed() {
+    local text=$1 total shown
+    total=$(printf '%s\n' "$text" | wc -l)
+    if [ "$total" -le "$QCI_AWAIT_OBSERVED_MAX_LINES" ]; then
+        printf '[await] observed: %s\n' "$text"
+        return 0
+    fi
+    shown=$(printf '%s\n' "$text" | head -n "$QCI_AWAIT_OBSERVED_MAX_LINES")
+    printf '[await] observed: %s\n' "$shown"
+    printf '[await] observed: ... (truncated, %s more line(s))\n' \
+        "$((total - QCI_AWAIT_OBSERVED_MAX_LINES))"
+}
+
 _await() {
     local desc=$1 timeout=$2 interval=$3; shift 3
     local start=$SECONDS last="" elapsed
@@ -57,9 +83,11 @@ _await() {
             # without weakening anything: it is emitted ONLY on the path where
             # the probe already exited 0.
             elapsed=$((SECONDS - start))
-            printf '[await] OK after %ss: %s\n' "$elapsed" "$desc"
-            if [ -n "$last" ]; then
-                printf '[await] observed: %s\n' "$last"
+            if [ "${QCI_AWAIT_QUIET:-0}" != 1 ]; then
+                printf '[await] OK after %ss: %s\n' "$elapsed" "$desc"
+                if [ -n "$last" ]; then
+                    _await_print_observed "$last"
+                fi
             fi
             return 0
         fi

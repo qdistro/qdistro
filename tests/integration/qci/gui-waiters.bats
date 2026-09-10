@@ -228,3 +228,25 @@ setup() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"TIMEOUT"* ]]
 }
+
+@test "_await: QCI_AWAIT_QUIET=1 suppresses the success announcement only" {
+    probe() { echo "ready=yes"; return 0; }
+    QCI_AWAIT_QUIET=1 run _await "the thing" 2 1 probe
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # A TIMEOUT is still loud even under quiet.
+    probe() { echo "state=degraded"; return 1; }
+    QCI_AWAIT_QUIET=1 run _await "the thing" 1 1 probe
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"state=degraded"* ]]
+}
+
+@test "_await: a chatty probe's observation is capped with an ANNOUNCED truncation" {
+    probe() { seq 1 50; return 0; }
+    QCI_AWAIT_OBSERVED_MAX_LINES=5 run _await "the chatty thing" 2 1 probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[await] OK"* ]]
+    [[ "$output" == *"truncated, 45 more line(s)"* ]]
+    [[ "$output" != *"50"* ]]
+}
