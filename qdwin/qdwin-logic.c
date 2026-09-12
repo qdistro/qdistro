@@ -407,3 +407,13 @@ qdwin_layershell_pre_shell_uid_allowed(uid_t client_uid, uid_t allowed_uid)
 {
 	return client_uid == allowed_uid;
 }
+
+/* iso2/11 E2: an inhibitor only holds while its surface is mapped and
+ * has both a buffer and a live view. Occlusion is deliberately not part of the test, and the
+ * residual that leaves is stated — see qdwin-logic.h. */
+bool
+qdwin_idle_inhibit_should_hold(bool have_surface, bool surface_mapped,
+			       bool has_buffer, bool has_view)
+{
+	return have_surface && surface_mapped && has_buffer && has_view;
+}

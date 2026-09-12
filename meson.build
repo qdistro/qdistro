@@ -1352,6 +1352,32 @@ test('output-manager-gate',
   ],
 )
 
+# iso2/11 E2 idle-inhibit visibility invariant: zwp_idle_inhibitor_v1 gates
+# idle-lock and DPMS, so the hold must follow the surface's mapped state for
+# the life of the inhibitor, not be taken unconditionally at create time.
+# Occlusion is deliberately out of scope (silo video keeps the session awake).
+test('idle-inhibit-visibility',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_idle_inhibit_visibility.py'),
+    files('qdwin/qdwin.c'),
+    files('qdwin/qdwin-logic.c'),
+  ],
+)
+
+# iso2/11 E2 behavioural companion: compiles the real weston mapped-query and
+# qdwin inhibitor bodies against libwayland signals and asserts on
+# ec->idle_inhibit across surface lifecycles, including the parent-unmap case
+# the eager listeners cannot see. Skips (77) without cc/wayland-server.
+test('idle-inhibit-behaviour',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_idle_inhibit_behaviour.py'),
+  ],
+)
+
 # Primary-selection D1 lifetime invariant: stale offer resources must be made
 # inert before their source is freed, otherwise a later receive() can deref a
 # destroyed source before the cross-silo gate runs.

@@ -174,8 +174,12 @@ If qdwin-bystander is absent on the VM (older bake), fail with
 output_pos=... rdp_port=<P> forward_pid=<P> ...` within 2s of the
 subscribe request. (If instead the journal shows
 `qdwin: subscribe_view_stream denied handle=$HANDLE ... (no pw
-output)`, weston.ini lacks `[pipewire] num-outputs>=1` — that's a
-prereq failure, fail loud.)
+output)`, this bake has no pipewire output. That is **not** a
+weston.ini `[pipewire] num-outputs` problem — that key is set. It
+means the compositor was started without `pipewire-backend.so` in its
+backend list, so no pipewire output ever initialised. **SKIP** the
+scenario with that reason rather than failing loud; a non-pipewire
+bake cannot satisfy this test.)
 
 **Assert (1.2):** $RDP_PORT is a valid TCP port (1024..65535).
 

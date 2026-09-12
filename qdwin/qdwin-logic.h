@@ -262,6 +262,55 @@ bool qdwin_secctx_root_launcher_attested(uid_t parent_uid,
 bool qdwin_layershell_pre_shell_uid_allowed(uid_t client_uid,
 					    uid_t allowed_uid);
 
+/* ------------------------------------------------------------------
+ * idle-inhibit (zwp_idle_inhibitor_v1) hold policy — iso2/11 E2.
+ *
+ * The protocol permits a compositor to ignore an inhibitor whose
+ * surface is not visible.  We take the *mapped* half of that
+ * permission and deliberately decline the occlusion half:
+ *
+ *   - mapped + has-a-buffer + has-a-view is what closes the
+ *     zero-effort hole.  A silo that creates a wl_surface, never
+ *     attaches a buffer, and takes an inhibitor would otherwise
+ *     suppress idle-lock and DPMS for the rest of the session with
+ *     nothing on screen.  The buffer and view terms additionally
+ *     reject two surfaces that weston leaves with a stale-true mapped
+ *     bit: a bufferless child of an unmapped parent (reads as mapped
+ *     again once the parent remaps), and a surface whose
+ *     wl_subsurface role was destroyed while the wl_surface was kept
+ *     (every view destroyed, mapped bit and buffer untouched, and the
+ *     recursive query no longer walks to the unmapped parent).
+ *     Minimisation is unaffected: qdwin minimises by moving the view
+ *     to another layer, so the view survives.
+ *   - occluded/minimised is left inhibiting on purpose.  "Video in a
+ *     silo keeps the session awake" is a product feature, and a
+ *     partly covered or minimised media window is exactly the case
+ *     users expect to keep playing.
+ *
+ * This is a product policy, NOT a visibility security boundary, and
+ * the difference is deliberate.  The terms prove a mapped surface
+ * with a buffer and a live view; they do NOT prove that any view is
+ * mapped, sits on a displayed layer, intersects an output, or draws a
+ * non-transparent pixel.  Accepted residual: a 1x1 fully transparent
+ * mapped surface with a buffer, a mapped surface moved off every
+ * output, or one whose views are retained but not displayed, all
+ * still inhibit.  No cheap predicate in this
+ * weston proves visible content without also breaking the
+ * covered/minimised-video behaviour we must keep.  What is closed is
+ * the zero-effort version: never-mapped and effectively unmapped
+ * surfaces hold nothing — released at the next successful backstop
+ * sweep, normally within a second plus event-loop delay, when the
+ * change is one no signal reports.
+ *
+ * Callers must re-evaluate; see qdwin_idle_inhibitor_sync() and the
+ * §6.7 banner in qdwin.c for why the surface's own map/unmap signals
+ * are necessary but not sufficient (weston's mapped query recurses up
+ * the subsurface tree, so an ancestor change moves the answer with no
+ * signal on this surface at all).
+ * ------------------------------------------------------------------ */
+bool qdwin_idle_inhibit_should_hold(bool have_surface, bool surface_mapped,
+				    bool has_buffer, bool has_view);
+
 #ifdef __cplusplus
 }
 #endif

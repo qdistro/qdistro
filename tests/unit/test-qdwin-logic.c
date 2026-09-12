@@ -681,6 +681,25 @@ static void test_s13_fail_open_pins(void)
 	      "S13 layer-shell: pre-shell non-allowed uid denied");
 	CHECK(!qdwin_layershell_pre_shell_uid_allowed(admin, (uid_t)-1),
 	      "S13 layer-shell: allowed_uid=-1 does not create an open bind");
+
+	/* iso2/11 E2: idle-inhibit holds only while the surface is mapped.
+	 * The unmapped-dummy case is the hole this closes; the mapped case
+	 * is the product feature (video in a silo keeps the session awake)
+	 * and must keep working. */
+	CHECK(qdwin_idle_inhibit_should_hold(true, true, true, true),
+	      "E2 idle-inhibit: mapped surface with a buffer and a view holds");
+	CHECK(!qdwin_idle_inhibit_should_hold(true, false, true, true),
+	      "E2 idle-inhibit: never-mapped surface holds nothing");
+	CHECK(!qdwin_idle_inhibit_should_hold(true, true, false, true),
+	      "E2 idle-inhibit: bufferless surface holds nothing even if the "
+	      "map bit reads true (stale-bit case)");
+	CHECK(!qdwin_idle_inhibit_should_hold(true, true, true, false),
+	      "E2 idle-inhibit: viewless surface holds nothing even if mapped "
+	      "and buffered (destroyed-subsurface-role case)");
+	CHECK(!qdwin_idle_inhibit_should_hold(false, true, true, true),
+	      "E2 idle-inhibit: destroyed surface holds nothing");
+	CHECK(!qdwin_idle_inhibit_should_hold(false, false, false, false),
+	      "E2 idle-inhibit: nothing present, nothing held");
 }
 
 /* ---- xdg_popup constraint kernel (M1 security fix) ----

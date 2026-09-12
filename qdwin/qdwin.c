@@ -1074,6 +1074,14 @@ struct qdwin {
 	struct wl_global *idle_inhibit_manager_global;
 	struct wl_list idle_notifications;  /* struct qdwin_idle_notification::link */
 	struct wl_list idle_inhibitors;     /* struct qdwin_idle_inhibitor::link */
+	/* iso2/11 E2: backstop re-evaluation of every inhibitor's hold.
+	 * Armed only while idle_inhibitors is non-empty. */
+	struct wl_event_source *idle_inhibit_recheck_timer;
+	/* Latched when the backstop can no longer be guaranteed. Terminal
+	 * by design: surviving inhibitors go inert and new ones are
+	 * refused, because a hold we cannot re-evaluate is a permanent
+	 * client-controlled suppression of idle-lock and DPMS. */
+	bool idle_inhibit_disabled;
 	struct wl_listener idle_signal_listener;
 	struct wl_listener wake_signal_listener;
 	/* §6.7(a) follow-up: when weston's built-in idle timer is disabled
@@ -13201,12 +13209,19 @@ qdwin_on_output_resized(struct wl_listener *listener, void *data)
  * Lifecycle.
  * ------------------------------------------------------------------ */
 
+/* iso2/11 E2 (codex r1 #4): destroying the idle-inhibit global does NOT
+ * destroy the inhibitor resources bound through it. Any survivor would
+ * later run its resource-destroy handler against a freed struct qdwin
+ * and unlink through a freed list head, so drain them explicitly. */
+static void qdwin_idle_inhibitors_destroy_all(struct qdwin *qdwin);
+
 static void
 qdwin_destroy(struct wl_listener *listener, void *data)
 {
 	struct qdwin *qdwin = wl_container_of(listener, qdwin,
 					      destroy_listener);
 	(void)data;
+	qdwin_idle_inhibitors_destroy_all(qdwin);
 	if (qdwin->background) {
 		weston_shell_utils_curtain_destroy(qdwin->background);
 		qdwin->background = NULL;
@@ -13339,10 +13354,89 @@ qdwin_destroy(struct wl_listener *listener, void *data)
  * one block.
  *
  * idle-inhibit: each zwp_idle_inhibitor_v1 bumps ec->idle_inhibit
- * while its backing wl_surface is alive; weston's own idle timer
- * defers while the counter is non-zero. Spec allows ignoring the
- * inhibitor while the surface is occluded / unmapped; we keep it
- * simple here and inhibit as long as the resource + surface exist.
+ * while its backing wl_surface is alive *and mapped*; weston's own
+ * idle timer defers while the counter is non-zero. The spec allows
+ * ignoring the inhibitor while the surface is occluded / unmapped.
+ * iso2/11 E2: we take the unmapped half of that permission and
+ * decline the occluded half. Unmapped matters because a silo could
+ * otherwise create a wl_surface, never attach a buffer, take an
+ * inhibitor, and suppress idle-lock + DPMS for the rest of the
+ * session with nothing on screen. Occluded/minimised keeps
+ * inhibiting on purpose: "video in a silo keeps the session awake"
+ * is a product feature and a covered media window is exactly the
+ * case users expect to keep playing. The policy predicate itself
+ * lives in qdwin-logic.c (qdwin_idle_inhibit_should_hold).
+ *
+ * Re-evaluation (qdwin_idle_inhibitor_sync) is driven two ways, and
+ * both are needed:
+ *
+ *   - the surface's own map_signal / unmap_signal, which makes the
+ *     common case (attach a NULL buffer, destroy the window) release
+ *     the hold immediately; and
+ *   - a periodic backstop timer, armed only while an inhibitor
+ *     exists.
+ *
+ * The backstop is not belt-and-braces. weston_surface_is_mapped() is
+ * a *recursive* query up the subsurface tree
+ * (libweston/compositor.c), so the effective answer for surface S can
+ * change with no signal on S at all: unmapping or destroying S's
+ * parent flips S's effective mapped state while emitting only the
+ * parent's signal (codex r1 #1). Subscribing to a fixed ancestor set
+ * does not fix it either, since a plain surface can acquire the
+ * subsurface role after the inhibitor is created. Polling the (tiny)
+ * inhibitor list is the cheap, complete answer; a second of latency
+ * is irrelevant against a multi-minute idle timeout.
+ *
+ * The hold additionally requires a currently attached buffer and at
+ * least one live weston_view. Both are stale-state guards that the
+ * mapped bit alone does not give us:
+ *
+ *   - no buffer: a bufferless child of an unmapped parent keeps
+ *     surface->is_mapped true and reads as mapped again the moment
+ *     the parent remaps (codex r1 #2).
+ *   - no views: weston_subsurface_destroy() destroys every view of
+ *     the surface but clears neither its mapped bit nor its buffer,
+ *     and clearing ->committed makes the recursive mapped query stop
+ *     walking to the (unmapped) parent — so destroying just the
+ *     wl_subsurface, keeping the wl_surface, leaves an orphan that
+ *     reads as mapped forever (codex r2 #2).
+ *
+ * Both are also independently defensible: a surface with no buffer or
+ * no view is showing nothing. Minimisation is unaffected — qdwin
+ * minimises by moving the view to another layer, so the view lives.
+ *
+ * The backstop is armed on the empty -> non-empty transition of the
+ * inhibitor list and re-armed only by its own callback. Arming per
+ * create would let a client churning throwaway inhibitors push the
+ * deadline out indefinitely and strand another client's stale hold.
+ * If the timer cannot be created, create_inhibitor fails with
+ * no_memory rather than accepting a hold it could never re-evaluate;
+ * if its callback's self-rearm ever fails, idle-inhibit is disabled
+ * for the rest of the session: every hold is released, surviving inhibitors go
+ * inert (they cannot re-acquire on a later map), and further
+ * create_inhibitor calls are refused. That latch is deliberate and
+ * terminal — merely releasing the holds would be momentary, since a
+ * re-map would take one straight back and nothing would ever
+ * re-evaluate it. Fail closed: an un-re-evaluatable hold is a
+ * permanent client-controlled suppression of idle-lock and DPMS.
+ *
+ * RESIDUAL RISK, accepted deliberately: this is a product policy, not
+ * a visibility security boundary. The predicate proves a mapped
+ * surface with a buffer and a live view; it does NOT prove that any
+ * view is mapped, is on a displayed layer, intersects an output, or
+ * draws a non-transparent pixel. A 1x1 fully transparent mapped
+ * surface with a buffer still inhibits indefinitely, as does a mapped
+ * surface positioned off every output, or one whose views are
+ * retained but not displayed. There is no cheap predicate in
+ * this weston that proves visible content without also breaking the
+ * covered/minimised-video behaviour we are required to keep
+ * (view->output_visibility_mask is repaint-derived and documented
+ * stale until repaint; the opaque region is a client hint). What is
+ * closed is the zero-effort version: never-mapped and effectively
+ * unmapped surfaces cannot hold. Release is not instantaneous in
+ * every case — a change no signal reports (an ancestor's unmap, a
+ * destroyed subsurface role) is picked up at the next successful
+ * backstop sweep, normally within a second plus event-loop delay.
  *
  * ext-idle-notify: every notification is linked from
  * qdwin::idle_notifications. Firing strategy (§6.7(a)):
@@ -13431,6 +13525,8 @@ struct qdwin_idle_inhibitor {
 	struct wl_resource *resource;
 	struct weston_surface *surface;
 	struct wl_listener surface_destroy_listener;
+	struct wl_listener surface_map_listener;
+	struct wl_listener surface_unmap_listener;
 	int active;           /* currently contributing to ec->idle_inhibit */
 	struct wl_list link;  /* qdwin::idle_inhibitors */
 };
@@ -13447,11 +13543,73 @@ qdwin_idle_inhibitor_activate(struct qdwin_idle_inhibitor *inh)
 static void
 qdwin_idle_inhibitor_deactivate(struct qdwin_idle_inhibitor *inh)
 {
+	struct weston_compositor *ec = inh->qdwin->compositor;
+
 	if (!inh->active)
 		return;
 	inh->active = 0;
-	if (inh->qdwin->compositor->idle_inhibit > 0)
-		inh->qdwin->compositor->idle_inhibit--;
+	if (ec->idle_inhibit > 0)
+		ec->idle_inhibit--;
+	/* codex r1 #3: weston's idle_handler() returns early while
+	 * inhibited and its timer is one-shot — returning 1 from a
+	 * wl_event_source timer callback does not make it periodic. If the
+	 * deadline passed under the hold, dropping to zero would otherwise
+	 * leave idle-lock/DPMS deferred until unrelated input. Give the
+	 * session a fresh idle interval instead, but never wake a
+	 * compositor that is already idle/asleep. */
+	if (ec->idle_inhibit == 0 && ec->idle_time > 0 &&
+	    ec->state == WESTON_COMPOSITOR_ACTIVE && ec->idle_source)
+		wl_event_source_timer_update(ec->idle_source,
+					     ec->idle_time * 1000);
+}
+
+/* iso2/11 E2: single re-evaluation point. Safe to call at any time;
+ * activate/deactivate are idempotent via inh->active. */
+static void
+qdwin_idle_inhibitor_sync(struct qdwin_idle_inhibitor *inh)
+{
+	bool hold;
+
+	/* codex r3 #1: once the backstop is gone, nothing may hold again —
+	 * not this inhibitor on a later map, not a fresh one. Without this
+	 * latch, release_all() is momentary and a re-map re-acquires a hold
+	 * that will never be re-evaluated. */
+	if (inh->qdwin->idle_inhibit_disabled) {
+		qdwin_idle_inhibitor_deactivate(inh);
+		return;
+	}
+	hold = qdwin_idle_inhibit_should_hold(
+		inh->surface != NULL,
+		inh->surface && weston_surface_is_mapped(inh->surface),
+		inh->surface && inh->surface->buffer_ref.buffer != NULL,
+		inh->surface && !wl_list_empty(&inh->surface->views));
+
+	/* No log here on purpose (codex r1 #7): a client can cycle buffer
+	 * attachment cheaply, and this runs per transition per inhibitor. */
+	if (hold == (inh->active != 0))
+		return;
+	if (hold)
+		qdwin_idle_inhibitor_activate(inh);
+	else
+		qdwin_idle_inhibitor_deactivate(inh);
+}
+
+static void
+qdwin_idle_inhibitor_surface_mapped(struct wl_listener *l, void *data)
+{
+	struct qdwin_idle_inhibitor *inh =
+		wl_container_of(l, inh, surface_map_listener);
+	(void)data;
+	qdwin_idle_inhibitor_sync(inh);
+}
+
+static void
+qdwin_idle_inhibitor_surface_unmapped(struct wl_listener *l, void *data)
+{
+	struct qdwin_idle_inhibitor *inh =
+		wl_container_of(l, inh, surface_unmap_listener);
+	(void)data;
+	qdwin_idle_inhibitor_sync(inh);
 }
 
 static void
@@ -13460,10 +13618,14 @@ qdwin_idle_inhibitor_surface_destroyed(struct wl_listener *l, void *data)
 	struct qdwin_idle_inhibitor *inh =
 		wl_container_of(l, inh, surface_destroy_listener);
 	(void)data;
-	qdwin_idle_inhibitor_deactivate(inh);
+	inh->surface = NULL;
+	qdwin_idle_inhibitor_sync(inh);
 	wl_list_remove(&inh->surface_destroy_listener.link);
 	wl_list_init(&inh->surface_destroy_listener.link);
-	inh->surface = NULL;
+	wl_list_remove(&inh->surface_map_listener.link);
+	wl_list_init(&inh->surface_map_listener.link);
+	wl_list_remove(&inh->surface_unmap_listener.link);
+	wl_list_init(&inh->surface_unmap_listener.link);
 }
 
 static void
@@ -13487,10 +13649,100 @@ qdwin_idle_inhibitor_resource_destroy(struct wl_resource *resource)
 	qdwin_idle_inhibitor_deactivate(inh);
 	if (inh->surface) {
 		wl_list_remove(&inh->surface_destroy_listener.link);
+		wl_list_remove(&inh->surface_map_listener.link);
+		wl_list_remove(&inh->surface_unmap_listener.link);
 		inh->surface = NULL;
 	}
 	wl_list_remove(&inh->link);
 	free(inh);
+}
+
+/* iso2/11 E2 backstop (codex r1 #1/#2): re-evaluate every inhibitor.
+ * See the §6.7 banner for why per-surface signals alone are not
+ * sufficient. Self-rearming while any inhibitor is alive. */
+#define QDWIN_IDLE_INHIBIT_RECHECK_MS 1000
+
+/* Release every hold. Used when the backstop can no longer be guaranteed:
+ * a hold we cannot re-evaluate is a permanent, client-controlled
+ * suppression of idle-lock and DPMS, so we fail closed. */
+static void
+qdwin_idle_inhibitors_release_all(struct qdwin *qdwin)
+{
+	struct qdwin_idle_inhibitor *inh;
+
+	wl_list_for_each(inh, &qdwin->idle_inhibitors, link)
+		qdwin_idle_inhibitor_deactivate(inh);
+}
+
+static bool
+qdwin_idle_inhibit_recheck_schedule(struct qdwin *qdwin)
+{
+	if (!qdwin->idle_inhibit_recheck_timer)
+		return false;
+	return wl_event_source_timer_update(
+		       qdwin->idle_inhibit_recheck_timer,
+		       QDWIN_IDLE_INHIBIT_RECHECK_MS) == 0;
+}
+
+static int
+qdwin_idle_inhibit_recheck(void *data)
+{
+	struct qdwin *qdwin = data;
+	struct qdwin_idle_inhibitor *inh, *tmp;
+
+	wl_list_for_each_safe(inh, tmp, &qdwin->idle_inhibitors, link)
+		qdwin_idle_inhibitor_sync(inh);
+
+	/* Self-rearm owns the cadence. Deliberately NOT re-armed from the
+	 * create path (codex r2 #1): re-arming per create would let a
+	 * client that churns throwaway inhibitors push the deadline out
+	 * forever and strand another client's stale hold. */
+	if (!wl_list_empty(&qdwin->idle_inhibitors) &&
+	    !qdwin_idle_inhibit_recheck_schedule(qdwin)) {
+		weston_log("qdwin: idle-inhibit recheck timer failed to "
+			   "re-arm; disabling idle-inhibit and releasing all "
+			   "holds (fail-closed, terminal)\n");
+		qdwin->idle_inhibit_disabled = true;
+		qdwin_idle_inhibitors_release_all(qdwin);
+	}
+	return 1;
+}
+
+/* Create the backstop timer if it does not exist yet. Returns false if
+ * idle-inhibit has been terminally disabled by an earlier re-arm failure,
+ * or if the timer could not be created; in either case no hold may be
+ * accepted. A create-time failure is per-request and does not latch — a
+ * later create may retry. */
+static bool
+qdwin_idle_inhibit_recheck_ensure(struct qdwin *qdwin)
+{
+	struct wl_event_loop *loop;
+
+	/* Checked before the timer shortcut: a surviving timer pointer is
+	 * not evidence that anything is still scheduled (codex r3 #1). */
+	if (qdwin->idle_inhibit_disabled)
+		return false;
+	if (qdwin->idle_inhibit_recheck_timer)
+		return true;
+	loop = wl_display_get_event_loop(qdwin->compositor->wl_display);
+	if (!loop)
+		return false;
+	qdwin->idle_inhibit_recheck_timer = wl_event_loop_add_timer(
+		loop, qdwin_idle_inhibit_recheck, qdwin);
+	return qdwin->idle_inhibit_recheck_timer != NULL;
+}
+
+static void
+qdwin_idle_inhibitors_destroy_all(struct qdwin *qdwin)
+{
+	struct qdwin_idle_inhibitor *inh, *tmp;
+
+	wl_list_for_each_safe(inh, tmp, &qdwin->idle_inhibitors, link)
+		wl_resource_destroy(inh->resource);
+	if (qdwin->idle_inhibit_recheck_timer) {
+		wl_event_source_remove(qdwin->idle_inhibit_recheck_timer);
+		qdwin->idle_inhibit_recheck_timer = NULL;
+	}
 }
 
 static void
@@ -13513,6 +13765,16 @@ qdwin_idle_inhibit_create_inhibitor(struct wl_client *client,
 				 : NULL;
 	struct qdwin_idle_inhibitor *inh;
 	struct wl_resource *inh_resource;
+	bool was_empty;
+
+	/* codex r2 #3: never accept a hold we cannot later re-evaluate.
+	 * Without the backstop an ancestor unmap would leave a permanent
+	 * +1 on ec->idle_inhibit, so a timer we cannot create is a refusal,
+	 * not a degraded mode. */
+	if (!qdwin_idle_inhibit_recheck_ensure(qdwin)) {
+		wl_client_post_no_memory(client);
+		return;
+	}
 
 	inh = calloc(1, sizeof *inh);
 	if (!inh) {
@@ -13531,18 +13793,41 @@ qdwin_idle_inhibit_create_inhibitor(struct wl_client *client,
 	inh->resource = inh_resource;
 	inh->surface = surface;
 	wl_list_init(&inh->surface_destroy_listener.link);
+	wl_list_init(&inh->surface_map_listener.link);
+	wl_list_init(&inh->surface_unmap_listener.link);
 	if (surface) {
 		inh->surface_destroy_listener.notify =
 			qdwin_idle_inhibitor_surface_destroyed;
 		wl_signal_add(&surface->destroy_signal,
 			      &inh->surface_destroy_listener);
+		/* iso2/11 E2: the hold follows the surface's mapped state
+		 * for the life of the inhibitor, not just at create time. */
+		inh->surface_map_listener.notify =
+			qdwin_idle_inhibitor_surface_mapped;
+		wl_signal_add(&surface->map_signal,
+			      &inh->surface_map_listener);
+		inh->surface_unmap_listener.notify =
+			qdwin_idle_inhibitor_surface_unmapped;
+		wl_signal_add(&surface->unmap_signal,
+			      &inh->surface_unmap_listener);
 	}
+	was_empty = wl_list_empty(&qdwin->idle_inhibitors);
 	wl_list_insert(&qdwin->idle_inhibitors, &inh->link);
 	wl_resource_set_implementation(inh_resource, &qdwin_idle_inhibitor_impl,
 				       inh,
 				       qdwin_idle_inhibitor_resource_destroy);
-	qdwin_idle_inhibitor_activate(inh);
-	weston_log("qdwin: idle-inhibit created (count=%u)\n",
+	/* Not an unconditional activate: an inhibitor taken on a surface
+	 * that is not mapped yet holds nothing until it maps. */
+	qdwin_idle_inhibitor_sync(inh);
+	/* Arm on the empty -> non-empty transition only; the callback owns
+	 * every later deadline (codex r2 #1). */
+	if (was_empty && !qdwin_idle_inhibit_recheck_schedule(qdwin)) {
+		wl_resource_destroy(inh_resource);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	weston_log("qdwin: idle-inhibit created (mapped=%d, count=%u)\n",
+		   surface ? (int)weston_surface_is_mapped(surface) : 0,
 		   (unsigned)qdwin->compositor->idle_inhibit);
 }
 
