@@ -247,6 +247,80 @@ if [ "$RC" -eq 0 ] && [ "$LOGHIT" -eq 0 ]; then echo "S9 PASS"; else
 > compositor-side gate). The placeholder shape the XML documents is the
 > empty string, which is what S9 exercises.
 
+### S10 — destroying the advertiser under a LIVE view_stream releases it
+
+The iso2/10 E2 gate. An *allowed* proxy is a legal stream source, so an
+advertiser disconnect while the shell still holds an exported `view_stream`
+used to leave `qdwin_view_stream::tl` dangling into the input-inject path
+(qdwin `0ed786d`). Until this step, no lane combined all three — an allowed
+proxy, a live dependent, and advertiser destruction; the VM sibling covering
+the popup and move dependents is `tests/gui/22-nested-proxy-teardown.md`.
+
+**Exactly what this step enforces, and what it does not.** It enforces that
+the proxy destroy path releases its view_stream *at all*. Codex compiled and
+ran the alternatives (`todo/reviews/proxy-lane-review-r1.md`): deleting the
+`qdwin_toplevel_release_dependents()` call turns this red, but moving that
+call to AFTER the curtain is destroyed and `tl->view` is NULL still passes,
+as does removing the `proxy_destroying` guard on the input-focus picker, and
+removing only the popup branch of the shared release routine. Those three
+properties are pinned by `qdwin/test_toplevel_destroy_dependents.py` (source
+invariant) and `qdwin/test_proxy_destroy_behaviour.py` (ASan behavioural) —
+not here. Do not read a green S10 as covering the whole of `0ed786d`.
+
+Needs a real PipeWire output: without one qdwin answers `denied "no free
+pipewire output"` and the probe exits 77 rather than asserting nothing.
+`--pipewire` loads libweston's PipeWire backend and configures that output.
+It requires a PipeWire daemon on the host and `start.sh` exits 8 without one
+— so a missing daemon shows up as a failed `start.sh`, never as the probe's
+77.
+
+```bash
+ID=16-nested-stream
+$HT/start.sh $ID --no-shell --no-terminal --pipewire >/dev/null \
+    || { echo "S10 ERROR (start.sh failed; exit 8 = no PipeWire daemon)"; exit 1; }
+RUNTIME=$(ht_runtime $ID); SOCK=$(ht_socket $ID)
+
+OUT=$(XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$SOCK" "$PROBE" --destroy-with-stream 2>&1) \
+    && RC=0 || RC=$?
+printf '%s\n' "$OUT"
+$HT/stop.sh $ID
+case "$RC" in
+    0)  echo "S10 PASS" ;;
+    77) echo "S10 INCONCLUSIVE (no live dependent; see probe stderr)" ;;
+    *)  echo "S10 FAIL (exit=$RC want 0)" ;;
+esac
+```
+
+**Assert (S10):**
+- `RC == 0`. The probe's own postconditions are: the subscribe was `approved`;
+  the stream was still un-torn-down at the moment of the destroy; `torn_down`
+  then fired with reason exactly `source toplevel closed`; `toplevel_removed`
+  fired for **that proxy's handle** (not merely a count bump); and a later
+  request still round-tripped.
+- `approved` means qdwin allocated the PipeWire output, pinned the view, minted
+  a token and *forked* — it does NOT prove the `qdistro-forward` child exec'd
+  or works. That is enough for what is under test (the server-side stream state
+  exists and points at the proxy) and is why this step can run on a host with
+  no forward binary at all.
+- `RC == 77` is INCONCLUSIVE, never PASS: the mode attached no live dependent
+  and asserted nothing. The probe's stderr names what is missing (no pipewire
+  output, no verdict within 20s).
+
+> Verified non-vacuous by fault injection: deleting the
+> `qdwin_toplevel_release_dependents()` call from `qdwin_nested_proxy_destroy`
+> — i.e. the pre-`0ed786d` behaviour — turns this case red. Independently
+> reproduced by codex against its own built plugin variants
+> (`todo/reviews/proxy-lane-review-r1.md`).
+>
+> One honest caveat about running it on a developer host: `/usr/bin/qdistro-
+> forward` is usually absent there, so the forked child dies immediately and
+> the stream is torn down as `"forward exited"` shortly after. The destroy wins
+> that race consistently (5/5 here), and the reason assertion is what
+> distinguishes the two — an exec-failed child yields `approved` then
+> `forward exited`, which fails as **RC=1**, not 77. A host seeing that is
+> looking at a missing forward binary, not a product regression; re-run in the
+> VM lane, where the forward is real, before treating it as one.
+
 ## Teardown
 
 `stop.sh` runs inline per case. If a case aborts before its `stop.sh`, tear
@@ -254,8 +328,12 @@ each down individually (one id per call), e.g. `$HT/stop.sh 16-nested-reject`.
 
 ## Pass criteria
 
-All nine asserts hold: S1 `RC==4` + refused log, S2 `RC==0` + proxy-created
+All ten asserts hold: S1 `RC==4` + refused log, S2 `RC==0` + proxy-created
 log, S3 `RC==0` + ALLOW log, S4 `RC==3` (policy_denied) + DENY log, S5
 `RC==0` + DEFER log, S6 `RC==0` + stale-no-op log + weston alive, S7 `RC==0`
 + idempotent log, S8 `RC==0` (toplevel_removed), S9 `RC==0` + empty-advertise
-log.
+log, S10 `RC==0` (stream released on advertiser destroy) — or S10
+INCONCLUSIVE on a host with no PipeWire daemon, which is not a pass.
+
+The move-drag and chrome-popup halves of the same E2 gate need a pointer and
+are therefore VM-only: `tests/gui/22-nested-proxy-teardown.md`.

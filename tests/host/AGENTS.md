@@ -45,7 +45,15 @@ scenario file's stem, e.g. `01-max-restore`).
   `/tmp/qdwin-host-tests/<id>/`, spawns weston (headless) +
   weston-terminal + qdshell. `--colors UID=#hex,...` sets per-uid
   border colour map. `--no-terminal` / `--no-shell` skip the
-  respective client. Echoes `<id>` on success.
+  respective client. `--pipewire` additionally loads libweston's
+  PipeWire **backend** and configures one pipewire output — needed by
+  any scenario that expects `subscribe_view_stream` to be *approved*,
+  since without a free pipewire output qdwin answers `denied "no free
+  pipewire output"` and every stream-shaped assertion is vacuous. It
+  requires a PipeWire daemon on the host (`/run/user/$UID/pipewire-0`)
+  and exits 8 without one; the backend is pointed at the real user
+  runtime dir via `PIPEWIRE_RUNTIME_DIR` while weston itself keeps the
+  per-test `XDG_RUNTIME_DIR`. Echoes `<id>` on success.
 - **`screenshot.sh <id> <name>`** — captures qdwin's output to
   `/tmp/qdwin-host-tests/<id>/shots/<name>.png` and echoes the path.
 - **`ctrl.sh <id> <cmd> [args...]`** — sends a line to qdshell's

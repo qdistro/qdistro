@@ -3,7 +3,14 @@
 #
 # Usage:
 #   start.sh <test-id> [--colors <map>] [--width N] [--height N]
-#                       [--no-shell] [--no-terminal]
+#                       [--no-shell] [--no-terminal] [--pipewire]
+#
+# --pipewire additionally loads libweston's PipeWire BACKEND and configures one
+# pipewire output, so subscribe_view_stream can actually be approved. Without
+# it qdwin answers `denied "no free pipewire output"` and every stream-shaped
+# assertion is vacuous. Requires a running PipeWire daemon on the host; the
+# backend is pointed at the REAL user runtime dir for its socket while weston
+# itself keeps the per-test one.
 #
 # After return:
 #   - weston is running headless on socket "qdwin-test-<id>"
@@ -24,6 +31,7 @@ WIDTH=1024
 HEIGHT=640
 WANT_SHELL=1
 WANT_TERMINAL=1
+WANT_PIPEWIRE=0
 ALLOWED_UID=$(id -u)
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -32,6 +40,7 @@ while [ $# -gt 0 ]; do
         --height)      HEIGHT=$2; shift 2 ;;
         --no-shell)    WANT_SHELL=0; shift ;;
         --no-terminal) WANT_TERMINAL=0; shift ;;
+        --pipewire)    WANT_PIPEWIRE=1; shift ;;
         # Override qdwin's allowed_uid. Shell bootstrap, locker, and
         # layer-shell bind gates key on it; secctx manager binds do not
         # authorize by uid except when QDWIN_SECCTX_OPEN=1 is set.
@@ -78,9 +87,26 @@ export QDWIN_ALLOWED_LOCKER_ANY
 # flag is present.
 export QDWIN_ENABLE_SCREENSHOOTER=1
 
+# Optional PipeWire backend. The [pipewire] section is only read once that
+# backend is loaded, and the backend resolves its socket through
+# PIPEWIRE_RUNTIME_DIR — which must stay the user's real runtime dir, since the
+# per-test XDG_RUNTIME_DIR has no pipewire-0 in it.
+PW_ARGS=()
+if [ "$WANT_PIPEWIRE" = 1 ]; then
+    if [ ! -S "/run/user/$(id -u)/pipewire-0" ]; then
+        echo "[start.sh] --pipewire: no pipewire daemon at /run/user/$(id -u)/pipewire-0" >&2
+        exit 8
+    fi
+    printf '[core]\nbackend=headless\nrequire-input=false\n\n[pipewire]\nnum-outputs=1\n' \
+        > "$DIR/weston.ini"
+    PW_ARGS=(--backend=pipewire --config="$DIR/weston.ini")
+    export PIPEWIRE_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+
 # weston headless + qdwin-shell.so
 weston \
     --backend=headless \
+    "${PW_ARGS[@]}" \
     --renderer=pixman \
     --shell="$QDWIN_INSTALL/lib/weston/qdwin-shell.so" \
     --width="$WIDTH" --height="$HEIGHT" \
