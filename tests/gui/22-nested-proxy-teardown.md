@@ -11,9 +11,10 @@ non-vacuous by fault injection. S3 (popup) has an EVENT-only oracle:
 `dismissed` firing is necessary but not sufficient for the parent pointer
 having been released, and it has never run against a pointer. S1 (move) has no
 oracle at all for grab release — it is a crash/liveness check. S4 is what
-covers all three indirectly, by proving input still reaches an ordinary client
-afterwards. Each section says which it is; do not summarise this scenario as
-"proves the dependents are released".
+proves only that KEYBOARD input still reaches an ordinary client afterwards —
+it does not exercise the pointer, so it does not detect a leftover pointer
+grab. Each section says which it is; do not summarise this scenario as "proves
+the dependents are released".
 
 **Why**: `qdwin_toplevel` is pointed at by three things that outlive an ordinary
 client request: `qdwin_popup::parent`, the active move-drag (by handle), and any
@@ -36,9 +37,12 @@ headless, has no pointer at all; `tests/apps/13-rdp-subscribe-frame.md`
 subscribes a *regular* toplevel and kills the forward, not the source. This
 scenario is that missing lane.
 
-**Non-visual**: every assert is a probe exit code plus a journal read. No
-screenshots. The one pixel-dependent step is a single injected click (S3), and
-its target is printed by the probe rather than hard-coded.
+**Mostly non-visual**: S1-S3 assert on probe exit codes and journal reads only.
+S4 is the exception — proving keyboard delivery means reading characters off a
+screenshot, the way `tests/apps/12-keystroke-roundtrip.md` does, so this
+scenario needs a graphic-aware runner. The one pixel-dependent *input* step is
+S3's single injected click, and its target is printed by the probe rather than
+hard-coded.
 
 ## What "destroying the advertiser" means here
 
@@ -48,14 +52,18 @@ its target is printed by the probe rather than hard-coded.
 resource to be the bound shell. So the probe destroys its own
 `qdwin_nested_toplevel_v1` rather than exiting.
 
-That is the same code path a real advertiser disconnect takes, not a weaker
-one: `qdwin_nested_toplevel_destroy_req` (`qdwin/qdwin.c:19445`) is a bare
+That reaches the same per-resource code path a disconnect reaches:
+`qdwin_nested_toplevel_destroy_req` (`qdwin/qdwin.c:19445`) is a bare
 `wl_resource_destroy(resource)`, and libwayland runs the SAME destructor —
 `qdwin_nested_toplevel_resource_destroy` (`:19620`) → `qdwin_nested_proxy_
-destroy` — on a client disconnect. What this lane does NOT reproduce is the
-advertiser and the shell being different clients, so a shell that reacted to
-`toplevel_removed` by touching the freed proxy would be a different (and
-untested) shape.
+destroy` — on a client disconnect.
+
+It is NOT equivalent to a disconnect, though, and two differences matter. A
+disconnect destroys *all* of the advertiser's resources, in libwayland's order,
+so teardown interactions between them are not exercised here at all. And the
+advertiser and the shell are one `wl_client` in this lane, so a shell that
+reacted to `toplevel_removed` by touching the freed proxy is a different,
+untested shape. Both are recorded in `todo/open-followups.md` item 4.
 
 ## Environment
 
@@ -103,11 +111,11 @@ trap 'qdwin_apps_restore_shell' EXIT
 
 # LANE CONSTRAINT (enforced by the probe, not here): S3's click target is
 # computed in output-local pixels against the first wl_output, so it assumes
-# exactly ONE unscaled output. The probe counts outputs and reads
-# wl_output.scale itself and exits 77 with the reason if either differs —
-# which is the right place for it, since only the probe sees what the
-# compositor actually advertises. It reports both in its PROXY_GEOM line
-# (`outputs=` and `scale=`); assert 3.3 checks them.
+# exactly ONE output, unscaled, untransformed, at the origin. The probe checks
+# all four itself from wl_output and exits 77 naming the one that differs —
+# the right place for it, since only the probe sees what the compositor
+# actually advertises. It reports them in its PROXY_GEOM line
+# (out=WxH@x,y outputs= scale= transform=); assert 3.3 checks them.
 
 # Never hard-code wayland-1: the socket name moves across compositor restarts
 # (see tests/apps/13-rdp-subscribe-frame.md Setup).
@@ -222,9 +230,16 @@ Oracle limits, stated up front: the protocol has no "popup created" event, so
 "the popup was live at the destruction boundary" is established by `show_popup`
 round-tripping without a protocol error AND `qdwin_popup_v1.dismissed` not
 having fired by the time the advertiser is destroyed. The probe re-arms that
-flag immediately before the destroy, so only a dismissal *caused by* the
-destroy satisfies the assertion — but an implementation that kept the popup
-alive while releasing nothing would still have to fire `dismissed` to pass.
+flag immediately before the destroy, which narrows the window but does NOT
+establish causality. Two sequences still reach a pass without the popup having
+been released (`proxy-lane-review-r2.md` finding 1): an outside press processed
+after the probe's re-check but before the server handles the destroy, whose
+`dismissed` is dispatched by the following round-trip; and an implementation
+that keeps `send_dismissed` while dropping `qdwin_popup_teardown`, which
+satisfies an event-only oracle by construction. Closing this needs a view of
+server-side popup state that the protocol does not expose — see
+`todo/open-followups.md` item 5. The only mitigation here is procedural: the
+lane injects exactly one click, and it happens before `show_popup`.
 
 This step launches a process that HOLDS THE SINGLETON SHELL ROLE and then
 blocks. It must be reaped on every exit path, or the `EXIT` trap will restart
@@ -232,45 +247,92 @@ blocks. It must be reaped on every exit path, or the `EXIT` trap will restart
 `qdwin_apps_restore_shell` kills bystanders, not this probe
 (`todo/reviews/proxy-lane-review-r1.md` finding 4).
 
-**Reap by PID, never by name.** `pkill -x qdwin-nested-probe` matches nothing:
-Linux `comm` is truncated to 15 characters and that name is 18, so both `pkill
--x` and `pgrep -x` silently return no match — and a wait loop built on `pgrep`
-then declares success immediately (`proxy-lane-review-r2.md` finding 2). The
-in-VM shell therefore records the probe's own PID and the reaper waits on it.
-`pkill -f` is the other trap here: it matches the guest-agent shell running the
-command itself (see the vm-exec pkill self-match note in the project memory).
+**Reap by process GROUP, and publish ownership before the probe exists.**
+`pkill -x qdwin-nested-probe` matches nothing: Linux `comm` is truncated to 15
+characters and that name is 18, so both `pkill -x` and `pgrep -x` silently
+return no match, and a wait loop built on `pgrep` then declares success
+immediately (`proxy-lane-review-r2.md` finding 2). `pkill -f` is the other trap:
+it matches the guest-agent shell running the command (see the vm-exec
+pkill self-match note in the project memory).
 
-The log is per-run and removed before launch so a previous run's
-`CLICK_TARGET`/`rc` can never be read as this one's.
+Reaping by PID alone is still not enough, because *publishing* a PID is not a
+handshake (`proxy-lane-review-r3.md` finding 1). Three rules close it:
+
+1. The inner shell writes **its own** pid and only then runs the probe, so a
+   missing pid-file means the probe was never started — not that cleanup
+   succeeded. If publication fails the shell exits without launching anything.
+2. `setsid` makes that shell a process-group leader, and the reaper signals the
+   **group**, so the probe cannot outlive the wrapper that owns it.
+3. The launch is *acknowledged*: the step waits for the pid-file before doing
+   anything else. Until it appears, ownership is unknown and the scenario must
+   not restore qdshell — a delayed launcher would otherwise start the probe
+   after cleanup declared itself finished.
+
+State is per-invocation (`$$` repeats if the scenario is rerun in one shell)
+and is retired once the probe exits, so the final trap's reaper is a no-op.
 
 ```bash
 CURSOR=$(qdwin_apps_journal_cursor)
-QD22_LOG=/tmp/qd22-popup.$$.log
-QD22_PID=/tmp/qd22-popup.$$.pid
+QD22_RUN="$$-$(date +%s)-$RANDOM"
+QD22_LOG=/tmp/qd22-popup.$QD22_RUN.log
+QD22_PID=/tmp/qd22-popup.$QD22_RUN.pid
+QD22_FAILED=0          # set by the reaper; checked before restoring
 
+# Reap the probe's whole process group. Exit status: 0 = nothing of ours is
+# running, 1 = ownership unknown or a survivor — which must BLOCK restoration.
 qd22_reap_probe() {
     "$QDWIN_VM_EXEC" "$VMNAME" \
       "p=\$(cat $QD22_PID 2>/dev/null); \
-       [ -n \"\$p\" ] || exit 0; \
-       kill -TERM \"\$p\" 2>/dev/null; \
-       for _i in \$(seq 1 40); do kill -0 \"\$p\" 2>/dev/null || exit 0; sleep 0.1; done; \
-       kill -KILL \"\$p\" 2>/dev/null; \
-       for _i in \$(seq 1 20); do kill -0 \"\$p\" 2>/dev/null || exit 0; sleep 0.1; done; \
-       echo \"probe pid \$p SURVIVED\" >&2; exit 1" 2>&1
+       case \"\$p\" in ''|*[!0-9]*) echo 'no pid published'; exit 0;; esac; \
+       kill -TERM -\"\$p\" 2>/dev/null; \
+       for _i in \$(seq 1 40); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; exit 0; }; sleep 0.1; done; \
+       kill -KILL -\"\$p\" 2>/dev/null; \
+       for _i in \$(seq 1 20); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; exit 0; }; sleep 0.1; done; \
+       echo \"probe group \$p SURVIVED\"; exit 1" 2>&1
 }
-# Reap BEFORE restoring qdshell, on every exit from here on.
-trap 'qd22_reap_probe; qdwin_apps_restore_shell' EXIT
+# qdwin_apps_restore_shell must NOT run while the probe may still hold the
+# singleton role. The GUI helpers do not set -e, so this is checked explicitly.
+qd22_final_check() {
+    if ! qd22_reap_probe; then
+        echo "FAIL: could not reap the popup probe — it may still own the shell role"
+        QD22_FAILED=1
+    fi
+    qdwin_apps_restore_shell || { echo "FAIL: qdshell restore failed"; QD22_FAILED=1; }
+    local after; after=$(qdwin_compositor_pid)
+    if [ "$after" != "$COMP_PID_BEFORE" ]; then
+        echo "FAIL (T.1): compositor pid $COMP_PID_BEFORE -> $after"
+        QD22_FAILED=1
+    else
+        echo "T.1 ok: compositor pid unchanged ($after)"
+    fi
+    [ "$QD22_FAILED" = 0 ] || echo "SCENARIO VERDICT: FAIL (see FAIL lines above)"
+}
+trap 'qd22_final_check' EXIT
 
-"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_PID" >/dev/null
-# `& echo $!` inside the inner sh gives the PROBE's pid, not runuser's; the
-# `wait` then makes rc= the probe's own exit status.
+"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_PID" >/dev/null \
+    || { echo "ERROR: could not clear per-run state in the VM"; exit 1; }
+
+# setsid -> group leader. `echo $$ > pid` BEFORE the probe runs, so an absent
+# pid-file provably means nothing was launched. `|| exit 90` refuses to launch
+# an unreapable child.
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      WAYLAND_DISPLAY=$ACTIVE_SOCKET \
-     sh -c 'qdwin-nested-probe --destroy-with-popup --click-timeout 60 \
-              >$QD22_LOG 2>&1 & \
-            echo \$! > $QD22_PID; wait \$!; echo rc=\$? >>$QD22_LOG' &" \
+     setsid sh -c 'echo \$\$ > $QD22_PID.tmp && mv $QD22_PID.tmp $QD22_PID || exit 90; \
+                   qdwin-nested-probe --destroy-with-popup --click-timeout 60 \
+                     >$QD22_LOG 2>&1; \
+                   echo rc=\$? >>$QD22_LOG' &" \
   >/dev/null
+
+# Acknowledge ownership before anything else can fail.
+PROBE_PID=
+for _ in $(seq 1 40); do
+    PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
+    [ -n "$PROBE_PID" ] && break
+    sleep 0.25
+done
+[ -n "$PROBE_PID" ] || { echo "ERROR: probe never published its pid (ownership unknown)"; exit 1; }
+echo "probe group pid=$PROBE_PID"
 
 # The probe prints CLICK_TARGET once the chrome is attached and committed.
 TARGET=
@@ -302,12 +364,15 @@ qd22_reap_probe
 LIVE chrome popup; dismissed fired; compositor alive`.
 **Assert (3.2):** `qdwin_compositor_pid` still equals `$COMP_PID_BEFORE`.
 
-**Assert (3.3) — calibration, check this FIRST if S3 goes wrong:** the `out=WxH`
-field the probe prints in `PROXY_GEOM` equals `$QDWIN_SCREEN_W x $QDWIN_SCREEN_H`.
-The probe reads that from `wl_output.mode`, i.e. the compositor's real output;
-`qdwin_click` uses the two env vars to convert pixels into QMP's 0..32767 axis
-range. If they disagree, every click in this scenario lands somewhere other than
-where it was aimed, and S3's `rc=77` says nothing about the product.
+**Assert (3.3) — calibration, check this FIRST if S3 goes wrong:** in the
+probe's `PROXY_GEOM` line, `out=WxH` equals `$QDWIN_SCREEN_W x $QDWIN_SCREEN_H`,
+and `outputs=1 scale=1 transform=0` with `out=...@0,0`. The probe reads all of
+these from `wl_output` — the compositor's real configuration — and refuses (77)
+if the count, scale, origin or transform is not the one its pixel arithmetic
+assumes. `qdwin_click` uses the two env vars to convert pixels into QMP's
+0..32767 axis range, and nothing else checks that they match reality: if they
+disagree, every click in this scenario lands somewhere other than where it was
+aimed and S3's result says nothing about the product.
 
 `rc=77` with `no chrome_button within 60s` means the precondition was not
 established — the cause is NOT determined by the timeout alone. Calibration
@@ -316,32 +381,42 @@ compositor produces exactly the same observation, and that would be a product
 defect. Do not report a calibration verdict without checking 3.3 first.
 `rc=77` with `leaves neither chrome band on-screen` means the proxy covers the
 whole output, so no clickable band exists — move it or enlarge the output.
-Both are harness-calibration ERROR, not product FAIL. The probe deliberately
+Neither reason is self-diagnosing. "Neither band on-screen" is most often a
+proxy covering the whole output, but the probe only knows the rectangles it was
+given. Report both as an unestablished precondition (ERROR) whose cause is
+still open, and check 3.3 before blaming calibration. The probe deliberately
 refuses to pass without a real grab serial, because `show_popup` would then
 never have been called and there would be no popup to destroy under.
 
-## S4 — input still reaches an ordinary window afterwards
+## S4 — KEYBOARD input still reaches an ordinary window afterwards
 
-Three proxies have now been torn down under live dependents. The probe cannot
-check the thing that matters most about that: whether a grab or a seat was left
-behind. A stale pointer grab is invisible in every cheap check — a compositor
-holding one still accepts new toplevels and keeps its PID — and the only
-symptom is **input not arriving**. Codex raised this twice
-(`proxy-lane-review-r1.md` finding 2, `proxy-lane-review-r2.md` finding 4), and
-a `qdwin: click-focus pick` journal line is NOT evidence of delivery: it is
-logged before the event is delivered, and it can be deduplicated away for an
-already-focused window.
+Three proxies have now been torn down under live dependents. This step checks
+the one thing the probe cannot check about itself: that the seat still delivers
+to an ordinary client.
 
-So use the repo's actual input-delivery idiom (`tests/apps/12-keystroke-
-roundtrip.md`): type into a terminal and read the characters back off the
-framebuffer. `foot` is part of the opt-in `QDWIN_APP_DEPS` matrix, so its
-absence is a SKIP of this step, not a FAIL — but then S4 asserts nothing and
-the scenario's headline claim is unproven; say so in the report.
+**What it proves is keyboard delivery, and only that.** An earlier draft also
+claimed it proved the pointer works and that no stale grab was left behind.
+That was wrong (`proxy-lane-review-r3.md` finding 2): `qdwin-bystander` calls
+`set_keyboard_focus` on `toplevel_added` (`test-client/qdwin-bystander.c:301`),
+so the terminal is keyboard-focused *before* any click — drop the click
+entirely and the same characters still appear. Worse, a stale pointer grab can
+swallow pointer events while keyboard events keep flowing to the focused
+window, which is exactly the defect that would go unseen.
+
+So: no click here, no pointer claim. **Pointer recovery after a proxy teardown
+has no oracle anywhere in this lane** — see `todo/open-followups.md` item 2.
+
+Uses the repo's keyboard-delivery idiom (`tests/apps/12-keystroke-roundtrip.md`):
+type into a terminal, read the characters off the framebuffer. `foot` is part of
+the opt-in `QDWIN_APP_DEPS` matrix, so its absence is a SKIP — but then S4
+asserts nothing and the scenario proves nothing about input surviving; say so
+in the report.
 
 The probe released the shell role when its last mode exited, so take the role
-with the bystander (the trap armed in S3 still covers both).
+with the bystander (the trap from S3 still covers cleanup).
 
 ```bash
+QD22_TERM_TITLE="qd22-after-$QD22_RUN"
 if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1'; then
     echo "SKIP S4: foot not installed (qdwin app deps are opt-in; rerun with QDWIN_APP_DEPS=1)"
     echo "NOTE: with S4 skipped, nothing in this scenario proves input survived the teardowns"
@@ -349,13 +424,13 @@ else
     qdwin_apps_become_shell || { echo "ERROR: could not take the shell role back"; exit 1; }
     qdwin_apps_session_up   || { echo "FAIL: session not healthy after the teardowns"; exit 1; }
 
-    qdwin_apps_launch qd22-after "foot --title qd22-after"
-    # Identify by TITLE, not app_id: another qdistro-test-window/foot from an
-    # earlier step would otherwise win a `tail -1` on app_id alone.
+    qdwin_apps_launch qd22-after "foot --title $QD22_TERM_TITLE"
+    # Identify by the per-run TITLE, not app_id: a `tail -1` on app_id alone
+    # would happily select some other terminal.
     HANDLE=
     for _ in $(seq 1 40); do
         HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-          "grep -E 'toplevel_added handle=[0-9]+ .*title=\"qd22-after\"' \
+          "grep -E 'toplevel_added handle=[0-9]+ .*title=\"$QD22_TERM_TITLE\"' \
              /tmp/bystander.log 2>/dev/null | tail -1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'")
         [ -n "$HANDLE" ] && break
         sleep 0.5
@@ -363,22 +438,6 @@ else
     [ -n "$HANDLE" ] || { echo "FAIL: compositor admitted no new toplevel after the teardowns"; exit 1; }
     echo "post-teardown handle=$HANDLE"
 
-    # Click the window's OWN rectangle, from its reported geometry.
-    GEOM=$("$QDWIN_VM_EXEC" "$VMNAME" \
-      "grep -E 'toplevel_geometry handle=$HANDLE ' /tmp/bystander.log | tail -1")
-    echo "target geom: $GEOM"
-    GX=$(printf '%s' "$GEOM" | sed -nE 's/.*[^_]x=(-?[0-9]+).*/\1/p')
-    GY=$(printf '%s' "$GEOM" | sed -nE 's/.* y=(-?[0-9]+).*/\1/p')
-    GW=$(printf '%s' "$GEOM" | sed -nE 's/.* w=([0-9]+).*/\1/p')
-    GH=$(printf '%s' "$GEOM" | sed -nE 's/.* h=([0-9]+).*/\1/p')
-    [ -n "$GX" ] && [ -n "$GY" ] && [ -n "$GW" ] && [ -n "$GH" ] \
-        || { echo "ERROR: could not parse geometry for handle $HANDLE"; exit 1; }
-    CLICK_X=$(( GX + GW / 2 ))
-    CLICK_Y=$(( GY + GH / 2 ))
-    echo "clicking qd22-after at ($CLICK_X, $CLICK_Y)"
-
-    qdwin_click "$CLICK_X" "$CLICK_Y" left
-    sleep 0.5
     qdwin_apps_type "qdwinlives"
     sleep 1
     qdwin_apps_screenshot /tmp/qd22-s4-typed.png
@@ -393,12 +452,11 @@ is what makes 4.1 mean anything: a compositor that died and was restarted by
 systemd would also accept a new toplevel and would otherwise read as a clean
 pass.
 
-**Assert (4.3) — the real point of S4:** `/tmp/qd22-s4-typed.png` shows
-`qdwinlives` echoed in the `qd22-after` terminal. That is direct evidence the
-click and the keystrokes reached an ordinary client: no leftover pointer grab,
-and the seat survived the per-stream seat release S2 performed. If the
-characters are absent but the window is visible and focused, that IS the
-failure this step exists to catch — report FAIL, not ERROR.
+**Assert (4.3) — the point of S4:** `/tmp/qd22-s4-typed.png` shows `qdwinlives`
+echoed in the terminal. Direct evidence that keyboard events still reach an
+ordinary client, i.e. the seat survived the per-stream seat release S2
+performed. If the window is visible and focused but the characters are absent,
+that IS the failure this step exists to catch — report FAIL, not ERROR.
 
 **Assert (4.4):** the compositor journal since `$CURSOR` contains no `SIGSEGV`,
 `use-after-free`, `double free`, or `Assertion` line.
@@ -408,13 +466,25 @@ failure this step exists to catch — report FAIL, not ERROR.
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      journalctl --user -b -u qdwin-compositor.service \
      --after-cursor '$CURSOR' --no-pager -o cat" \
-  | grep -E 'SIGSEGV|use-after-free|double free|Assertion' && echo "FAIL: see above" || echo "4.4 clean"
-"$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x foot 2>/dev/null' || true
+  | grep -E 'SIGSEGV|use-after-free|double free|Assertion' \
+  && echo "FAIL (4.4): see above" || echo "4.4 clean"
 ```
 
-**Assert (4.5):** the `foot` launched here is cleaned up — the command above
-runs on the failure path too, so do not leave it inside an `if` that only the
-success path reaches.
+The terminal is cleaned up by the EXIT trap, not here — an `exit 1` above, or a
+runner stopping on a failed assert, would skip any cleanup written at this
+point. Fold it into `qd22_final_check` from S3, matched on the per-run title so
+it cannot touch an unrelated terminal:
+
+```bash
+# add as the FIRST line of qd22_final_check(), defined in S3.
+# The bracket is deliberate: `pkill -f` would otherwise match the guest-agent
+# shell running this very command. `qd22-af[t]er-` as a REGEX matches the
+# terminal's title; as literal text in the command line it does not match
+# itself. $QD22_RUN is set in S3, so this is safe even if S4 was skipped —
+# it then matches nothing.
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  "pkill -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null" >/dev/null 2>&1 || true
+```
 
 ## Teardown
 

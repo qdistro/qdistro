@@ -304,9 +304,11 @@ esac
   or works. That is enough for what is under test (the server-side stream state
   exists and points at the proxy) and is why this step can run on a host with
   no forward binary at all.
-- `RC == 77` is INCONCLUSIVE, never PASS: the mode attached no live dependent
-  and asserted nothing. The probe's stderr names what is missing (no pipewire
-  output, no verdict within 20s).
+- `RC == 77` is INCONCLUSIVE, never PASS: a precondition for having a live
+  dependent at the destruction boundary was not met, so the mode asserted
+  nothing. The probe's stderr says which — no free pipewire output, no verdict
+  within 20s, or a stream that was approved and had already ended by the time
+  the probe re-checked.
 
 > Verified non-vacuous by fault injection: deleting the
 > `qdwin_toplevel_release_dependents()` call from `qdwin_nested_proxy_destroy`
@@ -338,8 +340,10 @@ log, S3 `RC==0` + ALLOW log, S4 `RC==3` (policy_denied) + DENY log, S5
 + idempotent log, S8 `RC==0` (toplevel_removed), S9 `RC==0` + empty-advertise
 log, S10 `RC==0` (stream released on advertiser destroy). On a host with no
 PipeWire daemon `start.sh --pipewire` exits 8 and S10 is an **ERROR** (the case
-never ran); the probe's own 77 is reserved for a compositor that started but
-could not give the stream a free output. Neither is a pass.
+never ran). The probe's own 77 means something weaker and more general: a
+precondition for having a live dependent at the destruction boundary was not
+met — no free output, no verdict within 20s, or a stream that was approved and
+then ended before the check. Neither 77 nor a failed start is a pass.
 
 The move-drag and chrome-popup halves of the same E2 gate need a pointer and
 are therefore VM-only: `tests/gui/22-nested-proxy-teardown.md`.

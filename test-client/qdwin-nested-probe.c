@@ -149,6 +149,7 @@ struct probe {
 	 * actually on-screen and therefore clickable. */
 	struct wl_output *output;
 	int out_w, out_h, out_scale, output_count;
+	int32_t out_x, out_y, out_transform;
 
 	/* The shell version to bind. v8 is enough for the gating modes; the
 	 * popup mode needs chrome_button (v20) to learn a live grab serial and
@@ -480,8 +481,16 @@ static const struct qdwin_nested_toplevel_v1_listener nt_listener = {
 static void l_out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y,
 			   int32_t pw, int32_t ph, int32_t sub, const char *make,
 			   const char *model, int32_t transform)
-{ (void)d; (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)sub;
-  (void)make; (void)model; (void)transform; }
+{
+	struct probe *p = d;
+	(void)o; (void)pw; (void)ph; (void)sub; (void)make; (void)model;
+	/* Origin and transform are part of the click-target assumption, not
+	 * just the mode: a rotated or non-origin output makes output-local
+	 * pixel arithmetic point somewhere else (codex r3). */
+	p->out_x = x;
+	p->out_y = y;
+	p->out_transform = transform;
+}
 static void l_out_mode(void *d, struct wl_output *o, uint32_t flags,
 		       int32_t w, int32_t h, int32_t refresh)
 {
@@ -1206,6 +1215,13 @@ int main(int argc, char *argv[])
 				p.out_scale);
 			return 77;
 		}
+		if (p.out_x != 0 || p.out_y != 0 || p.out_transform != 0) {
+			fprintf(stderr, "qdwin-nested-probe: output at (%d,%d) "
+				"transform=%d — the click target assumes an "
+				"untransformed output at the origin\n",
+				p.out_x, p.out_y, p.out_transform);
+			return 77;
+		}
 		int north_y = p.geom_y - ch / 2;
 		int south_y = p.geom_y + chh + ch / 2;
 		int use_north = (north_y >= 0 && north_y < p.out_h);
@@ -1238,10 +1254,11 @@ int main(int argc, char *argv[])
 		wl_display_roundtrip(p.display);
 
 		/* Tell the lane exactly where to click. */
-		printf("PROXY_GEOM x=%d y=%d w=%d h=%d out=%dx%d outputs=%d "
-		       "scale=%d side=%s chrome=%d\n", p.geom_x, p.geom_y,
-		       cw, chh, p.out_w, p.out_h, p.output_count,
-		       p.out_scale > 0 ? p.out_scale : 1,
+		printf("PROXY_GEOM x=%d y=%d w=%d h=%d out=%dx%d@%d,%d "
+		       "outputs=%d scale=%d transform=%d side=%s chrome=%d\n",
+		       p.geom_x, p.geom_y, cw, chh, p.out_w, p.out_h,
+		       p.out_x, p.out_y, p.output_count,
+		       p.out_scale > 0 ? p.out_scale : 1, p.out_transform,
 		       use_north ? "N" : "S", ch);
 		printf("CLICK_TARGET x=%d y=%d\n", click_x, click_y);
 		fflush(stdout);
