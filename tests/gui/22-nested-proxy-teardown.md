@@ -101,13 +101,95 @@ COMP_PID_BEFORE=$(qdwin_compositor_pid)
 [ -n "$COMP_PID_BEFORE" ] || { echo "ERROR: no compositor pid"; exit 1; }
 echo "compositor pid before = $COMP_PID_BEFORE"
 
+# Per-invocation state. `$$` alone repeats if the scenario is rerun in one
+# shell, and a stale file from an earlier attempt would then be read as this
+# run's.
+QD22_RUN="$$-$(date +%s)-$RANDOM"
+QD22_LOG=/tmp/qd22-popup.$QD22_RUN.log
+QD22_PID=/tmp/qd22-popup.$QD22_RUN.pid
+QD22_CANCEL=/tmp/qd22-popup.$QD22_RUN.cancel
+QD22_INTENT=/tmp/qd22-popup.$QD22_RUN.intent
+QD22_FAILED=0
+
+# ---------------------------------------------------------------------------
+# ONE cleanup handler, defined and installed BEFORE anything is launched.
+# Do not redefine or replace it later in this scenario: an earlier draft
+# defined it in S3, told the reader to insert the terminal cleanup afterwards,
+# and then replaced the whole thing in Teardown — which silently dropped both
+# (proxy-lane-review-r4.md finding 2).
+# ---------------------------------------------------------------------------
+
+# Reap S3's popup probe. Exit 0 only when nothing of ours can be running.
+#
+# The hard case is a launcher that has been BACKGROUNDED but not yet reached
+# its publication step: an absent pid-file then means "pending", not "never
+# started", and cleanup that returns success there lets the probe start
+# afterwards and hold the shell role (r4 finding 1, reproduced by pausing the
+# launcher). The launcher and the reaper therefore both check both flags:
+#   - the launcher tests $QD22_CANCEL before publishing AND again immediately
+#     after, removing its pid-file and exiting rather than starting the probe;
+#   - the reaper sets $QD22_CANCEL first, then watches for a late pid.
+# One of the two always observes the other, so after this returns 0 no probe
+# can start. $QD22_INTENT distinguishes "never launched" from "launched".
+qd22_reap_probe() {
+    "$QDWIN_VM_EXEC" "$VMNAME" \
+      "touch $QD22_CANCEL 2>/dev/null; \
+       [ -e $QD22_INTENT ] || { echo 'probe never launched'; exit 0; }; \
+       p=''; \
+       for _i in \$(seq 1 40); do \
+         p=\$(cat $QD22_PID 2>/dev/null); \
+         case \"\$p\" in ''|*[!0-9]*) sleep 0.1; continue;; esac; \
+         break; \
+       done; \
+       case \"\$p\" in ''|*[!0-9]*) \
+         echo 'no pid published after cancel; launcher self-cancelled'; exit 0;; \
+       esac; \
+       kill -TERM -\"\$p\" 2>/dev/null; \
+       for _i in \$(seq 1 40); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; echo \"group \$p reaped\"; exit 0; }; sleep 0.1; done; \
+       kill -KILL -\"\$p\" 2>/dev/null; \
+       for _i in \$(seq 1 20); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; echo \"group \$p killed\"; exit 0; }; sleep 0.1; done; \
+       echo \"probe group \$p SURVIVED\"; exit 1" 2>&1
+}
+
+qd22_cleanup() {
+    local reaped=ok
+    qd22_reap_probe || { reaped=failed; QD22_FAILED=1
+        echo "FAIL: could not reap the popup probe — it may still hold the shell role"; }
+
+    # S4's terminal, matched on the per-run title. The bracket stops `pkill -f`
+    # matching the guest-agent shell running it; harmless if S4 never ran.
+    "$QDWIN_VM_EXEC" "$VMNAME" \
+      "pkill -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null" >/dev/null 2>&1 || true
+
+    if [ "$reaped" = failed ]; then
+        # Restore anyway so the desktop is not left headless, but never let a
+        # recovery that ran with ownership unresolved read as a clean exit.
+        echo "WARN: restoring qdshell with probe ownership UNRESOLVED — this is"
+        echo "      recovery, not a pass; verify the session by hand."
+    fi
+    qdwin_apps_restore_shell || { echo "FAIL: qdshell restore failed"; QD22_FAILED=1; }
+
+    local after; after=$(qdwin_compositor_pid)
+    if [ "$after" != "$COMP_PID_BEFORE" ]; then
+        echo "FAIL (T.1): compositor pid $COMP_PID_BEFORE -> $after"
+        QD22_FAILED=1
+    else
+        echo "T.1 ok: compositor pid unchanged ($after)"
+    fi
+    "$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null 2>&1 || true
+
+    if [ "$QD22_FAILED" != 0 ]; then
+        echo "SCENARIO VERDICT: FAIL (see the FAIL lines above)"
+    fi
+}
+
 # Free the singleton shell role for the probe (stops qdshell, evicts any suite
-# bystander, waits for qdwin to log `shell unbound`). Arm the restore trap
-# IMMEDIATELY after a successful takeover so a later failure never leaves the
-# desktop headless.
+# bystander, waits for qdwin to log `shell unbound`). Arm cleanup IMMEDIATELY
+# after a successful takeover so a later failure never leaves the desktop
+# headless.
 qdwin_apps_prepare_shell_probe \
     || { echo "ERROR: could not reserve the singleton shell role"; exit 1; }
-trap 'qdwin_apps_restore_shell' EXIT
+trap 'qd22_cleanup' EXIT
 
 # LANE CONSTRAINT (enforced by the probe, not here): S3's click target is
 # computed in output-local pixels against the first wl_output, so it assumes
@@ -158,9 +240,10 @@ round-tripped, the proxy was removed, and the connection survived. It does NOT
 observe the grab. Codex confirmed the gap (`todo/reviews/proxy-lane-review-r1.md`
 finding 2): removing `qdwin_move_grab_end_for` leaves every one of those checks
 green. A leftover grab is only visible as *input not reaching other windows*,
-which is what S4 is for — and S4 runs after S2 and S3, whose own grabs could
-have replaced the stale one. Treat S1 as a crash/liveness check, and see the
-open follow-up for the missing oracle.
+and NOTHING in this scenario observes that: S4 proves keyboard delivery only,
+and the bystander focuses the keyboard on `toplevel_added`, so a stale pointer
+grab would swallow pointer events while typing keeps working. Treat S1 as a
+crash/liveness check; the missing oracle is `todo/open-followups.md` item 2.
 
 ```bash
 CURSOR=$(qdwin_apps_journal_cursor)
@@ -247,91 +330,62 @@ blocks. It must be reaped on every exit path, or the `EXIT` trap will restart
 `qdwin_apps_restore_shell` kills bystanders, not this probe
 (`todo/reviews/proxy-lane-review-r1.md` finding 4).
 
-**Reap by process GROUP, and publish ownership before the probe exists.**
-`pkill -x qdwin-nested-probe` matches nothing: Linux `comm` is truncated to 15
-characters and that name is 18, so both `pkill -x` and `pgrep -x` silently
-return no match, and a wait loop built on `pgrep` then declares success
-immediately (`proxy-lane-review-r2.md` finding 2). `pkill -f` is the other trap:
-it matches the guest-agent shell running the command (see the vm-exec
-pkill self-match note in the project memory).
+**The launcher's half of the cancel protocol.** This step starts a process that
+HOLDS THE SINGLETON SHELL ROLE and then blocks, so it must be impossible for it
+to be running once `qd22_cleanup` (defined in Setup) has returned. Three earlier
+attempts at this were each wrong one level down, so the reasoning is written out:
 
-Reaping by PID alone is still not enough, because *publishing* a PID is not a
-handshake (`proxy-lane-review-r3.md` finding 1). Three rules close it:
+- `pkill -x qdwin-nested-probe` matches nothing — Linux `comm` truncates to 15
+  characters and that name is 18, so `pkill -x` and `pgrep -x` both return no
+  match and a `pgrep`-based wait declares success instantly (r2 finding 2).
+- `pkill -f` matches the guest-agent shell running the command itself (see the
+  vm-exec pkill self-match note in the project memory).
+- Killing the published pid is not enough either: the probe is a child of the
+  wrapper. `setsid` makes the wrapper a group leader and the reaper signals the
+  **group**.
+- Publishing the pid before running the probe fixes publication *failure* but
+  not publication *pending*: a backgrounded launcher can be descheduled before
+  it publishes, outlive the acknowledgement timeout, and start the probe after
+  cleanup reported success (r4 finding 1, reproduced by pausing the launcher).
 
-1. The inner shell writes **its own** pid and only then runs the probe, so a
-   missing pid-file means the probe was never started — not that cleanup
-   succeeded. If publication fails the shell exits without launching anything.
-2. `setsid` makes that shell a process-group leader, and the reaper signals the
-   **group**, so the probe cannot outlive the wrapper that owns it.
-3. The launch is *acknowledged*: the step waits for the pid-file before doing
-   anything else. Until it appears, ownership is unknown and the scenario must
-   not restore qdshell — a delayed launcher would otherwise start the probe
-   after cleanup declared itself finished.
-
-State is per-invocation (`$$` repeats if the scenario is rerun in one shell)
-and is retired once the probe exits, so the final trap's reaper is a no-op.
+So the launcher checks `$QD22_CANCEL` **before** publishing and **again
+immediately after**, removing its pid-file and exiting rather than starting the
+probe. The reaper sets that flag first and then watches for a late pid. Whoever
+loses the race observes the other's flag, so neither a pending launcher nor a
+live probe can survive `qd22_cleanup`. `$QD22_INTENT` is written *synchronously*
+before the launcher is backgrounded, so an absent pid is unambiguous: with no
+intent nothing was ever started.
 
 ```bash
 CURSOR=$(qdwin_apps_journal_cursor)
-QD22_RUN="$$-$(date +%s)-$RANDOM"
-QD22_LOG=/tmp/qd22-popup.$QD22_RUN.log
-QD22_PID=/tmp/qd22-popup.$QD22_RUN.pid
-QD22_FAILED=0          # set by the reaper; checked before restoring
 
-# Reap the probe's whole process group. Exit status: 0 = nothing of ours is
-# running, 1 = ownership unknown or a survivor — which must BLOCK restoration.
-qd22_reap_probe() {
-    "$QDWIN_VM_EXEC" "$VMNAME" \
-      "p=\$(cat $QD22_PID 2>/dev/null); \
-       case \"\$p\" in ''|*[!0-9]*) echo 'no pid published'; exit 0;; esac; \
-       kill -TERM -\"\$p\" 2>/dev/null; \
-       for _i in \$(seq 1 40); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; exit 0; }; sleep 0.1; done; \
-       kill -KILL -\"\$p\" 2>/dev/null; \
-       for _i in \$(seq 1 20); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; exit 0; }; sleep 0.1; done; \
-       echo \"probe group \$p SURVIVED\"; exit 1" 2>&1
-}
-# qdwin_apps_restore_shell must NOT run while the probe may still hold the
-# singleton role. The GUI helpers do not set -e, so this is checked explicitly.
-qd22_final_check() {
-    if ! qd22_reap_probe; then
-        echo "FAIL: could not reap the popup probe — it may still own the shell role"
-        QD22_FAILED=1
-    fi
-    qdwin_apps_restore_shell || { echo "FAIL: qdshell restore failed"; QD22_FAILED=1; }
-    local after; after=$(qdwin_compositor_pid)
-    if [ "$after" != "$COMP_PID_BEFORE" ]; then
-        echo "FAIL (T.1): compositor pid $COMP_PID_BEFORE -> $after"
-        QD22_FAILED=1
-    else
-        echo "T.1 ok: compositor pid unchanged ($after)"
-    fi
-    [ "$QD22_FAILED" = 0 ] || echo "SCENARIO VERDICT: FAIL (see FAIL lines above)"
-}
-trap 'qd22_final_check' EXIT
-
-"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_PID" >/dev/null \
+"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null \
     || { echo "ERROR: could not clear per-run state in the VM"; exit 1; }
+# SYNCHRONOUS: after this returns, an absent pid means "pending", not "never".
+"$QDWIN_VM_EXEC" "$VMNAME" "touch $QD22_INTENT" >/dev/null \
+    || { echo "ERROR: could not record launch intent in the VM"; exit 1; }
 
-# setsid -> group leader. `echo $$ > pid` BEFORE the probe runs, so an absent
-# pid-file provably means nothing was launched. `|| exit 90` refuses to launch
-# an unreapable child.
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      WAYLAND_DISPLAY=$ACTIVE_SOCKET \
-     setsid sh -c 'echo \$\$ > $QD22_PID.tmp && mv $QD22_PID.tmp $QD22_PID || exit 90; \
+     setsid sh -c '[ -e $QD22_CANCEL ] && exit 91; \
+                   echo \$\$ > $QD22_PID.tmp && mv $QD22_PID.tmp $QD22_PID || exit 90; \
+                   [ -e $QD22_CANCEL ] && { rm -f $QD22_PID; exit 91; }; \
                    qdwin-nested-probe --destroy-with-popup --click-timeout 60 \
                      >$QD22_LOG 2>&1; \
                    echo rc=\$? >>$QD22_LOG' &" \
   >/dev/null
 
-# Acknowledge ownership before anything else can fail.
+# Acknowledge ownership before doing anything that could fail.
 PROBE_PID=
 for _ in $(seq 1 40); do
     PROBE_PID=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_PID 2>/dev/null")
     [ -n "$PROBE_PID" ] && break
     sleep 0.25
 done
-[ -n "$PROBE_PID" ] || { echo "ERROR: probe never published its pid (ownership unknown)"; exit 1; }
+# Not fatal by itself: qd22_cleanup can still cancel a pending launcher. But the
+# step cannot proceed without a probe.
+[ -n "$PROBE_PID" ] || { echo "ERROR: probe never published its pid within 10s"; exit 1; }
 echo "probe group pid=$PROBE_PID"
 
 # The probe prints CLICK_TARGET once the chrome is attached and committed.
@@ -355,9 +409,21 @@ for _ in $(seq 1 40); do
     sleep 0.5
 done
 "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG"
-# Must be gone before S4 takes the shell role. A `SURVIVED` line here is an
-# ERROR for the whole scenario: the singleton role is still held.
-qd22_reap_probe
+
+# The probe must be gone AND the compositor must have released its shell role
+# before S4 claims it. qdwin_apps_restore_shell's own pre-start wait watches
+# for a BYSTANDER unbind, which says nothing about this probe.
+qd22_reap_probe || { echo "ERROR: probe still holds the shell role; not proceeding to S4"; exit 1; }
+for _ in $(seq 1 40); do
+    "$QDWIN_VM_EXEC" "$VMNAME" \
+      "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+         journalctl --user -b -u qdwin-compositor.service \
+         --after-cursor '$CURSOR' --no-pager -o cat 2>/dev/null" \
+      | grep -qE '^(\[[0-9:.]+\] )?qdwin: shell unbound$' && { SHELL_FREE=1; break; }
+    sleep 0.25
+done
+[ "${SHELL_FREE:-0}" = 1 ] \
+    || { echo "ERROR: compositor never reported 'shell unbound' after the probe"; exit 1; }
 ```
 
 **Assert (3.1):** the log ends with `rc=0` and carries `proxy destroyed under a
@@ -379,8 +445,9 @@ established — the cause is NOT determined by the timeout alone. Calibration
 (3.3) is the first thing to check, but broken chrome-button routing in the
 compositor produces exactly the same observation, and that would be a product
 defect. Do not report a calibration verdict without checking 3.3 first.
-`rc=77` with `leaves neither chrome band on-screen` means the proxy covers the
-whole output, so no clickable band exists — move it or enlarge the output.
+`rc=77` with `leaves neither chrome band on-screen` means the probe computed no
+clickable band from the rectangles it was given — most often a proxy covering
+the whole output, but the probe cannot tell that from other causes.
 Neither reason is self-diagnosing. "Neither band on-screen" is most often a
 proxy covering the whole output, but the probe only knows the rectangles it was
 given. Report both as an unestablished precondition (ERROR) whose cause is
@@ -390,9 +457,10 @@ never have been called and there would be no popup to destroy under.
 
 ## S4 — KEYBOARD input still reaches an ordinary window afterwards
 
-Three proxies have now been torn down under live dependents. This step checks
-the one thing the probe cannot check about itself: that the seat still delivers
-to an ordinary client.
+Three proxies have now been destroyed — two of them (S2, S3) with a dependent
+established as live at the destruction boundary, one (S1) without move liveness
+being observed at all. This step checks the one thing the probe cannot check
+about itself: that the seat still delivers to an ordinary client.
 
 **What it proves is keyboard delivery, and only that.** An earlier draft also
 claimed it proved the pointer works and that no stale grab was left behind.
@@ -461,62 +529,57 @@ that IS the failure this step exists to catch — report FAIL, not ERROR.
 **Assert (4.4):** the compositor journal since `$CURSOR` contains no `SIGSEGV`,
 `use-after-free`, `double free`, or `Assertion` line.
 
+A failed remote read produces no stdout, and piping straight into `grep`
+makes that indistinguishable from a successful read with nothing to report —
+it takes the same "clean" branch, `pipefail` or not
+(`proxy-lane-review-r4.md` finding 3). Capture first, check the read, then
+search:
+
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" \
+JOURNAL=$("$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      journalctl --user -b -u qdwin-compositor.service \
-     --after-cursor '$CURSOR' --no-pager -o cat" \
-  | grep -E 'SIGSEGV|use-after-free|double free|Assertion' \
-  && echo "FAIL (4.4): see above" || echo "4.4 clean"
+     --after-cursor '$CURSOR' --no-pager -o cat")
+if [ $? -ne 0 ]; then
+    echo "ERROR (4.4): could not read the compositor journal — assertion not made"
+elif printf '%s\n' "$JOURNAL" | grep -E 'SIGSEGV|use-after-free|double free|Assertion'; then
+    echo "FAIL (4.4): see above"
+else
+    echo "4.4 clean"
+fi
 ```
 
-The terminal is cleaned up by the EXIT trap, not here — an `exit 1` above, or a
-runner stopping on a failed assert, would skip any cleanup written at this
-point. Fold it into `qd22_final_check` from S3, matched on the per-run title so
-it cannot touch an unrelated terminal:
-
-```bash
-# add as the FIRST line of qd22_final_check(), defined in S3.
-# The bracket is deliberate: `pkill -f` would otherwise match the guest-agent
-# shell running this very command. `qd22-af[t]er-` as a REGEX matches the
-# terminal's title; as literal text in the command line it does not match
-# itself. $QD22_RUN is set in S3, so this is safe even if S4 was skipped —
-# it then matches nothing.
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  "pkill -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null" >/dev/null 2>&1 || true
-```
+The terminal is cleaned up by `qd22_cleanup` (Setup), which already kills it by
+the per-run title — nothing to add here. It deliberately is NOT cleaned up at
+this point in the step: an `exit 1` above, or a runner stopping on a failed
+assert, would skip any cleanup written inline.
 
 ## Teardown
 
-The `EXIT` trap reaps any surviving `qdwin-nested-probe` and then restores
-`qdshell.service`, proving its compositor-visible bind. Order matters: the
-probe holds the singleton shell role while it blocks, so restoring first would
-race it.
+`qd22_cleanup`, defined and installed in **Setup**, is the only cleanup path.
+Do not define a second handler here: an earlier draft replaced it at this point
+and silently dropped the terminal cleanup, the reaper's status check and the
+scenario-failure line (`proxy-lane-review-r4.md` finding 2).
 
-**Assert (T.1):** after restoration, `qdwin_compositor_pid` still equals
-`$COMP_PID_BEFORE`. The handoff itself is part of what this lane exercises — a
-compositor that died during the final restore is a failure, not a clean exit.
+In order, it: reaps S3's probe group (setting the cancel flag first, so a
+launcher that has not yet published cannot start one), kills S4's terminal by
+its per-run title, restores `qdshell.service`, and compares the compositor pid
+against `$COMP_PID_BEFORE`.
 
-A command written *after* the trap cannot run: the exiting shell is already
-gone (`proxy-lane-review-r2.md`). Put the check inside the trap, so it runs on
-the failure paths too:
+**Assert (T.1):** `T.1 ok: compositor pid unchanged` — the final handoff is
+itself part of what this lane exercises, so a compositor that died during the
+restore is a failure, not a clean exit.
 
-```bash
-qd22_final_check() {
-    qd22_reap_probe
-    qdwin_apps_restore_shell
-    local after; after=$(qdwin_compositor_pid)
-    if [ "$after" != "$COMP_PID_BEFORE" ]; then
-        echo "FAIL (T.1): compositor pid $COMP_PID_BEFORE -> $after"
-    else
-        echo "T.1 ok: compositor pid unchanged ($after)"
-    fi
-}
-trap 'qd22_final_check' EXIT
-```
+**Assert (T.2):** no `SCENARIO VERDICT: FAIL` line. The GUI helpers do not set
+`-e` and a trap cannot change the shell's exit status usefully here, so this
+line is the verdict a runner must read. Treat its presence as a scenario
+failure regardless of what the individual steps printed.
 
-Install this in place of the S3 trap once S3 has defined `qd22_reap_probe`.
+**Assert (T.3):** no `WARN: restoring qdshell with probe ownership UNRESOLVED`.
+That path exists so the desktop is not left headless, but it means cleanup ran
+without establishing that the probe was gone — recovery, not a pass.
 
-Leftovers this scenario is responsible for: the probe's proxies (destroyed by
-the probe itself), the probe processes (reaped by the trap), `$QD22_LOG` in the
-VM's /tmp (per-run, harmless), and the `qd22-after` client (assert 4.5).
+Leftovers this scenario owns: the probe's proxies (destroyed by the probe
+itself), the probe group and S4's terminal (both reaped by `qd22_cleanup`), and
+`$QD22_LOG` in the VM's /tmp — per-run and deliberately kept, since it holds the
+popup step's verdict.
