@@ -202,8 +202,11 @@ def main():
 
     # Source removal and both privileged lock-entry paths mutate the active
     # list, so they must use safe iteration and the same terminal transition.
+    # Source removal reaches it through the one dependent-teardown routine
+    # shared by both toplevel destroy paths (see
+    # test_toplevel_destroy_dependents.py, iso2/10 E2).
     for name, reason in (
-        ("qdwin_surface_removed", "source toplevel closed"),
+        ("qdwin_toplevel_release_dependents", "source toplevel closed"),
         ("qdwin_handle_set_locked", "compositor locked"),
         ("qdwin_handle_locker_set_locked", "compositor locked"),
     ):

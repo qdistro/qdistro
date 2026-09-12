@@ -1378,6 +1378,33 @@ test('idle-inhibit-behaviour',
   ],
 )
 
+# iso2/10 E2 toplevel-destroy dependent invariant: BOTH destroy paths (real
+# xdg_toplevel and nested proxy) must release the chrome popup, the move-drag
+# and every exported view_stream through one shared routine, while tl->view is
+# still valid. The proxy path (advertiser crash/unpublish) used to free(tl)
+# with those dependents still pointing at it.
+test('toplevel-destroy-dependents',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_toplevel_destroy_dependents.py'),
+    files('qdwin/qdwin.c'),
+  ],
+)
+
+# iso2/10 E2 behavioural companion: splices the real proxy-destroy, dependent
+# helper, grab-end, popup/stream teardown and default-grab focus bodies, runs
+# them under ASan and asserts nothing points at the freed toplevel — including
+# the synchronous grab-focus callback that can re-cache the dying proxy.
+# Skips (77) without cc/wayland-server.
+test('proxy-destroy-behaviour',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_proxy_destroy_behaviour.py'),
+  ],
+)
+
 # Primary-selection D1 lifetime invariant: stale offer resources must be made
 # inert before their source is freed, otherwise a later receive() can deref a
 # destroyed source before the cross-silo gate runs.

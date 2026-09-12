@@ -52,6 +52,20 @@
  *   --destroy-order   advertise (get configured + pending), then destroy the
  *                     qdwin_nested_toplevel_v1 resource. Assert the proxy is
  *                     torn down (toplevel_removed fires) with no error/crash.
+ *   --destroy-with-move
+ *                     advertise, ALLOW, start an interactive move on the
+ *                     proxy handle, THEN destroy the qdwin_nested_toplevel_v1.
+ *                     The proxy dies with a server-owned dependent still
+ *                     attached — the shape of iso2/10 E2, where the proxy
+ *                     destroy path freed the toplevel without releasing its
+ *                     popup / move-drag / view_streams. Assert the proxy is
+ *                     torn down, the connection survives, and a further
+ *                     request still round-trips (a compositor that freed the
+ *                     toplevel under a live grab does not get that far).
+ *                     Exits 77 (INCONCLUSIVE) when the seat has no pointer:
+ *                     begin_interactive_move needs one, and the headless
+ *                     backend's synthesized seat has zero capabilities, so
+ *                     this mode only has teeth in a VM/DRM session.
  *   --malformed       advertise with empty pw_node + empty input_sink + NULL
  *                     app_id/title (the protocol's "placeholder advertise").
  *                     Assert the compositor still creates a proxy + fires
@@ -59,6 +73,7 @@
  *
  * Exit codes:
  *   0  the mode's expected-accept postcondition held
+ *  77  the mode could not be driven on this backend (see --destroy-with-move)
  *   4  --bind: the manager bind was REFUSED with the expected implementation
  *      error on wl_display (PASS signal for the unauthorized bind case)
  *   3  --deny: the originating nested toplevel got exactly policy_denied
@@ -87,6 +102,11 @@ struct probe {
 	uint32_t shell_name, shell_version;
 	uint32_t mgr_name, mgr_version;
 	int saw_shell, saw_mgr;
+
+	/* Only --destroy-with-move needs this: a move-drag requires a seat
+	 * with a pointer, which the headless backend's inert seat lacks. */
+	struct wl_seat *seat;
+	int seat_has_pointer;
 
 	struct qdwin_shell_v1 *shell;
 	struct qdwin_nested_manager_v1 *mgr;
@@ -229,6 +249,19 @@ static const struct qdwin_nested_toplevel_v1_listener nt_listener = {
 
 /* ---- registry ---- */
 
+static void l_seat_caps(void *d, struct wl_seat *s, uint32_t caps)
+{
+	struct probe *p = d;
+	(void)s;
+	p->seat_has_pointer = !!(caps & WL_SEAT_CAPABILITY_POINTER);
+}
+static void l_seat_name(void *d, struct wl_seat *s, const char *n)
+{ (void)d; (void)s; (void)n; }
+static const struct wl_seat_listener seat_listener = {
+	.capabilities = l_seat_caps, .name = l_seat_name,
+};
+
+
 static void
 on_global(void *data, struct wl_registry *reg, uint32_t name,
 	  const char *interface, uint32_t version)
@@ -245,6 +278,11 @@ on_global(void *data, struct wl_registry *reg, uint32_t name,
 		p->saw_mgr = 1;
 		p->mgr_name = name;
 		p->mgr_version = version < 1 ? version : 1;
+	} else if (strcmp(interface, wl_seat_interface.name) == 0 &&
+		   !p->seat) {
+		p->seat = wl_registry_bind(reg, name, &wl_seat_interface,
+					   version < 5 ? version : 5);
+		wl_seat_add_listener(p->seat, &seat_listener, p);
 	}
 }
 static void on_global_remove(void *d, struct wl_registry *r, uint32_t n)
@@ -280,7 +318,7 @@ roundtrip_err(struct probe *p, const char *what, uint32_t *out_code,
 
 enum mode {
 	M_ADVERTISE, M_BIND, M_ALLOW, M_DENY, M_DEFER,
-	M_STALE, M_DOUBLE, M_DESTROY, M_MALFORMED
+	M_STALE, M_DOUBLE, M_DESTROY, M_DESTROY_MOVE, M_MALFORMED
 };
 
 int main(int argc, char *argv[])
@@ -295,6 +333,8 @@ int main(int argc, char *argv[])
 		else if (!strcmp(argv[i], "--stale-decision")) mode = M_STALE;
 		else if (!strcmp(argv[i], "--double-decide"))  mode = M_DOUBLE;
 		else if (!strcmp(argv[i], "--destroy-order"))  mode = M_DESTROY;
+		else if (!strcmp(argv[i], "--destroy-with-move"))
+			mode = M_DESTROY_MOVE;
 		else if (!strcmp(argv[i], "--malformed"))      mode = M_MALFORMED;
 	}
 
@@ -536,6 +576,57 @@ int main(int argc, char *argv[])
 		printf("qdwin-nested-probe: deny posted policy_denied on the "
 		       "originating nested toplevel (handle=%u)\n", handle);
 		return 3;
+	}
+
+	case M_DESTROY_MOVE: {
+		int removed_before = p.toplevel_removed_count;
+
+		/* A move-drag needs a pointer. The headless backend's
+		 * synthesized seat has zero capabilities, so without one this
+		 * mode would "pass" having attached no dependent at all —
+		 * report INCONCLUSIVE rather than a vacuous PASS. */
+		wl_display_roundtrip(p.display);
+		if (!p.seat_has_pointer) {
+			fprintf(stderr, "qdwin-nested-probe: no pointer on the "
+				"seat — begin_interactive_move cannot start a "
+				"drag here; this mode needs a VM/DRM session\n");
+			return 77;
+		}
+
+		/* An allowed proxy is a legal target for shell-owned state. */
+		qdwin_shell_v1_nested_proxy_decision(p.shell, handle, 0,
+						     "probe-allow");
+		if (roundtrip_err(&p, "decision allow", NULL, NULL) != 0)
+			return 1;
+		/* Serial is ignored by begin_interactive_move (unlike
+		 * show_popup, which requires a live input-grab serial and so
+		 * is not reachable headlessly). */
+		qdwin_shell_v1_begin_interactive_move(p.shell, handle, 0);
+		if (roundtrip_err(&p, "begin_interactive_move", NULL, NULL) != 0)
+			return 1;
+
+		qdwin_nested_toplevel_v1_destroy(nt);
+		if (roundtrip_err(&p, "nested toplevel destroy under a move",
+				  NULL, NULL) != 0)
+			return 1;
+		wl_display_roundtrip(p.display);
+		if (p.toplevel_removed_count <= removed_before) {
+			fprintf(stderr, "qdwin-nested-probe: destroy under a "
+				"move did not fire toplevel_removed "
+				"(got %d, want >%d)\n",
+				p.toplevel_removed_count, removed_before);
+			return 1;
+		}
+		/* Liveness after the teardown: the compositor must still be
+		 * serving this client. */
+		if (wl_display_roundtrip(p.display) < 0) {
+			fprintf(stderr, "qdwin-nested-probe: connection died "
+				"after destroying a proxy under a move\n");
+			return 1;
+		}
+		printf("qdwin-nested-probe: proxy destroyed under a live "
+		       "move-drag; compositor alive (handle=%u)\n", handle);
+		return 0;
 	}
 
 	case M_DESTROY: {

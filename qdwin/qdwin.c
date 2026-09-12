@@ -324,6 +324,11 @@ static void qdwin_view_stream_unpin(struct qdwin_view_stream *s);
 static void qdwin_view_stream_reap_forward(struct qdwin_view_stream *s);
 static void qdwin_view_stream_terminate(struct qdwin_view_stream *s,
 					const char *reason, pid_t audit_pid);
+/* The single dependent-teardown routine shared by BOTH toplevel destroy
+ * paths (real desktop surface and nested proxy). Defined after
+ * qdwin_view_stream_terminate. */
+static void qdwin_toplevel_release_dependents(struct qdwin *qdwin,
+					      struct qdwin_toplevel *tl);
 static void qdwin_stream_seat_init(struct qdwin_view_stream *s);
 static void qdwin_stream_seat_release(struct qdwin_view_stream *s);
 static void qdwin_stream_confine_grab_end(struct qdwin_view_stream *s);
@@ -604,6 +609,15 @@ struct qdwin_toplevel {
 		 * when no v8+ shell can decide, so no-shell advertises fail
 		 * closed unless QDWIN_NESTED_BROKER_OPTIONAL=1 is set. */
 		bool nested_proxy_pending_decision;
+	/* iso2/10 E2: set for the whole of qdwin_nested_proxy_destroy.
+	 * Teardown ends grabs, and weston_pointer_end_grab() reinstalls the
+	 * default grab and runs its focus() callback SYNCHRONOUSLY — with
+	 * the dying proxy's curtain still mapped and still in
+	 * qdwin->toplevels, the picker would hand it straight back and
+	 * qdwin_proxy_pointer_track_focus() would cache it in
+	 * active_input_proxy (and write focus=1 to its input sink) moments
+	 * before free(tl). A destroying proxy is not selectable. */
+	bool proxy_destroying;
 	/* Back-ref so the qdwin_nested_toplevel resource destroy can
 	 * tear down the proxy. NULL on non-proxy toplevels. */
 	struct qdwin_nested_toplevel *proxy_nested_owner;
@@ -2025,22 +2039,7 @@ qdwin_surface_removed(struct weston_desktop_surface *dsurf, void *data)
 		weston_log("qdwin: toplevel_removed handle=%u\n", tl->handle);
 	}
 
-	if (tl->popup) {
-		qdwin_popup_v1_send_dismissed(tl->popup->resource);
-		qdwin_popup_teardown(tl->popup);
-	}
-	qdwin_move_grab_end_for(qdwin, tl->handle);
-
-	/* A source cannot outlive its export. Terminate before destroying the view:
-	 * unpin and ending the per-stream grab both still need a valid tl/view. The
-	 * termination removes each stream from view_streams, hence SAFE iteration. */
-	{
-		struct qdwin_view_stream *vs, *next;
-		wl_list_for_each_safe(vs, next, &qdwin->view_streams, link)
-			if (vs->tl == tl)
-				qdwin_view_stream_terminate(vs, "source toplevel closed",
-							    vs->forward_pid);
-	}
+	qdwin_toplevel_release_dependents(qdwin, tl);
 
 	for (int s = 0; s < QDWIN_SIDES; s++)
 		qdwin_chrome_detach(&tl->chrome[s]);
@@ -4317,7 +4316,8 @@ qdwin_proxy_for_view(struct qdwin *qdwin, struct weston_view *v)
 		return NULL;
 	struct qdwin_toplevel *tl;
 	wl_list_for_each(tl, &qdwin->toplevels, link) {
-		if (tl->is_nested_proxy && tl->view == v)
+		if (tl->is_nested_proxy && !tl->proxy_destroying &&
+		    tl->view == v)
 			return tl;
 	}
 	return NULL;
@@ -5458,6 +5458,38 @@ qdwin_view_stream_terminate(struct qdwin_view_stream *s, const char *reason,
 		qdwin_view_stream_v1_send_torn_down(s->resource, reason);
 	}
 	qdwin_view_stream_release_server_state(s);
+}
+
+/* Detach everything that holds a pointer to, or a grab on, `tl` before the
+ * toplevel is freed. BOTH destroy paths must call this: a real xdg_toplevel
+ * via qdwin_surface_removed, and a nested proxy via
+ * qdwin_nested_proxy_destroy (iso2/10 E2 — the proxy path used to free `tl`
+ * with live view_streams and popups still pointing at it, so an advertiser
+ * disconnect while qdshell had a stream or a chrome popup on the proxy was a
+ * compositor use-after-free, not a client disconnect).
+ *
+ * Call it while tl->view is still alive: unpinning a stream and ending a
+ * per-stream grab both still need a valid tl/view. It is idempotent — after
+ * it runs, tl owns no popup, no move-grab targets its handle, and no stream
+ * in qdwin->view_streams has s->tl == tl (termination NULLs s->tl and
+ * removes the stream from the list, hence the SAFE iteration). */
+static void
+qdwin_toplevel_release_dependents(struct qdwin *qdwin, struct qdwin_toplevel *tl)
+{
+	if (!qdwin || !tl)
+		return;
+
+	if (tl->popup) {
+		qdwin_popup_v1_send_dismissed(tl->popup->resource);
+		qdwin_popup_teardown(tl->popup);
+	}
+	qdwin_move_grab_end_for(qdwin, tl->handle);
+
+	struct qdwin_view_stream *vs, *next;
+	wl_list_for_each_safe(vs, next, &qdwin->view_streams, link)
+		if (vs->tl == tl)
+			qdwin_view_stream_terminate(vs, "source toplevel closed",
+						    vs->forward_pid);
 }
 
 /* item 5: the forward child exited on its own (crash, exec failure, or a future
@@ -22115,10 +22147,15 @@ qdwin_nested_proxy_destroy(struct qdwin_toplevel *tl)
 	if (!tl || !tl->is_nested_proxy)
 		return;
 	struct qdwin *qdwin = tl->qdwin;
+	tl->proxy_destroying = true;
 	if (qdwin->active_input_proxy == tl)
 		qdwin->active_input_proxy = NULL;
 	weston_log("qdwin/nested-proxy: destroy handle=%u\n", tl->handle);
 	qdwin_send_toplevel_removed(qdwin, tl);
+
+	/* Before anything that invalidates tl->view: drop the popup, the
+	 * move-grab and every view_stream sourced from this proxy. */
+	qdwin_toplevel_release_dependents(qdwin, tl);
 
 	for (int s = 0; s < QDWIN_SIDES; s++)
 		qdwin_chrome_detach(&tl->chrome[s]);
@@ -22146,6 +22183,13 @@ qdwin_nested_proxy_destroy(struct qdwin_toplevel *tl)
 		close(tl->proxy_input_sink_fd);
 		tl->proxy_input_sink_fd = -1;
 	}
+	/* Backstop for the synchronous grab-focus callbacks above: the
+	 * proxy_destroying gate keeps the picker off this toplevel, and this
+	 * final conditional clear keeps the invariant true even if some other
+	 * path learns to cache a proxy. A different, live proxy selected
+	 * during teardown is deliberately preserved. */
+	if (qdwin->active_input_proxy == tl)
+		qdwin->active_input_proxy = NULL;
 	wl_list_remove(&tl->link);
 	free(tl->proxy_app_id);
 	free(tl->proxy_title);
