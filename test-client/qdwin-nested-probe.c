@@ -72,9 +72,11 @@
  *                     arrives as chrome_button (--click-timeout, default 30s),
  *                     show_popup with that grab serial, THEN destroy the
  *                     qdwin_nested_toplevel_v1. Assert qdwin_popup_v1.dismissed
- *                     fires (i.e. qdwin_popup::parent was released, not left
- *                     pointing at a freed toplevel), the proxy is removed, and
- *                     the connection survives.
+ *                     fires, the proxy is removed, and the connection survives.
+ *                     NOTE this is an EVENT-only oracle: `dismissed` firing is
+ *                     necessary but not sufficient for qdwin_popup::parent
+ *                     having actually been released — see the causality note
+ *                     at the mode body.
  *                     show_popup is v29-gated on a live input-grab serial, so
  *                     this cannot be faked: no click means exit 77, never a
  *                     vacuous pass. Needs a VM/DRM session — see
@@ -146,7 +148,7 @@ struct probe {
 	/* Output mode, so the popup mode can pick a chrome side whose band is
 	 * actually on-screen and therefore clickable. */
 	struct wl_output *output;
-	int out_w, out_h;
+	int out_w, out_h, out_scale, output_count;
 
 	/* The shell version to bind. v8 is enough for the gating modes; the
 	 * popup mode needs chrome_button (v20) to learn a live grab serial and
@@ -492,7 +494,11 @@ static void l_out_mode(void *d, struct wl_output *o, uint32_t flags,
 }
 static void l_out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
 static void l_out_scale(void *d, struct wl_output *o, int32_t f)
-{ (void)d; (void)o; (void)f; }
+{
+	struct probe *p = d;
+	(void)o;
+	p->out_scale = f;
+}
 static void l_out_name(void *d, struct wl_output *o, const char *n)
 { (void)d; (void)o; (void)n; }
 static void l_out_description(void *d, struct wl_output *o, const char *n)
@@ -541,12 +547,18 @@ on_global(void *data, struct wl_registry *reg, uint32_t name,
 						 version < 4 ? version : 4);
 	} else if (strcmp(interface, wl_shm_interface.name) == 0 && !p->shm) {
 		p->shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
-	} else if (strcmp(interface, wl_output_interface.name) == 0 &&
-		   !p->output) {
-		/* v2 is enough for the `mode` event; name/description are v4
-		 * and go undelivered, which is why every slot is filled. */
+	} else if (strcmp(interface, wl_output_interface.name) == 0) {
+		/* Count every output, not just the one we bind: the click-target
+		 * arithmetic below assumes ONE unscaled output at the origin,
+		 * and silently aiming at the wrong one looks like a calibration
+		 * failure rather than an unmet precondition (codex r2). */
+		p->output_count++;
+		if (p->output)
+			return;
+		/* v3 carries `scale`; name/description are v4 and go
+		 * undelivered, which is why every slot is filled. */
 		p->output = wl_registry_bind(reg, name, &wl_output_interface,
-					     version < 2 ? version : 2);
+					     version < 3 ? version : 3);
 		wl_output_add_listener(p->output, &output_listener, p);
 	} else if (strcmp(interface, wl_seat_interface.name) == 0 &&
 		   !p->seat) {
@@ -638,6 +650,19 @@ wait_for(struct probe *p, const int *a, const int *b, int timeout_sec)
 			wl_display_cancel_read(p->display);
 			if (errno == EINTR)
 				continue;
+			return -1;
+		}
+		/* Terminal readiness is a CONNECTION ERROR, not a timeout. These
+		 * bits are returned whether or not they were requested, and a
+		 * hung-up fd stays ready forever: treating them as "not POLLIN,
+		 * retry" burns a CPU until the deadline and then reports the
+		 * wait as a clean timeout — which the callers turn into 77
+		 * INCONCLUSIVE rather than a failure (codex r2, reproduced with
+		 * a stubbed harness: 31.7M spins in one second). */
+		if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+			wl_display_cancel_read(p->display);
+			fprintf(stderr, "qdwin-nested-probe: display fd is no "
+				"longer usable (revents=%#x)\n", pfd.revents);
 			return -1;
 		}
 		if (n == 0 || !(pfd.revents & POLLIN)) {
@@ -1165,6 +1190,22 @@ int main(int argc, char *argv[])
 				"— cannot tell which chrome band is on-screen\n");
 			return 77;
 		}
+		/* Declared lane constraint, asserted rather than assumed. The
+		 * target below is computed in output-local pixels against the
+		 * first output; a second output, or a scale factor, makes it
+		 * point somewhere else entirely. */
+		if (p.output_count != 1) {
+			fprintf(stderr, "qdwin-nested-probe: %d outputs — the "
+				"click target assumes exactly one\n",
+				p.output_count);
+			return 77;
+		}
+		if (p.out_scale > 1) {
+			fprintf(stderr, "qdwin-nested-probe: output scale %d — "
+				"the click target assumes an unscaled output\n",
+				p.out_scale);
+			return 77;
+		}
 		int north_y = p.geom_y - ch / 2;
 		int south_y = p.geom_y + chh + ch / 2;
 		int use_north = (north_y >= 0 && north_y < p.out_h);
@@ -1197,9 +1238,11 @@ int main(int argc, char *argv[])
 		wl_display_roundtrip(p.display);
 
 		/* Tell the lane exactly where to click. */
-		printf("PROXY_GEOM x=%d y=%d w=%d h=%d out=%dx%d side=%s "
-		       "chrome=%d\n", p.geom_x, p.geom_y, cw, chh,
-		       p.out_w, p.out_h, use_north ? "N" : "S", ch);
+		printf("PROXY_GEOM x=%d y=%d w=%d h=%d out=%dx%d outputs=%d "
+		       "scale=%d side=%s chrome=%d\n", p.geom_x, p.geom_y,
+		       cw, chh, p.out_w, p.out_h, p.output_count,
+		       p.out_scale > 0 ? p.out_scale : 1,
+		       use_north ? "N" : "S", ch);
 		printf("CLICK_TARGET x=%d y=%d\n", click_x, click_y);
 		fflush(stdout);
 
@@ -1254,13 +1297,26 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
-		/* The popup must still be LIVE at the destruction boundary, and
-		 * only a dismissal CAUSED by the destroy may count. popup_
-		 * dismissed is sticky from creation onward, so a popup that was
-		 * dismissed first — by an outside press, or by an
+		/* The popup must still be LIVE at the destruction boundary. A
+		 * popup already dismissed — by an outside press, or by an
 		 * implementation that tears its own popup down immediately —
-		 * would otherwise satisfy the assertion below while the proxy
-		 * path released nothing (codex r1). Re-check, then re-arm. */
+		 * would otherwise satisfy a sticky flag while the proxy path
+		 * released nothing (codex r1). Re-check, then re-arm.
+		 *
+		 * This narrows the window; it does NOT establish causality, and
+		 * the mode does not claim to (codex r2). Two sequences still
+		 * reach 0 without the destroy having released the popup:
+		 *   - an outside press processed after this sync but before the
+		 *     server handles the destroy, whose `dismissed` is then
+		 *     dispatched by the round-trip that follows it;
+		 *   - an implementation that keeps send_dismissed but drops
+		 *     qdwin_popup_teardown from the shared release routine,
+		 *     which satisfies an EVENT-only oracle by construction.
+		 * The protocol exposes no popup-created event and no view of
+		 * server-side popup state, so closing this needs a new
+		 * observation, not another round-trip. Tracked in
+		 * todo/open-followups.md. The lane's mitigation is procedural:
+		 * it injects exactly one click, before show_popup. */
 		wl_display_roundtrip(p.display);
 		if (p.popup_dismissed) {
 			fprintf(stderr, "qdwin-nested-probe: popup was "

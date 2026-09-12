@@ -253,8 +253,10 @@ The iso2/10 E2 gate. An *allowed* proxy is a legal stream source, so an
 advertiser disconnect while the shell still holds an exported `view_stream`
 used to leave `qdwin_view_stream::tl` dangling into the input-inject path
 (qdwin `0ed786d`). Until this step, no lane combined all three — an allowed
-proxy, a live dependent, and advertiser destruction; the VM sibling covering
-the popup and move dependents is `tests/gui/22-nested-proxy-teardown.md`.
+proxy, a live dependent, and advertiser destruction. `tests/gui/22-nested-
+proxy-teardown.md` is the VM sibling that adds the popup and move dependents —
+with weaker oracles than this step's, and it has not been run yet; see the
+follow-up.
 
 **Exactly what this step enforces, and what it does not.** It enforces that
 the proxy destroy path releases its view_stream *at all*. Codex compiled and
@@ -316,10 +318,12 @@ esac
 > forward` is usually absent there, so the forked child dies immediately and
 > the stream is torn down as `"forward exited"` shortly after. The destroy wins
 > that race consistently (5/5 here), and the reason assertion is what
-> distinguishes the two — an exec-failed child yields `approved` then
-> `forward exited`, which fails as **RC=1**, not 77. A host seeing that is
-> looking at a missing forward binary, not a product regression; re-run in the
-> VM lane, where the forward is real, before treating it as one.
+> distinguishes the two — but which code an exec-failed child produces depends
+> on timing: **77** if that teardown is already dispatched when the probe
+> re-checks liveness before the destroy, **RC=1** if it arrives afterwards. A
+> host seeing either is looking at a missing forward binary, not a product
+> regression; re-run in the VM lane, where the forward is real, before treating
+> it as one.
 
 ## Teardown
 
@@ -332,8 +336,10 @@ All ten asserts hold: S1 `RC==4` + refused log, S2 `RC==0` + proxy-created
 log, S3 `RC==0` + ALLOW log, S4 `RC==3` (policy_denied) + DENY log, S5
 `RC==0` + DEFER log, S6 `RC==0` + stale-no-op log + weston alive, S7 `RC==0`
 + idempotent log, S8 `RC==0` (toplevel_removed), S9 `RC==0` + empty-advertise
-log, S10 `RC==0` (stream released on advertiser destroy) — or S10
-INCONCLUSIVE on a host with no PipeWire daemon, which is not a pass.
+log, S10 `RC==0` (stream released on advertiser destroy). On a host with no
+PipeWire daemon `start.sh --pipewire` exits 8 and S10 is an **ERROR** (the case
+never ran); the probe's own 77 is reserved for a compositor that started but
+could not give the stream a free output. Neither is a pass.
 
 The move-drag and chrome-popup halves of the same E2 gate need a pointer and
 are therefore VM-only: `tests/gui/22-nested-proxy-teardown.md`.
