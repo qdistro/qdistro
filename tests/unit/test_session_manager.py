@@ -381,8 +381,18 @@ class _FakeOps:
             if unit.startswith(f"qdshell-session-{name}@"):
                 self.cgroup_pids_map.setdefault(name, []).append(99000)
 
-    def systemctl_stop(self, unit: str) -> None:
+    def systemctl_stop(self, unit: str, *, timeout: int | None = None) -> bool:
+        # Returns whether the stop COMPLETED (the real op returns False when
+        # the systemctl client was killed by its timeout, which means PID 1 may
+        # never have accepted the transaction). Default True = ordinary
+        # completed stop; set systemctl_stop_unacknowledged to model a wedge.
         self.systemctl_calls.append(("stop", unit))
+        return not self.systemctl_stop_unacknowledged
+
+    # Set True to model `systemctl stop` wedging past its bound: the stop is
+    # UNACKNOWLEDGED, so a clean-looking snapshot afterwards must not be read
+    # as a completed stop (a queued start is indistinguishable from one).
+    systemctl_stop_unacknowledged = False
 
     def tier2_silo_running(self, name: str) -> bool:
         # Fail-closed verification hook: True means the stop did NOT take
@@ -1078,10 +1088,12 @@ class TestReviewFixups:
         orig_stop = ops.systemctl_stop
         in_teardown = threading.Event()
 
-        def _slow_stop(unit):
+        def _slow_stop(unit, **kw):
             in_teardown.set()
             _t.sleep(0.3)
-            orig_stop(unit)
+            # Forward the completion flag: systemctl_stop returns whether the
+            # stop was acknowledged, and _stop_impl fails closed on False.
+            return orig_stop(unit, **kw)
 
         ops.systemctl_stop = _slow_stop
 

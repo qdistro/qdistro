@@ -60,6 +60,79 @@ from qdistro_silo_egress import (
 
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
+
+# ---- bounds for the privileged helper commands ----------------------------
+#
+# Every child this daemon runs is a potential service-wide outage. StopSilo is
+# the ONLY asynchronous D-Bus method; CreateSilo, DeleteSilo, StartSilo,
+# Freeze/Resume, LaunchPodApp and DisposeByToken all run on the GLib main
+# loop, so a child that never exits blocks the loop and the service stops
+# answering ANY call — ListSilos included — until each client's own D-Bus
+# timeout fires. A wedged rootless podman has been observed holding the loop
+# for over two minutes with the bus name effectively dead.
+#
+# So these bounds are load-bearing, not hygiene: they turn the common
+# userspace hang into a failure the surrounding handling can act on instead of
+# a hang nothing can act on. That is the whole claim. It is NOT that the daemon
+# is now guaranteed responsive, NOT that every failure reaches the client as a
+# domain-typed error (CreateSilo still re-raises non-SessionError failures raw),
+# and NOT that every site's answer is safe in every dimension — account
+# operations remain non-transactional, and `check=False` callers still ignore
+# arbitrary non-zero exits, only the timeout direction is fixed. Both are filed
+# in todo/open-followups.md.
+#
+# TWO HONEST LIMITS, so nobody reads more into these than they carry:
+#
+#  * They are WEDGE catchers chosen as operational deadlines, NOT measured
+#    worst cases. No healthy-host timing study backs the specific numbers, so
+#    each is set far above anything the operation should plausibly need, and
+#    each site was examined individually for what firing should mean there.
+#    That is per-site care, not a universal guarantee: the deferred items below
+#    are places where the surrounding logic is still weaker than the bound.
+#  * They are not a hard containment boundary. CPython's `subprocess.run`
+#    implements `timeout=` as kill() followed by an UNBOUNDED wait(), so a
+#    child stuck in uninterruptible kernel I/O (a wedged storage stack, a dead
+#    NFS mount) still holds the caller past the bound — the handler does not
+#    get control until the child can actually be reaped. Bounding the argv is
+#    the fix for a hung *program*; it is not a fix for a hung *kernel*.
+#
+# A timeout is also NOT transactional: `userdel -r` killed mid-tree-removal has
+# already deleted part of the home. Recovery from partial completion is a
+# separate, filed problem — see todo/open-followups.md.
+_T_NETLINK = 15       # ip/wg/nft/sysctl: netlink round-trips, sub-second in practice
+_T_ACCOUNT = 300      # useradd -m / userdel -r. Dominated by the HOME TREE, not
+                      # the account databases: a plain-directory home with
+                      # millions of files can legitimately take minutes to copy
+                      # or remove, so this is deliberately far above the
+                      # /etc/passwd-lock case it is really here to catch.
+_T_BTRFS = 60         # subvolume create/probe on a busy filesystem
+_T_SYSTEMCTL = 30     # daemon-reload, reload, start. NB `Type=simple` bounds how
+                      # long startup EXECUTES, not how long the job sits QUEUED
+                      # behind another job for the same unit — so a timeout here
+                      # does not prove the unit did not start, and
+                      # systemctl_start() reconciles rather than assuming.
+_T_SYSTEMCTL_CANCEL = 30  # The compensating stop issued after a start TIMED OUT.
+                      # Deliberately short and NOT _T_SYSTEMCTL_STOP: this one
+                      # runs on the MAIN LOOP (StartSilo/LaunchPodApp are
+                      # synchronous), so a 300s allowance there would stack on
+                      # the 30s start bound and hand the loop a 5½-minute
+                      # outage. Cutting it short is only safe because failing to
+                      # confirm the cancellation is not treated as success — see
+                      # systemctl_start(), whose outcome is not consulted at
+                      # all: a start timeout always raises StartNotCancelled and
+                      # leaves the silo ACTIVE rather than claiming STOPPED.
+_T_SYSTEMCTL_STOP = 300   # `systemctl stop` is several phases, each with its own
+                      # TimeoutStopSec allowance (90s default; our units do not
+                      # override it): the ExecStop command, then termination of
+                      # the service processes. The tier-2 helper also does
+                      # rootless-podman setup before its `stop -t 10`. 120s
+                      # could therefore expire on a stop that was still
+                      # progressing legally, so the bound is an ALLOWANCE with
+                      # room for the phases — not demonstrated coverage of them.
+                      # Used by the StopSilo worker's teardown. (The main loop's
+                      # compensating stop uses _T_SYSTEMCTL_CANCEL instead.)
+_T_PODMAN = 30        # matches the disposable sweep/dispose bounds below
+_T_DNSMASQ = 15       # forks and daemonizes; the parent returns immediately
 ADMIN_USER_NAME = "admin"
 # qdistro is single-tenant: the admin role is the fixed 'admin' account, which
 # must be uid 1000. Resolve leniently at import (default 1000 when the account
@@ -305,6 +378,24 @@ class BadArgument(SessionError):
 
 class NotAuthorized(SessionError):
     dbus_name = "NotAuthorized"
+
+
+class StartNotCancelled(SessionError):
+    """A start timed out and the daemon could NOT establish that it was undone.
+
+    Killing the `systemctl` client does not withdraw a StartUnit request PID 1
+    has already accepted, so a timed-out start may still be queued or running.
+    systemctl_start() issues a compensating stop, but issuing one is not proof
+    PID 1 accepted it (a conflicting irreversible job can block the replace),
+    and `systemctl stop` succeeding is still not proof for a tier-2 silo, whose
+    rootless container lives outside the unit cgroup and whose ExecStop is
+    declared best-effort (`ExecStop=-`).
+
+    Raised only when that uncertainty survives. The lifecycle layer answers it
+    by leaving the silo ACTIVE — honest, retryable, and NOT deletable — instead
+    of recording STOPPED, which is the same trade _stop_impl already makes for
+    a tier-2 stop whose outcome it cannot verify."""
+    dbus_name = "StartNotCancelled"
 
 
 @dataclass
@@ -604,6 +695,23 @@ def _nft_benign(stderr: str) -> bool:
             or "does not exist" in s)
 
 
+@dataclass(frozen=True)
+class _TimedOutRun:
+    """A CompletedProcess-shaped stand-in for an nft element call that wedged.
+
+    The two nft element sites branch on ``returncode`` and ``stderr``, and both
+    already model a failure that is fatal on add and fail-safe on delete. A
+    timeout is exactly that failure, so rather than duplicate the branch in an
+    except clause we hand the existing code a result that reads as a non-benign
+    error: rc is non-zero and the message is deliberately NOT one _nft_benign
+    accepts, so a timed-out ADD still raises (the backstop is not installed)
+    instead of being mistaken for "already present"."""
+
+    stderr: str
+    returncode: int = -1
+    stdout: str = ""
+
+
 class _SystemOps:
     """Real implementation of the side-effecting ops (useradd,
     userdel, cgroup writes, systemctl). Tests substitute a fake
@@ -645,10 +753,13 @@ class _SystemOps:
         # matching group with the same name. -s bash gives the silo
         # a real shell; the launcher service replaces $SHELL with
         # qdshell when it spawns.
+        # A TimeoutExpired here propagates: create() wraps this in a broad
+        # handler that refuses the create, which is the fail-closed answer —
+        # far better than the main loop sitting on a held /etc/passwd lock.
         subprocess.run(
             ["useradd", "-m", "-u", str(int(uid)), "-U",
              "-s", "/bin/bash", str(name)],
-            check=True)
+            check=True, timeout=_T_ACCOUNT)
         # NOTE: the dbus reload that used to live here moved into
         # write_relay_policy(). It has to happen after BOTH the user and the
         # policy fragment exist — reloading here reloaded a config that did
@@ -662,13 +773,22 @@ class _SystemOps:
 
     def _convert_home_to_subvolume(self, name: str, uid: int) -> None:
         home = Path("/home") / name
+        # Set immediately BEFORE the destructive removal, once the backup
+        # exists — i.e. from the first moment a failure can no longer mean
+        # "leave everything as it was". (rmtree is not atomic, so a flag set
+        # after it would skip recovery for a partially deleted home.)
+        # Recovery runs ONLY past that point: a probe or copy failure BEFORE it
+        # leaves the home untouched, and running recovery there would read a
+        # .skel-backup this invocation never wrote (a stale one from an earlier
+        # attempt) into a home that never needed it.
+        past_no_return = False
         try:
             # Are we on btrfs at all? `btrfs filesystem df` exits 0 on
             # btrfs, non-zero elsewhere. Cheap probe.
             probe = subprocess.run(
                 ["btrfs", "filesystem", "df", str(home)],
                 check=False, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL)
+                stderr=subprocess.DEVNULL, timeout=_T_BTRFS)
             if probe.returncode != 0:
                 log.warning(
                     "btrfs not available at %s; leaving plain dir "
@@ -680,15 +800,27 @@ class _SystemOps:
             if skel_backup.exists():
                 shutil.rmtree(skel_backup)
             shutil.copytree(home, skel_backup, symlinks=True)
-            # Replace dir with subvolume.
+            # Replace dir with subvolume. The flag is set BEFORE the removal,
+            # not after: rmtree is not atomic, so it can delete part of the home
+            # and then raise, and a flag set afterwards would skip recovery for
+            # a home that had already been damaged. The backup exists by now, so
+            # from here on recovery is always the right answer.
+            past_no_return = True
             shutil.rmtree(home)
             subprocess.run(
                 ["btrfs", "subvolume", "create", str(home)],
-                check=True)
-            # Restore the skeleton contents.
+                check=True, timeout=_T_BTRFS)
+            # Restore the skeleton contents. Links are classified BEFORE
+            # directories: is_dir() follows symlinks, and copytree's
+            # symlinks=True preserves links found inside a tree but still
+            # follows the root it is handed — so a top-level directory symlink
+            # would be materialised as a real directory in the silo home and
+            # then chowned to the silo uid.
             for child in skel_backup.iterdir():
                 dst = home / child.name
-                if child.is_dir():
+                if child.is_symlink():
+                    os.symlink(os.readlink(child), dst)
+                elif child.is_dir():
                     shutil.copytree(child, dst, symlinks=True)
                 else:
                     shutil.copy2(child, dst, follow_symlinks=False)
@@ -696,19 +828,186 @@ class _SystemOps:
             os.chown(home, int(uid), int(uid))
             home.chmod(0o700)
             # Recursive chown for the restored files.
+            # follow_symlinks=False on BOTH: os.walk lists a preserved
+            # directory symlink in `dirs`, and a following chown would then
+            # change the ownership of whatever it points at — an external,
+            # possibly root-owned directory — to the silo uid.
             for root, dirs, files in os.walk(home):
-                for d in dirs:
-                    os.chown(Path(root) / d, int(uid), int(uid))
-                for f in files:
+                for entry in dirs + files:
                     try:
-                        os.chown(Path(root) / f, int(uid), int(uid),
+                        os.chown(Path(root) / entry, int(uid), int(uid),
                                  follow_symlinks=False)
                     except OSError:
                         pass
-        except (subprocess.CalledProcessError, FileNotFoundError,
-                OSError) as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError, OSError) as e:
+            # TimeoutExpired is listed explicitly: it is neither a
+            # CalledProcessError nor an OSError, so without it a wedged btrfs
+            # would escape useradd() and fail the whole create, when the
+            # intended behaviour for btrfs trouble is to fall through.
+            #
+            # "Fall through" is not unconditional, though: _restore_plain_home
+            # RAISES if it cannot leave a home that exists and is hardened, so
+            # a create can still fail here — deliberately. And if the subvolume
+            # was created before the failure, the home stays a subvolume; only
+            # the CONVERSION was abandoned.
+            # NB the recovery below decides the actual outcome, so this line
+            # says what FAILED, not what the home ended up as: if the subvolume
+            # was created before the failure, the home stays a subvolume.
             log.warning("btrfs subvolume conversion for %s failed: %s "
-                        "(home left as plain dir)", home, e)
+                        "(recovering the home in place; it stays a subvolume "
+                        "if one was already created)", home, e)
+            if past_no_return:
+                self._restore_plain_home(home, uid)
+
+    def _restore_plain_home(self, home, uid: int) -> None:
+        """Put a usable, hardened home back after a failed subvolume conversion.
+
+        The conversion deletes the real home BEFORE creating its replacement,
+        so "leave it a plain dir" was never true for a failure in that window:
+        `btrfs subvolume create` failing (a timeout, or a plain non-zero exit —
+        this was already broken before timeouts existed) left CreateSilo
+        reporting success for a silo with NO home directory at all, and the
+        skeleton stranded in the backup.
+
+        Two different failures with two different answers:
+
+        * An incomplete SKELETON is an accepted fallback. It is logged, and the
+          backup is KEPT so nothing is the only remaining copy of itself.
+        * An absent or unhardened HOME is not. A silo whose home is missing, or
+          left root-owned / group-readable, is worse than a failed create, so
+          those raise and fail the create. Hardening is attempted even when the
+          skeleton restore failed — the two must not share a fate.
+        """
+        skel_backup = Path("/var/lib/qdistro/silos") / home.name / ".skel-backup"
+        complete = True
+        # Both roots are validated as real directories, never links. mkdir's
+        # exist_ok accepts a symlink-to-directory, and is_dir() follows one, so
+        # without these checks a substituted root would have the restore write
+        # outside the home and the chown/chmod below retarget the link.
+        if home.is_symlink():
+            raise OSError(f"refusing to restore into {home}: it is a symlink")
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise OSError(
+                f"could not recreate a home at {home} after a failed subvolume "
+                f"conversion: {e}") from e
+        try:
+            if skel_backup.is_symlink():
+                complete = False
+                log.error("refusing to restore from %s: it is a symlink",
+                          skel_backup)
+            elif skel_backup.is_dir():
+                complete = self._merge_missing(skel_backup, home)
+        except OSError as e:
+            complete = False
+            log.error("restoring the skeleton into %s failed: %s", home, e)
+
+        # Ownership and mode are security-relevant and are applied whatever
+        # happened above: a home left root-owned or group/world-readable is a
+        # worse outcome than a missing dotfile, and must never be skipped
+        # because the skeleton copy raised on its way past.
+        try:
+            os.chown(home, int(uid), int(uid))
+            home.chmod(0o700)
+        except OSError as e:
+            raise OSError(
+                f"could not harden the recreated home at {home}: {e}") from e
+        for root, dirs, files in os.walk(home):
+            for entry in dirs + files:
+                try:
+                    os.chown(Path(root) / entry, int(uid), int(uid),
+                             follow_symlinks=False)
+                except OSError as e:
+                    # Individually suppressed, but NOT silent: a file the silo
+                    # cannot read is a nuisance, not a breach, and failing the
+                    # create over one is the wrong trade.
+                    log.warning("could not chown %s to uid %d: %s",
+                                Path(root) / entry, int(uid), e)
+        if complete:
+            shutil.rmtree(skel_backup, ignore_errors=True)
+        else:
+            log.error("the skeleton for %s was only partially restored; the "
+                      "backup at %s is KEPT so nothing is lost — restore it by "
+                      "hand", home, skel_backup)
+
+    @staticmethod
+    def _merge_missing(src, dst) -> bool:
+        """Copy every descendant of `src` that `dst` does not already have.
+
+        Recursive on purpose. A top-level "does the destination exist?" test is
+        not a completeness test: the interrupted restore may have created
+        `.config` and copied one of its three files, and skipping the whole
+        directory would lose the other two — then the backup gets deleted and
+        they are gone for good.
+
+        Never overwrites what the home already has, and never dereferences a
+        link on either side — but these are PATHNAME checks, and the precondition
+        is weaker than it first looks, so be precise about what they buy.
+
+        The only caller is useradd() inside create(). The `useradd` child has
+        already COMPLETED by then, so the uid exists and /home/<name> is
+        user-owned, not root-owned: "no other principal can touch this" is NOT
+        established by reachability alone. What is true is that the silo has
+        never been started, so no silo process exists to race us. That is why
+        this is treated as a conditional exposure rather than a closed one:
+        against a concurrent writer the check/use gap is real, and the fix is
+        descriptor-relative, no-follow operations throughout — filed in
+        todo/open-followups.md, not done here.
+
+        * SOURCE links are recreated as links. `copytree`'s symlinks=True
+          preserves links found INSIDE a tree but still follows the root it is
+          handed, so a directory symlink passed to it would be materialised as a
+          real directory — and then chowned to the silo. Links are therefore
+          classified before directories, with lstat semantics.
+        * DESTINATION links are refused outright. `target.mkdir(exist_ok=True)`
+          accepts a symlink-to-directory and the recursion would then write
+          through it; `target.exists()` is False for a DANGLING link, and
+          copy2's follow_symlinks=False governs the SOURCE, not the destination
+          open, so the copy would follow it. Either way the write lands outside
+          the home.
+
+        Returns True only if every entry was positively established as restored.
+        An entry the home already has is NOT assumed equivalent to the backup's
+        copy — an interrupted copy can leave a truncated file — so its presence
+        makes the result incomplete and keeps the backup alive. It costs nothing
+        in the normal case, where the home was just recreated and is empty."""
+        complete = True
+        for child in src.iterdir():
+            target = dst / child.name
+            try:
+                if target.is_symlink():
+                    # Never write through a destination link, and never delete
+                    # one to make room: refuse and keep the backup.
+                    complete = False
+                    log.error("refusing to restore %s: %s is a symlink",
+                              child, target)
+                    continue
+                if child.is_symlink():
+                    if not target.exists():
+                        os.symlink(os.readlink(child), target)
+                    else:
+                        complete = False
+                elif child.is_dir():
+                    if target.exists() and not target.is_dir():
+                        complete = False
+                        log.error("refusing to restore %s: %s exists and is "
+                                  "not a directory", child, target)
+                        continue
+                    target.mkdir(exist_ok=True)
+                    if not _SystemOps._merge_missing(child, target):
+                        complete = False
+                elif not target.exists():
+                    shutil.copy2(child, target, follow_symlinks=False)
+                else:
+                    # Present, but we cannot establish it is the whole file.
+                    complete = False
+            except OSError as e:
+                complete = False
+                log.warning("could not restore %s into %s: %s",
+                            child, target, e)
+        return complete
 
     def userdel(self, name: str) -> None:
         # -r removes home dir + mail spool. -f forces removal even
@@ -721,9 +1020,19 @@ class _SystemOps:
         # code that silo became UNDELETABLE — delete() failed at userdel,
         # rolled back to Stopped, and re-issued its relay grant, forever.
         # userdel exits 6 for "does not exist".
-        r = subprocess.run(
-            ["userdel", "-r", "-f", str(name)],
-            check=False, capture_output=True, text=True)
+        argv = ["userdel", "-r", "-f", str(name)]
+        try:
+            r = subprocess.run(
+                argv, check=False, capture_output=True, text=True,
+                timeout=_T_ACCOUNT)
+        except subprocess.TimeoutExpired as e:
+            # Fail closed, exactly like a non-zero rc below: the user may or
+            # may not be gone, so delete() must roll the silo back to Stopped
+            # and let the admin retry rather than dropping the row for an
+            # account that still exists.
+            raise subprocess.CalledProcessError(
+                -1, argv,
+                stderr=f"userdel timed out after {e.timeout}s") from e
         if r.returncode == 0:
             return
         if r.returncode == 6 or "does not exist" in (r.stderr or ""):
@@ -731,8 +1040,7 @@ class _SystemOps:
                      name, r.returncode)
             return
         raise subprocess.CalledProcessError(
-            r.returncode, ["userdel", "-r", "-f", str(name)],
-            output=r.stdout, stderr=r.stderr)
+            r.returncode, argv, output=r.stdout, stderr=r.stderr)
 
     # ---- per-silo user-relay D-Bus policy (F4-a) --------------------------
 
@@ -749,10 +1057,18 @@ class _SystemOps:
         so log when nothing could be reloaded.
         """
         for unit in ("dbus-broker.service", "dbus.service"):
-            r = subprocess.run(
-                ["systemctl", "reload", unit],
-                check=False, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL)
+            try:
+                r = subprocess.run(
+                    ["systemctl", "reload", unit],
+                    check=False, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=_T_SYSTEMCTL)
+            except subprocess.TimeoutExpired:
+                # Same as a non-zero rc: try the next unit, and fall through
+                # to the warning below if neither answered. Never raise — the
+                # caller's grant is already on disk.
+                log.warning("systemctl reload %s timed out after %ds",
+                            unit, _T_SYSTEMCTL)
+                continue
             if r.returncode == 0:
                 return
         log.warning(
@@ -1034,7 +1350,16 @@ class _SystemOps:
         if ns:
             cmd += ["-n", str(ns)]
         cmd += [str(a) for a in args]
-        subprocess.run(cmd, check=check)
+        # check=False means "ignore a non-zero EXIT STATUS" — a device that is
+        # already gone. It deliberately does NOT mean "ignore a wedge": a
+        # TimeoutExpired propagates either way. The distinction is load-bearing
+        # because link_del() runs on the APPLY path too (EgressBackend.apply
+        # tears down stale devices first), and there a swallowed timeout would
+        # let apply(none) return dark=True while the old wg device is still up
+        # with its default route — a silo reported as networkless that still
+        # has a tunnel. "The delete failed" and "the device was already absent"
+        # must never collapse into the same answer.
+        subprocess.run(cmd, check=check, timeout=_T_NETLINK)
 
     def netns_exists(self, ns: str) -> bool:
         return (NETNS_RUN_DIR / str(ns)).exists()
@@ -1042,13 +1367,19 @@ class _SystemOps:
     def netns_create(self, ns: str) -> None:
         # Idempotent: `ip netns add` errors if the name exists.
         if not self.netns_exists(ns):
-            subprocess.run(["ip", "netns", "add", str(ns)], check=True)
+            subprocess.run(["ip", "netns", "add", str(ns)], check=True,
+                           timeout=_T_NETLINK)
 
     def netns_remove(self, ns: str) -> None:
         # Deleting the netns destroys every interface still inside it. Best
         # effort: a missing netns is not an error.
+        # check=False covers "no such netns". A timeout is a different claim —
+        # the netns may still exist with devices in it — so it propagates to
+        # the caller, which already wraps this in its own "log and continue"
+        # handler and is the right place for that policy to live.
         subprocess.run(["ip", "netns", "del", str(ns)], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=_T_NETLINK)
 
     def link_up(self, ns, ifname) -> None:
         self._ip(ns, "link", "set", ifname, "up")
@@ -1060,7 +1391,7 @@ class _SystemOps:
     def link_set_netns(self, ifname, ns) -> None:
         # The device is in the init netns; move it into `ns`.
         subprocess.run(["ip", "link", "set", str(ifname), "netns", str(ns)],
-                       check=True)
+                       check=True, timeout=_T_NETLINK)
 
     def addr_add(self, ns, ifname, address) -> None:
         # `replace` (not `add`) so reattach() on a link-up is idempotent — a
@@ -1080,14 +1411,17 @@ class _SystemOps:
         argv = ["sysctl", "-q", f"net.ipv6.conf.{ifname}.disable_ipv6=1"]
         if ns:
             argv = ["ip", "netns", "exec", str(ns)] + argv
-        subprocess.run(argv, check=False)
+        # Propagates on timeout: this runs on the `direct` APPLY path, right
+        # before the silo is declared non-dark. Swallowing it would hand out a
+        # silo whose v6 SLAAC path around the NAT was never actually closed.
+        subprocess.run(argv, check=False, timeout=_T_NETLINK)
 
     def wg_add_dev(self, ifname) -> None:
         # Born in the init netns so WireGuard binds its encrypted UDP socket
         # here; moved into the silo netns afterwards (kill-switch by
         # construction — the silo netns then holds only this device + lo).
         subprocess.run(["ip", "link", "add", str(ifname), "type", "wireguard"],
-                       check=True)
+                       check=True, timeout=_T_NETLINK)
 
     def wg_configure(self, ifname, *, private_key, peer_public_key, endpoint,
                      allowed_ips, keepalive) -> None:
@@ -1105,7 +1439,8 @@ class _SystemOps:
                    "endpoint", str(endpoint)]
             if keepalive:
                 cmd += ["persistent-keepalive", str(int(keepalive))]
-            subprocess.run(cmd, check=True, pass_fds=(r,))
+            subprocess.run(cmd, check=True, pass_fds=(r,),
+                           timeout=_T_NETLINK)
         finally:
             if w != -1:
                 os.close(w)
@@ -1113,7 +1448,8 @@ class _SystemOps:
 
     def veth_create(self, host_if, peer_if) -> None:
         subprocess.run(["ip", "link", "add", str(host_if), "type", "veth",
-                        "peer", "name", str(peer_if)], check=True)
+                        "peer", "name", str(peer_if)], check=True,
+                       timeout=_T_NETLINK)
 
     def _nft_ensure_table(self) -> None:
         # Reconcile the owned chains on every ensure. nft commits the whole
@@ -1176,16 +1512,34 @@ class _SystemOps:
             f"{{ type nat hook postrouting priority srcnat; }}\n"
             f"add rule inet {self._NFT_TABLE} post "
             f"ip saddr @nat_subnets masquerade\n")
-        r = subprocess.run(["nft", "-f", "-"], input=base + chains,
-                           capture_output=True, text=True)
+        try:
+            r = subprocess.run(["nft", "-f", "-"], input=base + chains,
+                               capture_output=True, text=True,
+                               timeout=_T_NETLINK)
+        except subprocess.TimeoutExpired as e:
+            # Same fail-closed answer as a non-zero rc: the table may be half
+            # reconciled, so the apply must raise and the silo stay dark.
+            raise RuntimeError(
+                f"nft egress backstop rule install timed out after "
+                f"{e.timeout}s") from e
         if r.returncode != 0:
             raise RuntimeError(
                 f"nft egress backstop rule install failed: {r.stderr.strip()}")
 
     def _nft_table_present(self) -> bool:
-        return subprocess.run(
-            ["nft", "list", "table", "inet", self._NFT_TABLE],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        try:
+            return subprocess.run(
+                ["nft", "list", "table", "inet", self._NFT_TABLE],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=_T_NETLINK).returncode == 0
+        except subprocess.TimeoutExpired:
+            # Fail closed = report the table as PRESENT. The only caller is the
+            # removal shortcut, so "present" means we still attempt the element
+            # delete (whose own failure is fail-safe) instead of skipping it on
+            # the strength of a check that never answered.
+            log.warning("nft list table timed out after %ds; assuming present",
+                        _T_NETLINK)
+            return True
 
     def nft_skuid_drop(self, uid, enable) -> None:
         # Defense-in-depth backstop: drop traffic from a silo uid that runs in
@@ -1198,10 +1552,13 @@ class _SystemOps:
             # has nothing to clear, so this stays zero-cost (codex #3).
             return
         verb = "add" if enable else "delete"
-        r = subprocess.run(
-            ["nft", verb, "element", "inet", self._NFT_TABLE, "blocked_uids",
-             "{", str(int(uid)), "}"],
-            capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                ["nft", verb, "element", "inet", self._NFT_TABLE,
+                 "blocked_uids", "{", str(int(uid)), "}"],
+                capture_output=True, text=True, timeout=_T_NETLINK)
+        except subprocess.TimeoutExpired as e:
+            r = _TimedOutRun(f"nft {verb} element timed out after {e.timeout}s")
         if r.returncode != 0 and not _nft_benign(r.stderr):
             msg = f"nft backstop {verb} uid={uid} failed: {r.stderr.strip()}"
             if enable:
@@ -1216,10 +1573,13 @@ class _SystemOps:
         elif not self._nft_table_present():
             return
         verb = "add" if enable else "delete"
-        r = subprocess.run(
-            ["nft", verb, "element", "inet", self._NFT_TABLE, "nat_subnets",
-             "{", str(subnet), "}"],
-            capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                ["nft", verb, "element", "inet", self._NFT_TABLE,
+                 "nat_subnets", "{", str(subnet), "}"],
+                capture_output=True, text=True, timeout=_T_NETLINK)
+        except subprocess.TimeoutExpired as e:
+            r = _TimedOutRun(f"nft {verb} element timed out after {e.timeout}s")
         if r.returncode != 0 and not _nft_benign(r.stderr):
             msg = f"nft nat {verb} subnet={subnet} failed: {r.stderr.strip()}"
             if enable:
@@ -1233,7 +1593,8 @@ class _SystemOps:
         # other routing — the silo-isolation it would expose is closed by the
         # nft `forward` chain). Fail-closed: if the sysctl write fails the direct
         # apply raises and the silo comes up dark.
-        subprocess.run(["sysctl", "-q", "net.ipv4.ip_forward=1"], check=True)
+        subprocess.run(["sysctl", "-q", "net.ipv4.ip_forward=1"], check=True,
+                       timeout=_T_NETLINK)
 
     def _dns_pidfile(self, ns) -> Path:
         return SILO_DNS_RUN_DIR / f"{ns}.pid"
@@ -1266,7 +1627,7 @@ class _SystemOps:
              "--no-hosts",
              "--no-dhcp-interface=*",
              "--cache-size=150"],
-            check=True)
+            check=True, timeout=_T_DNSMASQ)
 
     def dns_stop(self, ns) -> None:
         # Idempotent: a missing/garbage pidfile, an already-dead pid, or an
@@ -1326,6 +1687,10 @@ class _SystemOps:
         this thread cannot deadlock. Best-effort: a watcher that fails to start
         only means a manual flap won't auto-heal (still fails closed)."""
         try:
+            # DELIBERATELY UNBOUNDED: `ip monitor link` is a long-lived event
+            # stream, not a command that completes, and it runs on its own
+            # watcher thread — never the main loop. stop_link_watcher()
+            # terminates it. Do not "fix" this with a timeout.
             proc = subprocess.Popen(
                 ["ip", "netns", "exec", str(ns), "ip", "monitor", "link"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -1506,17 +1871,114 @@ class _SystemOps:
     def daemon_reload(self) -> None:
         # check=True: a silent reload failure is what lets a create() report
         # success for a silo whose launcher unit systemd cannot resolve.
-        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=True,
+                       timeout=_T_SYSTEMCTL)
 
     def systemctl_start(self, unit: str) -> None:
-        subprocess.run(
-            ["systemctl", "start", unit],
-            check=True)
+        """Start `unit`. A TIMEOUT is always reported as an unresolved start.
 
-    def systemctl_stop(self, unit: str) -> None:
-        subprocess.run(
-            ["systemctl", "stop", unit],
-            check=False)
+        Killing the systemctl client does not withdraw a StartUnit request PID 1
+        has already accepted, and `Type=simple` bounds how long startup
+        EXECUTES, not how long the job sits queued behind another job for the
+        same unit. So a timeout tells us nothing, and — this is the part that
+        took three review rounds to get right — neither does anything we can
+        cheaply check afterwards:
+
+        * Issuing a compensating stop is not evidence. `systemctl stop` replaces
+          a conflicting pending start only once PID 1 accepts the transaction,
+          and an irreversible conflicting job can prevent that.
+        * `systemctl is-active` reporting `inactive` is not evidence either. A
+          job WAITING on a dependency has not begun executing, so the unit reads
+          inactive while the start is still queued and can launch later.
+        * And for a tier-2 silo an inactive unit is not even evidence about the
+          workload: the rootless container lives outside the unit cgroup and its
+          ExecStop is declared best-effort (`ExecStop=-`), so the supervisor can
+          exit with the container still running.
+
+        Establishing the truth would mean reconciling systemd's JOB state,
+        which nothing here does — StopSilo checks the unit and the container,
+        not the job queue. So this method does not pretend to. It issues the
+        compensating stop as a best-effort cancellation and then ALWAYS raises
+        StartNotCancelled, which routes the silo to ACTIVE: not deletable, and
+        resolvable by a stop that both completes AND finds the workload gone.
+        A stop that is not acknowledged keeps the silo Active precisely because
+        a queued start is indistinguishable from a clean stop by snapshot.
+
+        The compensating stop uses the short _T_SYSTEMCTL_CANCEL bound because
+        this runs on the main loop; its outcome is not consulted, so cutting it
+        short costs nothing.
+        """
+        try:
+            subprocess.run(
+                ["systemctl", "start", unit],
+                check=True, timeout=_T_SYSTEMCTL)
+            return
+        except subprocess.TimeoutExpired as start_err:
+            log.warning(
+                "systemctl start %s timed out after %ds; the job may have been "
+                "accepted, so issuing a best-effort stop and reporting the "
+                "start as unresolved", unit, _T_SYSTEMCTL)
+            try:
+                self.systemctl_stop(unit, timeout=_T_SYSTEMCTL_CANCEL)
+            except Exception as stop_err:  # noqa: BLE001
+                log.error("could not issue the compensating stop for %s: %s",
+                          unit, stop_err)
+            raise StartNotCancelled(
+                f"start of {unit} timed out after {_T_SYSTEMCTL}s; the job may "
+                f"still be queued or running and the workload was not verified "
+                f"absent") from start_err
+
+    def systemctl_stop(self, unit: str, *,
+                       timeout: int = _T_SYSTEMCTL_STOP) -> bool:
+        """Stop `unit`. Returns whether CANCELLATION IS ESTABLISHED.
+
+        The return value is load-bearing and callers must not discard it.
+        Process completion is not stop completion: `systemctl` exiting non-zero
+        can mean PID 1 never accepted the transaction at all — an irreversible
+        conflicting job cannot be replaced and the stop is never enqueued, and a
+        bus communication failure exits unsuccessfully without cancelling
+        anything. A timeout is the same class of answer: the client was killed,
+        so acceptance is UNKNOWN. None of these is repaired by a later snapshot
+        showing the unit inactive and its container absent, because a start job
+        waiting on a dependency reads exactly like a clean stop and runs later.
+
+        So True requires rc == 0. There is deliberately NO exception for
+        "unit not loaded": that diagnostic is not tied to the requested unit or
+        to a particular manager error, and the same stderr text
+        ("no such file or directory") is produced by a failure to reach the bus
+        AT ALL — which says nothing about PID 1's existing jobs. StopUnit also
+        LOADS the unit it is given, so a merely-never-loaded launcher stops
+        normally and needs no exception. A genuinely missing or broken launcher
+        unit is therefore the one case this refuses to resolve; see
+        todo/open-followups.md.
+
+        False means "unknown, assume the worst". Callers that consume it must
+        combine it with their own liveness check; `systemctl_start`'s
+        compensation is the one deliberate exception, and it is safe only
+        because it always raises StartNotCancelled regardless.
+
+        Raises OSError if the child cannot be spawned at all (a missing
+        `systemctl`, EMFILE); it does not swallow that into a verdict.
+
+        The default bound is an ALLOWANCE sized for systemd's TimeoutStopSec
+        phases, not demonstrated coverage of them: a stop can still legitimately
+        outlast it (drop-ins, queueing, a manager with a different default).
+        Callers on the main loop pass the shorter _T_SYSTEMCTL_CANCEL instead."""
+        try:
+            r = subprocess.run(
+                ["systemctl", "stop", unit],
+                check=False, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("systemctl stop %s timed out after %ds; acceptance is "
+                        "UNKNOWN — a queued start for this unit may still "
+                        "execute later", unit, timeout)
+            return False
+        if r.returncode == 0:
+            return True
+        log.warning("systemctl stop %s exited %d (%s); acceptance is UNKNOWN — "
+                    "the stop transaction may never have been enqueued",
+                    unit, r.returncode, (r.stderr or "").strip()[:200])
+        return False
 
     def tier2_silo_running(self, name: str) -> bool:
         """True if a tier-2 stop did NOT fully take effect: the launcher unit
@@ -1525,8 +1987,19 @@ class _SystemOps:
         in admin's podman (the daemon can drop to admin via runuser). Used to
         fail closed — never report STOPPED while a container may survive."""
         unit = TIER2_SILO_LAUNCHER_FMT.format(name=name)
-        active = subprocess.run(["systemctl", "is-active", unit],
-                                capture_output=True, text=True).stdout.strip()
+        try:
+            active = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True, text=True,
+                timeout=_T_SYSTEMCTL).stdout.strip()
+        except subprocess.TimeoutExpired:
+            # The check itself never answered: fail closed, exactly like the
+            # unrecognized-output case below. Never report a clean stop on the
+            # strength of a query that wedged.
+            log.warning("systemctl is-active %s timed out after %ds; "
+                        "reporting the silo as still running",
+                        unit, _T_SYSTEMCTL)
+            return True
         # Only a DEFINITIVELY not-running unit state (inactive/failed: the main
         # process has exited) lets us proceed to the container check. Any active
         # or transitional state — and any unrecognized/empty output (systemctl
@@ -1538,10 +2011,19 @@ class _SystemOps:
         # it as admin (the rootless owner). rc 0 = still running; rc 1 = gone;
         # any OTHER rc means the check itself failed to run — fail closed and
         # treat that as still running, never silently report a clean stop.
-        proc = subprocess.run(
-            ["runuser", "-u", ADMIN_USER_NAME,
-             "--", "podman", "container", "exists", container],
-            capture_output=True)
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME,
+                 "--", "podman", "container", "exists", container],
+                capture_output=True, timeout=_T_PODMAN)
+        except subprocess.TimeoutExpired:
+            # A wedged rootless podman is precisely the case this method has to
+            # survive: "the check failed to run" is already fail-closed here
+            # (any rc other than 1), so a timeout gets the same answer.
+            log.warning("podman container exists %s timed out after %ds; "
+                        "reporting the silo as still running",
+                        container, _T_PODMAN)
+            return True
         return proc.returncode != 1
 
     def disp_container_list(self) -> list[str]:
@@ -1552,12 +2034,19 @@ class _SystemOps:
         such label and is never listed (the name regex on the remove path is
         a second, defence-in-depth check). Returns [] on any failure (the
         sweep is best-effort and must not crash startup)."""
-        proc = subprocess.run(
-            ["runuser", "-u", ADMIN_USER_NAME,
-             "--", "podman", "ps", "-a",
-             "--filter", "label=qdistro_disposable=1",
-             "--format", "{{.Names}}"],
-            capture_output=True, text=True)
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME,
+                 "--", "podman", "ps", "-a",
+                 "--filter", "label=qdistro_disposable=1",
+                 "--format", "{{.Names}}"],
+                capture_output=True, text=True, timeout=_T_PODMAN)
+        except subprocess.TimeoutExpired:
+            # Documented contract: [] on any failure. The sweep is best-effort
+            # and runs at daemon startup — it must never wedge the boot.
+            log.warning("disposable container list timed out after %ds",
+                        _T_PODMAN)
+            return []
         if proc.returncode != 0:
             return []
         return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
@@ -3269,9 +3758,13 @@ class _SiloStore:
             self._ops.write_podapp_launch_env(token, content)
             self._ops.systemctl_start(unit)
         except Exception as e:  # noqa: BLE001
-            # Never leave a stanza behind for a unit that did not start: it is
-            # a spent token nobody will clean up (the unit's ExecStopPost is
-            # what normally removes it).
+            # Never leave a stanza behind for a unit whose start was not
+            # CONFIRMED: it is a spent token nobody will clean up (the unit's
+            # ExecStopPost is what normally removes it). NB a timeout proves
+            # only that startup was unconfirmed, not that nothing started —
+            # unlike a silo, a pod-app has no row to pin, so this reports the
+            # error and accepts that the stanza may be removed under a launch
+            # that did in fact happen.
             try:
                 self._ops.remove_podapp_launch_env(token)
             except Exception:  # noqa: BLE001
@@ -3407,6 +3900,31 @@ class _SiloStore:
                         # egress we applied so a failed start leaves no
                         # half-configured netns behind.
                         log.error("start of silo %r failed: %s", silo.name, e)
+                        # A start whose cancellation could NOT be confirmed is
+                        # the one failure we must not record as STOPPED: the
+                        # unit may still be starting, and for a tier-2 silo the
+                        # rootless container can outlive the unit entirely.
+                        # Recording STOPPED there would make the next StopSilo
+                        # a no-op and admit DeleteSilo over a live workload.
+                        # Force ACTIVE instead — honest, retryable, and not
+                        # deletable — exactly as _stop_impl does for a tier-2
+                        # stop whose outcome it cannot verify. Egress stays up
+                        # with it: tearing it down would strand a still-running
+                        # workload on a half-removed netns.
+                        if isinstance(e, StartNotCancelled):
+                            self._force_state(silo, State.ACTIVE)
+                            # The remedy is stop-then-start, NOT a plain retry:
+                            # start() from ACTIVE is an idempotent no-op that
+                            # reports success without launching anything. Said
+                            # here rather than in systemctl_start, whose other
+                            # caller (launch_podapp) has no silo to talk about.
+                            raise StartNotCancelled(
+                                f"start of silo {silo.name!r} is unresolved "
+                                f"({e}); it is left Active. Stop it before "
+                                f"starting it again — a plain retry of start "
+                                f"is an idempotent no-op from Active and would "
+                                f"report success without launching anything"
+                            ) from e
                         if self._is_netns_backed(silo):
                             self._teardown_egress(silo.name, silo.uid,
                                                   silo.egress)
@@ -3502,7 +4020,7 @@ class _SiloStore:
                 # STOPPED, which would be a lie here) and must never leave the
                 # silo wedged in STOPPING.
                 try:
-                    self._ops.systemctl_stop(
+                    stop_done = self._ops.systemctl_stop(
                         TIER2_SILO_LAUNCHER_FMT.format(name=silo_name))
                     survived = self._ops.tier2_silo_running(silo_name)
                 except Exception as e:  # noqa: BLE001
@@ -3515,20 +4033,43 @@ class _SiloStore:
                         self._force_state(silo, State.ACTIVE)
                     raise SessionError(
                         f"stop of tier-2 silo {silo_name!r} failed: {e}") from e
-                # FAIL CLOSED: systemctl_stop is check=False and the unit's
-                # ExecStop is best-effort, so a unit timeout / podman failure /
-                # surviving rootless container would otherwise be reported as a
-                # clean stop — a lie that hides an orphan. Report STOPPED only
-                # when the unit is inactive AND the container is gone.
-                if survived:
+                # FAIL CLOSED, on BOTH counts:
+                #
+                #  - `survived`: even an ACCEPTED, rc=0 stop is not proof the
+                #    workload is gone here. The unit's ExecStop is declared
+                #    best-effort (`ExecStop=-`) and the rootless container lives
+                #    outside the unit cgroup, so the supervisor can exit
+                #    cleanly with the container still running — a clean stop
+                #    that hides an orphan.
+                #  - `not stop_done`: the stop itself was never acknowledged, so
+                #    we do not know PID 1 accepted it. A snapshot cannot settle
+                #    that. This is the case a silo reaches after an unresolved
+                #    START (StartNotCancelled): the original start job may still
+                #    be QUEUED behind a dependency, in which case the unit reads
+                #    inactive and the container does not exist YET — identical
+                #    to a clean stop, and it launches minutes later. Reporting
+                #    STOPPED there would admit DeleteSilo over a workload that
+                #    has not started yet.
+                #
+                # Report STOPPED only when the stop completed AND the unit is
+                # inactive AND the container is gone.
+                if survived or not stop_done:
                     with self._lock:
                         self._clear_stop_inflight(silo_name)
                         self._force_state(silo, State.ACTIVE)
+                    if survived:
+                        raise SessionError(
+                            f"stop of tier-2 silo {silo_name!r} did not take "
+                            f"effect: the launcher unit is still active or the "
+                            f"container "
+                            f"{TIER2_CONTAINER_FMT.format(name=silo_name)} "
+                            f"survives")
                     raise SessionError(
-                        f"stop of tier-2 silo {silo_name!r} did not take "
-                        f"effect: the launcher unit is still active or the "
-                        f"container "
-                        f"{TIER2_CONTAINER_FMT.format(name=silo_name)} survives")
+                        f"stop of tier-2 silo {silo_name!r} was not "
+                        f"acknowledged (systemctl failed or timed out); the "
+                        f"unit looks inactive now, but a queued start may "
+                        f"still execute, so the silo stays Active. Retry the "
+                        f"stop")
                 # The container is verified gone — the stop SUCCEEDED. Clearing
                 # the (now-stale) launch env is best-effort: a failure here must
                 # not flip the verified-stopped silo back to ACTIVE (the daemon
@@ -3543,17 +4084,29 @@ class _SiloStore:
                     self._clear_stop_inflight(silo_name)
                     self._transition(silo, State.STOPPED)
                 return
+            # Conservative default: until systemctl_stop says otherwise, the
+            # cancellation is unresolved. Initialised OUTSIDE the try so no
+            # exception path can reach the handlers with it unset — or, worse,
+            # left over as True from an earlier iteration of anything.
+            stop_done = False
             try:
                 unit = SILO_LAUNCHER_FMT.format(name=silo_name, uid=silo_uid)
-                self._ops.systemctl_stop(unit)
+                stop_done = self._ops.systemctl_stop(unit)
                 # Capture pids defensively — cgroup_pids may raise on a
-                # corrupted procfs entry. Treat any read failure as
-                # "assume populated; SIGKILL anything we can find".
+                # corrupted procfs entry. A read failure yields an empty list,
+                # so the kill sweep is skipped; it is NOT evidence the cgroup
+                # was empty, and the final verdict does not rest on it.
                 try:
                     pids = self._ops.cgroup_pids(silo_name)
                 except Exception as e:  # noqa: BLE001
-                    log.warning("cgroup_pids for %r raised %s; assuming "
-                                "empty", silo_name, e)
+                    log.warning("cgroup_pids for %r raised %s; treating the "
+                                "cgroup as empty for the kill sweep. NB the "
+                                "gate below covers an UNACKNOWLEDGED "
+                                "cancellation, not this read failure — an "
+                                "acknowledged stop still reaches STOPPED "
+                                "without having established the cgroup was "
+                                "empty (see todo/open-followups.md)",
+                                silo_name, e)
                     pids = []
                 if pids:
                     self._ops.kill_pids(pids, signal.SIGTERM)
@@ -3587,8 +4140,11 @@ class _SiloStore:
                 except OSError as e:
                     # The cgroup is still populated — kernel didn't reap
                     # in time, or one of the processes is stuck in D.
-                    # Log loudly so the leak is visible; transition to
-                    # STOPPED anyway so the admin can retry stop or delete.
+                    # Log loudly so the leak is visible and carry on: if the
+                    # cancellation was acknowledged this still ends at STOPPED
+                    # (the leaked dir is a resource problem, not a liveness
+                    # one), and if it was not, the gate below keeps the silo
+                    # ACTIVE regardless of what happened here.
                     # The leftover dir is reclaimed by reap_orphan_cgroups()
                     # at the next daemon startup once its tasks have exited
                     # (02/S14a — previously this comment claimed the autostart
@@ -3600,23 +4156,62 @@ class _SiloStore:
                 # resolver) and remove the netns. Best-effort: never raises, so
                 # a teardown hiccup can't wedge the stop. No-op for legacy
                 # (egress=None) silos.
-                self._teardown_egress(silo_name, silo_uid, silo_egress)
+                #
+                # Skipped while the cancellation is unresolved, for the same
+                # reason start() keeps egress on the StartNotCancelled path: a
+                # queued start can still launch, and stripping its network out
+                # from under it strands a live workload on a half-removed
+                # netns. The retry stop tears it down once we know.
+                if stop_done:
+                    self._teardown_egress(silo_name, silo_uid, silo_egress)
             except SessionError:
-                # Already-typed errors propagate; force back to STOPPED
-                # so the silo isn't wedged in STOPPING.
+                # Already-typed errors propagate. Force back to STOPPED so the
+                # silo isn't wedged in STOPPING — UNLESS the cancellation was
+                # never established, in which case STOPPED would admit a delete
+                # over a start that can still run. Raising an error is not
+                # fail-closed on its own: the PERSISTED state is what gates
+                # DeleteSilo, so the uncertainty has to survive these handlers.
                 with self._lock:
                     self._clear_stop_inflight(silo_name)
-                    self._force_state(silo, State.STOPPED)
+                    self._force_state(
+                        silo, State.STOPPED if stop_done else State.ACTIVE)
                 raise
             except Exception as e:  # noqa: BLE001
-                log.error("stop of silo %r failed mid-teardown: %s — "
-                          "forcing STOPPED so the silo isn't wedged",
-                          silo_name, e)
+                log.error("stop of silo %r failed mid-teardown: %s — forcing "
+                          "%s so the silo isn't wedged", silo_name, e,
+                          "STOPPED" if stop_done else
+                          "ACTIVE (the stop was never acknowledged)")
                 with self._lock:
                     self._clear_stop_inflight(silo_name)
-                    self._force_state(silo, State.STOPPED)
+                    self._force_state(
+                        silo, State.STOPPED if stop_done else State.ACTIVE)
                 raise SessionError(
                     f"stop of silo {silo_name!r} failed: {e}") from e
+
+            # FAIL CLOSED on an unacknowledged stop, exactly as the tier-2
+            # branch above does. It lives OUTSIDE the try because the handlers
+            # above run first: they now honour stop_done too, but the gate is
+            # what covers the ORDINARY (no-exception) path, and keeping the
+            # decision here means a future edit to either handler cannot
+            # quietly become the only thing standing between an unresolved
+            # cancellation and a STOPPED row.
+            #
+            # An empty cgroup is not the proof it looks like: if the stop was
+            # never accepted, a start job still QUEUED behind a dependency
+            # leaves the cgroup empty simply because nothing has launched YET —
+            # byte-identical to "we killed everything" — and it can populate
+            # the cgroup minutes after we reported STOPPED. (The launcher does
+            # `mkdir -p` on its cgroup, so having removed the directory does
+            # not stop it either.) The kill/reclaim above still ran, because
+            # that is right either way; only the VERDICT is withheld.
+            if not stop_done:
+                with self._lock:
+                    self._clear_stop_inflight(silo_name)
+                    self._force_state(silo, State.ACTIVE)
+                raise SessionError(
+                    f"stop of silo {silo_name!r} was not acknowledged "
+                    f"(systemctl failed or timed out), so a queued start may "
+                    f"still execute; the silo stays Active. Retry the stop")
 
             # Phase 3: re-acquire the lock for the final state transition.
             # Clear the in-flight slot + notify waiters BEFORE _transition
