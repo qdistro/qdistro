@@ -133,7 +133,7 @@ QD22_FAILED=0
 # can start. $QD22_INTENT distinguishes "never launched" from "launched".
 qd22_reap_probe() {
     "$QDWIN_VM_EXEC" "$VMNAME" \
-      "touch $QD22_CANCEL 2>/dev/null; \
+      "touch $QD22_CANCEL || { echo 'could not record cancellation'; exit 1; }; \
        [ -e $QD22_INTENT ] || { echo 'probe never launched'; exit 0; }; \
        p=''; \
        for _i in \$(seq 1 40); do \
@@ -142,7 +142,7 @@ qd22_reap_probe() {
          break; \
        done; \
        case \"\$p\" in ''|*[!0-9]*) \
-         echo 'no pid published after cancel; launcher self-cancelled'; exit 0;; \
+         echo 'cancellation recorded; no pid published'; exit 0;; \
        esac; \
        kill -TERM -\"\$p\" 2>/dev/null; \
        for _i in \$(seq 1 40); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; echo \"group \$p reaped\"; exit 0; }; sleep 0.1; done; \
@@ -176,7 +176,15 @@ qd22_cleanup() {
     else
         echo "T.1 ok: compositor pid unchanged ($after)"
     fi
-    "$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null 2>&1 || true
+    # The cancel flag is a TOMBSTONE and is deliberately NOT removed. A
+    # launcher descheduled before publication can still resume after this
+    # function returns; its post-publication check is what stops it, and that
+    # check needs the flag to still exist. An earlier version deleted these
+    # three files here and reopened the exact race the protocol was written to
+    # close (proxy-lane-review-r5.md finding 1) — the stress runs missed it
+    # because they exercised qd22_reap_probe directly, with the flag retained,
+    # rather than this handler. The files are empty, per-invocation, and in the
+    # VM's /tmp; leaving them is the cheap half of the trade.
 
     if [ "$QD22_FAILED" != 0 ]; then
         echo "SCENARIO VERDICT: FAIL (see the FAIL lines above)"
@@ -414,6 +422,9 @@ done
 # before S4 claims it. qdwin_apps_restore_shell's own pre-start wait watches
 # for a BYSTANDER unbind, which says nothing about this probe.
 qd22_reap_probe || { echo "ERROR: probe still holds the shell role; not proceeding to S4"; exit 1; }
+SHELL_FREE=0   # Setup supports rerunning in one shell; a previous run's 1
+               # would otherwise satisfy this gate with no evidence from THIS
+               # run (proxy-lane-review-r5.md finding 3).
 for _ in $(seq 1 40); do
     "$QDWIN_VM_EXEC" "$VMNAME" \
       "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
@@ -481,7 +492,7 @@ asserts nothing and the scenario proves nothing about input surviving; say so
 in the report.
 
 The probe released the shell role when its last mode exited, so take the role
-with the bystander (the trap from S3 still covers cleanup).
+with the bystander (the `qd22_cleanup` trap installed in Setup covers it).
 
 ```bash
 QD22_TERM_TITLE="qd22-after-$QD22_RUN"
