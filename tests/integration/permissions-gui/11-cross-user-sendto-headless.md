@@ -36,7 +36,28 @@ for _ in 1 2 3 4 5; do
 done
 $VMEXEC "$VM" 'systemctl --machine=work@.host --user restart qdistro-user-relay.service qstub-notepad.service'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qdistro-user-relay.service qstub-notepad.service'
-sleep 1
+
+# A stub is reachable only once it has claimed its bus name -- `systemctl
+# restart` returns, and the unit reads `active`, well before that. This scenario
+# previously wrote `sleep 1` here, and had NO gate on the broker's view at all.
+# In the 8-worker run full-20260911T070416Z the runner did not even execute that
+# sleep: it substituted its own socket checks (agent.log:853-857), and S1 then
+# ran inside the unclaimed-name window -- uid 3000's RELAY-owned receivers
+# (Compositor/Downloads/Mpris/Notifications) were all listed while
+# `org.qdistro.StubNotepad.uid3000` was still missing, so S1 failed even though
+# S2-S5 then drove that very service successfully. Either way the defect is the
+# same: the scenario named no condition worth waiting for, so a fixed sleep and
+# an improvised substitute were equally free to miss it.
+# Wait for the bus names, then for the broker's view of them. ListReceivers is
+# a LIVE fan-out to each uid's relay, so there is no cached view to lag -- what
+# the second wait adds is the RELAY's own readiness, and these scenarios
+# restart the relay in the same breath as the stub.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
+  await_dbus_session_name org.qdistro.StubNotepad.uid2000 work 30 1 && \
+  await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2 30 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
+  await_broker_receiver 2000 org.qdistro.StubNotepad.uid2000 30 1 && \
+  await_broker_receiver 3000 org.qdistro.StubNotepad.uid3000 30 1'
 ```
 
 ## Steps
@@ -73,7 +94,15 @@ runuser -u work -- dbus-send --system --print-reply \
  string:hello_from_work_headless \
  > /tmp/sendto-relay.out 2>&1 &
 echo $! > /tmp/sendto-relay.pid
-sleep 1
+
+# Wait for the request to actually REACH the broker rather than sleeping at it.
+# The next command parses GetPending for the id; a fixed sleep that expires
+# first yields an empty RID and a DecideRequest against `int32:` -- which fails
+# in a way that looks nothing like "the request had not arrived yet".
+. /tmp/qci-gui-waiters.sh
+await_broker_pending_action \
+  'app.send-to:3000:org.qdistro.StubNotepad.uid3000' 30 1 || {
+  echo "ERROR: the send-to request never reached the broker" >&2; exit 1; }
 
 # Pick off the pending request id and approve as admin.
 RID=$(dbus-send --system --print-reply \

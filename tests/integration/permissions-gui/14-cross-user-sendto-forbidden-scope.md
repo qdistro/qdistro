@@ -32,6 +32,21 @@ $VMEXEC "$VM" 'runuser -u work2 -- env XDG_RUNTIME_DIR=/run/user/3000 \
  systemctl --user restart qstub-notepad.service'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
  await_user_unit_active qstub-notepad.service work2 30 1'
+# `active` only means the process was forked. S4 addresses this stub DIRECTLY
+# (`--dest=org.qdistro.StubNotepad.uid3000`), and the stub ships no .service
+# activation file, so reaching it before it has claimed its name fails with a
+# TERMINAL `ServiceUnknown: The name is not activatable`. Wait for the name
+# itself, which is the condition S4 actually depends on.
+#
+# HONEST ATTRIBUTION: this is a real gap in the gate, but it is NOT what made
+# S4 ERROR in full-20260911T070416Z. There the agent's whole Setup exec died
+# host-side in 0ms on a mangled quoting construct and was never retried, so
+# this stub was never started at all -- `diagnostics.txt` shows
+# `qstub-notepad.service ... inactive (dead)` with no `since`. That failure is
+# an agent-driving defect (a nonzero Setup exit read as "continue"), logged for
+# the qci1 classifier work, not something a waiter can fix.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
+ await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2 30 1'
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
 ```

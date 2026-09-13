@@ -226,6 +226,281 @@ _probe_user_unit_active() {
     [ "$state" = active ]
 }
 
+# await_dbus_session_name <well-known-name> <user> [timeout] [interval]
+# Wait until <well-known-name> HAS AN OWNER on <user>'s session bus.
+#
+# This is the condition scenarios actually depend on, and for the units these
+# scenarios restart it is STRICTLY stronger than `await_user_unit_active`.
+# `qstub-notepad.service` and `qdistro-user-relay.service` are plain
+# `Type=simple` units, so systemd reports them active the moment the process is
+# forked, while the D-Bus name is only claimed later, after the process connects
+# to the bus and requests it. (This is a property of THOSE unit types, not of
+# systemd in general: a `Type=dbus` or `Type=notify` unit is not reported active
+# until its own readiness condition is met.) Everything in between is a
+# window in which `is-active` says `active` and a `dbus-send --dest=<name>`
+# fails with `org.freedesktop.DBus.Error.ServiceUnknown: The name is not
+# activatable` -- these stub services ship no .service activation file, so the
+# bus cannot start them on demand and the error is terminal, not retried.
+#
+# That window is what failed permissions-gui/11 in the 8-way run
+# full-20260911T070416Z: S1 `ListReceivers` was missing
+# `org.qdistro.StubNotepad.uid3000` while uid 3000's relay-owned receivers were
+# all present, and S2-S5 then drove that very stub successfully -- so the defect
+# was the readiness gate, not the product.
+#
+# SCOPE, honestly: for these services name-owned is a LATER MILESTONE in the
+# same startup than unit-active -- not a logically stronger predicate, since
+# neither implies the other in general (see the converse below) -- and it is
+# still weaker than "the method you are about to call will succeed". It asks the BUS DAEMON who
+# owns the name, not the service whether it is ready: qstub-notepad claims its
+# name before exporting its object and before entering its mainloop
+# (stubs/qstub_notepad.py:87,93,100), so a call landing in that gap is QUEUED by
+# libdbus rather than answered. Use this as a precondition; keep the scenario's
+# real assertion on the method's result. The converse is worth stating too:
+# owning a name does NOT imply any particular unit is active -- the owner could
+# be a hand-started process. This waiter adds value only for `Type=simple` bus
+# services like these stubs; against a `Type=dbus` unit, systemd has already
+# gated `restart` on name acquisition, so it would return immediately and prove
+# nothing new.
+await_dbus_session_name() {
+    local name=$1 user=${2:-admin}
+    local timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    if [ -z "$name" ]; then
+        printf '[await] dbus session name must be non-empty\n' >&2
+        return 2
+    fi
+    _await "dbus session name owned: $name (user $user)" "$timeout" "$interval" \
+        _probe_dbus_session_name "$name" "$user"
+}
+_probe_dbus_session_name() {
+    local name=$1 user=$2 uid reply
+    uid=$(id -u "$user" 2>/dev/null) || { printf 'no such user: %s' "$user"; return 1; }
+    reply=$(runuser -u "$user" -- env \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        dbus-send --session --print-reply --reply-timeout=5000 \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.GetNameOwner "string:$name" 2>&1) || {
+        printf 'owner=<none> %s' "$(printf '%s' "$reply" | tr '\n' ' ')"
+        return 1
+    }
+    # A successful GetNameOwner reply carries the owner's unique name (":1.42").
+    printf '%s' "$(printf '%s' "$reply" | tr '\n' ' ')"
+    grep -Eq 'string ":[0-9]+\.[0-9]+"' <<<"$reply"
+}
+
+# await_dbus_system_name <well-known-name> [timeout] [interval]
+# System-bus counterpart of await_dbus_session_name: wait until a service has
+# claimed its well-known name on the SYSTEM bus.
+#
+# Use ONLY for a `Type=simple` system-bus service, where `systemctl restart`
+# returns as soon as the process forks and the name is claimed some time later.
+# It is NOT needed for a `Type=dbus` unit: systemd marks such a unit started
+# only once its BusName is acquired, so restart already blocks on exactly this
+# condition. qdistro-admin-broker.service is `Type=dbus` with
+# `BusName=org.qdistro.AdminBroker1` (broker/qdistro-admin-broker.service:11-12)
+# -- gating on its name adds nothing, and would give a scenario a false sense of
+# having closed a race it never had.
+await_dbus_system_name() {
+    local name=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    if [ -z "$name" ]; then
+        printf '[await] dbus system name must be non-empty\n' >&2
+        return 2
+    fi
+    _await "dbus system name owned: $name" "$timeout" "$interval" \
+        _probe_dbus_system_name "$name"
+}
+_probe_dbus_system_name() {
+    local name=$1 reply
+    reply=$(dbus-send --system --print-reply --reply-timeout=5000 \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.GetNameOwner "string:$name" 2>&1) || {
+        printf 'owner=<none> %s' "$(printf '%s' "$reply" | tr '\n' ' ')"
+        return 1
+    }
+    printf '%s' "$(printf '%s' "$reply" | tr '\n' ' ')"
+    grep -Eq 'string ":[0-9]+\.[0-9]+"' <<<"$reply"
+}
+
+# await_broker_receiver <uid> <well-known-name> [timeout] [interval]
+# Wait until the system broker's ListReceivers exposes <well-known-name> for
+# <uid>. ListReceivers is a LIVE query -- the broker fans out to each per-uid
+# UserRelay's ListLocalReceivers (broker/qdistro_admin_broker.py:3543-3546),
+# which does a live ListNames -- so there is no cached view to lag. What this
+# waiter adds over await_dbus_session_name is the RELAY's own readiness: the
+# relay is `Type=simple` (user_relay/qdistro-user-relay.service:9) and
+# scenarios restart it in the same breath as the stub, so the broker can be
+# unable to see a receiver whose own name is already owned.
+#
+# Assert on THIS when the scenario grades the broker's view
+# (permissions-gui/11 S1), and on await_dbus_session_name when it addresses the
+# service directly.
+await_broker_receiver() {
+    local uid=$1 name=$2 timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    if [ -z "$uid" ] || [ -z "$name" ]; then
+        printf '[await] broker receiver needs <uid> <name>\n' >&2
+        return 2
+    fi
+    _await "broker receiver visible: $name (uid $uid)" "$timeout" "$interval" \
+        _probe_broker_receiver "$uid" "$name"
+}
+_probe_broker_receiver() {
+    local uid=$1 name=$2 reply
+    # _await only measures elapsed time BETWEEN probes, so an unbounded
+    # dbus-send can overrun the advertised deadline by its own ~25s default.
+    reply=$(dbus-send --system --print-reply --reply-timeout=5000 \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.ListReceivers 2>&1) || {
+        printf '%s' "$reply"
+        return 1
+    }
+    printf '%s' "$reply"
+    # A STRICT record parser, for three reasons found in review:
+    #
+    #  - FIELD IDENTITY. The signature is a(iss) = (uid, service, friendly)
+    #    (broker/qdistro_admin_broker.py:3513,3547-3549). A two-line grep window
+    #    after the uid covers BOTH strings, so a receiver whose FRIENDLY LABEL
+    #    equalled the service name we want satisfied it: a mocked
+    #    (3000, "org.qdistro.DifferentService", "org.qdistro.StubNotepad.uid3000")
+    #    matched. Only the FIRST string of a record is the service name.
+    #  - SIGPIPE. `grep -A2 ... | grep -Fq` lets the downstream grep exit on the
+    #    first hit and SIGPIPE the upstream one; under `set -o pipefail` the
+    #    probe then returned 141 on a reply with many structs, so a receiver
+    #    that is permanently present timed out. No pipeline here.
+    #  - DISCARD IS NOT VALIDATE. The first rewrite still validated a record at
+    #    EOF and at the next `struct {`, so an unterminated record matched; and
+    #    a nested struct re-synced and its inner triple was graded. Validation
+    #    now happens ONLY at a depth-1 `}`; every other path discards.
+    #  - CONTAINERS ARE FIELDS. The rewrite after that tracked STRUCT nesting
+    #    only, and skipped `array [` / `]` outright. Review reproduced two real
+    #    dbus-send replies it wrongly accepted: `aa(iss)` (a matching struct one
+    #    array deeper) and `a(issai)` (the three scalars plus a trailing empty
+    #    int32 array, which never reached the field counter). Array depth is now
+    #    tracked alongside struct depth, and a container opened inside a
+    #    candidate counts as a field AND clears `ok`.
+    #  - TRACKING TWO CONTAINERS IS NOT TRACKING DEPTH. Tracking `struct {` and
+    #    `array [` still left every OTHER container opener invisible, and an
+    #    invisible opener is not a wrapper the parser is inside -- it is a line
+    #    the parser walks straight through, so the array within it is graded as
+    #    the reply's top-level array. Review captured real `dbus-send` output
+    #    for `v` -> `(a(iss))` (`variant       struct {`, one line, so the
+    #    anchored struct rule never fires) and this file's own author captured
+    #    `a{s(iss)}` (`dict entry(`); BOTH were accepted while the contract
+    #    below claimed nesting fails closed. The lesson is that an allowlist of
+    #    known openers cannot be completed by adding the next one found. So the
+    #    parser now rejects on ANY line it does not model -- see the envelope.
+    #
+    # THE ENVELOPE, which is now enforced rather than assumed. The whole reply
+    # must be: an optional `method return ...` header, then EXACTLY ONE
+    # top-level `array [ ... ]` -- the header at most ONCE and only BEFORE the
+    # array, its suffix unparsed -- containing NOTHING but well-formed `(iss)`
+    # records -- each opening at struct depth 0 while array depth is exactly 1,
+    # holding EXACTLY three fields whose FULL lines are `int32 <digits>`,
+    # `string "..."`, `string "..."` in that order, and closing with `}` at
+    # array depth 1. ANY other line anywhere -- a second top-level array, a
+    # container this parser does not model, a struct outside the array, an
+    # unbalanced `]` or `}`, a SECOND header or one positioned after the array
+    # has opened -- sets `bad` and fails the whole reply, as does a single
+    # MALFORMED SIBLING record even when a valid match is also present. The one
+    # deliberate exception is a BLANK line outside a record, tolerated anywhere
+    # because dbus-send's spacing is not worth pinning.
+    # At EOF both depths must be zero, so an unterminated container anywhere
+    # rejects. This is whole-reply validation, not a search: the match is
+    # existential over records that have ALL been validated.
+    #
+    # RESIDUAL, stated honestly rather than overclaimed: this is still a text
+    # parse of dbus-send output, which does not escape string contents. A
+    # receiver whose FRIENDLY LABEL contained a newline plus a forged
+    # `struct {` block could fabricate a record. That is the only remaining
+    # injection surface KNOWN to us -- a claim about our adversarial corpus, not
+    # a proof -- and it is unreachable through today's relay: D-Bus well-known
+    # names cannot contain a newline, and the relay derives the label from the
+    # service name (user_relay/qdistro_user_relay.py:353,608). A typed reader
+    # (busctl --json) would close the whole class outright; tracked as
+    # follow-up, not done here because it is an untested guest dependency.
+    #
+    # NOTE on timing: ListReceivers fans out to each relay with its own 5s
+    # timeout (broker/qdistro_admin_broker.py:3543), so a relay that owns its
+    # name but is not yet dispatching can make the call exceed the 5s
+    # --reply-timeout above. The probe then fails and _await retries, and the
+    # transcript shows [await] retries that are readiness, not flake. NOTE the
+    # limit: retrying only converges if the SLOW relay becomes responsive. An
+    # unrelated relay that stays wedged keeps every ListReceivers over 5s and
+    # will exhaust this waiter even when the receiver we asked about is healthy.
+    # The timeout print (the full reply/error) PRESERVES that evidence but does
+    # not attribute it: a generic outer NoReply looks the same for a wedged
+    # relay, a stalled broker, another slow operation, or plain scheduling
+    # delay. Separating those needs broker logs or a per-relay probe.
+    awk -v uid="$uid" -v name="$name" '
+        function fieldval(line,   v) {
+            v = line
+            sub(/^[[:space:]]*string[[:space:]]+"/, "", v)
+            sub(/"[[:space:]]*$/, "", v)
+            return v
+        }
+        { sub(/\r$/, "") }
+        /^[[:space:]]*array[[:space:]]*\[[[:space:]]*$/ {
+            if (sdepth == 1) { nf++; ok = 0 }        # a container IS a field
+            else if (sdepth == 0) {
+                if (adepth > 0 || seenarray) bad = 1 # only ONE top-level array
+                seenarray = 1
+            }
+            adepth++
+            next
+        }
+        /^[[:space:]]*\][[:space:]]*$/ {
+            if (sdepth > 0) ok = 0
+            if (adepth > 0) adepth--; else bad = 1
+            next
+        }
+        /^[[:space:]]*struct[[:space:]]*\{[[:space:]]*$/ {
+            if (sdepth == 0) {
+                nf = 0; opened = (adepth == 1); ok = opened
+                if (!opened) bad = 1                 # a struct outside the array
+            } else {
+                if (sdepth == 1) nf++
+                ok = 0
+            }
+            sdepth++
+            next
+        }
+        /^[[:space:]]*\}[[:space:]]*$/ {
+            if (sdepth == 1) {
+                if (!(opened && ok && adepth == 1 && nf == 3)) bad = 1
+                else if (f1 == uid && fieldval(f2) == name) hit = 1
+                opened = 0; ok = 0; nf = 0
+            }
+            if (sdepth > 0) sdepth--; else bad = 1
+            next
+        }
+        sdepth == 1 {
+            nf++
+            if (nf == 1) {
+                if (NF == 2 && $1 == "int32" && $2 ~ /^[0-9]+$/) f1 = $2; else ok = 0
+            } else if (nf == 2) {
+                if ($0 ~ /^[[:space:]]*string[[:space:]]+"[^"]*"[[:space:]]*$/) f2 = $0
+                else ok = 0
+            } else if (nf == 3) {
+                if ($0 !~ /^[[:space:]]*string[[:space:]]+"[^"]*"[[:space:]]*$/) ok = 0
+            } else ok = 0
+            next
+        }
+        sdepth > 1 { next }                          # already inside a rejected container
+        /^[[:space:]]*$/ { next }
+        /^method return / {
+            # At most ONE, and only BEFORE the array opens -- otherwise a
+            # header-prefixed line inside or after the array is a hole in the
+            # envelope (codex r6 finding 1). The suffix is opaque: we do not
+            # parse sender/serial, only the position of the line.
+            if (seenarray || sawheader) bad = 1
+            sawheader = 1
+            next
+        }
+        { bad = 1 }                                  # ANY unmodelled token: fail closed
+        END { exit !(hit && !bad && adepth == 0 && sdepth == 0) }' <<<"$reply"
+}
+
 # await_system_unit_active <unit> [timeout] [interval]
 # System-scope counterpart of await_user_unit_active: wait until a SYSTEM systemd
 # unit reports `active` (`systemctl is-active <unit>`, no --user). Use for
@@ -252,7 +527,7 @@ await_broker_pending_action() {
 }
 _probe_broker_pending_action() {
     local action=$1 reply
-    reply=$(dbus-send --system --print-reply \
+    reply=$(dbus-send --system --print-reply --reply-timeout=5000 \
         --dest=org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 \
         org.qdistro.AdminBroker1.GetPending 2>&1) || {
