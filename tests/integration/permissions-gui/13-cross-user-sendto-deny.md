@@ -20,6 +20,31 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.service'
+# The suppression check below reads this stub's document. If the stub is not on
+# the bus yet, GetDocument errors instead of answering, and "the output does not
+# contain the payload" is then satisfied by a stub that was never reachable --
+# a FALSE PASS on the one assertion that proves the deny actually worked.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
+ await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2 30 1'
+# POSITIVE CONTROL. "Document lacks the payload" only proves suppression if
+# this stub instance actually RECORDS deliveries; a stub that answers but
+# silently drops every Receive would look identical. Plant a sentinel directly
+# on work2's own session bus (no broker, no prompt, no cross-user hop) so S3
+# can assert the document is present-but-different rather than merely a
+# successful call.
+$VMEXEC "$VM" 'runuser -u work2 -- env \
+ XDG_RUNTIME_DIR=/run/user/3000 \
+ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
+ dbus-send --session --print-reply --reply-timeout=5000 \
+ --dest=org.qdistro.StubNotepad.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.Receive string:text/plain string:s13_sentinel' || {
+ echo "ERROR: could not plant the s13 sentinel (see the dbus-send error above)."
+ echo "Do not diagnose the cause from this line alone -- the owner may have"
+ echo "exited, the object may be unexported, or policy/transport may have"
+ echo "refused. What matters here: without the sentinel the suppression check"
+ echo "below is unfalsifiable, so the scenario must not continue." >&2
+ exit 1; }
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
 ```
@@ -95,7 +120,15 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**:
-- `${QCI_SCENARIO_TMPDIR:-/tmp}/13-doc.out` does NOT contain `deny_me_please`.
+- `${QCI_SCENARIO_TMPDIR:-/tmp}/13-doc.out` is a SUCCESSFUL reply — it
+ contains `method return` — it CONTAINS the setup sentinel
+ `[text/plain] s13_sentinel`, and it does NOT contain `deny_me_please`.
+ All three are required. An error reply (`ServiceUnknown`, `NoReply`)
+ trivially lacks the payload, so accepting one would let an unreachable
+ notepad masquerade as a suppressed delivery; and a stub that answers
+ but records nothing would too, which is what the sentinel rules out.
+ If the reply is an error, or the sentinel is missing, the scenario is an
+ ERROR, not a pass.
 - `/tmp/13-relay.out` contains the substring
  `org.qdistro.AdminBroker1.Denied` in the error name. (A NoReply
  instead is acceptable only if the admin click came after

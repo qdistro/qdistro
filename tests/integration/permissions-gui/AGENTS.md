@@ -37,6 +37,17 @@ await_user_unit_active qdshell.service        # not: systemctl is-active (one-sh
 await_socket /run/user/1000/wayland-1
 await_file /path/that/the/action/creates
 await_domstate "$nested_dom" running          # not: virsh domstate (one-shot)
+# A D-Bus service is NOT reachable just because its unit is active: these stubs
+# and relays are `Type=simple`, so systemd reports active once the process
+# forks, and the name is claimed later. They ship no activation file, so a call
+# landing in that gap fails TERMINALLY with
+# `ServiceUnknown: The name is not activatable`.
+await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2   # not: await_user_unit_active
+await_dbus_system_name org.qdistro.UserRelay.uid3000            # Type=simple units only
+#   (NOT for a Type=dbus unit like the broker: systemd already gates `restart`
+#    on its BusName, so such a wait returns instantly and proves nothing.)
+await_broker_receiver 3000 org.qdistro.StubNotepad.uid3000      # the BROKER's view of it
+await_broker_pending_action 'app.send-to:3000:org.qdistro.StubNotepad.uid3000'
 # scope a journal wait to AFTER the action with a cursor captured first:
 cur=$(journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p')
 # …drive the action…
