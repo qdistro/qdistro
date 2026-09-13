@@ -304,10 +304,13 @@ this is what distinguishes the source-closed path from the `forward exited` path
 state_released` for the stream — the server-owned state was revoked, not just
 the client told.
 
-`rc=77` with `subscribe DENIED (no free pipewire output ...)` means the VM's
-weston.ini has no `[pipewire] num-outputs >= 1`; `rc=77` with a spawn-related
-reason means `qdistro-forward` is missing. Both are ERROR (infra), same rule as
-`13-rdp-subscribe-frame.md`.
+`rc=77` with `subscribe DENIED (no free pipewire output ...)` establishes only
+that no output was FREE: `qdwin_handle_subscribe_view_stream` reports the same
+thing whether weston.ini configures none (`[pipewire] num-outputs`) or every
+configured one is already occupied by another stream — check both. A
+spawn-related reason likewise means the spawn failed, not specifically that
+`qdistro-forward` is missing. Both are ERROR (infra), same rule as
+`13-rdp-subscribe-frame.md`, but neither names its own cause.
 
 ## S3 — destroy under a LIVE chrome popup
 
@@ -332,15 +335,12 @@ server-side popup state that the protocol does not expose — see
 `todo/open-followups.md` item 5. The only mitigation here is procedural: the
 lane injects exactly one click, and it happens before `show_popup`.
 
-This step launches a process that HOLDS THE SINGLETON SHELL ROLE and then
-blocks. It must be reaped on every exit path, or the `EXIT` trap will restart
-`qdshell.service` while the probe still owns the role —
-`qdwin_apps_restore_shell` kills bystanders, not this probe
-(`todo/reviews/proxy-lane-review-r1.md` finding 4).
-
 **The launcher's half of the cancel protocol.** This step starts a process that
 HOLDS THE SINGLETON SHELL ROLE and then blocks, so it must be impossible for it
-to be running once `qd22_cleanup` (defined in Setup) has returned. Three earlier
+to be running once `qd22_cleanup` (defined in Setup) has returned — otherwise
+the `EXIT` trap restarts `qdshell.service` while the probe still owns the role,
+and `qdwin_apps_restore_shell` kills bystanders, not this probe
+(`todo/reviews/proxy-lane-review-r1.md` finding 4). Three earlier
 attempts at this were each wrong one level down, so the reasoning is written out:
 
 - `pkill -x qdwin-nested-probe` matches nothing — Linux `comm` truncates to 15
@@ -359,8 +359,10 @@ attempts at this were each wrong one level down, so the reasoning is written out
 So the launcher checks `$QD22_CANCEL` **before** publishing and **again
 immediately after**, removing its pid-file and exiting rather than starting the
 probe. The reaper sets that flag first and then watches for a late pid. Whoever
-loses the race observes the other's flag, so neither a pending launcher nor a
-live probe can survive `qd22_cleanup`. `$QD22_INTENT` is written *synchronously*
+loses the race observes the other's flag, so after `qd22_cleanup` has REAPED
+SUCCESSFULLY neither a pending launcher nor a live probe can survive. When
+cancellation cannot even be recorded the handler still attempts recovery, and
+reports that as FAIL with ownership unresolved rather than as a clean exit. `$QD22_INTENT` is written *synchronously*
 before the launcher is backgrounded, so an absent pid is unambiguous: with no
 intent nothing was ever started.
 
@@ -458,11 +460,10 @@ compositor produces exactly the same observation, and that would be a product
 defect. Do not report a calibration verdict without checking 3.3 first.
 `rc=77` with `leaves neither chrome band on-screen` means the probe computed no
 clickable band from the rectangles it was given — most often a proxy covering
-the whole output, but the probe cannot tell that from other causes.
-Neither reason is self-diagnosing. "Neither band on-screen" is most often a
-proxy covering the whole output, but the probe only knows the rectangles it was
-given. Report both as an unestablished precondition (ERROR) whose cause is
-still open, and check 3.3 before blaming calibration. The probe deliberately
+the whole output, but the probe knows only those rectangles and cannot tell that
+from other causes. Neither reason is self-diagnosing: report both as an
+unestablished precondition (ERROR) whose cause is still open, and check 3.3
+before blaming calibration. The probe deliberately
 refuses to pass without a real grab serial, because `show_popup` would then
 never have been called and there would be no popup to destroy under.
 

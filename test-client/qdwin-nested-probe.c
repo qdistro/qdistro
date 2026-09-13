@@ -67,7 +67,9 @@
  *                     nothing asserted. Drive it with
  *                     `tests/host/start.sh --pipewire`.
  *   --destroy-with-popup
- *                     advertise, ALLOW, attach a 32px north chrome, print
+ *                     advertise, ALLOW, attach a 32px chrome on whichever
+ *                     side (north or south) leaves a clickable on-screen
+ *                     band, print
  *                     CLICK_TARGET and block until a real pointer press
  *                     arrives as chrome_button (--click-timeout, default 30s),
  *                     show_popup with that grab serial, THEN destroy the
@@ -173,9 +175,12 @@ struct probe {
 	int32_t cfg_w, cfg_h;
 
 	/* Geometry of the proxy, so the VM lane can aim a click at its chrome.
-	 * watch_handle scopes the capture: on a populated session other windows
-	 * emit toplevel_geometry too, and aiming a click with a stray window's
-	 * rectangle would look like a calibration failure (codex r1). */
+	 * geom_handle records WHICH toplevel each rectangle belongs to and the
+	 * use site checks it against the proxy: on a populated session other
+	 * windows emit toplevel_geometry too, and aiming a click with a stray
+	 * window's rectangle would look like a calibration failure (codex r1).
+	 * Filtering at capture time is not an option — the proxy's only
+	 * geometry event arrives during advertise, before the handle is known. */
 	int got_geometry;
 	uint32_t geom_handle;
 	int32_t geom_x, geom_y;
@@ -330,11 +335,12 @@ static void l_toplevel_app_id(void *d, struct qdwin_shell_v1 *s, uint32_t h,
 { (void)d; (void)s; (void)h; (void)app_id; }
 
 /* The listener table is version-truncated by libwayland: the compositor
- * only dispatches events the bound version actually has. We bind v8, so
- * events newer than v8 (overlay_key v17, selection_set v11, ...) never fire,
- * but their slots must still be present in the struct for ABI layout. We
- * fill all slots defensively in case a future qdwin bumps the bound version.
- */
+ * only dispatches events the bound version actually has. The bound version is
+ * per-mode (want_shell_version: v29 for --destroy-with-popup, which needs
+ * chrome_button at v20 and show_popup at v29; v8 otherwise), so at v8 events
+ * newer than v8 (overlay_key v17, selection_set v11, ...) never fire while at
+ * v29 they do. Every slot must be present in the struct for ABI layout either
+ * way, so we fill them all. */
 static const struct qdwin_shell_v1_listener shell_listener = {
 	.hello              = l_hello,
 	.toplevel_added     = l_toplevel_added,
