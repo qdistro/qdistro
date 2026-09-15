@@ -3,12 +3,12 @@
 
 Runs in a fresh user+network namespace; no host/VM firewall is modified.
 libnftables provides the nft command boundary even on hosts without its CLI.
-The exact _nft_ensure_table method is compiled from the supplied production
+The exact _nft_ensure_table method is loaded from the supplied production
 source; all subprocesses, rules, transactions and packets are real.
 """
-import ast
 import ctypes
 import ctypes.util
+import importlib.util
 import os
 from pathlib import Path
 import shlex
@@ -72,15 +72,25 @@ def listener(port):
     return server
 
 
+def production_module(source):
+    # Import the real module rather than lifting one function out of its AST:
+    # the method has to run with the module's OWN globals, so module-level
+    # names it uses (the _T_* subprocess timeouts, imports) resolve. Extracting
+    # the function body alone silently drops them and NameErrors at call time
+    # the first time production starts using one.
+    sys.path.insert(0, str(Path(source).resolve().parent))
+    spec = importlib.util.spec_from_file_location("qdistro_production_under_test", source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_probe(source, parent_net):
     assert os.readlink("/proc/self/ns/net") != parent_net, "must run in a fresh network namespace"
-    tree = ast.parse(Path(source).read_text())
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_SystemOps")
-    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_nft_ensure_table")
-    scope = {"subprocess": subprocess}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), source, "exec"), scope)
+    production = production_module(source)
     ops = SimpleNamespace(_NFT_TABLE="qdistro_egress")
-    ensure = lambda: scope["_nft_ensure_table"](ops)
+    ensure = lambda: production._SystemOps._nft_ensure_table(ops)
     command("ip", "link", "set", "lo", "up")
     Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n")
     peers = {}
