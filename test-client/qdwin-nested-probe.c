@@ -69,8 +69,14 @@
  *   --destroy-with-popup
  *                     advertise, ALLOW, attach a 32px chrome on whichever
  *                     side (north or south) leaves a clickable on-screen
- *                     band, print
- *                     CLICK_TARGET and block until a real pointer press
+ *                     band of the DESIGNATED head (--output, default
+ *                     Virtual-1 — the qdwin golden also advertises the
+ *                     PipeWire forwarding outputs, which take no seat input),
+ *                     moving the proxy onto that head first if the
+ *                     compositor placed it elsewhere, print
+ *                     CLICK_TARGET in that head's LOCAL pixels (plus
+ *                     CLICK_TARGET_GLOBAL for diagnosis) and block until a
+ *                     real pointer press
  *                     arrives as chrome_button (--click-timeout, default 30s),
  *                     show_popup with that grab serial, THEN destroy the
  *                     qdwin_nested_toplevel_v1. Assert qdwin_popup_v1.dismissed
@@ -129,6 +135,26 @@
 #include "qdwin-shell-v1-client-protocol.h"
 #include "qdwin-nested-v1-client-protocol.h"
 
+/* The click space is one OUTPUT, not the global compositor space: the lane
+ * injects absolute pointer coordinates that QEMU's tablet spreads across the
+ * single scanout head, so a target is only meaningful once it has been mapped
+ * out of global coordinates into that head's local pixels. Tracking every
+ * output is what makes that mapping possible on a multi-output session. */
+#define QD_MAX_OUTPUTS 16
+
+/* The designated scanout head. Same output qdwin pins its shell capture to
+ * (QDWIN_SHELL_CAPTURE_OUTPUT in qdwin/qdwin.c) and the one the GUI lane
+ * screenshots and clicks; override with --output for a different lane. */
+#define QD_DEFAULT_OUTPUT "Virtual-1"
+
+struct probe_output {
+	struct wl_output *wl;
+	uint32_t global_name;
+	char name[64];            /* wl_output.name (v4); "" if undelivered */
+	int32_t x, y, transform;  /* global origin + transform (geometry) */
+	int w, h, scale;          /* current mode + scale */
+};
+
 struct probe {
 	struct wl_display *display;
 	struct wl_registry *registry;
@@ -147,10 +173,29 @@ struct probe {
 	struct wl_compositor *compositor;
 	struct wl_shm *shm;
 
-	/* Output mode, so the popup mode can pick a chrome side whose band is
-	 * actually on-screen and therefore clickable. */
-	struct wl_output *output;
-	int out_w, out_h, out_scale, output_count;
+	/* EVERY advertised output, so the popup mode can pick the one the lane
+	 * can actually click and map ITS logical geometry onto the injected
+	 * pointer coordinates. The qdwin golden advertises three wl_outputs —
+	 * the DRM scanout head (`Virtual-1`, the only one QEMU's tablet and
+	 * qdshell's capture authority address) plus the PipeWire forwarding
+	 * outputs `pipewire-0`/`pipewire-1` — so "the first wl_output" is not a
+	 * meaningful click space and an output COUNT is not a lane property.
+	 * The selected head is copied into the out_* fields below. */
+	struct probe_output outs[QD_MAX_OUTPUTS];
+	int outs_n;               /* slots ever used; slots with wl==NULL are
+				   * FREE holes left by global_remove and are
+				   * reused, so this is a scan bound, not a
+				   * live count. */
+	int output_count;         /* outputs currently ADVERTISED */
+	int outs_untracked;       /* live outputs dropped at QD_MAX_OUTPUTS */
+	const char *want_output;  /* --output NAME: the head the lane clicks */
+	int out_sel;              /* index into outs[], < 0 until selected or
+				   * once the selected head goes away */
+	char out_name[64];        /* selected head's name, COPIED: outs[] slots
+				   * are recycled while the mode dispatches */
+
+	/* The SELECTED output's geometry (global origin + current mode). */
+	int out_w, out_h, out_scale;
 	int32_t out_x, out_y, out_transform;
 
 	/* The shell version to bind. v8 is enough for the gating modes; the
@@ -484,38 +529,50 @@ static const struct qdwin_nested_toplevel_v1_listener nt_listener = {
 
 /* ---- registry ---- */
 
+/* Per-OUTPUT listeners: the user data is the probe_output slot, not the probe,
+ * so a multi-output session records each head's own geometry instead of the
+ * last-delivered event overwriting a single set of fields. */
 static void l_out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y,
 			   int32_t pw, int32_t ph, int32_t sub, const char *make,
 			   const char *model, int32_t transform)
 {
-	struct probe *p = d;
+	struct probe_output *po = d;
 	(void)o; (void)pw; (void)ph; (void)sub; (void)make; (void)model;
-	/* Origin and transform are part of the click-target assumption, not
-	 * just the mode: a rotated or non-origin output makes output-local
-	 * pixel arithmetic point somewhere else (codex r3). */
-	p->out_x = x;
-	p->out_y = y;
-	p->out_transform = transform;
+	/* The origin is what maps this head's pixels out of the GLOBAL
+	 * coordinate space toplevel_geometry reports; the transform is still
+	 * an assumption of the pixel arithmetic (codex r3). */
+	po->x = x;
+	po->y = y;
+	po->transform = transform;
 }
 static void l_out_mode(void *d, struct wl_output *o, uint32_t flags,
 		       int32_t w, int32_t h, int32_t refresh)
 {
-	struct probe *p = d;
+	struct probe_output *po = d;
 	(void)o; (void)refresh;
 	if (flags & WL_OUTPUT_MODE_CURRENT) {
-		p->out_w = w;
-		p->out_h = h;
+		po->w = w;
+		po->h = h;
 	}
 }
 static void l_out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
 static void l_out_scale(void *d, struct wl_output *o, int32_t f)
 {
-	struct probe *p = d;
+	struct probe_output *po = d;
 	(void)o;
-	p->out_scale = f;
+	po->scale = f;
 }
 static void l_out_name(void *d, struct wl_output *o, const char *n)
-{ (void)d; (void)o; (void)n; }
+{
+	struct probe_output *po = d;
+	(void)o;
+	/* v4. This is how the lane's designated head is identified by NAME
+	 * rather than by advertisement order, which is not stable and does not
+	 * distinguish a scanout head from a PipeWire forwarding output. */
+	if (n) {
+		snprintf(po->name, sizeof po->name, "%s", n);
+	}
+}
 static void l_out_description(void *d, struct wl_output *o, const char *n)
 { (void)d; (void)o; (void)n; }
 static const struct wl_output_listener output_listener = {
@@ -523,6 +580,58 @@ static const struct wl_output_listener output_listener = {
 	.scale = l_out_scale, .name = l_out_name,
 	.description = l_out_description,
 };
+
+/* Choose the head whose pixels the lane injects input into, BY NAME. The
+ * count of outputs says nothing about which one that is: the qdwin golden
+ * exposes one scanout head plus two PipeWire forwarding outputs, and a
+ * PipeWire output receives no seat input at all, so "exactly one output" was
+ * never the real precondition — "the designated head is present, unscaled and
+ * untransformed" is. Returns an index into p->outs, or -1.
+ *
+ * The unnamed single-output case is kept for the headless/legacy lanes: a
+ * compositor advertising wl_output below v4 sends no name, and with exactly
+ * one output there is nothing to disambiguate. */
+static int
+select_output(struct probe *p)
+{
+	int i, live = 0, only = -1;
+	for (i = 0; i < p->outs_n; i++) {
+		if (!p->outs[i].wl)
+			continue;
+		live++;
+		only = i;
+		if (p->outs[i].name[0] &&
+		    strcmp(p->outs[i].name, p->want_output) == 0)
+			return i;
+	}
+	if (live == 1 && !p->outs[only].name[0])
+		return only;
+	return -1;
+}
+
+/* Print every advertised head so a selection failure names what WAS there —
+ * the reader needs the candidate names to pass the right --output. */
+static void
+describe_outputs(struct probe *p, FILE *f)
+{
+	int i, first = 1;
+	for (i = 0; i < p->outs_n; i++) {
+		if (!p->outs[i].wl)   /* freed by global_remove */
+			continue;
+		fprintf(f, "%s%s=%dx%d@%d,%d scale=%d transform=%d",
+			first ? "" : ", ",
+			p->outs[i].name[0] ? p->outs[i].name : "(unnamed)",
+			p->outs[i].w, p->outs[i].h,
+			p->outs[i].x, p->outs[i].y,
+			p->outs[i].scale > 0 ? p->outs[i].scale : 1,
+			p->outs[i].transform);
+		first = 0;
+	}
+	if (p->outs_untracked > 0)
+		fprintf(f, "%s+%d NOT TRACKED (over the probe's "
+			"QD_MAX_OUTPUTS=%d cap)", first ? "" : ", ",
+			p->outs_untracked, QD_MAX_OUTPUTS);
+}
 
 static void l_seat_caps(void *d, struct wl_seat *s, uint32_t caps)
 {
@@ -536,6 +645,21 @@ static const struct wl_seat_listener seat_listener = {
 	.capabilities = l_seat_caps, .name = l_seat_name,
 };
 
+
+/* First FREE slot (a hole left by global_remove), else a fresh one, else
+ * NULL when QD_MAX_OUTPUTS is exhausted. Slot addresses are stable: they are
+ * the per-output listener's user data. */
+static struct probe_output *
+alloc_output_slot(struct probe *p)
+{
+	int i;
+	for (i = 0; i < p->outs_n; i++)
+		if (!p->outs[i].wl)
+			return &p->outs[i];
+	if (p->outs_n >= QD_MAX_OUTPUTS)
+		return NULL;
+	return &p->outs[p->outs_n++];
+}
 
 static void
 on_global(void *data, struct wl_registry *reg, uint32_t name,
@@ -563,18 +687,29 @@ on_global(void *data, struct wl_registry *reg, uint32_t name,
 	} else if (strcmp(interface, wl_shm_interface.name) == 0 && !p->shm) {
 		p->shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
 	} else if (strcmp(interface, wl_output_interface.name) == 0) {
-		/* Count every output, not just the one we bind: the click-target
-		 * arithmetic below assumes ONE unscaled output at the origin,
-		 * and silently aiming at the wrong one looks like a calibration
-		 * failure rather than an unmet precondition (codex r2). */
+		/* BIND every output, not just the first: on a multi-output
+		 * session the click target has to be mapped against a NAMED
+		 * head (see select_output), and binding only one leaves the
+		 * others' geometry unknown. Silently aiming at the wrong one
+		 * looks like a calibration failure rather than an unmet
+		 * precondition (codex r2). */
 		p->output_count++;
-		if (p->output)
+		struct probe_output *po = alloc_output_slot(p);
+		if (!po) {
+			/* Counted so the refusal can NAME the cap: silently
+			 * reporting the requested head "absent" would be a
+			 * wrong answer, not an inconclusive one (codex r3). */
+			p->outs_untracked++;
 			return;
-		/* v3 carries `scale`; name/description are v4 and go
-		 * undelivered, which is why every slot is filled. */
-		p->output = wl_registry_bind(reg, name, &wl_output_interface,
-					     version < 3 ? version : 3);
-		wl_output_add_listener(p->output, &output_listener, p);
+		}
+		po->global_name = name;
+		po->scale = 1;   /* wl_output.scale is only sent when != 1 */
+		/* v3 carries `scale`; v4 carries `name`, which is how the
+		 * designated scanout head is identified. Bind as high as the
+		 * compositor allows and treat an absent name as unnamed. */
+		po->wl = wl_registry_bind(reg, name, &wl_output_interface,
+					  version < 4 ? version : 4);
+		wl_output_add_listener(po->wl, &output_listener, po);
 	} else if (strcmp(interface, wl_seat_interface.name) == 0 &&
 		   !p->seat) {
 		p->seat = wl_registry_bind(reg, name, &wl_seat_interface,
@@ -582,8 +717,36 @@ on_global(void *data, struct wl_registry *reg, uint32_t name,
 		wl_seat_add_listener(p->seat, &seat_listener, p);
 	}
 }
+/* A removed head must NOT stay selectable with stale geometry, and a
+ * re-advertised one must land in a clean slot rather than a duplicate
+ * (codex r3). Slots are freed in place and reused by alloc_output_slot;
+ * nothing is compacted, because each slot's ADDRESS is the wl_output
+ * listener's user data and moving it would be a use-after-free. */
 static void on_global_remove(void *d, struct wl_registry *r, uint32_t n)
-{ (void)d; (void)r; (void)n; }
+{
+	struct probe *p = d;
+	int i;
+	(void)r;
+	/* This fires for EVERY global, so only a name that matches a tracked
+	 * output may touch the output bookkeeping. An untracked output (one
+	 * dropped at the cap) going away is deliberately NOT un-counted: the
+	 * probe cannot distinguish it from any other global, and over-counting
+	 * only makes the cap refusal louder, never silently wrong. */
+	for (i = 0; i < p->outs_n; i++) {
+		if (!p->outs[i].wl || p->outs[i].global_name != n)
+			continue;
+		/* Drop the selection BEFORE the slot is recycled: out_sel is
+		 * an index, so a later output reusing this slot would
+		 * otherwise be read as the head we calibrated against. */
+		if (p->out_sel == i)
+			p->out_sel = -1;
+		wl_output_destroy(p->outs[i].wl);
+		memset(&p->outs[i], 0, sizeof p->outs[i]);
+		if (p->output_count > 0)
+			p->output_count--;
+		return;
+	}
+}
 static const struct wl_registry_listener registry_listener = {
 	.global = on_global, .global_remove = on_global_remove,
 };
@@ -702,6 +865,11 @@ int main(int argc, char *argv[])
 {
 	enum mode mode = M_ADVERTISE;
 	int click_timeout_sec = 30;
+	/* The head the lane's injected pointer lands on. The env var lets a
+	 * harness declare it once for a whole lane; --output wins. */
+	const char *want_output = getenv("QDWIN_PROBE_OUTPUT");
+	if (!want_output || !*want_output)
+		want_output = QD_DEFAULT_OUTPUT;
 	for (int i = 1; i < argc; i++) {
 		if      (!strcmp(argv[i], "--bind"))           mode = M_BIND;
 		else if (!strcmp(argv[i], "--advertise"))      mode = M_ADVERTISE;
@@ -719,6 +887,8 @@ int main(int argc, char *argv[])
 			mode = M_DESTROY_POPUP;
 		else if (!strcmp(argv[i], "--click-timeout") && i + 1 < argc)
 			click_timeout_sec = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--output") && i + 1 < argc)
+			want_output = argv[++i];
 		else if (!strcmp(argv[i], "--malformed"))      mode = M_MALFORMED;
 		else if (!strcmp(argv[i], "-h") ||
 			 !strcmp(argv[i], "--help")) {
@@ -726,7 +896,13 @@ int main(int argc, char *argv[])
 			 * for a mode's presence on a deployed binary before it
 			 * takes the singleton shell role. */
 			printf("usage: qdwin-nested-probe [MODE] "
-			       "[--click-timeout SEC]\n"
+			       "[--click-timeout SEC] [--output NAME]\n"
+			       "  --output NAME  wl_output the lane injects "
+			       "pointer input into (default "
+			       QD_DEFAULT_OUTPUT ", env "
+			       "QDWIN_PROBE_OUTPUT);\n"
+			       "                 --destroy-with-popup maps "
+			       "its click target into THAT head's pixels\n"
 			       "modes: --bind --advertise --allow --deny "
 			       "--defer --stale-decision --double-decide\n"
 			       "       --destroy-order --destroy-with-move "
@@ -741,10 +917,16 @@ int main(int argc, char *argv[])
 	}
 
 	struct probe p = {0};
-	/* chrome_button is v20; show_popup's serial contract is v29. Every
-	 * other mode stays on v8 so it keeps testing the minimum a gating
-	 * shell must bind. */
-	p.want_shell_version = (mode == M_DESTROY_POPUP) ? 29u : 8u;
+	p.want_output = want_output;
+	p.out_sel = -1;
+	/* chrome_button is v20; show_popup's serial contract is v29;
+	 * request_set_position (v30) is what lets the popup mode place the
+	 * proxy onto the head the lane clicks when the compositor's own
+	 * placement put it on another output. The mode still only REQUIRES
+	 * v29 — the v30 path is used when available and otherwise reported.
+	 * Every other mode stays on v8 so it keeps testing the minimum a
+	 * gating shell must bind. */
+	p.want_shell_version = (mode == M_DESTROY_POPUP) ? 30u : 8u;
 	p.display = wl_display_connect(NULL);
 	if (!p.display) {
 		fprintf(stderr, "qdwin-nested-probe: wl_display_connect "
@@ -753,6 +935,11 @@ int main(int argc, char *argv[])
 	}
 	p.registry = wl_display_get_registry(p.display);
 	wl_registry_add_listener(p.registry, &registry_listener, &p);
+	wl_display_roundtrip(p.display);
+	/* A SECOND roundtrip: the wl_output binds above were issued while the
+	 * first one was dispatching globals, so each head's geometry/mode/
+	 * scale/name events are only delivered on the next round. Without this
+	 * a selection made early would see zeroed geometry. */
 	wl_display_roundtrip(p.display);
 
 	if (!p.saw_mgr) {
@@ -1200,49 +1387,175 @@ int main(int argc, char *argv[])
 		int cw = p.cfg_w > 0 ? p.cfg_w : 800;
 		int chh = p.cfg_h > 0 ? p.cfg_h : 600;
 		const int ch = 32;
-		if (p.out_w <= 0 || p.out_h <= 0) {
-			fprintf(stderr, "qdwin-nested-probe: no wl_output mode "
-				"— cannot tell which chrome band is on-screen\n");
-			return 77;
-		}
-		/* Declared lane constraint, asserted rather than assumed. The
-		 * target below is computed in output-local pixels against the
-		 * first output; a second output, or a scale factor, makes it
-		 * point somewhere else entirely. */
-		if (p.output_count != 1) {
-			fprintf(stderr, "qdwin-nested-probe: %d outputs — the "
-				"click target assumes exactly one\n",
+
+		/* ---- click calibration, multi-output aware ----------------
+		 * toplevel_geometry reports GLOBAL compositor coordinates
+		 * (qdwin/qdwin-shell-v1.xml, and see request_set_position's
+		 * description), while the lane injects pointer coordinates
+		 * that QEMU's tablet spreads across ONE scanout head. So the
+		 * band is chosen against the selected head's global rectangle
+		 * and the printed target is translated into that head's LOCAL
+		 * pixels — which is the space QDWIN_SCREEN_W/H describes. */
+		p.out_sel = select_output(&p);
+		if (p.out_sel < 0) {
+			fprintf(stderr, "qdwin-nested-probe: no output named "
+				"\"%s\" among %d advertised [", p.want_output,
 				p.output_count);
+			describe_outputs(&p, stderr);
+			fprintf(stderr, "] — pass --output NAME for the head "
+				"this lane injects pointer input into\n");
+			if (p.outs_untracked > 0)
+				fprintf(stderr, "qdwin-nested-probe: REFUSING "
+					"rather than answering \"absent\": %d "
+					"advertised output(s) were not tracked "
+					"because this session exceeds the "
+					"probe's QD_MAX_OUTPUTS=%d cap — raise "
+					"the cap to calibrate against this "
+					"session\n",
+					p.outs_untracked, QD_MAX_OUTPUTS);
 			return 77;
 		}
+		{
+			const struct probe_output *po = &p.outs[p.out_sel];
+			p.out_w = po->w;
+			p.out_h = po->h;
+			p.out_x = po->x;
+			p.out_y = po->y;
+			p.out_scale = po->scale;
+			p.out_transform = po->transform;
+			/* COPY the name: outs[] slots are freed and recycled
+			 * by global_remove while this mode dispatches, so
+			 * out_sel must not be re-read after a wait_for. */
+			snprintf(p.out_name, sizeof p.out_name, "%s",
+				 po->name[0] ? po->name : "(unnamed)");
+		}
+		if (p.out_w <= 0 || p.out_h <= 0) {
+			fprintf(stderr, "qdwin-nested-probe: output \"%s\" sent "
+				"no current mode — cannot tell which chrome "
+				"band is on-screen\n", p.out_name);
+			return 77;
+		}
+		/* Declared lane constraints, asserted rather than assumed. A
+		 * scale factor or a rotation makes the pixel arithmetic point
+		 * somewhere else entirely; a nonzero ORIGIN does not, because
+		 * it is subtracted out below. */
 		if (p.out_scale > 1) {
 			fprintf(stderr, "qdwin-nested-probe: output scale %d — "
 				"the click target assumes an unscaled output\n",
 				p.out_scale);
 			return 77;
 		}
-		if (p.out_x != 0 || p.out_y != 0 || p.out_transform != 0) {
-			fprintf(stderr, "qdwin-nested-probe: output at (%d,%d) "
-				"transform=%d — the click target assumes an "
-				"untransformed output at the origin\n",
-				p.out_x, p.out_y, p.out_transform);
+		if (p.out_transform != 0) {
+			fprintf(stderr, "qdwin-nested-probe: output transform="
+				"%d — the click target assumes an "
+				"untransformed output\n", p.out_transform);
 			return 77;
 		}
+
+		const int32_t ox = p.out_x, oy = p.out_y;
+		const int32_t out_r = ox + p.out_w, out_b = oy + p.out_h;
+
+		/* The proxy must sit on the SELECTED head, or its chrome band
+		 * is unreachable by the injected pointer no matter where we
+		 * aim. Placement is shell policy, so move it here rather than
+		 * refusing: this client IS the bound shell, and
+		 * request_set_position (v30) is exactly that control. */
+		if (p.geom_x < ox || p.geom_x >= out_r ||
+		    p.geom_y < oy || p.geom_y >= out_b) {
+			if (p.shell_version < 30) {
+				fprintf(stderr, "qdwin-nested-probe: proxy at "
+					"(%d,%d) is not on output \"%s\" "
+					"(%dx%d@%d,%d) and the shell is bound "
+					"at v%u (<30, no request_set_position) "
+					"— cannot place it where the lane can "
+					"click\n", p.geom_x, p.geom_y,
+					p.want_output, p.out_w, p.out_h, ox, oy,
+					p.shell_version);
+				return 77;
+			}
+			int want_x = ox + (p.out_w - cw) / 2;
+			int want_y = oy + (p.out_h - chh) / 2;
+			if (want_x < ox) want_x = ox;
+			/* Leave room for a north band so the placement does not
+			 * trade one unclickable geometry for another. */
+			if (want_y < oy + ch) want_y = oy + ch;
+			fprintf(stderr, "qdwin-nested-probe: proxy at (%d,%d) "
+				"is off output \"%s\"; moving it to (%d,%d)\n",
+				p.geom_x, p.geom_y, p.want_output,
+				want_x, want_y);
+			int placed = 0;
+			for (int attempt = 0; attempt < 5 && !placed; attempt++) {
+				p.got_geometry = 0;
+				qdwin_shell_v1_request_set_position(
+					p.shell, handle, want_x, want_y);
+				if (wait_for(&p, &p.got_geometry, NULL, 5) < 0)
+					return 1;
+				if (p.got_geometry && p.geom_handle == handle)
+					placed = 1;
+			}
+			if (!placed || p.geom_x < ox || p.geom_x >= out_r ||
+			    p.geom_y < oy || p.geom_y >= out_b) {
+				fprintf(stderr, "qdwin-nested-probe: proxy is "
+					"still at (%d,%d) after "
+					"request_set_position(%d,%d) — it "
+					"cannot be placed on output \"%s\" "
+					"(%dx%d@%d,%d)\n", p.geom_x, p.geom_y,
+					want_x, want_y, p.want_output,
+					p.out_w, p.out_h, ox, oy);
+				return 77;
+			}
+		}
+
+		/* The placement loop above dispatches, so the head could have
+		 * been unadvertised in the meantime; its geometry is now
+		 * stale and the click would be aimed at nothing. */
+		if (p.out_sel < 0) {
+			fprintf(stderr, "qdwin-nested-probe: output \"%s\" was "
+				"removed during calibration — its geometry is "
+				"stale; nothing to click\n", p.out_name);
+			return 77;
+		}
+
+		/* Global-space band selection against the selected head. */
 		int north_y = p.geom_y - ch / 2;
 		int south_y = p.geom_y + chh + ch / 2;
-		int use_north = (north_y >= 0 && north_y < p.out_h);
+		int use_north = (north_y >= oy && north_y < out_b);
 		int click_y = use_north ? north_y : south_y;
-		if (!use_north && (south_y < 0 || south_y >= p.out_h)) {
+		if (!use_north && (south_y < oy || south_y >= out_b)) {
 			fprintf(stderr, "qdwin-nested-probe: proxy at (%d,%d) "
-				"%dx%d on a %dx%d output leaves neither chrome "
-				"band on-screen; nothing to click\n",
-				p.geom_x, p.geom_y, cw, chh,
-				p.out_w, p.out_h);
+				"%dx%d on output \"%s\" %dx%d@%d,%d leaves "
+				"neither chrome band on-screen; nothing to "
+				"click\n", p.geom_x, p.geom_y, cw, chh,
+				p.out_name, p.out_w, p.out_h, ox, oy);
 			return 77;
 		}
-		int click_x = p.geom_x + cw / 2;
-		if (click_x < 0 || click_x >= p.out_w)
-			click_x = p.out_w / 2;
+		/* Aim at the middle of the INTERSECTION of the chrome
+		 * rectangle and the selected head, in global space. The old
+		 * "chrome centre, else output centre" fallback could land
+		 * outside the chrome whenever the proxy straddled the right
+		 * edge (output 0..1023, proxy x=900 w=800 gave 512), turning a
+		 * valid setup into a click timeout — a false ERROR (codex r3).
+		 * The chrome band spans the proxy's width, so its horizontal
+		 * extent is [geom_x, geom_x+cw). */
+		int cx0 = p.geom_x, cx1 = p.geom_x + cw;
+		int ix0 = cx0 > ox ? cx0 : ox;
+		int ix1 = cx1 < out_r ? cx1 : out_r;
+		if (ix0 >= ix1) {
+			fprintf(stderr, "qdwin-nested-probe: chrome band "
+				"x=[%d,%d) does not overlap output \"%s\" "
+				"x=[%d,%d) (proxy (%d,%d) %dx%d, out "
+				"%dx%d@%d,%d) — no clickable point exists; "
+				"NOT aiming outside the chrome\n",
+				cx0, cx1, p.out_name, ox, out_r,
+				p.geom_x, p.geom_y, cw, chh,
+				p.out_w, p.out_h, ox, oy);
+			return 77;
+		}
+		int click_x = ix0 + (ix1 - ix0) / 2;
+		/* Translate out of global space into the selected head's local
+		 * pixels — the coordinates QDWIN_SCREEN_W/H normalises. */
+		int click_lx = click_x - ox;
+		int click_ly = click_y - oy;
 
 		struct wl_surface *chrome =
 			make_committed_surface(&p, cw, ch, 0xff00aaaau);
@@ -1259,14 +1572,25 @@ int main(int argc, char *argv[])
 			return 1;
 		wl_display_roundtrip(p.display);
 
-		/* Tell the lane exactly where to click. */
-		printf("PROXY_GEOM x=%d y=%d w=%d h=%d out=%dx%d@%d,%d "
-		       "outputs=%d scale=%d transform=%d side=%s chrome=%d\n",
-		       p.geom_x, p.geom_y, cw, chh, p.out_w, p.out_h,
+		/* Tell the lane exactly where to click. CLICK_TARGET is in the
+		 * SELECTED output's local pixels (what the lane normalises
+		 * with QDWIN_SCREEN_W/H); CLICK_TARGET_GLOBAL is the same
+		 * point in the compositor's global space, printed so a
+		 * mis-aimed click can be diagnosed without re-deriving it.
+		 * `output=` names the head both were computed against — the
+		 * calibration assertion checks `out=` against the lane's
+		 * screen size, so it has to say WHICH output that is. */
+		printf("PROXY_GEOM x=%d y=%d w=%d h=%d output=%s "
+		       "out=%dx%d@%d,%d outputs=%d scale=%d transform=%d "
+		       "side=%s chrome=%d\n",
+		       p.geom_x, p.geom_y, cw, chh,
+		       p.out_name,
+		       p.out_w, p.out_h,
 		       p.out_x, p.out_y, p.output_count,
 		       p.out_scale > 0 ? p.out_scale : 1, p.out_transform,
 		       use_north ? "N" : "S", ch);
-		printf("CLICK_TARGET x=%d y=%d\n", click_x, click_y);
+		printf("CLICK_TARGET x=%d y=%d\n", click_lx, click_ly);
+		printf("CLICK_TARGET_GLOBAL x=%d y=%d\n", click_x, click_y);
 		fflush(stdout);
 
 		if (!p.seat_has_pointer) {

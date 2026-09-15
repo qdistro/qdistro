@@ -1,5 +1,7 @@
 # 22 — nested-proxy teardown with a LIVE dependent (iso2/10 E2 gate)
 
+<!-- qci:visual: required -->
+
 **What**: destroy a nested-compositor advertiser while the shell still holds a
 server-owned dependent on the proxy it advertised — a live `view_stream`, a
 live chrome popup, or a live move-drag — and assert the compositor survives and
@@ -93,6 +95,26 @@ qdwin_session_healthy || { echo "ERROR: qdwin/qdshell user session not up"; exit
 "$QDWIN_VM_EXEC" "$VMNAME" \
     'qdwin-nested-probe --help 2>&1 | grep -q -- --destroy-with-stream' \
     || { echo "ERROR: deploy qdwin-nested-probe with the --destroy-with-* modes"; exit 1; }
+
+# PRECONDITION (infra): S3's click calibration must be OUTPUT-AWARE. The qdwin
+# golden advertises THREE wl_outputs — the DRM scanout head `Virtual-1` plus the
+# PipeWire forwarding outputs `pipewire-0`/`pipewire-1`
+# (tests/gui/agent-shell-capture-smoke.sh asserts exactly those three) — and a
+# PipeWire output takes no seat input at all, so "the first wl_output" is not the
+# click space and an output COUNT was never the real precondition. A probe that
+# refuses on `3 outputs` predates the fix; it cannot be driven here, and that is
+# a stale deployment, NOT a property of the product and NOT something to skip
+# past. Name the remedy instead of hiding the gap:
+"$QDWIN_VM_EXEC" "$VMNAME" \
+    'qdwin-nested-probe --help 2>&1 | grep -q -- --output' \
+    || { echo "ERROR: the installed qdwin-nested-probe predates multi-output click calibration (no --output). S3 cannot run on a multi-head image without it. Rebuild qdwin's test-client and rebake the golden."; exit 1; }
+
+# The head S3 aims at. `qdwin_click` normalises pixels with QDWIN_SCREEN_W/H
+# against QEMU's tablet, which spans the single DRM scanout — the same output
+# qdwin pins shell capture to (QDWIN_SHELL_CAPTURE_OUTPUT in qdwin/qdwin.c) and
+# the same one the GUI lane screenshots. Declared here so the click space, the
+# capture space and the probe's arithmetic are one named thing.
+: "${QD22_OUTPUT:=Virtual-1}"
 
 # Record the compositor identity ONCE, before anything is torn down. Every step
 # re-reads it: a crash-and-restart is the failure this whole lane exists to
@@ -199,13 +221,17 @@ qdwin_apps_prepare_shell_probe \
     || { echo "ERROR: could not reserve the singleton shell role"; exit 1; }
 trap 'qd22_cleanup' EXIT
 
-# LANE CONSTRAINT (enforced by the probe, not here): S3's click target is
-# computed in output-local pixels against the first wl_output, so it assumes
-# exactly ONE output, unscaled, untransformed, at the origin. The probe checks
-# all four itself from wl_output and exits 77 naming the one that differs —
-# the right place for it, since only the probe sees what the compositor
-# actually advertises. It reports them in its PROXY_GEOM line
-# (out=WxH@x,y outputs= scale= transform=); assert 3.3 checks them.
+# LANE CONSTRAINT: S3's click target is computed against ONE NAMED output —
+# $QD22_OUTPUT, the DRM scanout head the injected pointer actually lands on.
+# The probe binds every wl_output, selects that one by name, maps the proxy's
+# GLOBAL rectangle into the head's LOCAL pixels (subtracting the head's origin),
+# and moves the proxy onto that head with request_set_position if the compositor
+# placed it elsewhere. So the number of outputs is irrelevant here; what must
+# hold is that the head exists, is unscaled and untransformed, and that its mode
+# equals QDWIN_SCREEN_W/H. The probe checks the first three itself — the right
+# place, since only the probe sees what the compositor advertises — exits 77
+# naming the one that differs, and reports them all in its PROXY_GEOM line
+# (output= out=WxH@x,y outputs= scale= transform=). Assert 3.3 checks the set.
 
 # Never hard-code wayland-1: the socket name moves across compositor restarts
 # (see tests/apps/13-rdp-subscribe-frame.md Setup).
@@ -320,6 +346,14 @@ attaches a 32px chrome band to the proxy — north or south, whichever the
 proxy's position leaves ON-SCREEN, which is why the click target is printed
 rather than hard-coded — then prints where to click and blocks.
 
+"On-screen" means on `$QD22_OUTPUT`, not "somewhere in the compositor's global
+space". The probe selects that head by name out of everything advertised, moves
+the proxy onto it (`request_set_position`, v30) if the compositor placed it on
+another output, and prints `CLICK_TARGET` in the head's LOCAL pixels — the space
+`qdwin_click` normalises with `QDWIN_SCREEN_W/H` against QEMU's tablet. That is
+what makes this step run on the standard three-output golden instead of
+assuming the session has a single head.
+
 Oracle limits, stated up front: the protocol has no "popup created" event, so
 "the popup was live at the destruction boundary" is established by `show_popup`
 round-tripping without a protocol error AND `qdwin_popup_v1.dismissed` not
@@ -382,6 +416,7 @@ CURSOR=$(qdwin_apps_journal_cursor)
                    echo \$\$ > $QD22_PID.tmp && mv $QD22_PID.tmp $QD22_PID || exit 90; \
                    [ -e $QD22_CANCEL ] && { rm -f $QD22_PID; exit 91; }; \
                    qdwin-nested-probe --destroy-with-popup --click-timeout 60 \
+                     --output $QD22_OUTPUT \
                      >$QD22_LOG 2>&1; \
                    echo rc=\$? >>$QD22_LOG' &" \
   >/dev/null
@@ -398,11 +433,15 @@ done
 [ -n "$PROBE_PID" ] || { echo "ERROR: probe never published its pid within 10s"; exit 1; }
 echo "probe group pid=$PROBE_PID"
 
-# The probe prints CLICK_TARGET once the chrome is attached and committed.
+# The probe prints CLICK_TARGET once the chrome is attached and committed. The
+# trailing space in the pattern matters: the probe also prints
+# CLICK_TARGET_GLOBAL (the same point before the output origin is subtracted,
+# for diagnosis), and clicking THAT on a head with a nonzero origin would aim
+# outside the scanout.
 TARGET=
 for _ in $(seq 1 40); do
     TARGET=$("$QDWIN_VM_EXEC" "$VMNAME" \
-        "grep -m1 '^CLICK_TARGET' $QD22_LOG 2>/dev/null")
+        "grep -m1 '^CLICK_TARGET ' $QD22_LOG 2>/dev/null")
     [ -n "$TARGET" ] && break
     sleep 0.5
 done
@@ -444,20 +483,54 @@ LIVE chrome popup; dismissed fired; compositor alive`.
 **Assert (3.2):** `qdwin_compositor_pid` still equals `$COMP_PID_BEFORE`.
 
 **Assert (3.3) — calibration, check this FIRST if S3 goes wrong:** in the
-probe's `PROXY_GEOM` line, `out=WxH` equals `$QDWIN_SCREEN_W x $QDWIN_SCREEN_H`,
-and `outputs=1 scale=1 transform=0` with `out=...@0,0`. The probe reads all of
-these from `wl_output` — the compositor's real configuration — and refuses (77)
-if the count, scale, origin or transform is not the one its pixel arithmetic
-assumes. `qdwin_click` uses the two env vars to convert pixels into QMP's
-0..32767 axis range, and nothing else checks that they match reality: if they
-disagree, every click in this scenario lands somewhere other than where it was
-aimed and S3's result says nothing about the product.
+probe's `PROXY_GEOM` line, `output=` equals `$QD22_OUTPUT`, `out=WxH` equals
+`$QDWIN_SCREEN_W x $QDWIN_SCREEN_H`, and `scale=1 transform=0`. **`outputs=` is
+reported, not constrained** — three outputs is the normal golden
+(`Virtual-1` + `pipewire-0` + `pipewire-1`), and the click target is mapped
+against the named head regardless of how many others exist. `out=...@x,y` is
+that head's global origin; it need not be `0,0`, because the probe subtracts it
+from the printed `CLICK_TARGET`. The probe reads all of this from `wl_output` —
+the compositor's real configuration — and refuses (77) if the named head is
+absent, scaled or transformed. `qdwin_click` uses the two env vars to convert
+pixels into QMP's 0..32767 axis range, and nothing else checks that they match
+reality: if they disagree, every click in this scenario lands somewhere other
+than where it was aimed and S3's result says nothing about the product.
+
+`rc=77` naming the OUTPUT (`no output named "Virtual-1" among N advertised
+[...]`) means the head this lane injects into is not the one the probe was
+asked for. The message lists every advertised head with its geometry: pick the
+scanout one and re-run with `QD22_OUTPUT=<name>`. This is a lane/config
+mismatch — report ERROR with that list, never a pass and never a silent skip.
+
+`rc=77` saying the proxy `cannot be placed on output` means
+`request_set_position` did not move it onto the clickable head (a v29-only
+shell, or the compositor refusing the move). Report ERROR: the calibration
+could not be established, so nothing about the teardown path was tested.
 
 `rc=77` with `no chrome_button within 60s` means the precondition was not
 established — the cause is NOT determined by the timeout alone. Calibration
 (3.3) is the first thing to check, but broken chrome-button routing in the
 compositor produces exactly the same observation, and that would be a product
 defect. Do not report a calibration verdict without checking 3.3 first.
+`rc=77` with `does not overlap output` means the chrome band and the selected
+head share no pixels, so no click point exists inside BOTH. The probe aims at
+the middle of that intersection and refuses here rather than falling back to
+the output centre, which could sit outside the chrome and time out as if the
+compositor had dropped the button. Report ERROR with the two x-ranges the
+message prints; it is a placement/geometry problem, not a product verdict.
+
+`rc=77` with `was removed during calibration` means the named head was
+unadvertised while the probe was placing the proxy, so its geometry is stale.
+Re-run; if it repeats, the lane's output configuration is unstable and no
+calibration is possible.
+
+`rc=77` with `QD_MAX_OUTPUTS` means the session advertises more outputs than
+the probe tracks and the requested head was not among the tracked ones. The
+probe refuses by NAME of the cap instead of reporting the head absent, because
+"absent" would be a wrong answer rather than an inconclusive one. Raise the cap
+in `test-client/qdwin-nested-probe.c` and rebuild. The three-output golden is
+far below it.
+
 `rc=77` with `leaves neither chrome band on-screen` means the probe computed no
 clickable band from the rectangles it was given — most often a proxy covering
 the whole output, but the probe knows only those rectangles and cannot tell that
