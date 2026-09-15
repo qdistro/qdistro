@@ -52,8 +52,11 @@ def _read_state(pid):
 
 def _wait_for_state(pid, expected, timeout=1.0):
     """Poll /proc until state matches (or timeout)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    # monotonic, not wall clock: these are DURATION bounds, and a wall-clock
+    # step (NTP, suspend/resume) either stretches them silently or expires them
+    # instantly -- turning a clock adjustment into a spurious test failure.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             if _read_state(pid) in expected:
                 return True
@@ -86,11 +89,42 @@ def _assert_signaled_death(proc, expected_returncodes):
     assert proc.returncode in expected_returncodes
 
 
+def _wait_for_exec(pid, timeout=5.0):
+    """Poll /proc until the process' argv is visible.
+
+    `Popen()` returns as soon as the child's close-on-exec errpipe closes,
+    which the kernel does in begin_new_exec() — the same place it sets
+    /proc/PID/comm. But argv only becomes readable later, when
+    create_elf_tables() sets mm->arg_start/arg_end, so there is a real window
+    in which /proc/PID/comm already reads "sleep" while /proc/PID/cmdline is
+    still empty. Measured on this host: ~2% of `sleep 60` spawns land in that
+    window (78/3000), and it always closes in well under a millisecond.
+
+    Without this wait, any assertion about cmdline is a ~2%-per-run flake —
+    which is exactly how test_get_process_info_real failed a `qci full` run
+    with `assert 'sleep' in ''`.
+    """
+    # Monotonic for the same reason as _wait_for_state above: a backward
+    # wall-clock adjustment would extend this nominal five seconds and a
+    # forward one would fail it immediately.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/cmdline") as f:
+                if f.read().strip("\0"):
+                    return True
+        except FileNotFoundError:
+            return False
+        time.sleep(0.001)
+    return False
+
+
 @pytest.fixture
 def sleep_proc():
     """Spawn a real `sleep 60` and guarantee cleanup."""
     p = subprocess.Popen(["sleep", "60"])
     try:
+        assert _wait_for_exec(p.pid), f"sleep {p.pid} never exposed its argv"
         yield p
     finally:
         try:
