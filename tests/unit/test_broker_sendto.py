@@ -316,6 +316,41 @@ class TestDecideOneShotScope:
         assert len(cb.errors) == 1
         assert "denied" in str(cb.errors[0]).lower()
 
+    def test_deny_error_name_is_exactly_denied(self, broker, cb):
+        """The wire-visible error name is the contract.
+
+        permissions-gui/13 asserts the SENDER sees
+        ``org.qdistro.AdminBroker1.Denied`` verbatim. A rename or a
+        fallthrough to ``.Internal`` / ``.RelayFailed`` would still read
+        as "an error happened" to a human but would break every SDK
+        that branches on the name, so pin the string here rather than
+        only substring-matching the message.
+        """
+        rid = self._enqueue(broker, cb)
+        broker.DecideRequest(rid, "deny", "once")
+        assert cb.errors[0].get_dbus_name() == \
+            "org.qdistro.AdminBroker1.Denied"
+
+    def test_deny_error_delivered_before_decide_returns(self, broker, cb):
+        """The deny reply must be released synchronously.
+
+        The RelayMessage caller is blocked on a D-Bus method call with a
+        finite reply timeout (dbus-send defaults to 25s). If the waiter
+        were released on a timer, a later idle callback, or another
+        thread, the caller would collect ``NoReply`` and the deny would
+        be indistinguishable from a broker that never answered -- which
+        is exactly how a slow harness misreads this path. Asserting the
+        error is already in hand the instant DecideRequest returns pins
+        "reply never sent" apart from "reply sent too late".
+        """
+        rid = self._enqueue(broker, cb)
+        assert cb.errors == []          # nothing before the decision
+        broker.DecideRequest(rid, "deny", "once")
+        # No mainloop iteration, no sleep, no thread join in between.
+        assert len(cb.errors) == 1
+        assert cb.errors[0].get_dbus_name() == \
+            "org.qdistro.AdminBroker1.Denied"
+
     def test_allow_does_not_write_cache(self, broker, cb):
         rid = self._enqueue(broker, cb)
         broker.DecideRequest(rid, "allow", "once")
