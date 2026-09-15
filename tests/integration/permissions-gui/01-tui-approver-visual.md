@@ -1,5 +1,7 @@
 # 01 — TUI approver renders correctly in a real terminal
 
+<!-- qci:visual: required -->
+
 **What**: launch `qdistro-admin-tui` inside `qterminal` in the VM's
 admin compositor session, inject one pending request, and verify the
 TUI's empty and populated states both render with correct colors,
@@ -108,13 +110,13 @@ $VMGUI "$VM" screenshot /tmp/01-tui-approver-visual-s3-afterdeny.png
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_tui 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /tmp/qterminal-tui.log'
+$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /home/admin/.local/state/qdistro/qterminal-tui.log'
 ```
 
 ## Notes for the runner
 
-- If qterminal fails to appear, check `/tmp/qterminal-tui.log` inside
- the VM (`vm-exec $VM 'cat /tmp/qterminal-tui.log'`). The launcher
+- If qterminal fails to appear, check `/home/admin/.local/state/qdistro/qterminal-tui.log` inside
+ the VM (`vm-exec $VM 'cat /home/admin/.local/state/qdistro/qterminal-tui.log'`). The launcher
  sets `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
  `DBUS_SESSION_BUS_ADDRESS`; missing any of those in the session
  itself (e.g. admin not logged in via greetd) is the usual culprit.

@@ -1,5 +1,7 @@
 # 02 — TUI scope picker keys shift the active scope chip
 
+<!-- qci:visual: required -->
+
 **What**: with one pending request in view, press digit keys `1`..`3`
 and verify the right pane's `Scope:` label and the header subtitle's
 scope chunk both update. The footer's digit chips are Textual
@@ -98,7 +100,7 @@ virsh send-key "$VM" --codeset linux KEY_D # deny the request so it doesn't ling
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_tui 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /tmp/qterminal-tui.log'
+$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /home/admin/.local/state/qdistro/qterminal-tui.log'
 ```
 
 ## Notes for the runner

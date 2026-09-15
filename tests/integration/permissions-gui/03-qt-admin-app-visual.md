@@ -1,5 +1,7 @@
 # 03 — Qt admin approval app renders master/detail correctly
 
+<!-- qci:visual: required -->
+
 **What**: launch the PyQt admin app in admin's compositor session,
 inject one pending request, verify the master (list) / detail (form)
 layout renders with correct empty and populated states, and confirm
@@ -127,7 +129,7 @@ $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s3-afterdeny.png
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /tmp/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /home/admin/.local/state/qdistro/admin-app.log'
 ```
 
 ## Notes for the runner
@@ -135,7 +137,7 @@ $VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /tmp/admin-app.log'
 - The admin app is a Qt widget app running under XWayland
  (`QT_QPA_PLATFORM=xcb`). `xdotool search --name` works on it,
  unlike native Wayland surfaces.
-- If the launch fails, inspect `/tmp/admin-app.log` inside the VM.
+- If the launch fails, inspect `/home/admin/.local/state/qdistro/admin-app.log` inside the VM.
  Typical cause: stale Wayland env vars or missing
  `DBUS_SESSION_BUS_ADDRESS`.
 - S3 uses `Ctrl+N` (the app's wired shortcut) rather than a pixel

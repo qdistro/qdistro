@@ -1,5 +1,7 @@
 # 06 — Qt admin app full mouse path: click radio, click Approve
 
+<!-- qci:visual: required -->
+
 **What**: cover the primary mouse interaction path end to end — select
 the "1 hour" scope by clicking its radio, commit the decision by
 clicking the Approve button, verify the SDK got `ALLOWED` and the
@@ -143,7 +145,7 @@ DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /tmp/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /home/admin/.local/state/qdistro/admin-app.log'
 ```
 
 ## Notes for the runner

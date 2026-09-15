@@ -1,5 +1,7 @@
 # 04 — Qt admin app Ctrl+Y approves with selected scope
 
+<!-- qci:visual: required -->
+
 **What**: with one pending request and the "1 hour" scope radio
 selected, press Ctrl+Y and verify the work process was allowed (not
 denied), the list returns to empty, and the approval was cached (a
@@ -142,7 +144,7 @@ DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /tmp/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /home/admin/.local/state/qdistro/admin-app.log'
 ```
 
 ## Notes for the runner

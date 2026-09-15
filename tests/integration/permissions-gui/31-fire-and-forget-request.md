@@ -1,5 +1,7 @@
 # 31 — Fire-and-forget `RequestPermission` queues without a waiter
 
+<!-- qci:visual: required -->
+
 **What**: from `work`, call `RequestPermission(action, details)`
 synchronously (no `WaitForDecision` follow-up). Verify (a) the
 call returns a `request_id` immediately, (b) the request appears
@@ -72,7 +74,7 @@ $VMEXEC "$VM" "cat $GUEST_TMP/31-s1.out" > "$ARTIFACT_DIR/31-s1.out"
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "admin approvals" admin :0 20 1' || {
-  $VMEXEC "$VM" 'cat /tmp/admin-app.log 2>&1' > "$ARTIFACT_DIR/admin-app-launch-failure.log"
+  $VMEXEC "$VM" 'cat /home/admin/.local/state/qdistro/admin-app.log 2>&1' > "$ARTIFACT_DIR/admin-app-launch-failure.log"
   echo "ERROR: admin approvals window did not map; see admin-app-launch-failure.log" >&2
   exit 1
 }

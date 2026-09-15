@@ -1,5 +1,7 @@
 # 05 — TUI `?` opens help overlay; any key dismisses
 
+<!-- qci:visual: required -->
+
 **What**: in the TUI running in qterminal, press `?` and verify the
 help overlay (a modal over the main view) renders with the expected
 text blocks; press Escape and verify the main view returns intact.
@@ -101,7 +103,7 @@ $VMGUI "$VM" screenshot /tmp/05-tui-help-overlay-s3-dismissed.png
 ```bash
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_tui 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/qterminal-tui.log'
+$VMEXEC "$VM" 'rm -f /home/admin/.local/state/qdistro/qterminal-tui.log'
 ```
 
 ## Notes for the runner

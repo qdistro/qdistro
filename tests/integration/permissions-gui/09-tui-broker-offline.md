@@ -1,5 +1,7 @@
 # 09 — TUI broker-offline banner + recovery
 
+<!-- qci:visual: required -->
+
 **What**: start the TUI while the broker is up, kill the broker,
 verify the TUI shows a sticky `⚠ BROKER OFFLINE` banner in the
 subtitle (replacing the normal `scope: Just this once` chunk).
@@ -92,7 +94,7 @@ $VMGUI "$VM" screenshot /tmp/09-s3-recovered.png
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_tui 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-$VMEXEC "$VM" 'rm -f /tmp/qterminal-tui.log'
+$VMEXEC "$VM" 'rm -f /home/admin/.local/state/qdistro/qterminal-tui.log'
 ```
 
 ## Notes for the runner
