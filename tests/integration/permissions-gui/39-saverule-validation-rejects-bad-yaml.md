@@ -1,5 +1,7 @@
 # 39 — `SaveRule` rejects bad YAML / bad filename, no partial write
 
+<!-- qci:visual: none -->
+
 **What**: call `SaveRule` with (a) a filename containing a path
 separator → `.RulesEngineRefused`; (b) a syntactically invalid
 YAML body → `.RulesEngineRefused`; (c) a valid YAML body whose

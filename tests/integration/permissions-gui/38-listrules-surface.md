@@ -1,5 +1,7 @@
 # 38 — `ListRules` surfaces every loaded rule's fields
 
+<!-- qci:visual: none -->
+
 **What**: install three rules with distinct shapes (uid + action +
 exe; action-only; action + glob exe), call `ListRules` as admin,
 verify every saved field surfaces in the reply with the expected

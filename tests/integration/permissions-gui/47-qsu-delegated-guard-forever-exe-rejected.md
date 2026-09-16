@@ -1,5 +1,7 @@
 # 47 — Delegated `forever_exe` on qsu is rejected; sender sees DENIED
 
+<!-- qci:visual: required -->
+
 **What**: as `work` (uid 2000) invoke `/usr/local/bin/qsu /bin/true`.
 The pending request reaches the admin app via the delegated path
 (`RequestPermissionAs`). Admin selects the legacy `Forever, only this

@@ -1,5 +1,7 @@
 # 55 — qsu end-to-end under SELinux Enforcing produces zero new AVCs
 
+<!-- qci:visual: none -->
+
 **What**: flip SELinux into Enforcing mode, run `qsu /bin/id` as
 `work` (uid 2000), drive admin's approve via D-Bus (no GUI; the
 admin app stays headless for this scenario), let the privileged

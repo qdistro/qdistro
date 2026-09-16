@@ -1,5 +1,7 @@
 # 08 — Admin app signal subscription survives broker restart
 
+<!-- qci:visual: required -->
+
 **What**: start the Qt admin app, restart `qdistro-admin-broker.service`
 mid-session, inject a permission request from `work`, verify the
 admin app shows the new pending row **without** being manually

@@ -1,5 +1,7 @@
 # 32 — `forever_exe` scope grants only the approved exe
 
+<!-- qci:visual: required -->
+
 **What**: approve `test.action` for `work` with scope `forever_exe`
 when the caller exe is `/usr/bin/python3.13`. Then (a) repeat the
 python call → cache hit, ALLOWED, no prompt; (b) issue the same

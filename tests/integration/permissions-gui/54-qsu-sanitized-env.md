@@ -1,5 +1,7 @@
 # 54 — qsu strips LD_*/PYTHONPATH and resets PATH before exec
 
+<!-- qci:visual: required -->
+
 **What**: as `work`, set `LD_PRELOAD=/tmp/evil.so`,
 `PYTHONPATH=/tmp/poison`, and a hostile `PATH=/tmp/evilbin:/bin`,
 then run `qsu /usr/bin/env`. Admin approves `forever_argv` for

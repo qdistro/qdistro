@@ -1,5 +1,7 @@
 # 57 — tier-4 RDP close tears down viewer, bridge, and domain
 
+<!-- qci:visual: required -->
+
 **What**: start the tier-4 RDP transport, close the visible host window,
 and verify the control path tears down the FreeRDP viewer, host `socat`
 bridge, guest publisher, and libvirt domain.

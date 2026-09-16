@@ -1,5 +1,7 @@
 # 53 — Per-uid in-flight cap rejects the 5th concurrent qsu
 
+<!-- qci:visual: none -->
+
 **What**: from `work` (uid 2000), open 5 concurrent qsu
 invocations of `/bin/sleep 60` — none of which will be approved.
 Exactly ONE of the 5 must be rejected by `qdistro-root-exec` with

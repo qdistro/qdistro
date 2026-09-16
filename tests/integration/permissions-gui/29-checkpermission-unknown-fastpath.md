@@ -1,5 +1,7 @@
 # 29 — `CheckPermission` returns `"unknown"` without prompting
 
+<!-- qci:visual: none -->
+
 **What**: with no rule and an empty cache for the action,
 synchronously call `CheckPermission("test.action", {})` as `work`.
 Expect string reply `"unknown"`. Verify `GetPending` is still empty

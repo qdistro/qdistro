@@ -1,5 +1,7 @@
 # 58 — permission lineage: forged `sandbox_engine` denied under enforce
 
+<!-- qci:visual: none -->
+
 **What**: an admin rule pre-approves an action for
 `sandbox_engine: qdistro.tier1`. A `work` caller with **no launch
 record** forges `sandbox_engine=qdistro.tier1` in the `CheckPermission`

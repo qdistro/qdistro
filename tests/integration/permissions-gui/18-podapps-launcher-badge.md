@@ -1,5 +1,7 @@
 # 18 — tier-2 podapps land in the launcher and survive the cold-start UX
 
+<!-- qci:visual: required -->
+
 **What**: scan a running `qdistro/tier2-weston-terminal` container,
 verify the launcher shows the workload's app entries from the
 PodApps provider with the current tier-2 visual signal: the

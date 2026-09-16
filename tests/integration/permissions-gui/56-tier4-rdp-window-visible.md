@@ -1,5 +1,7 @@
 # 56 — tier-4 RDP transport maps one guest window on the host
 
+<!-- qci:visual: required -->
+
 **What**: start a tier-4 VM with `TIER4_STREAMING_METHOD=rdp`, let the
 guest publisher subscribe to the latest guest qdwin toplevel, and verify
 the host sees a normal chromed window rendered through FreeRDP.

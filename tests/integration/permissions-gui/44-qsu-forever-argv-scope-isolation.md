@@ -1,5 +1,7 @@
 # 44 — `forever_argv` hits the exact argv tuple; different argv re-prompts
 
+<!-- qci:visual: required -->
+
 **What**: as `work`, run `/usr/local/bin/qsu /bin/echo hello`. Admin
 selects `Forever, only this exact argv tuple` (`forever_argv`)
 and approves. Then:

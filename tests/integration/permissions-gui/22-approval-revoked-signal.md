@@ -1,5 +1,7 @@
 # 22 — `ApprovalRevoked` signal payload, GUI revoke path
 
+<!-- qci:visual: required -->
+
 **What**: with one cached approval seeded for `work` (uid 2000),
 attach a real D-Bus signal subscriber, then revoke the row from
 the Qt admin app's Cache tab. Verify (a) one `ApprovalRevoked`

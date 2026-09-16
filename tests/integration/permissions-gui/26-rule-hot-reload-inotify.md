@@ -1,5 +1,7 @@
 # 26 — Rules reload automatically via inotify on file drop
 
+<!-- qci:visual: none -->
+
 **What**: with no rule installed, write a new allow-rule YAML
 *directly* into `/etc/qdistro/rules.d/` (bypassing `SaveRule`), wait
 for the inotify watcher's debounce, verify the `RulesReloaded`

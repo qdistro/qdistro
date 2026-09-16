@@ -1,5 +1,7 @@
 # 03 — Noctalia clock widget shows correct time
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** the clock widget in the bar repaints after
 the VM's wall-clock time advances by 1 minute. The hard behavioral
 signal is that the full-width top-bar crop's image hash changes between

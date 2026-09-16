@@ -1,5 +1,7 @@
 # 16 — cross-user send-to between two real qnotebook instances, visual admin-app approve
 
+<!-- qci:visual: required -->
+
 **What**: run the scenario-15 flow on the live admin compositor display with
 admin's approvals GUI in the middle. Launch qnotebook as `work`
 and `work2` via the xhost SI allowlist helper, trigger a

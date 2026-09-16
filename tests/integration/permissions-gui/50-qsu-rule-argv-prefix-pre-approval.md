@@ -1,5 +1,7 @@
 # 50 — Admin rule `argv_prefix:` pre-approves qsu without a prompt
 
+<!-- qci:visual: required -->
+
 **What**: as admin, write a rule pre-approving any qsu invocation
 whose argv starts with `[/usr/bin/systemctl, status]` (a read-only
 verb). Then as `work`, run two qsu invocations:

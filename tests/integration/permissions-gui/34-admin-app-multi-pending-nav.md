@@ -1,5 +1,7 @@
 # 34 — Admin app navigation across multiple pending requests
 
+<!-- qci:visual: required -->
+
 **What**: inject three pending requests at once (from three
 caller PIDs as `work`), launch the Qt admin app. Verify all three
 rows appear in the Pending list, arrow-Down moves selection from

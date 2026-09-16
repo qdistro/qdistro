@@ -1,5 +1,7 @@
 # 14 — cross-user send-to, admin picks non-once scope → ScopeNotPermitted
 
+<!-- qci:visual: required -->
+
 **What**: admin receives a RelayMessage, picks `1 hour` via the
 scope radio group, clicks **Approve**. Broker rejects the forbidden
 one-shot scope; admin app surfaces this in a modal

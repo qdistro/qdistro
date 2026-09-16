@@ -1,5 +1,7 @@
 # 51 — `qsu -u <user>` carries target_user in the action key
 
+<!-- qci:visual: required -->
+
 **What**: as `admin` (uid 1000) invoke `qsu -u work /usr/bin/id`.
 The pending request's action MUST be `qsu.exec:work`, NOT
 `qsu.exec:root`. Approve `forever_argv`; verify the streamed

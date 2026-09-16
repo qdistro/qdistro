@@ -1,5 +1,7 @@
 # 48 — TUI renders qsu argv on its own `Argv:` line, not 30 noisy details
 
+<!-- qci:visual: required -->
+
 **What**: launch `qdistro-admin-tui`. As `work`, invoke
 `/usr/local/bin/qsu /bin/sh -c "echo hi"` — an argv with 3
 elements (`/bin/sh`, `-c`, `echo hi`). The TUI's right detail

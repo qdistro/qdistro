@@ -1,5 +1,7 @@
 # 12 — cross-user send-to, visual admin-app approve
 
+<!-- qci:visual: required -->
+
 **What**: trigger a RelayMessage from `work` in the background,
 visually confirm the admin approvals app shows the request with
 its full detail payload, click **Approve**, verify the payload

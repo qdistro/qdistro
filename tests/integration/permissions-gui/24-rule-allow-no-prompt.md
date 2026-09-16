@@ -1,5 +1,7 @@
 # 24 — Declarative `allow` rule short-circuits the admin prompt
 
+<!-- qci:visual: required -->
+
 **What**: write an allow-rule for `(uid=2000, action=test.action)`
 via `SaveRule`, then run `qdistro-test-permission` as `work`. Assert
 the SDK returns ALLOWED *without* the admin app ever showing a

@@ -1,5 +1,7 @@
 # 49 — `ListHistory` carries qsu argv losslessly as `as` (not shlex-joined)
 
+<!-- qci:visual: required -->
+
 **What**: drive a single qsu invocation end-to-end through the
 admin app (allow `forever_argv` on
 `/usr/local/bin/qsu /usr/bin/echo hello world`). Then call

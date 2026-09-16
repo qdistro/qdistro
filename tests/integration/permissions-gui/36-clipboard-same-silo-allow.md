@@ -1,5 +1,7 @@
 # 36 — Same-silo clipboard transfer is unconditionally allowed
 
+<!-- qci:visual: none -->
+
 **What**: as `admin` (uid 1000 — the broker's clipboard caller),
 call `CheckClipboardTransfer("user1", "user1", ["text/plain"], ...)`.
 Expect `"allow"`, a `source='clipboard_same_silo'` audit row, and

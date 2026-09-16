@@ -1,5 +1,7 @@
 # 30 — Rate-limit raises `.RateLimited` on a tight-loop caller
 
+<!-- qci:visual: none -->
+
 **What**: from `work`, call `CheckPermission` for `test.action` in a
 tight Python loop. After `LIMIT` successful calls (the broker pins
 `LIMIT=50, WINDOW_S=1.0` at construction in

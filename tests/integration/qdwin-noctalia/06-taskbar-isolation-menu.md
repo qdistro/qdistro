@@ -1,5 +1,7 @@
 # 06 — Taskbar isolation menu renders for a tier-2 disposable
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** a real tier-2 DISPOSABLE window (spawned through the
 production root-launcher path so its `wp_security_context_v1` app_id reaches
 qdwin) shows up in the qdshell taskbar as an ISOLATED window; right-clicking its

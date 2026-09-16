@@ -1,5 +1,7 @@
 # 40 — TUI survives broker restart (signal subscription resilience)
 
+<!-- qci:visual: required -->
+
 **What**: launch the TUI (`qdistro_admin_tui.py`), restart
 `qdistro-admin-broker.service` mid-session, inject a pending
 permission request via `busctl call`, and verify the TUI's pending

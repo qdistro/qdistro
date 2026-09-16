@@ -1,5 +1,7 @@
 # 27 — Rule ordering: first match wins
 
+<!-- qci:visual: none -->
+
 **What**: install two rules for the same `(uid=2000, action=test.action)`
 pair in this order: `(allow)` then `(deny)`. Run
 `qdistro-test-permission` as `work`; expect ALLOWED (first match

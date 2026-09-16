@@ -1,5 +1,7 @@
 # 37 — Cross-silo clipboard transfer default-denies, rule allows
 
+<!-- qci:visual: none -->
+
 **What**: as `admin`, call `CheckClipboardTransfer("user1", "admin",
 ["text/plain"], ...)` with no rule installed. Expect `"deny"` and a
 `source='clipboard_default_deny'` audit row. Then install an allow

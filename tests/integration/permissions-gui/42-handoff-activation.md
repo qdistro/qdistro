@@ -1,5 +1,7 @@
 # 42 — `CheckHandoffActivation` default-deny + per-app-id rule
 
+<!-- qci:visual: none -->
+
 **What**: as `admin`, exercise `CheckHandoffActivation` in three
 configurations:
 1. Same-silo activation → unconditional `"allow"` + audit source

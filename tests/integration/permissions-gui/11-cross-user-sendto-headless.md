@@ -1,5 +1,7 @@
 # 11 — cross-user send-to, headless happy path
 
+<!-- qci:visual: none -->
+
 **What**: `work` (uid 2000) asks the broker to relay a payload to
 `work2`'s qstub-notepad (uid 3000). Admin approves with scope=`once`.
 Assert notepad's document contains the payload and the audit log

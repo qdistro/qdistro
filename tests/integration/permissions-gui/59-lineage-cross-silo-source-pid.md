@@ -1,5 +1,7 @@
 # 59 — permission lineage: cross-silo source attested by launch record (P1-1)
 
+<!-- qci:visual: none -->
+
 **What**: the cross-silo clipboard gate (`CheckClipboardTransfer`) keys its
 rule lookup on the **source** silo. The source is named by qdshell, not the
 D-Bus caller, so the broker now takes the source app's

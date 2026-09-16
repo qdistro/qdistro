@@ -1,5 +1,7 @@
 # 43 — qsu request reaches admin app with argv-aware scope radios
 
+<!-- qci:visual: required -->
+
 **What**: invoke `/usr/local/bin/qsu /bin/true` as `work` (uid
 2000). The admin app's pending list shows one row whose action is
 `qsu.exec:root`. The detail pane's Scope group shows EIGHT radios

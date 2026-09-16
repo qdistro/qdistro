@@ -1,5 +1,7 @@
 # 23 — `RevokeAllForUid` emits one signal per row, scoped to uid
 
+<!-- qci:visual: none -->
+
 **What**: seed five cached approvals across two uids (3 for uid 2000,
 2 for uid 3000), attach a dbus-monitor on `ApprovalRevoked`, call
 `RevokeAllForUid(2000)` as admin from a shell, verify (a) exactly

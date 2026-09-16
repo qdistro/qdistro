@@ -1,5 +1,7 @@
 # 01 — Noctalia bar + wallpaper visible
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** with Noctalia running on qdwin, a screenshot
 of the VM shows (a) the Noctalia bar at the top edge, (b) the
 wallpaper occupying the rest. No protocol errors in the weston

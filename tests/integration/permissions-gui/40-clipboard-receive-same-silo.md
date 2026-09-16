@@ -1,5 +1,7 @@
 # 40 — Same-silo clipboard *receive* short-circuits to allow
 
+<!-- qci:visual: none -->
+
 **What**: as `admin`, call `CheckClipboardReceive("user1", "user1",
 "text/plain", ...)`. Expect `"allow"`, a same-silo audit row, and no
 rule consultation.

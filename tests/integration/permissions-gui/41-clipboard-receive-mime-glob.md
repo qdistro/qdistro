@@ -1,5 +1,7 @@
 # 41 — Cross-silo receive: default-deny, rule, and MIME glob
 
+<!-- qci:visual: none -->
+
 **What**: as `admin`, exercise `CheckClipboardReceive` across silos
 in four configurations:
 1. No rule → `"deny"` + `source='clipboard_receive_default_deny'`.

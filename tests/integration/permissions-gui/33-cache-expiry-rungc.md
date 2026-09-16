@@ -1,5 +1,7 @@
 # 33 — Expired cache rows clear via `RunCacheGc`
 
+<!-- qci:visual: required -->
+
 **What**: seed a cache row whose `expires_at` is in the past (a
 "1h" row that already aged out). Verify `CheckPermission` does NOT
 return `"allow"` from the stale row, the periodic GC tick (or an

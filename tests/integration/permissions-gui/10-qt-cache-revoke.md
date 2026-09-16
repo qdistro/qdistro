@@ -1,5 +1,7 @@
 # 10 — Qt admin app Cache tab: mouse-driven revoke
 
+<!-- qci:visual: required -->
+
 **What**: seed the approval cache with four rows spanning different
 scopes + uids, open the admin app's Cache tab, click a specific row
 to select it, click the Revoke button, verify the row is gone from

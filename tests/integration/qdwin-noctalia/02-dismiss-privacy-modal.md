@@ -1,5 +1,7 @@
 # 02 — no upgrade/privacy wizard on fresh launch
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** A first-launch qdshell session shows the bar
 and wallpaper immediately, with no telemetry / privacy / upgrade
 modal in the way.

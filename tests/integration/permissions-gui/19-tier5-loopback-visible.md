@@ -1,5 +1,7 @@
 # 19 — tier-5 loopback toplevel renders with secctx chrome
 
+<!-- qci:visual: required -->
+
 **What**: spawn `weston-terminal` via `spawn-tier5.sh --loopback` and
 verify the resulting toplevel reaches the outer qdshell with the
 correct title prefix (`[tier5:loopback-…]`) and secctx-tagged

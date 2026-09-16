@@ -1,5 +1,7 @@
 # 35 — TUI and Qt admin app stay in sync via broker signals
 
+<!-- qci:visual: required -->
+
 **What**: launch the Qt admin app AND the Textual TUI side by side
 (both subscribe to the same broker's `RequestPending` /
 `RequestDecided` signals). Inject one pending request as `work`.

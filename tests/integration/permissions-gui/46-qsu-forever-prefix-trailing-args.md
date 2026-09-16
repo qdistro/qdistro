@@ -1,5 +1,7 @@
 # 46 — `forever_prefix` hits trailing args; differing prefix re-prompts
 
+<!-- qci:visual: required -->
+
 **What**: install `forever_prefix` for argv prefix
 `[/usr/bin/systemctl, status]`. Then issue qsu calls that vary in
 the **trailing** args and verify:

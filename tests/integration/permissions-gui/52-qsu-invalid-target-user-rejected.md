@@ -1,5 +1,7 @@
 # 52 — Invalid target_user is rejected before the broker is reached
 
+<!-- qci:visual: none -->
+
 **What**: as `work`, send a hand-crafted JSON request to
 `/run/qdistro-root-exec/sock` whose `target_user` field carries an
 embedded newline and other control characters. The

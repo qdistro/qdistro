@@ -1,5 +1,7 @@
 # 25 — Declarative `deny` rule short-circuits without prompting
 
+<!-- qci:visual: required -->
+
 **What**: write a deny-rule for `(uid=2000, action=test.action)` via
 `SaveRule`, then run `qdistro-test-permission` as `work`. Assert the
 SDK returns DENIED, no admin prompt appears, the audit row carries

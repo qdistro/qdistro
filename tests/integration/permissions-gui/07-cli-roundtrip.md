@@ -1,5 +1,7 @@
 # 07 — qdistro-approvals CLI roundtrip
 
+<!-- qci:visual: none -->
+
 **What**: exercise the CLI surface end-to-end — `list`, `audit`,
 `revoke`, `audit-gc` — against a freshly-seeded cache + audit log,
 capture text output, and assert each subcommand's effect is visible

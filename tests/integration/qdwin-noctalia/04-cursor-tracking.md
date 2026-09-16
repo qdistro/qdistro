@@ -1,5 +1,7 @@
 # 04 — cursor follows mouse moves
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** moving the mouse via QMP `input-send-event`
 results in the cursor visibly following on screen. Hovering over a
 bar widget triggers the appropriate hover state (color shift or

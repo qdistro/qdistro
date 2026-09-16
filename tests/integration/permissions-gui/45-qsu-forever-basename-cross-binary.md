@@ -1,5 +1,7 @@
 # 45 — `forever_basename` cross-binary: same basename hits, different basename misses
 
+<!-- qci:visual: required -->
+
 **What**: install `forever_basename` for `qsu /usr/bin/python3 -c …`.
 Then issue three follow-up qsu calls and verify:
 1. `qsu /usr/bin/python3 -c 'pass'` → cache hit (same exact argv).

@@ -1,5 +1,7 @@
 # 28 — Rule `exe` selector matches via fnmatch glob
 
+<!-- qci:visual: required -->
+
 **What**: install one rule that allows `test.action` for any caller
 whose `exe` matches `/usr/bin/python*`. Run `qdistro-test-permission`
 as `work` (caller exe is `/usr/bin/python3.13`); expect ALLOWED with
