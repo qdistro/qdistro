@@ -1,5 +1,7 @@
 # 07 — locked screen fully occludes desktop pixels
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion (security):** once qdlocker reports
 `locked=True`, no pixel from a normal desktop toplevel is visible at
 the screen edges or corners. This catches the historical bug where the

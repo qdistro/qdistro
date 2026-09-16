@@ -1,5 +1,7 @@
 # 02 — fprintd verifies in parallel with the password field
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** while the lock UI is up, the locker has an
 fprintd `VerifyStart` in flight; a fingerprint match unlocks even
 when the password field is empty. Confirms the spec's "fingerprint =

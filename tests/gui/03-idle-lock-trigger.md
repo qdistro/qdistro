@@ -1,5 +1,7 @@
 # 03 — idle timer engages the locker
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** after `QDLOCKER_IDLE_MS` of no keyboard or
 pointer activity, qdlocker engages the lock via its
 `ext-idle-notify-v1` subscription. The compositor's

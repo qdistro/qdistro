@@ -1,5 +1,7 @@
 # 05 — keystrokes typed while locked DO NOT reach qdshell
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion (security):** while qdlocker is engaged,
 keyboard `overlay_key` events route to `qdwin_locker_v1` only — they
 do NOT reach `qdwin_shell_v1`. Said differently: the password the

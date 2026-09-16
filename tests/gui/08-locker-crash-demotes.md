@@ -1,5 +1,7 @@
 # 08 — locker crash while locked demotes lock toplevel
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion (resource cleanup):** if qdlocker's control
 connection dies while the compositor is locked, qdwin must demote the
 promoted lock toplevel from the LOCK layer. The screen stays locked

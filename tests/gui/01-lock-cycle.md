@@ -1,5 +1,7 @@
 # 01 — qdlocker locks, accepts password, unlocks
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** Ctrl+Alt+L locks the desktop via the
 `qdwin_locker_v1` path (qdlocker is the actor, not qdshell); the user
 can type a password; correct password unlocks; lock surface is torn

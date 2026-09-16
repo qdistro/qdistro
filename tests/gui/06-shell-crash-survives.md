@@ -1,5 +1,7 @@
 # 06 — qdshell crashing while locked does NOT unlock the screen
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion (lifecycle independence):** the locker's
 process is a peer of qdshell, not a child. If qdshell crashes while
 the screen is locked:

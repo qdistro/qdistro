@@ -1,5 +1,7 @@
 # 04 — logind suspend/lid engages the locker
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** a systemd-logind D-Bus signal reaches
 qdlocker's own `LogindWatcher` (in `qdlocker/logind.py`) → the watcher
 injects `lock_requested` into the locker → qdlocker engages the lock.

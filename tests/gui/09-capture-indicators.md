@@ -1,5 +1,7 @@
 # 09 — lock-surface live-capture / egress indicators (J28)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion (security):** while the machine is locked, every
 active-capture indicator matches reality — a live microphone, camera,
 system-audio or screencast capture is visible on the lock surface, capture
