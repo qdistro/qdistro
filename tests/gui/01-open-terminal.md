@@ -1,5 +1,7 @@
 # 01 — open a terminal via the qdshell launcher
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** an admin user can open a terminal on the
 qdwin desktop via the launcher overlay and see a usable shell prompt.
 This is the smoke test for "is the desktop session usable at all".

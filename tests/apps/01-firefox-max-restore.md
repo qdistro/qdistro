@@ -1,5 +1,7 @@
 # 01 — Firefox round-trips request_maximize → request_maximize(0)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** after a `max` then `restore` via the bystander
 FIFO, Firefox is back at (approximately) its pre-max geometry — not
 sticking at the maximised dimensions. Regression-tests qdwin bug #1

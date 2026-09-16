@@ -1,5 +1,7 @@
 # 12 — single-window RDP sharing: subscribe + xfreerdp sees frames
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** a v14+ shell client can `subscribe_view_stream`
 on a live toplevel handle, qdwin spawns `qdistro-forward`, the
 forward listens on the announced TCP port, and a real RDP client

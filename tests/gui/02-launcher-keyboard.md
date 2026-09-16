@@ -1,5 +1,7 @@
 # 02 — launcher accepts keyboard input (B3 fix verification)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** the user can open the launcher overlay
 (Ctrl+Space), type to filter, navigate with arrow keys, and press
 Enter to spawn — all from a real keyboard, not the ctrl-socket.

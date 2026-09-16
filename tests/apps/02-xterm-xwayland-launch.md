@@ -1,5 +1,7 @@
 # 02 — xterm launches without crashing weston
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** spawning an XWayland client (xterm) does not
 SIGSEGV weston. Regression-tests qdwin bug #2 (NULL `wl_client` from
 `weston_desktop_client_get_client` for XWayland-spawned surfaces was

@@ -1,5 +1,7 @@
 # 04 — install_default_cursor warning logs at most once per session
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** the `qdwin: install_default_cursor: no
 surface yet` log line fires at most once per qdwin session, not on
 every pointer focus change. Regression-tests qdwin bug #4 (one-shot

@@ -1,5 +1,7 @@
 # 04 — Alt+Tab moves focus + raises (B3-switcher + auto-focus + raise)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** Alt+Tab on a 2-window setup switches both
 keyboard focus and z-order to the other window. The first press
 should already swap (no double-press required). Validates: the

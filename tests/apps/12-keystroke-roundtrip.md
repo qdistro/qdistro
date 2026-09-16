@@ -1,5 +1,7 @@
 # 12 — wl_keyboard delivery to native Wayland and XWayland clients
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** keystrokes injected as discrete QMP
 `input-send-event` key transitions reach both a native-Wayland focused toplevel
 and an XWayland focused toplevel and produce visible characters.

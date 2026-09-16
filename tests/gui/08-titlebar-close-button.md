@@ -1,5 +1,7 @@
 # 08 — titlebar close button via mouse
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** clicking the red × close button on the
 titlebar of a foot toplevel destroys the toplevel — the wl_surface
 goes away, qdwin emits `toplevel_removed`, and qdshell drops the tl

@@ -1,5 +1,7 @@
 # 05 — GTK4 native Wayland app: gnome-text-editor
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** a GTK4 application running native-Wayland
 (no XWayland) launches, accepts keystrokes that appear in the
 document, maximises and restores cleanly. Smoke test for the GTK4

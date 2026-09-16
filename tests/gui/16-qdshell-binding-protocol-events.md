@@ -1,5 +1,7 @@
 # 16 — qdshell binds qdwin_shell_v1 and observes protocol events
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** qdshell (via the `Qdistro.Qdwin` QML plugin
 that loads `libqdistro-qdwin.so` at startup) binds `qdwin_shell_v1`
 at version >= 14, calls `bind_as_shell`, and observes the full

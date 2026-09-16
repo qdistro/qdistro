@@ -1,5 +1,7 @@
 # 13 — qdwin emits focus-change events for every keyboard-focus move
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** every keyboard-focus transition between
 toplevels — spawn, alt-tab, click-to-focus, last-window-close — emits
 a `qdwin: focus handle=N (was M) seat=…` line in the journal, even

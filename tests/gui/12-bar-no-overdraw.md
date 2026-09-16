@@ -1,5 +1,7 @@
 # 12 — bar bottom row does not overdraw maximized work area
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** the qdshell bar's bottom row (y=30 by default)
 does NOT visibly overlap the top row of a maximized client. With the
 default `exclusionZoneBleed: false` (since the pixel-mismatch fix in

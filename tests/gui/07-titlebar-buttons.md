@@ -1,5 +1,7 @@
 # 07 — titlebar maximize / minimize / restore via mouse
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** clicking the right-edge titlebar buttons on
 a foot toplevel changes its window state — clicking maximise fills
 the work area while keeping titlebar+panel visible (NOT fullscreen),

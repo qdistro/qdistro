@@ -1,5 +1,7 @@
 # 11 — Imlib2 / raw Xlib: feh
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** an XWayland client that uses raw Xlib +
 Imlib2 (no widget toolkit) renders an image correctly. feh is the
 obvious test case — it has no menus, no keystroke handling beyond

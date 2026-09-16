@@ -1,5 +1,7 @@
 # 08 — Electron / Chromium browser via XWayland
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** Chromium (representing the Electron browser
 class) launches via XWayland, renders a real web page, survives a
 maximise/restore cycle. The Wayland-Ozone path stays black under the

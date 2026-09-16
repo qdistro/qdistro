@@ -1,5 +1,7 @@
 # 03 — is_xwayland flag distinguishes Wayland vs X11 clients
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** `qdwin_shell_v1.toplevel_added` carries
 `is_xwayland=0` for native-Wayland clients and `is_xwayland=1` for
 XWayland-spawned X11 clients. Regression-tests qdwin bug #3 (was

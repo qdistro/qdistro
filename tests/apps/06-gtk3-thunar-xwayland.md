@@ -1,5 +1,7 @@
 # 06 — GTK3 + XWayland: thunar file manager
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** a GTK3 file manager (thunar) launches via
 XWayland, displays a populated file grid, and survives `max`/`restore`
 cycles. Validates the GTK3-via-XWayland path which most legacy desktop

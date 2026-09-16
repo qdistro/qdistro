@@ -1,5 +1,7 @@
 # 09 — titlebar right-click context menu via mouse
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** right-clicking the titlebar of a foot
 toplevel opens the qdshell context menu, and clicking a menu item
 (e.g. "Toggle maximised", "Minimise", "Close") fires the matching

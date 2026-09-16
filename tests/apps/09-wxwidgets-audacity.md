@@ -1,5 +1,7 @@
 # 09 — wxWidgets via XWayland: audacity
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** a wxWidgets application (audacity) launches
 via XWayland, renders its main window with menus/toolbars/track view,
 shows the first-run welcome popup. wxWidgets is one of the rarer

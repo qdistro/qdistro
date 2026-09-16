@@ -1,5 +1,7 @@
 # 21 — window-manager policy: direct-compositor functional proof (v25)
 
+<!-- qci:visual: none -->
+
 **What**: drive the v25 window-manager-policy surface on the live qdwin DRM
 session directly, independent of qdshell — `set_wm_policy` (focus model /
 placement / snap), `request_tile` (left/right/restore), `request_fullscreen`

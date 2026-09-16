@@ -1,5 +1,7 @@
 # 18 — workspaces: switch hides/shows windows; count change (v24)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** with real qdwin workspaces (v24, ext-workspace-v1
 + the qdshell `workspace` IPC), a window spawned on the active workspace
 disappears when the user switches to another workspace and reappears on

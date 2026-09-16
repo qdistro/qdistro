@@ -1,5 +1,7 @@
 # 07 — Qt5 widget app: VLC media player
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** Qt5 (QWidget) UI renders correctly through
 qdwin's XWayland path and survives `max`/`restore`. VLC is the
 designated Qt5 reference because its main window uses QWidget /

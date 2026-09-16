@@ -1,5 +1,7 @@
 # 03 — locker accepts keyboard + unlock returns desktop (B1+B4)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** Ctrl+Alt+L locks the desktop; the user can
 type a password into the lock surface (B4); a correct password
 unlocks the session AND tears the lock surface down (B1); subsequent

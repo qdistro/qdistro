@@ -1,5 +1,7 @@
 # 11 — drag window by its titlebar
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** pressing the left mouse button on the
 titlebar background (NOT on close/min/max), holding it down while the
 pointer moves, and releasing translates the toplevel — content view

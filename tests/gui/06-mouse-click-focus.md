@@ -1,5 +1,7 @@
 # 06 — mouse click-to-focus + raise
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** clicking on a background window's chrome
 or content area focuses AND raises that window. Validates qdwin's
 pointer button handler now does click-to-focus (was a passthrough

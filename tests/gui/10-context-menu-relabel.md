@@ -1,5 +1,7 @@
 # 10 — context menu maximise/restore label flips with state
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** the qdshell context-menu row that
 toggles the MAXIMIZED bit shows "Maximise" when the window is at
 its non-maximised cascade size and "Restore" when it's filling the

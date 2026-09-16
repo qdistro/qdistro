@@ -1,5 +1,7 @@
 # 14 — bar-content does not remap-storm when idle
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** in the absence of user input and window
 state changes, the journal grows by ≤2 `qdshell-bar-content-Virtual-1`
 entries over 10 seconds. Before the fix in
