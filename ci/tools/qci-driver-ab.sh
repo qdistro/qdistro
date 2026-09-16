@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qci-driver-ab.sh — A/B driver-integrity gate for swapping the GUI-scenario
-# driver model (QCI_AGENT_CMD) off haiku.
+# driver model (QCI_AGENT_CMD) for any other candidate.
 #
 # WHY THIS EXISTS
 #   qci grades fail-closed: a scenario passes ONLY when status.txt==PASS AND

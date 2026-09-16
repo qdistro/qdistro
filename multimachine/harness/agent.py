@@ -2,7 +2,7 @@
 
 09 / silos.md: "screenshots are evidence, not the strongest oracle." The
 deterministic pixel oracle (``oracle.py``) is the pass/fail gate; this wrapper
-runs the configured vision agent (``QCI_AGENT_CMD``, the haiku vision model) as
+runs the configured vision agent (``QCI_AGENT_CMD``, Codex ``gpt-5.6-luna``) as
 a *holistic secondary* over the same evidence bundle and records its observation
 as a note. It can confirm "looks like one continuous window across the two
 displays, correct per-machine tint, no corruption", but it never overrides the

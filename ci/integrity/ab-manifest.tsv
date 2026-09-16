@@ -9,7 +9,8 @@
 #                              FALSE-PASSED and is rejected.
 #
 # The PASS rows are the "admin-9" set validated 2026-06-23/06-28 as genuine
-# (non-rubber-stamping) haiku passes. The FAIL rows are the ground-truth
+# (non-rubber-stamping) passes under the driver in use at that date. The FAIL
+# rows are the ground-truth
 # negatives that make a driver swap safe (fail-closed grading cannot catch a
 # false-pass on its own). Lines starting with # and blank lines are ignored.
 #

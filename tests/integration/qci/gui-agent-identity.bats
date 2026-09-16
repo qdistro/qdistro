@@ -39,14 +39,14 @@ teardown() {
 }
 
 @test "record_agent_identity: records cmd + model keys" {
-    QCI_AGENT_CMD='timeout 1800 claude -p "$(cat {prompt})" --model haiku' \
+    QCI_AGENT_CMD='timeout 1800 codex --yolo exec -m gpt-5.6-luna --ephemeral - < {prompt}' \
         record_agent_identity
     grep -q '^qci_agent_cmd=' "$KV_OUT"
-    grep -q '^qci_agent_model=haiku' "$KV_OUT"
+    grep -q '^qci_agent_model=gpt-5.6-luna' "$KV_OUT"
 }
 
 @test "record_agent_identity: QCI_AGENT_MODEL overrides parsed model" {
-    QCI_AGENT_CMD='claude --model haiku' QCI_AGENT_MODEL=gpt-5.6-luna \
+    QCI_AGENT_CMD='codex exec -m gpt-5.4-mini' QCI_AGENT_MODEL=gpt-5.6-luna \
         record_agent_identity
     grep -q '^qci_agent_model=gpt-5.6-luna' "$KV_OUT"
 }
@@ -63,7 +63,11 @@ teardown() {
     # made a debug rerun indistinguishable from a CI row.
     QCI_AGENT_CMD='myagent --run {prompt}' record_agent_identity
     grep -q '^qci_agent_model=unknown' "$KV_OUT"
-    ! grep -q '^qci_agent_model=haiku' "$KV_OUT"
+    # A bare leading `!` does NOT fail a bats test (SC2314); assert explicitly.
+    if grep -q '^qci_agent_model=gpt-5.6-luna' "$KV_OUT"; then
+        echo "guessed a default model instead of recording unknown" >&2
+        return 1
+    fi
 }
 
 @test "run_agent_command: relative tool outputs stay in a cleaned temporary cwd" {
