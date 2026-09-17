@@ -471,17 +471,31 @@ EOCTL
 qdwin_apps_libvirt_uri() {
     local first rest uri=""
     read -r first rest <<<"$QDWIN_VIRSH"
-    case "$(basename -- "$first")" in
-        virsh) ;;
-        *) echo "qdwin-apps: QDWIN_VIRSH is '$QDWIN_VIRSH', which is not a plain virsh command, so its connection cannot be passed to the capture library" >&2
-           return 1 ;;
-    esac
+    # EXACT SPELLING, not basename. The capture library runs the literal `virsh`
+    # from PATH, so accepting any executable whose basename happens to be
+    # `virsh` meant VM checks could go through a configured wrapper while
+    # screenshots silently went through a different binary -- the same
+    # backend-inconsistency this function exists to close (sol, B round 2).
+    if [ "$first" != virsh ]; then
+        echo "qdwin-apps: QDWIN_VIRSH starts with '$first'; only a plain \`virsh\` can be expressed as a URI for the capture library, which invokes \`virsh\` itself" >&2
+        return 1
+    fi
+    # shellcheck disable=SC2086  # deliberate word splitting of the setting
     set -- $rest
     while [ $# -gt 0 ]; do
         case "$1" in
-            -c|--connect) uri=${2:-}; shift 2 ;;
+            -c|--connect)
+                # `shift 2` with one argument left FAILS and shifts nothing, so
+                # the loop spun forever on `QDWIN_VIRSH='virsh -c'` (sol).
+                if [ $# -lt 2 ]; then
+                    echo "qdwin-apps: QDWIN_VIRSH ends with '$1' and no URI after it" >&2
+                    return 1
+                fi
+                uri=$2; shift 2 ;;
             -c*) uri=${1#-c}; shift ;;
             --connect=*) uri=${1#--connect=}; shift ;;
+            -*) echo "qdwin-apps: QDWIN_VIRSH carries '$1', which this parser does not understand; the capture library would not receive it" >&2
+                return 1 ;;
             *) shift ;;
         esac
     done
