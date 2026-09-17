@@ -1,5 +1,7 @@
 # 20 — tier-5 `--vm` cold-start UX, placeholder → real toplevel
 
+<!-- qci:visual: required -->
+
 **What**: spawn weston-terminal in a real per-app guest VM via
 `spawn-tier5.sh --vm`; verify the cold-start UX (placeholder taskbar
 entry / blank chromed view) renders during guest boot, then resolves

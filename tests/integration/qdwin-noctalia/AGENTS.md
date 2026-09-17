@@ -80,3 +80,45 @@ If picking up this harness from scratch:
  then `qdwin_set_vm noctalia-vis-…`.
 3. `noct_session_healthy` should return 0.
 4. Pick a scenario, follow its setup → steps → asserts.
+
+## Every scenario MUST declare `qci:visual`
+
+Put exactly one of these HTML comments near the top of every scenario file:
+
+```
+<!-- qci:visual: required -->   a REQUIRED assertion is decided by reading a captured frame
+<!-- qci:visual: none -->       no required assertion is decided by pixels
+```
+
+`none` is correct even when the scenario captures screenshots, as long as every
+required assertion is settled by a non-visual oracle (journal line, D-Bus reply,
+sqlite row, exit code, IPC response). Screenshots kept purely as run artifacts
+do not make a scenario `required`.
+
+`qci gui` REFUSES to run a scenario with no declaration, an unknown value, or
+two conflicting declarations (`gui_validate_scenarios`) - before any golden
+bake, VM, or agent. There is no content-sniffing fallback.
+
+**OPEN EVERY FRAME YOU ASSERT ON.** Use your image-viewing tool (`view_image`
+or equivalent). OCR is NOT a substitute: it reads text and nothing else, so it
+cannot establish a colour, a geometry/layout claim, focus, z-order, or the
+ABSENCE of a control - and "the pane is empty" / "no dialog appeared" / "the
+badge is gone" are the commonest assertions here. Text OCR does not find is
+indistinguishable from text it could not read, so OCR on an unrendered frame
+produces a confident wrong verdict in either direction. Run OCR only to pull
+long text out of a frame you have ALSO opened. If you cannot open images at
+all, record ERROR naming the missing capability - never PASS, never FAIL, and
+never fall back to OCR and grade anyway.
+
+For a `required` scenario the gate also reads the frames itself, host-side,
+after the agent exits: it checks every attested frame is DECODABLE and, when a
+tesseract backend is present, records what text it finds. Both are recorded in
+`visual-evidence/manifest.tsv`; the OCR column is corroboration and changes no
+verdict. So the one thing a `required` scenario must do is SAVE THE FRAMES IT
+ASSERTS ON into `$QCI_GUI_ARTIFACT_DIR`. A `required` PASS/FAIL whose artifact
+directory holds NO attested frame, or whose frames are ALL undecodable, is
+recorded ERROR - that is the harness failing to capture, not a verdict. Nothing
+the agent writes (its own OCR output, its transcript) is accepted as evidence,
+and artifact timestamps are never compared. Whether you opened a frame is
+RECORDED per attempt as a diagnostic; it does not change your verdict, but it
+is the first thing anyone reads when a visual verdict is disputed.

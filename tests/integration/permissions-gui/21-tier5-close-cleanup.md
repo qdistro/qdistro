@@ -1,5 +1,7 @@
 # 21 — closing a tier-5 toplevel tears down the guest VM cleanly
 
+<!-- qci:visual: required -->
+
 **What**: bring up a tier-5 `--vm` weston-terminal, drive
 `Qdwin.closeWindow(handle)` through qdshell's IPC (the same supported
 test surface scenario 17 uses), verify the inner app exits AND the

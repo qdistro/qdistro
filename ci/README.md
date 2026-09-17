@@ -187,20 +187,27 @@ QCI_AGENT_CMD='my-visual-agent-runner' qdistro/ci/bin/qci gui
 ```
 
 If your runner needs a template, include `{prompt}` — it is substituted with the
-prompt-file path and the result is run via `bash -lc`, so the usual shell forms
-work: `< {prompt}` feeds the prompt on stdin, and `$(cat {prompt})` inlines its
-text for a runner that wants the prompt as an argument rather than a path:
+prompt-file path and the result is run via `bash -lc`, so the template can pass
+the prompt as a path, on stdin, or inlined with `$(cat {prompt})`, whichever the
+runner takes. The supported runner is Codex with `gpt-5.6-luna`, which reads the
+prompt on stdin:
 
 ```bash
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
 
 `--yolo` is required because the agent must run `vm-exec`/`virsh` and write its
-`status.txt` without interactive approval. `gpt-5.6-luna` is the driver these
-scenarios are graded with: the visual scenarios are decided by OPENING the
-captured PNG, so the runner must be vision-capable. Do not substitute a model
-that cannot open an image — see `doc/dev.md` "Visual evidence: vision, not OCR".
+`status.txt` without interactive approval. Each attempt gets its own working
+directory regardless of the template: `run_agent_command` creates one with
+`mktemp -d` and `cd`s into it before running the agent. Set `QCI_AGENT_MODEL` whenever a wrapper selects the
+model outside the visible template, or the manifest records `unknown`.
+
+**The runner must be vision-capable.** Visual scenarios are graded by opening
+the harvested PNGs and looking at them. A driver that cannot view an image has
+no verdict about pixels and must record `ERROR`, never `PASS` or `FAIL` -- see
+`doc/dev.md` "Visual evidence: vision, not OCR".
 
 The executable qdwin smokes run before the markdown assignments:
 

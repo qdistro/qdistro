@@ -28,12 +28,27 @@ VM="${1:?Usage: $0 <vm> <command> [args...]}"
 CMD="${2:?Usage: $0 <vm> <command> [args...]}"
 shift 2
 
-VM_EXEC="$(dirname "$0")/vm-exec"
+# $0 is the INVOKED name, which is "bash" when this file is SOURCED rather than
+# executed -- two bootstrap-hardening tests source it to unit-test
+# ydotool_key_sequence/shell_quote, and under $0 the path resolved to ./vm-exec
+# and ./lib/..., which do not exist from the repo root. BASH_SOURCE[0] is always
+# THIS FILE, executed or sourced, so both callers resolve the same paths.
+VM_GUI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VM_EXEC="$VM_GUI_DIR/vm-exec"
 DELAY=100
 
 run_as_jan() {
     "$VM_EXEC" "$VM" "su - admin -c 'export DISPLAY=:0; $1'"
 }
+
+# HARNESS CAPTURE ATTESTATION — every `virsh screenshot` below is taken BY the
+# shared attestation library (capture_virsh_screenshot), which records it in the
+# qci GUI gate's capture ledger for the VM that ledger is bound to. vm-gui never
+# asks the library to bless a file it did not itself just capture, and it can
+# never attest a frame of another worker's VM. See the library header for
+# exactly what that does and does not prove.
+# shellcheck source=lib/capture-attest.sh
+. "$VM_GUI_DIR/lib/capture-attest.sh"
 
 shell_quote() {
     printf "'"
@@ -357,7 +372,7 @@ click_preview() {
     click_validate_coordinate y "$y" "$expected_h" || return $?
     qmp_mouse_move "$x" "$y"
     sleep 0.3
-    virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$raw" >/dev/null
+    capture_virsh_screenshot "$VM" "$raw"
     read -r width height < <(click_image_size "$raw")
     [ -n "$width" ] && [ -n "$height" ] || return 2
     if [ "$width" -ne "$expected_w" ] || [ "$height" -ne "$expected_h" ]; then
@@ -442,7 +457,7 @@ click_confirm() {
     qmp_click "$x" "$y" left
     sleep 0.3
     post="$dir/$preview_id.post.png"
-    virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$post" >/dev/null
+    capture_virsh_screenshot "$VM" "$post"
     printf 'confirmed_utc=%s\nx=%s\ny=%s\npost=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$x" "$y" "$post" > "$confirmed"
     log="$dir/clicks.tsv"
@@ -465,6 +480,132 @@ screenshot_is_black() {
     awk -v bright="$bright" 'BEGIN { exit !(bright < 0.15) }'
 }
 
+# Is FILE a frame an agent could actually form a verdict from?
+#
+# THREE WAYS A CAPTURE IS USELESS, and they are NOT the same failure:
+#   2  UNDECODABLE -- truncated/corrupt PNG. Nothing can read it, including any
+#      OCR backend. This check exists independently of OCR precisely because OCR
+#      is no longer a grading precondition: when it was, a corrupt file failed
+#      the OCR gate and was noticed by accident. It no longer is, so readability
+#      has to be checked on its own or an undecodable frame reaches the agent
+#      looking like a normal capture.
+#   3  NEAR-BLACK -- the stale-framebuffer capture this harness has always had.
+#      Kept at the historical, deliberately conservative 15% bright-pixel cutoff;
+#      a real dark-theme TUI frame measured well above it and a stale black
+#      qterminal capture measured 12.6%.
+#   4  FLAT -- near-zero variance across the whole image, i.e. one colour. This
+#      catches an all-WHITE or all-grey frame, which is just as empty as a black
+#      one and which the brightness test alone passes happily.
+# Return 0 when the frame is usable, or one of the codes above. Return 5 when
+# ImageMagick is absent: "cannot tell" must never be silently read as "fine".
+FRAME_FLAT_SIGMA=${QCI_FRAME_FLAT_SIGMA:-0.01}
+FRAME_BRIGHT_MIN=${QCI_FRAME_BRIGHT_MIN:-0.15}
+screenshot_is_usable() {
+    local file=$1 dims bright sigma
+    command -v magick >/dev/null 2>&1 || return 5
+    dims=$(magick identify -quiet -format '%w %h' "$file" 2>/dev/null) || return 2
+    case "$dims" in ''|*' 0'|'0 '*) return 2 ;; esac
+    bright=$(magick "$file" -colorspace gray -threshold 10% \
+        -format '%[fx:mean]' info: 2>/dev/null) || return 2
+    awk -v b="$bright" -v m="$FRAME_BRIGHT_MIN" 'BEGIN { exit !(b < m) }' && return 3
+    sigma=$(magick "$file" -colorspace gray -format '%[fx:standard_deviation]' info: 2>/dev/null) || return 2
+    awk -v s="$sigma" -v m="$FRAME_FLAT_SIGMA" 'BEGIN { exit !(s < m) }' && return 4
+    return 0
+}
+
+# Human-readable reason for a screenshot_is_usable code.
+screenshot_unusable_reason() {
+    case "$1" in
+        2) echo "undecodable (truncated or corrupt image)" ;;
+        3) echo "near-black (stale framebuffer)" ;;
+        4) echo "flat (a single colour fills the frame)" ;;
+        5) echo "cannot analyse (ImageMagick 'magick' is not installed)" ;;
+        *) echo "unusable (code $1)" ;;
+    esac
+}
+
+# THE GATE ON THE PLAIN `screenshot` PATH. Before round 9 this path captured and
+# attested whatever virsh returned, so a black or corrupt frame was handed to the
+# agent looking exactly like a good one -- and an agent that OCR'd it read no
+# text and could not distinguish "the control is absent" from "I cannot read
+# this". That produced a real FALSE FAIL on a working product (run
+# gui-20260916T115528Z: the first S3 capture was 2-colour black, the retries were
+# Publish an accepted candidate to its final IN-TREE path and give the ledger a
+# row for THAT path.
+#
+# Why this exists (B round 1, fable finding 2): candidates are captured into a
+# private scratch dir, so the row the library writes names a scratch path. Every
+# row was therefore `out-of-tree`, and out-of-tree rows whose bytes are absent
+# are REPORTED, never punished -- because a rejected attempt the agent tidied
+# away must not read as an omission. The consequence was that deleting the
+# ACCEPTED frame produced the same benign note as tidying a rejected one, and a
+# scenario that captured two frames and deleted the damning one still graded
+# PASS. Digest reconciliation alone cannot separate those two cases: absent
+# bytes look identical either way.
+#
+# So the delivered frame gets its own row at the path it actually occupies. That
+# row IS in-tree, so deleting the file is a real omission the gate can see,
+# while rejected attempts keep exactly the tidy-able status they had. The
+# accepted frame's two rows (scratch capture + in-tree delivery) share a digest
+# and reconcile to one harness capture, as the comment below already intended.
+#
+# A failed attestation is FATAL here: a delivered frame with no in-tree row is
+# precisely the ungraded-evidence state this whole path exists to prevent.
+deliver_attested_frame() {
+    local src=$1 dst=$2
+    cp "$src" "$dst" || return 1
+    if declare -f capture_attest_frame >/dev/null 2>&1; then
+        capture_attest_frame "$dst" "$VM" || {
+            echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger; it would not be graded" >&2
+            return 1
+        }
+    fi
+    return 0
+}
+
+# the correct window, and the scenario was reported FAIL).
+#
+# Retries are taken into a scratch dir and only the ACCEPTED frame is published
+# to $out, via deliver_attested_frame, which gives it an IN-TREE ledger row.
+# Rejected attempts are copied beside $out for triage and stay unattested, so
+# tidying them away is free; deleting the delivered frame is not.
+# If no attempt is usable this returns NONZERO rather than yielding a bad frame:
+# the caller must not be handed something it cannot form a verdict from.
+capture_usable_screenshot() {
+    local out=$1 attempts=${2:-3}
+    local i candidate rc scratch
+    [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || {
+        echo "vm-gui: screenshot attempts must be a positive integer" >&2
+        return 1
+    }
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shot.XXXXXX") || return 1
+    for (( i=1; i<=attempts; i++ )); do
+        candidate="$scratch/attempt-${i}.png"
+        capture_virsh_screenshot "$VM" "$candidate" \
+            || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
+        screenshot_is_usable "$candidate"; rc=$?
+        if [ "$rc" -eq 0 ]; then
+            deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
+            rm -rf -- "$scratch"
+            return 0
+        fi
+        if [ "$rc" -eq 5 ]; then
+            # No analyser. Do not pretend the frame was checked: hand it over and
+            # say plainly that it was not.
+            deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
+            rm -rf -- "$scratch"
+            echo "vm-gui: WARNING: screenshot NOT checked for blankness -- $(screenshot_unusable_reason 5)" >&2
+            return 0
+        fi
+        cp "$candidate" "${out}.attempt-${i}.png" 2>/dev/null || true
+        echo "vm-gui: screenshot attempt $i/$attempts rejected: $(screenshot_unusable_reason "$rc") (${out}.attempt-${i}.png)" >&2
+        [ "$i" -lt "$attempts" ] && sleep 1
+    done
+    rm -rf -- "$scratch"
+    echo "vm-gui: ERROR: no usable screenshot after $attempts attempts; rejected attempts retained beside $out. Do NOT record a visual PASS or FAIL from a frame you never received -- this is an ERROR condition." >&2
+    return 1
+}
+
 screenshot_fresh() {
     local out=$1 baseline=${2:-} attempts=${3:-3}
     local i candidate hash baseline_hash reason
@@ -480,10 +621,21 @@ screenshot_fresh() {
         }
         baseline_hash=$(sha256sum "$baseline" | awk '{print $1}')
     fi
+    # Candidates are captured OUT OF TREE (a private scratch dir), then either
+    # published to $out on acceptance or copied beside $out for triage on
+    # rejection. Rationale: the library attests what IT captures, so every
+    # attempt gets a row — but a REJECTED attempt is triage litter the agent may
+    # tidy away, and an in-tree row for a file the agent deleted would be a
+    # false omission ERROR. Out-of-tree rows whose bytes are absent are reported
+    # as un-harvested, never punished; the ACCEPTED frame's bytes are present in
+    # the artifact dir as $out, and reconciliation matches by DIGEST, so it
+    # counts exactly once as a real harness capture.
+    local scratch
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shotfresh.XXXXXX") || return 1
     for (( i=1; i<=attempts; i++ )); do
-        candidate="${out}.attempt-${i}.png"
-        virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot \
-            "$VM" "$candidate" >/dev/null || return $?
+        candidate="$scratch/attempt-${i}.png"
+        capture_virsh_screenshot "$VM" "$candidate" \
+            || { local caprc=$?; rm -rf -- "$scratch"; return "$caprc"; }
         reason=""
         if screenshot_is_black "$candidate"; then
             reason="near-black"
@@ -491,6 +643,7 @@ screenshot_fresh() {
             local black_rc=$?
             if [ "$black_rc" -ne 1 ]; then
                 echo "vm-gui: cannot analyse screenshot brightness (requires ImageMagick magick)" >&2
+                rm -rf -- "$scratch"
                 return "$black_rc"
             fi
             hash=$(sha256sum "$candidate" | awk '{print $1}')
@@ -499,13 +652,18 @@ screenshot_fresh() {
             fi
         fi
         if [ -z "$reason" ]; then
-            cp "$candidate" "$out"
+            deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
+            rm -rf -- "$scratch"
             echo "$out"
             return 0
         fi
-        echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason ($candidate)" >&2
+        # Keep the rejected frame beside $out for triage, under the historical
+        # name. It carries no in-tree ledger row, so deleting it is free.
+        cp "$candidate" "${out}.attempt-${i}.png" 2>/dev/null || true
+        echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason (${out}.attempt-${i}.png)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
+    rm -rf -- "$scratch"
     echo "vm-gui: no fresh non-black screenshot after $attempts attempts; attempts retained beside $out" >&2
     return 1
 }
@@ -513,7 +671,7 @@ screenshot_fresh() {
 case "$CMD" in
     screenshot)
         OUT="${1:-/tmp/vm-screenshot.png}"
-        virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$OUT" >/dev/null
+        capture_usable_screenshot "$OUT" "${QCI_SCREENSHOT_ATTEMPTS:-3}" || exit $?
         echo "$OUT"
         ;;
     screenshot-fresh)

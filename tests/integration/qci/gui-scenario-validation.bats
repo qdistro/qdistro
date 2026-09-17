@@ -41,11 +41,38 @@ setup() {
 
 @test "scenario validation accepts an existing readable markdown file" {
     local scenario="$BATS_TEST_TMPDIR/scenario.md"
-    : > "$scenario"
+    printf '# s\n<!-- qci:visual: none -->\n' > "$scenario"
     TEST_SCENARIO=$scenario
 
     run gui_validate_scenarios
 
     [ "$status" -eq 0 ]
     [ ! -s "$QCI_MARKERS" ]
+}
+
+# The visual-evidence contract is driven by a per-scenario declaration. An
+# undeclared scenario used to fall back to grepping its text for "screenshot",
+# which silently EXEMPTED any pixel assertion phrased another way. It is now a
+# registry defect, caught here rather than as a wasted agent attempt.
+@test "scenario validation rejects a scenario with no qci:visual declaration" {
+    local scenario="$BATS_TEST_TMPDIR/undeclared.md"
+    printf '# s\nTake a screenshot and confirm the Approve button is visible.\n' > "$scenario"
+    TEST_SCENARIO=$scenario
+
+    run gui_validate_scenarios
+
+    [ "$status" -eq "$EXIT_USAGE" ]
+    grep -q "blocked:$scenario:" "$QCI_MARKERS"
+    grep -q 'qci:visual' "$QCI_MARKERS"
+}
+
+@test "scenario validation rejects conflicting qci:visual declarations" {
+    local scenario="$BATS_TEST_TMPDIR/conflict.md"
+    printf '# s\n<!-- qci:visual: required -->\n<!-- qci:visual: none -->\n' > "$scenario"
+    TEST_SCENARIO=$scenario
+
+    run gui_validate_scenarios
+
+    [ "$status" -eq "$EXIT_USAGE" ]
+    grep -q conflicting "$QCI_MARKERS"
 }

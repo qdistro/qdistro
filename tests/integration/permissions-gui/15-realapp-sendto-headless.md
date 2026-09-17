@@ -1,5 +1,7 @@
 # 15 — cross-user send-to between two real qnotebook instances, headless
 
+<!-- qci:visual: none -->
+
 **What**: two real qnotebook processes, one running as `work`
 (uid 2000) on `/home/work/testnb`, one as `work2` (uid 3000) on
 `/home/work2/testnb`. Each hosts the `qdistro_sendto` plugin and

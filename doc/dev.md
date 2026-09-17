@@ -107,9 +107,9 @@ but only inside a VM session where qdwin is the active compositor.
 
 ### Agent-assisted GUI runner
 
-Keep Codex with `gpt-5.6-luna` as the default visual runner for the mechanical
-markdown scenarios. Run it non-interactively and let qci place each attempt in
-its own temporary working directory:
+Codex with `gpt-5.6-luna` is the **only** supported visual runner for the
+mechanical markdown scenarios. Run it non-interactively and let qci place each
+attempt in its own temporary working directory:
 
 ```sh
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
@@ -118,15 +118,18 @@ QCI_AGENT_MODEL=gpt-5.6-luna \
 ```
 
 The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
-named in `QCI_AGENT_CMD`, and finally `gpt-5.6-luna`. Set `QCI_AGENT_MODEL`
-whenever a generic wrapper selects the model outside the visible command
-template.
+named in `QCI_AGENT_CMD`, and otherwise records `unknown` — there is NO default,
+deliberately, so a run whose driver cannot be identified is visible as such
+rather than being labelled with the model it was supposed to use. Set
+`QCI_AGENT_MODEL` whenever a generic wrapper selects the model outside the
+visible command template, or the manifest will record `unknown`.
 
-`gpt-5.6-luna` is the only driver verified against the visual-evidence bar
-(it opens a PNG from disk mid-session and reports colour and layout, not just
-text). There is no sanctioned fallback model: a runner that cannot open an
-image cannot grade these scenarios, and must record `ERROR` rather than a
-verdict. Retrying a single scenario on a fresh VM:
+There is no second driver. `gpt-5.6-luna` is the only driver verified against
+the visual-evidence bar (it opens a PNG from disk mid-session and reports colour
+and layout, not just text). A visual scenario is graded by a runner that can
+open a PNG and look at it; when Luna is unavailable the honest outcome is a
+blocked run, not a substitute model. A runner that cannot open an image must
+record `ERROR` rather than a verdict. To retry a single scenario on a fresh VM:
 
 ```sh
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
@@ -157,6 +160,80 @@ bake failure, not a reason to relax the visual scenario.
 and must invoke `virsh`, `vm-exec`, and evidence-writing commands without an
 interactive approval. The scenario still fails closed unless the agent writes
 an explicit passing verdict and exits zero.
+
+#### Visual evidence: vision, not OCR
+
+Visual scenarios are graded by **opening the harvested PNG and looking at it**.
+OCR is not a grading backend. Tesseract *is* installed on this workstation
+(5.5.3, `eng`) and the gate runs it over every attested frame, but only as
+**text corroboration**: the result is recorded in
+`visual-evidence/manifest.tsv` and never decides a verdict. With no backend
+present the text column reads `skip` and scenarios grade exactly as before.
+
+Why the runner must be vision-capable, and why OCR cannot stand in for it:
+
+- OCR reads text and nothing else. It cannot establish a colour, a layout or
+  geometry claim, focus, z-order, animation, or the **absence** of a control —
+  and those are most of what these scenarios actually assert. A text-only
+  backend can be perfectly healthy and still have no opinion about the verdict.
+- A successful OCR run that reads zero words is indistinguishable from a
+  correct reading of a blank screen, so "OCR succeeded" is not evidence.
+
+Measured on one real capture (`qdlocker-09-step2-mic.png`), both backends over
+the same frame:
+
+| | Tesseract 5.5.3 | Luna (`view_image`) |
+|---|---|---|
+| banner + clock + date text | yes | yes |
+| cost | 0.25s, deterministic | a model call |
+| `⚠` glyph | read as `A` | read as a warning marker |
+| dark-navy background, pink outline | — | yes |
+| the empty password field below the "Password" label | **invisible** (no text to read) | yes, with its yellow outline |
+
+The last row is the whole argument: a scenario asserting "the password field is
+present and empty" is unanswerable by OCR and trivially answerable by looking.
+OCR earns its place as a cheap deterministic cross-check on quoted text — if a
+runner claims the screen said X and the attested frame's OCR contains no X,
+that is worth surfacing — but it is a corroborator, not a judge.
+
+Luna is verified against this bar. `todo/reviews/luna-vision-probe-result.md`
+records it opening `qdlocker-09-step2-mic.png` from disk mid-session with its
+`view_image` tool and returning the banner text verbatim, the dark-navy
+background, the pink warning outline, and the yellow-outlined empty password
+field — three of which OCR cannot report at all. The description was checked
+against the image by hand.
+
+Rules for the driver, in order of precedence:
+
+1. If you can open the image, open it. A screenshot you captured but did not
+   inspect is not evidence, and a verdict written from memory of what the
+   scenario said is a fabricated verdict.
+2. If you cannot open images, the scenario's visual assertions are
+   **unobservable by you**: record `ERROR` naming the missing capability. Never
+   `PASS`, never `FAIL` — with no pixels in hand there is no verdict about
+   pixels.
+3. Do not substitute OCR for step 1. Running OCR and reporting its output as if
+   it settled a colour, geometry, or absence claim is over-claiming, and it is
+   the specific failure that made an earlier full run's visual verdicts
+   worthless. What is actually countable in that run
+   (`full-20260914T194046Z-13620/gui`): **113** agent logs, **75** of them
+   mentioning `tesseract`, and **0** containing any image-open call, on a host
+   whose logs record `tesseract: command not found` — OCR was not installed
+   until 2026-09-16. Earlier drafts of this section said "74 cited ... while
+   only 13 ever opened an image"; neither number could be reproduced, and both
+   B-round-1 reviewers said so independently. A substring count is not a count
+   of invocations — a mention may be quoted instructions — so treat 75 as an
+   upper bound on citations and 0 as the load-bearing figure.
+
+Note that this workstation also carries an unrelated game, which ships
+`/usr/bin/tesseract-game` (its first `--version` line is `init: sdl`). It does
+NOT take the `tesseract` name — that is the real OCR, 5.5.3 — so `command -v
+tesseract` would in fact find the right binary here; an earlier version of this
+paragraph said otherwise and was wrong. `gui_ocr_backend_probe` still requires a
+genuine `tesseract <version>` banner rather than mere presence, because presence
+is the weaker check and a PATH is not ours to assume. It accepts any numeric
+version, not 5.x specifically. No scenario verdict may depend on OCR being
+present, absent, or successful.
 
 The qci GUI gate enforces a host/guest boundary for every runner:
 

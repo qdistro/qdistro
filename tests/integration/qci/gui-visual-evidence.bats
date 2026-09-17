@@ -1,0 +1,1371 @@
+#!/usr/bin/env bats
+#
+# Host-only tests for the GUI gate's VISUAL-EVIDENCE CONTRACT
+# (ci/lib/gates/gui.sh).
+#
+# Round 2 required the AGENT to leave evidence that it had read the pixels (an
+# OCR TSV in the artifact dir, or a structured image-open event in its log). An
+# adversarial review reproduced the bypass in one line: the agent has arbitrary
+# host shell, so it authors the evidence too. Round 3 moves the observation to
+# the harness — after the agent exits, the GATE runs OCR itself over the frames
+# harvested for THIS scenario. These tests pin that:
+#
+#   gui_scenario_visual_mode            - the scenario MUST declare required|none
+#   gui_validate_scenarios              - an undeclared scenario is a usage error
+#   gui_ocr_backend_probe               - real tesseract only (not a game's binary)
+#   gui_visual_frames                   - per-frame linkage to this scenario's dir
+#   gui_harness_ocr_frames              - the gate's own OCR pass + manifest
+#   gui_apply_visual_evidence_contract  - PASS/FAIL -> ERROR when unreadable
+#
+# Round 4's review reproduced the residual bypass: a blank/unrelated image the
+# AGENT wrote was a "frame", zero-word OCR returned ok, a pre-planted
+# visual-evidence/ came back as OCR input after its rename, and deleting a
+# damning frame was invisible. Round 5 moves the frame SET off the disk and onto
+# a harness capture log written by scripts/vm/vm-gui. These also pin:
+#
+#   gui_capture_log_init/_verify        - the harness ledger + its hash chain
+#   gui_capture_reconcile               - attested-vs-on-disk, matched by digest
+#
+# The producer side is not re-implemented here: attest_row() sources the REAL
+# scripts/vm/lib/capture-attest.sh, so producer and verifier are pinned against
+# each other rather than against a test-local copy. Both capture tools (vm-gui
+# for the labwc lane, qdwin-helpers.sh for the qdwin lane) use that library.
+#
+# Everything here is filesystem-only: no VM, no agent, no qci run. The host has
+# no real tesseract, so the OCR backend is a stub whose output depends on the
+# FRAME BYTES - which is exactly the property the design relies on.
+
+setup() {
+    REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/gates/gui.sh"
+    EXIT_USAGE=2
+    TDIR="$(mktemp -d "${BATS_TMPDIR:-/tmp}/gui-visual.XXXXXX")"
+    ADIR="$TDIR/artifacts"
+    mkdir -p "$ADIR" "$TDIR/bin"
+
+    VISUAL_MD="$TDIR/07-visual.md"
+    PLAIN_MD="$TDIR/08-headless.md"
+    UNDECLARED_MD="$TDIR/09-undeclared.md"
+    cat > "$VISUAL_MD" <<'EOF'
+# 07 - a pixel-dependent scenario
+<!-- qci:visual: required -->
+$VMGUI "$VM" screenshot $ARTIFACT_DIR/s1.png
+Assert the Approve button is visible.
+EOF
+    cat > "$PLAIN_MD" <<'EOF'
+# 08 - a journal/socket scenario
+<!-- qci:visual: none -->
+$VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service | grep -q Denied'
+EOF
+    # No marker at all, and it DOES capture pixels: round 2's content fallback
+    # would have called this `required`; round 3 calls it a registry defect.
+    cat > "$UNDECLARED_MD" <<'EOF'
+# 09 - captures frames but declares nothing
+$VMGUI "$VM" screenshot $ARTIFACT_DIR/s1.png
+EOF
+
+    # A stub OCR backend: its TSV is derived from the INPUT FILE's bytes, so a
+    # test can build a "frame" that reads as text or as a blank pane, and the
+    # gate's decision demonstrably comes from the frame, not from the agent.
+    cat > "$TDIR/bin/stubtess" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "tesseract 5.3.4"; echo " leptonica-1.84.1"; exit 0
+fi
+in=$1; out=$2
+[ -r "$in" ] || exit 1
+printf 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n' > "$out.tsv"
+printf '1\t1\t0\t0\t0\t0\t0\t0\t800\t600\t-1\t\n' >> "$out.tsv"
+n=0
+for w in $(sed -n 's/^TEXT://p' "$in"); do
+    n=$((n + 1))
+    printf '5\t1\t1\t1\t1\t%d\t10\t20\t60\t14\t93.5\t%s\n' "$n" "$w" >> "$out.tsv"
+done
+exit 0
+EOF
+    # A backend that is installed but cannot read anything (broken traineddata,
+    # unsupported format): every invocation fails.
+    cat > "$TDIR/bin/brokentess" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then echo "tesseract 5.3.4"; exit 0; fi
+echo "Error opening data file" >&2
+exit 1
+EOF
+    chmod +x "$TDIR/bin/stubtess" "$TDIR/bin/brokentess"
+    export PATH="$TDIR/bin:$PATH"
+    export QCI_OCR_BIN=stubtess
+
+    OCR_HEADER=$'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext'
+
+    # The harness capture log for this "scenario attempt". It lives OUTSIDE the
+    # artifact dir, exactly as gui_run_scenario places it in the run tree.
+    CAPLIB="$REPO_ROOT/scripts/vm/lib/capture-attest.sh"
+    CAPLOG="$TDIR/captures/scenario.tsv"
+    CAPVM=testvm
+    gui_capture_log_init "$CAPLOG" "$CAPVM"
+}
+
+# Append a capture row using the REAL producer from
+# scripts/vm/lib/capture-attest.sh, so a drift between the tool that writes the
+# ledger and the gate that verifies it fails these tests instead of silently
+# disabling the contract. This drives the library's INTERNAL row writer, which
+# is what the capture tools reach through their own entry points.
+# Args: abs_path [artifact_root] [vm]  (empty root => the capture is out-of-tree)
+attest_row() {
+    bash -c '
+        set -euo pipefail
+        . "$1"
+        _qci_capture_attest_row "$2" "$3" "$4" "${5-}"
+    ' _ "$CAPLIB" "$CAPLOG" "$1" "${3-$CAPVM}" "${2-$ADIR}"
+}
+
+# The library's one hand-over entry point (the in-guest qdwin lane's producer),
+# driven exactly as that helper drives it. Args: abs_path [artifact_root] [vm]
+attest_frame() {
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="${2-$ADIR}" bash -c '
+        set -euo pipefail
+        . "$1"
+        capture_attest_frame "$2" "$3"
+    ' _ "$CAPLIB" "$1" "${3-$CAPVM}"
+}
+
+# What the GATE does between the agent exiting and grading: seal the ledger and
+# keep "<vm>\t<rows>\t<head>" in its own memory. Echoes that anchor.
+seal_anchor() {
+    local sealed
+    sealed=$(gui_capture_log_seal "${1-$CAPLOG}" "$CAPVM") || return 1
+    printf '%s\t%s' "$CAPVM" "$sealed"
+}
+
+# Stand-in for gui_run_scenario's harvest->seal->grade sequence. Seals the
+# ledger if it is not sealed yet (otherwise re-reads the existing seal, so a
+# test may call it twice), then applies the contract with that anchor.
+# Args: status scenario artifact_dir capture_log
+apply_contract() {
+    local st=$1 scen=$2 adir=$3 clog=${4-} anchor="" sealed="" rows hd
+    if [ -n "$clog" ] && [ -f "$clog" ]; then
+        if tail -n +3 -- "$clog" | awk -F'\t' '$4 == "seal" { found = 1 } END { exit !found }'; then
+            rows=$(tail -n +3 -- "$clog" | grep -c . || true)
+            hd=$(tail -1 -- "$clog" | awk -F'\t' '{print $8}')
+            sealed="$rows"$'\t'"$hd"
+        else
+            sealed=$(gui_capture_log_seal "$clog" "$CAPVM") || sealed=""
+        fi
+        [ -n "$sealed" ] && anchor="$CAPVM"$'\t'"$sealed"
+    fi
+    gui_apply_visual_evidence_contract "$st" "$scen" "$adir" "$clog" "$anchor"
+}
+
+teardown() {
+    [ -n "${TDIR:-}" ] && rm -rf -- "$TDIR"
+}
+
+# Write an image into the artifact dir WITHOUT any harness capture behind it --
+# i.e. exactly what an agent with a host shell can do. The stub OCR backend
+# reads text out of its bytes. Args: relpath [word...]
+# Plant a REAL, decodable PNG carrying the given words as rendered text.
+#
+# These fixtures used to be a PNG magic header followed by plain text. That was
+# fine while nothing decoded them, but round 9 added a decodability probe to the
+# gate (an external review produced `ok:` for a file containing the twelve bytes
+# `not an image`), and a fake PNG is exactly what that probe is built to reject.
+# A fixture that cannot survive the real checks does not test the real code, so
+# the fixtures are now real images. `plant_broken_image` below is the deliberate
+# counter-fixture for the undecodable case.
+plant_image() {
+    local rel=$1; shift
+    local txt="" w
+    mkdir -p "$(dirname "$ADIR/$rel")"
+    for w in "$@"; do txt="$txt$w "; done
+    [ -n "$txt" ] || txt="frame"
+    if command -v magick >/dev/null 2>&1 \
+       && magick -size 320x80 xc:white -pointsize 24 -fill black \
+            -annotate +10+40 "$txt" "$ADIR/$rel" 2>/dev/null; then
+        # Append the TEXT: markers the stub OCR backend reads, AFTER the PNG's
+        # IEND chunk. A decoder stops at IEND and still reports the real
+        # dimensions (verified), so the file is simultaneously a valid image for
+        # the decodability probe and a scriptable fixture for the stub. The
+        # leading newline matters: without it the first marker is glued to the
+        # trailing binary byte and `sed` never matches it.
+        { printf '\n'; for w in "$@"; do printf 'TEXT:%s\n' "$w"; done; } >> "$ADIR/$rel"
+        return 0
+    fi
+    # No ImageMagick: emit a minimal valid 1x1 PNG so the frame is still
+    # decodable. Distinctness by digest is preserved via a trailing comment
+    # chunk carrying the words.
+    printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0\0\0\012IDATx\234c\370\17\0\1\1\1\0\30\335\215\260\0\0\0\0IEND\256B`\202' \
+        > "$ADIR/$rel"
+    { printf '\n'; for w in "$@"; do printf 'TEXT:%s\n' "$w"; done; } >> "$ADIR/$rel"
+}
+
+# plant_image, but at an ABSOLUTE path (for captures taken outside $ADIR).
+plant_image_at() {
+    local dest=$1; shift
+    local txt="" w
+    mkdir -p "$(dirname "$dest")"
+    for w in "$@"; do txt="$txt$w "; done
+    [ -n "$txt" ] || txt="frame"
+    if command -v magick >/dev/null 2>&1 \
+       && magick -size 320x80 xc:white -pointsize 24 -fill black \
+            -annotate +10+40 "$txt" "$dest" 2>/dev/null; then
+        # Append the TEXT: markers the stub OCR backend reads, AFTER the PNG's
+        # IEND chunk. A decoder stops at IEND and still reports the real
+        # dimensions (verified), so the file is simultaneously a valid image for
+        # the decodability probe and a scriptable fixture for the stub. The
+        # leading newline matters: without it the first marker is glued to the
+        # trailing binary byte and `sed` never matches it.
+        { printf '\n'; for w in "$@"; do printf 'TEXT:%s\n' "$w"; done; } >> "$dest"
+        return 0
+    fi
+    printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0\0\0\012IDATx\234c\370\17\0\1\1\1\0\30\335\215\260\0\0\0\0IEND\256B`\202' > "$dest"
+    { printf '\n'; for w in "$@"; do printf 'TEXT:%s\n' "$w"; done; } >> "$dest"
+}
+
+# The deliberate undecodable fixture: bytes that are not an image at all.
+plant_broken_image() {
+    local rel=$1
+    mkdir -p "$(dirname "$ADIR/$rel")"
+    printf 'not an image' > "$ADIR/$rel"
+}
+
+# A real frame: the image AND the harness capture row that attests it.
+write_frame() {
+    local rel=$1; shift
+    plant_image "$rel" "$@"
+    attest_row "$ADIR/$rel"
+}
+write_status() {
+    printf '%s\n' "$1" > "$ADIR/status.txt"
+    [ -n "${2:-}" ] && touch -d "$2" "$ADIR/status.txt"
+    return 0
+}
+
+# --- the scenario DECLARATION (no content fallback any more) ------------------
+
+@test "visual-mode: an explicit required marker is honoured" {
+    run gui_scenario_visual_mode "$VISUAL_MD"
+    [ "$status" -eq 0 ]
+    [ "$output" = required ]
+}
+
+@test "visual-mode: an explicit none marker is honoured" {
+    run gui_scenario_visual_mode "$PLAIN_MD"
+    [ "$output" = none ]
+}
+
+@test "visual-mode: the value is case-insensitive and spacing-tolerant" {
+    printf '<!--qci:visual=REQUIRED-->\n' > "$TDIR/x.md"
+    run gui_scenario_visual_mode "$TDIR/x.md"
+    [ "$output" = required ]
+    printf '<!--   qci:visual   :   None   -->\n' > "$TDIR/y.md"
+    run gui_scenario_visual_mode "$TDIR/y.md"
+    [ "$output" = none ]
+}
+
+# The round-2 fallback grepped the scenario text for `screenshot`/`.png`. It was
+# case-sensitive, blind to any other phrasing ("compare the rendered frame") or
+# capture helper, and it classified such a scenario `none` - i.e. EXEMPT. There
+# is no fallback now.
+@test "visual-mode: an UNDECLARED scenario is invalid, not silently exempt" {
+    run gui_scenario_visual_mode "$UNDECLARED_MD"
+    [[ "$output" == invalid:* ]]
+    [[ "$output" == *"no <!-- qci:visual: required|none --> declaration"* ]]
+}
+
+@test "visual-mode: a pixel assertion phrased without the magic words is still invalid, never none" {
+    printf '# 10\nCompare the rendered frame against the reference.\n' > "$TDIR/z.md"
+    run gui_scenario_visual_mode "$TDIR/z.md"
+    [[ "$output" == invalid:* ]]
+    [ "$output" != none ]
+}
+
+@test "visual-mode: conflicting markers fail CLOSED (round 2 failed open to none)" {
+    printf '<!-- qci:visual: required -->\n<!-- qci:visual: none -->\n' > "$TDIR/c.md"
+    run gui_scenario_visual_mode "$TDIR/c.md"
+    [[ "$output" == invalid:* ]]
+    [[ "$output" == *conflicting* ]]
+}
+
+@test "visual-mode: an unknown declaration value is rejected, not guessed" {
+    printf '<!-- qci:visual: maybe -->\n' > "$TDIR/u.md"
+    run gui_scenario_visual_mode "$TDIR/u.md"
+    [[ "$output" == invalid:* ]]
+    [[ "$output" == *"unknown qci:visual value maybe"* ]]
+}
+
+@test "visual-mode: a missing scenario file is invalid (it used to report none)" {
+    run gui_scenario_visual_mode "$TDIR/does-not-exist.md"
+    [[ "$output" == invalid:* ]]
+}
+
+# --- the declaration is part of registry validation --------------------------
+
+@test "registry: an undeclared scenario is rejected before any golden/VM/agent work" {
+    QCI_MARKERS="$TDIR/markers"; : > "$QCI_MARKERS"
+    record_blocked() { printf 'blocked:%s:%s\n' "$2" "$5" >> "$QCI_MARKERS"; }
+    agent_scenarios() { printf '%s\n' "$UNDECLARED_MD"; }
+
+    run gui_validate_scenarios
+    [ "$status" -eq "$EXIT_USAGE" ]
+    grep -q "blocked:$UNDECLARED_MD:" "$QCI_MARKERS"
+    grep -q 'qci:visual' "$QCI_MARKERS"
+}
+
+@test "registry: conflicting declarations are rejected too" {
+    QCI_MARKERS="$TDIR/markers"; : > "$QCI_MARKERS"
+    record_blocked() { printf 'blocked:%s:%s\n' "$2" "$5" >> "$QCI_MARKERS"; }
+    printf '# c\n<!-- qci:visual: required -->\n<!-- qci:visual: none -->\n' > "$TDIR/c.md"
+    agent_scenarios() { printf '%s\n' "$TDIR/c.md"; }
+
+    run gui_validate_scenarios
+    [ "$status" -eq "$EXIT_USAGE" ]
+    grep -q conflicting "$QCI_MARKERS"
+}
+
+@test "registry: a properly declared scenario passes validation" {
+    QCI_MARKERS="$TDIR/markers"; : > "$QCI_MARKERS"
+    record_blocked() { printf 'blocked:%s:%s\n' "$2" "$5" >> "$QCI_MARKERS"; }
+    agent_scenarios() { printf '%s\n%s\n' "$VISUAL_MD" "$PLAIN_MD"; }
+
+    run gui_validate_scenarios
+    [ "$status" -eq 0 ]
+    [ ! -s "$QCI_MARKERS" ]
+}
+
+@test "registry: every shipped GUI scenario carries a valid declaration" {
+    local f n=0
+    for f in "$REPO_ROOT"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/../qdwin/tests/gui/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/../qdwin/tests/apps/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/../qdlocker/tests/gui/[0-9][0-9]-*.md; do
+        [ -f "$f" ] || continue
+        n=$((n + 1))
+        local m; m=$(gui_scenario_visual_mode "$f")
+        [ "$m" = required ] || [ "$m" = none ] || {
+            echo "undeclared/invalid: $f -> $m"; return 1; }
+    done
+    [ "$n" -ge 60 ]
+}
+
+# --- the observer backend ----------------------------------------------------
+
+@test "ocr probe: a binary that is not really tesseract is rejected" {
+    # Reproduces this host exactly: a `tesseract` on PATH provided by an
+    # unrelated game. `command -v` alone would call the backend present.
+    cat > "$TDIR/bin/faketess" <<'EOF'
+#!/bin/sh
+echo "tesseract-game 1.0 (a puzzle game)"
+EOF
+    chmod +x "$TDIR/bin/faketess"
+    QCI_OCR_BIN=faketess run gui_ocr_backend_probe
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "ocr probe: a real tesseract banner is accepted and its version reported" {
+    run gui_ocr_backend_probe
+    [ "$status" -eq 0 ]
+    [ "$output" = "tesseract 5.3.4" ]
+}
+
+@test "ocr probe: an absent binary is reported as an absent backend" {
+    QCI_OCR_BIN=definitely-not-installed-qci run gui_ocr_backend_probe
+    [ "$status" -ne 0 ]
+    run gui_visual_backend_observation ""
+    [[ "$output" == *"text corroboration ABSENT"* ]]
+    [[ "$output" == *"zypper -n install tesseract-ocr"* ]]
+    # The observation must NOT claim the absence stops scenarios grading: OCR
+    # cannot adjudicate colour/geometry/absence, so it is never the gate.
+    [[ "$output" == *"Visual scenarios still grade"* ]]
+}
+
+@test "preflight: the present-backend line says the GATE runs the OCR" {
+    run gui_visual_backend_observation "tesseract 5.3.4"
+    [[ "$output" == *"run BY THE GATE"* ]]
+}
+
+# --- per-frame linkage -------------------------------------------------------
+
+@test "frames: only images under THIS scenario's artifact dir are enumerated" {
+    mkdir -p "$TDIR/neighbour"
+    write_frame s1.png Approve
+    write_frame sub/s2.PNG Deny
+    printf 'TEXT:Approve\n' > "$TDIR/neighbour/other.png"
+    run gui_visual_frames "$ADIR"
+    [[ "$output" == *"$ADIR/s1.png"* ]]
+    [[ "$output" == *"$ADIR/sub/s2.PNG"* ]]
+    [[ "$output" != *neighbour* ]]
+}
+
+@test "frames: a symlink pointing outside the artifact dir is not a frame" {
+    printf 'TEXT:Approve\n' > "$TDIR/elsewhere.png"
+    ln -s "$TDIR/elsewhere.png" "$ADIR/s1.png"
+    run gui_visual_frames "$ADIR"
+    [ -z "$output" ]
+}
+
+@test "frames: the harness-owned evidence dir is never re-OCR'd as input" {
+    write_frame s1.png Approve
+    mkdir -p "$ADIR/visual-evidence"
+    : > "$ADIR/visual-evidence/frame-001.png"
+    run gui_visual_frames "$ADIR"
+    [[ "$output" != *visual-evidence* ]]
+}
+
+# --- the harness's own OCR pass ---------------------------------------------
+
+@test "harness ocr: the gate produces a manifest with a sha256 per frame" {
+    write_frame s1.png Approve Deny
+    write_frame s2.png
+    run gui_harness_ocr_frames "$ADIR" "$ADIR/visual-evidence"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^frames=2\ ocr_ok=2\ ocr_fail=0\ text_frames=1\ words=[1-9][0-9]*\ undecodable=0\ dec_unknown=0$ ]]
+    [ -f "$ADIR/visual-evidence/manifest.tsv" ]
+    grep -q '^sha256	bytes	frame	decodable	tsv	ocr_rc	words$' "$ADIR/visual-evidence/manifest.tsv"
+    # every frame is recorded as decodable, by name not by position
+    [ "$(awk -F'	' 'NR>1 && $4=="yes"' "$ADIR/visual-evidence/manifest.tsv" | wc -l)" -eq 2 ]
+    # the recorded digest is the real digest of the real frame
+    local want; want=$(sha256sum "$ADIR/s1.png" | awk '{print $1}')
+    grep -q "^$want	" "$ADIR/visual-evidence/manifest.tsv"
+    [ "$(grep -c . "$ADIR/visual-evidence/manifest.tsv")" -eq 3 ]
+}
+
+@test "harness ocr: word counting ignores tesseract's empty structural rows" {
+    write_frame blank.png
+    run gui_harness_ocr_frames "$ADIR" "$ADIR/visual-evidence"
+    [[ "$output" == *"text_frames=0 words=0"* ]]
+    # ... even though the TSV really does carry a data row
+    [ "$(grep -c . "$ADIR"/visual-evidence/frame-001-*.tsv)" -eq 2 ]
+}
+
+# --- THE BYPASSES THE REVIEW REPRODUCED -------------------------------------
+
+# Verbatim from the round-3 review: "I reproduced this exact case: a JSON line
+# {"message":"view_image /tmp/unrelated.png"} written after status.txt made
+# gui_apply_visual_evidence_contract PASS return PASS."
+@test "BYPASS(reproduced): a forged view_image JSON line after status.txt no longer passes" {
+    write_status PASS '2026-09-15 10:00:00'
+    cat > "$TDIR/agent.log" <<'EOF'
+{"message":"view_image /tmp/unrelated.png"}
+EOF
+    touch -d '2026-09-15 10:00:30' "$TDIR/agent.log"
+    # called both with and without a log argument: the contract no longer takes one
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took NO capture"* ]]
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "BYPASS: the agent-log evidence path is GONE, not merely narrowed" {
+    # A well-formed codex --json image-open event is no longer evidence either;
+    # leaving a second accepted form alive would leave a second thing to forge.
+    # Explicit refutation, not a bare `!`: a leading `!` neither trips errexit
+    # nor fails a Bats test mid-body, so it would silently assert nothing here.
+    if declare -f gui_visual_json_evidence >/dev/null; then
+        echo "gui_visual_json_evidence still exists - the forgeable log path is alive"; return 1
+    fi
+    if declare -f gui_visual_ocr_evidence >/dev/null; then
+        echo "gui_visual_ocr_evidence still exists - the agent-placed TSV path is alive"; return 1
+    fi
+    write_status PASS
+    cat > "$TDIR/agent.log" <<'EOF'
+{"type":"item.completed","item":{"type":"function_call","name":"view_image","arguments":{"path":"/tmp/qci-gui-art/abc/s1.png"}}}
+EOF
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "BYPASS: a hand-written tesseract TSV in the artifact dir is not evidence" {
+    # Round 2 accepted exactly this: valid header + one invented row, mtime set
+    # before status.txt. It costs the agent one printf.
+    write_status PASS '2026-09-15 10:00:05'
+    { printf '%s\n' "$OCR_HEADER"
+      printf '5\t1\t1\t1\t1\t1\t10\t20\t60\t14\t93.5\tApprove\n'; } > "$ADIR/s1-ocr.tsv"
+    touch -d '2026-09-15 10:00:01' "$ADIR/s1-ocr.tsv"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took NO capture"* ]]
+}
+
+@test "BYPASS: a pre-planted visual-evidence/ directory is moved aside, never read" {
+    write_status PASS
+    mkdir -p "$ADIR/visual-evidence"
+    printf 'sha256\tbytes\tframe\ttsv\tocr_rc\twords\n' > "$ADIR/visual-evidence/manifest.tsv"
+    printf 'deadbeef\t100\tforged.png\tforged.tsv\t0\t99\n' >> "$ADIR/visual-evidence/manifest.tsv"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [ -f "$ADIR/visual-evidence.agent-supplied/manifest.tsv" ]
+    if grep -q deadbeef "$ADIR/visual-evidence/manifest.tsv"; then
+        echo "the planted manifest was read back as harness evidence"; return 1
+    fi
+}
+
+@test "BYPASS: vm-gui's click-preview ledger is not a frame" {
+    write_status PASS
+    mkdir -p "$ADIR/click-targets"
+    { printf 'timestamp_utc\tpreview_id\tphase\tvm\tx\ty\tlabel\n'
+      printf '2026-09-15T10:00:00Z\tclick-001\tpreview\tvm\t490\t337\t1 hour\n'; } \
+        > "$ADIR/click-targets/clicks.tsv"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+# --- the contract itself -----------------------------------------------------
+
+@test "contract: visual scenario + a readable frame -> the verdict is accepted" {
+    write_status PASS
+    write_frame step2.png Approve Deny Later
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "$status" -eq 0 ]
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
+    # The exact word count is a tesseract-version/rendering detail; what this
+    # test is about is that the gate read text out of the frame at all.
+    [[ "$output" =~ read\ text\ in\ 1\ frame\(s\)\ \([1-9][0-9]*\ words ]]
+    # the note must NOT over-claim what OCR can establish
+    [[ "$output" == *"colour, layout, focus, z-order and absence claims are NOT adjudicated"* ]]
+}
+
+@test "contract: ORDERING is irrelevant - a frame newer than status.txt still counts" {
+    # Round 2 rejected evidence whose mtime was after status.txt, while the same
+    # prompt told every agent to write status.txt first. That contradiction
+    # turned fully observed runs into ERROR. The harness reads the frames after
+    # the agent has exited, so order cannot matter.
+    write_status PASS '2026-09-15 10:00:00'
+    write_frame s1.png Approve
+    touch -d '2026-09-15 10:05:00' "$ADIR/s1.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "contract: an invented FAIL is rejected the same way as an invented PASS" {
+    write_status FAIL
+    run apply_contract FAIL "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "contract: no frames at all -> ERROR naming what was missing" {
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took NO capture"* ]]
+    [[ "$output" == *"the HARNESS could not read"* ]]
+    [[ "$output" == *PASS* ]]
+}
+
+# "the harness ran OCR and got nothing" must be distinguishable from "no OCR
+# happened". A legitimately blank pane is an observation; round 2 rejected it
+# (header-only TSV) and manufactured a false ERROR.
+@test "contract: a genuinely textless frame is an OBSERVATION, not a missing one" {
+    write_status PASS
+    write_frame blank.png
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"read NO text in any of them"* ]]
+    [[ "$output" == *"The frames are attested for this VM"* ]]
+    [[ "$output" == *"rests on something OCR cannot read"* ]]
+}
+
+@test "contract: a backend that fails on every frame does not void an attested verdict" {
+    # OCR reads TEXT only. A frame set this gate captured, sealed and harvested
+    # is evidence whether or not tesseract could read words in it, so a broken
+    # backend degrades the text column and nothing else. Making it ERROR would
+    # void verdicts over a tool that could not have adjudicated them anyway.
+    write_status PASS
+    write_frame s1.png Approve
+    QCI_OCR_BIN=brokentess run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"read NO text in any of them"* ]]
+}
+
+@test "contract: no OCR backend still grades, and says the text column is skipped" {
+    write_status PASS
+    write_frame s1.png Approve
+    QCI_OCR_BIN=definitely-not-installed-qci run apply_contract \
+        PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"no OCR backend on this host"* ]]
+    [[ "$output" == *"text column is \`skip\`"* ]]
+    # What IS load-bearing stays load-bearing: an absent ledger is still ERROR
+    # with no backend present, so this is a demotion of OCR, not of attestation.
+    rm -f "$CAPLOG"
+    QCI_OCR_BIN=definitely-not-installed-qci run apply_contract \
+        PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "contract: an UNDECLARED scenario's PASS is not graded" {
+    write_status PASS
+    write_frame s1.png Approve
+    run apply_contract PASS "$UNDECLARED_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"must declare"* ]]
+}
+
+@test "contract: a qci:visual=none scenario is unaffected" {
+    write_status PASS
+    run apply_contract PASS "$PLAIN_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [ -z "${output#*$'\t'}" ]
+    run apply_contract FAIL "$PLAIN_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = FAIL ]
+    # ... and the gate did not run OCR for it
+    [ ! -d "$ADIR/visual-evidence" ]
+}
+
+@test "contract: SKIP and UNKNOWN are passed through untouched" {
+    write_status SKIP
+    run apply_contract SKIP "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = SKIP ]
+    run apply_contract UNKNOWN "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = UNKNOWN ]
+}
+
+@test "contract: there is no env bypass that can re-accept an unevidenced PASS" {
+    write_status PASS
+    for v in QCI_VISUAL_EVIDENCE QCI_SKIP_VISUAL_EVIDENCE QCI_ALLOW_UNVERIFIED_VISUAL \
+             QCI_GUI_NO_VISUAL_CONTRACT QCI_ALLOW_TEST_EDITS; do
+        eval "export $v=0"
+        run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+        [ "${output%%$'\t'*}" = ERROR ]
+        eval "export $v=1"
+        run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+        [ "${output%%$'\t'*}" = ERROR ]
+        eval "unset $v"
+    done
+}
+
+# ===========================================================================
+# ROUND 5 — the bypass the round-4 review spelled out, and the three holes
+# behind it.
+# ===========================================================================
+
+# Verbatim from the round-4 review:
+#   "the agent writes visual-evidence/frame.png containing a blank or unrelated
+#    valid image, writes PASS, and leaves no asserted VM capture. The gate
+#    renames that directory to visual-evidence.agent-supplied; the frame finder
+#    does not exclude the renamed path; Tesseract succeeds with zero words; the
+#    contract returns ok."
+@test "BYPASS(round-4, exact): blank image planted in visual-evidence/ + PASS + no VM capture -> ERROR" {
+    write_status PASS
+    mkdir -p "$ADIR/visual-evidence"
+    # a VALID image the OCR backend reads successfully and finds no words in
+    printf '\211PNG\r\n\032\n' > "$ADIR/visual-evidence/frame.png"
+    # no attest_row anywhere: the harness never captured anything
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took NO capture"* ]]
+    # and the planted bytes must never have been an OCR input, even after the
+    # quarantine rename that round 3 left uncovered
+    run gui_visual_frames "$ADIR"
+    [[ "$output" != *agent-supplied* ]]
+    [[ "$output" != *frame.png* ]]
+}
+
+@test "(A) the quarantined agent-supplied tree is excluded from the frame set" {
+    # The round-3 exclusion was `-not -path \$adir/visual-evidence/*`, so the
+    # rename defeated it in one step. Exclusion is now by directory name prefix.
+    mkdir -p "$ADIR/visual-evidence.agent-supplied" "$ADIR/sub/visual-evidence"
+    : > "$ADIR/visual-evidence.agent-supplied/planted.png"
+    : > "$ADIR/sub/visual-evidence/nested.png"
+    plant_image real.png Approve
+    run gui_visual_frames "$ADIR"
+    [[ "$output" == *"$ADIR/real.png"* ]]
+    [[ "$output" != *planted.png* ]]
+    [[ "$output" != *nested.png* ]]
+}
+
+@test "(A) quarantine + exclusion together: a planted frame cannot become evidence on the next pass" {
+    write_status PASS
+    mkdir -p "$ADIR/visual-evidence"
+    printf '\211PNG\r\n\032\nTEXT:Approve\n' > "$ADIR/visual-evidence/frame.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [ -f "$ADIR/visual-evidence.agent-supplied/frame.png" ]
+    # second pass over the same tree: still not evidence
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [ ! -f "$ADIR/visual-evidence/manifest.tsv" ] || \
+        grep -qv frame.png "$ADIR/visual-evidence/manifest.tsv"
+}
+
+# --- (B) zero-word OCR is no longer what makes a frame evidence -------------
+
+@test "(B) an UNATTESTED blank image is not evidence, however well OCR runs on it" {
+    write_status PASS
+    plant_image blank.png          # valid image, zero words, zero captures
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took NO capture"* ]]
+    [[ "$output" == *"agent-authored"* ]]
+}
+
+@test "(B) an ATTESTED blank frame IS evidence — the empty-pane case is not a false ERROR" {
+    write_status PASS
+    write_frame blank.png
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"read NO text in any of them"* ]]
+}
+
+@test "(B) planting extra unattested images alongside one real capture cannot inflate the evidence" {
+    write_status PASS
+    write_frame real.png Approve
+    plant_image fake1.png Deny
+    plant_image fake2.png Deny
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    # exactly ONE frame is graded, and it is the attested one
+    [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
+    [ "$(grep -c . "$ADIR/visual-evidence/manifest.tsv")" -eq 2 ]
+    if grep -q 'fake' "$ADIR/visual-evidence/manifest.tsv"; then
+        echo "an unattested planted image reached the OCR manifest"; return 1
+    fi
+}
+
+# --- (C) frame omission — "cheaper than image forgery" ----------------------
+
+@test "(C) deleting a captured in-tree frame is DETECTED, not invisible" {
+    write_status PASS
+    write_frame good.png Approve
+    write_frame damning.png Error Denied
+    rm -f "$ADIR/damning.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+    [[ "$output" == *"frame omission"* ]]
+}
+
+@test "(C) deleting an INTERIOR capture row breaks the hash chain" {
+    write_status PASS
+    write_frame first.png One
+    write_frame damning.png Error Denied
+    write_frame last.png Three
+    rm -f "$ADIR/damning.png"
+    # the agent also edits the ledger the prompt never mentions
+    sed -i '/damning/d' "$CAPLOG"
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 1 ]
+    [[ "$output" == bad:* ]]
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"capture ledger"* || "$output" == *"out of sequence"* ]]
+}
+
+@test "(C) reordering capture rows breaks the hash chain" {
+    write_status PASS
+    write_frame a.png One
+    write_frame b.png Two
+    { head -2 "$CAPLOG"; tail -1 "$CAPLOG"; sed -n '3p' "$CAPLOG"; } > "$CAPLOG.x"
+    mv "$CAPLOG.x" "$CAPLOG"
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 1 ]
+}
+
+# TAIL TRUNCATION. Round 6 called this a real hole, not a bookkeeping residual,
+# and asked for it to be closed. It is closed for every moment the gate can
+# reach: once the agent has exited, the gate SEALS the ledger with a nonce it
+# generated in its own process and keeps the row count and chain head in shell
+# variables only. Reproducing that head after dropping a row would need a
+# sha256 preimage.
+#
+# What remains open is named precisely in the contract block and pinned by the
+# next test: an agent deleting its OWN last row before it exits is the same act
+# as never taking that screenshot, and no ledger can tell those apart. The
+# scenario-declared capture count is the mechanism for that, and it is pinned
+# below too.
+@test "(C) truncating the LAST capture row AFTER the gate sealed the ledger is DETECTED" {
+    write_status PASS
+    write_frame good.png Approve
+    write_frame damning.png Error Denied
+    local anchor
+    anchor=$(seal_anchor)          # <- the agent has exited; the gate freezes it
+    rm -f "$ADIR/damning.png"
+    sed -i '$d' "$CAPLOG"          # drops the seal
+    sed -i '$d' "$CAPLOG"          # drops the damning capture row
+    run gui_capture_log_verify "$CAPLOG" testvm "${anchor#*$'\t'}"
+    [ "$status" -eq 1 ]
+    run gui_apply_visual_evidence_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG" "$anchor"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "(C) removing only the gate's SEAL row is DETECTED" {
+    write_status PASS
+    write_frame good.png Approve
+    local anchor
+    anchor=$(seal_anchor)
+    sed -i '$d' "$CAPLOG"
+    run gui_apply_visual_evidence_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG" "$anchor"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"after the agent exited"* ]]
+}
+
+@test "(C) rebuilding the WHOLE ledger from its own seed is DETECTED by the seal" {
+    # The agent can read the seed, so it can re-derive a perfectly consistent
+    # chain. It cannot re-derive the head the gate holds in memory.
+    write_status PASS
+    write_frame good.png Approve
+    write_frame damning.png Error Denied
+    local anchor seed
+    anchor=$(seal_anchor)
+    seed=$(head -1 "$CAPLOG" | awk -F'\t' '{print $3}')
+    { head -2 "$CAPLOG"; } > "$CAPLOG.x"
+    mv "$CAPLOG.x" "$CAPLOG"
+    rm -f "$ADIR/damning.png"
+    attest_row "$ADIR/good.png"
+    run gui_apply_visual_evidence_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG" "$anchor"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "(C) an UNSEALED ledger is not graded at all (fail closed)" {
+    write_status PASS
+    write_frame good.png Approve
+    run gui_apply_visual_evidence_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG" ""
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"could not SEAL"* ]]
+}
+
+# The honest residual, stated: truncation BEFORE the agent exits is
+# indistinguishable from never capturing, and only the scenario's own declared
+# capture count can close it.
+@test "(C) RESIDUAL: a row dropped BEFORE the gate seals is indistinguishable from never capturing" {
+    write_status PASS
+    write_frame good.png Approve
+    write_frame damning.png Error Denied
+    rm -f "$ADIR/damning.png"
+    sed -i '$d' "$CAPLOG"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "(C) a scenario that DECLARES its capture count turns that residual into ERROR" {
+    printf '# 11\n<!-- qci:visual: required -->\n<!-- qci:visual-captures: 2 -->\n' > "$TDIR/two.md"
+    run gui_scenario_min_captures "$TDIR/two.md"
+    [ "$output" = 2 ]
+    write_status PASS
+    write_frame good.png Approve
+    write_frame damning.png Error Denied
+    rm -f "$ADIR/damning.png"
+    sed -i '$d' "$CAPLOG"
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"visual-captures: 2"* ]]
+    [[ "$output" == *"only 1 capture"* ]]
+}
+
+@test "(C) an undeclared scenario floors at one capture" {
+    run gui_scenario_min_captures "$VISUAL_MD"
+    [ "$output" = 1 ]
+    run gui_scenario_min_captures "$TDIR/does-not-exist.md"
+    [ "$output" = 1 ]
+}
+
+@test "(C) an overwritten capture (same path, different bytes) is omission too" {
+    write_status PASS
+    write_frame s1.png Error Denied
+    printf '\211PNG\r\n\032\nTEXT:Approve\n' > "$ADIR/s1.png"   # substituted
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+}
+
+@test "(C) a capture written OUTSIDE the artifact tree is reported, not punished" {
+    write_status PASS
+    write_frame s1.png Approve
+    # vm-gui's default destination is /tmp/vm-screenshot.png: a real capture that
+    # was never meant to be harvested. Its absence must not manufacture an ERROR.
+    printf '\211PNG\r\n\032\nTEXT:Scratch\n' > "$TDIR/vm-screenshot.png"
+    attest_row "$TDIR/vm-screenshot.png" ""
+    rm -f "$TDIR/vm-screenshot.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"1 captured outside the artifact dir and not graded"* ]]
+}
+
+@test "(C) capture-then-copy still counts: attestation matches by DIGEST, not path" {
+    write_status PASS
+    plant_image_at "$TDIR/scratch.png" Approve
+    attest_row "$TDIR/scratch.png" ""
+    cp "$TDIR/scratch.png" "$ADIR/s1.png"
+    rm -f "$TDIR/scratch.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 1 frame(s)"* ]]
+}
+
+# --- the ledger itself ------------------------------------------------------
+
+@test "capture log: a fresh log has a seeded, VM-BOUND header and no rows" {
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "rows=0 in_tree=0 out_tree=0" ]
+    head -1 "$CAPLOG" | grep -q '^#qci-capture-log	2	[0-9a-f]\{64\}	testvm$'
+}
+
+@test "capture log: a ledger cannot be provisioned without a bound VM" {
+    # Losing the binding by omission would silently restore the cross-VM route,
+    # so the gate refuses to create an unbound ledger at all.
+    run gui_capture_log_init "$TDIR/unbound.tsv" ""
+    [ "$status" -ne 0 ]
+    [ ! -f "$TDIR/unbound.tsv" ]
+}
+
+@test "capture tools: every lane's capture tool sources the shared attestation library" {
+    # vm-gui (virsh, labwc/admin lane): the library TAKES the screenshot.
+    grep -q 'lib/capture-attest.sh' "$REPO_ROOT/scripts/vm/vm-gui"
+    # The plain screenshot lane reaches the library through the usable-frame
+    # gate (round 9), which rejects black/flat/undecodable captures before the
+    # agent ever sees them. Assert the chain, not one spelling of it.
+    grep -q 'capture_usable_screenshot "\$OUT"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_screenshot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_screenshot "\$VM" "\$raw"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_screenshot "\$VM" "\$post"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_screenshot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
+    # qdwin_screenshot (in-guest qdshell capture, qdwin/qdlocker lane). Without
+    # this, every qci:visual=required scenario in those repos would be ERROR.
+    local qh="$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh"
+    if [ -r "$qh" ]; then
+        grep -q 'lib/capture-attest.sh' "$qh"
+        grep -q 'capture_attest_frame "\$out" "\$VMNAME"' "$qh"
+    fi
+    # qdwin_apps_screenshot (virsh, qdwin apps lane) -- the third capture tool.
+    local ah="$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh"
+    if [ -r "$ah" ]; then
+        grep -q 'lib/capture-attest.sh' "$ah"
+        grep -q 'capture_virsh_screenshot "\$VMNAME" "\$out"' "$ah"
+    fi
+}
+
+# Round 6 caught the earlier version of this test as inadequate: it only looked
+# for a `vm-gui` case arm while the SAME suite demonstrated a generic
+# `capture_attest <file>` entry point under the name attest_via_env. The
+# property that actually matters is not "no subcommand" but "no function
+# anywhere blesses bytes the library did not itself capture, and the one
+# hand-over helper that must exist for the in-guest lane is bound to the
+# assigned VM". That is what this pins.
+@test "capture tools: the GENERIC 'attest any file' entry point is gone" {
+    # No command-line route ...
+    if grep -qE '^[[:space:]]*attest\)' "$REPO_ROOT/scripts/vm/vm-gui"; then
+        echo "vm-gui grew an 'attest' subcommand - that IS the bypass"; return 1
+    fi
+    # ... and no ungated library function under the old name, in the library or
+    # in any capture tool that sources it.
+    if grep -qE '^[[:space:]]*capture_attest\(\)' "$CAPLIB"; then
+        echo "the ungated capture_attest() primitive is back"; return 1
+    fi
+    local f
+    for f in "$REPO_ROOT/scripts/vm/vm-gui" \
+             "$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh" \
+             "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh"; do
+        [ -r "$f" ] || continue
+        if grep -qE 'capture_attest[[:space:]]+"' "$f"; then
+            echo "$f still calls the ungated capture_attest"; return 1
+        fi
+    done
+    # The old name is not merely unused: it does not exist, so a scenario that
+    # calls it gets an error and NO row.
+    run bash -c '. "$1"; declare -f capture_attest >/dev/null' _ "$CAPLIB"
+    [ "$status" -ne 0 ]
+}
+
+@test "FORGERY(round 6): calling the removed capture_attest on an uncaptured image ERRORs" {
+    # The exact round-6 CRITICAL: the agent writes a blank PNG under the
+    # artifact dir, sources the library and asks for a row.
+    write_status PASS
+    plant_image forged.png Approve
+    run env QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" bash -c \
+        '. "$1"; capture_attest "$2" testvm 2>/dev/null; echo "rc=$?"' \
+        _ "$CAPLIB" "$ADIR/forged.png"
+    [ "$output" = "rc=127" ]   # the primitive does not exist any more
+    # no row was written, so the scenario has no evidence at all
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$output" = "rows=0 in_tree=0 out_tree=0" ]
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took NO capture"* ]]
+}
+
+# DOCUMENTED RESIDUAL, pinned so the contract's claim and the code agree.
+#
+# The in-guest qdwin lane's capture is a guest protocol that cannot live inside
+# the library, so ONE hand-over helper (capture_attest_frame) must exist. At the
+# same uid it cannot be made unforgeable: the agent can call it, and can equally
+# re-implement the published chain format itself. It is GATED on the bound VM,
+# and the contract claims exactly that and no more.
+@test "RESIDUAL: the gated hand-over helper still accepts bytes it did not capture" {
+    write_status PASS
+    plant_image forged.png Approve
+    attest_frame "$ADIR/forged.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "VM BINDING: the hand-over helper REFUSES a capture of another worker's VM" {
+    plant_image other.png Approve
+    run attest_frame "$ADIR/other.png" "$ADIR" other-worker-vm
+    [ "$status" -ne 0 ]
+    [[ "$output" == *REFUSED* ]]
+    [[ "$output" == *testvm* ]]
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$output" = "rows=0 in_tree=0 out_tree=0" ]
+}
+
+@test "VM BINDING: a hand-appended row for another VM is rejected by the verifier" {
+    # The producer refuses; this is the belt-and-braces check for a row the
+    # agent appended itself with the chain arithmetic done by hand.
+    write_status PASS
+    write_frame mine.png Approve
+    local seed prev payload chain
+    prev=$(tail -1 "$CAPLOG" | awk -F'\t' '{print $8}')
+    plant_image neighbour.png Approve
+    payload=$(printf '2\t2026-09-15T10:00:00Z\tother-worker-vm\tin-tree\t10\t%s\t%s' \
+        "$(sha256sum "$ADIR/neighbour.png" | awk '{print $1}')" "$ADIR/neighbour.png")
+    chain=$(printf '%s\t%s' "$prev" "$payload" | sha256sum | awk '{print $1}')
+    printf '%s\t%s\n' "$payload" "$chain" >> "$CAPLOG"
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"records VM other-worker-vm"* ]]
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "VM BINDING: a ledger bound to a VM this scenario was not assigned is rejected" {
+    write_status PASS
+    write_frame s1.png Approve
+    local anchor
+    anchor=$(seal_anchor)
+    # the gate knows, from its OWN memory, which VM it assigned
+    run gui_capture_log_verify "$CAPLOG" someone-elses-vm
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"bound to VM testvm"* ]]
+    run gui_apply_visual_evidence_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG" \
+        "someone-elses-vm"$'\t'"${anchor#*$'\t'}"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+# The seal is only a boundary if the GATE actually performs it. This pins the
+# wiring, because a future edit that drops the seal would silently reopen tail
+# truncation while every unit test above still passed.
+@test "wiring: gui_run_scenario binds, seals, and passes the anchor on both attempt paths" {
+    local g="$REPO_ROOT/ci/lib/gates/gui.sh"
+    # the ledger is bound to the attempt's VM (first attempt and retry)
+    grep -q 'gui_capture_log_init "$caplog" "$vm"' "$g"
+    grep -q 'gui_capture_log_init "$caplogN" "$vmN"' "$g"
+    # the ledger is sealed after harvest, before grading
+    grep -q 'capanchor=$(gui_capture_log_seal "$caplog" "$vm")' "$g"
+    grep -q 'capanchorN=$(gui_capture_log_seal "$caplogN" "$caplogN_vm")' "$g"
+    # and the anchor reaches the contract
+    grep -q '"$status" "$scenario" "$adir" "$caplog" "$capanchor"' "$g"
+    grep -q '"$statusN" "$scenario" "$adirN" "$caplogN" "$capanchorN"' "$g"
+}
+
+@test "capture log: the gated hand-over entry point writes accepted rows" {
+    plant_image e.png Hello
+    attest_frame "$ADIR/e.png"
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "rows=1 in_tree=1 out_tree=0" ]
+}
+
+@test "capture log: the real producer writes rows this verifier accepts" {
+    write_frame a.png One
+    write_frame b.png Two
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "rows=2 in_tree=2 out_tree=0" ]
+    # the recorded digest is the real digest of the real file
+    local want; want=$(sha256sum "$ADIR/a.png" | awk '{print $1}')
+    grep -q "	$want	" "$CAPLOG"
+}
+
+@test "capture log: an absent log is ERROR, never an exemption" {
+    write_status PASS
+    plant_image s1.png Approve
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$TDIR/nope.tsv"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"capture log is missing"* ]]
+    # ... and so is "no log was provisioned at all"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" ""
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no capture log was provisioned"* ]]
+}
+
+@test "capture log: a log the agent rebuilt with its own header is rejected" {
+    write_status PASS
+    plant_image s1.png Approve
+    { printf 'seq\tts_utc\tvm\tscope\tbytes\tsha256\tpath\tchain\n'
+      printf '1\t2026-09-15T10:00:00Z\ttestvm\tin-tree\t10\t%s\t%s/s1.png\tdeadbeef\n' \
+        "$(sha256sum "$ADIR/s1.png" | awk '{print $1}')" "$ADIR"; } > "$CAPLOG"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"header is missing or was rewritten"* ]]
+}
+
+@test "capture log: the gate copies the ledger into its own evidence dir for audit" {
+    write_status PASS
+    write_frame s1.png Approve
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [ -f "$ADIR/visual-evidence/captures.tsv" ]
+    [ -f "$ADIR/visual-evidence/attested-frames.txt" ]
+    cmp -s "$CAPLOG" "$ADIR/visual-evidence/captures.tsv"
+}
+
+# --- the structural facts the harness computes for NON-TEXT assertions ------
+
+@test "structural: identical captures are REPORTED as 1 distinct, not failed" {
+    # qdwin-noctalia/05 "bar stays after idle" asserts the frame does NOT change.
+    # A diff oracle that FAILED on identical frames would invent a wrong verdict.
+    write_status PASS
+    write_frame before.png
+    cp "$ADIR/before.png" "$ADIR/after.png"
+    attest_row "$ADIR/after.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 2 frame(s), 1 distinct"* ]]
+}
+
+@test "structural: frames that really changed are reported as distinct" {
+    write_status PASS
+    write_frame before.png Approve
+    write_frame after.png Approved Revoke
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 2 frame(s), 2 distinct"* ]]
+}
+
+# --- B round 1: the guards the reviewers found UNTESTED -----------------------
+#
+# Two independent reviewers mutated production and found that removing the
+# decodability gate entirely failed ZERO of these tests: `plant_broken_image`
+# was written as the deliberate counter-fixture and then never called. These
+# tests call it, and pin the missing-decoder case that let a 12-byte file
+# reading `not an image` carry a graded PASS.
+
+@test "decodable: an absent decoder is 'unknown', never a silent yes" {
+    plant_image real.png Approve
+    # The function needs only `command -v` and `magick`; pointing PATH at an
+    # empty dir removes the decoder without disturbing anything else it uses.
+    mkdir -p "$TDIR/empty"
+    PATH="$TDIR/empty" run gui_frame_is_decodable "$ADIR/real.png"
+    [ "$status" -eq 0 ]
+    [ "$output" = unknown ]
+}
+
+@test "decodable: real bytes decode and junk bytes do not" {
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    plant_image real.png Approve
+    plant_broken_image junk.png
+    run gui_frame_is_decodable "$ADIR/real.png"
+    [ "$output" = yes ]
+    run gui_frame_is_decodable "$ADIR/junk.png"
+    [ "$output" = no ]
+}
+
+@test "contract: ALL frames undecodable -> ERROR, not a graded verdict" {
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    write_status PASS
+    plant_broken_image junk.png
+    attest_row "$ADIR/junk.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"UNDECODABLE"* ]]
+}
+
+@test "contract: NO DECODER installed -> ERROR naming the missing capability" {
+    # The escape astra reproduced in B round 1: `unknown` is not `no`, so the
+    # old all-undecodable test could not fire and a sealed, correctly VM-bound
+    # ledger over junk bytes kept its PASS. The leaf probe is stubbed to report
+    # what it reports on a host with no ImageMagick; everything downstream of it
+    # -- the manifest, the counts, and the verdict logic under test -- is the
+    # real production code.
+    write_status PASS
+    plant_broken_image junk.png
+    attest_row "$ADIR/junk.png"
+    gui_frame_is_decodable() { printf 'unknown\n'; }
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"NO IMAGE DECODER"* ]]
+    [[ "$output" == *"never read a pixel"* ]]
+}
+
+@test "contract: a decoder-less run of REAL frames is still ERROR, not PASS" {
+    # Not a corrupt-capture case: the frames are fine, the gate simply cannot
+    # look at them. The verdict consequence is identical and fail-closed.
+    write_status PASS
+    write_frame step2.png Approve Deny
+    gui_frame_is_decodable() { printf 'unknown\n'; }
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"NO IMAGE DECODER"* ]]
+}
+
+@test "contract: broken AND unchecked together, none decoded -> ERROR" {
+    write_status PASS
+    plant_broken_image junk1.png
+    plant_broken_image junk2.png
+    # Two identical junk files share a digest and reconcile to ONE frame, which
+    # would exercise the all-undecodable branch instead of the mixed one.
+    printf 'second' >> "$ADIR/junk2.png"
+    attest_row "$ADIR/junk1.png"
+    attest_row "$ADIR/junk2.png"
+    # The probe runs in a command substitution, so the call counter has to live
+    # on disk rather than in a shell variable.
+    : > "$TDIR/deccalls"
+    gui_frame_is_decodable() {
+        printf 'x' >> "$TDIR/deccalls"
+        if [ "$(wc -c < "$TDIR/deccalls")" -eq 1 ]; then printf 'no\n'; else printf 'unknown\n'; fi
+    }
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"NOT ONE of the"* ]]
+}
+
+@test "contract: ONE decoded frame among broken ones is enough to grade" {
+    # The floor is one POSITIVELY decoded frame -- a flaky capture beside a good
+    # one must not turn a real verdict into ERROR.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    write_status PASS
+    write_frame good.png Approve
+    plant_broken_image junk.png
+    attest_row "$ADIR/junk.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"UNDECODABLE"* ]]
+}
+
+# --- B round 1: the image-open diagnostic could never read zero ---------------
+
+@test "image opens: the ECHOED PROMPT is not the driver looking" {
+    # The prompt tells the driver to call `view_image`; codex echoes its prompt
+    # into the log. Counting the raw log therefore returned >= 1 on every
+    # attempt, so the one reading this diagnostic exists for -- a lane-wide drop
+    # to zero -- was unreachable (fable, B round 1).
+    local prompt="$TDIR/prompt.md" log="$TDIR/agent.log"
+    cat > "$prompt" <<'EOP'
+Open the capture with your image tool (`view_image` or equivalent).
+This is mandatory and OCR is not a substitute.
+EOP
+    cp "$prompt" "$log"
+    printf 'I graded the scenario from the step list.\n' >> "$log"
+    run gui_count_image_opens "$log" "$prompt"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 0 ]
+}
+
+@test "image opens: the driver's OWN mention still counts" {
+    local prompt="$TDIR/prompt.md" log="$TDIR/agent.log"
+    printf 'Open the capture with view_image.\n' > "$prompt"
+    cp "$prompt" "$log"
+    printf 'Calling view_image on s1.png; the Approve button is visible.\n' >> "$log"
+    run gui_count_image_opens "$log" "$prompt"
+    [ "$output" -eq 1 ]
+}
+
+@test "image opens: with no prompt given the raw count is unchanged" {
+    # The second argument is optional; older callers must keep working.
+    local log="$TDIR/agent.log"
+    printf 'view_image s1.png\n' > "$log"
+    run gui_count_image_opens "$log"
+    [ "$output" -eq 1 ]
+}
+
+@test "image opens: a missing log is zero, not an error" {
+    run gui_count_image_opens "$TDIR/nope.log" "$TDIR/nope.md"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 0 ]
+}
+
+# --- B round 1: frame omission was undetectable on the REAL capture path ------
+#
+# vm-gui takes every candidate into a private scratch dir and copies only the
+# accepted one into the artifact dir, so EVERY ledger row named a scratch path
+# and graded as out-of-tree. Out-of-tree rows whose bytes are absent are
+# reported and never punished -- correctly, because a rejected attempt the agent
+# tidied away must not read as an omission -- so deleting the ACCEPTED frame
+# produced the same benign note as tidying a rejected one. A scenario that
+# captured two frames and deleted the damning one still graded PASS (fable,
+# B round 1). These run the REAL vm-gui against a fake virsh.
+
+# A `virsh` that writes a real PNG instead of talking to libvirt. Args as the
+# library calls it: -c <uri> screenshot <vm> <out>
+install_fake_virsh() {
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""; prev=""
+for a in "$@"; do
+    [ "$prev" = screenshot ] && vm="$a"
+    out="$a"; prev="$a"
+done
+if command -v magick >/dev/null 2>&1; then
+    magick -size 320x80 xc:white -pointsize 24 -fill black \
+        -annotate +10+40 "frame $(date +%s%N)" "$out" 2>/dev/null && exit 0
+fi
+printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0\0\0\012IDATx\234c\370\17\0\1\1\1\0\30\335\215\260\0\0\0\0IEND\256B`\202' > "$out"
+printf '%s\n' "$(date +%s%N)" >> "$out"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+}
+
+vmgui_screenshot() {
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+    LIBVIRT_DEFAULT_URI=qemu:///session \
+        "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot "$1"
+}
+
+@test "vm-gui: the DELIVERED frame gets an in-tree ledger row" {
+    install_fake_virsh
+    run vmgui_screenshot "$ADIR/s1.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/s1.png" ]
+    # scope is column 4, path is column 7
+    run awk -F'\t' -v p="$ADIR/s1.png" '$4 == "in-tree" && $7 == p { found = 1 } END { exit !found }' "$CAPLOG"
+    [ "$status" -eq 0 ]
+}
+
+@test "vm-gui: deleting a delivered frame is a detected OMISSION, not a note" {
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/keep.png"
+    vmgui_screenshot "$ADIR/damning.png"
+    write_status PASS
+    # The agent grades, then removes the frame that contradicts its verdict.
+    rm -f "$ADIR/damning.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "vm-gui: an UNTOUCHED delivered set grades normally" {
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/keep.png"
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "vm-gui: a published frame counts ONCE, not as capture + delivery" {
+    # The delivered frame has two rows with one digest (the scratch capture and
+    # the in-tree delivery). Counting both reported a single screenshot as
+    # "2 frame(s), 1 distinct" and inflated the declared-capture floor.
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
+    [[ "$output" != *"captured outside the artifact dir"* ]]
+}
+
+@test "vm-gui: two genuinely identical in-tree frames are still two captures" {
+    # Only the out-of-tree half of a PUBLISHED PAIR collapses. A stability
+    # scenario that captures a before and an after must keep reporting two.
+    write_status PASS
+    write_frame a.png Approve
+    cp "$ADIR/a.png" "$ADIR/b.png"
+    attest_row "$ADIR/b.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [[ "$output" == *"harness-captured 2 frame(s), 1 distinct"* ]]
+}

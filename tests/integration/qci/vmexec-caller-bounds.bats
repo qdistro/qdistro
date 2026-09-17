@@ -685,3 +685,35 @@ EOF
     [ "$status" -eq 125 ]
     grep -q "exceeded the 4-byte replay cap" "$BATS_TEST_TMPDIR/err"
 }
+
+# Every function these helper files CALL must be defined somewhere they can
+# reach.
+#
+# Workstream B was written before the round-10 cleanup deleted the unused
+# `qdwin_apps_vmx_merged`, and reintegrating B auto-merged cleanly while leaving
+# two calls to that now-absent function. `bash -n` stayed clean and every host
+# suite stayed green, because nothing here executes the apps lane: the break
+# surfaces only in a live run, as `command not found` and an empty evidence
+# string, which reads as a product FAIL for Tk, FLTK and Swing. Both B-round-1
+# reviewers found it independently. This is the cheap static check that would
+# have caught it at the moment of the merge.
+#
+# Command-position only: a name inside a comment, a string or a heredoc is not
+# a call. Sourced libraries count as reachable, so the check follows `.`/`source`
+# of a literal path.
+@test "caller audit: every helper function called by the qdwin lanes is defined" {
+    local f found=0
+    for f in "$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh" \
+             "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" \
+             "$REPO_ROOT/scripts/vm/vm-gui" \
+             "$REPO_ROOT/scripts/vm/lib/capture-attest.sh"; do
+        [ -f "$f" ] || continue
+        found=1
+        run python3 "$BATS_TEST_DIRNAME/undefined_callees.py" "$f"
+        if [ "$status" -ne 0 ]; then
+            printf 'undefined callee(s) in %s:\n%s\n' "$f" "$output" >&2
+            false
+        fi
+    done
+    [ "$found" -eq 1 ]
+}

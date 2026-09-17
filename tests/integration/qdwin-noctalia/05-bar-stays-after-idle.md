@@ -1,5 +1,7 @@
 # 05 — bar still visible after DPMS wake
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** after qdwin DPMSes the screen on idle
 (armed here to the 1-minute minimum via the qdshell `power.displayOff*`
 policy) and the test wakes it via mouse motion, the Noctalia bar

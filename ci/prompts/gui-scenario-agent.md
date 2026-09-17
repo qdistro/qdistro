@@ -14,8 +14,35 @@ Procedure:
 2. Read the nearest `AGENTS.md` for that scenario directory.
 3. Source the helper script documented by that `AGENTS.md`.
 4. Execute Setup, Steps, Assertions, and Cleanup exactly once, serially.
-5. Capture a screenshot after every GUI action that changes state.
-6. Before every model-targeted mouse click, activate the window and run
+5. Capture a screenshot after every GUI action that changes state, and capture
+   it THROUGH YOUR LANE'S OWN CAPTURE TOOL, INTO the artifact directory. For
+   the labwc/admin lane that is `vm-gui` (`screenshot`, `screenshot-fresh`,
+   `click-preview`, `click-confirm`); for the qdwin lanes it is the
+   `qdwin_screenshot` / `qdwin_apps_screenshot` helper your `AGENTS.md` names.
+   Only frames the harness's own capture tool took are graded as visual
+   evidence; an image produced any other way is not evidence. Never delete or overwrite a capture once it is in the
+   artifact directory — including one that shows a failure. Removing it is
+   detected and turns the verdict into ERROR; keeping it and reporting FAIL is
+   the correct outcome. Capture `$VMNAME` and nothing else: a capture of any
+   other VM is refused outright and fails the capture command.
+6. **OPEN EVERY FRAME YOU INTEND TO ASSERT ON.** Before stating anything about
+   what is on screen — a label reads X, a control is visible, a pane is empty,
+   a colour, a layout, what has focus — use your image-viewing tool
+   (`view_image` or equivalent) on the capture. This is mandatory and OCR is
+   **not** a substitute for it.
+   OCR reads text and nothing else. It cannot establish colour, layout,
+   geometry, focus, z-order, or — the one that matters most here — **absence**.
+   "The pending pane is empty", "no dialog appeared", "the badge is gone" are
+   the commonest assertions in these scenarios, and OCR cannot evidence a single
+   one: text it does not find is indistinguishable from text it could not read.
+   A frame that failed to render is also unreadable, so OCR turns a broken
+   capture into a confident wrong verdict in either direction. You may run OCR
+   to pull long text out of a frame you have **also** opened; it is triage,
+   never the basis of a verdict.
+   If you cannot open images at all, the visual assertions are UNOBSERVABLE by
+   you: record **ERROR** naming the missing capability. Do not record PASS, do
+   not record FAIL, and do not fall back to OCR and grade anyway.
+7. Before every model-targeted mouse click, activate the window and run
    `vm-gui "$VMNAME" click-preview X Y "visible target label"`. It moves the
    real VM pointer without a button press, then captures the evidence. Read both
    the command-line-generated annotated screenshot and zoomed crop. Confirm the
@@ -24,10 +51,11 @@ Procedure:
    A preview moves but never clicks. Only after visually confirming the marker may you run
    `vm-gui "$VMNAME" click-confirm <preview-manifest>`. Never use raw
    `vm-gui click X Y` or `xdotool click` for a model-targeted action.
-7. Save screenshots, OCR/vision notes, command logs, click preview manifests,
+8. Save screenshots, OCR/vision notes, command logs, click preview manifests,
    `click-targets/clicks.tsv`, and journal excerpts under
-   the artifact directory.
-8. Choose exactly one verdict and exit accordingly:
+   the artifact directory. Everything except the harness's own captures is
+   triage material, not evidence.
+9. Choose exactly one verdict and exit accordingly:
    - **PASS** - every required assertion passed. Exit **0**.
    - **SKIP** - a required dependency is verifiably ABSENT from this
      environment, so the scenario cannot run at all. Write
@@ -40,6 +68,15 @@ Procedure:
      **nonzero**.
    - **ERROR** - you could not reach a verdict. Exit **nonzero**.
 
+   The SCENARIO verdict is decided by the REQUIRED assertions only. A scenario
+   whose required assertions all passed is **PASS** even when one of its own
+   OPTIONAL/conditional steps was skipped - a step the scenario itself marks
+   "conditional on ...", "skip this step if ...", or "skipped when ...".
+   "Some steps skipped, none failed" is PASS, never ERROR. Name the skipped
+   step and its reason in the report; do not downgrade the verdict for it.
+   ERROR means you could not reach a verdict on the REQUIRED assertions - not
+   that the run was less than perfectly complete.
+
    SKIP is deliberately narrow. It means only: a package, binary, service,
    helper, or image capability that the scenario requires is not installed or
    not available, and you can name it and name the check that showed it absent
@@ -49,7 +86,7 @@ Procedure:
 
    These are **NOT** skips - record ERROR (nonzero) instead:
    - your own driver/setup commands were malformed, or their state did not
-     survive into a later command (see step 9);
+     survive into a later command (see step 11);
    - a required process started and then stopped, or did not respond in time;
    - a command ran but returned output you did not expect;
    - anything you did not manage to observe, where the dependency itself is
