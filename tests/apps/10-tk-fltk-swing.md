@@ -162,15 +162,40 @@ if ! "$QDWIN_VM_EXEC" "$VMNAME" "python3 -c 'import tkinter' 2>/dev/null"; then
     echo "SKIP step 1 (Tk): python313-tk not installed; qdwin app deps are opt-in"
 else
 TK_LOG_BOUNDARY=$(qdwin_apps_bystander_log_boundary) || exit 1
+# CAPTURE THROUGH A FILE, NOT `... 2>&1 | tee`. A host pipeline hands vm-exec's
+# fd 2 to the pipe, and the shell then waits for the READER's stdin to reach
+# EOF -- which happens only when the LAST writer closes. vm-exec bounds its own
+# children's fd 1 internally, but a virsh/jq descendant that outlives vm-exec
+# still holds fd 2, so the step hangs after the guest command is long dead. The
+# log file is the artifact we wanted anyway; read it back afterwards for the
+# transcript.
+#
+# `|| :` DISCARDS the status here, and that is a deliberate policy choice, not
+# an equivalence: the claim that it "keeps the old pipeline's status semantics"
+# held only with pipefail off and a reader that always succeeded. With pipefail
+# set the old pipeline could propagate vm-exec's failure, and a tee whose write
+# failed could fail on its own. The step's verdict comes from the assertions
+# below and from the log, never from this line's status.
 qdwin_apps_launch tk "wget -qO '$CASE_GUEST_DIR/tk-demo.py' $DEMOS/tk-demo.py && printf '%s\\n' \$\$ > '$CASE_GUEST_DIR/tk.pid' && exec python3 '$CASE_GUEST_DIR/tk-demo.py'" \
-    2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step1-launch.log"
+    > "$CASE_ARTIFACT_DIR/logs/step1-launch.log" 2>&1 || :
+head -c "${QDWIN_APPS_LOG_ECHO_BYTES:-65536}" "$CASE_ARTIFACT_DIR/logs/step1-launch.log"
 sleep 6
 qdwin_apps_screenshot "$CASE_ARTIFACT_DIR/screenshots/step1-tk.png"
 # Preserve the demo's own stdout/stderr: the launch helper only returns
 # the vm-exec exit, but the app writes to /tmp/tk.log INSIDE the VM.
 # Pull it to the host so a failure (e.g. a Tk font error) is diagnosable
 # instead of a silent black screenshot.
-"$QDWIN_VM_EXEC" "$VMNAME" "cat /tmp/tk.log" 2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step1-tk.log"
+# File capture, not `2>&1 | tee` -- see the note in step 1's launch.
+# The ECHO of that log is bounded in BYTES. `cat` was not a bounded reader:
+# it runs to EOF of a file a surviving guest descendant may still be
+# appending to, so one long line replays without limit (astra measured
+# 1,048,576 bytes from a single-line 1 MiB capture, A-astra finding 5).
+# NOTE the deliberate scope: unlike the qd_cap captures, these logs stay
+# NAMED on purpose -- they are the scenario's artifacts, kept for triage --
+# so this is a bounded replay of a persistent file, not the open/unlink
+# shape. The full text is always in the artifact; only the echo is capped.
+"$QDWIN_VM_EXEC" "$VMNAME" "cat /tmp/tk.log" > "$CASE_ARTIFACT_DIR/logs/step1-tk.log" 2>&1 || :
+head -c "${QDWIN_APPS_LOG_ECHO_BYTES:-65536}" "$CASE_ARTIFACT_DIR/logs/step1-tk.log"
 
 # ENV PREREQUISITE (not a qdwin bug): if the app log shows
 # `failed to allocate font`, the VM template lacks a usable X11 bitmap
@@ -222,15 +247,20 @@ idempotent.
 if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v g++ >/dev/null 2>&1 && test -e /usr/include/FL/Fl.H'; then
     echo "SKIP step 2 (FLTK): fltk-devel/g++ not installed; qdwin app deps are opt-in"
 else
+# File capture, not `2>&1 | tee` -- see the note in step 1's launch.
 "$QDWIN_VM_EXEC" "$VMNAME" "wget -qO '$CASE_GUEST_DIR/fltk-demo.cxx' $DEMOS/fltk-demo.cxx && \
     g++ -o '$CASE_GUEST_DIR/fltk-demo' '$CASE_GUEST_DIR/fltk-demo.cxx' -lfltk" \
-    2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step2-build.log" | tail -3
+    > "$CASE_ARTIFACT_DIR/logs/step2-build.log" 2>&1 || :
+tail -3 "$CASE_ARTIFACT_DIR/logs/step2-build.log"
 
 FLTK_LOG_BOUNDARY=$(qdwin_apps_bystander_log_boundary) || exit 1
-qdwin_apps_launch fltk "printf '%s\\n' \$\$ > '$CASE_GUEST_DIR/fltk.pid' && exec '$CASE_GUEST_DIR/fltk-demo'" 2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step2-launch.log"
+qdwin_apps_launch fltk "printf '%s\\n' \$\$ > '$CASE_GUEST_DIR/fltk.pid' && exec '$CASE_GUEST_DIR/fltk-demo'" \
+    > "$CASE_ARTIFACT_DIR/logs/step2-launch.log" 2>&1 || :
+head -c "${QDWIN_APPS_LOG_ECHO_BYTES:-65536}" "$CASE_ARTIFACT_DIR/logs/step2-launch.log"
 sleep 4
 qdwin_apps_screenshot "$CASE_ARTIFACT_DIR/screenshots/step2-fltk.png"
-"$QDWIN_VM_EXEC" "$VMNAME" "cat /tmp/fltk.log" 2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step2-fltk.log"
+"$QDWIN_VM_EXEC" "$VMNAME" "cat /tmp/fltk.log" > "$CASE_ARTIFACT_DIR/logs/step2-fltk.log" 2>&1 || :
+head -c "${QDWIN_APPS_LOG_ECHO_BYTES:-65536}" "$CASE_ARTIFACT_DIR/logs/step2-fltk.log"
 
 qdwin_apps_assert_max_restore_last "$CASE_ARTIFACT_DIR/screenshots/step2-fltk" \
     "$FLTK_LOG_BOUNDARY" FLTK "FLTK on qdwin" || exit 1
@@ -255,15 +285,20 @@ background, not a rendering failure.
 if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v javac >/dev/null 2>&1'; then
     echo "SKIP step 3 (Swing): javac (java-25-openjdk-devel) not installed; qdwin app deps are opt-in"
 else
+# File capture, not `2>&1 | tee` -- see the note in step 1's launch.
 "$QDWIN_VM_EXEC" "$VMNAME" "wget -qO '$CASE_GUEST_DIR/SwingDemo.java' $DEMOS/SwingDemo.java && \
     cd '$CASE_GUEST_DIR' && javac SwingDemo.java" \
-    2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step3-build.log" | tail -3
+    > "$CASE_ARTIFACT_DIR/logs/step3-build.log" 2>&1 || :
+tail -3 "$CASE_ARTIFACT_DIR/logs/step3-build.log"
 
 SWING_LOG_BOUNDARY=$(qdwin_apps_bystander_log_boundary) || exit 1
-qdwin_apps_launch swing "cd '$CASE_GUEST_DIR' && printf '%s\\n' \$\$ > '$CASE_GUEST_DIR/swing.pid' && exec java SwingDemo" 2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step3-launch.log"
+qdwin_apps_launch swing "cd '$CASE_GUEST_DIR' && printf '%s\\n' \$\$ > '$CASE_GUEST_DIR/swing.pid' && exec java SwingDemo" \
+    > "$CASE_ARTIFACT_DIR/logs/step3-launch.log" 2>&1 || :
+head -c "${QDWIN_APPS_LOG_ECHO_BYTES:-65536}" "$CASE_ARTIFACT_DIR/logs/step3-launch.log"
 sleep 10
 qdwin_apps_screenshot "$CASE_ARTIFACT_DIR/screenshots/step3-swing.png"
-"$QDWIN_VM_EXEC" "$VMNAME" "cat /tmp/swing.log" 2>&1 | tee "$CASE_ARTIFACT_DIR/logs/step3-swing.log"
+"$QDWIN_VM_EXEC" "$VMNAME" "cat /tmp/swing.log" > "$CASE_ARTIFACT_DIR/logs/step3-swing.log" 2>&1 || :
+head -c "${QDWIN_APPS_LOG_ECHO_BYTES:-65536}" "$CASE_ARTIFACT_DIR/logs/step3-swing.log"
 
 qdwin_apps_assert_max_restore_last "$CASE_ARTIFACT_DIR/screenshots/step3-swing" \
     "$SWING_LOG_BOUNDARY" SwingDemo "Swing on qdwin" || exit 1

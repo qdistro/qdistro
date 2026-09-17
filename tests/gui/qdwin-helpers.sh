@@ -70,6 +70,168 @@ qdwin_require_vm() {
     fi
 }
 
+# ------------------------------------------------- merged vm-exec capture
+#
+# qdwin_vmx_merged <guest-cmd...> -> runs it in $VMNAME via vm-exec with BOTH
+# of vm-exec's descriptors on a private capture file, then prints (a bounded
+# prefix of) what was written. Returns vm-exec's exit status.
+#
+# WHY THIS EXISTS. `x=$(vm-exec ... 2>&1)` and `vm-exec ... 2>&1 | reader` both
+# hand vm-exec's fd 2 to a PIPE, and the shell then waits for that pipe to reach
+# EOF -- which happens when the LAST writer closes it, not when vm-exec exits.
+# vm-exec redirects its own children's fd 1 to an internal capture file, but
+# fd 2 goes straight through to every virsh/jq descendant it starts; one that
+# outlives vm-exec holds the pipe, and the caller, open long after the guest
+# command is dead. An outer `timeout` on vm-exec does not help, because the
+# shell is blocked on the read rather than on the child. Reading a regular file
+# has no such dependency.
+#
+# The capture is created, opened and UNLINKED before the command starts, so a
+# survivor of an earlier call can never write into a later call's capture and no
+# capture is left NAMED while a command runs -- the same shape as bounded_run()
+# in qdistro/scripts/vm/vm-exec.
+# The replay is ceilinged in BYTES (`head -c`), which is what the knob name has
+# always promised. It used to be `read -N`, which counts stored CHARACTERS and
+# silently drops NULs without counting them -- so on a NUL-bearing capture the
+# ceiling bounded neither bytes nor the amount read. Bash still cannot STORE a
+# NUL, so such bytes are lost on assignment regardless of how they are read: the
+# ceiling is honest about SIZE, it does not make the value byte-exact.
+#
+# What bounds this is the BYTE COUNT, not the filesystem. The old comment here
+# argued it "cannot hang, because a read of a regular file returns at the
+# current EOF however many writers still hold it open"; that reasoning is
+# wrong, EOF is re-tested on every read, and `read -N` was measured at 9.57s
+# replaying a nominal 256 KiB against a writer staying ahead of it.
+#
+# WHAT THIS DOES NOT DO: it does not reap a surviving descendant, and it adds no
+# size limit of its own -- the only bound on the nameless inode is whatever
+# RLIMIT_FSIZE vm-exec installed on its own children, so with
+# an older QDWIN_VM_EXEC there is no capture-size bound at all.
+# QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE=1 does NOT itself remove the bound: vm-exec
+# still attempts `ulimit -f`, and the flag only permits it to CONTINUE when the
+# probe fails rather than refusing to start. Where the limit applies, it applies.
+#
+# One visible side effect of the `$( )` replay: on any NUL-bearing capture
+# bash writes `warning: command substitution: ignored null byte in input`
+# to this helper's stderr, once per call. Harmless, and not a failure. Bounding the REPLAY does not bound that GROWTH.
+# Callers that need a wall clock set QDWIN_VMX_TIMEOUT (seconds); `timeout -k`
+# then bounds THAT INVOCATION -- it is not a whole-helper resource guarantee.
+QDWIN_VMX_CAP_BYTES=${QDWIN_VMX_CAP_BYTES:-262144}
+# VALIDATE IT. `head -c` accepts things that are not a positive byte count and
+# quietly means something else: GNU `head -c -1` is "all but the LAST byte",
+# which on a 100-byte capture returns 99 bytes and exit 0 -- a cap that reads
+# almost everything while looking like it capped at one. Non-numeric input
+# makes head fail, and the `|| :` on the replay would hide that too, returning
+# an empty capture indistinguishable from a command that printed nothing.
+# (sol, todo/reviews/qci-A-260917-sol-review.md section 1.)
+case "$QDWIN_VMX_CAP_BYTES" in
+    ''|*[!0-9]*|0|0*)
+        echo "qdwin-helpers: QDWIN_VMX_CAP_BYTES must be a positive integer number of bytes, got '$QDWIN_VMX_CAP_BYTES'" >&2
+        return 2 2>/dev/null || exit 2 ;;
+esac
+QDWIN_VMX_KILL_GRACE=${QDWIN_VMX_KILL_GRACE:-5}
+qdwin_vmx_merged() {
+    local cf wfd rfd out="" rc=0 _qvm_size=""
+    cf=$(mktemp "${TMPDIR:-/tmp}/qdwin-vmx.XXXXXXXX") || return 125
+    # Every step is checked: an unchecked failure here would leave the capture
+    # NAMED while the command runs, which is exactly what this shape promises
+    # not to do. 125 is this helper's INFRASTRUCTURE status by convention. It is
+    # not a reserved value -- a guest command can exit 125 too, so a caller that
+    # must tell them apart cannot do it from the status alone; the stderr line
+    # is what distinguishes them.
+    exec {wfd}>"$cf" || { rm -f "$cf"; return 125; }
+    exec {rfd}<"$cf" || { exec {wfd}>&-; rm -f "$cf"; return 125; }
+    rm -f "$cf" || { exec {wfd}>&- {rfd}<&-; return 125; }
+    # The child and every descendant get the capture FILE on fd 1 and fd 2; the
+    # bookkeeping descriptors are closed for it so nothing downstream inherits a
+    # second handle or the read end.
+    if [ -n "${QDWIN_VMX_TIMEOUT:-}" ]; then
+        timeout -k "${QDWIN_VMX_KILL_GRACE}s" "${QDWIN_VMX_TIMEOUT}s" \
+            "$QDWIN_VM_EXEC" "$VMNAME" "$@" \
+            >&"$wfd" 2>&"$wfd" {wfd}>&- {rfd}<&- || rc=$?
+    else
+        "$QDWIN_VM_EXEC" "$VMNAME" "$@" \
+            >&"$wfd" 2>&"$wfd" {wfd}>&- {rfd}<&- || rc=$?
+    fi
+    exec {wfd}>&-
+    # BYTE-bounded replay. `read -N` counts stored CHARACTERS, not bytes
+    # consumed, and bash silently discards NULs without counting them -- so
+    # with a NUL-bearing capture the "CAP_BYTES" ceiling was neither a byte
+    # bound nor a bound on how much was read (measured: 204 bytes written ->
+    # 4 characters returned). `head -c` bounds the actual bytes, which is what
+    # the name has always promised.
+    #
+    # The substitution is safe here for the same reason it is unsafe around
+    # vm-exec: its only writer is our own `head`, which always closes. `head`
+    # reads from the unlinked capture FILE, never from a pipe a guest
+    # descendant could hold open.
+    #
+    # STILL TRUE, and not fixable in a shell variable: bash cannot store NUL,
+    # so a NUL-bearing capture loses those bytes on assignment regardless of
+    # how it is read. The ceiling is now honest about SIZE; it does not make
+    # the value byte-exact. A caller needing exact bytes must read the file.
+    # `$(...)` also strips trailing newlines, where `read -N` kept them --
+    # every caller here greps or compares tokens, so that is immaterial.
+        # A FAILED replay is a capture failure, not empty output. `|| :` made
+    # `head` returning nonzero indistinguishable from a command that printed
+    # nothing, so an I/O error surfaced as rc=0 with an empty string -- sol
+    # injected `head() { return 1; }` and got exactly that (A3 finding 3).
+    if ! out=$(head -c "$QDWIN_VMX_CAP_BYTES" <&"$rfd"); then
+        echo "qdwin-helpers: capture replay FAILED; the output is unavailable, not empty" >&2
+        exec {rfd}<&-
+        return 125
+    fi
+    # OVERFLOW IS NOT SILENT. Returning a capped PREFIX with the command's own
+    # status tells the caller "here is the output, it succeeded" when part of
+    # the output is gone. Every consumer here scans the text for a marker --
+    # the screenshot reply grammar at :536, the `no running instance|No such`
+    # PID fallback in the scenarios, MMNET-DEV= in the mmnet gate -- and a
+    # marker past the cap is indistinguishable from a marker that never
+    # appeared, which turns a working product into a FAIL or a broken one into
+    # a PASS. (sol, qci-A-260917-sol-review.md section 5.)
+    #
+    # WHAT THIS ESTABLISHES, AND WHAT IT DOES NOT. Stated plainly because the
+    # two previous attempts here both overclaimed.
+    #
+    # DETECTED: the capture holds more bytes than the replay returned -- a
+    # stored suffix this function did not deliver. A real, local fact about
+    # this file and this cap.
+    #
+    # NOT DETECTED: a writer that hit its own RLIMIT_FSIZE, handled EFBIG and
+    # exited zero. The previous version compared the size against the PARENT's
+    # `ulimit -f -H` and claimed to catch exactly that. It cannot, for two
+    # independent reasons (astra, A6 findings 1 and 2):
+    #   * `-H` is the HARD limit, but writes are constrained by the SOFT one,
+    #     so `ulimit -S -f 1` under an unlimited hard limit went undetected.
+    #   * The writer is not this process. vm-exec is a child, `bounded_run`
+    #     sets its own limit for the inner RPC capture, and a descendant
+    #     writing into the outer merged capture can have a different limit
+    #     again -- one file, several limits, so no single parent-side number
+    #     describes them.
+    # And `>=` against that number turned a HEALTHY exact-fit write into a
+    # fatal 125 that positively asserted the output "was cut off": a false red,
+    # the very class of defect this workstream exists to remove.
+    #
+    # Proving completeness needs evidence from the WRITER (an explicit
+    # completion marker), not a size. Until that exists this reports what it
+    # can and stays silent about what it cannot. Equality at the cap is
+    # ACCEPTED -- an exact fit is a legitimate write.
+    if ! _qvm_size=$(stat -Lc %s "/proc/self/fd/$rfd" 2>/dev/null); then
+        echo "qdwin-helpers: could not stat the capture to check completeness; whether the output is complete is UNKNOWN, not verified" >&2
+        exec {rfd}<&-
+        return 125
+    elif [ "$_qvm_size" -gt "$QDWIN_VMX_CAP_BYTES" ]; then
+        echo "qdwin-helpers: vm-exec output (${_qvm_size} bytes) exceeded the ${QDWIN_VMX_CAP_BYTES}-byte capture cap; the returned text is INCOMPLETE and any marker beyond the cap is lost. Raise QDWIN_VMX_CAP_BYTES, or set QDWIN_VMX_ALLOW_TRUNCATION=1 to accept a prefix." >&2
+        if [ "${QDWIN_VMX_ALLOW_TRUNCATION:-0}" != 1 ]; then
+            exec {rfd}<&-
+            return 125
+        fi
+    fi
+    exec {rfd}<&-
+    printf '%s' "$out"
+    return "$rc"
+}
+
 # ---------------------------------------------------------------- key
 #
 # All key injection goes through QMP input-send-event so modifier
@@ -240,8 +402,33 @@ qdwin_ctrl() {
 #!/bin/bash
 runuser -u admin -- bash -c "echo '$cmd' | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock"
 EOF
-    "$QDWIN_VM_EXEC" "$VMNAME" "wget -qO /tmp/qc.sh $QDWIN_HTTP_URL/$script && bash /tmp/qc.sh" 2>&1 | grep -v '^\[vm-exec\]'
+    # File capture, never `... 2>&1 | grep`: see qdwin_vmx_merged above for
+    # why a host pipeline on vm-exec's fd 2 can hang this call. The filtering
+    # pipeline below is fed by this shell's own `printf`, which always closes.
+    #
+    # The GUEST command's status is deliberately NOT propagated -- callers read
+    # the printed reply -- but a CAPTURE failure is not a guest result and must
+    # not be presented as success. 125 means the helper could not produce the
+    # output at all (setup failed, or the reply overflowed the byte cap and was
+    # suppressed rather than returned as a prefix). Swallowing it made this
+    # wrapper return rc=0 with EMPTY output, which a caller reads as "the
+    # command ran and said nothing" (sol, qci-A2-260917-sol-review.md
+    # section 2: cap 4 against an 8-byte reply gave rc=0, empty).
+    local out rc=0
+    out=$(qdwin_vmx_merged "wget -qO /tmp/qc.sh $QDWIN_HTTP_URL/$script && bash /tmp/qc.sh") || rc=$?
+    # `|| :` on the filter: grep exits 1 when it emits NOTHING, which is the
+    # NORMAL case for an empty or fully-suppressed capture. Unguarded, under
+    # `set -e` a bare `qdwin_ctrl ...` died right here -- before the cleanup
+    # below and before the 125 branch -- leaving the HTTP script behind and
+    # never delivering the status this function advertises (sol,
+    # qci-A3-260917-sol-review.md finding 2).
+    printf '%s' "$out" | grep -v '^\[vm-exec\]' || :
     rm -f "$QDWIN_HTTP_DIR/$script"
+    if [ "$rc" = 125 ]; then
+        echo "qdwin_ctrl: capture failed for '$cmd' (no usable reply)" >&2
+        return 125
+    fi
+    return 0
 }
 
 # ----------------------------------------------------- mouse (QMP)
@@ -387,7 +574,7 @@ qdwin_screenshot() {
     local out="${1:-/tmp/qdwin-shot.png}"
     local guest="/run/user/1000/qdwin-capture-$$-${RANDOM}.png"
     local host_tmp="${out}.partial.$$"
-    local reply b64 dims width height reply_w reply_h
+    local reply reply_raw reply_diag b64 dims width height reply_w reply_h
     local guest_meta guest_size guest_sha host_size host_sha
     local pid_before pid_after
 
@@ -440,8 +627,23 @@ qdwin_screenshot() {
     for attempt in 1 2; do
         local shell_t_arg=""
         [ "$QDWIN_CAPTURE_TIMEOUT_SCALE" -gt 1 ] && shell_t_arg=" $QDWIN_CAPTURE_SHELL_T_MS"
-        reply=$(timeout "${QDWIN_CAPTURE_T}s" "$QDWIN_VM_EXEC" "$VMNAME" \
-            "printf 'capture Virtual-1 $guest$shell_t_arg\\n' | socat -T $QDWIN_CAPTURE_SOCAT_T - UNIX-CONNECT:/run/user/1000/qdshell.sock" 2>&1)
+        # File capture, never `$( ... 2>&1 )`: see qdwin_vmx_merged. This is
+        # the hottest vm-exec call in the suite (every screenshot), so it is
+        # also the one most exposed to a virsh descendant holding the pipe.
+        reply_raw=$(QDWIN_VMX_TIMEOUT="$QDWIN_CAPTURE_T" qdwin_vmx_merged \
+            "printf 'capture Virtual-1 $guest$shell_t_arg\\n' | socat -T $QDWIN_CAPTURE_SOCAT_T - UNIX-CONNECT:/run/user/1000/qdshell.sock") || :
+        # SEPARATE TRANSPORT CHATTER FROM THE PROTOCOL REPLY BEFORE PARSING.
+        # The capture is MERGED stdout+stderr, and the `case` below matches the
+        # WHOLE string against the reply grammar -- so any line vm-exec writes
+        # to its own stderr makes a perfectly good capture unparseable and
+        # turns the scenario red for a transport reason. That is not
+        # hypothetical: adding a success-path `[vm-exec] guest identity pinned`
+        # line did exactly this, rejecting both attempts of a valid reply (sol,
+        # todo/reviews/qci-A3-260917-sol-review.md finding 1). vm-exec's
+        # periodic `[vm-exec] Waiting...` lines are the same hazard on a slow
+        # capture. Diagnostics are KEPT, in $reply_diag, for the messages below.
+        reply=$(printf '%s\n' "$reply_raw" | grep -v '^\[vm-exec\]' | grep -v '^[[:space:]]*$') || :
+        reply_diag=$(printf '%s\n' "$reply_raw" | grep '^\[vm-exec\]') || :
         case "${reply:-}" in
             ok\ output=Virtual-1\ width=*\ height=*\ path="$guest") break ;;
             # v33 retained-frame fallback: the compositor served the LAST
@@ -451,14 +653,22 @@ qdwin_screenshot() {
             ok\ output=Virtual-1\ width=*\ height=*\ path="$guest"\ live=0\ age_ms=*) break ;;
         esac
         if [ "$attempt" = 1 ]; then
-            echo "NOTE: capture attempt 1 failed (${reply:-timed out}); checking for a VT takeaway during the capture" >&2
+            # EMIT the retained transport diagnostics. They were captured into
+            # $reply_diag and then never read, so filtering them out of the
+            # protocol reply silently DESTROYED them: a transport that reported a
+            # specific failure surfaced to the user as "capture command timed
+            # out" (sol, qci-A4-260917-sol-review.md finding 2). Print them before
+            # the retry, which overwrites both variables.
+            [ -z "$reply_diag" ] || printf '%s\n' "$reply_diag" >&2
+            echo "NOTE: capture attempt 1 failed (${reply:-no usable reply — timed out, or the capture exceeded its byte cap; any [vm-exec] lines above carry the transport account}); checking for a VT takeaway during the capture" >&2
             rm -f "$host_tmp"
             if qdwin_recover_and_verify; then
                 "$QDWIN_VM_EXEC" "$VMNAME" "rm -f '$guest'" >/dev/null 2>&1 || true
                 continue
             fi
         fi
-        echo "ERROR: shell-capture-failed: ${reply:-capture command timed out}" >&2
+        [ -z "$reply_diag" ] || printf '%s\n' "$reply_diag" >&2
+        echo "ERROR: shell-capture-failed: ${reply:-no usable reply; see the [vm-exec] lines above for the transport account}" >&2
         qdwin_capture_fail_cleanup "$guest"
         return 1
     done

@@ -153,7 +153,37 @@ QD22_FAILED=0
 #   - the reaper sets $QD22_CANCEL first, then watches for a late pid.
 # One of the two always observes the other, so after this returns 0 no probe
 # can start. $QD22_INTENT distinguishes "never launched" from "launched".
+# Capture through a FILE, never with a bare trailing `2>&1`. That merges
+# vm-exec's stderr into fd 1, so if any caller ever wraps this function in
+# `$( ... )` the descendants inherit the substitution PIPE on fd 2 and a
+# survivor holds the call open forever. (No caller does today; the shape is
+# removed rather than relied on.) The capture is per call and unlinked before
+# the command starts.
+# The read is ceilinged in BYTES, with `head -c`. It was `read -N` until
+# 2026-09-17, which ceilings CHARACTERS: bash drops NUL bytes and they do not
+# count, so a NUL-bearing capture was read PAST the ceiling. The claim that
+# this "cannot hang, because a read of a regular file returns at the current
+# EOF" was also wrong -- EOF is re-tested on every read, and a nominal 256 KiB
+# replay was measured at 9.57s against a writer staying ahead of it.
+QD22_CAP_BYTES=${QD22_CAP_BYTES:-65536}
+# Not a positive decimal integer => not a byte ceiling: `head -c -1` is
+# "all but the last byte" and `head -c 00` reads nothing.
+case "$QD22_CAP_BYTES" in
+    ''|*[!0-9]*|0|0*)
+        echo "QD22_CAP_BYTES must be a positive integer number of bytes, got '$QD22_CAP_BYTES'" >&2
+        exit 2 ;;
+esac
 qd22_reap_probe() {
+    local cf wfd rfd out="" rc=0 _qc_size=""
+    cf=$(mktemp "${TMPDIR:-/tmp}/qd22-reap.XXXXXXXX") || return 125
+    # Every setup step is CHECKED. Unchecked, a failing open or unlink let this
+    # function run the command anyway and return its status, leaving the capture
+    # NAMED for the whole run -- the opposite of what the unlink is for.
+    # Reproduced by injecting a failing rm: it returned 0, printed COMMAND-RAN
+    # and left the file (sol, qci-A-260917-sol-review.md section 3).
+    exec {wfd}>"$cf" || { rm -f "$cf"; return 125; }
+    exec {rfd}<"$cf" || { exec {wfd}>&-; rm -f "$cf"; return 125; }
+    rm -f "$cf" || { exec {wfd}>&- {rfd}<&-; return 125; }
     "$QDWIN_VM_EXEC" "$VMNAME" \
       "touch $QD22_CANCEL || { echo 'could not record cancellation'; exit 1; }; \
        [ -e $QD22_INTENT ] || { echo 'probe never launched'; exit 0; }; \
@@ -170,7 +200,53 @@ qd22_reap_probe() {
        for _i in \$(seq 1 40); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; echo \"group \$p reaped\"; exit 0; }; sleep 0.1; done; \
        kill -KILL -\"\$p\" 2>/dev/null; \
        for _i in \$(seq 1 20); do kill -0 -\"\$p\" 2>/dev/null || { rm -f $QD22_PID; echo \"group \$p killed\"; exit 0; }; sleep 0.1; done; \
-       echo \"probe group \$p SURVIVED\"; exit 1" 2>&1
+       echo \"probe group \$p SURVIVED\"; exit 1" >&"$wfd" 2>&"$wfd" {wfd}>&- {rfd}<&- || rc=$?
+    exec {wfd}>&-
+    if ! out=$(head -c "$QD22_CAP_BYTES" <&"$rfd"); then
+        echo "capture replay FAILED; output unavailable, not empty" >&2
+        exec {rfd}<&-
+        return 125
+    fi
+    # THIS HELPER IS DIAGNOSTIC-ONLY, and that changes the failure policy.
+    #
+    # The comment that stood here was copied from the qd_cap/qs_ipc helpers in
+    # the sibling scenarios and described THEIR situation: a `no running
+    # instance|No such` PID fallback and state/geometry tokens parsed out of
+    # the reply. This function has neither. Its two callers -- the cleanup
+    # block and the S3/S4 transition -- read its EXIT STATUS and never parse
+    # its output; the guest command establishes cancellation and reaping
+    # through its own status, and its printed sentences are for a human
+    # reading the log (astra, A7 finding 2).
+    #
+    # So a lost SIZE observation must not be reported as a failed reap. With
+    # `stat` failing, the previous version returned 125 while cancellation had
+    # in fact been recorded and the command had succeeded, and the callers
+    # then announced "could not reap the popup probe" and "probe still holds
+    # the shell role" -- neither of which followed from a diagnostic fault.
+    # This is the same distinction as the await_vmexec_success exception.
+    #
+    # The byte bound stays, and an oversized capture is still refused: a
+    # truncated diagnostic is worth saying out loud even here.
+    #
+    # NOT DETECTED, as everywhere else: a writer that hit its own
+    # RLIMIT_FSIZE, handled EFBIG and exited zero. Comparing against this
+    # process's `ulimit -f -H` cannot catch that -- `-H` is the hard limit
+    # while writes obey the soft one, and the writer is a child whose limit
+    # this process does not know (astra, A6 findings 1 and 2).
+    if ! _qc_size=$(stat -Lc %s "/proc/self/fd/$rfd" 2>/dev/null); then
+        echo "WARNING: could not stat the reap capture; the diagnostic below may be short. The cancellation/reap verdict is the command's own exit status and is unaffected." >&2
+        exec {rfd}<&-
+        printf '%s' "$out"
+        return "$rc"
+    fi
+    if [ "$_qc_size" -gt "$QD22_CAP_BYTES" ]; then
+        echo "capture (${_qc_size} bytes) exceeded $QD22_CAP_BYTES bytes; reply INCOMPLETE" >&2
+        exec {rfd}<&-
+        return 125
+    fi
+    exec {rfd}<&-
+    printf '%s\n' "$out"
+    return "$rc"
 }
 
 qd22_cleanup() {

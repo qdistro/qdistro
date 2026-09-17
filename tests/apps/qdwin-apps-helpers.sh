@@ -353,6 +353,18 @@ EOSCRIPT
 # Launch <name> as admin against the active wayland socket. Logs go to
 # /tmp/<name>.log inside the VM. Background; returns once the
 # vm-exec call completes (the app keeps running via setsid).
+# ------------------------------------------------- merged vm-exec capture
+#
+# NOTE (2026-09-17): a `qdwin_apps_vmx_merged` helper lived here, added in
+# response to sol round 10 and then never wired into anything. Every vm-exec
+# call in this file either sends fd 2 to /dev/null or leaves it on the test's
+# own stderr; none of them merges host stderr into a pipe, so none of them is
+# the fd-2 hazard and none of them needed the helper. It was deleted rather
+# than kept as dead code, because an unused helper makes the caller audit look
+# more complete than it is (sol section 5, fable section 5.3). If a site here
+# ever does need merged capture, the shape is `qdwin_vmx_merged` in
+# ../gui/qdwin-helpers.sh.
+
 qdwin_apps_launch() {
     qdwin_apps_require_vm || return 1
     local name="$1"; shift
@@ -511,7 +523,7 @@ done
 echo \"expected post-command max state=0x1 and geometry for handle=\$handle; observed:\" >&2
 tail -n +\$((start + 1)) \"\$log\" >&2
 exit 1
-" 2>&1) || {
+") || {
         printf 'FAIL: %s (artifact_prefix=%s)\n' "$max_evidence" "$prefix" >&2
         return 1
     }
@@ -543,7 +555,7 @@ done
 echo \"expected post-command restore state=0x0 and geometry for handle=\$handle; observed:\" >&2
 tail -n +\$((start + 1)) \"\$log\" >&2
 exit 1
-" 2>&1) || {
+") || {
         printf 'FAIL: %s (artifact_prefix=%s)\n' "$restore_evidence" "$prefix" >&2
         return 1
     }

@@ -43,7 +43,19 @@ cat > ${QDWIN_REPO}/extra/install-extra.sh <<'EOF'
 zypper -n install qpdfview 2>&1 | tail -3
 ls /usr/share/applications/qpdfview.desktop
 EOF
-"$QDWIN_VM_EXEC" "$VMNAME" 'wget -qO /tmp/iea.sh http://10.0.2.2:8765/extra/install-extra.sh && bash /tmp/iea.sh' 2>&1 | tail -5
+# CAPTURE THROUGH A FILE, NOT `... 2>&1 | tail`. A host pipeline hands vm-exec's
+# fd 2 to the pipe and the shell then waits for `tail` to see EOF on its stdin,
+# which happens only when the LAST writer closes it. vm-exec bounds its own
+# children's fd 1 internally, but fd 2 goes straight through to every virsh/jq
+# descendant, and one that outlives vm-exec holds this step open after the guest
+# install is long dead. Reading a regular file has no such dependency.
+_IEA_LOG=$(mktemp "${TMPDIR:-/tmp}/qdwin05-install.XXXXXXXX")
+"$QDWIN_VM_EXEC" "$VMNAME" 'wget -qO /tmp/iea.sh http://10.0.2.2:8765/extra/install-extra.sh && bash /tmp/iea.sh' \
+    > "$_IEA_LOG" 2>&1 || :
+# `tail -5` is a LINE bound, not a byte bound: one arbitrarily long line
+# replays in full (astra, A-astra finding 5). Bound the bytes first, then
+# take the last lines of that bounded tail.
+tail -c "${QDWIN_05_LOG_ECHO_BYTES:-65536}" "$_IEA_LOG" | tail -5; rm -f "$_IEA_LOG"
 ```
 
 **Assert (2.1):** `qpdfview.desktop` lands in
