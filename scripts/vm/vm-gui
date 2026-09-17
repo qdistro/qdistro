@@ -551,20 +551,27 @@ screenshot_unusable_reason() {
 # out of the frame set (the gate finds frames by image extension) rather than
 # left where a later match could grade them.
 deliver_attested_frame() {
-    local src=$1 dst=$2 pre=absent
-    [ -e "$dst" ] && { pre=other; [ -f "$dst" ] && pre=file; }
+    local src=$1 dst=$2
+    # REFUSE A NON-REGULAR DESTINATION BEFORE PUBLISHING, not after. `-f`
+    # dereferences, so a pre-existing SYMLINK was classified as a regular file:
+    # the copy followed it and overwrote a file outside the artifact tree, then
+    # the symlink was quarantined while the damage stayed done. A FIFO was worse
+    # -- `cp -T` blocked in it forever, because the type was only acted on after
+    # the copy. `-h` first, then `-f` (sol, B round 5).
+    if [ -h "$dst" ] || { [ -e "$dst" ] && [ ! -f "$dst" ]; }; then
+        echo "vm-gui: ERROR: refusing to publish a capture to $dst -- it already exists and is not a regular file. It has been left untouched; nothing was captured to that path." >&2
+        return 1
+    fi
     if declare -f capture_publish_frame >/dev/null 2>&1; then
         capture_publish_frame "$src" "$dst" "$VM" && return 0
         # QUARANTINE ONLY WHAT THIS CALL PUT THERE. Testing `-e` moved whatever
         # already occupied the destination -- a pre-existing DIRECTORY that
         # `cp -T` had correctly refused to overwrite was renamed to
         # `.unattested`, and the error then claimed the frame had been captured
-        # and its bytes recovered there. Both were false (sol, B round 4).
-        if [ "$pre" = other ]; then
-            echo "vm-gui: ERROR: could not publish a capture to $dst -- something that is not a regular file is already there. It has been left untouched; nothing was captured to that path." >&2
-            return 1
-        fi
-        if [ -f "$dst" ]; then
+        # and its bytes recovered there. Both were false (sol, B round 4). The
+        # type check above means anything still here is a regular file this call
+        # wrote or replaced.
+        if [ -f "$dst" ] && [ ! -h "$dst" ]; then
             mv -fT -- "$dst" "$dst.unattested" 2>/dev/null || rm -f -- "$dst"
             echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; the bytes are at $dst.unattested" >&2
         else

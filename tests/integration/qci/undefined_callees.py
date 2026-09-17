@@ -27,12 +27,15 @@ import re
 import sys
 
 PREFIX = r'(?:qdwin_[a-z0-9_]+|capture_[a-z0-9_]+)'
-DEF = re.compile(r'^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', re.M)
+# A definition need not start the line: `foo; bar() { :; }` defines `bar`.
+DEF = re.compile(r'(?:^|[;&|{}])\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', re.M)
 # Command position: start of line, after a separator or an opening brace, after
 # a substitution opener, after `!`, or after a keyword that introduces a
 # command. `if X`, `if ! X`, `while X`, `do X` and `{ X` were all missed before
 # (sol and fable, B round 2), and all of them are `bash -n` clean.
-KEYWORD = r'(?:if|then|elif|else|while|until|do|done|\{)'
+KEYWORD = r'(?:if|then|elif|else|while|until|do|done|coproc|\{)'
+# `FOO=1 cmd` and `>/dev/null cmd` are command position with a prefix in front.
+PREFIXED = r'(?:^|[;&|({`]|\|\||&&)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+|[<>]{1,2}\S+\s+)+'
 # `)` closes a case-arm pattern, so `weston) qdwin_foo ;;` is command position
 # and was missed at a LIVE site. A backtick opens a substitution. `$` is
 # excluded before `{` so that `${qdwin_x}` -- a parameter expansion, not a
@@ -45,6 +48,10 @@ CALL = re.compile(
 # with no paren in between. The generic `)` separator this replaces also matched
 # a word after `$( ... )`, which is an argument, not a command (sol, B round 4).
 CASE_ARM = re.compile(r'^[^()\n]*\)\s*(?:!\s+)?(' + PREFIX + r')\b', re.M)
+PREFIXED_CALL = re.compile(PREFIXED + r'(?:!\s+)?(' + PREFIX + r')\b', re.M)
+# `qdwin_dir=/tmp/x` is an assignment and `$((qdwin_n + 1))` is arithmetic;
+# neither is a call, and both were reported (sol, B round 5).
+NOT_A_CALL = re.compile(r'(' + PREFIX + r')\s*=|\$\(\([^)]*?(' + PREFIX + r')')
 # The argument can itself contain quoted substitutions, so take the rest of the
 # line and drop the quoting rather than try to match balanced quotes.
 SOURCE = re.compile(r'^\s*(?:\.|source)\s+(.+?)\s*(?:\|\||&&|;|$)', re.M)
@@ -103,6 +110,20 @@ def strip_strings(line):
     return ''.join(out)
 
 
+def _uncomment(line):
+    """Drop a `#` comment without being fooled by a `#` inside quotes."""
+    quote = None
+    for i, c in enumerate(line):
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in ('"', "'"):
+            quote = c
+        elif c == '#' and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
 def strip_comments(text):
     """Comments and heredoc bodies only, keeping quoted text.
 
@@ -114,7 +135,7 @@ def strip_comments(text):
         line = lines[i]
         body = re.sub(r'<<<', '', line)
         m = re.search(r'<<-?\s*[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?', body)
-        out.append(re.sub(r'(^|\s)#.*$', r'\1', line))
+        out.append(_uncomment(line))
         i += 1
         if m:
             term = m.group(1)
@@ -210,12 +231,16 @@ def main():
     path = sys.argv[1]
     code = strip_noise(open(path, encoding='utf-8', errors='replace').read())
     defined = defs_of(path, set())
-    called = set(CALL.findall(code)) | set(CASE_ARM.findall(code))
+    called = (set(CALL.findall(code)) | set(CASE_ARM.findall(code))
+              | set(PREFIXED_CALL.findall(code)))
+    for a, b in NOT_A_CALL.findall(code):
+        called.discard(a or b)
     missing = sorted({n for n in called if n not in defined})
     # A call guarded by `declare -f NAME` is an intentional optional dependency.
     # Checked against the SAME stripped representation as the calls: reading raw
     # text let the phrase inside a comment suppress a real call (sol, round 4).
-    missing = [n for n in missing if f'declare -f {n}' not in code]
+    missing = [n for n in missing
+               if not re.search(r'declare -f\s+' + re.escape(n) + r'\b', code)]
     for n in missing:
         print(n)
     return 1 if missing else 0

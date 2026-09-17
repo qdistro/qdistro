@@ -1277,14 +1277,17 @@ gui_visual_frames() {
 #     header or any of whose rows names a VM other than the assigned one. With
 #     QCI_JOBS=8, screenshotting a neighbour's healthy VM cannot produce
 #     evidence for this scenario.
-#   * Blessing arbitrary bytes through a GENERIC entry point. Both virsh lanes
-#     now capture THROUGH the library (capture_virsh_screenshot), which
-#     attests only the file it itself just wrote; there is no
-#     `vm-gui <vm> attest <file>` and no exported `capture_attest <file>`.
-#     One gated helper (capture_attest_frame) remains for the in-guest qdwin
-#     lane, whose capture is a guest protocol that cannot live in the library;
-#     it is bound to the assigned VM, and it is documented as a convenience,
-#     NOT as a boundary.
+#   * Blessing arbitrary bytes through a GENERIC entry point. There is no
+#     `vm-gui <vm> attest <file>` and no exported `capture_attest <file>`. A
+#     lane that captures straight to its final path goes through
+#     capture_virsh_screenshot, which attests only the file it itself just
+#     wrote. TWO gated helpers take bytes from their caller:
+#     capture_attest_frame, for the in-guest qdwin lane whose capture is a
+#     guest protocol that cannot live in the library, and
+#     capture_publish_frame, which a retry lane uses to publish the candidate
+#     it accepted. Both are bound to the assigned VM and both are documented as
+#     conveniences, NOT boundaries. Naming only the first one here was wrong
+#     (B round 5).
 #
 # DETECTED (tamper-evident):
 #   * Interior deletion, reordering, substitution, re-seeding, a rewritten
@@ -1397,8 +1400,10 @@ gui_scenario_min_captures() {
 }
 
 # Verify a capture log's shape, VM binding and hash chain, and echo one summary
-#   rows=N in_tree=I out_tree=O
-# where N counts CAPTURE rows only (the gate's own seal row is excluded).
+#   rows=N in_tree=I out_tree=O rejected=R
+# where N counts CAPTURE rows only: the gate's own seal row is excluded, and so
+# are `rejected` rows, which are recorded for forensics and counted separately
+# so that an all-rejected ledger reads as "took no capture".
 # Returns 0 when the log is present and internally consistent, 1 otherwise
 # (echoing `bad:<why>`).
 #
@@ -1612,12 +1617,14 @@ gui_harness_ocr_frames() {
 # Returns 0 always; the caller decides.
 # Args: artifact_dir capture_log outfile
 gui_capture_reconcile() {
-    local adir=$1 log=$2 outfile=$3
+    local adir=$1 log=$2 outfile=$3 caproot=${4:-}
     local line seq ts vm scope bytes sum fpath chain
     local n=0 present=0 missing=0 unharv=0
-    local f d rel best best_len absdir pass want
-    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=() last_row_for=()
-    declare -A _vr_matched=()
+    local f d rel best absdir pass rowroot
+    rowroot=$(readlink -f "${caproot:-}" 2>/dev/null || printf '%s' "${caproot:-}")
+    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=()
+    declare -A matched=() last_row_for=() bydigest=()
+    local relocated=0
     declare -a keep=()
     : > "$outfile"
     absdir=$(readlink -f "$adir" 2>/dev/null || printf '%s' "$adir")
@@ -1631,13 +1638,6 @@ gui_capture_reconcile() {
         disk_rel[$f]=$rel
     done < <(gui_visual_frames "$adir")
 
-    # A PATH HOLDS ONE FILE, whatever its scope. A scenario that re-captures to
-    # the same path -- one reference-run log does it 34 times, and the common
-    # shape re-uses a single /tmp name -- writes a row each time, and demanding
-    # a separate file per row reported the survivor as an omission. The last row
-    # for a path supersedes the earlier ones: a re-capture loop is one frame of
-    # evidence, not N. Round 4 applied this to in-tree rows ONLY, so the
-    # dominant /tmp shape still inflated the floor (sol and fable, B round 4).
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
@@ -1647,89 +1647,99 @@ gui_capture_reconcile() {
         [ "$scope" = rejected ] && continue
         [ -n "$sum" ] || continue
         last_row_for[$fpath]=$seq
+        keep+=("$seq"$'\t'"$scope"$'\t'"$sum"$'\t'"$fpath")
     done < <(gui_capture_log_rows "$log")
 
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
-        [ "$scope" = seal ] && continue
-        [ "$scope" = rejected ] && continue
-        [ -n "$sum" ] || continue
-        [ "${last_row_for[$fpath]:-}" = "$seq" ] || continue
-        n=$((n + 1))
-        keep+=("$scope"$'\t'"$sum"$'\t'"$fpath")
-    done < <(gui_capture_log_rows "$log")
-
-    # MATCHING IS RESERVED IN THREE PASSES, and the order is the whole point.
+    # MATCHING RESERVES IN FOUR ORDERED PASSES, and both orders matter.
     #
-    # Rows used to take a match as they were read, so an EARLIER row could
-    # consume the file that was the exact path match for a LATER one. Deleting
-    # an in-tree frame while an identical out-of-tree frame survived then read
-    # as a benign non-harvest instead of the omission it is (sol and fable,
-    # B round 4). So: in-tree rows claim their own paths first, then
-    # out-of-tree rows claim theirs, and only then may anything fall back to a
-    # digest found elsewhere -- with in-tree still going first, because an
-    # in-tree row losing its file is fatal while an out-of-tree row losing its
-    # file is not. Ambiguity between identical bytes must never resolve in the
-    # direction that downgrades an omission.
+    # EXACTNESS FIRST: a row claims the file at its OWN relative path (with the
+    # digest agreeing) before anything claims a file by bytes alone. Matching in
+    # ledger order let an earlier row consume a later row's file, which turned a
+    # fatal omission into a benign non-harvest.
     #
-    # The path key is the RELATIVE path inside the artifact tree, not the
-    # absolute one the row recorded: harvest renames the artifact directory, so
-    # the recorded prefix is stale by grading time. The longest matching tail
-    # wins, so `first/frame.png` and `second/frame.png` are distinguishable.
+    # THE KEYS DIFFER BY SCOPE, because what survives differs by scope:
+    #   * an IN-TREE row knows the exact relative path it was captured to, so
+    #     that is its key. The capture-time root is passed in ($caproot: the
+    #     artifact alias the agent was given), so this is an exact comparison,
+    #     not the tail match round 5 used -- under which a row for
+    #     `sub/frame.png` could claim a top-level `frame.png` and hide an
+    #     omission (fable, B round 5).
+    #   * an OUT-OF-TREE row's recorded path is a tail of /tmp; the relative
+    #     path is simply the wrong key for it. What a `cp` into the tree
+    #     preserves is the BASENAME, and that is the strongest ownership
+    #     evidence a scratch capture has.
     #
-    # Two honesty notes, because round 4 shipped a matching rule that did
-    # nothing and said otherwise:
-    #   * The PATH pass is load-bearing: making all three passes digest-only
-    #     lets an in-tree row consume a file that is not its own, and a test
-    #     fails. Round 4's version was NOT -- deleting it changed no test and no
-    #     count, because the single greedy pass matched on digest first anyway
-    #     (fable proved this by removing it).
-    #   * Preferring the relative path over the bare BASENAME has not been shown
-    #     to change any verdict, because a match also requires digest equality,
-    #     and two files that differ only in directory almost always differ in
-    #     bytes or share them harmlessly. It is kept as the more correct key for
-    #     nested trees, not because a test distinguishes it. If you need it to
-    #     be load-bearing, write the case that proves it first.
-    for pass in in-tree out-of-tree digest; do
+    # THEN AMBIGUITY, IN-TREE FIRST. When identical bytes could serve either
+    # scope, the deleted capture's pixels are by definition still in the tree
+    # and still graded -- a real omission hides bytes that exist nowhere else,
+    # and that case is unambiguous under any policy. So what the ambiguity
+    # decides is accounting, not evidence: an allowed action (a rename inside
+    # the tree) against an accounting anomaly (delete-and-byte-identical-twin).
+    # Failing a legitimate run with a false message costs more than not
+    # flagging the anomaly, so the in-tree row claims first and an in-tree row
+    # matched only by digest is REPORTED, never punished (fable's ruling,
+    # B round 5; sol argued the other way and the exchange is in the reviews).
+    for pass in in-tree-path out-of-tree-base in-tree-digest out-of-tree-digest; do
         for line in "${keep[@]}"; do
-            IFS=$'\t' read -r scope sum fpath <<<"$line"
+            IFS=$'\t' read -r seq scope sum fpath <<<"$line"
             case "$pass" in
-                in-tree)     [ "$scope" = in-tree ] || continue ;;
-                out-of-tree) [ "$scope" = in-tree ] && continue ;;
+                in-tree-path|in-tree-digest)  [ "$scope" = in-tree ] || continue ;;
+                out-of-tree-base|out-of-tree-digest) [ "$scope" = in-tree ] && continue ;;
             esac
-            [ -n "${_vr_matched[$line]:-}" ] && continue
-            best=""; best_len=-1
+            [ -n "${matched[$seq]:-}" ] && continue
+            best=""
             for f in "${!disk_sum[@]}"; do
                 [ -n "${disk_taken[$f]:-}" ] && continue
                 # THE DIGEST MUST AGREE EITHER WAY. A file existing at the
                 # recorded path is not presence: an agent that overwrites a
                 # frame with an edited image leaves a file at that path.
                 [ "${disk_sum[$f]}" = "$sum" ] || continue
-                if [ "$pass" = digest ]; then
-                    best=$f; break
-                fi
-                rel=${disk_rel[$f]}
-                case "$fpath" in
-                    "$rel"|*/"$rel") ;;
-                    *) continue ;;
+                case "$pass" in
+                    *-digest) best=$f; break ;;
+                    out-of-tree-base)
+                        [ "${disk_rel[$f]##*/}" = "${fpath##*/}" ] || continue
+                        best=$f; break ;;
                 esac
-                if [ "${#rel}" -gt "$best_len" ]; then best=$f; best_len=${#rel}; fi
+                rel=${disk_rel[$f]}
+                # EXACT, against the capture-time root. Without a root there is
+                # nothing honest to compare, so this pass simply does not fire
+                # and the digest passes decide.
+                [ -n "$rowroot" ] || continue
+                [ "${fpath#"$rowroot"/}" = "$rel" ] || continue
+                best=$f; break
             done
             [ -n "$best" ] || continue
             disk_taken[$best]=1
-            _vr_matched[$line]=$best
-            present=$((present + 1))
-            if [ -z "${present_sum[$sum]:-}" ]; then
-                present_sum[$sum]=1
-                printf '%s\n' "$best" >> "$outfile"
-            fi
+            matched[$seq]=$best
+            [ "$pass" = in-tree-digest ] && bydigest[$seq]=1
         done
     done
 
+    # SUPERSESSION IS DECIDED AFTER MATCHING, NOT BEFORE.
+    #
+    # A path holds one file, so when a scenario re-captures to the same name the
+    # earlier rows are usually superseded -- a 34-iteration loop is one frame of
+    # evidence, not 34. But round 5 discarded every earlier row for a reused path
+    # BEFORE matching, which also discarded captures that demonstrably survived:
+    # two `vm-gui screenshot /tmp/frame.png` calls whose results were each copied
+    # to a different artifact name are TWO captures, and the gate reported one
+    # and refused a floor of two (sol, B round 5). A row is superseded only if it
+    # found no file AND a later row reused its path; a row whose bytes are still
+    # on disk is a capture that happened, whatever was written to that path next.
     for line in "${keep[@]}"; do
-        IFS=$'\t' read -r scope sum fpath <<<"$line"
-        [ -n "${_vr_matched[$line]:-}" ] && continue
+        IFS=$'\t' read -r seq scope sum fpath <<<"$line"
+        if [ -n "${matched[$seq]:-}" ]; then
+            n=$((n + 1))
+            present=$((present + 1))
+            [ -n "${bydigest[$seq]:-}" ] && relocated=$((relocated + 1))
+            if [ -z "${present_sum[$sum]:-}" ]; then
+                present_sum[$sum]=1
+                printf '%s\n' "${matched[$seq]}" >> "$outfile"
+            fi
+            continue
+        fi
+        [ "${last_row_for[$fpath]:-}" = "$seq" ] || continue
+        n=$((n + 1))
         if [ "$scope" = in-tree ]; then
             # Captured straight into the evidence directory, then removed.
             missing=$((missing + 1))
@@ -1737,8 +1747,8 @@ gui_capture_reconcile() {
             unharv=$((unharv + 1))
         fi
     done
-    printf 'attested=%d present=%d distinct=%d missing_in_tree=%d unharvested=%d\n' \
-        "$n" "$present" "${#present_sum[@]}" "$missing" "$unharv"
+    printf 'attested=%d present=%d distinct=%d missing_in_tree=%d unharvested=%d relocated=%d\n' \
+        "$n" "$present" "${#present_sum[@]}" "$missing" "$unharv" "$relocated"
 }
 
 # Combined evidence decision for one scenario's harvested artifacts.
@@ -1749,9 +1759,9 @@ gui_capture_reconcile() {
 # gui_capture_log_seal. An EMPTY anchor is fail-closed: an unsealed ledger is
 # one nobody froze, so it is not graded.
 gui_visual_evidence_status() {
-    local adir=$1 caplog=${2:-} anchor=${3:-} mincaps=${4:-1}
+    local adir=$1 caplog=${2:-} anchor=${3:-} mincaps=${4:-1} caproot=${5:-}
     local outdir ocr summary frames ok_n bad_n textf words stale
-    local capsum caprows recon attested present distinct missing unharv flist sfacts
+    local capsum caprows recon attested present distinct missing unharv relocated flist sfacts
     local undec decunk
     local a_vm="" a_rows="" a_head=""
     IFS=$'\t' read -r a_vm a_rows a_head <<<"$anchor"
@@ -1806,11 +1816,11 @@ gui_visual_evidence_status() {
     }
     cp -- "$caplog" "$outdir/captures.tsv" 2>/dev/null || true
     flist="$outdir/attested-frames.txt"
-    recon=$(gui_capture_reconcile "$adir" "$caplog" "$flist")
-    attested=0; present=0; distinct=0; missing=0; unharv=0
-    read -r attested present distinct missing unharv < <(printf '%s\n' "$recon" | sed -nE \
-        's/^attested=([0-9]+) present=([0-9]+) distinct=([0-9]+) missing_in_tree=([0-9]+) unharvested=([0-9]+)$/\1 \2 \3 \4 \5/p') || true
-    : "${attested:=0}" "${present:=0}" "${distinct:=0}" "${missing:=0}" "${unharv:=0}"
+    recon=$(gui_capture_reconcile "$adir" "$caplog" "$flist" "$caproot")
+    attested=0; present=0; distinct=0; missing=0; unharv=0; relocated=0
+    read -r attested present distinct missing unharv relocated < <(printf '%s\n' "$recon" | sed -nE \
+        's/^attested=([0-9]+) present=([0-9]+) distinct=([0-9]+) missing_in_tree=([0-9]+) unharvested=([0-9]+) relocated=([0-9]+)$/\1 \2 \3 \4 \5 \6/p') || true
+    : "${attested:=0}" "${present:=0}" "${distinct:=0}" "${missing:=0}" "${unharv:=0}" "${relocated:=0}"
     # DECLARED CAPTURE COUNT. The one mechanism that can distinguish "the agent
     # never captured the failing moment" from "the agent captured it and
     # dropped the row before exiting" — because the SCENARIO, not the agent,
@@ -1895,6 +1905,12 @@ gui_visual_evidence_status() {
     [ "$undec" -gt 0 ] && sfacts="$sfacts, $undec UNDECODABLE (see manifest.tsv decodable=no)"
     [ "$decunk" -gt 0 ] && sfacts="$sfacts, $decunk not checked for decodability (no ImageMagick)"
     [ "$unharv" -gt 0 ] && sfacts="$sfacts, $unharv captured outside the artifact dir and not graded"
+    # REPORTED, never verdict-affecting: an in-tree frame found by its bytes at
+    # a path other than the one it was captured to. Usually a rename the
+    # scenario made on purpose; occasionally the tell for a frame that was
+    # replaced by an identical twin. A human should see it; the gate does not
+    # act on it (fable's ruling, B round 5).
+    [ "$relocated" -gt 0 ] && sfacts="$sfacts, $relocated in-tree frame(s) found by digest at a path other than the one recorded"
     if [ "$textf" -gt 0 ]; then
         printf 'ok:the gate read the pixels of this scenario'"'"'s attested frame set itself (sealed, VM-bound ledger) — %s (%s/captures.tsv); %s read text in %d frame(s) (%d words; %s/manifest.tsv). OCR evidences TEXT only — colour, layout, focus, z-order and absence claims are NOT adjudicated, only attested as observed\n' \
             "$sfacts" "$GUI_VISUAL_EVIDENCE_DIR" "$ocr" "$textf" "$words" "$GUI_VISUAL_EVIDENCE_DIR"
@@ -1932,7 +1948,7 @@ gui_visual_evidence_status() {
 # `anchor` is the gate's in-memory seal ("<vm>\t<rows>\t<head>"); without it
 # nothing is graded.
 gui_apply_visual_evidence_contract() {
-    local status=$1 scenario=$2 adir=$3 caplog=${4:-} anchor=${5:-} ev mode mincaps
+    local status=$1 scenario=$2 adir=$3 caplog=${4:-} anchor=${5:-} caproot=${6:-} ev mode mincaps
     case "$status" in
         PASS|FAIL) ;;
         *) printf '%s\t\n' "$status"; return 0 ;;
@@ -1948,7 +1964,7 @@ gui_apply_visual_evidence_contract() {
             ;;
     esac
     mincaps=$(gui_scenario_min_captures "$scenario")
-    if ev=$(gui_visual_evidence_status "$adir" "$caplog" "$anchor" "$mincaps"); then
+    if ev=$(gui_visual_evidence_status "$adir" "$caplog" "$anchor" "$mincaps" "$caproot"); then
         printf '%s\tvisual-evidence %s\n' "$status" "${ev#ok:}"
         return 0
     fi
@@ -2861,7 +2877,7 @@ gui_run_scenario() {
     # accepted as evidence, so artifact ordering is irrelevant here.
     local ev_note=""
     IFS=$'\t' read -r status ev_note < <(gui_apply_visual_evidence_contract \
-        "$status" "$scenario" "$adir" "$caplog" "$capanchor")
+        "$status" "$scenario" "$adir" "$caplog" "$capanchor" "$art_alias")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
     # not the silent pass it used to be.
@@ -2989,7 +3005,7 @@ gui_run_scenario() {
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 local ev_noteN=""
                 IFS=$'\t' read -r statusN ev_noteN < <(gui_apply_visual_evidence_contract \
-                    "$statusN" "$scenario" "$adirN" "$caplogN" "$capanchorN")
+                    "$statusN" "$scenario" "$adirN" "$caplogN" "$capanchorN" "$art_aliasN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
                 if [ "$verdictN" = skip ]; then

@@ -1456,9 +1456,10 @@ EOF
 }
 
 @test "vm-gui: a REJECTED attempt is kept for triage but never graded" {
-    # The library attests every candidate it captures, so a rejected attempt
-    # copied back in-tree under an image name was matched to its row by digest
-    # and graded -- a frame the harness had already judged unusable entering
+    # Candidates carry no row until they are published or rejected, and a
+    # rejected attempt copied back in-tree under an IMAGE name used to be
+    # matched to a row by digest and graded -- a frame the harness had already
+    # judged unusable entering
     # the evidence set, where it could satisfy the decoded-frame floor alone.
     if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
     install_flaky_virsh
@@ -1779,4 +1780,111 @@ EOF
     [[ "$output" == *"rc=1"* ]]
     [[ "$output" == *"INCOMPLETE"* ]]
     [ -f "$TDIR/kept.rejected" ]
+}
+
+# --- B round 6: shapes both round-5 reviewers built -------------------------
+
+@test "S1c: two captures to one scratch name, each copy preserved, are TWO" {
+    # Round 5 discarded every earlier row for a reused path BEFORE matching, so
+    # a before/after pair taken through one /tmp name counted as one capture and
+    # failed a floor of two (sol and fable, B round 5).
+    install_fake_virsh
+    cat > "$TDIR/two.md" <<'EOF'
+# 14 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" LIBVIRT_DEFAULT_URI=qemu:///session \
+        "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot "$TDIR/frame.png" >/dev/null
+    cp "$TDIR/frame.png" "$ADIR/before.png"
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" LIBVIRT_DEFAULT_URI=qemu:///session \
+        "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot "$TDIR/frame.png" >/dev/null
+    cp "$TDIR/frame.png" "$ADIR/after.png"
+    write_status PASS
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 2 frame(s)"* ]]
+}
+
+@test "W3: a peek to /tmp does not make a RENAMED in-tree frame look deleted" {
+    # Identical bytes out-of-tree and in-tree, with the in-tree file renamed.
+    # A ledger-ordered digest pass reported the delivered frame as missing.
+    write_status PASS
+    plant_image_at "$TDIR/peek.png" Approve
+    attest_row "$TDIR/peek.png"
+    plant_image kept.png Approve
+    attest_row "$ADIR/kept.png"
+    mv "$ADIR/kept.png" "$ADIR/renamed.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "nested collision: a deleted in-tree frame whose twin was copied in is ERROR" {
+    # sol's nested_basename_digest_collision: in-tree first/frame.png deleted,
+    # an identical out-of-tree capture copied in as second/frame.png. The
+    # survivor belongs to the out-of-tree row; the in-tree capture is missing.
+    write_status PASS
+    plant_image first/frame.png Approve
+    attest_row "$ADIR/first/frame.png"
+    mkdir -p "$TDIR/outside"
+    cp "$ADIR/first/frame.png" "$TDIR/outside/frame.png"
+    attest_row "$TDIR/outside/frame.png"
+    mkdir -p "$ADIR/second"
+    cp "$TDIR/outside/frame.png" "$ADIR/second/frame.png"
+    rm -f "$ADIR/first/frame.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+}
+
+@test "W2: a row for a NESTED frame does not claim a top-level file" {
+    # The path match is a suffix test, so `sub/frame.png`'s row could take a
+    # top-level `frame.png` and hide the omission (fable, B round 5).
+    write_status PASS
+    plant_image sub/frame.png Approve
+    attest_row "$ADIR/sub/frame.png"
+    mv "$ADIR/sub/frame.png" "$ADIR/frame.png"
+    plant_image other.png Deny
+    attest_row "$ADIR/other.png"
+    rm -f "$ADIR/other.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "vm-gui: a SYMLINK destination is refused and its target untouched" {
+    # `-f` dereferences, so a pre-existing symlink was treated as a regular
+    # file: the copy followed it and overwrote a file outside the artifact tree
+    # (sol, B round 5).
+    printf 'external\n' > "$TDIR/outside-target"
+    ln -s "$TDIR/outside-target" "$ADIR/link.png"
+    printf 'bytes' > "$TDIR/src.png"
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        deliver_attested_frame "$2" "$3"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/link.png"
+    [[ "$output" == *"rc=1"* ]]
+    [[ "$output" == *"not a regular file"* ]]
+    [ "$(cat "$TDIR/outside-target")" = external ]
+    [ -h "$ADIR/link.png" ]
+}
+
+@test "vm-gui: a FIFO destination is refused before the copy can block" {
+    # The type was only acted on AFTER the copy, so `cp -T` blocked forever.
+    mkfifo "$ADIR/fifo.png"
+    printf 'bytes' > "$TDIR/src.png"
+    run timeout 10 bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        deliver_attested_frame "$2" "$3"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/fifo.png"
+    # 124 would be the timeout firing -- i.e. the block.
+    [[ "$output" == *"rc=1"* ]]
+    [ -p "$ADIR/fifo.png" ]
 }

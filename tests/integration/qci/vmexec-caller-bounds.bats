@@ -914,3 +914,31 @@ qdwin_gone'
     [ "$status" -eq 1 ]
     [ "$output" = qdwin_gone ]
 }
+
+# Round-5 review found seven more auditor shapes, in both directions.
+@test "callee audit: an assignment or redirection PREFIX still leaves a call" {
+    local shape
+    for shape in 'FOO=1 qdwin_gone' '>/dev/null qdwin_gone' 'coproc qdwin_gone'; do
+        run audit "$shape"
+        [ "$status" -eq 1 ] || { echo "MISSED: $shape" >&2; false; }
+        [ "$output" = qdwin_gone ]
+    done
+}
+
+@test "callee audit: a declare -f for a DIFFERENT name does not suppress a call" {
+    run audit 'declare -f qdwin_gone_helper >/dev/null; qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: an assignment or arithmetic is not a call" {
+    run audit 'qdwin_dir=/tmp/x
+x=$((qdwin_n + 1))'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a definition need not start its line" {
+    run audit 'echo "a # b"; qdwin_local() { :; }
+qdwin_local'
+    [ "$status" -eq 0 ]
+}

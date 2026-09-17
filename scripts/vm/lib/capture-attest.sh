@@ -7,9 +7,13 @@
 #   * qdwin/tests/gui/qdwin-helpers.sh       (in-guest qdshell capture: qdwin lane)
 #   * qdwin/tests/apps/qdwin-apps-helpers.sh (virsh screenshot: qdwin apps lane)
 #
-# Each successful capture appends one row to the capture ledger the GUI gate
-# provisioned for this scenario attempt (QCI_GUI_CAPTURE_LOG). The gate grades
-# ONLY the frames that appear in that ledger.
+# ONE ROW PER FRAME, written to the capture ledger the GUI gate provisioned for
+# this scenario attempt (QCI_GUI_CAPTURE_LOG). A lane that captures straight to
+# its final path writes that row at capture time; a lane that RETRIES captures
+# candidates with no row at all and writes the row when it publishes the one it
+# accepted, or records a candidate it refused under the `rejected` scope. The
+# gate grades ONLY the frames that appear in that ledger, and counts `rejected`
+# rows nowhere.
 #
 # ---------------------------------------------------------------------------
 # WHAT THIS IS AND IS NOT — read this before extending it.
