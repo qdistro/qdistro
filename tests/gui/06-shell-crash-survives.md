@@ -99,7 +99,27 @@ screenshot alone.
 ### Step 5 — qdshell is fully functional post-recovery
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" 'runuser -l admin -c "systemctl --user is-active qdshell.service"' 2>&1
+# Capture through a regular FILE, never a bare host-side `2>&1`.
+#
+# IF the tool running this block reads the command through a pipe -- which is
+# the usual shape, though this block cannot prove your tool's descriptor
+# topology -- then `2>&1` puts vm-exec's fd 2 on that pipe, and the read
+# finishes only when the LAST WRITER closes it, not when vm-exec exits. A
+# HOST-side descendant of vm-exec (virsh, jq) that outlives it therefore holds
+# the reader open and no outer timeout helps. Note the descendant must be a
+# host process: the guest agent runs in the GUEST and never holds a host
+# descriptor.
+#
+# The path is unique per run and the replay is byte-bounded, so a survivor of
+# an earlier attempt cannot contaminate this one and the replay cannot chase a
+# growing file. (This is weaker than qdwin_vmx_merged, which unlinks the
+# capture before the command starts; here the file is named while it is
+# written.)
+_qdl_cap=$(mktemp /tmp/qdlocker-06-step5.XXXXXXXX)
+"$QDWIN_VM_EXEC" "$VMNAME" 'runuser -l admin -c "systemctl --user is-active qdshell.service"' \
+  > "$_qdl_cap" 2>&1
+head -c 65536 "$_qdl_cap"
+rm -f "$_qdl_cap"
 "$QDWIN_VM_EXEC" "$VMNAME" \
   'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 qs ipc -p /usr/share/quickshell/qdshell call qdwin capabilities'
 ```
