@@ -58,6 +58,13 @@
 #      subcommand, so reaching it means calling a shell function from inside
 #      the harness — which, under the trust model above, is an accident to
 #      diagnose rather than an attack to stop.
+#
+#      capture_publish_frame is a SECOND such entry point, added in round 4 so
+#      a retry lane can capture candidates unattested and write one row for the
+#      frame it publishes. It copies and attests in the same process that took
+#      the screenshot, so in practice the bytes are the library's own -- but
+#      that is a property of its CALLERS, not something this function verifies,
+#      and it is listed here rather than left for a reviewer to find.
 #   2. EVERY ROW IS BOUND TO ONE VM. The gate writes the VM it assigned into
 #      the ledger header; this library REFUSES to append a row for any other
 #      VM. Under QCI_JOBS=8 the official helpers cannot be pointed at a

@@ -1025,14 +1025,17 @@ agent_artifact_status() {
 #     row for any other VM and the verifier rejects a ledger containing one, so
 #     at QCI_JOBS=8 a neighbour's healthy VM cannot supply this scenario's
 #     evidence.
-#   * Both virsh lanes capture THROUGH the library, which attests only what it
-#     just wrote, so nothing chooses those bytes. The in-guest qdwin lane's
-#     capture is a guest protocol the library cannot run, so it hands its file
-#     over via capture_attest_frame -- which DOES take caller-supplied bytes,
-#     gated only on the bound VM. That is a documented convenience for the
-#     capture tools, not a boundary, and an earlier version of this bullet
-#     claiming no such call exists was simply wrong (B round 1, both
-#     reviewers). There is no command-line subcommand for it.
+#   * A lane that captures straight to its final path goes THROUGH the library
+#     (capture_virsh_screenshot), which attests only the file it just wrote, so
+#     nothing chooses those bytes. TWO entry points do take caller-supplied
+#     bytes, gated only on the bound VM: capture_attest_frame, for the in-guest
+#     qdwin lane whose capture is a guest protocol the library cannot run, and
+#     capture_publish_frame, which a retry lane uses to publish the candidate it
+#     accepted. Both are documented conveniences for the capture tools, not
+#     boundaries. Earlier versions of this bullet claimed first that no such
+#     call exists (wrong, B round 1) and then that there was only one of them
+#     (wrong again, B round 4); they are listed here so the next reader does not
+#     have to find them. There is no command-line subcommand for either.
 #   * Deleting a capture that was taken INTO the artifact tree is detected
 #     (its row survives, its bytes do not) and is ERROR. Deleting the row too
 #     breaks the hash chain, which is also ERROR.
@@ -1065,14 +1068,15 @@ agent_artifact_status() {
 #   * IT CANNOT COMPEL A CAPTURE. An agent that never screenshots the failing
 #     moment, or that drops its own last row before exiting, look identical
 #     from here. `<!-- qci:visual-captures: N -->` narrows it and IS ACTIVE:
-#     gui_scenario_min_captures reads it and a shortfall in ledger rows is
-#     ERROR (an earlier version of this bullet said DISABLED, which was simply
-#     false -- see gui_visual_evidence_status). It is WEAKER than a count of
-#     usable frames, because ledger rows include helper retries that were
-#     rejected and never became evidence, so a scenario declaring 2 can satisfy
-#     the floor with 1 real frame plus 1 rejected attempt. Building correct
-#     counting semantics was judged not worth it under the trust model above;
-#     no scenario declares a count today, so the floor is 1 everywhere.
+#     gui_scenario_min_captures reads it and a shortfall is ERROR. It is
+#     checked against the RECONCILED capture count, not raw ledger rows:
+#     `rejected` candidates and superseded re-captures to one path count
+#     nowhere, so a scenario declaring 2 needs two real captures and cannot be
+#     satisfied by one frame plus a rejected retry. (Two earlier versions of
+#     this bullet were wrong in opposite directions -- one said the mechanism
+#     was DISABLED, the next said a rejected retry could satisfy it. Both were
+#     false; the test suite pins the current behaviour.) No scenario declares a
+#     count today, so the floor is 1 everywhere.
 #   * IT DOES NOT PROVE THE DRIVER LOOKED. A frame can be captured, attested,
 #     sealed and never opened. gui_count_image_opens records a DIAGNOSTIC on
 #     every attempt, first and retried -- it is the first thing to read when a
@@ -1405,7 +1409,7 @@ gui_scenario_min_captures() {
 gui_capture_log_verify() {
     local path=$1 want_vm=${2:-} want_rows=${3:-} want_head=${4:-}
     local seed bound prev line seq ts vm scope bytes sum fpath chain want
-    local n=0 total=0 in_tree=0 out_tree=0 seals=0
+    local n=0 total=0 in_tree=0 out_tree=0 seals=0 rejected=0
     if [ -z "$path" ]; then
         printf 'bad:no capture log was provisioned for this scenario\n'; return 1
     fi
@@ -1447,10 +1451,24 @@ gui_capture_log_verify() {
             return 1
         fi
         prev=$chain
+        # THE SCOPE IS AN ENUM AND UNKNOWN VALUES ARE FATAL. The catch-all
+        # used to treat anything it did not recognise as an ordinary
+        # out-of-tree capture, so a producer that misspelled `rejected` as
+        # `rejectd` silently promoted a frame the harness had already refused
+        # into evidence (sol, B round 4). That is an accident boundary, not a
+        # hostile-driver argument: a typo in a capture tool must not change
+        # what counts. `rejected` is a recorded non-capture and is counted
+        # separately, so `rows=` stays a count of CAPTURES -- an all-rejected
+        # ledger must read as "took no capture", not as a floor shortfall
+        # quoting a declaration the scenario never made (fable, B round 4).
         case "$scope" in
             seal) seals=$((seals + 1)) ;;
             in-tree) n=$((n + 1)); in_tree=$((in_tree + 1)) ;;
-            *) n=$((n + 1)); out_tree=$((out_tree + 1)) ;;
+            out-of-tree) n=$((n + 1)); out_tree=$((out_tree + 1)) ;;
+            rejected) rejected=$((rejected + 1)) ;;
+            *) printf 'bad:the capture ledger has a row with an unknown scope %s at row %s; the capture tool that wrote it is not one this gate understands\n' \
+                   "${scope:-<empty>}" "$seq"
+               return 1 ;;
         esac
     done < <(tail -n +3 -- "$path" 2>/dev/null)
     # THE SEAL ANCHOR. Both values were produced in the gate's own process after
@@ -1470,7 +1488,7 @@ gui_capture_log_verify() {
         printf 'bad:the capture ledger does not end at the chain head the gate sealed — it was rewritten after the agent exited\n'
         return 1
     fi
-    printf 'rows=%d in_tree=%d out_tree=%d\n' "$n" "$in_tree" "$out_tree"
+    printf 'rows=%d in_tree=%d out_tree=%d rejected=%d\n' "$n" "$in_tree" "$out_tree" "$rejected"
 }
 
 # Echo the data rows of a capture log (seq..chain), unverified. Args: path.
@@ -1579,7 +1597,11 @@ gui_harness_ocr_frames() {
 }
 
 # Reconcile the harness capture log against what is actually on disk in the
-# harvested artifact directory. Matching is BY DIGEST, not by path: an honest
+# harvested artifact directory. Matching reserves each row's OWN file first --
+# by relative path inside the artifact tree, and always with digest equality --
+# and only then falls back to the same bytes found elsewhere, in-tree rows
+# first. Matching purely by digest let an earlier row consume a later row's
+# file and turned a fatal omission into a benign non-harvest. An honest
 # `capture to scratch, copy into the artifact dir` still counts, and a rename
 # during harvest (the short /tmp alias -> the canonical run dir) does not break
 # attestation.
@@ -1593,31 +1615,38 @@ gui_capture_reconcile() {
     local adir=$1 log=$2 outfile=$3
     local line seq ts vm scope bytes sum fpath chain
     local n=0 present=0 missing=0 unharv=0
-    local f d base key hit
-    declare -A disk_sum=() disk_taken=() present_sum=() last_row_for=()
+    local f d rel best best_len absdir pass want
+    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=() last_row_for=()
+    declare -A _vr_matched=()
+    declare -a keep=()
     : > "$outfile"
+    absdir=$(readlink -f "$adir" 2>/dev/null || printf '%s' "$adir")
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         d=$(sha256sum "$f" 2>/dev/null | awk '{print $1}')
         [ -n "$d" ] || continue
         disk_sum[$f]=$d
+        rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f")
+        rel=${rel#"$absdir"/}
+        disk_rel[$f]=$rel
     done < <(gui_visual_frames "$adir")
 
-    # A PATH HOLDS ONE FILE. A scenario that re-captures to the same path (one
-    # reference-run log does it 34 times) writes a row each time, and demanding
-    # a separate file per row reported the surviving frame as an omission
-    # (fable, B round 4). The last row for a path supersedes the earlier ones:
-    # a re-capture loop is one frame of evidence, not N.
+    # A PATH HOLDS ONE FILE, whatever its scope. A scenario that re-captures to
+    # the same path -- one reference-run log does it 34 times, and the common
+    # shape re-uses a single /tmp name -- writes a row each time, and demanding
+    # a separate file per row reported the survivor as an omission. The last row
+    # for a path supersedes the earlier ones: a re-capture loop is one frame of
+    # evidence, not N. Round 4 applied this to in-tree rows ONLY, so the
+    # dominant /tmp shape still inflated the floor (sol and fable, B round 4).
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
         [ "$scope" = seal ] && continue
-        # A candidate the CAPTURE TOOL judged unusable is not evidence and is
-        # recorded only so the ledger stays a complete account of what the
-        # harness took. It counts nowhere.
+        # A candidate the CAPTURE TOOL judged unusable is not evidence; it is
+        # recorded only so the ledger stays an account of what the harness took.
         [ "$scope" = rejected ] && continue
         [ -n "$sum" ] || continue
-        [ "$scope" = in-tree ] && last_row_for[$fpath]=$seq
+        last_row_for[$fpath]=$seq
     done < <(gui_capture_log_rows "$log")
 
     while IFS= read -r line; do
@@ -1626,46 +1655,88 @@ gui_capture_reconcile() {
         [ "$scope" = seal ] && continue
         [ "$scope" = rejected ] && continue
         [ -n "$sum" ] || continue
-        if [ "$scope" = in-tree ] && [ "${last_row_for[$fpath]:-}" != "$seq" ]; then
-            continue
-        fi
+        [ "${last_row_for[$fpath]:-}" = "$seq" ] || continue
         n=$((n + 1))
-        # PATH FIRST, DIGEST ALWAYS. A file existing at the recorded path is not
-        # enough -- an overwritten frame is a file at that path carrying other
-        # bytes -- so the digest must agree either way. Harvest renames the
-        # artifact directory, so the recorded ABSOLUTE path cannot be resolved
-        # directly; the basename within this scenario's tree is what survives
-        # that rename. A frame moved elsewhere in the tree still counts, matched
-        # by digest alone.
-        hit=""
-        base=${fpath##*/}
-        for f in "${!disk_sum[@]}"; do
-            [ -n "${disk_taken[$f]:-}" ] && continue
-            [ "${f##*/}" = "$base" ] || continue
-            [ "${disk_sum[$f]}" = "$sum" ] || continue
-            hit=$f; break
-        done
-        if [ -z "$hit" ]; then
+        keep+=("$scope"$'\t'"$sum"$'\t'"$fpath")
+    done < <(gui_capture_log_rows "$log")
+
+    # MATCHING IS RESERVED IN THREE PASSES, and the order is the whole point.
+    #
+    # Rows used to take a match as they were read, so an EARLIER row could
+    # consume the file that was the exact path match for a LATER one. Deleting
+    # an in-tree frame while an identical out-of-tree frame survived then read
+    # as a benign non-harvest instead of the omission it is (sol and fable,
+    # B round 4). So: in-tree rows claim their own paths first, then
+    # out-of-tree rows claim theirs, and only then may anything fall back to a
+    # digest found elsewhere -- with in-tree still going first, because an
+    # in-tree row losing its file is fatal while an out-of-tree row losing its
+    # file is not. Ambiguity between identical bytes must never resolve in the
+    # direction that downgrades an omission.
+    #
+    # The path key is the RELATIVE path inside the artifact tree, not the
+    # absolute one the row recorded: harvest renames the artifact directory, so
+    # the recorded prefix is stale by grading time. The longest matching tail
+    # wins, so `first/frame.png` and `second/frame.png` are distinguishable.
+    #
+    # Two honesty notes, because round 4 shipped a matching rule that did
+    # nothing and said otherwise:
+    #   * The PATH pass is load-bearing: making all three passes digest-only
+    #     lets an in-tree row consume a file that is not its own, and a test
+    #     fails. Round 4's version was NOT -- deleting it changed no test and no
+    #     count, because the single greedy pass matched on digest first anyway
+    #     (fable proved this by removing it).
+    #   * Preferring the relative path over the bare BASENAME has not been shown
+    #     to change any verdict, because a match also requires digest equality,
+    #     and two files that differ only in directory almost always differ in
+    #     bytes or share them harmlessly. It is kept as the more correct key for
+    #     nested trees, not because a test distinguishes it. If you need it to
+    #     be load-bearing, write the case that proves it first.
+    for pass in in-tree out-of-tree digest; do
+        for line in "${keep[@]}"; do
+            IFS=$'\t' read -r scope sum fpath <<<"$line"
+            case "$pass" in
+                in-tree)     [ "$scope" = in-tree ] || continue ;;
+                out-of-tree) [ "$scope" = in-tree ] && continue ;;
+            esac
+            [ -n "${_vr_matched[$line]:-}" ] && continue
+            best=""; best_len=-1
             for f in "${!disk_sum[@]}"; do
                 [ -n "${disk_taken[$f]:-}" ] && continue
+                # THE DIGEST MUST AGREE EITHER WAY. A file existing at the
+                # recorded path is not presence: an agent that overwrites a
+                # frame with an edited image leaves a file at that path.
                 [ "${disk_sum[$f]}" = "$sum" ] || continue
-                hit=$f; break
+                if [ "$pass" = digest ]; then
+                    best=$f; break
+                fi
+                rel=${disk_rel[$f]}
+                case "$fpath" in
+                    "$rel"|*/"$rel") ;;
+                    *) continue ;;
+                esac
+                if [ "${#rel}" -gt "$best_len" ]; then best=$f; best_len=${#rel}; fi
             done
-        fi
-        if [ -n "$hit" ]; then
-            disk_taken[$hit]=1
+            [ -n "$best" ] || continue
+            disk_taken[$best]=1
+            _vr_matched[$line]=$best
             present=$((present + 1))
             if [ -z "${present_sum[$sum]:-}" ]; then
                 present_sum[$sum]=1
-                printf '%s\n' "$hit" >> "$outfile"
+                printf '%s\n' "$best" >> "$outfile"
             fi
-        elif [ "$scope" = in-tree ]; then
+        done
+    done
+
+    for line in "${keep[@]}"; do
+        IFS=$'\t' read -r scope sum fpath <<<"$line"
+        [ -n "${_vr_matched[$line]:-}" ] && continue
+        if [ "$scope" = in-tree ]; then
             # Captured straight into the evidence directory, then removed.
             missing=$((missing + 1))
         else
             unharv=$((unharv + 1))
         fi
-    done < <(gui_capture_log_rows "$log")
+    done
     printf 'attested=%d present=%d distinct=%d missing_in_tree=%d unharvested=%d\n' \
         "$n" "$present" "${#present_sum[@]}" "$missing" "$unharv"
 }

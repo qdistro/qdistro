@@ -904,7 +904,7 @@ EOF
 @test "capture log: a fresh log has a seeded, VM-BOUND header and no rows" {
     run gui_capture_log_verify "$CAPLOG"
     [ "$status" -eq 0 ]
-    [ "$output" = "rows=0 in_tree=0 out_tree=0" ]
+    [ "$output" = "rows=0 in_tree=0 out_tree=0 rejected=0" ]
     head -1 "$CAPLOG" | grep -q '^#qci-capture-log	2	[0-9a-f]\{64\}	testvm$'
 }
 
@@ -988,7 +988,7 @@ EOF
     [ "$output" = "rc=127" ]   # the primitive does not exist any more
     # no row was written, so the scenario has no evidence at all
     run gui_capture_log_verify "$CAPLOG"
-    [ "$output" = "rows=0 in_tree=0 out_tree=0" ]
+    [ "$output" = "rows=0 in_tree=0 out_tree=0 rejected=0" ]
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
     [ "${output%%$'\t'*}" = ERROR ]
     [[ "$output" == *"took NO capture"* ]]
@@ -1016,7 +1016,7 @@ EOF
     [[ "$output" == *REFUSED* ]]
     [[ "$output" == *testvm* ]]
     run gui_capture_log_verify "$CAPLOG"
-    [ "$output" = "rows=0 in_tree=0 out_tree=0" ]
+    [ "$output" = "rows=0 in_tree=0 out_tree=0 rejected=0" ]
 }
 
 @test "VM BINDING: a hand-appended row for another VM is rejected by the verifier" {
@@ -1073,7 +1073,7 @@ EOF
     attest_frame "$ADIR/e.png"
     run gui_capture_log_verify "$CAPLOG"
     [ "$status" -eq 0 ]
-    [ "$output" = "rows=1 in_tree=1 out_tree=0" ]
+    [ "$output" = "rows=1 in_tree=1 out_tree=0 rejected=0" ]
 }
 
 @test "capture log: the real producer writes rows this verifier accepts" {
@@ -1081,7 +1081,7 @@ EOF
     write_frame b.png Two
     run gui_capture_log_verify "$CAPLOG"
     [ "$status" -eq 0 ]
-    [ "$output" = "rows=2 in_tree=2 out_tree=0" ]
+    [ "$output" = "rows=2 in_tree=2 out_tree=0 rejected=0" ]
     # the recorded digest is the real digest of the real file
     local want; want=$(sha256sum "$ADIR/a.png" | awk '{print $1}')
     grep -q "	$want	" "$CAPLOG"
@@ -1617,4 +1617,166 @@ EOF
     run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
     [ "${output%%$'\t'*}" = ERROR ]
     [[ "$output" == *"took only 1 capture(s)"* ]]
+}
+
+# --- B round 5: the shapes both round-4 reviewers reproduced -----------------
+
+@test "supersede applies to OUT-OF-TREE paths too, not just in-tree" {
+    # Round 4 keyed supersession on in-tree rows only, so three publishes to one
+    # /tmp name -- the dominant scenario shape -- reconciled as three captures
+    # and satisfied a declared floor of two on one frame (sol, B round 4).
+    install_fake_virsh
+    cat > "$TDIR/two.md" <<'EOF'
+# 13 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    local i
+    for i in 1 2 3; do
+        QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+        LIBVIRT_DEFAULT_URI=qemu:///session \
+            "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot "$TDIR/frame.png" >/dev/null
+    done
+    cp "$TDIR/frame.png" "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took only 1 capture(s)"* ]]
+}
+
+@test "reservation: an earlier row cannot steal a later row's own file" {
+    # Delete an in-tree frame while an identical out-of-tree frame survives.
+    # Greedy in-ledger-order matching let the in-tree row consume the survivor,
+    # turning a fatal omission into a benign non-harvest (sol and fable).
+    write_status PASS
+    plant_image deleted.png Approve
+    attest_row "$ADIR/deleted.png"
+    plant_image_at "$TDIR/survivor.png" Approve
+    cp "$TDIR/survivor.png" "$ADIR/survivor.png"
+    attest_row "$TDIR/survivor.png"
+    rm -f "$ADIR/deleted.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+}
+
+@test "reservation: an out-of-tree row FIRST does not steal the in-tree file" {
+    # The same shape in the other ledger order -- a peek to /tmp before the
+    # evidence capture -- which fable found reported a delivered frame as
+    # deleted (a false ERROR with a false message).
+    write_status PASS
+    plant_image_at "$TDIR/peek.png" Approve
+    attest_row "$TDIR/peek.png"
+    plant_image kept.png Approve
+    attest_row "$ADIR/kept.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "path key: deleting one of two nested same-basename frames is detected" {
+    # NOTE: this passes with a bare-basename key too -- a match also requires
+    # digest equality, so the two keys agree here. It pins the BEHAVIOUR, not
+    # the relative-path mechanism; see gui_capture_reconcile for why that
+    # distinction is written down rather than assumed.
+    write_status PASS
+    plant_image first/frame.png Approve
+    attest_row "$ADIR/first/frame.png"
+    cp "$ADIR/first/frame.png" "$ADIR/second/frame.png" 2>/dev/null || {
+        mkdir -p "$ADIR/second"; cp "$ADIR/first/frame.png" "$ADIR/second/frame.png"; }
+    attest_row "$ADIR/second/frame.png"
+    rm -f "$ADIR/second/frame.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+}
+
+@test "path key: the relative path survives the artifact dir being renamed" {
+    # Harvest renames the artifact directory, so the ABSOLUTE path each row
+    # recorded is stale by grading time.
+    write_status PASS
+    plant_image sub/deep.png Approve
+    attest_row "$ADIR/sub/deep.png"
+    local moved="$TDIR/harvested"
+    cp -a "$ADIR" "$moved"
+    run apply_contract PASS "$VISUAL_MD" "$moved" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "verifier: an UNKNOWN scope is fatal, not silently an ordinary capture" {
+    # A producer that misspells `rejected` must not promote a frame the harness
+    # already refused into evidence (sol, B round 4).
+    plant_image junk.png Approve
+    bash -c '
+        set -euo pipefail
+        . "$1"
+        _qci_capture_attest_row "$2" "$3" "$4" "$5" rejectd
+    ' _ "$CAPLIB" "$CAPLOG" "$ADIR/junk.png" "$CAPVM" "$ADIR"
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown scope"* ]]
+}
+
+@test "verifier: rejected rows are counted apart from captures" {
+    # `rows=` must stay a count of CAPTURES: an all-rejected ledger has to read
+    # as "took no capture", not as a floor shortfall (fable, B round 4).
+    plant_image junk.png Approve
+    bash -c '
+        set -euo pipefail
+        . "$1"
+        _qci_capture_attest_row "$2" "$3" "$4" "$5" rejected
+    ' _ "$CAPLIB" "$CAPLOG" "$ADIR/junk.png" "$CAPVM" "$ADIR"
+    run gui_capture_log_verify "$CAPLOG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "rows=0 in_tree=0 out_tree=0 rejected=1" ]
+}
+
+@test "contract: an ALL-REJECTED ledger says no capture was taken" {
+    write_status PASS
+    plant_image junk.png Approve
+    bash -c '
+        set -euo pipefail
+        . "$1"
+        _qci_capture_attest_row "$2" "$3" "$4" "$5" rejected
+    ' _ "$CAPLIB" "$CAPLOG" "$ADIR/junk.png" "$CAPVM" "$ADIR"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"NO capture"* ]]
+    [[ "$output" != *"qci:visual-captures"* ]]
+}
+
+@test "vm-gui: a pre-existing DIRECTORY at the destination is left untouched" {
+    # `-e` quarantined whatever already occupied the path, so a directory
+    # cp -T had correctly refused to overwrite was renamed to .unattested and
+    # the error claimed bytes had been captured there (sol, B round 4).
+    mkdir -p "$ADIR/out.png"
+    printf 'preexisting\n' > "$ADIR/out.png/marker.txt"
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        printf "bytes" > "$2/src.png"
+        deliver_attested_frame "$2/src.png" "$3/out.png"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR" "$ADIR"
+    [[ "$output" == *"rc=1"* ]]
+    [ -f "$ADIR/out.png/marker.txt" ]
+    [ ! -e "$ADIR/out.png.unattested" ]
+    [[ "$output" == *"left untouched"* ]]
+}
+
+@test "vm-gui: a rejected-row write failure is LOUD, not swallowed" {
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        capture_attest_rejected() { return 1; }
+        printf "bytes" > "$2/cand.png"
+        retain_rejected_candidate "$2/cand.png" "$2/kept.rejected"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR"
+    [[ "$output" == *"rc=1"* ]]
+    [[ "$output" == *"INCOMPLETE"* ]]
+    [ -f "$TDIR/kept.rejected" ]
 }

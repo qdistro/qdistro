@@ -884,3 +884,33 @@ qdwin_gone'
     run uri_for 'virsh -cqemu:///y'
     [ "$output" = "qemu:///y" ]
 }
+
+# Round-4 review found four more auditor defects, two in each direction.
+@test "callee audit: a word after a substitution is an ARGUMENT, not a call" {
+    run audit 'printf "%s\n" "$(printf ok)" qdwin_plain_argument'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a declare -f phrase in a COMMENT does not suppress a call" {
+    run audit '# declare -f qdwin_gone
+qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: a real declare -f guard still marks an optional dependency" {
+    run audit 'declare -f qdwin_optional >/dev/null 2>&1 && qdwin_optional'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a # inside a string does not eat the rest of the line" {
+    run audit 'echo "a # b"; qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: a backtick call inside double quotes is seen" {
+    run audit 'x="`qdwin_gone`"'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}

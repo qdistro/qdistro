@@ -11,6 +11,7 @@ not implement. It is a REGEX over lines, not a shell parser:
     opens, so a name on a later line of it can still be reported;
   * `trap`, `time`, `timeout`, `xargs` and `exec` arguments are commands but are
     not recognised as command position;
+  * a case-arm pattern containing a parenthesis, e.g. `(a|b)` , is not matched;
   * `$(...)` nested inside `$(...)` inside double quotes is approximated.
 It is a cheap guard against calling a function nobody defines, which is the
 exact regression it was written for, and it must never be described as more. A mention in a comment, a string or a heredoc body
@@ -37,9 +38,13 @@ KEYWORD = r'(?:if|then|elif|else|while|until|do|done|\{)'
 # excluded before `{` so that `${qdwin_x}` -- a parameter expansion, not a
 # command -- is not reported (both reviewers, B round 3).
 CALL = re.compile(
-    r'(?:^|(?<!\$)[;&|({)`]|\$\(|\|\||&&|\b' + KEYWORD + r'\b)\s*(?:!\s+)?('
+    r'(?:^|(?<!\$)[;&|({`]|\$\(|\|\||&&|\b' + KEYWORD + r'\b)\s*(?:!\s+)?('
     + PREFIX + r')\b',
     re.M)
+# A case arm, and ONLY a case arm: from the start of the line to the first `)`
+# with no paren in between. The generic `)` separator this replaces also matched
+# a word after `$( ... )`, which is an argument, not a command (sol, B round 4).
+CASE_ARM = re.compile(r'^[^()\n]*\)\s*(?:!\s+)?(' + PREFIX + r')\b', re.M)
 # The argument can itself contain quoted substitutions, so take the rest of the
 # line and drop the quoting rather than try to match balanced quotes.
 SOURCE = re.compile(r'^\s*(?:\.|source)\s+(.+?)\s*(?:\|\||&&|;|$)', re.M)
@@ -72,6 +77,13 @@ def strip_strings(line):
             quote = None
             out.append(' ')
             i += 1
+            continue
+        if quote == '"' and line[i] == '`':
+            j = line.find('`', i + 1)
+            if j == -1:
+                j = n - 1
+            out.append(line[i:j + 1])
+            i = j + 1
             continue
         if quote == '"' and line.startswith('$(', i):
             depth, j = 0, i + 1
@@ -121,7 +133,7 @@ def strip_noise(text):
         # swallow the rest of the file (fable, B round 2).
         body = re.sub(r'<<<', '', line)
         m = re.search(r'<<-?\s*[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?', body)
-        out.append(strip_strings(re.sub(r'(^|\s)#.*$', r'\1', line)))
+        out.append(re.sub(r'(^|\s)#.*$', r'\1', strip_strings(line)))
         i += 1
         if m:
             term = m.group(1)
@@ -198,10 +210,12 @@ def main():
     path = sys.argv[1]
     code = strip_noise(open(path, encoding='utf-8', errors='replace').read())
     defined = defs_of(path, set())
-    missing = sorted({n for n in CALL.findall(code) if n not in defined})
+    called = set(CALL.findall(code)) | set(CASE_ARM.findall(code))
+    missing = sorted({n for n in called if n not in defined})
     # A call guarded by `declare -f NAME` is an intentional optional dependency.
-    text = open(path, encoding='utf-8', errors='replace').read()
-    missing = [n for n in missing if f'declare -f {n}' not in text]
+    # Checked against the SAME stripped representation as the calls: reading raw
+    # text let the phrase inside a comment suppress a real call (sol, round 4).
+    missing = [n for n in missing if f'declare -f {n}' not in code]
     for n in missing:
         print(n)
     return 1 if missing else 0

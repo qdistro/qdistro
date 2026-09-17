@@ -41,12 +41,23 @@ run_as_jan() {
     "$VM_EXEC" "$VM" "su - admin -c 'export DISPLAY=:0; $1'"
 }
 
-# HARNESS CAPTURE ATTESTATION — every `virsh screenshot` below is taken BY the
-# shared attestation library (capture_virsh_screenshot), which records it in the
-# qci GUI gate's capture ledger for the VM that ledger is bound to. vm-gui never
-# asks the library to bless a file it did not itself just capture, and it can
-# never attest a frame of another worker's VM. See the library header for
-# exactly what that does and does not prove.
+# HARNESS CAPTURE ATTESTATION — every `virsh screenshot` below goes through the
+# shared attestation library, which records it in the qci GUI gate's capture
+# ledger for the VM that ledger is bound to, and can never attest a frame of
+# another worker's VM.
+#
+# TWO SHAPES, because a retry loop and a one-shot capture want different things:
+#   * a lane that captures STRAIGHT to its final path (click-preview raw/post)
+#     uses capture_virsh_screenshot, which takes the screenshot and attests the
+#     file it just wrote -- one row, nothing chooses the bytes;
+#   * a lane that RETRIES (screenshot, screenshot-fresh) captures candidates
+#     with capture_virsh_shot, which writes NO row, and the row is written when
+#     a candidate is published with capture_publish_frame. Candidates the tool
+#     rejects are recorded under the `rejected` scope, which the gate counts
+#     nowhere.
+# capture_publish_frame therefore attests bytes handed to it, in the same
+# process that captured them. See the library header for what that does and does
+# not prove.
 # shellcheck source=lib/capture-attest.sh
 . "$VM_GUI_DIR/lib/capture-attest.sh"
 
@@ -540,13 +551,25 @@ screenshot_unusable_reason() {
 # out of the frame set (the gate finds frames by image extension) rather than
 # left where a later match could grade them.
 deliver_attested_frame() {
-    local src=$1 dst=$2
+    local src=$1 dst=$2 pre=absent
+    [ -e "$dst" ] && { pre=other; [ -f "$dst" ] && pre=file; }
     if declare -f capture_publish_frame >/dev/null 2>&1; then
         capture_publish_frame "$src" "$dst" "$VM" && return 0
-        if [ -e "$dst" ]; then
-            mv -fT -- "$dst" "$dst.unattested" 2>/dev/null || rm -f -- "$dst"
+        # QUARANTINE ONLY WHAT THIS CALL PUT THERE. Testing `-e` moved whatever
+        # already occupied the destination -- a pre-existing DIRECTORY that
+        # `cp -T` had correctly refused to overwrite was renamed to
+        # `.unattested`, and the error then claimed the frame had been captured
+        # and its bytes recovered there. Both were false (sol, B round 4).
+        if [ "$pre" = other ]; then
+            echo "vm-gui: ERROR: could not publish a capture to $dst -- something that is not a regular file is already there. It has been left untouched; nothing was captured to that path." >&2
+            return 1
         fi
-        echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; any bytes recovered are at $dst.unattested" >&2
+        if [ -f "$dst" ]; then
+            mv -fT -- "$dst" "$dst.unattested" 2>/dev/null || rm -f -- "$dst"
+            echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; the bytes are at $dst.unattested" >&2
+        else
+            echo "vm-gui: ERROR: could not publish a capture to $dst; nothing was written there" >&2
+        fi
         return 1
     fi
     # Standalone / older qdistro checkout: no ledger to write to.
@@ -560,10 +583,22 @@ deliver_attested_frame() {
 # bytes out of the frame set, so a frame the harness already refused can never
 # be graded -- nor satisfy the decoded-frame floor on its own.
 retain_rejected_candidate() {
-    local src=$1 dst=$2
-    declare -f capture_attest_rejected >/dev/null 2>&1 &&
-        capture_attest_rejected "$src" "$VM" || true
+    local src=$1 dst=$2 rc=0
+    if declare -f capture_attest_rejected >/dev/null 2>&1; then
+        # NOT `|| true`. Swallowing this made "the ledger is a complete account
+        # of what the harness took" false while the code claimed it: the row
+        # could silently go missing and a later attempt could still publish, so
+        # the screenshot command succeeded with an incomplete record (sol,
+        # B round 4). If completeness is the point, a failure to record is a
+        # failure.
+        capture_attest_rejected "$src" "$VM" || rc=$?
+    fi
     cp -T -- "$src" "$dst" 2>/dev/null || true
+    if [ "$rc" -ne 0 ]; then
+        echo "vm-gui: ERROR: could not record a rejected capture in the ledger; the account of what this scenario captured is INCOMPLETE (bytes kept at $dst)" >&2
+        return "$rc"
+    fi
+    return 0
 }
 
 # THE GATE ON THE PLAIN `screenshot` PATH. Before round 9 this path captured and
@@ -613,9 +648,10 @@ capture_usable_screenshot() {
         # would be matched to that row and GRADED -- a frame the harness
         # already judged unusable (blank, wrong window) entering the evidence
         # set, where it could even satisfy the decoded-frame floor on its own.
-        # The row stays out-of-tree and unharvested, which is exactly what it
-        # is, and the bytes remain beside $out for triage.
-        retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected"
+        # The row is written under the `rejected` scope, which the gate counts
+        # NOWHERE, and the bytes remain beside $out for triage.
+        retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected" || {
+            rm -rf -- "$scratch"; return 1; }
         echo "vm-gui: screenshot attempt $i/$attempts rejected: $(screenshot_unusable_reason "$rc") (${out}.attempt-${i}.rejected)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
@@ -639,15 +675,14 @@ screenshot_fresh() {
         }
         baseline_hash=$(sha256sum "$baseline" | awk '{print $1}')
     fi
-    # Candidates are captured OUT OF TREE (a private scratch dir), then either
-    # published to $out on acceptance or copied beside $out for triage on
-    # rejection. Rationale: the library attests what IT captures, so every
-    # attempt gets a row — but a REJECTED attempt is triage litter the agent may
-    # tidy away, and an in-tree row for a file the agent deleted would be a
-    # false omission ERROR. Out-of-tree rows whose bytes are absent are reported
-    # as un-harvested, never punished; the ACCEPTED frame's bytes are present in
-    # the artifact dir as $out, and reconciliation matches by DIGEST, so it
-    # counts exactly once as a real harness capture.
+    # Candidates are captured OUT OF TREE (a private scratch dir) and carry NO
+    # ledger row: the candidate capture writes nothing, so a frame that is never
+    # published leaves no trace claiming to be evidence. On acceptance the
+    # publication writes the SINGLE row for that frame, in-tree, so its bytes
+    # going missing afterwards is a real omission. On rejection the candidate
+    # gets a `rejected` row -- which the gate counts NOWHERE -- and its bytes
+    # are kept beside $out under a non-image name, so tidying them away is free
+    # and they can never be graded.
     local scratch
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shotfresh.XXXXXX") || return 1
     for (( i=1; i<=attempts; i++ )); do
@@ -679,7 +714,8 @@ screenshot_fresh() {
         # name: the library attested the candidate when it captured it, and an
         # in-tree copy with the same digest would be matched to that row and
         # graded. It carries no in-tree ledger row, so deleting it is free.
-        retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected"
+        retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected" || {
+            rm -rf -- "$scratch"; return 1; }
         echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason (${out}.attempt-${i}.rejected)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
