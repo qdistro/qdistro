@@ -35,6 +35,14 @@ EOF
     VIRSH=("$BIN/virsh")
     cat > "$BIN/virsh" <<'EOF'
 #!/usr/bin/env bash
+# A `-c <uri>` call is the FOREIGN-connection audit, which must be answered
+# separately: these fixtures' domains live on the session connection, so the
+# honest foreign answer is "reachable, no domains defined". Without this the
+# `list --all --name` pattern below matched the foreign call too, so the audit
+# saw a domain and then got NO disks for it -- an uninspectable inventory,
+# which now (correctly) fails closed and preserved the golden for the wrong
+# reason. Same shape as the default stub in cleanup-uefi.bats.
+if [ "$1" = "-c" ]; then exit 0; fi
 case "$*" in
     *"list --all --name"*) printf '%s\n' "${VIRSH_DEFINED_NAMES:-}" ;;
 esac

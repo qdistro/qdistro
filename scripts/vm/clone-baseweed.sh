@@ -172,6 +172,24 @@ fi
 # it can only ever touch the VM THIS invocation creates, and is gated by
 # CLONE_OK (set to 1 right before the final name echo, and before the deliberate
 # --from-enforcing-baked post-mortem exit so that path keeps the VM for triage).
+#
+# SCOPE, explicitly (sol review 2026-09-17): this removal does NOT participate
+# in the shared storage-lock protocol. The lock is released at the
+# `qci_release_storage_lock` below, once the overlay is an attached disk of a
+# DEFINED domain; if a later startup step then fails, this trap unlinks the
+# overlay with no lock held. So "every qci unlink is lock-protected" is false
+# as a blanket statement -- the three audited cleanup unlinks are, this one is
+# not.
+#
+# Why that is tolerated here rather than fixed: the trap can only ever touch
+# the overlay THIS invocation created (it is installed after the "already
+# exists" guard, and the name is unique per VM), i.e. it is an own-leaf
+# cleanup, not a directory sweep over images other runs may reference. Taking
+# the lock inside an EXIT trap would also mean a failure path that can BLOCK on
+# another holder, which trades a narrow theoretical exposure for a wedged
+# cleanup. Tracked as a follow-up in todo/vmexec-caller-audit.md; if callers
+# ever base children on a worker's overlay, this must become a guarded
+# deletion instead.
 CLONE_OK=0
 _clone_cleanup() {
     trap - EXIT INT TERM          # disarm so INT->exit doesn't re-run via EXIT
@@ -184,6 +202,44 @@ _clone_cleanup() {
 trap '_rc=$?; _clone_cleanup; exit $_rc' EXIT
 trap '_clone_cleanup; exit 130' INT
 trap '_clone_cleanup; exit 143' TERM
+
+# ROUND-3 destructive-cleanup coupling (ci/lib/gates/cleanup.sh).
+# `qci cleanup` takes an EXCLUSIVE flock on this file across its final
+# ownership audit -> unlink. Hold it SHARED from before the overlay exists on
+# disk until the domain that owns it is defined, so cleanup can never observe
+# the pre-define window -- overlay present, no libvirt attachment yet, backing
+# chain freshly extended -- and unlink either this overlay or the image it now
+# backs onto. Shared/shared does not block, so workers stay concurrent.
+#
+# ROUND 5 (destructive defect 3): acquiring this lock is MANDATORY. Round 3
+# warned and continued whenever flock was missing, the lock file could not be
+# opened, or `flock -s` failed -- which recreates the exact create-before-define
+# race while `qci cleanup` holds what it believes is an exclusive protocol lock
+# and therefore believes no qci writer is inside its critical section. A safety
+# protocol only works if BOTH sides fail closed, so a clone that cannot take
+# the lock aborts. The EXIT trap above is already armed, so nothing is leaked.
+QCI_STORAGE_LOCK_FD=""
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock(1) is required to clone safely: without it this clone cannot be serialised against a concurrent 'qci cleanup', which could unlink this overlay or its backing image mid-build. Install util-linux." >&2
+    exit 1
+fi
+# The braces matter: a bare `exec REDIR 2>/dev/null` has no command, so BOTH
+# redirections become permanent and this script would lose stderr -- including
+# every ERROR message below -- for the rest of the run.
+if ! { exec {QCI_STORAGE_LOCK_FD}>>"$IMG/.qci-storage.lock"; } 2>/dev/null; then
+    QCI_STORAGE_LOCK_FD=""
+    echo "ERROR: cannot open $IMG/.qci-storage.lock; refusing to clone unserialised against a concurrent 'qci cleanup'" >&2
+    exit 1
+fi
+if ! flock -w "${QCI_CLONE_LOCK_WAIT:-300}" -s "$QCI_STORAGE_LOCK_FD"; then
+    echo "ERROR: shared qci storage lock not acquired within ${QCI_CLONE_LOCK_WAIT:-300}s (a 'qci cleanup' holds it exclusively); refusing to clone unserialised" >&2
+    exit 1
+fi
+qci_release_storage_lock() {
+    [ -n "${QCI_STORAGE_LOCK_FD:-}" ] || return 0
+    eval "exec ${QCI_STORAGE_LOCK_FD}>&-" 2>/dev/null || true
+    QCI_STORAGE_LOCK_FD=""
+}
 
 # 1. qcow2 overlay backed by $BACKING_NAME (baseweed or baseweed-baked or baseweed-enforcing-baked)
 qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
@@ -452,6 +508,9 @@ if [ "$NEEDS_OVMF" = 1 ]; then
 fi
 
 printf '%s' "$XML" | virsh -c qemu:///session define /dev/stdin >/dev/null
+# The overlay is now an attached disk of a DEFINED domain, so the cleanup
+# ownership audit can see it; the shared storage lock is no longer needed.
+qci_release_storage_lock
 virsh -c qemu:///session start "$VM" >/dev/null
 
 # 4. Wait for the qemu-guest-agent so subsequent vm-exec works.

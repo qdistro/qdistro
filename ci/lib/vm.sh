@@ -336,6 +336,82 @@ release_vm() {
     fi
 }
 
+# --- qci storage-namespace lock (ROUND 5, destructive defect 4) -------------
+#
+# ROUND 3 put an exclusive flock on `$QDWIN_IMG_DIR/.qci-storage.lock` around
+# the TWO deletion sites in the cleanup gate. Round 4's review found that this
+# left the protocol incomplete: `cleanup_run_goldens` (and every other route
+# that reaches safe_rm_overlay -- release_vm's leaked-overlay reclaim,
+# reap_new_orphans, the golden-build failure paths, abort_run's in-flight
+# golden reap) unlinked images with no lock at all, while
+# scripts/vm/clone-baseweed.sh was inside its create..define window believing
+# the protocol covered it.
+#
+# The lock therefore lives HERE, next to the unlink, and safe_rm_overlay takes
+# it itself. Every present and future caller is inside the protocol by
+# construction rather than by a reviewer noticing the call site.
+#
+# Re-entrant by depth count, because the cleanup gate must hold the SAME lock
+# across a wider critical section (final ownership refresh -> final backing
+# referrer audit -> unlink) than the unlink alone. flock(2) is per open file
+# DESCRIPTION, so a second open+flock from the same process would deadlock
+# against the first; the depth counter makes the inner acquisition a no-op.
+# Subshells (`$(...)`, backgrounded workers) inherit the open descriptor and
+# therefore genuinely hold the lock the copied depth claims.
+#
+# Failing to take the lock is NEVER "unlink anyway": it returns failure and
+# the image survives. A leaked overlay is recoverable; a deleted live backing
+# is not.
+QCI_STORAGE_LOCK_FD=""
+QCI_STORAGE_LOCK_DEPTH=0
+QCI_STORAGE_LOCK_REASON=""
+
+qci_storage_lock_path() {
+    printf '%s/.qci-storage.lock' \
+        "${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
+}
+
+qci_storage_lock_acquire() {
+    local wait=${1:-${QCI_CLEANUP_LOCK_WAIT:-120}} lock
+    QCI_STORAGE_LOCK_REASON=""
+    if [ "${QCI_STORAGE_LOCK_DEPTH:-0}" -gt 0 ]; then
+        QCI_STORAGE_LOCK_DEPTH=$((QCI_STORAGE_LOCK_DEPTH + 1))
+        return 0
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        QCI_STORAGE_LOCK_REASON="storage lock unavailable: no flock(1)"
+        return 1
+    fi
+    lock=$(qci_storage_lock_path)
+    QCI_STORAGE_LOCK_FD=""
+    # The braces matter: a bare `exec REDIR 2>/dev/null` has no command, so
+    # BOTH redirections become permanent and the shell loses stderr for the
+    # rest of its life. Scope the error suppression to the group.
+    if ! { exec {QCI_STORAGE_LOCK_FD}>>"$lock"; } 2>/dev/null; then
+        QCI_STORAGE_LOCK_FD=""
+        QCI_STORAGE_LOCK_REASON="storage lock cannot be opened: $lock"
+        return 1
+    fi
+    if ! flock -w "$wait" -x "$QCI_STORAGE_LOCK_FD"; then
+        eval "exec ${QCI_STORAGE_LOCK_FD}>&-" 2>/dev/null || true
+        QCI_STORAGE_LOCK_FD=""
+        QCI_STORAGE_LOCK_REASON="storage lock not acquired within ${wait}s; a worker holds it"
+        return 1
+    fi
+    QCI_STORAGE_LOCK_DEPTH=1
+    return 0
+}
+
+qci_storage_lock_release() {
+    [ "${QCI_STORAGE_LOCK_DEPTH:-0}" -gt 0 ] || return 0
+    QCI_STORAGE_LOCK_DEPTH=$((QCI_STORAGE_LOCK_DEPTH - 1))
+    [ "$QCI_STORAGE_LOCK_DEPTH" -eq 0 ] || return 0
+    [ -n "$QCI_STORAGE_LOCK_FD" ] || return 0
+    eval "exec ${QCI_STORAGE_LOCK_FD}>&-" 2>/dev/null || true
+    QCI_STORAGE_LOCK_FD=""
+    return 0
+}
+
 # Guarded removal of a qci disposable overlay. Only removes a path that is a
 # regular non-empty file, lives directly under the libvirt images dir, and
 # whose basename starts with `qci-` (so backing images like baseweed-baked.qcow2
@@ -343,17 +419,42 @@ release_vm() {
 safe_rm_overlay() {
     local path=$1
     [ -n "$path" ] || return 1
-    [ -f "$path" ] || return 1
-    local img_dir base
+    local img_dir base rm_rc=0
     img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
     base=$(basename -- "$path")
     case "$base" in
         qci-*) ;;
         *) return 1 ;;
     esac
-    # Must reside directly in the images dir (not a symlink/escape).
+    # Must reside directly in the images dir (not a symlink/escape). Pure
+    # string tests, so they run before the lock is taken.
     [ "$path" = "$img_dir/$base" ] || return 1
-    rm -f -- "$path" 2>/dev/null && [ ! -f "$path" ]
+    # ROUND 5: the storage lock is taken HERE, so that every qci deletion
+    # route -- not just the cleanup gate's two sites -- is serialised against
+    # scripts/vm/clone-baseweed.sh's `qemu-img create -b` .. `virsh define`
+    # window. Cleanup already holds it across its wider critical section; the
+    # depth counter makes this acquisition a no-op there.
+    if ! qci_storage_lock_acquire; then
+        log "refusing to unlink $path: ${QCI_STORAGE_LOCK_REASON:-storage lock unavailable}"
+        return 1
+    fi
+    # Every filesystem predicate is re-evaluated INSIDE the lock: the caller's
+    # earlier `[ -f ]` proved nothing about the state at unlink time.
+    if [ ! -f "$path" ]; then
+        rm_rc=1
+    # ROUND 3: a SYMLINK named qci-*.qcow2 passes every other guard, but
+    # unlinking it removes the link while every audit that authorised the
+    # removal inspected its TARGET. Audit and unlink must name the same inode,
+    # so a symlink is never removed here.
+    elif [ -L "$path" ]; then
+        rm_rc=1
+    elif rm -f -- "$path" 2>/dev/null && [ ! -f "$path" ]; then
+        rm_rc=0
+    else
+        rm_rc=1
+    fi
+    qci_storage_lock_release
+    return "$rm_rc"
 }
 
 vm_disk_path() {
@@ -500,43 +601,485 @@ ensure_run_golden() {
     return 0
 }
 
-# Print `referred`, `clear`, or `unknown` after auditing whether another qci
-# overlay uses $candidate as its qcow2 backing file. Unknown is deliberately
-# distinct from clear: cleanup must keep a disk when qemu-img is unavailable or
-# cannot inspect any potential referrer.
+# Report whether a NAME exists inside a directory, distinguishing a real ENOENT
+# from a lookup that merely FAILED. Prints `absent`, `present` or `error`.
+#
+# The shell cannot see errno: `[ -e X ]` and `[ -L X ]` are both false for a
+# genuinely missing name AND for EACCES, ELOOP, EIO, ENAMETOOLONG, ESTALE and a
+# transient autofs/FUSE lookup failure. Collapsing those into "absent" is how a
+# path that DOES resolve to a real image gets recorded as missing, which is how
+# an image a domain owns gets unlinked. python3 can see errno, so the decision
+# is made there: ONLY ENOENT is absence, every other errno is `error`.
+#
+# The lookup is performed against an O_DIRECTORY|O_NOFOLLOW fd for the parent,
+# so the answer describes the directory INODE we inspected -- replacing the
+# parent (with a directory or a symlink) between the caller's checks and this
+# one cannot change the answer we already computed, and a parent that has become
+# a symlink is `error`, never `absent`. Search permission is enforced by the
+# kernel for the fd-relative lstat, so a missing +x surfaces as EACCES -> error.
+#
+# python3 is a hard requirement of the qci host gate; if it is missing the
+# answer is `error` and every caller stays fail-closed.
+# A third argument of `follow` asks the same question about the symlink TARGET
+# (stat) instead of the link itself (lstat): a demonstrably dangling link is
+# `absent`, a link whose target merely cannot be reached is `error`.
+QCI_PATH_LOOKUP_PY='
+import errno, os, sys
+parent, base = sys.argv[1], sys.argv[2]
+follow = len(sys.argv) > 3 and sys.argv[3] == "follow"
+try:
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    print("error"); raise SystemExit(0)
+try:
+    try:
+        os.stat(base, dir_fd=fd, follow_symlinks=follow)
+    except OSError as exc:
+        print("absent" if exc.errno == errno.ENOENT else "error")
+        raise SystemExit(0)
+finally:
+    os.close(fd)
+print("present")
+'
+qci_name_lookup_state() {
+    local parent=$1 base=$2 follow=${3:-} out
+    case "$base" in
+        ''|.|..) printf 'error'; return ;;
+        */*) printf 'error'; return ;;
+    esac
+    command -v python3 >/dev/null 2>&1 || { printf 'error'; return; }
+    out=$(python3 -c "$QCI_PATH_LOOKUP_PY" "$parent" "$base" "$follow" 2>/dev/null) \
+        || { printf 'error'; return; }
+    case "$out" in
+        absent|present) printf '%s' "$out" ;;
+        *) printf 'error' ;;
+    esac
+}
+
+# Same question for a whole path. Only used where the parent is already known
+# to be a real directory (chain walking below); `.`/`..`/`/` are `error`.
+qci_path_lookup_state() {
+    local path=$1 follow=${2:-} parent base
+    [ -n "$path" ] || { printf 'error'; return; }
+    parent=$(dirname -- "$path") || { printf 'error'; return; }
+    base=$(basename -- "$path") || { printf 'error'; return; }
+    qci_name_lookup_state "$parent" "$base" "$follow"
+}
+
+# Print the resolved absolute path of $1's IMMEDIATE qcow2 backing file, or the
+# sentinel `NONE` (no backing / the file is demonstrably not there, so nothing
+# further in the chain can exist) or `ERR` (could not be determined -- callers
+# must treat this as "may reference anything").
+backing_immediate_parent() {
+    local path=$1 info backing
+    # Ask qemu-img FIRST: a successful inspection is itself proof the file is
+    # there, and it keeps the (comparatively expensive) errno lookup off the
+    # hot path -- it runs only when qemu-img could not open the image, which is
+    # exactly when "missing" must be distinguished from "could not tell".
+    # Bounded, with kill escalation: an unbounded inspection here stalls the
+    # whole sweep with the exclusive storage lock held. A timeout leaves `info`
+    # empty and non-zero, which falls through to the lookup below and reports
+    # `ERR` for a file that exists -- i.e. "could not tell", which KEEPS the
+    # image. Fail-closed, not fail-open.
+    if ! info=$(timeout -k 5 "${QCI_BACKING_QEMU_IMG_TIMEOUT:-60}" qemu-img info -- "$path" 2>/dev/null); then
+        case "$(qci_path_lookup_state "$path")" in
+            absent) printf 'NONE' ;;
+            *) printf 'ERR' ;;
+        esac
+        return
+    fi
+    backing=$(printf '%s\n' "$info" | sed -n 's/^backing file: //p' | head -n1)
+    [ -n "$backing" ] || { printf 'NONE'; return; }
+    # `backing file: rel.qcow2 (actual path: /abs/rel.qcow2)` -- prefer the
+    # actual path qemu itself resolved; fall back to resolving relative to the
+    # referrer's directory exactly as qemu would.
+    case "$backing" in
+        *' (actual path: '*)
+            backing=${backing##* (actual path: }
+            backing=${backing%)}
+            ;;
+    esac
+    case "$backing" in
+        /*) ;;
+        *) backing="$(dirname -- "$path")/$backing" ;;
+    esac
+    backing=$(readlink -m -- "$backing" 2>/dev/null) || { printf 'ERR'; return; }
+    [ -n "$backing" ] || { printf 'ERR'; return; }
+    printf '%s' "$backing"
+}
+
+# --- sweep-spanning immediate-parent cache (ROUND 5) ------------------------
+#
+# `backing_chain_reaches`'s memo is keyed by node but its ANSWER is
+# target-specific, so it can only ever be per-call. That made a whole orphan
+# sweep quadratic: every candidate re-ran `qemu-img info` over every image in
+# the directory. Measured on a synthetic images directory with one real backing
+# chain: N=10 -> 3.16s, N=20 -> 12.08s, N=40 -> 48.17s, and N=78 -- this
+# host's real image count -> 164.4s, extrapolating to ~20 minutes at 250. A
+# cleanup that slow is a cleanup someone switches off, which is a destructive
+# outcome by another road. With the cache, the same N=78 sweep is 8.6s (mean of
+# six runs, 8.0-9.1s), a 19x reduction; the nanosecond signature of round 6
+# costs about 0.7s of that against round 5's whole-second one.
+#
+# What IS target-independent is a file's IMMEDIATE backing parent, so that is
+# what is cached, keyed by path and validated by a stat signature
+# (dev:inode:size:mtime:ctime). A rewrite of the qcow2 header that the
+# signature can see -- a `qemu-img rebase`, a re-create, an unlink-and-replace
+# -- forces a fresh inspection; a file that has vanished signs as MISSING,
+# which never matches; a malformed line is ignored.
+#
+# ROUND 8 (destructive defect). The signature is NOT a reliable mutation
+# detector, and this file no longer claims it is. `qemu-img rebase -u` rewrites
+# the header in place, leaving device, inode and size untouched, so the only
+# discriminator is the timestamp pair. Whole seconds collided on this host 195
+# times in 200 back-to-back rebase pairs. Nanoseconds (`%.9Y`/`%.9Z`) collided
+# 0 times in that same experiment -- but "the printed fraction is nonzero" does
+# not prove the filesystem issues a NEW ctime for every write. A clock whose
+# real granularity is coarser than its printed format can quantise two writes
+# into one nonzero tick, and two in-tick, size-preserving rebases then sign
+# identically. The round-6 precision gate inferred uniqueness from formatting
+# and has been REMOVED rather than left as a disabled guard.
+#
+# The cache therefore no longer decides anything destructive. It serves the
+# CHEAP PRE-SCAN only, where a wrong answer in either direction costs time and
+# nothing else:
+#   * a wrong `referred` keeps an image that could have gone;
+#   * a wrong `clear` only promotes the candidate to the under-lock path, where
+#     `backing_referrer_state_authoritative` re-walks every chain with
+#     `qemu-img` and consults no cached parent at all.
+# Every unlink in the cleanup gate and in cleanup_run_goldens is gated on that
+# authoritative answer, taken AFTER the exclusive storage lock is held (see
+# qci_storage_lock_acquire), so no cached timestamp authorises a deletion.
+#
+# What the authoritative pass costs is one `qemu-img info` per distinct image
+# reachable from the referrer set, per deletion candidate. It is paid only for
+# candidates that have already survived every other keep-rule, so in ORDINARY
+# runs -- few condemned images, many reachable ones -- it is a cached scan over
+# the directory plus one uncached scan per condemned image.
+#
+# It is NOT, however, categorically better than the round-4 quadratic: with K
+# deletion candidates and N reachable images the authoritative work is O(K*N),
+# and when K scales with N that is still quadratic in the worst case. The
+# round-8 report's timings (including the 143s figure) are MEASUREMENTS of one
+# workload on one host, not a bound: `qemu-img info` inspection is bounded only
+# by the per-call timeout below, and ownership-refresh and lock waits add cost
+# on top.
+#
+# The cache is BACKED BY A FILE because destructive callers read this state
+# through `$(backing_referrer_state ...)`, a command substitution whose
+# subshell discards in-memory state. The file lives in the run directory, so it
+# never outlives the run that created it. With no run directory (unit tests,
+# ad-hoc calls) caching is in-memory only, which still collapses the repeated
+# work inside a single call.
+# `-g` is load-bearing: ci/lib/vm.sh is sourced from inside a function by the
+# bats harness, where a bare `declare -A` would create a LOCAL array that
+# vanishes with the caller, leaving every later subscript reference to be
+# evaluated as an arithmetic index and killing the audit mid-answer.
+declare -gA _QCI_BACKING_PARENT_CACHE=()
+_QCI_BACKING_PARENT_CACHE_LOADED=""
+
+qci_backing_cache_file() {
+    if [ -n "${QCI_BACKING_PARENT_CACHE:-}" ]; then
+        printf '%s' "$QCI_BACKING_PARENT_CACHE"
+    elif [ -n "${RDIR:-}" ] && [ -d "${RDIR:-}/host" ]; then
+        printf '%s' "$RDIR/host/backing-parent-cache.tsv"
+    fi
+}
+
+# Load the on-disk cache into memory once per backing_referrer_state call.
+qci_backing_cache_load() {
+    local file sig path parent
+    file=$(qci_backing_cache_file)
+    [ "$_QCI_BACKING_PARENT_CACHE_LOADED" != "${file:-@none@}" ] || return 0
+    declare -gA _QCI_BACKING_PARENT_CACHE=()
+    _QCI_BACKING_PARENT_CACHE_LOADED="${file:-@none@}"
+    [ -n "$file" ] && [ -r "$file" ] || return 0
+    while IFS=$'\t' read -r sig path parent; do
+        [ -n "$sig" ] && [ -n "$path" ] && [ -n "$parent" ] || continue
+        _QCI_BACKING_PARENT_CACHE["$path"]="$sig|$parent"
+    done < "$file"
+    return 0
+}
+
+# Per-call snapshot of `stat` signatures for the enumerated referrer set, so a
+# cached scan costs ONE stat(1) rather than one per referrer per candidate.
+# Nodes reached by walking a chain outside that set fall back to an individual
+# stat. The snapshot is taken at the start of each cached backing_referrer_state
+# call and discarded at the end of it. It is not taken at all in authoritative
+# mode, which consults no signature.
+declare -gA _QCI_BACKING_SIG=()
+
+# The signature format, used by BOTH the per-file and the bulk `stat` paths so
+# a cached record and the scan that validates it can never disagree about the
+# field layout. The sub-second timestamps make the cache MISS more often on a
+# host that records them; they are an optimisation aid, not a correctness
+# guarantee, because nothing here establishes that the host issues a distinct
+# ctime per write. A coarser format is therefore permitted (a test overrides
+# this to stand in for a whole-second filesystem): coarsening it can only make
+# the CHEAP pre-scan wrong, and the pre-scan authorises nothing.
+QCI_BACKING_SIG_FMT='%d:%i:%s:%.9Y:%.9Z'
+
+# Set to 0 (by backing_referrer_state_authoritative, as a `local`, so the
+# setting covers exactly one call) to forbid every cached-parent read and
+# write for the duration of one audit.
+_QCI_BACKING_TRUST_PARENT_CACHE=1
+
+qci_backing_signature() {
+    local sig=${_QCI_BACKING_SIG[$1]:-}
+    if [ -n "$sig" ]; then
+        printf '%s' "$sig"
+        return
+    fi
+    sig=$(stat -c "$QCI_BACKING_SIG_FMT" -- "$1" 2>/dev/null) || sig=""
+    printf '%s' "${sig:-MISSING}"
+}
+
+# backing_immediate_parent with the cache in front of it. The answer is
+# returned in _QCI_BACKING_PARENT_RESULT rather than printed: a `$(...)` here
+# would fork once per chain node per candidate, which is most of the cost this
+# cache exists to remove, and would also discard the in-memory cache it just
+# populated.
+_QCI_BACKING_PARENT_RESULT=""
+backing_cached_parent() {
+    local path=$1 sig entry parent file
+    # Authoritative mode: no cached parent is read and none is written, so the
+    # answer below comes from `qemu-img` reading the file as it is now.
+    if [ "${_QCI_BACKING_TRUST_PARENT_CACHE:-1}" != 1 ]; then
+        _QCI_BACKING_PARENT_RESULT=$(backing_immediate_parent "$path")
+        return
+    fi
+    sig=$(qci_backing_signature "$path")
+    entry=${_QCI_BACKING_PARENT_CACHE[$path]:-}
+    if [ -n "$entry" ] && [ "$sig" != MISSING ] \
+            && [ "${entry%%|*}" = "$sig" ]; then
+        _QCI_BACKING_PARENT_RESULT="${entry#*|}"
+        return
+    fi
+    parent=$(backing_immediate_parent "$path")
+    _QCI_BACKING_PARENT_RESULT="$parent"
+    # Never cache an indeterminate answer, a signature for a file that is not
+    # there, or a record whose fields would not survive the tab-separated
+    # round trip.
+    [ "$parent" != ERR ] || return 0
+    [ "$sig" != MISSING ] || return 0
+    case "$path$parent" in *$'\t'*|*$'\n'*) return 0 ;; esac
+    _QCI_BACKING_PARENT_CACHE["$path"]="$sig|$parent"
+    file=$(qci_backing_cache_file)
+    [ -n "$file" ] || return 0
+    # One short line, written with a single append: atomic enough that a
+    # concurrent writer can never interleave a half record.
+    printf '%s\t%s\t%s\n' "$sig" "$path" "$parent" >> "$file" 2>/dev/null || true
+    return 0
+}
+
+# Does the FULL backing chain rooted at $1 contain $2?
+#   0 = yes, 1 = provably no, 2 = could not be determined.
+# Memoised in _BACKING_REACH_MEMO (declared by backing_referrer_state), so each
+# distinct image in a shared chain is inspected once per audit. A cycle or an
+# absurd depth is `could not be determined`, never `no`.
+backing_chain_reaches() {
+    local node=$1 target=$2 parent rc
+    case "${_BACKING_REACH_MEMO[$node]:-}" in
+        0|1|2) return "${_BACKING_REACH_MEMO[$node]}" ;;
+    esac
+    if [ -n "${_BACKING_REACH_STACK[$node]:-}" ] \
+            || [ "${#_BACKING_REACH_STACK[@]}" -gt 64 ]; then
+        return 2
+    fi
+    _BACKING_REACH_STACK["$node"]=1
+    backing_cached_parent "$node"
+    parent=$_QCI_BACKING_PARENT_RESULT
+    case "$parent" in
+        NONE) rc=1 ;;
+        ERR)  rc=2 ;;
+        *)
+            if [ "$parent" = "$target" ]; then
+                rc=0
+            else
+                backing_chain_reaches "$parent" "$target"
+                rc=$?
+            fi
+            ;;
+    esac
+    unset '_BACKING_REACH_STACK[$node]'
+    _BACKING_REACH_MEMO["$node"]=$rc
+    return "$rc"
+}
+
+# Print `referred`, `clear`, or `unknown` after auditing whether ANY image can
+# reach $candidate through its qcow2 backing chain. Unknown is deliberately
+# distinct from clear: cleanup must keep a disk when qemu-img is unavailable,
+# when a potential referrer cannot be inspected, or when a chain cannot be
+# walked to its end.
+#
+# Round-3 widening (destructive defect). The previous scan looked only at
+# `$QDWIN_IMG_DIR/qci-*.qcow2` and only at the IMMEDIATE backing file. Both
+# narrowings destroy data:
+#   * a human-named `kept.qcow2` (or a golden, or `baseweed-baked.qcow2`) that
+#     backs onto an old `qci-*.qcow2` was never examined at all, so the
+#     candidate read `clear` and the orphan sweep unlinked a live backing file,
+#     corrupting `kept.qcow2`;
+#   * `kept.qcow2 -> mid.qcow2 -> qci-old.qcow2` hides the candidate one level
+#     down, so even a widened immediate-parent scan would have read `clear`.
+# Every regular file in the images directory is now a potential referrer, and
+# the whole chain is walked. Callers that know of images OUTSIDE that directory
+# (cleanup passes every canonical disk libvirt declares, wherever it lives) add
+# them through BACKING_REFERRER_EXTRA_LIST, a newline-separated file of paths.
+#
+# Cost: one `qemu-img info` per DISTINCT image reachable from the directory
+# that the immediate-parent cache does not already answer, memoised across the
+# whole audit call (~25 ms each; ~2.0 s for a 78-file images directory on the
+# reference host when nothing is cached).
+#
+# This entry point may consult that cache and therefore MUST NOT be used to
+# authorise an unlink. Destructive callers use
+# backing_referrer_state_authoritative below.
 backing_referrer_state() {
-    local candidate=$1 img_dir ov info obacking candidate_real backing_real
+    local candidate=$1 img_dir ov ov_real candidate_real extra line
+    local _sig_path _sig_val
+    local -A _BACKING_REACH_MEMO=() _BACKING_REACH_STACK=()
+    local -a referrers=()
     [ -n "$candidate" ] || { printf 'unknown'; return; }
     command -v qemu-img >/dev/null 2>&1 || { printf 'unknown'; return; }
+    command -v python3 >/dev/null 2>&1 || { printf 'unknown'; return; }
     img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
     candidate_real=$(readlink -m -- "$candidate" 2>/dev/null) \
         || { printf 'unknown'; return; }
-    for ov in "$img_dir"/qci-*.qcow2; do
-        [ -e "$ov" ] || continue
-        [ "$ov" = "$candidate" ] && continue
-        if ! info=$(qemu-img info "$ov" 2>/dev/null); then
-            printf 'unknown'
-            return
-        fi
-        obacking=$(printf '%s\n' "$info" | sed -n 's/^backing file: //p' | head -n1)
-        [ -n "$obacking" ] || continue
-        obacking=${obacking%% (actual path:*}
-        case "$obacking" in
-            /*) backing_real=$(readlink -m -- "$obacking" 2>/dev/null) ;;
-            *)  backing_real=$(readlink -m -- "$(dirname -- "$ov")/$obacking" 2>/dev/null) ;;
-        esac
-        [ -n "$backing_real" ] || { printf 'unknown'; return; }
-        if [ "$backing_real" = "$candidate_real" ]; then
-            printf 'referred'
-            return
+    [ -n "$candidate_real" ] || { printf 'unknown'; return; }
+    if [ "${_QCI_BACKING_TRUST_PARENT_CACHE:-1}" = 1 ]; then
+        qci_backing_cache_load
+    fi
+
+    # Enumerate the images directory (dotfiles included) plus any caller-
+    # supplied out-of-directory referrers. A directory we cannot even list is
+    # `unknown`: an unlistable referrer set is not an empty one.
+    if [ ! -d "$img_dir" ] || [ ! -r "$img_dir" ] || [ ! -x "$img_dir" ]; then
+        printf 'unknown'
+        return
+    fi
+    # ROUND 5: built as an ARRAY rather than piped into a `{ ... }` block. The
+    # pipeline made the loop a subshell, which silently discarded every
+    # immediate-parent cache entry it learned.
+    # `-L` as well as `-e`: a symlink whose target cannot be reached is
+    # exactly the entry that must be classified, not dropped.
+    # Enumerate from the CANONICAL images directory. A plain file directly
+    # inside it is then already its own canonical path, which removes a
+    # readlink(1) fork per entry per candidate; a symlink, or anything from the
+    # caller-supplied extra list, still goes through the full resolution below.
+    local img_dir_real
+    img_dir_real=$(readlink -e -- "$img_dir" 2>/dev/null) \
+        || { printf 'unknown'; return; }
+    local -a ref_canonical=()
+    for ov in "$img_dir_real"/* "$img_dir_real"/.[!.]* "$img_dir_real"/..?*; do
+        if [ -e "$ov" ] || [ -L "$ov" ]; then
+            referrers+=("$ov")
+            if [ -L "$ov" ] || [ ! -e "$ov" ]; then
+                ref_canonical+=(0)
+            else
+                ref_canonical+=(1)
+            fi
         fi
     done
+    extra="${BACKING_REFERRER_EXTRA_LIST:-}"
+    if [ -n "$extra" ]; then
+        # An extra-referrer list that was requested but cannot be read is an
+        # unknown referrer set, never an empty one.
+        [ -r "$extra" ] || { printf 'unknown'; return; }
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            referrers+=("$line")
+            ref_canonical+=(0)
+        done < "$extra"
+    fi
+
+    # One stat(1) for the whole referrer set feeds the cache-validation
+    # signatures (see qci_backing_signature). Authoritative mode validates no
+    # cache entry, so it does not pay for this and does not populate it.
+    declare -gA _QCI_BACKING_SIG=()
+    if [ "${_QCI_BACKING_TRUST_PARENT_CACHE:-1}" = 1 ] \
+            && [ "${#referrers[@]}" -gt 0 ]; then
+        # Signature FIRST so a pathname containing '|' still round-trips: the
+        # last `read` field absorbs the remainder of the line.
+        while IFS='|' read -r _sig_val _sig_path; do
+            [ -n "$_sig_path" ] && [ -n "$_sig_val" ] || continue
+            _QCI_BACKING_SIG["$_sig_path"]="$_sig_val"
+        done < <(stat -c "$QCI_BACKING_SIG_FMT|%n" -- "${referrers[@]}" 2>/dev/null)
+    fi
+
+    local seen_unknown=0 i n=${#referrers[@]}
+    for ((i = 0; i < n; i++)); do
+        line=${referrers[i]}
+        [ -n "$line" ] || continue
+        # A directory is never a qcow2 referrer. Anything else that
+        # RESOLVES is inspected. Anything that does not resolve is only
+        # skipped when it is demonstrably not there (ENOENT on the target);
+        # a link we merely cannot follow could name a real image, so it is
+        # the ambiguity that must fail closed, not a silent skip.
+        if [ -d "$line" ]; then
+            continue
+        fi
+        if [ "${ref_canonical[i]}" = 1 ]; then
+            ov_real=$line
+        elif [ -e "$line" ]; then
+            ov_real=$(readlink -e -- "$line" 2>/dev/null) \
+                || { seen_unknown=1; break; }
+        else
+            # Treating local absence as "not a referrer" is only sound because
+            # every path in this list was resolved in OUR filesystem
+            # namespace: cleanup_uri_is_local() fails a remote connection
+            # closed rather than publishing its paths, so a remote guest's
+            # shared storage mounted at a different path can never arrive here
+            # and be dismissed by a local ENOENT.
+            case "$(qci_path_lookup_state "$line" follow)" in
+                absent) continue ;;
+                *) seen_unknown=1; break ;;
+            esac
+        fi
+        [ "$ov_real" = "$candidate_real" ] && continue
+        backing_chain_reaches "$ov_real" "$candidate_real"
+        case $? in
+            0) printf 'referred'; return ;;
+            2) seen_unknown=1; break ;;
+        esac
+    done
+    [ "$seen_unknown" = 0 ] || { printf 'unknown'; return; }
+    _QCI_BACKING_SIG=()
     printf 'clear'
 }
 
+# The audit that a deletion is allowed to rest on.
+#
+# Identical to backing_referrer_state except that every immediate-parent answer
+# comes from `qemu-img` reading the file as it is at this moment: no entry is
+# read from the sweep-spanning parent cache and none is written to it, and no
+# stat signature is consulted, so no timestamp -- of any precision -- takes
+# part in the decision. The `local` is deliberate: bash's dynamic scoping makes
+# it visible to backing_cached_parent for exactly the duration of this call.
+#
+# What this buys, precisely: the answer reflects the on-disk backing chains as
+# read by `qemu-img` during this call. It is NOT a claim that nothing can
+# change afterwards. That part is the CALLER's, and it holds only where the
+# caller arranges it. The three callers that exist today -- the cleanup gate's
+# two unlink sites and cleanup_run_goldens -- each take the exclusive storage
+# lock BEFORE calling this and release it only AFTER the unlink, so for that
+# whole window every other qci writer (clone-baseweed.sh's create..define
+# window, every safe_rm_overlay) is excluded. A writer that does not take the
+# storage lock -- anything outside qci touching the same images directory -- is
+# outside that protocol and outside this guarantee.
+#
+# Note also what this function is NOT: it is not wired into safe_rm_overlay, so
+# the other unlink routes (release_vm's leaked-overlay reclaim, reap_new_orphans,
+# the golden-build failure paths) still delete overlays they created without a
+# backing-chain audit of any kind. That is unchanged by round 8.
+backing_referrer_state_authoritative() {
+    local _QCI_BACKING_TRUST_PARENT_CACHE=0
+    backing_referrer_state "$1"
+}
+
 # Compatibility predicate used by the H12 contract tests and callers that only
-# need the positive case. Unknown is nonzero; destructive callers must use the
-# three-state helper above and preserve on unknown.
+# need the positive case. It reads the CACHED state and must never gate an
+# unlink; destructive callers use backing_referrer_state_authoritative and
+# preserve on `unknown`.
 golden_has_backing_referrer() {
     [ "$(backing_referrer_state "$1")" = referred ]
 }
@@ -556,12 +1099,26 @@ cleanup_run_goldens() {
             printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
             continue
         fi
+        # ROUND 5 (destructive defect 4): the referrer audit and the unlink
+        # must be ONE critical section, exactly as in the cleanup gate. Taking
+        # the lock only inside safe_rm_overlay would still let a worker start a
+        # clone backed onto this golden in the window between the audit
+        # returning `clear` and the unlink. Fail closed: a golden we cannot
+        # lock is preserved, never deleted.
+        if ! qci_storage_lock_acquire; then
+            log "preserving golden backing $d (${QCI_STORAGE_LOCK_REASON:-storage lock unavailable})"
+            printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
+            continue
+        fi
         # H12 belt-and-suspenders: the marker write can fail inside the worker
         # subshell (disk full/unwritable), which would otherwise let us delete a
         # golden a preserved overlay still backs. Independently verify no
         # surviving overlay references this golden as backing before deleting it.
-        ref_state=$(backing_referrer_state "$d")
+        # Authoritative: this answer authorises an unlink, so it may not come
+        # from the cache. The lock is already held, above.
+        ref_state=$(backing_referrer_state_authoritative "$d")
         if [ "$ref_state" != clear ]; then
+            qci_storage_lock_release
             log "preserving golden backing $d (backing-referrer audit: $ref_state)"
             printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
             continue
@@ -569,6 +1126,7 @@ cleanup_run_goldens() {
         if safe_rm_overlay "$d"; then
             log "removed per-run golden $d"
         fi
+        qci_storage_lock_release
     done
 }
 
