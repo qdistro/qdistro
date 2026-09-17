@@ -165,7 +165,13 @@ export -f _qci_capture_attest_row 2>/dev/null || true
 # Returns 0 when there is no ledger (ordinary by-hand use) or the row was
 # written; non-zero (loudly) when the ledger refused the row.
 capture_attest_frame() {
-    local out=${1:-} vm=${2:-${VM:-${VMNAME:-}}} log=${QCI_GUI_CAPTURE_LOG:-} rc=0
+    _qci_capture_write_row "${1:-}" "${2:-${VM:-${VMNAME:-}}}" ""
+}
+
+# INTERNAL. The locked row write shared by every public entry point.
+# Args: captured_file vm_name [scope_override]
+_qci_capture_write_row() {
+    local out=${1:-} vm=${2:-} forced=${3:-} log=${QCI_GUI_CAPTURE_LOG:-} rc=0
     [ -n "$log" ] || return 0
     [ -f "$log" ] || return 0
     [ -f "$out" ] || return 0
@@ -176,17 +182,57 @@ capture_attest_frame() {
     fi
     if command -v flock >/dev/null 2>&1; then
         flock "$log" bash -c '_qci_capture_attest_row "$@"' _ \
-            "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" || rc=$?
+            "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" "$forced" || rc=$?
     else
-        _qci_capture_attest_row "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" || rc=$?
+        _qci_capture_attest_row "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" "$forced" || rc=$?
     fi
     return "$rc"
 }
 
-# THE PREFERRED PRODUCER for every virsh lane: take the screenshot HERE and
-# attest the file this function just wrote. There is no way to use it to bless
-# bytes it did not produce, and it cannot be pointed at another worker's VM
-# (the row is refused). Args: vm out [libvirt_uri].
+# ONE ROW PER DELIVERED FRAME. Take a screenshot WITHOUT attesting it.
+#
+# A retry loop captures candidates it may throw away, and attesting each one
+# made every delivered frame carry TWO rows (the scratch capture and the
+# in-tree publication). Three rounds of review went into trying to pair those
+# two rows back up from their bytes, and bytes cannot carry capture identity:
+# same bytes are not the same capture, and a different destination is not a
+# different capture. The inference is removed rather than improved -- a
+# candidate gets no row until it is published or explicitly recorded as
+# rejected. Args: vm out [libvirt_uri].
+capture_virsh_shot() {
+    local vm=${1:?capture_virsh_shot: vm} out=${2:?capture_virsh_shot: out}
+    local uri=${3:-${LIBVIRT_DEFAULT_URI:-qemu:///session}}
+    virsh -c "$uri" screenshot "$vm" "$out" >/dev/null || return $?
+    return 0
+}
+
+# Publish a candidate this process captured to its final path and write THE row
+# for it. `-T` matters: plain `cp SRC DEST` puts SRC's basename INSIDE DEST when
+# DEST already exists as a directory, which silently produced a graded frame at
+# a path nobody intended (sol, B round 3). Args: src dst [vm].
+capture_publish_frame() {
+    local src=${1:?capture_publish_frame: src} dst=${2:?capture_publish_frame: dst}
+    local vm=${3:-${VM:-${VMNAME:-}}} rc=0
+    cp -T -- "$src" "$dst" || return 1
+    _qci_capture_write_row "$dst" "$vm" "" || rc=$?
+    return "$rc"
+}
+
+# Record a candidate the capture tool JUDGED UNUSABLE (blank, stale, wrong
+# window). It keeps the ledger a complete record of every frame the harness
+# took, which is its forensic purpose, while the `rejected` scope tells the gate
+# to ignore the row entirely: a frame the harness already refused is not
+# evidence, and must never satisfy an evidence floor. Args: file [vm].
+capture_attest_rejected() {
+    _qci_capture_write_row "${1:-}" "${2:-${VM:-${VMNAME:-}}}" rejected
+}
+
+# THE PREFERRED PRODUCER for a lane that captures STRAIGHT to its final path
+# (the qdwin apps lane): take the screenshot HERE and attest the file this
+# function just wrote, one row, no publication step. There is no way to use it
+# to bless bytes it did not produce, and it cannot be pointed at another
+# worker's VM (the row is refused). A lane with a retry loop wants
+# capture_virsh_shot + capture_publish_frame instead. Args: vm out [uri].
 capture_virsh_screenshot() {
     local vm=${1:?capture_virsh_screenshot: vm} out=${2:?capture_virsh_screenshot: out}
     local uri=${3:-${LIBVIRT_DEFAULT_URI:-qemu:///session}} rc=0

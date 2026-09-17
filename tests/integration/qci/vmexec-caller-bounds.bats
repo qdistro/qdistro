@@ -828,3 +828,59 @@ x="$(qdwin_here)"
     run audit 'some_other_undefined_function'
     [ "$status" -eq 0 ]
 }
+
+# Round-3 review found five more shapes the auditor got wrong. The case-arm one
+# was a LIVE miss: renaming qdwin_apps_send_key, which tests/apps calls only
+# from `[0-9]) qdwin_apps_send_key ...`, used to leave the audit green.
+@test "callee audit: a case-arm body is command position" {
+    run audit 'case $x in
+  weston) qdwin_gone ;;
+esac'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: a backtick substitution is command position" {
+    run audit 'result=`qdwin_gone`'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: a parameter expansion is NOT a call" {
+    run audit 'echo "${qdwin_variable_only:-unset}"
+echo ${qdwin_other_variable}'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a guarded source still contributes its definitions" {
+    printf 'qdwin_provided() { :; }\n' > "$BATS_TEST_TMPDIR/defs.sh"
+    run audit "source \"$BATS_TEST_TMPDIR/defs.sh\" || exit 1
+qdwin_provided"
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a definition inside a heredoc does not count as defined" {
+    # DEF used to run on the raw text, so a function merely PRINTED by a
+    # heredoc satisfied a real call and masked a missing callee.
+    run audit 'cat <<EOF
+qdwin_gone() { :; }
+EOF
+qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "qdwin apps: the URI parser refuses everything it cannot express" {
+    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    local bad
+    for bad in 'virsh nonsense' \
+               'virsh -c qemu:///x trailing' \
+               'virsh -c --quiet' \
+               'virsh --quiet -c qemu:///w'; do
+        run uri_for "$bad"
+        [ "$status" -eq 1 ] || { echo "ACCEPTED: $bad -> $output" >&2; false; }
+    done
+    # and the shapes it CAN express still work
+    run uri_for 'virsh -cqemu:///y'
+    [ "$output" = "qemu:///y" ]
+}

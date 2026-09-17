@@ -1227,10 +1227,17 @@ gui_visual_frames() {
 #
 # `scope` is `in-tree` when the capture's destination was inside the artifact
 # directory the harness handed the agent, `out-of-tree` otherwise (e.g. the
-# vm-gui default /tmp/vm-screenshot.png, or a scratch capture). The distinction
-# matters for omission detection: an in-tree capture was written where evidence
-# is collected, so its later absence is omission; an out-of-tree capture may
-# legitimately never be harvested, so its absence is reported, not punished.
+# vm-gui default /tmp/vm-screenshot.png, which many scenarios then copy in).
+# The distinction matters for omission detection: an in-tree capture was written
+# where evidence is collected, so its later absence is omission; an out-of-tree
+# capture may legitimately never be harvested, so its absence is reported, not
+# punished.
+#
+# `rejected` marks a candidate the CAPTURE TOOL itself judged unusable -- blank,
+# stale, the wrong window. It is written so the ledger stays a complete account
+# of what the harness took, and it counts NOWHERE: not as a frame, not toward a
+# declared floor, and never as evidence. A frame the harness already refused
+# must not be able to satisfy the contract on its own.
 #
 # `chain` is sha256("<prev-chain>\t<seq>\t<ts>\t<vm>\t<scope>\t<bytes>\t<sha256>\t<path>"),
 # chained from the seed. It makes an INTERIOR deleted row, and any reordering,
@@ -1586,48 +1593,71 @@ gui_capture_reconcile() {
     local adir=$1 log=$2 outfile=$3
     local line seq ts vm scope bytes sum fpath chain
     local n=0 present=0 missing=0 unharv=0
-    local f d
-    declare -A disk_by_sum=() disk_count=() used=() present_sum=() in_tree_sum=()
+    local f d base key hit
+    declare -A disk_sum=() disk_taken=() present_sum=() last_row_for=()
     : > "$outfile"
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         d=$(sha256sum "$f" 2>/dev/null | awk '{print $1}')
         [ -n "$d" ] || continue
-        [ -n "${disk_by_sum[$d]:-}" ] || disk_by_sum[$d]=$f
-        # MULTIPLICITY MATTERS. Matching every row with a digest against the one
-        # file that happens to carry it let two separate identical captures be
-        # satisfied by one surviving file, so deleting the other was invisible
-        # (sol, B round 2) -- an ordinary duplicate/stability case, not a
-        # hostile one. Rows consume files.
-        disk_count[$d]=$(( ${disk_count[$d]:-0} + 1 ))
+        disk_sum[$f]=$d
     done < <(gui_visual_frames "$adir")
-    # A capture taken out of tree and then PUBLISHED into the artifact dir has
-    # two rows with one digest: the capture and the delivery (see vm-gui's
-    # deliver_attested_frame). That is one frame, not two, so the scratch row is
-    # skipped below -- otherwise a single screenshot reported as "2 frame(s), 1
-    # distinct". Two genuinely identical captures both land in-tree and are NOT
-    # collapsed: only the out-of-tree half of a published pair is. The
-    # declared-capture floor is checked against THIS function's `attested`
-    # result for the same reason; see gui_visual_evidence_status.
+
+    # A PATH HOLDS ONE FILE. A scenario that re-captures to the same path (one
+    # reference-run log does it 34 times) writes a row each time, and demanding
+    # a separate file per row reported the surviving frame as an omission
+    # (fable, B round 4). The last row for a path supersedes the earlier ones:
+    # a re-capture loop is one frame of evidence, not N.
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
-        [ "$scope" = in-tree ] && [ -n "$sum" ] && in_tree_sum[$sum]=1
-    done < <(gui_capture_log_rows "$log")
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
-        [ -n "$sum" ] || continue
-        # The gate's own seal row vouches for the ledger, not for a frame.
         [ "$scope" = seal ] && continue
-        [ "$scope" != in-tree ] && [ -n "${in_tree_sum[$sum]:-}" ] && continue
+        # A candidate the CAPTURE TOOL judged unusable is not evidence and is
+        # recorded only so the ledger stays a complete account of what the
+        # harness took. It counts nowhere.
+        [ "$scope" = rejected ] && continue
+        [ -n "$sum" ] || continue
+        [ "$scope" = in-tree ] && last_row_for[$fpath]=$seq
+    done < <(gui_capture_log_rows "$log")
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
+        [ "$scope" = seal ] && continue
+        [ "$scope" = rejected ] && continue
+        [ -n "$sum" ] || continue
+        if [ "$scope" = in-tree ] && [ "${last_row_for[$fpath]:-}" != "$seq" ]; then
+            continue
+        fi
         n=$((n + 1))
-        if [ "${used[$sum]:-0}" -lt "${disk_count[$sum]:-0}" ]; then
-            used[$sum]=$(( ${used[$sum]:-0} + 1 ))
+        # PATH FIRST, DIGEST ALWAYS. A file existing at the recorded path is not
+        # enough -- an overwritten frame is a file at that path carrying other
+        # bytes -- so the digest must agree either way. Harvest renames the
+        # artifact directory, so the recorded ABSOLUTE path cannot be resolved
+        # directly; the basename within this scenario's tree is what survives
+        # that rename. A frame moved elsewhere in the tree still counts, matched
+        # by digest alone.
+        hit=""
+        base=${fpath##*/}
+        for f in "${!disk_sum[@]}"; do
+            [ -n "${disk_taken[$f]:-}" ] && continue
+            [ "${f##*/}" = "$base" ] || continue
+            [ "${disk_sum[$f]}" = "$sum" ] || continue
+            hit=$f; break
+        done
+        if [ -z "$hit" ]; then
+            for f in "${!disk_sum[@]}"; do
+                [ -n "${disk_taken[$f]:-}" ] && continue
+                [ "${disk_sum[$f]}" = "$sum" ] || continue
+                hit=$f; break
+            done
+        fi
+        if [ -n "$hit" ]; then
+            disk_taken[$hit]=1
             present=$((present + 1))
             if [ -z "${present_sum[$sum]:-}" ]; then
                 present_sum[$sum]=1
-                printf '%s\n' "${disk_by_sum[$sum]}" >> "$outfile"
+                printf '%s\n' "$hit" >> "$outfile"
             fi
         elif [ "$scope" = in-tree ]; then
             # Captured straight into the evidence directory, then removed.
@@ -1716,11 +1746,11 @@ gui_visual_evidence_status() {
     # says how many frames must exist. Floor of 1 when undeclared.
     #
     # It is checked against the RECONCILED count, not the verifier's raw row
-    # total. One published vm-gui frame writes TWO rows (scratch capture +
-    # in-tree delivery), so a raw-row floor counted one screenshot as two and a
-    # scenario declaring 2 passed on 1 real frame (sol, B round 2 -- the round-2
-    # comment claiming the collapse prevented this was false, because the
-    # collapse happened after the floor had already passed).
+    # total: the raw total includes `rejected` rows and superseded re-captures
+    # to the same path, neither of which is a frame of evidence. Under the
+    # earlier two-rows-per-frame design a raw-row floor also counted one
+    # screenshot as two, so a scenario declaring 2 passed on one frame (sol,
+    # B round 2).
     if [ "$attested" -lt "$mincaps" ]; then
         printf 'missing:this scenario declares <!-- qci:visual-captures: %s --> but the harness took only %d capture(s) from its VM, so the frames the scenario requires were never taken (or were dropped before the agent exited)\n' \
             "$mincaps" "$attested"

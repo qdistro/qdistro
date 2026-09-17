@@ -3,7 +3,17 @@
 
 Deliberately narrow, and the narrowness is the contract: ONLY the two project
 function-name prefixes `qdwin_*` and `capture_*` -- this is not a general
-undefined-function checker -- and only names in COMMAND POSITION. A mention in a comment, a string or a heredoc body
+undefined-function checker -- and only names in COMMAND POSITION.
+
+KNOWN LIMITS, stated because this file has twice claimed a parsing model it did
+not implement. It is a REGEX over lines, not a shell parser:
+  * a string spanning several lines is only stripped on the line where it
+    opens, so a name on a later line of it can still be reported;
+  * `trap`, `time`, `timeout`, `xargs` and `exec` arguments are commands but are
+    not recognised as command position;
+  * `$(...)` nested inside `$(...)` inside double quotes is approximated.
+It is a cheap guard against calling a function nobody defines, which is the
+exact regression it was written for, and it must never be described as more. A mention in a comment, a string or a heredoc body
 is not a call, and this must not manufacture findings out of prose -- the file
 under test documents a deleted helper by name in a NOTE, and that note is not
 a bug.
@@ -22,12 +32,17 @@ DEF = re.compile(r'^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', re.M)
 # command. `if X`, `if ! X`, `while X`, `do X` and `{ X` were all missed before
 # (sol and fable, B round 2), and all of them are `bash -n` clean.
 KEYWORD = r'(?:if|then|elif|else|while|until|do|done|\{)'
+# `)` closes a case-arm pattern, so `weston) qdwin_foo ;;` is command position
+# and was missed at a LIVE site. A backtick opens a substitution. `$` is
+# excluded before `{` so that `${qdwin_x}` -- a parameter expansion, not a
+# command -- is not reported (both reviewers, B round 3).
 CALL = re.compile(
-    r'(?:^|[;&|({]|\$\(|\|\||&&|\b' + KEYWORD + r'\b)\s*(?:!\s+)?(' + PREFIX + r')\b',
+    r'(?:^|(?<!\$)[;&|({)`]|\$\(|\|\||&&|\b' + KEYWORD + r'\b)\s*(?:!\s+)?('
+    + PREFIX + r')\b',
     re.M)
 # The argument can itself contain quoted substitutions, so take the rest of the
 # line and drop the quoting rather than try to match balanced quotes.
-SOURCE = re.compile(r'^\s*(?:\.|source)\s+(.+?)\s*$', re.M)
+SOURCE = re.compile(r'^\s*(?:\.|source)\s+(.+?)\s*(?:\|\||&&|;|$)', re.M)
 
 
 def strip_strings(line):
@@ -168,7 +183,7 @@ def defs_of(path, seen):
         text = open(path, encoding='utf-8', errors='replace').read()
     except OSError:
         return set()
-    names = set(DEF.findall(text))
+    names = set(DEF.findall(strip_comments(text)))
     base = os.path.dirname(path)
     for raw in SOURCE.findall(strip_comments(text)):
         resolved = resolve(raw.replace('"', '').rstrip(';'), path, text)

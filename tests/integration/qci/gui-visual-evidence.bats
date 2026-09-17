@@ -923,10 +923,13 @@ EOF
     # gate (round 9), which rejects black/flat/undecodable captures before the
     # agent ever sees them. Assert the chain, not one spelling of it.
     grep -q 'capture_usable_screenshot "\$OUT"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_screenshot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
+    # A retry lane captures candidates UNATTESTED and writes the one row when
+    # it PUBLISHES the accepted frame; a lane that captures straight to its
+    # final path still attests in place.
+    grep -q 'capture_virsh_shot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_publish_frame "\$src" "\$dst"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'capture_virsh_screenshot "\$VM" "\$raw"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'capture_virsh_screenshot "\$VM" "\$post"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_screenshot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
     # qdwin_screenshot (in-guest qdshell capture, qdwin/qdlocker lane). Without
     # this, every qci:visual=required scenario in those repos would be ERROR.
     local qh="$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh"
@@ -1468,7 +1471,10 @@ EOF
     [ "${output%%$'\t'*}" = PASS ]
     # the black attempt is NOT one of the graded frames
     [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
-    [[ "$output" == *"captured outside the artifact dir"* ]]
+    # the ledger still RECORDS it -- that is the forensic point -- under a
+    # scope the gate counts nowhere
+    run awk -F'\t' '$4 == "rejected" { n++ } END { exit !(n == 1) }' "$CAPLOG"
+    [ "$status" -eq 0 ]
 }
 
 @test "vm-gui: a frame that could not be attested is NOT left in the frame set" {
@@ -1481,7 +1487,7 @@ EOF
         # vm-gui runs under `set -euo pipefail`; sourcing turns it back on, and
         # a function returning 1 would abort before the status is reported.
         set +e
-        capture_attest_frame() { return 1; }
+        capture_publish_frame() { cp -T -- "$1" "$2"; return 1; }
         VM=testvm
         printf "bytes" > "$2/src.png"
         deliver_attested_frame "$2/src.png" "$3/out.png"
@@ -1490,4 +1496,125 @@ EOF
     [[ "$output" == *"rc=1"* ]]
     [ ! -f "$ADIR/out.png" ]
     [ -f "$ADIR/out.png.unattested" ]
+}
+
+# --- B round 4: one row per frame, path-first reconciliation -----------------
+#
+# Rounds 1-3 attested every candidate, so a delivered frame carried two rows and
+# the gate had to pair them from their bytes. Both round-3 reviewers broke that
+# from opposite sides: the scratch+copy shape never collapsed (a floor of 2
+# passed on one screenshot) while two genuinely identical captures collapsed
+# wrongly (a floor of 2 failed on two real frames). These pin the replacement.
+
+@test "one row: the /tmp-then-copy shape counts ONCE, not twice" {
+    # 42 of the shipped `required` scenarios prescribe exactly this: capture to
+    # /tmp, copy into the artifact dir.
+    install_fake_virsh
+    cat > "$TDIR/two.md" <<'EOF'
+# 11 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+    LIBVIRT_DEFAULT_URI=qemu:///session \
+        "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot "$TDIR/outside.png" >/dev/null
+    cp "$TDIR/outside.png" "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took only 1 capture(s)"* ]]
+}
+
+@test "one row: two identical captures in DIFFERENT scopes are two frames" {
+    # The old digest-wide collapse turned these into one and failed a floor of
+    # two on two real captures.
+    write_status PASS
+    plant_image_at "$TDIR/outside.png" Approve
+    cp "$TDIR/outside.png" "$ADIR/copied.png"
+    attest_row "$TDIR/outside.png"
+    cp "$TDIR/outside.png" "$ADIR/second.png"
+    attest_row "$ADIR/second.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 2 frame(s), 1 distinct"* ]]
+}
+
+@test "supersede: re-capturing to the SAME path is one frame, not an omission" {
+    # One reference-run log re-captures to the same path 34 times. Demanding a
+    # separate file per row reported the surviving frame as deleted.
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/s1.png"
+    vmgui_screenshot "$ADIR/s1.png"
+    vmgui_screenshot "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
+}
+
+@test "supersede: the LAST capture to a path is the one that must still exist" {
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/s1.png"
+    vmgui_screenshot "$ADIR/s1.png"
+    rm -f "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+}
+
+@test "digest always: a frame OVERWRITTEN at its path is not present" {
+    # A file existing at the recorded path is not presence -- an agent that
+    # replaces a frame with an edited image leaves a file at that path.
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/s1.png"
+    printf 'not the captured frame' > "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+}
+
+@test "moved: a frame relocated within the artifact tree still counts" {
+    install_fake_virsh
+    vmgui_screenshot "$ADIR/s1.png"
+    mkdir -p "$ADIR/sub"
+    mv "$ADIR/s1.png" "$ADIR/sub/renamed.png"
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "triage names are type-safe: a DIRECTORY at the destination cannot smuggle a frame in" {
+    # `cp SRC DEST` puts SRC's basename INSIDE DEST when DEST is a directory,
+    # which put a graded image at a path nobody intended. `cp -T` refuses.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    install_flaky_virsh
+    mkdir -p "$ADIR/s1.png.attempt-1.rejected"
+    run vmgui_screenshot "$ADIR/s1.png"
+    [ "$status" -eq 0 ]
+    [ ! -f "$ADIR/s1.png.attempt-1.rejected/attempt-1.png" ]
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
+}
+
+@test "rejected rows count NOWHERE, including toward a declared floor" {
+    # The forensic record must not become evidence: a frame the capture tool
+    # already refused cannot help satisfy `qci:visual-captures`.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    install_flaky_virsh
+    cat > "$TDIR/two.md" <<'EOF'
+# 12 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    vmgui_screenshot "$ADIR/s1.png"
+    write_status PASS
+    # one delivered frame + one rejected attempt in the ledger
+    run awk -F'\t' '$4 == "rejected" { r++ } $4 == "in-tree" { t++ } END { exit !(r == 1 && t == 1) }' "$CAPLOG"
+    [ "$status" -eq 0 ]
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took only 1 capture(s)"* ]]
 }

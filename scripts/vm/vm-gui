@@ -524,59 +524,62 @@ screenshot_unusable_reason() {
     esac
 }
 
+# Publish an accepted candidate to its final path, with THE one ledger row for
+# that frame.
+#
+# ONE ROW PER FRAME (B round 4). Earlier rounds attested every candidate at
+# capture time, so a delivered frame carried two rows -- the scratch capture and
+# the publication -- and the gate had to pair them back up from their bytes.
+# Three review rounds showed that cannot work: identical bytes are not the same
+# capture, so real duplicate captures collapsed into one, while a capture to
+# /tmp that the scenario copied in did not collapse at all. Candidates are now
+# captured UNATTESTED; the row is written when a frame is published.
+#
+# A failed publication is FATAL: a delivered frame with no row is precisely the
+# ungraded-evidence state this path exists to prevent, and the bytes are moved
+# out of the frame set (the gate finds frames by image extension) rather than
+# left where a later match could grade them.
+deliver_attested_frame() {
+    local src=$1 dst=$2
+    if declare -f capture_publish_frame >/dev/null 2>&1; then
+        capture_publish_frame "$src" "$dst" "$VM" && return 0
+        if [ -e "$dst" ]; then
+            mv -fT -- "$dst" "$dst.unattested" 2>/dev/null || rm -f -- "$dst"
+        fi
+        echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; any bytes recovered are at $dst.unattested" >&2
+        return 1
+    fi
+    # Standalone / older qdistro checkout: no ledger to write to.
+    cp -T -- "$src" "$dst" || return 1
+    return 0
+}
+
+# Record a candidate this tool judged unusable, and keep its bytes for triage
+# under a NON-IMAGE name. Both halves matter: the `rejected` row keeps the
+# ledger a complete account of what the harness captured, and the name keeps the
+# bytes out of the frame set, so a frame the harness already refused can never
+# be graded -- nor satisfy the decoded-frame floor on its own.
+retain_rejected_candidate() {
+    local src=$1 dst=$2
+    declare -f capture_attest_rejected >/dev/null 2>&1 &&
+        capture_attest_rejected "$src" "$VM" || true
+    cp -T -- "$src" "$dst" 2>/dev/null || true
+}
+
 # THE GATE ON THE PLAIN `screenshot` PATH. Before round 9 this path captured and
 # attested whatever virsh returned, so a black or corrupt frame was handed to the
 # agent looking exactly like a good one -- and an agent that OCR'd it read no
 # text and could not distinguish "the control is absent" from "I cannot read
 # this". That produced a real FALSE FAIL on a working product (run
 # gui-20260916T115528Z: the first S3 capture was 2-colour black, the retries were
-# Publish an accepted candidate to its final IN-TREE path and give the ledger a
-# row for THAT path.
-#
-# Why this exists (B round 1, fable finding 2): candidates are captured into a
-# private scratch dir, so the row the library writes names a scratch path. Every
-# row was therefore `out-of-tree`, and out-of-tree rows whose bytes are absent
-# are REPORTED, never punished -- because a rejected attempt the agent tidied
-# away must not read as an omission. The consequence was that deleting the
-# ACCEPTED frame produced the same benign note as tidying a rejected one, and a
-# scenario that captured two frames and deleted the damning one still graded
-# PASS. Digest reconciliation alone cannot separate those two cases: absent
-# bytes look identical either way.
-#
-# So the delivered frame gets its own row at the path it actually occupies. That
-# row IS in-tree, so deleting the file is a real omission the gate can see,
-# while rejected attempts keep exactly the tidy-able status they had. The
-# accepted frame's two rows (scratch capture + in-tree delivery) share a digest
-# and reconcile to one harness capture, as the comment below already intended.
-#
-# A failed attestation is FATAL here: a delivered frame with no in-tree row is
-# precisely the ungraded-evidence state this whole path exists to prevent.
-# ---------------------------------------------------------------------------
-deliver_attested_frame() {
-    local src=$1 dst=$2
-    cp "$src" "$dst" || return 1
-    if declare -f capture_attest_frame >/dev/null 2>&1; then
-        capture_attest_frame "$dst" "$VM" || {
-            # Leaving it in place was not the same as "not graded": an
-            # unattested file whose bytes match SOME row is matched by digest
-            # and graded anyway. Move it out of the frame set -- the gate finds
-            # frames by image extension -- so the claim below is actually true.
-            # The bytes are kept for triage under a non-image name.
-            mv -f "$dst" "$dst.unattested" 2>/dev/null || rm -f "$dst"
-            echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; the bytes are at $dst.unattested" >&2
-            return 1
-        }
-    fi
-    return 0
-}
-
 # the correct window, and the scenario was reported FAIL).
 #
 # Retries are taken into a scratch dir and only the ACCEPTED frame is published
 # to $out, via deliver_attested_frame, which gives it an IN-TREE ledger row.
-# Rejected attempts keep only their out-of-tree capture row and are copied
-# beside $out under a non-image name, so they are never graded and tidying them
-# away is free; deleting the delivered frame is not.
+# A rejected attempt is recorded under the `rejected` scope, which the gate
+# counts NOWHERE, and its bytes are copied beside $out under a non-image name,
+# so it can never be graded and tidying it away is free; deleting the delivered
+# frame is not.
 # If no attempt is usable this returns NONZERO rather than yielding a bad frame:
 # the caller must not be handed something it cannot form a verdict from.
 capture_usable_screenshot() {
@@ -589,7 +592,7 @@ capture_usable_screenshot() {
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shot.XXXXXX") || return 1
     for (( i=1; i<=attempts; i++ )); do
         candidate="$scratch/attempt-${i}.png"
-        capture_virsh_screenshot "$VM" "$candidate" \
+        capture_virsh_shot "$VM" "$candidate" \
             || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
         screenshot_is_usable "$candidate"; rc=$?
         if [ "$rc" -eq 0 ]; then
@@ -612,7 +615,7 @@ capture_usable_screenshot() {
         # set, where it could even satisfy the decoded-frame floor on its own.
         # The row stays out-of-tree and unharvested, which is exactly what it
         # is, and the bytes remain beside $out for triage.
-        cp "$candidate" "${out}.attempt-${i}.rejected" 2>/dev/null || true
+        retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected"
         echo "vm-gui: screenshot attempt $i/$attempts rejected: $(screenshot_unusable_reason "$rc") (${out}.attempt-${i}.rejected)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
@@ -649,7 +652,7 @@ screenshot_fresh() {
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shotfresh.XXXXXX") || return 1
     for (( i=1; i<=attempts; i++ )); do
         candidate="$scratch/attempt-${i}.png"
-        capture_virsh_screenshot "$VM" "$candidate" \
+        capture_virsh_shot "$VM" "$candidate" \
             || { local caprc=$?; rm -rf -- "$scratch"; return "$caprc"; }
         reason=""
         if screenshot_is_black "$candidate"; then
@@ -676,7 +679,7 @@ screenshot_fresh() {
         # name: the library attested the candidate when it captured it, and an
         # in-tree copy with the same digest would be matched to that row and
         # graded. It carries no in-tree ledger row, so deleting it is free.
-        cp "$candidate" "${out}.attempt-${i}.rejected" 2>/dev/null || true
+        retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected"
         echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason (${out}.attempt-${i}.rejected)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
