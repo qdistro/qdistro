@@ -714,6 +714,16 @@ Rules:
     process that timed out or was killed is not an intentional skip.
   - FAIL — a product-behaviour assertion did not hold. Exit nonzero.
   - ERROR — you could not reach a verdict. Exit nonzero.
+- The SCENARIO verdict is decided by the REQUIRED assertions only. A scenario
+  whose required assertions all passed is PASS even when one of its own
+  OPTIONAL/conditional steps was skipped — a step the scenario itself marks
+  "conditional on ...", "skip this step if ...", or "skipped when ...". "Some
+  steps skipped, none failed" is PASS, never ERROR. Say which step was skipped
+  and why in the report; do not downgrade the verdict for it. ERROR means you
+  could not reach a verdict on the REQUIRED assertions — not that the run was
+  less than perfectly complete. (qdwin/tests/gui/15-keybinding-events.md in
+  full-20260914T194046Z-13620: 1.1/2.1/3.1 observed, only the conditional 4.1
+  skipped, recorded ERROR.)
 - SKIP is deliberately NARROW. Use it only when a package, binary, service,
   helper, or image capability this scenario requires is verifiably ABSENT here,
   and you can name it and name the check that showed it absent
@@ -735,6 +745,64 @@ Rules:
     disappeared; that is a defect somewhere -- possibly your own driving, see
     the single-guest-shell rule above -- and calling it a skip makes it
     invisible. Exit nonzero with ERROR.
+- NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
+  \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
+  HEALTHY and your guest command is still running; they are progress, not a
+  wedge. vm-exec already enforces its own overall deadline
+  (\`QDISTRO_VM_EXEC_TIMEOUT\`, default 1800s) and exits 124 when it fires — but
+  that counter is checked BETWEEN steps, not enforced as wall clock, so under
+  host pressure the exit can come far later than 1800s. Do NOT wait forever for
+  it: put your own cap around the call, \`timeout -k 30 1900 vm-exec ...\`, and
+  let that be what ends it. Killing it and re-running leaves the FIRST driver shell alive inside the
+  guest, and two drivers then race on one VM: duplicated requests, duplicated
+  rows, and no attributable verdict (permissions-gui/45 and /50,
+  full-20260914T194046Z-13620). If a command really must be abandoned, send
+  vm-exec a signal (on INT/TERM/HUP it attempts an identity-checked
+  TERM-then-KILL of the pinned guest tree, and NAMES any descendant it could
+  not pin instead of signalling it) rather than
+  killing it with SIGKILL, and verify in the guest that nothing from the first
+  attempt survived before starting a second one.
+- NEVER put a PIPE on vm-exec's stderr in your driver script. Concretely, do
+  NOT open your driver with \`exec > >(tee "\$LOG") 2>&1\`, and do not write
+  \`out=\$(vm-exec ... 2>&1)\` or \`vm-exec ... 2>&1 | reader\`. This is the
+  single commonest way these drivers hang, and it does not look like a hang in
+  the script -- it looks like vm-exec being slow.
+  WHY. vm-exec puts its own children's fd 1 on an internal capture file, but
+  fd 2 is inherited straight through to every virsh/jq descendant it starts.
+  Whatever is reading that pipe waits for the pipe to reach EOF, which happens
+  when the LAST writer closes it -- NOT when vm-exec exits. One descendant that
+  outlives vm-exec holds your driver open for as long as it lives, after the
+  guest command is already finished. An outer \`timeout\` on vm-exec does not
+  help, because the shell is blocked on a READ, not on the child. Measured with
+  a vm-exec leaving a 4s descendant: the \`exec > >(tee …) 2>&1\` driver
+  returned after 4.00s, the same driver capturing to a file returned in 0.01s.
+  WHAT TO DO INSTEAD. Send both descriptors to a regular FILE and read the file
+  afterwards:
+      cf=\$(mktemp) || exit 2
+      exec {w}>"\$cf" || { rm -f "\$cf"; exit 2; }
+      exec {r}<"\$cf" || { exec {w}>&-; rm -f "\$cf"; exit 2; }
+      rm -f "\$cf" || { exec {w}>&- {r}<&-; exit 2; }
+      rc=0
+      "\$QDISTRO_REPO/scripts/vm/vm-exec" "\$VMNAME" 'cmd' \\
+          >&"\$w" 2>&"\$w" {w}>&- {r}<&- || rc=\$?
+      exec {w}>&-; out=\$(head -c 65536 <&"\$r"); exec {r}<&-
+  Check every setup step (an unchecked unlink leaves the capture NAMED while
+  the command runs) and collect rc with \`|| rc=\$?\` (under \`set -e\` a bare
+  call aborts before you can read it).
+  If you only want a log of your whole run, redirect to a FILE
+  (\`exec >"\$QCI_GUI_ARTIFACT_DIR/driver.log" 2>&1\`) -- a file has no reader
+  to wait on. Use
+  \`tee\` only where no vm-exec call is in scope.
+- Guest logs and scratch must be per-scenario and must not assume a clean /tmp.
+  ANY fixed shared guest path (\`/tmp/<something>.log\`) can already exist
+  ROOT-owned from the golden image, and a non-root writer then dies with
+  \`Permission denied\` and produces a black screenshot that looks like a product
+  failure (permissions-gui/50, full-20260914T194046Z-13620). Redirect YOUR OWN
+  logs to \`/tmp/qci-$slug/<name>.log\`. Do NOT invent a shipped log path to
+  clear: the admin launchers write under
+  \`\${XDG_STATE_HOME:-/home/admin/.local/state}/qdistro/\` (admin-app.log,
+  qterminal-tui.log), which is per-user and not a shared /tmp path — read it for
+  diagnostics, never delete it as root.
 - Diagnose your OWN tooling before blaming the product:
   - First confirm your setup/driver commands actually executed. A shell
     parser/usage error from one of your own commands (e.g. \`option requires an
@@ -927,18 +995,162 @@ runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart 
 
 # Host-side waiter: retry a guest command over vm-exec until it exits 0 or the
 # deadline passes — the host equivalent of the guest await_* helpers, for
-# host-driven readiness gates. Bounded by the wall clock; on timeout logs the
-# last guest output. Returns 0 on success, 1 on timeout. VM_TOOLS is overridable
-# so this is host-testable with a fake vm-exec.
+# host-driven readiness gates. Returns 0 on success, 1 on timeout; on timeout
+# logs the (ceiled) last guest output. VM_TOOLS is overridable so this is
+# host-testable with a fake vm-exec.
 # Args: vm timeout_s interval_s <guest-cmd...>
+#
+# WHY THE OUTPUT GOES THROUGH A FILE AND NOT THROUGH `$( ... 2>&1 )`.
+# `last=$(vm-exec ... 2>&1)` hands vm-exec's fd 1 AND fd 2 to this
+# substitution's pipe. vm-exec bounds its children's fd 1 internally, but fd 2
+# is inherited straight through to every virsh/jq descendant it starts. A
+# descendant that outlives vm-exec and keeps that descriptor holds the
+# substitution open, and bash waits for the pipe to close, not for vm-exec to
+# exit -- so the call can hang after the command it ran is long dead, with no
+# timeout able to help. A read from a REGULAR file has no such dependency: it
+# reaches EOF at the current end of file however many writers still hold it.
+# (An actively growing file keeps producing more on a later read; that is why
+# the read below is also ceiled, and why the file is per-call.)
+#
+# WHY A FRESH FILE PER ATTEMPT, UNLINKED BEFORE THE COMMAND STARTS.
+# The previous shape truncated ONE file per attempt (`: > "$cf"`). That is the
+# same isolation error this file's own vm-exec fixed one level inward: a
+# descendant of attempt N that still holds fd 2 on that inode appends into
+# attempt N+1's capture, so the text logged for one attempt can be another
+# attempt's output. Each attempt now gets its own mktemp name, opens both ends,
+# and unlinks the name BEFORE the command runs -- so no later attempt can be
+# handed an inode an earlier attempt's survivor still holds, and no file is
+# left named while a command is running. This mirrors bounded_run() in
+# scripts/vm/vm-exec.
+#
+# WHAT THIS DOES NOT DO: it does not reap or bound a surviving descendant. Such
+# a writer keeps an unlinked inode and can consume disk; the size bound on it is
+# whatever RLIMIT_FSIZE vm-exec installed on its own children (vm-exec refuses
+# to start without one unless QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE=1). This
+# helper adds no limit of its own beyond the ceiled read.
+#
+# THE DEADLINE IS ENFORCED, NOT MERELY CHECKED AFTER THE FACT.
+# The old loop invoked vm-exec and only compared elapsed time once it returned,
+# so an invocation that never returned never reached the check and a 2s success
+# was accepted against a 1s budget. Each invocation is now run under
+# `timeout -k <grace> <remaining>s`, where <remaining> is what is left of the
+# caller's budget, and the budget is re-checked at the top of every iteration.
+# Consequently: no single invocation can outlast the budget, and a success that
+# arrives after the budget is spent cannot be returned as a success -- `timeout`
+# has killed it and the status is 124/137.
+#
+# THE BOUND, STATED WITH ITS CONDITIONS. Once the budget is spent this function
+# returns within <grace> seconds plus one ceiled read, ASSUMING `timeout` is
+# GNU coreutils' (KILL after grace is not deniable by the monitored process)
+# and that the local read/unlink make ordinary progress. The wall time before
+# that is at most timeout_s + interval_s + grace + the reads + THE CAPTURE
+# SETUP of the final attempt. That last term used to be omitted; it is not
+# negligible and it is not hypothetical -- a two-second mktemp against a
+# one-second budget was enough to return a success past the deadline before
+# the budget was recomputed after setup (sol, qci-A-260917-sol-review.md
+# section 4). The recomputation bounds the damage; it does not make setup free.
+# One visible side effect of the `$( )` replay, shared by every site that
+# uses it: on a NUL-bearing capture bash writes `warning: command
+# substitution: ignored null byte in input` to stderr, once per call.
+# Harmless, and not a failure.
+GUI_AWAIT_CAP_BYTES=${QCI_GUI_AWAIT_CAP_BYTES:-65536}
+# A cap that is not a positive decimal integer is not a byte ceiling: GNU
+# `head -c -1` means "all but the LAST byte" and `head -c 00` reads nothing,
+# both of which look like a working bound (sol A2 section 2).
+case "$GUI_AWAIT_CAP_BYTES" in
+    ''|*[!0-9]*|0|0*)
+        echo "gui gate: GUI_AWAIT_CAP_BYTES must be a positive integer number of bytes, got '$GUI_AWAIT_CAP_BYTES'" >&2
+        return 2 2>/dev/null || exit 2 ;;
+esac
+GUI_AWAIT_KILL_GRACE=${QCI_GUI_AWAIT_KILL_GRACE:-5}
 await_vmexec_success() {
     local vm=$1 timeout=$2 interval=$3; shift 3
-    local start=$SECONDS last elapsed
+    local start=$SECONDS last="" elapsed left rc cf wfd rfd
     while :; do
-        if last=$("$VM_TOOLS/vm-exec" "$vm" "$*" 2>&1); then
+        elapsed=$((SECONDS - start))
+        left=$((timeout - elapsed))
+        if [ "$left" -le 0 ]; then
+            log "await_vmexec_success: TIMEOUT ${elapsed}s on '$*' (last: ${last:0:200})"
+            return 1
+        fi
+        cf=$(mktemp "${TMPDIR:-/tmp}/qci-await.XXXXXXXX") || {
+            log "await_vmexec_success: cannot create a capture file; refusing to run '$*'"
+            return 1
+        }
+        # Open both ends, then unlink: from here on the inode has no pathname,
+        # so neither a survivor of this attempt nor any later attempt can reach
+        # it by name. EVERY step is checked. An unchecked `rm` here used to let
+        # the function run the command anyway and return its status, leaving a
+        # NAMED capture behind and silently voiding the invariant this comment
+        # claims (sol, qci-A-260917-sol-review.md §3, reproduced by injecting a
+        # failing rm). A setup failure is infrastructure, not a guest result.
+        if ! exec {wfd}>"$cf"; then
+            log "await_vmexec_success: cannot open capture for write; refusing to run '$*'"
+            rm -f "$cf"
+            return 1
+        fi
+        if ! exec {rfd}<"$cf"; then
+            log "await_vmexec_success: cannot open capture for read; refusing to run '$*'"
+            exec {wfd}>&-
+            rm -f "$cf"
+            return 1
+        fi
+        if ! rm -f "$cf" || [ -e "$cf" ]; then
+            log "await_vmexec_success: capture file still NAMED after unlink; refusing to run '$*'"
+            exec {wfd}>&- {rfd}<&-
+            return 1
+        fi
+        rc=0
+        # Recompute the budget HERE. It used to be the `left` computed before
+        # mktemp and the three opens, so everything that setup cost was spent
+        # out of the caller's deadline without being counted against it.
+        elapsed=$((SECONDS - start))
+        left=$((timeout - elapsed))
+        if [ "$left" -le 0 ]; then
+            exec {wfd}>&- {rfd}<&-
+            log "await_vmexec_success: TIMEOUT ${elapsed}s on '$*' (capture setup consumed the budget)"
+            return 1
+        fi
+        # The command and every descendant get the capture FILE on fd 1 and
+        # fd 2. The bookkeeping descriptors are closed for the child so nothing
+        # downstream inherits a second handle or the read end.
+        timeout -k "${GUI_AWAIT_KILL_GRACE}s" "${left}s" \
+            "$VM_TOOLS/vm-exec" "$vm" "$*" >&"$wfd" 2>&"$wfd" {wfd}>&- {rfd}<&- || rc=$?
+        exec {wfd}>&-
+        # Bounded by BYTES, not by representable characters. `read -N` counts
+        # characters and silently DELETES NUL bytes on the way, so a capture
+        # full of NULs made it read far past the nominal ceiling (4 MiB of NULs
+        # cost 4,194,305 bytes and ~0.88s in sol's measurement). `head -c` is a
+        # fork, which is why the ceiling is only consulted once per attempt.
+        last=""
+        # A FAILED replay is not empty output. This waiter's VERDICT is the
+        # producer's exit status, not the capture -- the capture is diagnostic
+        # only -- so a lost capture must NOT flip a genuine success into a
+        # failure; that would be a new false-red. What it must not do is pass
+        # silently: `|| :` left a failed `head` looking exactly like a command
+        # that printed nothing (astra, A-astra finding 3).
+        #
+        # NOTE the scope, because I previously claimed the opposite: unlike the
+        # capture helpers, this site does NOT return 125 on a replay failure,
+        # and it is a deliberate exception rather than an oversight. It says so
+        # out loud and puts the marker in the timeout diagnostic below.
+        if ! last=$(head -c "$GUI_AWAIT_CAP_BYTES" <&"$rfd"); then
+            last="<capture replay FAILED: the command's output is UNAVAILABLE, not empty>"
+            log "await_vmexec_success: could not replay the capture for '$*'; the readiness verdict below rests on the exit status alone, with no output to show for it"
+        fi
+        exec {rfd}<&-
+        # A success is only a success WITHIN the deadline. Returning 0 here
+        # without re-checking meant a command that finished after the budget
+        # expired was reported ready: with a 1s budget and a 2s setup delay
+        # this returned 0 at 2.01s (sol §4).
+        elapsed=$((SECONDS - start))
+        if [ "$rc" -eq 0 ]; then
+            if [ "$elapsed" -ge "$timeout" ]; then
+                log "await_vmexec_success: succeeded at ${elapsed}s but the ${timeout}s deadline had passed on '$*' — reporting NOT ready"
+                return 1
+            fi
             return 0
         fi
-        elapsed=$((SECONDS - start))
         if [ "$elapsed" -ge "$timeout" ]; then
             log "await_vmexec_success: TIMEOUT ${elapsed}s on '$*' (last: ${last:0:200})"
             return 1
@@ -1845,8 +2057,8 @@ gui_preflight_capabilities() {
 }
 
 # Record the agent identity (H6a) into manifest.txt: the sanitized QCI_AGENT_CMD
-# template, the model (QCI_AGENT_MODEL, parsed from `--model X`/`-m X`, or the
-# Haiku default), and a
+# template, the model (QCI_AGENT_MODEL, parsed from `--model X`/`-m X`, or
+# `unknown` when neither names one), and a
 # best-effort agent CLI version. This is what distinguishes a CI run from a debug
 # rerun with a stronger model, and is the prerequisite for never confusing debug
 # rows with CI rows. Pure w.r.t. the run tree except the kv writes; a missing
@@ -1872,9 +2084,9 @@ record_agent_identity() {
     [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
     # `unknown`, never a guessed default. QCI_AGENT_CMD is an arbitrary wrapper;
     # when neither --model/-m nor QCI_AGENT_MODEL names one, the effective model
-    # is genuinely undetermined, and recording "haiku" made a debug rerun with a
-    # stronger model indistinguishable from a CI row in exactly the comparison
-    # this key exists to support.
+    # is genuinely undetermined, and recording a guessed default made a debug
+    # rerun with a different model indistinguishable from a CI row in exactly
+    # the comparison this key exists to support.
     kv qci_agent_model "${model:-unknown}"
     # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.

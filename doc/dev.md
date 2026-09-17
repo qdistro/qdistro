@@ -122,10 +122,15 @@ named in `QCI_AGENT_CMD`, and finally `gpt-5.6-luna`. Set `QCI_AGENT_MODEL`
 whenever a generic wrapper selects the model outside the visible command
 template.
 
-Claude Haiku is a verified vision-capable fallback when Luna is unavailable:
+`gpt-5.6-luna` is the only driver verified against the visual-evidence bar
+(it opens a PNG from disk mid-session and reports colour and layout, not just
+text). There is no sanctioned fallback model: a runner that cannot open an
+image cannot grade these scenarios, and must record `ERROR` rather than a
+verdict. Retrying a single scenario on a fresh VM:
 
 ```sh
-QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_MODEL=gpt-5.6-luna \
 QCI_GUI_RETRY=1 \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
 ```
@@ -153,8 +158,7 @@ and must invoke `virsh`, `vm-exec`, and evidence-writing commands without an
 interactive approval. The scenario still fails closed unless the agent writes
 an explicit passing verdict and exits zero.
 
-The qci GUI gate enforces a host/guest boundary for every runner, including
-Luna and Haiku:
+The qci GUI gate enforces a host/guest boundary for every runner:
 
 - Graphical applications, compositors, dialogs, screenshots, and input run only
   in disposable VMs. The host process is a non-interactive controller.

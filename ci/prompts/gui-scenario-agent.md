@@ -64,10 +64,66 @@ Procedure:
    - Bad SKIP (record ERROR instead): "the helper client bound the protocol but
      was gone by the time I ran the steps". Something started and then
      disappeared. That is a defect somewhere -- possibly in your own driving
-     (see step 9), possibly in the product -- and calling it a skip makes it
+     (see step 11), possibly in the product -- and calling it a skip makes it
      invisible. Exit nonzero with ERROR.
 
-9. Run Setup, Steps, Assertions, and Cleanup as ONE guest shell invocation.
+10. NEVER kill a running `vm-exec` and re-issue the same driver. Its periodic
+   `[vm-exec] Waiting... (polls=Ns elapsed=Ns)` lines mean the TRANSPORT IS
+   HEALTHY and the guest command is still running - progress, not a wedge.
+   vm-exec has its own deadline (`QDISTRO_VM_EXEC_TIMEOUT`, default 1800s) and
+   exits 124 when it fires -- but that counter is checked BETWEEN steps, not
+   enforced as wall clock, so under host pressure the exit can be far later
+   than 1800s. Do NOT simply wait forever for it: put your own wall-clock cap
+   around the call, `timeout -k 30 1900 vm-exec ...`, and let THAT be what ends
+   it. The `-k` matters: without it a leader that exits on TERM leaves the KILL
+   alarm unarmed. Killing it and re-running leaves the
+   FIRST driver shell alive in the guest, and two drivers then race on one VM:
+   duplicated requests, duplicated rows, no attributable verdict. If a command
+   must be abandoned, signal vm-exec (on INT/TERM/HUP it attempts an
+   identity-checked TERM-then-KILL of the pinned guest tree, and names any
+   descendant it could not pin rather than signalling it) instead of
+   SIGKILLing it, and verify in the guest that nothing from the first attempt
+   survived before starting a second one -- that verification is load-bearing,
+   not a formality, because discovery of a reparented process is not
+   guaranteed.
+
+11. NEVER put a PIPE on vm-exec's stderr. Do NOT open your driver with
+   `exec > >(tee "$LOG") 2>&1`, and do not write `out=$(vm-exec ... 2>&1)` or
+   `vm-exec ... 2>&1 | reader`. This is the commonest way these drivers hang.
+   vm-exec bounds its children's fd 1 internally, but fd 2 is inherited by
+   every virsh/jq descendant it starts; the reader then waits for the PIPE to
+   reach EOF, which is when the LAST writer closes it, not when vm-exec exits.
+   A single descendant outliving vm-exec holds your driver open after the guest
+   command has finished, and an outer `timeout` cannot help because the shell
+   is blocked on a read rather than on the child. Measured against a vm-exec
+   leaving a 4s descendant: `exec > >(tee …) 2>&1` returned after 4.00s, a
+   file capture in 0.01s.
+   Capture to a regular FILE instead:
+       cf=$(mktemp) || exit 2
+       exec {w}>"$cf" || { rm -f "$cf"; exit 2; }
+       exec {r}<"$cf" || { exec {w}>&-; rm -f "$cf"; exit 2; }
+       rm -f "$cf" || { exec {w}>&- {r}<&-; exit 2; }   # check it: an unchecked
+                    # unlink leaves the capture NAMED while the command runs
+       rc=0
+       "$QDISTRO_REPO/scripts/vm/vm-exec" "$VMNAME" 'cmd' \
+           >&"$w" 2>&"$w" {w}>&- {r}<&- || rc=$?        # collect rc HERE: with
+                    # `set -e` a bare call would abort before you could read it
+       exec {w}>&-; out=$(head -c 65536 <&"$r"); exec {r}<&-
+       # $rc is vm-exec's status, $out its merged output.
+   To log your whole run, redirect to a FILE
+   (`exec >"$QCI_GUI_ARTIFACT_DIR/driver.log" 2>&1`):
+   a file has no reader to wait on. Use `tee` only where no vm-exec is in scope.
+12. Guest logs and scratch must be per-scenario and must not assume a clean
+   /tmp. ANY fixed shared guest path (`/tmp/<something>.log`) can already exist
+   ROOT-owned from the golden image; a non-root writer then dies with
+   `Permission denied` and produces a black screenshot that looks like a
+   product failure. Redirect YOUR OWN logs to `/tmp/qci-<slug>/<name>.log`. Do
+   not invent a shipped log path to clear: the admin launchers write under
+   `${XDG_STATE_HOME:-/home/admin/.local/state}/qdistro/` (admin-app.log,
+   qterminal-tui.log), which is per-user and not a shared /tmp path - read it
+   for diagnostics, never delete it as root.
+
+13. Run Setup, Steps, Assertions, and Cleanup as ONE guest shell invocation.
    Scenario setup helpers commonly arm an `EXIT` trap that restores the
    compositor's shell role; splitting Setup and Steps across separate
    `vm-exec`/`guest-exec` calls fires that trap the moment Setup's shell exits

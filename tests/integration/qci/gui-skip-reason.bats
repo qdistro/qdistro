@@ -225,6 +225,72 @@ _render_prompt() {
     [ "$(gui_agent_verdict ERROR 1 | cut -f1)" = fail ]
 }
 
+# qdwin/tests/gui/15-keybinding-events.md, full-20260914T194046Z-13620: all
+# three REQUIRED asserts observed, only the scenario's own conditional 4.1
+# skipped -- recorded ERROR. ERROR is graded as a hard failure either way, so a
+# verdict-discipline slip like this costs a real red row.
+@test "runtime prompt says skipped OPTIONAL steps do not make a scenario ERROR" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'REQUIRED assertions only'
+    printf '%s' "$p" | grep -qi 'skipped, none failed. is PASS, never ERROR'
+    # ERROR is a hard failure however the agent exits -- the cost of the slip.
+    [ "$(gui_agent_verdict ERROR 0 | cut -f1)" = fail ]
+}
+
+# permissions-gui/45 and /50, full-20260914T194046Z-13620: the agent killed a
+# slow vm-exec and re-issued the driver; the first guest shell stayed alive and
+# the two duplicated every request and row, so no verdict was attributable.
+@test "runtime prompt forbids kill-and-reissue of a waiting vm-exec" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'NEVER kill a running'
+    printf '%s' "$p" | grep -q 'vm-exec] Waiting'
+    printf '%s' "$p" | grep -qi 'TRANSPORT IS'
+}
+
+# permissions-gui/50: a ROOT-owned shared /tmp log made the non-root launcher
+# die with `Permission denied` and screenshot black. The warning must stay
+# GENERIC: the launchers now write under $XDG_STATE_HOME/qdistro/, so pinning
+# the obsolete /tmp/admin-app.log here would teach the agent to "repair" a path
+# no shipped code opens (and to delete it as root).
+# THE caller class that actually hangs GUI runs, and the one the static scanner
+# cannot see: the driver scripts the agent writes at run time live under
+# ci/runs/, which ci/bin/vmexec-fd2-scan.py skips by design. Counted over the
+# archived runs in this checkout: 499 agent-written driver scripts, 121 of them
+# opening with `exec > >(tee "$LOG") 2>&1`, 33 of those going on to call
+# vm-exec. That shape puts vm-exec's fd 2 on tee's pipe, so every virsh/jq
+# descendant inherits it and the reader waits for the LAST writer to close --
+# measured at 4.00s against a vm-exec leaving a 4s descendant, where a file
+# capture returned in 0.01s. Since CI cannot lint these files, the prompt is
+# the only place the rule can live, and this test is what keeps it there.
+@test "runtime prompt forbids a PIPE on vm-exec stderr in the agent's own driver" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'NEVER put a PIPE'
+    printf '%s' "$p" | grep -q 'exec > >(tee'
+    # It must give the replacement, not just the prohibition.
+    printf '%s' "$p" | grep -q 'head -c'
+    # Wrap-insensitive: the sentence is reflowed when the surrounding text
+    # changes, and the RULE is what must be present, not its line breaks.
+    printf '%s' "$p" | tr '\n' ' ' | grep -qi 'a file has no reader *to wait on'
+    # The replacement it offers must name a variable the agent actually has.
+    printf '%s' "$p" | grep -q 'QCI_GUI_ARTIFACT_DIR'
+    if printf '%s' "$p" | grep -q '\$ART/'; then
+        echo "prompt tells the agent to write to \$ART, which does not exist" >&2
+        return 1
+    fi
+}
+
+@test "runtime prompt warns that a fixed shared guest log may be root-owned" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'fixed shared guest path'
+    printf '%s' "$p" | grep -qi 'ROOT-owned'
+    printf '%s' "$p" | grep -q 'qci-.*\.log'
+    # The obsolete remediation must NOT be pinned anywhere in the prompt.
+    # Explicit refutation: a bare leading `!` does not fail a Bats test.
+    if printf '%s' "$p" | grep -q '/tmp/admin-app.log'; then
+        echo "prompt still pins the obsolete /tmp/admin-app.log remediation"; return 1
+    fi
+}
+
 @test "runtime prompt requires one guest shell (the qdwin/21 EXIT-trap teardown)" {
     local p; p=$(_render_prompt)
     printf '%s' "$p" | grep -q 'ONE guest shell'

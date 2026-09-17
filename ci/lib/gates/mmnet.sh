@@ -39,6 +39,120 @@
 # QD_MMNET_MIN_FREE_GB.
 _mmnet_min_free_gb() { printf '%s' "${QD_MMNET_MIN_FREE_GB:-14}"; }
 
+# Run one guest command via vm-exec with BOTH of vm-exec's descriptors on a
+# private capture file, then print (a bounded prefix of) what was written.
+# Returns vm-exec's exit status.
+#
+# WHY. `x=$(vm-exec ... 2>&1)` hands vm-exec's fd 1 AND fd 2 to the
+# substitution's pipe. vm-exec redirects its own children's fd 1 to an internal
+# capture file, but fd 2 is inherited straight through to every virsh/jq
+# descendant it starts; one that outlives vm-exec holds the pipe -- and the
+# caller -- open long after the guest command is dead, and an outer `timeout`
+# cannot help because the shell is blocked on the read. A read from a regular
+# file reaches EOF at the current end of file however many writers still hold
+# it open. The same applies when the `2>&1` is written inside a FUNCTION whose
+# own stdout is a substitution pipe, which is what _mmnet_setup_guest did.
+#
+# The capture is per call and UNLINKED before the command starts (the shape of
+# bounded_run() in scripts/vm/vm-exec), so a survivor of one call can never
+# write into a later call's capture and nothing is left named while a command
+# runs.
+# The read is ceilinged in BYTES via `head -c`. It was `read -N` until
+# 2026-09-17, which ceilings CHARACTERS: bash discards NUL bytes and they do
+# not count, so a NUL-bearing capture was read PAST the ceiling -- 4 MiB of
+# NULs cost 4,194,305 bytes and ~0.88s for a nominal 64.
+#
+# The comment here used to argue that this "cannot HANG, because a read of a
+# regular file returns at the current EOF however many writers are still
+# appending", citing a 0.00s measurement. That argument is WRONG and the
+# measurement proved only that this particular reader caught its writer: EOF is
+# tested at EACH read, not frozen when the replay begins, so a writer that
+# stays ahead of the reader keeps it going, and a large pre-existing backlog
+# alone makes a nominally tiny replay expensive. (sol,
+# todo/reviews/qci-A-260917-sol-review.md section 1.) The byte ceiling is what
+# bounds this, not the filesystem's EOF semantics.
+#
+# No size bound is added to the FILE here: the only limit on the nameless inode
+# is the RLIMIT_FSIZE vm-exec installs on its own children.
+# One visible side effect of the `$( )` replay, shared by every site that
+# uses it: on a NUL-bearing capture bash writes `warning: command
+# substitution: ignored null byte in input` to stderr, once per call.
+# Harmless, and not a failure.
+MMNET_CAP_BYTES=${QD_MMNET_CAP_BYTES:-262144}
+case "$MMNET_CAP_BYTES" in
+    ''|*[!0-9]*|0|0*)
+        echo "mmnet: QD_MMNET_CAP_BYTES must be a positive integer number of bytes, got '$MMNET_CAP_BYTES'" >&2
+        return 2 2>/dev/null || exit 2 ;;
+esac
+_mmnet_vmx_merged() {
+    local vm=$1; shift
+    local cf wfd rfd out="" rc=0 _mm_size=""
+    cf=$(mktemp "${TMPDIR:-/tmp}/qci-mmnet-cap.XXXXXXXX") || return 125
+    # Every step is checked: an unchecked failure here would leave the capture
+    # NAMED while the command runs, which is exactly what this shape promises
+    # not to do. 125 is this helper's INFRASTRUCTURE status by convention -- not
+    # a reserved value, since a guest command can exit 125 too; the stderr line
+    # is what tells them apart.
+    exec {wfd}>"$cf" || { rm -f "$cf"; return 125; }
+    exec {rfd}<"$cf" || { exec {wfd}>&-; rm -f "$cf"; return 125; }
+    rm -f "$cf" || { exec {wfd}>&- {rfd}<&-; return 125; }
+    "$VM_TOOLS/vm-exec" "$vm" "$@" >&"$wfd" 2>&"$wfd" {wfd}>&- {rfd}<&- || rc=$?
+    exec {wfd}>&-
+        # A FAILED replay is a capture failure, not empty output. `|| :` made
+    # `head` returning nonzero indistinguishable from a command that printed
+    # nothing, so an I/O error surfaced as rc=0 with an empty string -- sol
+    # injected `head() { return 1; }` and got exactly that (A3 finding 3).
+    if ! out=$(head -c "$MMNET_CAP_BYTES" <&"$rfd"); then
+        echo "mmnet: capture replay FAILED; the output is unavailable, not empty" >&2
+        exec {rfd}<&-
+        return 125
+    fi
+    # Overflow is not silent. `MMNET-DEV=` is parsed out of this text at :214
+    # and the TCP token is required at :278; a marker past the cap reads
+    # exactly like a marker that never appeared, so a working setup would be
+    # classified as a failure.
+    # WHAT THIS ESTABLISHES, AND WHAT IT DOES NOT. Stated plainly because the
+    # two previous attempts here both overclaimed.
+    #
+    # DETECTED: the capture holds more bytes than the replay returned -- a
+    # stored suffix this function did not deliver. A real, local fact about
+    # this file and this cap.
+    #
+    # NOT DETECTED: a writer that hit its own RLIMIT_FSIZE, handled EFBIG and
+    # exited zero. The previous version compared the size against the PARENT's
+    # `ulimit -f -H` and claimed to catch exactly that. It cannot, for two
+    # independent reasons (astra, A6 findings 1 and 2):
+    #   * `-H` is the HARD limit, but writes are constrained by the SOFT one,
+    #     so `ulimit -S -f 1` under an unlimited hard limit went undetected.
+    #   * The writer is not this process. vm-exec is a child, `bounded_run`
+    #     sets its own limit for the inner RPC capture, and a descendant
+    #     writing into the outer merged capture can have a different limit
+    #     again -- one file, several limits, so no single parent-side number
+    #     describes them.
+    # And `>=` against that number turned a HEALTHY exact-fit write into a
+    # fatal 125 that positively asserted the output "was cut off": a false red,
+    # the very class of defect this workstream exists to remove.
+    #
+    # Proving completeness needs evidence from the WRITER (an explicit
+    # completion marker), not a size. Until that exists this reports what it
+    # can and stays silent about what it cannot. Equality at the cap is
+    # ACCEPTED -- an exact fit is a legitimate write.
+    if ! _mm_size=$(stat -Lc %s "/proc/self/fd/$rfd" 2>/dev/null); then
+        echo "mmnet: could not stat the capture to check completeness; whether the control output is complete is UNKNOWN, not verified" >&2
+        exec {rfd}<&-
+        return 125
+    elif [ "$_mm_size" -gt "$MMNET_CAP_BYTES" ]; then
+        echo "mmnet: vm-exec output (${_mm_size} bytes) exceeded the ${MMNET_CAP_BYTES}-byte capture cap; the returned text is INCOMPLETE and any marker beyond it is lost. Raise QD_MMNET_CAP_BYTES, or set QD_MMNET_ALLOW_TRUNCATION=1 to accept a prefix." >&2
+        if [ "${QD_MMNET_ALLOW_TRUNCATION:-0}" != 1 ]; then
+            exec {rfd}<&-
+            return 125
+        fi
+    fi
+    exec {rfd}<&-
+    printf '%s' "$out"
+    return "$rc"
+}
+
 # Configure one guest's mmnet NIC over qga and verify the address landed. The
 # NIC is identified by its MAC (mmnet_mac), found in the guest's `ip -o link`.
 # Returns 0 on success; non-zero (with a diagnostic) otherwise.
@@ -53,13 +167,13 @@ _mmnet_setup_guest() {
     # Find the guest NIC whose MAC matches, bring it up with the static addr.
     # All in one shell so qga sees a single command. `ip -o link` lists MAC on
     # the `link/ether` field; we match case-insensitively.
-    "$vmx" "$vm" "set -e
+    _mmnet_vmx_merged "$vm" "set -e
         dev=\$(ip -o link | awk -v m='$mac' 'tolower(\$0) ~ tolower(m){print \$2}' | sed 's/://;s/@.*//' | head -1)
         [ -n \"\$dev\" ] || { echo 'MMNET-ERR: no NIC with mac $mac'; ip -o link; exit 1; }
         ip addr flush dev \"\$dev\" 2>/dev/null || true
         ip addr add $ip/$prefix dev \"\$dev\"
         ip link set \"\$dev\" up
-        echo \"MMNET-DEV=\$dev MMNET-IP=$ip\"" 2>&1
+        echo \"MMNET-DEV=\$dev MMNET-IP=$ip\""
 }
 
 gate_mmnet() {
@@ -158,6 +272,16 @@ gate_mmnet() {
     printf '%s\n' "$setup_b" > "$log_dir/setup-b.log"
     if [ "$sa" -ne 0 ] || [ "$sb" -ne 0 ]; then
         collect_vm_artifacts "$vm_a" mmnet-a; collect_vm_artifacts "$vm_b" mmnet-b
+        # 125 from the capture helper is INFRASTRUCTURE (setup, byte-cap
+        # overflow, failed replay) -- the guest's NIC was never judged. Saying
+        # "NIC config failed" there blames the product for a harness fault
+        # (sol, todo/reviews/qci-A3-260917-sol-review.md finding 2).
+        if [ "$sa" = 125 ] || [ "$sb" = 125 ]; then
+            record_result mmnet nic-setup fail "$EXIT_RUNNER" runner mmnet "$log_dir/setup-a.log" \
+                "mmnet NIC config UNKNOWN: the host could not capture the setup output (A rc=$sa B rc=$sb); this is a harness capture failure, not a product result — see the qdwin-helpers/mmnet message on the runner's stderr"
+            record_timing mmnet smoke 0 "$(( $(date +%s) - t0 ))" "$(( $(date +%s) - t0 ))" "$EXIT_RUNNER" "$vm_a,$vm_b"
+            return "$EXIT_RUNNER"
+        fi
         record_result mmnet nic-setup fail "$EXIT_SERVICE" service mmnet "$log_dir/setup-a.log" \
             "mmnet NIC config failed (A rc=$sa B rc=$sb)"
         record_timing mmnet smoke 0 "$(( $(date +%s) - t0 ))" "$(( $(date +%s) - t0 ))" "$EXIT_SERVICE" "$vm_a,$vm_b"
@@ -166,7 +290,7 @@ gate_mmnet() {
     log "mmnet: A=$setup_a B=$setup_b"
 
     # 5. Assert the route to peer B leaves via the mmnet NIC, then ICMP + TCP.
-    local vmx="$VM_TOOLS/vm-exec" route_dev mmnet_dev ping_out tcp_out probe="$MMNET_PROBE_PORT"
+    local vmx="$VM_TOOLS/vm-exec" route_dev mmnet_dev tcp_out probe="$MMNET_PROBE_PORT"
     # The device peer A configured (parse MMNET-DEV= from its setup output).
     mmnet_dev=$(sed -n 's/.*MMNET-DEV=\([^ ]*\).*/\1/p' "$log_dir/setup-a.log" | head -1)
     route_dev=$("$vmx" "$vm_a" "ip -o route get $ip_b 2>/dev/null | sed -n 's/.*dev \\([^ ]*\\).*/\\1/p' | head -1" 2>/dev/null | tr -d '[:space:]')
@@ -183,9 +307,21 @@ gate_mmnet() {
     fi
     log "mmnet: route A->$ip_b via $route_dev (mmnet NIC) — data plane confirmed independent of qga"
 
-    # ICMP A -> B
-    ping_out=$("$vmx" "$vm_a" "ping -c 3 -W 2 $ip_b" 2>&1); local prc=$?
-    printf '%s\n' "$ping_out" > "$log_dir/ping.log"
+    # ICMP A -> B.
+    # CAPTURE THROUGH A FILE, NEVER THROUGH `$( ... 2>&1 )`. That shape hands
+    # vm-exec's fd 1 AND fd 2 to the substitution's pipe. vm-exec redirects its
+    # own children's fd 1 to an internal capture file, but fd 2 is inherited
+    # straight through to every virsh/jq descendant it starts; a descendant that
+    # outlives vm-exec and keeps that descriptor holds the pipe open, and bash
+    # waits for the PIPE to close, not for vm-exec to exit. The call then hangs
+    # after the ping is long dead, and an outer `timeout` on vm-exec does not
+    # help because the shell is blocked on the read, not on the child. Writing
+    # both descriptors to a regular file removes the dependency: a read from a
+    # regular file reaches EOF at the current end-of-file whoever else still
+    # holds it open. ping.log is the artifact the failure path records anyway,
+    # so this costs nothing.
+    local prc=0
+    "$vmx" "$vm_a" "ping -c 3 -W 2 $ip_b" > "$log_dir/ping.log" 2>&1 || prc=$?
     if [ "$prc" -ne 0 ]; then
         collect_vm_artifacts "$vm_a" mmnet-a; collect_vm_artifacts "$vm_b" mmnet-b
         record_result mmnet ping fail "$EXIT_SERVICE" service mmnet "$log_dir/ping.log" "ping A->B ($ip_b) failed"
@@ -209,7 +345,7 @@ c,_=s.accept(); c.sendall(b'$token'); c.close()"
         elif command -v ncat >/dev/null 2>&1; then printf %s \"$token\" | timeout 30 ncat -l $probe 2>/dev/null;
         else python3 -c \"$py_listener\" 2>/dev/null; fi' >/dev/null 2>&1 & echo listener-started" > "$log_dir/tcp-listener.log" 2>&1 || true
     sleep 2
-    tcp_out=$("$vmx" "$vm_a" "
+    tcp_out=$(_mmnet_vmx_merged "$vm_a" "
         for i in 1 2 3 4 5; do
             r=\$( (timeout 5 nc $ip_b $probe 2>/dev/null) \
                 || (timeout 5 ncat $ip_b $probe 2>/dev/null) \
@@ -217,10 +353,18 @@ c,_=s.accept(); c.sendall(b'$token'); c.close()"
             [ -n \"\$r\" ] && { echo \"\$r\"; exit 0; }
             sleep 1
         done
-        echo NO-TCP; exit 1" 2>&1); local trc=$?
+        echo NO-TCP; exit 1"); local trc=$?
     printf '%s\n' "$tcp_out" > "$log_dir/tcp.log"
     if [ "$trc" -ne 0 ] || ! grep -qF "$token" <<<"$tcp_out"; then
         collect_vm_artifacts "$vm_a" mmnet-a; collect_vm_artifacts "$vm_b" mmnet-b
+        # Same distinction as nic-setup above: a capture failure means the
+        # token was never observed, not that it was absent.
+        if [ "$trc" = 125 ]; then
+            record_result mmnet tcp fail "$EXIT_RUNNER" runner mmnet "$log_dir/tcp.log" \
+                "TCP A->B:$probe UNKNOWN: the host could not capture the probe output (rc=125); this is a harness capture failure, not a product result"
+            record_timing mmnet smoke 0 "$(( $(date +%s) - t0 ))" "$(( $(date +%s) - t0 ))" "$EXIT_RUNNER" "$vm_a,$vm_b"
+            return "$EXIT_RUNNER"
+        fi
         record_result mmnet tcp fail "$EXIT_SERVICE" service mmnet "$log_dir/tcp.log" \
             "TCP A->B:$probe did not return token '$token' (got: ${tcp_out:0:120})"
         record_timing mmnet smoke 0 "$(( $(date +%s) - t0 ))" "$(( $(date +%s) - t0 ))" "$EXIT_SERVICE" "$vm_a,$vm_b"

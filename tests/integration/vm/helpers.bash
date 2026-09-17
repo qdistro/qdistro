@@ -77,7 +77,133 @@ vm_run() {
             "$VM_SSH_USER@$VM_SSH_HOST" \
             "$cmd"
     else
-        run "$VM_EXEC" "$VM_NAME" "$cmd"
+        # CAPTURE THROUGH A FILE, NOT THROUGH bats' `run` PIPE.
+        # bats-core's `run` merges streams with `bats_merge_stdout_and_stderr`,
+        # i.e. `"$@" 2>&1`, INSIDE a command substitution
+        # (lib/bats-core/test_functions.bash, bats 1.14). That hands vm-exec's
+        # fd 2 to the substitution's pipe, and every virsh/jq descendant
+        # vm-exec starts inherits it. vm-exec redirects its own children's
+        # fd 1 to an internal capture file, but not fd 2 -- so a descendant
+        # that outlives vm-exec holds the pipe open and the shell waits for the
+        # PIPE, not for vm-exec. The test then hangs after the guest command is
+        # long dead, with no timeout able to help.
+        #
+        # So vm-exec is run FIRST, with both descriptors on a private capture
+        # file that is opened and unlinked before it starts (the shape of
+        # bounded_run() in scripts/vm/vm-exec), and `run` is then pointed at a
+        # bounded replay of that file. `$status`, `$output` and `$lines` come
+        # out as before -- merged stdout+stderr, vm-exec's exit status -- but
+        # the only thing `run`'s pipe ever holds is our own reader, which has
+        # no descendant to outlive it.
+        #
+        # The reader is `head -c`, not `cat`. A plain `cat` is not an
+        # independently bounded reader: it runs until EOF of a file a surviving
+        # descendant may still be appending to, so its finite completion was
+        # borrowed from the writer's behaviour rather than guaranteed here
+        # (sol, todo/reviews/qci-A-260917-sol-review.md §6). The cap is
+        # deliberately generous -- these are test diagnostics -- but it is a
+        # cap.
+        #
+        # This closes the hazard for every caller that goes through vm_run. It
+        # does NOT close it for a test that calls `run "$VM_EXEC" ...`
+        # directly; those sites are listed in the round-9 caller-audit report.
+        # Nor does it say anything about callers outside this file: the GUI
+        # agent's own run-time driver scripts are the dominant vm-exec callers
+        # and carry the same defect. They cannot be linted (they are written
+        # during the run), so they are addressed in the agent prompt instead.
+        local _vr_cf _vr_w _vr_r _vr_rc=0
+        # SETUP FAILURE IS AN INFRASTRUCTURE FAULT, reported as 125 with a
+        # diagnostic -- the same convention as replay, stat and flag-file
+        # failure. `run false` gave status=1 with empty output and empty
+        # stderr, which is indistinguishable from a guest command that RAN and
+        # returned 1; here the command never ran at all (astra, A8 finding 1,
+        # the one row in its ten-site fault matrix where vm_run disagreed with
+        # every other site). `run bash -c 'exit N'` is used rather than
+        # assigning $status directly so Bats' $output/$lines stay coherent.
+        _vr_setup_fail() {   # <why>
+            echo "vm_run: capture setup FAILED for '$cmd' ($1); the command was NOT run" >&2
+            run bash -c 'exit 125'
+        }
+        if ! _vr_cf=$(mktemp "${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}/vm-run.XXXXXXXX"); then
+            _vr_setup_fail "could not create the capture file"; return
+        fi
+        # Checked, including the unlink: unchecked, a failing open or rm left
+        # the capture NAMED while the command ran and reported the guest's
+        # status as if nothing were wrong (sol A2 section 1).
+        if ! exec {_vr_w}>"$_vr_cf"; then
+            rm -f "$_vr_cf"; _vr_setup_fail "could not open the capture for writing"; return
+        fi
+        if ! exec {_vr_r}<"$_vr_cf"; then
+            exec {_vr_w}>&-; rm -f "$_vr_cf"
+            _vr_setup_fail "could not open the capture for reading"; return
+        fi
+        if ! rm -f "$_vr_cf" || [ -e "$_vr_cf" ]; then
+            exec {_vr_w}>&- {_vr_r}<&-
+            _vr_setup_fail "the capture could not be unlinked and would have stayed NAMED"
+            return
+        fi
+        "$VM_EXEC" "$VM_NAME" "$cmd" \
+            >&"$_vr_w" 2>&"$_vr_w" {_vr_w}>&- {_vr_r}<&- || _vr_rc=$?
+        exec {_vr_w}>&-
+        local _vr_cap=${QCI_VM_RUN_CAP_BYTES:-4194304}
+        case "$_vr_cap" in
+            ''|*[!0-9]*|0|0*)
+                echo "vm_run: QCI_VM_RUN_CAP_BYTES must be a positive integer number of bytes, got '$_vr_cap'" >&2
+                exec {_vr_w}>&- {_vr_r}<&- 2>/dev/null || :
+                run bash -c 'exit 125'
+                return ;;
+        esac
+        # The replay's OWN status must not be overwritten by the producer's.
+        # `head -c ...; exit "$1"' discarded a failed replay and reported the
+        # guest's success with empty output (sol A4 finding 1). 125 marks the
+        # capture failure; the guest status is only reported once the bytes
+        # were actually delivered.
+        #
+        # The replay runs in a subprocess because Bats' `run` must capture it,
+        # so a bare 125 is AMBIGUOUS -- a guest command can exit 125 too. A
+        # non-empty flag file disambiguates, which is what lets the diagnostic
+        # be truthful rather than a guess. vm_run got the status right but said
+        # nothing about why (astra, A-astra finding 3).
+        local _vr_flag _vr_size
+        # A failed mktemp here is an INFRASTRUCTURE fault, and the command has
+        # already run: `run false` reported status=1 with empty output and no
+        # explanation, which reads exactly like an ordinary guest exit 1 and
+        # throws away a capture that exists (astra, A6 finding 4).
+        if ! _vr_flag=$(mktemp "${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}/vm-run-flag.XXXXXXXX"); then
+            exec {_vr_r}<&-
+            echo "vm_run: could not create the replay flag file for '$cmd'; the capture is UNREADABLE, not empty (the guest itself exited $_vr_rc)" >&2
+            run bash -c 'exit 125'
+            return
+        fi
+        run bash -c 'head -c "$2" <&3 || { printf R > "$3"; exit 125; }; exit "$1"' \
+            _ "$_vr_rc" "$_vr_cap" "$_vr_flag" 3<&"$_vr_r"
+        if [ -s "$_vr_flag" ]; then
+            echo "vm_run: capture replay FAILED for '$cmd'; the output is UNAVAILABLE, not empty (the guest itself exited $_vr_rc)" >&2
+            status=125
+        fi
+        rm -f "$_vr_flag"
+        # COMPLETENESS. vm_run had no check at all: with a 4-byte cap and a
+        # successful 4102-byte producer it reported status=0 out=[XXXX],
+        # losing everything past the cap silently (astra, A-astra finding 2).
+        #
+        # WHAT THIS DOES NOT ESTABLISH: that the guest's output was complete.
+        # The previous version compared the size against the PARENT's
+        # `ulimit -f -H` and claimed that. It cannot -- `-H` is the hard limit
+        # while writes obey the SOFT one, and the writer is a child (or a
+        # descendant of one) whose limit this process does not know. `>=`
+        # against it also failed a HEALTHY exact-fit write with a fatal 125
+        # asserting the output "was cut off" (astra, A6 findings 1 and 2).
+        # Detecting a writer's own EFBIG truncation needs a completion marker
+        # from the writer, which does not exist yet. This reports the one
+        # thing it can see: bytes stored past what the replay returned.
+        if ! _vr_size=$(stat -Lc %s "/proc/self/fd/$_vr_r" 2>/dev/null); then
+            echo "vm_run: could not stat the capture for '$cmd'; whether the output is complete is UNKNOWN, not verified" >&2
+            status=125
+        elif [ "$_vr_size" -gt "$_vr_cap" ]; then
+            echo "vm_run: output for '$cmd' (${_vr_size} bytes) exceeded the ${_vr_cap}-byte replay cap; \$output is a PREFIX and any marker beyond the cap is lost. Raise QCI_VM_RUN_CAP_BYTES." >&2
+            status=125
+        fi
+        exec {_vr_r}<&-
     fi
 }
 

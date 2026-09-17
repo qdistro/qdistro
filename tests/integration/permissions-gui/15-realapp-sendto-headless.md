@@ -87,10 +87,53 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # ListReceivers evidence; the poll just avoids a pure startup race.
 ready=0
 for _ in $(seq 1 30); do
- out=$($VMEXEC "$VM" 'dbus-send --system --print-reply \
+ # CAPTURE THROUGH A FILE, NEVER `$( ... 2>&1 )`: that hands vm-exec's fd 2 to
+ # the substitution's pipe, and a virsh/jq descendant that outlives vm-exec
+ # holds the pipe -- and this poll iteration -- open forever. The capture is
+ # fresh per ITERATION and unlinked before the command runs, so a survivor of
+ # iteration N cannot append into iteration N+1's answer.
+ _lr=$(mktemp "${TMPDIR:-/tmp}/s15-listrecv.XXXXXXXX") || { echo "ERROR: mktemp failed"; exit 2; }
+ exec {_lw}>"$_lr" || { rm -f "$_lr"; echo "ERROR: capture open failed"; exit 2; }
+ exec {_lrd}<"$_lr" || { exec {_lw}>&-; rm -f "$_lr"; echo "ERROR: capture open failed"; exit 2; }
+ if ! rm -f "$_lr" || [ -e "$_lr" ]; then exec {_lw}>&- {_lrd}<&-; echo "ERROR: capture still named"; exit 2; fi
+ $VMEXEC "$VM" 'dbus-send --system --print-reply \
   --dest=org.qdistro.AdminBroker1 \
   /org/qdistro/AdminBroker1 \
-  org.qdistro.AdminBroker1.ListReceivers' 2>&1) || true
+  org.qdistro.AdminBroker1.ListReceivers' >&"$_lw" 2>&"$_lw" {_lw}>&- {_lrd}<&- || true
+ exec {_lw}>&-
+ # A failed replay is a capture failure, not an empty reply. `|| :` let a
+ # nonzero head read as "no receivers yet", which this loop then spins on
+ # until it times out and blames readiness (astra, A-astra finding 3).
+ out=""
+ if ! out=$(head -c 65536 <&"$_lrd"); then
+  echo "ERROR: ListReceivers capture replay FAILED; the reply is UNAVAILABLE, not empty" >&2
+  exec {_lrd}<&-; exit 2
+ fi
+ # Both bus-name markers must be INSIDE the prefix; a silent cap would
+ # read as "the receivers are not there yet" and spin to the timeout.
+ #
+ # This detects only a stored suffix the replay did not return. It does NOT
+ # establish that the guest's reply was complete: an earlier version compared
+ # the size against this shell's `ulimit -f -H`, which is the hard limit where
+ # writes obey the soft one, and which in any case is not the limit the WRITER
+ # ran under. `>=` against it also failed healthy exact-fit replies outright
+ # (astra, A6 findings 1 and 2). Equality at the cap is accepted.
+ #
+ # The `stat` must be CHECKED and must actually run: removing the inherited
+ # -limit block here once took the assignment with it, leaving `$_s15_size`
+ # referenced and never set -- which accepted a 70,000-byte reply with
+ # `[: : integer expected`, and aborted a HEALTHY short reply under `set -u`
+ # (astra, A7 finding 1). This scenario's error convention is exit 2.
+ _s15_size=""
+ if ! _s15_size=$(stat -Lc %s "/proc/self/fd/$_lrd" 2>/dev/null); then
+  echo "ERROR: could not stat the ListReceivers capture; completeness is UNKNOWN, not verified" >&2
+  exec {_lrd}<&-; exit 2
+ fi
+ if [ "$_s15_size" -gt 65536 ]; then
+  echo "ERROR: ListReceivers reply (${_s15_size} bytes) exceeded the 65536-byte cap; INCOMPLETE" >&2
+  exec {_lrd}<&-; exit 2
+ fi
+ exec {_lrd}<&-
  if printf '%s' "$out" | grep -q 'org.qdistro.Qnotebook.uid2000' \
   && printf '%s' "$out" | grep -q 'org.qdistro.Qnotebook.uid3000'; then
   ready=1

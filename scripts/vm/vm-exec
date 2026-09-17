@@ -21,6 +21,36 @@ fi
 # is generous (1800s): parallel `qci full` has observed legitimate work near
 # ~1300s (templates-promotion setup under QCI_JOBS=8), so a tighter window
 # would false-kill.
+#
+# ELAPSED IS A DEADLINE COUNTER, NOT A WALL CLOCK. TIMEOUT bounds that counter;
+# it does NOT bound the wall time this script can take. Two separate reasons,
+# and round 8 was right that conflating them produced a false guarantee:
+#
+#   1. The check sits at the TOP of the poll loop, so the last iteration can
+#      start just under the line and then run its full length: jq (L+G=10s) +
+#      RPC (R+G=35s) + the response parse (10s) + an error-path parse (10s) +
+#      a backoff sleep (<=10s) = <=75s, and exit 124 is then preceded by
+#      kill_guest_pid (<=36s). So ONCE ELAPSED HAS REACHED TIMEOUT, exit 124
+#      follows within ~111s on defaults, plus the per-call replay/unlink term
+#      defined at bounded_run. That part is arithmetic and it holds.
+#   2. The time taken to REACH TIMEOUT is not bounded at all. The suspend clamp
+#      below charges only DEADLINE_JUMP_CHARGE=1s for any iteration whose
+#      measured delta exceeds DEADLINE_JUMP_THRESHOLD=60s, and nothing
+#      distinguishes a host suspend from an iteration that genuinely took 61s
+#      -- the 75s of bounded work in (1) plus ordinary scheduling delay already
+#      reaches that. Under sustained host pressure ELAPSED can advance roughly
+#      one second per real minute and exit 124 can be delayed by hours.
+#
+# Round 7 advertised "TIMEOUT + 111s" as a wall-clock maximum. It was not one,
+# and this file no longer claims it is. A wall-clock kill has to come from
+# OUTSIDE (`timeout <n> vm-exec ...`); vm-exec's TERM handler then runs the
+# identity-checked cleanup and re-raises. An external bound therefore
+# TRUNCATES that cleanup rather than composing cleanly with it: the caps A
+# itself uses are `timeout -k 5`, while cleanup verification can need up to
+# 36s, so the RPC is usually submitted but its verification is SIGKILLed and
+# the reported outcome is silence rather than 'cleanup verified'. What an
+# external bound reliably gives you is a bound on how long YOU wait, and
+# the guarantees that ARE made here.
 TIMEOUT=${QDISTRO_VM_EXEC_TIMEOUT:-1800}
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_TIMEOUT must be a non-negative integer, got: $TIMEOUT" >&2
@@ -31,17 +61,62 @@ fi
 # shell is blocked inside a `virsh qemu-agent-command` command substitution, so a
 # single wedged agent RPC could still hang forever. Bound each RPC with
 # `timeout` so the poll loop always regains control to re-check the deadline.
+# "Regains control" is a claim about the SUBSTITUTION returning, not merely
+# about virsh dying; bounded_run() below is what makes the two the same thing.
 AGENT_RPC_TIMEOUT=${QDISTRO_VM_AGENT_RPC_TIMEOUT:-30}
 if ! [[ "$AGENT_RPC_TIMEOUT" =~ ^[0-9]+$ ]]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_AGENT_RPC_TIMEOUT must be a non-negative integer, got: $AGENT_RPC_TIMEOUT" >&2
     exit 1
 fi
 
+# GNU `timeout` sends TERM at expiry and then WAITS. A TERM-resistant (or
+# uninterruptible-sleep) `virsh` therefore outlives a plain `timeout Ns`
+# indefinitely, which made every "hard bound" below unprovable: one wedged RPC
+# could hold a deferred signal trap forever. Every bounded command in this
+# script is now run with `timeout -k <grace>`, so the cap is TERM-at-cap
+# followed by an undeniable KILL-at-cap+grace for the process `timeout`
+# MONITORS.
+#
+# `timeout` also signals the process GROUP, but that is NOT a second guarantee
+# and this file must not lean on it: `timeout` waits only for its own direct
+# child, so a leader that EXITS on the TERM makes `timeout` exit too and the
+# later group KILL is never sent. See bounded_run() for what actually keeps a
+# TERM-ignoring grandchild from wedging us.
+#
+# Together with the trailing `sleep 1` of a poll loop, this grace is one of the
+# two CLOCK overshoot terms in the accounting; both are charged explicitly in
+# every bound stated in this file. Since round 8 there is a third, non-clock
+# term -- the per-call unlink and byte-ceiled replay (U + T_replay) defined at
+# bounded_run -- and it is charged explicitly too.
+SIGKILL_GRACE=${QDISTRO_VM_SIGKILL_GRACE:-5}
+if ! [[ "$SIGKILL_GRACE" =~ ^[0-9]+$ ]] || [ "$SIGKILL_GRACE" -lt 1 ]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_SIGKILL_GRACE must be a positive integer, got: $SIGKILL_GRACE" >&2
+    exit 1
+fi
+
+# Cap for the LOCAL pre/post-processing of one RPC answer (the jq parse, the
+# base64 decode, the jq that builds a request body). These are not RPCs, but
+# bash defers a trap until the current FOREGROUND command returns, so an
+# unbounded local helper holds the signal exactly as long as an unbounded
+# virsh would -- and the round-4 review is right that a deadline which accounts
+# only for the RPC is not a deadline. Each such helper handles a single small
+# control-plane JSON document, so this cap is enormous compared with the work.
+LOCAL_OP_TIMEOUT=${QDISTRO_VM_LOCAL_OP_TIMEOUT:-5}
+if ! [[ "$LOCAL_OP_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$LOCAL_OP_TIMEOUT" -lt 1 ]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_LOCAL_OP_TIMEOUT must be a positive integer, got: $LOCAL_OP_TIMEOUT" >&2
+    exit 1
+fi
+
 # Consecutive guest-agent RPC failures before giving up. Under parallel CI a
 # guest can leave QGA unresponsive for well over the old hard-coded 5 attempts
 # (CPU-starved podman/buildah builds, post-suspend channel recovery). Default
-# 30 keeps overall TIMEOUT as the real upper bound while surviving multi-minute
-# blips that previously killed templates-promotion / templates-browser setup.
+# 30 survives multi-minute blips that previously killed
+# templates-promotion / templates-browser setup.
+#
+# It does NOT "keep overall TIMEOUT as the real upper bound": TIMEOUT is
+# checked against ELAPSED between steps, not enforced as wall clock, so under a
+# stopped/slewed clock it can be delayed arbitrarily (see the header, lines
+# 30-46). A wall-clock cap has to come from OUTSIDE (`timeout <n> vm-exec`).
 AGENT_MAX_ERRORS=${QDISTRO_VM_AGENT_MAX_ERRORS:-30}
 if ! [[ "$AGENT_MAX_ERRORS" =~ ^[0-9]+$ ]] || [ "$AGENT_MAX_ERRORS" -lt 1 ]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_AGENT_MAX_ERRORS must be a positive integer, got: $AGENT_MAX_ERRORS" >&2
@@ -68,48 +143,1037 @@ DEADLINE_JUMP_CHARGE=1
 # Monotonic-ish clock for deadline accounting: successive /proc/uptime reads
 # with large positive deltas clamped. bash SECONDS tracks wall clock and jumps
 # with NTP/suspend, which false-fired exit 124 after host sleep in CI.
-read_uptime_s() {
+#
+# monotonic_s() is the non-fatal form: it RETURNS non-zero instead of exiting,
+# because it is also called from the signal trap, where exiting would swallow
+# the signal we still owe the caller.
+monotonic_s() {
     local u
-    if ! read -r u _ < /proc/uptime 2>/dev/null; then
-        echo "[vm-exec] ERROR: cannot read /proc/uptime for deadline tracking" >&2
-        exit 1
-    fi
+    read -r u _ < /proc/uptime 2>/dev/null || return 1
     # Truncate fractional seconds (first field is "seconds.centiseconds").
     printf '%s\n' "${u%%.*}"
 }
+read_uptime_s() {
+    local u
+    if ! u=$(monotonic_s); then
+        echo "[vm-exec] ERROR: cannot read /proc/uptime for deadline tracking" >&2
+        exit 1
+    fi
+    printf '%s\n' "$u"
+}
 
-# Single guest-agent RPC, bounded by AGENT_RPC_TIMEOUT (0 = unbounded). On timeout
-# `timeout` exits 124, which callers treat like any other virsh failure.
-agent_rpc() {
-    if [ "$AGENT_RPC_TIMEOUT" -gt 0 ]; then
-        timeout "${AGENT_RPC_TIMEOUT}s" virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$1"
+# Whole seconds left before the absolute monotonic deadline $1, floored at 0.
+# An empty deadline or an unreadable clock yields 0 -- no provable budget, so
+# callers must stop and report "not verified" rather than block without a bound.
+budget_left() {
+    local now
+    [ -n "$1" ] || { printf '0\n'; return 0; }
+    now=$(monotonic_s) || { printf '0\n'; return 0; }
+    if [ "$now" -ge "$1" ]; then
+        printf '0\n'
     else
-        virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$1"
+        printf '%s\n' "$(( $1 - now ))"
     fi
 }
 
-# Best-effort in-guest kill of a guest-exec'd PID and its whole descendant tree.
-# We collect the full descendant set by BFS over ps(ppid) BEFORE signalling, so
-# that reparenting (children of a dying shell get reparented to init) can't hide
-# any process — we then signal each collected PID directly, TERM then KILL.
-# Fire-and-forget: we don't wait for status since we're abandoning the command.
-KILL_TREE_SH='p=__PID__; list=$p; queue=$p
+# Largest TERM cap that keeps the WHOLE bounded command (TERM at cap, KILL at
+# cap+SIGKILL_GRACE) inside $1 seconds of remaining budget, additionally bounded
+# by the normal cap $2 (0 = "no normal cap"). Callers must only use this while
+# $1 is > 0.
+#
+# The reservation is what makes the bound provable. With cap <= left - grace an
+# operation started at `left` seconds before the deadline cannot run past it.
+# When left <= grace there is nothing left to reserve; the cap floors at 1s and
+# the operation can overrun the deadline by at most SIGKILL_GRACE, which is one
+# of the two explicit CLOCK overshoot terms in every bound documented here (the
+# other is the trailing `sleep 1` of a poll loop; the non-clock U + T_replay
+# term is described at bounded_run).
+cap_within() {
+    local left=$1 normal=${2:-0} cap=$1
+    if [ "$normal" -gt 0 ] && [ "$normal" -lt "$cap" ]; then
+        cap=$normal
+    fi
+    if [ "$cap" -gt "$SIGKILL_GRACE" ]; then
+        cap=$(( cap - SIGKILL_GRACE ))
+    fi
+    [ "$cap" -ge 1 ] || cap=1
+    printf '%s\n' "$cap"
+}
+
+# Per-RPC cap for a budgeted wait.
+rpc_cap() { cap_within "$1" "$AGENT_RPC_TIMEOUT"; }
+
+# >>> bounded-capture block (extracted verbatim by tests/integration/qci/vm-exec-signal.bats)
+# --- bounded capture: one unlinked file per call, with a byte ceiling -------
+#
+# Every bounded command's stdout is captured through a REGULAR FILE rather than
+# the caller's command-substitution pipe (see bounded_run below for why). Round
+# 7 used ONE reusable file for all calls; the round-8 review showed that shape
+# restores an unbounded wait and permits cross-call corruption:
+#
+#   * a descendant that outlives its leader keeps the open description and can
+#     keep appending, so the replay of a LIVE-GROWING regular file need never
+#     reach EOF;
+#   * whatever it appends after the next `: > $QD_CAP_FILE` lands in the NEXT
+#     call's result;
+#   * the inode survives the pathname's unlink, so that writer can consume disk
+#     without limit.
+#
+# Three separate mechanisms are used, because no one of them closes all three:
+#
+#   1. PER-CALL FILE, UNLINKED IMMEDIATELY. Each bounded_run gets a fresh name
+#      inside a private 0700 directory and unlinks it before the command runs.
+#      A later call therefore cannot be handed an inode an earlier call's
+#      descendant still holds. This closes cross-call corruption. It does NOT
+#      bound disk: an unlinked inode a writer still holds is not reclaimed.
+#   2. RLIMIT_FSIZE ON THE CHILD (`ulimit -f`). The bounded command and EVERY
+#      descendant inherit a hard file-size limit, so the capture inode cannot
+#      grow past the ceiling no matter who writes to it: the kernel raises
+#      SIGXFSZ (default: terminate) or fails the write with EFBIG. `ulimit -f N`
+#      with neither -H nor -S sets BOTH limits, so a same-UID descendant cannot
+#      raise it again. This is what bounds disk. `ulimit -c 0` is set alongside
+#      so a SIGXFSZ kill does not also write a core file.
+#   3. A CEILED REPLAY. The replay reads at most QD_CAP_MAX_BYTES BYTES, with
+#      `head -c`, and then stops. That bound holds whatever the bytes are.
+#      It was `read -N` -- a CHARACTER count with the shell builtin -- until
+#      2026-09-17, and the justification written here then ("reads of a regular
+#      file never block on a writer, so this is a finite amount of purely local
+#      work") was WRONG TWICE OVER: a dropped NUL does not count towards the
+#      character ceiling, so a NUL-bearing capture was read to EOF; and EOF is
+#      re-tested on every read, so a writer that stays ahead of the reader keeps
+#      it going. Measured: 9.57s to replay a nominal 256 KiB, against 7ms for
+#      `head -c`. The byte count is the bound; the filesystem's EOF semantics
+#      are not.
+#
+# HOW FAR EACH MECHANISM ACTUALLY REACHES, since (2) and (3) do NOT cover the
+# same cases and the difference matters:
+#
+#   * (3) bounds the replay in BYTES for ALL output, NUL-bearing or not:
+#     `head -c N` reads at most N bytes whatever they contain. This was NOT
+#     true until 2026-09-17, when (3) was `read -N`: that ceiling counts
+#     CHARACTERS, bash DROPS NULs, and a dropped NUL does not count towards
+#     nchars -- so reading N characters out of a NUL-filled file meant reading
+#     the WHOLE file, and the replay fell back on (2) alone.
+#   * For output containing NUL bytes, what remains is a REPRESENTATION limit,
+#     not a resource one: bash cannot hold a NUL in a variable, so those bytes
+#     are counted and bounded but cannot be returned in `$data`. A caller
+#     needing the exact bytes must read the capture file, not this string.
+#     The truncation report below is unaffected -- it reads the capture's SIZE,
+#     which NUL bytes do occupy, so a NUL flood that reaches the ceiling is
+#     reported as truncated like any other.
+#   * Consequently a NUL-flooding descendant on a host where `ulimit -f` could
+#     not be applied is bounded in REPLAY by (3) -- head reads its byte count
+#     whatever the bytes are -- but its capture FILE can still grow without
+#     limit and fill the filesystem. That case is REFUSED at startup by the
+#     probe below, unless an operator sets
+#     QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE=1, which restores warn-and-continue
+#     and with it that disk exposure.
+#   * On NULs and the validator: no control-plane response this script carries
+#     contains them, and one that DID would NOT reliably fail jq -- bash strips
+#     NULs out of `$data` before jq ever sees it, so NUL-bearing JSON can
+#     validate cleanly. Do not treat the validator as a NUL detector.
+#     Stated rather than smoothed over: the disk claim above is conditional on
+#     a host that grants RLIMIT_FSIZE, and the only other outcome is a refusal
+#     to start.
+#
+# Ceiling in bytes. It must exceed the largest legitimate control-plane
+# response: an agent_rpc answer is a JSON envelope around base64 of the guest
+# command's captured stdout, so ~4/3 of whatever qemu-guest-agent itself is
+# willing to capture. 64 MiB is far above every response this script has been
+# observed to carry; operators who hit the ceiling get a loud WARN (never a
+# silent truncation) and can raise it.
+QD_CAP_MAX_BYTES=${QDISTRO_VM_CAPTURE_MAX_BYTES:-67108864}
+if ! [[ "$QD_CAP_MAX_BYTES" =~ ^[0-9]+$ ]] || [ "$QD_CAP_MAX_BYTES" -lt 1024 ]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_CAPTURE_MAX_BYTES must be an integer >= 1024, got: $QD_CAP_MAX_BYTES" >&2
+    exit 1
+fi
+# `ulimit -f` counts 1024-byte blocks in bash; round UP so the block limit is
+# never SMALLER than the byte ceiling the replay uses.
+QD_CAP_MAX_BLOCKS=$(( (QD_CAP_MAX_BYTES + 1023) / 1024 ))
+# Probe ONCE whether the limit can actually be set, and REFUSE TO START if it
+# cannot. `ulimit -f N` fails when the inherited HARD limit is already lower
+# (harmless -- the tighter limit still binds, and the second branch accepts
+# that) but also on a host that refuses the limit outright. In the latter case
+# mechanism (2) above does not exist, and the note above says exactly what is
+# then unbounded: a NUL-flooding descendant is bounded by neither the file-size
+# limit nor an aggregate disk bound, and the unlinked capture inode can consume
+# disk without limit. Round 9 asked for that to fail closed rather than warn,
+# and it now does: a warning on a path whose whole purpose is to supply a bound
+# is not a bound. The probe runs in a subshell so it cannot lower this shell's
+# own limit.
+#
+# THE ESCAPE HATCH IS EXPLICIT AND IT DOWNGRADES TO THE OLD BEHAVIOUR, nothing
+# more: QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE=1 restores the WARN-and-continue
+# path for an operator who has decided the risk is theirs. It does not make the
+# limit apply; it only stops vm-exec refusing to run without it.
+if ( ulimit -f "$QD_CAP_MAX_BLOCKS" ) 2>/dev/null; then
+    :
+elif [ "$(ulimit -f -H)" != unlimited ] && [ "$(ulimit -f -H)" -le "$QD_CAP_MAX_BLOCKS" ] 2>/dev/null; then
+    # An inherited hard limit at or below our ceiling still BOUNDS the capture,
+    # which is all the resource argument needs. But it also means the kernel
+    # cuts the file BELOW $QD_CAP_MAX_BYTES, so a size test against the
+    # configured cap alone would never fire and the truncation would be silent
+    # -- measured by sol at rc=0, length=1024, no warning, for a writer
+    # attempting 16384 bytes under a one-block inherited limit (A2 section 3).
+    # Remember the effective ceiling in BYTES so the replay can test the
+    # smaller of the two.
+    QD_CAP_EFFECTIVE_BYTES=$(( $(ulimit -f -H) * 1024 ))
+elif [ "${QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE:-0}" = 1 ]; then
+    echo "[vm-exec] WARN: cannot apply a file-size limit (ulimit -f ${QD_CAP_MAX_BLOCKS}) to bounded commands, and QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE=1 says to continue anyway; a descendant that floods NUL bytes into a capture is then bounded by neither the size limit nor any aggregate disk bound -- the REPLAY is still byte-bounded by head -c, but the unlinked capture inode can grow without limit" >&2
+else
+    echo "[vm-exec] ERROR: cannot apply a file-size limit (ulimit -f ${QD_CAP_MAX_BLOCKS}) to bounded commands. Without RLIMIT_FSIZE the capture file has no size bound: the REPLAY stays byte-bounded, but a flooding descendant can fill the filesystem, so the bounds this script states would not hold. Refusing to run. Lower QDISTRO_VM_CAPTURE_MAX_BYTES to fit an inherited hard limit, or set QDISTRO_VM_ALLOW_UNBOUNDED_CAPTURE=1 to accept an unbounded capture." >&2
+    exit 1
+fi
+
+QD_CAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vm-exec-cap.XXXXXXXX") || {
+    echo "[vm-exec] ERROR: cannot create a temporary capture directory (TMPDIR=${TMPDIR:-/tmp})" >&2
+    exit 1
+}
+# Normal exits remove the directory. A signal exit CANNOT: the handler below
+# re-raises, so this shell dies of the signal and bash does not run an EXIT
+# trap. Because each capture file is unlinked as soon as it is opened, the
+# residue of an interrupted vm-exec is one EMPTY directory in TMPDIR, and never
+# captured RPC output. No external command is added to the signal path whose
+# bound is claimed below.
+#
+# ONE WINDOW WHERE "EMPTY" IS NOT EXACT, stated rather than rounded off:
+# bounded_run runs inside `$( )`, where bash resets caught traps to default, so
+# a TERM delivered to the process group between the capture's creation
+# (`: > "$f"`) and its unlink (`rm -f "$f"`) kills the subshell instantly and
+# leaves that NAMED file behind. The window is a few syscalls wide and the file
+# is empty -- it has no output in it yet -- so the "never captured RPC output"
+# half holds unconditionally, and only the "empty DIRECTORY" half has this
+# exception. A failed unlink has the same effect. (sol section 3, fable
+# section 3.)
+trap 'rm -rf "$QD_CAP_DIR"' EXIT
+
+# Per-call name parts. READ THIS BEFORE TRUSTING THE COUNTER: every caller runs
+# bounded_run inside a command substitution, i.e. in a SUBSHELL, so the
+# increment below does NOT persist into this shell -- `QD_CAP_SEQ` is 1 on
+# essentially every call. It is a debugging aid, not a uniqueness guarantee,
+# and $BASHPID (the subshell's own pid, distinct among live processes) is what
+# actually separates concurrent names.
+#
+# THE INVARIANT THAT DOES HOLD, and the only one bounded_run relies on: the
+# name is created, opened and UNLINKED before the bounded command starts, and
+# this shell runs bounded commands strictly one at a time. A later call that
+# reuses a name therefore always gets a BRAND-NEW inode -- the earlier one has
+# no pathname left -- so a survivor of an earlier call can never write into a
+# later call's capture. The directory is mode 0700 and freshly created, so no
+# other user can plant a name in it either.
+QD_CAP_SEQ=0
+
+# THE one place an external command is started under a cap. Runs "$@" under
+# `timeout -k <grace> <cap>` and re-emits at most QD_CAP_MAX_BYTES of its
+# stdout.
+#
+# WHY THE OUTPUT GOES THROUGH A FILE AND NOT THROUGH THE CALLER'S PIPE.
+# `x=$(timeout -k G C cmd)` finishes only when bash has read the substitution
+# pipe to EOF, i.e. when the LAST holder of its write end closes it. A helper
+# that `cmd` spawns inherits that pipe on fd 1 and keeps it open after `cmd`
+# itself is gone -- and `timeout` waits only for the process it monitors, so a
+# leader that EXITS on the TERM takes `timeout` with it and the promised
+# KILL-at-cap+grace is never delivered to the group. The substitution then
+# blocks FOREVER, and with it the deferred signal trap: that was the round-6
+# review's reproduction, and it is why the `timeout -k` group-signalling note
+# above is not load-bearing.
+#
+# Redirecting the child's stdout to a regular file removes the dependency
+# instead of trying to out-race it. The child and every descendant inherit the
+# FILE on fd 1, never the pipe; the only holder of the substitution pipe is this
+# shell, which closes it as soon as bounded_run returns. `timeout`'s exit is
+# bounded at cap + SIGKILL_GRACE in the absence of host pathology -- whether the monitored leader
+# ignores TERM (KILL at cap+grace) or exits on it (`timeout` exits at once) --
+# and the replay that follows it is bounded by the byte ceiling rather than by
+# any descendant's behaviour.
+#
+# WHAT THIS DOES NOT DO: a descendant that ignores TERM and outlives its leader
+# is not reaped here. It is rendered harmless to our bound and to later calls:
+# it holds a descriptor on an ALREADY-UNLINKED inode that no later call will
+# use and that RLIMIT_FSIZE keeps at or below the ceiling, plus whatever
+# vm-exec's own stderr happens to be. If OUR caller captured that stderr through
+# a pipe, such an orphan can still hold the CALLER's pipe open; that is the
+# caller's bound to make, and nothing here claims otherwise. We deliberately do
+# NOT `kill -KILL -- -$pid` the group after the fact: the only group id
+# available then is derived from a pid `wait` has already reaped, so signalling
+# it is the bare-recycled-pid hazard this whole file exists to remove, aimed at
+# an entire process group.
+#
+# stderr is deliberately left alone so callers keep deciding whether virsh
+# diagnostics are shown or dropped. Callers must never capture with `2>&1`
+# inside a command substitution: that would hand descendants the pipe again on
+# fd 2 and reopen exactly this hole, and nothing INSIDE this script can close
+# that route for them. `ci/bin/vmexec-fd2-scan.py` lints the tracked callers;
+# the GUI agent's run-time drivers cannot be linted and are covered by a rule
+# in its prompt instead.
+#
+# COSTS, stated rather than hidden, and named so every bound below can cite
+# them instead of quietly dropping them:
+#
+#   U        = one `rm -f` fork per bounded call, unlinking a path we created
+#              ourselves in our own `mktemp -d`. It is NOT run under `timeout`,
+#              so the bounds below assume a local unlink(2) completes -- the
+#              same assumption the startup `mktemp -d` and the EXIT trap
+#              already make.
+#   T_replay = the byte-ceiled replay: at most QD_CAP_MAX_BYTES BYTES read
+#              from a regular file, plus one `head -c` FORK (it is no longer a
+#              shell builtin -- see mechanism 3). The byte count cannot be
+#              extended by any descendant, so the VOLUME is bounded; the TIME
+#              it takes is ordinary local I/O and scheduling and is therefore
+#              NOT independent of the host. This is a DATA-VOLUME bound, not a
+#              clock bound, and nothing here converts it into seconds.
+#
+# Every bound stated elsewhere in this file is therefore of the form
+# "<capped seconds> + N x (U + T_replay)" for a stated N. Round 7's figures
+# omitted this term entirely; they are not restated here as flat second counts.
+bounded_run() {
+    local cap=$1 rc=0 f wfd rfd data readrc truncated=0 cap_size cap_ceiling _cap_hint
+    shift
+    QD_CAP_SEQ=$((QD_CAP_SEQ + 1))
+    f="$QD_CAP_DIR/cap.$BASHPID.$QD_CAP_SEQ"
+    : > "$f" || return 125
+    # Open BOTH ends before unlinking: after the `rm` the inode has no name, so
+    # neither this call nor any later one can reach it by path.
+    #
+    # EVERY step is checked, including the unlink. Only the create was checked
+    # until 2026-09-17, and an injected failing `rm` then ran the command
+    # anyway and returned rc=0 with its output sitting in a NAMED capture --
+    # the precise invariant this block exists to establish, silently void (sol,
+    # todo/reviews/qci-A2-260917-sol-review.md section 1). errexit cannot be
+    # relied on to catch it: bounded_run is always called inside `$( )`.
+    if ! exec {wfd}>"$f"; then
+        rm -f "$f"
+        return 125
+    fi
+    if ! exec {rfd}<"$f"; then
+        exec {wfd}>&-
+        rm -f "$f"
+        return 125
+    fi
+    if ! rm -f "$f" || [ -e "$f" ]; then
+        exec {wfd}>&- {rfd}<&-
+        return 125
+    fi
+    if [ "$cap" -gt 0 ]; then
+        (
+            ulimit -f "$QD_CAP_MAX_BLOCKS" 2>/dev/null || :
+            ulimit -c 0 2>/dev/null || :
+            # The child needs the capture only on fd 1 (dup'd by the outer
+            # redirection). Close our bookkeeping descriptors so nothing
+            # downstream inherits a second handle or the READ end.
+            exec {wfd}>&- {rfd}<&-
+            exec timeout -k "${SIGKILL_GRACE}s" "${cap}s" "$@"
+        ) >&"$wfd" || rc=$?
+    else
+        # Explicitly unbounded (QDISTRO_VM_AGENT_RPC_TIMEOUT=0). The file
+        # capture and the byte ceiling still hold; the TIME bound is the thing
+        # the operator opted out of.
+        (
+            ulimit -f "$QD_CAP_MAX_BLOCKS" 2>/dev/null || :
+            ulimit -c 0 2>/dev/null || :
+            exec {wfd}>&- {rfd}<&-
+            exec "$@"
+        ) >&"$wfd" || rc=$?
+    fi
+    exec {wfd}>&-
+    # Ceiled replay: `head -c` stops after at most QD_CAP_MAX_BYTES BYTES,
+    # whatever those bytes are, so it terminates whatever a surviving
+    # descendant does. It costs one fork, which the builtin it replaced did
+    # not -- that is the price of a bound that NUL bytes cannot escape.
+    #
+    # NOTE ON UNITS: this bound is in BYTES, and `head -c` reads at most that
+    # many. It was `read -r -N "$QD_CAP_MAX_BYTES"` until 2026-09-17, which is
+    # not a byte bound in the case that matters: it counted CHARACTERS, bash
+    # cannot store a NUL, and a dropped NUL did not count. So a NUL-bearing
+    # capture was read PAST the ceiling, to EOF in the limit. That reader is
+    # GONE; what follows is `head -c`, which is a byte count.
+    # Measured on a 4 MiB-of-NULs-then-'Z' fixture: the old reader consumed all
+    # 4,194,305 bytes to come back with ONE character; `head -c 64` consumes 64.
+    # (sol, todo/reviews/qci-A-260917-sol-review.md §1.)
+    #
+    # NULs are still dropped from $data by the command substitution -- no shell
+    # variable can hold one -- exactly as the `$(<file)` this replaced did. What
+    # changed is the number of bytes READ, which is the resource bound this
+    # ceiling exists to enforce.
+    data=""
+    # A FAILED replay is a capture failure, not empty output. `|| :` made a
+    # nonzero `head` indistinguishable from a command that printed nothing:
+    # injecting `head() { return 1; }` against a producer printing OK gave
+    # rc=0 with an empty string and no diagnostic (sol, A3 finding 3 / A4
+    # finding 1 -- I reported this fixed here once before it was).
+    if ! data=$(head -c "$QD_CAP_MAX_BYTES" <&"$rfd" 2>/dev/null); then
+        exec {rfd}<&-
+        echo "[vm-exec] ERROR: could not replay the capture for '$1'; the command's output is UNAVAILABLE, not empty." >&2
+        return 125
+    fi
+    # CEILING TEST, in bytes, from the capture's SIZE rather than from the
+    # replay. ${#data} cannot be used (NULs are not stored, so a NUL-filled
+    # capture measures 0 characters however many bytes it holds), and neither
+    # can a `read -N 1` probe -- that re-enters the very defect above and scans
+    # to the first non-NUL byte, 0.84s where this costs nothing.
+    #
+    # A one-byte `head -c 1` probe past the replay is NOT sufficient either,
+    # and this is the subtle case: when `ulimit -f` takes effect the file stops
+    # at EXACTLY the ceiling, so the probe sees a clean EOF and would report
+    # "not truncated" for output the kernel cut off. Size is the honest signal.
+    #
+    # So: reaching the ceiling is REPORTED AS TRUNCATION. "Filled the ceiling
+    # exactly" and "was cut off at the ceiling" remain genuinely
+    # indistinguishable here; the conservative answer is the right one, rather
+    # than returning a silently short body.
+    # Test against the SMALLER of the configured cap and any inherited file
+    # ceiling: whichever one the kernel actually enforced is the one that cut
+    # the output.
+    cap_ceiling=$QD_CAP_MAX_BYTES
+    if [ -n "${QD_CAP_EFFECTIVE_BYTES:-}" ] \
+       && [ "$QD_CAP_EFFECTIVE_BYTES" -lt "$cap_ceiling" ]; then
+        cap_ceiling=$QD_CAP_EFFECTIVE_BYTES
+    fi
+    # A FAILED stat must not read as "nothing was truncated". It means the
+    # completeness check could not be made, which is reported, not assumed away.
+    if ! cap_size=$(stat -Lc %s "/proc/self/fd/$rfd" 2>/dev/null); then
+        echo "[vm-exec] WARN: could not stat the capture to check for truncation (command: $1); completeness is UNKNOWN, not verified." >&2
+    elif [ "$cap_size" -ge "$cap_ceiling" ]; then
+        truncated=1
+    fi
+    exec {rfd}<&-
+    # THE REPORT CHANNEL IS THIS STDERR LINE, and deliberately nothing else.
+    # Every caller invokes bounded_run inside a command substitution, i.e. in a
+    # SUBSHELL, so a flag variable set here could not reach them; a global that
+    # looked like one would be a lie. A truncated control-plane body USUALLY
+    # also fails the jq validator downstream (exit 76, EX_PROTOCOL) -- but not
+    # always, and it must not be relied on: a document cut inside trailing
+    # whitespace leaves a VALID JSON prefix that validates cleanly. This
+    # stderr line is the reliable signal; the validator is a second net with a
+    # hole in it.
+    if [ "$truncated" -eq 1 ]; then
+        _cap_hint="QDISTRO_VM_CAPTURE_MAX_BYTES"
+        if [ "$cap_ceiling" != "$QD_CAP_MAX_BYTES" ]; then
+            # Name the limit that actually bound, not the configured one --
+            # telling an operator to raise a cap that is not binding sends them
+            # in the wrong direction (sol A3 table row 4).
+            _cap_hint="the inherited RLIMIT_FSIZE hard limit (raise that, not QDISTRO_VM_CAPTURE_MAX_BYTES=$QD_CAP_MAX_BYTES)"
+        fi
+        echo "[vm-exec] WARN: bounded command output reached the ${cap_ceiling}-byte capture ceiling and was TRUNCATED (command: $1); the result is incomplete. A truncated control-plane response USUALLY fails this script's JSON validator (exit 76) and a truncated diagnostic decode is merely short -- but parsing is not a truncation detector: a document cut inside trailing whitespace leaves a valid JSON prefix that validates cleanly. THIS WARNING, not the validator, is the reliable signal. Raise ${_cap_hint} if this output is legitimate." >&2
+    fi
+    # `$(<file)` stripped ALL trailing newlines; callers were written against
+    # that, so reproduce it exactly. ${data##*[!nl]} is the trailing run of
+    # newlines (or the whole string when it is nothing BUT newlines, which the
+    # outer %-strip then removes entirely) -- one pass, no loop over length.
+    data=${data%"${data##*[!$'\n']}"}
+    printf '%s' "$data"
+    return "$rc"
+}
+# <<< bounded-capture block
+
+# Run a small LOCAL helper under a fixed hard cap. Used on paths that have no
+# monotonic budget of their own (the launch probe, the main poll loop) purely so
+# that trap deferral stays bounded.
+capped_local() {
+    bounded_run "$LOCAL_OP_TIMEOUT" "$@"
+}
+
+# Run a small LOCAL helper under a cap that fits inside the remaining budget of
+# the absolute monotonic deadline $1. Returns 1 without running anything when
+# the budget is already spent, so the caller stops rather than doing "one more
+# quick thing" outside its own deadline.
+budgeted_local() {
+    local dl=$1 left
+    shift
+    left=$(budget_left "$dl")
+    [ "$left" -gt 0 ] || return 1
+    bounded_run "$(cap_within "$left" "$LOCAL_OP_TIMEOUT")" "$@"
+}
+
+# Single guest-agent RPC. The host-side cap is AGENT_RPC_TIMEOUT unless $2
+# overrides it (0 = unbounded). On timeout `timeout` exits 124, which callers
+# treat like any other virsh failure; a TERM-resistant virsh is KILLed
+# SIGKILL_GRACE seconds later, so the worst case is cap+SIGKILL_GRACE and not
+# "forever" -- see bounded_run() for why that is true of the RETURN here and
+# not merely of the virsh process.
+agent_rpc() {
+    local cap=${2-$AGENT_RPC_TIMEOUT}
+    bounded_run "$cap" virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$1"
+}
+
+# --- guest process identity + bounded, identity-checked cleanup -------------
+#
+# A guest-exec PID on its own is NOT a safe kill target. The guest command can
+# exit at any moment and the guest kernel is then free to hand its PID to an
+# unrelated process. Because bash defers a trap until the current foreground
+# command returns, our cleanup routinely runs tens of seconds after the signal
+# arrived (a single agent RPC is bounded by AGENT_RPC_TIMEOUT, not by us), so
+# the PID-reuse window is real rather than theoretical: the old fire-and-forget
+# killer could TERM/KILL a whole unrelated process tree in the guest.
+#
+# We therefore pin the process IDENTITY = (pid, start time) immediately after
+# launch. Start time is field 22 of /proc/<pid>/stat -- clock ticks since guest
+# boot, never carried over to a recycled pid -- and the in-guest cleanup script
+# signals ONLY when that identity still matches what we captured.
+#
+# NO IDENTITY => NO SIGNAL. There used to be an age-based fallback here: when
+# the probe could not answer, the cleanup script would still signal a process
+# "too young to be a recycled PID". That reasoning is wrong. PID reuse is at its
+# MOST likely exactly when our command has just exited -- the guest hands the
+# number straight to the next fork -- so a recycled PID can be arbitrarily
+# young, which is the very case the guard exists to prevent. The fallback made
+# the guard fail OPEN in its own threat model, so it is gone: without a pinned
+# (pid, start time) the cleanup script refuses and says so, loudly, on stderr.
+#
+# KNOWN ORPHAN WINDOW (acknowledged, not fixed): between qga answering
+# guest-exec and this script installing its trap, and again until the identity
+# probe answers, a signal still kills us while the guest command runs. The
+# window is small but NOT zero. A signal inside it now leaves a REPORTED orphan
+# (one loud WARN naming the guest PID) instead of an unverified kill.
+
+# Status polls spent waiting for the identity probe (0 disables the probe
+# entirely; cleanup then has no identity to check and will refuse to signal).
+IDENT_POLLS=${QDISTRO_VM_IDENT_POLLS:-5}
+if ! [[ "$IDENT_POLLS" =~ ^[0-9]+$ ]]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_IDENT_POLLS must be a non-negative integer, got: $IDENT_POLLS" >&2
+    exit 1
+fi
+# Host-side bound on the whole cleanup path: building the request, submitting
+# it, and polling it to completion. It is enforced as an absolute monotonic
+# deadline, and EACH individual external command -- RPC or local jq/base64 --
+# is capped at the time still left and run under `timeout -k`, so neither a
+# wedged QGA nor a TERM-resistant virsh can stretch the CAPPED part of the path
+# past this budget plus SIGKILL_GRACE plus one trailing `sleep 1` (the two
+# clock overshoot terms). Each bounded call also costs the non-clock U +
+# T_replay term defined at bounded_run; the full derivation, including how many
+# such calls this path can make, is on kill_guest_pid below. Cleanup is polled to
+# completion so we can report what actually happened; if it does not complete in
+# this budget we say we could not verify, rather than claiming a reap.
+KILL_VERIFY_TIMEOUT=${QDISTRO_VM_KILL_VERIFY_TIMEOUT:-30}
+if ! [[ "$KILL_VERIFY_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$KILL_VERIFY_TIMEOUT" -lt 1 ]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_KILL_VERIFY_TIMEOUT must be a positive integer, got: $KILL_VERIFY_TIMEOUT" >&2
+    exit 1
+fi
+
+# Start time of the guest command, as captured right after launch. Empty means
+# "identity unknown" -- the cleanup script then refuses to signal at all.
+GUEST_START_TIME=""
+
+# Shared /proc reader. Field 22 (starttime) is counted over the WHOLE stat
+# line, but field 2 (comm) may contain spaces and parentheses, so we anchor on
+# the LAST ')' -- nothing after comm can contain one -- and index from there:
+# overall field k is f[k-2], hence starttime is f[20].
+# >>> ident-probe script (extracted verbatim by tests/integration/qci/vm-exec-signal.bats)
+STARTOF_SH=$(cat <<'STARTOF_EOF'
+qd_startof() {
+  awk 'match($0,/\)[^)]*$/){s=substr($0,RSTART+2);split(s,f," ");print f[20]}' "/proc/$1/stat" 2>/dev/null
+}
+STARTOF_EOF
+)
+
+# Identity probe. It must ALWAYS print a definite token, because the caller
+# cannot otherwise tell three different situations apart:
+#
+#   start=<n>  the launched shell is still there and this is its start time;
+#   gone       /proc/<pid>/stat does not exist, i.e. the guest command has
+#              ALREADY FINISHED -- there is nothing to pin and nothing an
+#              interrupt could leave behind;
+#   (nothing)  the probe itself did not work.
+#
+# THE ROUND-8/LIVE-VM DEFECT THIS FIXES. The previous form printed the start
+# time or NOTHING, and let awk's exit status carry the difference. Against a
+# real guest the probe LOSES A RACE with every short command: `vm-exec vm 'echo
+# ok'` finishes in the guest long before the probe's own guest-exec round trip
+# lands, so `qd_startof` found no /proc entry, awk exited 2, the status came
+# back `{"exitcode":2,"exited":true}` with no out-data, and the host reported
+# "could not pin guest PID N's start time" on EVERY invocation. Live evidence
+# (VM qci-gui-admin-260916-132237-233635-7446): the identical request with a
+# PID that still existed returned out-data "OAo=" ("8"), and with the launched
+# shell's own PID returned exitcode 2 and no data.
+#
+# That warning was not a degradation of the safety mechanism -- there was
+# genuinely nothing to pin -- but it was indistinguishable from a real failure,
+# which is the worse of the two problems. Now the guest says which it is.
+# QUOTED heredoc: every $ and $( ) below belongs to the GUEST shell and must
+# not be expanded here.
+IDENT_SH="$STARTOF_SH
+$(cat <<'IDENT_EOF'
+qd_ident_s=$(qd_startof __PID__)
+if [ -n "$qd_ident_s" ]; then printf 'start=%s\n' "$qd_ident_s"; else printf 'gone\n'; fi
+IDENT_EOF
+)"
+# <<< ident-probe script
+
+# In-guest cleanup. Guarded, then BFS over ps(ppid) to collect the descendant
+# set BEFORE signalling, then TERM, wait, KILL, and finally VERIFY.
+#
+# "the descendant set" is what ps showed at enumeration time, NOT provably every
+# descendant that ever existed. A process that re-parents away from the tree
+# (daemonised, or orphaned to init) between guest-exec and this walk is invisible
+# to a ppid BFS and is neither signalled nor reported. Round 6 named this; it is
+# left as-is on purpose. Closing it needs a guest-side container for the command
+# (pid namespace or a cgroup), which qga's guest-exec does not give us, and the
+# failure direction is a LEAK -- an orphan we do not reap -- never a signal
+# delivered to the wrong process, which is the property this script defends.
+#
+# The tree is collected only AFTER the root identity check passes, so the
+# descendants really are the original command's. Exit codes are the host's
+# report channel:
+#   0  nothing left to kill (already gone) or no live process of the tree remains
+#   3  no captured identity, or identity mismatch -> refused to signal
+#   5  the root itself survived TERM+KILL
+#   6  the root is gone but some descendant survived TERM+KILL
+#
+# Escalation is per-SURVIVOR, not per-root: a TERM-ignoring child outlives a
+# root that exits on TERM, and the previous shape only sent KILL when the ROOT
+# was still alive. That reported exit 6 ("descendant survived") for a process it
+# had never actually tried to KILL -- a promised cleanup that never happened.
+#
+# IDENTITY IS PINNED FOR EVERY MEMBER OF THE TREE, not just the root. Round 3
+# fixed the root and left the same bug at the descendant boundary: the poll
+# loop tested only "is this number non-zombie", threw the start time away, and
+# then `kill -KILL $alive` acted on a BARE PID that could have been recycled in
+# between. Now:
+#   * the BFS captures (ppid, starttime) for each descendant in ONE /proc read
+#     and REQUIRES the ppid to still be the parent we discovered it under, so a
+#     number recycled between `ps` and the stat read is never pinned at all;
+#   * every liveness/zombie test compares the CURRENT start time against the
+#     pinned one, so a recycled PID is "our process is gone", never a survivor;
+#   * every signal goes through qd_kill_checked, which re-reads the identity
+#     immediately before the kill and prints `skipped-recycled` instead of
+#     signalling a stranger.
+# The residual is the sub-instruction gap between that last read and the
+# kill(2) itself, which POSIX sh cannot close (there is no pidfd here); it is
+# the same irreducible window the root guard has always had.
+#
+# A descendant that cannot be pinned (it exited, or was re-parented, between
+# discovery and the identity read) is reported as `unpinnable-descendants` and
+# NOT signalled -- the same "no identity => no signal" rule as the root. Its own
+# children are therefore not enumerated either; they re-parent to init exactly
+# as they would have if the cleanup had never run. Same direction as the
+# re-parenting gap above: unreaped, never mis-signalled.
+# >>> kill-tree script (extracted verbatim by tests/integration/qci/vm-exec-signal.bats)
+KILL_TREE_SH=$(cat <<'KILL_EOF'
+p=__PID__
+stamp="__STAMP__"
+# IDENTITY: start time (overall field 22 of /proc/<pid>/stat) regardless of
+# process state. Anchored on the LAST ')' because comm may contain spaces and
+# parentheses; overall field k is f[k-2], so starttime is f[20].
+qd_startof() {
+  awk 'match($0,/\)[^)]*$/){s=substr($0,RSTART+2);split(s,f," ");print f[20]}' "/proc/$1/stat" 2>/dev/null
+}
+# ppid (overall field 4 -> f[2]) AND starttime from ONE read, so the two halves
+# of a descendant's pin cannot come from two different processes.
+qd_scan() {
+  awk 'match($0,/\)[^)]*$/){s=substr($0,RSTART+2);split(s,f," ");print f[2],f[20]}' "/proc/$1/stat" 2>/dev/null
+}
+# LIVENESS, which is NOT the same question: a zombie still has
+# /proc/<pid>/stat, but it cannot be signalled and holds nothing open. Counting
+# one as a survivor would report a failed reap we never observed. State is
+# overall field 3, i.e. f[1] after the last ')'. Both helpers print the start
+# time so the caller can check identity from the SAME read as the state.
+qd_alive() {
+  awk 'match($0,/\)[^)]*$/){s=substr($0,RSTART+2);split(s,f," ");if(f[1]!="Z")print f[20]}' "/proc/$1/stat" 2>/dev/null
+}
+qd_zombie() {
+  awk 'match($0,/\)[^)]*$/){s=substr($0,RSTART+2);split(s,f," ");if(f[1]=="Z")print f[20]}' "/proc/$1/stat" 2>/dev/null
+}
+# The start time pinned for $1 when the tree was collected, or nothing. $map is
+# the pin table: space-separated "pid:starttime" entries.
+qd_pinned() {
+  for e in $map; do
+    case "$e" in "$1:"*) printf '%s' "${e#*:}"; return 0 ;; esac
+  done
+  return 1
+}
+# Members of $1 that are still LIVE **and** still carry their pinned identity.
+# A mismatch means our process exited and the number was handed out again: not
+# a survivor (nothing of ours is left) and never a signal target.
+qd_survivors() {
+  a=
+  for k in $1; do
+    want=$(qd_pinned "$k") || continue
+    now=$(qd_alive "$k")
+    [ -n "$now" ] && [ "$now" = "$want" ] && a="$a $k"
+  done
+  printf '%s' "$a"
+}
+# Members of $1 that are zombies of the pinned identity: unsignalable, holding
+# nothing open, but still listed in /proc until their parent waits.
+qd_zombies() {
+  z=
+  for k in $1; do
+    want=$(qd_pinned "$k") || continue
+    now=$(qd_zombie "$k")
+    [ -n "$now" ] && [ "$now" = "$want" ] && z="$z $k"
+  done
+  printf '%s' "$z"
+}
+# Signal $2 ONLY after re-reading each pid's identity immediately before the
+# kill. This is the descendant-side equivalent of the root guard: never hand a
+# bare PID to kill(2).
+qd_kill_checked() {
+  sig=$1
+  for k in $2; do
+    want=$(qd_pinned "$k") || continue
+    now=$(qd_startof "$k")
+    [ -n "$now" ] || continue
+    if [ "$now" != "$want" ]; then
+      echo "skipped-recycled pid=$k start=$now pinned=$want"
+      continue
+    fi
+    kill -"$sig" "$k" 2>/dev/null
+  done
+}
+cur=$(qd_startof "$p")
+if [ -z "$cur" ]; then echo "already-gone pid=$p"; exit 0; fi
+if [ -z "$stamp" ]; then
+  echo "identity-unknown pid=$p: no launch identity was captured; refusing to signal a possibly recycled pid"
+  exit 3
+fi
+if [ "$cur" != "$stamp" ]; then
+  echo "identity-mismatch pid=$p start=$cur expected=$stamp"; exit 3
+fi
+echo "identity-verified pid=$p start=$cur"
+list=$p; queue=$p; map="$p:$cur"; unpinned=
 while [ -n "$queue" ]; do
   next=
   for q in $queue; do
     for k in $(ps -o pid= --ppid "$q" 2>/dev/null); do
-      case " $list " in *" $k "*) ;; *) list="$list $k"; next="$next $k";; esac
+      case " $list " in *" $k "*) continue ;; esac
+      sc=$(qd_scan "$k")
+      if [ -z "$sc" ]; then unpinned="$unpinned $k"; continue; fi
+      kpp=${sc%% *}
+      kst=${sc##* }
+      # The ppid must still be the parent we just enumerated it under. If it is
+      # not, this number is either a recycled pid or a process re-parented away
+      # from our tree -- either way it is not provably ours, so it is not pinned
+      # and will not be signalled.
+      if [ "$kpp" != "$q" ]; then unpinned="$unpinned $k"; continue; fi
+      list="$list $k"; map="$map $k:$kst"; next="$next $k"
     done
   done
   queue=$next
 done
-kill -TERM $list 2>/dev/null; sleep 2; kill -KILL $list 2>/dev/null; true'
+if [ -n "$unpinned" ]; then
+  echo "unpinnable-descendants:$unpinned (no identity could be pinned; NOT signalled)"
+fi
+qd_kill_checked TERM "$(qd_survivors "$list")"
+i=0
+alive=$(qd_survivors "$list")
+while [ -n "$alive" ] && [ "$i" -lt 8 ]; do
+  sleep 1
+  i=$((i + 1))
+  alive=$(qd_survivors "$list")
+done
+if [ -n "$alive" ]; then
+  qd_kill_checked KILL "$alive"
+  i=0
+  while [ -n "$alive" ] && [ "$i" -lt 3 ]; do
+    sleep 1
+    i=$((i + 1))
+    alive=$(qd_survivors "$list")
+  done
+fi
+if [ -n "$alive" ]; then
+  case " $alive " in
+    *" $p "*) echo "still-alive pid=$p after TERM+KILL survivors:$alive"; exit 5 ;;
+    *)        echo "descendants-alive:$alive"; exit 6 ;;
+  esac
+fi
+# NOT "reaped": we observed that no SIGNALABLE process of the pinned tree
+# remains. A zombie is still a process table entry until its parent waits, and
+# claiming a reap we did not observe is exactly the habit this script exists to
+# break -- so when one is left we name it.
+zl=$(qd_zombies "$list")
+if [ -n "$zl" ]; then
+  echo "no-live-processes pid=$p tree=$list zombies-pending-parent-wait:$zl"
+else
+  echo "no-live-processes pid=$p tree=$list"
+fi
+exit 0
+KILL_EOF
+)
+# <<< kill-tree script
+
+# Run one short guest script and return its decoded stdout. `polls` is a COUNT
+# of status RPCs, not a time bound. Every step is capped, so the honest worst
+# case counts the LOCAL helpers too, not just the RPCs:
+#
+#   setup      = 2 x jq(L+G) + rpc(R+G)
+#   per poll   = 2 x jq(L+G) + rpc(R+G) + sleep 1   (+ one base64(L+G) overall)
+#   total     <= (polls + 1) x (R + G) + (2 x polls + 3) x (L + G) + polls
+#                 + N x (U + T_replay),  N = 3 x polls + 4 = 19 calls
+#              = 6x35 + 13x10 + 5 = 345s of CAPPED time on defaults
+#                (polls=IDENT_POLLS=5), plus 19 replay/unlink terms.
+#
+# (L = LOCAL_OP_TIMEOUT, R = AGENT_RPC_TIMEOUT, G = SIGKILL_GRACE; U and
+# T_replay are the per-bounded_run unlink and byte-ceiled replay defined at
+# bounded_run above.) The 345s is the CLOCK-CAPPED part -- a worst case for a
+# pathological guest agent, not a normal cost, and the caps here are FIXED
+# rather than budget-derived, so the
+# stale-budget defect fixed in kill_guest_pid has no analogue on this path.
+#
+# WHAT THE OBSERVED PATH ACTUALLY COSTS, since round 7's version of this
+# comment described a loop that never ran: the loop exits at the FIRST terminal
+# status, so on the dominant real path (the launched shell has already exited)
+# it runs ONE iteration -- 2 RPCs and 3 local helpers, ~1s against a live
+# guest -- and the polls/sleeps in the formula above are never reached. 345s
+# remains a correct UPPER bound; it is not a description of normal cost, and
+# round 7's arithmetic was right about the ceiling while the code underneath it
+# was taking a path the comment did not mention. Before the round-8 fix the
+# observed path was TWO iterations, the second of which was an RPC against a
+# pid qga had already reaped and could only fail. The
+# replay term is bounded by the capture ceiling and by nothing a descendant
+# does, but it is a data-volume bound, not a clock bound, so the total is
+# "345s + 19 bounded local reads of at most QD_CAP_MAX_BYTES each" rather than
+# a single second count. Do not restate it as 345s flat. It is NOT the
+# trap-deferral bound, which is per-foreground-command and therefore
+# max(R, L, 1) + G + U + T_replay = 35s + one replay term -- see the trap notes
+# below. This runs on the launch path only (the identity probe),
+# where the caller is not yet waiting on a deadline; the signal path uses the
+# monotonic budget in kill_guest_pid.
+# EXIT CODES, because "could not establish it" was too coarse and hid a real
+# bug for a whole review round:
+#   0  terminal status reached and its stdout decoded (printed on our stdout)
+#   1  an RPC, a parse or the poll budget failed
+#   3  terminal status reached but the probe script produced NO stdout
+#   4  terminal status reached with stdout that would not base64-decode
+#
+# TERMINAL STATUS IS ONE-SHOT and this loop now respects that. It used to test
+# only "is there out-data", so a terminal status with EMPTY out-data looked
+# exactly like "not finished yet": it slept and polled again, and qga -- which
+# reaps the process bookkeeping in the same response that reports terminal
+# status -- answered `PID <n> does not exist`. That is the same one-shot rule
+# the main poll loop documents, violated here. Every real short-command probe
+# went down that path: one wasted RPC, one wasted second, and a failure
+# reported as if the guest agent had gone wrong.
+run_guest_probe() {
+    local script=$1 polls=$2 json resp ipid i st cls b64 out
+    json=$(capped_local jq -nc --arg cmd "$script" \
+        '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":true}}') || return 1
+    resp=$(agent_rpc "$json" 2>/dev/null) || return 1
+    ipid=$(printf '%s' "$resp" | capped_local jq -r '.return.pid // empty' 2>/dev/null) || return 1
+    [ -n "$ipid" ] || return 1
+    i=0
+    while [ "$i" -lt "$polls" ]; do
+        st=$(agent_rpc "$(capped_local jq -nc --argjson pid "$ipid" \
+            '{execute:"guest-exec-status",arguments:{pid:$pid}}')" 2>/dev/null) || return 1
+        # "R" = still running; "E <b64>" = exited, with whatever stdout it had
+        # (possibly none). The two cases are now DISTINCT in the classifier, not
+        # collapsed into an empty string.
+        cls=$(printf '%s' "$st" \
+            | capped_local jq -r 'if ((.return.exited // false) == true) then "E " + (.return["out-data"] // "") else "R" end' \
+              2>/dev/null) || return 1
+        case "$cls" in
+            R)
+                i=$((i + 1))
+                sleep 1
+                continue
+                ;;
+            E*)
+                b64=${cls#E}
+                b64=${b64# }
+                ;;
+            *)
+                # Neither token: the classifier itself did not run properly.
+                return 1
+                ;;
+        esac
+        # Terminal. Do NOT poll again -- qga has already reaped this pid.
+        [ -n "$b64" ] || return 3
+        out=$(printf '%s' "$b64" | capped_local base64 -d 2>/dev/null) || return 4
+        # Builtin, so it adds nothing to the trap-deferral bound.
+        out=${out//[[:space:]]/}
+        printf '%s' "$out"
+        return 0
+    done
+    return 1
+}
+
+# Why the launched shell can be gone before we ever ask about it, and why that
+# is a RESULT rather than a failure:
+#
+# qga's guest-exec is fire-and-forget. By the time we have built a second
+# guest-exec request, sent it, and polled it to completion, a short guest
+# command (`echo ok`, a one-line check -- most of what vm-exec is used for) has
+# long finished. Its /proc entry is gone, so there is no start time to pin --
+# and equally nothing an interrupt could leave running. This race is not
+# closable with guest-exec: there is no way to ask qga for the start time of a
+# process in the same call that creates it.
+#
+# So the states below are deliberately FOUR, not two. Only the last of them is
+# a malfunction, and only it is reported as one.
+GUEST_IDENT_STATE=unprobed
+
+# Capture (pid, start time) for the launched guest command. GUEST_START_TIME is
+# set only in the `pinned` state; in every other state it stays empty and the
+# cleanup script refuses to signal.
+capture_guest_identity() {
+    local out rc=0
+    if [ "$IDENT_POLLS" -le 0 ]; then
+        GUEST_IDENT_STATE=disabled
+        return 0
+    fi
+    out=$(run_guest_probe "${IDENT_SH//__PID__/$PID}" "$IDENT_POLLS") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        GUEST_IDENT_STATE="probe-failed(rc=$rc)"
+        return 0
+    fi
+    case "$out" in
+        start=*)
+            out=${out#start=}
+            if [[ "$out" =~ ^[0-9]+$ ]]; then
+                GUEST_START_TIME=$out
+                GUEST_IDENT_STATE=pinned
+                # Announced so the SUCCESSFUL branch is observable too. The
+                # degraded branches each emit a WARN, and anything waiting for
+                # identity capture to finish could therefore only synchronise on
+                # failure; on success there was no edge to wait for, and the
+                # window between the probe's guest-exec and this assignment is
+                # exactly where a signal produces a cleanup with an empty stamp.
+                echo "[vm-exec] guest identity pinned (pid $PID start $GUEST_START_TIME)" >&2
+            else
+                GUEST_IDENT_STATE="unparsable(start=$out)"
+            fi
+            ;;
+        gone)
+            GUEST_IDENT_STATE=already-exited
+            ;;
+        *)
+            GUEST_IDENT_STATE="unparsable($out)"
+            ;;
+    esac
+    return 0
+}
+
+# Identity-checked, TIME-bounded, VERIFIED in-guest cleanup of the guest-exec'd
+# PID and its descendant tree. This never claims a reap it did not observe:
+# every outcome below is what the guest script actually reported, and an
+# unfinished or unanswerable cleanup is reported as "not verified".
+#
+# THE BOUND. An absolute MONOTONIC deadline is computed as the FIRST thing this
+# function does, before any request body is built, so pre-processing is inside
+# the accounting and not beside it. From then on EVERY external command --
+# every RPC and every local jq/base64 -- is started only while budget remains
+# and is run under `timeout -k`, capped by cap_within() to the remaining budget.
+#
+# Worst case, proven from those two rules:
+#   * bounded_run makes the RETURN of every step depend on `timeout`'s own exit
+#     and on nothing else -- in particular not on a descendant closing a pipe.
+#     So "the command is dead by X" really is "we are back by X".
+#   * cap_within returns cap <= max(1, min(left, normal) - SIGKILL_GRACE), and
+#     `timeout -k` is the point by which the command has been SIGKILLed, absent an uninterruptible kernel wait by cap + SIGKILL_GRACE.
+#   * An operation started with `left` > SIGKILL_GRACE therefore ends at or
+#     before the deadline; one started with left <= SIGKILL_GRACE (so left >= 1)
+#     ends by deadline + SIGKILL_GRACE. No external command can end later.
+#   * Steps CANNOT stack past that: each one re-reads the budget immediately
+#     before it starts (budgeted_local internally, rpc_cap from a `left` read
+#     after the previous step returned), and a spent budget makes the next step
+#     refuse to run at all instead of inheriting a stale cap. That last clause
+#     is the round-6 fix; before it, the status RPC was capped from a budget
+#     read BEFORE the jq that preceded it, and the honest bound was
+#     KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + AGENT_RPC_TIMEOUT + SIGKILL_GRACE + 1.
+#   * After the last operation the loop may execute one `sleep 1` before the
+#     budget re-check breaks it.
+#   * Each bounded_run additionally costs U + T_replay, which are OUTSIDE the
+#     monotonic budget (the budget is read around the capped command, not
+#     around the unlink and the replay). The number of calls on this path is
+#     bounded: every loop iteration contains at least one `sleep 1`, so there
+#     are at most KILL_VERIFY_TIMEOUT + 1 iterations of at most 3 calls each,
+#     plus 3 setup calls and 2 on the terminal decode:
+#        N <= 3 x KILL_VERIFY_TIMEOUT + 8   (= 98 on defaults).
+#   => kill_guest_pid returns within
+#        KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 1 seconds of CAPPED time
+#        + N x (U + T_replay),
+#      i.e. 30 + 5 + 1 = 36s on defaults PLUS at most 98 unlink+replay terms.
+#      In the ordinary case every one of those replays is a few hundred bytes
+#      and the figure is 36s; the term is written down because it is the part a
+#      hostile or broken descendant can inflate, up to the capture ceiling and
+#      no further.
+# There is no "unless virsh ignores TERM" clause any more: the KILL is what
+# makes the grace term an overshoot of exactly SIGKILL_GRACE. There is also no
+# "unless a descendant keeps writing" clause: since round 8 the replay stops at
+# the capture ceiling instead of following a live-growing file.
+#
+# This bound does NOT depend on AGENT_RPC_TIMEOUT: cap_within clamps every
+# cleanup RPC to the remaining budget, so even the explicit
+# QDISTRO_VM_AGENT_RPC_TIMEOUT=0 opt-out cannot stretch this path.
+#
+# NOTE for anyone lowering KILL_VERIFY_TIMEOUT: the in-guest script itself needs
+# up to 8s (TERM grace) + 3s (post-KILL confirmation) ~= 11s before it can
+# answer. Below that the host will honestly report "not verified" for cleanups
+# that in fact succeeded.
 kill_guest_pid() {
-    local p=$1 sh kjson
+    local p=$1 sh kjson resp kpid sjson st ec b64 detail now deadline left
+    deadline=""
+    if now=$(monotonic_s); then
+        deadline=$((now + KILL_VERIFY_TIMEOUT))
+    fi
+    left=$(budget_left "$deadline")
+    if [ "$left" -le 0 ]; then
+        echo "[vm-exec] WARN: cannot bound cleanup for guest PID $p (monotonic clock unreadable); NOT attempted and NOT verified, the guest command may still be running" >&2
+        return 0
+    fi
+    # Parameter expansion only: builtin, so the request body costs no wall time.
     sh=${KILL_TREE_SH//__PID__/$p}
-    kjson=$(jq -nc --arg cmd "$sh" \
-        '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":false}}')
-    agent_rpc "$kjson" >/dev/null 2>&1 || true
+    sh=${sh//__STAMP__/$GUEST_START_TIME}
+    if ! kjson=$(budgeted_local "$deadline" jq -nc --arg cmd "$sh" \
+            '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":true}}'); then
+        echo "[vm-exec] WARN: could not build the cleanup request for guest PID $p within its ${KILL_VERIFY_TIMEOUT}s budget; NOT attempted and NOT verified, the guest command may still be running" >&2
+        return 0
+    fi
+    left=$(budget_left "$deadline")
+    if [ "$left" -le 0 ]; then
+        echo "[vm-exec] WARN: cleanup budget for guest PID $p was spent before the request could be sent; NOT attempted and NOT verified, the guest command may still be running" >&2
+        return 0
+    fi
+    if ! resp=$(agent_rpc "$kjson" "$(rpc_cap "$left")" 2>/dev/null); then
+        echo "[vm-exec] WARN: could not submit cleanup for guest PID $p; NOT verified, the guest command may still be running" >&2
+        return 0
+    fi
+    kpid=$(printf '%s' "$resp" | budgeted_local "$deadline" jq -r '.return.pid // empty' 2>/dev/null || true)
+    if [ -z "$kpid" ]; then
+        echo "[vm-exec] WARN: cleanup RPC for guest PID $p returned no pid; NOT verified, the guest command may still be running" >&2
+        return 0
+    fi
+    while :; do
+        left=$(budget_left "$deadline")
+        [ "$left" -gt 0 ] || break
+        # Build the request FIRST, as its own bounded step. The previous shape
+        # inlined it as `agent_rpc "$(budgeted_local ... jq ...)" "$(rpc_cap
+        # "$left")"`, where $left had been read BEFORE the jq ran: a
+        # TERM-resisting jq could burn its whole cap + KILL grace and the RPC
+        # would still be capped from the pre-jq budget, pushing the return well
+        # past the deadline (round-6 review, HIGH). Every cap in this loop is
+        # now derived from a budget read AFTER the preceding step finished.
+        if ! sjson=$(budgeted_local "$deadline" jq -nc --argjson pid "$kpid" \
+                '{execute:"guest-exec-status",arguments:{pid:$pid}}'); then
+            sleep 1
+            continue
+        fi
+        left=$(budget_left "$deadline")
+        [ "$left" -gt 0 ] || break
+        if ! st=$(agent_rpc "$sjson" "$(rpc_cap "$left")" 2>/dev/null); then
+            sleep 1
+            continue
+        fi
+        ec=$(printf '%s' "$st" | budgeted_local "$deadline" jq -r '
+            if ((.return.exited // false) == true) and (.return|has("exitcode"))
+            then (.return.exitcode|floor|tostring) else "" end' 2>/dev/null || true)
+        if [ -n "$ec" ]; then
+            b64=$(printf '%s' "$st" | budgeted_local "$deadline" jq -r '.return["out-data"] // ""' 2>/dev/null || true)
+            detail=$(printf '%s' "$b64" | budgeted_local "$deadline" base64 -d 2>/dev/null || true)
+            # Builtin newline squashing: no external `tr`, so the final decode
+            # cannot push the return past the bound proven above.
+            detail=${detail//$'\n'/ }
+            case "$ec" in
+                0) echo "[vm-exec] cleanup verified for guest PID $p: ${detail:-no detail}" >&2 ;;
+                3) echo "[vm-exec] WARN: guest PID $p could not be identity-checked against the launch capture; REFUSED to signal a possibly recycled PID: ${detail:-no detail}" >&2 ;;
+                5|6) echo "[vm-exec] WARN: cleanup could NOT be verified for guest PID $p; guest processes survived TERM+KILL: ${detail:-no detail}" >&2 ;;
+                *) echo "[vm-exec] WARN: cleanup script for guest PID $p exited $ec; cleanup NOT verified: ${detail:-no detail}" >&2 ;;
+            esac
+            return 0
+        fi
+        sleep 1
+    done
+    echo "[vm-exec] WARN: cleanup for guest PID $p did not finish within ${KILL_VERIFY_TIMEOUT}s; cannot confirm the guest command was reaped" >&2
+    return 0
 }
 
 # 1. Send the command. Build the qga JSON with jq so embedded quotes,
@@ -133,6 +1197,108 @@ if [ -z "$PID" ] || ! [[ "$PID" =~ ^[0-9]+$ ]]; then
     echo "[vm-exec] ERROR: Could not extract valid PID from response: $RESPONSE" >&2
     exit 1
 fi
+
+# 2b. Clean up the guest command if THIS process is interrupted.
+# qga's guest-exec is fire-and-forget from the guest's point of view: the shell
+# it spawned keeps running after the host-side poller dies. A caller (or an
+# agent) that gives up on a slow vm-exec, kills it, and re-issues the same
+# driver therefore ends up with TWO abandoned driver shells racing on one VM --
+# duplicated requests and duplicated rows, so no verdict is attributable. That
+# is exactly what invalidated permissions-gui/45 and /50 in
+# full-20260914T194046Z-13620 ("host-side vm-exec polling was interrupted twice,
+# but the guest-agent commands remained alive"). Only the timeout path used to
+# clean up; now every interrupt does, then we die of the same signal so the
+# caller's wait status is still the signal it sent.
+#
+# The trap is installed BEFORE the identity probe on purpose: a signal during
+# the probe then still reaches cleanup, which reports an unpinned guest PID
+# instead of silently leaving it, rather than widening the orphan window by the
+# probe's duration.
+#
+# Note bash defers a trap until the current foreground command returns, so
+# cleanup can lag by the longest foreground command in the wait phase. That is
+# why EVERY external command reachable while the trap is armed is bounded:
+#   * each agent RPC          <= AGENT_RPC_TIMEOUT + SIGKILL_GRACE  (35s)
+#                                 + U + T_replay
+#   * each local jq/base64    <= LOCAL_OP_TIMEOUT  + SIGKILL_GRACE  (10s)
+#                                 + U + T_replay
+#   * each backoff sleep      <= 10s (self-terminating)
+# so deferral <= AGENT_RPC_TIMEOUT + SIGKILL_GRACE + U + T_replay, and
+#
+#   signal -> re-raise
+#     <= (AGENT_RPC_TIMEOUT + SIGKILL_GRACE)        deferral
+#      + (KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 1)  kill_guest_pid
+#     =  30 + 5 + 30 + 5 + 1 = 71s of CAPPED time on defaults,
+#      + (1 + N) x (U + T_replay) with N <= 3 x KILL_VERIFY_TIMEOUT + 8, i.e.
+#        at most 99 unlink+replay terms (see bounded_run for what those are and
+#        why they are not expressed in seconds).
+#
+# Three premises this rests on, all stated so a later reader can check them:
+#   1. "bounded" means bounded IN RETURN, not merely "the process we monitored
+#      was killed". That is bounded_run's file capture; with the old
+#      command-substitution pipe a TERM-ignoring grandchild of a leader that
+#      exited on TERM made this whole claim false (round-6 review).
+#   1b. The replay of that capture must itself terminate. With round 7's single
+#      reused file a descendant that kept writing could keep the replay from
+#      ever reaching EOF, which made the same claim false again (round-8
+#      review). The byte ceiling is what closes it.
+#   2. QDISTRO_VM_AGENT_RPC_TIMEOUT > 0. Setting it to 0 is a deliberate opt-out
+#      of the per-RPC cap, and it removes the deferral term -- so the 71s figure
+#      is false in that configuration and nothing here pretends otherwise. The
+#      36s cleanup bound survives it, because cap_within still clamps every
+#      cleanup RPC to the remaining budget.
+#
+# That lag is also exactly why the PID must be identity-checked before anything
+# is signalled -- see the identity notes above.
+#
+# The trap is DISARMED as soon as the poll loop breaks (see below): at that
+# point the guest command has reached terminal status, so there is nothing left
+# to clean up, and the output-decoding steps -- whose cost is set by the size of
+# the command's output rather than by any bounded RPC -- are outside the claim
+# above. A signal there takes the default disposition and kills us at once.
+vm_exec_on_signal() {
+    local sig=$1
+    trap - INT TERM HUP
+    echo "[vm-exec] WARN: received SIG${sig}; attempting identity-checked cleanup of guest PID $PID and its descendants" >&2
+    kill_guest_pid "$PID"
+    # Nothing to scrub: every capture file is unlinked the instant it is
+    # opened, so no captured output is reachable by path here. We are about to
+    # die of $sig, so the EXIT trap will not run and one EMPTY 0700 directory
+    # is left in TMPDIR -- see the QD_CAP_DIR notes above. Removing it would
+    # mean adding an external `rm -rf` to the signal path, whose duration is
+    # not covered by any bound claimed here, so we do not.
+    kill -s "$sig" "$$"
+}
+trap 'vm_exec_on_signal INT' INT
+trap 'vm_exec_on_signal TERM' TERM
+trap 'vm_exec_on_signal HUP' HUP
+
+# 2c. Pin the guest command's identity (pid + start time) so any later cleanup
+# cannot signal a recycled PID. Best effort -- but "best effort" does NOT mean
+# "kill anyway": if the probe cannot answer, the cleanup script refuses to
+# signal at all, and we say so here so an operator knows an interrupt may leave
+# this exact guest PID behind.
+capture_guest_identity
+case "$GUEST_IDENT_STATE" in
+    pinned|disabled)
+        # pinned: cleanup can identity-check and signal.
+        # disabled: the operator turned the probe off (IDENT_POLLS=0) and the
+        # cleanup script's own "no identity => no signal" rule applies.
+        ;;
+    already-exited)
+        # The guest command had already finished when the probe reached it.
+        # There is nothing to pin AND nothing to clean up, so this is silent on
+        # purpose. Round 7 warned here, on essentially every invocation, which
+        # trained readers to skip the message that actually matters below.
+        # If a signal arrives anyway, the cleanup script reports `already-gone`
+        # -- or, if the guest recycled the number, refuses on the empty stamp.
+        ;;
+    *)
+        # A genuine malfunction of the probe: distinguishable from both cases
+        # above, and it names WHICH step failed.
+        echo "[vm-exec] WARN: identity probe for guest PID $PID did not answer (${GUEST_IDENT_STATE}); cleanup will REFUSE to signal it, so an interrupt may leave it running in the guest" >&2
+        ;;
+esac
 
 # 3. Wait until command completes (exitcode is set).
 # Deadline uses clamped /proc/uptime deltas (not bash SECONDS / wall clock)
@@ -162,14 +1328,14 @@ while true; do
         ELAPSED=$((ELAPSED + DELTA))
         PREV_UPTIME=$NOW_UPTIME
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-            echo "[vm-exec] ERROR: command exceeded ${TIMEOUT}s (elapsed ${ELAPSED}s); killing guest PID $PID: $CMD" >&2
+            echo "[vm-exec] ERROR: command exceeded ${TIMEOUT}s (elapsed ${ELAPSED}s); attempting identity-checked cleanup of guest PID $PID: $CMD" >&2
             kill_guest_pid "$PID"
             exit 124
         fi
     fi
 
     set +e
-    STATUS_JSON=$(jq -nc --argjson pid "$PID" \
+    STATUS_JSON=$(capped_local jq -nc --argjson pid "$PID" \
         '{execute:"guest-exec-status",arguments:{pid:$pid}}')
     RESULT=$(agent_rpc "$STATUS_JSON")
     VIRSH_EXIT=$?
@@ -211,7 +1377,7 @@ while true; do
     # absent and "bad" when present with a non-numeric type. jq renders numbers
     # canonically, which is also what makes leading-zero values ("08", "010")
     # impossible to reach the shell's octal-sensitive arithmetic.
-    RESP_PARSE=$(printf '%s' "$RESULT" | jq -r '
+    RESP_PARSE=$(printf '%s' "$RESULT" | capped_local jq -r '
         if type != "object" then "bad - -"
         elif (has("error") and ((.error|type) == "object")) then "error - -"
         elif (has("return") and ((.return|type) == "object")) then
@@ -247,7 +1413,7 @@ while true; do
         # budget and then blames the guest agent.
         # Anchored on .error.desc, not the whole body, so an unrelated payload
         # cannot be read as a reaping.
-        if printf '%s' "$RESULT" | jq -e '.error.desc | test("does not exist")' >/dev/null 2>&1; then
+        if printf '%s' "$RESULT" | capped_local jq -e '.error.desc | test("does not exist")' >/dev/null 2>&1; then
             echo "[vm-exec] ERROR: guest agent has no bookkeeping for PID $PID (reaped)." >&2
             echo "[vm-exec] HINT: terminal status is one-shot; this cannot be retried." >&2
             echo "[vm-exec] HINT: If the command used 'pkill -f <pattern>', it matched its OWN" >&2
@@ -308,6 +1474,13 @@ while true; do
     fi
     sleep 1
 done
+# 3b. The command has reached TERMINAL status: qga has reported an exitcode or a
+# signal, so there is no guest process left for the trap to clean up. Disarm it
+# rather than deferring a signal behind the output decode below, whose duration
+# is bounded by the size of the command's output and not by any RPC cap. This
+# keeps the signal-to-re-raise bound documented above a statement about the
+# whole armed lifetime of the trap, not about part of it.
+trap - INT TERM HUP
 # 4. Decode and print stdout
 OUT_DATA=$(echo "$RESULT" | jq -r '.return."out-data"')
 if [ "$OUT_DATA" != "null" ] && [ -n "$OUT_DATA" ]; then

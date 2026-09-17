@@ -164,8 +164,8 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 | `QDISTRO_VM_BASE` | auto | `auto`: clone qci workers from the imported kiwi image (`qdistro-kiwi-base.qcow2`, tester or ci profile) if present, else `baseweed-baked`. `kiwi` requires the import (`scripts/vm/import-kiwi-base.sh`). `baked` always uses baseweed-baked. `build-in-vm.sh` always clones baked. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |
-| `QDISTRO_VM_EXEC_TIMEOUT` | 1800 | Overall deadline (s) for a single `vm-exec` in-guest command; on timeout the guest process tree is killed and `vm-exec` exits 124. `0` = unbounded. |
-| `QDISTRO_VM_AGENT_RPC_TIMEOUT` | 30 | Host-side cap (s) per `virsh qemu-agent-command` RPC, so a wedged agent call can't outlast the deadline above. `0` = unbounded. |
+| `QDISTRO_VM_EXEC_TIMEOUT` | 1800 | Overall deadline (s) for a single `vm-exec` in-guest command. On expiry `vm-exec` attempts an identity-checked TERM, then KILL, of the discovered and pinned guest process tree, and exits 124. It reports its own verification limits: a descendant whose identity it cannot pin is named (`unpinnable-descendants:`) and deliberately **not** signalled, and it cannot guarantee it discovers a reparented process, so reaping is attempted and reported, not guaranteed. The deadline is also checked against elapsed time BETWEEN steps, not enforced as wall clock, so a true wall-clock cap must come from outside — use `timeout -k 30 <n> vm-exec ...`, where `-k` makes the cap an undeniable KILL-at-cap+grace for **vm-exec itself**, which a plain `timeout` does not give you against a TERM-resistant process. It does **not** reach descendants: `timeout` waits only for its direct child, so if vm-exec exits on the TERM the later group KILL is never sent. An outer cap bounds how long you wait; it does not bound cleanup, and a short grace can cut vm-exec's own cleanup verification short. The counter is also clamped across host suspend, so it measures elapsed time as the host saw it, not as the guest experienced it. `0` = unbounded. |
+| `QDISTRO_VM_AGENT_RPC_TIMEOUT` | 30 | Host-side cap (s) per `virsh qemu-agent-command` RPC, bounding any ONE wedged agent call. It does not bound the total: the deadline above is checked between steps, so many capped calls can still overrun it. `0` = unbounded. |
 | `QD_VM_START_MAX_WAIT` | 300 | Backstop cap (s) on guest-agent readiness in `vm-start-and-wait` (raised from 120 for parallel boot contention). |
 | `QCI_HOST_STEP_TIMEOUT` | 600 | Per-step wall budget (s) for the `host` gate. It does **not** cover the `qdistro-pytest` step — see the next row. Raising this alone does not give pytest more time. |
 | `QCI_QDISTRO_PYTEST_TIMEOUT` | 1800 | Wall budget (s) for the `qdistro-pytest` host step **only**, deliberately independent of `QCI_HOST_STEP_TIMEOUT`. The suite's honest cost is ~550s across ten batches, so the shared 600s step budget left no headroom and one slow test killed the gate; 1800s is ~3.3x the honest cost, which keeps the step a wedge detector without being sensitive to normal variance. Set **both** knobs to slow down every host step. |
@@ -187,19 +187,20 @@ QCI_AGENT_CMD='my-visual-agent-runner' qdistro/ci/bin/qci gui
 ```
 
 If your runner needs a template, include `{prompt}` — it is substituted with the
-prompt-file path and the result is run via `bash -lc` (so `$(cat {prompt})`
-inlines the prompt text, which `claude -p` takes as a positional argument rather
-than a path):
+prompt-file path and the result is run via `bash -lc`, so the usual shell forms
+work: `< {prompt}` feeds the prompt on stdin, and `$(cat {prompt})` inlines its
+text for a runner that wants the prompt as an argument rather than a path:
 
 ```bash
-QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
   qdistro/ci/bin/qci gui
 ```
 
-`--dangerously-skip-permissions` is required because the agent must run
-`vm-exec`/`virsh` and write its `status.txt` without interactive approval;
-`--model haiku` keeps the per-scenario cost down (the scenarios are mechanical
-drive-and-screenshot tasks, run one disposable VM each).
+`--yolo` is required because the agent must run `vm-exec`/`virsh` and write its
+`status.txt` without interactive approval. `gpt-5.6-luna` is the driver these
+scenarios are graded with: the visual scenarios are decided by OPENING the
+captured PNG, so the runner must be vision-capable. Do not substitute a model
+that cannot open an image — see `doc/dev.md` "Visual evidence: vision, not OCR".
 
 The executable qdwin smokes run before the markdown assignments:
 

@@ -149,7 +149,24 @@ echo "guest-ping: \$(runuser -u admin -- virsh qemu-agent-command --timeout 5 "\
 tail -20 /tmp/s20-spawn.log 2>/dev/null
 EOF
 )
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash" 2>&1 | tee "${QCI_SCENARIO_TMPDIR:-/tmp}/s20-liveness.log"
+# CAPTURE THROUGH A FILE, NOT `... 2>&1 | tee`. A host pipeline hands vm-exec's
+# fd 2 to the pipe and the shell then waits for `tee` to see EOF on its stdin,
+# which happens only when the LAST writer closes it. vm-exec bounds its own
+# children's fd 1 internally, but fd 2 goes straight through to every virsh/jq
+# descendant, and one that outlives vm-exec holds this step open after the guest
+# script is long dead. The log file is the artifact we wanted anyway.
+#
+# `|| :` DISCARDS the status; it does not preserve what the pipeline reported.
+# The old claim here was false: under `set -o pipefail` the pipeline reported
+# the FAILING member, so `false | cat` was 1 where `false >file 2>&1 || :` is
+# 0, and a failed tee was reported too (astra, A-astra finding 6). Nothing
+# downstream reads a status from this line -- the assertions read the log --
+# so discarding it is acceptable, but it is a discard, not an equivalence.
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash" > "${QCI_SCENARIO_TMPDIR:-/tmp}/s20-liveness.log" 2>&1 || :
+# Bounded in BYTES: `cat` runs to EOF of a file a surviving descendant may
+# still be appending to (astra, A-astra finding 5). The log keeps the full
+# text; only this echo is capped.
+head -c "${QCI_S20_LOG_ECHO_BYTES:-65536}" "${QCI_SCENARIO_TMPDIR:-/tmp}/s20-liveness.log"
 ```
 
 **Assert**: the block prints `S2_VERDICT=LIVE` — the domain either
