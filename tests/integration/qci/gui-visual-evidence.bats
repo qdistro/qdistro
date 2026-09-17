@@ -31,9 +31,12 @@
 # each other rather than against a test-local copy. Both capture tools (vm-gui
 # for the labwc lane, qdwin-helpers.sh for the qdwin lane) use that library.
 #
-# Everything here is filesystem-only: no VM, no agent, no qci run. The host has
-# no real tesseract, so the OCR backend is a stub whose output depends on the
-# FRAME BYTES - which is exactly the property the design relies on.
+# Everything here is filesystem-only: no VM, no agent, no qci run. The OCR
+# backend is a STUB whose output depends on the FRAME BYTES -- exactly the
+# property the design relies on -- so these tests do not depend on the host's
+# OCR either way. (This header used to say the host has no real tesseract. It
+# has had tesseract-ocr 5.5.3 since 2026-09-16; the stub is a test-isolation
+# choice, not a workaround for an absent backend.)
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
@@ -1368,4 +1371,123 @@ vmgui_screenshot() {
     attest_row "$ADIR/b.png"
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
     [[ "$output" == *"harness-captured 2 frame(s), 1 distinct"* ]]
+}
+
+# --- B round 2 (sol): capture MULTIPLICITY, not just digest presence ----------
+
+@test "floor: a published pair does not satisfy a declared count of two" {
+    # One vm-gui frame writes two rows (scratch capture + in-tree delivery).
+    # The floor used to be checked against the verifier's RAW row count, before
+    # the pair collapse, so one screenshot satisfied `qci:visual-captures: 2`.
+    install_fake_virsh
+    cat > "$TDIR/two.md" <<'EOF'
+# 10 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    vmgui_screenshot "$ADIR/s1.png"
+    write_status PASS
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"took only 1 capture(s)"* ]]
+}
+
+@test "floor: two real published frames DO satisfy a declared count of two" {
+    install_fake_virsh
+    cat > "$TDIR/two.md" <<'EOF'
+# 10 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    vmgui_screenshot "$ADIR/s1.png"
+    vmgui_screenshot "$ADIR/s2.png"
+    write_status PASS
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "omission: deleting one of two IDENTICAL in-tree captures is detected" {
+    # Rows used to match against the one file carrying their digest, so the
+    # surviving twin satisfied both rows and the deletion was invisible. Rows
+    # now consume files.
+    write_status PASS
+    write_frame a.png Approve
+    cp "$ADIR/a.png" "$ADIR/b.png"
+    attest_row "$ADIR/b.png"
+    rm -f "$ADIR/b.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"no longer there"* ]]
+}
+
+@test "omission: both identical twins present is still a clean pass" {
+    write_status PASS
+    write_frame a.png Approve
+    cp "$ADIR/a.png" "$ADIR/b.png"
+    attest_row "$ADIR/b.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 2 frame(s), 1 distinct"* ]]
+}
+
+# --- B round 2 (fable): what the vm-gui comments claimed vs what happened -----
+
+# A `virsh` whose first screenshot is unusably black and whose later ones are
+# fine, so the retry path runs for real.
+install_flaky_virsh() {
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+out="${@: -1}"
+n=$(cat "$QCI_TEST_ATTEMPTS" 2>/dev/null || echo 0); n=$((n + 1))
+printf '%s' "$n" > "$QCI_TEST_ATTEMPTS"
+if [ "$n" -eq 1 ]; then
+    magick -size 320x80 xc:black "$out"
+else
+    magick -size 320x80 xc:white -pointsize 24 -fill black \
+        -annotate +10+40 "frame $(date +%s%N)" "$out"
+fi
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    export QCI_TEST_ATTEMPTS="$TDIR/attempts"
+}
+
+@test "vm-gui: a REJECTED attempt is kept for triage but never graded" {
+    # The library attests every candidate it captures, so a rejected attempt
+    # copied back in-tree under an image name was matched to its row by digest
+    # and graded -- a frame the harness had already judged unusable entering
+    # the evidence set, where it could satisfy the decoded-frame floor alone.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    install_flaky_virsh
+    run vmgui_screenshot "$ADIR/s1.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/s1.png.attempt-1.rejected" ]
+    [ ! -f "$ADIR/s1.png.attempt-1.png" ]
+    write_status PASS
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    # the black attempt is NOT one of the graded frames
+    [[ "$output" == *"harness-captured 1 frame(s), 1 distinct"* ]]
+    [[ "$output" == *"captured outside the artifact dir"* ]]
+}
+
+@test "vm-gui: a frame that could not be attested is NOT left in the frame set" {
+    # The comment said an unattestable delivery "would not be graded"; leaving
+    # the file in place did not achieve that, because an unattested file whose
+    # bytes match some row is matched by digest and graded anyway.
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        # vm-gui runs under `set -euo pipefail`; sourcing turns it back on, and
+        # a function returning 1 would abort before the status is reported.
+        set +e
+        capture_attest_frame() { return 1; }
+        VM=testvm
+        printf "bytes" > "$2/src.png"
+        deliver_attested_frame "$2/src.png" "$3/out.png"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR" "$ADIR"
+    [[ "$output" == *"rc=1"* ]]
+    [ ! -f "$ADIR/out.png" ]
+    [ -f "$ADIR/out.png.unattested" ]
 }

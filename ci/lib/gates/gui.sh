@@ -1077,8 +1077,9 @@ agent_artifact_status() {
 #     sealed and never opened. gui_count_image_opens records a DIAGNOSTIC on
 #     every attempt, first and retried -- it is the first thing to read when a
 #     visual verdict looks wrong -- but it is not a gate, it does not change a
-#     verdict, and it counts MENTIONS rather than tool calls: only a ZERO is
-#     strong evidence. See the function for why.
+#     verdict, and it counts MENTIONS rather than tool calls. A zero is a
+#     trend signal worth reading first, not proof the driver did not look. See
+#     the function for why.
 #   * It does not adjudicate the ASSERTION. OCR reads text. It cannot establish
 #     a colour, a layout/geometry claim, focus, z-order, animation, or the
 #     ABSENCE of a control. For those the contract proves attested observation
@@ -1095,10 +1096,17 @@ agent_artifact_status() {
 # Name of the harness-owned evidence subdirectory inside each artifact dir.
 GUI_VISUAL_EVIDENCE_DIR=visual-evidence
 
-# Probe the host OCR backend. `command -v tesseract` is NOT sufficient: this
-# host carries an unrelated game that provides a `tesseract` binary, and
-# packaging accidents of that shape are exactly how a "backend present" claim
-# goes wrong. Require the real banner (`tesseract 5.3.4` on the first line).
+# Probe the host OCR backend. Presence is NOT sufficient: require the real
+# banner (`tesseract 5.5.3` on the first line), because a "backend present"
+# claim built on `command -v` alone breaks on any packaging accident that puts
+# something else under the name.
+#
+# On THIS host the name is not actually contested: /usr/bin/tesseract belongs to
+# tesseract-ocr 5.5.3, and the unrelated game ships /usr/bin/tesseract-game,
+# whose first --version line is `init: sdl`. Earlier comments here and in
+# doc/dev.md claimed the game took the `tesseract` name; it does not (sol and
+# fable, B round 2). The banner check stays because a PATH is not ours to
+# assume, not because of that story. Any numeric version is accepted.
 # Echoes "tesseract <version>" and returns 0 when a real OCR binary is present;
 # echoes nothing and returns 1 otherwise.
 gui_ocr_backend_probe() {
@@ -1118,7 +1126,7 @@ gui_visual_backend_observation() {
     if [ -n "$ocr" ]; then
         printf 'text corroboration: OCR %s (host, run BY THE GATE over attested frames; recorded, never verdict-affecting)\n' "$ocr"
     else
-        printf '%s\n' "text corroboration ABSENT: no real tesseract on the host (a game that ships a tesseract binary does not count). Visual scenarios still grade -- the verdict rests on the sealed VM-bound ledger and a vision-capable runner, not on OCR -- but the per-frame text column will read 'skip'. Optional: sudo zypper -n install tesseract-ocr tesseract-ocr-traineddata-english"
+        printf '%s\n' "text corroboration ABSENT: nothing on the host answers with a real tesseract version banner. Visual scenarios still grade -- the verdict rests on the sealed VM-bound ledger and a vision-capable runner, not on OCR -- but the per-frame text column will read 'skip'. Optional: sudo zypper -n install tesseract-ocr tesseract-ocr-traineddata-english"
     fi
 }
 
@@ -1579,21 +1587,28 @@ gui_capture_reconcile() {
     local line seq ts vm scope bytes sum fpath chain
     local n=0 present=0 missing=0 unharv=0
     local f d
-    declare -A disk_by_sum=() present_sum=() in_tree_sum=()
+    declare -A disk_by_sum=() disk_count=() used=() present_sum=() in_tree_sum=()
     : > "$outfile"
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         d=$(sha256sum "$f" 2>/dev/null | awk '{print $1}')
         [ -n "$d" ] || continue
         [ -n "${disk_by_sum[$d]:-}" ] || disk_by_sum[$d]=$f
+        # MULTIPLICITY MATTERS. Matching every row with a digest against the one
+        # file that happens to carry it let two separate identical captures be
+        # satisfied by one surviving file, so deleting the other was invisible
+        # (sol, B round 2) -- an ordinary duplicate/stability case, not a
+        # hostile one. Rows consume files.
+        disk_count[$d]=$(( ${disk_count[$d]:-0} + 1 ))
     done < <(gui_visual_frames "$adir")
     # A capture taken out of tree and then PUBLISHED into the artifact dir has
     # two rows with one digest: the capture and the delivery (see vm-gui's
     # deliver_attested_frame). That is one frame, not two, so the scratch row is
     # skipped below -- otherwise a single screenshot reported as "2 frame(s), 1
-    # distinct" and inflated the declared-capture floor. Two genuinely identical
-    # captures both land in-tree and are NOT collapsed: only the out-of-tree
-    # half of a published pair is.
+    # distinct". Two genuinely identical captures both land in-tree and are NOT
+    # collapsed: only the out-of-tree half of a published pair is. The
+    # declared-capture floor is checked against THIS function's `attested`
+    # result for the same reason; see gui_visual_evidence_status.
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         IFS=$'\t' read -r seq ts vm scope bytes sum fpath chain <<<"$line"
@@ -1607,7 +1622,8 @@ gui_capture_reconcile() {
         [ "$scope" = seal ] && continue
         [ "$scope" != in-tree ] && [ -n "${in_tree_sum[$sum]:-}" ] && continue
         n=$((n + 1))
-        if [ -n "${disk_by_sum[$sum]:-}" ]; then
+        if [ "${used[$sum]:-0}" -lt "${disk_count[$sum]:-0}" ]; then
+            used[$sum]=$(( ${used[$sum]:-0} + 1 ))
             present=$((present + 1))
             if [ -z "${present_sum[$sum]:-}" ]; then
                 present_sum[$sum]=1
@@ -1683,15 +1699,6 @@ gui_visual_evidence_status() {
         printf 'missing:the harness took NO capture from this scenario VM (neither vm-gui screenshot/click-preview nor the qdwin in-guest capture helper ran), so every image under the artifact directory is agent-authored and none of it is evidence\n'
         return 1
     fi
-    # DECLARED CAPTURE COUNT. The one mechanism that can distinguish "the agent
-    # never captured the failing moment" from "the agent captured it and
-    # dropped the row before exiting" — because the SCENARIO, not the agent,
-    # says how many frames must exist. Floor of 1 when undeclared.
-    if [ "$caprows" -lt "$mincaps" ]; then
-        printf 'missing:this scenario declares <!-- qci:visual-captures: %s --> but the harness took only %d capture(s) from its VM, so the frames the scenario requires were never taken (or were dropped before the agent exited)\n' \
-            "$mincaps" "$caprows"
-        return 1
-    fi
     mkdir -p "$outdir" 2>/dev/null || {
         printf 'missing:the gate could not create its own evidence directory under %s, so it could not read the frames\n' "$adir"
         return 1
@@ -1703,6 +1710,22 @@ gui_visual_evidence_status() {
     read -r attested present distinct missing unharv < <(printf '%s\n' "$recon" | sed -nE \
         's/^attested=([0-9]+) present=([0-9]+) distinct=([0-9]+) missing_in_tree=([0-9]+) unharvested=([0-9]+)$/\1 \2 \3 \4 \5/p') || true
     : "${attested:=0}" "${present:=0}" "${distinct:=0}" "${missing:=0}" "${unharv:=0}"
+    # DECLARED CAPTURE COUNT. The one mechanism that can distinguish "the agent
+    # never captured the failing moment" from "the agent captured it and
+    # dropped the row before exiting" — because the SCENARIO, not the agent,
+    # says how many frames must exist. Floor of 1 when undeclared.
+    #
+    # It is checked against the RECONCILED count, not the verifier's raw row
+    # total. One published vm-gui frame writes TWO rows (scratch capture +
+    # in-tree delivery), so a raw-row floor counted one screenshot as two and a
+    # scenario declaring 2 passed on 1 real frame (sol, B round 2 -- the round-2
+    # comment claiming the collapse prevented this was false, because the
+    # collapse happened after the floor had already passed).
+    if [ "$attested" -lt "$mincaps" ]; then
+        printf 'missing:this scenario declares <!-- qci:visual-captures: %s --> but the harness took only %d capture(s) from its VM, so the frames the scenario requires were never taken (or were dropped before the agent exited)\n' \
+            "$mincaps" "$attested"
+        return 1
+    fi
     if [ "$missing" -gt 0 ]; then
         printf 'missing:%d of %d frame(s) the harness captured INTO this scenario'"'"'s artifact directory are no longer there (%s/captures.tsv lists them). A capture that was taken and then removed is frame omission, which is cheaper than forgery and hides exactly the failing frame\n' \
             "$missing" "$attested" "$GUI_VISUAL_EVIDENCE_DIR"
@@ -2332,7 +2355,12 @@ gui_detect_transport_marker() {
 #
 # What a 0 here means, concretely, from the runs on record: the overnight run
 # full-20260914T194046Z graded 113 scenarios with ZERO image opens across all of
-# them while 74 logs invoked an OCR binary the host did not have. A single-
+# them, while 75 of those logs MENTIONED an OCR binary the host did not have.
+# Mentioned, not invoked: the count is
+#   find <run>/gui -name '*.agent.log' -exec grep -l tesseract {} + | wc -l
+# and a mention may be quoted instructions, so it bounds citations rather than
+# counting invocations (75 by every spelling; an earlier comment said 74
+# "invoked", which was both the wrong number and the wrong verb). A single-
 # scenario rerun reproduced it (8 OCR invocations, 0 opens) and produced a FALSE
 # FAIL on an absence assertion -- OCR cannot distinguish "the control is not
 # there" from "I could not read this frame".
@@ -2343,8 +2371,13 @@ GUI_IMAGE_OPEN_PATTERNS=${QCI_IMAGE_OPEN_PATTERNS:-'view_image|image_view|read_i
 # tool calls, because the sanctioned driver does not emit a machine-readable
 # line when it opens an image: codex prints its narrative, not its tool
 # invocations. So a positive count means the driver TALKED about opening a
-# frame, which is weak evidence, and only a ZERO is strong -- it says the
-# driver never even claimed to look. Zero is the case this exists to surface.
+# frame, which is weak evidence. A ZERO is the useful signal -- nothing in the
+# driver's output claimed to look -- but it is a TREND signal, not proof: it
+# over-counts negations and error prose ("could not use view_image"), and
+# under-counts equivalent tool names, an open the driver never narrated, and any
+# driver line that happens to equal a prompt line verbatim, which the
+# subtraction below removes globally. Read it as "start here", never as a
+# finding (sol, B round 2).
 #
 # The echoed prompt must be subtracted first. The scenario prompt itself
 # contains the literal `view_image` (it is the instruction telling the driver

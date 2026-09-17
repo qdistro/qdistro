@@ -219,7 +219,19 @@ Rules for the driver, in order of precedence:
    (`full-20260914T194046Z-13620/gui`): **113** agent logs, **75** of them
    mentioning `tesseract`, and **0** containing any image-open call, on a host
    whose logs record `tesseract: command not found` — OCR was not installed
-   until 2026-09-16. Earlier drafts of this section said "74 cited ... while
+   until 2026-09-16. The method, so the numbers are reproducible rather than
+   asserted:
+
+   ```bash
+   D=ci/runs/full-20260914T194046Z-13620/gui
+   find "$D" -name '*.agent.log' | wc -l                                  # 113
+   find "$D" -name '*.agent.log' -exec grep -l  tesseract {} + | wc -l    #  75
+   find "$D" -name '*.agent.log' -exec grep -li tesseract {} + | wc -l    #  75
+   find "$D" -name '*.agent.log' -exec grep -lEi 'view_image|image_view|read_image' {} + | wc -l   # 0
+   ```
+
+   (One round-2 reviewer reported 74 for the mention count; it is 75 under both
+   case-sensitive and case-insensitive matching.) Earlier drafts of this section said "74 cited ... while
    only 13 ever opened an image"; neither number could be reproduced, and both
    B-round-1 reviewers said so independently. A substring count is not a count
    of invocations — a mention may be quoted instructions — so treat 75 as an

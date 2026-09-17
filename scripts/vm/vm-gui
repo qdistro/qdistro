@@ -551,12 +551,19 @@ screenshot_unusable_reason() {
 #
 # A failed attestation is FATAL here: a delivered frame with no in-tree row is
 # precisely the ungraded-evidence state this whole path exists to prevent.
+# ---------------------------------------------------------------------------
 deliver_attested_frame() {
     local src=$1 dst=$2
     cp "$src" "$dst" || return 1
     if declare -f capture_attest_frame >/dev/null 2>&1; then
         capture_attest_frame "$dst" "$VM" || {
-            echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger; it would not be graded" >&2
+            # Leaving it in place was not the same as "not graded": an
+            # unattested file whose bytes match SOME row is matched by digest
+            # and graded anyway. Move it out of the frame set -- the gate finds
+            # frames by image extension -- so the claim below is actually true.
+            # The bytes are kept for triage under a non-image name.
+            mv -f "$dst" "$dst.unattested" 2>/dev/null || rm -f "$dst"
+            echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; the bytes are at $dst.unattested" >&2
             return 1
         }
     fi
@@ -567,8 +574,9 @@ deliver_attested_frame() {
 #
 # Retries are taken into a scratch dir and only the ACCEPTED frame is published
 # to $out, via deliver_attested_frame, which gives it an IN-TREE ledger row.
-# Rejected attempts are copied beside $out for triage and stay unattested, so
-# tidying them away is free; deleting the delivered frame is not.
+# Rejected attempts keep only their out-of-tree capture row and are copied
+# beside $out under a non-image name, so they are never graded and tidying them
+# away is free; deleting the delivered frame is not.
 # If no attempt is usable this returns NONZERO rather than yielding a bad frame:
 # the caller must not be handed something it cannot form a verdict from.
 capture_usable_screenshot() {
@@ -597,8 +605,15 @@ capture_usable_screenshot() {
             echo "vm-gui: WARNING: screenshot NOT checked for blankness -- $(screenshot_unusable_reason 5)" >&2
             return 0
         fi
-        cp "$candidate" "${out}.attempt-${i}.png" 2>/dev/null || true
-        echo "vm-gui: screenshot attempt $i/$attempts rejected: $(screenshot_unusable_reason "$rc") (${out}.attempt-${i}.png)" >&2
+        # NOT under an image extension: the library attested this candidate
+        # when it captured it, so an in-tree copy carrying the same digest
+        # would be matched to that row and GRADED -- a frame the harness
+        # already judged unusable (blank, wrong window) entering the evidence
+        # set, where it could even satisfy the decoded-frame floor on its own.
+        # The row stays out-of-tree and unharvested, which is exactly what it
+        # is, and the bytes remain beside $out for triage.
+        cp "$candidate" "${out}.attempt-${i}.rejected" 2>/dev/null || true
+        echo "vm-gui: screenshot attempt $i/$attempts rejected: $(screenshot_unusable_reason "$rc") (${out}.attempt-${i}.rejected)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
     rm -rf -- "$scratch"
@@ -657,10 +672,12 @@ screenshot_fresh() {
             echo "$out"
             return 0
         fi
-        # Keep the rejected frame beside $out for triage, under the historical
-        # name. It carries no in-tree ledger row, so deleting it is free.
-        cp "$candidate" "${out}.attempt-${i}.png" 2>/dev/null || true
-        echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason (${out}.attempt-${i}.png)" >&2
+        # Keep the rejected frame beside $out for triage, under a NON-IMAGE
+        # name: the library attested the candidate when it captured it, and an
+        # in-tree copy with the same digest would be matched to that row and
+        # graded. It carries no in-tree ledger row, so deleting it is free.
+        cp "$candidate" "${out}.attempt-${i}.rejected" 2>/dev/null || true
+        echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason (${out}.attempt-${i}.rejected)" >&2
         [ "$i" -lt "$attempts" ] && sleep 1
     done
     rm -rf -- "$scratch"

@@ -686,8 +686,10 @@ EOF
     grep -q "exceeded the 4-byte replay cap" "$BATS_TEST_TMPDIR/err"
 }
 
-# Every function these helper files CALL must be defined somewhere they can
-# reach.
+# Every `qdwin_*` / `capture_*` function these helper files call must be defined
+# somewhere they can reach. Those two prefixes are the whole scope -- this is
+# not a general undefined-function checker, and the test name should not imply
+# one (sol, B round 2).
 #
 # Workstream B was written before the round-10 cleanup deleted the unused
 # `qdwin_apps_vmx_merged`, and reintegrating B auto-merged cleanly while leaving
@@ -701,7 +703,7 @@ EOF
 # Command-position only: a name inside a comment, a string or a heredoc is not
 # a call. Sourced libraries count as reachable, so the check follows `.`/`source`
 # of a literal path.
-@test "caller audit: every helper function called by the qdwin lanes is defined" {
+@test "caller audit: every qdwin_*/capture_* callee in the lane helpers is defined" {
     local f found=0
     for f in "$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh" \
              "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" \
@@ -716,4 +718,113 @@ EOF
         fi
     done
     [ "$found" -eq 1 ]
+}
+
+# The apps lane's libvirt-URI parser. It had no host test, and round 2 shipped
+# two defects in it: `QDWIN_VIRSH='virsh -c'` spun forever (a `shift 2` with one
+# argument left fails and shifts nothing), and any executable whose BASENAME was
+# `virsh` was accepted although the capture library invokes the literal `virsh`
+# from PATH -- so VM checks could use a wrapper while screenshots did not.
+uri_for() {
+    QDWIN_VIRSH="$1" QDWIN_WORKSPACE="$(cd "$REPO_ROOT/.." && pwd)" \
+        timeout 5 bash -c '
+            . "$1"/tests/apps/qdwin-apps-helpers.sh 2>/dev/null
+            qdwin_apps_libvirt_uri
+        ' _ "$REPO_ROOT/../qdwin"
+}
+
+@test "qdwin apps: the libvirt URI comes from QDWIN_VIRSH" {
+    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    run uri_for 'virsh -c qemu:///system'
+    [ "$status" -eq 0 ]
+    [ "$output" = "qemu:///system" ]
+    run uri_for 'virsh --connect=qemu:///x'
+    [ "$output" = "qemu:///x" ]
+    run uri_for 'virsh -cqemu:///y'
+    [ "$output" = "qemu:///y" ]
+    run uri_for 'virsh'
+    [ "$output" = "qemu:///session" ]
+}
+
+@test "qdwin apps: a URI flag with no operand is refused, not an infinite loop" {
+    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    run uri_for 'virsh -c'
+    # 124 would be the timeout firing -- i.e. the hang.
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no URI after it"* ]]
+}
+
+@test "qdwin apps: a wrapper the capture library would not invoke is refused" {
+    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    run uri_for '/usr/local/bin/virsh -c qemu:///z'
+    [ "$status" -eq 1 ]
+    run uri_for 'my-virsh-wrapper'
+    [ "$status" -eq 1 ]
+    run uri_for 'virsh --quiet -c qemu:///w'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not understand"* ]]
+}
+
+# NON-VACUITY for the callee audit. Round 2 shipped it with a command-position
+# claim it did not implement: names inside strings were reported (a manufactured
+# finding from prose), while `if X`, `if ! X` and `do X` were missed, and a
+# `<<<word` here-string was treated as a heredoc and swallowed the rest of the
+# file. All of those are `bash -n` clean, so nothing else would catch them.
+audit() {
+    printf '%s' "$1" > "$BATS_TEST_TMPDIR/probe.sh"
+    python3 "$BATS_TEST_DIRNAME/undefined_callees.py" "$BATS_TEST_TMPDIR/probe.sh"
+}
+
+@test "callee audit: a name in a STRING is prose, not a call" {
+    run audit 'echo "see qdwin_long_gone for why"
+printf %s '"'"'qdwin_also_gone'"'"'
+'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a name in a COMMENT or a heredoc is not a call" {
+    run audit '# qdwin_mentioned_in_comment was deleted
+cat <<EOF
+qdwin_inside_heredoc
+EOF
+'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: command position after if / ! / do is a call" {
+    local shape
+    for shape in 'if qdwin_gone; then :; fi' \
+                 'if ! qdwin_gone; then :; fi' \
+                 'for i in 1; do qdwin_gone; done' \
+                 'while qdwin_gone; do :; done' \
+                 '{ qdwin_gone; }' \
+                 'qdwin_gone && :' \
+                 'x=$(qdwin_gone)' \
+                 'x="$(qdwin_gone)"'; do
+        run audit "$shape"
+        [ "$status" -eq 1 ] || { echo "MISSED: $shape" >&2; false; }
+        [ "$output" = qdwin_gone ]
+    done
+}
+
+@test "callee audit: a here-string does not swallow the rest of the file" {
+    run audit 'read -r a <<<"some text"
+qdwin_gone
+'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: a defined function is not reported, however it is called" {
+    run audit 'qdwin_here() { :; }
+if qdwin_here; then :; fi
+x="$(qdwin_here)"
+'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: only the two project prefixes are in scope" {
+    # Not a general undefined-function checker, and the test must not imply it.
+    run audit 'some_other_undefined_function'
+    [ "$status" -eq 0 ]
 }
