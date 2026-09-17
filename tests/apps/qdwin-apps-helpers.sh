@@ -491,12 +491,21 @@ qdwin_apps_libvirt_uri() {
                     echo "qdwin-apps: QDWIN_VIRSH ends with '$1' and no URI after it" >&2
                     return 1
                 fi
+                # `virsh -c --quiet` used to take `--quiet` as the URI (sol).
+                case $2 in
+                    -*) echo "qdwin-apps: QDWIN_VIRSH has '$2' where the URI after '$1' should be" >&2
+                        return 1 ;;
+                esac
                 uri=$2; shift 2 ;;
             -c*) uri=${1#-c}; shift ;;
             --connect=*) uri=${1#--connect=}; shift ;;
-            -*) echo "qdwin-apps: QDWIN_VIRSH carries '$1', which this parser does not understand; the capture library would not receive it" >&2
-                return 1 ;;
-            *) shift ;;
+            # EVERYTHING else is refused, options and bare words alike. The
+            # catch-all `*) shift` accepted `virsh nonsense` and
+            # `virsh -c qemu:///x trailing` and returned a URI the capture would
+            # never have used, which is the silent divergence this whole
+            # function exists to prevent (sol, B round 3).
+            *) echo "qdwin-apps: QDWIN_VIRSH carries '$1', which this parser does not understand; only 'virsh [-c URI]' can be expressed as a URI for the capture library" >&2
+               return 1 ;;
         esac
     done
     printf '%s\n' "${uri:-${LIBVIRT_DEFAULT_URI:-qemu:///session}}"
