@@ -1,5 +1,7 @@
 # 10 — small-toolkit roundtrip: Tk, FLTK, Java Swing
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** three "small toolkit" demo programs each
 launch via XWayland, render their widgets correctly, and survive the
 bystander's max/restore round-trip. The demos are

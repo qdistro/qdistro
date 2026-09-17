@@ -1,5 +1,7 @@
 # 05 — launcher rescans after app install (B5)
 
+<!-- qci:visual: required -->
+
 **Acceptance criterion:** when an application is installed via zypper
 after the qdwin session has started, the new app appears in the
 launcher on the next Ctrl+Space toggle (no greetd-qdwin restart

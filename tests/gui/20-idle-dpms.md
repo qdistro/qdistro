@@ -1,5 +1,7 @@
 # 20 — idle / DPMS live apply (v26): display power + ext-idle-notify
 
+<!-- qci:visual: none -->
+
 **What**: validate the v26 idle/DPMS path on a live qdwin DRM session — the
 `set_display_power` request (DPMS all outputs off/on) and the capability gate
 the qdshell Power tab's inactivity-action + display-off timers ride on (driven

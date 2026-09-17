@@ -53,6 +53,24 @@ fi
 export QDWIN_WORKSPACE
 : "${QDWIN_VM_EXEC:=$QDWIN_WORKSPACE/qdistro/scripts/vm/vm-exec}"
 export QDWIN_VM_EXEC
+
+# HARNESS CAPTURE ATTESTATION (qci GUI visual-evidence contract).
+#
+# qdwin_screenshot is the qdwin lane's CAPTURE TOOL -- the counterpart of
+# qdistro/scripts/vm/vm-gui's `virsh screenshot` for the labwc lane. The qci GUI
+# gate grades only frames its own capture tools took, so this helper must record
+# its captures in the same ledger or every `qci:visual: required` qdwin/qdlocker
+# scenario would be recorded ERROR for want of an attested frame.
+#
+# Optional by design: sourcing failure degrades to a no-op stub so these helpers
+# keep working outside a qci run and against an older qdistro checkout.
+if [ -r "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh"
+fi
+if ! declare -f capture_attest_frame >/dev/null 2>&1; then
+    capture_attest_frame() { :; }
+fi
 : "${QDWIN_HTTP_DIR:=${QDWIN_REPO}/extra}"
 : "${QDWIN_HTTP_URL:=http://10.0.2.2:8765/extra}"
 
@@ -759,6 +777,16 @@ with Image.open(sys.argv[1]) as im:
             echo "WARN: stale-capture: $out is the compositor's RETAINED last frame (${stale_fields:-live=0}), not a fresh repaint — not valid post-action evidence" >&2
             ;;
     esac
+    # Record the capture in the gate's ledger BEFORE returning the path, so the
+    # frame is attested the moment it becomes visible to the caller. A REFUSAL
+    # (the ledger is bound to a different VM) fails the capture: returning an
+    # unattested frame as if it were evidence is exactly what the contract
+    # forbids, and a silent `|| true` here would restore that.
+    if ! capture_attest_frame "$out" "$VMNAME"; then
+        echo "ERROR: capture-attestation-refused: $out was not recorded as evidence for $VMNAME" >&2
+        rm -f "$out"
+        return 1
+    fi
     echo "capture=Virtual-1 width=$width height=$height path=$out" >&2
     echo "$out"
 }

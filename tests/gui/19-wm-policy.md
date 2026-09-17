@@ -1,5 +1,7 @@
 # 19 — window-manager policy live-apply (v25): capability gate + tile
 
+<!-- qci:visual: none -->
+
 **What**: validate the v25 window-manager-policy capability surface on a live
 qdwin DRM session via the qdshell IPC contract — that the shell binds the
 compositor at >= v25 and exposes `wmPolicy` + `keybindRegistration` true (what

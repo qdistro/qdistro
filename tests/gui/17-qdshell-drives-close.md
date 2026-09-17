@@ -1,5 +1,7 @@
 # 17 — qdshell drives request_close via qdwin_shell_v1
 
+<!-- qci:visual: none -->
+
 **Acceptance criterion:** qdshell's `Qdwin.closeWindow(window)` (the
 Q_INVOKABLE on the `QdwinBinding` exposed by the
 `Qdistro.Qdwin` plugin) sends `qdwin_shell_v1.request_close(handle)`,

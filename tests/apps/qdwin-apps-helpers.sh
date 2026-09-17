@@ -25,6 +25,20 @@ if [ -z "${QDWIN_WORKSPACE:-}" ]; then
 fi
 export QDWIN_WORKSPACE
 : "${QDWIN_VM_EXEC:=$QDWIN_WORKSPACE/qdistro/scripts/vm/vm-exec}"
+
+# HARNESS CAPTURE ATTESTATION (qci GUI visual-evidence contract). This helper
+# file owns the apps lane's capture tool (qdwin_apps_screenshot). The qci GUI
+# gate grades only frames its own capture tools took, so every such tool records
+# into the gate's capture ledger; see
+# qdistro/scripts/vm/lib/capture-attest.sh. Optional: degrades to a no-op stub
+# outside a qci run or against an older qdistro checkout.
+if [ -r "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh"
+fi
+if ! declare -f capture_attest_frame >/dev/null 2>&1; then
+    capture_attest_frame() { :; }
+fi
 export QDWIN_VM_EXEC
 : "${QDWIN_HTTP_DIR:=${QDWIN_REPO}/extra}"
 : "${QDWIN_HTTP_URL:=http://10.0.2.2:8765/extra}"
@@ -364,6 +378,17 @@ EOSCRIPT
 # more complete than it is (sol section 5, fable section 5.3). If a site here
 # ever does need merged capture, the shape is `qdwin_vmx_merged` in
 # ../gui/qdwin-helpers.sh.
+#
+# Workstream B was written BEFORE that deletion and routed the two
+# max/restore evidence reads below through the helper. Reintegrating B
+# auto-merged cleanly and left calls to a function that no longer exists:
+# `bash -n` stayed clean and every suite stayed green, because no host test
+# executes that path -- it fails only in a live apps run, as `command not
+# found` and an empty evidence string, which reads as a product FAIL for Tk,
+# FLTK and Swing. The calls are reverted to the direct invocation. Both sites
+# are `$(...)` substitutions that do NOT merge fd 2, so the reasoning above
+# still holds and neither one needed the helper. There is now a host test
+# pinning that every function this file calls is defined.
 
 qdwin_apps_launch() {
     qdwin_apps_require_vm || return 1
@@ -430,10 +455,53 @@ EOCTL
     "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | bash"
 }
 
+# The libvirt URI this lane is CONFIGURED with, for tools that take a URI
+# rather than a command. Everything else here runs `$QDWIN_VIRSH`, so that
+# setting is the single source of truth and must not be bypassed: B round 1
+# routed captures through the attestation library with a URI read from an
+# unrelated variable, so a run configured with
+# `QDWIN_VIRSH='virsh -c qemu:///system'` checked one connection and screenshot
+# another -- either failing, or silently observing a different domain that
+# happens to share the name (astra, B round 1). Ledger VM-name binding cannot
+# tell those two connections apart.
+#
+# Only a plain `virsh [-c URI]` can be expressed as a URI. Anything else (a
+# wrapper script, an ssh shim) is refused rather than quietly downgraded to the
+# default connection.
+qdwin_apps_libvirt_uri() {
+    local first rest uri=""
+    read -r first rest <<<"$QDWIN_VIRSH"
+    case "$(basename -- "$first")" in
+        virsh) ;;
+        *) echo "qdwin-apps: QDWIN_VIRSH is '$QDWIN_VIRSH', which is not a plain virsh command, so its connection cannot be passed to the capture library" >&2
+           return 1 ;;
+    esac
+    set -- $rest
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--connect) uri=${2:-}; shift 2 ;;
+            -c*) uri=${1#-c}; shift ;;
+            --connect=*) uri=${1#--connect=}; shift ;;
+            *) shift ;;
+        esac
+    done
+    printf '%s\n' "${uri:-${LIBVIRT_DEFAULT_URI:-qemu:///session}}"
+}
+
 qdwin_apps_screenshot() {
     qdwin_apps_require_vm || return 1
-    local out="$1"
+    local out="$1" rc=0 uri
+    # The screenshot is taken BY the attestation library when it is available,
+    # so this lane never asks the ledger to bless a file the library did not
+    # itself just capture, and it can never attest another worker's VM.
+    if declare -f capture_virsh_screenshot >/dev/null 2>&1; then
+        uri=$(qdwin_apps_libvirt_uri) || return 1
+        capture_virsh_screenshot "$VMNAME" "$out" "$uri" || rc=$?
+        return "$rc"
+    fi
+    # Standalone / older qdistro checkout: no ledger, plain capture.
     $QDWIN_VIRSH screenshot "$VMNAME" "$out" 2>&1 | tail -1
+    return "${PIPESTATUS[0]}"
 }
 
 # Return the current bystander log line count. Capture this immediately before
