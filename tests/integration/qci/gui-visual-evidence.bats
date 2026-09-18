@@ -31,8 +31,10 @@
 #
 # The producer side is not re-implemented here: attest_row() sources the REAL
 # scripts/vm/lib/capture-attest.sh, so producer and verifier are pinned against
-# each other rather than against a test-local copy. Both capture tools (vm-gui
-# for the labwc lane, qdwin-helpers.sh for the qdwin lane) use that library.
+# each other rather than against a test-local copy. THREE capture tools use that
+# library -- vm-gui (labwc/admin lane), qdwin-helpers.sh (in-guest qdwin lane)
+# and qdwin-apps-helpers.sh (qdwin apps lane); this header said "both" (fable,
+# B round 8). Only the vm-gui lane is exercised here.
 #
 # Everything here is filesystem-only: no VM, no agent, no qci run. The OCR
 # backend is a STUB whose output depends on the FRAME BYTES -- exactly the
@@ -187,6 +189,13 @@ teardown() {
 # A fixture that cannot survive the real checks does not test the real code, so
 # the fixtures are now real images. `plant_broken_image` below is the deliberate
 # counter-fixture for the undecodable case.
+# NOTE `png:exclude-chunks=date,time`. ImageMagick stamps `date:create` and
+# `date:modify` at ONE-SECOND granularity, so two renders of the same text
+# straddling a second boundary differ in bytes. Tests that need two IDENTICAL
+# frames from two separate renders then fail intermittently: that is what the
+# unexplained 128/1 run was -- K8n, ~2 in 40 unshimmed, reproducible on demand
+# with a `sleep 1; exec magick` PATH shim (fable, B round 8). The fake virsh
+# already excluded these chunks; the planters did not.
 plant_image() {
     local rel=$1; shift
     local txt="" w
@@ -195,7 +204,8 @@ plant_image() {
     [ -n "$txt" ] || txt="frame"
     if command -v magick >/dev/null 2>&1 \
        && magick -size 320x80 xc:white -pointsize 24 -fill black \
-            -annotate +10+40 "$txt" "$ADIR/$rel" 2>/dev/null; then
+            -annotate +10+40 "$txt" \
+            -define png:exclude-chunks=date,time "$ADIR/$rel" 2>/dev/null; then
         # Append the TEXT: markers the stub OCR backend reads, AFTER the PNG's
         # IEND chunk. A decoder stops at IEND and still reports the real
         # dimensions (verified), so the file is simultaneously a valid image for
@@ -222,7 +232,8 @@ plant_image_at() {
     [ -n "$txt" ] || txt="frame"
     if command -v magick >/dev/null 2>&1 \
        && magick -size 320x80 xc:white -pointsize 24 -fill black \
-            -annotate +10+40 "$txt" "$dest" 2>/dev/null; then
+            -annotate +10+40 "$txt" \
+            -define png:exclude-chunks=date,time "$dest" 2>/dev/null; then
         # Append the TEXT: markers the stub OCR backend reads, AFTER the PNG's
         # IEND chunk. A decoder stops at IEND and still reports the real
         # dimensions (verified), so the file is simultaneously a valid image for
@@ -1505,7 +1516,7 @@ EOF
         deliver_attested_frame "$2/src.png" "$3/out.png"
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR" "$ADIR"
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [ ! -f "$ADIR/out.png" ]
     [ -f "$ADIR/out.png.unattested" ]
 }
@@ -1777,7 +1788,7 @@ EOF
         deliver_attested_frame "$2/src.png" "$3/out.png"
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR" "$ADIR"
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [ -f "$ADIR/out.png/marker.txt" ]
     [ ! -e "$ADIR/out.png.unattested" ]
     [[ "$output" == *"left untouched"* ]]
@@ -1794,7 +1805,7 @@ EOF
         retain_rejected_candidate "$2/cand.png" "$2/kept.rejected"
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR"
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [[ "$output" == *"INCOMPLETE"* ]]
     [ -f "$TDIR/kept.rejected" ]
 }
@@ -1920,7 +1931,7 @@ EOF
         deliver_attested_frame "$2" "$3"
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/link.png"
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [[ "$output" == *"not a regular file"* ]]
     [ "$(cat "$TDIR/outside-target")" = external ]
     [ -h "$ADIR/link.png" ]
@@ -1939,7 +1950,7 @@ EOF
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/fifo.png"
     # 124 would be the timeout firing -- i.e. the block.
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [ -p "$ADIR/fifo.png" ]
 }
 
@@ -2077,7 +2088,7 @@ EOF
         deliver_attested_frame "$2" "$3"
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/s1.png"
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [[ "$output" != *"captured"*"could NOT record"* ]]
     [[ "$output" == *"left untouched"* ]]
     [ ! -e "$ADIR/s1.png.unattested" ]
@@ -2131,9 +2142,52 @@ EOF
         deliver_attested_frame "$2" "$3"
         echo "rc=$?"
     ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/s1.png"
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [[ "$output" != *"captured"*"could NOT record"* ]]
     [[ "$output" == *"left untouched"* ]]
     [ ! -e "$ADIR/s1.png.unattested" ]
     [ "$(cat "$ADIR/s1.png")" = "the agent wrote this" ]
+}
+
+@test "publisher: a LATE copy failure leaves the destination untouched" {
+    # rc=2 claims the destination was not touched. Round 8 implemented it as a
+    # plain `cp -T` whose non-zero exit was reported as rc=2 -- but `cp`
+    # truncates and writes a PREFIX before failing late, so a 1024-byte fragment
+    # replaced the file that was there while vm-gui said "nothing was written"
+    # (sol and fable, B round 8, reproduced with no shim under `ulimit -f 1`).
+    # The round-8 test could only reach a PRE-write failure (cp onto a
+    # directory), so it could not establish what rc=2 asserts.
+    head -c 8192 /dev/zero > "$TDIR/big.png"
+    printf 'the agent wrote this\n' > "$ADIR/keep.png"
+    run bash -c '
+        set +e
+        ulimit -f 1          # SIGXFSZ part-way through an 8 KiB copy
+        . "$1"
+        capture_publish_frame "$2" "$3" testvm >/dev/null 2>&1
+        echo "rc=$?"
+    ' _ "$CAPLIB" "$TDIR/big.png" "$ADIR/keep.png"
+    grep -qx 'rc=2' <<<"$output"
+    # the destination is EXACTLY as it was, and no staging file was left behind
+    [ "$(cat "$ADIR/keep.png")" = "the agent wrote this" ]
+    [ -z "$(find "$ADIR" -name '.qci-publish.*' -print -quit)" ]
+}
+
+@test "vm-gui: a NON-WRITABLE destination is refused, now on purpose" {
+    # Publication stages and renames, and a rename needs only the DIRECTORY to
+    # be writable -- so the read-only file that `cp` used to refuse by accident
+    # would now be replaced silently. The refusal is explicit instead.
+    printf 'the agent wrote this\n' > "$ADIR/ro.png"
+    chmod 0444 "$ADIR/ro.png"
+    printf 'bytes' > "$TDIR/src.png"
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        deliver_attested_frame "$2" "$3"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/ro.png"
+    grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
+    [[ "$output" == *"not writable"* ]]
+    [ "$(cat "$ADIR/ro.png")" = "the agent wrote this" ]
 }

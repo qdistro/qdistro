@@ -224,19 +224,39 @@ capture_virsh_shot() {
 #
 # TWO DISTINCT FAILURES, TWO DISTINCT EXIT CODES, because the caller must clean
 # up differently and cannot work out which happened afterwards:
-#   2  the COPY failed -- nothing was written, and whatever is at $dst was put
-#      there by somebody else;
-#   1  the copy succeeded and the LEDGER ROW did not -- the bytes at $dst are
-#      ours and are unattested.
-# vm-gui used to infer this by comparing the destination's content to the
-# source, which proves only what the bytes ARE, not who wrote them: a
-# pre-existing read-only file whose content already equalled the source was
-# quarantined under a message saying a frame had been captured, when `cp` had
-# in fact failed with EACCES and nothing was taken (sol and fable, B round 7).
+#   2  the publication failed and THE DESTINATION IS UNTOUCHED -- whatever is
+#      there, if anything, was put there by somebody else;
+#   1  the bytes were published and the LEDGER ROW failed -- the bytes at $dst
+#      are ours and are unattested.
+#
+# THE COPY IS STAGED AND RENAMED, and that is what makes rc=2 true. Round 7
+# inferred "did anything get written?" by comparing the destination's CONTENT to
+# the source, which proves what the bytes ARE and not who wrote them. Round 8
+# replaced that with a plain `cp -T` whose non-zero exit was reported as rc=2 --
+# also false, because `cp` truncates the destination and writes a PREFIX before
+# failing late (ENOSPC, EDQUOT, EFBIG, an I/O error). Both reviewers reproduced
+# it with the real function and no shim: an 8 KiB source under `ulimit -f 1`
+# returned "nothing was written" while a 1024-byte fragment sat at the
+# destination and the file previously there was gone (sol and fable, B round 8).
+#
+# So the bytes go to a temporary file IN THE DESTINATION'S OWN DIRECTORY -- same
+# filesystem, so the rename is atomic -- and the destination is only ever
+# replaced by a completed copy. A failure before the rename leaves the
+# destination exactly as it was and removes the fragment.
 capture_publish_frame() {
     local src=${1:?capture_publish_frame: src} dst=${2:?capture_publish_frame: dst}
-    local vm=${3:-${VM:-${VMNAME:-}}} rc=0
-    cp -T -- "$src" "$dst" || return 2
+    local vm=${3:-${VM:-${VMNAME:-}}} rc=0 stage=""
+    stage=$(mktemp -- "$(dirname -- "$dst")/.qci-publish.XXXXXX" 2>/dev/null) || return 2
+    if ! cp -T -- "$src" "$stage" 2>/dev/null; then
+        rm -f -- "$stage"
+        return 2
+    fi
+    # Preserve the mode a capture would have had; mktemp makes it 0600.
+    chmod 0644 -- "$stage" 2>/dev/null || true
+    if ! mv -fT -- "$stage" "$dst" 2>/dev/null; then
+        rm -f -- "$stage"
+        return 2
+    fi
     _qci_capture_write_row "$dst" "$vm" "" || rc=$?
     [ "$rc" -eq 0 ] || return 1
     return 0

@@ -1008,3 +1008,58 @@ qdwin_arr[0]=x'
     [ "$status" -eq 1 ]
     [ "$output" = qdwin_gone ]
 }
+
+# Round-8 review: guard regions were control-flow blind in BOTH directions.
+@test "callee audit: the ELSE branch of a guard is the ABSENT branch" {
+    # The call runs precisely when the helper is missing, so suppressing it is
+    # the worst kind of false negative (sol, B round 8). One-line form first:
+    # a line-granular region cannot express it.
+    run audit 'if declare -f qdwin_opt; then :; else qdwin_opt; fi'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_opt ]
+    run audit 'if declare -f qdwin_opt; then
+  qdwin_opt
+else
+  qdwin_opt
+fi'
+    [ "$status" -eq 1 ]
+}
+
+@test "callee audit: a NEGATED guard guards nothing in its then-body" {
+    run audit 'if ! declare -f qdwin_opt; then qdwin_opt; fi'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_opt ]
+}
+
+@test "callee audit: an until-loop body is not guarded either" {
+    run audit 'until declare -f qdwin_opt; do qdwin_opt; done'
+    [ "$status" -eq 1 ]
+}
+
+@test "callee audit: if/fi are syntax only in COMMAND POSITION" {
+    # `echo fi` closed a range early; `echo if` ran it to EOF (sol, B round 8).
+    run audit 'if declare -f qdwin_opt; then
+  echo fi
+  qdwin_opt
+fi'
+    [ "$status" -eq 0 ]
+    run audit 'if declare -f qdwin_opt; then
+  echo if
+  qdwin_opt
+fi
+qdwin_opt'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_opt ]
+}
+
+@test "callee audit: elif and while are real guards" {
+    run audit 'if false; then :;
+elif declare -f qdwin_opt; then
+  qdwin_opt
+fi'
+    [ "$status" -eq 0 ]
+    run audit 'while declare -f qdwin_opt; do
+  qdwin_opt
+done'
+    [ "$status" -eq 0 ]
+}

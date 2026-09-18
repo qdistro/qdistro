@@ -562,6 +562,17 @@ deliver_attested_frame() {
         echo "vm-gui: ERROR: refusing to publish a capture to $dst -- it already exists and is not a regular file. It has been left untouched; nothing was captured to that path." >&2
         return 1
     fi
+    # A NON-WRITABLE regular file is refused DELIBERATELY. It used to be
+    # refused by accident: `cp -T` returned EACCES and the publication failed.
+    # Publication now stages and renames, and a rename only needs the DIRECTORY
+    # to be writable, so that file would silently be replaced. Whether it should
+    # be is a policy question, and the answer that keeps round 7's guarantee --
+    # never destroy something the harness did not write, never claim a capture
+    # that did not happen -- is to refuse and say so.
+    if [ -e "$dst" ] && [ ! -w "$dst" ]; then
+        echo "vm-gui: ERROR: refusing to publish a capture to $dst -- a file is already there and is not writable, so it was not written by this harness. It has been left untouched; nothing was captured to that path." >&2
+        return 1
+    fi
     local prc=0
     if declare -f capture_publish_frame >/dev/null 2>&1; then
         capture_publish_frame "$src" "$dst" "$VM" && return 0

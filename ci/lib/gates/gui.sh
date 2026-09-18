@@ -1618,8 +1618,12 @@ gui_harness_ocr_frames() {
 # Returns 0 always; the caller decides.
 # Args: artifact_dir capture_log outfile [capture_root]
 # <capture_root> is the artifact path the AGENT was given, which is what in-tree
-# rows recorded; without it the exact-path pass cannot fire and the digest
-# passes decide alone.
+# rows recorded. WITHOUT IT the exact-path pass cannot fire and the BASENAME
+# pass decides next -- which can take an in-tree row's own file and report an
+# untouched frame as deleted. (This sentence said "the digest passes decide
+# alone", which is not the order; it was corrected in the body in round 7 and
+# left standing here, and round 8's commit message claimed it had been fixed
+# when the file was not in that commit at all -- fable, B round 8.)
 gui_capture_reconcile() {
     local adir=$1 log=$2 outfile=$3 caproot=${4:-}
     local line seq ts vm scope bytes sum fpath chain

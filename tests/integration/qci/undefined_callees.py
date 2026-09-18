@@ -30,6 +30,20 @@ A mention in a comment, a string or a heredoc body is not a call, and this must
 not manufacture findings out of prose -- the file under test documents a
 deleted helper by name in a NOTE, and that note is not a bug.
 
+THE OPTIONAL-DEPENDENCY GUARD IS A LINE SCANNER TOO. `declare -f f`,
+`declare -F f`, `command -v f` mark an intentional optional dependency, and a
+guard covers the rest of its line or the body of the `if`/`elif`/`while` it
+conditions -- NOT the file (round 7) and NOT the branch that runs when the
+helper is absent (round 8). What it still gets wrong, all latent for the files
+this repo audits, whose five guard sites are plain `if declare -f`:
+  * a guard reached by `|| return` / `|| exit` rather than a construct covers
+    only its own line, so a call below it is reported;
+  * a guard inside a `case` arm, a subshell or a function called elsewhere is
+    not connected to the call it protects;
+  * `if`/`fi`/`else` inside a heredoc body or a multi-line string can still
+    move a range, since only comments and single-line strings are stripped.
+Both directions are counted in `todo/reviews/qci-B8-260918-*`.
+
 SUPPRESSION IS PER OCCURRENCE. `qdwin_dir=/tmp/x` is an assignment and
 `$((qdwin_n + 1))` is arithmetic, so neither is a call -- but round 6
 implemented that as "a name that is ever assigned is never a call", which
@@ -276,29 +290,86 @@ GUARD = re.compile(r'(?:declare -[fF]|command -v)[ \t]+'
 
 
 def guard_regions(code):
-    """Map each guarded name to the 0-based line ranges its guard covers.
+    """Map each guarded name to the CHARACTER ranges its guard covers.
 
-    A guard on its own line covers that line (`declare -f f >/dev/null && f`).
-    A guard used as an `if` condition covers that `if`'s body, because the
-    real call sites in this tree put the call on the following line.
+    A guard on its own line covers the rest of that line
+    (`declare -f f >/dev/null && f`). A guard used as an `if`/`elif`/`while`
+    CONDITION covers that construct's body, because the real call sites in this
+    tree put the call on the next line.
+
+    Ranges are character offsets, not line numbers, because a one-line
+    `if declare -f f; then :; else f; fi` puts a GUARDED and an UNGUARDED call
+    on the same line and a line-granular region cannot tell them apart.
+
+    FOUR THINGS IT GETS RIGHT ONLY BECAUSE ROUND 8 GOT THEM WRONG
+    (sol and fable, B round 8):
+      * a NEGATED guard (`if ! declare -f f`) guards nothing in the `then`
+        body -- that body runs precisely when the helper is ABSENT, so
+        suppressing there is a false negative of the worst kind;
+      * an `else`/`elif` body is likewise the ABSENT branch, so a region stops
+        there, on the same line or a later one;
+      * an `elif` guard sits INSIDE an `if` that its own `fi` closes, so the
+        depth it starts from is 1, not 0;
+      * `if` and `fi` are only syntax in COMMAND POSITION. Round 8 counted them
+        after any whitespace, so `echo fi` closed a range early and `echo if`
+        ran it to EOF.
+    `until` is not a guard at all: its body runs while the condition FAILS.
+
+    It is still a line scanner, not a parser: see the module's known limits.
     """
     lines = code.split('\n')
+    base = []
+    off = 0
+    for line in lines:
+        base.append(off)
+        off += len(line) + 1
     out = {}
+    # `if`/`fi` as SYNTAX: start of line, or after a separator or a keyword that
+    # can precede a compound command -- never merely after a space.
+    op_if = re.compile(r'(?:^|[;&|]|\bthen\b|\bdo\b|\belse\b)\s*if\b')
+    op_fi = re.compile(r'(?:^|[;&|])\s*fi\b')
+    op_done = re.compile(r'(?:^|[;&|])\s*done\b')
+    op_else = re.compile(r'(?:^|[;&|])\s*(?:else|elif)\b')
     for i, line in enumerate(lines):
         m = GUARD.search(line)
         if not m:
             continue
-        hi = i
-        if re.match(r'\s*(?:if|elif)\b', line):
-            depth = 0
+        head = line[:m.start()]
+        if re.search(r'(?:^|[;&|(]|\bif\b|\belif\b|\bwhile\b|\buntil\b)\s*!\s', head + ' '):
+            continue
+        opener = re.match(r'\s*(if|elif|while|until)\b', line)
+        kw = opener.group(1) if opener else ''
+        if kw == 'until':
+            continue
+        lo = base[i] + m.start()
+        hi = base[i] + len(line)
+        if kw:
+            closer = op_done if kw == 'while' else op_fi
+            # An `elif` condition lives inside an `if` whose `fi` closes both.
+            depth = 1 if kw == 'elif' else 0
+
+            def _delta(text):
+                d = len(op_if.findall(text)) - len(closer.findall(text))
+                if kw == 'while':
+                    d += len(re.findall(r'(?:^|[;&|]|\bdo\b)\s*while\b', text))
+                return d
+
             for j in range(i, len(lines)):
-                depth += len(re.findall(r'(?:^|[;&|\s])if\b', lines[j]))
-                depth -= len(re.findall(r'(?:^|[;&|\s])fi\b', lines[j]))
-                hi = j
+                # An `else`/`elif` at OUR level ends the guarded branch: what
+                # follows it is the branch taken when the guard FAILED. The test
+                # is POSITIONAL, because a one-liner closes with `fi` on the
+                # same line and a whole-line count cancels the construct before
+                # the `else` is ever considered.
+                cut = op_else.search(lines[j], m.end() if j == i else 0)
+                if cut and depth + _delta(lines[j][:cut.start()]) == 1:
+                    hi = base[j] + cut.start()
+                    break
+                depth += _delta(lines[j])
+                hi = base[j] + len(lines[j])
                 if depth <= 0:
                     break
         for name in m.group(1).split():
-            out.setdefault(name, []).append((i, hi))
+            out.setdefault(name, []).append((lo, hi))
     return out
 
 
@@ -327,7 +398,7 @@ def main():
     calls = {}
     for rx in (CALL, CASE_ARM, PREFIXED_CALL):
         for m in rx.finditer(code):
-            calls.setdefault(m.group(1), set()).add(code.count('\n', 0, m.start(1)))
+            calls.setdefault(m.group(1), set()).add(m.start(1))
     missing = sorted({n for n in calls if n not in defined})
     # A call guarded by `declare -f NAME` is an intentional optional dependency.
     # Checked against the SAME stripped representation as the calls: reading raw
