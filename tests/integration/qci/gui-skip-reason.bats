@@ -237,6 +237,23 @@ _render_prompt() {
     [ "$(gui_agent_verdict ERROR 0 | cut -f1)" = fail ]
 }
 
+# permissions-gui/15, /27, /39, /52 in full-20260918T143937Z-3516587: every
+# functional oracle passed, then luna recorded ERROR because screenshot-fresh
+# refused near-black frames. Those scenarios are qci:visual: none; the harness
+# already leaves none PASS/FAIL alone, but the prompt told the agent the
+# opposite ("captured nothing -> ERROR").
+@test "runtime prompt does not make missing frames ERROR on qci:visual: none" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'qci:visual: none'
+    printf '%s' "$p" | grep -qi 'not ERROR and not FAIL'
+    printf '%s' "$p" | grep -qi 'screenshot-fresh refused'
+    # The required-lane floor must still be stated, or this un-does the
+    # visual-evidence contract. The phrase wraps in the prompt, so match
+    # each half.
+    printf '%s' "$p" | grep -qi 'no attested frame'
+    printf '%s' "$p" | grep -qi 'recorded ERROR'
+}
+
 # permissions-gui/45 and /50, full-20260914T194046Z-13620: the agent killed a
 # slow vm-exec and re-issued the driver; the first guest shell stayed alive and
 # the two duplicated every request and row, so no verdict was attributable.

@@ -16,6 +16,10 @@ ordering knob admins rely on. A regression where later files
 override earlier ones (or where all-rules-matching combine
 non-deterministically) would silently invert admin intent.
 
+This is a headless scenario (`qci:visual: none`). Required
+assertions are D-Bus / ReloadRules. A rejected screenshot is not
+ERROR.
+
 ## Setup
 
 ```bash

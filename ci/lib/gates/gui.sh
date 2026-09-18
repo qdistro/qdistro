@@ -681,6 +681,17 @@ Scenario file:
 
 Rules:
 - Read the nearest AGENTS.md before executing the scenario.
+- Read the scenario's \`<!-- qci:visual: required -->\` or
+  \`<!-- qci:visual: none -->\` declaration first. \`none\` means
+  required assertions are not pixel-dependent: a rejected,
+  near-black, or missing screenshot is then not ERROR and not FAIL.
+  Grade from the oracles the scenario names (D-Bus, sqlite, journal,
+  exit code). Do not take screenshots as a substitute for those
+  oracles, and do not record ERROR because screenshot-fresh refused
+  a diagnostic frame (permissions-gui/15, /27, /39, /52 in
+  full-20260918T143937Z-3516587). \`required\` means the capture
+  rules below apply, and a PASS/FAIL with no attested frame is
+  recorded ERROR.
 - Do not edit source files.
 - Every graphical process, dialog, compositor, and input action belongs inside
   the disposable VM named above. Never launch a host GUI program (including
@@ -784,11 +795,14 @@ Rules:
   absence claim, you have not checked it. You may still run OCR as a
   convenience for reading long text out of a frame you have ALSO looked at;
   it is triage, never the basis of a verdict.
-  If you have NO way to open an image, then this scenario's visual assertions
+  If you have NO way to open an image AND the scenario is
+  \`<!-- qci:visual: required -->\`, then this scenario's visual assertions
   are UNOBSERVABLE by you: record ERROR (nonzero) naming the missing
   capability. Do NOT record FAIL and do NOT record PASS: with no pixels in
   hand you have no verdict about pixels. Do NOT fall back to OCR and grade
   anyway — that is the failure this paragraph exists to prevent.
+  If the scenario is \`<!-- qci:visual: none -->\`, there are no required
+  visual assertions: missing image capability is not ERROR.
   HOW THIS IS ENFORCED — read this carefully, because it is NOT what you leave
   behind, and it is NOT any image file you can produce. The HARNESS records
   every screenshot its own capture tool takes from this VM, and after you exit
@@ -808,9 +822,12 @@ Rules:
        and your verdict is recorded ERROR — including the case where the frame
        showed something you did not like. Keep an unflattering frame and report
        FAIL; that is a correct, valuable result. Hiding it is not.
-  If the harness captured nothing from this VM, your PASS or FAIL is recorded
-  ERROR no matter what status.txt says. Timestamps are irrelevant — capture
-  frames whenever you need them.
+  If the scenario is \`<!-- qci:visual: required -->\` and the harness
+  captured nothing from this VM, your PASS or FAIL is recorded ERROR no
+  matter what status.txt says. Timestamps are irrelevant — capture frames
+  whenever you need them. If the scenario is \`<!-- qci:visual: none -->\`,
+  the harness does not require frames; a PASS or FAIL without captures
+  stands.
 - NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
   \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
   HEALTHY and your guest command is still running; they are progress, not a

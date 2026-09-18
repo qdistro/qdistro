@@ -17,7 +17,9 @@ Three failure modes pin the load-bearing checks:
 - YAML parse failure.
 - Schema rejection by the rules engine's dry-run load.
 
-This is a headless scenario.
+This is a headless scenario (`qci:visual: none`). Required
+assertions are D-Bus errors and file/count checks. A rejected
+screenshot is not ERROR.
 
 ## Setup
 

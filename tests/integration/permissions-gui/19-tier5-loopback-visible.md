@@ -136,9 +136,12 @@ Position click at the centre of the terminal's content area.
 # box, click its centre.)
 $VMGUI "$VM" click <cx> <cy>
 sleep 0.3
-$VMEXEC "$VM" 'runuser -u admin -- ydotool type "echo tier5-ok"'
+# Live socket is /run/user/1000/ydotool.sock (s60/s103). A ydotool
+# binary without that socket cannot inject; do not treat
+# `command -v ydotool` as enough (full-20260918T143937Z-3516587).
+$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool type "echo tier5-ok"'
 sleep 0.2
-$VMEXEC "$VM" 'runuser -u admin -- ydotool key enter'
+$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool key enter'
 sleep 0.5
 $VMGUI "$VM" screenshot /tmp/s19-after-type.png
 ```
@@ -149,10 +152,12 @@ This confirms the input event made it from outer-host →
 waypipe-client → vsock → waypipe-server → inner weston-terminal
 and the rendered frame came back across the same path.
 
-If `ydotool` isn't installed (`uinput` kernel module missing — see
-`todo/qdwin-vm/ydotool-install-uinput-missing.md`), this step is a
-**soft pass** — note the input-injection limitation and move on.
-Don't FAIL on it.
+If `ydotool` isn't installed **or** the admin ydotoold socket is
+absent (`test -S /run/user/1000/ydotool.sock`; older docs also
+mention `/tmp/.ydotool_socket`), this step is a **soft pass** —
+note the input-injection limitation and move on. Don't FAIL or
+ERROR on it. `command -v ydotool` returning success is not
+enough: a binary without a live daemon cannot inject.
 
 ### S4 — journal cross-check (soft / diagnostic)
 
@@ -180,7 +185,8 @@ $VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true
 - **ydotool may be soft-passed.** See
   `todo/qdwin-vm/ydotool-install-uinput-missing.md` — `uinput` kernel
   module isn't in the baseweed kernel. Until rebuilt with `CONFIG_INPUT_UINPUT=m`,
-  S3 input injection is best-effort.
+  S3 input injection is best-effort. Soft-pass when the **socket** is
+  missing, not only when the binary is missing.
 - **No tier-5 silo-badge yet.** `doc/ui.md` "silo-badges" reserves a
   distinct colour ring for tier-5, but the qdshell side
   (`Services/Qdistro/VMApps.qml`) doesn't exist on main as of

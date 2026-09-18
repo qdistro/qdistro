@@ -24,8 +24,9 @@ admin browses for security incident review) — exactly the kind
 of log injection that turns a sandbox bypass into a forensic
 hide-the-evidence trick.
 
-This is a headless scenario — no admin app interaction needed,
-just the wire shape.
+This is a headless scenario (`qci:visual: none`) — no admin app
+interaction needed, just the wire shape. A rejected screenshot is
+not ERROR.
 
 ## Setup
 

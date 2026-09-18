@@ -14,9 +14,11 @@ Procedure:
 2. Read the nearest `AGENTS.md` for that scenario directory.
 3. Source the helper script documented by that `AGENTS.md`.
 4. Execute Setup, Steps, Assertions, and Cleanup exactly once, serially.
-5. Capture a screenshot after every GUI action that changes state, and capture
-   it THROUGH YOUR LANE'S OWN CAPTURE TOOL, INTO the artifact directory. For
-   the labwc/admin lane that is `vm-gui` (`screenshot`, `screenshot-fresh`,
+5. Read the scenario's `<!-- qci:visual: required -->` or
+   `<!-- qci:visual: none -->` declaration. On `required`, capture a
+   screenshot after every GUI action that changes state, THROUGH YOUR
+   LANE'S OWN CAPTURE TOOL, INTO the artifact directory. For the
+   labwc/admin lane that is `vm-gui` (`screenshot`, `screenshot-fresh`,
    `click-preview`, `click-confirm`); for the qdwin lanes it is the
    `qdwin_screenshot` / `qdwin_apps_screenshot` helper your `AGENTS.md` names.
    Only frames the harness's own capture tool took are graded as visual
@@ -25,6 +27,10 @@ Procedure:
    detected and turns the verdict into ERROR; keeping it and reporting FAIL is
    the correct outcome. Capture `$VMNAME` and nothing else: a capture of any
    other VM is refused outright and fails the capture command.
+   On `none`, required assertions are not pixel-dependent. Do not take
+   screenshots as a substitute for the oracles the scenario names
+   (D-Bus, sqlite, journal, exit code). A rejected, near-black, or
+   missing screenshot is not ERROR and not FAIL.
 6. **OPEN EVERY FRAME YOU INTEND TO ASSERT ON.** Before stating anything about
    what is on screen — a label reads X, a control is visible, a pane is empty,
    a colour, a layout, what has focus — use your image-viewing tool
@@ -39,9 +45,11 @@ Procedure:
    capture into a confident wrong verdict in either direction. You may run OCR
    to pull long text out of a frame you have **also** opened; it is triage,
    never the basis of a verdict.
-   If you cannot open images at all, the visual assertions are UNOBSERVABLE by
-   you: record **ERROR** naming the missing capability. Do not record PASS, do
-   not record FAIL, and do not fall back to OCR and grade anyway.
+   If you cannot open images at all AND the scenario is `qci:visual:
+   required`, the visual assertions are UNOBSERVABLE by you: record
+   **ERROR** naming the missing capability. Do not record PASS, do not
+   record FAIL, and do not fall back to OCR and grade anyway. If the
+   scenario is `qci:visual: none`, missing image capability is not ERROR.
 7. Before every model-targeted mouse click, activate the window and run
    `vm-gui "$VMNAME" click-preview X Y "visible target label"`. It moves the
    real VM pointer without a button press, then captures the evidence. Read both

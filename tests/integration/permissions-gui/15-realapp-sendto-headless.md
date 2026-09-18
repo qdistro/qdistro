@@ -20,6 +20,12 @@ wire path carries real apps via the plugin pattern. Sister
 scenarios 16 (visual approve) and 17 (deny) exercise the admin
 GUI surface.
 
+This is a headless scenario (`qci:visual: none`). Required
+assertions are D-Bus / SDK / sqlite. A rejected, near-black, or
+missing screenshot is not ERROR and not FAIL — do not take
+frames as a substitute for those oracles
+(full-20260918T143937Z-3516587).
+
 ** scope note**: the qterminator side is deferred pending
 . When that clears,
 scenarios should be extended to exercise qterminator ↔ qnotebook.

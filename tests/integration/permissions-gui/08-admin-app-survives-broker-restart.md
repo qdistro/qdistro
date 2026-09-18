@@ -23,8 +23,24 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
+# Pending requests live in the broker's in-memory queue, not sqlite.
+# Restart empties it. Prove GetPending is empty before launching the
+# app — a leftover `uid=2000 test.action` row falsifies S1
+# (full-20260918T143937Z-3516587).
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
+B64=$(base64 -w0 <<'EOF'
+set -e
+out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.GetPending)
+printf '%s\n' "$out"
+echo "$out" | grep -q 'dict {' && {
+  echo 'FAIL(setup): GetPending not empty after broker restart'
+  exit 1
+}
+EOF
+)
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 ## Steps
@@ -34,10 +50,14 @@ sleep 1
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
+$VMEXEC "$VM" 'dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.GetPending'
 $VMGUI "$VM" screenshot /tmp/08-s1-empty.png
 ```
 
 **Assert:**
+- `GetPending` is an empty D-Bus array (no `dict {`). This is the
+  model behind the pane; a leftover request here is a setup failure,
+  not a signal-subscription regression.
 - Window `admin approvals` is visible.
 - Left list is empty; detail pane reads `(no selection)`.
 
@@ -123,6 +143,9 @@ $VMEXEC "$VM" 'rm -f /tmp/08-pid-before /tmp/08-pid-after /tmp/08-work.log /tmp/
 - Do NOT kill/relaunch the admin app between S1 and S3; the whole
  point is verifying the _long-running_ app handles a broker
  restart. Teardown at the end is fine.
+- Do not start `qdistro-test-permission` (or any work request) until
+  S3. S1 asserts an empty pane; injecting the request early is a
+  setup failure, not a product FAIL.
 - If S3 sees an empty list, also check `pgrep qdistro_admin_app`
  to rule out the app having crashed — if it crashed the bug is
  different (not the signal-filter regression the scenario

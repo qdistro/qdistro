@@ -93,7 +93,10 @@ Put exactly one of these HTML comments near the top of every scenario file:
 `none` is correct even when the scenario captures screenshots, as long as every
 required assertion is settled by a non-visual oracle (journal line, D-Bus reply,
 sqlite row, exit code, IPC response). Screenshots kept purely as run artifacts
-do not make a scenario `required`.
+do not make a scenario `required`. A rejected, near-black, or missing
+screenshot on `none` is not ERROR and not FAIL. Do not take screenshots as a
+substitute for those oracles, and do not record ERROR because screenshot-fresh
+refused a diagnostic frame.
 
 `qci gui` REFUSES to run a scenario with no declaration, an unknown value, or
 two conflicting declarations (`gui_validate_scenarios`) - before any golden
