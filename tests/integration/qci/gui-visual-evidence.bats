@@ -194,8 +194,14 @@ teardown() {
 # straddling a second boundary differ in bytes. Tests that need two IDENTICAL
 # frames from two separate renders then fail intermittently: that is what the
 # unexplained 128/1 run was -- K8n, ~2 in 40 unshimmed, reproducible on demand
-# with a `sleep 1; exec magick` PATH shim (fable, B round 8). The fake virsh
-# already excluded these chunks; the planters did not.
+# with a `sleep 1; exec magick` PATH shim (fable, B round 8).
+#
+# The round-9 version of this note said "the fake virsh already excluded these
+# chunks; the planters did not". NEITHER of this file's two fake-virsh
+# renderers passes `exclude-chunks` -- that sentence described a REVIEWER's
+# harness, not this suite (fable, B round 9). They are unaffected in practice
+# because each frame they render carries nanosecond text, so no two are
+# expected to match.
 plant_image() {
     local rel=$1; shift
     local txt="" w
@@ -2190,4 +2196,86 @@ EOF
     grep -qx 'rc=1' <<<"$output"      # not rc=127: a substring match accepted it
     [[ "$output" == *"not writable"* ]]
     [ "$(cat "$ADIR/ro.png")" = "the agent wrote this" ]
+}
+
+@test "publisher: a row attests the bytes THAT publisher published, not the path later" {
+    # Publication and attestation are not one locked operation: the rename is
+    # atomic, but the row writer used to re-open and hash the destination, which
+    # another publisher can replace in between. Two publishers then both
+    # returned 0 and BOTH rows recorded the second one's digest -- the first
+    # capture was attested nowhere while its call reported success (sol,
+    # B round 9). The digest is measured on the STAGE, before the rename.
+    local shim="$TDIR/bin"
+    mkdir -p "$shim"
+    cat > "$shim/mv" <<'EOF'
+#!/bin/sh
+/usr/bin/mv "$@"; rc=$?
+if [ -n "$QCI_PAUSE_AFTER_MV" ]; then
+    : > "$QCI_READY"
+    while [ ! -e "$QCI_GO" ]; do sleep 0.01; done
+fi
+exit $rc
+EOF
+    chmod +x "$shim/mv"
+    printf 'publisher A bytes\n' > "$TDIR/a.png"
+    printf 'publisher B bytes\n' > "$TDIR/b.png"
+    local a_sum b_sum
+    a_sum=$(sha256sum "$TDIR/a.png" | awk '{print $1}')
+    b_sum=$(sha256sum "$TDIR/b.png" | awk '{print $1}')
+    (
+        QCI_PAUSE_AFTER_MV=1 QCI_READY="$TDIR/ready" QCI_GO="$TDIR/go" \
+        PATH="$shim:$PATH" QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+        bash -c '. "$1"; capture_publish_frame "$2" "$3" "$4"' \
+            _ "$CAPLIB" "$TDIR/a.png" "$ADIR/out.png" "$CAPVM" >/dev/null 2>&1
+    ) &
+    local apid=$!
+    local waited=0
+    while [ ! -e "$TDIR/ready" ] && [ "$waited" -lt 500 ]; do sleep 0.02; waited=$((waited + 1)); done
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+        bash -c '. "$1"; capture_publish_frame "$2" "$3" "$4"' \
+            _ "$CAPLIB" "$TDIR/b.png" "$ADIR/out.png" "$CAPVM" >/dev/null 2>&1
+    : > "$TDIR/go"
+    wait "$apid"
+    # Each row carries ITS OWN publisher's digest, so both captures are on the
+    # record -- and the one whose bytes were overwritten is then reported as a
+    # frame that was taken and is no longer there, which is what happened.
+    grep -q "	$a_sum	" "$CAPLOG"
+    grep -q "	$b_sum	" "$CAPLOG"
+}
+
+@test "publisher: the published mode is the mode a plain copy would have given" {
+    # Round 9 forced 0644, ignoring the umask and widening a pre-existing 0600
+    # file, under a comment claiming it preserved "the mode a capture would have
+    # had" (sol and fable, B round 9). mktemp makes the stage 0600, so staging
+    # cannot simply inherit it either.
+    printf 'src' > "$TDIR/src.png"
+    run bash -c '
+        umask 077
+        . "$1"
+        capture_publish_frame "$2" "$3" "$5" >/dev/null 2>&1
+        cp -T -- "$2" "$4"
+        printf "staged=%s direct=%s\n" "$(stat -c %a "$3")" "$(stat -c %a "$4")"
+    ' _ "$CAPLIB" "$TDIR/src.png" "$TDIR/staged.png" "$TDIR/direct.png" "$CAPVM"
+    [[ "$output" == *"staged=600 direct=600"* ]]
+    # replacing an existing file keeps ITS mode, as cp -T (writing through the
+    # inode) would
+    printf 'old' > "$TDIR/exist.png"
+    chmod 0600 "$TDIR/exist.png"
+    bash -c '. "$1"; capture_publish_frame "$2" "$3" "$4" >/dev/null 2>&1' \
+        _ "$CAPLIB" "$TDIR/src.png" "$TDIR/exist.png" "$CAPVM"
+    [ "$(stat -c %a "$TDIR/exist.png")" = 600 ]
+}
+
+@test "publisher: a failed publication keeps the reason on stderr" {
+    # Round 9 silenced mktemp/cp/mv, so the operator lost "Permission denied"
+    # and was left with "nothing was written there" in a library whose stated
+    # purpose is a forensic record (fable, B round 9).
+    mkdir -p "$TDIR/ro"
+    printf 'src' > "$TDIR/src.png"
+    chmod 0555 "$TDIR/ro"
+    run bash -c '. "$1"; capture_publish_frame "$2" "$3" "$4" 2>&1; echo "rc=$?"' \
+        _ "$CAPLIB" "$TDIR/src.png" "$TDIR/ro/out.png" "$CAPVM"
+    chmod 0755 "$TDIR/ro"
+    [[ "$output" == *"rc=2"* ]]
+    [[ "$output" == *"denied"* || "$output" == *"Permission"* ]]
 }

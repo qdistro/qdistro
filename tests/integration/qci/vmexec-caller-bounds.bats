@@ -98,7 +98,7 @@ EOF
 
     run drive_await 'await_vmexec_success testvm 2 0 readiness-probe; echo "rc=$?"'
     [ "$status" -eq 0 ]
-    [[ "$output" == *"rc=1"* ]]
+    grep -qx 'rc=1' <<<"$output"   # rc=127 satisfied the substring match
 
     # NON-VACUITY: exactly the shape described above actually happened -- a
     # second attempt ran, and the survivor really did write while it was
@@ -1061,5 +1061,66 @@ fi'
     run audit 'while declare -f qdwin_opt; do
   qdwin_opt
 done'
+    [ "$status" -eq 0 ]
+}
+
+# Round-9 review: the line-at-a-time guard scanner was wrong in both directions.
+@test "callee audit: a while-guard body may contain if/for/brace blocks" {
+    # `_delta` counted the body's `if` but subtracted only `done`, so depth
+    # never reached zero and EVERY later call in the file was silenced -- the
+    # direction the docstring itself calls the worst (sol and fable, round 9).
+    run audit 'while declare -f qdwin_opt; do
+  if true; then :; fi
+  qdwin_opt
+done
+qdwin_opt'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_opt ]
+    # ...and the guarded call inside such a body is still suppressed
+    run audit 'while declare -f qdwin_opt; do
+  for i in 1 2; do :; done
+  qdwin_opt
+done'
+    [ "$status" -eq 0 ]
+    run audit 'if declare -f qdwin_opt; then { if true; then :; fi; }
+  qdwin_opt
+fi'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a call after fi is outside the region, same line or not" {
+    # The one-liner problem character offsets were introduced for: solved for
+    # `else` in round 9 and not for `fi` (fable, B round 9).
+    run audit 'if declare -f qdwin_opt; then :; fi; qdwin_opt'
+    [ "$status" -eq 1 ]
+    run audit 'if declare -f qdwin_opt; then
+  :
+fi; qdwin_opt'
+    [ "$status" -eq 1 ]
+}
+
+@test "callee audit: a NESTED one-liner else is not the guard's own" {
+    run audit 'if declare -f qdwin_opt; then if true; then :; else :; fi; else qdwin_opt; fi'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_opt ]
+}
+
+@test "callee audit: negation decides WHICH branch is guarded" {
+    # `if ! declare -f f; then A; else B; fi` runs A when f is ABSENT, so A is
+    # unguarded and B is guarded. Round 9 dropped the negated guard whole, so
+    # its `else` -- the PRESENT branch -- was not a region (fable, round 9).
+    run audit 'if ! declare -f qdwin_opt; then :; else qdwin_opt; fi'
+    [ "$status" -eq 0 ]
+    run audit 'if ! declare -f qdwin_opt; then qdwin_opt; fi'
+    [ "$status" -eq 1 ]
+    # a `!` in front of something else does not negate the guard
+    run audit 'if ! [ -e /nonexistent ] && declare -f qdwin_opt; then qdwin_opt; fi'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: the construct keyword need not start the line" {
+    run audit ':; if declare -f qdwin_opt; then
+  qdwin_opt
+fi'
     [ "$status" -eq 0 ]
 }

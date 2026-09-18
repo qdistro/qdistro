@@ -35,13 +35,22 @@ THE OPTIONAL-DEPENDENCY GUARD IS A LINE SCANNER TOO. `declare -f f`,
 guard covers the rest of its line or the body of the `if`/`elif`/`while` it
 conditions -- NOT the file (round 7) and NOT the branch that runs when the
 helper is absent (round 8). What it still gets wrong, all latent for the files
-this repo audits, whose five guard sites are plain `if declare -f`:
+this repo audits. (Of their five guard sites, THREE are a plain
+`if declare -f X`; the other two are `if ! declare -f X` wrapping a stub
+DEFINITION -- round 9's docstring called all five plain, which was wrong by
+two: fable, B round 9.) What it still gets wrong:
   * a guard reached by `|| return` / `|| exit` rather than a construct covers
     only its own line, so a call below it is reported;
   * a guard inside a `case` arm, a subshell or a function called elsewhere is
     not connected to the call it protects;
   * `if`/`fi`/`else` inside a heredoc body or a multi-line string can still
-    move a range, since only comments and single-line strings are stripped.
+    move a range, since only comments and single-line strings are stripped;
+  * a guard whose construct spans a line continuation, or whose body is
+    entered by `&&`/`||` rather than `then`, is not connected to its call.
+Two reviewers have now counted false positives AND false negatives in this
+scanner in three consecutive rounds; it is a cheap guard, and the honest
+summary is that its region model is approximate outside the shapes the bats
+guards pin.
 Both directions are counted in `todo/reviews/qci-B8-260918-*`.
 
 SUPPRESSION IS PER OCCURRENCE. `qdwin_dir=/tmp/x` is an assignment and
@@ -289,85 +298,99 @@ GUARD = re.compile(r'(?:declare -[fF]|command -v)[ \t]+'
                    r'((?:[A-Za-z_][A-Za-z0-9_]*[ \t]+)*[A-Za-z_][A-Za-z0-9_]*)')
 
 
+# Block-structure tokens in COMMAND POSITION. `fi` in `echo fi` is an argument;
+# only a token that starts a command counts (sol and fable, B rounds 8 and 9).
+_CMD_POS = r'(?:^|[;&|(]|\bthen\b|\bdo\b|\belse\b|\{)\s*'
+OPENERS = ('if', 'while', 'until', 'for', 'case', 'select')
+CLOSERS = {'fi': 'if', 'done': ('while', 'until', 'for', 'select'),
+           'esac': 'case'}
+TOKEN = re.compile(_CMD_POS + r'(if|while|until|for|case|select|fi|done|esac|else|elif)\b',
+                   re.M)
+
+
+def _tokens(code, pos):
+    """Yield (offset, token) for block tokens in command position from `pos`."""
+    for m in TOKEN.finditer(code, pos):
+        yield m.start(1), m.group(1)
+
+
 def guard_regions(code):
     """Map each guarded name to the CHARACTER ranges its guard covers.
 
     A guard on its own line covers the rest of that line
-    (`declare -f f >/dev/null && f`). A guard used as an `if`/`elif`/`while`
-    CONDITION covers that construct's body, because the real call sites in this
-    tree put the call on the next line.
+    (`declare -f f >/dev/null && f`). A guard used as the CONDITION of an
+    `if`/`elif`/`while` covers that construct's body.
 
-    Ranges are character offsets, not line numbers, because a one-line
-    `if declare -f f; then :; else f; fi` puts a GUARDED and an UNGUARDED call
-    on the same line and a line-granular region cannot tell them apart.
+    Ranges are character offsets and the scan is a BLOCK SCAN over tokens in
+    command position, because every cheaper model was wrong in both directions:
+      * round 8 counted `if`/`fi` after any whitespace, so `echo fi` closed a
+        range early and `echo if` ran it to EOF;
+      * round 9 counted per line with a single depth number, so a `while` guard
+        whose body held any `if` never subtracted that body's `fi` against
+        `done` and silenced every later call IN THE FILE; a call after `fi` on
+        the closing line was inside the region; a nested one-liner `else` was
+        taken for the guard's own; and a `for`/`{` in the body closed the range
+        early (sol and fable, B round 9).
+    Nesting is tracked across `if/fi`, `while|until|for|select ... done`,
+    `case/esac` and `{ }`, so a body may contain any of them.
 
-    FOUR THINGS IT GETS RIGHT ONLY BECAUSE ROUND 8 GOT THEM WRONG
-    (sol and fable, B round 8):
-      * a NEGATED guard (`if ! declare -f f`) guards nothing in the `then`
-        body -- that body runs precisely when the helper is ABSENT, so
-        suppressing there is a false negative of the worst kind;
-      * an `else`/`elif` body is likewise the ABSENT branch, so a region stops
-        there, on the same line or a later one;
-      * an `elif` guard sits INSIDE an `if` that its own `fi` closes, so the
-        depth it starts from is 1, not 0;
-      * `if` and `fi` are only syntax in COMMAND POSITION. Round 8 counted them
-        after any whitespace, so `echo fi` closed a range early and `echo if`
-        ran it to EOF.
-    `until` is not a guard at all: its body runs while the condition FAILS.
+    NEGATION INVERTS WHICH BRANCH IS GUARDED. `if ! declare -f f; then A; else
+    B; fi` runs A when f is ABSENT: A is not guarded and B is. A `!` counts only
+    when it introduces the guard's own command -- `if ! [ -e x ] && declare -f
+    f` is not a negated guard.
 
-    It is still a line scanner, not a parser: see the module's known limits.
+    It is still a line/token scanner, not a parser: see the module's limits.
     """
-    lines = code.split('\n')
-    base = []
-    off = 0
-    for line in lines:
-        base.append(off)
-        off += len(line) + 1
     out = {}
-    # `if`/`fi` as SYNTAX: start of line, or after a separator or a keyword that
-    # can precede a compound command -- never merely after a space.
-    op_if = re.compile(r'(?:^|[;&|]|\bthen\b|\bdo\b|\belse\b)\s*if\b')
-    op_fi = re.compile(r'(?:^|[;&|])\s*fi\b')
-    op_done = re.compile(r'(?:^|[;&|])\s*done\b')
-    op_else = re.compile(r'(?:^|[;&|])\s*(?:else|elif)\b')
-    for i, line in enumerate(lines):
-        m = GUARD.search(line)
-        if not m:
-            continue
-        head = line[:m.start()]
-        if re.search(r'(?:^|[;&|(]|\bif\b|\belif\b|\bwhile\b|\buntil\b)\s*!\s', head + ' '):
-            continue
-        opener = re.match(r'\s*(if|elif|while|until)\b', line)
+    for m in GUARD.finditer(code):
+        line_start = code.rfind('\n', 0, m.start()) + 1
+        nl = code.find('\n', m.start())
+        line_end = len(code) if nl == -1 else nl
+        line = code[line_start:line_end]
+        # Is the guard the condition of a construct that starts this command?
+        head = code[line_start:m.start()]
+        opener = None
+        for om in re.finditer(r'(?:^|[;&|(]|\bthen\b|\bdo\b|\belse\b)\s*'
+                              r'(if|elif|while|until)\b', head):
+            opener = om
+        # ...and it must be THIS command's keyword: nothing but `!` and the
+        # guard may sit between it and the guard itself.
+        if opener and not re.fullmatch(r'\s*(?:!\s+)?', head[opener.end():]):
+            opener = None
         kw = opener.group(1) if opener else ''
-        if kw == 'until':
-            continue
-        lo = base[i] + m.start()
-        hi = base[i] + len(line)
+        # The guard's own command is what follows the last separator before it.
+        seg = code[line_start:m.start()]
+        seg = re.split(r'&&|\|\||[;&|]|\b(?:if|elif|while|until)\b', seg)[-1]
+        negated = bool(re.match(r'\s*!\s', seg))
+        lo, hi = m.start(), line_end
         if kw:
-            closer = op_done if kw == 'while' else op_fi
-            # An `elif` condition lives inside an `if` whose `fi` closes both.
-            depth = 1 if kw == 'elif' else 0
-
-            def _delta(text):
-                d = len(op_if.findall(text)) - len(closer.findall(text))
-                if kw == 'while':
-                    d += len(re.findall(r'(?:^|[;&|]|\bdo\b)\s*while\b', text))
-                return d
-
-            for j in range(i, len(lines)):
-                # An `else`/`elif` at OUR level ends the guarded branch: what
-                # follows it is the branch taken when the guard FAILED. The test
-                # is POSITIONAL, because a one-liner closes with `fi` on the
-                # same line and a whole-line count cancels the construct before
-                # the `else` is ever considered.
-                cut = op_else.search(lines[j], m.end() if j == i else 0)
-                if cut and depth + _delta(lines[j][:cut.start()]) == 1:
-                    hi = base[j] + cut.start()
-                    break
-                depth += _delta(lines[j])
-                hi = base[j] + len(lines[j])
-                if depth <= 0:
-                    break
+            if kw == 'until':
+                # The body runs while the condition FAILS: never a guard.
+                if not negated:
+                    continue
+            depth = 1
+            closer_hit = None
+            branch = None       # offset of the `else`/`elif` at our level
+            for pos, tok in _tokens(code, m.end()):
+                if tok in OPENERS:
+                    depth += 1
+                elif tok in CLOSERS:
+                    depth -= 1
+                    if depth == 0:
+                        closer_hit = pos
+                        break
+                elif tok in ('else', 'elif') and depth == 1 and branch is None:
+                    branch = pos
+            stop = closer_hit if closer_hit is not None else len(code)
+            if negated:
+                # The PRESENT branch is the `else`, if there is one.
+                if branch is None:
+                    continue
+                lo, hi = branch, stop
+            else:
+                hi = branch if branch is not None else stop
+        elif negated:
+            continue
         for name in m.group(1).split():
             out.setdefault(name, []).append((lo, hi))
     return out

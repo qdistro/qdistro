@@ -110,8 +110,9 @@ _qci_capture_bound_vm() {
 # it is the raw row writer, and the public entry points above it are where the
 # VM gating and the capture live.
 # Args: log_path captured_file vm_name [artifact_root] [scope_override]
+#       [precomputed_digest_and_bytes]
 _qci_capture_attest_row() {
-    local log=$1 out=$2 vm=$3 root=${4:-} forced=${5:-}
+    local log=$1 out=$2 vm=$3 root=${4:-} forced=${5:-} precomputed=${6:-}
     local bound sum bytes abs scope prev seq ts chain payload rroot
     bound=$(_qci_capture_bound_vm "$log")
     if [ -z "$bound" ]; then
@@ -127,9 +128,23 @@ _qci_capture_attest_row() {
             "$bound" "${vm:-<none>}" >&2
         return 1
     fi
-    sum=$(sha256sum "$out" 2>/dev/null | awk '{print $1}') || return 1
+    # THE BYTES THIS ROW ATTESTS ARE THE BYTES THE CALLER PUBLISHED, when the
+    # caller knows them. Reading the path back is a second look at something
+    # another publisher may already have replaced: two publishers racing to one
+    # destination both returned 0 and BOTH ROWS recorded the second one's
+    # digest, so the first capture was attested nowhere while its call reported
+    # success (sol, B round 9, reproduced). $precomputed is "<sha256> <bytes>"
+    # measured on the staged file BEFORE the rename, so the row is true whatever
+    # happens to the path afterwards. Reconciliation then treats the superseded
+    # row exactly as it treats any reused path.
+    if [ -n "$precomputed" ]; then
+        sum=${precomputed%% *}
+        bytes=${precomputed##* }
+    else
+        sum=$(sha256sum "$out" 2>/dev/null | awk '{print $1}') || return 1
+        bytes=$(stat -c %s "$out" 2>/dev/null || echo 0)
+    fi
     [ -n "$sum" ] || return 1
-    bytes=$(stat -c %s "$out" 2>/dev/null || echo 0)
     abs=$(readlink -f "$out" 2>/dev/null || printf '%s' "$out")
     # `scope` decides whether a later absence is OMISSION or merely an
     # un-harvested scratch capture: in-tree means the frame was written where
@@ -182,7 +197,8 @@ capture_attest_frame() {
 # INTERNAL. The locked row write shared by every public entry point.
 # Args: captured_file vm_name [scope_override]
 _qci_capture_write_row() {
-    local out=${1:-} vm=${2:-} forced=${3:-} log=${QCI_GUI_CAPTURE_LOG:-} rc=0
+    local out=${1:-} vm=${2:-} forced=${3:-} precomputed=${4:-}
+    local log=${QCI_GUI_CAPTURE_LOG:-} rc=0
     [ -n "$log" ] || return 0
     [ -f "$log" ] || return 0
     [ -f "$out" ] || return 0
@@ -193,9 +209,11 @@ _qci_capture_write_row() {
     fi
     if command -v flock >/dev/null 2>&1; then
         flock "$log" bash -c '_qci_capture_attest_row "$@"' _ \
-            "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" "$forced" || rc=$?
+            "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" "$forced" \
+            "$precomputed" || rc=$?
     else
-        _qci_capture_attest_row "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" "$forced" || rc=$?
+        _qci_capture_attest_row "$log" "$out" "$vm" "${QCI_GUI_ARTIFACT_DIR:-}" \
+            "$forced" "$precomputed" || rc=$?
     fi
     return "$rc"
 }
@@ -245,19 +263,40 @@ capture_virsh_shot() {
 # destination exactly as it was and removes the fragment.
 capture_publish_frame() {
     local src=${1:?capture_publish_frame: src} dst=${2:?capture_publish_frame: dst}
-    local vm=${3:-${VM:-${VMNAME:-}}} rc=0 stage=""
-    stage=$(mktemp -- "$(dirname -- "$dst")/.qci-publish.XXXXXX" 2>/dev/null) || return 2
-    if ! cp -T -- "$src" "$stage" 2>/dev/null; then
+    local vm=${3:-${VM:-${VMNAME:-}}} rc=0 stage="" sum="" bytes="" mode=""
+    # FAILURES KEEP THEIR REASON. Round 9 silenced mktemp, cp and mv with
+    # `2>/dev/null`, so a log that had read "cp: cannot create regular file ...
+    # Permission denied" said only "nothing was written there" -- a
+    # diagnosability regression in a library whose stated purpose is a forensic
+    # record (fable, B round 9). stderr passes through.
+    stage=$(mktemp -- "$(dirname -- "$dst")/.qci-publish.XXXXXX") || return 2
+    if ! cp -T -- "$src" "$stage"; then
         rm -f -- "$stage"
         return 2
     fi
-    # Preserve the mode a capture would have had; mktemp makes it 0600.
-    chmod 0644 -- "$stage" 2>/dev/null || true
-    if ! mv -fT -- "$stage" "$dst" 2>/dev/null; then
+    # THE PUBLISHED MODE IS THE MODE A PLAIN COPY WOULD HAVE PRODUCED. mktemp
+    # makes the stage 0600 whatever the umask is, so copying to it and renaming
+    # would have PUBLISHED 0600 where `cp -T` publishes 0644&~umask. Round 9
+    # forced 0644 instead and called that "preserving the mode a capture would
+    # have had": it ignored the umask, widened a pre-existing 0600 file to 0644,
+    # and swallowed a chmod failure before returning success (sol and fable,
+    # B round 9). Replacing an existing file matches `cp -T`, which writes
+    # THROUGH the inode and keeps its mode.
+    if [ -e "$dst" ]; then
+        mode=$(stat -c %a -- "$dst" 2>/dev/null) || mode=""
+    fi
+    [ -n "$mode" ] || mode=$(printf '%o' "$(( 0666 & ~$(umask) ))")
+    chmod "$mode" -- "$stage" || { rm -f -- "$stage"; return 2; }
+    # MEASURE THE BYTES WE ARE ABOUT TO PUBLISH, before anyone else can replace
+    # the destination -- see _qci_capture_attest_row for why the row must not
+    # re-read the path.
+    sum=$(sha256sum -- "$stage" | awk '{print $1}') || { rm -f -- "$stage"; return 2; }
+    bytes=$(stat -c %s -- "$stage") || { rm -f -- "$stage"; return 2; }
+    if ! mv -fT -- "$stage" "$dst"; then
         rm -f -- "$stage"
         return 2
     fi
-    _qci_capture_write_row "$dst" "$vm" "" || rc=$?
+    _qci_capture_write_row "$dst" "$vm" "" "$sum $bytes" || rc=$?
     [ "$rc" -eq 0 ] || return 1
     return 0
 }
