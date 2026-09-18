@@ -942,3 +942,18 @@ x=$((qdwin_n + 1))'
 qdwin_local'
     [ "$status" -eq 0 ]
 }
+
+# Round-6 review: the false-positive filter erased real calls file-wide.
+@test "callee audit: an ASSIGNMENT does not suppress a real call to that name" {
+    run audit 'qdwin_gone=1
+qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: ARITHMETIC does not suppress a real call to that name" {
+    run audit 'x=$((qdwin_gone + 1))
+qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}

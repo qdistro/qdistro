@@ -24,7 +24,10 @@
 # a harness capture log written by scripts/vm/vm-gui. These also pin:
 #
 #   gui_capture_log_init/_verify        - the harness ledger + its hash chain
-#   gui_capture_reconcile               - attested-vs-on-disk, matched by digest
+#   gui_capture_reconcile               - attested-vs-on-disk; each row claims
+#                                         its OWN file first (in-tree by exact
+#                                         path, out-of-tree by basename), then
+#                                         by digest
 #
 # The producer side is not re-implemented here: attest_row() sources the REAL
 # scripts/vm/lib/capture-attest.sh, so producer and verifier are pinned against
@@ -157,7 +160,15 @@ apply_contract() {
         fi
         [ -n "$sealed" ] && anchor="$CAPVM"$'\t'"$sealed"
     fi
-    gui_apply_visual_evidence_contract "$st" "$scen" "$adir" "$clog" "$anchor"
+    # PASS THE CAPTURE ROOT, as production does (gui_run_scenario hands it
+    # $art_alias). Round 6 added the exact-path matching pass and NOTHING in
+    # this file exercised it: with no root the pass cannot fire, so a mutant
+    # that replaced it with `continue` was still 119/119, and every in-tree
+    # frame was reported `relocated` because the digest pass matched it --
+    # a false note no assertion ever read (fable, B round 6). A test that
+    # wants the rootless fallback passes CAPROOT="" explicitly.
+    gui_apply_visual_evidence_contract "$st" "$scen" "$adir" "$clog" "$anchor" \
+        "${CAPROOT-$ADIR}"
 }
 
 teardown() {
@@ -1626,6 +1637,12 @@ EOF
     # Round 4 keyed supersession on in-tree rows only, so three publishes to one
     # /tmp name -- the dominant scenario shape -- reconciled as three captures
     # and satisfied a declared floor of two on one frame (sol, B round 4).
+    #
+    # NOTE WHAT THIS DOES AND DOES NOT COVER: the fake virsh writes a
+    # TIMESTAMPED frame per call, so the three captures differ in bytes. The
+    # identical-bytes case -- what a settled screen actually produces -- is not
+    # reachable here and went wrong independently; K0 covers it (fable,
+    # B round 6).
     install_fake_virsh
     cat > "$TDIR/two.md" <<'EOF'
 # 13 - declares two captures
@@ -1837,17 +1854,54 @@ EOF
     [[ "$output" == *"no longer there"* ]]
 }
 
-@test "W2: a row for a NESTED frame does not claim a top-level file" {
-    # The path match is a suffix test, so `sub/frame.png`'s row could take a
-    # top-level `frame.png` and hide the omission (fable, B round 5).
+@test "W2: a NESTED row's key is its whole path, so a top-level move is REPORTED" {
+    # Round 5 keyed in-tree rows on a path SUFFIX, so `sub/frame.png`'s row
+    # claimed a top-level `frame.png` as if it were its own file.
+    #
+    # What that costs is the note, not the verdict, and saying otherwise is how
+    # this test came to pin nothing. A moved frame is matched either way -- by
+    # the suffix under round 5, by the in-tree digest pass under round 6 -- so
+    # both PASS. The difference is that only the digest pass sets `relocated`,
+    # which is the signal the ruling promised a human would see. Round 6's
+    # version asserted the verdict and therefore also passed on round-5 code and
+    # on a mutant with the exact-path pass deleted (fable, B round 6). K8 is the
+    # test that pins the key for a VERDICT.
     write_status PASS
     plant_image sub/frame.png Approve
     attest_row "$ADIR/sub/frame.png"
     mv "$ADIR/sub/frame.png" "$ADIR/frame.png"
-    plant_image other.png Deny
-    attest_row "$ADIR/other.png"
-    rm -f "$ADIR/other.png"
     run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"found by digest at a path other than"* ]]
+}
+
+@test "K8: the exact-path key keeps a peek from taking an in-tree row's OWN file" {
+    # A never-copied /tmp peek carrying the same bytes as an UNTOUCHED in-tree
+    # frame. With the capture root the in-tree row claims its own path and the
+    # peek is merely un-harvested; without a root the basename pass takes that
+    # file and a frame nobody touched is reported deleted (fable, B round 6,
+    # K8/K8n). This is the shape that proves the exact-path pass is
+    # load-bearing FOR A VERDICT, which no other test in this file does.
+    write_status PASS
+    plant_image frame.png Approve
+    attest_row "$ADIR/frame.png"
+    plant_image_at "$TDIR/frame.png" Approve
+    attest_row "$TDIR/frame.png"
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    # ... and the untouched frame is NOT reported as relocated.
+    [[ "$output" != *"found by digest at a path other than"* ]]
+}
+
+@test "K8n: WITHOUT a capture root the same shape is a false ERROR" {
+    # Pins the rootless fallback as the hazard it is, rather than the safe
+    # degradation the comment used to claim. Production always passes a root.
+    write_status PASS
+    plant_image frame.png Approve
+    attest_row "$ADIR/frame.png"
+    plant_image_at "$TDIR/frame.png" Approve
+    attest_row "$TDIR/frame.png"
+    CAPROOT="" run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
     [ "${output%%$'\t'*}" = ERROR ]
 }
 
@@ -1887,4 +1941,140 @@ EOF
     # 124 would be the timeout firing -- i.e. the block.
     [[ "$output" == *"rc=1"* ]]
     [ -p "$ADIR/fifo.png" ]
+}
+
+# --- B round 7: sol's round-6 reservation defects ---------------------------
+
+# The REAL library entry point a retry lane publishes through.
+publish_frame() {
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" bash -c '
+        set -euo pipefail
+        . "$1"
+        capture_publish_frame "$2" "$3" "$4"
+    ' _ "$CAPLIB" "$1" "$2" "$CAPVM"
+}
+
+@test "supersession: an IDENTICAL re-capture loop to one in-tree path is ONE frame" {
+    # Reserving in ledger order gave the sole surviving file to the OLDEST row.
+    # The newest row was then unmatched, and supersession only ever drops a row
+    # a LATER row superseded -- so the newest row counted as a real omission and
+    # the gate said a frame had been removed when none had (sol, B round 6).
+    # The existing loop test uses DISTINCT timestamped frames and cannot see it.
+    write_status PASS
+    plant_image_at "$TDIR/src.png" Approve
+    publish_frame "$TDIR/src.png" "$ADIR/frame.png"
+    publish_frame "$TDIR/src.png" "$ADIR/frame.png"
+    publish_frame "$TDIR/src.png" "$ADIR/frame.png"
+    run gui_capture_reconcile "$ADIR" "$CAPLOG" "$TDIR/flist" "$ADIR"
+    [ "$output" = "attested=1 present=1 distinct=1 missing_in_tree=0 unharvested=0 relocated=0" ]
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "supersession: an IDENTICAL loop to one /tmp path cannot satisfy a floor of 2" {
+    # The same defect out of tree, and this direction is a false PASS: the
+    # unmatched newest row counted as a second attested capture, so ONE frame
+    # satisfied a floor of two -- the exact bug round 5 set out to kill,
+    # reintroduced from the other end (sol, B round 6).
+    write_status PASS
+    cat > "$TDIR/two.md" <<'EOF'
+# 15 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    plant_image_at "$TDIR/src.png" Approve
+    publish_frame "$TDIR/src.png" "$TDIR/out.png"
+    publish_frame "$TDIR/src.png" "$TDIR/out.png"
+    publish_frame "$TDIR/src.png" "$TDIR/out.png"
+    cp "$TDIR/out.png" "$ADIR/kept.png"
+    run gui_capture_reconcile "$ADIR" "$CAPLOG" "$TDIR/flist" "$ADIR"
+    [ "$output" = "attested=1 present=1 distinct=1 missing_in_tree=0 unharvested=0 relocated=0" ]
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"only 1 capture"* ]]
+}
+
+@test "supersession: PRESERVED copies of a reused path are still counted apart" {
+    # The guard on the fix: newest-first reservation must not undo round 6's
+    # own correction. Two captures to one scratch name, each copy preserved
+    # under a different artifact name, are still TWO.
+    write_status PASS
+    cat > "$TDIR/two.md" <<'EOF'
+# 16 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    plant_image_at "$TDIR/a.png" One
+    plant_image_at "$TDIR/b.png" Two
+    publish_frame "$TDIR/a.png" "$TDIR/out.png"
+    cp "$TDIR/out.png" "$ADIR/before.png"
+    publish_frame "$TDIR/b.png" "$TDIR/out.png"
+    cp "$TDIR/out.png" "$ADIR/after.png"
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+    [[ "$output" == *"harness-captured 2 frame(s)"* ]]
+}
+
+@test "K7c: a 34-iteration STATIC in-tree loop is one frame, not an omission" {
+    # The shape the supersession comment itself cites. A wait-loop that
+    # re-captures to one name produces identical bytes by construction once the
+    # screen settles, which is precisely when ledger-order reservation misfired
+    # (fable, B round 6). The existing loop test uses distinct timestamped
+    # frames and cannot reach this.
+    write_status PASS
+    plant_image_at "$TDIR/src.png" Approve
+    local i
+    for (( i=0; i<34; i++ )); do
+        publish_frame "$TDIR/src.png" "$ADIR/poll.png"
+    done
+    run gui_capture_reconcile "$ADIR" "$CAPLOG" "$TDIR/flist" "$ADIR"
+    [ "$output" = "attested=1 present=1 distinct=1 missing_in_tree=0 unharvested=0 relocated=0" ]
+    run apply_contract PASS "$VISUAL_MD" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = PASS ]
+}
+
+@test "K0: five STATIC captures to one /tmp name cannot satisfy a floor of two" {
+    # sol's round-4 P1 for the static case. Round 6's fix covered it only when
+    # the bytes differed, which the fake virsh's timestamped frames always do
+    # (fable, B round 6).
+    write_status PASS
+    cat > "$TDIR/two.md" <<'EOF'
+# 17 - declares two captures
+<!-- qci:visual: required -->
+<!-- qci:visual-captures: 2 -->
+EOF
+    plant_image_at "$TDIR/src.png" Approve
+    local i
+    for (( i=0; i<5; i++ )); do
+        publish_frame "$TDIR/src.png" "$TDIR/shot.png"
+    done
+    cp "$TDIR/shot.png" "$ADIR/kept.png"
+    run apply_contract PASS "$TDIR/two.md" "$ADIR" "$CAPLOG"
+    [ "${output%%$'\t'*}" = ERROR ]
+    [[ "$output" == *"only 1 capture"* ]]
+}
+
+@test "D1: a read-only pre-existing file is left alone, and nothing claims a capture" {
+    # `cp -T` fails EACCES, so nothing is written -- but the AGENT's file was
+    # renamed to `.unattested` under a message saying a frame had been captured
+    # and could not be recorded. Both halves were false (fable, B rounds 5/6).
+    printf 'the agent wrote this\n' > "$ADIR/s1.png"
+    chmod 0444 "$ADIR/s1.png"
+    printf 'bytes' > "$TDIR/src.png"
+    # Make the ledger refuse the row, so publication fails AFTER the type check.
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        QCI_GUI_CAPTURE_LOG=/nonexistent/ledger.tsv
+        export QCI_GUI_CAPTURE_LOG
+        deliver_attested_frame "$2" "$3"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/s1.png"
+    [[ "$output" == *"rc=1"* ]]
+    [[ "$output" != *"captured"*"could NOT record"* ]]
+    [[ "$output" == *"left untouched"* ]]
+    [ ! -e "$ADIR/s1.png.unattested" ]
+    [ "$(cat "$ADIR/s1.png")" = "the agent wrote this" ]
 }

@@ -1602,20 +1602,24 @@ gui_harness_ocr_frames() {
 }
 
 # Reconcile the harness capture log against what is actually on disk in the
-# harvested artifact directory. Matching reserves each row's OWN file first --
-# by relative path inside the artifact tree, and always with digest equality --
-# and only then falls back to the same bytes found elsewhere, in-tree rows
-# first. Matching purely by digest let an earlier row consume a later row's
-# file and turned a fatal omission into a benign non-harvest. An honest
-# `capture to scratch, copy into the artifact dir` still counts, and a rename
-# during harvest (the short /tmp alias -> the canonical run dir) does not break
-# attestation.
+# harvested artifact directory. Matching reserves each row's OWN file first,
+# always with digest equality, and the key DIFFERS BY SCOPE: an in-tree row
+# claims the file at its exact relative path (against the capture-time root),
+# an out-of-tree row claims by basename. Only then does it fall back to the
+# same bytes found elsewhere, in-tree rows first. Matching purely by digest let
+# an earlier row consume a later row's file and turned a fatal omission into a
+# benign non-harvest. An honest `capture to scratch, copy into the artifact
+# dir` still counts, and a rename during harvest (the short /tmp alias -> the
+# canonical run dir) does not break attestation.
 #
 # Writes the attested-and-present frame paths, one per line, to <outfile>.
 # Echoes one summary line:
-#   attested=N present=P distinct=D missing_in_tree=M unharvested=U
+#   attested=N present=P distinct=D missing_in_tree=M unharvested=U relocated=R
 # Returns 0 always; the caller decides.
-# Args: artifact_dir capture_log outfile
+# Args: artifact_dir capture_log outfile [capture_root]
+# <capture_root> is the artifact path the AGENT was given, which is what in-tree
+# rows recorded; without it the exact-path pass cannot fire and the digest
+# passes decide alone.
 gui_capture_reconcile() {
     local adir=$1 log=$2 outfile=$3 caproot=${4:-}
     local line seq ts vm scope bytes sum fpath chain
@@ -1650,6 +1654,19 @@ gui_capture_reconcile() {
         keep+=("$seq"$'\t'"$scope"$'\t'"$sum"$'\t'"$fpath")
     done < <(gui_capture_log_rows "$log")
 
+    # Rows that are the LAST for their path first (in ledger order), then the
+    # rest. See "WITHIN A PASS" below for why.
+    local -a newest_first=() older=()
+    for line in "${keep[@]}"; do
+        IFS=$'\t' read -r seq scope sum fpath <<<"$line"
+        if [ "${last_row_for[$fpath]:-}" = "$seq" ]; then
+            newest_first+=("$line")
+        else
+            older+=("$line")
+        fi
+    done
+    [ ${#older[@]} -gt 0 ] && newest_first+=("${older[@]}")
+
     # MATCHING RESERVES IN FOUR ORDERED PASSES, and both orders matter.
     #
     # EXACTNESS FIRST: a row claims the file at its OWN relative path (with the
@@ -1669,8 +1686,19 @@ gui_capture_reconcile() {
     #     preserves is the BASENAME, and that is the strongest ownership
     #     evidence a scratch capture has.
     #
-    # THEN AMBIGUITY, IN-TREE FIRST. When identical bytes could serve either
-    # scope, the deleted capture's pixels are by definition still in the tree
+    # THEN AMBIGUITY, IN-TREE FIRST -- BUT ONLY AFTER THE BASENAME PASS, and
+    # that qualifier is the whole of it. The out-of-tree basename pass is itself
+    # an ambiguity resolver (basename plus digest is not ownership) and it runs
+    # SECOND, so an out-of-tree row beats an in-tree digest match. The one
+    # legitimate action this still fails is a rename ONTO a scratch capture's
+    # basename: the scratch row takes the file and the in-tree row is reported
+    # missing. Reversing the two passes would hide the deleted-frame shapes
+    # sol built (sol-9, W1), so the trade is deliberate and the cost is named
+    # here rather than papered over -- an earlier version of this paragraph
+    # claimed the in-tree row simply claims first, which was false (fable,
+    # B round 6, K1c/W5).
+    #
+    # When identical bytes could serve either scope, the deleted capture's pixels are by definition still in the tree
     # and still graded -- a real omission hides bytes that exist nowhere else,
     # and that case is unambiguous under any policy. So what the ambiguity
     # decides is accounting, not evidence: an allowed action (a rename inside
@@ -1679,8 +1707,21 @@ gui_capture_reconcile() {
     # flagging the anomaly, so the in-tree row claims first and an in-tree row
     # matched only by digest is REPORTED, never punished (fable's ruling,
     # B round 5; sol argued the other way and the exchange is in the reviews).
+    #
+    # WITHIN A PASS, THE NEWEST ROW OF A REUSED PATH CLAIMS FIRST. Reserving in
+    # ledger order let the OLDEST row of a re-capture loop take the sole
+    # surviving file; the newest row was then unmatched, and because
+    # supersession only ever drops a row that a LATER row superseded, that
+    # newest row was counted as a real omission (a false ERROR saying a frame
+    # was removed) or, out of tree, as a second attested capture that satisfied
+    # a floor of two on one frame -- the exact false PASS round 5 set out to
+    # kill, reintroduced from the other end (sol, B round 6; reproduced before
+    # fixing). Newest-first gives the file to the row supersession is going to
+    # credit; earlier rows may still claim additional PRESERVED copies in the
+    # later passes, and any that find none are superseded, which is what they
+    # are.
     for pass in in-tree-path out-of-tree-base in-tree-digest out-of-tree-digest; do
-        for line in "${keep[@]}"; do
+        for line in "${newest_first[@]}"; do
             IFS=$'\t' read -r seq scope sum fpath <<<"$line"
             case "$pass" in
                 in-tree-path|in-tree-digest)  [ "$scope" = in-tree ] || continue ;;
@@ -1701,9 +1742,16 @@ gui_capture_reconcile() {
                         best=$f; break ;;
                 esac
                 rel=${disk_rel[$f]}
-                # EXACT, against the capture-time root. Without a root there is
-                # nothing honest to compare, so this pass simply does not fire
-                # and the digest passes decide.
+                # EXACT, against the capture-time root. WITHOUT A ROOT THIS IS
+                # NOT A SAFE DEGRADATION: the pass cannot fire, and the next one
+                # to run is the BASENAME pass, which can take an in-tree row's
+                # own file and report a frame nobody touched as deleted. (The
+                # sentence here used to say "the digest passes decide", which is
+                # simply not the order -- fable, B round 6, K8n.) Production
+                # always passes a root: both gui_run_scenario sites hand over
+                # $art_alias, which falls back to $adir when alias creation
+                # fails, so the rootless path is a latent hazard rather than a
+                # live one.
                 [ -n "$rowroot" ] || continue
                 [ "${fpath#"$rowroot"/}" = "$rel" ] || continue
                 best=$f; break
@@ -1726,6 +1774,21 @@ gui_capture_reconcile() {
     # and refused a floor of two (sol, B round 5). A row is superseded only if it
     # found no file AND a later row reused its path; a row whose bytes are still
     # on disk is a capture that happened, whatever was written to that path next.
+    # The 34-iteration claim above is true only WITH newest-first reservation:
+    # at round 6 a static 34-loop was a false ERROR, because the oldest row took
+    # the file and the newest survived unmatched (fable, B round 6, K7c). The
+    # claim is pinned by a test now rather than asserted here.
+    #
+    # TWO LIMITS OF COUNTING ROWS, stated so the next reader does not have to
+    # rediscover them:
+    #   * ONE distinct frame delivered TWICE satisfies a floor of two, because
+    #     "its bytes are still on disk" is satisfied by any copy of identical
+    #     bytes. That falls out of the same rule that credits two preserved
+    #     captures through one scratch name, and it is accepted (fable's K5c).
+    #   * the floor counts ATTESTED ROWS, not graded frames, so deleting the
+    #     harvested copy of an out-of-tree capture is undetectable: the row
+    #     stands, the frame is reported un-harvested, and a floor of two can be
+    #     met with one frame actually graded (fable's W4c).
     for line in "${keep[@]}"; do
         IFS=$'\t' read -r seq scope sum fpath <<<"$line"
         if [ -n "${matched[$seq]:-}" ]; then
@@ -1754,7 +1817,7 @@ gui_capture_reconcile() {
 # Combined evidence decision for one scenario's harvested artifacts.
 # Echoes `ok:<detail>` (accept the agent verdict) or `missing:<why>` (record
 # ERROR).
-# Args: artifact_dir capture_log anchor [min_captures]
+# Args: artifact_dir capture_log anchor [min_captures] [capture_root]
 # `anchor` is the gate's in-memory "<vm>\t<total_rows>\t<chain_head>" from
 # gui_capture_log_seal. An EMPTY anchor is fail-closed: an unsealed ledger is
 # one nobody froze, so it is not graded.
@@ -1944,7 +2007,7 @@ gui_visual_evidence_status() {
 # them and is never the thing that makes a scenario gradable.
 #
 # Echoes "<status>\t<note-suffix>".
-# Args: status scenario_file artifact_dir capture_log anchor
+# Args: status scenario_file artifact_dir capture_log anchor [capture_root]
 # `anchor` is the gate's in-memory seal ("<vm>\t<rows>\t<head>"); without it
 # nothing is graded.
 gui_apply_visual_evidence_contract() {

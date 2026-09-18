@@ -5,19 +5,37 @@ Deliberately narrow, and the narrowness is the contract: ONLY the two project
 function-name prefixes `qdwin_*` and `capture_*` -- this is not a general
 undefined-function checker -- and only names in COMMAND POSITION.
 
-KNOWN LIMITS, stated because this file has twice claimed a parsing model it did
-not implement. It is a REGEX over lines, not a shell parser:
+KNOWN LIMITS, stated because this file has three times claimed a parsing model
+it did not implement. It is a REGEX over lines, not a shell parser. Round 6
+found 10 false negatives and 9 false positives outside the list that stood
+here; these are the ones that survive, counted rather than waved at:
   * a string spanning several lines is only stripped on the line where it
-    opens, so a name on a later line of it can still be reported;
+    opens, so a name on a later line of it can still be reported, and an
+    ESCAPED quote inside a string is not understood;
   * `trap`, `time`, `timeout`, `xargs` and `exec` arguments are commands but are
     not recognised as command position;
-  * a case-arm pattern containing a parenthesis, e.g. `(a|b)` , is not matched;
-  * `$(...)` nested inside `$(...)` inside double quotes is approximated.
+  * a case-arm pattern containing a parenthesis, e.g. `(a|b)` , is not matched.
+    The pattern list of an ordinary arm IS blanked, by a heuristic -- a line
+    whose first parenthesis is a closing one, with no `$` before it -- so that
+    `a|b)` is not read as a pipeline. A line that happens to have that shape
+    for another reason loses its names;
+  * `$(...)` nested inside `$(...)` inside double quotes is approximated, a `)`
+    closing a MULTI-LINE `$(` is not matched, and prose in backticks inside
+    double quotes can be read as a call;
+  * `echo "<<EOF"` opens a heredoc as far as this file is concerned, so the
+    lines after it are swallowed.
 It is a cheap guard against calling a function nobody defines, which is the
-exact regression it was written for, and it must never be described as more. A mention in a comment, a string or a heredoc body
-is not a call, and this must not manufacture findings out of prose -- the file
-under test documents a deleted helper by name in a NOTE, and that note is not
-a bug.
+exact regression it was written for, and it must never be described as more.
+A mention in a comment, a string or a heredoc body is not a call, and this must
+not manufacture findings out of prose -- the file under test documents a
+deleted helper by name in a NOTE, and that note is not a bug.
+
+SUPPRESSION IS PER OCCURRENCE. `qdwin_dir=/tmp/x` is an assignment and
+`$((qdwin_n + 1))` is arithmetic, so neither is a call -- but round 6
+implemented that as "a name that is ever assigned is never a call", which
+silently erased real calls to the same name for the whole file (sol and fable,
+B round 6). An arithmetic body is blanked WITHOUT blanking a `$( ... )` nested
+inside it, because that nested substitution is a command.
 
 Reachable definitions are the file's own, plus those of any library it sources
 by a literal path (relative to the file, or via $QDWIN_WORKSPACE/qdistro).
@@ -29,29 +47,40 @@ import sys
 PREFIX = r'(?:qdwin_[a-z0-9_]+|capture_[a-z0-9_]+)'
 # A definition need not start the line: `foo; bar() { :; }` defines `bar`.
 DEF = re.compile(r'(?:^|[;&|{}])\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', re.M)
+# `function name {` without parens is also a definition (fable, B round 6).
+DEF_KW = re.compile(r'(?:^|[;&|{}])\s*function\s+([A-Za-z_][A-Za-z0-9_]*)', re.M)
 # Command position: start of line, after a separator or an opening brace, after
 # a substitution opener, after `!`, or after a keyword that introduces a
 # command. `if X`, `if ! X`, `while X`, `do X` and `{ X` were all missed before
 # (sol and fable, B round 2), and all of them are `bash -n` clean.
 KEYWORD = r'(?:if|then|elif|else|while|until|do|done|coproc|\{)'
 # `FOO=1 cmd` and `>/dev/null cmd` are command position with a prefix in front.
-PREFIXED = r'(?:^|[;&|({`]|\|\||&&)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+|[<>]{1,2}\S+\s+)+'
+PREFIXED = (r'(?:^|[;&|({`]|\|\||&&|\b' + KEYWORD + r'\b)\s*'
+            r'(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+|[0-9]*[<>]{1,2}\s*\S+\s+)+')
 # `)` closes a case-arm pattern, so `weston) qdwin_foo ;;` is command position
 # and was missed at a LIVE site. A backtick opens a substitution. `$` is
 # excluded before `{` so that `${qdwin_x}` -- a parameter expansion, not a
 # command -- is not reported (both reviewers, B round 3).
+ASSIGN = r'(?!=)'   # `qdwin_dir=/tmp/x` is an assignment, not a call
 CALL = re.compile(
     r'(?:^|(?<!\$)[;&|({`]|\$\(|\|\||&&|\b' + KEYWORD + r'\b)\s*(?:!\s+)?('
-    + PREFIX + r')\b',
+    + PREFIX + r')\b' + ASSIGN,
     re.M)
 # A case arm, and ONLY a case arm: from the start of the line to the first `)`
 # with no paren in between. The generic `)` separator this replaces also matched
 # a word after `$( ... )`, which is an argument, not a command (sol, B round 4).
-CASE_ARM = re.compile(r'^[^()\n]*\)\s*(?:!\s+)?(' + PREFIX + r')\b', re.M)
-PREFIXED_CALL = re.compile(PREFIXED + r'(?:!\s+)?(' + PREFIX + r')\b', re.M)
+CASE_ARM = re.compile(r'^[^()\n]*\)\s*(?:!\s+)?(' + PREFIX + r')\b' + ASSIGN, re.M)
+PREFIXED_CALL = re.compile(PREFIXED + r'(?:!\s+)?(' + PREFIX + r')\b' + ASSIGN, re.M)
 # `qdwin_dir=/tmp/x` is an assignment and `$((qdwin_n + 1))` is arithmetic;
-# neither is a call, and both were reported (sol, B round 5).
-NOT_A_CALL = re.compile(r'(' + PREFIX + r')\s*=|\$\(\([^)]*?(' + PREFIX + r')')
+# neither is a call, and both were reported (sol, B round 5). Suppression is
+# PER OCCURRENCE, not per name: round 5 discarded the name from the whole
+# file's call set, so a file that assigned `qdwin_gone=1` and then CALLED
+# `qdwin_gone` reported nothing at all (sol, B round 6). Arithmetic bodies are
+# blanked, and the call patterns simply refuse a name followed by `=`.
+ARITH = re.compile(r'\$\(\((.*?)\)\)', re.S)
+# Inside an arithmetic body, a nested `$( ... )` IS a command. Blanking the body
+# wholesale erased it (fable, B round 6); only the arithmetic text is blanked.
+SUBST_IN_ARITH = re.compile(r'\$\([^()]*\)')
 # The argument can itself contain quoted substitutions, so take the rest of the
 # line and drop the quoting rather than try to match balanced quotes.
 SOURCE = re.compile(r'^\s*(?:\.|source)\s+(.+?)\s*(?:\|\||&&|;|$)', re.M)
@@ -227,20 +256,48 @@ def defs_of(path, seen):
     return names
 
 
+# A case arm's PATTERN LIST is not command position, but `a|b)` is
+# indistinguishable from a pipeline to the call regex, which reported the name
+# after the `|` (fable, B round 6). A line whose first parenthesis is a closing
+# one, with no `$` before it, is a case arm: its pattern text is blanked and the
+# `)` kept, so the COMMAND after the arm is still seen. This is a heuristic on a
+# heuristic -- see the limits in the module docstring.
+CASE_PATTERN = re.compile(r'^([^()\n$]*)\)', re.M)
+
+
+def blank_case_patterns(text):
+    return CASE_PATTERN.sub(lambda m: ' ' * len(m.group(1)) + ')', text)
+
+
 def main():
     path = sys.argv[1]
     code = strip_noise(open(path, encoding='utf-8', errors='replace').read())
     defined = defs_of(path, set())
+    def _blank_arith(m):
+        body = m.group(1)
+        kept = []
+        pos = 0
+        for sub in SUBST_IN_ARITH.finditer(body):
+            kept.append(' ' * (sub.start() - pos))
+            kept.append(sub.group(0))
+            pos = sub.end()
+        kept.append(' ' * (len(body) - pos))
+        return '  ' + ''.join(kept) + '  '
+    code = ARITH.sub(_blank_arith, code)
+    code = blank_case_patterns(code)
     called = (set(CALL.findall(code)) | set(CASE_ARM.findall(code))
               | set(PREFIXED_CALL.findall(code)))
-    for a, b in NOT_A_CALL.findall(code):
-        called.discard(a or b)
     missing = sorted({n for n in called if n not in defined})
     # A call guarded by `declare -f NAME` is an intentional optional dependency.
     # Checked against the SAME stripped representation as the calls: reading raw
     # text let the phrase inside a comment suppress a real call (sol, round 4).
+    # `declare -f a b` returns 1 if ANY name is undefined, so a multi-name
+    # guard is a real guard for each of them; `declare -F` and `command -v` are
+    # the same intent (fable, B round 6).
+    guard = (r'(?:declare -[fF]|command -v)\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+)*'
+             + r'%s\b')
     missing = [n for n in missing
-               if not re.search(r'declare -f\s+' + re.escape(n) + r'\b', code)]
+               if not re.search(guard % re.escape(n), code)]
     for n in missing:
         print(n)
     return 1 if missing else 0

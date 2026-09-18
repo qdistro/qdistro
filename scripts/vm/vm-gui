@@ -562,18 +562,30 @@ deliver_attested_frame() {
         echo "vm-gui: ERROR: refusing to publish a capture to $dst -- it already exists and is not a regular file. It has been left untouched; nothing was captured to that path." >&2
         return 1
     fi
+    local pre_existed=0
+    [ -e "$dst" ] && pre_existed=1
     if declare -f capture_publish_frame >/dev/null 2>&1; then
         capture_publish_frame "$src" "$dst" "$VM" && return 0
         # QUARANTINE ONLY WHAT THIS CALL PUT THERE. Testing `-e` moved whatever
         # already occupied the destination -- a pre-existing DIRECTORY that
         # `cp -T` had correctly refused to overwrite was renamed to
         # `.unattested`, and the error then claimed the frame had been captured
-        # and its bytes recovered there. Both were false (sol, B round 4). The
-        # type check above means anything still here is a regular file this call
-        # wrote or replaced.
-        if [ -f "$dst" ] && [ ! -h "$dst" ]; then
+        # and its bytes recovered there. Both were false (sol, B round 4).
+        #
+        # The type check above does NOT make everything still here ours, which
+        # the sentence that used to stand here claimed. A pre-existing READ-ONLY
+        # regular file is the counter-example: `cp -T` fails EACCES, nothing is
+        # written, and the AGENT's file was being renamed to `.unattested` under
+        # a message saying a frame had been captured and could not be recorded
+        # (fable, B rounds 5 and 6). So the publication is only credited with
+        # bytes that MATCH THE SOURCE: anything else that was already there is
+        # left exactly as it was found.
+        if [ -f "$dst" ] && [ ! -h "$dst" ] \
+           && { [ "$pre_existed" = 0 ] || cmp -s -- "$src" "$dst"; }; then
             mv -fT -- "$dst" "$dst.unattested" 2>/dev/null || rm -f -- "$dst"
             echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; the bytes are at $dst.unattested" >&2
+        elif [ "$pre_existed" = 1 ] && [ -e "$dst" ]; then
+            echo "vm-gui: ERROR: could not publish a capture to $dst -- nothing was written there, and the file already at that path was NOT written by this call, so it has been left untouched" >&2
         else
             echo "vm-gui: ERROR: could not publish a capture to $dst; nothing was written there" >&2
         fi
@@ -650,13 +662,16 @@ capture_usable_screenshot() {
             echo "vm-gui: WARNING: screenshot NOT checked for blankness -- $(screenshot_unusable_reason 5)" >&2
             return 0
         fi
-        # NOT under an image extension: the library attested this candidate
-        # when it captured it, so an in-tree copy carrying the same digest
-        # would be matched to that row and GRADED -- a frame the harness
-        # already judged unusable (blank, wrong window) entering the evidence
-        # set, where it could even satisfy the decoded-frame floor on its own.
-        # The row is written under the `rejected` scope, which the gate counts
-        # NOWHERE, and the bytes remain beside $out for triage.
+        # NOT under an image extension: the gate finds frames BY EXTENSION, so
+        # an image-named copy of a candidate the harness already judged
+        # unusable (blank, wrong window) could be picked up and graded, and
+        # could even satisfy the decoded-frame floor on its own. The candidate
+        # itself carries no row until it is published or refused; on refusal it
+        # gets a `rejected` row, which the gate counts NOWHERE, and the bytes
+        # remain beside $out for triage. (This comment used to explain the name
+        # by saying the library had attested the candidate at capture time.
+        # That model was removed in round 6 and both round-5 reviewers listed
+        # this site; the name is still right, the reason was not.)
         retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected" || {
             rm -rf -- "$scratch"; return 1; }
         echo "vm-gui: screenshot attempt $i/$attempts rejected: $(screenshot_unusable_reason "$rc") (${out}.attempt-${i}.rejected)" >&2
@@ -718,9 +733,10 @@ screenshot_fresh() {
             return 0
         fi
         # Keep the rejected frame beside $out for triage, under a NON-IMAGE
-        # name: the library attested the candidate when it captured it, and an
-        # in-tree copy with the same digest would be matched to that row and
-        # graded. It carries no in-tree ledger row, so deleting it is free.
+        # name, for the reason given in screenshot(): the gate finds frames by
+        # extension, and a refused frame must not be able to enter the evidence
+        # set. Its `rejected` row is counted nowhere, so deleting the bytes is
+        # free. (Same stale attest-at-capture rationale as above, same fix.)
         retain_rejected_candidate "$candidate" "${out}.attempt-${i}.rejected" || {
             rm -rf -- "$scratch"; return 1; }
         echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason (${out}.attempt-${i}.rejected)" >&2
