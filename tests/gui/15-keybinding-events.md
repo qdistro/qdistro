@@ -29,6 +29,15 @@ pgrep -f "http.server 8765" >/dev/null || (
 sleep 1
 qdwin_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
+# C.1 reads `locked=False` from the ctrl socket. Production answers
+# `error: command unavailable` unless the root-owned introspection
+# marker is present (full-20260918T143937Z-3516587). Enable it before
+# drain so cleanup can actually verify the unlock.
+if command -v qdlocker_enable_introspection >/dev/null 2>&1; then
+    qdlocker_enable_introspection \
+        || { echo "FAIL: could not enable locker ctrl introspection"; exit 1; }
+fi
+
 # A previous qdlocker scenario can leave the compositor in a real locked
 # state. In that state global keybindings are intentionally suppressed and
 # the keyboard is routed to the locker as `overlay_key role=2`, which is not
