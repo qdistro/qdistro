@@ -2279,3 +2279,123 @@ EOF
     [[ "$output" == *"rc=2"* ]]
     [[ "$output" == *"denied"* || "$output" == *"Permission"* ]]
 }
+
+# --- screenshot-fresh: the lane that had NO host-side coverage ---------------
+#
+# Until now nothing in this suite drove `screenshot-fresh`; its only user is a
+# VM-only scenario (permissions-gui/05). It carried its own black-only frame
+# check while the `screenshot` lane used screenshot_is_usable, so it could not
+# see an undecodable or a flat frame at all, and a host without ImageMagick
+# could not use it. These pin the unified behaviour.
+
+vmgui_fresh() {
+    QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+    LIBVIRT_DEFAULT_URI=qemu:///session \
+        "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot-fresh "$@"
+}
+
+@test "screenshot-fresh: an UNCHANGED frame is refused, a changed one is published" {
+    install_fake_virsh                     # each call renders distinct bytes
+    run vmgui_fresh "$ADIR/f1.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/f1.png" ]
+    # the same frame as its own baseline: every attempt matches, so it fails
+    run vmgui_fresh "$ADIR/f2.png" "$ADIR/f1.png" 2
+    [ "$status" -eq 0 ]                    # fake virsh renders NEW bytes each call
+    [ -f "$ADIR/f2.png" ]
+}
+
+@test "screenshot-fresh: an UNDECODABLE frame is refused — the old gate could not see it" {
+    # screenshot_is_black returned 'not black' for a corrupt file, so this lane
+    # published it. The unified gate reports it as undecodable.
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+printf 'not an image' > "${@: -1}"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    run vmgui_fresh "$ADIR/bad.png" "" 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"undecodable"* ]]
+    [ ! -f "$ADIR/bad.png" ]
+    [ -f "$ADIR/bad.png.attempt-1.rejected" ]
+}
+
+@test "screenshot-fresh: a FLAT frame is refused — the old gate could not see it either" {
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+magick -size 320x80 xc:'#808080' "${@: -1}"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    run vmgui_fresh "$ADIR/flat.png" "" 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"flat"* ]]
+    [ ! -f "$ADIR/flat.png" ]
+}
+
+@test "screenshot-fresh: a NEAR-BLACK frame is refused, as it always was" {
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+magick -size 320x80 xc:black "${@: -1}"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    run vmgui_fresh "$ADIR/black.png" "" 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"near-black"* ]]
+}
+
+@test "screenshot-fresh: WITHOUT an analyser the frame is delivered and said to be unchecked" {
+    # The old code returned the probe's rc, so a host with no ImageMagick could
+    # not take a fresh screenshot at all -- while the `screenshot` lane
+    # delivered and warned. The freshness check needs no analyser and still runs.
+    #
+    # GETTING THE PREMISE RIGHT TOOK TWO TRIES, both recorded because each was a
+    # test that proved something other than its name. (1) The fake virsh
+    # rendered WITH magick, so stubbing magick broke the CAPTURE (rc=127), not
+    # the analyser. (2) A magick stub that exits non-zero is still FOUND by
+    # `command -v`, so the frame is classified UNDECODABLE, not unanalysable --
+    # a broken analyser and a corrupt frame are indistinguishable to this code,
+    # which is a real limit of the design and not what this test is for. The
+    # only honest way to reach the no-analyser branch is a PATH with no magick
+    # on it at all, which is what the symlink farm below builds.
+    local farm="$TDIR/farm"
+    mkdir -p "$farm"
+    local c p
+    for c in bash sh mktemp sha256sum awk cp rm date stat readlink flock \
+             grep tail head sed dirname chmod mv cat id sleep find sort cut tr wc; do
+        p=$(command -v "$c" 2>/dev/null) && ln -sf "$p" "$farm/$c"
+    done
+    ! command -v magick >/dev/null 2>&1 || [ ! -e "$farm/magick" ]
+    cat > "$farm/virsh" <<'EOF'
+#!/usr/bin/env bash
+out="${@: -1}"
+printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0\0\0\012IDATx\234c\370\17\0\1\1\1\0\30\335\215\260\0\0\0\0IEND\256B`\202' > "$out"
+printf '\n%s\n' "$(date +%s%N)" >> "$out"
+EOF
+    chmod +x "$farm/virsh"
+    run env -i PATH="$farm" HOME="$TDIR" \
+        QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
+        LIBVIRT_DEFAULT_URI=qemu:///session \
+        "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot-fresh "$ADIR/unchecked.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/unchecked.png" ]
+    [[ "$output" == *"NOT checked for blankness"* ]]
+}
+
+@test "screenshot-fresh: a BROKEN analyser reads as undecodable, not as absent" {
+    # Stated because it is a limit, not a bug: `command -v` finds a magick that
+    # cannot run, every frame then fails to decode, and the lane refuses them
+    # all. The operator sees "undecodable", which is what the code can tell.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    install_fake_virsh
+    cat > "$TDIR/bin/magick" <<'EOF'
+#!/bin/sh
+exit 127
+EOF
+    chmod +x "$TDIR/bin/magick"
+    run vmgui_fresh "$ADIR/broken.png" "" 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"undecodable"* ]]
+}

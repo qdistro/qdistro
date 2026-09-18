@@ -478,19 +478,6 @@ click_confirm() {
     echo "post-click: $post"
 }
 
-# Returns success if FILE is overwhelmingly black. A valid dark-theme TUI
-# frame still has substantial bright text/chrome; a stale black qterminal
-# capture from virsh screenshot measured 12.6% bright pixels. Keep the 15%
-# cutoff deliberately conservative and leave the raw attempts beside OUT for
-# triage rather than silently accepting a suspect frame.
-screenshot_is_black() {
-    local file=$1 bright
-    command -v magick >/dev/null 2>&1 || return 2
-    bright=$(magick "$file" -colorspace gray -threshold 10% \
-        -format '%[fx:mean]' info: 2>/dev/null) || return 2
-    awk -v bright="$bright" 'BEGIN { exit !(bright < 0.15) }'
-}
-
 # Is FILE a frame an agent could actually form a verdict from?
 #
 # THREE WAYS A CAPTURE IS USELESS, and they are NOT the same failure:
@@ -662,7 +649,8 @@ capture_usable_screenshot() {
         candidate="$scratch/attempt-${i}.png"
         capture_virsh_shot "$VM" "$candidate" \
             || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
-        screenshot_is_usable "$candidate"; rc=$?
+        rc=0
+        screenshot_is_usable "$candidate" || rc=$?
         if [ "$rc" -eq 0 ]; then
             deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
@@ -698,7 +686,7 @@ capture_usable_screenshot() {
 
 screenshot_fresh() {
     local out=$1 baseline=${2:-} attempts=${3:-3}
-    local i candidate hash baseline_hash reason
+    local i candidate hash baseline_hash reason rc unchecked
     [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || {
         echo "vm-gui: screenshot-fresh attempts must be a positive integer" >&2
         return 2
@@ -725,24 +713,44 @@ screenshot_fresh() {
         candidate="$scratch/attempt-${i}.png"
         capture_virsh_shot "$VM" "$candidate" \
             || { local caprc=$?; rm -rf -- "$scratch"; return "$caprc"; }
+        # ONE USABILITY GATE FOR BOTH LANES. This loop used to carry its own
+        # black-only check (`screenshot_is_black`, a hard-coded 0.15 cutoff),
+        # while the `screenshot` lane used screenshot_is_usable. Two gates meant
+        # this lane could not see an UNDECODABLE or a FLAT frame at all, and the
+        # cutoff here ignored QCI_FRAME_BRIGHT_MIN. The near-black behaviour is
+        # unchanged, because FRAME_BRIGHT_MIN defaults to the same 0.15.
         reason=""
-        if screenshot_is_black "$candidate"; then
-            reason="near-black"
-        else
-            local black_rc=$?
-            if [ "$black_rc" -ne 1 ]; then
-                echo "vm-gui: cannot analyse screenshot brightness (requires ImageMagick magick)" >&2
-                rm -rf -- "$scratch"
-                return "$black_rc"
-            fi
+        unchecked=""
+        # `|| rc=$?`, NOT `; rc=$?`: this runs under `set -e`, so a bare
+        # `; rc=$?` lets the first unusable frame kill vm-gui outright -- no
+        # message, no retry, exit status 3. The `screenshot` lane survived that
+        # only because its caller writes `... || exit $?`, which disables errexit
+        # for the whole call; screenshot-fresh has no such caller and died. Both
+        # sites are written the safe way rather than relying on the caller.
+        rc=0
+        screenshot_is_usable "$candidate" || rc=$?
+        case "$rc" in
+            0) ;;
+            5) unchecked=1 ;;   # no analyser -- see below
+            *) reason=$(screenshot_unusable_reason "$rc") ;;
+        esac
+        # The baseline comparison needs no analyser, so it still runs when the
+        # frame could not be judged.
+        if [ -z "$reason" ] && [ -n "$baseline_hash" ]; then
             hash=$(sha256sum "$candidate" | awk '{print $1}')
-            if [ -n "$baseline_hash" ] && [ "$hash" = "$baseline_hash" ]; then
-                reason="unchanged-baseline"
-            fi
+            [ "$hash" = "$baseline_hash" ] && reason="unchanged-baseline"
         fi
         if [ -z "$reason" ]; then
             deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
+            # A MISSING ANALYSER NO LONGER FAILS THIS LANE. It used to return
+            # the probe's own rc, so a host without ImageMagick could not take a
+            # fresh screenshot at all -- while the `screenshot` lane delivered
+            # the frame and said plainly it was unchecked. Same choice here: the
+            # freshness guarantee (bytes differ from the baseline) is still
+            # enforced, and only the blankness judgement is absent.
+            [ -n "$unchecked" ] && \
+                echo "vm-gui: WARNING: screenshot NOT checked for blankness -- $(screenshot_unusable_reason 5)" >&2
             echo "$out"
             return 0
         fi
@@ -757,7 +765,7 @@ screenshot_fresh() {
         [ "$i" -lt "$attempts" ] && sleep 1
     done
     rm -rf -- "$scratch"
-    echo "vm-gui: no fresh non-black screenshot after $attempts attempts; attempts retained beside $out" >&2
+    echo "vm-gui: no fresh usable screenshot after $attempts attempts; attempts retained beside $out" >&2
     return 1
 }
 
