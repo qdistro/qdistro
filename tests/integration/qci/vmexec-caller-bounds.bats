@@ -981,8 +981,28 @@ qdwin_gone'
 }
 
 @test "callee audit: a guard does not reach across a newline to the next call" {
+    # What this pins is the REGION, not GUARD's whitespace class: a bare guard
+    # covers the rest of its own line, so a next-line call is outside it even
+    # if the name matched. Widening `[ \t]+` to `\s+` still leaves this green
+    # -- verified by mutation, which is why the test below exists (fable, B
+    # round 8, who said this test pinned the iteration rather than the class).
     run audit 'declare -f qdwin_a
 qdwin_b'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_b ]
+}
+
+@test "callee audit: a guard's NAME LIST stops at the end of its line" {
+    # The class matters where the region is wide enough to hide the leak: as
+    # the condition of an `if`, the guard covers the whole construct. With
+    # `\s+` the name list swallows `qdwin_b` off the next line and the call in
+    # the body is silently suppressed -- a false negative, the expensive
+    # direction. Mutating `[ \t]+` -> `\s+` in GUARD turns this test red.
+    run audit 'if declare -f qdwin_a
+qdwin_b
+then
+  qdwin_b
+fi'
     [ "$status" -eq 1 ]
     [ "$output" = qdwin_b ]
 }
@@ -1001,6 +1021,25 @@ fi'
 qdwin_count+=1
 qdwin_arr[0]=x'
     [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a case PATTERN is not a call" {
+    # `qdwin_ghost)` is a label, not an invocation. blank_case_patterns() is
+    # what makes that true, and until 2026-09-18 nothing pinned it: a mutation
+    # battery that neutered every regex in the auditor in turn found this one
+    # (and only this one) changing a verdict with no test noticing. Neuter
+    # CASE_PATTERN and `qdwin_ghost` is reported as an undefined callee.
+    run audit 'f() { :; }
+case "$x" in
+  qdwin_ghost) f ;;
+esac'
+    [ "$status" -eq 0 ]
+    # ...but the BODY of the arm still is a call.
+    run audit 'case "$x" in
+  label) qdwin_gone ;;
+esac'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
 }
 
 @test "callee audit: a call nested inside arithmetic is seen" {

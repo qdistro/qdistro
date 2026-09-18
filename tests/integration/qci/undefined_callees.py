@@ -102,9 +102,13 @@ PREFIXED_CALL = re.compile(PREFIXED + r'(?:!\s+)?(' + PREFIX + r')\b' + ASSIGN, 
 # `qdwin_gone` reported nothing at all (sol, B round 6). Arithmetic bodies are
 # blanked, and the call patterns simply refuse a name followed by `=`.
 ARITH = re.compile(r'\$?\(\((.*?)\)\)', re.S)
-# Inside an arithmetic body, a nested `$( ... )` IS a command. Blanking the body
-# wholesale erased it (fable, B round 6); only the arithmetic text is blanked.
-SUBST_IN_ARITH = re.compile(r'\$\([^()]*\)')
+# Inside an arithmetic body, a nested `$( ... )` IS a command, and blanking the
+# body wholesale erased it (fable, B round 6). That was once handled by scanning
+# the body for substitutions and blanking only around them; it is now handled by
+# leaving such a body ENTIRELY alone (see _blank_arith). The scanner survived the
+# change as dead code -- its regex needed a `$(` that the guard above it had
+# already excluded -- and was removed once a mutation battery showed that
+# neutering it changed no test. Removed 2026-09-18, not replaced.
 # The argument can itself contain quoted substitutions, so take the rest of the
 # line and drop the quoting rather than try to match balanced quotes.
 SOURCE = re.compile(r'^\s*(?:\.|source)\s+(.+?)\s*(?:\|\||&&|;|$)', re.M)
@@ -408,14 +412,10 @@ def main():
         # that arithmetic variables in such an expression may be reported.
         if '$(' in body:
             return m.group(0)
-        kept = []
-        pos = 0
-        for sub in SUBST_IN_ARITH.finditer(body):
-            kept.append(' ' * (sub.start() - pos))
-            kept.append(sub.group(0))
-            pos = sub.end()
-        kept.append(' ' * (len(body) - pos))
-        return '  ' + ''.join(kept) + '  '
+        # No substitution can remain here, so the whole body is arithmetic and
+        # blanks out. Same length in, same length out: GUARD regions are
+        # character offsets into this string.
+        return '  ' + ' ' * len(body) + '  '
     code = ARITH.sub(_blank_arith, code)
     code = blank_case_patterns(code)
     calls = {}
