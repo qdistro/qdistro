@@ -487,13 +487,37 @@ click_confirm() {
 #      the OCR gate and was noticed by accident. It no longer is, so readability
 #      has to be checked on its own or an undecodable frame reaches the agent
 #      looking like a normal capture.
-#   3  NEAR-BLACK -- the stale-framebuffer capture this harness has always had.
-#      Kept at the historical, deliberately conservative 15% bright-pixel cutoff;
-#      a real dark-theme TUI frame measured well above it and a stale black
-#      qterminal capture measured 12.6%.
-#   4  FLAT -- near-zero variance across the whole image, i.e. one colour. This
-#      catches an all-WHITE or all-grey frame, which is just as empty as a black
-#      one and which the brightness test alone passes happily.
+#   3  NEAR-BLACK -- an empty framebuffer: no structure AND dark.
+#   4  FLAT -- no structure, but not dark: an all-WHITE or all-grey frame,
+#      just as empty and just as useless.
+#
+# EMPTINESS IS DECIDED BY STRUCTURE, NOT BY BRIGHTNESS, and brightness only
+# picks which of the two labels an empty frame gets. This is the opposite of
+# what the check did until 2026-09-18, and the reversal is measured, not a
+# preference. The old rule refused any frame under 15% bright pixels, with a
+# comment claiming "a real dark-theme TUI frame measured well above it and a
+# stale black qterminal capture measured 12.6%". The first live capture ever
+# taken through this gate refused SIX consecutive frames of the qdlocker lock
+# screen -- clock, date, password field, all plainly legible -- at 3.7% bright.
+# The stale BLACK frame the cutoff was chosen for is BRIGHTER than a good dark
+# one, so no brightness threshold can separate them.
+#
+# Structure separates them completely. Over 700 frames harvested by the
+# 2026-09-16/17 runs: 169 sit under the 15% cutoff, and their standard
+# deviation takes exactly two values among the genuinely empty ones -- 0.00000
+# (4 frames) and 0.00625 (98, the signature of a black frame with a mouse
+# cursor) -- while the next value up is 0.01792. Nothing occupies the gap. The
+# 67 remaining sub-15% frames are real content (qdlocker steps, qdshell
+# panels, annotated click targets) that the old rule threw away: 9.6% of every
+# frame the harness takes.
+#
+# WHAT THIS GIVES UP, stated because it is a real cost: the brightness cutoff
+# was also a crude staleness proxy, and a stale frame showing real content now
+# passes the blankness check. Staleness is screenshot_fresh's baseline-hash
+# job, and the plain `screenshot` lane has no baseline -- so for that lane the
+# proxy is gone rather than replaced. Tune with QCI_FRAME_FLAT_SIGMA rather
+# than by restoring a brightness floor.
+#
 # Return 0 when the frame is usable, or one of the codes above. Return 5 when
 # ImageMagick is absent: "cannot tell" must never be silently read as "fine".
 FRAME_FLAT_SIGMA=${QCI_FRAME_FLAT_SIGMA:-0.01}
@@ -503,12 +527,14 @@ screenshot_is_usable() {
     command -v magick >/dev/null 2>&1 || return 5
     dims=$(magick identify -quiet -format '%w %h' "$file" 2>/dev/null) || return 2
     case "$dims" in ''|*' 0'|'0 '*) return 2 ;; esac
+    sigma=$(magick "$file" -colorspace gray -format '%[fx:standard_deviation]' info: 2>/dev/null) || return 2
+    # Structured? Then it is a frame, however dark it looks.
+    awk -v s="$sigma" -v m="$FRAME_FLAT_SIGMA" 'BEGIN { exit !(s < m) }' || return 0
     bright=$(magick "$file" -colorspace gray -threshold 10% \
         -format '%[fx:mean]' info: 2>/dev/null) || return 2
+    # Empty. Dark empty is near-black (3); bright empty is flat (4).
     awk -v b="$bright" -v m="$FRAME_BRIGHT_MIN" 'BEGIN { exit !(b < m) }' && return 3
-    sigma=$(magick "$file" -colorspace gray -format '%[fx:standard_deviation]' info: 2>/dev/null) || return 2
-    awk -v s="$sigma" -v m="$FRAME_FLAT_SIGMA" 'BEGIN { exit !(s < m) }' && return 4
-    return 0
+    return 4
 }
 
 # Human-readable reason for a screenshot_is_usable code.

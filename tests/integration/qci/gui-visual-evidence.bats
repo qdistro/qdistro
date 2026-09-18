@@ -2334,6 +2334,39 @@ EOF
     [ ! -f "$ADIR/flat.png" ]
 }
 
+@test "a DARK frame with structure is USABLE -- emptiness is not brightness" {
+    # THE ONLY TEST HERE THAT CAN TELL THE 2026-09-18 RULE FROM THE ONE BEFORE
+    # IT. Every other blankness test plants a UNIFORM frame (xc:black,
+    # xc:'#808080'), which both rules classify identically -- so the whole suite
+    # stayed green across a behavioural inversion of the gate, which is exactly
+    # the failure this workstream keeps finding.
+    #
+    # It is the live finding turned into a host-side guard. The first real
+    # capture ever taken through this gate was the qdlocker lock screen, plainly
+    # legible, at 3.7% bright pixels -- and the old 15% brightness floor refused
+    # it, six attempts running. This frame is the same shape: dark background,
+    # light text, ~0.3% bright, sigma ~0.038.
+    #
+    # Restore the brightness-first rule and this test fails while the other
+    # three blankness tests stay green.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+magick -size 640x400 xc:'#0d0b1f' -fill '#e8e4f0' -pointsize 48 \
+    -gravity center -annotate 0 "12:15 $RANDOM" \
+    -define png:exclude-chunks=date,time "${@: -1}"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    run vmgui_screenshot "$ADIR/darkui.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/darkui.png" ]
+    # ...and the same frame is accepted by the freshness lane, which shares the
+    # gate since 134a7fc.
+    run vmgui_fresh "$ADIR/darkui2.png" "" 2
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/darkui2.png" ]
+}
+
 @test "screenshot-fresh: a NEAR-BLACK frame is refused, as it always was" {
     if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
     cat > "$TDIR/bin/virsh" <<'EOF'
