@@ -957,3 +957,54 @@ qdwin_gone'
     [ "$status" -eq 1 ]
     [ "$output" = qdwin_gone ]
 }
+
+# Round-7 review: three audit defects, two of them claims that were not wired.
+@test "callee audit: a function defined with the KEYWORD form is defined" {
+    # DEF_KW was compiled and never referenced, so `function name {` was
+    # reported as undefined while the commit message said it was handled
+    # (sol and fable, B round 7).
+    run audit 'function qdwin_local {
+    :
+}
+qdwin_local'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: an UNRELATED declare -f does not suppress a real call" {
+    # File-wide erasure again, surviving in the guard filter (sol, B round 7).
+    run audit 'unused_probe() {
+    declare -f qdwin_gone >/dev/null
+}
+qdwin_gone'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}
+
+@test "callee audit: a guard does not reach across a newline to the next call" {
+    run audit 'declare -f qdwin_a
+qdwin_b'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_b ]
+}
+
+@test "callee audit: a REAL guard still marks an optional dependency, inline or in an if" {
+    run audit 'declare -f qdwin_opt >/dev/null 2>&1 && qdwin_opt'
+    [ "$status" -eq 0 ]
+    run audit 'if declare -f qdwin_opt >/dev/null 2>&1; then
+    qdwin_opt
+fi'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: arithmetic commands and += / array assignments are not calls" {
+    run audit '(( qdwin_n = 1 ))
+qdwin_count+=1
+qdwin_arr[0]=x'
+    [ "$status" -eq 0 ]
+}
+
+@test "callee audit: a call nested inside arithmetic is seen" {
+    run audit 'x=$(($(qdwin_gone)))'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_gone ]
+}

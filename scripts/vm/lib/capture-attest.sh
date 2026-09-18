@@ -221,12 +221,25 @@ capture_virsh_shot() {
 # for it. `-T` matters: plain `cp SRC DEST` puts SRC's basename INSIDE DEST when
 # DEST already exists as a directory, which silently produced a graded frame at
 # a path nobody intended (sol, B round 3). Args: src dst [vm].
+#
+# TWO DISTINCT FAILURES, TWO DISTINCT EXIT CODES, because the caller must clean
+# up differently and cannot work out which happened afterwards:
+#   2  the COPY failed -- nothing was written, and whatever is at $dst was put
+#      there by somebody else;
+#   1  the copy succeeded and the LEDGER ROW did not -- the bytes at $dst are
+#      ours and are unattested.
+# vm-gui used to infer this by comparing the destination's content to the
+# source, which proves only what the bytes ARE, not who wrote them: a
+# pre-existing read-only file whose content already equalled the source was
+# quarantined under a message saying a frame had been captured, when `cp` had
+# in fact failed with EACCES and nothing was taken (sol and fable, B round 7).
 capture_publish_frame() {
     local src=${1:?capture_publish_frame: src} dst=${2:?capture_publish_frame: dst}
     local vm=${3:-${VM:-${VMNAME:-}}} rc=0
-    cp -T -- "$src" "$dst" || return 1
+    cp -T -- "$src" "$dst" || return 2
     _qci_capture_write_row "$dst" "$vm" "" || rc=$?
-    return "$rc"
+    [ "$rc" -eq 0 ] || return 1
+    return 0
 }
 
 # Record a candidate the capture tool JUDGED UNUSABLE (blank, stale, wrong

@@ -562,30 +562,33 @@ deliver_attested_frame() {
         echo "vm-gui: ERROR: refusing to publish a capture to $dst -- it already exists and is not a regular file. It has been left untouched; nothing was captured to that path." >&2
         return 1
     fi
-    local pre_existed=0
-    [ -e "$dst" ] && pre_existed=1
+    local prc=0
     if declare -f capture_publish_frame >/dev/null 2>&1; then
         capture_publish_frame "$src" "$dst" "$VM" && return 0
+        prc=$?
+        # rc=2 is "the copy failed", which is knowledge only the publisher has.
+        # Round 7 tried to recover it here by comparing the destination's
+        # CONTENT to the source -- which proves what the bytes are, not who
+        # wrote them, so a pre-existing read-only file that happened to hold the
+        # same bytes was quarantined under a message claiming a capture (sol and
+        # fable, B round 7). Nothing was written, so nothing here is ours.
+        if [ "$prc" -eq 2 ]; then
+            echo "vm-gui: ERROR: could not publish a capture to $dst -- nothing was written there. Anything already at that path was put there by something else and has been left untouched." >&2
+            return 1
+        fi
         # QUARANTINE ONLY WHAT THIS CALL PUT THERE. Testing `-e` moved whatever
         # already occupied the destination -- a pre-existing DIRECTORY that
         # `cp -T` had correctly refused to overwrite was renamed to
         # `.unattested`, and the error then claimed the frame had been captured
         # and its bytes recovered there. Both were false (sol, B round 4).
         #
-        # The type check above does NOT make everything still here ours, which
-        # the sentence that used to stand here claimed. A pre-existing READ-ONLY
-        # regular file is the counter-example: `cp -T` fails EACCES, nothing is
-        # written, and the AGENT's file was being renamed to `.unattested` under
-        # a message saying a frame had been captured and could not be recorded
-        # (fable, B rounds 5 and 6). So the publication is only credited with
-        # bytes that MATCH THE SOURCE: anything else that was already there is
-        # left exactly as it was found.
-        if [ -f "$dst" ] && [ ! -h "$dst" ] \
-           && { [ "$pre_existed" = 0 ] || cmp -s -- "$src" "$dst"; }; then
+        # Past here the copy SUCCEEDED and only the row failed, so the bytes at
+        # $dst are ours and are unattested. (The type check above does not by
+        # itself make them ours -- that is what the publisher's exit code is
+        # for.)
+        if [ -f "$dst" ] && [ ! -h "$dst" ]; then
             mv -fT -- "$dst" "$dst.unattested" 2>/dev/null || rm -f -- "$dst"
             echo "vm-gui: ERROR: captured $dst but could NOT record it in the capture ledger, so it is NOT evidence; the bytes are at $dst.unattested" >&2
-        elif [ "$pre_existed" = 1 ] && [ -e "$dst" ]; then
-            echo "vm-gui: ERROR: could not publish a capture to $dst -- nothing was written there, and the file already at that path was NOT written by this call, so it has been left untouched" >&2
         else
             echo "vm-gui: ERROR: could not publish a capture to $dst; nothing was written there" >&2
         fi

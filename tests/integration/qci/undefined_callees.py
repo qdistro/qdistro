@@ -61,7 +61,8 @@ PREFIXED = (r'(?:^|[;&|({`]|\|\||&&|\b' + KEYWORD + r'\b)\s*'
 # and was missed at a LIVE site. A backtick opens a substitution. `$` is
 # excluded before `{` so that `${qdwin_x}` -- a parameter expansion, not a
 # command -- is not reported (both reviewers, B round 3).
-ASSIGN = r'(?!=)'   # `qdwin_dir=/tmp/x` is an assignment, not a call
+# `qdwin_dir=/tmp/x`, `qdwin_count+=1` and `qdwin_arr[0]=x` are assignments.
+ASSIGN = r'(?!\+?=|\[[^]\n]*\]\+?=)'
 CALL = re.compile(
     r'(?:^|(?<!\$)[;&|({`]|\$\(|\|\||&&|\b' + KEYWORD + r'\b)\s*(?:!\s+)?('
     + PREFIX + r')\b' + ASSIGN,
@@ -77,7 +78,7 @@ PREFIXED_CALL = re.compile(PREFIXED + r'(?:!\s+)?(' + PREFIX + r')\b' + ASSIGN, 
 # file's call set, so a file that assigned `qdwin_gone=1` and then CALLED
 # `qdwin_gone` reported nothing at all (sol, B round 6). Arithmetic bodies are
 # blanked, and the call patterns simply refuse a name followed by `=`.
-ARITH = re.compile(r'\$\(\((.*?)\)\)', re.S)
+ARITH = re.compile(r'\$?\(\((.*?)\)\)', re.S)
 # Inside an arithmetic body, a nested `$( ... )` IS a command. Blanking the body
 # wholesale erased it (fable, B round 6); only the arithmetic text is blanked.
 SUBST_IN_ARITH = re.compile(r'\$\([^()]*\)')
@@ -245,7 +246,8 @@ def defs_of(path, seen):
         text = open(path, encoding='utf-8', errors='replace').read()
     except OSError:
         return set()
-    names = set(DEF.findall(strip_comments(text)))
+    stripped = strip_comments(text)
+    names = set(DEF.findall(stripped)) | set(DEF_KW.findall(stripped))
     base = os.path.dirname(path)
     for raw in SOURCE.findall(strip_comments(text)):
         resolved = resolve(raw.replace('"', '').rstrip(';'), path, text)
@@ -269,12 +271,49 @@ def blank_case_patterns(text):
     return CASE_PATTERN.sub(lambda m: ' ' * len(m.group(1)) + ')', text)
 
 
+GUARD = re.compile(r'(?:declare -[fF]|command -v)[ \t]+'
+                   r'((?:[A-Za-z_][A-Za-z0-9_]*[ \t]+)*[A-Za-z_][A-Za-z0-9_]*)')
+
+
+def guard_regions(code):
+    """Map each guarded name to the 0-based line ranges its guard covers.
+
+    A guard on its own line covers that line (`declare -f f >/dev/null && f`).
+    A guard used as an `if` condition covers that `if`'s body, because the
+    real call sites in this tree put the call on the following line.
+    """
+    lines = code.split('\n')
+    out = {}
+    for i, line in enumerate(lines):
+        m = GUARD.search(line)
+        if not m:
+            continue
+        hi = i
+        if re.match(r'\s*(?:if|elif)\b', line):
+            depth = 0
+            for j in range(i, len(lines)):
+                depth += len(re.findall(r'(?:^|[;&|\s])if\b', lines[j]))
+                depth -= len(re.findall(r'(?:^|[;&|\s])fi\b', lines[j]))
+                hi = j
+                if depth <= 0:
+                    break
+        for name in m.group(1).split():
+            out.setdefault(name, []).append((i, hi))
+    return out
+
+
 def main():
     path = sys.argv[1]
     code = strip_noise(open(path, encoding='utf-8', errors='replace').read())
     defined = defs_of(path, set())
     def _blank_arith(m):
         body = m.group(1)
+        # An arithmetic body containing a command substitution is left ENTIRELY
+        # alone: `$(( $(f) ))` closes on the substitution's own `)`, so the
+        # blanking below cannot find it and would erase a real call. The cost is
+        # that arithmetic variables in such an expression may be reported.
+        if '$(' in body:
+            return m.group(0)
         kept = []
         pos = 0
         for sub in SUBST_IN_ARITH.finditer(body):
@@ -285,19 +324,29 @@ def main():
         return '  ' + ''.join(kept) + '  '
     code = ARITH.sub(_blank_arith, code)
     code = blank_case_patterns(code)
-    called = (set(CALL.findall(code)) | set(CASE_ARM.findall(code))
-              | set(PREFIXED_CALL.findall(code)))
-    missing = sorted({n for n in called if n not in defined})
+    calls = {}
+    for rx in (CALL, CASE_ARM, PREFIXED_CALL):
+        for m in rx.finditer(code):
+            calls.setdefault(m.group(1), set()).add(code.count('\n', 0, m.start(1)))
+    missing = sorted({n for n in calls if n not in defined})
     # A call guarded by `declare -f NAME` is an intentional optional dependency.
     # Checked against the SAME stripped representation as the calls: reading raw
     # text let the phrase inside a comment suppress a real call (sol, round 4).
     # `declare -f a b` returns 1 if ANY name is undefined, so a multi-name
     # guard is a real guard for each of them; `declare -F` and `command -v` are
     # the same intent (fable, B round 6).
-    guard = (r'(?:declare -[fF]|command -v)\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+)*'
-             + r'%s\b')
+    #
+    # THE GUARD COVERS A REGION, NOT A FILE. Round 7 suppressed a name whenever
+    # the phrase appeared ANYWHERE in the file, so an unrelated
+    # `declare -f qdwin_gone` inside some other function silenced a real,
+    # unguarded call -- the same file-wide-erasure shape round 7 had just fixed
+    # for assignments, surviving one filter along (sol, B round 7). A guard now
+    # covers its own line, and, when it is the condition of an `if`, that `if`'s
+    # body. A name is suppressed only if EVERY call to it is inside one.
+    guarded = guard_regions(code)
     missing = [n for n in missing
-               if not re.search(guard % re.escape(n), code)]
+               if not all(any(lo <= ln <= hi for lo, hi in guarded.get(n, ()))
+                          for ln in calls[n])]
     for n in missing:
         print(n)
     return 1 if missing else 0

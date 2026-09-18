@@ -2054,6 +2054,65 @@ EOF
     [[ "$output" == *"only 1 capture"* ]]
 }
 
+@test "D1 equal bytes: a read-only file holding the SOURCE's bytes is still not ours" {
+    # Round 7 recovered "did the copy happen?" by comparing the destination's
+    # CONTENT to the source. That proves what the bytes ARE, not who wrote them:
+    # when the pre-existing read-only file already held identical bytes, `cp`
+    # failed with EACCES, nothing was captured, and the agent's file was
+    # quarantined anyway under a message claiming a capture (sol and fable,
+    # B round 7). The publisher now reports WHICH half failed.
+    #
+    # The round-7 test could not reach this: its source and destination differ,
+    # so its `cmp` is necessarily false.
+    printf 'identical bytes\n' > "$TDIR/src.png"
+    printf 'identical bytes\n' > "$ADIR/s1.png"
+    chmod 0444 "$ADIR/s1.png"
+    run bash -c '
+        set +e
+        source "$1" testvm wait >/dev/null 2>&1
+        set +e
+        VM=testvm
+        QCI_GUI_CAPTURE_LOG=/nonexistent/ledger.tsv
+        export QCI_GUI_CAPTURE_LOG
+        deliver_attested_frame "$2" "$3"
+        echo "rc=$?"
+    ' _ "$REPO_ROOT/scripts/vm/vm-gui" "$TDIR/src.png" "$ADIR/s1.png"
+    [[ "$output" == *"rc=1"* ]]
+    [[ "$output" != *"captured"*"could NOT record"* ]]
+    [[ "$output" == *"left untouched"* ]]
+    [ ! -e "$ADIR/s1.png.unattested" ]
+    [ -f "$ADIR/s1.png" ]
+    [ "$(cat "$ADIR/s1.png")" = "identical bytes" ]
+}
+
+@test "publisher: a failed COPY and a failed ROW are distinguishable to the caller" {
+    # The fact vm-gui needs and cannot reconstruct afterwards. rc=2 copy, rc=1
+    # row (sol and fable, B round 7).
+    printf 'bytes' > "$TDIR/src.png"
+    mkdir -p "$ADIR/adir.png"          # cp -T refuses to overwrite a directory
+    run bash -c '
+        set +e
+        . "$1"
+        capture_publish_frame "$2" "$3" testvm >/dev/null 2>&1
+        echo "copyfail=$?"
+    ' _ "$CAPLIB" "$TDIR/src.png" "$ADIR/adir.png"
+    [ "$output" = "copyfail=2" ]
+    # An ABSENT ledger is a documented silent success (an ordinary by-hand run
+    # outside qci), so it cannot produce a row failure. A ledger bound to
+    # ANOTHER VM refuses the row, which is the real shape.
+    run bash -c '
+        set +e
+        QCI_GUI_CAPTURE_LOG="$4"
+        export QCI_GUI_CAPTURE_LOG
+        . "$1"
+        capture_publish_frame "$2" "$3" a-neighbours-vm >/dev/null 2>&1
+        echo "rowfail=$?"
+    ' _ "$CAPLIB" "$TDIR/src.png" "$TDIR/dest.png" "$CAPLOG"
+    [ "$output" = "rowfail=1" ]
+    # the copy DID happen in the second case, so the bytes are ours
+    [ -f "$TDIR/dest.png" ]
+}
+
 @test "D1: a read-only pre-existing file is left alone, and nothing claims a capture" {
     # `cp -T` fails EACCES, so nothing is written -- but the AGENT's file was
     # renamed to `.unattested` under a message saying a frame had been captured
