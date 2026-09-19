@@ -2288,26 +2288,77 @@ EOF
 # see an undecodable or a flat frame at all, and a host without ImageMagick
 # could not use it. These pin the unified behaviour.
 
+install_static_virsh() {
+    # Renders IDENTICAL bytes on every call, which install_fake_virsh cannot
+    # do (it stamps `date +%s%N` into the frame). Without this there is no way
+    # to present screenshot-fresh with an unchanged frame at all.
+    # Render ONCE, then copy. Re-running `magick` per call is not static:
+    # ImageMagick stamps date:create/date:modify into the PNG, so two renders
+    # of the same picture differ in bytes and the baseline never matches --
+    # which is exactly the trap that made the original combined test vacuous.
+    magick -size 320x80 xc:white -pointsize 24 -fill black \
+        -annotate +10+40 "static frame" -strip "$TDIR/static.png"
+    cat > "$TDIR/bin/virsh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+for a in "$@"; do out="$a"; done
+cp -- "$TDIR_FOR_STATIC/static.png" "$out"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    export TDIR_FOR_STATIC="$TDIR"
+}
+
 vmgui_fresh() {
     QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
     LIBVIRT_DEFAULT_URI=qemu:///session \
         "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot-fresh "$@"
 }
 
-@test "screenshot-fresh: an UNCHANGED frame is refused, a changed one is published" {
+@test "screenshot-fresh: a CHANGED frame is published" {
     install_fake_virsh                     # each call renders distinct bytes
     run vmgui_fresh "$ADIR/f1.png"
     [ "$status" -eq 0 ]
     [ -f "$ADIR/f1.png" ]
-    # the same frame as its own baseline: every attempt matches, so it fails
+    # A baseline the capture cannot match: fake virsh stamps the time into
+    # every frame, so attempt 1 already differs and is published.
     run vmgui_fresh "$ADIR/f2.png" "$ADIR/f1.png" 2
-    [ "$status" -eq 0 ]                    # fake virsh renders NEW bytes each call
+    [ "$status" -eq 0 ]
     [ -f "$ADIR/f2.png" ]
 }
 
-@test "screenshot-fresh: an UNDECODABLE frame is refused — the old gate could not see it" {
-    # screenshot_is_black returned 'not black' for a corrupt file, so this lane
-    # published it. The unified gate reports it as undecodable.
+@test "screenshot-fresh: an UNCHANGED frame is refused" {
+    # This is the half the combined test NEVER exercised. It ran under
+    # install_fake_virsh, whose every frame carries `date +%s%N`, so no
+    # attempt could ever match its baseline -- it asserted success twice and
+    # would have stayed green with baseline comparison deleted outright (sol,
+    # B round 11). A static fixture is the only way to present the unchanged
+    # case, so the assertion has to come with its own virsh.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    install_static_virsh
+    run vmgui_fresh "$ADIR/s1.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/s1.png" ]
+    # Same bytes as the baseline on every retry: never fresh, so refused.
+    run vmgui_fresh "$ADIR/s2.png" "$ADIR/s1.png" 2
+    [ "$status" -ne 0 ]
+    [ ! -f "$ADIR/s2.png" ]
+}
+
+@test "screenshot-fresh: an UNDECODABLE frame is refused AS SUCH, not as a missing analyser" {
+    # THE OLD LANE ALSO REFUSED THIS FRAME. An earlier version of this comment
+    # said it "published it"; that is false, checked against d077fe0:
+    # screenshot_is_black returned 2 on decode failure, and the caller did
+    # `[ "$black_rc" -ne 1 ] && return "$black_rc"`, so a corrupt file was
+    # refused (sol, B11 -- the finding was correct and C2 initially missed it).
+    #
+    # What the unified gate changes is the DIAGNOSIS, and that is what this
+    # test pins. The old lane reported every non-1 code as "cannot analyse
+    # screenshot brightness (requires ImageMagick magick)" -- so a corrupt
+    # frame and an absent ImageMagick were indistinguishable in the log. The
+    # gate now separates them: 2 is undecodable, 5 is no analyser, and the two
+    # are graded differently (see the WITHOUT-an-analyser test below, where
+    # the frame is DELIVERED and flagged unchecked rather than refused).
     cat > "$TDIR/bin/virsh" <<'EOF'
 #!/usr/bin/env bash
 printf 'not an image' > "${@: -1}"
@@ -2418,6 +2469,16 @@ EOF
 }
 
 @test "screenshot-fresh: a BROKEN analyser reads as undecodable, not as absent" {
+    # THIS TEST DOES REACH THE ANALYSER, despite two reviews saying it cannot
+    # (sol, B11 and again in C2: "capture fails before screenshot_is_usable
+    # can classify anything"). It does not, and the reason is the `&&` in
+    # install_fake_virsh: `magick ... && exit 0` is a compound, so the exit-127
+    # stub does NOT trip `set -e`; control falls through to the printf
+    # fallback, which writes a real file. Verified directly -- with magick
+    # stubbed to 127 the fixture returns rc=0 and writes 87 bytes. Capture
+    # therefore succeeds and screenshot_is_usable classifies rc=2 (magick
+    # exists, so it is not 5; `magick identify` fails, so it is undecodable),
+    # which is exactly what the assertions below check.
     # Stated because it is a limit, not a bug: `command -v` finds a magick that
     # cannot run, every frame then fails to decode, and the lane refuses them
     # all. The operator sees "undecodable", which is what the code can tell.

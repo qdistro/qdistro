@@ -400,23 +400,39 @@ def guard_regions(code):
     return out
 
 
+def blank_arith(m):
+    """Blank an arithmetic expression, preserving the length of the match.
+
+    An arithmetic body containing a command substitution is left ENTIRELY
+    alone: `$(( $(f) ))` closes on the substitution's own `)`, so the blanking
+    below cannot find it and would erase a real call. The cost is that
+    arithmetic variables in such an expression may be reported.
+
+    Otherwise the whole match becomes spaces. LENGTH-EXACT BY CONSTRUCTION,
+    which the previous form was not: ARITH matches an optional leading `$`,
+    but the replacement was a fixed four delimiter spaces, so `$((x))` came
+    back one character short while `((x))` did not.
+
+    That skew was HARMLESS, and the comment claiming otherwise was the actual
+    defect. guard_regions() and the call scan both read this same
+    post-substitution string, so a deletion shifts guard bounds and call
+    offsets together and no classification can change -- verified directly:
+    `$((1 + 2))` placed before a guarded `if` yields the identical verdict
+    with and without the skew. (Sol, B round 11, reported the false comment
+    and then inferred a behavioural bug from it that does not follow.)
+    It is made exact regardless, because the next reader will rely on the
+    invariant the docstring states, and it should be true.
+    """
+    if '$(' in m.group(1):
+        return m.group(0)
+    return ' ' * len(m.group(0))
+
+
 def main():
     path = sys.argv[1]
     code = strip_noise(open(path, encoding='utf-8', errors='replace').read())
     defined = defs_of(path, set())
-    def _blank_arith(m):
-        body = m.group(1)
-        # An arithmetic body containing a command substitution is left ENTIRELY
-        # alone: `$(( $(f) ))` closes on the substitution's own `)`, so the
-        # blanking below cannot find it and would erase a real call. The cost is
-        # that arithmetic variables in such an expression may be reported.
-        if '$(' in body:
-            return m.group(0)
-        # No substitution can remain here, so the whole body is arithmetic and
-        # blanks out. Same length in, same length out: GUARD regions are
-        # character offsets into this string.
-        return '  ' + ' ' * len(body) + '  '
-    code = ARITH.sub(_blank_arith, code)
+    code = ARITH.sub(blank_arith, code)
     code = blank_case_patterns(code)
     calls = {}
     for rx in (CALL, CASE_ARM, PREFIXED_CALL):

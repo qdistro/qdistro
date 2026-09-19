@@ -528,7 +528,28 @@ screenshot_is_usable() {
     dims=$(magick identify -quiet -format '%w %h' "$file" 2>/dev/null) || return 2
     case "$dims" in ''|*' 0'|'0 '*) return 2 ;; esac
     sigma=$(magick "$file" -colorspace gray -format '%[fx:standard_deviation]' info: 2>/dev/null) || return 2
-    # Structured? Then it is a frame, however dark it looks.
+    # Varied? Then treat it as a frame, however dark it looks.
+    #
+    # WHAT THIS ACTUALLY MEASURES, stated plainly because the previous comment
+    # here did not: standard deviation is VARIATION, not spatial structure and
+    # not legibility. Nothing in this test distinguishes a dark UI from a
+    # broken framebuffer whose variation is meaningless. The counterexample is
+    # constructible: 99.9% black pixels with 0.1% white scattered at random has
+    # a thresholded bright fraction near 0.001, which the old rule refused,
+    # and sigma near sqrt(.001*.999) = 0.0316, which this accepts. Hot pixels,
+    # a larger cursor or sensor-style noise land the same way. The 700-frame
+    # sample below justifies the THRESHOLD for frames this harness has
+    # actually seen; it does not make variance into structure (sol, B11).
+    #
+    # This is a deliberate trade, and the terms are: the variance gate newly
+    # accepts every sub-15%-bright frame whose sigma clears the threshold.
+    # That class CONTAINS the 67 observed real-content frames counted below,
+    # and it also contains noise-like frames meeting the same threshold --
+    # they are not two separate classes, they are the wanted and unwanted
+    # members of one. How often the unwanted ones occur in practice is NOT
+    # established here. A spatial or content measure could separate cases
+    # this one cannot; calling it strictly better would need a defined error
+    # metric and evidence, and there is neither (sol, C2 rounds 1 and 2).
     awk -v s="$sigma" -v m="$FRAME_FLAT_SIGMA" 'BEGIN { exit !(s < m) }' || return 0
     bright=$(magick "$file" -colorspace gray -threshold 10% \
         -format '%[fx:mean]' info: 2>/dev/null) || return 2
@@ -743,8 +764,17 @@ screenshot_fresh() {
         # black-only check (`screenshot_is_black`, a hard-coded 0.15 cutoff),
         # while the `screenshot` lane used screenshot_is_usable. Two gates meant
         # this lane could not see an UNDECODABLE or a FLAT frame at all, and the
-        # cutoff here ignored QCI_FRAME_BRIGHT_MIN. The near-black behaviour is
-        # unchanged, because FRAME_BRIGHT_MIN defaults to the same 0.15.
+        # cutoff here ignored QCI_FRAME_BRIGHT_MIN.
+        #
+        # THE NEAR-BLACK BEHAVIOUR HERE IS NOT UNCHANGED -- an earlier version
+        # of this comment claimed it was, on the grounds that FRAME_BRIGHT_MIN
+        # defaults to the same 0.15 (sol, B11). The default matches, but the
+        # cutoff is no longer reached the same way: screenshot_is_usable tests
+        # sigma FIRST and returns usable before computing brightness at all.
+        # This lane previously refused every frame under 15% bright; it now
+        # accepts any such frame whose sigma is at least FRAME_FLAT_SIGMA.
+        # That reversal is the point of the change, and it belongs in the
+        # comment rather than a claim of continuity.
         reason=""
         unchecked=""
         # `|| rc=$?`, NOT `; rc=$?`: this runs under `set -e`, so a bare

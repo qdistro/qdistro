@@ -992,6 +992,66 @@ qdwin_b'
     [ "$output" = qdwin_b ]
 }
 
+@test "callee audit: blanking an arithmetic expression preserves its length" {
+    # ARITH matches an OPTIONAL leading `$`, so a fixed four-space delimiter
+    # replacement returned `$((x))` one character short and `((x))` exact. The
+    # skew never changed a verdict -- guard_regions() and the call scan read
+    # the same post-substitution string, so bounds and offsets move together
+    # (the test below pins that) -- but the docstring asserts length-exactness,
+    # and an assertion a reader will build on has to be true. Reverting to
+    # `'  ' + ' ' * len(body) + '  '` turns red exactly those `$` shapes that
+    # REACH the blanking -- not all of them: `$(( $(f) ))` takes the
+    # leave-entirely-alone branch and is returned unchanged either way, so it
+    # covers that branch rather than the skew (sol, C2 round 2).
+    run python3 - "$BATS_TEST_DIRNAME/undefined_callees.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("uc", sys.argv[1])
+uc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(uc)
+bad = []
+for shape in ("((1 + 2))", "$((1 + 2))", "$((x))", "((a>b))",
+              "$(( $(f) ))", "x=$((i+1)) y=$((j+2))"):
+    out = uc.ARITH.sub(uc.blank_arith, shape)
+    if len(out) != len(shape):
+        bad.append(f"{shape!r}: {len(shape)} -> {len(out)}")
+print("\n".join(bad))
+sys.exit(1 if bad else 0)
+PY
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "callee audit: an arithmetic expansion before a guard does not move it" {
+    # The consequence half of the same round-11 finding. THIS TEST IS GREEN
+    # UNDER THE REVERTED FORM TOO, and that is the point: it records that the
+    # length skew is behaviourally inert, because guard_regions() and the call
+    # scan read one and the same post-substitution string. It is a non-vacuity
+    # guard: it pins the VERDICT for this shape, nothing more. It does NOT
+    # establish that the two scans share a string, and it is not a guaranteed
+    # detector of a future change that splits them -- now that blanking is
+    # length-exact, two different strings would still agree on offsets unless
+    # a skew were reintroduced as well (sol, C2, correcting an overclaim in
+    # this comment). It is a semantic regression test. The mutation test for
+    # the blanking itself is the one above.
+    run audit 'x=$((1 + 2))
+if declare -f qdwin_a
+then
+  qdwin_a
+fi
+qdwin_b'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_b ]
+
+    run audit 'x=$((1 + 2)); y=$((3 + 4)); z=$(( 5 + 6 ))
+if declare -f qdwin_a
+then
+  qdwin_a
+fi
+qdwin_b'
+    [ "$status" -eq 1 ]
+    [ "$output" = qdwin_b ]
+}
+
 @test "callee audit: a guard's NAME LIST stops at the end of its line" {
     # The class matters where the region is wide enough to hide the leak: as
     # the condition of an `if`, the guard covers the whole construct. With
