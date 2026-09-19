@@ -509,7 +509,7 @@ record_attempt() {
 # preserved with the run's artifacts for triage and reclaimed when the run dir is
 # cleaned. Exported to workers as QCI_SCENARIO_TMPDIR (see gui.sh / bats.sh); a
 # QCI_SCENARIO_SLUG is exported alongside so a scenario on a SHARED session VM can
-# also isolate GUEST scratch (e.g. /tmp/qci-$QCI_SCENARIO_SLUG). Pure (reads only
+# also isolate GUEST scratch (e.g. /tmp/qci/$QCI_SCENARIO_SLUG). Pure (reads only
 # $RDIR + args) => host-testable. Args: gate slug
 scenario_scratch_dir() {
     printf '%s/%s/%s.scratch' "$RDIR" "$1" "$2"

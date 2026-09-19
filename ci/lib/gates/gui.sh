@@ -722,7 +722,12 @@ Rules:
 - Scratch files: use isolated per-scenario scratch instead of fixed shared paths
   so parallel runs never collide. On the HOST, write scratch under
   \`\$QCI_SCENARIO_TMPDIR\` (=\`$scratch\`). For GUEST scratch, use the literal
-  per-scenario directory \`/tmp/qci-$slug/\` and create it before use. The
+  per-scenario directory \`/tmp/qci/$slug/\`. The harness pre-creates it under
+  a root-owned \`/tmp/qci\` parent, mode 1777, so ANY guest uid (root, admin,
+  work, silo uids) can write into it; if you ever recreate it, keep it
+  world-writable (\`install -d -m 1777\`) — a plain root \`mkdir\` leaves it
+  root-owned 0755 and every non-root write fails.
+  The
   \`\$QCI_SCENARIO_SLUG\` variable is HOST-side only — it is not set inside guest
   shells unless you pass it through yourself (e.g. \`QCI_SCENARIO_SLUG=$slug\`).
   Do NOT write to bare fixed paths like \`/tmp/foo.log\`.
@@ -881,7 +886,7 @@ Rules:
   ROOT-owned from the golden image, and a non-root writer then dies with
   \`Permission denied\` and produces a black screenshot that looks like a product
   failure (permissions-gui/50, full-20260914T194046Z-13620). Redirect YOUR OWN
-  logs to \`/tmp/qci-$slug/<name>.log\`. Do NOT invent a shipped log path to
+  logs to \`/tmp/qci/$slug/<name>.log\`. Do NOT invent a shipped log path to
   clear: the admin launchers write under
   \`\${XDG_STATE_HOME:-/home/admin/.local/state}/qdistro/\` (admin-app.log,
   qterminal-tui.log), which is per-user and not a shared /tmp path — read it for
@@ -2133,6 +2138,56 @@ install_gui_waiters() {
         >/dev/null 2>&1
 }
 
+# Pre-create the per-scenario guest scratch dir (/tmp/qci/<slug>) world-writable
+# so a scenario writing to it as a NON-root guest user cannot hit EACCES. The
+# prompt tells the agent the dir exists; if the agent instead runs `mkdir -p`
+# itself it does so through vm-exec as ROOT, leaving a root-owned 0755 dir, and
+# the first `runuser -u admin` write fails (observed 2026-09-19:
+# permissions-gui/18-podapps-launcher-badge — spawn.log Permission denied, the
+# whole scenario ungradable). Sticky 1777 mirrors /tmp semantics: any uid may
+# create files, only the owner (or root) removes them.
+#
+# The dir lives under a ROOT-OWNED 0755 /tmp/qci parent, not directly in /tmp:
+# a predictable world-writable path can be pre-created by any guest uid as a
+# symlink, and root `install -d` FOLLOWS a final-component symlink — it would
+# chmod/chown the TARGET. So the parent is claimed with mkdir(2), the only
+# atomic non-following create: it fails EEXIST on any occupant (dir, symlink,
+# file) without touching it. Untrusted occupants get only non-following ops —
+# unlink for a symlink, rm -rf for a foreign-owned dir (rm never follows; a
+# rename-aside would need a predictable destination a guest uid could pre-plant
+# as a symlink for mv to traverse) — and the only pathname-following op (chmod)
+# runs on an entry verified uid 0 by lstat, which non-root cannot swap under
+# sticky /tmp. A non-directory refuses. The claim retries a bounded number of
+# times, then fails loudly. Once the parent verifies root-owned, no guest uid
+# can create/swap entries inside it, so the slug ops are race-free;
+# install -o root -g root repairs ownership of a stale slug too, since a mere
+# chmod would leave its owner able to undo it. Best-effort like
+# install_gui_waiters: a failure here fails the scenario's own write loudly.
+prepare_guest_scratch() {
+    local vm=$1 slug=$2
+    "$VM_TOOLS/vm-exec" "$vm" "
+      i=0
+      while [ \$i -lt 5 ]; do
+        i=\$((i+1))
+        if mkdir -m 0755 -- /tmp/qci 2>/dev/null; then break; fi
+        if [ -L /tmp/qci ]; then rm -f -- /tmp/qci; continue; fi
+        if [ ! -d /tmp/qci ]; then
+          [ -e /tmp/qci ] && exit 1
+          continue
+        fi
+        if [ \"\$(stat -c %u -- /tmp/qci)\" = 0 ]; then
+          chmod 0755 -- /tmp/qci || exit 1
+          break
+        fi
+        rm -rf -- /tmp/qci 2>/dev/null
+      done
+      [ -d /tmp/qci ] && [ ! -L /tmp/qci ] \
+        && [ \"\$(stat -c %u -- /tmp/qci)\" = 0 ] || exit 1
+      [ -L '/tmp/qci/$slug' ] && rm -f -- '/tmp/qci/$slug'
+      [ -e '/tmp/qci/$slug' ] && [ ! -d '/tmp/qci/$slug' ] && exit 1
+      install -d -m 1777 -o root -g root -- '/tmp/qci/$slug'" >/dev/null 2>&1
+}
+
 # Best-effort: keep the qdlocker idle lock from firing mid-scenario on long agent
 # GUI runs. A multi-minute agent session otherwise trips the production 5-minute
 # idle lock; the lock screen then appears mid-run and the agent burns its whole
@@ -2933,6 +2988,7 @@ gui_run_scenario() {
     # /tmp/qci-gui-waiters.sh (best-effort; a scenario that needs it and lacks it
     # fails its own assertion loudly).
     install_gui_waiters "$vm" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
+    prepare_guest_scratch "$vm" "$slug" || log "agent scenario $rel: guest scratch prep failed (continuing)"
     suppress_idle_lock "$vm"
     log "agent scenario $rel on $vm"
     record_host_load gui "$rel" start
@@ -3078,6 +3134,7 @@ gui_run_scenario() {
                 gui_capture_log_init "$caplogN" "$vmN" || caplogN=""
                 write_agent_prompt "$vmN" "$scenario" "$prompt" "$art_aliasN" "$scratchN" "$slug"
                 install_gui_waiters "$vmN" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
+                prepare_guest_scratch "$vmN" "$slug" || log "agent scenario $rel: guest scratch prep failed (continuing)"
                 suppress_idle_lock "$vmN"
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)

@@ -300,7 +300,7 @@ _render_prompt() {
     local p; p=$(_render_prompt)
     printf '%s' "$p" | grep -q 'fixed shared guest path'
     printf '%s' "$p" | grep -qi 'ROOT-owned'
-    printf '%s' "$p" | grep -q 'qci-.*\.log'
+    printf '%s' "$p" | grep -q 'qci/.*\.log'
     # The obsolete remediation must NOT be pinned anywhere in the prompt.
     # Explicit refutation: a bare leading `!` does not fail a Bats test.
     if printf '%s' "$p" | grep -q '/tmp/admin-app.log'; then
