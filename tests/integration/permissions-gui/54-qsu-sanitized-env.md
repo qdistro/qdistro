@@ -56,14 +56,15 @@ sleep 3
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '
+source /tmp/qci-gui-waiters.sh
+# QCI_BG_STDERR keeps the loader's LD_PRELOAD warnings out of the log this
+# scenario asserts on — the privileged command's stdout must stand alone.
+QCI_BG_STDERR=/tmp/54-qsu-client.err bg_start 54-env work '
   export LD_PRELOAD=/tmp/evil.so
   export PYTHONPATH=/tmp/poison
   export LD_LIBRARY_PATH=/tmp/lib-evil
   export PATH=/tmp/evilbin:/bin
-  setsid /usr/local/bin/qsu /usr/bin/env \
-    >/tmp/54-env.log 2>/tmp/54-qsu-client.err </dev/null &
-  echo $! >/tmp/54-env.pid
+  setsid /usr/local/bin/qsu /usr/bin/env
 '
 EOF
 )
@@ -87,8 +88,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/54-env.pid) 2>/dev/null
-sort /tmp/54-env.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 54-env 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; echo "rc=$(bg_rc 54-env)"; sort /tmp/54-env.log'
 ```
 
 **Assert**: `/tmp/54-env.log` is the privileged command's stdout

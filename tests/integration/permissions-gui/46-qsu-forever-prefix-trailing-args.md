@@ -57,8 +57,8 @@ sleep 3
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/systemctl status \
-  >/tmp/46-status1.log 2>&1 & echo $! >/tmp/46-status1.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 46-status1 work '/usr/local/bin/qsu /usr/bin/systemctl status'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -90,7 +90,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 3
 
-$VMEXEC "$VM" 'wait $(cat /tmp/46-status1.pid) 2>/dev/null; head -3 /tmp/46-status1.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 46-status1 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 46-status1 3; echo "rc=$(bg_rc 46-status1)"'
 ```
 
 **Assert**:
@@ -112,14 +115,17 @@ $VMEXEC "$VM" 'wait $(cat /tmp/46-status1.pid) 2>/dev/null; head -3 /tmp/46-stat
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/systemctl status sshd \
-  >/tmp/46-status2.log 2>&1 & echo $! >/tmp/46-status2.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 46-status2 work '/usr/local/bin/qsu /usr/bin/systemctl status sshd'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 3
 $VMGUI "$VM" screenshot /tmp/46-s3-stillempty.png
-$VMEXEC "$VM" 'wait $(cat /tmp/46-status2.pid) 2>/dev/null; head -3 /tmp/46-status2.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 46-status2 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 46-status2 3; echo "rc=$(bg_rc 46-status2)"'
 ```
 
 **Assert**: pending list empty; log shows `sshd.service` or
@@ -129,14 +135,17 @@ similar systemctl output for the sshd unit.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/systemctl status sshd cron \
-  >/tmp/46-status3.log 2>&1 & echo $! >/tmp/46-status3.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 46-status3 work '/usr/local/bin/qsu /usr/bin/systemctl status sshd cron'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 3
 $VMGUI "$VM" screenshot /tmp/46-s4-stillempty.png
-$VMEXEC "$VM" 'wait $(cat /tmp/46-status3.pid) 2>/dev/null; head -5 /tmp/46-status3.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 46-status3 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 46-status3 5; echo "rc=$(bg_rc 46-status3)"'
 ```
 
 **Assert**: pending list empty; log shows status output for at
@@ -146,8 +155,8 @@ least one of `sshd` / `cron`.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/systemctl restart sshd \
-  >/tmp/46-restart.log 2>&1 & echo $! >/tmp/46-restart.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 46-restart work '/usr/local/bin/qsu /usr/bin/systemctl restart sshd'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -171,7 +180,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
-$VMEXEC "$VM" 'wait $(cat /tmp/46-restart.pid) 2>/dev/null; cat /tmp/46-restart.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 46-restart 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 46-restart; echo "rc=$(bg_rc 46-restart)"'
 ```
 
 **Assert**: log contains `request denied`.

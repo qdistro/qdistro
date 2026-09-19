@@ -52,6 +52,11 @@ await_broker_pending_action 'app.send-to:3000:org.qdistro.StubNotepad.uid3000'
 cur=$(journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p')
 # …drive the action…
 await_journal_line_after_cursor "$cur" 'toplevel_added.*app_id=foo' 30 1 --user
+
+# A backgrounded job's completion is NOT its pid file — see the `bg_start` /
+# `bg_wait` rule under "Hard-learned pitfalls" before writing one.
+bg_start 45-py1 work '/usr/local/bin/qsu /usr/bin/python3 -c "print(1)"'
+bg_wait 45-py1 60 && bg_log 45-py1     # not: wait $(cat /tmp/45-py1.pid)
 ```
 
 Every waiter is bounded and fails LOUD (expected-vs-last-observed + elapsed) when
@@ -609,6 +614,53 @@ The base64 drain block above is safe for a different reason: the pattern lives
 inside the decoded script, while the qga shell's argv is only
 `echo <b64> | base64 -d | bash`. Copying one of those lines into a direct
 `$VMEXEC` removes that protection.
+
+### A backgrounded job: `wait $(cat X.pid)` NEVER WAITS — use `bg_start`/`bg_wait`
+
+Every `$VMEXEC` is a SEPARATE guest shell. `wait` only knows its own children,
+so this pair — the shape almost every qsu scenario used — does not wait at all:
+
+```bash
+# BROKEN. Do not copy this.
+$VMEXEC "$VM" "sudo -u work bash -c 'qsu ... >/tmp/N.log 2>&1 & echo \$! >/tmp/N.pid'"
+$VMEXEC "$VM" 'wait $(cat /tmp/N.pid) 2>/dev/null; cat /tmp/N.log'  # qci-flake-allow: cross-shell-wait — the counter-example being documented
+```
+
+In the second shell that pid is not a child: bash prints `pid N is not a child
+of this shell`, the `2>/dev/null` swallows it, and `wait` returns IMMEDIATELY.
+The `cat` then races the still-running producer and reads an EMPTY or partial
+log — which the scenario reports as a product assertion failure. This was the
+root cause of eight of the twelve GUI failures on 2026-09-17, and the scenarios
+that passed that day passed on timing, not on correctness.
+
+A pid file records that a job STARTED. It is not a completion signal. Use the
+waiter library's job helpers, where the producer records its own exit status
+LAST and the consumer waits for that record:
+
+```bash
+# Producer — run it as <user> ("-" for root, the vm-exec default).
+B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh
+bg_start N work '/usr/local/bin/qsu /usr/bin/python3 -c "print(1)"'
+EOF
+)
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+
+# Consumer — bounded, loud on timeout, and the log is complete when it returns.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
+bg_wait N 60 || exit 1
+bg_log N
+echo "rc=$(bg_rc N)"'
+```
+
+`bg_wait`'s EXIT STATUS is the waiter verdict (0 = the job finished, nonzero =
+it never did) — the job's own status is a separate question, read with `bg_rc`.
+Never `|| true` a `bg_wait`; a job that never finished is a real failure.
+
+Keep a `sleep`/screenshot between the two only when the screenshot is capturing
+a GUI state that exists WHILE the job is still pending (e.g. "the request is
+visible in the pending list"). If the sleep only existed to let the job finish,
+delete it — `bg_wait` is the bound now.
 
 **Hard rule for new scenarios**: if your Setup installs files under
 `/etc/qdistro/rules.d/`, also `rm -f` your own scenario's prefix in

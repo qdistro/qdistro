@@ -45,9 +45,8 @@ $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
 
 B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
- >/tmp/work1.log 2>&1 & echo $! >/tmp/work1.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start work1 work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -102,7 +101,10 @@ $VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s2-afterapprove.png
 
 # Confirm the SDK-side process actually got ALLOWED (not just that
 # the list emptied).
-$VMEXEC "$VM" 'wait $(cat /tmp/work1.pid) 2>/dev/null; cat /tmp/work1.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait work1 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log work1; echo "rc=$(bg_rc work1)"'
 ```
 
 **Assert (after approve):**
@@ -118,15 +120,17 @@ $VMEXEC "$VM" 'wait $(cat /tmp/work1.pid) 2>/dev/null; cat /tmp/work1.log'
 # by the 1-hour cache entry written in S2. Admin app should see no
 # new pending row appear.
 B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
- >/tmp/work2.log 2>&1 & echo $! >/tmp/work2.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start work2 work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 $VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s3-cachehit.png
-$VMEXEC "$VM" 'wait $(cat /tmp/work2.pid) 2>/dev/null; cat /tmp/work2.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait work2 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log work2; echo "rc=$(bg_rc work2)"'
 ```
 
 **Assert (cache hit):**

@@ -74,9 +74,8 @@ would stay empty despite sqlite showing a pending row.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
- >/tmp/40-work.log 2>&1 & echo $! >/tmp/40-work.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 40-work work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -110,7 +109,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
 $VMGUI "$VM" screenshot /tmp/40-s4-afterdeny.png
-$VMEXEC "$VM" 'wait $(cat /tmp/40-work.pid) 2>/dev/null; cat /tmp/40-work.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 40-work 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 40-work; echo "rc=$(bg_rc 40-work)"'
 ```
 
 **Assert:**

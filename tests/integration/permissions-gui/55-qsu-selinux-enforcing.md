@@ -122,9 +122,11 @@ uses the same SKIP rule.
 ### S2 — qsu invocation under enforcing
 
 ```bash
+# The runner installs /tmp/qci-gui-waiters.sh into the VM first (this
+# scenario drives its own SSH VM rather than the agent GUI lane's).
 vm_ssh '
-  sudo -u work bash -c "/usr/local/bin/qsu /usr/bin/id \
-    > /tmp/55-qsu.log 2>&1 & echo \$! > /tmp/55-qsu.pid"
+  source /tmp/qci-gui-waiters.sh
+  bg_start 55-qsu work "/usr/local/bin/qsu /usr/bin/id"
   sleep 2
 '
 ```
@@ -146,8 +148,10 @@ iface.DecideRequest(rid, "allow", "forever_argv")
 print("decided rid=", rid)
 PYEOF
 '
-sleep 2
-vm_ssh 'wait $(cat /tmp/55-qsu.pid) 2>/dev/null; head -3 /tmp/55-qsu.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a second SSH
+# session (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS the failure.
+vm_ssh 'source /tmp/qci-gui-waiters.sh; bg_wait 55-qsu 60'
+vm_ssh 'source /tmp/qci-gui-waiters.sh; bg_log 55-qsu 3; echo "rc=$(bg_rc 55-qsu)"'
 ```
 
 **Assert**:

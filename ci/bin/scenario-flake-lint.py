@@ -107,6 +107,32 @@ STRUCTURED_PROBE_RE = re.compile(
 # single `&` that ends the command (EOL/comment/`;`/a following `pid=$!` capture).
 # It must NOT cross a `;`/`&`/`|` — `sleep 1; notify_ready &` backgrounds
 # notify_ready, not sleep — and it DOES catch the `await_x & pid=$!` form.
+# `wait $(cat X.pid)`. Across a remote-exec boundary — the shape nearly every
+# qsu scenario used — each call is a separate guest shell where that pid is not
+# a child: bash returns immediately ("pid N is not a child of this shell"), the
+# customary `2>/dev/null` hides the message, and the log read that follows
+# races the still-running producer. It was the root cause of eight of twelve
+# GUI failures on 2026-09-17.
+#
+# The rule deliberately flags EVERY occurrence rather than trying to tell the
+# cross-shell form from the correct same-shell one (producer and wait inside a
+# single heredoc). Distinguishing them needs multi-line state, and the version
+# that tried missed the `$VMEXEC` form outright and every wait whose launcher
+# was on a previous line. The legitimate same-shell sites carry an inline
+# `# qci-flake-allow: cross-shell-wait — <reason>` on the offending line, which
+# is a better record than a regex that silently excuses them.
+#
+# SCOPE, honestly: this covers SPELLINGS, not the whole class. It knows
+# `$(cat`, `$(command cat`, `$(head`, `$(<` and backtick `cat`. A pid read
+# through a variable, an indirect helper, or a command substitution split
+# across lines still evades a line-at-a-time regex. It stops the idiom that
+# actually occurred 43 times in this tree from coming back; it is not a proof
+# that no cross-shell pid wait can exist.
+CROSS_SHELL_WAIT_RE = re.compile(
+    r"\bwait\b[^;&|\n]*"
+    r"(?:\$\(\s*(?:cat|command\s+cat|head)\b|\$\(\s*<|`\s*cat\b)"
+)
+
 BACKGROUNDED_WAIT_RE = re.compile(
     r"(?:^|[;&|()]|\bthen\b|\bdo\b)\s*"
     r"\b(wait|await_[a-z_]+|sleep)\b[^;&|\n]*&"
@@ -341,6 +367,26 @@ def fenced_bash_blocks(text: str) -> list[tuple[int, list[str]]]:
     return blocks
 
 
+# An INLINE, line-scoped waiver: `... # qci-flake-allow: <rule> — <reason>`.
+# The allowlist TSV waives a rule for a WHOLE FILE, which also hides any future
+# bad line added to that file. A marker on the offending line cannot drift away
+# from what it excuses, and it carries the reason where the next reader is.
+# A reason is mandatory: a bare waiver is the thing this file exists to prevent.
+INLINE_ALLOW_RE = re.compile(
+    r"#\s*qci-flake-allow:\s*(?P<rule>[a-z0-9-]+)\s*(?P<why>\S.*)?$"
+)
+
+
+def inline_waived(raw: str, rule: str) -> bool:
+    """True when this RAW line carries a waiver for <rule> with a reason.
+
+    Read from the raw line, not the comment-stripped one the smell patterns
+    see — the waiver lives in the very comment that stripping removes.
+    """
+    m = INLINE_ALLOW_RE.search(raw)
+    return bool(m) and m.group("rule") == rule and bool((m.group("why") or "").strip())
+
+
 def lint_markdown(path: Path) -> list[tuple[int, str, str]]:
     """Return findings (line, rule, message) for one markdown scenario."""
     findings: list[tuple[int, str, str]] = []
@@ -417,6 +463,14 @@ def lint_markdown(path: Path) -> list[tuple[int, str, str]]:
                 findings.append((lineno, "backgrounded-wait",
                                  "readiness wait sent to the background with &; the "
                                  "verdict can be collected before readiness"))
+            if CROSS_SHELL_WAIT_RE.search(line) and not inline_waived(raw, "cross-shell-wait"):
+                findings.append((lineno, "cross-shell-wait",
+                                 "`wait $(cat X.pid)`: unless the producer ran in "
+                                 "THIS same shell, that pid is not its child, wait "
+                                 "returns at once, and the read that follows races "
+                                 "the producer. Use the waiter library's "
+                                 "bg_start/bg_wait/bg_rc, or waive it here with the "
+                                 "reason it is same-shell."))
     if has_code and not any_assert:
         findings.append((1, "prose-only-assert",
                          "scenario has shell blocks but NO shell assertion; the "

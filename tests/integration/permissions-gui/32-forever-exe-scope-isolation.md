@@ -50,8 +50,8 @@ $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
 
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
-  >/tmp/32-py1.log 2>&1 & echo $! >/tmp/32-py1.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 32-py1 work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -79,7 +79,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 1
 
-$VMEXEC "$VM" 'wait $(cat /tmp/32-py1.pid) 2>/dev/null; cat /tmp/32-py1.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 32-py1 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 32-py1; echo "rc=$(bg_rc 32-py1)"'
 ```
 
 **Assert**:
@@ -106,14 +109,16 @@ captured at decide time).
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
-  >/tmp/32-py2.log 2>&1 & echo $! >/tmp/32-py2.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 32-py2 work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 32-py2 60'
 $VMGUI "$VM" screenshot /tmp/32-s3-stillempty.png
-$VMEXEC "$VM" 'wait $(cat /tmp/32-py2.pid) 2>/dev/null; cat /tmp/32-py2.log'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 32-py2; echo "rc=$(bg_rc 32-py2)"'
 ```
 
 **Assert**:
@@ -143,8 +148,8 @@ my $ok = $obj->WaitForDecision(int $rid);
 print($ok ? "ALLOWED\n" : "DENIED\n");
 PERL
 chmod 0644 /tmp/32-perl-caller.pl
-sudo -u work bash -c 'perl /tmp/32-perl-caller.pl \
-  >/tmp/32-perl.log 2>&1 & echo $! >/tmp/32-perl.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 32-perl work 'perl /tmp/32-perl-caller.pl'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -177,11 +182,11 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
 $VMEXEC "$VM" 'touch /tmp/32-release-wait'
-$VMEXEC "$VM" 'for i in $(seq 1 100); do
-  grep -q DENIED /tmp/32-perl.log 2>/dev/null && break
-  sleep 0.1
-done
-cat /tmp/32-perl.log'
+# The denial releases the perl caller. Wait for ITS completion record — the
+# old 10s content poll was a correct shape but a shorter bound than the
+# decision path needs, and it could not report the caller's exit status.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 32-perl 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 32-perl; echo "rc=$(bg_rc 32-perl)"'
 ```
 
 **Assert**: `/tmp/32-perl.log` contains `DENIED`.
@@ -192,7 +197,7 @@ cat /tmp/32-perl.log'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f "perl /tmp/32-perl-caller.pl" 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/32-perl-caller.pl /tmp/32-*.log /tmp/32-*.pid'
+$VMEXEC "$VM" 'rm -f /tmp/32-perl-caller.pl /tmp/32-*.log /tmp/32-*.pid /tmp/32-*.rc /tmp/32-*.rc.part'
 APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
 SQL_EOF

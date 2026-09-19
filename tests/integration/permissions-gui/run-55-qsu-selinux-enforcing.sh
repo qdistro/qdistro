@@ -136,14 +136,26 @@ if [[ "$MODE" != "Enforcing" ]]; then
 fi
 check "SELinux mode is Enforcing"
 
+# The guest waiter library. The agent GUI lane installs this for every VM
+# (install_gui_waiters); this runner drives its own SSH VM, so it ships its
+# own copy. bg_start/bg_wait are how a backgrounded guest job's completion is
+# observed — `wait $(cat X.pid)` over a second SSH session never waits, it
+# returns immediately on a non-child and the log read races the producer.
+: "${QDISTRO_REPO:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+if ! vm_ssh 'cat > /tmp/qci-gui-waiters.sh && bash -n /tmp/qci-gui-waiters.sh' \
+        < "$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh"; then
+    echo "ERROR: could not install the guest waiter library into the VM" >&2
+    exit 2
+fi
+
 # ---------------------------------------------------------------------------
 # S2 — qsu invocation under enforcing (strict identity profile ON)
 # ---------------------------------------------------------------------------
 
 echo "=== S2: qsu /usr/bin/id as work, under Enforcing ==="
 vm_ssh '
-  sudo -u work bash -c "/usr/local/bin/qsu /usr/bin/id \
-    > /tmp/55-qsu.log 2>&1 & echo \$! > /tmp/55-qsu.pid"
+  source /tmp/qci-gui-waiters.sh
+  bg_start 55-qsu work "/usr/local/bin/qsu /usr/bin/id"
   sleep 2
 '
 
@@ -173,8 +185,12 @@ if ! grep -q "decided rid=" <<<"$DECIDE"; then
          "/ qdistro_broker AVC?): $DECIDE"
 fi
 
-sleep 2
-QSU_OUT=$(vm_ssh 'wait $(cat /tmp/55-qsu.pid) 2>/dev/null; cat /tmp/55-qsu.log')
+if ! vm_ssh 'source /tmp/qci-gui-waiters.sh; bg_wait 55-qsu 60'; then
+    fail "qsu never completed after the admin approve (see /tmp/55-qsu.log in the VM)"
+fi
+QSU_OUT=$(vm_ssh 'source /tmp/qci-gui-waiters.sh; bg_log 55-qsu')
+QSU_RC=$(vm_ssh 'source /tmp/qci-gui-waiters.sh; bg_rc 55-qsu')
+echo "--- qsu exit status: $QSU_RC ---"
 echo "--- qsu output ---"
 echo "$QSU_OUT"
 

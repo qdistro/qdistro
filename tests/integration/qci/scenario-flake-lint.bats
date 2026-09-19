@@ -324,3 +324,68 @@ MD
     [[ "$output" == *"63-bt-host"* ]]
     [[ "$output" == *"unscoped-tmp-path"* ]]
 }
+
+# --- cross-shell-wait + the inline waiver ------------------------------------
+#
+# `wait $(cat X.pid)` across a remote-exec boundary never waits: the pid is not
+# that shell's child. The rule flags every spelling of "wait on a pid read from
+# a file" rather than trying to tell cross-shell from same-shell apart, and the
+# genuinely same-shell sites carry a line-scoped waiver.
+
+@test "flake-lint: a cross-shell wait on a pid file is flagged" {
+    local f="$BATS_TEST_TMPDIR/70-xw.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" '"'"'wait $(cat /tmp/70-job.pid) 2>/dev/null; cat /tmp/70-job.log'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"cross-shell-wait"* ]]
+}
+
+@test "flake-lint: the other spellings of reading a pid from a file are flagged too" {
+    local f spelling i=0
+    for spelling in 'wait "$(< /tmp/j.pid)"' \
+                    'wait "$(command cat /tmp/j.pid)"' \
+                    'wait "$(head -1 /tmp/j.pid)"' \
+                    'wait `cat /tmp/j.pid`'; do
+        i=$((i + 1))
+        f="$BATS_TEST_TMPDIR/71-sp$i.md"
+        printf '# x\n```bash\n$VMEXEC "$VM" "%s; cat /tmp/j.log"\n```\n' "$spelling" > "$f"
+        run lint "$f"
+        [[ "$output" == *"cross-shell-wait"* ]] || {
+            echo "NOT FLAGGED: $spelling"; return 1; }
+    done
+}
+
+@test "flake-lint: bg_wait and an ordinary \$(cat ...) capture are NOT flagged" {
+    local f="$BATS_TEST_TMPDIR/72-ok.md"
+    printf '# x\n```bash\nsource /tmp/qci-gui-waiters.sh\n$VMEXEC "$VM" '"'"'source /tmp/qci-gui-waiters.sh; bg_wait job 60'"'"'\nRID=$(cat /tmp/72-rid.out)\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"cross-shell-wait"* ]]
+}
+
+@test "flake-lint: an inline waiver WITH a reason suppresses the finding" {
+    local f="$BATS_TEST_TMPDIR/73-waived.md"
+    printf '# x\n```bash\nwait $(cat /tmp/73.pid) || true  # qci-flake-allow: cross-shell-wait — same shell as the producer\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"cross-shell-wait"* ]]
+}
+
+@test "flake-lint: an inline waiver WITHOUT a reason does not suppress" {
+    local f="$BATS_TEST_TMPDIR/74-bare.md"
+    printf '# x\n```bash\nwait $(cat /tmp/74.pid) || true  # qci-flake-allow: cross-shell-wait\n```\n' > "$f"
+    run lint "$f"
+    # A bare waiver is the thing the linter exists to prevent.
+    [[ "$output" == *"cross-shell-wait"* ]]
+}
+
+@test "flake-lint: an inline waiver for a DIFFERENT rule does not suppress" {
+    local f="$BATS_TEST_TMPDIR/75-other.md"
+    printf '# x\n```bash\nwait $(cat /tmp/75.pid) || true  # qci-flake-allow: unscoped-tmp-path — wrong rule\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"cross-shell-wait"* ]]
+}
+
+@test "flake-lint: a command merely STARTING with cat/head is not flagged" {
+    local f="$BATS_TEST_TMPDIR/76-word.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" "wait $(catalog /tmp/x); wait $(header /tmp/y)"\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"cross-shell-wait"* ]]
+}

@@ -97,15 +97,18 @@ $VMGUI "$VM" screenshot /tmp/50-s2-empty.png
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/systemctl status sshd \
-  >/tmp/50-status.log 2>&1 & echo $! >/tmp/50-status.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 50-status work '/usr/local/bin/qsu /usr/bin/systemctl status sshd'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 3
 $VMGUI "$VM" screenshot /tmp/50-s3-stillempty.png
 
-$VMEXEC "$VM" 'wait $(cat /tmp/50-status.pid) 2>/dev/null; head -5 /tmp/50-status.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 50-status 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 50-status 5; echo "rc=$(bg_rc 50-status)"'
 ```
 
 **Assert**:
@@ -139,8 +142,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/systemctl restart sshd \
-  >/tmp/50-restart.log 2>&1 & echo $! >/tmp/50-restart.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 50-restart work '/usr/local/bin/qsu /usr/bin/systemctl restart sshd'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -166,7 +169,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 2
-$VMEXEC "$VM" 'wait $(cat /tmp/50-restart.pid) 2>/dev/null; cat /tmp/50-restart.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 50-restart 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 50-restart; echo "rc=$(bg_rc 50-restart)"'
 ```
 
 **Assert** (acceptable: either A or B — the load-bearing audit

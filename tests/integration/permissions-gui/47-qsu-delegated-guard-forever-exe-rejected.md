@@ -69,8 +69,9 @@ $VMGUI "$VM" screenshot /tmp/47-s1-empty.png
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-runuser -u work -- bash -c 'id -u > /tmp/47-qsu-caller-uid.txt; /usr/local/bin/qsu /bin/true \
-  >/tmp/47-qsu.log 2>&1 & echo $! >/tmp/47-qsu.pid'
+source /tmp/qci-gui-waiters.sh
+runuser -u work -- bash -c 'id -u > /tmp/47-qsu-caller-uid.txt'
+bg_start 47-qsu work '/usr/local/bin/qsu /bin/true'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -154,7 +155,11 @@ $VMGUI "$VM" screenshot /tmp/47-s4a-forever-argv-selected.png
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/47-qsu.pid) 2>/dev/null; cat /tmp/47-qsu.log; echo "rc=$?"'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+# `echo "rc=$?"` after a `cat` reported the CAT's status, never qsu's.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 47-qsu 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 47-qsu; echo "rc=$(bg_rc 47-qsu)"'
 ```
 
 **Assert**:

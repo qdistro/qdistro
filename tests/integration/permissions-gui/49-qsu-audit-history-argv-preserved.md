@@ -61,8 +61,8 @@ sleep 3
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'setsid /usr/local/bin/qsu /usr/bin/echo "hello world" \
-  >/tmp/49-qsu.log 2>&1 </dev/null & echo $! >/tmp/49-qsu.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 49-qsu work 'setsid /usr/local/bin/qsu /usr/bin/echo "hello world"'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -108,7 +108,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/49-qsu.pid) 2>/dev/null; cat /tmp/49-qsu.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 49-qsu 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 49-qsu; echo "rc=$(bg_rc 49-qsu)"'
 ```
 
 **Assert**:
@@ -186,13 +189,16 @@ The load-bearing pieces are:
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'setsid /usr/local/bin/qsu /usr/bin/echo "hello world" \
-  >/tmp/49-qsu2.log 2>&1 </dev/null & echo $! >/tmp/49-qsu2.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 49-qsu2 work 'setsid /usr/local/bin/qsu /usr/bin/echo "hello world"'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
-$VMEXEC "$VM" 'wait $(cat /tmp/49-qsu2.pid) 2>/dev/null; cat /tmp/49-qsu2.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 49-qsu2 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 49-qsu2; echo "rc=$(bg_rc 49-qsu2)"'
 
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- python3 - <<'PYEOF'

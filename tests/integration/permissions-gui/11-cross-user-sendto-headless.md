@@ -118,7 +118,12 @@ runuser -u admin -- dbus-send --system --print-reply \
  /org/qdistro/AdminBroker1 \
  org.qdistro.AdminBroker1.DecideRequest \
  int32:$RID string:allow string:once >/tmp/sendto-decide.out 2>&1
-wait $(cat /tmp/sendto-relay.pid) || true
+# This `wait` is CORRECT, unlike the `$VMEXEC "$VM" 'wait $(cat X.pid)'`
+# shape elsewhere: the background job and this wait are in the SAME guest
+# shell (one base64 payload piped to one bash), so the pid really is this
+# shell's child. Do not "fix" it to bg_wait; do not copy it to a site where
+# the producer ran in an earlier $VMEXEC call, where it does not wait at all.
+wait $(cat /tmp/sendto-relay.pid) || true  # qci-flake-allow: cross-shell-wait — same guest shell as the producer
 echo "=== relay.out ==="
 cat /tmp/sendto-relay.out
 EOF

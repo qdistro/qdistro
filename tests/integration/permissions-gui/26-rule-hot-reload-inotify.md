@@ -278,13 +278,16 @@ $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
-  >/tmp/26-work.log 2>&1 & echo $! >/tmp/26-work.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 26-work work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
-$VMEXEC "$VM" 'wait $(cat /tmp/26-work.pid) 2>/dev/null; cat /tmp/26-work.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 26-work 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 26-work; echo "rc=$(bg_rc 26-work)"'
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
   --dest=org.qdistro.AdminBroker1 \
   /org/qdistro/AdminBroker1 \

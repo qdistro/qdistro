@@ -60,10 +60,10 @@ B64=$(base64 -w0 <<'EOF'
 # Three callers with distinct actions so we can OCR-identify them.
 # qdistro-test-permission accepts --action and --detail since
 # todo/qdistro-test-permission-multi-action.md landed.
+source /tmp/qci-gui-waiters.sh
 for i in 1 2 3; do
-  sudo -u work bash -c "python3 /usr/local/bin/qdistro-test-permission \
-      --action multi.action.$i --detail slot=$i \
-      >/tmp/34-w$i.log 2>&1 & echo \$! >/tmp/34-w$i.pid"
+  bg_start "34-w$i" work "python3 /usr/local/bin/qdistro-test-permission \
+      --action multi.action.$i --detail slot=$i"
 done
 sleep 3
 EOF
@@ -179,9 +179,16 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 1
 $VMGUI "$VM" screenshot /tmp/34-s5-drained.png
 
-$VMEXEC "$VM" 'for i in 1 2 3; do
-  wait $(cat /tmp/34-w$i.pid) 2>/dev/null
-done; true'
+# All three were denied above, so all three must now finish. `wait $(cat
+# X.pid)` here never waited (the pid is not this shell's child), so this
+# drain was a no-op and the teardown pkill did the real work.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
+bad=0
+for i in 1 2 3; do
+  bg_wait "34-w$i" 60 || bad=1
+  echo "34-w$i rc=$(bg_rc "34-w$i")"
+done
+exit $bad'
 ```
 
 **Assert**: `/tmp/34-s5-drained.png` shows empty pending list.

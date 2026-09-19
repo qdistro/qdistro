@@ -67,8 +67,8 @@ title and an empty queue table.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'setsid /usr/local/bin/qsu /bin/sh -c "echo hi" \
-  >/tmp/48-qsu.log 2>&1 </dev/null & echo $! >/tmp/48-qsu.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 48-qsu work 'setsid /usr/local/bin/qsu /bin/sh -c "echo hi"'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -125,7 +125,10 @@ $VMGUI "$VM" screenshot /tmp/48-s3-scope-forever-argv.png
 virsh send-key "$VM" --codeset linux KEY_A
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/48-qsu.pid) 2>/dev/null; cat /tmp/48-qsu.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 48-qsu 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 48-qsu; echo "rc=$(bg_rc 48-qsu)"'
 $VMGUI "$VM" screenshot /tmp/48-s4-after-approve.png
 ```
 

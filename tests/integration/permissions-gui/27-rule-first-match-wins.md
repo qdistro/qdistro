@@ -82,13 +82,16 @@ loaded) and an empty `array []` of errors.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
-  >/tmp/27-work-a.log 2>&1 & echo $! >/tmp/27-work-a.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 27-work-a work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
-$VMEXEC "$VM" 'wait $(cat /tmp/27-work-a.pid) 2>/dev/null; cat /tmp/27-work-a.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 27-work-a 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 27-work-a; echo "rc=$(bg_rc 27-work-a)"'
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT decision, source, rule_path FROM audit
@@ -123,13 +126,16 @@ sleep 1
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
-  >/tmp/27-work-b.log 2>&1 & echo $! >/tmp/27-work-b.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 27-work-b work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
-$VMEXEC "$VM" 'wait $(cat /tmp/27-work-b.pid) 2>/dev/null; cat /tmp/27-work-b.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 27-work-b 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 27-work-b; echo "rc=$(bg_rc 27-work-b)"'
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT decision, source, rule_path FROM audit

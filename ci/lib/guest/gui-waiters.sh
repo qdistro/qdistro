@@ -632,3 +632,162 @@ _probe_domain_gone() {
         *) return 1 ;;
     esac
 }
+
+# --- Backgrounded guest jobs -------------------------------------------------
+#
+# `wait $(cat /tmp/N.pid)` DOES NOT WAIT when the producer and the consumer are
+# separate vm-exec calls, which is the shape every GUI scenario uses:
+#
+#     vm-exec "$VM" "... & echo \$! >/tmp/N.pid"          # guest shell A
+#     vm-exec "$VM" 'wait $(cat /tmp/N.pid); cat /tmp/N.log'   # guest shell B
+#
+# `wait` only knows its OWN children. In shell B that pid is not a child, so
+# bash prints "pid N is not a child of this shell" and returns IMMEDIATELY —
+# and the `2>/dev/null` every site carried swallowed the message. The `cat`
+# then races the still-running producer and reads an EMPTY or partial log,
+# which the scenario reports as a product assertion failure. It was the root
+# cause of eight of twelve GUI failures on 2026-09-17, and the scenarios that
+# passed that day passed on timing, not on correctness.
+#
+# A pid file records that a job STARTED. It is not a completion signal. These
+# helpers make completion observable the only way it can be: the producer
+# itself records its exit status, LAST, and the consumer waits for that record.
+#
+#     bg_start 45-py1 work '/usr/local/bin/qsu /usr/bin/python3 -c "print(1)"'
+#     bg_wait  45-py1 60 || { echo "FAIL: job never finished"; exit 1; }
+#     bg_log   45-py1
+#     [ "$(bg_rc 45-py1)" = 0 ] || { echo "FAIL: qsu exited $(bg_rc 45-py1)"; exit 1; }
+#
+# Files live in $QCI_BG_DIR (default /tmp) as <tag>.log, <tag>.rc, <tag>.pid.
+
+: "${QCI_BG_DIR:=/tmp}"
+
+# _bg_base <tag> — echo the path prefix for <tag>, rejecting a tag that would
+# escape $QCI_BG_DIR or need shell quoting. Restricting the tag is what lets
+# the generated producer script below interpolate these paths safely.
+_bg_base() {
+    local tag=$1
+    case "$tag" in
+        ""|*[!A-Za-z0-9._-]*|.*)
+            printf '[bg] invalid tag %q: use only [A-Za-z0-9._-], not leading "."\n' \
+                "$tag" >&2
+            return 1 ;;
+    esac
+    printf '%s/%s' "$QCI_BG_DIR" "$tag"
+}
+
+# bg_start <tag> <user> <command-string>
+# Run <command-string> in the background as <user> ("-" for the current user),
+# with stdout+stderr in <tag>.log and the exit status in <tag>.rc.
+#
+# STDIN is /dev/null, explicitly. bash ALREADY does this for an asynchronous
+# list in a non-interactive shell, so the redirect changes nothing today and
+# no test can tell it from its own absence — it is here so the guarantee
+# survives a refactor that stops backgrounding the job, not because it is
+# load-bearing now. Several scenarios (48/49/54) spelled `</dev/null` out by
+# hand for the same reason.
+#
+# Set QCI_BG_STDERR=<path> for the one case where stderr must be kept SEPARATE
+# from the command's stdout — permissions-gui/54 asserts on the privileged
+# command's stdout alone, because a hostile LD_PRELOAD makes the dynamic loader
+# warn on stderr before qsu reaches its own sanitization boundary.
+#
+# The status is written to <tag>.rc.part and then RENAMED into place, so
+# <tag>.rc only ever exists complete: a plain `echo $? > <tag>.rc` leaves a
+# window between the O_CREAT and the write in which a poller sees a zero-byte
+# file and reads an EMPTY status. That window is narrow enough that a
+# shell-level poll does not reliably hit it — the bats suite could not make a
+# direct-write variant fail — so this is cheap defence in depth, not something
+# the tests demonstrate.
+#
+# Stale files from an earlier step with the same tag are removed FIRST, so a
+# bg_wait can never be satisfied by the previous run's record.
+bg_start() {
+    local tag=$1 user=$2 cmd=$3 base script
+    base=$(_bg_base "$tag") || return 2
+    rm -f -- "$base.log" "$base.rc" "$base.rc.part" "$base.pid"
+    # <command-string> runs inside its own SUBSHELL, and the log redirect is
+    # applied to that subshell, for two reasons a plain `%s > log` gets wrong:
+    #   - `>` binds to the LAST command of a list, so a multi-command string
+    #     would send only its final command's output to the log;
+    #   - an `exit N` in the command would otherwise leave the whole background
+    #     shell, skipping the exit-status record entirely and hanging bg_wait.
+    local errspec='2>&1'
+    if [ -n "${QCI_BG_STDERR:-}" ]; then
+        printf -v errspec '2> %q' "$QCI_BG_STDERR"
+    fi
+    # <command-string> is passed through the environment and `eval`ed, NEVER
+    # interpolated into the script's source. Interpolation makes the wrapper's
+    # own syntax depend on the caller's text: an ordinary fragment ending in a
+    # comment (`echo ok  # why`) would comment out the closing `)` and the
+    # status record with it, and bg_wait would then block until its deadline
+    # for a job that had already finished.
+    printf -v script '{ ( eval "$QCI_BG_CMD" ) > %q %s < /dev/null; echo $? > %q; mv -f %q %q; } & echo $! > %q' \
+        "$base.log" "$errspec" "$base.rc.part" "$base.rc.part" "$base.rc" "$base.pid"
+    if [ "$user" = "-" ] || [ "$user" = "$(id -un)" ]; then
+        QCI_BG_CMD=$cmd bash -c "$script"
+    else
+        runuser -u "$user" -- env "QCI_BG_CMD=$cmd" bash -c "$script"
+    fi
+}
+
+# bg_wait <tag> [timeout] [interval] — wait until the job recorded an exit
+# status. Waiter contract: the EXIT STATUS is the verdict (0 = the job
+# finished, nonzero = it never did within the deadline). The job's OWN exit
+# status is a separate question — read it with bg_rc.
+bg_wait() {
+    local tag=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    local base
+    base=$(_bg_base "$tag") || return 2
+    _await "background job to record an exit status: $tag ($base.rc)" \
+        "$timeout" "$interval" _probe_bg_done "$base"
+}
+_probe_bg_done() {
+    local base=$1 rc
+    if [ ! -f "$base.rc" ]; then
+        printf 'no exit status yet (%s.rc absent)' "$base"
+        return 1
+    fi
+    rc=$(cat "$base.rc" 2>/dev/null)
+    printf 'exit status recorded: rc=%s' "$rc"
+}
+
+# bg_rc <tag> — print the job's recorded exit status on STDOUT. This
+# function's own exit status says whether a status could be READ (0 yes,
+# 1 no), deliberately NOT the job's status: conflating them would make a job
+# that legitimately exited 1 indistinguishable from a job that never ran.
+# Compare the stdout, e.g. `[ "$(bg_rc t)" = 0 ]`.
+bg_rc() {
+    local base rc
+    base=$(_bg_base "$1") || return 1
+    if [ ! -f "$base.rc" ]; then
+        printf '[bg] no exit status recorded for %s (did bg_wait time out?)\n' "$1" >&2
+        return 1
+    fi
+    rc=$(cat "$base.rc" 2>/dev/null)
+    printf '%s\n' "$rc"
+}
+
+# bg_log <tag> [lines] — print the job's captured output, or its first <lines>
+# lines. Absent log (the job never started) is reported loudly rather than as
+# empty output, because an empty read is exactly what the pid-wait bug
+# produced.
+#
+# The line limit is an argument rather than a `| head -n` at the call site: a
+# pipeline's reader closes early, the writer takes SIGPIPE, and under `set -o
+# pipefail` that turns a successful read into a failing step — the same shape
+# documented for _await_print_observed above.
+bg_log() {
+    local base lines
+    base=$(_bg_base "$1") || return 1
+    if [ ! -f "$base.log" ]; then
+        printf '[bg] no log for %s (job never started?)\n' "$1" >&2
+        return 1
+    fi
+    lines=${2:-}
+    if [ -n "$lines" ]; then
+        head -n "$lines" -- "$base.log"
+    else
+        cat -- "$base.log"
+    fi
+}

@@ -54,8 +54,8 @@ sleep 3
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hello \
-  >/tmp/44-echo1.log 2>&1 & echo $! >/tmp/44-echo1.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 44-echo1 work '/usr/local/bin/qsu /bin/echo hello'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -96,7 +96,10 @@ $VMGUI "$VM" screenshot /tmp/44-s2b-selected.png
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/44-echo1.pid) 2>/dev/null; cat /tmp/44-echo1.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 44-echo1 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 44-echo1; echo "rc=$(bg_rc 44-echo1)"'
 ```
 
 **Assert**:
@@ -119,14 +122,17 @@ $VMEXEC "$VM" 'wait $(cat /tmp/44-echo1.pid) 2>/dev/null; cat /tmp/44-echo1.log'
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hello \
-  >/tmp/44-echo2.log 2>&1 & echo $! >/tmp/44-echo2.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 44-echo2 work '/usr/local/bin/qsu /bin/echo hello'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 $VMGUI "$VM" screenshot /tmp/44-s3-stillempty.png
-$VMEXEC "$VM" 'wait $(cat /tmp/44-echo2.pid) 2>/dev/null; cat /tmp/44-echo2.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 44-echo2 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 44-echo2; echo "rc=$(bg_rc 44-echo2)"'
 ```
 
 **Assert**:
@@ -137,8 +143,8 @@ $VMEXEC "$VM" 'wait $(cat /tmp/44-echo2.pid) 2>/dev/null; cat /tmp/44-echo2.log'
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hi \
-  >/tmp/44-echo3.log 2>&1 & echo $! >/tmp/44-echo3.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 44-echo3 work '/usr/local/bin/qsu /bin/echo hi'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -164,11 +170,14 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
-$VMEXEC "$VM" 'wait $(cat /tmp/44-echo3.pid) 2>/dev/null; cat /tmp/44-echo3.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 44-echo3 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 44-echo3; echo "rc=$(bg_rc 44-echo3)"'
 
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/echo hello world \
-  >/tmp/44-echo4.log 2>&1 & echo $! >/tmp/44-echo4.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 44-echo4 work '/usr/local/bin/qsu /bin/echo hello world'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -192,7 +201,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
-$VMEXEC "$VM" 'wait $(cat /tmp/44-echo4.pid) 2>/dev/null; cat /tmp/44-echo4.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 44-echo4 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 44-echo4; echo "rc=$(bg_rc 44-echo4)"'
 ```
 
 **Assert**: log contains `request denied`.

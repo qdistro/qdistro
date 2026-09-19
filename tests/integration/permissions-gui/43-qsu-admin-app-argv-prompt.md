@@ -61,8 +61,8 @@ $VMGUI "$VM" screenshot /tmp/43-s1-empty.png
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/true \
-  >/tmp/43-qsu.log 2>&1 & echo $! >/tmp/43-qsu.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 43-qsu work '/usr/local/bin/qsu /bin/true'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -109,7 +109,11 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/43-qsu.pid) 2>/dev/null; cat /tmp/43-qsu.log; echo "qsu-rc=$?"'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+# `echo "qsu-rc=$?"` after a `cat` reported the CAT's status, never qsu's.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 43-qsu 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 43-qsu; echo "qsu-rc=$(bg_rc 43-qsu)"'
 $VMGUI "$VM" screenshot /tmp/43-s3-afterapprove.png
 ```
 
@@ -138,8 +142,8 @@ The audit row exists but no cache row — per
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/true \
-  >/tmp/43-qsu2.log 2>&1 & echo $! >/tmp/43-qsu2.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 43-qsu2 work '/usr/local/bin/qsu /bin/true'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -161,7 +165,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
-$VMEXEC "$VM" 'wait $(cat /tmp/43-qsu2.pid) 2>/dev/null; cat /tmp/43-qsu2.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 43-qsu2 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 43-qsu2; echo "rc=$(bg_rc 43-qsu2)"'
 ```
 
 **Assert**: log contains `request denied`, qsu rc=1.

@@ -55,8 +55,8 @@ running the TUI). Both list panes are empty.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qdistro-test-permission \
-  >/tmp/35-work.log 2>&1 & echo $! >/tmp/35-work.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 35-work work '/usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -88,7 +88,10 @@ virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 1.5
 
 $VMGUI "$VM" screenshot /tmp/35-s3-both-emptied.png
-$VMEXEC "$VM" 'wait $(cat /tmp/35-work.pid) 2>/dev/null; cat /tmp/35-work.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 35-work 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 35-work; echo "rc=$(bg_rc 35-work)"'
 ```
 
 **Assert** (`/tmp/35-s3-both-emptied.png`):

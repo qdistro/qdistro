@@ -28,16 +28,23 @@ $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 # app — a leftover `uid=2000 test.action` row falsifies S1
 # (full-20260918T143937Z-3516587).
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service && await_dbus_system_name org.qdistro.AdminBroker1'
+# Count via the Python API. dbus-send text is the wrong oracle, and
+# `grep -q && exit 1` fails the empty (success) case.
 B64=$(base64 -w0 <<'EOF'
-set -e
-out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
-  /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.GetPending)
-printf '%s\n' "$out"
-echo "$out" | grep -q 'dict {' && {
-  echo 'FAIL(setup): GetPending not empty after broker restart'
-  exit 1
-}
+python3 - <<'PYEOF'
+import dbus, sys
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+n = len(iface.GetPending())
+print(f"pending_count={n}")
+if n != 0:
+    print("FAIL(setup): GetPending not empty after broker restart",
+          file=sys.stderr)
+    sys.exit(1)
+PYEOF
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -55,9 +62,9 @@ $VMGUI "$VM" screenshot /tmp/08-s1-empty.png
 ```
 
 **Assert:**
-- `GetPending` is an empty D-Bus array (no `dict {`). This is the
-  model behind the pane; a leftover request here is a setup failure,
-  not a signal-subscription regression.
+- Setup printed `pending_count=0`. This is the model behind the
+  pane; a leftover request here is a setup failure, not a
+  signal-subscription regression.
 - Window `admin approvals` is visible.
 - Left list is empty; detail pane reads `(no selection)`.
 
@@ -89,9 +96,8 @@ would stay empty despite sqlite showing a pending row.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
- >/tmp/08-work.log 2>&1 & echo $! >/tmp/08-work.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 08-work work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -122,7 +128,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
 $VMGUI "$VM" screenshot /tmp/08-s4-afterdeny.png
-$VMEXEC "$VM" 'wait $(cat /tmp/08-work.pid) 2>/dev/null; cat /tmp/08-work.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 08-work 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 08-work; echo "rc=$(bg_rc 08-work)"'
 ```
 
 **Assert:**
@@ -135,7 +144,7 @@ $VMEXEC "$VM" 'wait $(cat /tmp/08-work.pid) 2>/dev/null; cat /tmp/08-work.log'
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/08-pid-before /tmp/08-pid-after /tmp/08-work.log /tmp/08-work.pid'
+$VMEXEC "$VM" 'rm -f /tmp/08-pid-before /tmp/08-pid-after /tmp/08-work.log /tmp/08-work.pid /tmp/08-work.rc /tmp/08-work.rc.part'
 ```
 
 ## Notes for the runner

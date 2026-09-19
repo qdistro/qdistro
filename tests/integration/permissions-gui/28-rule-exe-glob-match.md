@@ -81,14 +81,17 @@ sleep 3
 $VMGUI "$VM" screenshot /tmp/28-s2a-app-empty.png
 
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
-  >/tmp/28-work-py.log 2>&1 & echo $! >/tmp/28-work-py.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 28-work-py work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 $VMGUI "$VM" screenshot /tmp/28-s2b-app-stillempty.png
-$VMEXEC "$VM" 'wait $(cat /tmp/28-work-py.pid) 2>/dev/null; cat /tmp/28-work-py.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 28-work-py 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 28-work-py; echo "rc=$(bg_rc 28-work-py)"'
 ```
 
 **Assert**:
@@ -108,22 +111,24 @@ B64=$(base64 -w0 <<'EOF'
 # Issue RequestPermission as work, capture the request id, then
 # WaitForDecision in a second call (still as work). Long reply-
 # timeout so admin's deny click has time to land.
-sudo -u work bash -c '
-  RID_OUT=$(dbus-send --system --print-reply --reply-timeout=5000 \
+source /tmp/qci-gui-waiters.sh
+# RequestPermission returns the rid immediately and leaves the request
+# pending; only WaitForDecision blocks, so only that half is a background job.
+# Both halves still run as work with exe /usr/bin/dbus-send, which is the
+# identity this scenario is about.
+runuser -u work -- bash -c 'dbus-send --system --print-reply --reply-timeout=5000 \
     --dest=org.qdistro.AdminBroker1 \
     /org/qdistro/AdminBroker1 \
     org.qdistro.AdminBroker1.RequestPermission \
     string:"test.action" \
-    dict:string:string:"caller","dbus-send-28" 2>&1)
-  echo "$RID_OUT" > /tmp/28-rid.out
-  RID=$(echo "$RID_OUT" | awk "/int32/{print \$2; exit}")
-  echo "rid=$RID" >> /tmp/28-rid.out
-  dbus-send --system --print-reply --reply-timeout=60000 \
+    dict:string:string:"caller","dbus-send-28" 2>&1' > /tmp/28-rid.out
+RID=$(awk '/int32/{print $2; exit}' /tmp/28-rid.out)
+echo "rid=$RID" >> /tmp/28-rid.out
+bg_start 28-work-alt work "dbus-send --system --print-reply --reply-timeout=60000 \
     --dest=org.qdistro.AdminBroker1 \
     /org/qdistro/AdminBroker1 \
     org.qdistro.AdminBroker1.WaitForDecision \
-    int32:$RID > /tmp/28-work-alt.log 2>&1 &
-  echo $! > /tmp/28-work-alt.pid'
+    int32:$RID"
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -154,7 +159,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 2
 $VMGUI "$VM" screenshot /tmp/28-s4-after-deny.png
-$VMEXEC "$VM" 'wait $(cat /tmp/28-work-alt.pid) 2>/dev/null; cat /tmp/28-work-alt.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 28-work-alt 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 28-work-alt; echo "rc=$(bg_rc 28-work-alt)"'
 ```
 
 **Assert**:

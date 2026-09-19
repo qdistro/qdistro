@@ -60,8 +60,8 @@ is the load-bearing surface.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 # Run qsu as admin (not as work) — admin is allowed to escalate.
-runuser -u admin -- bash -c '/usr/local/bin/qsu -u work /usr/bin/id \
-  >/tmp/51-id-work.log 2>&1 & echo $! >/tmp/51-id-work.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 51-id-work admin '/usr/local/bin/qsu -u work /usr/bin/id'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -100,7 +100,10 @@ $VMGUI "$VM" screenshot /tmp/51-s2b-selected.png
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
-$VMEXEC "$VM" 'wait $(cat /tmp/51-id-work.pid) 2>/dev/null; cat /tmp/51-id-work.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 51-id-work 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 51-id-work; echo "rc=$(bg_rc 51-id-work)"'
 ```
 
 **Assert**:
@@ -122,8 +125,8 @@ $VMEXEC "$VM" 'wait $(cat /tmp/51-id-work.pid) 2>/dev/null; cat /tmp/51-id-work.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- bash -c '/usr/local/bin/qsu -u root /usr/bin/id \
-  >/tmp/51-id-root.log 2>&1 & echo $! >/tmp/51-id-root.pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 51-id-root admin '/usr/local/bin/qsu -u root /usr/bin/id'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -152,7 +155,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
-$VMEXEC "$VM" 'wait $(cat /tmp/51-id-root.pid) 2>/dev/null; cat /tmp/51-id-root.log'
+# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
+# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 51-id-root 60'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 51-id-root; echo "rc=$(bg_rc 51-id-root)"'
 ```
 
 **Assert**: log contains `request denied`, qsu rc=1.

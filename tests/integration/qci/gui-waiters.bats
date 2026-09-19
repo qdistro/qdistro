@@ -333,3 +333,177 @@ setup() {
     [ "$(_await_positive_int 5 20)" = "5" ]
     [ "$(_await_positive_int 999999999999999999999999 20)" = "20" ]  # overflow
 }
+
+# --- bg_start / bg_wait / bg_rc / bg_log -------------------------------------
+#
+# These pin the replacement for `wait $(cat X.pid)`, which does not wait at all
+# when the producer and the consumer are separate guest shells. The first test
+# below reproduces that defect directly, so the reason this API exists is
+# itself under test rather than only asserted in a comment.
+
+bg_setup() {
+    export QCI_BG_DIR="$BATS_TEST_TMPDIR/bg"
+    mkdir -p "$QCI_BG_DIR"
+}
+
+@test "bg: the OLD pid-wait idiom reads an empty log — the defect being replaced" {
+    bg_setup
+    # Producer in one shell, consumer in another, exactly as two vm-exec calls.
+    bash -c "{ sleep 3; echo PAYLOAD; } >'$QCI_BG_DIR/old.log' 2>&1 & echo \$! >'$QCI_BG_DIR/old.pid'"
+    run bash -c "wait \$(cat '$QCI_BG_DIR/old.pid') 2>/dev/null; cat '$QCI_BG_DIR/old.log'"
+    # `wait` returns instantly on a non-child, so the log is still empty.
+    [ "$output" = "" ]
+    wait
+}
+
+@test "bg: bg_wait does block for a job the old idiom would have raced" {
+    bg_setup
+    bg_start slow - 'sleep 3; echo PAYLOAD'
+    # Same timing as the test above, where the pid-wait read nothing.
+    [ "$(cat "$QCI_BG_DIR/slow.log" 2>/dev/null)" = "" ]
+    QCI_AWAIT_QUIET=1 run bg_wait slow 30 1
+    [ "$status" -eq 0 ]
+    [ "$(bg_log slow)" = "PAYLOAD" ]
+}
+
+@test "bg: the job's exit status is recorded and readable" {
+    bg_setup
+    bg_start rc7 - 'exit 7'
+    QCI_AWAIT_QUIET=1 bg_wait rc7 20 1
+    [ "$(bg_rc rc7)" = "7" ]
+    # bg_rc's OWN status says only whether a record could be read. Returning
+    # the job's status here instead would make a job that exited 1
+    # indistinguishable from a job that never ran, and would abort a caller
+    # running under `set -e` on a legitimately failing command.
+    run bg_rc rc7
+    [ "$status" -eq 0 ]
+    [ "$output" = "7" ]
+}
+
+@test "bg: QCI_BG_STDERR keeps stderr OUT of the stdout log" {
+    bg_setup
+    local err="$BATS_TEST_TMPDIR/split.err"
+    QCI_BG_STDERR="$err" bg_start split - 'echo wanted; echo loader-warning >&2'
+    QCI_AWAIT_QUIET=1 bg_wait split 20 1
+    [ "$(bg_log split)" = "wanted" ]
+    [[ "$(cat "$err")" == *"loader-warning"* ]]
+    [ "$(bg_rc split)" = "0" ]
+}
+
+@test "bg: bg_log <tag> <lines> truncates without a pipeline" {
+    bg_setup
+    bg_start many - 'for i in 1 2 3 4 5; do echo "line$i"; done'
+    QCI_AWAIT_QUIET=1 bg_wait many 20 1
+    [ "$(bg_log many 2)" = "line1
+line2" ]
+    # The same read under pipefail must not become a failure, which is what a
+    # `bg_log many | head -2` call site would risk.
+    run bash -c "set -euo pipefail; source '$REPO_ROOT/ci/lib/guest/gui-waiters.sh'; QCI_BG_DIR='$QCI_BG_DIR' bg_log many 2"
+    [ "$status" -eq 0 ]
+}
+
+@test "bg: an exit inside the command still records a status" {
+    bg_setup
+    # A bare `exit` would leave the whole background shell if the command were
+    # not run in its own subshell, so no .rc would ever be written and bg_wait
+    # would hang until its deadline.
+    bg_start ex - 'echo before; exit 3; echo after'
+    QCI_AWAIT_QUIET=1 run bg_wait ex 20 1
+    [ "$status" -eq 0 ]
+    [ "$(bg_rc ex)" = "3" ]
+    [ "$(bg_log ex)" = "before" ]
+}
+
+@test "bg: a multi-command string sends ALL of its output to the log" {
+    bg_setup
+    # `cmd > log` binds the redirect to the LAST command of a list; the whole
+    # list must be grouped or earlier output escapes to the caller's stdout.
+    bg_start multi - 'echo one; echo two; echo three'
+    QCI_AWAIT_QUIET=1 bg_wait multi 20 1
+    [ "$(bg_log multi)" = "one
+two
+three" ]
+}
+
+@test "bg: stderr is captured in the SAME log as stdout" {
+    bg_setup
+    bg_start err - 'echo out; echo problem >&2'
+    QCI_AWAIT_QUIET=1 bg_wait err 20 1
+    # Both halves, or "same log" is not what is being shown.
+    [[ "$(bg_log err)" == *"out"* ]]
+    [[ "$(bg_log err)" == *"problem"* ]]
+}
+
+@test "bg: a command ending in a COMMENT does not corrupt the wrapper" {
+    bg_setup
+    # Interpolating the command into the script source would let this comment
+    # swallow the closing paren and the exit-status record with it; bg_wait
+    # would then block to its deadline for a job that had already finished.
+    bg_start cmt - 'echo done  # why this command exists'
+    QCI_AWAIT_QUIET=1 run bg_wait cmt 20 1
+    [ "$status" -eq 0 ]
+    [ "$(bg_log cmt)" = "done" ]
+    [ "$(bg_rc cmt)" = "0" ]
+}
+
+@test "bg: a job directory with spaces and metacharacters still works" {
+    # The generated script %q-quotes every path it names; an unquoted one
+    # would split this directory into several words and write nowhere useful.
+    export QCI_BG_DIR="$BATS_TEST_TMPDIR/od d & \$x"
+    mkdir -p "$QCI_BG_DIR"
+    bg_start q - 'echo hello; exit 2'
+    QCI_AWAIT_QUIET=1 run bg_wait q 20 1
+    [ "$status" -eq 0 ]
+    [ "$(bg_log q)" = "hello" ]
+    [ "$(bg_rc q)" = "2" ]
+}
+
+@test "bg: bg_wait TIMES OUT loudly when the job never finishes" {
+    bg_setup
+    bg_start hang - 'sleep 30'
+    run bg_wait hang 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"hang"* ]]
+}
+
+@test "bg: bg_rc reports ABSENCE separately from a job that exited nonzero" {
+    bg_setup
+    bg_start none - 'sleep 30'
+    run bg_rc none
+    [ "$status" -eq 1 ]
+    [ "$output" != "" ]
+    [[ "$output" == *"no exit status recorded"* ]]
+}
+
+@test "bg: a stale record from an earlier job with the same tag cannot satisfy bg_wait" {
+    bg_setup
+    bg_start reuse - 'echo first'
+    QCI_AWAIT_QUIET=1 bg_wait reuse 20 1
+    [ "$(bg_rc reuse)" = "0" ]
+    bg_start reuse - 'sleep 2; echo second; exit 5'
+    # The previous run's .rc must be gone the moment the new job starts,
+    # or bg_wait returns instantly with the OLD job's status.
+    [ ! -e "$QCI_BG_DIR/reuse.rc" ]
+    QCI_AWAIT_QUIET=1 bg_wait reuse 20 1
+    [ "$(bg_rc reuse)" = "5" ]
+    [ "$(bg_log reuse)" = "second" ]
+}
+
+@test "bg: a tag that would escape the job directory is refused" {
+    bg_setup
+    run bg_start "../escape" - 'true'
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid tag"* ]]
+    run bg_start "" - 'true'
+    [ "$status" -eq 2 ]
+    run bg_wait "a b" 1 1
+    [ "$status" -eq 2 ]
+}
+
+@test "bg: bg_log reports a missing log loudly instead of as empty output" {
+    bg_setup
+    run bg_log never-started
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no log"* ]]
+}
