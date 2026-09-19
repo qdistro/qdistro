@@ -281,16 +281,23 @@ being recorded" are different statements to the owner.
 ### Step 5 — camera (CONDITIONAL)
 
 ```bash
-CAMID=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'cd / && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 python3 -I -c "
+# Multi-line guest programs go through the base64 envelope (same pitfall as
+# permissions-gui/AGENTS.md #1): an inline `python3 -c "<newline>..."` is both
+# vm-exec-JSON-fragile and easy for a driver to flatten into literal "\n",
+# which is a SyntaxError, not a probe result.
+CAM_PROBE_B64=$(base64 -w0 <<'PYEOF'
 import json,subprocess
 from qdlocker import indicators as I
 ok,nodes=I.parse_pw_dump(subprocess.run(I.CAPTURE_CMD,capture_output=True,text=True).stdout)
 for n in nodes:
-    p=n[\"props\"]
-    if str(p.get(\"media.class\",\"\"))==\"Video/Source\":
-        print(p.get(\"node.name\",\"\")); break
-"' | tr -d '\r')
+    p=n["props"]
+    if str(p.get("media.class",""))=="Video/Source":
+        print(p.get("node.name","")); break
+PYEOF
+)
+CAMID=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  "cd / && echo $CAM_PROBE_B64 | base64 -d | runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 python3 -I -" \
+  | tr -d '\r')
 if [ -z "$CAMID" ]; then
     echo "SKIP (5): no PipeWire Video/Source node in this VM (no camera," \
          "no v4l2loopback). Camera classification not exercised." >&2
@@ -474,7 +481,7 @@ qdwin_screenshot /tmp/qdlocker-09-step8-egress.png
 # the state transition, must not be able to satisfy this.
 # Reuse the production parser (the installed module) rather than hand-rolling
 # busctl string surgery in the harness.
-"$QDWIN_VM_EXEC" "$VMNAME" "cd / && runuser -u admin -- python3 -I -c \"
+SILO_STOP_B64=$(base64 -w0 <<PYEOF
 import subprocess, time
 from qdlocker import indicators as I
 deadline = time.monotonic() + 10
@@ -491,7 +498,11 @@ assert state == 'Stopping', (
     'silo $SILO never became externally observable as Stopping; last state='
     + str(state))
 print('ok: silo $SILO is Stopping')
-\"" || exit 1
+PYEOF
+)
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  "cd / && echo $SILO_STOP_B64 | base64 -d | runuser -u admin -- python3 -I -" \
+  || exit 1
 sleep 4
 assert_ind egress_active 1              # still live: Stopping is not dark
 assert_ind_contains egress_detail "$SILO"
