@@ -308,6 +308,11 @@ stdout** as ground truth:
  pending request (uid / action / exe / scope choices). This is
  the same call the Qt admin app makes to populate its list, so
  it is exactly the model behind the pane.
+ Root `dbus-send`/`busctl`/`gdbus` are trusted control-plane
+ helpers; root `python3` is not. A Python `GetPending` must be
+ `runuser -u admin -- python3 -` (live-stdin) or an installed
+ admin script. Do not grep dbus-send text for `dict {` — the
+ token is `dict entry(`, and `grep -q` exits 1 on empty.
  - Cached approvals (post-decision):
  ```bash
  SQL_B64=$(base64 -w0 <<'SQL'

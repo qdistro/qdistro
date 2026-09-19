@@ -29,10 +29,11 @@ $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 # (full-20260918T143937Z-3516587).
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service && await_dbus_system_name org.qdistro.AdminBroker1'
-# Count via the Python API. dbus-send text is the wrong oracle, and
-# `grep -q && exit 1` fails the empty (success) case.
-B64=$(base64 -w0 <<'EOF'
-python3 - <<'PYEOF'
+# Count via the Python API as admin stdin (`python3 -`). Root python3
+# is AccessDenied (gui-admin-20260919T114809Z-1540720); root dbus-send
+# is trusted, but its text is the wrong oracle, and `grep -q && exit 1`
+# fails the empty (success) case.
+B64=$(base64 -w0 <<'PYEOF'
 import dbus, sys
 bus = dbus.SystemBus()
 obj = bus.get_object("org.qdistro.AdminBroker1",
@@ -45,9 +46,8 @@ if n != 0:
           file=sys.stderr)
     sys.exit(1)
 PYEOF
-EOF
 )
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+$VMEXEC "$VM" "echo $B64 | base64 -d | runuser -u admin -- python3 -"
 ```
 
 ## Steps
