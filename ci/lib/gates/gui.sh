@@ -2161,7 +2161,15 @@ Environment=QDLOCKER_IDLE_MS=86400000
 EOF
 chown admin:users "$d/90-ci-gui.conf"
 runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || exit 0
-runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service 2>/dev/null || true'
+# try-restart, NOT restart: `restart` STARTS a stopped unit, and qdlocker is
+# Restart=always. On a VM where the compositor is not up and no wl_display is
+# reachable, qdlocker cannot initialise, and starting it there turns a dormant
+# unit into a crash-loop for the life of the VM. gui-20260919T072913Z had it at restart counter 121, SIGABRT every
+# ~2s, which flooded the journal collector and destroyed the evidence window
+# for an unrelated failure in the same run. This drop-in only needs to be in
+# effect for a locker that is ALREADY running; if it is not running, it will
+# read the drop-in when something starts it for real.
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user try-restart qdlocker.service 2>/dev/null || true'
     b64=$(printf '%s' "$script" | base64 -w0 2>/dev/null) || b64=$(printf '%s' "$script" | base64 | tr -d '\n')
     "$VM_TOOLS/vm-exec" "$vm" "printf '%s' '$b64' | base64 -d | bash" >/dev/null 2>&1 || true
 }

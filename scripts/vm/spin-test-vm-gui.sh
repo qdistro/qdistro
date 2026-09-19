@@ -717,6 +717,78 @@ NAutoVTs=0
 EOF2
     systemctl restart systemd-logind >/dev/null 2>&1 || true
 
+    # DESKTOP WALLPAPER: make the ordinary idle desktop visibly non-flat.
+    #
+    # qdshell ships `wallpaper.enabled: true` with an EMPTY `directory`
+    # (Commons/Settings.qml), defaulting to ~/Pictures/Wallpapers, and nothing
+    # here used to populate it -- so the test desktop background was BLACK. A
+    # healthy idle desktop and a dead compositor then produced the same frame,
+    # which is why this failure class kept being diagnosed indirectly
+    # (36b1ce6 "the 'app' screenshots were actually the qdlocker lock screen",
+    # 3dcd6bd, qdlocker 14c19a5, qdshell 4885738e8, qdwin 6e6d860). With a
+    # patterned background the ordinary idle desktop is no longer FLAT, so it
+    # is distinguishable from the uniform-black signature instead of identical
+    # to it.
+    #
+    # THIS IS NOT A LIVENESS PROOF. A structured frame shows the pattern was
+    # rendered at some point; a frozen framebuffer keeps its last contents, and
+    # that is exactly the state seen in gui-20260919T072913Z (three retries,
+    # byte-identical). Repeat-capture comparison stays the liveness test. Nor
+    # does it mean every refused frame is a fault: a fullscreen uniform app, a
+    # lock view, or DPMS-off can all legitimately produce a flat frame.
+    #
+    # Generated in-guest with stdlib python3 only. ImageMagick is a HOST
+    # dependency of the capture gate and is not guaranteed in the VM, and a
+    # binary asset in the repo cannot be reviewed in a diff. The pattern (plain
+    # diagonal + orthogonal grid, no text, no fonts) is the same one
+    # scripts/vm/assets/make-test-wallpaper.sh documents and regenerates (that
+    # script extracts and runs THIS generator rather than reimplementing it;
+    # the sigma figures below are measured by the gate tests):
+    # full-frame sigma ~0.098 against a FRAME_FLAT_SIGMA of 0.01. The pattern
+    # is 64px-periodic in both axes, so any axis-aligned, unscaled 64x64 crop
+    # contains each pair of residues exactly once and therefore has the
+    # histogram of ONE COMPLETE PERIOD -- which is only APPROXIMATELY the whole
+    # frame's, because 800 is 12.5 periods, not an integer: a tile is
+    # 496/4096 rule pixels (0.121094) against the frame's 123400/1024000
+    # (0.120508). Close enough that a crop and the frame read the same to the
+    # gate, which is why a window covering most of the screen leaves the
+    # remainder just as legible. 64px is the period, a design
+    # choice; it is NOT a measured claim about how much desktop a real
+    # scenario leaves uncovered, and a remnant smaller than one period or a
+    # scaled/filtered capture carries no such guarantee. A solid colour would
+    # NOT do: qdshell's solidColor default (#1a1a2e) measures sigma 0 and the
+    # gate would refuse a healthy desktop as FLAT.
+    install -d -m 0755 -o admin -g users /home/admin/Pictures/Wallpapers
+    runuser -u admin -- python3 - /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png <<'WPEOF'
+import struct, zlib, sys
+
+W, H, T = 1280, 800, 64
+BASE = (0x18, 0x20, 0x32)
+RULE = (0x5a, 0x6d, 0x99)
+
+def on_rule(x, y):
+    u, v = x % T, y % T
+    return (abs(u - v) < 2 or abs(u + v - (T - 1)) < 2
+            or abs(v - T // 2) < 1 or abs(u - T // 2) < 1)
+
+rows = bytearray()
+for y in range(H):
+    rows.append(0)
+    for x in range(W):
+        rows += bytes(RULE if on_rule(x, y) else BASE)
+
+def chunk(tag, data):
+    c = tag + data
+    return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+
+open(sys.argv[1], "wb").write(
+    b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+    + chunk(b"IEND", b""))
+WPEOF
+    chown admin:users /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png 2>/dev/null || true
+
     systemctl daemon-reload
     runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
     runuser -l admin -c 'systemctl --user start qdwin-session.target' || true

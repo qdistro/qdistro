@@ -2315,6 +2315,74 @@ vmgui_fresh() {
         "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot-fresh "$@"
 }
 
+@test "the test-lane wallpaper is USABLE to the gate that judges it" {
+    # Ties the desktop background to the gate. The GUI VMs used to run with an
+    # empty wallpaper directory, so the desktop was BLACK and a healthy idle
+    # screen was indistinguishable from a dead compositor -- the condition
+    # behind a long line of indirect diagnoses (36b1ce6, 3dcd6bd, qdlocker
+    # 14c19a5, qdshell 4885738e8, qdwin 6e6d860).
+    #
+    # Runs the generator extracted from spin-test-vm-gui.sh rather than a
+    # copy, so it catches invalid Python and a renamed/missing heredoc marker.
+    # WHAT IT DOES NOT COVER, stated because the obvious reading is wider: it
+    # does not execute the provisioning shell, so heredoc quoting in the outer
+    # base64 wrapper, `runuser`, the install/chown, and whether qdshell ever
+    # DISCOVERS the file are all unverified here. Only a provisioned VM can
+    # establish those.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    local spin="$REPO_ROOT/scripts/vm/spin-test-vm-gui.sh"
+    awk '/^    runuser -u admin -- python3 - .*qdistro-test-pattern/{f=1;next} /^WPEOF/{f=0} f' \
+        "$spin" > "$TDIR/genwp.py"
+    [ -s "$TDIR/genwp.py" ] || { echo "could not extract the wallpaper generator from $spin"; return 1; }
+    python3 "$TDIR/genwp.py" "$TDIR/wallpaper.png"
+
+    # Serve the wallpaper as the VM's framebuffer and require the gate to
+    # publish it. A solid-colour background (qdshell's own solidColor default
+    # measures sigma 0) would be refused as FLAT here.
+    cat > "$TDIR/bin/virsh" <<EOF
+#!/usr/bin/env bash
+cp -- "$TDIR/wallpaper.png" "\${@: -1}"
+EOF
+    chmod +x "$TDIR/bin/virsh"
+    run vmgui_fresh "$ADIR/wp.png"
+    [ "$status" -eq 0 ]
+    [ -f "$ADIR/wp.png" ]
+}
+
+@test "a window covering most of the desktop still leaves a USABLE frame" {
+    # The pattern is 64px-periodic in both axes, so any axis-aligned, unscaled
+    # 64x64 crop holds each pair of residues once, so it carries one full
+    # period. This samples the PRACTICAL CONSEQUENCE of that -- five crops,
+    # including off-boundary offsets, must all survive the gate -- and does
+    # NOT assert histogram equality; it is a usability regression test, not a
+    # proof of the mathematical property. The earlier single 64x800+0+0 strip
+    # was one aligned case and did not test even this.
+    if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
+    local spin="$REPO_ROOT/scripts/vm/spin-test-vm-gui.sh"
+    awk '/^    runuser -u admin -- python3 - .*qdistro-test-pattern/{f=1;next} /^WPEOF/{f=0} f' \
+        "$spin" > "$TDIR/genwp.py"
+    python3 "$TDIR/genwp.py" "$TDIR/wallpaper.png"
+    # Serve ONLY the uncovered strip as the framebuffer. Compositing a black
+    # rectangle over the rest instead would be vacuous: the covered/uncovered
+    # boundary is itself an edge, so such a frame stays structured even with a
+    # solid-colour background, and the assertion would pass for the wrong
+    # reason. Cropping asks the real question -- does the REMAINING desktop
+    # carry structure on its own?
+    local geom n=0
+    for geom in 64x64+0+0 64x64+13+7 64x64+640+400 64x64+1216+736 64x800+0+0; do
+        magick "$TDIR/wallpaper.png" -crop "$geom" +repage "$TDIR/remnant.png"
+        cat > "$TDIR/bin/virsh" <<EOF
+#!/usr/bin/env bash
+cp -- "$TDIR/remnant.png" "\${@: -1}"
+EOF
+        chmod +x "$TDIR/bin/virsh"
+        n=$((n + 1))
+        run vmgui_fresh "$ADIR/remnant-$n.png"
+        [ "$status" -eq 0 ] || { echo "remnant $geom was refused"; return 1; }
+        [ -f "$ADIR/remnant-$n.png" ]
+    done
+}
+
 @test "screenshot-fresh: a CHANGED frame is published" {
     install_fake_virsh                     # each call renders distinct bytes
     run vmgui_fresh "$ADIR/f1.png"

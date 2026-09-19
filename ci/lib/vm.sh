@@ -1141,12 +1141,62 @@ collect_vm_artifacts() {
     "${VIRSH[@]}" screenshot "$vm" "$RDIR/screenshots/$label-final.ppm" >/dev/null 2>&1 || true
     vmx="$VM_TOOLS/vm-exec"
     [ -x "$vmx" ] || return 0
-    # 3000-line window: the old 400-line cap truncated the journal at the
-    # decisive instant of the scenario-19 VT-takeaway investigation
-    # (todo/screenshots/README.md). Seat/VT actors are preserved in full.
-    "$vmx" "$vm" "journalctl -b --no-pager 2>/dev/null | tail -3000" > "$RDIR/journals/$label-system.log" 2>&1 || true
-    "$vmx" "$vm" "journalctl _UID=1000 -b --no-pager 2>/dev/null | tail -3000" > "$RDIR/journals/$label-user-1000.log" 2>&1 || true
-    "$vmx" "$vm" "journalctl -b -u seatd -u systemd-logind -u 'getty@*' --no-pager 2>/dev/null" > "$RDIR/journals/$label-seat-vt.log" 2>&1 || true
+    # A SHARED LINE CAP IS THE WRONG UNIT, and this is the second time it has
+    # cost an investigation. The cap was already widened 400 -> 3000 after it
+    # truncated the scenario-19 VT-takeaway evidence
+    # (todo/screenshots/README.md). In gui-20260919T072913Z, scenario 24's
+    # frame went black at 07:55:14 and a crash-looping qdlocker (restart
+    # counter 121, ~9 lines every 2s) plus spice-vdagent had already flooded
+    # the buffer: the captured user journal was exactly 3001 lines and began
+    # at 07:57. The decisive minute was discarded by the collector, not
+    # missing from the guest.
+    #
+    # Widening again only buys time until something loops faster. The
+    # structural fix is that ONE NOISY UNIT MUST NOT EVICT THE LINES OF
+    # ANOTHER, so
+    # the units that explain a display failure are captured into their own
+    # files, each with its own budget, in ADDITION to the whole-journal tails.
+    "$vmx" "$vm" "journalctl -b --no-pager 2>/dev/null | tail -8000" > "$RDIR/journals/$label-system.log" 2>&1 || true
+    "$vmx" "$vm" "journalctl _UID=1000 -b --no-pager 2>/dev/null | tail -8000" > "$RDIR/journals/$label-user-1000.log" 2>&1 || true
+    "$vmx" "$vm" "journalctl -b -u seatd -u systemd-logind -u '"'"'getty@*'"'"' --no-pager 2>/dev/null" > "$RDIR/journals/$label-seat-vt.log" 2>&1 || true
+    # ONE FILE AND ONE BUDGET PER UNIT. A combined query behind a shared
+    # `tail` would not fix anything -- the locker could still consume the whole
+    # window and bury the compositor, just with a different number on it. Each
+    # unit gets its own file so no unit's volume can evict another's lines.
+    local dunit dslug
+    for dunit in qdwin-compositor.service qdshell.service qdlocker.service; do
+        dslug=${dunit%.service}
+        "$vmx" "$vm" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -b -u $dunit --no-pager 2>/dev/null | tail -4000" > "$RDIR/journals/$label-unit-$dslug.log" 2>&1 || true
+    done
+    # Merged chronology as well, because interleaving across the three is what
+    # shows a handoff failing. This one is a convenience and may be truncated
+    # by a noisy neighbour; the per-unit files above are isolated bounded
+    # histories -- a unit can still evict its OWN earlier lines, including the
+    # start of its own loop, but it cannot evict another unit's.
+    "$vmx" "$vm" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -b -u qdwin-compositor.service -u qdshell.service -u qdlocker.service --no-pager 2>/dev/null | tail -4000" > "$RDIR/journals/$label-display-units.log" 2>&1 || true
+    # WHO IS FLOODING: line counts per syslog identifier, most-noisy first. A
+    # crash-loop is invisible in a truncated tail but obvious as a count, and
+    # this is the line that would have named qdlocker immediately. It is a
+    # TOP-TALKERS HEURISTIC, not exhaustive attribution: entries carrying no
+    # SYSLOG_IDENTIFIER are not counted at all, and the extraction is a regex
+    # over one-line JSON rather than a JSON parse: JSON escapes are not
+    # decoded, and because the match stops at the first quote, an identifier
+    # containing an ESCAPED quote is truncated (`a\"b` is reported as `a\`).
+    # Good enough to name a loop. Base64ed
+    # rather than inlined: the pipeline needs nested single and double quotes,
+    # and building that as a shell string inside a shell string is how the
+    # first version of this line came out unparseable.
+    local flood_b64 flood_script
+    flood_script=$(cat <<'FLOODEOF'
+journalctl -b --no-pager -o json --output-fields=SYSLOG_IDENTIFIER 2>/dev/null \
+  | grep -ao '"SYSLOG_IDENTIFIER"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  | sed 's/.*"\([^"]*\)"$/\1/' \
+  | sort | uniq -c | sort -rn | head -40
+FLOODEOF
+)
+    flood_b64=$(printf '%s' "$flood_script" | base64 -w0 2>/dev/null) \
+        || flood_b64=$(printf '%s' "$flood_script" | base64 | tr -d '\n')
+    "$vmx" "$vm" "printf '%s' '$flood_b64' | base64 -d | bash" > "$RDIR/journals/$label-flood-report.txt" 2>&1 || true
     "$vmx" "$vm" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status qdwin-compositor.service qdshell.service qdlocker.service qdistro-cursor-sprites.service --no-pager 2>/dev/null || true" > "$outdir/systemctl-user-status.txt" 2>&1 || true
     "$vmx" "$vm" "WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 runuser -u admin -- wayland-info 2>/dev/null | head -240 || true" > "$outdir/wayland-info.txt" 2>&1 || true
     "$vmx" "$vm" "echo list | socat - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>&1 | head -200 || true" > "$outdir/qdshell-list.txt" 2>&1 || true
