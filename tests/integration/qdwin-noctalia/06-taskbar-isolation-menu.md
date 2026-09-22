@@ -60,22 +60,32 @@ into later commands.
 `<APP_ID>` and `<LAUNCH_TOKEN>` with the values from above:
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" "for i in \$(seq 1 60); do line=\$(journalctl 2>/dev/null | grep -F -m1 'qdwin/secctx: committed engine=qdistro.tier2 app_id=<APP_ID> instance_id=<LAUNCH_TOKEN>'); [ -n \"\$line\" ] && { echo \"\$line\"; exit 0; }; sleep 0.5; done; echo NO_COMMIT; exit 1"
+"$QDWIN_VM_EXEC" "$VMNAME" "for i in \$(seq 1 60); do line=\$(journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service 2>/dev/null | grep -F -m1 'qdwin/secctx: committed engine=qdistro.tier2 app_id=<APP_ID> instance_id=<LAUNCH_TOKEN>'); [ -n \"\$line\" ] && { echo \"\$line\"; exit 0; }; sleep 0.5; done; echo NO_COMMIT; exit 1"
 ```
 It polls up to 30s (the commit can lag the spawn). It must print one
 `qdwin/secctx: committed …` line. If it prints `NO_COMMIT` → FAIL.
+
+Both journal waits in this file read ONLY qdwin's own unit
+(`_SYSTEMD_USER_UNIT=qdwin-compositor.service`). Do not widen them to plain
+`journalctl`: qemu-ga logs every command it runs (`guest-exec called: "…"`),
+so a whole-journal grep matches the waiting command's own text and passes on
+an identity that never existed.
 
 ## Step 2 — wait for the window's pixels, then screenshot the desktop
 
 The secctx commit (1.1) lands before the disposable's window exists. The window
 reaches qdwin as a **nested proxy**: qdwin first logs
-`toplevel_security_context (nested proxy) handle=<N> … app_id=<APP_ID>`, then
-`bind_proxy_pixels handle=<N>` once the live feed replaces the blank curtain.
-Wait for that second line — do NOT replace this with a fixed sleep. Run
-verbatim, replacing `<APP_ID>` and `<LAUNCH_TOKEN>`:
+`toplevel_security_context (nested proxy) handle=<N> … app_id=<APP_ID>`, then,
+once the live feed replaces the blank curtain on the approved window, either
+`bind_proxy_pixels handle=<N> … (curtain swapped for live feed)` or
+`activate pixel surface handle=<N> (deferred swap on allow)`. Other
+`bind_proxy_pixels` lines (feed STASHED while pending, view-create failed) are
+NOT a map. The command follows the NEWEST matching handle, in case the window
+is re-created. Do NOT replace this with a fixed sleep. Run verbatim, replacing
+`<APP_ID>` and `<LAUNCH_TOKEN>`:
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" "for i in \$(seq 1 60); do tail=\$(journalctl -b 2>/dev/null | sed -n '/toplevel_security_context (nested proxy) handle=[0-9]* engine=qdistro.tier2 app_id=<APP_ID> instance=<LAUNCH_TOKEN>/,\$p'); h=\$(printf '%s\n' \"\$tail\" | head -1 | sed -n 's/.*(nested proxy) handle=\([0-9]*\) .*/\1/p'); [ -n \"\$h\" ] && printf '%s\n' \"\$tail\" | grep -qF \"qdwin/nested-proxy: bind_proxy_pixels handle=\$h \" && { echo \"MAPPED handle=\$h\"; exit 0; }; sleep 0.5; done; echo NO_MAP; exit 1"
+"$QDWIN_VM_EXEC" "$VMNAME" "for i in \$(seq 1 60); do j=\$(journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service 2>/dev/null); m=\$(printf '%s\n' \"\$j\" | grep -nF 'toplevel_security_context (nested proxy) handle=' | grep -F ' engine=qdistro.tier2 app_id=<APP_ID> instance=<LAUNCH_TOKEN>' | tail -1); n=\${m%%:*}; h=\$(printf '%s\n' \"\$m\" | sed -n 's/.*(nested proxy) handle=\([0-9]*\) .*/\1/p'); [ -n \"\$h\" ] && printf '%s\n' \"\$j\" | tail -n \"+\$n\" | grep -qE \"qdwin/nested-proxy: (bind_proxy_pixels handle=\$h surface=.*curtain swapped for live feed|activate pixel surface handle=\$h \(deferred swap on allow\))\" && { echo \"MAPPED handle=\$h\"; exit 0; }; sleep 0.5; done; echo NO_MAP; exit 1"
 ```
 It polls up to 30s. It must print `MAPPED handle=<N>`. If it prints `NO_MAP` →
 FAIL (2.1).
@@ -162,7 +172,10 @@ attach `/tmp/06-step2-desktop.png` + `/tmp/06-step3-menu.png`. Otherwise write
 3. **`NO_MAP` (2.1)** — the disposable committed its identity but its window
    never showed live pixels within 30s. That is a real failure (the nested
    weston or its pipewire feed did not come up); do NOT retry with a sleep.
-   Attach `journalctl -b | grep -E 'nested-proxy|nested-toplevel'` output.
+   Attach the output of
+   `journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service | grep -E 'nested-proxy|nested-toplevel|nested_proxy_decision|holding_released|activate pixel surface'`
+   — a `nested_proxy_decision … DENY` or a `holding_released … deferred` line
+   means the window was refused or is still held, not that the feed is down.
 4. **Step-3 menu did not open** — expected/tolerated: the taskbar item is a small
    icon and its right-click is finicky; this is recorded evidence, not a failure.
    The isolation IDENTITY (1.1) and the Dispose ACTION (4.1/4.2) are what this
