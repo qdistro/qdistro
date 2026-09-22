@@ -65,15 +65,28 @@ into later commands.
 It polls up to 30s (the commit can lag the spawn). It must print one
 `qdwin/secctx: committed …` line. If it prints `NO_COMMIT` → FAIL.
 
-## Step 2 — screenshot the desktop (the taskbar should show the window)
+## Step 2 — wait for the window's pixels, then screenshot the desktop
 
-Wait for the window to map, then capture the desktop:
+The secctx commit (1.1) lands before the disposable's window exists. The window
+reaches qdwin as a **nested proxy**: qdwin first logs
+`toplevel_security_context (nested proxy) handle=<N> … app_id=<APP_ID>`, then
+`bind_proxy_pixels handle=<N>` once the live feed replaces the blank curtain.
+Wait for that second line — do NOT replace this with a fixed sleep. Run
+verbatim, replacing `<APP_ID>` and `<LAUNCH_TOKEN>`:
 
 ```bash
-sleep 3
+"$QDWIN_VM_EXEC" "$VMNAME" "for i in \$(seq 1 60); do tail=\$(journalctl -b 2>/dev/null | sed -n '/toplevel_security_context (nested proxy) handle=[0-9]* engine=qdistro.tier2 app_id=<APP_ID> instance=<LAUNCH_TOKEN>/,\$p'); h=\$(printf '%s\n' \"\$tail\" | head -1 | sed -n 's/.*(nested proxy) handle=\([0-9]*\) .*/\1/p'); [ -n \"\$h\" ] && printf '%s\n' \"\$tail\" | grep -qF \"qdwin/nested-proxy: bind_proxy_pixels handle=\$h \" && { echo \"MAPPED handle=\$h\"; exit 0; }; sleep 0.5; done; echo NO_MAP; exit 1"
+```
+It polls up to 30s. It must print `MAPPED handle=<N>`. If it prints `NO_MAP` →
+FAIL (2.1).
+
+Then capture the desktop:
+
+```bash
 noct_screenshot_awake /tmp/06-step2-desktop.png
 ```
-**Assert (2.1):** `/tmp/06-step2-desktop.png` shows (a) the qdshell **bar** along
+**Assert (2.1):** the wait above printed `MAPPED handle=<N>`, AND
+`/tmp/06-step2-desktop.png` shows (a) the qdshell **bar** along
 the very top edge of the screen, and (b) a window titled **"Wayland Terminal"**
 in the middle. The background is a plain solid colour (no picture)
 — the bar and window stand out against it. The disposable's **taskbar item** is
@@ -131,8 +144,9 @@ survives).
 ## Pass criteria
 
 Write `PASS` to `status.txt` only if ALL of the HARD gates held: setup, **1.1**
-(secctx committed — the disposable reached qdwin isolated), **2.1** (the bar +
-window are visible), **4.1** (`(true,)`), **4.2** (`GONE`). The step-3 menu
+(secctx committed — the disposable reached qdwin isolated), **2.1** (`MAPPED`
+was printed, then the bar + window are visible), **4.1** (`(true,)`), **4.2**
+(`GONE`). The step-3 menu
 screenshot is recorded EVIDENCE, not a pass/fail gate — note in `report.md`
 whether the menu opened and whether Dispose/Permissions were readable, and
 attach `/tmp/06-step2-desktop.png` + `/tmp/06-step3-menu.png`. Otherwise write
@@ -145,7 +159,11 @@ attach `/tmp/06-step2-desktop.png` + `/tmp/06-step3-menu.png`. Otherwise write
 2. **`DisposeByToken` errors with "not activatable" (4.1)** — you did not run
    step 4 verbatim. It MUST be `runuser -l admin -c "gdbus call --system …"`
    (admin user, system bus, the full object path + method). Re-run exactly.
-3. **Step-3 menu did not open** — expected/tolerated: the taskbar item is a small
+3. **`NO_MAP` (2.1)** — the disposable committed its identity but its window
+   never showed live pixels within 30s. That is a real failure (the nested
+   weston or its pipewire feed did not come up); do NOT retry with a sleep.
+   Attach `journalctl -b | grep -E 'nested-proxy|nested-toplevel'` output.
+4. **Step-3 menu did not open** — expected/tolerated: the taskbar item is a small
    icon and its right-click is finicky; this is recorded evidence, not a failure.
    The isolation IDENTITY (1.1) and the Dispose ACTION (4.1/4.2) are what this
    lane gates; the menu RENDER is also covered by the qdshell unit tests
