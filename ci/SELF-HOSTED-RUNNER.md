@@ -14,13 +14,14 @@ bottom is what a human must do to turn this on.
 
 ## Why
 
-The central `qdistro` repo is the only repo in the monorepo with **no hosted
-CI**. The siblings each run their own hosted workflow (qnotebook
-`tests.yml`, qterminator `ci.yml`, qdshell `test.yml` on
-`ubuntu-*`), but the cross-repo *host-tier* gate — `ci/bin/qci host`, which
+The `qdistro` monorepo has **no hosted CI**. (Before the monorepo migration
+the component repos each ran their own hosted workflow — qnotebook
+`tests.yml`, qterminator `ci.yml`, qdshell `test.yml` on `ubuntu-*`; those
+were retired with the migration, since GitHub only runs workflows from the
+repository root.) The whole-tree *host-tier* gate — `ci/bin/qci host`, which
 builds qdwin/qdshell, runs the qdistro unit suite under PyQt6, the blocking
 shared-ruff + narrow-mypy lint, the per-project coverage floors, and every
-sibling repo's host tests in one pass — only ever runs when a **human types
+component's host tests in one pass — only ever runs when a **human types
 `qci host`**. A host-tier regression (a broker change that breaks a CLI, a lint
 break, a coverage-floor regression) is therefore invisible to CI until someone
 remembers to run the gate locally.
@@ -41,40 +42,37 @@ while the heavy VM gate stays pinned to the one box that has KVM.
 
 `qci host` is `gate_host` in `ci/bin/qci`. It does **not** touch libvirt, but it
 *does* build and test most of the monorepo. The runner must therefore have BOTH
-the full sibling checkout layout (below) AND the toolchain every `run_logged`
+a full checkout of the monorepo (below) AND the toolchain every `run_logged`
 step in `gate_host` invokes.
 
 ### Workspace / checkout layout (REQUIRED)
 
-`qci` derives its paths from its own location: `WORKSPACE` is the parent of the
-`qdistro` checkout, and every sibling repo is expected as a direct child of
-`WORKSPACE`. `gate_host` builds/tests these siblings by name:
+`qci` derives its paths from its own location: `WORKSPACE` is the monorepo
+root (the directory holding `ci/bin/qci`), and every component is an in-tree
+directory of it. One clone is the whole layout. `gate_host` builds/tests these
+components by name:
 
 ```
-WORKSPACE/                      <- e.g. the runner's $GITHUB_WORKSPACE
-├── qdistro/                    <- this repo (ci/bin/qci lives here)
-│   └── ci/bin/qci
+qdistro/                        <- the monorepo (e.g. the runner's $GITHUB_WORKSPACE)
+├── ci/bin/qci
 ├── qdwin/                      <- meson build + meson test + vendored libweston
 ├── qdshell/                    <- meson build + ci-local.sh --no-int (needs qdwin pkgconfig)
 ├── qdbrowser/                  <- pytest (QtWebEngine)
 ├── qdgreeter/                  <- pytest (PySide6)
 ├── qdlocker/                   <- pytest
-├── qfileman/                   <- pytest
+├── qdfileman/                  <- pytest (package qfileman)
 ├── qnotebook/                  <- pytest
-├── qterminator/                <- pytest
-├── qdchrome-extension/         <- npm test && npm run build
-└── qdfirefox-extension/        <- npm test && npm run build
+├── qdterm/                     <- pytest (package qterminator)
+├── qdchrome-extension/         <- npm test && npm run build (run `npm ci` first)
+└── qdfirefox-extension/        <- npm test && npm run build (run `npm ci` first)
 ```
 
 (`qdistro-site`, the marketing website, is intentionally not part of the host
 gate — it ships through a separate website pipeline.)
 
-Missing siblings do not crash the gate (each step fails/reds individually), but
-a runner that only checks out `qdistro` will red almost every step. The template
-workflow documents how to populate the siblings; the simplest production setup
-is to keep a long-lived workspace on the runner with all repos cloned once and
-`git pull`ed per run (see the template's "sibling checkout" note), rather than a
-fresh full clone of 11 repos on every push.
+Before the monorepo migration this section described eleven sibling checkouts
+under a common parent; a single `git clone https://github.com/qdistro/qdistro.git`
+(plus `npm ci` in the two extension dirs) replaces all of that.
 
 ### Toolchain (derived from what `gate_host` invokes)
 
@@ -213,9 +211,8 @@ auto-trigger enabled.
 2. Create the `ci-qdistro` uid + the systemd unit; start the daemon.
 3. Register the runner against the qdistro repo with label `qdistro-host`
    (`forgejo-runner register`).
-4. Populate the sibling-repo workspace layout on the runner (clone all repos
-   listed above once; the workflow `git pull`s them per run — or wire the
-   workflow's sibling-checkout block).
+4. Clone the monorepo on the runner (one repository; `npm ci` in the two
+   extension dirs).
 5. Trigger `.forgejo/workflows/host-gate.yml` manually
    (**Actions → Host gate → Run workflow**) and confirm it goes green.
 6. Lock the runner down per the security posture (ephemeral workspace, no

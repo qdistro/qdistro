@@ -99,7 +99,7 @@ lockstep and share cross-repo "golden frame" wire-contract tests.
 xpi, no auto-update. The v1 install is a manual temporary load, and the
 operator-facing procedure (plus what the friction and the missing signature
 actually cost you) is
-[qdistro/doc/browser-extension-install.md](../qdistro/doc/browser-extension-install.md).
+[qdistro/doc/browser-extension-install.md](../doc/browser-extension-install.md).
 The short version is below; the long version is the doc of record.
 
 ```bash

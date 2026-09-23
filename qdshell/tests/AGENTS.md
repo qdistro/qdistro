@@ -3,8 +3,8 @@
 You are adding or changing tests in qdshell — the qdwin shell (panel /
 locker / notifications / approval UI, forked from Noctalia). Read this
 before you touch anything under `tests/` or `Tests/`. The anti-cheat
-rationale is shared with the sibling qdistro repo:
-`../qdistro/ci/prompts/anti-cheat-guidance.md`.
+rationale is shared with the rest of the monorepo (path relative to `qdshell/`):
+`../ci/prompts/anti-cheat-guidance.md`.
 
 ## Golden rule: never reduce coverage
 
@@ -61,7 +61,7 @@ Three independent test frameworks live here. They cover different layers:
   failure. `--no-int` skips the broker bats gate; `--quick` is qmltest
   only.
 - Integration gate: the qdshell↔broker bats (`broker-e2e.bats`) is driven
-  from the adjacent **qdistro** repo (`../qdistro/tests/integration/vm/`)
+  from the monorepo root (`../tests/integration/vm/`, relative to `qdshell/`)
   and needs a broker-present VM; skipped when that repo/VM is absent.
 - UI gate: `python3 -m pytest tests/ui` runs the screenshot suite against
   a live qdwin VM (see above). This is the agent-assisted `gui` path.
@@ -121,7 +121,7 @@ end of the file. The pytest UI tests already dump `missing`/`extra`/judge
 output and the `png` path on a failing verdict — preserve that. For a PASS
 to mean anything it must be earned: cite the command/output, journal
 delta, or artifact path, never a bare "PASS". See
-`../qdistro/ci/prompts/anti-cheat-guidance.md`.
+`../ci/prompts/anti-cheat-guidance.md`.
 
 ## Constraints
 

@@ -351,12 +351,13 @@ code; they bound what a compromised one can reach.
 
 ## Release CI note
 
-The two extension repos carry a byte-identical
-`tests/fixtures/golden-frames.js` — the bridge wire-protocol contract — with
-no workspace linking them. `tests/golden-frames-drift.test.js` enforces
-identity but, when the sibling repo is absent, warns and exits green. Release CI
-must check both repos out side-by-side (or point `$QDISTRO_SIBLING_GOLDEN`
-at the sibling fixture) **and** set `$QDISTRO_REQUIRE_SIBLING=1`, which
-makes an absent sibling fatal. qci's host gate does both
+The two extension components (`qdchrome-extension/`, `qdfirefox-extension/`,
+in-tree in the monorepo) carry a byte-identical
+`tests/fixtures/golden-frames.js` — the bridge wire-protocol contract.
+`tests/golden-frames-drift.test.js` enforces identity but, when the other
+extension is absent (a component copied out of the monorepo), warns and exits
+green. Release CI must run from the monorepo (or point
+`$QDISTRO_SIBLING_GOLDEN` at the other fixture) **and** set
+`$QDISTRO_REQUIRE_SIBLING=1`, which makes an absent counterpart fatal. qci's host gate does both
 (`ci/lib/gates/host.sh`), and `tests/integration/qci/extension-drift-guard.bats`
 keeps that wiring from being removed.

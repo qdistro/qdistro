@@ -163,6 +163,6 @@ Already covered by the existing `scripting` + `<all_urls>` host permissions. No 
 
 ## See also
 
-- `../../qdfirefox-extension/src/modules/pageExtract.js` — Firefox-side implementation.
-- `../../qdchrome-extension/src/modules/pageExtract.js` — Chromium-side implementation.
+- `../qdfirefox-extension/src/modules/pageExtract.js` — Firefox-side implementation.
+- `../qdchrome-extension/src/modules/pageExtract.js` — Chromium-side implementation.
 - `../tests/unit/test_browser_bridge_phase9.py::TestPageExtractRequest` — bridge-side round-trip + by-selector + extension-error + timeout tests.

@@ -26,10 +26,9 @@ the "one owner, many silos, dynamic sessions" model. This contract — and the
 deliberate choice to keep the plugin one C translation unit — is documented in
 [doc/AGENTS.md](doc/AGENTS.md).
 
-If you ARE building qdistro: the umbrella repo expects qdwin checked
-out as a sibling directory (`../qdwin/`) so its daemons can compile
-against qdwin's protocol XML. See the qdistro umbrella README for
-the canonical 3-repo checkout layout.
+If you ARE building qdistro: qdwin is the in-tree `qdwin/` component of
+the qdistro monorepo, and the root daemons compile against its protocol
+XML, so build qdwin first. See the [monorepo README](../README.md).
 
 ## What's in here
 

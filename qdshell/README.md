@@ -10,7 +10,7 @@ qdshell is the trusted desktop shell for the admin session. It renders the bar,
 panels, launcher, notification surfaces, OSD, settings, and qdistro-specific
 controls that let the owner see and operate silos. It is not the compositor and
 not the security broker; those live in [qdwin](../qdwin) and
-[qdistro](../qdistro) respectively.
+[qdistro](../README.md) respectively.
 
 The runtime lock surface has moved out to [qdlocker](../qdlocker), so qdshell
 can crash or restart without owning the unlock decision.
@@ -34,21 +34,21 @@ published. See [CREDITS.md](CREDITS.md).
   wizard, changelog, about box, wallhaven, and GitHub release plumbing
   were removed. The upstream migration chain was reset to schema v1.
 
-## Repository layout (sibling checkout)
+## Repository layout (monorepo)
 
-For development, qdshell expects the qdistro umbrella checked out as
-a sibling (`../qdistro/`) — the test scripts in `scripts/` look there
-for bats tests + the broker source. Canonical layout:
+qdshell lives in the qdistro monorepo as the top-level `qdshell/`
+directory. The test scripts in `scripts/` look one level up (`..`, the
+monorepo root) for the bats tests and the broker source:
 
 ```
-qdistro-org/
-├── qdistro/     ← umbrella (broker, tests, scripts)
-├── qdwin/       ← compositor
-└── qdshell/     ← this repo
+qdistro/          ← the monorepo root (broker, tests, scripts, ci)
+├── qdwin/        ← compositor
+└── qdshell/      ← this component
 ```
 
-See the [qdistro umbrella README](https://github.com/qdistro/qdistro)
-for the full clone sequence.
+One `git clone https://github.com/qdistro/qdistro.git` is the whole
+layout; see the [monorepo README](../README.md). The pre-migration
+history of this directory is on branch `legacy/multirepo/qdshell`.
 
 ## Build & run
 

@@ -1,6 +1,6 @@
 # qdlocker
 
-Screen locker for [qdistro](../qdistro). Qt/QML UI driven by a Python
+Screen locker for [qdistro](../README.md). Qt/QML UI driven by a Python
 controller, talking to [qdwin](../qdwin) over the
 `qdwin_locker_v1` private Wayland protocol.
 
@@ -133,11 +133,11 @@ Quickstart:
 
 ```bash
 # Build a qdistro guest image with qdlocker installed (see
-# qdistro/tier4-vm/build-guest-image.sh):
-$ ../qdistro/tier4-vm/build-guest-image.sh --include qdlocker
+# tier4-vm/build-guest-image.sh at the monorepo root):
+$ ../tier4-vm/build-guest-image.sh --include qdlocker
 
 # Launch it:
-$ ../qdistro/tier4-vm/spawn-tier4.sh
+$ ../tier4-vm/spawn-tier4.sh
 
 # Drive the 01-lock-cycle scenario:
 $ cd tests/gui

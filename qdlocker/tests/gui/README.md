@@ -11,7 +11,7 @@ ctrl-socket output.
   with the include flag:
 
   ```bash
-  cd ../../../qdistro/tier4-vm
+  cd ../../../tier4-vm
   ./build-guest-image.sh --include qdlocker
   ```
 
@@ -22,7 +22,7 @@ ctrl-socket output.
 - The guest must be running. Spawn with:
 
   ```bash
-  ../../../qdistro/tier4-vm/spawn-tier4.sh
+  ../../../tier4-vm/spawn-tier4.sh
   ```
 
 - `virsh`, `qemu`, and `socat` on the host. (Same as qdwin's tests.)

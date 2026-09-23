@@ -62,7 +62,7 @@ be green without ever checking that the two protocol copies agree. qdistro's
 signing key in production, no hosted `update.xml`, no auto-update. The v1
 install is a developer-mode unpacked load, and the operator-facing procedure
 (plus what the missing signature and update channel actually cost you) is
-[qdistro/doc/browser-extension-install.md](../qdistro/doc/browser-extension-install.md).
+[qdistro/doc/browser-extension-install.md](../doc/browser-extension-install.md).
 The short version:
 
 ```bash
@@ -71,7 +71,7 @@ bash scripts/build-extension.sh          # -> dist/chromium/
 # On a qdistro install (writes ~/.config/chromium/NativeMessagingHosts/qdistro.json):
 qdistro-browser-install --browsers chromium
 # From a checkout:
-python3 ../qdistro/browser_bridge/qdistro_browser_install.py --browsers chromium
+python3 ../browser_bridge/qdistro_browser_install.py --browsers chromium
 ```
 
 Then load the unpacked extension from `dist/chromium/` in
@@ -92,7 +92,7 @@ minimal set the ops implemented in `src/` actually use, with a closed-set
 test in `tests/manifest.test.js`. That is broader than the *effective* v1
 bridge surface under decision D5 (`qdistro.ping`; `containers.*` is Firefox
 only) — the module code and the bridge dispatch table still carry the
-Phase-9 handlers. See `../qdistro/doc/browser.md` (P0-4/5/6 disposition):
+Phase-9 handlers. See `../doc/browser.md` (P0-4/5/6 disposition):
 
 | Permission | Why |
 | --- | --- |
@@ -147,7 +147,7 @@ qdchrome-extension/
 This repo builds the Chromium-family extension only. It used to also emit a
 Firefox MV2 `dist/firefox.xpi` under gecko id `qdistro@qdistro.local`, but that
 collided with the **bundled** Firefox extension that used to ship from
-`../qdistro/browser_bridge/extension` (a different codebase under the *same*
+`../browser_bridge/extension` (a different codebase under the *same*
 id). To canonicalize the Firefox artifacts, that target was removed.
 
 **For Firefox, build and load [qdfirefox-extension](../qdfirefox-extension)**
@@ -159,12 +159,12 @@ that never grew the module/origin gate, so it had no origin allowlist at all,
 and it was the only extension the qdistro installer actually laid down. Its
 id `qdistro@qdistro.local` is now **revoked** — the qdistro bridge refuses it
 — and `--firefox-mode bundled` is a hard error, leaving `standalone` as the
-only mode. See `../qdistro/doc/browser-extension-install.md` for the v1
-procedure and `../qdistro/doc/browser.md` ("Firefox extension artifacts").
+only mode. See `../doc/browser-extension-install.md` for the v1
+procedure and `../doc/browser.md` ("Firefox extension artifacts").
 
 ## Related repos
 
-- [qdistro](../qdistro) contains the native browser bridge daemon and the
+- [qdistro](../README.md) contains the native browser bridge daemon and the
   architecture/security docs.
 - [qdfirefox-extension](../qdfirefox-extension) is the Firefox-native extension
   with contextual-identity support.

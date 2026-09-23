@@ -117,8 +117,9 @@ snapshot after it. Bump the id deliberately per tester release.
 
 What went into an image is in **`/etc/qdistro/release`** on the image:
 `VERSION`, `SNAPSHOT`, `PROFILE`, `BUILD_DATE`, `ARTIFACT` and one
-`SOURCE <repo> <commit> <clean|DIRTY diff-sha256=… untracked=N>` line per
-synced repo (qdistro, qdwin, qdshell, qdgreeter, qdlocker). `build.sh`
+`SOURCE qdistro <commit> <clean|DIRTY diff-sha256=… untracked=N>` line for
+the synced monorepo (one line; the components are in-tree and covered by
+that commit). `build.sh`
 strips `.git` during the sync, so `sync_sources` writes that manifest on the
 host (`root/root/qdistro-source-manifest`, gitignored) and `config.sh`
 installs it via `image/lib/release-stamp.sh` — fatally: an image that cannot
@@ -131,7 +132,7 @@ its presence.
 | --- | --- |
 | `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. Kiwi XML profiles: `tester` (default, import=true, the published stick) and `ci` (additive: bats/ydotool extras; config.sh masks greetd). Orthogonal to `QDISTRO_PROFILE` (dev/release). |
 | `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules and explicit global mode (dev permissive, release enforcing), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd (enabled on tester; **masked** on kiwi profile `ci` so admin's user manager starts the compositor), compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
-| `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the five sibling repos into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
+| `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the monorepo tree (root + in-tree components) into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
 | `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder; always `--from-baked`, never the kiwi tester image — that would be circular), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). Forwards `QDISTRO_KIWI_PROFILE` (tester\|ci). |
 | `lib/build-guard.sh` | liveness (log mtime / CPU ticks / D-state / uplink bytes), kill-tree and mount/loop cleanup used by the retry loop. |
 | `lib/release-stamp.sh` | `qdistro_write_release`: manifest + os-release → `/etc/qdistro/release`, refusing anything but the five expected repos with 40-hex commits, or a version mismatch. |
@@ -216,7 +217,8 @@ A tester-as-base still zypper-installs extras (needs guest egress);
   launcher starts admin's `qdwin-session.target` (weston with
   `qdwin-shell.so` + qdshell). The target is deliberately *not* wanted by
   `default.target` (it would race the greeter for `wayland-1`).
-- **Source-on-disk.** `/root/qdistro-src/{qdistro,qdwin,qdshell,…}` stays on
+- **Source-on-disk.** `/root/qdistro-src/` (the monorepo tree: qdistro's
+  root content with `qdwin/`, `qdshell/`, … in-tree) stays on
   the installed system — the LLM-modifiability principle in
   [../doc/overview.md](../doc/overview.md).
 - **dbus-broker, not dbus-daemon.** `qdistro-dbus-reload.service` lands via

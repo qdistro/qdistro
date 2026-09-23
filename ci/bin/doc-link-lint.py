@@ -19,10 +19,21 @@ EXPLICIT_ANCHOR_RE = re.compile(
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
 
 
+# In-tree components (monorepo): each one's top-level README.md is
+# maintained documentation too. Their deeper notes (design docs, todo/,
+# vendored upstream READMEs) are not in scope.
+COMPONENTS = (
+    "qdwin", "qdshell", "qdbrowser", "qdchrome-extension",
+    "qdfirefox-extension", "qdgreeter", "qdlocker", "qdfileman",
+    "qnotebook", "qdterm",
+)
+
+
 def markdown_files(root: Path) -> list[Path]:
-    files = [root / "README.md"]
+    files = [root / "README.md", root / "AGENTS.md", root / "MIGRATION.md"]
     files.extend(sorted((root / "doc").rglob("*.md")))
     files.extend(sorted((root / "ci").glob("*.md")))
+    files.extend(root / name / "README.md" for name in COMPONENTS)
     return [path for path in files if path.is_file()]
 
 

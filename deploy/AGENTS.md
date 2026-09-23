@@ -51,7 +51,7 @@ crash loop.
   `scripts/install/bare-metal-install.sh` for system-scoped). Don't
   ship a unit file that no script actually copies.
 - Renaming `qdwin-session.target`? Grep for it in
-  `scripts/`, `tests/integration/vm/`, and the qdshell sibling repo
+  `scripts/`, `tests/integration/vm/`, and the in-tree `qdshell/` component
   — the `s100-greeter-boots-qdshell.sh` smoke driver asserts on
   the name.
 - Touching greetd configs? Run the greeter boot-path VM smoke (`s100-greeter-boots-qdshell.sh`) to confirm the tty3 boot path still passes.

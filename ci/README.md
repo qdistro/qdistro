@@ -57,12 +57,12 @@ vitest tags), and the per-suite relabel action items.
 
 | Gate | Purpose |
 | --- | --- |
-| `preflight` | Verify sibling repos, libvirt session, VM tools, prebaked image, and common host tools. |
+| `preflight` | Verify the in-tree component dirs (and warn about stale pre-monorepo sibling checkouts next to the repo), libvirt session, VM tools, prebaked image, and common host tools. |
 | `lint` | Run warn-only shellcheck/scenario-structure metrics plus blocking Bats syntax and maintained-document local-link/anchor validation. `QCI_FLAKE_STRICT=1` also makes scenario flake findings fatal. |
 | `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
-| `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
+| `host` | Run host tests/builds across all in-tree components: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
-| `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
+| `bats` | Run every `tests/integration/vm/*.bats` file (and each component's `<component>/tests/integration/vm/*.bats`). Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
 | `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. Normal disposable runs provision both GUI profiles: admin/non-qdwin scenarios use the admin compositor harness, while qdwin-dependent rows use `QDISTRO_VM_GUI_SESSION=qdwin`. The agent scenarios run **in parallel** (one disposable VM each). |
 | `gui-admin` | Run the GUI gate in admin/non-qdwin mode: qdwin/qdshell, qdlocker, qdwin-noctalia, and tier-4/5 scenarios are recorded as intentional skips while qdistro admin/broker GUI scenarios still run. |
 | `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `image`, `vm-smoke`, `bats`, and `gui`. |
@@ -243,7 +243,7 @@ cannot be located. It does not guess paths outside libvirt metadata.
 
 ## Host test dependencies
 
-The `host` gate runs tests across all sibling projects. Several projects need
+The `host` gate runs tests across all in-tree components. Several components need
 dependencies that are not part of the base qdistro install. Check or install
 them in one shot (preflight also flags missing ones as WARN at the start of a
 run):
@@ -276,19 +276,19 @@ sudo apt install qml6-module-qtqml-workerscript
 sudo zypper install qt6-declarative-imports
 ```
 
-**qterminator tests** require the `QTermWidget` Python binding, which is
-built from source as part of the qterminator install (it is not packaged
-by any distro). Build it from the `qtermwidget-pyqt/` directory in the
-qterminator repo:
+**qdterm tests** (the `qterminator` package) require the `QTermWidget` Python
+binding, which is built from source as part of the qterminator install (it is
+not packaged by any distro). Build it from the `qtermwidget-pyqt/` directory
+of the in-tree `qdterm/` component:
 
 ```bash
-cd qterminator/qtermwidget-pyqt && pip install .
+cd qdterm/qtermwidget-pyqt && pip install .
 ```
 
-See `qterminator/README.md` for full build prerequisites (qtermwidget-devel,
+See `qdterm/README.md` for full build prerequisites (qtermwidget-devel,
 sip, pyqt-builder).
 
-**qfileman tests** require `tomli_w` (declared in `qfileman/pyproject.toml`; not
+**qdfileman tests** (the `qfileman` package) require `tomli_w` (declared in `qdfileman/pyproject.toml`; not
 packaged by most distros):
 
 ```bash

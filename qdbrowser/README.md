@@ -1,6 +1,6 @@
 # qdbrowser
 
-A Qt-based web browser, sibling of [qterminator](../qterminator) and [qdshell](../qdshell).
+A Qt-based web browser, sibling of [qterminator](../qdterm) and [qdshell](../qdshell).
 
 PyQt6 + QtWebEngine, plugin-driven, agent-controllable. Targets Vivaldi-class feature density without the Chrome lock-in.
 
