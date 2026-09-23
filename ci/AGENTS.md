@@ -1,6 +1,7 @@
 # Agent instructions for qdistro CI
 
-You are running or triaging local CI for the qdistro umbrella checkout.
+You are running or triaging local CI for the qdistro monorepo (root content +
+in-tree components; see the root [AGENTS.md](../AGENTS.md)).
 
 ## Runner layout
 
@@ -79,6 +80,31 @@ host-only `tests/integration/qci/*.bats` contract suite) before trusting a run.
 4. Read `report.md` or `report.html` in the run directory.
 5. If a VM failed and was preserved, use the VM name from `manifest.txt` and the
    linked artifacts before rerunning anything broad.
+
+## Operational lessons (read before running or grading)
+
+These used to live only in private agent notes; validation relies on them.
+
+- **A GUI `status.txt` can read FAIL mid-run and finalize PASS** (a retry is
+  still going). Grade from the final `status.txt` / `test.log` after the run
+  finished, never from a transient read.
+- **A flake claim needs a reproduction with a widened timing window.** "Passes
+  in isolation, failed under load" is a race until shown otherwise: widen the
+  window (e.g. a small `sleep`/delay shim on the suspected step, a PATH shim
+  that adds ~250 ms) and show the failure reproduces before calling it flake.
+- **Pin the sanctioned GUI driver explicitly** in `QCI_AGENT_CMD` for every GUI
+  run. An inherited environment value can be stale and silently drive a whole
+  run with the wrong model; a debug rerun with a different model is never a
+  CI verdict.
+- **Launch long runs under `systemd-run --user --unit=qci-<name>`**, so they
+  survive the launching shell, and **never edit a script while a run that
+  sources it is going**: bash reads scripts incrementally, and an edit (or a
+  commit that rewrites the file) mid-run corrupts the running driver. Commit
+  first, then launch.
+- **One full/GUI run per host.** Port 8765 and the VM/golden names are
+  singletons; check `systemctl --user list-units 'qci-*'` and
+  `virsh -c qemu:///session list --all` first. `repo-state.tsv` in each run
+  dir says which tree (worktree path + SHA) produced it.
 
 ## Debugging a failed run
 
