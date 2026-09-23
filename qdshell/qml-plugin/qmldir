@@ -1,0 +1,3 @@
+module Qdistro.Qdwin
+plugin qdistro-qdwin
+classname QdistroQdwinPlugin

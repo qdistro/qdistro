@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.so
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build & packaging
+result/
+build/
+dist/
+*.whl
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor & IDE
+.qmlls.ini
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+.cache/
+.zed
+
+# Local test screenshot outputs
+# NOTE: Assets/Screenshots/ holds the tracked upstream Noctalia
+# branding screenshots — that path is anchored under Assets/ and
+# stays in-tree.
+/screenshots/
+/test-screenshots/
+/test-output/
+/tests/**/screenshots/
+*.screenshot.png
+shot-*.png
+shot-*.jpg
+
+# Local git worktrees (the /do workflow puts them here). Never part of a
+# commit — they are separate checkouts, so `git add -A` from the repo root
+# would otherwise stage them as embedded git repositories.
+.worktrees/

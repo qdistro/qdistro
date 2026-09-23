@@ -1,0 +1,60 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import qs.Commons
+import qs.Services.UI
+import qs.Widgets
+
+ColumnLayout {
+  id: root
+  spacing: 0
+
+  // Forwarded to color pickers etc. that need a screen reference.
+  property var screen
+
+  NTabBar {
+    id: subTabBar
+    Layout.fillWidth: true
+    Layout.bottomMargin: Style.marginM
+    distributeEvenly: true
+    currentIndex: tabView.currentIndex
+
+    NTabButton {
+      text: I18n.tr("panels.accessibility.tab-find-cursor")
+      tabIndex: 0
+      checked: subTabBar.currentIndex === 0
+    }
+    NTabButton {
+      text: I18n.tr("panels.accessibility.tab-keyboard")
+      tabIndex: 1
+      checked: subTabBar.currentIndex === 1
+    }
+    NTabButton {
+      text: I18n.tr("panels.accessibility.tab-mouse")
+      tabIndex: 2
+      checked: subTabBar.currentIndex === 2
+    }
+    NTabButton {
+      text: I18n.tr("panels.accessibility.tab-assistive")
+      tabIndex: 3
+      checked: subTabBar.currentIndex === 3
+    }
+  }
+
+  Item {
+    Layout.fillWidth: true
+    Layout.preferredHeight: Style.marginS
+  }
+
+  NTabView {
+    id: tabView
+    currentIndex: subTabBar.currentIndex
+
+    AccessibilityFindCursorSubTab {
+      screen: root.screen
+    }
+    AccessibilityKeyboardSubTab {}
+    AccessibilityMouseKeysSubTab {}
+    AccessibilityAssistiveSubTab {}
+  }
+}
