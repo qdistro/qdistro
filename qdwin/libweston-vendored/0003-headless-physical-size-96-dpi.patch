@@ -1,0 +1,48 @@
+From: qdistro <qdistro@local>
+Date: 2026-05-15
+Subject: [PATCH] libweston/backend-headless: stop pretending 1mm == 1 pixel
+
+Upstream weston's headless backend passes the pixel count of the
+output directly to weston_head_set_physical_size, with an XXX comment
+noting "Calculate proper size." The result is wl_output reporting
+e.g. 1280 mm × 720 mm physical dimensions for a 1280×720 mode, i.e.
+~25 DPI.
+
+GDK and Qt-Wayland use the reported physical size to compute window
+DPI scaling. At ~25 DPI, they decide that a normally-sized window
+needs to be tens of thousands of pixels tall and either bail out
+("Native Windows taller than 65535 pixels are not supported") or
+walk into a NULL pointer in Cairo surface allocation.
+
+Approximate a 96 DPI display: physical millimetres = pixels * 25.4 / 96.
+1280 px → 338 mm, 720 px → 190 mm. Both toolkit families read this
+as a 14-inch laptop-ish panel and compute sane window sizes.
+
+Integer math (* 254 / 960) avoids floats while staying ≤ 1 mm off the
+target on any reasonable resolution.
+
+Tracked in qdistro/todo/spectrumos/19-libweston-headless-seat-patch.md
+"GTK still crashes — but it's a different bug".
+
+Vendored against weston 14.0.2 for ${QDWIN_REPO}/.
+---
+--- a/libweston/backend-headless/headless.c
++++ b/libweston/backend-headless/headless.c
+@@ -411,8 +411,14 @@ headless_output_set_size(struct weston_output *base,
+ 		weston_head_set_monitor_strings(head, "weston", "headless",
+ 						NULL);
+
+-		/* XXX: Calculate proper size. */
+-		weston_head_set_physical_size(head, width, height);
++		/* qdistro patch: upstream weston passes pixel count as
++		 * physical millimetres (XXX comment in the original line
++		 * acknowledges this is wrong). 1mm/pixel yields ~25 DPI
++		 * which makes GDK and Qt-Wayland compute absurd Cairo
++		 * surface dimensions on any reasonable window size.
++		 * Approximate a 96 DPI display: mm = px * 25.4 / 96. */
++		weston_head_set_physical_size(head,
++					      width * 254 / 960,
++					      height * 254 / 960);
+ 	}
+
+ 	output_width = width * output->base.current_scale;

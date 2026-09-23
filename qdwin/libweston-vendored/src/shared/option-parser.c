@@ -1,0 +1,282 @@
+/*
+ * Copyright © 2012 Kristian Høgsberg
+ * Copyright 2025 Collabora, Ltd.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+#include "config.h"
+
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+#include <errno.h>
+
+#include <wayland-util.h>
+#include <libweston/config-parser.h>
+#include "string-helpers.h"
+#include "xalloc.h"
+
+static bool
+handle_option(const struct weston_option *option, char *value)
+{
+	char* p;
+
+	switch (option->type) {
+	case WESTON_OPTION_INTEGER:
+		if (!safe_strtoint(value, option->data))
+			return false;
+		return true;
+	case WESTON_OPTION_UNSIGNED_INTEGER:
+		errno = 0;
+		* (uint32_t *) option->data = strtoul(value, &p, 10);
+		if (errno != 0 || p == value || *p != '\0')
+			return false;
+		return true;
+	case WESTON_OPTION_STRING:
+		* (char **) option->data = strdup(value);
+		return true;
+	default:
+		assert(0);
+		return false;
+	}
+}
+
+static bool
+long_option(const struct weston_option *options, int count, char *arg)
+{
+	int k, len;
+
+	for (k = 0; k < count; k++) {
+		if (!options[k].name)
+			continue;
+
+		len = strlen(options[k].name);
+		if (strncmp(options[k].name, arg + 2, len) != 0)
+			continue;
+
+		if (options[k].type == WESTON_OPTION_BOOLEAN) {
+			if (!arg[len + 2]) {
+				* (bool *) options[k].data = true;
+
+				return true;
+			}
+		} else if (arg[len+2] == '=') {
+			return handle_option(options + k, arg + len + 3);
+		}
+	}
+
+	return false;
+}
+
+static bool
+long_option_with_arg(const struct weston_option *options, int count, char *arg,
+		     char *param)
+{
+	int k, len;
+
+	for (k = 0; k < count; k++) {
+		if (!options[k].name)
+			continue;
+
+		len = strlen(options[k].name);
+		if (strncmp(options[k].name, arg + 2, len) != 0)
+			continue;
+
+		/* Since long_option() should handle all booleans, we should
+		 * never reach this
+		 */
+		assert(options[k].type != WESTON_OPTION_BOOLEAN);
+
+		return handle_option(options + k, param);
+	}
+
+	return false;
+}
+
+static bool
+short_option(const struct weston_option *options, int count, char *arg)
+{
+	int k;
+
+	if (!arg[1])
+		return false;
+
+	for (k = 0; k < count; k++) {
+		if (options[k].short_name != arg[1])
+			continue;
+
+		if (options[k].type == WESTON_OPTION_BOOLEAN) {
+			if (!arg[2]) {
+				* (bool *) options[k].data = true;
+
+				return true;
+			}
+		} else if (arg[2]) {
+			return handle_option(options + k, arg + 2);
+		} else {
+			return false;
+		}
+	}
+
+	return false;
+}
+
+static bool
+short_option_with_arg(const struct weston_option *options, int count, char *arg, char *param)
+{
+	int k;
+
+	if (!arg[1])
+		return false;
+
+	for (k = 0; k < count; k++) {
+		if (options[k].short_name != arg[1])
+			continue;
+
+		if (options[k].type == WESTON_OPTION_BOOLEAN)
+			continue;
+
+		return handle_option(options + k, param);
+	}
+
+	return false;
+}
+
+int
+parse_options(const struct weston_option *options,
+	      int count, int *argc, char *argv[])
+{
+	int i, j;
+	int ignore_options = 0;
+
+	for (i = 1, j = 1; i < *argc; i++) {
+		if (argv[i][0] == '-' && ignore_options == 0) {
+			if (argv[i][1] == '-') {
+				if (strlen(argv[i]) == 2) {
+					/* '--' to ignore the remaining options */
+					i--; /* reinsert the '--' entry */
+					ignore_options = 1;
+					continue;
+				}
+				/* Long option, e.g. --foo or --foo=bar */
+				if (long_option(options, count, argv[i]))
+					continue;
+
+				/* ...also handle --foo bar */
+				if (i + 1 < *argc &&
+				    long_option_with_arg(options, count,
+							 argv[i], argv[i+1])) {
+					i++;
+					continue;
+				}
+			} else {
+				/* Short option, e.g -f or -f42 */
+				if (short_option(options, count, argv[i]))
+					continue;
+
+				/* ...also handle -f 42 */
+				if (i+1 < *argc &&
+				    short_option_with_arg(options, count, argv[i], argv[i+1])) {
+					i++;
+					continue;
+				}
+			}
+		}
+		argv[j++] = argv[i];
+	}
+	argv[j] = NULL;
+	*argc = j;
+
+	return j;
+}
+
+/** Free string array contents
+ *
+ * Does not free \c strarr itself but resets it.
+ */
+void
+weston_string_array_fini(struct weston_string_array *strarr)
+{
+	size_t i;
+
+	for (i = 0; i < strarr->len; i++)
+		free(strarr->array[i]);
+	free(strarr->array);
+	strarr->len = 0;
+	strarr->array = NULL;
+}
+
+static bool
+is_space_for_split(char c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/** Split a string at spaces, tabs, CRs, LFs
+ *
+ * \param str An arbitrary string, can be empty but not NULL.
+ * \return An array of sub-strings. Must be finalized with
+ * weston_string_array_fini().
+ *
+ * Takes the given string, and splits it into items. Empty items are skipped.
+ * The items are returned in the array in the same order they appeared in the
+ * string. Spaces, tabs, newlines or carriage returns will not be present in
+ * the items as they cannot be escaped.
+ */
+struct weston_string_array
+weston_parse_space_separated_list(const char *str)
+{
+	struct wl_array arr;
+	const char *p = str;
+	char **item;
+
+	wl_array_init(&arr);
+
+	while (*p) {
+		const char *end = p;
+		while (*end && !is_space_for_split(*end))
+			end++;
+		size_t len = end - p;
+
+		if (len > 0) {
+			item = wl_array_add(&arr, sizeof *item);
+
+			*item = strndup(p, len);
+			abort_oom_if_null(*item);
+		}
+
+		p = end;
+
+		/* Skip whitespaces */
+		while (*p && is_space_for_split(*p))
+			p++;
+	}
+
+	return (struct weston_string_array){
+		.len = arr.size / sizeof *item,
+		.array = arr.data
+	};
+}

@@ -1,0 +1,47 @@
+From: qdistro <qdistro@local>
+Date: 2026-05-15
+Subject: [PATCH] libweston/backend-headless: synthesize inert wl_seat
+
+The headless backend declares `struct weston_seat fake_seat` in its
+private state but never initializes it, so no `wl_seat` global is
+advertised to clients. weston-terminal and other input-tolerant
+clients work fine without one; GTK 3+ and Qt assume a seat is always
+present and crash on the resulting NULL dereference inside
+libwayland-client.
+
+Call `weston_seat_init` in `headless_backend_create` and
+`weston_seat_release` in `headless_destroy`. No input devices are
+wired up, so the seat's capabilities mask stays at zero — clients
+observe the global but `wl_seat.get_keyboard/pointer/touch` produce
+no events. This is sufficient to keep `gdk_seat_get_*` from
+asserting on a NULL `GdkSeat`.
+
+Tracked in qdistro/todo/spectrumos/18-gtk-client-needs-wl-seat.md.
+
+Vendored against weston 14.0.2 for ${QDWIN_REPO}/.
+---
+--- a/libweston/backend-headless/headless.c
++++ b/libweston/backend-headless/headless.c
+@@ -574,6 +574,12 @@ headless_backend_create(struct weston_compositor *compositor,
+ 	b->formats_count = ARRAY_LENGTH(headless_formats);
+ 	b->formats = pixel_format_get_array(headless_formats, b->formats_count);
+
++	/* qdistro patch: synthesize an inert wl_seat so toolkit clients
++	 * (GTK 3+, Qt) don't crash on a missing seat global in headless
++	 * test runs. No input devices are wired up, so capabilities stay
++	 * zero — the seat exists for protocol-conformance only. */
++	weston_seat_init(&b->fake_seat, compositor, "default");
++
+ 	/* Wayland event source's timeout has a granularity of the order of
+ 	 * milliseconds so the highest supported rate is 1 kHz. 0 is a special
+ 	 * value that enables repaints only on capture. */
+@@ -528,6 +534,9 @@ headless_destroy(struct weston_backend *backend)
+ 	if (b->theme)
+ 		theme_destroy(b->theme);
+
++	/* qdistro patch: release the inert seat created in headless_backend_create. */
++	weston_seat_release(&b->fake_seat);
++
+ 	free(b->formats);
+ 	free(b);
+

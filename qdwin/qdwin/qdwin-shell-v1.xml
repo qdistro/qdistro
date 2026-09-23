@@ -1,0 +1,2289 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="qdwin_shell_v1">
+  <copyright>
+    Copyright © 2026 qdistro contributors
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <description summary="qdwin compositor shell attach protocol">
+    Private protocol between the qdwin compositor and the qdistro PyQt
+    shell. The shell connects as a normal Wayland client (same display
+    socket), but qdwin only advertises this global to clients whose
+    peer credentials (uid, exe, SELinux label) match the admin-
+    configured shell identity — regular app clients never see it.
+
+    The protocol carries two streams:
+
+    - Toplevel lifecycle events from the compositor to the shell.
+      For every xdg-toplevel qdwin tracks, the shell receives
+      added / moved / state / focus / title / removed events. The
+      shell uses this to draw window chrome (close / minimise /
+      maximise buttons and the per-user-colour isolation border,
+      per the architecture doc §4).
+
+    - Chrome buffer attachments from the shell to the compositor.
+      The shell renders the decoration pixels into standard wl_buffers
+      and attaches them per toplevel side; qdwin composites them
+      around the toplevel's content surface via weston_view.
+
+    All user actions on the chrome (clicking close, dragging the title
+    bar to move, clicking minimise) flow back from the shell as
+    request_* messages. The compositor applies policy (lock state,
+    rate limiting) before issuing the corresponding xdg-toplevel op.
+    This keeps qdwin authoritative over window state — a crashed or
+    compromised shell cannot directly act on a client.
+
+    No-shell-fallback rule: until the shell has sent `bind_as_shell`
+    and acknowledged a toplevel (by calling either `set_border_color`
+    or `attach_decoration` for it), qdwin does NOT composite that
+    toplevel to any output. The client runs and queues frames, but
+    is invisible. See the architecture doc §Bootstrap.
+
+    Warning! The protocol described in this file is experimental and
+    pre-stable. Breaking changes may happen. Versioning follows the
+    "experimental" convention: version 1 is the first unstable draft.
+  </description>
+
+  <interface name="qdwin_shell_v1" version="34">
+    <description summary="the qdwin shell attach point">
+      The shell binds this global once and holds it for the lifetime of
+      its process. qdwin rejects a second bind from the same client; a
+      new shell must replace the old one by first destroying its
+      binding (via the standard wl_registry delete).
+
+      Version 2 adds seat and output lifecycle events
+      (`seat_created` / `seat_removed` / `output_created` /
+      `output_removed`). Shells that need to react to RDP-subscriber
+      connect/disconnect or to output hot-plug should bind at ≥v2; v1
+      shells keep getting only toplevel-scoped events.
+
+      Version 13 adds `toplevel_security_context` so shells get the
+      `(sandbox_engine, app_id, instance_id)` carried by a sandboxed
+      client's `wp_security_context_v1` tag in-band rather than via
+      the chrome-side title-prefix heuristic. v12 and earlier shells
+      keep classifying sandboxed toplevels by title prefix.
+
+      Version 14 adds `seat_focus_changed` (event) and
+      `set_keyboard_focus` (request). The event lets the shell react to
+      keyboard-focus moves and implement spec/10 §"focus-aware
+      selection clear" — when the focus moves to a different silo, the
+      shell drops the seat selection so the newly focused client can't
+      `wl_data_offer.receive` admin's clipboard. The request is the
+      ctrl-socket-side test hook for headless bats coverage and for
+      future click-to-focus on chrome.
+
+      Version 16 adds `set_keyboard_focus_v2` so the shell can pass the
+      target toplevel's silo identity at focus-injection time. v14's
+      unconditional `weston_seat_set_selection(NULL, fresh_serial)` on
+      every set_keyboard_focus is correct for cross-silo moves
+      (defense-in-depth) but kills the active selection on same-silo
+      moves — which breaks the v15 sink-path: a sink-toplevel that
+      takes focus on the same silo as a still-active source must
+      receive the existing offer, not see a cleared selection. v2
+      tracks the last v2-focused silo per seat; if the new
+      `target_silo` matches, the clear is skipped and the existing
+      selection survives. v2 is purely additive — pre-v16 shells keep
+      using `set_keyboard_focus` and get the v14 unconditional-clear
+      behaviour.
+
+      Version 17 adds `overlay_key`, the keyboard-input route into the
+      launcher / switcher / locker overlay surfaces. Until v17 the
+      compositor never delivered key events to those surfaces — the
+      shell could only drive them via its private ctrl-socket. With
+      v17 the compositor installs a keyboard grab while an overlay is
+      visible and forwards each press as `overlay_key(role, sym, utf8,
+      state)`; the shell decodes utf8 for printable chars and matches
+      `sym` (xkb keysym) for named keys (Escape, Return, Tab, arrows,
+      Backspace). Pre-v17 shells stay on the ctrl-socket-only path.
+
+      Version 19 adds `register_hotkey` / `unregister_hotkey` /
+      `hotkey_pressed` for shell-driven global keyboard shortcuts. The
+      shell registers (linux-keycode + modifier-bitmask) tuples; the
+      compositor installs a weston key-binding for each and emits
+      `hotkey_pressed(id)` when the combo fires anywhere outside an
+      active overlay grab. Used for Super+Space → launcher, Super+L →
+      lock, etc. — any time a key combo should reach the shell without
+      an existing overlay surface to take focus.
+
+      Version 22 adds `toplevel_peer_identity`, a sidecar to v13's
+      `toplevel_security_context` carrying the stable process identity
+      of the backing wl_client so qdshell and the broker can re-verify
+      the secctx-asserted silo at decision time (see todo/decisions/
+      secctx-identity-contract.md — Option B "broker-attested"). The
+      event is purely additive; v21- shells keep getting only the
+      string-tuple secctx event and continue to trust it as before.
+
+      Version 18 adds `attach_background`: the shell registers a
+      fullscreen wl_surface as the desktop background, replacing
+      qdwin's compositor-owned `weston_curtain`. With a real client
+      surface covering the desktop, two things become possible that
+      were impossible before: (a) the shell calls
+      `wl_pointer.set_cursor` on `wl_pointer.enter` over the
+      background, so a default cursor sprite is always visible to
+      SPICE / VNC viewers (the curtain was compositor-owned and never
+      received pointer focus, so no client could set a cursor over
+      empty desktop); (b) clicks on the empty desktop now have a
+      target client to receive them. Pre-v18 shells continue with the
+      compositor curtain.
+
+      Version 24 adds a per-window workspace sidecar. The workspace
+      LIST, NAMES, ACTIVE state and switching are carried by the
+      standard `ext_workspace_v1` protocol (qdwin implements the server;
+      see qdwin/ext-workspace-v1.xml) — that protocol is window-agnostic
+      and does not tell a taskbar which workspace a given toplevel lives
+      on. This version closes exactly that gap so the bar can compute
+      per-workspace occupancy and window lists:
+
+      - event `toplevel_workspace(handle, index)` reports the workspace
+        a toplevel is on. It fires immediately after the toplevel's
+        `toplevel_added` (carrying the workspace it opened on — the
+        active workspace at map time), again whenever the assignment
+        changes, and once per existing toplevel during the
+        `bind_as_shell` replay (interleaved with each replayed
+        toplevel_added, mirroring `toplevel_security_context`).
+      - request `move_toplevel_to_workspace(handle, index)` relocates a
+        window (the "send window to workspace N" UX) — ext-workspace-v1
+        is workspace-centric and has no window-move request.
+
+      Pre-v24 shells never see the event; they keep classifying every
+      toplevel as workspace 0 (the pre-v24 behaviour). The compositor's
+      internal workspace mechanics (hide/show on switch) are driven by
+      the ext-workspace activate path regardless of the shell version.
+
+      Version 25 adds live window-manager policy so the qdshell
+      WindowManager settings tab applies instead of being persist-only:
+      `set_wm_policy` carries the focus model (click vs
+      focus-follows-mouse + settle delay), raise-on-click / raise-on-hover,
+      new-window placement strategy, and edge-snap enable + distance as
+      one idempotent snapshot. `request_fullscreen` and `request_tile`
+      add shell-driven fullscreen and half-screen tiling (the
+      counterparts of `request_maximize`); the shell wires its
+      close/maximize/fullscreen/tile keyboard shortcuts to these via the
+      existing v19 `register_hotkey` path. Pre-v25 shells get the
+      historical fixed behaviour (click-to-focus, centre+cascade
+      placement, no snapping/tiling).
+
+      Version 26 adds `set_display_power` so the Power tab's display-off
+      timer applies live: the shell owns the idle timing (via the standard
+      `ext-idle-notify-v1`, which qdwin already implements) and forces all
+      outputs off/on through this request. The inactivity *action*
+      (suspend/lock/…) is also shell-driven from ext-idle-notify and needs
+      no new request. Outputs are forced back on if the shell unbinds.
+
+      Version 28 adds live pointer/touchpad (`set_pointer_config`) and
+      keyboard-repeat (`set_key_repeat`) config so the qdshell Mouse and
+      Keyboard settings tabs apply instead of being persist-only. Both
+      fail safe on out-of-range values and no-op on backends without
+      libinput devices (e.g. headless); pre-v28 shells keep those tabs
+      persist-only. See the per-request docs below.
+
+      Version 31 adds `toplevel_app_id`, the live counterpart to the
+      app_id field in `toplevel_added`. XWayland applications may publish
+      WM_CLASS only after their first mapped commit, so the initial event
+      can legitimately carry an empty app_id. The sidecar delivers that
+      eventual identity and all later changes. Pre-v31 shells retain the
+      one-shot app_id behaviour.
+    </description>
+
+    <enum name="error">
+      <entry name="already_bound" value="0"
+             summary="shell has already claimed the shell role"/>
+      <entry name="not_bound" value="1"
+             summary="request issued before bind_as_shell"/>
+      <entry name="invalid_handle" value="2"
+             summary="toplevel handle does not exist or was removed"/>
+      <entry name="locked" value="3"
+             summary="compositor is in locked state; request refused"/>
+      <entry name="stream_unavailable" value="4"
+             summary="pipewire backend not loaded; per-view forwarding disabled"/>
+      <entry name="invalid_grab" value="5"
+             summary="show_popup serial did not match a live input grab serial"/>
+    </enum>
+
+    <request name="bind_as_shell">
+      <description summary="claim the shell role">
+        The shell announces that it is ready to receive toplevel events
+        and render decorations. Must be the first request on the
+        interface after binding. qdwin replays any toplevels that
+        already exist before this call as a burst of `toplevel_added`
+        events — the shell must treat `bind_as_shell` as the point at
+        which the event stream becomes live.
+
+        If this client has already called `bind_as_shell`, or if
+        another client has, qdwin raises the `already_bound` error.
+      </description>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="release the shell role">
+        Release the shell binding. Any in-flight decoration buffers are
+        detached. Toplevels revert to pending-chrome holding state
+        until a fresh shell binds.
+      </description>
+    </request>
+
+    <request name="set_border_color">
+      <description summary="per-toplevel isolation colour">
+        Record the isolation colour qdwin should associate with this
+        toplevel — typically the colour of the uid the toplevel
+        belongs to. The shell uses the same colour when painting the
+        decoration buffer; the compositor uses it for any out-of-band
+        rendering (e.g. focus ring during `begin_interactive_move`).
+      </description>
+      <arg name="handle" type="uint"
+           summary="opaque toplevel id from toplevel_added"/>
+      <arg name="rgba" type="uint"
+           summary="colour as 0xRRGGBBAA"/>
+    </request>
+
+    <request name="attach_decoration">
+      <description summary="attach chrome surfaces to a toplevel">
+        Supply one wl_surface per side of the decoration frame. The
+        shell client is expected to have created the wl_surface,
+        attached a wl_buffer containing the decoration pixels, and
+        committed before calling this request — otherwise the
+        surface has no content and qdwin refuses the side. Passing
+        NULL for a side leaves that edge undecorated.
+
+        qdwin creates an internal weston_view over each supplied
+        surface and positions it flush against the toplevel content.
+        The shell keeps ownership of the wl_surface and may update it
+        by attaching new buffers + committing at any cadence; qdwin
+        re-reads the surface on damage. To detach a side, pass NULL
+        (the view is removed); to stop decorating entirely, destroy
+        the wl_surface (qdwin observes the destroy and tears down
+        its view).
+
+        Why wl_surface rather than wl_buffer: Weston's composition
+        pipeline operates on surfaces, not bare buffers. A wl_surface
+        carries the buffer, damage regions, scale, transform, and
+        viewport as one atomic commit — matching the per-frame
+        contract weston_view expects.
+
+        This is the point at which a toplevel transitions out of
+        pending-chrome holding state. The first attach_decoration or
+        set_border_color is what makes the client visible.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="north" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="east"  type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="south" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="west"  type="object" interface="wl_surface" allow-null="true"/>
+    </request>
+
+    <request name="request_close">
+      <description summary="user clicked close on the chrome">
+        Forward a close request to the backing toplevel. qdwin calls
+        `xdg_toplevel.close` after checking policy (not locked,
+        not rate-limited). Exception: toplevels whose security context
+        engine is `qdistro.mm` (multi-machine remote windows) are
+        silently refused — their close is source-mediated through the
+        mm broker; xdg-closing the local viewer client is forbidden.
+      </description>
+      <arg name="handle" type="uint"/>
+    </request>
+
+    <request name="request_minimize">
+      <description summary="user clicked minimise"/>
+      <arg name="handle" type="uint"/>
+    </request>
+
+    <request name="request_maximize">
+      <description summary="user toggled maximise"/>
+      <arg name="handle" type="uint"/>
+      <arg name="maximized" type="uint"
+           summary="1 to maximise, 0 to restore"/>
+    </request>
+
+    <request name="request_raise">
+      <description summary="user raised the toplevel via chrome"/>
+      <arg name="handle" type="uint"/>
+    </request>
+
+    <request name="begin_interactive_move">
+      <description summary="user grabbed the title bar">
+        The shell reports the wl_pointer serial from the button press;
+        qdwin enters its move-drag state machine. Tiled windows are
+        refused (not an error — simply ignored); floating windows
+        move with the pointer.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <request name="begin_interactive_resize">
+      <description summary="user grabbed a resize edge">
+        v1 note: qdwin accepts the request but may refuse non-floating
+        toplevels. A future version will let the shell specify an
+        edge mask so the cursor hint and constraint are correct.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="serial" type="uint"/>
+      <arg name="edges" type="uint"
+           summary="xdg_toplevel.resize_edge bitmask"/>
+    </request>
+
+    <request name="show_popup">
+      <description summary="attach a shell-owned popup surface">
+        Place `surface` as a popup anchored to toplevel `parent`,
+        positioned at (x, y) in parent-local coordinates (the origin
+        is the top-left of the parent's outer-rect, i.e. north-west
+        of the N chrome).
+
+        The compositor creates a weston_view over `surface` on a
+        popup layer above normal app windows and composites it there
+        until the client destroys the returned `qdwin_popup_v1`
+        object, or until the compositor dismisses it (pointer click
+        outside, parent closed, compositor locked). Destroying the
+        wl_surface also tears the popup down.
+
+        The shell is expected to have committed a buffer to `surface`
+        before calling show_popup. Like chrome surfaces, popups are
+        roleless wl_surfaces — no xdg_popup role is involved.
+
+        Only one popup is active per parent at a time. A second
+        show_popup with the same parent dismisses the prior popup
+        (the `dismissed` event fires on the old object before the
+        new one becomes visible).
+
+        Version 29: `serial` must be the serial of the input event
+        (pointer button, key, or touch-down) that triggered the popup,
+        exactly as for an xdg_popup grab. The compositor starts a
+        pointer grab for the popup (so an outside-click dismisses it),
+        and like xdg-shell it validates the serial against a live grab
+        serial on the seat it grabs. A stale or fabricated serial
+        raises the `invalid_grab` error and no popup is created. This
+        keeps show_popup symmetric with the layer-popup grab path; the
+        request remains shell-only (require bound shell).
+      </description>
+      <arg name="popup" type="new_id" interface="qdwin_popup_v1"/>
+      <arg name="parent" type="uint"
+           summary="toplevel handle from toplevel_added"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="serial" type="uint"
+           summary="input event serial that triggered the popup (v29)"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+
+    <request name="subscribe_view_stream">
+      <description summary="start per-view forwarding of a toplevel">
+        Ask the compositor to forward toplevel `handle` as an out-of-band
+        video stream (PipeWire today; RDP/PipeWire via qdistro-forward
+        to remote clients). See the roadmap §6.5 and
+        .
+
+        Admin approval is NOT done here. The shell is expected to have
+        already resolved policy (qbus-admin `CheckPermission`, per
+        the permissions doc §6.5 S4) before sending this request.
+        qdwin trusts its bound shell — the shell is the policy layer,
+        qdwin is compositor mechanics. A future non-shell caller would
+        gate behind a separate allowed-uid check before reaching this
+        code path.
+
+        On receipt, qdwin:
+        1. Validates `handle` is a live toplevel (else `invalid_handle`).
+        2. Validates the pipewire backend is loaded (else
+           `stream_unavailable`).
+        3. Allocates a pipewire output via
+           `weston_pipewire_output_api_v2.head_create`, pins the view
+           to that output via `weston_view_set_output`, spawns a
+           qdistro-forward child process that serves the stream to
+           remote RDP clients, and emits `approved`.
+        4. On any failure (no free pipewire output, spawn error):
+           emits `denied` with a diagnostic reason string.
+
+        `desired_width` and `desired_height` are hints for the output
+        size; the compositor may clamp. `allow_input` is a
+        SERVER-ENFORCED permission bit: when 0 (read-only) the
+        compositor DROPS every injected event (`inject_pointer_motion`/
+        `inject_pointer_button`/`inject_pointer_axis`/`inject_key`/
+        `inject_modifiers`) for this stream at the compositor boundary,
+        so the subscriber's qdistro-forward cannot drive the source
+        window even though it may still hold the input channel. Pixel
+        frame production (`request_frame`) is unaffected. (Admin approval
+        remains the higher-level gate on granting the stream at all.)
+
+        `peer_label` is a caller-chosen short string shown in the
+        admin prompt ("Forward to phone", "Share with work").
+      </description>
+      <arg name="stream" type="new_id" interface="qdwin_view_stream_v1"/>
+      <arg name="handle" type="uint"
+           summary="toplevel handle from toplevel_added"/>
+      <arg name="peer_label" type="string"/>
+      <arg name="desired_width" type="int"/>
+      <arg name="desired_height" type="int"/>
+      <arg name="allow_input" type="uint"
+           summary="permission bit: 0 read-only (injects dropped), 1 subscriber may inject input"/>
+    </request>
+
+    <event name="hello">
+      <description summary="bind accepted, carry back the server's view of the client">
+        Emitted once immediately after a successful bind, before any
+        `toplevel_added` replay. Carries the uid the compositor saw,
+        so the shell can confirm its identity matches expectations.
+      </description>
+      <arg name="uid" type="uint" summary="uid the compositor saw"/>
+    </event>
+
+    <event name="toplevel_added">
+      <description summary="a new toplevel has appeared">
+        Sent after the toplevel is mapped and ready for decoration.
+        The toplevel is in pending-chrome holding state until the
+        shell's first attach_decoration for this handle arrives.
+
+        `owner_uid` is the uid of the process that owns the backing
+        wl_client. qdwin is the only party that can authoritatively
+        attribute this — the threat-model doc; the shell uses it
+        to pick the correct border colour, or to annotate the
+        decoration with a debug label. A future version may replace
+        this with an opaque colour token if the uid itself should not
+        leak to the shell.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="owner_uid" type="uint"/>
+      <arg name="app_id" type="string"
+           summary="xdg_toplevel app_id"/>
+      <arg name="title" type="string"/>
+      <arg name="is_xwayland" type="uint"
+           summary="non-zero for XWayland toplevels"/>
+    </event>
+
+    <event name="toplevel_geometry">
+      <description summary="toplevel has moved or resized"/>
+      <arg name="handle" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="toplevel_state">
+      <description summary="toplevel state changed">
+        State bitmask: bit 0 maximised, bit 1 fullscreen,
+        bit 2 minimised, bit 3 urgent, bit 4 focused, bit 5 floating.
+        More bits reserved.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="state" type="uint"/>
+    </event>
+
+    <event name="toplevel_title">
+      <description summary="title string changed"/>
+      <arg name="handle" type="uint"/>
+      <arg name="title" type="string"/>
+    </event>
+
+    <event name="toplevel_removed">
+      <description summary="toplevel was closed or unmapped">
+        The shell should release any wl_buffers it still holds for this
+        handle. The handle is retired; a subsequent toplevel_added may
+        reuse the numeric value but it refers to a different view.
+      </description>
+      <arg name="handle" type="uint"/>
+    </event>
+
+    <event name="locked_changed">
+      <description summary="compositor entered or left locked state">
+        While locked, qdwin refuses all request_* on the interface
+        (raises `locked` error) and stops emitting per-toplevel events.
+        Exception: the session-config snapshots `set_pointer_config` and
+        `set_key_repeat` are dropped silently (logged, no error) while
+        locked, because the shell pushes them unconditionally at startup
+        and a shell restarted during a lock must not be killed for it.
+        The shell uses this to swap to the lock UI layer-shell surface.
+      </description>
+      <arg name="locked" type="uint"/>
+    </event>
+
+    <!-- decoration_pointer was removed before any non-stub
+         implementation. The chrome surfaces are owned by the shell
+         as a wl_compositor client; it receives wl_pointer events on
+         them through the standard Wayland path and runs hit-testing
+         locally. Tunneling those events through the compositor would
+         duplicate work and violate the chrome/content independence
+         principle in the architecture doc § "Chrome and content
+         independence." -->
+
+    <event name="seat_created" since="2">
+      <description summary="a weston_seat was added">
+        Forwarded from `weston_compositor::seat_created_signal`. The
+        qdwin source publishes one event per seat, including the seats
+        that already exist at `bind_as_shell` time (replay).
+
+        Typical triggers: the initial libinput seat at compositor
+        startup, a new RDP client connecting (the RDP backend creates
+        a per-client seat), or a per-view seat spun up by
+        `qdwin_stream_input_v1` for an active forward (§6.5 S5).
+
+        `name` is `weston_seat::seat_name` — opaque to the shell
+        beyond use as a correlation key. Shells that care about the
+        seat's kind (physical input vs. RDP vs. per-stream virtual)
+        today infer it from the name prefix ("default", "rdp-", or
+        "qdwin-stream-"); a future event field may formalise this.
+      </description>
+      <arg name="name" type="string"/>
+    </event>
+
+    <event name="seat_removed" since="2">
+      <description summary="a weston_seat was destroyed">
+        Forwarded from `weston_seat::destroy_signal`. Emitted once per
+        seat at teardown. Pairs 1:1 with a prior `seat_created` for
+        the same `name`.
+
+        Use cases: per-uid session-state cleanup when an RDP
+        subscriber disconnects (§6.5), per-stream UI reset when the
+        stream-input seat is released, and general diagnostic logging.
+      </description>
+      <arg name="name" type="string"/>
+    </event>
+
+    <event name="output_created" since="2">
+      <description summary="a weston_output was added">
+        Forwarded from `weston_compositor::output_created_signal`.
+        Replayed at `bind_as_shell` for outputs that exist at bind
+        time.
+
+        `name` is `weston_output::name` (e.g. "pipewire-1",
+        "headless-0", or a DRM connector name). Shells may use it to
+        label per-output UI or to correlate with pipewire node names
+        exposed via `qdwin_view_stream_v1.approved`.
+      </description>
+      <arg name="name" type="string"/>
+    </event>
+
+    <event name="output_removed" since="2">
+      <description summary="a weston_output was destroyed">
+        Forwarded from `weston_compositor::output_destroyed_signal`.
+        Pairs 1:1 with a prior `output_created`. Matters when hot-
+        plug DRM outputs land and for pipewire outputs that get torn
+        down as view streams end.
+      </description>
+      <arg name="name" type="string"/>
+    </event>
+
+    <!-- §6.6 S1 — panel role. Promotes a wl_surface to a bar anchored
+         to one screen edge, positioned by qdwin, with a reserved
+         "exclusive zone" that xdg-toplevel maximise must not cover.
+         Wire format only for now; panel_layer + work-area
+         implementation lands in the next pass. -->
+    <request name="attach_panel" since="3">
+      <description summary="promote a wl_surface to a panel role">
+        Requests that the compositor treat `surface` as a shell-owned
+        panel. The compositor places the surface on its panel layer
+        (above normal toplevels, below popups), anchors it to the
+        given screen `edge`, and reserves an exclusive zone of
+        `thickness` pixels so xdg-toplevel maximise does not cover
+        the panel.
+
+        The returned `qdwin_panel_v1` handle mirrors the popup /
+        stream handle pattern. Destroying the handle unmaps the
+        panel and releases its exclusive zone. Multiple panels are
+        allowed (one per edge per output); the compositor picks the
+        primary output if the shell doesn't specify.
+
+        Shell must render continuously into `surface` (attach +
+        damage + commit) and `set_border_color` rules don't apply —
+        the panel carries its own chrome.
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_panel_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="edge" type="uint"
+           summary="screen edge: 0=top, 1=bottom, 2=left, 3=right"/>
+      <arg name="thickness" type="uint"
+           summary="panel thickness in px (height for top/bottom, width for left/right)"/>
+      <arg name="exclusive" type="uint"
+           summary="exclusive zone in px (usually == thickness; 0 to overlay without reserving)"/>
+    </request>
+
+    <!-- §6.6 S2 — notification role. Notification bubbles render on
+         a dedicated layer between panel and popup, anchored to one
+         corner of the primary output. The compositor handles layer
+         + placement; the shell owns timeout semantics (bubbles fire
+         `dismissed` when destroyed, never auto-timeout in the
+         compositor). -->
+    <request name="attach_notification" since="4">
+      <description summary="promote a wl_surface to a notification role">
+        Places `surface` on the notification layer, positioned at the
+        given corner of the primary output plus (offset_x, offset_y)
+        in px. The shell pre-paints the bubble at whatever size it
+        wants (from the surface's committed buffer dims). Multiple
+        notifications stack — the shell is responsible for offsetting
+        each one so they don't overlap.
+
+        Destroying the handle unmaps the bubble. The compositor may
+        also fire `dismissed` if the hosting output is removed.
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_notification_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="anchor" type="uint"
+           summary="corner: 0=top-right, 1=top-left, 2=bottom-right, 3=bottom-left"/>
+      <arg name="offset_x" type="uint"
+           summary="px offset from anchored corner on the x axis"/>
+      <arg name="offset_y" type="uint"
+           summary="px offset from anchored corner on the y axis"/>
+    </request>
+
+    <!-- §6.6 S3/S4 — launcher + switcher role. Both are corner-
+         anchored floating surfaces on a dedicated launcher layer.
+         kind=0 → launcher (keyboard-driven app picker, Ctrl+Space);
+         kind=1 → task switcher (Alt+Tab cycler). Compositor centres
+         the surface on the primary output. -->
+    <request name="attach_launcher" since="5">
+      <description summary="promote a wl_surface to a launcher role">
+        Places `surface` on the launcher layer, centred on the primary
+        output. `kind` distinguishes launcher (0) from task switcher
+        (1) — both share the same role/layer, the shell decides the
+        content. Destroying the handle unmaps.
+
+        Compositor fires `dismissed` on output loss or when Escape is
+        pressed and the shell-side grab surfaces it. Keyboard focus
+        stealing is shell-side — qdwin does not redirect input on
+        attach; the shell should call begin_interactive_move or a
+        future focus-grab request to pull focus.
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_launcher_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="kind" type="uint" summary="0=launcher, 1=switcher"/>
+    </request>
+
+    <event name="launcher_requested" since="5">
+      <description summary="user pressed the launcher keybinding">
+        Fired when the compositor's Ctrl+Space global binding fires.
+        The shell responds by attaching a launcher surface via
+        attach_launcher. If a launcher is already attached, the shell
+        should dismiss it (toggle).
+      </description>
+    </event>
+
+    <event name="switcher_next" since="5">
+      <description summary="user pressed the task-switcher keybinding">
+        Fired when the compositor's Alt+Tab global binding fires.
+        `direction` is 1 for forward (Alt+Tab) and -1 for reverse
+        (Alt+Shift+Tab). The shell attaches a switcher surface via
+        `attach_launcher(..., kind=1)` on the first event and cycles
+        on subsequent ones while Alt is held. The compositor fires
+        `switcher_commit` on Alt release so the shell can commit the
+        selection.
+      </description>
+      <arg name="direction" type="int"/>
+    </event>
+
+    <event name="switcher_commit" since="5">
+      <description summary="alt key released; shell should commit
+                            the highlighted toplevel">
+      </description>
+    </event>
+
+    <!-- §6.6 S5 — locker role + compositor-lock state driver. The
+         shell attaches one lock surface that fills the primary output
+         on the LOCK layer; when set_locked(1) fires, compositor hides
+         all other content. set_locked(0) un-covers. `locked_changed`
+         continues to be the state-observer event (already shipped). -->
+    <request name="attach_lock_surface" since="6">
+      <description summary="install a lock overlay">
+        Places `surface` on the compositor LOCK layer, covering every
+        output. The surface is not yet "live" — the lock state is still
+        driven by `set_locked`. Multiple lock surfaces are not allowed;
+        a second attach replaces the first and dismisses it.
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_lock_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="set_locked" since="6">
+      <description summary="transition compositor lock state">
+        `locked=1` → compositor enters the locked state: the lock
+        surface (from attach_lock_surface) is the only thing composited.
+        `locked=0` → unlocks; toplevels resume rendering.
+
+        Compositor emits `locked_changed(locked)` after the transition,
+        matching the existing auto-emit on boot.
+
+        Fails silently if no lock surface is attached; the shell is
+        responsible for attaching first.
+      </description>
+      <arg name="locked" type="uint"/>
+    </request>
+
+    <event name="lock_requested" since="7">
+      <description summary="user pressed the manual-lock keybinding">
+        Fired when the compositor's Ctrl+Alt+L global binding fires.
+        The shell should respond by calling `attach_lock_surface`
+        (if not already attached) + `set_locked(1)`. Compositor does
+        not itself flip lock state — the shell decides, so that an
+        auth panel can be shown before entering lock if desired.
+      </description>
+    </event>
+
+    <event name="overlay_key" since="17">
+      <description summary="key forwarded into a visible overlay surface">
+        While an overlay surface (launcher / switcher / locker) is
+        attached and visible, the compositor installs a keyboard grab
+        and forwards each pressed key here. The shell handles input
+        directly — there is no separate wl_keyboard.key delivery to
+        the overlay surface (overlays are not focusable in the normal
+        sense; this event IS the focus path).
+
+        `role` distinguishes the overlay: 0=launcher, 1=switcher,
+        2=locker. The shell ignores roles whose state machine isn't
+        currently active.
+
+        `sym` is the xkb keysym (XKB_KEY_*); the shell matches against
+        named keys (XKB_KEY_Escape, XKB_KEY_Return, XKB_KEY_BackSpace,
+        XKB_KEY_Up, XKB_KEY_Down, XKB_KEY_Tab) for navigation /
+        commit / dismiss. `utf8` is the printable character (or "" if
+        non-printable) for typing into filter / password fields. The
+        shell prefers utf8 when non-empty (so xkb layout dead-keys and
+        Compose are honoured) and falls back to `sym` matching for
+        control keys.
+
+        Only PRESSED transitions are sent (state=1). Releases are
+        absorbed by the grab.
+
+        The compositor stops forwarding when the overlay surface is
+        destroyed; on the next attach the grab is reinstalled.
+      </description>
+      <arg name="role" type="uint"
+           summary="0=launcher, 1=switcher, 2=locker"/>
+      <arg name="sym" type="uint"
+           summary="xkb keysym (XKB_KEY_* / xkbcommon-keysyms.h)"/>
+      <arg name="utf8" type="string"
+           summary="UTF-8 for printable keys, '' otherwise"/>
+      <arg name="state" type="uint"
+           summary="WL_KEYBOARD_KEY_STATE_PRESSED (always 1 in v17)"/>
+    </event>
+
+    <event name="idle_lock_hint" since="7">
+      <description summary="compositor-internal idle trigger relay">
+        Fired by the compositor when it detects an idle condition
+        that the spec 04 Lock-triggers section enumerates as a lock
+        source but the shell can't observe directly (e.g. lid close
+        signal pre-aggregated by the compositor). The shell treats
+        this like lock_requested. `reason` is one of 0=idle,
+        1=lid_close, 2=prepare_for_sleep, 3=manual for logging.
+
+        Idle based on ext-idle-notify-v1 subscription is observed by
+        the shell *directly* via that protocol — this event is only
+        fired for reasons that need compositor-side aggregation.
+      </description>
+      <arg name="reason" type="uint"/>
+    </event>
+
+    <event name="nested_proxy_pending" since="8">
+      <description summary="a nested-compositor advertise needs admin gating">
+        Fired by the compositor when a qdwin_nested_v1 advertise_toplevel
+        creates a proxy in pending state (held layer, invisible). The
+        shell must call `nested_proxy_decision(handle, decision, reason)`
+        within a reasonable window — until then, the proxy stays held.
+
+        Action string for broker CheckPermission convention:
+          `qdistro.nested.advertise:&lt;slug(app_id)&gt;`
+        Details dict should carry: app_id, title, origin_uid.
+
+        `handle` matches the toplevel_added event's handle that fired
+        immediately before this. Shells that don't bind v8 don't get
+        this event; in production/default config those proxies remain
+        held fail-closed. Dev/test can explicitly restore the old
+        auto-allow posture with `QDWIN_NESTED_BROKER_OPTIONAL=1`.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="app_id" type="string"/>
+      <arg name="origin_uid" type="uint"/>
+    </event>
+
+    <request name="nested_proxy_decision" since="8">
+      <description summary="shell's verdict on a pending nested proxy">
+        Issued by the shell after broker CheckPermission returns. The
+        compositor holds nested-proxy toplevels until this lands.
+
+        decision values:
+          0 — allow: release the proxy from held to normal layer; it
+              becomes visible to the user. Subsequent attach_decoration
+              wires chrome around it.
+          1 — deny: post wl_resource_post_error on the originating
+              qdwin_nested_toplevel_v1 with code `policy_denied`,
+              destroy the proxy, and forget the handle. The nested
+              compositor sees the protocol error and tears down its
+              local PipeWire output for this toplevel.
+          2 — defer: keep the proxy held; shell may re-decide later
+              (e.g. once admin approves a pending policy-change request
+              the broker enqueued). No auto-timeout — the proxy lives
+              until the resource closes or another decision arrives.
+
+        `reason` is a free-form string for audit logging; passed to the
+        compositor log when posting the protocol error.
+
+        Calling this on a non-pending or unknown handle is a silent
+        no-op (shells may issue stale decisions if a nested compositor
+        teardown raced a broker call).
+      </description>
+      <arg name="handle" type="uint"
+           summary="toplevel handle from toplevel_added/nested_proxy_pending"/>
+      <arg name="decision" type="uint"
+           summary="0=allow, 1=deny, 2=defer"/>
+      <arg name="reason" type="string"/>
+    </request>
+
+    <request name="bind_proxy_pixels" since="9">
+      <description summary="bind a wl_surface as the pixel source for a nested-proxy">
+        Tell the compositor that `surface` should be the pixel source
+        for nested-proxy `handle`. Issued by the admin shell after it
+        receives `nested_proxy_pixel_source` and successfully spawns
+        a consumer process that has connected back, created its own
+        wl_surface, and started feeding pixels into it.
+
+        On success the compositor swaps the placeholder curtain view
+        for a weston_view of `surface`, places the new view on the
+        normal layer at the same position, maps the surface so commits
+        are composited, and sets the surface's destroy listener so the
+        proxy reverts to a placeholder curtain if the consumer exits.
+
+        Issuing this on a non-existent or non-proxy `handle` raises
+        `invalid_handle`.
+
+        The compositor permits the root-installed
+        `/usr/bin/qdistro-nested-pixelfeed` helper to bind a secondary
+        qdwin_shell_v1 resource for this request. It does not acquire the
+        shell role, and proxy ownership is still checked against its peer uid.
+      </description>
+      <arg name="handle" type="uint"
+           summary="toplevel handle from nested_proxy_pixel_source"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <event name="nested_proxy_pixel_source" since="9">
+      <description summary="metadata the shell needs to spawn a pixel consumer">
+        Fired by the compositor immediately after `nested_proxy_pending`
+        for the same handle (so the shell can correlate). Carries the
+        `pw_node` string from the original `qdwin_nested_v1.advertise_
+        toplevel` call; the shell uses it to spawn a consumer process
+        (e.g. `qdistro-nested-pixelfeed`) that will resolve the node
+        via libpipewire and call `bind_proxy_pixels`.
+
+        `input_sink` is forwarded too in case the shell wants a single
+        consumer process to drive both the pixel feed and the input
+        injection encoder; in normal operation those concerns are
+        independent (input is the compositor's pointer-grab path, S3b).
+
+        For pre-v9 shells this event isn't sent; proxies stay in
+        placeholder-curtain mode until a v9 shell is bound.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="pw_node" type="string"/>
+      <arg name="input_sink" type="string"/>
+    </event>
+
+    <request name="set_cursor_sprite" since="10">
+      <description summary="provide a wl_surface as the sprite for one cursor shape">
+        Issued by the shell (or a helper it spawned) to register
+        `surface` as the visible sprite the compositor should use the
+        next time `wp_cursor_shape_device_v1.set_shape(shape)` fires
+        on any pointer.
+
+        The compositor caches `{shape -> surface, hotspot}` and applies
+        it lazily on the next set_shape — there is no per-pointer
+        targeting in this protocol; cursor sprites are global to the
+        compositor (single-seat is the only shape qdwin supports for
+        cursor-shape). On set_shape with no cached entry the
+        compositor falls back to its solid-colour sprite path
+        (gated by QDWIN_CURSOR_SPRITE_SOLID).
+
+        The surface MUST NOT carry an xdg role; only the wl_surface
+        + wl_buffer attach + commit cycle is required. The compositor
+        owns the surface lifetime once registered: a destroy of the
+        wl_surface (or the wl_client that owns it) clears the cache
+        entry automatically and the shape re-falls back.
+
+        Calling with a NULL `surface` clears the cached entry for
+        that `shape` (and falls back to solid / nothing).
+
+        `shape` values follow `wp_cursor_shape_device_v1.shape`
+        (1..ALL_RESIZE). Out-of-range raises `invalid_shape` per
+        cursor-shape-v1's rules.
+
+        Hotspot is in surface-local coordinates; values outside the
+        committed buffer are clamped on apply.
+      </description>
+      <arg name="shape" type="uint"
+           summary="wp_cursor_shape_device_v1.shape value"/>
+      <arg name="surface" type="object" interface="wl_surface"
+           allow-null="true"
+           summary="cursor sprite surface (null clears the entry)"/>
+      <arg name="hotspot_x" type="int"/>
+      <arg name="hotspot_y" type="int"/>
+    </request>
+
+    <event name="selection_set" since="11">
+      <description summary="seat selection (clipboard) changed">
+        Fires whenever the seat's selection_data_source changes — i.e.
+        a client called wl_data_device.set_selection on the seat.
+        Used by the shell to gate cross-silo clipboard transfers
+        (spec/10) before any destination client gets the offer.
+
+        `seat_name` matches the name reported on `seat_created`;
+        callers correlate against their seat-tracking state.
+
+        `source_handle` is the toplevel handle of the focused window
+        when the selection was set (the source client). Wayland only
+        permits clients with keyboard focus to set selection, so this
+        is unambiguous in practice. UINT32_MAX (0xffffffff) when the
+        selection was set without a focused toplevel (e.g. by an
+        XWayland helper or compositor-internal source) — the shell
+        treats this as "admin" silo by default.
+
+        `mime_types_concat` packs all advertised MIME types in a
+        single newline-separated string (LF only, no CRLF). qdshell
+        splits and forwards to the broker. Empty string means a
+        pre-mime-add selection — broker returns a decision regardless
+        and the shell may re-evaluate when types arrive (selection_set
+        re-fires on each set_selection call, including the rare
+        no-op case).
+
+        `is_primary` is 0 for the regular Ctrl+C / Ctrl+V clipboard
+        and 1 for the middle-click primary selection (per
+        primary-selection-unstable-v1). Both gate through this same
+        event but the shell may apply different default policies.
+
+        For pre-v11 shells this event isn't sent; selections behave
+        exactly as in stock libweston (every focused client can set
+        and any focused client can read).
+      </description>
+      <arg name="seat_name" type="string"/>
+      <arg name="source_handle" type="uint"/>
+      <arg name="mime_types_concat" type="string"
+           summary="LF-joined mime types, possibly empty"/>
+      <arg name="is_primary" type="uint" summary="0 clipboard, 1 primary"/>
+    </event>
+
+    <event name="selection_set_source_identity" since="23">
+      <description summary="secctx tuple of the wl_client behind selection_set">
+        Sidecar to `selection_set`. Fires IMMEDIATELY BEFORE the
+        matching `selection_set` event whenever the wl_client that
+        called `wl_data_device.set_selection` (or the primary-selection
+        equivalent) carries a `wp_security_context_v1` tag. The shell
+        MUST pair the two events by sequence — there is at most one
+        outstanding sidecar at any time on a given qdwin_shell_v1
+        resource, and the very next `selection_set` it sees consumes
+        the cached identity.
+
+        Closes the source-of-truth gap that v11 left open: in v11..v22
+        the shell had to derive the source silo from the keyboard-
+        focused toplevel handle (which works for normal apps but
+        collapses to "the focused admin shell's silo" when a tagged
+        wl_client emits set_selection without owning a focused
+        toplevel — XWayland helpers, waypipe-tier3 background bridges,
+        compositor-internal scratch sources). With this event the
+        shell can map source → silo directly from the wire instead
+        of from focus state.
+
+        For untagged source clients this event is NOT sent — the
+        shell falls back to the v11 focus-handle mapping for those
+        (matching the existing default-deny posture). Empty strings
+        on individual args are permitted (the secctx engine left
+        them unset at commit time, as with `toplevel_security_context`).
+
+        Pre-v23 shells never see this event. Their fall-back to the
+        v11 focus-handle path is preserved verbatim.
+      </description>
+      <arg name="src_sandbox_engine" type="string"
+           summary="from wp_security_context_v1.set_sandbox_engine"/>
+      <arg name="src_app_id" type="string"
+           summary="from wp_security_context_v1.set_app_id"/>
+      <arg name="src_instance_id" type="string"
+           summary="from wp_security_context_v1.set_instance_id"/>
+    </event>
+
+    <request name="clear_selection" since="11">
+      <description summary="reject the most recent selection_set">
+        Sent by the shell after a deny verdict from the broker.
+        Causes the compositor to drop the seat's selection (and the
+        primary selection, when `is_primary=1`) — equivalent to
+        `weston_seat_set_selection(seat, NULL, ...)`.
+
+        The destination clients see the offer disappear before they
+        had a chance to read it, which from their perspective is
+        indistinguishable from "the source app cleared its
+        selection." Source apps in Qt/GTK typically log a small
+        warning and re-set on their next user copy action.
+
+        `seat_name` MUST match a previously-emitted `seat_created`
+        event; unknown seats are silently ignored.
+      </description>
+      <arg name="seat_name" type="string"/>
+      <arg name="is_primary" type="uint" summary="0 clipboard, 1 primary"/>
+    </request>
+
+    <event name="activation_pending" since="12">
+      <description summary="xdg-activation gate request — spec/09">
+        Fires when a Wayland client calls
+        `xdg_activation_v1.activate(token, target_surface)`. The
+        compositor stalls the activate (does not raise / focus the
+        target yet) and emits this event; the shell consults
+        broker.CheckHandoffActivation, then calls
+        `activation_decision(handle, ...)`.
+
+        `handle` is opaque, monotonic, scoped to one pending
+        activation. The shell MUST eventually call
+        `activation_decision` for each handle (or destroy the shell
+        resource); the compositor times out after 10 seconds and
+        treats it as deny to avoid leaking pending state.
+
+        `source_handle` is the toplevel handle of the requesting
+        client's surface (set via `xdg_activation_token_v1.set_surface`
+        before `commit`), or UINT32_MAX if the requesting client never
+        provided one. `target_handle` is the toplevel handle of the
+        surface to be activated, or UINT32_MAX if the target surface
+        has no qdwin toplevel (compositor-internal popup, etc).
+
+        `app_id` is the requesting-side `xdg_activation_token_v1.set_app_id`
+        value, may be empty.
+
+        Pre-v12 shells don't see this event; the compositor falls
+        back to the legacy auto-allow path.
+      </description>
+      <arg name="handle" type="uint" summary="opaque pending-activation handle"/>
+      <arg name="source_handle" type="uint" summary="requesting toplevel or UINT32_MAX"/>
+      <arg name="target_handle" type="uint" summary="target toplevel or UINT32_MAX"/>
+      <arg name="app_id" type="string" summary="requester-set app_id, may be empty"/>
+    </event>
+
+    <request name="activation_decision" since="12">
+      <description summary="reply to activation_pending — spec/09">
+        Decision values:
+          0 = allow — compositor proceeds with the activate (raise +
+              focus target).
+          1 = deny  — compositor drops the token without acting.
+          2 = defer — equivalent to deny for the current activate, but
+              also signals that the shell is firing a separate
+              `RequestPermission` so admin can approve next time.
+
+        `reason` is logged for audit; not shown to the requesting
+        client (xdg-activation has no failure-feedback channel).
+
+        Calling with an unknown `handle` is silently ignored.
+      </description>
+      <arg name="handle" type="uint" summary="from activation_pending"/>
+      <arg name="decision" type="uint" summary="0 allow, 1 deny, 2 defer"/>
+      <arg name="reason" type="string"/>
+    </request>
+
+    <event name="toplevel_security_context" since="13">
+      <description summary="in-band sandbox identity for a toplevel">
+        Fires immediately after `toplevel_added` for any toplevel
+        whose backing wl_client carries a `wp_security_context_v1`
+        tag (committed via `qdwin_secctx`). Lets the shell classify
+        sandboxed toplevels by the engine that created them
+        (e.g. `waypipe`, `qdistro.tier2`) and the app-id the engine
+        propagated, instead of relying on the title-prefix heuristic
+        the tier-3 wrapper used before §6.10 shipped.
+
+        If the toplevel's client has no secctx tag, this event is
+        not sent. Shells must treat its absence as "unsandboxed."
+        For sandboxed clients all three string args are non-NULL but
+        any of them MAY be the empty string if the sandbox engine
+        chose not to set that field at commit time — e.g.
+        `set_instance_id` is optional in the upstream protocol.
+
+        The event is also replayed on `bind_as_shell` for every
+        already-mapped sandboxed toplevel, after the toplevel_added
+        replay burst.
+      </description>
+      <arg name="handle" type="uint"
+           summary="from toplevel_added"/>
+      <arg name="sandbox_engine" type="string"
+           summary="from wp_security_context_v1.set_sandbox_engine"/>
+      <arg name="app_id" type="string"
+           summary="from wp_security_context_v1.set_app_id"/>
+      <arg name="instance_id" type="string"
+           summary="from wp_security_context_v1.set_instance_id"/>
+    </event>
+
+    <event name="toplevel_peer_identity" since="22">
+      <description summary="stable process identity for a secctx toplevel">
+        Sidecar to `toplevel_security_context`. Fires immediately after
+        it (for the same toplevel handle) and carries the compositor-
+        observed peer identity of the toplevel's backing wl_client at
+        bind time. Lets qdshell forward the tuple to the qdistro admin
+        broker, which re-resolves the live process against /proc and
+        confirms the silo string the client asserted via
+        `wp_security_context_v1` actually matches a process that
+        still has that exe / SELinux label / starttime — closing the
+        same-uid spoof window that v13's string-only event leaves open.
+
+        All five args are present; empty strings/zeros mean the
+        compositor could not read that field (kernel/SELinux off, or
+        the process exited between bind and event flush). Consumers
+        MUST treat empty `peer_exe` or empty `peer_selinux_label` as
+        "unverifiable on this axis" rather than as a wildcard match.
+
+        The (peer_pid, peer_starttime) pair is the minimum sufficient
+        anti-reuse key — broker checks must compare BOTH.
+      </description>
+      <arg name="handle" type="uint"
+           summary="from toplevel_added / toplevel_security_context"/>
+      <arg name="peer_pid" type="uint"
+           summary="SO_PEERCRED pid of the wl_client at bind time"/>
+      <arg name="peer_starttime" type="uint"
+           summary="/proc/&lt;pid&gt;/stat field 22 (low 32 bits)"/>
+      <arg name="peer_starttime_hi" type="uint"
+           summary="/proc/&lt;pid&gt;/stat field 22 (high 32 bits)"/>
+      <arg name="peer_uid" type="uint"
+           summary="SO_PEERCRED uid of the wl_client at bind time"/>
+      <arg name="peer_exe" type="string"
+           summary="readlink /proc/&lt;pid&gt;/exe; empty if unreadable"/>
+      <arg name="peer_selinux_label" type="string"
+           summary="contents of /proc/&lt;pid&gt;/attr/current; empty when SELinux off"/>
+    </event>
+
+    <event name="seat_focus_changed" since="14">
+      <description summary="keyboard focus moved on this seat">
+        Fires whenever weston_keyboard's focus surface changes for a
+        tracked seat — including focus loss (no surface focused) and
+        focus restoration after a lock/unlock cycle. Shells use this
+        for spec/10 §"focus-aware selection clear" — when focus moves
+        to a different silo, the active selection should be dropped so
+        the newly focused client can't `wl_data_offer.receive` the
+        previous silo's clipboard.
+
+        `focused_handle` is the qdwin toplevel handle whose backing
+        surface is now focused, or `UINT32_MAX` if no qdwin toplevel
+        owns the focus (panel chrome, lock surface, RDP backend with
+        no input delivery). Compositor-internal panels and chromes are
+        not surfaced via toplevel_added so they always read as
+        UINT32_MAX here, which the shell should treat as "no
+        user-visible silo focused" — same behaviour as a real focus
+        loss.
+
+        Pre-v14 shells don't receive this event. The compositor still
+        tracks focus internally; it just doesn't forward it.
+
+        On `bind_as_shell` the compositor replays the current focus
+        state once for every existing seat (after the toplevel_added
+        burst), so the shell starts with a coherent picture without
+        having to wait for the first user input.
+      </description>
+      <arg name="seat_name" type="string"/>
+      <arg name="focused_handle" type="uint"
+           summary="toplevel handle, or UINT32_MAX when no qdwin toplevel is focused"/>
+    </event>
+
+    <request name="set_keyboard_focus" since="14">
+      <description summary="move keyboard focus to a target toplevel">
+        Admin-only, ctrl-socket-style focus injection used by tests
+        and (in future) by chrome click-to-focus. Calls
+        `weston_keyboard_set_focus` on the target toplevel's primary
+        view surface for every keyboard owned by `seat_name`, which
+        emits a fresh `wl_keyboard.enter` with a new input serial — so
+        any client that subsequently calls `wl_data_device.set_selection`
+        with that serial wins the seat selection.
+
+        Side effect: before changing focus, the compositor calls
+        `weston_seat_set_selection(seat, NULL, fresh_serial)` to drop
+        any prior selection (its source's wl_client may not match the
+        new focus and weston's stale-serial guard would otherwise
+        reject the new client's set_selection at serial=0). The shell
+        will then see a normal `seat_focus_changed` event for the new
+        target.
+
+        Passing `target_handle = UINT32_MAX` clears focus (and the
+        selection, by the same path).
+
+        Unknown seat names and unknown handles are silently ignored —
+        the operation is best-effort and the shell can rely on the
+        absence of a follow-up `seat_focus_changed` to detect failure.
+      </description>
+      <arg name="seat_name" type="string"/>
+      <arg name="target_handle" type="uint"
+           summary="toplevel handle, or UINT32_MAX to clear focus"/>
+    </request>
+
+    <event name="data_offer_receive_pending" since="15">
+      <description summary="per-MIME clipboard receive awaiting policy">
+        spec/10 v15. Fires every time a wl_data_offer.receive is
+        about to be honored against the seat's current selection.
+        Lets the shell apply per-MIME / per-recipient policy in
+        addition to the v14 focus-aware-clear gate (which is binary:
+        all or nothing per silo).
+
+        `request_handle` is a compositor-allocated unique token; the
+        shell echoes it back via `data_offer_receive_decision`. The
+        token has no relation to toplevel handles or seat names — it
+        is opaque scoped to one pending receive.
+
+        `source_handle` and `target_handle` are toplevel handles for
+        the source-owning client and the client that called .receive.
+        Both are resolved from their actual Wayland resources, independent
+        of keyboard focus. If either client has no tracked toplevel, the
+        receive is denied without emitting this event. A connection from
+        another launch in the same silo is not an identity substitute.
+
+        `mime_type` is the exact byte string the destination
+        requested. The shell must NOT assume canonical formatting
+        (RFC-valid mime types only); some clients post-fix charset=
+        parameters or use private experimental types.
+
+        `fd` is the destination's pipe write-end already dup'd into
+        the compositor's process. The compositor RETAINS the fd
+        until the shell decides; the shell does NOT receive it via
+        wire. On allow the compositor invokes the source's original
+        `send` callback with this fd; on deny the compositor closes
+        the fd (destination sees EOF → empty paste).
+
+        If the shell does not respond within the compositor's per-
+        pending timeout (currently ~2 s), the compositor closes the
+        fd as if the shell answered "deny". This bounds the wedged-
+        shell case without leaking destination fd ownership.
+
+        Absent or pre-v15 shells deny receives. Enforcement remains
+        installed across shell restart; pending receives are closed when
+        the shell disconnects. Allocation or timeout setup failure denies.
+      </description>
+      <arg name="request_handle" type="uint"
+           summary="compositor-allocated, unique per pending receive"/>
+      <arg name="seat_name" type="string"/>
+      <arg name="source_handle" type="uint"
+           summary="silo that owns the data_source, or UINT32_MAX"/>
+      <arg name="target_handle" type="uint"
+           summary="silo that called receive, or UINT32_MAX"/>
+      <arg name="mime_type" type="string"
+           summary="exact byte string requested by destination"/>
+    </event>
+
+    <request name="data_offer_receive_decision" since="15">
+      <description summary="resolve a pending data_offer_receive_pending">
+        spec/10 v15 paired request. Echoes the `request_handle` from
+        a `data_offer_receive_pending` event with the shell's
+        decision. `decision` is "allow" or "deny" (case-sensitive);
+        any other value is treated as "deny" by the compositor.
+
+        Decisions on unknown handles are silently dropped — the
+        compositor may have timed the pending out before the shell
+        responded, or the source may have been destroyed (e.g. the
+        owning client exited, or a fresh set_selection cancelled the
+        prior offer). The shell should not assume side effects from
+        a successful request.
+
+        The compositor synchronously invokes the source's original
+        `send` (allow) or closes the destination fd (deny) before
+        returning from this request handler. A correctly-behaving
+        shell sends one decision per event; duplicates are safe but
+        ignored after the first.
+      </description>
+      <arg name="request_handle" type="uint"
+           summary="from data_offer_receive_pending"/>
+      <arg name="decision" type="string"
+           summary="allow or deny (case-sensitive)"/>
+    </request>
+
+    <request name="set_keyboard_focus_v2" since="16">
+      <description summary="silo-aware focus injection">
+        spec/10 v16. Same as `set_keyboard_focus` but the shell also
+        names the target toplevel's silo. The compositor remembers the
+        last `target_silo` per seat (only v2 calls update this state)
+        and gates the unconditional pre-focus
+        `weston_seat_set_selection(NULL, ...)` on a silo transition:
+
+          - cross-silo (target_silo != last_target_silo, OR either
+            string is empty): clear the seat selection (and primary)
+            before changing focus, identical to v14 behaviour. This
+            keeps cross-silo paste-receive defense-in-depth and ensures
+            subsequent serial=0 set_selection calls win the seat.
+
+          - same-silo (target_silo == last_target_silo, both non-empty):
+            skip the selection clear so an active source survives the
+            focus move. Required for the v15 sink-path: when a sink
+            toplevel in the same silo as the source takes focus, weston
+            sends the existing wl_data_device.selection event to the
+            sink's wl_data_device, the sink calls
+            `wl_data_offer.receive`, and the v15 receive-time gate
+            fires.
+
+        After the (conditional) clear the compositor calls
+        `weston_keyboard_set_focus` on the target toplevel exactly as
+        in v1 of the request.
+
+        `target_silo` is an opaque string. Recommended values:
+        "admin" for the admin uid (default uid 1000), "user1" /
+        "user2" / ... for tier-3 silos keyed by their qdshell silo_map
+        entry, "vm-&lt;name&gt;" for tier-4 libvirt domains, or any other
+        stable identifier. The empty string means "unknown silo" and
+        is treated as cross-silo for safety (so the clear still fires
+        and existing v14 behaviour is preserved).
+
+        Passing `target_handle = UINT32_MAX` clears focus; the
+        per-seat `last_target_silo` is reset to the empty string in
+        that case so the next non-clear v2 call always counts as
+        cross-silo.
+
+        Pre-v16 shells use `set_keyboard_focus` and do not affect the
+        per-seat `last_target_silo` state — but the v14 unconditional
+        clear they trigger DOES reset the running data_source, which
+        is observable to v2 callers if they interleave the two.
+        Don't mix v1 and v2 from the same shell; pick one based on
+        bound version.
+      </description>
+      <arg name="seat_name" type="string"/>
+      <arg name="target_handle" type="uint"
+           summary="toplevel handle, or UINT32_MAX to clear focus"/>
+      <arg name="target_silo" type="string"
+           summary="opaque silo identifier; empty means unknown (treat as cross-silo)"/>
+    </request>
+
+    <request name="attach_background" since="18">
+      <description summary="register a fullscreen wl_surface as the desktop background">
+        The shell creates a wl_surface sized to cover the primary output
+        (or, in multi-output setups, one per output) and passes it
+        here. qdwin places it on the BACKGROUND layer, replaces its
+        compositor-owned `weston_curtain` with this surface for compositing,
+        and reports back via the `qdwin_background_v1` handle so the
+        shell can release / reattach.
+
+        Why: without a client surface covering the desktop, no client
+        ever receives `wl_pointer.enter` over the empty area. That
+        means no client can call `wl_pointer.set_cursor` for the
+        empty desktop, which is exactly when the SPICE / VNC viewer
+        cursor channel needs cursor data to render the pointer to
+        the user. With an attach_background-owned surface, the shell
+        receives pointer.enter and can call set_cursor with a default
+        sprite — visible end-to-end.
+
+        Secondary effect: clicks on the empty desktop now have a
+        target client surface, enabling future click-to-launcher /
+        right-click-context-menu UX.
+
+        Pre-v18 shells continue to see qdwin's compositor curtain.
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_background_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"
+           summary="fullscreen wl_surface covering the desktop"/>
+    </request>
+
+    <enum name="modifier" bitfield="true" since="19">
+      <description summary="modifier bitmask for register_hotkey">
+        Mirrors libweston's `enum weston_keyboard_modifier`. The shell
+        OR's these into the `modifier` arg of register_hotkey. Passing
+        zero registers a hotkey with no modifier (a bare keycode).
+      </description>
+      <entry name="ctrl"  value="1"/>
+      <entry name="alt"   value="2"/>
+      <entry name="super" value="4"/>
+      <entry name="shift" value="8"/>
+    </enum>
+
+    <request name="register_hotkey" since="19">
+      <description summary="register a shell-driven global hotkey">
+        Asks the compositor to install a key binding that fires
+        `hotkey_pressed(id)` on this shell resource whenever the
+        (modifier-bitmask + linux-keycode) combo is pressed and no
+        overlay grab is active. `id` is an opaque shell-assigned token
+        echoed back in the event.
+
+        Re-registering the same `id` is a silent replace.
+        Modifier-only combos (key=0) are not supported and post no
+        error; the call is a no-op.
+
+        Hotkeys do NOT fire while an overlay surface (launcher /
+        switcher / locker) is active — those have their own grab and
+        the shell receives input via `overlay_key`. Hotkeys are
+        registered for the lifetime of the shell binding and torn down
+        on shell unbind.
+      </description>
+      <arg name="id" type="uint"
+           summary="shell-assigned identifier echoed on hotkey_pressed"/>
+      <arg name="modifiers" type="uint"
+           summary="bitmask of qdwin_shell_v1.modifier entries"/>
+      <arg name="key" type="uint"
+           summary="linux input keycode (KEY_SPACE=57, KEY_E=18, KEY_L=38, …)"/>
+    </request>
+
+    <request name="unregister_hotkey" since="19">
+      <description summary="release a previously registered global hotkey">
+        Removes the binding installed by a prior `register_hotkey`
+        with the same `id`. Unknown ids are a silent no-op.
+      </description>
+      <arg name="id" type="uint"/>
+    </request>
+
+    <event name="hotkey_pressed" since="19">
+      <description summary="a registered global hotkey fired">
+        Fired by the compositor when the modifier+keycode combo
+        matching a prior `register_hotkey` is pressed. `id` is the
+        same token the shell passed at registration. Releases are
+        absorbed; only the press transition is reported.
+      </description>
+      <arg name="id" type="uint"/>
+    </event>
+
+    <event name="chrome_button" since="20">
+      <description summary="pointer button event over a chrome wl_surface">
+        Fired when a pointer button is pressed or released and the
+        pointer focus is one of the chrome wl_surfaces the shell
+        attached via attach_decoration. The event carries the
+        (handle, side) of the chrome plus surface-local coords and
+        the standard linux BTN_xxx code plus a press/release state.
+
+        Workaround for a libweston same-client gotcha: pointer
+        events that libweston sends to surfaces owned by the same
+        wl_client that holds the qdwin_shell_v1 binding are not
+        reliably delivered through wl_pointer (see
+         - same root cause that
+        suppresses pointer.enter on shell-owned surfaces). Without
+        this event, clicks on titlebar buttons (close, maximize,
+        minimize) painted by the shell are never observed by the
+        shell, so the buttons appear inert. The compositor side
+        already knows the focused chrome view and the surface-local
+        coordinates from its grab interface, so we forward them as
+        a typed shell event.
+
+        Coords are wl_fixed-encoded (x256) to match wl_pointer.motion
+        convention. button is a linux input code (BTN_LEFT=0x110,
+        BTN_RIGHT=0x111, BTN_MIDDLE=0x112). state is 1 for press,
+        0 for release.
+
+        Pre-v20 shells stay on the wl_pointer path. v20 shells should
+        ignore wl_pointer button events on chrome surfaces and rely
+        on this event instead - otherwise a future libweston fix
+        that restores wl_pointer delivery would cause double-fire.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="side" type="uint"
+           summary="0=N (titlebar), 1=E, 2=S, 3=W"/>
+      <arg name="surface_x" type="fixed"
+           summary="surface-local x in chrome buffer space"/>
+      <arg name="surface_y" type="fixed"
+           summary="surface-local y in chrome buffer space"/>
+      <arg name="button" type="uint" summary="linux BTN_* code"/>
+      <arg name="state" type="uint" summary="1=pressed, 0=released"/>
+      <arg name="serial" type="uint"
+           summary="input event serial of this button (v29) — pass to show_popup to open a context menu"/>
+    </event>
+
+    <event name="popup_button" since="21">
+      <description summary="pointer button event over an active popup surface">
+        Sibling of chrome_button for popup surfaces. Fired when a
+        button event is delivered to a qdwin_popup_v1 surface owned
+        by the shell, with the popup-local coordinates and the
+        parent toplevel handle.
+
+        Same rationale as chrome_button: libweston cannot reliably
+        deliver wl_pointer button events to surfaces owned by the
+        shell client (the same-client suppression issue), so menu
+        items inside a context-menu popup were inert before this
+        event existed. The compositor side knows the popup is up
+        (it owns the popup grab) and can hit-test the position
+        against the popup view bbox, so it forwards the click as a
+        typed shell event.
+
+        Coords are wl_fixed-encoded (x256). button is a linux
+        BTN_xxx code; state is 1 for press, 0 for release.
+
+        The `handle` field is the parent toplevel that owns the
+        popup. The shell dispatches on parent + popup-local y to
+        decide which menu item was clicked.
+
+        Pre-v21 shells continue to rely on wl_pointer for popup
+        clicks (and the menu items stay inert).
+      </description>
+      <arg name="handle" type="uint" summary="parent toplevel handle"/>
+      <arg name="surface_x" type="fixed"
+           summary="popup-local x in popup buffer space"/>
+      <arg name="surface_y" type="fixed"
+           summary="popup-local y in popup buffer space"/>
+      <arg name="button" type="uint" summary="linux BTN_xxx code"/>
+      <arg name="state" type="uint" summary="1=pressed, 0=released"/>
+      <arg name="serial" type="uint"
+           summary="input event serial of this button (v29) — pass to show_popup to open a submenu"/>
+    </event>
+
+    <request name="move_toplevel_to_workspace" since="24">
+      <description summary="reassign a toplevel to a workspace">
+        Move toplevel `handle` to workspace `index`. If `index` is the
+        active workspace the toplevel becomes visible; otherwise it is
+        parked on the hidden workspace layer. The window keeps its
+        position, size, chrome and minimised state across the move.
+
+        `handle` must be a live toplevel (else `invalid_handle`).
+        `index` out of range ([0, ext-workspace count)) is ignored. On
+        success qdwin emits `toplevel_workspace(handle, index)`. If the
+        move hides the currently focused window, focus is re-derived to
+        a still-visible toplevel exactly as on a workspace switch.
+      </description>
+      <arg name="handle" type="uint"
+           summary="toplevel handle from toplevel_added"/>
+      <arg name="index" type="uint" summary="target workspace, 0-based"/>
+    </request>
+
+    <event name="toplevel_workspace" since="24">
+      <description summary="a toplevel's workspace assignment">
+        Reports which workspace a toplevel lives on. Fires immediately
+        after `toplevel_added` for a new window (carrying the workspace
+        it opened on — the active workspace at map time), and again
+        whenever the assignment changes via
+        `move_toplevel_to_workspace`. Replayed at `bind_as_shell` for
+        every existing toplevel after the toplevel_added burst.
+
+        The shell uses this to populate the per-window `workspaceId`
+        so the bar can show window counts per workspace and so
+        per-workspace window lists are correct.
+      </description>
+      <arg name="handle" type="uint" summary="from toplevel_added"/>
+      <arg name="index" type="uint" summary="workspace index, 0-based"/>
+    </event>
+
+    <enum name="focus_policy" since="25">
+      <description summary="keyboard-focus model for set_wm_policy">
+        How keyboard focus follows the pointer. `click` is the
+        conservative default (focus only changes on a button press
+        inside a toplevel). `follow_mouse` retargets keyboard focus to
+        the toplevel under the pointer after `ffm_delay_ms` of the
+        pointer resting over it (focus-follows-mouse).
+      </description>
+      <entry name="click" value="0"/>
+      <entry name="follow_mouse" value="1"/>
+    </enum>
+
+    <enum name="placement" since="25">
+      <description summary="new-window placement strategy for set_wm_policy">
+        Where a freshly mapped toplevel is positioned on its output.
+        `center` centres it on the work area. `under_mouse` opens it
+        centred under the pointer. `smart` picks the least-overlapping
+        slot (falling back to centre). `cascade` steps each new window
+        down-right from the last (the historical qdwin default).
+      </description>
+      <entry name="center" value="0"/>
+      <entry name="under_mouse" value="1"/>
+      <entry name="smart" value="2"/>
+      <entry name="cascade" value="3"/>
+    </enum>
+
+    <enum name="tile_edge" since="25">
+      <description summary="half-screen tiling target for request_tile">
+        `none` restores the toplevel to its pre-tile geometry. `left` /
+        `right` tile it to the left / right half of the work area of its
+        current output (output minus panel exclusive zones, exactly as
+        maximise uses).
+      </description>
+      <entry name="none" value="0"/>
+      <entry name="left" value="1"/>
+      <entry name="right" value="2"/>
+    </enum>
+
+    <request name="set_wm_policy" since="25">
+      <description summary="apply live window-manager policy">
+        Sets the compositor's window-manager policy as a single
+        idempotent snapshot. The shell sends the full policy every time
+        any field changes; the compositor replaces its stored policy and
+        applies the new behaviour immediately (no per-window or deferred
+        apply). This is the live-apply counterpart to the qdshell
+        WindowManager settings tab — before v25 those settings were
+        persist-only.
+
+        Fields:
+        - `focus_policy`: a `focus_policy` enum value. Unknown values
+          fall back to `click`.
+        - `ffm_delay_ms`: focus-follows-mouse settle delay in
+          milliseconds (clamped to [0, 1000]); ignored under `click`.
+        - `raise_on_click`: 1 to raise a toplevel to the top of the
+          stack when it is clicked.
+        - `raise_on_hover`: 1 to also raise the focus-follows-mouse
+          target when focus moves to it (only meaningful under
+          `follow_mouse`).
+        - `placement`: a `placement` enum value for new-window
+          positioning. Unknown values fall back to `smart`.
+        - `snap_enabled`: 1 to enable edge snapping during an
+          interactive move.
+        - `snap_distance`: snap threshold in pixels (clamped to
+          [1, 64]).
+
+        Re-sending the same policy is a harmless no-op. The policy is
+        process-global (not per-seat / per-output) and is reset to the
+        compositor default when the shell binding is torn down.
+      </description>
+      <arg name="focus_policy" type="uint" summary="focus_policy enum"/>
+      <arg name="ffm_delay_ms" type="uint" summary="0..1000 ms"/>
+      <arg name="raise_on_click" type="uint" summary="1=raise on click"/>
+      <arg name="raise_on_hover" type="uint" summary="1=raise on hover"/>
+      <arg name="placement" type="uint" summary="placement enum"/>
+      <arg name="snap_enabled" type="uint" summary="1=enable edge snap"/>
+      <arg name="snap_distance" type="uint" summary="1..64 px"/>
+    </request>
+
+    <request name="request_fullscreen" since="25">
+      <description summary="toggle a toplevel's fullscreen state">
+        Shell-driven fullscreen toggle, mirroring `request_maximize`.
+        `fullscreen` non-zero puts the toplevel into compositor
+        fullscreen (filling the whole output, covering panels);
+        zero restores it. The shell drives this from its
+        toggle-fullscreen keyboard shortcut.
+
+        `handle` must be a live toplevel (else `invalid_handle`).
+        Refused while the compositor is `locked`. A no-op if the
+        toplevel is already in the requested state.
+      </description>
+      <arg name="handle" type="uint" summary="toplevel handle"/>
+      <arg name="fullscreen" type="uint" summary="1=fullscreen, 0=restore"/>
+    </request>
+
+    <request name="request_tile" since="25">
+      <description summary="half-screen tile a toplevel">
+        Tile `handle` to the left or right half of its output's work
+        area, or restore it (`tile_edge.none`). Tiling saves the
+        pre-tile floating geometry the first time it is applied and
+        restores it on `none`. An interactive move floats the window and
+        clears the tile. Maximise / fullscreen are layered on top of a
+        tile (they save the tiled rect as their own restore target), so
+        un-maximise / un-fullscreen returns to the tile and a later
+        `request_tile(none)` still restores the original floating
+        geometry. The shell drives this from its tile-left / tile-right
+        keyboard shortcuts.
+
+        `handle` must be a live toplevel (else `invalid_handle`).
+        `edge` out of range is treated as `none`. Refused while the
+        compositor is `locked`. Tiling a maximised or fullscreen window
+        first leaves that state, then tiles.
+      </description>
+      <arg name="handle" type="uint" summary="toplevel handle"/>
+      <arg name="edge" type="uint" summary="tile_edge enum"/>
+    </request>
+
+    <request name="set_display_power" since="26">
+      <description summary="turn all outputs on or off (DPMS)">
+        Force every output on (`on` non-zero) or off (`on` zero) — the
+        display-power side of the Power settings. The shell drives this
+        from its own idle source (`ext-idle-notify-v1`): on the display-off
+        idle it calls `set_display_power(0)`, and on resume (input wakes the
+        compositor) it calls `set_display_power(1)`.
+
+        Off ceases rendering on each output and DPMS-powers it down where
+        the backend supports it (no-op on backends without DPMS, e.g.
+        headless); on restores normal power. Idempotent. The compositor
+        forces all outputs back on when the shell binding is torn down so a
+        crashed shell can never leave the screen dark.
+
+        Display power is intentionally NOT tied to the compositor's own
+        idle timer: the shell owns the idle timing (via ext-idle-notify)
+        and the action policy, the compositor only enacts the power state.
+      </description>
+      <arg name="on" type="uint" summary="1=power on, 0=power off"/>
+    </request>
+
+    <request name="set_workspace_name" since="27">
+      <description summary="set a workspace's display name (ext-workspace parity)">
+        v27: push the user's custom display name for a workspace so the
+        compositor advertises it on the STANDARD
+        ext_workspace_handle_v1.name event to every ext-workspace client
+        (qdshell AND any third-party bar, e.g. waybar) — not just as a
+        shell-side overlay. ext-workspace-v1 itself has no rename request,
+        so this private sidecar carries the name into the compositor.
+
+        index is the positional workspace index (0-based), matching the
+        ext_workspace_handle_v1 ordering qdwin advertises. An index at or
+        beyond the maximum number of workspaces (32) is ignored.
+
+        name is the display name. An empty name reverts the workspace to
+        its positional default ("1".."N"). The compositor bounds the
+        stored name to a fixed maximum length (currently 256 bytes);
+        over-long names are truncated rather than treated as an error, so
+        a misbehaving shell can never make the compositor allocate
+        unboundedly.
+
+        The name persists for the lifetime of the compositor process (or
+        until changed/cleared); it is re-applied whenever the workspace's
+        ext_workspace_handle_v1 is (re)created. Pushing the same name
+        again is an idempotent no-op. Only the shell (bind_as_shell) may
+        call this; a non-shell caller is ignored.
+      </description>
+      <arg name="index" type="uint" summary="0-based positional workspace index"/>
+      <arg name="name" type="string"
+	   summary="display name, or empty to revert to the positional default"/>
+    </request>
+
+    <enum name="accel_profile" since="28">
+      <description summary="pointer acceleration profile for set_pointer_config">
+        Mirrors libinput's pointer-acceleration profile. `flat` applies a
+        constant factor with no acceleration (1:1 device-to-screen at the
+        configured speed); `adaptive` is libinput's default speed-dependent
+        curve. Unknown values fall back to `adaptive`. A device that does
+        not advertise the requested profile is left at its current profile
+        (no error).
+      </description>
+      <entry name="adaptive" value="0"/>
+      <entry name="flat" value="1"/>
+    </enum>
+
+    <enum name="scroll_method" since="28">
+      <description summary="touchpad/pointer scroll method for set_pointer_config">
+        Mirrors libinput's scroll method. `two_finger` is the touchpad
+        default; `edge` scrolls along the touchpad edge; `on_button_down`
+        scrolls while a designated button is held; `none` disables
+        software scroll. Unknown values fall back to `two_finger`. A device
+        that does not advertise the requested method is left unchanged
+        (no error).
+      </description>
+      <entry name="none" value="0"/>
+      <entry name="two_finger" value="1"/>
+      <entry name="edge" value="2"/>
+      <entry name="on_button_down" value="3"/>
+    </enum>
+
+    <request name="set_pointer_config" since="28">
+      <description summary="apply live libinput pointer/touchpad config">
+        Sets the compositor's pointer/touchpad policy as a single
+        idempotent snapshot, applied to EVERY libinput pointer and
+        touchpad device across the seats. The shell sends the full policy
+        every time any field changes; the compositor stores it and applies
+        the new behaviour immediately. This is the live-apply counterpart
+        to the qdshell Mouse settings tab — before v28 those settings were
+        persist-only.
+
+        Each field is applied per-device only when libinput advertises
+        that capability for the device (`*_is_available` /
+        `*_has_*` guard); an unsupported field is skipped for that device
+        rather than raising an error, so a single snapshot can target a
+        mixed mouse + touchpad seat. The policy is process-global (not
+        per-seat / per-device) and is reset to the libinput per-device
+        defaults when the shell binding is torn down.
+
+        Fields:
+        - `accel_speed`: pointer acceleration speed, expressed as a signed
+          fixed value in milli-units in the range [-1000, 1000] mapping to
+          libinput's [-1.0, 1.0]. Out-of-range values are clamped.
+        - `accel_profile`: an `accel_profile` enum value. Unknown values
+          fall back to `adaptive`.
+        - `natural_scroll`: 1 to enable natural (reverse) scrolling.
+        - `tap_to_click`: 1 to enable tap-to-click (touchpads).
+        - `left_handed`: 1 to swap left/right buttons.
+        - `middle_emulation`: 1 to enable middle-button emulation
+          (left+right chord → middle).
+        - `disable_while_typing`: 1 to disable the touchpad while typing.
+        - `scroll_method`: a `scroll_method` enum value. Unknown values
+          fall back to `two_finger`.
+
+        Re-sending the same policy is a harmless no-op. On backends with no
+        libinput devices (e.g. headless) the snapshot is stored but applies
+        to nothing — not an error.
+      </description>
+      <arg name="accel_speed" type="int"
+           summary="acceleration speed in milli-units, -1000..1000"/>
+      <arg name="accel_profile" type="uint" summary="accel_profile enum"/>
+      <arg name="natural_scroll" type="uint" summary="1=natural scroll"/>
+      <arg name="tap_to_click" type="uint" summary="1=tap to click"/>
+      <arg name="left_handed" type="uint" summary="1=left handed"/>
+      <arg name="middle_emulation" type="uint" summary="1=middle-button emulation"/>
+      <arg name="disable_while_typing" type="uint" summary="1=disable while typing"/>
+      <arg name="scroll_method" type="uint" summary="scroll_method enum"/>
+    </request>
+
+    <request name="set_key_repeat" since="28">
+      <description summary="apply live xkb key-repeat rate and delay">
+        Sets the keyboard key-repeat policy and re-advertises it to every
+        bound wl_keyboard via `wl_keyboard.repeat_info`. This is the
+        live-apply counterpart to the qdshell Keyboard settings tab's
+        repeat controls — before v28 the compositor only sent its built-in
+        repeat info at keyboard-bind time.
+
+        `rate` is the repeat rate in characters per second (Hz), clamped to
+        [0, 255]; 0 disables key repeat entirely (per the wl_keyboard
+        repeat_info contract). `delay` is the initial delay in
+        milliseconds before repeat begins, clamped to [1, 10000].
+
+        The policy is process-global and is reset to the compositor default
+        repeat rate/delay when the shell binding is torn down. Re-sending
+        the same values is a harmless no-op.
+      </description>
+      <arg name="rate" type="uint" summary="repeat rate in Hz, 0..255 (0=off)"/>
+      <arg name="delay" type="uint" summary="initial delay in ms, 1..10000"/>
+    </request>
+
+    <request name="request_set_position" since="30">
+      <description summary="shell moves a floating toplevel to an explicit position">
+        Shell-owned WM control: move the managed toplevel `handle` so its
+        outer-rect top-left sits at the GLOBAL compositor coordinate (x, y) —
+        the same coordinate space as the `toplevel_geometry` event — preserving
+        its current size. This is the compositor-driven counterpart to
+        `begin_interactive_move` (which follows the pointer): the shell names
+        the target position directly, so geometry is decided by shell policy,
+        not by the app or by pointer choreography.
+
+        qdwin refuses (silently ignores) an unknown/destroyed handle and a
+        maximized/fullscreen/tiled toplevel (those own their geometry); for a
+        floating toplevel it clamps the top-left onto the output that contains
+        it (falling back to the primary output) so the window stays reachable,
+        repositions the view, and emits `toplevel_geometry` with the new
+        (global) rectangle. The request never resizes.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="x" type="int" summary="global outer-rect x (toplevel_geometry space)"/>
+      <arg name="y" type="int" summary="global outer-rect y (toplevel_geometry space)"/>
+    </request>
+
+    <request name="prepare_output_capture" since="32">
+      <description summary="prepare one shell-authorized output capture">
+        Damage the named non-PipeWire output in full so a subsequent
+        weston_capture_v1 framebuffer request on this shell connection is
+        serviced by a real repaint even when the scene has otherwise been
+        idle. This is a shell-only preparation request; it does not capture
+        pixels or broaden weston_capture_v1 authorization.
+
+        An unknown output name, an empty name, or a PipeWire output name is a
+        harmless no-op. In particular, these cases do not raise a protocol
+        error or terminate the shell connection.
+      </description>
+      <arg name="output_name" type="string"
+           summary="exact wl_output name of the non-PipeWire output"/>
+    </request>
+
+    <event name="toplevel_app_id" since="31">
+      <description summary="a toplevel's application id changed">
+        Reports the current effective application id after it changes from
+        the value sent in `toplevel_added`. For native Wayland this is the
+        latest xdg_toplevel app_id. For XWayland, qdwin falls back to
+        WM_CLASS when the desktop-surface app_id is empty, which commonly
+        makes this event the first non-empty identity for a new window.
+      </description>
+      <arg name="handle" type="uint" summary="from toplevel_added"/>
+      <arg name="app_id" type="string" summary="current effective app id"/>
+    </event>
+
+    <event name="capture_served_stale" since="33">
+      <description summary="a capture was served from the retained frame">
+        The compositor completed one or more pending weston_capture_v1
+        framebuffer tasks on this shell connection from its retained
+        last-composited frame instead of a fresh repaint, because the output
+        could not repaint (seat taken away, display power off) or a scheduled
+        repaint never ran. The delivered pixels are STALE: they show the last
+        frame that was actually composited, age_ms milliseconds ago. A stale
+        frame may support "the session was showing X before the incident"
+        but never a post-action assertion, unless the action provably
+        predates the retained frame.
+      </description>
+      <arg name="output_name" type="string" summary="output that was served"/>
+      <arg name="age_ms" type="uint"
+           summary="milliseconds since the retained frame was composited"/>
+      <arg name="msc" type="uint"
+           summary="low 32 bits of the output frame counter at retention"/>
+    </event>
+
+    <event name="nested_proxy_remote_identity" since="34">
+      <description summary="authority-bound identity for a remote nested proxy">
+        Emitted only after qdwin verifies that the exact root-installed remote
+        viewer helper attached an immutable identity obtained from its local
+        authenticated controller. This is a protected sidecar to
+        toplevel_added; app_id and title remain untrusted presentation text.
+      </description>
+      <arg name="handle" type="uint"/>
+      <arg name="source_machine" type="string"/>
+      <arg name="trust_domain_id" type="string"/>
+      <arg name="stream_id" type="string"/>
+      <arg name="generation_hi" type="uint"/>
+      <arg name="generation_lo" type="uint"/>
+    </event>
+
+    <request name="set_remote_output_input" since="34">
+      <description summary="gate console-equivalent input from one RDP output">
+        Enables or disables RDP peer input at the compositor backend for the
+        named pre-created rdp-N output. Disabling deterministically releases
+        every held key and pointer button before returning. The backend starts
+        disabled, and qdwin disables it again if the bound shell disappears.
+
+        This is a safety boundary, not ordinary settings IPC. Only the
+        exclusively bound shell may invoke it; the shell in turn accepts the
+        exact generation/slot transition only from the authenticated display
+        controller transaction.
+      </description>
+      <arg name="output_name" type="string" summary="exact rdp-N slot name"/>
+      <arg name="enabled" type="uint" summary="0 disabled, 1 enabled"/>
+    </request>
+
+    <event name="remote_output_input_result" since="34">
+      <description summary="authoritative result of an RDP input gate request">
+        Correlates the exact output name and requested state. `applied` is 1
+        only after the RDP backend accepted the transition and, for disable,
+        released its held input state.
+      </description>
+      <arg name="output_name" type="string"/>
+      <arg name="enabled" type="uint"/>
+      <arg name="applied" type="uint"/>
+    </event>
+
+    <request name="drain_remote_output_state" since="34">
+      <description summary="drain session input and transfer state before detach">
+        Runs qdwin's fail-safe output-boundary cancellation without removing
+        the named output: cancel active grabs, DND, IME composition and pointer
+        constraints; clear keyboard/pointer/touch focus; and clear clipboard
+        plus primary selection. The controller invokes this only after RDP
+        input is disabled and before closing the authenticated carrier.
+      </description>
+      <arg name="output_name" type="string" summary="exact rdp-N slot name"/>
+    </request>
+
+    <event name="remote_output_drain_result" since="34">
+      <description summary="authoritative result of remote-output state drain">
+        `applied` is 1 only after the named output was found and the complete
+        cancellation boundary returned.
+      </description>
+      <arg name="output_name" type="string"/>
+      <arg name="applied" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="qdwin_background_v1" version="1">
+    <description summary="shell-owned desktop background surface">
+      Returned by `qdwin_shell_v1.attach_background`. Represents the
+      bottom-most surface of the desktop. The shell keeps painting
+      `surface`; qdwin positions it at the output origin and resizes
+      via the `geometry` event on output changes.
+
+      Destroy returns control to qdwin's compositor curtain.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <event name="geometry">
+      <description summary="compositor-assigned background rectangle">
+        Fires on attach and whenever the output geometry changes. The
+        shell resizes its wl_surface to (width, height) before the
+        next commit.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+    <event name="dismissed">
+      <description summary="compositor tore down the background">
+        Compositor teardown or output disappearance. The shell should
+        stop painting and re-attach if it wants to continue.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="qdwin_panel_v1" version="1">
+    <description summary="shell-owned panel composited by qdwin">
+      Returned by `qdwin_shell_v1.attach_panel`. Represents one
+      panel surface pinned to a screen edge. The shell keeps
+      painting `surface`; qdwin positions + sizes it per the
+      anchor parameters from `attach_panel` and updates
+      `geometry` on output changes (resize, rotate, hotplug).
+
+      Dismissed is rare — fires on compositor teardown or when the
+      hosting output disappears. The shell should treat it as "stop
+      painting this panel and re-attach if it wants to continue."
+    </description>
+
+    <request name="destroy" type="destructor"/>
+
+    <event name="geometry">
+      <description summary="compositor-assigned panel rectangle">
+        Fires on attach and whenever the panel's rectangle changes
+        (output geometry, exclusive zone changes, rotation). The
+        shell should resize its wl_surface to match (w,h) before the
+        next commit.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <event name="dismissed">
+      <description summary="panel is no longer composited">
+        The panel's output is gone, the compositor is shutting down,
+        or the shell's wl_surface was destroyed. The handle is
+        inert after this fires; client should `destroy` it.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="qdwin_lock_surface_v1" version="1">
+    <description summary="shell-owned lock overlay">
+      Returned by `qdwin_shell_v1.attach_lock_surface`. The surface is
+      on the LOCK layer; compositing is gated by the `locked` state,
+      driven by `set_locked`. Destroying the handle detaches the lock
+      view (and, if locked, unlocks).
+    </description>
+    <request name="destroy" type="destructor"/>
+    <event name="dismissed">
+      <description summary="compositor tore down the lock view"/>
+    </event>
+  </interface>
+
+  <interface name="qdwin_launcher_v1" version="1">
+    <description summary="shell-owned launcher / switcher surface">
+      Returned by `qdwin_shell_v1.attach_launcher`. Centred on the
+      primary output by the compositor. kind distinguishes launcher
+      from switcher (see the request summary); the compositor treats
+      them identically for placement.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <event name="dismissed">
+      <description summary="compositor dropped the launcher view"/>
+    </event>
+  </interface>
+
+  <interface name="qdwin_notification_v1" version="1">
+    <description summary="shell-owned notification bubble">
+      Returned by `qdwin_shell_v1.attach_notification`. Represents a
+      single compositor-placed bubble surface. The shell controls
+      content + timeout; the compositor controls layer + corner
+      placement.
+
+      Bubbles are composited above panels but below popups. When the
+      hosting output goes away the compositor fires `dismissed` and
+      the handle is inert until the client destroys it.
+    </description>
+    <request name="destroy" type="destructor"/>
+
+    <event name="dismissed">
+      <description summary="bubble is no longer composited">
+        Output removed, compositor shutdown, or the bubble's wl_surface
+        was destroyed. Handle is inert after this; client should
+        `destroy` it.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="qdwin_popup_v1" version="1">
+    <description summary="shell-owned popup composited by qdwin">
+      Returned by `qdwin_shell_v1.show_popup`. Represents one
+      compositor-side view over the shell's popup wl_surface.
+
+      The shell owns the wl_surface and keeps painting it — qdwin
+      re-reads on every commit. Hover feedback, item highlighting
+      and dismiss-on-selection are entirely shell-side; the
+      compositor's only active role is view placement, stacking,
+      and firing `dismissed` when it decides the popup should go
+      away (e.g. click outside).
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="tear down the popup view">
+        The shell calls this after it has finished with the popup
+        (item selected, dismissed internally, etc.). qdwin destroys
+        the view; the wl_surface is unchanged and may be reused for
+        another popup later.
+      </description>
+    </request>
+
+    <event name="dismissed">
+      <description summary="compositor wants the popup closed">
+        The compositor has decided to dismiss this popup — pointer
+        click outside its bbox, parent toplevel closed or minimised,
+        compositor entered locked state. The shell should respond by
+        calling `destroy`. qdwin keeps compositing the view until
+        destroy arrives, to avoid a frame of black where the menu
+        was — the shell is expected to destroy on the next event-
+        loop turn.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="qdwin_view_stream_v1" version="1">
+    <description summary="shell-facing handle on one forwarded toplevel">
+      Returned by `qdwin_shell_v1.subscribe_view_stream`. Tracks the
+      lifecycle of one forwarded toplevel from the shell's perspective.
+
+      The shell uses this object to:
+      - Observe approval (`approved`) with the endpoint values the
+        compositor chose — pipewire node name, RDP port + cert, one-
+        time password. These are typically shown to the admin as a
+        "share this" URL / QR code.
+      - Observe teardown (`torn_down`) so the shell can update its UI
+        when the forwarding process exits, the source toplevel closes,
+        or the compositor locks.
+      - Cancel the forwarding by calling `destroy`.
+
+      Input injection from the remote RDP subscriber is NOT handled on
+      this object — it flows through `qdwin_stream_input_v1`, advertised
+      only to the qdistro-forward child process the compositor spawned
+      for this stream. Splitting the trust boundary: the shell asks
+      for forwarding; the forward proxy injects input; the compositor
+      keeps authority over both.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="cancel forwarding and tear down">
+        Releases the pipewire output, reaps the qdistro-forward child,
+        and restores the view to its normal output. Clients connected
+        to the RDP endpoint see the connection drop. This request is the
+        client's terminal acknowledgement/cancellation, so qdwin does not
+        reply with `torn_down`; that event is reserved for server-originated
+        termination.
+      </description>
+    </request>
+
+    <event name="approved">
+      <description summary="stream is live">
+        Admin approved the forward. The compositor has allocated the
+        PipeWire output, spawned qdistro-forward, and the RDP endpoint
+        is ready for a remote client.
+
+        `pipewire_node_name` is the PipeWire Node name
+        (e.g. "weston.pipewire-3") suitable for `pipewiresrc path=…`.
+
+        `rdp_port` is the TCP port qdistro-forward is listening on,
+        bound to 0.0.0.0 (or a configured bind address); the shell
+        may build a `rdp://host:port` URL to show the user.
+
+        `rdp_cert_path` is a file path on the host to the TLS cert
+        that qdistro-forward is serving. Needed by non-TOFU RDP
+        clients that want to pin; sdl-freerdp with `/cert:ignore`
+        ignores this.
+
+        `rdp_password` is a one-time password, rotated per subscribe,
+        that the RDP client must present to connect. Prevents stray
+        connections to the port during the subscribe window.
+      </description>
+      <arg name="pipewire_node_name" type="string"/>
+      <arg name="rdp_port" type="uint"/>
+      <arg name="rdp_cert_path" type="string"/>
+      <arg name="rdp_password" type="string"/>
+    </event>
+
+    <event name="denied">
+      <description summary="admin rejected or broker timed out">
+        The subscribe did not become live. The shell should destroy
+        this object; reusing it is an error. `reason` is a short
+        string suitable for logging and (possibly) shell UI display.
+      </description>
+      <arg name="reason" type="string"/>
+    </event>
+
+    <event name="torn_down">
+      <description summary="stream ended">
+        Emitted when the stream ends from the server side — the
+        qdistro-forward process exited, the source toplevel was closed,
+        or the compositor entered locked state. (There is currently no
+        separate admin-revoke request; the shell cancels its own approval
+        with `destroy`.) Before returning to its event loop, qdwin
+        revokes all server-owned stream state and makes the PipeWire output
+        reusable even if the shell ignores this event. The protocol object
+        remains as an inert tombstone until the shell destroys it or
+        disconnects; the shell should destroy it promptly.
+      </description>
+      <arg name="reason" type="string"/>
+    </event>
+  </interface>
+
+  <interface name="qdwin_stream_input_v1" version="2">
+    <description summary="remote-input injection for one forwarded stream">
+      Advertised by the compositor only to the qdistro-forward child
+      process it spawned for a given stream (identified by peer-uid
+      plus the one-time `access_token` passed in spawn argv). No other
+      client sees this global. This is the mechanism the remote RDP
+      subscriber's pointer/keyboard events flow back into the
+      compositor, scoped to a single view.
+
+      qdistro-forward calls `claim` with the `access_token` it
+      received from argv; the compositor validates the token and
+      binds the returned handle to the source view's per-stream
+      `weston_seat`. Subsequent inject_* requests dispatch events
+      through that seat. The seat's focus is locked to the source
+      view — injection cannot leak to other views.
+
+      Tokens are one-shot and single-use: a successful `claim` consumes
+      the token, and destroying the returned handle (or the claimant
+      disconnecting) invalidates it rather than making it claimable
+      again — a second `claim` with the same token after release fails
+      with `invalid_token`. Reconnecting qdistro-forward (e.g. after a
+      crash) therefore requires the compositor to mint a fresh token,
+      which currently means destroying and re-subscribing the
+      `qdwin_view_stream_v1` on the shell side.
+    </description>
+
+    <enum name="error">
+      <entry name="invalid_token" value="0"
+             summary="access_token did not match any live stream"/>
+      <entry name="already_claimed" value="1"
+             summary="this token was already consumed"/>
+      <entry name="not_claimed" value="2"
+             summary="inject_ request issued before successful claim"/>
+    </enum>
+
+    <request name="claim">
+      <description summary="bind this connection to a pending stream">
+        qdistro-forward calls `claim` once after connecting, with the
+        token the compositor passed on spawn. On success, the returned
+        handle accepts `inject_*` requests for the lifetime of the
+        stream. On failure, `invalid_token` or `already_claimed` is
+        raised.
+      </description>
+      <arg name="handle" type="new_id" interface="qdwin_stream_input_handle_v1"/>
+      <arg name="access_token" type="string"/>
+    </request>
+  </interface>
+
+  <interface name="qdwin_stream_input_handle_v1" version="2">
+    <description summary="per-stream input-injection channel">
+      Returned by `qdwin_stream_input_v1.claim`. All inject_* requests
+      on this handle are dispatched through the per-stream weston_seat
+      whose pointer focus is locked to the forwarded view.
+
+      Coordinates for `inject_pointer_motion` are in source-view-local
+      pixels — qdistro-forward translates from RDP-client screen
+      coordinates as needed.
+
+      Button and key codes use Linux evdev values (BTN_LEFT = 0x110,
+      etc., matching the values qdwin already consumes from libinput).
+      Modifier state is layered as in xkb.
+    </description>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="inject_pointer_motion">
+      <arg name="time_msec" type="uint"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+    </request>
+
+    <request name="inject_pointer_button">
+      <arg name="time_msec" type="uint"/>
+      <arg name="button" type="uint"
+           summary="linux/input-event-codes.h BTN_*"/>
+      <arg name="state" type="uint" summary="0 released, 1 pressed"/>
+    </request>
+
+    <request name="inject_pointer_axis">
+      <arg name="time_msec" type="uint"/>
+      <arg name="axis" type="uint"
+           summary="0 vertical scroll, 1 horizontal scroll"/>
+      <arg name="value" type="fixed"/>
+    </request>
+
+    <request name="inject_key">
+      <arg name="time_msec" type="uint"/>
+      <arg name="key" type="uint"
+           summary="evdev keycode (KEY_*)"/>
+      <arg name="state" type="uint" summary="0 released, 1 pressed"/>
+    </request>
+
+    <request name="inject_modifiers">
+      <description summary="xkb modifier update">
+        qdistro-forward computes these from the RDP wire
+        (RDP modifier flags → xkb bitmasks) and sends them on every
+        keyboard event; the compositor doesn't track RDP-side state.
+      </description>
+      <arg name="depressed" type="uint"/>
+      <arg name="latched" type="uint"/>
+      <arg name="locked" type="uint"/>
+      <arg name="group" type="uint"/>
+    </request>
+
+    <request name="request_frame" since="2">
+      <description summary="ask compositor to push a PipeWire frame">
+        Request that the compositor schedule a repaint of the
+        PipeWire output backing this stream, so a fresh frame is
+        produced regardless of view damage. Used by consumers whose
+        demand cadence doesn't match Weston's damage-driven repaint —
+        e.g. the RDP encoder in qdistro-forward, which needs steady
+        frames to transport to its remote client even when the source
+        view is a static terminal.
+
+        The compositor may coalesce requests (multiple request_frame
+        between paints collapse to a single scheduled repaint) and
+        may defer if the output is already in a pending-repaint state.
+        This is advisory: no guarantees about per-call frame
+        production or latency. Rate-limit on the caller side.
+      </description>
+    </request>
+  </interface>
+</protocol>

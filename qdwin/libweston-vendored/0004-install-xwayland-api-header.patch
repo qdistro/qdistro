@@ -1,0 +1,50 @@
+From: qdistro <qdistro@localhost>
+Subject: [PATCH] include: install xwayland-api.h from the libweston headers
+
+Reproducible record of the in-place edit to
+src/include/libweston/meson.build (see libweston-vendored/README.md: the
+patches are the record, the tree is already patched).
+
+Upstream weston installs include/libweston/xwayland-api.h from
+compositor/meson.build, part of the weston *frontend*. This vendored tree
+builds libweston only and omits the compositor/ subdir, so the header --
+declared as `xwayland_api_h` in include/libweston/meson.build but consumed
+nowhere -- was never installed into the prefix.
+
+qdwin/qdwin.c includes <libweston/xwayland-api.h> unconditionally and calls
+weston_xwayland_surface_get_api() to tag XWayland toplevels
+(qdwin_toplevel_is_xwayland). Building qdwin against the vendored prefix
+therefore failed with:
+
+    qdwin/qdwin.c:48:10: fatal error: libweston/xwayland-api.h: No such file
+                         or directory
+
+Adding the header to the libweston install_headers() list restores the devel
+surface upstream exposes, rather than diverging from it. The header is a pure
+API declaration (function-pointer structs + the two *_get_api accessors); it
+pulls in no frontend code and is safe to install regardless of whether the
+xwayland module itself is built.
+
+Apply with `patch -p1` from src/.
+---
+ include/libweston/meson.build | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/include/libweston/meson.build b/include/libweston/meson.build
+--- a/include/libweston/meson.build
++++ b/include/libweston/meson.build
+@@ -13,6 +13,14 @@ install_headers(
+ 	'remoting-plugin.h',
+ 	'pipewire-plugin.h',
+ 	'shell-utils.h',
++	# qdistro (J29): upstream installs xwayland-api.h from compositor/, a
++	# subdir this vendored tree deliberately omits (frontend not built), so the
++	# header defined as xwayland_api_h below was never installed. qdwin.c
++	# includes <libweston/xwayland-api.h> unconditionally for
++	# weston_xwayland_surface_get_api() (the is_xwayland toplevel tagging), so
++	# without this the vendored prefix cannot build qdwin. Installing it here
++	# restores upstream's devel surface rather than diverging from it.
++	'xwayland-api.h',
+ 	subdir: dir_include_libweston_install
+ )
+ 

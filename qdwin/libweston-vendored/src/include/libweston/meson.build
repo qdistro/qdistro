@@ -1,0 +1,49 @@
+install_headers(
+	'colorimetry.h',
+	'config-parser.h',
+	'libweston.h',
+	'linalg.h',
+	'linalg-3.h',
+	'linalg-4.h',
+	'linalg-types.h',
+	'desktop.h',
+	'matrix.h',
+	'plugin-registry.h',
+	'windowed-output-api.h',
+	'weston-log.h',
+	'zalloc.h',
+	'remoting-plugin.h',
+	'pipewire-plugin.h',
+	'shell-utils.h',
+	# qdistro (J29): upstream installs xwayland-api.h from compositor/, a
+	# subdir this vendored tree deliberately omits (frontend not built), so the
+	# header defined as xwayland_api_h below was never installed. qdwin.c
+	# includes <libweston/xwayland-api.h> unconditionally for
+	# weston_xwayland_surface_get_api() (the is_xwayland toplevel tagging), so
+	# without this the vendored prefix cannot build qdwin. Installing it here
+	# restores upstream's devel surface rather than diverging from it.
+	'xwayland-api.h',
+	subdir: dir_include_libweston_install
+)
+
+backend_drm_h =      files('backend-drm.h')
+backend_headless_h = files('backend-headless.h')
+backend_pipewire_h = files('backend-pipewire.h')
+backend_rdp_h =      files('backend-rdp.h')
+backend_vnc_h =      files('backend-vnc.h')
+backend_wayland_h =  files('backend-wayland.h')
+backend_x11_h =      files('backend-x11.h')
+
+xwayland_api_h = files('xwayland-api.h')
+
+libweston_version_h = configuration_data()
+libweston_version_h.set('WESTON_VERSION_MAJOR', version_weston_arr[0])
+libweston_version_h.set('WESTON_VERSION_MINOR', version_weston_arr[1])
+libweston_version_h.set('WESTON_VERSION_MICRO', version_weston_arr[2])
+libweston_version_h.set('WESTON_VERSION', version_weston)
+version_h = configure_file(
+	input: 'version.h.in',
+	output: 'version.h',
+	configuration: libweston_version_h
+)
+install_headers(version_h, subdir: dir_include_libweston_install)

@@ -1,0 +1,58 @@
+# Build outputs
+build/
+build-*/
+builddir/
+builddir-*/
+*.o
+*.so
+dist/
+
+# Wayland-scanner generated headers (regenerated each build)
+*-server-protocol.h
+*-client-protocol.h
+*-protocol.c
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor & IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cache/
+.zed
+extra/
+
+# Local test artifacts (host + in-VM scenario screenshots)
+test-output/
+screenshots/
+test-screenshots/
+**/screenshots/
+*.screenshot.png
+shot-*.png
+shot-*.jpg
+
+# Local git worktrees (the /do workflow puts them here). Never part of a
+# commit — they are separate checkouts, so `git add -A` from the repo root
+# would otherwise stage them as embedded git repositories.
+.worktrees/

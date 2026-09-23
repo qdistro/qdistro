@@ -1,0 +1,163 @@
+From: qdistro <qdistro@local>
+Date: 2026-05-03
+Subject: [PATCH] libweston-desktop: allow NULL parent on xdg_surface.get_popup
+
+The xdg-shell spec permits parent=NULL on get_popup provided the parent
+is supplied via 'some other protocol' before commit. This unblocks
+zwlr_layer_shell_v1 popup clients (waybar, noctalia, fuzzel) which
+create popups with NULL parent and rely on the layer-surface for
+anchoring.
+
+We accept NULL at construction, defer the geometry/parent wiring,
+and post the spec error if commit happens with parent still NULL.
+Grab and reposition are guarded for defence-in-depth.
+
+Vendored against weston 14.0.2 for ${QDWIN_REPO}/.
+---
+--- a/libweston/desktop/xdg-shell.c	2026-05-03 14:13:37.560740966 +0200
++++ b/libweston/desktop/xdg-shell.c	2026-05-03 14:14:27.944499983 +0200
+@@ -930,7 +930,18 @@
+ 	struct weston_seat *wseat = wl_resource_get_user_data(seat_resource);
+ 	struct weston_desktop_seat *seat = weston_desktop_seat_from_seat(wseat);
+ 	struct weston_desktop_surface *topmost;
+-	bool parent_is_toplevel =
++	bool parent_is_toplevel;
++
++	/* qdistro patch: a NULL-parent popup cannot be grabbed; the spec
++	 * forbids grab before initial commit anyway, so this is the same
++	 * error class. */
++	if (popup->parent == NULL) {
++		wl_resource_post_error(popup->resource,
++				       XDG_POPUP_ERROR_INVALID_GRAB,
++				       "xdg_popup grab requires a parent set before grab");
++		return;
++	}
++	parent_is_toplevel =
+ 		popup->parent->role == WESTON_DESKTOP_XDG_SURFACE_ROLE_TOPLEVEL;
+ 
+ 	/* Check that if we have a valid wseat we also got a valid desktop seat */
+@@ -1010,6 +1021,19 @@
+ 		return;
+ 	}
+ 
++	/* qdistro patch: a NULL-parent popup has no anchor to reposition
++	 * relative to. Reposition before parent attachment is meaningless;
++	 * stash the geometry so a later attach + commit picks it up. */
++	if (popup->parent == NULL) {
++		popup->geometry.x = positioner->offset.x;
++		popup->geometry.y = positioner->offset.y;
++		popup->geometry.width = positioner->size.width;
++		popup->geometry.height = positioner->size.height;
++		popup->pending_reposition = true;
++		popup->pending_reposition_token = token;
++		return;
++	}
++
+ 	parent_dsurface = popup->parent->desktop_surface;
+ 	popup->geometry =
+ 		weston_desktop_xdg_positioner_get_geometry(positioner,
+@@ -1047,6 +1071,16 @@
+ 		weston_desktop_surface_get_surface (popup->base.desktop_surface);
+ 	struct weston_view *view;
+ 
++	/* qdistro patch: spec mandates the parent be set "before
++	 * committing". If a NULL-parent popup reaches commit without an
++	 * other-protocol parent attachment, post the error now. */
++	if (popup->parent == NULL) {
++		wl_resource_post_error(popup->resource,
++				       XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
++				       "popup parent must be set before commit");
++		return;
++	}
++
+ 	wl_list_for_each(view, &wsurface->views, surface_link)
+ 		weston_view_update_transform(view);
+ 
+@@ -1074,6 +1108,10 @@
+ 	struct weston_desktop_surface *parent_dsurface;
+ 	struct weston_coord_surface offset;
+ 
++	/* qdistro patch: only called after commit (which enforces
++	 * non-NULL parent). Guard for defence-in-depth. */
++	if (popup->parent == NULL)
++		return;
+ 	parent_dsurface = popup->parent->desktop_surface;
+ 	offset = weston_coord_surface(popup->geometry.x,
+ 				      popup->geometry.y,
+@@ -1343,20 +1381,20 @@
+ 	wsurface = weston_desktop_surface_get_surface(dsurface);
+ 	popup = weston_desktop_surface_get_implementation_data(dsurface);
+ 
+-	/* Popup parents are allowed to be non-null, but only if a parent is
+-	 * specified 'using some other protocol' before committing. Since we
+-	 * don't support such a protocol yet, clients cannot legitimately
+-	 * create a popup with a non-null parent. */
+-	if (!parent_resource) {
+-		wl_resource_post_error(resource,
+-				       XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
+-				       "popup parent must be non-null");
+-		return;
++	/* qdistro patch: per the xdg-shell spec, parent may be NULL provided
++	 * the parent is set 'using some other protocol' before commit. We
++	 * accept NULL here, mark the popup as parentless, and enforce the
++	 * spec error in the commit handler if no other-protocol attachment
++	 * has occurred by then. zwlr_layer_shell_v1 clients (waybar,
++	 * noctalia) routinely create popups with NULL parent and rely on
++	 * the layer-surface anchoring as the implicit parent. */
++	parent_surface = NULL;
++	parent = NULL;
++	if (parent_resource) {
++		parent_surface = wl_resource_get_user_data(parent_resource);
++		parent = weston_desktop_surface_get_implementation_data(parent_surface);
+ 	}
+ 
+-	parent_surface = wl_resource_get_user_data(parent_resource);
+-	parent = weston_desktop_surface_get_implementation_data(parent_surface);
+-
+ 	if (!is_positioner_valid(positioner)) {
+ 		wl_resource_post_error(resource,
+ 				       XDG_WM_BASE_ERROR_INVALID_POSITIONER,
+@@ -1379,18 +1417,31 @@
+ 	popup->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP;
+ 	popup->parent = parent;
+ 
+-	popup->geometry =
+-		weston_desktop_xdg_positioner_get_geometry(positioner,
+-							   dsurface,
+-							   parent_surface);
+-
+-	offset = weston_coord_surface(popup->geometry.x,
+-				      popup->geometry.y,
+-				      popup->parent->surface);
+-	weston_desktop_surface_set_relative_to(popup->base.desktop_surface,
+-					       parent_surface,
+-					       offset,
+-					       true);
++	if (parent_surface) {
++		popup->geometry =
++			weston_desktop_xdg_positioner_get_geometry(positioner,
++								   dsurface,
++								   parent_surface);
++
++		offset = weston_coord_surface(popup->geometry.x,
++					      popup->geometry.y,
++					      popup->parent->surface);
++		weston_desktop_surface_set_relative_to(popup->base.desktop_surface,
++						       parent_surface,
++						       offset,
++						       true);
++	} else {
++		/* Defer geometry until the parent is set via a side-channel
++		 * protocol (e.g. zwlr_layer_surface_v1.get_popup) before
++		 * commit. We still record the requested rect from the
++		 * positioner so that, once the parent is supplied, no
++		 * additional protocol round-trip is needed. */
++		popup->geometry.x = positioner->offset.x;
++		popup->geometry.y = positioner->offset.y;
++		popup->geometry.width = positioner->size.width;
++		popup->geometry.height = positioner->size.height;
++		(void) offset;
++	}
+ }
+ 
+ static bool

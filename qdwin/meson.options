@@ -1,0 +1,38 @@
+# §P10 — qdwin build-role option.
+#
+# host (default) — full host-side qdwin (locker + nested-manager + KMS/DRM
+#                  backend selection by weston binary). Behavior-identical
+#                  to the pre-P10 build (the `-DQDWIN_ROLE_HOST` define
+#                  exposed by meson.build doesn't gate any code paths in
+#                  this branch — it's there only as the explicit twin to
+#                  `-DQDWIN_ROLE_GUEST`).
+#
+# guest          — slimmed variant for the tier-4-guest VM. Compiles out
+#                  the `qdwin_locker_v1` and `qdwin_nested_manager_v1`
+#                  globals; the rest of qdwin (xdg-shell, security-
+#                  context, idle-notify, etc.) is unchanged because the
+#                  in-guest compositor still needs to drive its
+#                  weston-terminal smoke client. The
+#                  `qdwin_shell_v1` global remains registered so the
+#                  in-guest `qdwin-bystander --connect
+#                  --forward-all-toplevels` mode can enumerate inner
+#                  toplevels via its existing event wire (see plan-too-
+#                  thin tripwire #2 in
+#                  plan2/tasks/P10-tier4-guest-image-nested-qdwin.md).
+#
+# Spec:
+#   plan2/research/spice-retirement/00-overview.md §"What the stripped
+#   guest qdwin keeps"
+#   plan2/tasks/P10-tier4-guest-image-nested-qdwin.md §Phase A
+option('role',
+  type: 'combo',
+  choices: ['host', 'guest'],
+  value: 'host',
+  description: 'qdwin build target: host (default, full) or guest (stripped, for in-VM nested compositor)',
+)
+
+option('enable_test_place',
+  type: 'boolean',
+  value: false,
+  description: 'Compile the A1-min QDWIN_TEST_PLACE_* straddle test hook (test builds only; never enable in production packaging)',
+)

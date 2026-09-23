@@ -1,0 +1,188 @@
+/*
+ * Copyright © 2021 Google, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ */
+
+/* This code was lifted from Mesa, some code removed (eg: weston does not support
+ * WIN32), and edited to conform to weston coding style.
+ *
+ * The original copyright boilerplate has been retained.
+ */
+
+#ifndef _UTIL_PERFETTO_H
+#define _UTIL_PERFETTO_H
+
+#include "stdint.h"
+#include <time.h>
+
+#include "u_atomic.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum weston_debug_annotation_type {
+	WESTON_DEBUG_ANNOTATION_INT_VAL,
+	WESTON_DEBUG_ANNOTATION_FLOAT_VAL,
+	WESTON_DEBUG_ANNOTATION_DOUBLE_VAL,
+	WESTON_DEBUG_ANNOTATION_STR_VAL,
+	WESTON_DEBUG_ANNOTATION_CONTAINER,
+	WESTON_DEBUG_ANNOTATION_FLOW,
+};
+
+struct weston_debug_annotation {
+	const char *key;
+	union {
+		uint64_t flow_value;
+		int ivalue;
+		float fvalue;
+		double dvalue;
+		const char *svalue;
+	};
+	unsigned char type;
+	unsigned char parent;
+	unsigned char key_size;
+};
+
+struct weston_debug_annotations {
+	struct weston_debug_annotation *annots;
+	unsigned char count;
+};
+
+#ifdef HAVE_PERFETTO
+
+extern int util_perfetto_tracing_state;
+
+void util_perfetto_init(void);
+
+static inline bool
+util_perfetto_is_tracing_enabled(void)
+{
+	return p_atomic_read_relaxed(&util_perfetto_tracing_state);
+}
+
+void util_perfetto_trace_begin(const char *name);
+
+void util_perfetto_trace_end(void);
+
+void util_perfetto_trace_begin_flow(const char *fname, uint64_t id);
+
+void util_perfetto_counter_set(const char *name, double value);
+
+void util_perfetto_trace_full_begin(const char *name, uint64_t track_id, uint64_t id, clockid_t clock, uint64_t timestamp);
+
+void util_perfetto_trace_full_end(const char *name, uint64_t track_id, clockid_t clock, uint64_t timestamp);
+
+void util_perfetto_trace_commit_debug_annots(const char *name,
+		struct weston_debug_annotations *annots);
+
+void util_perfetto_trace_commit_annotate_func(const char *name,
+		struct weston_debug_annotations *annots);
+
+void util_perfetto_trace_instant_timestamp(const char *name, uint64_t track_id,
+		uint64_t id, clockid_t clock, uint64_t ts);
+
+uint64_t util_perfetto_next_id(void);
+
+uint64_t util_perfetto_new_track(const char *name);
+
+#else /* HAVE_PERFETTO */
+
+static inline void
+util_perfetto_init(void)
+{
+}
+
+static inline bool
+util_perfetto_is_tracing_enabled(void)
+{
+	return false;
+}
+
+static inline void
+util_perfetto_trace_begin(const char *name)
+{
+}
+
+static inline void
+util_perfetto_trace_end(void)
+{
+}
+
+static inline void util_perfetto_trace_begin_flow(const char *fname, uint64_t id)
+{
+}
+
+static inline void
+util_perfetto_trace_full_begin(const char *name, uint64_t track_id, uint64_t id, clockid_t clock, uint64_t timestamp)
+{
+}
+
+static inline void
+util_perfetto_trace_full_end(const char *name, uint64_t track_id, clockid_t clock, uint64_t timestamp)
+{
+}
+
+static inline void
+util_perfetto_trace_commit_debug_annots(uint64_t id, const char *name,
+					struct weston_debug_annotations *annots)
+{
+}
+
+static inline void
+util_perfetto_trace_commit_annotate_func(const char *name,
+					 struct weston_debug_annotations *annots)
+{
+}
+
+static inline void
+util_perfetto_trace_commit_annotate_func_flow(uint64_t id, const char *name,
+					      struct weston_debug_annotations *annots)
+{
+}
+
+static inline void
+util_perfetto_trace_instant_timestamp(const char *name, uint64_t track_id,
+				      clockid_t clock, uint64_t ts)
+{
+}
+
+static inline void util_perfetto_counter_set(const char *name, double value)
+{
+}
+
+static inline uint64_t util_perfetto_next_id(void)
+{
+	return 0;
+}
+
+static inline uint64_t util_perfetto_new_track(const char *name)
+{
+	return 0;
+}
+
+#endif /* HAVE_PERFETTO */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _UTIL_PERFETTO_H */

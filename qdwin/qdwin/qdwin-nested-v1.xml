@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="qdwin_nested_v1">
+  <copyright>
+    qdistro-internal protocol. Not for external use.
+  </copyright>
+
+  <description summary="nested-compositor native-toplevel passthrough">
+    Protocol by which a **nested** Wayland compositor running inside qdwin
+    advertises its inner toplevels as peer surfaces in the outer qdwin.
+    Enables multi-window containerised apps (tier-2 isolation per
+    `the architecture doc` + `the architecture doc`) to surface as
+    native-feeling toplevels in the admin shell instead of a single
+    "window-of-windows."
+
+    Design decision (§6.8 S0, 2026-04-25): Shape-A (per-toplevel
+    PipeWire streams piped from nested weston into outer qdwin proxy
+    surfaces) rather than Shape-B (Wayland re-marshalling bridge).
+    Rationale:
+
+      - §6.5 already ships per-view PipeWire streams; re-using the
+        pipeline avoids a second bespoke transport.
+      - Shape-B (Wayland re-marshal) requires the bridge to parse and
+        translate every Wayland request, including wl_buffer, wl_shm,
+        and backend-specific buffer types; multi-month implementation
+        cost.
+      - Shape-A keeps the nested compositor a black box; any inner
+        surface that renders onto its output is capturable, including
+        apps using any Wayland extension the inner compositor speaks.
+
+    Relationship to xdg-foreign: xdg-foreign is intentionally
+    scoped to client-to-client bridging inside one wl_display. It
+    does not span a nested → outer boundary because the inner
+    wl_surface isn't accessible from the outer compositor in any
+    form. qdwin_nested_v1 fills that gap.
+
+    Lifecycle:
+
+      1. Nested weston binds wp_qdwin_nested_manager_v1.
+      2. For each new inner toplevel, nested weston captures it to a
+         PipeWire node (backend-pipewire, per-view), captures its
+         input sink (for keyboard/pointer injection), and calls
+         advertise_toplevel(pw_node, input_sink, app_id, title,
+         origin_uid).
+      3. Outer qdwin creates a proxy wl_surface, attaches a buffer
+         fed by the PipeWire source, sends toplevel_added on
+         qdwin_shell_v1 so qdshell decorates it like any other
+         toplevel.
+      4. Inner toplevel destruction → nested weston destroys the
+         corresponding qdwin_nested_toplevel_v1 resource; outer
+         qdwin tears down the proxy surface.
+
+    Authorisation:
+
+      The manager global is hidden from generic secctx/silo clients. The
+      launcher-minted `qdistro.tier2` `/usr/bin/weston` publisher is the sole
+      secctx exception, repeated at bind time; all binders are also
+      peer-uid-filtered. Advertised inner toplevels are capped per
+      uid before allocation. The outer-qdwin-side policy decision for
+      "is this nested compositor allowed to publish each of its inner
+      toplevels" lives in the admin broker
+      (`qdistro.nested.advertise:&lt;app_id&gt;`); qdwin holds proxies
+      invisible/input-empty until the shell reports that decision. If
+      no v8+ shell can broker the request, production/default config
+      keeps the proxy held fail-closed.
+  </description>
+
+  <interface name="qdwin_nested_manager_v1" version="3">
+    <description summary="bind entry point for nested compositor passthrough">
+      Obtained via wl_registry.bind by the nested compositor. Hidden from
+      generic secctx clients by the global filter, with an exact
+      `qdistro.tier2` + `/usr/bin/weston` exception for the production nested
+      publisher. The bind handler repeats that identity check and applies the
+      peer-uid filter.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="release the manager (inner toplevels kept)">
+        Destroying the manager does not tear down already-advertised
+        toplevels; each qdwin_nested_toplevel_v1 must be destroyed
+        explicitly.
+      </description>
+    </request>
+
+    <request name="advertise_toplevel">
+      <description summary="publish a new inner toplevel to outer qdwin">
+        The nested compositor has already arranged a PipeWire source
+        node (pw_node) carrying the toplevel pixels and an input sink
+        (input_sink) that accepts synthesised pointer/keyboard events
+        which the nested compositor forwards to the corresponding
+        inner client. Both node IDs use PipeWire's global serial as
+        opaque identifiers — outer qdwin resolves them via the
+        PipeWire registry on its own session.
+
+        origin_uid is the uid owning the inner client (for per-uid
+        colour chip + broker authz). app_id and title follow the
+        standard xdg_toplevel semantics.
+
+        On successful advertise the outer qdwin sends the initial
+        `configured` event with the size picked by the admin shell;
+        before that event fires the inner client should not yet be
+        allowed to interact (implementation detail left to the
+        nested compositor).
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_nested_toplevel_v1"/>
+      <arg name="pw_node" type="string"
+           summary="PipeWire source-node identifier (v2: string of form
+                    'weston.pipewire:&lt;nested-pid&gt;:&lt;weston-output-name&gt;'
+                    or, for protocol-debug, an empty string meaning
+                    'no pixels yet — placeholder advertise'). Outer side
+                    resolves to a global serial via libpipewire on its
+                    own session bus."/>
+      <arg name="input_sink" type="string"
+           summary="Input-sink identifier for input injection.
+                    Format (S3 onward): a unix socket path of the form
+                    `/run/user/&lt;uid&gt;/qdwin-nested-input-&lt;pid&gt;-&lt;hndl&gt;.sock`
+                    that the nested compositor listens on. The outer
+                    side connects to it and writes binary packets:
+
+                      offset  size  field
+                      0       4     magic = 0x49444E51 ('QDNI', LE)
+                      4       1     version (1)
+                      5       1     event_type (1 PING, 2 motion,
+                                                 3 button, 4 key,
+                                                 5 axis, 6 focus)
+                      6       2     payload_len
+                      8       …     payload (per event_type)
+
+                    S3 ships only event_type=1 PING — proves the wire
+                    + roundtrip. S3b adds the real motion/button/key
+                    encoders. Empty string means 'no input sink' (S1
+                    backward-compat; outer treats the proxy as
+                    display-only)."/>
+      <arg name="app_id" type="string"/>
+      <arg name="title" type="string"/>
+      <arg name="origin_uid" type="uint"
+           summary="uid of the inner wl_client"/>
+    </request>
+
+    <enum name="error">
+      <entry name="bad_pw_node" value="0"
+             summary="pw_node doesn't resolve on outer's PipeWire"/>
+      <entry name="policy_denied" value="1"
+             summary="broker policy rejected advertise"/>
+      <entry name="duplicate" value="2"
+             summary="pw_node already advertised by this manager"/>
+    </enum>
+  </interface>
+
+  <interface name="qdwin_nested_toplevel_v1" version="3">
+    <description summary="one nested inner toplevel, surfaced as outer peer">
+      Handle on an advertised inner toplevel. Lifetime is bounded by
+      the nested compositor; the outer qdwin only observes.
+    </description>
+
+    <enum name="error">
+      <entry name="invalid_remote_identity" value="0"/>
+      <entry name="unauthorized_remote_identity" value="1"/>
+      <entry name="remote_identity_immutable" value="2"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="the inner toplevel is gone">
+        The nested compositor sends this when its inner toplevel is
+        destroyed (client exit, map→unmap, etc.). The outer qdwin
+        tears down the proxy surface and removes the toplevel from
+        qdwin_shell_v1.toplevel_added tracking.
+      </description>
+    </request>
+
+    <request name="set_title">
+      <arg name="title" type="string"/>
+    </request>
+
+    <request name="set_app_id">
+      <arg name="app_id" type="string"/>
+    </request>
+
+    <request name="set_geometry">
+      <description summary="inner content-size hint">
+        Suggested inner content size (not including outer chrome).
+        Outer qdwin may clamp or round to its own tiling rules.
+      </description>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <event name="configured">
+      <description summary="outer qdwin has picked a size for the toplevel">
+        Fired once after a successful advertise_toplevel and any time
+        the outer shell changes the allocated size. Nested compositor
+        should reconfigure its inner client accordingly.
+      </description>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <event name="close_requested">
+      <description summary="admin shell asked for the toplevel to close">
+        Fired when the user clicks the outer close glyph or the admin
+        shell issues qdwin_shell_v1.request_close for this proxy
+        surface. Nested compositor propagates to its inner client via
+        xdg_toplevel.close (or its private equivalent).
+      </description>
+    </event>
+
+    <event name="focus_changed">
+      <description summary="focus state in outer shell">
+        `focused=1` means this toplevel is the outer shell's focus;
+        `focused=0` means it isn't. Nested compositor mirrors the
+        state onto its inner client.
+      </description>
+      <arg name="focused" type="uint"/>
+    </event>
+
+    <request name="set_remote_identity" since="3">
+      <description summary="attach authority-verified remote origin identity">
+        Available only to the root-installed remote viewer helper. The
+        compositor verifies the publishing process executable independently
+        and accepts this immutable tuple once. Ordinary nested publishers
+        cannot cause qdwin to mark a proxy as remotely authenticated.
+      </description>
+      <arg name="source_machine" type="string"/>
+      <arg name="trust_domain_id" type="string"/>
+      <arg name="stream_id" type="string"/>
+      <arg name="generation_hi" type="uint"/>
+      <arg name="generation_lo" type="uint"/>
+    </request>
+  </interface>
+</protocol>
