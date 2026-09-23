@@ -1,27 +1,28 @@
 # Dev guidelines
 
-Patterns distilled from the existing first-party apps (qterminator,
-qnotebook) and the broker / SDK / admin-app stack. These conventions are
+Patterns distilled from the existing first-party apps (qterminator in
+`qdterm/`, qnotebook in `qnotebook/`) and the broker / SDK / admin-app stack. These conventions are
 the canonical reference — when in doubt about layout, testing, config, or
 idioms, follow what's described here.
 
-## Multi-repo dev setup
+## Dev setup
 
-qdistro spans three repos that must be cloned side-by-side. Scripts
-and tests reference siblings with hard-coded relative paths
-(`../qdwin`, `../qdshell`). No env vars to set; no system install
-required.
+qdistro is one repository: qdistro's own content at the root and the
+components (`qdwin/`, `qdshell/`, `qdlocker/`, `qdgreeter/`, `qdbrowser/`,
+`qdterm/`, `qdfileman/`, `qnotebook/`, the two browser extensions) as
+top-level directories. One clone is the whole layout; no env vars, no sibling
+checkouts, no system install of the sources:
 
 ```sh
-mkdir qdistro-org && cd qdistro-org
 git clone https://github.com/qdistro/qdistro.git
-git clone https://github.com/qdistro/qdwin.git
-git clone https://github.com/qdistro/qdshell.git
+cd qdistro
 ```
 
-(The "no system install required" above is about the repo *layout* — siblings
-are found by relative path, with no env vars. The build *toolchain* below still
-has to be on the host.)
+For parallel work, use one git worktree per task
+(`git worktree add .worktrees/<topic> -b <branch>`); a worktree is a complete
+tree and needs nothing linked next to it. See [../AGENTS.md](../AGENTS.md)
+for the working workflow. (The build *toolchain* below still has to be on the
+host.)
 
 ### Host build prerequisites
 
@@ -51,7 +52,7 @@ The build steps assume these tools are on `PATH`:
   If the devel `Makefile` exists, the host has the policy build toolchain; later
   `checkmodule` errors are policy/source issues, not missing host packages.
 
-`qdistro/ci/bin/qci preflight` checks the build/lint tools it can (meson, ninja,
+`ci/bin/qci preflight` checks the build/lint tools it can (meson, ninja,
 pkg-config, npm, ruff, mypy) plus virsh/KVM/VM tooling, and reports any that are
 missing. It records optional tools (meson included) as skip/warn rather than
 failing — the hard failure surfaces later in `qci host`, where the qdwin/qdshell
@@ -62,28 +63,29 @@ a preflight check; it runs as part of the host test step.)
 > either install the packaged meson (e.g. `meson` 1.x from the distro) or build
 > through a throwaway venv (`python -m venv` then `pip install meson`).
 
-Build order (from the parent `qdistro-org/` directory):
+Build order (from the repo root):
 
 ```sh
 # 1. Build qdwin — the compositor.
 (cd qdwin && meson setup build && meson compile -C build)
 
-# 2. Build the umbrella's C daemons against qdwin's XML.
-(cd qdistro/daemons && meson setup build && meson compile -C build)
+# 2. Build the root C daemons against qdwin's XML.
+(cd daemons && meson setup build && meson compile -C build)
 
 # 3. Headless unit tests.
-(cd qdistro && pytest)
+pytest
 
 # 4. Bake a test VM (one-time, ~5-10 min for baseweed, ~10-25 min
 #    for the dependency-baked overlay).
-qdistro/scripts/vm/build-baseweed-from-scratch.sh
-qdistro/scripts/vm/build-baked-baseweed.sh
+scripts/vm/build-baseweed-from-scratch.sh
+scripts/vm/build-baked-baseweed.sh
 
-# 5. Spin a fresh test VM + run the integration suite.
+# 5. Spin a fresh test VM + run the integration suite. The whole repo
+#    is staged into the VM as /root/qdistro-src.
 #    The fixed qdistro test VM password is Pa_ssw0rd45. QDWIN_VM_TEMPLATE is
 #    optional — spin-test-vm.sh auto-creates a "qdistro-template"
 #    libvirt domain on first run.
-qdistro/scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
+scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
 ```
 
 Prerequisites for the libvirt session (set up once):

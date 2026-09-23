@@ -4,9 +4,11 @@ A single-tenant Linux distribution with Qubes-inspired seamless app
 isolation, built on libweston + Wayland + Python/Qt/QML and designed
 to be easy to modify with LLM assistance.
 
-This repository is the **umbrella** for qdistro: documentation,
+This repository is **the whole of qdistro** (a monorepo): documentation,
 permission infrastructure, daemons, SDK, admin app, helper tools,
-build scripts, integration tests, and the local CI harness.
+build scripts, integration tests and the local CI harness at the root, plus
+the compositor, shell and first-party apps as top-level component
+directories. Agents start at [AGENTS.md](AGENTS.md).
 
 The current design shorthand is **one owner, many silos, dynamic sessions**.
 The owner is the single human and policy authority. Silos isolate data and
@@ -14,10 +16,10 @@ program state. Sessions attach silos and resources while work is happening.
 Start with [doc/overview.md](doc/overview.md) and
 [doc/glossary.md](doc/glossary.md) for those terms.
 
-The compositor lives in a separate repo:
-[github.com/qdistro/qdwin](https://github.com/qdistro/qdwin).
-The desktop shell (a Noctalia QML fork) lives in
-[github.com/qdistro/qdshell](https://github.com/qdistro/qdshell).
+The compositor is [`qdwin/`](qdwin/README.md); the desktop shell (a
+Noctalia QML fork) is [`qdshell/`](qdshell/README.md). Until 2026-09 these and
+the other components were separate repositories; see
+[MIGRATION.md](MIGRATION.md).
 
 ## Try qdistro
 
@@ -63,15 +65,13 @@ is available by default for wheel members on Tumbleweed):
 
 ```sh
 git clone https://github.com/qdistro/qdistro.git
-git clone https://github.com/qdistro/qdwin.git
-git clone https://github.com/qdistro/qdshell.git
 cd qdistro
 sudo bash scripts/install/qdistro-bootstrap.sh --profile=dev
 ```
 
 The bootstrap installs all dependencies, builds the compositor and daemons,
-clones the remaining components (qdgreeter, qdlocker, qdbrowser, qterminator,
-qnotebook, qfileman), and
+installs the in-tree apps (qdgreeter, qdlocker, qdbrowser, qterminator,
+qnotebook, qfileman) from the same checkout, and
 configures greetd. The first run takes a while. Idempotent — re-running is
 safe. The explicit `dev` profile is required for this preview path: the default
 `daily-driver` profile requires a populated, signed release manifest, which is
@@ -106,50 +106,31 @@ Most useful: "I ran step X and Y was unclear / broken." See
 [doc/support.md](doc/support.md) for what to include, how security issues are
 handled privately, and the [known-regressions](doc/known-regressions.md) ledger.
 
-## Repository layout (sibling checkout required)
+## One clone
 
-The three qdistro repos are designed to live side-by-side under a
-common parent directory. Build scripts and tests reference siblings
-with relative paths (`../qdwin`, `../qdshell`). Clone them like this:
+Everything is in this repository; one clone is the whole developer layout:
 
 ```sh
-mkdir qdistro-org && cd qdistro-org
 git clone https://github.com/qdistro/qdistro.git
-git clone https://github.com/qdistro/qdwin.git
-git clone https://github.com/qdistro/qdshell.git
 ```
 
-Resulting tree:
-
 ```
-qdistro-org/
-├── qdistro/     ← this repo (umbrella)
-├── qdwin/       ← compositor
-└── qdshell/     ← desktop shell
-```
-
-That three-repo set is the minimum developer layout. The bootstrap and full
-desktop image also consume first-party app repos as siblings when present.
-Three of them are not `github.com/qdistro/<dirname>` — two live in their own
-org and two were renamed upstream — so clone them by URL, keeping the sibling
-directory name on the left:
-
-```sh
-git clone https://github.com/qdistro/qdgreeter.git       qdgreeter
-git clone https://github.com/qdistro/qdlocker.git        qdlocker
-git clone https://github.com/qdistro/qdbrowser.git       qdbrowser
-git clone https://github.com/qterminator/qdterm.git      qterminator
-git clone https://github.com/qnotebook/qnotebook.git     qnotebook
-git clone https://github.com/qdistro/qdfileman.git       qfileman
+qdistro/
+├── (root)                  ← qdistro's own content: broker/, daemons/, ci/, doc/, image/, ...
+├── qdwin/                  ← compositor (libweston shell plugin)
+├── qdshell/                ← desktop shell
+├── qdlocker/  qdgreeter/   ← screen locker, boot greeter
+├── qdbrowser/  qdterm/  qdfileman/  qnotebook/   ← first-party apps
+└── qdchrome-extension/  qdfirefox-extension/     ← browser bridge extensions
 ```
 
-The bootstrap clones these itself (`repo_url()` in
-`scripts/install/qdistro-bootstrap.sh` holds the same mapping); the commands
-above are only for a manual sibling checkout.
+`qdterm/` and `qdfileman/` are the directories of the `qterminator` and
+`qfileman` apps (the Python packages and binaries keep those names). The
+component map with one line per directory is in [AGENTS.md](AGENTS.md).
 
-Build order: `qdwin` first (the umbrella's daemons compile against qdwin's
-protocol XML at `../qdwin/qdwin/*.xml`), then `qdistro`, then `qdshell`. See
-[doc/dev.md](doc/dev.md) for the full developer setup.
+Build order: `qdwin` first (the root daemons compile against qdwin's
+protocol XML at `qdwin/qdwin/*.xml`), then the root daemons, then `qdshell`.
+See [doc/dev.md](doc/dev.md) for the full developer setup.
 
 ## Project principles
 
@@ -186,6 +167,8 @@ Start with [doc/overview.md](doc/overview.md) for the vision, then:
 | For contributors | [dev.md](doc/dev.md), [ui.md](doc/ui.md), [vm-dev-tools.md](doc/vm-dev-tools.md), [AGENTS.md](doc/AGENTS.md) |
 
 ## Repository layout
+
+Root content (each component directory has its own README):
 
 ```
 broker/             D-Bus permission broker (the single arbiter of
@@ -244,7 +227,10 @@ deploy/             greetd config, session launchers, dispatcher
                     units installed onto the target machine
 doc/                project documentation (read [overview.md](doc/overview.md) first)
 pyproject.toml      pytest config
-LICENSE             GPL-3.0-or-later
+LICENSE             GPL-3.0-or-later (root content; components: see License)
+
+qdwin/ qdshell/ qdlocker/ qdgreeter/ qdbrowser/ qdterm/ qdfileman/
+qnotebook/ qdchrome-extension/ qdfirefox-extension/   components (AGENTS.md)
 ```
 
 ## Building and testing
@@ -252,7 +238,7 @@ LICENSE             GPL-3.0-or-later
 Testing happens at two layers, and the split is strict:
 
 1. **Headless host tests** — pytest unit suites, meson/QML checks, npm test
-   runs across all sibling repos. No display, no VM.
+   runs across the root and every component. No display, no VM.
 2. **Full-stack integration** — bats suites and GUI scenarios that run only
    **inside disposable libvirt VMs**. GUI tests are never run on the host:
    they inject real input and would fight your live session.
@@ -261,8 +247,8 @@ The day-to-day entry point for both is the local CI runner,
 [`ci/bin/qci`](ci/README.md):
 
 ```sh
-ci/bin/qci preflight    # verify libvirt session, sibling repos, host tools
-ci/bin/qci host         # all host-side tests/builds across sibling projects
+ci/bin/qci preflight    # verify libvirt session, in-tree components, host tools
+ci/bin/qci host         # all host-side tests/builds, root + every component
 ci/bin/qci bats         # bats integration suites, one disposable VM per file,
                         # run in parallel (QCI_JOBS=N to override)
 ci/bin/qci gui          # GUI scenarios in disposable VMs (see below)
@@ -301,7 +287,7 @@ scripts/vm/spin-test-vm.sh my-test
 ```
 
 For host prerequisites (libvirt, qemu-kvm, group membership), see
-[doc/dev.md](doc/dev.md#multi-repo-dev-setup).
+[doc/dev.md](doc/dev.md#dev-setup).
 
 The unit suite assumes the dependencies installed by
 `scripts/vm/install-deps.sh`. The simplest reliable host setup is a
@@ -310,9 +296,13 @@ the distro packages.
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE).
+Licensing is **per directory**. The root [LICENSE](LICENSE)
+(GPL-3.0-or-later) covers qdistro's own root content. Each component keeps
+its own license: its `LICENSE` file where it has one (qdwin, qdshell, qdterm,
+qdfileman) or the license declared in its package metadata (qdbrowser
+GPL-3.0-only, qnotebook GPL-2.0-or-later, qdgreeter and qdlocker MIT; the two
+browser extensions declare none yet).
 
-The choice of GPL-3.0-or-later reflects how the codebase weaves
+The choice of GPL-3.0-or-later for the root reflects how the codebase weaves
 together components under several copyleft licenses (notably
-libweston-adjacent code under GPL-3.0+); aligning the whole project
-on GPL-3.0-or-later avoids per-file license accounting.
+libweston-adjacent code under GPL-3.0+).
