@@ -139,8 +139,23 @@ affected_gates_for_path() {
         # qdlocker: host pytest, plus its locker GUI scenarios.
         qdlocker/*)
             printf 'host\ngui\n' ;;
+        # qdbrowser: host pytest, plus the VM bats lane. Its own
+        # tests/integration/vm/*.bats (certificate pin, launch smoke) exercise
+        # behaviour the host tests do not, and the rule above only selects
+        # them when a .bats file ITSELF changes -- an implementation change
+        # must select them too.
+        qdbrowser/*)
+            printf 'host\nbats\n' ;;
+        # qdgreeter: host pytest, plus the VM bats lane. The greeter's boot and
+        # session path (greetd -> qdgreeter -> qdwin-session.target -> qdshell)
+        # is tested only in VMs, by root bats that provision it with
+        # scripts/vm/enable-qdgreeter.sh (compositor-shell.bats
+        # launcher-foot-roundtrip, vt-escape-lockdown.bats). The daily snapshot
+        # gate also enables it, but that is not a per-change gate.
+        qdgreeter/*)
+            printf 'host\nbats\n' ;;
         # Pure host-tested components (pytest / npm test + build).
-        qdbrowser/*|qdgreeter/*|qdfileman/*|qdterm/*|qnotebook/*|\
+        qdfileman/*|qdterm/*|qnotebook/*|\
         qdchrome-extension/*|qdfirefox-extension/*)
             printf 'host\n' ;;
         # Maintained project docs run the deterministic local-link/anchor lint.

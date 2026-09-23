@@ -121,6 +121,47 @@ affected_gates() {
     [ "$output" = "lint" ]
 }
 
+# In-tree components (monorepo). Before the migration every component path
+# was UNKNOWN -> FULL; these pin the per-component map in ci/lib/affected.sh.
+# Selection is per GATE: a gate it selects runs whole (host runs every
+# component's rows, gui runs every scenario).
+@test "affected: qdwin source selects host + every VM lane" {
+    run affected_gates qdwin/qdwin/qdwin.c
+    [ "$status" -eq 0 ]
+    [ "$output" = "host vm-smoke bats gui" ]
+}
+
+@test "affected: component GUI scenario selects only gui" {
+    run affected_gates qdlocker/tests/gui/09-capture-indicators.md
+    [ "$status" -eq 0 ]
+    [ "$output" = "gui" ]
+}
+
+@test "affected: qdbrowser implementation selects host + bats (its VM bats test behaviour host tests do not)" {
+    run affected_gates qdbrowser/qdbrowser/config.py
+    [ "$status" -eq 0 ]
+    [ "$output" = "host bats" ]
+    # Its bats file alone still maps to just the bats lane.
+    run affected_gates qdbrowser/tests/integration/vm/qdbrowser-cert-pin.bats
+    [ "$status" -eq 0 ]
+    [ "$output" = "bats" ]
+}
+
+@test "affected: qdgreeter implementation selects host + bats (greeter boot path is VM-only)" {
+    run affected_gates qdgreeter/qdgreeter/__init__.py
+    [ "$status" -eq 0 ]
+    [ "$output" = "host bats" ]
+}
+
+@test "affected: host-only components and component docs" {
+    run affected_gates qdterm/qterminator/terminal.py qdchrome-extension/src/background.js
+    [ "$status" -eq 0 ]
+    [ "$output" = "host" ]
+    run affected_gates qdwin/README.md
+    [ "$status" -eq 0 ]
+    [ "$output" = "lint" ]
+}
+
 @test "affected: planning-only changes still fail safe to FULL set" {
     run affected_gates todo/notes.md docs/x.md
     [ "$status" -eq 0 ]
