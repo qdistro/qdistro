@@ -1,6 +1,7 @@
 # qdistro source manifest — pinned commit SHAs for bootstrap source builds.
 #
-# Format (one repo per line, TAB- or space-separated):
+# Format (one repo per line -- since the monorepo migration, the single
+# `qdistro` line -- TAB- or space-separated):
 #   <repo>  <40-hex-commit-sha>  [tag=<tag>] [artifact=<algo>:<hex>] [signer=<id>]
 # The trailing key=value fields are OPTIONAL release metadata (any order); the
 # bare `<repo> <sha>` form stays valid. See doc/release-signing.md.
@@ -14,7 +15,7 @@
 # from a source checkout, the bootstrap verifies the checkout is at exactly
 # the pinned commit (verify_repo_pin). This prevents a daily-driver/release
 # install from running root code out of an unpinned, signature-unverified
-# tree (e.g. a moved branch, a tampered mirror, or a stale sibling checkout).
+# tree (e.g. a moved branch, a tampered mirror, or a stale checkout).
 #
 # The `dev` profile ignores this manifest and uses shallow --branch clones.
 #
@@ -24,20 +25,12 @@
 # rather than silently build from whatever HEAD happens to be — fill in the
 # real SHAs (e.g. via your release tooling) before a hardened install.
 #
-# Example (replace the SHAs with the real release commits; the first line
-# also shows the optional tag=/artifact=/signer= release-metadata fields):
+# Example (replace the SHA with the real release commit; the line also shows
+# the optional tag=/artifact=/signer= release-metadata fields). Since the
+# monorepo migration there is exactly ONE pin: the qdistro repository, whose
+# commit covers every in-tree component (qdwin, qdshell, qdlocker, qdbrowser,
+# qdgreeter, qdterm, qnotebook, qdfileman) and the browser extensions
+# (qdchrome-extension, qdfirefox-extension; source-only -- v1 has no signed
+# extension distribution channel, so the user MANUALLY loads an extension
+# built from this pinned source, see doc/browser-extension-install.md).
 # qdistro      0000000000000000000000000000000000000000 tag=v1.0.0 signer=0xRELEASEKEYFINGERPRINT
-# qdwin        0000000000000000000000000000000000000000
-# qdshell      0000000000000000000000000000000000000000
-# qdlocker     0000000000000000000000000000000000000000
-# qdbrowser    0000000000000000000000000000000000000000
-# qdgreeter    0000000000000000000000000000000000000000
-# qterminator  0000000000000000000000000000000000000000
-# qnotebook    0000000000000000000000000000000000000000
-# qfileman     0000000000000000000000000000000000000000
-# The browser extensions are source-only pins: the bootstrap clones them but
-# builds/installs nothing from them. v1 has no signed extension distribution
-# channel, so the user MANUALLY loads an extension built from this pinned
-# source — see doc/browser-extension-install.md.
-# qdchrome-extension  0000000000000000000000000000000000000000
-# qdfirefox-extension 0000000000000000000000000000000000000000

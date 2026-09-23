@@ -24,7 +24,7 @@
 #
 # Inputs (all optional; sensible defaults):
 #   QDISTRO_RELEASE_MANIFEST  manifest file (default scripts/install/source-manifest.txt)
-#   QDISTRO_REPO_ROOT         dir holding the sibling repo checkouts (default: parent of the qdistro repo)
+#   QDISTRO_REPO_ROOT         the qdistro monorepo checkout (default: this repo)
 #   QDISTRO_RELEASE_KEYRING   gpgv keyring -> enables the signature sub-check
 #   QDISTRO_MANIFEST_SIG      detached signature over the manifest
 #   QDISTRO_RELEASE_SIGNER    expected 40-hex signer fingerprint (bound authoritatively)
@@ -39,17 +39,15 @@ gate_release_manifest() {
     # aliases and default the signature to the manifest's adjacent `.sig`, so a
     # release host configured exactly like qdistro-bootstrap.sh is understood.
     local manifest="${QDISTRO_RELEASE_MANIFEST:-${QDISTRO_SOURCE_MANIFEST:-$QDISTRO_REPO/scripts/install/source-manifest.txt}}"
-    local repo_root="${QDISTRO_REPO_ROOT:-$(dirname "$QDISTRO_REPO")}"
+    local repo_root="${QDISTRO_REPO_ROOT:-$QDISTRO_REPO}"
     local gen="$QDISTRO_REPO/scripts/install/gen-source-manifest.sh"
     local verify="$QDISTRO_REPO/scripts/install/verify-source-manifest.sh"
-    # Release-grade completeness: the bootstrap's fatal fetch set must be pinned
-    # (scripts/install/qdistro-bootstrap.sh: `for repo in qdistro qdwin qdshell`).
-    local CORE_REPOS="qdistro qdwin qdshell"
-    # The two extension repos are source-only optional fetches (R4): nothing is
-    # built from them, but a v1 user hand-builds the extension they load out of
-    # that checkout, so an unpinned extension repo is worth the same advisory
-    # WARN as any other optional repo.
-    local OPTIONAL_REPOS="qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension"
+    # Release-grade completeness: the bootstrap's fetch set must be pinned. Since
+    # the monorepo migration that is the one qdistro repository (every
+    # component, the browser extensions included, is in-tree and covered by
+    # that commit), so there are no optional per-component pins any more.
+    local CORE_REPOS="qdistro"
+    local OPTIONAL_REPOS=""
 
     {
         echo "## release-manifest gate (R1)"
@@ -157,7 +155,9 @@ gate_release_manifest() {
             for (i=3;i<=NF;i++){e=index($i,"="); if(e>1 && substr($i,1,e-1)=="tag"){print substr($i,e+1); exit}}
         }')
         pinned_repos="$pinned_repos $repo"
-        local dir="$repo_root/$repo" ok=1 detail=""
+        # The monorepo root (the only pinnable repo; gen-source-manifest --lint
+        # above already rejected any other repo name).
+        local dir="$repo_root" ok=1 detail=""
         if ! printf '%s' "$pin" | grep -qE '^[0-9a-f]{40}$'; then
             ok=0; detail="pin '$pin' is not a 40-hex commit SHA"
         elif [ ! -d "$dir/.git" ]; then

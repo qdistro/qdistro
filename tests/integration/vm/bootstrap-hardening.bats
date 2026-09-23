@@ -220,19 +220,13 @@ run_boot() { run bash "$BOOT" "$@"; }
         esac
     done <<< "$output"
 
-    # The renamed repos must resolve to their POST-migration upstream names,
-    # not their local checkout names (qfileman -> qdfileman, qterminator ->
-    # qdterm), or a clean-room install 404s on clone.
+    # Monorepo: ONE clone URL, the qdistro repository; the frozen per-component
+    # repositories (qdwin, qdshell, qdterm, ...) are never cloned any more.
+    eval "$(awk '/^QDISTRO_REPO_URL=/' "$BOOT")"
     eval "$(awk '/^repo_url\(\)/,/^}/' "$BOOT")"
-    [ "$(repo_url qdistro)" = "https://github.com/qdistro/qdistro.git" ]
-    [ "$(repo_url qdwin)" = "https://github.com/qdistro/qdwin.git" ]
-    [ "$(repo_url qdshell)" = "https://github.com/qdistro/qdshell.git" ]
-    [ "$(repo_url qdlocker)" = "https://github.com/qdistro/qdlocker.git" ]
-    [ "$(repo_url qdbrowser)" = "https://github.com/qdistro/qdbrowser.git" ]
-    [ "$(repo_url qdgreeter)" = "https://github.com/qdistro/qdgreeter.git" ]
-    [ "$(repo_url qfileman)" = "https://github.com/qdistro/qdfileman.git" ]
-    [ "$(repo_url qnotebook)" = "https://github.com/qnotebook/qnotebook.git" ]
-    [ "$(repo_url qterminator)" = "https://github.com/qterminator/qdterm.git" ]
+    [ "$(repo_url)" = "https://github.com/qdistro/qdistro.git" ]
+    run grep -nE 'github\.com/(qdistro|qterminator|qnotebook)/(qdwin|qdshell|qdlocker|qdbrowser|qdgreeter|qdterm|qnotebook|qdfileman|qdchrome-extension|qdfirefox-extension)\.git' "$BOOT"
+    [ "$status" -ne 0 ] || { echo "bootstrap still clones a legacy component repo: $output" >&2; return 1; }
 }
 
 @test "hardening: tier5 secctx wrapper is fail-closed by default" {
@@ -987,17 +981,19 @@ hookrepo() {
 }
 
 # run_verify_pin <root> <repo> <pin> — drive the REAL verify_repo_pin from the
-# REAL bootstrap in a hardened profile against <root>/<repo>.
+# REAL bootstrap in a hardened profile against the checkout at <root>/<repo>.
+# Monorepo: that checkout IS the bootstrap's REPO_ROOT (the source root), so
+# REPO_ROOT points at <root>/<repo>; the manifest stays outside the tree.
 run_verify_pin() {
     local root="$1" repo="$2" pin="$3" mf="$1/manifest.txt"
     printf '%s\t%s\n' "$repo" "$pin" > "$mf"
     run bash -c '
         set -uo pipefail
         export QDISTRO_PROFILE=release
-        export QDISTRO_REPO_ROOT="'"$root"'"
+        export QDISTRO_REPO_ROOT="'"$root/$repo"'"
         export QDISTRO_SOURCE_MANIFEST="'"$mf"'"
         . "'"$BOOT"'" >/dev/null 2>&1
-        REPO_ROOT="'"$root"'"
+        REPO_ROOT="'"$root/$repo"'"
         SOURCE_MANIFEST="'"$mf"'"
         verify_repo_pin "'"$repo"'"
     '
@@ -1167,13 +1163,14 @@ run_verify_pin() {
 }
 
 @test "root-checkout: --skip-sources pin-verifies every EXISTING tree, not just recognised ones" {
-    # repo_present only recognises .git / daemons / meson.build / pyproject.toml,
-    # but install_python_modules runs $REPO_ROOT/qdistro/scripts/install/*.sh and
-    # installs qdlocker's systemd/pam assets, so an unrecognisable-but-present
-    # tree must FAIL the pin, never silently skip it.
+    # repo_present only recognises .git / daemons+qdwin/meson.build, but
+    # install_python_modules runs $REPO_ROOT/scripts/install/*.sh and installs
+    # qdlocker's systemd/pam assets, so an unrecognisable-but-present tree must
+    # FAIL the pin, never silently skip it. Monorepo: the one source root is
+    # pin-verified unconditionally in hardened profiles.
     body="$(sed -n '/^fetch_sources()/,/^}/p' "$BOOT")"
     [ -n "$body" ]
-    printf '%s\n' "$body" | grep -q '\[ -e "\$REPO_ROOT/\$repo" \] && verify_repo_pin' \
+    printf '%s\n' "$body" | grep -q 'is_dev || verify_repo_pin qdistro' \
         || { echo "--skip-sources no longer pin-verifies every existing tree:"$'\n'"$body" >&2; return 1; }
     printf '%s\n' "$body" | grep -q 'repo_present "\$repo" && verify_repo_pin' \
         && { echo "--skip-sources regressed to the narrow repo_present predicate" >&2; return 1; }

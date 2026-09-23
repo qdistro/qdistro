@@ -2,18 +2,21 @@
 # Behavioural lock-in for scripts/install/gen-source-manifest.sh, the
 # release/packaging tool that pins source-manifest.txt for qdistro-bootstrap.sh.
 #
-# Needs NO live VM and NO network: it stubs the qdistro source repos with
-# `git init` + a commit in a temp dir, runs the generator, and feeds its
+# Needs NO live VM and NO network: it stubs the qdistro monorepo (root content
+# plus in-tree component dirs) with `git init` + a commit in a temp dir, runs
+# the generator, and feeds its
 # output back through the REAL bootstrap parser (manifest_pin) and the real
 # verify_repo_pin to prove byte-compatibility (round-trip).
 #
 # What it pins:
-#   - Correct repo set (the 11 repos fetch_sources fetches), in order.
+#   - Correct repo set: the ONE repository fetch_sources fetches (qdistro;
+#     since the monorepo migration every component is in-tree).
 #   - Generated output parses IDENTICALLY through the bootstrap's manifest_pin
 #     awk path: the pin for each repo == that repo's stubbed HEAD SHA (exact).
 #   - verify_repo_pin accepts a generated manifest end-to-end (real checkout).
 #   - Dirty-repo refusal (fail-closed), with --allow-dirty override.
-#   - Missing-repo handling: error by default, skip with --allow-missing.
+#   - Missing-repo handling: error by default; --allow-missing cannot leave
+#     an empty manifest.
 #   - --lint accepts a generated manifest and rejects malformed/dup/unknown.
 #
 # Run: bats tests/integration/vm/gen-source-manifest.bats
@@ -26,9 +29,12 @@ setup() {
     [ -f "$GEN" ]  || { echo "generator not found at $GEN" >&2; return 1; }
     [ -f "$BOOT" ] || { echo "bootstrap not found at $BOOT" >&2; return 1; }
 
-    REPOS=(qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension)
+    REPOS=(qdistro)
+    # Pre-monorepo per-component names: no longer pinnable.
+    LEGACY=(qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension)
 
     WORK="$BATS_TEST_TMPDIR/root"
+    MONO="$WORK/qdistro"     # the monorepo checkout (== --repo-root)
     mkdir -p "$WORK"
     # Hermetic git identity so commits work without host config.
     export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
@@ -36,24 +42,25 @@ setup() {
     export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 }
 
-# Stub one git repo at $WORK/<repo> with a single commit; echo its HEAD SHA.
+# Stub the monorepo at $MONO (root README + in-tree component dirs) with a
+# single commit; echo its HEAD SHA.
 stub_repo() {
-    local repo="$1" dir="$WORK/$1"
+    local dir="$MONO" c
     mkdir -p "$dir"
     git -C "$dir" init -q
-    printf '%s\n' "$repo" > "$dir/README"
-    git -C "$dir" add README
-    git -C "$dir" commit -q -m "init $repo"
+    printf 'qdistro\n' > "$dir/README"
+    for c in qdwin qdshell qnotebook qdfileman; do
+        mkdir -p "$dir/$c"; printf '%s\n' "$c" > "$dir/$c/README"
+    done
+    git -C "$dir" add -A
+    git -C "$dir" commit -q -m "init qdistro monorepo"
     git -C "$dir" rev-parse HEAD
 }
 
-# Stub all 11 repos; populate EXPECTED[<repo>]=<sha>.
+# Stub the monorepo; populate EXPECTED[qdistro]=<sha>.
 stub_all() {
     declare -gA EXPECTED=()
-    local r
-    for r in "${REPOS[@]}"; do
-        EXPECTED[$r]="$(stub_repo "$r")"
-    done
+    EXPECTED[qdistro]="$(stub_repo)"
 }
 
 # Parse a manifest through the REAL bootstrap parser: source the bootstrap
@@ -89,9 +96,9 @@ real_boot_fn() {
 }
 
 # --- repo set -----------------------------------------------------------
-@test "gen: emits exactly the 11 bootstrap repos, in fetch order" {
+@test "gen: emits exactly the one bootstrap repo (the qdistro monorepo)" {
     stub_all
-    run "$GEN" --repo-root "$WORK"
+    run "$GEN" --repo-root "$MONO"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 
     # Field-1 of every non-comment line, in order.
@@ -105,7 +112,7 @@ real_boot_fn() {
 @test "gen: output parses identically via bootstrap manifest_pin (exact SHAs)" {
     stub_all
     local mf="$WORK/manifest.txt"
-    run "$GEN" --repo-root "$WORK" -o "$mf"
+    run "$GEN" --repo-root "$MONO" -o "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 
     local r pin
@@ -119,7 +126,7 @@ real_boot_fn() {
 @test "gen: every emitted pin is a lowercase 40-hex SHA on a TAB-separated line" {
     stub_all
     local mf="$WORK/m.txt"
-    run "$GEN" --repo-root "$WORK" -o "$mf"
+    run "$GEN" --repo-root "$MONO" -o "$mf"
     [ "$status" -eq 0 ]
     # Each non-comment line must be EXACTLY: <repo><TAB><40 hex>, no trailing
     # junk. Split on TAB (FS="\t"): NF must be 2, $1 lowercase-alnum, $2 40-hex.
@@ -130,7 +137,7 @@ real_boot_fn() {
           if (NF != 2)                       { print "not TAB-2-field: " $0; bad=1 }
           else if ($1 !~ /^[a-z0-9-]+$/)     { print "bad repo: " $1; bad=1 }
           else if ($2 !~ /^[0-9a-f]{40}$/)   { print "bad sha: " $2; bad=1 } }
-        END { if (lines != 11) { print "expected 11 lines, got " lines; bad=1 }
+        END { if (lines != 1) { print "expected 1 line, got " lines; bad=1 }
               exit bad ? 1 : 0 }
     ' "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
@@ -140,24 +147,22 @@ real_boot_fn() {
 @test "gen: generated manifest is accepted end-to-end by verify_repo_pin" {
     stub_all
     local mf="$WORK/manifest.txt"
-    "$GEN" --repo-root "$WORK" -o "$mf"
+    "$GEN" --repo-root "$MONO" -o "$mf"
 
     # Move each stub HEAD forward, then have verify_repo_pin (hardened profile)
     # detach back to the pinned commit. It must succeed AND land on the pin.
     local r
-    for r in "${REPOS[@]}"; do
-        ( cd "$WORK/$r"
-          printf 'moved\n' > moved
-          git add moved && git commit -q -m moved )
-    done
+    ( cd "$MONO"
+      printf 'moved\n' > moved
+      git add moved && git commit -q -m moved )
 
     run bash -c '
         set -euo pipefail
         export QDISTRO_PROFILE=release
-        export QDISTRO_REPO_ROOT="'"$WORK"'"
+        export QDISTRO_REPO_ROOT="'"$MONO"'"
         export QDISTRO_SOURCE_MANIFEST="'"$mf"'"
         SOURCE_MANIFEST="'"$mf"'"
-        REPO_ROOT="'"$WORK"'"
+        REPO_ROOT="'"$MONO"'"
         . "'"$BOOT"'" >/dev/null 2>&1
         # resolve_profile populated by sourcing; ensure hardened path active.
         for r in '"${REPOS[*]}"'; do
@@ -168,76 +173,71 @@ real_boot_fn() {
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     [[ "$output" == *ALL_VERIFIED* ]] || { echo "$output" >&2; return 1; }
 
-    # And every checkout is now detached at exactly its pinned SHA.
-    for r in "${REPOS[@]}"; do
-        [ "$(git -C "$WORK/$r" rev-parse HEAD)" = "${EXPECTED[$r]}" ] \
-            || { echo "$r not detached at pin" >&2; return 1; }
-    done
+    # And the monorepo is now detached at exactly its pinned SHA.
+    [ "$(git -C "$MONO" rev-parse HEAD)" = "${EXPECTED[qdistro]}" ] \
+        || { echo "qdistro not detached at pin" >&2; return 1; }
 }
 
 # --- dirty-repo refusal -------------------------------------------------
 @test "gen: refuses a DIRTY repo (fail-closed) by default" {
     stub_all
-    # Dirty qdshell with an untracked file.
-    printf 'wip\n' > "$WORK/qdshell/wip.txt"
+    # Dirty the monorepo with an untracked file inside a component.
+    printf 'wip\n' > "$MONO/qdshell/wip.txt"
 
-    run "$GEN" --repo-root "$WORK"
+    run "$GEN" --repo-root "$MONO"
     [ "$status" -ne 0 ] || { echo "expected failure, got 0:"$'\n'"$output" >&2; return 1; }
-    [[ "$output" == *qdshell*DIRTY* ]] || { echo "wrong error: $output" >&2; return 1; }
+    [[ "$output" == *qdistro*DIRTY* ]] || { echo "wrong error: $output" >&2; return 1; }
 }
 
 @test "gen: --allow-dirty pins a dirty repo's HEAD anyway" {
     stub_all
-    printf 'wip\n' > "$WORK/qdshell/wip.txt"   # untracked, does not change HEAD
+    printf 'wip\n' > "$MONO/qdshell/wip.txt"   # untracked, does not change HEAD
 
-    run "$GEN" --repo-root "$WORK" --allow-dirty
+    run "$GEN" --repo-root "$MONO" --allow-dirty
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     # The pinned SHA is still the committed HEAD (untracked file isn't part of it).
     local pin
-    pin="$(printf '%s\n' "$output" | awk '$1=="qdshell"{print $2}')"
-    [ "$pin" = "${EXPECTED[qdshell]}" ] || { echo "pin $pin != ${EXPECTED[qdshell]}" >&2; return 1; }
+    pin="$(printf '%s\n' "$output" | awk '$1=="qdistro"{print $2}')"
+    [ "$pin" = "${EXPECTED[qdistro]}" ] || { echo "pin $pin != ${EXPECTED[qdistro]}" >&2; return 1; }
 }
 
 @test "gen: tracked modification also counts as dirty" {
     stub_all
-    printf 'changed\n' >> "$WORK/qdwin/README"   # modify a tracked file
-    run "$GEN" --repo-root "$WORK"
+    printf 'changed\n' >> "$MONO/qdwin/README"   # modify a tracked file (in a component)
+    run "$GEN" --repo-root "$MONO"
     [ "$status" -ne 0 ]
-    [[ "$output" == *qdwin*DIRTY* ]] || { echo "$output" >&2; return 1; }
+    [[ "$output" == *qdistro*DIRTY* ]] || { echo "$output" >&2; return 1; }
 }
 
 # --- missing-repo handling ----------------------------------------------
 @test "gen: errors on a missing repo by default" {
     stub_all
-    rm -rf "$WORK/qfileman"
-    run "$GEN" --repo-root "$WORK"
+    rm -rf "$MONO"
+    run "$GEN" --repo-root "$MONO"
     [ "$status" -ne 0 ] || { echo "expected failure:"$'\n'"$output" >&2; return 1; }
-    [[ "$output" == *qfileman*"no git checkout"* ]] || { echo "$output" >&2; return 1; }
+    [[ "$output" == *"repo root"*"does not exist"* ]] || { echo "$output" >&2; return 1; }
 }
 
 @test "gen: errors on a non-git directory by default" {
     stub_all
-    rm -rf "$WORK/qnotebook/.git"   # plain dir, not a git checkout
-    run "$GEN" --repo-root "$WORK"
+    rm -rf "$MONO/.git"   # plain dir, not a git checkout
+    run "$GEN" --repo-root "$MONO"
     [ "$status" -ne 0 ]
-    [[ "$output" == *qnotebook*"no git checkout"* ]] || { echo "$output" >&2; return 1; }
+    [[ "$output" == *qdistro*"no git checkout"* ]] || { echo "$output" >&2; return 1; }
 }
 
-@test "gen: --allow-missing skips an absent repo and emits the rest" {
+@test "gen: --allow-missing cannot produce an empty manifest (the one repo is required)" {
     stub_all
-    rm -rf "$WORK/qfileman"
-    run "$GEN" --repo-root "$WORK" --allow-missing
-    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-    # qfileman absent; the other 8 present and parseable.
-    run bash -c 'printf "%s\n" "$1" | awk "/^[[:space:]]*#/{next} NF{print \$1}"' _ "$output"
-    [[ "$output" != *qfileman* ]] || { echo "qfileman should be skipped" >&2; return 1; }
-    [[ "$output" == *qdistro* ]] && [[ "$output" == *qnotebook* ]]
+    rm -rf "$MONO/.git"
+    run "$GEN" --repo-root "$MONO" --allow-missing
+    [ "$status" -ne 0 ] || { echo "an all-missing manifest must be refused:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"nothing to emit"* ]] || { echo "$output" >&2; return 1; }
 }
 
 # --- header -------------------------------------------------------------
 @test "gen: output carries a GENERATED header comment (ignored by parser)" {
     stub_all
-    run "$GEN" --repo-root "$WORK"
+    run "$GEN" --repo-root "$MONO"
     [ "$status" -eq 0 ]
     [[ "$output" == *"GENERATED by scripts/install/gen-source-manifest.sh"* ]]
     # Header lines are comments -> parser skips them; manifest_pin of a header
@@ -250,7 +250,7 @@ real_boot_fn() {
 @test "lint: accepts a freshly generated manifest" {
     stub_all
     local mf="$WORK/manifest.txt"
-    "$GEN" --repo-root "$WORK" -o "$mf"
+    "$GEN" --repo-root "$MONO" -o "$mf"
     run "$GEN" --lint "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     [[ "$output" == *OK* ]]
@@ -278,6 +278,16 @@ real_boot_fn() {
     [[ "$output" == *"unknown repo"* ]]
 }
 
+@test "lint: rejects every pre-monorepo per-component pin" {
+    local mf="$WORK/legacy.txt" r
+    for r in "${LEGACY[@]}"; do
+        printf 'qdistro\t%040d\n%s\t%040d\n' 0 "$r" 1 > "$mf"
+        run "$GEN" --lint "$mf"
+        [ "$status" -ne 0 ] || { echo "legacy pin '$r' accepted" >&2; return 1; }
+        [[ "$output" == *"unknown repo '$r'"* ]] || { echo "$output" >&2; return 1; }
+    done
+}
+
 @test "lint: rejects a duplicate repo pin" {
     local mf="$WORK/dup.txt"
     printf 'qdistro\t%040d\nqdistro\t%040d\n' 0 0 > "$mf"
@@ -298,10 +308,11 @@ real_boot_fn() {
 @test "lint: accepts tag=/artifact=/signer= fields after the SHA" {
     local mf="$WORK/ext.txt"
     {
-        printf 'qdistro\t%040d\ttag=v1.0.0\n' 0
-        printf 'qdwin\t%040d\tartifact=sha256:%064d signer=0xDEADBEEFCAFE\n' 1 0
-        printf 'qdshell\t%040d\ttag=qdshell-1.2 artifact=sha512:%0128d signer=rel@qdistro.invalid\n' 2 0
+        printf 'qdistro\t%040d\ttag=v1.0.0 artifact=sha256:%064d signer=0xDEADBEEFCAFE\n' 0 0
     } > "$mf"
+    run "$GEN" --lint "$mf"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    printf 'qdistro\t%040d\ttag=qdistro-1.2 artifact=sha512:%0128d signer=rel@qdistro.invalid\n' 2 0 > "$mf"
     run "$GEN" --lint "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
@@ -355,9 +366,9 @@ real_boot_fn() {
 
 @test "gen: --tags emits tag= for a tagged HEAD and --signer stamps every line" {
     stub_all
-    git -C "$WORK/qdistro" tag v9.9.9
+    git -C "$MONO" tag v9.9.9
     local mf="$WORK/m.txt"
-    run "$GEN" --repo-root "$WORK" --tags --signer 0xFEEDFACE -o "$mf"
+    run "$GEN" --repo-root "$MONO" --tags --signer 0xFEEDFACE -o "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     # The tagged repo carries tag=; every non-comment line carries signer=.
     grep -qE "^qdistro	${EXPECTED[qdistro]} tag=v9.9.9" "$mf" \
@@ -373,7 +384,7 @@ real_boot_fn() {
 
 @test "gen: --require-tags fails when HEAD is untagged" {
     stub_all
-    run "$GEN" --repo-root "$WORK" --require-tags
+    run "$GEN" --repo-root "$MONO" --require-tags
     [ "$status" -ne 0 ]
     [[ "$output" == *"no exact-match tag"* ]]
 }
@@ -381,14 +392,18 @@ real_boot_fn() {
 @test "gen: --artifact pins a per-repo digest; unknown repo/format rejected" {
     stub_all
     local mf="$WORK/art.txt"
-    run "$GEN" --repo-root "$WORK" --artifact "qdwin=sha256:$(printf '%064d' 0)" -o "$mf"
+    run "$GEN" --repo-root "$MONO" --artifact "qdistro=sha256:$(printf '%064d' 0)" -o "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-    grep -qE "^qdwin	${EXPECTED[qdwin]} artifact=sha256:0{64}$" "$mf" \
-        || { echo "missing artifact= on qdwin:"; grep qdwin "$mf" >&2; return 1; }
-    run "$GEN" --repo-root "$WORK" --artifact "nope=sha256:$(printf '%064d' 0)"
+    grep -qE "^qdistro	${EXPECTED[qdistro]} artifact=sha256:0{64}$" "$mf" \
+        || { echo "missing artifact= on qdistro:"; grep qdistro "$mf" >&2; return 1; }
+    run "$GEN" --repo-root "$MONO" --artifact "nope=sha256:$(printf '%064d' 0)"
     [ "$status" -ne 0 ]
     [[ "$output" == *"unknown repo"* ]]
-    run "$GEN" --repo-root "$WORK" --artifact "qdwin=sha256:short"
+    # a component is not a pinnable repo any more
+    run "$GEN" --repo-root "$MONO" --artifact "qdwin=sha256:$(printf '%064d' 0)"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown repo"* ]]
+    run "$GEN" --repo-root "$MONO" --artifact "qdistro=sha256:short"
     [ "$status" -ne 0 ]
     [[ "$output" == *"well-formed"* ]]
 }
@@ -417,13 +432,13 @@ real_boot_fn() {
 # --- verify_repo_pin tag consistency ------------------------------------
 @test "boot: verify_repo_pin accepts a manifest tag that matches the pin" {
     stub_all
-    git -C "$WORK/qdistro" tag v1.2.3   # tag points at the pinned HEAD
+    git -C "$MONO" tag v1.2.3   # tag points at the pinned HEAD
     local mf="$WORK/m.txt"
     printf 'qdistro\t%s\ttag=v1.2.3\n' "${EXPECTED[qdistro]}" > "$mf"
     run bash -c '
         set -euo pipefail
-        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$WORK"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
-        REPO_ROOT="'"$WORK"'"; SOURCE_MANIFEST="'"$mf"'"
+        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$MONO"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        REPO_ROOT="'"$MONO"'"; SOURCE_MANIFEST="'"$mf"'"
         . "'"$BOOT"'" >/dev/null 2>&1
         verify_repo_pin qdistro
     '
@@ -439,8 +454,8 @@ real_boot_fn() {
     printf 'qdistro\t%s\ttag=bad:ref\n' "${EXPECTED[qdistro]}" > "$mf"
     run bash -c '
         set -euo pipefail
-        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$WORK"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
-        REPO_ROOT="'"$WORK"'"; SOURCE_MANIFEST="'"$mf"'"
+        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$MONO"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        REPO_ROOT="'"$MONO"'"; SOURCE_MANIFEST="'"$mf"'"
         . "'"$BOOT"'" >/dev/null 2>&1
         verify_repo_pin qdistro
     '
@@ -451,16 +466,16 @@ real_boot_fn() {
 @test "boot: verify_repo_pin is FATAL when the manifest tag != the pin" {
     stub_all
     # Create a tag on a DIFFERENT commit than the pinned one.
-    ( cd "$WORK/qdistro"; printf 'x\n' > x; git add x; git commit -q -m other; git tag v1.2.3 )
-    local other; other="$(git -C "$WORK/qdistro" rev-parse v1.2.3)"
+    ( cd "$MONO"; printf 'x\n' > x; git add x; git commit -q -m other; git tag v1.2.3 )
+    local other; other="$(git -C "$MONO" rev-parse v1.2.3)"
     [ "$other" != "${EXPECTED[qdistro]}" ]
     local mf="$WORK/m.txt"
     # Pin the ORIGINAL commit but claim tag v1.2.3 (which is on 'other').
     printf 'qdistro\t%s\ttag=v1.2.3\n' "${EXPECTED[qdistro]}" > "$mf"
     run bash -c '
         set -euo pipefail
-        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$WORK"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
-        REPO_ROOT="'"$WORK"'"; SOURCE_MANIFEST="'"$mf"'"
+        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$MONO"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        REPO_ROOT="'"$MONO"'"; SOURCE_MANIFEST="'"$mf"'"
         . "'"$BOOT"'" >/dev/null 2>&1
         verify_repo_pin qdistro
     '

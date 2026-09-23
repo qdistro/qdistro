@@ -12,7 +12,8 @@
 # populated-but-divergent manifest (EXIT_RELEASE=15), and only records `blocked`
 # (exit 0) for genuinely-absent release inputs (unpopulated manifest / no
 # keyring on a dev host). A release-grade manifest must pin the bootstrap's
-# fatal fetch set: qdistro qdwin qdshell.
+# fetch set, which since the monorepo migration is the ONE qdistro repository
+# (every component in-tree); per-component pins are rejected by the linter.
 
 setup() {
     REPO_ROOT_SRC="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
@@ -23,7 +24,10 @@ setup() {
     export QCI_RUNS_DIR="$RUNS"
 
     RR="$(mktemp -d)"
-    export QDISTRO_REPO_ROOT="$RR"
+    # The monorepo checkout under test (the manifest/keyring live beside it,
+    # outside the tree, so they never make it dirty).
+    MONO="$RR/qdistro"
+    export QDISTRO_REPO_ROOT="$MONO"
     MANIFEST="$RR/source-manifest.txt"
     export QDISTRO_RELEASE_MANIFEST="$MANIFEST"
 
@@ -41,31 +45,24 @@ teardown() {
     rm -rf "$RUNS" "$RR"
 }
 
-# Create a git repo at $RR/<name> with one commit; echo its commit SHA.
-mkrepo() {
-    local name="$1"
-    local dir="$RR/$name"
-    mkdir -p "$dir"
-    git -C "$dir" init -q
-    git -C "$dir" config user.email t@t.invalid
-    git -C "$dir" config user.name t
-    echo "$name" > "$dir/README"
-    git -C "$dir" add -A
-    git -C "$dir" commit -q -m init
-    git -C "$dir" rev-parse HEAD
-}
-
-# Create the three core repos; set P_qdistro / P_qdwin / P_qdshell to their pins.
+# Create the monorepo at $MONO (root README + in-tree component dirs) with one
+# commit; set P_qdistro to its pin.
 make_core() {
-    P_qdistro=$(mkrepo qdistro)
-    P_qdwin=$(mkrepo qdwin)
-    P_qdshell=$(mkrepo qdshell)
+    mkdir -p "$MONO"
+    git -C "$MONO" init -q
+    git -C "$MONO" config user.email t@t.invalid
+    git -C "$MONO" config user.name t
+    echo qdistro > "$MONO/README"
+    local c
+    for c in qdwin qdshell; do mkdir -p "$MONO/$c"; echo "$c" > "$MONO/$c/README"; done
+    git -C "$MONO" add -A
+    git -C "$MONO" commit -q -m init
+    P_qdistro=$(git -C "$MONO" rev-parse HEAD)
 }
 
-# Write a clean, complete, valid base manifest (no tags) pinning the core set.
+# Write a clean, complete, valid base manifest (no tags): the one pin.
 base_manifest() {
-    printf 'qdistro %s\nqdwin %s\nqdshell %s\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    printf 'qdistro %s\n' "$P_qdistro" > "$MANIFEST"
 }
 
 sign_manifest() {
@@ -124,8 +121,7 @@ row_note_has() {
     row_is signature blocked
     row_note_has signature "no keyring provided"
     row_is "pin:qdistro" pass
-    row_is "pin:qdwin" pass
-    row_is "pin:qdshell" pass
+    row_is "completeness:qdistro" ""   # no completeness failure row
 }
 
 # -------------------------------------------------------------------------
@@ -134,11 +130,8 @@ row_note_has() {
 
 @test "release-manifest: pinned+tagged clean repos with signer-bound signature => pass" {
     make_core
-    git -C "$RR/qdistro" tag v1.0.0
-    git -C "$RR/qdwin" tag v1.0.0
-    git -C "$RR/qdshell" tag v1.0.0
-    printf 'qdistro %s tag=v1.0.0\nqdwin %s tag=v1.0.0\nqdshell %s tag=v1.0.0\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    git -C "$MONO" tag v1.0.0
+    printf 'qdistro %s tag=v1.0.0\n' "$P_qdistro" > "$MANIFEST"
     sign_manifest
     export QDISTRO_RELEASE_KEYRING="$RR/keyring.gpg"
     export QDISTRO_MANIFEST_SIG="$MANIFEST.sig"
@@ -152,11 +145,8 @@ row_note_has() {
 
 @test "release-manifest: QCI_RELEASE=1 does NOT escalate a fully-signed complete green run" {
     make_core
-    git -C "$RR/qdistro" tag v1.0.0
-    git -C "$RR/qdwin" tag v1.0.0
-    git -C "$RR/qdshell" tag v1.0.0
-    printf 'qdistro %s tag=v1.0.0\nqdwin %s tag=v1.0.0\nqdshell %s tag=v1.0.0\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    git -C "$MONO" tag v1.0.0
+    printf 'qdistro %s tag=v1.0.0\n' "$P_qdistro" > "$MANIFEST"
     sign_manifest
     export QDISTRO_RELEASE_KEYRING="$RR/keyring.gpg"
     export QDISTRO_MANIFEST_SIG="$MANIFEST.sig"
@@ -184,68 +174,62 @@ row_note_has() {
 
 @test "release-manifest: wrong commit pin => fail 15 (HEAD!=pin)" {
     make_core
-    printf 'qdistro %s\nqdwin %s\nqdshell %s\n' \
-        "$P_qdistro" "1111111111111111111111111111111111111111" "$P_qdshell" > "$MANIFEST"
+    printf 'qdistro %s\n' "1111111111111111111111111111111111111111" > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_is "pin:qdwin" fail
-    row_note_has "pin:qdwin" "!= pinned"
+    row_is "pin:qdistro" fail
+    row_note_has "pin:qdistro" "!= pinned"
 }
 
 @test "release-manifest: dirty working tree => fail 15" {
     make_core
     base_manifest
-    echo dirty > "$RR/qdwin/extra"     # untracked => not clean
+    echo dirty > "$MONO/qdwin/extra"     # untracked, inside a component => not clean
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_is "pin:qdwin" fail
-    row_note_has "pin:qdwin" "working tree not clean"
+    row_is "pin:qdistro" fail
+    row_note_has "pin:qdistro" "working tree not clean"
 }
 
 @test "release-manifest: moved tag (HEAD==pin, tag elsewhere) => fail 15" {
     make_core
-    # Second commit on qdwin, tag points there, but HEAD+pin stay on commit 1.
-    echo more > "$RR/qdwin/x"; git -C "$RR/qdwin" add -A
-    git -C "$RR/qdwin" commit -q -m second
-    local c2; c2=$(git -C "$RR/qdwin" rev-parse HEAD)
-    git -C "$RR/qdwin" reset --hard -q "$P_qdwin"   # HEAD back to commit 1, clean
-    git -C "$RR/qdwin" tag v1.0.0 "$c2"             # tag on commit 2
-    printf 'qdistro %s\nqdwin %s tag=v1.0.0\nqdshell %s\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    # Second commit, tag points there, but HEAD+pin stay on commit 1.
+    echo more > "$MONO/qdwin/x"; git -C "$MONO" add -A
+    git -C "$MONO" commit -q -m second
+    local c2; c2=$(git -C "$MONO" rev-parse HEAD)
+    git -C "$MONO" reset --hard -q "$P_qdistro"   # HEAD back to commit 1, clean
+    git -C "$MONO" tag v1.0.0 "$c2"               # tag on commit 2
+    printf 'qdistro %s tag=v1.0.0\n' "$P_qdistro" > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_is "pin:qdwin" fail
-    row_note_has "pin:qdwin" "tamper/moved tag"   # isolates the moved-tag guard
+    row_is "pin:qdistro" fail
+    row_note_has "pin:qdistro" "tamper/moved tag"   # isolates the moved-tag guard
 }
 
 @test "release-manifest: unsafe tag name => fail 15" {
     make_core
-    printf 'qdistro %s\nqdwin %s tag=../evil\nqdshell %s\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    printf 'qdistro %s tag=../evil\n' "$P_qdistro" > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_note_has "pin:qdwin" "unsafe tag name"    # the gate's defense-in-depth guard fired
+    row_note_has "pin:qdistro" "unsafe tag name"    # the gate's defense-in-depth guard fired
 }
 
-@test "release-manifest: inconsistent tag versions => fail 15" {
+@test "release-manifest: a pre-monorepo per-component manifest => lint fail 15" {
+    # qdwin/qdshell are in-tree components now; pinning them separately is a
+    # malformed manifest (and could never be satisfied by one checkout).
     make_core
-    git -C "$RR/qdistro" tag v1.0.0
-    git -C "$RR/qdwin" tag v1.0.0
-    git -C "$RR/qdshell" tag v2.0.0
+    git -C "$MONO" tag v1.0.0
     printf 'qdistro %s tag=v1.0.0\nqdwin %s tag=v1.0.0\nqdshell %s tag=v2.0.0\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+        "$P_qdistro" "$P_qdistro" "$P_qdistro" > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_is version-consistency fail
+    row_is lint fail
 }
 
-@test "release-manifest: version core ignores v/V prefix (V1.0.0 == v1.0.0)" {
+@test "release-manifest: version core ignores v/V prefix (V1.0.0 is a valid release tag)" {
     make_core
-    git -C "$RR/qdistro" tag V1.0.0
-    git -C "$RR/qdwin" tag v1.0.0
-    git -C "$RR/qdshell" tag v1.0.0
-    printf 'qdistro %s tag=V1.0.0\nqdwin %s tag=v1.0.0\nqdshell %s tag=v1.0.0\n' \
-        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    git -C "$MONO" tag V1.0.0
+    printf 'qdistro %s tag=V1.0.0\n' "$P_qdistro" > "$MANIFEST"
     run_gate
     [ "$status" -eq 0 ] || { echo "status=$status: $output" >&2; cat "$RESULTS" >&2; return 1; }
     row_is version-consistency pass
@@ -253,18 +237,19 @@ row_note_has() {
 
 @test "release-manifest: missing repo checkout => fail 15 (no git checkout)" {
     make_core
-    rm -rf "$RR/qdshell"               # pinned in manifest but absent on disk
+    rm -rf "$MONO/.git"                # pinned in manifest but not a checkout on disk
     base_manifest
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_is "pin:qdshell" fail
-    row_note_has "pin:qdshell" "no git checkout"   # isolates the .git guard
+    row_is "pin:qdistro" fail
+    row_note_has "pin:qdistro" "no git checkout"   # isolates the .git guard
 }
 
 @test "release-manifest: missing required core repo from manifest => completeness fail 15" {
     make_core
-    # Pin only qdwin + qdshell; omit the required core repo qdistro.
-    printf 'qdwin %s\nqdshell %s\n' "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    # An active line that is not the qdistro pin (a legacy component name):
+    # the manifest is populated, yet the required repo is unpinned.
+    printf 'qdwin %s\n' "$P_qdistro" > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
     row_is "completeness:qdistro" fail
@@ -272,17 +257,15 @@ row_note_has() {
 
 @test "release-manifest: non-hex pin => fail 15" {
     make_core
-    printf 'qdistro %s\nqdwin zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\nqdshell %s\n' \
-        "$P_qdistro" "$P_qdshell" > "$MANIFEST"
+    printf 'qdistro zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n' > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
-    row_note_has "pin:qdwin" "not a 40-hex"        # the gate's own hex guard fired
+    row_note_has "pin:qdistro" "not a 40-hex"        # the gate's own hex guard fired
 }
 
 @test "release-manifest: malformed manifest => lint fail 15" {
     make_core
-    printf 'qdistro %s\nqdwin deadbeef\nqdshell %s\n' \
-        "$P_qdistro" "$P_qdshell" > "$MANIFEST"
+    printf 'qdistro deadbeef\n' > "$MANIFEST"
     run_gate
     [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
     row_is lint fail
@@ -292,7 +275,7 @@ row_note_has() {
     make_core
     base_manifest
     sign_manifest
-    printf 'qdlocker %s\n' "$P_qdwin" >> "$MANIFEST"   # valid shape, breaks the sig
+    printf 'qdistro %s tag=v9.9.9\n' "$P_qdistro" > "$MANIFEST"   # valid shape, breaks the sig
     export QDISTRO_RELEASE_KEYRING="$RR/keyring.gpg"
     export QDISTRO_MANIFEST_SIG="$MANIFEST.sig"
     run_gate

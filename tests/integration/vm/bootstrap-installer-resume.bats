@@ -23,11 +23,12 @@ setup() {
                     rev-parse --show-toplevel 2>/dev/null)"
     BOOT="$REPO_ROOT/scripts/install/qdistro-bootstrap.sh"
 
-    # Fake qdistro source tree: $FAKE_QD acts as $REPO_ROOT/qdistro. Install a
+    # Fake qdistro monorepo: $FAKE_QD is the monorepo root, i.e. $REPO_ROOT
+    # itself (before the monorepo migration it was $REPO_ROOT/qdistro). Install a
     # stub for every chain installer that appends "<basename> <srcdir>"
     # to $TRACE and exits 0 (success → recorded by chain_state_record).
     FAKE_ROOT="$BATS_TEST_TMPDIR/src"
-    FAKE_QD="$FAKE_ROOT/qdistro"
+    FAKE_QD="$FAKE_ROOT"
     TRACE="$BATS_TEST_TMPDIR/trace"
     STATE_DIR="$BATS_TEST_TMPDIR/state"
     : > "$TRACE"

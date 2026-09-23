@@ -18,9 +18,10 @@
 #       snapper configs.
 #   5.  Provisions system btrfs subvolumes: /var/lib/qdistro/vaults,
 #       /var/lib/libvirt/images, /var/lib/containers.
-#   6.  Fetches all qdistro repos (qdistro, qdwin, qdshell, qdlocker,
-#       qdbrowser, qdgreeter, qterminator, qnotebook, qfileman) — uses
-#       sibling checkouts under $REPO_ROOT if present, otherwise clones
+#   6.  Acquires the qdistro monorepo (qdistro's own content plus the
+#       in-tree components qdwin/, qdshell/, qdlocker/, qdbrowser/,
+#       qdgreeter/, qdterm/, qnotebook/, qdfileman/, ...) — uses the
+#       checkout at $REPO_ROOT if present, otherwise clones ONE repository
 #       from GitHub (see repo_url).
 #   7.  Builds qdwin (libweston shell plugin) and the qdistro C daemons.
 #   8.  Builds the qdshell QML plugin (libqdistro-qdwin.so).
@@ -88,9 +89,10 @@
 #                          re-run, existing accounts' passwords are left
 #                          untouched (and the skip is logged), so bootstrap
 #                          never clobbers a password the operator changed.
-#   --repo-root=DIR        directory holding all qdistro sibling checkouts
-#                          (default: parent of this repo if found,
-#                           else /opt/qdistro-src)
+#   --repo-root=DIR        the qdistro monorepo checkout (root = qdistro
+#                          content, components in-tree beside it)
+#                          (default: the repo containing this script if
+#                           found, else /opt/qdistro-src)
 #   --branch=BR            git branch to clone (default: main)
 #   --yes, -y              skip the "Proceed? [y/N]" confirmation
 #   --noninteractive       fail rather than prompt for missing values
@@ -186,9 +188,11 @@ SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
 # Shared profile gate + hardened primitives (dev vs daily-driver/release).
 # shellcheck source=lib/qdistro-profile.sh
 . "$SCRIPT_DIR/lib/qdistro-profile.sh"
-# scripts/install/<this> -> qdistro/ -> qdistro-org/
+# scripts/install/<this> -> the qdistro monorepo root. REPO_ROOT is that root
+# (qdistro content + the in-tree components), NOT the parent of sibling
+# checkouts as it was before the monorepo migration.
 QDISTRO_DIR_DEFAULT=$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd || true)
-REPO_ROOT="${QDISTRO_REPO_ROOT:-${QDISTRO_DIR_DEFAULT:+$(dirname "$QDISTRO_DIR_DEFAULT")}}"
+REPO_ROOT="${QDISTRO_REPO_ROOT:-$QDISTRO_DIR_DEFAULT}"
 REPO_ROOT="${REPO_ROOT:-/opt/qdistro-src}"
 BRANCH="${QDISTRO_BRANCH:-main}"
 
@@ -881,7 +885,7 @@ provision_template_dirs() {
         /var/lib/qdistro/silos 2>/dev/null || true
 
     # Global retention defaults — never clobber an operator's edited file.
-    local retention_src="$REPO_ROOT/qdistro/deploy/etc/qdistro/template-retention.toml"
+    local retention_src="$REPO_ROOT/deploy/etc/qdistro/template-retention.toml"
     if [ ! -f /etc/qdistro/template-retention.toml ]; then
         if [ -f "$retention_src" ]; then
             install -m 0644 "$retention_src" /etc/qdistro/template-retention.toml
@@ -893,7 +897,7 @@ provision_template_dirs() {
 
     # Example authored policy for the first workload (tier2-dev). Only
     # dropped if no policy is present yet; the operator owns it afterward.
-    local policy_src="$REPO_ROOT/qdistro/templates/examples/tier2-dev.toml"
+    local policy_src="$REPO_ROOT/templates/examples/tier2-dev.toml"
     if [ ! -f /etc/qdistro/templates/tier2-dev.toml ]; then
         if [ -f "$policy_src" ]; then
             install -m 0644 "$policy_src" /etc/qdistro/templates/tier2-dev.toml
@@ -1057,37 +1061,35 @@ create_users() {
 # ---------------------------------------------------------------------------
 # 6. Source acquisition
 # ---------------------------------------------------------------------------
-# repo_url <local-checkout-name> — canonical upstream clone URL for a repo.
-# $1 is the LOCAL directory name under $REPO_ROOT (which the rest of this
-# script, the manifest, and the build steps key off), NOT necessarily the
-# upstream repository name: the 2026-07 Codeberg -> GitHub migration renamed
-# two repos (qfileman -> qdfileman, qterminator -> qdterm) and qnotebook /
-# qterminator live in their own GitHub orgs. Keep the local names stable and
-# map them here.
+# repo_url — the canonical upstream clone URL. Since the monorepo migration
+# there is ONE repository: qdistro, with every component in-tree. (The old
+# per-component URL map — qnotebook/qterminator orgs, the qfileman/qterminator
+# local-name mapping — is gone; those repositories are frozen legacy.)
+QDISTRO_REPO_URL="${QDISTRO_REPO_URL:-https://github.com/qdistro/qdistro.git}"
 repo_url() {
+    echo "$QDISTRO_REPO_URL"
+}
+
+# comp_dir <product> — the in-tree directory of a component. Two components
+# keep their product/package/binary names (qterminator, qfileman) but live in
+# directories named after their GitHub repositories (qdterm/, qdfileman/).
+comp_dir() {
     case "$1" in
-        qnotebook)   echo "https://github.com/qnotebook/qnotebook.git" ;;
-        qterminator) echo "https://github.com/qterminator/qdterm.git" ;;
-        qfileman)    echo "https://github.com/qdistro/qdfileman.git" ;;
-        *)           echo "https://github.com/qdistro/$1.git" ;;
+        qterminator) echo qdterm ;;
+        qfileman)    echo qdfileman ;;
+        *)           echo "$1" ;;
     esac
 }
 
+# repo_present — is $REPO_ROOT already a qdistro monorepo checkout (or an
+# unpacked tree of one)?
 repo_present() {
-    local repo="$1"
-    [ -d "$REPO_ROOT/$repo/.git" ] && return 0
-    case "$repo" in
-        qdistro) [ -d "$REPO_ROOT/$repo/daemons" ] ;;
-        qdwin|qdshell) [ -f "$REPO_ROOT/$repo/meson.build" ] ;;
-        # The browser extensions are npm/WebExtension trees, not python
-        # packages — they have no pyproject.toml.
-        qdchrome-extension|qdfirefox-extension) \
-            [ -f "$REPO_ROOT/$repo/package.json" ] ;;
-        *) [ -f "$REPO_ROOT/$repo/pyproject.toml" ] ;;
-    esac
+    [ -d "$REPO_ROOT/.git" ] && return 0
+    [ -d "$REPO_ROOT/daemons" ] && [ -f "$REPO_ROOT/qdwin/meson.build" ]
 }
 
-# Source manifest: maps each repo to a pinned 40-hex commit SHA. Default
+# Source manifest: pins the qdistro monorepo to a 40-hex commit SHA (one
+# `qdistro <sha>` line; the components are covered by that commit). Default
 # location is scripts/install/source-manifest.txt, overridable via
 # QDISTRO_SOURCE_MANIFEST. In hardened (daily-driver/release) profiles this
 # manifest is REQUIRED before any root build/install from a checkout: we will
@@ -1222,7 +1224,7 @@ verify_manifest_signature() {
 # include.path, filter.*.clean/smudge, ...), `meson setup` executes
 # meson.build plus anything a stale build/ directory points at, `pip install`
 # executes setup.py/backend hooks, and the installer chain runs
-# $REPO_ROOT/qdistro/scripts/install/*.sh and $REPO_ROOT/qdistro/deploy/*
+# $REPO_ROOT/scripts/install/*.sh and $REPO_ROOT/deploy/*
 # directly. None of that is covered by the manifest signature.
 #
 # So rather than enumerating the dangerous settings one by one, we refuse to
@@ -1428,8 +1430,9 @@ git_pinned() {
         git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$dir" "$@"
 }
 
-# verify_repo_pin <repo> — in hardened profiles, ensure the checkout at
-# $REPO_ROOT/<repo> is exactly at its manifest-pinned commit; check it out if
+# verify_repo_pin <repo> — in hardened profiles, ensure the monorepo checkout
+# at $REPO_ROOT is exactly at <repo>'s manifest-pinned commit (<repo> is
+# always `qdistro` since the monorepo migration); check it out if
 # a fetched full clone allows. FATAL on any mismatch / missing pin / detached
 # unpinned state. No-op (returns 0) under dev.
 verify_repo_pin() {
@@ -1446,18 +1449,18 @@ verify_repo_pin() {
     # and every git command honours .git/config, neither of which the signed
     # manifest covers. Refuse a tree (and a .git) an unprivileged user could
     # have written to.
-    assert_trusted_tree "$REPO_ROOT/$repo" "$repo source checkout"
-    [ -d "$REPO_ROOT/$repo/.git" ] || die "$repo: pinned profile needs a git checkout to verify $pin (found a non-git tree at $REPO_ROOT/$repo)"
-    assert_trusted_tree "$REPO_ROOT/$repo/.git" "$repo git directory"
+    assert_trusted_tree "$REPO_ROOT" "$repo source checkout"
+    [ -d "$REPO_ROOT/.git" ] || die "$repo: pinned profile needs a git checkout to verify $pin (found a non-git tree at $REPO_ROOT)"
+    assert_trusted_tree "$REPO_ROOT/.git" "$repo git directory"
     # Make sure the pinned object exists, then check it out.
-    if ! git_pinned "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null; then
-        git_pinned "$REPO_ROOT/$repo" fetch --quiet origin "$pin" 2>/dev/null || true
+    if ! git_pinned "$REPO_ROOT" cat-file -e "${pin}^{commit}" 2>/dev/null; then
+        git_pinned "$REPO_ROOT" fetch --quiet origin "$pin" 2>/dev/null || true
     fi
-    git_pinned "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null \
+    git_pinned "$REPO_ROOT" cat-file -e "${pin}^{commit}" 2>/dev/null \
         || die "$repo: pinned commit $pin not present in checkout (shallow clone? fetch the pin or supply a full checkout)"
-    git_pinned "$REPO_ROOT/$repo" checkout --quiet --detach "$pin" \
+    git_pinned "$REPO_ROOT" checkout --quiet --detach "$pin" \
         || die "$repo: failed to check out pinned commit $pin"
-    head="$(git_pinned "$REPO_ROOT/$repo" rev-parse HEAD 2>/dev/null || true)"
+    head="$(git_pinned "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
     [ "$head" = "$pin" ] || die "$repo: HEAD ($head) != pinned $pin after checkout"
 
     # The pin only constrains TRACKED content at that commit. `git checkout`
@@ -1466,10 +1469,10 @@ verify_repo_pin() {
     # passes the SHA check can still carry attacker- or accident-supplied
     # source. Hardened profiles build only from a pristine tree.
     local dirty
-    dirty="$(git_pinned "$REPO_ROOT/$repo" status --porcelain)" \
-        || die "$repo: could not compute working-tree status at $REPO_ROOT/$repo; a security assertion that cannot be evaluated is a FAILED assertion"
+    dirty="$(git_pinned "$REPO_ROOT" status --porcelain)" \
+        || die "$repo: could not compute working-tree status at $REPO_ROOT; a security assertion that cannot be evaluated is a FAILED assertion"
     if [ -n "$dirty" ]; then
-        die "$repo: checkout at $REPO_ROOT/$repo is at pin $pin but the working tree is DIRTY (modified or untracked files); hardened profiles refuse to root-build content the signed manifest does not cover.
+        die "$repo: checkout at $REPO_ROOT is at pin $pin but the working tree is DIRTY (modified or untracked files); hardened profiles refuse to root-build content the signed manifest does not cover.
     Offending entries:
 $(printf '%s\n' "$dirty" | head -20)
     Do not try to clean it in place with root git commands — they consume the
@@ -1493,10 +1496,10 @@ $(printf '%s\n' "$dirty" | head -20)
            || [ "${tag#*..}" != "$tag" ]; then
             die "$repo: manifest tag '$tag' is not a safe tag name (lint bypassed or hand-edited manifest)"
         fi
-        if ! git_pinned "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null 2>&1; then
-            git_pinned "$REPO_ROOT/$repo" fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+        if ! git_pinned "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null 2>&1; then
+            git_pinned "$REPO_ROOT" fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
         fi
-        tag_commit="$(git_pinned "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
+        tag_commit="$(git_pinned "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
         if [ -z "$tag_commit" ]; then
             warn "  $repo: manifest records tag '$tag' but it is absent from the checkout (commit pin $pin still enforced)"
         elif [ "$tag_commit" != "$pin" ]; then
@@ -1511,37 +1514,35 @@ $(printf '%s\n' "$dirty" | head -20)
 
 fetch_repo() {
     local repo="$1"
-    local fatal="${2:-fatal}"
     local url
 
-    if repo_present "$repo"; then
-        log "  $repo: using existing checkout at $REPO_ROOT/$repo"
+    if repo_present; then
+        log "  $repo: using existing checkout at $REPO_ROOT"
         verify_repo_pin "$repo"
         return 0
     fi
 
-    url="$(repo_url "$repo")"
+    url="$(repo_url)"
     # Pinned (hardened) profiles need the pinned commit object available, so
     # a shallow --branch clone is not enough — do a full clone and let
     # verify_repo_pin detach to the manifest SHA. dev keeps the fast shallow
     # branch clone (branch already validated git-ref-safe in parse_args).
+    # The clone target is $REPO_ROOT itself (it must be empty): the monorepo
+    # root IS the source root.
     if is_dev; then
-        log "  $repo: cloning $url (branch=$BRANCH, shallow — dev)..."
-        if git clone --depth 1 --branch "$BRANCH" "$url" "$REPO_ROOT/$repo"; then
+        log "  $repo: cloning $url into $REPO_ROOT (branch=$BRANCH, shallow — dev)..."
+        if git clone --depth 1 --branch "$BRANCH" "$url" "$REPO_ROOT"; then
             return 0
         fi
     else
-        log "  $repo: cloning $url (full, will pin per manifest)..."
-        if git clone "$url" "$REPO_ROOT/$repo"; then
+        log "  $repo: cloning $url into $REPO_ROOT (full, will pin per manifest)..."
+        if git clone "$url" "$REPO_ROOT"; then
             verify_repo_pin "$repo"
             return 0
         fi
     fi
 
-    if [ "$fatal" = "fatal" ]; then
-        die "$repo: clone failed"
-    fi
-    warn "  $repo: clone failed (non-fatal; install will be skipped)"
+    die "$repo: clone into $REPO_ROOT failed (the directory must be empty or absent)"
 }
 
 fetch_sources() {
@@ -1562,47 +1563,23 @@ fetch_sources() {
 
     if [ -n "$SKIP_SOURCES" ]; then
         log "skipping source acquisition (--skip-sources)"
-        # Pre-staged checkouts are still root-built: verify each PRESENT repo is
-        # at its manifest pin before any build runs (no-op under dev).
-        if ! is_dev; then
-            local repo
-            for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension; do
-                # Any tree that EXISTS gets pin-verified, not just the ones
-                # repo_present's narrow marker set recognises: later steps run
-                # $REPO_ROOT/qdistro/scripts/install/*.sh, install
-                # $REPO_ROOT/qdistro/deploy/*, and read qdlocker's systemd/pam
-                # assets, none of which repo_present looks for. An existing but
-                # unrecognisable tree must FAIL, not silently skip the pin.
-                # The two extension repos are source-only (R4): nothing is built
-                # from them, but a staged tree still gets pin-verified — the
-                # user hand-builds the artifact they load out of it.
-                [ -e "$REPO_ROOT/$repo" ] && verify_repo_pin "$repo"
-            done
-        fi
+        # A pre-staged monorepo is still root-built: verify it is at its
+        # manifest pin before any build runs (no-op under dev). One pin now
+        # covers every component (the chain runs $REPO_ROOT/scripts/install/
+        # *.sh and $REPO_ROOT/deploy/*, reads qdlocker's systemd/pam assets,
+        # and the user hand-builds the extensions out of the same tree).
+        is_dev || verify_repo_pin qdistro
         return 0
     fi
-    install -d -m 0755 "$REPO_ROOT"
     cd "$REPO_ROOT"
 
-    for repo in qdistro qdwin qdshell; do
-        fetch_repo "$repo" fatal
-    done
+    # ONE repository. The optional components (qdlocker, qdbrowser, qdgreeter,
+    # qdterm, qnotebook, qdfileman, the browser extensions) are simply present
+    # in-tree; the build/pip steps below skip any that are absent.
+    fetch_repo qdistro
 
-    for repo in qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman; do
-        fetch_repo "$repo" optional
-    done
-
-    # Browser extensions (R4). Source-only: nothing here is built or installed
-    # into a browser by the bootstrap — v1 has no signed extension channel, so
-    # the extension is MANUALLY loaded by the user (doc/browser-extension-
-    # install.md). They are fetched anyway so the tree the user loads is the
-    # manifest-pinned, signature-covered source rather than an ad-hoc clone.
-    for repo in qdchrome-extension qdfirefox-extension; do
-        fetch_repo "$repo" optional
-    done
-
-    [ -f "$REPO_ROOT/qdwin/meson.build" ]   || die "qdwin tree missing meson.build"
-    [ -d "$REPO_ROOT/qdistro/daemons" ]     || die "qdistro tree missing daemons/"
+    [ -f "$REPO_ROOT/qdwin/meson.build" ]   || die "qdwin tree missing meson.build (incomplete monorepo at $REPO_ROOT)"
+    [ -d "$REPO_ROOT/daemons" ]             || die "qdistro tree missing daemons/ (incomplete monorepo at $REPO_ROOT)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1661,8 +1638,8 @@ build_qdistro_daemons() {
         return 0
     fi
     log "building qdistro C daemons..."
-    assert_trusted_tree "$REPO_ROOT/qdistro/daemons" "qdistro daemons build tree"
-    cd "$REPO_ROOT/qdistro/daemons"
+    assert_trusted_tree "$REPO_ROOT/daemons" "qdistro daemons build tree"
+    cd "$REPO_ROOT/daemons"
     # Core build: already fatal by default via `set -e`; explicit messages
     # keep behavior unchanged (fatal).
     if [ -f build/build.ninja ]; then
@@ -1710,19 +1687,20 @@ pip_install_one() {
     local app="$1" launcher
     # pip executes the source tree's build backend (setup.py / PEP 517 hooks)
     # as root; same exposure as the git/meson steps.
-    assert_trusted_tree "$REPO_ROOT/$app" "$app source tree"
+    local dir; dir="$REPO_ROOT/$(comp_dir "$app")"
+    assert_trusted_tree "$dir" "$app source tree"
     if is_dev; then
         # dev: write into /usr (collides with RPM ownership, but a throwaway
         # VM does not care). --prefix=/usr launchers land in /usr/bin.
         python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
-            "$REPO_ROOT/$app" \
+            "$dir" \
             || fail_or_warn "  pip install $app failed"
         return 0
     fi
     # Hardened: isolated /opt/qdistro prefix; no writes into RPM-owned /usr.
     install -d -m 0755 "$QDISTRO_OPT_PREFIX"
     python3 -m pip install --no-deps --prefix="$QDISTRO_OPT_PREFIX" --quiet \
-        "$REPO_ROOT/$app" \
+        "$dir" \
         || { fail_or_warn "  pip install $app -> $QDISTRO_OPT_PREFIX failed"; return 0; }
     # Expose the launcher on PATH via a thin wrapper that sets PYTHONPATH to
     # the isolated prefix's site dir. Avoids touching /usr/lib*/python*/site.
@@ -1756,7 +1734,7 @@ EOF
 # profile, and renames the sized PNGs into hicolor/<N>x<N>/apps/<app>.png.
 install_app_desktop_assets() {
     local app="$1"
-    local src="$REPO_ROOT/$app"
+    local src; src="$REPO_ROOT/$(comp_dir "$app")"
     [ -d "$src" ] || return 0
     # .desktop
     if [ -f "$src/$app.desktop" ]; then
@@ -1797,17 +1775,17 @@ install_app_desktop_assets() {
 # which is idempotent (no-op if the binding already imports) and self-locates
 # the qmake/headers; reuse it verbatim rather than re-deriving the build.
 build_qtermwidget_binding() {
-    local sip="$REPO_ROOT/qterminator/util/build-sip.sh"
+    local sip="$REPO_ROOT/qdterm/util/build-sip.sh"
     # Already importable (e.g. distro qtermwidget-qt6 python binding)? Done.
     if python3 -c "from QTermWidget import QTermWidget" >/dev/null 2>&1; then
         log "  QTermWidget binding already importable (system package)"
         return 0
     fi
     if [ ! -x "$sip" ]; then
-        fail_qterminator_binding "  QTermWidget binding builder not found at $sip — qterminator will fail to launch (missing QTermWidget). Install the distro qtermwidget python binding or ship qterminator/qtermwidget-pyqt/."
+        fail_qterminator_binding "  QTermWidget binding builder not found at $sip — qterminator will fail to launch (missing QTermWidget). Install the distro qtermwidget python binding or ship qdterm/qtermwidget-pyqt/."
         return 0
     fi
-    log "  building QTermWidget SIP binding (qterminator/qtermwidget-pyqt)..."
+    log "  building QTermWidget SIP binding (qdterm/qtermwidget-pyqt)..."
     if bash "$sip"; then
         if python3 -c "from QTermWidget import QTermWidget" >/dev/null 2>&1; then
             log "  QTermWidget binding installed + importable"
@@ -1830,7 +1808,7 @@ pip_install_apps() {
         log "installing Python apps to isolated $QDISTRO_OPT_PREFIX (+ /usr/bin wrappers)..."
     fi
     for app in qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman; do
-        if [ -f "$REPO_ROOT/$app/pyproject.toml" ]; then
+        if [ -f "$REPO_ROOT/$(comp_dir "$app")/pyproject.toml" ]; then
             # qterminator's runtime QTermWidget binding is not a pip dep;
             # build/install it before qterminator so the package is usable
             # at first launch (finding #20).
@@ -1847,7 +1825,7 @@ pip_install_apps() {
                 qterminator|qfileman) install_app_desktop_assets "$app" ;;
             esac
         else
-            warn "  $app source not found at $REPO_ROOT/$app"
+            warn "  $app source not found at $REPO_ROOT/$(comp_dir "$app")"
         fi
     done
 
@@ -1885,7 +1863,7 @@ pip_install_apps() {
         esac
     }
     for smoke in $smoke_repos; do
-        if [ -f "$REPO_ROOT/$smoke/pyproject.toml" ]; then
+        if [ -f "$REPO_ROOT/$(comp_dir "$smoke")/pyproject.toml" ]; then
             local mod
             mod="$(smoke_module "$smoke")"
             if QT_QPA_PLATFORM=offscreen PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 \
@@ -1911,8 +1889,8 @@ pip_install_apps() {
 # Ordered installer chain. Each entry is "step-name|installer-path|src-suffix"
 # where step-name is a stable, operator-facing identifier (used by --resume /
 # --from-step / --rerun-step / the state file), installer-path is relative to
-# $REPO_ROOT/qdistro, and src-suffix is appended to $REPO_ROOT/qdistro to form
-# the source dir argument ("" means the qdistro root itself). Keeping the name
+# $REPO_ROOT (the monorepo root), and src-suffix is appended to $REPO_ROOT to
+# form the source dir argument ("" means the monorepo root itself). Keeping the name
 # decoupled from the script basename means the state file stays stable even if
 # a script is renamed. Defined as a function (not a global array) so it works
 # whether the file is executed or sourced by the test harness.
@@ -2279,7 +2257,7 @@ run_installer_step() {
 }
 
 install_python_modules() {
-    local QD="$REPO_ROOT/qdistro"
+    local QD="$REPO_ROOT"
     # The chain below executes $QD/scripts/install/*.sh and installs
     # $QD/deploy/* as root, so the tree must not be user-writable.
     assert_trusted_tree "$QD" "qdistro source tree"
@@ -2426,7 +2404,7 @@ EOF
 # 10. Locker config
 # ---------------------------------------------------------------------------
 install_locker_config_file() {
-    local cfg_installer="$REPO_ROOT/qdistro/deploy/install-locker-config.sh"
+    local cfg_installer="$REPO_ROOT/deploy/install-locker-config.sh"
     if [ -x "$cfg_installer" ]; then
         log "installing locker config..."
         bash "$cfg_installer" || warn "locker config install failed"
@@ -2480,7 +2458,7 @@ install_selinux_policies() {
         log "  SELinux config: permissive (dev/explicit override)"
     fi
 
-    cd "$REPO_ROOT/qdistro"
+    cd "$REPO_ROOT"
     for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             log "  -> $pol"
@@ -2528,8 +2506,8 @@ install_qdwin_session() {
     # Production install: never bake the test-only shell-capture authority,
     # even if the invoking shell still exports it from a test run.
     unset QDWIN_ENABLE_SHELL_CAPTURE
-    QDISTRO_SRC="$REPO_ROOT/qdistro" \
-    bash "$REPO_ROOT/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
+    QDISTRO_SRC="$REPO_ROOT" \
+    bash "$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh" \
         "$REPO_ROOT/qdshell"
 }
 
@@ -2572,21 +2550,21 @@ configure_greetd() {
     # greetd config (tty3 — production qdgreeter path).
     install -d -m 0755 /etc/greetd
     install -m 0644 \
-        "$REPO_ROOT/qdistro/deploy/greetd-config.toml" \
+        "$REPO_ROOT/deploy/greetd-config.toml" \
         /etc/greetd/config.toml
 
     # systemd hardening drop-in for the distro-packaged greetd.service.
-    if [ -f "$REPO_ROOT/qdistro/deploy/greetd-hardening.conf" ]; then
+    if [ -f "$REPO_ROOT/deploy/greetd-hardening.conf" ]; then
         install -d -m 0755 /etc/systemd/system/greetd.service.d
         install -m 0644 \
-            "$REPO_ROOT/qdistro/deploy/greetd-hardening.conf" \
+            "$REPO_ROOT/deploy/greetd-hardening.conf" \
             /etc/systemd/system/greetd.service.d/10-qdistro-hardening.conf
         log "  installed greetd.service systemd hardening drop-in"
     fi
 
     # session launcher — what greetd execs as admin post-auth.
     install -m 0755 \
-        "$REPO_ROOT/qdistro/deploy/qdwin-session-launcher.sh" \
+        "$REPO_ROOT/deploy/qdwin-session-launcher.sh" \
         /usr/local/bin/qdwin-session-launcher
 
     # qdwin-session.target + sub-units (system-wide copy of the
@@ -2594,13 +2572,13 @@ configure_greetd() {
     # ALSO installs per-user deploy-named copies under admin's
     # ~/.config/systemd/user/ with the VM-specific module map / LD path).
     install -m 0644 \
-        "$REPO_ROOT/qdistro/deploy/qdwin-session.target" \
+        "$REPO_ROOT/deploy/qdwin-session.target" \
         /etc/systemd/user/qdwin-session.target 2>/dev/null || true
     install -m 0644 \
-        "$REPO_ROOT/qdistro/deploy/qdwin-compositor.service" \
+        "$REPO_ROOT/deploy/qdwin-compositor.service" \
         /etc/systemd/user/qdwin-compositor.service 2>/dev/null || true
     install -m 0644 \
-        "$REPO_ROOT/qdistro/deploy/qdshell.service" \
+        "$REPO_ROOT/deploy/qdshell.service" \
         /etc/systemd/user/qdshell.service 2>/dev/null || true
 
     # Tear down any pre-existing tty4 LXQt+labwc fallback from an OLDER install
@@ -2620,8 +2598,8 @@ configure_greetd() {
     # keystrokes into the kernel console / login(1). Scoped to the compositor
     # VT — tty1's emergency agetty and tty5+ work sessions are untouched. See
     # harden-compositor-vt.sh for the full rationale and the live evidence.
-    if [ -x "$REPO_ROOT/qdistro/scripts/install/harden-compositor-vt.sh" ]; then
-        if ! "$REPO_ROOT/qdistro/scripts/install/harden-compositor-vt.sh" \
+    if [ -x "$REPO_ROOT/scripts/install/harden-compositor-vt.sh" ]; then
+        if ! "$REPO_ROOT/scripts/install/harden-compositor-vt.sh" \
                 /etc/greetd/config.toml; then
             fail_compositor_vt "the compositor VT is not exclusively the compositor's (a getty can take it and revert seatd's K_OFF)"
         fi
@@ -2747,7 +2725,7 @@ main() {
 
     # Step 9b: Template/promotion directory skeleton + retention defaults.
     # Runs after fetch_sources so the example policy + retention defaults
-    # are present in $REPO_ROOT/qdistro to copy from.
+    # are present in $REPO_ROOT to copy from.
     provision_template_dirs
 
     # Step 10: Build qdwin
@@ -2783,7 +2761,7 @@ main() {
     # Step 20 (opt-in): tier-4 guest base image bake
     if [ -n "$BUILD_TIER4_BASE" ]; then
         log "building tier-4 guest base image (--tier4-base)..."
-        bash "$REPO_ROOT/qdistro/tier4-vm-guest/build-guest-image.sh" \
+        bash "$REPO_ROOT/tier4-vm-guest/build-guest-image.sh" \
             || warn "tier-4 base build failed; tier-4 VM apps will not work"
     fi
 

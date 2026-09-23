@@ -154,10 +154,13 @@ setup() {
 # --- #19: image stages + verifies /usr/bin/qdgreeter --------------------
 
 @test "#19: build.sh syncs qdgreeter (and qdlocker) into the image overlay" {
-    # The repository list is declared once and consumed by the sync loop.
-    # Assert both halves so a dead declaration cannot satisfy this guard.
-    grep -Eq '^SYNC_REPOS=.*qdgreeter.*qdlocker' "$IMAGE_BUILD"
-    grep -Eq 'for repo in \$SYNC_REPOS' "$IMAGE_BUILD"
+    # Monorepo: the whole tree is synced in one rsync of the repo root; the
+    # components config.sh builds are declared once and presence-checked by
+    # the sync loop (so an incomplete tree refuses the sync). Assert both
+    # halves so a dead declaration cannot satisfy this guard.
+    grep -Eq '^REQUIRED_COMPONENTS=.*qdgreeter.*qdlocker' "$IMAGE_BUILD"
+    grep -Eq 'for comp in \$REQUIRED_COMPONENTS' "$IMAGE_BUILD"
+    grep -Eq '"\$REPO_ROOT/" "\$SRC_OVERLAY/"' "$IMAGE_BUILD"
 }
 
 @test "#19: config.sh pip-installs qdgreeter and hard-fails if /usr/bin/qdgreeter is missing" {

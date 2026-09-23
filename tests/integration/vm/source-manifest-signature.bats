@@ -26,8 +26,7 @@ setup() {
 write_manifest() {
     local path="$1"
     cat > "$path" <<'EOF'
-qdistro  0000000000000000000000000000000000000000
-qdwin    1111111111111111111111111111111111111111
+qdistro  0000000000000000000000000000000000000000 tag=v1.0.0
 EOF
 }
 
@@ -51,7 +50,7 @@ sign_manifest() {
     manifest="$WORK/source-manifest.txt"
     write_manifest "$manifest"
     sign_manifest "$manifest"
-    printf 'qdshell 2222222222222222222222222222222222222222\n' >> "$manifest"
+    sed -i 's/^qdistro .*/qdistro  2222222222222222222222222222222222222222 tag=v1.0.0/' "$manifest"
 
     run "$VERIFY" "$manifest" "$manifest.sig" "$WORK/keyring.gpg"
     [ "$status" -ne 0 ] || { echo "expected tamper failure" >&2; return 1; }
@@ -149,7 +148,7 @@ run_fetch() {
     manifest="$WORK/source-manifest.txt"
     write_manifest "$manifest"
     sign_manifest "$manifest"
-    printf 'qdshell 2222222222222222222222222222222222222222\n' >> "$manifest"
+    sed -i 's/^qdistro .*/qdistro  2222222222222222222222222222222222222222 tag=v1.0.0/' "$manifest"
     run_gate release "$manifest" "$manifest.sig" "$WORK/keyring.gpg"
     [ "$status" -ne 0 ] || { echo "expected fatal (tamper)" >&2; return 1; }
 }
@@ -161,7 +160,6 @@ run_fetch() {
     # even though the document is validly signed and self-claims a signer.
     cat > "$manifest" <<EOF
 qdistro  0000000000000000000000000000000000000000 signer=0xAAAA
-qdwin    1111111111111111111111111111111111111111 signer=0xAAAA
 EOF
     sign_manifest "$manifest"
     # A full 40-hex fingerprint that is NOT the real signing key.
@@ -216,15 +214,20 @@ key_fpr() {
     [[ "$output" == *"no release keyring"* ]] || { echo "$output" >&2; return 1; }
 }
 
-@test "fetch_sources: signed manifest gate passes, then proceeds (no required source -> dies later, not at gate)" {
+@test "fetch_sources: signed manifest gate passes, then proceeds (empty source root -> dies at the pin, not at the gate)" {
     manifest="$WORK/source-manifest.txt"
     write_manifest "$manifest"
     sign_manifest "$manifest"
     local rr="$WORK/srcroot3"; mkdir -p "$rr"
     run_fetch "skip" "$manifest" "$manifest.sig" "$WORK/keyring.gpg" "$rr"
-    # --skip-sources + signed manifest + no present repos -> gate passes, the
-    # per-repo verify loop is a no-op (nothing present), fetch_sources returns 0.
-    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    # --skip-sources + signed manifest: the signature gate PASSES, then the one
+    # monorepo source root is pin-verified. Before the monorepo migration an
+    # empty root meant "no sibling present" and was a no-op; now the root IS
+    # the (single) pinned source, so an empty one is refused at the pin.
+    [ "$status" -ne 0 ] || { echo "an unverifiable empty source root must be refused" >&2; return 1; }
+    [[ "$output" != *"no release keyring"* && "$output" != *"signature"*"FAIL"* ]] \
+        || { echo "died at the signature gate, not the pin: $output" >&2; return 1; }
+    [[ "$output" == *"needs a git checkout"* ]] || { echo "$output" >&2; return 1; }
 }
 
 # --- manifest_has_pins: a populated-but-malformed line still trips the gate --
@@ -245,10 +248,11 @@ key_fpr() {
     # the pinned commit must die in the skip-sources pin loop, before any build.
     export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
     export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
-    local rr="$WORK/staged"; mkdir -p "$rr/qdistro/daemons"
-    git -C "$rr/qdistro" init -q
-    printf 'x\n' > "$rr/qdistro/daemons/keep"
-    git -C "$rr/qdistro" add -A && git -C "$rr/qdistro" commit -q -m init
+    # Monorepo: the staged checkout IS the source root.
+    local rr="$WORK/staged"; mkdir -p "$rr/daemons"
+    git -C "$rr" init -q
+    printf 'x\n' > "$rr/daemons/keep"
+    git -C "$rr" add -A && git -C "$rr" commit -q -m init
     # Manifest pins a DIFFERENT (nonexistent) commit for qdistro; sign it.
     manifest="$WORK/source-manifest.txt"
     printf 'qdistro aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$manifest"
