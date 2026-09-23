@@ -27,6 +27,17 @@ qdwin_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
 ## Steps
 
+**Run the steps strictly in order; never overlap them.** Steps 3 and 4
+RESTART qdshell, and qdshell is also the capture client behind
+`qdwin_screenshot`. The Step 2 screenshot must therefore have RETURNED before
+anything from Step 3 starts. In full-20260922T193137Z-881799 the runner moved
+Steps 1-4 into one backgrounded guest script and took the Step 2 capture from
+the host in parallel, timed by fixed sleeps; under load the capture landed in
+Step 3's restart window, `/run/user/1000/qdshell.sock` refused the
+connection, and the required frame was lost although every oracle passed. A
+frame taken during or after Step 3 would not evidence 2.2 anyway: it shows
+the `exclusionZoneBleed: true` layout, not the default one under test.
+
 ### Step 1 — confirm bar-content height == bar-exclusion height
 
 ```bash
