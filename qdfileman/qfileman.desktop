@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=QFileMan
+GenericName=File Manager
+Comment=Qt file manager with plugin support
+TryExec=qfileman
+Exec=qfileman %F
+Icon=qfileman
+Type=Application
+Categories=Qt;Utility;FileManager;System;
+Keywords=file;manager;explorer;files;folders;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=qfileman

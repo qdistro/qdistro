@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>qfileman.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>QFileMan</name>
+  <summary>Qt file manager with plugin support</summary>
+  <description>
+    <p>
+      QFileMan is a small Qt-based file manager built with PyQt6.
+      It pairs a sidebar tree view with a configurable file list and
+      exposes a Python plugin system for menu items, navigation hooks,
+      and file filters.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Sidebar tree view and file list with list/grid modes</li>
+      <li>Sort by name, size, date (newest first), or extension</li>
+      <li>Toggleable hidden-file filter</li>
+      <li>Bookmarks, file info, and quick-navigation built-in plugins</li>
+      <li>Configurable via TOML config under ~/.config/qfileman/</li>
+      <li>Extensible Python plugin system: MenuProvider, NavigationHook, FileFilter</li>
+      <li>Back/forward navigation history</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">qfileman.desktop</launchable>
+  <provides>
+    <binary>qfileman</binary>
+  </provides>
+  <categories>
+    <category>Qt</category>
+    <category>Utility</category>
+    <category>FileManager</category>
+    <category>System</category>
+  </categories>
+  <url type="homepage">https://github.com/qdistro/qdfileman</url>
+  <url type="bugtracker">https://github.com/qdistro/qdfileman/issues</url>
+  <developer_name>QDistro</developer_name>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-05-14">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

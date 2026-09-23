@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qfileman"
+version = "0.1.0"
+description = "Qt file manager with plugin support, inspired by qnotebook and qterminator"
+license = "GPL-3.0-only"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.5",
+    "tomli_w>=1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-qt>=4.2",
+]
+
+[project.scripts]
+qfileman = "qfileman.__main__:main"
+
+# Desktop integration assets (.desktop launcher, AppStream metainfo, icon).
+# Without these a source/wheel install gives a CLI wrapper but never registers
+# qfileman in the shell launcher, AppStream catalog, or icon theme. data-files
+# lands them under <prefix>/share/... for both `pip install --prefix=...` and
+# wheel installs, so the packaging dry-run can assert they exist.
+[tool.setuptools.data-files]
+"share/applications" = ["qfileman.desktop"]
+"share/metainfo" = ["qfileman.metainfo.xml"]
+"share/icons/hicolor/scalable/apps" = ["icons/qfileman.svg"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qfileman*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyqt6"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length is enforced by the formatter, not the linter
+    "B008",  # function calls in argument defaults are fine for our Qt code
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts are intentional in tests

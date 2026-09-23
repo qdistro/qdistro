@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="folder" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5294e2"/>
+      <stop offset="100%" stop-color="#2c5aa0"/>
+    </linearGradient>
+    <linearGradient id="tab" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7eb3eb"/>
+      <stop offset="100%" stop-color="#4476c7"/>
+    </linearGradient>
+  </defs>
+  <!-- back tab -->
+  <path d="M 16 32 L 48 32 L 56 40 L 112 40 L 112 52 L 16 52 Z"
+        fill="url(#tab)" stroke="#1d3f70" stroke-width="1.5"/>
+  <!-- folder body -->
+  <rect x="16" y="44" width="96" height="64" rx="4" ry="4"
+        fill="url(#folder)" stroke="#1d3f70" stroke-width="1.5"/>
+  <!-- file lines inside -->
+  <rect x="28" y="60" width="48" height="4" rx="1.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="28" y="72" width="64" height="4" rx="1.5" fill="#ffffff" opacity="0.75"/>
+  <rect x="28" y="84" width="40" height="4" rx="1.5" fill="#ffffff" opacity="0.65"/>
+  <rect x="28" y="96" width="56" height="4" rx="1.5" fill="#ffffff" opacity="0.55"/>
+</svg>
