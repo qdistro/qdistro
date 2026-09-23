@@ -11,8 +11,8 @@ whitespace before this guard existed. So we pin the load-bearing functions to be
 byte-identical. Surrounding, legitimately-different content (qdistro's extra
 `no_attest` marker, each file's own header comment + fixtures) is NOT compared.
 
-Skips loudly if the qdshell sibling is not checked out (the qci/bats lane
-guarantees the sibling layout; the standalone host lane may not have it).
+Skips loudly if qdshell/ is missing from the tree (e.g. the file is exported
+without the rest of the repository).
 """
 from __future__ import annotations
 
@@ -21,10 +21,12 @@ from pathlib import Path
 
 import pytest
 
-# qdistro/tests/unit/test_cheat_aware_sync.py -> umbrella root == parents[3]
-UMBRELLA = Path(__file__).resolve().parents[3]
+# tests/unit/test_cheat_aware_sync.py -> repository root == parents[2]; qdshell
+# is an in-tree component of it (monorepo). The pre-monorepo parents[3] (the
+# workspace above the repo) no longer holds qdshell, so the guard SKIPPED.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 QDISTRO_CONFTEST = Path(__file__).resolve().parent / "conftest.py"
-QDSHELL_CONFTEST = UMBRELLA / "qdshell" / "tests" / "ui" / "conftest.py"
+QDSHELL_CONFTEST = REPO_ROOT / "qdshell" / "tests" / "ui" / "conftest.py"
 
 # The functions that MUST stay identical (the marker report machinery).
 SHARED_FUNCS = ("_format_cheat_aware_block", "pytest_runtest_makereport")
@@ -45,8 +47,8 @@ def _extract_funcs(path: Path) -> dict[str, str]:
 def test_cheat_aware_helpers_are_byte_identical_across_repos():
     if not QDSHELL_CONFTEST.exists():
         pytest.skip(
-            f"qdshell sibling conftest not found at {QDSHELL_CONFTEST} — "
-            "the integrated qci/bats lane guarantees the sibling layout."
+            f"qdshell conftest not found at {QDSHELL_CONFTEST} — "
+            "qdshell/ is an in-tree component of this repository."
         )
 
     canonical = _extract_funcs(QDISTRO_CONFTEST)
