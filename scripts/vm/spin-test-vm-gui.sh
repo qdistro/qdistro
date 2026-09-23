@@ -538,6 +538,15 @@ RestartSec=2
 WantedBy=default.target
 EOF2
 chown -R admin:users /home/admin/.config/systemd/user
+
+# 8a. spice-vdagent must be absent: fresh-vm-bootstrap.sh §0c removes and
+#     locks it (it rides in on xwayland's supplements). Under labwc,
+#     lxqt-session autostarts it and it loops on the missing Mutter API
+#     (~500k journal lines / 3 min), so fail closed if the lock was bypassed.
+if rpm -q spice-vdagent >/dev/null 2>&1; then
+    echo "[gui-spin] ERROR: spice-vdagent is installed despite the zypper lock (fresh-vm-bootstrap.sh §0c)" >&2
+    exit 1
+fi
 fi  # end labwc-only steps 6-8
 
 # 8b. Display-resolution fix — make virtio_gpu the DRM driver instead
@@ -626,10 +635,16 @@ systemctl mask greetd.service 2>/dev/null || true
 if [ "$SESSION" = labwc ]; then
     # labwc: admin's lingering user manager starts labwc on wayland-0; the
     # qdwin session units would race it for the DRM seat, so disable them.
+    # qdlocker.service too: it binds qdwin_locker_v1 on wayland-1 and cannot
+    # run under labwc. Older qdlocker units were WantedBy=default.target, so a
+    # base built with one carries a default.target.wants link that started the
+    # locker here and crash-looped it every 2s for the life of the VM (qci
+    # 2026-09-23: 92 restarts/3 min, coredump spam, journald suppressing the
+    # admin session's messages). `disable` removes every enablement link.
     systemctl set-default multi-user.target >/dev/null
     systemctl daemon-reload
     systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
-    runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service 2>/dev/null' || true
+    runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service 2>/dev/null' || true
     runuser -l admin -c 'systemctl --user daemon-reload'
     runuser -l admin -c 'systemctl --user enable --now qdistro-labwc.service'
 
