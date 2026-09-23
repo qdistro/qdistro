@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdbrowser"
+version = "0.1.0"
+description = "Qt-based feature-rich web browser, sibling of qterminator"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.5",
+    "PyQt6-WebEngine>=6.5",
+    # pwd_autofill.py's production RPC client. Pure-Python so the
+    # browser stays C-extension-free; same dep the daemon-side
+    # qdistro_browser_bridge module uses to talk back.
+    "jeepney>=0.8",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+test = ["pytest>=7.0", "pytest-qt>=4.0", "Pillow"]
+
+[project.scripts]
+qdbrowser = "qdbrowser.__main__:main"
+qdbrowser-mcp = "qdbrowser.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qdbrowser*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyqt6"
+# QtWebEngine emits internal "TypeError: 'NoneType' object is not callable"
+# during destruction (signals firing after Python-side weakrefs cleared).
+# These are harmless; disable pytest-qt's exception capture for them.
+qt_log_level_fail = "NO"

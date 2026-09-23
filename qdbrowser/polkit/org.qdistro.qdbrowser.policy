@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Track 02 — qdbrowser bridge adapter polkit policy.
+
+  Per-operation actions for the inbound D-Bus surface exposed by the
+  qdbrowser bridge_adapter plugin. The adapter validates each daemon-
+  initiated call against the matching action via `pkcheck` before
+  honouring it.
+
+  Auth retention follows the precedent set by qdistro-pwd: only
+  "burst" actions (open/close during an admin-panel session) get
+  auth_admin_keep. Read-only inventory methods are unauthenticated.
+  Cookies export gets fresh consent per call — no retain.
+-->
+<policyconfig>
+
+  <vendor>qdistro</vendor>
+  <vendor_url>https://qdistro.invalid/</vendor_url>
+
+  <!-- Read-only inventory: no auth gate. -->
+  <action id="org.qdistro.qdbrowser.tabs.list">
+    <description>List qdbrowser tabs</description>
+    <description xml:lang="en">List qdbrowser tabs</description>
+    <message>Read-only access to the qdbrowser tab list</message>
+    <message xml:lang="en">Read-only access to the qdbrowser tab list</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.qdistro.qdbrowser.media.status">
+    <description>Read qdbrowser media playback state</description>
+    <description xml:lang="en">Read qdbrowser media playback state</description>
+    <message>Read-only access to qdbrowser media state</message>
+    <message xml:lang="en">Read-only access to qdbrowser media state</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.qdistro.qdbrowser.downloads.list">
+    <description>List qdbrowser downloads</description>
+    <description xml:lang="en">List qdbrowser downloads</description>
+    <message>Read-only access to the qdbrowser download list</message>
+    <message xml:lang="en">Read-only access to the qdbrowser download list</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Mutating tab ops: bursty within an admin-panel session, so
+       retain authorization once granted. -->
+  <action id="org.qdistro.qdbrowser.tabs.open">
+    <description>Open a tab in qdbrowser</description>
+    <description xml:lang="en">Open a tab in qdbrowser</description>
+    <message>Authentication is required to open a tab in qdbrowser</message>
+    <message xml:lang="en">Authentication is required to open a tab in qdbrowser</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="org.qdistro.qdbrowser.tabs.close">
+    <description>Close a tab in qdbrowser</description>
+    <description xml:lang="en">Close a tab in qdbrowser</description>
+    <message>Authentication is required to close a tab in qdbrowser</message>
+    <message xml:lang="en">Authentication is required to close a tab in qdbrowser</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- Page content extraction can leak DOM contents. Fresh auth per
+       admin session, but no retain — extraction is not a burst op. -->
+  <action id="org.qdistro.qdbrowser.page.extract">
+    <description>Extract page content from a qdbrowser tab</description>
+    <description xml:lang="en">Extract page content from a qdbrowser tab</description>
+    <message>Authentication is required to extract page content from qdbrowser</message>
+    <message xml:lang="en">Authentication is required to extract page content from qdbrowser</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- Releasing a quarantined download moves the file out of the
+       sandbox into ~/Downloads. Retained for the active session so
+       batch-releasing several files doesn't re-prompt each time. -->
+  <action id="org.qdistro.qdbrowser.downloads.release">
+    <description>Release a quarantined download</description>
+    <description xml:lang="en">Release a quarantined download</description>
+    <message>Authentication is required to release a quarantined file</message>
+    <message xml:lang="en">Authentication is required to release a quarantined file</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Cookies are sensitive credential material: fresh consent
+       every time, intent-token gated even within qdbrowser. -->
+  <action id="org.qdistro.qdbrowser.cookies.export">
+    <description>Export cookies from qdbrowser</description>
+    <description xml:lang="en">Export cookies from qdbrowser</description>
+    <message>Authentication is required to export cookies from qdbrowser</message>
+    <message xml:lang="en">Authentication is required to export cookies from qdbrowser</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- History / bookmarks search expose privacy-sensitive browsing
+       metadata that can be bulk-exfiltrated (finding #12). They are no
+       longer treated as "open" read-only inventory: the active user
+       must authenticate. Inactive / remote callers require admin. -->
+  <action id="org.qdistro.qdbrowser.history.search">
+    <description>Search qdbrowser history</description>
+    <description xml:lang="en">Search qdbrowser history</description>
+    <message>Authentication is required to search qdbrowser browsing history</message>
+    <message xml:lang="en">Authentication is required to search qdbrowser browsing history</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="org.qdistro.qdbrowser.bookmarks.search">
+    <description>Search qdbrowser bookmarks</description>
+    <description xml:lang="en">Search qdbrowser bookmarks</description>
+    <message>Authentication is required to search qdbrowser bookmarks</message>
+    <message xml:lang="en">Authentication is required to search qdbrowser bookmarks</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>
