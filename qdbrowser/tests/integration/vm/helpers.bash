@@ -11,7 +11,7 @@ if [[ -z "${VM_EXEC:-}" ]]; then
     # this fell back to a sibling ../qdistro checkout.)
     _repo_root=$(git -C "$(dirname "${BATS_TEST_FILENAME}")" \
                      rev-parse --show-toplevel 2>/dev/null \
-                     || cd "$(dirname "${BATS_TEST_FILENAME}")/../../../.." && pwd)
+                     || { cd "$(dirname "${BATS_TEST_FILENAME}")/../../../.." && pwd; })
     VM_EXEC="${_repo_root}/scripts/vm/vm-exec"
 fi
 
