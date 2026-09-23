@@ -1,16 +1,16 @@
-# Self-hosted host-gate CI runner (SCAFFOLD)
+# Self-hosted host-gate CI runner (SCAFFOLD, template retired)
 
-Status: **SCAFFOLD / NOT PROVISIONED.** This document plus
-`.forgejo/workflows/host-gate.yml` are a ready-to-use template. No runner is
-registered yet; nothing runs automatically. The "Activation checklist" at the
-bottom is what a human must do to turn this on.
-
-> **Forge note (2026-07):** the project moved from Codeberg to GitHub. The
-> sibling-repo coordinates in `.forgejo/workflows/host-gate.yml` are updated to
-> the GitHub layout, but the *runner registration* steps below still describe
-> `forgejo-runner` against a Forgejo instance. Porting the runner itself to a
-> GitHub Actions self-hosted runner is a pending follow-up; whoever activates
-> this gate does that port first. Nothing here is on the install path.
+Status: **SCAFFOLD / NOT PROVISIONED.** No runner is registered; nothing runs
+automatically. The Forgejo workflow template this document was written for
+(`.forgejo/workflows/host-gate.yml`, which cloned eleven sibling repos) was
+**retired in the monorepo migration** — Codeberg/Forgejo is gone and the
+per-repo layout it assumed no longer exists. It is still readable in history
+(`git show <pre-migration main>:.forgejo/workflows/host-gate.yml`). A
+monorepo GitHub Actions workflow is a separate, deferred decision; until then
+qci (`ci/bin/qci`) is the monorepo's CI, run locally. The runner notes below
+(toolchain, security posture, activation checklist) remain valid input for
+that future workflow; where they name `host-gate.yml` or `forgejo-runner`,
+read "the future root `.github/workflows/` host-gate workflow".
 
 ## Why
 
