@@ -722,7 +722,14 @@ bg_start() {
     # comment (`echo ok  # why`) would comment out the closing `)` and the
     # status record with it, and bg_wait would then block until its deadline
     # for a job that had already finished.
-    printf -v script '{ ( eval "$QCI_BG_CMD" ) > %q %s < /dev/null; echo $? > %q; mv -f %q %q; } & echo $! > %q' \
+    # The backgrounded GROUP gets its own stdio too, not just the command in
+    # it. Otherwise the group process keeps the CALLER's stdout/stderr open for
+    # the job's whole lifetime, and qga guest-exec (capture-output) does not
+    # report the launching vm-exec finished until every holder of those pipes
+    # has closed them: a `bg_start` of a request that waits for an approval
+    # then hangs its own vm-exec until the approval that can only come after
+    # it (permissions-gui/44 and /46, full-20260922T193137Z-881799).
+    printf -v script '{ ( eval "$QCI_BG_CMD" ) > %q %s < /dev/null; echo $? > %q; mv -f %q %q; } < /dev/null > /dev/null 2>&1 & echo $! > %q' \
         "$base.log" "$errspec" "$base.rc.part" "$base.rc.part" "$base.rc" "$base.pid"
     if [ "$user" = "-" ] || [ "$user" = "$(id -un)" ]; then
         QCI_BG_CMD=$cmd bash -c "$script"

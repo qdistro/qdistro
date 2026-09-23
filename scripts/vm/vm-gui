@@ -668,6 +668,32 @@ retain_rejected_candidate() {
     return 0
 }
 
+# Tell the driver when a frame it was just handed is BYTE-IDENTICAL to a frame
+# already in the artifact tree. Diagnostic only: it changes no file, no ledger
+# row and no exit status. Why it exists: in full-20260922T193137Z-881799
+# (permissions-gui/06, /25) and again in the 2026-09-23 rerun of 06, the driver
+# graded a capture "entirely black" that was byte-for-byte the same valid frame
+# it had graded correctly one step earlier (e.g. s3-cachehit.png ==
+# s2-afterapprove.png, mean luma 138/255). Every misread frame was a repeat of
+# an earlier one, so the driver's viewer is suspected of not re-rendering a
+# repeated image. Naming the twin gives the driver something to check against.
+note_identical_frames() {
+    local out=$1 dir sum f twins=""
+    [ -f "$out" ] || return 0
+    dir=$(dirname -- "$out")
+    sum=$(sha256sum -- "$out" 2>/dev/null | awk '{print $1}') || return 0
+    [ -n "$sum" ] || return 0
+    for f in "$dir"/*.png "$dir"/click-targets/*.png; do
+        [ -f "$f" ] || continue
+        [ "$f" -ef "$out" ] && continue
+        [ "$(sha256sum -- "$f" 2>/dev/null | awk '{print $1}')" = "$sum" ] || continue
+        twins="$twins ${f#"$dir"/}"
+    done
+    [ -n "$twins" ] || return 0
+    echo "vm-gui: note: $out is BYTE-IDENTICAL to earlier capture(s):$twins -- the screen did not change between them. It is a usable, non-blank frame; if your image viewer shows it blank or black, that is the viewer not re-rendering a repeated image, not the screen. Grade it as the same picture as those files." >&2
+    return 0
+}
+
 # THE GATE ON THE PLAIN `screenshot` PATH. Before round 9 this path captured and
 # attested whatever virsh returned, so a black or corrupt frame was handed to the
 # agent looking exactly like a good one -- and an agent that OCR'd it read no
@@ -701,6 +727,7 @@ capture_usable_screenshot() {
         if [ "$rc" -eq 0 ]; then
             deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
+            note_identical_frames "$out"
             return 0
         fi
         if [ "$rc" -eq 5 ]; then
@@ -709,6 +736,7 @@ capture_usable_screenshot() {
             deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
             echo "vm-gui: WARNING: screenshot NOT checked for blankness -- $(screenshot_unusable_reason 5)" >&2
+            note_identical_frames "$out"
             return 0
         fi
         # NOT under an image extension: the gate finds frames BY EXTENSION, so

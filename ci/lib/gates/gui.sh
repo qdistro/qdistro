@@ -743,6 +743,30 @@ Rules:
   and the Steps in another, that trap fires the instant Setup's shell exits and
   silently tears down the state your Steps depend on. What then looks like a
   missing precondition is your own teardown.
+  vm-exec does NOT stream: the guest command's output reaches the host only
+  when that command EXITS. So a host-side step that must happen MID-scenario
+  (a screenshot, click, send-key) cannot be synchronised by polling the
+  running vm-exec's output for a phase marker -- the marker arrives after the
+  guest driver, teardown included, has finished, and every "mid-scenario"
+  frame is then a frame of the torn-down screen (permissions-gui/32,
+  full-20260922T193137Z-881799: all frames black because the admin app had
+  already been killed by the driver's own teardown). Instead make the guest
+  driver WAIT for a host-created marker file before each host-side step
+  (\`await_file\` on a path you \`touch\` with a separate vm-exec after the
+  capture/click), and read guest progress from files with separate short
+  vm-exec calls. Never let the driver reach its teardown before the last
+  frame the scenario asks for has been captured -- and that includes the
+  TIMEOUT path: if a wait for a host marker times out, the driver must write a
+  failure marker and STOP, leaving the app and requests in place, not fall
+  through to (or trap into) cleanup. A timed-out wait that tears down makes the
+  late capture a black frame of a killed app (permissions-gui/25, 2026-09-23
+  rerun: EXIT-trap cleanup killed the admin app at 08:31:36, captures 08:35).
+  Gate cleanup on a host marker you create only after your last capture. And
+  never start a
+  second driver while the first one's guest shell may still be alive: two
+  drivers sharing \`bg_start\` tags clobber each other's logs (permissions-gui/06,
+  2026-09-23 rerun: a surviving first driver re-ran \`bg_start work2\` and
+  emptied the second driver's work2 log).
 - Exit code follows the verdict, and the harness is strict about it:
   - PASS — every required assertion passed. Exit 0.
   - SKIP — exit 0, with \`SKIP <reason>\` in status.txt. A SKIP recorded with a
@@ -827,6 +851,13 @@ Rules:
        and your verdict is recorded ERROR — including the case where the frame
        showed something you did not like. Keep an unflattering frame and report
        FAIL; that is a correct, valuable result. Hiding it is not.
+       What this rule does NOT cover: taking a NEW capture through the tool to
+       a path the tool already wrote. The harness records both captures and
+       the later one supersedes the earlier; that is not tampering and is
+       never, by itself, a reason to record ERROR. It does throw away the
+       earlier frame, though, so when you re-run a step or the whole scenario,
+       capture to NEW names (\`s1-pending-r2.png\`, ...) and keep both attempts'
+       evidence.
   If the scenario is \`<!-- qci:visual: required -->\` and the harness
   captured nothing from this VM, your PASS or FAIL is recorded ERROR no
   matter what status.txt says. Timestamps are irrelevant — capture frames

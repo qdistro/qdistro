@@ -313,3 +313,21 @@ _render_prompt() {
     printf '%s' "$p" | grep -q 'ONE guest shell'
     printf '%s' "$p" | grep -qi 'EXIT.*trap'
 }
+
+@test "runtime prompt says vm-exec does not stream (permissions-gui/32 post-teardown frames)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'vm-exec does NOT stream'
+    printf '%s' "$p" | grep -q 'host-created marker file'
+}
+
+@test "runtime prompt: a tool re-capture to the same path is not tampering (permissions-gui/08)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'the later one supersedes the earlier'
+    printf '%s' "$p" | grep -q 'capture to NEW names'
+}
+
+@test "runtime prompt: a timed-out host-marker wait must not tear down (permissions-gui/25)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'TIMEOUT path'
+    printf '%s' "$p" | grep -q 'Gate cleanup on a host marker'
+}
