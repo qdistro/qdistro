@@ -1,0 +1,92 @@
+#!/bin/bash
+# qdistro-fake-lid-close — TEST-ONLY. Make systemd-logind itself raise
+# org.freedesktop.login1.Manager.PrepareForSleep(true/false) in a VM that has
+# no lid and must not actually suspend.
+#
+# Installed to /usr/local/bin by scripts/vm/fresh-vm-bootstrap.sh (qdlocker
+# section) for qdlocker/tests/gui/04-lid-close-lock.md, which asserts that
+# qdlocker's LogindWatcher engages the lock with reason=suspend.
+#
+# WHY NOT JUST EMIT THE SIGNAL. `gdbus emit`/`busctl emit` from this process
+# would carry THIS process's unique bus name as sender. qdlocker subscribes
+# through a dbus-next proxy for org.freedesktop.login1, whose match rule is
+# sender-scoped, so a forged signal never reaches it — correctly: a locker that
+# honoured anyone's PrepareForSleep would be a bug. The helper therefore drives
+# the REAL logind path (Manager.Suspend -> PrepareForSleep(true) -> wait for
+# delay inhibitors, which exercises qdlocker's sleep inhibitor -> suspend.target
+# -> PrepareForSleep(false)) with the one sleep step replaced by a no-op:
+#
+#   * a runtime (/run) drop-in turns systemd-suspend.service into a no-op, so
+#     the guest never sleeps and qemu-guest-agent stays reachable;
+#   * a runtime sleep.conf drop-in allows suspend and uses the `freeze` state,
+#     which a VM without ACPI S3 still advertises, so logind's CanSuspend check
+#     passes on any qemu machine type.
+#
+# Both drop-ins live under /run and are removed on exit, so nothing persists.
+# Exit 0 only after logind has completed the cycle (suspend job finished).
+set -euo pipefail
+
+TIMEOUT_S=${QDISTRO_FAKE_LID_TIMEOUT_S:-30}
+SVC_DROPIN_DIR=/run/systemd/system/systemd-suspend.service.d
+SVC_DROPIN=$SVC_DROPIN_DIR/50-qdistro-fake-lid-noop.conf
+SLEEP_DROPIN_DIR=/run/systemd/sleep.conf.d
+SLEEP_DROPIN=$SLEEP_DROPIN_DIR/50-qdistro-fake-lid.conf
+# Written by the no-op "suspend". Completion cannot be read from the unit's
+# timestamps: an inactive oneshot is garbage-collected at once and reads 0.
+RAN_MARKER=/run/qdistro-fake-lid-close.ran
+
+die() { echo "qdistro-fake-lid-close: $*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+
+cleanup() {
+    rm -f "$SVC_DROPIN" "$SLEEP_DROPIN" "$RAN_MARKER"
+    rmdir "$SVC_DROPIN_DIR" "$SLEEP_DROPIN_DIR" 2>/dev/null || true
+    systemctl daemon-reload || true
+}
+trap cleanup EXIT
+
+mkdir -p "$SVC_DROPIN_DIR" "$SLEEP_DROPIN_DIR"
+cat >"$SVC_DROPIN" <<'EOF'
+# qdistro-fake-lid-close (test-only, runtime): never actually sleep.
+[Service]
+ExecStart=
+ExecStart=/usr/bin/touch /run/qdistro-fake-lid-close.ran
+EOF
+cat >"$SLEEP_DROPIN" <<'EOF'
+# qdistro-fake-lid-close (test-only, runtime).
+[Sleep]
+AllowSuspend=yes
+SuspendState=freeze
+EOF
+systemctl daemon-reload
+
+# The no-op must be what systemd will actually run; otherwise the guest
+# really suspends and the caller loses the guest agent.
+exec_start=$(systemctl show -p ExecStart --value systemd-suspend.service)
+case "$exec_start" in
+    *"path=/usr/bin/touch "*) ;;
+    *) die "systemd-suspend.service ExecStart override not in effect: $exec_start" ;;
+esac
+
+rm -f "$RAN_MARKER"
+# Delay inhibitors (qdlocker's own) are honoured by logind: this cycle
+# exercises them. A block inhibitor is a real reason to fail, so keep checks.
+systemctl suspend \
+    || die "systemctl suspend refused (logind CanSuspend: $(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend 2>&1 || true))"
+
+deadline=$(( $(date +%s) + TIMEOUT_S ))
+while :; do
+    # Done = the no-op sleep ran, no sleep job is still queued, and logind
+    # is no longer preparing for sleep (it emits PrepareForSleep(false) as it
+    # clears this).
+    preparing=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager PreparingForSleep 2>/dev/null || echo '?')
+    if [ -e "$RAN_MARKER" ] && [ "$preparing" = "b false" ] \
+        && ! systemctl list-jobs --no-legend 2>/dev/null | grep -qE '(suspend|sleep)\.target|systemd-suspend\.service'; then
+        break
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] \
+        || die "suspend cycle did not complete within ${TIMEOUT_S}s (no-op ran: $([ -e "$RAN_MARKER" ] && echo yes || echo no); PreparingForSleep: $preparing)"
+    sleep 0.2
+done
+echo "qdistro-fake-lid-close: logind PrepareForSleep cycle completed (no-op suspend)"

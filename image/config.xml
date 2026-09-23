@@ -326,6 +326,9 @@
     <package name="rsync"/>
     <package name="python313-jeepney"/>
     <package name="python313-six"/>
+    <!-- qdbrowser's VM bats (fresh-vm-bootstrap.sh §1c); also zyppered there
+         so tester-profile bases work until a ci base is re-imported. -->
+    <package name="python313-PyQt6-WebEngine"/>
     <package name="Mesa-demo-egl"/>
     <package name="wireguard-tools"/>
     <package name="nftables"/>
