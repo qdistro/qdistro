@@ -196,12 +196,13 @@ teardown() {
 # unexplained 128/1 run was -- K8n, ~2 in 40 unshimmed, reproducible on demand
 # with a `sleep 1; exec magick` PATH shim (fable, B round 8).
 #
-# The round-9 version of this note said "the fake virsh already excluded these
-# chunks; the planters did not". NEITHER of this file's two fake-virsh
-# renderers passes `exclude-chunks` -- that sentence described a REVIEWER's
-# harness, not this suite (fable, B round 9). They are unaffected in practice
-# because each frame they render carries nanosecond text, so no two are
-# expected to match.
+# Every fake-virsh renderer in this file passes it too. install_constant_virsh
+# did not, and it is the one renderer whose two separate renders MUST match:
+# "a frame byte-identical to an earlier capture is NAMED" failed whenever its
+# two captures straddled a second boundary (baseline selftest 2026-09-23,
+# 1/848; 100% with a `sleep 1.1; exec magick` PATH shim). The nanosecond-text
+# renderers were never at risk, but carry the define so no fixture's bytes
+# depend on the wall clock.
 plant_image() {
     local rel=$1; shift
     local txt="" w
@@ -1337,7 +1338,8 @@ for a in "$@"; do
 done
 if command -v magick >/dev/null 2>&1; then
     magick -size 320x80 xc:white -pointsize 24 -fill black \
-        -annotate +10+40 "frame $(date +%s%N)" "$out" 2>/dev/null && exit 0
+        -annotate +10+40 "frame $(date +%s%N)" \
+        -define png:exclude-chunks=date,time "$out" 2>/dev/null && exit 0
 fi
 printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0\0\0\012IDATx\234c\370\17\0\1\1\1\0\30\335\215\260\0\0\0\0IEND\256B`\202' > "$out"
 printf '%s\n' "$(date +%s%N)" >> "$out"
@@ -1360,7 +1362,8 @@ out=""
 for a in "$@"; do out="$a"; done
 if command -v magick >/dev/null 2>&1; then
     magick -size 320x80 xc:white -pointsize 24 -fill black \
-        -annotate +10+40 "unchanged screen" "$out" 2>/dev/null && exit 0
+        -annotate +10+40 "unchanged screen" \
+        -define png:exclude-chunks=date,time "$out" 2>/dev/null && exit 0
 fi
 printf '\211PNG\r\n\032\nCONSTANT\n' > "$out"
 VIRSH
@@ -1512,10 +1515,11 @@ out="${@: -1}"
 n=$(cat "$QCI_TEST_ATTEMPTS" 2>/dev/null || echo 0); n=$((n + 1))
 printf '%s' "$n" > "$QCI_TEST_ATTEMPTS"
 if [ "$n" -eq 1 ]; then
-    magick -size 320x80 xc:black "$out"
+    magick -size 320x80 xc:black -define png:exclude-chunks=date,time "$out"
 else
     magick -size 320x80 xc:white -pointsize 24 -fill black \
-        -annotate +10+40 "frame $(date +%s%N)" "$out"
+        -annotate +10+40 "frame $(date +%s%N)" \
+        -define png:exclude-chunks=date,time "$out"
 fi
 EOF
     chmod +x "$TDIR/bin/virsh"
@@ -2483,7 +2487,7 @@ EOF
     if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
     cat > "$TDIR/bin/virsh" <<'EOF'
 #!/usr/bin/env bash
-magick -size 320x80 xc:'#808080' "${@: -1}"
+magick -size 320x80 xc:'#808080' -define png:exclude-chunks=date,time "${@: -1}"
 EOF
     chmod +x "$TDIR/bin/virsh"
     run vmgui_fresh "$ADIR/flat.png" "" 2
@@ -2529,7 +2533,7 @@ EOF
     if ! command -v magick >/dev/null 2>&1; then skip "no ImageMagick on this host"; fi
     cat > "$TDIR/bin/virsh" <<'EOF'
 #!/usr/bin/env bash
-magick -size 320x80 xc:black "${@: -1}"
+magick -size 320x80 xc:black -define png:exclude-chunks=date,time "${@: -1}"
 EOF
     chmod +x "$TDIR/bin/virsh"
     run vmgui_fresh "$ADIR/black.png" "" 2
