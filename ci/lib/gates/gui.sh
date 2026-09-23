@@ -760,7 +760,17 @@ Rules:
   driver WAIT for a host-created marker file before each host-side step
   (\`await_file\` on a path you \`touch\` with a separate vm-exec after the
   capture/click), and read guest progress from files with separate short
-  vm-exec calls. Never let the driver reach its teardown before the last
+  vm-exec calls.
+  \`virsh\` (\`send-key\`, \`screenshot\`), \`vm-gui\` and \`vm-exec\` are HOST
+  commands: the libvirt domain \`$vm\` does not exist INSIDE the guest. Never
+  put them in the guest driver script -- the guest has its own \`virsh\`, which
+  answers \`error: failed to get domain\` and the keystroke is silently lost,
+  so every later frame is identical and the scenario reads as "keyboard
+  navigation did not work" (permissions-gui/04, 22, 34 and 46 in
+  full-20260923T163219Z-1188602; 22 also in full-20260923T123113Z-2785403).
+  Every \`virsh send-key\` a scenario lists runs on the host, between the
+  guest's ready-marker and your go-marker, and you check its exit status.
+  Never let the driver reach its teardown before the last
   frame the scenario asks for has been captured -- and that includes the
   TIMEOUT path: if a wait for a host marker times out, the driver must write a
   failure marker and STOP, leaving the app and requests in place, not fall
