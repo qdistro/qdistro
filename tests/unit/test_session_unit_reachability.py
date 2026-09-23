@@ -55,6 +55,13 @@ _SESSION_TARGET = "qdwin-session.target"
 _DEAD_TARGET = "graphical-session.target"
 
 
+_COMPONENT_DIRS = {
+    "qdwin", "qdshell", "qdbrowser", "qdchrome-extension",
+    "qdfirefox-extension", "qdgreeter", "qdlocker", "qdfileman",
+    "qnotebook", "qdterm",
+}
+
+
 def _unit_files() -> list[Path]:
     """Every .service/.timer/.target shipped from the qdistro repo."""
     out: list[Path] = []
@@ -67,6 +74,11 @@ def _unit_files() -> list[Path]:
             rel = p.relative_to(_REPO)
             parts = set(rel.parts)
             if parts & {".git", ".worktrees", "tests", "__pycache__"}:
+                continue
+            # In-tree components (monorepo) ship their own units and are out
+            # of scope here, exactly as they were as sibling repos: qdlocker's
+            # Wants= is the known out-of-repo activator pinned below.
+            if rel.parts[0] in _COMPONENT_DIRS:
                 continue
             # image/root/root/ is the rsynced sibling-source overlay the kiwi
             # build stages (gitignored; present only in a checkout that has
@@ -163,13 +175,13 @@ def test_nothing_in_THIS_repo_activates_graphical_session_target():
 def test_the_qdlocker_incidental_activator_is_still_the_only_one():
     """Pin the one known out-of-repo activator, so it stays a known fact.
 
-    Skipped when the sibling checkout is absent (CI lanes that clone only
-    qdistro), which is precisely why it cannot be the *only* protection —
-    the rule the suite actually enforces is the in-repo one above.
+    qdlocker is an in-tree component since the monorepo migration (it was a
+    sibling checkout, and this test skipped when that was absent). The rule
+    the suite enforces for units it ships is still the in-repo one above.
     """
-    sibling = _REPO.parent / "qdlocker" / "systemd" / "qdlocker.service"
+    sibling = _REPO / "qdlocker" / "systemd" / "qdlocker.service"
     if not sibling.is_file():
-        pytest.skip(f"sibling qdlocker checkout not present at {sibling}")
+        pytest.skip(f"qdlocker component not present at {sibling}")
     wants = " ".join(_values(sibling, "Unit", "Wants"))
     assert _DEAD_TARGET in wants, (
         "qdlocker no longer Wants=graphical-session.target. That was the ONLY "

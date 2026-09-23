@@ -50,7 +50,7 @@ _UNIT = _REPO / "session_manager" / "qdistro-podapp@.service"
 _SPAWN = _REPO / "tier2" / "spawn-tier2.sh"
 _DBUS_CONF = _REPO / "session_manager" / "org.qdistro.SessionManager1.conf"
 _INSTALL = _REPO / "scripts" / "install" / "install-session-manager.sh"
-_PODAPPS_QML = (_REPO.parent / "qdshell" / "Services" / "Qdistro"
+_PODAPPS_QML = (_REPO / "qdshell" / "Services" / "Qdistro"   # in-tree component
                 / "PodApps.qml")
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")

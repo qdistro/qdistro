@@ -247,8 +247,9 @@ class TestDaemonNamesAdapter:
     on the bus."""
 
     def test_pwd1_name_present_in_adapter_probe(self):
+        # Monorepo: qdbrowser is an in-tree component of this repository.
         adapter_path = (Path(__file__).resolve().parent.parent.parent
-                        .parent / "qdbrowser" / "qdbrowser"
+                        / "qdbrowser" / "qdbrowser"
                         / "plugins" / "bridge_adapter.py")
         if not adapter_path.is_file():
             pytest.skip("qdbrowser/qdbrowser/plugins/bridge_adapter.py "

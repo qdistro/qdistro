@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 XML_PATH = (
-    Path(__file__).resolve().parents[2]
-    .parent / "qdwin" / "qdwin" / "qdwin-shell-v1.xml"
+    Path(__file__).resolve().parents[2]   # monorepo root; qdwin/ is in-tree
+    / "qdwin" / "qdwin" / "qdwin-shell-v1.xml"
 )
 
 
@@ -81,7 +81,7 @@ def test_modifier_bits_match_c_handler() -> None:
     """
     src = (
         Path(__file__).resolve().parents[2]
-        .parent / "qdwin" / "qdwin" / "qdwin.c"
+        / "qdwin" / "qdwin" / "qdwin.c"
     ).read_text()
     # Each line of the form `if (mods & N) wmods |= MODIFIER_X;` must
     # appear exactly once with the expected bit→name pairing.

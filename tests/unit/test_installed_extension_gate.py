@@ -55,7 +55,9 @@ def _sibling(name: str) -> Path | None:
     if override:
         cand = Path(override) / name
         return cand if (cand / "package.json").is_file() else None
-    for up in (REPO_ROOT.parent, REPO_ROOT.parent.parent):
+    # Monorepo: the extensions are in-tree components of REPO_ROOT (the old
+    # parent / grandparent candidates would reach a stale legacy checkout).
+    for up in (REPO_ROOT,):
         cand = up / name
         if (cand / "package.json").is_file() and (cand / "src").is_dir():
             return cand

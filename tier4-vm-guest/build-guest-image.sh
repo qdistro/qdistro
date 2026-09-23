@@ -66,7 +66,8 @@ Options:
   --dest PATH    Output path
                  (default /var/lib/libvirt/images/qdistro-tier4-guest.qcow2).
   --qdwin-src P  Path to the qdwin source checkout to compile with
-                 role=guest. Default: ../../qdwin relative to this script.
+                 role=guest. Default: ../qdwin relative to this script
+                 (the in-tree qdwin component of the monorepo).
   --qdistro-src P
                  Path to the qdistro source checkout used to compile
                  qdistro-forward. Default: this repository root.
@@ -88,7 +89,7 @@ FORCE=0
 DEST=/var/lib/libvirt/images/qdistro-tier4-guest.qcow2
 MIRROR=https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-QDWIN_SRC="$(cd "$SCRIPT_DIR/../../qdwin" 2>/dev/null && pwd || echo '')"
+QDWIN_SRC="$(cd "$SCRIPT_DIR/../qdwin" 2>/dev/null && pwd || echo '')"
 QDISTRO_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 while [ $# -gt 0 ]; do

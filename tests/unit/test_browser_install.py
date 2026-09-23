@@ -36,14 +36,14 @@ RETIRED_BUNDLED_GECKO_ID = "qdistro@qdistro.local"
 # qdfirefox-extension repo) — now the ONLY canonical Firefox artifact.
 STANDALONE_GECKO_ID = "qdistro-firefox@qdistro.local"
 
-# Canonical standalone manifest in the sibling qdfirefox-extension repo.
-# Checked by the cross-repo contract test when present.
+# Canonical standalone manifest in the in-tree qdfirefox-extension component
+# (monorepo; parents[2] is the repo root). Checked first: the old
+# parents[3] candidate (the workspace above the repo) would now resolve a
+# stale legacy sibling checkout ahead of the in-tree one.
 _STANDALONE_MANIFEST_CANDIDATES = [
-    Path("/home/playai/doc/qdistro2/qdfirefox-extension/manifest.json"),
-    Path(__file__).resolve().parents[3]
-    / "qdfirefox-extension" / "manifest.json",
     Path(__file__).resolve().parents[2]
     / "qdfirefox-extension" / "manifest.json",
+    Path("/home/playai/doc/qdistro2/qdfirefox-extension/manifest.json"),
 ]
 
 
@@ -191,10 +191,10 @@ def _qdchrome_repo_candidates() -> list[Path]:
     if env:
         cands.append(Path(env))
     here = Path(__file__).resolve()
-    # tests/unit/<file> -> repo root is parents[2]; its parent is the
-    # workspace dir that holds the sibling repos / worktrees.
-    for up in (here.parents[3], here.parents[2]):
-        cands.append(up / "qdchrome-extension")
+    # tests/unit/<file> -> repo root is parents[2]; qdchrome-extension is an
+    # in-tree component of it (monorepo). The old parents[3] candidate (the
+    # workspace above the repo) would now find a stale legacy checkout first.
+    cands.append(here.parents[2] / "qdchrome-extension")
     cands.append(Path("/home/playai/doc/qdistro2/qdchrome-extension"))
     return cands
 

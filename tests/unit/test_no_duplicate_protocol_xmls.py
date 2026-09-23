@@ -33,11 +33,20 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
-# This file: qdistro/tests/unit/test_no_duplicate_protocol_xmls.py
-# Umbrella root:                 ../../../..
-UMBRELLA = Path(__file__).resolve().parents[3]
+# This file: <monorepo>/tests/unit/test_no_duplicate_protocol_xmls.py
+# Monorepo root: ../../.. -- qdistro's own content at the root, the components
+# (qdwin/, qdshell/, qdlocker/, ...) in-tree beside it. (Before the monorepo
+# migration this was the parent "umbrella" of sibling checkouts.)
+UMBRELLA = Path(__file__).resolve().parents[2]
 
 REPO_DIRS = ["qdwin", "qdistro", "qdshell", "qdlocker"]
+# Every in-tree component dir: excluded from the "qdistro" (root) scan so a
+# component's XMLs are counted once, under its own entry (or not at all).
+COMPONENT_DIRS = {
+    "qdwin", "qdshell", "qdbrowser", "qdchrome-extension",
+    "qdfirefox-extension", "qdgreeter", "qdlocker", "qdfileman",
+    "qnotebook", "qdterm",
+}
 
 # Subdirectories that hold third-party or out-of-scope content. Skipped
 # during the scan to avoid false positives from vendored test fixtures
@@ -65,7 +74,7 @@ def find_protocol_xmls() -> dict[str, list[Path]]:
     """Map protocol-name -> list of XML paths that define it."""
     found: dict[str, list[Path]] = defaultdict(list)
     for repo in REPO_DIRS:
-        root = UMBRELLA / repo
+        root = UMBRELLA if repo == "qdistro" else UMBRELLA / repo
         if not root.is_dir():
             continue
         for xml in root.rglob("*.xml"):
@@ -74,6 +83,9 @@ def find_protocol_xmls() -> dict[str, list[Path]]:
             # that has built an image): copies of the other repos, not code.
             rel = xml.relative_to(root).parts
             if repo == "qdistro" and rel[:3] == ("image", "root", "root"):
+                continue
+            if repo == "qdistro" and rel and (rel[0] in COMPONENT_DIRS
+                                              or rel[0] == ".worktrees"):
                 continue
             if any(part in EXCLUDE_PARTS for part in xml.parts):
                 continue
