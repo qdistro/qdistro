@@ -297,6 +297,16 @@ qdwin_apps_prepare_shell_probe \
     || { echo "ERROR: could not reserve the singleton shell role"; exit 1; }
 trap 'qd22_cleanup' EXIT
 
+# PRECONDITION (lane): the seat must ADVERTISE a pointer before S1/S3 ask for
+# one. libweston 16 adds the pointer capability lazily, on a pointer device's
+# first event, so a fresh worker whose tablet never moved advertises a
+# keyboard-only seat and the probe exits 77 "no pointer on the seat" even on
+# the DRM session (the ERROR every run hit until 2026-09-23). Park the pointer
+# in the bottom-right corner — outside the proxy's 800x600 placement at
+# (240,100) — AFTER qdshell is stopped, so nothing reacts to the hover.
+qdwin_prime_pointer \
+    || { echo "ERROR: could not inject the pointer-priming motion over QMP"; exit 1; }
+
 # LANE CONSTRAINT: S3's click target is computed against ONE NAMED output —
 # $QD22_OUTPUT, the DRM scanout head the injected pointer actually lands on.
 # The probe binds every wl_output, selects that one by name, maps the proxy's
@@ -366,8 +376,10 @@ move-drag; compositor alive`.
 **Assert (1.3):** the journal after `$CURSOR` shows no `qdwin: ` line containing
 `SIGSEGV`, `use-after-free`, or `assertion`.
 
-`rc=77` here means the seat has no pointer (a headless backend). On the DRM VM
-session that is an environment fault: report ERROR.
+`rc=77` here means the seat advertises no pointer: a headless backend, or a
+libweston-16 seat whose pointer devices have sent no event yet (Setup's
+`qdwin_prime_pointer` exists to rule that out). On the DRM VM session, after
+priming, that is an environment fault: report ERROR.
 
 ## S2 — destroy under a LIVE view_stream
 

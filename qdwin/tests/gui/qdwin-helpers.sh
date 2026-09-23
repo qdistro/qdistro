@@ -474,6 +474,29 @@ qdwin_mouse_move() {
         ]}}" >/dev/null
 }
 
+# Make the seat advertise its pointer capability without clicking anything.
+#
+# libweston 16 (the J29 migration) adds WL_SEAT_CAPABILITY_POINTER LAZILY: a
+# libinput pointer device only calls weston_seat_init_pointer() from its first
+# motion/button/axis event (ensure_pointer_capability() in
+# libweston/libinput-device.c), not when the device is added. A freshly booted
+# worker whose tablet has never moved therefore advertises wl_seat
+# capabilities=2 (keyboard only), and anything that asks "is there a pointer?"
+# before the first injected event — qdwin-nested-probe's --destroy-with-move /
+# --destroy-with-popup, the compositor's begin_interactive_move — sees none.
+# Scenarios that click or move first never notice; ones that need the pointer
+# before their first injection must call this. Two distinct positions, because
+# QEMU's tablet sends nothing for a move to where it already is, and a seat
+# disable/enable (VT switch) re-adds the devices without the capability again.
+# The corner is outside the probe proxy's placement (240,100 800x600).
+qdwin_prime_pointer() {
+    qdwin_require_vm
+    qdwin_mouse_move $(( QDWIN_SCREEN_W - 4 )) $(( QDWIN_SCREEN_H - 4 )) || return 1
+    sleep 0.2
+    qdwin_mouse_move $(( QDWIN_SCREEN_W - 2 )) $(( QDWIN_SCREEN_H - 2 )) || return 1
+    sleep 0.2
+}
+
 # Send a mouse button event (left/middle/right) without moving.
 qdwin_mouse_button() {
     qdwin_require_vm
