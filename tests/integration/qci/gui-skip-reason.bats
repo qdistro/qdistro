@@ -331,3 +331,12 @@ _render_prompt() {
     printf '%s' "$p" | grep -q 'TIMEOUT path'
     printf '%s' "$p" | grep -q 'Gate cleanup on a host marker'
 }
+
+@test "runtime prompt: virsh/vm-gui/vm-exec are host commands, never in the guest driver (permissions-gui/22)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'are HOST'
+    printf '%s' "$p" | grep -q 'does not exist INSIDE the guest'
+    printf '%s' "$p" | grep -q 'failed to get domain'
+    # The domain it names must be the real VM, not an unexpanded variable.
+    printf '%s' "$p" | grep -q 'libvirt domain `qci-vm-1`'
+}

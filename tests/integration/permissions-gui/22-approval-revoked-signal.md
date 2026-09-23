@@ -112,6 +112,15 @@ selected. Only once the row is selected and `btn_revoke` is focused do we arm
 the D-Bus subscriber and then press **Space** — so the subscriber's timeout
 covers just the revoke, not the GUI choreography that precedes it.
 
+**Where each command runs.** Every `virsh send-key` and `$VMGUI screenshot`
+line below is a HOST command: the libvirt domain `$VM` exists only on the host.
+Inside the guest, `virsh` answers `error: failed to get domain` and the key is
+silently lost, which leaves all four frames identical (the 2026-09-23 baseline
+and candidate failures). Only the `$VMEXEC` lines run in the guest. If you
+drive the guest from one long-running driver script, the driver touches a
+ready-marker and waits; the host then sends the keys (checking each exit
+status), takes the screenshot, and touches the go-marker.
+
 ```bash
 # Re-focus the window so the evdev send-key events land on it.
 B64=$(base64 -w0 <<'EOF'
@@ -122,6 +131,7 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 0.5
 
+# HOST from here: every virsh line is run by the host, never the guest.
 # Shift+Tab: Pending list -> tab bar.
 virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_TAB
 sleep 0.3
