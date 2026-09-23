@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdgreeter"
+version = "0.1.0"
+description = "qdistro boot greeter — graphical replacement for tuigreet"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.6",
+]
+
+[project.scripts]
+qdgreeter = "qdgreeter.app:main"
+
+[tool.setuptools.packages.find]
+include = ["qdgreeter*"]
+
+[tool.setuptools.package-data]
+# Ship the QML with the wheel. Globs are relative to the package directory
+# (`qdgreeter/`); a path that escapes the package (`../qml/...`) is silently
+# dropped by setuptools, which is how the greeter used to ship without its UI.
+qdgreeter = [
+    "qml/*.qml",
+    "qml/shim/*.qml",
+    "qml/shim/qmldir",
+]
+
+[tool.pytest.ini_options]
+# pytest-qt otherwise auto-imports PySide6 first if it's installed
+# anywhere on the path, which loads PySide6's bundled libQt6Core.so
+# and then breaks the subsequent PyQt6 import with a missing
+# Qt_*_PRIVATE_API symbol error.
+qt_api = "pyqt6"

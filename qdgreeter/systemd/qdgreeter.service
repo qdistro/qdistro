@@ -1,0 +1,47 @@
+[Unit]
+Description=qdistro boot greeter
+# greetd invokes qdgreeter directly via its 'greeter' config field;
+# this unit is here for diagnostic / debug runs (`systemd-run --user
+# qdgreeter` to test the QML outside the greetd handshake). For the
+# production path, see /etc/greetd/config.toml:
+#   [default_session]
+#   command = "qdgreeter"
+#   user = "_greeter"
+# (Per qdistro/doc/sessions.md: this is the tty3 entry. tty3 is the only
+# interactive qdistro login; recovery is via GRUB, not a tty2 text greeter.)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qdgreeter
+Environment=QT_QPA_PLATFORM=wayland
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+# Finding 02: this is a DEBUG/diagnostic unit (production runs qdgreeter via
+# greetd's [default_session], not this), but it ships runnable, so confine it to
+# at least the TCB baseline the locker carries — a stray `systemctl enable` must
+# not hand a pre-auth, raw-input, PAM-touching greeter an under-sandboxed unit.
+# Unlike the production path this runs the greeter standalone (not under greetd),
+# so PrivateNetwork=yes is safe here.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The greeter writes its eglfs KMS cursor config under XDG_RUNTIME_DIR (/run)
+# and needs the DRM render nodes under /dev; ProtectSystem=strict makes those
+# read-only, so re-open exactly those (mirrors the production greetd drop-in).
+ReadWritePaths=/run /dev
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# The greeter handles a pre-auth password buffer in a Python str (cannot be
+# zeroed); disable core dumps so a crash cannot spill it (matches qdlocker 07).
+LimitCORE=0
+# Refuse user-site shims (a malicious ~/.local pam.py would otherwise shadow the
+# system python-pam at import); matches qdlocker.
+Environment=PYTHONNOUSERSITE=1
