@@ -1351,6 +1351,45 @@ vmgui_screenshot() {
         "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot "$1"
 }
 
+install_constant_virsh() {
+    # Every capture returns the SAME bytes: an unchanged screen.
+    cat > "$TDIR/bin/virsh" <<'VIRSH'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+for a in "$@"; do out="$a"; done
+if command -v magick >/dev/null 2>&1; then
+    magick -size 320x80 xc:white -pointsize 24 -fill black \
+        -annotate +10+40 "unchanged screen" "$out" 2>/dev/null && exit 0
+fi
+printf '\211PNG\r\n\032\nCONSTANT\n' > "$out"
+VIRSH
+    chmod +x "$TDIR/bin/virsh"
+}
+
+@test "vm-gui: a frame byte-identical to an earlier capture is NAMED as such (06/25 misread)" {
+    install_constant_virsh
+    run vmgui_screenshot "$ADIR/s2-after.png"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BYTE-IDENTICAL"* ]]
+    run vmgui_screenshot "$ADIR/s3-cachehit.png"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"BYTE-IDENTICAL"* ]]
+    [[ "$output" == *"s2-after.png"* ]]
+    # Diagnostic only: the frame is still delivered and attested in-tree.
+    [ -f "$ADIR/s3-cachehit.png" ]
+    run awk -F'\t' -v p="$ADIR/s3-cachehit.png" '$4 == "in-tree" && $7 == p { found = 1 } END { exit !found }' "$CAPLOG"
+    [ "$status" -eq 0 ]
+}
+
+@test "vm-gui: a CHANGED frame is not reported identical" {
+    install_fake_virsh
+    run vmgui_screenshot "$ADIR/a.png"
+    run vmgui_screenshot "$ADIR/b.png"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BYTE-IDENTICAL"* ]]
+}
+
 @test "vm-gui: the DELIVERED frame gets an in-tree ledger row" {
     install_fake_virsh
     run vmgui_screenshot "$ADIR/s1.png"
