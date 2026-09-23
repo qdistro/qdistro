@@ -1,39 +1,48 @@
 [Unit]
 Description=qdistro screen locker (qdlocker)
 Documentation=https://github.com/qdistro/qdlocker
-# Peer to the shell — comes up alongside it, not after it. We use
-# After= (ordering only, not a hard dep) on the user-session unit
-# because qdshell may be slow to start and we don't want to block the
-# locker behind it. Requires= on a system unit (qdwin.service) from a
-# --user unit is silently ignored by systemd, so we don't bother.
-# Wants= makes systemd actually try to start us when the session
-# target is activated; PartOf= propagates stop/restart so we go
-# down cleanly on logout.
+# Peer to the shell — comes up alongside it, not after it (qdshell may be
+# slow to start; the locker must not be blocked behind it). Wants= keeps the
+# historical graphical-session.target pull-in.
 Wants=graphical-session.target
-PartOf=graphical-session.target
-# Ordering: come up after qdwin's compositor unit has advertised the
-# qdwin_locker_v1 global. The Requires= form is intentionally NOT
-# used — qdlocker has Restart=always and will re-attempt the
-# connection if qdwin isn't ready, which is the documented fail-safe.
-# qdlocker exits non-zero when it cannot bind qdwin_locker_v1 (a
-# locker that never bound cannot drive the lock), so Restart=always +
-# RestartSec below provide exactly this backoff-retry; a persistent
-# bind failure stays visible in the journal instead of a live-but-
-# useless detached process masking the breakage.
+#
+# SESSION SCOPE — qdlocker only runs inside a qdwin session. It binds the
+# qdwin-only qdwin_locker_v1 global on the pinned WAYLAND_DISPLAY below, so on
+# any other compositor (the labwc/lxqt admin CI lane on wayland-0, a bare
+# default.target with no desktop) it cannot possibly work. Enabling it under
+# default.target used to start it in exactly those sessions, where it
+# crash-looped every RestartSec forever ("Failed to create wl_display", ~30
+# restarts/min, a coredump each, journald dropping the session's messages).
+#
+#   - Requisite=qdwin-compositor.service: start ONLY if the qdwin compositor
+#     is already active (or being started in the same transaction, e.g. by
+#     qdwin-session.target). Never pulls the compositor in (unlike Requires=/
+#     BindsTo=, a stray `start qdlocker` in a labwc session cannot drag qdwin
+#     up to race the other compositor for the seat); if it is not running the
+#     start fails once with result "dependency" and is NOT auto-restarted.
+#   - After=qdwin-compositor.service: required for Requisite= to be evaluated
+#     after the compositor's start job, and so qdwin_locker_v1 is advertised
+#     before we connect (the ExecStartPre socket wait covers the Type=simple
+#     compositor's socket-creation gap).
+#   - PartOf=qdwin-compositor.service: a compositor stop/restart stops/restarts
+#     the locker cleanly instead of leaving it to crash on a dead socket.
+#
+# Enablement: WantedBy=qdwin-session.target only (see the Install section).
+Requisite=qdwin-compositor.service
+PartOf=qdwin-compositor.service
 After=graphical-session.target qdwin-compositor.service
-# Disable systemd's start-limit-hit gate. Qt's wayland platform plugin
-# qFatals (SIGABRT) when $WAYLAND_DISPLAY isn't accepting connections
-# at QGuiApplication() construction — a transient condition during
-# session bring-up and any restart that races qdwin/weston. With the
-# default StartLimitBurst=5 / StartLimitIntervalSec=10s, five such
-# crashes within 10 s permanently park the unit in `failed
-# (start-limit-hit)` until a manual `systemctl reset-failed`, which
-# silently breaks the "Restart=always re-attempts forever" contract
-# the [Service] block below relies on. Setting
-# StartLimitIntervalSec=0 disables the gate entirely; the unit will
-# keep retrying every RestartSec=2s indefinitely, which matches the
-# stated fail-safe and prevents s103-locker-idle from observing a
-# stale ctrl socket after Test 1's restart hop.
+#
+# UNBOUNDED RESTART, on purpose. Restart=always (below) with the start limit
+# disabled: the locker is the thing that lets a locked session unlock, and a
+# unit parked in start-limit-hit is never restarted again by systemd (the
+# limit window expiring does not schedule a new start). A parked locker while
+# locked strands the session behind qdwin's fail-secure curtain; while
+# unlocked, the next lock has no locker. So the unit must keep retrying for
+# as long as the qdwin session lives. The labwc crash loop this unit once
+# caused is prevented by SESSION SCOPE above (Requisite= fails once, with
+# result "dependency", which Restart= does not retry), not by a start limit.
+# (A finite 10/60 s limit was tried on fix/qci-260923-lockerloop and dropped
+# after review: todo/reviews/qci-260923-fixes-sol-review.md item 1.)
 StartLimitIntervalSec=0
 
 [Service]
@@ -42,6 +51,13 @@ StartLimitIntervalSec=0
 # process never notified, so systemd held the unit `activating` until
 # TimeoutStartSec.
 Type=simple
+# Wait (bounded, ~10 s) for the compositor's socket: qdwin-compositor is
+# Type=simple, so it is "active" before wayland-1 exists, and Qt's wayland
+# plugin qFatals if the socket is not there yet. Mirrors qdshell.service's
+# ExecStartPre. Uses the WAYLAND_DISPLAY / XDG_RUNTIME_DIR pinned below;
+# `$$` is systemd's escape for a literal `$` so the shell, not systemd,
+# expands them.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -S "$$XDG_RUNTIME_DIR/$$WAYLAND_DISPLAY" ]; do i=$$((i+1)); [ $$i -gt 40 ] && exit 1; sleep 0.25; done'
 # CANONICAL ExecStart for an unprefixed `pip install` (--prefix=/usr/local).
 # qdistro's installers pip-install qdlocker with --prefix=/usr, which lands the
 # console_script at /usr/bin/qdlocker, so BOTH installers MUST rewrite this line
@@ -131,17 +147,16 @@ Restart=always
 RestartSec=2
 
 [Install]
-# default.target for the user manager is the right target for an
-# always-on user service. PartOf=graphical-session.target above ties
-# our lifetime to the session so we go down cleanly on logout.
+# qdwin-session.target ONLY. It is the qdwin desktop session in every path:
+# production (greetd -> qdwin-session-launcher -> `systemctl --user start
+# qdwin-session.target`), the image (config.sh writes the .wants symlink
+# directly) and the test VMs (fresh-vm-bootstrap enables the target under
+# default.target and `systemctl --user enable qdlocker.service` lands the
+# .wants symlink here). The target also declares Wants=qdlocker.service.
 #
-# qdwin-session.target is the production qdistro desktop session
-# (greetd -> qdwin-session-launcher -> `systemctl --user start
-# qdwin-session.target`). The session target also Wants= this unit, so
-# the locker comes up with the desktop; declaring it WantedBy= here means
-# `systemctl --user enable qdlocker.service` installs the .wants symlink
-# under qdwin-session.target.wants/ in addition to default.target.wants/,
-# making qdlocker a first-class member of the qdwin-session deployment
-# path (finding #16). Keeping default.target too preserves the
-# standalone/test-VM bring-up that does not use a session target.
-WantedBy=default.target qdwin-session.target
+# default.target was dropped deliberately: it started the locker in sessions
+# with no qdwin (the labwc admin lane), where it crash-looped forever. An
+# older install may still carry a stale default.target.wants/qdlocker.service
+# symlink; Requisite= above makes that a single harmless "dependency" failure
+# instead of a loop, and `systemctl --user reenable qdlocker.service` removes it.
+WantedBy=qdwin-session.target

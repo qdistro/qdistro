@@ -1,5 +1,5 @@
 """Finding #16: qdlocker must be a first-class member of the qdwin desktop
-session, not only default.target.
+session — and (qci 2026-09-23) ONLY of that session.
 
 The production qdistro session is qdwin-session.target (greetd ->
 qdwin-session-launcher). For panel lock actions and compositor-driven lock
@@ -41,13 +41,60 @@ def test_wantedby_includes_qdwin_session_target():
     )
 
 
-def test_wantedby_keeps_default_target_for_standalone():
-    """The standalone/test-VM bring-up still relies on default.target."""
+def test_not_wanted_by_default_target():
+    """qdlocker only works inside a qdwin session (it binds qdwin_locker_v1 on
+    the pinned wayland-1). WantedBy=default.target started it in sessions with
+    no qdwin — the labwc admin CI lane — where it crash-looped every
+    RestartSec forever (qci 2026-09-23: 92 restarts in ~3 min, a coredump each,
+    journald dropping the session's messages). Enablement must be scoped to
+    qdwin-session.target only."""
     cp = _parse_unit()
-    wanted_by = cp.get("Install", "WantedBy", fallback="")
-    assert "default.target" in wanted_by.split(), (
-        "default.target must remain in WantedBy= for the standalone path"
+    wanted_by = cp.get("Install", "WantedBy", fallback="").split()
+    assert "default.target" not in wanted_by, (
+        f"qdlocker.service must not be WantedBy=default.target (starts the "
+        f"locker in non-qdwin sessions -> crash loop); got {wanted_by!r}"
     )
+
+
+def _unit_values(section, key):
+    """All values of a (possibly repeated / space-separated) unit key."""
+    vals = []
+    cur = None
+    for line in UNIT.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            cur = line[1:-1]
+            continue
+        if cur == section and line.startswith(key + "="):
+            vals.extend(line[len(key) + 1:].split())
+    return vals
+
+
+def test_start_requires_running_qdwin_compositor_without_pulling_it_in():
+    """Requisite= (not Requires=/BindsTo=): a start outside a running qdwin
+    session fails once ("dependency") instead of crash-looping, and never
+    drags the qdwin compositor up in a foreign (labwc) session. After= is
+    mandatory for Requisite= to see the compositor's start job result."""
+    assert "qdwin-compositor.service" in _unit_values("Unit", "Requisite")
+    assert "qdwin-compositor.service" in _unit_values("Unit", "After")
+    for pulling in ("Requires", "BindsTo"):
+        assert "qdwin-compositor.service" not in _unit_values("Unit", pulling), (
+            f"{pulling}=qdwin-compositor.service would start qdwin from a "
+            f"stray qdlocker start in a non-qdwin session"
+        )
+
+
+def test_restart_is_never_parked_by_a_start_limit():
+    """The locker must keep restarting for the life of the qdwin session: a
+    unit in start-limit-hit is never restarted again, and a parked locker
+    strands a locked session behind qdwin's fail-secure curtain. The labwc
+    crash loop is prevented by session scope (Requisite=), not by a limit."""
+    interval = _unit_values("Unit", "StartLimitIntervalSec")
+    assert interval and interval[-1] in ("0", "infinity"), (
+        "qdlocker.service must disable the start limit (StartLimitIntervalSec=0)"
+    )
+    restart = _unit_values("Service", "Restart")
+    assert restart and restart[-1] == "always", "qdlocker.service must set Restart=always"
 
 
 def test_ordered_after_compositor_socket():
