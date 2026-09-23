@@ -690,8 +690,11 @@ qdwin_screenshot() {
     # session — a false green on the exact path this block exists to handle.
     local heal_err heal_rc
     heal_err=$(mktemp "${TMPDIR:-/tmp}/qdwin-heal.XXXXXXXX") || return 1
-    qdwin_session_healthy 2>"$heal_err"
-    heal_rc=$?
+    # `|| heal_rc=$?`, not a bare call: callers may run with errexit, and a
+    # bare nonzero return here would kill them in the very restart window
+    # this block exists to ride out (and leak $heal_err).
+    heal_rc=0
+    qdwin_session_healthy 2>"$heal_err" || heal_rc=$?
     if [ "$heal_rc" -ne 0 ]; then
         # Replay the gate's own account only if we do NOT recover below; a
         # shell restart window is not an ERROR and must not print as one.

@@ -105,9 +105,11 @@ BIND_LINE= BOUND_LINE=
 for _ in $(seq 1 40); do
     J=$("$QDWIN_VM_EXEC" "$VMNAME" \
         "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager 2>/dev/null | \
-         grep -E 'qdwin: bind accepted for uid=1000|Qdwin +qdwin_shell_v1 bound v[0-9]+'")
-    BIND_LINE=$(printf '%s\n' "$J" | grep -m1 'qdwin: bind accepted for uid=1000')
-    BOUND_LINE=$(printf '%s\n' "$J" | grep -m1 -E 'Qdwin +qdwin_shell_v1 bound v[0-9]+')
+         grep -E 'qdwin: bind accepted for uid=1000|Qdwin +qdwin_shell_v1 bound v[0-9]+'") || :
+    # `|| :` on each: no match yet is the normal first iterations, and must
+    # not abort a runner that uses `set -e` before the poll has had its 20s.
+    BIND_LINE=$(printf '%s\n' "$J" | grep -m1 'qdwin: bind accepted for uid=1000') || :
+    BOUND_LINE=$(printf '%s\n' "$J" | grep -m1 -E 'Qdwin +qdwin_shell_v1 bound v[0-9]+') || :
     [ -n "$BIND_LINE" ] && [ -n "$BOUND_LINE" ] && break
     sleep 0.5
 done
