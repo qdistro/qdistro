@@ -166,6 +166,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 **Assert**:
+- `SaveRule` reply: `string "/etc/qdistro/rules.d/42-allow-firefox.yaml"` — the
+  method returns the installed rule path (not `"ok"`).
 - First reply (`firefox`): `string "allow"`.
 - Second reply (`chrome`): `string "deny"`.
 
@@ -173,7 +175,7 @@ Audit cross-check:
 
 ```bash
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT decision, substr(source, 1, 32), rule_path FROM audit
+SELECT decision, substr(source, 1, 32), coalesce(rule_path, '') FROM audit
   WHERE action='qdistro.handoff.activate:user1:admin'
   ORDER BY id DESC LIMIT 2;
 SQL_EOF
@@ -181,7 +183,7 @@ SQL_EOF
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 ```
 
-**Assert**: two newest rows (reverse chrono):
+**Assert**: two newest rows (reverse chrono) — exactly two lines of output:
 - `0|handoff_default_deny secctx_prov|` (chrome, no rule match;
   prefix is truncated by `substr(source, 1, 32)`).
 - `1|handoff_rule secctx_provenance=l|/etc/qdistro/rules.d/42-allow-firefox.yaml`
@@ -219,6 +221,13 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 ## Notes for the runner
+
+- Run the audit SQL **verbatim** (column list, `sqlite3` default `|`
+  separator). Do not rewrite it as a `a || '|' || b || '|' || rule_path`
+  string concatenation: the default-deny row has `rule_path = NULL`, and
+  `'…' || NULL` is `NULL`, so the concatenated Chrome row prints as an **empty
+  line** and looks "missing" (full-20260922T193137Z-881799 false FAIL). The
+  S3 query wraps `rule_path` in `coalesce(…, '')` so either form is NULL-safe.
 
 - `CheckHandoffActivation` signature is `sssssb` (5 strings plus
   `identity_verified` boolean):

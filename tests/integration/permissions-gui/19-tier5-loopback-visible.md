@@ -141,7 +141,10 @@ sleep 0.3
 # `command -v ydotool` as enough (full-20260918T143937Z-3516587).
 $VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool type "echo tier5-ok"'
 sleep 0.2
-$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool key enter'
+# ydotool 1.x `key` takes raw Linux keycodes as <code>:<state> — a key NAME
+# like `enter` is silently ignored (emits no event, exits 0), which left the
+# typed command un-submitted (full-20260922T193137Z-881799). 28 = KEY_ENTER.
+$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool key 28:1 28:0'
 sleep 0.5
 $VMGUI "$VM" screenshot /tmp/s19-after-type.png
 ```
