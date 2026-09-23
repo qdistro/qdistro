@@ -1,0 +1,21 @@
+[Desktop Entry]
+Name=QTerminator
+GenericName=Terminal Emulator
+Comment=Qt terminal emulator with splits, tabs, and plugin system
+TryExec=qterminator
+Exec=qterminator
+Icon=utilities-terminal
+Type=Application
+Categories=Qt;Utility;TerminalEmulator;System;
+Keywords=terminal;shell;prompt;command;commandline;tty;
+StartupNotify=true
+StartupWMClass=qterminator
+Actions=NewWindow;NewTab;
+
+[Desktop Action NewWindow]
+Name=Open a New Window
+Exec=qterminator
+
+[Desktop Action NewTab]
+Name=Open a New Tab
+Exec=qterminator --new-tab

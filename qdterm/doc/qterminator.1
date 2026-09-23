@@ -1,0 +1,265 @@
+.TH "QTERMINATOR" "1" "2026-04-14" "QTerminator 0.1.0" "User Commands"
+.SH NAME
+qterminator \- Qt terminal emulator with splits, tabs, and plugin system
+.SH SYNOPSIS
+.B qterminator
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.PP
+\fBQTerminator\fR is a Qt port of the Terminator terminal emulator,
+built with PyQt6 and QTermWidget. It allows arranging multiple
+terminal panes in tabs and splits, with broadcast input, layout
+persistence, and an extensible Python plugin system.
+.SH OPTIONS
+.SS Window options
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show summary of options and exit.
+.TP
+\fB\-\-version\fR
+Show the QTerminator version and exit.
+.TP
+\fB\-T\fR, \fB\-\-title\fR=\fITITLE\fR
+Specify a title for the window.
+.TP
+\fB\-\-geometry\fR=\fIWxH[+X+Y]\fR
+Set the window geometry. Width and height are required;
+position offsets are optional. Example: \fI1024x768+100+50\fR.
+.TP
+\fB\-m\fR, \fB\-M\fR, \fB\-\-maximise\fR, \fB\-\-maximize\fR
+Start with a maximised window.
+.TP
+\fB\-f\fR, \fB\-\-fullscreen\fR
+Start with a fullscreen window.
+.TP
+\fB\-b\fR, \fB\-\-borderless\fR
+Render the window without borders or decorations.
+.TP
+\fB\-H\fR, \fB\-\-hidden\fR
+Hide the window at startup.
+.TP
+\fB\-r\fR, \fB\-\-role\fR=\fIROLE\fR
+Set a custom WM_WINDOW_ROLE property on the window.
+.TP
+\fB\-i\fR, \fB\-\-icon\fR=\fIPATH\fR
+Set a custom window icon (path to image file).
+.SS Terminal options
+.TP
+\fB\-d\fR, \fB\-\-working\-directory\fR=\fIDIR\fR
+Set the initial working directory for the terminal.
+.TP
+\fB\-e\fR, \fB\-\-command\fR=\fICOMMAND\fR
+Specify a single command string to execute inside the terminal.
+.TP
+\fB\-x\fR, \fB\-\-execute\fR \fICOMMAND\fR [\fIARGS\fR...]
+Use the rest of the command line as a command to execute,
+along with its arguments.
+.TP
+\fB\-p\fR, \fB\-\-profile\fR=\fIPROFILE\fR
+Use the named profile as the default for new terminals.
+.SS Layout options
+.TP
+\fB\-l\fR, \fB\-\-layout\fR=\fILAYOUT\fR
+Launch with the named saved layout.
+.TP
+\fB\-\-no\-restore\fR
+Do not restore the previous session layout.
+.SS Information
+.TP
+\fB\-\-list\-profiles\fR
+List all configured profiles and exit.
+.TP
+\fB\-\-list\-layouts\fR
+List all saved layouts and exit.
+.TP
+\fB\-\-new\-tab\fR
+Open a new tab in the running QTerminator instance (if supported).
+.SH KEYBOARD SHORTCUTS
+.SS Tabs
+.TP
+\fBCtrl+Shift+T\fR
+New tab.
+.TP
+\fBCtrl+Shift+W\fR
+Close current terminal.
+.TP
+\fBCtrl+PgUp\fR / \fBCtrl+PgDn\fR
+Previous / next tab.
+.TP
+\fBCtrl+Shift+PgUp\fR / \fBCtrl+Shift+PgDn\fR
+Move tab left / right.
+.TP
+\fBAlt+1\fR..\fBAlt+9\fR
+Switch to tab N.
+.SS Splits
+.TP
+\fBCtrl+Shift+O\fR
+Split horizontally.
+.TP
+\fBCtrl+Shift+E\fR
+Split vertically.
+.TP
+\fBAlt+Left\fR / \fBAlt+Right\fR / \fBAlt+Up\fR / \fBAlt+Down\fR
+Navigate between split panes.
+.TP
+\fBCtrl+Shift+Left\fR / \fBRight\fR / \fBUp\fR / \fBDown\fR
+Resize current split.
+.TP
+\fBMeta+R\fR
+Rotate splits.
+.TP
+\fBCtrl+Shift+Z\fR
+Maximize / unmaximize current pane.
+.SS View
+.TP
+\fBF11\fR
+Toggle fullscreen.
+.TP
+\fBCtrl+Shift+M\fR
+Toggle menu bar.
+.TP
+\fBCtrl+Shift+=\fR / \fBCtrl+Shift+\-\fR / \fBCtrl+0\fR
+Zoom in / out / reset.
+.TP
+\fBCtrl+Shift+S\fR
+Toggle scrollbar.
+.TP
+\fBShift+PgUp\fR / \fBShift+PgDn\fR
+Scrollback up / down.
+.SS Edit
+.TP
+\fBCtrl+Shift+C\fR / \fBCtrl+Shift+V\fR
+Copy / paste.
+.TP
+\fBCtrl+Shift+F\fR
+Search.
+.TP
+\fBCtrl+Shift+R\fR
+Reset terminal.
+.TP
+\fBCtrl+Shift+G\fR
+Reset and clear.
+.SS Terminal
+.TP
+\fBCtrl+Alt+X\fR / \fBCtrl+Alt+A\fR / \fBCtrl+Alt+W\fR
+Edit terminal / tab / window title.
+.TP
+\fBCtrl+Alt+N\fR / \fBCtrl+Alt+P\fR
+Next / previous profile.
+.SH FILES
+.TP
+\fI~/.config/qterminator/config.toml\fR
+User configuration file. Sections include
+\fI[general]\fR, \fI[profiles.\fIname\fR]\fR,
+\fI[keybindings]\fR, \fI[layouts]\fR, and
+\fI[plugins.\fIname\fR]\fR.
+.TP
+\fI~/.config/qterminator/plugins/\fR
+User plugin directory. Python files placed here are loaded
+automatically. Each plugin must subclass one of \fIPlugin\fR,
+\fIURLHandler\fR, \fIMenuProvider\fR, or \fIOutputWatcher\fR
+from the \fIqterminator.plugin\fR module.
+.TP
+\fI~/.config/qterminator/color\-schemes/\fR
+User color scheme directory. \fI.colorscheme\fR files placed
+here override built-in schemes from \fI/usr/share/qtermwidget6/color\-schemes/\fR.
+.SH PLUGINS
+.PP
+QTerminator ships with a number of built-in plugins:
+.TP
+\fBurl_handlers\fR
+Detects HTTP/HTTPS, file://, and email addresses in terminal output.
+.TP
+\fBissue_tracker\fR
+Matches configurable PREFIX-NUMBER patterns (e.g., QTERM-1234)
+and opens them as URLs.
+.TP
+\fBcustom_commands\fR
+Sends configured shell commands from the context menu.
+.TP
+\fBlogger\fR
+Logs terminal output to a file.
+.TP
+\fBscreenshot\fR
+Save the visible terminal area or full buffer as a PNG.
+.TP
+\fBpdf_export\fR
+Export the visible area or full scrollback to a styled PDF.
+.TP
+\fBprint_terminal\fR
+Print the terminal contents via QPrintDialog.
+.TP
+\fBbuffer_export\fR
+Export to HTML, plain text; copy with HTML/Markdown formatting.
+.TP
+\fBtext_transforms\fR
+Context menu transforms on selected text: base64, JSON pretty-print,
+URL encode/decode, hex-to-ASCII, hashes, case conversions, etc.
+.TP
+\fBpattern_links\fR
+Open IP addresses, file paths, stack traces, UUIDs, Docker container
+IDs, and git hashes from the terminal.
+.TP
+\fBoutput_monitors\fR
+Watch output for errors, build progress, log levels, and sensitive
+data; update the terminal title bar accordingly.
+.TP
+\fBnotifications\fR
+Flash the terminal when configured patterns appear or when the
+foreground process becomes idle.
+.TP
+\fBprocess_control\fR
+Send signals (SIGSTOP, SIGCONT, SIGTERM, SIGKILL) to the foreground
+process from the context menu.
+.TP
+\fBfile_monitor\fR
+Notify when files in the working directory stop being modified.
+.TP
+\fBscheduler\fR
+Schedule text to be sent to the terminal after a delay,
+optionally repeating.
+.TP
+\fBmodal\fR
+Vim-like modal keybindings (\fICtrl+[\fR for normal mode).
+.TP
+\fBstacked_panes\fR
+Show one terminal at a time in a tab; cycle through hidden panes.
+.TP
+\fBworkspace_switcher\fR
+Fuzzy-find and open project workspaces in new tabs.
+.TP
+\fBtmux_integration\fR
+Optionally start terminals inside tmux for persistent sessions.
+.TP
+\fBsmart_clipboard\fR
+Smart paste/copy operations (escaped paste, paste as single line,
+copy without ANSI colors).
+.TP
+\fBdim_backgrounds\fR
+Suppress bright background colors in dark themes.
+.SH ENVIRONMENT
+.TP
+\fBSHELL\fR
+The shell program to launch in new terminals. Defaults to
+\fI/bin/bash\fR if not set.
+.TP
+\fBQT_QPA_PLATFORM\fR
+Set to \fIoffscreen\fR for headless test execution.
+.SH BUGS
+.PP
+Report bugs at https://github.com/qterminator/qdterm/issues
+.SH SEE ALSO
+.PP
+.BR qterminator-config (5),
+.BR terminator (1),
+.BR konsole (1),
+.BR xterm (1)
+.SH AUTHOR
+.PP
+Jan Kotek <jan@kotek.net>
+.SH COPYRIGHT
+.PP
+Copyright \(co 2026 Jan Kotek.
+License GPLv3: GNU GPL version 3.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.

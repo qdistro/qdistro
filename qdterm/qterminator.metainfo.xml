@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>qterminator.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>QTerminator</name>
+  <summary>Qt terminal emulator with splits, tabs, and plugin system</summary>
+  <description>
+    <p>
+      QTerminator is a Qt port of the Terminator terminal emulator,
+      built with PyQt6 and QTermWidget. It allows arranging multiple
+      terminal panes in tabs and recursive splits within one window.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Tabs and recursive horizontal/vertical splits</li>
+      <li>Per-terminal title bars with grouping indicators</li>
+      <li>Broadcast input to grouped or all terminals</li>
+      <li>Read-only mode, zoom, fullscreen, dark theme</li>
+      <li>Configurable profiles and color schemes</li>
+      <li>Layout save and restore across restarts</li>
+      <li>Extensible Python plugin system with 19+ built-in plugins</li>
+      <li>Terminator-compatible CLI options</li>
+      <li>System dark/light theme detection</li>
+      <li>URL detection and clickable issue tracker links</li>
+      <li>Vim-like modal keybindings</li>
+      <li>Tmux integration for persistent sessions</li>
+      <li>Export buffer to HTML, PDF, or print</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">qterminator.desktop</launchable>
+  <provides>
+    <binary>qterminator</binary>
+  </provides>
+  <categories>
+    <category>Qt</category>
+    <category>Utility</category>
+    <category>TerminalEmulator</category>
+    <category>System</category>
+  </categories>
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>shell</keyword>
+    <keyword>command line</keyword>
+    <keyword>tty</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/qterminator/qdterm</url>
+  <url type="bugtracker">https://github.com/qterminator/qdterm/issues</url>
+  <developer_name>Jan Kotek</developer_name>
+  <update_contact>jan_AT_kotek.net</update_contact>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-04-14">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

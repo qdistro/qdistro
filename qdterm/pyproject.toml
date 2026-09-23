@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qterminator"
+version = "0.1.0"
+description = "Qt port of Terminator terminal emulator"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.5",
+]
+
+[project.scripts]
+qterminator = "qterminator.__main__:main"
+qterminator-mcp = "qterminator.mcp_server:main"
+qterminator-shell-integration = "qterminator.shell_integration_cli:main"
+
+# Desktop integration assets (.desktop launcher, AppStream metainfo, scalable
+# icon). Without these a source/wheel install gives a CLI wrapper but never
+# registers qterminator in the shell launcher, AppStream catalog, or icon
+# theme. data-files lands them under <prefix>/share/... for both
+# `pip install --prefix=...` and wheel installs.
+#
+# NOTE: data-files copies preserve the source basename, so only the scalable
+# SVG (already named qterminator.svg) is shipped here; the sized hicolor PNGs
+# (qterminator-<N>.png) need a rename to qterminator.png per size dir, which
+# the fpm packaging path (justfile) and the qdistro-bootstrap shared asset
+# install step handle.
+[tool.setuptools.data-files]
+"share/applications" = ["qterminator.desktop"]
+"share/metainfo" = ["qterminator.metainfo.xml"]
+"share/icons/hicolor/scalable/apps" = ["icons/qterminator.svg"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qterminator*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyqt6"

@@ -1,0 +1,196 @@
+name: Build .deb and .rpm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install fpm
+        run: |
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential
+          sudo gem install --no-document fpm
+
+      - name: Get version
+        id: ver
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.1.0+$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Stage files
+        run: |
+          mkdir -p stage/usr/lib/python3/dist-packages
+          mkdir -p stage/usr/bin
+          mkdir -p stage/usr/share/man/man1 stage/usr/share/man/man5
+          mkdir -p stage/usr/share/applications stage/usr/share/metainfo
+          mkdir -p stage/usr/share/icons/hicolor/scalable/apps
+          mkdir -p stage/usr/share/qterminator
+          cp -r qterminator stage/usr/lib/python3/dist-packages/
+          cat > stage/usr/bin/qterminator << 'EOF'
+          #!/bin/bash
+          exec python3 -m qterminator "$@"
+          EOF
+          chmod +x stage/usr/bin/qterminator
+          cp doc/qterminator.1 stage/usr/share/man/man1/
+          cp doc/qterminator-config.5 stage/usr/share/man/man5/
+          cp qterminator.desktop stage/usr/share/applications/
+          cp qterminator.metainfo.xml stage/usr/share/metainfo/
+          cp icons/qterminator.svg stage/usr/share/icons/hicolor/scalable/apps/
+          for size in 16 22 24 32 48 64 128 256 512; do
+            mkdir -p stage/usr/share/icons/hicolor/${size}x${size}/apps
+            cp icons/qterminator-${size}.png stage/usr/share/icons/hicolor/${size}x${size}/apps/qterminator.png
+          done
+          # Vendor SIP source + build script into the package
+          cp -r qtermwidget-pyqt stage/usr/share/qterminator/sip-src
+          cp util/build-sip.sh stage/usr/share/qterminator/build-sip.sh
+          chmod +x stage/usr/share/qterminator/build-sip.sh
+          # postinst: invoke the bundled build-sip script with the bundled SIP src
+          cat > postinst << 'EOF'
+          #!/bin/bash
+          set -e
+          if [ "$1" = "configure" ]; then
+            echo "Building QTermWidget Python bindings (one-time)..."
+            SIP_SRC=/usr/share/qterminator/sip-src \
+              /usr/share/qterminator/build-sip.sh || \
+              echo "WARNING: SIP build failed. Run SIP_SRC=/usr/share/qterminator/sip-src /usr/share/qterminator/build-sip.sh manually."
+          fi
+          EOF
+          chmod +x postinst
+
+      - name: Build .deb
+        run: |
+          fpm -s dir -t deb -n qterminator -v ${{ steps.ver.outputs.version }} \
+            --license GPL-3.0-only \
+            --vendor "Jan Kotek" \
+            --maintainer "jan@kotek.net" \
+            --url "https://github.com/qterminator/qdterm" \
+            --description "Qt terminal emulator with splits, tabs, and plugin system" \
+            --architecture all \
+            --depends "python3 (>= 3.10)" \
+            --depends "python3-pyqt6" \
+            --depends "libqtermwidget6-3" \
+            --depends "qtermwidget-data" \
+            --depends "g++" \
+            --depends "qmake6" \
+            --depends "sip-tools" \
+            --depends "python3-pyqt-builder" \
+            --depends "libqtermwidget6-3-dev" \
+            --suggests "python3-setproctitle" \
+            --suggests "libnotify-bin" \
+            --suggests "tmux" \
+            --suggests "xdg-utils" \
+            --after-install postinst \
+            -C stage \
+            usr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: '*.deb'
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.deb'
+
+  build-rpm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fpm + rpm
+        run: |
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential rpm
+          sudo gem install --no-document fpm
+
+      - name: Get version
+        id: ver
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.1.0+$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Stage files
+        run: |
+          mkdir -p stage/usr/lib/python3/site-packages
+          mkdir -p stage/usr/bin
+          mkdir -p stage/usr/share/man/man1 stage/usr/share/man/man5
+          mkdir -p stage/usr/share/applications stage/usr/share/metainfo
+          mkdir -p stage/usr/share/icons/hicolor/scalable/apps
+          mkdir -p stage/usr/share/qterminator
+          cp -r qterminator stage/usr/lib/python3/site-packages/
+          cat > stage/usr/bin/qterminator << 'EOF'
+          #!/bin/bash
+          exec python3 -m qterminator "$@"
+          EOF
+          chmod +x stage/usr/bin/qterminator
+          cp doc/qterminator.1 stage/usr/share/man/man1/
+          cp doc/qterminator-config.5 stage/usr/share/man/man5/
+          cp qterminator.desktop stage/usr/share/applications/
+          cp qterminator.metainfo.xml stage/usr/share/metainfo/
+          cp icons/qterminator.svg stage/usr/share/icons/hicolor/scalable/apps/
+          for size in 16 22 24 32 48 64 128 256 512; do
+            mkdir -p stage/usr/share/icons/hicolor/${size}x${size}/apps
+            cp icons/qterminator-${size}.png stage/usr/share/icons/hicolor/${size}x${size}/apps/qterminator.png
+          done
+          # Vendor SIP source + build script into the package
+          cp -r qtermwidget-pyqt stage/usr/share/qterminator/sip-src
+          cp util/build-sip.sh stage/usr/share/qterminator/build-sip.sh
+          chmod +x stage/usr/share/qterminator/build-sip.sh
+          cat > postinst << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "Building QTermWidget Python bindings (one-time)..."
+          SIP_SRC=/usr/share/qterminator/sip-src \
+            /usr/share/qterminator/build-sip.sh || \
+            echo "WARNING: SIP build failed. Run SIP_SRC=/usr/share/qterminator/sip-src /usr/share/qterminator/build-sip.sh manually."
+          EOF
+          chmod +x postinst
+
+      - name: Build .rpm
+        run: |
+          fpm -s dir -t rpm -n qterminator -v ${{ steps.ver.outputs.version }} \
+            --license "GPL-3.0-only" \
+            --vendor "Jan Kotek" \
+            --maintainer "jan@kotek.net" \
+            --url "https://github.com/qterminator/qdterm" \
+            --description "Qt terminal emulator with splits, tabs, and plugin system" \
+            --architecture noarch \
+            --rpm-summary "Qt terminal emulator" \
+            --depends "python3 >= 3.10" \
+            --depends "python3-qt6" \
+            --depends "qtermwidget-qt6" \
+            --depends "qtermwidget-qt6-devel" \
+            --depends "gcc-c++" \
+            --depends "qt6-qtbase-devel" \
+            --depends "python3-pyqt-builder" \
+            --depends "python3-sip-devel" \
+            --after-install postinst \
+            -C stage \
+            usr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: '*.rpm'
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.rpm'

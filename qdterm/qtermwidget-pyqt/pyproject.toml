@@ -1,0 +1,10 @@
+# https://www.riverbankcomputing.com/static/Docs/sip/index.html
+
+[build-system]
+requires = ["sip", "PyQt-builder"]
+build-backend = "sipbuild.api"
+
+[project]
+name = "QTermWidget"
+version = "2.4.0"
+dependencies = ["PyQt6"]

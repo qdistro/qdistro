@@ -1,0 +1,226 @@
+.TH "QTERMINATOR-CONFIG" "5" "2026-04-14" "QTerminator 0.1.0" "File Formats"
+.SH NAME
+qterminator-config \- configuration file format for QTerminator
+.SH DESCRIPTION
+.PP
+QTerminator reads its configuration from \fI~/.config/qterminator/config.toml\fR
+in TOML format. The file is created with default values on first run and may
+be edited manually or via the in-app preferences dialog.
+.SH SECTIONS
+.SS [general]
+.TP
+\fBwindow_width\fR = \fIINTEGER\fR (default 800)
+Initial window width in pixels.
+.TP
+\fBwindow_height\fR = \fIINTEGER\fR (default 500)
+Initial window height in pixels.
+.TP
+\fBtab_position\fR = "top" | "bottom" | "left" | "right"  (default "top")
+Where to display the tab bar.
+.TP
+\fBconfirm_close\fR = \fIBOOLEAN\fR (default true)
+Show a confirmation dialog when closing a terminal that has a
+running foreground process.
+.TP
+\fBshow_menubar\fR = \fIBOOLEAN\fR (default false)
+Show the menu bar at startup. Toggle with \fBCtrl+Shift+M\fR.
+.TP
+\fBtheme_mode\fR = "system" | "dark" | "light"  (default "system")
+Application theme. \fI"system"\fR follows the OS preference.
+.TP
+\fBdark_color_scheme\fR = \fISTRING\fR (default "Linux")
+QTermWidget color scheme used when theme is dark.
+.TP
+\fBlight_color_scheme\fR = \fISTRING\fR (default "BlackOnLightYellow")
+QTermWidget color scheme used when theme is light.
+.TP
+\fBsave_scrollback\fR = \fIBOOLEAN\fR (default false)
+Save terminal scrollback content to the layout file. Disabled by
+default for security (scrollback may contain secrets).
+.SS [profiles.\fIname\fR]
+.PP
+Each profile defines settings for terminal appearance and behavior.
+The default profile is named \fIdefault\fR. Additional profiles can
+be created from the preferences dialog.
+.TP
+\fBfont_family\fR = \fISTRING\fR (default "Monospace")
+Font family for terminal text.
+.TP
+\fBfont_size\fR = \fIINTEGER\fR (default 11)
+Font size in points.
+.TP
+\fBcolor_scheme\fR = \fISTRING\fR (default "Linux")
+QTermWidget color scheme name.
+.TP
+\fBcursor_shape\fR = "block" | "underline" | "ibeam"  (default "block")
+Cursor shape.
+.TP
+\fBcursor_blink\fR = \fIBOOLEAN\fR (default true)
+Whether the cursor blinks.
+.TP
+\fBscrollback_lines\fR = \fIINTEGER\fR (default 5000)
+Number of scrollback lines to retain. Set to 0 to disable.
+.TP
+\fBscrollback_infinite\fR = \fIBOOLEAN\fR (default false)
+If true, retain unlimited scrollback (overrides scrollback_lines).
+.TP
+\fBscroll_on_keystroke\fR = \fIBOOLEAN\fR (default true)
+Scroll to the bottom when a key is pressed.
+.TP
+\fBscroll_on_output\fR = \fIBOOLEAN\fR (default false)
+Scroll to the bottom when new output arrives.
+.TP
+\fBbackground_opacity\fR = \fIFLOAT\fR (default 1.0, range 0.0\-1.0)
+Background opacity. 1.0 is opaque.
+.TP
+\fBaudible_bell\fR = \fIBOOLEAN\fR (default false)
+Play system bell sound on terminal bell.
+.TP
+\fBvisible_bell\fR = \fIBOOLEAN\fR (default false)
+Briefly flash the terminal background on bell.
+.TP
+\fBmouse_autohide\fR = \fIBOOLEAN\fR (default true)
+Hide the mouse cursor while typing.
+.TP
+\fBcopy_on_selection\fR = \fIBOOLEAN\fR (default false)
+Automatically copy selected text to the clipboard.
+.TP
+\fBshow_titlebar\fR = \fIBOOLEAN\fR (default true)
+Show the per-terminal title bar with close button.
+.TP
+\fBexit_action\fR = "close" | "restart" | "hold"  (default "close")
+What to do when the shell exits. \fIclose\fR removes the terminal,
+\fIrestart\fR launches a new shell, \fIhold\fR keeps the terminal
+open with a "[Process exited]" message.
+.SS [keybindings]
+.PP
+Override default keybindings. Each entry maps an action to a
+key sequence string in Qt format (e.g., \fI"Ctrl+Shift+T"\fR,
+\fI"Alt+Left"\fR, \fI"F11"\fR).
+.PP
+Default actions: \fInew_tab\fR, \fIclose_terminal\fR, \fIcopy\fR,
+\fIpaste\fR, \fIsplit_horizontal\fR, \fIsplit_vertical\fR,
+\fIsearch\fR, \fIzoom_in\fR, \fIzoom_out\fR, \fInext_tab\fR,
+\fIprev_tab\fR, \fIquit\fR, \fInew_window\fR,
+\fInavigate_left\fR, \fInavigate_right\fR, \fInavigate_up\fR,
+\fInavigate_down\fR.
+.SS [layouts]
+.PP
+Saved window/tab/split layouts. Created automatically by the
+"Save Layout" action. Each layout is keyed by a user-chosen name.
+The \fIlast_session\fR layout is updated on every clean exit
+and restored on next launch.
+.SS [plugins.\fIname\fR]
+.PP
+Per-plugin configuration. See PLUGIN CONFIGURATION below.
+.SH PLUGIN CONFIGURATION
+.SS [plugins.issue_tracker]
+.PP
+Pattern-based issue tracker links.
+.PP
+.RS 4
+.nf
+patterns = [
+    '{"prefix": "QTERM", "url": "https://github.com/qterminator/qdterm/issues/{id}"}',
+    '{"prefix": "JIRA", "url": "https://jira.example.com/browse/{prefix}-{id}"}',
+]
+.fi
+.RE
+.PP
+Each entry is a JSON object with \fIprefix\fR (matched as PREFIX-NUMBER)
+and \fIurl\fR (with \fI{id}\fR and \fI{prefix}\fR placeholders).
+.SS [plugins.dim_backgrounds]
+.PP
+Suppress bright backgrounds in dark themes.
+.PP
+.RS 4
+.nf
+max_brightness = 140        # cap intense color channels (0\-255)
+min_brightness = 60         # floor for dim channels
+brightness_threshold = 80   # bg pixel brightness above this triggers
+interval_ms = 500           # polling interval
+.fi
+.RE
+.SS [plugins.notifications]
+.PP
+Flash terminal on pattern matches or process inactivity.
+.PP
+.RS 4
+.nf
+flash_patterns = ["BUILD FAILED", "ERROR", "your-irc-nick"]
+flash_color = "#ff4444"
+flash_duration_ms = 150
+flash_count = 3
+inactivity_timeout_s = 60
+check_cpu = true
+.fi
+.RE
+.SS [plugins.file_monitor]
+.PP
+Notify when file activity stops in working directory.
+.PP
+.RS 4
+.nf
+inactivity_timeout_s = 30   # seconds without changes
+recursive = false           # walk subdirectories
+check_interval_s = 5        # polling interval
+ignore_patterns = ["*.tmp", "*.swp", ".git"]
+.fi
+.RE
+.SS [plugins.tmux]
+.PP
+Start terminals inside tmux for persistent sessions.
+.PP
+.RS 4
+.nf
+enabled = true
+session_prefix = "qterminator"
+detach_on_close = true
+.fi
+.RE
+.SS [plugins.workspace_switcher]
+.PP
+Fuzzy-find project workspaces.
+.PP
+.RS 4
+.nf
+search_roots = ["~/Documents", "~/Projects"]
+markers = [".git", "package.json", "Cargo.toml", "pyproject.toml"]
+max_depth = 3
+.fi
+.RE
+.SS [plugins.custom_commands]
+.PP
+Send configured commands from the context menu.
+.PP
+.RS 4
+.nf
+[plugins.custom_commands.commands]
+"List large files" = "find . \-type f \-size +10M"
+"Disk usage" = "du \-sh *"
+.fi
+.RE
+.SH EXAMPLE
+.PP
+A minimal configuration:
+.PP
+.RS 4
+.nf
+[general]
+window_width = 1280
+window_height = 800
+theme_mode = "dark"
+
+[profiles.default]
+font_family = "JetBrains Mono"
+font_size = 12
+scrollback_lines = 10000
+
+[keybindings]
+new_tab = "Ctrl+T"
+.fi
+.RE
+.SH SEE ALSO
+.BR qterminator (1)
+.SH AUTHOR
+Jan Kotek <jan@kotek.net>

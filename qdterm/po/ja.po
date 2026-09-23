@@ -1,0 +1,369 @@
+# QTerminator translation file.
+# Copyright (C) 2026 Jan Kotek
+# This file is distributed under the same license as the qterminator package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: qterminator 0.1.0\n"
+"Report-Msgid-Bugs-To: jan@kotek.net\n"
+"POT-Creation-Date: 2026-04-14 20:42+0200\n"
+"PO-Revision-Date: 2026-04-14 21:00+0200\n"
+"Last-Translator: QTerminator Team <jan@kotek.net>\n"
+"Language-Team: Japanese <ja@li.org>\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: qterminator/preferences.py:22
+msgid "QTerminator Preferences"
+msgstr "QTerminator 設定"
+
+#: qterminator/preferences.py:32
+msgid "Appearance"
+msgstr "外観"
+
+#: qterminator/preferences.py:33
+msgid "Behavior"
+msgstr "動作"
+
+#: qterminator/preferences.py:34
+msgid "Shortcuts"
+msgstr "ショートカット"
+
+#: qterminator/preferences.py:54
+msgid "Font"
+msgstr "フォント"
+
+#: qterminator/preferences.py:59
+msgid "Family:"
+msgstr "ファミリー:"
+
+#: qterminator/preferences.py:63
+msgid "Size:"
+msgstr "サイズ:"
+
+#: qterminator/preferences.py:68
+msgid "Colors"
+msgstr "色"
+
+#: qterminator/preferences.py:75
+msgid "Color Scheme:"
+msgstr "配色:"
+
+#: qterminator/preferences.py:80
+msgid "Dark color scheme:"
+msgstr "ダーク配色:"
+
+#: qterminator/preferences.py:85
+msgid "Light color scheme:"
+msgstr "ライト配色:"
+
+#: qterminator/preferences.py:91
+msgid "Opacity:"
+msgstr "不透明度:"
+
+#: qterminator/preferences.py:96
+msgid "Cursor"
+msgstr "カーソル"
+
+#: qterminator/preferences.py:101
+msgid "Shape:"
+msgstr "形状:"
+
+#: qterminator/preferences.py:103
+msgid "Blinking cursor"
+msgstr "点滅カーソル"
+
+#: qterminator/preferences.py:116
+msgid "Scrollback"
+msgstr "スクロールバック"
+
+#: qterminator/preferences.py:122
+msgid "Disabled"
+msgstr "無効"
+
+#: qterminator/preferences.py:123
+msgid "Lines:"
+msgstr "行数:"
+
+#: qterminator/preferences.py:128
+msgid "Tabs"
+msgstr "タブ"
+
+#: qterminator/preferences.py:133
+msgid "Tab position:"
+msgstr "タブの位置:"
+
+#: qterminator/preferences.py:138
+msgid "Window"
+msgstr "ウィンドウ"
+
+#: qterminator/preferences.py:143
+msgid "Theme mode:"
+msgstr "テーマモード:"
+
+#: qterminator/preferences.py:145
+msgid "Confirm before closing with running processes"
+msgstr "実行中のプロセスがある場合、閉じる前に確認"
+
+#: qterminator/preferences.py:148
+msgid "Show menu bar"
+msgstr "メニューバーを表示"
+
+#: qterminator/preferences.py:161
+msgid ""
+"Keyboard shortcuts are configured in\n"
+"~/.config/qterminator/config.toml\n"
+"\n"
+"Default shortcuts:"
+msgstr ""
+
+#: qterminator/window.py:147
+msgid "&File"
+msgstr "ファイル(&F)"
+
+#: qterminator/window.py:148
+#, fuzzy
+msgid "New &Tab"
+msgstr "新しいタブ"
+
+#: qterminator/window.py:149
+#, fuzzy
+msgid "New &Window"
+msgstr "ウィンドウ"
+
+#: qterminator/window.py:151
+#, fuzzy
+msgid "&Close Terminal"
+msgstr "ターミナルを閉じる"
+
+#: qterminator/window.py:152
+msgid "&Quit"
+msgstr "終了(&Q)"
+
+#: qterminator/window.py:155
+msgid "&Edit"
+msgstr "編集(&E)"
+
+#: qterminator/window.py:156
+#, fuzzy
+msgid "&Copy"
+msgstr "コピー"
+
+#: qterminator/window.py:157
+#, fuzzy
+msgid "&Paste"
+msgstr "貼り付け"
+
+#: qterminator/window.py:159
+#, fuzzy
+msgid "&Search"
+msgstr "検索..."
+
+#: qterminator/window.py:160
+#, fuzzy
+msgid "&Reset"
+msgstr "リセット"
+
+#: qterminator/window.py:161
+#, fuzzy
+msgid "Reset && C&lear"
+msgstr "リセットしてクリア"
+
+#: qterminator/window.py:163
+#, fuzzy
+msgid "&Preferences..."
+msgstr "設定..."
+
+#: qterminator/window.py:166
+msgid "&View"
+msgstr "表示(&V)"
+
+#: qterminator/window.py:167
+#, fuzzy
+msgid "Split &Horizontally"
+msgstr "水平に分割"
+
+#: qterminator/window.py:168
+#, fuzzy
+msgid "Split &Vertically"
+msgstr "垂直に分割"
+
+#: qterminator/window.py:169
+msgid "&Rotate Splits"
+msgstr "分割を回転(&R)"
+
+#: qterminator/window.py:171
+#, fuzzy
+msgid "&Maximize Terminal"
+msgstr "ターミナルを閉じる"
+
+#: qterminator/window.py:172
+msgid "&Full Screen"
+msgstr "全画面(&F)"
+
+#: qterminator/window.py:175
+#, fuzzy
+msgid "Zoom &In"
+msgstr "拡大"
+
+#: qterminator/window.py:176
+#, fuzzy
+msgid "Zoom &Out"
+msgstr "縮小"
+
+#: qterminator/window.py:177
+msgid "Zoom &Normal"
+msgstr "標準サイズ(&N)"
+
+#: qterminator/window.py:179
+msgid "Toggle &Scrollbar"
+msgstr "スクロールバー(&S)"
+
+#: qterminator/window.py:185
+#, fuzzy
+msgid "&Terminal"
+msgstr "ターミナルを閉じる"
+
+#: qterminator/window.py:186
+msgid "Edit &Terminal Title..."
+msgstr "ターミナルタイトルを編集(&T)..."
+
+#: qterminator/window.py:187
+msgid "Edit T&ab Title..."
+msgstr "タブタイトルを編集(&A)..."
+
+#: qterminator/window.py:188
+msgid "Edit &Window Title..."
+msgstr "ウィンドウタイトルを編集(&W)..."
+
+#: qterminator/window.py:190
+#, fuzzy
+msgid "Read-&Only"
+msgstr "読み取り専用"
+
+#: qterminator/window.py:193
+msgid "&Broadcast Input"
+msgstr "入力をブロードキャスト(&B)"
+
+#: qterminator/window.py:195
+msgid "&Off"
+msgstr "オフ(&O)"
+
+#: qterminator/window.py:196
+#, fuzzy
+msgid "&Group"
+msgstr "グループ"
+
+#: qterminator/window.py:197
+msgid "&All"
+msgstr "すべて(&A)"
+
+#: qterminator/window.py:200
+msgid "T&ools"
+msgstr "ツール(&O)"
+
+#: qterminator/window.py:204
+msgid "&Help"
+msgstr "ヘルプ(&H)"
+
+#: qterminator/window.py:205
+msgid "&About QTerminator"
+msgstr "QTerminator について(&A)"
+
+#: qterminator/context_menu.py:21
+msgid "Copy"
+msgstr "コピー"
+
+#: qterminator/context_menu.py:26
+msgid "Paste"
+msgstr "貼り付け"
+
+#: qterminator/context_menu.py:34
+msgid "Split Horizontally"
+msgstr "水平に分割"
+
+#: qterminator/context_menu.py:40
+msgid "Split Vertically"
+msgstr "垂直に分割"
+
+#: qterminator/context_menu.py:49
+msgid "New Tab"
+msgstr "新しいタブ"
+
+#: qterminator/context_menu.py:56
+msgid "Read-Only"
+msgstr "読み取り専用"
+
+#: qterminator/context_menu.py:63
+msgid "Monitor"
+msgstr "監視"
+
+#: qterminator/context_menu.py:65
+msgid "Watch for Activity"
+msgstr "活動を監視"
+
+#: qterminator/context_menu.py:73
+msgid "Watch for Silence"
+msgstr "無活動を監視"
+
+#: qterminator/context_menu.py:83
+msgid "Group"
+msgstr "グループ"
+
+#: qterminator/context_menu.py:86
+msgid "None"
+msgstr "なし"
+
+#: qterminator/context_menu.py:103
+msgid "Custom..."
+msgstr "カスタム..."
+
+#: qterminator/context_menu.py:114
+msgid "Profiles"
+msgstr "プロファイル"
+
+#: qterminator/context_menu.py:128
+msgid "Color Scheme"
+msgstr "配色"
+
+#: qterminator/context_menu.py:144
+msgid "Search..."
+msgstr "検索..."
+
+#: qterminator/context_menu.py:150
+msgid "Reset"
+msgstr "リセット"
+
+#: qterminator/context_menu.py:155
+msgid "Reset && Clear"
+msgstr "リセットしてクリア"
+
+#: qterminator/context_menu.py:163
+msgid "Zoom In"
+msgstr "拡大"
+
+#: qterminator/context_menu.py:167
+msgid "Zoom Out"
+msgstr "縮小"
+
+#: qterminator/context_menu.py:177
+msgid "Show Menu Bar"
+msgstr "メニューバーを表示"
+
+#: qterminator/context_menu.py:187
+msgid "Preferences..."
+msgstr "設定..."
+
+#: qterminator/context_menu.py:196
+msgid "Close Terminal"
+msgstr "ターミナルを閉じる"
+
+#: qterminator/context_menu.py:211
+msgid "Custom Group"
+msgstr "カスタムグループ"
+
+#: qterminator/context_menu.py:211
+msgid "Group name:"
+msgstr "グループ名:"

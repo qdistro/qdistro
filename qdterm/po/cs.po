@@ -1,0 +1,369 @@
+# QTerminator translation file.
+# Copyright (C) 2026 Jan Kotek
+# This file is distributed under the same license as the qterminator package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: qterminator 0.1.0\n"
+"Report-Msgid-Bugs-To: jan@kotek.net\n"
+"POT-Creation-Date: 2026-04-14 20:42+0200\n"
+"PO-Revision-Date: 2026-04-14 21:00+0200\n"
+"Last-Translator: QTerminator Team <jan@kotek.net>\n"
+"Language-Team: Czech <cs@li.org>\n"
+"Language: cs\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: qterminator/preferences.py:22
+msgid "QTerminator Preferences"
+msgstr "Předvolby QTerminator"
+
+#: qterminator/preferences.py:32
+msgid "Appearance"
+msgstr "Vzhled"
+
+#: qterminator/preferences.py:33
+msgid "Behavior"
+msgstr "Chování"
+
+#: qterminator/preferences.py:34
+msgid "Shortcuts"
+msgstr "Klávesové zkratky"
+
+#: qterminator/preferences.py:54
+msgid "Font"
+msgstr "Písmo"
+
+#: qterminator/preferences.py:59
+msgid "Family:"
+msgstr "Rodina:"
+
+#: qterminator/preferences.py:63
+msgid "Size:"
+msgstr "Velikost:"
+
+#: qterminator/preferences.py:68
+msgid "Colors"
+msgstr "Barvy"
+
+#: qterminator/preferences.py:75
+msgid "Color Scheme:"
+msgstr "Barevné schéma:"
+
+#: qterminator/preferences.py:80
+msgid "Dark color scheme:"
+msgstr "Tmavé schéma:"
+
+#: qterminator/preferences.py:85
+msgid "Light color scheme:"
+msgstr "Světlé schéma:"
+
+#: qterminator/preferences.py:91
+msgid "Opacity:"
+msgstr "Průhlednost:"
+
+#: qterminator/preferences.py:96
+msgid "Cursor"
+msgstr "Kurzor"
+
+#: qterminator/preferences.py:101
+msgid "Shape:"
+msgstr "Tvar:"
+
+#: qterminator/preferences.py:103
+msgid "Blinking cursor"
+msgstr "Blikající kurzor"
+
+#: qterminator/preferences.py:116
+msgid "Scrollback"
+msgstr "Historie"
+
+#: qterminator/preferences.py:122
+msgid "Disabled"
+msgstr "Zakázáno"
+
+#: qterminator/preferences.py:123
+msgid "Lines:"
+msgstr "Řádky:"
+
+#: qterminator/preferences.py:128
+msgid "Tabs"
+msgstr "Karty"
+
+#: qterminator/preferences.py:133
+msgid "Tab position:"
+msgstr "Poloha karet:"
+
+#: qterminator/preferences.py:138
+msgid "Window"
+msgstr "Okno"
+
+#: qterminator/preferences.py:143
+msgid "Theme mode:"
+msgstr "Režim motivu:"
+
+#: qterminator/preferences.py:145
+msgid "Confirm before closing with running processes"
+msgstr "Potvrdit zavření při běžících procesech"
+
+#: qterminator/preferences.py:148
+msgid "Show menu bar"
+msgstr "Zobrazit nabídkový pruh"
+
+#: qterminator/preferences.py:161
+msgid ""
+"Keyboard shortcuts are configured in\n"
+"~/.config/qterminator/config.toml\n"
+"\n"
+"Default shortcuts:"
+msgstr ""
+
+#: qterminator/window.py:147
+msgid "&File"
+msgstr "&Soubor"
+
+#: qterminator/window.py:148
+#, fuzzy
+msgid "New &Tab"
+msgstr "Nová karta"
+
+#: qterminator/window.py:149
+#, fuzzy
+msgid "New &Window"
+msgstr "Okno"
+
+#: qterminator/window.py:151
+#, fuzzy
+msgid "&Close Terminal"
+msgstr "Zavřít terminál"
+
+#: qterminator/window.py:152
+msgid "&Quit"
+msgstr "&Konec"
+
+#: qterminator/window.py:155
+msgid "&Edit"
+msgstr "&Úpravy"
+
+#: qterminator/window.py:156
+#, fuzzy
+msgid "&Copy"
+msgstr "Kopírovat"
+
+#: qterminator/window.py:157
+#, fuzzy
+msgid "&Paste"
+msgstr "Vložit"
+
+#: qterminator/window.py:159
+#, fuzzy
+msgid "&Search"
+msgstr "Hledat..."
+
+#: qterminator/window.py:160
+#, fuzzy
+msgid "&Reset"
+msgstr "Reset"
+
+#: qterminator/window.py:161
+#, fuzzy
+msgid "Reset && C&lear"
+msgstr "Reset && smazat"
+
+#: qterminator/window.py:163
+#, fuzzy
+msgid "&Preferences..."
+msgstr "Předvolby..."
+
+#: qterminator/window.py:166
+msgid "&View"
+msgstr "&Zobrazení"
+
+#: qterminator/window.py:167
+#, fuzzy
+msgid "Split &Horizontally"
+msgstr "Rozdělit vodorovně"
+
+#: qterminator/window.py:168
+#, fuzzy
+msgid "Split &Vertically"
+msgstr "Rozdělit svisle"
+
+#: qterminator/window.py:169
+msgid "&Rotate Splits"
+msgstr "&Rotovat rozdělení"
+
+#: qterminator/window.py:171
+#, fuzzy
+msgid "&Maximize Terminal"
+msgstr "Zavřít terminál"
+
+#: qterminator/window.py:172
+msgid "&Full Screen"
+msgstr "Celá obra&zovka"
+
+#: qterminator/window.py:175
+#, fuzzy
+msgid "Zoom &In"
+msgstr "Přiblížit"
+
+#: qterminator/window.py:176
+#, fuzzy
+msgid "Zoom &Out"
+msgstr "Oddálit"
+
+#: qterminator/window.py:177
+msgid "Zoom &Normal"
+msgstr "&Normální velikost"
+
+#: qterminator/window.py:179
+msgid "Toggle &Scrollbar"
+msgstr "Přepnout po&suvník"
+
+#: qterminator/window.py:185
+#, fuzzy
+msgid "&Terminal"
+msgstr "Zavřít terminál"
+
+#: qterminator/window.py:186
+msgid "Edit &Terminal Title..."
+msgstr "Upravit název &terminálu..."
+
+#: qterminator/window.py:187
+msgid "Edit T&ab Title..."
+msgstr "Upravit název k&arty..."
+
+#: qterminator/window.py:188
+msgid "Edit &Window Title..."
+msgstr "Upravit název &okna..."
+
+#: qterminator/window.py:190
+#, fuzzy
+msgid "Read-&Only"
+msgstr "Pouze pro čtení"
+
+#: qterminator/window.py:193
+msgid "&Broadcast Input"
+msgstr "Vy&sílat vstup"
+
+#: qterminator/window.py:195
+msgid "&Off"
+msgstr "&Vypnuto"
+
+#: qterminator/window.py:196
+#, fuzzy
+msgid "&Group"
+msgstr "Skupina"
+
+#: qterminator/window.py:197
+msgid "&All"
+msgstr "Vš&em"
+
+#: qterminator/window.py:200
+msgid "T&ools"
+msgstr "Nás&troje"
+
+#: qterminator/window.py:204
+msgid "&Help"
+msgstr "&Nápověda"
+
+#: qterminator/window.py:205
+msgid "&About QTerminator"
+msgstr "&O QTerminator"
+
+#: qterminator/context_menu.py:21
+msgid "Copy"
+msgstr "Kopírovat"
+
+#: qterminator/context_menu.py:26
+msgid "Paste"
+msgstr "Vložit"
+
+#: qterminator/context_menu.py:34
+msgid "Split Horizontally"
+msgstr "Rozdělit vodorovně"
+
+#: qterminator/context_menu.py:40
+msgid "Split Vertically"
+msgstr "Rozdělit svisle"
+
+#: qterminator/context_menu.py:49
+msgid "New Tab"
+msgstr "Nová karta"
+
+#: qterminator/context_menu.py:56
+msgid "Read-Only"
+msgstr "Pouze pro čtení"
+
+#: qterminator/context_menu.py:63
+msgid "Monitor"
+msgstr "Sledovat"
+
+#: qterminator/context_menu.py:65
+msgid "Watch for Activity"
+msgstr "Sledovat aktivitu"
+
+#: qterminator/context_menu.py:73
+msgid "Watch for Silence"
+msgstr "Sledovat ticho"
+
+#: qterminator/context_menu.py:83
+msgid "Group"
+msgstr "Skupina"
+
+#: qterminator/context_menu.py:86
+msgid "None"
+msgstr "Žádná"
+
+#: qterminator/context_menu.py:103
+msgid "Custom..."
+msgstr "Vlastní..."
+
+#: qterminator/context_menu.py:114
+msgid "Profiles"
+msgstr "Profily"
+
+#: qterminator/context_menu.py:128
+msgid "Color Scheme"
+msgstr "Barevné schéma"
+
+#: qterminator/context_menu.py:144
+msgid "Search..."
+msgstr "Hledat..."
+
+#: qterminator/context_menu.py:150
+msgid "Reset"
+msgstr "Reset"
+
+#: qterminator/context_menu.py:155
+msgid "Reset && Clear"
+msgstr "Reset && smazat"
+
+#: qterminator/context_menu.py:163
+msgid "Zoom In"
+msgstr "Přiblížit"
+
+#: qterminator/context_menu.py:167
+msgid "Zoom Out"
+msgstr "Oddálit"
+
+#: qterminator/context_menu.py:177
+msgid "Show Menu Bar"
+msgstr "Zobrazit nabídku"
+
+#: qterminator/context_menu.py:187
+msgid "Preferences..."
+msgstr "Předvolby..."
+
+#: qterminator/context_menu.py:196
+msgid "Close Terminal"
+msgstr "Zavřít terminál"
+
+#: qterminator/context_menu.py:211
+msgid "Custom Group"
+msgstr "Vlastní skupina"
+
+#: qterminator/context_menu.py:211
+msgid "Group name:"
+msgstr "Název skupiny:"

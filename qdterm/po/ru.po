@@ -1,0 +1,369 @@
+# QTerminator translation file.
+# Copyright (C) 2026 Jan Kotek
+# This file is distributed under the same license as the qterminator package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: qterminator 0.1.0\n"
+"Report-Msgid-Bugs-To: jan@kotek.net\n"
+"POT-Creation-Date: 2026-04-14 20:42+0200\n"
+"PO-Revision-Date: 2026-04-14 21:00+0200\n"
+"Last-Translator: QTerminator Team <jan@kotek.net>\n"
+"Language-Team: Russian <ru@li.org>\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: qterminator/preferences.py:22
+msgid "QTerminator Preferences"
+msgstr "Параметры QTerminator"
+
+#: qterminator/preferences.py:32
+msgid "Appearance"
+msgstr "Внешний вид"
+
+#: qterminator/preferences.py:33
+msgid "Behavior"
+msgstr "Поведение"
+
+#: qterminator/preferences.py:34
+msgid "Shortcuts"
+msgstr "Сочетания клавиш"
+
+#: qterminator/preferences.py:54
+msgid "Font"
+msgstr "Шрифт"
+
+#: qterminator/preferences.py:59
+msgid "Family:"
+msgstr "Семейство:"
+
+#: qterminator/preferences.py:63
+msgid "Size:"
+msgstr "Размер:"
+
+#: qterminator/preferences.py:68
+msgid "Colors"
+msgstr "Цвета"
+
+#: qterminator/preferences.py:75
+msgid "Color Scheme:"
+msgstr "Цветовая схема:"
+
+#: qterminator/preferences.py:80
+msgid "Dark color scheme:"
+msgstr "Тёмная схема:"
+
+#: qterminator/preferences.py:85
+msgid "Light color scheme:"
+msgstr "Светлая схема:"
+
+#: qterminator/preferences.py:91
+msgid "Opacity:"
+msgstr "Непрозрачность:"
+
+#: qterminator/preferences.py:96
+msgid "Cursor"
+msgstr "Курсор"
+
+#: qterminator/preferences.py:101
+msgid "Shape:"
+msgstr "Форма:"
+
+#: qterminator/preferences.py:103
+msgid "Blinking cursor"
+msgstr "Мигающий курсор"
+
+#: qterminator/preferences.py:116
+msgid "Scrollback"
+msgstr "Журнал прокрутки"
+
+#: qterminator/preferences.py:122
+msgid "Disabled"
+msgstr "Отключено"
+
+#: qterminator/preferences.py:123
+msgid "Lines:"
+msgstr "Строк:"
+
+#: qterminator/preferences.py:128
+msgid "Tabs"
+msgstr "Вкладки"
+
+#: qterminator/preferences.py:133
+msgid "Tab position:"
+msgstr "Положение вкладок:"
+
+#: qterminator/preferences.py:138
+msgid "Window"
+msgstr "Окно"
+
+#: qterminator/preferences.py:143
+msgid "Theme mode:"
+msgstr "Режим темы:"
+
+#: qterminator/preferences.py:145
+msgid "Confirm before closing with running processes"
+msgstr "Подтверждать закрытие при работающих процессах"
+
+#: qterminator/preferences.py:148
+msgid "Show menu bar"
+msgstr "Показать строку меню"
+
+#: qterminator/preferences.py:161
+msgid ""
+"Keyboard shortcuts are configured in\n"
+"~/.config/qterminator/config.toml\n"
+"\n"
+"Default shortcuts:"
+msgstr ""
+
+#: qterminator/window.py:147
+msgid "&File"
+msgstr "&Файл"
+
+#: qterminator/window.py:148
+#, fuzzy
+msgid "New &Tab"
+msgstr "Новая вкладка"
+
+#: qterminator/window.py:149
+#, fuzzy
+msgid "New &Window"
+msgstr "Окно"
+
+#: qterminator/window.py:151
+#, fuzzy
+msgid "&Close Terminal"
+msgstr "Закрыть терминал"
+
+#: qterminator/window.py:152
+msgid "&Quit"
+msgstr "В&ыход"
+
+#: qterminator/window.py:155
+msgid "&Edit"
+msgstr "&Правка"
+
+#: qterminator/window.py:156
+#, fuzzy
+msgid "&Copy"
+msgstr "Копировать"
+
+#: qterminator/window.py:157
+#, fuzzy
+msgid "&Paste"
+msgstr "Вставить"
+
+#: qterminator/window.py:159
+#, fuzzy
+msgid "&Search"
+msgstr "Поиск..."
+
+#: qterminator/window.py:160
+#, fuzzy
+msgid "&Reset"
+msgstr "Сброс"
+
+#: qterminator/window.py:161
+#, fuzzy
+msgid "Reset && C&lear"
+msgstr "Сброс и очистка"
+
+#: qterminator/window.py:163
+#, fuzzy
+msgid "&Preferences..."
+msgstr "Параметры..."
+
+#: qterminator/window.py:166
+msgid "&View"
+msgstr "&Вид"
+
+#: qterminator/window.py:167
+#, fuzzy
+msgid "Split &Horizontally"
+msgstr "Разделить горизонтально"
+
+#: qterminator/window.py:168
+#, fuzzy
+msgid "Split &Vertically"
+msgstr "Разделить вертикально"
+
+#: qterminator/window.py:169
+msgid "&Rotate Splits"
+msgstr "Повернуть &разделения"
+
+#: qterminator/window.py:171
+#, fuzzy
+msgid "&Maximize Terminal"
+msgstr "Закрыть терминал"
+
+#: qterminator/window.py:172
+msgid "&Full Screen"
+msgstr "Полный &экран"
+
+#: qterminator/window.py:175
+#, fuzzy
+msgid "Zoom &In"
+msgstr "Увеличить"
+
+#: qterminator/window.py:176
+#, fuzzy
+msgid "Zoom &Out"
+msgstr "Уменьшить"
+
+#: qterminator/window.py:177
+msgid "Zoom &Normal"
+msgstr "&Обычный размер"
+
+#: qterminator/window.py:179
+msgid "Toggle &Scrollbar"
+msgstr "Полоса &прокрутки"
+
+#: qterminator/window.py:185
+#, fuzzy
+msgid "&Terminal"
+msgstr "Закрыть терминал"
+
+#: qterminator/window.py:186
+msgid "Edit &Terminal Title..."
+msgstr "Изменить заголовок &терминала..."
+
+#: qterminator/window.py:187
+msgid "Edit T&ab Title..."
+msgstr "Изменить заголовок вкл&адки..."
+
+#: qterminator/window.py:188
+msgid "Edit &Window Title..."
+msgstr "Изменить заголовок &окна..."
+
+#: qterminator/window.py:190
+#, fuzzy
+msgid "Read-&Only"
+msgstr "Только для чтения"
+
+#: qterminator/window.py:193
+msgid "&Broadcast Input"
+msgstr "Ра&сылать ввод"
+
+#: qterminator/window.py:195
+msgid "&Off"
+msgstr "Вы&кл"
+
+#: qterminator/window.py:196
+#, fuzzy
+msgid "&Group"
+msgstr "Группа"
+
+#: qterminator/window.py:197
+msgid "&All"
+msgstr "&Все"
+
+#: qterminator/window.py:200
+msgid "T&ools"
+msgstr "С&ервис"
+
+#: qterminator/window.py:204
+msgid "&Help"
+msgstr "&Справка"
+
+#: qterminator/window.py:205
+msgid "&About QTerminator"
+msgstr "&О QTerminator"
+
+#: qterminator/context_menu.py:21
+msgid "Copy"
+msgstr "Копировать"
+
+#: qterminator/context_menu.py:26
+msgid "Paste"
+msgstr "Вставить"
+
+#: qterminator/context_menu.py:34
+msgid "Split Horizontally"
+msgstr "Разделить горизонтально"
+
+#: qterminator/context_menu.py:40
+msgid "Split Vertically"
+msgstr "Разделить вертикально"
+
+#: qterminator/context_menu.py:49
+msgid "New Tab"
+msgstr "Новая вкладка"
+
+#: qterminator/context_menu.py:56
+msgid "Read-Only"
+msgstr "Только для чтения"
+
+#: qterminator/context_menu.py:63
+msgid "Monitor"
+msgstr "Наблюдение"
+
+#: qterminator/context_menu.py:65
+msgid "Watch for Activity"
+msgstr "Наблюдать за активностью"
+
+#: qterminator/context_menu.py:73
+msgid "Watch for Silence"
+msgstr "Наблюдать за тишиной"
+
+#: qterminator/context_menu.py:83
+msgid "Group"
+msgstr "Группа"
+
+#: qterminator/context_menu.py:86
+msgid "None"
+msgstr "Нет"
+
+#: qterminator/context_menu.py:103
+msgid "Custom..."
+msgstr "Пользовательская..."
+
+#: qterminator/context_menu.py:114
+msgid "Profiles"
+msgstr "Профили"
+
+#: qterminator/context_menu.py:128
+msgid "Color Scheme"
+msgstr "Цветовая схема"
+
+#: qterminator/context_menu.py:144
+msgid "Search..."
+msgstr "Поиск..."
+
+#: qterminator/context_menu.py:150
+msgid "Reset"
+msgstr "Сброс"
+
+#: qterminator/context_menu.py:155
+msgid "Reset && Clear"
+msgstr "Сброс и очистка"
+
+#: qterminator/context_menu.py:163
+msgid "Zoom In"
+msgstr "Увеличить"
+
+#: qterminator/context_menu.py:167
+msgid "Zoom Out"
+msgstr "Уменьшить"
+
+#: qterminator/context_menu.py:177
+msgid "Show Menu Bar"
+msgstr "Показать строку меню"
+
+#: qterminator/context_menu.py:187
+msgid "Preferences..."
+msgstr "Параметры..."
+
+#: qterminator/context_menu.py:196
+msgid "Close Terminal"
+msgstr "Закрыть терминал"
+
+#: qterminator/context_menu.py:211
+msgid "Custom Group"
+msgstr "Пользовательская группа"
+
+#: qterminator/context_menu.py:211
+msgid "Group name:"
+msgstr "Имя группы:"
