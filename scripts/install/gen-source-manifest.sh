@@ -192,8 +192,15 @@ repo_is_dirty() {
     [ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]
 }
 
+# is_git_checkout <dir> — true (0) only if <dir> IS the top level of a git
+# checkout (a linked worktree counts). Being merely INSIDE a work tree is not
+# enough: `--repo-root <mono>/qdwin` would otherwise pin the enclosing
+# repository's HEAD as "qdistro". Same rule as image/build.sh's repo_head.
 is_git_checkout() {
-    git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+    local top
+    top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    [ -n "$top" ] || return 1
+    [ "$(realpath -e -- "$top")" = "$(realpath -e -- "$1")" ]
 }
 
 # --- lint mode ----------------------------------------------------------
@@ -283,7 +290,7 @@ generate_manifest() {
                 missing=1
                 continue
             fi
-            die "$repo: no git checkout at $dir (supply --repo-root, or --allow-missing to skip)"
+            die "$repo: no git checkout at $dir (it must be the checkout's top level; supply --repo-root, or --allow-missing to skip)"
         fi
 
         if repo_is_dirty "$dir"; then

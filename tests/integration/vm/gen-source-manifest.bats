@@ -226,6 +226,26 @@ real_boot_fn() {
     [[ "$output" == *qdistro*"no git checkout"* ]] || { echo "$output" >&2; return 1; }
 }
 
+@test "gen: refuses a --repo-root INSIDE the checkout (must be the top level)" {
+    stub_all
+    # <mono>/qdwin is inside a work tree but is not one: pinning the enclosing
+    # repository's HEAD as "qdistro" from here would be a wrong-root manifest.
+    run "$GEN" --repo-root "$MONO/qdwin"
+    [ "$status" -ne 0 ] || { echo "expected failure, got 0:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *qdistro*"no git checkout"*"top level"* ]] || { echo "$output" >&2; return 1; }
+}
+
+@test "gen: accepts a linked worktree root (.git is a file there)" {
+    stub_all
+    git -C "$MONO" worktree add -q --detach "$WORK/wt" HEAD
+    [ -f "$WORK/wt/.git" ]
+    run "$GEN" --repo-root "$WORK/wt"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    local pin
+    pin="$(printf '%s\n' "$output" | awk '$1=="qdistro"{print $2}')"
+    [ "$pin" = "${EXPECTED[qdistro]}" ] || { echo "pin $pin != ${EXPECTED[qdistro]}" >&2; return 1; }
+}
+
 @test "gen: --allow-missing cannot produce an empty manifest (the one repo is required)" {
     stub_all
     rm -rf "$MONO/.git"
