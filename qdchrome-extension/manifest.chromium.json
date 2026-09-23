@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "qdistro browser bridge",
+  "version": "0.2.0",
+  "description": "qdistro native-messaging client: tabs, pwd, page-extract, cookies, mpris, downloads, notifications, screen-lock.",
+  "minimum_chrome_version": "126",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhKmm1wW5AP3/tbOkitZeYZ3Q6os4xmfSID0IHMlfbri5l9rxoKT9+lUUCBLEOuscSDxQSZxK8UIQSiQZJHqVTtmRaIQIt0D7i1b+bneTOXkakj1ribb9oi8YOybWj+2aSd//BWzZ8rXxmmFJbOeRGRPbS4u/1DOZ8tIru6vUhw90jxQ4GEEHppH6FgBD6jpPkqilKYnEIX/80HVmLMtQ0LBmdTyHj4Xbar+q1OwCpSXYLw+4LL4Q8N8KS5Soziodw779bPHySNwlGc2/3DCx+JBMfuh1FdXeOSWWgpiGYPjUXGjtQ/Vx4aEc1TDY1vG21MmBswbjbhoBVbMmFvV0MwIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "tabs",
+    "cookies",
+    "downloads",
+    "notifications",
+    "contextMenus",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "qdistro browser bridge",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.png"
+    }
+  },
+  "icons": {
+    "48": "icons/icon-48.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/pwd-content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "src/content/mpris-content.js",
+        "src/content/screenlock-content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

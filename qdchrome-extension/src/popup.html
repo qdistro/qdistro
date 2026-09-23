@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>qdistro browser bridge</title>
+  <style>
+    body { font-family: sans-serif; min-width: 320px; margin: 8px; }
+    h1 { font-size: 14px; margin: 0 0 6px 0; }
+    button { padding: 4px 10px; margin-right: 4px; }
+    pre { font-size: 11px; background: #f4f4f4; padding: 6px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
+    .ok { color: #0a6; }
+    .err { color: #a00; }
+    .row { margin: 6px 0; }
+    a { font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h1>qdistro browser bridge</h1>
+  <div class="row">
+    Port: <span id="status">checking…</span>
+  </div>
+  <div class="row">
+    <button id="ping">Ping</button>
+    <button id="cookies-export">Export session</button>
+  </div>
+  <pre id="out">(no response yet)</pre>
+  <div class="row">
+    <a href="#" id="open-options">Settings…</a>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

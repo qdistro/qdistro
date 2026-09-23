@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>qdistro browser bridge — settings</title>
+  <style>
+    body { font-family: sans-serif; max-width: 640px; margin: 16px auto; padding: 0 16px; }
+    h1 { font-size: 18px; }
+    h2 { font-size: 14px; margin-top: 24px; }
+    fieldset { border: 1px solid #ccc; padding: 8px 12px; margin: 8px 0; }
+    legend { padding: 0 4px; font-weight: bold; }
+    label { display: block; margin: 4px 0; }
+    textarea { width: 100%; height: 80px; font-family: monospace; font-size: 12px; }
+    .muted { color: #666; font-size: 12px; }
+    button { padding: 6px 12px; margin-top: 8px; }
+    #saved { color: #0a6; margin-left: 8px; display: none; }
+  </style>
+</head>
+<body>
+  <h1>qdistro browser bridge</h1>
+
+  <h2>Modules</h2>
+  <fieldset>
+    <legend>Enabled features</legend>
+    <label><input type="checkbox" id="mod-tabs" checked> Tabs (list / open / close)</label>
+    <label><input type="checkbox" id="mod-pwd" checked> Password manager (fill / save)</label>
+    <label><input type="checkbox" id="mod-pageExtract" checked> Share-to (page extract)</label>
+    <label><input type="checkbox" id="mod-cookies" checked> Cookies export</label>
+    <label><input type="checkbox" id="mod-mpris"> MPRIS media control</label>
+    <label><input type="checkbox" id="mod-downloads" checked> Downloads</label>
+    <label><input type="checkbox" id="mod-notifications" checked> Notifications</label>
+    <label><input type="checkbox" id="mod-screenlock"> Screen-lock inhibit</label>
+  </fieldset>
+
+  <h2>Per-origin allowlist</h2>
+  <fieldset>
+    <legend>Only run modules on these origins</legend>
+    <p class="muted">One origin per line. <strong>Closed by default:</strong>
+       leave empty to block all page-initiated operations. Enter
+       <code>*</code> on its own line to allow all origins. Match is
+       exact-host (no glob); subdomain matching is explicit
+       (<code>https://*.internal.corp</code>).</p>
+    <textarea id="origin-allowlist" placeholder="https://example.com&#10;https://*.internal.corp"></textarea>
+  </fieldset>
+
+  <h2>Intent tokens</h2>
+  <fieldset>
+    <legend>TTL</legend>
+    <p>Intent tokens are valid for <strong id="intent-ttl">5000</strong> ms after mint.
+       Per spec/14 Phase-9d, TTL is daemon-policy controlled — this is informational.</p>
+  </fieldset>
+
+  <div>
+    <button id="save">Save</button>
+    <span id="saved">Saved.</span>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

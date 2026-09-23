@@ -1,0 +1,38 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+.npm
+package-lock.json.backup
+
+# Build & dist
+dist/
+coverage/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor & IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.zed
+
+# Logs
+*.log
+
+# Private packing key — never commit. Public key is inlined in
+# manifest.chromium.json's "key" field instead.
+keys/qdistro.pem
+keys/qdistro-pubkey.b64
+
+# Local git worktrees (the /do workflow puts them here). Never part of a
+# commit — they are separate checkouts, so `git add -A` from the repo root
+# would otherwise stage them as embedded git repositories.
+.worktrees/

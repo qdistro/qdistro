@@ -1,0 +1,17 @@
+{
+  "name": "qdchrome-extension",
+  "version": "0.2.0",
+  "private": true,
+  "description": "qdistro Chromium-family native-messaging WebExtension (MV3).",
+  "scripts": {
+    "build": "bash scripts/build-extension.sh",
+    "test": "vitest run",
+    "test:release": "QDISTRO_REQUIRE_SIBLING=1 vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^1.6.0",
+    "jsdom": "^26.1.0",
+    "vitest": "^1.6.0"
+  }
+}
