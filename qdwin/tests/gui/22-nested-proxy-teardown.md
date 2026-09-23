@@ -82,8 +82,11 @@ source ${QDWIN_REPO}/tests/apps/qdwin-apps-helpers.sh
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 qdwin_apps_set_vm "$VMNAME"
 
-: "${QDWIN_SCREEN_W:=1024}"
-: "${QDWIN_SCREEN_H:=768}"
+# The GUI lane pins Virtual-1 to 1280x800 (scripts/vm/spin-test-vm-gui.sh,
+# weston.ini mode=1280x800@60); qdwin-helpers.sh and vm-gui default to the same.
+# Assert 3.3 checks the probe's `out=` against these.
+: "${QDWIN_SCREEN_W:=1280}"
+: "${QDWIN_SCREEN_H:=800}"
 export QDWIN_SCREEN_W QDWIN_SCREEN_H
 
 qdwin_session_healthy || { echo "ERROR: qdwin/qdshell user session not up"; exit 1; }
