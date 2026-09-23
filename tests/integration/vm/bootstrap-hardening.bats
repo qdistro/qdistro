@@ -1162,12 +1162,16 @@ run_verify_pin() {
     [ ! -e "$root/qdistro.pwned" ]
 }
 
-@test "root-checkout: --skip-sources pin-verifies every EXISTING tree, not just recognised ones" {
-    # repo_present only recognises .git / daemons+qdwin/meson.build, but
-    # install_python_modules runs $REPO_ROOT/scripts/install/*.sh and installs
-    # qdlocker's systemd/pam assets, so an unrecognisable-but-present tree must
-    # FAIL the pin, never silently skip it. Monorepo: the one source root is
-    # pin-verified unconditionally in hardened profiles.
+@test "root-checkout: --skip-sources source keeps the unconditional hardened pin (static guard)" {
+    # Static guard on fetch_sources' text. The behavioural fail-closed case
+    # (empty source root dies at the pin) is in
+    # source-manifest-signature.bats, "fetch_sources: signed manifest gate
+    # passes, then proceeds". repo_present only recognises .git /
+    # daemons+qdwin/meson.build, but install_python_modules runs
+    # $REPO_ROOT/scripts/install/*.sh and installs qdlocker's systemd/pam
+    # assets, so an unrecognisable-but-present tree must FAIL the pin, never
+    # silently skip it. Monorepo: the one source root is pin-verified
+    # unconditionally in hardened profiles.
     body="$(sed -n '/^fetch_sources()/,/^}/p' "$BOOT")"
     [ -n "$body" ]
     printf '%s\n' "$body" | grep -q 'is_dev || verify_repo_pin qdistro' \
