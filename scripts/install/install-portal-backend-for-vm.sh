@@ -11,7 +11,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-SRC=${1:-/root/qdistro-src/qdistro}
+SRC=${1:-/root/qdistro-src}
 if [ ! -d "$SRC" ]; then
     echo "[install-portal-backend] missing source dir $SRC" >&2
     exit 2

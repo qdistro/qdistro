@@ -34,7 +34,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER1_DIR="$SRC/selinux/tier1"
 SPAWN="$TIER1_DIR/spawn-tier1.sh"
 

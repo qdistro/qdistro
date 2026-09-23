@@ -1,6 +1,6 @@
 #!/bin/bash
 # fresh-vm-bootstrap.sh — run inside a freshly-cloned baseweed VM to:
-#   1. Fetch the three qdistro repos as tarballs from host:8765.
+#   1. Fetch the qdistro monorepo as one tarball from host:8765.
 #   2. Build qdwin from source (libweston shell plugin).
 #   3. Build qdistro's C daemons against qdwin's protocol XML.
 #   4. Install the Python broker / polkit-agent / pwd / etc. services.
@@ -16,16 +16,12 @@
 #   - quickshell + qt6-* for qdshell
 #   - bats for in-VM integration tests
 #
-# Host must be serving the three tarballs at http://10.0.2.2:8765/:
-#   /qdistro.tar.gz
-#   /qdwin.tar.gz
-#   /qdshell.tar.gz
+# Host must be serving the monorepo tarball at http://10.0.2.2:8765/:
+#   /qdistro.tar.gz   (repo root: qdistro content + qdwin/, qdshell/, ... in-tree)
 #
 # spin-test-vm.sh handles the host-side staging. To bootstrap manually:
 #   STAGE=$(mktemp -d)
-#   tar czf $STAGE/qdistro.tar.gz -C ~/path/to/qdistro .
-#   tar czf $STAGE/qdwin.tar.gz   -C ~/path/to/qdwin .
-#   tar czf $STAGE/qdshell.tar.gz -C ~/path/to/qdshell .
+#   tar czf $STAGE/qdistro.tar.gz --exclude=.git -C ~/path/to/qdistro .
 #   cp ~/path/to/qdistro/scripts/vm/fresh-vm-bootstrap.sh $STAGE/
 #   (cd $STAGE && python3 -m http.server 8765 --bind 127.0.0.1) &
 #   vm-exec <vm> "wget -O- http://10.0.2.2:8765/fresh-vm-bootstrap.sh | bash"
@@ -198,30 +194,24 @@ fi
 zypper -n addlock spice-vdagent >/dev/null 2>&1 \
     || { log "  ERROR: zypper addlock spice-vdagent failed"; exit 3; }
 
-# ---- 1. Fetch + unpack the three repos -----------------------------------
-log "fetching tarballs from $HOST..."
+# ---- 1. Fetch + unpack the monorepo ---------------------------------------
+# One tarball of the qdistro monorepo: root = qdistro's own content, the
+# components (qdwin/, qdshell/, qdlocker/, qdbrowser/, qdgreeter/, qnotebook/,
+# ...) in-tree beside it. /root/qdistro-src IS that tree (same layout as the
+# image and a developer checkout).
+log "fetching the monorepo tarball from $HOST..."
+if ! wget -q -O /tmp/qdistro.tar.gz "$HOST/qdistro.tar.gz"; then
+    echo "[bootstrap] failed to fetch $HOST/qdistro.tar.gz"; exit 2
+fi
+# A cached base can contain files deleted from the current checkout.  Do
+# not overlay the new archive on that stale tree: security removals such
+# as browser_bridge/extension must remain removed in every fresh VM.
+rm -rf "$SRC"
 mkdir -p "$SRC"
-for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qnotebook; do
-    if ! wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz"; then
-        # qdlocker + qdbrowser + qdgreeter + qnotebook are optional during the rollout; older
-        # spin scripts don't stage them. Don't fail the whole bootstrap
-        # if they're absent — the bridge installer will WARN and the
-        # qdbrowser pwd_autofill probes will then ModuleNotFoundError,
-        # but the broker / pwd / session-manager paths still come up.
-        if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ] || [ "$repo" = "qdgreeter" ] || [ "$repo" = "qnotebook" ]; then
-            log "$repo tarball not staged; skipping"
-            rm -rf "$SRC/$repo"
-            continue
-        fi
-        echo "[bootstrap] failed to fetch $HOST/$repo.tar.gz"; exit 2
-    fi
-    # A cached base can contain files deleted from the current checkout.  Do
-    # not overlay the new archive on that stale tree: security removals such
-    # as browser_bridge/extension must remain removed in every fresh VM.
-    rm -rf "$SRC/$repo"
-    mkdir -p "$SRC/$repo"
-    tar -xzf "/tmp/$repo.tar.gz" -C "$SRC/$repo"
-    rm -f "/tmp/$repo.tar.gz"
+tar -xzf /tmp/qdistro.tar.gz -C "$SRC"
+rm -f /tmp/qdistro.tar.gz
+for repo in qdwin qdshell; do
+    [ -d "$SRC/$repo" ] || { echo "[bootstrap] monorepo tarball lacks $repo/"; exit 2; }
 done
 
 if [ -f "$SRC/qnotebook/pyproject.toml" ]; then
@@ -331,11 +321,11 @@ zypper -n install --no-recommends \
 # LD_LIBRARY_PATH + WESTON_MODULE_MAP at that tree.
 # Decision doc: qdwin/doc/decisions/0001-vendored-libweston-packaging.md
 log "building + staging vendored libweston (production profile)..."
-if [ ! -x "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" ]; then
+if [ ! -x "$SRC/scripts/install/install-vendored-libweston.sh" ]; then
     log "  ERROR: install-vendored-libweston.sh missing — cannot stage vendored libweston"
     exit 3
 fi
-if ! bash "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"; then
+if ! bash "$SRC/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"; then
     log "  ERROR: vendored libweston staging failed — qdwin must not fall back to distro libweston in CI"
     exit 3
 fi
@@ -346,17 +336,17 @@ fi
 
 # ---- 3. Build qdistro daemons (C, against ../qdwin XML) ------------------
 log "building qdistro daemons..."
-cd "$SRC/qdistro/daemons"
+cd "$SRC/daemons"
 meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
 
 # ---- 4. Install Python modules + systemd units --------------------------
 # Each install-*.sh takes the module's source dir as $1. We pass paths
-# under $SRC/qdistro/<module>/ instead of the legacy /root/<module>-src/.
+# under $SRC/<module>/ instead of the legacy /root/<module>-src/.
 log "installing Python modules..."
-cd "$SRC/qdistro"
-QD="$SRC/qdistro"
+cd "$SRC"
+QD="$SRC"
 INSTALLERS=(
     "scripts/install/install-sdk-for-vm.sh             $QD/sdk/qdistro_app"
     "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
@@ -462,9 +452,9 @@ done
 
 # ---- 5b. Build qdshell QML plugin (libqdistro-qdwin.so) ------------------
 # The Qdistro.Qdwin QML plugin lives in qdshell/qml-plugin/ and reads
-# the qdwin_shell_v1 protocol XML from the sibling qdwin repo via a
-# relative path (../../qdwin/qdwin/qdwin-shell-v1.xml). Both repos are
-# unpacked side-by-side under $SRC so the relative path resolves.
+# the qdwin_shell_v1 protocol XML from the in-tree qdwin component via a
+# relative path (../../qdwin/qdwin/qdwin-shell-v1.xml). Both components are
+# unpacked side-by-side under $SRC (the monorepo root) so it resolves.
 # Without this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
 # `import Qdistro.Qdwin 1.0` and `qs` exits with rc=255 on startup.
 log "building qdshell QML plugin (libqdistro-qdwin.so)..."
@@ -665,18 +655,18 @@ log "installing qdwin session (qdwin-compositor + qdshell user units via qdwin-s
 # shell-capture authority the GUI harness observes through. The production
 # installer callers (image/config.sh, qdistro-bootstrap.sh) must not set it.
 QDWIN_ENABLE_SHELL_CAPTURE=1 \
-bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
+bash "$SRC/scripts/install/install-qdwin-session-for-vm.sh" \
     "$SRC/qdshell" \
     || { echo "[bootstrap] qdwin-session install failed"; exit 3; }
 
 # qdwin does not own cursor image buffers itself. Keep the helper alive
 # as part of the qdshell session so it can register wl_shm cursor
 # surfaces through qdwin_shell_v1.set_cursor_sprite.
-if [ -f "$SRC/qdistro/daemons/cursor-sprites/qdistro-cursor-sprites.service" ]; then
+if [ -f "$SRC/daemons/cursor-sprites/qdistro-cursor-sprites.service" ]; then
     log "installing qdwin cursor sprite helper user unit..."
     install -d -m 0755 /etc/systemd/user
     install -m 0644 \
-        "$SRC/qdistro/daemons/cursor-sprites/qdistro-cursor-sprites.service" \
+        "$SRC/daemons/cursor-sprites/qdistro-cursor-sprites.service" \
         /etc/systemd/user/qdistro-cursor-sprites.service
     runuser -l admin -c \
         'systemctl --user enable qdistro-cursor-sprites.service' \
@@ -831,7 +821,7 @@ DBUS
     # The scenario and qdlocker/tests/gui/AGENTS.md always named this path,
     # but nothing installed it, so 04 was a permanent SKIP.
     install -m 0755 -o root -g root \
-        "$SRC/qdistro/scripts/vm/assets/qdistro-fake-lid-close" \
+        "$SRC/scripts/vm/assets/qdistro-fake-lid-close" \
         /usr/local/bin/qdistro-fake-lid-close
     log "  installed /usr/local/bin/qdistro-fake-lid-close test helper"
 
@@ -848,10 +838,10 @@ fi
 # admin session pkexec the spawn helper without re-auth. Required for
 # qdshell's VMAppsProvider to actually launch tier-5 apps (admin uid
 # can't run libvirt/virsh as root without this).
-if [ -x "$SRC/qdistro/scripts/install/install-tier5-for-vm.sh" ]; then
+if [ -x "$SRC/scripts/install/install-tier5-for-vm.sh" ]; then
     log "installing tier-5 launcher symlinks + polkit policy..."
-    bash "$SRC/qdistro/scripts/install/install-tier5-for-vm.sh" \
-        "$SRC/qdistro" \
+    bash "$SRC/scripts/install/install-tier5-for-vm.sh" \
+        "$SRC" \
         || log "  WARN: tier-5 launcher install failed; VMAppsProvider will not work"
 fi
 
@@ -860,10 +850,10 @@ fi
 # admin to the group, symlinks spawn-tier3 + cleanup, and installs the
 # polkit policy. Required for the phase7-tier3-* bats family to have
 # a populated silo to spawn into.
-if [ -x "$SRC/qdistro/scripts/install/install-tier3-for-vm.sh" ]; then
+if [ -x "$SRC/scripts/install/install-tier3-for-vm.sh" ]; then
     log "installing tier-3 silo + launcher symlinks + polkit policy..."
-    bash "$SRC/qdistro/scripts/install/install-tier3-for-vm.sh" \
-        "$SRC/qdistro" \
+    bash "$SRC/scripts/install/install-tier3-for-vm.sh" \
+        "$SRC" \
         || log "  WARN: tier-3 launcher install failed; phase7-tier3-* bats will fail loud"
 fi
 
@@ -946,18 +936,18 @@ fi
 # to actually exercise the full --vm path. tiered-isolation.bats's
 # error message points at these env vars.
 if [ "${QDISTRO_BUILD_TIER4_BASE:-0}" = "1" ]; then
-    if [ -x "$SRC/qdistro/tier4-vm/build-guest-image.sh" ]; then
+    if [ -x "$SRC/tier4-vm/build-guest-image.sh" ]; then
         log "building tier-4 base disk (QDISTRO_BUILD_TIER4_BASE=1)..."
-        bash "$SRC/qdistro/tier4-vm/build-guest-image.sh" \
+        bash "$SRC/tier4-vm/build-guest-image.sh" \
             || log "  WARN: tier-4 base build failed; phase7-tier4-vm will SKIP"
     else
         log "  WARN: tier4-vm/build-guest-image.sh not staged; skipping"
     fi
 fi
 if [ "${QDISTRO_BUILD_TIER5_BASE:-0}" = "1" ]; then
-    if [ -x "$SRC/qdistro/tier5-vm/build-guest-image.sh" ]; then
+    if [ -x "$SRC/tier5-vm/build-guest-image.sh" ]; then
         log "building tier-5 base disk (QDISTRO_BUILD_TIER5_BASE=1)..."
-        bash "$SRC/qdistro/tier5-vm/build-guest-image.sh" \
+        bash "$SRC/tier5-vm/build-guest-image.sh" \
             || log "  WARN: tier-5 base build failed; phase7-tier5-vm will SKIP"
     else
         log "  WARN: tier5-vm/build-guest-image.sh not staged; skipping"
@@ -974,7 +964,7 @@ fi
 # backing blocks. Failure here is FATAL when opted in — silently falling back to
 # the per-worker on-demand build is exactly the flaky path this removes.
 if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
-    if [ ! -x "$SRC/qdistro/tier2/make-tier2-image.sh" ]; then
+    if [ ! -x "$SRC/tier2/make-tier2-image.sh" ]; then
         log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
         exit 1
     fi
@@ -988,7 +978,7 @@ if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
     chmod 0711 /root 2>/dev/null || true
     chmod -R a+rX "$SRC" 2>/dev/null || true
     log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
-    if ! runuser -u admin -- bash "$SRC/qdistro/tier2/make-tier2-image.sh"; then
+    if ! runuser -u admin -- bash "$SRC/tier2/make-tier2-image.sh"; then
         log "  ERROR: tier-2 image pre-build failed"
         exit 1
     fi

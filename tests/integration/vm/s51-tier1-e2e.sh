@@ -32,7 +32,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER1_DIR="$SRC/selinux/tier1"
 [ -d "$TIER1_DIR" ] || skip "tier1 source not staged at $TIER1_DIR"
 

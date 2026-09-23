@@ -81,7 +81,7 @@ echo "[gui-spin] step 2/3: layering permissions-gui prereqs on $VM" >&2
 B64=$(base64 -w0 <<'POSTBOOT'
 set -eu
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 
 # Which graphical session this VM should expose to scenarios:
 #   labwc  (default) — labwc + lxqt on wayland-0, for the permissions-gui

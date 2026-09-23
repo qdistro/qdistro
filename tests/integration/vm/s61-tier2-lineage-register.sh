@@ -36,7 +36,7 @@ fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
 # --- config ----------------------------------------------------------
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER2_DIR=/tmp/qdistro-tier2-lineage
 COMMON_LIB_DIR=/tmp/lib
 ADMIN_USER=admin

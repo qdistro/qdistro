@@ -23,7 +23,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER5_DIR=/tmp/qdistro-tier5
 # Stage the shared library too so a standalone replay is independent of files
 # left in /tmp by earlier tiered-isolation cases.

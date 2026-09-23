@@ -41,7 +41,7 @@ fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
 # ---- 0. stage tier5-vm/ next to the script, like s45 ----------------
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER5_DIR=/tmp/qdistro-tier5
 if [ -d "$SRC/tier5-vm" ]; then
     rm -rf "$TIER5_DIR" 2>/dev/null || true

@@ -26,7 +26,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER5_DIR=/tmp/qdistro-tier5
 # Stage tier5-vm AND lib as siblings so spawn-tier5.sh's `../lib/spawn-common.sh`
 # source resolves (matches permissions-gui/21's layout).

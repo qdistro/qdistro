@@ -3,7 +3,7 @@
 # (App1 receiver + app integration; recall.py ships present-but-disabled) onto a
 # fresh-clone VM.
 #
-# Takes the SDK package dir as $1 (default /root/qdistro-src/qdistro/sdk/qdistro_app).
+# Takes the SDK package dir as $1 (default /root/qdistro-src/sdk/qdistro_app).
 #
 # Layout:
 #   /usr/lib/python*/site-packages/qdistro_app/{__init__,app_receiver,recall}.py
@@ -27,7 +27,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-SDK_SRC=${1:-/root/qdistro-src/qdistro/sdk/qdistro_app}
+SDK_SRC=${1:-/root/qdistro-src/sdk/qdistro_app}
 if [ ! -d "$SDK_SRC" ] || [ ! -f "$SDK_SRC/__init__.py" ]; then
     echo "[install-sdk] qdistro_app SDK not found at $SDK_SRC" >&2
     echo "       need $SDK_SRC/__init__.py" >&2

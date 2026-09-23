@@ -88,7 +88,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- 1. stage tier3 source -------------------------------------------
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER3_DIR=/tmp/qdistro-tier3-src
 if [ -d "$SRC/tier3" ]; then
     rm -rf "$TIER3_DIR" 2>/dev/null || true

@@ -37,7 +37,7 @@ def find_marker_binary() -> str | None:
     if env and Path(env).exists():
         return env
     cands = ["/tmp/mm-build/qdwin-marker-client"]
-    cands += [str(p) for p in Path("/home/play2/qdistro/qdwin").glob(
+    cands += [str(p) for p in (Path(__file__).resolve().parents[2] / "qdwin").glob(
         "build*/qdwin-marker-client")]
     for c in cands:
         if Path(c).exists():

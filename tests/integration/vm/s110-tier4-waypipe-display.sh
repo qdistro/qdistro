@@ -314,7 +314,7 @@ IDENTITY_PY=""
 for cand in \
     /usr/local/lib/qdistro/tier4_publisher_identity.py \
     /usr/share/qdistro/tier4-vm/tier4_publisher_identity.py \
-    /root/qdistro-src/qdistro/tier4-vm/tier4_publisher_identity.py; do
+    /root/qdistro-src/tier4-vm/tier4_publisher_identity.py; do
     [ -f "$cand" ] && { IDENTITY_PY="$cand"; break; }
 done
 if [ -z "$IDENTITY_PY" ]; then

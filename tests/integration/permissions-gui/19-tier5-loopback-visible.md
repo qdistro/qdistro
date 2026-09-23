@@ -31,7 +31,7 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 # Precondition: tier-5 source unpacked + waypipe + weston-terminal
 # present in the VM. The bats s35 driver bootstraps the same tree.
 $VMEXEC "$VM" 'command -v waypipe >/dev/null && command -v weston-terminal >/dev/null'
-$VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier5-vm'
+$VMEXEC "$VM" 'test -d /root/qdistro-src/tier5-vm'
 
 # Drain any leftover tier-5 spawn from a prior run. ([s]pawn bracket trick so
 # the pkill pattern can't match the guest shell running this very command.)
@@ -55,8 +55,8 @@ launch token + lineage registration are silently skipped.)
 B64=$(base64 -w0 <<'EOF'
 rm -rf /tmp/qdistro-tier5
 mkdir -p /tmp/qdistro-tier5
-cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
-cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
+cp -r /root/qdistro-src/tier5-vm /tmp/qdistro-tier5/tier5-vm
+cp -r /root/qdistro-src/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
 setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --loopback -p 7791 \

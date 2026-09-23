@@ -22,7 +22,7 @@ gate_snapshot_daily() {
     vm=$(acquire_vm snapshot-daily "") || return "$EXIT_VM_PROVISION"
     tmp=$vm
     mkdir -p "$RDIR/vm"
-    if ! "$VM_TOOLS/vm-exec" "$tmp" "bash /root/qdistro-src/qdistro/scripts/vm/enable-qdgreeter.sh" \
+    if ! "$VM_TOOLS/vm-exec" "$tmp" "bash /root/qdistro-src/scripts/vm/enable-qdgreeter.sh" \
         > "$RDIR/vm/enable-qdgreeter.log" 2>&1; then
         record_result snapshot-daily "$new_name" fail "$EXIT_VM_PROVISION" vm_provision vm "$RDIR/vm/enable-qdgreeter.log" "could not enable qdgreeter/greetd"
         return "$EXIT_VM_PROVISION"

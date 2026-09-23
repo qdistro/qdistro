@@ -228,7 +228,7 @@ fi
 # canonical name so launches from the live shell work without baking
 # the dev-tree path in QML. The script is self-contained — entrypoint.sh
 # and the rest live inside the container image, not on the host.
-QDISTRO_SRC="${QDISTRO_SRC:-/root/qdistro-src/qdistro}"
+QDISTRO_SRC="${QDISTRO_SRC:-/root/qdistro-src}"
 if [ -f "$QDISTRO_SRC/tier2/spawn-tier2.sh" ]; then
     install -d /usr/lib/qdistro
     install -m 0644 -o root -g root \
@@ -255,7 +255,7 @@ if [ -f "$QDISTRO_SRC/tier2/spawn-tier2.sh" ]; then
 else
     echo "WARN: $QDISTRO_SRC/tier2/spawn-tier2.sh not found —" \
          "PodApps.launch() will fail with 'qdistro-tier2-spawn: not found'." \
-         "Pass QDISTRO_SRC=<path> or untar qdistro to /root/qdistro-src/qdistro/."
+         "Pass QDISTRO_SRC=<path> or untar qdistro to /root/qdistro-src/."
 fi
 
 # 3d. Tier-2 podapps cache directory. qdistro-podapps-scan writes

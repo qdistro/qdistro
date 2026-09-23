@@ -24,9 +24,9 @@ from multimachine.harness.vm_backend import QciVMBackend  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument("vm")
 ap.add_argument("--qdshell", type=Path,
-                default=Path("/home/play2/qdistro/qdshell"))
+                default=Path(str(REPO) + "/qdshell"))
 ap.add_argument("--popup-binary", type=Path,
-                default=Path("/home/play2/qdistro/qdwin/build-qci/qdwin-popup-probe"))
+                default=Path(str(REPO) + "/qdwin/build-qci/qdwin-popup-probe"))
 args = ap.parse_args()
 
 bundle = Path("/tmp/mm-live/r5-local")

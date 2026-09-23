@@ -29,7 +29,7 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 # Precondition: nested virt + tier-4 image + source tree.
 $VMEXEC "$VM" 'test -e /dev/kvm'
 $VMEXEC "$VM" 'test -f /var/lib/libvirt/images/qdistro-tier4-guest.qcow2'
-$VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier4-vm'
+$VMEXEC "$VM" 'test -d /root/qdistro-src/tier4-vm'
 
 # Precondition: host-side RDP client exists inside the outer VM.
 $VMEXEC "$VM" 'command -v wlfreerdp >/dev/null 2>&1 || \
@@ -63,8 +63,8 @@ RDP.
 B64=$(base64 -w0 <<EOF
 rm -rf /tmp/qdistro-tier4-rdp
 rm -rf /tmp/tier4-vm-guest
-cp -r /root/qdistro-src/qdistro/tier4-vm /tmp/qdistro-tier4-rdp
-cp -r /root/qdistro-src/qdistro/tier4-vm-guest /tmp/tier4-vm-guest
+cp -r /root/qdistro-src/tier4-vm /tmp/qdistro-tier4-rdp
+cp -r /root/qdistro-src/tier4-vm-guest /tmp/tier4-vm-guest
 chmod -R a+rX /tmp/qdistro-tier4-rdp /tmp/tier4-vm-guest
 find /tmp/qdistro-tier4-rdp /tmp/tier4-vm-guest -name '*.sh' -exec chmod a+rx {} +
 setsid env TIER4_VM_NAME="$VM4" \

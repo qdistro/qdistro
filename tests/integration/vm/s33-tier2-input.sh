@@ -27,7 +27,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 # Stage tier2/ scripts under /tmp where the unprivileged admin user can
 # reach them — /root is mode 0700 on the test VM.
 TIER2_DIR=/tmp/qdistro-tier2

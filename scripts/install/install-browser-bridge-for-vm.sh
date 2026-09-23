@@ -46,7 +46,6 @@ QDBROWSER_PKG="${2:-}"
 BROWSER_DAEMONS_SRC="${3:-}"
 if [ -z "$QDBROWSER_PKG" ]; then
     for cand in \
-        "$SRC/../../qdbrowser/qdbrowser" \
         "$SRC/../qdbrowser/qdbrowser" \
         "/root/qdistro-src/qdbrowser/qdbrowser" \
         "/root/qdbrowser-src/qdbrowser"; do
@@ -56,8 +55,7 @@ fi
 if [ -z "$BROWSER_DAEMONS_SRC" ]; then
     for cand in \
         "$SRC/../browser_daemons" \
-        "$SRC/../../qdistro/browser_daemons" \
-        "/root/qdistro-src/qdistro/browser_daemons"; do
+        "/root/qdistro-src/browser_daemons"; do
         if [ -f "$cand/qdistro_downloads_daemon.py" ]; then
             BROWSER_DAEMONS_SRC="$cand"
             break
@@ -152,12 +150,13 @@ if [ ! -f "$STAGE_EXT" ]; then
     echo "[install-browser-bridge] missing $STAGE_EXT" >&2
     exit 2
 fi
-# $SRC is <source-root>/qdistro/browser_bridge, so the sibling extension
-# checkouts are two levels up — the same idiom the qdbrowser /
-# browser_daemons lookups above use. QDISTRO_EXTENSION_SRC_ROOT overrides
-# (needed under a git worktree, whose parent dir is .worktrees/).
+# $SRC is <monorepo-root>/browser_bridge, so the in-tree extension
+# components (qdchrome-extension/, qdfirefox-extension/) are one level up —
+# the same idiom the qdbrowser / browser_daemons lookups above use. (Two
+# levels up was the pre-monorepo sibling layout; it would now reach a stale
+# legacy checkout beside the repo.) QDISTRO_EXTENSION_SRC_ROOT overrides.
 bash "$STAGE_EXT" "$DEST_SHARE" \
-    "${QDISTRO_EXTENSION_SRC_ROOT:-$(cd "$SRC/../.." 2>/dev/null && pwd || echo "")}"
+    "${QDISTRO_EXTENSION_SRC_ROOT:-$(cd "$SRC/.." 2>/dev/null && pwd || echo "")}"
 
 # The ungated fork used to live at "$SRC/extension" and was copied to
 # $DEST_SHARE blindly. Its continued presence means the qdistro source

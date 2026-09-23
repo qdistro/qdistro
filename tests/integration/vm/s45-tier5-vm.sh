@@ -26,7 +26,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER5_DIR=/tmp/qdistro-tier5
 # Keep tier5-vm and lib as siblings: spawn-tier5.sh sources
 # ../lib/spawn-common.sh. Depending on /tmp/lib left by an earlier Bats case

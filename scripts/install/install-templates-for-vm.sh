@@ -2,7 +2,7 @@
 # install-templates-for-vm.sh — idempotent install of the qdistro template/
 # promotion slice (todo/fableplan) onto a fresh-clone VM.
 #
-# Takes the umbrella root as $1 (default /root/qdistro-src/qdistro).
+# Takes the umbrella root as $1 (default /root/qdistro-src).
 #
 # Layout:
 #   /usr/libexec/qdistro/qdistro_templates.py            shared lib
@@ -22,7 +22,7 @@
 #   /var/lib/qdistro/{templates,bindings,pins,identity}  on-disk model
 set -euo pipefail
 
-UMBRELLA=${1:-/root/qdistro-src/qdistro}
+UMBRELLA=${1:-/root/qdistro-src}
 SRC="$UMBRELLA/templates"
 if [ ! -d "$SRC" ]; then
     echo "[install-templates] no templates/ tree at $UMBRELLA" >&2

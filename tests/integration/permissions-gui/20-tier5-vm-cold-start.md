@@ -47,7 +47,7 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 # Precondition: nested KVM + base image + tier-5 source.
 $VMEXEC "$VM" 'test -e /dev/kvm'
 $VMEXEC "$VM" 'test -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2'
-$VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier5-vm'
+$VMEXEC "$VM" 'test -d /root/qdistro-src/tier5-vm'
 
 # Pick a unique VM name so re-runs don't collide.
 VM5="qdistro-tier5-s20-$RANDOM"
@@ -70,8 +70,8 @@ points:
 B64=$(base64 -w0 <<EOF
 rm -rf /tmp/qdistro-tier5
 mkdir -p /tmp/qdistro-tier5
-cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
-cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
+cp -r /root/qdistro-src/tier5-vm /tmp/qdistro-tier5/tier5-vm
+cp -r /root/qdistro-src/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
 # TIER5_MEM_KIB=2097152 (2 GiB): the former 512 MiB CI accommodation was too

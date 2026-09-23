@@ -2523,7 +2523,7 @@ install_selinux_policies() {
 install_qdwin_session() {
     log "installing qdwin user session for admin..."
     # Pass QDISTRO_SRC so the helper can locate tier2/spawn-tier2.sh; otherwise it
-    # defaults to /root/qdistro-src/qdistro and silently skips Tier-2 helper install
+    # defaults to /root/qdistro-src and silently skips Tier-2 helper install
     # on non-/root source trees (e.g. /opt/qdistro-src).
     # Production install: never bake the test-only shell-capture authority,
     # even if the invoking shell still exports it from a test run.

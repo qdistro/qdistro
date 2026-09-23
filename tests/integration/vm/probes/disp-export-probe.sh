@@ -41,7 +41,7 @@ SPAWN_RULE="$RULE_DIR/zz-disp-export-spawn-allow.yaml"
 OPEN_RULE="$RULE_DIR/zz-disp-export-open-allow.yaml"
 EXPORT_RULE="$RULE_DIR/zz-disp-export-class-allow.yaml"
 TIER2_BUILD_DIR=/tmp/qd-dispexport-tier2
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 REQUEST_SILO=exportwork
 
 NAME_RE='^disp-weston-terminal-[0-9]{8}-[0-9]{6}(-[0-9a-f]{1,8})?$'

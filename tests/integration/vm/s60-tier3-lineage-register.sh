@@ -55,7 +55,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- 1. prerequisites ------------------------------------------------
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER3_DIR=/tmp/qdistro-tier3-src
 COMMON_LIB_DIR=/tmp/lib
 if [ -d "$SRC/tier3" ]; then

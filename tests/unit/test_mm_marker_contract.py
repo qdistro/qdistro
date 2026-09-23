@@ -391,8 +391,8 @@ def _find_marker_binary() -> str | None:
         return env
     for cand in (
         "/tmp/mm-build/qdwin-marker-client",
-        # common qdwin build dirs (sibling repo)
-        *(str(p) for p in Path("/home/play2/qdistro/qdwin").glob(
+        # common qdwin build dirs (in-tree qdwin component of this monorepo)
+        *(str(p) for p in (Path(__file__).resolve().parents[2] / "qdwin").glob(
             "build*/qdwin-marker-client")),
     ):
         if Path(cand).exists():

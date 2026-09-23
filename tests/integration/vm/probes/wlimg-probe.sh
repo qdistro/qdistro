@@ -31,7 +31,7 @@ RUNTIME_DIR="/run/user/$ADMIN_UID"
 OUTER=wayland-1
 RULE_DIR=/etc/qdistro/rules.d
 TIER2_BUILD_DIR=/tmp/qd-wlimg-tier2
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 INPUT_DIR=/tmp/qd-wlimg-input
 
 # Seccomp install path (install-qdwin-session-for-vm.sh installs every

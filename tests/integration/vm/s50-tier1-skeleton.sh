@@ -3,7 +3,7 @@
 #
 # Tier-1 SELinux source inventory. This driver confirms the source
 # artifacts survived the fresh-vm-bootstrap rsync into the VM at
-# /root/qdistro-src/qdistro/selinux/tier1/. Runtime policy loading and AVC
+# /root/qdistro-src/selinux/tier1/. Runtime policy loading and AVC
 # budget are covered by s55-tier1-enforcing.sh.
 #
 # Paired bats @test: phase7-tier1-skeleton.
@@ -18,7 +18,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-TIER1_SRC=/root/qdistro-src/qdistro/selinux/tier1
+TIER1_SRC=/root/qdistro-src/selinux/tier1
 [ -d "$TIER1_SRC" ] || skip "tier1 source not staged at $TIER1_SRC"
 
 # --- existence checks ---------------------------------------------------

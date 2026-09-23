@@ -34,7 +34,7 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
 $VMEXEC "$VM" 'test -e /dev/kvm'
 $VMEXEC "$VM" 'test -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2'
-$VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier5-vm'
+$VMEXEC "$VM" 'test -d /root/qdistro-src/tier5-vm'
 
 # qs_ipc <method> [args...] — call a qdwin IPC method on the running qdshell,
 # mirroring scenario 17's proven `ipc_vm` shape: runuser -u admin -- env …
@@ -186,8 +186,8 @@ $VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh" 2>/dev/null || true; sleep 1'
 B64=$(base64 -w0 <<EOF
 rm -rf /tmp/qdistro-tier5
 mkdir -p /tmp/qdistro-tier5
-cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
-cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
+cp -r /root/qdistro-src/tier5-vm /tmp/qdistro-tier5/tier5-vm
+cp -r /root/qdistro-src/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
 # TIER5_MEM_KIB=2097152 (2 GiB): the former 512 MiB CI accommodation was too

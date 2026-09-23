@@ -172,11 +172,11 @@ def stage_product(backend: QciVMBackend, vm: str, role: str,
     for relative in daemon_files:
         backend._push(
             vm, REPO / relative,
-            "/root/qdistro-src/qdistro/" + relative)
+            "/root/qdistro-src/" + relative)
     targets = ("qdistro-mm-remote-source-helper" if role == "source" else
                "qdistro-mm-remote-pixelfeed qdistro-mm-remote-viewer-helper")
     backend._vmexec(
-        vm, f"ninja -C /root/qdistro-src/qdistro/daemons/build {targets}")
+        vm, f"ninja -C /root/qdistro-src/daemons/build {targets}")
 
     # The v31 identity event terminates in qdshell's native binding. Stage and
     # rebuild that binding as part of the same exact-source closure; copying
@@ -197,15 +197,15 @@ def stage_product(backend: QciVMBackend, vm: str, role: str,
             "Qdistro/Qdwin/libqdistro-qdwin.so")
     if role == "source":
         backend._vmexec(
-            vm, "install -m 0755 /root/qdistro-src/qdistro/daemons/build/"
+            vm, "install -m 0755 /root/qdistro-src/daemons/build/"
                 "qdistro-mm-remote-source-helper /usr/bin/"
                 "qdistro-mm-remote-source-helper")
     else:
         backend._vmexec(
-            vm, "install -m 0755 /root/qdistro-src/qdistro/daemons/build/"
+            vm, "install -m 0755 /root/qdistro-src/daemons/build/"
                 "qdistro-mm-remote-pixelfeed /usr/bin/"
                 "qdistro-mm-remote-pixelfeed; "
-                "install -m 0755 /root/qdistro-src/qdistro/daemons/build/"
+                "install -m 0755 /root/qdistro-src/daemons/build/"
                 "qdistro-mm-remote-viewer-helper /usr/bin/"
                 "qdistro-mm-remote-viewer-helper")
 
@@ -217,11 +217,11 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=15443)
     ap.add_argument("--profile", default="wifi-good")
     ap.add_argument("--qdshell", type=Path,
-                    default=Path("/home/play2/qdistro/qdshell"))
+                    default=Path(str(REPO) + "/qdshell"))
     ap.add_argument("--qdwin", type=Path,
-                    default=Path("/home/play2/qdistro/qdwin"))
+                    default=Path(str(REPO) + "/qdwin"))
     ap.add_argument("--popup-binary", type=Path,
-                    default=Path("/home/play2/qdistro/qdwin/build-qci/"
+                    default=Path(str(REPO) + "/qdwin/build-qci/"
                                  "qdwin-popup-probe"))
     args = ap.parse_args()
     netem = profile(args.profile)

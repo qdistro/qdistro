@@ -4,7 +4,7 @@
 # /usr/libexec/qdistro/, installs the dbus policy + systemd unit,
 # reloads dbus, and enables the service.
 #
-# Usage: $0 [SRC]      # SRC defaults to /root/qdistro-src/qdistro/session_manager
+# Usage: $0 [SRC]      # SRC defaults to /root/qdistro-src/session_manager
 set -eu
 
 # Offline-install contract (todo/iso/14 Phase B): file drops always run;
@@ -15,7 +15,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-SRC=${1:-/root/qdistro-src/qdistro/session_manager}
+SRC=${1:-/root/qdistro-src/session_manager}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-session-manager.service
 POLICY=/etc/dbus-1/system.d/org.qdistro.SessionManager1.conf

@@ -21,7 +21,7 @@ WORK=/tmp/qd-backup-btrfs
 IMG="$WORK/btrfs.img"
 MNT="$WORK/mnt"
 REMOTE="$WORK/remote"
-BK="${QDISTRO_BACKUP_CLI:-/root/qdistro-src/qdistro/snapshots/qdistro_backup_cli.py}"
+BK="${QDISTRO_BACKUP_CLI:-/root/qdistro-src/snapshots/qdistro_backup_cli.py}"
 
 fail() { printf 'FAIL: %s — %s\n' "$1" "${2:-}" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$1"; }

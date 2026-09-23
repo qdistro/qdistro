@@ -111,21 +111,17 @@ trap cleanup EXIT
 #    that dir over http on 0.0.0.0 (the VM reaches us via 10.0.2.2 over
 #    SLIRP/passt NAT — 127.0.0.1 is unreachable from the guest). This
 #    mirrors spin-test-vm.sh's staging pattern; fresh-vm-bootstrap.sh
-#    expects /qdistro.tar.gz, /qdwin.tar.gz, /qdshell.tar.gz at the
-#    HTTP root, optionally /qdlocker.tar.gz.
-PARENT="$(cd "$REPO_ROOT/.." && pwd)"
+#    expects /qdistro.tar.gz (the whole monorepo) at the HTTP root.
 STAGE="$(mktemp -d -t bake-enforcing-stage.XXXXXX)"
-echo "[bake-enforcing] tarballing qdistro, qdwin, qdshell, qdlocker into $STAGE..."
+echo "[bake-enforcing] tarballing the qdistro monorepo into $STAGE..."
 TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
               --exclude='.pytest_cache' --exclude='.git'
-              --exclude='build' --exclude='build-*')
-tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdistro.tar.gz" -C "$PARENT/qdistro" .
-tar "${TAR_EXCLUDES[@]}" --exclude='libweston-vendored/src/build' \
-    -czf "$STAGE/qdwin.tar.gz" -C "$PARENT/qdwin" .
-tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdshell.tar.gz" -C "$PARENT/qdshell" .
-if [ -d "$PARENT/qdlocker" ]; then
-    tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdlocker.tar.gz" -C "$PARENT/qdlocker" .
-fi
+              --exclude='build' --exclude='build-*'
+              --exclude='node_modules' --exclude='.worktrees'
+              --exclude='./ci/runs' --exclude='./image/root/root'
+              --exclude='./image/logs')
+tar "${TAR_EXCLUDES[@]}" --exclude='./qdwin/libweston-vendored/src/build' \
+    -czf "$STAGE/qdistro.tar.gz" -C "$REPO_ROOT" .
 cp "$VM_TOOLS/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 
 # Detect + reclaim port: a stale http.server from a prior run silently

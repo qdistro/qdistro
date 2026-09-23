@@ -17,10 +17,10 @@ ALLOWLIST_BIN=/usr/local/bin/qdistro-print-allowlist
 # matching the broker / pwd / polkit-agent split. The earlier draft
 # of this probe checked /usr/lib/qdistro/print which was wrong.
 BROWSE_MOD=/usr/libexec/qdistro/qdistro_print_browse.py
-# fresh-vm-bootstrap.sh unpacks tarballs to /root/qdistro-src/qdistro/,
-# so build-print-image.sh lands at qdistro-src/qdistro/print-vm/, not
+# fresh-vm-bootstrap.sh unpacks tarballs to /root/qdistro-src/,
+# so build-print-image.sh lands at qdistro-src/print-vm/, not
 # the legacy /root/print-src/ path the first draft of this probe used.
-BUILD_SCRIPT=/root/qdistro-src/qdistro/print-vm/build-print-image.sh
+BUILD_SCRIPT=/root/qdistro-src/print-vm/build-print-image.sh
 if [ ! -f "$BUILD_SCRIPT" ] && [ -f /root/print-src/build-print-image.sh ]; then
     BUILD_SCRIPT=/root/print-src/build-print-image.sh
 fi

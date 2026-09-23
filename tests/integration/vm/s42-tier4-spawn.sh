@@ -23,7 +23,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER4_DIR=/tmp/qdistro-tier4
 if [ -d "$SRC/tier4-vm" ]; then
     rm -rf "$TIER4_DIR" 2>/dev/null || true

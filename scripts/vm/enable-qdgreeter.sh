@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SRC="${QDISTRO_SRC:-/root/qdistro-src}"
-QD="$SRC/qdistro"
+QD="$SRC"   # monorepo root: qdistro content + in-tree components
 QDG="$SRC/qdgreeter"
 
 log() { echo "[enable-qdgreeter] $*"; }

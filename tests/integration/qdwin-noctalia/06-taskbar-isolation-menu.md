@@ -35,7 +35,7 @@ Build the disposable image + broker allow-rule (one exact command; idempotent,
 may take a few minutes on first run):
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" "bash /root/qdistro-src/qdistro/tests/integration/vm/probes/disp-secctx-wiretag-probe.sh setup"
+"$QDWIN_VM_EXEC" "$VMNAME" "bash /root/qdistro-src/tests/integration/vm/probes/disp-secctx-wiretag-probe.sh setup"
 ```
 **Assert (setup):** the command prints `PASS: setup`.
 
@@ -148,7 +148,7 @@ survives).
 ## Cleanup
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" "bash /root/qdistro-src/qdistro/tests/integration/vm/probes/disp-secctx-wiretag-probe.sh teardown"
+"$QDWIN_VM_EXEC" "$VMNAME" "bash /root/qdistro-src/tests/integration/vm/probes/disp-secctx-wiretag-probe.sh teardown"
 ```
 
 ## Pass criteria

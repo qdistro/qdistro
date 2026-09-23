@@ -50,11 +50,11 @@ def main() -> int:
     parser.add_argument("--base-port", type=int, default=15443)
     parser.add_argument("--profile", default="wifi-good")
     parser.add_argument("--qdshell", type=Path,
-                        default=Path("/home/play2/qdistro/qdshell"))
+                        default=Path(str(REPO) + "/qdshell"))
     parser.add_argument("--qdwin", type=Path,
-                        default=Path("/home/play2/qdistro/qdwin"))
+                        default=Path(str(REPO) + "/qdwin"))
     parser.add_argument("--popup-binary", type=Path,
-                        default=Path("/home/play2/qdistro/qdwin/build-qci/"
+                        default=Path(str(REPO) + "/qdwin/build-qci/"
                                      "qdwin-popup-probe"))
     args = parser.parse_args()
     netem = profile(args.profile)

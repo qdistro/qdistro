@@ -26,7 +26,7 @@
 #   bash install-tier5b-for-vm.sh <qdistro-src-root>
 #
 # Where <qdistro-src-root> is the directory containing tier5b-vm/.
-# Typically /root/qdistro-src/qdistro in the bats VM (per
+# Typically /root/qdistro-src in the bats VM (per
 # fresh-vm-bootstrap.sh's $SRC).
 set -euo pipefail
 

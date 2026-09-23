@@ -4,7 +4,7 @@
 # Recall is cut from v1. This helper is retained for post-v1 development only
 # and refuses to install unless QDISTRO_ENABLE_POSTV1_RECALL=1 is set.
 #
-# Takes the umbrella root as $1 (default /root/qdistro-src/qdistro).
+# Takes the umbrella root as $1 (default /root/qdistro-src).
 # Recall is unusual: its files are spread across three subtrees of
 # the umbrella — recall/ (daemon + ingest + units), cli/ (CLI), and
 # sdk/qdistro_app/ (SDK module). We pull from all three.
@@ -37,7 +37,7 @@ if [ "${QDISTRO_ENABLE_POSTV1_RECALL:-0}" != "1" ]; then
     exit 2
 fi
 
-UMBRELLA=${1:-/root/qdistro-src/qdistro}
+UMBRELLA=${1:-/root/qdistro-src}
 if [ ! -d "$UMBRELLA/recall" ] || [ ! -d "$UMBRELLA/cli" ] || [ ! -d "$UMBRELLA/sdk/qdistro_app" ]; then
     echo "[install-recall] umbrella tree incomplete at $UMBRELLA" >&2
     echo "       need $UMBRELLA/{recall,cli,sdk/qdistro_app}/" >&2

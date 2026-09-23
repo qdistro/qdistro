@@ -837,9 +837,9 @@ def main() -> int:
     ap.add_argument("--vm-source", required=True)
     ap.add_argument("--vm-viewer", required=True)
     ap.add_argument("--qdwin", type=Path,
-                    default=Path("/home/play2/qdistro/qdwin"))
+                    default=Path(str(REPO) + "/qdwin"))
     ap.add_argument("--qdshell", type=Path,
-                    default=Path("/home/play2/qdistro/qdshell"))
+                    default=Path(str(REPO) + "/qdshell"))
     ap.add_argument("--bundle", type=Path,
                     default=Path("/tmp/mm-live/r9-rdp-output"))
     args = ap.parse_args()

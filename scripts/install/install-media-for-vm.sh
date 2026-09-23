@@ -1,7 +1,7 @@
 #!/bin/bash
 # Idempotent removable-media (qdistro-media-exec) install for
 # fresh-vm-bootstrap. Takes the media/ source dir as $1 (default
-# /root/qdistro-src/qdistro/media), copies qdistro_media_exec.py + the
+# /root/qdistro-src/media), copies qdistro_media_exec.py + the
 # systemd unit pair into place, and enables the socket-activated service
 # so removable-media bats can drive the real
 # /run/qdistro-media-exec/sock path.
@@ -22,7 +22,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-MEDIA_SRC=${1:-/root/qdistro-src/qdistro/media}
+MEDIA_SRC=${1:-/root/qdistro-src/media}
 DEST_LIB=/usr/local/lib/qdistro
 SYSTEMD_DIR=/etc/systemd/system
 SOCKET_UNIT=$SYSTEMD_DIR/qdistro-media-exec.socket

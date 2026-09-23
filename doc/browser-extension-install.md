@@ -84,7 +84,7 @@ set -euo pipefail
 
 REPO=qdchrome-extension          # or qdfirefox-extension
 SRC=/opt/qdistro-src/$REPO
-QD=/opt/qdistro-src/qdistro
+QD=/opt/qdistro-src
 
 # The PUBLISHED manifest + detached signature + release keyring you were
 # given (the bootstrap can be pointed elsewhere via QDISTRO_SOURCE_MANIFEST /

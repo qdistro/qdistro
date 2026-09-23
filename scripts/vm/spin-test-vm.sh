@@ -8,7 +8,7 @@
 #   3. clone-baseweed.sh --from-kiwi or --from-baked
 #      (QDISTRO_VM_BASE=auto|kiwi|baked; auto uses the imported kiwi
 #       image if present — iso/14 Phase G — else baseweed-baked)
-#   4. tarball + HTTP-stage the three sibling repos
+#   4. tarball + HTTP-stage the monorepo (one tarball)
 #   5. fresh-vm-bootstrap.sh in VM      (build qdwin, build daemons,
 #                                        install broker + qdshell)
 #   6. systemctl start greetd-qdwin.service
@@ -40,22 +40,16 @@ export QDWIN_VM_TEMPLATE
 
 PREFIX="${1:-qd-test}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"           # qdistro/
-PARENT="$(cd "$REPO/.." && pwd)"                  # qdistro-org/
+REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"           # the qdistro monorepo root
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
 log() { echo "[spin-test-vm] $*" >&2; }
 
-# Sanity-check sibling checkout. qnotebook lives in its own GitHub org, so the
-# hint has to name the owner per repo rather than assume `qdistro/`.
-for sib in qdwin qdshell qnotebook; do
-    if [ ! -d "$PARENT/$sib" ]; then
-        case "$sib" in
-            qnotebook) sib_url="https://github.com/qnotebook/qnotebook.git" ;;
-            *)         sib_url="https://github.com/qdistro/$sib.git" ;;
-        esac
-        log "ERROR: sibling repo '$sib' not found at $PARENT/$sib"
-        log "       Clone $sib_url next to qdistro/"
+# Sanity-check the in-tree components the guest build needs (monorepo layout:
+# qdwin/, qdshell/, qnotebook/ live at the repo root, not as sibling checkouts).
+for comp in qdwin qdshell qnotebook; do
+    if [ ! -d "$REPO/$comp" ]; then
+        log "ERROR: component '$comp' not found at $REPO/$comp (incomplete monorepo checkout?)"
         exit 2
     fi
 done
@@ -156,55 +150,30 @@ virsh -c qemu:///session start "$VM" >/dev/null 2>&1 || true
 # compositor. We only boot + verify in that case. The body below is unindented
 # but enclosed by this guard (bash ignores indentation).
 if [ -z "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
-# Stage 4: tarball the three sibling repos and serve over SLIRP.
+# Stage 4: tarball the monorepo and serve it over SLIRP.
 STAGE="$(mktemp -d -t qdistro-stage.XXXXXX)"
 
-log "stage 4a: tarballing qdistro, qdwin, qdshell..."
+log "stage 4a: tarballing the qdistro monorepo (root + in-tree components)..."
 # `build-*` excludes match by basename anywhere in the tree; the
 # old `--exclude='build-*'` ate `print-vm/build-print-image.sh`
 # (spec/20 priority #5 source-of-truth probed by s64). Restrict the
-# exclude to the known meson-host build dirs in sibling repos so
-# regular scripts named `build-*` survive into the staged tarballs.
+# exclude to the known meson-host build dirs so regular scripts named
+# `build-*` survive into the staged tarball.
 # Exclude ci/runs (the live CI run dirs): the guest never needs host CI
 # artifacts, and tarring the run dir that concurrent qci workers are actively
 # writing raced as `tar: ./ci/runs/...: file changed as we read it`, failing the
 # spin (observed on a parallel gui worker). Excluding it removes the race and
-# shrinks the tarball.
+# shrinks the tarball. The image build overlay and its logs are excluded for
+# the same reason (large, untracked, never needed in the guest), as are the
+# extension repos' node_modules.
+# ONE tarball: the guest unpacks it as /root/qdistro-src (fresh-vm-bootstrap.sh),
+# the same layout as the image and a developer checkout.
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
     --exclude='.git' --exclude='build' --exclude='build-host*' \
-    --exclude='./ci/runs' \
-    -czf "$STAGE/qdistro.tar.gz" -C "$PARENT/qdistro" .
-tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-host*' \
-    --exclude='libweston-vendored/src/build' \
-    -czf "$STAGE/qdwin.tar.gz" -C "$PARENT/qdwin" .
-tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-host*' \
-    -czf "$STAGE/qdshell.tar.gz" -C "$PARENT/qdshell" .
-if [ -d "$PARENT/qdlocker" ]; then
-    tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-        --exclude='.git' --exclude='build' --exclude='build-host*' \
-        -czf "$STAGE/qdlocker.tar.gz" -C "$PARENT/qdlocker" .
-fi
-# qdbrowser ships the outer ``qdbrowser/qdbrowser/`` python package
-# that install-browser-bridge-for-vm.sh stages to
-# /usr/local/lib/qdistro/qdbrowser/ (so probes can
-# ``from qdbrowser.pwd_autofill import ...``). Without staging the
-# tarball here the bridge installer auto-search misses the package
-# and the bake-time python313-jeepney is wasted.
-if [ -d "$PARENT/qdbrowser" ]; then
-    tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-        --exclude='.git' --exclude='build' --exclude='build-host*' \
-        -czf "$STAGE/qdbrowser.tar.gz" -C "$PARENT/qdbrowser" .
-fi
-if [ -d "$PARENT/qdgreeter" ]; then
-    tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-        --exclude='.git' --exclude='build' --exclude='build-host*' \
-        -czf "$STAGE/qdgreeter.tar.gz" -C "$PARENT/qdgreeter" .
-fi
-tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-host*' \
-    -czf "$STAGE/qnotebook.tar.gz" -C "$PARENT/qnotebook" .
+    --exclude='node_modules' --exclude='.worktrees' \
+    --exclude='./ci/runs' --exclude='./image/root/root' --exclude='./image/logs' \
+    --exclude='./qdwin/libweston-vendored/src/build' \
+    -czf "$STAGE/qdistro.tar.gz" -C "$REPO" .
 
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.
@@ -255,7 +224,7 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 "$SCRIPT_DIR/vm-exec" "$VM" "wget -q -O /root/fresh-vm-bootstrap.sh $STAGE_URL/fresh-vm-bootstrap.sh" >&2 \
     || { log "ERROR: failed to fetch bootstrap script (port $SPIN_HTTP_PORT reachable?)"; exit 3; }
 
-# Bootstrap fetches the three tarballs and runs the build. Pass the
+# Bootstrap fetches the monorepo tarball and runs the build. Pass the
 # per-run staging URL so the in-VM bootstrap fetches from THIS run's
 # server (its default is the old fixed http://10.0.2.2:8765).
 # Normalize the tier-2 image-prebuild flag to a bare 0/1 before embedding it in

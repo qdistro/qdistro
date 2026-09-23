@@ -37,7 +37,7 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 # message makes a slow/failed build obvious instead of an opaque timeout.
 $VMEXEC "$VM" 'timeout 240 runuser -u admin -- bash -c "
     podman image exists qdistro/tier2-weston-terminal:latest \
-        || bash /root/qdistro-src/qdistro/tier2/make-tier2-image.sh weston-terminal"' \
+        || bash /root/qdistro-src/tier2/make-tier2-image.sh weston-terminal"' \
   || { echo "FAIL(setup): tier-2 image build/check exceeded 240s or failed"; exit 1; }
 # Hard-assert the image now exists, so S1 only does the (fast) spawn+scan.
 # Tier-2 images live in ADMIN's ROOTLESS podman store by design (spawn-tier2.sh
@@ -164,11 +164,11 @@ wall-clock budget.
 ```bash
 $VMEXEC "$VM" 'timeout 60 runuser -u admin -- bash -c "
     nohup env QDISTRO_PROFILE=dev TIER2_DETACH=1 \
-        /root/qdistro-src/qdistro/tier2/spawn-tier2.sh \
+        /root/qdistro-src/tier2/spawn-tier2.sh \
         tier2-c-ui weston-terminal -- weston-terminal \
         >/tmp/qci-permissions-gui-18-podapps-spawn.log 2>&1 </dev/null &
     sleep 3
-    /root/qdistro-src/qdistro/tier2/podapps-scan.sh tier2-c-ui"' \
+    /root/qdistro-src/tier2/podapps-scan.sh tier2-c-ui"' \
   || { echo "FAIL(S1): spawn+scan exceeded 60s or failed"; exit 1; }
 ```
 

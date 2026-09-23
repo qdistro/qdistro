@@ -32,14 +32,14 @@ ap.add_argument("vm_c", help="read-only source origin")
 ap.add_argument("vm_b", help="viewer running broker + qdshell")
 ap.add_argument("--qdshell", type=Path,
                 default=Path(os.environ.get("QDSHELL_REPO",
-                                            "/home/play2/qdistro/qdshell")))
+                                            str(REPO) + "/qdshell")))
 ap.add_argument("--r3", action="store_true",
                 help="also prove source-mediated remote shell operations")
 ap.add_argument("--r4", action="store_true",
                 help="also prove a contained real source xdg popup")
 ap.add_argument(
     "--popup-binary", type=Path,
-    default=Path("/home/play2/qdistro/qdwin/build-qci/qdwin-popup-probe"))
+    default=Path(str(REPO) + "/qdwin/build-qci/qdwin-popup-probe"))
 args = ap.parse_args()
 
 W, H = 640, 400

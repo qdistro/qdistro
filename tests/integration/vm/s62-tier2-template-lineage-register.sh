@@ -34,7 +34,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 SPAWN=/usr/bin/qdistro-tier2-spawn
 LAUNCH_UNIT_TMPL="qdistro-tier2-silo@"
 LAUNCH_HELPER=/usr/libexec/qdistro/qdistro-tier2-silo-launch

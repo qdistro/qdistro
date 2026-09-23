@@ -38,7 +38,7 @@
 #   s56b-broker-no-network.sh [BROKER_SELINUX_DIR]
 # BROKER_SELINUX_DIR defaults to the first of:
 #   /tmp/brk  (HTTP-staged by an operator/bats wrapper)
-#   /root/qdistro-src/qdistro/selinux/broker
+#   /root/qdistro-src/selinux/broker
 # and must contain qdistro_broker.{te,if,fc}.
 
 set -u
@@ -54,7 +54,7 @@ skip() { echo "SKIP: $*"; exit 0; }
 DEVEL=/usr/share/selinux/devel
 SRC="${1:-}"
 if [ -z "$SRC" ]; then
-    for cand in /tmp/brk /root/qdistro-src/qdistro/selinux/broker; do
+    for cand in /tmp/brk /root/qdistro-src/selinux/broker; do
         [ -f "$cand/qdistro_broker.te" ] && SRC="$cand" && break
     done
 fi

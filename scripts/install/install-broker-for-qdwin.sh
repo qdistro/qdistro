@@ -12,7 +12,7 @@
 # lib glob so .fc wins natively.
 #
 # Source: takes the broker tree path as $1. fresh-vm-bootstrap.sh
-# untars the umbrella repo to /root/qdistro-src/qdistro/ and invokes
+# untars the umbrella repo to /root/qdistro-src/ and invokes
 # this script with that path's broker/ subdir.
 #
 # Pre-reqs already baked into baseweed: python313-dbus-python,
@@ -27,14 +27,14 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-BROKER_SRC=${1:-/root/qdistro-src/qdistro/broker}
+BROKER_SRC=${1:-/root/qdistro-src/broker}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-admin-broker.service
 POLICY=/etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
 
 if [ ! -d "$BROKER_SRC" ]; then
     echo "ERROR: broker source not found at $BROKER_SRC" >&2
-    echo "       pass the broker/ dir as \$1 or untar qdistro to /root/qdistro-src/qdistro/" >&2
+    echo "       pass the broker/ dir as \$1 or untar qdistro to /root/qdistro-src/" >&2
     exit 2
 fi
 

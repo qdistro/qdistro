@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-bare-metal-on-vm.sh — exercise bare-metal-install.sh inside a
 # fresh libvirt/virt-manager VM. Builds a one-shot disposable VM from
-# an upstream cloud image, copies the installer + sibling repos in,
+# an upstream cloud image, copies the installer + the monorepo tree in,
 # runs it noninteractively, and reports pass/fail.
 #
 # This is the "did the bare-metal installer regress?" gate — before
@@ -33,7 +33,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 QDISTRO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
-REPO_PARENT=$(dirname "$QDISTRO_DIR")
 INSTALLER="$SCRIPT_DIR/bare-metal-install.sh"
 
 VM_PASSWORD='Pa_ssw0rd45'
@@ -198,10 +197,10 @@ start_vm() {
 stage_sources_in_vm() {
     local distro="$1" name="qdistro-baremetal-test-$distro"
     local stage; stage=$(mktemp -d)
-    log "[$distro] tarring sibling repos..."
-    tar czf "$stage/qdistro.tar.gz" -C "$REPO_PARENT" qdistro
-    [ -d "$REPO_PARENT/qdwin"   ] && tar czf "$stage/qdwin.tar.gz"   -C "$REPO_PARENT" qdwin
-    [ -d "$REPO_PARENT/qdshell" ] && tar czf "$stage/qdshell.tar.gz" -C "$REPO_PARENT" qdshell
+    log "[$distro] tarring the monorepo..."
+    # One tree: qdistro's root content with qdwin/, qdshell/, ... in-tree.
+    tar czf "$stage/qdistro.tar.gz" --exclude=.git --exclude=node_modules \
+        --exclude=./ci/runs --exclude=./image/root/root -C "$QDISTRO_DIR" .
 
     # Serve via host:port forwarded over user-mode net (10.0.2.2 = host).
     local port=$(( 18800 + RANDOM % 1000 ))
@@ -210,8 +209,8 @@ stage_sources_in_vm() {
     local http_pid=$!
     trap "kill $http_pid 2>/dev/null || true; rm -rf '$stage'" RETURN
 
-    log "[$distro] downloading repos inside VM..."
-    "$SCRIPT_DIR/../vm/vm-exec" "$name" "mkdir -p /opt/qdistro-src && cd /opt/qdistro-src && for r in qdistro qdwin qdshell; do mkdir -p \$r; wget -q -O - http://10.0.2.2:$port/\$r.tar.gz 2>/dev/null | tar xz -C \$r --strip-components=1 || true; done"
+    log "[$distro] downloading the monorepo inside VM..."
+    "$SCRIPT_DIR/../vm/vm-exec" "$name" "mkdir -p /opt/qdistro-src && cd /opt/qdistro-src && wget -q -O - http://10.0.2.2:$port/qdistro.tar.gz | tar xz -C /opt/qdistro-src"
 }
 
 run_installer_in_vm() {
@@ -223,7 +222,7 @@ run_installer_in_vm() {
     # argv. Those shortcuts are gated behind the dev profile; the hardened
     # default (daily-driver) would reject the argv passwords and require a
     # pinned source manifest, which is intentionally not how this test runs.
-    cmd="cd /opt/qdistro-src/qdistro && bash scripts/install/bare-metal-install.sh --profile=dev"
+    cmd="cd /opt/qdistro-src && bash scripts/install/bare-metal-install.sh --profile=dev"
     cmd+=" --admin-password='$ADMIN_PW'"
     cmd+=" --user='$USER_NAME' --user-password='$USER_PW'"
     cmd+=" --repo-root=/opt/qdistro-src --yes --noninteractive"

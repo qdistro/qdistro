@@ -30,7 +30,7 @@
 # asserted by disposable-secctx-wiretag.bats.
 set -u
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 SPAWN=/usr/bin/qdistro-tier2-spawn          # the SHIPPED artifact under test
 ADMIN=admin
 ADMIN_UID=1000

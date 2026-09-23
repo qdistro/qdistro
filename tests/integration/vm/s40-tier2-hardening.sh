@@ -33,7 +33,7 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 die() { fail "$*"; exit 1; }
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER2_DIR=/tmp/qdistro-tier2
 COMMON_LIB_DIR=/tmp/lib
 if [ -d "$SRC/tier2" ]; then

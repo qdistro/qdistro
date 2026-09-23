@@ -13,7 +13,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-SRC=${1:-/root/qdistro-src/qdistro/multimachine}
+SRC=${1:-/root/qdistro-src/multimachine}
 DEST=/usr/local/lib/qdistro/multimachine
 
 if [ ! -d "$SRC" ]; then

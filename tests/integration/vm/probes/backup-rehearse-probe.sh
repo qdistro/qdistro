@@ -17,7 +17,7 @@ set -u
 WORK=/tmp/qd-backup-rehearse
 IMG="$WORK/btrfs.img"
 MNT="$WORK/mnt"
-SRC_ROOT=/root/qdistro-src/qdistro/snapshots
+SRC_ROOT=/root/qdistro-src/snapshots
 DRV="${QDISTRO_BACKUP_SVC:-$SRC_ROOT/qdistro_backup_service.py}"
 CONF="$WORK/backup.conf"
 

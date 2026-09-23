@@ -19,7 +19,7 @@ set -u
 WORK=/tmp/qd-backup-driver
 IMG="$WORK/btrfs.img"
 MNT="$WORK/mnt"
-SRC_ROOT=/root/qdistro-src/qdistro/snapshots
+SRC_ROOT=/root/qdistro-src/snapshots
 DRV="${QDISTRO_BACKUP_SVC:-$SRC_ROOT/qdistro_backup_service.py}"
 BK="${QDISTRO_BACKUP_CLI:-$SRC_ROOT/qdistro_backup_cli.py}"
 CONF="$WORK/backup.conf"

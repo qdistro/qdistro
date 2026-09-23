@@ -38,7 +38,7 @@
 # asserted by tier2-silo-secctx-wiretag.bats.
 set -u
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 SPAWN=/usr/bin/qdistro-tier2-spawn
 LAUNCH_UNIT_TMPL="qdistro-tier2-silo@"
 LAUNCH_HELPER=/usr/libexec/qdistro/qdistro-tier2-silo-launch

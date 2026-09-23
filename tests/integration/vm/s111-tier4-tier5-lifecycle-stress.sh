@@ -41,7 +41,7 @@ fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
 # ---- locate the in-VM tier sources ----------------------------------
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 TIER4_DIR=/tmp/qdistro-tier4-stress
 TIER5_DIR=/tmp/qdistro-tier5-stress
 for pair in "tier4-vm:$TIER4_DIR" "tier5-vm:$TIER5_DIR"; do

@@ -28,7 +28,7 @@
 # layout can be reproduced in a test tmpdir; see
 # tests/unit/test_user_relay_installed_layout.py.
 #
-# Usage: $0 [SRC]     # SRC defaults to /root/qdistro-src/qdistro/user_relay
+# Usage: $0 [SRC]     # SRC defaults to /root/qdistro-src/user_relay
 set -eu
 
 # Offline-install contract (todo/iso/14 Phase B): file drops always run;
@@ -39,7 +39,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-SRC=${1:-/root/qdistro-src/qdistro/user_relay}
+SRC=${1:-/root/qdistro-src/user_relay}
 DESTDIR=${DESTDIR:-}
 DEST_LIB=$DESTDIR/usr/libexec/qdistro
 LEGACY_LIB=$DESTDIR/usr/local/lib/qdistro

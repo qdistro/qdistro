@@ -29,7 +29,7 @@ load helpers
 
 STATE="${BATS_FILE_TMPDIR:-/tmp}/qd-m4-taskbar.env"
 WORKLOAD=weston-terminal
-PROBE=/root/qdistro-src/qdistro/tests/integration/vm/probes/disp-secctx-wiretag-probe.sh
+PROBE=/root/qdistro-src/tests/integration/vm/probes/disp-secctx-wiretag-probe.sh
 APPID_RE='qdistro\.disp\.[0-9a-f]{8,64}'
 TOKEN_RE='[0-9a-f]{32}'
 

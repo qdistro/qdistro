@@ -37,7 +37,7 @@ RULE_DIR=/etc/qdistro/rules.d
 SPAWN_RULE="$RULE_DIR/zz-disp-open-spawn-allow.yaml"
 OPEN_RULE="$RULE_DIR/zz-disp-open-class-allow.yaml"
 TIER2_BUILD_DIR=/tmp/qd-dispopen-tier2
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 # A host input file admin can read (the bind mounts admin-readable paths).
 INPUT_DIR=/tmp/qd-open-input
 INPUT_FILE="$INPUT_DIR/secret.txt"

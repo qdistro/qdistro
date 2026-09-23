@@ -42,7 +42,7 @@
 # as a NOTE so the scope stays visible rather than silently hidden.
 set -u
 
-SRC=/root/qdistro-src/qdistro
+SRC=/root/qdistro-src
 SPAWN=/usr/bin/qdistro-tier2-spawn          # the SHIPPED artifact under test
 LIBEXEC=/usr/libexec/qdistro                # installed daemon modules (reaper)
 ADMIN=admin

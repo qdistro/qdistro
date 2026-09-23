@@ -1,6 +1,6 @@
 #!/bin/bash
 # Idempotent qsu install for fresh-vm-bootstrap. Takes the qsu/
-# source dir as $1 (default /root/qdistro-src/qdistro/qsu), copies
+# source dir as $1 (default /root/qdistro-src/qsu), copies
 # qsu.py + qdistro_root_exec.py + the systemd unit pair into place,
 # and enables the socket-activated service so end-to-end qsu tests
 # can drive the real /run/qdistro-root-exec/sock path.
@@ -20,7 +20,7 @@ _QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$_QDO_DIR/lib/qdistro-offline.sh"
 resolve_offline_install
 
-QSU_SRC=${1:-/root/qdistro-src/qdistro/qsu}
+QSU_SRC=${1:-/root/qdistro-src/qsu}
 DEST_LIB=/usr/local/lib/qdistro
 DEST_BIN=/usr/local/bin
 SYSTEMD_DIR=/etc/systemd/system
@@ -29,7 +29,7 @@ SERVICE_UNIT=$SYSTEMD_DIR/qdistro-root-exec.service
 
 if [ ! -d "$QSU_SRC" ]; then
     echo "ERROR: qsu source not found at $QSU_SRC" >&2
-    echo "       pass the qsu/ dir as \$1 or untar qdistro to /root/qdistro-src/qdistro/" >&2
+    echo "       pass the qsu/ dir as \$1 or untar qdistro to /root/qdistro-src/" >&2
     exit 2
 fi
 

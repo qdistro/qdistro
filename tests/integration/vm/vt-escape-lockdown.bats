@@ -48,7 +48,7 @@ teardown_file() {
 # qdwin session on tty3. Every step is fail-loud: a silent fallback here would
 # turn the whole file into a test of the wrong machine.
 _vt_require_production_path() {
-    vm_run 'test -x /root/qdistro-src/qdistro/scripts/vm/enable-qdgreeter.sh'
+    vm_run 'test -x /root/qdistro-src/scripts/vm/enable-qdgreeter.sh'
     [ "$status" -eq 0 ] || \
         fail_loud "enable-qdgreeter.sh not staged in the VM at /root/qdistro-src"
 
@@ -79,7 +79,7 @@ _vt_require_production_path() {
     # greetd is masked by fresh-vm-bootstrap.sh; unmask before enabling it.
     vm_run 'systemctl unmask greetd.service 2>/dev/null; true'
 
-    vm_run 'bash /root/qdistro-src/qdistro/scripts/vm/enable-qdgreeter.sh'
+    vm_run 'bash /root/qdistro-src/scripts/vm/enable-qdgreeter.sh'
     [ "$status" -eq 0 ] || \
         fail_loud "enable-qdgreeter.sh failed (rc=$status): $output"
 
