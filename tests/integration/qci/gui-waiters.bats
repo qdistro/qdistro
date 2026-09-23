@@ -366,6 +366,26 @@ bg_setup() {
     [ "$(bg_log slow)" = "PAYLOAD" ]
 }
 
+@test "bg: bg_start does NOT hold the caller's stdout/stderr open (vm-exec returns)" {
+    bg_setup
+    # vm-exec runs each command through qga guest-exec with capture-output, and
+    # qga reports the command finished only once EVERY holder of its stdout and
+    # stderr pipes has closed them. A background job that inherits those fds
+    # therefore pins the launching vm-exec until the JOB exits: `bg_start` of a
+    # qsu request that waits for an approval hung its own vm-exec until the
+    # approval that could only come after it (permissions-gui/44 and /46,
+    # full-20260922T193137Z-881799). A command substitution reads to EOF the
+    # same way, so it measures exactly that.
+    local start=$SECONDS out
+    out=$(bash -c "source '$REPO_ROOT/ci/lib/guest/gui-waiters.sh'; QCI_BG_DIR='$QCI_BG_DIR' bg_start det - 'sleep 20; echo late'; echo launched" 2>&1)
+    [ "$out" = "launched" ]
+    [ $((SECONDS - start)) -lt 10 ]
+    # The job itself is still running and still reports through its own files.
+    [ ! -e "$QCI_BG_DIR/det.rc" ]
+    [ -s "$QCI_BG_DIR/det.pid" ]
+    kill "$(cat "$QCI_BG_DIR/det.pid")" 2>/dev/null || true
+}
+
 @test "bg: the job's exit status is recorded and readable" {
     bg_setup
     bg_start rc7 - 'exit 7'
