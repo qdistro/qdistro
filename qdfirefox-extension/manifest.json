@@ -1,0 +1,76 @@
+{
+  "manifest_version": 3,
+  "name": "qdistro browser bridge (Firefox)",
+  "version": "0.2.0",
+  "description": "qdistro native-messaging client for Firefox: tabs, pwd, page-extract, cookies, containers, mpris, downloads, notifications, screen-lock.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "qdistro-firefox@qdistro.local",
+      "strict_min_version": "128.0"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "tabs",
+    "cookies",
+    "downloads",
+    "notifications",
+    "contextMenus",
+    "contextualIdentities",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "qdistro browser bridge",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.png"
+    }
+  },
+  "icons": {
+    "48": "icons/icon-48.png"
+  },
+  "background": {
+    "scripts": [
+      "src/api.js",
+      "src/port.js",
+      "src/dispatcher.js",
+      "src/intent.js",
+      "src/gate.js",
+      "src/modules/tabs.js",
+      "src/modules/pwd.js",
+      "src/modules/pageExtract.js",
+      "src/modules/cookies.js",
+      "src/modules/containers.js",
+      "src/modules/mpris.js",
+      "src/modules/downloads.js",
+      "src/modules/notifications.js",
+      "src/modules/screenlock.js",
+      "src/background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/pwd-content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "src/content/mpris-content.js",
+        "src/content/screenlock-content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": true
+  }
+}

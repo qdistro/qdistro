@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>qdistro browser bridge</title>
+  <style>
+    body { font-family: sans-serif; min-width: 340px; margin: 8px; }
+    h1 { font-size: 14px; margin: 0 0 6px 0; }
+    button { padding: 4px 10px; margin-right: 4px; margin-top: 4px; }
+    pre { font-size: 11px; background: #f4f4f4; padding: 6px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
+    .ok { color: #0a6; }
+    .err { color: #a00; }
+    .row { margin: 6px 0; }
+    a { font-size: 11px; }
+    select { max-width: 220px; }
+    fieldset { border: 1px solid #ccc; padding: 6px 10px; margin: 8px 0; }
+    legend { font-size: 11px; color: #666; padding: 0 4px; }
+  </style>
+</head>
+<body>
+  <h1>qdistro browser bridge</h1>
+  <div class="row">
+    Port: <span id="status">checking…</span>
+  </div>
+  <div class="row">
+    <button id="ping">Ping</button>
+    <button id="cookies-export">Export session</button>
+  </div>
+  <fieldset>
+    <legend>Container (Firefox)</legend>
+    <div class="row">
+      <select id="container-select">
+        <option value="">(default — no container)</option>
+      </select>
+    </div>
+    <p style="font-size:11px;color:#666;margin:4px 0;">
+      Selecting a container scopes the cookie export to that
+      contextual identity.
+    </p>
+  </fieldset>
+  <pre id="out">(no response yet)</pre>
+  <div class="row">
+    <a href="#" id="open-options">Settings…</a>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

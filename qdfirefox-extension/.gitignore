@@ -1,0 +1,34 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+.npm
+package-lock.json.backup
+
+# Build & dist
+dist/
+coverage/
+build/
+web-ext-artifacts/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor & IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.zed
+
+# Logs
+*.log
+
+# Local git worktrees (the /do workflow puts them here). Never part of a
+# commit — they are separate checkouts, so `git add -A` from the repo root
+# would otherwise stage them as embedded git repositories.
+.worktrees/
