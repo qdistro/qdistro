@@ -40,9 +40,23 @@ root:
 
 ```sh
 (cd qdwin && meson setup build && meson compile -C build)
+# the daemons and qdshell find qdwin's protocol XML via its uninstalled .pc
+export PKG_CONFIG_PATH="$PWD/qdwin/build/meson-uninstalled${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 (cd daemons && meson setup build && meson compile -C build)
 (cd qdshell && meson setup build && meson compile -C build)
 python3 -m pytest            # root unit tests (tests/unit)
+```
+
+`qdistro-forward` and `qdistro-nested-pixelfeed` are optional: meson skips them
+(with a `message`) when the FreeRDP 3 / PipeWire development packages are
+missing, and the build still exits 0. See [doc/dev.md](doc/dev.md).
+
+Before `ci/bin/qci host` in a fresh clone, install the two WebExtensions' npm
+dependencies (the `host` gate runs their tests but does not install them):
+
+```sh
+(cd qdchrome-extension && npm ci)
+(cd qdfirefox-extension && npm ci)
 ```
 
 Host prerequisites and the VM path: [doc/dev.md](doc/dev.md).
@@ -95,7 +109,7 @@ what is running:
 
 ```sh
 systemctl --user list-units 'qci-*'          # runs launched under systemd-run
-pgrep -af 'ci/bin/qci'                       # any qci process
+pgrep -af '[c]i/bin/qci'                     # any qci process ([c] keeps pgrep from matching this command)
 virsh -c qemu:///session list --all | grep qci-
 ```
 

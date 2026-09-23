@@ -31,7 +31,14 @@ The build steps assume these tools are on `PATH`:
 - **meson** + **ninja** + **pkg-config** — build the qdwin compositor and the C
   daemons.
 - **Python 3** + **pytest** — headless unit tests.
-- **npm** — WebExtension tests/builds.
+- **npm** — WebExtension tests/builds. In a fresh clone, run
+  `(cd qdchrome-extension && npm ci)` and `(cd qdfirefox-extension && npm ci)`
+  once before `qci host`; the gate runs their tests but does not install their
+  dependencies (without them it fails with `vitest: command not found`).
+- **Optional:** FreeRDP 3 (`freerdp3`, `freerdp-shadow3`, `winpr3`) and
+  PipeWire (`libpipewire-0.3`) development packages. Without them meson skips
+  `qdistro-forward` (and, without PipeWire, `qdistro-nested-pixelfeed`) and
+  still exits 0.
 - **SELinux policy build tools** — needed when compiling qdistro `.te` modules
   locally. On Tumbleweed:
 
@@ -69,7 +76,9 @@ Build order (from the repo root):
 # 1. Build qdwin — the compositor.
 (cd qdwin && meson setup build && meson compile -C build)
 
-# 2. Build the root C daemons against qdwin's XML.
+# 2. Build the root C daemons against qdwin's XML (found through qdwin's
+#    uninstalled pkg-config file).
+export PKG_CONFIG_PATH="$PWD/qdwin/build/meson-uninstalled${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 (cd daemons && meson setup build && meson compile -C build)
 
 # 3. Headless unit tests.
