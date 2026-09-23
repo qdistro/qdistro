@@ -90,8 +90,12 @@ bridge then logs `lock_requested reason=suspend`:
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  'journalctl --user -u qdlocker.service --since "1 minute ago" | grep -E "reason=suspend|PrepareForSleep"'
+  'runuser -l admin -c "journalctl --user -u qdlocker.service --since \"1 minute ago\" --no-pager" | grep -E "reason=suspend|PrepareForSleep"'
 ```
+
+vm-exec runs as root; qdlocker.service is admin's USER unit, so the query
+must run as admin (a root `journalctl --user` reads root's own user journal
+and prints `-- No entries --`).
 
 The journal assertion is the *primary* one — it proves the path was
 via the logind subscription, not, e.g., qdlocker's own idle timer
