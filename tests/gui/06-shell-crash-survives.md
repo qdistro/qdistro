@@ -59,10 +59,31 @@ qdwin_screenshot /tmp/qdlocker-06-step2-shell-dead.png
 qdlocker_ctrl status
 ```
 
+The capture client behind `qdwin_screenshot` IS qdshell, so this frame cannot
+be taken while the shell is literally dead: the helper waits (bounded) for
+the unit's `Restart=on-failure` respawn to answer on its ctrl socket and to
+map its wallpaper, then captures, and prints
+`WARN: capture-after-shell-restart`. That is the expected path here, not a
+defect — the frame still proves the point of 2.2, because the respawned shell
+comes back while the screen is LOCKED and must not have displaced the lock
+UI. (Before 2026-09-23 the helper's `socat` gave up 0.5s after sending the
+request, so a capture served by a still-starting shell came back EMPTY and
+this step was recorded ERROR; see the `-t` note in qdwin-helpers.sh.)
+
 **Assert (2.1):** `qdlocker_ctrl status` still reports
 `locked=True`. The shell death did not affect the locker's process
 or the compositor's lock state.
-**Assert (2.2):** screenshot still shows the qdlocker UI. The LOCK
+**Assert (2.2):** screenshot still shows the qdlocker UI (clock, date,
+`Password` prompt box, and the "capture monitoring" banner along the top —
+that banner is part of the LOCK UI, not the qdshell bar). OPEN THIS FILE
+itself before grading it; do not infer it from the Step 1 or Step 4 frame.
+While locked the shell draws nothing visible, so the Step 2 frame normally
+looks the same as Step 1 and is often BYTE-IDENTICAL to it (same clock
+minute) — identical is the expected PASS shape, not a sign of a stale
+capture (a stale capture is flagged by the helper's `WARN: stale-capture`).
+In two 2026-09-23 verification runs the runner opened only one image and
+graded this frame "black with only the panel" while the file showed the
+full lock UI. The LOCK
 layer is owned by qdwin from the locker's wl_surface — the shell's
 death doesn't tear it down. Chrome / panel may be absent (shell is
 dead, no decorations) but the lock UI is intact.
@@ -91,10 +112,18 @@ qdwin_screenshot /tmp/qdlocker-06-step4-unlocked.png
 **Assert (4.1):** `qdlocker_ctrl unlock-result` reports
 `last=success`; `qdlocker_ctrl status` reports `locked=False`.
 **Assert (4.2):** `systemctl --user is-active qdshell.service` reports
-`active`. The screenshot is supporting visual evidence only; if the
-framebuffer helper is on the wrong VT or catches the last lock frame while
-`locked=False` and Step 5 IPC succeeds, do not fail the product on the
-screenshot alone.
+`active`.
+**Assert (4.3):** the Step 4 screenshot shows the unlocked DESKTOP drawn by
+the respawned qdshell — at least its top bar — not the lock UI and not an
+all-black frame. An all-black post-unlock frame here is a PRODUCT failure,
+not a capture artefact: until qdwin 2026-09-23 every surface the respawned
+shell mapped WHILE LOCKED (wallpaper, bar, background) stayed unmapped after
+unlock, because qdwin re-positioned the hidden layers without re-mapping the
+views inserted into them during the lock — the desktop stayed black, and
+this step recorded it as "supporting evidence only" in every run from
+2026-09-17 to 2026-09-22. If the helper reports the frame STALE
+(`WARN: stale-capture`, `.meta` sidecar) it is not post-unlock evidence:
+record ERROR for 4.3, not FAIL.
 
 ### Step 5 — qdshell is fully functional post-recovery
 
@@ -165,6 +194,12 @@ neither process owns the other.
   `StartLimitBurst=5/30s`, leaving the desktop dead even after unlock.
   The locked gate for those two session-config snapshots must refuse
   by DROPPING the request, never by posting a fatal protocol error.
+- Step 4 reports `locked=False`, Step 5 IPC answers, but the Step 4
+  screenshot is black (bar and wallpaper absent) — the respawned shell's
+  layer surfaces mapped while locked were never re-mapped on unlock. qdwin's
+  `qdwin_show_non_lock_layers()` must re-map views that
+  `weston_view_move_to_layer()` inserted into the then-unpositioned layers
+  (`qdwin_layer_remap_after_unlock`), and damage the outputs.
 - Step 4 reports `locked=False` but screenshot still shows lock UI —
   qdwin destroyed the lock_surface resource but did not flip the
   compositor state machine. B1-style bug; see qdwin's 03-locker-cycle
