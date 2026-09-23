@@ -626,10 +626,16 @@ systemctl mask greetd.service 2>/dev/null || true
 if [ "$SESSION" = labwc ]; then
     # labwc: admin's lingering user manager starts labwc on wayland-0; the
     # qdwin session units would race it for the DRM seat, so disable them.
+    # qdlocker.service too: it binds qdwin_locker_v1 on wayland-1 and cannot
+    # run under labwc. Older qdlocker units were WantedBy=default.target, so a
+    # base built with one carries a default.target.wants link that started the
+    # locker here and crash-looped it every 2s for the life of the VM (qci
+    # 2026-09-23: 92 restarts/3 min, coredump spam, journald suppressing the
+    # admin session's messages). `disable` removes every enablement link.
     systemctl set-default multi-user.target >/dev/null
     systemctl daemon-reload
     systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
-    runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service 2>/dev/null' || true
+    runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service 2>/dev/null' || true
     runuser -l admin -c 'systemctl --user daemon-reload'
     runuser -l admin -c 'systemctl --user enable --now qdistro-labwc.service'
 

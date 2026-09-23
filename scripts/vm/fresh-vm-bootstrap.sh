@@ -801,7 +801,8 @@ fi
 # clean user@1000.service with the right supplementary groups, then
 # start qdwin-session.target (which pulls qdwin-compositor.service +
 # qdshell.service in via Requires=/Wants=). qdlocker.service was enabled
-# in §7 and starts via default.target once the user manager comes up.
+# in §7 into qdwin-session.target.wants (its only WantedBy=), so it starts
+# with the target, after the compositor (Requisite=/After=).
 log "starting admin user session..."
 loginctl terminate-user admin 2>/dev/null || true
 # Wait for the user manager to actually go away before re-lingering.
