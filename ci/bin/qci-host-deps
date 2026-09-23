@@ -32,7 +32,8 @@ esac
 
 SELF=$(readlink -f "$0")
 BIN_DIR=$(cd "$(dirname "$SELF")" && pwd)
-WORKSPACE=$(cd "$BIN_DIR/../../.." && pwd)
+# Monorepo root (ci/bin -> ci -> root); components such as qdwin/ are in-tree.
+WORKSPACE=$(cd "$BIN_DIR/../.." && pwd)
 QDWIN_SYMS_TEST="$WORKSPACE/qdwin/libweston-vendored/run-production-symbols-test.sh"
 
 # Detect the system package manager (apt/zypper; matches what qdwin's own test
@@ -51,7 +52,7 @@ distro_pkgs=()   # distro packages to install
 pip_pkgs=()      # pip packages to install
 manual=()        # deps we can detect but not auto-install on this host
 
-# --- qfileman: tomli_w (declared in qfileman/pyproject.toml; pip-only) ---
+# --- qdfileman (qfileman): tomli_w (declared in qdfileman/pyproject.toml; pip-only) ---
 if have_py tomli_w; then ok+=("tomli_w (qfileman)")
 else missing+=("tomli_w (qfileman) -> pip install tomli_w"); pip_pkgs+=("tomli_w>=1.0"); fi
 

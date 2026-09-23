@@ -14,11 +14,16 @@ PROJECTS=(
     qdfirefox-extension
     qdgreeter
     qdlocker
-    qfileman
+    qdfileman
     qnotebook
-    qterminator
+    qdterm
 )
 
+# Monorepo: `qdistro` is the repo root; every other entry is an in-tree
+# component directory of the same name ($QDISTRO_REPO/<name>). The two renamed
+# components use their directory names (qdfileman, qdterm), not their Python
+# package names (qfileman, qterminator).
+#
 # Export a host-side <NAME>_REPO=$WORKSPACE/<name> per project (plus WORKSPACE and
 # QDISTRO_REPO). GUI scenarios run in the agent's child shell and source helpers
 # via ${QDWIN_REPO}/... / ${QDISTRO_REPO}/...; these vars were process-local, so

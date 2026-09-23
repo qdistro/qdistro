@@ -81,13 +81,12 @@ ignore = [
 
 # NOTE on per-file-ignore globs: ruff matches these against each file's path
 # RELATIVE TO THE WORKING DIRECTORY (or absolute when the file is outside it),
-# NOT against the bare argument. The qci host gate always runs ruff from
-# $WORKSPACE/qdistro (see gate_host's `run_logged host qdistro-ruff ...`), so:
-#   - in-tree qdistro files are matched by their path under that dir, hence a
-#     "**/" glob reaches them (a bare "tests/*" anchored at root would NOT —
-#     that was an inert no-op and is dropped);
-#   - sibling repos live one level up ($WORKSPACE/<repo>), so their cwd-relative
-#     path begins "../<repo>/..." and the glob must spell that prefix.
+# NOT against the bare argument. The qci host gate always runs ruff from the
+# monorepo root (see gate_host's `run_logged host qdistro-ruff ...`), so every
+# file -- root content and in-tree components (qdbrowser/, qdterm/, ...) alike --
+# is matched by its path under that dir, hence a "**/" glob reaches them (a
+# bare "tests/*" anchored at root would NOT -- that was an inert no-op and is
+# dropped).
 [lint.per-file-ignores]
 "**/tests/*" = ["B011"]      # asserts are intentional in tests (any repo)
 

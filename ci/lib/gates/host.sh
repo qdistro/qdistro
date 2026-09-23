@@ -116,9 +116,14 @@ host_ruff_targets() {
              multimachine media tier4-vm tier5b-vm; do
         [ -d "$QDISTRO_REPO/$d" ] && printf '%s\n' "$QDISTRO_REPO/$d"
     done
-    local repo
-    for repo in qdbrowser qnotebook qterminator qdgreeter qdlocker qfileman; do
-        [ -d "$WORKSPACE/$repo/$repo" ] && printf '%s\n' "$WORKSPACE/$repo/$repo"
+    # In-tree Python components: <dir>:<package>. qdterm and qdfileman keep
+    # their Python package names (qterminator, qfileman); only the directory
+    # took the GitHub repository name in the monorepo migration.
+    local entry repo pkg
+    for entry in qdbrowser:qdbrowser qnotebook:qnotebook qdterm:qterminator \
+                 qdgreeter:qdgreeter qdlocker:qdlocker qdfileman:qfileman; do
+        repo=${entry%%:*} pkg=${entry#*:}
+        [ -d "$WORKSPACE/$repo/$pkg" ] && printf '%s\n' "$WORKSPACE/$repo/$pkg"
         [ -d "$WORKSPACE/$repo/tests" ] && printf '%s\n' "$WORKSPACE/$repo/tests"
     done
 }
@@ -526,18 +531,18 @@ fi'
     # non-recursive tests/test_*.py glob) to bound QtWebEngine native residue.
     run_logged host qdbrowser-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdbrowser" "$(host_pytest_cmd 'glob:tests/test_*.py' 1)" "qdbrowser pytest per file to reduce QtWebEngine residue"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    # qdgreeter/qdlocker/qfileman/qnotebook/qterminator: single-process run via
+    # qdgreeter/qdlocker/qdfileman/qnotebook/qdterm: single-process run via
     # the shared runner ("all" mode). The selector arg reproduces each repo's
     # prior bare invocation (explicit dir, or empty => pyproject testpaths).
     run_logged host qdgreeter-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdgreeter" "$(host_pytest_cmd all 0 '' tests)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qdlocker-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdlocker" "$(host_pytest_cmd all 0 '' tests/unit)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qfileman" "$(host_pytest_cmd all)" ""; step_rc=$?
+    run_logged host qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    # qterminator: exclude the printer-coupled print_terminal tests on the host.
+    # qdterm (qterminator): exclude the printer-coupled print_terminal tests on the host.
     # They construct QPrinter(QPrinter.PrinterMode.HighResolution), which resolves
     # the host's DEFAULT printer and blocks indefinitely when that printer is an
     # offline/unreachable network device (this workstation's Phaser-3020) — with
@@ -546,9 +551,9 @@ fi'
     # belong in a VM lane (clean image => no printer => no hang). Recorded below
     # as a visible SKIP, not silently dropped.
     # TODO(host-gate refactor): run test_print_terminal.py under the VM suite gate.
-    run_logged host qterminator-pytest "$EXIT_HOST" pytest "$WORKSPACE/qterminator" "$(host_pytest_cmd all 0 '' '--ignore=tests/test_print_terminal.py')" "excludes printer-coupled test_print_terminal.py (belongs in VM lane)"; step_rc=$?
+    run_logged host qdterm-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdterm" "$(host_pytest_cmd all 0 '' '--ignore=tests/test_print_terminal.py')" "excludes printer-coupled test_print_terminal.py (belongs in VM lane)"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    record_skip host qterminator-print-tests pytest "tests/test_print_terminal.py excluded from host gate: QPrinter(HighResolution) blocks on the host default printer (Phaser-3020); move to VM lane (host-gate refactor)"
+    record_skip host qdterm-print-tests pytest "tests/test_print_terminal.py excluded from host gate: QPrinter(HighResolution) blocks on the host default printer (Phaser-3020); move to VM lane (host-gate refactor)"
 
     # Extension repos: run tests + build. Coverage (REPORT-ONLY): when
     # @vitest/coverage-v8 is installed, run a SEPARATE non-gating vitest

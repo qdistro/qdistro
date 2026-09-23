@@ -524,16 +524,17 @@ def qdistro_owned_roots(repo: Path) -> list[Path]:
     ]
 
 
-# The UMBRELLA scenario roots: the qdistro-owned set PLUS the sibling qdwin/
-# qdlocker roots — the same path set `qci gui` actually schedules. The readiness
-# metric for widening `qci gui` across the whole suite. Umbrella STRICT-clean must
-# never be conflated with qdistro-owned strict-clean.
+# The UMBRELLA scenario roots: the qdistro-owned set PLUS the in-tree qdwin/
+# qdlocker component roots — the same path set `qci gui` actually schedules. The
+# readiness metric for widening `qci gui` across the whole suite. Umbrella
+# STRICT-clean must never be conflated with qdistro-owned strict-clean.
 def umbrella_roots(repo: Path) -> list[Path]:
-    ws = repo.parent  # sibling repos live next to the qdistro checkout
+    # Monorepo: components live in-tree under the repo root (formerly sibling
+    # checkouts at repo.parent; that form now silently finds nothing).
     return qdistro_owned_roots(repo) + [
-        ws / "qdwin/tests/gui",
-        ws / "qdwin/tests/apps",
-        ws / "qdlocker/tests/gui",
+        repo / "qdwin/tests/gui",
+        repo / "qdwin/tests/apps",
+        repo / "qdlocker/tests/gui",
     ]
 
 

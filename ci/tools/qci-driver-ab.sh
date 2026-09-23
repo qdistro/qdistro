@@ -50,7 +50,17 @@ SELF=$(readlink -f "${BASH_SOURCE[0]}")
 TOOLS_DIR=$(dirname "$SELF")
 QCI_DIR=$(cd "$TOOLS_DIR/.." && pwd)
 QDISTRO_REPO=$(cd "$QCI_DIR/.." && pwd)
-WORKSPACE=$(cd "$QDISTRO_REPO/.." && pwd)
+# The manifest's scenario paths are LOGICAL ids ("qdistro/tests/...",
+# "qdwin/tests/...", same as results.tsv subjects). In the monorepo the
+# "qdistro/" project is the repo root and components are in-tree, so resolve
+# an id through ab_scenario_abs rather than "$WORKSPACE/<id>".
+WORKSPACE=$QDISTRO_REPO
+ab_scenario_abs() {
+    case "$1" in
+        qdistro/*) printf '%s/%s\n' "$QDISTRO_REPO" "${1#qdistro/}" ;;
+        *)         printf '%s/%s\n' "$QDISTRO_REPO" "$1" ;;
+    esac
+}
 QCI="$QCI_DIR/bin/qci"
 
 MANIFEST="$QCI_DIR/integrity/ab-manifest.tsv"
@@ -96,7 +106,7 @@ while IFS=$'\t' read -r rel exp _rest; do
         PASS|FAIL) ;;
         *) die "manifest: bad expected verdict '$exp' for '$rel' (want PASS|FAIL)" ;;
     esac
-    [ -f "$WORKSPACE/$rel" ] || die "manifest: scenario file missing: $WORKSPACE/$rel"
+    [ -f "$(ab_scenario_abs "$rel")" ] || die "manifest: scenario file missing: $(ab_scenario_abs "$rel")"
     SCEN_REL+=("$rel"); SCEN_EXP+=("$exp")
 done < "$MANIFEST"
 [ "${#SCEN_REL[@]}" -gt 0 ] || die "manifest has no scenarios"
@@ -138,7 +148,8 @@ fi
 # Echoes: rel \t expected \t outcome \t detail \t raw_status \t agent_rc \t wall_s
 #   outcome is one of: OK FALSE-PASS INVALID SLOW BASELINE-BROKEN
 run_one() {
-    local rel=$1 expected=$2 agent_cmd=$3 abs="$WORKSPACE/$1"
+    local rel=$1 expected=$2 agent_cmd=$3 abs
+    abs=$(ab_scenario_abs "$1")
     local logf rc=0
     logf="$WORKDIR/$(printf '%s' "$rel" | tr '/.' '__').$$.log"
     QCI_AGENT_CMD="$agent_cmd" QCI_GUI_JOBS=1 QCI_GUI_RETRY=0 \

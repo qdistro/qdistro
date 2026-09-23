@@ -378,26 +378,29 @@ record_result() {
 #     `git rev-parse --git-dir` is the supported detection and covers both.
 # The resolved root and the FULL SHA are recorded alongside the short head so a
 # result can be attributed to an exact tree without guessing.
+#
+# Monorepo: every component is in-tree, so there is exactly ONE repository to
+# describe. One row (repo `qdistro`, root = the repo/worktree qci runs from,
+# dirty = whole-tree count) replaces the former per-sibling rows; per-component
+# rows would repeat the same HEAD ten times.
 collect_repo_state() {
-    local project repo branch head head_full dirty status_log
-    for project in "${PROJECTS[@]}"; do
-        repo=$(project_root "$project") || continue
-        [ -d "$repo" ] || continue
-        git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || continue
-        status_log="$RDIR/repos/$project.status.txt"
-        branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-        head=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo "?")
-        head_full=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "?")
-        dirty=$(git -C "$repo" status --short 2>/dev/null | wc -l | tr -d ' ')
-        {
-            git -C "$repo" status --short --branch 2>/dev/null || true
-            echo
-            git -C "$repo" log -1 --oneline 2>/dev/null || true
-        } > "$status_log"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$project" "$branch" "$head" "$dirty" "$(rel_path "$status_log")" \
-            "$head_full" "$repo" >> "$RDIR/repo-state.tsv"
-    done
+    local project=qdistro repo branch head head_full dirty status_log
+    repo=$(project_root "$project") || return 0
+    [ -d "$repo" ] || return 0
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    status_log="$RDIR/repos/$project.status.txt"
+    branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+    head=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo "?")
+    head_full=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "?")
+    dirty=$(git -C "$repo" status --short 2>/dev/null | wc -l | tr -d ' ')
+    {
+        git -C "$repo" status --short --branch 2>/dev/null || true
+        echo
+        git -C "$repo" log -1 --oneline 2>/dev/null || true
+    } > "$status_log"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$project" "$branch" "$head" "$dirty" "$(rel_path "$status_log")" \
+        "$head_full" "$repo" >> "$RDIR/repo-state.tsv"
 }
 
 run_logged() {

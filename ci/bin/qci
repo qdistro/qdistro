@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qci - qdistro local CI runner (thin dispatcher).
 #
-# This is intentionally local-first CI: it runs sibling-repo host tests,
+# This is intentionally local-first CI: it runs the in-tree components' host tests,
 # disposable VM gates, bats integration tests, and agent-assisted GUI
 # scenarios, then writes Markdown and HTML reports into qdistro/ci/runs/.
 #
@@ -21,7 +21,12 @@ SELF=$(readlink -f "$0")
 QCI_BIN_DIR=$(cd "$(dirname "$SELF")" && pwd)
 QCI_DIR=$(cd "$QCI_BIN_DIR/.." && pwd)
 QDISTRO_REPO=$(cd "$QCI_DIR/.." && pwd)
-WORKSPACE=$(cd "$QDISTRO_REPO/.." && pwd)
+# Monorepo: the components (qdwin/, qdshell/, ...) live in-tree, so the
+# "workspace" that holds every project IS the repo root. $WORKSPACE/<comp>
+# therefore resolves to $QDISTRO_REPO/<comp>; nothing is read from the parent
+# directory any more (a stale old sibling checkout there is ignored; preflight
+# warns about it).
+WORKSPACE=$QDISTRO_REPO
 RUNS_DIR=${QCI_RUNS_DIR:-$QCI_DIR/runs}
 REPORT_PY="$QCI_DIR/lib/report.py"
 VM_TOOLS="$QDISTRO_REPO/scripts/vm"

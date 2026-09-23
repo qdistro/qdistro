@@ -123,7 +123,13 @@ gui_scenario_rel() {
     local scenario=$1 canonical root project repo_var repo
     canonical=$(readlink -f -- "$scenario" 2>/dev/null) || canonical=$scenario
 
-    for project in qdistro qdwin qdshell qdlocker; do
+    # Components FIRST, qdistro (the repo root) LAST: in the monorepo every
+    # component root lies INSIDE $QDISTRO_REPO, so testing qdistro first would
+    # label qdwin/tests/gui/x.md as "qdistro/qdwin/tests/gui/x.md" and route it
+    # to the admin lane. Most-specific root wins; the logical ids stay
+    # "qdwin/..." and "qdistro/tests/..." exactly as before the migration, so
+    # results.tsv subjects and ci/integrity/ab-manifest.tsv are unchanged.
+    for project in qdwin qdshell qdlocker qdistro; do
         if [ "$project" = qdistro ]; then
             repo=${QDISTRO_REPO:-}
         else

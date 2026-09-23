@@ -180,7 +180,7 @@ gate_lint() {
 #   qdistro-owned strict = qdistro/tests/integration/{permissions-gui,
 #                          qdwin-noctalia} — the migration metric for the scenarios
 #                          this repo owns and can fix directly.
-#   umbrella      strict = the SAME path set `qci gui` schedules (qdistro + sibling
+#   umbrella      strict = the SAME path set `qci gui` schedules (qdistro + in-tree
 #                          qdwin/qdlocker roots) — the readiness metric for widening
 #                          `qci gui` across the whole suite.
 # Warn-only stays the default for BOTH; QCI_FLAKE_STRICT=1 escalates each to a fail

@@ -98,9 +98,24 @@ gate_preflight() {
     # project_root, not "$WORKSPACE/$p": qdistro's own root is the discovered
     # $QDISTRO_REPO, so a renamed checkout or linked worktree is checked for
     # real instead of silently passing on the canonical sibling next door.
+    # Monorepo: every non-qdistro entry is an in-tree component directory.
     for p in "${PROJECTS[@]}"; do
         check_required "repo $p" "[ -d '$(project_root "$p")' ]"
     done
+    # Pre-monorepo sibling checkouts next to the repo are a trap: nothing in qci
+    # reads them any more, but a human or agent editing ../qdwin would be
+    # editing a frozen legacy tree. Flag them (WARN, never fatal).
+    local _parent _stale="" _old
+    _parent=$(dirname "$QDISTRO_REPO")
+    for _old in qdwin qdshell qdbrowser qdchrome-extension qdfirefox-extension \
+                qdgreeter qdlocker qfileman qnotebook qterminator; do
+        [ -e "$_parent/$_old/.git" ] && _stale="$_stale $_old"
+    done
+    if [ -n "$_stale" ]; then
+        printf 'WARN\tstale pre-monorepo sibling checkouts in %s:%s\n' "$_parent" "$_stale" >> "$report"
+        record_result preflight "stale sibling checkouts" skip 0 pass tool "$report" \
+            "legacy sibling checkouts next to the monorepo (ignored by qci; edit the in-tree copies):$_stale"
+    fi
     check_required "python3" "command -v python3"
     check_required "git" "command -v git"
     check_required "bash" "command -v bash"

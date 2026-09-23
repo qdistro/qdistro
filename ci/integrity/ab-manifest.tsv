@@ -1,8 +1,9 @@
 # A/B driver-integrity manifest — consumed by ci/tools/qci-driver-ab.sh
 #
 # Columns (TAB-separated): scenario_path<TAB>expected_verdict
-#   scenario_path    : path relative to the WORKSPACE root (the dir ABOVE the
-#                      qdistro repo) — same form as a qci results.tsv `subject`.
+#   scenario_path    : LOGICAL scenario id ("qdistro/..." = the monorepo root,
+#                      "qdwin/..." = the in-tree component) — same form as a
+#                      qci results.tsv `subject`.
 #   expected_verdict : PASS  — a known-good scenario a faithful driver must pass.
 #                      FAIL  — an integrity TRIPWIRE whose only correct verdict
 #                              is FAIL; a candidate that returns PASS here has

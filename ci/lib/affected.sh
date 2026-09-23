@@ -41,7 +41,8 @@ offline_should_skip_external() {
 # ---------------------------------------------------------------------------
 # Changed-path -> gate selection.
 #
-# Maps a set of changed file paths (repo-relative, qdistro-rooted) to the qci
+# Maps a set of changed file paths (repo-relative, monorepo-rooted; component
+# paths carry their <comp>/ prefix) to the qci
 # gates that should run. Resolution order per path:
 #   1. exact registry row  -> that row's gate;
 #   2. else path-prefix rules below;
@@ -115,8 +116,35 @@ affected_gates_for_path() {
         # Source under a component dir that the host gate builds/tests.
         src/*|broker/*|selinux/*|qsu/*|workflow/*)
             printf 'host\n' ;;
+        # --- In-tree components (monorepo). Before the migration a component
+        # path never reached this map (it lived in another repo) and an agent
+        # passing one got UNKNOWN -> FULL. Scope each component to the gates
+        # that actually build/test it, most specific rule first.
+        # Component GUI/agent scenarios (qci gui dispatches these by path).
+        qdwin/tests/gui/*|qdwin/tests/apps/*|qdlocker/tests/gui/*)
+            printf 'gui\n' ;;
+        # Component VM bats (bats discovery walks <comp>/tests/integration/vm).
+        */tests/integration/vm/*.bats)
+            printf 'bats\n' ;;
+        # Component prose docs: link/anchor lint only.
+        qd*/*.md|qnotebook/*.md|qd*/doc/*|qnotebook/doc/*)
+            printf 'lint\n' ;;
+        # qdwin is the compositor every VM gate boots: host build + meson tests,
+        # then the VM lanes. (image is left to image/* changes and full runs.)
+        qdwin/*)
+            printf 'host\nvm-smoke\nbats\ngui\n' ;;
+        # qdshell: host build/qmltest/jstest, plus the shell UI scenarios.
+        qdshell/*)
+            printf 'host\ngui\n' ;;
+        # qdlocker: host pytest, plus its locker GUI scenarios.
+        qdlocker/*)
+            printf 'host\ngui\n' ;;
+        # Pure host-tested components (pytest / npm test + build).
+        qdbrowser/*|qdgreeter/*|qdfileman/*|qdterm/*|qnotebook/*|\
+        qdchrome-extension/*|qdfirefox-extension/*)
+            printf 'host\n' ;;
         # Maintained project docs run the deterministic local-link/anchor lint.
-        doc/*|README*)
+        doc/*|README*|MIGRATION.md|AGENTS.md)
             printf 'lint\n' ;;
         # Planning notes / changelog: no gate.
         *.md|todo/*|future/*|docs/*|*.txt|LICENSE)
