@@ -32,15 +32,18 @@ from qfileman.plugins.builtin import open_in_disposable as oid
 
 # The real shipped resolver + registry, used for an end-to-end probe assertion
 # that doesn't mock the gate (so a registry/resolver drift would be caught).
-# The sibling qdistro repo's on-disk location isn't a fixed offset from this
-# worktree, so we probe a few candidate roots and skip cleanly if none is
-# present (qfileman's own CI may run without the qdistro checkout alongside).
+# qdfileman lives in-tree in the qdistro monorepo, so the resolver is at
+# <repo root>/session_manager/. Walk up from this file and take the NEAREST
+# ancestor that has it: that is the checkout (or worktree) this test belongs
+# to. (The pre-monorepo lookup was "<ancestor>/qdistro/session_manager/...",
+# which in the monorepo only matched when the checkout happened to be NAMED
+# qdistro, and from a worktree could reach a different checkout.) Skips
+# cleanly if the file is exported without the rest of the repository.
 def _find_real_resolver():
     here = Path(__file__).resolve()
     candidates = [
-        # sibling-repo layout: <parent>/qdistro/session_manager/...
-        *(p / "qdistro" / "session_manager" / "qdistro_disposable_classes.py"
-          for p in here.parents),
+        p / "session_manager" / "qdistro_disposable_classes.py"
+        for p in here.parents
     ]
     env_override = os.environ.get("QDISTRO_DISPOSABLE_CLASSES_RESOLVER", "")
     env = (Path(env_override),) if env_override else ()
