@@ -29,10 +29,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# $HERE is <repo>/image, so the sibling-repo root is two levels up, not one
-# (iso/14 Phase A item 2). The one-level form predates the import of image/
-# into the qdistro repo and made every in-repo build fail its sibling check.
-SIBLINGS="$(cd "$HERE/../.." && pwd)"
+# $HERE is <repo>/image. The monorepo root (qdistro content + the in-tree
+# components qdwin/, qdshell/, qdgreeter/, qdlocker/, ...) is one level up,
+# and that whole tree is what ships as /root/qdistro-src (O6).
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
 # /tmp is a tmpfs on the build hosts; a kiwi run does not fit in RAM.
 BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
 SRC_OVERLAY="$HERE/root/root/qdistro-src"  # ends up at /root/qdistro-src in image
@@ -40,7 +40,8 @@ SRC_OVERLAY="$HERE/root/root/qdistro-src"  # ends up at /root/qdistro-src in ima
 # chroot, where config.sh turns it into /etc/qdistro/release and removes it.
 # Lives under root/root/ so it is gitignored with the synced sources.
 MANIFEST="$HERE/root/root/qdistro-source-manifest"
-SYNC_REPOS="qdistro qdwin qdshell qdgreeter qdlocker"
+# Components config.sh builds from the synced tree; checked for presence.
+REQUIRED_COMPONENTS="qdwin qdshell qdgreeter qdlocker"
 
 # snapshot_id: the Tumbleweed snapshot both repositories in config.xml are
 # pinned to. config.xml is the only place the id is written (kiwi's parser
@@ -66,18 +67,19 @@ image_version() {
     sed -n 's|.*<version>\([0-9][0-9.]*\)</version>.*|\1|p' "$HERE/config.xml" | head -n1
 }
 
-# write_manifest: one line per synced repo -- name, commit, clean/DIRTY --
-# plus the snapshot id, so a built artifact can be traced to five commits.
+# write_manifest: the monorepo's commit -- name, commit, clean/DIRTY --
+# plus the snapshot id, so a built artifact can be traced to one commit.
 # build.sh strips .git during the sync, so this is the only moment the
-# commits can be read. "DIRTY" alone cannot distinguish two uncommitted
+# commit can be read. "DIRTY" alone cannot distinguish two uncommitted
 # states on the same parent, so a dirty tree also records the sha256 of its
-# diff against HEAD and the count of untracked files. Every one of the five
-# must be a git checkout whose top level IS the sibling directory (a linked
-# worktree or submodule, where .git is a file, counts; a plain directory
-# that merely sits inside some other repository does not, or the manifest
-# would name a stranger's commit) with a 40-hex HEAD. Anything else refuses
-# the sync: a tester image that cannot say what went in is not built
-# (round-1 review: a worktree was silently stamped "no-git").
+# diff against HEAD and the count of untracked files. The repo root must be
+# a git checkout whose top level IS that directory (a linked worktree,
+# where .git is a file, counts; a plain directory that merely sits inside
+# some other repository does not, or the manifest would name a stranger's
+# commit) with a 40-hex HEAD. Anything else refuses the sync: a tester
+# image that cannot say what went in is not built (round-1 review: a
+# worktree was silently stamped "no-git"). Before the monorepo migration
+# there was one SOURCE line per sibling repo; now there is exactly one.
 repo_head() {
     local dir="$1" top head
     top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
@@ -87,37 +89,35 @@ repo_head() {
     printf '%s\n' "$head"
 }
 write_manifest() {
-    local snap repo state head status untracked
+    local snap state head status untracked
     snap="$(snapshot_id)" || exit 2
     # Written to a temp name and moved into place: a refusal mid-way must
     # not leave a partial manifest that a later --no-sync would accept.
     rm -f "$MANIFEST" "$MANIFEST.tmp"
     {
         echo "SNAPSHOT=$snap"
-        for repo in $SYNC_REPOS; do
-            if ! head="$(repo_head "$SIBLINGS/$repo")"; then
-                echo "[build] ERROR: $SIBLINGS/$repo is not a git checkout with a commit at HEAD; the image could not say what went in" >&2
-                rm -f "$MANIFEST.tmp"
-                exit 2
-            fi
-            # Captured once, and its failure is a failure: piping status into
-            # `grep -q` under pipefail returned 141 (SIGPIPE after the first
-            # match) on a tree with thousands of untracked files and the
-            # else-branch stamped it clean (round-2 review); a git error
-            # would have read as clean the same way.
-            if ! status="$(git -C "$SIBLINGS/$repo" status --porcelain 2>&1)"; then
-                echo "[build] ERROR: git status failed in $SIBLINGS/$repo: $status" >&2
-                rm -f "$MANIFEST.tmp"
-                exit 2
-            fi
-            if [ -n "$status" ]; then
-                untracked="$(printf '%s\n' "$status" | grep -c '^??' || true)"
-                state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$untracked"
-            else
-                state=clean
-            fi
-            printf 'SOURCE %s %s %s\n' "$repo" "$head" "$state"
-        done
+        if ! head="$(repo_head "$REPO_ROOT")"; then
+            echo "[build] ERROR: $REPO_ROOT is not a git checkout with a commit at HEAD; the image could not say what went in" >&2
+            rm -f "$MANIFEST.tmp"
+            exit 2
+        fi
+        # Captured once, and its failure is a failure: piping status into
+        # `grep -q` under pipefail returned 141 (SIGPIPE after the first
+        # match) on a tree with thousands of untracked files and the
+        # else-branch stamped it clean (round-2 review); a git error
+        # would have read as clean the same way.
+        if ! status="$(git -C "$REPO_ROOT" status --porcelain 2>&1)"; then
+            echo "[build] ERROR: git status failed in $REPO_ROOT: $status" >&2
+            rm -f "$MANIFEST.tmp"
+            exit 2
+        fi
+        if [ -n "$status" ]; then
+            untracked="$(printf '%s\n' "$status" | grep -c '^??' || true)"
+            state="DIRTY diff-sha256=$(git -C "$REPO_ROOT" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$untracked"
+        else
+            state=clean
+        fi
+        printf 'SOURCE %s %s %s\n' qdistro "$head" "$state"
     } > "$MANIFEST.tmp"
     mv "$MANIFEST.tmp" "$MANIFEST"
     echo "[build] source manifest ($MANIFEST):"
@@ -129,46 +129,55 @@ sync_sources() {
     # qdgreeter + qdlocker are part of the production boot/session path:
     # greetd execs /usr/bin/qdgreeter (greetd-config.toml) and the
     # qdwin-session.target Wants= qdlocker.service. config.sh pip-installs
-    # both from this overlay, so they must be synced in (findings #16, #19).
-    for repo in $SYNC_REPOS; do
-        if [ ! -d "$SIBLINGS/$repo" ]; then
-            echo "[build] ERROR: $SIBLINGS/$repo not found (sibling repo missing)" >&2
+    # both from this overlay, so they must be present (findings #16, #19).
+    local comp
+    for comp in $REQUIRED_COMPONENTS; do
+        if [ ! -d "$REPO_ROOT/$comp" ]; then
+            echo "[build] ERROR: $REPO_ROOT/$comp not found (incomplete monorepo checkout)" >&2
             exit 2
         fi
-        echo "[build] rsyncing $repo -> $SRC_OVERLAY/$repo"
-        # Leading slashes anchor these at the repo root: an unanchored
-        # `ci/runs` would also drop an unrelated `anything/ci/runs`.
-        #   /image/root/root — with the corrected $SIBLINGS the qdistro repo
-        #     contains this very overlay, so an unfiltered sync copies the
-        #     destination into itself.
-        #   /image/logs — build logs, each holding the tarball of a previous
-        #     run (which holds the run before it). Left in, they made the
-        #     overlay 169 MB of stale nested tarballs and shipped them to
-        #     /root/qdistro-src in the image, differing run to run.
-        #   /ci/runs — gigabytes of untracked CI run artifacts in a working
-        #     checkout; never part of the image.
-        # Excluded paths are also protected from --delete, so debris left by
-        # an earlier unfiltered sync would survive forever: clear it first.
-        rm -rf "$SRC_OVERLAY/$repo/image/root/root" \
-               "$SRC_OVERLAY/$repo/image/logs" \
-               "$SRC_OVERLAY/$repo/ci/runs"
-        # `build`, `node_modules`, `__pycache__` and `*.pyc` stay UNanchored on
-        # purpose: they are build products at any depth (meson/cmake build
-        # dirs, vendored JS). No tracked path in the five repos is named
-        # `build` today, so nothing shipped is dropped by that.
-        rsync -a --delete \
-              --exclude=.git \
-              --exclude=__pycache__ \
-              --exclude='*.pyc' \
-              --exclude=build \
-              --exclude=node_modules \
-              --exclude=/image/root/root \
-              --exclude=/image/logs \
-              --exclude=/ci/runs \
-              "$SIBLINGS/$repo/" "$SRC_OVERLAY/$repo/"
     done
-    echo "[build] source overlay sizes:"
-    du -sh "$SRC_OVERLAY"/* 2>&1 | sed 's/^/  /'
+    # A pre-monorepo overlay held one directory per sibling repo, including
+    # a nested qdistro/ copy of the root. Its leftovers must not survive into
+    # the monorepo-shaped overlay (rsync --delete would keep an excluded
+    # path, and qdistro/ is not in the new tree at all, so it WOULD be
+    # deleted -- but say so explicitly rather than rely on it).
+    rm -rf "$SRC_OVERLAY/qdistro"
+    echo "[build] rsyncing the monorepo $REPO_ROOT -> $SRC_OVERLAY"
+    # Leading slashes anchor these at the repo root: an unanchored
+    # `ci/runs` would also drop an unrelated `anything/ci/runs`.
+    #   /image/root/root — the repo contains this very overlay, so an
+    #     unfiltered sync copies the destination into itself.
+    #   /image/logs — build logs, each holding the tarball of a previous
+    #     run (which holds the run before it). Left in, they made the
+    #     overlay 169 MB of stale nested tarballs and shipped them to
+    #     /root/qdistro-src in the image, differing run to run.
+    #   /ci/runs — gigabytes of untracked CI run artifacts in a working
+    #     checkout; never part of the image.
+    #   /.worktrees — linked worktrees of this repo (full source copies).
+    # Excluded paths are also protected from --delete, so debris left by
+    # an earlier unfiltered sync would survive forever: clear it first.
+    rm -rf "$SRC_OVERLAY/image/root/root" \
+           "$SRC_OVERLAY/image/logs" \
+           "$SRC_OVERLAY/ci/runs" \
+           "$SRC_OVERLAY/.worktrees"
+    # `build`, `node_modules`, `__pycache__` and `*.pyc` stay UNanchored on
+    # purpose: they are build products at any depth (meson/cmake build
+    # dirs, vendored JS). No tracked path in the monorepo is named `build`
+    # or `node_modules` today, so nothing shipped is dropped by that.
+    rsync -a --delete \
+          --exclude=.git \
+          --exclude=__pycache__ \
+          --exclude='*.pyc' \
+          --exclude=build \
+          --exclude=node_modules \
+          --exclude=/image/root/root \
+          --exclude=/image/logs \
+          --exclude=/ci/runs \
+          --exclude=/.worktrees \
+          "$REPO_ROOT/" "$SRC_OVERLAY/"
+    echo "[build] source overlay size:"
+    du -sh "$SRC_OVERLAY" 2>&1 | sed 's/^/  /'
     write_manifest
 }
 

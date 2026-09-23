@@ -91,13 +91,14 @@ rm -rf "$DEST"; mkdir -p "$DEST"; chmod 0700 "$DEST"
         echo "-copy-out $p $DEST${p%/*}"
     done
 } | guestfish --ro -a "$RAW" -i
-# /root/qdistro-src is checked for presence of its three dirs, and for the
-# targets of the tier-3 spawn/cleanup symlinks (check_link resolves them);
-# keep it small on the host by dropping everything else below the second
-# level. Add an exemption here when a checklist row resolves into the tree.
+# /root/qdistro-src (the monorepo tree) is checked for presence of its
+# top-level dirs (daemons/, qdwin/, qdshell/), and for the targets of the
+# tier-3 spawn/cleanup symlinks (check_link resolves them); keep it small on
+# the host by dropping everything below the first level. Add an exemption
+# here when a checklist row resolves into the tree.
 if [ -d "$DEST/root/qdistro-src" ]; then
     find "$DEST/root/qdistro-src" -mindepth 2 \
-        -not -path '*/qdistro/tier3' -not -path '*/qdistro/tier3/*' \
+        -not -path "$DEST/root/qdistro-src/tier3/*" \
         -delete 2>/dev/null || true
 fi
 echo "extract-root: $RAW -> $DEST ($(du -sh "$DEST" | cut -f1))"

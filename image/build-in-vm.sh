@@ -206,7 +206,7 @@ log "copying qdistro-image/ into the VM rootfs (offline)"
 # but for ~50MB it's faster to land a single archive.
 TAR="$LOGS/qdistro-image.tar"
 tar --exclude='./logs' --exclude='./keys/gnupg' \
-    --exclude='./root/root/qdistro-src/qdistro/tests/integration/qdwin-noctalia/.git' \
+    --exclude='./root/root/qdistro-src/tests/integration/qdwin-noctalia/.git' \
     -cf "$TAR" -C "$HERE" .
 
 # Wait until VM is shut off; virt-copy-in needs the disk exclusive.

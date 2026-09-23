@@ -38,25 +38,24 @@ elif what == 'ci-packages':
 PY
 }
 
-# Fake sibling layout: $T/tree/{qdistro,qdwin,qdshell,qdgreeter,qdlocker}
-# with qdistro/image/ holding a copy of build.sh and a config.xml, so
-# build.sh's $HERE/../.. sibling walk and its snapshot parser run for real.
+# Fake monorepo: $T/tree/qdistro is ONE git repository holding image/ (a copy
+# of build.sh and a config.xml) and the in-tree components qdwin/ qdshell/
+# qdgreeter/ qdlocker/, so build.sh's $HERE/.. repo-root walk and its
+# snapshot parser run for real.
 fake_tree() {
     local cfg="${1:-$IMAGE/config.xml}"
     mkdir -p "$T/tree/qdistro/image"
     cp "$IMAGE/build.sh" "$T/tree/qdistro/image/build.sh"
     cp "$cfg" "$T/tree/qdistro/image/config.xml"
     # same ignores as the real image/.gitignore: the sync's own output must
-    # not make the qdistro tree look dirty
+    # not make the tree look dirty
     printf 'root/root/\nlogs/\n' > "$T/tree/qdistro/image/.gitignore"
     for r in qdwin qdshell qdgreeter qdlocker; do
-        mkdir -p "$T/tree/$r"; echo "$r" > "$T/tree/$r/README"
+        mkdir -p "$T/tree/qdistro/$r"; echo "$r" > "$T/tree/qdistro/$r/README"
     done
-    for r in qdistro qdwin qdshell qdgreeter qdlocker; do
-        git -C "$T/tree/$r" init -q
-        git -C "$T/tree/$r" -c user.email=t@t -c user.name=t add -A
-        git -C "$T/tree/$r" -c user.email=t@t -c user.name=t commit -q -m init
-    done
+    git -C "$T/tree/qdistro" init -q
+    git -C "$T/tree/qdistro" -c user.email=t@t -c user.name=t add -A
+    git -C "$T/tree/qdistro" -c user.email=t@t -c user.name=t commit -q -m init
 }
 
 @test "config.xml: tester build is the raw alone, 28 GiB, no systemsize cap, bundle-named" {
@@ -170,61 +169,79 @@ PY
     [[ "$output" == *"exactly two repositories"* ]]
 }
 
-@test "build.sh: --sync-only writes the source manifest: snapshot + five commits with clean/DIRTY state" {
+@test "build.sh: --sync-only writes the source manifest: snapshot + the monorepo commit with clean/DIRTY state" {
     fake_tree
-    echo dirty >> "$T/tree/qdwin/README"           # tracked change -> DIRTY
-    echo new > "$T/tree/qdshell/untracked.txt"     # untracked only -> DIRTY, untracked=1
-    # a linked worktree: .git is a FILE, and it is still a checkout with a
-    # commit (round-1 review: it used to be stamped no-git)
-    mv "$T/tree/qdlocker" "$T/main-qdlocker"
-    git -C "$T/main-qdlocker" worktree add -q "$T/tree/qdlocker" -b linked
-    [ -f "$T/tree/qdlocker/.git" ]
     run bash "$T/tree/qdistro/image/build.sh" --sync-only
     [ "$status" -eq 0 ]
     local m="$T/tree/qdistro/image/root/root/qdistro-source-manifest"
     [ -s "$m" ]
     local snap; snap="$(bash "$IMAGE/build.sh" --snapshot-id)"
     grep -qx "SNAPSHOT=$snap" "$m"
-    [ "$(grep -c '^SOURCE ' "$m")" -eq 5 ]
-    grep -qE "^SOURCE qdistro [0-9a-f]{40} clean$" "$m"
-    grep -qE "^SOURCE qdwin [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=0$" "$m"
-    grep -qE "^SOURCE qdshell [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=1$" "$m"
-    grep -qE "^SOURCE qdgreeter [0-9a-f]{40} clean$" "$m"
-    grep -q "^SOURCE qdlocker $(git -C "$T/tree/qdlocker" rev-parse HEAD) clean$" "$m"
-    # the commit recorded is the sibling's HEAD
-    grep -q "^SOURCE qdistro $(git -C "$T/tree/qdistro" rev-parse HEAD) " "$m"
-    # and the sync itself still lands the sources (with .git stripped)
-    [ -f "$T/tree/qdistro/image/root/root/qdistro-src/qdwin/README" ]
-    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-src/qdwin/.git" ]
-    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-src/qdlocker/.git" ]
+    [ "$(grep -c '^SOURCE ' "$m")" -eq 1 ]
+    # the commit recorded is the monorepo's HEAD
+    grep -qx "SOURCE qdistro $(git -C "$T/tree/qdistro" rev-parse HEAD) clean" "$m"
+    # the sync lands the WHOLE tree as /root/qdistro-src (root content plus
+    # the components beside it), with .git stripped and no nested copy
+    local o="$T/tree/qdistro/image/root/root/qdistro-src"
+    [ -f "$o/qdwin/README" ]
+    [ -f "$o/qdlocker/README" ]
+    [ -f "$o/image/build.sh" ]
+    [ ! -e "$o/.git" ]
+    [ ! -e "$o/qdistro" ]
+    [ ! -e "$o/image/root/root" ]
+    # tracked change in a component + an untracked file elsewhere -> DIRTY
+    echo dirty >> "$T/tree/qdistro/qdwin/README"
+    echo new > "$T/tree/qdistro/qdshell/untracked.txt"
+    run bash "$T/tree/qdistro/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    grep -qE "^SOURCE qdistro [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=1$" "$m"
 }
 
-@test "build.sh: a sibling that is not its own git checkout refuses the sync (no 'no-git' placeholder)" {
+@test "build.sh: a linked worktree of the monorepo is a checkout with a commit (not no-git)" {
     fake_tree
-    rm -rf "$T/tree/qdlocker/.git"
+    # a linked worktree: .git is a FILE, and it is still a checkout with a
+    # commit (round-1 review: it used to be stamped no-git)
+    git -C "$T/tree/qdistro" worktree add -q "$T/wt" -b linked
+    [ -f "$T/wt/.git" ]
+    run bash "$T/wt/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    grep -qx "SOURCE qdistro $(git -C "$T/wt" rev-parse HEAD) clean" \
+        "$T/wt/image/root/root/qdistro-source-manifest"
+}
+
+@test "build.sh: an incomplete monorepo (a required component missing) refuses the sync" {
+    fake_tree
+    rm -rf "$T/tree/qdistro/qdlocker"
     run bash "$T/tree/qdistro/image/build.sh" --sync-only
     [ "$status" -eq 2 ]
-    [[ "$output" == *"qdlocker is not a git checkout with a commit at HEAD"* ]]
+    [[ "$output" == *"qdlocker not found"* ]]
+    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest" ]
+}
+
+@test "build.sh: a tree that is not its own git checkout refuses the sync (no 'no-git' placeholder)" {
+    fake_tree
+    rm -rf "$T/tree/qdistro/.git"
+    run bash "$T/tree/qdistro/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is not a git checkout with a commit at HEAD"* ]]
     [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest" ]
     [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest.tmp" ]
     # a plain directory INSIDE another repository must not borrow that
     # repository's commit either
-    rm -rf "$T/tree"; fake_tree
-    rm -rf "$T/tree/qdlocker/.git"
-    git -C "$T/tree" init -q; git -C "$T/tree" -c user.email=t@t -c user.name=t add -A qdlocker
+    git -C "$T/tree" init -q; git -C "$T/tree" -c user.email=t@t -c user.name=t add -A qdistro
     git -C "$T/tree" -c user.email=t@t -c user.name=t commit -q -m outer
     run bash "$T/tree/qdistro/image/build.sh" --sync-only
     [ "$status" -eq 2 ]
-    [[ "$output" == *"qdlocker is not a git checkout"* ]]
+    [[ "$output" == *"is not a git checkout"* ]]
 }
 
 @test "build.sh: a tree with thousands of untracked files is DIRTY, not clean (SIGPIPE under pipefail)" {
     fake_tree
-    mkdir -p "$T/tree/qdwin/many"
-    (cd "$T/tree/qdwin/many" && seq 1 12000 | xargs touch)
+    mkdir -p "$T/tree/qdistro/qdwin/many"
+    (cd "$T/tree/qdistro/qdwin/many" && seq 1 12000 | xargs touch)
     run bash "$T/tree/qdistro/image/build.sh" --sync-only
     [ "$status" -eq 0 ]
-    grep -qE "^SOURCE qdwin [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=1$" \
+    grep -qE "^SOURCE qdistro [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=1$" \
         "$T/tree/qdistro/image/root/root/qdistro-source-manifest"   # one untracked dir
 }
 
@@ -254,15 +271,11 @@ SH
 good_manifest() {
     cat > "$1" <<M
 SNAPSHOT=20260902
-SOURCE qdistro 1111111111111111111111111111111111111111 clean
-SOURCE qdwin 2222222222222222222222222222222222222222 DIRTY diff-sha256=abcdefabcdefabcd untracked=0
-SOURCE qdshell 3333333333333333333333333333333333333333 clean
-SOURCE qdgreeter 4444444444444444444444444444444444444444 clean
-SOURCE qdlocker 5555555555555555555555555555555555555555 clean
+SOURCE qdistro 1111111111111111111111111111111111111111 DIRTY diff-sha256=abcdefabcdefabcd untracked=0
 M
 }
 
-@test "release-stamp: writes /etc/qdistro/release with version, snapshot, profile, artifact name and five sources" {
+@test "release-stamp: writes /etc/qdistro/release with version, snapshot, profile, artifact name and the monorepo source" {
     source "$IMAGE/lib/release-stamp.sh"
     good_manifest "$T/manifest"
     printf 'NAME="qdistro"\nVERSION_ID="0.1.0"\n' > "$T/os-release"
@@ -275,8 +288,8 @@ M
     grep -qx "PROFILE=dev" "$f"
     grep -qx "ARTIFACT=qdistro-0.1.0-20260902.raw.xz" "$f"
     grep -qE '^BUILD_DATE=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$f"
-    [ "$(grep -c '^SOURCE ' "$f")" -eq 5 ]
-    grep -qx "SOURCE qdwin 2222222222222222222222222222222222222222 DIRTY diff-sha256=abcdefabcdefabcd untracked=0" "$f"
+    [ "$(grep -c '^SOURCE ' "$f")" -eq 1 ]
+    grep -qx "SOURCE qdistro 1111111111111111111111111111111111111111 DIRTY diff-sha256=abcdefabcdefabcd untracked=0" "$f"
     # shell-sourceable KEY=value lines (like os-release) apart from SOURCE rows
     ( set -e; eval "$(grep -v '^SOURCE \|^#' "$f")"; [ "$SNAPSHOT" = 20260902 ] )
 }
@@ -286,9 +299,14 @@ M
     printf 'VERSION_ID="0.1.0"\n' > "$T/os-release"
     run qdistro_write_release "$T/none" "$T/os-release" "$T/out" 0.1.0 dev
     [ "$status" -eq 1 ]; [[ "$output" == *"missing or empty"* ]]
-    good_manifest "$T/m4"; sed -i '/qdlocker/d' "$T/m4"
-    run qdistro_write_release "$T/m4" "$T/os-release" "$T/out" 0.1.0 dev
-    [ "$status" -eq 1 ]; [[ "$output" == *"4 SOURCE lines, want 5"* ]]
+    good_manifest "$T/m0"; sed -i '/^SOURCE /d' "$T/m0"
+    run qdistro_write_release "$T/m0" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]; [[ "$output" == *"0 SOURCE lines, want 1"* ]]
+    # a pre-monorepo five-line manifest is refused too
+    good_manifest "$T/m5"
+    printf 'SOURCE %s %040d clean\n' qdwin 2 qdshell 3 qdgreeter 4 qdlocker 5 >> "$T/m5"
+    run qdistro_write_release "$T/m5" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]; [[ "$output" == *"5 SOURCE lines, want 1"* ]]
     good_manifest "$T/m"; sed -i 's/^SNAPSHOT=.*/SNAPSHOT=latest/' "$T/m"
     run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
     [ "$status" -eq 1 ]; [[ "$output" == *"no SNAPSHOT"* ]]
@@ -300,25 +318,21 @@ M
     [ ! -e "$T/out" ]
 }
 
-@test "release-stamp: five lines is not enough -- each expected repo once, 40-hex commit, exact DIRTY grammar" {
+@test "release-stamp: one line is not enough -- the repo must be qdistro, 40-hex commit, exact DIRTY grammar" {
     source "$IMAGE/lib/release-stamp.sh"
     printf 'VERSION_ID="0.1.0"\n' > "$T/os-release"
-    # a stranger's repo in place of qdlocker
-    good_manifest "$T/m"; sed -i 's/^SOURCE qdlocker/SOURCE stranger/' "$T/m"
+    # a stranger's repo in place of qdistro
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdistro/SOURCE stranger/' "$T/m"
     run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
-    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdlocker"* ]]
-    # duplicate repo
-    good_manifest "$T/m"; sed -i 's/^SOURCE qdlocker/SOURCE qdwin/' "$T/m"
-    run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdistro"* ]]
     # the old no-git placeholder
-    good_manifest "$T/m"; sed -i 's/^SOURCE qdlocker .*/SOURCE qdlocker no-git/' "$T/m"
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdistro .*/SOURCE qdistro no-git/' "$T/m"
     run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
-    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdlocker"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdistro"* ]]
     # malformed DIRTY data
-    good_manifest "$T/m"; sed -i 's/^SOURCE qdwin \(.*\) DIRTY.*/SOURCE qdwin \1 DIRTY/' "$T/m"
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdistro \(.*\) DIRTY.*/SOURCE qdistro \1 DIRTY/' "$T/m"
     run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
-    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdwin"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdistro"* ]]
     [ ! -e "$T/out" ]
 }
 
@@ -378,7 +392,7 @@ chain_root() {
     mkdir -p "$T/root/etc/tmpfiles.d" "$T/root/usr/local/bin" "$T/root/usr/local/lib/qdistro" \
         "$T/root/usr/share/polkit-1/actions" "$T/root/usr/share/qdistro/tier4-vm" \
         "$T/root/usr/share/qdistro/tier5" "$T/root/usr/share/qdistro/tier5b" \
-        "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/qdistro/tier3" \
+        "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/tier3" \
         "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system"
     : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
     mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
@@ -395,9 +409,9 @@ chain_root() {
     printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/usr/etc/sysconfig/qemu-ga"
     printf '[Service]\nEnvironmentFile=-/usr/etc/sysconfig/qemu-ga\nEnvironmentFile=-/etc/sysconfig/qemu-ga\nExecStart=-/usr/bin/qemu-ga -p /dev/virtio-ports/org.qemu.guest_agent.0 ${FILTER_RPC_ARGS}\n' \
         > "$T/root/usr/lib/systemd/system/qemu-guest-agent.service"
-    : > "$T/root/root/qdistro-src/qdistro/tier3/spawn-tier3.sh"; : > "$T/root/root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh"
-    ln -sfn /root/qdistro-src/qdistro/tier3/spawn-tier3.sh "$T/root/usr/local/bin/qdistro-tier3-spawn"
-    ln -sfn /root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh "$T/root/usr/local/bin/qdistro-tier3-cleanup"
+    : > "$T/root/root/qdistro-src/tier3/spawn-tier3.sh"; : > "$T/root/root/qdistro-src/tier3/qdistro-tier3-cleanup.sh"
+    ln -sfn /root/qdistro-src/tier3/spawn-tier3.sh "$T/root/usr/local/bin/qdistro-tier3-spawn"
+    ln -sfn /root/qdistro-src/tier3/qdistro-tier3-cleanup.sh "$T/root/usr/local/bin/qdistro-tier3-cleanup"
     : > "$T/root/usr/local/lib/qdistro/spawn-common.sh"; : > "$T/root/etc/tmpfiles.d/qdistro-tier3.conf"
     : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier3.policy"; : > "$T/root/usr/share/polkit-1/actions/org.qdistro.tier5.policy"
     printf 'qdistro-tier3:x:499:admin,user1,user2\n' > "$T/root/etc/group"
@@ -508,16 +522,19 @@ chain_root() {
     grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
     grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
     grep -q '^    /root/qdistro-src$' "$x"
-    grep -q -- "-not -path '\*/qdistro/tier3' -not -path '\*/qdistro/tier3/\*'" "$x"
-    # and the prune really keeps them: run its find on a mock tree
-    local m="$BATS_TEST_TMPDIR/prune"
-    mkdir -p "$m/root/qdistro-src/qdistro/tier3" "$m/root/qdistro-src/qdistro/scripts/install" "$m/root/qdistro-src/qdwin/src"
-    : > "$m/root/qdistro-src/qdistro/tier3/spawn-tier3.sh"; : > "$m/root/qdistro-src/qdistro/scripts/install/x.sh"; : > "$m/root/qdistro-src/qdwin/src/a.c"
-    find "$m/root/qdistro-src" -mindepth 2 -not -path '*/qdistro/tier3' -not -path '*/qdistro/tier3/*' -delete 2>/dev/null || true
-    [ -f "$m/root/qdistro-src/qdistro/tier3/spawn-tier3.sh" ]
-    [ ! -e "$m/root/qdistro-src/qdistro/scripts" ]
+    grep -q -- '-not -path "$DEST/root/qdistro-src/tier3/\*"' "$x"
+    # and the prune really keeps them: run its find on a mock tree (the
+    # monorepo layout: tier3/, scripts/, daemons/ and qdwin/ all top-level)
+    local m="$BATS_TEST_TMPDIR/prune" DEST
+    DEST="$m"
+    mkdir -p "$m/root/qdistro-src/tier3" "$m/root/qdistro-src/scripts/install" "$m/root/qdistro-src/qdwin/src" "$m/root/qdistro-src/daemons/x"
+    : > "$m/root/qdistro-src/tier3/spawn-tier3.sh"; : > "$m/root/qdistro-src/scripts/install/x.sh"; : > "$m/root/qdistro-src/qdwin/src/a.c"
+    find "$m/root/qdistro-src" -mindepth 2 -not -path "$DEST/root/qdistro-src/tier3/*" -delete 2>/dev/null || true
+    [ -f "$m/root/qdistro-src/tier3/spawn-tier3.sh" ]
+    [ ! -e "$m/root/qdistro-src/scripts/install" ]
     [ ! -e "$m/root/qdistro-src/qdwin/src" ]
     [ -d "$m/root/qdistro-src/qdwin" ]
+    [ -d "$m/root/qdistro-src/daemons" ]
 }
 
 @test "verify-contents: a missing or truncated /etc/qdistro/release is a MISS, not a pass" {
@@ -525,9 +542,9 @@ chain_root() {
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [[ "$output" == *"MISS image provenance:"*"(missing)"* ]]
     fake_root dev
-    sed -i '/^SOURCE qdlocker/d;/^SNAPSHOT/d;/^PROFILE/d' "$T/root/etc/qdistro/release"
+    sed -i '/^SOURCE qdistro/d;/^SNAPSHOT/d;/^PROFILE/d' "$T/root/etc/qdistro/release"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"MISS image provenance:"*"no single SNAPSHOT=YYYYMMDD;"*"no single well-formed SOURCE qdlocker line"* ]]
+    [[ "$output" == *"MISS image provenance:"*"no single SNAPSHOT=YYYYMMDD;"*"not exactly one SOURCE line;"*"no single well-formed SOURCE qdistro line"* ]]
     # profile unknown -> neither sudoers row is emitted rather than guessed
     [[ "$output" != *"passwordless sudoers"* ]]
 }
@@ -542,15 +559,15 @@ chain_root() {
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [[ "$output" == *"MISS image provenance:"*"no single PROFILE=dev|release;"* ]]
     [[ "$output" != *"passwordless sudoers"* ]]
-    fake_root dev; sed -i 's/^\(SOURCE qdwin [0-9a-f]*\) DIRTY.*/\1 DIRTY/' "$f"
+    fake_root dev; sed -i 's/^\(SOURCE qdistro [0-9a-f]*\) DIRTY.*/\1 DIRTY/' "$f"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"MISS image provenance:"*"no single well-formed SOURCE qdwin line;"* ]]
-    fake_root dev; sed -i 's/^SOURCE qdlocker/SOURCE stranger/' "$f"
+    [[ "$output" == *"MISS image provenance:"*"no single well-formed SOURCE qdistro line;"* ]]
+    fake_root dev; sed -i 's/^SOURCE qdistro/SOURCE stranger/' "$f"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"MISS image provenance:"*"no single well-formed SOURCE qdlocker line;"* ]]
-    fake_root dev; sed -i 's/^SOURCE qdlocker/SOURCE qdwin/' "$f"  # five lines, one repo twice
+    [[ "$output" == *"MISS image provenance:"*"no single well-formed SOURCE qdistro line;"* ]]
+    fake_root dev; sed -i '/^SOURCE qdistro/p' "$f"  # the one repo twice
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"MISS image provenance:"*"SOURCE qdwin line;"*"SOURCE qdlocker line;"* ]]
+    [[ "$output" == *"MISS image provenance:"*"not exactly one SOURCE line;"*"SOURCE qdistro line;"* ]]
     fake_root dev
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [[ "$output" == *"OK   image provenance:"* ]]
@@ -989,11 +1006,11 @@ identity_check() {
         "$T/root" "$T/identity.xml" --profile "${1:-release}"
 }
 
-@test "release identity: matches all five pins and admits explicitly requested clean dev tester" {
+@test "release identity: matches the monorepo pin and admits explicitly requested clean dev tester" {
     identity_fixture
     run identity_check
     [ "$status" -eq 0 ]
-    [[ "$output" == *"SOURCE qdlocker: expected="*"observed="* ]]
+    [[ "$output" == *"SOURCE qdistro: expected="*"observed="* ]]
     sed -i 's/^PROFILE=release/PROFILE=dev/' "$T/root/etc/qdistro/release"
     run identity_check dev
     [ "$status" -eq 0 ]
@@ -1004,7 +1021,7 @@ identity_check() {
 
 @test "release identity: stale pin missing component dirty state and wrong snapshot fail" {
     local repo
-    for repo in qdwin qdlocker; do
+    for repo in qdistro; do
         identity_fixture
         sed -i "s/^SOURCE $repo [0-9a-f]*/SOURCE $repo 0000000000000000000000000000000000000000/" "$T/root/etc/qdistro/release"
         run identity_check
@@ -1012,7 +1029,7 @@ identity_check() {
         [[ "$output" == *"image identity mismatch: $repo"* ]]
     done
     identity_fixture
-    sed -i '/^qdlocker /d' "$T/expected-manifest"
+    sed -i '/^qdistro /d' "$T/expected-manifest"
     run identity_check
     [ "$status" -ne 0 ]
     [[ "$output" == *"expected manifest missing components"* ]]
@@ -1048,11 +1065,11 @@ identity_check() {
     run gate_image --root "$T/root" --no-boot
     [ "$status" -eq 0 ]
     [[ "$output" == *"release-identity pass"* ]]
-    sed -i 's/^SOURCE qdlocker [0-9a-f]*/SOURCE qdlocker 0000000000000000000000000000000000000000/' "$T/root/etc/qdistro/release"
+    sed -i 's/^SOURCE qdistro [0-9a-f]*/SOURCE qdistro 0000000000000000000000000000000000000000/' "$T/root/etc/qdistro/release"
     run gate_image --root "$T/root" --no-boot
     [ "$status" -eq 7 ]
     [[ "$output" == *"verify-contents pass"*"release-identity fail"* ]]
-    grep -q 'image identity mismatch: qdlocker' "$RDIR/host/image-release-identity.log"
+    grep -q 'image identity mismatch: qdistro' "$RDIR/host/image-release-identity.log"
 }
 
 @test "image gate: unpopulated captured manifest stays blocked while malformed active input fails" {

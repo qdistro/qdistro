@@ -6,8 +6,9 @@
 # qdistro_write_release <manifest> <os-release> <dest> <version> <profile>
 #   manifest    root/root/qdistro-source-manifest as written by build.sh
 #               sync_sources: one SNAPSHOT=<YYYYMMDD> line and one
-#               "SOURCE <repo> <40-hex commit> <clean|DIRTY diff-sha256=<16 hex> untracked=<n>>"
-#               line per synced repo, five in all
+#               "SOURCE qdistro <40-hex commit> <clean|DIRTY diff-sha256=<16 hex> untracked=<n>>"
+#               line for the monorepo (one line; before the monorepo migration
+#               there were five, one per synced sibling repo)
 #   os-release  the image's /etc/os-release; its VERSION_ID must equal
 #               <version> or the two identities the image carries disagree
 #   dest        the file to write (/etc/qdistro/release in the image)
@@ -27,20 +28,18 @@ qdistro_write_release() {
         echo "release-stamp: $manifest has no SNAPSHOT=<YYYYMMDD> line" >&2
         return 1
     fi
-    # Exactly the five synced repos, each once, each with a 40-hex commit and
-    # the writer's clean/DIRTY grammar. Counting generic SOURCE lines would
+    # Exactly the one synced monorepo, once, with a 40-hex commit and the
+    # writer's clean/DIRTY grammar. Counting generic SOURCE lines would
     # accept a stranger's repo or a "no-git" placeholder (round-1 review).
     n="$(grep -c '^SOURCE ' "$manifest")"
-    if [ "$n" -ne 5 ]; then
-        echo "release-stamp: $manifest lists $n SOURCE lines, want 5" >&2
+    if [ "$n" -ne 1 ]; then
+        echo "release-stamp: $manifest lists $n SOURCE lines, want 1 (the qdistro monorepo)" >&2
         return 1
     fi
-    for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
-        if [ "$(grep -cE "^SOURCE $repo [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$manifest")" -ne 1 ]; then
-            echo "release-stamp: $manifest lacks exactly one well-formed 'SOURCE $repo <40-hex> clean|DIRTY diff-sha256=<16-hex> untracked=<n>' line" >&2
-            return 1
-        fi
-    done
+    if [ "$(grep -cE "^SOURCE qdistro [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$manifest")" -ne 1 ]; then
+        echo "release-stamp: $manifest lacks exactly one well-formed 'SOURCE qdistro <40-hex> clean|DIRTY diff-sha256=<16-hex> untracked=<n>' line" >&2
+        return 1
+    fi
     case "$profile" in
         dev|release) ;;
         *) echo "release-stamp: profile must be dev or release, got: $profile" >&2; return 1 ;;

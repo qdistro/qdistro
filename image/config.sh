@@ -4,10 +4,11 @@
 # Runs inside the image chroot AFTER packages install, BEFORE the
 # rootfs is packed into the OEM disk image.
 #
-# Layout assumed (build.sh rsyncs these in via the `root/` overlay):
-#   /root/qdistro-src/qdistro/
-#   /root/qdistro-src/qdwin/
+# Layout assumed (build.sh rsyncs the monorepo in via the `root/` overlay):
+#   /root/qdistro-src/            the qdistro monorepo root (ci/ daemons/ ...)
+#   /root/qdistro-src/qdwin/      in-tree components beside it
 #   /root/qdistro-src/qdshell/
+#   ...
 #
 # This is the same /root/qdistro-src layout that
 # qdistro/scripts/vm/fresh-vm-bootstrap.sh expects, so we reuse the
@@ -22,7 +23,7 @@ set -euxo pipefail
 echo "[qdistro-image] kiwi config.sh: $kiwi_iname-$kiwi_iversion"
 
 SRC=/root/qdistro-src
-QD="$SRC/qdistro"
+QD="$SRC"   # monorepo root (qdistro content); components are $SRC/<name>
 
 # The build profile, validated ONCE: dev (passwordless sudo, the tester
 # image) or release (the safe default). Every later gate -- sudoers, the
@@ -139,7 +140,7 @@ else
     echo "[qdistro-image] release profile: no passwordless sudoers baked (admin uses password-required sudo; cross-uid via qsu/broker)"
 fi
 
-# Build the three sibling projects out of /root/qdistro-src/.
+# Build qdwin, the qdistro daemons and qdshell out of /root/qdistro-src/.
 echo "[qdistro-image] building qdwin..."
 cd "$SRC/qdwin"
 meson setup build --wipe --prefix=/usr
@@ -177,7 +178,7 @@ cd "$QD"
 # its globals, which are (re)initialised from their QDISTRO_* environment
 # forms, so those are what we set -- never the internal names (REPO_ROOT,
 # STRICT, QDISTRO_STATE_DIR is both), which the source would clobber.
-#   QDISTRO_REPO_ROOT   the synced sources; the chain runs $REPO_ROOT/qdistro
+#   QDISTRO_REPO_ROOT   the synced monorepo tree; the chain runs from $REPO_ROOT
 #   QDISTRO_PROFILE     dev|release, the validated image profile: `phone` is
 #                       a dev-only step (decision D4) and follows the same
 #                       guard here as on a machine install; in release the

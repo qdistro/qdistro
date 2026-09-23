@@ -6,7 +6,9 @@ import sys
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-REPOS = {"qdistro", "qdwin", "qdshell", "qdgreeter", "qdlocker"}
+# One pin: the qdistro monorepo (the components are in-tree and covered by
+# its commit). Before the monorepo migration there were five sibling pins.
+REPOS = {"qdistro"}
 
 
 def image_file(root, name):

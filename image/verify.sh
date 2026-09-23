@@ -595,9 +595,9 @@ expect "weston (qdwin) on disk" \
 # So: the link and its target's name from admin's view, the target's
 # executability from root's.
 expect "tier-3 spawn helper installed (chain step tier3)" \
-    remote 'test -L /usr/local/bin/qdistro-tier3-spawn && [ "$(readlink /usr/local/bin/qdistro-tier3-spawn)" = /root/qdistro-src/qdistro/tier3/spawn-tier3.sh ] && getent group qdistro-tier3 >/dev/null && test -f /usr/share/polkit-1/actions/org.qdistro.tier3.policy'
+    remote 'test -L /usr/local/bin/qdistro-tier3-spawn && [ "$(readlink /usr/local/bin/qdistro-tier3-spawn)" = /root/qdistro-src/tier3/spawn-tier3.sh ] && getent group qdistro-tier3 >/dev/null && test -f /usr/share/polkit-1/actions/org.qdistro.tier3.policy'
 expect "tier-3 spawn/cleanup helper targets executable (root view)" \
-    qga_root 'test -x /root/qdistro-src/qdistro/tier3/spawn-tier3.sh && test -x /root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh && test -x /usr/local/bin/qdistro-tier3-spawn'
+    qga_root 'test -x /root/qdistro-src/tier3/spawn-tier3.sh && test -x /root/qdistro-src/tier3/qdistro-tier3-cleanup.sh && test -x /usr/local/bin/qdistro-tier3-spawn'
 # passwd -S needs root; an empty or unexpected status line is a FAIL (the
 # case pattern matches the second field exactly, so silence cannot pass).
 expect "tier-3 silo users exist with locked passwords" \
@@ -614,7 +614,7 @@ expect "sdk (qdistro_app) importable" \
 # from the on-image source tree -- under /root, hence the root channel.
 expect "installer chain record equals the bootstrap chain for this profile" \
     qga_root 'p=$(sed -n "s/^PROFILE=//p" /etc/qdistro/release); [ -n "$p" ] || { echo "no PROFILE in /etc/qdistro/release"; exit 1; };
-            exp=$(QDISTRO_PROFILE="$p" bash -c ". /root/qdistro-src/qdistro/scripts/install/qdistro-bootstrap.sh; resolve_profile >/dev/null; chain_expected_names") || { echo "chain_expected_names failed"; exit 1; };
+            exp=$(QDISTRO_PROFILE="$p" bash -c ". /root/qdistro-src/scripts/install/qdistro-bootstrap.sh; resolve_profile >/dev/null; chain_expected_names") || { echo "chain_expected_names failed"; exit 1; };
             rec=$(grep -vE "^[[:space:]]*(#|$)" /var/lib/qdistro/bootstrap/installer-chain.state);
             [ -n "$exp" ] && [ "$exp" = "$rec" ] && { echo "chain ($p): $(echo $exp)"; exit 0; };
             echo "expected: $(echo $exp)"; echo "recorded: $(echo $rec)"; exit 1'
@@ -739,7 +739,7 @@ if [ "$NESTED" = 1 ]; then
                   done
                   export TIER4_GUEST_DISK=/tmp/qdistro-t4-stub.qcow2
                   export TIER4_DOMAIN_DEFINE_ONLY=1
-                  bash /root/qdistro-src/qdistro/tier4-vm/spawn-tier4.sh qdistro-verify-t4
+                  bash /root/qdistro-src/tier4-vm/spawn-tier4.sh qdistro-verify-t4
                   as_admin virsh undefine qdistro-verify-t4 2>/dev/null || true'
 fi
 

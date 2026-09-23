@@ -340,7 +340,7 @@ check_req_any "os-release present"        /etc/os-release /usr/lib/os-release
 check_opt     "qdistro-release marker"    /etc/qdistro-release
 # /etc/qdistro/release (todo/iso/14 Phase C): the image must say what it was
 # built from -- version, the pinned Tumbleweed snapshot, the profile and one
-# SOURCE line per synced repo (five). Content is checked, not just presence:
+# SOURCE line for the synced monorepo (one). Content is checked, not just presence:
 # an empty or truncated file is exactly what a broken manifest step would
 # leave, and a bug report needs these lines.
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
@@ -368,11 +368,9 @@ else
     # fields disagree is corrupt, not merely oddly named (round-1 review).
     [ -n "$rel_version" ] && [ -n "$rel_snapshot" ] && [ "$rel_artifact" = "qdistro-$rel_version-$rel_snapshot.raw.xz" ] \
         || release_problem="$release_problem ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"
-    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 5 ] || release_problem="$release_problem not exactly five SOURCE lines;"
-    for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
-        [ "$(grep -cE "^SOURCE $repo [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$release_file")" -eq 1 ] \
-            || release_problem="$release_problem no single well-formed SOURCE $repo line;"
-    done
+    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
+    [ "$(grep -cE "^SOURCE qdistro [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$release_file")" -eq 1 ] \
+        || release_problem="$release_problem no single well-formed SOURCE qdistro line;"
 fi
 if [ -z "$release_problem" ]; then
     printf 'OK   %s: %s (%s)\n' "image provenance" "$ROOT/etc/qdistro/release" \
@@ -405,9 +403,10 @@ esac
 
 echo
 echo "-- in-place source tree (LLM-modifiability) --"
-# /root/qdistro-src/{qdistro,qdwin,qdshell} must survive onto the image.
+# /root/qdistro-src (the monorepo: root content + qdwin/, qdshell/, ...) must
+# survive onto the image.
 check_req "qdistro source root"  /root/qdistro-src
-check_req "qdistro src"          /root/qdistro-src/qdistro
+check_req "qdistro src"          /root/qdistro-src/daemons
 check_req "qdwin src"            /root/qdistro-src/qdwin
 check_req "qdshell src"         /root/qdistro-src/qdshell
 
