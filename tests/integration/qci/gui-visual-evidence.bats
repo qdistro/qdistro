@@ -368,9 +368,9 @@ write_status() {
     local f n=0
     for f in "$REPO_ROOT"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
              "$REPO_ROOT"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/../qdwin/tests/gui/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/../qdwin/tests/apps/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/../qdlocker/tests/gui/[0-9][0-9]-*.md; do
+             "$REPO_ROOT"/qdwin/tests/gui/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/qdwin/tests/apps/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/qdlocker/tests/gui/[0-9][0-9]-*.md; do
         [ -f "$f" ] || continue
         n=$((n + 1))
         local m; m=$(gui_scenario_visual_mode "$f")
@@ -960,13 +960,13 @@ EOF
     grep -q 'capture_virsh_screenshot "\$VM" "\$post"' "$REPO_ROOT/scripts/vm/vm-gui"
     # qdwin_screenshot (in-guest qdshell capture, qdwin/qdlocker lane). Without
     # this, every qci:visual=required scenario in those repos would be ERROR.
-    local qh="$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh"
+    local qh="$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh"
     if [ -r "$qh" ]; then
         grep -q 'lib/capture-attest.sh' "$qh"
         grep -q 'capture_attest_frame "\$out" "\$VMNAME"' "$qh"
     fi
     # qdwin_apps_screenshot (virsh, qdwin apps lane) -- the third capture tool.
-    local ah="$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh"
+    local ah="$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh"
     if [ -r "$ah" ]; then
         grep -q 'lib/capture-attest.sh' "$ah"
         grep -q 'capture_virsh_screenshot "\$VMNAME" "\$out"' "$ah"
@@ -992,8 +992,8 @@ EOF
     fi
     local f
     for f in "$REPO_ROOT/scripts/vm/vm-gui" \
-             "$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh" \
-             "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh"; do
+             "$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh" \
+             "$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh"; do
         [ -r "$f" ] || continue
         if grep -qE 'capture_attest[[:space:]]+"' "$f"; then
             echo "$f still calls the ungated capture_attest"; return 1

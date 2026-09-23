@@ -61,7 +61,7 @@ B round 6). An arithmetic body is blanked WITHOUT blanking a `$( ... )` nested
 inside it, because that nested substitution is a command.
 
 Reachable definitions are the file's own, plus those of any library it sources
-by a literal path (relative to the file, or via $QDWIN_WORKSPACE/qdistro).
+by a literal path (relative to the file, or via $QDWIN_WORKSPACE, the monorepo root).
 """
 import os
 import re

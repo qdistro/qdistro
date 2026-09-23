@@ -248,7 +248,7 @@ EOF
     # a command substitution). Those are enumerated in the round-9 report, not
     # by this test.
     run python3 "$REPO_ROOT/ci/bin/vmexec-fd2-scan.py" \
-        "$REPO_ROOT" "$REPO_ROOT/../qdwin"
+        "$REPO_ROOT"
     if [ "$status" -ne 0 ]; then
         echo "$output" >&2
         return 1
@@ -271,7 +271,7 @@ EOF
     #     body that runs in the GUEST.
     # A NEW blind spot fails this test rather than silently exempting a file.
     run --separate-stderr python3 "$REPO_ROOT/ci/bin/vmexec-fd2-scan.py" \
-        "$REPO_ROOT" "$REPO_ROOT/../qdwin"
+        "$REPO_ROOT"
     local expected="UNPARSEABLE: scripts/vm/build-baked-baseweed.sh
 UNPARSEABLE: tests/integration/permissions-gui/AGENTS.md
 UNPARSEABLE: tests/integration/workflow-gui/05-approval-queue-gated-run.md"
@@ -370,8 +370,8 @@ EOF
 # todo/reviews/qci-A3-260917-sol-review.md finding 1). vm-exec's periodic
 # "[vm-exec] Waiting..." lines are the same hazard on any slow capture.
 @test "caller audit: the screenshot reply parser survives vm-exec transport chatter" {
-    local helpers="$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh"
-    [ -f "$helpers" ] || skip "sibling qdwin checkout not present"
+    local helpers="$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh"
+    [ -f "$helpers" ] || skip "qdwin component not present"
 
     # RUN THE PRODUCTION FUNCTION. An earlier version of this test greped the
     # source and then re-implemented the filter locally; sol INVERTED the real
@@ -434,8 +434,8 @@ SH
 # surfaced to the operator as "capture command timed out" (sol,
 # qci-A4-260917-sol-review.md finding 2).
 @test "caller audit: a failed capture still reports what the transport said" {
-    local helpers="$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh"
-    [ -f "$helpers" ] || skip "sibling qdwin checkout not present"
+    local helpers="$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh"
+    [ -f "$helpers" ] || skip "qdwin component not present"
 
     local d="$BATS_TEST_TMPDIR/shot2"; mkdir -p "$d/bin"
     # Transport fails and says why; there is no protocol reply at all.
@@ -705,8 +705,8 @@ EOF
 # of a literal path.
 @test "caller audit: every qdwin_*/capture_* callee in the lane helpers is defined" {
     local f found=0
-    for f in "$REPO_ROOT/../qdwin/tests/gui/qdwin-helpers.sh" \
-             "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" \
+    for f in "$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh" \
+             "$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh" \
              "$REPO_ROOT/scripts/vm/vm-gui" \
              "$REPO_ROOT/scripts/vm/lib/capture-attest.sh"; do
         [ -f "$f" ] || continue
@@ -726,15 +726,15 @@ EOF
 # `virsh` was accepted although the capture library invokes the literal `virsh`
 # from PATH -- so VM checks could use a wrapper while screenshots did not.
 uri_for() {
-    QDWIN_VIRSH="$1" QDWIN_WORKSPACE="$(cd "$REPO_ROOT/.." && pwd)" \
+    QDWIN_VIRSH="$1" QDWIN_WORKSPACE="$REPO_ROOT" \
         timeout 5 bash -c '
             . "$1"/tests/apps/qdwin-apps-helpers.sh 2>/dev/null
             qdwin_apps_libvirt_uri
-        ' _ "$REPO_ROOT/../qdwin"
+        ' _ "$REPO_ROOT/qdwin"
 }
 
 @test "qdwin apps: the libvirt URI comes from QDWIN_VIRSH" {
-    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    [ -f "$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "qdwin component not present"
     run uri_for 'virsh -c qemu:///system'
     [ "$status" -eq 0 ]
     [ "$output" = "qemu:///system" ]
@@ -747,7 +747,7 @@ uri_for() {
 }
 
 @test "qdwin apps: a URI flag with no operand is refused, not an infinite loop" {
-    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    [ -f "$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "qdwin component not present"
     run uri_for 'virsh -c'
     # 124 would be the timeout firing -- i.e. the hang.
     [ "$status" -eq 1 ]
@@ -755,7 +755,7 @@ uri_for() {
 }
 
 @test "qdwin apps: a wrapper the capture library would not invoke is refused" {
-    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    [ -f "$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "qdwin component not present"
     run uri_for '/usr/local/bin/virsh -c qemu:///z'
     [ "$status" -eq 1 ]
     run uri_for 'my-virsh-wrapper'
@@ -871,7 +871,7 @@ qdwin_gone'
 }
 
 @test "qdwin apps: the URI parser refuses everything it cannot express" {
-    [ -f "$REPO_ROOT/../qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "no sibling qdwin"
+    [ -f "$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh" ] || skip "qdwin component not present"
     local bad
     for bad in 'virsh nonsense' \
                'virsh -c qemu:///x trailing' \

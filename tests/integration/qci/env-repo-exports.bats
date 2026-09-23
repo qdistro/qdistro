@@ -19,8 +19,17 @@ child_val() {
 }
 
 @test "bootstrap exports WORKSPACE + QDISTRO_REPO to a child shell" {
+    # Monorepo: the workspace IS the qdistro repo root.
     [ "$(child_val WORKSPACE)" = "/ws" ]
-    [ "$(child_val QDISTRO_REPO)" = "/ws/qdistro" ]
+    [ "$(child_val QDISTRO_REPO)" = "/ws" ]
+}
+
+@test "renamed components export their DIRECTORY names (qdfileman, qdterm)" {
+    [ "$(child_val QDFILEMAN_REPO)" = "/ws/qdfileman" ]
+    [ "$(child_val QDTERM_REPO)" = "/ws/qdterm" ]
+    # the pre-monorepo local names are gone
+    [ -z "$(child_val QFILEMAN_REPO)" ]
+    [ -z "$(child_val QTERMINATOR_REPO)" ]
 }
 
 @test "bootstrap exports QDWIN_REPO / QDLOCKER_REPO (used by GUI scenarios)" {
@@ -56,7 +65,7 @@ child_val() {
 
 @test "QDISTRO_REPO is derived from WORKSPACE when not pre-discovered" {
     # Sourced standalone with only WORKSPACE (no discovered QDISTRO_REPO), the
-    # loop must still derive QDISTRO_REPO=$WORKSPACE/qdistro so the anchored
-    # ${QDISTRO_REPO}/... helper paths resolve.
-    [ "$(child_val QDISTRO_REPO)" = "/ws/qdistro" ]
+    # loop must still derive QDISTRO_REPO (monorepo: = $WORKSPACE) so the
+    # anchored ${QDISTRO_REPO}/... helper paths resolve.
+    [ "$(child_val QDISTRO_REPO)" = "/ws" ]
 }

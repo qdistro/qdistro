@@ -49,7 +49,12 @@ if [ -n "${WORKSPACE:-}" ]; then
             export QDISTRO_REPO
             continue
         fi
-        export "${_repo_var}=$WORKSPACE/$_repo_proj"
+        if [ "$_repo_proj" = qdistro ]; then
+            # Monorepo: qdistro is the workspace (repo root) itself.
+            export "${_repo_var}=$WORKSPACE"
+        else
+            export "${_repo_var}=$WORKSPACE/$_repo_proj"
+        fi
     done
     unset _repo_proj _repo_var
 fi
@@ -71,6 +76,10 @@ project_root() {
     local proj=$1
     if [ "$proj" = qdistro ] && [ -n "${QDISTRO_REPO:-}" ]; then
         printf '%s' "$QDISTRO_REPO"; return 0
+    fi
+    # Monorepo: without a discovered QDISTRO_REPO, qdistro is the workspace root.
+    if [ "$proj" = qdistro ] && [ -n "${WORKSPACE:-}" ]; then
+        printf '%s' "$WORKSPACE"; return 0
     fi
     if [ -n "${WORKSPACE:-}" ]; then printf '%s' "$WORKSPACE/$proj"; return 0; fi
     return 1

@@ -69,6 +69,21 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
     [ "$count" -eq 1 ]
 }
 
+@test "discover (monorepo layout): in-tree component vm bats found, root listed once" {
+    # WORKSPACE == QDISTRO_REPO == the monorepo root; components are in-tree.
+    mkdir -p "$TMP/mono/tests/integration/vm" \
+             "$TMP/mono/qdbrowser/tests/integration/vm"
+    : > "$TMP/mono/tests/integration/vm/shell-modules.bats"
+    : > "$TMP/mono/qdbrowser/tests/integration/vm/qdbrowser-smoke.bats"
+    QDISTRO_REPO="$TMP/mono" WORKSPACE="$TMP/mono" \
+        run bats_discover_files
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/mono/tests/integration/vm/shell-modules.bats"* ]]
+    [[ "$output" == *"/mono/qdbrowser/tests/integration/vm/qdbrowser-smoke.bats"* ]]
+    count=$(printf '%s\n' "$output" | grep -c 'shell-modules.bats' || true)
+    [ "$count" -eq 1 ]
+}
+
 @test "discover ignores a stray checkout beside the workspace" {
     # The 2026-09-08 incident: a review checkout named qdistro-ci-host-20260908
     # sat beside the canonical tree, the "$WORKSPACE"/*/tests/integration/vm glob

@@ -21,7 +21,10 @@ setup() {
     SRC_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
     HOST_GATE="$SRC_ROOT/ci/lib/gates/host.sh"
     [ -f "$HOST_GATE" ] || { echo "host gate not found at $HOST_GATE" >&2; return 1; }
-    WORKSPACE_DIR="$(dirname "$SRC_ROOT")"
+    # Monorepo: the extensions are in-tree components of this repo (they were
+    # sibling checkouts, and in a clone without siblings the byte-identity
+    # check below would have skipped silently).
+    WORKSPACE_DIR="$SRC_ROOT"
     CHROME_REPO="${QDCHROME_EXTENSION_REPO:-$WORKSPACE_DIR/qdchrome-extension}"
     FIREFOX_REPO="${QDFIREFOX_EXTENSION_REPO:-$WORKSPACE_DIR/qdfirefox-extension}"
 }
