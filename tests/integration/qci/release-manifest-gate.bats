@@ -304,3 +304,47 @@ row_note_has() {
     row_is signature fail
     row_note_has signature "signature file missing"
 }
+
+# -------------------------------------------------------------------------
+# Linked worktrees (the documented per-task workflow) and the exact-root rule
+# -------------------------------------------------------------------------
+
+@test "release-manifest: clean linked worktree at the pin => pass (.git is a file there)" {
+    make_core
+    git -C "$MONO" worktree add -q --detach "$RR/wt" "$P_qdistro"
+    [ -f "$RR/wt/.git" ]                          # a linked worktree, not a .git dir
+    export QDISTRO_REPO_ROOT="$RR/wt"
+    base_manifest
+    sign_manifest
+    export QDISTRO_RELEASE_KEYRING="$RR/keyring.gpg"
+    export QDISTRO_MANIFEST_SIG="$MANIFEST.sig"
+    export QDISTRO_RELEASE_SIGNER="$FPR"
+    run_gate
+    [ "$status" -eq 0 ] || { echo "status=$status: $output" >&2; cat "$RESULTS" >&2; return 1; }
+    row_is "pin:qdistro" pass
+    row_is signature pass
+}
+
+@test "release-manifest: a linked worktree is still checked (dirty worktree => fail 15)" {
+    make_core
+    git -C "$MONO" worktree add -q --detach "$RR/wt" "$P_qdistro"
+    export QDISTRO_REPO_ROOT="$RR/wt"
+    echo wip > "$RR/wt/qdshell/wip"
+    base_manifest
+    run_gate
+    [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
+    row_is "pin:qdistro" fail
+    row_note_has "pin:qdistro" "working tree not clean"
+}
+
+@test "release-manifest: a directory INSIDE the checkout is not the repo root => fail 15" {
+    # <mono>/qdwin resolves to the enclosing repository; judging it by that
+    # repo's HEAD would pin the wrong tree. The root must be the top level.
+    make_core
+    export QDISTRO_REPO_ROOT="$MONO/qdwin"
+    base_manifest
+    run_gate
+    [ "$status" -eq 15 ] || { echo "status=$status: $output" >&2; return 1; }
+    row_is "pin:qdistro" fail
+    row_note_has "pin:qdistro" "no git checkout rooted at"
+}

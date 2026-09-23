@@ -157,11 +157,23 @@ gate_release_manifest() {
         pinned_repos="$pinned_repos $repo"
         # The monorepo root (the only pinnable repo; gen-source-manifest --lint
         # above already rejected any other repo name).
-        local dir="$repo_root" ok=1 detail=""
+        local dir="$repo_root" ok=1 detail="" top=""
+        # Git root discovery, not a `.git` DIRECTORY test: a linked worktree
+        # (`git worktree add`, the documented per-task workflow) has a `.git`
+        # FILE. The root must be exactly the checkout's top level; a directory
+        # that merely sits inside some repository (e.g. <mono>/qdwin) would
+        # otherwise be judged by the enclosing repo's HEAD. Read-only gate:
+        # this is not the root-run bootstrap, which keeps its own stricter
+        # trust rules (verify_repo_pin still requires a .git directory).
+        if [ -d "$dir" ]; then
+            top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || top=""
+        fi
         if ! printf '%s' "$pin" | grep -qE '^[0-9a-f]{40}$'; then
             ok=0; detail="pin '$pin' is not a 40-hex commit SHA"
-        elif [ ! -d "$dir/.git" ]; then
+        elif [ -z "$top" ]; then
             ok=0; detail="no git checkout at $dir"
+        elif [ "$(realpath -e -- "$top")" != "$(realpath -e -- "$dir")" ]; then
+            ok=0; detail="no git checkout rooted at $dir (it is inside $top)"
         else
             local head st_out st_rc
             head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
