@@ -325,3 +325,9 @@ _render_prompt() {
     printf '%s' "$p" | grep -q 'the later one supersedes the earlier'
     printf '%s' "$p" | grep -q 'capture to NEW names'
 }
+
+@test "runtime prompt: a timed-out host-marker wait must not tear down (permissions-gui/25)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'TIMEOUT path'
+    printf '%s' "$p" | grep -q 'Gate cleanup on a host marker'
+}

@@ -755,7 +755,18 @@ Rules:
   (\`await_file\` on a path you \`touch\` with a separate vm-exec after the
   capture/click), and read guest progress from files with separate short
   vm-exec calls. Never let the driver reach its teardown before the last
-  frame the scenario asks for has been captured.
+  frame the scenario asks for has been captured -- and that includes the
+  TIMEOUT path: if a wait for a host marker times out, the driver must write a
+  failure marker and STOP, leaving the app and requests in place, not fall
+  through to (or trap into) cleanup. A timed-out wait that tears down makes the
+  late capture a black frame of a killed app (permissions-gui/25, 2026-09-23
+  rerun: EXIT-trap cleanup killed the admin app at 08:31:36, captures 08:35).
+  Gate cleanup on a host marker you create only after your last capture. And
+  never start a
+  second driver while the first one's guest shell may still be alive: two
+  drivers sharing \`bg_start\` tags clobber each other's logs (permissions-gui/06,
+  2026-09-23 rerun: a surviving first driver re-ran \`bg_start work2\` and
+  emptied the second driver's work2 log).
 - Exit code follows the verdict, and the harness is strict about it:
   - PASS — every required assertion passed. Exit 0.
   - SKIP — exit 0, with \`SKIP <reason>\` in status.txt. A SKIP recorded with a
