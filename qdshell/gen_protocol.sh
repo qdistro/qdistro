@@ -12,10 +12,10 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-# Default: sibling compositor/qdwin/qdwin-shell-v1.xml (in-tree layout).
+# Default: the monorepo's qdwin/qdwin/qdwin-shell-v1.xml (in-tree layout).
 # Override via QDWIN_PROTO_XML when running from an installed copy of
 # qdshell that's been split off from the source tree.
-protocol_xml="${QDWIN_PROTO_XML:-$here/../qdwin/qdwin-shell-v1.xml}"
+protocol_xml="${QDWIN_PROTO_XML:-$here/../qdwin/qdwin/qdwin-shell-v1.xml}"
 nested_xml="${QDWIN_NESTED_XML:-$(dirname "$protocol_xml")/qdwin-nested-v1.xml}"
 wayland_xml="/usr/share/wayland/wayland.xml"
 out="$here/protocol"

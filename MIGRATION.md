@@ -43,6 +43,13 @@ Mark that range `git bisect skip`:
 
     git bisect skip ab7983511e74^..4eb26dec45f1
 
+Two harness tests stayed broken by the migration a little longer: the qdbrowser
+VM bats (repo-root resolver, fixed in `6dd845279`) and `kiwi-ci-base.bats`
+case 10 (log anchor, fixed in `2b775479a`). When bisecting with either of
+them, also skip up to the fix:
+
+    git bisect skip 4eb26dec45f1..2b775479a^
+
 ## What changed in the layout
 
 - qci (`ci/bin/qci`) resolves components in-tree: `WORKSPACE` is the repo
