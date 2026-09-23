@@ -237,6 +237,43 @@ EOF
     chmod 0755 /usr/local/bin/qnotebook
 fi
 
+# ---- 1c. Install qdbrowser (+ PyQt6-WebEngine) -----------------------------
+# qdbrowser's own VM bats (qdbrowser/tests/integration/vm/*.bats) run
+# `python3 -m qdbrowser` and `cd /opt/qdbrowser && python3 tests/integration/
+# scenarios/runner.py ...`, and ci/lib/gates/bats.sh gates them on
+# `python3 -c "import qdbrowser, PyQt6.QtWebEngineWidgets"`. Nothing ever
+# installed either, so every golden failed that probe and both files were a
+# permanent SKIP (full-20260922T193137Z-881799). The kiwi image ships PyQt6
+# but not the WebEngine binding; the pinned snapshot names it
+# <pyprefix>-PyQt6-WebEngine (verified on history/20260902). When the tarball
+# is staged the dependency is required, so a missing package fails the
+# bootstrap closed instead of reappearing as a quiet skip.
+if [ -f "$SRC/qdbrowser/pyproject.toml" ]; then
+    log "installing qdbrowser (+ PyQt6-WebEngine)..."
+    QDB_PY_PREFIX=$(python3 -c 'import sys; print(f"python{sys.version_info.major}{sys.version_info.minor}")')
+    QDB_ZYPPER_LOG=/tmp/qdbrowser-zypper-install.log
+    if ! zypper -n install --no-recommends \
+            "$QDB_PY_PREFIX-PyQt6" "$QDB_PY_PREFIX-PyQt6-WebEngine" \
+            "$QDB_PY_PREFIX-jeepney" "$QDB_PY_PREFIX-pip" \
+            >"$QDB_ZYPPER_LOG" 2>&1; then
+        log "  ERROR: zypper install of qdbrowser deps ($QDB_PY_PREFIX-PyQt6-WebEngine) failed"
+        tail -80 "$QDB_ZYPPER_LOG" | sed 's/^/[bootstrap]   zypper: /'
+        exit 3
+    fi
+    # Source tree at /opt/qdbrowser: the bats scenarios run its
+    # tests/integration/scenarios/ runner from there (QDBROWSER_SRC default).
+    rm -rf /opt/qdbrowser
+    install -d -m 0755 /opt/qdbrowser
+    cp -a "$SRC/qdbrowser/." /opt/qdbrowser/
+    # Importable from any cwd (`python3 -m qdbrowser`); --no-deps because the
+    # deps come from zypper above, never from PyPI wheels.
+    python3 -m pip install --break-system-packages --no-deps --quiet "$SRC/qdbrowser" \
+        || { log "  ERROR: pip install qdbrowser failed"; exit 3; }
+    python3 -c 'import qdbrowser, PyQt6.QtWebEngineWidgets' \
+        || { log "  ERROR: qdbrowser installed but not importable with PyQt6.QtWebEngineWidgets"; exit 3; }
+    log "  qdbrowser installed (/opt/qdbrowser; WebEngine via $QDB_PY_PREFIX-PyQt6-WebEngine)"
+fi
+
 # ---- 2. Build qdwin ------------------------------------------------------
 log "building qdwin (libweston shell plugin)..."
 cd "$SRC/qdwin"
@@ -761,6 +798,16 @@ DBUS
     systemctl daemon-reload || true
     systemctl reload dbus.service 2>/dev/null || systemctl reload dbus-broker.service 2>/dev/null || true
     log "  installed qdistro-fprintd-fake test service"
+
+    # Test-only logind sleep-cycle driver used by qdlocker/tests/gui/04. VMs
+    # have no lid and must not really suspend; the helper makes logind raise
+    # PrepareForSleep with a runtime no-op suspend (see the script header).
+    # The scenario and qdlocker/tests/gui/AGENTS.md always named this path,
+    # but nothing installed it, so 04 was a permanent SKIP.
+    install -m 0755 -o root -g root \
+        "$SRC/qdistro/scripts/vm/assets/qdistro-fake-lid-close" \
+        /usr/local/bin/qdistro-fake-lid-close
+    log "  installed /usr/local/bin/qdistro-fake-lid-close test helper"
 
     runuser -l admin -c 'systemctl --user daemon-reload' || true
     runuser -l admin -c 'systemctl --user enable qdlocker.service' || true
