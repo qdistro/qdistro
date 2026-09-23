@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdlocker"
+version = "0.1.0"
+description = "qdistro screen locker — Qt/QML peer client to qdwin"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.6",
+    "dbus-next>=0.2.3",
+    "python-pam>=2.0",
+    # TOML is read via the 3.11+ stdlib `tomllib` — no third-party
+    # dependency needed (and avoiding `toml>=0.10.0`, which is
+    # unmaintained on PyPI).
+    # Pin <0.5 — pywayland's pre-1.0 API has changed between minor
+    # releases (e.g. dispatcher signature, registry binding). The
+    # scanner output we ship under qdlocker/protocol/ targets the
+    # 0.4.x API.
+    "pywayland>=0.4.18,<0.5",
+]
+
+[project.scripts]
+qdlocker = "qdlocker.app:main"
+
+[tool.setuptools.packages.find]
+include = ["qdlocker*"]
+
+[tool.setuptools.package-data]
+# Ship the QML + the auto-generated protocol module with the wheel.
+# Globs are relative to the package directory (`qdlocker/`), so
+# `qml/...` resolves to `qdlocker/qml/...`. Earlier drafts used
+# `../qml/**/*.qml` — setuptools silently drops paths that escape
+# the package, so the wheel shipped no QML at all.
+qdlocker = [
+    "qml/*.qml",
+    "qml/qmldir",
+    # The `shim` QML module (Main.qml does `import shim`). Without these the
+    # installed wheel ships Main.qml but not its shim/ dependency, so QML load
+    # fails at runtime ("module shim is not installed") and qdlocker crash-loops.
+    # Explicit subdir globs — not `qml/**`, which setuptools handles
+    # inconsistently (see note above).
+    "qml/shim/*.qml",
+    "qml/shim/qmldir",
+    "protocol/qdwin_locker_v1/*.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+pythonpath = ["."]
+# pytest-qt otherwise auto-imports PySide6 first if it's installed
+# anywhere on the path, which loads PySide6's bundled libQt6Core.so
+# and then breaks the subsequent PyQt6 import with a missing
+# Qt_*_PRIVATE_API symbol error.
+qt_api = "pyqt6"
+# Opt-in marker for security-critical tests. The failure hook in
+# tests/unit/conftest.py surfaces protects/severity/cheats/consequence
+# on FAILURE only; the marker is inert on pass. See tests/AGENTS.md.
+markers = [
+    "cheat_aware(protects, severity, cheats, consequence): security-critical test; on failure prints what capability it protects, how the test could be cheated green, and the consequence of a false pass.",
+]

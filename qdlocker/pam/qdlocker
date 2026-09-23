@@ -1,0 +1,31 @@
+#%PAM-1.0
+# qdlocker — screen-unlock PAM service. Dedicated (not `login`) so the unlock
+# policy is explicit and decoupled from console-login semantics, and enforces
+# an explicit brute-force lockout via pam_faillock (deny=5, unlock_time=10).
+#
+# Stack shape (verified end-to-end on Tumbleweed via the qdlocker-faillock VM
+# test — do NOT "simplify" without re-running it):
+#   - `preauth` denies the auth phase while the account is locked. python-pam
+#     calls pam_authenticate(), so the lockout MUST be enforced here in the
+#     auth phase (pam_acct_mgmt is not reliably called by the unlock path).
+#   - We invoke pam_unix DIRECTLY rather than `include common-auth`. openSUSE's
+#     common-auth is `auth required pam_unix.so` (NOT `sufficient`), so a plain
+#     `include`/`substack` does not short-circuit on success and falls through
+#     to the `authfail [default=die]` line below — which rejects the CORRECT
+#     password and bricks the locker. The `[success=1 default=bad]` control
+#     makes a successful pam_unix jump over `authfail` straight to `authsucc`;
+#     a failure falls through to `authfail`. (qdistro is single-tenant with
+#     local accounts, so pam_unix is the authentication method; mirror
+#     common-auth's `pam_unix.so try_first_pass` line if it changes.)
+#   - `authfail` records a failed attempt (and `[default=die]` ends the stack).
+#   - `authsucc` is reached only on a successful password; being `sufficient`
+#     it returns success AND clears the tally, so a correct password before the
+#     deny threshold resets the counter (no slow lockout accumulation).
+#   - `pam_deny` is the catch-all so nothing falls off the end open.
+auth     required                pam_faillock.so preauth  deny=5 unlock_time=10
+auth     [success=1 default=bad] pam_unix.so try_first_pass
+auth     [default=die]           pam_faillock.so authfail deny=5 unlock_time=10
+auth     sufficient              pam_faillock.so authsucc deny=5 unlock_time=10
+auth     required                pam_deny.so
+account  required                pam_faillock.so
+account  include                 common-account

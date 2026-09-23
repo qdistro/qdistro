@@ -1,0 +1,162 @@
+[Unit]
+Description=qdistro screen locker (qdlocker)
+Documentation=https://github.com/qdistro/qdlocker
+# Peer to the shell — comes up alongside it, not after it (qdshell may be
+# slow to start; the locker must not be blocked behind it). Wants= keeps the
+# historical graphical-session.target pull-in.
+Wants=graphical-session.target
+#
+# SESSION SCOPE — qdlocker only runs inside a qdwin session. It binds the
+# qdwin-only qdwin_locker_v1 global on the pinned WAYLAND_DISPLAY below, so on
+# any other compositor (the labwc/lxqt admin CI lane on wayland-0, a bare
+# default.target with no desktop) it cannot possibly work. Enabling it under
+# default.target used to start it in exactly those sessions, where it
+# crash-looped every RestartSec forever ("Failed to create wl_display", ~30
+# restarts/min, a coredump each, journald dropping the session's messages).
+#
+#   - Requisite=qdwin-compositor.service: start ONLY if the qdwin compositor
+#     is already active (or being started in the same transaction, e.g. by
+#     qdwin-session.target). Never pulls the compositor in (unlike Requires=/
+#     BindsTo=, a stray `start qdlocker` in a labwc session cannot drag qdwin
+#     up to race the other compositor for the seat); if it is not running the
+#     start fails once with result "dependency" and is NOT auto-restarted.
+#   - After=qdwin-compositor.service: required for Requisite= to be evaluated
+#     after the compositor's start job, and so qdwin_locker_v1 is advertised
+#     before we connect (the ExecStartPre socket wait covers the Type=simple
+#     compositor's socket-creation gap).
+#   - PartOf=qdwin-compositor.service: a compositor stop/restart stops/restarts
+#     the locker cleanly instead of leaving it to crash on a dead socket.
+#
+# Enablement: WantedBy=qdwin-session.target only (see the Install section).
+Requisite=qdwin-compositor.service
+PartOf=qdwin-compositor.service
+After=graphical-session.target qdwin-compositor.service
+#
+# UNBOUNDED RESTART, on purpose. Restart=always (below) with the start limit
+# disabled: the locker is the thing that lets a locked session unlock, and a
+# unit parked in start-limit-hit is never restarted again by systemd (the
+# limit window expiring does not schedule a new start). A parked locker while
+# locked strands the session behind qdwin's fail-secure curtain; while
+# unlocked, the next lock has no locker. So the unit must keep retrying for
+# as long as the qdwin session lives. The labwc crash loop this unit once
+# caused is prevented by SESSION SCOPE above (Requisite= fails once, with
+# result "dependency", which Restart= does not retry), not by a start limit.
+# (A finite 10/60 s limit was tried on fix/qci-260923-lockerloop and dropped
+# after review: todo/reviews/qci-260923-fixes-sol-review.md item 1.)
+StartLimitIntervalSec=0
+
+[Service]
+# Type=simple — we don't sd_notify until a later iteration wires the
+# READY=1 + STATUS= path. Earlier drafts used Type=notify but the
+# process never notified, so systemd held the unit `activating` until
+# TimeoutStartSec.
+Type=simple
+# Wait (bounded, ~10 s) for the compositor's socket: qdwin-compositor is
+# Type=simple, so it is "active" before wayland-1 exists, and Qt's wayland
+# plugin qFatals if the socket is not there yet. Mirrors qdshell.service's
+# ExecStartPre. Uses the WAYLAND_DISPLAY / XDG_RUNTIME_DIR pinned below;
+# `$$` is systemd's escape for a literal `$` so the shell, not systemd,
+# expands them.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -S "$$XDG_RUNTIME_DIR/$$WAYLAND_DISPLAY" ]; do i=$$((i+1)); [ $$i -gt 40 ] && exit 1; sleep 0.25; done'
+# CANONICAL ExecStart for an unprefixed `pip install` (--prefix=/usr/local).
+# qdistro's installers pip-install qdlocker with --prefix=/usr, which lands the
+# console_script at /usr/bin/qdlocker, so BOTH installers MUST rewrite this line
+# rather than copy the unit verbatim:
+#   - qdistro/scripts/install/qdistro-bootstrap.sh (sed /usr/local/bin -> /usr/bin)
+#   - qdistro/image/config.sh                      (same sed; fail-closed if the
+#                                                    rewritten ExecStart is not
+#                                                    an executable in the image)
+# Copying this unit verbatim into a --prefix=/usr install makes qdlocker.service
+# die 203/EXEC at boot — the locker silently never starts. Do NOT repoint this
+# at /usr/bin here: that would break the standalone --prefix=/usr/local path and
+# the installers' sed contract. The installers are authoritative for the
+# deployed ExecStart path.
+ExecStart=/usr/local/bin/qdlocker
+Environment=QT_QPA_PLATFORM=wayland
+# Belt-and-suspenders for the software scene-graph backend that app.py already
+# forces via QQuickWindow.setGraphicsApi(Software): a lock screen must render an
+# opaque frame even where hardware GL is missing/broken (GPU-less / software-GL
+# VMs have produced a transparent lock buffer under the default backend). The
+# app.py call is authoritative; this env is a fallback in case of a launch path
+# that bypasses it.
+Environment=QT_QUICK_BACKEND=software
+Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
+# PYTHONNOUSERSITE=1: refuse to load user-site shims (a malicious
+# ~/.local/.../site-packages/pam.py would otherwise shadow the system
+# python-pam at import time). PYTHONPATH override removed — the
+# packaged qdlocker is installed at a system-Python-discoverable
+# location; hardcoding /usr/lib/python3.11 broke on Python 3.13.
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Dedicated /etc/pam.d/qdlocker service (shipped from this repo's pam/
+# dir): it `include`s common-account for well-formed account management
+# (a standalone common-auth fragment fails account management on its own)
+# and adds an explicit pam_faillock brute-force lockout. Decoupling from
+# the borrowed `login` stack makes the unlock policy explicit.
+Environment=QDLOCKER_PAM_SERVICE=qdlocker
+# Pin WAYLAND_DISPLAY + XDG_RUNTIME_DIR explicitly: the test-VM linger
+# session doesn't import them into the user manager environment, so we
+# set them here, mirroring qdshell.service.
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# TCB no-network discipline — DELIBERATELY NOT enforced from this --user unit.
+# qdlocker talks to qdwin, its ctrl socket, logind/fprintd/PAM, and systemd
+# notify over AF_UNIX/system facilities only; it has no legitimate IP/vsock
+# egress path. But NO systemd unit primitive can enforce that here without
+# breaking unlock, because qdlocker authenticates via pam_unix.so, which execs
+# the setuid-root helper /usr/sbin/unix_chkpwd to read /etc/shadow. ALL of these
+# were tried and PROVEN broken/ineffective live (qdlocker gui 01-lock-cycle /
+# 06-shell-crash-survives, openSUSE Tumbleweed, uid-1000 user@1000 manager):
+#
+#   - PrivateNetwork=yes: an unprivileged per-user manager can't make a private
+#     netns the privileged way, so systemd implies PrivateUsers= and wraps the
+#     service in a rootless USER NAMESPACE with host root UNMAPPED (overflow
+#     65534). unix_chkpwd then can't elevate → runs as uid 1000 → shadow read
+#     fails → "check pass; user unknown" → correct password rejected.
+#   - RestrictAddressFamilies=... : a SECCOMP filter, so systemd IMPLICITLY sets
+#     NoNewPrivileges=yes (verified: the service PID shows NoNewPrivs:1 even
+#     though `systemctl show` reports NoNewPrivileges=no). Under NNP the kernel
+#     ignores unix_chkpwd's setuid bit → SAME "user unknown" failure (PAM code
+#     9). This is what re-broke unlock after PrivateNetwork=yes was removed.
+#   - IPAddressDeny=any / SocketBindDeny= : cgroup-eBPF controls that need BPF
+#     delegation a rootless user manager lacks. Verified a NO-OP here: an
+#     AF_INET connect()+send() from inside an IPAddressDeny=any --user unit was
+#     NOT blocked. Keeping it is cargo-cult — it advertises a property the unit
+#     does not actually have, hiding the gap from review.
+#   - RestrictNetworkInterfaces= : needs netns machinery → same userns problem
+#     class as PrivateNetwork.
+#
+# Conclusion (codex-reviewed gpt-5.5, VM-proven): for a uid-1000 --user service
+# that must run setuid unix_chkpwd on demand at every unlock, in-process egress
+# containment is fundamentally incompatible with a working PAM unlock. Egress
+# containment for qdlocker must live at a layer that CAN enforce it (a system
+# firewall / nftables in the qdistro image, or user@1000 slice policy with the
+# needed cgroup-BPF delegation), NOT this --user unit. Removing these directives
+# does NOT weaken authentication: the locker still runs uid 1000, pam_unix +
+# setuid unix_chkpwd + /etc/shadow + pam_faillock(deny=5) are all intact, and a
+# WRONG password still fails (verified PAM code 7) — only the never-effective
+# in-process egress claim is dropped. See tests/unit/test_session_target.py.
+
+# Finding 07: the unlock password is held in a Python str and cannot be
+# reliably zeroed (CPython limitation). Disable core dumps so a crash cannot
+# spill the plaintext (or the prompt buffer) to disk via systemd-coredump.
+LimitCORE=0
+
+Restart=always
+RestartSec=2
+
+[Install]
+# qdwin-session.target ONLY. It is the qdwin desktop session in every path:
+# production (greetd -> qdwin-session-launcher -> `systemctl --user start
+# qdwin-session.target`), the image (config.sh writes the .wants symlink
+# directly) and the test VMs (fresh-vm-bootstrap enables the target under
+# default.target and `systemctl --user enable qdlocker.service` lands the
+# .wants symlink here). The target also declares Wants=qdlocker.service.
+#
+# default.target was dropped deliberately: it started the locker in sessions
+# with no qdwin (the labwc admin lane), where it crash-looped forever. An
+# older install may still carry a stale default.target.wants/qdlocker.service
+# symlink; Requisite= above makes that a single harmless "dependency" failure
+# instead of a loop, and `systemctl --user reenable qdlocker.service` removes it.
+WantedBy=qdwin-session.target
