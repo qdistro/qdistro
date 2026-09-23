@@ -102,7 +102,10 @@
  *                     Exits 77 (INCONCLUSIVE) when the seat has no pointer:
  *                     begin_interactive_move needs one, and the headless
  *                     backend's synthesized seat has zero capabilities, so
- *                     this mode only has teeth in a VM/DRM session.
+ *                     this mode only has teeth in a VM/DRM session. Even
+ *                     there, libweston 16 advertises the pointer only after
+ *                     a pointer device's first event, so the lane must move
+ *                     the pointer before running this (qdwin_prime_pointer).
  *   --malformed       advertise with empty pw_node + empty input_sink + NULL
  *                     app_id/title (the protocol's "placeholder advertise").
  *                     Assert the compositor still creates a proxy + fires
@@ -1182,7 +1185,10 @@ int main(int argc, char *argv[])
 		if (!p.seat_has_pointer) {
 			fprintf(stderr, "qdwin-nested-probe: no pointer on the "
 				"seat — begin_interactive_move cannot start a "
-				"drag here; this mode needs a VM/DRM session\n");
+				"drag here; this mode needs a VM/DRM session "
+				"whose pointer has moved at least once "
+				"(libweston 16 adds the capability on a "
+				"device's first event)\n");
 			return 77;
 		}
 
@@ -1596,7 +1602,10 @@ int main(int argc, char *argv[])
 		if (!p.seat_has_pointer) {
 			fprintf(stderr, "qdwin-nested-probe: no pointer on the "
 				"seat — show_popup needs a live pointer grab "
-				"serial; this mode needs a VM/DRM session\n");
+				"serial; this mode needs a VM/DRM session "
+				"whose pointer has moved at least once "
+				"(libweston 16 adds the capability on a "
+				"device's first event)\n");
 			return 77;
 		}
 
