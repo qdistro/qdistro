@@ -1,8 +1,3 @@
-<!-- REHEARSAL VALUES (2026-09-23, first rehearsal). At the freeze the sources
-     are re-frozen and the imports re-created, so the Source-commit and
-     Import-commit columns, the last pre-migration commit, the bisect range
-     and the date MUST be re-filled from the execution log before this file
-     is committed for real. -->
 # Monorepo migration (2026-09-23)
 
 Until 2026-09-23 qdistro was an umbrella repository, and its components lived
@@ -12,21 +7,21 @@ history is kept, unrewritten, on a `legacy/multirepo/<name>` branch.
 
 | Directory | Original repository | Source commit | Legacy branch | Import commit | Planned legacy repo |
 |---|---|---|---|---|---|
-| `qdbrowser/` | https://github.com/qdistro/qdbrowser | `997b4f64b04a` | `legacy/multirepo/qdbrowser` | `1c63fa963786` | `qdistro/legacy-qdbrowser` (not yet renamed) |
-| `qdchrome-extension/` | https://github.com/qdistro/qdchrome-extension | `8f7cdf769858` | `legacy/multirepo/qdchrome-extension` | `6634fff52fea` | `qdistro/legacy-qdchrome-extension` (not yet renamed) |
-| `qdfileman/` | https://github.com/qdistro/qdfileman (local dir was `qfileman`) | `920aa45e8e7f` | `legacy/multirepo/qdfileman` | `66357d771190` | `qdistro/legacy-qdfileman` (not yet renamed) |
-| `qdfirefox-extension/` | https://github.com/qdistro/qdfirefox-extension | `d5aa682bdfd1` | `legacy/multirepo/qdfirefox-extension` | `20fd8f007060` | `qdistro/legacy-qdfirefox-extension` (not yet renamed) |
-| `qdgreeter/` | https://github.com/qdistro/qdgreeter | `998b4abcba1c` | `legacy/multirepo/qdgreeter` | `0a8fe825b173` | `qdistro/legacy-qdgreeter` (not yet renamed) |
-| `qdlocker/` | https://github.com/qdistro/qdlocker | `32e04c4d351c` | `legacy/multirepo/qdlocker` | `08b81c424b29` | `qdistro/legacy-qdlocker` (not yet renamed) |
-| `qdshell/` | https://github.com/qdistro/qdshell | `efd42d984db1` | `legacy/multirepo/qdshell` | `6554bb1d2b57` | `qdistro/legacy-qdshell` (not yet renamed) |
-| `qdterm/` | https://github.com/qterminator/qdterm (local dir was `qterminator`) | `9b02fe42a1e6` | `legacy/multirepo/qdterm` | `0f6347423289` | `qterminator/legacy-qdterm` (not yet renamed) |
-| `qdwin/` | https://github.com/qdistro/qdwin | `65b29d9def71` | `legacy/multirepo/qdwin` | `77a14fc11888` | `qdistro/legacy-qdwin` (not yet renamed) |
-| `qnotebook/` | https://github.com/qnotebook/qnotebook | `0b818d8c0150` | `legacy/multirepo/qnotebook` | `8047580bdfc1` | `qnotebook/legacy-qnotebook` (not yet renamed) |
+| `qdbrowser/` | https://github.com/qdistro/qdbrowser | `45e6edc23a1d` | `legacy/multirepo/qdbrowser` | `ab7983511e74` | `qdistro/legacy-qdbrowser` (not yet renamed) |
+| `qdchrome-extension/` | https://github.com/qdistro/qdchrome-extension | `8f7cdf769858` | `legacy/multirepo/qdchrome-extension` | `e3bcdbef6e38` | `qdistro/legacy-qdchrome-extension` (not yet renamed) |
+| `qdfileman/` | https://github.com/qdistro/qdfileman (local dir was `qfileman`) | `920aa45e8e7f` | `legacy/multirepo/qdfileman` | `314268d68a9d` | `qdistro/legacy-qdfileman` (not yet renamed) |
+| `qdfirefox-extension/` | https://github.com/qdistro/qdfirefox-extension | `d5aa682bdfd1` | `legacy/multirepo/qdfirefox-extension` | `6390fe71c23d` | `qdistro/legacy-qdfirefox-extension` (not yet renamed) |
+| `qdgreeter/` | https://github.com/qdistro/qdgreeter | `998b4abcba1c` | `legacy/multirepo/qdgreeter` | `6d85b404069f` | `qdistro/legacy-qdgreeter` (not yet renamed) |
+| `qdlocker/` | https://github.com/qdistro/qdlocker | `2ee75a82143b` | `legacy/multirepo/qdlocker` | `02d58070b1fe` | `qdistro/legacy-qdlocker` (not yet renamed) |
+| `qdshell/` | https://github.com/qdistro/qdshell | `efd42d984db1` | `legacy/multirepo/qdshell` | `fb3f6cfd7e9f` | `qdistro/legacy-qdshell` (not yet renamed) |
+| `qdterm/` | https://github.com/qterminator/qdterm (local dir was `qterminator`) | `9b02fe42a1e6` | `legacy/multirepo/qdterm` | `eebd0b5bca74` | `qterminator/legacy-qdterm` (not yet renamed) |
+| `qdwin/` | https://github.com/qdistro/qdwin | `2838b21ccc18` | `legacy/multirepo/qdwin` | `2deb4a2de0c9` | `qdistro/legacy-qdwin` (not yet renamed) |
+| `qnotebook/` | https://github.com/qnotebook/qnotebook | `0b818d8c0150` | `legacy/multirepo/qnotebook` | `97d840cfe5ff` | `qnotebook/legacy-qnotebook` (not yet renamed) |
 
-Full SHAs, trees and commit counts are in each import commit's trailers
-(`Source-Commit:`, `Source-Tree:`). qdistro's own history continues unchanged
+Full SHAs and trees are in each import commit's trailers
+(`Source-Commit:`, `Source-Tree:`), commit counts in its body. qdistro's own history continues unchanged
 on `main`. The last pre-migration commit is
-`31ce4fe0248ee9d1088cebfb683f16463b3c5d54`.
+`d1d0aee8c3f88b73137b3b8ea266e13ab82174cd`.
 
 `qdterm/` and `qdfileman/` take their GitHub repository names. Their Python
 packages, binaries, desktop IDs and D-Bus names are still `qterminator` and
@@ -46,7 +41,7 @@ The import commits and the layout repairs right after them add components
 while the tree is still wired (wholly or partly) for the old sibling layout.
 Mark that range `git bisect skip`:
 
-    git bisect skip 1c63fa963786^..379d6e015
+    git bisect skip ab7983511e74^..4eb26dec45f1
 
 ## What changed in the layout
 
