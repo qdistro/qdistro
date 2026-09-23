@@ -220,9 +220,12 @@ colour).
 # OCR-find the terminal; click its content area.
 $VMGUI "$VM" click <cx> <cy>
 sleep 0.3
-$VMEXEC "$VM" 'runuser -u admin -- ydotool type "echo from-tier5-vm"'
+# Live socket is /run/user/1000/ydotool.sock (see 19); bare ydotool defaults
+# to /tmp/.ydotool_socket and cannot inject. ydotool 1.x `key` takes raw
+# <code>:<state> keycodes — the name `enter` is silently ignored. 28 = KEY_ENTER.
+$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool type "echo from-tier5-vm"'
 sleep 0.2
-$VMEXEC "$VM" 'runuser -u admin -- ydotool key enter'
+$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock ydotool key 28:1 28:0'
 sleep 1
 $VMGUI "$VM" screenshot /tmp/s20-typed.png
 ```

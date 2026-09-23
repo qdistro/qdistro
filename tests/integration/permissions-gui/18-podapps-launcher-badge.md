@@ -40,6 +40,11 @@ $VMEXEC "$VM" 'timeout 240 runuser -u admin -- bash -c "
         || bash /root/qdistro-src/qdistro/tier2/make-tier2-image.sh weston-terminal"' \
   || { echo "FAIL(setup): tier-2 image build/check exceeded 240s or failed"; exit 1; }
 # Hard-assert the image now exists, so S1 only does the (fast) spawn+scan.
+# Tier-2 images live in ADMIN's ROOTLESS podman store by design (spawn-tier2.sh
+# runs every podman call as admin; fresh-vm-bootstrap pre-builds via
+# `runuser -u admin`). root's store never holds them — keep the `runuser -u
+# admin --` on every podman check (full-20260922T193137Z-881799: a transcription
+# that dropped it asserted the root store and ERRORed a healthy VM).
 $VMEXEC "$VM" 'runuser -u admin -- podman image exists qdistro/tier2-weston-terminal:latest' \
   || { echo "FAIL(setup): qdistro/tier2-weston-terminal:latest missing after build"; exit 1; }
 
