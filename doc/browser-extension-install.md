@@ -30,7 +30,7 @@ table is a summary, not an exhaustive install record):
 | `/usr/libexec/qdistro/qdistro_browser_bridge.py` | the bridge itself |
 | `/usr/libexec/qdistro/qdistro_browser_install.py` | the manifest writer |
 | `/usr/local/bin/qdistro-browser-install` | CLI front for the above |
-| `/usr/share/qdistro/browser-extension/{chromium,firefox}/` | source of the two maintained extensions, staged from the pinned repos and gate-checked at install time (J11) — this **is** what this page builds from |
+| `/usr/share/qdistro/browser-extension/{chromium,firefox}/` | source of the two maintained extensions, staged from the pinned qdistro checkout and gate-checked at install time (J11) — this **is** what this page builds from |
 
 It does **not** install any extension into any browser profile, and it
 writes no packed artifact: there is no `/usr/share/qdistro/extensions/`
@@ -48,11 +48,14 @@ install rather than being staged (exit 4).
 
 ### Where the extension source comes from
 
-The bootstrap clones `qdchrome-extension` and `qdfirefox-extension` into the
-source root as **optional, source-only** repos, and in a hardened profile
-`verify_repo_pin` checks each clone out at the commit the signed release
-manifest pins (see [release-signing.md](release-signing.md)). Nothing is
-built or root-installed from those trees.
+Both extensions are directories of the one qdistro repository:
+`qdchrome-extension/` and `qdfirefox-extension/`. The bootstrap clones that
+repository into the source root (`/opt/qdistro-src`), and in a hardened
+profile `verify_repo_pin` checks the clone out at the commit the signed
+release manifest pins (see [release-signing.md](release-signing.md)). The
+manifest has exactly one pin, `qdistro <sha>`, and that commit covers every
+component, the extensions included. Nothing is built or root-installed from
+the extension directories.
 
 Be precise about what that buys you, because the next section depends on it:
 
@@ -61,30 +64,29 @@ Be precise about what that buys you, because the next section depends on it:
   the tree root-owned afterwards (`assert_trusted_tree`). What it does **not**
   do is re-run when you later build — so the recipe below re-checks HEAD and
   cleanliness itself, immediately before exporting.
-- Because these repos are **optional**, a failed clone warns and the install
-  continues — you then simply have no extension source and no browser
-  integration. Under `--skip-sources` only *present* checkouts are pin-
-  verified, so an absent extension repo is not an install failure either.
-- When a clone *does* succeed in a hardened profile, a manifest with no pin
-  for that repo is fatal. `gen-source-manifest.sh` emits both repos, so a
-  generated release manifest is complete by construction; a hand-written one
-  must include them (or the install must run `--profile=dev`).
+- The extensions are no longer separate, optional repositories: if the
+  qdistro checkout is present and verified, so is their source. A hardened
+  install (with or without `--skip-sources`) refuses a source root that is not
+  a git checkout at the pin, so a verified install always has it.
+- A hand-written release manifest needs only the `qdistro` line.
+  `gen-source-manifest.sh` emits exactly that, and the manifest linter
+  rejects the old per-component lines (`qdchrome-extension <sha>`, ...).
 
 ### Build from a clean export, as your own user
 
 The bootstrap runs as root and the source root it creates is root-owned,
 while both build scripts write `dist/` **inside the source tree** — so do not
 build in place, and do not build as root. Verify the manifest, verify the
-checkout against it, export that exact commit into a fresh directory you own,
-and build there. The script below is fail-closed: every check aborts.
+checkout against it, export that extension's directory at that exact commit
+into a fresh directory you own, and build there. The script below is
+fail-closed: every check aborts.
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 
-REPO=qdchrome-extension          # or qdfirefox-extension
-SRC=/opt/qdistro-src/$REPO
-QD=/opt/qdistro-src
+COMP=qdchrome-extension          # or qdfirefox-extension
+QD=/opt/qdistro-src              # the one qdistro checkout (repository root)
 
 # The PUBLISHED manifest + detached signature + release keyring you were
 # given (the bootstrap can be pointed elsewhere via QDISTRO_SOURCE_MANIFEST /
@@ -99,30 +101,34 @@ SIGNER=<40-hex-release-key-fingerprint>
 "$QD/scripts/install/verify-source-manifest.sh" \
     "$MANIFEST" "$SIG" "$KEYRING" "$SIGNER"
 
-# 2. Exactly one pin for this repo, and the checkout is AT it and CLEAN.
-#    $SRC is ROOT-owned (the bootstrap cloned it), and git refuses to touch a
-#    repository owned by someone else — hence `-c safe.directory`, which is
-#    honoured in the command scope. `--no-optional-locks` keeps `status` from
-#    trying to refresh an index it cannot write.
-git_src() { git --no-optional-locks -c safe.directory="$SRC" -C "$SRC" "$@"; }
+# 2. Exactly one `qdistro` pin, and the checkout is AT it and CLEAN.
+#    $QD is ROOT-owned (the bootstrap cloned it), and git refuses to touch a
+#    repository owned by someone else — hence `-c safe.directory`, scoped to
+#    exactly this repository root and honoured in the command scope.
+#    `--no-optional-locks` keeps `status` from trying to refresh an index it
+#    cannot write.
+git_qd() { git --no-optional-locks -c safe.directory="$QD" -C "$QD" "$@"; }
 
-PIN=$(awk -v r="$REPO" '/^[[:space:]]*#/{next} $1==r{print $2}' "$MANIFEST")
+[ "$(git_qd rev-parse --show-toplevel)" = "$QD" ] \
+    || { echo "$QD is not the root of a git checkout" >&2; exit 1; }
+PIN=$(awk '/^[[:space:]]*#/{next} $1=="qdistro"{print $2}' "$MANIFEST")
 [ "$(printf '%s\n' "$PIN" | grep -c .)" -eq 1 ] \
-    || { echo "no unique pin for $REPO in $MANIFEST" >&2; exit 1; }
+    || { echo "no unique qdistro pin in $MANIFEST" >&2; exit 1; }
 printf '%s' "$PIN" | grep -qE '^[0-9a-f]{40}$' \
-    || { echo "pin for $REPO is not a 40-hex sha" >&2; exit 1; }
-[ "$(git_src rev-parse HEAD)" = "$PIN" ] \
-    || { echo "$SRC HEAD is not the pinned commit" >&2; exit 1; }
-[ -z "$(git_src status --porcelain)" ] \
-    || { echo "$SRC has modified or untracked files" >&2; exit 1; }
+    || { echo "the qdistro pin is not a 40-hex sha" >&2; exit 1; }
+[ "$(git_qd rev-parse HEAD)" = "$PIN" ] \
+    || { echo "$QD HEAD is not the pinned commit" >&2; exit 1; }
+[ -z "$(git_qd status --porcelain)" ] \
+    || { echo "$QD has modified or untracked files" >&2; exit 1; }
 
-# 3. Export that commit into a FRESH directory you own, and build there.
-#    (A reused directory is not a clean export: `git archive | tar -x`
-#    overwrites archived paths but leaves stale extra files behind, and both
-#    build scripts glob src/modules/*.js, src/content/*.js and icons/*.)
+# 3. Export the extension's directory at that commit into a FRESH directory
+#    you own, and build there. (A reused directory is not a clean export:
+#    `git archive | tar -x` overwrites archived paths but leaves stale extra
+#    files behind, and both build scripts glob src/modules/*.js,
+#    src/content/*.js and icons/*.)
 OUT=$(mktemp -d "$HOME/qdistro-ext.XXXXXX")
-git_src archive "$PIN" | tar -x -C "$OUT"
-cd "$OUT" && bash scripts/build-extension.sh
+git_qd archive "$PIN" "$COMP" | tar -x -C "$OUT"
+cd "$OUT/$COMP" && bash scripts/build-extension.sh
 ```
 
 The browser performs no qdistro artifact check when you load the result, so
@@ -139,7 +145,7 @@ verify against, and what you are trusting is your own copy of the source.
 | Chromium | `qdchrome-extension` | Chromium family (MV3) | `ammgnkddbnjdhikklpljgiclldedgncf` |
 
 Both are staged for you under `/usr/share/qdistro/browser-extension/` — but
-build from a verified export of the pinned repo as described above, not from
+build from a verified export of the pinned commit as described above, not from
 the root-owned staged copy.
 
 > **There used to be a third — do not go looking for it.** A *bundled* Firefox
