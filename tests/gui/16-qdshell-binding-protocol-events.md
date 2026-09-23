@@ -77,24 +77,56 @@ qdwin_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
 ### Step 1 — bind handshake visible in journal
 
-Restart qdshell so the bind happens after our cursor:
+Restart qdshell so the bind happens after our cursor. **The cursor MUST be
+taken BEFORE the restart** — the bind lands within ~1s of the restart, so a
+cursor read after the restart (or after any sleep following it) sits past
+both lines and the asserts read an empty window. That is exactly how
+full-20260922T193137Z-881799 recorded a false 1.1/1.2 FAIL: the runner took
+the cursor after `restart` + `sleep 8`, while the compositor journal shows
+`bind accepted for uid=1000` and the QML `bound v34` line both logged ~1s
+after the restart. Run this block as written; do not reorder it.
 
 ```bash
 CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
   --show-cursor --no-pager 2>/dev/null | tail -1 | sed 's/^-- cursor: //'")
+[ -n "$CURSOR" ] || { echo "ERROR: could not read a journal cursor before the restart"; exit 1; }
 "$QDWIN_VM_EXEC" "$VMNAME" \
     "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 \
      systemctl --user restart qdshell.service'"
-sleep 8
+
+# Poll (bounded, ~20s) for BOTH lines after the pre-restart cursor. The greps
+# are scoped by `_UID=1000`, which excludes qemu-ga's own `guest-exec called`
+# echo of this command (qemu-ga runs as root), so the pattern text cannot
+# match itself. Keep journalctl's default (short) output: Quickshell writes
+# ANSI colour codes INTO the message (`Qdwin\e[0m qdwin_shell_v1 bound v34`),
+# which short output strips and `-o cat` does not — so `-o cat` breaks the
+# 1.2 pattern.
+BIND_LINE= BOUND_LINE=
+for _ in $(seq 1 40); do
+    J=$("$QDWIN_VM_EXEC" "$VMNAME" \
+        "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager 2>/dev/null | \
+         grep -E 'qdwin: bind accepted for uid=1000|Qdwin +qdwin_shell_v1 bound v[0-9]+'") || :
+    # `|| :` on each: no match yet is the normal first iterations, and must
+    # not abort a runner that uses `set -e` before the poll has had its 20s.
+    BIND_LINE=$(printf '%s\n' "$J" | grep -m1 'qdwin: bind accepted for uid=1000') || :
+    BOUND_LINE=$(printf '%s\n' "$J" | grep -m1 -E 'Qdwin +qdwin_shell_v1 bound v[0-9]+') || :
+    [ -n "$BIND_LINE" ] && [ -n "$BOUND_LINE" ] && break
+    sleep 0.5
+done
+BOUND_V=$(printf '%s' "$BOUND_LINE" | sed -nE 's/.*qdwin_shell_v1 bound v([0-9]+).*/\1/p')
+echo "1.1: ${BIND_LINE:-<absent>}"
+echo "1.2: ${BOUND_LINE:-<absent>} (version=${BOUND_V:-?})"
 ```
 
-**Assert (1.1):** `qdwin: bind accepted for uid=1000` appears in
-the journal after `$CURSOR`.
+**Assert (1.1):** `$BIND_LINE` is non-empty — `qdwin: bind accepted for
+uid=1000` appears in the journal after `$CURSOR`.
 
-**Assert (1.2):** `INFO qml: ... Qdwin qdwin_shell_v1 bound v14`
-appears in the journal after `$CURSOR`. (Both lines must appear —
-qdwin's confirms the server saw the request, the QML one confirms
-the plugin loaded and dispatched the `hello` event up to QML.)
+**Assert (1.2):** `$BOUND_LINE` is non-empty and `$BOUND_V` is an integer
+**>= 14** — the QML `INFO qml: ... Qdwin qdwin_shell_v1 bound v<N>` line.
+The version is whatever the plugin negotiated (34 on the 2026-09 goldens);
+the requirement is the floor, NOT a literal `v14`. (Both lines must appear —
+qdwin's confirms the server saw the request, the QML one confirms the
+plugin loaded and dispatched the `hello` event up to QML.)
 
 ### Step 2 — toplevel_added reaches QML
 

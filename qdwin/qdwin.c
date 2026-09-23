@@ -7508,6 +7508,49 @@ qdwin_hide_non_lock_layers(struct qdwin *qdwin)
 		weston_layer_unset_position(&qdwin->layer_shell_layer[i]);
 }
 
+/* Re-map every view a lock left UNMAPPED inside a layer that is visible
+ * again, preserving the layer's stacking order.
+ *
+ * While locked the non-lock layers are unset (no position), and
+ * weston_view_move_to_layer() into an unpositioned layer INSERTS the view
+ * into the layer's list but leaves it unmapped (layer_is_visible() is
+ * false). Re-positioning the layer on unlock does not re-map anything, so
+ * every surface that mapped DURING the lock — above all a qdshell that
+ * crashed and was respawned while locked, whose wallpaper/bar/background
+ * layer surfaces all map then — stays unmapped forever: libweston skips it
+ * ("Detected an unmapped surface or view in the layer list") and the
+ * unlocked desktop is black (qdlocker/tests/gui/06, full run 2026-09-22).
+ *
+ * weston_view_move_to_layer() inserts at the TOP of the layer, so taking
+ * the current BOTTOM view N times and re-inserting it on top rebuilds the
+ * list in its original order while mapping each view via the stock path
+ * (geometry dirty, transform update, map_signal). Views that were already
+ * mapped only get re-inserted in place. */
+static void
+qdwin_layer_remap_after_unlock(struct weston_layer *layer)
+{
+	struct weston_view *view;
+	bool any_unmapped = false;
+	int n;
+
+	wl_list_for_each(view, &layer->view_list.link, layer_link.link) {
+		if (!weston_view_is_mapped(view)) {
+			any_unmapped = true;
+			break;
+		}
+	}
+	if (!any_unmapped)
+		return;
+
+	n = wl_list_length(&layer->view_list.link);
+	for (int i = 0; i < n; i++) {
+		struct weston_layer_entry *bottom =
+			wl_container_of(layer->view_list.link.prev, bottom, link);
+		view = wl_container_of(bottom, view, layer_link);
+		weston_view_move_to_layer(view, &layer->view_list);
+	}
+}
+
 static void
 qdwin_show_non_lock_layers(struct qdwin *qdwin)
 {
@@ -7527,6 +7570,23 @@ qdwin_show_non_lock_layers(struct qdwin *qdwin)
 	weston_layer_set_position(&qdwin->layer_shell_layer[2], QDWIN_LAYER_POS_LSHELL_TOP);
 	weston_layer_set_position(&qdwin->layer_shell_layer[3],
 				  WESTON_LAYER_POSITION_TOP_UI);
+
+	qdwin_layer_remap_after_unlock(&qdwin->background_layer);
+	qdwin_layer_remap_after_unlock(&qdwin->normal_layer);
+	qdwin_layer_remap_after_unlock(&qdwin->panel_layer);
+	qdwin_layer_remap_after_unlock(&qdwin->notification_layer);
+	qdwin_layer_remap_after_unlock(&qdwin->launcher_layer);
+	qdwin_layer_remap_after_unlock(&qdwin->popup_layer);
+	for (int i = 0; i < 4; i++)
+		qdwin_layer_remap_after_unlock(&qdwin->layer_shell_layer[i]);
+
+	/* Layer (un)positioning neither damages nor rebuilds the view list,
+	 * and the pixman/DRM path repaints only damaged regions — so without
+	 * this the scanout keeps showing the LOCK UI after unlock until some
+	 * unrelated damage lands (observed: virsh scanout still showed the
+	 * password dots after locked=False). Repaint the whole desktop. */
+	qdwin->compositor->view_list_needs_rebuild = true;
+	weston_compositor_damage_all(qdwin->compositor);
 }
 
 static void

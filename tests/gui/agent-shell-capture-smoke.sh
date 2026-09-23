@@ -85,7 +85,7 @@ if grep -q "interface: 'weston_capture_v1'" <<<"$secctx_info"; then
 fi
 pass "SECCTX client cannot discover weston_capture_v1"
 
-admin_reply=$(vm_exec "runuser -u admin -- bash -c \"printf 'capture Virtual-1 /run/user/1000/capture-admin.png\\n' | socat -T 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock\"")
+admin_reply=$(vm_exec "runuser -u admin -- bash -c \"printf 'capture Virtual-1 /run/user/1000/capture-admin.png\\n' | socat -T 2 -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock\"")
 case "$admin_reply" in
     *"error: capture requires authenticated root peer"*) ;;
     *) fail "same-uid ctrl peer was not denied: $admin_reply" ;;
@@ -95,9 +95,9 @@ pass "qdshell capture IPC denies a same-uid confused-deputy request"
 # Anything that is not the single designated output (Virtual-1) is refused
 # up front — absent names and PipeWire forwards alike. The compositor
 # authority enforces the same exact-name pin independently.
-bad_reply=$(vm_exec "printf 'capture absent-output /run/user/1000/capture-bad.png\\n' | socat -T 10 - UNIX-CONNECT:/run/user/1000/qdshell.sock")
+bad_reply=$(vm_exec "printf 'capture absent-output /run/user/1000/capture-bad.png\\n' | socat -T 10 -t 10 - UNIX-CONNECT:/run/user/1000/qdshell.sock")
 case "$bad_reply" in *"error: refusing capture of non-designated output"*) ;; *) fail "wrong output did not fail: $bad_reply" ;; esac
-pipe_reply=$(vm_exec "printf 'capture pipewire-0 /run/user/1000/capture-pipewire.png\\n' | socat -T 10 - UNIX-CONNECT:/run/user/1000/qdshell.sock")
+pipe_reply=$(vm_exec "printf 'capture pipewire-0 /run/user/1000/capture-pipewire.png\\n' | socat -T 10 -t 10 - UNIX-CONNECT:/run/user/1000/qdshell.sock")
 case "$pipe_reply" in *"error: refusing capture of non-designated output"*) ;; *) fail "PipeWire output did not fail: $pipe_reply" ;; esac
 pass "non-designated output names (absent + PipeWire) fail without killing qdshell"
 

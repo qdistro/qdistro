@@ -416,6 +416,23 @@ spawn-related reason likewise means the spawn failed, not specifically that
 
 ## S3 — destroy under a LIVE chrome popup
 
+**What the screen looks like in this lane (read before judging any frame).**
+From Setup until cleanup qdshell is STOPPED and the probe holds the shell
+role, so there is no wallpaper, bar or background surface: qdwin's opaque
+BLACK background curtain is all that is left. S1 and S2 proxies live for
+milliseconds, so frames taken around S1/S2 are legitimately all-black
+(0,0,0) — `vm-gui` rejecting them as "near-black" says nothing about the
+product and they are not evidence either way; do not take them. During S3,
+while the probe waits for the click, the scanout MUST show the proxy: an
+800x600 grey-blue (~#333847) rectangle with a teal (#00aaaa) 32px chrome band
+on the side the probe printed (`side=N` → the band spans y=68..99 for the
+default `x=240 y=100`), and `CLICK_TARGET` lies inside that band (verified
+live 2026-09-23 with virsh screenshot on a golden VM). If the S3 preview is
+ALL black while the probe is still waiting, that is an observation defect
+(scanout not repainting), not a calibration answer: record ERROR, quote the
+preview's timestamp against the probe's `created handle=`/`destroy handle=`
+journal lines, and do not click blind.
+
 `show_popup` is v29-gated on a live input-grab serial, so this case cannot be
 faked: the probe must receive a real `chrome_button` press. It therefore
 attaches a 32px chrome band to the proxy — north or south, whichever the

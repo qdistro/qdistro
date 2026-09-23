@@ -573,6 +573,18 @@ qdwin_screenshot_virsh_diag() {
 #
 # INVARIANT: the outer `timeout` must exceed the inner `socat -T`, or the host
 # gives up first and the error says "timed out" instead of socat's reason.
+#
+# The capture socat needs BOTH `-T` and `-t`. `-T` is only the INACTIVITY
+# timeout; `-t` is how long socat keeps reading the socket after its stdin (the
+# one-line request) hits EOF, and it DEFAULTS TO 0.5s. qdshell answers only
+# after the capture completes, so any capture slower than half a second — a
+# loaded host, or a qdshell still busy starting up — made socat exit 0 with an
+# EMPTY reply while qdshell went on to write a perfectly good PNG
+# (qdlocker/tests/gui/06 in full-20260922T193137Z-881799: qdshell logged
+# `capture complete ... live` 0.7s after the request; the helper saw "no usable
+# reply"). Reproduce on any host: a UNIX server that sleeps 0.8s before
+# replying returns nothing to `printf x | socat -T 25 - UNIX-CONNECT:s` and the
+# reply to the same command with `-t 25`.
 QDWIN_CAPTURE_TIMEOUT_SCALE=${QDWIN_CAPTURE_TIMEOUT_SCALE:-1}
 QDWIN_CAPTURE_T=$((30 * QDWIN_CAPTURE_TIMEOUT_SCALE))   # outer, capture request
 QDWIN_CAPTURE_SOCAT_T=$((25 * QDWIN_CAPTURE_TIMEOUT_SCALE))  # inner, socat
@@ -585,6 +597,60 @@ QDWIN_CAPTURE_COPY_T=$((20 * QDWIN_CAPTURE_TIMEOUT_SCALE))   # stat/hash + base6
 # socat -T above or socat gives up first (8*scale < 25*scale holds).
 QDWIN_CAPTURE_SHELL_T_MS=$((8000 * QDWIN_CAPTURE_TIMEOUT_SCALE))
 [ "$QDWIN_CAPTURE_SHELL_T_MS" -gt 120000 ] && QDWIN_CAPTURE_SHELL_T_MS=120000  # ctrl-verb upper bound
+# How long a capture waits for qdshell's ctrl socket to come back when the
+# first attempt found it REFUSED or ABSENT, i.e. qdshell was mid-restart
+# (a scenario's own `systemctl --user restart qdshell`, or the unit's
+# Restart=on-failure respawn after a crash test killed it). Bounded: a shell
+# that stays down still fails the capture, just after this many seconds.
+QDWIN_CAPTURE_SHELL_WAIT_T=$((20 * QDWIN_CAPTURE_TIMEOUT_SCALE))
+
+# The qdshell ctrl socket is refusing/absent -> qdshell is (re)starting.
+# Matches socat's connect() failure text, nothing else: a capture that the
+# shell ANSWERED with `error: ...` is a real refusal and must not be retried.
+qdwin_capture_reply_shell_down() {
+    case "$1" in
+        *'qdshell.sock'*'Connection refused'*|*'qdshell.sock'*'No such file or directory'*) return 0 ;;
+    esac
+    return 1
+}
+
+# Wait (bounded) until qdshell's ctrl socket answers `status` with `ok`, then
+# (bounded, best-effort) until THIS qdshell instance has mapped its wallpaper
+# on Virtual-1. The ctrl socket listens ~1-2s before the wallpaper paints, so
+# stopping at `status ok` hands the capture a near-black startup frame — which
+# the graders then rightly reject as unusable. The wallpaper line is qdwin's
+# (`layer-shell mapped ns=qdshell-wallpaper-Virtual-1`), read from the
+# compositor unit's journal only, since the unit's current ActiveEnterTimestamp
+# (never a whole-journal grep: qemu-ga logs this very command). If it never
+# appears (wallpaper disabled) the wait just expires and the capture proceeds.
+# Connects as root, like the capture itself; one vm-exec round trip.
+qdwin_wait_shell_ctrl() {
+    local secs="${1:-$QDWIN_CAPTURE_SHELL_WAIT_T}" out
+    local paint=$((10 * QDWIN_CAPTURE_TIMEOUT_SCALE))
+    out=$(QDWIN_VMX_TIMEOUT=$((secs + paint + 15)) qdwin_vmx_merged "
+        i=0; up=
+        while [ \$i -lt $((secs * 2)) ]; do
+            r=\$(printf 'status\\n' | socat -T 2 -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null)
+            [ \"\$r\" = ok ] && { up=1; break; }
+            i=\$((i + 1)); sleep 0.5
+        done
+        [ -n \"\$up\" ] || { echo SHELL_CTRL_DOWN; exit 1; }
+        echo SHELL_CTRL_UP
+        since=\$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdshell.service -p ActiveEnterTimestamp --value 2>/dev/null)
+        i=0
+        while [ -n \"\$since\" ] && [ \$i -lt $((paint * 2)) ]; do
+            journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service --since \"\$since\" --no-pager -o cat 2>/dev/null |
+                grep -q 'layer-shell mapped ns=qdshell-wallpaper-Virtual-1 ' && { echo SHELL_PAINTED; exit 0; }
+            i=\$((i + 1)); sleep 0.5
+        done
+        echo SHELL_PAINT_UNCONFIRMED; exit 0") || :
+    case "$out" in *SHELL_CTRL_UP*) ;; *) return 1 ;; esac
+    case "$out" in
+        *SHELL_PAINTED*) ;;
+        *) echo "WARN: qdshell is back but its wallpaper map was not observed within ${paint}s; the frame may predate the shell's first paint" >&2 ;;
+    esac
+    return 0
+}
 
 
 qdwin_screenshot() {
@@ -622,12 +688,32 @@ qdwin_screenshot() {
     # the status of the NEGATION (always 0), so reading it there would return 0
     # from this function and report a successful capture for an unhealthy
     # session — a false green on the exact path this block exists to handle.
-    qdwin_session_healthy
-    local heal_rc=$?
+    local heal_err heal_rc
+    heal_err=$(mktemp "${TMPDIR:-/tmp}/qdwin-heal.XXXXXXXX") || return 1
+    # `|| heal_rc=$?`, not a bare call: callers may run with errexit, and a
+    # bare nonzero return here would kill them in the very restart window
+    # this block exists to ride out (and leak $heal_err).
+    heal_rc=0
+    qdwin_session_healthy 2>"$heal_err" || heal_rc=$?
     if [ "$heal_rc" -ne 0 ]; then
-        [ "$heal_rc" -eq 2 ] && return 2
-        qdwin_recover_and_verify || return "$heal_rc"
+        # Replay the gate's own account only if we do NOT recover below; a
+        # shell restart window is not an ERROR and must not print as one.
+        [ "$heal_rc" -eq 2 ] && { cat "$heal_err" >&2; rm -f "$heal_err"; return 2; }
+        # qdshell mid-restart (auto-restart after a crash test, or a
+        # scenario's own restart) fails the unit check above for ~1-2s. The
+        # capture client IS qdshell, so wait for its ctrl socket to answer
+        # and re-run the gate; anything else falls through to VT recovery.
+        if qdwin_wait_shell_ctrl "$QDWIN_CAPTURE_SHELL_WAIT_T" && qdwin_session_healthy; then
+            echo "WARN: capture-after-shell-restart: qdshell was down at capture time and came back; this frame is taken AFTER the shell restart" >&2
+        else
+            cat "$heal_err" >&2
+            rm -f "$heal_err"
+            qdwin_recover_and_verify || return "$heal_rc"
+        fi
+    else
+        cat "$heal_err" >&2
     fi
+    rm -f "$heal_err"
     pid_before=$(qdwin_compositor_pid) || return 1
 
     # Connect as root: CtrlServer verifies SO_PEERCRED so the admin desktop
@@ -649,7 +735,7 @@ qdwin_screenshot() {
         # the hottest vm-exec call in the suite (every screenshot), so it is
         # also the one most exposed to a virsh descendant holding the pipe.
         reply_raw=$(QDWIN_VMX_TIMEOUT="$QDWIN_CAPTURE_T" qdwin_vmx_merged \
-            "printf 'capture Virtual-1 $guest$shell_t_arg\\n' | socat -T $QDWIN_CAPTURE_SOCAT_T - UNIX-CONNECT:/run/user/1000/qdshell.sock") || :
+            "printf 'capture Virtual-1 $guest$shell_t_arg\\n' | socat -T $QDWIN_CAPTURE_SOCAT_T -t $QDWIN_CAPTURE_SOCAT_T - UNIX-CONNECT:/run/user/1000/qdshell.sock") || :
         # SEPARATE TRANSPORT CHATTER FROM THE PROTOCOL REPLY BEFORE PARSING.
         # The capture is MERGED stdout+stderr, and the `case` below matches the
         # WHOLE string against the reply grammar -- so any line vm-exec writes
@@ -678,8 +764,24 @@ qdwin_screenshot() {
             # out" (sol, qci-A4-260917-sol-review.md finding 2). Print them before
             # the retry, which overwrites both variables.
             [ -z "$reply_diag" ] || printf '%s\n' "$reply_diag" >&2
-            echo "NOTE: capture attempt 1 failed (${reply:-no usable reply — timed out, or the capture exceeded its byte cap; any [vm-exec] lines above carry the transport account}); checking for a VT takeaway during the capture" >&2
             rm -f "$host_tmp"
+            # qdshell mid-restart: its ctrl socket refused or was absent. That
+            # is a transient of the CAPTURE CHANNEL (the capture client IS
+            # qdshell), not a property of what is on screen -- wait for the
+            # respawned shell and ask once more. Loud, so the report can say
+            # the frame was taken after the shell came back.
+            if qdwin_capture_reply_shell_down "$reply"; then
+                echo "NOTE: capture attempt 1 failed ($reply); qdshell's ctrl socket is down (shell restarting) — waiting up to ${QDWIN_CAPTURE_SHELL_WAIT_T}s for it" >&2
+                if qdwin_wait_shell_ctrl "$QDWIN_CAPTURE_SHELL_WAIT_T"; then
+                    echo "WARN: capture-after-shell-restart: qdshell's ctrl socket came back; retrying once — this frame is taken AFTER the shell restart, not at the moment originally requested" >&2
+                    "$QDWIN_VM_EXEC" "$VMNAME" "rm -f '$guest'" >/dev/null 2>&1 || true
+                    continue
+                fi
+                echo "ERROR: shell-capture-failed: qdshell's ctrl socket did not come back within ${QDWIN_CAPTURE_SHELL_WAIT_T}s ($reply)" >&2
+                qdwin_capture_fail_cleanup "$guest"
+                return 1
+            fi
+            echo "NOTE: capture attempt 1 failed (${reply:-no usable reply — timed out, or the capture exceeded its byte cap; any [vm-exec] lines above carry the transport account}); checking for a VT takeaway during the capture" >&2
             if qdwin_recover_and_verify; then
                 "$QDWIN_VM_EXEC" "$VMNAME" "rm -f '$guest'" >/dev/null 2>&1 || true
                 continue
