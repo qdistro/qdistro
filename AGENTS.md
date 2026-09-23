@@ -69,8 +69,14 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   (`.worktrees/` is gitignored). A worktree is a complete tree; no sibling
   checkouts or symlinks are needed.
 - **Pick gates with `qci affected`**, then run the gates it selects from the
-  worktree. A change inside one component selects that component's gates, not
-  the whole suite.
+  worktree. It selects whole **gates**, not component-precise tests: a change
+  inside one component usually avoids some gates (a qdterm change selects only
+  `host`), but every gate it does select runs in full. `host` builds and
+  tests every component, and `gui` runs every GUI scenario, so a qdshell or
+  qdlocker change (`host gui`) costs most of the 2–3 h suite. For quicker
+  feedback while developing, run single scenarios
+  (`ci/bin/qci gui --scenario <abs path>`); the selected gates are the
+  acceptance bar.
 - **Review before merge.** Get the change reviewed (diff + gate evidence)
   before it lands on `main`.
 - **The live checkout on `main` is merge-only.** Agents never edit it
