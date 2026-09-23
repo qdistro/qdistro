@@ -18,7 +18,7 @@ injects `lock_requested` into the locker → qdlocker engages the lock.
 >   emitted just before the system suspends, so the locker engages
 >   BEFORE suspend. This is `reason=2` (suspend) in `logind.py`.
 >
-> The fake helper below emits **`PrepareForSleep`**, so this scenario
+> The fake helper below makes logind raise **`PrepareForSleep`**, so this scenario
 > validates the **suspend pre-lock path (reason=2)**, not a true lid
 > close. The two signals are distinct in `logind.py`; see "Testing a
 > true lid close" at the bottom for the `Session.Lock`/reason=1
@@ -26,11 +26,16 @@ injects `lock_requested` into the locker → qdlocker engages the lock.
 > wiring on this path — that protocol carries only the manual hotkey
 > (reason=3) and the compositor-side lock state.
 
-VMs don't have a real laptop lid. The qdistro tier4-vm image ships a
-helper at `/usr/local/bin/qdistro-fake-lid-close` that emits the
-`org.freedesktop.login1.Manager.PrepareForSleep` signal on the system
-bus — the same signal logind raises on suspend — which drives
-qdlocker's `LogindWatcher.PrepareForSleep` subscription (reason=2).
+VMs don't have a real laptop lid. The qci GUI golden (qdistro
+`scripts/vm/fresh-vm-bootstrap.sh`, source
+`qdistro/scripts/vm/assets/qdistro-fake-lid-close`) installs a test-only
+helper at `/usr/local/bin/qdistro-fake-lid-close` that runs a real logind
+suspend cycle with a runtime no-op `systemd-suspend.service`, so logind
+itself raises `org.freedesktop.login1.Manager.PrepareForSleep(true)`
+(then `false`) and the guest never sleeps. That drives qdlocker's
+`LogindWatcher.PrepareForSleep` subscription (reason=2). A signal forged
+with `gdbus emit` does NOT reach the watcher (its match is scoped to
+logind's bus name), so the helper cannot simply emit it.
 
 ## Setup
 
@@ -43,7 +48,7 @@ qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 if ! "$QDWIN_VM_EXEC" "$VMNAME" \
     'test -x /usr/local/bin/qdistro-fake-lid-close' >/dev/null 2>&1; then
     echo "SKIP: qdistro-fake-lid-close not installed in guest"
-    echo "      (ship it from qdistro/tier4-vm/build-guest-image.sh)"
+    echo "      (installed by qdistro/scripts/vm/fresh-vm-bootstrap.sh)"
     exit 77   # bats convention for skip
 fi
 
@@ -85,8 +90,12 @@ bridge then logs `lock_requested reason=suspend`:
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  'journalctl --user -u qdlocker.service --since "1 minute ago" | grep -E "reason=suspend|PrepareForSleep"'
+  'runuser -l admin -c "journalctl --user -u qdlocker.service --since \"1 minute ago\" --no-pager" | grep -E "reason=suspend|PrepareForSleep"'
 ```
+
+vm-exec runs as root; qdlocker.service is admin's USER unit, so the query
+must run as admin (a root `journalctl --user` reads root's own user journal
+and prints `-- No entries --`).
 
 The journal assertion is the *primary* one — it proves the path was
 via the logind subscription, not, e.g., qdlocker's own idle timer
@@ -130,9 +139,9 @@ helper if the image ships one.) Then assert
 
 - Step 2 reports `locked=True` but the journal grep is empty — the
   lock happened via idle, not the logind subscription. Re-check that
-  qdistro-fake-lid-close actually published the `PrepareForSleep`
-  signal and that `LogindWatcher` logged `logind watcher ready` at
-  startup (`journalctl --user -u qdlocker.service`).
+  qdistro-fake-lid-close exited 0 (it waits for logind to finish the
+  cycle) and that `LogindWatcher` logged `logind automatic sleep locking
+  ready` at startup (`journalctl --user -u qdlocker.service`).
 - Step 2 reports `locked=False` after 5s — either the fake helper
   didn't emit the signal, or `LogindWatcher` never connected. Check
   `journalctl --user -u qdlocker.service` for `logind` lines: a
