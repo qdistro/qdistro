@@ -25,30 +25,25 @@ Wants=graphical-session.target
 #     before we connect (the ExecStartPre socket wait covers the Type=simple
 #     compositor's socket-creation gap).
 #   - PartOf=qdwin-compositor.service: a compositor stop/restart stops/restarts
-#     the locker cleanly instead of leaving it to crash on a dead socket (and
-#     burn the start budget below).
+#     the locker cleanly instead of leaving it to crash on a dead socket.
 #
 # Enablement: WantedBy=qdwin-session.target only (see the Install section).
 Requisite=qdwin-compositor.service
 PartOf=qdwin-compositor.service
 After=graphical-session.target qdwin-compositor.service
 #
-# BOUNDED RESTART. Restart=always (below) re-attempts a transient failure — a
-# bind race during session bring-up, a qFatal while qdwin restarts, a
-# SIGKILLed locker (qdlocker/tests/gui/08) — but a PERSISTENT failure must not
-# restart forever: that is a crash loop that hides itself in load and journal
-# noise rather than a fail-safe (a locker that cannot bind cannot lock anyway;
-# the failed unit state is the visible signal). 10 starts per 60 s: a real
-# crash loop (~3-4 s per attempt with RestartSec=2) parks the unit in
-# start-limit-hit after ~30-40 s; normal operation — bring-up, the few
-# explicit `systemctl --user restart qdlocker` hops the GUI scenarios and
-# qdlocker_drain_lock_state perform — stays well under 10/min. The window is
-# rolling: once 60 s pass, a new start (next session start, or a manual
-# restart) is accepted again. Earlier revisions set StartLimitIntervalSec=0 to
-# survive the default 5-in-10 s gate during bring-up races; the ExecStartPre
-# socket wait removes most of those races and 10/60 s absorbs the rest.
-StartLimitIntervalSec=60
-StartLimitBurst=10
+# UNBOUNDED RESTART, on purpose. Restart=always (below) with the start limit
+# disabled: the locker is the thing that lets a locked session unlock, and a
+# unit parked in start-limit-hit is never restarted again by systemd (the
+# limit window expiring does not schedule a new start). A parked locker while
+# locked strands the session behind qdwin's fail-secure curtain; while
+# unlocked, the next lock has no locker. So the unit must keep retrying for
+# as long as the qdwin session lives. The labwc crash loop this unit once
+# caused is prevented by SESSION SCOPE above (Requisite= fails once, with
+# result "dependency", which Restart= does not retry), not by a start limit.
+# (A finite 10/60 s limit was tried on fix/qci-260923-lockerloop and dropped
+# after review: todo/reviews/qci-260923-fixes-sol-review.md item 1.)
+StartLimitIntervalSec=0
 
 [Service]
 # Type=simple — we don't sd_notify until a later iteration wires the

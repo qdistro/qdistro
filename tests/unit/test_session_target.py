@@ -84,17 +84,17 @@ def test_start_requires_running_qdwin_compositor_without_pulling_it_in():
         )
 
 
-def test_restart_is_bounded_by_a_start_limit():
-    """A persistent failure must not restart forever. StartLimitIntervalSec=0
-    (the old value) disabled the gate and let a crash loop run unbounded."""
+def test_restart_is_never_parked_by_a_start_limit():
+    """The locker must keep restarting for the life of the qdwin session: a
+    unit in start-limit-hit is never restarted again, and a parked locker
+    strands a locked session behind qdwin's fail-secure curtain. The labwc
+    crash loop is prevented by session scope (Requisite=), not by a limit."""
     interval = _unit_values("Unit", "StartLimitIntervalSec")
-    burst = _unit_values("Unit", "StartLimitBurst")
-    assert interval and burst, "qdlocker.service must set a start limit"
-    assert interval[-1] not in ("0", "infinity"), (
-        f"StartLimitIntervalSec={interval[-1]} disables the start limit"
+    assert interval and interval[-1] in ("0", "infinity"), (
+        "qdlocker.service must disable the start limit (StartLimitIntervalSec=0)"
     )
-    assert 0 < int(burst[-1]) <= 20, f"StartLimitBurst={burst[-1]} is not a sane bound"
-    assert _unit_values("Service", "Restart"), "qdlocker.service must set Restart="
+    restart = _unit_values("Service", "Restart")
+    assert restart and restart[-1] == "always", "qdlocker.service must set Restart=always"
 
 
 def test_ordered_after_compositor_socket():
