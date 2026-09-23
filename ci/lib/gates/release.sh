@@ -272,7 +272,7 @@ EOF
 release_contract_floor() {
     case "$1" in
         bootstrap-hardening.bats)        echo 32 ;;
-        source-manifest-signature.bats)  echo 18 ;;
+        source-manifest-signature.bats)  echo 37 ;;
         gen-source-manifest.bats)        echo 32 ;;
         *)                               echo 1 ;;
     esac
