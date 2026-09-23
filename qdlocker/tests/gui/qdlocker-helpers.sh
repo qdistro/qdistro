@@ -15,7 +15,7 @@
 
 : "${QDLOCKER_REPO:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
 : "${QDWIN_REPO:=${QDLOCKER_REPO}/../qdwin}"
-: "${QDWIN_VM_EXEC:=${QDLOCKER_REPO}/../qdistro/scripts/vm/vm-exec}"
+: "${QDWIN_VM_EXEC:=${QDLOCKER_REPO}/../scripts/vm/vm-exec}"   # monorepo root
 
 # qdwin session unit names. Default to the production/deploy names
 # (qdistro/deploy/). VMs spun via install-qdwin-session-for-vm.sh now ship

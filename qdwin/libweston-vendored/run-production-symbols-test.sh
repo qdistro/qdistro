@@ -18,7 +18,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"   # workspace root (siblings: qdwin, qdistro)
+REPO="$(cd "$HERE/../.." && pwd)"   # monorepo root (qdwin/ in-tree; scripts/ at the root)
 BUILD_SCRIPT="$HERE/build-libweston.sh"
 PREFIX="${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}"
 
@@ -238,7 +238,7 @@ done
 [ "$missing" -eq 0 ] || fail "one or more soft-linked helper symbols are not exported by the production library"
 
 # Staging dry-run into a throwaway dest (non-root tolerated).
-STAGE_SCRIPT="$REPO/qdistro/scripts/install/install-vendored-libweston.sh"
+STAGE_SCRIPT="$REPO/scripts/install/install-vendored-libweston.sh"
 if [ -x "$STAGE_SCRIPT" ]; then
     DEST="$(mktemp -d)/qdwin-libweston"
     echo "[prod-syms] staging dry-run -> $DEST"

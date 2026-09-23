@@ -248,9 +248,11 @@ if [ "$NO_INT" = 1 ]; then
     INT_RESULT="skipped"
 else
     step "integration (qdistro repo + bats VM)"
-    QDISTRO_DIR="${QDISTRO_DIR:-../qdistro}"
+    # Monorepo: qdistro's own content is the root, one level above qdshell/.
+    # Absolute, so the later `cd "$QDISTRO_DIR" && bats "$BATS_FILE"` works.
+    QDISTRO_DIR="$(cd "${QDISTRO_DIR:-..}" 2>/dev/null && pwd || echo "${QDISTRO_DIR:-..}")"
     if [ ! -d "$QDISTRO_DIR/tests/integration/vm" ]; then
-        warn "  qdistro sibling repo not at $QDISTRO_DIR — skipping integration"
+        warn "  qdistro monorepo root not at $QDISTRO_DIR — skipping integration"
         INT_RESULT="skipped"
     else
         # Drive the qdshell-broker bats from the qdistro side so it

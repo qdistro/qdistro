@@ -16,7 +16,7 @@
 # distinct codebases, same gecko id). The target was removed to canonicalize
 # the Firefox artifacts; that bundled tree was later deleted outright (J11 —
 # it had no origin gate) and its id is now revoked by the bridge.
-# See ../qdistro/doc/browser.md ("Firefox extension artifacts").
+# See ../doc/browser.md ("Firefox extension artifacts").
 #
 # Chromium MV3 uses importScripts(...) in the service worker so we
 # can ship the source tree as-is.

@@ -9,15 +9,17 @@
 // silos or talks to a dead bus name. The tier prefixes in particular are a
 // SECURITY boundary (silo identity), so a mismatch must fail CI.
 //
-// Source of truth: ../qdistro/tests/contracts/qdistro_shell_contract.json, which
+// Source of truth: ../tests/contracts/qdistro_shell_contract.json (the qdistro
+// monorepo root, one level above this qdshell/ component), which
 // qdistro's own tests/unit/test_shell_contract.py pins to its Python constants.
 //
 // This is the cross-repo complement to tests/test_drift_guard.js (which keeps the
 // JS mirrors in sync with the QML *within* qdshell).
 //
-// If the sibling qdistro checkout is absent (qdshell unit lane run standalone),
-// this guard SKIPS LOUDLY rather than failing — the integrated qci/bats path is
-// where the sibling layout is guaranteed.
+// If the contract is absent (qdshell copied out of the monorepo and run
+// standalone), this guard SKIPS LOUDLY rather than failing. In the monorepo it
+// is always present. (Before the migration it looked for a sibling ../qdistro
+// checkout, which in the monorepo would never exist -> a silent skip.)
 
 "use strict";
 
@@ -28,13 +30,13 @@ const path = require("path");
 const ROOT = path.resolve(__dirname, "..");
 const QDISTRO_DIR = process.env.QDISTRO_DIR
     ? path.resolve(process.env.QDISTRO_DIR)
-    : path.resolve(ROOT, "..", "qdistro");
+    : path.resolve(ROOT, "..");   // monorepo root
 const CONTRACT = path.join(QDISTRO_DIR, "tests", "contracts", "qdistro_shell_contract.json");
 
 if (!fs.existsSync(CONTRACT)) {
     console.log("[SKIP] qdistro-contract-drift: sibling contract not found at " +
-        CONTRACT + " (set QDISTRO_DIR or check out qdistro as a sibling). " +
-        "The integrated qci/bats lane guarantees this layout.");
+        CONTRACT + " (set QDISTRO_DIR, or run from the qdistro monorepo " +
+        "where qdshell/ is in-tree).");
     process.exit(0);
 }
 

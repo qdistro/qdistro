@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VM="${QDISTRO_VM:?set QDISTRO_VM to the libvirt domain name}"
-QDISTRO_DIR="${QDISTRO_DIR:-../qdistro}"
+QDISTRO_DIR="${QDISTRO_DIR:-..}"   # monorepo root (qdshell/ is in-tree)
 VME="$QDISTRO_DIR/scripts/vm/vm-exec"
 HTTP_PORT="${HTTP_PORT:-8765}"
 

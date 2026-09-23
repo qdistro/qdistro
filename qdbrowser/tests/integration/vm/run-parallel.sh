@@ -6,7 +6,7 @@
 #   - libvirt with a baseweed-qdbrowser template
 #   - $QDWIN_VM_TEMPLATE pointing at it
 #   - qdistro's clone-baseweed.sh + fresh-vm-bootstrap.sh in PATH or
-#     accessible via ../../qdistro/scripts/vm.
+#     at <monorepo root>/scripts/vm.
 #
 # Usage:
 #   ./run-parallel.sh                          # all .bats files in this dir
@@ -36,7 +36,7 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || cd "$HERE/../../.." && pwd)"
-QDISTRO_SCRIPTS="${QDISTRO_SCRIPTS:-$REPO_ROOT/../qdistro/scripts/vm}"
+QDISTRO_SCRIPTS="${QDISTRO_SCRIPTS:-$REPO_ROOT/scripts/vm}"   # REPO_ROOT = monorepo root
 LOG_DIR="${LOG_DIR_OVERRIDE:-/tmp/qdbrowser-bats-$$}"
 mkdir -p "$LOG_DIR"
 

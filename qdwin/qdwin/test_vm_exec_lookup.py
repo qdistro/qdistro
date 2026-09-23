@@ -3,14 +3,14 @@
 vm-exec / workspace lookup in the GUI agent test harness.
 
 The agent GUI smoke scripts (tests/gui/agent-*.sh, tests/apps/*) derive the
-path to qdistro/scripts/vm/vm-exec from the qdwin checkout. The old derivation
+path to scripts/vm/vm-exec (monorepo root) from the qdwin component. The old derivation
 used "$ROOT/.." (two levels above the repo). That is correct only when qdwin is
 a direct sibling of qdistro under the project root; when the script runs from a
 git worktree (.worktrees/<name>/), "$ROOT/.." is the worktrees dir, not the
 project root, so vm-exec was never found and the caller had to pass
 QDWIN_VM_EXEC= by hand. The /do workflow always runs from a worktree, so the
 lookup is now worktree-aware: qdwin_find_workspace() in the two helper files
-walks upward until it finds a checkout containing qdistro/scripts/vm/vm-exec.
+walks upward until it finds the monorepo root (scripts/vm/vm-exec + qdwin/).
 
 This test builds throwaway directory layouts (normal + worktree) in a tmpdir,
 sources the *real* committed helper files via bash, and asserts the resolved
@@ -95,35 +95,52 @@ def source_helper(helper_src, repo_dir, helper_rel, extra_env=None):
 
 
 def run_for(helper_src, helper_rel, label):
-    with tempfile.TemporaryDirectory() as ws:
-        ws = os.path.realpath(ws)
-        real_vm_exec = os.path.join(ws, "qdistro", "scripts", "vm", "vm-exec")
+    # Monorepo layout: <ws> is the qdistro monorepo root holding
+    # scripts/vm/vm-exec with qdwin/ in-tree; a linked worktree of it is a
+    # full copy of that layout under <ws>/.worktrees/<topic>/.
+    with tempfile.TemporaryDirectory() as top:
+        # The checkout is NAMED "qdistro" on purpose (as real clones are): the
+        # pre-monorepo resolver looked for "<dir>/qdistro/scripts/vm/vm-exec"
+        # and so matched <top> by name, resolving a worktree's helpers to the
+        # MAIN checkout's vm-exec. The worktree checks below catch that.
+        ws = os.path.join(os.path.realpath(top), "qdistro")
+        real_vm_exec = os.path.join(ws, "scripts", "vm", "vm-exec")
         write_exec(real_vm_exec)
 
-        # --- normal layout: <ws>/qdwin is a sibling of <ws>/qdistro ---
+        # --- normal layout: <ws>/qdwin is in-tree beside <ws>/scripts ---
         normal_repo = os.path.join(ws, "qdwin")
         wsp, vme, err = source_helper(helper_src, normal_repo, helper_rel)
         check(f"{label}: normal layout sources cleanly", err == "", err)
-        check(f"{label}: normal workspace == project root", wsp == ws,
+        check(f"{label}: normal workspace == monorepo root", wsp == ws,
               f"{wsp!r} != {ws!r}")
         check(f"{label}: normal vm-exec resolves to real file", vme == real_vm_exec,
               f"{vme!r} != {real_vm_exec!r}")
 
-        # --- worktree layout: <ws>/.worktrees/qdwin-topic ---
-        wt_repo = os.path.join(ws, ".worktrees", "qdwin-topic")
+        # --- worktree layout: <ws>/.worktrees/topic/{scripts/vm,qdwin} ---
+        wt_root = os.path.join(ws, ".worktrees", "topic")
+        wt_vm_exec = os.path.join(wt_root, "scripts", "vm", "vm-exec")
+        write_exec(wt_vm_exec)
+        wt_repo = os.path.join(wt_root, "qdwin")
         wsp, vme, err = source_helper(helper_src, wt_repo, helper_rel)
         check(f"{label}: worktree layout sources cleanly", err == "", err)
-        check(f"{label}: worktree workspace == project root", wsp == ws,
-              f"{wsp!r} != {ws!r}")
-        check(f"{label}: worktree vm-exec resolves to real file", vme == real_vm_exec,
-              f"{vme!r} != {real_vm_exec!r}  (regression: pointed at the "
-              ".worktrees dir before the fix)")
+        check(f"{label}: worktree workspace == the worktree root", wsp == wt_root,
+              f"{wsp!r} != {wt_root!r}")
+        check(f"{label}: worktree vm-exec is the WORKTREE's own", vme == wt_vm_exec,
+              f"{vme!r} != {wt_vm_exec!r}  (regression: resolved the main "
+              "checkout's vm-exec from inside a worktree)")
 
-        # --- nested worktree: <ws>/.worktrees/sub/qdwin-topic ---
-        deep_repo = os.path.join(ws, ".worktrees", "sub", "qdwin-topic")
+        # --- nested worktree: <ws>/.worktrees/sub/topic/{scripts/vm,qdwin} ---
+        deep_root = os.path.join(ws, ".worktrees", "sub", "topic")
+        deep_vm_exec = os.path.join(deep_root, "scripts", "vm", "vm-exec")
+        write_exec(deep_vm_exec)
+        deep_repo = os.path.join(deep_root, "qdwin")
         wsp, vme, err = source_helper(helper_src, deep_repo, helper_rel)
-        check(f"{label}: nested-worktree vm-exec resolves", vme == real_vm_exec,
-              f"{vme!r} != {real_vm_exec!r}")
+        check(f"{label}: nested-worktree vm-exec resolves", vme == deep_vm_exec,
+              f"{vme!r} != {deep_vm_exec!r}")
+
+        # --- a pre-monorepo sibling layout ABOVE the root is NOT picked up ---
+        check(f"{label}: nested worktree never resolves the main checkout",
+              vme != real_vm_exec, f"{vme!r}")
 
         # --- env override wins over auto-resolution ---
         wsp, vme, err = source_helper(

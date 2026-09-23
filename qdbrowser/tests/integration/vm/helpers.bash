@@ -5,15 +5,14 @@
 : "${VM_NAME:?set VM_NAME to a libvirt domain (cloned from QDWIN_VM_TEMPLATE)}"
 
 if [[ -z "${VM_EXEC:-}" ]]; then
+    # Monorepo: qdbrowser is in-tree, so the git toplevel (or, outside git,
+    # four levels up from qdbrowser/tests/integration/vm/) is the qdistro
+    # monorepo root, which ships scripts/vm/vm-exec. (Before the migration
+    # this fell back to a sibling ../qdistro checkout.)
     _repo_root=$(git -C "$(dirname "${BATS_TEST_FILENAME}")" \
                      rev-parse --show-toplevel 2>/dev/null \
-                     || dirname "$(dirname "$(dirname "${BATS_TEST_FILENAME}")")")
+                     || cd "$(dirname "${BATS_TEST_FILENAME}")/../../../.." && pwd)
     VM_EXEC="${_repo_root}/scripts/vm/vm-exec"
-    # qdbrowser ships no scripts/vm/; fall back to the sibling qdistro
-    # checkout's helper (the layout spin-test-vm.sh / qci assume).
-    if [[ ! -x "$VM_EXEC" && -x "${_repo_root}/../qdistro/scripts/vm/vm-exec" ]]; then
-        VM_EXEC="${_repo_root}/../qdistro/scripts/vm/vm-exec"
-    fi
 fi
 
 : "${VM_SSH_USER:=root}"

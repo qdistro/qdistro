@@ -27,10 +27,10 @@
 set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)        # qdgreeter/
-WORKSPACE=$(cd "$ROOT/.." && pwd)                                # doc/qdistro2/
+WORKSPACE=$(cd "$ROOT/.." && pwd)                                # the monorepo root
 VIRSH=${VIRSH:-virsh -c qemu:///session}
 VMNAME=${VMNAME:-$($VIRSH list --name --state-running 2>/dev/null | head -n1)}
-VM_EXEC=${VM_EXEC:-$WORKSPACE/qdistro/scripts/vm/vm-exec}
+VM_EXEC=${VM_EXEC:-$WORKSPACE/scripts/vm/vm-exec}
 
 fail()  { echo "FAIL: $*" >&2; exit 1; }
 setup() { echo "SETUP-ERROR: $*" >&2; exit 2; }

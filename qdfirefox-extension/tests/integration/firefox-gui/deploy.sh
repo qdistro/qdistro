@@ -9,7 +9,9 @@ set -euo pipefail
 
 VM="${VMNAME:?VMNAME env var required}"
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-QDISTRO_REPO="${QDISTRO_REPO:-/home/playai/doc/qdistro-org/qdistro}"
+# Monorepo: qdistro's scripts are at the repo root, one level above this
+# component (the old default was another user's sibling checkout).
+QDISTRO_REPO="${QDISTRO_REPO:-$(cd "$REPO_ROOT/.." && pwd)}"
 VMEXEC="$QDISTRO_REPO/scripts/vm/vm-exec"
 
 log() { echo "[deploy] $*" >&2; }

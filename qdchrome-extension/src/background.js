@@ -18,7 +18,7 @@
 // the import and reuse the already-defined globals. This repo is
 // Chromium-only; the Firefox extensions live in their own repos — the
 // maintained ../qdfirefox-extension and the legacy bundled tree (see
-// ../qdistro/doc/browser.md "Firefox extension artifacts").
+// ../doc/browser.md "Firefox extension artifacts").
 //
 // @ts-check
 

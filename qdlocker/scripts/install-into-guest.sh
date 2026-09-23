@@ -28,7 +28,7 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ ! -f "$IMG" ]; then
     echo "install-into-guest: image not found at $IMG" >&2
-    echo "  build it first: cd ../../qdistro/tier4-vm && ./build-guest-image.sh" >&2
+    echo "  build it first: cd ../../tier4-vm && ./build-guest-image.sh" >&2
     exit 2
 fi
 

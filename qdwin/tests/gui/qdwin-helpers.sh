@@ -42,16 +42,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/workspace.sh"
 
 : "${VMNAME:=}"
 : "${QDWIN_VIRSH:=virsh -c qemu:///session}"
-# Anchor the upward search at the qdwin checkout (QDWIN_REPO when the caller
-# set it, else this file's own repo root); fall back to the legacy two-up path
-# only when no qdistro sibling exists anywhere above (degraded, but no worse
-# than before).
+# Anchor the upward search at the qdwin component (QDWIN_REPO when the caller
+# set it, else this file's own component root); fall back to the monorepo
+# root three levels up (qdwin/tests/gui -> root) when the search finds none.
 if [ -z "${QDWIN_WORKSPACE:-}" ]; then
     QDWIN_WORKSPACE=$(qdwin_find_workspace "${QDWIN_REPO:-$(dirname "${BASH_SOURCE[0]}")/../..}") \
         || QDWIN_WORKSPACE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 fi
 export QDWIN_WORKSPACE
-: "${QDWIN_VM_EXEC:=$QDWIN_WORKSPACE/qdistro/scripts/vm/vm-exec}"
+: "${QDWIN_VM_EXEC:=$QDWIN_WORKSPACE/scripts/vm/vm-exec}"
 export QDWIN_VM_EXEC
 
 # HARNESS CAPTURE ATTESTATION (qci GUI visual-evidence contract).
@@ -64,9 +63,9 @@ export QDWIN_VM_EXEC
 #
 # Optional by design: sourcing failure degrades to a no-op stub so these helpers
 # keep working outside a qci run and against an older qdistro checkout.
-if [ -r "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh" ]; then
+if [ -r "$QDWIN_WORKSPACE/scripts/vm/lib/capture-attest.sh" ]; then
     # shellcheck source=/dev/null
-    . "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh"
+    . "$QDWIN_WORKSPACE/scripts/vm/lib/capture-attest.sh"
 fi
 if ! declare -f capture_attest_frame >/dev/null 2>&1; then
     capture_attest_frame() { :; }

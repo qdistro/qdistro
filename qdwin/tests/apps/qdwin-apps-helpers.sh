@@ -24,7 +24,7 @@ if [ -z "${QDWIN_WORKSPACE:-}" ]; then
         || QDWIN_WORKSPACE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 fi
 export QDWIN_WORKSPACE
-: "${QDWIN_VM_EXEC:=$QDWIN_WORKSPACE/qdistro/scripts/vm/vm-exec}"
+: "${QDWIN_VM_EXEC:=$QDWIN_WORKSPACE/scripts/vm/vm-exec}"
 
 # HARNESS CAPTURE ATTESTATION (qci GUI visual-evidence contract). This helper
 # file owns the apps lane's capture tool (qdwin_apps_screenshot). The qci GUI
@@ -32,9 +32,9 @@ export QDWIN_WORKSPACE
 # into the gate's capture ledger; see
 # qdistro/scripts/vm/lib/capture-attest.sh. Optional: degrades to a no-op stub
 # outside a qci run or against an older qdistro checkout.
-if [ -r "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh" ]; then
+if [ -r "$QDWIN_WORKSPACE/scripts/vm/lib/capture-attest.sh" ]; then
     # shellcheck source=/dev/null
-    . "$QDWIN_WORKSPACE/qdistro/scripts/vm/lib/capture-attest.sh"
+    . "$QDWIN_WORKSPACE/scripts/vm/lib/capture-attest.sh"
 fi
 if ! declare -f capture_attest_frame >/dev/null 2>&1; then
     capture_attest_frame() { :; }

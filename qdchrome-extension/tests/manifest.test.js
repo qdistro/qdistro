@@ -2,7 +2,7 @@
 //
 // This repo is Chromium-only. The Firefox extension comes from its own
 // sources — ../qdfirefox-extension (standalone; the maintained one v1
-// users load) and ../qdistro/browser_bridge/extension (bundled; a LEGACY
+// users load) and ../browser_bridge/extension (bundled; a LEGACY
 // compatibility artifact with no origin allowlist, J11) — NOT built here. A
 // legacy Firefox MV2 target used to be emitted from this repo under
 // gecko id `qdistro@qdistro.local`, colliding with the bundled

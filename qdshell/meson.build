@@ -65,8 +65,8 @@ if node.found()
   test('drift-guard', node, args: files('tests/test_drift_guard.js'))
   # Cross-repo complement to drift-guard: assert qdshell's mirrored qdistro
   # identifiers (tier secctx prefixes, AdminBroker1/SessionManager1 D-Bus names,
-  # broker reply fields) match qdistro's contract fixture. Skips loudly if the
-  # sibling ../qdistro checkout is absent.
+  # broker reply fields) match qdistro's contract fixture (the monorepo root's
+  # tests/contracts/). Skips loudly if qdshell runs outside the monorepo.
   test('qdistro-contract-drift', node, args: files('tests/test_qdistro_contract_drift.js'))
   test('silo-chrome', node, args: files('tests/test_silo_chrome.js'))
   test('remote-machine', node, args: files('tests/test_remote_machine.js'))
