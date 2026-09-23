@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "qnotebook"
+version = "0.0.1"
+description = "Personal PyQt6 wiki editor, heavily inspired by Zim Desktop Wiki, written from scratch"
+license = "GPL-2.0-or-later"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.5",
+    "mistune>=3.0",
+]
+
+[project.scripts]
+qnotebook = "qnotebook.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qnotebook*"]
+
+[tool.setuptools.package-data]
+qnotebook = ["builtin_templates/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyqt6"
