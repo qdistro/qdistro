@@ -538,6 +538,24 @@ RestartSec=2
 WantedBy=default.target
 EOF2
 chown -R admin:users /home/admin/.config/systemd/user
+
+# 8a. Keep lxqt-session from autostarting spice-vdagent under labwc.
+#     /usr/etc/xdg/autostart/spice-vdagent.desktop makes lxqt-session launch
+#     it; with no Mutter DisplayConfig on the bus it spins on "failed to call
+#     GetCurrentState from mutter" / "No guest output map" — ~500k journal
+#     lines in 3 min (measured 2026-09-23), so journald suppresses ~17k
+#     user@1000 messages every 30 s and the admin lane's evidence is lost.
+#     Nothing in CI uses SPICE agent features (screenshots/input go through
+#     virsh + qemu-ga). A per-user Hidden=true entry is the XDG way to
+#     disable a system autostart item.
+install -d -o admin -g users -m 0755 /home/admin/.config/autostart
+cat > /home/admin/.config/autostart/spice-vdagent.desktop <<'EOF3'
+[Desktop Entry]
+Type=Application
+Name=Spice vdagent
+Hidden=true
+EOF3
+chown admin:users /home/admin/.config/autostart/spice-vdagent.desktop
 fi  # end labwc-only steps 6-8
 
 # 8b. Display-resolution fix — make virtio_gpu the DRM driver instead
