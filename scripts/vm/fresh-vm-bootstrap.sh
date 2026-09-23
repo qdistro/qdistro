@@ -179,6 +179,25 @@ else
     fi
 fi
 
+# ---- 0c. Keep spice-vdagent off test VMs -----------------------------------
+# Nobody installs it on purpose: the package SUPPLEMENTS xwayland on a host
+# with a virtio-serial console, so zypper pulls it in automatically (it was in
+# every base and golden checked, 2026-09-23). No test uses it: screenshots go
+# through virsh / the qdshell capture socket, input through ydotool + qemu-ga,
+# and the clipboard tests exercise Wayland data-device, not SPICE. Its resize
+# path needs Mutter, so under labwc it loops ("failed to call GetCurrentState
+# from mutter") at ~500k journal lines per 3 min and journald drops the admin
+# session's evidence; under qdwin it fails at every login. Remove it and lock
+# it, so the later GUI-lane installs (spin-test-vm-gui.sh) cannot bring it
+# back. Test VMs only; the product image does not ship it.
+if rpm -q spice-vdagent >/dev/null 2>&1; then
+    log "removing spice-vdagent (auto-pulled via xwayland supplements; unused by tests)..."
+    zypper -n rm spice-vdagent >/dev/null 2>&1 \
+        || { log "  ERROR: zypper rm spice-vdagent failed"; exit 3; }
+fi
+zypper -n addlock spice-vdagent >/dev/null 2>&1 \
+    || { log "  ERROR: zypper addlock spice-vdagent failed"; exit 3; }
+
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
 mkdir -p "$SRC"
