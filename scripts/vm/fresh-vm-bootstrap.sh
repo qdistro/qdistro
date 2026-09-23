@@ -271,6 +271,13 @@ if [ -f "$SRC/qdbrowser/pyproject.toml" ]; then
         || { log "  ERROR: pip install qdbrowser failed"; exit 3; }
     python3 -c 'import qdbrowser, PyQt6.QtWebEngineWidgets' \
         || { log "  ERROR: qdbrowser installed but not importable with PyQt6.QtWebEngineWidgets"; exit 3; }
+    # bridge_adapter gates mutating D-Bus ops with pkcheck on these action
+    # ids; unregistered actions are always denied, so ship the policy. 0644
+    # explicitly: polkitd cannot read a file created under root's 077 umask.
+    if [ -f "$SRC/qdbrowser/polkit/org.qdistro.qdbrowser.policy" ]; then
+        install -m 0644 -o root -g root "$SRC/qdbrowser/polkit/org.qdistro.qdbrowser.policy" \
+            /usr/share/polkit-1/actions/org.qdistro.qdbrowser.policy
+    fi
     log "  qdbrowser installed (/opt/qdbrowser; WebEngine via $QDB_PY_PREFIX-PyQt6-WebEngine)"
 fi
 
