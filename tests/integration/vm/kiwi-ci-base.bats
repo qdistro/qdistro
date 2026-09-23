@@ -240,7 +240,7 @@ setup() {
     [[ "$output" == *"import-kiwi-base.sh"* ]]
 }
 
-@test "bootstrap: ensures CI extras after masking greetd, before fetching tarballs" {
+@test "bootstrap: ensures CI extras after masking greetd, before fetching the monorepo tarball" {
     local b="$VM/fresh-vm-bootstrap.sh"
     grep -q 'ensuring CI extras' "$b"
     grep -q 'command -v bats' "$b"
@@ -253,7 +253,7 @@ setup() {
     grep -q 'id -gn admin' "$b"
     local extras_line fetch_line mask_line offline_line repos_line
     extras_line="$(grep -n 'ensuring CI extras' "$b" | head -1 | cut -d: -f1)"
-    fetch_line="$(grep -n 'fetching tarballs' "$b" | head -1 | cut -d: -f1)"
+    fetch_line="$(grep -n 'fetching the monorepo tarball' "$b" | head -1 | cut -d: -f1)"
     mask_line="$(grep -n 'masking jeos-firstboot + greetd' "$b" | head -1 | cut -d: -f1)"
     offline_line="$(grep -n 'QCI_OFFLINE=1 forbids zypper' "$b" | head -1 | cut -d: -f1)"
     repos_line="$(grep -n 'no zypper repos in the image' "$b" | head -1 | cut -d: -f1)"
