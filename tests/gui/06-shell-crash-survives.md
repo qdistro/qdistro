@@ -73,7 +73,17 @@ this step was recorded ERROR; see the `-t` note in qdwin-helpers.sh.)
 **Assert (2.1):** `qdlocker_ctrl status` still reports
 `locked=True`. The shell death did not affect the locker's process
 or the compositor's lock state.
-**Assert (2.2):** screenshot still shows the qdlocker UI. The LOCK
+**Assert (2.2):** screenshot still shows the qdlocker UI (clock, date,
+`Password` prompt box, and the "capture monitoring" banner along the top —
+that banner is part of the LOCK UI, not the qdshell bar). OPEN THIS FILE
+itself before grading it; do not infer it from the Step 1 or Step 4 frame.
+While locked the shell draws nothing visible, so the Step 2 frame normally
+looks the same as Step 1 and is often BYTE-IDENTICAL to it (same clock
+minute) — identical is the expected PASS shape, not a sign of a stale
+capture (a stale capture is flagged by the helper's `WARN: stale-capture`).
+In two 2026-09-23 verification runs the runner opened only one image and
+graded this frame "black with only the panel" while the file showed the
+full lock UI. The LOCK
 layer is owned by qdwin from the locker's wl_surface — the shell's
 death doesn't tear it down. Chrome / panel may be absent (shell is
 dead, no decorations) but the lock UI is intact.
