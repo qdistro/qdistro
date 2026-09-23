@@ -70,9 +70,9 @@ $VMEXEC "$VM" "echo $SUB_B64 | base64 -d > /tmp/listen-broker-signal.py"
 ### S1 — launch the admin app
 
 The signal subscriber is deliberately NOT started here. It is armed in S2
-immediately before the revoke keypress, so its `--timeout` budget covers only
-the Space→emit latency rather than the whole GUI launch/nav/screenshot
-choreography below (see the comment in S2 for why this matters).
+just before the final Tab+Space, so its `--timeout` budget doesn't have to
+cover the whole GUI launch/nav/screenshot choreography below (see the comment
+in S2 for why this matters).
 
 ```bash
 # Reap any listener left over from an interrupted prior run, then clear its
@@ -108,9 +108,14 @@ focus from the table OUT to the `btn_revoke` button, and **Space**
 activates it. The Tab-out-of-table step relies on the Cache table
 having `tabKeyNavigation` disabled — Qt's default traps Tab inside the
 view, which would make `btn_revoke` unreachable by keyboard with a row
-selected. Only once the row is selected and `btn_revoke` is focused do we arm
-the D-Bus subscriber and then press **Space** — so the subscriber's timeout
-covers just the revoke, not the GUI choreography that precedes it.
+selected. Once the row is selected we arm the D-Bus subscriber, and only then
+send the last two keys, **Tab** and **Space**, together in one host block.
+
+**The last Tab is required.** Without it, Space goes to the table, not to
+Revoke, and nothing is revoked. The 2026-09-23 worktree rerun
+(gui-20260923T211440Z-3686994) dropped that Tab because the scenario used to
+place it on the far side of the subscriber-arming step. The result was the
+row still selected, no signal and no audit row.
 
 **Where each command runs.** Every `virsh send-key` and `$VMGUI screenshot`
 line below is a HOST command: the libvirt domain `$VM` exists only on the host.
@@ -146,21 +151,19 @@ sleep 0.3
 virsh send-key "$VM" --codeset linux KEY_DOWN
 sleep 0.3
 $VMGUI "$VM" screenshot /tmp/22-s2b-row-selected.png
-# Tab: focus OUT of the table to btn_revoke (needs tabKeyNavigation off).
-virsh send-key "$VM" --codeset linux KEY_TAB
-sleep 0.3
 
-# Arm the signal subscriber NOW — immediately before the revoke — and BLOCK
-# until it is actually listening (the --ready file). This keeps its --timeout
-# budget scoped to the Space->emit latency only; anchoring it back in S1 (with
-# the admin-app launch, six send-keys, and three screenshots in between) is
-# what made this scenario flake under full-run load — the 30s window expired
-# before Space ever fired the revoke. The subscribe/emit race stays closed
-# because we wait for --ready before sending Space, and none of the nav keys
-# above trigger a revoke; only Space does. Starting a process on the VM does
-# not steal the admin app's GUI focus, so btn_revoke stays focused.
+# GUEST: arm the signal subscriber now, just before the revoke, and BLOCK
+# until it is listening (the --ready file). The subscribe/emit race stays
+# closed because we wait for --ready before sending Space. None of the nav
+# keys trigger a revoke; only Space does. Starting a process on the VM does
+# not steal the admin app's GUI focus, so the table keeps focus.
+# --timeout 300: the listener exits on the first signal, so the timeout only
+# bounds an orphan. It must still outlast the gap from arming to Space. With a
+# guest driver and host markers that gap was 117s in the 2026-09-23 rerun,
+# far past the old 30s budget. Arming in S1 was worse: the launch, the nav and
+# the screenshots all ran down the clock.
 $VMEXEC "$VM" 'setsid python3 /tmp/listen-broker-signal.py ApprovalRevoked \
-    --ready /tmp/22-ready --out /tmp/22-signals.json --timeout 30 \
+    --ready /tmp/22-ready --out /tmp/22-signals.json --timeout 300 \
     >/tmp/22-sub.log 2>&1 </dev/null &
   echo $! >/tmp/22-monitor.pid'
 $VMEXEC "$VM" 'for i in $(seq 1 50); do [ -f /tmp/22-ready ] && break; sleep 0.1; done; \
@@ -168,7 +171,12 @@ $VMEXEC "$VM" 'for i in $(seq 1 50); do [ -f /tmp/22-ready ] && break; sleep 0.1
   [ -s /tmp/22-signals.json ] && { echo "premature signal before revoke:"; cat /tmp/22-signals.json; exit 1; }; \
   echo "subscriber ready"'
 
-# Space: activate the focused Revoke button.
+# HOST, ONE block, in this order: Tab then Space. Don't split it and
+# don't drop the Tab.
+# Tab: focus OUT of the table to btn_revoke (needs tabKeyNavigation off).
+virsh send-key "$VM" --codeset linux KEY_TAB
+sleep 0.3
+# Space: activate the now-focused Revoke button.
 virsh send-key "$VM" --codeset linux KEY_SPACE
 sleep 1
 $VMGUI "$VM" screenshot /tmp/22-s2c-after-revoke.png
@@ -259,9 +267,9 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
   this scenario used `dbus-monitor`, which both raced the revoke at start-up
   and tested the eavesdrop path rather than the ordinary receive policy that
   production subscribers use — the subscriber fixes both.
-- Do NOT move the subscriber start back into S1. It is armed in S2 right
-  before the Space keypress on purpose: the `--timeout` must cover only the
-  revoke's emit latency, not the admin-app launch + keyboard nav + screenshots.
+- Do NOT move the subscriber start back into S1. It is armed in S2 right before
+  the final Tab+Space on purpose: the `--timeout` must not have to cover the
+  admin-app launch + keyboard nav + screenshots.
   When it was anchored in S1, slow full-run hosts blew the 30s window before
   the revoke fired, so the signal was emitted to an already-exited listener and
   the scenario falsely read as "broker never emitted ApprovalRevoked". The
