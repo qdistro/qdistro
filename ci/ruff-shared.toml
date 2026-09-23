@@ -27,6 +27,16 @@
 line-length = 100
 target-version = "py311"
 extend-exclude = ["build", "dist", ".venv", "*.egg-info", "__pycache__"]
+# No first-party SOURCE ROOTS. ruff's default `src = [".", "src"]` is resolved
+# against the cwd, which the host gate sets to the repository root. Since the
+# monorepo migration the root also holds the components (qnotebook/,
+# qdlocker/, qdbrowser/, qdgreeter/, ...), so "." made e.g. `from qnotebook
+# import x` in qnotebook/tests FIRST-party and demanded a separate import block
+# (26 I001 findings with no code change). In the sibling layout those
+# directories were not under the cwd and the imports were third-party. An empty
+# `src` restores that: a file's own package is still first-party (ruff's
+# package-root detection), everything else is classified as before.
+src = []
 
 [lint]
 # Enforced families (calibrated green on current main):
