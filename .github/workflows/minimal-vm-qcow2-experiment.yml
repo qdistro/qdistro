@@ -34,7 +34,7 @@ jobs:
       - name: Install image tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils gnupg wget jq
+          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils gnupg wget jq xfsprogs
           for tool in guestfish virt-resize virt-customize virt-filesystems qemu-img gpgv; do command -v "$tool"; done
           # The hosted Azure kernel is mode 0600. supermin only needs a readable
           # copy to boot its userspace QEMU appliance; image work remains rootless.
@@ -63,7 +63,7 @@ jobs:
           virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
           # Exercise an actual libguestfs guest write, keeping cloud-init and
           # upstream account policy intact; no hard-coded test credentials.
-          virt-customize -a "$VM_IMAGE" --run-command 'true'
+          virt-customize --no-network -a "$VM_IMAGE" --run-command 'true'
 
       - name: Validate boot disk
         shell: bash
@@ -72,6 +72,8 @@ jobs:
           qemu-img check "$VM_IMAGE"
           qemu-img info --output=json "$VM_IMAGE" | jq -e '.format == "qcow2" and .["virtual-size"] == 8589934592 and .["backing-filename"] == null'
           virt-filesystems --long --parts --filesystems -a "$VM_IMAGE"
+          root_size="$(guestfish --ro -a "$VM_IMAGE" run : vfs-size /dev/sda3)"
+          test "$root_size" -gt 7000000000
           test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda2 / : is-file /EFI/BOOT/bootx64.efi)" = true
           (cd "$(dirname "$VM_IMAGE")" && sha256sum "$(basename "$VM_IMAGE")" > "$(basename "$VM_IMAGE").sha256")
           {
