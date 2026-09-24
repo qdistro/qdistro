@@ -346,7 +346,7 @@ check_opt     "qdistro-release marker"    /etc/qdistro-release
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
 # The writer's SOURCE grammar (shared with image/lib/release-stamp.sh).
 # shellcheck source=lib/release-stamp.sh
-. "$(dirname "$(readlink -f "$0")")/lib/release-stamp.sh"
+. "$CHECKER_DIR/lib/release-stamp.sh"
 release_file="$(file_in_image "$ROOT/etc/qdistro/release" 2>/dev/null || true)"
 release_problem=""
 # field <KEY> -- the value of exactly one KEY= line, or nothing (so a

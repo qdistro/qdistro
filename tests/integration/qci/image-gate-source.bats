@@ -285,6 +285,28 @@ EOF
     [[ "$ROW" == *"ancestor $OLD (DIRTY), 1 commit(s) behind HEAD $HEAD_SHA"* ]]
 }
 
+@test "image gate: the canonical stamp (SOURCE qdistro HEAD clean) is a pass, exact, with no source note" {
+    stub_checker_pass
+    stamp "SOURCE qdistro $HEAD_SHA clean"
+    run_gate
+    [ "$status" -eq 0 ]
+    [ "$(field 3)" = pass ]
+    [ "$(field 8)" = "static checklist passed ($BUILD/extracted)" ]
+    grep -qx "image_source_relation=exact" "$T"/runs/*/manifest.txt
+    grep -qx "image_source_state=clean" "$T"/runs/*/manifest.txt
+}
+
+@test "image gate: the null OID is invalid provenance: fail/20, not a blocked identity" {
+    stub_checker_pass
+    stamp "SOURCE qdistro 0000000000000000000000000000000000000000 clean"
+    run_gate
+    [ "$status" -eq 20 ]
+    [ "$(field 3)" = fail ]
+    [[ "$ROW" == *"image provenance invalid"* ]]
+    [[ "$ROW" == *"non-null"* ]]
+    grep -q "stub checklist" "$T"/runs/*/host/image-verify-contents.log
+}
+
 @test "image gate: a bundle built from HEAD itself (valid DIRTY) runs the checklist and passes when it does" {
     stub_checker_pass
     stamp "SOURCE qdistro $HEAD_SHA DIRTY diff-sha256=0123456789abcdef untracked=0"

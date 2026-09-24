@@ -48,10 +48,13 @@ qdistro_file_has_nul() {
 # _qdistro_source_emit <kind> <file> <sha> <state> -- fail closed: a
 # "successful" classification must still carry a 40-hex SHA and a state.
 _qdistro_source_emit() {
-    if [[ "$3" =~ ^[0-9a-f]{40}$ ]] && [[ "$4" =~ ^(clean|DIRTY)$ ]]; then
+    # The null OID is well-formed hex but names no commit: build.sh never
+    # writes it, so it is a damaged stamp (invalid), not an identity.
+    if [[ "$3" =~ ^[0-9a-f]{40}$ ]] && [ "$3" != 0000000000000000000000000000000000000000 ] \
+        && [[ "$4" =~ ^(clean|DIRTY)$ ]]; then
         echo "$1 $3 $4"; return 0
     fi
-    echo "invalid $2 SOURCE qdistro line did not yield a 40-hex SHA and clean|DIRTY state"
+    echo "invalid $2 SOURCE qdistro line did not yield a non-null 40-hex SHA and clean|DIRTY state"
     return 1
 }
 
@@ -60,9 +63,9 @@ qdistro_read_release_source() {
     if [ -L "$f" ]; then echo "invalid $f is a symlink"; return 1; fi
     if [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "invalid $f is missing or unreadable"; return 1; fi
     if qdistro_file_has_nul "$f"; then echo "invalid $f contains a NUL byte (binary, not the writer's text)"; return 1; fi
-    n="$(LC_ALL=C grep -ac '^SOURCE' "$f")"
+    n="$(LC_ALL=C grep -ac '^SOURCE ' "$f")"
     if [ "$n" -eq 1 ]; then
-        line="$(LC_ALL=C grep -a '^SOURCE' "$f")"
+        line="$(LC_ALL=C grep -a '^SOURCE ' "$f")"
         if ! printf '%s\n' "$line" | LC_ALL=C grep -aqE "$(qdistro_source_line_ere qdistro)"; then
             echo "invalid $f SOURCE line is not 'SOURCE qdistro <40-hex> clean|DIRTY diff-sha256=<16-hex> untracked=<n>'"
             return 1

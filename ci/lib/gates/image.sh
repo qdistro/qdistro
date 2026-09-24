@@ -97,7 +97,9 @@ image_source_check() {
         kv image_source_relation not-ancestor
         return 1
     elif [ "$rc" -eq 1 ]; then
-        IMAGE_SOURCE_REASON="image source unknown: built from $sha, not reachable from HEAD $head in a shallow history (shallow=$shallow); ancestry cannot be established; $fetch"
+        local hist="in a shallow history"
+        [ "$shallow" = true ] || hist="and history shallowness unknown (git rev-parse --is-shallow-repository: $shallow)"
+        IMAGE_SOURCE_REASON="image source unknown: built from $sha, not reachable from HEAD $head $hist; ancestry cannot be established; $fetch"
         kv image_source_relation unknown
         return 1
     elif [ "$rc" -ne 0 ]; then
