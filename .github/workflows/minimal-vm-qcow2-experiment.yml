@@ -34,7 +34,7 @@ jobs:
       - name: Install image tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils gnupg wget jq xfsprogs
+          sudo apt-get install -y --no-install-recommends libguestfs-tools libguestfs-xfs qemu-utils gnupg wget jq xfsprogs
           for tool in guestfish virt-resize virt-customize virt-filesystems qemu-img gpgv; do command -v "$tool"; done
           # The hosted Azure kernel is mode 0600. supermin only needs a readable
           # copy to boot its userspace QEMU appliance; image work remains rootless.
