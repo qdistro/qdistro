@@ -42,19 +42,21 @@ The build script writes unpacked browser trees under `dist/`.
 ## Test
 
 ```bash
-npm test              # sibling-repo drift check skips-with-warning if absent
+npm test              # drift check against ../qdfirefox-extension (skips-with-warning if absent)
 npm run test:release  # QDISTRO_REQUIRE_SIBLING=1 — absent sibling is FATAL
 ```
 
 **Release CI must use `npm run test:release`** (or otherwise set
-`$QDISTRO_REQUIRE_SIBLING=1`) with `qdfirefox-extension` checked out
-side-by-side, or with `$QDISTRO_SIBLING_GOLDEN` pointing at its
-`tests/fixtures/golden-frames.js`. Both repos carry a byte-identical copy of
+`$QDISTRO_REQUIRE_SIBLING=1`). In the qdistro monorepo the sibling
+`qdfirefox-extension` component is always in-tree at `../qdfirefox-extension`;
+`$QDISTRO_SIBLING_GOLDEN` can point at its `tests/fixtures/golden-frames.js`
+for other layouts. Both extension components carry a byte-identical copy of
 that fixture — the bridge wire-protocol contract — and
 `tests/golden-frames-drift.test.js` warns and exits green instead of comparing
-across repos when the sibling is missing, so a plain `npm test` in a single-repo clone can
-be green without ever checking that the two protocol copies agree. qdistro's
-`qci` host gate sets both env vars for this repo.
+the two copies when the sibling is missing (e.g. this directory copied out on
+its own), so the plain `npm test` form alone does not prove the two protocol
+copies agree. qdistro's
+`qci` host gate sets both env vars for this component.
 
 ## Install
 

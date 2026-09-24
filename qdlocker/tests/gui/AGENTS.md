@@ -94,8 +94,8 @@ qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running |
 qdlocker_session_healthy || { echo "session not up"; exit 2; }
 ```
 
-`qdlocker-helpers.sh` sources `qdwin-helpers.sh` from the qdwin
-sibling repo (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`, and
+`qdlocker-helpers.sh` sources `qdwin-helpers.sh` from the in-tree
+`qdwin/` component (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`, and
 `qdwin_qmp_key` work as documented in qdwin's AGENTS.md) and adds
 locker-specific accessors. qdlocker core scenarios use the qdlocker socket,
 Quickshell IPC where explicitly required, and direct VM commands; they must

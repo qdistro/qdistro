@@ -89,7 +89,7 @@ Each @test wraps one of the reproducible probes in
 has pipewire up, and has a recent qdwin-shell.so + qdistro-forward
 installed. If you changed code on the host, re-run
 `scripts/vm/spin-test-vm.sh <prefix>` against a fresh clone — the
-bake pipeline tarballs the three sibling repos, pushes them into
+bake pipeline tarballs the qdistro monorepo, pushes it into
 the VM, rebuilds qdwin + daemons, and reruns the install scripts.
 
 ## Dependencies
@@ -151,8 +151,12 @@ scripts, and start pipewire.
 When a new probe lands in `scripts/vm/`, add a matching
 @test here. The test body should:
 
-1. Assume the VM already has the probe deployed (or deploy it via
-HTTP-server-on-host pattern: the host serves the three sibling-repo tarballs over SLIRP NAT on 10.0.2.2:8765.
+1. Assume the VM already has the probe deployed (or deploy it via the
+   HTTP-server-on-host pattern: the host serves the monorepo tarball over
+   SLIRP NAT at `10.0.2.2:<staging-port>`; `spin-test-vm.sh` binds a
+   kernel-chosen free port per run and passes `http://10.0.2.2:$SPIN_HTTP_PORT`
+   to the bootstrap; 8765 remains the manual-bootstrap default and the
+   enforcing-base builder's default (`build-enforcing-baseweed.sh --http-port`)).
 2. Run the probe via `vm-exec`.
 3. Assert on exit code via `[ "$status" -eq 0 ]`.
 4. Optionally `run-asserts` specific log lines via grep.

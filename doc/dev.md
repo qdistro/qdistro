@@ -566,8 +566,8 @@ covers in-codebase intelligence, while MCP is for external systems
 - Man pages under `doc/`. At minimum: `<app>.1` (usage) and
  `<app>-config.5` (config file reference).
 - `README.md` covers features, installation, runtime deps, quickstart.
-- User-facing docs live in the app repo. Admin/devops docs stay in the
- umbrella qdistro repo.
+- User-facing docs live in the app's component directory. Admin/devops docs
+ stay in the root `doc/`.
 
 ## Why these specifics
 

@@ -32,7 +32,7 @@ wl_display. For each native toplevel it wants the outer to host, it:
    inner replays into its own seat infrastructure.
 
 Pixels move via PipeWire, not Wayland: the outer's
-`qdistro-nested-pixelfeed` daemon (umbrella repo) consumes the
+`qdistro-nested-pixelfeed` daemon (root `daemons/`) consumes the
 PipeWire stream, optionally allocates dmabuf buffers via
 `zwp_linux_dmabuf_v1`, and posts them as wl_buffers to the
 placeholder surface. The dmabuf path is true zero-copy when the
@@ -97,7 +97,7 @@ authoritative.
 
 Cursors are owned by the outer because the outer is the seat owner.
 The shell client (or its `qdistro-cursor-sprites` helper in the
-umbrella repo) installs theme sprites for each `cursor-shape-v1`
+root `daemons/`) installs theme sprites for each `cursor-shape-v1`
 shape via `qdwin_shell_v1.set_cursor_sprite`. The inner never sees
 pointer-set-cursor.
 

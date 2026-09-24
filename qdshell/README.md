@@ -2,7 +2,7 @@
 
 A Wayland desktop shell for [qdistro](https://github.com/qdistro/qdistro)
 — bar, panels, launcher, notifications, OSD, and settings — running on
-top of the [qdwin](https://github.com/qdistro/qdwin) compositor.
+top of the [qdwin](../qdwin) compositor.
 
 ## Role in qdistro
 
@@ -59,7 +59,7 @@ The QML tree itself has no build step. Two pieces do get built/installed:
   thing meson builds here — meson does not install the QML tree.
 - **Deployment**: the real session install (QML tree to
   `/usr/share/quickshell/qdshell` plus the plugin) is done by the
-  umbrella repo's `scripts/install/install-qdwin-session-for-vm.sh`,
+  root `scripts/install/install-qdwin-session-for-vm.sh`,
   which is what the bootstrap and the CI VM provisioning use.
 
 For a quick host-side preview outside a qdwin session:

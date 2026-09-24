@@ -2,9 +2,9 @@
 
 Graphical boot greeter for qdistro. Drop-in replacement for `tuigreet`
 on the admin TTY, sharing the Python + QML stack and the qdshell
-styling story with sibling repos
-[qdlocker](https://github.com/qdistro/qdlocker) and
-[qdshell](https://github.com/qdistro/qdshell).
+styling story with sibling components
+[qdlocker](../qdlocker) and
+[qdshell](../qdshell).
 
 ## Role in qdistro
 

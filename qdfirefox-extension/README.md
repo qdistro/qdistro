@@ -10,13 +10,13 @@ media status, downloads, notifications, cookies, and screen-lock inhibition can
 be mediated by qdistro policy.
 
 Firefox containers/contextual identities are the reason this remains a separate
-subrepo instead of a build target of qdchrome-extension. Containers map naturally
+component instead of a build target of qdchrome-extension. Containers map naturally
 onto qdistro's silo/session model and let browser state carry a stronger
 context boundary than a plain profile alone.
 
-## Why a separate repo
+## Why a separate component
 
-qdchrome-extension *used to* build a Firefox MV2 xpi (concatenated bundle, `chrome.*` callback API); that target was removed because it collided with the then-bundled extension's gecko id, so qdchrome is Chromium-only. That bundled tree has since been deleted (J11) and its id revoked, so this repo is now the *only* source of the qdistro Firefox extension. It is Firefox-native:
+qdchrome-extension *used to* build a Firefox MV2 xpi (concatenated bundle, `chrome.*` callback API); that target was removed because it collided with the then-bundled extension's gecko id, so qdchrome is Chromium-only. That bundled tree has since been deleted (J11) and its id revoked, so this component is now the *only* source of the qdistro Firefox extension. It is Firefox-native:
 
 - **MV3** (`background.scripts` event page, not the deprecated MV2 background page)
 - **`browser.*` Promise API** throughout — no callback-shim
@@ -25,7 +25,7 @@ qdchrome-extension *used to* build a Firefox MV2 xpi (concatenated bundle, `chro
 ## Status
 
 In development, tracking the v1 bridge op set. The module table below is the
-intended surface; the vitest suite (see [Test](#test)) and the cross-repo
+intended surface; the vitest suite (see [Test](#test)) and the cross-component
 golden-frame contract tests are the source of truth for what is covered.
 
 | Module           | Direction        | Ops                                                 |
@@ -73,25 +73,27 @@ WEB_EXT_API_KEY=... WEB_EXT_API_SECRET=... bash scripts/build-extension.sh --sig
 ## Test
 
 ```bash
-npm test              # sibling-repo drift check skips-with-warning if absent
+npm test              # drift check against ../qdchrome-extension (skips-with-warning if absent)
 npm run test:release  # QDISTRO_REQUIRE_SIBLING=1 — absent sibling is FATAL
 ```
 
 **Release CI must use `npm run test:release`** (or otherwise set
-`$QDISTRO_REQUIRE_SIBLING=1`) with `qdchrome-extension` checked out
-side-by-side, or with `$QDISTRO_SIBLING_GOLDEN` pointing at its
-`tests/fixtures/golden-frames.js`. Both repos carry a byte-identical copy of
+`$QDISTRO_REQUIRE_SIBLING=1`). In the qdistro monorepo the sibling
+`qdchrome-extension` component is always in-tree at `../qdchrome-extension`;
+`$QDISTRO_SIBLING_GOLDEN` can point at its `tests/fixtures/golden-frames.js`
+for other layouts. Both extension components carry a byte-identical copy of
 that fixture — the bridge wire-protocol contract — and
 `tests/golden-frames-drift.test.js` warns and exits green instead of comparing
-across repos when the sibling is missing, so a plain `npm test` in a single-repo clone can
-be green without ever checking that the two protocol copies agree. qdistro's
-`qci` host gate sets both env vars for this repo.
+the two copies when the sibling is missing (e.g. this directory copied out on
+its own), so the plain `npm test` form alone does not prove the two protocol
+copies agree. qdistro's
+`qci` host gate sets both env vars for this component.
 
 Vitest. Most suites load the source files into a synthetic `self` global with
 a `browser.*` Promise-API shim — same shape as qdchrome-extension's helpers;
 DOM-facing suites (popup, options, content scripts) opt into jsdom via
-`@vitest-environment` pragmas. The two extension repos are developed in
-lockstep and share cross-repo "golden frame" wire-contract tests.
+`@vitest-environment` pragmas. The two extension components are developed in
+lockstep and share cross-component "golden frame" wire-contract tests.
 
 ## Install
 
