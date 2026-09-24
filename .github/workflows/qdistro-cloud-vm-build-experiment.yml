@@ -107,7 +107,7 @@ jobs:
           # which the KIWI image lists for qdshell's Meson QML plugin.
           vmssh 'sudo -n zypper -n install --no-recommends \
             qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
-            qt6-declarative-devel qt6-svg-devel qt6-shadertools'
+            qt6-declarative-devel qt6-svg-devel qt6-shadertools python313-pip'
           vmssh 'sudo -n bash /opt/qdistro-src/scripts/install/qdistro-bootstrap.sh \
             --profile=dev --strict --yes --noninteractive --skip-sources --skip-subvolumes \
             --repo-root=/opt/qdistro-src --admin-password=qdistro \
