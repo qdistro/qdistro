@@ -15,66 +15,95 @@
 # image_source_check <tree> -- is the auto-discovered image under <tree> built
 # from the tree under test? The build stamps its source into the image as
 # /etc/qdistro/release (image/lib/release-stamp.sh, written by config.sh in the
-# kiwi chroot): exactly one "SOURCE qdistro <40-hex> clean|DIRTY ..." line. The
-# bundle directory itself (bundle/*.verified, *.packages, *.sha256) carries no
-# source SHA, so the stamp inside the extracted tree is the only record.
+# kiwi chroot). The bundle directory itself (bundle/*.verified, *.packages,
+# *.sha256) carries no source SHA, so the stamp inside the extracted tree is
+# the only record. The stamp is parsed with the WRITER's grammar
+# (qdistro_read_release_source in release-stamp.sh), shared with
+# verify-contents.sh.
 #
-# Returns 0 when that SHA is HEAD of the tree under test or an ANCESTOR of it
-# (an older build of this line of history: allowed, logged with the distance).
-# Returns 1 and sets IMAGE_SOURCE_BLOCK_REASON otherwise:
-#   - the SHA is not an ancestor of HEAD, or is not a commit in this repo
-#     (built from another branch/clone): its checklist result says nothing
-#     about this tree, so a failure there is not a regression here;
-#   - no readable stamp, or not exactly one well-formed SOURCE qdistro line
-#     (e.g. the pre-monorepo sibling layout carried five SOURCE rows): the
-#     image cannot be tied to this tree at all. A tree built from THIS source
-#     always has a well-formed stamp (release-stamp.sh is fatal in config.sh),
-#     so a missing/malformed one means "some other build", not a regression;
-#     the verify-contents provenance row still fails it under an explicit --root.
+# Returns, setting IMAGE_SOURCE_REASON and IMAGE_SOURCE_NOTE:
+#   0  a valid stamp whose qdistro SHA is HEAD or an ANCESTOR of HEAD: inspect.
+#      An ancestor build is allowed but NOT proof of HEAD: IMAGE_SOURCE_NOTE
+#      carries the SHA/distance into the checklist row (and the log warns).
+#   1  BLOCKED: a VALID source identity that is incompatible with, or cannot be
+#      tied to, the tree under test --
+#        not-ancestor  proven on a complete (non-shallow) history;
+#        unknown       the source commit is not in the local object db, the
+#                      history is shallow, or git itself errored: the graph
+#                      cannot establish ancestry (fetch/deepen, not rebuild);
+#        legacy-layout the recognised pre-monorepo five-repo SOURCE schema
+#                      (the 2026-09-10 sibling-layout bundle).
+#   2  INVALID provenance: missing, unreadable, symlinked, duplicate or
+#      malformed stamp. That is a defect of the image under test (the writer
+#      is product code), so the caller still runs the checklist and FAILS.
 # ---------------------------------------------------------------------------
 image_source_check() {
-    local tree=$1 repo rel n_src sha state head behind
+    local tree=$1 repo rel cls kind sha state head behind err rc shallow
     local fix="rebuild the bundle from this tree with image/build-in-vm.sh, or set QDISTRO_BUILD_DIR to a build dir whose bundle was built from it"
-    IMAGE_SOURCE_BLOCK_REASON=""
+    local fetch="fetch or deepen the history (git fetch --unshallow / git fetch origin <branch>) so ancestry can be checked, or $fix"
+    IMAGE_SOURCE_REASON=""
+    IMAGE_SOURCE_NOTE=""
     repo="$(project_root qdistro)"
     rel="$tree/etc/qdistro/release"
-    # A symlink would be resolved against the HOST's /, not the image.
-    if [ -L "$rel" ] || [ ! -f "$rel" ] || [ ! -r "$rel" ]; then
-        IMAGE_SOURCE_BLOCK_REASON="image source unknown: $rel is missing or unreadable, so the image under $tree cannot be tied to the tree under test; $fix"
+    if [ ! -f "$IMAGE_DIR/lib/release-stamp.sh" ]; then
+        IMAGE_SOURCE_REASON="image source unknown: $IMAGE_DIR/lib/release-stamp.sh (the stamp grammar) is missing"
+        kv image_source_relation unknown
         return 1
     fi
-    n_src="$(grep -c '^SOURCE ' "$rel" 2>/dev/null || true)"
-    sha="$(sed -nE 's/^SOURCE qdistro ([0-9a-f]{40}) (clean|DIRTY .*)$/\1/p' "$rel" 2>/dev/null)"
-    if [ "${n_src:-0}" -ne 1 ] || [ "$(printf '%s\n' "$sha" | grep -c .)" -ne 1 ]; then
-        IMAGE_SOURCE_BLOCK_REASON="image source unknown: $rel has ${n_src:-0} SOURCE line(s), expected exactly one 'SOURCE qdistro <sha> clean|DIRTY' (several = a pre-monorepo sibling-layout build); $fix"
-        return 1
+    # shellcheck source=../../../image/lib/release-stamp.sh
+    . "$IMAGE_DIR/lib/release-stamp.sh"
+    cls="$(qdistro_read_release_source "$rel")"
+    read -r kind sha state _ <<<"$cls"
+    if [ "$kind" = invalid ]; then
+        IMAGE_SOURCE_REASON="image provenance invalid: ${cls#invalid }"
+        kv image_source_relation invalid
+        return 2
     fi
-    state="$(sed -nE 's/^SOURCE qdistro [0-9a-f]{40} (clean|DIRTY).*$/\1/p' "$rel")"
     kv image_source_sha "$sha"
     kv image_source_state "$state"
-    if ! head="$(git -C "$repo" rev-parse --verify -q HEAD 2>/dev/null)"; then
-        IMAGE_SOURCE_BLOCK_REASON="image built from $sha, but HEAD of the tree under test ($repo) cannot be resolved to check ancestry; $fix"
+    if [ "$kind" = legacy ]; then
+        IMAGE_SOURCE_REASON="stale image: pre-monorepo sibling-layout build (five SOURCE lines: $QDISTRO_LEGACY_SOURCE_REPOS; qdistro $sha); it was not built from this monorepo tree; $fix"
+        kv image_source_relation legacy-layout
+        return 1
+    fi
+    if ! head="$(git -C "$repo" rev-parse --verify -q HEAD 2>&1)"; then
+        IMAGE_SOURCE_REASON="image source unknown: image built from $sha, but HEAD of the tree under test ($repo) cannot be resolved (git: ${head:-no output}); $fix"
+        kv image_source_relation unknown
         return 1
     fi
     kv image_tree_head "$head"
     if [ "$sha" = "$head" ]; then
         kv image_source_relation exact
+        [ "$state" = clean ] || IMAGE_SOURCE_NOTE="image built from HEAD $head with a DIRTY tree"
         return 0
     fi
-    if ! git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null; then
-        IMAGE_SOURCE_BLOCK_REASON="stale image: built from $sha, which is not a commit in the tree under test (HEAD $head; another clone or an unfetched branch); $fix"
-        kv image_source_relation unknown-commit
+    shallow="$(git -C "$repo" rev-parse --is-shallow-repository 2>/dev/null || echo unknown)"
+    kv image_tree_shallow "$shallow"
+    err="$(git -C "$repo" cat-file -e "$sha^{commit}" 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        IMAGE_SOURCE_REASON="image source unknown: built from $sha, which is not available in the local history of the tree under test (HEAD $head; shallow=$shallow${err:+; git: $err}); cannot tell whether it is an ancestor; $fetch"
+        kv image_source_relation unknown
         return 1
     fi
-    if ! git -C "$repo" merge-base --is-ancestor "$sha" "$head" 2>/dev/null; then
-        IMAGE_SOURCE_BLOCK_REASON="stale image: built from $sha, which is not an ancestor of the tree under test (HEAD $head); $fix"
+    err="$(git -C "$repo" merge-base --is-ancestor "$sha" "$head" 2>&1)"; rc=$?
+    if [ "$rc" -eq 1 ] && [ "$shallow" = false ]; then
+        IMAGE_SOURCE_REASON="stale image: built from $sha, which is not an ancestor of the tree under test (HEAD $head); $fix"
         kv image_source_relation not-ancestor
+        return 1
+    elif [ "$rc" -eq 1 ]; then
+        IMAGE_SOURCE_REASON="image source unknown: built from $sha, not reachable from HEAD $head in a shallow history (shallow=$shallow); ancestry cannot be established; $fetch"
+        kv image_source_relation unknown
+        return 1
+    elif [ "$rc" -ne 0 ]; then
+        IMAGE_SOURCE_REASON="image source unknown: git merge-base --is-ancestor $sha $head failed rc=$rc (${err:-no output}); ancestry cannot be established; $fetch"
+        kv image_source_relation unknown
         return 1
     fi
     behind="$(git -C "$repo" rev-list --count "$sha..$head" 2>/dev/null || echo '?')"
     kv image_source_relation ancestor
     kv image_source_behind "$behind"
-    log "image: WARNING bundle built from $sha ($state), an ancestor $behind commit(s) behind HEAD $head; checklist results describe that build, not HEAD"
+    IMAGE_SOURCE_NOTE="image built from ancestor $sha ($state), $behind commit(s) behind HEAD $head; not proof of HEAD"
+    log "image: WARNING $IMAGE_SOURCE_NOTE"
     return 0
 }
 
@@ -164,13 +193,17 @@ gate_image() {
     # checklist verdict is about some other source (the 2026-09-10 sibling-
     # layout bundle "failed" verify-contents on the monorepo). An explicit
     # --root is the caller's deliberate choice and is inspected as given.
-    local source_block=""
+    local source_block="" source_invalid="" source_note=""
     if [ -z "$root" ] && [ -n "$static_root" ] && [ -d "$static_root" ]; then
-        if ! image_source_check "$static_root"; then
-            source_block="$IMAGE_SOURCE_BLOCK_REASON"
-            log "image: $source_block"
-            record_blocked image verify-contents "$EXIT_BUILD" image "$source_block"
-        fi
+        image_source_check "$static_root"
+        case $? in
+            0) source_note="$IMAGE_SOURCE_NOTE" ;;
+            1) source_block="$IMAGE_SOURCE_REASON"
+               log "image: $source_block"
+               record_blocked image verify-contents "$EXIT_BUILD" image "$source_block" ;;
+            *) source_invalid="$IMAGE_SOURCE_REASON"
+               log "image: $source_invalid" ;;
+        esac
     fi
     if [ -n "$source_block" ]; then
         :   # blocked above; do not judge (or boot) an unrelated build
@@ -180,10 +213,17 @@ gate_image() {
         log "image: static content checklist against ${static_root:-<unset>}"
         bash "$checker" "$static_root" > "$sc_log" 2>&1
         local sc_rc=$?
-        if [ "$sc_rc" -eq 0 ]; then
-            record_result image verify-contents pass 0 pass image "$sc_log" "static checklist passed ($static_root)"
+        local sc_extra=""
+        [ -n "$source_note" ] && sc_extra="; $source_note"
+        [ -n "$source_invalid" ] && sc_extra="; $source_invalid"
+        if [ "$sc_rc" -eq 0 ] && [ -z "$source_invalid" ]; then
+            record_result image verify-contents pass 0 pass image "$sc_log" "static checklist passed ($static_root)$sc_extra"
         else
-            record_result image verify-contents fail "$EXIT_BUILD" build image "$sc_log" "static checklist failed rc=$sc_rc ($static_root)"
+            # Invalid provenance fails even if every checklist row passed:
+            # an image that cannot say what went in is not a tester image.
+            local verdict="static checklist failed rc=$sc_rc"
+            [ "$sc_rc" -eq 0 ] && verdict="static checklist passed but provenance is invalid"
+            record_result image verify-contents fail "$EXIT_BUILD" build image "$sc_log" "$verdict ($static_root)$sc_extra"
             rc=$EXIT_BUILD
             # Fail fast: do not boot a tree that failed static inspection.
             return "$rc"
