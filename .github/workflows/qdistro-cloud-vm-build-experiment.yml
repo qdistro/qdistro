@@ -87,7 +87,7 @@ jobs:
             -display none -serial file:"$RUNNER_TEMP/qdistro-image/serial.log" -monitor none \
             > "$RUNNER_TEMP/qdistro-image/qemu.log" 2>&1 &
           qemu_pid=$!
-          trap 'kill "$qemu_pid" 2>/dev/null || true' EXIT
+          trap 'df -h /; du -h "$VM_IMAGE"; kill "$qemu_pid" 2>/dev/null || true' EXIT
           vmssh() {
             ssh -i "$RUNNER_TEMP/qdistro-image/builder-key" -p 2222 \
               -o BatchMode=yes -o StrictHostKeyChecking=no \
@@ -103,10 +103,16 @@ jobs:
           if [ "$ready" -ne 1 ]; then tail -120 "$RUNNER_TEMP/qdistro-image/serial.log"; exit 1; fi
           vmssh 'df -h /; cat /etc/os-release | head -5'
           git archive HEAD | vmssh 'sudo -n install -d -m 0755 /opt/qdistro-src && sudo -n tar -xf - -C /opt/qdistro-src'
+          # The regular cloud bootstrap lacks the Qt development dependencies
+          # which the KIWI image lists for qdshell's Meson QML plugin.
+          vmssh 'sudo -n zypper -n install --no-recommends \
+            qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
+            qt6-declarative-devel qt6-svg-devel qt6-shadertools'
           vmssh 'sudo -n bash /opt/qdistro-src/scripts/install/qdistro-bootstrap.sh \
             --profile=dev --strict --yes --noninteractive --skip-sources --skip-subvolumes \
             --repo-root=/opt/qdistro-src --admin-password=qdistro \
-            --user=user --user-password=qdistro --reset-passwords' \
+            --user=user --user-password=qdistro --reset-passwords; \
+            rc=$?; df -h /; exit "$rc"' \
             2>&1 | tee "$RUNNER_TEMP/qdistro-image/bootstrap.log"
           vmssh 'sudo -n test -f /var/lib/qdistro/bootstrap/installer-chain.state && \
             sudo -n test -f /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir && \
