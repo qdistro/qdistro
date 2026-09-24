@@ -66,12 +66,58 @@ print_triage() {
     echo "Artifacts: $dir"
 }
 
+# Every subcommand main() dispatches. Keep in sync with the case arms in
+# main() and the Usage: block in usage.sh (qci-subcommand-help.bats checks
+# the latter against this list through the real runner).
+QCI_COMMANDS="preflight lint selftest image registry-check release-manifest \
+bootstrap-release-profile affected edit-guard replay host vm-smoke bats gui \
+gui-admin full snapshot-daily mmnet cleanup report triage list-runs"
+
+qci_is_command() {
+    local c
+    for c in $QCI_COMMANDS; do
+        [ "$c" = "$1" ] && return 0
+    done
+    return 1
+}
+
+# True when a subcommand's args ask for help (-h/--help before any `--`).
+qci_wants_help() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --) return 1 ;;
+            -h|--help) return 0 ;;
+        esac
+        shift
+    done
+    return 1
+}
+
 main() {
     local cmd=${1:-}
     shift || true
     case "$cmd" in
         -h|--help|help|"") usage; exit "$EXIT_USAGE" ;;
     esac
+    # Reject an unknown command BEFORE init_run, so a typo never leaves an
+    # empty run dir behind. QCI_COMMANDS must list every case arm below; a
+    # missing entry fails loudly as "unknown command", never as a silent run.
+    if ! qci_is_command "$cmd"; then
+        echo "unknown command: $cmd" >&2
+        usage >&2
+        exit "$EXIT_USAGE"
+    fi
+    # `qci <sub> -h|--help` prints usage and exits EXIT_USAGE, the same code as
+    # top-level `qci --help` (pinned by qci-runner-contract.bats): a help
+    # request ran no gate, so it must never read as a pass to `&&` chains.
+    # This runs BEFORE init_run: no run dir, no results row, no VM. Without
+    # it every subcommand either ran its gate (--help ignored or taken as a
+    # bats file / triage run dir) or created a run dir to record the flag as
+    # "unknown arg". Operands after `--` are paths, not flags.
+    if qci_wants_help "$@"; then
+        usage
+        exit "$EXIT_USAGE"
+    fi
 
     case "$cmd" in
         report|triage|list-runs)
