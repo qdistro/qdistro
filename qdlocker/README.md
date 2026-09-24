@@ -89,15 +89,15 @@ qdlocker/
 └── pyproject.toml
 ```
 
-## Styling — reuses qdshell
+## Styling — mirrors qdshell
 
-The QML imports `qs.Commons` (Style.qml, Color.qml, Icons.qml) and
-`qs.Widgets` (NText, NIcon, NIconButton, NBusyIndicator) from the
-in-tree [qdshell](../qdshell) component. `app.py:_qdshell_import_path` finds
-it automatically at `../qdshell` (its location in this repository);
-`QDLOCKER_QDSHELL_PATH=/path/to/qdshell` is only an override for unusual
-layouts, such as an installed qdlocker outside the source tree. The locker falls back to inline rendering for the
-header if qdshell isn't on the path.
+The QML imports only the in-tree `shim` module (`qml/shim/Style.qml`,
+`qml/shim/Color.qml`): Quickshell-free singletons whose property names and
+default values mirror [qdshell](../qdshell)'s `Commons/Style.qml` and
+`Commons/Color.qml`, so the locker looks like the shell without depending on
+it. No QML file imports `qs.*`. `app.py:_qdshell_import_path` still adds
+qdshell (found at `../qdshell`, or `QDLOCKER_QDSHELL_PATH=/path/to/qdshell`)
+to the QML import path, but that is only a hook: nothing uses it today.
 
 ## Run
 

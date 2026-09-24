@@ -63,9 +63,10 @@ The qdshell QML lives in the sibling [qdshell](../qdshell) component.
 Several daemons that consume qdwin protocols (`qdistro-cursor-sprites`,
 `qdistro-nested-pixelfeed`, `qdistro-secctx-exec`, `qdistro-tier1-exec`,
 `qdistro-forward`) live in the root `daemons/` directory. They compile
-against qdwin's protocol XML, either from qdwin's uninstalled build tree (see
-the root [AGENTS.md](../AGENTS.md) build order) or from the system
-`wayland-protocols` directory once qdwin is installed.
+against qdwin's protocol XML through the `qdistro-protocols` pkg-config
+package: qdwin installs the XMLs to `$datadir/qdistro/protocols`, and its
+uninstalled build tree provides the same package for in-tree builds (see the
+root [AGENTS.md](../AGENTS.md) build order).
 
 ## Build
 

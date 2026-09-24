@@ -194,10 +194,10 @@ kept treating an empty allowlist as "all origins". That was drift, not a
 deliberately different Firefox posture: the two extension components are
 maintained as parallel copies (the byte-identical
 `tests/fixtures/golden-frames.js` and its cross-component drift guard exist
-precisely because of that), and J11 simply
-patched one of the two. The Firefox port is
-`qdfirefox-extension` `fix/j11-firefox-allowlist-closed`; the stager below
-will not install a tree that is open by default, so the two land together.
+precisely because of that), and J11 at first
+patched only one of the two. The Firefox port has since landed: both in-tree
+copies are closed by default (`qdfirefox-extension/src/gate.js`), and the
+stager below will not install a tree that is open by default.
 
 **A second, `bundled` artifact used to exist and was the default — it was
 retired for J11.** It was vendored at `browser_bridge/extension/`: an MV2

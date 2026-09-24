@@ -93,7 +93,7 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   acceptance bar.
 - **Cheap per-component host checks** (development feedback only; they do
   **not** satisfy a selected `host` gate). `qci host` has no component
-  selector; these are its rows from `ci/lib/gates/host.sh`. Run each
+  selector; these are three of its rows (`ci/lib/gates/host.sh:537-541`). Run each
   independently from the repository root (the host's Python/Qt test
   dependencies must be installed); each takes seconds:
 

@@ -87,7 +87,7 @@ that fixture — the bridge wire-protocol contract — and
 the two copies when the sibling is missing (e.g. this directory copied out on
 its own), so the plain `npm test` form alone does not prove the two protocol
 copies agree. qdistro's
-`qci` host gate sets both env vars for this repo.
+`qci` host gate sets both env vars for this component.
 
 Vitest. Most suites load the source files into a synthetic `self` global with
 a `browser.*` Promise-API shim — same shape as qdchrome-extension's helpers;
