@@ -336,6 +336,25 @@ M
     [ ! -e "$T/out" ]
 }
 
+@test "release-stamp: a NUL byte refuses the write, and the reader classifies NUL input invalid (not legacy)" {
+    source "$IMAGE/lib/release-stamp.sh"
+    printf 'VERSION_ID="0.1.0"\n' > "$T/os-release"
+    printf 'SNAPSHOT=20260902\nSOURCE qdistro %040d clean\000 extra\n' 1 > "$T/m"
+    [ "$(tr -dc '\000' < "$T/m" | wc -c)" -eq 1 ]
+    run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]; [[ "$output" == *"NUL"* ]]
+    [ ! -e "$T/out" ]
+    # reader: the five-repo legacy set with a NUL in one line
+    printf 'SOURCE %s %040d clean\n' qdistro 1 qdwin 2 qdshell 3 qdgreeter 4 > "$T/rel"
+    printf 'SOURCE qdlocker %040d clean\000 extra\n' 5 >> "$T/rel"
+    run qdistro_read_release_source "$T/rel"
+    [ "$status" -eq 1 ]; [[ "$output" == "invalid "*"NUL"* ]]
+    # the same set without the NUL is the recognised legacy schema
+    printf 'SOURCE %s %040d clean\n' qdistro 1 qdwin 2 qdshell 3 qdgreeter 4 qdlocker 5 > "$T/rel"
+    run qdistro_read_release_source "$T/rel"
+    [ "$status" -eq 0 ]; [ "$output" = "legacy $(printf '%040d' 1) clean" ]
+}
+
 @test "release-stamp: config.xml <version> and the os-release override agree (what the chroot check enforces)" {
     local v; v="$(xml version)"
     grep -qx "VERSION_ID=\"$v\"" "$IMAGE/root/etc/os-release.qdistro"

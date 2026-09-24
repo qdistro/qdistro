@@ -344,6 +344,9 @@ check_opt     "qdistro-release marker"    /etc/qdistro-release
 # an empty or truncated file is exactly what a broken manifest step would
 # leave, and a bug report needs these lines.
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+# The writer's SOURCE grammar (shared with image/lib/release-stamp.sh).
+# shellcheck source=lib/release-stamp.sh
+. "$CHECKER_DIR/lib/release-stamp.sh"
 release_file="$(file_in_image "$ROOT/etc/qdistro/release" 2>/dev/null || true)"
 release_problem=""
 # field <KEY> -- the value of exactly one KEY= line, or nothing (so a
@@ -368,8 +371,9 @@ else
     # fields disagree is corrupt, not merely oddly named (round-1 review).
     [ -n "$rel_version" ] && [ -n "$rel_snapshot" ] && [ "$rel_artifact" = "qdistro-$rel_version-$rel_snapshot.raw.xz" ] \
         || release_problem="$release_problem ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"
-    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
-    [ "$(grep -cE "^SOURCE qdistro [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$release_file")" -eq 1 ] \
+    qdistro_file_has_nul "$release_file" && release_problem="$release_problem contains a NUL byte;"
+    [ "$(LC_ALL=C grep -ac '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
+    [ "$(LC_ALL=C grep -acE "$(qdistro_source_line_ere qdistro)" "$release_file")" -eq 1 ] \
         || release_problem="$release_problem no single well-formed SOURCE qdistro line;"
 fi
 if [ -z "$release_problem" ]; then
