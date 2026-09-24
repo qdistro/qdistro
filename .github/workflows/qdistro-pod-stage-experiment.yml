@@ -50,7 +50,7 @@ jobs:
             bash -euo pipefail -c '
               zypper -n refresh
               zypper -n install --no-recommends \
-                meson ninja gcc gcc-c++ pkgconf-pkg-config \
+                meson ninja gcc gcc-c++ pkgconf-pkg-config git file \
                 weston-devel libweston-16 libweston-16-0 \
                 wayland-devel wayland-protocols-devel libinput-devel libXcursor-devel \
                 freerdp-devel winpr-devel pipewire-devel libselinux-devel \
@@ -83,6 +83,14 @@ jobs:
               test -f /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
               test -f /out/stage/usr/bin/qdistro-secctx-exec
               test -f /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so
+              mkdir -p /out/stage/usr/share/qdistro-build
+              find /out/stage -type f -print0 | while IFS= read -r -d "" staged_file; do
+                if file -b "$staged_file" | grep -Eq "^ELF .* (dynamically linked|shared object)"; then
+                  printf "%s\n" "${staged_file#/out/stage}"
+                fi
+              done > /out/stage/usr/share/qdistro-build/elf-manifest
+              test -s /out/stage/usr/share/qdistro-build/elf-manifest
+              wc -l /out/stage/usr/share/qdistro-build/elf-manifest
               tar -C /out/stage -cf /out/staged-files.tar .
               du -sh /out/stage /out/staged-files.tar
             '
@@ -156,26 +164,39 @@ jobs:
           done
           if [ "$ready" -ne 1 ]; then tail -120 "$RUNNER_TEMP/qdistro-vm/serial.log"; exit 1; fi
           vmssh 'sudo -n zypper -n install --no-recommends \
-            weston libweston-16 libweston-16-0 libinput10 libXcursor1 \
+            weston libweston-16 libweston-16-0 libinput10 libXcursor1 libpango-1_0-0 \
             freerdp libpipewire-0_3-0 qt6-wayland qt6-declarative-imports \
             libQt6Core6 libQt6Gui6 libQt6Qml6 libQt6Network6'
-          vmssh 'set -eu; for f in \
-            /usr/lib64/weston/qdwin-shell.so \
-            /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so \
-            /usr/bin/qdistro-secctx-exec \
-            /usr/bin/qdistro-cursor-sprites; do \
-              test -s "$f"; ldd "$f" | tee /tmp/qdistro-ldd-last; \
-              if grep -q "not found" /tmp/qdistro-ldd-last; then exit 1; fi; \
-            done; weston --version; df -h /'
+          vmssh 'set -eu; export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
+            for f in /usr/lib64/weston/qdwin-shell.so \
+              /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so \
+              /usr/bin/qdistro-secctx-exec \
+              /usr/bin/qdistro-cursor-sprites; do test -s "$f"; done; \
+            n=0; while IFS= read -r f; do \
+              test -s "$f"; ldd "$f" > /tmp/qdistro-ldd-last; \
+              if grep -q "not found" /tmp/qdistro-ldd-last; then cat /tmp/qdistro-ldd-last; exit 1; fi; \
+              n=$((n + 1)); \
+            done < /usr/share/qdistro-build/elf-manifest; \
+            test "$n" -ge 10; echo "Checked $n staged ELF files"; weston --version; df -h /'
           vmssh 'set -eu; sudo -n install -d -m 0700 -o admin -g admin /run/user/1000; \
             export XDG_RUNTIME_DIR=/run/user/1000; \
             export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
             export WESTON_MODULE_MAP=headless-backend.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so; \
-            timeout 15s weston --backend=headless-backend.so \
+            export WAYLAND_DISPLAY=wayland-pod-test; \
+            timeout 20s weston --backend=headless-backend.so --renderer=pixman \
               --shell=qdwin-shell.so --socket=wayland-pod-test \
-              --idle-time=0 --log=/tmp/qdistro-weston.log || rc=$?; \
-            cat /tmp/qdistro-weston.log; test "${rc:-0}" -eq 124'
-          vmssh 'sudo -n rm -f /home/admin/.ssh/authorized_keys && \
+              --idle-time=0 --log=/tmp/qdistro-weston.log & compositor_pid=$!; \
+            ready=0; for attempt in $(seq 1 30); do \
+              if test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; then ready=1; break; fi; \
+              if ! kill -0 "$compositor_pid" 2>/dev/null; then break; fi; sleep 0.2; \
+            done; \
+            if test "$ready" -eq 1; then qdwin-probe --timeout=5; fi; \
+            wait "$compositor_pid" || rc=$?; \
+            cat /tmp/qdistro-weston.log; \
+            test "$ready" -eq 1; test "${rc:-0}" -eq 124; \
+            grep -q "qdwin: shell loaded" /tmp/qdistro-weston.log'
+          vmssh 'sudo -n zypper clean -a && \
+            sudo -n rm -f /home/admin/.ssh/authorized_keys && \
             sudo -n systemctl disable sshd.service && \
             test "$(systemctl is-enabled sshd.service)" = disabled && \
             test ! -e /home/admin/.ssh/authorized_keys && \
@@ -195,7 +216,7 @@ jobs:
           set -euo pipefail
           test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/lib64/weston/qdwin-shell.so)" = true
           virt-customize --no-network -a "$VM_IMAGE" \
-            --run-command 'for f in /usr/lib64/weston/qdwin-shell.so /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so /usr/bin/qdistro-secctx-exec; do ldd "$f" | grep -q "not found" && exit 1; done; true'
+            --run-command 'set -eu; export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; n=0; while IFS= read -r f; do test -s "$f"; ldd "$f" > /tmp/qdistro-ldd-offline; if grep -q "not found" /tmp/qdistro-ldd-offline; then cat /tmp/qdistro-ldd-offline; exit 1; fi; n=$((n + 1)); done < /usr/share/qdistro-build/elf-manifest; test "$n" -ge 10; echo "Offline checked $n staged ELF files"'
           used_now="$(df -B1 --output=used / | tail -1 | tr -d ' ')"
           used_delta="$((used_now - DISK_BASELINE))"
           echo "Runner disk used since start: $used_delta bytes"
