@@ -169,7 +169,12 @@ sync_sources() {
     local list path n=0
     # Outside the overlay tree (image/root/ is copied into the image).
     list="$(mktemp "${TMPDIR:-/tmp}/qdistro-src-files.XXXXXX")"
-    if ! git -C "$REPO_ROOT" ls-files -z --cached --others --exclude-standard \
+    # core.excludesFile=/dev/null: what ships is decided by the repo's own
+    # .gitignore files, not by the building user's global ignore file.
+    # (.git/info/exclude is still honoured: it is per-checkout, and empty
+    # in a fresh clone.)
+    if ! git -C "$REPO_ROOT" -c core.excludesFile=/dev/null \
+            ls-files -z --cached --others --exclude-standard \
             > "$list.raw"; then
         echo "[build] ERROR: git ls-files failed in $REPO_ROOT" >&2
         rm -f "$list" "$list.raw"
@@ -179,7 +184,7 @@ sync_sources() {
     # process substitution is invisible to set -e and pipefail, and an
     # empty list would wipe the overlay and stamp the manifest clean
     # (fu review: a failing `sort -zu` synced 0 files with exit 0).
-    if ! sort -zu -o "$list.raw" "$list.raw"; then
+    if ! LC_ALL=C sort -zu -o "$list.raw" "$list.raw"; then
         echo "[build] ERROR: sorting the git file list failed" >&2
         rm -f "$list" "$list.raw"
         exit 2
@@ -199,6 +204,12 @@ sync_sources() {
     # the overlay is a generated, gitignored copy. This also clears debris
     # of any earlier sync (the pre-monorepo per-repo qdistro/ copy, the
     # unfiltered syncs that nested image/root/root and image/logs).
+    # The previous run's manifest goes first: from here on the overlay is
+    # being replaced, and a copy that fails half-way must not leave a
+    # partial tree labelled by the old manifest, which --no-sync would
+    # accept (fu review, fable). write_manifest writes the new one only
+    # after the copy succeeded.
+    rm -f "$MANIFEST" "$MANIFEST.tmp"
     rm -rf "$SRC_OVERLAY"
     install -d -m 0755 "$SRC_OVERLAY"
     echo "[build] copying $n git-visible files of $REPO_ROOT -> $SRC_OVERLAY"
