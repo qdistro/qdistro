@@ -60,7 +60,7 @@ jobs:
               /opt/kiwi-venv/bin/pip install --no-cache-dir \
                 kiwi==11.0.5 kiwi-boxed-plugin==0.2.58
               export PATH=/opt/kiwi-venv/bin:$PATH
-              kiwi-ng --version
+              kiwi-ng --version || true
               echo "Checking boxed-plugin command registration:"
               kiwi-ng system boxbuild --help || true
               kiwi-ng --debug system boxbuild --list-boxes || true
