@@ -46,6 +46,10 @@ jobs:
           download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"
           qemu-img info "$CLOUD_CACHE"
 
+      - name: Diagnose libguestfs appliance
+        run: |
+          LIBGUESTFS_DEBUG=1 libguestfs-test-tool
+
       - name: Build standalone 8 GiB VM disk without KVM or host mounts
         shell: bash
         run: |
