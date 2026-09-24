@@ -2,7 +2,8 @@
 
 This is a continuation of the monorepo migration work, on the
 `experiment/github-qdistro-image` branch. It does not change the KIWI release
-path. The workflow is `.github/workflows/qdistro-pod-stage-experiment.yml`.
+path. The final workflow is `.github/workflows/qdistro-test-vm.yml`. Earlier
+Podman and in-guest-build experiment workflows were removed after validation.
 
 ## Verified result
 
@@ -29,8 +30,19 @@ five minutes per build, while still allowing CI to rebuild the binaries.
 
 ## Scope and next steps
 
+Final decision: publish **one runtime-only test VM** as a GitHub Actions ZIP
+artifact containing an 8 GiB virtual, sparse QCOW2 and its SHA-256 checksum.
+Build qdwin, daemons, qdshell's native plugin, and patched libweston inside an
+openSUSE Tumbleweed Docker container. Do not install the compiler, Meson,
+Ninja, or development headers in the guest. GitHub's `upload-artifact@v4`
+provides native ZIP/zlib compression at level 6; no extra gzip/XZ layer is
+used. The 8 GiB disk leaves about 6 GiB free in the successful runtime image
+and does not imply an 8 GiB download. The artifact is retained for 30 days.
+
 The artifact is a native-components *developer/test VM*, not a complete qdistro desktop or a KIWI replacement. `qdshell/meson.build` installs only its native QML plugin, not the QML shell/session wiring. The VM has no baked builder SSH key; cloud-init can provision one on first boot. Artifact retention is seven days.
 
-For a faster distributable, package the staged native tree as RPM(s) and upload those as the on-demand GitHub artifact. The verified Podman compile step took 1m12s, versus 20m12s for the full developer QCOW2. RPM work should include explicit runtime `Requires`, post-install integration boundaries, package ownership, and container install/`ldd`/probe checks; the broader bootstrap's users, services, QML assets, and policy setup are not made complete just by packaging these 12 MB of binaries. Keep VM boot tests on the user's own hardware as requested, with a less frequent GitHub TCG smoke test if useful.
+RPM distribution was considered and rejected for this test-image workflow.
+Keep more extensive VM testing on the user's own hardware as requested, with
+the GitHub TCG boot/probe serving as a portable smoke test.
 
 Before calling this reproducible release packaging: pin or consistently snapshot the container, cloud image and RPM repositories; record their digests; inspect peak (not just final) runner disk use; and verify upgrades/rebuilds against the pinned Weston ABI. The current workflow compares four key container/guest RPM versions and performs full staged-ELF closure checks, but it does not prove snapshot identity for the entire dependency graph.

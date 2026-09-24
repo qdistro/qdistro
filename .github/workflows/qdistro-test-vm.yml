@@ -1,19 +1,19 @@
-name: qdistro Podman staged VM experiment
+name: qdistro downloadable VM test image
 
-# Native compile on openSUSE, offline copy into a signed cloud QCOW2, then
-# verify library closure and a headless qdwin/Weston launch. This developer
-# VM retains the native build toolchain; it is not a release image.
+# Native compile in openSUSE Docker, offline copy into a signed cloud QCOW2,
+# then verify library closure and a headless qdwin/Weston launch. Build tools
+# stay in the container; this is a VM test image, not a release image.
 on:
   push:
     branches: [experiment/github-qdistro-image]
-    paths: [.github/workflows/qdistro-pod-stage-experiment.yml]
+    paths: [.github/workflows/qdistro-test-vm.yml]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  pod-stage:
+  build-test-image:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -27,25 +27,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/qdistro-pod/stage" "$RUNNER_TEMP/qdistro-vm"
+          mkdir -p "$RUNNER_TEMP/qdistro-build/stage" "$RUNNER_TEMP/qdistro-vm"
           echo "CLOUD_CACHE=$RUNNER_TEMP/qdistro-vm/cloud-base.qcow2" >> "$GITHUB_ENV"
-          echo "VM_IMAGE=$RUNNER_TEMP/qdistro-vm/qdistro-native-components.qcow2" >> "$GITHUB_ENV"
+          echo "VM_IMAGE=$RUNNER_TEMP/qdistro-vm/qdistro-test-vm.qcow2" >> "$GITHUB_ENV"
           echo "DISK_BASELINE=$(df -B1 --output=used / | tail -1 | tr -d ' ')" >> "$GITHUB_ENV"
-          podman --version
-          podman info --format 'rootless={{.Host.Security.Rootless}}'
+          docker --version
+          docker info --format 'server={{.ServerVersion}}'
           df -h /
 
-      - name: Compile native components in an openSUSE Podman pod
+      - name: Compile native components in an openSUSE Docker container
         shell: bash
         timeout-minutes: 35
         run: |
           set -euo pipefail
-          pod_name="qdistro-build-$GITHUB_RUN_ID"
-          podman pod create --name "$pod_name"
-          trap 'podman pod rm -f "$pod_name" >/dev/null 2>&1 || true' EXIT
-          podman run --rm --pod "$pod_name" \
+          docker run --rm \
             --volume "$GITHUB_WORKSPACE:/src:rw" \
-            --volume "$RUNNER_TEMP/qdistro-pod:/out:rw" \
+            --volume "$RUNNER_TEMP/qdistro-build:/out:rw" \
             --workdir /src \
             registry.opensuse.org/opensuse/tumbleweed:latest \
             bash -euo pipefail -c '
@@ -122,12 +119,12 @@ jobs:
           qemu-img create -f qcow2 "$VM_IMAGE" 8G
           virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
           guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : xfs-growfs /
-          guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : tar-in "$RUNNER_TEMP/qdistro-pod/staged-files.tar" /
+          guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : tar-in "$RUNNER_TEMP/qdistro-build/staged-files.tar" /
           qemu-img check "$VM_IMAGE"
           test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/lib64/weston/qdwin-shell.so)" = true
           df -h /
 
-      - name: Install runtime and developer packages, then test launch in VM
+      - name: Install runtime packages and test launch in VM
         shell: bash
         timeout-minutes: 35
         run: |
@@ -140,7 +137,7 @@ jobs:
             printf 'ssh_pwauth: false\ndisable_root: true\n'
             printf 'runcmd:\n  - [systemctl, enable, --now, sshd.service]\n'
           } > "$RUNNER_TEMP/qdistro-vm/user-data"
-          printf 'instance-id: qdistro-pod-test\nlocal-hostname: qdistro-pod-test\n' > "$RUNNER_TEMP/qdistro-vm/meta-data"
+          printf 'instance-id: qdistro-test-vm\nlocal-hostname: qdistro-test-vm\n' > "$RUNNER_TEMP/qdistro-vm/meta-data"
           cloud-localds "$RUNNER_TEMP/qdistro-vm/seed.img" "$RUNNER_TEMP/qdistro-vm/user-data" "$RUNNER_TEMP/qdistro-vm/meta-data"
           cp /usr/share/OVMF/OVMF_VARS_4M.fd "$RUNNER_TEMP/qdistro-vm/OVMF_VARS.fd"
           qemu-system-x86_64 -machine q35,accel=tcg -m 4096 -smp 2 \
@@ -170,20 +167,8 @@ jobs:
           vmssh 'sudo -n zypper -n install --no-recommends \
             weston libweston-16 libweston-16-0 libinput10 libXcursor1 libpango-1_0-0 \
             freerdp libpipewire-0_3-0 qt6-wayland qt6-declarative-imports \
-            libQt6Core6 libQt6Gui6 libQt6Qml6 libQt6Network6 \
-            meson ninja gcc gcc-c++ pkgconf-pkg-config git file \
-            weston-devel wayland-devel wayland-protocols-devel \
-            libinput-devel libXcursor-devel freerdp-devel winpr-devel \
-            pipewire-devel libselinux-devel \
-            qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
-            qt6-declarative-devel qt6-svg-devel qt6-shadertools \
-            libpixman-1-0-devel libxkbcommon-devel libevdev-devel \
-            libgbm-devel libdrm-devel seatd-devel \
-            Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \
-            liblcms2-devel libdisplay-info-devel libX11-devel libxcb-devel \
-            cairo-devel libpng16-devel libpng16-compat-devel pango-devel \
-            fontconfig-devel glib2-devel libva-devel'
-          vmssh 'meson --version; ninja --version; gcc --version | head -1; df -h /'
+            libQt6Core6 libQt6Gui6 libQt6Qml6 libQt6Network6'
+          vmssh 'test ! -x /usr/bin/meson; test ! -x /usr/bin/gcc; df -h /'
           vmssh 'rpm -q --qf "%{NAME} %{VERSION}-%{RELEASE}\n" \
             glibc libwayland-client0 libweston-16-0 libQt6Core6 \
             > /tmp/qdistro-guest-rpms; \
@@ -246,24 +231,13 @@ jobs:
           (cd "$(dirname "$VM_IMAGE")" && sha256sum "$(basename "$VM_IMAGE")" > "$(basename "$VM_IMAGE").sha256")
           du -h "$VM_IMAGE"
 
-      - name: Upload staged VM experiment
+      - name: Upload downloadable test VM image
         uses: actions/upload-artifact@v4
         with:
-          name: qdistro-native-components-dev-vm
+          name: qdistro-test-vm-qcow2
           path: |
             ${{ env.VM_IMAGE }}
             ${{ env.VM_IMAGE }}.sha256
           if-no-files-found: error
           compression-level: 6
-          retention-days: 7
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: qdistro-pod-stage-logs
-          path: |
-            ${{ runner.temp }}/qdistro-vm/serial.log
-            ${{ runner.temp }}/qdistro-vm/qemu.log
-          if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 30
