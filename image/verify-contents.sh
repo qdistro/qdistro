@@ -37,8 +37,14 @@ CHECKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOTSTRAP_SH="$CHECKER_DIR/../scripts/install/qdistro-bootstrap.sh"
 # The names of host build output / caches that must not ship in the source
 # tree (shared with extract-root.sh's prune).
+# Fail closed: without the lists the no-debris rows would pass vacuously.
 # shellcheck source=/dev/null  # image/lib/src-debris.sh
-. "$CHECKER_DIR/lib/src-debris.sh"
+if ! . "$CHECKER_DIR/lib/src-debris.sh" 2>/dev/null \
+        || [ "${#QDISTRO_SRC_DEBRIS_NAMES[@]}" -eq 0 ] \
+        || [ "${#QDISTRO_SRC_DEBRIS_FILES[@]}" -eq 0 ]; then
+    printf 'FATAL: %s did not load (or its debris lists are empty)\n' "$CHECKER_DIR/lib/src-debris.sh" >&2
+    exit 2
+fi
 
 usage() {
     cat <<EOF
@@ -301,20 +307,31 @@ check_absent() {
 # followed). A directory absent from the image has nothing in it; its
 # presence is a separate check_req row.
 check_src_debris_absent() {
-    local label=$1 full="$ROOT/${2#/}" host n expr=() hits
+    local label=$1 full="$ROOT/${2#/}" host n expr=() hits frc ferr out errf
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
     for n in "${QDISTRO_SRC_DEBRIS_NAMES[@]}"; do
         expr+=(${expr[0]:+-o} -name "$n")
     done
     host="$(resolve_in_image "$full")" || host=""
-    if [ -n "$host" ] && [ -d "$host" ]; then
-        # -prune: name the debris entry, not everything inside it. awk,
-        # not head: head would SIGPIPE find under pipefail.
-        hits="$(find "$host" \( "${expr[@]}" \) -prune -print 2>/dev/null | awk 'NR <= 20')"
-    else
-        hits=""
+    if [ -z "$host" ] || [ ! -d "$host" ]; then
+        printf 'OK   %s: none under %s\n' "$label" "$full"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+        return
     fi
-    if [ -z "$hits" ]; then
+    # find's status is the verdict's precondition: an unreadable directory
+    # is a subtree nobody looked at, not an absence. Output goes to files
+    # (no pipe, so no SIGPIPE and no lost exit status).
+    out="$(mktemp)"; errf="$(mktemp)"
+    # -prune: name the debris entry, not everything inside it.
+    find "$host" \( "${expr[@]}" \) -prune -print > "$out" 2> "$errf"; frc=$?
+    hits="$(awk 'NR <= 20' "$out")"
+    ferr="$(awk 'NR <= 3' "$errf")"
+    rm -f "$out" "$errf"
+    if [ "$frc" -ne 0 ]; then
+        printf 'FAIL %s: %s (INDETERMINATE: find failed rc=%s: %s; not a verdict on absence)\n' \
+            "$label" "$full" "$frc" "${ferr//$'\n'/ | }"
+        FAIL=1
+    elif [ -z "$hits" ]; then
         printf 'OK   %s: none under %s\n' "$label" "$full"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else

@@ -410,10 +410,18 @@ SH
 @test "build.sh: the building user's global git ignore file does not decide what ships" {
     fake_tree
     local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
-    mkdir -p "$T/xdg/git"
-    printf '*.sh\n' > "$T/xdg/git/ignore"      # git's default core.excludesFile
+    # Hermetic: a private HOME whose global config names an ignore file,
+    # and GIT_CONFIG_GLOBAL pinned to it, so the host's own git config
+    # neither helps nor hurts.
+    mkdir -p "$T/home"
+    printf '*.sh\n' > "$T/home/global-ignore"
+    printf '[core]\n\texcludesFile = %s\n' "$T/home/global-ignore" > "$T/home/.gitconfig"
     echo new > "$r/qdshell/new-installer.sh"   # untracked, not ignored BY THE REPO
-    XDG_CONFIG_HOME="$T/xdg" run bash "$r/image/build.sh" --sync-only
+    # precondition: this git really would ignore the file without the override
+    HOME="$T/home" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" \
+        git -C "$r" check-ignore -q qdshell/new-installer.sh
+    HOME="$T/home" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" XDG_CONFIG_HOME="$T/home/.config" \
+        run bash "$r/image/build.sh" --sync-only
     [ "$status" -eq 0 ]
     [ "$(cat "$o/qdshell/new-installer.sh")" = new ]
 }
@@ -752,6 +760,42 @@ extracted_src() {
     # the deep caches survive the prune as markers and are named
     [[ "$output" == *"multimachine/harness/__pycache__"* ]]
     [[ "$output" == *"qdterm/.pytest_cache"* ]]
+}
+
+@test "verify-contents: without its debris lists the checker refuses to run (exit 2), not pass vacuously" {
+    fake_root dev
+    extracted_src leaky
+    mkdir -p "$T/chk/lib"
+    cp "$IMAGE/verify-contents.sh" "$T/chk/"
+    # lib absent
+    run bash "$T/chk/verify-contents.sh" "$T/root"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"src-debris.sh did not load"* ]]
+    # lib present but a list empty
+    sed 's/^QDISTRO_SRC_DEBRIS_NAMES=(.*)$/QDISTRO_SRC_DEBRIS_NAMES=()/' \
+        "$IMAGE/lib/src-debris.sh" > "$T/chk/lib/src-debris.sh"
+    grep -qx 'QDISTRO_SRC_DEBRIS_NAMES=()' "$T/chk/lib/src-debris.sh"
+    run bash "$T/chk/verify-contents.sh" "$T/root"
+    [ "$status" -eq 2 ]
+    # the real lib: runs, and the leaky tree FAILs (the harness is not what
+    # produced the exit 2 above)
+    cp "$IMAGE/lib/src-debris.sh" "$T/chk/lib/"
+    run bash "$T/chk/verify-contents.sh" "$T/root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL qdistro-src: no build output or caches at any depth: found under"* ]]
+}
+
+@test "verify-contents: an unreadable directory in qdistro-src is INDETERMINATE, not an absence" {
+    [ "$(id -u)" -ne 0 ] || skip "root reads mode-000 directories"
+    fake_root dev
+    extracted_src
+    mkdir -p "$T/root/root/qdistro-src/qdwin/locked/__pycache__"
+    chmod 000 "$T/root/root/qdistro-src/qdwin/locked"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    chmod 755 "$T/root/root/qdistro-src/qdwin/locked"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FAIL qdistro-src: no build output or caches at any depth: "*"(INDETERMINATE: find failed rc="*"Permission denied"* ]]
+    [[ "$output" != *"OK   qdistro-src: no build output or caches at any depth"* ]]
 }
 
 @test "verify-contents: a missing or truncated /etc/qdistro/release is a MISS, not a pass" {

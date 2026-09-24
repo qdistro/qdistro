@@ -11,6 +11,8 @@
 # removes `build` and `__pycache__` itself at the end of the chroot build,
 # so a __pycache__ in the image means something wrote one after it.
 
+# These are the names that HAVE leaked (or are the obvious siblings of
+# ones that did), not a complete catalogue of what must not ship.
 # shellcheck disable=SC2034  # both lists are read by the sourcing scripts
 QDISTRO_SRC_DEBRIS_NAMES=(__pycache__ .mypy_cache .ruff_cache .pytest_cache .hypothesis build-qci)
 # Top-level files (depth 1, which the prune never removes).
