@@ -31,6 +31,20 @@ set -u
 
 PASSCOUNT=0
 FAILCOUNT=0
+# The broker has no ExecReload, so reload-or-restart is a full restart, and the
+# tiered-isolation file restarts it several times within seconds (the previous
+# script's cleanup, this script's start, this rule reload). That tripped
+# systemd's start limit on 2026-09-24 ("Start request repeated too quickly",
+# start-limit-hit), and a unit in that state never starts again on its own.
+# reset-failed clears the start-rate counter, so the restart is allowed; a
+# restart that still fails is reported with the unit status, never swallowed.
+broker_restart() {
+    systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true
+    if ! systemctl restart qdistro-admin-broker.service; then
+        systemctl status --no-pager --lines=20 qdistro-admin-broker.service >&2 || true
+        return 1
+    fi
+}
 pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
@@ -60,7 +74,7 @@ cleanup() {
     [ -n "$SPAWN_PID" ] && wait    "$SPAWN_PID" 2>/dev/null || true
     runuser -u "$ADMIN_USER" -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
     rm -f "$RULE_FILE" 2>/dev/null || true
-    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+    broker_restart || true
     rm -f /tmp/s61-spawn.log 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -100,6 +114,7 @@ pass "tier-2 image present"
 # --- 3. author the broker spawn allow rule + settle ------------------
 # Rules-only / fail-closed: without this rule the root-launcher spawn is
 # refused at the broker gate. Idempotent with tiered-isolation.bats setup_file.
+systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true
 systemctl start qdistro-admin-broker.service 2>/dev/null || true
 install -d -m 0755 "$RULE_DIR"
 cat >"$RULE_FILE" <<YAML
@@ -114,7 +129,7 @@ cat >"$RULE_FILE" <<YAML
   match:
     action: qdistro.nested.advertise:org.freedesktop.weston.wayland-terminal
 YAML
-systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+broker_restart || fail "broker restart after writing the lineage rules failed (unit status above)"
 bc() {
     runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         dbus-send --system --print-reply=literal \

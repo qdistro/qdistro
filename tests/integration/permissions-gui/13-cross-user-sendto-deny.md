@@ -159,9 +159,33 @@ $VMGUI "$VM" screenshot /tmp/13-s1-pending.png
 # path documented in AGENTS.md.
 $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "admin approvals" windowactivate --sync'
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
-sleep 2
-$VMGUI "$VM" screenshot /tmp/13-s2-denied.png
+# Settle before grading. The title is computed from the Pending model's row
+# count, so "admin approvals" with no "(N pending)" means the model is empty.
+# The client surface can lag the title: a fixed `sleep 2` once captured the
+# emptied title over the stale, still-selected row (2026-09-24, scenario 13).
+$VMEXEC "$VM" 'for _ in $(seq 1 60); do
+  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
+  [ "$t" = "admin approvals" ] && exit 0
+  sleep 0.5
+done
+echo "title never settled: $t" >&2; exit 1'
+# Bounded capture sequence: up to 5 frames, 2 s apart. Grade each as it
+# lands and stop at the first that shows the asserted empty state.
+for i in 1 2 3 4 5; do
+  sleep 2
+  $VMGUI "$VM" screenshot /tmp/13-s2-denied-$i.png
+  # Runner: open /tmp/13-s2-denied-$i.png; if it shows `(no selection)`
+  # and no request row, copy it to /tmp/13-s2-denied.png and break.
+done
 ```
+
+**Readiness** (a failed step on its own, recorded with the wait's stderr):
+- The title wait above exits 0. If it times out, S2 FAILS on that
+  ground; still capture and grade the frames as evidence, but a later
+  good frame does not erase the timeout.
+- One of the 5 frames shows the empty state. If none does, the surface
+  stayed stale for ~10 s after the model emptied: S2 FAILS. Copy the
+  last frame to /tmp/13-s2-denied.png and grade that. Keep every frame.
 
 **Assert (OCR /tmp/13-s2-denied.png)**:
 - `(no selection)` visible again.
