@@ -61,6 +61,8 @@ jobs:
           set -euo pipefail
           qemu-img create -f qcow2 "$VM_IMAGE" 8G
           virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
+          # virt-resize enlarges this XFS partition but not its filesystem.
+          guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : xfs-growfs /
           # Exercise an actual libguestfs guest write, keeping cloud-init and
           # upstream account policy intact; no hard-coded test credentials.
           virt-customize --no-network -a "$VM_IMAGE" --run-command 'true'
@@ -71,9 +73,8 @@ jobs:
           set -euo pipefail
           qemu-img check "$VM_IMAGE"
           qemu-img info --output=json "$VM_IMAGE" | jq -e '.format == "qcow2" and .["virtual-size"] == 8589934592 and .["backing-filename"] == null'
-          virt-filesystems --long --parts --filesystems -a "$VM_IMAGE"
-          root_size="$(guestfish --ro -a "$VM_IMAGE" run : vfs-size /dev/sda3)"
-          test "$root_size" -gt 7000000000
+          virt-filesystems --long --parts --filesystems -a "$VM_IMAGE" | tee "$RUNNER_TEMP/qdistro-filesystems.txt"
+          awk '$1 == "/dev/sda3" && $2 == "filesystem" && $6 > 7000000000 { found = 1 } END { exit !found }' "$RUNNER_TEMP/qdistro-filesystems.txt"
           test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda2 / : is-file /EFI/BOOT/bootx64.efi)" = true
           (cd "$(dirname "$VM_IMAGE")" && sha256sum "$(basename "$VM_IMAGE")" > "$(basename "$VM_IMAGE").sha256")
           {
