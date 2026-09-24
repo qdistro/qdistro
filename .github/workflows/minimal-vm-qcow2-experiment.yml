@@ -1,0 +1,83 @@
+name: Minimal VM QCOW2 experiment
+
+# Branch-only experiment. Do not publish the old baseweed-admin image here:
+# that script embeds a known password and passwordless sudo.
+on:
+  push:
+    branches: [experiment/github-vm-image]
+    paths:
+      - .github/workflows/minimal-vm-qcow2-experiment.yml
+      - scripts/vm/lib/opensuse-cloud-image.sh
+      - scripts/vm/keys/opensuse-tumbleweed-signing-key.asc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      LIBGUESTFS_BACKEND: direct
+      LIBGUESTFS_BACKEND_SETTINGS: force_tcg
+      CLOUD_URL: https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+      CLOUD_CACHE: ${{ runner.temp }}/qdistro-cloud-base.qcow2
+      VM_IMAGE: ${{ runner.temp }}/qdistro-minimal-vm.qcow2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils gnupg wget jq
+          for tool in guestfish virt-resize virt-customize virt-filesystems qemu-img gpgv; do command -v "$tool"; done
+          df -h "$RUNNER_TEMP"
+
+      - name: Download and verify upstream image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/vm/lib/opensuse-cloud-image.sh
+          download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"
+          qemu-img info "$CLOUD_CACHE"
+
+      - name: Build standalone 8 GiB VM disk without KVM or host mounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          qemu-img create -f qcow2 "$VM_IMAGE" 8G
+          virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
+          # Exercise an actual libguestfs guest write, keeping cloud-init and
+          # upstream account policy intact; no hard-coded test credentials.
+          virt-customize -a "$VM_IMAGE" --run-command 'true'
+
+      - name: Validate boot disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          qemu-img check "$VM_IMAGE"
+          qemu-img info --output=json "$VM_IMAGE" | jq -e '.format == "qcow2" and .["virtual-size"] == 8589934592 and .["backing-filename"] == null'
+          virt-filesystems --long --parts --filesystems -a "$VM_IMAGE"
+          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda2 / : is-file /EFI/BOOT/bootx64.efi)" = true
+          (cd "$(dirname "$VM_IMAGE")" && sha256sum "$(basename "$VM_IMAGE")" > "$(basename "$VM_IMAGE").sha256")
+          {
+            echo '### Minimal VM image'
+            echo 'Signed openSUSE Tumbleweed Minimal-VM Cloud QCOW2, expanded to 8 GiB.'
+            echo 'Cloud-init remains enabled; no qdistro installation or preset password.'
+            echo 'Build used libguestfs with QEMU TCG, without /dev/kvm or privileged containers.'
+            echo 'Download the `qdistro-minimal-vm-qcow2` artifact from this run.'
+            qemu-img info "$VM_IMAGE"
+            sha256sum "$VM_IMAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload downloadable VM image
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdistro-minimal-vm-qcow2
+          path: |
+            ${{ env.VM_IMAGE }}
+            ${{ env.VM_IMAGE }}.sha256
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7
