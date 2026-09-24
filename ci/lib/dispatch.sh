@@ -67,8 +67,8 @@ print_triage() {
 }
 
 # Every subcommand main() dispatches. Keep in sync with the case arms in
-# main() and the Usage: block in usage.sh (qci-subcommand-help.bats checks
-# the latter against this list through the real runner).
+# main() and the Usage: block in usage.sh; qci-subcommand-help.bats derives
+# the real case arms from this file and fails on any difference.
 QCI_COMMANDS="preflight lint selftest image registry-check release-manifest \
 bootstrap-release-profile affected edit-guard replay host vm-smoke bats gui \
 gui-admin full snapshot-daily mmnet cleanup report triage list-runs"
@@ -81,14 +81,52 @@ qci_is_command() {
     return 1
 }
 
-# True when a subcommand's args ask for help (-h/--help before any `--`).
+# Options of <cmd> that CONSUME the next argument as their value, as parsed
+# by its arm in main() (or by the gate it hands "$@" to: gate_image,
+# gate_cleanup). The help pre-scan skips these values, so `bats --file -h`
+# or `report --run -h` keep meaning a file/run dir named `-h`.
+# qci-subcommand-help.bats extracts every `--opt) shift` from the real
+# parsers and fails if this table drifts from them.
+qci_value_opts() {
+    case "$1" in
+        affected) echo "--changed-from --vm" ;;
+        edit-guard) echo "--changed-from" ;;
+        vm-smoke) echo "--vm" ;;
+        bats) echo "--vm --file" ;;
+        gui|gui-admin) echo "--vm --scenario" ;;
+        image) echo "--root" ;;
+        snapshot-daily) echo "--date --name" ;;
+        cleanup) echo "--age-hours" ;;
+        report|triage) echo "--run" ;;
+    esac
+}
+
+# Commands whose parser treats `--` as the end of options (the rest are
+# path operands).
+qci_has_terminator() {
+    case "$1" in
+        affected|edit-guard) return 0 ;;
+    esac
+    return 1
+}
+
+# True when <cmd>'s args ask for help: -h/--help in an OPTION position, i.e.
+# not the value of a value-taking option and not after a `--` terminator.
 qci_wants_help() {
+    local cmd=$1 vopts o
+    shift
+    vopts=" $(qci_value_opts "$cmd") "
     while [ $# -gt 0 ]; do
-        case "$1" in
-            --) return 1 ;;
+        o=$1
+        case "$o" in
             -h|--help) return 0 ;;
+            --) qci_has_terminator "$cmd" && return 1 ;;
         esac
-        shift
+        # Skip a value-taking option's operand, whatever it looks like.
+        if [[ "$vopts" == *" $o "* ]]; then
+            shift
+        fi
+        [ $# -gt 0 ] && shift
     done
     return 1
 }
@@ -113,8 +151,9 @@ main() {
     # This runs BEFORE init_run: no run dir, no results row, no VM. Without
     # it every subcommand either ran its gate (--help ignored or taken as a
     # bats file / triage run dir) or created a run dir to record the flag as
-    # "unknown arg". Operands after `--` are paths, not flags.
-    if qci_wants_help "$@"; then
+    # "unknown arg". Option VALUES (bats --file -h) and operands after an
+    # affected/edit-guard `--` are not help requests.
+    if qci_wants_help "$cmd" "$@"; then
         usage
         exit "$EXIT_USAGE"
     fi
