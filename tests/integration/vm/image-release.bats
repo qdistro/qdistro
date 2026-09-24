@@ -338,21 +338,52 @@ debris_absent() {
 }
 
 @test "build.sh: the sync never ships the overlay, worktrees, ci/runs, image/logs or keys even when nothing ignores them" {
-    fake_tree   # no top-level .gitignore: only image/.gitignore (root/root/, logs/)
+    fake_tree
     local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
-    printf 'root/root/\n' > "$r/image/.gitignore"   # logs/ no longer ignored
-    git -C "$r" -c user.email=t@t -c user.name=t commit -q -am narrower
+    # NOTHING is ignored any more -- not even the overlay itself -- so only
+    # the fixed drop-list in build.sh stands between each path and the image
+    : > "$r/image/.gitignore"
+    git -C "$r" -c user.email=t@t -c user.name=t commit -q -am unignored
     mkdir -p "$r/.worktrees/x" "$r/ci/runs/y" "$r/image/logs" "$r/image/keys/gnupg"
     echo wt  > "$r/.worktrees/x/file"
     echo run > "$r/ci/runs/y/log"
     echo tar > "$r/image/logs/old.tar"
     echo key > "$r/image/keys/gnupg/secring.gpg"
+    # a previous overlay (with content) sits in the unignored image/root/root
+    mkdir -p "$o/old"; echo prev > "$o/old/sentinel"
     run bash "$r/image/build.sh" --sync-only
     [ "$status" -eq 0 ]
     [ -f "$o/qdwin/README" ]
-    for p in .worktrees ci/runs image/logs image/keys image/root/root; do
+    [ ! -e "$o/old" ]
+    for p in .worktrees ci/runs image/logs image/keys image/root; do
         [ ! -e "$o/$p" ] || { echo "shipped: $p" >&2; false; }
     done
+    # and again, now that the overlay and manifest from run 1 are in the tree
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ ! -e "$o/image/root" ] || { echo "overlay copied into itself" >&2; false; }
+}
+
+@test "build.sh: a failing sort of the file list refuses the sync and keeps the previous overlay" {
+    fake_tree
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    echo prev > "$o/sentinel"
+    mkdir -p "$T/shim"
+    cat > "$T/shim/sort" <<SH
+#!/bin/bash
+for a in "\$@"; do case "\$a" in -z*) echo "sort: simulated failure" >&2; exit 2 ;; esac; done
+exec /usr/bin/sort "\$@"
+SH
+    chmod +x "$T/shim/sort"
+    PATH="$T/shim:$PATH" run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"sorting the git file list failed"* ]]
+    [[ "$output" != *"copying"* ]]
+    [ "$(cat "$o/sentinel")" = prev ]
+    [ -f "$o/qdwin/README" ]
+    [ -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'qdistro-src-files.*' -newer "$T/shim/sort" 2>/dev/null)" ]
 }
 
 @test "build.sh: a failing git status refuses the sync instead of reading as clean" {

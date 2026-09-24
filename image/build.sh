@@ -175,15 +175,25 @@ sync_sources() {
         rm -f "$list" "$list.raw"
         exit 2
     fi
+    # Sorted as its own checked step: a failure inside a `< <(...)`
+    # process substitution is invisible to set -e and pipefail, and an
+    # empty list would wipe the overlay and stamp the manifest clean
+    # (fu review: a failing `sort -zu` synced 0 files with exit 0).
+    if ! sort -zu -o "$list.raw" "$list.raw"; then
+        echo "[build] ERROR: sorting the git file list failed" >&2
+        rm -f "$list" "$list.raw"
+        exit 2
+    fi
     while IFS= read -r -d '' path; do
         case "$path" in
             */) echo "[build] skipping untracked nested repository $path" >&2; continue ;;
-            image/root/root/*|.worktrees/*|ci/runs/*|image/logs/*|image/keys/*|.git/*) continue ;;
+            image/root/root|image/root/root/*|.worktrees|.worktrees/*|ci/runs|ci/runs/*|\
+            image/logs|image/logs/*|image/keys|image/keys/*|.git|.git/*) continue ;;
         esac
         [ -e "$REPO_ROOT/$path" ] || [ -L "$REPO_ROOT/$path" ] || continue
         printf '%s\0' "$path"
         n=$((n + 1))
-    done < <(sort -zu "$list.raw") > "$list"
+    done < "$list.raw" > "$list"
     rm -f "$list.raw"
     # A fresh overlay every time: rsync --files-from cannot --delete, and
     # the overlay is a generated, gitignored copy. This also clears debris
