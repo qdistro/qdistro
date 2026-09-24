@@ -27,6 +27,14 @@ qdistro_source_line_ere() {
 # this set, each exactly once, with the same per-line grammar.
 QDISTRO_LEGACY_SOURCE_REPOS="qdistro qdwin qdshell qdgreeter qdlocker"
 
+# qdistro_file_has_nul <file> -- true when the file contains a NUL byte.
+# GNU grep treats such a file as binary: a NUL can end a "line" early for the
+# anchored matches and suppresses non-counting output (astra r2), so every
+# SOURCE reader/writer here refuses NUL input and matches with LC_ALL=C grep -a.
+qdistro_file_has_nul() {
+    [ "$(LC_ALL=C tr -dc '\000' < "$1" | wc -c)" -ne 0 ]
+}
+
 # qdistro_read_release_source <release-file>
 #   Classify the SOURCE lines of an /etc/qdistro/release. Prints ONE line:
 #     mono <sha> <clean|DIRTY>     the current writer's single qdistro line
@@ -37,33 +45,44 @@ QDISTRO_LEGACY_SOURCE_REPOS="qdistro qdwin qdshell qdgreeter qdlocker"
 #   Returns 0 for mono/legacy, 1 for invalid. Pure; reads only the file.
 #   A symlink is refused: on a host-extracted tree it resolves against the
 #   HOST's /, not the image.
+# _qdistro_source_emit <kind> <file> <sha> <state> -- fail closed: a
+# "successful" classification must still carry a 40-hex SHA and a state.
+_qdistro_source_emit() {
+    if [[ "$3" =~ ^[0-9a-f]{40}$ ]] && [[ "$4" =~ ^(clean|DIRTY)$ ]]; then
+        echo "$1 $3 $4"; return 0
+    fi
+    echo "invalid $2 SOURCE qdistro line did not yield a 40-hex SHA and clean|DIRTY state"
+    return 1
+}
+
 qdistro_read_release_source() {
     local f="$1" n line sha state repo
     if [ -L "$f" ]; then echo "invalid $f is a symlink"; return 1; fi
     if [ ! -f "$f" ] || [ ! -r "$f" ]; then echo "invalid $f is missing or unreadable"; return 1; fi
-    n="$(grep -c '^SOURCE' "$f")"
+    if qdistro_file_has_nul "$f"; then echo "invalid $f contains a NUL byte (binary, not the writer's text)"; return 1; fi
+    n="$(LC_ALL=C grep -ac '^SOURCE' "$f")"
     if [ "$n" -eq 1 ]; then
-        line="$(grep '^SOURCE' "$f")"
-        if ! printf '%s\n' "$line" | grep -qE "$(qdistro_source_line_ere qdistro)"; then
+        line="$(LC_ALL=C grep -a '^SOURCE' "$f")"
+        if ! printf '%s\n' "$line" | LC_ALL=C grep -aqE "$(qdistro_source_line_ere qdistro)"; then
             echo "invalid $f SOURCE line is not 'SOURCE qdistro <40-hex> clean|DIRTY diff-sha256=<16-hex> untracked=<n>'"
             return 1
         fi
         read -r _ _ sha state _ <<<"$line"
-        echo "mono $sha $state"; return 0
+        _qdistro_source_emit mono "$f" "$sha" "$state"; return
     fi
     local -a legacy
     read -ra legacy <<<"$QDISTRO_LEGACY_SOURCE_REPOS"
     set -- "${legacy[@]}"
     if [ "$n" -eq "$#" ]; then
         for repo in "$@"; do
-            [ "$(grep -cE "$(qdistro_source_line_ere "$repo")" "$f")" -eq 1 ] || {
+            [ "$(LC_ALL=C grep -acE "$(qdistro_source_line_ere "$repo")" "$f")" -eq 1 ] || {
                 echo "invalid $f has $n SOURCE lines but not exactly one well-formed line for each of: $QDISTRO_LEGACY_SOURCE_REPOS"
                 return 1
             }
         done
-        line="$(grep -E "$(qdistro_source_line_ere qdistro)" "$f")"
+        line="$(LC_ALL=C grep -aE "$(qdistro_source_line_ere qdistro)" "$f")"
         read -r _ _ sha state _ <<<"$line"
-        echo "legacy $sha $state"; return 0
+        _qdistro_source_emit legacy "$f" "$sha" "$state"; return
     fi
     echo "invalid $f has $n SOURCE lines, want 1 (SOURCE qdistro ...)"
     return 1
@@ -76,6 +95,10 @@ qdistro_write_release() {
         echo "release-stamp: $manifest missing or empty; build.sh sync_sources must write it" >&2
         return 1
     fi
+    if qdistro_file_has_nul "$manifest"; then
+        echo "release-stamp: $manifest contains a NUL byte; refusing binary input" >&2
+        return 1
+    fi
     snapshot="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' "$manifest" | head -n1)"
     if [ -z "$snapshot" ]; then
         echo "release-stamp: $manifest has no SNAPSHOT=<YYYYMMDD> line" >&2
@@ -84,12 +107,12 @@ qdistro_write_release() {
     # Exactly the one synced monorepo, once, with a 40-hex commit and the
     # writer's clean/DIRTY grammar. Counting generic SOURCE lines would
     # accept a stranger's repo or a "no-git" placeholder (round-1 review).
-    n="$(grep -c '^SOURCE ' "$manifest")"
+    n="$(LC_ALL=C grep -ac '^SOURCE ' "$manifest")"
     if [ "$n" -ne 1 ]; then
         echo "release-stamp: $manifest lists $n SOURCE lines, want 1 (the qdistro monorepo)" >&2
         return 1
     fi
-    if [ "$(grep -cE "$(qdistro_source_line_ere qdistro)" "$manifest")" -ne 1 ]; then
+    if [ "$(LC_ALL=C grep -acE "$(qdistro_source_line_ere qdistro)" "$manifest")" -ne 1 ]; then
         echo "release-stamp: $manifest lacks exactly one well-formed 'SOURCE qdistro <40-hex> clean|DIRTY diff-sha256=<16-hex> untracked=<n>' line" >&2
         return 1
     fi
@@ -112,7 +135,7 @@ qdistro_write_release() {
         echo "PROFILE=$profile"
         echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "ARTIFACT=qdistro-$version-$snapshot.raw.xz"
-        grep '^SOURCE ' "$manifest"
+        LC_ALL=C grep -a '^SOURCE ' "$manifest"
     } > "$dest"
     chmod 0644 "$dest"
 }

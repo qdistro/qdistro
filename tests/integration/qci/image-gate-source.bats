@@ -176,6 +176,39 @@ EOF
     [[ "$ROW" == *"3 SOURCE lines"* ]]
 }
 
+@test "image gate: a five-repo legacy stamp with a NUL byte in one line FAILS (20), not legacy-blocked (astra r2)" {
+    stub_checker_pass
+    stamp "SOURCE qdistro $OLD clean" \
+          "SOURCE qdwin 815c2876e58a7b1668c0e03a78bdc3e3d62ebf42 clean" \
+          "SOURCE qdshell 43e4574511105ae188c961aca2380db8184d5286 clean" \
+          "SOURCE qdgreeter 998b4abcba1ccfcc1ba234b22f93b906d036b231 clean"
+    # A REAL NUL byte: `clean\0 extra` is outside the writer's grammar, but
+    # GNU grep's binary mode used to let every anchored count match.
+    printf 'SOURCE qdlocker 039c14a3be1fbd65a74a625cfb04fc1bd83f9137 clean\000 extra\n' \
+        >> "$BUILD/extracted/etc/qdistro/release"
+    [ "$(tr -dc '\000' < "$BUILD/extracted/etc/qdistro/release" | wc -c)" -eq 1 ]
+    run_gate
+    [ "$status" -eq 20 ]
+    [ "$(field 3)" = fail ]
+    [[ "$ROW" == *"image provenance invalid"* ]]
+    [[ "$ROW" == *"NUL"* ]]
+    [[ "$ROW" != *"sibling-layout"* ]]
+    ! grep -q "image_source_relation=legacy-layout" "$T"/runs/*/manifest.txt
+    grep -q "stub checklist" "$T"/runs/*/host/image-verify-contents.log
+    [ "$(field 7)" = host/image-verify-contents.log ]
+}
+
+@test "image gate: a single SOURCE line naming HEAD with a NUL byte FAILS (20)" {
+    stub_checker_pass
+    stamp
+    printf 'SOURCE qdistro %s clean\000\n' "$HEAD_SHA" >> "$BUILD/extracted/etc/qdistro/release"
+    run_gate
+    [ "$status" -eq 20 ]
+    [ "$(field 3)" = fail ]
+    [[ "$ROW" == *"NUL"* ]]
+    grep -q "stub checklist" "$T"/runs/*/host/image-verify-contents.log
+}
+
 @test "image gate: a missing /etc/qdistro/release FAILS (20) with the checklist evidence kept" {
     stub_checker_pass
     run_gate

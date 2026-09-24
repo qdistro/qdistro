@@ -371,8 +371,9 @@ else
     # fields disagree is corrupt, not merely oddly named (round-1 review).
     [ -n "$rel_version" ] && [ -n "$rel_snapshot" ] && [ "$rel_artifact" = "qdistro-$rel_version-$rel_snapshot.raw.xz" ] \
         || release_problem="$release_problem ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"
-    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
-    [ "$(grep -cE "$(qdistro_source_line_ere qdistro)" "$release_file")" -eq 1 ] \
+    qdistro_file_has_nul "$release_file" && release_problem="$release_problem contains a NUL byte;"
+    [ "$(LC_ALL=C grep -ac '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
+    [ "$(LC_ALL=C grep -acE "$(qdistro_source_line_ere qdistro)" "$release_file")" -eq 1 ] \
         || release_problem="$release_problem no single well-formed SOURCE qdistro line;"
 fi
 if [ -z "$release_problem" ]; then

@@ -54,6 +54,12 @@ image_source_check() {
     . "$IMAGE_DIR/lib/release-stamp.sh"
     cls="$(qdistro_read_release_source "$rel")"
     read -r kind sha state _ <<<"$cls"
+    # Fail closed on any classification that lacks a valid identity.
+    if [ "$kind" != mono ] && [ "$kind" != legacy ]; then kind=invalid; fi
+    if [ "$kind" != invalid ] && { ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$state" =~ ^(clean|DIRTY)$ ]]; }; then
+        cls="invalid $rel classified '$cls' without a 40-hex SHA and clean|DIRTY state"
+        kind=invalid
+    fi
     if [ "$kind" = invalid ]; then
         IMAGE_SOURCE_REASON="image provenance invalid: ${cls#invalid }"
         kv image_source_relation invalid
