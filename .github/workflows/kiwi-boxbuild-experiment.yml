@@ -21,12 +21,18 @@ jobs:
         run: |
           set -euxo pipefail
           id
+          id -nG
           podman --version
           podman info --format 'rootless={{.Host.Security.Rootless}}'
           df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
           free -h
           if [[ -e /dev/kvm ]]; then
             ls -l /dev/kvm
+            if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+              echo 'KVM is accessible to this runner user.'
+            else
+              echo 'KVM exists but is not accessible to this runner user.' >&2
+            fi
           else
             echo '/dev/kvm is absent; VM-backed KIWI cannot use KVM here.' >&2
           fi
@@ -55,9 +61,11 @@ jobs:
                 kiwi==11.0.5 kiwi-boxed-plugin==0.2.58
               export PATH=/opt/kiwi-venv/bin:$PATH
               kiwi-ng --version
-              kiwi-ng system boxbuild --list-boxes
+              echo "Checking boxed-plugin command registration:"
+              kiwi-ng system boxbuild --help || true
+              kiwi-ng --debug system boxbuild --list-boxes || true
               if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-                echo "KVM is unavailable to the unprivileged container; stopping before the large box download." >&2
+                echo "KVM is unavailable to the unprivileged container; stopping before the large box download and image build." >&2
                 exit 2
               fi
               bash image/build.sh --sync-only
