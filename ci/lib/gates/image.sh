@@ -11,6 +11,73 @@
 # need a built image + libvirt + a VM, so they degrade to record_blocked
 # with a clear "needs VM/image" message when prerequisites are absent.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# image_source_check <tree> -- is the auto-discovered image under <tree> built
+# from the tree under test? The build stamps its source into the image as
+# /etc/qdistro/release (image/lib/release-stamp.sh, written by config.sh in the
+# kiwi chroot): exactly one "SOURCE qdistro <40-hex> clean|DIRTY ..." line. The
+# bundle directory itself (bundle/*.verified, *.packages, *.sha256) carries no
+# source SHA, so the stamp inside the extracted tree is the only record.
+#
+# Returns 0 when that SHA is HEAD of the tree under test or an ANCESTOR of it
+# (an older build of this line of history: allowed, logged with the distance).
+# Returns 1 and sets IMAGE_SOURCE_BLOCK_REASON otherwise:
+#   - the SHA is not an ancestor of HEAD, or is not a commit in this repo
+#     (built from another branch/clone): its checklist result says nothing
+#     about this tree, so a failure there is not a regression here;
+#   - no readable stamp, or not exactly one well-formed SOURCE qdistro line
+#     (e.g. the pre-monorepo sibling layout carried five SOURCE rows): the
+#     image cannot be tied to this tree at all. A tree built from THIS source
+#     always has a well-formed stamp (release-stamp.sh is fatal in config.sh),
+#     so a missing/malformed one means "some other build", not a regression;
+#     the verify-contents provenance row still fails it under an explicit --root.
+# ---------------------------------------------------------------------------
+image_source_check() {
+    local tree=$1 repo rel n_src sha state head behind
+    local fix="rebuild the bundle from this tree with image/build-in-vm.sh, or set QDISTRO_BUILD_DIR to a build dir whose bundle was built from it"
+    IMAGE_SOURCE_BLOCK_REASON=""
+    repo="$(project_root qdistro)"
+    rel="$tree/etc/qdistro/release"
+    # A symlink would be resolved against the HOST's /, not the image.
+    if [ -L "$rel" ] || [ ! -f "$rel" ] || [ ! -r "$rel" ]; then
+        IMAGE_SOURCE_BLOCK_REASON="image source unknown: $rel is missing or unreadable, so the image under $tree cannot be tied to the tree under test; $fix"
+        return 1
+    fi
+    n_src="$(grep -c '^SOURCE ' "$rel" 2>/dev/null || true)"
+    sha="$(sed -nE 's/^SOURCE qdistro ([0-9a-f]{40}) (clean|DIRTY .*)$/\1/p' "$rel" 2>/dev/null)"
+    if [ "${n_src:-0}" -ne 1 ] || [ "$(printf '%s\n' "$sha" | grep -c .)" -ne 1 ]; then
+        IMAGE_SOURCE_BLOCK_REASON="image source unknown: $rel has ${n_src:-0} SOURCE line(s), expected exactly one 'SOURCE qdistro <sha> clean|DIRTY' (several = a pre-monorepo sibling-layout build); $fix"
+        return 1
+    fi
+    state="$(sed -nE 's/^SOURCE qdistro [0-9a-f]{40} (clean|DIRTY).*$/\1/p' "$rel")"
+    kv image_source_sha "$sha"
+    kv image_source_state "$state"
+    if ! head="$(git -C "$repo" rev-parse --verify -q HEAD 2>/dev/null)"; then
+        IMAGE_SOURCE_BLOCK_REASON="image built from $sha, but HEAD of the tree under test ($repo) cannot be resolved to check ancestry; $fix"
+        return 1
+    fi
+    kv image_tree_head "$head"
+    if [ "$sha" = "$head" ]; then
+        kv image_source_relation exact
+        return 0
+    fi
+    if ! git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null; then
+        IMAGE_SOURCE_BLOCK_REASON="stale image: built from $sha, which is not a commit in the tree under test (HEAD $head; another clone or an unfetched branch); $fix"
+        kv image_source_relation unknown-commit
+        return 1
+    fi
+    if ! git -C "$repo" merge-base --is-ancestor "$sha" "$head" 2>/dev/null; then
+        IMAGE_SOURCE_BLOCK_REASON="stale image: built from $sha, which is not an ancestor of the tree under test (HEAD $head); $fix"
+        kv image_source_relation not-ancestor
+        return 1
+    fi
+    behind="$(git -C "$repo" rev-list --count "$sha..$head" 2>/dev/null || echo '?')"
+    kv image_source_relation ancestor
+    kv image_source_behind "$behind"
+    log "image: WARNING bundle built from $sha ($state), an ancestor $behind commit(s) behind HEAD $head; checklist results describe that build, not HEAD"
+    return 0
+}
+
 gate_image() {
     qci_assert_run_dir || return $?
     local root="" idempotency=0 no_boot=0 rc=$EXIT_OK
@@ -93,7 +160,21 @@ gate_image() {
     # surface as a FAIL, not be masked as a non-failing record_blocked). Only
     # the auto-discovery-found-nothing case is a legitimate "blocked, needs an
     # extracted tree" — never a user-supplied root.
-    if [ -n "$root" ] || { [ -n "$static_root" ] && [ -d "$static_root" ]; }; then
+    # An auto-discovered tree must come from this tree's history, or its
+    # checklist verdict is about some other source (the 2026-09-10 sibling-
+    # layout bundle "failed" verify-contents on the monorepo). An explicit
+    # --root is the caller's deliberate choice and is inspected as given.
+    local source_block=""
+    if [ -z "$root" ] && [ -n "$static_root" ] && [ -d "$static_root" ]; then
+        if ! image_source_check "$static_root"; then
+            source_block="$IMAGE_SOURCE_BLOCK_REASON"
+            log "image: $source_block"
+            record_blocked image verify-contents "$EXIT_BUILD" image "$source_block"
+        fi
+    fi
+    if [ -n "$source_block" ]; then
+        :   # blocked above; do not judge (or boot) an unrelated build
+    elif [ -n "$root" ] || { [ -n "$static_root" ] && [ -d "$static_root" ]; }; then
         local sc_log="$RDIR/host/image-verify-contents.log"
         mkdir -p "$(dirname "$sc_log")"
         log "image: static content checklist against ${static_root:-<unset>}"
@@ -115,7 +196,7 @@ gate_image() {
     # A full run already captured this manifest for its source gate. Release
     # image-only runs capture the same configured input here before checking.
     local identity_manifest="$RDIR/release-manifest/manifest.snapshot"
-    if [ -n "$static_root" ] && [ -d "$static_root" ] \
+    if [ -z "$source_block" ] && [ -n "$static_root" ] && [ -d "$static_root" ] \
         && { [ -f "$identity_manifest" ] || [ "${QCI_RELEASE:-0}" = 1 ]; }; then
         local identity_log="$RDIR/host/image-release-identity.log"
         if [ ! -f "$identity_manifest" ]; then
@@ -179,11 +260,12 @@ gate_image() {
     # (round-4 review); that case is BLOCKED with the reason, not silently
     # booted.
     local img=""
-    if [ -z "$root" ] && [ -n "$raw" ] && [ "$extracted_fresh" = 1 ]; then
+    if [ -z "$root" ] && [ -z "$source_block" ] && [ -n "$raw" ] && [ "$extracted_fresh" = 1 ]; then
         img="$raw"
     fi
     if [ -z "$img" ]; then
         local why="boot needs the published raw Stage A inspected:"
+        [ -n "$source_block" ] && why="$why the published image was not built from this tree (see the verify-contents row);"
         [ -n "$root" ] && why="$why --root was given, so the inspected tree has no provable source image;"
         [ -z "$raw" ] && why="$why no bundle/*.raw.xz or single top-level .raw under $build_dir;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh and rerun without --root"
