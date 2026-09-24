@@ -22,8 +22,8 @@ jobs:
       LIBGUESTFS_BACKEND: direct
       LIBGUESTFS_BACKEND_SETTINGS: force_tcg
       CLOUD_URL: https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
-      CLOUD_CACHE: ${{ runner.temp }}/qdistro-cloud-base.qcow2
-      VM_IMAGE: ${{ runner.temp }}/qdistro-minimal-vm.qcow2
+      CLOUD_CACHE: /tmp/qdistro-cloud-base.qcow2
+      VM_IMAGE: /tmp/qdistro-minimal-vm.qcow2
     steps:
       - uses: actions/checkout@v4
 
