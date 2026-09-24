@@ -1,7 +1,8 @@
 name: qdistro Podman staged VM experiment
 
 # Native compile on openSUSE, offline copy into a signed cloud QCOW2, then
-# verify library closure and a headless qdwin/Weston launch. Not a release.
+# verify library closure and a headless qdwin/Weston launch. This developer
+# VM retains the native build toolchain; it is not a release image.
 on:
   push:
     branches: [experiment/github-qdistro-image]
@@ -84,6 +85,9 @@ jobs:
               test -f /out/stage/usr/bin/qdistro-secctx-exec
               test -f /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so
               mkdir -p /out/stage/usr/share/qdistro-build
+              rpm -q --qf "%{NAME} %{VERSION}-%{RELEASE}\n" \
+                glibc libwayland-client0 libweston-16-0 libQt6Core6 \
+                > /out/stage/usr/share/qdistro-build/build-rpms.txt
               find /out/stage -type f -print0 | while IFS= read -r -d "" staged_file; do
                 if file -b "$staged_file" | grep -Eq "^ELF .* (dynamically linked|shared object)"; then
                   printf "%s\n" "${staged_file#/out/stage}"
@@ -123,7 +127,7 @@ jobs:
           test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/lib64/weston/qdwin-shell.so)" = true
           df -h /
 
-      - name: Install runtime libraries and test headless launch in VM
+      - name: Install runtime and developer packages, then test launch in VM
         shell: bash
         timeout-minutes: 35
         run: |
@@ -166,7 +170,24 @@ jobs:
           vmssh 'sudo -n zypper -n install --no-recommends \
             weston libweston-16 libweston-16-0 libinput10 libXcursor1 libpango-1_0-0 \
             freerdp libpipewire-0_3-0 qt6-wayland qt6-declarative-imports \
-            libQt6Core6 libQt6Gui6 libQt6Qml6 libQt6Network6'
+            libQt6Core6 libQt6Gui6 libQt6Qml6 libQt6Network6 \
+            meson ninja gcc gcc-c++ pkgconf-pkg-config git file \
+            weston-devel wayland-devel wayland-protocols-devel \
+            libinput-devel libXcursor-devel freerdp-devel winpr-devel \
+            pipewire-devel libselinux-devel \
+            qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
+            qt6-declarative-devel qt6-svg-devel qt6-shadertools \
+            libpixman-1-0-devel libxkbcommon-devel libevdev-devel \
+            libgbm-devel libdrm-devel seatd-devel \
+            Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \
+            liblcms2-devel libdisplay-info-devel libX11-devel libxcb-devel \
+            cairo-devel libpng16-devel libpng16-compat-devel pango-devel \
+            fontconfig-devel glib2-devel libva-devel'
+          vmssh 'meson --version; ninja --version; gcc --version | head -1; df -h /'
+          vmssh 'rpm -q --qf "%{NAME} %{VERSION}-%{RELEASE}\n" \
+            glibc libwayland-client0 libweston-16-0 libQt6Core6 \
+            > /tmp/qdistro-guest-rpms; \
+            diff -u /usr/share/qdistro-build/build-rpms.txt /tmp/qdistro-guest-rpms'
           vmssh 'set -eu; export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
             for f in /usr/lib64/weston/qdwin-shell.so \
               /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so \
@@ -228,7 +249,7 @@ jobs:
       - name: Upload staged VM experiment
         uses: actions/upload-artifact@v4
         with:
-          name: qdistro-native-components-vm
+          name: qdistro-native-components-dev-vm
           path: |
             ${{ env.VM_IMAGE }}
             ${{ env.VM_IMAGE }}.sha256
