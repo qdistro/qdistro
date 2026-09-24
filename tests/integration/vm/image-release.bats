@@ -245,6 +245,116 @@ PY
         "$T/tree/qdistro/image/root/root/qdistro-source-manifest"   # one untracked dir
 }
 
+# debris: build output, caches, worktrees and run artifacts that a working
+# checkout accumulates, none of it source. Each is created UNtracked.
+make_debris() {
+    local r="$1"
+    mkdir -p "$r/qdwin/build-foo" "$r/qdwin/build" "$r/qdshell/build-qci" \
+             "$r/daemons/__pycache__" "$r/.worktrees/x" "$r/ci/runs/y" \
+             "$r/.mypy_cache/3.13" "$r/.pytest_cache" "$r/qdshell/.venv/bin" \
+             "$r/.ruff_cache" "$r/qdterm/.hypothesis" "$r/qdterm/x.egg-info" \
+             "$r/qdchrome-extension/node_modules/m" "$r/qdchrome-extension/dist" \
+             "$r/image/logs" "$r/image/keys/gnupg" "$r/qdchrome-extension/keys"
+    echo pem > "$r/qdchrome-extension/keys/qdistro.pem"
+    echo o   > "$r/qdwin/build-foo/qdwin.o"
+    echo n   > "$r/qdwin/build/build.ninja"
+    echo so  > "$r/qdshell/build-qci/libplugin.so"
+    echo pyc > "$r/daemons/__pycache__/x.cpython-313.pyc"
+    echo wt  > "$r/.worktrees/x/file"
+    echo run > "$r/ci/runs/y/log"
+    echo c   > "$r/.mypy_cache/3.13/cache.json"
+    echo c   > "$r/.pytest_cache/README.md"
+    echo c   > "$r/.ruff_cache/CACHEDIR.TAG"
+    echo c   > "$r/qdterm/.hypothesis/db"
+    echo c   > "$r/qdterm/x.egg-info/PKG-INFO"
+    echo py  > "$r/qdshell/.venv/bin/python"
+    echo js  > "$r/qdchrome-extension/node_modules/m/index.js"
+    echo js  > "$r/qdchrome-extension/dist/bundle.js"
+    echo tar > "$r/image/logs/old.tar"
+    echo key > "$r/image/keys/gnupg/secring.gpg"
+    echo cov > "$r/.coverage-report.json"
+}
+
+debris_absent() {
+    local o="$1" p
+    for p in qdwin/build-foo qdwin/build qdshell/build-qci daemons/__pycache__ \
+             .worktrees ci/runs .mypy_cache .pytest_cache qdshell/.venv \
+             .ruff_cache qdterm/.hypothesis qdterm/x.egg-info \
+             qdchrome-extension/node_modules qdchrome-extension/dist \
+             image/logs image/keys .coverage-report.json image/root/root .git \
+             qdchrome-extension/keys; do
+        if [ -e "$o/$p" ]; then echo "debris shipped: $p" >&2; return 1; fi
+    done
+}
+
+@test "build.sh: the sync copies git's view of the source -- tracked + untracked-unignored, never build dirs or caches" {
+    fake_tree
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    # the REAL ignore lists (top level + the extension's, which guards its
+    # private packing key), so this pins what the monorepo ignores
+    cp "$REPO/.gitignore" "$r/.gitignore"
+    cp "$REPO/image/.gitignore" "$r/image/.gitignore"
+    mkdir -p "$r/qdchrome-extension"
+    cp "$REPO/qdchrome-extension/.gitignore" "$r/qdchrome-extension/.gitignore"
+    mkdir -p "$r/ci/lib" "$r/qdwin/build-aux"
+    echo tracked > "$r/ci/lib/tracked.sh"
+    echo gone    > "$r/ci/lib/deleted.sh"
+    # a TRACKED file whose name the ignore patterns match (build-*/): git
+    # decides, not a name pattern, so it ships
+    echo aux > "$r/qdwin/build-aux/tool"
+    git -C "$r" add ci/lib .gitignore image/.gitignore qdchrome-extension/.gitignore
+    git -C "$r" add -f qdwin/build-aux/tool
+    git -C "$r" -c user.email=t@t -c user.name=t commit -q -m more
+    rm "$r/ci/lib/deleted.sh"                 # tracked, deleted in the tree
+    echo new > "$r/qdshell/new-installer.sh"  # untracked, not ignored
+    make_debris "$r"
+    # an untracked nested repository is not this repo's source
+    mkdir -p "$r/vendor/nested"; git -C "$r/vendor/nested" init -q
+    echo n > "$r/vendor/nested/f"
+    # debris of an earlier sync inside the overlay must not survive
+    mkdir -p "$o/stale"; echo s > "$o/stale/file"
+
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ "$(cat "$o/ci/lib/tracked.sh")" = tracked ]
+    [ "$(cat "$o/qdwin/build-aux/tool")" = aux ]
+    [ "$(cat "$o/qdshell/new-installer.sh")" = new ]
+    [ -f "$o/image/build.sh" ] && [ -f "$o/qdwin/README" ] && [ -f "$o/.gitignore" ]
+    [ ! -e "$o/ci/lib/deleted.sh" ]
+    [ ! -e "$o/vendor" ]
+    [ ! -e "$o/stale" ]
+    debris_absent "$o"
+    # the file list stays out of the overlay tree kiwi copies into the image
+    [ -z "$(find "$r/image/root" -name '*files*' -print)" ]
+    # a second sync does not copy the overlay (inside the repo) into itself
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    debris_absent "$o"
+    # exactly git's view lands: no more (debris), no less (source)
+    (cd "$o" && find . \( -type f -o -type l \) -printf '%P\n' | sort) > "$T/got"
+    (cd "$r" && git ls-files --cached --others --exclude-standard | sort -u \
+        | grep -vx -e ci/lib/deleted.sh -e vendor/nested/) > "$T/want"
+    diff "$T/want" "$T/got"
+}
+
+@test "build.sh: the sync never ships the overlay, worktrees, ci/runs, image/logs or keys even when nothing ignores them" {
+    fake_tree   # no top-level .gitignore: only image/.gitignore (root/root/, logs/)
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    printf 'root/root/\n' > "$r/image/.gitignore"   # logs/ no longer ignored
+    git -C "$r" -c user.email=t@t -c user.name=t commit -q -am narrower
+    mkdir -p "$r/.worktrees/x" "$r/ci/runs/y" "$r/image/logs" "$r/image/keys/gnupg"
+    echo wt  > "$r/.worktrees/x/file"
+    echo run > "$r/ci/runs/y/log"
+    echo tar > "$r/image/logs/old.tar"
+    echo key > "$r/image/keys/gnupg/secring.gpg"
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ -f "$o/qdwin/README" ]
+    for p in .worktrees ci/runs image/logs image/keys image/root/root; do
+        [ ! -e "$o/$p" ] || { echo "shipped: $p" >&2; false; }
+    done
+}
+
 @test "build.sh: a failing git status refuses the sync instead of reading as clean" {
     fake_tree
     mkdir -p "$T/shim"
