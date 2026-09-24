@@ -7,9 +7,10 @@ Podman and in-guest-build experiment workflows were removed after validation.
 
 ## Verified result
 
+- [Final manually triggered Docker run 36013692783](https://github.com/qdistro/qdistro/actions/runs/36013692783): successful in 15m49s; [downloadable test VM ZIP](https://github.com/qdistro/qdistro/actions/runs/36013692783/artifacts/10814472674), 677 MB, retained until 2026-10-24. The guest root had 1.4 GiB used / 6.1 GiB free; runner final disk-use delta was 2.68 GB. All 44 staged dynamic ELFs passed dependency checks, and `qdwin-probe` received `hello uid=1000` from the launched shell. No build tools were installed in the guest. This run also verified `workflow_dispatch` on the experiment branch.
 - [Runtime-only run 35993860510](https://github.com/qdistro/qdistro/actions/runs/35993860510): successful; 15m08s job; [QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/35993860510/artifacts/10805489190), 676 MB compressed.
 - [Developer-image run 35994485920](https://github.com/qdistro/qdistro/actions/runs/35994485920): successful; 20m12s job; [QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/35994485920/artifacts/10806601494), 1.11 GB compressed. It retains the native compiler, Meson, Ninja, Git, pkg-config and development headers, per user preference. The 8 GiB virtual disk's 7.5 GiB root had 2.3 GiB used and 5.3 GiB free; the runner's final disk-use delta was 3.78 GB, below the 15 GiB target.
-- Both builds compiled qdwin, daemons, qdshell's native plugin, and the patched production libweston 16 in an openSUSE Tumbleweed Podman pod. The staged tree was about 12 MB. The signed Minimal-VM QCOW2 was verified, resized, and populated offline with libguestfs. No host privilege or KVM was required.
+- The earlier comparison builds compiled qdwin, daemons, qdshell's native plugin, and the patched production libweston 16 in an openSUSE Tumbleweed Podman pod; the final workflow uses Docker. The staged tree was about 12 MB. The signed Minimal-VM QCOW2 was verified, resized, and populated offline with libguestfs. No privileged container or KVM was required; the runner did use sudo to install host image tools.
 - In the guest, all 44 staged dynamic ELF files passed dependency checks with the vendored library path. Weston loaded `qdwin-shell.so` on a headless backend, and `qdwin-probe` received `hello uid=1000`. Offline dependency checks and `qemu-img check` passed. Boot/probe used QEMU TCG, not KVM.
 
 ## Time and space profile
@@ -44,5 +45,27 @@ The artifact is a native-components *test VM*, not a complete qdistro desktop or
 RPM distribution was considered and rejected for this test-image workflow.
 Keep more extensive VM testing on the user's own hardware as requested, with
 the GitHub TCG boot/probe serving as a portable smoke test.
+
+## Astra review of a possible single RPM
+
+One versioned RPM for qdistro-owned runtime files is a reasonable *future*
+ownership and upgrade boundary, but it should not replace the ready-to-use
+QCOW2 artifact. The current 12 MB staged tree is only native qdwin, daemons,
+patched libweston and qdshell's native plugin; `qdshell/meson.build` explicitly
+leaves the QML shell tree to another installer. Python apps, services, greeter
+and policy setup are likewise not captured. An RPM of this tree should be
+called `qdistro-native`, not `qdistro`, until the complete runtime manifest is
+defined against the bootstrap installer chain.
+
+If an RPM is introduced, it should own first-party immutable files and declare
+openSUSE runtime dependencies, not bundle openSUSE RPMs or invoke zypper/pip
+inside `%post`. Keep machine provisioning (users, storage, SSH, profile and
+service enablement) in an explicit image assembler/bootstrap. Audit generated
+RPM requirements/provides around the *private* vendored libweston tree so its
+SONAME cannot falsely satisfy unrelated system packages. An XFS Minimal-VM
+image would still lack the btrfs/subvolume/snapshot properties of the full
+release path. RPM packaging improves upgrade/removal hygiene, but does not
+remove the measured VM boot and dependency-install time; making testers assemble
+the image locally would also shift network and libguestfs work to their machines.
 
 Before calling this reproducible release packaging: pin or consistently snapshot the container, cloud image and RPM repositories; record their digests; inspect peak (not just final) runner disk use; and verify upgrades/rebuilds against the pinned Weston ABI. The current workflow compares four key container/guest RPM versions and performs full staged-ELF closure checks, but it does not prove snapshot identity for the entire dependency graph.
