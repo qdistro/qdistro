@@ -92,8 +92,8 @@ only the LOCK layer can render.
 6. **Shell-side deprecation** of `attach_lock_surface` /
    `set_locked` / `lock_requested` on `qdwin_shell_v1`: not yet.
    Keep them functional during qdlocker rollout. Once
-   `qdshell/Modules/LockScreen/*` is deleted (sibling-repo
-   migration), bump `qdwin_shell_v1` and remove the shell-side
+   `qdshell/Modules/LockScreen/*` is deleted (in the
+   `qdshell/` component), bump `qdwin_shell_v1` and remove the shell-side
    handlers in the same commit.
 
 ## Lifecycle invariants
