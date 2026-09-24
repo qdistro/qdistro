@@ -91,6 +91,12 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   feedback while developing, run single scenarios
   (`ci/bin/qci gui --scenario <abs path>`); the selected gates are the
   acceptance bar.
+- **Cheap per-component host checks** (development feedback only; they do
+  **not** satisfy a selected `host` gate). `qci host` has no component
+  selector; these are its rows from `ci/lib/gates/host.sh`, run from the
+  component directory: `cd qdlocker && python3 -m pytest -q tests/unit`,
+  `cd qdgreeter && python3 -m pytest -q tests`,
+  `cd qdfileman && python3 -m pytest -q`. Each takes seconds.
 - **Review before merge.** Get the change reviewed (diff + gate evidence)
   before it lands on `main`.
 - **The live checkout on `main` is merge-only.** Agents never edit it
@@ -112,6 +118,10 @@ systemctl --user list-units 'qci-*'          # runs launched under systemd-run
 pgrep -af '[c]i/bin/qci'                     # any qci process ([c] keeps pgrep from matching this command)
 virsh -c qemu:///session list --all | grep qci-
 ```
+
+Only an *active/running* `qci-*` unit, a live `ci/bin/qci` process, or a
+*running* `qci-*` domain means the host is in use; `failed` units and
+`shut off` domains are residue of earlier runs.
 
 Launch long runs under `systemd-run --user --unit=qci-<name> ...` and never
 edit a script while a run that sources it is going. Each run's

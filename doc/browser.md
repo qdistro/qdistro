@@ -180,20 +180,21 @@ There is **one** canonical Firefox extension:
 
 | Mode | Source of truth | gecko id |
 |------|-----------------|----------|
-| `standalone` (default, only) | the `qdfirefox-extension` repo (MV3, first-class containers) | `qdistro-firefox@qdistro.local` |
+| `standalone` (default, only) | the in-tree `qdfirefox-extension` component (MV3, first-class containers) | `qdistro-firefox@qdistro.local` |
 
-`qdistro_browser_install.py` pins that id as a cross-repo contract (asserted
-by the unit suite against `qdfirefox-extension/manifest.json` when the repo is
-checked out). The policy-match example below uses it.
+`qdistro_browser_install.py` pins that id as a cross-component contract
+(asserted by the unit suite against the in-tree
+`qdfirefox-extension/manifest.json`). The policy-match example below uses it.
 
 **Both shipped extensions close the origin allowlist by default.** They did
 not always: J11 landed the closed-by-default gate in `qdchrome-extension`
 only, and `qdfirefox-extension` — whose `src/gate.js` was otherwise
 byte-identical, down to the test name `"allows all origins when empty"` —
 kept treating an empty allowlist as "all origins". That was drift, not a
-deliberately different Firefox posture: the two repos are maintained as
-parallel copies (the byte-identical `tests/fixtures/golden-frames.js` and its
-cross-repo drift guard exist precisely because of that), and J11 simply
+deliberately different Firefox posture: the two extension components are
+maintained as parallel copies (the byte-identical
+`tests/fixtures/golden-frames.js` and its cross-component drift guard exist
+precisely because of that), and J11 simply
 patched one of the two. The Firefox port is
 `qdfirefox-extension` `fix/j11-firefox-allowlist-closed`; the stager below
 will not install a tree that is open by default, so the two land together.
@@ -485,7 +486,7 @@ open: each is a named post-v1 item, and the v1 substitute is documented in
 | qdistro CRX signing key custody | release engineering | **post-v1** — v1 loads unpacked; the pinned public key keeps the *unpacked* id stable, but a CRX keeps that id only if signed with the matching private key, which has no custody story yet |
 | `update.xml` hosting endpoint | release engineering | **post-v1** — no endpoint; installer default is `https://example.invalid/…`, so `--install-policy` must not be used in v1 |
 | AMO self-distribution build pipeline | release engineering | **post-v1** — `build-extension.sh --sign` exists but is inert without AMO credentials; v1 uses `about:debugging` temporary load (re-load on every restart) |
-| Force-install policy scripts (`install-system-policy.sh`, both repos) | release engineering | **scaffolding** — they reference `/usr/share/qdistro/extensions/…`, a path nothing populates in v1 |
+| Force-install policy scripts (`install-system-policy.sh`, both extension components) | release engineering | **scaffolding** — they reference `/usr/share/qdistro/extensions/…`, a path nothing populates in v1 |
 | Auto-update + revocation for a shipped extension | release engineering | **post-v1** — no update channel and no kill switch; a fix reaches users only by rebuild + re-load |
 | Air-gapped fallback (no AMO / no update.xml) | architecture | not designed |
 

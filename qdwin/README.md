@@ -2,13 +2,13 @@
 
 A libweston shell plugin that hosts the qdistro desktop. Single-seat,
 single-user, designed for one trusted shell client (typically
-[qdshell](https://github.com/qdistro/qdshell)) plus arbitrary
+[qdshell](../qdshell)) plus arbitrary
 sandboxed application clients placed by the shell.
 
-qdwin is the compositor half of [qdistro](https://github.com/qdistro/qdistro)
-but is published as a separate project: nothing in qdwin assumes the
-qdistro broker, the qdshell QML stack, or the qdistro userland is
-present. A different shell can adopt it.
+qdwin is the compositor half of [qdistro](../README.md) and lives in-tree as
+the `qdwin/` component of the qdistro monorepo. It is kept self-contained:
+nothing in qdwin assumes the qdistro broker, the qdshell QML stack, or the
+qdistro userland is present. A different shell can adopt it.
 
 ## Role in qdistro
 
@@ -16,7 +16,7 @@ In qdistro, qdwin is the trusted Wayland compositor. It owns window placement,
 trusted chrome boundaries, lock-layer enforcement, private qdwin protocols, and
 the metadata that lets qdshell and the broker reason about which silo owns a
 surface. It deliberately stays small and C/libweston-based while the modifiable
-product code lives in Python/QML sibling repos.
+product code lives in the Python/QML components elsewhere in this repository.
 
 **Mechanism, not policy.** qdwin does not make policy decisions by itself:
 privileged operations surface as `*_pending` events and complete on
@@ -57,13 +57,15 @@ XML, so build qdwin first. See the [monorepo README](../README.md).
 ## What's NOT in here
 
 The qdistro userland — broker, polkit agent, SDK, vault, admin app,
-etc. — lives in the [qdistro umbrella repo](https://github.com/qdistro/qdistro).
-The qdshell QML lives in [qdshell](https://github.com/qdistro/qdshell).
+etc. — lives elsewhere in this repository (see the [root README](../README.md)).
+The qdshell QML lives in the sibling [qdshell](../qdshell) component.
 
 Several daemons that consume qdwin protocols (`qdistro-cursor-sprites`,
 `qdistro-nested-pixelfeed`, `qdistro-secctx-exec`, `qdistro-tier1-exec`,
-`qdistro-forward`) ship in the umbrella repo. They consume qdwin's XML
-via the system `wayland-protocols` directory once qdwin is installed.
+`qdistro-forward`) live in the root `daemons/` directory. They compile
+against qdwin's protocol XML, either from qdwin's uninstalled build tree (see
+the root [AGENTS.md](../AGENTS.md) build order) or from the system
+`wayland-protocols` directory once qdwin is installed.
 
 ## Build
 

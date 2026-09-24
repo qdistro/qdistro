@@ -15,8 +15,8 @@ Boot login is deliberately separate and belongs to [qdgreeter](../qdgreeter).
 The production session should treat qdlocker as part of the qdwin session stack,
 not as optional shell chrome.
 
-Sibling to [qdshell](../qdshell), not part of it. The original locker
-lived inside qdshell as `Modules/LockScreen/*.qml`; this repo lifts
+A sibling component to [qdshell](../qdshell), not part of it. The original
+locker lived inside qdshell as `Modules/LockScreen/*.qml`; this component lifts
 it out so the locker's process lifecycle is independent of the shell
 (a shell crash no longer drops the screen unlocked, and a locker
 crash doesn't take chrome down with it).
@@ -93,10 +93,10 @@ qdlocker/
 
 The QML imports `qs.Commons` (Style.qml, Color.qml, Icons.qml) and
 `qs.Widgets` (NText, NIcon, NIconButton, NBusyIndicator) from the
-qdshell sibling repo. `app.py:_qdshell_import_path` finds qdshell
-automatically when the two repos are siblings; override with
-`QDLOCKER_QDSHELL_PATH=/path/to/qdshell` if you've laid things out
-differently. The locker falls back to inline rendering for the
+in-tree [qdshell](../qdshell) component. `app.py:_qdshell_import_path` finds
+it automatically at `../qdshell` (its location in this repository);
+`QDLOCKER_QDSHELL_PATH=/path/to/qdshell` is only an override for unusual
+layouts, such as an installed qdlocker outside the source tree. The locker falls back to inline rendering for the
 header if qdshell isn't on the path.
 
 ## Run
