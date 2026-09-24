@@ -93,10 +93,15 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   acceptance bar.
 - **Cheap per-component host checks** (development feedback only; they do
   **not** satisfy a selected `host` gate). `qci host` has no component
-  selector; these are its rows from `ci/lib/gates/host.sh`, run from the
-  component directory: `cd qdlocker && python3 -m pytest -q tests/unit`,
-  `cd qdgreeter && python3 -m pytest -q tests`,
-  `cd qdfileman && python3 -m pytest -q`. Each takes seconds.
+  selector; these are its rows from `ci/lib/gates/host.sh`. Run each
+  independently from the repository root (the host's Python/Qt test
+  dependencies must be installed); each takes seconds:
+
+  ```sh
+  (cd qdlocker && python3 -m pytest -q tests/unit)
+  (cd qdgreeter && python3 -m pytest -q tests)
+  (cd qdfileman && python3 -m pytest -q)
+  ```
 - **Review before merge.** Get the change reviewed (diff + gate evidence)
   before it lands on `main`.
 - **The live checkout on `main` is merge-only.** Agents never edit it
@@ -109,8 +114,10 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
 
 ## Shared-host qci rule
 
-Run **one `qci full` / GUI run at a time per host**: the HTTP staging port
-(8765) and VM/golden names are host-wide singletons. Before starting one, check
+Run **one `qci full` / GUI run at a time per host**: VM and golden-image names
+are host-wide singletons, and some staging paths (the manual
+`fresh-vm-bootstrap.sh` default, `build-enforcing-baseweed.sh`) still use the
+fixed HTTP port 8765. Before starting one, check
 what is running:
 
 ```sh

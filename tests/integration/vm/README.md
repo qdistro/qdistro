@@ -151,8 +151,12 @@ scripts, and start pipewire.
 When a new probe lands in `scripts/vm/`, add a matching
 @test here. The test body should:
 
-1. Assume the VM already has the probe deployed (or deploy it via
-HTTP-server-on-host pattern: the host serves the monorepo tarball over SLIRP NAT on 10.0.2.2:8765.
+1. Assume the VM already has the probe deployed (or deploy it via the
+   HTTP-server-on-host pattern: the host serves the monorepo tarball over
+   SLIRP NAT at `10.0.2.2:<staging-port>`; `spin-test-vm.sh` binds a
+   kernel-chosen free port per run and passes `http://10.0.2.2:$SPIN_HTTP_PORT`
+   to the bootstrap, and the fixed port 8765 is only for a manually started
+   server).
 2. Run the probe via `vm-exec`.
 3. Assert on exit code via `[ "$status" -eq 0 ]`.
 4. Optionally `run-asserts` specific log lines via grep.
