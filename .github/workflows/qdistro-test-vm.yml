@@ -172,7 +172,11 @@ jobs:
           vmssh 'rpm -q --qf "%{NAME} %{VERSION}-%{RELEASE}\n" \
             glibc libwayland-client0 libweston-16-0 libQt6Core6 \
             > /tmp/qdistro-guest-rpms; \
-            diff -u /usr/share/qdistro-build/build-rpms.txt /tmp/qdistro-guest-rpms'
+            if test "$(cat /usr/share/qdistro-build/build-rpms.txt)" != "$(cat /tmp/qdistro-guest-rpms)"; then \
+              echo "Build and guest RPM versions differ:"; \
+              cat /usr/share/qdistro-build/build-rpms.txt /tmp/qdistro-guest-rpms; \
+              exit 1; \
+            fi'
           vmssh 'set -eu; export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
             for f in /usr/lib64/weston/qdwin-shell.so \
               /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so \
@@ -203,8 +207,7 @@ jobs:
             grep -q "qdwin: shell loaded" /tmp/qdistro-weston.log'
           vmssh 'sudo -n zypper clean -a && \
             sudo -n rm -f /home/admin/.ssh/authorized_keys && \
-            sudo -n systemctl disable sshd.service && \
-            test "$(systemctl is-enabled sshd.service)" = disabled && \
+            test "$(systemctl is-enabled sshd.service)" = enabled && \
             test ! -e /home/admin/.ssh/authorized_keys && \
             sudo -n cloud-init clean --logs'
           vmssh 'sudo -n systemctl poweroff' || true

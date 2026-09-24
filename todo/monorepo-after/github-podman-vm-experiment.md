@@ -39,7 +39,7 @@ provides native ZIP/zlib compression at level 6; no extra gzip/XZ layer is
 used. The 8 GiB disk leaves about 6 GiB free in the successful runtime image
 and does not imply an 8 GiB download. The artifact is retained for 30 days.
 
-The artifact is a native-components *developer/test VM*, not a complete qdistro desktop or a KIWI replacement. `qdshell/meson.build` installs only its native QML plugin, not the QML shell/session wiring. The VM has no baked builder SSH key; cloud-init can provision one on first boot. Artifact retention is seven days.
+The artifact is a native-components *test VM*, not a complete qdistro desktop or a KIWI replacement. `qdshell/meson.build` installs only its native QML plugin, not the QML shell/session wiring. The VM has no baked builder SSH key; SSH remains enabled so cloud-init can provision the user's key on first boot. Artifact retention is 30 days.
 
 RPM distribution was considered and rejected for this test-image workflow.
 Keep more extensive VM testing on the user's own hardware as requested, with
