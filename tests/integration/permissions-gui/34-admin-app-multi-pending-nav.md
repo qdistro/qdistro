@@ -137,7 +137,20 @@ PYEOF
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 1
+# The title is computed from the Pending model's row count, and an external
+# decision reaches the app only through the broker's signal -> refresh, so
+# waiting for the exact title proves the app itself reacted. Up to 60
+# polls, ~30 s.
+wait_title() {  # $1 = the exact title to wait for
+  $VMEXEC "$VM" "for _ in \$(seq 1 60); do
+    t=\$(runuser -u admin -- env DISPLAY=:0 xdotool search --name '^admin approvals' getwindowname 2>/dev/null | head -1)
+    [ \"\$t\" = '$1' ] && exit 0
+    sleep 0.5
+  done
+  echo \"title is '\$t', wanted '$1'\" >&2; exit 1"
+}
+wait_title 'admin approvals (2 pending)'
+sleep 2
 $VMGUI "$VM" screenshot /tmp/34-s4-after-approve.png
 
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
@@ -176,7 +189,8 @@ PYEOF
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 1
+wait_title 'admin approvals'
+sleep 2
 $VMGUI "$VM" screenshot /tmp/34-s5-drained.png
 
 # All three were denied above, so all three must now finish. `wait $(cat
@@ -216,7 +230,26 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
   assert "row 0 is action.1" — assert the *set* of three actions
   is the right set, and that arrow-Down moves selection by one
   row in the rendered order.
-- If S4's "two rows remain" check fails with three rows, the
-  Ctrl+Y in S3 didn't fire — re-check that the admin app window
-  has X focus (the windowactivate call is supposed to ensure
-  that; if it didn't, the chord went to whoever else has focus).
+- If S4's "two rows remain" check fails with three rows, S4's
+  approve never took effect in the app. S3 only navigates (no
+  decision is sent there). Find which of three steps failed, in
+  order: the admin API call was refused (typically `python3`
+  run without the `-`, see the next note), `DecideRequest`
+  itself raised, or the decision landed but the app never
+  refreshed (`GetPending` shows two rows while the title wait
+  timed out on `(3 pending)`).
+- Run the S4/S5 decision scripts exactly as written, as
+  `runuser -u admin -- python3 -`. The `-` is required: the broker
+  trusts an admin Python peer that reads its script from stdin only
+  when argv says so (`-` or `-c`), and refuses a bare `python3` with
+  "Python peer is not an installed admin script" (2026-09-24: a
+  driver dropped the `-`, GetPending was refused, S4 never decided).
+- If a decision script or a `wait_title` fails, that step has
+  failed: record it with the command's stderr, and do not release
+  the next guest gate before you have. Releasing the guest early let
+  its S5 deny-all drain every row before the S4 retry (2026-09-24).
+- The S4/S5 frames are taken after the title settled, but the client
+  surface can lag the title. If a frame disagrees with the title
+  (rows that the title says are gone), capture again up to 4 more
+  times, 2 s apart (`-r2.png` ...), and grade the first that agrees.
+  If none agrees, the step FAILS on the last frame; keep every frame.
