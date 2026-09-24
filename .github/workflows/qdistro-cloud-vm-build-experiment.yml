@@ -1,0 +1,165 @@
+name: qdistro cloud VM build experiment
+
+# Experimental continuation of the old signed Minimal-VM + guest customization
+# path. This does not invoke KIWI or allocate its 28 GiB raw build disk.
+on:
+  push:
+    branches: [experiment/github-qdistro-image]
+    paths: [.github/workflows/qdistro-cloud-vm-build-experiment.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      LIBGUESTFS_BACKEND: direct
+      LIBGUESTFS_BACKEND_SETTINGS: force_tcg
+      CLOUD_URL: https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare runner-owned paths and disk baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qdistro-image"
+          echo "CLOUD_CACHE=$RUNNER_TEMP/qdistro-image/cloud-base.qcow2" >> "$GITHUB_ENV"
+          echo "VM_IMAGE=$RUNNER_TEMP/qdistro-image/qdistro-dev.qcow2" >> "$GITHUB_ENV"
+          echo "DISK_BASELINE=$(df -B1 --output=used / | tail -1 | tr -d ' ')" >> "$GITHUB_ENV"
+          df -h /
+
+      - name: Install VM and image tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libguestfs-tools libguestfs-xfs xfsprogs qemu-utils \
+            qemu-system-x86 ovmf cloud-image-utils gnupg wget jq openssh-client
+          sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$RUNNER_TEMP/qdistro-image/vmlinuz-$(uname -r)"
+          echo "SUPERMIN_KERNEL=$RUNNER_TEMP/qdistro-image/vmlinuz-$(uname -r)" >> "$GITHUB_ENV"
+          echo "SUPERMIN_MODULES=/lib/modules/$(uname -r)" >> "$GITHUB_ENV"
+          command -v cloud-localds
+          command -v qemu-system-x86_64
+          df -h /
+
+      - name: Build 10 GiB standalone cloud VM disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/vm/lib/opensuse-cloud-image.sh
+          download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"
+          qemu-img create -f qcow2 "$VM_IMAGE" 10G
+          virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
+          guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : xfs-growfs /
+          qemu-img check "$VM_IMAGE"
+          virt-filesystems --long --parts --filesystems -a "$VM_IMAGE"
+          df -h /
+
+      - name: Boot VM and install qdistro from this monorepo
+        shell: bash
+        timeout-minutes: 155
+        run: |
+          set -euo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/qdistro-image/builder-key"
+          {
+            printf '#cloud-config\n'
+            printf 'users:\n  - name: admin\n    uid: 1000\n    groups: [wheel]\n    shell: /bin/bash\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    ssh_authorized_keys:\n'
+            printf '      - %s\n' "$(cat "$RUNNER_TEMP/qdistro-image/builder-key.pub")"
+            printf 'ssh_pwauth: false\ndisable_root: true\n'
+            printf 'runcmd:\n  - [systemctl, enable, --now, sshd.service]\n'
+          } > "$RUNNER_TEMP/qdistro-image/user-data"
+          printf 'instance-id: qdistro-builder\nlocal-hostname: qdistro-builder\n' > "$RUNNER_TEMP/qdistro-image/meta-data"
+          cloud-localds "$RUNNER_TEMP/qdistro-image/seed.img" "$RUNNER_TEMP/qdistro-image/user-data" "$RUNNER_TEMP/qdistro-image/meta-data"
+
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd "$RUNNER_TEMP/qdistro-image/OVMF_VARS.fd"
+          qemu-system-x86_64 -machine q35,accel=tcg -m 4096 -smp 2 \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+            -drive if=pflash,format=raw,file="$RUNNER_TEMP/qdistro-image/OVMF_VARS.fd" \
+            -drive if=virtio,format=qcow2,file="$VM_IMAGE" \
+            -drive if=virtio,format=raw,readonly=on,file="$RUNNER_TEMP/qdistro-image/seed.img" \
+            -netdev user,id=vmnet,hostfwd=tcp:127.0.0.1:2222-:22 \
+            -device virtio-net-pci,netdev=vmnet \
+            -display none -serial file:"$RUNNER_TEMP/qdistro-image/serial.log" -monitor none \
+            > "$RUNNER_TEMP/qdistro-image/qemu.log" 2>&1 &
+          qemu_pid=$!
+          trap 'kill "$qemu_pid" 2>/dev/null || true' EXIT
+          vmssh() {
+            ssh -i "$RUNNER_TEMP/qdistro-image/builder-key" -p 2222 \
+              -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+              admin@127.0.0.1 "$@"
+          }
+          ready=0
+          for attempt in $(seq 1 120); do
+            if vmssh 'sudo -n true' >/dev/null 2>&1; then ready=1; break; fi
+            if ! kill -0 "$qemu_pid" 2>/dev/null; then echo 'QEMU exited before SSH became ready'; break; fi
+            sleep 5
+          done
+          if [ "$ready" -ne 1 ]; then tail -120 "$RUNNER_TEMP/qdistro-image/serial.log"; exit 1; fi
+          vmssh 'df -h /; cat /etc/os-release | head -5'
+          git archive HEAD | vmssh 'sudo -n install -d -m 0755 /opt/qdistro-src && sudo -n tar -xf - -C /opt/qdistro-src'
+          vmssh 'sudo -n bash /opt/qdistro-src/scripts/install/qdistro-bootstrap.sh \
+            --profile=dev --strict --yes --noninteractive --skip-sources --skip-subvolumes \
+            --repo-root=/opt/qdistro-src --admin-password=qdistro \
+            --user=user --user-password=qdistro --reset-passwords' \
+            2>&1 | tee "$RUNNER_TEMP/qdistro-image/bootstrap.log"
+          vmssh 'sudo -n test -f /var/lib/qdistro/bootstrap/installer-chain.state && \
+            sudo -n test -f /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir && \
+            sudo -n find /usr/lib64/weston -name qdwin-shell.so -print -quit && \
+            df -h /'
+          # Do not ship the temporary builder SSH key in a downloadable VM.
+          vmssh 'sudo -n zypper clean -a && \
+            sudo -n cloud-init clean --logs && \
+            sudo -n rm -f /home/admin/.ssh/authorized_keys && \
+            sudo -n systemctl disable sshd.service && \
+            test "$(systemctl is-enabled sshd.service)" = disabled && \
+            test ! -e /home/admin/.ssh/authorized_keys'
+          vmssh 'sudo -n systemctl poweroff' || true
+          for attempt in $(seq 1 60); do
+            kill -0 "$qemu_pid" 2>/dev/null || break
+            sleep 2
+          done
+          kill "$qemu_pid" 2>/dev/null || true
+          wait "$qemu_pid" 2>/dev/null || true
+          qemu-img check "$VM_IMAGE"
+
+      - name: Validate disk budget and prepare download
+        shell: bash
+        run: |
+          set -euo pipefail
+          used_now="$(df -B1 --output=used / | tail -1 | tr -d ' ')"
+          used_delta="$((used_now - DISK_BASELINE))"
+          echo "Runner disk used since start: $used_delta bytes"
+          test "$used_delta" -lt 16106127360
+          qemu-img info --output=json "$VM_IMAGE" | jq -e '.format == "qcow2" and .["virtual-size"] == 10737418240 and .["backing-filename"] == null'
+          (cd "$(dirname "$VM_IMAGE")" && sha256sum "$(basename "$VM_IMAGE")" > "$(basename "$VM_IMAGE").sha256")
+          du -h "$VM_IMAGE"
+          df -h /
+
+      - name: Upload qdistro VM image
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdistro-dev-vm-qcow2
+          path: |
+            ${{ env.VM_IMAGE }}
+            ${{ env.VM_IMAGE }}.sha256
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdistro-vm-build-logs
+          path: |
+            ${{ runner.temp }}/qdistro-image/bootstrap.log
+            ${{ runner.temp }}/qdistro-image/serial.log
+            ${{ runner.temp }}/qdistro-image/qemu.log
+          if-no-files-found: ignore
+          retention-days: 7
