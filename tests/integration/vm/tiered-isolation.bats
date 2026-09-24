@@ -39,8 +39,20 @@ cat >"$RULE_FILE" <<'YAML' || { echo "FAIL: cannot write $RULE_FILE"; exit 1; }
   match:
     action: qdistro.nested.advertise:org.freedesktop.weston.wayland-terminal
 YAML
-systemctl start qdistro-admin-broker.service 2>/dev/null || true
-systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+# The broker has no ExecReload, so reload-or-restart was a full restart, and
+# this file restarts it many times within seconds (setup, each driver's rule
+# reload and cleanup, teardown). That tripped systemd's start limit on
+# 2026-09-24 (start-limit-hit), which never clears on its own. reset-failed
+# clears the start-rate counter first, and a plain restart also starts a
+# stopped unit (the previous start+reload-or-restart pair was two starts).
+# Same shape as broker_restart() in s61/s62/s64. A restart that still fails
+# is reported with the unit status, never swallowed.
+systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true
+if ! systemctl restart qdistro-admin-broker.service; then
+    systemctl status --no-pager --lines=20 qdistro-admin-broker.service || true
+    echo "FAIL: broker restart after writing the tier-2 allow-rules failed (unit status above)"
+    exit 1
+fi
 # Settle: poll as the REAL caller (admin uid) until both freshly-authored
 # rules resolve to allow (broker reloads rules on SIGHUP/restart).
 bc() {
@@ -113,9 +125,14 @@ teardown_file() {
     # Remove the test-authored rules so they never leak across runs. A failed
     # cleanup — which would leave a standing allow rule in the VM — is LOUD,
     # not swallowed (helpers.bash policy: never silently skip).
-    vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml; systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true; echo 'PASS: tier-2 broker allow-rules removed'"
+    # The broker restart uses the same reset-failed-before-restart shape as
+    # setup_file. Its result is carried out as a BROKER-RESTART marker and
+    # asserted only after the qdlocker restore below, so a failed restart is
+    # loud without skipping the remaining cleanup.
+    vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml || exit 1; echo 'PASS: tier-2 broker allow-rules removed'; systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true; if systemctl restart qdistro-admin-broker.service; then echo 'BROKER-RESTART: ok'; else systemctl status --no-pager --lines=20 qdistro-admin-broker.service || true; echo 'BROKER-RESTART: failed'; fi"
     assert_success || fail_loud "could not remove the tier-2 broker allow-rules (a test-authored rule may persist in the VM)"
     assert_output_contains "PASS: tier-2 broker allow-rules removed"
+    local broker_restart_output=$output
 
     # Restore qdlocker's idle-auto-lock (undo the setup_file drop-in) so the
     # idle timeout never leaks across runs to a VM that outlives this suite.
@@ -133,6 +150,39 @@ UNIDLE
 )"
     assert_success || fail_loud "could not restore qdlocker idle-auto-lock (the test-authored drop-in may persist in the VM)"
     assert_output_contains "PASS: qdlocker idle-auto-lock restored"
+
+    output=$broker_restart_output
+    assert_output_contains "BROKER-RESTART: ok" \
+        || fail_loud "broker restart after removing the tier-2 allow-rules failed (unit status in the output above)"
+}
+
+# run_driver_keep_stderr <tag> <driver.sh> — stage-and-run form for drivers
+# whose stderr carries diagnostics (s61/s62/s64: broker_restart() prints the
+# unit status to stderr when a restart fails). The old `2>/dev/null` threw that
+# away. Stderr must not join the stdout protocol either: the tests match
+# PASS:/SKIP: substrings in $output, and a dumped build log or journal must
+# never satisfy or trip those. So the driver's stderr goes to a guest file and
+# is emitted after a marker; the marker splits it back off, $output keeps the
+# driver's stdout (plus whatever vm-exec itself adds, as before), and the
+# stderr is echoed to the test's stderr, which bats prints when the test
+# fails. $status stays the driver's exit status: a FAIL recorded by a failed
+# restart stays a failure whatever the cleanup restart does.
+_DRIVER_STDERR_MARK='@@qci-driver-stderr@@'
+run_driver_keep_stderr() {
+    local tag=$1 driver=$2
+    vm_run "curl -fsS -o /tmp/$tag.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/$driver && chmod +x /tmp/$tag.sh && { bash /tmp/$tag.sh 2>/tmp/$tag.stderr; rc=\$?; echo '$_DRIVER_STDERR_MARK'; cat /tmp/$tag.stderr; exit \$rc; }"
+    split_driver_stderr "$tag"
+}
+
+# split_driver_stderr <tag> — cut $output at the marker (see above).
+split_driver_stderr() {
+    local tag=$1 driver_stderr
+    [[ "$output" == *"$_DRIVER_STDERR_MARK"* ]] || return 0
+    driver_stderr=${output#*"$_DRIVER_STDERR_MARK"}
+    output=${output%%"$_DRIVER_STDERR_MARK"*}
+    if [[ -n "${driver_stderr//[$'\n']/}" ]]; then
+        printf '%s\n' "--- $tag driver stderr ---" "$driver_stderr" >&2
+    fi
 }
 
 setup() {
@@ -244,7 +294,7 @@ setup() {
     # to phase7-tier3-lineage-register (s60). The spawn gate rule is authored by
     # setup_file (and idempotently by the driver), so this needs no extra setup.
     stage_vm_driver "s61-tier2-lineage-register.sh"
-    vm_run "curl -fsS -o /tmp/s61.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s61-tier2-lineage-register.sh && chmod +x /tmp/s61.sh && bash /tmp/s61.sh 2>/dev/null"
+    run_driver_keep_stderr s61 s61-tier2-lineage-register.sh
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman / tier-2 image / qdistro-secctx-exec / outer compositor / broker audit db not available on this VM"
@@ -268,7 +318,7 @@ setup() {
     # probe's near-instant FROM-only recipe + promote. Companion to S3b (s61) and
     # S3d (s60); the driver authors its own broker rule (idempotent w/ setup_file).
     stage_vm_driver "s62-tier2-template-lineage-register.sh"
-    vm_run "curl -fsS -o /tmp/s62.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s62-tier2-template-lineage-register.sh && chmod +x /tmp/s62.sh && bash /tmp/s62.sh 2>/dev/null"
+    run_driver_keep_stderr s62 s62-tier2-template-lineage-register.sh
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-2 template stack (qdistro-template-build / silo unit + launch helper / podman / secctx-exec / outer compositor / broker audit db) not available on this VM"
@@ -294,7 +344,7 @@ setup() {
     # surfaced + validates the resolve_btrfs() fix (btrfs is off the as-admin
     # PATH, so the subvolume mechanism had silently degraded to copy).
     stage_vm_driver "s64-tier2-template-snapshot-e2e.sh"
-    vm_run "curl -fsS -o /tmp/s64.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s64-tier2-template-snapshot-e2e.sh && chmod +x /tmp/s64.sh && bash /tmp/s64.sh 2>/dev/null"
+    run_driver_keep_stderr s64 s64-tier2-template-snapshot-e2e.sh
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-2 template stack / mkfs.btrfs / btrfs subvolume support not available on this VM"

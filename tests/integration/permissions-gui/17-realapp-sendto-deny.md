@@ -183,6 +183,11 @@ $VMGUI "$VM" screenshot /tmp/17-s1-pending.png
 # 2. Find bounding box of "Deny" (scope picker has no "Deny"
 # label — only Approve/Deny buttons fit that width).
 # 3. Click its center.
+```
+
+Then, as a separate command, the title wait:
+
+```bash
 # Settle before grading. The title is computed from the Pending model's row
 # count, so "admin approvals" with no "(N pending)" means the model is empty.
 # The client surface can lag the title: a fixed `sleep 2` once captured the
@@ -192,26 +197,50 @@ $VMEXEC "$VM" 'for _ in $(seq 1 60); do
   [ "$t" = "admin approvals" ] && exit 0
   sleep 0.5
 done
-echo "title never settled: $t" >&2; exit 1'
-# Bounded capture sequence: up to 5 frames, 2 s apart. Grade each as it
-# lands and stop at the first that shows the asserted empty state.
-for i in 1 2 3 4 5; do
-  sleep 2
-  $VMGUI "$VM" screenshot /tmp/17-s2-denied-$i.png
-  # Runner: open /tmp/17-s2-denied-$i.png; if it shows `(no selection)`
-  # and no request row, copy it to /tmp/17-s2-denied.png and break.
-done
+echo "title never settled: $t" >&2; exit 1' 2>"${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.err"
+echo "title-wait rc=$?"
+cat "${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.err"
 ```
 
-**Readiness** (a failed step on its own, recorded with the wait's stderr):
-- The title wait above exits 0. If it times out, S2 FAILS on that
-  ground; still capture and grade the frames as evidence, but a later
-  good frame does not erase the timeout.
-- One of the 5 frames shows the empty state. If none does, the surface
-  stayed stale for ~10 s after the model emptied: S2 FAILS. Copy the
-  last frame to /tmp/17-s2-denied.png and grade that. Keep every frame.
+**Readiness, step 1 — title wait** (up to 60 polls, ~30 s). Run the
+block above as its own command and record the printed `title-wait rc=`
+line together with the stderr shown after it. Any rc other than 0 is a
+failed step: S2 FAILS on that ground regardless of what the frames below
+show. Still capture and grade the frames as evidence; a later good frame
+does not erase the timeout.
 
-**Assert (OCR /tmp/17-s2-denied.png)**:
+**Readiness, step 2 — bounded frame capture** (at most 5 frames, 2 s
+apart). Start with N=1. Each iteration is a separate runner action, not
+a shell loop:
+
+1. Capture frame N (substitute the number for `N`):
+
+   ```bash
+   $VMGUI "$VM" screenshot /tmp/17-s2-denied-N.png
+   ```
+
+2. Open `/tmp/17-s2-denied-N.png` and grade it by looking at the image
+   (vision; no OCR helper). The empty state is: `(no selection)` in the
+   details pane and no request row in the Pending list.
+3. If frame N shows the empty state, copy it to the canonical path and
+   stop capturing:
+
+   ```bash
+   cp /tmp/17-s2-denied-N.png /tmp/17-s2-denied.png
+   ```
+
+4. Otherwise, if N < 5: `sleep 2`, increment N, and go back to 1.
+5. If frame 5 still does not show the empty state, the surface stayed
+   stale for ~10 s after the model emptied: S2 FAILS. Copy the last
+   frame to the canonical path and grade that below:
+
+   ```bash
+   cp /tmp/17-s2-denied-5.png /tmp/17-s2-denied.png
+   ```
+
+Keep every numbered frame; do not delete or overwrite them.
+
+**Assert (open and grade /tmp/17-s2-denied.png by vision)**:
 - `(no selection)` visible.
 - No `uid=2000` / `app.send-to:` text.
 

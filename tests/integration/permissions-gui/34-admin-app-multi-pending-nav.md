@@ -139,7 +139,8 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # The title is computed from the Pending model's row count, and an external
 # decision reaches the app only through the broker's signal -> refresh, so
-# waiting for the exact title proves the app itself reacted. Up to 30 s.
+# waiting for the exact title proves the app itself reacted. Up to 60
+# polls, ~30 s.
 wait_title() {  # $1 = the exact title to wait for
   $VMEXEC "$VM" "for _ in \$(seq 1 60); do
     t=\$(runuser -u admin -- env DISPLAY=:0 xdotool search --name '^admin approvals' getwindowname 2>/dev/null | head -1)
@@ -229,10 +230,14 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
   assert "row 0 is action.1" — assert the *set* of three actions
   is the right set, and that arrow-Down moves selection by one
   row in the rendered order.
-- If S4's "two rows remain" check fails with three rows, the
-  Ctrl+Y in S3 didn't fire — re-check that the admin app window
-  has X focus (the windowactivate call is supposed to ensure
-  that; if it didn't, the chord went to whoever else has focus).
+- If S4's "two rows remain" check fails with three rows, S4's
+  approve never took effect in the app. S3 only navigates (no
+  decision is sent there). Find which of three steps failed, in
+  order: the admin API call was refused (typically `python3`
+  run without the `-`, see the next note), `DecideRequest`
+  itself raised, or the decision landed but the app never
+  refreshed (`GetPending` shows two rows while the title wait
+  timed out on `(3 pending)`).
 - Run the S4/S5 decision scripts exactly as written, as
   `runuser -u admin -- python3 -`. The `-` is required: the broker
   trusts an admin Python peer that reads its script from stdin only
