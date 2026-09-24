@@ -377,13 +377,14 @@ for a in "\$@"; do case "\$a" in -z*) echo "sort: simulated failure" >&2; exit 2
 exec /usr/bin/sort "\$@"
 SH
     chmod +x "$T/shim/sort"
-    PATH="$T/shim:$PATH" run bash "$r/image/build.sh" --sync-only
+    mkdir -p "$T/tmp"   # private TMPDIR: the temp file list lands here
+    TMPDIR="$T/tmp" PATH="$T/shim:$PATH" run bash "$r/image/build.sh" --sync-only
     [ "$status" -eq 2 ]
     [[ "$output" == *"sorting the git file list failed"* ]]
     [[ "$output" != *"copying"* ]]
     [ "$(cat "$o/sentinel")" = prev ]
     [ -f "$o/qdwin/README" ]
-    [ -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'qdistro-src-files.*' -newer "$T/shim/sort" 2>/dev/null)" ]
+    [ -z "$(ls -A "$T/tmp")" ] || { ls -A "$T/tmp" >&2; false; }
 }
 
 @test "build.sh: a failing git status refuses the sync instead of reading as clean" {
