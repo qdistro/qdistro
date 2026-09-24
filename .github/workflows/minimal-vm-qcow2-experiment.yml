@@ -36,6 +36,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libguestfs-tools qemu-utils gnupg wget jq
           for tool in guestfish virt-resize virt-customize virt-filesystems qemu-img gpgv; do command -v "$tool"; done
+          # The hosted Azure kernel is mode 0600. supermin only needs a readable
+          # copy to boot its userspace QEMU appliance; image work remains rootless.
+          sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$RUNNER_TEMP/qdistro-image/vmlinuz-$(uname -r)"
+          echo "SUPERMIN_KERNEL=$RUNNER_TEMP/qdistro-image/vmlinuz-$(uname -r)" >> "$GITHUB_ENV"
+          echo "SUPERMIN_MODULES=/lib/modules/$(uname -r)" >> "$GITHUB_ENV"
           df -h "$RUNNER_TEMP"
 
       - name: Download and verify upstream image
