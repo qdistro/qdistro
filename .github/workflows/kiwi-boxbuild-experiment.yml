@@ -58,12 +58,12 @@ jobs:
                 python3-pip python3-virtualenv qemu-x86 rsync git-core xz
               python3 -m venv /opt/kiwi-venv
               /opt/kiwi-venv/bin/pip install --no-cache-dir \
-                kiwi==11.0.5 kiwi-boxed-plugin==0.2.58
+                kiwi==10.3.5 kiwi-boxed-plugin==0.2.58
               export PATH=/opt/kiwi-venv/bin:$PATH
               kiwi-ng --version || true
               echo "Checking boxed-plugin command registration:"
               kiwi-ng system boxbuild --help || true
-              kiwi-ng --debug system boxbuild --list-boxes || true
+              kiwi-ng --debug system boxbuild --list-boxes
               if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
                 echo "KVM is unavailable to the unprivileged container; stopping before the large box download and image build." >&2
                 exit 2
