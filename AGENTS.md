@@ -114,10 +114,12 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
 
 ## Shared-host qci rule
 
-Run **one `qci full` / GUI run at a time per host**: VM and golden-image names
-are host-wide singletons, and some staging paths (the manual
-`fresh-vm-bootstrap.sh` default, `build-enforcing-baseweed.sh`) still use the
-fixed HTTP port 8765. Before starting one, check
+Run **one `qci full` / GUI run at a time per host**. Per-run VM and golden
+names are generated uniquely, but runs share fixed resources: the
+`qdistro-template` domain in the user's libvirt session, the base images in the
+image directory (`baseweed-baked.qcow2`, `baseweed-enforcing-baked.qcow2`), and
+host CPU/memory. Port 8765 remains the default of the manual
+`fresh-vm-bootstrap.sh` path and of `build-enforcing-baseweed.sh`. Before starting one, check
 what is running:
 
 ```sh
