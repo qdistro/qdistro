@@ -192,19 +192,23 @@ Then, as a separate command, the title wait:
 # count, so "admin approvals" with no "(N pending)" means the model is empty.
 # The client surface can lag the title: a fixed `sleep 2` once captured the
 # emptied title over the stale, still-selected row (2026-09-24, scenario 13).
+title_rc=0
 $VMEXEC "$VM" 'for _ in $(seq 1 60); do
   t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
   [ "$t" = "admin approvals" ] && exit 0
   sleep 0.5
 done
-echo "title never settled: $t" >&2; exit 1' 2>"${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.err"
-echo "title-wait rc=$?"
+echo "title never settled: $t" >&2; exit 1' 2>"${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.err" || title_rc=$?
+echo "$title_rc" >"${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.rc"
+echo "title-wait rc=$title_rc"
 cat "${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.err"
 ```
 
 **Readiness, step 1 — title wait** (up to 60 polls, ~30 s). Run the
 block above as its own command and record the printed `title-wait rc=`
-line together with the stderr shown after it. Any rc other than 0 is a
+line together with the stderr shown after it (both are also kept in
+`${QCI_SCENARIO_TMPDIR:-/tmp}/17-s2-title.rc` and `.err`; the `|| title_rc=$?` form keeps them
+even in a shell with errexit on). Any rc other than 0 is a
 failed step: S2 FAILS on that ground regardless of what the frames below
 show. Still capture and grade the frames as evidence; a later good frame
 does not erase the timeout.
@@ -231,7 +235,8 @@ a shell loop:
 
 4. Otherwise, if N < 5: `sleep 2`, increment N, and go back to 1.
 5. If frame 5 still does not show the empty state, the surface stayed
-   stale for ~10 s after the model emptied: S2 FAILS. Copy the last
+   stale across five frames with 2 s pauses between them (8 s of sleeps
+   plus capture and grading time) after the model emptied: S2 FAILS. Copy the last
    frame to the canonical path and grade that below:
 
    ```bash

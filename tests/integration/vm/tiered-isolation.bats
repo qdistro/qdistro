@@ -122,19 +122,32 @@ teardown_file() {
     # in a file, so the broker-rule removal below MUST live in this same function
     # — a second teardown_file() would silently shadow it and leak the rule.
     reap_vm_drivers
-    # Remove the test-authored rules so they never leak across runs. A failed
-    # cleanup — which would leave a standing allow rule in the VM — is LOUD,
-    # not swallowed (helpers.bash policy: never silently skip).
-    # The broker restart uses the same reset-failed-before-restart shape as
-    # setup_file. Its result is carried out as a BROKER-RESTART marker and
-    # asserted only after the qdlocker restore below, so a failed restart is
-    # loud without skipping the remaining cleanup.
-    vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml || exit 1; echo 'PASS: tier-2 broker allow-rules removed'; systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true; if systemctl restart qdistro-admin-broker.service; then echo 'BROKER-RESTART: ok'; else systemctl status --no-pager --lines=20 qdistro-admin-broker.service || true; echo 'BROKER-RESTART: failed'; fi"
-    assert_success || fail_loud "could not remove the tier-2 broker allow-rules (a test-authored rule may persist in the VM)"
-    assert_output_contains "PASS: tier-2 broker allow-rules removed"
-    local broker_restart_output=$output
+    # Three cleanups, each attempted whatever happened to the ones before it,
+    # each failure LOUD (helpers.bash policy: never silently skip). bats calls
+    # this as `teardown_file || status=$?`, so errexit never stops it and ONLY
+    # the final return reaches the verdict: every failure is accumulated into
+    # cleanup_rc and returned at the end. `fail_loud ... || cleanup_rc=1`
+    # records it (fail_loud always returns 1) without depending on errexit.
+    local cleanup_rc=0
 
-    # Restore qdlocker's idle-auto-lock (undo the setup_file drop-in) so the
+    # 1. Remove the test-authored rules so they never leak across runs.
+    vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml && ! test -e /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml && echo 'PASS: tier-2 broker allow-rules removed'"
+    if ! assert_success || ! assert_output_contains "PASS: tier-2 broker allow-rules removed"; then
+        fail_loud "could not remove the tier-2 broker allow-rules (a test-authored rule may persist in the VM)" || cleanup_rc=1
+    fi
+
+    # 2. Restart the broker so it drops the removed rules. Same
+    # reset-failed-before-restart shape as setup_file. The verdict is this
+    # command's EXIT STATUS (the restart's, or the transport's), never a token
+    # searched for in the output: that output holds `systemctl status` journal
+    # text, which can quote anything.
+    vm_run "systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true; systemctl restart qdistro-admin-broker.service && exit 0; rc=\$?; systemctl status --no-pager --lines=20 qdistro-admin-broker.service || true; exit \$rc"
+    if [[ "$status" -ne 0 ]]; then
+        printf '%s\n' "$output" >&2
+        fail_loud "broker restart after removing the tier-2 allow-rules failed (exit=$status)" || cleanup_rc=1
+    fi
+
+    # 3. Restore qdlocker's idle-auto-lock (undo the setup_file drop-in) so the
     # idle timeout never leaks across runs to a VM that outlives this suite.
     vm_run "$(cat <<'UNIDLE'
 rm -f /etc/systemd/user/qdlocker.service.d/99-qci-no-idle-lock.conf
@@ -148,41 +161,93 @@ adm_uctl restart qdlocker.service || true
 echo "PASS: qdlocker idle-auto-lock restored"
 UNIDLE
 )"
-    assert_success || fail_loud "could not restore qdlocker idle-auto-lock (the test-authored drop-in may persist in the VM)"
-    assert_output_contains "PASS: qdlocker idle-auto-lock restored"
+    if ! assert_success || ! assert_output_contains "PASS: qdlocker idle-auto-lock restored"; then
+        fail_loud "could not restore qdlocker idle-auto-lock (the test-authored drop-in may persist in the VM)" || cleanup_rc=1
+    fi
 
-    output=$broker_restart_output
-    assert_output_contains "BROKER-RESTART: ok" \
-        || fail_loud "broker restart after removing the tier-2 allow-rules failed (unit status in the output above)"
+    return "$cleanup_rc"
 }
 
 # run_driver_keep_stderr <tag> <driver.sh> — stage-and-run form for drivers
 # whose stderr carries diagnostics (s61/s62/s64: broker_restart() prints the
 # unit status to stderr when a restart fails). The old `2>/dev/null` threw that
-# away. Stderr must not join the stdout protocol either: the tests match
-# PASS:/SKIP: substrings in $output, and a dumped build log or journal must
-# never satisfy or trip those. So the driver's stderr goes to a guest file and
-# is emitted after a marker; the marker splits it back off, $output keeps the
-# driver's stdout (plus whatever vm-exec itself adds, as before), and the
-# stderr is echoed to the test's stderr, which bats prints when the test
-# fails. $status stays the driver's exit status: a FAIL recorded by a failed
-# restart stays a failure whatever the cleanup restart does.
-_DRIVER_STDERR_MARK='@@qci-driver-stderr@@'
+# away, but stderr must not join the assertion input either: the tests match
+# PASS:/SKIP: substrings in $output, and a dumped build log, journal, or
+# vm-exec's own messages must never satisfy or trip those.
+#
+# So the guest wraps the driver in a frame whose marker lines carry a fresh
+# random nonce per call (a driver cannot print a boundary it cannot know):
+#     @@qci-driver-stdout-<nonce>@@      then the driver's stdout
+#     @@qci-driver-stderr-<nonce>@@      then the driver's stderr (guest file)
+#     @@qci-driver-end-<nonce> rc=<N>@@  the driver's exit status
+# split_driver_frame then sets $output to the stdout section ONLY. The stderr
+# section and anything outside the frame (vm-exec's messages before it, its
+# `--- stderr ---` block after it) go to the test's stderr, which bats prints
+# when the test fails. $status keeps the driver's exit status, so a FAIL
+# recorded by a failed restart stays a failure whatever the cleanup restart
+# does.
 run_driver_keep_stderr() {
-    local tag=$1 driver=$2
-    vm_run "curl -fsS -o /tmp/$tag.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/$driver && chmod +x /tmp/$tag.sh && { bash /tmp/$tag.sh 2>/tmp/$tag.stderr; rc=\$?; echo '$_DRIVER_STDERR_MARK'; cat /tmp/$tag.stderr; exit \$rc; }"
-    split_driver_stderr "$tag"
+    local tag=$1 driver=$2 nonce
+    nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    vm_run "curl -fsS -o /tmp/$tag.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/$driver && chmod +x /tmp/$tag.sh && { echo '@@qci-driver-stdout-$nonce@@'; bash /tmp/$tag.sh 2>/tmp/$tag.stderr; rc=\$?; printf '\n%s\n' '@@qci-driver-stderr-$nonce@@'; cat /tmp/$tag.stderr; printf '\n@@qci-driver-end-%s rc=%s@@\n' '$nonce' \"\$rc\"; exit \$rc; }"
+    split_driver_frame "$tag" "$nonce"
 }
 
-# split_driver_stderr <tag> — cut $output at the marker (see above).
-split_driver_stderr() {
-    local tag=$1 driver_stderr
-    [[ "$output" == *"$_DRIVER_STDERR_MARK"* ]] || return 0
-    driver_stderr=${output#*"$_DRIVER_STDERR_MARK"}
-    output=${output%%"$_DRIVER_STDERR_MARK"*}
-    if [[ -n "${driver_stderr//[$'\n']/}" ]]; then
-        printf '%s\n' "--- $tag driver stderr ---" "$driver_stderr" >&2
+# split_driver_frame <tag> <nonce> — validate and cut the frame described
+# above. The frame is valid only when each marker appears exactly once, as a
+# whole line, in order, and the end marker carries a numeric rc. An invalid
+# frame fails CLOSED: $status is forced non-zero if the transport said 0,
+# $output is left as the raw capture (assert_success prints it), and the raw
+# capture is also written to stderr. A valid frame whose rc disagrees with a
+# zero transport status also fails (with that rc).
+split_driver_frame() {
+    local tag=$1 nonce=$2
+    local out_mark="@@qci-driver-stdout-$nonce@@"
+    local err_mark="@@qci-driver-stderr-$nonce@@"
+    local end_re="^@@qci-driver-end-$nonce rc=([0-9]+)@@\$"
+    local raw=$output line section=pre bad="" rc=""
+    local n_out=0 n_err=0 n_end=0 drv_out="" drv_err="" diag=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "$out_mark" ]]; then
+            n_out=$((n_out + 1))
+            if [[ $section == pre ]]; then section=out; else bad="stdout marker out of order"; fi
+        elif [[ "$line" == "$err_mark" ]]; then
+            n_err=$((n_err + 1))
+            if [[ $section == out ]]; then section=err; else bad="stderr marker out of order"; fi
+        elif [[ "$line" =~ $end_re ]]; then
+            n_end=$((n_end + 1)); rc=${BASH_REMATCH[1]}
+            if [[ $section == err ]]; then section=post; else bad="end marker out of order"; fi
+        else
+            case $section in
+                out) drv_out+=$line$'\n' ;;
+                err) drv_err+=$line$'\n' ;;
+                *)   diag+=$line$'\n' ;;
+            esac
+        fi
+    done <<<"$raw"
+    if [[ -z "$bad" ]] && { [[ $n_out -ne 1 || $n_err -ne 1 || $n_end -ne 1 ]] || [[ $section != post ]]; }; then
+        bad="markers stdout=$n_out stderr=$n_err end=$n_end (want 1 each)"
     fi
+    if [[ -n "$bad" ]]; then
+        printf '%s\n' "--- $tag driver capture: invalid frame ($bad); raw capture follows ---" "$raw" >&2
+        [[ "$status" -ne 0 ]] || status=125
+        return 0
+    fi
+    # Strip the trailing blank lines the frame's own newlines add, as $() would.
+    while [[ "$drv_out" == *$'\n' ]]; do drv_out=${drv_out%$'\n'}; done
+    while [[ "$drv_err" == *$'\n' ]]; do drv_err=${drv_err%$'\n'}; done
+    output=$drv_out
+    mapfile -t lines <<<"$output"
+    if [[ -n "$drv_err" ]]; then
+        printf '%s\n' "--- $tag driver stderr ---" "$drv_err" >&2
+    fi
+    if [[ -n "${diag//[$'\n']/}" ]]; then
+        printf '%s\n' "--- $tag transport output outside the frame ---" "$diag" >&2
+    fi
+    if [[ "$status" -eq 0 && "$rc" -ne 0 ]]; then
+        status=$rc
+    fi
+    return 0
 }
 
 setup() {
