@@ -22,10 +22,14 @@ jobs:
       LIBGUESTFS_BACKEND: direct
       LIBGUESTFS_BACKEND_SETTINGS: force_tcg
       CLOUD_URL: https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
-      CLOUD_CACHE: /tmp/qdistro-cloud-base.qcow2
-      VM_IMAGE: /tmp/qdistro-minimal-vm.qcow2
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set runner-owned image paths
+        run: |
+          mkdir -p "$RUNNER_TEMP/qdistro-image"
+          echo "CLOUD_CACHE=$RUNNER_TEMP/qdistro-image/cloud-base.qcow2" >> "$GITHUB_ENV"
+          echo "VM_IMAGE=$RUNNER_TEMP/qdistro-image/qdistro-minimal-vm.qcow2" >> "$GITHUB_ENV"
 
       - name: Install image tools
         run: |
