@@ -10,13 +10,17 @@
 #    the file went green (astra round 3, triage-fix-review-r3-astra.md #1). The
 #    matrix below runs the REAL teardown_file, extracted from the suite, under
 #    the REAL installed bats runner with only vm_run/reap_vm_drivers stubbed,
-#    and checks the runner's exit status.
+#    and checks the runner's exit status. Round 4 (triage-fix-review-r4-astra.md
+#    #1/#2) added a failing host reaper, and cases that RUN the real qdlocker
+#    restore guest string under command shims: stubbing the whole vm_run
+#    result could never see a guest script that swallowed its own failures.
 #
 # 2. run_driver_keep_stderr / split_driver_frame, which cut driver stdout (the
 #    assertion input) out of a merged capture. A fixed marker could be forged or
 #    go missing (review #2); the frame now uses a per-call nonce and fails
 #    closed. The cases run the real functions against a local stand-in for the
-#    guest.
+#    guest. Round 4 (#3/#4) added a failed/short host nonce and non-canonical
+#    end statuses (`08`, `256`, ...).
 #
 # No VM, no libvirt, no systemd.
 
@@ -55,14 +59,20 @@ extract_fn() {
 # run_teardown_matrix — build an inner .bats file with one green test, the
 # suite's real teardown_file and the real assert/fail_loud helpers, and run it
 # with the real bats. MODE_rules / MODE_broker / MODE_locker pick each stubbed
-# vm_run's outcome: ok | fail | transport | nopass | quoted-ok.
+# vm_run's outcome: ok | fail | transport | nopass | quoted-ok, plus `exec`,
+# which RUNS the real guest command string locally under /bin/sh with the
+# command shims from make_guest_shims (see there; SHIM_FAIL picks failures).
+# MODE_reap=fail makes the host reaper return 1.
 run_teardown_matrix() {
     local inner="$BATS_TEST_TMPDIR/inner.bats"
     : > "$WORK/calls.log"
+    : > "$WORK/shim.log"
+    make_guest_shims
     {
         echo "CALLS='$WORK/calls.log'"
+        echo "SHIMS='$WORK/shims'"
         cat <<'STUB'
-reap_vm_drivers() { :; }
+reap_vm_drivers() { echo reap >> "$CALLS"; [ "${MODE_reap:-ok}" = ok ]; }
 vm_run() {
     local step mode_var mode
     case "$1" in
@@ -74,6 +84,8 @@ vm_run() {
     echo "$step" >> "$CALLS"
     mode_var="MODE_$step"; mode=${!mode_var:-ok}
     case $mode in
+        exec)
+            output=$(PATH="$SHIMS:$PATH" /bin/sh -c "$1" 2>&1) && status=0 || status=$? ;;
         ok)
             status=0
             case $step in
@@ -105,10 +117,40 @@ STUB
     CALLS_SEEN=$(tr '\n' ' ' < "$WORK/calls.log")
 }
 
+# make_guest_shims — stand-ins for the guest commands the qdlocker restore
+# runs (rm, rmdir, systemctl, runuser). Each logs its argv to shim.log and,
+# when told to fail, prints a stderr diagnostic and exits 1. SHIM_FAIL is a
+# space-separated list: `rm`, `rmdir`, `systemctl:<verb>` (the machined path),
+# `runuser:<verb>` (the login-shell fallback); <verb> is daemon-reload or
+# restart. Nothing on the host is touched.
+make_guest_shims() {
+    local c
+    mkdir -p "$WORK/shims"
+    for c in rm rmdir systemctl runuser; do
+        {
+            echo '#!/bin/bash'
+            printf 'LOG=%q; NAME=%q\n' "$WORK/shim.log" "$c"
+            cat <<'SHIM'
+echo "$NAME $*" >> "$LOG"
+key=$NAME
+case $NAME in
+    systemctl|runuser)
+        if [[ "$*" == *restart* ]]; then key+=:restart; else key+=:daemon-reload; fi ;;
+esac
+case " ${SHIM_FAIL:-} " in
+    *" $key "*) echo "$key-shim-diag" >&2; exit 1 ;;
+esac
+exit 0
+SHIM
+        } > "$WORK/shims/$c"
+        chmod +x "$WORK/shims/$c"
+    done
+}
+
 @test "teardown_file: all cleanups succeed -> file passes" {
     MODE_rules=ok MODE_broker=ok MODE_locker=ok run_teardown_matrix
     [ "$status" -eq 0 ]
-    [ "$CALLS_SEEN" = "rules broker locker " ]
+    [ "$CALLS_SEEN" = "reap rules broker locker " ]
 }
 
 @test "teardown_file: broker ok + qdlocker transport failure -> file FAILS (astra r3 #1)" {
@@ -125,7 +167,7 @@ STUB
 @test "teardown_file: broker restart fails -> file FAILS, qdlocker restore still runs" {
     MODE_rules=ok MODE_broker=fail MODE_locker=ok run_teardown_matrix
     [ "$status" -ne 0 ]
-    [ "$CALLS_SEEN" = "rules broker locker " ]
+    [ "$CALLS_SEEN" = "reap rules broker locker " ]
     [[ "$output" == *"broker restart after removing the tier-2 allow-rules failed"* ]]
 }
 
@@ -137,13 +179,71 @@ STUB
 @test "teardown_file: rule removal fails -> file FAILS, broker + qdlocker cleanups still run" {
     MODE_rules=transport MODE_broker=ok MODE_locker=ok run_teardown_matrix
     [ "$status" -ne 0 ]
-    [ "$CALLS_SEEN" = "rules broker locker " ]
+    [ "$CALLS_SEEN" = "reap rules broker locker " ]
 }
 
 @test "teardown_file: everything fails -> file FAILS, every cleanup attempted" {
     MODE_rules=fail MODE_broker=transport MODE_locker=transport run_teardown_matrix
     [ "$status" -ne 0 ]
-    [ "$CALLS_SEEN" = "rules broker locker " ]
+    [ "$CALLS_SEEN" = "reap rules broker locker " ]
+}
+
+@test "teardown_file: host reaper fails -> file FAILS, guest cleanups still run (astra r4 #2)" {
+    MODE_reap=fail MODE_rules=ok MODE_broker=ok MODE_locker=ok run_teardown_matrix
+    [ "$status" -ne 0 ]
+    [ "$CALLS_SEEN" = "reap rules broker locker " ]
+    [[ "$output" == *"could not reap the driver-staging http server"* ]]
+}
+
+# The qdlocker restore below runs the REAL guest command string (not a stubbed
+# vm_run result) under /bin/sh with the command shims.
+
+@test "qdlocker restore (real guest string): all steps succeed -> file passes" {
+    MODE_locker=exec SHIM_FAIL="" run_teardown_matrix
+    [ "$status" -eq 0 ]
+    grep -qx 'rm -f /etc/systemd/user/qdlocker.service.d/99-qci-no-idle-lock.conf' "$WORK/shim.log"
+    grep -q '^systemctl .*daemon-reload$' "$WORK/shim.log"
+    grep -q '^systemctl .*restart qdlocker.service$' "$WORK/shim.log"
+    run grep -q '^runuser' "$WORK/shim.log"
+    [ "$status" -eq 1 ]
+}
+
+@test "qdlocker restore (real guest string): machined fails, runuser fallback ok -> file passes" {
+    MODE_locker=exec SHIM_FAIL="systemctl:daemon-reload systemctl:restart" run_teardown_matrix
+    [ "$status" -eq 0 ]
+    grep -q '^runuser .*daemon-reload$' "$WORK/shim.log"
+    grep -q '^runuser .*restart qdlocker.service$' "$WORK/shim.log"
+}
+
+@test "qdlocker restore (real guest string): rmdir of a non-empty dir stays best effort" {
+    MODE_locker=exec SHIM_FAIL="rmdir" run_teardown_matrix
+    [ "$status" -eq 0 ]
+}
+
+@test "qdlocker restore (real guest string): drop-in rm fails -> file FAILS, reload + restart still run (astra r4 #1)" {
+    MODE_locker=exec SHIM_FAIL="rm" run_teardown_matrix
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not restore qdlocker idle-auto-lock"* ]]
+    [[ "$output" != *"PASS: qdlocker idle-auto-lock restored"* ]]
+    grep -q '^systemctl .*daemon-reload$' "$WORK/shim.log"
+    grep -q '^systemctl .*restart qdlocker.service$' "$WORK/shim.log"
+}
+
+@test "qdlocker restore (real guest string): daemon-reload fails both ways -> file FAILS with both diagnostics, restart still runs" {
+    MODE_locker=exec SHIM_FAIL="systemctl:daemon-reload runuser:daemon-reload" run_teardown_matrix
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not restore qdlocker idle-auto-lock"* ]]
+    [[ "$output" == *"systemctl:daemon-reload-shim-diag"* ]]
+    [[ "$output" == *"runuser:daemon-reload-shim-diag"* ]]
+    grep -q '^systemctl .*restart qdlocker.service$' "$WORK/shim.log"
+}
+
+@test "qdlocker restore (real guest string): restart fails both ways -> file FAILS with both diagnostics" {
+    MODE_locker=exec SHIM_FAIL="systemctl:restart runuser:restart" run_teardown_matrix
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not restore qdlocker idle-auto-lock"* ]]
+    [[ "$output" == *"systemctl:restart-shim-diag"* ]]
+    [[ "$output" == *"runuser:restart-shim-diag"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -274,4 +374,79 @@ PASS: x
     split_driver_frame s62 "$n" 2>"$WORK/err"
     [ "$status" -eq 3 ]
     [ "$output" = 'PASS: x' ]
+}
+
+# od_shim <exit> <text> — an `od` stand-in for the host-side nonce read.
+od_shim() {
+    mkdir -p "$WORK/odbin"
+    printf '#!/bin/bash\nprintf %%s %q\nexit %s\n' "$2" "$1" > "$WORK/odbin/od"
+    chmod +x "$WORK/odbin/od"
+}
+
+# nonce_case <exit> <text> — run the real run_driver_keep_stderr with od
+# shimmed; vm_run only records that it was (wrongly) reached.
+nonce_case() {
+    load_framing
+    # shellcheck disable=SC2329 # called by the real run_driver_keep_stderr
+    vm_run() { touch "$WORK/vm_run_called"; status=0; output=""; }
+    od_shim "$1" "$2"
+    PATH="$WORK/odbin:$PATH" run_driver_keep_stderr s62 s62-x.sh 2>"$WORK/err"
+}
+
+@test "nonce: od fails with no output -> status 125, driver never run (astra r4 #3)" {
+    nonce_case 1 ""
+    [ "$status" -eq 125 ]
+    [ ! -e "$WORK/vm_run_called" ]
+    grep -q 'could not generate a 32-hex frame nonce' "$WORK/err"
+}
+
+@test "nonce: od fails after printing a full-looking nonce -> status 125" {
+    nonce_case 1 $' 01 23 45 67 89 ab cd ef 01 23 45 67 89 ab cd ef\n'
+    [ "$status" -eq 125 ]
+    [ ! -e "$WORK/vm_run_called" ]
+}
+
+@test "nonce: short od output -> status 125, driver never run" {
+    nonce_case 0 $' 01 23\n'
+    [ "$status" -eq 125 ]
+    [ ! -e "$WORK/vm_run_called" ]
+}
+
+# frame_with_rc <rc-text> — a complete, well-ordered frame ending in rc=<rc-text>.
+frame_with_rc() {
+    local n=abcd
+    output="@@qci-driver-stdout-$n@@
+PASS: x
+@@qci-driver-stderr-$n@@
+@@qci-driver-end-$n rc=$1@@"
+}
+
+@test "frame: non-canonical end statuses are invalid frames (astra r4 #4)" {
+    load_framing
+    local bad
+    for bad in 08 010 00 256 1000 -1 ' 3' 3x ''; do
+        status=0; frame_with_rc "$bad"
+        split_driver_frame s62 abcd 2>"$WORK/err"
+        [ "$status" -eq 125 ] || { echo "rc='$bad' gave status=$status"; false; }
+        grep -q 'invalid frame' "$WORK/err"
+    done
+}
+
+@test "frame: an invalid end status keeps a non-zero transport status" {
+    load_framing
+    status=255; frame_with_rc 08
+    split_driver_frame s62 abcd 2>"$WORK/err"
+    [ "$status" -eq 255 ]
+    grep -q 'invalid frame' "$WORK/err"
+}
+
+@test "frame: canonical end statuses 0 and 255 are accepted" {
+    load_framing
+    status=0; frame_with_rc 0
+    split_driver_frame s62 abcd 2>"$WORK/err"
+    [ "$status" -eq 0 ]
+    [ "$output" = 'PASS: x' ]
+    status=0; frame_with_rc 255
+    split_driver_frame s62 abcd 2>"$WORK/err"
+    [ "$status" -eq 255 ]
 }

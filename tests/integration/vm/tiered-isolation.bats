@@ -121,14 +121,20 @@ teardown_file() {
     # cleanup, always runs). NB: bats runs only the LAST teardown_file() defined
     # in a file, so the broker-rule removal below MUST live in this same function
     # — a second teardown_file() would silently shadow it and leak the rule.
-    reap_vm_drivers
-    # Three cleanups, each attempted whatever happened to the ones before it,
-    # each failure LOUD (helpers.bash policy: never silently skip). bats calls
-    # this as `teardown_file || status=$?`, so errexit never stops it and ONLY
-    # the final return reaches the verdict: every failure is accumulated into
-    # cleanup_rc and returned at the end. `fail_loud ... || cleanup_rc=1`
-    # records it (fail_loud always returns 1) without depending on errexit.
+    #
+    # Four cleanups (the reaper + three guest-side), each attempted whatever
+    # happened to the ones before it, each failure LOUD (helpers.bash policy:
+    # never silently skip). bats calls this as `teardown_file || status=$?`, so
+    # errexit never stops it and ONLY the final return reaches the verdict:
+    # every failure is accumulated into cleanup_rc and returned at the end.
+    # `fail_loud ... || cleanup_rc=1` records it (fail_loud always returns 1)
+    # without depending on errexit.
     local cleanup_rc=0
+
+    # 0. Host-side driver-staging reaper.
+    if ! reap_vm_drivers; then
+        fail_loud "could not reap the driver-staging http server (a stale server or pid file may persist on the host)" || cleanup_rc=1
+    fi
 
     # 1. Remove the test-authored rules so they never leak across runs.
     vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml && ! test -e /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml && echo 'PASS: tier-2 broker allow-rules removed'"
@@ -149,16 +155,30 @@ teardown_file() {
 
     # 3. Restore qdlocker's idle-auto-lock (undo the setup_file drop-in) so the
     # idle timeout never leaks across runs to a VM that outlives this suite.
+    # Every required step (drop-in removal, daemon-reload, restart) is
+    # attempted and folds its failure into st; PASS is printed only when st
+    # stayed 0, and the script exits with st. Only the rmdir is best effort (the
+    # directory may legitimately hold other drop-ins). adm_uctl keeps the
+    # machined attempt's diagnostics and prints them with the runuser
+    # fallback's when BOTH fail.
     vm_run "$(cat <<'UNIDLE'
-rm -f /etc/systemd/user/qdlocker.service.d/99-qci-no-idle-lock.conf
+st=0
+f=/etc/systemd/user/qdlocker.service.d/99-qci-no-idle-lock.conf
+if ! rm -f "$f" || test -e "$f"; then
+    echo "ERROR: could not remove $f"; st=1
+fi
 rmdir /etc/systemd/user/qdlocker.service.d 2>/dev/null || true
 adm_uctl() {
-    systemctl --user --machine=admin@.host "$@" 2>/dev/null \
-        || runuser -l admin -c "systemctl --user $*" 2>/dev/null
+    e1=$(systemctl --user --machine=admin@.host "$@" 2>&1) && return 0
+    e2=$(runuser -l admin -c "systemctl --user $*" 2>&1) && return 0
+    echo "ERROR: systemctl --user $* failed via machined: $e1"
+    echo "ERROR: systemctl --user $* failed via runuser: $e2"
+    return 1
 }
-adm_uctl daemon-reload || true
-adm_uctl restart qdlocker.service || true
-echo "PASS: qdlocker idle-auto-lock restored"
+adm_uctl daemon-reload || st=1
+adm_uctl restart qdlocker.service || st=1
+if [ "$st" -eq 0 ]; then echo "PASS: qdlocker idle-auto-lock restored"; fi
+exit "$st"
 UNIDLE
 )"
     if ! assert_success || ! assert_output_contains "PASS: qdlocker idle-auto-lock restored"; then
@@ -188,14 +208,25 @@ UNIDLE
 # does.
 run_driver_keep_stderr() {
     local tag=$1 driver=$2 nonce
-    nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    # The nonce is generated on the HOST. A failed or short read must not
+    # degrade to an empty (predictable) delimiter: require exactly 32 hex.
+    if ! nonce=$(set -o pipefail; od -An -N16 -tx1 /dev/urandom | tr -d ' \n') \
+        || [[ ! "$nonce" =~ ^[0-9a-f]{32}$ ]]; then
+        output="[qci] $tag: could not generate a 32-hex frame nonce on the host (got '$nonce'); driver not run"
+        # shellcheck disable=SC2034 # read by the caller's assert_success
+        lines=("$output")
+        status=125
+        printf '%s\n' "$output" >&2
+        return 0
+    fi
     vm_run "curl -fsS -o /tmp/$tag.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/$driver && chmod +x /tmp/$tag.sh && { echo '@@qci-driver-stdout-$nonce@@'; bash /tmp/$tag.sh 2>/tmp/$tag.stderr; rc=\$?; printf '\n%s\n' '@@qci-driver-stderr-$nonce@@'; cat /tmp/$tag.stderr; printf '\n@@qci-driver-end-%s rc=%s@@\n' '$nonce' \"\$rc\"; exit \$rc; }"
     split_driver_frame "$tag" "$nonce"
 }
 
 # split_driver_frame <tag> <nonce> — validate and cut the frame described
 # above. The frame is valid only when each marker appears exactly once, as a
-# whole line, in order, and the end marker carries a numeric rc. An invalid
+# whole line, in order, and the end marker carries a canonical 0-255 decimal
+# rc (anything else, e.g. `08` or `256`, is an invalid frame). An invalid
 # frame fails CLOSED: $status is forced non-zero if the transport said 0,
 # $output is left as the raw capture (assert_success prints it), and the raw
 # capture is also written to stderr. A valid frame whose rc disagrees with a
@@ -204,7 +235,7 @@ split_driver_frame() {
     local tag=$1 nonce=$2
     local out_mark="@@qci-driver-stdout-$nonce@@"
     local err_mark="@@qci-driver-stderr-$nonce@@"
-    local end_re="^@@qci-driver-end-$nonce rc=([0-9]+)@@\$"
+    local end_re="^@@qci-driver-end-$nonce rc=(.*)@@\$"
     local raw=$output line section=pre bad="" rc=""
     local n_out=0 n_err=0 n_end=0 drv_out="" drv_err="" diag=""
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -227,6 +258,11 @@ split_driver_frame() {
     done <<<"$raw"
     if [[ -z "$bad" ]] && { [[ $n_out -ne 1 || $n_err -ne 1 || $n_end -ne 1 ]] || [[ $section != post ]]; }; then
         bad="markers stdout=$n_out stderr=$n_err end=$n_end (want 1 each)"
+    fi
+    # The end status must be a canonical shell status, 0-255 decimal: `-ne`
+    # below is arithmetic, so `08` (invalid octal) or `1000` must never reach it.
+    if [[ -z "$bad" ]] && ! { [[ "$rc" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( rc <= 255 )); }; then
+        bad="end status '$rc' is not a 0-255 decimal"
     fi
     if [[ -n "$bad" ]]; then
         printf '%s\n' "--- $tag driver capture: invalid frame ($bad); raw capture follows ---" "$raw" >&2
