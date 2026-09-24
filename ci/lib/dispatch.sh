@@ -113,20 +113,25 @@ qci_has_terminator() {
 # True when <cmd>'s args ask for help: -h/--help in an OPTION position, i.e.
 # not the value of a value-taking option and not after a `--` terminator.
 qci_wants_help() {
-    local cmd=$1 vopts o
+    local cmd=$1 o v takes
+    local -a vopts
     shift
-    vopts=" $(qci_value_opts "$cmd") "
+    # One array element per option; membership is exact per-element equality
+    # (a joined-string substring test let "" or "--vm --file" pose as one).
+    read -r -a vopts <<< "$(qci_value_opts "$cmd")"
     while [ $# -gt 0 ]; do
         o=$1
         case "$o" in
             -h|--help) return 0 ;;
             --) qci_has_terminator "$cmd" && return 1 ;;
         esac
+        takes=0
+        for v in "${vopts[@]}"; do
+            [ "$o" = "$v" ] && { takes=1; break; }
+        done
         # Skip a value-taking option's operand, whatever it looks like.
-        if [[ "$vopts" == *" $o "* ]]; then
-            shift
-        fi
-        [ $# -gt 0 ] && shift
+        [ "$takes" = 1 ] && [ $# -gt 1 ] && shift
+        shift
     done
     return 1
 }

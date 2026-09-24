@@ -170,7 +170,7 @@ stub_main() {
         init_run() { echo "INIT_RUN $*"; }
         finish_run() { echo "FINISH $1"; exit "$1"; }
         record_blocked() { echo "BLOCKED $*"; }
-        for g in gate_bats gate_gui gate_vm_smoke gate_image gate_snapshot_daily gate_cleanup gate_affected gate_edit_guard; do
+        for g in gate_preflight gate_host gate_bats gate_gui gate_vm_smoke gate_image gate_snapshot_daily gate_cleanup gate_affected gate_edit_guard; do
             eval "$g() { echo \"GATE $g \$*\"; return 0; }"
         done
         main "$@"
@@ -235,18 +235,44 @@ dispatch_arms() {
     ' "$REPO_ROOT/ci/lib/dispatch.sh"
 }
 
-# Print "<cmd> <--opt>" for every option whose parser does `shift` to take a
-# value, from main()'s arm or from a gate function the arm passes "$@" to.
+# Print "<cmd> <--opt>" for every option arm that consumes a value, from
+# main()'s arm or from the first `while [ $# -gt 0 ]` arg loop of a gate
+# function the arm passes "$@" to. An option arm is any case label starting
+# with `-`; its body runs to the first `;;`. It consumes a value when that body
+# does `shift` or reads `$2`/`${2`, whatever the order (`--x) shift; v=$1`,
+# `--x) v=${2:-}; shift`, a two-line `--x)` / `shift`). A label this parser
+# cannot map to one exact token (`--a|-a)`, `--x=*)`, `-v`) is printed as
+# "UNSUPPORTED <cmd> <label>" so the drift test fails instead of missing it.
+# `--)` and `-*)` are the terminator / unknown-flag arms and are ignored.
 parsed_value_opts() {
     awk -v libdir="$REPO_ROOT/ci/lib/gates" '
-        function scan(line, nextline) {
-            if (match(line, /^ *--[a-z-]+\) *shift/)) {
-                o=line; sub(/^ */, "", o); sub(/\).*/, "", o); return o
+        function scan_block(n,    i, j, lbl, body, k, done_arm) {
+            for (i=1; i<=n; i++) {
+                if (buf[i] !~ /^ *-[^ ]*\)/) continue
+                lbl=buf[i]; sub(/^ */, "", lbl); sub(/\).*/, "", lbl)
+                if (lbl == "--" || lbl == "-*") continue
+                body=buf[i]; sub(/^ *[^)]*\)/, "", body)
+                j=i
+                while (body !~ /;;/ && j < n) { j++; body=body "\n" buf[j] }
+                if (lbl !~ /^--[a-z][a-z-]*$/) {
+                    for (k=1; k<=ncur; k++) print "UNSUPPORTED", cur[k], lbl
+                    continue
+                }
+                if (body ~ /(^|[^a-z_])shift([^a-z_]|$)/ || body ~ /\$2|\$\{2/)
+                    for (k=1; k<=ncur; k++) print cur[k], lbl
             }
-            if (line ~ /^ *--[a-z-]+\) *$/ && nextline ~ /^ *shift *$/) {
-                o=line; sub(/^ */, "", o); sub(/\).*/, "", o); return o
+        }
+        function gate_block(g,    cmd, l, inf, inloop, n) {
+            cmd="cat " libdir "/*.sh"; inf=0; inloop=0; n=0
+            while ((cmd | getline l) > 0) {
+                if (l ~ ("^" g "\\(\\) \\{")) { inf=1; continue }
+                if (inf && l ~ /^}/) inf=0
+                if (inf && !inloop && l ~ /while \[ \$# -gt 0 \]/) { inloop=1; continue }
+                if (inloop && l ~ /^    done/) { inloop=0; inf=0 }
+                if (inloop) buf[++n]=l
             }
-            return ""
+            close(cmd)
+            return n
         }
         /^main\(\) \{/ { inmain=1 }
         inmain && /^    local rc=\$EXIT_OK/ { armed=1; next }
@@ -254,27 +280,20 @@ parsed_value_opts() {
         incase && /^    esac/ { exit }
         incase { lines[++nl]=$0 }
         END {
-            for (i=1; i<=nl; i++) {
-                if (lines[i] ~ /^        [a-z][a-z|-]*\)/) {
+            ncur=0; n=0
+            for (i=1; i<=nl+1; i++) {
+                if (i > nl || lines[i] ~ /^        [a-z][a-z|-]*\)/) {
+                    if (ncur) scan_block(n)
+                    for (gi=1; gi<=ngates; gi++) { m=gate_block(gates[gi]); scan_block(m) }
+                    if (i > nl) break
                     lbl=lines[i]; sub(/^ */, "", lbl); sub(/\).*/, "", lbl)
-                    ncur=split(lbl, cur, "|")
+                    ncur=split(lbl, cur, "|"); n=0; ngates=0
                     continue
                 }
-                o=scan(lines[i], lines[i+1])
-                if (o != "") for (k=1; k<=ncur; k++) print cur[k], o
+                buf[++n]=lines[i]
                 if (match(lines[i], /gate_[a-z_]+ "\$@"/)) {
                     g=substr(lines[i], RSTART, RLENGTH); sub(/ .*/, "", g)
-                    cmd="cat " libdir "/*.sh"
-                    inf=0; prev=""
-                    while ((cmd | getline l) > 0) {
-                        if (l ~ ("^" g "\\(\\) \\{")) { inf=1; continue }
-                        if (inf && l ~ /^}/) inf=0
-                        if (inf) {
-                            if (prev != "") { o=scan(prev, l); if (o != "") for (k=1; k<=ncur; k++) print cur[k], o }
-                            prev=l
-                        }
-                    }
-                    close(cmd)
+                    gates[++ngates]=g
                 }
             }
         }
@@ -300,6 +319,48 @@ parsed_value_opts() {
     [[ "$parsed" == *"edit-guard --changed-from"* ]]
     [[ "$parsed" == *"image --root"* ]]
     [[ "$parsed" == *"cleanup --age-hours"* ]]
+    # Boolean options must NOT be reported as value options.
+    [[ "$parsed" != *"affected --run"* ]]
+    [[ "$parsed" != *"gui --skip-qdwin"* ]]
+    [[ "$parsed" != *"image --no-boot"* ]]
+    [[ "$parsed" != *UNSUPPORTED* ]]
     table=$(bash -c '. "$1"; for c in $QCI_COMMANDS; do for o in $(qci_value_opts "$c"); do echo "$c $o"; done; done' _ "$REPO_ROOT/ci/lib/dispatch.sh" | sort -u)
     diff <(echo "$parsed") <(echo "$table")
+}
+
+@test "an empty or space-joined argument is not a value option; the help after it wins (stubbed gates)" {
+    export REPO_ROOT
+    local work
+    work=$(mktemp -d)
+    # Commands with NO value options: "" must not match the empty table.
+    run stub_main "$work" preflight "" --help
+    echo "preflight '' --help -> $status: $output"
+    [ "$status" -eq 2 ]
+    [ "$output" = "Usage: (stub)" ]
+    run stub_main "$work" host "" -h
+    echo "host '' -h -> $status: $output"
+    [ "$status" -eq 2 ]
+    [ "$output" = "Usage: (stub)" ]
+    # A command WITH value options: "" and one argv element spelling two
+    # table entries are neither of them.
+    run stub_main "$work" bats "" --help
+    echo "bats '' --help -> $status: $output"
+    [ "$status" -eq 2 ]
+    [ "$output" = "Usage: (stub)" ]
+    run stub_main "$work" bats "--vm --file" --help
+    echo "bats '--vm --file' --help -> $status: $output"
+    [ "$status" -eq 2 ]
+    [ "$output" = "Usage: (stub)" ]
+    run stub_main "$work" gui "--vm --scenario" -h
+    echo "gui '--vm --scenario' -h -> $status: $output"
+    [ "$status" -eq 2 ]
+    [ "$output" = "Usage: (stub)" ]
+    rm -rf "$work"
+}
+
+@test "list-runs '' --help prints usage through the real runner" {
+    run timeout 60 "$QCI" list-runs "" --help
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Usage:"* ]]
+    [ "$(run_count)" -eq 0 ]
 }
