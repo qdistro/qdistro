@@ -1,0 +1,75 @@
+name: KIWI rootless boxbuild experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/github-kiwi-boxbuild
+
+permissions:
+  contents: read
+
+jobs:
+  boxbuild:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Inspect unprivileged runner capabilities
+        shell: bash
+        run: |
+          set -euxo pipefail
+          id
+          podman --version
+          podman info --format 'rootless={{.Host.Security.Rootless}}'
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          free -h
+          if [[ -e /dev/kvm ]]; then
+            ls -l /dev/kvm
+          else
+            echo '/dev/kvm is absent; VM-backed KIWI cannot use KVM here.' >&2
+          fi
+
+      - name: Set up KIWI in rootless Podman and try boxed build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/kiwi-boxbuild"
+          device_args=()
+          if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+            device_args+=(--device /dev/kvm)
+          fi
+          podman run --rm \
+            "${device_args[@]}" \
+            --volume "$GITHUB_WORKSPACE:/src:rw" \
+            --volume "$RUNNER_TEMP/kiwi-boxbuild:/out:rw" \
+            --workdir /src \
+            --env QDISTRO_BUILD_DIR=/out \
+            registry.opensuse.org/opensuse/tumbleweed:latest \
+            bash -euo pipefail -c '
+              zypper --non-interactive install --no-recommends \
+                python3-pip python3-virtualenv qemu-x86 rsync git-core xz
+              python3 -m venv /opt/kiwi-venv
+              /opt/kiwi-venv/bin/pip install --no-cache-dir \
+                kiwi==11.0.5 kiwi-boxed-plugin==0.2.58
+              export PATH=/opt/kiwi-venv/bin:$PATH
+              kiwi-ng --version
+              kiwi-ng system boxbuild --list-boxes
+              if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+                echo "KVM is unavailable to the unprivileged container; stopping before the large box download." >&2
+                exit 2
+              fi
+              bash image/build.sh --sync-only
+              kiwi-ng system boxbuild --box tumbleweed \
+                --box-memory 8G --box-smp-cpus 2 -- \
+                --description /src/image --target-dir /out
+            '
+
+      - name: Summarize result
+        if: always()
+        shell: bash
+        run: |
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          du -sh "$RUNNER_TEMP/kiwi-boxbuild" 2>/dev/null || true
+          find "$RUNNER_TEMP/kiwi-boxbuild" -maxdepth 1 -type f -printf '%f %s bytes\n' 2>/dev/null || true
