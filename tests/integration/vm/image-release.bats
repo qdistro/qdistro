@@ -245,6 +245,187 @@ PY
         "$T/tree/qdistro/image/root/root/qdistro-source-manifest"   # one untracked dir
 }
 
+# debris: build output, caches, worktrees and run artifacts that a working
+# checkout accumulates, none of it source. Each is created UNtracked.
+make_debris() {
+    local r="$1"
+    mkdir -p "$r/qdwin/build-foo" "$r/qdwin/build" "$r/qdshell/build-qci" \
+             "$r/daemons/__pycache__" "$r/.worktrees/x" "$r/ci/runs/y" \
+             "$r/.mypy_cache/3.13" "$r/.pytest_cache" "$r/qdshell/.venv/bin" \
+             "$r/.ruff_cache" "$r/qdterm/.hypothesis" "$r/qdterm/x.egg-info" \
+             "$r/qdchrome-extension/node_modules/m" "$r/qdchrome-extension/dist" \
+             "$r/image/logs" "$r/image/keys/gnupg" "$r/qdchrome-extension/keys"
+    echo pem > "$r/qdchrome-extension/keys/qdistro.pem"
+    echo o   > "$r/qdwin/build-foo/qdwin.o"
+    echo n   > "$r/qdwin/build/build.ninja"
+    echo so  > "$r/qdshell/build-qci/libplugin.so"
+    echo pyc > "$r/daemons/__pycache__/x.cpython-313.pyc"
+    echo wt  > "$r/.worktrees/x/file"
+    echo run > "$r/ci/runs/y/log"
+    echo c   > "$r/.mypy_cache/3.13/cache.json"
+    echo c   > "$r/.pytest_cache/README.md"
+    echo c   > "$r/.ruff_cache/CACHEDIR.TAG"
+    echo c   > "$r/qdterm/.hypothesis/db"
+    echo c   > "$r/qdterm/x.egg-info/PKG-INFO"
+    echo py  > "$r/qdshell/.venv/bin/python"
+    echo js  > "$r/qdchrome-extension/node_modules/m/index.js"
+    echo js  > "$r/qdchrome-extension/dist/bundle.js"
+    echo tar > "$r/image/logs/old.tar"
+    echo key > "$r/image/keys/gnupg/secring.gpg"
+    echo cov > "$r/.coverage-report.json"
+}
+
+debris_absent() {
+    local o="$1" p
+    for p in qdwin/build-foo qdwin/build qdshell/build-qci daemons/__pycache__ \
+             .worktrees ci/runs .mypy_cache .pytest_cache qdshell/.venv \
+             .ruff_cache qdterm/.hypothesis qdterm/x.egg-info \
+             qdchrome-extension/node_modules qdchrome-extension/dist \
+             image/logs image/keys .coverage-report.json image/root/root .git \
+             qdchrome-extension/keys; do
+        if [ -e "$o/$p" ]; then echo "debris shipped: $p" >&2; return 1; fi
+    done
+}
+
+@test "build.sh: the sync copies git's view of the source -- tracked + untracked-unignored, never build dirs or caches" {
+    fake_tree
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    # the REAL ignore lists (top level + the extension's, which guards its
+    # private packing key), so this pins what the monorepo ignores
+    cp "$REPO/.gitignore" "$r/.gitignore"
+    cp "$REPO/image/.gitignore" "$r/image/.gitignore"
+    mkdir -p "$r/qdchrome-extension"
+    cp "$REPO/qdchrome-extension/.gitignore" "$r/qdchrome-extension/.gitignore"
+    mkdir -p "$r/ci/lib" "$r/qdwin/build-aux"
+    echo tracked > "$r/ci/lib/tracked.sh"
+    echo gone    > "$r/ci/lib/deleted.sh"
+    # a TRACKED file whose name the ignore patterns match (build-*/): git
+    # decides, not a name pattern, so it ships
+    echo aux > "$r/qdwin/build-aux/tool"
+    git -C "$r" add ci/lib .gitignore image/.gitignore qdchrome-extension/.gitignore
+    git -C "$r" add -f qdwin/build-aux/tool
+    git -C "$r" -c user.email=t@t -c user.name=t commit -q -m more
+    rm "$r/ci/lib/deleted.sh"                 # tracked, deleted in the tree
+    echo new > "$r/qdshell/new-installer.sh"  # untracked, not ignored
+    make_debris "$r"
+    # an untracked nested repository is not this repo's source
+    mkdir -p "$r/vendor/nested"; git -C "$r/vendor/nested" init -q
+    echo n > "$r/vendor/nested/f"
+    # debris of an earlier sync inside the overlay must not survive
+    mkdir -p "$o/stale"; echo s > "$o/stale/file"
+
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ "$(cat "$o/ci/lib/tracked.sh")" = tracked ]
+    [ "$(cat "$o/qdwin/build-aux/tool")" = aux ]
+    [ "$(cat "$o/qdshell/new-installer.sh")" = new ]
+    [ -f "$o/image/build.sh" ] && [ -f "$o/qdwin/README" ] && [ -f "$o/.gitignore" ]
+    [ ! -e "$o/ci/lib/deleted.sh" ]
+    [ ! -e "$o/vendor" ]
+    [ ! -e "$o/stale" ]
+    debris_absent "$o"
+    # the file list stays out of the overlay tree kiwi copies into the image
+    [ -z "$(find "$r/image/root" -name '*files*' -print)" ]
+    # a second sync does not copy the overlay (inside the repo) into itself
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    debris_absent "$o"
+    # exactly git's view lands: no more (debris), no less (source)
+    (cd "$o" && find . \( -type f -o -type l \) -printf '%P\n' | sort) > "$T/got"
+    (cd "$r" && git ls-files --cached --others --exclude-standard | sort -u \
+        | grep -vx -e ci/lib/deleted.sh -e vendor/nested/) > "$T/want"
+    diff "$T/want" "$T/got"
+}
+
+@test "build.sh: the sync never ships the overlay, worktrees, ci/runs, image/logs or keys even when nothing ignores them" {
+    fake_tree
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    # NOTHING is ignored any more -- not even the overlay itself -- so only
+    # the fixed drop-list in build.sh stands between each path and the image
+    : > "$r/image/.gitignore"
+    git -C "$r" -c user.email=t@t -c user.name=t commit -q -am unignored
+    mkdir -p "$r/.worktrees/x" "$r/ci/runs/y" "$r/image/logs" "$r/image/keys/gnupg"
+    echo wt  > "$r/.worktrees/x/file"
+    echo run > "$r/ci/runs/y/log"
+    echo tar > "$r/image/logs/old.tar"
+    echo key > "$r/image/keys/gnupg/secring.gpg"
+    # a previous overlay (with content) sits in the unignored image/root/root
+    mkdir -p "$o/old"; echo prev > "$o/old/sentinel"
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ -f "$o/qdwin/README" ]
+    [ ! -e "$o/old" ]
+    for p in .worktrees ci/runs image/logs image/keys image/root; do
+        [ ! -e "$o/$p" ] || { echo "shipped: $p" >&2; false; }
+    done
+    # and again, now that the overlay and manifest from run 1 are in the tree
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ ! -e "$o/image/root" ] || { echo "overlay copied into itself" >&2; false; }
+}
+
+@test "build.sh: a failing sort of the file list refuses the sync and keeps the previous overlay" {
+    fake_tree
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    echo prev > "$o/sentinel"
+    mkdir -p "$T/shim"
+    cat > "$T/shim/sort" <<SH
+#!/bin/bash
+for a in "\$@"; do case "\$a" in -z*) echo "sort: simulated failure" >&2; exit 2 ;; esac; done
+exec /usr/bin/sort "\$@"
+SH
+    chmod +x "$T/shim/sort"
+    mkdir -p "$T/tmp"   # private TMPDIR: the temp file list lands here
+    TMPDIR="$T/tmp" PATH="$T/shim:$PATH" run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"sorting the git file list failed"* ]]
+    [[ "$output" != *"copying"* ]]
+    [ "$(cat "$o/sentinel")" = prev ]
+    [ -f "$o/qdwin/README" ]
+    [ -z "$(ls -A "$T/tmp")" ] || { ls -A "$T/tmp" >&2; false; }
+}
+
+@test "build.sh: a failing copy removes the previous manifest, so --no-sync refuses the partial overlay" {
+    fake_tree
+    local r="$T/tree/qdistro" m="$T/tree/qdistro/image/root/root/qdistro-source-manifest"
+    run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ -s "$m" ]
+    mkdir -p "$T/shim"
+    printf '#!/bin/sh\necho "rsync: simulated partial transfer" >&2\nexit 23\n' > "$T/shim/rsync"
+    chmod +x "$T/shim/rsync"
+    PATH="$T/shim:$PATH" run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"rsync of the source tree failed"* ]]
+    [ ! -e "$m" ]
+    [ ! -e "$m.tmp" ]
+    # the build that would consume the overlay refuses it
+    run bash "$r/image/build.sh" --no-sync
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"no source manifest"* ]]
+}
+
+@test "build.sh: the building user's global git ignore file does not decide what ships" {
+    fake_tree
+    local r="$T/tree/qdistro" o="$T/tree/qdistro/image/root/root/qdistro-src"
+    # Hermetic: a private HOME whose global config names an ignore file,
+    # and GIT_CONFIG_GLOBAL pinned to it, so the host's own git config
+    # neither helps nor hurts.
+    mkdir -p "$T/home"
+    printf '*.sh\n' > "$T/home/global-ignore"
+    printf '[core]\n\texcludesFile = %s\n' "$T/home/global-ignore" > "$T/home/.gitconfig"
+    echo new > "$r/qdshell/new-installer.sh"   # untracked, not ignored BY THE REPO
+    # precondition: this git really would ignore the file without the override
+    HOME="$T/home" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" \
+        git -C "$r" check-ignore -q qdshell/new-installer.sh
+    HOME="$T/home" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" XDG_CONFIG_HOME="$T/home/.config" \
+        run bash "$r/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    [ "$(cat "$o/qdshell/new-installer.sh")" = new ]
+}
+
 @test "build.sh: a failing git status refuses the sync instead of reading as clean" {
     fake_tree
     mkdir -p "$T/shim"
@@ -541,19 +722,99 @@ chain_root() {
     grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
     grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
     grep -q '^    /root/qdistro-src$' "$x"
-    grep -q -- '-not -path "$DEST/root/qdistro-src/tier3/\*"' "$x"
-    # and the prune really keeps them: run its find on a mock tree (the
-    # monorepo layout: tier3/, scripts/, daemons/ and qdwin/ all top-level)
-    local m="$BATS_TEST_TMPDIR/prune" DEST
-    DEST="$m"
+    grep -q '^prune_src_tree "$DEST/root/qdistro-src"$' "$x"
+    # and the prune really keeps them: run the real prune_src_tree on a mock
+    # tree (the monorepo layout: tier3/, scripts/, daemons/ and qdwin/ all
+    # top-level)
+    local m="$BATS_TEST_TMPDIR/prune"
     mkdir -p "$m/root/qdistro-src/tier3" "$m/root/qdistro-src/scripts/install" "$m/root/qdistro-src/qdwin/src" "$m/root/qdistro-src/daemons/x"
     : > "$m/root/qdistro-src/tier3/spawn-tier3.sh"; : > "$m/root/qdistro-src/scripts/install/x.sh"; : > "$m/root/qdistro-src/qdwin/src/a.c"
-    find "$m/root/qdistro-src" -mindepth 2 -not -path "$DEST/root/qdistro-src/tier3/*" -delete 2>/dev/null || true
+    ( . "$IMAGE/lib/src-debris.sh"; prune_src_tree "$m/root/qdistro-src" )
     [ -f "$m/root/qdistro-src/tier3/spawn-tier3.sh" ]
     [ ! -e "$m/root/qdistro-src/scripts/install" ]
     [ ! -e "$m/root/qdistro-src/qdwin/src" ]
     [ -d "$m/root/qdistro-src/qdwin" ]
     [ -d "$m/root/qdistro-src/daemons" ]
+}
+
+# An extracted image's source tree the way extract-root.sh leaves it: the
+# real prune_src_tree over a full tree. $1=leaky adds what main's
+# rsync-with-excludes shipped (build-qci dirs with binaries, caches at
+# depth, the coverage report).
+extracted_src() {
+    local s="$T/root/root/qdistro-src"
+    mkdir -p "$s/daemons/x" "$s/qdwin/src" "$s/qdshell/src" "$s/tier3"
+    : > "$s/qdwin/src/a.c"; : > "$s/daemons/x/d.py"; : > "$s/tier3/spawn-tier3.sh"
+    if [ "${1:-}" = leaky ]; then
+        mkdir -p "$s/qdwin/build-qci/sub" "$s/qdshell/build-qci" "$s/.mypy_cache/3.13" \
+                 "$s/qdterm/.pytest_cache/v" "$s/qnotebook/.hypothesis/constants" \
+                 "$s/.ruff_cache/0.15" "$s/multimachine/harness/__pycache__"
+        : > "$s/qdwin/build-qci/sub/qdwin-shell.so"; : > "$s/qdshell/build-qci/libplugin.so"
+        : > "$s/.mypy_cache/3.13/x.json"; : > "$s/qdterm/.pytest_cache/v/cache"
+        : > "$s/qnotebook/.hypothesis/constants/c"; : > "$s/.ruff_cache/0.15/r"
+        : > "$s/multimachine/harness/__pycache__/m.pyc"
+        echo '{}' > "$s/.coverage-report.json"
+    fi
+    ( . "$IMAGE/lib/src-debris.sh"; prune_src_tree "$s" )
+}
+
+@test "verify-contents: the extracted source tree of a leaky sync FAILs the no-debris rows; a clean one passes" {
+    fake_root dev
+    extracted_src
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"OK   qdistro-src: no host qdwin build dir: absent as required"* ]]
+    [[ "$output" == *"OK   qdistro-src: no host qdshell build dir: absent as required"* ]]
+    [[ "$output" == *"OK   qdistro-src: no .coverage-report.json: absent as required"* ]]
+    [[ "$output" == *"OK   qdistro-src: no build output or caches at any depth: none under"* ]]
+    [[ "$output" != *"FAIL qdistro-src"* ]]
+
+    rm -rf "$T/root/root/qdistro-src"
+    extracted_src leaky
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FAIL qdistro-src: no host qdwin build dir: must be absent but exists"* ]]
+    [[ "$output" == *"FAIL qdistro-src: no host qdshell build dir: must be absent but exists"* ]]
+    [[ "$output" == *"FAIL qdistro-src: no .coverage-report.json: must be absent but exists"* ]]
+    [[ "$output" == *"FAIL qdistro-src: no build output or caches at any depth: found under"* ]]
+    # the deep caches survive the prune as markers and are named
+    [[ "$output" == *"multimachine/harness/__pycache__"* ]]
+    [[ "$output" == *"qdterm/.pytest_cache"* ]]
+}
+
+@test "verify-contents: without its debris lists the checker refuses to run (exit 2), not pass vacuously" {
+    fake_root dev
+    extracted_src leaky
+    mkdir -p "$T/chk/lib"
+    cp "$IMAGE/verify-contents.sh" "$T/chk/"
+    # lib absent
+    run bash "$T/chk/verify-contents.sh" "$T/root"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"src-debris.sh did not load"* ]]
+    # lib present but a list empty
+    sed 's/^QDISTRO_SRC_DEBRIS_NAMES=(.*)$/QDISTRO_SRC_DEBRIS_NAMES=()/' \
+        "$IMAGE/lib/src-debris.sh" > "$T/chk/lib/src-debris.sh"
+    grep -qx 'QDISTRO_SRC_DEBRIS_NAMES=()' "$T/chk/lib/src-debris.sh"
+    run bash "$T/chk/verify-contents.sh" "$T/root"
+    [ "$status" -eq 2 ]
+    # the real lib: runs, and the leaky tree FAILs (the harness is not what
+    # produced the exit 2 above)
+    cp "$IMAGE/lib/src-debris.sh" "$T/chk/lib/"
+    run bash "$T/chk/verify-contents.sh" "$T/root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL qdistro-src: no build output or caches at any depth: found under"* ]]
+}
+
+@test "verify-contents: an unreadable directory in qdistro-src is INDETERMINATE, not an absence" {
+    [ "$(id -u)" -ne 0 ] || skip "root reads mode-000 directories"
+    fake_root dev
+    extracted_src
+    mkdir -p "$T/root/root/qdistro-src/qdwin/locked/__pycache__"
+    chmod 000 "$T/root/root/qdistro-src/qdwin/locked"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    chmod 755 "$T/root/root/qdistro-src/qdwin/locked"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FAIL qdistro-src: no build output or caches at any depth: "*"(INDETERMINATE: find failed rc="*"Permission denied"* ]]
+    [[ "$output" != *"OK   qdistro-src: no build output or caches at any depth"* ]]
 }
 
 @test "verify-contents: a missing or truncated /etc/qdistro/release is a MISS, not a pass" {

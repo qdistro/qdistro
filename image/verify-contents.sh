@@ -35,6 +35,16 @@ PROG=$(basename "$0")
 # image's record against it.
 CHECKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOTSTRAP_SH="$CHECKER_DIR/../scripts/install/qdistro-bootstrap.sh"
+# The names of host build output / caches that must not ship in the source
+# tree (shared with extract-root.sh's prune).
+# Fail closed: without the lists the no-debris rows would pass vacuously.
+# shellcheck source=/dev/null  # image/lib/src-debris.sh
+if ! . "$CHECKER_DIR/lib/src-debris.sh" 2>/dev/null \
+        || [ "${#QDISTRO_SRC_DEBRIS_NAMES[@]}" -eq 0 ] \
+        || [ "${#QDISTRO_SRC_DEBRIS_FILES[@]}" -eq 0 ]; then
+    printf 'FATAL: %s did not load (or its debris lists are empty)\n' "$CHECKER_DIR/lib/src-debris.sh" >&2
+    exit 2
+fi
 
 usage() {
     cat <<EOF
@@ -292,6 +302,44 @@ check_absent() {
     fi
 }
 
+# check_src_debris_absent <label> <rel-dir> — no entry named in
+# QDISTRO_SRC_DEBRIS_NAMES anywhere under the directory (symlinks are not
+# followed). A directory absent from the image has nothing in it; its
+# presence is a separate check_req row.
+check_src_debris_absent() {
+    local label=$1 full="$ROOT/${2#/}" host n expr=() hits frc ferr out errf
+    REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+    for n in "${QDISTRO_SRC_DEBRIS_NAMES[@]}"; do
+        expr+=(${expr[0]:+-o} -name "$n")
+    done
+    host="$(resolve_in_image "$full")" || host=""
+    if [ -z "$host" ] || [ ! -d "$host" ]; then
+        printf 'OK   %s: none under %s\n' "$label" "$full"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+        return
+    fi
+    # find's status is the verdict's precondition: an unreadable directory
+    # is a subtree nobody looked at, not an absence. Output goes to files
+    # (no pipe, so no SIGPIPE and no lost exit status).
+    out="$(mktemp)"; errf="$(mktemp)"
+    # -prune: name the debris entry, not everything inside it.
+    find "$host" \( "${expr[@]}" \) -prune -print > "$out" 2> "$errf"; frc=$?
+    hits="$(awk 'NR <= 20' "$out")"
+    ferr="$(awk 'NR <= 3' "$errf")"
+    rm -f "$out" "$errf"
+    if [ "$frc" -ne 0 ]; then
+        printf 'FAIL %s: %s (INDETERMINATE: find failed rc=%s: %s; not a verdict on absence)\n' \
+            "$label" "$full" "$frc" "${ferr//$'\n'/ | }"
+        FAIL=1
+    elif [ -z "$hits" ]; then
+        printf 'OK   %s: none under %s\n' "$label" "$full"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+    else
+        printf 'FAIL %s: found under %s: %s\n' "$label" "$full" "${hits//$'\n'/ }"
+        FAIL=1
+    fi
+}
+
 # check_link <label> <rel> — a systemd wants-link (or any symlink) that must
 # exist AND whose target must exist inside the image. systemd writes these
 # ABSOLUTE (`-> /etc/systemd/user/foo.service`), so read from the host they
@@ -413,6 +461,16 @@ check_req "qdistro source root"  /root/qdistro-src
 check_req "qdistro src"          /root/qdistro-src/daemons
 check_req "qdwin src"            /root/qdistro-src/qdwin
 check_req "qdshell src"         /root/qdistro-src/qdshell
+# ...and it is SOURCE: no host build output or tool caches. build.sh ships
+# git's view of the tree; before that, the sync leaked qdwin/build-qci,
+# qdshell/build-qci (host-built binaries) and the caches (fu review). The
+# names are shared with extract-root.sh's prune (lib/src-debris.sh).
+check_absent "qdistro-src: no host qdwin build dir"   /root/qdistro-src/qdwin/build-qci
+check_absent "qdistro-src: no host qdshell build dir" /root/qdistro-src/qdshell/build-qci
+for _f in "${QDISTRO_SRC_DEBRIS_FILES[@]}"; do
+    check_absent "qdistro-src: no $_f" "/root/qdistro-src/$_f"
+done
+check_src_debris_absent "qdistro-src: no build output or caches at any depth" /root/qdistro-src
 
 echo
 echo "-- qdwin / qdshell / qdistro install roots --"

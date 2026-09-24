@@ -92,13 +92,13 @@ rm -rf "$DEST"; mkdir -p "$DEST"; chmod 0700 "$DEST"
     done
 } | guestfish --ro -a "$RAW" -i
 # /root/qdistro-src (the monorepo tree) is checked for presence of its
-# top-level dirs (daemons/, qdwin/, qdshell/), and for the targets of the
-# tier-3 spawn/cleanup symlinks (check_link resolves them); keep it small on
-# the host by dropping everything below the first level. Add an exemption
-# here when a checklist row resolves into the tree.
-if [ -d "$DEST/root/qdistro-src" ]; then
-    find "$DEST/root/qdistro-src" -mindepth 2 \
-        -not -path "$DEST/root/qdistro-src/tier3/*" \
-        -delete 2>/dev/null || true
-fi
+# top-level dirs (daemons/, qdwin/, qdshell/), for the targets of the
+# tier-3 spawn/cleanup symlinks (check_link resolves them), and for the
+# ABSENCE of host build output and caches at any depth; keep it small on
+# the host by dropping everything below the first level except those. Add
+# an exemption in prune_src_tree when a checklist row resolves into the
+# tree.
+# shellcheck source=/dev/null  # image/lib/src-debris.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/src-debris.sh"
+prune_src_tree "$DEST/root/qdistro-src"
 echo "extract-root: $RAW -> $DEST ($(du -sh "$DEST" | cut -f1))"
