@@ -340,3 +340,18 @@ _render_prompt() {
     # The domain it names must be the real VM, not an unexpanded variable.
     printf '%s' "$p" | grep -q 'libvirt domain `qci-vm-1`'
 }
+
+@test "runtime prompt: guest markers are invisible on the host (permissions-gui/13, 2026-09-25)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'exists ONLY INSIDE THE GUEST'
+    printf '%s' "$p" | grep -q 'silently, permanently false'
+    # The example must carry the REAL slug, not an unexpanded variable.
+    printf '%s' "$p" | grep -Fq "vm-exec \"\$VMNAME\" 'test -f /tmp/qci/"
+    if grep -Fq '/tmp/qci/$slug/<marker>' <<<"$p"; then false; fi
+}
+
+@test "runtime prompt: the shell tool SIGKILLs a backgrounded vm-exec (permissions-gui/13, 2026-09-25)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'YOUR SHELL TOOL SIGKILLS every process'
+    printf '%s' "$p" | grep -q 'FOREGROUND of the command that owns it'
+}

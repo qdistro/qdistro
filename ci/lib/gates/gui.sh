@@ -744,6 +744,11 @@ Rules:
   work, silo uids) can write into it; if you ever recreate it, keep it
   world-writable (\`install -d -m 1777\`) — a plain root \`mkdir\` leaves it
   root-owned 0755 and every non-root write fails.
+  That directory exists ONLY INSIDE THE GUEST. The host has a \`/tmp\` too, so
+  a host-side \`test -f /tmp/qci/$slug/<marker>\` is not an error -- it is
+  silently, permanently false. Poll a guest marker THROUGH vm-exec
+  (\`vm-exec "\$VMNAME" 'test -f /tmp/qci/$slug/<marker>'\`); permissions-gui/13
+  lost two runs on 2026-09-25 to a host driver waiting on guest markers.
   The
   \`\$QCI_SCENARIO_SLUG\` variable is HOST-side only — it is not set inside guest
   shells unless you pass it through yourself (e.g. \`QCI_SCENARIO_SLUG=$slug\`).
