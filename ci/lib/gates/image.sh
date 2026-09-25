@@ -12,35 +12,66 @@
 gate_image_developer_skip() {
     local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
     local selected="${QDISTRO_IMAGE:-}" requested="${QDISTRO_IMAGE_SHA256:-}"
-    local digest=none sidecar name rec
+    local digest=none identity=selected sidecar name rec
     if [ -f "$IMAGE_DIR/lib/select-artifact.sh" ]; then
         # shellcheck source=../../../image/lib/select-artifact.sh
         . "$IMAGE_DIR/lib/select-artifact.sh"
+        if [ -n "$requested" ] && ! [[ "$requested" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            identity=invalid-selector
+        fi
         if [ -n "$selected" ] && [[ "$selected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            if [ -n "$requested" ] && [ "${requested,,}" != "${selected,,}" ]; then
+                identity=selector-conflict
+            fi
             requested="${selected,,}"
             selected=""
         fi
-        if [ -z "$selected" ] && [[ "$requested" =~ ^[0-9a-fA-F]{64}$ ]]; then
-            selected=$(qdistro_find_by_digest "${requested,,}" "$build_dir" 2>/dev/null) || selected=""
-        elif [ -z "$selected" ] && [ -z "$requested" ]; then
-            selected=$(qdistro_discover_image "$build_dir" 2>/dev/null) || selected=""
+        if [ "$identity" = selected ]; then
+            if [ -z "$selected" ] && [ -n "$requested" ]; then
+                selected=$(qdistro_find_by_digest "${requested,,}" "$build_dir" 2>/dev/null) || selected=""
+            elif [ -z "$selected" ]; then
+                selected=$(qdistro_discover_image "$build_dir" 2>/dev/null) || selected=""
+            fi
         fi
+    else
+        identity=selection-unavailable
     fi
-    if [[ "$selected" = *.raw.xz ]] && [ -f "$selected" ]; then
+    if [ "$identity" = selected ] && [ ! -f "$selected" ]; then
+        identity=selection-unavailable
+    fi
+    if [ "$identity" = selected ] && [[ "$selected" = *.raw.xz ]]; then
         sidecar="${QDISTRO_IMAGE_SHA256_FILE:-$selected.sha256}"
-        if [ -f "$sidecar" ] && [ "$(grep -c . "$sidecar")" = 1 ]; then
+        if [ ! -s "$sidecar" ]; then
+            identity=missing-sidecar
+        elif [ "$(grep -c . "$sidecar")" != 1 ]; then
+            identity=malformed-sidecar
+        else
             read -r rec name < "$sidecar"
             name="${name#\*}"
             if [[ "$rec" =~ ^[0-9a-fA-F]{64}$ ]] && [ "$name" = "$(basename "$selected")" ]; then
-                digest="${rec,,}"
+                if [ -n "$requested" ] && [ "${requested,,}" != "${rec,,}" ]; then
+                    identity=selector-conflict
+                else
+                    digest="${rec,,}"
+                fi
+            else
+                identity=malformed-sidecar
             fi
         fi
+    elif [ "$identity" = selected ] && [ -n "$requested" ]; then
+        identity=selector-conflict
+    elif [ "$identity" = selected ]; then
+        identity=non-xz-artifact
+    fi
+    if [ "$identity" = selector-conflict ] || [ "$identity" = invalid-selector ]; then
+        selected=""
     fi
     kv image_gate skipped
     kv image_published "${selected:-none}"
     kv image_digest "$digest"
+    kv image_identity_status "$identity"
     record_skip image developer-omission image \
-        "QCI_SKIP_IMAGE=1; published=${selected:-none}; digest=$digest; image contents and boot verification were not run"
+        "QCI_SKIP_IMAGE=1; published=${selected:-none}; digest=$digest; identity=$identity; image contents and boot verification were not run"
 }
 
 # ---------------------------------------------------------------------------
@@ -379,7 +410,7 @@ gate_image() {
     # silently skip the default matrix.
     local verify_src="$img"
     [ "${QDISTRO_RESOLVED_KIND:-}" = xz ] && [ -n "${QDISTRO_RESOLVED_XZ:-}" ] && verify_src="$QDISTRO_RESOLVED_XZ"
-    QDISTRO_IMAGE="$verify_src" \
+    QDISTRO_IMAGE="$verify_src" QDISTRO_VERIFY_PARENT= \
       QDISTRO_VERIFY_LOGIN=1 QDISTRO_VERIFY_PERSIST=1 QDISTRO_VERIFY_GROW_GIB=64 \
       bash "$IMAGE_DIR/verify.sh" --stick > "$v_log" 2>&1
     local v_rc=$?

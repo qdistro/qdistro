@@ -60,6 +60,36 @@ skip_identity() {
     [[ "$output" == *"image_digest=$(printf '%064d' 2)"* ]]
 }
 
+@test "developer skip marks path and digest selector conflicts as unavailable" {
+    local xz="$T/build/bundle/chosen.raw.xz" a b
+    a="$(printf '%064d' 1)"; b="$(printf '%064d' 2)"
+    : > "$xz"
+    printf '%s  %s\n' "$a" "$(basename "$xz")" > "$xz.sha256"
+    QDISTRO_IMAGE="$xz" QDISTRO_IMAGE_SHA256="$b" run skip_identity
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"image_published=none"* ]]
+    [[ "$output" == *"image_digest=none"* ]]
+    [[ "$output" == *"image_identity_status=selector-conflict"* ]]
+    QDISTRO_IMAGE="$a" QDISTRO_IMAGE_SHA256="$b" run skip_identity
+    [[ "$output" == *"image_identity_status=selector-conflict"* ]]
+    [[ "$output" == *"image_published=none"* ]]
+}
+
+@test "developer skip distinguishes missing and malformed sidecars" {
+    local xz="$T/build/bundle/chosen.raw.xz"
+    : > "$xz"
+    run skip_identity
+    [[ "$output" == *"image_identity_status=missing-sidecar"* ]]
+    [[ "$output" == *"image_digest=none"* ]]
+    printf 'garbage  chosen.raw.xz\n' > "$xz.sha256"
+    run skip_identity
+    [[ "$output" == *"image_identity_status=malformed-sidecar"* ]]
+    [[ "$output" == *"image_digest=none"* ]]
+    printf '%064d  wrong.raw.xz\n' 1 > "$xz.sha256"
+    run skip_identity
+    [[ "$output" == *"image_identity_status=malformed-sidecar"* ]]
+}
+
 @test "full dispatcher calls one skip and no image gate; default still calls image" {
     run bash -c '
         source "$1/ci/lib/dispatch.sh"
