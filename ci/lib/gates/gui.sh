@@ -933,9 +933,11 @@ Rules:
   2026-09-25: the settle waits were dropped, each frame showed the state
   before its key, and the differing clock was taken as proof the key had
   landed). Keep every settle wait and wait-for-state check the scenario lists,
-  exactly as written, between the input and the capture. If a frame still
-  shows the pre-input state, wait and capture again to a NEW name before
-  recording FAIL.
+  exactly as written, between the input and the capture. Do not add waits or
+  re-captures the scenario does not authorize, and never past a deadline it
+  states: a frame taken at a scenario's deadline stands. Where a scenario
+  authorizes a late re-capture (permissions-gui/05 does), take it once, to a
+  NEW name, and judge from it.
 - NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
   \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
   HEALTHY and your guest command is still running; they are progress, not a

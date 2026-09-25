@@ -843,6 +843,8 @@ run_scen() {
         grep -q 'A FRESH FRAME IS NOT A REACTED UI' "$f"
         grep -q 'proves only' "$f"
         grep -q 'Keep every settle wait' "$f"
+        grep -q 'Do not add waits or' "$f"
+        grep -q 'deadline' "$f"
     done
 }
 

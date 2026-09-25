@@ -73,8 +73,10 @@ Procedure:
    that the UI reached the state the step expects. A live clock, a blinking
    cursor or an animation changes pixels on its own. Keep every settle wait and
    wait-for-state check the scenario lists, exactly as written, between the
-   input and the capture. If a frame still shows the pre-input state, wait and
-   capture again to a NEW name before recording FAIL.
+   input and the capture. Do not add waits or re-captures the scenario does not
+   authorize, and never past a deadline it states: a frame taken at a
+   scenario's deadline stands. Where a scenario authorizes a late re-capture
+   (permissions-gui/05 does), take it once, to a NEW name, and judge from it.
 7. Before every model-targeted mouse click, activate the window and run
    `vm-gui "$VMNAME" click-preview X Y "visible target label"`. It moves the
    real VM pointer without a button press, then captures the evidence. Read both
