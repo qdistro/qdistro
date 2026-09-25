@@ -132,11 +132,16 @@ start_and_sigkill_vm_exec() {   # start_and_sigkill_vm_exec <token>
     local out="$BATS_TEST_TMPDIR/bg.out" i p
     "$VM_EXEC" "$VM_NAME" "sleep 600; : $1" >"$out" 2>&1 &
     p=$!
+    # Synchronise on the PUBLISHED registry record of THIS owner, not on the
+    # "guest identity pinned" line: that line precedes registration, and a
+    # SIGKILL timed on it could create an untracked orphan (astra r1 #4).
+    local rec=""
     for i in $(seq 1 120); do
-        grep -qF "guest identity pinned" "$out" && break
+        for rec in "$QDISTRO_VM_EXEC_STATE_DIR/$VM_NAME/$p"-*; do [ -f "$rec" ] && break 2; done
+        rec=""
         sleep 0.5
     done
-    grep -qF "guest identity pinned" "$out" || fail_loud "vm-exec never pinned its guest command: $(cat "$out")"
+    [ -n "$rec" ] || fail_loud "vm-exec never registered its guest command: $(cat "$out")"
     kill -KILL "$p"
     wait "$p" 2>/dev/null || true
 }

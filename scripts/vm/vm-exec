@@ -346,13 +346,18 @@ QD_CAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vm-exec-cap.XXXXXXXX") || {
 # exception. A failed unlink has the same effect. (sol section 3, fable
 # section 3.)
 #
-# The EXIT trap also retracts this invocation's orphan-registry entry (see
+# The EXIT trap also handles this invocation's orphan-registry record (see
 # "orphan registry" below). NOTE, measured: bash DOES run the EXIT trap when the
 # signal handler below re-raises with the default disposition, so the paragraph
 # above is conservative -- the only exits that skip this trap are ones bash never
 # sees, i.e. SIGKILL, and those are exactly what the registry exists for.
+# It retracts ONLY when QD_ORPHAN_DONE=1, i.e. once the guest command is known
+# to be finished (terminal status, a reaped pid, or a cleanup that returned
+# "resolved"). Every other exit -- poll errors, an unverified signal cleanup --
+# leaves the entry for the next vm-exec to resolve.
 QD_ORPHAN_ENTRY=""
-trap 'rm -rf "$QD_CAP_DIR"; [ -z "$QD_ORPHAN_ENTRY" ] || rm -f "$QD_ORPHAN_ENTRY"' EXIT
+QD_ORPHAN_DONE=0
+trap 'rm -rf "$QD_CAP_DIR"; if [ "$QD_ORPHAN_DONE" = 1 ] && [ -n "$QD_ORPHAN_ENTRY" ]; then rm -f "$QD_ORPHAN_ENTRY"; fi' EXIT
 
 # Per-call name parts. READ THIS BEFORE TRUSTING THE COUNTER: every caller runs
 # bounded_run inside a command substitution, i.e. in a SUBSHELL, so the
@@ -660,6 +665,9 @@ fi
 # Start time of the guest command, as captured right after launch. Empty means
 # "identity unknown" -- the cleanup script then refuses to signal at all.
 GUEST_START_TIME=""
+# Guest boot id captured with the identity (empty when unknown). The cleanup
+# script refuses to signal when it is set and the guest has since rebooted.
+GUEST_BOOT_ID=""
 
 # Shared /proc reader. Field 22 (starttime) is counted over the WHOLE stat
 # line, but field 2 (comm) may contain spaces and parentheses, so we anchor on
@@ -701,7 +709,12 @@ STARTOF_EOF
 IDENT_SH="$STARTOF_SH
 $(cat <<'IDENT_EOF'
 qd_ident_s=$(qd_startof __PID__)
-if [ -n "$qd_ident_s" ]; then printf 'start=%s\n' "$qd_ident_s"; else printf 'gone\n'; fi
+# The guest's boot id rides along: a (pid, start time) pair is unique only
+# WITHIN one boot, and the orphan registry must never match it against a later
+# incarnation of the same VM name. "boot=" with nothing after it means the id
+# was unreadable; the host then does not register the command.
+qd_ident_b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+if [ -n "$qd_ident_s" ]; then printf 'start=%s boot=%s\n' "$qd_ident_s" "$qd_ident_b"; else printf 'gone\n'; fi
 IDENT_EOF
 )"
 # <<< ident-probe script
@@ -758,6 +771,7 @@ IDENT_EOF
 KILL_TREE_SH=$(cat <<'KILL_EOF'
 p=__PID__
 stamp="__STAMP__"
+boot="__BOOT__"
 # IDENTITY: start time (overall field 22 of /proc/<pid>/stat) regardless of
 # process state. Anchored on the LAST ')' because comm may contain spaces and
 # parentheses; overall field k is f[k-2], so starttime is f[20].
@@ -827,6 +841,15 @@ qd_kill_checked() {
     kill -"$sig" "$k" 2>/dev/null
   done
 }
+# INCARNATION first. (pid, start time) is unique only within one boot: after a
+# reboot or re-creation under the same VM name a DIFFERENT process can carry the
+# same pair. Checked here, inside the guest, so a reboot between the host's
+# decision and this RPC cannot slip past it.
+if [ -n "$boot" ]; then
+  nowboot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+  if [ -z "$nowboot" ]; then echo "boot-unknown pid=$p: cannot read boot_id; refusing to signal"; exit 7; fi
+  if [ "$nowboot" != "$boot" ]; then echo "boot-mismatch pid=$p boot=$nowboot expected=$boot: the recorded process belonged to an earlier boot; NOT signalled"; exit 4; fi
+fi
 cur=$(qd_startof "$p")
 if [ -z "$cur" ]; then echo "already-gone pid=$p"; exit 0; fi
 if [ -z "$stamp" ]; then
@@ -1025,6 +1048,14 @@ capture_guest_identity() {
     case "$out" in
         start=*)
             out=${out#start=}
+            GUEST_BOOT_ID=""
+            case "$out" in
+                *boot=*)
+                    GUEST_BOOT_ID=${out#*boot=}
+                    out=${out%%boot=*}
+                    [[ "$GUEST_BOOT_ID" =~ ^[0-9a-f-]{36}$ ]] || GUEST_BOOT_ID=""
+                    ;;
+            esac
             if [[ "$out" =~ ^[0-9]+$ ]]; then
                 GUEST_START_TIME=$out
                 GUEST_IDENT_STATE=pinned
@@ -1106,6 +1137,11 @@ capture_guest_identity() {
 # up to 8s (TERM grace) + 3s (post-KILL confirmation) ~= 11s before it can
 # answer. Below that the host will honestly report "not verified" for cleanups
 # that in fact succeeded.
+# OUTCOME (since the orphan registry): returns 0 only when the guest command is
+# PROVABLY no longer running -- verified gone, already gone, its pid now held by
+# a different process (identity-mismatch), or it belonged to an earlier boot.
+# Every "not attempted / not verified / survived" path returns 1. Callers under
+# `set -e` must test it (`if kill_guest_pid ...`), never call it bare.
 kill_guest_pid() {
     local p=$1 sh kjson resp kpid sjson st ec b64 detail now deadline left
     deadline=""
@@ -1115,29 +1151,30 @@ kill_guest_pid() {
     left=$(budget_left "$deadline")
     if [ "$left" -le 0 ]; then
         echo "[vm-exec] WARN: cannot bound cleanup for guest PID $p (monotonic clock unreadable); NOT attempted and NOT verified, the guest command may still be running" >&2
-        return 0
+        return 1
     fi
     # Parameter expansion only: builtin, so the request body costs no wall time.
     sh=${KILL_TREE_SH//__PID__/$p}
     sh=${sh//__STAMP__/$GUEST_START_TIME}
+    sh=${sh//__BOOT__/$GUEST_BOOT_ID}
     if ! kjson=$(budgeted_local "$deadline" jq -nc --arg cmd "$sh" \
             '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":true}}'); then
         echo "[vm-exec] WARN: could not build the cleanup request for guest PID $p within its ${KILL_VERIFY_TIMEOUT}s budget; NOT attempted and NOT verified, the guest command may still be running" >&2
-        return 0
+        return 1
     fi
     left=$(budget_left "$deadline")
     if [ "$left" -le 0 ]; then
         echo "[vm-exec] WARN: cleanup budget for guest PID $p was spent before the request could be sent; NOT attempted and NOT verified, the guest command may still be running" >&2
-        return 0
+        return 1
     fi
     if ! resp=$(agent_rpc "$kjson" "$(rpc_cap "$left")" 2>/dev/null); then
         echo "[vm-exec] WARN: could not submit cleanup for guest PID $p; NOT verified, the guest command may still be running" >&2
-        return 0
+        return 1
     fi
     kpid=$(printf '%s' "$resp" | budgeted_local "$deadline" jq -r '.return.pid // empty' 2>/dev/null || true)
     if [ -z "$kpid" ]; then
         echo "[vm-exec] WARN: cleanup RPC for guest PID $p returned no pid; NOT verified, the guest command may still be running" >&2
-        return 0
+        return 1
     fi
     while :; do
         left=$(budget_left "$deadline")
@@ -1170,17 +1207,24 @@ kill_guest_pid() {
             # cannot push the return past the bound proven above.
             detail=${detail//$'\n'/ }
             case "$ec" in
-                0) echo "[vm-exec] cleanup verified for guest PID $p: ${detail:-no detail}" >&2 ;;
-                3) echo "[vm-exec] WARN: guest PID $p could not be identity-checked against the launch capture; REFUSED to signal a possibly recycled PID: ${detail:-no detail}" >&2 ;;
+                0) echo "[vm-exec] cleanup verified for guest PID $p: ${detail:-no detail}" >&2
+                   return 0 ;;
+                3) echo "[vm-exec] WARN: guest PID $p could not be identity-checked against the launch capture; REFUSED to signal a possibly recycled PID: ${detail:-no detail}" >&2
+                   # identity-mismatch: that pid now belongs to ANOTHER process,
+                   # so ours is provably gone. identity-unknown: nothing proven.
+                   case "$detail" in identity-mismatch*) return 0 ;; esac
+                   return 1 ;;
+                4) echo "[vm-exec] guest PID $p belongs to an earlier boot of this VM; nothing signalled, nothing left to clean up: ${detail:-no detail}" >&2
+                   return 0 ;;
                 5|6) echo "[vm-exec] WARN: cleanup could NOT be verified for guest PID $p; guest processes survived TERM+KILL: ${detail:-no detail}" >&2 ;;
                 *) echo "[vm-exec] WARN: cleanup script for guest PID $p exited $ec; cleanup NOT verified: ${detail:-no detail}" >&2 ;;
             esac
-            return 0
+            return 1
         fi
         sleep 1
     done
     echo "[vm-exec] WARN: cleanup for guest PID $p did not finish within ${KILL_VERIFY_TIMEOUT}s; cannot confirm the guest command was reaped" >&2
-    return 0
+    return 1
 }
 
 # --- orphan registry: reap guest commands whose vm-exec was SIGKILLed ---------
@@ -1198,56 +1242,117 @@ kill_guest_pid() {
 # pending requests, REQ=ambiguous, and "admin approvals (2 pending)" after the
 # one Deny.
 #
-# So every invocation that pins its guest command's identity records it here,
-# keyed by its OWN host (pid, start time), and retracts the entry in the EXIT
-# trap -- which runs on every exit bash sees, including the re-raised signal.
-# An entry that outlives its owner therefore means the owner died without
-# running any code, and the next vm-exec against the same VM kills that guest
-# command (identity-checked, via the same kill_guest_pid as the signal path)
-# BEFORE it launches its own. The limit, stated: a SIGKILL that lands between
-# guest-exec and the identity pin leaves no entry, and nothing is reaped.
+# RECORD. Every invocation that pins its guest command records, in
+# $QD_ORPHAN_DIR/<host pid>-<host start time>, one line:
+#     <guest pid> <guest start time> <guest boot id> <domain uuid|->
+# The boot id binds the record to ONE incarnation of the VM: (pid, start time)
+# is unique only within a boot, and the in-guest cleanup script re-checks the
+# boot id before it signals anything. The domain uuid (when virsh answers)
+# lets a re-created domain's records be dropped without any RPC at all.
+# A command whose boot id could not be read is NOT recorded.
+#
+# RETRACT. The EXIT trap removes the record only once the guest command is known
+# to be finished (QD_ORPHAN_DONE, see the trap). An owner that died WITHOUT
+# running that trap (SIGKILL), or exited while its command may still run, leaves
+# the record behind.
+#
+# REAP. Before launching, vm-exec resolves every record whose owner is
+# confirmed gone. "Resolved" means kill_guest_pid returned 0 (verified gone,
+# already gone, pid recycled, earlier boot) or the domain uuid differs. An
+# UNRESOLVED record is kept, and the launch is REFUSED with exit
+# $QD_ORPHAN_REFUSE_RC: launching next to a live orphan is exactly the
+# duplicate-driver bug. The same exit is used when the per-VM lock cannot be
+# taken in time -- never launch without the barrier. Both are retryable.
+#
+# LIMITS, stated. A SIGKILL between guest-exec and the record's rename leaves no
+# record, and nothing is reaped. A restored memory snapshot reproduces the same
+# boot id and process table; the record then legitimately still matches.
+# Fully detached/reparented guest work is not discovered by the tree walk.
+# Opt out with QDISTRO_VM_EXEC_ORPHAN_REAP=0.
 QD_ORPHAN_ROOT=${QDISTRO_VM_EXEC_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/qdistro-vm-exec-$(id -u)}
 QD_ORPHAN_DIR="$QD_ORPHAN_ROOT/${VM_NAME//\//_}"
+QD_ORPHAN_REFUSE_RC=75   # EX_TEMPFAIL
+QD_ORPHAN_LOCK_WAIT=${QDISTRO_VM_EXEC_REAP_LOCK_WAIT:-$(( 4 * (KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 1) + 10 ))}
+if ! [[ "$QD_ORPHAN_LOCK_WAIT" =~ ^[0-9]+$ ]]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_REAP_LOCK_WAIT must be a non-negative integer, got: $QD_ORPHAN_LOCK_WAIT" >&2
+    exit 1
+fi
 
-# Start time (field 22) of a HOST process, or empty when it does not exist.
-# Parsed after the LAST ')' because comm may contain spaces and parentheses.
-host_starttime() {
+# Host process state for a registry owner: prints `alive <start>`, `gone`, or
+# `unknown`. `gone` only on CONFIRMED absence (no /proc entry); a readable entry
+# is parsed after the LAST ')' (comm may hold spaces/parens). Anything else --
+# /proc present but unreadable or unparsable -- is `unknown`, and an unknown
+# owner is never treated as dead.
+host_owner_state() {
     local st rest
-    st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    if [ ! -e "/proc/$1" ]; then echo gone; return 0; fi
+    if ! st=$(cat "/proc/$1/stat" 2>/dev/null) || [ -z "$st" ]; then
+        # It may have exited between the two reads; ask again.
+        [ -e "/proc/$1" ] && echo unknown || echo gone
+        return 0
+    fi
     rest=${st##*') '}
     # shellcheck disable=SC2086
     set -- $rest
-    printf '%s' "${20:-}"
+    if [[ "${20:-}" =~ ^[0-9]+$ ]]; then echo "alive ${20}"; else echo unknown; fi
+}
+
+# This domain's uuid, or `-` when virsh cannot say (never fatal).
+domain_uuid() {
+    local u
+    u=$(capped_local virsh -c qemu:///session domuuid "$VM_NAME" 2>/dev/null) || u=""
+    u=${u//[[:space:]]/}
+    [[ "$u" =~ ^[0-9a-fA-F-]{36}$ ]] && printf '%s' "$u" || printf -- '-'
 }
 
 orphan_register() {
-    local me_start tmp
+    local me me_start tmp uuid
     [ "${QDISTRO_VM_EXEC_ORPHAN_REAP:-1}" = 1 ] || return 0
-    me_start=$(host_starttime "$$")
-    [ -n "$me_start" ] || return 0
-    mkdir -p -m 0700 "$QD_ORPHAN_ROOT" "$QD_ORPHAN_DIR" 2>/dev/null || return 0
+    if [ -z "$GUEST_BOOT_ID" ]; then
+        echo "[vm-exec] WARN: orphan registry: guest boot id unknown; guest PID $PID is NOT recorded and will not be reaped if this vm-exec is SIGKILLed" >&2
+        return 0
+    fi
+    me=$(host_owner_state "$$")
+    me_start=${me#alive }
+    if [ "$me" = "$me_start" ]; then
+        echo "[vm-exec] WARN: orphan registry: cannot read this process's own start time; guest PID $PID is NOT recorded" >&2
+        return 0
+    fi
+    if ! mkdir -p -m 0700 "$QD_ORPHAN_ROOT" "$QD_ORPHAN_DIR" 2>/dev/null; then
+        echo "[vm-exec] WARN: orphan registry: cannot create $QD_ORPHAN_DIR; guest PID $PID is NOT recorded and will not be reaped if this vm-exec is SIGKILLed" >&2
+        return 0
+    fi
+    uuid=$(domain_uuid)
     tmp="$QD_ORPHAN_DIR/.new.$$"
-    printf '%s %s\n' "$PID" "$GUEST_START_TIME" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    if ! printf '%s %s %s %s\n' "$PID" "$GUEST_START_TIME" "$GUEST_BOOT_ID" "$uuid" >"$tmp" 2>/dev/null \
+       || ! mv -f "$tmp" "$QD_ORPHAN_DIR/$$-$me_start" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null || true
+        echo "[vm-exec] WARN: orphan registry: cannot write a record in $QD_ORPHAN_DIR; guest PID $PID is NOT recorded and will not be reaped if this vm-exec is SIGKILLed" >&2
+        return 0
+    fi
     QD_ORPHAN_ENTRY="$QD_ORPHAN_DIR/$$-$me_start"
-    mv -f "$tmp" "$QD_ORPHAN_ENTRY" 2>/dev/null || { rm -f "$tmp"; QD_ORPHAN_ENTRY=""; }
     return 0
 }
 
+orphan_refuse() {
+    echo "[vm-exec] ERROR: refusing to launch on $VM_NAME: $1. Nothing was started; retry (exit $QD_ORPHAN_REFUSE_RC is retryable), or set QDISTRO_VM_EXEC_ORPHAN_REAP=0 to launch without the orphan barrier." >&2
+    exit "$QD_ORPHAN_REFUSE_RC"
+}
+
 orphan_reap() {
-    local lockfd e base owner owner_start gpid gstamp
+    local lockfd e base owner owner_start st gpid gstamp gboot guuid cur_uuid="" unresolved=0 have=0
     [ "${QDISTRO_VM_EXEC_ORPHAN_REAP:-1}" = 1 ] || return 0
     [ -d "$QD_ORPHAN_DIR" ] || return 0
-    # One reaper per VM at a time, and a concurrent launcher WAITS for it, so no
-    # new command on this VM starts while an orphan is being killed. Bounded:
-    # one kill_guest_pid is at most KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 1.
-    # NOT `exec {fd}>>f 2>/dev/null`: a redirection on a bare `exec` is
-    # PERMANENT, and that form silenced every later line on vm-exec's stderr.
-    # The group's own redirection is restored when the group ends.
-    { exec {lockfd}>>"$QD_ORPHAN_DIR/.lock"; } 2>/dev/null || return 0
-    if ! flock -w $((KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 10)) "$lockfd"; then
-        echo "[vm-exec] WARN: orphan registry for $VM_NAME is locked by another vm-exec; launching without reaping" >&2
+    for e in "$QD_ORPHAN_DIR"/*-*; do [ -f "$e" ] && { have=1; break; }; done
+    [ "$have" = 1 ] || return 0
+    # One reaper per VM at a time, and a concurrent launcher WAITS for it: no new
+    # command may start on this VM while a record is unresolved.
+    if ! { exec {lockfd}>>"$QD_ORPHAN_DIR/.lock"; } 2>/dev/null; then
+        orphan_refuse "cannot open the orphan registry lock $QD_ORPHAN_DIR/.lock while records exist"
+    fi
+    if ! flock -w "$QD_ORPHAN_LOCK_WAIT" "$lockfd"; then
         exec {lockfd}>&-
-        return 0
+        orphan_refuse "another vm-exec held the orphan registry lock for more than ${QD_ORPHAN_LOCK_WAIT}s (orphan cleanup still in progress)"
     fi
     for e in "$QD_ORPHAN_DIR"/*-*; do
         [ -f "$e" ] || continue
@@ -1255,23 +1360,50 @@ orphan_reap() {
         owner=${base%%-*}
         owner_start=${base#*-}
         [[ "$owner" =~ ^[0-9]+$ && "$owner_start" =~ ^[0-9]+$ ]] || continue
-        # Owner still alive (same pid AND same start time): it is polling its
-        # own command, which is not an orphan.
-        [ "$(host_starttime "$owner")" = "$owner_start" ] && continue
-        read -r gpid gstamp <"$e" 2>/dev/null || { rm -f "$e"; continue; }
-        if [[ "$gpid" =~ ^[0-9]+$ && "$gstamp" =~ ^[0-9]+$ ]]; then
+        st=$(host_owner_state "$owner")
+        case "$st" in
+            "alive $owner_start") continue ;;   # its owner is still polling it
+            unknown)
+                echo "[vm-exec] WARN: orphan registry: cannot read host pid $owner; its record is left alone and NOT signalled" >&2
+                continue ;;
+        esac
+        # Owner confirmed gone (or its pid now belongs to another process).
+        gpid="" gstamp="" gboot="" guuid=""
+        read -r gpid gstamp gboot guuid <"$e" 2>/dev/null || true
+        if ! [[ "$gpid" =~ ^[0-9]+$ && "$gstamp" =~ ^[0-9]+$ && "$gboot" =~ ^[0-9a-f-]{36}$ ]]; then
+            echo "[vm-exec] WARN: orphan registry: malformed record $base; left in place, NOT signalled" >&2
+            unresolved=$((unresolved + 1))
+            continue
+        fi
+        [ -n "$cur_uuid" ] || cur_uuid=$(domain_uuid)
+        if [ "${guuid:--}" != - ] && [ "$cur_uuid" != - ] && [ "$guuid" != "$cur_uuid" ]; then
+            echo "[vm-exec] orphan registry: record for guest PID $gpid belongs to an earlier domain $guuid (now $cur_uuid); dropped, nothing signalled" >&2
+        else
             echo "[vm-exec] WARN: reaping orphaned guest command PID $gpid on $VM_NAME: its vm-exec (host pid $owner) died without cleanup (SIGKILL?)" >&2
             GUEST_START_TIME=$gstamp
-            kill_guest_pid "$gpid"
-            GUEST_START_TIME=""
+            GUEST_BOOT_ID=$gboot
+            if kill_guest_pid "$gpid"; then
+                GUEST_START_TIME="" GUEST_BOOT_ID=""
+            else
+                GUEST_START_TIME="" GUEST_BOOT_ID=""
+                echo "[vm-exec] WARN: orphaned guest PID $gpid could NOT be confirmed gone; its record is kept" >&2
+                unresolved=$((unresolved + 1))
+                continue
+            fi
         fi
-        rm -f "$e"
+        if ! rm -f "$e" 2>/dev/null || [ -e "$e" ]; then
+            echo "[vm-exec] WARN: orphan registry: resolved record $base could not be removed; it will be re-checked (harmlessly) next time" >&2
+        fi
     done
     exec {lockfd}>&-
+    if [ "$unresolved" -gt 0 ]; then
+        orphan_refuse "$unresolved orphaned guest command(s) left by a SIGKILLed vm-exec could not be confirmed gone"
+    fi
     return 0
 }
 
 orphan_reap
+
 
 # 1. Send the command. Build the qga JSON with jq so embedded quotes,
 #    backslashes, and newlines in $CMD survive a round-trip through
@@ -1357,7 +1489,7 @@ vm_exec_on_signal() {
     local sig=$1
     trap - INT TERM HUP
     echo "[vm-exec] WARN: received SIG${sig}; attempting identity-checked cleanup of guest PID $PID and its descendants" >&2
-    kill_guest_pid "$PID"
+    if kill_guest_pid "$PID"; then QD_ORPHAN_DONE=1; fi
     # Nothing to scrub: every capture file is unlinked the instant it is
     # opened, so no captured output is reachable by path here. We are about to
     # die of $sig, so the EXIT trap will not run and one EMPTY 0700 directory
@@ -1431,7 +1563,7 @@ while true; do
         PREV_UPTIME=$NOW_UPTIME
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
             echo "[vm-exec] ERROR: command exceeded ${TIMEOUT}s (elapsed ${ELAPSED}s); attempting identity-checked cleanup of guest PID $PID: $CMD" >&2
-            kill_guest_pid "$PID"
+            if kill_guest_pid "$PID"; then QD_ORPHAN_DONE=1; fi
             exit 124
         fi
     fi
@@ -1516,6 +1648,8 @@ while true; do
         # Anchored on .error.desc, not the whole body, so an unrelated payload
         # cannot be read as a reaping.
         if printf '%s' "$RESULT" | capped_local jq -e '.error.desc | test("does not exist")' >/dev/null 2>&1; then
+            # qga reaped it: the command has finished, nothing to orphan.
+            QD_ORPHAN_DONE=1
             echo "[vm-exec] ERROR: guest agent has no bookkeeping for PID $PID (reaped)." >&2
             echo "[vm-exec] HINT: terminal status is one-shot; this cannot be retried." >&2
             echo "[vm-exec] HINT: If the command used 'pkill -f <pattern>', it matched its OWN" >&2
@@ -1583,6 +1717,7 @@ done
 # keeps the signal-to-re-raise bound documented above a statement about the
 # whole armed lifetime of the trap, not about part of it.
 trap - INT TERM HUP
+QD_ORPHAN_DONE=1
 # 4. Decode and print stdout
 OUT_DATA=$(echo "$RESULT" | jq -r '.return."out-data"')
 if [ "$OUT_DATA" != "null" ] && [ -n "$OUT_DATA" ]; then
