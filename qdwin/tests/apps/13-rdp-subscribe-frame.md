@@ -29,9 +29,13 @@ This scenario REQUIRES:
   pipewire output, qdwin emits `denied "no free pipewire output"`
   and the rest of the scenario short-circuits.
 
-Fail loudly if any of the *infrastructure* prereqs above (VM `xfreerdp`,
-VM `qdistro-forward`, `qdwin-bystander`, a free pipewire output) is missing;
-do not skip those. The *subject* app `foot`, however, is part of the opt-in
+Fail loudly if VM `xfreerdp`, VM `qdistro-forward`, or `qdwin-bystander`
+is missing; do not skip those. The one exception is a subscribe denial of
+`(no pw output)` / `no free pipewire output` in the qdwin journal since the
+subscribe cursor: Step 1 prints `SKIP:` naming that check and exits 77.
+Any other missing approval (credentials absent without that denial, a real
+product deny, a bad port) stays a loud FAIL. The *subject* app `foot`,
+however, is part of the opt-in
 `QDWIN_APP_DEPS` matrix: on a lean GUI golden (no `QDWIN_APP_DEPS=1`) it is
 legitimately absent, so SKIP cleanly per the apps/AGENTS.md rule rather than
 ERROR (see the Setup guard below).
@@ -142,7 +146,21 @@ for _i in $(seq 1 30); do
   printf '%s\n' "$CREDS" | grep -q '^RDP_PASSWORD=' && break
   sleep 0.2
 done
+# No free pipewire output is a bake limit, not a product deny. Only that
+# journal denial since the subscribe cursor becomes a skip; every other
+# missing-approval cause keeps the FAIL below it.
+rdp_skip_if_no_pipewire_output() {
+  local denial
+  denial=$(qdwin_apps_log_since_cursor "$SUBSCRIBE_CURSOR" \
+    "subscribe_view_stream denied handle=${HANDLE}([^0-9]|$).*(no pw output|no free pipewire output)" || true)
+  if printf '%s\n' "$denial" | grep -Eq 'no pw output|no free pipewire output'; then
+    echo "SKIP: qdwin_apps_log_since_cursor since subscribe cursor shows subscribe_view_stream denied handle=${HANDLE} (no pw output / no free pipewire output); bake has no free pipewire output"
+    exit 77   # bats convention for skip
+  fi
+  return 0
+}
 printf '%s\n' "$CREDS" | grep -q '^RDP_PASSWORD=' || {
+  rdp_skip_if_no_pipewire_output
   echo "FAIL: approved credentials did not arrive within 6 seconds"; exit 1;
 }
 # qdwin-bystander emits only fixed KEY=value protocol fields. Import the
@@ -156,6 +174,7 @@ FORWARD_PID=$(printf '%s\n' "$APPROVAL" | \
 FIRST_PW_OUTPUT=$(printf '%s\n' "$APPROVAL" | \
   sed -nE 's/.* pw=([^ ]+).*/\1/p')
 [ -n "$FORWARD_PID" ] && [ -n "$FIRST_PW_OUTPUT" ] || {
+  rdp_skip_if_no_pipewire_output
   echo "FAIL: approved event lacks forward PID/PipeWire output: $APPROVAL"; exit 1;
 }
 
@@ -179,9 +198,12 @@ subscribe request. (If instead the journal shows
 output)`, this bake has no pipewire output. That is **not** a
 weston.ini `[pipewire] num-outputs` problem — that key is set. It
 means the compositor was started without `pipewire-backend.so` in its
-backend list, so no pipewire output ever initialised. **SKIP** the
-scenario with that reason rather than failing loud; a non-pipewire
-bake cannot satisfy this test.)
+backend list, so no pipewire output ever initialised. The bash above
+already checks that delta with `qdwin_apps_log_since_cursor` and, only
+when `(no pw output)` or `no free pipewire output` is present, prints
+`SKIP:` and exits 77 before either missing-approval failure. Record that
+SKIP. A non-pipewire bake cannot satisfy this test. Any other denial, or
+a missing approval with that denial absent, stays FAIL.)
 
 **Assert (1.2):** $RDP_PORT is a valid TCP port (1024..65535).
 
