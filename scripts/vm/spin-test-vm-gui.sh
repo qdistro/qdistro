@@ -120,6 +120,16 @@ if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
             exit 1
         fi
         pgrep -x labwc >/dev/null || { echo "[gui-spin] ERROR: labwc not running on clone"; exit 1; }
+        # Test wallpaper (step 8-wp). The baked config is checked fail-closed;
+        # a swaybg that has not (yet) come up is only a warning, since the
+        # scenarios still run without it -- an empty desktop just reads black.
+        grep -q "^swaybg -m tile -i '/home/admin/Pictures/Wallpapers/qdistro-test-pattern.png'" \
+                /home/admin/.config/lxqt/labwc/autostart 2>/dev/null \
+            && [ -s /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png ] \
+            || { echo "[gui-spin] ERROR: labwc golden clone lost its test-wallpaper swaybg config"; exit 1; }
+        for _i in $(seq 1 10); do pgrep -u admin -x swaybg >/dev/null && break; sleep 1; done
+        pgrep -u admin -x swaybg >/dev/null \
+            || echo "[gui-spin] WARN: swaybg not running on labwc clone (desktop will be black)"
         echo "[gui-spin] labwc clone session up (wayland-0)"
     else
         for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-1 ] && break; sleep 2; done
@@ -464,6 +474,87 @@ size=@Size(1200 700)
 INI
 chown admin:users /home/admin/.config/qterminal.org/qterminal.ini
 
+# DESKTOP WALLPAPER (BOTH profiles): install_test_wallpaper renders the patterned
+# test wallpaper to /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png.
+# The qdwin profile shows it through qdshell (wallpaper directory default); the
+# labwc profile points swaybg at it via scripts/vm/assets/labwc-test-wallpaper.sh
+# (step 8-wp). The body keeps its 4-space indent: make-test-wallpaper.sh and
+# the gate tests extract the generator by that exact line shape.
+TEST_WALLPAPER=/home/admin/Pictures/Wallpapers/qdistro-test-pattern.png
+install_test_wallpaper() {
+    # DESKTOP WALLPAPER: make the ordinary idle desktop visibly non-flat.
+    #
+    # qdshell ships `wallpaper.enabled: true` with an EMPTY `directory`
+    # (Commons/Settings.qml), defaulting to ~/Pictures/Wallpapers, and nothing
+    # here used to populate it -- so the test desktop background was BLACK. A
+    # healthy idle desktop and a dead compositor then produced the same frame,
+    # which is why this failure class kept being diagnosed indirectly
+    # (36b1ce6 "the 'app' screenshots were actually the qdlocker lock screen",
+    # 3dcd6bd, qdlocker 14c19a5, qdshell 4885738e8, qdwin 6e6d860). With a
+    # patterned background the ordinary idle desktop is no longer FLAT, so it
+    # is distinguishable from the uniform-black signature instead of identical
+    # to it.
+    #
+    # THIS IS NOT A LIVENESS PROOF. A structured frame shows the pattern was
+    # rendered at some point; a frozen framebuffer keeps its last contents, and
+    # that is exactly the state seen in gui-20260919T072913Z (three retries,
+    # byte-identical). Repeat-capture comparison stays the liveness test. Nor
+    # does it mean every refused frame is a fault: a fullscreen uniform app, a
+    # lock view, or DPMS-off can all legitimately produce a flat frame.
+    #
+    # Generated in-guest with stdlib python3 only. ImageMagick is a HOST
+    # dependency of the capture gate and is not guaranteed in the VM, and a
+    # binary asset in the repo cannot be reviewed in a diff. The pattern (plain
+    # diagonal + orthogonal grid, no text, no fonts) is the same one
+    # scripts/vm/assets/make-test-wallpaper.sh documents and regenerates (that
+    # script extracts and runs THIS generator rather than reimplementing it;
+    # the sigma figures below are measured by the gate tests):
+    # full-frame sigma ~0.098 against a FRAME_FLAT_SIGMA of 0.01. The pattern
+    # is 64px-periodic in both axes, so any axis-aligned, unscaled 64x64 crop
+    # contains each pair of residues exactly once and therefore has the
+    # histogram of ONE COMPLETE PERIOD -- which is only APPROXIMATELY the whole
+    # frame's, because 800 is 12.5 periods, not an integer: a tile is
+    # 496/4096 rule pixels (0.121094) against the frame's 123400/1024000
+    # (0.120508). Close enough that a crop and the frame read the same to the
+    # gate, which is why a window covering most of the screen leaves the
+    # remainder just as legible. 64px is the period, a design
+    # choice; it is NOT a measured claim about how much desktop a real
+    # scenario leaves uncovered, and a remnant smaller than one period or a
+    # scaled/filtered capture carries no such guarantee. A solid colour would
+    # NOT do: qdshell's solidColor default (#1a1a2e) measures sigma 0 and the
+    # gate would refuse a healthy desktop as FLAT.
+    install -d -m 0755 -o admin -g users /home/admin/Pictures/Wallpapers
+    runuser -u admin -- python3 - /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png <<'WPEOF'
+import struct, zlib, sys
+
+W, H, T = 1280, 800, 64
+BASE = (0x18, 0x20, 0x32)
+RULE = (0x5a, 0x6d, 0x99)
+
+def on_rule(x, y):
+    u, v = x % T, y % T
+    return (abs(u - v) < 2 or abs(u + v - (T - 1)) < 2
+            or abs(v - T // 2) < 1 or abs(u - T // 2) < 1)
+
+rows = bytearray()
+for y in range(H):
+    rows.append(0)
+    for x in range(W):
+        rows += bytes(RULE if on_rule(x, y) else BASE)
+
+def chunk(tag, data):
+    c = tag + data
+    return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+
+open(sys.argv[1], "wb").write(
+    b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+    + chunk(b"IEND", b""))
+WPEOF
+    chown admin:users /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png 2>/dev/null || true
+}
+
 # Steps 6-8 below stand up the labwc+lxqt session and are skipped for the
 # `qdwin` profile (which keeps the qdwin+qdshell session staged by
 # fresh-vm-bootstrap.sh instead — see step 8c). §8b (virtio-gpu DRM) runs for
@@ -483,7 +574,7 @@ if [ "$SESSION" = labwc ]; then
 #      - xwayland (provides /usr/bin/Xwayland)
 #      - dejavu-fonts noto-sans-fonts (labwc aborts on no fonts)
 zypper -n install labwc lxqt-session lxqt-labwc-session \
-    qterminal xdotool xhost xwayland git \
+    qterminal xdotool xhost xwayland git swaybg \
     python313-rich python313-textual python313-mistune \
     dejavu-fonts google-noto-sans-fonts \
     perl-Net-DBus \
@@ -538,6 +629,25 @@ RestartSec=2
 WantedBy=default.target
 EOF2
 chown -R admin:users /home/admin/.config/systemd/user
+
+# 8-wp. Desktop wallpaper for the labwc lane. Without it the desktop outside
+#       app windows is solid black: labwc's autostart (seeded from
+#       lxqt-labwc-session's /usr/share/lxqt/wayland/labwc by startlxqtwayland)
+#       runs `swaybg -i /usr/share/wallpapers/openSUSEdefault/...`, an image
+#       this image never installs, so swaybg shows nothing. An empty desktop
+#       then reads as a dead display and vm-gui refuses it as near-black.
+#       This must run BEFORE qdistro-labwc.service first starts (step below):
+#       the helper seeds ~/.config/lxqt/labwc itself, so startlxqtwayland's
+#       first-run copy is skipped and cannot overwrite the edit. The helper
+#       fails closed if swaybg is missing and replaces any other swaybg line.
+#       Test image only; the product's labwc defaults are untouched.
+install_test_wallpaper
+# Runs as root ($SRC is root's 0700 home), then hands the tree to admin.
+install -d -m 0755 -o admin -g users /home/admin/.config/lxqt
+sh "$SRC/scripts/vm/assets/labwc-test-wallpaper.sh" \
+    /home/admin/.config/lxqt/labwc "$TEST_WALLPAPER" \
+    || { echo "[gui-spin] ERROR: could not point labwc's swaybg at the test wallpaper"; exit 1; }
+chown -R admin:users /home/admin/.config/lxqt
 
 # 8a. spice-vdagent must be absent: fresh-vm-bootstrap.sh §0c removes and
 #     locks it (it rides in on xwayland's supplements). Under labwc,
@@ -732,77 +842,9 @@ NAutoVTs=0
 EOF2
     systemctl restart systemd-logind >/dev/null 2>&1 || true
 
-    # DESKTOP WALLPAPER: make the ordinary idle desktop visibly non-flat.
-    #
-    # qdshell ships `wallpaper.enabled: true` with an EMPTY `directory`
-    # (Commons/Settings.qml), defaulting to ~/Pictures/Wallpapers, and nothing
-    # here used to populate it -- so the test desktop background was BLACK. A
-    # healthy idle desktop and a dead compositor then produced the same frame,
-    # which is why this failure class kept being diagnosed indirectly
-    # (36b1ce6 "the 'app' screenshots were actually the qdlocker lock screen",
-    # 3dcd6bd, qdlocker 14c19a5, qdshell 4885738e8, qdwin 6e6d860). With a
-    # patterned background the ordinary idle desktop is no longer FLAT, so it
-    # is distinguishable from the uniform-black signature instead of identical
-    # to it.
-    #
-    # THIS IS NOT A LIVENESS PROOF. A structured frame shows the pattern was
-    # rendered at some point; a frozen framebuffer keeps its last contents, and
-    # that is exactly the state seen in gui-20260919T072913Z (three retries,
-    # byte-identical). Repeat-capture comparison stays the liveness test. Nor
-    # does it mean every refused frame is a fault: a fullscreen uniform app, a
-    # lock view, or DPMS-off can all legitimately produce a flat frame.
-    #
-    # Generated in-guest with stdlib python3 only. ImageMagick is a HOST
-    # dependency of the capture gate and is not guaranteed in the VM, and a
-    # binary asset in the repo cannot be reviewed in a diff. The pattern (plain
-    # diagonal + orthogonal grid, no text, no fonts) is the same one
-    # scripts/vm/assets/make-test-wallpaper.sh documents and regenerates (that
-    # script extracts and runs THIS generator rather than reimplementing it;
-    # the sigma figures below are measured by the gate tests):
-    # full-frame sigma ~0.098 against a FRAME_FLAT_SIGMA of 0.01. The pattern
-    # is 64px-periodic in both axes, so any axis-aligned, unscaled 64x64 crop
-    # contains each pair of residues exactly once and therefore has the
-    # histogram of ONE COMPLETE PERIOD -- which is only APPROXIMATELY the whole
-    # frame's, because 800 is 12.5 periods, not an integer: a tile is
-    # 496/4096 rule pixels (0.121094) against the frame's 123400/1024000
-    # (0.120508). Close enough that a crop and the frame read the same to the
-    # gate, which is why a window covering most of the screen leaves the
-    # remainder just as legible. 64px is the period, a design
-    # choice; it is NOT a measured claim about how much desktop a real
-    # scenario leaves uncovered, and a remnant smaller than one period or a
-    # scaled/filtered capture carries no such guarantee. A solid colour would
-    # NOT do: qdshell's solidColor default (#1a1a2e) measures sigma 0 and the
-    # gate would refuse a healthy desktop as FLAT.
-    install -d -m 0755 -o admin -g users /home/admin/Pictures/Wallpapers
-    runuser -u admin -- python3 - /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png <<'WPEOF'
-import struct, zlib, sys
-
-W, H, T = 1280, 800, 64
-BASE = (0x18, 0x20, 0x32)
-RULE = (0x5a, 0x6d, 0x99)
-
-def on_rule(x, y):
-    u, v = x % T, y % T
-    return (abs(u - v) < 2 or abs(u + v - (T - 1)) < 2
-            or abs(v - T // 2) < 1 or abs(u - T // 2) < 1)
-
-rows = bytearray()
-for y in range(H):
-    rows.append(0)
-    for x in range(W):
-        rows += bytes(RULE if on_rule(x, y) else BASE)
-
-def chunk(tag, data):
-    c = tag + data
-    return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
-
-open(sys.argv[1], "wb").write(
-    b"\x89PNG\r\n\x1a\n"
-    + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
-    + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
-    + chunk(b"IEND", b""))
-WPEOF
-    chown admin:users /home/admin/Pictures/Wallpapers/qdistro-test-pattern.png 2>/dev/null || true
+    # DESKTOP WALLPAPER: see install_test_wallpaper above (qdshell reads
+    # ~/Pictures/Wallpapers, where it installs the pattern).
+    install_test_wallpaper
 
     systemctl daemon-reload
     runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
