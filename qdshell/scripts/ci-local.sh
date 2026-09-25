@@ -9,7 +9,7 @@
 #   5. summary      — pass/fail tally + non-zero exit on hard fail
 #
 # Invocation:
-#   ./scripts/ci-local.sh             # all gates, fail on qmltest only
+#   ./scripts/ci-local.sh             # all gates, fail on qmltest and jstest
 #   ./scripts/ci-local.sh --strict    # also fail on lint warnings
 #   ./scripts/ci-local.sh --no-int    # skip integration gate
 #   ./scripts/ci-local.sh --quick     # qmltest only
@@ -91,13 +91,22 @@ QMLTEST_FAIL=0
 QMLTEST_FILES=0
 
 step "qmltest"
-for f in Tests/tst_*.qml; do
-    if [ ! -f "$f" ]; then continue; fi
+shopt -s nullglob
+qml_files=(Tests/tst_*.qml)
+shopt -u nullglob
+if [ "${#qml_files[@]}" -eq 0 ]; then
+    err "  no Tests/tst_*.qml — refusing an empty qmltest suite"
+    QMLTEST_FAIL=1
+fi
+for f in "${qml_files[@]}"; do
     QMLTEST_FILES=$((QMLTEST_FILES + 1))
-    out="$("$QMLTEST" -input "$f" 2>&1 || true)"
+    # Keep the runner's status. A crash after a clean Totals line used to
+    # pass because `|| true` discarded it.
+    rc=0
+    out="$("$QMLTEST" -input "$f" 2>&1)" || rc=$?
     line="$(printf '%s\n' "$out" | grep -E '^Totals:' | tail -1 || true)"
     if [ -z "$line" ]; then
-        err "  $f: NO TOTALS LINE — runner failed"
+        err "  $f: NO TOTALS LINE — runner failed (exit $rc)"
         QMLTEST_FAIL=$((QMLTEST_FAIL + 1))
         continue
     fi
@@ -107,9 +116,12 @@ for f in Tests/tst_*.qml; do
     QMLTEST_PASS=$((QMLTEST_PASS + pass))
     QMLTEST_FAIL=$((QMLTEST_FAIL + fail))
     if [ "$fail" -gt 0 ]; then
-        err "  $f: $pass passed, $fail failed"
+        err "  $f: $pass passed, $fail failed (exit $rc)"
         # Re-run with -v2 to dump per-test results.
         "$QMLTEST" -input "$f" 2>&1 | grep -E '^FAIL' | sed 's/^/    /' || true
+    elif [ "$rc" -ne 0 ]; then
+        err "  $f: qmltestrunner exited $rc after reporting $pass passed, 0 failed"
+        QMLTEST_FAIL=$((QMLTEST_FAIL + 1))
     else
         ok  "  $f: $pass passed"
     fi
@@ -127,7 +139,9 @@ fi
 # scripts under tests/test_*.js (CommonJS; see tests/test_clipboard_silo.js).
 # They are also declared as meson test() targets, but qci's qdshell host
 # step runs this script rather than `meson test`, so run them here too so
-# both qci and local `ci-local.sh` cover them. Node-less hosts skip.
+# both qci and local `ci-local.sh` cover them. A missing node is a
+# failure when those files exist: skipping them used to leave qci host
+# green without running the broker and clipboard gates.
 
 JSTEST_PASS=0
 JSTEST_FAIL=0
@@ -135,11 +149,16 @@ JSTEST_FILES=0
 
 step "jstest (node)"
 NODE_BIN="${NODE:-$(command -v node || true)}"
-if [ -z "$NODE_BIN" ]; then
-    warn "  node not found — skipping JS unit tests"
+shopt -s nullglob
+js_files=(tests/test_*.js)
+shopt -u nullglob
+if [ -z "$NODE_BIN" ] && [ "${#js_files[@]}" -gt 0 ]; then
+    err "  node not found — ${#js_files[@]} JS unit tests were not run"
+    JSTEST_FAIL=1
+elif [ -z "$NODE_BIN" ]; then
+    warn "  node not found — no tests/test_*.js to run"
 else
-    for f in tests/test_*.js; do
-        if [ ! -f "$f" ]; then continue; fi
+    for f in "${js_files[@]}"; do
         JSTEST_FILES=$((JSTEST_FILES + 1))
         if out="$("$NODE_BIN" "$f" 2>&1)"; then
             ok  "  $f: ok"

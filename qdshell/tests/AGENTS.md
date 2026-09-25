@@ -55,9 +55,11 @@ Three independent test frameworks live here. They cover different layers:
 ## How qci runs the tests
 
 - Host gate: `scripts/ci-local.sh` runs `qmltest` (every `Tests/tst_*.qml`),
-  `jstest` (every `tests/test_*.js` via `node`, skipped on a node-less
-  host), `qmllint` (informational unless `--strict`), and `qmlformat
-  --check` over `Services/Qdshell/`. Non-zero exit on any qmltest/jstest
+  `jstest` (every `tests/test_*.js` via `node`), `qmllint` (informational
+  unless `--strict`), and `qmlformat --check` over `Services/Qdshell/`.
+  A missing `node` when JS tests exist, an empty `Tests/tst_*.qml` set,
+  or a `qmltestrunner` that exits nonzero are failures, including when
+  the totals line says 0 failed. Non-zero exit on any qmltest/jstest
   failure. `--no-int` skips the broker bats gate; `--quick` is qmltest
   only.
 - Integration gate: the qdshell↔broker bats (`broker-e2e.bats`) is driven

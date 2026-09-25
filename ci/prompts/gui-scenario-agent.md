@@ -76,6 +76,8 @@ Procedure:
    A preview moves but never clicks. Only after visually confirming the marker may you run
    `vm-gui "$VMNAME" click-confirm <preview-manifest>`. Never use raw
    `vm-gui click X Y` or `xdotool click` for a model-targeted action.
+   A hotkey asserted by typing into a focused field is not evidence the
+   binding fired. Modifier chords go through `virsh send-key`.
 8. Save screenshots, OCR/vision notes, command logs, click preview manifests,
    `click-targets/clicks.tsv`, and journal excerpts under
    the artifact directory. Everything except the harness's own captures is
