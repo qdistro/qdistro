@@ -23,6 +23,11 @@ setup() {
     mkdir -p "$FAKEBIN"
     STATE="$BATS_TEST_TMPDIR/calls"
     : > "$STATE"
+    # vm-exec's orphan registry (see "orphan registry" in vm-exec). Per test, so
+    # an entry left by one test's SIGKILL can never be reaped by another's.
+    export QDISTRO_VM_EXEC_STATE_DIR="$BATS_TEST_TMPDIR/orphans"
+    # The guest boot id every fake identity probe reports.
+    FAKE_BOOT=11111111-2222-3333-4444-555555555555
 }
 
 # make_virsh <terminal-json> [nonterminal-count] — a fake virsh answering
@@ -42,6 +47,11 @@ make_virsh() {
     # several bodies) must not resume a previous body's call count, or it lands
     # in the post-terminal reaped branch instead of the shape under test.
     : > "$STATE"
+    # ...and the orphan registry with it: a reconfigured fake is a new VM. A
+    # previous body's protocol-error exit legitimately KEEPS its record (its
+    # guest command may still run), and the next call would then reap it
+    # through a fake that was never meant to answer a cleanup.
+    rm -rf "$QDISTRO_VM_EXEC_STATE_DIR"
     printf '%s' "$terminal" > "$BATS_TEST_TMPDIR/terminal.json"
     printf '%s' "$nonterm" > "$BATS_TEST_TMPDIR/nonterm"
     cat > "$FAKEBIN/virsh" <<EOF
@@ -50,8 +60,8 @@ for a in "\$@"; do
     case "\$a" in
         *'"pid":4243'*)
             # launch-identity probe result. The probe script prints a TOKEN,
-            # not a bare number: "start=987654\n" base64'd.
-            echo '{"return":{"exited":true,"exitcode":0,"out-data":"c3RhcnQ9OTg3NjU0Cg=="}}'
+            # not a bare number: "start=987654 boot=<FAKE_BOOT>\n" base64'd.
+            echo '{"return":{"exited":true,"exitcode":0,"out-data":"c3RhcnQ9OTg3NjU0IGJvb3Q9MTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1Cg=="}}'
             exit 0
             ;;
         *guest-exec-status*)
@@ -284,7 +294,7 @@ make_signal_virsh() {
     # bare number: a bare number could not tell "already exited" apart from
     # "the probe did not work", which is exactly the round-8/live-VM defect.
     if [ -n "$stamp" ]; then
-        printf 'start=%s' "$stamp" | base64 -w0 > "$BATS_TEST_TMPDIR/stamp_b64"
+        printf 'start=%s boot=%s' "$stamp" "$FAKE_BOOT" | base64 -w0 > "$BATS_TEST_TMPDIR/stamp_b64"
     else
         : > "$BATS_TEST_TMPDIR/stamp_b64"
     fi
@@ -380,18 +390,35 @@ case "\$arg" in
                     echo "{\"return\":{\"exited\":true,\"exitcode\":\$m,\"out-data\":\"\$(cat "\$T/cleanup_out_b64")\"}}"
                 fi
                 ;;
-            *) echo '{"return":{"exited":false}}' ;;
+            *)
+                if [ -e "\$T/reaped" ]; then
+                    # qga lost its bookkeeping (e.g. an agent restart) while the
+                    # command itself may still be running.
+                    echo '{"error":{"class":"GenericError","desc":"PID 4242 does not exist"}}'
+                elif [ -e "\$T/statuserr" ]; then
+                    echo '{"error":{"class":"GenericError","desc":"injected transient"}}'
+                else
+                    echo '{"return":{"exited":false}}'
+                fi ;;
         esac
         ;;
     *'"guest-exec"'*)
         printf '%s\n' "\$arg" >> "\$T/exec.log"
         case "\$arg" in
-            *qd_kill_checked*) echo '{"return":{"pid":4244}}' ;;
+            *qd_kill_checked*)
+                if [ -e "\$T/killfail" ]; then
+                    echo '{"error":{"class":"GenericError","desc":"injected submission failure"}}'
+                else
+                    echo '{"return":{"pid":4244}}'
+                fi ;;
             *qd_startof\ 4242*) echo '{"return":{"pid":4243}}' ;;
             *)                echo '{"return":{"pid":4242}}' ;;
         esac
         ;;
-    *) echo '{"return":{}}' ;;
+    *) case " \$* " in
+           *" domuuid "*) if [ -s "\$T/domuuid" ]; then cat "\$T/domuuid"; else exit 1; fi ;;
+           *) echo '{"return":{}}' ;;
+       esac ;;
 esac
 exit 0
 EOF
@@ -530,12 +557,13 @@ mono_s() {
 # against actual PID identities, which is the only way to show that a recycled
 # PID is not signalled.
 
-render_kill_script() {   # <pid> <stamp>   (empty stamp == no captured identity)
+render_kill_script() {   # <pid> <stamp> [boot]  (empty stamp == no captured identity; empty boot == no boot check)
     local body
     body=$(sed -n '/^KILL_TREE_SH=/,/^KILL_EOF$/p' "$VM_EXEC" | sed '1d;$d')
     [ -n "$body" ] || return 1
     body=${body//__PID__/$1}
     body=${body//__STAMP__/$2}
+    body=${body//__BOOT__/${3:-}}
     printf '%s\n' "$body" > "$BATS_TEST_TMPDIR/kill.sh"
 }
 
@@ -1512,7 +1540,11 @@ render_ident_script() {   # <pid>
     [ "$status" -eq 0 ]
     [[ "$output" == start=* ]]
     local got=${output#start=}
+    got=${got%% boot=*}
     [[ "$got" =~ ^[0-9]+$ ]]
+    # ...and it carries THIS machine's boot id, which binds the identity to one
+    # boot (the orphan registry depends on it).
+    [ "${output##* boot=}" = "$(cat /proc/sys/kernel/random/boot_id)" ]
     # ...and it is the real value, cross-checked against field 22 directly.
     [ "$got" = "$(awk '{print $22}' "/proc/$$/stat")" ]
 
@@ -1582,4 +1614,438 @@ render_ident_script() {   # <pid>
     grep -q 'GUEST_IDENT_STATE=already-exited' "$VM_EXEC"
     grep -q 'GUEST_IDENT_STATE=pinned' "$VM_EXEC"
     grep -q 'GUEST_IDENT_STATE="probe-failed(rc=\$rc)"' "$VM_EXEC"
+}
+
+
+# --- orphan registry: a SIGKILLed vm-exec's guest command is reaped by the next
+# vm-exec on the same VM (permissions-gui/13, gui-20260925T065332Z-3908053).
+#
+# SIGKILL runs no trap, so the signal-path cleanup above cannot help. The codex
+# agent's shell tool SIGKILLs every process of a command when it returns, so a
+# backgrounded vm-exec in a driver that exits early dies exactly that way, and
+# its guest driver lives on: in pg/13 two such orphans were released by the
+# next attempt's `touch s1-go` and sent two extra RelayMessage requests.
+# Review: todo/test-blankscreenshots/reviews/blankss-pg13-code-r1-astra.md.
+
+ODIR() { printf '%s' "$QDISTRO_VM_EXEC_STATE_DIR/fake-vm"; }
+
+# The owner's COMPLETED record (published by rename), not the identity line:
+# "guest identity pinned" is printed BEFORE registration, so a SIGKILL timed on
+# it can land before the record exists (astra r1 #4).
+await_record_of() {   # <host pid>
+    local _tick f
+    for _tick in $(seq 1 300); do
+        for f in "$(ODIR)/$1"-*; do [ -f "$f" ] && return 0; done
+        sleep 0.1
+    done
+    return 1
+}
+
+# Launch vm-exec in the background against the signal fake and wait until its
+# record is published. Sets $BG_PID.
+bg_registered_vm_exec() {
+    local out=$1 cmd=$2
+    PATH="$FAKEBIN:$PATH" "$VM_EXEC" fake-vm "$cmd" >"$out" 2>&1 &
+    BG_PID=$!
+    await_record_of "$BG_PID"
+}
+
+# Wait until the fake has logged a guest-exec body containing $1.
+await_exec_body() {
+    local _tick
+    for _tick in $(seq 1 300); do
+        grep -qF -- "$1" "$EXECLOG" && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+registry_entries() {
+    find "$QDISTRO_VM_EXEC_STATE_DIR" -type f ! -name '.lock' 2>/dev/null | wc -l
+}
+
+# A record for an owner that is certainly dead: pid_max+1 never exists.
+plant_dead_record() {   # <numeric start-time suffix> <guest pid> <stamp> <boot> [uuid]
+    local dead=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
+    mkdir -p "$(ODIR)"
+    printf '%s %s %s %s\n' "$2" "$3" "$4" "${5:--}" > "$(ODIR)/$dead-$1"
+}
+
+# SIGKILL a registered vm-exec. Sets nothing; leaves its record behind.
+sigkill_registered() {
+    bg_registered_vm_exec "$BATS_TEST_TMPDIR/out1" "${1:-first-driver}"
+    kill -KILL "$BG_PID"
+    wait "$BG_PID" || true
+}
+
+# Start a second vm-exec, wait until its OWN command is launched, TERM it.
+run_second_until_launched() {   # <token> [stderr line to wait for before TERM]
+    PATH="$FAKEBIN:$PATH" "$VM_EXEC" fake-vm "$1" >"$BATS_TEST_TMPDIR/out2" 2>&1 &
+    local p=$! _tick
+    await_exec_body "$1"
+    if [ -n "${2:-}" ]; then
+        for _tick in $(seq 1 300); do
+            grep -qF -- "$2" "$BATS_TEST_TMPDIR/out2" && break
+            sleep 0.1
+        done
+    fi
+    kill -TERM "$p"
+    wait "$p" || true
+}
+
+@test "vm-exec: a SIGKILLed vm-exec's guest command is reaped by the NEXT vm-exec, before it launches its own" {
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    sigkill_registered
+    # SIGKILL ran no code: the record is still there, and no cleanup was sent.
+    [ "$(registry_entries)" -eq 1 ]
+    grep -q "^4242 987654 $FAKE_BOOT " "$(ODIR)"/*-*
+    run ! grep -q 'qd_kill_checked' "$EXECLOG"
+
+    run_second_until_launched second-driver
+
+    local kill_line cmd_line
+    kill_line=$(grep -n 'qd_kill_checked' "$EXECLOG" | head -1 | cut -d: -f1)
+    cmd_line=$(grep -n 'second-driver' "$EXECLOG" | head -1 | cut -d: -f1)
+    [ -n "$kill_line" ] && [ -n "$cmd_line" ]
+    # The cleanup carried the orphan's FULL identity, boot id included ...
+    sed -n "${kill_line}p" "$EXECLOG" | grep -q 'stamp=\\"987654\\"'
+    sed -n "${kill_line}p" "$EXECLOG" | grep -q "boot=\\\\\"$FAKE_BOOT\\\\\""
+    # ... and was submitted BEFORE the new command, so the two never overlap.
+    [ "$kill_line" -lt "$cmd_line" ]
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'cleanup verified for guest PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: SIGKILL right after registration is still reaped even when publishing is SLOW (window widened)" {
+    # A 1s `mv` puts a wide gap between "guest identity pinned" and the published
+    # record. A test synchronised on the pinned line would SIGKILL inside it.
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    local realmv; realmv=$(command -v mv)
+    printf '#!/bin/sh\nsleep 1\nexec %s "$@"\n' "$realmv" > "$FAKEBIN/mv"
+    chmod +x "$FAKEBIN/mv"
+    sigkill_registered
+    grep -q 'guest identity pinned' "$BATS_TEST_TMPDIR/out1"
+    [ "$(registry_entries)" -eq 1 ]
+    rm -f "$FAKEBIN/mv"
+    run_second_until_launched second-driver
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: a LIVE vm-exec's guest command is never reaped by a concurrent one" {
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    bg_registered_vm_exec "$BATS_TEST_TMPDIR/out1" 'first-driver'
+    local first=$BG_PID
+    bg_registered_vm_exec "$BATS_TEST_TMPDIR/out2" 'second-driver'
+    local second=$BG_PID
+    run ! grep -q 'qd_kill_checked' "$EXECLOG"
+    run ! grep -q 'reaping orphaned' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 2 ]
+    kill -TERM "$first" "$second"
+    wait "$first" || true
+    wait "$second" || true
+}
+
+@test "vm-exec: an entry whose owner PID was RECYCLED is still reaped" {
+    # The owner check is (pid, start time), not a bare pid.
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    mkdir -p "$(ODIR)"
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$$-1"
+    run_second_until_launched second-driver
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: an owner whose /proc entry cannot be READ is not treated as dead" {
+    # Indeterminate is not absence (astra r1): a failed read of a live owner's
+    # stat must never let its command be reaped.
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    mkdir -p "$(ODIR)"
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$$-1"
+    local realcat; realcat=$(command -v cat)
+    printf '#!/bin/sh\n[ "$1" = "/proc/%s/stat" ] && exit 1\nexec %s "$@"\n' "$$" "$realcat" > "$FAKEBIN/cat"
+    chmod +x "$FAKEBIN/cat"
+    run_second_until_launched second-driver
+    rm -f "$FAKEBIN/cat"
+    grep -q "cannot read host pid $$" "$BATS_TEST_TMPDIR/out2"
+    run ! grep -q 'qd_kill_checked' <(head -1 "$EXECLOG")
+    run ! grep -q 'reaping orphaned' "$BATS_TEST_TMPDIR/out2"
+    [ -f "$(ODIR)/$$-1" ]
+}
+
+@test "vm-exec: normal completion and a VERIFIED signal cleanup both retract the record" {
+    make_virsh '{"return":{"exited":true,"exitcode":0}}'
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"guest identity pinned"* ]]
+    [[ "$output" != *"orphan registry"* ]]     # it DID register, silently
+    [ "$(registry_entries)" -eq 0 ]
+
+    make_signal_virsh 987654 0
+    QDISTRO_VM_KILL_VERIFY_TIMEOUT=10 term_vm_exec "guest identity pinned"
+    [ "$TERM_RC" -eq 143 ]
+    [ "$(registry_entries)" -eq 0 ]
+
+    # The same TERM landing INSIDE registration (a 1s `mv` holds it there; bash
+    # runs the trap right after mv returns) must not leave the record behind.
+    local realmv; realmv=$(command -v mv)
+    printf '#!/bin/sh\nsleep 1\nexec %s "$@"\n' "$realmv" > "$FAKEBIN/mv"
+    chmod +x "$FAKEBIN/mv"
+    make_signal_virsh 987654 0
+    QDISTRO_VM_KILL_VERIFY_TIMEOUT=10 term_vm_exec "guest identity pinned"
+    rm -f "$FAKEBIN/mv"
+    [ "$TERM_RC" -eq 143 ]
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: an UNVERIFIED signal cleanup and a poll-error exit KEEP the record" {
+    # EXIT must not retract a record while the guest command may still run.
+    make_signal_virsh 987654 5 'still-alive pid=4242 after TERM+KILL'
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    bg_registered_vm_exec "$BATS_TEST_TMPDIR/out1" 'first-driver'
+    kill -TERM "$BG_PID"; wait "$BG_PID" || true
+    grep -q 'could NOT be verified' "$BATS_TEST_TMPDIR/out1"
+    [ "$(registry_entries)" -eq 1 ]
+
+    rm -rf "$QDISTRO_VM_EXEC_STATE_DIR"
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_AGENT_MAX_ERRORS=2
+    bg_registered_vm_exec "$BATS_TEST_TMPDIR/out3" 'poll-error-driver'
+    touch "$BATS_TEST_TMPDIR/statuserr"
+    local rc=0
+    wait "$BG_PID" || rc=$?
+    rm -f "$BATS_TEST_TMPDIR/statuserr"
+    [ "$rc" -eq 1 ]
+    [ "$(registry_entries)" -eq 1 ]
+}
+
+@test "vm-exec: a FAILED cleanup keeps the record and REFUSES the launch; recovery then succeeds" {
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    sigkill_registered
+    touch "$BATS_TEST_TMPDIR/killfail"
+    PATH="$FAKEBIN:$PATH" run timeout 60 "$VM_EXEC" fake-vm 'refused-driver'
+    [ "$status" -eq 75 ]
+    [[ "$output" == *"refusing to launch on fake-vm"* ]]
+    [[ "$output" == *"could not be confirmed gone"* ]]
+    # It names where the record lives, so an operator can find it.
+    [[ "$output" == *"registry: $(ODIR)"* ]]
+    # Nothing was started, and the orphan is still on file.
+    run ! grep -q 'refused-driver' "$EXECLOG"
+    [ "$(registry_entries)" -eq 1 ]
+
+    # The agent recovers: the retry reaps it and launches.
+    rm -f "$BATS_TEST_TMPDIR/killfail"
+    run_second_until_launched retry-driver
+    grep -q 'cleanup verified for guest PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: a caller that cannot get the reaper lock in time REFUSES rather than launching" {
+    # Two stale records whose cleanups never finish hold the lock for ~2x the
+    # verify budget; a caller with a short lock wait must not slip past.
+    make_signal_virsh 987654 hang
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=3
+    plant_dead_record 1 4242 987654 "$FAKE_BOOT"
+    plant_dead_record 2 4242 987654 "$FAKE_BOOT"
+    PATH="$FAKEBIN:$PATH" "$VM_EXEC" fake-vm 'holder-driver' >"$BATS_TEST_TMPDIR/holder" 2>&1 &
+    local holder=$!
+    await_exec_body qd_kill_checked
+    local rc=0
+    PATH="$FAKEBIN:$PATH" QDISTRO_VM_EXEC_REAP_LOCK_WAIT=1 \
+        timeout 60 "$VM_EXEC" fake-vm 'waiting-driver' >"$BATS_TEST_TMPDIR/waiter" 2>&1 || rc=$?
+    [ "$rc" -eq 75 ]
+    grep -q 'held the orphan registry lock' "$BATS_TEST_TMPDIR/waiter"
+    run ! grep -q 'waiting-driver' "$EXECLOG"
+    # The holder could not confirm either orphan gone: it refuses too, keeps both.
+    rc=0; wait "$holder" || rc=$?
+    [ "$rc" -eq 75 ]
+    run ! grep -q 'holder-driver' "$EXECLOG"
+    [ "$(registry_entries)" -eq 2 ]
+}
+
+@test "vm-exec: a record from an EARLIER BOOT is resolved without a kill, via the in-guest boot check" {
+    # Same VM name, new boot: the guest reports boot-mismatch and signals nothing.
+    make_signal_virsh 987654 4 'boot-mismatch pid=4242 boot=x expected=y: the recorded process belonged to an earlier boot; NOT signalled'
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    plant_dead_record 1 4242 987654 99999999-8888-7777-6666-555555555555
+    run_second_until_launched second-driver
+    # The submitted script carried the RECORDED boot id for the guest to check.
+    grep -q 'boot=\\"99999999-8888-7777-6666-555555555555\\"' "$EXECLOG"
+    grep -q 'belongs to an earlier boot' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: a record from a RE-CREATED domain (uuid differs) is dropped with no RPC" {
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    echo aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee > "$BATS_TEST_TMPDIR/domuuid"
+    plant_dead_record 1 4242 987654 "$FAKE_BOOT" 12345678-1234-1234-1234-123456789abc
+    run_second_until_launched second-driver
+    grep -q 'belongs to an earlier domain' "$BATS_TEST_TMPDIR/out2"
+    # The very first guest-exec is the new command itself: no cleanup RPC.
+    head -1 "$EXECLOG" | grep -q second-driver
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: registry failures are REPORTED, never fatal to the command" {
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    # 1. Unwritable state root: the command runs, and says it is unprotected.
+    mkdir -p "$QDISTRO_VM_EXEC_STATE_DIR"; chmod 555 "$QDISTRO_VM_EXEC_STATE_DIR"
+    run_second_until_launched unprotected-driver 'orphan registry: cannot create'
+    chmod 755 "$QDISTRO_VM_EXEC_STATE_DIR"
+    grep -q 'orphan registry: cannot create' "$BATS_TEST_TMPDIR/out2"
+
+    # 2. A resolved record that cannot be removed (writable .lock, read-only
+    #    directory) is reported and does NOT abort the requested command.
+    rm -rf "$QDISTRO_VM_EXEC_STATE_DIR"
+    plant_dead_record 1 4242 987654 "$FAKE_BOOT"
+    : > "$(ODIR)/.lock"
+    chmod 555 "$(ODIR)"
+    run_second_until_launched readonly-driver
+    chmod 755 "$(ODIR)"
+    grep -q 'cleanup verified for guest PID 4242' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'could not be removed' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'readonly-driver' "$EXECLOG"
+}
+
+@test "kill script: a matching (pid, start-time) from an EARLIER BOOT is NOT signalled" {
+    # The same-name/new-boot regression against the REAL script and a REAL live
+    # process whose pid and start time match the record exactly.
+    sleep 60 &
+    local victim=$!
+    local stamp; stamp=$(host_startof "$victim")
+    render_kill_script "$victim" "$stamp" 00000000-0000-0000-0000-000000000000
+    run sh "$BATS_TEST_TMPDIR/kill.sh"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"boot-mismatch"* ]]
+    kill -0 "$victim"
+    # Same record with THIS boot's id is signalled.
+    render_kill_script "$victim" "$stamp" "$(cat /proc/sys/kernel/random/boot_id)"
+    run sh "$BATS_TEST_TMPDIR/kill.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"identity-verified"* ]]
+    run ! kill -0 "$victim"
+}
+
+# --- r2 review (todo/test-blankscreenshots/reviews/blankss-pg13-code-r2-*.md) --
+
+@test "vm-exec: a record RETRACTED by its owner mid-scan is skipped, not refused (window widened)" {
+    # A healthy concurrent vm-exec finishes: it removes its record in EXIT and
+    # exits between this caller's glob and its read. The `cat` of the owner's
+    # /proc/<pid>/stat is the widened window: the shim retracts the record and
+    # ends the owner exactly there.
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    local owner ostart realcat
+    owner=$(bash -c 'sleep 60 >/dev/null 2>&1 </dev/null & echo $!')
+    ostart=$(host_startof "$owner")
+    mkdir -p "$(ODIR)"
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$owner-$ostart"
+    realcat=$(command -v cat)
+    cat > "$FAKEBIN/cat" <<SHIM
+#!/bin/sh
+if [ "\$1" = "/proc/$owner/stat" ]; then
+    rm -f "$(ODIR)/$owner-$ostart"
+    kill -KILL $owner 2>/dev/null
+    i=0; while [ -e /proc/$owner ] && [ \$i -lt 50 ]; do sleep 0.1; i=\$((i+1)); done
+fi
+exec $realcat "\$@"
+SHIM
+    chmod +x "$FAKEBIN/cat"
+    run_second_until_launched concurrent-driver
+    rm -f "$FAKEBIN/cat"
+    [ ! -e "/proc/$owner" ]
+    run ! grep -q 'refusing to launch' "$BATS_TEST_TMPDIR/out2"
+    run ! grep -q 'malformed' "$BATS_TEST_TMPDIR/out2"
+    run ! grep -q 'No such file' "$BATS_TEST_TMPDIR/out2"
+    # Nothing was signalled for it: the first guest-exec is the new command.
+    head -1 "$EXECLOG" | grep -q 'concurrent-driver'
+}
+
+@test "vm-exec: a MALFORMED or OLD-FORMAT record is KEPT and the launch refused with a reconciliation hint" {
+    # Malformed does not mean the guest command finished: an older writer
+    # published `<pid> <start>` records in this same directory, and a SIGKILLed
+    # caller of that version can have left a live driver (astra r3 #1).
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    local dead=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
+    mkdir -p "$(ODIR)"
+    printf '4242 987654\n' > "$(ODIR)/$dead-1"      # the 09c080e82 format
+    printf 'not a record\n' > "$(ODIR)/$dead-2"
+    local i rc
+    for i in 1 2; do                                  # and it stays refused
+        rc=0
+        PATH="$FAKEBIN:$PATH" timeout 60 "$VM_EXEC" fake-vm "after-malformed-$i" \
+            >"$BATS_TEST_TMPDIR/out$i" 2>&1 || rc=$?
+        [ "$rc" -eq 75 ]
+        grep -qF "If no such driver runs in the guest, rm $(ODIR)/$dead-1" "$BATS_TEST_TMPDIR/out$i"
+        grep -qF "If no such driver runs in the guest, rm $(ODIR)/$dead-2" "$BATS_TEST_TMPDIR/out$i"
+        grep -q 'refusing to launch' "$BATS_TEST_TMPDIR/out$i"
+    done
+    run ! grep -q 'after-malformed' "$EXECLOG"
+    run ! grep -q 'qd_kill_checked' "$EXECLOG"
+    [ "$(registry_entries)" -eq 2 ]
+    # Reconciled by hand -> the next call launches.
+    rm -f "$(ODIR)/$dead-1" "$(ODIR)/$dead-2"
+    run_second_until_launched after-reconcile
+    grep -q 'after-reconcile' "$EXECLOG"
+}
+
+@test "vm-exec: qga 'PID does not exist' KEEPS the record; the next call reaps the still-live driver" {
+    # Lost agent bookkeeping (a qga restart) is not proof the command exited.
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    bg_registered_vm_exec "$BATS_TEST_TMPDIR/out1" 'live-driver'
+    touch "$BATS_TEST_TMPDIR/reaped"
+    local rc=0
+    timeout 60 tail --pid="$BG_PID" -f /dev/null || true
+    wait "$BG_PID" || rc=$?
+    rm -f "$BATS_TEST_TMPDIR/reaped"
+    [ "$rc" -eq 1 ]
+    grep -q 'no bookkeeping for PID 4242' "$BATS_TEST_TMPDIR/out1"
+    [ "$(registry_entries)" -eq 1 ]
+    run ! grep -q 'qd_kill_checked' "$EXECLOG"
+
+    run_second_until_launched next-driver
+    local kill_line cmd_line
+    kill_line=$(grep -n 'qd_kill_checked' "$EXECLOG" | head -1 | cut -d: -f1)
+    cmd_line=$(grep -n 'next-driver' "$EXECLOG" | head -1 | cut -d: -f1)
+    [ -n "$kill_line" ] && [ -n "$cmd_line" ] && [ "$kill_line" -lt "$cmd_line" ]
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: a surviving TERM-ignoring cleanup helper does NOT keep the reaper lock; the retry proceeds" {
+    # orphanpipe: the cleanup-status RPC's leader exits on TERM while a
+    # TERM-ignoring descendant survives ~45s. If that descendant inherited the
+    # reaper's lock descriptor, flock stays held and every retry refuses 75.
+    make_signal_virsh 987654 orphanpipe
+    export QDISTRO_VM_SIGKILL_GRACE=1
+    local dead=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
+    mkdir -p "$(ODIR)"
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$dead-1"
+    local rc=0
+    PATH="$FAKEBIN:$PATH" QDISTRO_VM_KILL_VERIFY_TIMEOUT=4 \
+        timeout 60 "$VM_EXEC" fake-vm 'first-attempt' >"$BATS_TEST_TMPDIR/out1" 2>&1 || rc=$?
+    [ "$rc" -eq 75 ]
+    grep -q 'could not be confirmed gone' "$BATS_TEST_TMPDIR/out1"
+    run ! grep -q 'first-attempt' "$EXECLOG"
+    [ "$(registry_entries)" -eq 1 ]
+
+    # The agent recovers; the retry must get the lock well inside its wait.
+    printf '0' > "$BATS_TEST_TMPDIR/cleanup_mode"
+    QDISTRO_VM_KILL_VERIFY_TIMEOUT=10 QDISTRO_VM_EXEC_REAP_LOCK_WAIT=5 \
+        run_second_until_launched retry-after-helper
+    run ! grep -q 'held the orphan registry lock' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'cleanup verified for guest PID 4242' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'retry-after-helper' "$EXECLOG"
+    [ "$(registry_entries)" -eq 0 ]
 }

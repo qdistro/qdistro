@@ -748,6 +748,11 @@ Rules:
   work, silo uids) can write into it; if you ever recreate it, keep it
   world-writable (\`install -d -m 1777\`) — a plain root \`mkdir\` leaves it
   root-owned 0755 and every non-root write fails.
+  That directory exists ONLY INSIDE THE GUEST. The host has a \`/tmp\` too, so
+  a host-side \`test -f /tmp/qci/$slug/<marker>\` is not an error -- it is
+  silently, permanently false. Poll a guest marker THROUGH vm-exec
+  (\`vm-exec "\$VMNAME" 'test -f /tmp/qci/$slug/<marker>'\`); permissions-gui/13
+  lost two runs on 2026-09-25 to a host driver waiting on guest markers.
   The
   \`\$QCI_SCENARIO_SLUG\` variable is HOST-side only — it is not set inside guest
   shells unless you pass it through yourself (e.g. \`QCI_SCENARIO_SLUG=$slug\`).
@@ -937,6 +942,19 @@ Rules:
   not pin instead of signalling it) rather than
   killing it with SIGKILL, and verify in the guest that nothing from the first
   attempt survived before starting a second one.
+  YOUR SHELL TOOL SIGKILLS every process a command started when that command
+  returns, and SIGKILL runs no trap: a \`vm-exec ... &\` left in
+  the background of a command that exits is killed WITHOUT cleaning up its
+  guest command, which keeps running and keeps waiting on your markers. Keep
+  vm-exec in the FOREGROUND of the command that owns it, or \`wait\` for it
+  before that command returns (permissions-gui/13, 2026-09-25: two such orphans
+  released by one \`touch s1-go\` sent two extra requests).
+  vm-exec EXIT 75 means it REFUSED TO LAUNCH, and nothing was started: an
+  orphaned guest command from an earlier SIGKILLed vm-exec on this VM could not
+  yet be confirmed gone, or another vm-exec was still cleaning one up. It is
+  retryable. A slow guest's cleanup usually resolves on the very next call, so
+  retry the SAME command once before diagnosing, and quote the refusal line in
+  your report if it repeats.
 - CLAIM THE GUEST DRIVER. Your guest driver is the ONE guest shell that runs
   this scenario's Setup, Steps, Assertions, and Cleanup (see the one-shell rule
   above); a scenario written as many separate host \`vm-exec\` calls is adapted
