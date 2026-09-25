@@ -121,6 +121,7 @@ for u in $SILO_USERS; do
     fi
     # Ensure membership even if the user already existed without it.
     usermod -a -G "$TIER3_GROUP" "$u" 2>/dev/null || true
+    /usr/bin/python3 /usr/libexec/qdistro/qdistro_silo_skill.py "$u"
 done
 
 # --- 2b. /run/qdistro-tier3 socket dir -------------------------------

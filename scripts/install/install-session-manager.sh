@@ -47,6 +47,12 @@ install -d -o root -g root -m 0755 /sys/fs/cgroup/qdistro-silos 2>/dev/null || t
 install -d -o root -g root -m 0755 "$DEST"
 install -o root -g root -m 0755 "$SRC/qdistro_session_manager.py" \
     "$DEST/qdistro_session_manager.py"
+install -o root -g root -m 0755 "$SRC/qdistro_silo_skill.py" \
+    "$DEST/qdistro_silo_skill.py"
+_qd_skill_src="$(dirname "$SRC")/agents/skills/silo/SKILL.md"
+_qd_skill_dest=/usr/share/qdistro/agents/skills/silo
+install -d -o root -g root -m 0755 "$_qd_skill_dest"
+install -o root -g root -m 0644 "$_qd_skill_src" "$_qd_skill_dest/SKILL.md"
 # Disposables backend (M3): the pure tier-2 --disposable helper imported by
 # the daemon at startup (qdistro_session_manager.py: `import qdistro_disposables`).
 # Without this the daemon ModuleNotFoundErrors and crash-loops on boot.

@@ -791,6 +791,9 @@ class _SystemOps:
         # boundary + per-quota target. Falls through (warning only)
         # on non-btrfs hosts so dev VMs without btrfs still work.
         self._convert_home_to_subvolume(name, uid)
+        subprocess.run(
+            ["/usr/bin/python3", "/usr/libexec/qdistro/qdistro_silo_skill.py",
+             str(name)], check=True, timeout=_T_ACCOUNT)
 
     def _convert_home_to_subvolume(self, name: str, uid: int) -> None:
         home = Path("/home") / name
