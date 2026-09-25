@@ -110,6 +110,60 @@ _remap_line() {
     [ $(( end - start )) -lt 2000 ]
 }
 
+# Production path: NOCT_CURSOR_JOURNAL_FILE unset. A stub vm-exec records the
+# remote command and returns only the lines after the cursor that command
+# actually names. Dropping --after-cursor, the unit, or this cursor makes the
+# stub return the pre-move remap, so the count is 1 instead of 0.
+@test "vm journal path passes --after-cursor to qdwin-compositor and drops earlier remaps" {
+    unset NOCT_CURSOR_JOURNAL_FILE
+    local full="$BATS_TEST_TMPDIR/full.journal"
+    local cmdfile="$BATS_TEST_TMPDIR/last-cmd"
+    local exe="$BATS_TEST_TMPDIR/vm-exec"
+    {
+        _remap_line install_default_cursor 16
+        echo "-- cursor: cur-step"
+        _remap_line install_default_cursor 0
+    } > "$full"
+    cat > "$exe" <<EOF
+#!/bin/bash
+printf '%s\\n' "\$2" > "$cmdfile"
+python3 - "\$2" "$full" <<'PY'
+import re, sys
+cmd, path = sys.argv[1], sys.argv[2]
+text = open(path).read().splitlines(True)
+m = re.search(
+    r"journalctl --user -u qdwin-compositor\\.service --after-cursor '([^']*)' --no-pager",
+    cmd,
+)
+if not m:
+    sys.stdout.write("".join(text))
+    raise SystemExit(0)
+cur = m.group(1)
+out, seen = [], False
+for line in text:
+    if line == f"-- cursor: {cur}\\n":
+        seen = True
+        continue
+    if seen:
+        out.append(line)
+sys.stdout.write("".join(out))
+PY
+EOF
+    chmod +x "$exe"
+    VMNAME=test-vm
+    QDWIN_VM_EXEC="$exe"
+    run cursor_layer_nonzero_alpha_after cur-step
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+    [ -f "$cmdfile" ]
+    grep -F "runuser -l admin -c" "$cmdfile"
+    grep -F "journalctl --user -u qdwin-compositor.service --after-cursor 'cur-step' --no-pager" "$cmdfile"
+    _remap_line install_default_cursor 4 >> "$full"
+    run cursor_layer_nonzero_alpha_after cur-step
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+}
+
 @test "waiter does not treat a missing journal file as success" {
     NOCT_CURSOR_JOURNAL_FILE="$BATS_TEST_TMPDIR/missing-journal.txt"
     run noct_wait_cursor_layer_nonzero_alpha cur-step 0.3
