@@ -1390,10 +1390,13 @@ orphan_reap() {
         # and removed it (the EXIT trap does not take this lock). Resolved.
         [ -e "$e" ] || continue
         if ! [[ "$gpid" =~ ^[0-9]+$ && "$gstamp" =~ ^[0-9]+$ && "$gboot" =~ ^[0-9a-f-]{36}$ ]]; then
-            # Nothing can be signalled from it and no retry changes its bytes:
-            # keeping it would wedge every later launch on this VM. Drop it.
-            echo "[vm-exec] WARN: orphan registry: malformed record $QD_ORPHAN_DIR/$base (owner gone); removed, nothing signalled" >&2
-            rm -f "$e" 2>/dev/null || echo "[vm-exec] WARN: orphan registry: could not remove malformed record $base" >&2
+            # Malformed, an unknown (e.g. older `<pid> <start>`) format, or
+            # unreadable. That does NOT mean its guest command finished, and no
+            # safe identity can be recovered from it, so it is KEPT and the
+            # launch refused until a human reconciles it (astra r3 #1).
+            echo "[vm-exec] ERROR: orphan registry: record $e is malformed, of an unknown format, or unreadable; its owner is gone but its guest command cannot be identified safely. If no such driver runs in the guest, rm $e" >&2
+            unresolved=$((unresolved + 1))
+            names="$names $base"
             continue
         fi
         [ -n "$cur_uuid" ] || cur_uuid=$(domain_uuid)

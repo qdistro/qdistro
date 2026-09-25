@@ -629,35 +629,6 @@ cleanup_foreign_uri_conflict() {
     return "$conflict"
 }
 
-# vm-exec's orphan registry keeps one directory per VM NAME
-# (scripts/vm/vm-exec, "orphan registry"). A VM that is no longer defined can
-# have no live guest commands, so its records mean nothing: remove the
-# directory. Anything still defined is left alone. If libvirt cannot be listed,
-# nothing is removed. Prints the number removed.
-cleanup_vm_exec_registry() {
-    local dry=${1:-0} log_path=${2:-/dev/null} root names d name n=0
-    root=${QDISTRO_VM_EXEC_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/qdistro-vm-exec-$(id -u)}
-    [ -d "$root" ] || { printf '0'; return 0; }
-    if ! names=$(timeout -k 5 30 "${VIRSH[@]}" list --all --name 2>/dev/null); then
-        echo "keep vm-exec registry (cannot list libvirt domains)" >> "$log_path"
-        printf '0'; return 0
-    fi
-    for d in "$root"/*/; do
-        [ -d "$d" ] || continue
-        name=${d%/}; name=${name##*/}
-        if printf '%s\n' "$names" | grep -Fxq -- "$name"; then continue; fi
-        if [ "$dry" = 1 ]; then
-            echo "would remove vm-exec registry $d (domain not defined)" >> "$log_path"
-        elif rm -rf -- "$d"; then
-            echo "removed vm-exec registry $d (domain not defined)" >> "$log_path"
-        else
-            echo "FAIL remove vm-exec registry $d" >> "$log_path"; continue
-        fi
-        n=$((n + 1))
-    done
-    printf '%s' "$n"
-}
-
 gate_cleanup() {
     qci_assert_run_dir || return $?
     local dry=0 age_hours=24 rc=$EXIT_OK log_path="$RDIR/host/cleanup.log"
@@ -934,9 +905,7 @@ gate_cleanup() {
 
     # Surface dangling-disk findings in the row itself: they are non-fatal, but
     # a silent one is how an unexpected libvirt edit goes unnoticed.
-    local registries
-    registries=$(cleanup_vm_exec_registry "$dry" "$log_path")
-    local notes="age_hours=$age_hours dry_run=$dry orphans=$orphans missing_disk_refs=$CLEANUP_MISSING_DISK_COUNT vm_exec_registries=$registries"
+    local notes="age_hours=$age_hours dry_run=$dry orphans=$orphans missing_disk_refs=$CLEANUP_MISSING_DISK_COUNT"
     if [ "$rc" -eq 0 ]; then
         record_result cleanup qci-vms pass "$rc" "$(exit_class_name "$rc")" vm "$log_path" "$notes"
     else

@@ -1970,17 +1970,33 @@ SHIM
     head -1 "$EXECLOG" | grep -q 'concurrent-driver'
 }
 
-@test "vm-exec: a MALFORMED record of a dead owner is dropped, not a permanent wedge" {
+@test "vm-exec: a MALFORMED or OLD-FORMAT record is KEPT and the launch refused with a reconciliation hint" {
+    # Malformed does not mean the guest command finished: an older writer
+    # published `<pid> <start>` records in this same directory, and a SIGKILLed
+    # caller of that version can have left a live driver (astra r3 #1).
     make_signal_virsh 987654 0
     export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
     local dead=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
     mkdir -p "$(ODIR)"
-    printf 'not a record\n' > "$(ODIR)/$dead-1"
-    run_second_until_launched after-malformed
-    grep -q "malformed record $(ODIR)/$dead-1 (owner gone); removed" "$BATS_TEST_TMPDIR/out2"
-    run ! grep -q 'refusing to launch' "$BATS_TEST_TMPDIR/out2"
-    grep -q 'after-malformed' "$EXECLOG"
-    [ "$(registry_entries)" -eq 0 ]
+    printf '4242 987654\n' > "$(ODIR)/$dead-1"      # the 09c080e82 format
+    printf 'not a record\n' > "$(ODIR)/$dead-2"
+    local i rc
+    for i in 1 2; do                                  # and it stays refused
+        rc=0
+        PATH="$FAKEBIN:$PATH" timeout 60 "$VM_EXEC" fake-vm "after-malformed-$i" \
+            >"$BATS_TEST_TMPDIR/out$i" 2>&1 || rc=$?
+        [ "$rc" -eq 75 ]
+        grep -qF "If no such driver runs in the guest, rm $(ODIR)/$dead-1" "$BATS_TEST_TMPDIR/out$i"
+        grep -qF "If no such driver runs in the guest, rm $(ODIR)/$dead-2" "$BATS_TEST_TMPDIR/out$i"
+        grep -q 'refusing to launch' "$BATS_TEST_TMPDIR/out$i"
+    done
+    run ! grep -q 'after-malformed' "$EXECLOG"
+    run ! grep -q 'qd_kill_checked' "$EXECLOG"
+    [ "$(registry_entries)" -eq 2 ]
+    # Reconciled by hand -> the next call launches.
+    rm -f "$(ODIR)/$dead-1" "$(ODIR)/$dead-2"
+    run_second_until_launched after-reconcile
+    grep -q 'after-reconcile' "$EXECLOG"
 }
 
 @test "vm-exec: qga 'PID does not exist' KEEPS the record; the next call reaps the still-live driver" {
