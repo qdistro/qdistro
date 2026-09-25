@@ -527,3 +527,197 @@ three" ]
     [ "$status" -eq 1 ]
     [[ "$output" == *"no log"* ]]
 }
+
+# --- qci_claim_driver --------------------------------------------------------
+#
+# The lock has to live in the calling shell. These tests use separate bash
+# processes (the way two vm-execs are separate guest shells), not `run` of
+# the function inside the bats process: `run` is a subshell, and a subshell
+# that exits drops the flock.
+
+_claim_hold() {
+    # Block in this shell (builtin read), so the holder has no child that
+    # could inherit the lock fd and keep it after the shell is killed.
+    local lib=$1 lock=$2 ready=$3 fifo=$4
+    bash -c '
+        set -euo pipefail
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        : > "$3"
+        exec 3<>"$4"
+        read -t 30 -u 3 || true
+    ' _ "$lib" "$lock" "$ready" "$fifo" &
+    CLAIM_PID=$!
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        [ -f "$ready" ] && return 0
+        sleep 0.1
+    done
+    echo "holder did not become ready" >&2
+    return 1
+}
+
+@test "qci_claim_driver: a second concurrent shell fails at once and does no side effect" {
+    local lock="$BATS_TEST_TMPDIR/qci/permissions-gui/driver.lock"
+    local side="$BATS_TEST_TMPDIR/second-side"
+    local ready="$BATS_TEST_TMPDIR/ready"
+    local fifo="$BATS_TEST_TMPDIR/hold"
+    mkfifo "$fifo"
+    [ ! -e "$lock" ]
+    # No RETURN trap: under bats that trap also fires when this helper
+    # returns, which would drop the lock before the contender runs.
+    _claim_hold "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$ready" "$fifo" \
+        || { kill "$CLAIM_PID" 2>/dev/null || true; wait "$CLAIM_PID" 2>/dev/null || true; return 1; }
+    # No set -e in the contender: the claim itself must stop that shell
+    # before the side effect. timeout(1) bounds a blocking flock; 124 would
+    # mean we killed it for hanging rather than it exiting on its own.
+    run timeout 2 bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN > "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$side"
+    kill "$CLAIM_PID" 2>/dev/null || true
+    wait "$CLAIM_PID" 2>/dev/null || true
+    [ "$status" -eq 1 ]
+    [ "$output" = "ERROR: a second guest driver is already running: $lock" ]
+    [ ! -e "$side" ]
+    [ -f "$lock" ]
+}
+
+@test "qci_claim_driver: after the holder shell exits a later claim succeeds" {
+    local lock="$BATS_TEST_TMPDIR/qci/permissions-gui/driver.lock"
+    local side="$BATS_TEST_TMPDIR/side"
+    bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock"
+    run bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN > "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$side"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(cat "$side")" = "RAN" ]
+}
+
+@test "qci_claim_driver: sourcing the library does not hold the lock" {
+    local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
+    local side="$BATS_TEST_TMPDIR/side"
+    local ready="$BATS_TEST_TMPDIR/ready"
+    local fifo="$BATS_TEST_TMPDIR/hold"
+    local default_lock=/tmp/qci-driver.lock
+    local before after
+    mkfifo "$fifo"
+    if [ -e "$default_lock" ]; then
+        before=$(stat -c %Y "$default_lock")
+    else
+        before=absent
+    fi
+    bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        : > "$2"
+        exec 3<>"$3"
+        read -t 30 -u 3 || true
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$ready" "$fifo" &
+    local pid=$!
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        [ -f "$ready" ] && break
+        sleep 0.1
+    done
+    if [ ! -f "$ready" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "sourcer did not become ready" >&2
+        return 1
+    fi
+    run bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN > "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$side"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [ "$(cat "$side")" = "RAN" ]
+    if [ -e "$default_lock" ]; then
+        after=$(stat -c %Y "$default_lock")
+    else
+        after=absent
+    fi
+    [ "$before" = "$after" ]
+}
+
+@test "qci_claim_driver: a second claim of the same path in the same shell succeeds and keeps the lock" {
+    local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
+    local side="$BATS_TEST_TMPDIR/second-side"
+    local ready="$BATS_TEST_TMPDIR/ready"
+    local fifo="$BATS_TEST_TMPDIR/hold"
+    mkfifo "$fifo"
+    # The holder claims twice and re-sources under set -e before signalling.
+    # Ready means both same-shell claims returned 0 and the re-source did not
+    # abort the shell. The contender must still lose: the second claim did
+    # not drop or replace the lock.
+    bash -c '
+        set -euo pipefail
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        qci_claim_driver "$2"
+        # shellcheck disable=SC1090
+        source "$1"
+        : > "$3"
+        exec 3<>"$4"
+        read -t 30 -u 3 || true
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$ready" "$fifo" &
+    local pid=$!
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        [ -f "$ready" ] && break
+        sleep 0.1
+    done
+    if [ ! -f "$ready" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "holder did not become ready" >&2
+        return 1
+    fi
+    run timeout 2 bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN > "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$side"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ "$status" -eq 1 ]
+    [ "$output" = "ERROR: a second guest driver is already running: $lock" ]
+    [ ! -e "$side" ]
+}
+
+@test "qci_claim_driver: a subshell that exits is not the lock holder" {
+    local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
+    local side="$BATS_TEST_TMPDIR/side"
+    bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        ( qci_claim_driver "$2" )
+        echo PARENT_CONTINUED > "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$side"
+    [ "$(cat "$side")" = "PARENT_CONTINUED" ]
+    run bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock"
+    [ "$status" -eq 0 ]
+    [ "$output" = "RAN" ]
+}
