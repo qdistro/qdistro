@@ -148,8 +148,9 @@ _claim_snippet() {
 @test "two different scenarios claim concurrently without contending" {
     local snip other side ready fifo
     snip=$(_claim_snippet)
-    other=${snip//$SLUG/qdlocker_09-capture-indicators}
-    [ "$other" != "$snip" ]
+    # Render the second scenario's prompt on its own; do not rewrite the first.
+    other=$(SLUG=qdlocker_09-capture-indicators _claim_snippet)
+    [[ "$other" == *"/qci/qdlocker_09-capture-indicators/driver.lock"* ]]
     side="$BATS_TEST_TMPDIR/other-side"
     ready="$BATS_TEST_TMPDIR/ready"
     fifo="$BATS_TEST_TMPDIR/hold"
