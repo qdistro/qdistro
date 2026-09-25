@@ -57,7 +57,13 @@ then inject `?` through the virtual keyboard (see AGENTS.md).
 $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "Shell No. 1" windowactivate --sync'
 # `?` = Shift+/ at evdev.
 virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_SLASH
-sleep 1
+# MANDATORY SETTLE WAIT -- do not drop or shorten it. There is no guest-side
+# signal for "the modal is on screen", so time is the only wait-for-state
+# available. A capture taken ~0.1 s after the key still shows the main view
+# (reproduced 2026-09-25,
+# todo/test-blankscreenshots/pg05-live-repro/b-s2-nosleep.png), and it is still
+# accepted as "fresh" because the header clock changed.
+sleep 2
 $VMGUI "$VM" screenshot-fresh /tmp/05-tui-help-overlay-s2-help-open.png \
   /tmp/05-tui-help-overlay-s1-main.png
 ```
@@ -80,20 +86,37 @@ and **Navigation:** in that order.
 (Deny) are listed.
 - The last paragraph mentions "mirrored to the GUI app instantly".
 
-The S2 image must differ from S1 before judging modal content. The app header
-contains a live clock, so captures with identical RAW pixels separated by this
-step prove the screenshot path was stale rather than proving the `?` binding
-failed. Compare raw identities (`raw_pix_sha`, field 4 of each frame's `.raw`
-sidecar; the harness also prints a "same screen pixels" note), never PNG file
-hashes: every frame is padded to a size of its own, so file bytes always differ.
+**Freshness is necessary, not sufficient.** `screenshot-fresh` refuses a
+frame whose RAW pixels equal S1's (compare raw identities, `raw_pix_sha` in
+field 4 of each `.raw` sidecar, never PNG file hashes: every frame is padded to
+a size of its own). Identical raw pixels mean the capture path was stale, not
+that `?` failed. But the header has a live clock, so a frame is "fresh" one
+second later **whether or not the TUI has processed the key**: a different raw
+hash proves only that a new frame was captured, never that `?` took effect.
+Only the frame's content says whether the overlay is up.
+
+If S2 shows the main view (no modal), the key may not have been rendered yet:
+wait 2 more seconds and capture once more to a NEW name
+(`$VMGUI "$VM" screenshot-fresh /tmp/05-tui-help-overlay-s2-help-open-late.png /tmp/05-tui-help-overlay-s1-main.png`),
+open it, and judge S2 from that frame. Record FAIL only if the late frame also
+shows no modal.
 
 ### S3 — Escape dismisses, main view returns intact
 
 ```bash
 virsh send-key "$VM" --codeset linux KEY_ESC
-sleep 1
+# MANDATORY SETTLE WAIT, same reason as S2: a capture right after Escape still
+# shows the overlay
+# (todo/test-blankscreenshots/pg05-live-repro/b-s3-nosleep.png). Textual also delays a
+# bare Escape briefly while it waits to see whether an escape sequence follows
+# (Textual's escape delay).
+sleep 2
 $VMGUI "$VM" screenshot /tmp/05-tui-help-overlay-s3-dismissed.png
 ```
+
+If S3 still shows the overlay, apply the same rule as S2: wait 2 more seconds,
+capture once more to a NEW name (`.../05-tui-help-overlay-s3-dismissed-late.png`),
+and judge from that frame.
 
 **Assert (after dismiss):**
 - The modal is gone. Main view is visible again.
@@ -115,7 +138,9 @@ $VMEXEC "$VM" 'rm -f /home/admin/.local/state/qdistro/qterminal-tui.log'
  again as dismiss keys. Only Escape is asserted here to keep the
  scenario narrow. A broader key-coverage scenario is a possible
  follow-up; don't expand this one in-place.
-- If the `?` key produces nothing, first prove the TUI is alive and the S2
- screenshot is fresh (its hash differs from S1). Do not retry with different
- key names. Once those preconditions hold, report FAIL — a regression in the
- `question_mark` binding is exactly what we want to catch.
+- If the `?` key produces nothing, first prove the TUI is alive and that the
+ settle wait and the one late re-capture were both done. A fresh S2 (raw
+ pixels differ from S1) is required but proves nothing about the key: the
+ clock alone changes the frame. Do not retry with different key names. Once
+ those preconditions hold, report FAIL — a regression in the `question_mark`
+ binding is exactly what we want to catch.

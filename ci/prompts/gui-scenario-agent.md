@@ -67,6 +67,14 @@ Procedure:
    its `.raw` sidecar (`cp F F.raw DEST/`), or use `view-copy`. The harness
    reads your session record afterwards: a PASS or FAIL on a `required`
    scenario whose frames you never opened is recorded ERROR.
+   **A FRESH FRAME IS NOT A REACTED UI.** `screenshot-fresh` accepting a frame,
+   or two frames having different raw pixels (`raw_pix_sha`), proves only that
+   a NEW frame was captured — never that your key or click was processed or
+   that the UI reached the state the step expects. A live clock, a blinking
+   cursor or an animation changes pixels on its own. Keep every settle wait and
+   wait-for-state check the scenario lists, exactly as written, between the
+   input and the capture. If a frame still shows the pre-input state, wait and
+   capture again to a NEW name before recording FAIL.
 7. Before every model-targeted mouse click, activate the window and run
    `vm-gui "$VMNAME" click-preview X Y "visible target label"`. It moves the
    real VM pointer without a button press, then captures the evidence. Read both

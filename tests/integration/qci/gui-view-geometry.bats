@@ -794,6 +794,10 @@ run_scen() {
         grep -q 'same screen pixels' "$f" || grep -q 'SAME SCREEN PIXELS' "$f"
         grep -q '\.post\.png' "$f"
         grep -q 'cp F F.raw' "$f"
+        # pg/05 follow-up: freshness is not the UI having reacted
+        grep -q 'A FRESH FRAME IS NOT A REACTED UI' "$f"
+        grep -q 'proves only' "$f"
+        grep -q 'Keep every settle wait' "$f"
     done
 }
 
