@@ -148,6 +148,16 @@ Procedure:
    survived before starting a second one -- that verification is load-bearing,
    not a formality, because discovery of a reparented process is not
    guaranteed.
+   YOUR SHELL TOOL SIGKILLS every process a command started when that command
+   returns, and SIGKILL runs no trap. A `vm-exec ... &` left in the
+   background of a command that exits (an early `exit 2`, say) is
+   therefore killed WITHOUT cleaning up its guest command, which keeps running
+   and keeps waiting on your markers. Keep vm-exec in the FOREGROUND of the
+   command that owns it, or `wait` for it before that command returns. (vm-exec
+   reaps such an orphan at its next call against the same VM, but only if the
+   orphan's identity was pinned first; permissions-gui/13 on 2026-09-25 had two
+   such orphans released by one `touch s1-go`, three RelayMessage requests, and
+   no attributable verdict.)
 
 11. NEVER put a PIPE on vm-exec's stderr. Do NOT open your driver with
    `exec > >(tee "$LOG") 2>&1`, and do not write `out=$(vm-exec ... 2>&1)` or

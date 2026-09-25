@@ -933,6 +933,13 @@ Rules:
   not pin instead of signalling it) rather than
   killing it with SIGKILL, and verify in the guest that nothing from the first
   attempt survived before starting a second one.
+  YOUR SHELL TOOL SIGKILLS every process a command started when that command
+  returns, and SIGKILL runs no trap: a \`vm-exec ... &\` left in
+  the background of a command that exits is killed WITHOUT cleaning up its
+  guest command, which keeps running and keeps waiting on your markers. Keep
+  vm-exec in the FOREGROUND of the command that owns it, or \`wait\` for it
+  before that command returns (permissions-gui/13, 2026-09-25: two such orphans
+  released by one \`touch s1-go\` sent two extra requests).
 - NEVER put a PIPE on vm-exec's stderr in your driver script. Concretely, do
   NOT open your driver with \`exec > >(tee "\$LOG") 2>&1\`, and do not write
   \`out=\$(vm-exec ... 2>&1)\` or \`vm-exec ... 2>&1 | reader\`. This is the

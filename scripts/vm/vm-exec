@@ -345,7 +345,14 @@ QD_CAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vm-exec-cap.XXXXXXXX") || {
 # half holds unconditionally, and only the "empty DIRECTORY" half has this
 # exception. A failed unlink has the same effect. (sol section 3, fable
 # section 3.)
-trap 'rm -rf "$QD_CAP_DIR"' EXIT
+#
+# The EXIT trap also retracts this invocation's orphan-registry entry (see
+# "orphan registry" below). NOTE, measured: bash DOES run the EXIT trap when the
+# signal handler below re-raises with the default disposition, so the paragraph
+# above is conservative -- the only exits that skip this trap are ones bash never
+# sees, i.e. SIGKILL, and those are exactly what the registry exists for.
+QD_ORPHAN_ENTRY=""
+trap 'rm -rf "$QD_CAP_DIR"; [ -z "$QD_ORPHAN_ENTRY" ] || rm -f "$QD_ORPHAN_ENTRY"' EXIT
 
 # Per-call name parts. READ THIS BEFORE TRUSTING THE COUNTER: every caller runs
 # bounded_run inside a command substitution, i.e. in a SUBSHELL, so the
@@ -1176,6 +1183,96 @@ kill_guest_pid() {
     return 0
 }
 
+# --- orphan registry: reap guest commands whose vm-exec was SIGKILLed ---------
+#
+# The signal trap below cleans up the guest command on INT/TERM/HUP. It cannot
+# run on SIGKILL, and SIGKILL is not exotic: the codex agent's shell tool
+# SIGKILLs every process a command started when that command returns
+# (measured 2026-09-25: a backgrounded child with INT/TERM/HUP traps died
+# within 1s of its parent's exit and none of its traps ran). A GUI driver that
+# does `vm-exec vm '<long guest driver>' &` and then exits early therefore
+# leaves the guest driver running with nobody to reap it. permissions-gui/13 in
+# gui-20260925T065332Z-3908053: two such orphaned guest drivers from aborted
+# attempts were still blocked on the scenario's `s1-go` marker, so the next
+# attempt's single `touch s1-go` released THREE RelayMessage senders -- three
+# pending requests, REQ=ambiguous, and "admin approvals (2 pending)" after the
+# one Deny.
+#
+# So every invocation that pins its guest command's identity records it here,
+# keyed by its OWN host (pid, start time), and retracts the entry in the EXIT
+# trap -- which runs on every exit bash sees, including the re-raised signal.
+# An entry that outlives its owner therefore means the owner died without
+# running any code, and the next vm-exec against the same VM kills that guest
+# command (identity-checked, via the same kill_guest_pid as the signal path)
+# BEFORE it launches its own. The limit, stated: a SIGKILL that lands between
+# guest-exec and the identity pin leaves no entry, and nothing is reaped.
+QD_ORPHAN_ROOT=${QDISTRO_VM_EXEC_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/qdistro-vm-exec-$(id -u)}
+QD_ORPHAN_DIR="$QD_ORPHAN_ROOT/${VM_NAME//\//_}"
+
+# Start time (field 22) of a HOST process, or empty when it does not exist.
+# Parsed after the LAST ')' because comm may contain spaces and parentheses.
+host_starttime() {
+    local st rest
+    st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    rest=${st##*') '}
+    # shellcheck disable=SC2086
+    set -- $rest
+    printf '%s' "${20:-}"
+}
+
+orphan_register() {
+    local me_start tmp
+    [ "${QDISTRO_VM_EXEC_ORPHAN_REAP:-1}" = 1 ] || return 0
+    me_start=$(host_starttime "$$")
+    [ -n "$me_start" ] || return 0
+    mkdir -p -m 0700 "$QD_ORPHAN_ROOT" "$QD_ORPHAN_DIR" 2>/dev/null || return 0
+    tmp="$QD_ORPHAN_DIR/.new.$$"
+    printf '%s %s\n' "$PID" "$GUEST_START_TIME" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    QD_ORPHAN_ENTRY="$QD_ORPHAN_DIR/$$-$me_start"
+    mv -f "$tmp" "$QD_ORPHAN_ENTRY" 2>/dev/null || { rm -f "$tmp"; QD_ORPHAN_ENTRY=""; }
+    return 0
+}
+
+orphan_reap() {
+    local lockfd e base owner owner_start gpid gstamp
+    [ "${QDISTRO_VM_EXEC_ORPHAN_REAP:-1}" = 1 ] || return 0
+    [ -d "$QD_ORPHAN_DIR" ] || return 0
+    # One reaper per VM at a time, and a concurrent launcher WAITS for it, so no
+    # new command on this VM starts while an orphan is being killed. Bounded:
+    # one kill_guest_pid is at most KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 1.
+    # NOT `exec {fd}>>f 2>/dev/null`: a redirection on a bare `exec` is
+    # PERMANENT, and that form silenced every later line on vm-exec's stderr.
+    # The group's own redirection is restored when the group ends.
+    { exec {lockfd}>>"$QD_ORPHAN_DIR/.lock"; } 2>/dev/null || return 0
+    if ! flock -w $((KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 10)) "$lockfd"; then
+        echo "[vm-exec] WARN: orphan registry for $VM_NAME is locked by another vm-exec; launching without reaping" >&2
+        exec {lockfd}>&-
+        return 0
+    fi
+    for e in "$QD_ORPHAN_DIR"/*-*; do
+        [ -f "$e" ] || continue
+        base=${e##*/}
+        owner=${base%%-*}
+        owner_start=${base#*-}
+        [[ "$owner" =~ ^[0-9]+$ && "$owner_start" =~ ^[0-9]+$ ]] || continue
+        # Owner still alive (same pid AND same start time): it is polling its
+        # own command, which is not an orphan.
+        [ "$(host_starttime "$owner")" = "$owner_start" ] && continue
+        read -r gpid gstamp <"$e" 2>/dev/null || { rm -f "$e"; continue; }
+        if [[ "$gpid" =~ ^[0-9]+$ && "$gstamp" =~ ^[0-9]+$ ]]; then
+            echo "[vm-exec] WARN: reaping orphaned guest command PID $gpid on $VM_NAME: its vm-exec (host pid $owner) died without cleanup (SIGKILL?)" >&2
+            GUEST_START_TIME=$gstamp
+            kill_guest_pid "$gpid"
+            GUEST_START_TIME=""
+        fi
+        rm -f "$e"
+    done
+    exec {lockfd}>&-
+    return 0
+}
+
+orphan_reap
+
 # 1. Send the command. Build the qga JSON with jq so embedded quotes,
 #    backslashes, and newlines in $CMD survive a round-trip through
 #    virsh -> qemu-guest-agent -> /bin/sh -c. The previous form
@@ -1279,6 +1376,11 @@ trap 'vm_exec_on_signal HUP' HUP
 # signal at all, and we say so here so an operator knows an interrupt may leave
 # this exact guest PID behind.
 capture_guest_identity
+# Only a PINNED command can be reaped later: kill_guest_pid refuses to signal
+# without the start-time stamp, so an entry without one would be dead weight.
+if [ "$GUEST_IDENT_STATE" = pinned ]; then
+    orphan_register
+fi
 case "$GUEST_IDENT_STATE" in
     pinned|disabled)
         # pinned: cleanup can identity-check and signal.
