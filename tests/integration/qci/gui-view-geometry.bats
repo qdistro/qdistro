@@ -909,6 +909,9 @@ The frame was fully black, but the terminal crashed (s3.png).
 The frame `s3.png` shows a black background with white text.
 The screen shows a black background with the clock (s3.png).
 The frame s3.png is black-and-white.
+Evidence: `s3.png` shows the recovered desktop; the earlier frame was fully black.
+The earlier frame was fully black; the recovered desktop is now visible. Evidence: `s3.png`.
+The frame was fully black. Evidence: `s3.png` shows the recovered desktop.
 The screen was blank (s3.png).
 s3.png was blank.
 EOF
@@ -963,6 +966,38 @@ EOF
     [ "$status" -eq 0 ]
     [ "$output" = "$(sed 's/^/flagged: /' "$TDIR/pos")" ]
     grep -q 'skipped report.md:1 s4.png: ambiguous (2 attested frames share that name)' "$TDIR/agent.log"
+}
+
+@test "F5: an explicit path keeps its identity (./x.png, absolute into the root)" {
+    dark_setup
+    # ONLY art/sub/s3.png is attested (bright); art/s3.png is an agent-made,
+    # unattested black image (astra F5 code r2, P1).
+    mkdir -p "$ADIR/sub"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/sub/s3.png" >/dev/null 2>&1
+    [ -f "$ADIR/sub/s3.png" ]
+    magick -size 1280x800 xc:black "$ADIR/s3.png"
+    # and sub/s5.png attested with NO root s5.png at all: `./s5.png` names a
+    # file that does not exist, never the sub-directory frame.
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/sub/s5.png" >/dev/null 2>&1
+    [ -f "$ADIR/sub/s5.png" ] && [ ! -e "$ADIR/s5.png" ]
+    cat > "$TDIR/neg" <<EOF
+The frame $ADIR/s3.png was fully black.
+./s3.png was fully black.
+The frame ./s3.png was fully black.
+s3.png was fully black.
+./s5.png was fully black.
+The frame $ADIR/s5.png was fully black.
+EOF
+    cat > "$TDIR/pos" <<EOF
+The frame sub/s3.png was fully black.
+The frame ./sub/s3.png was fully black.
+The frame $ADIR/sub/s3.png was fully black.
+s5.png was fully black.
+EOF
+    cat "$TDIR/neg" "$TDIR/pos" > "$TDIR/all"
+    run dark_each "$TDIR/all"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(sed 's/^/flagged: /' "$TDIR/pos")" ]
 }
 
 @test "F5: the RAW content is measured, not the padded frame (padding-boundary fixture)" {

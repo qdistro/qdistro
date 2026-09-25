@@ -2820,9 +2820,9 @@ gui_image_opens_diag_note() {
 # CONSERVATIVE BY CONSTRUCTION. A false positive points a human at the wrong
 # frame; a false negative costs nothing (this is advisory). So every ambiguity
 # is a SKIP -- one pattern, no prose interpreter (astra, F5 code r1, P2/P3):
-#   * the unit is a CLAUSE: each line of status.txt/report.md is split at
-#     `. ; :` (followed by a space or the end), ", but", "but", "while",
-#     "whereas" and ", so";
+#   * the unit is a CLAUSE: each line of status.txt/report.md is split into
+#     sentences at `. ; :` (followed by a space or the end), and each sentence
+#     into clauses at ", but", "but", "while", "whereas" and ", so";
 #   * a clause is a claim when GUI_DARKNESS_CLAIM_RE matches it ("fully black
 #     frame", "the frame [`x.png`] was fully black", "`x.png` was near-black")
 #     and it
@@ -2838,14 +2838,17 @@ gui_image_opens_diag_note() {
 #   * its referent is the ONE png-bearing token in that clause, taken whole
 #     (`s3.png.attempt-1.rejected` is its own token and names no accepted
 #     frame). Two tokens, or a token that is not a plain `*.png` -> skip. A
-#     clause with none borrows the line's referent ONLY in the house style
-#     "<claim>. Evidence: `one.png`[, `other.log`]": exactly one claim clause
-#     on the line, no png before "evidence:", exactly one png after it;
+#     clause with none borrows the line's referent ONLY in the ADJACENT house
+#     style "<claim>. Evidence: `one.png`[, `other.log`]": the claim is in the
+#     sentence right before the single marker and the only claim on the line,
+#     no png before the marker, and after it nothing but references with
+#     exactly one png;
 #   * the token resolves only inside THIS attempt's artifact root or its
 #     capture-root alias, with a UNIQUE match among the frames the sealed,
-#     VM-bound ledger attests (gui_capture_reconcile): `..`, paths into other
-#     directories (a previous attempt's) and a bare basename shared by two
-#     attested frames -> skip;
+#     VM-bound ledger attests (gui_capture_reconcile). An explicit path must
+#     equal an attested frame's relative path exactly; only a bare name is
+#     matched by basename. `..`, paths into other directories (a previous
+#     attempt's) and a bare basename shared by two attested frames -> skip;
 #   * "not dark": qci_frame_not_dark (scripts/vm/lib/frame-usable.sh) on the
 #     RAW content (qci_view_raw_extract), never the padded frame --
 #     screenshot_is_usable's thresholds, sourced, never copied. Dark UI, noisy
@@ -2865,7 +2868,9 @@ GUI_DARKNESS_CLAIM_RE="(${GUI_DARK_WORD}[ -]+${GUI_FRAME_NOUN}([^a-z]|\$)|(${GUI
 GUI_DARKNESS_NEGATION_RE="(^|[^a-z'])(not|no|none|nothing|never|without|nor|neither|non|than|instead|hardly|barely)([^a-z]|\$)|n't([^a-z]|\$)"
 GUI_DARKNESS_REGION_RE='(^|[^a-z])(pane|panel|area|region|window|list|dialog|widget|column|sidebar|tab|field|box|section|corner|half|portion|part|terminal|content|contents|viewport|tile|cell|strip|rectangle|border|margin|thumbnail|bar|menu|toolbar|popup|tooltip|top|bottom|left|right|edge|inside|within|background|backdrop|wallpaper|theme|text|font|colou?r|title|and-white)s?([^a-z]|$)'
 # The clause splitter, one sed program (GNU: `\n` in the replacement, `I`).
-GUI_DARKNESS_CLAUSE_SED='s/[.;:]([[:space:]]|$)/\n/g; s/,? but /\n/gI; s/ (while|whereas) /\n/gI; s/, so /\n/gI'
+# SENTENCES first (`. ; :` + space/end), then CLAUSES within each sentence.
+GUI_DARKNESS_SENTENCE_SED='s/[.;:]([[:space:]]|$)/\n/g'
+GUI_DARKNESS_CLAUSE_SED='s/,? but /\n/gI; s/ (while|whereas) /\n/gI; s/, so /\n/gI'
 # Helpers of gui_darkness_contradiction_note. One `qci_gui_darkness:` line to
 # the agent log (args: log_path message); the png-bearing tokens of a text,
 # each taken WHOLE (a rejected name keeps its suffix).
@@ -2874,37 +2879,49 @@ _gui_dark_toks() { printf '%s\n' "$1" | grep -oE '[A-Za-z0-9_.+/~-]+' | grep -iE
 gui_darkness_contradiction_note() {
     local adir=$1 caplog=${2:-} anchor=${3:-} caproot=${4:-} log_path=${5:-}
     local src line clause lc prose n tok f rel absdir rootr tmp metrics mrc before after
-    local nclaims fb_claim a_vm="" a_rows="" a_head="" shown=0 out=""
-    local -a claims=() attested=() toks=() hits=()
+    local nclaims fb_claim fb_sent si sentence bare a_vm="" a_rows="" a_head="" shown=0 out=""
+    local -a claims=() attested=() toks=() hits=() lsent=()
     for src in status.txt report.md; do
         [ -f "$adir/$src" ] && [ ! -L "$adir/$src" ] || continue
         n=0
         while IFS= read -r line || [ -n "$line" ]; do
             n=$((n + 1)); line=${line//$'\r'/}
-            nclaims=0; fb_claim=""
-            while IFS= read -r clause; do
-                lc=${clause,,}
-                [[ "$lc" =~ $GUI_DARKNESS_CLAIM_RE ]] || continue
-                nclaims=$((nclaims + 1))
-                # Negation/region words are judged on the PROSE: png-bearing
-                # tokens are removed first (`guest-agent-not-responding.png`
-                # holds a "not" that negates nothing).
-                prose=$(printf '%s\n' "$lc" | sed -E 's/[a-z0-9_.+\/~-]*\.png[a-z0-9_.+\/~-]*/ /g')
-                [[ "$prose" =~ $GUI_DARKNESS_NEGATION_RE ]] && continue
-                [[ "$prose" =~ $GUI_DARKNESS_REGION_RE ]] && continue
-                mapfile -t toks < <(_gui_dark_toks "$clause")
-                if [ ${#toks[@]} -eq 0 ]; then
-                    fb_claim=$lc
-                elif [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]]; then
-                    claims+=("$src:$n"$'\t'"$(printf '%s' "$lc" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
-                fi
-            done < <(printf '%s\n' "$line" | sed -E "$GUI_DARKNESS_CLAUSE_SED")
-            # The "Evidence:" house style: the only claim on the line, no png
-            # before the marker, exactly one plain png after it.
+            nclaims=0; fb_claim=""; fb_sent=-1; si=-1; lsent=()
+            while IFS= read -r sentence; do
+                si=$((si + 1))
+                lsent+=("$(printf '%s' "${sentence,,}" | tr -s ' ' | sed 's/^[ -]*//; s/ $//')")
+                while IFS= read -r clause; do
+                    lc=${clause,,}
+                    [[ "$lc" =~ $GUI_DARKNESS_CLAIM_RE ]] || continue
+                    nclaims=$((nclaims + 1))
+                    # Negation/region words are judged on the PROSE: png-bearing
+                    # tokens are removed first (`guest-agent-not-responding.png`
+                    # holds a "not" that negates nothing).
+                    prose=$(printf '%s\n' "$lc" | sed -E 's/[a-z0-9_.+\/~-]*\.png[a-z0-9_.+\/~-]*/ /g')
+                    [[ "$prose" =~ $GUI_DARKNESS_NEGATION_RE ]] && continue
+                    [[ "$prose" =~ $GUI_DARKNESS_REGION_RE ]] && continue
+                    mapfile -t toks < <(_gui_dark_toks "$clause")
+                    if [ ${#toks[@]} -eq 0 ]; then
+                        fb_claim=$lc; fb_sent=$si
+                    elif [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]]; then
+                        claims+=("$src:$n"$'\t'"$(printf '%s' "$lc" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
+                    fi
+                done < <(printf '%s\n' "$sentence" | sed -E "$GUI_DARKNESS_CLAUSE_SED")
+            done < <(printf '%s\n' "$line" | sed -E "$GUI_DARKNESS_SENTENCE_SED")
+            # The "Evidence:" house style, ADJACENT form only: the only claim
+            # on the line sits in the SENTENCE immediately before a single
+            # "Evidence:" marker (no other sentence between; a ", so ..."
+            # consequence of the claim is the same sentence, as in pg/06),
+            # no png before the marker, and after it only references --
+            # exactly one plain png,
+            # other file names, backticks and separators, no prose and so no
+            # claim (astra F5 code r2, P2).
             [ -n "$fb_claim" ] && [ "$nclaims" -eq 1 ] || continue
-            [[ "${line,,}" == *evidence:* ]] || continue
-            before=${line%%[Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]:*}; after=${line:${#before}}
+            [ "${lsent[$((fb_sent + 1))]:-}" = evidence ] || continue
+            [ "$(grep -oi 'evidence:' <<<"$line" | wc -l)" -eq 1 ] || continue
+            before=${line%%[Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]:*}; after=${line:$((${#before} + 9))}
             [ -z "$(_gui_dark_toks "$before")" ] || continue
+            [ -z "$(printf '%s\n' "$after" | sed -E 's/[A-Za-z0-9_.+\/~-]+\.[A-Za-z0-9]+//g; s/(^|[^a-z])and([^a-z]|$)/ /g; s/[][`"(),.;:[:space:]]//g')" ] || continue
             mapfile -t toks < <(_gui_dark_toks "$after")
             [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]] || continue
             claims+=("$src:$n"$'\t'"$(printf '%s' "$fb_claim" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
@@ -2928,6 +2945,11 @@ gui_darkness_contradiction_note() {
     declare -A seen=()
     for line in "${claims[@]}"; do
         IFS=$'\t' read -r src clause tok <<<"$line"
+        # An EXPLICIT path (`./x.png`, absolute, anything with a `/`) keeps its
+        # identity: it must equal one attested frame's relative path exactly.
+        # Only an originally BARE name is searched by basename (astra F5 code
+        # r2, P1: `./s3.png` must not resolve to an attested `sub/s3.png`).
+        bare=1; [[ "$tok" == */* ]] && bare=0
         tok=${tok#./}
         # Only this attempt's own tree: its root, or the alias it was given.
         case "$tok" in
@@ -2940,7 +2962,7 @@ gui_darkness_contradiction_note() {
         hits=()
         for f in "${attested[@]}"; do
             rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f"); rel=${rel#"$absdir"/}
-            if [[ "$tok" == */* ]]; then
+            if [ "$bare" = 0 ]; then
                 [ "$rel" = "$tok" ] && hits+=("$f")
             else
                 [ "${rel##*/}" = "$tok" ] && hits+=("$f")
@@ -2952,6 +2974,12 @@ gui_darkness_contradiction_note() {
         fi
         f=${hits[0]}
         rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f"); rel=${rel#"$absdir"/}
+        # A bare name that exists at the artifact root names THAT file; if the
+        # unique basename hit is some other (sub-directory) frame, skip.
+        if [ "$bare" = 1 ] && [ -e "$absdir/$tok" ] && [ "$rel" != "$tok" ]; then
+            _gui_dark_log "$log_path" "skipped $src $tok: the root file of that name is not the attested frame"
+            continue
+        fi
         [ -z "${seen[$src/$rel]:-}" ] || continue
         seen[$src/$rel]=1
         rm -f -- "$tmp/raw.png"
