@@ -71,6 +71,10 @@ affected_gates_for_path() {
     fi
     # 2. conservative path-prefix rules.
     case "$p" in
+        # VM provisioning and golden lifecycle are shared by every VM lane.
+        # Match before ci/*, whose default is host-only.
+        ci/lib/vm.sh)
+            printf 'selftest\nlint\nhost\nvm-smoke\nbats\ngui\n' ;;
         # CI runner / registry / lint inputs themselves. A change to the runner
         # or its self-test must re-run the host-only runner self-test.
         ci/*|tests/registry.tsv)
@@ -113,8 +117,12 @@ affected_gates_for_path() {
         # VM lifecycle tooling -> exercise a VM boot at least.
         scripts/vm/*)
             printf 'vm-smoke\n' ;;
+        # Broker authorization and SELinux policy also run in the guest;
+        # host tests alone cannot exercise their runtime boundaries.
+        broker/*|selinux/*)
+            printf 'host\nvm-smoke\nbats\ngui\n' ;;
         # Source under a component dir that the host gate builds/tests.
-        src/*|broker/*|selinux/*|qsu/*|workflow/*)
+        src/*|qsu/*|workflow/*)
             printf 'host\n' ;;
         # --- In-tree components (monorepo). Before the migration a component
         # path never reached this map (it lived in another repo) and an agent
