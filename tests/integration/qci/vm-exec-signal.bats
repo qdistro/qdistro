@@ -2049,3 +2049,126 @@ SHIM
     grep -q 'retry-after-helper' "$EXECLOG"
     [ "$(registry_entries)" -eq 0 ]
 }
+
+@test "vm-exec: only the lock helper holds the reaper lock; a left-behind child of the reap does NOT block the next vm-exec" {
+    # The lock used to be an fd of the vm-exec shell. bash cannot make it
+    # close-on-exec, so every subshell and auxiliary command run while it was
+    # held (cat/rm/jq/sleep/...) inherited it -- bounded_run closed it only in
+    # its own helpers. One such child left behind kept the flock, and every
+    # later vm-exec on the VM refused with 75
+    # (todo/test-blankscreenshots/reviews/blankss-pg13-code-r4-astra.md).
+    #
+    # The widened window is host_owner_state's `cat /proc/<owner>/stat`, run
+    # UNDER the lock and NOT through bounded_run. The shim (1) records, at that
+    # moment, every process on the host holding the registry .lock and (2)
+    # leaves a TERM-ignoring child behind with its stdio detached, so the only
+    # thing it can still hold is an inherited descriptor.
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    mkdir -p "$(ODIR)"
+    : > "$(ODIR)/.lock"
+    local lock realcat left
+    lock=$(realpath "$(ODIR)/.lock")
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$$-1"   # owner pid recycled
+    realcat=$(command -v cat)
+    cat > "$FAKEBIN/cat" <<SHIM
+#!/bin/sh
+if [ "\$1" = "/proc/$$/stat" ]; then
+    for fd in /proc/[0-9]*/fd/*; do
+        [ "\$(readlink "\$fd" 2>/dev/null)" = "$lock" ] || continue
+        p=\${fd#/proc/}; p=\${p%%/*}
+        printf '%s %s\n' "\$p" "\$($realcat /proc/\$p/comm 2>/dev/null)" >> "$BATS_TEST_TMPDIR/holders"
+    done
+    ( trap '' TERM; i=0; while [ \$i -lt 60 ]; do sleep 0.5; i=\$((i + 1)); done ) \
+        >/dev/null 2>&1 </dev/null &
+    echo \$! > "$BATS_TEST_TMPDIR/leftover"
+fi
+exec $realcat "\$@"
+SHIM
+    chmod +x "$FAKEBIN/cat"
+    run_second_until_launched first-driver
+    rm -f "$FAKEBIN/cat"
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'first-driver' "$EXECLOG"
+
+    # (1) At that moment the lock was held, and by the flock helper ALONE: not
+    # by vm-exec, not by the subshell, not by the auxiliary command itself.
+    [ -s "$BATS_TEST_TMPDIR/holders" ]
+    run cut -d' ' -f2 "$BATS_TEST_TMPDIR/holders"
+    [ "${#lines[@]}" -eq 1 ]
+    [ "${lines[0]}" = flock ]
+
+    # (2) The left-behind child outlived the vm-exec that spawned it ...
+    left=$($realcat "$BATS_TEST_TMPDIR/leftover")
+    kill -0 "$left"
+    # ... and still the next reaper gets the lock well inside a short wait.
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$$-2"
+    local rc=0
+    PATH="$FAKEBIN:$PATH" QDISTRO_VM_EXEC_REAP_LOCK_WAIT=2 \
+        timeout 60 "$VM_EXEC" fake-vm 'second-driver' >"$BATS_TEST_TMPDIR/out3" 2>&1 &
+    local second=$!
+    await_exec_body second-driver || { kill -KILL "$left" 2>/dev/null; kill "$second"; wait "$second" || true; false; }
+    kill -TERM "$second"; wait "$second" || rc=$?
+    kill -KILL "$left" 2>/dev/null || true
+    run ! grep -q 'held the orphan registry lock' "$BATS_TEST_TMPDIR/out3"
+    grep -q 'cleanup verified for guest PID 4242' "$BATS_TEST_TMPDIR/out3"
+    [ "$(registry_entries)" -eq 0 ]
+}
+
+@test "vm-exec: a SIGKILLed lock holder whose parent never reaps it (zombie) does NOT keep the reaper lock" {
+    # A PID-existence monitor (`tail --pid`) keeps the lock for as long as the
+    # dead vm-exec stays a zombie, i.e. until an unrelated parent wait()s --
+    # possibly never. The old in-shell fd was released at EXIT, not at reaping
+    # (astra, todo/test-blankscreenshots/reviews/blankss-lockfd-code-r1-astra.md).
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    mkdir -p "$(ODIR)"
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$$-1"   # owner pid recycled
+    # Park the first reaper UNDER the lock: host_owner_state's cat pauses until
+    # released (bounded, so a regressed run cannot wedge the suite).
+    local realcat; realcat=$(command -v cat)
+    cat > "$FAKEBIN/cat" <<SHIM
+#!/bin/sh
+if [ "\$1" = "/proc/$$/stat" ]; then
+    echo \$\$ > "$BATS_TEST_TMPDIR/parked"
+    i=0; while [ ! -e "$BATS_TEST_TMPDIR/unpark" ] && [ \$i -lt 120 ]; do sleep 0.25; i=\$((i + 1)); done
+fi
+exec $realcat "\$@"
+SHIM
+    chmod +x "$FAKEBIN/cat"
+    # The parent backgrounds vm-exec and then becomes a `sleep` that never
+    # wait()s: once vm-exec is SIGKILLed it stays a zombie until that sleep ends.
+    PATH="$FAKEBIN:$PATH" VM_EXEC="$VM_EXEC" OUT="$BATS_TEST_TMPDIR/out1" PF="$BATS_TEST_TMPDIR/first.pid" \
+        bash -c '"$VM_EXEC" fake-vm first-driver >"$OUT" 2>&1 & echo $! > "$PF"; exec sleep 60' \
+        >/dev/null 2>&1 &
+    local parent=$! first _tick
+    for _tick in $(seq 1 300); do [ -s "$BATS_TEST_TMPDIR/parked" ] && break; sleep 0.1; done
+    [ -s "$BATS_TEST_TMPDIR/parked" ]
+    first=$($realcat "$BATS_TEST_TMPDIR/first.pid")
+    # The lock IS held right now (by the helper) ...
+    run ! flock -n "$(ODIR)/.lock" true
+    kill -KILL "$first"
+    local state=""
+    for _tick in $(seq 1 100); do
+        state=$(sed 's/.*) //' "/proc/$first/stat" 2>/dev/null | cut -d' ' -f1)
+        [ "$state" = Z ] && break
+        sleep 0.05
+    done
+    [ "$state" = Z ]                  # dead but NOT reaped
+    touch "$BATS_TEST_TMPDIR/unpark"
+    rm -f "$FAKEBIN/cat"
+
+    local rc=0
+    PATH="$FAKEBIN:$PATH" QDISTRO_VM_EXEC_REAP_LOCK_WAIT=3 \
+        timeout 60 "$VM_EXEC" fake-vm 'after-zombie' >"$BATS_TEST_TMPDIR/out2" 2>&1 &
+    local second=$!
+    await_exec_body after-zombie || { kill "$parent" "$second" 2>/dev/null; wait "$second" || true; false; }
+    # Still a zombie while the next vm-exec took the lock and launched.
+    state=$(sed 's/.*) //' "/proc/$first/stat" 2>/dev/null | cut -d' ' -f1)
+    kill -TERM "$second"; wait "$second" || rc=$?
+    kill "$parent" 2>/dev/null || true; wait "$parent" 2>/dev/null || true
+    [ "$state" = Z ]
+    run ! grep -q 'held the orphan registry lock' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
