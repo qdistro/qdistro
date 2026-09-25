@@ -131,6 +131,9 @@ echo "compositor pid before = $COMP_PID_BEFORE"
 # run's.
 QD22_RUN="$$-$(date +%s)-$RANDOM"
 QD22_LOG=/tmp/qd22-popup.$QD22_RUN.log
+# The LAUNCHER's own stdout/stderr (runuser/env/setsid/pid publication), kept
+# apart from $QD22_LOG because the probe truncates that one when it starts.
+QD22_LAUNCH_LOG=/tmp/qd22-popup.$QD22_RUN.launch.log
 QD22_PID=/tmp/qd22-popup.$QD22_RUN.pid
 QD22_CANCEL=/tmp/qd22-popup.$QD22_RUN.cancel
 QD22_INTENT=/tmp/qd22-popup.$QD22_RUN.intent
@@ -443,10 +446,19 @@ while the probe waits for the click, the scanout MUST show the proxy: an
 on the side the probe printed (`side=N` → the band spans y=68..99 for the
 default `x=240 y=100`), and `CLICK_TARGET` lies inside that band (verified
 live 2026-09-23 with virsh screenshot on a golden VM). If the S3 preview is
-ALL black while the probe is still waiting, that is an observation defect
-(scanout not repainting), not a calibration answer: record ERROR, quote the
-preview's timestamp against the probe's `created handle=`/`destroy handle=`
-journal lines, and do not click blind.
+ALL black, first establish whether the probe was still waiting when it was
+taken: its log has no `rc=` line yet, and the compositor journal has no
+`destroy handle=` for the S3 proxy before the preview's time (the VM clock can
+run seconds ahead of the host's; compare against a guest `date`). Every
+all-black S3 preview recorded from 2026-09-17 to 09-24 was taken AFTER the
+probe had exited -- by `rc=77` "no pointer on the seat" before pointer priming,
+or by its click timeout expiring while the old launch command held vm-exec --
+so the proxy was gone and black was the truth. Only a black preview taken while
+the probe is verifiably still waiting would be an observation defect (scanout
+not repainting); none has been observed (270/270 live frames showed the proxy,
+2026-09-25). Either way record ERROR, quote the preview's timestamp against the
+probe's `created handle=`/`destroy handle=` journal lines, and do not click
+blind.
 
 `show_popup` is v29-gated on a live input-grab serial, so this case cannot be
 faked: the probe must receive a real `chrome_button` press. It therefore
@@ -511,23 +523,40 @@ intent nothing was ever started.
 ```bash
 CURSOR=$(qdwin_apps_journal_cursor)
 
-"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null \
+"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_LAUNCH_LOG $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null \
     || { echo "ERROR: could not clear per-run state in the VM"; exit 1; }
 # SYNCHRONOUS: after this returns, an absent pid means "pending", not "never".
 "$QDWIN_VM_EXEC" "$VMNAME" "touch $QD22_INTENT" >/dev/null \
     || { echo "ERROR: could not record launch intent in the VM"; exit 1; }
 
+# DETACH THE LAUNCHER'S OWN STDIO, not just the probe's. vm-exec runs through
+# qga guest-exec with capture-output, and qga reports a command finished only
+# once EVERY holder of its stdout/stderr pipes has closed them. Without the
+# `</dev/null >$QD22_LAUNCH_LOG 2>&1` below, the backgrounded `sh -c` keeps those pipes
+# and this vm-exec does not return until the PROBE exits -- i.e. until its
+# click timeout expires and the proxy is destroyed. Every "black S3 preview"
+# ERROR from 2026-09-17 to 09-24 was that: the driver read CLICK_TARGET and
+# took the preview after the proxy was already gone, so the frame was
+# legitimately black (measured live 2026-09-25: the old launch blocked 45.14s
+# with --click-timeout 45; this one returns in 0.2s and 270/270 frames taken
+# while the proxy lived showed it; todo/test-blankscreenshots/qdwin-gui22-triage.md).
+# The launcher's output goes to a REGULAR FILE, $QD22_LAUNCH_LOG, not to
+# /dev/null: an error before the probe starts (runuser, env, setsid, the pid
+# publication) would otherwise vanish, and the only trace would be "probe never
+# published its pid". Both acknowledgement failures below print it.
+S3_LAUNCH_T0=$SECONDS
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      WAYLAND_DISPLAY=$ACTIVE_SOCKET \
      setsid sh -c '[ -e $QD22_CANCEL ] && exit 91; \
                    echo \$\$ > $QD22_PID.tmp && mv $QD22_PID.tmp $QD22_PID || exit 90; \
                    [ -e $QD22_CANCEL ] && { rm -f $QD22_PID; exit 91; }; \
-                   qdwin-nested-probe --destroy-with-popup --click-timeout 60 \
+                   qdwin-nested-probe --destroy-with-popup --click-timeout 120 \
                      --output $QD22_OUTPUT \
                      >$QD22_LOG 2>&1; \
-                   echo rc=\$? >>$QD22_LOG' &" \
+                   echo rc=\$? >>$QD22_LOG' </dev/null >$QD22_LAUNCH_LOG 2>&1 &" \
   >/dev/null
+echo "S3 launch returned after $((SECONDS - S3_LAUNCH_T0))s (expected ~0s; a launch that takes as long as the click timeout means the launcher pinned vm-exec again)"
 
 # Acknowledge ownership before doing anything that could fail.
 PROBE_PID=
@@ -538,7 +567,8 @@ for _ in $(seq 1 40); do
 done
 # Not fatal by itself: qd22_cleanup can still cancel a pending launcher. But the
 # step cannot proceed without a probe.
-[ -n "$PROBE_PID" ] || { echo "ERROR: probe never published its pid within 10s"; exit 1; }
+[ -n "$PROBE_PID" ] || { echo "ERROR: probe never published its pid within 10s; launcher output:"; \
+    "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LAUNCH_LOG 2>&1"; exit 1; }
 echo "probe group pid=$PROBE_PID"
 
 # The probe prints CLICK_TARGET once the chrome is attached and committed. The
@@ -554,8 +584,18 @@ for _ in $(seq 1 40); do
     sleep 0.5
 done
 [ -n "$TARGET" ] || { echo "ERROR: probe never printed CLICK_TARGET"; \
-    "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG"; exit 1; }
+    "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG; echo '--- launcher:'; cat $QD22_LAUNCH_LOG"; exit 1; }
 "$QDWIN_VM_EXEC" "$VMNAME" "grep '^PROXY_GEOM' $QD22_LOG"   # for assert 3.3
+# The probe prints CLICK_TARGET BEFORE it knows whether it can use a click (the
+# rc=77 "no pointer on the seat" exit comes after it), and it destroys the proxy
+# when it exits. So CLICK_TARGET alone does not mean the proxy is on screen:
+# confirm the probe is still WAITING before taking any preview. A preview taken
+# after `rc=` is legitimately black and says nothing about the capture path.
+if "$QDWIN_VM_EXEC" "$VMNAME" "grep -q '^rc=' $QD22_LOG"; then
+    echo "ERROR: the popup probe already exited (proxy destroyed) before the click; any S3 preview now would be black. Probe log:"
+    "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG"
+    exit 1
+fi
 CX=$(printf '%s' "$TARGET" | sed -nE 's/.*x=(-?[0-9]+).*/\1/p')
 CY=$(printf '%s' "$TARGET" | sed -nE 's/.*y=(-?[0-9]+).*/\1/p')
 echo "clicking chrome at ($CX, $CY)"
@@ -615,7 +655,7 @@ mismatch — report ERROR with that list, never a pass and never a silent skip.
 shell, or the compositor refusing the move). Report ERROR: the calibration
 could not be established, so nothing about the teardown path was tested.
 
-`rc=77` with `no chrome_button within 60s` means the precondition was not
+`rc=77` with `no chrome_button within 120s` means the precondition was not
 established — the cause is NOT determined by the timeout alone. Calibration
 (3.3) is the first thing to check, but broken chrome-button routing in the
 compositor produces exactly the same observation, and that would be a product
@@ -774,5 +814,5 @@ without establishing that the probe was gone — recovery, not a pass.
 
 Leftovers this scenario owns: the probe's proxies (destroyed by the probe
 itself), the probe group and S4's terminal (both reaped by `qd22_cleanup`), and
-`$QD22_LOG` in the VM's /tmp — per-run and deliberately kept, since it holds the
-popup step's verdict.
+`$QD22_LOG` and `$QD22_LAUNCH_LOG` in the VM's /tmp — per-run and deliberately
+kept, since they hold the popup step's verdict and its launcher's diagnostics.
