@@ -661,3 +661,101 @@ run_scen() {
         grep -q 'cp F F.raw' "$f"
     done
 }
+
+# ------------------------------------------- astra code review r1 fixes --------
+
+# The frame at $1 must either be absent together with its sidecar, or carry a
+# sidecar whose raw_pix_sha matches its own raw pixels (I6).
+assert_frame_consistent() {
+    local f=$1 rw rh k sha rest
+    if [ ! -e "$f" ]; then
+        [ ! -e "$f.raw" ] || { echo "orphan sidecar beside missing $f" >&2; return 1; }
+        return 0
+    fi
+    [ -f "$f.raw" ] || { echo "$f has no sidecar" >&2; return 1; }
+    read -r rw rh k sha rest < "$f.raw"
+    magick "$f" -crop "${rw}x${rh}+0+0" +repage "$TDIR/i6.png"
+    [ "$(pix "$TDIR/i6.png")" = "$sha" ] || { echo "I6 broken for $f" >&2; return 1; }
+}
+
+@test "review r1.1: a REFUSED capture through capture_virsh_screenshot leaves no frame and no stale sidecar" {
+    new_ledger     # bound to $CAPVM
+    local cap="$REPO_ROOT/scripts/vm/lib/capture-attest.sh"
+    # (a) no existing destination: refused -> nothing at the path
+    run bash -c '. "$1"; capture_virsh_screenshot wrongvm "$2"' _ "$cap" "$ADIR/f.png"
+    [ "$status" -ne 0 ]
+    [ ! -e "$ADIR/f.png" ]
+    [ ! -e "$ADIR/f.png.raw" ]
+    # (b) an existing attested frame (red), then a refused publication (blue)
+    magick -size 64x48 xc:red -define png:exclude-chunks=date,time "$SCREEN"
+    run bash -c '. "$1"; capture_virsh_screenshot "$2" "$3"' _ "$cap" "$CAPVM" "$ADIR/g.png"
+    [ "$status" -eq 0 ]
+    assert_frame_consistent "$ADIR/g.png"
+    magick -size 64x48 xc:blue -define png:exclude-chunks=date,time "$SCREEN"
+    run bash -c '. "$1"; capture_virsh_screenshot wrongvm "$2"' _ "$cap" "$ADIR/g.png"
+    [ "$status" -ne 0 ]
+    assert_frame_consistent "$ADIR/g.png"
+    # the refused blue bytes are not left behind under the image name
+    if [ -e "$ADIR/g.png" ]; then
+        [ "$(magick "$ADIR/g.png" -format '%[pixel:p{1,1}]' info:)" != "srgb(0,0,255)" ]
+    fi
+    [ -z "$(find "$ADIR" -maxdepth 1 -name '.qci-*' ! -name .qci-view-state)" ]
+}
+
+@test "review r1.2: simultaneous default view-copies of one source get distinct surviving paths" {
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    local i
+    for i in $(seq 1 6); do
+        ( "$VM_GUI" "$CAPVM" view-copy "$ADIR/s1.png" > "$TDIR/vc-$i.out" 2>"$TDIR/vc-$i.err" ) &
+    done
+    wait
+    cat "$TDIR"/vc-*.out | sort > "$TDIR/paths"
+    [ "$(wc -l < "$TDIR/paths")" -eq 6 ]
+    [ "$(sort -u "$TDIR/paths" | wc -l)" -eq 6 ]
+    local p
+    while IFS= read -r p; do
+        [ -f "$p" ]
+        assert_frame_consistent "$p"
+        dims "$p" >> "$TDIR/vdims"; echo >> "$TDIR/vdims"
+    done < "$TDIR/paths"
+    [ "$(sort -u "$TDIR/vdims" | grep -c .)" -eq 6 ]
+    [ -z "$(find "$ADIR" -maxdepth 1 -name '.qci-view-name.*')" ]
+    # explicit --out is unchanged: exactly that path
+    run "$VM_GUI" "$CAPVM" view-copy "$ADIR/s1.png" --out "$ADIR/explicit.png"
+    [ "$output" = "$ADIR/explicit.png" ]
+}
+
+# noctalia/03's own crop/hash lines, with /tmp/ redirected into $TDIR.
+noct03_block() {  # $1 = step1|step2
+    local md="$REPO_ROOT/tests/integration/qdwin-noctalia/03-clock-updates.md"
+    case "$1" in
+        step1) awk '/^read -r RAW_W/{on=1} on{print} /^\[ -n "\$STEP1_HASH" \]/{exit}' "$md" ;;
+        step2) awk '/^  magick \/tmp\/03-step2-advanced.png/{on=1} on{print} on && /step-2 bar crop pixel hash failed/{exit}' "$md" ;;
+    esac | sed "s#/tmp/#$TDIR/#g"
+}
+
+
+@test "review r1.3: noctalia/03 compares bar PIXELS, not crop-file timestamps" {
+    [ -n "$(noct03_block step1)" ] && [ -n "$(noct03_block step2)" ]
+    noct03_block step1 | grep -q qci_view_pix_sha
+    "$VM_GUI" "$CAPVM" screenshot "$TDIR/03-step1-now.png" >/dev/null 2>&1
+    "$VM_GUI" "$CAPVM" screenshot "$TDIR/03-step2-advanced.png" >/dev/null 2>&1
+    # step 1 now, step 2's crop written >1 s later: new PNG timestamps
+    bash -c '. "$1"; eval "$2"; echo "$STEP1_HASH" > "$3"; echo "$BAR_CROP" > "$4"' \
+        _ "$VIEWLIB" "$(noct03_block step1)" "$TDIR/h1" "$TDIR/barcrop"
+    [ "$(cat "$TDIR/barcrop")" = "1280x48+0+0" ]
+    cp "$TDIR/03-step1-clock.png" "$TDIR/crop1.png"
+    sleep 1.2
+    run bash -c '. "$1"; BAR_CROP=$(cat "$3"); eval "$2"; echo "$STEP2_HASH"' _ "$VIEWLIB" "$(noct03_block step2)" "$TDIR/barcrop"
+    [ "$status" -eq 0 ]
+    # the hazard is real here: the two crop FILES differ ...
+    ! cmp -s "$TDIR/crop1.png" "$TDIR/03-step2-clock.png"
+    # ... and the scenario's hashes are still equal
+    [ "$output" = "$(cat "$TDIR/h1")" ]
+    # a pixel change inside the bar makes them unequal
+    magick "$SCREEN" -fill red -draw 'point 5,5' -define png:exclude-chunks=date,time "$SCREEN"
+    "$VM_GUI" "$CAPVM" screenshot "$TDIR/03-step2-advanced.png" >/dev/null 2>&1
+    run bash -c '. "$1"; BAR_CROP=$(cat "$3"); eval "$2"; echo "$STEP2_HASH"' _ "$VIEWLIB" "$(noct03_block step2)" "$TDIR/barcrop"
+    [ "$status" -eq 0 ]
+    [ "$output" != "$(cat "$TDIR/h1")" ]
+}
