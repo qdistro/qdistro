@@ -639,7 +639,8 @@ chown -R admin:users /home/admin/.config/systemd/user
 #       This must run BEFORE qdistro-labwc.service first starts (step below):
 #       the helper seeds ~/.config/lxqt/labwc itself, so startlxqtwayland's
 #       first-run copy is skipped and cannot overwrite the edit. The helper
-#       fails closed if swaybg is missing and replaces any other swaybg line.
+#       fails closed if swaybg is missing, replaces any other swaybg line,
+#       and drops the distro swayidle `wlopm --off` idle-blanking line.
 #       Test image only; the product's labwc defaults are untouched.
 install_test_wallpaper
 # Runs as root ($SRC is root's 0700 home), then hands the tree to admin.

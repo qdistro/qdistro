@@ -29,6 +29,11 @@
 #    any earlier copy of ours), so no second background client races ours for
 #    the background layer. labwc -C reads autostart only from that directory,
 #    so there is no system-wide file that could also start one.
+#  - Removes every uncommented line that runs swayidle. The distro autostart
+#    runs `swayidle -w timeout 300 "wlopm --off *" ...`: wlopm is not in the
+#    image today, so the line is inert, but if it is ever installed the display
+#    goes DPMS-off after 5 idle minutes -- mid-scenario -- and every capture
+#    after that is black again. A test VM has no reason to idle-blank.
 #  - Appends one marked swaybg line in tile mode: tile draws the image
 #    unscaled, so on the lane's 1280x800 output the frame outside windows is
 #    pixel-identical to the asset, and at any other size it is still the
@@ -64,11 +69,13 @@ auto="$cfg/autostart"
 [ -f "$auto" ] || : > "$auto"
 
 tmp="$auto.qdistro-tmp"
-# Drop our marker and every uncommented swaybg invocation; keep the rest.
+# Drop our marker and every uncommented swaybg or swayidle invocation; keep
+# the rest.
 awk -v m="$marker" '
     $0 == m { next }
     /^[[:space:]]*#/ { print; next }
     /(^|[^[:alnum:]_-])swaybg([^[:alnum:]_-]|$)/ { next }
+    /(^|[^[:alnum:]_-])swayidle([^[:alnum:]_-]|$)/ { next }
     { print }
 ' "$auto" > "$tmp"
 printf '%s\n%s\n' "$marker" \
