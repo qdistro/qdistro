@@ -62,28 +62,50 @@ cd /tmp/qdshell-tests
 curl -s -o tests.tar http://10.0.2.2:8765/qdshell-tests.tar
 tar -xf tests.tar
 
-if [ ! -x /usr/bin/qmltestrunner6 ]; then
-    echo "qmltestrunner6 not installed in VM — install qt6-declarative-tools"
+QMLTEST_BIN=${QMLTESTRUNNER:-/usr/bin/qmltestrunner6}
+if [ ! -x "$QMLTEST_BIN" ]; then
+    echo "qmltestrunner not executable: $QMLTEST_BIN — install qt6-declarative-tools" >&2
     exit 2
+fi
+
+# A missing match used to leave the literal "Tests/tst_*.qml", produce no
+# Totals line, and count as 0 failed. A crash after a clean Totals line
+# passed because `|| true` discarded the runner status.
+shopt -s nullglob
+qml_files=(Tests/tst_*.qml)
+shopt -u nullglob
+if [ "${#qml_files[@]}" -eq 0 ]; then
+    echo "no Tests/tst_*.qml — refusing an empty qmltest suite" >&2
+    exit 1
 fi
 
 PASS=0
 FAIL=0
 FILES=0
-for t in Tests/tst_*.qml; do
+for t in "${qml_files[@]}"; do
     FILES=$((FILES + 1))
-    out="$(QT_QPA_PLATFORM=offscreen qmltestrunner6 -input "$t" 2>&1 || true)"
-    line="$(echo "$out" | grep -E '^Totals:' | tail -1)"
+    rc=0
+    out="$(QT_QPA_PLATFORM=offscreen "$QMLTEST_BIN" -input "$t" 2>&1)" || rc=$?
+    line="$(printf '%s\n' "$out" | grep -E '^Totals:' | tail -1 || true)"
+    if [ -z "$line" ]; then
+        printf 'FAIL  %s: no Totals line (exit %d)\n' "$(basename "$t")" "$rc" >&2
+        FAIL=$((FAIL + 1))
+        continue
+    fi
     p="$(echo "$line" | sed -nE 's/.*Totals: ([0-9]+) passed.*/\1/p')"
     f="$(echo "$line" | sed -nE 's/.* ([0-9]+) failed.*/\1/p')"
     p="${p:-0}"; f="${f:-0}"
     PASS=$((PASS + p))
     FAIL=$((FAIL + f))
     if [ "$f" -gt 0 ]; then
-        printf 'FAIL  %s: %d passed, %d failed\n' "$(basename $t)" "$p" "$f"
-        echo "$out" | grep -E '^FAIL' | sed 's/^/  /'
+        printf 'FAIL  %s: %d passed, %d failed (exit %d)\n' "$(basename "$t")" "$p" "$f" "$rc"
+        echo "$out" | grep -E '^FAIL' | sed 's/^/  /' || true
+    elif [ "$rc" -ne 0 ]; then
+        printf 'FAIL  %s: qmltestrunner exited %d after reporting %d passed, 0 failed\n' \
+            "$(basename "$t")" "$rc" "$p" >&2
+        FAIL=$((FAIL + 1))
     else
-        printf 'OK    %s: %d passed\n' "$(basename $t)" "$p"
+        printf 'OK    %s: %d passed\n' "$(basename "$t")" "$p"
     fi
 done
 
