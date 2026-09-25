@@ -40,17 +40,13 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 #     never re-fires on a runtime move, so it is a boot precondition,
 #     not a per-move assertion.
 # Mirrors the journalctl style in noct_layer_mapped_count_since.
-# Count runtime cursor-plane remaps with nonzero alpha AFTER a journal cursor
-# captured immediately before the move. Cursor-scoped, not a --since window: a
-# same-second stale remap from a prior move can no longer satisfy the assert.
-cursor_layer_nonzero_alpha_after() {
-    local cur="$1"
-    "$QDWIN_VM_EXEC" "$VMNAME" \
-        "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --after-cursor '$cur' --no-pager\" \
-            | grep 'mapped on cursor_layer' \
-            | grep -oE 'nonzero_alpha=[0-9]+' | grep -vc 'nonzero_alpha=0$'" \
-        2>/dev/null | tail -1
-}
+# cursor_layer_nonzero_alpha_after and noct_wait_cursor_layer_nonzero_alpha
+# live in noctalia-helpers.sh (sourced above). The count is cursor-scoped,
+# not a --since window: a same-second stale remap from a prior move cannot
+# satisfy it. The waiter polls that same predicate (mapped on cursor_layer,
+# nonzero_alpha>0) until it is true or NOCT_CURSOR_WAIT_S (default 10s,
+# every NOCT_CURSOR_POLL_S, default 0.25s). A fixed sleep races journal
+# visibility when many GUI workers share the host.
 # Capture the current qdwin-compositor user-journal cursor (empty string on
 # failure). Call immediately BEFORE a cursor move to scope the per-move assert.
 compositor_journal_cursor() {
@@ -88,8 +84,12 @@ hard-fails the journal asserts even though the cursor code is fine.
 ```bash
 CUR_STEP1=$(compositor_journal_cursor)
 qdwin_mouse_move 1000 600
-sleep 1
+# Bounded journal poll (default 10s), not a fixed sleep. Same condition as
+# assert 1.1. Screenshot stays soft corroboration and still runs if the
+# waiter times out; the exit below is the loud failure.
+noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP1" || step1_cursor_rc=$?
 qdwin_screenshot /tmp/04-step1-wallpaper-area.png
+[ "${step1_cursor_rc:-0}" -eq 0 ] || exit 1
 ```
 
 **Assert (1.1) — compositor evidence (load-bearing):** the cursor
@@ -114,8 +114,9 @@ NOT required to pass (the hw-cursor plane is invisible to virsh).
 ```bash
 CUR_STEP2=$(compositor_journal_cursor)
 qdwin_mouse_move 1130 15
-sleep 1
+noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP2" || step2_cursor_rc=$?
 qdwin_screenshot /tmp/04-step2-clock-hover.png
+[ "${step2_cursor_rc:-0}" -eq 0 ] || exit 1
 ```
 
 **Assert (2.1) — compositor evidence (load-bearing):** the cursor is
@@ -146,8 +147,9 @@ for x in 100 300 500 700 900 1100 1260; do
  qdwin_mouse_move "$x" 15
  sleep 0.2
 done
-sleep 1
+noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP3" || step3_cursor_rc=$?
 qdwin_screenshot /tmp/04-step3-sweep-end.png
+[ "${step3_cursor_rc:-0}" -eq 0 ] || exit 1
 ```
 
 **Assert (3.1) — compositor evidence (load-bearing):** the cursor
@@ -172,7 +174,10 @@ None. Cursor parked at (1260, 15) is fine.
 The boot precondition (default cursor sprite registered at session
 start) plus the load-bearing compositor-evidence asserts (1.1, 2.1,
 3.1: cursor re-mapped on cursor_layer with nonzero_alpha>0 after each
-move) plus 3.2/3.3 (session alive, no protocol errors) pass. Screenshot-based
+move) plus 3.2/3.3 (session alive, no protocol errors) pass. Each
+load-bearing assert is preceded by `noct_wait_cursor_layer_nonzero_alpha`,
+which polls that same journal predicate until it holds or
+`NOCT_CURSOR_WAIT_S` (default 10s) expires, then fails loud. Screenshot-based
 cursor-position checks are soft corroboration only — the hardware
 cursor plane is not captured by `virsh screenshot`, so their absence
 is NOT a failure. Soft asserts (2.2) may be downgraded to "info only"
