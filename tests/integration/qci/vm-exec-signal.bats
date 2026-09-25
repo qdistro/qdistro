@@ -1787,6 +1787,17 @@ run_second_until_launched() {   # <token> [stderr line to wait for before TERM]
     QDISTRO_VM_KILL_VERIFY_TIMEOUT=10 term_vm_exec "guest identity pinned"
     [ "$TERM_RC" -eq 143 ]
     [ "$(registry_entries)" -eq 0 ]
+
+    # The same TERM landing INSIDE registration (a 1s `mv` holds it there; bash
+    # runs the trap right after mv returns) must not leave the record behind.
+    local realmv; realmv=$(command -v mv)
+    printf '#!/bin/sh\nsleep 1\nexec %s "$@"\n' "$realmv" > "$FAKEBIN/mv"
+    chmod +x "$FAKEBIN/mv"
+    make_signal_virsh 987654 0
+    QDISTRO_VM_KILL_VERIFY_TIMEOUT=10 term_vm_exec "guest identity pinned"
+    rm -f "$FAKEBIN/mv"
+    [ "$TERM_RC" -eq 143 ]
+    [ "$(registry_entries)" -eq 0 ]
 }
 
 @test "vm-exec: an UNVERIFIED signal cleanup and a poll-error exit KEEP the record" {

@@ -1324,13 +1324,18 @@ orphan_register() {
     fi
     uuid=$(domain_uuid)
     tmp="$QD_ORPHAN_DIR/.new.$$"
+    # Name the record BEFORE publishing it. bash runs a deferred signal trap the
+    # moment `mv` returns, so assigning after the rename left a window in which
+    # the handler (and then EXIT) saw no record and leaked a published one.
+    # Retracting a name that was never published is a harmless `rm -f`.
+    QD_ORPHAN_ENTRY="$QD_ORPHAN_DIR/$$-$me_start"
     if ! printf '%s %s %s %s\n' "$PID" "$GUEST_START_TIME" "$GUEST_BOOT_ID" "$uuid" >"$tmp" 2>/dev/null \
-       || ! mv -f "$tmp" "$QD_ORPHAN_DIR/$$-$me_start" 2>/dev/null; then
+       || ! mv -f "$tmp" "$QD_ORPHAN_ENTRY" 2>/dev/null; then
+        QD_ORPHAN_ENTRY=""
         rm -f "$tmp" 2>/dev/null || true
         echo "[vm-exec] WARN: orphan registry: cannot write a record in $QD_ORPHAN_DIR; guest PID $PID is NOT recorded and will not be reaped if this vm-exec is SIGKILLed" >&2
         return 0
     fi
-    QD_ORPHAN_ENTRY="$QD_ORPHAN_DIR/$$-$me_start"
     return 0
 }
 
