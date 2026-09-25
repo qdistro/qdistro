@@ -355,3 +355,9 @@ _render_prompt() {
     printf '%s' "$p" | grep -q 'YOUR SHELL TOOL SIGKILLS every process'
     printf '%s' "$p" | grep -q 'FOREGROUND of the command that owns it'
 }
+
+@test "runtime prompt: explains vm-exec exit 75 and says to retry once (blankss-pg13 r2)" {
+    local p; p=$(_render_prompt)
+    printf '%s' "$p" | grep -q 'vm-exec EXIT 75 means it REFUSED TO LAUNCH'
+    printf '%s' "$p" | grep -q 'retry the SAME command once before diagnosing'
+}

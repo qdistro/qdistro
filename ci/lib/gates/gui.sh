@@ -945,6 +945,12 @@ Rules:
   vm-exec in the FOREGROUND of the command that owns it, or \`wait\` for it
   before that command returns (permissions-gui/13, 2026-09-25: two such orphans
   released by one \`touch s1-go\` sent two extra requests).
+  vm-exec EXIT 75 means it REFUSED TO LAUNCH, and nothing was started: an
+  orphaned guest command from an earlier SIGKILLed vm-exec on this VM could not
+  yet be confirmed gone, or another vm-exec was still cleaning one up. It is
+  retryable. A slow guest's cleanup usually resolves on the very next call, so
+  retry the SAME command once before diagnosing, and quote the refusal line in
+  your report if it repeats.
 - NEVER put a PIPE on vm-exec's stderr in your driver script. Concretely, do
   NOT open your driver with \`exec > >(tee "\$LOG") 2>&1\`, and do not write
   \`out=\$(vm-exec ... 2>&1)\` or \`vm-exec ... 2>&1 | reader\`. This is the
