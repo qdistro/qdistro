@@ -276,6 +276,28 @@ qci_view_publish() {
     return "$rc"
 }
 
+# Reserve the next free default view name for STEM under the attempt's state
+# lock: the smallest n with no STEM.view-n.png, no sidecar and no live marker.
+# Creates and echoes the marker `<dir>/.qci-view-name.<base>.view.<n>`; the
+# caller removes it after publishing. Args: stem.
+_qci_view_reserve_name() {
+    local stem=$1 state fd n=1 dir base marker
+    state=$(qci_view_state) || return 1
+    dir=$(dirname -- "$stem"); base=$(basename -- "$stem")
+    exec {fd}>>"$state" || return 1
+    flock -x "$fd" || { exec {fd}>&-; return 1; }
+    while :; do
+        marker="$dir/.qci-view-name.$base.view.$n"
+        if [ ! -e "$stem.view-$n.png" ] && [ ! -e "$stem.view-$n.png.raw" ] \
+           && ( set -o noclobber; : > "$marker" ) 2>/dev/null; then
+            break
+        fi
+        n=$((n + 1))
+    done
+    exec {fd}>&-
+    printf '%s\n' "$marker"
+}
+
 # F2: `view-copy`. Write a freshly padded copy of ANY image, for a second look
 # or for an image the harness did not just hand over (a scenario crop).
 #   qci_view_copy SRC [--source CAPTURE --crop WxH+X+Y] [--out PATH]
@@ -286,7 +308,7 @@ qci_view_publish() {
 # lineage (rejected, diag, stale; a stale `.meta` is copied beside the view).
 # A view never gets a ledger row. Echoes the new path.
 qci_view_copy() {
-    local src="" cap="" geom="" out="" arg rc=0 tmp stem n kind tags="" sline skind cline ckind src_for_row
+    local src="" cap="" geom="" out="" arg rc=0 tmp stem kind tags="" sline skind cline ckind src_for_row reserve=""
     while [ "$#" -gt 0 ]; do
         arg=$1; shift
         case "$arg" in
@@ -308,12 +330,7 @@ qci_view_copy() {
     fi
     command -v magick >/dev/null 2>&1 || { echo "view-copy: ImageMagick 'magick' is required" >&2; return 2; }
     src=$(readlink -f -- "$src") || return 2
-    if [ -z "$out" ]; then
-        stem=${src%.png}; stem=${stem%.PNG}
-        n=1; while [ -e "$stem.view-$n.png" ] || [ -e "$stem.view-$n.png.raw" ]; do n=$((n + 1)); done
-        out="$stem.view-$n.png"
-    fi
-    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    [ -z "$out" ] || case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/qci-view-copy.XXXXXX") || return 2
     qci_view_raw_extract "$src" "$tmp/raw.png" || { rm -rf -- "$tmp"; echo "view-copy: cannot read $src" >&2; return 2; }
     # Status inherited from SRC.
@@ -351,8 +368,19 @@ qci_view_copy() {
         src_for_row=$src
     fi
     [ -z "$tags" ] || kind="$kind$(printf '%s' "$tags" | tr ',' '\n' | awk 'NF && !s[$0]++ {printf ",%s", $0}')"
+    if [ -z "$out" ]; then
+        # THE DEFAULT NAME IS RESERVED UNDER THE ATTEMPT LOCK. Choosing it
+        # before publication let simultaneous view-copies of one source all
+        # pick `.view-1.png` and overwrite one another (astra code review r1,
+        # finding 2). A reservation marker, created while the attempt's state
+        # lock is held, makes each call's name its own until it publishes.
+        stem=${src%.png}; stem=${stem%.PNG}
+        reserve=$(_qci_view_reserve_name "$stem") || { echo "view-copy: could not reserve an output name for $src" >&2; rm -rf -- "$tmp"; return 2; }
+        out="$stem.view-${reserve##*.}.png"
+    fi
     rc=0
     qci_view_publish "$tmp/raw.png" "$out" "$kind" "$src_for_row" qci_view_mv_publish || rc=$?
+    [ -z "$reserve" ] || rm -f -- "$reserve"
     if [ "$rc" -eq 0 ]; then
         if [ -f "$src.meta" ]; then cp -T -- "$src.meta" "$out.meta" 2>/dev/null || true
         elif [ -n "$cap" ] && [ -f "$cap.meta" ]; then cp -T -- "$cap.meta" "$out.meta" 2>/dev/null || true
