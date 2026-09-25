@@ -120,9 +120,13 @@ pass "qdshell bar-content layer surface mapped (desktop painted)"
 
 shot="$ART/qdwin-cursor-paint-$$.png"
 qdwin_screenshot "$shot" >/dev/null
+# Measure the RAW frame: harness captures carry a unique black margin
+# (view-geometry.sh), which is not scanout content.
+shot_raw=$(mktemp "${TMPDIR:-/tmp}/qdwin-cursor-paint-raw.XXXXXX")
+qci_view_raw_extract "$shot" "$shot_raw" || fail "could not read the raw content of $shot"
 # Non-black sample: a black scanout (crashed qdshell) reads ~0; a painted
 # desktop is well above. Threshold 1% is comfortably between.
-nonblack=$(python3 -W ignore - "$shot" <<'PY'
+nonblack=$(python3 -W ignore - "$shot_raw" <<'PY'
 import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert("RGB").resize((192, 108))
@@ -209,13 +213,9 @@ fi
 # screenshot is the double-cursor regression. The agent also confirms the
 # desktop painted with a top bar, catching paint failures a pixel-count
 # threshold can miss.
-read -r SW SH < <(python3 - "$shot" <<'PY'
-import sys
-from PIL import Image
-w, h = Image.open(sys.argv[1]).size
-print(w, h)
-PY
-)
+# Raw screen size (the sidecar's, not the padded PNG's): it drives QMP mapping.
+read -r SW SH < <(qci_view_raw_dims "$shot")
+rm -f "$shot_raw"
 export QDWIN_SCREEN_W=$SW QDWIN_SCREEN_H=$SH
 midx=$(( SW / 2 )); midy=$(( SH / 2 ))
 qdwin_mouse_move "$midx" "$midy"

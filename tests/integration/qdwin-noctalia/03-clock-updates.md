@@ -43,9 +43,14 @@ noct_screenshot_awake /tmp/03-step1-now.png
 
 # Crop the FULL-WIDTH top bar strip, not a top-left corner: Noctalia centres
 # the clock capsule in the bar, so a narrow 250x30 left crop misses it entirely
-# and OCR comes back empty. An over-wide width clamps to the image width, so
-# this is resolution-robust.
-magick /tmp/03-step1-now.png -crop 2560x48+0+0 /tmp/03-step1-clock.png
+# and OCR comes back empty. The width is the RAW screen width from the frame's
+# `.raw` sidecar: the harness pads every frame with a black right/bottom
+# margin of a different size per capture, so an over-wide crop would take in
+# the margin and `+repage` is needed so the file does not record the padded
+# canvas size. Either would make the two crop hashes differ on every run.
+read -r RAW_W _ < <(qci_view_raw_dims /tmp/03-step1-now.png)
+BAR_CROP="${RAW_W}x48+0+0"
+magick /tmp/03-step1-now.png -crop "$BAR_CROP" +repage /tmp/03-step1-clock.png
 STEP1_HASH=$(sha256sum /tmp/03-step1-clock.png | awk '{print $1}')
 [ -n "$STEP1_HASH" ] || { echo "FAIL: step-1 bar crop hash is empty"; exit 1; }
 OCR=$(tesseract /tmp/03-step1-clock.png stdout 2>/dev/null || true)
@@ -88,7 +93,7 @@ STEP2_HASH=""
 for _ in $(seq 1 15); do
   sleep 5
   noct_screenshot_awake /tmp/03-step2-advanced.png
-  magick /tmp/03-step2-advanced.png -crop 2560x48+0+0 /tmp/03-step2-clock.png
+  magick /tmp/03-step2-advanced.png -crop "$BAR_CROP" +repage /tmp/03-step2-clock.png
   STEP2_HASH=$(sha256sum /tmp/03-step2-clock.png | awk '{print $1}')
   [ "$STEP1_HASH" != "$STEP2_HASH" ] && break
 done
@@ -100,6 +105,15 @@ echo "step2 OCR diagnostic: $OCR2"
   echo "FAIL: clock bar crop did not repaint within 75s after VM time advanced"
   exit 1
 }
+```
+
+To LOOK at a bar crop, never open the crop file itself (two crops of the
+same size read as black where they repeat): open a view-copy, which records
+the crop's lineage and gets a size of its own:
+
+```bash
+$QDISTRO_REPO/scripts/vm/vm-gui "$VMNAME" view-copy /tmp/03-step2-clock.png \
+    --source /tmp/03-step2-advanced.png --crop "$BAR_CROP"
 ```
 
 **Assert (2.1):** the bar crop after the clock advance differs from

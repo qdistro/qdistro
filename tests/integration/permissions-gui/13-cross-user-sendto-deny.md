@@ -206,7 +206,7 @@ a shell loop:
    stop capturing:
 
    ```bash
-   cp /tmp/13-s2-denied-N.png /tmp/13-s2-denied.png
+   $VMGUI "$VM" view-copy /tmp/13-s2-denied-N.png --out /tmp/13-s2-denied.png
    ```
 
 4. Otherwise, if N < 5: `sleep 2`, increment N, and go back to 1.
@@ -216,10 +216,14 @@ a shell loop:
    frame to the canonical path and grade that below:
 
    ```bash
-   cp /tmp/13-s2-denied-5.png /tmp/13-s2-denied.png
+   $VMGUI "$VM" view-copy /tmp/13-s2-denied-5.png --out /tmp/13-s2-denied.png
    ```
 
 Keep every numbered frame; do not delete or overwrite them.
+The canonical copy is made with `view-copy`, not `cp`: it carries the frame's
+raw identity (`.raw` sidecar, lineage to frame N) and a size of its own. You
+have already looked at frame N, and a same-size twin of a frame you have seen
+is read as black where it repeats.
 
 **Assert (open and grade /tmp/13-s2-denied.png by vision)**:
 - `(no selection)` visible again.
