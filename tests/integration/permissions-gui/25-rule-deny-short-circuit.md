@@ -101,8 +101,24 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 
 **Assert**:
 - `/tmp/25-s3-stillempty.png` shows the same empty admin app.
-- `/tmp/25-work.log` contains `DENIED` on its own line.
-- `GetPending` output is `array []`.
+- `DENIED` is on its own line in the `bg_log 25-work` output printed
+  by this step, and the same command's `rc=$(bg_rc 25-work)` is `1`.
+  Read both from that bg record before Teardown. Do not re-read
+  `/tmp/25-work.log` (or a later copy of that path): Teardown
+  deletes it, so the path is empty even when `bg_log` already
+  printed `DENIED`.
+- `GetPending` shows no pending request. `dbus-send --print-reply`
+  prints an empty array as two lines, `array [` then `]` on the
+  next line (a `method return` header and pretty-printer indent
+  may precede the tokens):
+
+```
+array [
+]
+```
+
+  A single-line `array []` is NOT what dbus-send prints. Do not
+  grep for that literal.
 
 ### S4 — audit row carries `source='rule'`, `decision=0`, cache empty
 
