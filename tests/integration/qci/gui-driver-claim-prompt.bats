@@ -34,19 +34,20 @@ _render_prompt() {
 
 # The indented command lines of the CLAIM bullet, guest paths rebased.
 _claim_snippet() {
+    local lib=${1:-$REPO_ROOT/ci/lib/guest/gui-waiters.sh}
     _render_prompt \
-        | sed -n '/^- CLAIM THE GUEST DRIVER/,/^  The claim is held/p' \
+        | sed -n '/^- CLAIM THE GUEST DRIVER/,/^  Piping the decoded script/p' \
         | sed -n 's/^      //p' \
-        | sed -e "s#/tmp/qci-gui-waiters.sh#$REPO_ROOT/ci/lib/guest/gui-waiters.sh#" \
+        | sed -e "s#/tmp/qci-gui-waiters.sh#$lib#" \
               -e "s#/tmp/qci/#$BATS_TEST_TMPDIR/qci/#"
 }
 
 @test "runtime prompt tells the guest driver to claim a per-scenario lock" {
     local p; p=$(_render_prompt)
-    printf '%s\n' "$p" | grep -qx '      source /tmp/qci-gui-waiters.sh'
-    printf '%s\n' "$p" | grep -qx "      qci_claim_driver /tmp/qci/$SLUG/driver.lock"
+    printf '%s\n' "$p" | grep -qx '      source /tmp/qci-gui-waiters.sh || exit 2'
+    printf '%s\n' "$p" | grep -qx "      qci_claim_driver /tmp/qci/$SLUG/driver.lock || exit 2"
     printf '%s\n' "$p" | grep -q 'ERROR: a second guest driver is already running'
-    printf '%s\n' "$p" | grep -q 'do not delete the lock file'
+    printf '%s\n' "$p" | grep -q 'do not delete the lock'
 }
 
 @test "the prompt's claim lines stop a second concurrent driver" {
@@ -89,6 +90,81 @@ _claim_snippet() {
 }
 
 @test "documented prompt template carries the same claim rule" {
-    grep -q 'qci_claim_driver /tmp/qci/<slug>/driver.lock' \
+    grep -q 'qci_claim_driver /tmp/qci/<slug>/driver.lock || exit 2' \
         "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
+}
+
+@test "the prompt's claim lines fail closed when the library is missing" {
+    local snip side
+    snip=$(_claim_snippet "$BATS_TEST_TMPDIR/no-such-waiters.sh")
+    side="$BATS_TEST_TMPDIR/side"
+    run bash -c "$snip"'
+        echo RAN > "$1"
+    ' _ "$side"
+    [ "$status" -eq 2 ]
+    [ ! -e "$side" ]
+}
+
+@test "the prompt's claim lines fail closed on a stale library without the claim" {
+    local snip side stale
+    stale="$BATS_TEST_TMPDIR/old-waiters.sh"
+    sed '/^qci_claim_driver()/,$d' "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" > "$stale"
+    ! grep -q '^qci_claim_driver()' "$stale"
+    bash -n "$stale"
+    snip=$(_claim_snippet "$stale")
+    side="$BATS_TEST_TMPDIR/side"
+    run bash -c "$snip"'
+        echo RAN > "$1"
+    ' _ "$side"
+    [ "$status" -eq 2 ]
+    [ ! -e "$side" ]
+}
+
+@test "a background job the driver started keeps the claim after the driver exits" {
+    # This is the lifetime the prompt states ("until the driver shell AND every
+    # background process it started have exited"): a finished driver whose
+    # bg_start job still runs must still stop a second driver.
+    local snip side ready fifo
+    snip=$(_claim_snippet)
+    side="$BATS_TEST_TMPDIR/second-side"
+    ready="$BATS_TEST_TMPDIR/child-ready"
+    fifo="$BATS_TEST_TMPDIR/child-hold"
+    mkfifo "$fifo"
+    bash -c "$snip"'
+        ( : > "$1"; exec 3<>"$2"; read -t 30 -u 3 || true ) </dev/null >/dev/null 2>&1 &
+    ' _ "$ready" "$fifo"
+    local i
+    for i in $(seq 1 50); do [ -f "$ready" ] && break; sleep 0.1; done
+    [ -f "$ready" ]
+    run timeout 5 bash -c "$snip"'
+        echo RAN > "$1"
+    ' _ "$side"
+    # Release the child: a writer on the fifo ends its read.
+    echo go > "$fifo"
+    [ "$status" -eq 1 ]
+    [ ! -e "$side" ]
+}
+
+@test "two different scenarios claim concurrently without contending" {
+    local snip other side ready fifo
+    snip=$(_claim_snippet)
+    other=${snip//$SLUG/qdlocker_09-capture-indicators}
+    [ "$other" != "$snip" ]
+    side="$BATS_TEST_TMPDIR/other-side"
+    ready="$BATS_TEST_TMPDIR/ready"
+    fifo="$BATS_TEST_TMPDIR/hold"
+    mkfifo "$fifo"
+    bash -c "$snip"'
+        : > "$1"; exec 3<>"$2"; read -t 30 -u 3 || true
+    ' _ "$ready" "$fifo" &
+    local holder=$! i
+    for i in $(seq 1 50); do [ -f "$ready" ] && break; sleep 0.1; done
+    [ -f "$ready" ] || { kill "$holder"; wait "$holder" || true; return 1; }
+    run timeout 5 bash -c "$other"'
+        echo RAN > "$1"
+    ' _ "$side"
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [ "$(cat "$side")" = RAN ]
 }
