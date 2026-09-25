@@ -150,11 +150,17 @@ done
 # journal denial since the subscribe cursor becomes a skip; every other
 # missing-approval cause keeps the FAIL below it.
 rdp_skip_if_no_pipewire_output() {
-  local denial
-  denial=$(qdwin_apps_log_since_cursor "$SUBSCRIBE_CURSOR" \
-    "subscribe_view_stream denied handle=${HANDLE}([^0-9]|$).*(no pw output|no free pipewire output)" || true)
-  if printf '%s\n' "$denial" | grep -Eq 'no pw output|no free pipewire output'; then
-    echo "SKIP: qdwin_apps_log_since_cursor since subscribe cursor shows subscribe_view_stream denied handle=${HANDLE} (no pw output / no free pipewire output); bake has no free pipewire output"
+  # The compositor's no-output record is exactly
+  #   qdwin: subscribe_view_stream denied handle=N peer_label="..." (no pw output)
+  # with the reason outside the quotes and at the end of the line
+  # (qdwin.c weston_log). A journalctl prefix may precede "qdwin:".
+  # peer_label text, a different parenthetical reason, and a quoted
+  # copy of the event must not skip.
+  local denial record
+  record="qdwin: subscribe_view_stream denied handle=${HANDLE} peer_label=\"[^\"]*\" \\(no pw output\\)\$"
+  denial=$(qdwin_apps_log_since_cursor "$SUBSCRIBE_CURSOR" "$record" || true)
+  if printf '%s\n' "$denial" | grep -Eq "$record"; then
+    echo "SKIP: qdwin_apps_log_since_cursor since subscribe cursor shows subscribe_view_stream denied handle=${HANDLE} peer_label=\"...\" (no pw output) at end of record; bake has no pipewire output"
     exit 77   # bats convention for skip
   fi
   return 0

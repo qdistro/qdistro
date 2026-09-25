@@ -56,26 +56,23 @@ qdwin_apps_log_since_cursor() {
     ! printf '%s\n' "$STEP" | grep -A2 'invalid RDP port' | grep -q 'rdp_skip_if_no_pipewire_output'
 }
 
-@test "journal (no pw output) since the subscribe cursor skips" {
-    STUB_JOURNAL='qdwin: subscribe_view_stream denied handle=7 peer_label="admin" (no pw output)'
+@test "journal (no pw output) at end of the compositor record skips" {
+    STUB_JOURNAL='Sep 24 12:00:00 host qdwin[1]: qdwin: subscribe_view_stream denied handle=7 peer_label="admin" (no pw output)'
     run rdp_skip_if_no_pipewire_output
     [ "$status" -eq 77 ]
     [[ "$output" == SKIP:*qdwin_apps_log_since_cursor* ]]
-    [[ "$output" == *"(no pw output"* ]]
-    [[ "$output" == *"no free pipewire output"* ]]
+    [[ "$output" == *"(no pw output)"* ]]
     [[ "$output" == *"handle=7"* ]]
+    [[ "$output" != *"no free pipewire output"* ]]
 }
 
-@test "journal no free pipewire output since the subscribe cursor skips" {
-    STUB_JOURNAL='qdwin: subscribe_view_stream denied handle=7 peer_label="admin" no free pipewire output'
-    run rdp_skip_if_no_pipewire_output
-    [ "$status" -eq 77 ]
-    [[ "$output" == SKIP:* ]]
-}
-
-@test "other denials and a handle prefix stay loud failures" {
+@test "reason text inside peer_label or a quoted copy does not skip" {
     local sample
     for sample in \
+        'qdwin: subscribe_view_stream denied handle=7 peer_label="no pw output" (getrandom failed)' \
+        'qdwin: subscribe_view_stream denied handle=7 peer_label="admin" (no pw output) trailing' \
+        'diagnostic: previous text="subscribe_view_stream denied handle=7 (no pw output)"' \
+        'qdwin: subscribe_view_stream denied handle=7 peer_label="admin" no free pipewire output' \
         'qdwin: subscribe_view_stream denied handle=7 (nested-proxy pending admin decision)' \
         'qdwin: subscribe_view_stream denied handle=7 peer_label="admin" (getrandom failed)' \
         'qdwin: subscribe_view_stream denied handle=77 peer_label="admin" (no pw output)' \
@@ -87,4 +84,42 @@ qdwin_apps_log_since_cursor() {
         [ "$status" -eq 0 ]
         [ -z "$output" ]
     done
+}
+
+_run_step() {
+    local exe="$BATS_TEST_TMPDIR/vm-exec"
+    printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$STUB_CREDS"' > "$exe"
+    chmod +x "$exe"
+    export STEP SUBSCRIBE_CURSOR STUB_JOURNAL STUB_CREDS
+    export HANDLE=7
+    export QDWIN_VM_EXEC="$exe"
+    export VMNAME=vm
+    run bash -c '
+        qdwin_apps_journal_cursor() { printf "%s\n" "$SUBSCRIBE_CURSOR"; }
+        qdwin_apps_ctl() { return 0; }
+        qdwin_apps_log_since_cursor() {
+            local cursor=$1 pattern=$2
+            [ "$cursor" = "$SUBSCRIBE_CURSOR" ] || return 2
+            printf "%s\n" "$STUB_JOURNAL" | grep -E "$pattern"
+        }
+        eval "$STEP"
+    '
+}
+
+@test "missing credentials without the no-pw record still fail" {
+    STUB_JOURNAL='qdwin: subscribe_view_stream denied handle=7 peer_label="no pw output" (getrandom failed)'
+    STUB_CREDS=''
+    _run_step
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL: approved credentials did not arrive"* ]]
+    [[ "$output" != SKIP:* ]]
+}
+
+@test "credentials without an approved forward still fail when the record is absent" {
+    STUB_JOURNAL='qdwin: subscribe_view_stream denied handle=7 peer_label="admin" (getrandom failed)'
+    STUB_CREDS=$'RDP_PASSWORD=secret\nPIPEWIRE_NODE_NAME=n\nRDP_PORT=3389\nRDP_CERT_PATH=/c\nHANDLE=7'
+    _run_step
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL: approved event lacks forward PID"* ]]
+    [[ "$output" != SKIP:* ]]
 }
