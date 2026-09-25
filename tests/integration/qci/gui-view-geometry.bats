@@ -515,10 +515,10 @@ calls=()
 view() { calls+=(--call "$(python3 -c 'import json,sys; print(json.dumps({"input": "const a = await tools.view_image({path:\"%s\"});\nimage(a.image_url);\n" % sys.argv[1], "images": 1}))' "$1")"); }
 case "$look" in
     nocapture) ;;
-    *) "$VM_GUI" "$VMNAME" screenshot "$A/s1.png" >/dev/null 2>&1 || echo "capture failed" ;;
+    *) "$VM_GUI" "$VMNAME" screenshot "$A/${FAKE_SHOT:-s1.png}" >/dev/null 2>&1 || echo "capture failed" ;;
 esac
 case "$look" in
-    look) view "$A/s1.png" ;;
+    look) view "$A/${FAKE_SHOT:-s1.png}" ;;
     nolook|nocapture) ;;
     tooling) echo "bash: -c: option requires an argument" ;;
     viewcopy) v=$("$VM_GUI" "$VMNAME" view-copy "$A/s1.png"); view "$v" ;;
@@ -532,7 +532,11 @@ case "$look" in
 esac
 python3 "$FIX/make-rollout.py" --sid "$sid" --cwd "$PWD" \
     --out "$CODEX_HOME/sessions/2026/09/25/rollout-2026-09-25T00-00-00-$sid.jsonl" "${calls[@]}"
+# F5: an optional per-attempt report (plan file + ".report<N>").
+[ -f "$FAKE_PLAN.report$n" ] && cp "$FAKE_PLAN.report$n" "$A/report.md"
 echo "$verdict" > "$A/status.txt"
+# UNKNOWN = the agent was killed by its timeout (rc 124).
+[ "$verdict" = UNKNOWN ] && exit 124
 [ "$verdict" = PASS ]
 DRV
     chmod +x "$TDIR/bin/fake-driver"
@@ -822,4 +826,318 @@ noct03_block() {  # $1 = step1|step2
     # Both attempt paths use the helper; no inline copy of the prose note remains.
     [ "$(grep -c 'gui_image_opens_diag_note "\$scenario"' "$REPO_ROOT/ci/lib/gates/gui.sh")" -eq 2 ]
     [ "$(grep -c 'DIAGNOSTIC: the driver never MENTIONED' "$REPO_ROOT/ci/lib/gates/gui.sh")" -eq 1 ]
+}
+
+# ---------------------------------------------------------------- F5 --------
+#
+# The darkness contradiction DIAGNOSTIC (advisory only). The positive case is
+# the recorded class-A misgrade: 2026-09-22 full-20260922T193137Z-881799,
+# permissions-gui/06 attempt r2, whose report.md (verbatim in
+# fixtures/darkness-claim/pg06-report.md) calls `s3-r2.png` "fully black";
+# the frame (fixtures/darkness-claim/pg06-s3-r2.png, md5 4f737201...) measures
+# sigma 0.486, bright 0.56. Frames go through the REAL vm-gui (fake virsh), the
+# ledger is the real one sealed by the real gui_capture_log_seal, and the
+# function under test is the production gui_darkness_contradiction_note.
+
+DARKFIX="${BATS_TEST_DIRNAME}/fixtures/darkness-claim"
+
+dark_setup() {
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/core.sh"
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/gates/gui.sh"
+    new_ledger
+    cp "$DARKFIX/pg06-s3-r2.png" "$SCREEN"
+}
+
+# Seal the ledger (once) and run the production diagnostic over $ADIR.
+dark_note() {
+    local sealed
+    sealed=$(gui_capture_log_seal "$CAPLOG" "$CAPVM")
+    DNOTE=$(gui_darkness_contradiction_note "$ADIR" "$CAPLOG" "$CAPVM"$'\t'"$sealed" "$ADIR" "$TDIR/agent.log")
+}
+
+# Each line of FILE as the whole report, against ONE sealed ledger; echoes
+# "flagged: <line>" for every line that produced a diagnostic.
+dark_each() {
+    local sealed line
+    sealed=$(gui_capture_log_seal "$CAPLOG" "$CAPVM")
+    while IFS= read -r line; do
+        printf '%s\n' "$line" > "$ADIR/report.md"
+        [ -z "$(gui_darkness_contradiction_note "$ADIR" "$CAPLOG" "$CAPVM"$'\t'"$sealed" "$ADIR" "$TDIR/agent.log")" ] \
+            || printf 'flagged: %s\n' "$line"
+    done < "$1"
+}
+
+@test "F5: the recorded pg/06 'fully black' report on a bright attested frame -> DIAGNOSTIC with text, frame and metrics" {
+    dark_setup
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s3-r2.png" >/dev/null 2>&1
+    [ -f "$ADIR/s3-r2.png.raw" ]
+    cp "$DARKFIX/pg06-report.md" "$ADIR/report.md"
+    echo FAIL > "$ADIR/status.txt"
+    dark_note
+    [[ "$DNOTE" == "; DIAGNOSTIC: darkness claim contradicted: report.md:7 \"the required post-cache-hit frame was fully black and the admin-app process was absent\" names s3-r2.png, whose raw pixels measure sigma=0.485913 bright=0.561448, not dark"* ]]
+    [[ "$DNOTE" == *"verdict NOT changed"* ]]
+    # exactly one: the "rejected near-black captures" line names no frame
+    [ "$(grep -o 'DIAGNOSTIC' <<<"$DNOTE" | wc -l)" -eq 1 ]
+    grep -q '^qci_gui_darkness: CONTRADICTION report.md:7 "the required post-cache-hit frame was fully black and the admin-app process was absent" names s3-r2.png' "$TDIR/agent.log"
+    # nothing written into the evidence tree
+    [ -z "$(find "$ADIR" -newer "$ADIR/report.md" -name '*dark*')" ]
+}
+
+@test "F5: negations and pane/region-only claims are not whole-frame darkness claims" {
+    dark_setup
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s3.png" >/dev/null 2>&1
+    # astra F5 code r1's exact lines first, then the r0 set, then fable F5
+    # code r1's scope words and "blank" (not a darkness word). "...but the
+    # terminal crashed (s3.png)" is an ACCEPTED false negative (its referent
+    # sits in another clause).
+    cat > "$TDIR/neg" <<'EOF'
+There was not any sign of a black screen (s3.png).
+The frame was black only in the top pane (s3.png).
+The pane inside the captured frame was blank (s3.png).
+- S3: the frame was not black this time. Evidence: `s3.png`.
+- S3: `s3.png` is not a black frame.
+- S3: `s3.png` is a non-black frame; the app is visible.
+- S3: the screenshot showed the dialog rather than a black screen (`s3.png`).
+- S3: the frame isn't black at all (`s3.png`).
+- S3: `s3.png` shows a blank details pane.
+- S3: the screenshot shows a black terminal in `s3.png`.
+- S3: the details pane of the frame was blank (`s3.png`).
+- S3: a black screen area remains at the bottom of `s3.png`.
+The frame was fully black, but the terminal crashed (s3.png).
+The frame `s3.png` shows a black background with white text.
+The screen shows a black background with the clock (s3.png).
+The frame s3.png is black-and-white.
+Evidence: `s3.png` shows the recovered desktop; the earlier frame was fully black.
+The earlier frame was fully black; the recovered desktop is now visible. Evidence: `s3.png`.
+The frame was fully black. Evidence: `s3.png` shows the recovered desktop.
+The screen was blank (s3.png).
+s3.png was blank.
+EOF
+    # Controls on the same ledger and frame: plain claims DO fire.
+    cat > "$TDIR/pos" <<'EOF'
+The frame was fully black (s3.png).
+s3.png was fully black.
+- S3: the frame was fully black. Evidence: `s3.png`.
+The frame s3.png was all-dark.
+EOF
+    cat "$TDIR/neg" "$TDIR/pos" > "$TDIR/all"
+    run dark_each "$TDIR/all"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(sed 's/^/flagged: /' "$TDIR/pos")" ]
+}
+
+@test "F5: attribution -- rejected+accepted, two frames, previous-attempt path, duplicate basename" {
+    dark_setup
+    cp "$SCREEN" "$TDIR/bright.png"
+    magick -size 1280x800 xc:black "$SCREEN"
+    QCI_SCREENSHOT_ATTEMPTS=1 "$VM_GUI" "$CAPVM" screenshot "$ADIR/s3.png" >/dev/null 2>&1 || true
+    [ -f "$ADIR/s3.png.attempt-1.rejected" ]
+    cp "$TDIR/bright.png" "$SCREEN"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s3.png" >/dev/null 2>&1
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s2.png" >/dev/null 2>&1
+    mkdir -p "$ADIR/sub"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/sub/s4.png" >/dev/null 2>&1
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s4.png" >/dev/null 2>&1
+    # s1 is genuinely dark (noisy black)
+    magick -size 1280x800 xc:gray50 +noise Random -colorspace gray -threshold 99.9% "$SCREEN"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    [ -f "$ADIR/s1.png" ] && [ -f "$ADIR/s2.png" ] && [ -f "$ADIR/sub/s4.png" ] && [ -f "$ADIR/s4.png" ]
+    # a previous attempt's directory holding its own s3.png
+    mkdir -p "$TDIR/prev"; cp "$ADIR/s3.png" "$TDIR/prev/s3.png"
+    cat > "$TDIR/neg" <<EOF
+The black screen was s3.png.attempt-1.rejected; s3.png shows the recovered desktop.
+- S3 \`s3.png.attempt-1.rejected\`: the capture was fully black.
+The frame s1.png was fully black; compare s2.png.
+The screen was fully black (s1.png, s2.png).
+The frame was fully black. Evidence: \`s1.png\`, \`s2.png\`.
+The frame $TDIR/prev/s3.png was fully black.
+The frame ../prev/s3.png was fully black.
+The frame s4.png was fully black.
+EOF
+    cat > "$TDIR/pos" <<EOF
+The frame s3.png was fully black.
+The frame sub/s4.png was fully black.
+The frame $ADIR/sub/s4.png was fully black.
+EOF
+    cat "$TDIR/neg" "$TDIR/pos" > "$TDIR/all"
+    run dark_each "$TDIR/all"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(sed 's/^/flagged: /' "$TDIR/pos")" ]
+    grep -q 'skipped report.md:1 s4.png: ambiguous (2 attested frames share that name)' "$TDIR/agent.log"
+}
+
+@test "F5: an explicit path keeps its identity (./x.png, absolute into the root)" {
+    dark_setup
+    # ONLY art/sub/s3.png is attested (bright); art/s3.png is an agent-made,
+    # unattested black image (astra F5 code r2, P1).
+    mkdir -p "$ADIR/sub"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/sub/s3.png" >/dev/null 2>&1
+    [ -f "$ADIR/sub/s3.png" ]
+    magick -size 1280x800 xc:black "$ADIR/s3.png"
+    # and sub/s5.png attested with NO root s5.png at all: `./s5.png` names a
+    # file that does not exist, never the sub-directory frame.
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/sub/s5.png" >/dev/null 2>&1
+    [ -f "$ADIR/sub/s5.png" ] && [ ! -e "$ADIR/s5.png" ]
+    cat > "$TDIR/neg" <<EOF
+The frame $ADIR/s3.png was fully black.
+./s3.png was fully black.
+The frame ./s3.png was fully black.
+s3.png was fully black.
+./s5.png was fully black.
+The frame $ADIR/s5.png was fully black.
+EOF
+    cat > "$TDIR/pos" <<EOF
+The frame sub/s3.png was fully black.
+The frame ./sub/s3.png was fully black.
+The frame $ADIR/sub/s3.png was fully black.
+s5.png was fully black.
+EOF
+    cat "$TDIR/neg" "$TDIR/pos" > "$TDIR/all"
+    run dark_each "$TDIR/all"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(sed 's/^/flagged: /' "$TDIR/pos")" ]
+}
+
+@test "F5: the RAW content is measured, not the padded frame (padding-boundary fixture)" {
+    dark_setup
+    # 20x20 raw with exactly 64 bright pixels: bright 0.16 >= 0.15 (not dark).
+    # Padded by k=1 to 21x21 the same frame is 64/441 = 0.145 (dark).
+    magick -size 20x20 xc:black -fill white -draw 'rectangle 0,0 7,7' "$SCREEN"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/tiny.png" >/dev/null 2>&1
+    [ "$(dims "$ADIR/tiny.png")" = "21 21" ]
+    ! qci_frame_not_dark "$ADIR/tiny.png" >/dev/null
+    printf 'The frame tiny.png was fully black.\n' > "$ADIR/report.md"
+    dark_note
+    [[ "$DNOTE" == *'names tiny.png, whose raw pixels measure sigma='*' bright=0.16, not dark'* ]]
+}
+
+@test "F5: genuinely dark attested frames (noisy black, dark UI) are not contradicted" {
+    dark_setup
+    # 99.9% black with scattered white: usable (sigma ~0.03) but bright ~0.001.
+    magick -size 1280x800 xc:gray50 +noise Random -colorspace gray -threshold 99.9% "$SCREEN"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/noisy.png" >/dev/null 2>&1
+    [ -f "$ADIR/noisy.png" ]
+    # a legible dark UI (lock-screen shape): varied, but under FRAME_BRIGHT_MIN.
+    magick -size 1280x800 xc:'#101418' -fill white -pointsize 60 -annotate +500+400 '12:34' "$SCREEN"
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/lock.png" >/dev/null 2>&1
+    [ -f "$ADIR/lock.png" ]
+    printf -- '- `noisy.png` is a fully black frame.\n- `lock.png`: the screen was near-black.\n' > "$ADIR/report.md"
+    dark_note
+    [ -z "$DNOTE" ]
+}
+
+@test "F5: a frame not attested in this attempt, an unsealed ledger, and no ImageMagick -> no diagnostic" {
+    dark_setup
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s3-r2.png" >/dev/null 2>&1
+    # an agent-authored bright image the harness never captured
+    magick -size 1280x800 xc:white -fill black -draw 'rectangle 100,100 900,500' "$ADIR/own.png"
+    local sealed out
+    sealed=$(gui_capture_log_seal "$CAPLOG" "$CAPVM")
+    printf -- '- the frame `own.png` was fully black.\n' > "$ADIR/report.md"
+    [ -z "$(gui_darkness_contradiction_note "$ADIR" "$CAPLOG" "$CAPVM"$'\t'"$sealed" "$ADIR" "$TDIR/agent.log")" ]
+    # unsealed: no anchor -> nothing is attested; a reason is logged
+    printf -- '- the frame `s3-r2.png` was fully black.\n' > "$ADIR/report.md"
+    : > "$TDIR/agent.log"
+    [ -z "$(gui_darkness_contradiction_note "$ADIR" "$CAPLOG" "" "$ADIR" "$TDIR/agent.log")" ]
+    grep -q '^qci_gui_darkness: skipped: the capture ledger is unsealed' "$TDIR/agent.log"
+    # no ImageMagick: a PATH with every tool but magick
+    mkdir -p "$TDIR/nomagick"
+    local t
+    for t in /usr/bin/* /bin/*; do
+        [ "${t##*/}" = magick ] || ln -sf "$t" "$TDIR/nomagick/${t##*/}" 2>/dev/null || true
+    done
+    : > "$TDIR/agent.log"
+    out=$(PATH="$TDIR/nomagick" gui_darkness_contradiction_note "$ADIR" "$CAPLOG" "$CAPVM"$'\t'"$sealed" "$ADIR" "$TDIR/agent.log")
+    [ -z "$out" ]
+    grep -q "^qci_gui_darkness: skipped: ImageMagick 'magick' is not installed" "$TDIR/agent.log"
+    # and the same sealed ledger with magick back: the diagnostic fires
+    out=$(gui_darkness_contradiction_note "$ADIR" "$CAPLOG" "$CAPVM"$'\t'"$sealed" "$ADIR" "$TDIR/agent.log")
+    [[ "$out" == *'"- the frame `s3-r2.png` was fully black" names s3-r2.png'* ]]
+}
+
+# The INVARIANT, through the real gui_run_scenario on both attempt paths: the
+# diagnostic lands in the result note and changes no attempt row (status,
+# classifier), no retry decision and no verdict. Each case is compared with the
+# SAME plan run without the report.
+f5_run() {
+    local tag=$1; shift
+    : > "$TDIR/attempts"; : > "$TDIR/results"; : > "$TDIR/flakes"; : > "$FAKE_N"
+    rm -rf "$RDIR/gui"; mkdir -p "$RDIR/gui"
+    run_scen "$@"
+    cut -f1-4 "$TDIR/attempts" > "$TDIR/attempts-$tag"
+    cut -d' ' -f1-4 "$TDIR/results" > "$TDIR/verdict-$tag"
+    cut -d' ' -f1-8 "$TDIR/flakes" > "$TDIR/flakes-$tag"
+    cp "$TDIR/results" "$TDIR/results-$tag"
+}
+
+@test "F5: invariant -- first attempt and retry: diagnostic recorded, status/classifier/retry/verdict unchanged" {
+    f4_setup
+    cp "$DARKFIX/pg06-s3-r2.png" "$SCREEN"
+    sed 's/s3-r2\.png/s1.png/g' "$DARKFIX/pg06-report.md" > "$TDIR/claim.md"
+    local plan
+    for plan in "FAIL look" "PASS look"; do
+        rm -f "$FAKE_PLAN".report*
+        f5_run ctl "$plan"
+        cp "$TDIR/claim.md" "$FAKE_PLAN.report1"
+        f5_run dia "$plan"
+        grep -q 'darkness claim contradicted: report.md:7 "the required post-cache-hit frame was fully black and the admin-app process was absent" names s1.png' "$TDIR/results-dia"
+        ! grep -q 'darkness claim' "$TDIR/results-ctl"
+        cmp "$TDIR/attempts-ctl" "$TDIR/attempts-dia"
+        cmp "$TDIR/verdict-ctl" "$TDIR/verdict-dia"
+        cmp "$TDIR/flakes-ctl" "$TDIR/flakes-dia"
+    done
+    [ "$(cut -f2,4 "$TDIR/attempts-dia")" = "PASS	" ]
+    grep -Fq 'qci_gui_darkness: CONTRADICTION' "$RDIR/gui/"*.agent.log
+    # RETRY PATH: attempt 1 is a zero-look PASS (retriable), attempt 2 looks
+    # and FAILs with the claim. The claim must not stop, extend or re-classify.
+    export QCI_GUI_RETRY=2
+    rm -f "$FAKE_PLAN".report*
+    f5_run ctl "PASS nolook" "FAIL look" "PASS look"
+    cp "$TDIR/claim.md" "$FAKE_PLAN.report2"
+    f5_run dia "PASS nolook" "FAIL look" "PASS look"
+    [ "$(wc -l < "$TDIR/attempts-dia")" -eq 2 ]
+    [ "$(sed -n 2p "$TDIR/attempts-dia" | cut -f2,4)" = "FAIL	product-fail" ]
+    grep -q 'darkness claim contradicted' "$TDIR/results-dia"
+    grep -q ' fail ' "$TDIR/results-dia"
+    cmp "$TDIR/attempts-ctl" "$TDIR/attempts-dia"
+    cmp "$TDIR/verdict-ctl" "$TDIR/verdict-dia"
+    cmp "$TDIR/flakes-ctl" "$TDIR/flakes-dia"
+    grep -Fq 'qci_gui_darkness: CONTRADICTION' "$RDIR/gui/"*.retry1.agent.log
+    # Both attempt paths call the one helper.
+    [ "$(grep -c 'gui_darkness_contradiction_note "\$adir' "$REPO_ROOT/ci/lib/gates/gui.sh")" -eq 2 ]
+}
+
+@test "F5: invariant -- a marker-bearing frame NAME in the diagnostic never reclassifies UNKNOWN/124 (both paths)" {
+    # astra F5 code r1 P1: the transport detector greps the agent log
+    # unanchored, so a diagnostic line naming guest-agent-not-responding.png
+    # written BEFORE classification turned agent-timeout into a retriable
+    # transport-timeout. The frame is attested and bright; the claim names it.
+    f4_setup
+    cp "$DARKFIX/pg06-s3-r2.png" "$SCREEN"
+    export FAKE_SHOT=guest-agent-not-responding.png QCI_GUI_RETRY=2
+    printf 'The frame guest-agent-not-responding.png was fully black.\n' > "$TDIR/claim.md"
+    # FIRST-ATTEMPT PATH: UNKNOWN/124 -> agent-timeout, not retried.
+    rm -f "$FAKE_PLAN".report*
+    f5_run ctl "UNKNOWN look" "PASS look" "PASS look"
+    cp "$TDIR/claim.md" "$FAKE_PLAN.report1"
+    f5_run dia "UNKNOWN look" "PASS look" "PASS look"
+    grep -q 'darkness claim contradicted: .* names guest-agent-not-responding.png' "$TDIR/results-dia"
+    [ "$(cut -f2,3,4 "$TDIR/attempts-dia")" = "UNKNOWN	124	agent-timeout" ]
+    cmp "$TDIR/attempts-ctl" "$TDIR/attempts-dia"
+    cmp "$TDIR/verdict-ctl" "$TDIR/verdict-dia"
+    cmp "$TDIR/flakes-ctl" "$TDIR/flakes-dia"
+    # RETRY PATH: attempt 1 a retriable zero-look PASS, attempt 2 UNKNOWN/124
+    # with the claim -> agent-timeout, the loop stops at 2 attempts.
+    rm -f "$FAKE_PLAN".report*
+    f5_run ctl "PASS nolook" "UNKNOWN look" "PASS look"
+    cp "$TDIR/claim.md" "$FAKE_PLAN.report2"
+    f5_run dia "PASS nolook" "UNKNOWN look" "PASS look"
+    grep -q 'darkness claim contradicted: .* names guest-agent-not-responding.png' "$TDIR/results-dia"
+    [ "$(wc -l < "$TDIR/attempts-dia")" -eq 2 ]
+    [ "$(sed -n 2p "$TDIR/attempts-dia" | cut -f2,3,4)" = "UNKNOWN	124	agent-timeout" ]
+    cmp "$TDIR/attempts-ctl" "$TDIR/attempts-dia"
+    cmp "$TDIR/verdict-ctl" "$TDIR/verdict-dia"
+    cmp "$TDIR/flakes-ctl" "$TDIR/flakes-dia"
 }

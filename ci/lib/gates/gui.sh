@@ -11,6 +11,10 @@
 GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../scripts/vm/lib/view-geometry.sh
 . "$GUI_GATE_DIR/../../../scripts/vm/lib/view-geometry.sh"
+# Frame usability/darkness (screenshot_is_usable's thresholds and measures),
+# shared with vm-gui; the F5 darkness diagnostic asks qci_frame_not_dark.
+# shellcheck source=../../../scripts/vm/lib/frame-usable.sh
+. "$GUI_GATE_DIR/../../../scripts/vm/lib/frame-usable.sh"
 GUI_ROLLOUT_ADAPTER="$GUI_GATE_DIR/../gui_rollout_views.py"
 # The per-attempt allocator state: a dotfile in the artifact directory the
 # agent is given (harvest copies `$parent/*`, which skips it).
@@ -2798,6 +2802,206 @@ gui_image_opens_diag_note() {
     return 0
 }
 
+# F5. THE DARKNESS CONTRADICTION DIAGNOSTIC -- ADVISORY ONLY. A report that
+# calls a WHOLE FRAME black/near-black/all-dark, naming an attested frame of THIS
+# attempt whose raw pixels measure NOT dark, is the class-A misgrade shape
+# (todo/test-blankscreenshots/README.md: pg/06 `s3-r2.png` "fully black" at
+# sigma 0.486, bright 0.56). This records it as a note fragment
+# ("; DIAGNOSTIC: ..." or empty) plus `qci_gui_darkness:` log lines.
+#
+# INVARIANT: it changes NO status, classifier or retry decision. Regex over
+# free prose cannot establish scope, referent, negation or sole cause (astra,
+# blankss spec r1), so this is a pointer for a human, never a verdict input.
+# Its log lines are therefore written AFTER the attempt is classified: the
+# marker detectors grep the agent log unanchored, and a frame NAME such as
+# `guest-agent-not-responding.png` in a diagnostic line would otherwise turn an
+# agent-timeout into a retriable transport-timeout (astra, F5 code r1, P1).
+#
+# CONSERVATIVE BY CONSTRUCTION. A false positive points a human at the wrong
+# frame; a false negative costs nothing (this is advisory). So every ambiguity
+# is a SKIP -- one pattern, no prose interpreter (astra, F5 code r1, P2/P3):
+#   * the unit is a CLAUSE: each line of status.txt/report.md is split into
+#     sentences at `. ; :` (followed by a space or the end), and each sentence
+#     into clauses at ", but", "but", "while", "whereas" and ", so";
+#   * a clause is a claim when GUI_DARKNESS_CLAIM_RE matches it ("fully black
+#     frame", "the frame [`x.png`] was fully black", "`x.png` was near-black")
+#     and it
+#     contains NO negation word and NO region word ANYWHERE in its prose (file
+#     names excluded) ("not any sign of a
+#     black screen", "black only in the top pane", "the pane inside the frame
+#     was black", "a black background with white text", "black-and-white" are
+#     all skipped -- scope words such as background/wallpaper/theme/text/colour
+#     count as region words);
+#   * "BLANK" IS NOT A DARKNESS WORD. Brightness can contradict "black", never
+#     "blank": a bright wallpaper-only desktop is correctly blank when the
+#     required app is absent (astra spec r1; fable F5 code r1; coordinator);
+#   * its referent is the ONE png-bearing token in that clause, taken whole
+#     (`s3.png.attempt-1.rejected` is its own token and names no accepted
+#     frame). Two tokens, or a token that is not a plain `*.png` -> skip. A
+#     clause with none borrows the line's referent ONLY in the ADJACENT house
+#     style "<claim>. Evidence: `one.png`[, `other.log`]": the claim is in the
+#     sentence right before the single marker and the only claim on the line,
+#     no png before the marker, and after it nothing but references with
+#     exactly one png;
+#   * the token resolves only inside THIS attempt's artifact root or its
+#     capture-root alias, with a UNIQUE match among the frames the sealed,
+#     VM-bound ledger attests (gui_capture_reconcile). An explicit path must
+#     equal an attested frame's relative path exactly; only a bare name is
+#     matched by basename. `..`, paths into other directories (a previous
+#     attempt's) and a bare basename shared by two attested frames -> skip;
+#   * "not dark": qci_frame_not_dark (scripts/vm/lib/frame-usable.sh) on the
+#     RAW content (qci_view_raw_extract), never the padded frame --
+#     screenshot_is_usable's thresholds, sourced, never copied. Dark UI, noisy
+#     black and flat frames stay "dark".
+# ACCEPTED FALSE NEGATIVES: "The frame was fully black, but the terminal
+# crashed (s3.png)" (the referent sits in another clause); any claim whose
+# clause mentions a negation or a region word for an unrelated reason.
+# Missing ImageMagick, an unsealed/unverifiable ledger or an unmeasurable frame
+# skip with a logged reason and no note. Only the first 256 KiB of each of
+# status.txt/report.md is read; a claim past that is not seen (a false
+# negative, which is the safe direction).
+# Args: adir caplog anchor caproot log_path. QCI_GUI_VIEW_STATE as for the
+# evidence contract (resolves sidecar-less copies to their raw content).
+GUI_DARK_WORD='(near[- ]?black|all[- ]black|pitch[- ]black|black|all[- ]dark)'
+GUI_FRAME_NOUN='(frame|screen|screenshot|capture|image|display|framebuffer)s?'
+GUI_DARKNESS_CLAIM_RE="(${GUI_DARK_WORD}[ -]+${GUI_FRAME_NOUN}([^a-z]|\$)|(${GUI_FRAME_NOUN} +(\`?[a-z0-9_./+~-]+\.png\`? +)?|\`?[a-z0-9_./+~-]+\.png\`? +)(is|was|were|are|looks|looked|appears|appeared|shows|showed|stayed|remained|came back|rendered) +([a-z'-]+ +){0,2}${GUI_DARK_WORD}([^a-z]|\$))"
+GUI_DARKNESS_NEGATION_RE="(^|[^a-z'])(not|no|none|nothing|never|without|nor|neither|non|than|instead|hardly|barely)([^a-z]|\$)|n't([^a-z]|\$)"
+GUI_DARKNESS_REGION_RE='(^|[^a-z])(pane|panel|area|region|window|list|dialog|widget|column|sidebar|tab|field|box|section|corner|half|portion|part|terminal|content|contents|viewport|tile|cell|strip|rectangle|border|margin|thumbnail|bar|menu|toolbar|popup|tooltip|top|bottom|left|right|edge|inside|within|background|backdrop|wallpaper|theme|text|font|colou?r|title|and-white)s?([^a-z]|$)'
+# The clause splitter, one sed program (GNU: `\n` in the replacement, `I`).
+# SENTENCES first (`. ; :` + space/end), then CLAUSES within each sentence.
+GUI_DARKNESS_SENTENCE_SED='s/[.;:]([[:space:]]|$)/\n/g'
+GUI_DARKNESS_CLAUSE_SED='s/,? but /\n/gI; s/ (while|whereas) /\n/gI; s/, so /\n/gI'
+# Helpers of gui_darkness_contradiction_note. One `qci_gui_darkness:` line to
+# the agent log (args: log_path message); the png-bearing tokens of a text,
+# each taken WHOLE (a rejected name keeps its suffix).
+_gui_dark_log() { [ -n "$1" ] && printf 'qci_gui_darkness: %s\n' "$2" >> "$1" 2>/dev/null; return 0; }
+_gui_dark_toks() { printf '%s\n' "$1" | grep -oE '[A-Za-z0-9_.+/~-]+' | grep -iE '\.png' || true; }
+gui_darkness_contradiction_note() {
+    local adir=$1 caplog=${2:-} anchor=${3:-} caproot=${4:-} log_path=${5:-}
+    local src line clause lc prose n tok f rel absdir rootr tmp metrics mrc before after
+    local nclaims fb_claim fb_sent si sentence bare a_vm="" a_rows="" a_head="" shown=0 out=""
+    local -a claims=() attested=() toks=() hits=() lsent=()
+    for src in status.txt report.md; do
+        [ -f "$adir/$src" ] && [ ! -L "$adir/$src" ] || continue
+        n=0
+        while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1)); line=${line//$'\r'/}
+            nclaims=0; fb_claim=""; fb_sent=-1; si=-1; lsent=()
+            while IFS= read -r sentence; do
+                si=$((si + 1))
+                lsent+=("$(printf '%s' "${sentence,,}" | tr -s ' ' | sed 's/^[ -]*//; s/ $//')")
+                while IFS= read -r clause; do
+                    lc=${clause,,}
+                    [[ "$lc" =~ $GUI_DARKNESS_CLAIM_RE ]] || continue
+                    nclaims=$((nclaims + 1))
+                    # Negation/region words are judged on the PROSE: png-bearing
+                    # tokens are removed first (`guest-agent-not-responding.png`
+                    # holds a "not" that negates nothing).
+                    prose=$(printf '%s\n' "$lc" | sed -E 's/[a-z0-9_.+\/~-]*\.png[a-z0-9_.+\/~-]*/ /g')
+                    [[ "$prose" =~ $GUI_DARKNESS_NEGATION_RE ]] && continue
+                    [[ "$prose" =~ $GUI_DARKNESS_REGION_RE ]] && continue
+                    mapfile -t toks < <(_gui_dark_toks "$clause")
+                    if [ ${#toks[@]} -eq 0 ]; then
+                        fb_claim=$lc; fb_sent=$si
+                    elif [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]]; then
+                        claims+=("$src:$n"$'\t'"$(printf '%s' "$lc" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
+                    fi
+                done < <(printf '%s\n' "$sentence" | sed -E "$GUI_DARKNESS_CLAUSE_SED")
+            done < <(printf '%s\n' "$line" | sed -E "$GUI_DARKNESS_SENTENCE_SED")
+            # The "Evidence:" house style, ADJACENT form only: the only claim
+            # on the line sits in the SENTENCE immediately before a single
+            # "Evidence:" marker (no other sentence between; a ", so ..."
+            # consequence of the claim is the same sentence, as in pg/06),
+            # no png before the marker, and after it only references --
+            # exactly one plain png,
+            # other file names, backticks and separators, no prose and so no
+            # claim (astra F5 code r2, P2).
+            [ -n "$fb_claim" ] && [ "$nclaims" -eq 1 ] || continue
+            [ "${lsent[$((fb_sent + 1))]:-}" = evidence ] || continue
+            [ "$(grep -oi 'evidence:' <<<"$line" | wc -l)" -eq 1 ] || continue
+            before=${line%%[Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]:*}; after=${line:$((${#before} + 9))}
+            [ -z "$(_gui_dark_toks "$before")" ] || continue
+            [ -z "$(printf '%s\n' "$after" | sed -E 's/[A-Za-z0-9_.+\/~-]+\.[A-Za-z0-9]+//g; s/(^|[^a-z])and([^a-z]|$)/ /g; s/[][`"(),.;:[:space:]]//g')" ] || continue
+            mapfile -t toks < <(_gui_dark_toks "$after")
+            [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]] || continue
+            claims+=("$src:$n"$'\t'"$(printf '%s' "$fb_claim" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
+        done < <(head -c 262144 -- "$adir/$src" 2>/dev/null)
+    done
+    [ ${#claims[@]} -gt 0 ] || return 0
+    if ! command -v magick >/dev/null 2>&1; then
+        _gui_dark_log "$log_path" "skipped: ImageMagick 'magick' is not installed, so the ${#claims[@]} whole-frame darkness claim(s) were not measured"
+        return 0
+    fi
+    IFS=$'\t' read -r a_vm a_rows a_head <<<"$anchor"
+    if [ -z "$a_head" ] || ! gui_capture_log_verify "$caplog" "$a_vm" "$a_rows" "$a_head" >/dev/null 2>&1; then
+        _gui_dark_log "$log_path" "skipped: the capture ledger is unsealed or does not verify, so no frame is attested"
+        return 0
+    fi
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/qci-dark.XXXXXX") || return 0
+    gui_capture_reconcile "$adir" "$caplog" "$tmp/attested" "$caproot" >/dev/null 2>&1 || true
+    mapfile -t attested < "$tmp/attested" 2>/dev/null || attested=()
+    absdir=$(readlink -f "$adir" 2>/dev/null || printf '%s' "$adir")
+    rootr=$(readlink -f "$caproot" 2>/dev/null || printf '%s' "$caproot")
+    declare -A seen=()
+    for line in "${claims[@]}"; do
+        IFS=$'\t' read -r src clause tok <<<"$line"
+        # An EXPLICIT path (`./x.png`, absolute, anything with a `/`) keeps its
+        # identity: it must equal one attested frame's relative path exactly.
+        # Only an originally BARE name is searched by basename (astra F5 code
+        # r2, P1: `./s3.png` must not resolve to an attested `sub/s3.png`).
+        bare=1; [[ "$tok" == */* ]] && bare=0
+        tok=${tok#./}
+        # Only this attempt's own tree: its root, or the alias it was given.
+        case "$tok" in
+            *..*) _gui_dark_log "$log_path" "skipped $src $tok: a relative path out of this attempt's tree"; continue ;;
+            "$absdir"/*) tok=${tok#"$absdir"/} ;;
+            "$caproot"/*) [ -n "$caproot" ] || continue; tok=${tok#"$caproot"/} ;;
+            "$rootr"/*) [ -n "$rootr" ] || continue; tok=${tok#"$rootr"/} ;;
+            /*) _gui_dark_log "$log_path" "skipped $src $tok: not inside this attempt's artifact directory"; continue ;;
+        esac
+        hits=()
+        for f in "${attested[@]}"; do
+            rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f"); rel=${rel#"$absdir"/}
+            if [ "$bare" = 0 ]; then
+                [ "$rel" = "$tok" ] && hits+=("$f")
+            else
+                [ "${rel##*/}" = "$tok" ] && hits+=("$f")
+            fi
+        done
+        if [ ${#hits[@]} -ne 1 ]; then
+            [ ${#hits[@]} -gt 1 ] && _gui_dark_log "$log_path" "skipped $src $tok: ambiguous (${#hits[@]} attested frames share that name)"
+            continue
+        fi
+        f=${hits[0]}
+        rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f"); rel=${rel#"$absdir"/}
+        # A bare name that exists at the artifact root names THAT file; if the
+        # unique basename hit is some other (sub-directory) frame, skip.
+        if [ "$bare" = 1 ] && [ -e "$absdir/$tok" ] && [ "$rel" != "$tok" ]; then
+            _gui_dark_log "$log_path" "skipped $src $tok: the root file of that name is not the attested frame"
+            continue
+        fi
+        [ -z "${seen[$src/$rel]:-}" ] || continue
+        seen[$src/$rel]=1
+        rm -f -- "$tmp/raw.png"
+        if ! qci_view_raw_extract "$f" "$tmp/raw.png" >/dev/null 2>&1; then
+            _gui_dark_log "$log_path" "skipped $rel: its raw content could not be extracted"
+            continue
+        fi
+        mrc=0; metrics=$(qci_frame_not_dark "$tmp/raw.png") || mrc=$?
+        case "$mrc" in
+            0) _gui_dark_log "$log_path" "CONTRADICTION $src \"$clause\" names $rel, whose raw pixels measure $metrics (not dark: sigma >= $FRAME_FLAT_SIGMA and bright >= $FRAME_BRIGHT_MIN)"
+               shown=$((shown + 1))
+               [ "$shown" -le 3 ] && out="$out; DIAGNOSTIC: darkness claim contradicted: $src \"$clause\" names $rel, whose raw pixels measure $metrics, not dark (verdict NOT changed; if this verdict is wrong, start here)" ;;
+            1) ;;
+            *) _gui_dark_log "$log_path" "skipped $rel: could not measure its raw pixels (code $mrc)" ;;
+        esac
+    done
+    rm -rf -- "$tmp"
+    [ "$shown" -le 3 ] || out="$out; DIAGNOSTIC: $((shown - 3)) more darkness contradiction(s) in the agent log (qci_gui_darkness)"
+    printf '%s' "$out"
+    return 0
+}
+
 gui_count_image_opens() {
     local log_path=$1 prompt_path=${2:-} n=0
     [ -f "$log_path" ] || { printf '0\n'; return 0; }
@@ -3318,6 +3522,13 @@ gui_run_scenario() {
     # classifier, before the verdict collapses it. This is where the flake signal
     # lives (rc=124, UNKNOWN, slow walls under load).
     record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path" "$ta0" "$ta1" "$lane"
+    # F5 DIAGNOSTIC, never a gate: a whole-frame darkness claim contradicted by
+    # the named attested frame's raw pixels. It writes the agent log, so it runs
+    # only AFTER the marker detectors and the classifier have read that log
+    # (a frame NAME in its lines must not become a transport marker), and
+    # before the retry decision -- the same place as on the retry path.
+    note="$note$(QCI_GUI_VIEW_STATE="${obs%.views.txt}.view-state.tsv" \
+        gui_darkness_contradiction_note "$adir" "$caplog" "$capanchor" "$art_alias" "$log_path")"
 
     # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
     # retriable signature (transport-timeout, agent-tooling,
@@ -3448,6 +3659,9 @@ gui_run_scenario() {
                 img_opensN=$(gui_count_image_opens "$logN" "$prompt")
                 printf '\nqci_gui_image_opens: %s\n' "$img_opensN" >> "$logN" 2>/dev/null || true
                 noteN="$noteN$(gui_image_opens_diag_note "$scenario" "$img_opensN" "$obsN")"
+                # Same F5 darkness DIAGNOSTIC as the first attempt, same place.
+                noteN="$noteN$(QCI_GUI_VIEW_STATE="${obsN%.views.txt}.view-state.tsv" \
+                    gui_darkness_contradiction_note "$adirN" "$caplogN" "$capanchorN" "$art_aliasN" "$logN")"
                 status=$statusN; verdict=$verdictN; note=$noteN; classifier=$classifierN; log_path=$logN; adir=$adirN
                 orig_src="$orig_statusN:$agent_rc"
             done
