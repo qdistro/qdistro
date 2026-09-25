@@ -64,7 +64,7 @@ ws_spawn_gated() {
     local h
     for _ in $(seq 1 30); do
         h=$("$QDWIN_VM_EXEC" "$VMNAME" \
-          "journalctl _UID=1000 --after-cursor='$cur' --no-pager | \
+          "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$cur' --no-pager | \
            grep -E 'qdwin: toplevel_added handle=[0-9]+ uid=1000 pid=[0-9]+ app_id=qdistro-test-window' | \
            tail -1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'")
         [ -n "$h" ] && { echo "$h"; return 0; }

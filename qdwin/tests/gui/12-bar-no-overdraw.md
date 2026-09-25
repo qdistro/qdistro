@@ -41,7 +41,7 @@ the `exclusionZoneBleed: true` layout, not the default one under test.
 ### Step 1 — confirm bar-content height == bar-exclusion height
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 --no-pager | \
+"$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager | \
   grep -E 'qdshell-bar-(content|exclusion-top)-Virtual-1' | tail -4"
 ```
 
@@ -88,14 +88,14 @@ CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
 # its post-cursor `toplevel_added` line to keep the old identity guarantee.
 GUEST_POLL='h=""
 for _i in $(seq 1 30); do
-  h=$(journalctl _UID=1000 --after-cursor="__CURSOR__" --no-pager |
+  h=$(journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor="__CURSOR__" --no-pager |
       grep -E "qdwin: toplevel_app_id handle=[0-9]+ app_id=\"org\.freedesktop\.weston\.wayland-terminal\"" |
       tail -1 | sed -nE "s/.*handle=([0-9]+).*/\1/p")
   [ -n "$h" ] && break
   sleep 1
 done
 [ -n "$h" ] || exit 1
-journalctl _UID=1000 --after-cursor="__CURSOR__" --no-pager |
+journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor="__CURSOR__" --no-pager |
   grep -qE "qdwin: toplevel_added handle=$h uid=1000 pid=[0-9]+" || exit 2
 echo "$h"'
 HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" "${GUEST_POLL//__CURSOR__/$CURSOR}")
@@ -115,7 +115,7 @@ sleep 1
 # cursor-scoped set_maximized check below; this only reduces flake.
 for _ in $(seq 1 10); do
   "$QDWIN_VM_EXEC" "$VMNAME" \
-    "journalctl _UID=1000 --no-pager | grep -q 'registered WM shortcuts'" && break
+    "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdshell.service --no-pager | grep -q 'registered WM shortcuts'" && break
   sleep 1
 done
 
@@ -136,7 +136,7 @@ MAXLINE=""
 for _ in $(seq 1 10); do
   sleep 1
   MAXLINE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-    "journalctl _UID=1000 --after-cursor='$MAXCURSOR' --no-pager | \
+    "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$MAXCURSOR' --no-pager | \
      grep -E 'qdwin: set_maximized handle=$HANDLE max=1' | tail -1")
   [ -n "$MAXLINE" ] && break
 done
@@ -190,7 +190,7 @@ for _ in $(seq 1 20); do
   "$QDWIN_VM_EXEC" "$VMNAME" \
     "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      systemctl --user is-active --quiet qdshell.service" || continue
-  EXCL=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  EXCL=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
     grep 'qdshell-bar-exclusion-top-Virtual-1' | grep -oE '1280x[0-9]+' | tail -1")
   [ "$EXCL" = "1280x30" ] && break
 done
@@ -224,7 +224,7 @@ for _ in $(seq 1 20); do
   "$QDWIN_VM_EXEC" "$VMNAME" \
     "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      systemctl --user is-active --quiet qdshell.service" || continue
-  EXCL=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  EXCL=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
     grep 'qdshell-bar-exclusion-top-Virtual-1' | grep -oE '1280x[0-9]+' | tail -1")
   [ "$EXCL" = "1280x31" ] && break
 done

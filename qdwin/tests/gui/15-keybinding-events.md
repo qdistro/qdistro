@@ -70,7 +70,7 @@ sleep 0.5
 qdwin_send_key KEY_ESC                          # dismiss launcher
 sleep 0.3
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: launcher_requested'"
 ```
 
@@ -104,7 +104,7 @@ CURSOR2=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
 qdwin_chord alt -- tab
 sleep 0.5
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR2' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR2' --no-pager | \
    grep -E 'qdwin: switcher_(next|commit)'"
 ```
 
@@ -121,7 +121,7 @@ CURSOR3=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
 qdwin_chord ctrl alt -- l
 sleep 0.6
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR3' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR3' --no-pager | \
    grep -E 'qdwin: lock_requested|qdwin: lock key pressed'"
 ```
 

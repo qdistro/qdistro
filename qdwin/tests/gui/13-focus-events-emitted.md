@@ -44,7 +44,7 @@ echo "cursor=$CURSOR"
    WAYLAND_DISPLAY=wayland-1 foot sleep 600 &' " >/dev/null
 sleep 2
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: focus handle='"
 ```
 
@@ -61,7 +61,7 @@ line, where H is the toplevel handle of the new foot
 sleep 2
 qdwin_ctrl "list"
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: focus handle=' | tail -2"
 ```
 
@@ -76,7 +76,7 @@ previous handle is being tracked.
 "$QDWIN_VM_EXEC" "$VMNAME" "pkill -9 -n foot" >/dev/null
 sleep 1
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: focus handle=' | tail -1"
 ```
 
@@ -90,7 +90,7 @@ handle is either H1 (focus transferred to remaining foot) or
 "$QDWIN_VM_EXEC" "$VMNAME" "pkill -9 -x foot" >/dev/null
 sleep 1
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: focus handle=' | tail -1"
 ```
 
