@@ -475,10 +475,6 @@ bounded_run() {
             # redirection). Close our bookkeeping descriptors so nothing
             # downstream inherits a second handle or the READ end.
             exec {wfd}>&- {rfd}<&-
-            # The orphan-reaper lock must not outlive the reaper: a surviving
-            # TERM-ignoring descendant of this helper would otherwise hold the
-            # SAME open file description, and flock with it, for its lifetime.
-            if [ -n "${QD_ORPHAN_LOCKFD:-}" ]; then exec {QD_ORPHAN_LOCKFD}>&-; fi
             exec timeout -k "${SIGKILL_GRACE}s" "${cap}s" "$@"
         ) >&"$wfd" || rc=$?
     else
@@ -489,7 +485,6 @@ bounded_run() {
             ulimit -f "$QD_CAP_MAX_BLOCKS" 2>/dev/null || :
             ulimit -c 0 2>/dev/null || :
             exec {wfd}>&- {rfd}<&-
-            if [ -n "${QD_ORPHAN_LOCKFD:-}" ]; then exec {QD_ORPHAN_LOCKFD}>&-; fi
             exec "$@"
         ) >&"$wfd" || rc=$?
     fi
@@ -1278,7 +1273,8 @@ kill_guest_pid() {
 QD_ORPHAN_ROOT=${QDISTRO_VM_EXEC_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/qdistro-vm-exec-$(id -u)}
 QD_ORPHAN_DIR="$QD_ORPHAN_ROOT/${VM_NAME//\//_}"
 QD_ORPHAN_REFUSE_RC=75   # EX_TEMPFAIL
-QD_ORPHAN_LOCKFD=""
+QD_ORPHAN_LOCK_FLOCK=""   # pid of the flock(1) process holding the registry lock
+QD_ORPHAN_LOCK_HOLDER=""  # pid of its in-lock waiter; killing it releases the lock
 QD_ORPHAN_LOCK_WAIT=${QDISTRO_VM_EXEC_REAP_LOCK_WAIT:-$(( 4 * (KILL_VERIFY_TIMEOUT + SIGKILL_GRACE + 1) + 10 ))}
 if ! [[ "$QD_ORPHAN_LOCK_WAIT" =~ ^[0-9]+$ ]]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_REAP_LOCK_WAIT must be a non-negative integer, got: $QD_ORPHAN_LOCK_WAIT" >&2
@@ -1351,6 +1347,65 @@ orphan_refuse() {
     exit "$QD_ORPHAN_REFUSE_RC"
 }
 
+# The per-VM registry lock is held by a HELPER process, never by this shell.
+#
+# It used to be an fd of this shell (`exec {fd}>>.lock; flock fd`). bash cannot
+# mark such an fd close-on-exec, and fork always copies it, so EVERY process
+# started while the lock was held -- each `$( )` subshell, and the cat/rm/jq/
+# sleep/virsh they run -- got the same open file description, and with it the
+# flock. bounded_run closed it in its own helpers, but nothing else did: one
+# hung or left-behind child (e.g. a `sleep` outliving a killed parent) kept the
+# lock, and every later vm-exec on this VM timed out on it and exited 75.
+#
+# Now `flock -o` takes the lock on ITS OWN descriptor and closes that
+# descriptor before it execs the waiter, so the flock process is the one and
+# only holder. The waiter announces the acquisition on the process-substitution
+# pipe and then sits in `tail --pid=<this vm-exec>`:
+#   - orphan_lock_release kills the waiter and WAITS for flock to exit, so the
+#     lock is free by the time the reap returns;
+#   - if this vm-exec dies without releasing (SIGKILL, an errexit), tail sees
+#     its pid gone and exits, and flock exits with it: the lock does not
+#     outlive its owner;
+#   - if it dies while still WAITING for the lock, nobody reads the pipe any
+#     more: the announcement fails (EPIPE/SIGPIPE) the moment flock acquires,
+#     and the waiter exits before it could ever watch a recycled pid.
+# Nothing this shell starts afterwards can inherit the lock: this shell never
+# has it open.
+orphan_lock_take() {
+    local rd line rc=0 lock="$QD_ORPHAN_DIR/.lock"
+    QD_ORPHAN_LOCK_FLOCK="" QD_ORPHAN_LOCK_HOLDER=""
+    # stdin/stderr of the helpers are detached; tail's stdout too, so it never
+    # writes to (or watches) the announcement pipe after the first line.
+    if ! exec {rd}< <(exec flock -o -w "$QD_ORPHAN_LOCK_WAIT" -E "$QD_ORPHAN_REFUSE_RC" "$lock" \
+            sh -c 'echo "held $$" || exit 1; exec tail --pid="$1" -f /dev/null >/dev/null' qd-orphan-lock "$$" \
+            </dev/null 2>/dev/null); then
+        orphan_refuse "cannot start the orphan registry lock helper for $lock while records exist"
+    fi
+    QD_ORPHAN_LOCK_FLOCK=$!
+    IFS= read -r -u "$rd" line || line=""
+    exec {rd}<&-
+    if [[ "$line" =~ ^held\ ([0-9]+)$ ]]; then
+        QD_ORPHAN_LOCK_HOLDER=${BASH_REMATCH[1]}
+        return 0
+    fi
+    # No announcement: flock gave up (timeout -> $QD_ORPHAN_REFUSE_RC) or could
+    # not open the lock file. Either way the lock is NOT held.
+    wait "$QD_ORPHAN_LOCK_FLOCK" 2>/dev/null || rc=$?
+    QD_ORPHAN_LOCK_FLOCK=""
+    if [ "$rc" -eq "$QD_ORPHAN_REFUSE_RC" ]; then
+        orphan_refuse "another vm-exec held the orphan registry lock for more than ${QD_ORPHAN_LOCK_WAIT}s (orphan cleanup still in progress)"
+    fi
+    orphan_refuse "cannot open the orphan registry lock $lock while records exist (flock exit $rc)"
+}
+
+orphan_lock_release() {
+    [ -n "$QD_ORPHAN_LOCK_HOLDER" ] && kill "$QD_ORPHAN_LOCK_HOLDER" 2>/dev/null || :
+    # flock exits as soon as its waiter does; wait for it so the lock is really
+    # free when this returns (a waiting concurrent vm-exec proceeds at once).
+    [ -n "$QD_ORPHAN_LOCK_FLOCK" ] && wait "$QD_ORPHAN_LOCK_FLOCK" 2>/dev/null || :
+    QD_ORPHAN_LOCK_FLOCK="" QD_ORPHAN_LOCK_HOLDER=""
+}
+
 orphan_reap() {
     local e base owner owner_start st gpid gstamp gboot guuid cur_uuid="" unresolved=0 have=0 names=""
     [ "${QDISTRO_VM_EXEC_ORPHAN_REAP:-1}" = 1 ] || return 0
@@ -1359,17 +1414,7 @@ orphan_reap() {
     [ "$have" = 1 ] || return 0
     # One reaper per VM at a time, and a concurrent launcher WAITS for it: no new
     # command may start on this VM while a record is unresolved.
-    # Global, not local: bounded_run closes it in every helper child.
-    QD_ORPHAN_LOCKFD=""
-    if ! { exec {QD_ORPHAN_LOCKFD}>>"$QD_ORPHAN_DIR/.lock"; } 2>/dev/null; then
-        QD_ORPHAN_LOCKFD=""
-        orphan_refuse "cannot open the orphan registry lock $QD_ORPHAN_DIR/.lock while records exist"
-    fi
-    if ! flock -w "$QD_ORPHAN_LOCK_WAIT" "$QD_ORPHAN_LOCKFD"; then
-        exec {QD_ORPHAN_LOCKFD}>&-
-        QD_ORPHAN_LOCKFD=""
-        orphan_refuse "another vm-exec held the orphan registry lock for more than ${QD_ORPHAN_LOCK_WAIT}s (orphan cleanup still in progress)"
-    fi
+    orphan_lock_take
     for e in "$QD_ORPHAN_DIR"/*-*; do
         [ -f "$e" ] || continue
         base=${e##*/}
@@ -1420,8 +1465,7 @@ orphan_reap() {
             echo "[vm-exec] WARN: orphan registry: resolved record $base could not be removed; it will be re-checked (harmlessly) next time" >&2
         fi
     done
-    exec {QD_ORPHAN_LOCKFD}>&-
-    QD_ORPHAN_LOCKFD=""
+    orphan_lock_release
     if [ "$unresolved" -gt 0 ]; then
         orphan_refuse "$unresolved orphaned guest command(s) left by a SIGKILLed vm-exec could not be confirmed gone (records:$names)"
     fi
