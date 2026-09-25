@@ -46,7 +46,9 @@
 #
 #   1. THE PREFERRED ENTRY POINT TAKES THE PICTURE ITSELF. The virsh lanes go
 #      through capture_virsh_screenshot, which runs `virsh screenshot` and
-#      attests only the file it just wrote; nothing chooses those bytes.
+#      attests only the file it just wrote; nothing chooses those bytes beyond
+#      the black view-unique margin view-geometry.sh adds (the raw pixels are
+#      kept intact and described by the frame's `.raw` sidecar).
 #
 #      capture_attest_frame IS A CALLER-SUPPLIED-BYTES ENTRY POINT, and this
 #      is stated plainly because an earlier version of this bullet claimed no
@@ -93,6 +95,14 @@
 
 QCI_CAPTURE_LOG_MAGIC='#qci-capture-log'
 QCI_CAPTURE_LOG_VERSION=2
+
+# VIEW-UNIQUE GEOMETRY (view-geometry.sh): every frame a capture tool publishes
+# is padded to a (W,H) not issued before in this attempt, with its raw identity
+# in a `.raw` sidecar. Sourced here so every tool that sources this library --
+# vm-gui, the qdwin and qdwin-apps helpers, and qdlocker through qdwin -- uses
+# the one copy of the allocator.
+# shellcheck source=view-geometry.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/view-geometry.sh"
 
 # The VM a ledger is bound to (header field 4), or empty when the header is
 # missing, the wrong version, or unbound. Args: log_path.
@@ -316,10 +326,27 @@ capture_attest_rejected() {
 # to bless bytes it did not produce, and it cannot be pointed at another
 # worker's VM (the row is refused). A lane with a retry loop wants
 # capture_virsh_shot + capture_publish_frame instead. Args: vm out [uri].
+#
+# The raw screenshot is taken to a NON-IMAGE stage beside $out, padded to this
+# attempt's next unique geometry (view-geometry.sh), and only then moved to
+# $out and attested -- so the ledger digest is of the file as written, and raw
+# bytes never sit under the image name the caller hands to a driver. Outside
+# qci (no QCI_GUI_VIEW_STATE) the frame is published raw, as before.
+# Args: vm out [uri] [kind].
 capture_virsh_screenshot() {
     local vm=${1:?capture_virsh_screenshot: vm} out=${2:?capture_virsh_screenshot: out}
-    local uri=${3:-${LIBVIRT_DEFAULT_URI:-qemu:///session}} rc=0
-    virsh -c "$uri" screenshot "$vm" "$out" >/dev/null || return $?
-    capture_attest_frame "$out" "$vm" || rc=$?
+    local uri=${3:-${LIBVIRT_DEFAULT_URI:-qemu:///session}} kind=${4:-screenshot} rc=0 stage
+    stage=$(mktemp -- "$(dirname -- "$out")/.qci-capture.XXXXXX") || return 1
+    virsh -c "$uri" screenshot "$vm" "$stage" >/dev/null || { rc=$?; rm -f -- "$stage"; return "$rc"; }
+    qci_view_publish "$stage" "$out" "$kind" "virsh:$vm" _qci_capture_mv_attest "$vm" || rc=$?
+    rm -f -- "$stage"
     return "$rc"
+}
+
+# Publisher for capture_virsh_screenshot: move the staged frame to its final
+# path, then attest it. Args: vm staged dst.
+_qci_capture_mv_attest() {
+    local vm=$1 staged=$2 dst=$3
+    mv -fT -- "$staged" "$dst" || return 1
+    capture_attest_frame "$dst" "$vm"
 }

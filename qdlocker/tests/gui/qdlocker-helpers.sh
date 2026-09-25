@@ -201,13 +201,18 @@ qdlocker_drain_lock_state() {
 # ImageMagick on the host screenshot, not agent vision, so "a thin strip
 # of desktop is visible" turns into a deterministic failure.
 
+# The SCREEN dimensions of a capture: the raw frame's, from its `.raw` sidecar
+# (view-geometry.sh pads every harness frame with a unique black margin), or
+# the decoded size of a legacy frame without one. Output format unchanged:
+# "W H" with no trailing newline.
 qdlocker_screenshot_dimensions() {
-    local image="$1"
+    local image="$1" dims
     if ! command -v magick >/dev/null 2>&1; then
         echo "qdlocker_screenshot_dimensions: ImageMagick 'magick' not found" >&2
         return 2
     fi
-    magick identify -format '%w %h' "$image"
+    dims=$(qci_view_raw_dims "$image") || return 1
+    printf '%s' "$dims"
 }
 
 qdlocker_count_color_in_crop() {

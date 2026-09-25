@@ -952,25 +952,28 @@ EOF
     # gate (round 9), which rejects black/flat/undecodable captures before the
     # agent ever sees them. Assert the chain, not one spelling of it.
     grep -q 'capture_usable_screenshot "\$OUT"' "$REPO_ROOT/scripts/vm/vm-gui"
-    # A retry lane captures candidates UNATTESTED and writes the one row when
-    # it PUBLISHES the accepted frame; a lane that captures straight to its
-    # final path still attests in place.
+    # Every lane captures its RAW frame UNATTESTED and writes the one row when
+    # it PUBLISHES the padded frame (view-geometry.sh): the retry lanes'
+    # candidates and, since the padding work, click-preview raw and
+    # click-confirm post too.
     grep -q 'capture_virsh_shot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'capture_publish_frame "\$src" "\$dst"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_screenshot "\$VM" "\$raw"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_screenshot "\$VM" "\$post"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_shot "\$VM" "\$scratch/raw.png"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'qci_view_publish "\$scratch/raw.png" "\$raw" click-raw "virsh:\$VM" deliver_attested_frame' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_shot "\$VM" "\$scratch/post.png"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'qci_view_publish "\$scratch/post.png" "\$post" click-post "virsh:\$VM" deliver_attested_frame' "$REPO_ROOT/scripts/vm/vm-gui"
     # qdwin_screenshot (in-guest qdshell capture, qdwin/qdlocker lane). Without
     # this, every qci:visual=required scenario in those repos would be ERROR.
     local qh="$REPO_ROOT/qdwin/tests/gui/qdwin-helpers.sh"
     if [ -r "$qh" ]; then
         grep -q 'lib/capture-attest.sh' "$qh"
-        grep -q 'capture_attest_frame "\$out" "\$VMNAME"' "$qh"
+        grep -q 'capture_attest_frame "\$dst" "\$VMNAME"' "$qh"
     fi
     # qdwin_apps_screenshot (virsh, qdwin apps lane) -- the third capture tool.
     local ah="$REPO_ROOT/qdwin/tests/apps/qdwin-apps-helpers.sh"
     if [ -r "$ah" ]; then
         grep -q 'lib/capture-attest.sh' "$ah"
-        grep -q 'capture_virsh_screenshot "\$VMNAME" "\$out"' "$ah"
+        grep -q 'capture_virsh_screenshot "\$VMNAME" "\$out" "\$uri" apps' "$ah"
     fi
 }
 
@@ -1374,10 +1377,10 @@ VIRSH
     install_constant_virsh
     run vmgui_screenshot "$ADIR/s2-after.png"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"BYTE-IDENTICAL"* ]]
+    [[ "$output" != *"SAME SCREEN PIXELS"* ]]
     run vmgui_screenshot "$ADIR/s3-cachehit.png"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"BYTE-IDENTICAL"* ]]
+    [[ "$output" == *"SAME SCREEN PIXELS"* ]]
     [[ "$output" == *"s2-after.png"* ]]
     # Diagnostic only: the frame is still delivered and attested in-tree.
     [ -f "$ADIR/s3-cachehit.png" ]
@@ -1390,7 +1393,7 @@ VIRSH
     run vmgui_screenshot "$ADIR/a.png"
     run vmgui_screenshot "$ADIR/b.png"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"BYTE-IDENTICAL"* ]]
+    [[ "$output" != *"SAME SCREEN PIXELS"* ]]
 }
 
 @test "vm-gui: the DELIVERED frame gets an in-tree ledger row" {
