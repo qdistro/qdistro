@@ -4,7 +4,7 @@
 
 **Acceptance criterion:** the clock widget in the bar repaints after
 the VM's wall-clock time advances by 1 minute. The hard behavioral
-signal is that the full-width top-bar crop's image hash changes between
+signal is that the full-width top-bar crop's pixel hash changes between
 the pre-advance and post-advance screenshots. OCR of the rendered clock
 text is best-effort diagnostic output only.
 
@@ -13,7 +13,7 @@ This exercises:
 - Configure/ack cadence on widget property updates (Noctalia binds
  Date.now() to the clock label, which fires repaints)
 - OCR readability of bar text (diagnostic signal only; the pass/fail
- decision comes from the repaint hash)
+ decision comes from the repaint pixel hash)
 
 ## Setup
 
@@ -43,14 +43,25 @@ noct_screenshot_awake /tmp/03-step1-now.png
 
 # Crop the FULL-WIDTH top bar strip, not a top-left corner: Noctalia centres
 # the clock capsule in the bar, so a narrow 250x30 left crop misses it entirely
-# and OCR comes back empty. An over-wide width clamps to the image width, so
-# this is resolution-robust.
-magick /tmp/03-step1-now.png -crop 2560x48+0+0 /tmp/03-step1-clock.png
-STEP1_HASH=$(sha256sum /tmp/03-step1-clock.png | awk '{print $1}')
-[ -n "$STEP1_HASH" ] || { echo "FAIL: step-1 bar crop hash is empty"; exit 1; }
+# and OCR comes back empty. The width is the RAW screen width from the frame's
+# `.raw` sidecar: the harness pads every frame with a black right/bottom
+# margin of a different size per capture, so an over-wide crop would take in
+# the margin and `+repage` is needed so the file does not record the padded
+# canvas size. Either would make the two crop hashes differ on every run.
+# The hash is a PIXEL hash (qci_view_pix_sha: decoded 8-bit RGB), never the
+# crop FILE's sha256: ImageMagick writes fresh tIME/date chunks into every
+# crop, so two crops of an unchanged bar written seconds apart differ in file
+# bytes and would "prove" a repaint that never happened.
+read -r RAW_W _ < <(qci_view_raw_dims /tmp/03-step1-now.png)
+BAR_CROP="${RAW_W}x48+0+0"
+magick /tmp/03-step1-now.png -crop "$BAR_CROP" +repage /tmp/03-step1-clock.png \
+  || { echo "FAIL: step-1 bar crop failed"; exit 1; }
+STEP1_HASH=$(qci_view_pix_sha /tmp/03-step1-clock.png) \
+  || { echo "FAIL: step-1 bar crop pixel hash failed"; exit 1; }
+[ -n "$STEP1_HASH" ] || { echo "FAIL: step-1 bar crop pixel hash is empty"; exit 1; }
 OCR=$(tesseract /tmp/03-step1-clock.png stdout 2>/dev/null || true)
 echo "$EXPECT_HHMM matches OCR: $OCR"
-echo "step1 bar crop sha256: $STEP1_HASH"
+echo "step1 bar crop pixel hash: $STEP1_HASH"
 ```
 
 **Assert (1.1):** the screenshot and full-width top-bar crop were
@@ -82,19 +93,21 @@ EXPECT_HHMM2=$("$QDWIN_VM_EXEC" "$VMNAME" 'date +%H%M' | tail -1)
 # Poll up to 75s for the next minute-tick repaint. Noctalia ticks on a
 # 60 000 ms Qt timer from launch; advancing the wall clock does not
 # reschedule it, so the repaint lands within one timer period. Break early
-# once the crop hash changes so a fast tick doesn't pay the full wait. This
+# once the crop pixel hash changes so a fast tick doesn't pay the full wait. This
 # is ONE synchronous loop — it must run to completion in this shell call.
 STEP2_HASH=""
 for _ in $(seq 1 15); do
   sleep 5
   noct_screenshot_awake /tmp/03-step2-advanced.png
-  magick /tmp/03-step2-advanced.png -crop 2560x48+0+0 /tmp/03-step2-clock.png
-  STEP2_HASH=$(sha256sum /tmp/03-step2-clock.png | awk '{print $1}')
+  magick /tmp/03-step2-advanced.png -crop "$BAR_CROP" +repage /tmp/03-step2-clock.png \
+    || { echo "FAIL: step-2 bar crop failed"; exit 1; }
+  STEP2_HASH=$(qci_view_pix_sha /tmp/03-step2-clock.png) \
+    || { echo "FAIL: step-2 bar crop pixel hash failed"; exit 1; }
   [ "$STEP1_HASH" != "$STEP2_HASH" ] && break
 done
-[ -n "$STEP2_HASH" ] || { echo "FAIL: step-2 bar crop hash is empty"; exit 1; }
+[ -n "$STEP2_HASH" ] || { echo "FAIL: step-2 bar crop pixel hash is empty"; exit 1; }
 OCR2=$(tesseract /tmp/03-step2-clock.png stdout 2>/dev/null || true)
-echo "step2 bar crop sha256: $STEP2_HASH"
+echo "step2 bar crop pixel hash: $STEP2_HASH"
 echo "step2 OCR diagnostic: $OCR2"
 [ "$STEP1_HASH" != "$STEP2_HASH" ] || {
   echo "FAIL: clock bar crop did not repaint within 75s after VM time advanced"
@@ -102,8 +115,17 @@ echo "step2 OCR diagnostic: $OCR2"
 }
 ```
 
+To LOOK at a bar crop, never open the crop file itself (two crops of the
+same size read as black where they repeat): open a view-copy, which records
+the crop's lineage and gets a size of its own:
+
+```bash
+$QDISTRO_REPO/scripts/vm/vm-gui "$VMNAME" view-copy /tmp/03-step2-clock.png \
+    --source /tmp/03-step2-advanced.png --crop "$BAR_CROP"
+```
+
 **Assert (2.1):** the bar crop after the clock advance differs from
-the step-1 crop by image hash. This is the hard pass condition for the
+the step-1 crop by pixel hash. This is the hard pass condition for the
 clock update.
 **Assert (2.2):** the VM time changed from step 1 to step 2 and the
 bar crop changed after the next clock tick, proving the widget
@@ -129,16 +151,16 @@ Hard pass conditions:
 1. Setup proves the Noctalia session is healthy.
 2. Step 1 and Step 2 screenshots and bar crops are captured.
 3. The VM time advances from Step 1 to Step 2.
-4. The Step 2 bar-crop hash differs from the Step 1 bar-crop hash.
+4. The Step 2 bar-crop pixel hash differs from the Step 1 bar-crop pixel hash.
 5. Cleanup leaves `qdshell.service` healthy.
 
 OCR exact-digit matching is diagnostic only and must not fail the
-scenario when the crop hash changed.
+scenario when the crop pixel hash changed.
 
 ## Known failure modes
 
 1. **OCR reads "tofu" / no text** — record the OCR output in the
- report, but do not fail the scenario if the bar-crop hash changed.
+ report, but do not fail the scenario if the bar-crop pixel hash changed.
 
 2. **Clock doesn't advance for 1 full minute** — Noctalia ticks
  on a Qt Timer at 60 000ms interval starting from launch.

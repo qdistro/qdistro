@@ -81,8 +81,11 @@ and **Navigation:** in that order.
 - The last paragraph mentions "mirrored to the GUI app instantly".
 
 The S2 image must differ from S1 before judging modal content. The app header
-contains a live clock, so byte-identical captures separated by this step prove
-the screenshot path was stale rather than proving the `?` binding failed.
+contains a live clock, so captures with identical RAW pixels separated by this
+step prove the screenshot path was stale rather than proving the `?` binding
+failed. Compare raw identities (`raw_pix_sha`, field 4 of each frame's `.raw`
+sidecar; the harness also prints a "same screen pixels" note), never PNG file
+hashes: every frame is padded to a size of its own, so file bytes always differ.
 
 ### S3 — Escape dismisses, main view returns intact
 

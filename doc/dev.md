@@ -123,10 +123,14 @@ mechanical markdown scenarios. Run it non-interactively and let qci place each
 attempt in its own temporary working directory:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
+
+Do not add `--ephemeral`: the gate reads each attempt's codex rollout to see
+which frames the driver actually opened, and records a pixel-dependent verdict
+whose driver opened none as ERROR (see `ci/README.md`).
 
 The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
 named in `QCI_AGENT_CMD`, and otherwise records `unknown` — there is NO default,
@@ -143,7 +147,7 @@ blocked run, not a substitute model. A runner that cannot open an image must
 record `ERROR` rather than a verdict. To retry a single scenario on a fresh VM:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
 QCI_GUI_RETRY=1 \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
@@ -158,7 +162,7 @@ build a clean app-deps golden and use eight disposable VM workers:
 
 ```sh
 QCI_GUI_JOBS=8 QDWIN_APP_DEPS=1 \
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```

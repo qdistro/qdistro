@@ -11,6 +11,10 @@
 #   vm-gui <vm> click-preview <x> <y> [label]
 #                                         Move pointer; save raw/marked/zoom review images
 #   vm-gui <vm> click-confirm <manifest> Click the exact reviewed coordinates
+#   vm-gui <vm> view-copy <image> [--out PATH] [--source CAPTURE --crop WxH+X+Y]
+#                                         [--attempt-dir DIR]
+#                                         Fresh uniquely-sized copy for a second
+#                                         look (never re-open a path you viewed)
 #   vm-gui <vm> click <x> <y>           Left-click at coordinates
 #   vm-gui <vm> rightclick <x> <y>      Right-click at coordinates
 #   vm-gui <vm> doubleclick <x> <y>     Double-click at coordinates
@@ -46,18 +50,24 @@ run_as_jan() {
 # ledger for the VM that ledger is bound to, and can never attest a frame of
 # another worker's VM.
 #
-# TWO SHAPES, because a retry loop and a one-shot capture want different things:
-#   * a lane that captures STRAIGHT to its final path (click-preview raw/post)
-#     uses capture_virsh_screenshot, which takes the screenshot and attests the
-#     file it just wrote -- one row, nothing chooses the bytes;
-#   * a lane that RETRIES (screenshot, screenshot-fresh) captures candidates
-#     with capture_virsh_shot, which writes NO row, and the row is written when
-#     a candidate is published with capture_publish_frame. Candidates the tool
-#     rejects are recorded under the `rejected` scope, which the gate counts
-#     nowhere.
-# capture_publish_frame therefore attests bytes handed to it, in the same
-# process that captured them. See the library header for what that does and does
-# not prove.
+# ONE SHAPE for every lane here: capture the RAW frame UNATTESTED with
+# capture_virsh_shot (no row), run every raw check on it (usability, freshness
+# baseline, QMP geometry, ring/zoom placement), then pad it to this attempt's
+# next VIEW-UNIQUE size and publish it with qci_view_publish
+# (lib/view-geometry.sh), whose publisher here is deliver_attested_frame ->
+# capture_publish_frame: THE ledger row for that frame, of the bytes as
+# written. Candidates the tool rejects are recorded under the `rejected` scope,
+# which the gate counts nowhere, and keep their raw bytes under a non-image
+# name. (click-preview raw/post used capture_virsh_screenshot until the padding
+# work: attesting inside the capture call made "raw checks first, pad, then
+# attest" impossible.) capture_publish_frame attests bytes handed to it, in the
+# same process that captured them. See the library header for what that does
+# and does not prove.
+#
+# WHY PAD. The vision driver reads as BLACK any region of a later image that
+# repeats, at the same position in an image of the same size, something it was
+# already shown. A size of its own per image defeats it; the raw frame stays
+# recoverable from its `.raw` sidecar.
 # shellcheck source=lib/capture-attest.sh
 . "$VM_GUI_DIR/lib/capture-attest.sh"
 
@@ -366,7 +376,7 @@ click_manifest_value() {
 click_preview() {
     local x=$1 y=$2 label=${3:-} dir id raw annotated zoom manifest log
     local width height expected_w=${QDWIN_SCREEN_W:-1280} expected_h=${QDWIN_SCREEN_H:-800}
-    local label_b64 created hash
+    local label_b64 created hash scratch rc=0
     dir=$(click_artifact_dir) || return $?
     id=$(click_next_id "$dir")
     raw="$dir/$id.raw.png"
@@ -383,20 +393,38 @@ click_preview() {
     click_validate_coordinate y "$y" "$expected_h" || return $?
     qmp_mouse_move "$x" "$y"
     sleep 0.3
-    capture_virsh_screenshot "$VM" "$raw"
-    read -r width height < <(click_image_size "$raw")
-    [ -n "$width" ] && [ -n "$height" ] || return 2
+    # RAW FIRST, PAD LAST. The capture is taken UNATTESTED into a private
+    # scratch dir; its size check, the coordinate checks, the ring and the zoom
+    # crop all work in RAW screen coordinates (the geometry QMP maps). Only
+    # then is each of the three images padded to its own view-unique size
+    # (view-geometry.sh) and published: the raw frame with THE ledger row for
+    # this capture, the annotated and zoomed views without one (they are
+    # derivatives, linked to the raw frame by their sidecars and manifest).
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-click.XXXXXX") || return 1
+    capture_virsh_shot "$VM" "$scratch/raw.png" || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
+    read -r width height < <(click_image_size "$scratch/raw.png")
+    [ -n "$width" ] && [ -n "$height" ] || { rm -rf -- "$scratch"; return 2; }
     if [ "$width" -ne "$expected_w" ] || [ "$height" -ne "$expected_h" ]; then
         echo "vm-gui: screenshot is ${width}x${height}, but QMP click mapping expects ${expected_w}x${expected_h}" >&2
         echo "vm-gui: set QDWIN_SCREEN_W/H correctly before previewing a click" >&2
+        rm -rf -- "$scratch"
         return 2
     fi
-    click_validate_coordinate x "$x" "$width" || return $?
-    click_validate_coordinate y "$y" "$height" || return $?
-    click_annotate_image "$raw" "$annotated" "$zoom" "$x" "$y" "$width" "$height"
+    click_validate_coordinate x "$x" "$width" || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
+    click_validate_coordinate y "$y" "$height" || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
+    click_annotate_image "$scratch/raw.png" "$scratch/annotated.png" "$scratch/zoom.png" \
+        "$x" "$y" "$width" "$height" || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
+    # The same contract as every raw consumer: the canonical RAW pixel digest.
+    hash=$(qci_view_pix_sha "$scratch/raw.png") || hash=$(sha256sum "$scratch/raw.png" | awk '{print $1}')
+    qci_view_publish "$scratch/raw.png" "$raw" click-raw "virsh:$VM" deliver_attested_frame \
+        || { rm -rf -- "$scratch"; return 1; }
+    qci_view_publish "$scratch/annotated.png" "$annotated" click-annotated "$raw" qci_view_mv_publish \
+        || { rm -rf -- "$scratch"; return 1; }
+    qci_view_publish "$scratch/zoom.png" "$zoom" click-zoom "$raw" qci_view_mv_publish \
+        || { rm -rf -- "$scratch"; return 1; }
+    rm -rf -- "$scratch"
     label_b64=$(printf '%s' "$label" | base64 -w0)
     created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    hash=$(sha256sum "$raw" | awk '{print $1}')
     {
         printf 'preview_version=1\n'
         printf 'preview_id=%s\n' "$id"
@@ -410,6 +438,8 @@ click_preview() {
         printf 'annotated=%s\n' "$annotated"
         printf 'zoom=%s\n' "$zoom"
         printf 'raw_sha256=%s\n' "$hash"
+        printf 'annotated_raw=%s\n' "$raw"
+        printf 'zoom_raw=%s\n' "$raw"
         printf 'pointer_moved_before_capture=1\n'
         printf 'button_events_before_confirmation=0\n'
         printf 'created_utc=%s\n' "$created"
@@ -429,7 +459,7 @@ click_preview() {
 
 click_confirm() {
     local manifest=$1 dir manifest_real expected_dir preview_id manifest_vm x y width height
-    local label_b64 label raw annotated zoom post log confirmed
+    local label_b64 label raw annotated zoom post log confirmed scratch
     [ -f "$manifest" ] || { echo "vm-gui: click preview manifest not found: $manifest" >&2; return 2; }
     dir=$(click_artifact_dir) || return $?
     manifest_real=$(realpath "$manifest")
@@ -468,7 +498,13 @@ click_confirm() {
     qmp_click "$x" "$y" left
     sleep 0.3
     post="$dir/$preview_id.post.png"
-    capture_virsh_screenshot "$VM" "$post"
+    # Unattested raw capture, then padded to its own view-unique size and
+    # published with its ledger row (see click_preview).
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-click.XXXXXX") || return 1
+    capture_virsh_shot "$VM" "$scratch/post.png" || { local crc=$?; rm -rf -- "$scratch"; return "$crc"; }
+    qci_view_publish "$scratch/post.png" "$post" click-post "virsh:$VM" deliver_attested_frame \
+        || { rm -rf -- "$scratch"; return 1; }
+    rm -rf -- "$scratch"
     printf 'confirmed_utc=%s\nx=%s\ny=%s\npost=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$x" "$y" "$post" > "$confirmed"
     log="$dir/clicks.tsv"
@@ -668,29 +704,41 @@ retain_rejected_candidate() {
     return 0
 }
 
-# Tell the driver when a frame it was just handed is BYTE-IDENTICAL to a frame
-# already in the artifact tree. Diagnostic only: it changes no file, no ledger
-# row and no exit status. Why it exists: in full-20260922T193137Z-881799
+# Tell the driver when a frame it was just handed shows the same screen as a
+# frame already in the artifact tree. Diagnostic only: it changes no file, no
+# ledger row and no exit status. Why it exists: in full-20260922T193137Z-881799
 # (permissions-gui/06, /25) and again in the 2026-09-23 rerun of 06, the driver
 # graded a capture "entirely black" that was byte-for-byte the same valid frame
 # it had graded correctly one step earlier (e.g. s3-cachehit.png ==
-# s2-afterapprove.png, mean luma 138/255). Every misread frame was a repeat of
-# an earlier one, so the driver's viewer is suspected of not re-rendering a
-# repeated image. Naming the twin gives the driver something to check against.
+# s2-afterapprove.png, mean luma 138/255). The cause was measured on
+# 2026-09-24: the vision model blanks regions that repeat, at the same position
+# in a same-size image, what it was already shown (todo/test-blankscreenshots).
+# View-unique padding is the fix; this note only says the screen did not change.
+#
+# COMPARED ON RAW PIXELS. Every frame is padded to a size of its own
+# (view-geometry.sh), so file bytes of two captures of an unchanged screen
+# always differ; the question "did the screen change?" is answered by the raw
+# canonical pixel digest in each frame's `.raw` sidecar (computed for a legacy
+# frame without one). Derivative views (annotated/zoom/view-copy) are not
+# captures and are not listed.
 note_identical_frames() {
-    local out=$1 dir sum f twins=""
+    local out=$1 dir sum f twins="" line kind
     [ -f "$out" ] || return 0
     dir=$(dirname -- "$out")
-    sum=$(sha256sum -- "$out" 2>/dev/null | awk '{print $1}') || return 0
+    sum=$(qci_view_raw_pix_sha "$out" 2>/dev/null) || return 0
     [ -n "$sum" ] || return 0
     for f in "$dir"/*.png "$dir"/click-targets/*.png; do
         [ -f "$f" ] || continue
         [ "$f" -ef "$out" ] && continue
-        [ "$(sha256sum -- "$f" 2>/dev/null | awk '{print $1}')" = "$sum" ] || continue
+        if line=$(qci_view_sidecar "$f"); then
+            read -r _ _ _ _ kind _ <<<"$line"
+            case "${kind%%,*}" in click-annotated|click-zoom|view|crop:*) continue ;; esac
+        fi
+        [ "$(qci_view_raw_pix_sha "$f" 2>/dev/null)" = "$sum" ] || continue
         twins="$twins ${f#"$dir"/}"
     done
     [ -n "$twins" ] || return 0
-    echo "vm-gui: note: $out is BYTE-IDENTICAL to earlier capture(s):$twins -- the screen did not change between them. It is a usable, non-blank frame; if your image viewer shows it blank or black, that is the viewer not re-rendering a repeated image, not the screen. Grade it as the same picture as those files." >&2
+    echo "vm-gui: note: $out shows the SAME SCREEN PIXELS as earlier capture(s):$twins -- the screen did not change between them. The file was given a size of its own so it can be viewed as a fresh image; judge it from the pixels you open, like any other frame." >&2
     return 0
 }
 
@@ -725,7 +773,10 @@ capture_usable_screenshot() {
         rc=0
         screenshot_is_usable "$candidate" || rc=$?
         if [ "$rc" -eq 0 ]; then
-            deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
+            # Usability was judged on the RAW candidate above; only now is it
+            # padded to this attempt's next unique size and published.
+            qci_view_publish "$candidate" "$out" screenshot "virsh:$VM" deliver_attested_frame \
+                || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
             note_identical_frames "$out"
             return 0
@@ -733,7 +784,8 @@ capture_usable_screenshot() {
         if [ "$rc" -eq 5 ]; then
             # No analyser. Do not pretend the frame was checked: hand it over and
             # say plainly that it was not.
-            deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
+            qci_view_publish "$candidate" "$out" screenshot "virsh:$VM" deliver_attested_frame \
+                || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
             echo "vm-gui: WARNING: screenshot NOT checked for blankness -- $(screenshot_unusable_reason 5)" >&2
             note_identical_frames "$out"
@@ -772,7 +824,15 @@ screenshot_fresh() {
             echo "vm-gui: screenshot-fresh baseline does not exist: $baseline" >&2
             return 2
         }
-        baseline_hash=$(sha256sum "$baseline" | awk '{print $1}')
+        # RAW IDENTITY, NOT FILE BYTES: a padded baseline's bytes can never
+        # equal a raw candidate's, so comparing files would call every
+        # unchanged screen fresh. The baseline's raw canonical pixel digest
+        # comes from its `.raw` sidecar (computed for a legacy frame), and the
+        # candidate's is computed the same way below. Without ImageMagick the
+        # comparison falls back to file bytes, which is exact for two raw
+        # frames and is the only comparison available.
+        baseline_hash=$(qci_view_raw_pix_sha "$baseline" 2>/dev/null) \
+            || baseline_hash=$(sha256sum "$baseline" | awk '{print $1}')
     fi
     # Candidates are captured OUT OF TREE (a private scratch dir) and carry NO
     # ledger row: the candidate capture writes nothing, so a frame that is never
@@ -821,11 +881,13 @@ screenshot_fresh() {
         # The baseline comparison needs no analyser, so it still runs when the
         # frame could not be judged.
         if [ -z "$reason" ] && [ -n "$baseline_hash" ]; then
-            hash=$(sha256sum "$candidate" | awk '{print $1}')
+            hash=$(qci_view_pix_sha "$candidate" 2>/dev/null) \
+                || hash=$(sha256sum "$candidate" | awk '{print $1}')
             [ "$hash" = "$baseline_hash" ] && reason="unchanged-baseline"
         fi
         if [ -z "$reason" ]; then
-            deliver_attested_frame "$candidate" "$out" || { rm -rf -- "$scratch"; return 1; }
+            qci_view_publish "$candidate" "$out" screenshot-fresh "virsh:$VM" deliver_attested_frame \
+                || { rm -rf -- "$scratch"; return 1; }
             rm -rf -- "$scratch"
             # A MISSING ANALYSER NO LONGER FAILS THIS LANE. It used to return
             # the probe's own rc, so a host without ImageMagick could not take a
@@ -882,6 +944,26 @@ case "$CMD" in
     click-confirm)
         MANIFEST="${1:?Usage: vm-gui <vm> click-confirm <preview-manifest>}"
         click_confirm "$MANIFEST"
+        ;;
+    view-copy)
+        # F2. A fresh, uniquely-sized copy of ANY image (raw content if it has
+        # a `.raw` sidecar), for a second look or for an image the harness did
+        # not just hand over (a scenario crop: pass --source/--crop). Inside
+        # qci the attempt's view state is already exported; by hand, pass
+        # --attempt-dir so views of one attempt get unique sizes.
+        VC_ARGS=()
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --attempt-dir)
+                    [ -d "${2:-}" ] || { echo "vm-gui: --attempt-dir needs an existing directory" >&2; exit 2; }
+                    QCI_GUI_VIEW_STATE="$(cd "$2" && pwd)/.qci-view-state"
+                    export QCI_GUI_VIEW_STATE
+                    shift 2 ;;
+                *) VC_ARGS+=("$1"); shift ;;
+            esac
+        done
+        [ "${#VC_ARGS[@]}" -gt 0 ] || { echo "Usage: vm-gui <vm> view-copy <image> [--out PATH] [--source CAPTURE --crop WxH+X+Y] [--attempt-dir DIR]" >&2; exit 2; }
+        qci_view_copy "${VC_ARGS[@]}"
         ;;
     click)
         X="${1:?Usage: vm-gui <vm> click <x> <y>}"
@@ -1011,7 +1093,7 @@ case "$CMD" in
         ;;
     *)
         echo "Unknown command: $CMD" >&2
-        echo "Commands: screenshot, start, activate, click-preview, click-confirm, click, rightclick, doubleclick, drag, scroll, type, key, windowsize, windowmove, wait" >&2
+        echo "Commands: screenshot, screenshot-fresh, view-copy, start, activate, click-preview, click-confirm, click, rightclick, doubleclick, drag, scroll, type, key, windowsize, windowmove, wait" >&2
         exit 1
         ;;
 esac

@@ -50,6 +50,23 @@ Procedure:
    **ERROR** naming the missing capability. Do not record PASS, do not
    record FAIL, and do not fall back to OCR and grade anyway. If the
    scenario is `qci:visual: none`, missing image capability is not ERROR.
+   **NEVER RE-OPEN A PATH; JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.**
+   Your image viewer shows as BLACK any region of an image that repeats, at the
+   same position in an image of the same size, something it already showed you
+   in this session. So every image the harness writes gets a size of its own (a
+   thin black right/bottom margin; the raw screen size is in the frame's `.raw`
+   sidecar), and a capture you open for the first time is seen correctly. For
+   ANY second look, and for any image the harness did not just hand you (a crop
+   you made, a copy), run `vm-gui "$VMNAME" view-copy <image>` (for a crop add
+   `--source <capture> --crop WxH+X+Y`) and open the path it prints; never open
+   the same file twice. Click-preview `.raw.png` and click-confirm `.post.png`
+   files are frames like any other. Decide that a frame is black, blank, or
+   missing something ONLY from the pixels of a frame you have just opened —
+   never from process state, from rejected attempts, from the harness's
+   "same screen pixels" note, or from an earlier frame. Copy a frame together with
+   its `.raw` sidecar (`cp F F.raw DEST/`), or use `view-copy`. The harness
+   reads your session record afterwards: a PASS or FAIL on a `required`
+   scenario whose frames you never opened is recorded ERROR.
 7. Before every model-targeted mouse click, activate the window and run
    `vm-gui "$VMNAME" click-preview X Y "visible target label"`. It moves the
    real VM pointer without a button press, then captures the evidence. Read both
