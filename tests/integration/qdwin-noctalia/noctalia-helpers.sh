@@ -152,3 +152,93 @@ noct_wait_cursor_layer_nonzero_alpha() {
         sleep "$interval"
     done
 }
+
+# virtio-gpu DPMS-on rejection (libweston backend-drm/kms.c).
+# weston_log("atomic: couldn't commit new state: %s\n", strerror(errno))
+# with EINVAL ends the line in exactly:
+#   atomic: couldn't commit new state: Invalid argument
+# A journalctl prefix may precede "atomic:" (the byte before it is
+# whitespace, or the line is only that message). Success (0) only for that
+# record. Not a match: "couldn't compile atomic state", any other errno,
+# the same words inside quotes, or a copy that does not end the line.
+# Prints nothing. Reads journal text on stdin.
+# shell exit on this SKIP is 0. Callers print a line starting with "SKIP:"
+# and exit 0. Do not exit 77: the GUI harness records SKIP only with rc=0.
+# Absence of the record is not a skip (non-zero, no output).
+noct_dpms_on_atomic_einval() {
+    local line trimmed prefix last
+    local reason="atomic: couldn't commit new state: Invalid argument"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        trimmed=${line%"${line##*[![:space:]]}"}
+        [ -n "$trimmed" ] || continue
+        case "$trimmed" in
+            *"$reason") ;;
+            *) continue ;;
+        esac
+        prefix=${trimmed%"$reason"}
+        if [ -z "$prefix" ]; then
+            return 0
+        fi
+        last=${prefix: -1}
+        case "$last" in
+            [[:space:]]) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Same record, strictly after an opaque journalctl cursor. Production reads
+# `journalctl --user -u qdwin-compositor.service --after-cursor` (see
+# noct_compositor_journal_after). A hit from before the cursor does not count.
+noct_dpms_on_atomic_einval_after() {
+    local cur="$1"
+    noct_compositor_journal_after "$cur" | noct_dpms_on_atomic_einval
+}
+
+# How long scenario 05 polls for the DPMS-on EINVAL record after the wake
+# move. Same window as that scenario's "black for >5s is acceptable".
+: "${NOCT_DPMS_WAKE_WAIT_S:=5}"
+: "${NOCT_DPMS_WAKE_POLL_S:=0.25}"
+
+# Poll noct_dpms_on_atomic_einval_after until the record appears or $2
+# seconds (default NOCT_DPMS_WAKE_WAIT_S) elapse. Returns 0 on the first
+# sighting and prints nothing — the scenario prints "SKIP:" and exits 0.
+# Returns 1 when the bound expires with no record. That is not a skip and
+# does not end the scenario. An empty cursor is the caller's FAIL; this
+# returns 1 without skipping.
+noct_poll_dpms_on_atomic_einval() {
+    local cur="$1"
+    local timeout="${2:-$NOCT_DPMS_WAKE_WAIT_S}"
+    local interval="${NOCT_DPMS_WAKE_POLL_S}"
+    local start_ms now_ms limit_ms elapsed_ms
+    [ -n "$cur" ] || return 1
+    case "$timeout" in
+        ''|*[!0-9.]*)
+            echo "FAIL: bad DPMS-wake journal wait bound '${timeout}'"
+            return 1
+            ;;
+    esac
+    case "$interval" in
+        ''|*[!0-9.]*)
+            echo "FAIL: bad DPMS-wake journal poll interval '${interval}'"
+            return 1
+            ;;
+    esac
+    start_ms=$(date +%s%3N) || {
+        noct_dpms_on_atomic_einval_after "$cur"
+        return
+    }
+    limit_ms=$(awk -v t="$timeout" 'BEGIN { printf "%d", (t * 1000) + 0.5 }')
+    while :; do
+        if noct_dpms_on_atomic_einval_after "$cur"; then
+            return 0
+        fi
+        now_ms=$(date +%s%3N) || return 1
+        elapsed_ms=$(( now_ms - start_ms ))
+        if [ "$elapsed_ms" -ge "$limit_ms" ]; then
+            return 1
+        fi
+        sleep "$interval"
+    done
+}
