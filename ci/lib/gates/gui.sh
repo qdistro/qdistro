@@ -1682,10 +1682,10 @@ gui_harness_ocr_frames() {
         # OCR reads the RAW content (the frame cropped to its `.raw` sidecar
         # dims): the view-unique margin is not screen. The manifest row keeps
         # the PUBLISHED file's sha256/bytes, and decodability above was judged
-        # on the published file itself.
+        # on the published file itself. A sidecar-less copy of an issued frame
+        # is resolved through the attempt's view state (qci_view_raw_extract).
         ocr_in=$f
-        if qci_view_sidecar "$f" >/dev/null 2>&1 \
-           && qci_view_raw_extract "$f" "$outdir/.ocr-raw.png" 2>/dev/null; then
+        if qci_view_raw_extract "$f" "$outdir/.ocr-raw.png" 2>/dev/null; then
             ocr_in="$outdir/.ocr-raw.png"
         fi
         if "$bin" "$ocr_in" "$outdir/$stem" -c tessedit_create_tsv=1 >>"$outdir/ocr.log" 2>&1 \
@@ -3224,7 +3224,11 @@ gui_run_scenario() {
     # when the harness could read those frames. Nothing the agent wrote is
     # accepted as evidence, so artifact ordering is irrelevant here.
     local ev_note=""
-    IFS=$'\t' read -r status ev_note < <(gui_apply_visual_evidence_contract \
+    # The attempt's view state (saved beside the log before the alias went)
+    # lets reconcile's raw distinct count and the OCR input resolve a
+    # sidecar-less copy of an issued frame to its raw identity.
+    IFS=$'\t' read -r status ev_note < <(QCI_GUI_VIEW_STATE="${obs%.views.txt}.view-state.tsv" \
+        gui_apply_visual_evidence_contract \
         "$status" "$scenario" "$adir" "$caplog" "$capanchor" "$art_alias")
     # F4 ZERO-LOOK GATE, after the evidence contract and BEFORE the verdict,
     # classification and record_attempt. The ORIGINAL status/rc are kept for
@@ -3375,7 +3379,8 @@ gui_run_scenario() {
                 fi
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 local ev_noteN=""
-                IFS=$'\t' read -r statusN ev_noteN < <(gui_apply_visual_evidence_contract \
+                IFS=$'\t' read -r statusN ev_noteN < <(QCI_GUI_VIEW_STATE="${obsN%.views.txt}.view-state.tsv" \
+                    gui_apply_visual_evidence_contract \
                     "$statusN" "$scenario" "$adirN" "$caplogN" "$capanchorN" "$art_aliasN")
                 # Same F4 zero-look gate as the first attempt, same place.
                 local orig_statusN=$statusN unviewedN=0 vg_noteN=""

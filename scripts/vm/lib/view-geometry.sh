@@ -81,10 +81,45 @@ qci_view_sidecar() {
     printf '%s\n' "$line"
 }
 
-# Raw dimensions of a frame: from its sidecar, else decoded (legacy frame).
+# SIDECAR-LESS COPIES OF ISSUED FRAMES (fable code review r1, P2). A
+# PNG-only `cp` of a padded frame has no `.raw`, and decoding it yields the
+# padded canvas: a freshness baseline that can never equal a raw candidate, an
+# inflated distinct count, a missed same-screen twin. Every image this attempt
+# issued has a state row (W H padded_sha raw_pix_sha kind source path), so the
+# copy's FILE sha256 finds it. Echoes that row's tab-separated fields, or
+# returns 1 (no state, no match). Args: file.
+_qci_view_state_row() {
+    local f=${1:-} state fsha
+    state=$(qci_view_state 2>/dev/null) || return 1
+    [ -f "$state" ] && [ -f "$f" ] || return 1
+    fsha=$(sha256sum -- "$f" 2>/dev/null | awk '{print $1}') || return 1
+    [ -n "$fsha" ] || return 1
+    awk -F'\t' -v s="$fsha" '!/^#/ && $3 == s && $4 ~ /^[0-9a-f]{64}$/ { print; found = 1; exit }
+        END { exit !found }' "$state"
+}
+
+# The sidecar line describing F: its own `.raw`, else -- for a sidecar-less
+# copy -- the `.raw` of the issued frame its bytes match, when that sidecar
+# still exists and agrees with the state row. Returns 1 otherwise.
+_qci_view_effective_sidecar() {
+    local f=${1:-} line row rpath rsha rw rh k sha rest
+    if line=$(qci_view_sidecar "$f"); then printf '%s\n' "$line"; return 0; fi
+    [ -e "$f.raw" ] && return 1          # present but malformed: no guessing
+    row=$(_qci_view_state_row "$f") || return 1
+    IFS=$'\t' read -r _ _ _ rsha _ _ rpath <<<"$row"
+    line=$(qci_view_sidecar "$rpath") || return 1
+    read -r rw rh k sha rest <<<"$line"
+    [ "$sha" = "$rsha" ] || return 1
+    printf '%s\n' "$line"
+}
+
+# Raw dimensions of a frame: from its sidecar; for a sidecar-less copy, from
+# the issued frame's sidecar found through the attempt state; else decoded (a
+# legacy frame -- or a copy whose original frame is gone, whose k the state
+# row does not record, so its decoded size is returned).
 qci_view_raw_dims() {
     local f=${1:-} line rw rh rest
-    if line=$(qci_view_sidecar "$f"); then
+    if line=$(_qci_view_effective_sidecar "$f"); then
         read -r rw rh rest <<<"$line"
         printf '%s %s\n' "$rw" "$rh"
         return 0
@@ -92,11 +127,17 @@ qci_view_raw_dims() {
     qci_view_dims "$f"
 }
 
-# Raw canonical pixel digest of a frame: from its sidecar, else computed.
+# Raw canonical pixel digest of a frame: from its sidecar; for a sidecar-less
+# copy, from its attempt state row (column 4); else computed from the file.
 qci_view_raw_pix_sha() {
-    local f=${1:-} line rw rh k sha rest
+    local f=${1:-} line rw rh k sha rest row
     if line=$(qci_view_sidecar "$f"); then
         read -r rw rh k sha rest <<<"$line"
+        printf '%s\n' "$sha"
+        return 0
+    fi
+    if [ ! -e "$f.raw" ] && row=$(_qci_view_state_row "$f"); then
+        IFS=$'\t' read -r _ _ _ sha _ <<<"$row"
         printf '%s\n' "$sha"
         return 0
     fi
@@ -109,7 +150,7 @@ qci_view_raw_pix_sha() {
 qci_view_raw_extract() {
     local f=${1:-} out=${2:-} rw rh
     [ -n "$out" ] && [ -f "$f" ] || return 2
-    if qci_view_sidecar "$f" >/dev/null; then
+    if _qci_view_effective_sidecar "$f" >/dev/null; then
         command -v magick >/dev/null 2>&1 || return 5
         read -r rw rh < <(qci_view_raw_dims "$f") || return 2
         magick "${f}[0]" -crop "${rw}x${rh}+0+0" +repage -define png:exclude-chunks=date,time PNG24:"$out" 2>/dev/null || return 2
