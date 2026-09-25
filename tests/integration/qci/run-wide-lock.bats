@@ -1,0 +1,86 @@
+#!/usr/bin/env bats
+# Host-only contention contract: no libvirt or VM is touched.
+
+setup() {
+    REPO=$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)
+    T=$BATS_TEST_TMPDIR
+    export QDWIN_IMG_DIR="$T/images"
+    export QCI_RUNS_DIR="$T/runs"
+    mkdir -p "$QDWIN_IMG_DIR"
+    cat > "$T/holder" <<'SH'
+#!/usr/bin/env bash
+. "$RUN_LOCK_HELPER"
+qdistro_run_lock_reexec "$0" "$@"
+printf '%s\n' ready > "$RUN_LOCK_READY"
+exec sleep 30
+SH
+    chmod +x "$T/holder"
+    export RUN_LOCK_HELPER="$REPO/scripts/vm/run-lock.sh"
+    export RUN_LOCK_READY="$T/ready"
+    "$T/holder" > "$T/holder.log" 2>&1 &
+    HOLDER=$!
+    for i in $(seq 1 100); do
+        [ -f "$RUN_LOCK_READY" ] && break
+        sleep 0.01
+    done
+    [ -f "$RUN_LOCK_READY" ]
+}
+
+teardown() {
+    kill "$HOLDER" 2>/dev/null || true
+    wait "$HOLDER" 2>/dev/null || true
+    # The guardian can outlive the shell when interrupted. Stop the actual
+    # recorded holder as well, so this test never leaves a sleeping child.
+    local pid
+    pid=$(cat "$QDWIN_IMG_DIR/.qdistro-vm-run.lock" 2>/dev/null || true)
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
+}
+
+@test "qci full is rejected before init_run and names the live holder pid" {
+    local lock="$QDWIN_IMG_DIR/.qdistro-vm-run.lock" pid inode
+    pid=$(cat "$lock")
+    inode=$(stat -c %i "$lock")
+    kill -0 "$pid"
+    run "$REPO/ci/bin/qci" full
+    [ "$status" -eq 98 ]
+    [[ "$output" == *"held by pid $pid"* ]]
+    [ ! -e "$QCI_RUNS_DIR" ]
+    [ "$(stat -c %i "$lock")" = "$inode" ]
+}
+
+@test "all qci VM commands and kiwi teardown share the same lock" {
+    local command
+    for command in bats gui gui-admin image cleanup; do
+        run "$REPO/ci/bin/qci" "$command"
+        [ "$status" -eq 98 ]
+        [ ! -e "$QCI_RUNS_DIR" ]
+    done
+    run "$REPO/image/build-in-vm.sh" --teardown qdistro-builder-test
+    [ "$status" -eq 98 ]
+    [[ "$output" == *"held by pid "* ]]
+}
+
+@test "background children cannot retain the whole-run lock after runner exits" {
+    local pid bgpid lock="$QDWIN_IMG_DIR/.qdistro-vm-run.lock"
+    pid=$(cat "$lock")
+    kill "$pid"
+    for i in $(seq 1 100); do
+        flock -n "$lock" true 2>/dev/null && break
+        sleep 0.01
+    done
+    cat > "$T/forker" <<'SH'
+#!/usr/bin/env bash
+. "$RUN_LOCK_HELPER"
+qdistro_run_lock_reexec "$0" "$@"
+sleep 30 >/dev/null 2>&1 &
+printf '%s\n' "$!" > "$RUN_LOCK_BG_PID"
+SH
+    chmod +x "$T/forker"
+    export RUN_LOCK_BG_PID="$T/bgpid"
+    run "$T/forker"
+    [ "$status" -eq 0 ]
+    bgpid=$(cat "$RUN_LOCK_BG_PID")
+    kill -0 "$bgpid"
+    flock -n "$lock" true
+    kill "$bgpid"
+}

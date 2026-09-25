@@ -163,6 +163,14 @@ main() {
         exit "$EXIT_USAGE"
     fi
 
+    # Take the host-wide lock before init_run or any VM-destructive gate work.
+    # The flock guardian owns the fd for this command's full lifetime; worker
+    # children inherit no lock fd. image and cleanup share it with full/bats/gui.
+    case "$cmd" in
+        full|bats|gui|gui-admin|image|cleanup)
+            qdistro_run_lock_reexec "$SELF" "$cmd" "$@" ;;
+    esac
+
     case "$cmd" in
         report|triage|list-runs)
             ;;
