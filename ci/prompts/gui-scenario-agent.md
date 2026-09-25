@@ -148,6 +148,12 @@ Procedure:
    survived before starting a second one -- that verification is load-bearing,
    not a formality, because discovery of a reparented process is not
    guaranteed.
+   The guest driver shell must claim the scenario as its FIRST commands, in
+   that shell itself: `source /tmp/qci-gui-waiters.sh` then
+   `qci_claim_driver /tmp/qci/<slug>/driver.lock`. A second driver then prints
+   `ERROR: a second guest driver is already running` and exits 1. Do not delete
+   the lock or change its path; wait for the first driver or record ERROR.
+   Short one-off vm-exec checks do not claim.
 
 11. NEVER put a PIPE on vm-exec's stderr. Do NOT open your driver with
    `exec > >(tee "$LOG") 2>&1`, and do not write `out=$(vm-exec ... 2>&1)` or

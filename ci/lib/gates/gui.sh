@@ -937,6 +937,19 @@ Rules:
   not pin instead of signalling it) rather than
   killing it with SIGKILL, and verify in the guest that nothing from the first
   attempt survived before starting a second one.
+- CLAIM THE GUEST DRIVER. The guest shell that runs this scenario's Setup,
+  Steps, and Assertions (your guest driver) must, as its FIRST commands and
+  directly in that shell (not in a subshell, pipeline, or \`\$( )\`), run:
+      source /tmp/qci-gui-waiters.sh
+      qci_claim_driver /tmp/qci/$slug/driver.lock
+  The claim is held until that shell exits. If it prints
+  \`ERROR: a second guest driver is already running\` and exits 1, an earlier
+  driver of yours is still alive in the guest (permissions-gui/08 in
+  gui-20260924T193011Z-2597819 ran four at once and read another driver's rc).
+  Do NOT work around it: do not delete the lock file, do not use another lock
+  path, and do not start yet another driver. Wait for the first driver to
+  finish, or record ERROR. Short one-off \`vm-exec\` checks (\`bg_wait\`,
+  \`bg_log\`, a sqlite query) do not claim.
 - NEVER put a PIPE on vm-exec's stderr in your driver script. Concretely, do
   NOT open your driver with \`exec > >(tee "\$LOG") 2>&1\`, and do not write
   \`out=\$(vm-exec ... 2>&1)\` or \`vm-exec ... 2>&1 | reader\`. This is the
