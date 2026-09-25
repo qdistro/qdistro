@@ -193,13 +193,25 @@ runner takes. The supported runner is Codex with `gpt-5.6-luna`, which reads the
 prompt on stdin:
 
 ```bash
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
 
 `--yolo` is required because the agent must run `vm-exec`/`virsh` and write its
-`status.txt` without interactive approval. Each attempt gets its own working
+`status.txt` without interactive approval. Do NOT add `--ephemeral`: the gate
+reads each attempt's codex rollout (`$CODEX_HOME/sessions`, default
+`~/.codex/sessions`) to see which attested frames the driver actually opened
+(`ci/lib/gui_rollout_views.py`, sidecar `gui/<slug>.views.txt`). A
+`qci:visual: required` PASS or FAIL whose driver opened no attested frame is
+recorded ERROR (`agent-unviewed-verdict`); with `--ephemeral` there is no
+rollout and every attempt is `unobservable:ephemeral` (no verdict changes). If
+the template sets its own `CODEX_HOME=...`, also export `QCI_GUI_CODEX_HOME`
+with the same value, or the attempts are `unobservable:codex-home`. Retention:
+the rollouts are codex's own files and keep every viewed frame as base64, so
+`~/.codex/sessions` grows by roughly the encoded size of every frame each
+attempt opened (a 1280x800 admin-app frame is about 50 KB of base64; a two-frame
+grading session measured 148 KB); prune it as you would any codex history. Each attempt gets its own working
 directory regardless of the template: `run_agent_command` creates one with
 `mktemp -d` and `cd`s into it before running the agent. Set `QCI_AGENT_MODEL` whenever a wrapper selects the
 model outside the visible template, or the manifest records `unknown`.
