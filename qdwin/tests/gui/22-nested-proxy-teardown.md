@@ -532,7 +532,7 @@ CURSOR=$(qdwin_apps_journal_cursor)
 # DETACH THE LAUNCHER'S OWN STDIO, not just the probe's. vm-exec runs through
 # qga guest-exec with capture-output, and qga reports a command finished only
 # once EVERY holder of its stdout/stderr pipes has closed them. Without the
-# `</dev/null >/dev/null 2>&1` below, the backgrounded `sh -c` keeps those pipes
+# `</dev/null >$QD22_LAUNCH_LOG 2>&1` below, the backgrounded `sh -c` keeps those pipes
 # and this vm-exec does not return until the PROBE exits -- i.e. until its
 # click timeout expires and the proxy is destroyed. Every "black S3 preview"
 # ERROR from 2026-09-17 to 09-24 was that: the driver read CLICK_TARGET and
