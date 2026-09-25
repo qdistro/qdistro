@@ -5,6 +5,17 @@
 # NOT executed standalone. See ci/AGENTS.md for the module map.
 # shellcheck shell=bash
 
+# VIEW-UNIQUE GEOMETRY (todo/test-blankscreenshots/SPEC.md F1-F4). The one
+# allocator/pad/sidecar/canonical-pixel library the capture tools use; the gate
+# reads raw identities through it (reconcile's distinct count, OCR input).
+GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../../scripts/vm/lib/view-geometry.sh
+. "$GUI_GATE_DIR/../../../scripts/vm/lib/view-geometry.sh"
+GUI_ROLLOUT_ADAPTER="$GUI_GATE_DIR/../gui_rollout_views.py"
+# The per-attempt allocator state: a dotfile in the artifact directory the
+# agent is given (harvest copies `$parent/*`, which skips it).
+GUI_VIEW_STATE_NAME=.qci-view-state
+
 run_qdwin_executable_gui_smokes() {
     local vm=$1 qdwin_capture=${2:-1} rc=$EXIT_OK scenario file step_rc
     export VMNAME="$vm"
@@ -861,7 +872,8 @@ Rules:
     2. CAPTURE INTO THE ARTIFACT DIRECTORY, e.g.
        \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" screenshot $artifact_dir/s1.png\`
        (click-preview captures already land there). A capture written elsewhere
-       is recorded but is not graded unless you copy it in.
+       is recorded but is not graded unless you copy it in, together with its
+       \`.raw\` sidecar (\`cp F F.raw $artifact_dir/\`).
     3. NEVER DELETE OR OVERWRITE A CAPTURE. Once the tool has written a frame
        into \`$artifact_dir/\`, removing it or replacing its bytes is detected
        and your verdict is recorded ERROR — including the case where the frame
@@ -880,6 +892,30 @@ Rules:
   whenever you need them. If the scenario is \`<!-- qci:visual: none -->\`,
   the harness does not require frames; a PASS or FAIL without captures
   stands.
+- NEVER RE-OPEN A PATH, AND JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.
+  Your image viewer shows as BLACK any region of an image that repeats, at the
+  same position in an image of the same size, something it already showed you
+  in this session (measured: a byte-identical frame, a frame with one changed
+  pixel, and a second look at the same file are all read as black). So every
+  image the harness writes gets a size of its own (a thin black right/bottom
+  margin; the raw screen size is in the frame's \`.raw\` sidecar), and a
+  capture you open for the first time is seen correctly. What still breaks it
+  is opening the SAME file again, or a same-size copy of one:
+  - For ANY second look at an image, and for any image the harness did not just
+    hand you (a crop you made, a copy), run
+    \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" view-copy <image>\` and open
+    the path it prints. For a crop you made, pass its lineage:
+    \`... view-copy <crop.png> --source <capture.png> --crop WxH+X+Y\`.
+  - Click-preview \`.raw.png\` and click-confirm \`.post.png\` files are
+    frames like any other.
+  - Decide that a frame is black, blank, or missing something ONLY from the
+    pixels of a frame you have just opened. Never infer it from process state
+    (\`pgrep\` found nothing), from rejected capture attempts, from the
+    harness's "same screen pixels" note, or from an earlier frame.
+  - When you copy a frame, copy its \`.raw\` sidecar with it
+    (\`cp F F.raw DEST/\`), or use \`view-copy\`.
+  The harness reads your session record afterwards: a PASS or FAIL on a
+  \`required\` scenario whose frames you never opened is recorded ERROR.
 - NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
   \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
   HEALTHY and your guest command is still running; they are progress, not a
@@ -1607,7 +1643,7 @@ gui_frame_is_decodable() {
 gui_harness_ocr_frames() {
     local adir=$1 outdir=$2 flist=${3:-} bin=${QCI_OCR_BIN:-tesseract}
     local f n=0 ok=0 bad=0 textf=0 words=0 total=0 base stem sum bytes rc have=1
-    local dec undec=0 decunk=0
+    local dec undec=0 decunk=0 ocr_in
     # OCR is OPTIONAL corroboration. Without a backend the manifest is still
     # written (sha256/bytes per attested frame -- which is the part that matters
     # for attestation); only the text column degrades to `skip`.
@@ -1643,7 +1679,16 @@ gui_harness_ocr_frames() {
                 >> "$outdir/manifest.tsv"
             continue
         fi
-        if "$bin" "$f" "$outdir/$stem" -c tessedit_create_tsv=1 >>"$outdir/ocr.log" 2>&1 \
+        # OCR reads the RAW content (the frame cropped to its `.raw` sidecar
+        # dims): the view-unique margin is not screen. The manifest row keeps
+        # the PUBLISHED file's sha256/bytes, and decodability above was judged
+        # on the published file itself.
+        ocr_in=$f
+        if qci_view_sidecar "$f" >/dev/null 2>&1 \
+           && qci_view_raw_extract "$f" "$outdir/.ocr-raw.png" 2>/dev/null; then
+            ocr_in="$outdir/.ocr-raw.png"
+        fi
+        if "$bin" "$ocr_in" "$outdir/$stem" -c tessedit_create_tsv=1 >>"$outdir/ocr.log" 2>&1 \
            && [ -f "$outdir/$stem.tsv" ]; then
             rc=0; ok=$((ok + 1))
             # A data row counts only when its text column holds a non-whitespace
@@ -1662,6 +1707,7 @@ gui_harness_ocr_frames() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sum" "$bytes" "$base" "$dec" "$stem.tsv" "$rc" "$words" \
             >> "$outdir/manifest.tsv"
     done < <(if [ -n "$flist" ]; then cat -- "$flist"; else gui_visual_frames "$adir"; fi)
+    rm -f -- "$outdir/.ocr-raw.png"
     printf 'frames=%d ocr_ok=%d ocr_fail=%d text_frames=%d words=%d undecodable=%d dec_unknown=%d\n' \
         "$n" "$ok" "$bad" "$textf" "$total" "$undec" "$decunk"
     # Success means the PASS completed and the manifest was written. OCR success
@@ -1697,9 +1743,14 @@ gui_capture_reconcile() {
     local adir=$1 log=$2 outfile=$3 caproot=${4:-}
     local line seq ts vm scope bytes sum fpath chain
     local n=0 present=0 missing=0 unharv=0
-    local f d rel best absdir pass rowroot
+    local f d rel best absdir pass rowroot rawid
     rowroot=$(readlink -f "${caproot:-}" 2>/dev/null || printf '%s' "${caproot:-}")
-    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=()
+    # present_sum dedups the evidence LIST by file digest (what OCR reads);
+    # raw_distinct counts DISTINCT SCREENS by raw canonical pixels. They were
+    # one map until frames were padded to unique sizes: two captures of an
+    # unchanged screen now always differ in file bytes, so a file-digest count
+    # would report them distinct.
+    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=() raw_distinct=()
     declare -A matched=() last_row_for=() bydigest=()
     local relocated=0
     declare -a keep=()
@@ -1872,6 +1923,8 @@ gui_capture_reconcile() {
                 present_sum[$sum]=1
                 printf '%s\n' "${matched[$seq]}" >> "$outfile"
             fi
+            rawid=$(qci_view_raw_pix_sha "${matched[$seq]}" 2>/dev/null) || rawid="file:$sum"
+            raw_distinct[$rawid]=1
             continue
         fi
         [ "${last_row_for[$fpath]:-}" = "$seq" ] || continue
@@ -1884,7 +1937,7 @@ gui_capture_reconcile() {
         fi
     done
     printf 'attested=%d present=%d distinct=%d missing_in_tree=%d unharvested=%d relocated=%d\n' \
-        "$n" "$present" "${#present_sum[@]}" "$missing" "$unharv" "$relocated"
+        "$n" "$present" "${#raw_distinct[@]}" "$missing" "$unharv" "$relocated"
 }
 
 # Combined evidence decision for one scenario's harvested artifacts.
@@ -2521,10 +2574,20 @@ gui_agent_verdict() {
 # a partial report.md verdict + rc=124 is an inconsistent agent result, not an
 # infra timeout. Pure (args only) => host-testable (gui-retry-classify.bats).
 # A nonzero-rc SKIP reaches here because gui_agent_verdict now fails it closed.
+#   agent-unviewed-verdict
+#                     a `qci:visual: required` PASS or FAIL whose attempt was
+#                     OBSERVED (codex rollout, F3) to open ZERO attested frames:
+#                     a verdict about pixels nobody looked at. The gate records
+#                     it ERROR and passes the flag here as an ARGUMENT (never a
+#                     note-string match) with the ORIGINAL status/rc. Retriable
+#                     ONLY for an original PASS rc=0 (see gui_classifier_retriable):
+#                     an original FAIL never enters a retry through this path,
+#                     so it can never turn green by re-rolling.
 # Args: status agent_rc transport_marker(0/1) agent_tooling_marker(0/1, optional)
-#       agent_api_marker(0/1, optional)
+#       agent_api_marker(0/1, optional) extnet_marker(0/1, optional)
+#       unviewed(0/1, optional; status is then the ORIGINAL agent status)
 gui_classify_failure() {
-    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0} extnet=${6:-0}
+    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0} extnet=${6:-0} unviewed=${7:-0}
     case "$status" in
         FAIL)
             # A FAIL whose evidence shows the agent's OWN command was malformed is
@@ -2532,7 +2595,11 @@ gui_classify_failure() {
             # Only status=FAIL is flipped — ERROR/PASS/SKIP/UNKNOWN are untouched.
             # A provider-unreachable marker does NOT flip a FAIL: the agent ran the
             # asserts and one genuinely failed; the marker's scope is UNKNOWN only.
-            if [ "$tooling" = 1 ]; then printf 'agent-tooling'; else printf 'product-fail'; fi
+            # The tooling marker keeps precedence over an unviewed FAIL: it was
+            # retriable before the view gate existed and still is.
+            if [ "$tooling" = 1 ]; then printf 'agent-tooling'
+            elif [ "$unviewed" = 1 ]; then printf 'agent-unviewed-verdict'
+            else printf 'product-fail'; fi
             return ;;
         ERROR)
             # An ERROR caused by an upstream external FETCH failure (curl/zypper/
@@ -2548,6 +2615,9 @@ gui_classify_failure() {
             # selected-model-capacity error while finalizing its response.
             if [ "$rc" != 0 ] && [ "$api" = 1 ]; then
                 printf 'agent-api-after-verdict'; return
+            fi
+            if [ "$unviewed" = 1 ]; then
+                printf 'agent-unviewed-verdict'; return
             fi ;;
         SKIP)
             # Only reachable with a nonzero rc (gui_agent_verdict accepts SKIP:0
@@ -2581,10 +2651,15 @@ gui_classify_failure() {
 # failures (no product/guest failure signal) and are safe to re-run on a fresh
 # attempt. The latter still requires a fresh PASS; its first PASS is never
 # accepted directly because the process rc contradicted it.
-# Args: classifier
+# agent-unviewed-verdict is retriable ONLY when the second argument, the
+# attempt's ORIGINAL "<status>:<rc>", is exactly PASS:0 -- an unviewed PASS
+# may be re-run on a fresh VM, an unviewed FAIL/ERROR never is (and without the
+# argument it is not retriable at all: fail safe).
+# Args: classifier [original_status:rc]
 gui_classifier_retriable() {
     case "$1" in
         transport-timeout|agent-tooling|agent-api-unreachable|agent-api-after-verdict) return 0 ;;
+        agent-unviewed-verdict) [ "${2:-}" = "PASS:0" ] ;;
         *) return 1 ;;
     esac
 }
@@ -2858,8 +2933,76 @@ gui_host_sandbox_args() {
     done
 }
 
+# F3. Observe which attested frames THIS attempt's driver actually opened, from
+# its codex rollout (ci/lib/gui_rollout_views.py), and persist the per-attempt
+# observation sidecar. Called by run_agent_command after the agent exits and
+# BEFORE its cwd is removed or the artifact alias is harvested, so relative
+# paths and in-alias files still resolve. Reads the attempt env it runs in:
+# QCI_AGENT_CMD (`--ephemeral` or an explicit child CODEX_HOME make it
+# unobservable unless QCI_GUI_CODEX_HOME names the home), QCI_GUI_CAPTURE_LOG,
+# QCI_GUI_VIEW_STATE. Never fails the attempt: an adapter failure is recorded
+# as unobservable. Args: log_path out_file.
+gui_observe_attempt() {
+    local log_path=$1 obs_out=${2:-} summary
+    [ -n "$obs_out" ] || return 0
+    if [ -n "${QCI_GUI_VIEW_STATE:-}" ] && [ -f "$QCI_GUI_VIEW_STATE" ]; then
+        cp -- "$QCI_GUI_VIEW_STATE" "${obs_out%.views.txt}.view-state.tsv" 2>/dev/null || true
+    fi
+    if ! summary=$(python3 "$GUI_ROLLOUT_ADAPTER" --log "$log_path" --out "$obs_out" \
+            --agent-cmd "${QCI_AGENT_CMD:-}" --codex-home "${QCI_GUI_CODEX_HOME:-}" \
+            --ledger "${QCI_GUI_CAPTURE_LOG:-}" --state "${QCI_GUI_VIEW_STATE:-}" 2>"$obs_out.err"); then
+        printf 'parser_version=1\nreason=unobservable:adapter-failed\nopens=unobservable\ncredited=unobservable\n' \
+            > "$obs_out" 2>/dev/null || true
+        summary="reason=unobservable:adapter-failed opens=unobservable credited=unobservable"
+    fi
+    [ -s "$obs_out.err" ] || rm -f -- "$obs_out.err"
+    printf '\nqci_gui_views: %s (%s)\n' "$summary" "$obs_out" >> "$log_path" 2>/dev/null || true
+}
+
+# F4. THE ZERO-LOOK GATE. Runs AFTER the visual-evidence contract, only for a
+# `qci:visual: required` scenario whose verdict survived it (PASS or FAIL). When
+# the attempt was OBSERVED (F3) to open ZERO attested frames, the verdict is
+# about pixels the driver never looked at: the status becomes ERROR and the
+# caller passes unviewed=1 to gui_classify_failure with the ORIGINAL status/rc.
+# Evidence failures keep precedence (their ERROR never reaches here), and so do
+# rc failures: a PASS with a nonzero rc is already a failure and is left alone.
+# UNOBSERVABLE IS NEVER ZERO: it changes no verdict and is only noted.
+# Echoes "<status>\t<unviewed 0|1>\t<note>". Args: status rc scenario obs_file.
+gui_apply_view_gate() {
+    local status=$1 rc=$2 scenario=$3 obs=${4:-} reason="" credited=""
+    if [ "$(gui_scenario_visual_mode "$scenario")" != required ]; then
+        printf '%s\t0\t\n' "$status"; return 0
+    fi
+    case "$status" in
+        PASS|FAIL) ;;
+        *) printf '%s\t0\t\n' "$status"; return 0 ;;
+    esac
+    if [ -n "$obs" ] && [ -f "$obs" ] && [ ! -L "$obs" ]; then
+        reason=$(sed -n 's/^reason=//p' "$obs" | head -1)
+        credited=$(sed -n 's/^credited=//p' "$obs" | head -1)
+    fi
+    if [ "$reason" != observed ]; then
+        printf '%s\t0\tdriver views %s (verdict not changed)\n' "$status" "${reason:-unobservable:no-observation}"
+        return 0
+    fi
+    if ! [[ "$credited" =~ ^[0-9]+$ ]]; then
+        printf '%s\t0\tdriver views unobservable:malformed-observation (verdict not changed)\n' "$status"
+        return 0
+    fi
+    if [ "$credited" -gt 0 ]; then
+        printf '%s\t0\tthe driver opened %s view(s) of attested frames (codex rollout)\n' "$status" "$credited"
+        return 0
+    fi
+    if [ "$status" = PASS ] && [ "$rc" != 0 ]; then
+        printf '%s\t0\tthe driver opened NO attested frame (codex rollout); the nonzero rc already fails this PASS\n' "$status"
+        return 0
+    fi
+    printf 'ERROR\t1\tagent-unviewed-verdict: the codex rollout shows the driver opened NO attested frame of this attempt, so its %s (rc=%s) on a pixel-dependent scenario was never looked at\n' \
+        "$status" "$rc"
+}
+
 run_agent_command() {
-    local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded workdir rc
+    local prompt=$1 log_path=$2 observe_out=${3:-} cmd=${QCI_AGENT_CMD:-} expanded workdir rc
     local -a host_sandbox=()
     if [ -z "$cmd" ]; then
         return 127
@@ -2906,6 +3049,8 @@ run_agent_command() {
         fi
     )
     rc=$?
+    # F3: observe BEFORE the cwd goes (relative view_image paths resolve there).
+    [ -z "$observe_out" ] || gui_observe_attempt "$log_path" "$observe_out"
     if [ "$rc" -eq 0 ]; then
         rm -rf -- "$workdir" 2>/dev/null || true
         printf '\nqci_agent_workdir=%s (removed after success)\n' "$workdir" >> "$log_path"
@@ -3008,7 +3153,7 @@ gui_run_scenario() {
         own=1
     fi
     t1=$(date +%s)
-    local slug scratch art_alias caplog
+    local slug scratch art_alias caplog viewstate obs
     slug=$(safe_name "$rel")
     adir="$RDIR/gui/$slug"
     prompt="$RDIR/agent-notes/$slug.prompt.md"
@@ -3018,6 +3163,13 @@ gui_run_scenario() {
     # ImageMagick policies that reject symlinked output paths. Harvest copies it
     # into the canonical run directory after the agent exits.
     art_alias=$(gui_make_artifact_alias "$adir") || art_alias=$adir
+    # VIEW-UNIQUE GEOMETRY state for this attempt (view-geometry.sh): created
+    # empty before the driver starts, never replaced while it runs; every
+    # capture tool the driver calls inherits it and reserves a (W,H) in it.
+    viewstate="$art_alias/$GUI_VIEW_STATE_NAME"
+    : > "$viewstate" 2>/dev/null || viewstate=""
+    # F3 observation sidecar: which attested frames the driver opened.
+    obs="${log_path%.agent.log}.views.txt"
     # Per-scenario isolated scratch dir (host) + slug (for guest scratch on a
     # shared session VM). Passed to the agent's env at run_agent_command so a
     # scenario routes scratch here instead of a collision-prone fixed /tmp path.
@@ -3047,7 +3199,8 @@ gui_run_scenario() {
     # still grades the canonical adir after recovery.
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
         QCI_GUI_ARTIFACT_DIR="$art_alias" QCI_GUI_CAPTURE_LOG="$caplog" \
-        run_agent_command "$prompt" "$log_path"
+        QCI_GUI_VIEW_STATE="$viewstate" \
+        run_agent_command "$prompt" "$log_path" "$obs"
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
@@ -3073,6 +3226,12 @@ gui_run_scenario() {
     local ev_note=""
     IFS=$'\t' read -r status ev_note < <(gui_apply_visual_evidence_contract \
         "$status" "$scenario" "$adir" "$caplog" "$capanchor" "$art_alias")
+    # F4 ZERO-LOOK GATE, after the evidence contract and BEFORE the verdict,
+    # classification and record_attempt. The ORIGINAL status/rc are kept for
+    # the classifier and the retry decision: only an original PASS rc=0 may be
+    # retried for it.
+    local orig_status=$status unviewed=0 vg_note=""
+    IFS=$'\t' read -r status unviewed vg_note < <(gui_apply_view_gate "$status" "$agent_rc" "$scenario" "$obs")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
     # not the silent pass it used to be.
@@ -3087,6 +3246,10 @@ gui_run_scenario() {
     if [ -n "$ev_note" ]; then
         note="$note; $ev_note"
         printf '\nqci_gui_visual_evidence: %s\n' "$ev_note" >> "$log_path" 2>/dev/null || true
+    fi
+    if [ -n "$vg_note" ]; then
+        note="$note; $vg_note"
+        printf '\nqci_gui_view_gate: %s\n' "$vg_note" >> "$log_path" 2>/dev/null || true
     fi
     # DIAGNOSTIC, never a gate (see gui_count_image_opens). Recorded for EVERY
     # attempt so the report can answer "did the driver look?" without anyone
@@ -3111,7 +3274,11 @@ gui_run_scenario() {
         gui_detect_agent_tooling_marker "$log_path" && tooling=1
         gui_detect_agent_api_marker "$log_path" && api=1
         gui_detect_external_network_marker "$log_path" && extnet=1
-        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet")
+        if [ "$unviewed" = 1 ]; then
+            classifier=$(gui_classify_failure "$orig_status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet" 1)
+        else
+            classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet")
+        fi
         # Classifier-drift alarm (H6b): a fail with NO marker matched fell through
         # to a generic classifier — snapshot the log tail so a drifted infra
         # marker is not lost. report.py counts these rows (rising count => drift).
@@ -3139,7 +3306,10 @@ gui_run_scenario() {
     # result, so a retry can never silently turn a flake green.
     local retry_max
     retry_max=$(gui_retry_max "${QCI_GUI_RETRY:-0}")
-    if [ "$verdict" = fail ] && [ "$own" = 1 ] && gui_classifier_retriable "$classifier"; then
+    # The ORIGINAL status:rc of the current attempt, for agent-unviewed-verdict
+    # (retriable only for an original PASS rc=0).
+    local orig_src="$orig_status:$agent_rc"
+    if [ "$verdict" = fail ] && [ "$own" = 1 ] && gui_classifier_retriable "$classifier" "$orig_src"; then
         if [ "$retry_max" -ge 1 ]; then
             # Snapshot the FIRST attempt's evidence — the basis for the retriable
             # classification and the audit trail that makes retry acceptable.
@@ -3147,7 +3317,7 @@ gui_run_scenario() {
             local attempt=0 provision_failed=0
             while [ "$attempt" -lt "$retry_max" ] \
                   && [ "$verdict" = fail ] \
-                  && gui_classifier_retriable "$classifier"; do
+                  && gui_classifier_retriable "$classifier" "$orig_src"; do
                 attempt=$((attempt + 1))
                 local ordinal=$((attempt + 1))   # attempt-2 is the first retry
                 log "agent scenario $rel: retriable signature ($classifier); retry $attempt/$retry_max on a fresh VM"
@@ -3156,11 +3326,15 @@ gui_run_scenario() {
                 vm_live=0   # previous VM collected+released; nothing live until a fresh one is up
                 # Each retry writes to its OWN log + artifact dir so every attempt's
                 # evidence is preserved and each fresh agent starts clean.
-                local vmN logN adirN scratchN art_aliasN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN caplogN_vm
+                local vmN logN adirN scratchN art_aliasN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN caplogN_vm viewstateN obsN
                 logN="${log_path_base%.agent.log}.retry${attempt}.agent.log"
                 adirN="${adir%.retry*}.retry${attempt}"
                 mkdir -p "$adirN"
                 art_aliasN=$(gui_make_artifact_alias "$adirN") || art_aliasN=$adirN
+                # A fresh view state per attempt: sizes are unique per ATTEMPT.
+                viewstateN="$art_aliasN/$GUI_VIEW_STATE_NAME"
+                : > "$viewstateN" 2>/dev/null || viewstateN=""
+                obsN="${logN%.agent.log}.views.txt"
                 # Fresh host scratch PER RETRY so stale scratch from the failed
                 # attempt can't leak into the retry (mirrors the per-attempt
                 # logN/adirN discipline).
@@ -3187,7 +3361,8 @@ gui_run_scenario() {
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
                     QCI_GUI_ARTIFACT_DIR="$art_aliasN" QCI_GUI_CAPTURE_LOG="$caplogN" \
-                    run_agent_command "$prompt" "$logN"
+                    QCI_GUI_VIEW_STATE="$viewstateN" \
+                    run_agent_command "$prompt" "$logN" "$obsN"
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
                 gui_harvest_agent_artifacts "$adirN" "$slug" "$logN" "$art_aliasN"
@@ -3202,6 +3377,9 @@ gui_run_scenario() {
                 local ev_noteN=""
                 IFS=$'\t' read -r statusN ev_noteN < <(gui_apply_visual_evidence_contract \
                     "$statusN" "$scenario" "$adirN" "$caplogN" "$capanchorN" "$art_aliasN")
+                # Same F4 zero-look gate as the first attempt, same place.
+                local orig_statusN=$statusN unviewedN=0 vg_noteN=""
+                IFS=$'\t' read -r statusN unviewedN vg_noteN < <(gui_apply_view_gate "$statusN" "$agent_rc" "$scenario" "$obsN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
                 if [ "$verdictN" = skip ]; then
@@ -3212,12 +3390,20 @@ gui_run_scenario() {
                     noteN="$noteN; $ev_noteN"
                     printf '\nqci_gui_visual_evidence: %s\n' "$ev_noteN" >> "$logN" 2>/dev/null || true
                 fi
+                if [ -n "$vg_noteN" ]; then
+                    noteN="$noteN; $vg_noteN"
+                    printf '\nqci_gui_view_gate: %s\n' "$vg_noteN" >> "$logN" 2>/dev/null || true
+                fi
                 if [ "$verdictN" = fail ]; then
                     gui_detect_transport_marker "$logN" && transportN=1
                     gui_detect_agent_tooling_marker "$logN" && toolingN=1
                     gui_detect_agent_api_marker "$logN" && apiN=1
                     gui_detect_external_network_marker "$logN" && extnetN=1
-                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN")
+                    if [ "$unviewedN" = 1 ]; then
+                        classifierN=$(gui_classify_failure "$orig_statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN" 1)
+                    else
+                        classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN")
+                    fi
                     if [ "$((transportN + toolingN + apiN + extnetN))" -eq 0 ]; then
                         gui_capture_unmatched_tail "$logN" "${logN%.agent.log}.unmatched-tail.txt"
                     fi
@@ -3236,6 +3422,7 @@ gui_run_scenario() {
                     noteN="$noteN; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
                 fi
                 status=$statusN; verdict=$verdictN; note=$noteN; classifier=$classifierN; log_path=$logN; adir=$adirN
+                orig_src="$orig_statusN:$agent_rc"
             done
             # Summarize the retried run (skip when we bailed on a provision failure,
             # which already recorded its own flake row).
