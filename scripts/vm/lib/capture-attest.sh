@@ -344,9 +344,17 @@ capture_virsh_screenshot() {
 }
 
 # Publisher for capture_virsh_screenshot: move the staged frame to its final
-# path, then attest it. Args: vm staged dst.
+# path, then attest it. A refused row REMOVES the frame this call just moved
+# there -- an unattested frame is not evidence, and left in place it would sit
+# beside no sidecar or, worse, an older frame's (astra code review r1,
+# finding 1). Same contract as _qdwin_publish_attested. Args: vm staged dst.
 _qci_capture_mv_attest() {
-    local vm=$1 staged=$2 dst=$3
-    mv -fT -- "$staged" "$dst" || return 1
-    capture_attest_frame "$dst" "$vm"
+    local vm=$1 staged=$2 dst=$3 rc=0
+    mv -fT -- "$staged" "$dst" || return 2
+    capture_attest_frame "$dst" "$vm" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -f -- "$dst"
+        printf 'capture-attest: ERROR: %s was not recorded in the capture ledger and was removed\n' "$dst" >&2
+        return "$rc"
+    fi
 }

@@ -165,6 +165,11 @@ _qci_view_field() {
 # PUBLISHER is called as `PUBLISHER [ARGS...] STAGED DST` and must move/copy
 # the staged file to DST (and write any ledger row); its exit status is
 # returned. RAW itself is never modified or published under an image name.
+# PUBLISHER FAILURE CONTRACT: on failure it should leave DST as it was or
+# remove it. This function does not trust that: after a failure it checks
+# whether DST now holds the new padded bytes, and if so removes the frame AND
+# the old sidecar -- a sidecar is only ever restored beside the untouched frame
+# it describes (astra code review r1, finding 1).
 #
 # Order, all under the state lock (same-destination publishers serialize):
 # measure raw -> reserve (W,H) and append the state row -> pad to a stage in
@@ -252,9 +257,18 @@ qci_view_publish() {
     fi
     [ -z "$stage" ] || rm -f -- "$stage"
     [ -z "$sstage" ] || rm -f -- "$sstage"
+    if [ "$rc" -ne 0 ] && [ -n "$psha" ] && [ -f "$dst" ] && [ ! -h "$dst" ] \
+       && [ "$(sha256sum -- "$dst" 2>/dev/null | awk '{print $1}')" = "$psha" ]; then
+        # The publisher moved the NEW frame into place and then failed (e.g.
+        # its ledger row was refused). Those bytes carry no sidecar and no
+        # row, so they go -- and the old sidecar with them, below.
+        rm -f -- "$dst"
+        echo "view-geometry: ERROR: publication of $dst failed after the frame was written; the frame was removed" >&2
+    fi
     if [ -n "$old" ]; then
         # The publication failed. Restore the previous sidecar only beside the
-        # frame it described; a sidecar without its frame is removed.
+        # UNTOUCHED frame it described (the new bytes were removed above, so a
+        # surviving $dst is the old frame); a sidecar without its frame goes.
         if [ -f "$dst" ]; then mv -fT -- "$old" "$dst.raw" 2>/dev/null || rm -f -- "$old"
         else rm -f -- "$old"; fi
     fi
