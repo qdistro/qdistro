@@ -25,6 +25,7 @@ from qdistro_session_manager import (
     _STATE_TRANSITIONS,
     BadArgument,
     BadState,
+    SessionError,
     SiloBusy,
     SiloExists,
     State,
@@ -597,6 +598,27 @@ class TestValidation:
 # ---------------------------------------------------------------------------
 
 class TestCreate:
+    def test_skill_failure_removes_account_and_retry_succeeds(self, store, ops):
+        ops.silo_skill_fails_for.add("work")
+        with pytest.raises(SessionError, match="could not install the silo skill"):
+            store.create("work", 2000)
+        assert "work" not in ops.users
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+        assert "work" not in ops.relay_policies
+        ops.silo_skill_fails_for.clear()
+        assert store.create("work", 2000).uid == 2000
+        assert ops.installed_silo_skills == ["work"]
+
+    def test_skill_failure_reports_failed_account_cleanup(self, store, ops):
+        ops.silo_skill_fails_for.add("work")
+        ops.userdel_should_fail = True
+        with pytest.raises(SessionError, match="remove account 'work' before retrying"):
+            store.create("work", 2000)
+        assert ops.users == {"work": 2000}
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+
     def test_create_writes_state_dir_and_user(self, store, ops):
         silo = store.create("work", 2000)
         assert silo.name == "work"

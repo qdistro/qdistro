@@ -791,7 +791,6 @@ class _SystemOps:
         # boundary + per-quota target. Falls through (warning only)
         # on non-btrfs hosts so dev VMs without btrfs still work.
         self._convert_home_to_subvolume(name, uid)
-        self.install_silo_skill(name)
 
     def install_silo_skill(self, name: str) -> None:
         subprocess.run(
@@ -3468,6 +3467,23 @@ class _SiloStore:
                             "cannot create silo "
                             f"{name!r}: {self._unsafe_fragment_error(_unpurged)}")
                     self._ops.useradd(name, uid)
+                    # A failed skill install must not leave a Linux account
+                    # without a silo row: such an account blocks retry, and
+                    # startup reconciliation only visits registered silos.
+                    try:
+                        self._ops.install_silo_skill(name)
+                    except Exception as e:  # noqa: BLE001
+                        try:
+                            self._ops.userdel(name)
+                        except Exception as undo:  # noqa: BLE001
+                            raise SessionError(
+                                f"could not install the silo skill for {name!r} "
+                                f"({e}), and removing its new Linux account "
+                                f"also failed ({undo}); remove account {name!r} "
+                                f"before retrying") from e
+                        raise SessionError(
+                            f"could not install the silo skill for {name!r}: {e}"
+                        ) from e
                     # Issue this silo's user-relay bus-name grant. Without
                     # it qdistro-user-relay@<uid> is refused the name and
                     # exits 78, so cross-silo Send-To and the

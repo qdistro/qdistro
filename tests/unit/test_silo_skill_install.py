@@ -3,6 +3,7 @@
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,7 +31,7 @@ def test_installs_per_uid_and_is_idempotent(tmp_path):
     assert "admin approval skill" not in target.read_text().lower()
 
 
-def test_rejects_admin_and_silo_redirect(tmp_path):
+def test_rejects_admin_and_silo_redirect(tmp_path, monkeypatch):
     home = tmp_path / "silo"
     home.mkdir()
     source = ROOT / "agents/skills/silo/SKILL.md"
@@ -40,8 +41,19 @@ def test_rejects_admin_and_silo_redirect(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (home / ".agents").symlink_to(outside, target_is_directory=True)
+    # The test runner may itself be admin uid 1000. Model a valid silo-owned
+    # home so the symlink check is exercised on every host.
+    real_stat = Path.stat
+
+    def silo_home_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == home:
+            return SimpleNamespace(st_mode=result.st_mode, st_uid=1001)
+        return result
+
+    monkeypatch.setattr(Path, "stat", silo_home_stat)
     with pytest.raises(ValueError, match="symlink"):
-        install_skill(home, os.getuid(), source)
+        install_skill(home, 1001, source)
     assert list(outside.iterdir()) == []
 
 
