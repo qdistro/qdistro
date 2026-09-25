@@ -74,12 +74,24 @@ OBJ_PATH = "/org/qdistro/SessionManager1"
 # So these bounds are load-bearing, not hygiene: they turn the common
 # userspace hang into a failure the surrounding handling can act on instead of
 # a hang nothing can act on. That is the whole claim. It is NOT that the daemon
-# is now guaranteed responsive, NOT that every failure reaches the client as a
-# domain-typed error (CreateSilo still re-raises non-SessionError failures raw),
-# and NOT that every site's answer is safe in every dimension — account
-# operations remain non-transactional, and `check=False` callers still ignore
-# arbitrary non-zero exits, only the timeout direction is fixed. Both are filed
-# in todo/open-followups.md.
+# is now guaranteed responsive, and NOT that every site's answer is safe in
+# every dimension — account operations remain non-transactional (see
+# todo/open-followups.md). Three holes this paragraph used to leave open are
+# closed:
+#   * CreateSilo translates a non-SessionError (store.create audits, then
+#     re-raises the original class) to org.qdistro.SessionManager1.Generic.
+#     The store method still raises that original class for unit tests.
+#   * link_del / netns_remove ignore a non-zero exit only for the absence
+#     text `ip` prints ("Cannot find device", "No such file or directory").
+#     Any other failure raises. ipv6_disable uses check=True: sysctl returns
+#     0 when the write succeeds, including when the value is already set, so
+#     there is no "already disabled" non-zero to swallow.
+#   * Freeze/resume/stop waiters on an in-flight slot give up after
+#     _T_INFLIGHT_WAIT. That bounds the waiter, not the cgroup.freeze write
+#     (the write staying unbounded is still a separate filed item).
+# Other check=False sites still treat a specific non-zero as non-fatal on
+# purpose (userdel "does not exist", systemctl stop "not established", the
+# btrfs probe, a best-effort bus reload).
 #
 # TWO HONEST LIMITS, so nobody reads more into these than they carry:
 #
@@ -314,6 +326,15 @@ SILO_UID_MAX = 60000
 
 # Default grace seconds for StopSilo (SIGTERM → wait → SIGKILL).
 DEFAULT_STOP_GRACE_S = 5
+
+# How long freeze/resume/stop will wait for another thread's in-flight
+# lifecycle op on the same silo. This bounds the WAITER, not the
+# cgroup.freeze write itself (that write staying unbounded is a separate
+# filed item). Longer than _T_SYSTEMCTL (30s) and DEFAULT_STOP_GRACE_S
+# (5s), shorter than the _T_ACCOUNT (300s) allowance: a slow-but-live holder
+# is given time to finish, and a waiter is not stuck forever if the holder
+# never clears the slot.
+_T_INFLIGHT_WAIT = 120
 
 log = logging.getLogger("qdistro_session_manager")
 
@@ -1350,16 +1371,31 @@ class _SystemOps:
         if ns:
             cmd += ["-n", str(ns)]
         cmd += [str(a) for a in args]
-        # check=False means "ignore a non-zero EXIT STATUS" — a device that is
-        # already gone. It deliberately does NOT mean "ignore a wedge": a
-        # TimeoutExpired propagates either way. The distinction is load-bearing
-        # because link_del() runs on the APPLY path too (EgressBackend.apply
-        # tears down stale devices first), and there a swallowed timeout would
-        # let apply(none) return dark=True while the old wg device is still up
-        # with its default route — a silo reported as networkless that still
-        # has a tunnel. "The delete failed" and "the device was already absent"
-        # must never collapse into the same answer.
+        # check=True callers (link_up, addr_add, routes) fail on any non-zero
+        # exit. Absence-tolerant deletes do not come through here: this call
+        # does not capture stderr, so it cannot tell "Cannot find device" from
+        # "Operation not permitted". TimeoutExpired propagates either way — a
+        # swallowed timeout on the apply path would let apply(none) return
+        # dark=True while the old wg device is still up with its default route.
         subprocess.run(cmd, check=check, timeout=_T_NETLINK)
+
+    def _run_absent_ok(self, cmd: list[str], absent_marker: str) -> None:
+        """Run *cmd*. rc 0 succeeds. A non-zero exit whose stdout or stderr
+        contains *absent_marker* is a missing object and stays a silent no-op.
+        Any other non-zero exit raises CalledProcessError carrying both
+        streams. TimeoutExpired propagates unchanged — it is never success.
+        """
+        proc = subprocess.run(
+            cmd, check=False, capture_output=True, text=True,
+            timeout=_T_NETLINK)
+        if proc.returncode == 0:
+            return
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        if absent_marker in out or absent_marker in err:
+            return
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
 
     def netns_exists(self, ns: str) -> bool:
         return (NETNS_RUN_DIR / str(ns)).exists()
@@ -1371,22 +1407,30 @@ class _SystemOps:
                            timeout=_T_NETLINK)
 
     def netns_remove(self, ns: str) -> None:
-        # Deleting the netns destroys every interface still inside it. Best
-        # effort: a missing netns is not an error.
-        # check=False covers "no such netns". A timeout is a different claim —
-        # the netns may still exist with devices in it — so it propagates to
-        # the caller, which already wraps this in its own "log and continue"
-        # handler and is the right place for that policy to live.
-        subprocess.run(["ip", "netns", "del", str(ns)], check=False,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=_T_NETLINK)
+        # Deleting the netns destroys every interface still inside it.
+        # `ip netns del` on a missing netns prints "No such file or directory"
+        # (Cannot remove namespace file "...": No such file or directory) and
+        # that stays a silent no-op. A generic rc=1 is not absence: permission,
+        # busy, or any other netlink error raises. A timeout is a different
+        # claim — the netns may still exist — so TimeoutExpired propagates.
+        # Callers that want "log and continue" already wrap this themselves.
+        self._run_absent_ok(
+            ["ip", "netns", "del", str(ns)], "No such file or directory")
 
     def link_up(self, ns, ifname) -> None:
         self._ip(ns, "link", "set", ifname, "up")
 
     def link_del(self, ns, ifname) -> None:
-        # Idempotent teardown: a missing device must not raise.
-        self._ip(ns, "link", "del", ifname, check=False)
+        # Idempotent teardown for a missing device only. `ip link del` prints
+        # `Cannot find device "<name>"` in that case. Any other non-zero exit
+        # (EPERM, EBUSY, netlink) raises, with the captured streams attached.
+        # Done here rather than via _ip(check=False): _ip does not capture
+        # stderr, and check=True callers must keep failing on every non-zero.
+        cmd = ["ip"]
+        if ns:
+            cmd += ["-n", str(ns)]
+        cmd += ["link", "del", str(ifname)]
+        self._run_absent_ok(cmd, "Cannot find device")
 
     def link_set_netns(self, ifname, ns) -> None:
         # The device is in the init netns; move it into `ns`.
@@ -1408,13 +1452,17 @@ class _SystemOps:
 
     def ipv6_disable(self, ns, ifname) -> None:
         # Stop SLAAC handing a direct-egress silo a v6 path around the NAT.
+        # Runs on the direct APPLY path immediately before the silo is
+        # declared non-dark, so a non-zero sysctl must raise (check=True),
+        # not be ignored. sysctl writes the value; an already-applied `=1`
+        # is still a successful write (exit 0). There is no separate
+        # "already disabled" non-zero to special-case. TimeoutExpired
+        # propagates as well: swallowing it would hand out a silo whose v6
+        # path around the NAT was never actually closed.
         argv = ["sysctl", "-q", f"net.ipv6.conf.{ifname}.disable_ipv6=1"]
         if ns:
             argv = ["ip", "netns", "exec", str(ns)] + argv
-        # Propagates on timeout: this runs on the `direct` APPLY path, right
-        # before the silo is declared non-dark. Swallowing it would hand out a
-        # silo whose v6 SLAAC path around the NAT was never actually closed.
-        subprocess.run(argv, check=False, timeout=_T_NETLINK)
+        subprocess.run(argv, check=True, timeout=_T_NETLINK)
 
     def wg_add_dev(self, ifname) -> None:
         # Born in the init netns so WireGuard binds its encrypted UDP socket
@@ -3963,17 +4011,13 @@ class _SiloStore:
                    grace_s: int = DEFAULT_STOP_GRACE_S) -> None:
         # Phase 1: validate state and transition to STOPPING under the lock.
         with self._lock:
-            silo = self.get(name)
             # A concurrent/retried StopSilo while a stop is already in its
             # phase-2 teardown (running without the lock) must NOT return
             # success prematurely — the first stop may still fail. Wait for
-            # the in-flight stop to finish, then re-check the final state.
-            while silo.name in self._stopping_inflight:
-                self._stop_cv.wait()
-                # Re-fetch in case the silo was deleted while we waited.
-                silo = self._silos.get(name)
-                if silo is None:
-                    raise UnknownSilo(f"no such silo {name!r}")
+            # the in-flight op to finish (same bounded helper as freeze and
+            # resume), then re-check the final state. A deadline raises and
+            # leaves the holder's slot and the silo state alone.
+            silo = self._await_inflight_locked(name)
             if silo.state == State.STOPPED:
                 return
             if silo.state not in (State.ACTIVE, State.FROZEN):
@@ -4230,12 +4274,39 @@ class _SiloStore:
 
     def _await_inflight_locked(self, name: str) -> Silo:
         """Wait (on _stop_cv, with _lock held) until no lock-free lifecycle
-        write is in flight for *name*, then return the current silo. Raises
-        UnknownSilo if the silo is deleted while we wait. Caller must hold
-        _lock and must not yet have claimed the slot."""
+        write is in flight for *name*, then return the current silo.
+
+        Bounded by _T_INFLIGHT_WAIT — the waiter, not the cgroup write the
+        other thread is stuck in. Condition.wait returns False when the
+        timeout elapses and True on a wakeup, including a spurious one, so
+        this loops until the slot is clear or the deadline passes. Remaining
+        time comes from time.monotonic(); a burst of spurious wakeups cannot
+        extend the wait.
+
+        On deadline, raises SessionError naming the silo. Does NOT clear the
+        other thread's _stopping_inflight slot and does NOT force silo state.
+        Raises UnknownSilo if the silo is deleted while we wait. Caller must
+        hold _lock and must not yet have claimed the slot.
+        """
         silo = self.get(name)
-        while silo.name in self._stopping_inflight:
-            self._stop_cv.wait()
+        deadline = time.monotonic() + _T_INFLIGHT_WAIT
+
+        def _stuck() -> SessionError:
+            return SessionError(
+                f"in-flight lifecycle op for silo {name!r} did not finish "
+                f"within {_T_INFLIGHT_WAIT:g}s")
+
+        while name in self._stopping_inflight:
+            remaining = deadline - time.monotonic()
+            # wait() is False on timeout. Short-circuit when the deadline has
+            # already passed so a zero/negative remaining cannot block again.
+            if remaining <= 0 or not self._stop_cv.wait(remaining):
+                silo = self._silos.get(name)
+                if name not in self._stopping_inflight:
+                    if silo is None:
+                        raise UnknownSilo(f"no such silo {name!r}")
+                    return silo
+                raise _stuck()
             silo = self._silos.get(name)
             if silo is None:
                 raise UnknownSilo(f"no such silo {name!r}")
@@ -5644,9 +5715,23 @@ except ImportError:  # pragma: no cover - exercised on hosts without dbus
     GLib = None  # type: ignore[assignment]
 
 
-def _to_dbus_exception(e: SessionError):
+def _dbus_error_name_and_message(exc: BaseException) -> tuple[str, str]:
+    """(error name, message) for a SessionManager1 D-Bus failure.
+
+    No live bus: unit tests call this directly. A SessionError keeps
+    ``org.qdistro.SessionManager1.<dbus_name>``. Anything else — the raw
+    OSError ``store.create`` re-raises after it has already audited — is
+    ``org.qdistro.SessionManager1.Generic``, message ``str(exc)``.
+    """
+    if isinstance(exc, SessionError):
+        return f"{BUS_NAME}.{exc.dbus_name}", str(exc)
+    return f"{BUS_NAME}.Generic", str(exc)
+
+
+def _to_dbus_exception(exc: BaseException):
+    name, message = _dbus_error_name_and_message(exc)
     return dbus.DBusException(  # type: ignore[union-attr]
-        str(e), name=f"{BUS_NAME}.{e.dbus_name}")
+        message, name=name)
 
 
 if dbus is not None:
@@ -5777,7 +5862,13 @@ if dbus is not None:
             try:
                 self.store.create(str(name), int(uid), caller=caller)
                 log.info("CreateSilo name=%s uid=%d", name, int(uid))
-            except SessionError as e:
+            except Exception as e:  # noqa: BLE001 — raw create() stays raw
+                # store.create() is the lifecycle method that audits and then
+                # re-raises the original class (OSError included), so unit
+                # tests still see that class. The bus boundary is what turns
+                # a non-SessionError into SessionManager1.Generic. start()
+                # already wraps into SessionError; delete()'s teardown path
+                # does too. Sibling methods are left on `except SessionError`.
                 raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",

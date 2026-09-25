@@ -10,6 +10,7 @@ swapped.
 """
 from __future__ import annotations
 
+import ast
 import json
 import signal
 import subprocess
@@ -919,6 +920,112 @@ class TestS14FreezeLockScope:
         tf.join(5)
         assert stop_done.wait(5), "stop() never completed after freeze released"
         assert store.get("work").state == State.STOPPED
+
+    def test_inflight_wait_times_out_without_taking_the_slot(self, store, ops,
+                                                             monkeypatch):
+        """A holder that never returns must not wedge the waiter forever.
+
+        The deadline bounds the waiter only: the parked freeze keeps the
+        slot, the silo stays ACTIVE, and once the write is released the
+        holder still finishes and clears the slot itself.
+        """
+        import threading
+        monkeypatch.setattr(sm, "_T_INFLIGHT_WAIT", 0.2)
+        store.create("work", 2000)
+        store.start("work")
+        in_write = threading.Event()
+        release = threading.Event()
+        orig = ops.cgroup_freeze
+
+        def parked(name, frozen):
+            if frozen:
+                in_write.set()
+                assert release.wait(5), "test deadlock: freeze never released"
+            return orig(name, frozen)
+
+        ops.cgroup_freeze = parked
+        holder_err: list[BaseException] = []
+
+        def run_freeze():
+            try:
+                store.freeze("work")
+            except BaseException as e:  # noqa: BLE001 — surface it below
+                holder_err.append(e)
+
+        holder = threading.Thread(target=run_freeze)
+        holder.start()
+        assert in_write.wait(5), "freeze never reached the cgroup write"
+
+        waiter_err: list[BaseException] = []
+
+        def run_stop():
+            try:
+                store.stop("work", grace_s=0)
+            except BaseException as e:  # noqa: BLE001 — the expected failure
+                waiter_err.append(e)
+
+        started = time.monotonic()
+        waiter = threading.Thread(target=run_stop)
+        waiter.start()
+        waiter.join(2.0)
+        elapsed = time.monotonic() - started
+        try:
+            assert not waiter.is_alive(), "stop() did not give up on the inflight freeze"
+            assert elapsed < 2.0
+            assert waiter_err, "stop() returned instead of raising"
+            assert isinstance(waiter_err[0], sm.SessionError)
+            assert not isinstance(waiter_err[0], UnknownSilo)
+            assert "work" in str(waiter_err[0])
+            assert "did not finish" in str(waiter_err[0])
+            # The parked freeze is still the holder. State was not forced.
+            assert "work" in store._stopping_inflight
+            assert holder.is_alive()
+            assert store.get("work").state == State.ACTIVE
+        finally:
+            release.set()
+            holder.join(5)
+        assert not holder.is_alive(), "parked freeze leaked after release"
+        assert not holder_err, holder_err
+        assert "work" not in store._stopping_inflight
+        assert store.get("work").state == State.FROZEN
+
+
+class TestDBusErrorNames:
+    def test_session_error_keeps_its_name_and_oserror_is_generic(self):
+        name, msg = sm._dbus_error_name_and_message(SiloExists("already"))
+        assert name == "org.qdistro.SessionManager1.SiloExists"
+        assert msg == "already"
+        name, msg = sm._dbus_error_name_and_message(OSError("disk"))
+        assert name == "org.qdistro.SessionManager1.Generic"
+        assert "disk" in msg
+
+    def test_create_silo_translates_any_exception(self):
+        """Supplement: CreateSilo's store handler uses the helper for Exception,
+        not only SessionError. The helper itself is tested above without a bus.
+        """
+        tree = ast.parse(Path(sm.__file__).read_text())
+        create = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == "CreateSilo"),
+            None)
+        assert create is not None, "CreateSilo not found"
+        matched = False
+        for handler in ast.walk(create):
+            if not isinstance(handler, ast.ExceptHandler):
+                continue
+            if not (isinstance(handler.type, ast.Name)
+                    and handler.type.id == "Exception"):
+                continue
+            for raised in ast.walk(handler):
+                if not isinstance(raised, ast.Raise):
+                    continue
+                exc = raised.exc
+                if (isinstance(exc, ast.Call)
+                        and isinstance(exc.func, ast.Name)
+                        and exc.func.id == "_to_dbus_exception"):
+                    matched = True
+        assert matched, (
+            "CreateSilo does not raise _to_dbus_exception from except Exception")
 
 
 # ---------------------------------------------------------------------------
