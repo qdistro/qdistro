@@ -47,6 +47,11 @@ make_virsh() {
     # several bodies) must not resume a previous body's call count, or it lands
     # in the post-terminal reaped branch instead of the shape under test.
     : > "$STATE"
+    # ...and the orphan registry with it: a reconfigured fake is a new VM. A
+    # previous body's protocol-error exit legitimately KEEPS its record (its
+    # guest command may still run), and the next call would then reap it
+    # through a fake that was never meant to answer a cleanup.
+    rm -rf "$QDISTRO_VM_EXEC_STATE_DIR"
     printf '%s' "$terminal" > "$BATS_TEST_TMPDIR/terminal.json"
     printf '%s' "$nonterm" > "$BATS_TEST_TMPDIR/nonterm"
     cat > "$FAKEBIN/virsh" <<EOF
@@ -1656,7 +1661,7 @@ registry_entries() {
 }
 
 # A record for an owner that is certainly dead: pid_max+1 never exists.
-plant_dead_record() {   # <name-suffix> <guest pid> <stamp> <boot> [uuid]
+plant_dead_record() {   # <numeric start-time suffix> <guest pid> <stamp> <boot> [uuid]
     local dead=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
     mkdir -p "$(ODIR)"
     printf '%s %s %s %s\n' "$2" "$3" "$4" "${5:--}" > "$(ODIR)/$dead-$1"
@@ -1670,10 +1675,16 @@ sigkill_registered() {
 }
 
 # Start a second vm-exec, wait until its OWN command is launched, TERM it.
-run_second_until_launched() {   # <token>
+run_second_until_launched() {   # <token> [stderr line to wait for before TERM]
     PATH="$FAKEBIN:$PATH" "$VM_EXEC" fake-vm "$1" >"$BATS_TEST_TMPDIR/out2" 2>&1 &
-    local p=$!
+    local p=$! _tick
     await_exec_body "$1"
+    if [ -n "${2:-}" ]; then
+        for _tick in $(seq 1 300); do
+            grep -qF -- "$2" "$BATS_TEST_TMPDIR/out2" && break
+            sleep 0.1
+        done
+    fi
     kill -TERM "$p"
     wait "$p" || true
 }
@@ -1789,6 +1800,7 @@ run_second_until_launched() {   # <token>
 
     rm -rf "$QDISTRO_VM_EXEC_STATE_DIR"
     make_signal_virsh 987654 0
+    export QDISTRO_VM_AGENT_MAX_ERRORS=2
     bg_registered_vm_exec "$BATS_TEST_TMPDIR/out3" 'poll-error-driver'
     touch "$BATS_TEST_TMPDIR/statuserr"
     local rc=0
@@ -1823,8 +1835,8 @@ run_second_until_launched() {   # <token>
     # verify budget; a caller with a short lock wait must not slip past.
     make_signal_virsh 987654 hang
     export QDISTRO_VM_KILL_VERIFY_TIMEOUT=3
-    plant_dead_record a 4242 987654 "$FAKE_BOOT"
-    plant_dead_record b 4242 987654 "$FAKE_BOOT"
+    plant_dead_record 1 4242 987654 "$FAKE_BOOT"
+    plant_dead_record 2 4242 987654 "$FAKE_BOOT"
     PATH="$FAKEBIN:$PATH" "$VM_EXEC" fake-vm 'holder-driver' >"$BATS_TEST_TMPDIR/holder" 2>&1 &
     local holder=$!
     await_exec_body qd_kill_checked
@@ -1845,7 +1857,7 @@ run_second_until_launched() {   # <token>
     # Same VM name, new boot: the guest reports boot-mismatch and signals nothing.
     make_signal_virsh 987654 4 'boot-mismatch pid=4242 boot=x expected=y: the recorded process belonged to an earlier boot; NOT signalled'
     export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
-    plant_dead_record a 4242 987654 99999999-8888-7777-6666-555555555555
+    plant_dead_record 1 4242 987654 99999999-8888-7777-6666-555555555555
     run_second_until_launched second-driver
     # The submitted script carried the RECORDED boot id for the guest to check.
     grep -q 'boot=\\"99999999-8888-7777-6666-555555555555\\"' "$EXECLOG"
@@ -1857,12 +1869,12 @@ run_second_until_launched() {   # <token>
     make_signal_virsh 987654 0
     export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
     echo aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee > "$BATS_TEST_TMPDIR/domuuid"
-    plant_dead_record a 4242 987654 "$FAKE_BOOT" 12345678-1234-1234-1234-123456789abc
+    plant_dead_record 1 4242 987654 "$FAKE_BOOT" 12345678-1234-1234-1234-123456789abc
     run_second_until_launched second-driver
     grep -q 'belongs to an earlier domain' "$BATS_TEST_TMPDIR/out2"
-    run ! grep -q 'qd_kill_checked' <(sed -n '1,/second-driver/p' "$EXECLOG")
+    # The very first guest-exec is the new command itself: no cleanup RPC.
+    head -1 "$EXECLOG" | grep -q second-driver
     [ "$(registry_entries)" -eq 0 ]
-    # And the new command's own record carries the current uuid.
 }
 
 @test "vm-exec: registry failures are REPORTED, never fatal to the command" {
@@ -1870,14 +1882,14 @@ run_second_until_launched() {   # <token>
     export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
     # 1. Unwritable state root: the command runs, and says it is unprotected.
     mkdir -p "$QDISTRO_VM_EXEC_STATE_DIR"; chmod 555 "$QDISTRO_VM_EXEC_STATE_DIR"
-    run_second_until_launched unprotected-driver
+    run_second_until_launched unprotected-driver 'orphan registry: cannot create'
     chmod 755 "$QDISTRO_VM_EXEC_STATE_DIR"
     grep -q 'orphan registry: cannot create' "$BATS_TEST_TMPDIR/out2"
 
     # 2. A resolved record that cannot be removed (writable .lock, read-only
     #    directory) is reported and does NOT abort the requested command.
     rm -rf "$QDISTRO_VM_EXEC_STATE_DIR"
-    plant_dead_record a 4242 987654 "$FAKE_BOOT"
+    plant_dead_record 1 4242 987654 "$FAKE_BOOT"
     : > "$(ODIR)/.lock"
     chmod 555 "$(ODIR)"
     run_second_until_launched readonly-driver
