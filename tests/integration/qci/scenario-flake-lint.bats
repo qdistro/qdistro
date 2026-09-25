@@ -451,3 +451,82 @@ MD
     run lint "$dropped"
     [[ "$output" == *"qga-journal-self-match"* ]]
 }
+
+@test "flake-lint: guest double-quoted command substitution is qga-journal-self-match" {
+    # Outer single quotes: the guest executes $(...) / backticks, the host
+    # does not. The pipe may sit on the next line inside that substitution.
+    local f="$BATS_TEST_TMPDIR/87-qga-subst.md"
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="$(journalctl --no-pager | grep token)"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="$(journalctl --no-pager
+| grep token)"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="`journalctl --no-pager | grep token`"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    # A unit match inside the substitution is still scoped.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="$(journalctl --user -u qdwin-compositor.service | grep token)"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    # Host-expanded $(...) in the remote double quotes is not a guest command.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" "$(journalctl --no-pager | grep token)"
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: journalctl as an argument is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/88-qga-arg.md"
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'echo journalctl | grep token'
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    # The pipe inside quotes is echo's text, not a pipeline.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'echo "journalctl | grep token"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    # command/exec wrap the program that actually runs.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'command journalctl --no-pager | grep token'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}

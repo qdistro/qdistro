@@ -463,27 +463,93 @@ def _lex_guest_script(script: str) -> list[tuple[str, str, int, int]]:
 
     Yields (kind, text, offset, depth). kind is word / hole / op / redir / nl.
     `$(...)` and backticks bump depth so an inner `journalctl | grep` is its own
-    pipeline. Quoted text hides operators. A newline is a separator unless the
-    next token is `|` (the journalctl / `| grep` split).
+    pipeline. Single quotes hide operators. Double quotes hide operators too,
+    except an unescaped `$(...)` or backtick: the guest executes that, so it is
+    lexed as a nested command and the surrounding quotes resume afterwards.
+    A newline is a separator unless the next token is `|` (the journalctl /
+    `| grep` split) or the newline sits inside quotes.
     """
     tokens: list[tuple[str, str, int, int]] = []
     i, n = 0, len(script)
     depth = 0
     in_bt = False
+    quote = ""
+    buf: list[str] = []
+    buf_at = 0
+    hole = False
+    # (quote to resume, depth to resume at) when a substitution opened inside
+    # double quotes. The closing paren/backtick returns to that quote.
+    resume: list[tuple[str, int]] = []
+
+    def flush_word() -> None:
+        nonlocal buf, hole
+        if hole:
+            tokens.append(("hole", "\x00", buf_at, depth))
+        elif buf:
+            tokens.append(("word", "".join(buf), buf_at, depth))
+        buf = []
+        hole = False
+
+    def take(ch: str) -> None:
+        nonlocal buf_at
+        if not buf and not hole:
+            buf_at = i
+        buf.append(ch)
+
     while i < n:
         c = script[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+            elif c == "\x00":
+                if not buf and not hole:
+                    buf_at = i
+                hole = True
+            else:
+                take(c)
+            i += 1
+            continue
+        if quote == '"':
+            if c == "\\" and i + 1 < n:
+                take(script[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                quote = ""
+                i += 1
+                continue
+            if c == "\x00":
+                if not buf and not hole:
+                    buf_at = i
+                hole = True
+                i += 1
+                continue
+            # Guest-executed. Leave the introducer for the unquoted path and
+            # come back to this double-quoted word when the sub closes.
+            if c == "`" or (c == "$" and i + 1 < n and script[i + 1] == "("):
+                flush_word()
+                resume.append(('"', depth))
+                quote = ""
+            else:
+                take(c)
+                i += 1
+                continue
         if c in " \t":
+            flush_word()
             i += 1
             continue
         if c == "\n":
+            flush_word()
             tokens.append(("nl", "", i, depth))
             i += 1
             continue
         if c == "\x00":
+            flush_word()
             tokens.append(("hole", "\x00", i, depth))
             i += 1
             continue
         if c == "#" and not in_bt:
+            flush_word()
             while i < n and script[i] != "\n":
                 i += 1
             continue
@@ -491,35 +557,43 @@ def _lex_guest_script(script: str) -> list[tuple[str, str, int, int]]:
             if i + 1 < n and script[i + 1] == "\n":
                 i += 2
                 continue
-        if script.startswith("||", i):
-            tokens.append(("op", "||", i, depth))
-            i += 2
+            if i + 1 < n:
+                take(script[i + 1])
+                i += 2
+                continue
+        if c in "\"'":
+            if not buf and not hole:
+                buf_at = i
+            quote = c
+            i += 1
             continue
-        if script.startswith("&&", i):
-            tokens.append(("op", "&&", i, depth))
-            i += 2
-            continue
-        if script.startswith("|&", i):
-            tokens.append(("op", "|&", i, depth))
+        if script.startswith("||", i) or script.startswith("&&", i) or script.startswith("|&", i):
+            flush_word()
+            tokens.append(("op", script[i:i + 2], i, depth))
             i += 2
             continue
         if c == "|":
+            flush_word()
             tokens.append(("op", "|", i, depth))
             i += 1
             continue
         if script.startswith("&>", i):
+            flush_word()
             tokens.append(("redir", "&>", i, depth))
             i += 2
             continue
         if c == "&":
+            flush_word()
             tokens.append(("op", "&", i, depth))
             i += 1
             continue
         if c == ";":
+            flush_word()
             tokens.append(("op", ";", i, depth))
             i += 1
             continue
         if c in "<>":
+            flush_word()
             j = i + 1
             if j < n and script[j] in (">" if c == ">" else "<"):
                 j += 1
@@ -529,16 +603,20 @@ def _lex_guest_script(script: str) -> list[tuple[str, str, int, int]]:
             i = j
             continue
         if c == "$" and i + 1 < n and script[i + 1] == "(":
+            flush_word()
             depth += 1
             tokens.append(("op", "$(", i, depth))
             i += 2
             continue
         if c == "`":
+            flush_word()
             if in_bt:
                 tokens.append(("op", "`", i, depth))
                 if depth:
                     depth -= 1
                 in_bt = False
+                if resume and resume[-1][1] == depth:
+                    quote = resume.pop()[0]
             else:
                 depth += 1
                 in_bt = True
@@ -546,14 +624,18 @@ def _lex_guest_script(script: str) -> list[tuple[str, str, int, int]]:
             i += 1
             continue
         if c == "(":
+            flush_word()
             depth += 1
             tokens.append(("op", "(", i, depth))
             i += 1
             continue
         if c == ")":
+            flush_word()
             tokens.append(("op", ")", i, depth))
             if depth:
                 depth -= 1
+            if resume and resume[-1][1] == depth:
+                quote = resume.pop()[0]
             i += 1
             continue
         # Leading fd of a redirect (`2>/dev/null`) is not an argv word.
@@ -562,44 +644,37 @@ def _lex_guest_script(script: str) -> list[tuple[str, str, int, int]]:
             while j < n and script[j].isdigit():
                 j += 1
             if j < n and script[j] in "<>":
+                flush_word()
                 i = j
                 continue
         start = i
-        word, i, hole = _read_guest_word(script, i)
+        word, i, word_hole = _read_guest_word(script, i)
         if i == start:
             i += 1
             continue
-        if hole:
-            tokens.append(("hole", "\x00", start, depth))
-        elif word:
-            tokens.append(("word", word, start, depth))
+        if not buf and not hole:
+            buf_at = start
+        if word_hole:
+            hole = True
+        buf.append(word)
+    flush_word()
     return tokens
 
 
 def _read_guest_word(script: str, i: int) -> tuple[str, int, bool]:
-    """Read one shell word starting at i. Returns (text, new_index, saw_hole)."""
+    """Read one unquoted shell word starting at i.
+
+    Stops before a quote, so the caller can keep the same word across
+    `foo"bar"` and can lex `$(...)` inside double quotes. Returns
+    (text, new_index, saw_hole).
+    """
     n = len(script)
     buf: list[str] = []
     hole = False
     while i < n:
         c = script[i]
         if c in "\"'":
-            q = c
-            i += 1
-            while i < n and script[i] != q:
-                if script[i] == "\x00":
-                    hole = True
-                    i += 1
-                    continue
-                if q == '"' and script[i] == "\\" and i + 1 < n:
-                    buf.append(script[i + 1])
-                    i += 2
-                    continue
-                buf.append(script[i])
-                i += 1
-            if i < n and script[i] == q:
-                i += 1
-            continue
+            break
         if c == "\\" and i + 1 < n:
             if script[i + 1] == "\n":
                 i += 2
@@ -669,13 +744,46 @@ def _guest_commands(
     return commands
 
 
-def _command_basename(words: list[tuple[str, int]]) -> str | None:
-    for text, _pos in words:
+# Shell prefixes that do not themselves read the journal. `env VAR=1` is
+# already skipped as an assignment; `command`/`exec`/`builtin` (and their
+# dash-flags, such as `command -p`) wrap the program that actually runs.
+_CMD_WRAPPERS = {"command", "exec", "builtin"}
+
+
+def _executed_argv(
+    words: list[tuple[str, int]],
+) -> tuple[int, list[str]] | None:
+    """(offset, argv) of the program this simple command executes.
+
+    Leading assignments and command/exec/builtin are not that program. A
+    later argument whose text is `journalctl` is not either. None when a
+    host-expansion hole hides the program or one of its arguments.
+    """
+    i = 0
+    n = len(words)
+    while i < n:
+        text, pos = words[i]
         if "\x00" in text:
             return None
         if _ASSIGN_RE.fullmatch(text):
+            i += 1
             continue
-        return text.rsplit("/", 1)[-1]
+        base = text.rsplit("/", 1)[-1]
+        if base in _CMD_WRAPPERS:
+            i += 1
+            while i < n and words[i][0].startswith("-"):
+                if "\x00" in words[i][0]:
+                    return None
+                i += 1
+            continue
+        argv: list[str] = []
+        origin = pos
+        while i < n:
+            if "\x00" in words[i][0]:
+                return None
+            argv.append(words[i][0])
+            i += 1
+        return origin, argv
     return None
 
 
@@ -712,18 +820,14 @@ def qga_journal_self_match_lines(script: str) -> list[int]:
     for idx, (wds, piped) in enumerate(commands):
         if not piped or idx + 1 >= len(commands):
             continue
-        if _command_basename(commands[idx + 1][0]) not in _QGA_GREP:
+        nxt = _executed_argv(commands[idx + 1][0])
+        if nxt is None or nxt[1][0].rsplit("/", 1)[-1] not in _QGA_GREP:
             continue
-        jpos: int | None = None
-        argv: list[str] = []
-        for text, pos in wds:
-            base = text.rsplit("/", 1)[-1]
-            if jpos is None and base == "journalctl":
-                jpos = pos
-                argv = [text]
-            elif jpos is not None:
-                argv.append(text)
-        if jpos is None or any("\x00" in a for a in argv):
+        found = _executed_argv(wds)
+        if found is None:
+            continue
+        jpos, argv = found
+        if argv[0].rsplit("/", 1)[-1] != "journalctl":
             continue
         if _journal_unit_scoped(argv):
             continue
