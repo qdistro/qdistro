@@ -47,7 +47,7 @@ EOF
     export PATH="$T/bin:$PATH"
     export QDWIN_VM_EXEC="$T/bin/fake-vm-exec" VMNAME=fake-vm
     export ACTIVE_SOCKET=wayland-1 QD22_OUTPUT=Virtual-1
-    export QD22_LOG="$T/qd22.log" QD22_PID="$T/qd22.pid"
+    export QD22_LOG="$T/qd22.log" QD22_LAUNCH_LOG="$T/qd22.launch.log" QD22_PID="$T/qd22.pid"
     export QD22_CANCEL="$T/qd22.cancel" QD22_INTENT="$T/qd22.intent"
 }
 
@@ -141,6 +141,41 @@ extract_exited_guard() {
     export FAKE_PROBE_S=20
     eval "$stmt"
     for _ in $(seq 1 40); do grep -q '^CLICK_TARGET ' "$QD22_LOG" 2>/dev/null && break; sleep 0.1; done
+    # The precondition must actually hold, or this passes on a failed launch.
+    grep -q '^CLICK_TARGET ' "$QD22_LOG"
+    ! grep -q '^rc=' "$QD22_LOG"
     run bash -c "$guard"
     [ "$status" -eq 0 ]
+}
+
+# The pid-acknowledgement block that follows the launch, through its `echo`.
+extract_pid_ack() {
+    awk '
+        /^PROBE_PID=$/ { buf = $0 "\n"; grab = 1; next }
+        grab { buf = buf $0 "\n"; if ($0 ~ /^echo "probe group pid=/) { printf "%s", buf; n++; grab = 0 } }
+        END { if (n != 1) exit 1 }
+    ' "$SCENARIO"
+}
+
+@test "a launcher failure before the probe starts is reported, and the launch still returns promptly" {
+    # runuser fails before anything is published. With the launcher's output
+    # sent to /dev/null this cause vanished and the step said only "probe never
+    # published its pid" (astra r1). It must land in $QD22_LAUNCH_LOG and the
+    # acknowledgement failure must print it.
+    cat > "$T/bin/runuser" <<'SHIM'
+#!/bin/bash
+echo "RUNUSER-FAILED: injected" >&2
+exit 1
+SHIM
+    chmod +x "$T/bin/runuser"
+    local stmt ack start
+    stmt=$(extract_launch)
+    ack=$(extract_pid_ack)
+    start=$SECONDS
+    eval "$stmt"
+    [ $((SECONDS - start)) -lt 5 ]
+    run bash -c "$ack"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"never published its pid"* ]]
+    [[ "$output" == *"RUNUSER-FAILED: injected"* ]]
 }
