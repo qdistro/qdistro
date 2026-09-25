@@ -1359,25 +1359,57 @@ orphan_refuse() {
 #
 # Now `flock -o` takes the lock on ITS OWN descriptor and closes that
 # descriptor before it execs the waiter, so the flock process is the one and
-# only holder. The waiter announces the acquisition on the process-substitution
-# pipe and then sits in `tail --pid=<this vm-exec>`:
+# only holder. The waiter (QD_ORPHAN_LOCK_WAITER) announces the acquisition on
+# the process-substitution pipe and then watches THIS vm-exec by identity:
 #   - orphan_lock_release kills the waiter and WAITS for flock to exit, so the
 #     lock is free by the time the reap returns;
-#   - if this vm-exec dies without releasing (SIGKILL, an errexit), tail sees
-#     its pid gone and exits, and flock exits with it: the lock does not
-#     outlive its owner;
-#   - if it dies while still WAITING for the lock, nobody reads the pipe any
-#     more: the announcement fails (EPIPE/SIGPIPE) the moment flock acquires,
-#     and the waiter exits before it could ever watch a recycled pid.
+#   - if this vm-exec dies without releasing (SIGKILL, an errexit), the waiter
+#     sees it within one poll and exits, and flock with it. "Dies" means EXITS,
+#     not "is reaped": a zombie (state Z/X) counts as dead, because a SIGKILLed
+#     vm-exec whose parent does not wait() stays a zombie indefinitely -- and
+#     the old in-shell fd was released at exit, not at reaping. `tail --pid`
+#     (r1 of this fix) kept the lock through such a zombie (astra,
+#     blankss-lockfd-code-r1-astra.md);
+#   - the owner is pinned by (pid, start time) from /proc/<pid>/stat, so a
+#     recycled pid is never mistaken for it;
+#   - if it dies while still WAITING for the lock, the identity check fails at
+#     acquisition, and so does the announcement (nobody reads the pipe: EPIPE).
 # Nothing this shell starts afterwards can inherit the lock: this shell never
-# has it open.
+# has it open. The waiter's own `sleep` children do not hold it either (-o).
+QD_ORPHAN_LOCK_POLL=0.5
+# $1 owner pid, $2 owner start time (field 22 of /proc/<pid>/stat), $3 poll.
+# POSIX sh; `read` and the parameter expansions are builtins, so the only fork
+# per poll is the `sleep`.
+# shellcheck disable=SC2016
+QD_ORPHAN_LOCK_WAITER='
+owner=$1 start=$2 poll=$3
+owner_alive() {
+    st=""
+    { read -r st <"/proc/$owner/stat"; } 2>/dev/null || return 1
+    # Fields after the LAST ") " (comm may hold spaces/parens): $1 is the
+    # state, $20 the start time.
+    set -f; set -- ${st##*") "}; set +f
+    case "$1" in Z|X|x|"") return 1 ;; esac
+    [ "${20:-}" = "$start" ]
+}
+owner_alive || exit 1
+echo "held $$" || exit 1
+exec >/dev/null
+while owner_alive; do sleep "$poll"; done
+exit 0
+'
 orphan_lock_take() {
-    local rd line rc=0 lock="$QD_ORPHAN_DIR/.lock"
+    local rd line rc=0 me start lock="$QD_ORPHAN_DIR/.lock"
     QD_ORPHAN_LOCK_FLOCK="" QD_ORPHAN_LOCK_HOLDER=""
-    # stdin/stderr of the helpers are detached; tail's stdout too, so it never
-    # writes to (or watches) the announcement pipe after the first line.
+    me=$(host_owner_state "$$")
+    start=${me#alive }
+    if [ "$me" = "$start" ]; then
+        orphan_refuse "cannot read this process's own start time, needed to bind the orphan registry lock to it"
+    fi
+    # stdin/stderr of the helpers are detached; the waiter's stdout goes to
+    # /dev/null right after the one announcement line.
     if ! exec {rd}< <(exec flock -o -w "$QD_ORPHAN_LOCK_WAIT" -E "$QD_ORPHAN_REFUSE_RC" "$lock" \
-            sh -c 'echo "held $$" || exit 1; exec tail --pid="$1" -f /dev/null >/dev/null' qd-orphan-lock "$$" \
+            sh -c "$QD_ORPHAN_LOCK_WAITER" qd-orphan-lock "$$" "$start" "$QD_ORPHAN_LOCK_POLL" \
             </dev/null 2>/dev/null); then
         orphan_refuse "cannot start the orphan registry lock helper for $lock while records exist"
     fi
@@ -1395,7 +1427,7 @@ orphan_lock_take() {
     if [ "$rc" -eq "$QD_ORPHAN_REFUSE_RC" ]; then
         orphan_refuse "another vm-exec held the orphan registry lock for more than ${QD_ORPHAN_LOCK_WAIT}s (orphan cleanup still in progress)"
     fi
-    orphan_refuse "cannot open the orphan registry lock $lock while records exist (flock exit $rc)"
+    orphan_refuse "cannot open or take the orphan registry lock $lock while records exist (flock exit $rc)"
 }
 
 orphan_lock_release() {

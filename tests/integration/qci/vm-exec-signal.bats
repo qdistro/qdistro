@@ -2114,3 +2114,61 @@ SHIM
     grep -q 'cleanup verified for guest PID 4242' "$BATS_TEST_TMPDIR/out3"
     [ "$(registry_entries)" -eq 0 ]
 }
+
+@test "vm-exec: a SIGKILLed lock holder whose parent never reaps it (zombie) does NOT keep the reaper lock" {
+    # A PID-existence monitor (`tail --pid`) keeps the lock for as long as the
+    # dead vm-exec stays a zombie, i.e. until an unrelated parent wait()s --
+    # possibly never. The old in-shell fd was released at EXIT, not at reaping
+    # (astra, todo/test-blankscreenshots/reviews/blankss-lockfd-code-r1-astra.md).
+    make_signal_virsh 987654 0
+    export QDISTRO_VM_KILL_VERIFY_TIMEOUT=10
+    mkdir -p "$(ODIR)"
+    printf '4242 987654 %s -\n' "$FAKE_BOOT" > "$(ODIR)/$$-1"   # owner pid recycled
+    # Park the first reaper UNDER the lock: host_owner_state's cat pauses until
+    # released (bounded, so a regressed run cannot wedge the suite).
+    local realcat; realcat=$(command -v cat)
+    cat > "$FAKEBIN/cat" <<SHIM
+#!/bin/sh
+if [ "\$1" = "/proc/$$/stat" ]; then
+    echo \$\$ > "$BATS_TEST_TMPDIR/parked"
+    i=0; while [ ! -e "$BATS_TEST_TMPDIR/unpark" ] && [ \$i -lt 120 ]; do sleep 0.25; i=\$((i + 1)); done
+fi
+exec $realcat "\$@"
+SHIM
+    chmod +x "$FAKEBIN/cat"
+    # The parent backgrounds vm-exec and then becomes a `sleep` that never
+    # wait()s: once vm-exec is SIGKILLed it stays a zombie until that sleep ends.
+    PATH="$FAKEBIN:$PATH" VM_EXEC="$VM_EXEC" OUT="$BATS_TEST_TMPDIR/out1" PF="$BATS_TEST_TMPDIR/first.pid" \
+        bash -c '"$VM_EXEC" fake-vm first-driver >"$OUT" 2>&1 & echo $! > "$PF"; exec sleep 60' \
+        >/dev/null 2>&1 &
+    local parent=$! first _tick
+    for _tick in $(seq 1 300); do [ -s "$BATS_TEST_TMPDIR/parked" ] && break; sleep 0.1; done
+    [ -s "$BATS_TEST_TMPDIR/parked" ]
+    first=$($realcat "$BATS_TEST_TMPDIR/first.pid")
+    # The lock IS held right now (by the helper) ...
+    run ! flock -n "$(ODIR)/.lock" true
+    kill -KILL "$first"
+    local state=""
+    for _tick in $(seq 1 100); do
+        state=$(sed 's/.*) //' "/proc/$first/stat" 2>/dev/null | cut -d' ' -f1)
+        [ "$state" = Z ] && break
+        sleep 0.05
+    done
+    [ "$state" = Z ]                  # dead but NOT reaped
+    touch "$BATS_TEST_TMPDIR/unpark"
+    rm -f "$FAKEBIN/cat"
+
+    local rc=0
+    PATH="$FAKEBIN:$PATH" QDISTRO_VM_EXEC_REAP_LOCK_WAIT=3 \
+        timeout 60 "$VM_EXEC" fake-vm 'after-zombie' >"$BATS_TEST_TMPDIR/out2" 2>&1 &
+    local second=$!
+    await_exec_body after-zombie || { kill "$parent" "$second" 2>/dev/null; wait "$second" || true; false; }
+    # Still a zombie while the next vm-exec took the lock and launched.
+    state=$(sed 's/.*) //' "/proc/$first/stat" 2>/dev/null | cut -d' ' -f1)
+    kill -TERM "$second"; wait "$second" || rc=$?
+    kill "$parent" 2>/dev/null || true; wait "$parent" 2>/dev/null || true
+    [ "$state" = Z ]
+    run ! grep -q 'held the orphan registry lock' "$BATS_TEST_TMPDIR/out2"
+    grep -q 'reaping orphaned guest command PID 4242' "$BATS_TEST_TMPDIR/out2"
+    [ "$(registry_entries)" -eq 0 ]
+}
