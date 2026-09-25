@@ -181,6 +181,24 @@ long text out of a frame you have ALSO opened. If you cannot open images at
 all, record ERROR naming the missing capability - never PASS, never FAIL, and
 never fall back to OCR and grade anyway.
 
+**NEVER RE-OPEN A PATH; JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.** Your
+image viewer shows as BLACK any region of an image that repeats, at the same
+position in an image of the same size, something it already showed you in this
+session. So the harness gives every image it writes a size of its own (a thin
+black right/bottom margin; the raw screen size is in the frame's `.raw`
+sidecar), and a capture you open for the first time is seen correctly. What
+still breaks it is opening the SAME file again, or a same-size copy of one. For
+any second look, and for any image the harness did not just hand you (a crop
+you made, a copy), run
+`$QDISTRO_REPO/scripts/vm/vm-gui "$VMNAME" view-copy <image>` (for a crop add
+`--source <capture> --crop WxH+X+Y`) and open the path it prints. Click-preview
+`.raw.png` and click-confirm `.post.png` files are frames like any other.
+Decide that a frame is black, blank, or missing something ONLY from the pixels
+of a frame you have just opened - never from process state, from rejected
+attempts, from the harness's "same screen pixels" note, or from an earlier
+frame. When you copy a frame, copy its `.raw` sidecar with it
+(`cp F F.raw DEST/`), or use `view-copy`.
+
 For a `required` scenario the gate also reads the frames itself, host-side,
 after the agent exits: it checks every attested frame is DECODABLE and, when a
 tesseract backend is present, records what text it finds. Both are recorded in

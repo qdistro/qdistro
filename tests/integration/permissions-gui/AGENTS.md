@@ -353,12 +353,16 @@ note the screenshot staleness in your justification and decide from
 the broker.
 
 For visual-only assertions such as a Textual modal appearing, also verify that
-the post-action capture is fresh before interpreting it: hash the baseline and
-post-action PNGs and reject byte-identical captures as **invalid evidence**.
-The admin TUI header has a live clock, so a capture after the scenario's normal
-one-second wait should not be byte-identical to the baseline. An identical PNG
-does not prove an input binding failed; it proves the capture path did not
-produce a new frame.
+the post-action capture is fresh before interpreting it: take it with
+`vm-gui "$VMNAME" screenshot-fresh <out> <baseline>`, which refuses a frame
+whose RAW pixels equal the baseline's, and treat a refused capture as
+**invalid evidence**. Do not compare PNG file hashes yourself: every frame is
+padded to a size of its own, so two captures of an unchanged screen never have
+equal file bytes (the raw identity is `raw_pix_sha`, field 4 of the frame's
+`.raw` sidecar). The admin TUI header has a live clock, so a capture after the
+scenario's normal one-second wait should not show the same raw pixels as the
+baseline. Identical raw pixels do not prove an input binding failed; they prove
+the capture path did not produce a new frame.
 
 ## Running a scenario
 
@@ -420,6 +424,24 @@ produces a confident wrong verdict in either direction. Run OCR only to pull
 long text out of a frame you have ALSO opened. If you cannot open images at
 all, record ERROR naming the missing capability - never PASS, never FAIL, and
 never fall back to OCR and grade anyway.
+
+**NEVER RE-OPEN A PATH; JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.** Your
+image viewer shows as BLACK any region of an image that repeats, at the same
+position in an image of the same size, something it already showed you in this
+session. So the harness gives every image it writes a size of its own (a thin
+black right/bottom margin; the raw screen size is in the frame's `.raw`
+sidecar), and a capture you open for the first time is seen correctly. What
+still breaks it is opening the SAME file again, or a same-size copy of one. For
+any second look, and for any image the harness did not just hand you (a crop
+you made, a copy), run
+`$QDISTRO_REPO/scripts/vm/vm-gui "$VMNAME" view-copy <image>` (for a crop add
+`--source <capture> --crop WxH+X+Y`) and open the path it prints. Click-preview
+`.raw.png` and click-confirm `.post.png` files are frames like any other.
+Decide that a frame is black, blank, or missing something ONLY from the pixels
+of a frame you have just opened - never from process state, from rejected
+attempts, from the harness's "same screen pixels" note, or from an earlier
+frame. When you copy a frame, copy its `.raw` sidecar with it
+(`cp F F.raw DEST/`), or use `view-copy`.
 
 For a `required` scenario the gate also reads the frames itself, host-side,
 after the agent exits: it checks every attested frame is DECODABLE and, when a
