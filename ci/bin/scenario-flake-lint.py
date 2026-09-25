@@ -9,6 +9,13 @@ found and migrated to the bounded waiter library (ci/lib/guest/gui-waiters.sh):
                         (a bet on host load; use a readiness gate instead)
   unscoped-journal      `journalctl --since ...` without --after-cursor/--cursor
                         (a stale pre-action line can satisfy it)
+  qga-journal-self-match  a guest-exec `journalctl` whose output is piped to
+                        grep/egrep with no unit scope (`-u` / `--unit` /
+                        `_SYSTEMD_UNIT=` / `_SYSTEMD_USER_UNIT=`). qemu-ga logs
+                        the guest command into the journal, so the grep can
+                        match that echo. `--user`, `--since`, `--after-cursor`,
+                        and `-t` are not a unit scope. Host journalctl is not
+                        this bug.
   oneshot-systemctl     a single `systemctl is-active` not inside a poll/await
   oneshot-domstate      a single `virsh domstate` not inside a poll/await
   virsh-head-vm-select  `virsh ... | head` to pick a VM (races a parallel run)
@@ -184,19 +191,26 @@ TMP_SCOPED_HINT_RE = re.compile(r"\$|`|mktemp")
 # wrapper — `vm-gui screenshot /tmp/x.png` writes a HOST artifact and must stay
 # flagged; and a top-level `runuser -c` is host-side unless already nested inside a
 # wrapper span (which the scanner covers for free).
-# Env-var-style wrappers ($VMEXEC / "$QDWIN_VM_EXEC" / ${FOO_VM_EXEC}) and the
-# bareword `vm_ssh` helper (run-55 defines it as an ssh-into-guest runner). The
-# bareword form needs a left word-boundary check (see the scanner) so `myvm_ssh`
-# does not arm.
+# Env-var-style wrappers ($VMEXEC / "$QDWIN_VM_EXEC" / ${FOO_VM_EXEC}), the
+# bareword `vm_ssh` helper (run-55 defines it as an ssh-into-guest runner), and
+# a literal `vm-exec` binary (path or bare). The bareword form needs a left
+# word-boundary check (see the scanner) so `myvm_ssh` does not arm. `vm-exec`
+# additionally requires a path/command boundary so `--vm-exec` does not arm.
 _GUEST_WRAPPER = (
     r'"?\$\{?(?:VMEXEC|QDWIN_VM_EXEC|[A-Z][A-Z0-9_]*_VM_EXEC)\}?"?'
     r"|vm_ssh\b"
+    r"|vm-exec\b"
 )
+# Characters that may precede a `vm-exec` command word (start-of-line is
+# handled separately). A hyphen (`--vm-exec`) must not arm.
+_VM_EXEC_PREV_OK = set(" \t/\"'`$(")
 _GUEST_WRAPPER_RE = re.compile(_GUEST_WRAPPER)
 
 
-def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]]:
-    """For each line in a fenced block return (guest_columns, code_len):
+def guest_exec_write_columns(
+    body: list[str],
+) -> tuple[list[set[int]], list[int], list[tuple[int, str]]]:
+    """For each line in a fenced block return (guest_columns, code_len, scripts):
       guest_columns[off] - the set of column indices that lie inside a guest-exec
         wrapper's quoted remote-command argument (possibly opened on an earlier
         line — remote strings routinely span real newlines). A tmp-write whose
@@ -206,6 +220,11 @@ def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]
         Callers must slice `raw[:code_len]` instead of the quote-unaware
         `raw.split("#")[0]`, else a `#` literal inside a remote string truncates a
         following same-line HOST write out of view.
+      scripts - (body_offset, guest-visible text) for each quoted remote
+        argument. Host `$(...)` / backticks inside a double-quoted span are a
+        single ``\\x00`` hole (those bytes are expanded on the host). A
+        backslash-newline inside a double-quoted span is a continuation, not a
+        guest newline. `eval` lines yield no script (the re-parse is not guest).
 
     Conservative char scanner. State carried across lines:
       guest_open  - inside an unclosed quote that is a wrapper remote arg
@@ -231,6 +250,7 @@ def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]
     """
     masks: list[set[int]] = []
     code_lens: list[int] = []
+    scripts: list[tuple[int, str]] = []
     guest_open = False
     gq = ""
     subst_depth = 0   # >0: inside $(...) host command-sub in a "..." guest span
@@ -239,7 +259,20 @@ def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]
     armed = False
     eval_active = False  # a top-level `eval` governs this logical command (carries
     #                      across `\`-continuations); refuse exemptions while set
-    for raw in body:
+    span_off: int | None = None
+    span_parts: list[str] = []
+    span_cont_nl = False  # double-quoted backslash-newline: drop the newline
+
+    def finish_span() -> None:
+        nonlocal span_off, span_parts
+        if span_off is not None and not eval_active:
+            text = "".join(span_parts)
+            if text.strip("\n\t \x00"):
+                scripts.append((span_off, text))
+        span_off = None
+        span_parts = []
+
+    for off, raw in enumerate(body):
         line = raw
         plain_quote = ""
         cols: set[int] = set()
@@ -277,20 +310,40 @@ def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]
                     cols.add(i)
                     if i + 1 < n:
                         cols.add(i + 1)
-                    i += 2
+                        esc = line[i + 1]
+                        # Host double quotes eat the backslash only for the
+                        # special set; the guest script sees the result.
+                        if span_off is not None:
+                            if esc in "$`\"\\":
+                                span_parts.append(esc)
+                            else:
+                                span_parts.append("\\")
+                                span_parts.append(esc)
+                        i += 2
+                        continue
+                    # Trailing backslash inside "..." continues the host line.
+                    span_cont_nl = True
+                    i += 1
                     continue
                 if gq == '"' and c == "$" and i + 1 < n and line[i + 1] == "(":
                     subst_depth = 1
+                    if span_off is not None:
+                        span_parts.append("\x00")
                     i += 2
                     continue
                 if gq == '"' and c == "`":
                     in_backtick = True
+                    if span_off is not None:
+                        span_parts.append("\x00")
                     i += 1
                     continue
                 cols.add(i)
                 if c == gq:
+                    finish_span()
                     guest_open = False
                     gq = ""
+                elif span_off is not None:
+                    span_parts.append(c)
                 i += 1
                 continue
             if plain_quote:
@@ -318,14 +371,22 @@ def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]
                     eval_active = True
                 m = _GUEST_WRAPPER_RE.match(line, i)
                 if m:
-                    armed = True
-                    i = m.end()
-                    continue
+                    matched = line[m.start():m.end()]
+                    if (matched == "vm-exec" and i > 0
+                            and line[i - 1] not in _VM_EXEC_PREV_OK):
+                        pass
+                    else:
+                        armed = True
+                        i = m.end()
+                        continue
             if c in "\"'":
                 if armed:
                     guest_open = True
                     gq = c
                     cols.add(i)
+                    if not eval_active:
+                        span_off = off
+                        span_parts = []
                 else:
                     plain_quote = c
                 i += 1
@@ -338,13 +399,18 @@ def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]
         # `\`-continuation lines) rather than reason about the re-parse.
         masks.append(set() if eval_active else cols)
         code_lens.append(code_len)
+        if guest_open and span_off is not None:
+            if span_cont_nl:
+                span_cont_nl = False
+            else:
+                span_parts.append("\n")
         # End of physical line. If no guest span is still open, `armed`/`eval_active`
         # only survive a trailing-backslash continuation (wrapper/eval on one line,
         # its arg on the next); otherwise a fresh command starts next line -> reset.
         if not guest_open and not line.rstrip().endswith("\\"):
             armed = False
             eval_active = False
-    return masks, code_lens
+    return masks, code_lens, scripts
 
 
 def fenced_bash_blocks(text: str) -> list[tuple[int, list[str]]]:
@@ -377,6 +443,294 @@ INLINE_ALLOW_RE = re.compile(
 )
 
 
+# qemu-ga records every guest-exec argv in the guest journal. A later
+# `journalctl | grep PATTERN` inside that same guest command prints the echo
+# (which contains PATTERN) and the grep succeeds even when the product never
+# logged it. A unit match excludes qemu-ga's unit; --user / --since /
+# --after-cursor / -t do not.
+_QGA_JOURNAL_MSG = (
+    "guest journalctl | grep can match qemu-ga's own guest-exec log line "
+    "unless the invocation is scoped to the emitting unit "
+    "(-u / --unit / _SYSTEMD_UNIT= / _SYSTEMD_USER_UNIT=)"
+)
+_QGA_GREP = {"grep", "egrep"}
+_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+_SHORT_U_RE = re.compile(r"-[A-Za-z]*u[A-Za-z]*$")
+
+
+def _lex_guest_script(script: str) -> list[tuple[str, str, int, int]]:
+    """Tokenize a guest script enough to see pipelines.
+
+    Yields (kind, text, offset, depth). kind is word / hole / op / redir / nl.
+    `$(...)` and backticks bump depth so an inner `journalctl | grep` is its own
+    pipeline. Quoted text hides operators. A newline is a separator unless the
+    next token is `|` (the journalctl / `| grep` split).
+    """
+    tokens: list[tuple[str, str, int, int]] = []
+    i, n = 0, len(script)
+    depth = 0
+    in_bt = False
+    while i < n:
+        c = script[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "\n":
+            tokens.append(("nl", "", i, depth))
+            i += 1
+            continue
+        if c == "\x00":
+            tokens.append(("hole", "\x00", i, depth))
+            i += 1
+            continue
+        if c == "#" and not in_bt:
+            while i < n and script[i] != "\n":
+                i += 1
+            continue
+        if c == "\\":
+            if i + 1 < n and script[i + 1] == "\n":
+                i += 2
+                continue
+        if script.startswith("||", i):
+            tokens.append(("op", "||", i, depth))
+            i += 2
+            continue
+        if script.startswith("&&", i):
+            tokens.append(("op", "&&", i, depth))
+            i += 2
+            continue
+        if script.startswith("|&", i):
+            tokens.append(("op", "|&", i, depth))
+            i += 2
+            continue
+        if c == "|":
+            tokens.append(("op", "|", i, depth))
+            i += 1
+            continue
+        if script.startswith("&>", i):
+            tokens.append(("redir", "&>", i, depth))
+            i += 2
+            continue
+        if c == "&":
+            tokens.append(("op", "&", i, depth))
+            i += 1
+            continue
+        if c == ";":
+            tokens.append(("op", ";", i, depth))
+            i += 1
+            continue
+        if c in "<>":
+            j = i + 1
+            if j < n and script[j] in (">" if c == ">" else "<"):
+                j += 1
+            elif j < n and script[j] == "&":
+                j += 1
+            tokens.append(("redir", script[i:j], i, depth))
+            i = j
+            continue
+        if c == "$" and i + 1 < n and script[i + 1] == "(":
+            depth += 1
+            tokens.append(("op", "$(", i, depth))
+            i += 2
+            continue
+        if c == "`":
+            if in_bt:
+                tokens.append(("op", "`", i, depth))
+                if depth:
+                    depth -= 1
+                in_bt = False
+            else:
+                depth += 1
+                in_bt = True
+                tokens.append(("op", "`", i, depth))
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+            tokens.append(("op", "(", i, depth))
+            i += 1
+            continue
+        if c == ")":
+            tokens.append(("op", ")", i, depth))
+            if depth:
+                depth -= 1
+            i += 1
+            continue
+        # Leading fd of a redirect (`2>/dev/null`) is not an argv word.
+        if c.isdigit():
+            j = i
+            while j < n and script[j].isdigit():
+                j += 1
+            if j < n and script[j] in "<>":
+                i = j
+                continue
+        start = i
+        word, i, hole = _read_guest_word(script, i)
+        if i == start:
+            i += 1
+            continue
+        if hole:
+            tokens.append(("hole", "\x00", start, depth))
+        elif word:
+            tokens.append(("word", word, start, depth))
+    return tokens
+
+
+def _read_guest_word(script: str, i: int) -> tuple[str, int, bool]:
+    """Read one shell word starting at i. Returns (text, new_index, saw_hole)."""
+    n = len(script)
+    buf: list[str] = []
+    hole = False
+    while i < n:
+        c = script[i]
+        if c in "\"'":
+            q = c
+            i += 1
+            while i < n and script[i] != q:
+                if script[i] == "\x00":
+                    hole = True
+                    i += 1
+                    continue
+                if q == '"' and script[i] == "\\" and i + 1 < n:
+                    buf.append(script[i + 1])
+                    i += 2
+                    continue
+                buf.append(script[i])
+                i += 1
+            if i < n and script[i] == q:
+                i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            if script[i + 1] == "\n":
+                i += 2
+                continue
+            buf.append(script[i + 1])
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and script[i + 1] == "(":
+            break
+        if c in " \t\n|&;()<>#`\x00":
+            break
+        buf.append(c)
+        i += 1
+    return "".join(buf), i, hole
+
+
+def _guest_commands(
+    tokens: list[tuple[str, str, int, int]],
+) -> list[tuple[list[tuple[str, int]], bool]]:
+    """Group tokens into (words, piped_to_next_command). Redirect targets are
+    dropped so `2>/dev/null` is not a `-u` argument."""
+    commands: list[tuple[list[tuple[str, int]], bool]] = []
+    words: list[tuple[str, int]] = []
+    skip_word = False
+
+    def flush(piped: bool) -> None:
+        nonlocal words
+        if words:
+            commands.append((words, piped))
+        words = []
+
+    i, n = 0, len(tokens)
+    while i < n:
+        kind, val, pos, depth = tokens[i]
+        if kind == "nl":
+            j = i + 1
+            while j < n and tokens[j][0] == "nl":
+                j += 1
+            if (j < n and tokens[j][0] == "op" and tokens[j][1] in ("|", "|&")
+                    and tokens[j][3] == depth):
+                i += 1
+                continue
+            flush(False)
+            skip_word = False
+            i += 1
+            continue
+        if kind == "redir":
+            skip_word = True
+            i += 1
+            continue
+        if kind in ("word", "hole"):
+            if skip_word and kind == "word":
+                skip_word = False
+                i += 1
+                continue
+            skip_word = False
+            words.append((val, pos))
+            i += 1
+            continue
+        if kind == "op":
+            skip_word = False
+            flush(val in ("|", "|&"))
+            i += 1
+            continue
+        i += 1
+    flush(False)
+    return commands
+
+
+def _command_basename(words: list[tuple[str, int]]) -> str | None:
+    for text, _pos in words:
+        if "\x00" in text:
+            return None
+        if _ASSIGN_RE.fullmatch(text):
+            continue
+        return text.rsplit("/", 1)[-1]
+    return None
+
+
+def _journal_unit_scoped(argv: list[str]) -> bool:
+    """True when argv carries a unit match. `--user` / `--since` /
+    `--after-cursor` / `-t` do not count."""
+    for i, w in enumerate(argv):
+        if w in ("-u", "--unit", "--user-unit"):
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if nxt and not nxt.startswith("-") and "\x00" not in nxt:
+                return True
+        elif w.startswith("--unit=") and len(w) > len("--unit="):
+            return True
+        elif w.startswith("--user-unit=") and len(w) > len("--user-unit="):
+            return True
+        elif (w.startswith("_SYSTEMD_UNIT=")
+              and len(w) > len("_SYSTEMD_UNIT=")):
+            return True
+        elif (w.startswith("_SYSTEMD_USER_UNIT=")
+              and len(w) > len("_SYSTEMD_USER_UNIT=")):
+            return True
+        elif _SHORT_U_RE.fullmatch(w) and w != "-u":
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if nxt and not nxt.startswith("-") and "\x00" not in nxt:
+                return True
+    return False
+
+
+def qga_journal_self_match_lines(script: str) -> list[int]:
+    """0-based line offsets of unscoped `journalctl` piped to grep/egrep."""
+    tokens = _lex_guest_script(script)
+    commands = _guest_commands(tokens)
+    hits: list[int] = []
+    for idx, (wds, piped) in enumerate(commands):
+        if not piped or idx + 1 >= len(commands):
+            continue
+        if _command_basename(commands[idx + 1][0]) not in _QGA_GREP:
+            continue
+        jpos: int | None = None
+        argv: list[str] = []
+        for text, pos in wds:
+            base = text.rsplit("/", 1)[-1]
+            if jpos is None and base == "journalctl":
+                jpos = pos
+                argv = [text]
+            elif jpos is not None:
+                argv.append(text)
+        if jpos is None or any("\x00" in a for a in argv):
+            continue
+        if _journal_unit_scoped(argv):
+            continue
+        hits.append(script[:jpos].count("\n"))
+    return hits
+
+
 def inline_waived(raw: str, rule: str) -> bool:
     """True when this RAW line carries a waiver for <rule> with a reason.
 
@@ -398,7 +752,11 @@ def lint_markdown(path: Path) -> list[tuple[int, str, str]]:
     any_structured = False
     for start, body in blocks:
         has_code = has_code or bool(body)
-        guest_cols, code_lens = guest_exec_write_columns(body)
+        guest_cols, code_lens, guest_scripts = guest_exec_write_columns(body)
+        for span_off, script in guest_scripts:
+            for rel in qga_journal_self_match_lines(script):
+                findings.append((start + span_off + rel, "qga-journal-self-match",
+                                 _QGA_JOURNAL_MSG))
         for off, raw in enumerate(body):
             lineno = start + off
             line = raw.split("#", 1)[0]  # ignore trailing comments for matching

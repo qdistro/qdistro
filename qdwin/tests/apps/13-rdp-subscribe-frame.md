@@ -111,7 +111,7 @@ qdwin_apps_launch foot "foot sleep 600" || {
 sleep 2
 
 HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-    "journalctl _UID=1000 --no-pager | grep 'qdwin: toplevel_added' \
+    "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager | grep 'qdwin: toplevel_added' \
      | tail -1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'")
 [ -n "$HANDLE" ] || { echo "FAIL: no toplevel handle"; exit 1; }
 echo "subject toplevel handle=$HANDLE"

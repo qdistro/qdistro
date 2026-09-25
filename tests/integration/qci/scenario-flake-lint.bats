@@ -389,3 +389,65 @@ MD
     run lint "$f"
     [[ "$output" != *"cross-shell-wait"* ]]
 }
+
+# qemu-ga echoes every guest-exec into the guest journal. An unscoped
+# `journalctl | grep` inside that command can match the echo. The pipe may
+# sit on the next line of the same quoted guest script.
+
+@test "flake-lint: fires qga-journal-self-match on guest journalctl piped to grep" {
+    local f="$BATS_TEST_TMPDIR/80-qga.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --no-pager | grep -q some-token'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    # A literal vm-exec binary is a guest command even though it is not $VMEXEC.
+    printf '# x\n```bash\nscripts/vm/vm-exec "$VM" '"'"'journalctl --no-pager | egrep -q some-token'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: fires qga-journal-self-match when the pipe is on the next guest line" {
+    local f="$BATS_TEST_TMPDIR/81-qga-ml.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --no-pager\n| grep -q some-token'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: -u scoped guest journalctl|grep is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/82-qga-u.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user -u qdwin-compositor.service --after-cursor "$c" | grep -q mapped'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: _SYSTEMD_USER_UNIT= scoped guest journalctl|grep is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/83-qga-field.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service | grep -q mapped'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: a host journalctl|grep is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/84-qga-host.md"
+    printf '# x\n```bash\njournalctl --no-pager | grep -q some-token\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: guest journalctl redirected to a file is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/85-qga-redir.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user -u unit > /tmp/log'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: dropping -u from a scoped guest journalctl|grep starts flagging" {
+    # Mutation of the safe `-u <unit>` form above: without the unit match the
+    # same guest pipeline is qga-journal-self-match.
+    local safe="$BATS_TEST_TMPDIR/86-qga-safe.md" dropped="$BATS_TEST_TMPDIR/86-qga-dropped.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user -u qdwin-compositor.service --after-cursor "$c" | grep -q mapped'"'"'\n```\n' > "$safe"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user --after-cursor "$c" | grep -q mapped'"'"'\n```\n' > "$dropped"
+    run lint "$safe"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    run lint "$dropped"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}

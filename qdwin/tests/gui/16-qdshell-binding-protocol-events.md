@@ -94,17 +94,18 @@ CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
     "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 \
      systemctl --user restart qdshell.service'"
 
-# Poll (bounded, ~20s) for BOTH lines after the pre-restart cursor. The greps
-# are scoped by `_UID=1000`, which excludes qemu-ga's own `guest-exec called`
-# echo of this command (qemu-ga runs as root), so the pattern text cannot
-# match itself. Keep journalctl's default (short) output: Quickshell writes
+# Poll (bounded, ~20s) for BOTH lines after the pre-restart cursor. The read is
+# scoped to the two emitters (qdwin-compositor for `qdwin: bind accepted`,
+# qdshell for the Quickshell `bound` line) so qemu-ga's `guest-exec called`
+# echo of this command cannot satisfy the grep. Keep journalctl's default
+# (short) output: Quickshell writes
 # ANSI colour codes INTO the message (`Qdwin\e[0m qdwin_shell_v1 bound v34`),
 # which short output strips and `-o cat` does not — so `-o cat` breaks the
 # 1.2 pattern.
 BIND_LINE= BOUND_LINE=
 for _ in $(seq 1 40); do
     J=$("$QDWIN_VM_EXEC" "$VMNAME" \
-        "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager 2>/dev/null | \
+        "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service _SYSTEMD_USER_UNIT=qdshell.service --after-cursor='$CURSOR' --no-pager 2>/dev/null | \
          grep -E 'qdwin: bind accepted for uid=1000|Qdwin +qdwin_shell_v1 bound v[0-9]+'") || :
     # `|| :` on each: no match yet is the normal first iterations, and must
     # not abort a runner that uses `set -e` before the poll has had its 20s.
@@ -143,7 +144,7 @@ CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
 sleep 2
 
 HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: toplevel_added handle=[0-9]+ uid=1000 pid=[0-9]+ app_id=qdistro-test-window' | tail -1 | \
    sed -nE 's/.*handle=([0-9]+).*/\1/p'")
 # Resolve the window's real PID from the SAME toplevel_added line so Step 4
@@ -151,7 +152,7 @@ HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" \
 # stays scoped to this spawn's `$CURSOR` and this run's `$HANDLE`, so it can
 # never pick up a stale line from an earlier compositor session.
 PID=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: toplevel_added handle=$HANDLE uid=1000 pid=[0-9]+ app_id=qdistro-test-window' | tail -1 | \
    sed -nE 's/.*pid=([0-9]+).*/\1/p'")
 echo "subject handle=$HANDLE pid=$PID"
@@ -222,7 +223,7 @@ echo "closing qd16-step2 pid=$PID (handle=$HANDLE)"
 removed=
 for _ in $(seq 1 50); do
     "$QDWIN_VM_EXEC" "$VMNAME" \
-        "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+        "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
          grep -qE 'qdwin: toplevel_removed handle=$HANDLE'" && { removed=1; break; }
     sleep 0.2
 done
@@ -269,7 +270,7 @@ sleep 1
 step5_ok=
 for _ in $(seq 1 40); do
     n=$("$QDWIN_VM_EXEC" "$VMNAME" \
-        "journalctl _UID=1000 --after-cursor='$SPAWN_CURSOR' --no-pager | \
+        "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$SPAWN_CURSOR' --no-pager | \
          grep -cE 'qdwin: toplevel_added handle=[0-9]+ uid=1000 pid=[0-9]+ app_id=qdistro-test-window'")
     [ "${n:-0}" -ge 2 ] && { step5_ok=1; break; }
     sleep 0.2
