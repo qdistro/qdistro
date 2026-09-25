@@ -13,10 +13,20 @@ call ids and image counts. Nothing about the schema is invented here.
                   [--call '{"input": JS, "status": "completed", "images": N}']...
                   [--raw-line FILE]... [--truncate]
 
+A --call may also carry
+  "image_files": [PATH...]  the output's input_image items carry the REAL
+                            bytes of these files as data URLs (instead of the
+                            fixture's elided stub), one item per path;
+  "image_url": URL          every stub input_image item carries this URL;
+  "image_views": [PATH...]  one ImageView item_completed event per path,
+                            emitted between the call and its output (the
+                            fixture's own real ImageView record, re-pathed).
+
 --call entries and --raw-line entries (a real record from another rollout,
 e.g. the 0.130.0 function_call shape) are emitted in command-line order.
 """
 import argparse
+import base64
 import copy
 import json
 import os
@@ -44,6 +54,8 @@ def main():
     tail = [r for r in recs[1:] if (r.get("payload") or {}).get("type") in
             ("task_started",)]
     closing = [r for r in recs if (r.get("payload") or {}).get("type") == "task_complete"]
+    view_t = next(r for r in recs if (r.get("payload") or {}).get("type") == "item_completed"
+                  and (r["payload"].get("item") or {}).get("type") == "ImageView")
     meta["payload"]["session_id"] = args.sid
     meta["payload"]["id"] = args.sid
     meta["payload"]["cwd"] = args.cwd
@@ -70,8 +82,22 @@ def main():
         o = copy.deepcopy(out_t)
         o["ordinal"] = 101 + 2 * n
         o["payload"]["call_id"] = cid
-        o["payload"]["output"] = [copy.deepcopy(text_item)] + \
-            [copy.deepcopy(img_item) for _ in range(int(item.get("images", 0)))]
+        for vp in item.get("image_views", []):
+            v = copy.deepcopy(view_t)
+            v["payload"]["item"]["path"] = "file://" + vp
+            lines.append(v)
+        imgs = []
+        for fp in item.get("image_files", []):
+            im = copy.deepcopy(img_item)
+            with open(fp, "rb") as fh:
+                im["image_url"] = "data:image/png;base64," + base64.b64encode(fh.read()).decode()
+            imgs.append(im)
+        for _ in range(int(item.get("images", 0))):
+            im = copy.deepcopy(img_item)
+            if "image_url" in item:
+                im["image_url"] = item["image_url"]
+            imgs.append(im)
+        o["payload"]["output"] = [copy.deepcopy(text_item)] + imgs
         lines.append(o)
     lines += closing
     data = "".join(json.dumps(l, ensure_ascii=False) + "\n" for l in lines)

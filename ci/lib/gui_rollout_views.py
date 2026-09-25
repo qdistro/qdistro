@@ -16,10 +16,22 @@ harness attested for that attempt. It is an OBSERVATION, never a guess:
   code has no control flow, and the number of literal calls equals the number
   of `input_image` items in the `custom_tool_call_output` with the same
   call_id. There is no JavaScript interpreter here.
-* ANYTHING ELSE -- a computed path, control flow, a count mismatch, a failed
-  call, truncated JSONL, zero or two rollouts, `--ephemeral`, an unknown
-  CODEX_HOME, the older `function_call name=view_image` shape (codex 0.130) --
-  is `unobservable:<reason>`. Unobservable is never reported as zero opens.
+* CONTENT-PROVEN opens (parser v2, pg/05 follow-up 2026-09-25): when that
+  same exec call is NOT the literal shape (a computed path, a loop over a list,
+  `.map`), its output's `input_image` items are the images codex actually put
+  in front of the model. Each one's data URL is decoded and hashed; the call is
+  credited only when EVERY such image is byte-identical to an attested frame of
+  this attempt (ledger sha256 or view-state padded sha; only these earn
+  credit) or to the current bytes of a path codex itself reported reading
+  during that call (its `ImageView` item_completed events; an open with NO
+  credit, whatever that path's name). The JavaScript is still never interpreted: the proof
+  is the delivered bytes, not the code. One image that cannot be proven, or a
+  call that delivered no image at all, keeps the attempt unobservable under the
+  literal shape's reason (computed-path / control-flow).
+* ANYTHING ELSE -- a count mismatch, a failed call, truncated JSONL, zero or
+  two rollouts, `--ephemeral`, an unknown CODEX_HOME, the older
+  `function_call name=view_image` shape (codex 0.130) -- is
+  `unobservable:<reason>`. Unobservable is never reported as zero opens.
 
 Opens are credited to attested frames of THIS attempt by exact ledger path, by
 sha256 equal to a this-attempt ledger row (reconcile's relocated/out-of-tree
@@ -29,16 +41,21 @@ by basename. Crops are credited as crops. Rejected and diagnostic lineages get
 no credit.
 
 Output (the per-attempt observation sidecar, no base64):
-    parser_version=1
+    parser_version=2
     session_id=...
     rollout=...
     reason=observed | unobservable:<why>
     opens=N
     credited=M
+    [content_route=<why the content proof failed>]   (unobservable only)
     open<TAB>n<TAB>ordinal<TAB>path<TAB>full|crop|none<TAB>frame-or-why[<TAB>stale]
+  `path` of a content-proven open is the attested file whose bytes were
+  delivered (or the ImageView path whose bytes they are).
 Prints one summary line `reason=... opens=N credited=M`.
 """
 import argparse
+import base64
+import binascii
 import glob
 import hashlib
 import json
@@ -46,7 +63,7 @@ import os
 import re
 import sys
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 HEADER_LINES = 40
 
@@ -59,6 +76,7 @@ CONTROL_RE = re.compile(
     r"\b(if|else|for|while|do|switch|case|try|catch|finally|function|return|yield)\b"
     r"|=>|\?|&&|\|\||\.map\s*\(|\.forEach\s*\(|\.then\s*\(|\.reduce\s*\(|\.filter\s*\(")
 DERIVATIVE_KINDS = ("view", "click-annotated", "click-zoom")
+DATA_URL_RE = re.compile(r"^data:image/[A-Za-z0-9.+-]+;base64,")
 
 
 class Unobservable(Exception):
@@ -156,15 +174,49 @@ def find_session_id(log_path):
     return None
 
 
+def image_digest(item):
+    """sha256 of the bytes one `input_image` output item delivered, or None."""
+    url = item.get("image_url")
+    if not isinstance(url, str):
+        return None
+    m = DATA_URL_RE.match(url)
+    if not m:
+        return None
+    try:
+        data = base64.b64decode(url[m.end():], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return hashlib.sha256(data).hexdigest() if data else None
+
+
+def image_view_path(p):
+    """The path of an `ImageView` item_completed event (codex's own record that
+    view_image read a file), or None."""
+    if p.get("type") != "item_completed":
+        return None
+    item = p.get("item")
+    if not isinstance(item, dict) or item.get("type") != "ImageView":
+        return None
+    path = item.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    if path.startswith("file://"):
+        path = path[len("file://"):]
+    return path
+
+
 def parse_rollout(path, sid, max_bytes):
-    """Yield (ordinal, [paths]) per counted call; raise Unobservable."""
+    """Return (cwd, views); raise Unobservable. Each view is
+    (ordinal, "literal", [paths]) or
+    (ordinal, "content", {"why": literal-shape reason, "digests": [sha|None],
+                          "viewed": [ImageView paths during the call]})."""
     try:
         size = os.path.getsize(path)
     except OSError:
         raise Unobservable("rollout-unreadable")
     if size > max_bytes:
         raise Unobservable("rollout-too-large")
-    calls, outputs, order, cwd = {}, {}, [], None
+    calls, outputs, order, cwd, pending = {}, {}, [], None, []
     with open(path, "rb") as fh:
         for idx, raw in enumerate(fh):
             if not raw.endswith(b"\n"):
@@ -185,6 +237,14 @@ def parse_rollout(path, sid, max_bytes):
             if not isinstance(p, dict):
                 continue
             pt, name = p.get("type"), p.get("name")
+            viewed = image_view_path(p)
+            if viewed is not None:
+                # Attributed to every content-route call still awaiting its
+                # output. Only ever used to name a file whose CURRENT bytes
+                # equal a delivered image, so a wrong window cannot credit.
+                for cid in pending:
+                    calls[cid][2]["viewed"].append(viewed)
+                continue
             if pt == "function_call" and name == "view_image":
                 raise Unobservable("unsupported-shape")
             # ONLY the one documented shape (custom_tool_call named exec)
@@ -203,24 +263,36 @@ def parse_rollout(path, sid, max_bytes):
                     continue
                 if p.get("status") != "completed":
                     raise Unobservable("failed-call")
-                calls[p.get("call_id")] = (obj.get("ordinal", idx), literal_views(code))
-                order.append(p.get("call_id"))
+                cid = p.get("call_id")
+                if cid in calls:
+                    raise Unobservable("duplicate-call-id")
+                try:
+                    calls[cid] = (obj.get("ordinal", idx), "literal", literal_views(code))
+                except Unobservable as e:
+                    calls[cid] = (obj.get("ordinal", idx), "content",
+                                  {"why": str(e), "digests": [], "viewed": []})
+                    pending.append(cid)
+                order.append(cid)
             elif pt == "custom_tool_call_output":
+                cid = p.get("call_id")
                 out = p.get("output")
-                n = 0
+                imgs = []
                 if isinstance(out, list):
-                    n = sum(1 for x in out if isinstance(x, dict) and x.get("type") == "input_image")
-                outputs[p.get("call_id")] = n
+                    imgs = [x for x in out if isinstance(x, dict) and x.get("type") == "input_image"]
+                outputs[cid] = len(imgs)
+                if cid in pending:
+                    pending.remove(cid)
+                    calls[cid][2]["digests"] = [image_digest(x) for x in imgs]
     if cwd is None:
         raise Unobservable("no-cwd")
     views = []
     for cid in order:
-        ordinal, paths = calls[cid]
+        ordinal, kind, data = calls[cid]
         if cid not in outputs:
             raise Unobservable("no-output")
-        if outputs[cid] != len(paths):
+        if kind == "literal" and outputs[cid] != len(data):
             raise Unobservable("count-mismatch")
-        views.append((ordinal, paths))
+        views.append((ordinal, kind, data))
     return cwd, views
 
 
@@ -316,19 +388,71 @@ def resolve(path, ledger_path, ledger_sha, state, depth=0, crop=False, stale=Fal
         for row in state:
             if row["sha"] != digest:
                 continue
-            primary, tags = kind_parts(row["kind"])
-            if "rejected" in tags:
-                return "none", "rejected-lineage", stale
-            if "diag" in tags or primary == "virsh-diag":
-                return "none", "diagnostic", stale
-            if primary in DERIVATIVE_KINDS or primary.startswith("crop:"):
-                is_crop = crop or primary == "click-zoom" or primary.startswith("crop:")
-                return resolve(row["source"], ledger_path, ledger_sha, state, depth + 1,
-                               is_crop, stale, seen)
-            if row["path"] != path:
-                return resolve(row["path"], ledger_path, ledger_sha, state, depth + 1,
-                               crop, stale, seen)
+            got = resolve_state_row(row, path, ledger_path, ledger_sha, state, depth,
+                                    crop, stale, seen)
+            if got is not None:
+                return got
     return "none", "not-an-attested-frame", stale
+
+
+def resolve_state_row(row, path, ledger_path, ledger_sha, state, depth, crop, stale, seen):
+    """Credit through one view-state row whose padded sha matched. None when
+    the row is the file itself (no further lineage to follow)."""
+    primary, tags = kind_parts(row["kind"])
+    # The state row persists the inherited tags, so a derivative whose frame
+    # (and `.meta`) has since moved keeps its stale status (astra r1, 4).
+    stale = stale or "stale" in tags
+    if "rejected" in tags:
+        return "none", "rejected-lineage", stale
+    if "diag" in tags or primary == "virsh-diag":
+        return "none", "diagnostic", stale
+    if primary in DERIVATIVE_KINDS or primary.startswith("crop:"):
+        is_crop = crop or primary == "click-zoom" or primary.startswith("crop:")
+        return resolve(row["source"], ledger_path, ledger_sha, state, depth + 1,
+                       is_crop, stale, seen)
+    if row["path"] != path:
+        return resolve(row["path"], ledger_path, ledger_sha, state, depth + 1,
+                       crop, stale, seen)
+    return None
+
+
+def resolve_digest(digest, viewed, cwd, ledger_path, ledger_sha, state):
+    """A content-proven open: the model was handed an image whose bytes hash
+    to `digest`. Returns (path, credit, frame_or_reason, stale), or None when
+    the bytes match nothing this attempt issued and no file codex reported
+    reading during the call (the proof failed: never guessed)."""
+    if not digest:
+        return None
+    if digest in ledger_sha:
+        p = ledger_sha[digest]
+        return (p,) + resolve(p, ledger_path, ledger_sha, state)
+    for row in state:
+        if row["sha"] != digest:
+            continue
+        # The harness issued these bytes. Only a DERIVATIVE row (view-copy,
+        # click view, crop) earns credit, through its recorded source; a
+        # rejected/diagnostic lineage earns none. A plain frame row whose bytes
+        # have no ledger row was never attested (e.g. a refused publication):
+        # it is never credited by its path name.
+        primary, tags = kind_parts(row["kind"])
+        stale = os.path.exists(row["path"] + ".meta") or "stale" in tags
+        if primary in DERIVATIVE_KINDS or primary.startswith("crop:") \
+                or tags & {"rejected", "diag"} or primary == "virsh-diag":
+            got = resolve_state_row(row, None, ledger_path, ledger_sha, state, 0,
+                                    False, stale, set())
+            if got is not None:
+                return (row["path"],) + got
+        return row["path"], "none", "not-an-attested-frame", stale
+    # Bytes that no ledger or state row attests. An ImageView path whose
+    # CURRENT bytes are these proves which file was delivered, but never earns
+    # credit: the path may be a ledger path whose frame was overwritten after
+    # capture, and resolve() would credit it by name (astra r1, 1). Credit is
+    # digest-bound only (the two routes above); this is an open with none.
+    for v in viewed:
+        vp = os.path.normpath(v if os.path.isabs(v) else os.path.join(cwd, v))
+        if sha256_file(vp) == digest:
+            return vp, "none", "not-an-attested-frame", False
+    return None
 
 
 def observe(args, found_info):
@@ -380,18 +504,42 @@ def main():
         lp, ls = read_ledger(args.ledger)
         st = read_state(args.state)
         n = 0
-        for ordinal, paths in views:
-            for p in paths:
+        resolved = []
+        for ordinal, kind, data in views:
+            if kind == "literal":
+                for p in data:
+                    ap_ = os.path.normpath(p if os.path.isabs(p) else os.path.join(cwd, p))
+                    resolved.append((ordinal, ap_) + resolve(ap_, lp, ls, st))
+                continue
+            # Content route: every delivered image must be proven, else the
+            # whole attempt stays unobservable (I4: never a partial count).
+            why = None
+            if not data["digests"]:
+                why = "no-image-delivered"
+            got = []
+            for d in data["digests"]:
+                r = None if why else resolve_digest(d, data["viewed"], cwd, lp, ls, st)
+                if r is None:
+                    why = why or ("undecodable-image" if not d else "unproven-image")
+                    break
+                got.append((ordinal,) + r)
+            if why:
+                reason = "unobservable:%s" % data["why"]
+                lines[-1] = "reason=%s" % reason
+                lines.append("content_route=%s" % why)
+                resolved = None
+                break
+            resolved += got
+        if resolved is not None:
+            for ordinal, ap_, credit, what, stale in resolved:
                 n += 1
-                ap_ = os.path.normpath(p if os.path.isabs(p) else os.path.join(cwd, p))
-                credit, what, stale = resolve(ap_, lp, ls, st)
                 if credit != "none":
                     credited += 1
                 opens.append("open\t%d\t%s\t%s\t%s\t%s%s" % (
                     n, ordinal, ap_.replace("\t", " "), credit, what.replace("\t", " "),
                     "\tstale" if stale else ""))
-        lines += ["opens=%d" % n, "credited=%d" % credited]
-    else:
+            lines += ["opens=%d" % n, "credited=%d" % credited]
+    if reason != "observed":
         lines += ["opens=unobservable", "credited=unobservable"]
     lines += opens
     tmp = args.out + ".tmp"

@@ -461,6 +461,152 @@ view_js() { printf 'const a = await tools.view_image({path:"%s", detail:"high"})
     [ "$(observe nohdr)" = unobservable:no-session-id ]
 }
 
+# F3 content route (pg/05 follow-up, parser v2). The real pg/05 luna rollout
+# (2026-09-25, ordinal 213) opened three frames with exactly this loop; the
+# literal shape rejects it as computed-path. The delivered input_image bytes
+# are the proof. JSON for one --call: input, image_files, image_views, extras.
+call_json() {
+    python3 -c 'import json,sys
+d={"input": sys.argv[1], "image_files": [x for x in sys.argv[2].split(":") if x],
+   "image_views": [x for x in sys.argv[3].split(":") if x]}
+d.update(json.loads(sys.argv[4] if len(sys.argv) > 4 else "{}"))
+print(json.dumps(d))' "$@"
+}
+loop_js() {
+    local p list=""
+    for p in "$@"; do list="$list${list:+,}\"$p\""; done
+    printf 'const paths=[%s];\nfor (const p of paths){ const v=await tools.view_image({path:p,detail:"high"}); image(v.image_url); }' "$list"
+}
+
+@test "F3 content: the real pg/05 loop shape is credited by the bytes codex delivered" {
+    new_ledger
+    local f
+    for f in d s1 s2 s3; do "$VM_GUI" "$CAPVM" screenshot "$ADIR/$f.png" >/dev/null 2>&1; done
+    mkdir -p "$TDIR/cwd"
+    mk_attempt pg05 \
+        --call "$(python3 -c 'import json,sys; print(json.dumps({"input": sys.argv[1], "images": 0, "image_files": [sys.argv[2]], "image_views": [sys.argv[2]]}))' "$(view_js "$ADIR/d.png")" "$ADIR/d.png")" \
+        --call "$(call_json "$(loop_js "$ADIR/s1.png" "$ADIR/s2.png" "$ADIR/s3.png")" \
+                  "$ADIR/s1.png:$ADIR/s2.png:$ADIR/s3.png" "$ADIR/s1.png:$ADIR/s2.png:$ADIR/s3.png")" >/dev/null
+    [ "$(observe pg05)" = observed ]
+    grep -Fxq 'parser_version=2' "$TDIR/pg05.views"
+    grep -Fxq 'opens=4' "$TDIR/pg05.views"
+    grep -Fxq 'credited=4' "$TDIR/pg05.views"
+    [ "$(grep $'^open\t' "$TDIR/pg05.views" | cut -f2,4,5 | tr '\t' ' ')" = "1 $ADIR/d.png full
+2 $ADIR/s1.png full
+3 $ADIR/s2.png full
+4 $ADIR/s3.png full" ]
+    # The ledger path, not the ImageView path, is what earns the credit: with
+    # the alias gone (paths no longer exist) the bytes still map to the rows.
+    mv "$ADIR" "$TDIR/art-moved"
+    [ "$(observe pg05)" = observed ]
+    grep -Fxq 'credited=4' "$TDIR/pg05.views"
+}
+
+@test "F3 content: never credits a frame whose bytes were not delivered" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s2.png" >/dev/null 2>&1
+    mkdir -p "$TDIR/cwd"
+    # codex READ s1 and s2 (ImageView for both) but the model was handed s1 twice.
+    mk_attempt twice --call "$(call_json "$(loop_js "$ADIR/s1.png" "$ADIR/s2.png")" \
+        "$ADIR/s1.png:$ADIR/s1.png" "$ADIR/s1.png:$ADIR/s2.png")" >/dev/null
+    [ "$(observe twice)" = observed ]
+    [ "$(grep $'^open\t' "$TDIR/twice.views" | cut -f4 | sort -u)" = "$ADIR/s1.png" ]
+    ! grep -q "s2.png" <(grep $'^open\t' "$TDIR/twice.views")
+    # Delivered bytes match nothing attested and nothing codex reported reading
+    # (ImageView names s2, whose CURRENT bytes differ): unobservable, never 0.
+    magick -size 64x64 xc:red "$TDIR/other.png"
+    mk_attempt unproven --call "$(call_json "$(loop_js "$ADIR/s2.png")" "$TDIR/other.png" "$ADIR/s2.png")" >/dev/null
+    [ "$(observe unproven)" = unobservable:computed-path ]
+    grep -Fxq 'content_route=unproven-image' "$TDIR/unproven.views"
+    grep -Fxq 'credited=unobservable' "$TDIR/unproven.views"
+    ! grep -q $'^open\t' "$TDIR/unproven.views"
+    # One proven image and one unproven in the SAME attempt: still unobservable
+    # (no partial count), even with a literal open elsewhere in the attempt.
+    mk_attempt mixed \
+        --call "$(python3 -c 'import json,sys; print(json.dumps({"input": sys.argv[1], "images": 1}))' "$(view_js "$ADIR/s1.png")")" \
+        --call "$(call_json "$(loop_js "$ADIR/s1.png" "$ADIR/s2.png")" "$ADIR/s1.png:$TDIR/other.png" "$ADIR/s1.png:$ADIR/s2.png")" >/dev/null
+    [ "$(observe mixed)" = unobservable:computed-path ]
+    # codex read the frames but delivered NO image (e.g. printed the data URL
+    # as text): unobservable, not zero opens.
+    mk_attempt noimg --call "$(call_json "$(loop_js "$ADIR/s1.png")" "" "$ADIR/s1.png")" >/dev/null
+    [ "$(observe noimg)" = unobservable:computed-path ]
+    grep -Fxq 'content_route=no-image-delivered' "$TDIR/noimg.views"
+    # A delivered item that is not a decodable data URL.
+    mk_attempt bad --call "$(call_json "$(loop_js "$ADIR/s1.png")" "" "$ADIR/s1.png" '{"images": 1, "image_url": "data:image/png;base64,@@@"}')" >/dev/null
+    [ "$(observe bad)" = unobservable:computed-path ]
+    grep -Fxq 'content_route=undecodable-image' "$TDIR/bad.views"
+}
+
+@test "F3 content: lineage and non-attested files keep their exact meaning" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    local v
+    v=$("$VM_GUI" "$CAPVM" view-copy "$ADIR/s1.png")
+    magick -size 64x64 xc:blue "$TDIR/own.png"
+    magick -size 1280x800 xc:black "$TDIR/b.png"
+    cp "$TDIR/b.png" "$ADIR/x.png.attempt-1.rejected"
+    local rv
+    rv=$("$VM_GUI" "$CAPVM" view-copy "$ADIR/x.png.attempt-1.rejected")
+    mkdir -p "$TDIR/cwd"
+    # a view-copy (state row) credits its source; a file the driver made itself,
+    # proven by ImageView + equal bytes, is an open with no credit; a view of a
+    # rejected frame gets none.
+    mk_attempt lin --call "$(call_json "$(loop_js "$v" "$TDIR/own.png" "$rv")" \
+        "$v:$TDIR/own.png:$rv" "$v:$TDIR/own.png:$rv")" >/dev/null
+    [ "$(observe lin)" = observed ]
+    grep -Fxq 'opens=3' "$TDIR/lin.views"
+    grep -Fxq 'credited=1' "$TDIR/lin.views"
+    [ "$(grep $'^open\t' "$TDIR/lin.views" | cut -f4,5,6 | tr '\t' ' ')" = "$v full $ADIR/s1.png
+$TDIR/own.png none not-an-attested-frame
+$rv none rejected-lineage" ]
+}
+
+@test "F3 content: an attested PATH overwritten with other bytes earns no credit (astra r1)" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    # the attested frame is replaced in place; the model is handed the NEW bytes
+    magick -size 64x64 xc:blue "$ADIR/s1.png"
+    mkdir -p "$TDIR/cwd"
+    mk_attempt over --call "$(call_json "$(loop_js "$ADIR/s1.png")" "$ADIR/s1.png" "$ADIR/s1.png")" >/dev/null
+    [ "$(observe over)" = observed ]
+    grep -Fxq 'opens=1' "$TDIR/over.views"
+    grep -Fxq 'credited=0' "$TDIR/over.views"
+    [ "$(grep $'^open\t' "$TDIR/over.views" | cut -f4,5,6 | tr '\t' ' ')" = "$ADIR/s1.png none not-an-attested-frame" ]
+}
+
+@test "F3 content: issued-but-unattested bytes at an attested path earn no credit" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    # A later publication to the same path that the ledger REFUSED still
+    # consumed a view-state reservation (SPEC F1: failed publications may).
+    magick -size 1290x810 xc:green "$TDIR/refused.png"
+    printf '1290\t810\t%s\t-\tscreenshot\tvirsh:%s\t%s\n' \
+        "$(sha256sum < "$TDIR/refused.png" | cut -c1-64)" "$CAPVM" "$ADIR/s1.png" >> "$QCI_GUI_VIEW_STATE"
+    mkdir -p "$TDIR/cwd"
+    mk_attempt refused --call "$(call_json "$(loop_js "$ADIR/s1.png")" "$TDIR/refused.png" "")" >/dev/null
+    [ "$(observe refused)" = observed ]
+    grep -Fxq 'credited=0' "$TDIR/refused.views"
+    [ "$(grep $'^open\t' "$TDIR/refused.views" | cut -f5,6 | tr '\t' ' ')" = "none not-an-attested-frame" ]
+}
+
+@test "F3 content: a relocated stale derivative keeps its stale flag (astra r1)" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/st.png" >/dev/null 2>&1
+    echo 'live=0 age_ms=5 msc=1' > "$ADIR/st.png.meta"
+    local v
+    v=$("$VM_GUI" "$CAPVM" view-copy "$ADIR/st.png")
+    grep -q ' view,stale ' "$v.raw"
+    mkdir -p "$TDIR/cwd"
+    mk_attempt stale --call "$(call_json "$(loop_js "$v")" "$v" "$v")" >/dev/null
+    # the gate persists the state beside the log before the alias goes away
+    cp "$QCI_GUI_VIEW_STATE" "$TDIR/view-state.tsv"
+    mv "$ADIR" "$TDIR/art-moved"
+    [ "$(QCI_GUI_VIEW_STATE="$TDIR/view-state.tsv" observe stale)" = observed ]
+    grep -Fxq 'credited=1' "$TDIR/stale.views"
+    [ "$(grep $'^open\t' "$TDIR/stale.views" | cut -f5,6,7 | tr '\t' ' ')" = "full $ADIR/st.png stale" ]
+}
+
 # ---------------------------------------------------------------- F4 --------
 #
 # The REAL gui_run_scenario, with the REAL run_agent_command (bwrap sandbox,
@@ -693,6 +839,12 @@ run_scen() {
         grep -q 'same screen pixels' "$f" || grep -q 'SAME SCREEN PIXELS' "$f"
         grep -q '\.post\.png' "$f"
         grep -q 'cp F F.raw' "$f"
+        # pg/05 follow-up: freshness is not the UI having reacted
+        grep -q 'A FRESH FRAME IS NOT A REACTED UI' "$f"
+        grep -q 'proves only' "$f"
+        grep -q 'Keep every settle wait' "$f"
+        grep -q 'Do not add waits or' "$f"
+        grep -q 'deadline' "$f"
     done
 }
 

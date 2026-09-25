@@ -184,7 +184,10 @@ silences only the success announcement, never a timeout. Set it per call, never
  --sync --name "<window title>" windowactivate --sync` (as the
  right user, with `DISPLAY=:0`) immediately before a `send-key`
  burst so the intended window holds X focus when the evdev event
- arrives. This is the supported, portable contract for this VM
+ arrives. Bound it (`timeout 20 xdotool search --sync ...`) and check its
+ exit status: `--sync` waits forever when no X window matches, e.g. when
+ the client came up as a native Wayland window (qterminal does unless it
+ is launched with `QT_QPA_PLATFORM=xcb`; see permissions-gui/05). This is the supported, portable contract for this VM
  template; do not introduce new scenarios that depend on pixel
  clicks.
 
@@ -360,9 +363,15 @@ whose RAW pixels equal the baseline's, and treat a refused capture as
 padded to a size of its own, so two captures of an unchanged screen never have
 equal file bytes (the raw identity is `raw_pix_sha`, field 4 of the frame's
 `.raw` sidecar). The admin TUI header has a live clock, so a capture after the
-scenario's normal one-second wait should not show the same raw pixels as the
-baseline. Identical raw pixels do not prove an input binding failed; they prove
-the capture path did not produce a new frame.
+scenario's settle wait should not show the same raw pixels as the baseline.
+Identical raw pixels do not prove an input binding failed; they prove the
+capture path did not produce a new frame. The converse does not hold either:
+**different raw pixels do not prove the input took effect.** The clock alone
+changes the frame every second, so a capture taken before the TUI processed the
+key is still "fresh" (permissions-gui/05, 2026-09-25: both post-key waits were
+dropped, S2 showed the main view and S3 the overlay, one step behind). Freshness
+proves a new frame; only the settle wait and the frame's content say whether
+the UI reached the expected state. Keep the scenario's waits as written.
 
 ## Running a scenario
 

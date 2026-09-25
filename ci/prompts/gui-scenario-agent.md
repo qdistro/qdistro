@@ -67,6 +67,16 @@ Procedure:
    its `.raw` sidecar (`cp F F.raw DEST/`), or use `view-copy`. The harness
    reads your session record afterwards: a PASS or FAIL on a `required`
    scenario whose frames you never opened is recorded ERROR.
+   **A FRESH FRAME IS NOT A REACTED UI.** `screenshot-fresh` accepting a frame,
+   or two frames having different raw pixels (`raw_pix_sha`), proves only that
+   a NEW frame was captured — never that your key or click was processed or
+   that the UI reached the state the step expects. A live clock, a blinking
+   cursor or an animation changes pixels on its own. Keep every settle wait and
+   wait-for-state check the scenario lists, exactly as written, between the
+   input and the capture. Do not add waits or re-captures the scenario does not
+   authorize, and never past a deadline it states: a frame taken at a
+   scenario's deadline stands. Where a scenario authorizes a late re-capture
+   (permissions-gui/05 does), take it once, to a NEW name, and judge from it.
 7. Drive keys and clicks through the harness.
    A hotkey asserted by typing into a focused field is not evidence the
    binding fired. Modifier chords go through `virsh send-key`.
