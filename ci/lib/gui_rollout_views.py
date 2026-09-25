@@ -187,7 +187,12 @@ def parse_rollout(path, sid, max_bytes):
             pt, name = p.get("type"), p.get("name")
             if pt == "function_call" and name == "view_image":
                 raise Unobservable("unsupported-shape")
-            if pt in ("function_call", "custom_tool_call") and name != "exec":
+            # ONLY the one documented shape (custom_tool_call named exec)
+            # reaches the counting branch below. Any other call record that
+            # mentions view_image -- a function_call named exec included
+            # (fable code review r1, P1) -- is unsupported, never dropped.
+            if pt in ("function_call", "custom_tool_call") \
+                    and not (pt == "custom_tool_call" and name == "exec"):
                 blob = json.dumps(p.get("input", p.get("arguments", "")))
                 if "view_image" in blob or name == "view_image":
                     raise Unobservable("unsupported-shape")
