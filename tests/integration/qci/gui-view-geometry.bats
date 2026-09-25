@@ -562,6 +562,51 @@ $TDIR/own.png none not-an-attested-frame
 $rv none rejected-lineage" ]
 }
 
+@test "F3 content: an attested PATH overwritten with other bytes earns no credit (astra r1)" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    # the attested frame is replaced in place; the model is handed the NEW bytes
+    magick -size 64x64 xc:blue "$ADIR/s1.png"
+    mkdir -p "$TDIR/cwd"
+    mk_attempt over --call "$(call_json "$(loop_js "$ADIR/s1.png")" "$ADIR/s1.png" "$ADIR/s1.png")" >/dev/null
+    [ "$(observe over)" = observed ]
+    grep -Fxq 'opens=1' "$TDIR/over.views"
+    grep -Fxq 'credited=0' "$TDIR/over.views"
+    [ "$(grep $'^open\t' "$TDIR/over.views" | cut -f4,5,6 | tr '\t' ' ')" = "$ADIR/s1.png none not-an-attested-frame" ]
+}
+
+@test "F3 content: issued-but-unattested bytes at an attested path earn no credit" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/s1.png" >/dev/null 2>&1
+    # A later publication to the same path that the ledger REFUSED still
+    # consumed a view-state reservation (SPEC F1: failed publications may).
+    magick -size 1290x810 xc:green "$TDIR/refused.png"
+    printf '1290\t810\t%s\t-\tscreenshot\tvirsh:%s\t%s\n' \
+        "$(sha256sum < "$TDIR/refused.png" | cut -c1-64)" "$CAPVM" "$ADIR/s1.png" >> "$QCI_GUI_VIEW_STATE"
+    mkdir -p "$TDIR/cwd"
+    mk_attempt refused --call "$(call_json "$(loop_js "$ADIR/s1.png")" "$TDIR/refused.png" "")" >/dev/null
+    [ "$(observe refused)" = observed ]
+    grep -Fxq 'credited=0' "$TDIR/refused.views"
+    [ "$(grep $'^open\t' "$TDIR/refused.views" | cut -f5,6 | tr '\t' ' ')" = "none not-an-attested-frame" ]
+}
+
+@test "F3 content: a relocated stale derivative keeps its stale flag (astra r1)" {
+    new_ledger
+    "$VM_GUI" "$CAPVM" screenshot "$ADIR/st.png" >/dev/null 2>&1
+    echo 'live=0 age_ms=5 msc=1' > "$ADIR/st.png.meta"
+    local v
+    v=$("$VM_GUI" "$CAPVM" view-copy "$ADIR/st.png")
+    grep -q ' view,stale ' "$v.raw"
+    mkdir -p "$TDIR/cwd"
+    mk_attempt stale --call "$(call_json "$(loop_js "$v")" "$v" "$v")" >/dev/null
+    # the gate persists the state beside the log before the alias goes away
+    cp "$QCI_GUI_VIEW_STATE" "$TDIR/view-state.tsv"
+    mv "$ADIR" "$TDIR/art-moved"
+    [ "$(QCI_GUI_VIEW_STATE="$TDIR/view-state.tsv" observe stale)" = observed ]
+    grep -Fxq 'credited=1' "$TDIR/stale.views"
+    [ "$(grep $'^open\t' "$TDIR/stale.views" | cut -f5,6,7 | tr '\t' ' ')" = "full $ADIR/st.png stale" ]
+}
+
 # ---------------------------------------------------------------- F4 --------
 #
 # The REAL gui_run_scenario, with the REAL run_agent_command (bwrap sandbox,

@@ -21,9 +21,10 @@ harness attested for that attempt. It is an OBSERVATION, never a guess:
   `.map`), its output's `input_image` items are the images codex actually put
   in front of the model. Each one's data URL is decoded and hashed; the call is
   credited only when EVERY such image is byte-identical to an attested frame of
-  this attempt (ledger sha256 or view-state padded sha) or to the current bytes
-  of a path codex itself reported reading during that call (its `ImageView`
-  item_completed events). The JavaScript is still never interpreted: the proof
+  this attempt (ledger sha256 or view-state padded sha; only these earn
+  credit) or to the current bytes of a path codex itself reported reading
+  during that call (its `ImageView` item_completed events; an open with NO
+  credit, whatever that path's name). The JavaScript is still never interpreted: the proof
   is the delivered bytes, not the code. One image that cannot be proven, or a
   call that delivered no image at all, keeps the attempt unobservable under the
   literal shape's reason (computed-path / control-flow).
@@ -398,6 +399,9 @@ def resolve_state_row(row, path, ledger_path, ledger_sha, state, depth, crop, st
     """Credit through one view-state row whose padded sha matched. None when
     the row is the file itself (no further lineage to follow)."""
     primary, tags = kind_parts(row["kind"])
+    # The state row persists the inherited tags, so a derivative whose frame
+    # (and `.meta`) has since moved keeps its stale status (astra r1, 4).
+    stale = stale or "stale" in tags
     if "rejected" in tags:
         return "none", "rejected-lineage", stale
     if "diag" in tags or primary == "virsh-diag":
@@ -425,14 +429,29 @@ def resolve_digest(digest, viewed, cwd, ledger_path, ledger_sha, state):
     for row in state:
         if row["sha"] != digest:
             continue
-        got = resolve_state_row(row, None, ledger_path, ledger_sha, state, 0,
-                                False, os.path.exists(row["path"] + ".meta"), set())
-        if got is not None:
-            return (row["path"],) + got
+        # The harness issued these bytes. Only a DERIVATIVE row (view-copy,
+        # click view, crop) earns credit, through its recorded source; a
+        # rejected/diagnostic lineage earns none. A plain frame row whose bytes
+        # have no ledger row was never attested (e.g. a refused publication):
+        # it is never credited by its path name.
+        primary, tags = kind_parts(row["kind"])
+        stale = os.path.exists(row["path"] + ".meta") or "stale" in tags
+        if primary in DERIVATIVE_KINDS or primary.startswith("crop:") \
+                or tags & {"rejected", "diag"} or primary == "virsh-diag":
+            got = resolve_state_row(row, None, ledger_path, ledger_sha, state, 0,
+                                    False, stale, set())
+            if got is not None:
+                return (row["path"],) + got
+        return row["path"], "none", "not-an-attested-frame", stale
+    # Bytes that no ledger or state row attests. An ImageView path whose
+    # CURRENT bytes are these proves which file was delivered, but never earns
+    # credit: the path may be a ledger path whose frame was overwritten after
+    # capture, and resolve() would credit it by name (astra r1, 1). Credit is
+    # digest-bound only (the two routes above); this is an open with none.
     for v in viewed:
         vp = os.path.normpath(v if os.path.isabs(v) else os.path.join(cwd, v))
         if sha256_file(vp) == digest:
-            return (vp,) + resolve(vp, ledger_path, ledger_sha, state)
+            return vp, "none", "not-an-attested-frame", False
     return None
 
 
