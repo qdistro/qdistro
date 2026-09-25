@@ -163,6 +163,25 @@ new_ledger() {
     [ -f "$ADIR/after.png.raw" ]
 }
 
+@test "F1: a PNG-only (sidecar-less) copy of a padded baseline still refuses an unchanged screen" {
+    # fable code review r1, P2: the driver copies the baseline WITHOUT its .raw.
+    "$VM_GUI" "$CAPVM" screenshot "$TDIR/base.png" >/dev/null 2>&1
+    cp "$TDIR/base.png" "$ADIR/base.png"
+    [ ! -e "$ADIR/base.png.raw" ]
+    run "$VM_GUI" "$CAPVM" screenshot-fresh "$ADIR/after.png" "$ADIR/base.png" 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unchanged-baseline"* ]]
+    [ ! -e "$ADIR/after.png" ]
+}
+
+@test "F1: the same-screen note finds a sidecar-less copy of an earlier frame" {
+    "$VM_GUI" "$CAPVM" screenshot "$TDIR/first.png" >/dev/null 2>&1
+    cp "$TDIR/first.png" "$ADIR/copied.png"
+    run "$VM_GUI" "$CAPVM" screenshot "$ADIR/second.png"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME SCREEN PIXELS as earlier capture(s): copied.png"* ]]
+}
+
 @test "F1: click geometry is raw -- margin click rejected, ring/zoom and QMP events unchanged" {
     # Reference run WITHOUT the view state: the pre-padding behaviour.
     local ref="$TDIR/ref"
@@ -253,7 +272,9 @@ new_ledger() {
     "$VM_GUI" "$CAPVM" screenshot "$ADIR/y.png" >/dev/null 2>&1
     render_screen "screen two"
     "$VM_GUI" "$CAPVM" screenshot "$ADIR/z.png" >/dev/null 2>&1
-    cp "$tmpd/x.png" "$tmpd/x.png.raw" "$ADIR/"
+    # x.png is copied WITHOUT its .raw (fable code review r1, P2): its raw
+    # identity must still resolve through the attempt's view state.
+    cp "$tmpd/x.png" "$ADIR/"
     echo PASS > "$ADIR/status.txt"
     # Harvest the (alias) directory into a canonical one with the real harvest.
     # shellcheck disable=SC1090
@@ -266,7 +287,8 @@ new_ledger() {
     cp -a "$ADIR/." "$alias/"
     gui_harvest_agent_artifacts "$canon" slug "" "$alias"
     local f
-    for f in x.png x.png.raw y.png y.png.raw z.png z.png.raw; do
+    [ ! -e "$canon/x.png.raw" ]
+    for f in x.png y.png y.png.raw z.png z.png.raw; do
         cmp "$ADIR/$f" "$canon/$f"
     done
     [ ! -e "$canon/.qci-view-state" ]
@@ -420,6 +442,10 @@ view_js() { printf 'const a = await tools.view_image({path:"%s", detail:"high"})
     [ "$(observe trunc)" = unobservable:truncated ]
     mk_attempt old --raw-line "$FIX/function-call-view-image-0.130.0.jsonl" >/dev/null
     [ "$(observe old)" = unobservable:unsupported-shape ]
+    # a function_call NAMED exec carrying view_image (fable code review r1, P1)
+    mk_attempt fnexec --raw-line "$FIX/function-call-exec-view-image.jsonl" >/dev/null
+    [ "$(observe fnexec)" = unobservable:unsupported-shape ]
+    grep -Fxq 'credited=unobservable' "$TDIR/fnexec.views"
     local sid
     sid=$(mk_attempt two --call "$(python3 -c 'import json,sys; print(json.dumps({"input": sys.argv[1], "images": 1}))' "$(view_js /a.png)")")
     mkdir -p "$TDIR/codex/sessions/2026/09/26"
@@ -596,7 +622,11 @@ run_scen() {
         [ "$(cut -f2,4 "$TDIR/attempts")" = "PASS	" ] || { echo "mode $m: $(cat "$TDIR/attempts")" >&2; cat "$RDIR"/gui/*.views.txt >&2; return 1; }
         grep -q ' pass ' "$TDIR/results"
         grep $'^open\t' "$RDIR"/gui/*.views.txt | cut -f5,6 > "$TDIR/credit-$m"
+        cp "$TDIR/results" "$TDIR/results-$m"
     done
+    # The gate resolves the PNG-only /tmp copy's raw identity through the
+    # saved view state: s1 and the copy show one screen (fable r1, P2).
+    grep -q 'harness-captured 2 frame(s), 1 distinct' "$TDIR/results-tmpcopy"
     # WHAT each open was credited to, not merely that it was.
     grep -Eq $'^full\t.*/s1\.png$' "$TDIR/credit-look"
     grep -Eq $'^full\t.*/s1\.png$' "$TDIR/credit-viewcopy"
