@@ -69,6 +69,13 @@ vitest tags), and the per-suite relabel action items.
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
 
+For a developer full run, `QCI_SKIP_IMAGE=1 ci/bin/qci full` omits the image
+gate and records an explicit skip row. The report Summary names the selected
+published artifact and its `.sha256` sidecar digest (or `none`), without
+decompressing or booting it. Such a run does not qualify the image or count as
+P8 green full evidence. `QCI_RELEASE=1` rejects this switch before any gate or
+VM starts; release full runs always exercise the image gate.
+
 `QCI_RELEASE=1` strengthens `full`: every `skip` or `blocked` row from a
 release-relevant gate is fatal. Release evidence is green only when the
 required VM, Bats, GUI, manifest, bootstrap-contract, and tester-image

@@ -6,6 +6,44 @@
 # shellcheck shell=bash
 
 # ---------------------------------------------------------------------------
+# Developer full runs may omit image verification, but the omission must be
+# visible and tied to the published artifact identity. Read the sidecar only:
+# hashing or decompressing the xz would defeat this switch's purpose.
+gate_image_developer_skip() {
+    local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+    local selected="${QDISTRO_IMAGE:-}" requested="${QDISTRO_IMAGE_SHA256:-}"
+    local digest=none sidecar name rec
+    if [ -f "$IMAGE_DIR/lib/select-artifact.sh" ]; then
+        # shellcheck source=../../../image/lib/select-artifact.sh
+        . "$IMAGE_DIR/lib/select-artifact.sh"
+        if [ -n "$selected" ] && [[ "$selected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            requested="${selected,,}"
+            selected=""
+        fi
+        if [ -z "$selected" ] && [[ "$requested" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            selected=$(qdistro_find_by_digest "${requested,,}" "$build_dir" 2>/dev/null) || selected=""
+        elif [ -z "$selected" ] && [ -z "$requested" ]; then
+            selected=$(qdistro_discover_image "$build_dir" 2>/dev/null) || selected=""
+        fi
+    fi
+    if [[ "$selected" = *.raw.xz ]] && [ -f "$selected" ]; then
+        sidecar="${QDISTRO_IMAGE_SHA256_FILE:-$selected.sha256}"
+        if [ -f "$sidecar" ] && [ "$(grep -c . "$sidecar")" = 1 ]; then
+            read -r rec name < "$sidecar"
+            name="${name#\*}"
+            if [[ "$rec" =~ ^[0-9a-fA-F]{64}$ ]] && [ "$name" = "$(basename "$selected")" ]; then
+                digest="${rec,,}"
+            fi
+        fi
+    fi
+    kv image_gate skipped
+    kv image_published "${selected:-none}"
+    kv image_digest "$digest"
+    record_skip image developer-omission image \
+        "QCI_SKIP_IMAGE=1; published=${selected:-none}; digest=$digest; image contents and boot verification were not run"
+}
+
+# ---------------------------------------------------------------------------
 # qci image gate. (a) static image-content checklist first (fail fast,
 # no VM); then (b) boot-verify + install-test. The boot/install stages
 # need a built image + libvirt + a VM, so they degrade to record_blocked
