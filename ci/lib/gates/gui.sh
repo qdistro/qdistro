@@ -2772,6 +2772,32 @@ GUI_IMAGE_OPEN_PATTERNS=${QCI_IMAGE_OPEN_PATTERNS:-'view_image|image_view|read_i
 # function was built to detect -- a lane-wide drop to zero -- was unreachable.
 # Lines identical to prompt lines are therefore dropped before matching
 # (fable, B round 1).
+# The "did the driver look?" DIAGNOSTIC for one attempt, as a note fragment
+# ("; DIAGNOSTIC: ..." or empty). Never changes a verdict. When the rollout
+# adapter OBSERVED the session (F3 sidecar reason=observed), its credited-open
+# count is the answer and the prose-mention count is not consulted: on
+# 2026-09-25 pg/13 carried "never MENTIONED opening an image" while its rollout
+# proved two credited opens. The prose count remains the fallback for attempts
+# the adapter could not observe. Args: scenario prose_opens obs_file.
+gui_image_opens_diag_note() {
+    local scenario=$1 opens=$2 obs=${3:-} reason="" credited=""
+    [ "$(gui_scenario_visual_mode "$scenario")" = required ] || return 0
+    if [ -n "$obs" ] && [ -f "$obs" ] && [ ! -L "$obs" ]; then
+        reason=$(sed -n 's/^reason=//p' "$obs" | head -1)
+        credited=$(sed -n 's/^credited=//p' "$obs" | head -1)
+    fi
+    if [ "$reason" = observed ] && [[ "$credited" =~ ^[0-9]+$ ]]; then
+        if [ "$credited" -eq 0 ]; then
+            printf '%s' "; DIAGNOSTIC: the driver's rollout shows no opened attested frame for a pixel-dependent scenario (verdict NOT changed here; if this verdict is wrong, start here)"
+        fi
+        return 0
+    fi
+    if [[ "$opens" =~ ^[0-9]+$ ]] && [ "$opens" -eq 0 ]; then
+        printf '%s' "; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
+    fi
+    return 0
+}
+
 gui_count_image_opens() {
     local log_path=$1 prompt_path=${2:-} n=0
     [ -f "$log_path" ] || { printf '0\n'; return 0; }
@@ -3263,9 +3289,7 @@ gui_run_scenario() {
     local img_opens
     img_opens=$(gui_count_image_opens "$log_path" "$prompt")
     printf '\nqci_gui_image_opens: %s\n' "$img_opens" >> "$log_path" 2>/dev/null || true
-    if [ "$(gui_scenario_visual_mode "$scenario")" = required ] && [ "$img_opens" -eq 0 ]; then
-        note="$note; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
-    fi
+    note="$note$(gui_image_opens_diag_note "$scenario" "$img_opens" "$obs")"
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
     local classifier="" transport=0 tooling=0 api=0 extnet=0
@@ -3423,9 +3447,7 @@ gui_run_scenario() {
                 local img_opensN
                 img_opensN=$(gui_count_image_opens "$logN" "$prompt")
                 printf '\nqci_gui_image_opens: %s\n' "$img_opensN" >> "$logN" 2>/dev/null || true
-                if [ "$(gui_scenario_visual_mode "$scenario")" = required ] && [ "$img_opensN" -eq 0 ]; then
-                    noteN="$noteN; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
-                fi
+                noteN="$noteN$(gui_image_opens_diag_note "$scenario" "$img_opensN" "$obsN")"
                 status=$statusN; verdict=$verdictN; note=$noteN; classifier=$classifierN; log_path=$logN; adir=$adirN
                 orig_src="$orig_statusN:$agent_rc"
             done

@@ -789,3 +789,37 @@ noct03_block() {  # $1 = step1|step2
     [ "$status" -eq 0 ]
     [ "$output" != "$(cat "$TDIR/h1")" ]
 }
+
+# --------------------------------- prose image-open diagnostic vs rollout --------
+
+@test "diagnostic: an observed rollout overrides the prose 'never MENTIONED' note" {
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/gates/gui.sh"
+    local req="$REPO_ROOT/tests/integration/permissions-gui/13-cross-user-sendto-deny.md"
+    local obs="$TDIR/a.views.txt"
+    # pg/13, 2026-09-25: prose count 0, rollout observed 2 credited opens.
+    printf 'parser_version=1\nreason=observed\nopens=2\ncredited=2\n' > "$obs"
+    [ -z "$(gui_image_opens_diag_note "$req" 0 "$obs")" ]
+    # Observed with zero credited opens: the rollout's own diagnostic.
+    printf 'parser_version=1\nreason=observed\nopens=0\ncredited=0\n' > "$obs"
+    run gui_image_opens_diag_note "$req" 5 "$obs"
+    [[ "$output" == *"rollout shows no opened attested frame"* ]]
+    [[ "$output" != *MENTIONED* ]]
+    # Unobservable / missing / malformed: the prose count is the fallback.
+    printf 'parser_version=1\nreason=unobservable:ephemeral\nopens=unobservable\ncredited=unobservable\n' > "$obs"
+    run gui_image_opens_diag_note "$req" 0 "$obs"
+    [[ "$output" == *"never MENTIONED"* ]]
+    [ -z "$(gui_image_opens_diag_note "$req" 3 "$obs")" ]
+    run gui_image_opens_diag_note "$req" 0 "$TDIR/missing.views.txt"
+    [[ "$output" == *"never MENTIONED"* ]]
+    printf 'reason=observed\ncredited=two\n' > "$obs"
+    run gui_image_opens_diag_note "$req" 0 "$obs"
+    [[ "$output" == *"never MENTIONED"* ]]
+    # visual: none scenarios never get the diagnostic.
+    local none; none=$(grep -l 'qci:visual: none' "$REPO_ROOT"/tests/integration/permissions-gui/*.md | head -1)
+    [ -n "$none" ]
+    [ -z "$(gui_image_opens_diag_note "$none" 0 "$TDIR/missing.views.txt")" ]
+    # Both attempt paths use the helper; no inline copy of the prose note remains.
+    [ "$(grep -c 'gui_image_opens_diag_note "\$scenario"' "$REPO_ROOT/ci/lib/gates/gui.sh")" -eq 2 ]
+    [ "$(grep -c 'DIAGNOSTIC: the driver never MENTIONED' "$REPO_ROOT/ci/lib/gates/gui.sh")" -eq 1 ]
+}
