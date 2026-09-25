@@ -44,14 +44,16 @@ $VMEXEC "$VM" 'runuser -u admin -- env QT_QPA_PLATFORM=xcb /usr/local/bin/qdistr
 # XWayland proof, bounded: the window must be found through the X server on
 # :0 within 20 s. Every xdotool --sync in this scenario runs under `timeout`;
 # an unbounded --sync waits forever when no X window matches.
-$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 timeout 20 xdotool search --sync --name "Shell No. 1"'
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 timeout 20 xdotool search --sync --name "Shell No. 1"' \
+  || { rc=$?; echo "XWAYLAND-SETUP-FAILED rc=$rc: record ERROR" >&2; exit "$rc"; }
 # Settle: the TUI draws its main view after the window maps.
 sleep 3
 $VMGUI "$VM" screenshot-fresh /tmp/05-tui-help-overlay-s1-main.png
 ```
 
-If the bounded `xdotool search` exits non-zero (124 = timed out), qterminal
-is not running as an X client: record **ERROR** (the XWayland setup failed;
+If the bounded `xdotool search` exits non-zero (124 = timed out), the block
+stops before the capture: qterminal is not running as an X client. Record
+**ERROR** (the XWayland setup failed;
 this is not the `?` binding), and include the qterminal environment
 (`tr '\0' '\n' < /proc/$(pgrep -u admin -x qterminal)/environ | grep -E 'QT_QPA|DISPLAY'`).
 
@@ -71,11 +73,11 @@ then inject `?` through the virtual keyboard (see AGENTS.md).
 
 ```bash
 # Activate the named XWayland terminal before the evdev burst. This is the
-# blessed focus path; do not replace it with a pixel click. Bounded, and its
-# exit status is checked: a non-zero exit means the focus handoff did not
-# happen -- record ERROR, do not send keys into an unknown focus.
+# blessed focus path; do not replace it with a pixel click. Bounded, and a
+# non-zero exit STOPS the block before any key is sent: the focus handoff did
+# not happen, so record ERROR -- never send keys into an unknown focus.
 $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 timeout 20 xdotool search --sync --name "Shell No. 1" windowactivate --sync' \
-  || echo "XWAYLAND-FOCUS-FAILED rc=$?"
+  || { rc=$?; echo "XWAYLAND-FOCUS-FAILED rc=$rc: record ERROR, no key was sent" >&2; exit "$rc"; }
 # `?` = Shift+/ at evdev.
 virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_SLASH
 # MANDATORY SETTLE WAIT -- do not drop or shorten it. There is no guest-side
