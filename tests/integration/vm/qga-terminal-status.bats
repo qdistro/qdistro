@@ -14,6 +14,7 @@
 # changes the contract fails HERE rather than resurfacing as a mystery flake in
 # a GUI scenario months later.
 
+bats_require_minimum_version 1.5.0
 load helpers
 
 setup() {
@@ -111,4 +112,59 @@ qga_wait_terminal() {   # qga_wait_terminal <pid> -> the terminal response
     '
     [ "$status" -eq 0 ]
     [[ "$output" == *"IDENTITY-OK"* ]]
+}
+
+# The in-VM half of the orphan-registry fix (permissions-gui/13,
+# gui-20260925T065332Z-3908053). A SIGKILLed vm-exec runs no trap, so its guest
+# command outlives it; the NEXT vm-exec on the VM must reap it -- against the
+# REAL agent and the REAL in-guest kill script, not the host fake.
+# The liveness probes use raw qga, never vm-exec: any vm-exec call would itself
+# reap the orphan before running, and so could not observe it.
+orphan_alive() {   # orphan_alive <token> -> 0 if a guest process carries it
+    local pid resp
+    # Bracketed first letter: the probe shell's own argv must not self-match.
+    pid=$(qga_start "pgrep -f '[o]${1#o}' >/dev/null")
+    resp=$(qga_wait_terminal "$pid")
+    [ "$(jq -r '.return.exitcode' <<<"$resp")" = "0" ]
+}
+
+start_and_sigkill_vm_exec() {   # start_and_sigkill_vm_exec <token>
+    local out="$BATS_TEST_TMPDIR/bg.out" i p
+    "$VM_EXEC" "$VM_NAME" "sleep 600; : $1" >"$out" 2>&1 &
+    p=$!
+    for i in $(seq 1 120); do
+        grep -qF "guest identity pinned" "$out" && break
+        sleep 0.5
+    done
+    grep -qF "guest identity pinned" "$out" || fail_loud "vm-exec never pinned its guest command: $(cat "$out")"
+    kill -KILL "$p"
+    wait "$p" 2>/dev/null || true
+}
+
+@test "vm-exec: a SIGKILLed vm-exec's guest command is REAPED by the next vm-exec (real qga)" {
+    export QDISTRO_VM_EXEC_STATE_DIR="$BATS_TEST_TMPDIR/orphans"
+    local token="orphan-reap-$$-$RANDOM"
+    start_and_sigkill_vm_exec "$token"
+    # SIGKILL ran no cleanup: the guest command is still there.
+    orphan_alive "$token" || fail_loud "orphan was not alive after SIGKILL -- the test would prove nothing"
+    run "$VM_EXEC" "$VM_NAME" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reaping orphaned guest command PID"* ]]
+    [[ "$output" == *"cleanup verified for guest PID"* ]]
+    run ! orphan_alive "$token"
+}
+
+@test "vm-exec: with reaping DISABLED the same orphan survives (control)" {
+    # Proves the test above can fail: nothing else in the path kills it.
+    export QDISTRO_VM_EXEC_STATE_DIR="$BATS_TEST_TMPDIR/orphans"
+    local token="orphan-ctl-$$-$RANDOM"
+    start_and_sigkill_vm_exec "$token"
+    QDISTRO_VM_EXEC_ORPHAN_REAP=0 run "$VM_EXEC" "$VM_NAME" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"reaping orphaned"* ]]
+    orphan_alive "$token"
+    # Clean up through the real path, and prove it once more.
+    run "$VM_EXEC" "$VM_NAME" true
+    [[ "$output" == *"reaping orphaned guest command PID"* ]]
+    run ! orphan_alive "$token"
 }
