@@ -37,6 +37,10 @@
 # (see install_gui_waiters in ci/lib/gates/gui.sh); markdown scenarios source
 # that path. Host-side driver scripts can source the repo copy directly. The
 # library has NO host-only dependencies.
+#
+# Sourcing this file does NOT claim the guest driver lock. A long-lived driver
+# shell calls qci_claim_driver once, itself, before any broker request. See
+# qci_claim_driver at the bottom of this file.
 # shellcheck shell=bash
 
 # Defaults (override per call). Deadlines are intentionally modest: a waiter is a
@@ -797,4 +801,94 @@ bg_log() {
     else
         cat -- "$base.log"
     fi
+}
+
+# --- Guest driver claim ------------------------------------------------------
+#
+# A GUI scenario driver is one long-lived guest shell. Killing the host-side
+# vm-exec that started it does not kill that shell (permissions-gui/08 in
+# full-20260924T171310Z-972187, and the solo rerun gui-20260924T193011Z-2597819):
+# the agent started another driver, and each leftover shell ran bg_start and
+# filed its own broker request. Nothing else in the guest serialises them.
+#
+# qci_claim_driver [lock-path]
+# Take a non-blocking exclusive flock and hold it in THIS shell until it
+# exits. Call it once, directly, at the top of the driver — not in a
+# subshell, pipeline, command substitution, or `flock -c`. Those release the
+# lock as soon as that short-lived process exits, so the rest of the driver
+# would run with no claim. A subshell that exits immediately is not the holder.
+#
+# Pass a scenario-scoped path: /tmp/qci/<slug>/driver.lock. The parent
+# directory is created. If the argument is omitted the default is
+# /tmp/qci-driver.lock (one lock for the whole guest — prefer the scenario
+# path).
+#
+# Same shell, same path: a second call returns 0 and does not open another
+# descriptor. flock(2) is per open file description, so a second open in this
+# process would fail against our own lock and look like a second driver.
+# That is what lets one driver claim once at the top and source this file
+# again afterwards: sourcing never claims, and it must not clear the claim.
+# A different path from a shell that already holds a claim is refused without
+# releasing the first lock.
+#
+# Another live holder: print one ERROR line to stderr and `exit 1` the
+# calling shell. Do not steal the lock, do not block, and do not arm a
+# timeout that would kill the first driver. `exit` (not `return`) so the
+# lines after the claim do not run even without `set -e`, and even under
+# `qci_claim_driver || true` — exit is not caught by a conditional. There is
+# no release helper; the kernel drops the lock when the holding descriptor
+# is closed.
+#
+# Children inherit the descriptor (this bash does not set close-on-exec on
+# it). A background child that outlives this shell keeps the claim until that
+# child exits too. A fresh vm-exec is not a child of the first driver and
+# does not inherit the descriptor.
+qci_claim_driver() {
+    local lock=${1:-/tmp/qci-driver.lock} dir fd
+
+    if [ "${QCI_DRIVER_CLAIM_DEPTH:-0}" -gt 0 ]; then
+        if [ "${QCI_DRIVER_CLAIM_PATH:-}" = "$lock" ]; then
+            return 0
+        fi
+        printf 'ERROR: a second guest driver is already running: %s\n' "$lock" >&2
+        exit 1
+    fi
+
+    if ! command -v flock >/dev/null 2>&1; then
+        printf 'ERROR: qci_claim_driver: flock(1) is required\n' >&2
+        exit 2
+    fi
+
+    dir=$(dirname -- "$lock")
+    if ! mkdir -p -- "$dir" 2>/dev/null; then
+        printf 'ERROR: qci_claim_driver: cannot create %s\n' "$dir" >&2
+        exit 2
+    fi
+
+    # Braces keep the stderr redirect on the open only. A bare
+    # `exec REDIR 2>/dev/null` has no command, so BOTH redirections become
+    # permanent and the driver shell loses stderr for the rest of its life.
+    QCI_DRIVER_CLAIM_FD=""
+    if ! { exec {QCI_DRIVER_CLAIM_FD}>>"$lock"; } 2>/dev/null; then
+        QCI_DRIVER_CLAIM_FD=""
+        printf 'ERROR: qci_claim_driver: cannot open %s\n' "$lock" >&2
+        exit 2
+    fi
+    # -n: fail immediately. No -w. A wait would only delay the second driver,
+    # and a timeout that killed the holder would be the opposite of a claim.
+    # flock(1) locks the inherited descriptor and exits; this shell keeps that
+    # open file description, so the lock outlives the flock process.
+    if ! flock -n -x "$QCI_DRIVER_CLAIM_FD" 2>/dev/null; then
+        fd=$QCI_DRIVER_CLAIM_FD
+        QCI_DRIVER_CLAIM_FD=""
+        case $fd in
+            ''|*[!0-9]*) ;;
+            *) eval "exec ${fd}>&-" 2>/dev/null || true ;;
+        esac
+        printf 'ERROR: a second guest driver is already running: %s\n' "$lock" >&2
+        exit 1
+    fi
+    QCI_DRIVER_CLAIM_PATH=$lock
+    QCI_DRIVER_CLAIM_DEPTH=1
+    return 0
 }
