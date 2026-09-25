@@ -1,0 +1,12 @@
+OpenAI Codex v0.156.1
+--------
+workdir: /home/play2/qdistro/todo/test-blankscreenshots/experiments/replay/control-main/B
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a0d717-7251-7ab1-aea1-2a7ee6d34e5a
+--------
+user
