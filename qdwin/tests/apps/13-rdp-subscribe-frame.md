@@ -30,9 +30,11 @@ This scenario REQUIRES:
   and the rest of the scenario short-circuits.
 
 Fail loudly if VM `xfreerdp`, VM `qdistro-forward`, or `qdwin-bystander`
-is missing; do not skip those. The one exception is a subscribe denial of
-`(no pw output)` / `no free pipewire output` in the qdwin journal since the
-subscribe cursor: Step 1 prints `SKIP:` naming that check and exits 77.
+is missing; do not skip those. The one exception is the compositor journal
+record `qdwin: subscribe_view_stream denied handle=$HANDLE peer_label="..." (no pw output)`
+since the subscribe cursor, with that reason at the end of the line and
+outside the quotes: Step 1 prints `SKIP:` naming that check and exits 77.
+The wire string `no free pipewire output` is not itself a skip.
 Any other missing approval (credentials absent without that denial, a real
 product deny, a bad port) stays a loud FAIL. The *subject* app `foot`,
 however, is part of the opt-in
@@ -205,11 +207,11 @@ output)`, this bake has no pipewire output. That is **not** a
 weston.ini `[pipewire] num-outputs` problem — that key is set. It
 means the compositor was started without `pipewire-backend.so` in its
 backend list, so no pipewire output ever initialised. The bash above
-already checks that delta with `qdwin_apps_log_since_cursor` and, only
-when `(no pw output)` or `no free pipewire output` is present, prints
-`SKIP:` and exits 77 before either missing-approval failure. Record that
-SKIP. A non-pipewire bake cannot satisfy this test. Any other denial, or
-a missing approval with that denial absent, stays FAIL.)
+already checks that delta with `qdwin_apps_log_since_cursor` and prints
+`SKIP:` and exits 77 only when the record ends in `(no pw output)` after
+a closed `peer_label="..."`. Record that SKIP. A non-pipewire bake cannot
+satisfy this test. Any other denial, a reason buried in `peer_label`, or
+a missing approval with that record absent, stays FAIL.)
 
 **Assert (1.2):** $RDP_PORT is a valid TCP port (1024..65535).
 

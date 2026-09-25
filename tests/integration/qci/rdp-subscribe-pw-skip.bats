@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
 #
 # Host-only contract for qdwin/tests/apps/13-rdp-subscribe-frame.md.
-# A non-pipewire bake denies subscribe_view_stream with "(no pw output)" /
-# "no free pipewire output". That denial must exit 77 before either
-# missing-approval failure. No VM, no libvirt.
+# A non-pipewire bake logs subscribe_view_stream denied with the reason
+# "(no pw output)" at the end of the record, outside peer_label. That
+# record must exit 77 before either missing-approval failure. The wire
+# phrase "no free pipewire output" alone must not. No VM, no libvirt.
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
