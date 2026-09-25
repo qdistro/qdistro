@@ -530,3 +530,45 @@ EOF
     run lint "$f"
     [[ "$output" == *"qga-journal-self-match"* ]]
 }
+
+@test "flake-lint: fires unbounded-xdotool-sync; a timeout-wrapped --sync is clean" {
+    local f="$BATS_TEST_TMPDIR/32-xdo.md"
+    cat > "$f" <<'MD'
+# xdotool
+
+## Steps
+
+```bash
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "Shell No. 1" windowactivate --sync'
+runuser -u admin -- env DISPLAY=:0 timeout -k 5 20 xdotool search --sync --name "x" windowactivate --sync || exit 1
+runuser -u admin -- env DISPLAY=:0 xdotool search --name "x" || exit 1
+MD
+    run lint "$f"
+    [ "$(grep -c ': unbounded-xdotool-sync: ' <<<"$output")" -eq 1 ]
+    [[ "$output" == *"32-xdo.md:6: unbounded-xdotool-sync"* ]]
+}
+
+@test "permissions-gui/05: XWayland forced, every xdotool --sync bounded, settle wait after each key" {
+    local sc="$REPO_ROOT/tests/integration/permissions-gui/05-tui-help-overlay.md"
+    run lint --strict "$sc"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unbounded-xdotool-sync"* ]]
+    # the launcher runs qterminal on the Qt xcb platform (XWayland)
+    grep -q "env QT_QPA_PLATFORM=xcb /usr/local/bin/qdistro-start-admin-tui" "$sc"
+    # an XWayland proof that can fail: a bounded xdotool search before any key
+    grep -q 'timeout 20 xdotool search --sync --name "Shell No. 1"'"'" "$sc"
+    # every `virsh send-key` is followed, before the next capture, by sleep >= 2
+    python3 - "$sc" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+keys = [i for i, l in enumerate(lines) if l.startswith("virsh send-key")]
+assert len(keys) == 2, keys
+for i in keys:
+    j = next(k for k in range(i + 1, len(lines)) if "screenshot" in lines[k] and "$VMGUI" in lines[k])
+    sl = [float(m.group(1)) for l in lines[i + 1:j] for m in [re.match(r"^sleep ([0-9.]+)\s*$", l)] if m]
+    assert sl and max(sl) >= 2, (i, lines[i + 1:j])
+PY
+    # the misleading claim is gone and its correction is present
+    ! grep -q 'its hash differs from S1' "$sc"
+    grep -q 'proves only that a new frame was captured' "$sc"
+}

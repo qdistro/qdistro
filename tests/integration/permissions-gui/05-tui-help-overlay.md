@@ -2,9 +2,14 @@
 
 <!-- qci:visual: required -->
 
-**What**: in the TUI running in qterminal, press `?` and verify the
-help overlay (a modal over the main view) renders with the expected
-text blocks; press Escape and verify the main view returns intact.
+**What**: in the TUI running in qterminal **under XWayland**, press `?` and
+verify the help overlay (a modal over the main view) renders with the
+expected text blocks; press Escape and verify the main view returns intact.
+
+This is an XWayland opt-in scenario (`QCI_XWAYLAND_E2E=1`). qterminal would
+otherwise start as a native Wayland client (the launcher exports
+`WAYLAND_DISPLAY`), so S1 forces the Qt xcb platform and then proves the
+window is an X client before any input is sent.
 
 **Why**: the help overlay is the only place the full scope vocabulary
 (`1`..`8`) and non-obvious keys (`Ctrl+P` palette, `r` refresh) are
@@ -27,15 +32,28 @@ sleep 1
 
 ## Steps
 
-### S1 — launch TUI, baseline screenshot
+### S1 — launch TUI under XWayland, baseline screenshot
 
 ```bash
 # Repo-supplied launcher; see scenarios 01/02 for the D-Bus-session
-# env reason.
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-tui'
+# env reason. QT_QPA_PLATFORM=xcb makes qterminal an XWayland client: the
+# launcher inherits it (it only re-execs when started as root, and this call
+# already runs as admin). Without it qterminal is native Wayland, xdotool
+# finds no window, and the X focus handoff below is inert.
+$VMEXEC "$VM" 'runuser -u admin -- env QT_QPA_PLATFORM=xcb /usr/local/bin/qdistro-start-admin-tui'
+# XWayland proof, bounded: the window must be found through the X server on
+# :0 within 20 s. Every xdotool --sync in this scenario runs under `timeout`;
+# an unbounded --sync waits forever when no X window matches.
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 timeout 20 xdotool search --sync --name "Shell No. 1"'
+# Settle: the TUI draws its main view after the window maps.
 sleep 3
 $VMGUI "$VM" screenshot-fresh /tmp/05-tui-help-overlay-s1-main.png
 ```
+
+If the bounded `xdotool search` exits non-zero (124 = timed out), qterminal
+is not running as an X client: record **ERROR** (the XWayland setup failed;
+this is not the `?` binding), and include the qterminal environment
+(`tr '\0' '\n' < /proc/$(pgrep -u admin -x qterminal)/environ | grep -E 'QT_QPA|DISPLAY'`).
 
 **Assert (main view):**
 - TUI header reads `qdistro admin approvals (TUI)` with subtitle
@@ -53,8 +71,11 @@ then inject `?` through the virtual keyboard (see AGENTS.md).
 
 ```bash
 # Activate the named XWayland terminal before the evdev burst. This is the
-# blessed focus path; do not replace it with a pixel click.
-$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "Shell No. 1" windowactivate --sync'
+# blessed focus path; do not replace it with a pixel click. Bounded, and its
+# exit status is checked: a non-zero exit means the focus handoff did not
+# happen -- record ERROR, do not send keys into an unknown focus.
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 timeout 20 xdotool search --sync --name "Shell No. 1" windowactivate --sync' \
+  || echo "XWAYLAND-FOCUS-FAILED rc=$?"
 # `?` = Shift+/ at evdev.
 virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_SLASH
 # MANDATORY SETTLE WAIT -- do not drop or shorten it. There is no guest-side
@@ -138,8 +159,9 @@ $VMEXEC "$VM" 'rm -f /home/admin/.local/state/qdistro/qterminal-tui.log'
  again as dismiss keys. Only Escape is asserted here to keep the
  scenario narrow. A broader key-coverage scenario is a possible
  follow-up; don't expand this one in-place.
-- If the `?` key produces nothing, first prove the TUI is alive and that the
- settle wait and the one late re-capture were both done. A fresh S2 (raw
+- If the `?` key produces nothing, first prove the TUI is alive, that the
+ XWayland focus handoff succeeded (the bounded `xdotool` exited 0), and that
+ the settle wait and the one late re-capture were both done. A fresh S2 (raw
  pixels differ from S1) is required but proves nothing about the key: the
  clock alone changes the frame. Do not retry with different key names. Once
  those preconditions hold, report FAIL — a regression in the `question_mark`

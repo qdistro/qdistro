@@ -184,7 +184,10 @@ silences only the success announcement, never a timeout. Set it per call, never
  --sync --name "<window title>" windowactivate --sync` (as the
  right user, with `DISPLAY=:0`) immediately before a `send-key`
  burst so the intended window holds X focus when the evdev event
- arrives. This is the supported, portable contract for this VM
+ arrives. Bound it (`timeout 20 xdotool search --sync ...`) and check its
+ exit status: `--sync` waits forever when no X window matches, e.g. when
+ the client came up as a native Wayland window (qterminal does unless it
+ is launched with `QT_QPA_PLATFORM=xcb`; see permissions-gui/05). This is the supported, portable contract for this VM
  template; do not introduce new scenarios that depend on pixel
  clicks.
 

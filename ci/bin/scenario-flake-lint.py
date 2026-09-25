@@ -34,6 +34,10 @@ found and migrated to the bounded waiter library (ci/lib/guest/gui-waiters.sh):
   backgrounded-wait     a readiness wait (`wait`/`await_*`/`sleep`) sent to the
                         background with `&` — the verdict can be collected before
                         the thing it waits for is ready
+  unbounded-xdotool-sync  `xdotool ... --sync` not run under `timeout`: --sync
+                        waits FOREVER when no X window matches (e.g. the client
+                        came up native Wayland, not XWayland) and hangs the
+                        scenario (permissions-gui/05, 2026-09-25)
 
 This is REPORTING ONLY: it flags smells to drive migration; it does NOT weaken or
 rewrite anything, and exits 0 unless --strict is given. It is the lint-side
@@ -68,6 +72,10 @@ JOURNAL_SCOPED_RE = re.compile(r"--(after-cursor|cursor)\b")
 ISACTIVE_RE = re.compile(r"\bsystemctl\b.*\bis-active\b")
 DOMSTATE_RE = re.compile(r"\bvirsh\b.*\bdomstate\b")
 VIRSH_HEAD_RE = re.compile(r"\bvirsh\b.*\|\s*\S*\bhead\b")
+XDOTOOL_SYNC_RE = re.compile(r"\bxdotool\b.*--sync\b")
+# `timeout [opts] DURATION xdotool` -- the bound must wrap the xdotool itself.
+XDOTOOL_BOUNDED_RE = re.compile(
+    r"\btimeout\s+(?:-{1,2}[A-Za-z-]+(?:[= ]\S+)?\s+)*[0-9.]+[smhd]?\s+xdotool\b")
 # A line is "loop/await context" if it is part of a poll construct.
 LOOP_CTX_RE = re.compile(r"\b(while|until|for|await_[a-z_]+|poll_until|retry)\b")
 # Assertion-ish shell on a line (used for prose-only detection + sleep-before).
@@ -921,6 +929,12 @@ def lint_markdown(path: Path) -> list[tuple[int, str, str]]:
                                      f"write to fixed scratch path {tmp!r} with no "
                                      "scenario/run suffix; use $QCI_SCENARIO_TMPDIR "
                                      "or mktemp so parallel runs don't collide"))
+            if XDOTOOL_SYNC_RE.search(line) and not XDOTOOL_BOUNDED_RE.search(line):
+                findings.append((lineno, "unbounded-xdotool-sync",
+                                 "xdotool --sync waits forever when no X window "
+                                 "matches (a native-Wayland client, a wrong title); "
+                                 "run it as `timeout N xdotool ...` and check the "
+                                 "exit status"))
             if BACKGROUNDED_WAIT_RE.search(line):
                 findings.append((lineno, "backgrounded-wait",
                                  "readiness wait sent to the background with &; the "
