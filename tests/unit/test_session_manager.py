@@ -56,6 +56,8 @@ class _FakeOps:
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
+        self.installed_silo_skills: list[str] = []
+        self.silo_skill_fails_for: set[str] = set()
         # silo name → uid, mirroring the per-silo relay policy fragments
         # under /etc/dbus-1/system.d/ (F4-a).
         self.relay_policies: dict[str, int] = {}
@@ -152,6 +154,11 @@ class _FakeOps:
             import subprocess
             raise subprocess.CalledProcessError(1, ["userdel", name])
         self.users.pop(name, None)
+
+    def install_silo_skill(self, name: str) -> None:
+        if name in self.silo_skill_fails_for:
+            raise OSError("skill installation failed")
+        self.installed_silo_skills.append(name)
 
     # ---- per-silo user-relay D-Bus policy (F4-a) --------------------------
 
@@ -1063,6 +1070,26 @@ class TestStateMachine:
 # ---------------------------------------------------------------------------
 
 class TestPersistence:
+    def test_existing_silos_receive_skill_on_startup(self, ops, tmp_path):
+        old = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        old.create("work", 2000)
+        old.create("scratch", 2001)
+        ops.installed_silo_skills.clear()
+        current = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        current.autostart_pass()
+        assert ops.installed_silo_skills == ["scratch", "work"]
+
+    def test_skill_reconcile_skips_uid_mismatch_and_continues(self, ops, tmp_path):
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        store.create("work", 2000)
+        store.create("scratch", 2001)
+        store.create("other", 2002)
+        ops.installed_silo_skills.clear()
+        ops.users["other"] = 2999
+        ops.silo_skill_fails_for.add("scratch")
+        assert store.reconcile_silo_skills() == ["work"]
+        assert ops.installed_silo_skills == ["work"]
+
     def test_yaml_round_trip(self, ops, tmp_path):
         s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
         s1.create("work", 2000)

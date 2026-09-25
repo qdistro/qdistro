@@ -791,6 +791,9 @@ class _SystemOps:
         # boundary + per-quota target. Falls through (warning only)
         # on non-btrfs hosts so dev VMs without btrfs still work.
         self._convert_home_to_subvolume(name, uid)
+        self.install_silo_skill(name)
+
+    def install_silo_skill(self, name: str) -> None:
         subprocess.run(
             ["/usr/bin/python3", "/usr/libexec/qdistro/qdistro_silo_skill.py",
              str(name)], check=True, timeout=_T_ACCOUNT)
@@ -4478,6 +4481,26 @@ class _SiloStore:
             log.info("linked the launcher unit for silo %r", name)
         return linked
 
+    def reconcile_silo_skills(self) -> list[str]:
+        """Seed image-built rules into homes of silos created before upgrade."""
+        installed: list[str] = []
+        with self._lock:
+            want = [(s.name, s.uid) for s in self._silos.values()
+                    if s.kind == KIND_TIER3_USER]
+        for name, uid in sorted(want):
+            try:
+                # A stale or hand-edited row must never select another uid's
+                # home for a privileged installer invocation.
+                if not self._ops.user_uid_matches(name, uid):
+                    log.error("cannot install silo skill for %r: account uid mismatch", name)
+                    continue
+                self._ops.install_silo_skill(name)
+            except Exception as e:  # noqa: BLE001
+                log.error("could not install silo skill for %r: %s", name, e)
+                continue
+            installed.append(name)
+        return installed
+
     def reconcile_relay_policies(self) -> tuple[list[str], list[str]]:
         """Make the on-disk per-silo relay grants match the silo table.
 
@@ -5493,6 +5516,7 @@ class _SiloStore:
         # sweep below, or a silo this pass would have repaired fails to start
         # on this very boot.
         self.reconcile_silo_launcher_links()
+        self.reconcile_silo_skills()
         # Reclaim any cgroup dirs leaked by a previous stop()'s EBUSY rmdir
         # before we (re)start silos (02/S14a). Runs lock-free internally.
         self.reap_orphan_cgroups()
