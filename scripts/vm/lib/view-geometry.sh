@@ -112,7 +112,7 @@ qci_view_raw_extract() {
     if qci_view_sidecar "$f" >/dev/null; then
         command -v magick >/dev/null 2>&1 || return 5
         read -r rw rh < <(qci_view_raw_dims "$f") || return 2
-        magick "${f}[0]" -crop "${rw}x${rh}+0+0" +repage PNG24:"$out" 2>/dev/null || return 2
+        magick "${f}[0]" -crop "${rw}x${rh}+0+0" +repage -define png:exclude-chunks=date,time PNG24:"$out" 2>/dev/null || return 2
         return 0
     fi
     cp -T -- "$f" "$out"
@@ -217,7 +217,7 @@ qci_view_publish() {
     fi
     if [ "$rc" -eq 0 ]; then
         magick "${raw}[0]" -alpha off -background black -gravity northwest \
-            -extent "${W}x${H}" PNG24:"$stage" 2>/dev/null || rc=2
+            -extent "${W}x${H}" -define png:exclude-chunks=date,time PNG24:"$stage" 2>/dev/null || rc=2
     fi
     if [ "$rc" -eq 0 ]; then
         psha=$(sha256sum -- "$stage" | awk '{print $1}') || rc=2

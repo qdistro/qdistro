@@ -62,8 +62,8 @@ Procedure:
    the same file twice. Click-preview `.raw.png` and click-confirm `.post.png`
    files are frames like any other. Decide that a frame is black, blank, or
    missing something ONLY from the pixels of a frame you have just opened —
-   never from process state, from rejected attempts, from the harness's "same
-   screen pixels" note, or from an earlier frame. Copy a frame together with
+   never from process state, from rejected attempts, from the harness's
+   "same screen pixels" note, or from an earlier frame. Copy a frame together with
    its `.raw` sidecar (`cp F F.raw DEST/`), or use `view-copy`. The harness
    reads your session record afterwards: a PASS or FAIL on a `required`
    scenario whose frames you never opened is recorded ERROR.
