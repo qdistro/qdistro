@@ -29,8 +29,8 @@ SH
 teardown() {
     kill "$HOLDER" 2>/dev/null || true
     wait "$HOLDER" 2>/dev/null || true
-    # The guardian can outlive the shell when interrupted. Stop the actual
-    # recorded holder as well, so this test never leaves a sleeping child.
+    # Stop the recorded runner as well if the launcher was interrupted before
+    # it could forward the signal, so the fixture leaves no sleeping child.
     local pid
     pid=$(cat "$QDWIN_IMG_DIR/.qdistro-vm-run.lock" 2>/dev/null || true)
     [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
