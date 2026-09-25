@@ -672,10 +672,14 @@ remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pa
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 
 shoot 02-fully-booted
-sleep 30
-shoot 03-after-30s
-sleep 30
-shoot 04-after-60s
+if [ -z "${QDISTRO_VERIFY_PARENT:-}" ]; then
+    # The primary boot retains its 60-second stability and persistence window.
+    # Stick extras exercise their bus/checklist and do not repeat that wait.
+    sleep 30
+    shoot 03-after-30s
+    sleep 30
+    shoot 04-after-60s
+fi
 
 #-- 10. Greeter login (N19) + persistence + nested KVM -----------------------
 # qdgreeter forcePasswordFocus() on startup; username is read-only "admin".
