@@ -392,10 +392,19 @@ class LogindWatcher:
                                  session_path)
                     first = False
 
+        resolver = None
+
         def rebind_soon() -> None:
-            task = asyncio.create_task(rebind_session(False))
-            tasks.add(task)
-            task.add_done_callback(completed)
+            # At most one resolver: a resolution in progress (the startup one
+            # or a worker) already repeats until the generation is stable, so
+            # an event during it only dirties the generation. A burst of
+            # logins therefore never queues more than one task.
+            nonlocal resolver
+            if session_lock.locked() or (resolver is not None and not resolver.done()):
+                return
+            resolver = asyncio.create_task(rebind_session(False))
+            tasks.add(resolver)
+            resolver.add_done_callback(completed)
 
         def session_new(session_id: str, path: str) -> None:
             nonlocal membership_gen
@@ -403,8 +412,9 @@ class LogindWatcher:
                 return
             membership_gen += 1
             # A bound session stays valid when someone else logs in; while
-            # unbound (or mid-resolution) the new session may be ours.
-            if session_path is None or session_lock.locked():
+            # unbound the new session may be ours. (Mid-resolution changes
+            # are picked up by the running resolver via the generation.)
+            if session_path is None:
                 rebind_soon()
 
         def session_removed(session_id: str, path: str) -> None:
@@ -412,7 +422,7 @@ class LogindWatcher:
             if not active:
                 return
             membership_gen += 1
-            if path == session_path or session_lock.locked():
+            if path == session_path:
                 rebind_soon()
 
         def subscribe(proxy, signal, callback) -> None:

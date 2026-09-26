@@ -753,3 +753,37 @@ def test_membership_change_during_resolution_is_not_lost(monkeypatch, reconnect_
         watcher._stop_event.set()
         await asyncio.wait_for(task, 1)
     asyncio.run(run())
+
+
+def test_membership_burst_keeps_one_resolver(monkeypatch, reconnect_bus, closed_fds):
+    """codex r2: a burst of SessionNew/SessionRemoved while a resolution is
+    in flight must not queue one task per event; one resolver repeats until
+    the membership is stable, then binds the post-burst session list."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    reconnect_bus.pid_session = False
+    async def run():
+        watcher = LogindWatcher(on_lock=lambda reason: None)
+        task = asyncio.create_task(watcher._main())
+        await _eventually(lambda: watcher.automatic_lock_ready)
+        bus = reconnect_bus.instances[0]
+        baseline = len(asyncio.all_tasks())
+        reconnect_bus.seat_sessions = 1
+        reconnect_bus.gate = asyncio.Event()
+        reconnect_bus.paused = asyncio.Event()
+        bus.manager.emit('session_new', 'current', '/session/current')
+        await asyncio.wait_for(reconnect_bus.paused.wait(), 1)
+        for i in range(500):
+            bus.manager.emit('session_new', f'c{i}', f'/session/c{i}')
+            bus.manager.emit('session_removed', f'c{i}', f'/session/c{i}')
+        assert len(asyncio.all_tasks()) <= baseline + 1, 'one resolver, no per-event tasks'
+        reconnect_bus.gate.set()
+        reconnect_bus.gate = None
+        await _eventually(lambda: bool(bus.session.callbacks.get('lock')))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert len(bus.session.callbacks['lock']) == 1
+        assert len(reconnect_bus.instances) == 1 and closed_fds == []
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
+        assert not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    asyncio.run(run())
