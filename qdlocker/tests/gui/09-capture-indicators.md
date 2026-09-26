@@ -51,6 +51,32 @@ qdlocker_drain_lock_state
 # scenario and remove it in Cleanup.
 SILO=${QDLOCKER_09_SILO:-qdlocker09}
 SILO_UID=${QDLOCKER_09_SILO_UID:-3909}
+# Reclaim THIS scenario's own fixture if an earlier attempt/run in this VM left
+# it behind (qci run full-20260926T153217Z: a driver cleanup that skipped the
+# Step 8 fixture kill left the TERM-ignoring loop in the silo cgroup, so
+# DeleteSilo hit EBUSY and the rerun's CreateSilo failed "silo already
+# exists"). Only the dedicated $SILO name is touched: SIGKILL whatever is left
+# in its cgroup, then Stop + Delete it, exactly as Cleanup does.
+"$QDWIN_VM_EXEC" "$VMNAME" "
+  CG=/sys/fs/cgroup/qdistro-silos/$SILO
+  if runuser -u admin -- busctl --system call \
+       org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+       org.qdistro.SessionManager1 ListSilos 2>/dev/null | grep -Fq '$SILO' \
+     || [ -d \"\$CG\" ]; then
+    echo 'setup: reclaiming leftover fixture silo $SILO' >&2
+    [ -f \"\$CG/cgroup.procs\" ] && xargs -r kill -KILL < \"\$CG/cgroup.procs\" 2>/dev/null || true
+    rm -f /tmp/qdlocker-09-stop-fixture.pid /tmp/qdlocker-09-stop-fixture.log
+    runuser -u admin -- busctl --system call \
+      org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+      org.qdistro.SessionManager1 StopSilo si '$SILO' 0 2>/dev/null || true
+    for i in \$(seq 1 20); do
+      runuser -u admin -- busctl --system call \
+        org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+        org.qdistro.SessionManager1 DeleteSilo s '$SILO' >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+"
 "$QDWIN_VM_EXEC" "$VMNAME" "
   runuser -u admin -- busctl --system call \
     org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
@@ -422,7 +448,10 @@ a failed observer, not as a quiet machine.
 is dim here, the fail-visible property is broken and this is the most serious
 failure this scenario can report.
 **Assert (7.3):** the journal shows the scan being killed — the hard timeout
-fired rather than the scan hanging forever.
+fired rather than the scan hanging forever. vm-exec runs as root and
+qdlocker.service is admin's USER unit, so the query must run as admin
+(`runuser -l admin -c "journalctl --user ..."`, as above); a root
+`journalctl --user` reads root's own user journal and proves nothing.
 
 Recovery (also asserted, so a failure cannot be sticky):
 
