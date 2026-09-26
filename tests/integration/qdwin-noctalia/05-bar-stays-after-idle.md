@@ -225,8 +225,9 @@ PY
 "$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p' > /tmp/05-arm.cur"
 noct_restart
 
-# Fail fast (don't burn the 75s idle wait) if the policy didn't actually arm:
-# the proven smoke asserts the same 'idle policy armed: ... displayOff=60000ms'
+# Fail fast (don't burn the 75s idle wait) if the policy didn't actually arm.
+# THIS WAIT IS CURSOR-SCOPED ON PURPOSE -- see the driver note under this block.
+# The proven smoke asserts the same 'idle policy armed: ... displayOff=60000ms'
 # journal line. Wait (bounded) for it AFTER the restart cursor; a missing line
 # means the write-path/schema is wrong, not that DPMS is slow.
 "$QDWIN_VM_EXEC" "$VMNAME" 'source /tmp/qci-gui-waiters.sh
@@ -235,6 +236,30 @@ cur=$(cat /tmp/05-arm.cur 2>/dev/null)
 await_journal_line_after_cursor "$cur" "idle policy armed:.*displayOff=60000ms" 15 1 _UID=1000' \
     || { echo "FAIL: qdshell did not arm displayOff=60000ms after settings write (schema/path regression?)"; exit 1; }
 ```
+
+> **Driver note (MUST): carry the arm wait over exactly.** When you fold this
+> Setup into your one claimed guest driver, the arm check stays the
+> cursor-scoped wait above, in this order:
+>
+> 1. `cur=$(journalctl _UID=1000 -n0 --show-cursor | sed -n 's/^-- cursor: //p')`
+>    BEFORE the restart (fail if `$cur` is empty);
+> 2. the restart (`runuser -l admin -c "systemctl --user reset-failed qdshell.service qdwin-compositor.service && systemctl --user restart qdshell.service"`);
+> 3. `await_journal_line_after_cursor "$cur" "idle policy armed:.*displayOff=60000ms" 15 1 _UID=1000`
+>    — defined by `/tmp/qci-gui-waiters.sh`, which your driver's first line
+>    already sourced.
+>
+> Do NOT replace step 3 with a tail or time window (`journalctl -n <N> | grep`,
+> `--since '<N> seconds ago'`, a fixed `sleep` and one look). A qdshell restart
+> writes well over a hundred more UID-1000 journal lines (layer-shell maps, QML
+> warnings) within seconds AFTER the arm line, so a tail window misses a line
+> that WAS logged. full-20260926T153217Z-3807077 lost this scenario exactly
+> that way: `sleep 8` then `journalctl _UID=1000 -n 80 | grep` recorded FAIL
+> "qdshell did not arm displayOff=60000ms". Replayed on a fresh VM from a
+> golden of the same main commit (30fc68cf7), 8 s after the restart the
+> `displayOff=60000ms` arm line was present after the cursor but followed by
+> 114 more lines, so `-n 80` held 0 hits. A missing arm line
+> after the cursor-scoped 15 s wait is a real FAIL; a miss from any other
+> shape of check is your driver's error, not the product's.
 
 ## Steps
 
