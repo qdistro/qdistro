@@ -389,13 +389,32 @@ def reconnect_bus(monkeypatch):
             self.path = '/session/current'
 
         async def call_get_session_by_pid(self, pid):
+            if not state.pid_session:
+                raise RuntimeError('org.freedesktop.login1.NoSessionForPID')
             return self.path
+
+        async def call_list_sessions(self):
+            return [('current', logind.os.getuid(), 'admin', 'seat0', self.path)
+                    for _ in range(state.seat_sessions)]
+
+        async def get_preparing_for_sleep(self):
+            return state.preparing
 
     class Session(Signals):
         async def get_user(self):
             return (logind.os.getuid(), '/user/current')
 
-    state = SimpleNamespace(instances=[], fail_connect=0, hang_connect=False)
+        async def get_active(self):
+            return True
+
+        async def get_type(self):
+            return 'wayland'
+
+        async def get_remote(self):
+            return False
+
+    state = SimpleNamespace(instances=[], fail_connect=0, hang_connect=False,
+                            pid_session=True, seat_sessions=0, preparing=False)
 
     class Bus:
         def __init__(self, **kwargs):
@@ -443,7 +462,7 @@ def reconnect_bus(monkeypatch):
     return state
 
 
-@pytest.mark.parametrize('trigger', ['owner', 'disconnect', 'session'])
+@pytest.mark.parametrize('trigger', ['owner', 'disconnect'])
 def test_main_reconnects_and_rejects_stale_callbacks(reconnect_bus, closed_fds, trigger):
     """A logind/bus/session replacement restores pre-suspend locking and its fd."""
     async def run():
@@ -459,10 +478,8 @@ def test_main_reconnects_and_rejects_stale_callbacks(reconnect_bus, closed_fds, 
         assert closed_fds == [], 'restart test must begin with lock confirmation pending'
         if trigger == 'owner':
             old.daemon.emit('name_owner_changed', 'org.freedesktop.login1', ':1.1', ':1.2')
-        elif trigger == 'disconnect':
-            old.disconnected.set()
         else:
-            old.manager.emit('session_removed', 'current', '/session/current')
+            old.disconnected.set()
         await _eventually(lambda: len(reconnect_bus.instances) == 2 and watcher.automatic_lock_ready)
         assert closed_fds == [1000], 'old confirmation task must close only its own inhibitor'
         assert watcher._inhibit_fd == 1100
@@ -599,4 +616,99 @@ def test_session_replacement_resolves_stale_environment(monkeypatch, reconnect_b
         actual = await watcher._subscribe_session(bus, manager)
         assert actual == expected
         assert bool(bus.session.callbacks.get('lock')) == (expected is not None)
+    asyncio.run(run())
+
+
+def test_unrelated_session_login_keeps_sleep_protection(monkeypatch, reconnect_bus,
+                                                       closed_fds):
+    """qci run 260926 qdlocker/04: with no resolvable session, a `runuser -l`
+    login (SessionNew) tore the logind connection down, releasing the sleep
+    delay inhibitor; the PrepareForSleep sent during the reconnect backoff was
+    lost and the guest "suspended" unlocked. A login must not open that gap."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    monkeypatch.setattr(logind, '_RECONNECT_MIN_S', 5.0)
+    reconnect_bus.pid_session = False
+    async def run():
+        locks = []
+        watcher = LogindWatcher(on_lock=locks.append)
+        task = asyncio.create_task(watcher._main())
+        await _eventually(lambda: watcher.automatic_lock_ready)
+        bus = reconnect_bus.instances[0]
+        assert not bus.session.callbacks.get('lock'), '0 candidates: no session bound'
+        bus.manager.emit('session_new', 'c5', '/session/c5')
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert watcher.automatic_lock_ready
+        assert closed_fds == [], 'a login must not release the sleep inhibitor'
+        assert len(reconnect_bus.instances) == 1, 'a login must not reconnect'
+        bus.manager.emit('prepare_for_sleep', True)
+        await _eventually(lambda: locks == [REASON_SUSPEND])
+        watcher.notify_lock_confirmed()
+        await _eventually(lambda: watcher._inhibit_fd is None)
+        assert closed_fds == [1000]
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
+    asyncio.run(run())
+
+
+def test_session_new_binds_late_session_in_place(monkeypatch, reconnect_bus, closed_fds):
+    """A seat session that appears after startup is bound without a reconnect."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    reconnect_bus.pid_session = False
+    async def run():
+        locks = []
+        watcher = LogindWatcher(on_lock=locks.append)
+        task = asyncio.create_task(watcher._main())
+        await _eventually(lambda: watcher.automatic_lock_ready)
+        bus = reconnect_bus.instances[0]
+        reconnect_bus.seat_sessions = 1
+        bus.manager.emit('session_new', 'current', '/session/current')
+        await _eventually(lambda: bool(bus.session.callbacks.get('lock')))
+        bus.session.emit('lock')
+        assert locks == [logind.REASON_LID]
+        # A second unrelated login must not stack a duplicate subscription.
+        bus.manager.emit('session_new', 'c6', '/session/c6')
+        for _ in range(8):
+            await asyncio.sleep(0)
+        assert len(bus.session.callbacks['lock']) == 1
+        assert len(reconnect_bus.instances) == 1 and closed_fds == []
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
+        assert not bus.session.callbacks['lock'], 'teardown drops session subscriptions'
+    asyncio.run(run())
+
+
+def test_bound_session_removal_rebinds_in_place(monkeypatch, reconnect_bus, closed_fds):
+    """Removing the bound session drops its Lock handler, keeps the inhibitor."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    async def run():
+        locks = []
+        watcher = LogindWatcher(on_lock=locks.append)
+        task = asyncio.create_task(watcher._main())
+        await _eventually(lambda: watcher.automatic_lock_ready)
+        bus = reconnect_bus.instances[0]
+        stale_lock = bus.session.callbacks['lock'][0]
+        reconnect_bus.pid_session = False
+        bus.manager.emit('session_removed', 'current', '/session/current')
+        await _eventually(lambda: not bus.session.callbacks['lock'])
+        stale_lock()
+        assert locks == [], 'the removed session\'s Lock handler must be inert'
+        assert len(reconnect_bus.instances) == 1 and closed_fds == []
+        assert watcher.automatic_lock_ready
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
+    asyncio.run(run())
+
+
+def test_connect_during_sleep_preparation_locks(monkeypatch, reconnect_bus, closed_fds):
+    """A generation that connects after PrepareForSleep(true) still locks."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    reconnect_bus.preparing = True
+    async def run():
+        locks = []
+        watcher = LogindWatcher(on_lock=locks.append)
+        task = asyncio.create_task(watcher._main())
+        await _eventually(lambda: locks == [REASON_SUSPEND])
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
     asyncio.run(run())
