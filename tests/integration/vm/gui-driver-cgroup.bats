@@ -17,4 +17,8 @@ load helpers
     assert_output_contains "PASS forked orphans cannot act after contender"
     assert_output_contains "PASS intentional completion preserves detached app without holding lock"
     assert_output_contains "PASS registered worker holds claim after owner exit"
+    assert_output_contains "PASS owner death during job handoff kills stopped worker"
+    assert_output_contains "PASS ordinary completion removes empty scope and marker"
+    assert_output_contains "PASS refused claim cleans its scope and marker"
+    assert_output_contains "PASS failed setup removes empty scope without following marker"
 }

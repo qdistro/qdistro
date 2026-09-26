@@ -882,9 +882,13 @@ bg_log() {
 # Its holders stay in the parent cgroup. Unexpected owner or guardian death
 # triggers cgroup.kill, which also catches children that fork and reparent
 # between process scans. A registered bg_start job moves out of that scope
-# while stopped, before it runs. A deliberate qci_claim_done leaves detached
+# while stopped, before it runs. Its pending record remains killable by the
+# guardians until CONT succeeds and a job record completes the handoff.
+# A deliberate qci_claim_done leaves detached
 # apps in the scope; they never inherit the flock. A missing or unwritable
-# cgroup fails the claim closed. The /proc walker below is used only by the
+# cgroup fails the claim closed. Detached cleaners remove the marker and
+# empty scope after both guardians finish; a preserved app delays cleanup
+# until it exits. The /proc walker below is used only by the
 # unprivileged host bats suite, which cannot create a delegated cgroup.
 # FAIL CLOSED: each of the two watches the other. If one dies (SIGKILL)
 # while the driver shell lives, the survivor, which still holds the lock,
@@ -924,6 +928,7 @@ _QCI_CLAIM_POLL=0.2
 _QCI_CLAIM_HOLDER='
 self=$1 role=$2 lock=$3 mode=$4 owner=$5 ostart=$6 poll=$7
 scope=$8 done_marker=$9 partner=${10:-} pstart=${11:-}
+other=${12:-} otherstart=${13:-}
 reg=$lock.jobs dir=${lock%/*}
 trap "" TERM INT HUP
 alive() {
@@ -945,9 +950,24 @@ held_for() {
     alive "$owner" "$ostart" && return 0
     [ -f "$reg" ] || return 1
     while read -r kind pid start tag; do
-        [ "$kind" = job ] && alive "$pid" "$start" && return 0
+        case $kind in job|pending) alive "$pid" "$start" && return 0 ;; esac
     done <"$reg"
     return 1
+}
+ready_job() {
+    [ -f "$reg" ] || return 1
+    while read -r kind rpid rstart tag; do
+        [ "$kind" = job ] && [ "$rpid" = "$1" ] && [ "$rstart" = "$2" ] && return 0
+    done <"$reg"
+    return 1
+}
+kill_pending_jobs() {
+    [ -f "$reg" ] || return 0
+    while read -r kind jpid jstart tag; do
+        [ "$kind" = pending ] || continue
+        ready_job "$jpid" "$jstart" && continue
+        alive "$jpid" "$jstart" && kill -KILL "$jpid" 2>/dev/null || true
+    done <"$reg"
 }
 completed() {
     value=""
@@ -968,6 +988,23 @@ drain_scope() {
         sleep "$poll"
     done
 }
+clean_after_holders() {
+    # This child has no flock fd. Both guardians must be gone before the
+    # marker can disappear; detached apps may keep the cgroup populated.
+    while alive "$partner" "$pstart" || alive "$other" "$otherstart"; do
+        sleep "$poll"
+    done
+    while [ -n "$scope" ] && [ -d "$scope" ]; do
+        populated=""
+        while read -r key value; do
+            case $key in populated) populated=$value ;; esac
+        done <"$scope/cgroup.events" 2>/dev/null || { sleep "$poll"; continue; }
+        [ "$populated" = 0 ] || { sleep "$poll"; continue; }
+        rmdir -- "$scope" 2>/dev/null && break
+        sleep "$poll"
+    done
+    rm -f -- "$done_marker"
+}
 # Remove a waiting advertisement the (dead) owner left: tokens carry the
 # owner pid as <name>.<owner>.<nonce>.
 drop_waiting() {
@@ -979,7 +1016,9 @@ drop_waiting() {
 is_job() {
     [ -f "$reg" ] || return 1
     while read -r kind jpid jstart tag; do
-        [ "$kind" = job ] && [ "$jpid" = "$1" ] && [ "$jstart" = "$2" ] && return 0
+        case $kind in job|pending)
+            [ "$jpid" = "$1" ] && [ "$jstart" = "$2" ] && return 0 ;;
+        esac
     done <"$reg"
     return 1
 }
@@ -1067,11 +1106,16 @@ watch() {
         if [ -n "$scope" ]; then
             if [ -n "$partner" ] && ! alive "$partner" "$pstart"; then
                 drain_scope || { sleep "$poll"; continue; }
+                kill_pending_jobs
             elif ! alive "$owner" "$ostart" && ! completed; then
                 drain_scope || { sleep "$poll"; continue; }
+                kill_pending_jobs
+            elif ! alive "$owner" "$ostart"; then
+                kill_pending_jobs
             fi
             if ! held_for; then
                 completed || drain_scope || { sleep "$poll"; continue; }
+                kill_pending_jobs
                 break
             fi
             sleep "$poll"
@@ -1093,6 +1137,10 @@ watch() {
             # snapshot pins those identities so they are still drained.
             kill_driver_scope
         fi
+        if ! alive "$owner" "$ostart" \
+            || { [ -n "$partner" ] && ! alive "$partner" "$pstart"; }; then
+            kill_pending_jobs
+        fi
         if ! held_for; then
             # Owner death can happen after the last explicit alive check.
             # Drain the pinned scope on this final path before flock closes.
@@ -1103,7 +1151,17 @@ watch() {
     done
     drop_waiting
 }
+if [ "$role" = cleaner ]; then
+    clean_after_holders
+    exit 0
+fi
 if [ "$role" = guard ]; then
+    # Both guardians start a cleaner, so abrupt loss of either during its
+    # launch cannot strand an empty scope. Each cleaner waits for BOTH
+    # guardians before it may remove the shared marker or cgroup.
+    sh -c "$self" qci-claim-cleaner "$self" cleaner "$lock" "$mode" "$owner" "$ostart" "$poll" \
+        "$scope" "$done_marker" "$partner" "$pstart" "$$" "$(start_of $$)" \
+        9<&- >/dev/null 2>&1 &
     watch
     exit 0
 fi
@@ -1119,6 +1177,10 @@ sh -c "$self" qci-driver-claim "$self" guard "$lock" "$mode" "$owner" "$ostart" 
     "$scope" "$done_marker" "$$" "$(start_of $$)" >/dev/null &
 partner=$!
 pstart=$(start_of "$partner") || pstart=""
+# A detached cleaner does not inherit fd 9 or the claimant output pipe.
+sh -c "$self" qci-claim-cleaner "$self" cleaner "$lock" "$mode" "$owner" "$ostart" "$poll" \
+    "$scope" "$done_marker" "$$" "$(start_of $$)" "$partner" "$pstart" \
+    9<&- >/dev/null 2>&1 &
 echo "held $$ $partner" || exit 1
 exec >/dev/null
 watch
@@ -1203,6 +1265,7 @@ _qci_claim_describe() {
             driver) printf '  held for: the driver shell, pid %s\n' "$pid" ;;
             job) printf '  held for: bg_start job %s, pid %s (stop it, and what it started)\n' \
                     "$tag" "$pid" ;;
+            pending) printf '  held for: pending bg_start job %s, pid %s\n' "$tag" "$pid" ;;
             *) continue ;;
         esac
         n=$((n + 1))
@@ -1269,7 +1332,7 @@ _qci_claim_register_job() {
         sleep 0.05
     done
     if [ "$state" != T ] || ! start=$(_qci_proc_start "$pid") \
-        || ! printf 'job %s %s %s\n' "$pid" "$start" "$tag" >>"$QCI_DRIVER_CLAIM_PATH.jobs"; then
+        || ! printf 'pending %s %s %s\n' "$pid" "$start" "$tag" >>"$QCI_DRIVER_CLAIM_PATH.jobs"; then
         kill -KILL "$pid" 2>/dev/null
         printf 'ERROR: bg_start: cannot record job %s (pid %s, state %s) in %s.jobs; it was killed before it ran, stopping this driver\n' \
             "$tag" "$pid" "${state:-gone}" "${QCI_DRIVER_CLAIM_PATH:-?}" >&2
@@ -1282,6 +1345,13 @@ _qci_claim_register_job() {
         _qci_driver_stop 1
     fi
     kill -CONT "$pid"
+    # Promotion comes AFTER CONT. If the owner dies at any earlier point,
+    # guardians kill this identity even if it already moved out of the scope.
+    if ! printf 'job %s %s %s\n' "$pid" "$start" "$tag" >>"$QCI_DRIVER_CLAIM_PATH.jobs"; then
+        kill -KILL "$pid" 2>/dev/null || true
+        printf 'ERROR: bg_start: cannot complete job %s handoff; stopping this driver\n' "$tag" >&2
+        _qci_driver_stop 1
+    fi
 }
 
 _qci_claim_scope_prepare() {
@@ -1357,7 +1427,14 @@ qci_claim_driver() {
         exit 2
     fi
     marker=$lock.done.$me.$start
-    if ! _qci_claim_safe_file "$marker" || ! : >"$marker"; then
+    if ! _qci_claim_safe_file "$marker"; then
+        [ -z "$QCI_DRIVER_CLAIM_SCOPE" ] || rmdir -- "$QCI_DRIVER_CLAIM_SCOPE" 2>/dev/null || true
+        printf 'ERROR: qci_claim_driver: cannot prepare completion marker %s\n' "$marker" >&2
+        exit 2
+    fi
+    if ! : >"$marker"; then
+        rm -f -- "$marker" 2>/dev/null || true
+        [ -z "$QCI_DRIVER_CLAIM_SCOPE" ] || rmdir -- "$QCI_DRIVER_CLAIM_SCOPE" 2>/dev/null || true
         printf 'ERROR: qci_claim_driver: cannot prepare completion marker %s\n' "$marker" >&2
         exit 2
     fi
@@ -1373,11 +1450,13 @@ qci_claim_driver() {
         0) ;;
         75)
             [ -z "$QCI_DRIVER_CLAIM_SCOPE" ] || rmdir -- "$QCI_DRIVER_CLAIM_SCOPE" 2>/dev/null || true
+            rm -f -- "$marker"
             printf 'ERROR: a second guest driver is already running: %s\n' "$lock" >&2
             _qci_claim_describe "$lock" >&2
             exit 1 ;;
         *)
             [ -z "$QCI_DRIVER_CLAIM_SCOPE" ] || rmdir -- "$QCI_DRIVER_CLAIM_SCOPE" 2>/dev/null || true
+            rm -f -- "$marker"
             printf 'ERROR: qci_claim_driver: cannot open %s\n' "$lock" >&2
             exit 2 ;;
     esac
