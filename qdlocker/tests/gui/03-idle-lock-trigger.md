@@ -27,13 +27,10 @@ case "$(qdlocker_ctrl status 2>/dev/null)" in
 esac
 
 # Shorten the idle threshold so the scenario doesn't wall-clock wait for the
-# default 5min (QDLOCKER_IDLE_MS=300000). 8s — NOT 3s — is deliberate: the
-# setup restart + vm-exec round-trips can take >3s, so a 3s threshold let the
-# idle timer fire and lock the screen DURING setup, before the baseline check
-# could read the unlocked state (the test raced itself). 8s is comfortably
-# larger than the setup+round-trip budget yet still short enough to exercise.
-# The `idle.conf` name sorts AFTER the GUI-lane `90-ci-gui.conf` dropin (which
-# disables idle for ordinary scenarios), so this override wins for THIS test.
+# default 5min (QDLOCKER_IDLE_MS=300000). The `idle.conf` name sorts AFTER the
+# GUI-lane `90-ci-gui.conf` dropin (which disables idle for ordinary
+# scenarios), so this override wins for THIS test. Only the drop-in is written
+# here; the restart that APPLIES it is in Step 1 (see there for why).
 "$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
   mkdir -p ~/.config/systemd/user/qdlocker.service.d
   cat > ~/.config/systemd/user/qdlocker.service.d/idle.conf <<EOF
@@ -41,29 +38,43 @@ esac
 Environment=QDLOCKER_IDLE_MS=8000
 EOF
   systemctl --user daemon-reload
-  systemctl --user restart qdlocker.service
 '"
-sleep 2
-
-# Reset the idle counter immediately before reading the baseline: a lone Shift
-# press (no text side-effect on the focused desktop) generates input so the 8s
-# idle window restarts at ~0 and cannot fire during the baseline read below.
-qdwin_qmp_key shift down; sleep 0.05; qdwin_qmp_key shift up
-qdlocker_ctrl status   # baseline — must be locked=False
 ```
 
 ## Steps
 
-### Step 1 — confirm baseline unlocked
+### Step 1 — apply the 8s threshold and confirm baseline unlocked
+
+The 8s idle timer starts counting the moment the restarted qdlocker binds, and
+a keypress only RESETS it — it never unlocks. So the restart, the resetting
+keypress and the baseline read must all happen inside one 8s window. (8s,
+not 3s, leaves room for the restart and the vm-exec round-trips of this block
+— a 3s threshold let the timer fire during setup.)
+
+**Run the whole block below as a SINGLE command** (one tool call; a guest-side
+driver must do it in one uninterrupted phase) — do NOT restart qdlocker in one
+phase and read the baseline after an agent round-trip or a `*-go` handshake.
+In qci run full-20260926T153217Z the driver restarted qdlocker, then waited
+15 s (16 s on the retry) for the agent's `setup-go` before the baseline read;
+the idle timer had long fired, so 1.1 read `locked=True` on both attempts — a
+HARNESS artifact, not a product bug.
 
 ```bash
-qdlocker_ctrl status
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service'
+sleep 2
+# A lone Shift press (no text side-effect on the focused desktop) restarts the
+# 8s idle window at ~0 so it cannot fire during the baseline read below.
+qdwin_qmp_key shift down; sleep 0.05; qdwin_qmp_key shift up
+qdlocker_ctrl status   # baseline — must be locked=False
 qdwin_screenshot /tmp/qdlocker-03-step1-baseline.png
 ```
 
 **Assert (1.1):** `locked=False`. If the locker came up locked-by-default
 (`initially_locked=True` from `qdwin_locker_v1.ready`), this scenario
-is meaningless — abort and run after a clean unlock cycle.
+is meaningless — abort and run after a clean unlock cycle. The screenshot is
+supporting evidence only (`qci:visual: none`); it is taken after the status
+read.
 
 ### Step 2 — wait 9s without touching the keyboard/pointer
 

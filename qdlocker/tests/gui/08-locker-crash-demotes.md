@@ -57,6 +57,17 @@ black frame; under `Restart=always`, the replacement locker can rebind
 before the screenshot. The load-bearing demotion proof is Step 3, and the
 fail-safe locked-state proof is Step 4/5.
 
+Expect the Step 2 frame to show the **recovered lock UI** more often than
+black: systemd rebinds the locker ~2.5 s after the kill, and `vm-gui`
+rejects near-black captures as a stale framebuffer and retries, so the frame it
+accepts is usually taken after the rebind. Grade the Step 2 frame from its own
+pixels — never from what this step "should" show. If Step 5's frame is later
+reported as showing the SAME SCREEN PIXELS as Step 2, that means both show the
+same (normally recovered) lock screen; describe Step 2's actual content before
+drawing any conclusion from that note. (qci run full-20260926T153217Z: both
+frames showed the clock + password field, yet the driver described Step 2 as
+black and then failed 5.2 as "identical to the black frame".)
+
 ### Step 3 — journal confirms demote-on-disconnect
 
 ```bash
@@ -97,6 +108,18 @@ compositor was still locked; the fresh locker inherited that state via
 `ready(initially_locked=1)`).
 **Assert (5.2):** screenshot shows the qdlocker UI again — the fresh
 locker's Qt toplevel was promoted to the lock layer.
+**Assert (5.3):** the compositor journal shows the fresh locker's toplevel
+promoted AFTER the demotion — a `promoted locker toplevel handle=N to
+lock_layer` line whose handle differs from the demoted one and which follows
+the `demoted locker toplevel ... via locker_disconnect` line:
+
+```bash
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"2 minutes ago\" --no-pager"' \
+  | grep -E 'demoted locker toplevel .*locker_disconnect|promoted locker toplevel handle=[0-9]+ to lock_layer'
+```
+
+5.3 is additive corroboration for 5.2; it does not replace the visual check.
 
 ### Step 6 — unlock through recovered locker
 
