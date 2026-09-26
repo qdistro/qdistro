@@ -736,16 +736,21 @@ bg_start() {
     # has closed them: a `bg_start` of a request that waits for an approval
     # then hangs its own vm-exec until the approval that can only come after
     # it (permissions-gui/44 and /46, full-20260922T193137Z-881799).
-    printf -v script '{ ( eval "$QCI_BG_CMD" ) > %q %s < /dev/null; echo $? > %q; mv -f %q %q; } < /dev/null > /dev/null 2>&1 & echo $! > %q' \
-        "$base.log" "$errspec" "$base.rc.part" "$base.rc.part" "$base.rc" "$base.pid"
+    # Under a driver claim the job is a worker of the driver and keeps the
+    # claim until it exits (qci_claim_driver). It must be on record BEFORE it
+    # runs anything, or a driver killed in between would release the claim
+    # with the job already filing requests: so the group STOPS itself first,
+    # and _qci_claim_register_job continues it once its record is written.
+    local gate=''
+    [ "${QCI_DRIVER_CLAIM_DEPTH:-0}" -gt 0 ] && gate='kill -STOP "$BASHPID"; '
+    printf -v script '{ %s( eval "$QCI_BG_CMD" ) > %q %s < /dev/null; echo $? > %q; mv -f %q %q; } < /dev/null > /dev/null 2>&1 & echo $! > %q' \
+        "$gate" "$base.log" "$errspec" "$base.rc.part" "$base.rc.part" "$base.rc" "$base.pid"
     if [ "$user" = "-" ] || [ "$user" = "$(id -un)" ]; then
         QCI_BG_CMD=$cmd bash -c "$script" || rc=$?
     else
         runuser -u "$user" -- env "QCI_BG_CMD=$cmd" bash -c "$script" || rc=$?
     fi
-    # The job is a worker of the driver: it keeps the driver's claim until it
-    # exits (qci_claim_driver). An app it daemonized is not the job.
-    _qci_claim_register_job "$tag" "$base.pid"
+    [ -z "$gate" ] || [ "$rc" -ne 0 ] || _qci_claim_register_job "$tag" "$base.pid"
     return "$rc"
 }
 
@@ -855,28 +860,39 @@ bg_log() {
 # app running, the app kept the lock, and every retry was refused "a second
 # guest driver is already running" with no driver alive (permissions-gui/04
 # and /44, qdwin gui/16, full-20260926T153217Z-3807077).
-# Now a HOLDER keeps the lock: flock(1) running _QCI_CLAIM_WAITER, both with
-# the lock descriptor and detached stdio (qga guest-exec waits for every
-# holder of the driver's output pipe; the holder is none). The waiter
-# ignores TERM/INT/HUP and keeps the lock while EITHER
+# Now a HOLDER keeps the lock: two sh processes (_QCI_CLAIM_HOLDER), a
+# parent that takes the flock on its own descriptor and a guard child that
+# inherits it, both with detached stdio (qga guest-exec waits for every
+# holder of the driver's output pipe; the holder is none) and both ignoring
+# TERM/INT/HUP. Each keeps the lock while EITHER
 #   - the driver shell is alive, by (pid, start time) from /proc — a zombie
 #     is dead, as the old fd was released at exit, not at reaping; OR
 #   - a bg_start job the driver started is alive. bg_start registers its job
-#     (pid, start time, tag) in <lock>.jobs. A job is a worker of the driver
+#     (pid, start time, tag) in <lock>.jobs BEFORE the job runs its command
+#     (the job waits stopped until then). A job is a worker of the driver
 #     and may still file or hold a broker request, so a retry must not run
 #     beside it. An app the driver merely LAUNCHED (not through bg_start, or
 #     one a bg_start launcher daemonized) is not registered and holds nothing:
 #     the retry's Setup stops it.
 # The refusal lists the live processes the claim is held for, so a retry
 # knows exactly what to stop.
-# If the holder itself dies while the driver lives (SIGKILL), the lock is
-# gone; the driver notices at its next bg_start or qci_host_step, and stops.
+# FAIL CLOSED: each of the two watches the other. If one dies (SIGKILL)
+# while the driver shell lives, the survivor, which still holds the lock,
+# SIGKILLs the driver shell and keeps the lock until it is dead — so a
+# contender can never run beside ANY later command of that driver. Only
+# killing both at the same instant (which also no tree kill does without
+# killing the driver) gets past this. The driver also checks both at its
+# next bg_start / qci_host_step.
+# When the driver shell is dead, the holder removes a `waiting` advertisement
+# that driver left (see qci_host_step), so the host never acts on a step of
+# a dead driver.
 #
 # The lock and <lock>.jobs are regular files owned by the claiming user with
 # one link. /tmp/qci/<slug>/ is world-writable (sticky): a file another uid
 # created there first is theirs to unlink and replace under a live holder,
 # so the claim refuses one (exit 2), and creates its own without following a
-# symlink. The sticky bit then stops anyone else from swapping it.
+# symlink. The sticky bit then stops anyone else from swapping it; a
+# directory without it must not be group- or other-writable.
 #
 # The release is up to one poll late. A contender that finds the lock held
 # retries for QCI_DRIVER_CLAIM_GRACE seconds (default 2) before it refuses, so
@@ -884,12 +900,18 @@ bg_log() {
 # lag. The retry only delays a refusal; it never takes a lock a live holder
 # has.
 _QCI_CLAIM_POLL=0.2
-# $1 owner pid, $2 owner start time (field 22 of /proc/<pid>/stat),
-# $3 jobs registry, $4 poll. POSIX sh; `read` and the expansions are
-# builtins, so the only fork per poll is the `sleep`.
+# sh -c "$_QCI_CLAIM_HOLDER" qci-driver-claim <self> <role> <lock> <flock-mode>
+#     <owner-pid> <owner-start> <poll> [<partner-pid> <partner-start>]
+# <self> is this script's own text (the holder starts the guard with it);
+# <role> is `holder` (take the lock, start the guard, announce) or `guard`;
+# <flock-mode> is `-n` or a -w timeout in seconds. POSIX sh; `read` and the
+# expansions are builtins, so the only fork per poll is the `sleep`.
+# Exit 75: the lock is held by someone else; 2: cannot open it; 1: the owner
+# died before the lock was taken.
 # shellcheck disable=SC2016
-_QCI_CLAIM_WAITER='
-owner=$1 ostart=$2 reg=$3 poll=$4
+_QCI_CLAIM_HOLDER='
+self=$1 role=$2 lock=$3 mode=$4 owner=$5 ostart=$6 poll=$7 partner=${8:-} pstart=${9:-}
+reg=$lock.jobs dir=${lock%/*}
 trap "" TERM INT HUP
 alive() {
     want=$2 st=""
@@ -900,6 +922,12 @@ alive() {
     case "$1" in Z|X|x|"") return 1 ;; esac
     [ "${20:-}" = "$want" ]
 }
+start_of() {
+    st=""
+    { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+    set -f; set -- ${st##*") "}; set +f
+    printf "%s" "${20:-}"
+}
 held_for() {
     alive "$owner" "$ostart" && return 0
     [ -f "$reg" ] || return 1
@@ -908,10 +936,42 @@ held_for() {
     done <"$reg"
     return 1
 }
+# Remove a waiting advertisement the (dead) owner left: tokens carry the
+# owner pid as <name>.<owner>.<nonce>.
+drop_waiting() {
+    tok=""
+    # The token is written without a newline: read fails at EOF but fills tok.
+    { read -r tok <"$dir/waiting" || [ -n "$tok" ]; } 2>/dev/null || return 0
+    case $tok in *".$owner."*) rm -f "$dir/waiting" ;; esac
+}
+watch() {
+    while held_for; do
+        if [ -n "$partner" ] && ! alive "$partner" "$pstart" && alive "$owner" "$ostart"; then
+            kill -KILL "$owner" 2>/dev/null
+        fi
+        sleep "$poll"
+    done
+    drop_waiting
+}
+if [ "$role" = guard ]; then
+    watch
+    exit 0
+fi
+exec 9<"$lock" || exit 2
+if [ "$mode" = -n ]; then
+    flock -n -E 75 9 || exit $?
+else
+    flock -w "$mode" -E 75 9 || exit $?
+fi
 alive "$owner" "$ostart" || exit 1
-echo "held $$" || exit 1
+# Our stdout is the claimant'"'"'s pipe: the guard must not keep it.
+sh -c "$self" qci-driver-claim "$self" guard "$lock" "$mode" "$owner" "$ostart" "$poll" \
+    "$$" "$(start_of $$)" >/dev/null &
+partner=$!
+pstart=$(start_of "$partner") || pstart=""
+echo "held $$ $partner" || exit 1
 exec >/dev/null
-while held_for; do sleep "$poll"; done
+watch
 exit 0
 '
 
@@ -939,7 +999,8 @@ _qci_claim_safe_file() {
     mode=$(stat -c '%A %u' -- "$dir" 2>/dev/null) || return 1
     case $mode in
         d????????[tT]\ *) ;;                 # sticky: only the owner unlinks
-        d???????w?\ *) return 1 ;;           # others-writable, not sticky
+        d????w????\ *|d???????w?\ *)
+            return 1 ;;                      # group/others-writable, not sticky
         d*) ;;
         *) return 1 ;;                       # not a directory (or a symlink)
     esac
@@ -956,25 +1017,24 @@ _qci_claim_safe_file() {
     return 1
 }
 
-# _qci_claim_take <lock> <owner-pid> <owner-start> <flock-mode...>
-# Start the holder. Returns 0 when it announced the lock (QCI_DRIVER_CLAIM_HOLDER
-# is its pid), 75 when the lock is held by someone else, 2 otherwise.
+# _qci_claim_take <lock> <owner-pid> <owner-start> <-n | wait-seconds>
+# Start the holder. Returns 0 when it announced the lock
+# (QCI_DRIVER_CLAIM_HOLDER is "<holder-pid> <guard-pid>"), 75 when the lock is
+# held by someone else, 2 otherwise.
 _qci_claim_take() {
-    local lock=$1 owner=$2 start=$3 rd line fpid rc=0
-    shift 3
-    if ! exec {rd}< <(exec flock "$@" -E 75 "$lock" \
-            sh -c "$_QCI_CLAIM_WAITER" qci-driver-claim "$owner" "$start" "$lock.jobs" \
-            "$_QCI_CLAIM_POLL" </dev/null 2>/dev/null); then
+    local lock=$1 owner=$2 start=$3 mode=$4 rd line fpid rc=0
+    if ! exec {rd}< <(exec sh -c "$_QCI_CLAIM_HOLDER" qci-driver-claim "$_QCI_CLAIM_HOLDER" \
+            holder "$lock" "$mode" "$owner" "$start" "$_QCI_CLAIM_POLL" \
+            </dev/null 2>/dev/null); then
         return 2
     fi
     fpid=$!
     IFS= read -r -u "$rd" line || line=""
     exec {rd}<&-
-    case $line in
-        'held '[0-9]*)
-            QCI_DRIVER_CLAIM_HOLDER=${line#held }
-            return 0 ;;
-    esac
+    if [[ "$line" =~ ^held\ ([0-9]+)\ ([0-9]+)$ ]]; then
+        QCI_DRIVER_CLAIM_HOLDER="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+        return 0
+    fi
     wait "$fpid" 2>/dev/null || rc=$?
     [ "$rc" -eq 75 ] && return 75
     return 2
@@ -1008,29 +1068,63 @@ _qci_driver_stop() {
 }
 
 # _qci_claim_check — when this process tree holds a claim, stop the driver if
-# the claim's holder has died (the lock may already be someone else's).
+# either of the claim's two holder processes has died (the survivor is
+# about to SIGKILL this driver anyway; do not start more work meanwhile).
 _qci_claim_check() {
-    local cur
+    local p s pids starts i
     [ "${QCI_DRIVER_CLAIM_DEPTH:-0}" -gt 0 ] || return 0
-    cur=$(_qci_proc_start "${QCI_DRIVER_CLAIM_HOLDER:-x}") || cur=""
-    if [ -z "$cur" ] || [ "$cur" != "${QCI_DRIVER_CLAIM_HOLDER_START:-}" ]; then
-        printf 'ERROR: qci_claim_driver: the claim on %s was lost (its holder, pid %s, is gone); stopping this driver\n' \
-            "${QCI_DRIVER_CLAIM_PATH:-?}" "${QCI_DRIVER_CLAIM_HOLDER:-?}" >&2
-        _qci_driver_stop 1
-    fi
+    read -r -a pids <<<"${QCI_DRIVER_CLAIM_HOLDER:-}"
+    read -r -a starts <<<"${QCI_DRIVER_CLAIM_HOLDER_START:-}"
+    for i in 0 1; do
+        p=${pids[$i]:-x}
+        s=$(_qci_proc_start "$p") || s=""
+        if [ -z "$s" ] || [ "$s" != "${starts[$i]:-}" ]; then
+            printf 'ERROR: qci_claim_driver: the claim on %s was lost (its holder, pid %s, is gone); stopping this driver\n' \
+                "${QCI_DRIVER_CLAIM_PATH:-?}" "$p" >&2
+            _qci_driver_stop 1
+        fi
+    done
     return 0
 }
 
-# _qci_claim_register_job <tag> <pid-file> — record a bg_start job as a
-# worker of the claim (see above). A job that already exited needs no record.
+# _qci_proc_state <pid> — print the one-letter state from /proc/<pid>/stat.
+_qci_proc_state() {
+    local st f
+    st=""
+    { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+    f=()
+    read -r -a f <<<"${st##*") "}" || true
+    printf '%s' "${f[0]:-}"
+}
+
+# _qci_claim_register_job <tag> <pid-file> — the job (bg_start's group) has
+# stopped itself before running its command. Record it as a worker of the
+# claim, then continue it. If it cannot be recorded, kill it (it never ran)
+# and stop the driver without teardown: an unrecorded worker would outlive
+# the claim.
 _qci_claim_register_job() {
-    local tag=$1 pid start
-    [ "${QCI_DRIVER_CLAIM_DEPTH:-0}" -gt 0 ] || return 0
-    pid=""
-    { read -r pid <"$2"; } 2>/dev/null || return 0
-    case $pid in ''|*[!0-9]*) return 0 ;; esac
-    start=$(_qci_proc_start "$pid") || return 0
-    printf 'job %s %s %s\n' "$pid" "$start" "$tag" >>"$QCI_DRIVER_CLAIM_PATH.jobs"
+    local tag=$1 pid="" start i state=""
+    { read -r pid <"$2"; } 2>/dev/null || pid=""
+    case $pid in
+        ''|*[!0-9]*)
+            printf 'ERROR: bg_start: no pid recorded for job %s; stopping this driver\n' "$tag" >&2
+            _qci_driver_stop 1 ;;
+    esac
+    # Continue only a job that is already stopped: a CONT that overtook its
+    # STOP would leave it stopped for ever.
+    for i in $(seq 1 100); do
+        state=$(_qci_proc_state "$pid") || state=""
+        [ "$state" = T ] && break
+        sleep 0.05
+    done
+    if [ "$state" != T ] || ! start=$(_qci_proc_start "$pid") \
+        || ! printf 'job %s %s %s\n' "$pid" "$start" "$tag" >>"$QCI_DRIVER_CLAIM_PATH.jobs"; then
+        kill -KILL "$pid" 2>/dev/null
+        printf 'ERROR: bg_start: cannot record job %s (pid %s, state %s) in %s.jobs; it was killed before it ran, stopping this driver\n' \
+            "$tag" "$pid" "${state:-gone}" "${QCI_DRIVER_CLAIM_PATH:-?}" >&2
+        _qci_driver_stop 1
+    fi
+    kill -CONT "$pid"
 }
 
 qci_claim_driver() {
@@ -1074,7 +1168,7 @@ qci_claim_driver() {
         # Maybe the previous driver has just exited and its holder has not
         # noticed yet (one poll). Wait that long, never longer.
         rc=0
-        _qci_claim_take "$lock" "$me" "$start" -w "${QCI_DRIVER_CLAIM_GRACE:-2}" || rc=$?
+        _qci_claim_take "$lock" "$me" "$start" "${QCI_DRIVER_CLAIM_GRACE:-2}" || rc=$?
     fi
     case $rc in
         0) ;;
@@ -1086,10 +1180,16 @@ qci_claim_driver() {
             printf 'ERROR: qci_claim_driver: cannot open %s\n' "$lock" >&2
             exit 2 ;;
     esac
-    if ! QCI_DRIVER_CLAIM_HOLDER_START=$(_qci_proc_start "$QCI_DRIVER_CLAIM_HOLDER"); then
+    local hp gp hs gs
+    read -r hp gp <<<"$QCI_DRIVER_CLAIM_HOLDER"
+    if ! hs=$(_qci_proc_start "$hp") || ! gs=$(_qci_proc_start "$gp"); then
         printf 'ERROR: qci_claim_driver: the holder of %s died at once\n' "$lock" >&2
         exit 2
     fi
+    QCI_DRIVER_CLAIM_HOLDER_START="$hs $gs"
+    # A `waiting` advertisement left by a dead driver must not be read as
+    # this driver's step (qci_host_step).
+    rm -f -- "$dir/waiting"
     # We hold the lock, so every earlier record is dead; start a fresh one.
     if ! printf 'driver %s %s -\n' "$me" "$start" >"$lock.jobs"; then
         printf 'ERROR: qci_claim_driver: cannot write %s.jobs\n' "$lock" >&2
@@ -1116,8 +1216,8 @@ qci_claim_driver() {
 #     the host which marker the driver was waiting for.
 #
 # qci_host_step <name> [timeout]
-# Pick a fresh token <name>.<random>, publish it as the whole content of
-# <dir>/waiting, and wait for the host to create the DIRECTORY
+# Pick a fresh token <name>.<driver pid>.<random>, publish it as the whole
+# content of <dir>/waiting, and wait for the host to create the DIRECTORY
 # <dir>/<token>.go (`mkdir`, never `touch`: mkdir does not follow a symlink
 # someone planted at that path, and the driver only accepts a real directory
 # owned by its own uid, so nobody else can forge it). The random token means
@@ -1178,7 +1278,9 @@ qci_host_step() {
     _qci_claim_check
     nonce=${SRANDOM:-}
     [ -n "$nonce" ] || nonce=$RANDOM$RANDOM
-    printf -v token '%s.%s%s' "$name" "$nonce" "$RANDOM"
+    # <name>.<driver pid>.<nonce>: the claim's holder drops a `waiting` that
+    # names a dead driver (qci_claim_driver).
+    printf -v token '%s.%s.%s%s' "$name" "${QCI_DRIVER_CLAIM_OWNER:-$$}" "$nonce" "$RANDOM"
     if ! _qci_step_publish "$dir/waiting" "$token"; then
         printf 'ERROR: qci_host_step: cannot publish %s/waiting\n' "$dir" >&2
         return 2

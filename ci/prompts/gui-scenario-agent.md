@@ -176,7 +176,7 @@ Procedure:
    lock or change its path; send a waiting driver its go, stop a leftover
    `bg_start` job, or record ERROR. Short read-only vm-exec checks do not claim.
    Each mid-scenario HOST step (capture, click, send-key) is gated in the
-   driver by `qci_host_step <name>`: it writes a token such as `s1.83917264`
+   driver by `qci_host_step <name>`: it writes a token such as `s1.2213.83917264`
    to `/tmp/qci/<slug>/waiting` and waits up to 900s for the DIRECTORY
    `/tmp/qci/<slug>/<token>.go`; on timeout it stops the driver (no EXIT-trap
    teardown). The driver cannot finish until you do its host steps, so do NOT

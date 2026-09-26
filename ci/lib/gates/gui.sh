@@ -779,7 +779,7 @@ Rules:
   already been killed by the driver's own teardown). Instead the guest
   driver WAITS for the host before each host-side step, with the library's
   \`qci_host_step <name>\` (after the claim, below; names are
-  [A-Za-z0-9_-]). It writes a fresh token such as \`s1.83917264\` into
+  [A-Za-z0-9_-]). It writes a fresh token such as \`s1.2213.83917264\` into
   \`/tmp/qci/$slug/waiting\` and waits up to 900s for the DIRECTORY
   \`/tmp/qci/$slug/<token>.go\`. On timeout it STOPS the driver itself: it
   writes \`<token>.timeout\`, clears the EXIT trap and exits 1, leaving the
@@ -793,7 +793,10 @@ Rules:
   issue the host steps as SEPARATE tool commands. Waiting for the driver
   first is a deadlock that ends only at the step's timeout (gui/16 again).
   For EACH host step: poll \`cat /tmp/qci/$slug/waiting\` through short
-  vm-exec calls until the token it prints starts with that step's name, do
+  vm-exec calls until the token it prints starts with that step's name
+  (\`waiting\` is withdrawn within a second of its driver dying, and a new
+  driver clears it when it claims, so never act on a token from before you
+  started the current driver), do
   the step, then run \`mkdir /tmp/qci/$slug/<token>.go\` through vm-exec with
   the EXACT token you read (mkdir, not touch: only a directory counts, and
   a go for an older token releases nothing). Always read \`waiting\` before
