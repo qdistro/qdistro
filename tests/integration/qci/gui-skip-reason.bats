@@ -317,7 +317,7 @@ _render_prompt() {
 @test "runtime prompt says vm-exec does not stream (permissions-gui/32 post-teardown frames)" {
     local p; p=$(_render_prompt)
     printf '%s' "$p" | grep -q 'vm-exec does NOT stream'
-    printf '%s' "$p" | grep -q 'host-created marker file'
+    printf '%s' "$p" | grep -q 'driver WAITS for the host before each host-side step'
 }
 
 @test "runtime prompt: a tool re-capture to the same path is not tampering (permissions-gui/08)" {
