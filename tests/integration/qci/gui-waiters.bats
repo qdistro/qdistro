@@ -969,12 +969,13 @@ _claim_child_driver() {
     grep -q 'ERROR: a second guest driver is already running' "$out"
 }
 
-# _claim_kill_one_holder <which: 1|2> — a ticking driver claims; SIGKILL one
-# of its two holder processes; a contender then claims. The survivor must
-# kill the driver BEFORE the lock can be taken: no tick after the
-# contender's CLAIMED line.
+# _claim_kill_one_holder <which: 1|2> [child] — a ticking driver claims;
+# SIGKILL one of its two holder processes; a contender then claims. The
+# survivor must kill the driver BEFORE the lock can be taken: no tick after
+# the contender's CLAIMED line. With `child`, the ticks come from a
+# FOREGROUND child the driver is waiting on, which must die with it.
 _claim_kill_one_holder() {
-    local which=$1
+    local which=$1 shape=${2:-shell}
     local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
     local log="$BATS_TEST_TMPDIR/ticks"
     local ready="$BATS_TEST_TMPDIR/ready"
@@ -984,8 +985,12 @@ _claim_kill_one_holder() {
         qci_claim_driver "$2"
         trap "echo TEARDOWN >> \"$3\"" EXIT
         echo "$BASHPID $QCI_DRIVER_CLAIM_HOLDER" > "$4"
-        for i in $(seq 1 100); do echo tick >> "$3"; sleep 0.05; done
-    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log" "$ready" &
+        if [ "$5" = child ]; then
+            bash -c "for i in \$(seq 1 100); do echo child-tick >> \"\$1\"; sleep 0.05; done" _ "$3"
+        else
+            for i in $(seq 1 100); do echo tick >> "$3"; sleep 0.05; done
+        fi
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log" "$ready" "$shape" &
     local drv=$! i owner hp gp victim
     for i in $(seq 1 50); do [ -s "$ready" ] && break; sleep 0.1; done
     [ -s "$ready" ] || { kill "$drv"; return 1; }
@@ -1017,6 +1022,75 @@ _claim_kill_one_holder() {
 
 @test "qci_claim_driver: killing the guard kills the driver before the lock can be taken" {
     _claim_kill_one_holder 2
+}
+
+@test "qci_claim_driver: killing a holder also kills the driver's foreground command" {
+    _claim_kill_one_holder 2 child
+    grep -q child-tick "$BATS_TEST_TMPDIR/ticks"
+}
+
+@test "qci_claim_driver: killing the driver directly drains its foreground command before unlock" {
+    local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
+    local log="$BATS_TEST_TMPDIR/direct-ticks"
+    local ready="$BATS_TEST_TMPDIR/direct-ready"
+    bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo "$BASHPID" > "$4"
+        # The trailing command prevents bash from exec-optimising the child.
+        bash -c "for i in \$(seq 1 200); do echo child-\$i >> \"\$1\"; sleep 0.05; done" _ "$3"
+        echo DRIVER-AFTER-CHILD >> "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log" "$ready" &
+    local drv=$! i rc=0
+    for i in $(seq 1 50); do [ -s "$ready" ] && [ -s "$log" ] && break; sleep 0.1; done
+    [ -s "$ready" ] && [ -s "$log" ] || { kill "$drv"; return 1; }
+    # Allow both guardians to observe and identity-pin the foreground child.
+    sleep 0.4
+    kill -KILL "$(cat "$ready")"
+    run timeout 10 bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo CLAIMED >> "$3"
+        sleep 0.5
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log"
+    wait "$drv" || rc=$?
+    [ "$status" -eq 0 ]
+    [ "$rc" -eq 137 ]
+    [ "$(tail -n 1 "$log")" = CLAIMED ]
+    run grep -q DRIVER-AFTER-CHILD "$log"
+    [ "$status" -eq 1 ]
+}
+
+@test "qci_claim_driver: teardown closes a foreground fork storm before unlock" {
+    local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
+    local log="$BATS_TEST_TMPDIR/fork-ticks"
+    local ready="$BATS_TEST_TMPDIR/fork-ready"
+    bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo "$BASHPID $QCI_DRIVER_CLAIM_HOLDER" > "$4"
+        bash -c "for i in \$(seq 1 150); do (sleep 0.03; echo fork-\$i >> \"\$1\") & sleep 0.01; done; wait" _ "$3"
+        echo DRIVER-AFTER-CHILD >> "$3"
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log" "$ready" &
+    local drv=$! i owner hp gp rc=0
+    for i in $(seq 1 50); do [ -s "$ready" ] && [ -s "$log" ] && break; sleep 0.1; done
+    [ -s "$ready" ] && [ -s "$log" ] || { kill "$drv"; return 1; }
+    read -r owner hp gp < "$ready"
+    kill -KILL "$gp"
+    run timeout 10 bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        qci_claim_driver "$2"
+        echo CLAIMED >> "$3"
+        sleep 0.5
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log"
+    wait "$drv" || rc=$?
+    [ "$status" -eq 0 ]
+    [ "$rc" -eq 137 ]
+    [ "$(tail -n 1 "$log")" = CLAIMED ]
 }
 
 @test "qci_claim_driver: a driver whose holders were both killed stops at its next bg_start, without teardown" {

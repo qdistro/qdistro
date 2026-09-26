@@ -878,8 +878,10 @@ bg_log() {
 # knows exactly what to stop.
 # FAIL CLOSED: each of the two watches the other. If one dies (SIGKILL)
 # while the driver shell lives, the survivor, which still holds the lock,
-# SIGKILLs the driver shell and keeps the lock until it is dead — so a
-# contender can never run beside ANY later command of that driver. Only
+# SIGKILLs the driver shell and every process still under it (the command it
+# is running), and keeps the lock until they are dead — so a contender can
+# never run beside ANY later work of that driver. Apps that were detached
+# from the driver are not under it and are not touched. Only
 # killing both at the same instant (which also no tree kill does without
 # killing the driver) gets past this. The driver also checks both at its
 # next bg_start / qci_host_step.
@@ -944,11 +946,100 @@ drop_waiting() {
     { read -r tok <"$dir/waiting" || [ -n "$tok" ]; } 2>/dev/null || return 0
     case $tok in *".$owner."*) rm -f "$dir/waiting" ;; esac
 }
+is_job() {
+    [ -f "$reg" ] || return 1
+    while read -r kind jpid jstart tag; do
+        [ "$kind" = job ] && [ "$jpid" = "$1" ] && [ "$jstart" = "$2" ] && return 0
+    done <"$reg"
+    return 1
+}
+# `tracked` is a space-delimited set of pid:start-time identities. Refresh it
+# while the owner is alive, so a process that successfully daemonizes and is
+# reparented away drops out. Registered bg_start roots (and therefore their
+# subtrees) are deliberately excluded: the jobs file already keeps the claim
+# for those and they are allowed to finish after a normal driver exit.
+snapshot_tree() {
+    tracked=" $owner:$ostart " grew=1
+    while [ "$grew" = 1 ]; do
+        grew=0
+        for d in /proc/[0-9]*; do
+            p=${d#/proc/}
+            case " $tracked $$:$selfstart $partner:$pstart " in *" $p:"*) continue ;; esac
+            st=""
+            { read -r st <"$d/stat"; } 2>/dev/null || continue
+            set -f; set -- ${st##*") "}; set +f
+            state=$1 ppid=$2 start=${20:-}
+            case "$state:$start" in Z:*|X:*|x:*|*:) continue ;; esac
+            case "$tracked" in
+                *" $ppid:"*)
+                    is_job "$p" "$start" && continue
+                    tracked="$tracked$p:$start " grew=1 ;;
+            esac
+        done
+    done
+}
+# Add children of the last live snapshot without forgetting identities whose
+# parent was reparented after the owner died. Once all known identities are
+# stopped this reaches a fixed point: no member can fork between the final
+# discovery and KILL. A child that has already detached/reparented is outside
+# the driver scope by contract.
+grow_tree() {
+    grew=0
+    for d in /proc/[0-9]*; do
+        p=${d#/proc/}
+        case " $tracked $$:$selfstart $partner:$pstart " in *" $p:"*) continue ;; esac
+        st=""
+        { read -r st <"$d/stat"; } 2>/dev/null || continue
+        set -f; set -- ${st##*") "}; set +f
+        state=$1 ppid=$2 start=${20:-}
+        case "$state:$start" in Z:*|X:*|x:*|*:) continue ;; esac
+        case "$tracked" in
+            *" $ppid:"*)
+                is_job "$p" "$start" && continue
+                tracked="$tracked$p:$start " grew=1 ;;
+        esac
+    done
+}
+signal_tracked() {
+    sig=$1
+    for ent in $tracked; do
+        p=${ent%%:*}; want=${ent#*:}
+        alive "$p" "$want" && kill -"$sig" "$p" 2>/dev/null
+    done
+}
+# Kill and drain the last observed non-daemonized driver scope on either
+# guardian loss OR direct driver loss. Identities prevent PID-reuse signals.
+# STOP/discover repeats to a fixed point, closing the fork race of a fixed
+# two-pass tree walk.
+kill_driver_scope() {
+    while :; do
+        grow_tree
+        signal_tracked STOP
+        grow_tree
+        [ "$grew" = 0 ] && break
+    done
+    signal_tracked KILL
+    for ent in $tracked; do
+        p=${ent%%:*}; want=${ent#*:}
+        while alive "$p" "$want"; do sleep "$poll"; done
+    done
+}
 watch() {
-    while held_for; do
-        if [ -n "$partner" ] && ! alive "$partner" "$pstart" && alive "$owner" "$ostart"; then
-            kill -KILL "$owner" 2>/dev/null
+    selfstart=$(start_of $$) || selfstart=""
+    tracked=" $owner:$ostart "
+    while :; do
+        if alive "$owner" "$ostart"; then
+            snapshot_tree
+            if [ -n "$partner" ] && ! alive "$partner" "$pstart"; then
+                kill_driver_scope
+            fi
+        else
+            # The owner may have vanished before this poll, taking ordinary
+            # foreground children out of /proc ancestry. The preceding live
+            # snapshot pins those identities so they are still drained.
+            kill_driver_scope
         fi
+        held_for || break
         sleep "$poll"
     done
     drop_waiting
