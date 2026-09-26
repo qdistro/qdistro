@@ -123,7 +123,7 @@ def strip_strings(code):
                 raise Unobservable("unterminated-string")
             raw = "".join(buf)
             val = None if (q == "`" and "${" in raw) else decode_js_string(q, buf)
-            out.append('"S%d"' % len(lits))
+            out.append(f'"S{len(lits)}"')
             lits.append(val)
             i = j + 1
             continue
@@ -162,7 +162,7 @@ def literal_views(code):
 
 def find_session_id(log_path):
     try:
-        with open(log_path, "r", errors="replace") as fh:
+        with open(log_path, errors="replace") as fh:
             for idx, line in enumerate(fh):
                 if idx >= HEADER_LINES or line.rstrip("\n") == "user":
                     break
@@ -213,7 +213,7 @@ def parse_rollout(path, sid, max_bytes):
     try:
         size = os.path.getsize(path)
     except OSError:
-        raise Unobservable("rollout-unreadable")
+        raise Unobservable("rollout-unreadable") from None
     if size > max_bytes:
         raise Unobservable("rollout-too-large")
     calls, outputs, order, cwd, pending = {}, {}, [], None, []
@@ -224,7 +224,7 @@ def parse_rollout(path, sid, max_bytes):
             try:
                 obj = json.loads(raw)
             except ValueError:
-                raise Unobservable("truncated")
+                raise Unobservable("truncated") from None
             if not isinstance(obj, dict):
                 raise Unobservable("truncated")
             p = obj.get("payload")
@@ -469,7 +469,7 @@ def observe(args, found_info):
         raise Unobservable("no-session-id")
     found_info["sid"] = sid
     found = glob.glob(os.path.join(glob.escape(home), "sessions", "*", "*", "*",
-                                   "rollout-*-%s.jsonl" % sid))
+                                   f"rollout-*-{sid}.jsonl"))
     if not found:
         raise Unobservable("no-rollout")
     if len(found) > 1:
@@ -489,16 +489,16 @@ def main():
     ap.add_argument("--state", default="")
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     args = ap.parse_args()
-    lines = ["parser_version=%d" % PARSER_VERSION]
+    lines = [f"parser_version={PARSER_VERSION:d}"]
     info = {"sid": "", "rollout": ""}
     opens = []
     try:
         sid, rollout, cwd, views = observe(args, info)
         reason = "observed"
     except Unobservable as e:
-        reason = "unobservable:%s" % e
+        reason = f"unobservable:{e}"
         sid, rollout = info["sid"], info["rollout"]
-    lines += ["session_id=%s" % sid, "rollout=%s" % rollout, "reason=%s" % reason]
+    lines += [f"session_id={sid}", f"rollout={rollout}", f"reason={reason}"]
     credited = 0
     if reason == "observed":
         lp, ls = read_ledger(args.ledger)
@@ -524,9 +524,9 @@ def main():
                     break
                 got.append((ordinal,) + r)
             if why:
-                reason = "unobservable:%s" % data["why"]
-                lines[-1] = "reason=%s" % reason
-                lines.append("content_route=%s" % why)
+                reason = f"unobservable:{data['why']}"
+                lines[-1] = f"reason={reason}"
+                lines.append(f"content_route={why}")
                 resolved = None
                 break
             resolved += got
@@ -535,10 +535,11 @@ def main():
                 n += 1
                 if credit != "none":
                     credited += 1
-                opens.append("open\t%d\t%s\t%s\t%s\t%s%s" % (
-                    n, ordinal, ap_.replace("\t", " "), credit, what.replace("\t", " "),
-                    "\tstale" if stale else ""))
-            lines += ["opens=%d" % n, "credited=%d" % credited]
+                ap_s = ap_.replace("\t", " ")
+                what_s = what.replace("\t", " ")
+                stale_s = "\tstale" if stale else ""
+                opens.append(f"open\t{n:d}\t{ordinal}\t{ap_s}\t{credit}\t{what_s}{stale_s}")
+            lines += [f"opens={n:d}", f"credited={credited:d}"]
     if reason != "observed":
         lines += ["opens=unobservable", "credited=unobservable"]
     lines += opens
@@ -546,9 +547,9 @@ def main():
     with open(tmp, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     os.replace(tmp, args.out)
-    print("reason=%s opens=%s credited=%s" % (
-        reason, len(opens) if reason == "observed" else "unobservable",
-        credited if reason == "observed" else "unobservable"))
+    shown_opens = len(opens) if reason == "observed" else "unobservable"
+    shown_credited = credited if reason == "observed" else "unobservable"
+    print(f"reason={reason} opens={shown_opens} credited={shown_credited}")
     return 0
 
 
