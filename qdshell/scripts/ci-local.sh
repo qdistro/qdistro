@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # qdshell local CI runner — equivalent to what GitHub Actions / a
 # self-hosted runner would invoke. Five gates:
-#   1. qmltest      — Tests/tst_*.qml under Tests/
+#   1. qmltest      — Tests/tst_*.qml under Tests/ (+ node tests/test_*.js
+#                     and host pytest tests/test_*.py)
 #   2. qmllint      — informational (counts Warning/Error rows)
 #   3. qmlformat    — --files-changed dry-run check
 #   4. integration  — bats scenarios on a broker-present VM (skipped if
@@ -172,6 +173,37 @@ else
     echo "  $JSTEST_FILES file(s); $JSTEST_PASS passed, $JSTEST_FAIL failed"
 fi
 
+# --- 1c. pytest (host-runnable Python tests) -----------------------
+#
+# tests/test_*.py are self-contained host tests (no VM, no compositor),
+# including the UI harness's own transport contracts
+# (test_ui_capture_retry.py, test_ui_ctrl_socket_reply_wait.py). The live UI
+# suite under tests/ui runs only in qci's gui gate, so without this phase a
+# regression in runner.py's transport can pass every gate whenever the
+# load-sensitive live case happens not to recur. The files are named
+# explicitly: a recursive `pytest tests` also collects tests/ui, whose
+# conftest skips everything without QDSHELL_UI_TESTS=1. A missing python3 or
+# pytest is a FAILURE when the files exist, never a skip.
+
+PYTEST_RESULT="none"
+
+step "pytest (host)"
+shopt -s nullglob
+py_files=(tests/test_*.py)
+shopt -u nullglob
+if [ "${#py_files[@]}" -eq 0 ]; then
+    warn "  no tests/test_*.py to run"
+elif ! python3 -c 'import pytest' >/dev/null 2>&1; then
+    err "  python3/pytest not available — ${#py_files[@]} Python test files were not run"
+    PYTEST_RESULT="fail"
+elif python3 -m pytest -q -p no:cacheprovider "${py_files[@]}"; then
+    ok  "  pytest: ${#py_files[@]} file(s) passed"
+    PYTEST_RESULT="pass"
+else
+    err "  pytest: FAIL"
+    PYTEST_RESULT="fail"
+fi
+
 # --- 2. qmllint -----------------------------------------------------
 
 step "qmllint"
@@ -300,6 +332,7 @@ printf '  qmltest:     %d passed, %d failed across %d files\n' \
     "$QMLTEST_PASS" "$QMLTEST_FAIL" "$QMLTEST_FILES"
 printf '  jstest:      %d passed, %d failed across %d files\n' \
     "$JSTEST_PASS" "$JSTEST_FAIL" "$JSTEST_FILES"
+printf '  pytest:      %s\n' "$PYTEST_RESULT"
 printf '  qmllint:     %d warnings, %d errors\n' \
     "$LINT_WARN_COUNT" "$LINT_ERR_COUNT"
 printf '  qmlformat:   %d files need reformatting (Services/Qdshell only)\n' \
@@ -314,6 +347,10 @@ if [ "$QMLTEST_FAIL" -gt 0 ]; then
 fi
 if [ "$JSTEST_FAIL" -gt 0 ]; then
     err "FAIL — jstest"
+    EXIT=1
+fi
+if [ "$PYTEST_RESULT" = "fail" ]; then
+    err "FAIL — pytest"
     EXIT=1
 fi
 if [ "$INT_RESULT" = "fail" ]; then

@@ -12,7 +12,8 @@ local stand-in for vm-exec, against a UNIX socket server that replies late --
 the widened timing window. Restoring `-t 2` makes
 `test_capture_reply_slower_than_two_seconds_is_received` fail with ''.
 
-Host-runnable: needs bash, base64 and socat; no VM, no compositor.
+Host-runnable: needs bash, base64 and socat (missing socat FAILS the
+delayed-reply test); no VM, no compositor. Run by scripts/ci-local.sh.
 """
 
 import re
@@ -24,9 +25,6 @@ from pathlib import Path
 import pytest
 
 from tests.ui import runner
-
-pytestmark = pytest.mark.skipif(shutil.which("socat") is None,
-                                reason="socat not installed on this host")
 
 QDSHELL = Path(__file__).resolve().parents[1]
 
@@ -77,6 +75,10 @@ def local_session(tmp_path, monkeypatch):
 
 
 def test_capture_reply_slower_than_two_seconds_is_received(local_session):
+    # A missing socat is a FAILURE, not a skip: a skipped run of this test
+    # leaves the gate green with the regression unguarded.
+    if shutil.which("socat") is None:
+        pytest.fail("socat is required on the host to run the real ctrl-socket script")
     session, rundir = local_session
     reply = "ok output=Virtual-1 width=1280 height=800 path=/run/user/1000/x.png"
     srv = SlowCtrlServer(rundir / "qdshell.sock", delay=3.0, reply=reply)
