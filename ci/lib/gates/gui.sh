@@ -1010,9 +1010,15 @@ Rules:
   driver starts inherits the lock), and is released within a second after
   the last of them exits, even when the driver is SIGKILLed. An app the
   driver merely launched (or that a \`bg_start\` launcher daemonized) does
-  NOT hold it, so a retry driver's Setup must stop whatever the previous
-  attempt left running (an admin app, a test window, a pending request)
-  before it files anything. If it prints
+  NOT hold it. The ROOT driver enters a dedicated cgroup before the claim
+  returns. If it dies unexpectedly, the holder kills that entire cgroup,
+  including children that fork or reparent during teardown, before unlock.
+  After your last foreground action and Cleanup, call \`qci_claim_done\`
+  immediately before a normal exit if a detached app must remain for
+  inspection. \`qci_host_step\` does this on its timeout path. A retry
+  driver's Setup must stop whatever the previous attempt left running
+  (an admin app, a test window, a pending request) before it files anything.
+  If it prints
   \`ERROR: a second guest driver is already running\` and exits 1, an earlier
   driver of yours, or one of its \`bg_start\` jobs, is still alive in the
   guest (permissions-gui/08 in gui-20260924T193011Z-2597819 ran four drivers

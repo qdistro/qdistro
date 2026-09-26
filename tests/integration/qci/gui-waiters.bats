@@ -9,6 +9,9 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+    # The production root driver uses cgroup.kill; host bats has no delegated
+    # cgroup and exercises the process-watcher compatibility path.
+    export QCI_DRIVER_CLAIM_TEST_PROC_FALLBACK=1
     # shellcheck disable=SC1090
     source "$REPO_ROOT/ci/lib/guest/gui-waiters.sh"
 }
@@ -732,6 +735,18 @@ _claim_hold() {
 # wl_display_dispatch). The claim used to be an fd of the driver shell, and
 # every child inherited it, so those apps held driver.lock with no driver
 # alive and every retry was refused "a second guest driver is already running".
+
+@test "qci_claim_driver: a non-root caller without a delegated scope fails closed" {
+    local lock="$BATS_TEST_TMPDIR/qci/slug/driver.lock"
+    run env -u QCI_DRIVER_CLAIM_TEST_PROC_FALLBACK bash -c '
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"cannot create a killable cgroup"* ]]
+    [[ "$output" != *RAN* ]]
+}
 
 # _claim_child_driver <lib> <lock> <ready> <fifo>
 # A driver that claims, then leaves a DETACHED child behind (the shape of

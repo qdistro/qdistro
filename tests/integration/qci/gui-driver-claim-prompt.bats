@@ -15,6 +15,7 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+    export QCI_DRIVER_CLAIM_TEST_PROC_FALLBACK=1
     # shellcheck disable=SC1090
     source "$REPO_ROOT/ci/lib/core.sh"
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
@@ -151,6 +152,7 @@ _claim_snippet() {
 @test "runtime prompt gates host steps with qci_host_step and says not to wait on the driver first" {
     local p; p=$(_render_prompt)
     printf '%s\n' "$p" | grep -q 'qci_host_step <name>'
+    printf '%s\n' "$p" | grep -q 'qci_claim_done'
     printf '%s\n' "$p" | grep -q "/tmp/qci/$SLUG/waiting"
     printf '%s\n' "$p" | grep -q "mkdir /tmp/qci/$SLUG/<token>.go"
     printf '%s\n' "$p" | grep -q 'THE DRIVER DOES NOT RETURN UNTIL YOU HAVE DONE ITS HOST STEPS'
@@ -161,6 +163,7 @@ _claim_snippet() {
     run grep -q 'AND every' <<<"$p"
     [ "$status" -eq 1 ]
     grep -q 'qci_host_step <name>' "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
+    grep -q 'qci_claim_done' "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
     grep -q 'mkdir. that exact token' "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
 }
 
