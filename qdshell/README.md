@@ -78,9 +78,10 @@ Coverage lives in three layers, driven by two scripts:
 
 ```sh
 scripts/ci-local.sh     # host gates: qmltestrunner (Tests/tst_*.qml),
-                        # Node JS unit tests (tests/test_*.js), qmllint
-                        # (informational), qmlformat check; optional bats
-                        # integration. Flags: --strict --no-int --quick
+                        # Node JS unit tests (tests/test_*.js), host pytest
+                        # (tests/test_*.py), qmllint (informational),
+                        # qmlformat check; optional bats integration.
+                        # Flags: --strict --no-int --quick
 QDISTRO_VM=<vm> scripts/ci-in-vm.sh   # runs the qmltest suite inside a
                         # qdistro VM; --bats adds broker end-to-end bats
 ```
@@ -92,10 +93,12 @@ QDISTRO_VM=<vm> scripts/ci-in-vm.sh   # runs the qmltest suite inside a
 - `Tests/tst_*.qml` — qmltestrunner smoke tests.
 - `tests/ui/test_*.py` — agent-assisted live-VM UI tests (pytest); they
   only execute with `QDSHELL_UI_TESTS=1` and `QDSHELL_UI_VM=<vm>` set.
-- `tests/test_*.py` — host-side Python unit tests (`python3 -m pytest
-  tests`). Not currently wired into `ci-local.sh`; run them manually when
-  touching the areas they cover (bluetooth pairing, content signing,
-  plugin helper, safe write, theming hooks).
+- `tests/test_*.py` — host-side Python unit tests, run by `ci-local.sh` and
+  `qci host` with `python3 -m pytest -q -p no:cacheprovider tests/test_*.py`.
+  Use that explicit top-level glob for manual runs too: recursive collection
+  also loads `tests/ui/conftest.py`, whose live-VM skip can mask the host tests.
+  Missing Python/pytest fails the host gate, as does missing `socat` for the
+  ctrl-socket transport regression.
 
 Host `qmllint` cannot resolve Quickshell's `qs.*` modules, so
 `.qmllint.ini` relaxes the categories that would false-positive; full QML
