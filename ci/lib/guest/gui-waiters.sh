@@ -812,39 +812,103 @@ bg_log() {
 # filed its own broker request. Nothing else in the guest serialises them.
 #
 # qci_claim_driver [lock-path]
-# Take a non-blocking exclusive flock and hold it in THIS shell until it
-# exits. Call it once, directly, at the top of the driver — not in a
-# subshell, pipeline, command substitution, or `flock -c`. Those release the
-# lock as soon as that short-lived process exits, so the rest of the driver
-# would run with no claim. A subshell that exits immediately is not the holder.
+# Take a non-blocking exclusive flock for THIS shell and keep it until this
+# shell exits. Call it once, directly, at the top of the driver — not in a
+# subshell, pipeline, command substitution, or `flock -c`. The claim belongs
+# to the process that called it ($BASHPID), so a short-lived subshell that
+# claims releases the claim when IT exits, and the rest of the driver would
+# run with no claim.
 #
 # Pass a scenario-scoped path: /tmp/qci/<slug>/driver.lock. The parent
 # directory is created. If the argument is omitted the default is
 # /tmp/qci-driver.lock (one lock for the whole guest — prefer the scenario
 # path).
 #
-# Same shell, same path: a second call returns 0 and does not open another
-# descriptor. flock(2) is per open file description, so a second open in this
-# process would fail against our own lock and look like a second driver.
+# Same shell, same path: a second call returns 0 and takes nothing new.
 # That is what lets one driver claim once at the top and source this file
 # again afterwards: sourcing never claims, and it must not clear the claim.
 # A different path from a shell that already holds a claim is refused without
 # releasing the first lock.
 #
 # Another live holder: print one ERROR line to stderr and `exit 1` the
-# calling shell. Do not steal the lock, do not block, and do not arm a
-# timeout that would kill the first driver. `exit` (not `return`) so the
-# lines after the claim do not run even without `set -e`, and even under
-# `qci_claim_driver || true` — exit is not caught by a conditional. There is
-# no release helper; the kernel drops the lock when the holding descriptor
-# is closed.
+# calling shell. Do not steal the lock and do not arm a timeout that would
+# kill the first driver. `exit` (not `return`) so the lines after the claim
+# do not run even without `set -e`, and even under `qci_claim_driver || true`
+# — exit is not caught by a conditional. There is no release helper; the
+# claim ends when the driver shell exits.
 #
-# Children inherit the descriptor (this bash does not set close-on-exec on
-# it). A background child that outlives this shell keeps the claim until that
-# child exits too. A fresh vm-exec is not a child of the first driver and
-# does not inherit the descriptor.
+# WHO HOLDS IT. The lock is held by a HELPER, never by an fd of the driver
+# shell (the same design as vm-exec's orphan-registry lock). It used to be
+# `exec {fd}>>lock; flock fd` in the shell, and bash cannot mark that fd
+# close-on-exec, so EVERY process the driver started inherited it: an admin
+# app from qdistro-start-admin-app (reparented to init), a `setsid -f`
+# qdistro-test-window that ignores SIGTERM while it idles in
+# wl_display_dispatch. The driver then exited on a waiter timeout, the app
+# kept the lock, and every retry was refused "a second guest driver is
+# already running" with no driver alive (permissions-gui/44 and qdwin gui/16,
+# full-20260926T153217Z-3807077). The single-driver rule is about driver
+# SHELLS, which file requests and run steps; an app or a background job left
+# behind is the next driver's Setup to stop, not a reason to refuse it.
+#
+# `flock -o` takes the lock on its own descriptor and closes that descriptor
+# before it runs the waiter, so the flock process is the only holder and
+# nothing the driver starts can inherit it. The waiter (_QCI_CLAIM_WAITER)
+# announces the acquisition, then watches the driver shell by (pid, start
+# time) and exits when the shell is DEAD — a zombie counts as dead, as the old
+# fd was released at exit, not at reaping — and flock exits with it. Its
+# stdin, stdout and stderr are detached, so it never holds the caller's
+# output pipe (qga guest-exec waits for every holder of that pipe).
+#
+# The release is therefore up to one poll late. A contender that finds the
+# lock held retries for QCI_DRIVER_CLAIM_GRACE seconds (default 2) before it
+# refuses, so a driver started right after the previous one exited is not
+# refused by that lag. The retry only delays a refusal; it never takes a lock
+# a live shell holds.
+_QCI_CLAIM_POLL=0.2
+# $1 owner pid, $2 owner start time (field 22 of /proc/<pid>/stat), $3 poll.
+# shellcheck disable=SC2016
+_QCI_CLAIM_WAITER='
+owner=$1 start=$2 poll=$3
+owner_alive() {
+    st=""
+    { read -r st <"/proc/$owner/stat"; } 2>/dev/null || return 1
+    # Fields after the LAST ") " (comm may hold spaces/parens): $1 is the
+    # state, $20 the start time.
+    set -f; set -- ${st##*") "}; set +f
+    case "$1" in Z|X|x|"") return 1 ;; esac
+    [ "${20:-}" = "$start" ]
+}
+owner_alive || exit 1
+echo "held $$" || exit 1
+exec >/dev/null
+while owner_alive; do sleep "$poll"; done
+exit 0
+'
+
+# _qci_claim_take <lock> <owner-pid> <owner-start> <flock-mode...>
+# Start the holder. Returns 0 when it announced the lock, 75 when the lock
+# is held by someone else, anything else when the lock could not be opened.
+_qci_claim_take() {
+    local lock=$1 owner=$2 start=$3 rd line fpid rc=0
+    shift 3
+    if ! exec {rd}< <(exec flock -o "$@" -E 75 "$lock" \
+            sh -c "$_QCI_CLAIM_WAITER" qci-driver-claim "$owner" "$start" "$_QCI_CLAIM_POLL" \
+            </dev/null 2>/dev/null); then
+        return 2
+    fi
+    fpid=$!
+    IFS= read -r -u "$rd" line || line=""
+    exec {rd}<&-
+    case $line in
+        'held '[0-9]*) return 0 ;;
+    esac
+    wait "$fpid" 2>/dev/null || rc=$?
+    [ "$rc" -eq 75 ] && return 75
+    return 2
+}
+
 qci_claim_driver() {
-    local lock=${1:-/tmp/qci-driver.lock} dir fd
+    local lock=${1:-/tmp/qci-driver.lock} dir st start rc=0 f
 
     if [ "${QCI_DRIVER_CLAIM_DEPTH:-0}" -gt 0 ]; then
         if [ "${QCI_DRIVER_CLAIM_PATH:-}" = "$lock" ]; then
@@ -865,30 +929,114 @@ qci_claim_driver() {
         exit 2
     fi
 
-    # Braces keep the stderr redirect on the open only. A bare
-    # `exec REDIR 2>/dev/null` has no command, so BOTH redirections become
-    # permanent and the driver shell loses stderr for the rest of its life.
-    QCI_DRIVER_CLAIM_FD=""
-    if ! { exec {QCI_DRIVER_CLAIM_FD}>>"$lock"; } 2>/dev/null; then
-        QCI_DRIVER_CLAIM_FD=""
-        printf 'ERROR: qci_claim_driver: cannot open %s\n' "$lock" >&2
-        exit 2
+    # The owner is the process running this function: $BASHPID, not $$ ($$
+    # of a subshell is its parent's pid).
+    # Fields after the LAST ") " (comm may hold spaces/parens); index 19 is
+    # field 22, the start time. `read -a` splits without globbing.
+    st=""
+    { read -r st <"/proc/$BASHPID/stat"; } 2>/dev/null || st=""
+    f=()
+    read -r -a f <<<"${st##*") "}" || true
+    start=${f[19]:-}
+    case $start in
+        ''|*[!0-9]*)
+            printf 'ERROR: qci_claim_driver: cannot read the start time of pid %s\n' "$BASHPID" >&2
+            exit 2 ;;
+    esac
+
+    _qci_claim_take "$lock" "$BASHPID" "$start" -n || rc=$?
+    if [ "$rc" -eq 75 ]; then
+        # Maybe the previous driver has just exited and its holder has not
+        # noticed yet (one poll). Wait that long, never longer.
+        rc=0
+        _qci_claim_take "$lock" "$BASHPID" "$start" -w "${QCI_DRIVER_CLAIM_GRACE:-2}" || rc=$?
     fi
-    # -n: fail immediately. No -w. A wait would only delay the second driver,
-    # and a timeout that killed the holder would be the opposite of a claim.
-    # flock(1) locks the inherited descriptor and exits; this shell keeps that
-    # open file description, so the lock outlives the flock process.
-    if ! flock -n -x "$QCI_DRIVER_CLAIM_FD" 2>/dev/null; then
-        fd=$QCI_DRIVER_CLAIM_FD
-        QCI_DRIVER_CLAIM_FD=""
-        case $fd in
-            ''|*[!0-9]*) ;;
-            *) eval "exec ${fd}>&-" 2>/dev/null || true ;;
-        esac
-        printf 'ERROR: a second guest driver is already running: %s\n' "$lock" >&2
-        exit 1
-    fi
+    case $rc in
+        0) ;;
+        75)
+            printf 'ERROR: a second guest driver is already running: %s\n' "$lock" >&2
+            exit 1 ;;
+        *)
+            printf 'ERROR: qci_claim_driver: cannot open %s\n' "$lock" >&2
+            exit 2 ;;
+    esac
     QCI_DRIVER_CLAIM_PATH=$lock
     QCI_DRIVER_CLAIM_DEPTH=1
+    return 0
+}
+
+# --- Host steps (guest <-> host handshake) -----------------------------------
+#
+# A host-side step (a screenshot, click, send-key) that must happen in the
+# MIDDLE of a guest driver is synchronised by files: the driver says it is
+# ready and waits; the host acts, then says go. Hand-rolled versions of this
+# failed in full-20260926T153217Z-3807077 in two ways:
+#   - qdwin gui/16: the host-marker wait was 30s. The agent ran the driver in
+#     the foreground, waited for it to return, and could only act after the
+#     driver had already timed out. An agent needs minutes per host step
+#     (capture, open the image, decide, click) — seconds are never enough.
+#   - permissions-gui/14: the agent did S2-S4 on the host but never sent the
+#     S1 go-marker, so the driver sat on S1 until it timed out. Nothing told
+#     the host which marker the driver was waiting for.
+#
+# qci_host_step <name> [timeout]
+# Publish <dir>/<name>.ready and <dir>/waiting (whose content is <name>), then
+# wait for <dir>/<name>.go. <dir> is the directory of the driver's claim
+# (/tmp/qci/<slug>/) unless QCI_HOST_STEP_DIR is set. The default timeout is
+# QCI_HOST_STEP_TIMEOUT (900s). Returns 0 when go arrived. On timeout it
+# publishes <dir>/<name>.timeout, prints an ERROR line, and returns 1 — the
+# driver then STOPS (no teardown), exactly as for any host-marker timeout.
+# A stale <name>.go from an earlier attempt is removed BEFORE ready is
+# published, so it can never satisfy this wait.
+#
+# Host side, for each step: poll `cat /tmp/qci/<slug>/waiting` through
+# vm-exec until it names the step you are about to act on, act, then
+# `touch /tmp/qci/<slug>/<name>.go` through vm-exec.
+#
+# Files are published with mktemp + rename, never written by path: the
+# directory is world-writable (1777), and a root `>` or `touch` follows a
+# symlink another uid planted there.
+_qci_step_publish() {
+    local path=$1 content=$2 tmp
+    tmp=$(mktemp "${path%/*}/.qci-step.XXXXXX") || return 1
+    if ! printf '%s' "$content" >"$tmp" || ! mv -f -T -- "$tmp" "$path"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+qci_host_step() {
+    local name=$1 timeout=${2:-${QCI_HOST_STEP_TIMEOUT:-900}} dir rc=0
+    case $name in
+        ''|*[!A-Za-z0-9._-]*|.*)
+            printf 'ERROR: qci_host_step: invalid step name %q: use only [A-Za-z0-9._-], not leading "."\n' \
+                "$name" >&2
+            return 2 ;;
+    esac
+    dir=${QCI_HOST_STEP_DIR:-}
+    if [ -z "$dir" ] && [ -n "${QCI_DRIVER_CLAIM_PATH:-}" ]; then
+        dir=$(dirname -- "$QCI_DRIVER_CLAIM_PATH")
+    fi
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+        printf 'ERROR: qci_host_step: no step directory (claim the driver first, or set QCI_HOST_STEP_DIR)\n' >&2
+        return 2
+    fi
+    rm -f -- "$dir/$name.go" "$dir/$name.timeout" "$dir/$name.ready"
+    if ! _qci_step_publish "$dir/waiting" "$name" \
+        || ! _qci_step_publish "$dir/$name.ready" ""; then
+        printf 'ERROR: qci_host_step: cannot publish the ready marker for %s in %s\n' "$name" "$dir" >&2
+        return 2
+    fi
+    printf '[host-step] %s: waiting up to %ss for the host: touch %s/%s.go\n' \
+        "$name" "$timeout" "$dir" "$name"
+    QCI_AWAIT_QUIET=1 await_file "$dir/$name.go" "$timeout" 1 || rc=$?
+    rm -f -- "$dir/waiting"
+    if [ "$rc" -ne 0 ]; then
+        _qci_step_publish "$dir/$name.timeout" "" || true
+        printf 'ERROR: qci_host_step: the host never sent %s/%s.go within %ss\n' \
+            "$dir" "$name" "$timeout" >&2
+        return 1
+    fi
+    printf '[host-step] %s: go\n' "$name"
     return 0
 }

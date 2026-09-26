@@ -776,11 +776,28 @@ Rules:
   guest driver, teardown included, has finished, and every "mid-scenario"
   frame is then a frame of the torn-down screen (permissions-gui/32,
   full-20260922T193137Z-881799: all frames black because the admin app had
-  already been killed by the driver's own teardown). Instead make the guest
-  driver WAIT for a host-created marker file before each host-side step
-  (\`await_file\` on a path you \`touch\` with a separate vm-exec after the
-  capture/click), and read guest progress from files with separate short
-  vm-exec calls.
+  already been killed by the driver's own teardown). Instead the guest
+  driver WAITS for the host before each host-side step, with the library's
+  \`qci_host_step <name>\` (after the claim, below): it publishes
+  \`/tmp/qci/$slug/<name>.ready\`, writes \`<name>\` into
+  \`/tmp/qci/$slug/waiting\`, and waits up to 900s for
+  \`/tmp/qci/$slug/<name>.go\`; on timeout it returns 1 and the driver stops.
+  Do not hand-roll these waits with short deadlines: you need minutes per
+  host step (capture, open the image, decide, click), and a 30s wait expires
+  before you can act (qdwin gui/16, full-20260926T153217Z-3807077).
+  THE DRIVER DOES NOT RETURN UNTIL YOU HAVE DONE ITS HOST STEPS. Start it as
+  its own long-running tool command (timeout-capped, in that command's
+  foreground) and do NOT wait for that command to finish -- while it runs,
+  issue the host steps as SEPARATE tool commands. Waiting for the driver
+  first is a deadlock that ends only at the step's timeout (gui/16 again).
+  For EACH host step: poll \`cat /tmp/qci/$slug/waiting\` through short
+  vm-exec calls until it names that step, do the step, then \`touch
+  /tmp/qci/$slug/<name>.go\` through vm-exec. Always read \`waiting\` before
+  acting: it is the step the driver is blocked on, and a step whose go you
+  never sent leaves the driver stuck there while you drive later steps
+  against a driver that has already given up (permissions-gui/14, same run:
+  S2-S4 done on the host, the S1 go never sent). Read other guest progress
+  from files with separate short vm-exec calls.
   \`virsh\` (\`send-key\`, \`screenshot\`), \`vm-gui\` and \`vm-exec\` are HOST
   commands: the libvirt domain \`$vm\` does not exist INSIDE the guest. Never
   put them in the guest driver script -- the guest has its own \`virsh\`, which
@@ -789,7 +806,8 @@ Rules:
   navigation did not work" (permissions-gui/04, 22, 34 and 46 in
   full-20260923T163219Z-1188602; 22 also in full-20260923T123113Z-2785403).
   Every \`virsh send-key\` a scenario lists runs on the host, between the
-  guest's ready-marker and your go-marker, and you check its exit status.
+  guest's \`<name>.ready\` and your \`<name>.go\`, and you check its exit
+  status.
   Never let the driver reach its teardown before the last
   frame the scenario asks for has been captured -- and that includes the
   TIMEOUT path: if a wait for a host marker times out, the driver must write a
@@ -980,15 +998,21 @@ Rules:
   fine when these lines and all the driver's work are in that script. Never
   claim in a subshell, \`\$( )\`, or a helper that exits before the work.
   Exit 2 means the claim could not be taken (library missing, lock not
-  openable): record ERROR. The claim is held until the driver shell AND every
-  background process it started (\`bg_start\` jobs, launched apps) have exited,
-  so Cleanup must stop what the driver started. If it prints
+  openable): record ERROR. The claim is held for exactly as long as the
+  driver SHELL lives (a helper watches it; nothing the driver starts inherits
+  the lock) and is released within a second of that shell exiting, even when
+  it is SIGKILLed. Apps and \`bg_start\` jobs a driver left behind do NOT hold
+  it, so a retry driver's Setup must stop whatever the previous attempt left
+  running (an admin app, a test window, a pending request) before it files
+  anything. If it prints
   \`ERROR: a second guest driver is already running\` and exits 1, an earlier
-  driver of yours, or a process it started, is still alive in the guest
+  driver SHELL of yours is still alive in the guest
   (permissions-gui/08 in gui-20260924T193011Z-2597819 ran four drivers at once
-  and read another driver's rc). Do NOT work around it: do not delete the lock
-  file, do not use another lock path, and do not start yet another driver.
-  Wait for the first driver to finish, or record ERROR. Short read-only
+  and read another driver's rc) -- typically one still waiting in
+  \`qci_host_step\` (\`cat /tmp/qci/$slug/waiting\` names the step). Do NOT
+  work around it: do not delete the lock file, do not use another lock path,
+  and do not start yet another driver. Send that driver its go, or wait for
+  it to finish, or record ERROR. Short read-only
   \`vm-exec\` checks (\`bg_wait\`, \`bg_log\`, a sqlite query) and host
   go-marker touches do not claim; they must never file a broker request or
   run scenario steps.

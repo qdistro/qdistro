@@ -120,10 +120,12 @@ _claim_snippet() {
     [ ! -e "$side" ]
 }
 
-@test "a background job the driver started keeps the claim after the driver exits" {
-    # This is the lifetime the prompt states ("until the driver shell AND every
-    # background process it started have exited"): a finished driver whose
-    # bg_start job still runs must still stop a second driver.
+@test "an app the driver left running does not keep the claim after the driver exits" {
+    # full-20260926T153217Z-3807077: permissions-gui/44's first driver
+    # launched the admin app (qdistro-start-admin-app daemonizes it) and then
+    # exited on a waiter timeout; the app inherited the old in-shell lock fd,
+    # and both retries were refused "a second guest driver is already
+    # running" with no driver alive. The claim is the driver SHELL's.
     local snip side ready fifo
     snip=$(_claim_snippet)
     side="$BATS_TEST_TMPDIR/second-side"
@@ -131,18 +133,51 @@ _claim_snippet() {
     fifo="$BATS_TEST_TMPDIR/child-hold"
     mkfifo "$fifo"
     bash -c "$snip"'
-        ( : > "$1"; exec 3<>"$2"; read -t 30 -u 3 || true ) </dev/null >/dev/null 2>&1 &
+        setsid -f bash -c '"'"': > "$1"; exec 3<>"$2"; read -t 30 -u 3 || true'"'"' _ "$1" "$2" \
+            </dev/null >/dev/null 2>&1
     ' _ "$ready" "$fifo"
     local i
     for i in $(seq 1 50); do [ -f "$ready" ] && break; sleep 0.1; done
     [ -f "$ready" ]
-    run timeout 5 bash -c "$snip"'
+    run timeout 10 bash -c "$snip"'
         echo RAN > "$1"
     ' _ "$side"
     # Release the child: a writer on the fifo ends its read.
     echo go > "$fifo"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$side")" = RAN ]
+}
+
+@test "runtime prompt gates host steps with qci_host_step and says not to wait on the driver first" {
+    local p; p=$(_render_prompt)
+    printf '%s\n' "$p" | grep -q 'qci_host_step <name>'
+    printf '%s\n' "$p" | grep -q "/tmp/qci/$SLUG/waiting"
+    printf '%s\n' "$p" | grep -q 'THE DRIVER DOES NOT RETURN UNTIL YOU HAVE DONE ITS HOST STEPS'
+    # The old advice, a hand-rolled await_file, is gone.
+    run grep -q 'await_file. on a path you' <<<"$p"
     [ "$status" -eq 1 ]
-    [ ! -e "$side" ]
+    # The prompt no longer claims that launched apps keep the claim.
+    run grep -q 'AND every' <<<"$p"
+    [ "$status" -eq 1 ]
+    grep -q 'qci_host_step <name>' "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
+}
+
+@test "the prompt's claim lines and qci_host_step: the host sees the step and releases it" {
+    local snip out
+    snip=$(_claim_snippet)
+    out="$BATS_TEST_TMPDIR/driver.out"
+    local d="$BATS_TEST_TMPDIR/qci/$SLUG"
+    bash -c "$snip"'
+        qci_host_step s1 20 > "$1" 2>&1 || exit 1
+        echo AFTER-S1 >> "$1"
+    ' _ "$out" &
+    local drv=$! i
+    for i in $(seq 1 100); do [ "$(cat "$d/waiting" 2>/dev/null)" = s1 ] && break; sleep 0.1; done
+    [ "$(cat "$d/waiting")" = s1 ]
+    [ -f "$d/s1.ready" ]
+    : > "$d/s1.go"
+    wait "$drv"
+    grep -q AFTER-S1 "$out"
 }
 
 @test "two different scenarios claim concurrently without contending" {
