@@ -953,6 +953,14 @@ is_job() {
     done <"$reg"
     return 1
 }
+tracked_parent_alive() {
+    parent=$1
+    for member in $tracked; do
+        [ "${member%%:*}" = "$parent" ] || continue
+        alive "$parent" "${member#*:}" && return 0
+    done
+    return 1
+}
 # `tracked` is a space-delimited set of pid:start-time identities. Refresh it
 # while the owner is alive, so a process that successfully daemonizes and is
 # reparented away drops out. Registered bg_start roots (and therefore their
@@ -964,17 +972,15 @@ snapshot_tree() {
         grew=0
         for d in /proc/[0-9]*; do
             p=${d#/proc/}
-            case " $tracked $$:$selfstart $partner:$pstart " in *" $p:"*) continue ;; esac
             st=""
             { read -r st <"$d/stat"; } 2>/dev/null || continue
             set -f; set -- ${st##*") "}; set +f
             state=$1 ppid=$2 start=${20:-}
             case "$state:$start" in Z:*|X:*|x:*|*:) continue ;; esac
-            case "$tracked" in
-                *" $ppid:"*)
-                    is_job "$p" "$start" && continue
-                    tracked="$tracked$p:$start " grew=1 ;;
-            esac
+            case " $tracked $$:$selfstart $partner:$pstart " in *" $p:$start "*) continue ;; esac
+            tracked_parent_alive "$ppid" || continue
+            is_job "$p" "$start" && continue
+            tracked="$tracked$p:$start " grew=1
         done
     done
 }
@@ -987,17 +993,18 @@ grow_tree() {
     grew=0
     for d in /proc/[0-9]*; do
         p=${d#/proc/}
-        case " $tracked $$:$selfstart $partner:$pstart " in *" $p:"*) continue ;; esac
         st=""
         { read -r st <"$d/stat"; } 2>/dev/null || continue
         set -f; set -- ${st##*") "}; set +f
         state=$1 ppid=$2 start=${20:-}
         case "$state:$start" in Z:*|X:*|x:*|*:) continue ;; esac
-        case "$tracked" in
-            *" $ppid:"*)
-                is_job "$p" "$start" && continue
-                tracked="$tracked$p:$start " grew=1 ;;
-        esac
+        case " $tracked $$:$selfstart $partner:$pstart " in *" $p:$start "*) continue ;; esac
+        tracked_parent_alive "$ppid" || continue
+        is_job "$p" "$start" && continue
+        tracked="$tracked$p:$start " grew=1
+        # Close the interval before the next scan: a newly found forker must
+        # not stay runnable long enough to spawn and reap an orphan.
+        alive "$p" "$start" && kill -STOP "$p" 2>/dev/null
     done
 }
 signal_tracked() {
@@ -1012,9 +1019,8 @@ signal_tracked() {
 # STOP/discover repeats to a fixed point, closing the fork race of a fixed
 # two-pass tree walk.
 kill_driver_scope() {
+    signal_tracked STOP
     while :; do
-        grow_tree
-        signal_tracked STOP
         grow_tree
         [ "$grew" = 0 ] && break
     done
@@ -1030,7 +1036,12 @@ watch() {
     while :; do
         if alive "$owner" "$ostart"; then
             snapshot_tree
-            if [ -n "$partner" ] && ! alive "$partner" "$pstart"; then
+            # The owner can die during the /proc walk. Recheck before the
+            # held_for decision, or that transition could break the loop and
+            # release the flock without draining the snapshot we just pinned.
+            if ! alive "$owner" "$ostart"; then
+                kill_driver_scope
+            elif [ -n "$partner" ] && ! alive "$partner" "$pstart"; then
                 kill_driver_scope
             fi
         else
@@ -1039,7 +1050,12 @@ watch() {
             # snapshot pins those identities so they are still drained.
             kill_driver_scope
         fi
-        held_for || break
+        if ! held_for; then
+            # Owner death can happen after the last explicit alive check.
+            # Drain the pinned scope on this final path before flock closes.
+            kill_driver_scope
+            break
+        fi
         sleep "$poll"
     done
     drop_waiting

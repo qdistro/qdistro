@@ -1072,7 +1072,9 @@ _claim_kill_one_holder() {
         source "$1"
         qci_claim_driver "$2"
         echo "$BASHPID $QCI_DRIVER_CLAIM_HOLDER" > "$4"
-        bash -c "for i in \$(seq 1 150); do (sleep 0.03; echo fork-\$i >> \"\$1\") & sleep 0.01; done; wait" _ "$3"
+        # Each short-lived forker leaves a child running after reparenting.
+        # The guardian must finish draining before the next claim can act.
+        bash -c "for i in \$(seq 1 150); do ( (sleep 0.03; echo fork-\$i >> \"\$1\") & ); sleep 0.01; done; wait" _ "$3"
         echo DRIVER-AFTER-CHILD >> "$3"
     ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$lock" "$log" "$ready" &
     local drv=$! i owner hp gp rc=0
