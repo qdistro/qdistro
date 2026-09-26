@@ -167,20 +167,22 @@ Procedure:
    FIRST commands, in that shell itself:
    `source /tmp/qci-gui-waiters.sh || exit 2` then
    `qci_claim_driver /tmp/qci/<slug>/driver.lock || exit 2`. Exit 2 (library
-   missing, lock not openable) is ERROR. The claim lasts exactly as long as
-   the driver SHELL (a helper watches it; nothing the driver starts inherits
-   the lock), so apps and `bg_start` jobs a failed driver left behind do not
-   block a retry -- the retry's Setup must stop them first. A second live
-   driver prints `ERROR: a second guest driver is already running` and exits 1.
-   Do not delete the lock or change its path; send the first driver its go,
-   wait for it, or record ERROR. Short read-only vm-exec checks do not claim.
+   missing, lock not openable) is ERROR. The claim lasts while the driver
+   SHELL or a `bg_start` job it started is alive (a helper watches them;
+   nothing the driver starts inherits the lock), so apps a failed driver
+   launched do not block a retry -- the retry's Setup must stop them first.
+   A second driver prints `ERROR: a second guest driver is already running`,
+   one line per process the claim is held for, and exits 1. Do not delete the
+   lock or change its path; send a waiting driver its go, stop a leftover
+   `bg_start` job, or record ERROR. Short read-only vm-exec checks do not claim.
    Each mid-scenario HOST step (capture, click, send-key) is gated in the
-   driver by `qci_host_step <name>`: it writes `<name>` to
-   `/tmp/qci/<slug>/waiting` and waits up to 900s for
-   `/tmp/qci/<slug>/<name>.go`. The driver cannot finish until you do its host
-   steps, so do NOT wait for the driver command to return first: run it as its
-   own long-running command and, meanwhile, for each step poll `waiting`
-   through vm-exec, act, and `touch` that step's `.go` (qdwin gui/16 and
+   driver by `qci_host_step <name>`: it writes a token such as `s1.83917264`
+   to `/tmp/qci/<slug>/waiting` and waits up to 900s for the DIRECTORY
+   `/tmp/qci/<slug>/<token>.go`; on timeout it stops the driver (no EXIT-trap
+   teardown). The driver cannot finish until you do its host steps, so do NOT
+   wait for the driver command to return first: run it as its own
+   long-running command and, meanwhile, for each step poll `waiting` through
+   vm-exec, act, and `mkdir` that exact token's `.go` (qdwin gui/16 and
    permissions-gui/14, full-20260926T153217Z-3807077).
    YOUR SHELL TOOL SIGKILLS every process a command started when that command
    returns, and SIGKILL runs no trap. A `vm-exec ... &` left in the

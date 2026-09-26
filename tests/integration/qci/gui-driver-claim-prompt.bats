@@ -73,7 +73,7 @@ _claim_snippet() {
     kill "$holder" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
     [ "$status" -eq 1 ]
-    [ "$output" = "ERROR: a second guest driver is already running: $lock" ]
+    [ "${lines[0]}" = "ERROR: a second guest driver is already running: $lock" ]
     [ ! -e "$side" ]
 }
 
@@ -152,30 +152,36 @@ _claim_snippet() {
     local p; p=$(_render_prompt)
     printf '%s\n' "$p" | grep -q 'qci_host_step <name>'
     printf '%s\n' "$p" | grep -q "/tmp/qci/$SLUG/waiting"
+    printf '%s\n' "$p" | grep -q "mkdir /tmp/qci/$SLUG/<token>.go"
     printf '%s\n' "$p" | grep -q 'THE DRIVER DOES NOT RETURN UNTIL YOU HAVE DONE ITS HOST STEPS'
-    # The old advice, a hand-rolled await_file, is gone.
+    # The old advice, a hand-rolled await_file on a touched path, is gone.
     run grep -q 'await_file. on a path you' <<<"$p"
     [ "$status" -eq 1 ]
-    # The prompt no longer claims that launched apps keep the claim.
+    # The prompt no longer says launched apps keep the claim.
     run grep -q 'AND every' <<<"$p"
     [ "$status" -eq 1 ]
     grep -q 'qci_host_step <name>' "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
+    grep -q 'mkdir. that exact token' "$REPO_ROOT/ci/prompts/gui-scenario-agent.md"
 }
 
-@test "the prompt's claim lines and qci_host_step: the host sees the step and releases it" {
-    local snip out
+@test "the prompt's claim lines and qci_host_step: the host reads the token and releases the step" {
+    local snip out tok="" i
     snip=$(_claim_snippet)
     out="$BATS_TEST_TMPDIR/driver.out"
     local d="$BATS_TEST_TMPDIR/qci/$SLUG"
     bash -c "$snip"'
-        qci_host_step s1 20 > "$1" 2>&1 || exit 1
+        qci_host_step s1 20 > "$1" 2>&1
         echo AFTER-S1 >> "$1"
     ' _ "$out" &
-    local drv=$! i
-    for i in $(seq 1 100); do [ "$(cat "$d/waiting" 2>/dev/null)" = s1 ] && break; sleep 0.1; done
-    [ "$(cat "$d/waiting")" = s1 ]
-    [ -f "$d/s1.ready" ]
-    : > "$d/s1.go"
+    local drv=$!
+    for i in $(seq 1 100); do
+        tok=$(cat "$d/waiting" 2>/dev/null) || tok=""
+        [ "${tok%%.*}" = s1 ] && break
+        sleep 0.1
+    done
+    [ "${tok%%.*}" = s1 ]
+    # Exactly what the prompt tells the host to run.
+    mkdir "$d/$tok.go"
     wait "$drv"
     grep -q AFTER-S1 "$out"
 }

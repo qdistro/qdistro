@@ -778,21 +778,25 @@ Rules:
   full-20260922T193137Z-881799: all frames black because the admin app had
   already been killed by the driver's own teardown). Instead the guest
   driver WAITS for the host before each host-side step, with the library's
-  \`qci_host_step <name>\` (after the claim, below): it publishes
-  \`/tmp/qci/$slug/<name>.ready\`, writes \`<name>\` into
-  \`/tmp/qci/$slug/waiting\`, and waits up to 900s for
-  \`/tmp/qci/$slug/<name>.go\`; on timeout it returns 1 and the driver stops.
-  Do not hand-roll these waits with short deadlines: you need minutes per
-  host step (capture, open the image, decide, click), and a 30s wait expires
-  before you can act (qdwin gui/16, full-20260926T153217Z-3807077).
+  \`qci_host_step <name>\` (after the claim, below; names are
+  [A-Za-z0-9_-]). It writes a fresh token such as \`s1.83917264\` into
+  \`/tmp/qci/$slug/waiting\` and waits up to 900s for the DIRECTORY
+  \`/tmp/qci/$slug/<token>.go\`. On timeout it STOPS the driver itself: it
+  writes \`<token>.timeout\`, clears the EXIT trap and exits 1, leaving the
+  app and requests in place. Do not hand-roll these waits with short
+  deadlines: you need minutes per host step (capture, open the image,
+  decide, click), and a 30s wait expires before you can act (qdwin gui/16,
+  full-20260926T153217Z-3807077).
   THE DRIVER DOES NOT RETURN UNTIL YOU HAVE DONE ITS HOST STEPS. Start it as
   its own long-running tool command (timeout-capped, in that command's
   foreground) and do NOT wait for that command to finish -- while it runs,
   issue the host steps as SEPARATE tool commands. Waiting for the driver
   first is a deadlock that ends only at the step's timeout (gui/16 again).
   For EACH host step: poll \`cat /tmp/qci/$slug/waiting\` through short
-  vm-exec calls until it names that step, do the step, then \`touch
-  /tmp/qci/$slug/<name>.go\` through vm-exec. Always read \`waiting\` before
+  vm-exec calls until the token it prints starts with that step's name, do
+  the step, then run \`mkdir /tmp/qci/$slug/<token>.go\` through vm-exec with
+  the EXACT token you read (mkdir, not touch: only a directory counts, and
+  a go for an older token releases nothing). Always read \`waiting\` before
   acting: it is the step the driver is blocked on, and a step whose go you
   never sent leaves the driver stuck there while you drive later steps
   against a driver that has already given up (permissions-gui/14, same run:
@@ -806,7 +810,7 @@ Rules:
   navigation did not work" (permissions-gui/04, 22, 34 and 46 in
   full-20260923T163219Z-1188602; 22 also in full-20260923T123113Z-2785403).
   Every \`virsh send-key\` a scenario lists runs on the host, between the
-  guest's \`<name>.ready\` and your \`<name>.go\`, and you check its exit
+  guest's \`waiting\` token and your \`<token>.go\`, and you check its exit
   status.
   Never let the driver reach its teardown before the last
   frame the scenario asks for has been captured -- and that includes the
@@ -998,23 +1002,27 @@ Rules:
   fine when these lines and all the driver's work are in that script. Never
   claim in a subshell, \`\$( )\`, or a helper that exits before the work.
   Exit 2 means the claim could not be taken (library missing, lock not
-  openable): record ERROR. The claim is held for exactly as long as the
-  driver SHELL lives (a helper watches it; nothing the driver starts inherits
-  the lock) and is released within a second of that shell exiting, even when
-  it is SIGKILLed. Apps and \`bg_start\` jobs a driver left behind do NOT hold
-  it, so a retry driver's Setup must stop whatever the previous attempt left
-  running (an admin app, a test window, a pending request) before it files
-  anything. If it prints
+  openable): record ERROR. The claim is held while the driver SHELL, or a
+  \`bg_start\` job it started, is alive (a helper watches them; nothing the
+  driver starts inherits the lock), and is released within a second after
+  the last of them exits, even when the driver is SIGKILLed. An app the
+  driver merely launched (or that a \`bg_start\` launcher daemonized) does
+  NOT hold it, so a retry driver's Setup must stop whatever the previous
+  attempt left running (an admin app, a test window, a pending request)
+  before it files anything. If it prints
   \`ERROR: a second guest driver is already running\` and exits 1, an earlier
-  driver SHELL of yours is still alive in the guest
-  (permissions-gui/08 in gui-20260924T193011Z-2597819 ran four drivers at once
-  and read another driver's rc) -- typically one still waiting in
-  \`qci_host_step\` (\`cat /tmp/qci/$slug/waiting\` names the step). Do NOT
-  work around it: do not delete the lock file, do not use another lock path,
-  and do not start yet another driver. Send that driver its go, or wait for
-  it to finish, or record ERROR. Short read-only
+  driver of yours, or one of its \`bg_start\` jobs, is still alive in the
+  guest (permissions-gui/08 in gui-20260924T193011Z-2597819 ran four drivers
+  at once and read another driver's rc); the lines after the ERROR name each
+  process it is held for. A driver shell is typically still in
+  \`qci_host_step\` (\`cat /tmp/qci/$slug/waiting\` names the step): send it
+  its go or wait for it. A leftover \`bg_start\` job: stop it, and what it
+  started, with a short vm-exec, then retry. Do NOT work around the claim:
+  do not delete the lock file, do not use another lock path, and do not
+  start yet another driver while one is alive; if it cannot be released,
+  record ERROR. Short read-only
   \`vm-exec\` checks (\`bg_wait\`, \`bg_log\`, a sqlite query) and host
-  go-marker touches do not claim; they must never file a broker request or
+  go-marker mkdirs do not claim; they must never file a broker request or
   run scenario steps.
 - NEVER put a PIPE on vm-exec's stderr in your driver script. Concretely, do
   NOT open your driver with \`exec > >(tee "\$LOG") 2>&1\`, and do not write
