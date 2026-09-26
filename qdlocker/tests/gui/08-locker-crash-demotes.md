@@ -116,8 +116,20 @@ the `demoted locker toplevel ... via locker_disconnect` line:
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
   'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"2 minutes ago\" --no-pager"' \
-  | grep -E 'demoted locker toplevel .*locker_disconnect|promoted locker toplevel handle=[0-9]+ to lock_layer'
+  | awk '
+      /demoted locker toplevel handle=[0-9]+ via locker_disconnect/ {
+          match($0, /handle=[0-9]+/); demoted = substr($0, RSTART + 7, RLENGTH - 7); promoted = ""; next }
+      demoted != "" && /promoted locker toplevel handle=[0-9]+ to lock_layer/ {
+          match($0, /handle=[0-9]+/); h = substr($0, RSTART + 7, RLENGTH - 7)
+          if (h != demoted) promoted = h }
+      END {
+          if (demoted == "" || promoted == "") {
+              print "FAIL 5.3: demoted=" demoted " promoted-after=" promoted; exit 1 }
+          print "OK 5.3: demoted handle=" demoted ", later promoted handle=" promoted }'
 ```
+
+The awk exits non-zero unless the LAST `locker_disconnect` demotion is followed
+by a promotion of a DIFFERENT handle.
 
 5.3 is additive corroboration for 5.2; it does not replace the visual check.
 

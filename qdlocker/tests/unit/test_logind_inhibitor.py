@@ -405,6 +405,9 @@ def reconnect_bus(monkeypatch):
             return (logind.os.getuid(), '/user/current')
 
         async def get_active(self):
+            if state.gate is not None:
+                state.paused.set()
+                await state.gate.wait()
             return True
 
         async def get_type(self):
@@ -414,7 +417,8 @@ def reconnect_bus(monkeypatch):
             return False
 
     state = SimpleNamespace(instances=[], fail_connect=0, hang_connect=False,
-                            pid_session=True, seat_sessions=0, preparing=False)
+                            pid_session=True, seat_sessions=0, preparing=False,
+                            gate=None, paused=None)
 
     class Bus:
         def __init__(self, **kwargs):
@@ -709,6 +713,43 @@ def test_connect_during_sleep_preparation_locks(monkeypatch, reconnect_bus, clos
         watcher = LogindWatcher(on_lock=locks.append)
         task = asyncio.create_task(watcher._main())
         await _eventually(lambda: locks == [REASON_SUSPEND])
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('event', ['removed', 'new'])
+def test_membership_change_during_resolution_is_not_lost(monkeypatch, reconnect_bus,
+                                                         closed_fds, event):
+    """codex r1: a SessionRemoved/SessionNew that lands while discovery is
+    awaiting logind must be applied, not dropped because no session was
+    published yet. Discovery picks the only seat session, then (paused) that
+    session is removed / a second one appears: the final binding must reflect
+    the post-event list (unbound: 0 resp. 2 candidates)."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    reconnect_bus.pid_session = False
+    reconnect_bus.seat_sessions = 1
+    async def run():
+        reconnect_bus.gate = asyncio.Event()
+        reconnect_bus.paused = asyncio.Event()
+        watcher = LogindWatcher(on_lock=lambda reason: None)
+        task = asyncio.create_task(watcher._main())
+        await asyncio.wait_for(reconnect_bus.paused.wait(), 1)
+        bus = reconnect_bus.instances[0]
+        if event == 'removed':
+            reconnect_bus.seat_sessions = 0
+            bus.manager.emit('session_removed', 'current', '/session/current')
+        else:
+            reconnect_bus.seat_sessions = 2
+            bus.manager.emit('session_new', 'other', '/session/other')
+        reconnect_bus.gate.set()
+        reconnect_bus.gate = None
+        await _eventually(lambda: watcher.automatic_lock_ready)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not bus.session.callbacks.get('lock'), \
+            'a session that changed during discovery must not stay bound'
+        assert len(reconnect_bus.instances) == 1 and closed_fds == []
         watcher._stop_event.set()
         await asyncio.wait_for(task, 1)
     asyncio.run(run())

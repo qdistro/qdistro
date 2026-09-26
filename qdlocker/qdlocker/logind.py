@@ -352,49 +352,68 @@ class LogindWatcher:
         session_subscriptions = []
         session_lock = asyncio.Lock()
         session_binding = None
+        # Every SessionNew/SessionRemoved bumps the membership generation. A
+        # resolution records the generation it started from and repeats until
+        # none changed while it was awaiting logind, so an event that lands
+        # mid-resolution (e.g. the chosen session being removed before the
+        # result is published) is never lost.
+        membership_gen = 0
+        resolved_gen = -1
 
-        async def rebind_session(initial: bool, stale_path: str | None) -> None:
-            nonlocal session_path, session_binding
+        async def rebind_session(initial: bool) -> None:
+            nonlocal session_path, session_binding, resolved_gen
             async with session_lock:
-                if not active:
-                    return
-                if not initial and session_path != stale_path:
-                    return  # an earlier rebind already handled this change
-                for proxy, signal, callback in reversed(session_subscriptions):
+                first = initial
+                while active and (first or resolved_gen != membership_gen):
+                    gen = membership_gen
+                    for proxy, signal, callback in reversed(session_subscriptions):
+                        try:
+                            getattr(proxy, "off_" + signal)(callback)
+                        except Exception:
+                            log.debug("could not remove logind session %s subscription",
+                                      signal, exc_info=True)
+                    session_subscriptions.clear()
+                    session_path = None
+                    # Callbacks of a replaced binding stay inert even if a
+                    # signal already queued for them is still delivered.
+                    binding = session_binding = object()
                     try:
-                        getattr(proxy, "off_" + signal)(callback)
+                        session_path = await self._subscribe_session(
+                            bus, self._mgr, session_subscriptions,
+                            lambda: active and session_binding is binding,
+                            quiet=not initial,
+                        )
                     except Exception:
-                        log.debug("could not remove logind session %s subscription",
-                                  signal, exc_info=True)
-                session_subscriptions.clear()
-                session_path = None
-                # Callbacks of a replaced binding stay inert even if a signal
-                # already queued for them is still delivered.
-                binding = session_binding = object()
-                try:
-                    session_path = await self._subscribe_session(
-                        bus, self._mgr, session_subscriptions,
-                        lambda: active and session_binding is binding,
-                        quiet=not initial,
-                    )
-                except Exception:
-                    log.exception("session lock subscription unavailable; "
-                                  "suspend protection remains active")
-                if not initial:
-                    log.info("logind session rebound in place; session=%s", session_path)
+                        log.exception("session lock subscription unavailable; "
+                                      "suspend protection remains active")
+                    resolved_gen = gen
+                    if not first:
+                        log.info("logind session rebound in place; session=%s",
+                                 session_path)
+                    first = False
 
-        def rebind_soon(stale_path: str | None) -> None:
-            task = asyncio.create_task(rebind_session(False, stale_path))
+        def rebind_soon() -> None:
+            task = asyncio.create_task(rebind_session(False))
             tasks.add(task)
             task.add_done_callback(completed)
 
         def session_new(session_id: str, path: str) -> None:
-            if active and session_path is None:
-                rebind_soon(None)
+            nonlocal membership_gen
+            if not active:
+                return
+            membership_gen += 1
+            # A bound session stays valid when someone else logs in; while
+            # unbound (or mid-resolution) the new session may be ours.
+            if session_path is None or session_lock.locked():
+                rebind_soon()
 
         def session_removed(session_id: str, path: str) -> None:
-            if active and path == session_path:
-                rebind_soon(path)
+            nonlocal membership_gen
+            if not active:
+                return
+            membership_gen += 1
+            if path == session_path or session_lock.locked():
+                rebind_soon()
 
         def subscribe(proxy, signal, callback) -> None:
             getattr(proxy, "on_" + signal)(callback)
@@ -416,7 +435,7 @@ class LogindWatcher:
             subscribe(mgr, "session_new", session_new)
             subscribe(mgr, "session_removed", session_removed)
             await self._acquire_inhibitor()
-            await rebind_session(True, None)
+            await rebind_session(True)
             # A suspend already in progress when this generation connected
             # (e.g. logind restarted, or the bus dropped mid-cycle) sent its
             # PrepareForSleep(true) before we subscribed; lock for it now.
