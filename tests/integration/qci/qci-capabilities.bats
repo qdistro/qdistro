@@ -65,6 +65,12 @@ affected_gates() {
     [ "$output" = "selftest lint host" ]
 }
 
+@test "affected: shared VM lifecycle source selects every VM lane" {
+    run affected_gates ci/lib/vm.sh
+    [ "$status" -eq 0 ]
+    [ "$output" = "selftest lint host vm-smoke bats gui" ]
+}
+
 @test "affected: source-manifest + R1 tooling select the release-manifest gate" {
     run affected_gates scripts/install/source-manifest.txt
     [ "$status" -eq 0 ]
@@ -107,6 +113,16 @@ affected_gates() {
     run affected_gates scripts/vm/vm-exec
     [ "$status" -eq 0 ]
     [ "$output" = "vm-smoke" ]
+}
+
+@test "affected: broker and SELinux changes select runtime coverage" {
+    run affected_gates broker/qdistro_admin_broker.py
+    [ "$status" -eq 0 ]
+    [ "$output" = "host vm-smoke bats gui" ]
+
+    run affected_gates selinux/tier2/qdistro_tier2.te
+    [ "$status" -eq 0 ]
+    [ "$output" = "host vm-smoke bats gui" ]
 }
 
 @test "affected: bats-dir path (not in registry) selects bats" {
