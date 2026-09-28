@@ -110,6 +110,7 @@ qdistro_write_snapshot_repos() {
 name=qdistro Tumbleweed OSS $snap
 enabled=1
 autorefresh=0
+keeppackages=1
 baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/oss/
 gpgcheck=1
 EOF
@@ -118,13 +119,24 @@ EOF
 name=qdistro Tumbleweed NonOSS $snap
 enabled=1
 autorefresh=0
+keeppackages=1
 baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/non-oss/
 gpgcheck=1
 EOF
     chmod 0644 "$repo_dir/qdistro-snapshot-oss.repo" "$repo_dir/qdistro-snapshot-nonoss.repo"
     return 0
 }
-if ! ls /etc/zypp/repos.d/*.repo >/dev/null 2>&1; then
+if [ -s /etc/qdistro/test-substrate ]; then
+    # Cloud-derived base: enforce the base's own accepted snapshot, even if
+    # cloud-init or another package has added rolling repositories since bake.
+    _snap="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' /etc/qdistro/test-substrate)"
+    [ -n "$_snap" ] || { log "ERROR: invalid cloud test-substrate stamp"; exit 3; }
+    mkdir -p /etc/zypp/repos.d
+    find /etc/zypp/repos.d -maxdepth 1 -name '*.repo' -delete
+    find /etc/zypp/services.d -maxdepth 1 -name '*.service' -delete 2>/dev/null || true
+    printf 'SNAPSHOT=%s\n' "$_snap" > /tmp/qdistro-test-release
+    qdistro_write_snapshot_repos /tmp/qdistro-test-release || exit 3
+elif ! ls /etc/zypp/repos.d/*.repo >/dev/null 2>&1; then
     log "no zypper repos in the image; writing snapshot repos from /etc/qdistro/release"
     qdistro_write_snapshot_repos /etc/qdistro/release || exit 3
 fi
@@ -221,7 +233,7 @@ import sys
 print(f"python{sys.version_info.major}{sys.version_info.minor}")
 PY
 )
-    zypper -n --no-gpg-checks refresh >/tmp/qnotebook-zypper-refresh.log 2>&1 \
+    zypper -n refresh >/tmp/qnotebook-zypper-refresh.log 2>&1 \
         || log "  WARN: zypper refresh before qnotebook deps failed; trying cached metadata"
     QNOTEBOOK_ZYPPER_LOG=/tmp/qnotebook-zypper-install.log
     if ! zypper -n install --no-recommends \
@@ -623,7 +635,7 @@ moddir="/lib/modules/$krel/kernel/drivers/input/misc"
 if [ ! -e "$moddir/uinput.ko" ] && [ ! -e "$moddir/uinput.ko.zst" ] \
    && [ ! -e "$moddir/uinput.ko.xz" ]; then
     log "  uinput.ko absent for running kernel ${krel}; installing kernel-default (fallback)..."
-    zypper -n --no-gpg-checks refresh >/dev/null 2>&1 || true
+    zypper -n refresh >/dev/null 2>&1 || true
     if zypper -n install --no-recommends kernel-default >/dev/null 2>&1; then
         # Refresh the running kernel's module dep index in case the install
         # overlaid a matching version (same-version repo case).

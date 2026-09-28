@@ -565,6 +565,18 @@ ensure_run_golden() {
         record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "golden did not quiesce"
         return "$EXIT_VM_PROVISION"
     fi
+    # The guest keeps verified RPM downloads in its snapshot-specific zypp
+    # cache. Export after a clean shutdown, before the disk becomes immutable,
+    # so later golden builds can seed those packages without another download.
+    # Cache I/O is an optimization; a failed export cannot change test verdicts.
+    if [ "${QDISTRO_VM_BASE:-baked}" = baked ] && { [ "$profile" = bats ] || [ "$profile" = gui-qdwin ]; }; then
+        . "$VM_TOOLS/lib/test-substrate.sh"
+        . "$VM_TOOLS/lib/rpm-cache.sh"
+        if qdistro_load_test_substrate; then
+            qdistro_rpm_cache_export "$gdisk" >> "$log" 2>&1 \
+                || log "WARN: could not export RPM cache from golden $profile; continuing with validated disk"
+        fi
+    fi
     # Integrity guardrail on the qcow2 metadata before using it as a backing.
     if command -v qemu-img >/dev/null 2>&1 && ! qemu-img check "$gdisk" >/dev/null 2>&1; then
         log "golden $profile failed qemu-img check; failing"

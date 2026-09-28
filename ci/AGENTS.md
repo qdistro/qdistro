@@ -103,7 +103,8 @@ These used to live only in private agent notes; validation relies on them.
   first, then launch.
 - **One full/GUI run per host.** Per-run VM/golden names are unique, but
   runs share the `qdistro-template` domain, the base images
-  (`baseweed-baked.qcow2`, `baseweed-enforcing-baked.qcow2`) and host
+  (the versioned cloud-derived baseweed backing and
+  `baseweed-enforcing-baked.qcow2`) and host
   capacity; check `systemctl --user list-units 'qci-*'` and
   `virsh -c qemu:///session list --all` first. `repo-state.tsv` in each run
   dir says which tree (worktree path + SHA) produced it.

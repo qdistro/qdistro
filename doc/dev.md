@@ -97,6 +97,12 @@ scripts/vm/build-baked-baseweed.sh
 scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
 ```
 
+The qci VM base defaults to the cloud-derived, dependency-baked image. Its
+cloud SHA256 and Tumbleweed repository snapshot are pinned together in
+[`scripts/vm/test-substrate.conf`](../scripts/vm/test-substrate.conf); see
+[`ci/README.md`](../ci/README.md#cloud-test-substrate) for rotation, the RPM
+download cache, and the explicit `QDISTRO_VM_BASE=kiwi` alternative.
+
 Prerequisites for the libvirt session (set up once):
 
 ```sh

@@ -92,6 +92,75 @@ make_local_signed_fixture() {
     [ "$status" -ne 0 ]
 }
 
+@test "cloud cache accepts signed bytes only when they match the test substrate pin" {
+    make_local_signed_fixture
+    digest="$(sha256sum "$WORK/image.qcow2" | awk '{print $1}')"
+    run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+        bash -c ". '$LIB'; download_verified_cloud_image 'https://invalid.example/image.qcow2' '$WORK/image.qcow2' '$digest'"
+    [ "$status" -eq 0 ]
+    run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+        bash -c ". '$LIB'; download_verified_cloud_image 'https://invalid.example/image.qcow2' '$WORK/image.qcow2' '0000000000000000000000000000000000000000000000000000000000000000'"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"differs from test substrate pin"* ]]
+}
+
+@test "cloud test substrate stamp rejects old snapshot and modified disk" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf"
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=20260924\n' \
+        "$(uname -m)" 1 > "$manifest"
+    printf 'base' > "$WORK/base.qcow2"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_write_stamp '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\"; qdistro_substrate_stamp_ok '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\""
+    [ "$status" -eq 0 ]
+    sed -i 's/snapshot=20260924/snapshot=20260923/' "$manifest"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_stamp_ok '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\""
+    [ "$status" -ne 0 ]
+    sed -i 's/snapshot=20260923/snapshot=20260924/' "$manifest"
+    printf 'tamper' >> "$WORK/base.qcow2"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_stamp_ok '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\""
+    [ "$status" -ne 0 ]
+}
+
+@test "cloud test substrate uses distinct paths for snapshot and recipe changes" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf" path1 path2
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=20260924\n' \
+        "$(uname -m)" 1 > "$manifest"
+    path1="$(QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    sed -i 's/snapshot=20260924/snapshot=20260923/' "$manifest"
+    path2="$(QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    [ "$path1" != "$path2" ]
+    [[ "$path1" == *"20260924"* ]]
+    [[ "$path2" == *"20260923"* ]]
+}
+
+@test "VM base default stays cloud-derived while Kiwi remains explicit" {
+    local selector="$REPO_ROOT/scripts/vm/lib/vm-base.sh"
+    run bash -c ". '$selector'; qdistro_kiwi_base_ok() { return 0; }; qdistro_vm_base_kind"
+    [ "$status" -eq 0 ]
+    [ "$output" = baked ]
+    run env QDISTRO_VM_BASE=auto bash -c ". '$selector'; qdistro_kiwi_base_ok() { return 0; }; qdistro_vm_base_kind"
+    [ "$status" -eq 0 ]
+    [ "$output" = kiwi ]
+}
+
+@test "cloud substrate replaces rolling repositories with signed snapshot repositories" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" root="$WORK/root" command
+    mkdir -p "$root/etc/zypp/repos.d" "$root/etc/zypp/services.d"
+    printf 'baseurl=https://download.opensuse.org/tumbleweed/repo/oss/\n' > "$root/etc/zypp/repos.d/rolling.repo"
+    printf 'service\n' > "$root/etc/zypp/services.d/rolling.service"
+    command="$(bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_repo_command")"
+    command="${command//\/etc\//$root\/etc\/}"
+    bash -c "$command"
+    [ ! -e "$root/etc/zypp/repos.d/rolling.repo" ]
+    [ ! -e "$root/etc/zypp/services.d/rolling.service" ]
+    [ "$(find "$root/etc/zypp/repos.d" -name '*.repo' | wc -l)" -eq 2 ]
+    grep -Fq "history/20260924/tumbleweed/repo/oss/" "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
+    grep -Fq 'gpgcheck=1' "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
+    grep -Fq 'keeppackages=1' "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
+}
+
 # --- zypper --no-gpg-checks profile gate ----------------------------------
 
 # Echo the gpg_flags array the install-deps gate computes for a given profile.

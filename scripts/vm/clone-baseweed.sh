@@ -121,7 +121,13 @@ elif [ "$FROM_KIWI" = 1 ]; then
     BACKING="$(qdistro_kiwi_base_path)"
     BACKING_NAME=qdistro-kiwi-base
 elif [ "$FROM_BAKED" = 1 ]; then
-    BACKING="$IMG/baseweed-baked.qcow2"
+    . "$SCRIPT_DIR/lib/test-substrate.sh"
+    qdistro_load_test_substrate || exit 2
+    BACKING="$(qdistro_substrate_base_path baked)"
+    qdistro_substrate_stamp_ok "$BACKING" baked \
+        "$(sha256sum "$(qdistro_substrate_base_path admin)" 2>/dev/null | awk '{print $1}')" || {
+        echo "ERROR: pinned cloud test base missing or mismatched: $BACKING" >&2; exit 2;
+    }
     BACKING_NAME=baseweed-baked
 else
     BACKING="$IMG/baseweed.qcow2"
@@ -263,6 +269,13 @@ else
     virt-customize --no-network -a "$IMG/${VM}.qcow2" \
         --edit '/etc/selinux/config:s/SELINUX=enforcing/SELINUX=permissive/' \
         >/dev/null
+fi
+
+# Only fresh cloud-derived goldens need the host RPM seed. Ordinary workers
+# inherit their golden's installed packages and should stay cheap to clone.
+if [ "$FROM_BAKED" = 1 ] && [[ "$PREFIX" = qci-golden-* ]]; then
+    . "$SCRIPT_DIR/lib/rpm-cache.sh"
+    qdistro_rpm_cache_import "$IMG/${VM}.qcow2"
 fi
 
 # 3. Define from template, swapping name + disk path + MAC + GPU bits

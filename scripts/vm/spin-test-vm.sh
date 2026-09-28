@@ -6,8 +6,7 @@
 #   1. build-baseweed-from-scratch.sh   (if baseweed-admin.qcow2 absent)
 #   2. build-baked-baseweed.sh          (if baseweed-baked.qcow2 absent)
 #   3. clone-baseweed.sh --from-kiwi or --from-baked
-#      (QDISTRO_VM_BASE=auto|kiwi|baked; auto uses the imported kiwi
-#       image if present — iso/14 Phase G — else baseweed-baked)
+#      (QDISTRO_VM_BASE=baked by default; kiwi and auto remain explicit)
 #   4. tarball + HTTP-stage the monorepo (one tarball)
 #   5. fresh-vm-bootstrap.sh in VM      (build qdwin, build daemons,
 #                                        install broker + qdshell)
@@ -76,16 +75,26 @@ if [ "$NEED_BAKED" = 1 ]; then
     # lock acquire.
     exec 9>"$IMG/.baseweed-build.lock"
     if flock -w 2400 9; then
-        if [ ! -f "$IMG/baseweed-admin.qcow2" ]; then
+        . "$REPO/scripts/vm/lib/test-substrate.sh"
+        qdistro_load_test_substrate || exit 2
+        BASEWEED_ADMIN="$(qdistro_substrate_base_path admin)"
+        BASEWEED_BAKED="$(qdistro_substrate_base_path baked)"
+        if [ ! -f "$BASEWEED_ADMIN" ]; then
             log "stage 1: building baseweed-admin.qcow2 from scratch (~5-10 min)..."
             bash "$REPO/scripts/vm/build-baseweed-from-scratch.sh" >&2
         else
+            qdistro_substrate_stamp_ok "$BASEWEED_ADMIN" admin "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+                log "ERROR: baseweed-admin does not match pinned test substrate; rebuild it safely"; exit 2;
+            }
             log "stage 1: baseweed-admin.qcow2 already present"
         fi
-        if [ ! -f "$IMG/baseweed-baked.qcow2" ]; then
+        if [ ! -f "$BASEWEED_BAKED" ]; then
             log "stage 2: baking dependencies onto overlay (~15-25 min)..."
             bash "$REPO/scripts/vm/build-baked-baseweed.sh" >&2
         else
+            qdistro_substrate_stamp_ok "$BASEWEED_BAKED" baked "$(sha256sum "$BASEWEED_ADMIN" | awk '{print $1}')" || {
+                log "ERROR: baseweed-baked does not match pinned test substrate; rebuild it safely"; exit 2;
+            }
             log "stage 2: baseweed-baked.qcow2 already present"
         fi
         flock -u 9
@@ -104,7 +113,7 @@ if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
             --from-run-golden="$QCI_RUN_GOLDEN_BACKING" | tail -1)
 else
     if [ "$VM_BASE_KIND" = kiwi ]; then
-        log "stage 3: cloning a fresh VM from kiwi image ($(qdistro_kiwi_base_path); QDISTRO_VM_BASE=${QDISTRO_VM_BASE:-auto})..."
+        log "stage 3: cloning a fresh VM from kiwi image ($(qdistro_kiwi_base_path); QDISTRO_VM_BASE=${QDISTRO_VM_BASE:-baked})..."
         VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-kiwi | tail -1)
     else
         log "stage 3: cloning a fresh VM from baked..."

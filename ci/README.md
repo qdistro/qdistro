@@ -168,7 +168,8 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 | `QCI_AGENT_TIMEOUT` | 0 | Host-side backstop deadline (s) on each agent scenario, wrapping `QCI_AGENT_CMD` in `timeout -k 15`. `0` = unbounded (the operator command owns the budget). When both are set the smaller wins; on expiry the agent is killed and the scenario fails closed (rc=124, no verdict). |
 | `QCI_GUI_RETRY` | 0 | Classified GUI retry. `0`/unset = **report-only**: classify each failure and log to `flake.tsv` what *would* retry, but never re-run. `1`/`classified` = retry **exactly once on a fresh VM**, and only for tight retriable infra/tooling signatures such as `transport-timeout` (qemu-agent/vm-exec wedge), `agent-api-unreachable` (exact external provider connection or selected-model-capacity failure), and `agent-tooling` (agent command-construction failure). `status=FAIL`/`ERROR`, generic `UNKNOWN`, `no-verdict`, and `agent-timeout` (slow agent — possible product hang) are **never** auto-retried. A retried pass always emits a `flake.tsv` row + a note on the result row, so a flake is never silently green. |
 | `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
-| `QDISTRO_VM_BASE` | auto | `auto`: clone qci workers from the imported kiwi image (`qdistro-kiwi-base.qcow2`, tester or ci profile) if present, else `baseweed-baked`. `kiwi` requires the import (`scripts/vm/import-kiwi-base.sh`). `baked` always uses baseweed-baked. `build-in-vm.sh` always clones baked. |
+| `QDISTRO_VM_BASE` | baked | `baked` uses the pinned cloud-derived baseweed image. `kiwi` explicitly uses the imported Kiwi base; `auto` prefers Kiwi when imported, otherwise baseweed. The product image gate still qualifies Kiwi. |
+| `QDISTRO_TEST_SUBSTRATE` | `scripts/vm/test-substrate.conf` | Select an alternate manifest with a cloud URL, SHA256, architecture and Tumbleweed repository snapshot for a test substrate experiment. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |
 | `QDISTRO_VM_EXEC_TIMEOUT` | 1800 | Overall deadline (s) for a single `vm-exec` in-guest command. On expiry `vm-exec` attempts an identity-checked TERM, then KILL, of the discovered and pinned guest process tree, and exits 124. It reports its own verification limits: a descendant whose identity it cannot pin is named (`unpinnable-descendants:`) and deliberately **not** signalled, and it cannot guarantee it discovers a reparented process, so reaping is attempted and reported, not guaranteed. The deadline is also checked against elapsed time BETWEEN steps, not enforced as wall clock, so a true wall-clock cap must come from outside — use `timeout -k 30 <n> vm-exec ...`, where `-k` makes the cap an undeniable KILL-at-cap+grace for **vm-exec itself**, which a plain `timeout` does not give you against a TERM-resistant process. It does **not** reach descendants: `timeout` waits only for its direct child, so if vm-exec exits on the TERM the later group KILL is never sent. An outer cap bounds how long you wait; it does not bound cleanup, and a short grace can cut vm-exec's own cleanup verification short. The counter is also clamped across host suspend, so it measures elapsed time as the host saw it, not as the guest experienced it. `0` = unbounded. |
@@ -182,6 +183,31 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 
 A per-task timing breakdown (provision vs work seconds per file/scenario) is
 written to `<run-dir>/timings.tsv` for spotting outliers.
+
+### Cloud test substrate
+
+The default VM base is built from openSUSE's Minimal-VM cloud qcow2. The
+checked-in [`scripts/vm/test-substrate.conf`](../scripts/vm/test-substrate.conf)
+pins its SHA256 and the OSS/non-OSS history snapshot. The download must also
+match openSUSE's signed checksum. Changing the manifest or build recipe gives
+the next base a new filename; old disks remain available to preserved workers.
+`QDISTRO_VM_BASE=kiwi` remains available when image parity is the test target.
+
+To rotate the test substrate, choose an available history snapshot, verify the
+new cloud checksum signature, edit the manifest's digest and snapshot together,
+then build with `scripts/vm/build-baseweed-from-scratch.sh` followed by
+`scripts/vm/build-baked-baseweed.sh`. The history service retains snapshots for
+roughly a month; schedule a candidate build about weekly. An expired snapshot
+is an error, not a reason to use rolling repositories. An explicit alternate
+manifest via `QDISTRO_TEST_SUBSTRATE` keeps experiments separate.
+
+Downloaded RPMs from the base builders, the tier-5 base, and Bats/qdwin
+goldens are exported to
+`$QDWIN_CACHE_DIR/rpm/<snapshot>/<arch>/` (default
+`~/.cache/qdistro/rpm/`) and seeded on a later rebuild. The repository files
+retain `gpgcheck=1`; cached RPMs are only download hints. The cloud qcow2 and
+its signed sidecars live in a SHA256-named cache entry. The existing fixed-name
+baseweed disks are left untouched when the pinned substrate is first built.
 
 ## Agent-assisted GUI scenarios
 
