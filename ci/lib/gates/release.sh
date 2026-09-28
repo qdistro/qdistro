@@ -317,7 +317,9 @@ gate_bootstrap_release_profile() {
             fail=1; continue
         fi
         { echo; echo "## $f"; } >> "$log_path"
-        out=$(VM_NAME="${VM_NAME:-qci-bootstrap-release}" bats --tap "$path" 2>>"$log_path"); brc=$?
+        # Scrub the image gate's expected profile: these suites pin the
+        # DEFAULT (hardened) contract and must not inherit an operator's dev.
+        out=$(VM_NAME="${VM_NAME:-qci-bootstrap-release}" env -u QDISTRO_PROFILE bats --tap "$path" 2>>"$log_path"); brc=$?
         printf '%s\n' "$out" >> "$log_path"
         # TAP: a passing line is `ok N ...`; a skipped one is `ok N ... # skip`;
         # a failure is `not ok N ...`; the plan is `1..N`. Skips do NOT count as

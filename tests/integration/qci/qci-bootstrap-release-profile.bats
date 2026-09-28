@@ -130,3 +130,13 @@ row_note_has() {
     n=$(bats --count "$vmdir/source-manifest-signature.bats"); [ "$n" -ge 18 ] || { echo "source-manifest-signature=$n < 18" >&2; return 1; }
     n=$(bats --count "$vmdir/gen-source-manifest.bats");       [ "$n" -ge 32 ] || { echo "gen-source-manifest=$n < 32" >&2; return 1; }
 }
+
+@test "bootstrap-release-profile: an ambient QDISTRO_PROFILE does not reach the contract suites" {
+    # `QDISTRO_PROFILE=dev qci full` is how the dev tester image passes the
+    # image gate; the release-contract suites must still see the default.
+    mkbats env.bats '@test "profile unset" { [ -z "${QDISTRO_PROFILE+x}" ]; }'
+    export QCI_BOOTSTRAP_RELEASE_BATS="env.bats"
+    QDISTRO_PROFILE=dev run_gate
+    [ "$status" -eq 0 ] || { echo "$output" >&2; cat "$RESULTS" >&2; return 1; }
+    row_is env.bats pass
+}

@@ -107,8 +107,12 @@ bats_run_one() {
     log "bats $base on $vm"
     (
         cd "$QDISTRO_REPO" || exit 2
+        # QDISTRO_PROFILE is the image gate's expected profile, not a bats
+        # input: `QDISTRO_PROFILE=dev qci full` (the tester image) leaked it
+        # into suites that assert the default profile (13 false failures).
         VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" \
-            QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" bats "$file"
+            QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+            env -u QDISTRO_PROFILE bats "$file"
     ) > "$log_path" 2>&1
     gate_rc=$?
     collect_vm_artifacts "$vm" "bats-${base%.bats}"

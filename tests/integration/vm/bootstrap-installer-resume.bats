@@ -19,6 +19,10 @@
 # Run: bats tests/integration/vm/bootstrap-installer-resume.bats
 
 setup() {
+    # The profile under test is chosen per case. An ambient QDISTRO_PROFILE
+    # (qci takes it as the image gate's expected profile, and the tester
+    # image is dev) must not stand in for the default.
+    unset QDISTRO_PROFILE
     REPO_ROOT="$(git -C "$(dirname "$BATS_TEST_FILENAME")" \
                     rev-parse --show-toplevel 2>/dev/null)"
     BOOT="$REPO_ROOT/scripts/install/qdistro-bootstrap.sh"
