@@ -174,6 +174,10 @@ Environment:
                             run to EXIT_RELEASE (15); a real failure keeps its own
                             class. Infra gates (preflight/selftest/lint/…) are
                             excluded.
+  QCI_SKIP_IMAGE=1          Developer `full` runs record an explicit image
+                            skip with the selected .sha256 sidecar digest.
+                            The report marks the run outside full image/P8
+                            qualification. Forbidden with QCI_RELEASE=1.
   QCI_HOST_STEP_TIMEOUT     Per-step wall budget for the `host` gate, in seconds
                             (default 600). It does NOT cover the qdistro pytest
                             step, which carries its own budget below — raising

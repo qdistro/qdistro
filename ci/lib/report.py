@@ -697,6 +697,14 @@ def generate_md(run_dir: Path) -> str:
             lines.append(f"- **{key}**: `{manifest[key]}`")
     if counts:
         lines.append("- **results**: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if manifest.get("image_gate") == "skipped":
+        lines.append(
+            "- **Scope**: Image gate skipped by QCI_SKIP_IMAGE=1; "
+            f"published artifact `{manifest.get('image_published', 'none')}` "
+            f"(sidecar digest `{manifest.get('image_digest', 'none')}`; "
+            f"identity `{manifest.get('image_identity_status', 'unavailable')}`) was not booted. "
+            "This run is not full image qualification or P8 green full evidence."
+        )
     # Normalized clean-run signal (Phase-1). Distinguishes ACTIONABLE failures
     # (product/test/infra to triage) from EXPECTED/operator rows (release pins
     # absent, operator interrupt, policy gate). Report-only: gates nothing.

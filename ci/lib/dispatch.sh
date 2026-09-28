@@ -9,6 +9,8 @@ gate_full() {
     qci_assert_run_dir || return $?
     local rc=$EXIT_OK step_rc
     QCI_LINT_RC=0
+    # Record the developer-only omission before preflight can short-circuit.
+    [ "${QCI_SKIP_IMAGE:-0}" = 1 ] && gate_image_developer_skip
     gate_preflight || return $?
     # gate_preflight runs gate_lint for its rows but keeps it out of its own
     # required/optional accounting; the rc arrives here. Without this, a blocking
@@ -26,8 +28,10 @@ gate_full() {
     # it is NOT in the golden-sharing cascade below. A missing artifact
     # records blocked rows and returns 0 in normal mode; QCI_RELEASE=1
     # escalates those blocked rows.
-    gate_image; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    if [ "${QCI_SKIP_IMAGE:-0}" != 1 ]; then
+        gate_image; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    fi
     # VM-dependent gates share ONE infra resource (libvirt provisioning + the
     # per-run golden). When one fails with EXIT_VM_PROVISION that is a single
     # infra root cause; running the rest into the same wall books N independent
@@ -160,6 +164,10 @@ main() {
     # affected/edit-guard `--` are not help requests.
     if qci_wants_help "$cmd" "$@"; then
         usage
+        exit "$EXIT_USAGE"
+    fi
+    if [ "$cmd" = full ] && [ "${QCI_SKIP_IMAGE:-0}" = 1 ] && [ "${QCI_RELEASE:-0}" = 1 ]; then
+        echo "qci full: QCI_SKIP_IMAGE=1 is forbidden with QCI_RELEASE=1" >&2
         exit "$EXIT_USAGE"
     fi
 
