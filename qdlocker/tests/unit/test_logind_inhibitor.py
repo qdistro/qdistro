@@ -755,6 +755,41 @@ def test_membership_change_during_resolution_is_not_lost(monkeypatch, reconnect_
     asyncio.run(run())
 
 
+def test_repeated_resolution_retires_earlier_lock_handler(monkeypatch, reconnect_bus,
+                                                         closed_fds):
+    """ruff B023: a membership change mid-resolution repeats the loop inside one
+    rebind call. The first pass's Lock handler must stay inert once the second
+    pass rebinds, even if a Lock queued for it is still delivered."""
+    monkeypatch.delenv('XDG_SESSION_ID', raising=False)
+    reconnect_bus.pid_session = False
+    reconnect_bus.seat_sessions = 1
+    async def run():
+        locks = []
+        reconnect_bus.gate = asyncio.Event()
+        reconnect_bus.paused = asyncio.Event()
+        watcher = LogindWatcher(on_lock=locks.append)
+        task = asyncio.create_task(watcher._main())
+        await asyncio.wait_for(reconnect_bus.paused.wait(), 1)
+        bus = reconnect_bus.instances[0]
+        handlers = []
+        def record(cb):
+            handlers.append(cb)
+            bus.session.callbacks.setdefault('lock', []).append(cb)
+        bus.session.on_lock = record
+        bus.manager.emit('session_new', 'other', '/session/other')
+        reconnect_bus.gate.set()
+        reconnect_bus.gate = None
+        await _eventually(lambda: len(handlers) == 2)
+        await _eventually(lambda: watcher.automatic_lock_ready)
+        handlers[0]()
+        assert locks == [], 'the first pass\'s Lock handler must be inert'
+        handlers[1]()
+        assert locks == [logind.REASON_LID]
+        watcher._stop_event.set()
+        await asyncio.wait_for(task, 1)
+    asyncio.run(run())
+
+
 def test_membership_burst_keeps_one_resolver(monkeypatch, reconnect_bus, closed_fds):
     """codex r2: a burst of SessionNew/SessionRemoved while a resolution is
     in flight must not queue one task per event; one resolver repeats until

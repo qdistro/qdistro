@@ -360,6 +360,11 @@ class LogindWatcher:
         membership_gen = 0
         resolved_gen = -1
 
+        def is_current(binding: object):
+            # Bind this pass's token now; session_binding is read live, so a
+            # later pass (even in the same resolution loop) retires it.
+            return lambda: active and session_binding is binding
+
         async def rebind_session(initial: bool) -> None:
             nonlocal session_path, session_binding, resolved_gen
             async with session_lock:
@@ -380,7 +385,7 @@ class LogindWatcher:
                     try:
                         session_path = await self._subscribe_session(
                             bus, self._mgr, session_subscriptions,
-                            lambda: active and session_binding is binding,
+                            is_current(binding),
                             quiet=not initial,
                         )
                     except Exception:
