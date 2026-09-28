@@ -187,6 +187,29 @@ main() {
             ;;
     esac
 
+    # Fail before any VM test gate starts when the cloud substrate has aged
+    # beyond its short-lived upstream history repository. Pure host gates do
+    # not depend on this image; explicit Kiwi runs use their own source.
+    local check_substrate=0 arg base_kind
+    case "$cmd" in
+        preflight|full|vm-smoke|bats|gui|gui-admin|replay|mmnet|snapshot-daily)
+            check_substrate=1 ;;
+        affected)
+            for arg in "$@"; do [ "$arg" = --run ] && check_substrate=1; done ;;
+    esac
+    if [ "$check_substrate" -eq 1 ]; then
+        . "$VM_TOOLS/lib/vm-base.sh"
+        base_kind="$(qdistro_vm_base_kind)" || base_kind=invalid
+        if [ "$base_kind" = baked ]; then
+            . "$VM_TOOLS/lib/test-substrate.sh"
+            if ! qdistro_load_test_substrate; then
+                record_result preflight "cloud test substrate freshness" fail "$EXIT_PREFLIGHT" preflight tool \
+                    "$RDIR/preflight/preflight.txt" "pinned snapshot is invalid, future-dated, or older than 14 days; update test-substrate.conf"
+                finish_run "$EXIT_PREFLIGHT"
+            fi
+        fi
+    fi
+
     local rc=$EXIT_OK date_arg="" name_arg="" files=() scenarios=() run_dir="" latest=0
     case "$cmd" in
         preflight)

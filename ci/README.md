@@ -197,8 +197,11 @@ To rotate the test substrate, choose an available history snapshot, verify the
 new cloud checksum signature, edit the manifest's digest and snapshot together,
 then build with `scripts/vm/build-baseweed-from-scratch.sh` followed by
 `scripts/vm/build-baked-baseweed.sh`. The history service retains snapshots for
-roughly a month; schedule a candidate build about weekly. An expired snapshot
-is an error, not a reason to use rolling repositories. An explicit alternate
+roughly a month; schedule a candidate build about weekly. Cloud base builders
+and qci VM test entry points reject a pin more than 14 UTC calendar days old,
+including when a matching base is already cached. Refresh the pin and rebuild
+both bases before launching tests. An expired snapshot is an error, not a
+reason to use rolling repositories. An explicit alternate
 manifest via `QDISTRO_TEST_SUBSTRATE` keeps experiments separate.
 
 Downloaded RPMs from the base builders, the tier-5 base, and Bats/qdwin

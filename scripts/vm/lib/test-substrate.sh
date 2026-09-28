@@ -2,6 +2,16 @@
 # Shared, explicit input for cloud-derived test VMs. Callers may select a
 # different qualified manifest with QDISTRO_TEST_SUBSTRATE=<absolute path>.
 
+qdistro_substrate_snapshot_fresh() {
+    local snapshot="$1" today="${2:-$(date -u +%Y%m%d)}" snapshot_epoch today_epoch
+    [[ "$snapshot" =~ ^20[0-9]{6}$ && "$today" =~ ^20[0-9]{6}$ ]] || return 1
+    snapshot_epoch="$(date -u -d "${snapshot:0:4}-${snapshot:4:2}-${snapshot:6:2}" +%s 2>/dev/null)" || return 1
+    today_epoch="$(date -u -d "${today:0:4}-${today:4:2}-${today:6:2}" +%s 2>/dev/null)" || return 1
+    [ "$(date -u -d "@$snapshot_epoch" +%Y%m%d)" = "$snapshot" ] || return 1
+    [ "$(date -u -d "@$today_epoch" +%Y%m%d)" = "$today" ] || return 1
+    [ "$snapshot_epoch" -le "$today_epoch" ] && [ "$(( (today_epoch - snapshot_epoch) / 86400 ))" -le 14 ]
+}
+
 qdistro_load_test_substrate() {
     local file="${QDISTRO_TEST_SUBSTRATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-substrate.conf}"
     local key value schema='' arch='' cloud_url='' cloud_sha256='' snapshot=''
@@ -18,6 +28,10 @@ qdistro_load_test_substrate() {
         && [[ "$cloud_sha256" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$snapshot" =~ ^20[0-9]{6}$ ]] || {
         echo "ERROR: invalid test substrate manifest: $file" >&2; return 1;
+    }
+    qdistro_substrate_snapshot_fresh "$snapshot" || {
+        echo "ERROR: Tumbleweed snapshot $snapshot is older than 14 days (or invalid/future); update $file before building or testing" >&2
+        return 1
     }
     QDISTRO_SUBSTRATE_FILE="$file"
     QDISTRO_SUBSTRATE_ARCH="$arch"
