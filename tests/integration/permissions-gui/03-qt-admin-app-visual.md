@@ -75,9 +75,25 @@ sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
+```
+
+Then, as a separate command, wait for the app to SHOW the request. The
+title is computed from the Pending model's row count (see
+`_update_window_title`), so `(1 pending)` means the row is in the list:
+
+```bash
+title_rc=0
+$VMEXEC "$VM" 'for _ in $(seq 1 60); do
+  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
+  [ "$t" = "admin approvals (1 pending)" ] && exit 0
+  sleep 0.5
+done
+echo "title never showed the request: $t" >&2; exit 1' || title_rc=$?
+echo "s2 title-wait rc=$title_rc"
 $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s2-populated.png
 ```
+
+A non-zero `s2 title-wait rc` FAILS S2 regardless of the frame.
 
 **Assert (populated):**
 - Left list view now has one row referencing `work` (or uid `2000`)
@@ -114,9 +130,44 @@ EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
-sleep 1
-$VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s3-afterdeny.png
 ```
+
+Then, as a separate command, the title wait. Never screenshot straight
+after the keystroke: the deny is a D-Bus round trip plus a 250 ms
+debounced refresh, and a capture taken 158 ms after `send-key` under a
+16-way run graded the still-populated pane as "Ctrl+N did not deny"
+(2026-09-28). A bare `admin approvals` title (no `(N pending)`) means the
+model is empty:
+
+```bash
+title_rc=0
+$VMEXEC "$VM" 'for _ in $(seq 1 60); do
+  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
+  [ "$t" = "admin approvals" ] && exit 0
+  sleep 0.5
+done
+echo "title never settled: $t" >&2; exit 1' || title_rc=$?
+echo "s3 title-wait rc=$title_rc"
+```
+
+A non-zero `s3 title-wait rc` (about 30 s) means the deny never emptied
+the model: S3 FAILS on that ground regardless of the frames.
+
+The client surface can lag the title by a frame, so capture at most 5
+frames, 2 s apart, each as a separate runner action (not a shell loop),
+starting with N=1:
+
+1. `$VMGUI "$VM" screenshot /tmp/03-s3-afterdeny-N.png` (substitute N).
+2. Open it and grade by vision: the empty state is `(no selection)` in
+   the detail pane and no row in the list.
+3. If it shows the empty state, make it canonical and stop:
+   `$VMGUI "$VM" view-copy /tmp/03-s3-afterdeny-N.png --out /tmp/03-qt-admin-app-visual-s3-afterdeny.png`
+4. Otherwise, if N < 5: `sleep 2`, increment N, go back to 1.
+5. If frame 5 is still stale, S3 FAILS: `view-copy` frame 5 to the
+   canonical path and grade that below.
+
+Keep every numbered frame. Use `view-copy`, not `cp`: a same-size twin
+of a frame you have already seen reads as black where it repeats.
 
 **Assert (after deny):**
 - Left list view is empty again.
