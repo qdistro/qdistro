@@ -84,3 +84,40 @@ SH
     flock -n "$lock" true
     kill "$bgpid"
 }
+
+@test "the re-executed runner keeps the launcher's SIGPIPE and SIGXFSZ dispositions" {
+    # CPython ignores SIGPIPE and SIGXFSZ at startup and execv keeps SIG_IGN.
+    # Leaked through the python re-exec, every qci descendant got EFBIG instead
+    # of the SIGXFSZ kill vm-exec's `ulimit -f` capture bound relies on
+    # (selftest "file-size limit is inherited by a surviving descendant").
+    export QDWIN_IMG_DIR="$T/images-sig"
+    mkdir -p "$QDWIN_IMG_DIR"
+    cat > "$T/sigrunner" <<'SH'
+#!/usr/bin/env bash
+. "$RUN_LOCK_HELPER"
+qdistro_run_lock_reexec "$0" "$@"
+awk '$1 == "SigIgn:" { print $2 }' /proc/$$/status > "$1"
+# The kernel must kill an over-limit writer, not fail its write.
+( ulimit -f 1; head -c 4096 /dev/zero > "$1.big" ) 2>/dev/null
+printf '%s\n' "$?" > "$1.rc"
+SH
+    chmod +x "$T/sigrunner"
+    local ign pipe=$((1 << 12)) xfsz=$((1 << 24))
+    # A launcher with both signals at their defaults (as from a terminal).
+    python3 -c 'import os, signal, sys
+for s in (signal.SIGPIPE, signal.SIGXFSZ): signal.signal(s, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])' "$T/sigrunner" "$T/dfl"
+    ign=$((16#$(cat "$T/dfl")))
+    [ $((ign & pipe)) -eq 0 ]
+    [ $((ign & xfsz)) -eq 0 ]
+    [ "$(cat "$T/dfl.rc")" -eq $((128 + 25)) ]
+    # A launcher that really does ignore them (systemd's IgnoreSIGPIPE, a
+    # deliberate caller choice) keeps them ignored: restored, not reset.
+    python3 -c 'import os, signal, sys
+for s in (signal.SIGPIPE, signal.SIGXFSZ): signal.signal(s, signal.SIG_IGN)
+os.execv(sys.argv[1], sys.argv[1:])' "$T/sigrunner" "$T/ign"
+    ign=$((16#$(cat "$T/ign")))
+    [ $((ign & pipe)) -ne 0 ]
+    [ $((ign & xfsz)) -ne 0 ]
+    [ "$(cat "$T/ign.rc")" -ne $((128 + 25)) ]
+}
