@@ -33,6 +33,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # (iso/14 Phase A item 1).
 QDISTRO="$(cd "$HERE/.." && pwd)"
 VM_TOOLS="$QDISTRO/scripts/vm"
+. "$VM_TOOLS/run-lock.sh"
 IMG_DIR="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 URI="qemu:///session"
 export LIBVIRT_DEFAULT_URI="$URI"
@@ -72,7 +73,6 @@ case "$QDISTRO_KIWI_PROFILE" in
     *) printf '\033[1;31m[in-vm] FATAL:\033[0m QDISTRO_KIWI_PROFILE must be tester or ci, got: %s\n' "$QDISTRO_KIWI_PROFILE" >&2; exit 1 ;;
 esac
 LOGS="$HERE/logs/in-vm-$(date +%y%m%d-%H%M%S)"
-mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
 log()  { printf '\033[1;36m[in-vm]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[in-vm] WARN:\033[0m %s\n' "$*" >&2; }
@@ -93,6 +93,7 @@ vms() {
 }
 
 #-- 0. Args -------------------------------------------------------------------
+BUILD_IN_VM_ARGS=("$@")
 TEARDOWN=0
 KEEP_RUNNING=0
 REUSE=0
@@ -113,6 +114,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+qdistro_run_lock_reexec "$0" "${BUILD_IN_VM_ARGS[@]}"
+mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
 if [ "$TEARDOWN" = 1 ]; then
     [ -n "$TEARDOWN_VM" ] && VM="$TEARDOWN_VM"
