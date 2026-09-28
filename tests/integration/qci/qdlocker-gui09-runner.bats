@@ -199,6 +199,8 @@ case "\$*" in
         echo active > "$T/sm-state" ;;
     *stop*qdistro-session-manager*)
         [ "\${FAKE_SM_STOP_FAIL:-}" = 1 ] && exit 1
+        # FAKE_SM_STOP_NEWINV=1: another invocation ran and ended meanwhile
+        [ "\${FAKE_SM_STOP_NEWINV:-}" = 1 ] && echo eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee > "$T/sm-inv"
         echo inactive > "$T/sm-state" ;;
     *is-active*) case "\$*" in *-q*) ;; *) echo active ;; esac ;;
 esac
@@ -344,7 +346,7 @@ load_sm() {
     run_guest_setup "$D09/guest.sh"          # builds the stateful systemctl stub
     local f
     SCR="$T/sm"; mkdir -p "$SCR"; SM_MARK="$SCR/sm-stopped-by-09"; SM_UNIT=qdistro-session-manager.service
-    for f in sm_read sm_stop_verified sm_try_start; do
+    for f in sm_read sm_stop_verified sm_try_start sm_reclaim; do
         eval "$(sed -n "/^$f() {/,/^}/p" "$D09/guest.sh")"
         declare -F "$f" >/dev/null || { echo "guest.sh has no $f()"; return 1; }
     done
@@ -623,6 +625,67 @@ W
     grep -q '^ASSERT 5 ERROR camera node cam0 is present but gst-launch-1.0 is not installed' "$T/guest.out" \
         || { cat "$T/guest.out"; false; }
     refute_grep -qE '^ASSERT [45] SKIP' "$T/guest.out"
+}
+
+# ---------------------------------------------------------------------------
+# sol round 5.
+@test "Step 8 does not claim a manager that was ALREADY inactive: no stop, no marker" {
+    load_sm
+    echo inactive > "$T/sm-state"          # it exited on its own after 8.2
+    : > "$T/calls"
+    if sm_stop_verified; then echo "claimed a stop it did not perform"; false; fi
+    [ ! -e "$SM_MARK" ]
+    refute_grep -q 'systemctl stop qdistro-session-manager' "$T/calls"
+}
+
+@test "Step 8 does not claim a stop when the post-stop InvocationID differs from the pre-stop one" {
+    load_sm
+    echo active > "$T/sm-state"
+    if FAKE_SM_STOP_NEWINV=1 sm_stop_verified; then echo "claimed a different invocation"; false; fi
+    [ ! -e "$SM_MARK" ]
+}
+
+@test "Step 8 skips the recovery start unless THIS scenario verifiably stopped the manager" {
+    local gate stopped start
+    stopped=$(grep -n '^if sm_stop_verified; then$' "$D09/guest.sh" | cut -d: -f1)
+    gate=$(grep -n '^if \[ "\$SM_STOPPED" != 1 \]; then$' "$D09/guest.sh" | cut -d: -f1)
+    start=$(grep -n '^elif ! sm_try_start; then$' "$D09/guest.sh" | cut -d: -f1)
+    [ -n "$stopped" ]; [ -n "$gate" ]; [ -n "$start" ]
+    [ "$stopped" -lt "$gate" ]
+    [ "$gate" -lt "$start" ]
+}
+
+@test "an unreadable manager state KEEPS this scenario's marker (sm_reclaim) and Setup reports ERROR" {
+    load_sm
+    printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > "$SM_MARK"
+    FAKE_SM_SHOW_FAIL=1 sm_reclaim
+    [ -e "$SM_MARK" ] || { echo "marker discarded on a failed query"; false; }
+    # the whole Setup
+    mark aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    FAKE_SM_SHOW_FAIL=1 run_guest_setup "$D09/guest.sh"
+    [ -e "$T/qd09/scratch/sm-stopped-by-09" ] || { echo "marker discarded by Setup"; cat "$T/guest.out"; false; }
+    grep -q "cannot query qdistro-session-manager.service state at Setup; this scenario's marker is kept" "$T/guest.out" \
+        || { cat "$T/guest.out"; false; }
+    grep -q '^VERDICT ERROR' "$T/guest.out"
+    refute_grep -q 'systemctl start qdistro-session-manager' "$T/calls"
+}
+
+@test "7.3 searches only journal entries after a cursor taken BEFORE the injected hang" {
+    local cur inject q
+    cur=$(grep -n '^C7=\$(runuser -l admin -c "journalctl --user -u qdlocker.service -n1 --show-cursor' "$D09/guest.sh" | cut -d: -f1)
+    inject=$(grep -n '^install -d -m 0755 "\$BROKEN"' "$D09/guest.sh" | cut -d: -f1)
+    q=$(grep -n -- "--after-cursor='\$C7'" "$D09/guest.sh" | cut -d: -f1)
+    [ -n "$cur" ]; [ -n "$inject" ]; [ -n "$q" ]
+    [ "$cur" -lt "$inject" ]
+    [ "$inject" -lt "$q" ]
+    # no whole-boot search for the timeout line remains
+    refute_grep -q 'qdlocker.service --boot' "$D09/guest.sh"
+    # the cursor check accepts a real cursor and rejects junk
+    local re
+    re=$(sed -n 's/^if ! \[\[ \$C7 =~ \(.*\) \]\]; then$/\1/p' "$D09/guest.sh")
+    [ -n "$re" ]
+    [[ 's=5b1e0c6a1d3a4f0e9c7b2a1d0e9f8c7b;i=1a2f3;b=0f1e2d3c4b5a69788796a5b4c3d2e1f0;m=4a5b6c7;t=62a1b2c3d4e5f;x=9f8e7d6c5b4a3920' =~ $re ]]
+    if [[ "'; rm -rf /" =~ $re ]]; then false; fi
 }
 
 @test "guest.sh and run.sh parse" {

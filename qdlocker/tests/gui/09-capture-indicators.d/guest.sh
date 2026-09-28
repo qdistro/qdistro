@@ -229,14 +229,22 @@ sm_read() {
     done <<<"$out"
     [ -n "$SM_LOAD" ]
 }
-# sm_stop_verified: stop the manager and write the marker ONLY when the stop
-# succeeded AND a successful query shows it loaded, inactive, with an
-# InvocationID. rc 1 (and no marker) otherwise.
+# sm_stop_verified: stop the manager and write the marker ONLY for a stop
+# this scenario provably performed: a successful query shows it loaded and
+# ACTIVE with an InvocationID immediately before (a manager that already
+# exited on its own is NOT stopped -- nothing to claim), the stop succeeds,
+# and a successful query afterwards shows it loaded, inactive, with that
+# SAME InvocationID. rc 1 and no marker otherwise; SM_PRE_INV is the
+# pre-stop invocation for the report.
 sm_stop_verified() {
     rm -f "$SM_MARK"
+    SM_PRE_INV=""
+    sm_read || return 1
+    [ "$SM_LOAD" = loaded ] && [ "$SM_ACTIVE" = active ] && [ -n "$SM_INV" ] || return 1
+    SM_PRE_INV=$SM_INV
     systemctl stop "$SM_UNIT" 2>/dev/null || { sm_read || true; return 1; }
     sm_read || return 1
-    [ "$SM_LOAD" = loaded ] && [ "$SM_ACTIVE" = inactive ] && [ -n "$SM_INV" ] || return 1
+    [ "$SM_LOAD" = loaded ] && [ "$SM_ACTIVE" = inactive ] && [ "$SM_INV" = "$SM_PRE_INV" ] || return 1
     printf '%s\n' "$SM_INV" >"$SM_MARK"
 }
 # sm_try_start: restart a manager this scenario stopped. The marker is
@@ -254,26 +262,25 @@ sm_try_start() {
     fi
     return 1
 }
-# sm_reclaim: Setup/cleanup side of the marker. Active -> the marker is stale
-# (a recovery finished; the driver died before removing it): drop it.
-# Inactive/failed with the marked InvocationID -> our own pending stop:
-# retry the start. Anything else (another InvocationID, not loaded, query
-# failed) is not provably ours: drop the marker and leave the manager as it
-# is for Setup to report.
+# sm_reclaim: Setup/cleanup side of the marker. The marker is discarded only
+# on PROOF from a successful query: the manager is active (a recovery
+# finished; the driver died before removing it), or it is loaded with a
+# DIFFERENT InvocationID (someone ran it since: not ours). Inactive/failed
+# with the marked InvocationID -> our own pending stop: retry the start.
+# A failed query, or anything else unproven, KEEPS the marker (Setup then
+# reports ERROR for this attempt; a later one can still reclaim).
 sm_reclaim() {
     local mark=""
     [ -e "$SM_MARK" ] || return 0
     read -r mark <"$SM_MARK" 2>/dev/null || mark=""
-    if ! sm_read; then
-        rm -f "$SM_MARK"; return 0
-    fi
+    sm_read || return 0
     if [ "$SM_ACTIVE" = active ]; then
+        rm -f "$SM_MARK"
+    elif [ "$SM_LOAD" = loaded ] && [ -n "$SM_INV" ] && [ "$SM_INV" != "$mark" ]; then
         rm -f "$SM_MARK"
     elif [ "$SM_LOAD" = loaded ] && [ -n "$mark" ] && [ "$SM_INV" = "$mark" ] \
          && { [ "$SM_ACTIVE" = inactive ] || [ "$SM_ACTIVE" = failed ]; }; then
         sm_try_start || true
-    else
-        rm -f "$SM_MARK"
     fi
 }
 
@@ -449,7 +456,10 @@ chown admin:users "$DROPIN_DIR/90-ci-gui.conf"
 reset_state >/dev/null
 FOREIGN=$(foreign_captures)
 [ -z "$FOREIGN" ] || error "foreign capture active before Step 1 (not started by this scenario; left running): $FOREIGN"
-if ! sm_read || [ "$SM_ACTIVE" != active ]; then
+if ! sm_read; then
+    error "cannot query qdistro-session-manager.service state at Setup$([ -e "$SM_MARK" ] && echo "; this scenario's marker is kept for the next attempt")"
+fi
+if [ "$SM_ACTIVE" != active ]; then
     if [ -e "$SM_MARK" ]; then
         error "qdistro-session-manager.service is '${SM_ACTIVE:-unknown}' at Setup: this scenario's own earlier stop could not be recovered (invocation ${SM_INV:-none}; marker kept for the next attempt)"
     fi
@@ -648,6 +658,11 @@ fi
 
 # ------------------------------------------------------------------ Step 7
 echo "== Step 7 — observer failure must be visible"
+# 7.3 must be proven by THIS step's hang: a journal cursor taken before the
+# injection bounds the search (an earlier run's line in the same boot must
+# not count). A cursor is "s=..;i=..;b=..;m=..;t=..;x=..".
+C7=$(runuser -l admin -c "journalctl --user -u qdlocker.service -n1 --show-cursor --no-pager -o cat" 2>/dev/null \
+    | sed -n 's/^-- cursor: //p' | tail -1)
 install -d -m 0755 "$BROKEN"
 printf '#!/bin/sh\nsleep 300\n' > "$BROKEN/pw-dump"
 chmod 0755 "$BROKEN/pw-dump"
@@ -663,11 +678,14 @@ assert_ind 7.1 capture_active 0
 host s7-alarm      # 7.2: the banner is ALARMING
 # 7.3: qdlocker.service is admin's USER unit; root's `journalctl --user` would
 # read root's own journal and prove nothing.
-if runuser -l admin -c "journalctl --user -u qdlocker.service --boot --no-pager" 2>/dev/null \
-        | grep -q "observer timed out; killing scan"; then
-    record 7.3 PASS "journal: observer timed out; killing scan"
+if ! [[ $C7 =~ ^[A-Za-z0-9=\;_-]+$ ]]; then
+    record 7.3 ERROR "no journal cursor for qdlocker.service before the injected hang ('$C7'); 7.3 undecided"
+elif ! J7=$(runuser -l admin -c "journalctl --user -u qdlocker.service --after-cursor='$C7' --no-pager -o cat" 2>/dev/null); then
+    record 7.3 ERROR "qdlocker.service journal query after the Step 7 cursor failed; 7.3 undecided"
+elif printf '%s\n' "$J7" | grep -q "observer timed out; killing scan"; then
+    record 7.3 PASS "journal (after the Step 7 cursor): observer timed out; killing scan"
 else
-    record 7.3 FAIL "the hard timeout did not fire (no 'observer timed out; killing scan' in qdlocker.service's journal)"
+    record 7.3 FAIL "the hard timeout did not fire (no 'observer timed out; killing scan' in qdlocker.service's journal after the Step 7 cursor)"
 fi
 # Recovery (7.4).
 rm -f "$BREAK_DROPIN"
@@ -732,14 +750,24 @@ sleep 4
 assert_ind 8.2 egress_active 1              # still live: Stopping is not dark
 assert_ind_contains 8.2 egress_detail "$SILO"
 # Unreachable session manager must read UNVERIFIED, never "no egress".
-# The marker (provenance for Setup) is written only by a VERIFIED stop.
-sm_stop_verified || record 8.3 ERROR "stop of qdistro-session-manager.service not verified (load=${SM_LOAD:-?} active=${SM_ACTIVE:-?} invocation=${SM_INV:-none}); no marker written"
+# The marker (provenance for Setup) is written only by a VERIFIED stop of a
+# manager that was active right before it.
+SM_STOPPED=0
+if sm_stop_verified; then
+    SM_STOPPED=1
+else
+    record 8.3 ERROR "stop of qdistro-session-manager.service not verified (before: invocation ${SM_PRE_INV:-none}; after: load=${SM_LOAD:-?} active=${SM_ACTIVE:-?} invocation=${SM_INV:-none}); no marker written"
+fi
 sleep 5
 assert_ind 8.3 egress_observer failed
 assert_ind 8.3 egress_active 0
 host s8b-alarm     # 8.3: the egress-unverified row is drawn in mError
-# The marker is cleared only once the restart is verified (sm_try_start).
-if ! sm_try_start; then
+# Recovery only restarts a manager THIS scenario verifiably stopped; the
+# marker is cleared only once the restart is verified (sm_try_start). An
+# unverified stop is not "repaired" here: the manager is left as found.
+if [ "$SM_STOPPED" != 1 ]; then
+    record 8.4 ERROR "recovery start skipped: this scenario did not verifiably stop the manager (see 8.3)"
+elif ! sm_try_start; then
     record 8.4 FAIL "could not restart qdistro-session-manager.service (active=${SM_ACTIVE:-?} invocation=${SM_INV:-none})"
 fi
 sleep 4
