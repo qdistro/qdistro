@@ -672,7 +672,7 @@ remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pa
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 
 shoot 02-fully-booted
-if [ -z "${QDISTRO_VERIFY_PARENT:-}" ]; then
+if [ "${QDISTRO_VERIFY_PARENT:-}" != 1 ]; then
     # The primary boot retains its 60-second stability and persistence window.
     sleep 30
     shoot 03-after-30s
@@ -825,7 +825,7 @@ fi
 # power-off / dd). Each re-exec uses a unique VM name and skips login +
 # persist (those are proven on the default virtio boot). Nested and
 # power-off are their own boots so a failure is attributed.
-if [ "$STICK" = 1 ] && [ -z "${QDISTRO_VERIFY_PARENT:-}" ] && [ "$KEEP" != 1 ]; then
+if [ "$STICK" = 1 ] && [ "${QDISTRO_VERIFY_PARENT:-}" != 1 ] && [ "$KEEP" != 1 ]; then
     log "stick matrix: extra boots of $IMG"
     export QDISTRO_VERIFY_PARENT=1
     export QDISTRO_IMAGE="$IMG"

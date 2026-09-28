@@ -39,6 +39,11 @@ gate_image_developer_skip() {
     if [ "$identity" = selected ] && [ ! -f "$selected" ]; then
         identity=selection-unavailable
     fi
+    # Resolve symlinks as select-artifact.sh does before it picks the
+    # sidecar, so the recorded identity is the artifact a real gate verifies.
+    if [ "$identity" = selected ]; then
+        selected=$(realpath -e -- "$selected" 2>/dev/null) || identity=selection-unavailable
+    fi
     if [ "$identity" = selected ] && [[ "$selected" = *.raw.xz ]]; then
         sidecar="${QDISTRO_IMAGE_SHA256_FILE:-$selected.sha256}"
         if [ ! -s "$sidecar" ]; then

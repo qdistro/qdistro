@@ -793,9 +793,16 @@ class _SystemOps:
         self._convert_home_to_subvolume(name, uid)
 
     def install_silo_skill(self, name: str) -> None:
-        subprocess.run(
+        # The installer's refusal reason (unsafe path, redirected home)
+        # belongs in the error the D-Bus caller sees, not only the journal.
+        r = subprocess.run(
             ["/usr/bin/python3", "/usr/libexec/qdistro/qdistro_silo_skill.py",
-             str(name)], check=True, timeout=_T_ACCOUNT)
+             str(name)], check=False, capture_output=True, text=True,
+            timeout=_T_ACCOUNT)
+        if r.returncode != 0:
+            raise RuntimeError(
+                (r.stderr or r.stdout).strip()
+                or f"silo skill installer exited {r.returncode}")
 
     def _convert_home_to_subvolume(self, name: str, uid: int) -> None:
         home = Path("/home") / name
@@ -3473,7 +3480,14 @@ class _SiloStore:
                     try:
                         self._ops.install_silo_skill(name)
                     except Exception as e:  # noqa: BLE001
+                        # The store lock does not cover the system account
+                        # database: if the name now resolves to another uid,
+                        # an administrator replaced the account meanwhile,
+                        # and userdel -r would delete theirs. Leave it.
                         try:
+                            if not self._ops.user_uid_matches(name, uid):
+                                raise SessionError(
+                                    f"account {name!r} no longer has uid {uid}")
                             self._ops.userdel(name)
                         except Exception as undo:  # noqa: BLE001
                             raise SessionError(

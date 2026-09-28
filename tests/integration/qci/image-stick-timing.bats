@@ -42,3 +42,36 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$output" = 'parent= image=/tmp/primary.raw login=1' ]
 }
+
+stick_matrix() {
+    # Execute the real matrix block from verify.sh with the child boot stubbed.
+    local block
+    block="$(sed -n '/^if \[ "\$STICK" = 1 \] && /,/^fi$/p' "$REPO/image/verify.sh")"
+    [ -n "$block" ] || return 1
+    bash -c '
+        STICK=1 KEEP=0 VM=vm SSH_PORT=2200 HERE=/nonexistent IMG=/img BUILD_DIR=/b
+        VERIFY_DIR="$2" PASS=0 FAIL=0 QDISTRO_RESOLVED_XZ=/img.raw.xz
+        log() { :; }
+        bash() { printf "child parent=%s login=%s args=%s\n" "$QDISTRO_VERIFY_PARENT" "$QDISTRO_VERIFY_LOGIN" "${*:2}"; }
+        eval "$1"
+        echo "fail=$FAIL"
+    ' _ "$block" "$BATS_TEST_TMPDIR"
+}
+
+@test "stick matrix marks every extra boot as a child of the parent" {
+    run stick_matrix
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^child ')" -eq 7 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^child parent=1 login=0 ')" -eq 7 ]
+    [[ "$output" == *"fail=0"* ]]
+}
+
+@test "an inherited parent flag other than 1 still runs as a primary" {
+    local block
+    block="$(sed -n '/^shoot 02-fully-booted$/,/^#-- 10\./p' "$REPO/image/verify.sh" | sed '$d')"
+    run env QDISTRO_VERIFY_PARENT=0 bash -c 'shoot() { echo "shot:$1"; }; sleep() { echo "sleep:$1"; }; eval "$1"' _ "$block"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^sleep:30$')" -eq 2 ]
+    QDISTRO_VERIFY_PARENT=0 run stick_matrix
+    [ "$(printf '%s\n' "$output" | grep -c '^child parent=1 ')" -eq 7 ]
+}

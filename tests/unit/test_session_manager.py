@@ -619,6 +619,19 @@ class TestCreate:
         with pytest.raises(UnknownSilo):
             store.get("work")
 
+    def test_skill_failure_keeps_account_replaced_at_another_uid(self, store, ops):
+        # Model an administrator deleting and recreating the name at another
+        # uid while the installer ran: the rollback must not delete theirs.
+        def replace_account(name):
+            ops.users[name] = 3000
+            raise OSError("skill installation failed")
+        ops.install_silo_skill = replace_account
+        with pytest.raises(SessionError, match="no longer has uid 2000"):
+            store.create("work", 2000)
+        assert ops.users == {"work": 3000}
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+
     def test_create_writes_state_dir_and_user(self, store, ops):
         silo = store.create("work", 2000)
         assert silo.name == "work"

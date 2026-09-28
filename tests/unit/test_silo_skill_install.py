@@ -13,10 +13,23 @@ from qdistro_silo_skill import install_skill
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_installs_per_uid_and_is_idempotent(tmp_path):
+def test_installs_per_uid_and_is_idempotent(tmp_path, monkeypatch):
     uid = os.getuid()
     if uid <= 1000:
-        pytest.skip("test needs a non-admin uid")
+        # An admin-uid runner (the VM's admin is 1000) must still exercise the
+        # install path: files it creates are reported as owned by a silo uid.
+        runner, uid = tmp_path.stat().st_uid, 1001
+        real_stat = Path.stat
+
+        def as_silo_uid(path, *args, **kwargs):
+            st = real_stat(path, *args, **kwargs)
+            if st.st_uid != runner:
+                return st
+            fields = list(st)
+            fields[stat.ST_UID] = uid
+            return os.stat_result(fields)
+
+        monkeypatch.setattr(Path, "stat", as_silo_uid)
     home = tmp_path / "silo"
     home.mkdir(mode=0o700)
     source = ROOT / "agents/skills/silo/SKILL.md"

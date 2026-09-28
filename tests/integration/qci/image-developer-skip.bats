@@ -18,7 +18,9 @@ skip_identity() {
 }
 
 @test "release full refuses image skip before it creates a run or VM" {
-    run env QCI_SKIP_IMAGE=1 QCI_RELEASE=1 "$REPO/ci/bin/qci" full
+    # The timeout bounds a regressed guard: a real release full run would
+    # otherwise start on the shared host instead of failing this test.
+    run timeout 60 env QCI_SKIP_IMAGE=1 QCI_RELEASE=1 "$REPO/ci/bin/qci" full
     [ "$status" -eq 2 ]
     [[ "$output" == *"forbidden with QCI_RELEASE=1"* ]]
     [ -z "$(find "$T/runs" -mindepth 1 -print -quit)" ]
@@ -136,4 +138,16 @@ skip_identity() {
     grep -q '/tmp/test.raw.xz' "$r/report.md"
     grep -q "$(printf '%064d' 1)" "$r/report.md"
     grep -q 'not full image qualification or P8 green full evidence' "$r/report.md"
+}
+
+@test "developer skip records a symlinked image by its target and the target's sidecar" {
+    local real="$T/build/bundle/real.raw.xz" alias="$T/alias.raw.xz"
+    : > "$real"
+    printf '%064d  %s\n' 3 "$(basename "$real")" > "$real.sha256"
+    ln -s "$real" "$alias"
+    printf '%064d  %s\n' 4 "$(basename "$alias")" > "$alias.sha256"
+    QDISTRO_IMAGE="$alias" run skip_identity
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"image_published=$real"* ]]
+    [[ "$output" == *"image_digest=$(printf '%064d' 3)"* ]]
 }
