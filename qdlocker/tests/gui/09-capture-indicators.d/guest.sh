@@ -359,10 +359,52 @@ have() {
 compositor_journal() {
     runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager" 2>"$SCR/journal.err"
 }
+# probe_default_sink: the node.name of the default Audio/Sink, from pw-dump
+# (pipewire-tools, which the image ships -- pactl/parec never were: the old
+# pactl probe "found no sink" on every VM because pactl did not exist, and
+# Step 4 had never run). The default is the `default` metadata's
+# default.audio.sink; with no default set, the first Audio/Sink by name.
+# rc 0 + empty = pw-dump succeeded and there is no Audio/Sink; rc 2 = pw-dump
+# failed or its output is not a pw-dump object list; rc 3 = no pw-dump.
 probe_default_sink() {
     local out
-    have pactl || return 3
-    out=$(U pactl get-default-sink 2>"$SCR/pactl.err") || return 2
+    have pw-dump || return 3
+    out=$(cd / && U python3 -I - 2>"$SCR/sink-probe.err" <<'PYEOF'
+import json, subprocess, sys
+r = subprocess.run(["pw-dump"], capture_output=True, text=True)
+if r.returncode != 0:
+    sys.stderr.write("pw-dump failed rc=%d: %s\n" % (r.returncode, r.stderr[-300:]))
+    sys.exit(2)
+try:
+    objs = json.loads(r.stdout)
+except ValueError as e:
+    sys.stderr.write("pw-dump output is not JSON: %s\n" % e)
+    sys.exit(2)
+if not isinstance(objs, list) or not objs:
+    sys.stderr.write("pw-dump returned no objects\n")
+    sys.exit(2)
+sinks, default = set(), None
+for o in objs:
+    if not isinstance(o, dict):
+        continue
+    t = str(o.get("type") or "")
+    if "Interface:Node" in t:
+        info = o.get("info") if isinstance(o.get("info"), dict) else {}
+        props = info.get("props") if isinstance(info.get("props"), dict) else {}
+        if str(props.get("media.class") or "") == "Audio/Sink" and props.get("node.name"):
+            sinks.add(str(props["node.name"]))
+    elif "Interface:Metadata" in t:
+        mprops = o.get("props") if isinstance(o.get("props"), dict) else {}
+        if str(mprops.get("metadata.name") or "") != "default":
+            continue
+        for m in o.get("metadata") or []:
+            if isinstance(m, dict) and m.get("key") == "default.audio.sink" \
+                    and isinstance(m.get("value"), dict):
+                default = m["value"].get("name")
+if sinks:
+    print(default if default in sinks else sorted(sinks)[0])
+PYEOF
+) || return 2
     printf '%s' "${out//$'\r'/}"
 }
 # probe_camera: the node.name of a Video/Source node, via the installed parser.
@@ -580,32 +622,40 @@ host s3-quiet
 
 # ------------------------------------------------------------------ Step 4
 echo "== Step 4 — system-audio (sink-monitor) capture (CONDITIONAL)"
-MON=$(probe_default_sink); rc=$?
-if [ "$rc" = 3 ]; then
-    # A missing TOOL is not evidence that there is no sink: without pactl
-    # this driver cannot tell, so the step is undecided, not skipped.
-    record 4 ERROR "pactl is not installed (command -v pactl), so the default-sink probe cannot run; system-audio capture undecided"
-elif [ "$rc" != 0 ]; then
-    record 4 ERROR "pactl get-default-sink failed (rc=$rc): $(tail -2 "$SCR/pactl.err" | tr '\n' ' ')"
-elif [ -z "$MON" ]; then
-    record 4 SKIP "no default sink (pactl get-default-sink succeeded, empty); system-audio capture not exercised"
+# The capture is a pw-record stream on the default sink with
+# stream.capture.sink=true: a Stream/Input/Audio node carrying that
+# property, which qdlocker.indicators.classify_node reports as systemAudio
+# (and, without it, as microphone). Same tool family as Step 2's microphone.
+if ! have pw-record; then
+    record 4 ERROR "pw-record is not installed (command -v pw-record); system-audio capture undecided"
 else
-    start_recorder sysaudio parec "$SCR/sysaudio.log" parec -d "${MON}.monitor" -r "$ASCR/sysaudio.raw" \
-        || error "could not start parec: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
-    sleep 6
-    tracked_alive sysaudio \
-        || error "parec is not running 6s after start: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
-    assert_ind 4.1 capture_active 1
-    assert_ind_contains 4.1 capture_kinds systemAudio
-    if field capture_kinds "$(ind)" | grep -q microphone; then
-        record 4.1 FAIL "sink-monitor capture also reported as microphone :: $(ind)"
+    SINK=$(probe_default_sink); rc=$?
+    if [ "$rc" = 3 ]; then
+        record 4 ERROR "pw-dump is not installed, so the default-sink probe cannot run; system-audio capture undecided"
+    elif [ "$rc" != 0 ]; then
+        record 4 ERROR "default-sink probe failed (rc=$rc): $(tail -2 "$SCR/sink-probe.err" | tr '\n' ' ')"
+    elif [ -z "$SINK" ]; then
+        record 4 SKIP "no Audio/Sink node (pw-dump succeeded); system-audio capture not exercised"
     else
-        record 4.1 PASS "monitor capture not reported as microphone"
+        echo "default sink: $SINK"
+        start_recorder sysaudio pw-record "$SCR/sysaudio.log" \
+            pw-record --target "$SINK" -P '{ stream.capture.sink = true }' "$ASCR/sysaudio.wav" \
+            || error "could not start the sink-monitor pw-record: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
+        sleep 6
+        tracked_alive sysaudio \
+            || error "sink-monitor pw-record is not running 6s after start: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
+        assert_ind 4.1 capture_active 1
+        assert_ind_contains 4.1 capture_kinds systemAudio
+        if field capture_kinds "$(ind)" | grep -q microphone; then
+            record 4.1 FAIL "sink-monitor capture also reported as microphone :: $(ind)"
+        else
+            record 4.1 PASS "monitor capture not reported as microphone"
+        fi
+        host s4-alarm
+        stop_recorder sysaudio
+        sleep 7
+        assert_ind 4.2 capture_active 0
     fi
-    host s4-alarm
-    stop_recorder sysaudio
-    sleep 7
-    assert_ind 4.2 capture_active 0
 fi
 
 # ------------------------------------------------------------------ Step 5

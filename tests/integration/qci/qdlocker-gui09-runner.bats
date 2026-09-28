@@ -151,7 +151,7 @@ admin_args_in_root_scratch() {
 
 @test "the recorders' liveness is checked before Steps 2/4/5 assert on the observer" {
     grep -q '^tracked_alive mic ' "$D09/guest.sh"
-    grep -q '^    tracked_alive sysaudio ' "$D09/guest.sh"
+    grep -q '^        tracked_alive sysaudio ' "$D09/guest.sh"
     grep -q 'if ! tracked_alive cam; then' "$D09/guest.sh"
 }
 
@@ -457,19 +457,73 @@ drm_stubs() {
     [ "$output" = 1 ] || { echo "counted $output heads, want 1 (a crashed same-second invocation leaked in)"; false; }
 }
 
-@test "Step 4 probe: pactl absent (3), failing (2), and succeeding-empty (0) are distinct" {
+# pwdump_stub <json>: a pw-dump that prints <json> (a file path) and exits 0
+pwdump_stub() { printf '#!/bin/bash\ncat "%s"\n' "$1" > "$T/pstub/pw-dump"; chmod +x "$T/pstub/pw-dump"; }
+node() {   # node <id> <media.class> <node.name>
+    printf '{"id":%s,"type":"PipeWire:Interface:Node","info":{"state":"idle","props":{"media.class":"%s","node.name":"%s"}}}' "$1" "$2" "$3"
+}
+
+@test "Step 4 probe: default Audio/Sink from pw-dump; absent tool (3), failure (2), no sink (0 + empty) are distinct" {
     load_probes
-    local saved=$PATH
-    PATH="$T/pstub:/nonexistent"
-    run probe_default_sink; [ "$status" -eq 3 ]
-    PATH=$saved
-    stub pactl 'echo "Connection failure: Connection refused" >&2; exit 1'
+    # the image ships pipewire-tools, not pactl: the probe must not need pactl
+    refute_grep -q 'pactl' <(sed -n '/^probe_default_sink() {/,/^}/p' "$D09/guest.sh")
+    # pw-dump not installed -> 3 (hidden through the harness-only seam)
+    QDLOCKER_09_TEST_HARNESS=1 QDLOCKER_09_HIDE_TOOLS=pw-dump run probe_default_sink
+    [ "$status" -eq 3 ]
+    # pw-dump fails -> 2
+    stub pw-dump 'echo "failed to connect" >&2; exit 1'
     run probe_default_sink; [ "$status" -eq 2 ]
-    stub pactl 'exit 0'
+    # pw-dump prints garbage -> 2
+    stub pw-dump 'echo "not json"'
+    run probe_default_sink; [ "$status" -eq 2 ]
+    # pw-dump prints an empty list -> 2 (not a real graph)
+    stub pw-dump 'echo "[]"'
+    run probe_default_sink; [ "$status" -eq 2 ]
+    # a real graph with no Audio/Sink -> 0 + empty (the only SKIP)
+    printf '[%s,%s]\n' "$(node 30 Audio/Source alsa_input.mic)" "$(node 31 Video/Source cam0)" > "$T/g1.json"
+    pwdump_stub "$T/g1.json"
     run probe_default_sink; [ "$status" -eq 0 ]; [ -z "$output" ]
-    stub pactl 'echo alsa_output.pci'
-    run probe_default_sink; [ "$status" -eq 0 ]; [ "$output" = alsa_output.pci ]
-    grep -q 'record 4 ERROR' "$D09/guest.sh"
+    # two sinks: the `default` metadata's default.audio.sink wins
+    printf '[%s,%s,%s]\n' "$(node 40 Audio/Sink alsa_output.a)" "$(node 41 Audio/Sink alsa_output.hdmi)" \
+        '{"id":50,"type":"PipeWire:Interface:Metadata","props":{"metadata.name":"default"},"metadata":[{"subject":0,"key":"default.audio.sink","type":"Spa:String:JSON","value":{"name":"alsa_output.hdmi"}}]}' > "$T/g2.json"
+    pwdump_stub "$T/g2.json"
+    run probe_default_sink; [ "$status" -eq 0 ]; [ "$output" = alsa_output.hdmi ]
+    # no default metadata: the first sink by name
+    printf '[%s,%s]\n' "$(node 41 Audio/Sink alsa_output.z)" "$(node 40 Audio/Sink alsa_output.a)" > "$T/g3.json"
+    pwdump_stub "$T/g3.json"
+    run probe_default_sink; [ "$status" -eq 0 ]; [ "$output" = alsa_output.a ]
+    grep -q 'record 4 ERROR "default-sink probe failed' "$D09/guest.sh"
+}
+
+@test "Step 4 captures the sink monitor with pw-record + stream.capture.sink, as a tracked recorder" {
+    grep -q "^            pw-record --target \"\$SINK\" -P '{ stream.capture.sink = true }' \"\$ASCR/sysaudio.wav\"" "$D09/guest.sh"
+    grep -q '^        start_recorder sysaudio pw-record ' "$D09/guest.sh"
+    grep -q '^        tracked_alive sysaudio ' "$D09/guest.sh"
+    grep -q 'record 4 ERROR "pw-record is not installed' "$D09/guest.sh"
+    refute_grep -qE '(^|[^-])parec -d' "$D09/guest.sh"
+}
+
+# The product side of Step 4, run for real: the node Step 4 creates (a
+# running Stream/Input/Audio from pw-record with stream.capture.sink=true) is
+# what qdlocker.indicators classifies as systemAudio -- and the same stream
+# without the property as microphone. If this failed, Step 4 would be testing
+# a stream the product cannot see as system audio.
+@test "qdlocker.indicators classifies Step 4's pw-record sink-monitor stream as systemAudio, not microphone" {
+    command -v python3 >/dev/null || skip "python3 not on this host"
+    run env PYTHONPATH="$REPO_ROOT/qdlocker" python3 -I -c '
+import sys; sys.path.insert(0, sys.argv[1])
+from qdlocker.indicators import classify_node
+base = {"media.class": "Stream/Input/Audio", "node.name": "pw-record",
+        "application.name": "pw-record", "media.type": "Audio"}
+for v in ("true", True, "1"):
+    k = classify_node({"state": "running", "props": dict(base, **{"stream.capture.sink": v})})
+    assert k and k["kind"] == "systemAudio", (v, k)
+k = classify_node({"state": "running", "props": base})
+assert k and k["kind"] == "microphone", k
+print("ok")
+' "$REPO_ROOT/qdlocker"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ "$output" = ok ]
 }
 
 @test "Steps 5/6 probes: a failing pw-cli is a failure, not zero nodes / no camera" {
@@ -594,11 +648,11 @@ alarm_png() { magick -size 1280x800 'xc:#FD4663' "PNG24:$1"; }
 }
 
 # ---------------------------------------------------------------------------
-# The REAL guest.sh from Setup through Step 5, with pactl and gst-launch-1.0
+# The REAL guest.sh from Setup through Step 5, with pw-record and gst-launch-1.0
 # hidden (QDLOCKER_09_HIDE_TOOLS, honoured only under the harness flag) and a
 # camera node present: a missing TOOL is not evidence of no sink / no camera,
 # so both conditional steps must be ERROR, never SKIP.
-@test "a missing pactl, or a missing gst-launch-1.0 with a camera present, is ERROR, not SKIP" {
+@test "a missing pw-record (Step 4), or a missing gst-launch-1.0 with a camera present, is ERROR, not SKIP" {
     local S="$T/stub"
     run_guest_setup "$D09/guest.sh"          # builds the stubs; stops at setup-drain
     # recorders: scripts, so /proc/<pid>/comm is their name; TERM ends them
@@ -618,10 +672,10 @@ qci_host_step() { echo "HOSTSTEP \$1" >>"$T/calls"; [ "\$1" = s7-alarm ] || [ "\
 W
     : > "$T/calls"
     PATH="$S:$PATH" QDLOCKER_09_TEST_HARNESS=1 QCI_GUI_WAITERS="$T/waiters.sh" \
-        QDLOCKER_09_HIDE_TOOLS="pactl gst-launch-1.0" QDLOCKER_09_DIR="$T/qd09" \
+        QDLOCKER_09_HIDE_TOOLS="pw-record gst-launch-1.0" QDLOCKER_09_DIR="$T/qd09" \
         timeout 120 bash "$D09/guest.sh" >"$T/guest.out" 2>&1 || true
     pkill -f -- "$S/pw-record" 2>/dev/null || true
-    grep -q '^ASSERT 4 ERROR pactl is not installed' "$T/guest.out" || { cat "$T/guest.out"; false; }
+    grep -q '^ASSERT 4 ERROR pw-record is not installed' "$T/guest.out" || { cat "$T/guest.out"; false; }
     grep -q '^ASSERT 5 ERROR camera node cam0 is present but gst-launch-1.0 is not installed' "$T/guest.out" \
         || { cat "$T/guest.out"; false; }
     refute_grep -qE '^ASSERT [45] SKIP' "$T/guest.out"

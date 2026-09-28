@@ -175,7 +175,7 @@ owner to ignore it.
 
 ### Step 4 — system-audio (sink-monitor) capture
 
-In `guest.sh`: `MON=$(pactl get-default-sink)`; it succeeded with no sink → `ASSERT 4 SKIP`; `pactl` not installed or failing → `ASSERT 4 ERROR` (a missing tool is not evidence that there is no sink). Otherwise `parec -d $MON.monitor`, sleep 6, `ASSERT 4.1` (systemAudio, and NOT microphone); host step **`s4-alarm`** → `s4.png`, `#FD4663` PRESENT; stop it, sleep 7, `ASSERT 4.2`.
+In `guest.sh`, with the tools the image ships (pipewire-tools; `pactl`/`parec` never were, so the old probe "found no sink" on every VM and this step had never run): the default `Audio/Sink` from `pw-dump` (the `default` metadata's `default.audio.sink`, else the first sink by name). A successful probe with no `Audio/Sink` → `ASSERT 4 SKIP`; `pw-record`/`pw-dump` not installed, or a failed/unparsable `pw-dump` → `ASSERT 4 ERROR` (a missing tool is not evidence that there is no sink). Otherwise `pw-record --target <sink> -P '{ stream.capture.sink = true }'` as a tracked recorder — a running `Stream/Input/Audio` node with `stream.capture.sink`, which `qdlocker.indicators.classify_node` reports as `systemAudio` (and, without the property, as `microphone`) — sleep 6, `ASSERT 4.1` (systemAudio, and NOT microphone); host step **`s4-alarm`** → `s4.png`, `#FD4663` PRESENT; stop it, sleep 7, `ASSERT 4.2`.
 
 **Assert (4.1):** a monitor capture is classified `systemAudio`, not
 `microphone`. If it lands in `microphone`, the `stream.capture.sink`
