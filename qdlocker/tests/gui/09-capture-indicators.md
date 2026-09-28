@@ -101,8 +101,10 @@ Setup (in `guest.sh`): first reclaim what an earlier attempt of THIS
 scenario provably left — a host-step timeout stops the driver WITHOUT its
 teardown (`reset_state`): the recorders it started (each tracked by pid +
 start time + comm, and only then signalled), the Stopping fixture, the
-Step 7 `pw-dump` break, and `qdistro-session-manager` only if this
-scenario's own Step 8 marker says it stopped it. Anything else is REPORTED
+Step 7 `pw-dump` break, and `qdistro-session-manager` only if it is still
+`inactive`/`failed` with the `InvocationID` this scenario's Step 8 marker
+recorded (nobody has run it since); a marker with the manager already
+`active` is stale and dropped. Anything else is REPORTED
 as ERROR, never repaired: an admin `pw-record`/`parec`/`gst-launch-1.0` this
 scenario did not start ("foreign capture active" — killing it would fake
 Step 1's quiet baseline), or a session manager found stopped without the
@@ -229,7 +231,7 @@ In `guest.sh`: remove the drop-in and the fake `pw-dump`, daemon-reload, restart
 
 ### Step 8 — silo egress, including transient `Stopping` and an unreachable manager
 
-In `guest.sh`: `SetSiloEgress qdlocker09 direct` + `StartSilo`, sleep 4, `ASSERT 8.1`; host step **`s8a-rec`** → `s8a.png` (recorded only). Plant a SIGTERM-ignoring process in the silo's cgroup, `StopSilo qdlocker09 30` in the background, observe `Stopping` through the installed parser (`ASSERT 8.2`), sleep 4, `ASSERT 8.2` (still shown). Then ROOT `systemctl stop qdistro-session-manager.service`, and only once it is verified not active write this scenario's marker `scratch/sm-stopped-by-09` (a system unit — never through `runuser`), sleep 5, `ASSERT 8.3`; host step **`s8b-alarm`** → `s8b.png`, `#FD4663` PRESENT (the egress-unverified row); clear the marker, then start it again (so a driver that dies mid-recovery can never leave a marker that authorises a later repair), sleep 4, `ASSERT 8.4`.
+In `guest.sh`: `SetSiloEgress qdlocker09 direct` + `StartSilo`, sleep 4, `ASSERT 8.1`; host step **`s8a-rec`** → `s8a.png` (recorded only). Plant a SIGTERM-ignoring process in the silo's cgroup, `StopSilo qdlocker09 30` in the background, observe `Stopping` through the installed parser (`ASSERT 8.2`), sleep 4, `ASSERT 8.2` (still shown). Then ROOT `systemctl stop qdistro-session-manager.service`; only if the stop succeeded AND a successful query shows it `loaded`/`inactive` is this scenario's marker `scratch/sm-stopped-by-09` written, holding the `InvocationID` it stopped (otherwise `ASSERT 8.3 ERROR`, no marker) (a system unit — never through `runuser`), sleep 5, `ASSERT 8.3`; host step **`s8b-alarm`** → `s8b.png`, `#FD4663` PRESENT (the egress-unverified row); start it again — the marker is removed only once the manager reads `active`; a failed start keeps it, rewritten with that failed attempt's `InvocationID` — sleep 4, `ASSERT 8.4`.
 
 **Assert (8.1):** an `Active` silo with `direct` egress is shown.
 **Assert (8.2):** the same silo is STILL shown while `Stopping` — the session
@@ -259,7 +261,7 @@ Requires a VM booted with two enabled heads. A successful
 scanout the compositor never enabled — so the compositor's own output count
 is checked first.
 
-In `guest.sh`: count the DRM heads the CURRENT compositor invocation has enabled: its journal since the unit's `ExecMainStartTimestamp`, replaying libweston's `Output <name> (crtc N) video modes:` (enable) and `Disabling output <name>` lines in order, so an earlier invocation's or a since-disabled head is not counted (the earlier `output_created ... name=` pattern is never logged by qdwin, so this step could never run). A failed query, or no enabled head at all → `ASSERT 10 ERROR`; exactly one → `ASSERT 10 SKIP`. Otherwise host step `s10-drain`, lock, sleep 3, host step **`s10-heads`**: run.sh takes `virsh screenshot --screen 1` and `--screen 0` and checks 10.1 (secondary uniformly black — judged only on a successful, non-empty decode; a failed decode is ERROR) and 10.2 (primary not one flat colour — the weak check noted below).
+In `guest.sh`: count the DRM heads the CURRENT compositor invocation has enabled: its own journal entries (`_SYSTEMD_INVOCATION_ID` = the unit's `InvocationID`; a whole-second start timestamp would also take in an invocation that crashed in the same second), replaying libweston's `Output <name> (crtc N) video modes:` (enable) and `Disabling output <name>` lines in order, so an earlier invocation's or a since-disabled head is not counted (the earlier `output_created ... name=` pattern is never logged by qdwin, so this step could never run). A missing `InvocationID`, a failed query, or no enabled head at all → `ASSERT 10 ERROR`; exactly one → `ASSERT 10 SKIP`. Otherwise host step `s10-drain`, lock, sleep 3, host step **`s10-heads`**: run.sh takes `virsh screenshot --screen 1` and `--screen 0` and checks 10.1 (secondary uniformly black — judged only on a successful, non-empty decode; a failed decode is ERROR) and 10.2 (primary not one flat colour — the weak check noted below).
 
 **Assert (10.1):** the secondary output is uniformly black. No desktop pixel
 may appear on any output. A failure here is a qdwin lock-curtain leak and

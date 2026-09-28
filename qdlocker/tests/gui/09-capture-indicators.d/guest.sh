@@ -64,10 +64,14 @@ BREAK_DROPIN=$DROPIN_DIR/91-break-pwdump.conf
 FIXTURE_PID=/tmp/qdlocker-09-stop-fixture.pid
 FAILS=0
 ERRORS=0
-# This scenario's own session-manager stop (Step 8). Setup restarts the
-# manager ONLY when this marker says a previous run stopped it; a manager
-# found stopped without it is reported, never repaired.
+# This scenario's own session-manager stop (Step 8). The marker holds the
+# InvocationID of the manager invocation THIS scenario stopped (an enabled
+# unit keeps its last InvocationID while inactive; any later start replaces
+# it). Setup repairs the manager ONLY when it is still inactive/failed with
+# that same InvocationID -- nobody has run it since -- and reports any other
+# stopped manager, never repairing it. See sm_read / sm_try_start.
 SM_MARK=$SCR/sm-stopped-by-09
+SM_UNIT=qdistro-session-manager.service
 
 # ------------------------------------------------------------------ helpers
 # admin's user session (qdlocker.service, PipeWire) needs XDG_RUNTIME_DIR.
@@ -207,6 +211,72 @@ foreign_captures() {
     done
 }
 
+# ---- session manager provenance ------------------------------------------
+# sm_read: load SM_LOAD / SM_ACTIVE / SM_INV from ONE systemctl query (a
+# SYSTEM unit: root's systemctl, never through runuser -- polkit refuses).
+# rc != 0 when the query failed. Note that `show` of an unknown unit still
+# answers ActiveState=inactive, so LoadState=loaded is always required too.
+sm_read() {
+    local l out
+    SM_LOAD="" SM_ACTIVE="" SM_INV=""
+    out=$(systemctl show -p LoadState -p ActiveState -p InvocationID "$SM_UNIT" 2>/dev/null) || return 1
+    while IFS= read -r l; do
+        case $l in
+            LoadState=*) SM_LOAD=${l#*=} ;;
+            ActiveState=*) SM_ACTIVE=${l#*=} ;;
+            InvocationID=*) SM_INV=${l#*=} ;;
+        esac
+    done <<<"$out"
+    [ -n "$SM_LOAD" ]
+}
+# sm_stop_verified: stop the manager and write the marker ONLY when the stop
+# succeeded AND a successful query shows it loaded, inactive, with an
+# InvocationID. rc 1 (and no marker) otherwise.
+sm_stop_verified() {
+    rm -f "$SM_MARK"
+    systemctl stop "$SM_UNIT" 2>/dev/null || { sm_read || true; return 1; }
+    sm_read || return 1
+    [ "$SM_LOAD" = loaded ] && [ "$SM_ACTIVE" = inactive ] && [ -n "$SM_INV" ] || return 1
+    printf '%s\n' "$SM_INV" >"$SM_MARK"
+}
+# sm_try_start: restart a manager this scenario stopped. The marker is
+# removed only once the start succeeded AND the manager reads active. A
+# failed start is still OUR pending recovery: the marker is rewritten with
+# that failed attempt's InvocationID, so the next Setup can retry it (and
+# only it).
+sm_try_start() {
+    if systemctl start "$SM_UNIT" 2>/dev/null && sm_read && [ "$SM_ACTIVE" = active ]; then
+        rm -f "$SM_MARK"
+        return 0
+    fi
+    if sm_read && [ "$SM_LOAD" = loaded ] && [ -n "$SM_INV" ]; then
+        printf '%s\n' "$SM_INV" >"$SM_MARK"
+    fi
+    return 1
+}
+# sm_reclaim: Setup/cleanup side of the marker. Active -> the marker is stale
+# (a recovery finished; the driver died before removing it): drop it.
+# Inactive/failed with the marked InvocationID -> our own pending stop:
+# retry the start. Anything else (another InvocationID, not loaded, query
+# failed) is not provably ours: drop the marker and leave the manager as it
+# is for Setup to report.
+sm_reclaim() {
+    local mark=""
+    [ -e "$SM_MARK" ] || return 0
+    read -r mark <"$SM_MARK" 2>/dev/null || mark=""
+    if ! sm_read; then
+        rm -f "$SM_MARK"; return 0
+    fi
+    if [ "$SM_ACTIVE" = active ]; then
+        rm -f "$SM_MARK"
+    elif [ "$SM_LOAD" = loaded ] && [ -n "$mark" ] && [ "$SM_INV" = "$mark" ] \
+         && { [ "$SM_ACTIVE" = inactive ] || [ "$SM_ACTIVE" = failed ]; }; then
+        sm_try_start || true
+    else
+        rm -f "$SM_MARK"
+    fi
+}
+
 # reset_state: undo everything a run of this driver can leave behind that
 # would change what the NEXT run observes. Idempotent; safe on a clean VM.
 # Called by guest_cleanup AND at the top of Setup: a qci_host_step timeout
@@ -234,15 +304,9 @@ reset_state() {
     [ -e "$BREAK_DROPIN" ] && was_broken=1
     rm -f "$BREAK_DROPIN"
     rm -rf "$BROKEN"
-    # A SYSTEM unit: root's systemctl, never through runuser (polkit refuses).
-    # Restarted only if THIS scenario stopped it (Step 8's marker).
-    # The marker is removed BEFORE the recovery start, so a driver that dies
-    # mid-recovery can never leave a marker that authorises a later repair.
-    if [ -e "$SM_MARK" ]; then
-        rm -f "$SM_MARK"
-        systemctl is-active -q qdistro-session-manager.service \
-            || systemctl start qdistro-session-manager.service 2>/dev/null || true
-    fi
+    # The session manager: restarted only if it provably is THIS scenario's
+    # own pending stop (sm_reclaim).
+    sm_reclaim
     echo "$was_broken"
 }
 
@@ -335,21 +399,24 @@ count_pw_nodes() {
 # "Output <name> (crtc <n>) video modes:" when it enables an output
 # (backend-drm/drm.c drm_output_enable) and "Disabling output <name>" when it
 # disables one; the journal keeps both, and the lines of every earlier
-# compositor invocation of this boot. So the query starts at this
-# invocation's ExecMainStartTimestamp and replays enable/disable in order.
-# (The first probe grepped for `output_created ... name=`, which qdwin never
-# logs: it read 0 on every VM and Step 10 could never run.) A failed query,
-# or no enabled output at all, is a probe failure: a running compositor has
-# at least one.
+# compositor invocation of this boot. The query is scoped to this
+# invocation's journal entries by _SYSTEMD_INVOCATION_ID (the compositor is
+# admin's USER unit, whose own entries carry that field in the user
+# journal), NOT by a start timestamp: a whole-second `--since` also takes in
+# an earlier invocation that crashed in the same second. Enable/disable
+# lines are then replayed in order. (The first probe grepped for
+# `output_created ... name=`, which qdwin never logs: it read 0 on every VM
+# and Step 10 could never run.) A missing InvocationID, a failed query, or
+# no enabled output at all is a probe failure.
 count_drm_outputs() {
-    local since out n
-    since=$(runuser -l admin -c "systemctl --user show --timestamp=unix -p ExecMainStartTimestamp --value qdwin-compositor.service" 2>"$SCR/journal.err") || return 2
-    since=${since//$'\r'/}
-    case $since in
-        @[0-9]*) ;;
-        *) echo "no ExecMainStartTimestamp for qdwin-compositor.service: '$since'" >>"$SCR/journal.err"; return 2 ;;
-    esac
-    out=$(runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since $since --no-pager -o cat" 2>>"$SCR/journal.err") || return 2
+    local inv out n
+    inv=$(runuser -l admin -c "systemctl --user show -p InvocationID --value qdwin-compositor.service" 2>"$SCR/journal.err") || return 2
+    inv=${inv//$'\r'/}
+    if ! [[ $inv =~ ^[0-9a-f]{32}$ ]]; then
+        echo "no InvocationID for qdwin-compositor.service: '$inv'" >>"$SCR/journal.err"
+        return 2
+    fi
+    out=$(runuser -l admin -c "journalctl --user _SYSTEMD_INVOCATION_ID=$inv --no-pager -o cat" 2>>"$SCR/journal.err") || return 2
     n=$(printf '%s\n' "$out" | awk '
         match($0, /Output [A-Za-z0-9-]+ \(crtc [0-9]+\) video modes:/) {
             split(substr($0, RSTART, RLENGTH), f, " "); on[f[2]] = 1
@@ -382,8 +449,12 @@ chown admin:users "$DROPIN_DIR/90-ci-gui.conf"
 reset_state >/dev/null
 FOREIGN=$(foreign_captures)
 [ -z "$FOREIGN" ] || error "foreign capture active before Step 1 (not started by this scenario; left running): $FOREIGN"
-SM_STATE=$(systemctl is-active qdistro-session-manager.service 2>/dev/null)
-[ "$SM_STATE" = active ] || error "qdistro-session-manager.service is '${SM_STATE:-unknown}' at Setup and this scenario did not stop it (no $SM_MARK); not repairing it"
+if ! sm_read || [ "$SM_ACTIVE" != active ]; then
+    if [ -e "$SM_MARK" ]; then
+        error "qdistro-session-manager.service is '${SM_ACTIVE:-unknown}' at Setup: this scenario's own earlier stop could not be recovered (invocation ${SM_INV:-none}; marker kept for the next attempt)"
+    fi
+    error "qdistro-session-manager.service is '${SM_ACTIVE:-unknown}' at Setup and this scenario did not stop it (load ${SM_LOAD:-unknown}); not repairing it"
+fi
 U systemctl --user daemon-reload
 restart_locker
 for unit in qdwin-compositor.service qdlocker.service; do
@@ -661,16 +732,15 @@ sleep 4
 assert_ind 8.2 egress_active 1              # still live: Stopping is not dark
 assert_ind_contains 8.2 egress_detail "$SILO"
 # Unreachable session manager must read UNVERIFIED, never "no egress".
-systemctl stop qdistro-session-manager.service || record 8.3 FAIL "could not stop qdistro-session-manager.service"
-# Provenance for reset_state: written only once the stop is VERIFIED.
-systemctl is-active -q qdistro-session-manager.service || : >"$SM_MARK"
+# The marker (provenance for Setup) is written only by a VERIFIED stop.
+sm_stop_verified || record 8.3 ERROR "stop of qdistro-session-manager.service not verified (load=${SM_LOAD:-?} active=${SM_ACTIVE:-?} invocation=${SM_INV:-none}); no marker written"
 sleep 5
 assert_ind 8.3 egress_observer failed
 assert_ind 8.3 egress_active 0
 host s8b-alarm     # 8.3: the egress-unverified row is drawn in mError
-rm -f "$SM_MARK"   # cleared BEFORE the recovery start (see reset_state)
-if ! systemctl start qdistro-session-manager.service; then
-    record 8.4 FAIL "could not start qdistro-session-manager.service"
+# The marker is cleared only once the restart is verified (sm_try_start).
+if ! sm_try_start; then
+    record 8.4 FAIL "could not restart qdistro-session-manager.service (active=${SM_ACTIVE:-?} invocation=${SM_INV:-none})"
 fi
 sleep 4
 assert_ind 8.4 egress_observer ok

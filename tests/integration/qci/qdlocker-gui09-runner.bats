@@ -175,22 +175,31 @@ run_guest_setup() {   # run_guest_setup <guest.sh>  (env: FAKE_SM, extra stubs)
     for c in pkill busctl faillock install chown journalctl; do
         printf '#!/bin/bash\necho "%s $*" >>"%s/calls"\n' "$c" "$T" > "$S/$c"
     done
-    # systemctl: log. The session manager's state starts as $FAKE_SM
-    # (default active) and follows start/stop; FAKE_SM_START_FAIL=1 makes its
-    # start fail. is-active prints the state and exits like systemctl (0 =
-    # active); other units are active.
+    # systemctl: log. The session manager is a small state machine: state
+    # ($FAKE_SM, default active) and InvocationID ($FAKE_SM_INV, default
+    # aaaa..), answered by `show -p ...` as key=value lines and by is-active.
+    # start: new InvocationID (bbbb..); FAKE_SM_START_FAIL=1 makes it fail
+    # into `failed` (still a new InvocationID). stop: inactive, same ID.
+    # FAKE_SM_SHOW_FAIL=1 makes `show` fail.
     printf '%s\n' "${FAKE_SM:-active}" > "$T/sm-state"
+    printf '%s\n' "${FAKE_SM_INV:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" > "$T/sm-inv"
     cat > "$S/systemctl" <<EOF
 #!/bin/bash
 echo "systemctl \$*" >>"$T/calls"
 case "\$*" in
+    show*qdistro-session-manager*)
+        [ "\${FAKE_SM_SHOW_FAIL:-}" = 1 ] && exit 1
+        printf 'LoadState=loaded\nActiveState=%s\nInvocationID=%s\n' "\$(cat "$T/sm-state")" "\$(cat "$T/sm-inv")" ;;
     *is-active*qdistro-session-manager*)
         st=\$(cat "$T/sm-state"); case "\$*" in *-q*) ;; *) echo "\$st" ;; esac
         [ "\$st" = active ] ;;
     *start*qdistro-session-manager*)
-        [ "\${FAKE_SM_START_FAIL:-}" = 1 ] && exit 1
+        echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$T/sm-inv"
+        if [ "\${FAKE_SM_START_FAIL:-}" = 1 ]; then echo failed > "$T/sm-state"; exit 1; fi
         echo active > "$T/sm-state" ;;
-    *stop*qdistro-session-manager*) echo inactive > "$T/sm-state" ;;
+    *stop*qdistro-session-manager*)
+        [ "\${FAKE_SM_STOP_FAIL:-}" = 1 ] && exit 1
+        echo inactive > "$T/sm-state" ;;
     *is-active*) case "\$*" in *-q*) ;; *) echo active ;; esac ;;
 esac
 EOF
@@ -283,9 +292,11 @@ teardown() {
     grep -q '^VERDICT ERROR' "$T/guest.out"
 }
 
-@test "a session manager THIS scenario stopped (marker) is restarted before the locker restart" {
-    mkdir -p "$T/qd09/scratch"
-    : >"$T/qd09/scratch/sm-stopped-by-09"
+# mark <invocation-id>: this scenario's Step 8 marker, as sm_stop_verified writes it
+mark() { mkdir -p "$T/qd09/scratch"; printf '%s\n' "$1" > "$T/qd09/scratch/sm-stopped-by-09"; }
+
+@test "a session manager THIS scenario stopped (marker = its InvocationID) is restarted before the locker restart" {
+    mark aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     FAKE_SM=inactive run_guest_setup "$D09/guest.sh"
     grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
     local start restart
@@ -297,27 +308,72 @@ teardown() {
     [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ]
 }
 
-@test "the marker is cleared BEFORE recovery: a failed restart leaves no marker to authorise a later repair" {
-    mkdir -p "$T/qd09/scratch"
-    : >"$T/qd09/scratch/sm-stopped-by-09"
+@test "a failed recovery keeps a verifiable marker (the failed attempt's InvocationID) and is reported as OUR stop" {
+    mark aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     FAKE_SM=inactive FAKE_SM_START_FAIL=1 run_guest_setup "$D09/guest.sh"
-    [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ] || { echo "stale marker survived a failed recovery"; false; }
-    grep -q "qdistro-session-manager.service is 'inactive' at Setup" "$T/guest.out" || { cat "$T/guest.out"; false; }
+    [ -e "$T/qd09/scratch/sm-stopped-by-09" ] || { echo "marker lost after a failed recovery"; cat "$T/guest.out"; false; }
+    [ "$(cat "$T/qd09/scratch/sm-stopped-by-09")" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]
+    grep -q "this scenario's own earlier stop could not be recovered" "$T/guest.out" || { cat "$T/guest.out"; false; }
     grep -q '^VERDICT ERROR' "$T/guest.out"
+    # ...and the next attempt retries it (same invocation, still ours)
+    : > "$T/calls"
+    PATH="$T/stub:$PATH" QDLOCKER_09_TEST_HARNESS=1 QCI_GUI_WAITERS="$T/waiters.sh" \
+        QDLOCKER_09_DIR="$T/qd09" timeout 60 bash "$D09/guest.sh" >"$T/guest.out" 2>&1 || true
+    grep -q 'systemctl start qdistro-session-manager.service' "$T/calls"
 }
 
-@test "Step 8 writes the marker only after a VERIFIED stop, and clears it before the restart" {
-    local stop mark gate clear start
-    stop=$(grep -n '^systemctl stop qdistro-session-manager.service' "$D09/guest.sh" | cut -d: -f1)
-    gate=$(grep -n '^systemctl is-active -q qdistro-session-manager.service || : >"\$SM_MARK"' "$D09/guest.sh" | cut -d: -f1)
-    clear=$(grep -n '^rm -f "\$SM_MARK"' "$D09/guest.sh" | cut -d: -f1)
-    start=$(grep -n '^if ! systemctl start qdistro-session-manager.service' "$D09/guest.sh" | cut -d: -f1)
-    [ -n "$stop" ]; [ -n "$gate" ]; [ -n "$clear" ]; [ -n "$start" ]
-    [ "$stop" -lt "$gate" ]
-    [ "$gate" -lt "$clear" ]
-    [ "$clear" -lt "$start" ]
-    # and nothing else creates the marker
-    [ "$(grep -c ': >"\$SM_MARK"' "$D09/guest.sh")" -eq 1 ]
+@test "a marker whose InvocationID is not the manager's current one is not ours: no repair, reported" {
+    # someone started (and something stopped) the manager after our stop
+    mark aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    FAKE_SM=inactive FAKE_SM_INV=cccccccccccccccccccccccccccccccc run_guest_setup "$D09/guest.sh"
+    refute_grep -q 'systemctl start qdistro-session-manager' "$T/calls"
+    [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ]
+    grep -q "at Setup and this scenario did not stop it" "$T/guest.out" || { cat "$T/guest.out"; false; }
+}
+
+@test "a marker left after a COMPLETED recovery (manager active) is stale: dropped, nothing restarted" {
+    mark aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    run_guest_setup "$D09/guest.sh"
+    grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
+    refute_grep -q 'systemctl start qdistro-session-manager' "$T/calls"
+    [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ]
+}
+
+# load_sm: guest.sh's session-manager helpers, extracted, against the stub.
+load_sm() {
+    run_guest_setup "$D09/guest.sh"          # builds the stateful systemctl stub
+    local f
+    SCR="$T/sm"; mkdir -p "$SCR"; SM_MARK="$SCR/sm-stopped-by-09"; SM_UNIT=qdistro-session-manager.service
+    for f in sm_read sm_stop_verified sm_try_start; do
+        eval "$(sed -n "/^$f() {/,/^}/p" "$D09/guest.sh")"
+        declare -F "$f" >/dev/null || { echo "guest.sh has no $f()"; return 1; }
+    done
+    PATH="$T/stub:$PATH"
+}
+
+@test "Step 8 marks ONLY a verified stop: a failed stop, a failed query or a non-inactive state leave no marker" {
+    load_sm
+    echo active > "$T/sm-state"
+    FAKE_SM_STOP_FAIL=1 sm_stop_verified && false
+    [ ! -e "$SM_MARK" ]
+    echo active > "$T/sm-state"
+    FAKE_SM_SHOW_FAIL=1 sm_stop_verified && false
+    [ ! -e "$SM_MARK" ]
+    # a stop "succeeds" but the unit ends up failed, not inactive
+    echo active > "$T/sm-state"
+    printf '#!/bin/bash\necho "systemctl $*" >>"%s/calls"\ncase "$*" in show*) printf "LoadState=loaded\\nActiveState=failed\\nInvocationID=%s\\n" ;; esac\nexit 0\n' "$T" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > "$T/stub/systemctl.failed"
+    chmod +x "$T/stub/systemctl.failed"
+    systemctl() { "$T/stub/systemctl.failed" "$@"; }
+    sm_stop_verified && false
+    [ ! -e "$SM_MARK" ]
+    unset -f systemctl
+    # a clean, verified stop writes the invocation it stopped
+    echo active > "$T/sm-state"
+    sm_stop_verified
+    [ "$(cat "$SM_MARK")" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
+    # and the recovery clears it only once the manager reads active
+    sm_try_start
+    [ ! -e "$SM_MARK" ]
 }
 
 @test "QCI_GUI_WAITERS is ignored unless the test harness flag is set" {
@@ -354,37 +410,49 @@ RU
 }
 stub() { printf '#!/bin/bash\n%s\n' "$2" > "$T/pstub/$1"; chmod +x "$T/pstub/$1"; }
 
-# journal stub for Step 10: `--since @100` (this invocation) gets $1's lines;
-# any other query (whole boot) gets an EARLIER invocation's extra heads.
-drm_journal() {
-    printf '#!/bin/bash\ncase "$*" in *"--since @100"*) printf "%%s\\n" %s ;; *) printf "%%s\\n" "Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-3 (crtc 41) video modes:" ;; esac\n' "$1" > "$T/pstub/journalctl"
-    chmod +x "$T/pstub/journalctl"
+# Step 10 stubs. systemctl answers the compositor's InvocationID (or $2 if
+# given, e.g. "" for none) and a start timestamp; journalctl answers the
+# query scoped to THAT invocation with $1's lines, and ANY other query (a
+# `--since` of the same second, the whole boot) with an earlier invocation's
+# heads -- the one that crashed within the same second -- plus $1's.
+CUR=dddddddddddddddddddddddddddddddd
+drm_stubs() {
+    local inv=${2-$CUR}
+    printf '#!/bin/bash\ncase "$*" in *InvocationID*) echo "%s" ;; *ExecMainStartTimestamp*) echo @100 ;; esac\n' "$inv" > "$T/pstub/systemctl"
+    printf '#!/bin/bash\ncase "$*" in *"_SYSTEMD_INVOCATION_ID=%s"*) printf "%%s\\n" %s ;; *) printf "%%s\\n" "Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" %s ;; esac\n' "$CUR" "$1" "$1" > "$T/pstub/journalctl"
+    chmod +x "$T/pstub/systemctl" "$T/pstub/journalctl"
 }
 
 @test "Step 10 probe: counts DRM heads from the real log line; a failed or line-less query is a failure" {
     load_probes
-    stub systemctl 'echo @100'
-    drm_journal '"Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-1 (crtc 39) video modes:" "Output '"'"'pipewire-0'"'"' using color profile: x"'
+    drm_stubs '"Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-1 (crtc 39) video modes:" "Output '"'"'pipewire-0'"'"' using color profile: x"'
     run count_drm_outputs; [ "$status" -eq 0 ]; [ "$output" = 2 ]
     stub journalctl 'echo "Failed to open journal" >&2; exit 1'
     run count_drm_outputs; [ "$status" -eq 2 ]
-    drm_journal '"output_created name=Virtual-1"'     # the old, never-logged pattern
+    drm_stubs '"output_created name=Virtual-1"'       # the old, never-logged pattern
     run count_drm_outputs; [ "$status" -eq 2 ]
-    stub systemctl 'echo ""'                          # no start timestamp
-    drm_journal '"Output Virtual-1 (crtc 39) video modes:"'
+    drm_stubs '"Output Virtual-1 (crtc 39) video modes:"' ""   # no InvocationID
     run count_drm_outputs; [ "$status" -eq 2 ]
     grep -q 'record 10 ERROR' "$D09/guest.sh"
 }
 
 @test "Step 10 probe: counts only THIS compositor invocation's heads, minus disabled ones" {
     load_probes
-    stub systemctl 'echo @100'
-    # this invocation enabled Virtual-1 and Virtual-2, then disabled Virtual-2;
-    # the whole-boot journal also holds an earlier invocation's Virtual-3
-    drm_journal '"Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Disabling output Virtual-2"'
+    # this invocation enabled Virtual-1 and Virtual-2, then disabled Virtual-2
+    drm_stubs '"Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Disabling output Virtual-2"'
     run count_drm_outputs
     [ "$status" -eq 0 ]
     [ "$output" = 1 ] || { echo "counted $output enabled heads, want 1"; false; }
+}
+
+@test "Step 10 probe: an earlier invocation that crashed in the SAME second is not counted" {
+    load_probes
+    # the earlier invocation (same start second) enabled Virtual-1 and
+    # Virtual-2 and crashed without disabling; this one enabled only Virtual-1
+    drm_stubs '"Output Virtual-1 (crtc 39) video modes:"'
+    run count_drm_outputs
+    [ "$status" -eq 0 ]
+    [ "$output" = 1 ] || { echo "counted $output heads, want 1 (a crashed same-second invocation leaked in)"; false; }
 }
 
 @test "Step 4 probe: pactl absent (3), failing (2), and succeeding-empty (0) are distinct" {
