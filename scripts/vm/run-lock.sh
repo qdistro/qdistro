@@ -42,9 +42,22 @@ qdistro_run_lock_reexec() {
     # Bash gives asynchronous children SIGINT=ignored. Reset it before exec so
     # qci's INT cleanup still runs on a process-group interrupt. Bash closes
     # the lock descriptor in this child; workers cannot inherit it.
-    QDISTRO_RUN_LOCK_GUARD_PID=$$ python3 -c \
-        'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
-        "$script" "$@" {lock_fd}>&- &
+    # CPython also sets SIGPIPE and SIGXFSZ to ignored at startup, and execv
+    # keeps SIG_IGN, so without a restore every qci descendant would get EFBIG
+    # instead of the SIGXFSZ kill a `ulimit -f` bound relies on. Hand the
+    # runner this launcher's own dispositions for both (SigIgn is a hex mask,
+    # bit N-1 = signal N).
+    local sig_ign
+    sig_ign=$(awk '$1 == "SigIgn:" { print $2 }' "/proc/$$/status" 2>/dev/null)
+    [[ "$sig_ign" =~ ^[0-9a-fA-F]+$ ]] || sig_ign=0
+    QDISTRO_RUN_LOCK_GUARD_PID=$$ python3 -c '
+import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+ign = int(sys.argv[1], 16)
+for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+    signal.signal(sig, signal.SIG_IGN if ign >> (sig - 1) & 1 else signal.SIG_DFL)
+os.execv(sys.argv[2], sys.argv[2:])' \
+        "$sig_ign" "$script" "$@" {lock_fd}>&- &
     child_pid=$!
     [ -z "$pending_signal" ] || kill -s "$pending_signal" "$child_pid" 2>/dev/null || true
     if ! printf '%s\n' "$child_pid" > "$lock_path"; then
