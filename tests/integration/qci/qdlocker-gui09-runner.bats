@@ -132,6 +132,28 @@ drain cleanup" ]
     done
 }
 
+# gui-20260928T182835Z-1160277: pw-record ran as admin but was told to write
+# into the root-created 0700 scratch dir, exited "Permission denied", and
+# Step 2 read as a product FAIL. A redirection is opened by the ROOT driver
+# shell and is fine; a path handed to an admin process as an argument must be
+# in the admin-owned $ASCR.
+admin_args_in_root_scratch() {
+    grep -E '^[[:space:]]*(U|runuser)[[:space:]]' "$1" \
+        | sed -E 's/[0-9]?>+[[:space:]]*"?\$SCR\/[^" ]*"?//g' \
+        | grep -F '$SCR/' || true
+}
+
+@test "admin-run commands in guest.sh never get a root-only scratch path as an argument" {
+    run admin_args_in_root_scratch "$D09/guest.sh"
+    [ -z "$output" ] || { echo "admin writes into root scratch: $output"; false; }
+    grep -q 'install -d -m 0700 -o admin -g users "\$ASCR"' "$D09/guest.sh"
+}
+
+@test "the recorders' liveness is checked before Step 2/4 assert on the observer" {
+    grep -q 'pgrep -u admin -x pw-record >/dev/null' "$D09/guest.sh"
+    grep -q 'pgrep -u admin -x parec >/dev/null' "$D09/guest.sh"
+}
+
 @test "guest.sh and run.sh parse" {
     bash -n "$D09/guest.sh"
     bash -n "$D09/run.sh"

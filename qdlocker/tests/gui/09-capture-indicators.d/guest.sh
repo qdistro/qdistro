@@ -40,7 +40,13 @@ set -u
 SILO=${QDLOCKER_09_SILO:-qdlocker09}
 SILO_UID=${QDLOCKER_09_SILO_UID:-3909}
 SCR=$QDLOCKER_09_DIR/scratch
-mkdir -p "$SCR" || exit 2
+mkdir -p "$SCR" && chmod 0711 "$SCR" || exit 2
+# Files an ADMIN process writes (the capture outputs) go in an admin-owned
+# directory: the root-created $SCR is 0700 under qga's umask, and pw-record
+# then dies "Permission denied" -- which read as a product FAIL of Step 2
+# (gui-20260928T182835Z-1160277, first run of this driver).
+ASCR=$SCR/admin
+install -d -m 0700 -o admin -g users "$ASCR" || exit 2
 BROKEN=/tmp/qdlocker-09-brokenbin
 DROPIN_DIR=/home/admin/.config/systemd/user/qdlocker.service.d
 BREAK_DROPIN=$DROPIN_DIR/91-break-pwdump.conf
@@ -252,8 +258,12 @@ assert_ind 1.3 capture_unverified microphone,camera,screencast,systemAudio,virtu
 
 # ------------------------------------------------------------------ Step 2
 echo "== Step 2 — microphone capture starts while locked"
-U setsid pw-record --target=@DEFAULT_SOURCE@ "$SCR/mic.wav" >"$SCR/mic.log" 2>&1 </dev/null &
+U setsid pw-record --target=@DEFAULT_SOURCE@ "$ASCR/mic.wav" >"$SCR/mic.log" 2>&1 </dev/null &
 sleep 6            # two polls; deliberately NO lock cycle
+# The capture must actually be running, or 2.1 would grade the harness, not
+# the observer (a recorder that exited is ERROR, never a product FAIL).
+pgrep -u admin -x pw-record >/dev/null \
+    || error "pw-record is not running 6s after start: $(tail -3 "$SCR/mic.log" | tr '\n' ' ')"
 assert_ind 2.1 capture_active 1
 assert_ind_contains 2.1 capture_kinds microphone
 assert_ind_contains 2.1 capture_detail mic
@@ -286,8 +296,10 @@ MON=$(U pactl get-default-sink 2>/dev/null | tr -d '\r')
 if [ -z "$MON" ]; then
     record 4 SKIP "no default sink (pactl get-default-sink empty); system-audio capture not exercised"
 else
-    U setsid parec -d "${MON}.monitor" -r "$SCR/sysaudio.raw" >"$SCR/sysaudio.log" 2>&1 </dev/null &
+    U setsid parec -d "${MON}.monitor" -r "$ASCR/sysaudio.raw" >"$SCR/sysaudio.log" 2>&1 </dev/null &
     sleep 6
+    pgrep -u admin -x parec >/dev/null \
+        || error "parec is not running 6s after start: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
     assert_ind 4.1 capture_active 1
     assert_ind_contains 4.1 capture_kinds systemAudio
     if field capture_kinds "$(ind)" | grep -q microphone; then
