@@ -35,6 +35,7 @@ VM=${VMNAME:-qd-sudo}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
 $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
+$VMEXEC "$VM" 'rm -f /tmp/52-dbusmon.log /tmp/52-dbusmon.pid'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
@@ -52,13 +53,30 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 ### S1 — start dbus-monitor as admin to record any broker calls
 
+The monitor records its OWN pid, then execs. Never capture it with
+`& echo \$!`: re-quoted by a driver, `$!` expands in the driver shell and
+names the harness's live claim watcher (S3 would then kill the watcher
+and grade a log no monitor ever wrote).
+
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- bash -c "dbus-monitor --system \
-  \"interface='\''org.qdistro.AdminBroker1'\''\" \
-  >/tmp/52-dbusmon.log 2>&1 & echo \$! >/tmp/52-dbusmon.pid"'
+MON_START_B64=$(base64 -w0 <<'EOF'
+runuser -u admin -- setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" >"$3" 2>&1 </dev/null' \
+  _ /tmp/52-dbusmon.pid "interface='org.qdistro.AdminBroker1'" /tmp/52-dbusmon.log
+for _ in $(seq 1 50); do [ -s /tmp/52-dbusmon.pid ] && break; sleep 0.1; done
+p=$(cat /tmp/52-dbusmon.pid 2>/dev/null)
+if [ -n "$p" ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  echo "MONITOR_OK pid=$p"
+else
+  echo "MONITOR_NOT_RUNNING pid=[$p]"
+fi
+EOF
+)
+$VMEXEC "$VM" "echo $MON_START_B64 | base64 -d | bash"
 sleep 1
-$VMEXEC "$VM" 'cat /tmp/52-dbusmon.pid'
 ```
+
+**Assert**: the output is `MONITOR_OK pid=<N>`. `MONITOR_NOT_RUNNING`
+is a harness ERROR: S3's zero counts would be vacuous without a monitor.
 
 ### S2 — send a malicious JSON request directly to the socket
 
@@ -111,12 +129,26 @@ $VMEXEC "$VM" 'cat /tmp/52-evil.log'
 Stop dbus-monitor and inspect the log:
 
 ```bash
-$VMEXEC "$VM" 'kill $(cat /tmp/52-dbusmon.pid) 2>/dev/null; sleep 1
-grep -c "RequestPermissionAs" /tmp/52-dbusmon.log || echo 0
-grep -c "qsu.exec:" /tmp/52-dbusmon.log || echo 0'
+MON_STOP_B64=$(base64 -w0 <<'EOF'
+p=$(cat /tmp/52-dbusmon.pid 2>/dev/null)
+if [ -n "$p" ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  echo "MONITOR_ALIVE_AT_STOP pid=$p"
+  kill "$p"
+else
+  echo "MONITOR_GONE_BEFORE_STOP pid=[$p]"
+fi
+sleep 1
+# One line per count (`grep -c` prints 0 AND exits 1 on no match).
+c=$(grep -c "RequestPermissionAs" /tmp/52-dbusmon.log 2>/dev/null); echo "REQUEST_PERMISSION_AS=${c:-0}"
+c=$(grep -c "qsu.exec:" /tmp/52-dbusmon.log 2>/dev/null); echo "QSU_EXEC=${c:-0}"
+EOF
+)
+$VMEXEC "$VM" "echo $MON_STOP_B64 | base64 -d | bash"
 ```
 
-**Assert**: both counts are `0` — the broker was never asked.
+**Assert**: `MONITOR_ALIVE_AT_STOP` (otherwise ERROR: the monitor did
+not cover S2), and `REQUEST_PERMISSION_AS=0` and `QSU_EXEC=0` — the
+broker was never asked.
 qdistro-root-exec failed closed at the input-validation stage.
 
 ### S4 — broker audit DB has no row for the malicious target
