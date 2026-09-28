@@ -96,7 +96,7 @@ if [ -f "$BAKED" ] && [ "$FORCE" -ne 1 ] && [ "$NETWORK_PROBE_ONLY" -ne 1 ]; the
     exit 0
 fi
 
-for tool in virt-customize guestfish qemu-img; do
+for tool in virt-customize virt-resize guestfish qemu-img; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ERROR: $tool not found on host (install libguestfs + guestfs-tools)" >&2
         exit 3
@@ -409,7 +409,11 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             [ -s "$BAKED_CACHE" ] && echo "[bake] tier-5 customized base missing/mismatched provenance; rebuilding from verified base" >&2
             rm -f "$BAKED_CACHE" "$BAKED_CACHE.provenance"
             echo "[bake] customizing tier-5 base on host (waypipe + qga + publisher)..."
-            cp --reflink=auto "$CLOUD_CACHE" "$BAKED_CACHE.partial"
+            # The stock cloud root is only 1.5 GiB. A warm RPM seed plus
+            # weston/LLVM dependencies cannot fit there, so grow the root
+            # partition before copying cached downloads into it.
+            qemu-img create -f qcow2 "$BAKED_CACHE.partial" 8G >/dev/null
+            virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$BAKED_CACHE.partial"
             qdistro_rpm_cache_import "$BAKED_CACHE.partial"
             PUBLISHER_TMP="$(mktemp /tmp/qd-pub-XXXXXX.sh)"
             if [ ! -f "$TIER5_BUILD_GUEST" ]; then
