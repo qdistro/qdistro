@@ -22,10 +22,17 @@ qdistro_rpm_cache_import() {
 }
 
 qdistro_rpm_cache_export() {
-    local disk="$1" dir tmp
+    local disk="$1" dir tmp packages_present
     dir="$(qdistro_rpm_cache_dir)"
+    command -v guestfish >/dev/null || { echo "ERROR: guestfish missing" >&2; return 1; }
     command -v virt-copy-out >/dev/null || { echo "ERROR: virt-copy-out missing" >&2; return 1; }
     command -v rsync >/dev/null || { echo "ERROR: rsync missing" >&2; return 1; }
+    packages_present="$(guestfish --ro -a "$disk" -i is-dir /var/cache/zypp/packages)" || return 1
+    if [ "$packages_present" = false ]; then
+        echo "[rpm-cache] no downloaded packages in $disk"
+        return 0
+    fi
+    [ "$packages_present" = true ] || return 1
     mkdir -p "$dir"
     tmp="$(mktemp -d "$dir/export.XXXXXX")" || return 1
     if ! virt-copy-out -a "$disk" /var/cache/zypp/packages "$tmp"; then
