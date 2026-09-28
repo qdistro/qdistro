@@ -40,90 +40,63 @@ into a SKIP rather than a pass.
 
 ## Setup
 
+**The commands live in two files next to this one, not in this markdown. Run
+them; do not re-type them into a driver of your own.**
+
+- [`09-capture-indicators.d/guest.sh`](09-capture-indicators.d/guest.sh) is
+  the ONE claimed guest driver (root, Setup through Cleanup). It prints one
+  `ASSERT <id> <PASS|FAIL|SKIP> <detail>` line per ctrl-socket assertion below
+  and a final `VERDICT <PASS|FAIL|ERROR>`.
+- [`09-capture-indicators.d/run.sh`](09-capture-indicators.d/run.sh) is its
+  host side. It starts `guest.sh` through vm-exec and serves EVERY host step
+  the driver publishes, by the name it publishes: `<id>-quiet` / `-alarm` /
+  `-rec` capture `$QCI_GUI_ARTIFACT_DIR/<id>.png` with `qdwin_screenshot` and
+  check the banner band (top `max(H/4, 220)` px, full width) for `#FD4663`
+  ABSENT / PRESENT / not at all; `<id>-drain` runs
+  `qdlocker_drain_lock_state`; `s10-heads` runs Step 10's two-head checks.
+
+Why: every failing run of this scenario before 2026-09-28 lost its verdict to
+a different slip in a hand translation of host-side vm-exec blocks into a
+guest driver — a host loop serving a FIXED step list that waited for the
+skipped conditional `s4` while the guest sat on `s7` (full-20260928T154720Z,
+recorded as a transport ERROR), busctl calls missing the interface argument
+and a system unit stopped through `runuser` (full-20260928T111118Z), a
+cleanup that left the fixture silo busy (full-20260926T153217Z). None of
+those was the product.
+
+Run, from any directory, with the scenario's own path and the VM you were
+given, in the FOREGROUND of ONE long-running command (4-6 min; it owns the
+driver's vm-exec, so let it finish; never start a second copy while one runs):
+
 ```bash
-source "$(dirname "$0")/qdlocker-helpers.sh"
-qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
-qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
-qdlocker_drain_lock_state
-
-# The qdwin golden intentionally has no work silos: adding one globally changes
-# unrelated shell UI baselines.  Own a dedicated, denied-egress fixture for this
-# scenario and remove it in Cleanup.
-SILO=${QDLOCKER_09_SILO:-qdlocker09}
-SILO_UID=${QDLOCKER_09_SILO_UID:-3909}
-# Reclaim THIS scenario's own fixture if an earlier attempt/run in this VM left
-# it behind (qci run full-20260926T153217Z: a driver cleanup that skipped the
-# Step 8 fixture kill left the TERM-ignoring loop in the silo cgroup, so
-# DeleteSilo hit EBUSY and the rerun's CreateSilo failed "silo already
-# exists"). Only the dedicated $SILO name is touched: SIGKILL whatever is left
-# in its cgroup, then Stop + Delete it, exactly as Cleanup does.
-"$QDWIN_VM_EXEC" "$VMNAME" "
-  CG=/sys/fs/cgroup/qdistro-silos/$SILO
-  if runuser -u admin -- busctl --system call \
-       org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-       org.qdistro.SessionManager1 ListSilos 2>/dev/null | grep -Fq '$SILO' \
-     || [ -d \"\$CG\" ]; then
-    echo 'setup: reclaiming leftover fixture silo $SILO' >&2
-    [ -f \"\$CG/cgroup.procs\" ] && xargs -r kill -KILL < \"\$CG/cgroup.procs\" 2>/dev/null || true
-    rm -f /tmp/qdlocker-09-stop-fixture.pid /tmp/qdlocker-09-stop-fixture.log
-    runuser -u admin -- busctl --system call \
-      org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-      org.qdistro.SessionManager1 StopSilo si '$SILO' 0 2>/dev/null || true
-    for i in \$(seq 1 20); do
-      runuser -u admin -- busctl --system call \
-        org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-        org.qdistro.SessionManager1 DeleteSilo s '$SILO' >/dev/null 2>&1 && break
-      sleep 1
-    done
-  fi
-"
-"$QDWIN_VM_EXEC" "$VMNAME" "
-  runuser -u admin -- busctl --system call \
-    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 CreateSilo si '$SILO' '$SILO_UID'
-  runuser -u admin -- busctl --system call \
-    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 SetSiloEgress ss '$SILO' none
-"
-
-qdwin_screenshot /tmp/qdlocker-09-step0-baseline.png
-read -r SW SH < <(qdlocker_screenshot_dimensions /tmp/qdlocker-09-step0-baseline.png)
-
-# The banner is anchored to the top of the lock surface. Assert inside a
-# generous top band rather than at exact coordinates so a font/metric change
-# is not a false FAIL.
-BANNER_H=$(( SH / 4 > 220 ? SH / 4 : 220 ))
-BANNER_CROP="${SW}x${BANNER_H}+0+0"
-ERR='#FD4663'   # shim/Color.qml mError — the banner border while alarming
-
-# Authoritative channel: one line from the RUNNING observer.
-ind() { qdlocker_ctrl indicators | tr -d '\r'; }
-
-# assert_ind <key> <expected>  — exact match on one key=value token.
-assert_ind() {
-    local key="$1" want="$2" line got
-    line="$(ind)"
-    got="$(printf '%s\n' "$line" | tr ' ' '\n' | grep "^${key}=" | cut -d= -f2-)"
-    if [ "$got" != "$want" ]; then
-        echo "FAIL: ${key}=${got:-<missing>} (want ${want})" >&2
-        echo "  full line: $line" >&2
-        return 1
-    fi
-    printf 'ok: %s=%s\n' "$key" "$got"
-}
-
-# assert_ind_contains <key> <substring>
-assert_ind_contains() {
-    local key="$1" want="$2" line got
-    line="$(ind)"
-    got="$(printf '%s\n' "$line" | tr ' ' '\n' | grep "^${key}=" | cut -d= -f2-)"
-    case "$got" in
-        *"$want"*) printf 'ok: %s=%s contains %s\n' "$key" "$got" "$want" ;;
-        *) echo "FAIL: ${key}=${got:-<missing>} does not contain ${want}" >&2
-           echo "  full line: $line" >&2; return 1 ;;
-    esac
-}
+bash <directory of this scenario>/09-capture-indicators.d/run.sh "$VMNAME"
 ```
+
+(The guest step directory defaults to `/tmp/qci/qdlocker_tests_gui_09-capture-indicators.md`;
+if your prompt names a different `/tmp/qci/<slug>/`, export `QDLOCKER_09_SLUG=<slug>` first.)
+
+It writes to `$QCI_GUI_ARTIFACT_DIR`: `driver.log` (the guest driver's
+output), `host.log`, `host-checks.tsv` (one row per host check),
+`summary.txt`, and the frames `s1.png` ... Exit 0 = every assertion that ran
+passed, 1 = an assertion FAILED, 3 = no verdict (ERROR). It ends with the
+summary and `RESULT <PASS|FAIL|ERROR>`.
+
+Then grade: OPEN EVERY FRAME it lists (each is a fresh capture) and check it
+against the step's pixel assertion below; quote the `ASSERT` lines and the
+`host-checks.tsv` rows in your report. The colour counts are machine checks
+that back your reading of the frame; a frame whose content contradicts its
+row (e.g. `s7.png` shows no alarm banner) is a FAIL whatever the count says.
+If run.sh ends in ERROR, report ERROR with the `ERROR:` line from
+`driver.log` / the ERROR rows — do not re-drive the scenario by hand.
+
+Setup (in `guest.sh`): enable ctrl introspection and the GUI-lane idle
+override, restart qdlocker and wait for its ctrl socket, require
+`qdwin-compositor.service` and `qdlocker.service` active, drain any lock
+state (host step `setup-drain`), reclaim this scenario's own fixture silo
+`qdlocker09` if an earlier attempt left it (SIGKILL what is left in its
+cgroup, `StopSilo`, `DeleteSilo`), then `CreateSilo qdlocker09 3909` with
+egress `none`. The qdwin golden intentionally has no work silos; this one is
+removed in Cleanup.
 
 ## Steps
 
@@ -136,51 +109,11 @@ would be a false FAIL. That is an environment ERROR, not a product defect.
 re-run with only the `assert_ind*` checks and report the pixel checks as
 BLOCKED rather than passed.)
 
-```bash
-DRM_LOG=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager"' \
-  | grep -E "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
-DRM_FAILS=$(printf '%s\n' "$DRM_LOG" | grep -cE "atomic: couldn't commit new state|repaint-flush failed" || true)
-if [ "${DRM_FAILS:-0}" -ge 5 ]; then
-    echo "ERROR: VM graphics backend is failing DRM atomic commits ($DRM_FAILS)." >&2
-    printf '%s\n' "$DRM_LOG" | tail -20 >&2
-    exit 78
-fi
-```
+In `guest.sh`: five or more `atomic: couldn't commit` / `repaint-flush failed` lines in the compositor journal end the run as ERROR (black frames would make every pixel check a false FAIL).
 
 ### Preflight B — the observer is installed, from the installed prefix
 
-```bash
-# python3 -I: isolated mode ignores PYTHONPATH *and* user site-packages, and
-# `cd /` removes the cwd. If the module still imports, it is the installed
-# one. The path is ASSERTED, not merely printed.
-MODPATH=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'cd / && runuser -u admin -- python3 -I -c "import qdlocker.indicators as m; print(m.__file__)"' \
-  | tr -d '\r')
-echo "installed module: $MODPATH"
-case "$MODPATH" in
-    /usr/lib*/python3*/site-packages/qdlocker/indicators.py|/usr/lib/qdistro/*|/usr/local/lib*/python3*/*/qdlocker/indicators.py)
-        echo "ok: module resolves under an installed prefix" ;;
-    "") echo "FAIL: qdlocker.indicators does not import in isolated mode —" \
-             "the wheel does not ship it" >&2; exit 1 ;;
-    /home/*|*/.worktrees/*|*/qdistro/qdlocker/qdlocker/*)
-        echo "FAIL: module resolves to a CHECKOUT ($MODPATH), not the installed" \
-             "package — this is the reachability failure class in" \
-             "todo/fable-release/10-reachability-audit-2026-07-26.md" >&2; exit 1 ;;
-    *) echo "FAIL: unexpected module path $MODPATH" >&2; exit 1 ;;
-esac
-
-# Both observer tools must exist in the image, or the indicator can only ever
-# read "unverified" — honest, but useless.
-"$QDWIN_VM_EXEC" "$VMNAME" 'command -v pw-dump >/dev/null' \
-  || { echo "FAIL: pw-dump missing from the image (pipewire-tools)" >&2; exit 1; }
-"$QDWIN_VM_EXEC" "$VMNAME" 'command -v busctl >/dev/null' \
-  || { echo "FAIL: busctl missing from the image" >&2; exit 1; }
-
-# And the ctrl channel itself must be live, or every assertion below is vacuous.
-ind | grep -q 'capture_observer=' \
-  || { echo "FAIL: ctrl 'indicators' unavailable — introspection not enabled" >&2; exit 1; }
-```
+In `guest.sh`: `ASSERT B.1` (module path from `python3 -I` in `/`), `B.2` (`pw-dump`, `busctl`), `B.3` (the `indicators` verb). A B.1/B.2 failure stops the run before Step 1; B.3 is ERROR.
 
 **Assert (B.1):** the module imports in isolated mode from an installed
 prefix. A checkout-only import is a release blocker, not a test-env issue.
@@ -190,21 +123,7 @@ unfalsifiable and must be reported BLOCKED.
 
 ### Step 1 — locked with nothing capturing: healthy, quiet, and NOT an all-clear
 
-```bash
-qdlocker_ctrl lock
-qdlocker_wait_for_lock 5
-sleep 2            # the lock edge forces an immediate scan; one poll is 3s
-assert_ind capture_observer ok
-assert_ind capture_active 0
-assert_ind egress_observer ok
-qdwin_screenshot /tmp/qdlocker-09-step1-quiet.png
-qdlocker_assert_color_absent_in_crop \
-  /tmp/qdlocker-09-step1-quiet.png "$ERR" "$BANNER_CROP" banner-quiet
-# No kind may be missing from the unverified list while nothing is observed:
-# "clear" is not a state this product can produce.
-assert_ind capture_unverified \
-  microphone,camera,screencast,systemAudio,virtualInput,unattributed
-```
+In `guest.sh`: lock, wait for `locked=True`, sleep 2 (the lock edge forces an immediate scan), `ASSERT 1.1`; host step **`s1-quiet`** → `s1.png`, `#FD4663` ABSENT; then `ASSERT 1.3`.
 
 **Assert (1.1):** the observer is healthy and saw nothing.
 **Assert (1.2):** no `#FD4663` in the banner band — a healthy quiet scan must
@@ -213,29 +132,7 @@ not look like an alarm.
 
 ### Step 2 — a real microphone capture starts WHILE LOCKED
 
-```bash
-"$QDWIN_VM_EXEC" "$VMNAME" '
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-    setsid pw-record --target=@DEFAULT_SOURCE@ /tmp/qdlocker-09-mic.wav \
-    >/tmp/qdlocker-09-mic.log 2>&1 &
-'
-sleep 6   # two polls; deliberately NO lock cycle, so only the poll can see it
-assert_ind capture_active 1
-assert_ind_contains capture_kinds microphone
-assert_ind_contains capture_detail mic
-qdwin_screenshot /tmp/qdlocker-09-step2-mic.png
-qdlocker_assert_color_present_in_crop \
-  /tmp/qdlocker-09-step2-mic.png "$ERR" "$BANNER_CROP" banner-mic-alarm
-ATTR=$(ind | tr ' ' '\n' | grep '^capture_attributed=' | cut -d= -f2)
-echo "capture_attributed=$ATTR"
-if [ "$ATTR" = "0" ]; then
-    assert_ind_contains capture_detail client_unknown
-else
-    ind | grep -q 'client_unknown' && {
-        echo "FAIL: capture_attributed=1 but the detail says client unknown" >&2
-        exit 1; }
-fi
-```
+In `guest.sh`: `pw-record --target=@DEFAULT_SOURCE@` as admin (detached, output to a file), sleep 6 (two polls; deliberately NO lock cycle), `ASSERT 2.1`; host step **`s2-alarm`** → `s2.png`, `#FD4663` PRESENT; then `ASSERT 2.3` compares `capture_attributed` with `capture_detail`.
 
 **Assert (2.1):** the running observer reports an active microphone without
 any lock/unlock cycle — the poll saw a capture that began while locked. This
@@ -250,15 +147,7 @@ contain `client_unknown`, and with `ATTR=1` it must not.
 
 ### Step 3 — the capture stops while locked
 
-```bash
-"$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x pw-record || true'
-sleep 7
-assert_ind capture_active 0
-assert_ind capture_observer ok
-qdwin_screenshot /tmp/qdlocker-09-step3-mic-stopped.png
-qdlocker_assert_color_absent_in_crop \
-  /tmp/qdlocker-09-step3-mic-stopped.png "$ERR" "$BANNER_CROP" banner-after-stop
-```
+In `guest.sh`: `pkill -u admin -x pw-record`, sleep 7, `ASSERT 3.1`; host step **`s3-quiet`** → `s3.png`, `#FD4663` ABSENT.
 
 **Assert (3.1):** the alarm clears within two polls, on both channels. A
 stuck-on indicator is as much a failure as a stuck-off one — it trains the
@@ -266,37 +155,7 @@ owner to ignore it.
 
 ### Step 4 — system-audio (sink-monitor) capture
 
-```bash
-MON=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-     pactl get-default-sink' | tr -d '\r')
-if [ -z "$MON" ]; then
-    echo "SKIP (4): no default sink; system-audio capture not exercised." >&2
-else
-    "$QDWIN_VM_EXEC" "$VMNAME" "
-      runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-        setsid parec -d ${MON}.monitor -r /tmp/qdlocker-09-sysaudio.raw \
-        >/tmp/qdlocker-09-sysaudio.log 2>&1 &
-    "
-    sleep 6
-    assert_ind capture_active 1
-    assert_ind_contains capture_kinds systemAudio
-    # The discrimination is the point: a monitor capture must NOT also raise a
-    # microphone alarm. "Your mic is live" and "your speakers are being
-    # recorded" are different statements to the owner.
-    if ind | tr ' ' '\n' | grep '^capture_kinds=' | grep -q microphone; then
-        echo "FAIL: sink-monitor capture also reported as microphone" >&2
-        ind >&2
-        exit 1
-    fi
-    qdwin_screenshot /tmp/qdlocker-09-step4-sysaudio.png
-    qdlocker_assert_color_present_in_crop \
-      /tmp/qdlocker-09-step4-sysaudio.png "$ERR" "$BANNER_CROP" banner-sysaudio
-    "$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x parec || true'
-    sleep 7
-    assert_ind capture_active 0
-fi
-```
+In `guest.sh`: `MON=$(pactl get-default-sink)`; empty → `ASSERT 4 SKIP`. Otherwise `parec -d $MON.monitor`, sleep 6, `ASSERT 4.1` (systemAudio, and NOT microphone); host step **`s4-alarm`** → `s4.png`, `#FD4663` PRESENT; stop it, sleep 7, `ASSERT 4.2`.
 
 **Assert (4.1):** a monitor capture is classified `systemAudio`, not
 `microphone`. If it lands in `microphone`, the `stream.capture.sink`
@@ -306,54 +165,7 @@ being recorded" are different statements to the owner.
 
 ### Step 5 — camera (CONDITIONAL)
 
-```bash
-# Multi-line guest programs go through the base64 envelope (same pitfall as
-# permissions-gui/AGENTS.md #1): an inline `python3 -c "<newline>..."` is both
-# vm-exec-JSON-fragile and easy for a driver to flatten into literal "\n",
-# which is a SyntaxError, not a probe result.
-CAM_PROBE_B64=$(base64 -w0 <<'PYEOF'
-import json,subprocess
-from qdlocker import indicators as I
-ok,nodes=I.parse_pw_dump(subprocess.run(I.CAPTURE_CMD,capture_output=True,text=True).stdout)
-for n in nodes:
-    p=n["props"]
-    if str(p.get("media.class",""))=="Video/Source":
-        print(p.get("node.name","")); break
-PYEOF
-)
-CAMID=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "cd / && echo $CAM_PROBE_B64 | base64 -d | runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 python3 -I -" \
-  | tr -d '\r')
-if [ -z "$CAMID" ]; then
-    echo "SKIP (5): no PipeWire Video/Source node in this VM (no camera," \
-         "no v4l2loopback). Camera classification not exercised." >&2
-elif ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v gst-launch-1.0 >/dev/null'; then
-    echo "SKIP (5): gst-launch-1.0 not installed; cannot drive the camera node." >&2
-else
-    "$QDWIN_VM_EXEC" "$VMNAME" "
-      runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-        setsid gst-launch-1.0 -q pipewiresrc path=\$(
-          runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-            pw-cli ls Node | awk '/id /{id=\$2} /node.name = \"${CAMID}\"/{print id; exit}'
-        ) ! fakesink >/tmp/qdlocker-09-cam.log 2>&1 &
-    "
-    sleep 6
-    # The driver must actually be running, or a SKIP is masquerading as a pass.
-    "$QDWIN_VM_EXEC" "$VMNAME" 'pgrep -u admin -x gst-launch-1.0 >/dev/null' \
-      || { echo "SKIP (5): gst-launch-1.0 exited immediately; see" \
-                "/tmp/qdlocker-09-cam.log in the guest (node id parse?)." >&2; \
-           CAM_SKIPPED=1; }
-    if [ -z "${CAM_SKIPPED:-}" ]; then
-    assert_ind capture_active 1
-    assert_ind_contains capture_kinds camera
-    qdwin_screenshot /tmp/qdlocker-09-step5-camera.png
-    qdlocker_assert_color_present_in_crop \
-      /tmp/qdlocker-09-step5-camera.png "$ERR" "$BANNER_CROP" banner-camera
-    fi
-    "$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x gst-launch-1.0 || true'
-    sleep 7
-fi
-```
+In `guest.sh`: find a `Video/Source` node with the installed parser; none, or no `gst-launch-1.0` → `ASSERT 5 SKIP`. Otherwise drive it with `gst-launch-1.0 pipewiresrc path=<id> ! fakesink`, check it stayed up (else SKIP with its log), `ASSERT 5.1`; host step **`s5-alarm`** → `s5.png`, `#FD4663` PRESENT.
 
 **Assert (5.1):** a camera stream classifies as `camera`, not `screencast`.
 If it lands in `screencast`, the camera hints (`media.role`, `device.api`,
@@ -369,40 +181,7 @@ view-stream subscription — this scenario does **not** reimplement a Wayland
 client. Correlation is asserted: the node set is sampled before and after, so
 a pre-existing node cannot make the step trivially green.
 
-```bash
-MM=/home/play2/qdistro/qdistro/multimachine/harness
-NODES_BEFORE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 pw-cli ls Node' \
-  | grep -c 'weston\.pipewire' || true)
-if [ ! -d "$MM" ]; then
-    echo "SKIP (6): multimachine harness not present at $MM; screencast" \
-         "classification not exercised." >&2
-else
-    # NOT AUTOMATED: this scenario does not reimplement a Wayland view-stream
-    # client, and the mm harness's subscribe_view_stream is not a standalone
-    # entry point for an arbitrary already-running toplevel — its source stack
-    # performs the subscription as part of a larger setup. So this step is a
-    # MANUAL driver: the runner starts a view stream by whatever means the mm
-    # lane uses, and the correlation below decides PASS/SKIP. A step that
-    # cannot create the node reports SKIP; it never reports PASS.
-    echo "RUNNER (manual): start a qdwin view stream against $VMNAME now." >&2
-    sleep 5
-    NODES_AFTER=$("$QDWIN_VM_EXEC" "$VMNAME" \
-      'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 pw-cli ls Node' \
-      | grep -c 'weston\.pipewire' || true)
-    if [ "$NODES_AFTER" -le "$NODES_BEFORE" ]; then
-        echo "SKIP (6): no new weston.pipewire node appeared" \
-             "($NODES_BEFORE -> $NODES_AFTER); the view stream did not start," \
-             "so there is nothing to assert." >&2
-    else
-        sleep 4
-        assert_ind_contains capture_kinds screencast
-        qdwin_screenshot /tmp/qdlocker-09-step6-screencast.png
-        qdlocker_assert_color_present_in_crop \
-          /tmp/qdlocker-09-step6-screencast.png "$ERR" "$BANNER_CROP" banner-screencast
-    fi
-fi
-```
+In `guest.sh`: count `weston.pipewire` nodes, print the manual-runner notice, wait 5 s, count again. No new node → `ASSERT 6 SKIP` (the normal qci outcome: nothing in this lane starts a view stream). A new node → sleep 4, `ASSERT 6.1`; host step **`s6-alarm`** → `s6.png`, `#FD4663` PRESENT.
 
 **Assert (6.1):** a newly created `weston.pipewire-N` node is observed as
 `screencast` while the stream is live.
@@ -412,35 +191,7 @@ otherwise.
 
 ### Step 7 — observer failure must be visible (the most important step)
 
-```bash
-"$QDWIN_VM_EXEC" "$VMNAME" '
-  install -d -m 0755 /tmp/qdlocker-09-brokenbin
-  printf "#!/bin/sh\nsleep 300\n" > /tmp/qdlocker-09-brokenbin/pw-dump
-  chmod 0755 /tmp/qdlocker-09-brokenbin/pw-dump
-  install -d -m 0755 /home/admin/.config/systemd/user/qdlocker.service.d
-  cat >/home/admin/.config/systemd/user/qdlocker.service.d/91-break-pwdump.conf <<EOF
-[Service]
-Environment=PATH=/tmp/qdlocker-09-brokenbin:/usr/local/bin:/usr/bin:/bin
-EOF
-  chown -R admin:users /home/admin/.config/systemd/user/qdlocker.service.d
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
-'
-sleep 4
-qdlocker_enable_introspection    # the restart dropped the socket; re-arm it
-qdlocker_ctrl lock
-qdlocker_wait_for_lock 5
-sleep 6            # past the 2.5s scan timeout; the kill publishes immediately
-assert_ind capture_observer failed
-assert_ind capture_active 0
-qdwin_screenshot /tmp/qdlocker-09-step7-observer-dead.png
-qdlocker_assert_color_present_in_crop \
-  /tmp/qdlocker-09-step7-observer-dead.png "$ERR" "$BANNER_CROP" banner-observer-failed
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -l admin -c "journalctl --user -u qdlocker.service --boot --no-pager"' \
-  | grep -E "observer timed out; killing scan" \
-  || { echo "FAIL: the hard timeout did not fire" >&2; exit 1; }
-```
+In `guest.sh`: a `pw-dump` that sleeps 300 s first on qdlocker.service's PATH (user drop-in `91-break-pwdump.conf`), daemon-reload, restart qdlocker and wait for its socket, lock, sleep 6 (past the 2.5 s scan timeout), `ASSERT 7.1`; host step **`s7-alarm`** → `s7.png`, `#FD4663` PRESENT; `ASSERT 7.3` greps admin's qdlocker.service journal.
 
 **Assert (7.1):** `capture_observer=failed` — a hung `pw-dump` is reported as
 a failed observer, not as a quiet machine.
@@ -450,106 +201,18 @@ failure this scenario can report.
 **Assert (7.3):** the journal shows the scan being killed — the hard timeout
 fired rather than the scan hanging forever. vm-exec runs as root and
 qdlocker.service is admin's USER unit, so the query must run as admin
-(`runuser -l admin -c "journalctl --user ..."`, as above); a root
+(`runuser -l admin -c "journalctl --user ..."`, as `guest.sh` does); a root
 `journalctl --user` reads root's own user journal and proves nothing.
 
 Recovery (also asserted, so a failure cannot be sticky):
 
-```bash
-"$QDWIN_VM_EXEC" "$VMNAME" '
-  rm -f /home/admin/.config/systemd/user/qdlocker.service.d/91-break-pwdump.conf
-  rm -rf /tmp/qdlocker-09-brokenbin
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
-'
-sleep 4
-qdlocker_enable_introspection
-qdlocker_ctrl lock
-qdlocker_wait_for_lock 5
-sleep 3
-assert_ind capture_observer ok
-```
+In `guest.sh`: remove the drop-in and the fake `pw-dump`, daemon-reload, restart qdlocker, lock, sleep 3, `ASSERT 7.4`.
 
 **Assert (7.4):** the observer recovers to `ok` after the tool is restored.
 
 ### Step 8 — silo egress, including transient `Stopping` and an unreachable manager
 
-```bash
-SILO=${QDLOCKER_09_SILO:-qdlocker09}
-"$QDWIN_VM_EXEC" "$VMNAME" "
-  runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 SetSiloEgress ss '$SILO' 'direct'
-  runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 StartSilo s '$SILO'
-"
-sleep 4
-assert_ind egress_active 1
-assert_ind_contains egress_detail "$SILO"
-qdwin_screenshot /tmp/qdlocker-09-step8-egress.png
-
-# Keep a genuine process alive through SIGTERM so StopSilo's grace window is
-# real and long enough to observe. The process lives in the silo's production
-# cgroup; StopSilo will SIGKILL it after the requested grace period.
-"$QDWIN_VM_EXEC" "$VMNAME" "
-  setsid sh -c 'trap \"\" TERM; while :; do sleep 1; done' \
-    >/tmp/qdlocker-09-stop-fixture.log 2>&1 &
-  fixture_pid=\$!
-  echo \"\$fixture_pid\" > '/sys/fs/cgroup/qdistro-silos/$SILO/cgroup.procs'
-  echo \"\$fixture_pid\" > /tmp/qdlocker-09-stop-fixture.pid
-  grep -qx \"\$fixture_pid\" '/sys/fs/cgroup/qdistro-silos/$SILO/cgroup.procs'
-" || { echo "FAIL: could not plant the Stopping-state workload" >&2; exit 1; }
-
-# Sample DURING the transient Stopping state (30s grace window).
-"$QDWIN_VM_EXEC" "$VMNAME" "
-  setsid runuser -u admin -- busctl --system call \
-    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 StopSilo si '$SILO' 30 >/dev/null 2>&1 &
-"
-# Correlate: the TARGET silo must be in Stopping in the SAME window in which
-# the indicator still shows it. Another active silo, or a sample taken before
-# the state transition, must not be able to satisfy this.
-# Reuse the production parser (the installed module) rather than hand-rolling
-# busctl string surgery in the harness.
-SILO_STOP_B64=$(base64 -w0 <<PYEOF
-import subprocess, time
-from qdlocker import indicators as I
-deadline = time.monotonic() + 10
-state = None
-while time.monotonic() < deadline:
-    out = subprocess.run(I.EGRESS_CMD, capture_output=True, text=True)
-    ok, rows = I.parse_list_silos(out.stdout)
-    row = [r for r in rows if r.get('name') == '$SILO'] if ok else []
-    state = row[0].get('state') if row else None
-    if state == 'Stopping':
-        break
-    time.sleep(0.2)
-assert state == 'Stopping', (
-    'silo $SILO never became externally observable as Stopping; last state='
-    + str(state))
-print('ok: silo $SILO is Stopping')
-PYEOF
-)
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  "cd / && echo $SILO_STOP_B64 | base64 -d | runuser -u admin -- python3 -I -" \
-  || exit 1
-sleep 4
-assert_ind egress_active 1              # still live: Stopping is not dark
-assert_ind_contains egress_detail "$SILO"
-
-# Unreachable session manager must read UNVERIFIED, never "no egress".
-"$QDWIN_VM_EXEC" "$VMNAME" 'systemctl stop qdistro-session-manager.service'
-sleep 5
-assert_ind egress_observer failed
-assert_ind egress_active 0
-# The UI claim is asserted too: the egress-unverified row is drawn in mError,
-# so the banner band must contain the error colour even with capture quiet.
-qdwin_screenshot /tmp/qdlocker-09-step8-egress-unverified.png
-qdlocker_assert_color_present_in_crop \
-  /tmp/qdlocker-09-step8-egress-unverified.png "$ERR" "$BANNER_CROP" banner-egress-unverified
-"$QDWIN_VM_EXEC" "$VMNAME" 'systemctl start qdistro-session-manager.service'
-sleep 4
-assert_ind egress_observer ok
-```
+In `guest.sh`: `SetSiloEgress qdlocker09 direct` + `StartSilo`, sleep 4, `ASSERT 8.1`; host step **`s8a-rec`** → `s8a.png` (recorded only). Plant a SIGTERM-ignoring process in the silo's cgroup, `StopSilo qdlocker09 30` in the background, observe `Stopping` through the installed parser (`ASSERT 8.2`), sleep 4, `ASSERT 8.2` (still shown). Then ROOT `systemctl stop qdistro-session-manager.service` (a system unit — never through `runuser`), sleep 5, `ASSERT 8.3`; host step **`s8b-alarm`** → `s8b.png`, `#FD4663` PRESENT (the egress-unverified row); start it again, sleep 4, `ASSERT 8.4`.
 
 **Assert (8.1):** an `Active` silo with `direct` egress is shown.
 **Assert (8.2):** the same silo is STILL shown while `Stopping` — the session
@@ -562,21 +225,7 @@ unverified" row — never a silent "no egress".
 
 ### Step 9 — locked-state restart of qdlocker
 
-```bash
-qdlocker_drain_lock_state
-qdlocker_ctrl lock
-qdlocker_wait_for_lock 5
-"$QDWIN_VM_EXEC" "$VMNAME" '
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-    systemctl --user restart qdlocker.service
-'
-sleep 5
-qdlocker_enable_introspection
-qdlocker_ctrl status | grep 'locked=True' \
-  || { echo "FAIL: locker did not come back locked" >&2; exit 1; }
-assert_ind capture_observer ok
-qdwin_screenshot /tmp/qdlocker-09-step9-restarted.png
-```
+In `guest.sh`: host step **`s9-drain`**, lock, restart qdlocker while locked, sleep 5 and wait for its socket, `ASSERT 9.1` (`locked=True` and `capture_observer=ok`); host step **`s9-rec`** → `s9.png` (recorded only).
 
 **Assert (9.1):** after a restart while locked, qdlocker comes back locked
 (`initially_locked` at bind time) **and the observer has produced a fresh
@@ -593,53 +242,7 @@ Requires a VM booted with two enabled heads. A successful
 scanout the compositor never enabled — so the compositor's own output count
 is checked first.
 
-```bash
-# qdwin's own enabled-output set, not DRM connector state: a connected
-# connector the compositor never enabled would make the black-screen assertion
-# below trivially green. The compositor logs an output_created per enabled
-# output; count the distinct names still present.
-OUTPUTS=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager"' \
-  | grep -oE "output_created[^\n]*name=[A-Za-z0-9-]+" | grep -oE "name=[A-Za-z0-9-]+" \
-  | sort -u | wc -l)
-echo "qdwin enabled outputs: $OUTPUTS"
-if [ "${OUTPUTS:-0}" -lt 2 ]; then
-    echo "SKIP (10): compositor has ${OUTPUTS:-0} connected output(s); re-run" \
-         "on a two-head VM to exercise multi-output lock behaviour." >&2
-else
-    qdlocker_drain_lock_state
-    qdlocker_ctrl lock
-    qdlocker_wait_for_lock 5
-    sleep 3
-    virsh -c qemu:///session screenshot "$VMNAME" \
-        /tmp/qdlocker-09-step10-secondary.ppm --screen 1
-    virsh -c qemu:///session screenshot "$VMNAME" \
-        /tmp/qdlocker-09-step10-primary.ppm --screen 0
-    # Primary must not be blank. NOTE: this is a weak check — it establishes
-    # that the locker surface is being painted, NOT that the J28 banner is
-    # present on it. Asserting the banner itself needs a text/pixel signature
-    # the runner can match; until that exists, treat 10.2 as observed, not
-    # gated.
-    python3 - /tmp/qdlocker-09-step10-primary.ppm <<'EOF'
-import subprocess, sys
-out = subprocess.run(["convert", sys.argv[1], "-format", "%c",
-                      "histogram:info:-"], capture_output=True, text=True).stdout
-colors = [l for l in out.splitlines() if l.strip()]
-assert len(colors) > 1, "primary output is uniformly one colour — no lock UI"
-EOF
-    # Secondary must be uniformly black: qdwin's curtain spans the union bbox
-    # of the outputs present when it was installed, and all non-lock layers are
-    # unset globally.
-    python3 - /tmp/qdlocker-09-step10-secondary.ppm <<'EOF'
-import subprocess, sys
-out = subprocess.run(["convert", sys.argv[1], "-format", "%c",
-                      "histogram:info:-"], capture_output=True, text=True).stdout
-nonblack = [l for l in out.splitlines()
-            if l.strip() and "#000000" not in l and "srgb(0,0,0)" not in l]
-assert not nonblack, f"secondary output is not uniformly black: {nonblack[:5]}"
-EOF
-fi
-```
+In `guest.sh`: count distinct `output_created ... name=` in the compositor journal; fewer than 2 → `ASSERT 10 SKIP`. Otherwise host step `s10-drain`, lock, sleep 3, host step **`s10-heads`**: run.sh takes `virsh screenshot --screen 1` and `--screen 0` and checks 10.1 (secondary uniformly black) and 10.2 (primary not one flat colour — the weak check noted below).
 
 **Assert (10.1):** the secondary output is uniformly black. No desktop pixel
 may appear on any output. A failure here is a qdwin lock-curtain leak and
@@ -661,40 +264,7 @@ a J28 regression — do not report it as a J28 failure.
 
 ## Cleanup
 
-```bash
-SILO=${QDLOCKER_09_SILO:-qdlocker09}
-"$QDWIN_VM_EXEC" "$VMNAME" "
-  pkill -u admin -x pw-record 2>/dev/null || true
-  pkill -u admin -x parec 2>/dev/null || true
-  pkill -u admin -x gst-launch-1.0 2>/dev/null || true
-  pkill -u admin -x qdistro-test-window 2>/dev/null || true
-  if [ -s /tmp/qdlocker-09-stop-fixture.pid ]; then
-    fixture_pid=\$(cat /tmp/qdlocker-09-stop-fixture.pid)
-    if grep -Fq "/qdistro-silos/$SILO" "/proc/\$fixture_pid/cgroup" 2>/dev/null; then
-      kill -KILL "\$fixture_pid" 2>/dev/null || true
-    fi
-  fi
-  rm -f /tmp/qdlocker-09-stop-fixture.pid /tmp/qdlocker-09-stop-fixture.log
-  rm -f /home/admin/.config/systemd/user/qdlocker.service.d/91-break-pwdump.conf
-  rm -rf /tmp/qdlocker-09-brokenbin
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
-  systemctl start qdistro-session-manager.service 2>/dev/null || true
-  runuser -u admin -- busctl --system call \
-    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 SetSiloEgress ss '$SILO' none 2>/dev/null || true
-  runuser -u admin -- busctl --system call \
-    org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 StopSilo si '$SILO' 0 2>/dev/null || true
-  for i in \$(seq 1 20); do
-    runuser -u admin -- busctl --system call \
-      org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-      org.qdistro.SessionManager1 DeleteSilo s '$SILO' >/dev/null 2>&1 && break
-    sleep 1
-  done
-"
-qdlocker_drain_lock_state
-sleep 2
-```
+In `guest.sh` (also its EXIT trap if it dies mid-run; a host-step timeout stops it WITHOUT teardown by design): stop `pw-record`/`parec`/`gst-launch-1.0`, SIGKILL the Stopping fixture if it is still in the silo cgroup, remove the break drop-in (restarting qdlocker if it was still in place), daemon-reload, start the session manager, `SetSiloEgress none`, `StopSilo 0`, `DeleteSilo` (retried 20 s); then host step `cleanup-drain`.
 
 ## Known-broken-if
 
