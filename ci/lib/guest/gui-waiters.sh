@@ -965,7 +965,17 @@ kill_pending_jobs() {
     [ -f "$reg" ] || return 0
     while read -r kind jpid jstart tag; do
         [ "$kind" = pending ] || continue
-        ready_job "$jpid" "$jstart" && continue
+        if ready_job "$jpid" "$jstart"; then
+            # A committed worker is safe to keep once CONT has made it
+            # runnable. If its owner died before CONT, it is still stopped
+            # and would otherwise hold the claim forever.
+            state=""
+            st=""
+            { read -r st <"/proc/$jpid/stat"; } 2>/dev/null || continue
+            set -f; set -- ${st##*") "}; set +f
+            state=$1
+            [ "$state" = T ] || [ "$state" = t ] || continue
+        fi
         alive "$jpid" "$jstart" && kill -KILL "$jpid" 2>/dev/null || true
     done <"$reg"
 }
@@ -1104,7 +1114,7 @@ watch() {
     tracked=" $owner:$ostart "
     while :; do
         if [ -n "$scope" ]; then
-            if [ -n "$partner" ] && ! alive "$partner" "$pstart"; then
+            if [ -n "$partner" ] && ! alive "$partner" "$pstart" && ! completed; then
                 drain_scope || { sleep "$poll"; continue; }
                 kill_pending_jobs
             elif ! alive "$owner" "$ostart" && ! completed; then
@@ -1344,14 +1354,16 @@ _qci_claim_register_job() {
         printf 'ERROR: bg_start: cannot move job %s out of the driver scope; it was killed before it ran\n' "$tag" >&2
         _qci_driver_stop 1
     fi
-    kill -CONT "$pid"
-    # Promotion comes AFTER CONT. If the owner dies at any earlier point,
-    # guardians kill this identity even if it already moved out of the scope.
+    # Commit the handoff while the worker is still stopped. Once CONT lets
+    # it fork, its whole command must already be registered to hold the claim.
+    # A guardian kills a committed but still-stopped worker if the owner dies
+    # before CONT, so that this ordering cannot strand the claim.
     if ! printf 'job %s %s %s\n' "$pid" "$start" "$tag" >>"$QCI_DRIVER_CLAIM_PATH.jobs"; then
         kill -KILL "$pid" 2>/dev/null || true
         printf 'ERROR: bg_start: cannot complete job %s handoff; stopping this driver\n' "$tag" >&2
         _qci_driver_stop 1
     fi
+    kill -CONT "$pid"
 }
 
 _qci_claim_scope_prepare() {
