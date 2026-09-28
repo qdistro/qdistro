@@ -10,6 +10,10 @@ setup() {
     export RUN_LOCK_STATE="$T/state"
     export RUN_LOCK_LAUNCHER="$T/launcher-pid"
     export RUN_LOCK_READY="$T/ready"
+    # Under qci full/selftest this suite inherits the outer run's guard pid.
+    # The runner must be an outermost launcher, or it never records its pid
+    # and setup has no process group to signal.
+    unset QDISTRO_RUN_LOCK_GUARD_PID
     mkdir -p "$QDWIN_IMG_DIR"
     cat > "$T/runner" <<'SH'
 #!/usr/bin/env bash
@@ -38,7 +42,16 @@ PY
 }
 
 teardown() {
-    [ -n "${PGID:-}" ] && kill -TERM -- "-$PGID" 2>/dev/null || true
+    # SESSION is the setsid leader, so its pid is also the group id. Never
+    # wait unbounded: a runner that ignores TERM would hang the whole suite.
+    local pg=${PGID:-${SESSION:-}} i
+    [ -n "$pg" ] || return 0
+    kill -TERM -- "-$pg" 2>/dev/null || true
+    for i in $(seq 1 300); do
+        kill -0 -- "-$pg" 2>/dev/null || break
+        sleep 0.01
+    done
+    kill -KILL -- "-$pg" 2>/dev/null || true
     [ -n "${SESSION:-}" ] && wait "$SESSION" 2>/dev/null || true
 }
 
