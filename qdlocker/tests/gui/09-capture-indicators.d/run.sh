@@ -116,20 +116,37 @@ act_drain() {   # act_drain <id>
     fi
 }
 
+# histogram <image>: ImageMagick's colour histogram, one colour per line.
+# Fails (rc != 0) when the decode fails or yields no colour at all: an
+# unreadable frame must never be judged "uniformly black".
+histogram() {
+    local out
+    out=$(magick "$1" -format %c histogram:info:- 2>>"$HLOG") || return 1
+    out=$(printf '%s\n' "$out" | grep .) || return 1
+    printf '%s\n' "$out"
+}
+
 act_heads() {   # act_heads <id> — Step 10.1/10.2 on a two-head VM
-    local id=$1 p="$ART/$1-primary.ppm" s="$ART/$1-secondary.ppm" colors nonblack
+    local id=$1 p="$ART/$1-primary.ppm" s="$ART/$1-secondary.ppm" hp hs colors nonblack
     if ! $QDWIN_VIRSH screenshot "$VMNAME" "$s" --screen 1 >>"$HLOG" 2>&1 \
        || ! $QDWIN_VIRSH screenshot "$VMNAME" "$p" --screen 0 >>"$HLOG" 2>&1; then
         check "$id" heads ERROR "virsh screenshot --screen 0/1 failed"
         return
     fi
     # 10.2 (weak, observed): the primary is not one flat colour.
-    colors=$(magick "$p" -format %c histogram:info:- 2>>"$HLOG" | grep -c .)
-    if [ "${colors:-0}" -gt 1 ]; then check "$id" primary-painted PASS "$colors colours"
-    else check "$id" primary-painted FAIL "primary output is uniformly one colour — no lock UI"; fi
-    # 10.1: the secondary is uniformly black.
-    nonblack=$(magick "$s" -format %c histogram:info:- 2>>"$HLOG" \
-        | grep . | grep -v -e '#000000' -e 'srgb(0,0,0)' | head -5)
+    if ! hp=$(histogram "$p"); then
+        check "$id" primary-painted ERROR "could not decode $p (empty or failed histogram)"
+    else
+        colors=$(printf '%s\n' "$hp" | wc -l)
+        if [ "$colors" -gt 1 ]; then check "$id" primary-painted PASS "$colors colours"
+        else check "$id" primary-painted FAIL "primary output is uniformly one colour — no lock UI"; fi
+    fi
+    # 10.1: the secondary is uniformly black — judged only on a real decode.
+    if ! hs=$(histogram "$s"); then
+        check "$id" secondary-black ERROR "could not decode $s (empty or failed histogram); 10.1 not decided"
+        return
+    fi
+    nonblack=$(printf '%s\n' "$hs" | grep -v -e '#000000' -e 'srgb(0,0,0)' | head -5)
     if [ -z "$nonblack" ]; then check "$id" secondary-black PASS "uniformly black"
     else check "$id" secondary-black FAIL "not uniformly black: $(printf '%s' "$nonblack" | tr '\n' ';')"; fi
 }
@@ -158,7 +175,7 @@ serve() {   # serve <token>
 STALE=$(read_waiting)
 B64=$(base64 -w0 "$GUEST_SCRIPT") || exit 3
 timeout -k 30 "$DRIVER_TIMEOUT" "$VMEXEC" "$VMNAME" \
-    "mkdir -p $GDIR && echo $B64 | base64 -d >$GDIR/driver.sh && QDLOCKER_09_DIR=$GDIR bash $GDIR/driver.sh" \
+    "mkdir -p $GDIR && echo $B64 | base64 -d >$GDIR/driver.sh && env -u QCI_GUI_WAITERS -u QDLOCKER_09_TEST_HARNESS QDLOCKER_09_DIR=$GDIR bash $GDIR/driver.sh" \
     >"$ART/driver.log" 2>&1 </dev/null &
 DRV=$!
 # vm-exec on TERM/INT/HUP stops the pinned guest tree; forward, never SIGKILL.
@@ -189,12 +206,20 @@ trap - TERM INT HUP
     ls -1 "$ART"/*.png 2>/dev/null || echo "(none)"
 } >"$ART/summary.txt"
 
+# ERROR takes precedence: a run that also hit a harness/transport/probe error
+# did not complete, so its FAILs are reported but the class is ERROR (a
+# FAIL-then-timeout is not a clean product failure). FAIL needs a completed
+# run: guest verdict FAIL (exit 1) or PASS with a failed host check.
 result=PASS
-if grep -q '^ASSERT [^ ]* FAIL' "$ART/driver.log" || grep -q $'\tFAIL\t' "$CHECKS"; then
-    result=FAIL
-elif [ "$drc" -ne 0 ] || grep -q $'\tERROR\t' "$CHECKS" || ! grep -q '^VERDICT PASS' "$ART/driver.log"; then
+n_fail=$(( $(grep -c '^ASSERT [^ ]* FAIL' "$ART/driver.log") + $(grep -c $'\tFAIL\t' "$CHECKS") ))
+if grep -q '^ASSERT [^ ]* ERROR' "$ART/driver.log" || grep -q $'\tERROR\t' "$CHECKS" \
+   || { [ "$drc" -ne 0 ] && [ "$drc" -ne 1 ]; } \
+   || ! grep -qE '^VERDICT (PASS|FAIL)' "$ART/driver.log"; then
     result=ERROR
+elif [ "$n_fail" -gt 0 ]; then
+    result=FAIL
 fi
+[ "$result" != ERROR ] || [ "$n_fail" -eq 0 ] || echo "note: $n_fail FAIL row(s) above, in a run that did not complete" >>"$ART/summary.txt"
 echo "RESULT $result" >>"$ART/summary.txt"
 cat "$ART/summary.txt"
 case $result in

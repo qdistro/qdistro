@@ -149,26 +149,48 @@ admin_args_in_root_scratch() {
     grep -q 'install -d -m 0700 -o admin -g users "\$ASCR"' "$D09/guest.sh"
 }
 
-@test "the recorders' liveness is checked before Step 2/4 assert on the observer" {
-    grep -q 'pgrep -u admin -x pw-record >/dev/null' "$D09/guest.sh"
-    grep -q 'pgrep -u admin -x parec >/dev/null' "$D09/guest.sh"
+@test "the recorders' liveness is checked before Steps 2/4/5 assert on the observer" {
+    grep -q '^tracked_alive mic ' "$D09/guest.sh"
+    grep -q '^    tracked_alive sysaudio ' "$D09/guest.sh"
+    grep -q 'if ! tracked_alive cam; then' "$D09/guest.sh"
 }
 
-# Codex review 2026-09-28 (todo/reviews, gui09 BLOCK): qci_host_step's timeout
-# stops the driver WITHOUT its EXIT-trap teardown, so the NEXT run's Setup
-# must reclaim what a timed-out run left: a live pw-record (Step 1 would read
-# capture_active=1, a false product FAIL) and a stopped session manager
-# (Setup dies at ListSilos/CreateSilo). This runs the REAL guest.sh Setup
-# against logging stubs and stops it at its first host step.
-run_guest_setup() {   # run_guest_setup <guest.sh>
+# ---------------------------------------------------------------------------
+# The REAL guest.sh Setup, run against logging stubs and stopped at its first
+# host step. Codex round 1 (2026-09-28): a qci_host_step timeout stops the
+# driver WITHOUT its EXIT-trap teardown, so the next run's Setup must reclaim
+# what that run left. sol round 2: ...but only what THIS scenario provably
+# started or stopped: a foreign admin capture is reported, never killed (it
+# would turn a real capture into Step 1's quiet baseline), and a session
+# manager found stopped without this scenario's marker is reported, never
+# silently repaired.
+#
+# The stubs map the guest's `admin` to the test user (pgrep), so "admin
+# recorders" are real processes the test spawns: a copy of sleep named
+# pw-record (so /proc/<pid>/comm is "pw-record").
+run_guest_setup() {   # run_guest_setup <guest.sh>  (env: FAKE_SM, extra stubs)
     local g=$1 S="$T/stub"
     mkdir -p "$S" "$T/qd09"
     : > "$T/calls"
-    for c in pkill systemctl busctl faillock install chown journalctl; do
+    for c in pkill busctl faillock install chown journalctl; do
         printf '#!/bin/bash\necho "%s $*" >>"%s/calls"\n' "$c" "$T" > "$S/$c"
     done
-    # systemctl is-active answers "active"
-    printf '#!/bin/bash\necho "systemctl $*" >>"%s/calls"\n[ "${2:-}" = is-active ] || [ "${1:-}" = is-active ] && echo active\nexit 0\n' "$T" > "$S/systemctl"
+    # systemctl: log; is-active answers "active", or $FAKE_SM for the manager
+    cat > "$S/systemctl" <<EOF
+#!/bin/bash
+echo "systemctl \$*" >>"$T/calls"
+case "\$*" in
+    *is-active*qdistro-session-manager*) echo "\${FAKE_SM:-active}" ;;
+    *is-active*) echo active ;;
+esac
+exit 0
+EOF
+    # pgrep -u admin ... -> the real pgrep for the test user
+    cat > "$S/pgrep" <<EOF
+#!/bin/bash
+a=(); while [ \$# -gt 0 ]; do if [ "\$1" = -u ] && [ "\$2" = admin ]; then a+=(-u "$(id -un)"); shift 2; else a+=("\$1"); shift; fi; done
+exec /usr/bin/pgrep "\${a[@]}"
+EOF
     # socat: the ctrl socket; `status` -> unlocked, `indicators` -> healthy
     printf '#!/bin/bash\nread -r cmd; case $cmd in status) echo "locked=False prompt-len=0";; *) echo "capture_observer=ok";; esac\n' > "$S/socat"
     # runuser -u admin -- CMD... | runuser -l admin -c "CMD"
@@ -183,26 +205,197 @@ RU
 qci_claim_driver() { return 0; }
 qci_host_step() { echo "HOSTSTEP \$1" >>"$T/calls"; trap - EXIT; exit 0; }
 W
-    PATH="$S:$PATH" QCI_GUI_WAITERS="$T/waiters.sh" QDLOCKER_09_DIR="$T/qd09" \
-        timeout 60 bash "$g" >"$T/guest.out" 2>&1
+    PATH="$S:$PATH" QDLOCKER_09_TEST_HARNESS=1 QCI_GUI_WAITERS="$T/waiters.sh" \
+        QDLOCKER_09_DIR="$T/qd09" timeout 60 bash "$g" >"$T/guest.out" 2>&1
 }
 
 # first_line <pattern> -> line number of its first match in the call log
 first_line() { grep -nF -- "$1" "$T/calls" | head -1 | cut -d: -f1; }
 
-@test "Setup reclaims a timed-out run's recorders and session manager before the locker restart" {
+# spawn_recorder <comm>: a live process whose /proc/<pid>/comm is <comm>;
+# prints "<pid> <starttime>"
+spawn_recorder() {
+    mkdir -p "$T/fakebin"
+    cp /usr/bin/sleep "$T/fakebin/$1"
+    "$T/fakebin/$1" 300 >/dev/null 2>&1 &
+    local pid=$! st
+    echo "$pid" >>"$T/spawned"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$1" ] && break; sleep 0.1
+    done
+    read -r st <"/proc/$pid/stat"; set -f; set -- ${st##*") "}; set +f
+    printf '%s %s\n' "$pid" "${20}"
+}
+
+teardown() {
+    local p
+    [ -f "$T/spawned" ] || return 0
+    while read -r p; do kill -KILL "$p" 2>/dev/null || true; done <"$T/spawned"
+}
+
+@test "Setup stops THIS scenario's recorder (identity-checked) before the locker restart" {
+    local pid st restart
+    read -r pid st < <(spawn_recorder pw-record)
+    mkdir -p "$T/qd09/scratch"
+    printf '%s %s pw-record\n' "$pid" "$st" >"$T/qd09/scratch/rec-mic"
     run_guest_setup "$D09/guest.sh"
     grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
-    local restart pat n
+    ! kill -0 "$pid" 2>/dev/null || { echo "own recorder $pid still alive"; false; }
+    [ ! -e "$T/qd09/scratch/rec-mic" ]
+    ! grep -q 'foreign capture' "$T/guest.out"
+}
+
+@test "a foreign admin capture is REPORTED at Setup, never killed" {
+    local pid st
+    read -r pid st < <(spawn_recorder pw-record)
+    # a stale record for a DIFFERENT process identity (wrong start time)
+    mkdir -p "$T/qd09/scratch"
+    printf '%s %s pw-record\n' "$pid" "$((st + 1))" >"$T/qd09/scratch/rec-mic"
+    run_guest_setup "$D09/guest.sh"
+    kill -0 "$pid" 2>/dev/null || { echo "foreign recorder $pid was killed"; false; }
+    grep -q "foreign capture active before Step 1.*pw-record(pid $pid" "$T/guest.out" \
+        || { cat "$T/guest.out"; false; }
+    grep -q '^VERDICT ERROR' "$T/guest.out"
+    ! grep -q 'pkill' "$T/calls"
+}
+
+@test "a session manager stopped WITHOUT this scenario's marker is reported, not restarted" {
+    FAKE_SM=inactive run_guest_setup "$D09/guest.sh"
+    grep -q "qdistro-session-manager.service is 'inactive' at Setup and this scenario did not stop it" "$T/guest.out" \
+        || { cat "$T/guest.out"; false; }
+    ! grep -q 'systemctl start qdistro-session-manager' "$T/calls"
+    grep -q '^VERDICT ERROR' "$T/guest.out"
+}
+
+@test "a session manager THIS scenario stopped (marker) is restarted before the locker restart" {
+    mkdir -p "$T/qd09/scratch"
+    : >"$T/qd09/scratch/sm-stopped-by-09"
+    run_guest_setup "$D09/guest.sh"
+    grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
+    local start restart
+    start=$(first_line 'systemctl start qdistro-session-manager.service')
     restart=$(first_line 'systemctl --user restart qdlocker.service')
-    [ -n "$restart" ]
-    for pat in 'pkill -u admin -x pw-record' 'pkill -u admin -x parec' \
-               'pkill -u admin -x gst-launch-1.0' \
-               'systemctl start qdistro-session-manager.service'; do
-        n=$(first_line "$pat")
-        [ -n "$n" ] || { echo "Setup never ran: $pat"; cat "$T/calls"; false; }
-        [ "$n" -lt "$restart" ] || { echo "$pat (line $n) after the locker restart (line $restart)"; false; }
+    [ -n "$start" ] && [ -n "$restart" ] && [ "$start" -lt "$restart" ]
+    [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ]
+}
+
+@test "QCI_GUI_WAITERS is ignored unless the test harness flag is set" {
+    [ ! -e /tmp/qci-gui-waiters.sh ] || skip "a real /tmp/qci-gui-waiters.sh exists on this host"
+    run_guest_setup "$D09/guest.sh"            # sanity: harness path works
+    grep -q '^HOSTSTEP setup-drain$' "$T/calls"
+    : > "$T/calls"
+    PATH="$T/stub:$PATH" QCI_GUI_WAITERS="$T/waiters.sh" QDLOCKER_09_DIR="$T/qd09" \
+        run timeout 30 bash "$D09/guest.sh"
+    [ "$status" -eq 2 ]
+    ! grep -q HOSTSTEP "$T/calls"
+    grep -q 'env -u QCI_GUI_WAITERS -u QDLOCKER_09_TEST_HARNESS' "$D09/run.sh"
+}
+
+# ---------------------------------------------------------------------------
+# Probe helpers, extracted from guest.sh and run against stubs. A probe that
+# FAILED must be distinguishable from one that succeeded with an empty
+# result: only the latter may SKIP a conditional step.
+load_probes() {
+    local f
+    SCR="$T/scr"; mkdir -p "$SCR" "$T/pstub"
+    U() { "$@"; }
+    for f in compositor_journal probe_default_sink count_pw_nodes count_drm_outputs probe_node_id; do
+        eval "$(sed -n "/^$f() {/,/^}/p" "$D09/guest.sh")"
+        declare -F "$f" >/dev/null || { echo "guest.sh has no $f()"; return 1; }
     done
+    cat > "$T/pstub/runuser" <<'RU'
+#!/bin/bash
+[ "$1" = -l ] && exec bash -c "$4"
+exit 99
+RU
+    chmod +x "$T/pstub/runuser"
+    PATH="$T/pstub:$PATH"
+}
+stub() { printf '#!/bin/bash\n%s\n' "$2" > "$T/pstub/$1"; chmod +x "$T/pstub/$1"; }
+
+@test "Step 10 probe: counts DRM heads from the real log line; a failed or line-less query is a failure" {
+    load_probes
+    stub journalctl 'printf "%s\n" "Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-1 (crtc 39) video modes:" "Output '"'"'pipewire-0'"'"' using color profile: x"'
+    run count_drm_outputs; [ "$status" -eq 0 ]; [ "$output" = 2 ]
+    stub journalctl 'echo "Failed to open journal" >&2; exit 1'
+    run count_drm_outputs; [ "$status" -eq 2 ]
+    stub journalctl 'echo "output_created name=Virtual-1"'     # the old, never-logged pattern
+    run count_drm_outputs; [ "$status" -eq 2 ]
+    grep -q 'record 10 ERROR' "$D09/guest.sh"
+}
+
+@test "Step 4 probe: pactl absent (3), failing (2), and succeeding-empty (0) are distinct" {
+    load_probes
+    local saved=$PATH
+    PATH="$T/pstub:/nonexistent"
+    run probe_default_sink; [ "$status" -eq 3 ]
+    PATH=$saved
+    stub pactl 'echo "Connection failure: Connection refused" >&2; exit 1'
+    run probe_default_sink; [ "$status" -eq 2 ]
+    stub pactl 'exit 0'
+    run probe_default_sink; [ "$status" -eq 0 ]; [ -z "$output" ]
+    stub pactl 'echo alsa_output.pci'
+    run probe_default_sink; [ "$status" -eq 0 ]; [ "$output" = alsa_output.pci ]
+    grep -q 'record 4 ERROR' "$D09/guest.sh"
+}
+
+@test "Steps 5/6 probes: a failing pw-cli is a failure, not zero nodes / no camera" {
+    load_probes
+    stub pw-cli 'exit 1'
+    run count_pw_nodes; [ "$status" -eq 2 ]
+    run probe_node_id cam0; [ "$status" -eq 2 ]
+    stub pw-cli 'printf "%s\n" "id 45, type PipeWire:Interface:Node/3" "  node.name = \"cam0\"" "id 50, type x" "  node.name = \"weston.pipewire-1\""'
+    run count_pw_nodes; [ "$status" -eq 0 ]; [ "$output" = 1 ]
+    run probe_node_id cam0; [ "$status" -eq 0 ]; [ "$output" = 45 ]
+    run probe_node_id nosuch; [ "$status" -eq 2 ]
+    grep -q 'record 5 ERROR "camera probe failed' "$D09/guest.sh"
+    grep -q 'record 6 ERROR' "$D09/guest.sh"
+}
+
+# ---------------------------------------------------------------------------
+# run.sh's Step 10 decision, extracted and run against stubs: a failed or
+# empty decode of the secondary frame is ERROR, never "uniformly black".
+load_heads() {
+    HLOG="$T/hlog"; CHECKS="$T/checks.tsv"; ART="$T/art"; VMNAME=fake
+    : >"$CHECKS"
+    check() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >>"$CHECKS"; }
+    mkdir -p "$T/hstub"
+    printf '#!/bin/bash\n: > "$3"\n' > "$T/hstub/virsh"
+    chmod +x "$T/hstub/virsh"
+    QDWIN_VIRSH="$T/hstub/virsh"
+    eval "$(sed -n '/^histogram() {/,/^}/p' "$D09/run.sh")"
+    eval "$(sed -n '/^act_heads() {/,/^}/p' "$D09/run.sh")"
+    PATH="$T/hstub:$PATH"
+}
+
+@test "Step 10: a failed or empty secondary decode is ERROR, never PASS" {
+    load_heads
+    printf '#!/bin/bash\necho "magick: improper image header" >&2\nexit 1\n' > "$T/hstub/magick"; chmod +x "$T/hstub/magick"
+    act_heads s10
+    grep -q $'^s10\tsecondary-black\tERROR' "$CHECKS" || { cat "$CHECKS"; false; }
+    ! grep -q $'secondary-black\tPASS' "$CHECKS"
+    : >"$CHECKS"
+    printf '#!/bin/bash\nexit 0\n' > "$T/hstub/magick"
+    act_heads s10
+    grep -q $'^s10\tsecondary-black\tERROR' "$CHECKS" || { cat "$CHECKS"; false; }
+    : >"$CHECKS"
+    printf '#!/bin/bash\necho "  100: (0,0,0) #000000 black"\n' > "$T/hstub/magick"
+    act_heads s10
+    grep -q $'^s10\tsecondary-black\tPASS' "$CHECKS"
+    : >"$CHECKS"
+    printf '#!/bin/bash\nprintf "%%s\\n" "  90: (0,0,0) #000000 black" "  10: (9,9,9) #090909 x"\n' > "$T/hstub/magick"
+    act_heads s10
+    grep -q $'^s10\tsecondary-black\tFAIL' "$CHECKS"
+}
+
+@test "an assertion FAIL followed by a driver timeout is RESULT ERROR, not FAIL" {
+    fake_guest 'VERDICT PASS' s1-quiet
+    # the driver fails 2.1, then dies before its verdict (as on a host-step timeout)
+    sed -i 's/^for s in .*/qci_host_step s1-quiet 20; echo "ASSERT 2.1 FAIL capture_active=0"; exit 124/' "$T/guest.sh"
+    run timeout 90 bash "$D09/run.sh" fake-vm
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"RESULT ERROR"* ]]
+    [[ "$output" == *"ASSERT 2.1 FAIL"* ]]
 }
 
 @test "guest.sh and run.sh parse" {

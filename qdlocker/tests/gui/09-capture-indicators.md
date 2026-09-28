@@ -78,8 +78,11 @@ if your prompt names a different `/tmp/qci/<slug>/`, export `QDLOCKER_09_SLUG=<s
 It writes to `$QCI_GUI_ARTIFACT_DIR`: `driver.log` (the guest driver's
 output), `host.log`, `host-checks.tsv` (one row per host check),
 `summary.txt`, and the frames `s1.png` ... Exit 0 = every assertion that ran
-passed, 1 = an assertion FAILED, 3 = no verdict (ERROR). It ends with the
-summary and `RESULT <PASS|FAIL|ERROR>`.
+passed, 1 = an assertion FAILED in a run that completed, 3 = ERROR: an
+assertion was not decided (`ASSERT <id> ERROR` — a probe or the harness
+failed), the driver stopped early, or a host check errored. ERROR wins over
+FAIL: a FAIL followed by a timeout is ERROR, with the FAIL rows still listed.
+It ends with the summary and `RESULT <PASS|FAIL|ERROR>`.
 
 Then grade: OPEN EVERY FRAME it lists (each is a fresh capture) and check it
 against the step's pixel assertion below; quote the `ASSERT` lines and the
@@ -89,11 +92,16 @@ row (e.g. `s7.png` shows no alarm banner) is a FAIL whatever the count says.
 If run.sh ends in ERROR, report ERROR with the `ERROR:` line from
 `driver.log` / the ERROR rows — do not re-drive the scenario by hand.
 
-Setup (in `guest.sh`): first reclaim whatever an earlier attempt left — a
-host-step timeout stops the driver WITHOUT its teardown, so stale
-`pw-record`/`parec`/`gst-launch-1.0`, the Stopping fixture, the Step 7
-`pw-dump` break and a stopped `qdistro-session-manager` are undone here
-(`reset_state`) — then enable ctrl introspection and the GUI-lane idle
+Setup (in `guest.sh`): first reclaim what an earlier attempt of THIS
+scenario provably left — a host-step timeout stops the driver WITHOUT its
+teardown (`reset_state`): the recorders it started (each tracked by pid +
+start time + comm, and only then signalled), the Stopping fixture, the
+Step 7 `pw-dump` break, and `qdistro-session-manager` only if this
+scenario's own Step 8 marker says it stopped it. Anything else is REPORTED
+as ERROR, never repaired: an admin `pw-record`/`parec`/`gst-launch-1.0` this
+scenario did not start ("foreign capture active" — killing it would fake
+Step 1's quiet baseline), or a session manager found stopped without the
+marker. Then enable ctrl introspection and the GUI-lane idle
 override, restart qdlocker and wait for its ctrl socket, require
 `qdwin-compositor.service` and `qdlocker.service` active, drain any lock
 state (host step `setup-drain`), reclaim this scenario's own fixture silo
@@ -159,7 +167,7 @@ owner to ignore it.
 
 ### Step 4 — system-audio (sink-monitor) capture
 
-In `guest.sh`: `MON=$(pactl get-default-sink)`; empty → `ASSERT 4 SKIP`. Otherwise `parec -d $MON.monitor`, sleep 6, `ASSERT 4.1` (systemAudio, and NOT microphone); host step **`s4-alarm`** → `s4.png`, `#FD4663` PRESENT; stop it, sleep 7, `ASSERT 4.2`.
+In `guest.sh`: `MON=$(pactl get-default-sink)`; `pactl` not installed, or it succeeded with no sink → `ASSERT 4 SKIP`; `pactl` failing → `ASSERT 4 ERROR`. Otherwise `parec -d $MON.monitor`, sleep 6, `ASSERT 4.1` (systemAudio, and NOT microphone); host step **`s4-alarm`** → `s4.png`, `#FD4663` PRESENT; stop it, sleep 7, `ASSERT 4.2`.
 
 **Assert (4.1):** a monitor capture is classified `systemAudio`, not
 `microphone`. If it lands in `microphone`, the `stream.capture.sink`
@@ -169,7 +177,7 @@ being recorded" are different statements to the owner.
 
 ### Step 5 — camera (CONDITIONAL)
 
-In `guest.sh`: find a `Video/Source` node with the installed parser; none, or no `gst-launch-1.0` → `ASSERT 5 SKIP`. Otherwise drive it with `gst-launch-1.0 pipewiresrc path=<id> ! fakesink`, check it stayed up (else SKIP with its log), `ASSERT 5.1`; host step **`s5-alarm`** → `s5.png`, `#FD4663` PRESENT.
+In `guest.sh`: find a `Video/Source` node with the installed parser; none (from a successful `pw-dump` + parse), or no `gst-launch-1.0` → `ASSERT 5 SKIP`; a failed `pw-dump`/parse, a node `pw-cli` cannot resolve, or a pipeline that does not stay up → `ASSERT 5 ERROR`. Otherwise drive it with `gst-launch-1.0 pipewiresrc path=<id> ! fakesink`, check it stayed up (else SKIP with its log), `ASSERT 5.1`; host step **`s5-alarm`** → `s5.png`, `#FD4663` PRESENT.
 
 **Assert (5.1):** a camera stream classifies as `camera`, not `screencast`.
 If it lands in `screencast`, the camera hints (`media.role`, `device.api`,
@@ -185,7 +193,7 @@ view-stream subscription — this scenario does **not** reimplement a Wayland
 client. Correlation is asserted: the node set is sampled before and after, so
 a pre-existing node cannot make the step trivially green.
 
-In `guest.sh`: count `weston.pipewire` nodes, print the manual-runner notice, wait 5 s, count again. No new node → `ASSERT 6 SKIP` (the normal qci outcome: nothing in this lane starts a view stream). A new node → sleep 4, `ASSERT 6.1`; host step **`s6-alarm`** → `s6.png`, `#FD4663` PRESENT.
+In `guest.sh`: count `weston.pipewire` nodes, print the manual-runner notice, wait 5 s, count again. A failing `pw-cli` → `ASSERT 6 ERROR`; no new node → `ASSERT 6 SKIP` (the normal qci outcome: nothing in this lane starts a view stream). A new node → sleep 4, `ASSERT 6.1`; host step **`s6-alarm`** → `s6.png`, `#FD4663` PRESENT.
 
 **Assert (6.1):** a newly created `weston.pipewire-N` node is observed as
 `screencast` while the stream is live.
@@ -216,7 +224,7 @@ In `guest.sh`: remove the drop-in and the fake `pw-dump`, daemon-reload, restart
 
 ### Step 8 — silo egress, including transient `Stopping` and an unreachable manager
 
-In `guest.sh`: `SetSiloEgress qdlocker09 direct` + `StartSilo`, sleep 4, `ASSERT 8.1`; host step **`s8a-rec`** → `s8a.png` (recorded only). Plant a SIGTERM-ignoring process in the silo's cgroup, `StopSilo qdlocker09 30` in the background, observe `Stopping` through the installed parser (`ASSERT 8.2`), sleep 4, `ASSERT 8.2` (still shown). Then ROOT `systemctl stop qdistro-session-manager.service` (a system unit — never through `runuser`), sleep 5, `ASSERT 8.3`; host step **`s8b-alarm`** → `s8b.png`, `#FD4663` PRESENT (the egress-unverified row); start it again, sleep 4, `ASSERT 8.4`.
+In `guest.sh`: `SetSiloEgress qdlocker09 direct` + `StartSilo`, sleep 4, `ASSERT 8.1`; host step **`s8a-rec`** → `s8a.png` (recorded only). Plant a SIGTERM-ignoring process in the silo's cgroup, `StopSilo qdlocker09 30` in the background, observe `Stopping` through the installed parser (`ASSERT 8.2`), sleep 4, `ASSERT 8.2` (still shown). Then write this scenario's marker `scratch/sm-stopped-by-09` and ROOT `systemctl stop qdistro-session-manager.service` (a system unit — never through `runuser`), sleep 5, `ASSERT 8.3`; host step **`s8b-alarm`** → `s8b.png`, `#FD4663` PRESENT (the egress-unverified row); start it again (clearing the marker), sleep 4, `ASSERT 8.4`.
 
 **Assert (8.1):** an `Active` silo with `direct` egress is shown.
 **Assert (8.2):** the same silo is STILL shown while `Stopping` — the session
@@ -246,7 +254,7 @@ Requires a VM booted with two enabled heads. A successful
 scanout the compositor never enabled — so the compositor's own output count
 is checked first.
 
-In `guest.sh`: count distinct `output_created ... name=` in the compositor journal; fewer than 2 → `ASSERT 10 SKIP`. Otherwise host step `s10-drain`, lock, sleep 3, host step **`s10-heads`**: run.sh takes `virsh screenshot --screen 1` and `--screen 0` and checks 10.1 (secondary uniformly black) and 10.2 (primary not one flat colour — the weak check noted below).
+In `guest.sh`: count distinct DRM heads from the compositor journal's `Output <name> (crtc N) video modes:` lines (one per enabled DRM output; the earlier `output_created ... name=` pattern is never logged by qdwin, so this step could never run). A failed journal query, or no such line at all → `ASSERT 10 ERROR`; exactly one → `ASSERT 10 SKIP`. Otherwise host step `s10-drain`, lock, sleep 3, host step **`s10-heads`**: run.sh takes `virsh screenshot --screen 1` and `--screen 0` and checks 10.1 (secondary uniformly black — judged only on a successful, non-empty decode; a failed decode is ERROR) and 10.2 (primary not one flat colour — the weak check noted below).
 
 **Assert (10.1):** the secondary output is uniformly black. No desktop pixel
 may appear on any output. A failure here is a qdwin lock-curtain leak and

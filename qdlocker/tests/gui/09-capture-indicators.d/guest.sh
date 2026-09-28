@@ -30,12 +30,20 @@
 #   heads   two-head check of Step 10 (virsh --screen 0/1 histograms)
 #
 # Output: one `ASSERT <id> <PASS|FAIL|SKIP> <detail>` line per assertion, then
-# `VERDICT <PASS|FAIL|ERROR>`. Exit 0 PASS, 1 FAIL, 3 ERROR.
+# `VERDICT <PASS|FAIL|ERROR>`. Exit 0 PASS, 1 FAIL, 3 ERROR. An ASSERT ERROR
+# (a probe or the harness failed, so that assertion was not decided) makes
+# the verdict ERROR even when other assertions FAILed: the run is incomplete.
 
-# QCI_GUI_WAITERS is a test seam (qdlocker-gui09-runner.bats); the lane
-# installs the library at /tmp/qci-gui-waiters.sh.
+# The lane installs the library at /tmp/qci-gui-waiters.sh. The override is
+# honoured ONLY under the host-only bats harness's explicit flag, so a stray
+# QCI_GUI_WAITERS in a guest environment can never swap in a no-op
+# qci_host_step (run.sh also strips both from the driver's environment).
+WAITERS=/tmp/qci-gui-waiters.sh
+if [ "${QDLOCKER_09_TEST_HARNESS:-}" = 1 ]; then
+    WAITERS=${QCI_GUI_WAITERS:?test harness must set QCI_GUI_WAITERS}
+fi
 # shellcheck source=/dev/null
-source "${QCI_GUI_WAITERS:-/tmp/qci-gui-waiters.sh}" || exit 2
+source "$WAITERS" || exit 2
 : "${QDLOCKER_09_DIR:?run.sh sets the /tmp/qci/<slug> step directory}"
 qci_claim_driver "$QDLOCKER_09_DIR/driver.lock" || exit 2
 set -u
@@ -55,6 +63,11 @@ DROPIN_DIR=/home/admin/.config/systemd/user/qdlocker.service.d
 BREAK_DROPIN=$DROPIN_DIR/91-break-pwdump.conf
 FIXTURE_PID=/tmp/qdlocker-09-stop-fixture.pid
 FAILS=0
+ERRORS=0
+# This scenario's own session-manager stop (Step 8). Setup restarts the
+# manager ONLY when this marker says a previous run stopped it; a manager
+# found stopped without it is reported, never repaired.
+SM_MARK=$SCR/sm-stopped-by-09
 
 # ------------------------------------------------------------------ helpers
 # admin's user session (qdlocker.service, PipeWire) needs XDG_RUNTIME_DIR.
@@ -78,6 +91,7 @@ field() { printf '%s\n' "$2" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
 record() {
     printf 'ASSERT %s %s %s\n' "$1" "$2" "$3"
     [ "$2" != FAIL ] || FAILS=$((FAILS + 1))
+    [ "$2" != ERROR ] || ERRORS=$((ERRORS + 1))
 }
 # assert_ind <id> <key> <want> — exact match on one key=value token.
 assert_ind() {
@@ -128,6 +142,71 @@ restart_locker() {
 
 host() { qci_host_step "$1"; }
 
+# ---- this scenario's own recorders -------------------------------------
+# Each recorder is started through start_recorder, which records
+# "<pid> <starttime> <comm>" in the root-owned $SCR/rec-<tag>. Only a
+# process matching all three is ever signalled: another admin application's
+# pw-record/parec/gst-launch-1.0 is never killed (that would silently turn a
+# real capture into Step 1's "quiet" baseline); Setup REPORTS it instead.
+# proc_start <pid>: field 22 of /proc/<pid>/stat (unchanged across exec).
+proc_start() {
+    local st
+    { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+    set -f
+    # shellcheck disable=SC2086
+    set -- ${st##*") "}
+    set +f
+    [ -n "${20:-}" ] || return 1
+    printf '%s' "${20}"
+}
+# start_recorder <tag> <comm> <log> <cmd...>: run cmd as admin, detached,
+# stdio on <log> (opened by this root shell), and record its identity. The
+# admin sh writes its own pid and then execs the recorder, so that pid IS
+# the recorder's.
+start_recorder() {
+    local tag=$1 comm=$2 log=$3 pidf pid st
+    shift 3
+    pidf=$ASCR/$tag.pid
+    rm -f "$pidf" "$SCR/rec-$tag"
+    # shellcheck disable=SC2016
+    U setsid sh -c 'echo $$ >"$0"; exec "$@"' "$pidf" "$@" >"$log" 2>&1 </dev/null &
+    for _ in $(seq 1 50); do [ -s "$pidf" ] && break; sleep 0.1; done
+    pid=$(cat "$pidf" 2>/dev/null) || return 1
+    case $pid in ''|*[!0-9]*) return 1 ;; esac
+    st=$(proc_start "$pid") || return 1
+    printf '%s %s %s\n' "$pid" "$st" "$comm" >"$SCR/rec-$tag"
+}
+# tracked_alive <tag>: the recorded process is still that same process.
+tracked_alive() {
+    local pid st comm cur
+    read -r pid st comm <"$SCR/rec-$1" 2>/dev/null || return 1
+    cur=$(proc_start "$pid") || return 1
+    [ "$cur" = "$st" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$comm" ]
+}
+# stop_recorder <tag>: TERM (then KILL) the recorded process if, and only
+# if, it is still the one this scenario started; then forget the record.
+stop_recorder() {
+    local pid st comm
+    if tracked_alive "$1"; then
+        read -r pid st comm <"$SCR/rec-$1"
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in $(seq 1 30); do tracked_alive "$1" || break; sleep 0.1; done
+        ! tracked_alive "$1" || kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$SCR/rec-$1"
+}
+# foreign_captures: admin recorders this scenario did not start, one entry
+# each. Setup refuses to run over them.
+foreign_captures() {
+    local name pid
+    for name in pw-record parec gst-launch-1.0; do
+        for pid in $(pgrep -u admin -x "$name" 2>/dev/null); do
+            printf '%s(pid %s: %s) ' "$name" "$pid" \
+                "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-120)"
+        done
+    done
+}
+
 # reset_state: undo everything a run of this driver can leave behind that
 # would change what the NEXT run observes. Idempotent; safe on a clean VM.
 # Called by guest_cleanup AND at the top of Setup: a qci_host_step timeout
@@ -138,9 +217,11 @@ host() { qci_host_step "$1"; }
 # s8b-alarm leaves qdistro-session-manager stopped (the next Setup dies at
 # ListSilos/CreateSilo). Echoes 1 if the pw-dump break drop-in was present.
 reset_state() {
-    pkill -u admin -x pw-record 2>/dev/null || true
-    pkill -u admin -x parec 2>/dev/null || true
-    pkill -u admin -x gst-launch-1.0 2>/dev/null || true
+    local rec
+    for rec in "$SCR"/rec-*; do
+        [ -e "$rec" ] || continue
+        stop_recorder "${rec##*/rec-}"
+    done
     if [ -s "$FIXTURE_PID" ]; then
         local fp
         fp=$(cat "$FIXTURE_PID")
@@ -154,7 +235,10 @@ reset_state() {
     rm -f "$BREAK_DROPIN"
     rm -rf "$BROKEN"
     # A SYSTEM unit: root's systemctl, never through runuser (polkit refuses).
-    systemctl start qdistro-session-manager.service 2>/dev/null || true
+    # Restarted only if THIS scenario stopped it (Step 8's marker).
+    if [ -e "$SM_MARK" ]; then
+        systemctl start qdistro-session-manager.service 2>/dev/null && rm -f "$SM_MARK"
+    fi
     echo "$was_broken"
 }
 
@@ -177,9 +261,76 @@ error() {
     printf 'ERROR: %s\n' "$*"
     trap - EXIT
     guest_cleanup
+    # The verdict is printed before the last host step, so a timeout on the
+    # drain cannot lose it.
+    echo "VERDICT ERROR ($ERRORS undecided assertion(s); $FAILS failed)"
     host cleanup-drain
-    echo "VERDICT ERROR"
     exit 3
+}
+
+# ---- probes ---------------------------------------------------------------
+# A probe prints its value and returns 0 when it RAN and was parsed (the value
+# may legitimately be empty/zero), 2 when the probe itself failed (non-zero
+# exit, unparsable output), 3 when its tool is not installed. Only a
+# successful empty result may SKIP a conditional step; a failure is ERROR.
+compositor_journal() {
+    runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager" 2>"$SCR/journal.err"
+}
+probe_default_sink() {
+    local out
+    command -v pactl >/dev/null || return 3
+    out=$(U pactl get-default-sink 2>"$SCR/pactl.err") || return 2
+    printf '%s' "${out//$'\r'/}"
+}
+# probe_camera: the node.name of a Video/Source node, via the installed parser.
+probe_camera() {
+    local out
+    out=$(cd / && U python3 -I - 2>"$SCR/cam-probe.err" <<'PYEOF'
+import subprocess, sys
+from qdlocker import indicators as I
+r = subprocess.run(I.CAPTURE_CMD, capture_output=True, text=True)
+if r.returncode != 0:
+    sys.stderr.write("capture command failed rc=%d: %s\n" % (r.returncode, r.stderr[-300:]))
+    sys.exit(2)
+ok, nodes = I.parse_pw_dump(r.stdout)
+if not ok:
+    sys.stderr.write("parse_pw_dump rejected the pw-dump output\n")
+    sys.exit(2)
+for n in nodes:
+    p = n["props"]
+    if str(p.get("media.class", "")) == "Video/Source":
+        print(p.get("node.name", "")); break
+PYEOF
+) || return 2
+    printf '%s' "${out//$'\r'/}"
+}
+# probe_node_id <node.name>: pw-cli's id for a node pw-dump just reported;
+# not finding it is a probe failure, not an absence.
+probe_node_id() {
+    local out id
+    out=$(U pw-cli ls Node 2>"$SCR/pw-cli.err") || return 2
+    id=$(printf '%s\n' "$out" | awk -v n="node.name = \"$1\"" '/id /{id=$2} index($0,n){print id; exit}' | tr -d ',')
+    case $id in ''|*[!0-9]*) return 2 ;; esac
+    printf '%s' "$id"
+}
+count_pw_nodes() {
+    local out
+    out=$(U pw-cli ls Node 2>"$SCR/pw-cli.err") || return 2
+    printf '%s\n' "$out" | grep -c 'weston\.pipewire' || true
+}
+# count_drm_outputs: distinct DRM heads the compositor enabled this boot.
+# qdwin's DRM backend logs "Output <name> (crtc <n>) video modes:" per
+# enabled output (libweston backend-drm/drm.c). The earlier probe grepped
+# for an `output_created ... name=` line qdwin never logs, so it read 0 on
+# every VM and Step 10 could never run. A successful query with NO such line
+# is a probe failure: a running compositor has at least one output.
+count_drm_outputs() {
+    local out n
+    out=$(compositor_journal) || return 2
+    n=$(printf '%s\n' "$out" | grep -oE 'Output [A-Za-z0-9-]+ \(crtc [0-9]+\) video modes:' \
+        | awk '{print $2}' | sort -u | wc -l)
+    [ "$n" -ge 1 ] || return 2
+    printf '%s' "$n"
 }
 
 # ------------------------------------------------------------------ Setup
@@ -194,10 +345,16 @@ faillock --user admin --reset 2>/dev/null || true
 install -d -m 0755 -o admin -g users "$DROPIN_DIR"
 printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' > "$DROPIN_DIR/90-ci-gui.conf"
 chown admin:users "$DROPIN_DIR/90-ci-gui.conf"
-# Reclaim whatever an earlier attempt left (see reset_state) BEFORE the
-# locker restart below and before any silo call: stale recorders, the
-# Stopping fixture, the Step 7 pw-dump break, a stopped session manager.
+# Reclaim whatever an earlier attempt of THIS scenario left (see
+# reset_state) BEFORE the locker restart below and before any silo call:
+# its own recorders, the Stopping fixture, the Step 7 pw-dump break, and the
+# session manager when its own Step 8 marker says it stopped it. Anything
+# else is reported, not repaired.
 reset_state >/dev/null
+FOREIGN=$(foreign_captures)
+[ -z "$FOREIGN" ] || error "foreign capture active before Step 1 (not started by this scenario; left running): $FOREIGN"
+SM_STATE=$(systemctl is-active qdistro-session-manager.service 2>/dev/null)
+[ "$SM_STATE" = active ] || error "qdistro-session-manager.service is '${SM_STATE:-unknown}' at Setup and this scenario did not stop it (no $SM_MARK); not repairing it"
 U systemctl --user daemon-reload
 restart_locker
 for unit in qdwin-compositor.service qdlocker.service; do
@@ -234,7 +391,8 @@ sm SetSiloEgress ss "$SILO" none || error "SetSiloEgress $SILO none failed"
 
 # ------------------------------------------------------------------ Preflight A
 echo "== Preflight A"
-DRM_FAILS=$(runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager" 2>/dev/null \
+CJ=$(compositor_journal) || error "compositor journal query failed: $(tail -2 "$SCR/journal.err" | tr '\n' ' ')"
+DRM_FAILS=$(printf '%s\n' "$CJ" \
     | grep -cE "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
 if [ "${DRM_FAILS:-0}" -ge 5 ]; then
     error "VM graphics backend is failing DRM atomic commits ($DRM_FAILS); pixel checks would be false FAILs"
@@ -277,11 +435,12 @@ assert_ind 1.3 capture_unverified microphone,camera,screencast,systemAudio,virtu
 
 # ------------------------------------------------------------------ Step 2
 echo "== Step 2 — microphone capture starts while locked"
-U setsid pw-record --target=@DEFAULT_SOURCE@ "$ASCR/mic.wav" >"$SCR/mic.log" 2>&1 </dev/null &
+start_recorder mic pw-record "$SCR/mic.log" pw-record --target=@DEFAULT_SOURCE@ "$ASCR/mic.wav" \
+    || error "could not start pw-record: $(tail -3 "$SCR/mic.log" | tr '\n' ' ')"
 sleep 6            # two polls; deliberately NO lock cycle
 # The capture must actually be running, or 2.1 would grade the harness, not
 # the observer (a recorder that exited is ERROR, never a product FAIL).
-pgrep -u admin -x pw-record >/dev/null \
+tracked_alive mic \
     || error "pw-record is not running 6s after start: $(tail -3 "$SCR/mic.log" | tr '\n' ' ')"
 assert_ind 2.1 capture_active 1
 assert_ind_contains 2.1 capture_kinds microphone
@@ -303,7 +462,7 @@ fi
 
 # ------------------------------------------------------------------ Step 3
 echo "== Step 3 — the capture stops while locked"
-pkill -u admin -x pw-record || true
+stop_recorder mic
 sleep 7
 assert_ind 3.1 capture_active 0
 assert_ind 3.1 capture_observer ok
@@ -311,13 +470,18 @@ host s3-quiet
 
 # ------------------------------------------------------------------ Step 4
 echo "== Step 4 — system-audio (sink-monitor) capture (CONDITIONAL)"
-MON=$(U pactl get-default-sink 2>/dev/null | tr -d '\r')
-if [ -z "$MON" ]; then
-    record 4 SKIP "no default sink (pactl get-default-sink empty); system-audio capture not exercised"
+MON=$(probe_default_sink); rc=$?
+if [ "$rc" = 3 ]; then
+    record 4 SKIP "pactl is not installed in this image (command -v pactl); system-audio capture not exercised"
+elif [ "$rc" != 0 ]; then
+    record 4 ERROR "pactl get-default-sink failed (rc=$rc): $(tail -2 "$SCR/pactl.err" | tr '\n' ' ')"
+elif [ -z "$MON" ]; then
+    record 4 SKIP "no default sink (pactl get-default-sink succeeded, empty); system-audio capture not exercised"
 else
-    U setsid parec -d "${MON}.monitor" -r "$ASCR/sysaudio.raw" >"$SCR/sysaudio.log" 2>&1 </dev/null &
+    start_recorder sysaudio parec "$SCR/sysaudio.log" parec -d "${MON}.monitor" -r "$ASCR/sysaudio.raw" \
+        || error "could not start parec: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
     sleep 6
-    pgrep -u admin -x parec >/dev/null \
+    tracked_alive sysaudio \
         || error "parec is not running 6s after start: $(tail -3 "$SCR/sysaudio.log" | tr '\n' ' ')"
     assert_ind 4.1 capture_active 1
     assert_ind_contains 4.1 capture_kinds systemAudio
@@ -327,40 +491,36 @@ else
         record 4.1 PASS "monitor capture not reported as microphone"
     fi
     host s4-alarm
-    pkill -u admin -x parec || true
+    stop_recorder sysaudio
     sleep 7
     assert_ind 4.2 capture_active 0
 fi
 
 # ------------------------------------------------------------------ Step 5
 echo "== Step 5 — camera (CONDITIONAL)"
-CAMID=$(cd / && U python3 -I - 2>"$SCR/cam-probe.err" <<'PYEOF' | tr -d '\r'
-import subprocess
-from qdlocker import indicators as I
-ok, nodes = I.parse_pw_dump(subprocess.run(I.CAPTURE_CMD, capture_output=True, text=True).stdout)
-for n in nodes:
-    p = n["props"]
-    if str(p.get("media.class", "")) == "Video/Source":
-        print(p.get("node.name", "")); break
-PYEOF
-)
-if [ -z "$CAMID" ]; then
+CAMID=$(probe_camera); rc=$?
+if [ "$rc" != 0 ]; then
+    record 5 ERROR "camera probe failed (pw-dump / parse_pw_dump): $(tail -2 "$SCR/cam-probe.err" | tr '\n' ' ')"
+elif [ -z "$CAMID" ]; then
     record 5 SKIP "no PipeWire Video/Source node in this VM (no camera, no v4l2loopback)"
 elif ! command -v gst-launch-1.0 >/dev/null; then
     record 5 SKIP "gst-launch-1.0 not installed; cannot drive the camera node $CAMID"
+elif ! CAMNODE=$(probe_node_id "$CAMID"); then
+    record 5 ERROR "pw-dump reported camera node $CAMID but pw-cli could not resolve its id: $(tail -2 "$SCR/pw-cli.err" | tr '\n' ' ')"
 else
-    CAMNODE=$(U pw-cli ls Node | awk -v n="node.name = \"$CAMID\"" '/id /{id=$2} index($0,n){print id; exit}' | tr -d ',')
-    U setsid gst-launch-1.0 -q pipewiresrc path="$CAMNODE" ! fakesink >"$SCR/cam.log" 2>&1 </dev/null &
+    start_recorder cam gst-launch-1.0 "$SCR/cam.log" gst-launch-1.0 -q pipewiresrc path="$CAMNODE" ! fakesink \
+        || record 5 ERROR "could not start gst-launch-1.0: $(tail -3 "$SCR/cam.log" | tr '\n' ' ')"
     sleep 6
-    if ! pgrep -u admin -x gst-launch-1.0 >/dev/null; then
-        # The driver must actually be running, or a SKIP masquerades as a pass.
-        record 5 SKIP "gst-launch-1.0 exited immediately (node $CAMID id=${CAMNODE:-?}; node id parse?): $(tail -3 "$SCR/cam.log" | tr '\n' ' ')"
+    if ! tracked_alive cam; then
+        # The dependency is present and the node resolved, so a pipeline that
+        # did not stay up is not an absence.
+        record 5 ERROR "gst-launch-1.0 exited immediately (node $CAMID id=$CAMNODE): $(tail -3 "$SCR/cam.log" | tr '\n' ' ')"
     else
         assert_ind 5.1 capture_active 1
         assert_ind_contains 5.1 capture_kinds camera
         host s5-alarm
     fi
-    pkill -u admin -x gst-launch-1.0 || true
+    stop_recorder cam
     sleep 7
 fi
 
@@ -369,12 +529,13 @@ echo "== Step 6 — screencast via a qdwin view stream (CONDITIONAL, MANUAL)"
 # Nothing in this driver creates a view stream (the scenario does not
 # reimplement a Wayland client). The node set is sampled around a 5 s window;
 # only a NEW weston.pipewire node lets the step assert, otherwise it SKIPs.
-count_pw_nodes() { U pw-cli ls Node 2>/dev/null | grep -c 'weston\.pipewire' || true; }
-NODES_BEFORE=$(count_pw_nodes)
+NODES_BEFORE=$(count_pw_nodes); rc1=$?
 echo "RUNNER (manual): a qdwin view stream started now would be observed (nodes before: $NODES_BEFORE)"
 sleep 5
-NODES_AFTER=$(count_pw_nodes)
-if [ "${NODES_AFTER:-0}" -le "${NODES_BEFORE:-0}" ]; then
+NODES_AFTER=$(count_pw_nodes); rc2=$?
+if [ "$rc1" != 0 ] || [ "$rc2" != 0 ]; then
+    record 6 ERROR "pw-cli ls Node failed: $(tail -2 "$SCR/pw-cli.err" | tr '\n' ' ')"
+elif [ "$NODES_AFTER" -le "$NODES_BEFORE" ]; then
     record 6 SKIP "no new weston.pipewire node appeared ($NODES_BEFORE -> $NODES_AFTER); no view stream was started"
 else
     sleep 4
@@ -468,12 +629,17 @@ sleep 4
 assert_ind 8.2 egress_active 1              # still live: Stopping is not dark
 assert_ind_contains 8.2 egress_detail "$SILO"
 # Unreachable session manager must read UNVERIFIED, never "no egress".
+: >"$SM_MARK"   # provenance: THIS scenario stopped it (see reset_state)
 systemctl stop qdistro-session-manager.service || record 8.3 FAIL "could not stop qdistro-session-manager.service"
 sleep 5
 assert_ind 8.3 egress_observer failed
 assert_ind 8.3 egress_active 0
 host s8b-alarm     # 8.3: the egress-unverified row is drawn in mError
-systemctl start qdistro-session-manager.service || record 8.4 FAIL "could not start qdistro-session-manager.service"
+if systemctl start qdistro-session-manager.service; then
+    rm -f "$SM_MARK"
+else
+    record 8.4 FAIL "could not start qdistro-session-manager.service"
+fi
 sleep 4
 assert_ind 8.4 egress_observer ok
 
@@ -493,12 +659,12 @@ host s9-rec
 
 # ------------------------------------------------------------------ Step 10
 echo "== Step 10 — second output (CONDITIONAL)"
-OUTPUTS=$(runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager" 2>/dev/null \
-    | grep -oE "output_created[^\n]*name=[A-Za-z0-9-]+" | grep -oE "name=[A-Za-z0-9-]+" \
-    | sort -u | wc -l)
-echo "qdwin enabled outputs: $OUTPUTS"
-if [ "${OUTPUTS:-0}" -lt 2 ]; then
-    record 10 SKIP "compositor has ${OUTPUTS:-0} enabled output(s); needs a two-head VM"
+OUTPUTS=$(count_drm_outputs); rc=$?
+echo "qdwin enabled DRM outputs: ${OUTPUTS:-?}"
+if [ "$rc" != 0 ]; then
+    record 10 ERROR "could not count the compositor's DRM outputs (journal query failed, or no 'Output <name> (crtc N) video modes:' line): $(tail -2 "$SCR/journal.err" | tr '\n' ' ')"
+elif [ "$OUTPUTS" -lt 2 ]; then
+    record 10 SKIP "compositor enabled $OUTPUTS DRM output(s); needs a two-head VM"
 else
     host s10-drain
     lock_now 10.0
@@ -511,6 +677,10 @@ echo "== Cleanup"
 trap - EXIT
 guest_cleanup
 host cleanup-drain
+if [ "$ERRORS" -gt 0 ]; then
+    echo "VERDICT ERROR ($ERRORS undecided assertion(s); $FAILS failed)"
+    exit 3
+fi
 if [ "$FAILS" -gt 0 ]; then
     echo "VERDICT FAIL ($FAILS failed guest assertion(s))"
     exit 1
