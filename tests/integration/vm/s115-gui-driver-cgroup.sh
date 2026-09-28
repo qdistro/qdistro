@@ -75,6 +75,43 @@ for i in $(seq 1 100); do [ -s "$d/app" ] && break; sleep 0.05; done
 await_cleanup "$d"
 echo 'PASS intentional completion preserves detached app without holding lock'
 
+# If one guardian exits after a deliberate completion, its stopped partner
+# must not mistake that exit for a crash and kill the preserved application.
+d=$root/done-staggered
+mkdir -p "$d"
+bash -c '
+  source "$1"; qci_claim_driver "$2/driver.lock"
+  echo "$QCI_DRIVER_CLAIM_SCOPE" > "$2/scope"
+  echo "$QCI_DRIVER_CLAIM_DONE_MARKER" > "$2/marker"
+  setsid -f bash -c '\''echo READY > "$1/app-ready"; while [ ! -e "$1/app-release" ]; do sleep 0.02; done; echo APP-SURVIVED > "$1/app"'\'' _ "$2" </dev/null >/dev/null 2>&1
+  for i in $(seq 1 100); do [ -s "$2/app-ready" ] && break; sleep 0.02; done
+  [ -s "$2/app-ready" ] || exit 1
+  read -r holder guard <<<"$QCI_DRIVER_CLAIM_HOLDER"
+  echo "$holder" > "$2/holder"
+  echo "$guard" > "$2/guard"
+  kill -STOP "$guard"
+  qci_claim_done
+' _ "$lib" "$d"
+# Let the first guardian finish its normal exit before the guard can poll.
+holder=$(cat "$d/holder")
+gone=0
+for i in $(seq 1 100); do
+  st=""
+  if ! { read -r st <"/proc/$holder/stat"; } 2>/dev/null; then gone=1; break; fi
+  state=${st##*") "}; state=${state%% *}
+  case $state in Z|X|x) gone=1; break ;; esac
+  sleep 0.02
+done
+[ "$gone" -eq 1 ] || { echo 'first guardian did not exit'; exit 1; }
+kill -CONT "$(cat "$d/guard")"
+bash -c 'source "$1"; qci_claim_driver "$2/driver.lock"; echo CLAIMED > "$2/claimed"' _ "$lib" "$d"
+[ -s "$d/claimed" ] && [ -s "$d/app-ready" ]
+: > "$d/app-release"
+for i in $(seq 1 100); do [ -s "$d/app" ] && break; sleep 0.02; done
+[ -s "$d/app" ]
+await_cleanup "$d"
+echo 'PASS staggered guardian exit preserves completed app'
+
 # A bg_start worker moves out of the driver scope before it runs.
 d=$root/job
 mkdir -p "$d"
@@ -121,6 +158,43 @@ wait "$owner" 2>/dev/null || true
 [ -s "$d/claimed" ] && [ ! -e "$d/job-ran" ]
 await_cleanup "$d"
 echo 'PASS owner death during job handoff kills stopped worker'
+
+# The command may fork immediately after CONT. Kill its driver before
+# bg_start returns and make sure the registered worker still holds the claim.
+d=$root/continued
+mkdir -p "$d"
+bash -c '
+  source "$1"; QCI_BG_DIR=$2; qci_claim_driver "$2/driver.lock"
+  echo "$QCI_DRIVER_CLAIM_SCOPE" > "$2/scope"
+  echo "$QCI_DRIVER_CLAIM_DONE_MARKER" > "$2/marker"
+  kill() {
+    builtin kill "$@"
+    if [ "$1" = -CONT ]; then
+      for i in $(seq 1 100); do [ -s "$continued_dir/started" ] && break; sleep 0.01; done
+      [ -s "$continued_dir/started" ] || exit 1
+      builtin kill -KILL "$BASHPID"
+    fi
+  }
+  continued_dir=$2
+  bg_start continued - "echo STARTED > $2/started; while [ ! -e $2/release ]; do sleep 0.02; done; echo FINISHED > $2/finished"
+' _ "$lib" "$d" >/dev/null 2>&1 &
+owner=$!
+for i in $(seq 1 100); do [ -s "$d/started" ] && break; sleep 0.02; done
+[ -s "$d/started" ] || { echo 'continued command never started'; exit 1; }
+wait "$owner" 2>/dev/null || true
+# Give both guardians multiple polls to process the dead owner. The command
+# stays blocked on release, so refusal must be due to its registered claim.
+sleep 0.6
+if QCI_DRIVER_CLAIM_GRACE=1 bash -c 'source "$1"; qci_claim_driver "$2/driver.lock"; echo EARLY > "$2/early"' _ "$lib" "$d" >/dev/null 2>&1; then
+  echo 'contender acquired while continued job was active'; exit 1
+fi
+: > "$d/release"
+for i in $(seq 1 100); do [ -s "$d/finished" ] && break; sleep 0.02; done
+[ -s "$d/finished" ] && [ ! -e "$d/early" ]
+bash -c 'source "$1"; qci_claim_driver "$2/driver.lock"; echo LATE > "$2/late"' _ "$lib" "$d"
+[ -s "$d/late" ]
+await_cleanup "$d"
+echo 'PASS continued job remains registered after driver death'
 
 # A plain successful driver with no app leaves no cgroup or marker.
 d=$root/ordinary
