@@ -44,35 +44,6 @@ SQL_EOF
 $VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
 $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 
-# The RequestDecided monitor (S4) records its OWN pid, then execs; its
-# stop only signals that pid if it really is dbus-monitor. Never capture
-# it with `& echo \$!`: re-quoted by a driver, `$!` expands in the driver
-# shell and names the harness's live claim watcher, which a cleanup
-# `kill` would then take down. Both scripts take GUEST_TMP as $1.
-MON_START_B64=$(base64 -w0 <<'EOF'
-set -eu
-T=$1
-rm -f "$T/31-decided.log" "$T/31-monitor.pid"
-setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" >"$3" 2>&1 </dev/null' \
-  _ "$T/31-monitor.pid" \
-  'type=signal,interface=org.qdistro.AdminBroker1,member=RequestDecided' \
-  "$T/31-decided.log"
-for _ in $(seq 1 50); do [ -s "$T/31-monitor.pid" ] && break; sleep 0.1; done
-echo "monitor pid=$(cat "$T/31-monitor.pid")"
-EOF
-)
-MON_STOP_B64=$(base64 -w0 <<'EOF'
-T=$1
-p=$(cat "$T/31-monitor.pid" 2>/dev/null)
-case $p in ''|*[!0-9]*) echo "monitor: no pid recorded" >&2; exit 0 ;; esac
-if [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
-  kill "$p"
-elif [ -d /proc/$p ]; then
-  echo "monitor: pid $p is $(cat /proc/$p/comm), not dbus-monitor; NOT killing" >&2
-fi
-exit 0
-EOF
-)
 ```
 
 ## Steps
@@ -142,8 +113,51 @@ $VMGUI "$VM" screenshot "$ARTIFACT_DIR/s3-app-still-pending.png"
 ### S4 — admin approves; cache row appears; `RequestDecided` fires
 
 ```bash
+# Self-contained: this block may run in a fresh shell (a recovery rerun),
+# so it defines its own GUEST_TMP default and scripts.
+#
+# The monitor records its OWN pid, then execs. Never capture it with
+# `& echo \$!`: re-quoted by a driver, `$!` expands in the driver shell and
+# names the harness's live claim watcher, which the stop would then kill.
+# Readiness is a positive control, not a sleep: the monitor also matches a
+# private QciProbe.Ready signal, and it counts as subscribed only once a
+# probe carrying this run's token appears in ITS log.
+GUEST_TMP=${GUEST_TMP:-/tmp/qci-qdistro_tests_integration_permissions-gui_31-fire-and-forget-request.md}
+MON_START_B64=$(base64 -w0 <<'EOF'
+T=$1
+rm -f "$T/31-decided.log" "$T/31-monitor.pid"
+setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" "$3" >"$4" 2>&1 </dev/null' \
+  _ "$T/31-monitor.pid" \
+  'type=signal,interface=org.qdistro.AdminBroker1,member=RequestDecided' \
+  'type=signal,interface=org.qdistro.QciProbe,member=Ready' \
+  "$T/31-decided.log"
+tok=ready-$$-$RANDOM
+for _ in $(seq 1 100); do
+  dbus-send --system --type=signal /org/qdistro/QciProbe org.qdistro.QciProbe.Ready "string:$tok" 2>/dev/null
+  grep -q "$tok" "$T/31-decided.log" 2>/dev/null && break
+  sleep 0.1
+done
+p=$(cat "$T/31-monitor.pid" 2>/dev/null)
+if grep -q "$tok" "$T/31-decided.log" 2>/dev/null && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  echo "MONITOR_READY pid=$p"
+else
+  echo "MONITOR_NOT_READY pid=[$p]"
+fi
+EOF
+)
+MON_STOP_B64=$(base64 -w0 <<'EOF'
+T=$1
+p=$(cat "$T/31-monitor.pid" 2>/dev/null)
+case $p in ''|*[!0-9]*) echo "MONITOR_STOP: no pid recorded" >&2; exit 0 ;; esac
+if [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  kill "$p"
+elif [ -d /proc/$p ]; then
+  echo "MONITOR_STOP: pid $p is $(cat /proc/$p/comm), not dbus-monitor; NOT killing" >&2
+fi
+exit 0
+EOF
+)
 $VMEXEC "$VM" "echo $MON_START_B64 | base64 -d | bash -s $GUEST_TMP"
-sleep 1
 
 # Approve with 1h scope via admin app. Window is already focused.
 B64=$(base64 -w0 <<'EOF'
@@ -177,6 +191,10 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 ```
 
 **Assert**:
+- The monitor start printed `MONITOR_READY pid=<N>` BEFORE Ctrl+Y.
+  `MONITOR_NOT_READY` is a harness ERROR (an empty signal log would then
+  prove nothing), not a product FAIL. (The log also holds the
+  `QciProbe` readiness signal; ignore it.)
 - `$ARTIFACT_DIR/31-decided.log` contains one `member=RequestDecided`
   signal block; its args are `int32 ${RID}` then `string "allow"`.
 - Cache count is `1` — the broker wrote the row even though no
@@ -187,6 +205,20 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Self-contained (Teardown may run in a fresh shell after a failure).
+GUEST_TMP=${GUEST_TMP:-/tmp/qci-qdistro_tests_integration_permissions-gui_31-fire-and-forget-request.md}
+MON_STOP_B64=$(base64 -w0 <<'EOF'
+T=$1
+p=$(cat "$T/31-monitor.pid" 2>/dev/null)
+case $p in ''|*[!0-9]*) echo "MONITOR_STOP: no pid recorded" >&2; exit 0 ;; esac
+if [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  kill "$p"
+elif [ -d /proc/$p ]; then
+  echo "MONITOR_STOP: pid $p is $(cat /proc/$p/comm), not dbus-monitor; NOT killing" >&2
+fi
+exit 0
+EOF
+)
 $VMEXEC "$VM" "echo $MON_STOP_B64 | base64 -d | bash -s $GUEST_TMP"
 $VMEXEC "$VM" "rm -rf $GUEST_TMP"
 APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
