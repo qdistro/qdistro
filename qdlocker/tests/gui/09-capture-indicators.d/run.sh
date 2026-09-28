@@ -88,8 +88,20 @@ act_capture() {   # act_capture <id> <quiet|alarm|rec>
         check "$id" capture ERROR "qdwin_screenshot produced no frame (see host.log)"
         return
     fi
-    [ ! -f "$out.meta" ] || check "$id" capture WARN "retained (stale) frame: $(cat "$out.meta")"
-    read -r sw sh < <(qdlocker_screenshot_dimensions "$out")
+    # A retained frame (.meta live=0) is the compositor's LAST frame from
+    # before this step's action: it cannot show what the action did. Every
+    # quiet/alarm check is a post-action assertion, so it is ERROR there and
+    # its pixels are never graded; a `rec` frame is only recorded.
+    if [ -f "$out.meta" ]; then
+        case $mode in
+            quiet|alarm)
+                check "$id" "banner-$mode" ERROR "retained frame, not a fresh repaint ($(cat "$out.meta")); not graded"
+                return ;;
+            *) check "$id" capture WARN "retained frame, not a fresh repaint: $(cat "$out.meta")" ;;
+        esac
+    fi
+    # the helper prints "W H" without a newline, so read returns 1 at EOF
+    read -r sw sh < <(qdlocker_screenshot_dimensions "$out") || true
     if [ -z "${sw:-}" ] || [ -z "${sh:-}" ]; then
         check "$id" capture ERROR "cannot read the frame's screen dimensions"
         return
@@ -216,7 +228,8 @@ if grep -q '^ASSERT [^ ]* ERROR' "$ART/driver.log" || grep -q $'\tERROR\t' "$CHE
    || { [ "$drc" -ne 0 ] && [ "$drc" -ne 1 ]; } \
    || ! grep -qE '^VERDICT (PASS|FAIL)' "$ART/driver.log"; then
     result=ERROR
-elif [ "$n_fail" -gt 0 ]; then
+elif [ "$n_fail" -gt 0 ] || [ "$drc" -eq 1 ] || grep -q '^VERDICT FAIL' "$ART/driver.log"; then
+    # A declared FAIL is never turned green by a lost or malformed row.
     result=FAIL
 fi
 [ "$result" != ERROR ] || [ "$n_fail" -eq 0 ] || echo "note: $n_fail FAIL row(s) above, in a run that did not complete" >>"$ART/summary.txt"

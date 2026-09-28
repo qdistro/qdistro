@@ -236,8 +236,12 @@ reset_state() {
     rm -rf "$BROKEN"
     # A SYSTEM unit: root's systemctl, never through runuser (polkit refuses).
     # Restarted only if THIS scenario stopped it (Step 8's marker).
+    # The marker is removed BEFORE the recovery start, so a driver that dies
+    # mid-recovery can never leave a marker that authorises a later repair.
     if [ -e "$SM_MARK" ]; then
-        systemctl start qdistro-session-manager.service 2>/dev/null && rm -f "$SM_MARK"
+        rm -f "$SM_MARK"
+        systemctl is-active -q qdistro-session-manager.service \
+            || systemctl start qdistro-session-manager.service 2>/dev/null || true
     fi
     echo "$was_broken"
 }
@@ -273,12 +277,20 @@ error() {
 # may legitimately be empty/zero), 2 when the probe itself failed (non-zero
 # exit, unparsable output), 3 when its tool is not installed. Only a
 # successful empty result may SKIP a conditional step; a failure is ERROR.
+# have <tool>: the tool is installed. Under the host-only bats harness (and
+# only there) QDLOCKER_09_HIDE_TOOLS lists tools to treat as missing.
+have() {
+    if [ "${QDLOCKER_09_TEST_HARNESS:-}" = 1 ]; then
+        case " ${QDLOCKER_09_HIDE_TOOLS:-} " in *" $1 "*) return 1 ;; esac
+    fi
+    command -v "$1" >/dev/null
+}
 compositor_journal() {
     runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager" 2>"$SCR/journal.err"
 }
 probe_default_sink() {
     local out
-    command -v pactl >/dev/null || return 3
+    have pactl || return 3
     out=$(U pactl get-default-sink 2>"$SCR/pactl.err") || return 2
     printf '%s' "${out//$'\r'/}"
 }
@@ -318,17 +330,34 @@ count_pw_nodes() {
     out=$(U pw-cli ls Node 2>"$SCR/pw-cli.err") || return 2
     printf '%s\n' "$out" | grep -c 'weston\.pipewire' || true
 }
-# count_drm_outputs: distinct DRM heads the compositor enabled this boot.
-# qdwin's DRM backend logs "Output <name> (crtc <n>) video modes:" per
-# enabled output (libweston backend-drm/drm.c). The earlier probe grepped
-# for an `output_created ... name=` line qdwin never logs, so it read 0 on
-# every VM and Step 10 could never run. A successful query with NO such line
-# is a probe failure: a running compositor has at least one output.
+# count_drm_outputs: DRM heads the CURRENT compositor invocation has enabled
+# and not since disabled. libweston's DRM backend logs
+# "Output <name> (crtc <n>) video modes:" when it enables an output
+# (backend-drm/drm.c drm_output_enable) and "Disabling output <name>" when it
+# disables one; the journal keeps both, and the lines of every earlier
+# compositor invocation of this boot. So the query starts at this
+# invocation's ExecMainStartTimestamp and replays enable/disable in order.
+# (The first probe grepped for `output_created ... name=`, which qdwin never
+# logs: it read 0 on every VM and Step 10 could never run.) A failed query,
+# or no enabled output at all, is a probe failure: a running compositor has
+# at least one.
 count_drm_outputs() {
-    local out n
-    out=$(compositor_journal) || return 2
-    n=$(printf '%s\n' "$out" | grep -oE 'Output [A-Za-z0-9-]+ \(crtc [0-9]+\) video modes:' \
-        | awk '{print $2}' | sort -u | wc -l)
+    local since out n
+    since=$(runuser -l admin -c "systemctl --user show --timestamp=unix -p ExecMainStartTimestamp --value qdwin-compositor.service" 2>"$SCR/journal.err") || return 2
+    since=${since//$'\r'/}
+    case $since in
+        @[0-9]*) ;;
+        *) echo "no ExecMainStartTimestamp for qdwin-compositor.service: '$since'" >>"$SCR/journal.err"; return 2 ;;
+    esac
+    out=$(runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since $since --no-pager -o cat" 2>>"$SCR/journal.err") || return 2
+    n=$(printf '%s\n' "$out" | awk '
+        match($0, /Output [A-Za-z0-9-]+ \(crtc [0-9]+\) video modes:/) {
+            split(substr($0, RSTART, RLENGTH), f, " "); on[f[2]] = 1
+        }
+        match($0, /Disabling output [A-Za-z0-9-]+/) {
+            split(substr($0, RSTART, RLENGTH), f, " "); delete on[f[3]]
+        }
+        END { c = 0; for (k in on) c++; print c }')
     [ "$n" -ge 1 ] || return 2
     printf '%s' "$n"
 }
@@ -472,7 +501,9 @@ host s3-quiet
 echo "== Step 4 — system-audio (sink-monitor) capture (CONDITIONAL)"
 MON=$(probe_default_sink); rc=$?
 if [ "$rc" = 3 ]; then
-    record 4 SKIP "pactl is not installed in this image (command -v pactl); system-audio capture not exercised"
+    # A missing TOOL is not evidence that there is no sink: without pactl
+    # this driver cannot tell, so the step is undecided, not skipped.
+    record 4 ERROR "pactl is not installed (command -v pactl), so the default-sink probe cannot run; system-audio capture undecided"
 elif [ "$rc" != 0 ]; then
     record 4 ERROR "pactl get-default-sink failed (rc=$rc): $(tail -2 "$SCR/pactl.err" | tr '\n' ' ')"
 elif [ -z "$MON" ]; then
@@ -503,8 +534,9 @@ if [ "$rc" != 0 ]; then
     record 5 ERROR "camera probe failed (pw-dump / parse_pw_dump): $(tail -2 "$SCR/cam-probe.err" | tr '\n' ' ')"
 elif [ -z "$CAMID" ]; then
     record 5 SKIP "no PipeWire Video/Source node in this VM (no camera, no v4l2loopback)"
-elif ! command -v gst-launch-1.0 >/dev/null; then
-    record 5 SKIP "gst-launch-1.0 not installed; cannot drive the camera node $CAMID"
+elif ! have gst-launch-1.0; then
+    # A camera IS present; only the driving tool is missing: undecided.
+    record 5 ERROR "camera node $CAMID is present but gst-launch-1.0 is not installed; camera classification undecided"
 elif ! CAMNODE=$(probe_node_id "$CAMID"); then
     record 5 ERROR "pw-dump reported camera node $CAMID but pw-cli could not resolve its id: $(tail -2 "$SCR/pw-cli.err" | tr '\n' ' ')"
 else
@@ -629,15 +661,15 @@ sleep 4
 assert_ind 8.2 egress_active 1              # still live: Stopping is not dark
 assert_ind_contains 8.2 egress_detail "$SILO"
 # Unreachable session manager must read UNVERIFIED, never "no egress".
-: >"$SM_MARK"   # provenance: THIS scenario stopped it (see reset_state)
 systemctl stop qdistro-session-manager.service || record 8.3 FAIL "could not stop qdistro-session-manager.service"
+# Provenance for reset_state: written only once the stop is VERIFIED.
+systemctl is-active -q qdistro-session-manager.service || : >"$SM_MARK"
 sleep 5
 assert_ind 8.3 egress_observer failed
 assert_ind 8.3 egress_active 0
 host s8b-alarm     # 8.3: the egress-unverified row is drawn in mError
-if systemctl start qdistro-session-manager.service; then
-    rm -f "$SM_MARK"
-else
+rm -f "$SM_MARK"   # cleared BEFORE the recovery start (see reset_state)
+if ! systemctl start qdistro-session-manager.service; then
     record 8.4 FAIL "could not start qdistro-session-manager.service"
 fi
 sleep 4

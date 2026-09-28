@@ -223,9 +223,19 @@ qdlocker_count_color_in_crop() {
         echo "qdlocker_count_color_in_crop: ImageMagick 'magick' not found" >&2
         return 2
     fi
-    magick "$image" -alpha off -crop "$crop" \
-        -format %c histogram:info:- \
-        | awk -v hex="$hex" '
+    # The histogram is captured FIRST and checked: in `magick | awk` the
+    # pipeline's status is awk's, so a failed decode used to print 0 with
+    # status 0 -- a "colour absent" PASS on pixels nobody counted.
+    local hist
+    if ! hist=$(magick "$image" -alpha off -crop "$crop" -format %c histogram:info:-); then
+        echo "qdlocker_count_color_in_crop: magick could not decode $image (crop $crop)" >&2
+        return 2
+    fi
+    if ! printf '%s\n' "$hist" | grep -qE '^[[:space:]]*[0-9]+:'; then
+        echo "qdlocker_count_color_in_crop: no histogram for $image (crop $crop)" >&2
+        return 2
+    fi
+    printf '%s\n' "$hist" | awk -v hex="$hex" '
             toupper($0) ~ ("#" hex) {
                 gsub(":", "", $1);
                 sum += $1;

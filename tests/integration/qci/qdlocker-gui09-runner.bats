@@ -175,15 +175,24 @@ run_guest_setup() {   # run_guest_setup <guest.sh>  (env: FAKE_SM, extra stubs)
     for c in pkill busctl faillock install chown journalctl; do
         printf '#!/bin/bash\necho "%s $*" >>"%s/calls"\n' "$c" "$T" > "$S/$c"
     done
-    # systemctl: log; is-active answers "active", or $FAKE_SM for the manager
+    # systemctl: log. The session manager's state starts as $FAKE_SM
+    # (default active) and follows start/stop; FAKE_SM_START_FAIL=1 makes its
+    # start fail. is-active prints the state and exits like systemctl (0 =
+    # active); other units are active.
+    printf '%s\n' "${FAKE_SM:-active}" > "$T/sm-state"
     cat > "$S/systemctl" <<EOF
 #!/bin/bash
 echo "systemctl \$*" >>"$T/calls"
 case "\$*" in
-    *is-active*qdistro-session-manager*) echo "\${FAKE_SM:-active}" ;;
-    *is-active*) echo active ;;
+    *is-active*qdistro-session-manager*)
+        st=\$(cat "$T/sm-state"); case "\$*" in *-q*) ;; *) echo "\$st" ;; esac
+        [ "\$st" = active ] ;;
+    *start*qdistro-session-manager*)
+        [ "\${FAKE_SM_START_FAIL:-}" = 1 ] && exit 1
+        echo active > "$T/sm-state" ;;
+    *stop*qdistro-session-manager*) echo inactive > "$T/sm-state" ;;
+    *is-active*) case "\$*" in *-q*) ;; *) echo active ;; esac ;;
 esac
-exit 0
 EOF
     # pgrep -u admin ... -> the real pgrep for the test user
     cat > "$S/pgrep" <<EOF
@@ -207,6 +216,13 @@ qci_host_step() { echo "HOSTSTEP \$1" >>"$T/calls"; trap - EXIT; exit 0; }
 W
     PATH="$S:$PATH" QDLOCKER_09_TEST_HARNESS=1 QCI_GUI_WAITERS="$T/waiters.sh" \
         QDLOCKER_09_DIR="$T/qd09" timeout 60 bash "$g" >"$T/guest.out" 2>&1
+}
+
+# refute_grep <grep args...>: fail the test when the pattern IS found. A bare
+# `! grep` does not fail a Bats test (SC2314): its status is ignored by -e.
+refute_grep() {
+    if grep "$@"; then echo "unexpected match: grep $*"; return 1; fi
+    return 0
 }
 
 # first_line <pattern> -> line number of its first match in the call log
@@ -240,9 +256,9 @@ teardown() {
     printf '%s %s pw-record\n' "$pid" "$st" >"$T/qd09/scratch/rec-mic"
     run_guest_setup "$D09/guest.sh"
     grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
-    ! kill -0 "$pid" 2>/dev/null || { echo "own recorder $pid still alive"; false; }
+    if kill -0 "$pid" 2>/dev/null; then echo "own recorder $pid still alive"; false; fi
     [ ! -e "$T/qd09/scratch/rec-mic" ]
-    ! grep -q 'foreign capture' "$T/guest.out"
+    refute_grep -q 'foreign capture' "$T/guest.out"
 }
 
 @test "a foreign admin capture is REPORTED at Setup, never killed" {
@@ -256,27 +272,52 @@ teardown() {
     grep -q "foreign capture active before Step 1.*pw-record(pid $pid" "$T/guest.out" \
         || { cat "$T/guest.out"; false; }
     grep -q '^VERDICT ERROR' "$T/guest.out"
-    ! grep -q 'pkill' "$T/calls"
+    refute_grep -q 'pkill' "$T/calls"
 }
 
 @test "a session manager stopped WITHOUT this scenario's marker is reported, not restarted" {
     FAKE_SM=inactive run_guest_setup "$D09/guest.sh"
     grep -q "qdistro-session-manager.service is 'inactive' at Setup and this scenario did not stop it" "$T/guest.out" \
         || { cat "$T/guest.out"; false; }
-    ! grep -q 'systemctl start qdistro-session-manager' "$T/calls"
+    refute_grep -q 'systemctl start qdistro-session-manager' "$T/calls"
     grep -q '^VERDICT ERROR' "$T/guest.out"
 }
 
 @test "a session manager THIS scenario stopped (marker) is restarted before the locker restart" {
     mkdir -p "$T/qd09/scratch"
     : >"$T/qd09/scratch/sm-stopped-by-09"
-    run_guest_setup "$D09/guest.sh"
+    FAKE_SM=inactive run_guest_setup "$D09/guest.sh"
     grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
     local start restart
     start=$(first_line 'systemctl start qdistro-session-manager.service')
     restart=$(first_line 'systemctl --user restart qdlocker.service')
-    [ -n "$start" ] && [ -n "$restart" ] && [ "$start" -lt "$restart" ]
+    [ -n "$start" ]
+    [ -n "$restart" ]
+    [ "$start" -lt "$restart" ]
     [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ]
+}
+
+@test "the marker is cleared BEFORE recovery: a failed restart leaves no marker to authorise a later repair" {
+    mkdir -p "$T/qd09/scratch"
+    : >"$T/qd09/scratch/sm-stopped-by-09"
+    FAKE_SM=inactive FAKE_SM_START_FAIL=1 run_guest_setup "$D09/guest.sh"
+    [ ! -e "$T/qd09/scratch/sm-stopped-by-09" ] || { echo "stale marker survived a failed recovery"; false; }
+    grep -q "qdistro-session-manager.service is 'inactive' at Setup" "$T/guest.out" || { cat "$T/guest.out"; false; }
+    grep -q '^VERDICT ERROR' "$T/guest.out"
+}
+
+@test "Step 8 writes the marker only after a VERIFIED stop, and clears it before the restart" {
+    local stop mark gate clear start
+    stop=$(grep -n '^systemctl stop qdistro-session-manager.service' "$D09/guest.sh" | cut -d: -f1)
+    gate=$(grep -n '^systemctl is-active -q qdistro-session-manager.service || : >"\$SM_MARK"' "$D09/guest.sh" | cut -d: -f1)
+    clear=$(grep -n '^rm -f "\$SM_MARK"' "$D09/guest.sh" | cut -d: -f1)
+    start=$(grep -n '^if ! systemctl start qdistro-session-manager.service' "$D09/guest.sh" | cut -d: -f1)
+    [ -n "$stop" ]; [ -n "$gate" ]; [ -n "$clear" ]; [ -n "$start" ]
+    [ "$stop" -lt "$gate" ]
+    [ "$gate" -lt "$clear" ]
+    [ "$clear" -lt "$start" ]
+    # and nothing else creates the marker
+    [ "$(grep -c ': >"\$SM_MARK"' "$D09/guest.sh")" -eq 1 ]
 }
 
 @test "QCI_GUI_WAITERS is ignored unless the test harness flag is set" {
@@ -287,7 +328,7 @@ teardown() {
     PATH="$T/stub:$PATH" QCI_GUI_WAITERS="$T/waiters.sh" QDLOCKER_09_DIR="$T/qd09" \
         run timeout 30 bash "$D09/guest.sh"
     [ "$status" -eq 2 ]
-    ! grep -q HOSTSTEP "$T/calls"
+    refute_grep -q HOSTSTEP "$T/calls"
     grep -q 'env -u QCI_GUI_WAITERS -u QDLOCKER_09_TEST_HARNESS' "$D09/run.sh"
 }
 
@@ -299,7 +340,7 @@ load_probes() {
     local f
     SCR="$T/scr"; mkdir -p "$SCR" "$T/pstub"
     U() { "$@"; }
-    for f in compositor_journal probe_default_sink count_pw_nodes count_drm_outputs probe_node_id; do
+    for f in have compositor_journal probe_default_sink count_pw_nodes count_drm_outputs probe_node_id; do
         eval "$(sed -n "/^$f() {/,/^}/p" "$D09/guest.sh")"
         declare -F "$f" >/dev/null || { echo "guest.sh has no $f()"; return 1; }
     done
@@ -313,15 +354,37 @@ RU
 }
 stub() { printf '#!/bin/bash\n%s\n' "$2" > "$T/pstub/$1"; chmod +x "$T/pstub/$1"; }
 
+# journal stub for Step 10: `--since @100` (this invocation) gets $1's lines;
+# any other query (whole boot) gets an EARLIER invocation's extra heads.
+drm_journal() {
+    printf '#!/bin/bash\ncase "$*" in *"--since @100"*) printf "%%s\\n" %s ;; *) printf "%%s\\n" "Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-3 (crtc 41) video modes:" ;; esac\n' "$1" > "$T/pstub/journalctl"
+    chmod +x "$T/pstub/journalctl"
+}
+
 @test "Step 10 probe: counts DRM heads from the real log line; a failed or line-less query is a failure" {
     load_probes
-    stub journalctl 'printf "%s\n" "Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-1 (crtc 39) video modes:" "Output '"'"'pipewire-0'"'"' using color profile: x"'
+    stub systemctl 'echo @100'
+    drm_journal '"Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Output Virtual-1 (crtc 39) video modes:" "Output '"'"'pipewire-0'"'"' using color profile: x"'
     run count_drm_outputs; [ "$status" -eq 0 ]; [ "$output" = 2 ]
     stub journalctl 'echo "Failed to open journal" >&2; exit 1'
     run count_drm_outputs; [ "$status" -eq 2 ]
-    stub journalctl 'echo "output_created name=Virtual-1"'     # the old, never-logged pattern
+    drm_journal '"output_created name=Virtual-1"'     # the old, never-logged pattern
+    run count_drm_outputs; [ "$status" -eq 2 ]
+    stub systemctl 'echo ""'                          # no start timestamp
+    drm_journal '"Output Virtual-1 (crtc 39) video modes:"'
     run count_drm_outputs; [ "$status" -eq 2 ]
     grep -q 'record 10 ERROR' "$D09/guest.sh"
+}
+
+@test "Step 10 probe: counts only THIS compositor invocation's heads, minus disabled ones" {
+    load_probes
+    stub systemctl 'echo @100'
+    # this invocation enabled Virtual-1 and Virtual-2, then disabled Virtual-2;
+    # the whole-boot journal also holds an earlier invocation's Virtual-3
+    drm_journal '"Output Virtual-1 (crtc 39) video modes:" "Output Virtual-2 (crtc 40) video modes:" "Disabling output Virtual-2"'
+    run count_drm_outputs
+    [ "$status" -eq 0 ]
+    [ "$output" = 1 ] || { echo "counted $output enabled heads, want 1"; false; }
 }
 
 @test "Step 4 probe: pactl absent (3), failing (2), and succeeding-empty (0) are distinct" {
@@ -373,7 +436,7 @@ load_heads() {
     printf '#!/bin/bash\necho "magick: improper image header" >&2\nexit 1\n' > "$T/hstub/magick"; chmod +x "$T/hstub/magick"
     act_heads s10
     grep -q $'^s10\tsecondary-black\tERROR' "$CHECKS" || { cat "$CHECKS"; false; }
-    ! grep -q $'secondary-black\tPASS' "$CHECKS"
+    refute_grep -q $'secondary-black\tPASS' "$CHECKS"
     : >"$CHECKS"
     printf '#!/bin/bash\nexit 0\n' > "$T/hstub/magick"
     act_heads s10
@@ -396,6 +459,102 @@ load_heads() {
     [ "$status" -eq 3 ]
     [[ "$output" == *"RESULT ERROR"* ]]
     [[ "$output" == *"ASSERT 2.1 FAIL"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# sol round 3. run.sh's capture grading and the shared colour-count helper.
+
+# load_capture: run.sh's act_capture, extracted, with the REAL colour-count
+# helper from qdlocker-helpers.sh and a stubbed qdwin_screenshot.
+load_capture() {
+    HLOG="$T/hlog"; CHECKS="$T/checks.tsv"; ART="$T/art"; ERR_COLOR='#FD4663'
+    : >"$CHECKS"
+    check() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >>"$CHECKS"; }
+    eval "$(sed -n '/^qdlocker_count_color_in_crop() {/,/^}/p' "$REPO_ROOT/qdlocker/tests/gui/qdlocker-helpers.sh")"
+    eval "$(sed -n '/^act_capture() {/,/^}/p' "$D09/run.sh")"
+    qdlocker_screenshot_dimensions() { printf '1280 800'; }
+    mkdir -p "$T/cstub"
+    PATH="$T/cstub:$PATH"
+}
+# a frame whose banner band is solid #FD4663 (a real alarm), via real magick
+alarm_png() { magick -size 1280x800 'xc:#FD4663' "PNG24:$1"; }
+
+@test "a retained frame (.meta live=0) is ERROR for a post-action check, and its pixels are not graded" {
+    command -v magick >/dev/null || skip "ImageMagick not on this host"
+    load_capture
+    # s7-alarm: the capture returns the compositor's RETAINED frame -- which
+    # happens to show an alarm from an earlier step
+    qdwin_screenshot() { alarm_png "$1"; echo "live=0 age_ms=9000 msc=7" > "$1.meta"; }
+    act_capture s7 alarm
+    grep -q $'^s7\tbanner-alarm\tERROR\tretained frame' "$CHECKS" || { cat "$CHECKS"; false; }
+    refute_grep -q $'\tPASS\t' "$CHECKS"
+    # a fresh frame with the same pixels is graded normally
+    : >"$CHECKS"
+    qdwin_screenshot() { rm -f "$1.meta"; alarm_png "$1"; }
+    act_capture s7 alarm
+    grep -q $'^s7\tbanner-alarm\tPASS' "$CHECKS" || { cat "$CHECKS"; false; }
+}
+
+@test "qdlocker_count_color_in_crop fails on a failed or empty decode instead of printing 0" {
+    load_capture
+    : > "$T/frame.png"
+    printf '#!/bin/bash\necho "magick: improper image header" >&2\nexit 1\n' > "$T/cstub/magick"
+    chmod +x "$T/cstub/magick"
+    run qdlocker_count_color_in_crop "$T/frame.png" '#FD4663' 10x10+0+0
+    [ "$status" -ne 0 ] || { echo "failed decode returned status 0, output '$output'"; false; }
+    printf '#!/bin/bash\nexit 0\n' > "$T/cstub/magick"          # "succeeds", no histogram
+    run qdlocker_count_color_in_crop "$T/frame.png" '#FD4663' 10x10+0+0
+    [ "$status" -ne 0 ] || { echo "empty histogram returned status 0, output '$output'"; false; }
+    printf '#!/bin/bash\nprintf "%%s\\n" "  60: (253,70,99) #FD4663 srgb(253,70,99)" "  40: (0,0,0) #000000 black"\n' > "$T/cstub/magick"
+    run qdlocker_count_color_in_crop "$T/frame.png" '#FD4663' 10x10+0+0
+    [ "$status" -eq 0 ]; [ "$output" = 60 ]
+    # ...so banner-quiet cannot PASS on pixels nobody counted
+    printf '#!/bin/bash\nexit 1\n' > "$T/cstub/magick"
+    qdwin_screenshot() { : > "$1"; echo x > "$1"; rm -f "$1.meta"; }
+    : >"$CHECKS"
+    act_capture s3 quiet
+    grep -q $'^s3\tbanner\tERROR' "$CHECKS" || { cat "$CHECKS"; false; }
+}
+
+@test "a declared guest FAIL with no ASSERT FAIL row is still RESULT FAIL" {
+    fake_guest 'VERDICT FAIL (rows lost)' s1-quiet
+    run timeout 90 bash "$D09/run.sh" fake-vm
+    [ "$status" -eq 1 ] || { echo "$output"; false; }
+    [[ "$output" == *"RESULT FAIL"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# The REAL guest.sh from Setup through Step 5, with pactl and gst-launch-1.0
+# hidden (QDLOCKER_09_HIDE_TOOLS, honoured only under the harness flag) and a
+# camera node present: a missing TOOL is not evidence of no sink / no camera,
+# so both conditional steps must be ERROR, never SKIP.
+@test "a missing pactl, or a missing gst-launch-1.0 with a camera present, is ERROR, not SKIP" {
+    local S="$T/stub"
+    run_guest_setup "$D09/guest.sh"          # builds the stubs; stops at setup-drain
+    # recorders: scripts, so /proc/<pid>/comm is their name; TERM ends them
+    for r in pw-record parec; do
+        printf '#!/bin/bash\ntrap "kill \\$! 2>/dev/null; exit 0" TERM\nsleep 300 & wait\n' > "$S/$r"
+    done
+    # python3: the isolated-mode import answers an installed path; the camera
+    # probe (reading its program from stdin) reports a camera node
+    printf '#!/bin/bash\ncase "$*" in *" -c "*) echo /usr/lib64/python3.13/site-packages/qdlocker/indicators.py ;; *) cat >/dev/null; echo cam0 ;; esac\n' > "$S/python3"
+    printf '#!/bin/bash\nexit 0\n' > "$S/pw-cli"
+    # install -d creates directories only inside the test tree
+    printf '#!/bin/bash\necho "install $*" >>"%s/calls"\nd=${@: -1}\ncase "$*" in *-d*) case $d in %s/*) mkdir -p "$d" ;; esac ;; esac\nexit 0\n' "$T" "$T" > "$S/install"
+    chmod +x "$S"/*
+    cat > "$T/waiters.sh" <<W
+qci_claim_driver() { return 0; }
+qci_host_step() { echo "HOSTSTEP \$1" >>"$T/calls"; [ "\$1" = s7-alarm ] || [ "\$1" = cleanup-drain ] || return 0; trap - EXIT; exit 0; }
+W
+    : > "$T/calls"
+    PATH="$S:$PATH" QDLOCKER_09_TEST_HARNESS=1 QCI_GUI_WAITERS="$T/waiters.sh" \
+        QDLOCKER_09_HIDE_TOOLS="pactl gst-launch-1.0" QDLOCKER_09_DIR="$T/qd09" \
+        timeout 120 bash "$D09/guest.sh" >"$T/guest.out" 2>&1 || true
+    pkill -f -- "$S/pw-record" 2>/dev/null || true
+    grep -q '^ASSERT 4 ERROR pactl is not installed' "$T/guest.out" || { cat "$T/guest.out"; false; }
+    grep -q '^ASSERT 5 ERROR camera node cam0 is present but gst-launch-1.0 is not installed' "$T/guest.out" \
+        || { cat "$T/guest.out"; false; }
+    refute_grep -qE '^ASSERT [45] SKIP' "$T/guest.out"
 }
 
 @test "guest.sh and run.sh parse" {
