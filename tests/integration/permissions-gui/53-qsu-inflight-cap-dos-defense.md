@@ -34,6 +34,9 @@ $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f sleep 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
+# Stale work-owned /tmp/53-* from an interrupted run would be read as this
+# run's evidence (and fs.protected_regular blocks reopening them).
+$VMEXEC "$VM" 'rm -f /tmp/53-q*.out /tmp/53-q*.err /tmp/53-q*.pid'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
 sleep 1
@@ -64,8 +67,9 @@ set +e
 # background job (the claim watcher) for all five, and S4 then reads that
 # live watcher as a hung client.
 for i in 1 2 3 4 5; do
-  sudo -u work setsid -f /bin/sh -c 'echo $$ >"$1"; exec /usr/local/bin/qsu /bin/sleep 60 "$2"' \
-    _ /tmp/53-q$i.pid "$i" >/tmp/53-q$i.out 2>/tmp/53-q$i.err </dev/null
+  sudo -u work setsid -f /bin/sh -c \
+    'echo $$ >"$1"; exec /usr/local/bin/qsu /bin/sleep 60 "$2" >"$3" 2>"$4" </dev/null' \
+    _ /tmp/53-q$i.pid "$i" /tmp/53-q$i.out /tmp/53-q$i.err </dev/null
 done
 sleep 5
 ls -la /tmp/53-q*.pid
