@@ -43,6 +43,36 @@ SQL_EOF
 )
 $VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
 $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+
+# The RequestDecided monitor (S4) records its OWN pid, then execs; its
+# stop only signals that pid if it really is dbus-monitor. Never capture
+# it with `& echo \$!`: re-quoted by a driver, `$!` expands in the driver
+# shell and names the harness's live claim watcher, which a cleanup
+# `kill` would then take down. Both scripts take GUEST_TMP as $1.
+MON_START_B64=$(base64 -w0 <<'EOF'
+set -eu
+T=$1
+rm -f "$T/31-decided.log" "$T/31-monitor.pid"
+setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" >"$3" 2>&1 </dev/null' \
+  _ "$T/31-monitor.pid" \
+  'type=signal,interface=org.qdistro.AdminBroker1,member=RequestDecided' \
+  "$T/31-decided.log"
+for _ in $(seq 1 50); do [ -s "$T/31-monitor.pid" ] && break; sleep 0.1; done
+echo "monitor pid=$(cat "$T/31-monitor.pid")"
+EOF
+)
+MON_STOP_B64=$(base64 -w0 <<'EOF'
+T=$1
+p=$(cat "$T/31-monitor.pid" 2>/dev/null)
+case $p in ''|*[!0-9]*) echo "monitor: no pid recorded" >&2; exit 0 ;; esac
+if [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  kill "$p"
+elif [ -d /proc/$p ]; then
+  echo "monitor: pid $p is $(cat /proc/$p/comm), not dbus-monitor; NOT killing" >&2
+fi
+exit 0
+EOF
+)
 ```
 
 ## Steps
@@ -112,11 +142,7 @@ $VMGUI "$VM" screenshot "$ARTIFACT_DIR/s3-app-still-pending.png"
 ### S4 — admin approves; cache row appears; `RequestDecided` fires
 
 ```bash
-$VMEXEC "$VM" "rm -f $GUEST_TMP/31-decided.log; \
-  setsid dbus-monitor --system \
-    'type=signal,interface=org.qdistro.AdminBroker1,member=RequestDecided' \
-    >$GUEST_TMP/31-decided.log 2>&1 </dev/null &
-  echo \$! >$GUEST_TMP/31-monitor.pid"
+$VMEXEC "$VM" "echo $MON_START_B64 | base64 -d | bash -s $GUEST_TMP"
 sleep 1
 
 # Approve with 1h scope via admin app. Window is already focused.
@@ -140,7 +166,7 @@ sleep 0.5
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 1
 
-$VMEXEC "$VM" "kill \$(cat $GUEST_TMP/31-monitor.pid) 2>/dev/null; sleep 0.3; cat $GUEST_TMP/31-decided.log" \
+$VMEXEC "$VM" "echo $MON_STOP_B64 | base64 -d | bash -s $GUEST_TMP; sleep 0.3; cat $GUEST_TMP/31-decided.log" \
   | tee "$ARTIFACT_DIR/31-decided.log"
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
@@ -161,7 +187,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
-$VMEXEC "$VM" "kill \$(cat $GUEST_TMP/31-monitor.pid) 2>/dev/null; true"
+$VMEXEC "$VM" "echo $MON_STOP_B64 | base64 -d | bash -s $GUEST_TMP"
 $VMEXEC "$VM" "rm -rf $GUEST_TMP"
 APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
