@@ -6,7 +6,6 @@ import sys
 import uuid
 from pathlib import Path
 
-
 SOURCE = Path("/usr/share/qdistro/agents/skills/silo/SKILL.md")
 
 
