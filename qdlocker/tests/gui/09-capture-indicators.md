@@ -89,7 +89,11 @@ row (e.g. `s7.png` shows no alarm banner) is a FAIL whatever the count says.
 If run.sh ends in ERROR, report ERROR with the `ERROR:` line from
 `driver.log` / the ERROR rows — do not re-drive the scenario by hand.
 
-Setup (in `guest.sh`): enable ctrl introspection and the GUI-lane idle
+Setup (in `guest.sh`): first reclaim whatever an earlier attempt left — a
+host-step timeout stops the driver WITHOUT its teardown, so stale
+`pw-record`/`parec`/`gst-launch-1.0`, the Stopping fixture, the Step 7
+`pw-dump` break and a stopped `qdistro-session-manager` are undone here
+(`reset_state`) — then enable ctrl introspection and the GUI-lane idle
 override, restart qdlocker and wait for its ctrl socket, require
 `qdwin-compositor.service` and `qdlocker.service` active, drain any lock
 state (host step `setup-drain`), reclaim this scenario's own fixture silo

@@ -74,8 +74,7 @@ read_waiting() {   # prints a well-formed token, or nothing
 }
 
 send_go() {
-    local attempt
-    for attempt in 1 2 3; do   # vm-exec exit 75 = refused to launch; retryable
+    for _ in 1 2 3; do   # vm-exec exit 75 = refused to launch; retryable
         vx "mkdir $GDIR/$1.go" && return 0
         sleep 2
     done

@@ -154,6 +154,57 @@ admin_args_in_root_scratch() {
     grep -q 'pgrep -u admin -x parec >/dev/null' "$D09/guest.sh"
 }
 
+# Codex review 2026-09-28 (todo/reviews, gui09 BLOCK): qci_host_step's timeout
+# stops the driver WITHOUT its EXIT-trap teardown, so the NEXT run's Setup
+# must reclaim what a timed-out run left: a live pw-record (Step 1 would read
+# capture_active=1, a false product FAIL) and a stopped session manager
+# (Setup dies at ListSilos/CreateSilo). This runs the REAL guest.sh Setup
+# against logging stubs and stops it at its first host step.
+run_guest_setup() {   # run_guest_setup <guest.sh>
+    local g=$1 S="$T/stub"
+    mkdir -p "$S" "$T/qd09"
+    : > "$T/calls"
+    for c in pkill systemctl busctl faillock install chown journalctl; do
+        printf '#!/bin/bash\necho "%s $*" >>"%s/calls"\n' "$c" "$T" > "$S/$c"
+    done
+    # systemctl is-active answers "active"
+    printf '#!/bin/bash\necho "systemctl $*" >>"%s/calls"\n[ "${2:-}" = is-active ] || [ "${1:-}" = is-active ] && echo active\nexit 0\n' "$T" > "$S/systemctl"
+    # socat: the ctrl socket; `status` -> unlocked, `indicators` -> healthy
+    printf '#!/bin/bash\nread -r cmd; case $cmd in status) echo "locked=False prompt-len=0";; *) echo "capture_observer=ok";; esac\n' > "$S/socat"
+    # runuser -u admin -- CMD... | runuser -l admin -c "CMD"
+    cat > "$S/runuser" <<'RU'
+#!/bin/bash
+if [ "$1" = -l ]; then exec bash -c "$4"; fi
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift; exec "$@"
+RU
+    chmod +x "$S"/*
+    cat > "$T/waiters.sh" <<W
+qci_claim_driver() { return 0; }
+qci_host_step() { echo "HOSTSTEP \$1" >>"$T/calls"; trap - EXIT; exit 0; }
+W
+    PATH="$S:$PATH" QCI_GUI_WAITERS="$T/waiters.sh" QDLOCKER_09_DIR="$T/qd09" \
+        timeout 60 bash "$g" >"$T/guest.out" 2>&1
+}
+
+# first_line <pattern> -> line number of its first match in the call log
+first_line() { grep -nF -- "$1" "$T/calls" | head -1 | cut -d: -f1; }
+
+@test "Setup reclaims a timed-out run's recorders and session manager before the locker restart" {
+    run_guest_setup "$D09/guest.sh"
+    grep -q '^HOSTSTEP setup-drain$' "$T/calls" || { cat "$T/guest.out"; false; }
+    local restart pat n
+    restart=$(first_line 'systemctl --user restart qdlocker.service')
+    [ -n "$restart" ]
+    for pat in 'pkill -u admin -x pw-record' 'pkill -u admin -x parec' \
+               'pkill -u admin -x gst-launch-1.0' \
+               'systemctl start qdistro-session-manager.service'; do
+        n=$(first_line "$pat")
+        [ -n "$n" ] || { echo "Setup never ran: $pat"; cat "$T/calls"; false; }
+        [ "$n" -lt "$restart" ] || { echo "$pat (line $n) after the locker restart (line $restart)"; false; }
+    done
+}
+
 @test "guest.sh and run.sh parse" {
     bash -n "$D09/guest.sh"
     bash -n "$D09/run.sh"

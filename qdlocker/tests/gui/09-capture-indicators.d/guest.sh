@@ -32,7 +32,10 @@
 # Output: one `ASSERT <id> <PASS|FAIL|SKIP> <detail>` line per assertion, then
 # `VERDICT <PASS|FAIL|ERROR>`. Exit 0 PASS, 1 FAIL, 3 ERROR.
 
-source /tmp/qci-gui-waiters.sh || exit 2
+# QCI_GUI_WAITERS is a test seam (qdlocker-gui09-runner.bats); the lane
+# installs the library at /tmp/qci-gui-waiters.sh.
+# shellcheck source=/dev/null
+source "${QCI_GUI_WAITERS:-/tmp/qci-gui-waiters.sh}" || exit 2
 : "${QDLOCKER_09_DIR:?run.sh sets the /tmp/qci/<slug> step directory}"
 qci_claim_driver "$QDLOCKER_09_DIR/driver.lock" || exit 2
 set -u
@@ -125,7 +128,16 @@ restart_locker() {
 
 host() { qci_host_step "$1"; }
 
-guest_cleanup() {
+# reset_state: undo everything a run of this driver can leave behind that
+# would change what the NEXT run observes. Idempotent; safe on a clean VM.
+# Called by guest_cleanup AND at the top of Setup: a qci_host_step timeout
+# stops the driver WITHOUT its EXIT trap (by design, so the frame's state
+# stays inspectable), so a rerun must not assume the previous run cleaned
+# up. Left alone, a timeout at s2-alarm leaves pw-record capturing (the next
+# Step 1 reads capture_active=1, a false product FAIL), and a timeout at
+# s8b-alarm leaves qdistro-session-manager stopped (the next Setup dies at
+# ListSilos/CreateSilo). Echoes 1 if the pw-dump break drop-in was present.
+reset_state() {
     pkill -u admin -x pw-record 2>/dev/null || true
     pkill -u admin -x parec 2>/dev/null || true
     pkill -u admin -x gst-launch-1.0 2>/dev/null || true
@@ -141,15 +153,20 @@ guest_cleanup() {
     [ -e "$BREAK_DROPIN" ] && was_broken=1
     rm -f "$BREAK_DROPIN"
     rm -rf "$BROKEN"
+    # A SYSTEM unit: root's systemctl, never through runuser (polkit refuses).
+    systemctl start qdistro-session-manager.service 2>/dev/null || true
+    echo "$was_broken"
+}
+
+guest_cleanup() {
+    local was_broken
+    was_broken=$(reset_state)
     U systemctl --user daemon-reload || true
     # A driver that died with the pw-dump break in place must not leave the
     # locker running with it.
     [ "$was_broken" = 0 ] || U systemctl --user restart qdlocker.service || true
-    # A SYSTEM unit: root's systemctl, never through runuser (polkit refuses).
-    systemctl start qdistro-session-manager.service 2>/dev/null || true
     sm SetSiloEgress ss "$SILO" none >/dev/null 2>&1 || true
     sm StopSilo si "$SILO" 0 >/dev/null 2>&1 || true
-    local i
     for _ in $(seq 1 20); do
         sm DeleteSilo s "$SILO" >/dev/null 2>&1 && break
         sleep 1
@@ -177,8 +194,10 @@ faillock --user admin --reset 2>/dev/null || true
 install -d -m 0755 -o admin -g users "$DROPIN_DIR"
 printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' > "$DROPIN_DIR/90-ci-gui.conf"
 chown admin:users "$DROPIN_DIR/90-ci-gui.conf"
-# An earlier attempt that died in Step 7 may have left the pw-dump break.
-rm -f "$BREAK_DROPIN"; rm -rf "$BROKEN"
+# Reclaim whatever an earlier attempt left (see reset_state) BEFORE the
+# locker restart below and before any silo call: stale recorders, the
+# Stopping fixture, the Step 7 pw-dump break, a stopped session manager.
+reset_state >/dev/null
 U systemctl --user daemon-reload
 restart_locker
 for unit in qdwin-compositor.service qdlocker.service; do
