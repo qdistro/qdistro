@@ -122,6 +122,11 @@ $VMGUI "$VM" screenshot "$ARTIFACT_DIR/s3-app-still-pending.png"
 # Readiness is a positive control, not a sleep: the monitor also matches a
 # private QciProbe.Ready signal, and it counts as subscribed only once a
 # probe carrying this run's token appears in ITS log.
+#
+# ORDER IS PART OF THE TEST: run this monitor start, and see
+# MONITOR_READY + REQUEST_STILL_PENDING, BEFORE any approval action (the
+# "1 hour" click, Ctrl+Y, or any host step that performs them). A driver
+# that approves first and starts the monitor afterwards loses the signal.
 GUEST_TMP=${GUEST_TMP:-/tmp/qci-qdistro_tests_integration_permissions-gui_31-fire-and-forget-request.md}
 MON_START_B64=$(base64 -w0 <<'EOF'
 T=$1
@@ -142,6 +147,16 @@ if grep -q "$tok" "$T/31-decided.log" 2>/dev/null && [ "$(cat /proc/$p/comm 2>/d
   echo "MONITOR_READY pid=$p"
 else
   echo "MONITOR_NOT_READY pid=[$p]"
+fi
+# Ordering proof: the monitor is only useful if it came up BEFORE the
+# approval. The request must still be pending now; if it is not, the
+# approval already happened and an empty signal log proves nothing.
+if dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+     /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.GetPending 2>&1 \
+     | grep -q 'test.action'; then
+  echo "REQUEST_STILL_PENDING"
+else
+  echo "REQUEST_ALREADY_DECIDED"
 fi
 EOF
 )
@@ -191,9 +206,11 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 ```
 
 **Assert**:
-- The monitor start printed `MONITOR_READY pid=<N>` BEFORE Ctrl+Y.
-  `MONITOR_NOT_READY` is a harness ERROR (an empty signal log would then
-  prove nothing), not a product FAIL. (The log also holds the
+- The monitor start printed `MONITOR_READY pid=<N>` and
+  `REQUEST_STILL_PENDING`, BEFORE the "1 hour" click and Ctrl+Y.
+  `MONITOR_NOT_READY` or `REQUEST_ALREADY_DECIDED` is a harness ERROR
+  (the monitor was not listening before the approval, so an empty signal
+  log would prove nothing), not a product FAIL. (The log also holds the
   `QciProbe` readiness signal; ignore it.)
 - `$ARTIFACT_DIR/31-decided.log` contains one `member=RequestDecided`
   signal block; its args are `int32 ${RID}` then `string "allow"`.
