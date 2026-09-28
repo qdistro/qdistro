@@ -25,7 +25,6 @@ from qdistro_session_manager import (
     _STATE_TRANSITIONS,
     BadArgument,
     BadState,
-    SessionError,
     SiloBusy,
     SiloExists,
     State,
