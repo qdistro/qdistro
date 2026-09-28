@@ -598,39 +598,20 @@ class TestValidation:
 # ---------------------------------------------------------------------------
 
 class TestCreate:
-    def test_skill_failure_removes_account_and_retry_succeeds(self, store, ops):
+    def test_skill_failure_keeps_silo_and_startup_retries(self, store, ops):
+        # Nothing may be deleted on this path: a rollback by name could hit
+        # an account an administrator recreated meanwhile.
+        def no_userdel(name):
+            raise AssertionError(f"userdel({name!r}) on a skill failure")
+        ops.userdel = no_userdel
         ops.silo_skill_fails_for.add("work")
-        with pytest.raises(SessionError, match="could not install the silo skill"):
-            store.create("work", 2000)
-        assert "work" not in ops.users
-        with pytest.raises(UnknownSilo):
-            store.get("work")
-        assert "work" not in ops.relay_policies
-        ops.silo_skill_fails_for.clear()
         assert store.create("work", 2000).uid == 2000
-        assert ops.installed_silo_skills == ["work"]
-
-    def test_skill_failure_reports_failed_account_cleanup(self, store, ops):
-        ops.silo_skill_fails_for.add("work")
-        ops.userdel_should_fail = True
-        with pytest.raises(SessionError, match="remove account 'work' before retrying"):
-            store.create("work", 2000)
         assert ops.users == {"work": 2000}
-        with pytest.raises(UnknownSilo):
-            store.get("work")
-
-    def test_skill_failure_keeps_account_replaced_at_another_uid(self, store, ops):
-        # Model an administrator deleting and recreating the name at another
-        # uid while the installer ran: the rollback must not delete theirs.
-        def replace_account(name):
-            ops.users[name] = 3000
-            raise OSError("skill installation failed")
-        ops.install_silo_skill = replace_account
-        with pytest.raises(SessionError, match="no longer has uid 2000"):
-            store.create("work", 2000)
-        assert ops.users == {"work": 3000}
-        with pytest.raises(UnknownSilo):
-            store.get("work")
+        assert "work" in ops.relay_policies
+        assert ops.installed_silo_skills == []
+        ops.silo_skill_fails_for.clear()
+        assert store.reconcile_silo_skills() == ["work"]
+        assert ops.installed_silo_skills == ["work"]
 
     def test_create_writes_state_dir_and_user(self, store, ops):
         silo = store.create("work", 2000)

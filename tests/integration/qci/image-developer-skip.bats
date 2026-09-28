@@ -18,9 +18,15 @@ skip_identity() {
 }
 
 @test "release full refuses image skip before it creates a run or VM" {
-    # The timeout bounds a regressed guard: a real release full run would
-    # otherwise start on the shared host instead of failing this test.
-    run timeout 60 env QCI_SKIP_IMAGE=1 QCI_RELEASE=1 "$REPO/ci/bin/qci" full
+    # Hold the run lock of a private image dir: if the guard regresses, qci
+    # is refused at the lock (exit 98) before init_run, and this test fails
+    # without starting a real release run on the shared host.
+    local lock_fd
+    mkdir -p "$T/img"
+    exec {lock_fd}>>"$T/img/.qdistro-vm-run.lock"
+    flock -n -x "$lock_fd"
+    run timeout 60 env QDWIN_IMG_DIR="$T/img" QCI_SKIP_IMAGE=1 QCI_RELEASE=1 "$REPO/ci/bin/qci" full
+    exec {lock_fd}>&-
     [ "$status" -eq 2 ]
     [[ "$output" == *"forbidden with QCI_RELEASE=1"* ]]
     [ -z "$(find "$T/runs" -mindepth 1 -print -quit)" ]
