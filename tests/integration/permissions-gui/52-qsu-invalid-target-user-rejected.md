@@ -35,7 +35,7 @@ VM=${VMNAME:-qd-sudo}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
 $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/52-dbusmon.log /tmp/52-dbusmon.pid'
+$VMEXEC "$VM" 'rm -f /tmp/52-dbusmon.log /tmp/52-dbusmon.pid /tmp/52-dbusmon.token'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
@@ -60,23 +60,33 @@ and grade a log no monitor ever wrote).
 
 ```bash
 MON_START_B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" >"$3" 2>&1 </dev/null' \
-  _ /tmp/52-dbusmon.pid "interface='org.qdistro.AdminBroker1'" /tmp/52-dbusmon.log
-for _ in $(seq 1 50); do [ -s /tmp/52-dbusmon.pid ] && break; sleep 0.1; done
+runuser -u admin -- setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" "$3" >"$4" 2>&1 </dev/null' \
+  _ /tmp/52-dbusmon.pid "interface='org.qdistro.AdminBroker1'" \
+  'type=signal,interface=org.qdistro.QciProbe,member=Ready' /tmp/52-dbusmon.log
+# Readiness is a positive control, not a sleep: the pid exists before the
+# match rule is installed. Keep sending this run's token until it shows up
+# in the monitor's OWN log.
+tok=ready-$$-$RANDOM
+echo "$tok" >/tmp/52-dbusmon.token
+for _ in $(seq 1 100); do
+  dbus-send --system --type=signal /org/qdistro/QciProbe org.qdistro.QciProbe.Ready "string:$tok" 2>/dev/null
+  grep -q "$tok" /tmp/52-dbusmon.log 2>/dev/null && break
+  sleep 0.1
+done
 p=$(cat /tmp/52-dbusmon.pid 2>/dev/null)
-if [ -n "$p" ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
-  echo "MONITOR_OK pid=$p"
+if grep -q "$tok" /tmp/52-dbusmon.log 2>/dev/null && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  echo "MONITOR_READY pid=$p"
 else
-  echo "MONITOR_NOT_RUNNING pid=[$p]"
+  echo "MONITOR_NOT_READY pid=[$p]"
 fi
 EOF
 )
 $VMEXEC "$VM" "echo $MON_START_B64 | base64 -d | bash"
-sleep 1
 ```
 
-**Assert**: the output is `MONITOR_OK pid=<N>`. `MONITOR_NOT_RUNNING`
-is a harness ERROR: S3's zero counts would be vacuous without a monitor.
+**Assert**: the output is `MONITOR_READY pid=<N>` (the subscription is
+proven live, not assumed after a sleep). `MONITOR_NOT_READY` is a harness
+ERROR: S3's zero counts would be vacuous without a subscribed monitor.
 
 ### S2 — send a malicious JSON request directly to the socket
 
@@ -138,6 +148,14 @@ else
   echo "MONITOR_GONE_BEFORE_STOP pid=[$p]"
 fi
 sleep 1
+# Zero traffic only counts if this is the log of the monitor that was
+# proven subscribed in S1 (its readiness token is in it).
+tok=$(cat /tmp/52-dbusmon.token 2>/dev/null)
+if [ -n "$tok" ] && [ -r /tmp/52-dbusmon.log ] && grep -q "$tok" /tmp/52-dbusmon.log; then
+  echo "MONITOR_LOG_OK"
+else
+  echo "MONITOR_LOG_MISSING token=[$tok]"
+fi
 # One line per count (`grep -c` prints 0 AND exits 1 on no match).
 c=$(grep -c "RequestPermissionAs" /tmp/52-dbusmon.log 2>/dev/null); echo "REQUEST_PERMISSION_AS=${c:-0}"
 c=$(grep -c "qsu.exec:" /tmp/52-dbusmon.log 2>/dev/null); echo "QSU_EXEC=${c:-0}"
@@ -146,8 +164,8 @@ EOF
 $VMEXEC "$VM" "echo $MON_STOP_B64 | base64 -d | bash"
 ```
 
-**Assert**: `MONITOR_ALIVE_AT_STOP` (otherwise ERROR: the monitor did
-not cover S2), and `REQUEST_PERMISSION_AS=0` and `QSU_EXEC=0` — the
+**Assert**: `MONITOR_ALIVE_AT_STOP` and `MONITOR_LOG_OK` (otherwise
+ERROR: the monitor did not provably cover S2), and `REQUEST_PERMISSION_AS=0` and `QSU_EXEC=0` — the
 broker was never asked.
 qdistro-root-exec failed closed at the input-validation stage.
 
