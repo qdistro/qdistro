@@ -390,6 +390,42 @@ approvals, sensitive exports, and authority-bearing runs require admin unlock
 unless a previously approved workflow explicitly carries lock-continuation
 semantics.
 
+## Approval binding in the current engine
+
+Pending runs capture an immutable canonical definition and SHA-256 digest.
+The identity includes trigger configuration, conditions, roles, needs,
+`auto_run`, and every step's complete configuration. Description and source
+filename are display metadata and do not change the digest. Configuration
+must contain JSON-compatible values with string mapping keys and finite
+numbers; unsupported YAML types are reported as load errors.
+
+The admin Workflows tab previews the captured definition before approval.
+`PreviewWorkflowRun(run_id)` returns JSON with `run_id`, `workflow_name`,
+`definition_digest`, and `definition`; `{}` means the pending run is no longer
+approvable. `ApproveWorkflowRun(run_id, expected_digest)` releases only the
+matching plan and records the digest and control peer identity before dispatch.
+Both methods require an admin control peer. Approval requires the digest from
+the preview; calls using the previous digestless signature must migrate.
+The engine also refuses empty or mismatched approval digests.
+
+Reloading a materially changed or removed definition invalidates pending and
+approved-but-queued runs. Returning to the old definition does not resurrect
+an invalidated run. An unchanged reload, description edit or file move
+preserves approval identity. Automatic trigger fires are registered with their
+captured run before submission and are subject to the same permanent queued-run
+invalidation. A failed audit write does not abort revocation of any affected
+run; the failure is retained in memory and reported in the broker log.
+Once worker dispatch starts, a running workflow
+continues using its captured definition; reload does not splice in new steps.
+Live firing-process identity checks still run immediately before execution.
+
+The preview reads configuration and resource references without fetching vault
+values; do not put plaintext credentials in workflow configuration. Audit
+stores the definition digest and approving process identity, rather than the
+preview or secret values. The binding does not freeze hook executable contents,
+mutable broker policy, secret contents or other external resources. It is an
+execution-definition consistency guarantee, not immutable external authority.
+
 ## Open Decisions
 
 - Exact strict manifest attribute names and validation language.

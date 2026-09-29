@@ -8,6 +8,9 @@ partial objects during error-recovery paths.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -226,6 +229,57 @@ class WorkflowDef:
         )
 
 
+@dataclass(frozen=True)
+class WorkflowPlan:
+    """Immutable, canonical execution definition; never contains fetched secrets."""
+    definition_json: str
+
+    @classmethod
+    def capture(cls, wf: WorkflowDef) -> WorkflowPlan:
+        data = {
+            "name": wf.name,
+            "trigger": {"type": wf.trigger.type.value, "config": wf.trigger.config},
+            "steps": [{"type": s.type.value, "name": s.name, "config": s.config}
+                      for s in wf.steps],
+            "conditions": wf.conditions, "needs": wf.needs,
+            "roles": wf.roles, "auto_run": wf.auto_run,
+        }
+        def validate(value: Any) -> None:
+            if isinstance(value, dict):
+                if any(not isinstance(k, str) for k in value):
+                    raise ValueError("workflow configuration keys must be strings")
+                for item in value.values():
+                    validate(item)
+            elif isinstance(value, list):
+                for item in value:
+                    validate(item)
+            elif isinstance(value, float):
+                if not math.isfinite(value):
+                    raise ValueError("workflow numbers must be finite")
+            elif value is not None and not isinstance(value, (str, int, bool)):
+                raise ValueError(f"unsupported workflow configuration type: {type(value).__name__}")
+        validate(data)
+        return cls(json.dumps(data, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=True, allow_nan=False))
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.definition_json.encode("utf-8")).hexdigest()
+
+    def definition(self) -> WorkflowDef:
+        # Decode a fresh object for execution/preview: no mutable references
+        # to either the loaded definition or the run's captured plan escape.
+        d = json.loads(self.definition_json)
+        return WorkflowDef(
+            name=d["name"],
+            trigger=TriggerDef(TriggerType(d["trigger"]["type"]), d["trigger"]["config"]),
+            steps=[StepDef(StepType(s["type"]), s["name"], s["config"])
+                   for s in d["steps"]],
+            conditions=d["conditions"], needs=d["needs"], roles=d["roles"],
+            auto_run=d["auto_run"],
+        )
+
+
 @dataclass
 class StepResult:
     """Outcome of executing a single step."""
@@ -255,6 +309,8 @@ class WorkflowRun:
     context: dict[str, Any] = field(default_factory=dict)
     audit_entries: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
+    plan: WorkflowPlan | None = None
+    execution_started: bool = False
 
     def mark_running(self) -> None:
         self.state = RunState.RUNNING
