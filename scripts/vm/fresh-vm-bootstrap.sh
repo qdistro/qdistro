@@ -1,8 +1,8 @@
 #!/bin/bash
 # fresh-vm-bootstrap.sh — run inside a freshly-cloned baseweed VM to:
 #   1. Fetch the qdistro monorepo as one tarball from host:8765.
-#   2. Build qdwin from source (libweston shell plugin).
-#   3. Build qdistro's C daemons against qdwin's protocol XML.
+#   2. Install Podman-built native components, or build them on a developer VM.
+#   3. Load SELinux modules built against the pinned snapshot.
 #   4. Install the Python broker / polkit-agent / pwd / etc. services.
 #   5. Install the qdshell QML stack.
 #   6. Install + enable user systemd units that start qdwin + qdshell.
@@ -10,9 +10,8 @@
 # Prerequisites (handled by build-baked-baseweed.sh):
 #   - SELinux permissive
 #   - admin user (uid 1000) present
-#   - meson + ninja + gcc/cc + libweston-16-devel + wayland-protocols
-#     (gcc is required: install-qsu-for-vm.sh compiles qsu.c into the
-#      /usr/local/bin/qsu ELF binary so /proc/<pid>/exe is unambiguous)
+#   - native payload from rootless Podman on cloud-derived test bases;
+#     Meson/Ninja/compiler and policy headers on explicit developer VMs only
 #   - quickshell + qt6-* for qdshell
 #   - bats for in-VM integration tests
 #
@@ -226,6 +225,30 @@ for repo in qdwin qdshell; do
     [ -d "$SRC/$repo" ] || { echo "[bootstrap] monorepo tarball lacks $repo/"; exit 2; }
 done
 
+# Cloud test VMs receive native outputs built against this same snapshot in a
+# rootless Podman container. The tarball is content-checked before extraction;
+# the guest still installs its Python services, QML tree and systemd units.
+QCI_NATIVE_STAGE=0
+if [ -n "${QCI_NATIVE_STAGE_SHA256:-}" ]; then
+    [[ "$QCI_NATIVE_STAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || { log "ERROR: invalid native-stage digest"; exit 3; }
+    log "fetching Podman-built native stage..."
+    wget -q -O /tmp/qdistro-native-stage.tar "$HOST/native-stage.tar" \
+        || { log "ERROR: native stage download failed"; exit 3; }
+    echo "$QCI_NATIVE_STAGE_SHA256  /tmp/qdistro-native-stage.tar" | sha256sum -c - \
+        || { log "ERROR: native stage checksum mismatch"; exit 3; }
+    tar -xf /tmp/qdistro-native-stage.tar -C /
+    rm -f /tmp/qdistro-native-stage.tar
+    [ "$(cat /usr/share/qdistro-build/snapshot 2>/dev/null)" = "$(sed -n 's/^SNAPSHOT=//p' /etc/qdistro/test-substrate)" ] \
+        || { log "ERROR: native stage snapshot differs from the cloud base"; exit 3; }
+    while read -r pkg version; do
+        [ "$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$pkg" 2>/dev/null)" = "$version" ] \
+            || { log "ERROR: native stage RPM mismatch: $pkg wants $version"; exit 3; }
+    done < /usr/share/qdistro-build/build-rpms.txt
+    QCI_NATIVE_STAGE=1
+    export QCI_NATIVE_STAGE QSU_PREBUILT_BINARY=/usr/local/bin/qsu
+fi
+
 if [ -f "$SRC/qnotebook/pyproject.toml" ]; then
     log "installing qnotebook..."
     PY_PKG_PREFIX=$(python3 - <<'PY'
@@ -303,6 +326,7 @@ if [ -f "$SRC/qdbrowser/pyproject.toml" ]; then
 fi
 
 # ---- 2. Build qdwin ------------------------------------------------------
+if [ "$QCI_NATIVE_STAGE" = 0 ]; then
 log "building qdwin (libweston shell plugin)..."
 cd "$SRC/qdwin"
 # QDWIN_EXTRA_MESON_OPTS: optional space-separated extra `meson setup` flags
@@ -352,6 +376,8 @@ cd "$SRC/daemons"
 meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
+
+fi # native qdwin, vendored libweston and daemons came from Podman when staged
 
 # ---- 4. Install Python modules + systemd units --------------------------
 # Each install-*.sh takes the module's source dir as $1. We pass paths
@@ -456,11 +482,34 @@ fi
 
 # ---- 5. Install SELinux policy modules (permissive by default) ----------
 log "installing SELinux policy modules (permissive)..."
-for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
-    if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
-        (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
-    fi
-done
+if [ "$QCI_NATIVE_STAGE" = 1 ]; then
+    command -v semodule >/dev/null || { log 'ERROR: semodule missing'; exit 3; }
+    for pol in pwd broker session_manager tier1; do
+        policy=/usr/share/qdistro-build/selinux/qdistro_$pol.pp
+        [ -s "$policy" ] || { log "ERROR: staged policy missing: $policy"; exit 3; }
+        semodule -i "$policy" || { log "ERROR: staged policy failed: $policy"; exit 3; }
+    done
+    for entry in \
+        /usr/libexec/qdistro/qdistro_admin_broker.py:qdistro_broker_exec_t \
+        /usr/libexec/qdistro/qdistro_pwd_daemon.py:qdistro_pwd_exec_t \
+        /usr/libexec/qdistro/qdistro_session_manager.py:qdistro_sessmgr_exec_t; do
+        path=${entry%%:*}
+        label=${entry#*:}
+        [ -f "$path" ] || continue
+        restorecon "$path" 2>/dev/null || chcon -t "$label" "$path" 2>/dev/null || true
+    done
+    restorecon -R /var/lib/qdistro/vaults /var/lib/qdistro/audit 2>/dev/null || true
+    for service in qdistro-admin-broker.service qdistro-pwd.service \
+        qdistro-session-manager.service; do
+        systemctl is-active --quiet "$service" && systemctl restart "$service" || true
+    done
+else
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
+        if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
+            (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
+        fi
+    done
+fi
 
 # ---- 5b. Build qdshell QML plugin (libqdistro-qdwin.so) ------------------
 # The Qdistro.Qdwin QML plugin lives in qdshell/qml-plugin/ and reads
@@ -469,14 +518,27 @@ done
 # unpacked side-by-side under $SRC (the monorepo root) so it resolves.
 # Without this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
 # `import Qdistro.Qdwin 1.0` and `qs` exits with rc=255 on startup.
-log "building qdshell QML plugin (libqdistro-qdwin.so)..."
-cd "$SRC/qdshell"
-meson setup build --wipe --prefix=/usr \
-    || { log "  ERROR: qdshell meson setup failed"; exit 3; }
-meson compile -C build \
-    || { log "  ERROR: qdshell meson compile failed"; exit 3; }
-meson install -C build \
-    || { log "  ERROR: qdshell meson install failed"; exit 3; }
+if [ "$QCI_NATIVE_STAGE" = 0 ]; then
+    log "building qdshell QML plugin (libqdistro-qdwin.so)..."
+    cd "$SRC/qdshell"
+    meson setup build --wipe --prefix=/usr \
+        || { log "  ERROR: qdshell meson setup failed"; exit 3; }
+    meson compile -C build \
+        || { log "  ERROR: qdshell meson compile failed"; exit 3; }
+    meson install -C build \
+        || { log "  ERROR: qdshell meson install failed"; exit 3; }
+else
+    log "checking staged native ELF dependencies..."
+    while IFS= read -r elf; do
+        [ -s "$elf" ] || { log "ERROR: staged ELF missing: $elf"; exit 3; }
+        deps=$(ldd "$elf" 2>&1) || { log "ERROR: ldd failed for staged ELF: $elf"; exit 3; }
+        if [[ "$deps" == *'not found'* ]]; then
+            log "ERROR: staged ELF has missing runtime library: $elf"
+            printf '%s\n' "$deps" >&2
+            exit 3
+        fi
+    done < /usr/share/qdistro-build/elf-manifest
+fi
 
 # ---- 5c. Install + enable seatd (system service) ------------------------
 # admin's lingering user@1000.service is a "manager" session that does

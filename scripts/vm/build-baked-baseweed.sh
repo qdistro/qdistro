@@ -283,18 +283,18 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
 fi
 
 # Pull the package list from install-deps.sh — single source of truth.
-# install-deps.sh detects the source-vs-execute mode and just exposes
-# QDISTRO_PKGS without invoking zypper.
+# Native code is built in rootless Podman and staged into per-run goldens, so
+# this disk needs runtime packages and test tools, not compilers or headers.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/install-deps.sh"
-if [ "${#QDISTRO_PKGS[@]}" -eq 0 ]; then
-    echo "ERROR: install-deps.sh produced an empty package list" >&2
+if [ "${#QDISTRO_RUNTIME_PKGS[@]}" -eq 0 ]; then
+    echo "ERROR: install-deps.sh produced an empty runtime package list" >&2
     exit 4
 fi
 [ "$FORCE" -ne 1 ] || qdistro_substrate_replace_safe "$BAKED" || exit 2
-PKG_CSV="$(printf '%s,' "${QDISTRO_PKGS[@]}")"
+PKG_CSV="$(printf '%s,' "${QDISTRO_RUNTIME_PKGS[@]}")"
 PKG_CSV="${PKG_CSV%,}"
-echo "[bake] ${#QDISTRO_PKGS[@]} packages to install"
+echo "[bake] ${#QDISTRO_RUNTIME_PKGS[@]} runtime/test packages to install"
 
 # 1. Fresh overlay backed by baseweed. We work on .partial and only
 #    promote to baseweed-baked.qcow2 at the very end so a partial run
@@ -317,7 +317,7 @@ trap cleanup_partial EXIT
 #    libguestfs; no qga, no in-VM init system. The appliance gets
 #    network through libguestfs's slirp backend so zypper can reach
 #    download.opensuse.org.
-echo "[bake] virt-customize: refresh + install ${#QDISTRO_PKGS[@]} packages..."
+echo "[bake] virt-customize: refresh + install ${#QDISTRO_RUNTIME_PKGS[@]} packages..."
 echo "[bake]   (this is the slow step — typically 10–25 min)"
 # Notes:
 # - Use --memsize 4096 to give zypper enough RAM (default 768M is

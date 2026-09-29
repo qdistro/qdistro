@@ -106,6 +106,31 @@ else
     log "stage 1/2: skipped (kiwi base or run-golden; no baseweed-baked needed)"
 fi
 
+# Build native outputs before starting a new VM, so a cold Podman build does
+# not leave an idle guest consuming RAM. Kiwi can still use its in-guest build
+# path; the cloud-derived runtime-only base uses Podman by default.
+NATIVE_ARCHIVE=""
+NATIVE_SHA256=""
+if [ -z "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
+    NATIVE_MODE=${QCI_NATIVE_BUILDER:-}
+    [ -n "$NATIVE_MODE" ] || {
+        if [ "${VM_BASE_KIND:-baked}" = baked ]; then NATIVE_MODE=podman; else NATIVE_MODE=guest; fi
+    }
+    if [ "${VM_BASE_KIND:-baked}" = baked ] && [ "$NATIVE_MODE" = guest ]; then
+        log 'ERROR: the baked cloud base has no native build toolchain; use QCI_NATIVE_BUILDER=podman'
+        exit 2
+    fi
+    case "$NATIVE_MODE" in
+        podman)
+            log "building/caching native components in rootless Podman..."
+            NATIVE_ARCHIVE=$(bash "$SCRIPT_DIR/build-native-podman.sh") || exit 3
+            NATIVE_SHA256=$(sha256sum "$NATIVE_ARCHIVE" | awk '{print $1}')
+            ;;
+        guest) ;;
+        *) log "ERROR: QCI_NATIVE_BUILDER must be podman or guest"; exit 2 ;;
+    esac
+fi
+
 # Stage 3.
 if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
     log "stage 3: cloning a fresh VM from run-golden ($QCI_RUN_GOLDEN_BACKING)..."
@@ -187,6 +212,9 @@ tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.
 cp "$REPO/scripts/vm/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
+if [ -n "$NATIVE_ARCHIVE" ]; then
+    cp --reflink=auto "$NATIVE_ARCHIVE" "$STAGE/native-stage.tar"
+fi
 
 # Use a per-run EPHEMERAL port + a log inside the per-user $STAGE dir
 # rather than a fixed host-wide port (8765) and a fixed /tmp path. On a
@@ -251,7 +279,7 @@ case "${QCI_OFFLINE:-0}" in 1|true|yes|on) _OFFLINE=1 ;; *) _OFFLINE=0 ;; esac
 # meson setup — used by the A1-min straddle test build (-Denable_test_place=true).
 # QCI_OFFLINE is forwarded so a tester-as-base golden fails closed before
 # zypper instead of waiting 60s for DNS that will not come.
-"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_APP_DEPS='$_APP_DEPS' QCI_OFFLINE='$_OFFLINE' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' bash /root/fresh-vm-bootstrap.sh" >&2
+"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_APP_DEPS='$_APP_DEPS' QCI_OFFLINE='$_OFFLINE' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' QCI_NATIVE_STAGE_SHA256='$NATIVE_SHA256' bash /root/fresh-vm-bootstrap.sh" >&2
 
 fi  # end stages 4-5 (skipped in run-golden mode)
 

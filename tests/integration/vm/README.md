@@ -89,8 +89,9 @@ Each @test wraps one of the reproducible probes in
 has pipewire up, and has a recent qdwin-shell.so + qdistro-forward
 installed. If you changed code on the host, re-run
 `scripts/vm/spin-test-vm.sh <prefix>` against a fresh clone — the
-bake pipeline tarballs the qdistro monorepo, pushes it into
-the VM, rebuilds qdwin + daemons, and reruns the install scripts.
+bake pipeline tarballs the qdistro monorepo, pushes it into the VM,
+installs the matching Podman-built native payload, and reruns the install
+scripts.
 
 ## Dependencies
 
@@ -99,52 +100,17 @@ the VM, rebuilds qdwin + daemons, and reruns the install scripts.
  `vm-exec` into the VM.
 - `scripts/vm/vm-exec` reachable via absolute path or PATH.
 
-### VM (baseweed clone + these packages)
+### VM (cloud-derived baked base)
 
-Installed once via `zypper install` after cloning baseweed:
-
-```
-weston weston-devel libweston-16 libweston-16-0
-freerdp freerdp-sdl freerdp-server freerdp-devel winpr-devel
-libpixman-1-0 libpixman-1-0-devel
-pipewire wireplumber pipewire-tools pipewire-devel libpipewire-0_3-0
-gstreamer gstreamer-plugin-pipewire gstreamer-plugins-good gstreamer-utils
-meson ninja gcc gcc-c++ pkgconf-pkg-config
-wayland-devel wayland-protocols-devel libxkbcommon-devel libevdev-devel
-libinput-devel libgbm-devel libdrm-devel seatd-devel
-libXcursor-devel adwaita-icon-theme
-python313-pywayland python313-cffi python313-PyQt6
-qt6-wayland python313-setuptools
-qt6-base-devel qt6-declarative-devel
-socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
-```
-
-`libXcursor-devel` is required by (b) — qdwin-shell links libXcursor
-for cursor-shape-v1 theme loading. `adwaita-icon-theme` (or any theme
-that provides CSS cursor names) gives the loader a populated theme;
-without one, set_shape still accepts but all lookups miss.
-
-`wayland-protocols-devel` and `python313-cffi` are easy to miss —
-`python313-pywayland` depends on `_cffi_backend` at runtime but
-doesn't pull it in transitively, and the build step runs
-`pywayland-scanner` which needs `wayland-protocols` pkgconfig data.
-`python313-PyQt6` + `qt6-wayland` are for `qdshell.py` (which binds
-`qdwin_shell_v1` as a PyQt app).
-
-`qt6-base-devel` + `qt6-declarative-devel` are required to build the
-qdshell QML plugin (`qdshell/qml-plugin`, a Qt6 C++ meson build). Its
-`meson.build` resolves `Qt6Core`, `Qt6Network`, `Qt6Qml` and
-`Qt6QmlIntegration` (the latter `required: false`) and runs `moc` via
-`import('qt6')`: `qt6-base-devel` provides Core/Network + the moc
-tooling, and `qt6-declarative-devel` pulls in the Qml/QmlIntegration
-development files (via `qt6-qml-devel`). The
-plugin's Wayland side uses plain `wayland-client` + `wayland-scanner`
-(already covered by `wayland-devel`), not Qt's WaylandClient.
-
-Then run `scripts/vm/fresh-vm-bootstrap.sh` inside the VM
-(fetched via `http_server_vm_deploy.md` pattern) to sync the source
-tree, build qdwin-shell.so + qdistro-forward, stage /root probe
-scripts, and start pipewire.
+`scripts/vm/install-deps.sh` is the package source of truth. The baked
+cloud base installs its runtime/test subset, with no native compiler,
+Meson, Ninja, `make`, or development headers. Rootless Podman builds
+qdwin, qdshell, daemons, qsu, and SELinux modules against the pinned
+Tumbleweed snapshot. `fresh-vm-bootstrap.sh` installs that payload,
+the Python services and QML tree, stages `/root` probes, and starts
+the session. It also stages Wayland protocol XML and pkg-config metadata
+needed by the Python protocol probes. See [ci/README.md](../../../ci/README.md#cloud-test-substrate)
+for the snapshot and RPM caches.
 
 ## Maintenance
 

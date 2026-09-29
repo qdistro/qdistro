@@ -97,8 +97,13 @@ scripts/vm/build-baked-baseweed.sh
 scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
 ```
 
-The qci VM base defaults to the cloud-derived, dependency-baked image. Its
-cloud SHA256 and Tumbleweed repository snapshot are pinned together in
+The qci VM base defaults to the cloud-derived, dependency-baked image. It has
+runtime and test packages but no native compiler toolchain. Rootless Podman
+builds qdwin, qdshell, the daemons, qsu and SELinux policy modules against the
+pinned snapshot on the host; a checked payload is installed while provisioning
+each run's golden VM.
+Install rootless Podman on the host before running VM integration gates.
+Its cloud SHA256 and Tumbleweed repository snapshot are pinned together in
 [`scripts/vm/test-substrate.conf`](../scripts/vm/test-substrate.conf); see
 [`ci/README.md`](../ci/README.md#cloud-test-substrate) for rotation, the RPM
 download cache, and the explicit `QDISTRO_VM_BASE=kiwi` alternative.
