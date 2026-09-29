@@ -36,9 +36,9 @@ qdistro_run_lock_reexec() {
 
     # Install handlers before starting the child. If a signal arrives between
     # fork and $! assignment, remember it and forward it once the PID is known.
-    trap 'if [ -n "$child_pid" ]; then kill -INT "$child_pid" 2>/dev/null || true; else pending_signal=INT; fi' INT
-    trap 'if [ -n "$child_pid" ]; then kill -TERM "$child_pid" 2>/dev/null || true; else pending_signal=TERM; fi' TERM
-    trap 'if [ -n "$child_pid" ]; then kill -HUP "$child_pid" 2>/dev/null || true; else pending_signal=HUP; fi' HUP
+    trap 'if [ -n "$child_pid" ]; then kill -INT -- "-$child_pid" 2>/dev/null || true; else pending_signal=INT; fi' INT
+    trap 'if [ -n "$child_pid" ]; then kill -TERM -- "-$child_pid" 2>/dev/null || true; else pending_signal=TERM; fi' TERM
+    trap 'if [ -n "$child_pid" ]; then kill -HUP -- "-$child_pid" 2>/dev/null || true; else pending_signal=HUP; fi' HUP
     # Bash gives asynchronous children SIGINT=ignored. Reset it before exec so
     # qci's INT cleanup still runs on a process-group interrupt. Bash closes
     # the lock descriptor in this child; workers cannot inherit it.
@@ -50,6 +50,12 @@ qdistro_run_lock_reexec() {
     local sig_ign
     sig_ign=$(awk '$1 == "SigIgn:" { print $2 }' "/proc/$$/status" 2>/dev/null)
     [[ "$sig_ign" =~ ^[0-9a-fA-F]+$ ]] || sig_ign=0
+    # Put the asynchronous runner in its own process group at fork. Otherwise
+    # a group signal reaches both processes, and the guardian forwards a
+    # second copy while the runner is already cleaning up. Job control makes
+    # Bash establish the group before the child can run, avoiding a startup
+    # window between fork and a child-side setpgid call.
+    set -m
     QDISTRO_RUN_LOCK_GUARD_PID=$$ python3 -c '
 import os, signal, sys
 signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -59,13 +65,13 @@ for sig in (signal.SIGPIPE, signal.SIGXFSZ):
 os.execv(sys.argv[2], sys.argv[2:])' \
         "$sig_ign" "$script" "$@" {lock_fd}>&- &
     child_pid=$!
-    [ -z "$pending_signal" ] || kill -s "$pending_signal" "$child_pid" 2>/dev/null || true
+    set +m
+    [ -z "$pending_signal" ] || kill -s "$pending_signal" -- "-$child_pid" 2>/dev/null || true
     if ! printf '%s\n' "$child_pid" > "$lock_path"; then
         printf 'run lock: cannot write holder pid to %s\n' "$lock_path" >&2
     fi
-    # A direct signal to the original launcher must reach the runner. A signal
-    # to the process group may also reach it directly. In both cases we wait
-    # for its cleanup before releasing our descriptor.
+    # Forward to the runner's group so a foreground command receives the
+    # signal too. Wait for the runner's cleanup before releasing our descriptor.
     while :; do
         if wait "$child_pid"; then rc=0; else rc=$?; fi
         # A trapped signal interrupts wait even while the child is cleaning
