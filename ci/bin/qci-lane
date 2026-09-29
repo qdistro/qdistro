@@ -12,6 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 QCI = ROOT / "ci/bin/qci"
+REGISTRY = ROOT / "tests/registry.tsv"
 SLOW_BATS = {
     "tiered-isolation.bats",
     "templates-browser.bats",
@@ -73,15 +74,32 @@ def verify_qci_discovery(lanes: dict[str, list[Path]]) -> None:
             )
 
 
+def audit_registry(lanes: dict[str, list[Path]]) -> None:
+    registered = set()
+    for line in REGISTRY.read_text().splitlines():
+        if not line or line.startswith("#") or line.startswith("path\t"):
+            continue
+        registered.add(line.split("\t", 1)[0])
+    for kind, names in (
+        ("bats", ("bats-fast", "bats-slow")),
+        ("gui", tuple(GUI_DIRS)),
+    ):
+        paths = {p.relative_to(ROOT).as_posix() for name in names for p in lanes[name]}
+        missing = sorted(paths - registered)
+        print(f"{kind}: {len(paths)} discovered, {len(paths) - len(missing)} registered, {len(missing)} missing")
+        for path in missing:
+            print(f"  {path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check", "list", "run"))
+    parser.add_argument("action", choices=("check", "audit", "list", "run"))
     parser.add_argument("lane", nargs="?", choices=LANES)
     parser.add_argument("--vm", help="reuse a named VM (serial execution)")
     args = parser.parse_args()
-    if args.action == "check":
+    if args.action in ("check", "audit"):
         if args.lane or args.vm:
-            parser.error("check takes no lane or VM")
+            parser.error(f"{args.action} takes no lane or VM")
     elif not args.lane:
         parser.error(f"{args.action} requires a lane")
     elif args.action == "list" and args.vm:
@@ -95,6 +113,9 @@ def main() -> int:
     if args.action == "check":
         for lane, paths in lanes.items():
             print(f"{lane}: {len(paths)} files")
+        return 0
+    if args.action == "audit":
+        audit_registry(lanes)
         return 0
     selected = [p.relative_to(ROOT).as_posix() for p in lanes[args.lane]]
     if args.action == "list":

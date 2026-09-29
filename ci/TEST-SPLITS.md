@@ -41,6 +41,24 @@ must still include every lane.
    Unknown paths should keep the current fail-safe full-gate behavior, and
    scheduled or release runs should continue to run all groups.
 
+## Registry audit, 2026-09-29
+
+QCI currently discovers 51 Bats files and 110 GUI scenarios. The pilot
+`tests/registry.tsv` lists 6 of the Bats files and 2 of the GUI scenarios;
+45 Bats files and 108 GUI scenarios still lack reviewed owner and dependency
+metadata. `ci/bin/qci-lane audit` prints the missing paths. The explicit lanes
+cover all discovered files, but the registry is
+not yet complete enough to drive automatic per-component lane selection.
+
+The path-rule audit also found source changes that were under-selected by
+`qci affected`: shared `scripts/vm/*` tools selected only `vm-smoke`, and
+qdshell, qdlocker, qsu, workflow and first-party app changes omitted Bats or
+GUI gates that exercise them. `ci/lib/affected.sh` now selects those whole
+gates conservatively. This can cost more time for a change, but it prevents
+an affected verdict from silently omitting existing runtime coverage. The
+next selection change needs a reviewed test-to-source dependency map, not
+just timing data or a filename prefix.
+
 ## Separate SELinux check to preserve
 
 `tests/integration/vm/s56b-broker-no-network.sh` has a SELinux neverallow

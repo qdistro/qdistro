@@ -109,10 +109,10 @@ affected_gates() {
     [ "$output" = "image" ]
 }
 
-@test "affected: scripts/vm prefix selects vm-smoke" {
-    run affected_gates scripts/vm/vm-exec
+@test "affected: shared VM build and execution scripts select every VM lane" {
+    run affected_gates scripts/vm/vm-exec scripts/vm/build-native-podman.sh
     [ "$status" -eq 0 ]
-    [ "$output" = "vm-smoke" ]
+    [ "$output" = "selftest lint vm-smoke bats gui" ]
 }
 
 @test "affected: broker and SELinux changes select runtime coverage" {
@@ -163,14 +163,25 @@ affected_gates() {
     [ "$output" = "bats" ]
 }
 
+@test "affected: shell, locker, qsu and first-party app changes keep Bats and GUI coverage" {
+    local path
+    for path in qdshell/src/shell.qml qdlocker/qdlocker/main.py qsu/qsu.c \
+                qdterm/qterminator/terminal.py qdfileman/qfileman/main.py \
+                qnotebook/qnotebook/main.py workflow/handler.py; do
+        run affected_gates "$path"
+        [ "$status" -eq 0 ]
+        [ "$output" = "host bats gui" ]
+    done
+}
+
 @test "affected: qdgreeter implementation selects host + bats (greeter boot path is VM-only)" {
     run affected_gates qdgreeter/qdgreeter/__init__.py
     [ "$status" -eq 0 ]
     [ "$output" = "host bats" ]
 }
 
-@test "affected: host-only components and component docs" {
-    run affected_gates qdterm/qterminator/terminal.py qdchrome-extension/src/background.js
+@test "affected: host-only extensions and component docs" {
+    run affected_gates qdchrome-extension/src/background.js qdfirefox-extension/src/background.js
     [ "$status" -eq 0 ]
     [ "$output" = "host" ]
     run affected_gates qdwin/README.md

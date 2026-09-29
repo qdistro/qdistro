@@ -200,6 +200,8 @@ group sizes, `ci/bin/qci-lane list bats-fast` prints its files, and
 `ci/bin/qci-lane run gui-locker` executes only that scenario group through
 the normal qci gate. The group and exact file selection appear in the run
 manifest. These explicit lanes do not alter `qci full` or `qci affected`.
+`ci/bin/qci-lane audit` lists discovered Bats and GUI cases missing from the
+pilot registry before any automatic per-component selection is attempted.
 
 ### Cloud test substrate
 
