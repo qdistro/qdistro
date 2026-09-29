@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QAbstractItemView, QListWidgetItem, QMessageBox
-
 from qfileman import qdistro_integration as qi
 from qfileman.text_transfer import MAX_TEXT_BYTES, read_selected_text
 from qfileman.window import FileManagerWindow
