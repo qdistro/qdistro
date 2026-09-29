@@ -34,6 +34,9 @@ $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f sleep 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
+# Stale work-owned /tmp/53-* from an interrupted run would be read as this
+# run's evidence (and fs.protected_regular blocks reopening them).
+$VMEXEC "$VM" 'rm -f /tmp/53-q*.out /tmp/53-q*.err /tmp/53-q*.pid'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
 sleep 1
@@ -58,9 +61,15 @@ stays at peak occupancy.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 set +e
+# Each client records its OWN pid, then execs qsu (same pid). Keep this
+# single-quoted with positional args: a `& echo \$!` inside a double-quoted
+# string, re-quoted once more by a driver, records the DRIVER shell's last
+# background job (the claim watcher) for all five, and S4 then reads that
+# live watcher as a hung client.
 for i in 1 2 3 4 5; do
-  sudo -u work bash -c "setsid /usr/local/bin/qsu /bin/sleep 60 $i \
-    >/tmp/53-q$i.out 2>/tmp/53-q$i.err < /dev/null & echo \$! >/tmp/53-q$i.pid"
+  sudo -u work setsid -f /bin/sh -c \
+    'echo $$ >"$1"; exec /usr/local/bin/qsu /bin/sleep 60 "$2" >"$3" 2>"$4" </dev/null' \
+    _ /tmp/53-q$i.pid "$i" /tmp/53-q$i.out /tmp/53-q$i.err </dev/null
 done
 sleep 5
 ls -la /tmp/53-q*.pid
@@ -121,10 +130,15 @@ writes it to stderr prefixed with `qsu:`; the message includes
 B64=$(base64 -w0 <<'EOF'
 set +e
 for i in 1 2 3 4 5; do
-  pid=$(cat /tmp/53-q$i.pid 2>/dev/null)
-  if [ -z "$pid" ]; then continue; fi
   if grep -q "too many in-flight" /tmp/53-q$i.out /tmp/53-q$i.err 2>/dev/null; then
-    if kill -0 "$pid" 2>/dev/null; then
+    pid=$(cat /tmp/53-q$i.pid 2>/dev/null)
+    case $pid in ''|*[!0-9]*) echo "REJECTED_$i:no_pid"; continue ;; esac
+    # A live pid is only "still running" if it IS this client; anything
+    # else means the pid capture is wrong (a harness error, not a verdict).
+    cmd=$( { tr '\0' ' ' < /proc/$pid/cmdline; } 2>/dev/null)
+    if kill -0 "$pid" 2>/dev/null && [ "$cmd" != "/usr/local/bin/qsu /bin/sleep 60 $i " ]; then
+      echo "REJECTED_$i:pid_mismatch pid=$pid cmdline=[$cmd]"
+    elif kill -0 "$pid" 2>/dev/null; then
       echo "REJECTED_$i:still_running pid=$pid"
     else
       # This check runs from a fresh vm-exec shell, so wait(1) cannot
@@ -145,6 +159,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 `too many in-flight` message. NOT `still_running` — that would
 mean the qsu client is hanging on the socket after the server
 already sent an error+exit frame.
+`REJECTED_N:no_pid` or `REJECTED_N:pid_mismatch` means S1 did not
+capture the client's own pid: report ERROR (harness), never PASS and
+never a product FAIL.
 
 ### S5 — kill the surviving pending qsu clients and drain broker state
 

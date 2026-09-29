@@ -7,6 +7,10 @@
 # image/build-in-vm.sh (release-artifact.txt) and the checklist on the raw.
 
 setup() {
+    # The profile under test is chosen per case. An ambient QDISTRO_PROFILE
+    # (qci takes it as the image gate's expected profile, and the tester
+    # image is dev) must not stand in for the default.
+    unset QDISTRO_PROFILE
     REPO="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
     IMAGE="$REPO/image"
     [ -f "$IMAGE/config.xml" ]

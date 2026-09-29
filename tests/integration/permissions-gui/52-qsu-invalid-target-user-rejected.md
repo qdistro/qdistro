@@ -35,6 +35,7 @@ VM=${VMNAME:-qd-sudo}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
 $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
+$VMEXEC "$VM" 'rm -f /tmp/52-dbusmon.log /tmp/52-dbusmon.pid /tmp/52-dbusmon.token'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
@@ -50,15 +51,60 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 ## Steps
 
-### S1 — start dbus-monitor as admin to record any broker calls
+### S1 — start dbus-monitor (as root) to record any broker calls
+
+The monitor records its OWN pid, then execs. Never capture it with
+`& echo \$!`: re-quoted by a driver, `$!` expands in the driver shell and
+names the harness's live claim watcher (S3 would then kill the watcher
+and grade a log no monitor ever wrote).
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- bash -c "dbus-monitor --system \
-  \"interface='\''org.qdistro.AdminBroker1'\''\" \
-  >/tmp/52-dbusmon.log 2>&1 & echo \$! >/tmp/52-dbusmon.pid"'
-sleep 1
-$VMEXEC "$VM" 'cat /tmp/52-dbusmon.pid'
+MON_START_B64=$(base64 -w0 <<'EOF'
+# Run as ROOT: a non-root monitor is refused BecomeMonitor and falls back
+# to eavesdropping, which sees broadcast signals but NOT the unicast
+# RequestPermissionAs call S3 counts, so its zero would prove nothing.
+setsid -f /bin/sh -c 'echo $$ >"$1"; exec dbus-monitor --system "$2" "$3" >"$4" 2>&1 </dev/null' \
+  _ /tmp/52-dbusmon.pid "interface='org.qdistro.AdminBroker1'" \
+  'type=signal,interface=org.qdistro.QciProbe,member=Ready' /tmp/52-dbusmon.log
+# Readiness is a positive control, not a sleep: the pid exists before the
+# match rule is installed. Keep sending this run's token until it shows up
+# in the monitor's OWN log.
+tok=ready-$$-$RANDOM
+echo "$tok" >/tmp/52-dbusmon.token
+for _ in $(seq 1 100); do
+  dbus-send --system --type=signal /org/qdistro/QciProbe org.qdistro.QciProbe.Ready "string:$tok" 2>/dev/null
+  grep -q "$tok" /tmp/52-dbusmon.log 2>/dev/null && break
+  sleep 0.1
+done
+p=$(cat /tmp/52-dbusmon.pid 2>/dev/null)
+if grep -q "$tok" /tmp/52-dbusmon.log 2>/dev/null && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  echo "MONITOR_READY pid=$p"
+else
+  echo "MONITOR_NOT_READY pid=[$p]"
+fi
+# Positive control for what S3 relies on: a UNICAST method call to the
+# broker (read-only GetPending) must show up in the log.
+dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.GetPending >/dev/null 2>&1
+for _ in $(seq 1 50); do
+  grep -q 'member=GetPending' /tmp/52-dbusmon.log 2>/dev/null && break
+  sleep 0.1
+done
+if grep -q 'member=GetPending' /tmp/52-dbusmon.log 2>/dev/null; then
+  echo "MONITOR_SEES_UNICAST"
+else
+  echo "MONITOR_BLIND_TO_UNICAST"
+fi
+EOF
+)
+$VMEXEC "$VM" "echo $MON_START_B64 | base64 -d | bash"
 ```
+
+**Assert**: the output has `MONITOR_READY pid=<N>` (the subscription is
+proven live, not assumed after a sleep) and `MONITOR_SEES_UNICAST` (it
+captures a unicast broker method call, the kind S3 counts).
+`MONITOR_NOT_READY` or `MONITOR_BLIND_TO_UNICAST` is a harness ERROR:
+S3's zero counts would be vacuous.
 
 ### S2 — send a malicious JSON request directly to the socket
 
@@ -111,12 +157,34 @@ $VMEXEC "$VM" 'cat /tmp/52-evil.log'
 Stop dbus-monitor and inspect the log:
 
 ```bash
-$VMEXEC "$VM" 'kill $(cat /tmp/52-dbusmon.pid) 2>/dev/null; sleep 1
-grep -c "RequestPermissionAs" /tmp/52-dbusmon.log || echo 0
-grep -c "qsu.exec:" /tmp/52-dbusmon.log || echo 0'
+MON_STOP_B64=$(base64 -w0 <<'EOF'
+p=$(cat /tmp/52-dbusmon.pid 2>/dev/null)
+if [ -n "$p" ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ]; then
+  echo "MONITOR_ALIVE_AT_STOP pid=$p"
+  kill "$p"
+else
+  echo "MONITOR_GONE_BEFORE_STOP pid=[$p]"
+fi
+sleep 1
+# Zero traffic only counts if this is the log of the monitor that was
+# proven subscribed in S1 (its readiness token is in it).
+tok=$(cat /tmp/52-dbusmon.token 2>/dev/null)
+if [ -n "$tok" ] && [ -r /tmp/52-dbusmon.log ] && grep -q "$tok" /tmp/52-dbusmon.log; then
+  echo "MONITOR_LOG_OK"
+else
+  echo "MONITOR_LOG_MISSING token=[$tok]"
+fi
+# One line per count (`grep -c` prints 0 AND exits 1 on no match).
+c=$(grep -c "RequestPermissionAs" /tmp/52-dbusmon.log 2>/dev/null); echo "REQUEST_PERMISSION_AS=${c:-0}"
+c=$(grep -c "qsu.exec:" /tmp/52-dbusmon.log 2>/dev/null); echo "QSU_EXEC=${c:-0}"
+EOF
+)
+$VMEXEC "$VM" "echo $MON_STOP_B64 | base64 -d | bash"
 ```
 
-**Assert**: both counts are `0` — the broker was never asked.
+**Assert**: `MONITOR_ALIVE_AT_STOP` and `MONITOR_LOG_OK` (otherwise
+ERROR: the monitor did not provably cover S2), and `REQUEST_PERMISSION_AS=0` and `QSU_EXEC=0` — the
+broker was never asked.
 qdistro-root-exec failed closed at the input-validation stage.
 
 ### S4 — broker audit DB has no row for the malicious target
@@ -155,8 +223,17 @@ frame, not the syslog line.
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f dbus-monitor 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/52-*.log /tmp/52-*.pid /tmp/52-evil-client.py'
+# Stop the (root) S1 monitor if still running: its recorded pid, and only
+# if that pid really is dbus-monitor. Self-contained for a fresh shell.
+TD_B64=$(base64 -w0 <<'EOF'
+p=$(cat /tmp/52-dbusmon.pid 2>/dev/null)
+case $p in ''|*[!0-9]*) exit 0 ;; esac
+[ "$(cat /proc/$p/comm 2>/dev/null)" = dbus-monitor ] && kill "$p"
+exit 0
+EOF
+)
+$VMEXEC "$VM" "echo $TD_B64 | base64 -d | bash"
+$VMEXEC "$VM" 'rm -f /tmp/52-*.log /tmp/52-*.pid /tmp/52-*.token /tmp/52-evil-client.py'
 B64=$(base64 -w0 <<'EOF'
 sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
 sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
