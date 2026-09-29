@@ -193,6 +193,8 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 
 A per-task timing breakdown (provision vs work seconds per file/scenario) is
 written to `<run-dir>/timings.tsv` for spotting outliers.
+The [test split proposal](TEST-SPLITS.md) summarizes a measured full run and
+the coverage work needed before automatic selection can omit slow scenarios.
 
 ### Cloud test substrate
 
