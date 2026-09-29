@@ -49,4 +49,5 @@ The native Podman build now runs
 `scripts/vm/container-check-broker-ratchet.sh` against the pinned snapshot's
 policy store before caching a golden payload. It requires the injected
 forbidden rule to fail and the clean broker to have zero broker neverallow
-violations. The s56b runtime systemd checks still need a VM lane invocation.
+violations. `broker-no-network.bats` invokes the s56b runtime checks in the VM
+lane and fails if the installed broker unit or systemd confinement is absent.
