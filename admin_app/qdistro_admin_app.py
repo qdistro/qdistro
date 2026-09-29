@@ -972,6 +972,9 @@ class BrokerBridge(QObject):
                 "completed_at":  float(r["completed_at"]),
                 "error":         str(r["error"]),
                 "definition_digest": str(r.get("definition_digest", "")),
+                "cleanup_state": str(r.get("cleanup_state", "unknown")),
+                "cleanup_pending": int(r.get("cleanup_pending", 0)),
+                "cleanup_error": str(r.get("cleanup_error", "")),
             })
         return out
 
