@@ -80,12 +80,35 @@ class WorkflowAuditLogger:
         finally:
             os.umask(old_umask)
         self._conn.executescript(SCHEMA)
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(workflow_runs)")}
+        if "definition_digest" not in columns:
+            self._conn.execute("ALTER TABLE workflow_runs ADD COLUMN definition_digest TEXT")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         try:
             os.chmod(db_path, 0o600)
         except OSError:
             pass
+
+    def log_plan_binding(self, run_id: str, digest: str) -> None:
+        self._conn.execute("UPDATE workflow_runs SET definition_digest=? WHERE run_id=?",
+                           (digest, run_id))
+
+    def log_run_approval(self, run_id: str, workflow_name: str,
+                         digest: str, approver: dict[str, Any]) -> None:
+        self._log_event(run_id, workflow_name, "run_approval", "approval attempt",
+                        {"definition_digest": digest, "approver": approver})
+
+    def log_run_queued(self, run_id: str, workflow_name: str,
+                       trigger_context: dict[str, Any], digest: str) -> None:
+        """Persist automatic work before submitting it to the worker pool."""
+        self._conn.execute(
+            """INSERT INTO workflow_runs
+               (run_id, workflow_name, state, started_at, trigger_context, definition_digest)
+               VALUES (?, ?, 'running', ?, ?, ?)""",
+            (run_id, workflow_name, time.time(), json.dumps(trigger_context, default=str), digest))
+        self._log_event(run_id, workflow_name, "run_queued", "automatic run queued",
+                        {"definition_digest": digest})
 
     def log_run_pending(self, run_id: str, workflow_name: str,
                         trigger_context: dict[str, Any]) -> None:
@@ -189,7 +212,7 @@ class WorkflowAuditLogger:
         limit = max(1, min(int(limit), 10000))
         cur = self._conn.execute(
             """SELECT run_id, workflow_name, state, started_at,
-                      completed_at, trigger_context, error
+                      completed_at, trigger_context, error, definition_digest
                FROM workflow_runs ORDER BY started_at DESC LIMIT ?""",
             (limit,),
         )
@@ -202,6 +225,7 @@ class WorkflowAuditLogger:
                 "completed_at": r[4],
                 "trigger_context": r[5],
                 "error": r[6],
+                "definition_digest": r[7] or "",
             }
             for r in cur.fetchall()
         ]

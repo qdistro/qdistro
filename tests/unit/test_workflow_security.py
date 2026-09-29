@@ -385,7 +385,8 @@ class TestApprovalGate:
         eng._workflows["wf"] = _wf(needs=["vault/dev/key"], auto_run=False)
         eng._on_trigger("wf", {})
         run_id = eng.list_pending_runs()[0].run_id
-        assert eng.approve_run(run_id) is True
+        digest = eng.preview_run(run_id)["definition_digest"]
+        assert eng.approve_run(run_id, digest) is True
         # Dispatched to the pool — wait for completion.
         for _ in range(200):
             r = eng.get_run(run_id)
@@ -394,12 +395,12 @@ class TestApprovalGate:
             time.sleep(0.01)
         assert eng.get_run(run_id).state == RunState.COMPLETED
         # Double-approve is a no-op.
-        assert eng.approve_run(run_id) is False
+        assert eng.approve_run(run_id, digest) is False
         eng.shutdown()
 
     def test_approve_unknown_run(self):
         eng = WorkflowEngine(audit_logger=None)
-        assert eng.approve_run("nope") is False
+        assert eng.approve_run("nope", "no-such-digest") is False
 
     def test_repeated_fire_does_not_flood_pending(self):
         # A cron-style workflow that keeps firing while unapproved must

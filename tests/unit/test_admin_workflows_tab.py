@@ -111,14 +111,18 @@ def _pending_run(run_id="p1"):
             "started_at": 1716800000.0, "completed_at": 0.0, "error": ""}
 
 
-def test_approve_selected_calls_broker(qapp):
+def test_approve_selected_calls_broker(qapp, monkeypatch):
     br = _broker([], [_pending_run("p1")])
     br.approve_workflow_run.return_value = True
+    preview = {"run_id": "p1", "definition_digest": "reviewed-digest", "definition": {}}
+    br.preview_workflow_run.return_value = preview
+    monkeypatch.setattr(WorkflowsTab, "_confirm_preview", lambda self, p: p == preview)
     tab = WorkflowsTab(br)
     # Select the pending run row, then approve.
     tab.runs_table.selectRow(0)
     tab.approve_selected()
-    br.approve_workflow_run.assert_called_once_with("p1")
+    br.preview_workflow_run.assert_called_once_with("p1")
+    br.approve_workflow_run.assert_called_once_with("p1", "reviewed-digest")
 
 
 def test_approve_skips_non_pending(qapp):
@@ -148,3 +152,22 @@ def test_pending_signal_triggers_refresh(qapp):
     tab._on_reloaded("p9", "wf")
     assert tab._runs_model.rowCount() == 1
     assert tab._runs_model.item(0, 2).text() == "pending"
+
+
+def test_cancel_preview_does_not_release(qapp, monkeypatch):
+    br = _broker([], [_pending_run()])
+    br.preview_workflow_run.return_value = {"definition_digest": "d"}
+    monkeypatch.setattr(WorkflowsTab, "_confirm_preview", lambda self, p: False)
+    tab = WorkflowsTab(br)
+    tab.runs_table.selectRow(0)
+    tab.approve_selected()
+    br.approve_workflow_run.assert_not_called()
+
+
+def test_missing_preview_does_not_release(qapp):
+    br = _broker([], [_pending_run()])
+    br.preview_workflow_run.return_value = {}
+    tab = WorkflowsTab(br)
+    tab.runs_table.selectRow(0)
+    tab.approve_selected()
+    br.approve_workflow_run.assert_not_called()

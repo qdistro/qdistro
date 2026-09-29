@@ -4895,54 +4895,43 @@ class Broker(dbus.service.Object):
                 "completed_at":  dbus.Double(
                     float(r.get("completed_at") or 0.0)),
                 "error":         dbus.String(str(r.get("error") or "")),
+                "definition_digest": dbus.String(str(r.get("definition_digest") or "")),
             })
         return out
 
-    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
-    def ApproveWorkflowRun(self, run_id: str, sender=None,
-                           conn=None) -> bool:
-        """Approve a PENDING workflow run so it executes (F3).
+    def PreviewWorkflowRun(self, run_id: str, sender=None, conn=None) -> str:
+        """Admin-only captured plan preview; never fetches vault values."""
+        self._require_admin_control_peer(sender, conn, "PreviewWorkflowRun")
+        engine = getattr(self, "workflow_engine", None)
+        return json.dumps(engine.preview_run(str(run_id)) if engine else {})
 
-        Human-in-the-loop gate: a workflow that did not opt into
-        ``auto_run`` parks each fire as a PENDING run; an admin approves it
-        here. Admin/root only at the bus level AND server-side. Returns
-        True if a pending run was found and scheduled (conditions are still
-        re-evaluated at execution, so approval never bypasses the identity
-        gate). False if no such pending run exists.
-        """
-        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+    @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="b",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ApproveWorkflowRun(self, run_id: str, expected_digest: str,
+                            sender=None, conn=None) -> bool:
+        """Approve the exact preview digest, auditing identity before release."""
+        uid, pid, exe, start = self._require_admin_control_peer(
             sender, conn, "ApproveWorkflowRun")
         engine = getattr(self, "workflow_engine", None)
         if engine is None:
             return False
-        # Audit BEFORE the release, and fail closed if it raises (iso2 `14`
-        # E2). The old order called approve_run() first and swallowed a
-        # failing audit.log with a bare `except: pass`, so a human approval
-        # could schedule a run with no forensic row at all. Same shape the
-        # prompt path already gets right at DecideRequest: never grant past
-        # a failed audit. The row is written for the attempt, so an approve
-        # that finds no pending run leaves a decision=True row for an
-        # approval that released nothing — cheaper than the alternative.
+        digest = str(expected_digest)
+        preview = engine.preview_run(str(run_id))
+        if not digest or preview.get("definition_digest") != digest:
+            return False
         try:
             self.audit.log(
-                caller_uid=admin_uid, caller_pid=_pid,
-                caller_exe=_exe or "qdistro-admin",
-                action=f"qdistro.workflow.approve:{run_id}",
-                decision=True, scope=None,
-                source=f"run_id={run_id}", approver_uid=admin_uid,
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[broker] qdistro.audit.failure: ApproveWorkflowRun "
-                  f"run_id={run_id!r}, reason={e!r}; approval refused",
-                  flush=True)
+                caller_uid=uid, caller_pid=pid, caller_exe=exe or "qdistro-admin",
+                action=f"qdistro.workflow.approve:{run_id}", decision=True,
+                scope=None, source=f"run_id={run_id} definition_digest={digest}",
+                approver_uid=uid)
+            return bool(engine.approve_run(str(run_id), digest,
+                        {"uid": uid, "pid": pid, "exe": exe, "start_time": start}))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: ApproveWorkflowRun refused: {exc!r}", flush=True)
             return False
-        try:
-            approved = bool(engine.approve_run(str(run_id)))
-        except Exception as e:  # noqa: BLE001
-            print(f"[broker] ApproveWorkflowRun failed: {e!r}", flush=True)
-            return False
-        return approved
 
     @dbus.service.method(BUS_NAME, in_signature="sasi", out_signature="a{ss}",
                          sender_keyword="sender", connection_keyword="conn")
@@ -5426,7 +5415,7 @@ class Broker(dbus.service.Object):
         """Emitted when a non-auto-run workflow fires and parks a run for
         admin approval (F3). The admin Workflows tab refreshes its run
         list so the new PENDING entry appears; an admin then calls
-        ApproveWorkflowRun(run_id). Carries only identifiers, never any
+        ApproveWorkflowRun(run_id, expected_digest). Carries only identifiers, never any
         secret or trigger payload."""
         pass
 
