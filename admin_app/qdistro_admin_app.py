@@ -1370,7 +1370,7 @@ class SilosTab(QWidget):
     SessionManager1 well-known name.
     """
 
-    COLUMNS = ("name", "uid", "state", "autostart")
+    COLUMNS = ("name", "uid", "state", "autostart", "runtime observation")
     STATE_COLOURS = {
         "Created":  QColor("#a0a0a0"),
         "Active":   QColor("#7bc97b"),
@@ -1449,7 +1449,10 @@ class SilosTab(QWidget):
                 QStandardItem(str(r.get("uid", ""))),
                 QStandardItem(str(r.get("state", ""))),
                 QStandardItem("yes" if r.get("autostart") else "no"),
+                QStandardItem(str(r.get("observed_status", "unknown"))),
             ]
+            items[4].setToolTip(str(r.get("observed_reason", "")) +
+                                f"\nObserved at: {r.get('observed_at', 0)}; generation: {r.get('operation_generation', 0)}")
             colour = self.STATE_COLOURS.get(str(r.get("state", "")))
             if colour is not None:
                 items[2].setForeground(colour)

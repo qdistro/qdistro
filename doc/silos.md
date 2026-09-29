@@ -645,3 +645,25 @@ to different sessions at different times, subject to attachment policy in
 The session manager's current D-Bus lifecycle states in [sessions.md](sessions.md)
 are implementation states for uid-backed silos. They are compatible with this
 model but lower-level than the owner-facing health and bootstrap states above.
+
+## Observed runtime evidence
+
+`ListSilos` retains the conservative lifecycle `state` used for stop, delete
+and broker policy. It additionally returns `observed_status`, `observed_reason`,
+`observed_at` (epoch seconds) and `operation_generation`. The admin silo table
+shows the runtime observation separately from lifecycle state. Status is one of
+`starting`, `launcher-running`, `stopped`, `failed` or `unknown`.
+
+A background observer samples systemd's launcher state and pending job, plus
+container existence/running status for tier-2 workloads or the recursive
+cgroup population for uid-backed workloads. Each subprocess is bounded to three
+seconds. Observations expire after thirty seconds; unavailable or timed-out
+probes report unknown. Results from a preceding lifecycle generation are
+ignored, and no observations survive daemon restart. Unresolved starts remain
+unknown until a successful stop. A plain start retry remains an idempotent
+operation from Active; follow the existing stop-then-start recovery path.
+
+Launcher activation and container existence do not establish application
+health. Observations never authorize deletion, relaunch, or broker transfers;
+they do not replace the lifecycle safeguards. Probe snapshots may become stale
+between reads, so a stopped observation is evidence about that sample only.
