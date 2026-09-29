@@ -242,7 +242,7 @@ class FileManagerWindow(QMainWindow):
 
         # qdistro Send-To — lazy-populated so the menu reflects the
         # live broker view of registered peer apps.
-        self._send_to_menu = edit_menu.addMenu("Send &To")
+        self._send_to_menu = edit_menu.addMenu("Send Text &To")
         self._send_to_menu.aboutToShow.connect(self._populate_send_to_menu)
 
         edit_menu.addSeparator()
@@ -871,15 +871,7 @@ class FileManagerWindow(QMainWindow):
                 break
 
     def _populate_send_to_menu(self) -> None:
-        """Lazy-fill the qdistro Send-To submenu from the broker.
-
-        Payload = full contents of the currently-selected file (UTF-8
-        decoded, capped at 1 MiB to stay below the broker's detail
-        sanitiser budget). The cap is conservative — for binaries the
-        receiving app gets only the readable prefix; users who need
-        full-fidelity binary transfer should use the file manager's
-        copy-to-pane operation, not Send-To.
-        """
+        """Discover receivers; read the current selection only at dispatch."""
         self._send_to_menu.clear()
         try:
             from qfileman import qdistro_integration as _qi
@@ -887,7 +879,6 @@ class FileManagerWindow(QMainWindow):
             act = self._send_to_menu.addAction("(qdistro SDK not available)")
             act.setEnabled(False)
             return
-        payload = self._collect_send_to_payload()
         targets = _qi.send_to_targets(kind="text/plain")
         if not targets:
             act = self._send_to_menu.addAction("(no receivers running)")
@@ -899,33 +890,53 @@ class FileManagerWindow(QMainWindow):
             if silo:
                 label = f"{label}  [{silo}]"
             act = self._send_to_menu.addAction(label)
-            if not payload:
-                act.setEnabled(False)
-                act.setToolTip("Select a readable file first")
-            else:
-                uid = int(row["uid"])
-                svc = str(row["service"])
-                act.triggered.connect(
-                    lambda _checked=False, u=uid, s=svc, p=payload:
-                        _qi.send_payload(u, s, p, kind="text/plain"))
+            act.setToolTip("Send one UTF-8 text file (up to 256 KiB). Receiver acceptance is unknown.")
+            uid = int(row["uid"])
+            svc = str(row["service"])
+            act.triggered.connect(
+                lambda _checked=False, u=uid, s=svc:
+                    self._send_selected_text(u, s))
+
+    def _send_selected_text(self, uid: int, service: str) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        from qfileman import qdistro_integration as qi
+
+        try:
+            payload = self._collect_send_to_payload()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Send Text To", str(exc))
+            return
+        try:
+            arrived = qi.send_payload(uid, service, payload, kind="text/plain")
+        except Exception as exc:
+            log.warning("Text transfer was not confirmed: %s", exc)
+            arrived = False
+        if arrived:
+            self.statusBar().showMessage(
+                "Text arrived at receiver; acceptance is unknown.", 10000)
+        else:
+            QMessageBox.warning(
+                self, "Send Text To",
+                "Text transfer was not confirmed. Receiver acceptance is unknown; "
+                "the receiver may have received the text.")
 
     def _collect_send_to_payload(self) -> str:
+        from qfileman.text_transfer import read_selected_text
+
         pane = self._active_pane
         if pane is None:
-            return ""
+            raise ValueError("Select exactly one text file to send.")
         try:
-            selected = pane.selected_paths() if hasattr(pane, "selected_paths") else []
-        except Exception:
             selected = []
-        if not selected:
-            return ""
-        path = selected[0]
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read(1024 * 1024)
-            return data.decode("utf-8", errors="replace")
-        except OSError:
-            return ""
+            for item in pane.file_list.selectedItems():
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                path = data.get("path")
+                if not path:
+                    raise ValueError("The selected item has no file path.")
+                selected.append(path)
+        except Exception as exc:
+            raise ValueError("Cannot read the current selection.") from exc
+        return read_selected_text(selected)
 
     def _open_preferences(self) -> None:
         from qfileman.config import Config
