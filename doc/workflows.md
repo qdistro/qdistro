@@ -408,3 +408,27 @@ semantics.
 - [guards.md](guards.md)
 - [vm-definitions.md](vm-definitions.md)
 - [permissions.md](permissions.md)
+
+### Secret-channel cleanup outcomes
+
+Delivery handles mark `scrubbed` only after their backend confirms revocation.
+Every attempt wipes the in-memory buffer; failures raise and retain resource
+identity for retry. Buffer wiping does not retract material already copied by a
+consumer. `metadata()` reports buffer wiping separately from channel cleanup.
+
+For env/fd children, Linux `waitid(WNOWAIT)` observes command completion without
+reaping the session leader. The owned leader remains a zombie until scrub, pinning
+the group ID against PID reuse. Cleanup signals only that owned group, waits up to
+two seconds for live members to disappear, then reaps the leader. An external
+reaper invalidates this identity and cleanup reports unresolved rather than
+signalling a potentially reused group. SSH agents run in foreground as owned
+children and use the same identity protection. This retains one child process
+record per delivered command until cleanup.
+
+Tmpfs cleanup requires ordinary unmount and observed mount disappearance. Lazy
+detach is not successful revocation. Startup reaping counts only successfully
+removed tmpfs directories and reports failed mounts, unknown entries and stale
+SSH directories as unresolved. An SSH directory has no trustworthy process
+identity after a crash; existing key TTL and service supervision still apply.
+These backend guarantees do not provide durable cleanup manifests or replay
+workflow side effects.
