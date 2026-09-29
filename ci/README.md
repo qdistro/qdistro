@@ -227,6 +227,10 @@ The rootless native builder has a separate RPM cache under
 `$QDWIN_CACHE_DIR/podman-rpm/<snapshot>/<arch>/packages/` and stores its staged
 archive under `$QDWIN_CACHE_DIR/native-podman/<snapshot>/<arch>/`. A changed
 source tree, container image, snapshot or Meson options triggers a rebuild.
+Its dependency installation lives in a rootless Podman toolchain image keyed
+by the base image ID, snapshot and dependency recipe. A source-only rebuild
+reuses that image and skips `zypper dup` and the development-package install; the RPM
+cache supplies downloads when the toolchain image itself must be rebuilt.
 The guest loads the staged SELinux modules with `semodule`; no native compiler,
 Meson, Ninja, `make` or policy headers are needed in the cloud test base.
 The native builder checks the broker SELinux neverallow negative control
