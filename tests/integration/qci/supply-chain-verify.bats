@@ -137,6 +137,22 @@ make_local_signed_fixture() {
     [[ "$path2" == *"$YESTERDAY"* ]]
 }
 
+@test "baked tier-5 omission has a distinct path and cannot reuse the default stamp" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf" default_path skip_path
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$TODAY" > "$manifest"
+    default_path="$(QDWIN_SKIP_TIER5_BAKE=0 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    skip_path="$(QDWIN_SKIP_TIER5_BAKE=1 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    [ "$default_path" != "$skip_path" ]
+    printf 'baked' > "$WORK/baked.qcow2"
+    run env QDWIN_SKIP_TIER5_BAKE=0 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_write_stamp '$WORK/baked.qcow2' baked source; qdistro_substrate_stamp_ok '$WORK/baked.qcow2' baked source"
+    [ "$status" -eq 0 ]
+    run env QDWIN_SKIP_TIER5_BAKE=1 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_stamp_ok '$WORK/baked.qcow2' baked source"
+    [ "$status" -ne 0 ]
+}
+
 @test "snapshot freshness accepts day 14 and rejects day 15, future and invalid dates" {
     local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh"
     run bash -c ". '$substrate'; qdistro_substrate_snapshot_fresh 20260914 20260928"

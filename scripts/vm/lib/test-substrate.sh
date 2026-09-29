@@ -66,6 +66,11 @@ qdistro_substrate_recipe_digest() {
         digest="$(sha256sum "$file" | awk '{print $1}')" || return 1
         joined+="$digest"$'\n'
     done
+    # An omitted tier-5 disk changes the baked image. Keep that opt-in variant
+    # separate from the default while preserving the default cache key.
+    if [ "$kind" = baked ] && [ "${QDWIN_SKIP_TIER5_BAKE:-0}" = 1 ]; then
+        joined+='skip-tier5=1'$'\n'
+    fi
     printf '%s' "$joined" | sha256sum | awk '{print $1}'
 }
 

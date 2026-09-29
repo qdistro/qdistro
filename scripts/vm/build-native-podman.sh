@@ -39,7 +39,9 @@ tar -C "$repo" --mtime=@0 --owner=0 --group=0 --numeric-owner \
     --no-recursion --null -T "$work/source-files.list" -cf "$work/source.tar"
 source_sha=$(sha256sum "$work/source.tar" | awk '{print $1}')
 builder_sha=$(sha256sum "$here/build-native-podman.sh" | awk '{print $1}')
-deps_sha=$(sha256sum "$here/container-native-deps.sh" "$here/Containerfile.native-builder" | sha256sum | awk '{print $1}')
+# Hash stable relative names: absolute worktree paths must not invalidate a
+# shared toolchain cache when the dependency recipe bytes are identical.
+deps_sha=$(cd "$here" && sha256sum container-native-deps.sh Containerfile.native-builder | sha256sum | awk '{print $1}')
 builder_key=$(printf '%s\n' "$image_id" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$deps_sha" | sha256sum | awk '{print $1}')
 builder_image="localhost/qdistro/native-builder:$builder_key"
 key=$(printf '%s\n' "$source_sha" "$builder_sha" "$builder_key" \

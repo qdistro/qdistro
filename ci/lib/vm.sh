@@ -569,7 +569,12 @@ ensure_run_golden() {
     # cache. Export after a clean shutdown, before the disk becomes immutable,
     # so later golden builds can seed those packages without another download.
     # Cache I/O is an optimization; a failed export cannot change test verdicts.
-    if [ "${QDISTRO_VM_BASE:-baked}" = baked ] && { [ "$profile" = bats ] || [ "$profile" = gui-qdwin ]; }; then
+    # Resolve auto the same way the spinner does: it may choose either Kiwi or
+    # baked depending on the imported Kiwi image.
+    . "$VM_TOOLS/lib/vm-base.sh"
+    local resolved_vm_base
+    resolved_vm_base="$(qdistro_vm_base_kind)" || resolved_vm_base=''
+    if [ "$resolved_vm_base" = baked ] && { [ "$profile" = bats ] || [ "$profile" = gui-qdwin ]; }; then
         . "$VM_TOOLS/lib/test-substrate.sh"
         . "$VM_TOOLS/lib/rpm-cache.sh"
         if qdistro_load_test_substrate; then
