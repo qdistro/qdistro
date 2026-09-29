@@ -37,9 +37,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from pathlib import Path
-from collections.abc import Callable
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("qdistro.workflow.secret")
