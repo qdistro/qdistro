@@ -1326,6 +1326,42 @@ class SessionManagerBridge(QObject):
         raw = self._call("ListSilos")
         return json.loads(str(raw))
 
+    def list_silos_async(self, reply, error):
+        """Bounded read only; never reconnect or retry lifecycle operations."""
+        import json
+        import math
+
+        def parsed(raw):
+            try:
+                rows = json.loads(str(raw))
+                if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+                    raise ValueError("Invalid ListSilos response")
+                for row in rows:
+                    ttl = float(row.get("observed_ttl_seconds", 0))
+                    generation = row.get("operation_generation", 0)
+                    if (not math.isfinite(ttl) or not 0 <= ttl <= 30
+                            or not isinstance(generation, int) or generation < 0
+                            or not isinstance(row.get("name"), str)
+                            or not isinstance(row.get("runtime_incarnation"), str)
+                            or not row["runtime_incarnation"]):
+                        raise ValueError("Invalid ListSilos observation")
+                    row["observed_ttl_seconds"] = ttl
+            except (ValueError, TypeError) as exc:
+                error(exc)
+                return
+            reply(rows)
+
+        try:
+            # ProxyObject's async method discards PendingCall. Use Connection
+            # directly so invalidation owns a cancellable local reply handler.
+            return self.bus.call_async(
+                SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH,
+                SESSION_MANAGER_BUS_NAME, "ListSilos", "", (),
+                parsed, error, timeout=3.0)
+        except dbus.DBusException as exc:
+            error(exc)
+            return None
+
     def create(self, name: str, uid: int) -> None:
         self._call("CreateSilo", str(name), int(uid))
 
@@ -1369,13 +1405,14 @@ class NewSiloDialog(QDialog):
 class SilosTab(QWidget):
     """Tab listing silos with state badges + lifecycle action buttons.
 
-    Refreshes on SiloChanged or after a successful action. Refuses to
+    Refreshes periodically, on SiloChanged, or after a successful action. Refuses to
     construct without a SessionManagerBridge — the tab is gated at
     MainWindow startup based on whether the system bus has the
     SessionManager1 well-known name.
     """
 
-    COLUMNS = ("name", "uid", "state", "autostart")
+    COLUMNS = ("name", "uid", "state", "autostart", "runtime observation")
+    OBSERVATION_REFRESH_MS = 5000
     STATE_COLOURS = {
         "Created":  QColor("#a0a0a0"),
         "Active":   QColor("#7bc97b"),
@@ -1405,6 +1442,10 @@ class SilosTab(QWidget):
         self.model = QStandardItemModel(self)
         self.model.setHorizontalHeaderLabels(list(self.COLUMNS))
         self.table.setModel(self.model)
+        self._observation_deadlines = {}
+        self._read_generation = 0
+        self._pending_generation = None
+        self._pending_call = None
 
         btns = QHBoxLayout()
         self.btn_new = QPushButton("+ New silo"); self.btn_new.setObjectName("btn_new_silo")
@@ -1435,26 +1476,129 @@ class SilosTab(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(200)
-        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.timeout.connect(self._refresh_observations)
         self.session.siloChanged.connect(
-            lambda _n, _s: self._refresh_timer.start())
+            lambda _n, _s: self._schedule_observation_refresh())
 
-    def refresh(self) -> None:
+        # Same-result samples and expiry do not emit SiloChanged. Polling keeps
+        # rendered evidence current even when lifecycle and status stay stable.
+        self._observation_timer = QTimer(self)
+        self._observation_timer.setInterval(self.OBSERVATION_REFRESH_MS)
+        self._observation_timer.timeout.connect(self._refresh_observations)
+        self._observation_timer.start()
+        self._expiry_timer = QTimer(self)
+        self._expiry_timer.setInterval(1000)
+        self._expiry_timer.timeout.connect(self._expire_observations)
+        self._expiry_timer.start()
+        self._read_timeout = QTimer(self)
+        self._read_timeout.setSingleShot(True)
+        self._read_timeout.setInterval(3000)
+        self._read_timeout.timeout.connect(self._observation_timeout)
+
+    def _invalidate_observation_read(self) -> None:
+        self._read_generation += 1
+        self._pending_generation = None
+        self._read_timeout.stop()
+        if self._pending_call is not None:
+            self._pending_call.cancel()
+            self._pending_call = None
+
+    def _schedule_observation_refresh(self) -> None:
+        self._invalidate_observation_read()
+        self._refresh_timer.start()
+
+    def _mark_observations_unknown(self, reason: str) -> None:
+        self._observation_deadlines.clear()
+        for i in range(self.model.rowCount()):
+            self.model.item(i, 4).setText("unknown")
+            self.model.item(i, 4).setToolTip(reason)
+
+    def _expire_observations(self) -> None:
+        now = _time.monotonic()
+        for i in range(self.model.rowCount()):
+            name = self.model.item(i, 0).text()
+            deadline = self._observation_deadlines.get(name)
+            if deadline is not None and now >= deadline:
+                self.model.item(i, 4).setText("unknown")
+                self.model.item(i, 4).setToolTip("Runtime observation expired; awaiting fresh evidence")
+                del self._observation_deadlines[name]
+
+    def _observation_timeout(self) -> None:
+        self._invalidate_observation_read()
+        self._mark_observations_unknown("Runtime observation unavailable: refresh timed out")
+
+    def _refresh_observations(self) -> None:
+        if self._pending_generation is not None:
+            return
+        self._read_generation += 1
+        generation = self._read_generation
+        self._pending_generation = generation
+        began = _time.monotonic()
+        self._read_timeout.start()
+
+        def finished(rows=None, error=None):
+            if self._pending_generation != generation or self._read_generation != generation:
+                return
+            self._pending_generation = None
+            self._pending_call = None
+            self._read_timeout.stop()
+            if error is not None:
+                self._mark_observations_unknown("Runtime observation unavailable: refresh failed")
+                return
+            previous = {self.model.item(i, 0).text(): self.model.item(i, 0).data(Qt.ItemDataRole.UserRole + 1)
+                        for i in range(self.model.rowCount())}
+            if any(r.get("runtime_incarnation") == previous.get(r.get("name"), {}).get("runtime_incarnation")
+                   and r.get("operation_generation", 0) < previous.get(r.get("name"), {}).get("operation_generation", 0)
+                   for r in rows):
+                self._mark_observations_unknown("Runtime observation unavailable: outdated reply")
+                return
+            self._render_silos(rows, elapsed=_time.monotonic() - began)
+
+        pending = self.session.list_silos_async(
+            lambda rows: finished(rows=rows), lambda error: finished(error=error))
+        if self._pending_generation == generation:
+            self._pending_call = pending
+
+    def refresh(self, *, background: bool = False) -> None:
+        self._invalidate_observation_read()
         try:
             rows = self.session.list_silos()
         except dbus.DBusException as e:
+            if background:
+                # Failed polling cannot leave old affirmative evidence visible.
+                self._mark_observations_unknown("Runtime observation unavailable: refresh failed")
+                return
             title, label = _friendly_broker_error(e)
             QMessageBox.warning(self, title,
                                 f"Couldn't list silos.\n\n{label}")
             return
+        self._render_silos(rows)
+
+    def _render_silos(self, rows, *, elapsed: float = 0.0) -> None:
+        selected = self._selected_row()
+        selected_name = selected.get("name") if selected is not None else None
+        selected_incarnation = selected.get("runtime_incarnation") if selected is not None else None
+        self._observation_deadlines.clear()
+        now = _time.monotonic()
         self.model.removeRows(0, self.model.rowCount())
+        selected_index = None
         for r in rows:
             items = [
                 QStandardItem(str(r.get("name", ""))),
                 QStandardItem(str(r.get("uid", ""))),
                 QStandardItem(str(r.get("state", ""))),
                 QStandardItem("yes" if r.get("autostart") else "no"),
+                QStandardItem(str(r.get("observed_status", "unknown"))),
             ]
+            items[4].setToolTip(str(r.get("observed_reason", "")) +
+                                f"\nObserved at: {r.get('observed_at', 0)}; generation: {r.get('operation_generation', 0)}")
+            # Backend monotonic TTL avoids wall-clock drift. Subtracting the
+            # entire request duration conservatively includes transit delay.
+            ttl = min(30.0, max(0.0, float(r.get("observed_ttl_seconds", 0)))) - elapsed
+            if ttl > 0:
+                self._observation_deadlines[str(r.get("name", ""))] = now + ttl
+            else:
+                items[4].setText("unknown")
             colour = self.STATE_COLOURS.get(str(r.get("state", "")))
             if colour is not None:
                 items[2].setForeground(colour)
@@ -1462,6 +1606,16 @@ class SilosTab(QWidget):
                 it.setEditable(False)
             items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
             self.model.appendRow(items)
+            if (selected_name is not None and r.get("name") == selected_name
+                    and r.get("runtime_incarnation") == selected_incarnation):
+                selected_index = self.model.rowCount() - 1
+        # A refresh may reorder or remove silos. Preserve action targeting by
+        # name and incarnation; a replaced silo requires a new selection.
+        if selected_index is not None:
+            self.table.selectRow(selected_index)
+        else:
+            self.table.clearSelection()
+            self.table.setCurrentIndex(self.model.index(-1, -1))
         self.table.resizeColumnsToContents()
 
     def _selected_row(self) -> dict | None:
