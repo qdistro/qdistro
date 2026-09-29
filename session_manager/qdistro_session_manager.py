@@ -449,8 +449,9 @@ class Silo:
     start_unresolved: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        age = time.monotonic() - self.observed_monotonic
         fresh = (self.observed_monotonic > 0
-                 and time.monotonic() - self.observed_monotonic < 30)
+                 and 0 <= age < 30)
         return {
             "name": self.name,
             "uid": int(self.uid),
@@ -464,6 +465,7 @@ class Silo:
             "observed_status": self.observed_status if fresh else "unknown",
             "observed_reason": self.observed_reason if fresh else "observation stale or unavailable",
             "observed_at": self.observed_at,
+            "observed_ttl_seconds": 30 - age if fresh else 0.0,
             "operation_generation": self.operation_generation,
         }
 

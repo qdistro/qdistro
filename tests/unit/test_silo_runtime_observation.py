@@ -93,6 +93,22 @@ def test_ordinary_start_failure_is_visible(tmp_path):
     assert store.get('work').state == sm.State.STOPPED
 
 
+def test_remaining_validity_uses_monotonic_age_and_expires(tmp_path, monkeypatch):
+    store, ops = store_at(tmp_path)
+    silo = store.get('work')
+    silo.observed_monotonic = 100.0
+    silo.observed_status = 'launcher-running'
+    monkeypatch.setattr(sm.time, 'monotonic', lambda: 105.0)
+    assert silo.to_dict()['observed_ttl_seconds'] == 25.0
+    monkeypatch.setattr(sm.time, 'monotonic', lambda: 130.0)
+    assert silo.to_dict()['observed_ttl_seconds'] == 0.0
+    assert silo.to_dict()['observed_status'] == 'unknown'
+    # Even an anomalous backwards sample age cannot grant fresh evidence.
+    monkeypatch.setattr(sm.time, 'monotonic', lambda: 95.0)
+    assert silo.to_dict()['observed_ttl_seconds'] == 0.0
+    assert silo.to_dict()['observed_status'] == 'unknown'
+
+
 @pytest.mark.parametrize('job,active,exists,running,expected', [
     ('0', 'inactive', 0, 'false', 'unknown'),
     ('0', 'failed', 0, 'true', 'unknown'),
