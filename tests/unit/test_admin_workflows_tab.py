@@ -171,3 +171,14 @@ def test_missing_preview_does_not_release(qapp):
     tab.runs_table.selectRow(0)
     tab.approve_selected()
     br.approve_workflow_run.assert_not_called()
+
+
+def test_cleanup_failure_is_visible_separately_from_completed_task(qapp):
+    run = {"run_id":"done", "workflow_name":"wf", "state":"completed",
+           "cleanup_state":"unresolved", "cleanup_pending":1,
+           "cleanup_error":"channel cleanup attempts exhausted; requires review"}
+    tab = WorkflowsTab(_broker([], [run]))
+    assert tab._runs_model.item(0, 2).text() == "completed"
+    assert tab._runs_model.item(0, 6).text() == "unresolved"
+    assert tab._runs_model.item(0, 7).text() == "1"
+    assert "requires review" in tab._runs_model.item(0, 8).text()

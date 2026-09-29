@@ -251,3 +251,18 @@ class TestApproveWorkflowRunAuditOrdering:
         assert row["action"] == "qdistro.workflow.approve:run-1"
         assert row["decision"] is True
         assert row["approver_uid"] == ADMIN
+
+
+def test_workflow_history_exposes_cleanup_outcome_through_real_broker_surface(tmp_path):
+    audit = WorkflowAuditLogger(str(tmp_path / "cleanup.sqlite"))
+    engine = WorkflowEngine(audit_logger=audit, own_dbus_loop=False)
+    audit.log_run_start("residue", "wf", {})
+    audit.log_run_complete("residue", "wf")
+    audit.log_cleanup_state("residue", "unresolved", 1, "requires review")
+    broker = _broker(engine)
+    rows = broker.ListWorkflowRuns(10, sender=":1", conn=None)
+    assert rows[0]["state"] == "completed"
+    assert rows[0]["cleanup_state"] == "unresolved"
+    assert rows[0]["cleanup_pending"] == 1
+    assert rows[0]["cleanup_error"] == "requires review"
+    engine.shutdown(); audit.close()

@@ -18,8 +18,8 @@ delivery to privileged tasks"):
     buffer and, transiently, in whatever channel the method requires
     (a child's env, a pipe, an agent, a tmpfs file). It is never written
     to a world-readable path and never returned in metadata.
-  - ``scrub()`` is idempotent and best-effort-total: it revokes the
-    channel (kill agent, close fds, umount+unlink) and wipes the buffer.
+  - ``scrub()`` reports success only after channel revocation. A failed
+    attempt stays retryable and always wipes the buffer.
   - Mechanisms that cannot guarantee RAM-only storage fail closed: the
     tmpfs method raises rather than fall back to an on-disk file.
   - Defense-in-depth against engine crash: the ssh-agent key is added
@@ -36,6 +36,9 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
+from pathlib import Path
+from collections.abc import Callable
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -69,27 +72,54 @@ class DeliveryError(Exception):
 
 
 def _run_in_new_session(command: list[str], env: dict[str, str],
-                        pass_fds: tuple[int, ...] = ()) -> tuple[int, int]:
-    """Spawn ``command`` as a new session leader and wait for it.
-
-    Returning the leader pid lets the caller ``killpg`` the whole group on
-    scrub so a backgrounded descendant cannot outlive the secret. Returns
-    ``(returncode, pgid)``.
-    """
+                        register: Callable[[subprocess.Popen], None],
+                        pass_fds: tuple[int, ...] = ()) -> int:
+    """Wait without reaping: the owned leader pins its process-group identity."""
     proc = subprocess.Popen(  # noqa: S603
         command, env=env, pass_fds=pass_fds, start_new_session=True)
-    pgid = proc.pid  # session leader: pgid == pid
-    proc.wait()
-    return proc.returncode, pgid
+    register(proc)
+    result = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+    return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
 
 
-def _killpg(pgid: int | None) -> None:
-    if pgid is None:
+def _group_alive(pgid: int) -> bool:
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdecimal():
+            continue
+        try:
+            data = Path(entry.path, "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        # comm is parenthesised and may contain spaces or closing parentheses.
+        fields = data.rsplit(")", 1)[1].split()
+        if int(fields[2]) == pgid and fields[0] not in ("Z", "X"):
+            return True
+    return False
+
+
+def _killpg(proc: subprocess.Popen | None) -> None:
+    if proc is None:
         return
+    # A reaped leader no longer pins the numeric PGID. Never signal a reused
+    # group after an external child reaper (or accidental Popen.poll/wait).
+    if proc.returncode is not None:
+        raise DeliveryError("process-group identity was already released")
     try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+    except ChildProcessError as e:
+        raise DeliveryError("process-group identity cannot be verified") from e
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
         pass
+    deadline = time.monotonic() + 2.0
+    while _group_alive(proc.pid):
+        if time.monotonic() >= deadline:
+            raise DeliveryError("process group still live after revocation")
+        time.sleep(0.01)
+    # Reap only after all live members have disappeared; retain the anchor on
+    # failure so a later retry can safely target this same group.
+    proc.wait(timeout=2.0)
 
 
 class SecretValue:
@@ -137,23 +167,29 @@ class DeliveryHandle(ABC):
     def __init__(self, secret: SecretValue):
         self._secret = secret
         self._scrubbed = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._cleanup_error: str | None = None
 
     @abstractmethod
     def _revoke(self) -> None:
         """Method-specific teardown (kill agent, close fds, umount...)."""
 
     def scrub(self) -> None:
-        """Revoke the channel and wipe the buffer. Idempotent."""
+        """Revoke the channel or raise; always wipe, and retry failed attempts."""
         with self._lock:
             if self._scrubbed:
                 return
-            self._scrubbed = True
             try:
                 self._revoke()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("scrub revoke for %s failed: %r",
-                               self.method, e)
+            except Exception:  # noqa: BLE001
+                # Backend diagnostics must never include secret-bearing command
+                # output. Keep only the failure class on the loggable surface.
+                self._cleanup_error = "revocation failed"
+                logger.warning("scrub revoke for %s failed", self.method)
+                raise
+            else:
+                self._scrubbed = True
+                self._cleanup_error = None
             finally:
                 self._secret.wipe()
 
@@ -163,7 +199,9 @@ class DeliveryHandle(ABC):
 
     def metadata(self) -> dict[str, Any]:
         """Loggable, secret-free description of this delivery."""
-        return {"method": self.method, "scrubbed": self._scrubbed}
+        return {"method": self.method, "scrubbed": self._scrubbed,
+                "buffer_wiped": self._secret.wiped,
+                "cleanup_error": self._cleanup_error}
 
 
 # ----------------------------------------------------------------------
@@ -198,7 +236,7 @@ class EnvDelivery(DeliveryHandle):
         self._var = var
         self._command = command
         self._base_env = base_env
-        self._pgid: int | None = None
+        self._process: subprocess.Popen | None = None
         self.returncode: int | None = None
 
     def deliver(self) -> None:
@@ -207,8 +245,8 @@ class EnvDelivery(DeliveryHandle):
         env = dict(self._base_env if self._base_env is not None else os.environ)
         env[self._var] = self._secret.as_str()
         try:
-            self.returncode, self._pgid = _run_in_new_session(
-                self._command, env)
+            self.returncode = _run_in_new_session(
+                self._command, env, lambda proc: setattr(self, "_process", proc))
         finally:
             # Drop our reference to the plaintext-bearing env dict.
             env[self._var] = ""
@@ -225,8 +263,8 @@ class EnvDelivery(DeliveryHandle):
     def _revoke(self) -> None:
         # Kill any backgrounded descendant still holding the secret in its
         # environment; the buffer wipe in scrub() handles our own copy.
-        _killpg(self._pgid)
-        self._pgid = None
+        _killpg(self._process)
+        self._process = None
 
     def metadata(self) -> dict[str, Any]:
         md = super().metadata()
@@ -259,7 +297,8 @@ class FdPassDelivery(DeliveryHandle):
         self._fd_env = fd_env
         self._base_env = base_env
         self._read_fd: int | None = None
-        self._pgid: int | None = None
+        self._fd_close_unknown = False
+        self._process: subprocess.Popen | None = None
         self.returncode: int | None = None
 
     # Bound well under a pipe's typical 64 KiB capacity: we write the
@@ -285,8 +324,9 @@ class FdPassDelivery(DeliveryHandle):
         env = dict(self._base_env if self._base_env is not None else os.environ)
         env[self._fd_env] = str(read_fd)
         try:
-            self.returncode, self._pgid = _run_in_new_session(
-                self._command, env, pass_fds=(read_fd,))
+            self.returncode = _run_in_new_session(
+                self._command, env, lambda proc: setattr(self, "_process", proc),
+                pass_fds=(read_fd,))
         finally:
             del env
         if self.returncode != 0:
@@ -299,14 +339,19 @@ class FdPassDelivery(DeliveryHandle):
     def _revoke(self) -> None:
         # Kill any backgrounded descendant that may still hold the
         # inherited read fd, then close our own end.
-        _killpg(self._pgid)
-        self._pgid = None
+        _killpg(self._process)
+        self._process = None
+        if self._fd_close_unknown:
+            raise DeliveryError("pipe close outcome is unknown; requires review")
         if self._read_fd is not None:
+            # Linux may release an FD even when close raises. Detach ownership
+            # before the one-shot close; a retry must never close a reused FD.
+            fd, self._read_fd = self._read_fd, None
             try:
-                os.close(self._read_fd)
+                os.close(fd)
             except OSError:
-                pass
-            self._read_fd = None
+                self._fd_close_unknown = True
+                raise
 
 
 # ----------------------------------------------------------------------
@@ -335,7 +380,7 @@ class SshAgentDelivery(DeliveryHandle):
         self._add_bin = ssh_add_bin
         self._dir: str | None = None
         self._sock: str | None = None
-        self._agent_pid: int | None = None
+        self._agent_process: subprocess.Popen | None = None
 
     def deliver(self) -> None:
         if shutil.which(self._agent_bin) is None:
@@ -344,19 +389,19 @@ class SshAgentDelivery(DeliveryHandle):
         self._dir = tempfile.mkdtemp(prefix="ssh-", dir=self._runtime_root)
         os.chmod(self._dir, 0o700)
         self._sock = os.path.join(self._dir, "agent.sock")
-        # Start the agent bound to our socket.
-        proc = subprocess.run(  # noqa: S603
-            [self._agent_bin, "-a", self._sock],
-            capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            raise DeliveryError(f"ssh-agent failed: {proc.returncode}")
-        for line in proc.stdout.splitlines():
-            if line.startswith("SSH_AGENT_PID="):
-                pid_s = line.split("=", 1)[1].split(";", 1)[0]
-                try:
-                    self._agent_pid = int(pid_s)
-                except ValueError:
-                    pass
+        # Foreground agent remains our owned child; an unreaped child identity
+        # cannot be recycled into an unrelated process before cleanup.
+        self._agent_process = subprocess.Popen(  # noqa: S603
+            [self._agent_bin, "-D", "-a", self._sock],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        deadline = time.monotonic() + 2.0
+        while not os.path.exists(self._sock):
+            result = os.waitid(os.P_PID, self._agent_process.pid,
+                               os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            if result is not None or time.monotonic() >= deadline:
+                raise DeliveryError("ssh-agent did not create its socket")
+            time.sleep(0.01)
         # Load the key from stdin with a TTL. OpenSSH rejects a private
         # key whose final line lacks a trailing newline ("error in
         # libcrypto" / "invalid format"); a vault that stores the value
@@ -372,7 +417,7 @@ class SshAgentDelivery(DeliveryHandle):
             add = subprocess.run(  # noqa: S603
                 [self._add_bin, "-t", str(self._ttl), "-"],
                 input=bytes(key_buf), env=env,
-                capture_output=True, check=False)
+                capture_output=True, check=False, timeout=5.0)
         finally:
             for i in range(len(key_buf)):
                 key_buf[i] = 0
@@ -387,14 +432,10 @@ class SshAgentDelivery(DeliveryHandle):
         return self._sock
 
     def _revoke(self) -> None:
-        if self._agent_pid is not None:
-            try:
-                os.kill(self._agent_pid, 15)
-            except OSError:
-                pass
-            self._agent_pid = None
-        if self._dir is not None and os.path.isdir(self._dir):
-            shutil.rmtree(self._dir, ignore_errors=True)
+        _killpg(self._agent_process)
+        self._agent_process = None
+        if self._dir is not None and os.path.lexists(self._dir):
+            shutil.rmtree(self._dir)
         self._dir = None
         self._sock = None
 
@@ -441,7 +482,7 @@ class TmpfsMountDelivery(DeliveryHandle):
         proc = subprocess.run(  # noqa: S603
             ["mount", "-t", "tmpfs", "-o",
              f"size={self._size},mode=0700", "tmpfs", target],
-            capture_output=True, text=True, check=False)
+            capture_output=True, text=True, check=False, timeout=5.0)
         if proc.returncode != 0:
             raise DeliveryError(
                 f"tmpfs mount failed (need privilege): "
@@ -451,30 +492,19 @@ class TmpfsMountDelivery(DeliveryHandle):
         if self._mounter is not None:
             self._mounter[1](target)
             return
-        r = subprocess.run(["umount", target],  # noqa: S603
-                           capture_output=True, text=True, check=False)
-        if r.returncode != 0:
-            # A busy mount must not pin the (already-zeroed) secret dir.
-            # Lazy-detach so it is released as soon as the last user exits.
-            lazy = subprocess.run(["umount", "-l", target],  # noqa: S603
-                                  capture_output=True, text=True, check=False)
-            if lazy.returncode != 0:
-                logger.error(
-                    "tmpfs umount of %s failed (%s) and lazy detach failed "
-                    "(%s); secret file content was zeroed before umount",
-                    target, r.stderr.strip(), lazy.stderr.strip())
+        _unmount_confirmed(target)
 
     def deliver(self) -> None:
         os.makedirs(self._runtime_root, mode=0o700, exist_ok=True)
         self._dir = tempfile.mkdtemp(prefix="tmpfs-", dir=self._runtime_root)
         os.chmod(self._dir, 0o700)
+        # A timeout does not prove the mount command failed. Record the
+        # obligation before invoking it, then reconcile actual mount state.
+        self._mounted = True
         try:
             self._do_mount(self._dir)
-            self._mounted = True
-        except DeliveryError:
-            # No tmpfs -> do NOT write plaintext to a persistent path.
-            shutil.rmtree(self._dir, ignore_errors=True)
-            self._dir = None
+        except Exception:
+            self._revoke()
             raise
         self._path = os.path.join(self._dir, self._filename)
         try:
@@ -503,7 +533,7 @@ class TmpfsMountDelivery(DeliveryHandle):
         return self._path
 
     def _revoke(self) -> None:
-        # Overwrite the file content before unmounting (cheap, RAM-backed).
+        error = None
         if self._path is not None and os.path.isfile(self._path):
             try:
                 size = os.path.getsize(self._path)
@@ -512,15 +542,17 @@ class TmpfsMountDelivery(DeliveryHandle):
                     f.flush()
                     os.fsync(f.fileno())
                 os.unlink(self._path)
-            except OSError:
-                pass
+            except OSError as e:
+                error = e
         if self._mounted and self._dir is not None:
             self._do_umount(self._dir)
             self._mounted = False
-        if self._dir is not None and os.path.isdir(self._dir):
-            shutil.rmtree(self._dir, ignore_errors=True)
+        if self._dir is not None and os.path.lexists(self._dir):
+            shutil.rmtree(self._dir)
         self._dir = None
         self._path = None
+        if error is not None:
+            raise DeliveryError("secret-file wipe failed") from error
 
 
 # ----------------------------------------------------------------------
@@ -535,32 +567,38 @@ _HANDLE_CLASSES = {
 }
 
 
-def reap_runtime_root(root: str = _DEFAULT_RUNTIME_ROOT) -> int:
-    """Tear down stale per-run secret dirs left by a crashed engine.
+def _unmount_confirmed(target: str) -> None:
+    if not os.path.ismount(target):
+        return
+    result = subprocess.run(["umount", target],  # noqa: S603
+                            capture_output=True, check=False, timeout=5.0)
+    if result.returncode != 0 or os.path.ismount(target):
+        # Lazy detach only removes the namespace entry, leaving open references
+        # usable. It is not confirmed revocation and must not erase retry state.
+        raise DeliveryError("tmpfs unmount not confirmed")
 
-    Best-effort: unmounts any tmpfs still mounted under each leftover
-    directory and removes it. Called at engine startup so a hard crash
-    can't leave a tmpfs/ssh-agent secret readable until reboot. The root
-    is a fixed, root-owned path so this never touches arbitrary mounts.
-    Returns the number of entries reaped.
+
+def reap_runtime_root(root: str = _DEFAULT_RUNTIME_ROOT) -> int:
+    """Reap confirmed tmpfs residue; report unknown agents without killing PIDs.
+
+    An SSH directory alone has no trustworthy agent identity after a crash.
+    TTL/service supervision still apply, but cannot establish successful cleanup.
     """
     if not os.path.isdir(root):
         return 0
     reaped = 0
-    for entry in os.listdir(root):
-        path = os.path.join(root, entry)
+    for entry in os.scandir(root):
+        if not entry.is_dir(follow_symlinks=False) or not entry.name.startswith("tmpfs-"):
+            logger.warning("unresolved workflow secret residue: %s", entry.path)
+            continue
         try:
-            r = subprocess.run(["umount", path],  # noqa: S603
-                               capture_output=True, check=False)
-            if r.returncode != 0:
-                # Busy mount: lazy-detach so it can't pin the dir.
-                subprocess.run(["umount", "-l", path],  # noqa: S603
-                               capture_output=True, check=False)
-            shutil.rmtree(path, ignore_errors=True)
+            _unmount_confirmed(entry.path)
+            shutil.rmtree(entry.path)
+            if os.path.lexists(entry.path):
+                raise DeliveryError("secret directory remains")
             reaped += 1
-        except Exception as e:  # noqa: BLE001
-            logger.warning("reap of stale secret dir %s failed: %r",
-                           path, e)
+        except Exception:  # noqa: BLE001
+            logger.warning("reap of stale secret dir %s failed", entry.path)
     return reaped
 
 

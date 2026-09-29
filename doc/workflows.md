@@ -444,3 +444,51 @@ execution-definition consistency guarantee, not immutable external authority.
 - [guards.md](guards.md)
 - [vm-definitions.md](vm-definitions.md)
 - [permissions.md](permissions.md)
+
+### Secret-channel cleanup outcomes
+
+Delivery handles mark `scrubbed` only after their backend confirms revocation.
+Every attempt wipes the in-memory buffer; failures raise and retain resource
+identity for retry. Buffer wiping does not retract material already copied by a
+consumer. `metadata()` reports buffer wiping separately from channel cleanup.
+
+For env/fd children, Linux `waitid(WNOWAIT)` observes command completion without
+reaping the session leader. The owned leader remains a zombie until scrub, pinning
+the group ID against PID reuse. Cleanup signals only that owned group, waits up to
+two seconds for live members to disappear, then reaps the leader. An external
+reaper invalidates this identity and cleanup reports unresolved rather than
+signalling a potentially reused group. SSH agents run in foreground as owned
+children and use the same identity protection. This retains one child process
+record per delivered command until cleanup.
+
+Tmpfs cleanup requires ordinary unmount and observed mount disappearance. Lazy
+detach is not successful revocation. Startup reaping counts only successfully
+removed tmpfs directories and reports failed mounts, unknown entries and stale
+SSH directories as unresolved. An SSH directory has no trustworthy process
+identity after a crash; existing key TTL and service supervision still apply.
+These backend guarantees do not provide durable cleanup manifests or replay
+workflow side effects.
+
+Workflow task state and channel cleanup are separate outcomes. History and the
+admin workflow table show `cleanup_state`, unresolved delivery count and a
+nonsecret cleanup error alongside task state. A completed task can therefore
+have unresolved cleanup and must still be reviewed. Each delivery is owned before
+backend creation; partial, step-scoped and shutdown-time failures remain owned.
+A sweep attempts each unconfirmed backend once, with at most three backend
+attempts per handle across sweeps. Exhaustion retains the obligation for review
+rather than treating it as scrubbed. `scrub_all_runs()` and shutdown sweep this
+queue; no automatic side-effect replay occurs.
+
+Scrub audit success is emitted only after backend confirmation, once per delivery
+ID. A missing audit acknowledgement retains ownership even when the channel has
+been revoked; retrying audit does not invoke a confirmed backend again. Legacy
+history lacks verified cleanup evidence and is shown as unknown.
+
+At engine startup, durable pending approvals expire and prior queued/running
+work is marked interrupted. No approval, step or remote side effect is replayed.
+Interrupted cleanup stays unknown and requires review, including any recorded
+unresolved delivery count. Cleanup identities live only in the owning engine;
+restart does not reconstruct handles or signal numeric PIDs. A durable resource
+manifest and a write-before-create provenance protocol remain deferred, so
+crashes during resource creation cannot be claimed as automatically reconciled.
+History retention preserves pending, unresolved and unknown cleanup rows.

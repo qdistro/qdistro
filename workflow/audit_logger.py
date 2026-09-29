@@ -83,6 +83,11 @@ class WorkflowAuditLogger:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(workflow_runs)")}
         if "definition_digest" not in columns:
             self._conn.execute("ALTER TABLE workflow_runs ADD COLUMN definition_digest TEXT")
+        for name, definition in (("cleanup_state", "TEXT NOT NULL DEFAULT 'unknown'"),
+                                 ("cleanup_pending", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("cleanup_error", "TEXT NOT NULL DEFAULT ''")):
+            if name not in columns:
+                self._conn.execute(f"ALTER TABLE workflow_runs ADD COLUMN {name} {definition}")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         try:
@@ -104,8 +109,8 @@ class WorkflowAuditLogger:
         """Persist automatic work before submitting it to the worker pool."""
         self._conn.execute(
             """INSERT INTO workflow_runs
-               (run_id, workflow_name, state, started_at, trigger_context, definition_digest)
-               VALUES (?, ?, 'running', ?, ?, ?)""",
+               (run_id, workflow_name, state, started_at, trigger_context, definition_digest, cleanup_state)
+               VALUES (?, ?, 'running', ?, ?, ?, 'not_needed')""",
             (run_id, workflow_name, time.time(), json.dumps(trigger_context, default=str), digest))
         self._log_event(run_id, workflow_name, "run_queued", "automatic run queued",
                         {"definition_digest": digest})
@@ -116,8 +121,8 @@ class WorkflowAuditLogger:
         now = time.time()
         self._conn.execute(
             """INSERT INTO workflow_runs
-               (run_id, workflow_name, state, started_at, trigger_context)
-               VALUES (?, ?, 'pending', ?, ?)""",
+               (run_id, workflow_name, state, started_at, trigger_context, cleanup_state)
+               VALUES (?, ?, 'pending', ?, ?, 'not_needed')""",
             (run_id, workflow_name, now,
              json.dumps(trigger_context, default=str)),
         )
@@ -138,8 +143,8 @@ class WorkflowAuditLogger:
         now = time.time()
         self._conn.execute(
             """INSERT INTO workflow_runs
-               (run_id, workflow_name, state, started_at, trigger_context)
-               VALUES (?, ?, 'running', ?, ?)
+               (run_id, workflow_name, state, started_at, trigger_context, cleanup_state)
+               VALUES (?, ?, 'running', ?, ?, 'not_needed')
                ON CONFLICT(run_id) DO UPDATE SET
                    state='running', started_at=excluded.started_at""",
             (run_id, workflow_name, now,
@@ -202,17 +207,62 @@ class WorkflowAuditLogger:
         )
 
     def log_secret_scrub(self, run_id: str, workflow_name: str,
-                         secret_item: str) -> None:
-        """Record that a delivered secret was scrubbed."""
+                         secret_item: str, delivery_id: str | None = None) -> None:
+        """Record confirmed revocation once per delivery, including audit retries."""
+        details = {"delivery_id": delivery_id} if delivery_id else {}
+        if delivery_id and self._conn.execute(
+                "SELECT 1 FROM workflow_audit WHERE run_id=? AND event_type='secret_scrub' AND details=?",
+                (run_id, json.dumps(details))).fetchone():
+            return
         self._log_event(run_id, workflow_name, "secret_scrub",
-                        f"scrubbed secret: {secret_item}")
+                        f"scrubbed secret: {secret_item}", details)
+
+    def log_cleanup_state(self, run_id: str, state: str, pending: int, error: str) -> None:
+        self._conn.execute(
+            "UPDATE workflow_runs SET cleanup_state=?, cleanup_pending=?, cleanup_error=? WHERE run_id=?",
+            (state, pending, error, run_id))
+
+    def reconcile_interrupted_runs(self) -> int:
+        """Terminalize prior instance work; never recreate approvals or replay effects."""
+        rows = self._conn.execute(
+            "SELECT run_id, workflow_name, state FROM workflow_runs WHERE state IN ('pending','running','queued')"
+        ).fetchall()
+        updated = []
+        failed = False
+        # Terminalize every row before emitting events. One broken audit event
+        # must not leave later approvals/executions looking live after restart.
+        for run_id, name, state in rows:
+            terminal = "expired" if state == "pending" else "interrupted"
+            error = ("approval expired after engine restart" if state == "pending" else
+                     "execution interrupted; effects and cleanup require review")
+            try:
+                self._conn.execute(
+                    "UPDATE workflow_runs SET state=?, completed_at=?, error=?, cleanup_state='unknown', "
+                    "cleanup_error='prior process cleanup cannot be confirmed; requires review' WHERE run_id=?",
+                    (terminal, time.time(), error, run_id))
+            except Exception:
+                failed = True
+                continue
+            updated.append((run_id, name, state, error))
+        for run_id, name, state, error in updated:
+            try:
+                self._log_event(run_id, name, "run_reconciled", error,
+                                {"prior_state": state, "cleanup_state": "unknown"})
+            except Exception:
+                failed = True
+        if failed:
+            # Refuse engine startup when accounting is incomplete; never start
+            # triggers or replay effects merely because some rows were updated.
+            raise RuntimeError("interrupted workflow reconciliation audit failed; requires review")
+        return len(rows)
 
     def recent_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return the N most-recent workflow runs."""
         limit = max(1, min(int(limit), 10000))
         cur = self._conn.execute(
             """SELECT run_id, workflow_name, state, started_at,
-                      completed_at, trigger_context, error, definition_digest
+                      completed_at, trigger_context, error, definition_digest,
+                      cleanup_state, cleanup_pending, cleanup_error
                FROM workflow_runs ORDER BY started_at DESC LIMIT ?""",
             (limit,),
         )
@@ -226,6 +276,7 @@ class WorkflowAuditLogger:
                 "trigger_context": r[5],
                 "error": r[6],
                 "definition_digest": r[7] or "",
+                "cleanup_state": r[8], "cleanup_pending": r[9], "cleanup_error": r[10],
             }
             for r in cur.fetchall()
         ]
@@ -253,13 +304,15 @@ class WorkflowAuditLogger:
         ]
 
     def gc(self, older_than_seconds: int) -> int:
-        """Delete run records older than the given threshold."""
+        """Delete old confirmed history; unresolved cleanup remains visible."""
         cutoff = time.time() - older_than_seconds
         # Delete steps for old runs first.
         self._conn.execute(
             """DELETE FROM workflow_steps
                WHERE run_id IN (
                    SELECT run_id FROM workflow_runs WHERE started_at < ?
+                   AND cleanup_state NOT IN ('pending','unresolved','unknown')
+                   AND state NOT IN ('pending','running','queued')
                )""",
             (cutoff,),
         )
@@ -267,11 +320,15 @@ class WorkflowAuditLogger:
             """DELETE FROM workflow_audit
                WHERE run_id IN (
                    SELECT run_id FROM workflow_runs WHERE started_at < ?
+                   AND cleanup_state NOT IN ('pending','unresolved','unknown')
+                   AND state NOT IN ('pending','running','queued')
                )""",
             (cutoff,),
         )
         cur = self._conn.execute(
-            "DELETE FROM workflow_runs WHERE started_at < ?",
+            "DELETE FROM workflow_runs WHERE started_at < ? "
+            "AND cleanup_state NOT IN ('pending','unresolved','unknown') "
+            "AND state NOT IN ('pending','running','queued')",
             (cutoff,),
         )
         return cur.rowcount or 0
