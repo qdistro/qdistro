@@ -653,7 +653,10 @@ model but lower-level than the owner-facing health and bootstrap states above.
 `ListSilos` retains the conservative lifecycle `state` used for stop, delete
 and broker policy. It additionally returns `observed_status`, `observed_reason`,
 `observed_at` (epoch seconds), `observed_ttl_seconds` (remaining validity computed
-from the daemon's monotonic clock), and `operation_generation`. The admin silo table
+from the daemon's monotonic clock), `operation_generation`, and an opaque
+`runtime_incarnation` identifying the current in-memory silo object. Incarnations
+are never persisted and change after daemon restart or silo recreation; generation
+counters are comparable only within one incarnation. The admin silo table
 shows the runtime observation separately from lifecycle state and refreshes it
 every five seconds, including when the status stays the same. Status is one of
 `starting`, `launcher-running`, `stopped`, `failed` or `unknown`.
@@ -664,6 +667,9 @@ using a monotonic deadline that subtracts the full request duration from the
 server's remaining validity. Delayed or outdated replies cannot extend evidence
 past that deadline, and failed reads display unknown. Polling never retries
 lifecycle effects.
+Invalidating a read cancels its local pending call and ignores late replies;
+this does not retract a request already sent to the daemon. A replaced silo
+clears the table selection so actions require selecting its new incarnation.
 
 A background observer samples systemd's launcher state and pending job, plus
 container existence/running status for tier-2 workloads or the recursive

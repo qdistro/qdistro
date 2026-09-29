@@ -181,25 +181,62 @@ class DelayedProxy:
     def ListSilos(self, **kwargs):
         import json
 
+        assert "reply_handler" not in kwargs, "Automatic reads must use Connection.call_async, not ProxyObject"
         rows = [s.to_dict() for s in self.store.list_silos()]
-        if "reply_handler" not in kwargs:
-            return json.dumps(rows)
-        assert kwargs["timeout"] == 3.0
-        pending = PendingRead()
-        self.requests.append((kwargs, json.dumps(rows), pending))
-        return pending
+        return json.dumps(rows)
 
 
 @pytest.fixture
 def real_async_tab(tab_with_store, monkeypatch):
     import dbus
+    import dbus.connection
+    import dbus.lowlevel
+    import json
 
     old_tab, _, store, clock = tab_with_store
     old_tab._observation_timer.stop()
     old_tab._expiry_timer.stop()
     proxy = DelayedProxy(store)
     options = []
+    # Reply messages are transport fixtures; outgoing calls and PendingCall
+    # propagation execute the installed Connection.call_async implementation.
+    class ReplyMessage:
+        def __init__(self, raw):
+            self.raw = raw
+        def get_args_list(self, **kwargs):
+            return [self.raw]
+    class ErrorMessage:
+        def __init__(self, error):
+            self.error = error
+        def get_args_list(self, **kwargs):
+            return [str(self.error)]
+        def get_error_name(self):
+            return self.error.get_dbus_name() or "org.freedesktop.DBus.Error.Failed"
+    monkeypatch.setattr(dbus.connection, "MethodReturnMessage", ReplyMessage)
+    monkeypatch.setattr(dbus.connection, "ErrorMessage", ErrorMessage)
     class Bus:
+        # Execute the installed dbus-python Connection implementation, including
+        # real message construction and its PendingCall return path. Only the
+        # actual wire send is replaced with this delayed transport boundary.
+        call_async = dbus.connection.Connection.call_async
+
+        def send_message_with_reply(self, message, reply, timeout, *, require_main_loop):
+            assert message.get_destination() == sm.BUS_NAME
+            assert message.get_path() == sm.OBJ_PATH
+            assert message.get_interface() == sm.BUS_NAME
+            assert message.get_member() == "ListSilos"
+            assert message.get_signature() == ""
+            assert timeout == 3.0
+            assert require_main_loop is True
+            def success(raw):
+                reply(ReplyMessage(raw))
+            def failure(error):
+                reply(ErrorMessage(error))
+            pending = PendingRead()
+            raw = json.dumps([s.to_dict() for s in proxy.store.list_silos()])
+            proxy.requests.append(({"reply_handler": success, "error_handler": failure}, raw, pending))
+            return pending
+
         def get_object(self, *args, **kwargs):
             options.append(kwargs)
             return proxy
@@ -207,7 +244,7 @@ def real_async_tab(tab_with_store, monkeypatch):
             pass
     monkeypatch.setattr(dbus, "SystemBus", Bus)
     bridge = SessionManagerBridge()
-    assert options == [{}, {"introspect": False, "follow_name_owner_changes": True}]
+    assert options == [{}]  # Automatic reads construct no ProxyObject at all.
     tab = SilosTab(bridge)
     tab.refresh()
     yield tab, bridge, proxy, store, clock
@@ -309,7 +346,7 @@ def test_lifecycle_event_invalidates_reply_and_malformed_or_owner_loss_is_unknow
     tab._refresh_observations()
     proxy.requests[2][0]["error_handler"](dbus.DBusException("owner lost"))
     assert tab.model.item(row_index(tab, "work"), 4).text() == "unknown"
-    # The same non-introspecting, well-known-name proxy can read the new owner.
+    # Direct calls route to the well-known name, so the next owner can reply.
     clock.update(mono=105.0, wall=1005.0)
     store.observe_runtime_once()
     tab._refresh_observations()
@@ -317,3 +354,66 @@ def test_lifecycle_event_invalidates_reply_and_malformed_or_owner_loss_is_unknow
     fresh["reply_handler"](fresh_raw)
     assert "Observed at: 1005.0;" in tab.model.item(row_index(tab, "work"), 4).toolTip()
     assert tab._selected_row()["name"] == "work"
+
+
+def test_reloaded_store_resets_counter_without_rejecting_fresh_rows(real_async_tab, tmp_path):
+    tab, bridge, proxy, store, clock = real_async_tab
+    tab.table.selectRow(row_index(tab, "work"))
+    old_incarnation = store.get("work").runtime_incarnation
+    store.freeze("work")
+    store.delete("other")
+    store.create("new", 2002)
+    reloaded = sm._SiloStore(store._ops, config_path=store._config_path)
+    assert reloaded.get("work").operation_generation == 0
+    assert reloaded.get("work").runtime_incarnation != old_incarnation
+    assert "runtime_incarnation" not in store._config_path.read_text()
+    proxy.store = reloaded
+    reloaded.observe_runtime_once()
+    tab._refresh_observations()
+    callbacks, raw, _ = proxy.requests[-1]
+    callbacks["reply_handler"](raw)
+    assert {tab.model.item(i, 0).text() for i in range(tab.model.rowCount())} == {"work", "new"}
+    idx = row_index(tab, "work")
+    assert tab.model.item(idx, 2).text() == "Frozen"
+    assert tab.model.item(idx, 1).text() == "2000"
+    assert tab._selected_row() is None
+    assert tab.model.item(idx, 0).data(257)["runtime_incarnation"] == reloaded.get("work").runtime_incarnation
+
+
+def test_same_name_recreated_silo_updates_uid_and_clears_selection(real_async_tab):
+    tab, bridge, proxy, store, clock = real_async_tab
+    tab.table.selectRow(row_index(tab, "work"))
+    old_incarnation = store.get("work").runtime_incarnation
+    store.stop("work", 5)
+    store.delete("work")
+    store.create("work", 2003)
+    assert store.get("work").runtime_incarnation != old_incarnation
+    assert store.get("work").operation_generation == 0
+    tab._refresh_observations()
+    callbacks, raw, _ = proxy.requests[-1]
+    callbacks["reply_handler"](raw)
+    idx = row_index(tab, "work")
+    assert tab.model.item(idx, 1).text() == "2003"
+    assert tab.model.item(idx, 2).text() == "Created"
+    assert tab._selected_row() is None
+
+
+def test_connection_handle_stays_owned_and_invalidation_cancels_locally(real_async_tab):
+    tab, bridge, proxy, store, clock = real_async_tab
+    tab._refresh_observations()
+    callbacks, raw, pending = proxy.requests[0]
+    assert tab._pending_call is pending
+    assert not pending.cancelled
+    tab._refresh_observations()
+    assert len(proxy.requests) == 1
+    tab._invalidate_observation_read()
+    assert pending.cancelled
+    assert tab._pending_call is None
+    assert tab._pending_generation is None
+    # Cancellation owns the local callback; a sent remote message can still
+    # produce a late response, which must not replace a newer request's data.
+    tab._refresh_observations()
+    newer = tab._pending_call
+    callbacks["reply_handler"](raw)
+    assert tab._pending_call is newer
+    assert tab._pending_generation is not None

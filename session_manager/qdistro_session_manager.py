@@ -446,6 +446,7 @@ class Silo:
     observed_at: float = 0.0
     observed_monotonic: float = 0.0
     operation_generation: int = 0
+    runtime_incarnation: str = field(default_factory=lambda: secrets.token_hex(16))
     start_unresolved: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -467,6 +468,7 @@ class Silo:
             "observed_at": self.observed_at,
             "observed_ttl_seconds": 30 - age if fresh else 0.0,
             "operation_generation": self.operation_generation,
+            "runtime_incarnation": self.runtime_incarnation,
         }
 
 

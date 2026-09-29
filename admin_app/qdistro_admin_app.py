@@ -1289,9 +1289,6 @@ class SessionManagerBridge(QObject):
         self.bus = dbus.SystemBus()
         self._proxy = self.bus.get_object(
             SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH)
-        self._observation_proxy = self.bus.get_object(
-            SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH,
-            introspect=False, follow_name_owner_changes=True)
         self.bus.add_signal_receiver(
             self._on_changed, signal_name="SiloChanged",
             dbus_interface=SESSION_MANAGER_BUS_NAME,
@@ -1339,7 +1336,9 @@ class SessionManagerBridge(QObject):
                     generation = row.get("operation_generation", 0)
                     if (not math.isfinite(ttl) or not 0 <= ttl <= 30
                             or not isinstance(generation, int) or generation < 0
-                            or not isinstance(row.get("name"), str)):
+                            or not isinstance(row.get("name"), str)
+                            or not isinstance(row.get("runtime_incarnation"), str)
+                            or not row["runtime_incarnation"]):
                         raise ValueError("Invalid ListSilos observation")
                     row["observed_ttl_seconds"] = ttl
             except (ValueError, TypeError) as exc:
@@ -1348,9 +1347,12 @@ class SessionManagerBridge(QObject):
             reply(rows)
 
         try:
-            return self._observation_proxy.ListSilos(
-                dbus_interface=SESSION_MANAGER_BUS_NAME, timeout=3.0,
-                reply_handler=parsed, error_handler=error)
+            # ProxyObject's async method discards PendingCall. Use Connection
+            # directly so invalidation owns a cancellable local reply handler.
+            return self.bus.call_async(
+                SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH,
+                SESSION_MANAGER_BUS_NAME, "ListSilos", "", (),
+                parsed, error, timeout=3.0)
         except dbus.DBusException as exc:
             error(exc)
             return None
@@ -1540,7 +1542,8 @@ class SilosTab(QWidget):
                 return
             previous = {self.model.item(i, 0).text(): self.model.item(i, 0).data(Qt.ItemDataRole.UserRole + 1)
                         for i in range(self.model.rowCount())}
-            if any(r.get("operation_generation", 0) < previous.get(r.get("name"), {}).get("operation_generation", 0)
+            if any(r.get("runtime_incarnation") == previous.get(r.get("name"), {}).get("runtime_incarnation")
+                   and r.get("operation_generation", 0) < previous.get(r.get("name"), {}).get("operation_generation", 0)
                    for r in rows):
                 self._mark_observations_unknown("Runtime observation unavailable: outdated reply")
                 return
@@ -1569,6 +1572,7 @@ class SilosTab(QWidget):
     def _render_silos(self, rows, *, elapsed: float = 0.0) -> None:
         selected = self._selected_row()
         selected_name = selected.get("name") if selected is not None else None
+        selected_incarnation = selected.get("runtime_incarnation") if selected is not None else None
         self._observation_deadlines.clear()
         now = _time.monotonic()
         self.model.removeRows(0, self.model.rowCount())
@@ -1597,10 +1601,11 @@ class SilosTab(QWidget):
                 it.setEditable(False)
             items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
             self.model.appendRow(items)
-            if selected_name is not None and r.get("name") == selected_name:
+            if (selected_name is not None and r.get("name") == selected_name
+                    and r.get("runtime_incarnation") == selected_incarnation):
                 selected_index = self.model.rowCount() - 1
         # A refresh may reorder or remove silos. Preserve action targeting by
-        # name, and leave no target when the selected silo disappeared.
+        # name and incarnation; a replaced silo requires a new selection.
         if selected_index is not None:
             self.table.selectRow(selected_index)
         else:
