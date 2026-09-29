@@ -60,32 +60,43 @@ COMPOSITOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMG="${IMG_DIR_OVERRIDE:-${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}}"
 TIER5_BUILD_GUEST="$SCRIPT_DIR/../../tier5-vm/build-guest-image.sh"
 CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
-CLOUD_CACHE="$CACHE_DIR/tier5-base-cloud.qcow2"
-BAKED_CACHE="$CACHE_DIR/tier5-base-customized.qcow2"
-CLOUD_URL="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
+. "$SCRIPT_DIR/lib/test-substrate.sh"
+. "$SCRIPT_DIR/lib/rpm-cache.sh"
+qdistro_load_test_substrate
+CLOUD_CACHE="$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2"
+BAKED_RECIPE="$(qdistro_substrate_recipe_digest baked)"
+BAKED_CACHE="$CACHE_DIR/tier5-$QDISTRO_SUBSTRATE_CLOUD_SHA256-$QDISTRO_SUBSTRATE_SNAPSHOT-${BAKED_RECIPE:0:12}.qcow2"
+CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
 
 # J25 verification is also required by --network-probe-only: qemu-img and
 # libguestfs must never parse an unauthenticated cached cloud disk.
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
 
-BASE="$IMG/baseweed-admin.qcow2"
-BAKED="$IMG/baseweed-baked.qcow2"
-PARTIAL="$IMG/baseweed-baked.qcow2.partial"
+BASE="$(qdistro_substrate_base_path admin "$IMG")"
+BAKED="$(qdistro_substrate_base_path baked "$IMG")"
+PARTIAL="$BAKED.partial"
 
 if [ ! -f "$BASE" ]; then
     echo "ERROR: $BASE not found." >&2
     echo "       Build it first with: $SCRIPT_DIR/build-baseweed-from-scratch.sh" >&2
     exit 1
 fi
+qdistro_substrate_stamp_ok "$BASE" admin "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+    echo "ERROR: $BASE does not match the pinned cloud test substrate; rebuild baseweed-admin first" >&2
+    exit 2
+}
 if [ -f "$BAKED" ] && [ "$FORCE" -ne 1 ] && [ "$NETWORK_PROBE_ONLY" -ne 1 ]; then
-    echo "$BAKED already exists. Use --force to rebuild." >&2
+    qdistro_substrate_stamp_ok "$BAKED" baked "$(sha256sum "$BASE" | awk '{print $1}')" || {
+        echo "ERROR: $BAKED has no matching test-substrate stamp; rebuild safely after clearing its backing users" >&2; exit 2;
+    }
+    echo "$BAKED already matches the pinned test substrate. Use --force to rebuild." >&2
     echo "qemu-img info:"
     qemu-img info "$BAKED" | sed 's/^/    /'
     exit 0
 fi
 
-for tool in virt-customize guestfish qemu-img; do
+for tool in virt-customize virt-resize guestfish qemu-img; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ERROR: $tool not found on host (install libguestfs + guestfs-tools)" >&2
         exit 3
@@ -248,7 +259,7 @@ if [ "$NETWORK_PROBE_ONLY" -eq 1 ]; then
         echo "[bake] tier-5 network probe skipped (QDWIN_SKIP_TIER5_BAKE=1)"
     else
         # Authenticate before qemu-img or libguestfs opens any probe disk.
-        download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" || {
+        download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
             echo "[bake] FAIL: tier-5 cloud cache could not be authenticated; refusing to open it" >&2
             exit 6
         }
@@ -264,31 +275,33 @@ fi
 # The default golden promises a tier-5 disk; verification failure is fatal
 # unless the caller explicitly requested the documented tier-5-free variant.
 if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
-    install -d "$CACHE_DIR"
-    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" || {
+    install -d "$(dirname "$CLOUD_CACHE")"
+    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
         echo "[bake] FAIL: tier-5 cloud cache could not be authenticated" >&2
         exit 6
     }
 fi
 
 # Pull the package list from install-deps.sh — single source of truth.
-# install-deps.sh detects the source-vs-execute mode and just exposes
-# QDISTRO_PKGS without invoking zypper.
+# Native code is built in rootless Podman and staged into per-run goldens, so
+# this disk needs runtime packages and test tools, not compilers or headers.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/install-deps.sh"
-if [ "${#QDISTRO_PKGS[@]}" -eq 0 ]; then
-    echo "ERROR: install-deps.sh produced an empty package list" >&2
+if [ "${#QDISTRO_RUNTIME_PKGS[@]}" -eq 0 ]; then
+    echo "ERROR: install-deps.sh produced an empty runtime package list" >&2
     exit 4
 fi
-PKG_CSV="$(printf '%s,' "${QDISTRO_PKGS[@]}")"
+[ "$FORCE" -ne 1 ] || qdistro_substrate_replace_safe "$BAKED" || exit 2
+PKG_CSV="$(printf '%s,' "${QDISTRO_RUNTIME_PKGS[@]}")"
 PKG_CSV="${PKG_CSV%,}"
-echo "[bake] ${#QDISTRO_PKGS[@]} packages to install"
+echo "[bake] ${#QDISTRO_RUNTIME_PKGS[@]} runtime/test packages to install"
 
 # 1. Fresh overlay backed by baseweed. We work on .partial and only
 #    promote to baseweed-baked.qcow2 at the very end so a partial run
 #    doesn't poison future fresh clones.
 rm -f "$PARTIAL"
 qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$PARTIAL" >/dev/null
+qdistro_rpm_cache_import "$PARTIAL"
 
 cleanup_partial() {
     rc=$?
@@ -304,7 +317,7 @@ trap cleanup_partial EXIT
 #    libguestfs; no qga, no in-VM init system. The appliance gets
 #    network through libguestfs's slirp backend so zypper can reach
 #    download.opensuse.org.
-echo "[bake] virt-customize: refresh + install ${#QDISTRO_PKGS[@]} packages..."
+echo "[bake] virt-customize: refresh + install ${#QDISTRO_RUNTIME_PKGS[@]} packages..."
 echo "[bake]   (this is the slow step — typically 10–25 min)"
 # Notes:
 # - Use --memsize 4096 to give zypper enough RAM (default 768M is
@@ -326,6 +339,7 @@ virt-customize \
     --smp 4 \
     -a "$PARTIAL" \
     "${LIBGUESTFS_NET_ARGS[@]}" \
+    --run-command "$(qdistro_substrate_repo_command)" \
     --run-command 'zypper -n refresh' \
     --run-command 'rpm -q kernel-default-base >/dev/null 2>&1 && zypper -n remove kernel-default-base || true' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
@@ -347,9 +361,9 @@ virt-customize \
     --run-command 'sed -i -e "s/^GRUB_TERMINAL_OUTPUT=.*/GRUB_TERMINAL_OUTPUT=\"console\"/" /etc/default/grub; grep -q "^GRUB_TERMINAL_OUTPUT=" /etc/default/grub || echo "GRUB_TERMINAL_OUTPUT=\"console\"" >>/etc/default/grub' \
     --run-command 'sed -i -e "s/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=\"text\"/" /etc/default/grub; grep -q "^GRUB_GFXPAYLOAD_LINUX=" /etc/default/grub || echo "GRUB_GFXPAYLOAD_LINUX=\"text\"" >>/etc/default/grub' \
     --run-command 'grub2-mkconfig -o /boot/grub2/grub.cfg' \
-    --run-command 'zypper clean -a' \
-    --run-command 'rm -rf /var/cache/zypp/* /tmp/* /var/tmp/* 2>/dev/null; true' \
+    --run-command 'rm -rf /tmp/* /var/tmp/* 2>/dev/null; true' \
     --run-command 'journalctl --vacuum-time=1s 2>/dev/null; true'
+qdistro_rpm_cache_export "$PARTIAL"
 
 # 3. Bake the tier-5 per-app guest base disk INTO the overlay so
 #    phase7-tier5-vm + phase7-tier5-audio always PASS on a --from-baked
@@ -366,7 +380,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     # baked into every --from-baked overlay, so bake ONLY when it verifies.
     # Gating on the helper's EXIT STATUS — not `[ -s cache ]` — means a
     # stale/unverified pre-existing cache the helper refused is never baked in.
-    if download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"; then
+    if download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256"; then
         # J25 (fail-closed): the customized derivative (tier5-base-customized.qcow2)
         # is bound to THIS verified cloud digest via a provenance stamp. Reuse it
         # only when the stamp matches; otherwise rebuild from the verified base so
@@ -374,12 +388,16 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
         CLOUD_DIGEST="$(sha256sum "$CLOUD_CACHE" | awk '{print $1}')"
         CACHED_SOURCE_DIGEST="$(awk -F= '$1 == "source_sha256" { print $2; exit }' "$BAKED_CACHE.provenance" 2>/dev/null || true)"
         CACHED_IMAGE_DIGEST="$(awk -F= '$1 == "image_sha256" { print $2; exit }' "$BAKED_CACHE.provenance" 2>/dev/null || true)"
+        CACHED_SNAPSHOT="$(awk -F= '$1 == "snapshot" { print $2; exit }' "$BAKED_CACHE.provenance" 2>/dev/null || true)"
+        CACHED_RECIPE="$(awk -F= '$1 == "recipe_sha256" { print $2; exit }' "$BAKED_CACHE.provenance" 2>/dev/null || true)"
         ACTUAL_BAKED_DIGEST=""
         if [ -s "$BAKED_CACHE" ] && [ "$CACHED_SOURCE_DIGEST" = "$CLOUD_DIGEST" ] && [ -n "$CACHED_IMAGE_DIGEST" ]; then
             ACTUAL_BAKED_DIGEST="$(sha256sum "$BAKED_CACHE" | awk '{print $1}')"
         fi
         if [ -s "$BAKED_CACHE" ] \
             && [ "$CACHED_SOURCE_DIGEST" = "$CLOUD_DIGEST" ] \
+            && [ "$CACHED_SNAPSHOT" = "$QDISTRO_SUBSTRATE_SNAPSHOT" ] \
+            && [ "$CACHED_RECIPE" = "$BAKED_RECIPE" ] \
             && [ "$CACHED_IMAGE_DIGEST" = "$ACTUAL_BAKED_DIGEST" ] \
             && qemu-img check "$BAKED_CACHE" >/dev/null; then
             echo "[bake] tier-5 customized base already cached (digest/provenance verified)"
@@ -391,7 +409,12 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             [ -s "$BAKED_CACHE" ] && echo "[bake] tier-5 customized base missing/mismatched provenance; rebuilding from verified base" >&2
             rm -f "$BAKED_CACHE" "$BAKED_CACHE.provenance"
             echo "[bake] customizing tier-5 base on host (waypipe + qga + publisher)..."
-            cp --reflink=auto "$CLOUD_CACHE" "$BAKED_CACHE.partial"
+            # The stock cloud root is only 1.5 GiB. A warm RPM seed plus
+            # weston/LLVM dependencies cannot fit there, so grow the root
+            # partition before copying cached downloads into it.
+            qemu-img create -f qcow2 "$BAKED_CACHE.partial" 8G >/dev/null
+            virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$BAKED_CACHE.partial"
+            qdistro_rpm_cache_import "$BAKED_CACHE.partial"
             PUBLISHER_TMP="$(mktemp /tmp/qd-pub-XXXXXX.sh)"
             if [ ! -f "$TIER5_BUILD_GUEST" ]; then
                 echo "[bake] FAIL: tier-5 builder not found at $TIER5_BUILD_GUEST" >&2
@@ -404,6 +427,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             chmod +x "$PUBLISHER_TMP"
             virt-customize -a "$BAKED_CACHE.partial" \
                 "${LIBGUESTFS_NET_ARGS[@]}" \
+                --run-command "$(qdistro_substrate_repo_command)" \
                 --run-command 'zypper -n refresh' \
                 `# weston provides weston-terminal (the tier-5 cold-start app);` \
                 `# dejavu-fonts gives it a monospace face. Without these the` \
@@ -447,8 +471,8 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \
                 --root-password "password:Pa_ssw0rd45" \
                 --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
-                --run-command 'zypper clean -a' \
                 >/dev/null
+            qdistro_rpm_cache_export "$BAKED_CACHE.partial"
             rm -f "$PUBLISHER_TMP"
             virt-sparsify --in-place "$BAKED_CACHE.partial" 2>/dev/null || true
             mv "$BAKED_CACHE.partial" "$BAKED_CACHE"
@@ -458,8 +482,8 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 exit 5
             }
             BAKED_DIGEST="$(sha256sum "$BAKED_CACHE" | awk '{print $1}')"
-            printf 'source_sha256=%s\nimage_sha256=%s\n' \
-                "$CLOUD_DIGEST" "$BAKED_DIGEST" > "$BAKED_CACHE.provenance"
+            printf 'source_sha256=%s\nsnapshot=%s\nrecipe_sha256=%s\nimage_sha256=%s\n' \
+                "$CLOUD_DIGEST" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$BAKED_RECIPE" "$BAKED_DIGEST" > "$BAKED_CACHE.provenance"
             echo "[bake] tier-5 customized base cached → $BAKED_CACHE ($(du -h "$BAKED_CACHE" | cut -f1))"
         fi
         echo "[bake] uploading tier-5 base into baked overlay..."
@@ -489,12 +513,8 @@ virt-customize -a "$PARTIAL" \
 echo "[bake] sparsifying overlay..."
 virt-sparsify --in-place "$PARTIAL" 2>/dev/null || true
 
-# 5. Promote.
-if [ -f "$BAKED" ] && [ "$FORCE" -eq 1 ]; then
-    rm -f "$BAKED"
-fi
-mv "$PARTIAL" "$BAKED"
-chmod 0644 "$BAKED"
+# 5. Promote under the storage lock, rechecking backing references.
+qdistro_substrate_publish "$PARTIAL" "$BAKED" baked "$(sha256sum "$BASE" | awk '{print $1}')"
 
 echo "[bake] OK: $BAKED ready"
 qemu-img info "$BAKED" | sed 's/^/    /'

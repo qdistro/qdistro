@@ -108,7 +108,17 @@ build_and_install_binary() {
     echo "installed compiled qsu binary -> $DEST_BIN/qsu"
 }
 
-if [ -n "$QSU_CC" ]; then
+if [ -n "${QSU_PREBUILT_BINARY:-}" ]; then
+    # The test golden's native payload was compiled in rootless Podman from
+    # this source revision; retain the ELF caller identity without gcc here.
+    [ -x "$QSU_PREBUILT_BINARY" ] \
+        && [ "$(head -c4 "$QSU_PREBUILT_BINARY")" = $'\177ELF' ] \
+        || { echo "ERROR: prebuilt qsu is missing or not ELF: $QSU_PREBUILT_BINARY" >&2; exit 4; }
+    if [ "$QSU_PREBUILT_BINARY" != "$DEST_BIN/qsu" ]; then
+        install -o root -g root -m 0755 "$QSU_PREBUILT_BINARY" "$DEST_BIN/qsu"
+    fi
+    echo "installed prebuilt qsu binary -> $DEST_BIN/qsu"
+elif [ -n "$QSU_CC" ]; then
     build_and_install_binary || exit 4
 elif [ "${QSU_ALLOW_PYTHON_FALLBACK:-}" = "1" ]; then
     echo "WARN: no C compiler found (tried: cc gcc clang) and" >&2

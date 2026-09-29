@@ -149,7 +149,7 @@ Environment:
                             separate qdwin-profile VM for qdwin-dependent rows.
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
-  QDISTRO_VM_BASE           auto|kiwi|baked. Which backing image spin-test-vm
+  QDISTRO_VM_BASE           baked (default)|kiwi|auto. Which backing image spin-test-vm
                             clones for qci workers. auto (default): imported
                             kiwi qcow2 if present (scripts/vm/import-kiwi-base.sh;
                             tester or ci profile), else baseweed-baked. kiwi

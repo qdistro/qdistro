@@ -1171,8 +1171,17 @@ _release_storage_lock() {
 # exclusive protocol lock and could unlink either the new child or its backing.
 # A safety protocol works only if BOTH sides fail closed.
 _clone_harness() {
+    export QDWIN_IMG_DIR
     printf backing > "$QDWIN_IMG_DIR/baseweed.qcow2"
-    printf backing > "$QDWIN_IMG_DIR/baseweed-baked.qcow2"
+    . "$REPO_ROOT/scripts/vm/lib/test-substrate.sh"
+    qdistro_load_test_substrate
+    local admin baked
+    admin="$(qdistro_substrate_base_path admin)"
+    baked="$(qdistro_substrate_base_path baked)"
+    printf backing > "$admin"
+    qdistro_substrate_write_stamp "$admin" admin "$QDISTRO_SUBSTRATE_CLOUD_SHA256"
+    printf backing > "$baked"
+    qdistro_substrate_write_stamp "$baked" baked "$(sha256sum "$admin" | awk '{print $1}')"
     cat > "$BIN/virsh" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -1185,7 +1194,6 @@ esac
 exit 0
 SH
     chmod +x "$BIN/virsh"
-    export QDWIN_IMG_DIR
 }
 
 @test "clone refuses to proceed when the shared storage lock is held exclusively" {

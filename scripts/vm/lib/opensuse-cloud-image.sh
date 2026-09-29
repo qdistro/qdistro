@@ -40,7 +40,7 @@ _osci_die() { echo "ERROR: $*" >&2; return 1; }
 
 _osci_require_tools() {
     local t
-    for t in wget gpg gpgv sha256sum awk mktemp basename dirname mv install chmod rm; do
+    for t in wget gpg gpgv sha256sum awk mktemp basename dirname mv install chmod rm flock; do
         command -v "$t" >/dev/null 2>&1 || { _osci_die "$t not found; cannot verify openSUSE cloud image"; return 1; }
     done
 }
@@ -123,16 +123,23 @@ verify_cached_cloud_image() {
 # cache (with sidecars); otherwise downloads image+.sha256+.sha256.asc to a
 # private temp dir, verifies, and only then promotes into the cache. Fails
 # closed: on any verification failure nothing is promoted and rc is non-zero.
-download_verified_cloud_image() {
-    local url="$1" cache="$2" tmp base image sha sig cache_dir
+_osci_download_verified_cloud_image() {
+    local url="$1" cache="$2" expected_pin="${3:-}" tmp base image sha sig cache_dir actual
 
     _osci_require_tools || return 1
     cache_dir="$(dirname "$cache")"; install -d "$cache_dir"
     base="$(basename "$url")"   # the upstream artifact name the checksum is for
+    if [ -n "$expected_pin" ] && [[ ! "$expected_pin" =~ ^[0-9a-f]{64}$ ]]; then
+        _osci_die "invalid pinned cloud SHA256"; return 1
+    fi
 
     if [ -s "$cache" ] && [ -s "$cache.sha256" ] && [ -s "$cache.sha256.asc" ]; then
         echo "[cloud] verifying cached image: $cache"
         verify_cached_cloud_image "$cache" "$cache.sha256" "$cache.sha256.asc" "$base" || return 1
+        if [ -n "$expected_pin" ]; then
+            actual="$(sha256sum "$cache" | awk '{print $1}')"
+            [ "$actual" = "$expected_pin" ] || { _osci_die "cached cloud image differs from test substrate pin ($actual != $expected_pin)"; return 1; }
+        fi
         echo "[cloud] cached image verified (openSUSE-signed)"
         return 0
     fi
@@ -150,9 +157,26 @@ download_verified_cloud_image() {
     if ! verify_cached_cloud_image "$image" "$sha" "$sig" "$base"; then
         rm -rf "$tmp"; return 1
     fi
+    if [ -n "$expected_pin" ]; then
+        actual="$(sha256sum "$image" | awk '{print $1}')"
+        [ "$actual" = "$expected_pin" ] || {
+            rm -rf "$tmp"; _osci_die "downloaded cloud image differs from test substrate pin ($actual != $expected_pin); update the manifest deliberately"; return 1;
+        }
+    fi
 
     mv "$image" "$cache"; mv "$sha" "$cache.sha256"; mv "$sig" "$cache.sha256.asc"
     rm -rf "$tmp"
     echo "[cloud] verified cache ready: $cache"
     return 0
+}
+
+download_verified_cloud_image() {
+    local cache="$2" lock_fd rc
+    install -d "$(dirname "$cache")" || return 1
+    exec {lock_fd}>"$cache.lock" || return 1
+    flock -x "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+    _osci_download_verified_cloud_image "$@"; rc=$?
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    return "$rc"
 }

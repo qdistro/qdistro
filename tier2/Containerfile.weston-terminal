@@ -15,6 +15,8 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 # metadata. The shared helper pins both repos and leaves GPG checks enabled.
 COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
 RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive dup --no-recommends
 
 # Runtime deps. weston pulls libpipewire-0_3 + pipewire-backend
 # transitively on Tumbleweed; we list them explicitly so a future weston
@@ -25,8 +27,7 @@ RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
 #
 # Debug packages (procps, wayland-utils) removed for attack surface
 # reduction. To debug, use: podman exec -it <ctr> zypper install procps
-RUN zypper --non-interactive --gpg-auto-import-keys refresh \
- && zypper --non-interactive install --no-recommends \
+RUN zypper --non-interactive install --no-recommends \
         weston \
         libweston-16 \
         libpipewire-0_3-0 \

@@ -17,6 +17,8 @@ setup() {
     FIXT="$BATS_TEST_DIRNAME/fixtures"
     WORK="$BATS_TEST_TMPDIR/work"
     mkdir -p "$WORK"
+    TODAY="$(date -u +%Y%m%d)"
+    YESTERDAY="$(date -u -d yesterday +%Y%m%d)"
 }
 
 # The pinned fingerprint the helper trusts.
@@ -90,6 +92,129 @@ make_local_signed_fixture() {
     run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
         bash -c ". '$LIB'; verify_cached_cloud_image '$WORK/image.qcow2' '$WORK/image.qcow2.sha256' '$WORK/image.qcow2.sha256.asc' 'image.qcow2'"
     [ "$status" -ne 0 ]
+}
+
+@test "cloud cache accepts signed bytes only when they match the test substrate pin" {
+    make_local_signed_fixture
+    digest="$(sha256sum "$WORK/image.qcow2" | awk '{print $1}')"
+    run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+        bash -c ". '$LIB'; download_verified_cloud_image 'https://invalid.example/image.qcow2' '$WORK/image.qcow2' '$digest'"
+    [ "$status" -eq 0 ]
+    run env OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+        bash -c ". '$LIB'; download_verified_cloud_image 'https://invalid.example/image.qcow2' '$WORK/image.qcow2' '0000000000000000000000000000000000000000000000000000000000000000'"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"differs from test substrate pin"* ]]
+}
+
+@test "cloud test substrate stamp rejects old snapshot and modified disk" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf"
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$TODAY" > "$manifest"
+    printf 'base' > "$WORK/base.qcow2"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_write_stamp '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\"; qdistro_substrate_stamp_ok '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\""
+    [ "$status" -eq 0 ]
+    sed -i "s/snapshot=$TODAY/snapshot=$YESTERDAY/" "$manifest"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_stamp_ok '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\""
+    [ "$status" -ne 0 ]
+    sed -i "s/snapshot=$YESTERDAY/snapshot=$TODAY/" "$manifest"
+    printf 'tamper' >> "$WORK/base.qcow2"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_stamp_ok '$WORK/base.qcow2' admin \"\$QDISTRO_SUBSTRATE_CLOUD_SHA256\""
+    [ "$status" -ne 0 ]
+}
+
+@test "cloud test substrate uses distinct paths for snapshot and recipe changes" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf" path1 path2
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$TODAY" > "$manifest"
+    path1="$(QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    sed -i "s/snapshot=$TODAY/snapshot=$YESTERDAY/" "$manifest"
+    path2="$(QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    [ "$path1" != "$path2" ]
+    [[ "$path1" == *"$TODAY"* ]]
+    [[ "$path2" == *"$YESTERDAY"* ]]
+}
+
+@test "baked tier-5 omission has a distinct path and cannot reuse the default stamp" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf" default_path skip_path
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$TODAY" > "$manifest"
+    default_path="$(QDWIN_SKIP_TIER5_BAKE=0 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    skip_path="$(QDWIN_SKIP_TIER5_BAKE=1 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_base_path baked")"
+    [ "$default_path" != "$skip_path" ]
+    printf 'baked' > "$WORK/baked.qcow2"
+    run env QDWIN_SKIP_TIER5_BAKE=0 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_write_stamp '$WORK/baked.qcow2' baked source; qdistro_substrate_stamp_ok '$WORK/baked.qcow2' baked source"
+    [ "$status" -eq 0 ]
+    run env QDWIN_SKIP_TIER5_BAKE=1 QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_stamp_ok '$WORK/baked.qcow2' baked source"
+    [ "$status" -ne 0 ]
+}
+
+@test "snapshot freshness accepts day 14 and rejects day 15, future and invalid dates" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh"
+    run bash -c ". '$substrate'; qdistro_substrate_snapshot_fresh 20260914 20260928"
+    [ "$status" -eq 0 ]
+    run bash -c ". '$substrate'; qdistro_substrate_snapshot_fresh 20260913 20260928"
+    [ "$status" -ne 0 ]
+    run bash -c ". '$substrate'; qdistro_substrate_snapshot_fresh 20260929 20260928"
+    [ "$status" -ne 0 ]
+    run bash -c ". '$substrate'; qdistro_substrate_snapshot_fresh 20260230 20260301"
+    [ "$status" -ne 0 ]
+}
+
+@test "expired manifest is refused before a base path can be selected" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf" expired
+    expired="$(date -u -d '15 days ago' +%Y%m%d)"
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$expired" > "$manifest"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate && qdistro_substrate_base_path admin"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"older than 14 days"* ]]
+}
+
+@test "qci refuses an expired cloud pin before starting VM tests" {
+    local manifest="$WORK/substrate.conf" expired runs="$WORK/runs"
+    expired="$(date -u -d '15 days ago' +%Y%m%d)"
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$expired" > "$manifest"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" QCI_RUNS_DIR="$runs" \
+        "$REPO_ROOT/ci/bin/qci" vm-smoke
+    [ "$status" -eq 10 ]
+    local results
+    results="$(find "$runs" -name results.tsv -print -quit)"
+    [ -s "$results" ]
+    grep -Fq 'cloud test substrate freshness' "$results"
+    ! awk -F '\t' '$1 == "vm-smoke" || $1 == "bats" || $1 == "gui" { found=1 } END { exit !found }' "$results"
+}
+
+@test "VM base default stays cloud-derived while Kiwi remains explicit" {
+    local selector="$REPO_ROOT/scripts/vm/lib/vm-base.sh"
+    run bash -c ". '$selector'; qdistro_kiwi_base_ok() { return 0; }; qdistro_vm_base_kind"
+    [ "$status" -eq 0 ]
+    [ "$output" = baked ]
+    run env QDISTRO_VM_BASE=auto bash -c ". '$selector'; qdistro_kiwi_base_ok() { return 0; }; qdistro_vm_base_kind"
+    [ "$status" -eq 0 ]
+    [ "$output" = kiwi ]
+}
+
+@test "cloud substrate replaces rolling repositories with signed snapshot repositories" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" root="$WORK/root" command
+    mkdir -p "$root/etc/zypp/repos.d" "$root/etc/zypp/services.d"
+    printf 'baseurl=https://download.opensuse.org/tumbleweed/repo/oss/\n' > "$root/etc/zypp/repos.d/rolling.repo"
+    printf 'service\n' > "$root/etc/zypp/services.d/rolling.service"
+    command="$(bash -c ". '$substrate'; qdistro_load_test_substrate; qdistro_substrate_repo_command")"
+    command="${command//\/etc\//$root\/etc\/}"
+    bash -c "$command"
+    [ ! -e "$root/etc/zypp/repos.d/rolling.repo" ]
+    [ ! -e "$root/etc/zypp/services.d/rolling.service" ]
+    [ "$(find "$root/etc/zypp/repos.d" -name '*.repo' | wc -l)" -eq 2 ]
+    grep -Fq "history/$(sed -n 's/^snapshot=//p' "$REPO_ROOT/scripts/vm/test-substrate.conf")/tumbleweed/repo/oss/" "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
+    grep -Fq 'gpgcheck=1' "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
+    grep -Fq 'keeppackages=1' "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
 }
 
 # --- zypper --no-gpg-checks profile gate ----------------------------------

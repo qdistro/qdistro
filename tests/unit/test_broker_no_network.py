@@ -8,10 +8,8 @@ These are the headless, runnable-here halves of the task-5 test matrix:
     in) — the invariant the hardening relies on;
   * the SELinux module carries the neverallow ratchet.
 
-The enforcing halves — a negative bats proving AF_INET socket() is denied from
-the broker context, and the build-ratchet proving an intentional forbidden
-`allow` fails the policy build — need an SELinux-enforcing VM and are staged in
-the task file, not here.
+The policy build-ratchet runs in the rootless native Podman builder against
+the pinned snapshot. Runtime checks still need a VM.
 """
 from __future__ import annotations
 

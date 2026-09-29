@@ -1,8 +1,8 @@
 #!/bin/bash
 # fresh-vm-bootstrap.sh — run inside a freshly-cloned baseweed VM to:
 #   1. Fetch the qdistro monorepo as one tarball from host:8765.
-#   2. Build qdwin from source (libweston shell plugin).
-#   3. Build qdistro's C daemons against qdwin's protocol XML.
+#   2. Install Podman-built native components, or build them on a developer VM.
+#   3. Load SELinux modules built against the pinned snapshot.
 #   4. Install the Python broker / polkit-agent / pwd / etc. services.
 #   5. Install the qdshell QML stack.
 #   6. Install + enable user systemd units that start qdwin + qdshell.
@@ -10,9 +10,8 @@
 # Prerequisites (handled by build-baked-baseweed.sh):
 #   - SELinux permissive
 #   - admin user (uid 1000) present
-#   - meson + ninja + gcc/cc + libweston-16-devel + wayland-protocols
-#     (gcc is required: install-qsu-for-vm.sh compiles qsu.c into the
-#      /usr/local/bin/qsu ELF binary so /proc/<pid>/exe is unambiguous)
+#   - native payload from rootless Podman on cloud-derived test bases;
+#     Meson/Ninja/compiler and policy headers on explicit developer VMs only
 #   - quickshell + qt6-* for qdshell
 #   - bats for in-VM integration tests
 #
@@ -110,6 +109,7 @@ qdistro_write_snapshot_repos() {
 name=qdistro Tumbleweed OSS $snap
 enabled=1
 autorefresh=0
+keeppackages=1
 baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/oss/
 gpgcheck=1
 EOF
@@ -118,13 +118,24 @@ EOF
 name=qdistro Tumbleweed NonOSS $snap
 enabled=1
 autorefresh=0
+keeppackages=1
 baseurl=https://download.opensuse.org/history/${snap}/tumbleweed/repo/non-oss/
 gpgcheck=1
 EOF
     chmod 0644 "$repo_dir/qdistro-snapshot-oss.repo" "$repo_dir/qdistro-snapshot-nonoss.repo"
     return 0
 }
-if ! ls /etc/zypp/repos.d/*.repo >/dev/null 2>&1; then
+if [ -s /etc/qdistro/test-substrate ]; then
+    # Cloud-derived base: enforce the base's own accepted snapshot, even if
+    # cloud-init or another package has added rolling repositories since bake.
+    _snap="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' /etc/qdistro/test-substrate)"
+    [ -n "$_snap" ] || { log "ERROR: invalid cloud test-substrate stamp"; exit 3; }
+    mkdir -p /etc/zypp/repos.d
+    find /etc/zypp/repos.d -maxdepth 1 -name '*.repo' -delete
+    find /etc/zypp/services.d -maxdepth 1 -name '*.service' -delete 2>/dev/null || true
+    printf 'SNAPSHOT=%s\n' "$_snap" > /tmp/qdistro-test-release
+    qdistro_write_snapshot_repos /tmp/qdistro-test-release || exit 3
+elif ! ls /etc/zypp/repos.d/*.repo >/dev/null 2>&1; then
     log "no zypper repos in the image; writing snapshot repos from /etc/qdistro/release"
     qdistro_write_snapshot_repos /etc/qdistro/release || exit 3
 fi
@@ -214,6 +225,30 @@ for repo in qdwin qdshell; do
     [ -d "$SRC/$repo" ] || { echo "[bootstrap] monorepo tarball lacks $repo/"; exit 2; }
 done
 
+# Cloud test VMs receive native outputs built against this same snapshot in a
+# rootless Podman container. The tarball is content-checked before extraction;
+# the guest still installs its Python services, QML tree and systemd units.
+QCI_NATIVE_STAGE=0
+if [ -n "${QCI_NATIVE_STAGE_SHA256:-}" ]; then
+    [[ "$QCI_NATIVE_STAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || { log "ERROR: invalid native-stage digest"; exit 3; }
+    log "fetching Podman-built native stage..."
+    wget -q -O /tmp/qdistro-native-stage.tar "$HOST/native-stage.tar" \
+        || { log "ERROR: native stage download failed"; exit 3; }
+    echo "$QCI_NATIVE_STAGE_SHA256  /tmp/qdistro-native-stage.tar" | sha256sum -c - \
+        || { log "ERROR: native stage checksum mismatch"; exit 3; }
+    tar -xf /tmp/qdistro-native-stage.tar -C /
+    rm -f /tmp/qdistro-native-stage.tar
+    [ "$(cat /usr/share/qdistro-build/snapshot 2>/dev/null)" = "$(sed -n 's/^SNAPSHOT=//p' /etc/qdistro/test-substrate)" ] \
+        || { log "ERROR: native stage snapshot differs from the cloud base"; exit 3; }
+    while read -r pkg version; do
+        [ "$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$pkg" 2>/dev/null)" = "$version" ] \
+            || { log "ERROR: native stage RPM mismatch: $pkg wants $version"; exit 3; }
+    done < /usr/share/qdistro-build/build-rpms.txt
+    QCI_NATIVE_STAGE=1
+    export QCI_NATIVE_STAGE QSU_PREBUILT_BINARY=/usr/local/bin/qsu
+fi
+
 if [ -f "$SRC/qnotebook/pyproject.toml" ]; then
     log "installing qnotebook..."
     PY_PKG_PREFIX=$(python3 - <<'PY'
@@ -221,7 +256,7 @@ import sys
 print(f"python{sys.version_info.major}{sys.version_info.minor}")
 PY
 )
-    zypper -n --no-gpg-checks refresh >/tmp/qnotebook-zypper-refresh.log 2>&1 \
+    zypper -n refresh >/tmp/qnotebook-zypper-refresh.log 2>&1 \
         || log "  WARN: zypper refresh before qnotebook deps failed; trying cached metadata"
     QNOTEBOOK_ZYPPER_LOG=/tmp/qnotebook-zypper-install.log
     if ! zypper -n install --no-recommends \
@@ -291,6 +326,7 @@ if [ -f "$SRC/qdbrowser/pyproject.toml" ]; then
 fi
 
 # ---- 2. Build qdwin ------------------------------------------------------
+if [ "$QCI_NATIVE_STAGE" = 0 ]; then
 log "building qdwin (libweston shell plugin)..."
 cd "$SRC/qdwin"
 # QDWIN_EXTRA_MESON_OPTS: optional space-separated extra `meson setup` flags
@@ -340,6 +376,8 @@ cd "$SRC/daemons"
 meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
+
+fi # native qdwin, vendored libweston and daemons came from Podman when staged
 
 # ---- 4. Install Python modules + systemd units --------------------------
 # Each install-*.sh takes the module's source dir as $1. We pass paths
@@ -444,11 +482,34 @@ fi
 
 # ---- 5. Install SELinux policy modules (permissive by default) ----------
 log "installing SELinux policy modules (permissive)..."
-for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
-    if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
-        (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
-    fi
-done
+if [ "$QCI_NATIVE_STAGE" = 1 ]; then
+    command -v semodule >/dev/null || { log 'ERROR: semodule missing'; exit 3; }
+    for pol in pwd broker session_manager tier1; do
+        policy=/usr/share/qdistro-build/selinux/qdistro_$pol.pp
+        [ -s "$policy" ] || { log "ERROR: staged policy missing: $policy"; exit 3; }
+        semodule -i "$policy" || { log "ERROR: staged policy failed: $policy"; exit 3; }
+    done
+    for entry in \
+        /usr/libexec/qdistro/qdistro_admin_broker.py:qdistro_broker_exec_t \
+        /usr/libexec/qdistro/qdistro_pwd_daemon.py:qdistro_pwd_exec_t \
+        /usr/libexec/qdistro/qdistro_session_manager.py:qdistro_sessmgr_exec_t; do
+        path=${entry%%:*}
+        label=${entry#*:}
+        [ -f "$path" ] || continue
+        restorecon "$path" 2>/dev/null || chcon -t "$label" "$path" 2>/dev/null || true
+    done
+    restorecon -R /var/lib/qdistro/vaults /var/lib/qdistro/audit 2>/dev/null || true
+    for service in qdistro-admin-broker.service qdistro-pwd.service \
+        qdistro-session-manager.service; do
+        systemctl is-active --quiet "$service" && systemctl restart "$service" || true
+    done
+else
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
+        if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
+            (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
+        fi
+    done
+fi
 
 # ---- 5b. Build qdshell QML plugin (libqdistro-qdwin.so) ------------------
 # The Qdistro.Qdwin QML plugin lives in qdshell/qml-plugin/ and reads
@@ -457,14 +518,27 @@ done
 # unpacked side-by-side under $SRC (the monorepo root) so it resolves.
 # Without this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
 # `import Qdistro.Qdwin 1.0` and `qs` exits with rc=255 on startup.
-log "building qdshell QML plugin (libqdistro-qdwin.so)..."
-cd "$SRC/qdshell"
-meson setup build --wipe --prefix=/usr \
-    || { log "  ERROR: qdshell meson setup failed"; exit 3; }
-meson compile -C build \
-    || { log "  ERROR: qdshell meson compile failed"; exit 3; }
-meson install -C build \
-    || { log "  ERROR: qdshell meson install failed"; exit 3; }
+if [ "$QCI_NATIVE_STAGE" = 0 ]; then
+    log "building qdshell QML plugin (libqdistro-qdwin.so)..."
+    cd "$SRC/qdshell"
+    meson setup build --wipe --prefix=/usr \
+        || { log "  ERROR: qdshell meson setup failed"; exit 3; }
+    meson compile -C build \
+        || { log "  ERROR: qdshell meson compile failed"; exit 3; }
+    meson install -C build \
+        || { log "  ERROR: qdshell meson install failed"; exit 3; }
+else
+    log "checking staged native ELF dependencies..."
+    while IFS= read -r elf; do
+        [ -s "$elf" ] || { log "ERROR: staged ELF missing: $elf"; exit 3; }
+        deps=$(ldd "$elf" 2>&1) || { log "ERROR: ldd failed for staged ELF: $elf"; exit 3; }
+        if [[ "$deps" == *'not found'* ]]; then
+            log "ERROR: staged ELF has missing runtime library: $elf"
+            printf '%s\n' "$deps" >&2
+            exit 3
+        fi
+    done < /usr/share/qdistro-build/elf-manifest
+fi
 
 # ---- 5c. Install + enable seatd (system service) ------------------------
 # admin's lingering user@1000.service is a "manager" session that does
@@ -623,7 +697,7 @@ moddir="/lib/modules/$krel/kernel/drivers/input/misc"
 if [ ! -e "$moddir/uinput.ko" ] && [ ! -e "$moddir/uinput.ko.zst" ] \
    && [ ! -e "$moddir/uinput.ko.xz" ]; then
     log "  uinput.ko absent for running kernel ${krel}; installing kernel-default (fallback)..."
-    zypper -n --no-gpg-checks refresh >/dev/null 2>&1 || true
+    zypper -n refresh >/dev/null 2>&1 || true
     if zypper -n install --no-recommends kernel-default >/dev/null 2>&1; then
         # Refresh the running kernel's module dep index in case the install
         # overlaid a matching version (same-version repo case).
@@ -964,31 +1038,45 @@ fi
 # backing blocks. Failure here is FATAL when opted in — silently falling back to
 # the per-worker on-demand build is exactly the flaky path this removes.
 if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
-    if [ ! -x "$SRC/tier2/make-tier2-image.sh" ]; then
-        log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
-        exit 1
-    fi
-    # The source is staged under root's home (/root/qdistro-src, mode 700), but
-    # the tier-2 images build rootless AS admin (uid 1000), which then cannot
-    # traverse /root NOR read the tar-extracted source tree (make-tier2-image.sh
-    # + its podman build context) — "bash: .../make-tier2-image.sh: Permission
-    # denied". Make /root traversable (not listable) and the staged source
-    # world-readable so admin can reach the known paths. Test-VM only (no secrets
-    # in the source tree).
-    chmod 0711 /root 2>/dev/null || true
-    chmod -R a+rX "$SRC" 2>/dev/null || true
-    log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
-    if ! runuser -u admin -- bash "$SRC/tier2/make-tier2-image.sh"; then
-        log "  ERROR: tier-2 image pre-build failed"
-        exit 1
+    if [ -n "${QCI_TIER2_STAGE_SHA256:-}" ]; then
+        [[ "$QCI_TIER2_STAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+            || { log 'ERROR: invalid tier-2 archive digest'; exit 3; }
+        log 'fetching cached tier-2 Podman images...'
+        wget -q -O /tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \
+            || { log 'ERROR: tier-2 image archive download failed'; exit 3; }
+        echo "$QCI_TIER2_STAGE_SHA256  /tmp/qdistro-tier2-images.tar" | sha256sum -c - \
+            || { log 'ERROR: tier-2 image archive checksum mismatch'; exit 3; }
+        chmod 0644 /tmp/qdistro-tier2-images.tar
+        runuser -u admin -- podman load -i /tmp/qdistro-tier2-images.tar \
+            || { log 'ERROR: tier-2 image archive load failed'; exit 3; }
+        rm -f /tmp/qdistro-tier2-images.tar
+    else
+        if [ ! -x "$SRC/tier2/make-tier2-image.sh" ]; then
+            log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
+            exit 1
+        fi
+        # Guest builds run as admin, which needs access to source under /root.
+        chmod 0711 /root 2>/dev/null || true
+        chmod -R a+rX "$SRC" 2>/dev/null || true
+        log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
+        if ! runuser -u admin -- bash "$SRC/tier2/make-tier2-image.sh"; then
+            log "  ERROR: tier-2 image pre-build failed"
+            exit 1
+        fi
     fi
     # Verify each expected tag actually landed in admin's store. A partial build
     # (script exits 0 but one tag missing) would silently leave the on-demand
     # path for that workload.
     for _w in weston-terminal text-viewer url-preview; do
         if ! runuser -u admin -- podman image exists "qdistro/tier2-${_w}:latest"; then
-            log "  ERROR: expected image qdistro/tier2-${_w}:latest missing after pre-build"
+            log "  ERROR: expected image qdistro/tier2-${_w}:latest missing after load/build"
             exit 1
+        fi
+        if [ -n "${QCI_TIER2_STAGE_SHA256:-}" ]; then
+            _label=$(runuser -u admin -- podman image inspect "qdistro/tier2-${_w}:latest" \
+                --format '{{index .Labels "org.qdistro.test-snapshot"}}') || exit 3
+            [ "$_label" = "$(sed -n 's/^SNAPSHOT=//p' /etc/qdistro/test-substrate)" ] \
+                || { log "ERROR: tier-2 $_w image snapshot mismatch"; exit 3; }
         fi
     done
     log "  tier-2 images pre-built: weston-terminal, text-viewer, url-preview"

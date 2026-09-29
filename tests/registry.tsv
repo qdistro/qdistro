@@ -27,6 +27,7 @@ tests/unit/test_audisp_parser.py	host	none	none	none	none	selinux	no
 tests/integration/vm/qsu-binary.bats	bats	host	none	none	none	qsu	no
 tests/integration/vm/edit-guard.bats	bats	host	none	none	none	qci	no
 tests/integration/vm/broker-e2e.bats	bats	vm	qdistro-admin-broker.service	loopback	none	broker	slow
+tests/integration/vm/broker-no-network.bats	bats	vm	qdistro-admin-broker.service	loopback	none	broker	no
 tests/integration/vm/tiered-isolation.bats	bats	vm-nested	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow,flaky
 tests/integration/vm/compositor-shell.bats	bats	vm	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow
 tests/integration/permissions-gui/03-qt-admin-app-visual.md	gui	vm	qdistro-admin-broker.service	loopback	agent	qdistro	slow

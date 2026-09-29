@@ -32,7 +32,7 @@ QDISTRO_PKGS=(
   fontconfig-devel glib2-devel libva-devel
   python313-pywayland python313-cffi python313-PyQt6
   qt6-wayland python313-setuptools
-  socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
+  socat dbus-1-daemon Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
   Mesa-demo-egl wayland-utils
   python313-python-pam python313-six fprintd
   python313-dbus-python python313-gobject python313-gobject-Gdk
@@ -114,6 +114,17 @@ QDISTRO_PKGS=(
 # in bash, `${BASH_SOURCE[0]}` differs from `${0}` if we were sourced.
 # Keep PKGS exported as a back-compat alias.
 PKGS=("${QDISTRO_PKGS[@]}")
+# Runtime-only cloud test bases receive prebuilt native files from the rootless
+# Podman builder. Keep the full list above for the explicit developer/guest
+# build path, while excluding compilers and headers from the baked test disk.
+QDISTRO_RUNTIME_PKGS=()
+for _pkg in "${QDISTRO_PKGS[@]}"; do
+    case "$_pkg" in
+        *-devel|meson|ninja|gcc|gcc-c++|pkgconf-pkg-config) ;;
+        *) QDISTRO_RUNTIME_PKGS+=("$_pkg") ;;
+    esac
+done
+unset _pkg
 if [ "${BASH_SOURCE[0]:-$0}" != "${0}" ]; then
     return 0 2>/dev/null || true
 fi

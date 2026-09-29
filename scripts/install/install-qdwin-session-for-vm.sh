@@ -183,7 +183,13 @@ chmod -R u=rwX,go=rX /usr/share/quickshell/qdshell
 # `import Qdistro.Qdwin 1.0` and falls back to the no-binding stubs.
 QDSHELL_PLUGIN_BUILD="${QDSHELL_PLUGIN_BUILD:-$QDSHELL_SRC/build}"
 PLUGIN_SO="$QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so"
-if [ -f "$PLUGIN_SO" ]; then
+if [ "${QCI_NATIVE_STAGE:-0}" = 1 ]; then
+    # The verified Podman payload has already installed the matching plugin.
+    # There is no Meson build tree or compiler in this runtime-only guest.
+    test -s /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so \
+        && cmp -s "$QDSHELL_SRC/qml-plugin/qmldir" /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir \
+        || { echo 'ERROR: staged Qdistro.Qdwin plugin is missing or mismatched' >&2; exit 2; }
+elif [ -f "$PLUGIN_SO" ]; then
     # Staleness guard. A plugin .so older than its own sources is the
     # classic cause of the qdshell crash-loop: the .so predates a
     # Q_PROPERTY (e.g. `outputs`) that the deployed Qdwin.qml binds via a

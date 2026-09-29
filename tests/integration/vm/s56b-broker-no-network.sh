@@ -35,6 +35,7 @@
 # restores it + reinstalls the clean module on EXIT/INT/TERM.
 #
 # Usage (run as root in the VM):
+#   s56b-broker-no-network.sh --runtime-only
 #   s56b-broker-no-network.sh [BROKER_SELINUX_DIR]
 # BROKER_SELINUX_DIR defaults to the first of:
 #   /tmp/brk  (HTTP-staged by an operator/bats wrapper)
@@ -49,22 +50,35 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*" >&2; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
-[ "$(id -u)" = "0" ] || skip "must run as root"
+MODE=all
+if [ "${1:-}" = --runtime-only ]; then
+    MODE=runtime
+    shift
+fi
+if [ "$(id -u)" != "0" ]; then
+    [ "$MODE" = runtime ] && { fail 'runtime checks must run as root'; exit 1; }
+    skip "must run as root"
+fi
 
 DEVEL=/usr/share/selinux/devel
 SRC="${1:-}"
-if [ -z "$SRC" ]; then
+if [ "$MODE" = all ] && [ -z "$SRC" ]; then
     for cand in /tmp/brk /root/qdistro-src/selinux/broker; do
         [ -f "$cand/qdistro_broker.te" ] && SRC="$cand" && break
     done
 fi
-[ -n "$SRC" ] && [ -f "$SRC/qdistro_broker.te" ] \
-    || skip "broker SELinux source not found (pass BROKER_SELINUX_DIR)"
+if [ "$MODE" = all ]; then
+    [ -n "$SRC" ] && [ -f "$SRC/qdistro_broker.te" ] \
+        || skip "broker SELinux source not found (pass BROKER_SELINUX_DIR)"
+fi
 
 # ---------------------------------------------------------------------------
 # Layer 1 — systemd runtime no-network (always runnable; no SELinux needed).
 # ---------------------------------------------------------------------------
-command -v systemd-run >/dev/null 2>&1 || skip "systemd-run absent"
+if ! command -v systemd-run >/dev/null 2>&1; then
+    [ "$MODE" = runtime ] && { fail 'systemd-run absent'; exit 1; }
+    skip "systemd-run absent"
+fi
 
 CONF='RestrictAddressFamilies=AF_UNIX AF_NETLINK'
 PY_INET='import socket,sys
@@ -102,7 +116,16 @@ if systemctl cat "$UNIT" >/dev/null 2>&1; then
         fail "live $UNIT missing no-network hardening (PrivateNetwork=$pn RAF=[$raf])"
     fi
 else
-    echo "INFO: $UNIT not installed on this image — runtime directive check skipped (recipe proven generically above)"
+    if [ "$MODE" = runtime ]; then
+        fail "$UNIT not installed on this image"
+    else
+        echo "INFO: $UNIT not installed on this image — runtime directive check skipped (recipe proven generically above)"
+    fi
+fi
+
+if [ "$MODE" = runtime ]; then
+    echo "[s56b] $PASSCOUNT passes, $FAILCOUNT failures (runtime-only)"
+    [ "$FAILCOUNT" -eq 0 ] && exit 0 || exit 1
 fi
 
 # ---------------------------------------------------------------------------

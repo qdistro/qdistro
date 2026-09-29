@@ -170,7 +170,10 @@ host_free_check $(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 )) "the
 
 # The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
-[ -f "$IMG_DIR/baseweed-baked.qcow2" ] || die "$IMG_DIR/baseweed-baked.qcow2 missing (build it via scripts/vm/build-baked-baseweed.sh)"
+. "$VM_TOOLS/lib/test-substrate.sh"
+qdistro_load_test_substrate || die "invalid cloud test substrate manifest"
+BAKED_BASE="$(qdistro_substrate_base_path baked)"
+[ -f "$BAKED_BASE" ] || die "$BAKED_BASE missing (build it via scripts/vm/build-baked-baseweed.sh)"
 virsh dominfo qdistro-template >/dev/null 2>&1 || die "qdistro-template domain missing"
 
 #-- 2. Clone baseweed via the project's own tool ------------------------------

@@ -20,6 +20,7 @@ init_run() {
         printf 'user=%s\n' "$(id -un)"
         printf 'workspace=%s\n' "$WORKSPACE"
         printf 'qci=%s\n' "$SELF"
+        [ -z "${QCI_TEST_LANE:-}" ] || printf 'test_lane=%s\n' "$QCI_TEST_LANE"
         printf 'command=%q %q' "$SELF" "$GATE"
         local arg
         for arg in "$@"; do
