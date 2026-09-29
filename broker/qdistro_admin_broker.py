@@ -4896,6 +4896,9 @@ class Broker(dbus.service.Object):
                     float(r.get("completed_at") or 0.0)),
                 "error":         dbus.String(str(r.get("error") or "")),
                 "definition_digest": dbus.String(str(r.get("definition_digest") or "")),
+                "cleanup_state": dbus.String(str(r.get("cleanup_state") or "unknown")),
+                "cleanup_pending": dbus.UInt32(int(r.get("cleanup_pending") or 0)),
+                "cleanup_error": dbus.String(str(r.get("cleanup_error") or "")),
             })
         return out
 
