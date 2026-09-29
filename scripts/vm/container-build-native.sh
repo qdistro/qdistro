@@ -30,7 +30,7 @@ zypper -n refresh
 zypper -n dup --no-recommends
 zypper -n install --no-recommends \
     meson ninja gcc gcc-c++ pkgconf-pkg-config git file make \
-    selinux-policy-devel checkpolicy policycoreutils \
+    selinux-policy-devel selinux-policy-targeted checkpolicy policycoreutils findutils \
     weston-devel libweston-16 libweston-16-0 \
     wayland-devel wayland-protocols-devel libinput-devel libXcursor-devel \
     freerdp-devel winpr-devel pipewire-devel libselinux-devel \
@@ -89,6 +89,10 @@ for policy in pwd broker session_manager tier1; do
     install -m 0644 "$policy_dir/qdistro_$policy.pp" \
         "/out/stage/usr/share/qdistro-build/selinux/qdistro_$policy.pp"
 done
+
+# The runtime-only guest has no policy development tools. Check the broker's
+# neverallow negative control here against this snapshot's full policy store.
+bash /src/scripts/vm/container-check-broker-ratchet.sh /src/selinux
 
 test -s /out/stage/usr/lib64/weston/qdwin-shell.so
 test -s /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so

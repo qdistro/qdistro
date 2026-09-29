@@ -28,6 +28,7 @@ git -C "$repo" ls-files -z --cached --others --exclude-standard -- \
     qdwin qdshell daemons qsu selinux \
     scripts/install/install-vendored-libweston.sh \
     scripts/vm/container-build-native.sh \
+    scripts/vm/container-check-broker-ratchet.sh \
     | LC_ALL=C sort -zu > "$work/source-files.list"
 tar -C "$repo" --mtime=@0 --owner=0 --group=0 --numeric-owner \
     --no-recursion --null -T "$work/source-files.list" -cf "$work/source.tar"

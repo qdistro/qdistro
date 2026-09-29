@@ -229,6 +229,8 @@ archive under `$QDWIN_CACHE_DIR/native-podman/<snapshot>/<arch>/`. A changed
 source tree, container image, snapshot or Meson options triggers a rebuild.
 The guest loads the staged SELinux modules with `semodule`; no native compiler,
 Meson, Ninja, `make` or policy headers are needed in the cloud test base.
+The native builder checks the broker SELinux neverallow negative control
+against the pinned snapshot policy store before it caches the payload.
 Tier-2 test images use Podman's local image layers and a separate archive cache
 under `$QDWIN_CACHE_DIR/tier2-podman/<snapshot>/<arch>/`. Changes to tier-2
 source, the base container image or the pinned test snapshot rebuild that
