@@ -297,6 +297,7 @@ class FdPassDelivery(DeliveryHandle):
         self._fd_env = fd_env
         self._base_env = base_env
         self._read_fd: int | None = None
+        self._fd_close_unknown = False
         self._process: subprocess.Popen | None = None
         self.returncode: int | None = None
 
@@ -340,9 +341,17 @@ class FdPassDelivery(DeliveryHandle):
         # inherited read fd, then close our own end.
         _killpg(self._process)
         self._process = None
+        if self._fd_close_unknown:
+            raise DeliveryError("pipe close outcome is unknown; requires review")
         if self._read_fd is not None:
-            os.close(self._read_fd)
-            self._read_fd = None
+            # Linux may release an FD even when close raises. Detach ownership
+            # before the one-shot close; a retry must never close a reused FD.
+            fd, self._read_fd = self._read_fd, None
+            try:
+                os.close(fd)
+            except OSError:
+                self._fd_close_unknown = True
+                raise
 
 
 # ----------------------------------------------------------------------
@@ -489,13 +498,13 @@ class TmpfsMountDelivery(DeliveryHandle):
         os.makedirs(self._runtime_root, mode=0o700, exist_ok=True)
         self._dir = tempfile.mkdtemp(prefix="tmpfs-", dir=self._runtime_root)
         os.chmod(self._dir, 0o700)
+        # A timeout does not prove the mount command failed. Record the
+        # obligation before invoking it, then reconcile actual mount state.
+        self._mounted = True
         try:
             self._do_mount(self._dir)
-            self._mounted = True
-        except DeliveryError:
-            # No tmpfs -> do NOT write plaintext to a persistent path.
-            shutil.rmtree(self._dir)
-            self._dir = None
+        except Exception:
+            self._revoke()
             raise
         self._path = os.path.join(self._dir, self._filename)
         try:

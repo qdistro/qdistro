@@ -65,18 +65,23 @@ def test_released_child_identity_never_signals_numeric_group(monkeypatch):
     assert not handle.scrubbed and handle._secret.wiped
 
 
-def test_fd_close_failure_preserves_fd_for_retry(monkeypatch):
+def test_failed_fd_close_never_retries_reused_descriptor():
     handle = sd.FdPassDelivery(sd.SecretValue(b"dummy"))
     handle.deliver()
     fd = handle.read_fd
-    with monkeypatch.context() as patch:
-        patch.setattr(sd.os, "close", lambda fd: (_ for _ in ()).throw(OSError("denied")))
-        with pytest.raises(OSError):
+    os.close(fd)
+    with pytest.raises(OSError):
+        handle.scrub()
+    assert handle.read_fd is None and not handle.scrubbed
+    replacement = os.open("/dev/null", os.O_RDONLY)
+    try:
+        assert replacement == fd
+        with pytest.raises(sd.DeliveryError, match="outcome is unknown"):
             handle.scrub()
-    assert handle.read_fd == fd and not handle.scrubbed
-    os.fstat(fd)
-    handle.scrub()
-    assert handle.read_fd is None and handle.scrubbed
+        os.fstat(replacement)
+        assert not handle.scrubbed and handle._secret.wiped
+    finally:
+        os.close(replacement)
 
 
 @pytest.mark.integration
@@ -226,3 +231,32 @@ def test_reaper_failed_removal_is_not_counted(tmp_path, monkeypatch):
     monkeypatch.setattr(sd.shutil, "rmtree", denied)
     assert sd.reap_runtime_root(str(tmp_path)) == 0
     assert stale.exists()
+
+
+def test_mount_timeout_retains_attempted_mount_until_verified_retry(tmp_path, monkeypatch):
+    mounted = set()
+    commands = []
+    unmount_attempts = []
+    def run(command, **kwargs):
+        commands.append(command)
+        target = command[-1]
+        if command[0] == "mount":
+            mounted.add(target)
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        unmount_attempts.append(target)
+        if len(unmount_attempts) == 1:
+            return subprocess.CompletedProcess(command, 1)
+        mounted.remove(target)
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(sd.subprocess, "run", run)
+    monkeypatch.setattr(sd.os.path, "ismount", lambda target: target in mounted)
+    handle = sd.TmpfsMountDelivery(sd.SecretValue(b"dummy"), runtime_root=str(tmp_path))
+    with pytest.raises(sd.DeliveryError, match="not confirmed"):
+        handle.deliver()
+    assert handle._mounted and handle._dir in mounted
+    assert not handle.scrubbed and handle.path is None
+    directory = handle._dir
+    handle.scrub()
+    assert unmount_attempts == [directory, directory]
+    assert not mounted and not os.path.exists(directory)
+    assert handle.scrubbed and handle._secret.wiped
