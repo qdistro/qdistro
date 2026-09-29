@@ -38,6 +38,8 @@ class RunState(StrEnum):
     RUNNING = "running"
     FAILED = "failed"
     COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+    EXPIRED = "expired"
 
 
 @dataclass

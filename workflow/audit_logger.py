@@ -222,6 +222,23 @@ class WorkflowAuditLogger:
             "UPDATE workflow_runs SET cleanup_state=?, cleanup_pending=?, cleanup_error=? WHERE run_id=?",
             (state, pending, error, run_id))
 
+    def reconcile_interrupted_runs(self) -> int:
+        """Terminalize prior instance work; never recreate approvals or replay effects."""
+        rows = self._conn.execute(
+            "SELECT run_id, workflow_name, state FROM workflow_runs WHERE state IN ('pending','running','queued')"
+        ).fetchall()
+        for run_id, name, state in rows:
+            terminal = "expired" if state == "pending" else "interrupted"
+            error = ("approval expired after engine restart" if state == "pending" else
+                     "execution interrupted; effects and cleanup require review")
+            self._conn.execute(
+                "UPDATE workflow_runs SET state=?, completed_at=?, error=?, cleanup_state='unknown', "
+                "cleanup_error='prior process cleanup cannot be confirmed; requires review' WHERE run_id=?",
+                (terminal, time.time(), error, run_id))
+            self._log_event(run_id, name, "run_reconciled", error,
+                            {"prior_state": state, "cleanup_state": "unknown"})
+        return len(rows)
+
     def recent_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return the N most-recent workflow runs."""
         limit = max(1, min(int(limit), 10000))
@@ -270,13 +287,15 @@ class WorkflowAuditLogger:
         ]
 
     def gc(self, older_than_seconds: int) -> int:
-        """Delete run records older than the given threshold."""
+        """Delete old confirmed history; unresolved cleanup remains visible."""
         cutoff = time.time() - older_than_seconds
         # Delete steps for old runs first.
         self._conn.execute(
             """DELETE FROM workflow_steps
                WHERE run_id IN (
                    SELECT run_id FROM workflow_runs WHERE started_at < ?
+                   AND cleanup_state NOT IN ('pending','unresolved','unknown')
+                   AND state NOT IN ('pending','running','queued')
                )""",
             (cutoff,),
         )
@@ -284,11 +303,15 @@ class WorkflowAuditLogger:
             """DELETE FROM workflow_audit
                WHERE run_id IN (
                    SELECT run_id FROM workflow_runs WHERE started_at < ?
+                   AND cleanup_state NOT IN ('pending','unresolved','unknown')
+                   AND state NOT IN ('pending','running','queued')
                )""",
             (cutoff,),
         )
         cur = self._conn.execute(
-            "DELETE FROM workflow_runs WHERE started_at < ?",
+            "DELETE FROM workflow_runs WHERE started_at < ? "
+            "AND cleanup_state NOT IN ('pending','unresolved','unknown') "
+            "AND state NOT IN ('pending','running','queued')",
             (cutoff,),
         )
         return cur.rowcount or 0

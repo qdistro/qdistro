@@ -483,3 +483,12 @@ Scrub audit success is emitted only after backend confirmation, once per deliver
 ID. A missing audit acknowledgement retains ownership even when the channel has
 been revoked; retrying audit does not invoke a confirmed backend again. Legacy
 history lacks verified cleanup evidence and is shown as unknown.
+
+At engine startup, durable pending approvals expire and prior queued/running
+work is marked interrupted. No approval, step or remote side effect is replayed.
+Interrupted cleanup stays unknown and requires review, including any recorded
+unresolved delivery count. Cleanup identities live only in the owning engine;
+restart does not reconstruct handles or signal numeric PIDs. A durable resource
+manifest and a write-before-create provenance protocol remain deferred, so
+crashes during resource creation cannot be claimed as automatically reconciled.
+History retention preserves pending, unresolved and unknown cleanup rows.

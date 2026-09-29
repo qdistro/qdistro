@@ -280,7 +280,8 @@ class WorkflowEngine:
         self._cleanup_pending_runs: set[str] = set()
         self._relay_cleanup_attempts: dict[tuple[str, str], int] = {}
         self._relay_cleared: set[tuple[str, str]] = set()
-
+        if self._audit is not None:
+            self._audit.reconcile_interrupted_runs()
         # When a real vault backend is wired up, sweep any secret dirs a
         # previously-crashed engine left mounted/on tmpfs before we start.
         if secret_source is not None:
@@ -1445,6 +1446,10 @@ class WorkflowEngine:
                                                    run.plan.digest)
                 except Exception as exc:  # noqa: BLE001
                     run.mark_failed("automatic run admission audit failed")
+                    try:
+                        self._audit.log_run_failed(run.run_id, workflow_name, run.error)
+                    except Exception:
+                        logger.error("automatic admission failure could not be persisted")
                     self._release_inflight(dedup_key)
                     logger.error("automatic run %s refused: %r", run.run_id, exc)
                     return
