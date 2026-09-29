@@ -152,6 +152,11 @@ the SELinux policy modules, are built from current source in rootless Podman and
 cached by source, container image and snapshot. The runtime-only cloud VM
 receives that verified payload;
 `fresh-vm-bootstrap.sh` installs the remaining Python services, QML and units.
+When tier-2 workloads are requested, rootless Podman also builds their three
+images against the test substrate snapshot and caches a checksum-verified
+archive. The golden loads the archive into admin's Podman store and verifies
+each image's snapshot label. A cache hit avoids rebuilding these images inside
+every golden; the normal guest build remains available with the Kiwi base.
 The `bats` gate provisions this **once per run** into a golden qcow2
 (`qci-golden-bats-*.qcow2`), then every worker
 clones that golden and **skips the build** (per-VM provisioning drops to ~10 s).
@@ -222,6 +227,11 @@ archive under `$QDWIN_CACHE_DIR/native-podman/<snapshot>/<arch>/`. A changed
 source tree, container image, snapshot or Meson options triggers a rebuild.
 The guest loads the staged SELinux modules with `semodule`; no native compiler,
 Meson, Ninja, `make` or policy headers are needed in the cloud test base.
+Tier-2 test images use Podman's local image layers and a separate archive cache
+under `$QDWIN_CACHE_DIR/tier2-podman/<snapshot>/<arch>/`. Changes to tier-2
+source, the base container image or the pinned test snapshot rebuild that
+archive. `QCI_OFFLINE=1` requires both the base container and archive to be
+cached. The production `tier2/SNAPSHOT` pin is separate from the test pin.
 
 ## Agent-assisted GUI scenarios
 

@@ -1038,31 +1038,45 @@ fi
 # backing blocks. Failure here is FATAL when opted in — silently falling back to
 # the per-worker on-demand build is exactly the flaky path this removes.
 if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
-    if [ ! -x "$SRC/tier2/make-tier2-image.sh" ]; then
-        log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
-        exit 1
-    fi
-    # The source is staged under root's home (/root/qdistro-src, mode 700), but
-    # the tier-2 images build rootless AS admin (uid 1000), which then cannot
-    # traverse /root NOR read the tar-extracted source tree (make-tier2-image.sh
-    # + its podman build context) — "bash: .../make-tier2-image.sh: Permission
-    # denied". Make /root traversable (not listable) and the staged source
-    # world-readable so admin can reach the known paths. Test-VM only (no secrets
-    # in the source tree).
-    chmod 0711 /root 2>/dev/null || true
-    chmod -R a+rX "$SRC" 2>/dev/null || true
-    log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
-    if ! runuser -u admin -- bash "$SRC/tier2/make-tier2-image.sh"; then
-        log "  ERROR: tier-2 image pre-build failed"
-        exit 1
+    if [ -n "${QCI_TIER2_STAGE_SHA256:-}" ]; then
+        [[ "$QCI_TIER2_STAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+            || { log 'ERROR: invalid tier-2 archive digest'; exit 3; }
+        log 'fetching cached tier-2 Podman images...'
+        wget -q -O /tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \
+            || { log 'ERROR: tier-2 image archive download failed'; exit 3; }
+        echo "$QCI_TIER2_STAGE_SHA256  /tmp/qdistro-tier2-images.tar" | sha256sum -c - \
+            || { log 'ERROR: tier-2 image archive checksum mismatch'; exit 3; }
+        chmod 0644 /tmp/qdistro-tier2-images.tar
+        runuser -u admin -- podman load -i /tmp/qdistro-tier2-images.tar \
+            || { log 'ERROR: tier-2 image archive load failed'; exit 3; }
+        rm -f /tmp/qdistro-tier2-images.tar
+    else
+        if [ ! -x "$SRC/tier2/make-tier2-image.sh" ]; then
+            log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
+            exit 1
+        fi
+        # Guest builds run as admin, which needs access to source under /root.
+        chmod 0711 /root 2>/dev/null || true
+        chmod -R a+rX "$SRC" 2>/dev/null || true
+        log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
+        if ! runuser -u admin -- bash "$SRC/tier2/make-tier2-image.sh"; then
+            log "  ERROR: tier-2 image pre-build failed"
+            exit 1
+        fi
     fi
     # Verify each expected tag actually landed in admin's store. A partial build
     # (script exits 0 but one tag missing) would silently leave the on-demand
     # path for that workload.
     for _w in weston-terminal text-viewer url-preview; do
         if ! runuser -u admin -- podman image exists "qdistro/tier2-${_w}:latest"; then
-            log "  ERROR: expected image qdistro/tier2-${_w}:latest missing after pre-build"
+            log "  ERROR: expected image qdistro/tier2-${_w}:latest missing after load/build"
             exit 1
+        fi
+        if [ -n "${QCI_TIER2_STAGE_SHA256:-}" ]; then
+            _label=$(runuser -u admin -- podman image inspect "qdistro/tier2-${_w}:latest" \
+                --format '{{index .Labels "org.qdistro.test-snapshot"}}') || exit 3
+            [ "$_label" = "$(sed -n 's/^SNAPSHOT=//p' /etc/qdistro/test-substrate)" ] \
+                || { log "ERROR: tier-2 $_w image snapshot mismatch"; exit 3; }
         fi
     done
     log "  tier-2 images pre-built: weston-terminal, text-viewer, url-preview"

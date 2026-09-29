@@ -21,13 +21,14 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 # metadata. The shared helper pins both repos and leaves GPG checks enabled.
 COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
 RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive dup --no-recommends
 
 # Runtime deps: the weston stack (nested compositor + qdwin-shell.so publisher;
 # the `weston` package ships the `weston-terminal` binary used as the pager host,
 # same as the weston-terminal image) + `less` (the pager) + curl +
 # ca-certificates (the bounded fetch — https needs the CA bundle).
-RUN zypper --non-interactive --gpg-auto-import-keys refresh \
- && zypper --non-interactive install --no-recommends \
+RUN zypper --non-interactive install --no-recommends \
         weston \
         libweston-16 \
         libpipewire-0_3-0 \

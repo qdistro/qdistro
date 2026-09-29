@@ -109,7 +109,9 @@ qdwin, qdshell, daemons, qsu, and SELinux modules against the pinned
 Tumbleweed snapshot. `fresh-vm-bootstrap.sh` installs that payload,
 the Python services and QML tree, stages `/root` probes, and starts
 the session. It also stages Wayland protocol XML and pkg-config metadata
-needed by the Python protocol probes. See [ci/README.md](../../../ci/README.md#cloud-test-substrate)
+needed by the Python protocol probes. Tier-2 workload images are built and
+cached in rootless Podman on the host, then loaded into the golden VM.
+See [ci/README.md](../../../ci/README.md#cloud-test-substrate)
 for the snapshot and RPM caches.
 
 ## Maintenance

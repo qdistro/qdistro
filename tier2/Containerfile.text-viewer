@@ -19,14 +19,15 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 # Tumbleweed snapshot and retains normal RPM/repository signature checks.
 COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
 RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive dup --no-recommends
 
 # Runtime deps: identical weston stack to the weston-terminal image (so the
 # nested compositor + qdwin-shell.so publisher behave the same). The `weston`
 # package ships the `weston-terminal` binary (the viewer host) — same as the
 # weston-terminal image, which also installs only `weston`. Plus `less` (the
 # pager). No network tooling — text/plain is a network=none class.
-RUN zypper --non-interactive --gpg-auto-import-keys refresh \
- && zypper --non-interactive install --no-recommends \
+RUN zypper --non-interactive install --no-recommends \
         weston \
         libweston-16 \
         libpipewire-0_3-0 \
