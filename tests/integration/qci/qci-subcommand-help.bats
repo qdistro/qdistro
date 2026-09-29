@@ -12,7 +12,7 @@
 
 # Every subcommand main() dispatches, one entry per case arm.
 SUBCOMMANDS=(preflight lint selftest image registry-check release-manifest
-    bootstrap-release-profile affected edit-guard replay host vm-smoke bats
+    bootstrap-release-profile affected edit-guard replay host feedback vm-smoke bats
     gui gui-admin full snapshot-daily mmnet cleanup report triage list-runs)
 
 setup() {

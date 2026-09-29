@@ -322,6 +322,12 @@ except (KeyError, TypeError):
     return "$rc"
 }
 
+# One invocation shared by full host acceptance and component development feedback.
+host_job_qdfileman() {
+    local gate=${1:-host}
+    run_logged "$gate" qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)"         "${2:-}"
+}
+
 gate_host() {
     qci_assert_run_dir || return $?
     qci_assert_repo host || return $?
@@ -538,7 +544,7 @@ fi'
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qdlocker-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdlocker" "$(host_pytest_cmd all 0 '' tests/unit)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)" ""; step_rc=$?
+    host_job_qdfileman host; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
