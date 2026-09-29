@@ -195,6 +195,11 @@ A per-task timing breakdown (provision vs work seconds per file/scenario) is
 written to `<run-dir>/timings.tsv` for spotting outliers.
 The [test split proposal](TEST-SPLITS.md) summarizes a measured full run and
 the coverage work needed before automatic selection can omit slow scenarios.
+For focused development runs, `ci/bin/qci-lane check` lists the available
+group sizes, `ci/bin/qci-lane list bats-fast` prints its files, and
+`ci/bin/qci-lane run gui-locker` executes only that scenario group through
+the normal qci gate. The group and exact file selection appear in the run
+manifest. These explicit lanes do not alter `qci full` or `qci affected`.
 
 ### Cloud test substrate
 

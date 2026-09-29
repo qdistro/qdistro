@@ -26,9 +26,11 @@ must still include every lane.
 1. Keep `preflight`, `lint`, `selftest`, and the relevant host tests as the
    short feedback path. Keep `vm-smoke` for changes to provisioning and runtime
    startup.
-2. Add explicit Bats file-list and GUI scenario-group selectors for focused
-   development runs. Start with the four groups in the table plus the slow
-   Bats group. Make the group membership visible in each run's manifest.
+2. Use `ci/bin/qci-lane list <lane>` and `ci/bin/qci-lane run <lane>` for
+   focused development runs. The launcher provides fast/slow Bats and
+   permissions, locker, Noctalia, qdwin and app GUI groups. Its manifest
+   records the lane and the exact selected files in the command. It does not
+   change `qci full` or provide a release verdict.
 3. Expand `tests/registry.tsv` to cover every Bats file and GUI scenario,
    recording the component or boundary each case protects. Audit the
    `ci/lib/affected.sh` path rules against that inventory before any automatic
@@ -44,7 +46,7 @@ must still include every lane.
 `tests/integration/vm/s56b-broker-no-network.sh` has a SELinux neverallow
 negative control that needs policy development tools. The cloud test VM omits
 those tools, so the script's build-ratchet portion exits with an informational
-skip when run there. It also has no direct Bats or registry invocation today.
+skip when run there. Its runtime checks now have a direct Bats invocation.
 The native Podman build now runs
 `scripts/vm/container-check-broker-ratchet.sh` against the pinned snapshot's
 policy store before caching a golden payload. It requires the injected
