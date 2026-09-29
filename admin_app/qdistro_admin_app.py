@@ -1364,13 +1364,14 @@ class NewSiloDialog(QDialog):
 class SilosTab(QWidget):
     """Tab listing silos with state badges + lifecycle action buttons.
 
-    Refreshes on SiloChanged or after a successful action. Refuses to
+    Refreshes periodically, on SiloChanged, or after a successful action. Refuses to
     construct without a SessionManagerBridge — the tab is gated at
     MainWindow startup based on whether the system bus has the
     SessionManager1 well-known name.
     """
 
     COLUMNS = ("name", "uid", "state", "autostart", "runtime observation")
+    OBSERVATION_REFRESH_MS = 5000
     STATE_COLOURS = {
         "Created":  QColor("#a0a0a0"),
         "Active":   QColor("#7bc97b"),
@@ -1434,15 +1435,31 @@ class SilosTab(QWidget):
         self.session.siloChanged.connect(
             lambda _n, _s: self._refresh_timer.start())
 
-    def refresh(self) -> None:
+        # Same-result samples and expiry do not emit SiloChanged. Polling keeps
+        # rendered evidence current even when lifecycle and status stay stable.
+        self._observation_timer = QTimer(self)
+        self._observation_timer.setInterval(self.OBSERVATION_REFRESH_MS)
+        self._observation_timer.timeout.connect(lambda: self.refresh(background=True))
+        self._observation_timer.start()
+
+    def refresh(self, *, background: bool = False) -> None:
+        selected = self._selected_row()
+        selected_name = selected.get("name") if selected is not None else None
         try:
             rows = self.session.list_silos()
         except dbus.DBusException as e:
+            if background:
+                # Failed polling cannot leave old affirmative evidence visible.
+                for i in range(self.model.rowCount()):
+                    self.model.item(i, 4).setText("unknown")
+                    self.model.item(i, 4).setToolTip("Runtime observation unavailable: refresh failed")
+                return
             title, label = _friendly_broker_error(e)
             QMessageBox.warning(self, title,
                                 f"Couldn't list silos.\n\n{label}")
             return
         self.model.removeRows(0, self.model.rowCount())
+        selected_index = None
         for r in rows:
             items = [
                 QStandardItem(str(r.get("name", ""))),
@@ -1460,6 +1477,15 @@ class SilosTab(QWidget):
                 it.setEditable(False)
             items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
             self.model.appendRow(items)
+            if selected_name is not None and r.get("name") == selected_name:
+                selected_index = self.model.rowCount() - 1
+        # A refresh may reorder or remove silos. Preserve action targeting by
+        # name, and leave no target when the selected silo disappeared.
+        if selected_index is not None:
+            self.table.selectRow(selected_index)
+        else:
+            self.table.clearSelection()
+            self.table.setCurrentIndex(self.model.index(-1, -1))
         self.table.resizeColumnsToContents()
 
     def _selected_row(self) -> dict | None:

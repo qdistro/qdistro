@@ -42,8 +42,10 @@ Examples:
 
 This document is the owner-facing contract qdistro is building toward; the v1
 runtime implements only a narrower slice. The shipped session manager has a
-low-level uid/cgroup lifecycle for created, stopped, starting, active,
-stopping, and failed sessions, plus crash-safe persistence for that lifecycle.
+low-level uid/cgroup lifecycle with `Created`, `Active`, `Frozen`, `Stopping`,
+`Stopped`, and `Deleting` states, plus crash-safe persistence for that lifecycle.
+Observed runtime status is separate evidence and does not change those states
+or the lifecycle safeguards described below.
 Template bindings, candidate validation, promotion, and first-activation state
 snapshots are implemented in the template layer; see
 [templates.md](templates.md).
@@ -651,7 +653,8 @@ model but lower-level than the owner-facing health and bootstrap states above.
 `ListSilos` retains the conservative lifecycle `state` used for stop, delete
 and broker policy. It additionally returns `observed_status`, `observed_reason`,
 `observed_at` (epoch seconds) and `operation_generation`. The admin silo table
-shows the runtime observation separately from lifecycle state. Status is one of
+shows the runtime observation separately from lifecycle state and refreshes it
+every five seconds, including when the status stays the same. Status is one of
 `starting`, `launcher-running`, `stopped`, `failed` or `unknown`.
 
 A background observer samples systemd's launcher state and pending job, plus
@@ -659,8 +662,11 @@ container existence/running status for tier-2 workloads or the recursive
 cgroup population for uid-backed workloads. Each subprocess is bounded to three
 seconds. Observations expire after thirty seconds; unavailable or timed-out
 probes report unknown. Results from a preceding lifecycle generation are
-ignored, and no observations survive daemon restart. Unresolved starts remain
-unknown until a successful stop. A plain start retry remains an idempotent
+ignored, and no observations survive daemon restart. Within the current daemon
+lifetime, unresolved starts remain unknown until a successful stop. Restart
+resets that unresolved-start latch and initializes observations as unknown;
+subsequent probes may report runtime evidence, while the persisted lifecycle
+remains conservative. A plain start retry remains an idempotent
 operation from Active; follow the existing stop-then-start recovery path.
 
 Launcher activation and container existence do not establish application
