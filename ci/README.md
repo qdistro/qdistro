@@ -60,6 +60,7 @@ vitest tags), and the per-suite relabel action items.
 | `preflight` | Verify the in-tree component dirs (and warn about stale pre-monorepo sibling checkouts next to the repo), libvirt session, VM tools, prebaked image, and common host tools. |
 | `lint` | Run warn-only shellcheck/scenario-structure metrics plus blocking Bats syntax and maintained-document local-link/anchor validation. `QCI_FLAKE_STRICT=1` also makes scenario flake findings fatal. |
 | `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
+| `feedback qdfileman [paths...]` | Run the shared qdfileman host pytest job for development feedback only; record paths, dependencies, timing and outcome. Refuses release mode. |
 | `host` | Run host tests/builds across all in-tree components: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `tests/integration/vm/*.bats` file (and each component's `<component>/tests/integration/vm/*.bats`). Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
@@ -195,6 +196,25 @@ A per-task timing breakdown (provision vs work seconds per file/scenario) is
 written to `<run-dir>/timings.tsv` for spotting outliers.
 The [test split proposal](TEST-SPLITS.md) summarizes a measured full run and
 the coverage work needed before automatic selection can omit slow scenarios.
+For quick Python app feedback, use an isolated worktree and run
+`ci/bin/qci feedback qdfileman qdfileman/qfileman/window.py` (replace the path
+with the changed files). It calls the same job as `host`, with the same default
+600-second step timeout. A pass is development feedback only and does not
+satisfy `host` or `full`; `QCI_RELEASE=1` is refused before a run is created.
+The `feedback_*` manifest fields and `host/feedback-paths.txt` record selection,
+revision, elapsed time to result, job counts and exit outcome. Dependency content
+hashes and Python/pytest/Qt package versions appear in
+`host/feedback-dependencies.txt`; `repo-state.tsv` records checkout state.
+Compare timings only at matching revision, clean/dirty state and dependency
+identity; no speedup against full host has been measured here. Job counts describe
+jobs, not pytest test cases; the pytest log has case counts.
+
+The consumer map is deliberately a shadow report: qdfileman changes still need
+`host bats gui`, and no paths, shared SDK receive/send, installation changes or
+unknown paths require full acceptance coverage. The command executes one explicit
+job regardless of this report, and never changes `qci affected` selections.
+SDK or installation feedback alone cannot validate their other consumers.
+
 For focused development runs, `ci/bin/qci-lane check` lists the available
 group sizes, `ci/bin/qci-lane list bats-fast` prints its files, and
 `ci/bin/qci-lane run gui-locker` executes only that scenario group through
