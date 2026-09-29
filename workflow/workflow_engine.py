@@ -294,10 +294,11 @@ class WorkflowEngine:
         wf_list = self._loader.load()
         with self._runs_lock:
             self._workflows = {wf.name: wf for wf in wf_list}
-            for run in self._runs.values():
-                if (run.plan is not None and not run.execution_started
-                        and run.state in (RunState.PENDING, RunState.RUNNING)):
-                    self._validate_plan(run)
+            invalidated = [run for run in self._runs.values()
+                           if (run.plan is not None and not run.execution_started
+                               and run.state in (RunState.PENDING, RunState.RUNNING)
+                               and not self._plan_matches(run))]
+            self._invalidate_runs(invalidated)
         errors = self._loader.load_errors()
         for err in errors:
             logger.warning("workflow load error: %s", err)
@@ -369,7 +370,6 @@ class WorkflowEngine:
         self,
         workflow_name: str,
         trigger_context: dict[str, Any] | None = None,
-        plan: WorkflowPlan | None = None,
     ) -> WorkflowRun:
         """Create and execute a workflow run.
 
@@ -384,7 +384,7 @@ class WorkflowEngine:
             run = WorkflowRun(
                 workflow_name=workflow_name,
                 trigger_context=dict(trigger_context or {}),
-                plan=plan if plan is not None else WorkflowPlan.capture(wf),
+                plan=WorkflowPlan.capture(wf),
             )
             run.mark_running()
             self._runs[run.run_id] = run
@@ -462,15 +462,31 @@ class WorkflowEngine:
 
         return run
 
+    def _plan_matches(self, run: WorkflowRun) -> bool:
+        current = self._workflows.get(run.workflow_name)
+        return (run.plan is not None and current is not None
+                and WorkflowPlan.capture(current).digest == run.plan.digest)
+
+    def _invalidate_runs(self, runs: list[WorkflowRun]) -> None:
+        # Revocation must complete for the entire batch before any fallible
+        # persistence operation. An unavailable audit DB cannot keep a plan live.
+        for run in runs:
+            run.mark_failed("workflow definition changed or was removed; approval invalidated")
+        if self._audit:
+            for run in runs:
+                try:
+                    self._audit.log_run_failed(run.run_id, run.workflow_name, run.error)
+                except Exception as exc:  # noqa: BLE001
+                    run.audit_entries.append({"event": "audit_failure", "operation": "plan_invalidation",
+                                              "error": repr(exc)})
+                    logger.error("run %s approval invalidated but audit persistence failed: %r",
+                                 run.run_id, exc)
+
     def _validate_plan(self, run: WorkflowRun) -> bool:
         """Called under _runs_lock at preview, approval and worker dispatch."""
-        current = self._workflows.get(run.workflow_name)
-        if (run.plan is not None and current is not None
-                and WorkflowPlan.capture(current).digest == run.plan.digest):
+        if self._plan_matches(run):
             return True
-        run.mark_failed("workflow definition changed or was removed; approval invalidated")
-        if self._audit:
-            self._audit.log_run_failed(run.run_id, run.workflow_name, run.error)
+        self._invalidate_runs([run])
         return False
 
     def preview_run(self, run_id: str) -> dict[str, Any]:
@@ -1334,46 +1350,49 @@ class WorkflowEngine:
         broker main loop for D-Bus triggers) is never occupied by
         workflow execution.
         """
+        dedup_key = self._dedup_key(workflow_name, trigger_context)
         with self._runs_lock:
             wf = self._workflows.get(workflow_name)
             if wf is None:
                 logger.warning("trigger fired for unknown workflow %s", workflow_name)
                 return
-            plan = WorkflowPlan.capture(wf)
-
-        # F3: human-in-the-loop default. A workflow only auto-executes if
-        # it opted in with ``auto_run: true``; otherwise the fire records a
-        # PENDING run awaiting admin approval.
-        if not wf.auto_run:
+            auto_run = wf.auto_run
+            if auto_run:
+                with self._active_lock:
+                    if self._inflight >= self._max_inflight:
+                        logger.warning("workflow run queue saturated; dropping trigger for %s", workflow_name)
+                        return
+                    if dedup_key is not None and dedup_key in self._active_keys:
+                        return
+                    if dedup_key is not None:
+                        self._active_keys.add(dedup_key)
+                    self._inflight += 1
+                run = WorkflowRun(workflow_name=workflow_name,
+                                  trigger_context=dict(trigger_context or {}),
+                                  plan=WorkflowPlan.capture(wf))
+                run.mark_running()
+                # A queued automatic fire must be visible to reload, including
+                # a temporary revocation followed by restoration of its plan.
+                self._runs[run.run_id] = run
+                try:
+                    if self._audit:
+                        self._audit.log_run_queued(run.run_id, workflow_name, run.trigger_context,
+                                                   run.plan.digest)
+                except Exception as exc:  # noqa: BLE001
+                    run.mark_failed("automatic run admission audit failed")
+                    self._release_inflight(dedup_key)
+                    logger.error("automatic run %s refused: %r", run.run_id, exc)
+                    return
+        if not auto_run:
             self._enqueue_pending(workflow_name, trigger_context)
             return
-
-        dedup_key = self._dedup_key(workflow_name, trigger_context)
-        with self._active_lock:
-            if self._inflight >= self._max_inflight:
-                logger.warning(
-                    "workflow run queue saturated (%d in flight); dropping "
-                    "trigger for %s", self._inflight, workflow_name)
-                return
-            if dedup_key is not None and dedup_key in self._active_keys:
-                logger.info(
-                    "collapsing duplicate trigger for %s (cgroup %s already "
-                    "has an active run)", workflow_name, dedup_key[1])
-                return
-            if dedup_key is not None:
-                self._active_keys.add(dedup_key)
-            self._inflight += 1
-
-        logger.info("trigger fired for workflow %s, dispatching run",
-                    workflow_name)
         try:
-            self._run_pool.submit(self._run_from_trigger,
-                                  workflow_name, trigger_context, dedup_key, plan)
-        except RuntimeError as e:
-            # Pool already shut down (engine stopping) — drop the fire and
-            # release the accounting we just took.
+            self._run_pool.submit(self._run_from_trigger, run, dedup_key)
+        except RuntimeError as exc:
+            with self._runs_lock:
+                run.mark_failed("worker pool unavailable")
             self._release_inflight(dedup_key)
-            logger.warning("dropping trigger for %s: %r", workflow_name, e)
+            logger.warning("dropping trigger for %s: %r", workflow_name, exc)
 
     def _release_inflight(self, dedup_key: tuple[str, str] | None) -> None:
         with self._active_lock:
@@ -1381,15 +1400,12 @@ class WorkflowEngine:
             if dedup_key is not None:
                 self._active_keys.discard(dedup_key)
 
-    def _run_from_trigger(self, workflow_name: str,
-                          trigger_context: dict[str, Any],
-                          dedup_key: tuple[str, str] | None = None,
-                          plan: WorkflowPlan | None = None) -> None:
+    def _run_from_trigger(self, run: WorkflowRun,
+                          dedup_key: tuple[str, str] | None = None) -> None:
         try:
-            self.start_run(workflow_name, trigger_context, plan)
-        except Exception as e:  # noqa: BLE001
-            logger.error("failed to start run for workflow %s: %s",
-                         workflow_name, e)
+            self._execute_existing_run(run)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("failed to start run %s: %s", run.run_id, exc)
         finally:
             self._release_inflight(dedup_key)
 
@@ -1440,18 +1456,14 @@ class WorkflowEngine:
             return [r for r in self._runs.values()
                     if r.state == RunState.PENDING]
 
-    def approve_run(self, run_id: str, expected_digest: str | None = None,
+    def approve_run(self, run_id: str, expected_digest: str,
                     approver: dict[str, Any] | None = None) -> bool:
-        """Release the captured plan once; new callers must supply preview digest.
-
-        Trusted legacy callers omit the digest but still cannot approve a
-        changed definition. Reload and dispatch share the same lock.
-        """
+        """Release only the captured plan matching the caller's preview digest."""
         with self._runs_lock:
             run = self._runs.get(run_id)
             if run is None or run.state != RunState.PENDING or not self._validate_plan(run):
                 return False
-            if expected_digest is not None and expected_digest != run.plan.digest:
+            if not expected_digest or expected_digest != run.plan.digest:
                 return False
             with self._active_lock:
                 if self._inflight >= self._max_inflight:

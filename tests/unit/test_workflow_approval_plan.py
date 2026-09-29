@@ -78,7 +78,8 @@ def test_reload_invalidates_material_changes(engine, monkeypatch, field):
     assert run.state == RunState.FAILED, run
     assert engine.preview_run(run.run_id) == {}
     assert not engine.approve_run(run.run_id, digest)
-    assert not engine.approve_run(run.run_id), "legacy approval released invalidated run"
+    with pytest.raises(TypeError):
+        engine.approve_run(run.run_id)
     assert engine.executed == []
 
 
@@ -167,9 +168,9 @@ def test_preview_approval_and_execution_share_audited_digest(tmp_path):
         assert preview["definition"]["steps"][0]["config"]["hook"] == "reviewed"
         assert preview["definition"]["needs"] == ["vault/dev/key"]
         digest = preview["definition_digest"]
-        assert not br.ApproveWorkflowPlan(run.run_id, "stale")
+        assert not br.ApproveWorkflowRun(run.run_id, "stale")
         assert audit.rows == []
-        assert br.ApproveWorkflowPlan(run.run_id, digest)
+        assert br.ApproveWorkflowRun(run.run_id, digest)
         engine._run_pool.shutdown(wait=True)
         assert engine.executed == [digest]
         assert durable.recent_runs()[0]["definition_digest"] == digest
@@ -187,7 +188,7 @@ def test_strict_approval_fails_closed_on_audit_error(engine):
     br = make_broker(engine, RecordingAudit(fail=True))
     run = engine._enqueue_pending("wf", {})
     digest = engine.preview_run(run.run_id)["definition_digest"]
-    assert not br.ApproveWorkflowPlan(run.run_id, digest)
+    assert not br.ApproveWorkflowRun(run.run_id, digest)
     assert run.state == RunState.PENDING and engine.executed == []
 
 
@@ -199,15 +200,15 @@ def test_strict_surfaces_require_control_peer(engine):
     with pytest.raises(dbus.DBusException):
         br.PreviewWorkflowRun("any")
     with pytest.raises(dbus.DBusException):
-        br.ApproveWorkflowPlan("any", "digest")
+        br.ApproveWorkflowRun("any", "digest")
 
 
-def test_legacy_approval_binds_audited_digest_and_rejects_drift(engine):
+def test_approval_binds_audited_digest(engine):
     audit = RecordingAudit()
     br = make_broker(engine, audit)
     run = engine._enqueue_pending("wf", {})
     digest = run.plan.digest
-    assert br.ApproveWorkflowRun(run.run_id)
+    assert br.ApproveWorkflowRun(run.run_id, digest)
     engine._run_pool.shutdown(wait=True)
     assert engine.executed == [digest]
     assert f"definition_digest={digest}" in audit.rows[0]["source"]
@@ -254,6 +255,10 @@ def test_auto_run_queue_cannot_execute_reloaded_approval_required_plan(engine, m
         engine._workflows["wf"].auto_run = True
         engine._on_trigger("wf", {})
         reload(engine, monkeypatch, [definition()])
+        assert engine.list_runs()[0].state == RunState.FAILED
+        restored = definition()
+        restored.auto_run = True
+        reload(engine, monkeypatch, [restored])
     finally:
         release.set()
         blocker.result(timeout=5)
@@ -286,3 +291,52 @@ def test_reload_does_not_splice_into_already_executing_run(engine, monkeypatch):
         engine._run_pool.shutdown(wait=True)
     assert captured == [digest]
     assert run.state == RunState.COMPLETED
+
+
+def test_digestless_and_empty_approval_cannot_release(engine):
+    br = make_broker(engine, RecordingAudit())
+    run = engine._enqueue_pending("wf", {})
+    with pytest.raises(TypeError):
+        engine.approve_run(run.run_id)
+    with pytest.raises(TypeError):
+        br.ApproveWorkflowRun(run.run_id)
+    assert not engine.approve_run(run.run_id, "")
+    assert not br.ApproveWorkflowRun(run.run_id, "")
+    assert not br.ApproveWorkflowRun(run.run_id, "mismatch")
+    assert run.state == RunState.PENDING and engine.executed == []
+
+
+def test_all_queued_approvals_stay_revoked_when_audit_fails(engine, monkeypatch, caplog):
+    occupied = threading.Event()
+    release = threading.Event()
+    def block_worker():
+        occupied.set()
+        assert release.wait(5)
+    blocker = engine._run_pool.submit(block_worker)
+    assert occupied.wait(5)
+    first = engine._enqueue_pending("wf", {"cgroup": "first"})
+    second = engine._enqueue_pending("wf", {"cgroup": "second"})
+    assert engine.approve_run(first.run_id, first.plan.digest)
+    assert engine.approve_run(second.run_id, second.plan.digest)
+    attempted = []
+    class FailingRevocationAudit:
+        def log_run_failed(self, run_id, workflow_name, error):
+            assert first.state == second.state == RunState.FAILED, "revocation did not precede audit"
+            attempted.append(run_id)
+            raise OSError("revocation audit unavailable")
+    engine._audit = FailingRevocationAudit()
+    try:
+        changed = definition()
+        changed.steps[0].config["hook"] = "changed"
+        reload(engine, monkeypatch, [changed])
+        assert first.state == second.state == RunState.FAILED
+        assert attempted == [first.run_id, second.run_id]
+        assert all(r.audit_entries[0]["operation"] == "plan_invalidation" for r in (first, second))
+        assert "audit persistence failed" in caplog.text
+        reload(engine, monkeypatch, [definition()])
+    finally:
+        release.set()
+        blocker.result(timeout=5)
+        engine._run_pool.shutdown(wait=True)
+        engine._audit = None
+    assert engine.executed == [], "failed audit allowed a revoked queued approval to resurrect"

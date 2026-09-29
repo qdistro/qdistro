@@ -99,6 +99,17 @@ class WorkflowAuditLogger:
         self._log_event(run_id, workflow_name, "run_approval", "approval attempt",
                         {"definition_digest": digest, "approver": approver})
 
+    def log_run_queued(self, run_id: str, workflow_name: str,
+                       trigger_context: dict[str, Any], digest: str) -> None:
+        """Persist automatic work before submitting it to the worker pool."""
+        self._conn.execute(
+            """INSERT INTO workflow_runs
+               (run_id, workflow_name, state, started_at, trigger_context, definition_digest)
+               VALUES (?, ?, 'running', ?, ?, ?)""",
+            (run_id, workflow_name, time.time(), json.dumps(trigger_context, default=str), digest))
+        self._log_event(run_id, workflow_name, "run_queued", "automatic run queued",
+                        {"definition_digest": digest})
+
     def log_run_pending(self, run_id: str, workflow_name: str,
                         trigger_context: dict[str, Any]) -> None:
         """Record a run that fired but awaits admin approval (F3)."""

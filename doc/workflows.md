@@ -402,17 +402,20 @@ numbers; unsupported YAML types are reported as load errors.
 The admin Workflows tab previews the captured definition before approval.
 `PreviewWorkflowRun(run_id)` returns JSON with `run_id`, `workflow_name`,
 `definition_digest`, and `definition`; `{}` means the pending run is no longer
-approvable. `ApproveWorkflowPlan(run_id, expected_digest)` releases only the
+approvable. `ApproveWorkflowRun(run_id, expected_digest)` releases only the
 matching plan and records the digest and control peer identity before dispatch.
-Both methods require an admin control peer. The historical admin-only
-`ApproveWorkflowRun(run_id)` also binds execution and audit to the captured
-plan, but cannot attest that an old caller displayed its preview. New callers
-should use the digest-bearing method.
+Both methods require an admin control peer. Approval requires the digest from
+the preview; calls using the previous digestless signature must migrate.
+The engine also refuses empty or mismatched approval digests.
 
 Reloading a materially changed or removed definition invalidates pending and
 approved-but-queued runs. Returning to the old definition does not resurrect
 an invalidated run. An unchanged reload, description edit or file move
-preserves approval identity. Once worker dispatch starts, a running workflow
+preserves approval identity. Automatic trigger fires are registered with their
+captured run before submission and are subject to the same permanent queued-run
+invalidation. A failed audit write does not abort revocation of any affected
+run; the failure is retained in memory and reported in the broker log.
+Once worker dispatch starts, a running workflow
 continues using its captured definition; reload does not splice in new steps.
 Live firing-process identity checks still run immediately before execution.
 

@@ -980,7 +980,7 @@ class BrokerBridge(QObject):
 
     def approve_workflow_run(self, run_id: str, expected_digest: str) -> bool:
         """Approve exactly the captured definition shown in the preview."""
-        return bool(self._call("ApproveWorkflowPlan", str(run_id), str(expected_digest)))
+        return bool(self._call("ApproveWorkflowRun", str(run_id), str(expected_digest)))
 
     def list_history(self, limit: int) -> list[dict]:
         raw = self._call("ListHistory", int(limit))
