@@ -3230,7 +3230,7 @@ class WorkflowsTab(QWidget):
     """
     WF_COLUMNS = ("name", "trigger", "steps", "needs", "description")
     RUN_COLUMNS = ("run_id", "workflow", "state", "started", "finished",
-                   "error")
+                   "error", "cleanup", "cleanup pending", "cleanup error")
 
     def __init__(self, broker: BrokerBridge):
         super().__init__()
@@ -3409,6 +3409,9 @@ class WorkflowsTab(QWidget):
                 QStandardItem(started),
                 QStandardItem(finished),
                 QStandardItem(str(r.get("error", "")) or "-"),
+                QStandardItem(str(r.get("cleanup_state", "unknown"))),
+                QStandardItem(str(r.get("cleanup_pending", 0))),
+                QStandardItem(str(r.get("cleanup_error", "")) or "-"),
             ]
             items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
             for it in items:

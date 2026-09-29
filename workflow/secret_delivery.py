@@ -167,7 +167,7 @@ class DeliveryHandle(ABC):
     def __init__(self, secret: SecretValue):
         self._secret = secret
         self._scrubbed = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._cleanup_error: str | None = None
 
     @abstractmethod

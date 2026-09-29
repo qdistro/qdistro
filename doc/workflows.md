@@ -468,3 +468,18 @@ SSH directories as unresolved. An SSH directory has no trustworthy process
 identity after a crash; existing key TTL and service supervision still apply.
 These backend guarantees do not provide durable cleanup manifests or replay
 workflow side effects.
+
+Workflow task state and channel cleanup are separate outcomes. History and the
+admin workflow table show `cleanup_state`, unresolved delivery count and a
+nonsecret cleanup error alongside task state. A completed task can therefore
+have unresolved cleanup and must still be reviewed. Each delivery is owned before
+backend creation; partial, step-scoped and shutdown-time failures remain owned.
+A sweep attempts each unconfirmed backend once, with at most three backend
+attempts per handle across sweeps. Exhaustion retains the obligation for review
+rather than treating it as scrubbed. `scrub_all_runs()` and shutdown sweep this
+queue; no automatic side-effect replay occurs.
+
+Scrub audit success is emitted only after backend confirmation, once per delivery
+ID. A missing audit acknowledgement retains ownership even when the channel has
+been revoked; retrying audit does not invoke a confirmed backend again. Legacy
+history lacks verified cleanup evidence and is shown as unknown.

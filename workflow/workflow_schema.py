@@ -311,6 +311,9 @@ class WorkflowRun:
     error: str = ""
     plan: WorkflowPlan | None = None
     execution_started: bool = False
+    cleanup_state: str = "not_needed"
+    cleanup_pending: int = 0
+    cleanup_error: str = ""
 
     def mark_running(self) -> None:
         self.state = RunState.RUNNING
