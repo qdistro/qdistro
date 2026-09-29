@@ -310,8 +310,8 @@ if [ -f "$SRC/qdbrowser/pyproject.toml" ]; then
     install -d -m 0755 /opt/qdbrowser
     cp -a "$SRC/qdbrowser/." /opt/qdbrowser/
     # Importable from any cwd (`python3 -m qdbrowser`); --no-deps because the
-    # deps come from zypper above, never from PyPI wheels.
-    python3 -m pip install --break-system-packages --no-deps --quiet "$SRC/qdbrowser" \
+    # deps and setuptools come from the pinned snapshot RPMs, never PyPI.
+    python3 -m pip install --break-system-packages --no-index --no-build-isolation --no-deps --quiet "$SRC/qdbrowser" \
         || { log "  ERROR: pip install qdbrowser failed"; exit 3; }
     python3 -c 'import qdbrowser, PyQt6.QtWebEngineWidgets' \
         || { log "  ERROR: qdbrowser installed but not importable with PyQt6.QtWebEngineWidgets"; exit 3; }
@@ -765,7 +765,7 @@ if [ -d "$SRC/qdlocker/qdlocker" ]; then
         >/dev/null 2>&1 || \
         { log "  ERROR: zypper install of qdlocker deps failed"; exit 3; }
 
-    python3 -m pip install --break-system-packages --no-deps --quiet \
+    python3 -m pip install --break-system-packages --no-index --no-build-isolation --no-deps --quiet \
         "$SRC/qdlocker" \
         || { log "  ERROR: pip install qdlocker failed"; exit 3; }
 
