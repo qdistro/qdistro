@@ -12,6 +12,7 @@ setup() {
     export RUN_LOCK_LAUNCHER="$T/launcher-pid"
     export RUN_LOCK_READY="$T/ready"
     export RUN_LOCK_RELEASE="$T/release"
+    export RUN_LOCK_CHILD_PID="$T/child-pid"
     # Under qci full/selftest this suite inherits the outer run's guard pid.
     # The runner must be an outermost launcher, or it never records its pid
     # and setup has no process group to signal.
@@ -26,7 +27,9 @@ qdistro_run_lock_reexec "$0" "$@"
 # host the lock assertions cannot be squeezed into a wall-clock window.
 trap 'trap - TERM INT HUP; printf "cleanup-start\n" > "$RUN_LOCK_STATE"; while [ ! -e "$RUN_LOCK_RELEASE" ]; do sleep 0.05; done; printf "cleanup-done\n" > "$RUN_LOCK_STATE"; exit 0' TERM INT HUP
 printf '%s\n' ready > "$RUN_LOCK_READY"
-while :; do sleep 0.1; done
+while :; do
+    bash -c 'printf "%s\n" "$$" > "$RUN_LOCK_CHILD_PID"; exec sleep 30'
+done
 SH
     chmod +x "$T/runner"
     # A shell background job inherits SIGINT ignored, and a nohup'd caller
@@ -115,5 +118,20 @@ assert_lock_held_during_cleanup() {
 
 @test "TERM to original launcher reaches runner and holds lock through cleanup" {
     kill -TERM "$LAUNCHER"
+    assert_lock_held_during_cleanup
+}
+
+@test "TERM to launcher interrupts a long foreground child before cleanup" {
+    wait_for_file "$RUN_LOCK_CHILD_PID"
+    kill -TERM "$LAUNCHER"
+    local i
+    for i in $(seq 1 200); do
+        [ -e "$RUN_LOCK_STATE" ] && break
+        sleep 0.01
+    done
+    [ -e "$RUN_LOCK_STATE" ] || {
+        printf 'runner did not start cleanup within 2 seconds; foreground child pid=%s\n' "$(cat "$RUN_LOCK_CHILD_PID")" >&2
+        return 1
+    }
     assert_lock_held_during_cleanup
 }
