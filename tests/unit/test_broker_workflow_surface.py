@@ -211,6 +211,9 @@ class TestApproveWorkflowRunAuditOrdering:
         def __init__(self):
             self.calls = []
 
+        def preview_run(self, run_id):
+            return {"definition_digest": "captured-digest"}
+
         def approve_run(self, run_id):
             self.calls.append(run_id)
             return True

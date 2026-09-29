@@ -7,6 +7,7 @@ failure cleanup (secret scrubbing, run-state marking).
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import os
 import select
@@ -32,6 +33,7 @@ from workflow_schema import (  # type: ignore[import-not-found]
     StepType,
     WorkflowDef,
     WorkflowRun,
+    WorkflowPlan,
 )
 
 logger = logging.getLogger("qdistro.workflow.engine")
@@ -290,7 +292,12 @@ class WorkflowEngine:
     def load_workflows(self) -> list[str]:
         """Load workflow definitions from disk. Returns load errors."""
         wf_list = self._loader.load()
-        self._workflows = {wf.name: wf for wf in wf_list}
+        with self._runs_lock:
+            self._workflows = {wf.name: wf for wf in wf_list}
+            for run in self._runs.values():
+                if (run.plan is not None and not run.execution_started
+                        and run.state in (RunState.PENDING, RunState.RUNNING)):
+                    self._validate_plan(run)
         errors = self._loader.load_errors()
         for err in errors:
             logger.warning("workflow load error: %s", err)
@@ -362,6 +369,7 @@ class WorkflowEngine:
         self,
         workflow_name: str,
         trigger_context: dict[str, Any] | None = None,
+        plan: WorkflowPlan | None = None,
     ) -> WorkflowRun:
         """Create and execute a workflow run.
 
@@ -369,17 +377,16 @@ class WorkflowEngine:
         On failure mid-step, delivered secrets are scrubbed and the
         run is marked failed.
         """
-        wf = self._workflows.get(workflow_name)
-        if wf is None:
-            raise ValueError(f"unknown workflow: {workflow_name!r}")
-
-        run = WorkflowRun(
-            workflow_name=workflow_name,
-            trigger_context=dict(trigger_context or {}),
-        )
-        run.mark_running()
-
         with self._runs_lock:
+            wf = self._workflows.get(workflow_name)
+            if wf is None:
+                raise ValueError(f"unknown workflow: {workflow_name!r}")
+            run = WorkflowRun(
+                workflow_name=workflow_name,
+                trigger_context=dict(trigger_context or {}),
+                plan=plan if plan is not None else WorkflowPlan.capture(wf),
+            )
+            run.mark_running()
             self._runs[run.run_id] = run
 
         return self._execute_existing_run(run)
@@ -393,22 +400,21 @@ class WorkflowEngine:
         (scrub + audit) on success or failure.
         """
         workflow_name = run.workflow_name
-        wf = self._workflows.get(workflow_name)
-        if wf is None:
-            error_msg = "workflow no longer loaded"
-            run.mark_failed(error_msg)
-            if self._audit:
-                self._audit.log_run_failed(
-                    run.run_id, workflow_name, error_msg)
-            return run
-
-        if run.state != RunState.RUNNING:
-            run.mark_running()
+        with self._runs_lock:
+            if run.state == RunState.FAILED or not self._validate_plan(run):
+                return run
+            wf = run.plan.definition()
+            # This is the dispatch boundary. Reload invalidates queued work;
+            # a run already executing keeps its selected definition.
+            run.execution_started = True
+            if run.state != RunState.RUNNING:
+                run.mark_running()
 
         if self._audit:
             self._audit.log_run_start(
                 run.run_id, workflow_name, run.trigger_context,
             )
+            self._audit.log_plan_binding(run.run_id, run.plan.digest)
 
         logger.info(
             "starting workflow run %s for %s",
@@ -456,6 +462,26 @@ class WorkflowEngine:
 
         return run
 
+    def _validate_plan(self, run: WorkflowRun) -> bool:
+        """Called under _runs_lock at preview, approval and worker dispatch."""
+        current = self._workflows.get(run.workflow_name)
+        if (run.plan is not None and current is not None
+                and WorkflowPlan.capture(current).digest == run.plan.digest):
+            return True
+        run.mark_failed("workflow definition changed or was removed; approval invalidated")
+        if self._audit:
+            self._audit.log_run_failed(run.run_id, run.workflow_name, run.error)
+        return False
+
+    def preview_run(self, run_id: str) -> dict[str, Any]:
+        with self._runs_lock:
+            run = self._runs.get(run_id)
+            if run is None or run.state != RunState.PENDING or not self._validate_plan(run):
+                return {}
+            return {"run_id": run.run_id, "workflow_name": run.workflow_name,
+                    "definition_digest": run.plan.digest,
+                    "definition": json.loads(run.plan.definition_json)}
+
     def get_run(self, run_id: str) -> WorkflowRun | None:
         with self._runs_lock:
             return self._runs.get(run_id)
@@ -491,6 +517,7 @@ class WorkflowEngine:
                 "run_id": r.run_id, "workflow_name": r.workflow_name,
                 "state": r.state.value, "started_at": r.started_at,
                 "completed_at": r.completed_at, "error": r.error,
+                "definition_digest": r.plan.digest if r.plan else "",
             }
             for r in runs
         ]
@@ -1307,11 +1334,12 @@ class WorkflowEngine:
         broker main loop for D-Bus triggers) is never occupied by
         workflow execution.
         """
-        wf = self._workflows.get(workflow_name)
-        if wf is None:
-            logger.warning("trigger fired for unknown workflow %s",
-                           workflow_name)
-            return
+        with self._runs_lock:
+            wf = self._workflows.get(workflow_name)
+            if wf is None:
+                logger.warning("trigger fired for unknown workflow %s", workflow_name)
+                return
+            plan = WorkflowPlan.capture(wf)
 
         # F3: human-in-the-loop default. A workflow only auto-executes if
         # it opted in with ``auto_run: true``; otherwise the fire records a
@@ -1340,7 +1368,7 @@ class WorkflowEngine:
                     workflow_name)
         try:
             self._run_pool.submit(self._run_from_trigger,
-                                  workflow_name, trigger_context, dedup_key)
+                                  workflow_name, trigger_context, dedup_key, plan)
         except RuntimeError as e:
             # Pool already shut down (engine stopping) — drop the fire and
             # release the accounting we just took.
@@ -1355,9 +1383,10 @@ class WorkflowEngine:
 
     def _run_from_trigger(self, workflow_name: str,
                           trigger_context: dict[str, Any],
-                          dedup_key: tuple[str, str] | None = None) -> None:
+                          dedup_key: tuple[str, str] | None = None,
+                          plan: WorkflowPlan | None = None) -> None:
         try:
-            self.start_run(workflow_name, trigger_context)
+            self.start_run(workflow_name, trigger_context, plan)
         except Exception as e:  # noqa: BLE001
             logger.error("failed to start run for workflow %s: %s",
                          workflow_name, e)
@@ -1375,33 +1404,26 @@ class WorkflowEngine:
         The trigger context is captured so the eventual approved run sees
         the same firing process (conditions are re-checked at execution).
         """
-        # Don't flood the queue: a periodic trigger (cron) that keeps
-        # firing while its previous run is still awaiting approval must not
-        # accumulate a new PENDING run every tick. Collapse to the existing
-        # pending run for the same (workflow, cgroup).
         dedup_key = self._dedup_key(workflow_name, trigger_context)
         with self._runs_lock:
             for existing in self._runs.values():
                 if (existing.state == RunState.PENDING
                         and existing.workflow_name == workflow_name
-                        and self._dedup_key(
-                            workflow_name, existing.trigger_context)
-                        == dedup_key):
-                    logger.info(
-                        "workflow %s already has a pending run %s; not "
-                        "enqueuing another", workflow_name, existing.run_id)
+                        and self._dedup_key(workflow_name, existing.trigger_context) == dedup_key
+                        and self._validate_plan(existing)):
                     return existing
-
-        run = WorkflowRun(
-            workflow_name=workflow_name,
-            trigger_context=dict(trigger_context or {}),
-        )
-        # state defaults to PENDING.
-        with self._runs_lock:
+            wf = self._workflows.get(workflow_name)
+            if wf is None:
+                raise ValueError(f"unknown workflow: {workflow_name!r}")
+            run = WorkflowRun(
+                workflow_name=workflow_name,
+                trigger_context=dict(trigger_context or {}),
+                plan=WorkflowPlan.capture(wf),
+            )
             self._runs[run.run_id] = run
-        if self._audit:
-            self._audit.log_run_pending(
-                run.run_id, workflow_name, run.trigger_context)
+            if self._audit:
+                self._audit.log_run_pending(run.run_id, workflow_name, run.trigger_context)
+                self._audit.log_plan_binding(run.run_id, run.plan.digest)
         logger.info("workflow %s run %s PENDING admin approval",
                     workflow_name, run.run_id)
         # Best-effort: nudge the admin UI / approval queue.
@@ -1418,34 +1440,34 @@ class WorkflowEngine:
             return [r for r in self._runs.values()
                     if r.state == RunState.PENDING]
 
-    def approve_run(self, run_id: str) -> bool:
-        """Approve a PENDING run and dispatch it for execution.
+    def approve_run(self, run_id: str, expected_digest: str | None = None,
+                    approver: dict[str, Any] | None = None) -> bool:
+        """Release the captured plan once; new callers must supply preview digest.
 
-        Returns True if a pending run was found and scheduled. The run is
-        executed on the worker pool (conditions are re-evaluated there, so
-        approval does not bypass the identity gate).
+        Trusted legacy callers omit the digest but still cannot approve a
+        changed definition. Reload and dispatch share the same lock.
         """
         with self._runs_lock:
             run = self._runs.get(run_id)
-            if run is None or run.state != RunState.PENDING:
+            if run is None or run.state != RunState.PENDING or not self._validate_plan(run):
                 return False
-            # Flip out of PENDING immediately so a double-approve can't
-            # schedule the same run twice.
-            run.mark_running()
-        with self._active_lock:
-            if self._inflight >= self._max_inflight:
-                logger.warning("queue saturated; cannot approve run %s now",
-                               run_id)
+            if expected_digest is not None and expected_digest != run.plan.digest:
+                return False
+            with self._active_lock:
+                if self._inflight >= self._max_inflight:
+                    return False
+                self._inflight += 1
+            try:
+                if self._audit:
+                    self._audit.log_run_approval(run.run_id, run.workflow_name,
+                                                 run.plan.digest, approver or {})
+                run.mark_running()
+                self._run_pool.submit(self._run_approved, run)
+            except Exception as exc:
+                self._release_inflight(None)
                 run.state = RunState.PENDING
+                logger.warning("cannot approve run %s: %r", run_id, exc)
                 return False
-            self._inflight += 1
-        try:
-            self._run_pool.submit(self._run_approved, run)
-        except RuntimeError as e:
-            self._release_inflight(None)
-            run.state = RunState.PENDING
-            logger.warning("cannot approve run %s (pool down): %r", run_id, e)
-            return False
         logger.info("approved workflow run %s (%s)", run_id, run.workflow_name)
         return True
 

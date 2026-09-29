@@ -12,6 +12,7 @@ Ctrl+Shift+1..8 scope picker.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -970,12 +971,16 @@ class BrokerBridge(QObject):
                 "started_at":    float(r["started_at"]),
                 "completed_at":  float(r["completed_at"]),
                 "error":         str(r["error"]),
+                "definition_digest": str(r.get("definition_digest", "")),
             })
         return out
 
-    def approve_workflow_run(self, run_id: str) -> bool:
-        """Approve a PENDING workflow run (admin-gated, server-side)."""
-        return bool(self._call("ApproveWorkflowRun", str(run_id)))
+    def preview_workflow_run(self, run_id: str) -> dict:
+        return json.loads(str(self._call("PreviewWorkflowRun", str(run_id))))
+
+    def approve_workflow_run(self, run_id: str, expected_digest: str) -> bool:
+        """Approve exactly the captured definition shown in the preview."""
+        return bool(self._call("ApproveWorkflowPlan", str(run_id), str(expected_digest)))
 
     def list_history(self, limit: int) -> list[dict]:
         raw = self._call("ListHistory", int(limit))
@@ -3302,7 +3307,15 @@ class WorkflowsTab(QWidget):
             return
         run_id = str(run.get("run_id", ""))
         try:
-            ok = self.broker.approve_workflow_run(run_id)
+            preview = self.broker.preview_workflow_run(run_id)
+            if not preview:
+                QMessageBox.warning(self, "Preview unavailable",
+                                    "The run changed or is no longer awaiting approval. Refresh and review a new run.")
+                self.refresh()
+                return
+            if not self._confirm_preview(preview):
+                return
+            ok = self.broker.approve_workflow_run(run_id, preview["definition_digest"])
         except dbus.DBusException as e:
             _title, label = _friendly_broker_error(e)
             QMessageBox.warning(self, "Approve failed",
@@ -3314,6 +3327,28 @@ class WorkflowsTab(QWidget):
                 f"Run {run_id} could not be approved (already running, "
                 f"gone, or queue saturated).")
         self.refresh()
+
+    def _confirm_preview(self, preview: dict) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review workflow plan")
+        dialog.resize(700, 600)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            f"Run {preview['run_id']}\nDefinition SHA-256: {preview['definition_digest']}"))
+        details = QTextEdit(dialog)
+        details.setReadOnly(True)
+        details.setPlainText(json.dumps(preview["definition"], indent=2, sort_keys=True))
+        layout.addWidget(details)
+        layout.addWidget(QLabel(
+            "Review actions, resources, destinations and cleanup settings.\n"
+            "Vault values are not fetched. Hook contents and external resources can change."))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Approve plan")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
     @staticmethod
     def _configure_table(table: QTableView, model: QStandardItemModel) -> None:

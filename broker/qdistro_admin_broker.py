@@ -4895,6 +4895,7 @@ class Broker(dbus.service.Object):
                 "completed_at":  dbus.Double(
                     float(r.get("completed_at") or 0.0)),
                 "error":         dbus.String(str(r.get("error") or "")),
+                "definition_digest": dbus.String(str(r.get("definition_digest") or "")),
             })
         return out
 
@@ -4916,21 +4917,24 @@ class Broker(dbus.service.Object):
         engine = getattr(self, "workflow_engine", None)
         if engine is None:
             return False
+        preview = engine.preview_run(str(run_id))
+        if not preview:
+            return False
+        digest = preview["definition_digest"]
         # Audit BEFORE the release, and fail closed if it raises (iso2 `14`
         # E2). The old order called approve_run() first and swallowed a
         # failing audit.log with a bare `except: pass`, so a human approval
         # could schedule a run with no forensic row at all. Same shape the
         # prompt path already gets right at DecideRequest: never grant past
-        # a failed audit. The row is written for the attempt, so an approve
-        # that finds no pending run leaves a decision=True row for an
-        # approval that released nothing — cheaper than the alternative.
+        # a failed audit. The row records the attempt: a concurrent reload
+        # may still invalidate this plan before release or worker dispatch.
         try:
             self.audit.log(
                 caller_uid=admin_uid, caller_pid=_pid,
                 caller_exe=_exe or "qdistro-admin",
                 action=f"qdistro.workflow.approve:{run_id}",
                 decision=True, scope=None,
-                source=f"run_id={run_id}", approver_uid=admin_uid,
+                source=f"run_id={run_id} definition_digest={digest}", approver_uid=admin_uid,
             )
         except Exception as e:  # noqa: BLE001
             print(f"[broker] qdistro.audit.failure: ApproveWorkflowRun "
@@ -4943,6 +4947,40 @@ class Broker(dbus.service.Object):
             print(f"[broker] ApproveWorkflowRun failed: {e!r}", flush=True)
             return False
         return approved
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def PreviewWorkflowRun(self, run_id: str, sender=None, conn=None) -> str:
+        """Admin-only captured plan preview; never fetches vault values."""
+        self._require_admin_control_peer(sender, conn, "PreviewWorkflowRun")
+        engine = getattr(self, "workflow_engine", None)
+        return json.dumps(engine.preview_run(str(run_id)) if engine else {})
+
+    @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="b",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ApproveWorkflowPlan(self, run_id: str, expected_digest: str,
+                            sender=None, conn=None) -> bool:
+        """Approve the exact preview digest, auditing identity before release."""
+        uid, pid, exe, start = self._require_admin_control_peer(
+            sender, conn, "ApproveWorkflowPlan")
+        engine = getattr(self, "workflow_engine", None)
+        if engine is None:
+            return False
+        digest = str(expected_digest)
+        preview = engine.preview_run(str(run_id))
+        if not digest or preview.get("definition_digest") != digest:
+            return False
+        try:
+            self.audit.log(
+                caller_uid=uid, caller_pid=pid, caller_exe=exe or "qdistro-admin",
+                action=f"qdistro.workflow.approve:{run_id}", decision=True,
+                scope=None, source=f"run_id={run_id} definition_digest={digest}",
+                approver_uid=uid)
+            return bool(engine.approve_run(str(run_id), digest,
+                        {"uid": uid, "pid": pid, "exe": exe, "start_time": start}))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] ApproveWorkflowPlan refused: {exc!r}", flush=True)
+            return False
 
     @dbus.service.method(BUS_NAME, in_signature="sasi", out_signature="a{ss}",
                          sender_keyword="sender", connection_keyword="conn")
