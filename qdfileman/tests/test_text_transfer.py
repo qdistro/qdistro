@@ -147,3 +147,36 @@ def test_unconfirmed_transport_visible_and_acceptance_unknown(sender, monkeypatc
         "Text transfer was not confirmed. Receiver acceptance is unknown; "
         "the receiver may have received the text.")]
     assert sender.window.statusBar().currentMessage() != "Text arrived at receiver; acceptance is unknown."
+
+
+@pytest.mark.parametrize("next_outcome", ["refused", False,
+                                         RuntimeError("relay failed"), TimeoutError("late reply")])
+def test_new_attempt_clears_previous_arrival_status(sender, monkeypatch, next_outcome):
+    sent = []
+    def send(*args, **kwargs):
+        # The old success must already be gone while the new send is in progress.
+        assert sender.window.statusBar().currentMessage() == ""
+        sent.append(args)
+        if len(sent) == 1:
+            return True
+        if isinstance(next_outcome, Exception):
+            raise next_outcome
+        return next_outcome
+
+    monkeypatch.setattr(qi, "send_payload", send)
+    sender.window._send_selected_text(1000, "org.qdistro.Notebook.uid1000")
+    assert sender.window.statusBar().currentMessage() == "Text arrived at receiver; acceptance is unknown."
+    assert sender.messages == []
+    if next_outcome == "refused":
+        sender.path.write_bytes(b"")
+    sender.window._send_selected_text(1000, "org.qdistro.Notebook.uid1000")
+    # No timer wait: a refusal or unknown outcome replaces the prior send immediately.
+    assert sender.window.statusBar().currentMessage() == ""
+    if next_outcome == "refused":
+        assert len(sent) == 1, "validation refusal dispatched the empty file"
+        assert sender.messages == [("Send Text To", "The selected file is empty; there is no text to send.")]
+    else:
+        assert len(sent) == 2
+        assert sender.messages == [("Send Text To",
+            "Text transfer was not confirmed. Receiver acceptance is unknown; "
+            "the receiver may have received the text.")]

@@ -898,6 +898,7 @@ class FileManagerWindow(QMainWindow):
                     self._send_selected_text(u, s))
 
     def _send_selected_text(self, uid: int, service: str) -> None:
+        self.statusBar().clearMessage()
         from PyQt6.QtWidgets import QMessageBox
         from qfileman import qdistro_integration as qi
 
