@@ -68,3 +68,25 @@ def test_history_gc_preserves_unresolved_cleanup(tmp_path):
     assert audit.gc(1) == 1
     assert [row["run_id"] for row in audit.recent_runs()] == ["residue"]
     audit.close()
+
+
+def test_reconciliation_event_failure_does_not_leave_later_rows_live(tmp_path, monkeypatch):
+    import pytest
+    audit = WorkflowAuditLogger(str(tmp_path / "audit.sqlite"))
+    audit.log_run_pending("pending", "wf", {})
+    audit.log_run_start("running", "wf", {})
+    audit.log_run_queued("queued", "wf", {}, "digest")
+    original = audit._log_event
+    def unavailable(*args, **kwargs):
+        if args[2] == "run_reconciled":
+            raise RuntimeError("event database unavailable")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(audit, "_log_event", unavailable)
+    with pytest.raises(RuntimeError, match="reconciliation audit failed"):
+        WorkflowEngine(audit_logger=audit, own_dbus_loop=False)
+    records = {r["run_id"]: r for r in audit.recent_runs()}
+    assert records["pending"]["state"] == "expired"
+    assert records["running"]["state"] == "interrupted"
+    assert records["queued"]["state"] == "interrupted"
+    assert all(r["cleanup_state"] == "unknown" for r in records.values())
+    audit.close()

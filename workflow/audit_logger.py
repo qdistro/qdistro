@@ -227,16 +227,33 @@ class WorkflowAuditLogger:
         rows = self._conn.execute(
             "SELECT run_id, workflow_name, state FROM workflow_runs WHERE state IN ('pending','running','queued')"
         ).fetchall()
+        updated = []
+        failed = False
+        # Terminalize every row before emitting events. One broken audit event
+        # must not leave later approvals/executions looking live after restart.
         for run_id, name, state in rows:
             terminal = "expired" if state == "pending" else "interrupted"
             error = ("approval expired after engine restart" if state == "pending" else
                      "execution interrupted; effects and cleanup require review")
-            self._conn.execute(
-                "UPDATE workflow_runs SET state=?, completed_at=?, error=?, cleanup_state='unknown', "
-                "cleanup_error='prior process cleanup cannot be confirmed; requires review' WHERE run_id=?",
-                (terminal, time.time(), error, run_id))
-            self._log_event(run_id, name, "run_reconciled", error,
-                            {"prior_state": state, "cleanup_state": "unknown"})
+            try:
+                self._conn.execute(
+                    "UPDATE workflow_runs SET state=?, completed_at=?, error=?, cleanup_state='unknown', "
+                    "cleanup_error='prior process cleanup cannot be confirmed; requires review' WHERE run_id=?",
+                    (terminal, time.time(), error, run_id))
+            except Exception:
+                failed = True
+                continue
+            updated.append((run_id, name, state, error))
+        for run_id, name, state, error in updated:
+            try:
+                self._log_event(run_id, name, "run_reconciled", error,
+                                {"prior_state": state, "cleanup_state": "unknown"})
+            except Exception:
+                failed = True
+        if failed:
+            # Refuse engine startup when accounting is incomplete; never start
+            # triggers or replay effects merely because some rows were updated.
+            raise RuntimeError("interrupted workflow reconciliation audit failed; requires review")
         return len(rows)
 
     def recent_runs(self, limit: int = 100) -> list[dict[str, Any]]:
