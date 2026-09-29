@@ -50,6 +50,12 @@ qdistro_run_lock_reexec() {
     local sig_ign
     sig_ign=$(awk '$1 == "SigIgn:" { print $2 }' "/proc/$$/status" 2>/dev/null)
     [[ "$sig_ign" =~ ^[0-9a-fA-F]+$ ]] || sig_ign=0
+    # Put the asynchronous runner in its own process group at fork. Otherwise
+    # a group signal reaches both processes, and the guardian forwards a
+    # second copy while the runner is already cleaning up. Job control makes
+    # Bash establish the group before the child can run, avoiding a startup
+    # window between fork and a child-side setpgid call.
+    set -m
     QDISTRO_RUN_LOCK_GUARD_PID=$$ python3 -c '
 import os, signal, sys
 signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -59,6 +65,7 @@ for sig in (signal.SIGPIPE, signal.SIGXFSZ):
 os.execv(sys.argv[2], sys.argv[2:])' \
         "$sig_ign" "$script" "$@" {lock_fd}>&- &
     child_pid=$!
+    set +m
     [ -z "$pending_signal" ] || kill -s "$pending_signal" "$child_pid" 2>/dev/null || true
     if ! printf '%s\n' "$child_pid" > "$lock_path"; then
         printf 'run lock: cannot write holder pid to %s\n' "$lock_path" >&2
