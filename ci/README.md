@@ -238,6 +238,9 @@ Its dependency installation lives in a rootless Podman toolchain image keyed
 by the base image ID, snapshot and dependency recipe. A source-only rebuild
 reuses that image and skips `zypper dup` and the development-package install; the RPM
 cache supplies downloads when the toolchain image itself must be rebuilt.
+Golden bootstraps install the local qdbrowser and qdlocker Python packages
+without pip build isolation or an index; the snapshot's setuptools RPM supplies
+their build backend instead of a fresh PyPI download.
 The guest loads the staged SELinux modules with `semodule`; no native compiler,
 Meson, Ninja, `make` or policy headers are needed in the cloud test base.
 The native builder checks the broker SELinux neverallow negative control
