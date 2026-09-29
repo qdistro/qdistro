@@ -53,6 +53,22 @@ The `qfileman.plugins.builtin` package ships a broad set — highlights:
 
 Run `qfileman --no-plugins` to see the bare core.
 
+### Sending text to an application
+
+Edit → **Send Text To** sends the contents of exactly one selected regular
+file as UTF-8 text. Selection and contents are read when the receiver action
+is clicked. Empty files, invalid UTF-8, NUL characters and files above the
+local 256 KiB encoded-byte limit are refused visibly; content is never
+silently shortened or converted. This is a text operation, not a file copy.
+
+Both same-user and cross-user sends use the qdistro broker. A successful
+transport means the text arrived at the receiver; acceptance remains unknown.
+The receiver may ask for confirmation, decline it, or fail to apply it. An
+unconfirmed transfer, including a timeout, may already have arrived. The byte
+limit is a local sender policy, not negotiated receiver capacity. Versioned
+capability discovery and staged/applied/declined/failed receipts remain future
+protocol work; this command does not promise acceptance or exactly-once delivery.
+
 ## Installation
 
 ```bash
