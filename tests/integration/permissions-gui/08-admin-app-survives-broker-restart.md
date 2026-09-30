@@ -132,12 +132,17 @@ $VMGUI "$VM" screenshot /tmp/08-s4-afterdeny.png
 # shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 08-work 60'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 08-work; echo "rc=$(bg_rc 08-work)"'
+# The SDK-side oracle, read through bg_log (the only reader of a bg job's
+# output). Do NOT grep a log by path: the job's files live in $QCI_BG_DIR,
+# not the per-scenario scratch dir, and a guessed path reads as a missing
+# DENIED (full-20260930T051422Z-65193 ERROR'd that way with DENIED logged).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; if bg_log 08-work | grep -x DENIED >/dev/null; then echo WORK_SAW_DENIED=yes; else echo WORK_SAW_DENIED=no; fi'
 ```
 
 **Assert:**
 - Screenshot shows empty list + detail pane `(no selection)`.
-- `/tmp/08-work.log` contains `DENIED` — the SDK actually saw the
- deny (not just the UI).
+- The last command prints `WORK_SAW_DENIED=yes` — the SDK actually saw
+ the deny (not just the UI). `WORK_SAW_DENIED=no` is a product FAIL.
 
 ## Teardown
 
