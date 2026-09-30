@@ -48,12 +48,20 @@ def prompt():
 
 
 def test_attach_ignores_developer_override(qapp, tmp_path, prompt, monkeypatch):
+    from qdistro_presentation import paths as paths_mod
     from qdistro_presentation.model import example_snapshot
     from qdistro_presentation.publish import write_snapshot
     from qdistro_presentation.qt import reset_controller_for_tests
 
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv("QDISTRO_PRESENTATION_FILE", str(tmp_path / "current.json"))
+    real = paths_mod.resolve_snapshot_path
+    absent = str(tmp_path / "no-managed")
+
+    def wrapped(*, role="ordinary", environ=None, managed_dir=paths_mod.MANAGED_DIR):
+        return real(role=role, environ=environ, managed_dir=absent)
+
+    monkeypatch.setattr(paths_mod, "resolve_snapshot_path", wrapped)
     native = QPalette(qapp.palette()).color(QPalette.ColorRole.Window).getRgb()
     reset_controller_for_tests()
     ctrl = prompt._attach_trusted_appearance(qapp)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from qdistro_admin_app import (  # noqa: E402
     DetailPane,
+    MainWindow,
     SilosTab,
     _age_color,
     attach_presentation,
@@ -128,21 +129,45 @@ def test_silo_state_colours_unchanged():
     assert SilosTab.STATE_COLOURS["Created"].name() == "#a0a0a0"
 
 
+def _stub_broker():
+    broker = MagicMock()
+    broker.get_pending.return_value = []
+    broker.list_rules.return_value = []
+    broker.list_history.return_value = []
+    broker.list_cache.return_value = []
+    broker.list_workflows.return_value = []
+    broker.list_workflow_runs.return_value = []
+    broker.rulesReloaded = MagicMock()
+    broker.rulesReloaded.connect = MagicMock()
+    broker.requestPending = MagicMock()
+    broker.requestPending.connect = MagicMock()
+    broker.requestDecided = MagicMock()
+    broker.requestDecided.connect = MagicMock()
+    broker.approvalRevoked = MagicMock()
+    broker.approvalRevoked.connect = MagicMock()
+    return broker
+
+
 def test_live_update_refreshes_detail_heading_font(qapp, tmp_path):
     from dataclasses import replace
 
+    from PyQt6.QtCore import QCoreApplication
     from qdistro_presentation.model import example_snapshot, with_generation
     from qdistro_presentation.publish import write_snapshot
 
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     ctrl = attach_presentation(qapp, snapshot_path=_snapshot_path(tmp_path), watch=False)
-    pane = DetailPane()
+    win = MainWindow(_stub_broker())
+    pane = win.detail
     before = pane.lbl_user.font().pointSizeF()
     fonts = replace(example_snapshot().fonts, ui_scale=1.25)
     second = with_generation(replace(example_snapshot(), fonts=fonts))
     write_snapshot(str(tmp_path), second, require_unwritable_dirs=False, skip_unchanged=False)
     ctrl._reload()
-    pane.apply_presentation_update()
+    QCoreApplication.processEvents()
+    assert ctrl.state.ui_point_size == pytest.approx(13.75)
     after = pane.lbl_user.font().pointSizeF()
+    assert after == pytest.approx(13.75 * 14.0 / 11.0)
     assert after > before
+    win.close()
     ctrl.stop()

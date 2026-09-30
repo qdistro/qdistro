@@ -8,8 +8,8 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt6.QtGui import QPalette
-from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtGui import QFont, QPalette
+from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.paths import ResolvedPath
 from qdistro_presentation.publish import write_disabled_envelope, write_snapshot
@@ -151,6 +151,40 @@ def test_changed_signal_and_existing_widget(qapp, tmp_path):
     assert seen
     assert "using_shared_palette" in seen[0]
     label.setParent(None)
+    ctrl.stop()
+
+
+def test_changed_handler_fonts_survive_polish(qapp, tmp_path):
+    from dataclasses import replace
+
+    from qdistro_presentation.model import with_generation
+
+    class Host(QWidget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.label = QLabel("hello", self)
+            heading = QFont(qapp.font())
+            heading.setPointSizeF((heading.pointSizeF() or 11.0) * 14.0 / 11.0)
+            self.label.setFont(heading)
+
+        def apply_presentation_update(self, *_args: object) -> None:
+            heading = QFont(qapp.font())
+            heading.setPointSizeF((heading.pointSizeF() or 11.0) * 14.0 / 11.0)
+            self.label.setFont(heading)
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    host = Host()
+    ctrl.changed.connect(host.apply_presentation_update)
+    fonts = replace(example_snapshot().fonts, ui_scale=1.25)
+    second = with_generation(replace(example_snapshot(), fonts=fonts))
+    write_snapshot(str(tmp_path), second, require_unwritable_dirs=False, skip_unchanged=False)
+    ctrl._reload()
+    assert ctrl.state.ui_point_size == pytest.approx(13.75)
+    assert host.label.font().pointSizeF() == pytest.approx(13.75 * 14.0 / 11.0)
+    host.setParent(None)
     ctrl.stop()
 
 

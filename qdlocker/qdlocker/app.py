@@ -436,7 +436,7 @@ class WaylandBridge(QObject):
         # suspend arriving before any fresh locked_changed(1) confirms
         # immediately instead of waiting out the inhibitor timeout.
         self._compositor_locked = initially_locked
-        if initially_locked:
+        if initially_locked and not self._locked:
             self._freeze_presentation()
         if self._initially_locked != initially_locked:
             self._initially_locked = initially_locked
@@ -468,7 +468,8 @@ class WaylandBridge(QObject):
         # This is the compositor's authoritative lock state — track it
         # separately from the intent mirror `_locked`.
         self._compositor_locked = locked
-        if locked:
+        entering = locked and not self._locked
+        if entering:
             self._freeze_presentation()
         if self._locked != locked:
             self._locked = locked

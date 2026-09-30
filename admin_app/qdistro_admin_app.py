@@ -3978,6 +3978,12 @@ def _refresh_admin_windows(app: QApplication) -> None:
             method()
 
 
+def _on_presentation_changed(*_args: object) -> None:
+    app = QApplication.instance()
+    if app is not None:
+        _refresh_admin_windows(app)
+
+
 def attach_presentation(app: QApplication, **kwargs):
     """Attach the shared presentation controller. Missing package is non-fatal."""
     global _PRESENTATION
@@ -3994,7 +4000,9 @@ def attach_presentation(app: QApplication, **kwargs):
             "presentation attach failed", exc_info=True
         )
         return None
-    ctrl.changed.connect(lambda *_args: _refresh_admin_windows(app))
+    if _PRESENTATION is ctrl:
+        return ctrl
+    ctrl.changed.connect(_on_presentation_changed)
     _PRESENTATION = ctrl
     return ctrl
 

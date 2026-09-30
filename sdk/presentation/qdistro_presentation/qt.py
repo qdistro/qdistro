@@ -396,8 +396,11 @@ class PresentationController(QObject):
         if emit:
             fields = changed_fields(old, resolved)
             if fields:
-                self.changed.emit(old, resolved, fields)
+                # Polish before changed so consumer slots can assign
+                # explicit widget fonts without the style pass restoring
+                # the previous sizes.
                 self._notify_widgets()
+                self.changed.emit(old, resolved, fields)
 
     def _restore_native(self) -> None:
         app = self._app

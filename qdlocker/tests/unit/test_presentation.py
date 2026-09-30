@@ -36,12 +36,25 @@ def _distinct_snapshot():
     return with_generation(replace(example_snapshot(), colors=colors))
 
 
+def _force_absent_managed(monkeypatch, tmp_path):
+    from qdistro_presentation import paths as paths_mod
+
+    real = paths_mod.resolve_snapshot_path
+    absent = str(tmp_path / "no-managed")
+
+    def wrapped(*, role="ordinary", environ=None, managed_dir=paths_mod.MANAGED_DIR):
+        return real(role=role, environ=environ, managed_dir=absent)
+
+    monkeypatch.setattr(paths_mod, "resolve_snapshot_path", wrapped)
+
+
 def test_override_env_is_ignored(qgui, tmp_path, monkeypatch):
     from qdistro_presentation.model import example_snapshot
     from qdistro_presentation.publish import write_snapshot
 
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv("QDISTRO_PRESENTATION_FILE", str(tmp_path / "current.json"))
+    _force_absent_managed(monkeypatch, tmp_path)
     assert try_load_trusted_snapshot() is None
     pres = LockerPresentation()
     pres.reload_trusted()
@@ -106,16 +119,21 @@ def test_enabled_false_resets_to_defaults(qgui, monkeypatch):
     from qdistro_presentation.model import example_snapshot, with_generation
     from qdistro_presentation.paths import ResolvedPath
 
-    snap = with_generation(replace(example_snapshot(), enabled=False))
+    enabled = _distinct_snapshot()
+    disabled = with_generation(replace(example_snapshot(), enabled=False))
+    snaps = [enabled, disabled]
     monkeypatch.setattr(
         "qdistro_presentation.paths.resolve_snapshot_path",
         lambda **_k: ResolvedPath(path="/tmp/x", kind="override", expected_uid=None, watch=False),
     )
     monkeypatch.setattr(
         "qdistro_presentation.paths.load_snapshot",
-        lambda _resolved: (snap, (1, 2, 3, 4)),
+        lambda _resolved: (snaps.pop(0), (1, 2, 3, 4)),
     )
     pres = LockerPresentation()
+    pres.reload_trusted()
+    assert pres.has_snapshot is True
+    assert pres.value("mSurface") == "#112233"
     pres.reload_trusted()
     assert pres.has_snapshot is False
     assert pres.value("mSurface") == "#070722"
@@ -148,32 +166,57 @@ def test_failed_reload_keeps_last_good(qgui, monkeypatch):
 
 
 def test_lock_request_freezes_before_visibility(qgui, monkeypatch):
+    from dataclasses import replace
+
+    from PyQt6.QtCore import QCoreApplication
+    from qdistro_presentation.model import with_generation
     from qdistro_presentation.paths import ResolvedPath
 
-    snap = _distinct_snapshot()
+    snap_a = _distinct_snapshot()
+    snap_b = with_generation(
+        replace(snap_a, colors=replace(snap_a.colors, mSurface="#445566"))
+    )
+    current = [snap_a]
+    loads: list[str] = []
+
+    def load(_resolved):
+        snap = current[0]
+        loads.append(snap.colors.mSurface)
+        return snap, (1, 2, 3, 4)
+
     monkeypatch.setattr(
         "qdistro_presentation.paths.resolve_snapshot_path",
         lambda **_k: ResolvedPath(path="/tmp/x", kind="override", expected_uid=None, watch=False),
     )
-    monkeypatch.setattr(
-        "qdistro_presentation.paths.load_snapshot",
-        lambda _resolved: (snap, (1, 2, 3, 4)),
-    )
+    monkeypatch.setattr("qdistro_presentation.paths.load_snapshot", load)
     pres = LockerPresentation()
     assert pres.has_snapshot is False
     controller = MagicMock()
     bridge = WaylandBridge(controller)
     bridge.set_presentation(pres)
     order = []
-    bridge.lockedChanged.connect(lambda locked: order.append(("visible", locked, pres.value("mSurface"))))
+    bridge.lockedChanged.connect(
+        lambda locked: order.append(("visible", locked, pres.value("mSurface")))
+    )
     bridge.inject_lock_requested(3)
-    from PyQt6.QtCore import QCoreApplication
-
     QCoreApplication.processEvents()
     assert pres.has_snapshot is True
     assert order[0][0] == "visible"
     assert order[0][2] == "#112233"
+    assert loads == ["#112233"]
     controller.notify_lock_begin.assert_called()
+
+    current[0] = snap_b
+    bridge._on_locked_changed(True)
+    assert pres.value("mSurface") == "#112233"
+    assert loads == ["#112233"]
+
+    bridge._on_unlocked()
+    QCoreApplication.processEvents()
+    bridge.inject_lock_requested(3)
+    QCoreApplication.processEvents()
+    assert pres.value("mSurface") == "#445566"
+    assert loads == ["#112233", "#445566"]
 
 
 def test_lock_ui_defaults_without_adapter(qgui):
