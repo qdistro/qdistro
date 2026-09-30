@@ -63,12 +63,13 @@ def test_apply_persists_global_settings(win, qtbot):
     qtbot.addWidget(dlg)
     dlg._spin_autosave_secs.setValue(45)
     dlg._chk_autosave.setChecked(False)
-    dlg._chk_dark.setChecked(True)
+    dlg._combo_appearance.setCurrentText("Dark")
     dlg._chk_session_restore.setChecked(False)
     dlg._apply()
     s = QSettings("qnotebook", "qnotebook")
     assert s.value("autosave_ms", type=int) == 45 * 1000
     assert s.value("autosave_enabled", type=bool) is False
+    assert s.value("appearance/theme_mode") == "dark"
     assert s.value("dark_mode", type=bool) is True
     assert s.value("session_restore_enabled", type=bool) is False
 
@@ -173,6 +174,15 @@ def test_resolving_conflict_clears_flag(win, qtbot):
     dlg._refresh_shortcut_conflicts()
     label_a = dlg._shortcut_table.item(0, 0).text()
     assert dlg._shortcut_conflicts[label_a] is False
+
+
+def test_cancel_does_not_materialize_font_overrides(win, qtbot):
+    s = QSettings("qnotebook", "qnotebook")
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    dlg.reject()
+    assert not s.contains("appearance/ui_font_family")
+    assert not s.contains("appearance/ui_font_size_pt")
 
 
 def test_opening_settings_action_works(win, qtbot, monkeypatch):

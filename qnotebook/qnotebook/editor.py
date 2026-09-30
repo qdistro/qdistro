@@ -28,6 +28,31 @@ from .md_to_qdoc import (
 )
 from .qdoc_to_md import qdoc_to_markdown
 
+BODY_POINT_SIZE = 11
+_PINNED_BODY_FONT: QFont | None = None
+
+
+def pin_native_body_font(font: QFont) -> None:
+    """Remember the platform body family captured before app.setFont."""
+    global _PINNED_BODY_FONT
+    pinned = QFont(font)
+    pinned.setPointSize(BODY_POINT_SIZE)
+    _PINNED_BODY_FONT = pinned
+
+
+def native_body_font() -> QFont:
+    """11 pt native body family; never the shared UI chrome font."""
+    if _PINNED_BODY_FONT is not None:
+        return QFont(_PINNED_BODY_FONT)
+    base = QFont()
+    base.setPointSize(BODY_POINT_SIZE)
+    return base
+
+
+def reset_pinned_body_font_for_tests() -> None:
+    global _PINNED_BODY_FONT
+    _PINNED_BODY_FONT = None
+
 
 class MarkdownEditor(QTextEdit):
     """WYSIWYG markdown editor.
@@ -55,9 +80,7 @@ class MarkdownEditor(QTextEdit):
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.setTabChangesFocus(True)
-        base = QFont()
-        base.setPointSize(11)
-        self.setFont(base)
+        self.setFont(native_body_font())
         self._dirty = False
         self._loading = False
         self._current_path: str | None = None

@@ -14,10 +14,13 @@ def main(argv: list[str] | None = None) -> int:
         # rc == -1 → fall through to GUI
     from PyQt6.QtWidgets import QApplication
 
+    from qnotebook.appearance import SettingsAdapter
+    from qnotebook.theme import attach_presentation
     from qnotebook.window import MainWindow
     app = QApplication(argv)
     app.setApplicationName("qnotebook")
     app.setOrganizationName("qnotebook")
+    attach_presentation(app, SettingsAdapter())
     notebook = argv[1] if len(argv) > 1 else None
     page = argv[2] if len(argv) > 2 else None
     win = MainWindow(notebook_path=notebook)

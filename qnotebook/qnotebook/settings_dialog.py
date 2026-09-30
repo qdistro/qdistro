@@ -17,8 +17,10 @@ from PyQt6.QtGui import QAction, QBrush, QColor, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFontComboBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -40,6 +42,14 @@ from PyQt6.QtWidgets import (
 )
 
 from . import nb_settings
+from .appearance import (
+    THEME_KEY_TO_LABEL,
+    THEME_LABEL_TO_KEY,
+    load_overrides,
+    load_theme_mode,
+    save_overrides,
+    save_theme_mode,
+)
 
 
 class _KeySequenceDelegate(QStyledItemDelegate):
@@ -228,8 +238,22 @@ class SettingsDialog(QDialog):
         self._chk_spell = QCheckBox("Spell check")
         global_form.addRow(self._chk_spell)
 
-        self._chk_dark = QCheckBox("Dark mode")
-        global_form.addRow(self._chk_dark)
+        self._combo_appearance = QComboBox()
+        self._combo_appearance.addItems(list(THEME_LABEL_TO_KEY))
+        global_form.addRow("Application appearance:", self._combo_appearance)
+
+        self._chk_desktop_fonts = QCheckBox("Use desktop fonts")
+        global_form.addRow(self._chk_desktop_fonts)
+
+        self._combo_ui_font = QFontComboBox()
+        global_form.addRow("UI font:", self._combo_ui_font)
+
+        self._spin_ui_font_size = QSpinBox()
+        self._spin_ui_font_size.setRange(6, 48)
+        global_form.addRow("UI font size:", self._spin_ui_font_size)
+        self._ui_font_size_dirty = False
+        self._spin_ui_font_size.valueChanged.connect(self._mark_ui_font_size_dirty)
+        self._chk_desktop_fonts.toggled.connect(self._on_desktop_fonts_toggled)
 
         self._chk_session_restore = QCheckBox("Restore last session on open")
         global_form.addRow(self._chk_session_restore)
@@ -378,9 +402,23 @@ class SettingsDialog(QDialog):
         self._chk_spell.setChecked(
             bool(self._settings.value("spell_enabled", False, type=bool))
         )
-        self._chk_dark.setChecked(
-            bool(self._settings.value("dark_mode", False, type=bool))
+        mode = load_theme_mode(self._settings)
+        self._combo_appearance.setCurrentText(THEME_KEY_TO_LABEL.get(mode, "Follow desktop"))
+        appearance = load_overrides(self._settings)
+        has_font_override = bool(
+            appearance.get("ui_font_family") or appearance.get("ui_font_size_pt")
         )
+        self._chk_desktop_fonts.setChecked(not has_font_override)
+        if appearance.get("ui_font_family"):
+            self._combo_ui_font.setCurrentText(str(appearance["ui_font_family"]))
+        self._spin_ui_font_size.blockSignals(True)
+        if appearance.get("ui_font_size_pt"):
+            self._spin_ui_font_size.setValue(int(appearance["ui_font_size_pt"]))
+        else:
+            self._spin_ui_font_size.setValue(11)
+        self._spin_ui_font_size.blockSignals(False)
+        self._ui_font_size_dirty = False
+        self._on_desktop_fonts_toggled(self._chk_desktop_fonts.isChecked())
         self._chk_session_restore.setChecked(
             bool(self._settings.value("session_restore_enabled", True, type=bool))
         )
@@ -420,10 +458,23 @@ class SettingsDialog(QDialog):
         if hasattr(self._window, "act_toggle_spell"):
             self._window.act_toggle_spell.setChecked(spell_on)
 
-        dark_on = self._chk_dark.isChecked()
-        self._settings.setValue("dark_mode", dark_on)
-        if hasattr(self._window, "act_dark"):
-            self._window.act_dark.setChecked(dark_on)
+        mode = THEME_LABEL_TO_KEY.get(
+            self._combo_appearance.currentText(), "system"
+        )
+        save_theme_mode(self._settings, mode, update_legacy=(mode != "system"))
+        appearance: dict = {"version": 1}
+        if self._chk_desktop_fonts.isChecked():
+            pass
+        else:
+            appearance["ui_font_family"] = self._combo_ui_font.currentText()
+            existing = load_overrides(self._settings).get("ui_font_size_pt")
+            if self._ui_font_size_dirty:
+                appearance["ui_font_size_pt"] = float(self._spin_ui_font_size.value())
+            elif existing is not None:
+                appearance["ui_font_size_pt"] = float(existing)
+        save_overrides(self._settings, appearance)
+        if hasattr(self._window, "apply_saved_appearance"):
+            self._window.apply_saved_appearance()
 
         self._settings.setValue(
             "session_restore_enabled", self._chk_session_restore.isChecked()
@@ -434,6 +485,13 @@ class SettingsDialog(QDialog):
             cell = self._shortcut_table.item(r, 1)
             key_text = cell.text().strip() if cell is not None else ""
             self._window.set_action_shortcut(label, key_text)
+
+    def _mark_ui_font_size_dirty(self, _value: int) -> None:
+        self._ui_font_size_dirty = True
+
+    def _on_desktop_fonts_toggled(self, checked: bool) -> None:
+        self._combo_ui_font.setEnabled(not checked)
+        self._spin_ui_font_size.setEnabled(not checked)
 
     def _apply_and_close(self) -> None:
         self._apply()
