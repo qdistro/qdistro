@@ -212,6 +212,12 @@ qd22_cleanup() {
         "$QDWIN_VM_EXEC" "$VMNAME" \
           "pkill -u admin -f \"qd22-af[t]er-$QD22_RUN\" 2>/dev/null" >/dev/null 2>&1 || true
     fi
+    # The run record marks an UNCLEAN exit for the next runner; a clean reap
+    # retires it (only if it still names this run).
+    if [ "$reaped" = ok ] && [ -n "${QD22_RUN:-}" ]; then
+        "$QDWIN_VM_EXEC" "$VMNAME" \
+          "[ \"\$(cat $QD22_CURRENT 2>/dev/null)\" = $QD22_RUN ] && rm -f $QD22_CURRENT; true" >/dev/null 2>&1 || true
+    fi
     if [ "$reaped" = failed ]; then
         # Restore anyway so the desktop is not left headless, but never let a
         # recovery that ran with ownership unresolved read as a clean exit.
@@ -241,7 +247,8 @@ qd22_cleanup() {
 #    later runner can reap a probe orphaned by a runner that died without its
 #    trap (SIGKILL): qd22_reap_previous, before the shell role is taken.
 QD22_CURRENT=/tmp/qd22-popup.current
-qd22_reap_previous() {
+QD22_HAD_PREVIOUS=0
+qd22_reap_previous() {   # NOT in a subshell: sets QD22_HAD_PREVIOUS
     local prev
     prev=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_CURRENT 2>/dev/null || true") \
         || { echo "could not read $QD22_CURRENT in the guest"; return 1; }
@@ -249,7 +256,8 @@ qd22_reap_previous() {
         '') return 0 ;;
         *[!0-9-]*) echo "unexpected content in $QD22_CURRENT: '$prev'"; return 1 ;;
     esac
-    echo "reaping any probe left by earlier run $prev"
+    QD22_HAD_PREVIOUS=1
+    echo "an earlier run ($prev) did not finish its cleanup; reaping any probe it left"
     ( QD22_PID=/tmp/qd22-popup.$prev.pid
       QD22_CANCEL=/tmp/qd22-popup.$prev.cancel
       QD22_INTENT=/tmp/qd22-popup.$prev.intent
@@ -483,6 +491,15 @@ export QDWIN_SCREEN_W QDWIN_SCREEN_H
 : "${QD22_OUTPUT:=Virtual-1}"
 
 # ------------------------------------------------------------------ Setup
+# A probe orphaned by an earlier runner that died untrapped (SIGKILL) still
+# holds the shell role, and that runner never restored qdshell: reap the probe
+# and restore the shell BEFORE judging the session healthy.
+qd22_reap_previous \
+    || { qd22_assert 0.0 ERROR "a probe from an earlier run could not be reaped (see above)"; exit 3; }
+if [ "$QD22_HAD_PREVIOUS" = 1 ]; then
+    qdwin_apps_restore_shell \
+        || { qd22_assert 0.0 ERROR "could not restore qdshell after an earlier run's unclean exit"; exit 3; }
+fi
 qdwin_session_healthy || { qd22_assert 0.0 ERROR "qdwin/qdshell user session not up"; exit 3; }
 
 # The probe must be installed with the --destroy-with-* modes and output-aware
@@ -501,10 +518,6 @@ COMP_PID_BEFORE=$(qdwin_compositor_pid)
 echo "compositor pid before = $COMP_PID_BEFORE"
 
 # Per-invocation guest state. `$$` alone repeats across reruns in one shell.
-# A probe orphaned by an earlier runner that died untrapped still holds the
-# shell role; reap it before anything else touches the session.
-msg=$(qd22_reap_previous) || { echo "$msg"; qd22_assert 0.0 ERROR "a probe from an earlier run could not be reaped: $msg"; exit 3; }
-[ -z "$msg" ] || echo "$msg"
 QD22_RUN="$$-$(date +%s)-$RANDOM"
 "$QDWIN_VM_EXEC" "$VMNAME" "echo $QD22_RUN > $QD22_CURRENT" >/dev/null \
     || { qd22_assert 0.0 ERROR "could not record the run id in the guest ($QD22_CURRENT)"; exit 3; }
