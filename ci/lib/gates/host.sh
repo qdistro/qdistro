@@ -537,6 +537,8 @@ fi'
     # non-recursive tests/test_*.py glob) to bound QtWebEngine native residue.
     run_logged host qdbrowser-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdbrowser" "$(host_pytest_cmd 'glob:tests/test_*.py' 1)" "qdbrowser pytest per file to reduce QtWebEngine residue"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host presentation-pytest "$EXIT_HOST" pytest "$WORKSPACE/sdk/presentation" "$(host_pytest_cmd all)" "qdistro-presentation unit tests"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # qdgreeter/qdlocker/qdfileman/qnotebook/qdterm: single-process run via
     # the shared runner ("all" mode). The selector arg reproduces each repo's
     # prior bare invocation (explicit dir, or empty => pyproject testpaths).
