@@ -3866,6 +3866,49 @@ def _maybe_session_bridge() -> SessionManagerBridge | None:
         return None
 
 
+class _FirstPaintMarker(QObject):
+    """Create a file once the main window has painted its first frame.
+
+    A launcher that must hand back a window someone can look at (the GUI test
+    launcher) cannot learn that from the X or Wayland side: the window is
+    created, named and mapped before Qt paints it, and a capture taken in
+    between shows the desktop or a half-drawn surface. The first paint event
+    of an exposed window is followed, in the same event-loop pass, by the
+    backing-store flush; the zero-delay timer runs after that pass, so the
+    file appears only once the frame has been handed to the display server.
+    """
+
+    def __init__(self, window, path: str):
+        super().__init__(window)
+        self._window = window
+        self._path = path
+        self._scheduled = False
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
+        if (obj is self._window and not self._scheduled
+                and event.type() == QEvent.Type.Paint):
+            self._scheduled = True
+            QTimer.singleShot(0, self._mark)
+        return False
+
+    def _mark(self) -> None:
+        handle = self._window.windowHandle()
+        if handle is None or not handle.isExposed():
+            # Painted while not on screen: wait for the next real frame.
+            self._scheduled = False
+            return
+        self._window.removeEventFilter(self)
+        try:
+            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            logging.warning("could not write first-paint marker %s: %s",
+                            self._path, exc)
+            return
+        with os.fdopen(fd, "w") as f:
+            f.write(f"painted pid={os.getpid()}\n")
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -3876,6 +3919,9 @@ def main():
     broker = BrokerBridge()
     session = _maybe_session_bridge()
     win = MainWindow(broker, session=session)
+    ready_file = os.environ.get("QDISTRO_ADMIN_APP_READY_FILE", "")
+    if os.path.isabs(ready_file):
+        _FirstPaintMarker(win, ready_file)
     win.show()
     sys.exit(app.exec())
 

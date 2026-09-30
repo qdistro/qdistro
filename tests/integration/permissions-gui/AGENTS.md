@@ -139,7 +139,13 @@ silences only the success announcement, never a timeout. Set it per call, never
  these instead of hand-rolling `runuser -u admin -- env ...`:
 
  - `/usr/local/bin/qdistro-start-admin-app` — launches the PyQt6
- admin approval app.
+ admin approval app and returns (printing its pid) only after the window
+ has painted its first frame; it exits 3 if the app dies first or paints
+ nothing within `QDISTRO_ADMIN_APP_READY_TIMEOUT` (60 s). Check its exit
+ status. A sleep or `xdotool search --sync --name` is not a paint
+ readiness check: the X window exists and is named before Qt paints it,
+ and a capture in that gap shows the bare desktop or a half-drawn window
+ (full-20260930T051422Z-65193 permissions-gui/22 and /47).
  - `/usr/local/bin/qdistro-start-admin-tui` — launches qterminal
  wrapping the Textual TUI (`qdistro-admin-tui`).
 
