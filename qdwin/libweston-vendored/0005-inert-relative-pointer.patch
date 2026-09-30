@@ -1,0 +1,40 @@
+From: qdistro <qdistro@local>
+Date: 2026-09-30
+Subject: [PATCH] libweston/input: inert relative pointer for an inert wl_pointer
+
+Once a seat (or its pointer) is released, libweston clears the user data
+of every wl_seat / wl_pointer resource a client still holds. A client that
+then asks zwp_relative_pointer_manager_v1.get_relative_pointer for such a
+wl_pointer made the compositor pass NULL to
+weston_pointer_ensure_pointer_client and SIGSEGV. qdwin releases a
+per-stream seat whenever a view stream's server state goes away, so any
+client racing that release could crash the session (qdwin gui/22 S2).
+
+Hand back an inert zwp_relative_pointer_v1 instead, as seat_get_pointer
+already does for an inert seat. unbind_pointer_client_resource copes with
+NULL user data. Regression gate: run-inert-relptr-test.sh.
+
+Vendored against weston 16.0.0 for ${QDWIN_REPO}/.
+---
+--- a/libweston/input.c
++++ b/libweston/input.c
+@@ -3966,6 +3966,19 @@ relative_pointer_manager_get_relative_pointer(struct wl_client *client,
+ 		return;
+ 	}
+ 
++	/* qdistro patch: the wl_pointer is inert once its seat (or the
++	 * seat's pointer) is released — e.g. a qdwin per-stream seat torn
++	 * down while a client raced to bind it. Its user data is then NULL;
++	 * hand back an equally inert relative pointer, as seat_get_pointer
++	 * does, instead of dereferencing it. */
++	if (!pointer) {
++		wl_list_init(wl_resource_get_link(cr));
++		wl_resource_set_implementation(cr, &relative_pointer_interface,
++					       NULL,
++					       unbind_pointer_client_resource);
++		return;
++	}
++
+ 	pointer_client = weston_pointer_ensure_pointer_client(pointer, client);
+ 	if (!pointer_client) {
+ 		wl_client_post_no_memory(client);

@@ -3966,6 +3966,19 @@ relative_pointer_manager_get_relative_pointer(struct wl_client *client,
 		return;
 	}
 
+	/* qdistro patch: the wl_pointer is inert once its seat (or the
+	 * seat's pointer) is released — e.g. a qdwin per-stream seat torn
+	 * down while a client raced to bind it. Its user data is then NULL;
+	 * hand back an equally inert relative pointer, as seat_get_pointer
+	 * does, instead of dereferencing it. */
+	if (!pointer) {
+		wl_list_init(wl_resource_get_link(cr));
+		wl_resource_set_implementation(cr, &relative_pointer_interface,
+					       NULL,
+					       unbind_pointer_client_resource);
+		return;
+	}
+
 	pointer_client = weston_pointer_ensure_pointer_client(pointer, client);
 	if (!pointer_client) {
 		wl_client_post_no_memory(client);

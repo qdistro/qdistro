@@ -516,6 +516,14 @@ fi'
     run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
+    # Patch 0005 regression: a relative pointer requested for a released
+    # seat's (inert) wl_pointer must not SIGSEGV the compositor — the qdwin
+    # per-stream-seat crash of gui/22 S2. Runs headless against the production
+    # prefix the step above just built.
+    c="bash libweston-vendored/run-inert-relptr-test.sh"
+    run_logged host qdwin-vendored-libweston-inert-relptr "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston survives get_relative_pointer on an inert wl_pointer"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
     # Configure qdwin against the vendored prefix's pkgconfig (see the ordering
     # note above). pkgconfig-dir.sh prints that dir and exits nonzero when the
     # prefix is absent; on that path we deliberately leave PKG_CONFIG_PATH

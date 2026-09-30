@@ -22,6 +22,7 @@ shape that works. See the design note for full reasoning.
 ```
 VERSION                              # "16.0.0" (must match Tumbleweed package)
 0001-allow-null-parent-xdg-popup.patch
+0005-inert-relative-pointer.patch     # get_relative_pointer on a released seat's wl_pointer
 src/                                 # weston @ tag 16.0.0 with desktop/xdg-shell.c patched in-place
 build-libweston.sh                   # one-shot build wrapper
 README.md                            # this file
@@ -87,7 +88,10 @@ with message `popup parent must be set before commit`.
 2. Update `VERSION` in this directory.
 3. Re-extract: `cd src && rm -rf * && git -C $HOME/doc/weston archive 16.0.X | tar -x`
 4. Strip again: `rm -rf clients data desktop-shell doc fullscreen-shell ivi-shell kiosk-shell man notes.txt pipewire remoting tests pam wcap weston.ini.in` (keep tools/, frontend/include/ if needed)
-5. Apply patch: `patch -p1 < ../0001-allow-null-parent-xdg-popup.patch`
+5. Apply patches: `patch -p1 < ../0001-allow-null-parent-xdg-popup.patch`,
+   likewise every other `../000N-*.patch` (0005 guards
+   `relative_pointer_manager_get_relative_pointer` in `libweston/input.c`
+   — drop it only if upstream now handles an inert `wl_pointer` there)
 6. Rebuild: `./build-libweston.sh`
 
 If patch fails: re-edit `xdg-shell.c` by hand, then regenerate the
@@ -103,6 +107,13 @@ should report `null_parent_popup` as a deliberate rejection; vendored
 should report it as accepted. Use this as the regression gate
 whenever `0001-allow-null-parent-xdg-popup.patch` or its rebase
 target moves.
+
+`run-inert-relptr-test.sh` is the gate for
+`0005-inert-relative-pointer.patch`: a test module
+(`tests/stale-seat-module.c`) releases a seat the way qdwin releases a
+per-stream seat, and `tests/stale-seat-client.py` then asks for a relative
+pointer on the stale `wl_pointer`. Unpatched, weston SIGSEGVs; `qci host`
+runs it against the production prefix.
 
 ## Smoke and protocol-test wiring
 
