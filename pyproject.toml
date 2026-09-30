@@ -45,6 +45,7 @@ pythonpath = [
   "daemons",
   "snapshots",
   "sdk",
+  "qnotebook",
   "admin_app",
   "session_manager",
   "tier4-vm",

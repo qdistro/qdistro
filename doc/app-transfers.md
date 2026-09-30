@@ -51,9 +51,10 @@ payload is removed from the inbox after disposition. A failed confirmation or
 append cannot produce an applied receipt.
 
 Receipt history is process-local and bounded to 256 entries, with a ten-minute
-query lifetime. Terminal receipts may be evicted to admit new work. Outstanding
-staged obligations retain capacity until completion even after their query
-lifetime expires. Restart, expiry, eviction, malformed replies and transport
+query lifetime. The broker discards expired routing records. At the receiver,
+terminal receipts may be evicted to admit new work, while outstanding staged
+obligations retain capacity until completion even after their query lifetime
+expires. Restart, expiry, eviction, malformed replies and transport
 timeouts can yield unknown. Unknown does not mean the payload was not delivered.
 The sender never automatically resends. There is no durable receipt history or
 exactly-once guarantee.
