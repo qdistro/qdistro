@@ -8,6 +8,18 @@
 #include <limits.h>
 #include <string.h>
 
+uint32_t
+qdwin_lock_hotkey_pending_for_grab(uint32_t pending,
+				   const uint32_t *held_keys, size_t held_count)
+{
+	if (!pending || !held_keys)
+		return 0;
+	for (size_t i = 0; i < held_count; i++)
+		if (held_keys[i] == pending)
+			return pending;
+	return 0;
+}
+
 enum libinput_config_accel_profile
 qdwin_accel_profile_to_libinput(uint32_t p)
 {

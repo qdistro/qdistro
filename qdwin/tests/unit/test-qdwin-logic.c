@@ -793,8 +793,26 @@ static void test_popup_constrain(void)
 	CHECK_GEOM(x, y, w, h, 1000, 1100, 50, 50, "clamp respects bounds origin");
 }
 
+static void test_lock_hotkey_pending_for_grab(void)
+{
+	/* The binding grab may consume L's release before qdlocker binds.
+	 * A stale suppression must not eat the next intentional password L. */
+	const uint32_t l = 38; /* evdev KEY_L */
+	const uint32_t held_l[] = { 29, 56, 38 }; /* Ctrl, Alt, L */
+	const uint32_t released_l[] = { 29, 56 };
+	CHECK_U(qdwin_lock_hotkey_pending_for_grab(l, held_l, 3), l,
+		"lock chord still held on locker grab");
+	CHECK_U(qdwin_lock_hotkey_pending_for_grab(l, released_l, 2), 0,
+		"released lock key is not suppressed later");
+	CHECK_U(qdwin_lock_hotkey_pending_for_grab(l, NULL, 0), 0,
+		"empty keyboard state clears pending suppression");
+	CHECK_U(qdwin_lock_hotkey_pending_for_grab(0, held_l, 3), 0,
+		"non-hotkey locker grab has no suppression");
+}
+
 int main(void)
 {
+	test_lock_hotkey_pending_for_grab();
 	test_accel_profile();
 	test_scroll_method();
 	test_exclusive_edge();
