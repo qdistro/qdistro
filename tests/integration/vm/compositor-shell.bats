@@ -75,7 +75,10 @@ teardown_file() {
     cp "$shot" "$(_qd_driver_stage_dir)/s103-foot.png"
     vm_run "command -v tesseract >/dev/null"
     require "tesseract not installed on VM (needed for launcher visual assertion)"
-    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png && tesseract /tmp/s103-foot.png - 2>/dev/null"
+    # The VM's Tesseract 5.5.3 aborted in adaptive-classifier teardown after
+    # spawning OpenMP workers during a 12-VM run. Keep OCR single-threaded and
+    # retain stderr so another crash has an actionable diagnostic.
+    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png && OMP_THREAD_LIMIT=1 tesseract /tmp/s103-foot.png -"
     assert_success
 
     local ocr_text="$output" hits=0 d
