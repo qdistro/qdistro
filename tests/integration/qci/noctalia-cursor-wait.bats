@@ -18,11 +18,11 @@ _remap_line() {
     printf 'qdwin: %s: mapped on cursor_layer (hotspot=1,1) payload=32x32 nonzero_alpha=%s\n' "$1" "$2"
 }
 
-@test "default cursor wait bound is 10s" {
+@test "default cursor wait bound is 30s" {
     env -u NOCT_CURSOR_WAIT_S -u NOCT_CURSOR_POLL_S -u NOCT_CURSOR_JOURNAL_FILE \
         bash -c '
             source "$1"
-            [ "$NOCT_CURSOR_WAIT_S" = 10 ]
+            [ "$NOCT_CURSOR_WAIT_S" = 30 ]
             [ "$NOCT_CURSOR_POLL_S" = 0.25 ]
         ' bash "$REPO_ROOT/tests/integration/qdwin-noctalia/noctalia-helpers.sh"
 }
@@ -170,4 +170,42 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"FAIL:"* ]]
     [[ "$output" == *"last_count=0"* ]]
+}
+
+@test "shape filter: waiter keeps polling past a nonzero remap of another shape" {
+    {
+        echo "-- cursor: cur-step"
+        _remap_line "cursor-shape install shape=pointer" 335
+    } > "$NOCT_CURSOR_JOURNAL_FILE"
+    (
+        sleep 0.35
+        _remap_line "cursor-shape install shape=default" 272 >> "$NOCT_CURSOR_JOURNAL_FILE"
+    ) &
+    local start end
+    start=$(date +%s%3N)
+    run noct_wait_cursor_layer_nonzero_alpha cur-step 3 'cursor-shape install shape=default: mapped on cursor_layer'
+    end=$(date +%s%3N)
+    wait
+    [ "$status" -eq 0 ]
+    # Returned only once the default line appeared, not on the pointer line.
+    [ $(( end - start )) -ge 300 ]
+    [ $(( end - start )) -lt 1500 ]
+    run cursor_layer_nonzero_alpha_after cur-step 'cursor-shape install shape=default: mapped on cursor_layer'
+    [ "$output" = 1 ]
+}
+
+@test "shape filter: a transparent default is not rescued by a visible pointer line" {
+    {
+        echo "-- cursor: cur-step"
+        _remap_line "cursor-shape install shape=default" 0
+        _remap_line "cursor-shape install shape=pointer" 335
+    } > "$NOCT_CURSOR_JOURNAL_FILE"
+    run noct_wait_cursor_layer_nonzero_alpha cur-step 0.3 'cursor-shape install shape=default: mapped on cursor_layer'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"on a line matching"* ]]
+    run cursor_layer_nonzero_alpha_after cur-step 'cursor-shape install shape=default: mapped on cursor_layer'
+    [ "$output" = 0 ]
+    # Unfiltered, the pointer line alone satisfies the old predicate.
+    run cursor_layer_nonzero_alpha_after cur-step
+    [ "$output" = 1 ]
 }

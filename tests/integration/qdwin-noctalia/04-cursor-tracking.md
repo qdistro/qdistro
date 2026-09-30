@@ -3,9 +3,16 @@
 <!-- qci:visual: none -->
 
 **Acceptance criterion:** moving the mouse via QMP `input-send-event`
-results in the cursor visibly following on screen. Hovering over a
-bar widget triggers the appropriate hover state (color shift or
-icon highlight).
+across Noctalia surfaces makes qdwin (re)install a visible cursor sprite
+(non-zero alpha) on the cursor plane at each pointer-enter transition
+(bar, wallpaper). Hovering over a bar widget triggers the appropriate
+hover state (color shift or icon highlight), soft-checked.
+
+Scope limit: the compositor journal records shape, payload and alpha,
+not the pointer or cursor-plane position, and `virsh screenshot` does
+not capture the hardware cursor plane. This scenario therefore proves
+pointer delivery to the right surfaces (their enter handlers fire) and
+a visible sprite, NOT the cursor's pixel position.
 
 This exercises:
 - Pointer event delivery (already proven in scenario 02 by the
@@ -33,8 +40,8 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 #     Both cursor paths carry this line — the no-client default path
 #     (`install_default_cursor:` prefix) and the client cursor-shape
 #     path (`cursor-shape install shape=...` prefix) — so grepping the
-#     `mapped on cursor_layer` line catches either. This is the proof
-#     the cursor followed the pointer at runtime.
+#     `mapped on cursor_layer` line catches either. It proves a visible
+#     sprite was (re)installed on a pointer transition, not a position.
 #   * BOOT (once per session): the default sprite is `registered` at
 #     session start (`cursor-sprite registered shape=default`). This
 #     never re-fires on a runtime move, so it is a boot precondition,
@@ -44,7 +51,7 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 # live in noctalia-helpers.sh (sourced above). The count is cursor-scoped,
 # not a --since window: a same-second stale remap from a prior move cannot
 # satisfy it. The waiter polls that same predicate (mapped on cursor_layer,
-# nonzero_alpha>0) until it is true or NOCT_CURSOR_WAIT_S (default 10s,
+# nonzero_alpha>0) until it is true or NOCT_CURSOR_WAIT_S (default 30s,
 # every NOCT_CURSOR_POLL_S, default 0.25s). A fixed sleep races journal
 # visibility when many GUI workers share the host.
 # Capture the current qdwin-compositor user-journal cursor (empty string on
@@ -81,29 +88,65 @@ hard-fails the journal asserts even though the cursor code is fine.
 
 ### Step 1 — park cursor in the dark wallpaper area
 
+qdwin logs `mapped on cursor_layer` only when a sprite is (re)installed:
+the no-client default path, or a client's `wp_cursor_shape` set_shape.
+Motion alone logs nothing. Measured on a golden clone of the full run
+(F5 probe, 2026-09-30): wallpaper→wallpaper moves (first move, same
+point, another point) never log; every move that enters a Quickshell
+surface does, because the client sets its shape on pointer enter:
+wallpaper→bar logs `cursor-shape install shape=default` then
+`shape=pointer` in the same millisecond, and bar→bar and bar→wallpaper
+each log `cursor-shape install shape=default`. (The wallpaper is the
+`qdshell-wallpaper` client, not bare desktop.)
+
+So step 1 first enters the bar (an asserted precondition whose remap
+lands before the step-1 journal cursor is taken), then moves onto the
+wallpaper, whose enter must log a fresh `cursor-shape install
+shape=default`. Every attempt, including a retry that starts parked at
+(1000, 600), therefore has a real transition.
+full-20260930T051422Z-65193 failed 1.1 because its retries moved
+wallpaper→same wallpaper point, which can never remap.
+
 ```bash
+CUR_PRE1=$(compositor_journal_cursor)
+qdwin_mouse_move 640 15
+# Precondition: entering the bar remaps, and those lines land BEFORE the
+# step-1 journal cursor, so none of them can count for the wallpaper move.
+noct_wait_cursor_layer_nonzero_alpha "$CUR_PRE1" \
+    || { echo "FAIL: entering the bar produced no cursor remap (step 1 precondition)"; exit 1; }
 CUR_STEP1=$(compositor_journal_cursor)
 qdwin_mouse_move 1000 600
-# Bounded journal poll (default 10s), not a fixed sleep. Same condition as
-# assert 1.1. Screenshot stays soft corroboration and still runs if the
+# Bounded journal poll (default 30s), not a fixed sleep, for the SAME
+# predicate as assert 1.1: the wallpaper's default-shape install with
+# nonzero alpha on one line (a late bar `shape=pointer` remap cannot end the
+# wait early). Screenshot stays soft corroboration and still runs if the
 # waiter times out; the exit below is the loud failure.
-noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP1" || step1_cursor_rc=$?
+STEP1_SHAPE='cursor-shape install shape=default: mapped on cursor_layer'
+noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP1" "" "$STEP1_SHAPE" || step1_cursor_rc=$?
 qdwin_screenshot /tmp/04-step1-wallpaper-area.png
 [ "${step1_cursor_rc:-0}" -eq 0 ] || exit 1
 ```
 
 **Assert (1.1) — compositor evidence (load-bearing):** the cursor
 sprite is (re)mapped on the cursor plane with non-zero alpha after the
-move — the runtime proof that the cursor followed the pointer. (The
+move, by the wallpaper client's default-shape install on pointer enter. (The
 sprite's one-time `registered` line is a boot precondition, already
 checked once in Setup, and does NOT re-fire on a move.) `virsh
 screenshot` cannot capture the hardware cursor PLANE, so assert the
 compositor's own journal rather than the screenshot:
 
 ```bash
-[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP1")" -ge 1 ] \
-    || { echo "FAIL: cursor not mapped on cursor_layer with nonzero_alpha"; exit 1; }
+# The wallpaper's default-shape install itself must be visible: shape and
+# non-zero alpha counted on the SAME line (a late bar `shape=pointer` remap
+# must not stand in for a transparent wallpaper default).
+[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP1" 'cursor-shape install shape=default: mapped on cursor_layer')" -ge 1 ] \
+    || { echo "FAIL: no visible wallpaper-enter default-shape install after the move"; exit 1; }
 ```
+
+What 1.1 proves: the pointer left the bar and entered the wallpaper
+client, whose enter installed the default shape. The journal line
+carries no coordinates, so it is not a pixel-position proof of
+(1000, 600).
 
 The `/tmp/04-step1-wallpaper-area.png` screenshot is kept as soft
 corroboration only — a visible arrow near (1000, 600) is a bonus but
@@ -153,8 +196,9 @@ qdwin_screenshot /tmp/04-step3-sweep-end.png
 ```
 
 **Assert (3.1) — compositor evidence (load-bearing):** the cursor
-sprite stayed mapped on the cursor plane with non-zero alpha through
-the sweep (the cursor followed the motion). Assert the journal, not
+sprite was re-installed on the cursor plane with non-zero alpha during
+the sweep (pointer transitions reached the bar; not a position proof,
+see Scope limit). Assert the journal, not
 the screenshot (the final position (1260, 15) is soft-only):
 
 ```bash
@@ -177,7 +221,7 @@ start) plus the load-bearing compositor-evidence asserts (1.1, 2.1,
 move) plus 3.2/3.3 (session alive, no protocol errors) pass. Each
 load-bearing assert is preceded by `noct_wait_cursor_layer_nonzero_alpha`,
 which polls that same journal predicate until it holds or
-`NOCT_CURSOR_WAIT_S` (default 10s) expires, then fails loud. Screenshot-based
+`NOCT_CURSOR_WAIT_S` (default 30s) expires, then fails loud. Screenshot-based
 cursor-position checks are soft corroboration only — the hardware
 cursor plane is not captured by `virsh screenshot`, so their absence
 is NOT a failure. Soft asserts (2.2) may be downgraded to "info only"
