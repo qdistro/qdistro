@@ -712,7 +712,7 @@ install_packages_ubuntu() {
         python3 python3-pip python3-setuptools python3-cffi
         python3-pyqt6 python3-dbus python3-gi python3-yaml python3-cryptography
         python3-pam python3-pywayland
-        qt6-wayland-dev
+        qt6-wayland qt6-wayland-dev
         qml6-module-qtqml-workerscript
         # mesa
         libegl1 libgl1 mesa-utils libglx-mesa0
@@ -1898,6 +1898,7 @@ installer_chain_entries() {
     cat <<'EOF'
 sdk|scripts/install/install-sdk-for-vm.sh|/sdk/qdistro_app
 broker|scripts/install/install-broker-for-qdwin.sh|/broker
+admin-app|scripts/install/install-admin-app-for-vm.sh|/admin_app
 session-manager|scripts/install/install-session-manager.sh|/session_manager
 user-relay|scripts/install/install-user-relay-for-vm.sh|/user_relay
 polkit|scripts/install/install-polkit-agent-for-vm.sh|/polkit

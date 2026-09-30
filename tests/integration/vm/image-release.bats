@@ -597,7 +597,11 @@ chain_root() {
         "$T/root/usr/share/polkit-1/actions" "$T/root/usr/share/qdistro/tier4-vm" \
         "$T/root/usr/share/qdistro/tier5" "$T/root/usr/share/qdistro/tier5b" \
         "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/tier3" \
-        "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system"
+        "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system" \
+        "$T/root/usr/libexec/qdistro" "$T/root/usr/share/applications"
+    cp "$REPO/admin_app/qdistro_admin_app.py" "$T/root/usr/local/bin/qdistro-admin-approval-app"
+    cp "$REPO/deploy/start-admin-app-wayland.sh" "$T/root/usr/local/bin/qdistro-start-admin-app"
+    cp "$REPO/admin_app/qdistro-admin-app.desktop" "$T/root/usr/share/applications/qdistro-admin-app.desktop"
     : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
     mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
     : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim/qmldir"
@@ -645,11 +649,14 @@ chain_root() {
     [[ "$output" == *"OK   [qemu-ga] unit reads the override"* ]]
     [[ "$output" == *"OK   [qemu-ga] unit passes the filter"* ]]
     [[ "$output" == *"OK   [qemu-ga] vendor default blocks only guest-exec"* ]]
+    [[ "$output" == *"OK   [admin-app] UI script"* ]]
+    [[ "$output" == *"OK   [admin-app] launcher uses native Wayland"* ]]
+    [[ "$output" == *"OK   [admin-app] desktop entry launches installed UI"* ]]
     [[ "$output" == *"OK   [identity] fstab uses UUID"* ]]
     [[ "$output" == *"OK   [identity] grub root=UUID"* ]]
     [[ "$output" == *"OK   [identity] EFI/BOOT fallback loader"* ]]
     [[ "$output" == *"OK   [identity] swap in fstab by UUID"* ]]
-    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 16 steps): sdk broker"*"phone"*"tier5b"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 17 steps): sdk broker admin-app"*"phone"*"tier5b"* ]]
     [[ "$output" == *"OK   [media] socket unit not shipped: absent as required"* ]]
     [[ "$output" == *"OK   [multimachine] broker CLI not shipped: absent as required"* ]]
     # dev: phone rows are requirements (the fixture has no phone unit, so MISS)
@@ -657,12 +664,12 @@ chain_root() {
     [[ "$output" != *"[phone] unit not shipped"* ]]
 }
 
-@test "verify-contents: Phase D rows -- release profile expects 15 steps and NO phone; media present is a FAIL" {
+@test "verify-contents: Phase D rows -- release profile expects 16 steps and NO phone; media present is a FAIL" {
     chain_root release
     mkdir -p "$T/root/etc/systemd/system"; : > "$T/root/etc/systemd/system/qdistro-media-exec.socket"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (release profile, 15 steps):"* ]]
-    [[ "$output" != *"(release profile, 15 steps):"*"phone"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (release profile, 16 steps):"* ]]
+    [[ "$output" != *"(release profile, 16 steps):"*"phone"* ]]
     [[ "$output" == *"OK   [phone] unit not shipped (release profile): absent as required"* ]]
     [[ "$output" == *"FAIL [media] socket unit not shipped: must be absent but exists"* ]]
     [ "$status" -eq 1 ]
@@ -695,7 +702,18 @@ chain_root() {
     # blank lines and comments in the record are tolerated
     chain_root dev "$(printf '# written by config.sh\n\n%s\n' "$(QDISTRO_PROFILE=dev bash -c '. "$1"; resolve_profile >/dev/null; chain_expected_names' _ "$REPO/scripts/install/qdistro-bootstrap.sh")")"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 16 steps)"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 17 steps)"* ]]
+}
+
+@test "verify-contents: missing admin app script or wrong desktop command fails its required rows" {
+    chain_root dev
+    rm "$T/root/usr/local/bin/qdistro-admin-approval-app"
+    printf 'Exec=/home/admin/qdistro/admin_app/qdistro_admin_app.py\n' \
+        > "$T/root/usr/share/applications/qdistro-admin-app.desktop"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MISS [admin-app] UI script"* ]]
+    [[ "$output" == *"MISS [admin-app] desktop entry launches installed UI"* ]]
 }
 
 @test "verify-contents: tier-3 content rows -- unlocked silo password or admin outside the group is a MISS" {
