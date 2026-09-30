@@ -32,7 +32,9 @@ DEFAULTS = {
             "font_family": "Monospace",
             "font_size": 11,
             "font_ligatures": False,
+            "font_source": "desktop",
             "color_scheme": "Linux",
+            "color_source": "profile",
             "cursor_shape": "block",  # block, underline, ibeam
             "cursor_blink": True,
             "scrollback_lines": 5000,
@@ -136,10 +138,23 @@ class Config:
         self._loaded = True
 
     def _load(self):
-        if os.path.exists(CONFIG_FILE):
+        existed = os.path.isfile(CONFIG_FILE)
+        raw_profiles = {}
+        if existed:
             with open(CONFIG_FILE, "rb") as f:
                 user_config = tomllib.load(f)
+            raw_profiles = copy.deepcopy(user_config.get("profiles") or {})
             self._merge(self._data, user_config)
+        for name, prof in list(self._data.get("profiles", {}).items()):
+            if not isinstance(prof, dict) or str(name).startswith("_"):
+                continue
+            src = raw_profiles.get(name) if existed else {}
+            if not isinstance(src, dict):
+                src = {}
+            if "font_source" not in src:
+                prof["font_source"] = "local" if existed else "desktop"
+            if "color_source" not in src:
+                prof["color_source"] = "profile"
 
     def _merge(self, base, override):
         for key, value in override.items():
@@ -238,14 +253,16 @@ def _toml_string(s):
     """TOML-encode a string. Uses literal 'single-quote' form if safe
     (no single quotes or control chars), otherwise double-quoted with
     escapes."""
-    if "'" not in s and '\n' not in s and '\r' not in s and '\t' not in s:
+    if "'" not in s and "\n" not in s and "\r" not in s and "\t" not in s:
         return f"'{s}'"
     # Escape for double-quoted TOML string
-    escaped = (s.replace('\\', '\\\\')
-                .replace('"', '\\"')
-                .replace('\n', '\\n')
-                .replace('\r', '\\r')
-                .replace('\t', '\\t'))
+    escaped = (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
     return f'"{escaped}"'
 
 

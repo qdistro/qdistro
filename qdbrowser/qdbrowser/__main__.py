@@ -63,8 +63,8 @@ def _compose_chromium_flags():
     if "--site-per-process" not in existing:
         parts.append("--site-per-process")
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(parts)
-    log.info("qdbrowser.security isolate_origins=%s",
-             ",".join(origins))
+    log.info("qdbrowser.security isolate_origins=%s", ",".join(origins))
+
 
 def _apply_ca_bundle(profile):
     """Export ``SSL_CERT_FILE`` for the launch profile's CA bundle, if
@@ -95,8 +95,7 @@ def _apply_ca_bundle(profile):
         log.warning("qdbrowser per-profile CA bundle setup failed: %s", exc)
         return
     if applied:
-        log.info("qdbrowser.cert ca_bundle profile=%s file=%s",
-                 profile, applied)
+        log.info("qdbrowser.cert ca_bundle profile=%s file=%s", profile, applied)
 
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
@@ -110,18 +109,20 @@ def parse_args(argv=None):
         description="qdbrowser — Qt-based web browser.",
     )
     p.add_argument("url", nargs="?", help="URL to open (optional)")
-    p.add_argument("--profile", default="default",
-                   help="Web profile to use (default: default; 'private' = OTR)")
+    p.add_argument(
+        "--profile",
+        default="default",
+        help="Web profile to use (default: default; 'private' = OTR)",
+    )
     p.add_argument("--geometry", help="WxH or WxH+X+Y")
-    p.add_argument("-f", "--fullscreen", action="store_true",
-                   help="Open fullscreen")
-    p.add_argument("-m", "--maximize", action="store_true",
-                   help="Open maximized")
-    p.add_argument("--no-restore", action="store_true",
-                   help="Don't restore the previous session")
-    p.add_argument("--agent-control", action="store_true",
-                   help="Enable the agent_control plugin (same as setting "
-                        "QDBROWSER_AGENT_CONTROL=1)")
+    p.add_argument("-f", "--fullscreen", action="store_true", help="Open fullscreen")
+    p.add_argument("-m", "--maximize", action="store_true", help="Open maximized")
+    p.add_argument("--no-restore", action="store_true", help="Don't restore the previous session")
+    p.add_argument(
+        "--agent-control",
+        action="store_true",
+        help="Enable the agent_control plugin (same as setting QDBROWSER_AGENT_CONTROL=1)",
+    )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args(argv)
 
@@ -136,6 +137,7 @@ def _apply_geometry(window, geom):
                 size_part = geom[:idx]
                 pos_part = geom[idx:]
                 import re
+
                 m = re.match(r"([+-]\d+)([+-]\d+)", pos_part)
                 if m:
                     x = int(m.group(1))
@@ -187,19 +189,20 @@ def main(argv=None):
     # Local imports after QApplication so QtWebEngine initialises with
     # the right platform integration.
     from qdbrowser.config import Config
-    from qdbrowser.theme import apply_theme
+    from qdbrowser.theme import attach_presentation
     from qdbrowser.window import MainWindow
 
     config = Config()
-    theme_mode = config.get("general", "theme_mode", default="system")
-    resolved = apply_theme(app, theme_mode)
+    resolved = attach_presentation(app, config)
 
     window = MainWindow(resolved_theme=resolved)
 
     restored = False
-    if (not args.no_restore
-            and not args.url
-            and config.get("general", "restore_session_on_start", default=True)):
+    if (
+        not args.no_restore
+        and not args.url
+        and config.get("general", "restore_session_on_start", default=True)
+    ):
         try:
             restored = window.restore_session()
         except Exception as exc:
@@ -225,6 +228,7 @@ def main(argv=None):
     # survives across the event loop (letting it GC drops the bus claim).
     try:
         from qdbrowser import qdistro_integration as _qdistro
+
         app._qdistro_app1_receiver = _qdistro.maybe_install(window)
     except Exception as exc:  # noqa: BLE001
         log.warning("qdistro App1 registration failed: %s", exc)
@@ -237,6 +241,7 @@ def main(argv=None):
     # follow-up; this is the title-shim that ships today).
     try:
         from qdbrowser.clipboard_silo import stamp_title
+
         base_title = window.windowTitle() or "qdbrowser"
         stamp_title(window, base_title)
     except Exception as exc:  # noqa: BLE001

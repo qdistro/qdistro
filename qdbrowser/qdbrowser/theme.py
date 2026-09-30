@@ -32,6 +32,7 @@ def detect_system_theme() -> str:
             hints = app.styleHints()
             scheme = hints.colorScheme()
             from PyQt6.QtCore import Qt
+
             if hasattr(Qt, "ColorScheme"):
                 if scheme == Qt.ColorScheme.Dark:
                     return "dark"
@@ -68,11 +69,27 @@ def palette_dict(mode: str = "auto") -> dict:
     keys are stable across theme changes; values are CSS colors.
 
     ``mode``:
-      - ``"auto"`` — follow ``detect_system_theme()``
+      - ``"auto"`` — follow the effective app palette
       - ``"dark"`` — force dark palette
       - ``"light"`` — force light palette
     """
     if mode == "auto":
+        ctrl = current_controller()
+        if ctrl is not None and ctrl.state.using_shared_palette and ctrl.state.colors:
+            colors = ctrl.state.colors
+            return {
+                "bg": colors.mSurface,
+                "bg_mid": colors.mSurfaceVariant,
+                "bg_dim": colors.mSurfaceVariant,
+                "fg": colors.mOnSurface,
+                "fg_dim": colors.mOnSurfaceVariant,
+                "accent": colors.mPrimary,
+                "border": colors.mOutline,
+                "selection": colors.mPrimary,
+                "selection_fg": colors.mOnPrimary,
+                "hover": colors.mHover,
+                "hover_fg": colors.mOnHover,
+            }
         mode = detect_system_theme()
     if mode == "light":
         return {
@@ -111,12 +128,9 @@ def _apply_dark(app):
     pal.setColor(QPalette.ColorRole.Link, QColor(ACCENT_LIGHT))
     pal.setColor(QPalette.ColorRole.Highlight, QColor(SELECTION))
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    pal.setColor(QPalette.ColorGroup.Disabled,
-                 QPalette.ColorRole.WindowText, QColor(FG_DIM))
-    pal.setColor(QPalette.ColorGroup.Disabled,
-                 QPalette.ColorRole.Text, QColor(FG_DIM))
-    pal.setColor(QPalette.ColorGroup.Disabled,
-                 QPalette.ColorRole.ButtonText, QColor(FG_DIM))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(FG_DIM))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(FG_DIM))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(FG_DIM))
     app.setPalette(pal)
     app.setStyleSheet(DARK_QSS)
 
@@ -182,6 +196,45 @@ QScrollBar::handle:vertical {{ background-color: {BG_LIGHT};
                                border-radius: 4px; min-height: 20px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 """
+
+_CONTROLLER = None
+
+
+def attach_presentation(app: QApplication, config):
+    global _CONTROLLER
+    try:
+        from qdistro_presentation.model import LocalOverrides, parse_local_overrides
+        from qdistro_presentation.qt import PresentationController
+    except ImportError:
+        return apply_theme(app, config.get("general", "theme_mode", default="system"))
+
+    theme_mode = config.get("general", "theme_mode", default="system")
+    if theme_mode not in ("system", "dark", "light", "native"):
+        theme_mode = "system"
+    appearance = config.get("appearance", default={}) or {}
+    try:
+        local = parse_local_overrides(appearance)
+    except Exception:
+        local = LocalOverrides()
+    ctrl = PresentationController(
+        app,
+        theme_mode=theme_mode,
+        local=local,
+        apply_legacy=lambda a, mode: apply_theme(a, mode),
+        apply_system_fallback=lambda a: apply_theme(a, detect_system_theme()),
+        watch=True,
+    )
+    _CONTROLLER = ctrl
+    if ctrl.state.using_shared_palette:
+        return ctrl.state.snapshot.mode if ctrl.state.snapshot else "dark"
+    if theme_mode in ("dark", "light", "native"):
+        return theme_mode
+    return detect_system_theme()
+
+
+def current_controller():
+    return _CONTROLLER
+
 
 LIGHT_QSS = f"""
 QMainWindow {{ background-color: {LT_BG}; }}
