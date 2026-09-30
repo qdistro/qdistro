@@ -1012,6 +1012,8 @@ struct qdwin {
 	struct weston_keyboard_grab overlay_grab;
 	int overlay_grab_active;
 	uint32_t overlay_grab_role;
+	/* The manual-lock chord can finish after the locker grab starts. */
+	uint32_t lock_hotkey_pending_release;
 
 	/* Opaque black curtain covering the whole output. Ensures pixels
 	 * are overwritten every frame — without this, the pixman renderer
@@ -4383,6 +4385,12 @@ qdwin_proxy_default_grab_motion(struct weston_pointer_grab *grab,
 	struct weston_pointer *pointer = grab->pointer;
 	qdwin_idle_note_activity(qdwin_singleton);
 	weston_pointer_move(pointer, event);
+	/* A sprite is mapped once and then moved by libweston. Record its
+	 * current position for the GUI cursor-motion oracle; mapping logs
+	 * cannot prove motion of an already installed sprite. */
+	if (qdwin_singleton && pointer->sprite)
+		weston_log("qdwin: cursor_motion x=%.0f y=%.0f sprite=1\n",
+			   pointer->pos.c.x, pointer->pos.c.y);
 	if (qdwin_singleton && qdwin_singleton->locked) {
 		struct weston_view *lv = qdwin_singleton->lock_view;
 		if (pointer->focus != lv)
@@ -7205,6 +7213,12 @@ qdwin_overlay_grab_key(struct weston_keyboard_grab *grab,
 	uint32_t key = ke->key;
 	uint32_t state_w = ke->key_state;
 	struct qdwin *qdwin = wl_container_of(grab, qdwin, overlay_grab);
+	if (qdwin->overlay_grab_role == 2 &&
+	    qdwin->lock_hotkey_pending_release == key) {
+		if (state_w == WL_KEYBOARD_KEY_STATE_RELEASED)
+			qdwin->lock_hotkey_pending_release = 0;
+		return;
+	}
 	if (state_w != WL_KEYBOARD_KEY_STATE_PRESSED)
 		return;     /* releases absorbed; v17 forwards press only */
 	struct weston_keyboard *kb = grab->keyboard;
@@ -7403,7 +7417,10 @@ qdwin_on_lock_key(struct weston_keyboard *kb,
 		  uint32_t key, void *data)
 {
 	struct qdwin *qdwin = data;
-	(void)kb; (void)t; (void)key;
+	(void)kb; (void)t;
+	/* Never turn the triggering L press into a password character if the
+	 * asynchronous locker lock arrives before the chord has fully released. */
+	qdwin->lock_hotkey_pending_release = key;
 	/* `reason=3` is the manual hotkey (XML lock_requested enum).
 	 * Include in the log so tests that grep for the reason can
 	 * distinguish this from the idle / lid / suspend paths once
@@ -7985,6 +8002,7 @@ qdwin_handle_set_locked(struct wl_client *client,
 		qdwin_install_lock_curtain(qdwin);
 		qdwin_hide_non_lock_layers(qdwin);
 	} else {
+		qdwin->lock_hotkey_pending_release = 0;
 		qdwin_remove_lock_curtain(qdwin);
 		if (qdwin->overlay_grab_active &&
 		    qdwin->overlay_grab_role == 2)
@@ -9980,6 +9998,7 @@ qdwin_handle_locker_set_locked(struct wl_client *client,
 		qdwin_overlay_grab_start(qdwin, /* role=locker */ 2);
 		qdwin_hide_non_lock_layers(qdwin);
 	} else {
+		qdwin->lock_hotkey_pending_release = 0;
 		qdwin_remove_lock_curtain(qdwin);
 		qdwin_demote_lock_toplevel(qdwin, "locker_set_locked=0");
 		if (qdwin->overlay_grab_active &&

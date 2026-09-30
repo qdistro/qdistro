@@ -97,6 +97,25 @@ noct_compositor_journal_after() {
         2>/dev/null
 }
 
+# A mapped sprite is repositioned by libweston without another map event.
+# Match an actual compositor position after the caller's journal boundary.
+# QMP's 0..32767 coordinate conversion can round by one pixel.
+noct_cursor_at_after() {
+    local cur="$1" x="$2" y="$3"
+    noct_compositor_journal_after "$cur" | awk -v x="$x" -v y="$y" '
+        /qdwin: cursor_motion / && /sprite=1/ {
+            px = py = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^x=[0-9]+$/) { px = $i; sub(/^x=/, "", px) }
+                if ($i ~ /^y=[0-9]+$/) { py = $i; sub(/^y=/, "", py) }
+            }
+            if (px != "" && py != "" && (px+0) >= x-3 && (px+0) <= x+3 && (py+0) >= y-3 && (py+0) <= y+3)
+                found = 1
+        }
+        END { exit !found }
+    '
+}
+
 # Runtime nonzero-alpha cursor remaps after a journal cursor captured
 # immediately before the move. Prints a single integer.
 cursor_layer_nonzero_alpha_after() {
