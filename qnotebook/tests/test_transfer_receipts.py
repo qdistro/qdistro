@@ -4,7 +4,6 @@ import threading
 import pytest
 from PyQt6.QtCore import QEventLoop, QThread, QTimer
 from PyQt6.QtWidgets import QMainWindow, QTextEdit
-
 from qnotebook import qdistro_integration as qi
 
 

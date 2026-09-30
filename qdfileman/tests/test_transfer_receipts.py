@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QListWidgetItem
-
 from qfileman import qdistro_integration as qi
 from qfileman.transfer_jobs import TransferSender
 from qfileman.window import FileManagerWindow
