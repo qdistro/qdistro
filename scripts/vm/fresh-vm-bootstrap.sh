@@ -63,6 +63,16 @@ if ! getent group admin >/dev/null; then
 fi
 usermod -aG admin admin
 
+# The shipped image puts admin in `audio` (image/config.xml <users>); the
+# cloud-derived test base does not, and this lane's lingering admin session
+# owns no logind seat, so no uaccess ACL is granted on /dev/snd (root:audio
+# 0660). WirePlumber then could not open the template's ICH9 card and PipeWire
+# had no source or sink at all (qdlocker gui 09: pw-record "no target node
+# available"). The §7d user-session restart picks the membership up.
+if getent group audio >/dev/null; then
+    usermod -aG audio admin
+fi
+
 # GUI and PAM integration scenarios exercise the real qdlocker stack with a
 # documented disposable-VM credential.  Imported Kiwi images do not inherit
 # the old baseweed password, so pin it here before any golden is captured.
