@@ -61,13 +61,21 @@ is clicked. Empty files, invalid UTF-8, NUL characters and files above the
 local 256 KiB encoded-byte limit are refused visibly; content is never
 silently shortened or converted. This is a text operation, not a file copy.
 
-Both same-user and cross-user sends use the qdistro broker. A successful
-transport means the text arrived at the receiver; acceptance remains unknown.
-The receiver may ask for confirmation, decline it, or fail to apply it. An
-unconfirmed transfer, including a timeout, may already have arrived. The byte
-limit is a local sender policy, not negotiated receiver capacity. Versioned
-capability discovery and staged/applied/declined/failed receipts remain future
-protocol work; this command does not promise acceptance or exactly-once delivery.
+Both same-user and cross-user sends use the qdistro broker. Versioned receivers
+advertise encoded byte limits, kinds and confirmation requirements; menu
+capabilities are enriched asynchronously and rechecked before sending. At most
+two sends run concurrently across windows, with one pending send per window.
+Discovery probes at most sixteen receivers within a fifteen-second budget;
+the initial receiver list has a three-second read timeout. Old or unavailable
+metadata remains explicitly unknown.
+
+Versioned sends report staged, rejected, applied, declined, failed or unknown.
+For notebook delivery, applied means text was inserted into the receiver's
+editor; saving is separate. Status queries stop after sixty seconds of waiting
+for confirmation. Old endpoints retain the legacy arrival-only message, with
+acceptance unknown. A timeout may already have delivered the text, and nothing
+is automatically resent. The local 256 KiB sending policy still applies even
+when a receiver advertises a higher limit.
 
 ## Installation
 
