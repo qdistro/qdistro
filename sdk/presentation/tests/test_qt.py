@@ -154,14 +154,43 @@ def test_changed_signal_and_existing_widget(qapp, tmp_path):
     ctrl.stop()
 
 
-def test_same_generation_reload_is_noop(qapp, tmp_path):
+def test_unchanged_file_reload_is_noop(qapp, tmp_path):
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     ctrl = PresentationController(
         qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
     )
+    assert ctrl.state.using_shared_palette is True
     seen = []
     ctrl.changed.connect(lambda *_args: seen.append(True))
     ctrl._reload()
+    assert seen == []
+    ctrl.stop()
+
+
+def test_same_generation_rewrite_skips_apply(qapp, tmp_path):
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    assert ctrl.state.using_shared_palette is True
+    first_identity = ctrl._identity
+    first_generation = ctrl.state.generation
+    seen = []
+    applies = []
+    ctrl.changed.connect(lambda *_args: seen.append(True))
+    real_apply = ctrl._apply_to_app
+
+    def spy(resolved):
+        applies.append(resolved.generation)
+        real_apply(resolved)
+
+    ctrl._apply_to_app = spy
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False, skip_unchanged=False)
+    ctrl._reload()
+    assert ctrl.state.generation == first_generation
+    assert ctrl._identity != first_identity
+    assert applies == []
     assert seen == []
     ctrl.stop()
 

@@ -54,7 +54,22 @@ def test_attach_presentation_native_ignores_snapshot(qapp, tmp_path, monkeypatch
     assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == native
 
 
-def test_missing_snapshot_falls_back(qapp, tmp_path, monkeypatch):
+def test_missing_snapshot_applies_system_fallback(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtGui import QColor
+    from qterminator.theme import (
+        LT_BG,
+        LT_FG,
+        apply_dark_theme,
+        current_controller,
+    )
+
+    monkeypatch.setattr("qterminator.theme.detect_system_theme", lambda: "light")
+    apply_dark_theme(qapp)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "missing.json"))
     resolved = attach_presentation(qapp, _config("system"))
-    assert resolved in ("dark", "light")
+    assert resolved == "light"
+    ctrl = current_controller()
+    assert ctrl is not None
+    assert ctrl.state.using_shared_palette is False
+    assert qapp.palette().color(QPalette.ColorRole.Window) == QColor(LT_BG)
+    assert qapp.palette().color(QPalette.ColorRole.WindowText) == QColor(LT_FG)

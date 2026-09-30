@@ -51,12 +51,17 @@ def test_attach_presentation_follows_snapshot(qapp, tmp_path, monkeypatch):
 
 
 def test_palette_dict_explicit_dark_stays_content_policy(qapp, tmp_path, monkeypatch):
+    from qdbrowser.theme import ACCENT_LIGHT, BG_DARK, FG, SELECTION
+
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
     attach_presentation(qapp, _config("system"))
     forced = palette_dict("dark")
+    assert forced["bg"] == BG_DARK
+    assert forced["fg"] == FG
+    assert forced["accent"] == ACCENT_LIGHT
+    assert forced["selection"] == SELECTION
     assert forced["bg"] != example_snapshot().colors.mSurface
-    assert forced["bg"].startswith("#")
 
 
 def test_attach_presentation_native_ignores_snapshot(qapp, tmp_path, monkeypatch):

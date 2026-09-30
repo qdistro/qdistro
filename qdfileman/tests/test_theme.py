@@ -138,9 +138,10 @@ def test_presentation_update_keeps_two_pane_paths(qapp, tmp_dir, tmp_path):
         new_pane = win._split_right()
         new_pane._update_path(str(other))
         before = [pane.current_path for pane in win._split_root.find_panes()]
+        second = with_generation(replace(example_snapshot(), mode="light"))
         write_snapshot(
             str(tmp_path),
-            with_generation(replace(example_snapshot(), mode="light")),
+            second,
             require_unwritable_dirs=False,
             skip_unchanged=False,
         )
@@ -151,6 +152,8 @@ def test_presentation_update_keeps_two_pane_paths(qapp, tmp_dir, tmp_path):
         assert str(tmp_dir) in after
         assert str(other) in after
         assert len(after) == 2
+        assert ctrl.state.generation == second.generation
+        assert ctrl.state.snapshot.mode == "light"
     finally:
         win.close()
         win.deleteLater()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -91,9 +92,18 @@ def test_cli_skip_unchanged_prints_same_generation(tmp_path: Path, monkeypatch, 
     body = example_snapshot().to_json().encode("utf-8")
     assert _run(monkeypatch, ["--dir", str(tmp_path)], body) == 0
     first = capsys.readouterr().out.strip()
+    path = tmp_path / "current.json"
+    before = os.stat(path)
     assert _run(monkeypatch, ["--dir", str(tmp_path)], body) == 0
     second = capsys.readouterr().out.strip()
+    after = os.stat(path)
     assert first == second
+    assert (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_size,
+    )
 
 
 def test_cli_reset_empty_writes_disabled(tmp_path: Path, monkeypatch, capsys):
