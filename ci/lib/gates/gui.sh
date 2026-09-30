@@ -3523,9 +3523,15 @@ gui_run_scenario() {
     # set it from the prompt (or a racy `virsh list | head` fallback).
     # QCI_GUI_ARTIFACT_DIR is the SHORT alias (preferred for agents); harvest
     # still grades the canonical adir after recovery.
+    # The admin lane IS labwc: vm-gui then requires labwc's frame refresh
+    # instead of trusting the guest's own "no labwc" (scripts/vm/vm-gui). An
+    # explicit value in the gate's own environment (the operator's, or a
+    # fake-VM test declaring `none`) wins; the scenario driver cannot set it.
+    local vm_gui_session=${QCI_VM_GUI_SESSION:-auto}
+    [ "$lane" = admin ] && vm_gui_session=${QCI_VM_GUI_SESSION:-labwc}
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
         QCI_GUI_ARTIFACT_DIR="$art_alias" QCI_GUI_CAPTURE_LOG="$caplog" \
-        QCI_GUI_VIEW_STATE="$viewstate" \
+        QCI_GUI_VIEW_STATE="$viewstate" QCI_VM_GUI_SESSION="$vm_gui_session" \
         run_agent_command "$prompt" "$log_path" "$obs"
     agent_rc=$?
     ta1=$(date +%s)

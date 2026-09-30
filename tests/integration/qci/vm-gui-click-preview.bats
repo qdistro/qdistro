@@ -2,6 +2,9 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+    # A fake virsh has no guest to answer the labwc frame refresh; these
+    # suites test capture attestation (vm-gui-labwc-refresh.bats covers it).
+    export QCI_VM_GUI_SESSION=none
     VM_GUI="$REPO_ROOT/scripts/vm/vm-gui"
     ARTIFACT_DIR="$BATS_TEST_TMPDIR/artifacts"
     FAKE_BIN="$BATS_TEST_TMPDIR/bin"
