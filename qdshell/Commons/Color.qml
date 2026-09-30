@@ -475,14 +475,7 @@ Singleton {
     if (root.acceptedRequestId === 0) {
       const mode = (Settings.data.colorSchemes && Settings.data.colorSchemes.darkMode) ? "dark" : "light";
       commitTargetPalette(beginRequest(mode), mode, pal);
-      return;
     }
-    if (root.skipTransition)
-      return;
-    if (ColorPalette.palettesEqual(pal, root.acceptedPalette))
-      return;
-    const req = beginRequest(root.acceptedMode);
-    commitTargetPalette(req, root.acceptedMode, pal);
   }
 
   // --------------------------------
