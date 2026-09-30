@@ -105,8 +105,22 @@ qdistro_open_launch_log admin-app.log
 # connection (QDISTRO_ADMIN_APP_READY_FILE; see _FirstPaintMarker), so the
 # server has the frame when this returns. No round trip from here can stand
 # in for that one: X orders requests per connection only.
+#
+# If no private directory can be made for the marker, the app is still
+# started (a launcher must never keep it from starting) but without a marker
+# path, and the launcher exits 3: it cannot prove the frame, and an empty
+# READY_DIR must never turn the marker into a fixed path such as /painted.
 READY_DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/qdistro-admin-app-ready.XXXXXXXX" 2>/dev/null) \
-    || READY_DIR=$(mktemp -d)
+    || READY_DIR=$(mktemp -d 2>/dev/null) || READY_DIR=
+if [ -z "$READY_DIR" ] || [ ! -d "$READY_DIR" ]; then
+    unset QDISTRO_ADMIN_APP_READY_FILE
+    setsid python3 "$APP_PY" < /dev/null >&9 2>&1 &
+    APP_PID=$!
+    disown
+    echo "start-admin-app: no private directory for the first-paint marker; admin app (pid $APP_PID) started without the readiness wait" >&2
+    echo "$APP_PID"
+    exit 3
+fi
 READY_FILE=$READY_DIR/painted
 QDISTRO_ADMIN_APP_READY_FILE=$READY_FILE setsid python3 "$APP_PY" < /dev/null >&9 2>&1 &
 APP_PID=$!
