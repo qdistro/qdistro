@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/types.h>
 #include <libinput.h>
 
@@ -310,6 +311,13 @@ bool qdwin_layershell_pre_shell_uid_allowed(uid_t client_uid,
  * ------------------------------------------------------------------ */
 bool qdwin_idle_inhibit_should_hold(bool have_surface, bool surface_mapped,
 				    bool has_buffer, bool has_view);
+
+/* Keep suppressing the manual lock key only if it is still physically held
+ * when the locker keyboard grab starts. Held keys use libweston's evdev
+ * keycode space, the same space as the key-binding callback. */
+uint32_t qdwin_lock_hotkey_pending_for_grab(uint32_t pending,
+					    const uint32_t *held_keys,
+					    size_t held_count);
 
 #ifdef __cplusplus
 }

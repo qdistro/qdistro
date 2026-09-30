@@ -4385,12 +4385,6 @@ qdwin_proxy_default_grab_motion(struct weston_pointer_grab *grab,
 	struct weston_pointer *pointer = grab->pointer;
 	qdwin_idle_note_activity(qdwin_singleton);
 	weston_pointer_move(pointer, event);
-	/* A sprite is mapped once and then moved by libweston. Record its
-	 * current position for the GUI cursor-motion oracle; mapping logs
-	 * cannot prove motion of an already installed sprite. */
-	if (qdwin_singleton && pointer->sprite)
-		weston_log("qdwin: cursor_motion x=%.0f y=%.0f sprite=1\n",
-			   pointer->pos.c.x, pointer->pos.c.y);
 	if (qdwin_singleton && qdwin_singleton->locked) {
 		struct weston_view *lv = qdwin_singleton->lock_view;
 		if (pointer->focus != lv)
@@ -7309,6 +7303,16 @@ qdwin_overlay_grab_start(struct qdwin *qdwin, uint32_t role)
 	}
 	if (!kb)
 		return;
+	if (role == 2 && qdwin->lock_hotkey_pending_release) {
+		/* notify_key removes releases from kb->keys before running grabs.
+		 * If the binding grab consumed L's release before the locker grab
+		 * started, the next intentional L must reach the password field. */
+		qdwin->lock_hotkey_pending_release =
+			qdwin_lock_hotkey_pending_for_grab(
+				qdwin->lock_hotkey_pending_release,
+				kb->keys.data,
+				kb->keys.size / sizeof(uint32_t));
+	}
 	if (qdwin->overlay_grab_active) {
 		/* Already grabbed — just update the role (e.g. launcher
 		 * → locker takeover). The grab struct itself stays. */
