@@ -20,4 +20,4 @@ if [ ! -S "$DISPLAY_SOCKET" ]; then
     exit 1
 fi
 export QT_QPA_PLATFORM=wayland
-exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_admin_app.py "$@"
+exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "$@"

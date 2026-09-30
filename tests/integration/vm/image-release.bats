@@ -599,7 +599,7 @@ chain_root() {
         "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/tier3" \
         "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system" \
         "$T/root/usr/libexec/qdistro" "$T/root/usr/share/applications"
-    cp "$REPO/admin_app/qdistro_admin_app.py" "$T/root/usr/libexec/qdistro/qdistro_admin_app.py"
+    cp "$REPO/admin_app/qdistro_admin_app.py" "$T/root/usr/local/bin/qdistro-admin-approval-app"
     cp "$REPO/deploy/start-admin-app-wayland.sh" "$T/root/usr/local/bin/qdistro-start-admin-app"
     cp "$REPO/admin_app/qdistro-admin-app.desktop" "$T/root/usr/share/applications/qdistro-admin-app.desktop"
     : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
@@ -649,7 +649,7 @@ chain_root() {
     [[ "$output" == *"OK   [qemu-ga] unit reads the override"* ]]
     [[ "$output" == *"OK   [qemu-ga] unit passes the filter"* ]]
     [[ "$output" == *"OK   [qemu-ga] vendor default blocks only guest-exec"* ]]
-    [[ "$output" == *"OK   [admin-app] UI module"* ]]
+    [[ "$output" == *"OK   [admin-app] UI script"* ]]
     [[ "$output" == *"OK   [admin-app] launcher uses native Wayland"* ]]
     [[ "$output" == *"OK   [admin-app] desktop entry launches installed UI"* ]]
     [[ "$output" == *"OK   [identity] fstab uses UUID"* ]]
@@ -705,14 +705,14 @@ chain_root() {
     [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 17 steps)"* ]]
 }
 
-@test "verify-contents: missing admin app module or wrong desktop command fails its required rows" {
+@test "verify-contents: missing admin app script or wrong desktop command fails its required rows" {
     chain_root dev
-    rm "$T/root/usr/libexec/qdistro/qdistro_admin_app.py"
+    rm "$T/root/usr/local/bin/qdistro-admin-approval-app"
     printf 'Exec=/home/admin/qdistro/admin_app/qdistro_admin_app.py\n' \
         > "$T/root/usr/share/applications/qdistro-admin-app.desktop"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"MISS [admin-app] UI module"* ]]
+    [[ "$output" == *"MISS [admin-app] UI script"* ]]
     [[ "$output" == *"MISS [admin-app] desktop entry launches installed UI"* ]]
 }
 

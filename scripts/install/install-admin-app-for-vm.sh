@@ -35,11 +35,12 @@ for source_file in "$APP" "$DESKTOP" "$LAUNCHER"; do
 done
 
 # Keep the app and its launcher outside /root/qdistro-src: that retained
-# source tree is not readable by the admin session on the image.
-install -d "${OWN[@]}" -m 0755 "$DESTDIR/usr/libexec/qdistro" \
-    "$DESTDIR/usr/local/bin" "$DESTDIR/usr/share/applications"
-install "${OWN[@]}" -m 0644 "$APP" \
-    "$DESTDIR/usr/libexec/qdistro/qdistro_admin_app.py"
+# source tree is not readable by the admin session on the image. The broker
+# already trusts this exact installed app path for uid-1000 Python peers.
+install -d "${OWN[@]}" -m 0755 "$DESTDIR/usr/local/bin" \
+    "$DESTDIR/usr/share/applications"
+install "${OWN[@]}" -m 0755 "$APP" \
+    "$DESTDIR/usr/local/bin/qdistro-admin-approval-app"
 install "${OWN[@]}" -m 0755 "$LAUNCHER" \
     "$DESTDIR/usr/local/bin/qdistro-start-admin-app"
 install "${OWN[@]}" -m 0644 "$DESKTOP" \

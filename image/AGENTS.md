@@ -69,7 +69,7 @@ image's profile and `verify.sh` repeats the diff on the booted image.
 | step | what lands | tester image (dev) | release profile |
 |---|---|---|---|
 | `sdk` | `qdistro_app` in the system python | yes | yes |
-| `admin-app` | graphical approval queue in `/usr/libexec/qdistro`, a native Wayland launcher, and a discoverable desktop entry | yes | yes |
+| `admin-app` | graphical approval queue at the broker-approved `/usr/local/bin/qdistro-admin-approval-app`, a native Wayland launcher, and a discoverable desktop entry | yes | yes |
 | `broker`, `session-manager`, `user-relay`, `polkit`, `pwd`, `qsu`, `browser-bridge`, `portal-backend`, `print`, `snapshots` | the permission arbiter, silo launcher, relay, credential vault, root-exec helper, browser bridge, portals, print proxy, backups | yes | yes |
 | `phone` | phone companion daemon (cut from v1, decision D4) | yes, dev-only guard | **no** (skipped, not a gap) |
 | `tier3` | `qdistro-tier3` group, locked silo users `user1`/`user2`, `/usr/local/bin/qdistro-tier3-spawn`, tmpfiles entry, polkit action | yes | yes |

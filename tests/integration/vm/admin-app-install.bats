@@ -12,19 +12,19 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"graphical admin approval UI installed"* ]]
 
-    local app="$ROOT/usr/libexec/qdistro/qdistro_admin_app.py"
+    local app="$ROOT/usr/local/bin/qdistro-admin-approval-app"
     local launcher="$ROOT/usr/local/bin/qdistro-start-admin-app"
     local desktop="$ROOT/usr/share/applications/qdistro-admin-app.desktop"
     cmp "$REPO/admin_app/qdistro_admin_app.py" "$app"
     cmp "$REPO/deploy/start-admin-app-wayland.sh" "$launcher"
     cmp "$REPO/admin_app/qdistro-admin-app.desktop" "$desktop"
-    [ "$(stat -c %a "$app")" = 644 ]
+    [ "$(stat -c %a "$app")" = 755 ]
     [ "$(stat -c %a "$launcher")" = 755 ]
     [ "$(stat -c %a "$desktop")" = 644 ]
     grep -qx 'Exec=/usr/local/bin/qdistro-start-admin-app' "$desktop"
     grep -qx 'TryExec=/usr/local/bin/qdistro-start-admin-app' "$desktop"
     grep -qx 'export QT_QPA_PLATFORM=wayland' "$launcher"
-    grep -qx 'exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_admin_app.py "$@"' "$launcher"
+    grep -qx 'exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "$@"' "$launcher"
     ! grep -Eq 'QT_QPA_PLATFORM=xcb|/home/admin/qdistro|/root/qdistro-src' "$launcher" "$desktop"
 }
 
@@ -33,7 +33,7 @@ setup() {
     run env DESTDIR="$ROOT" bash "$INSTALLER" "$BATS_TEST_TMPDIR/empty/admin_app"
     [ "$status" -eq 2 ]
     [[ "$output" == *"missing admin app source"* ]]
-    [ ! -e "$ROOT/usr/libexec/qdistro/qdistro_admin_app.py" ]
+    [ ! -e "$ROOT/usr/local/bin/qdistro-admin-approval-app" ]
 }
 
 @test "production launcher rejects root and a missing Wayland session" {
@@ -72,11 +72,11 @@ EOF
         WAYLAND_DISPLAY=wayland-test QT_QPA_PLATFORM=xcb TEST_SOCKET="$socket" \
         bash -c 'function [ { if [[ "$1" == ! && "$2" == -S && "$3" == "$TEST_SOCKET" ]]; then return 1; else builtin [ "$@"; fi; }; export -f "["; exec() { printf "MOCK_EXEC=%s|%s|%s|%s|%s\n" "$QT_QPA_PLATFORM" "$WAYLAND_DISPLAY" "$1" "$2" "$3"; }; export -f exec; bash "$1" approval-test' _ "$launcher"
     [ "$status" -eq 0 ]
-    [ "$output" = 'MOCK_EXEC=wayland|wayland-test|/usr/bin/python3|/usr/libexec/qdistro/qdistro_admin_app.py|approval-test' ]
+    [ "$output" = 'MOCK_EXEC=wayland|wayland-test|/usr/bin/python3|/usr/local/bin/qdistro-admin-approval-app|approval-test' ]
 
     run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/runtime" \
         WAYLAND_DISPLAY="$socket" QT_QPA_PLATFORM=xcb TEST_SOCKET="$socket" \
         bash -c 'function [ { if [[ "$1" == ! && "$2" == -S && "$3" == "$TEST_SOCKET" ]]; then return 1; else builtin [ "$@"; fi; }; export -f "["; exec() { printf "MOCK_EXEC=%s|%s|%s|%s|%s\n" "$QT_QPA_PLATFORM" "$WAYLAND_DISPLAY" "$1" "$2" "$3"; }; export -f exec; bash "$1" approval-test' _ "$launcher"
     [ "$status" -eq 0 ]
-    [ "$output" = "MOCK_EXEC=wayland|$socket|/usr/bin/python3|/usr/libexec/qdistro/qdistro_admin_app.py|approval-test" ]
+    [ "$output" = "MOCK_EXEC=wayland|$socket|/usr/bin/python3|/usr/local/bin/qdistro-admin-approval-app|approval-test" ]
 }
