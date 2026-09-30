@@ -1,0 +1,51 @@
+## <summary>Public qdshell presentation snapshot.</summary>
+## <desc>
+##   Read-only appearance JSON for first-party apps. The trusted admin
+##   publisher writes it; isolated app domains may only read/search/watch.
+## </desc>
+policy_module(qdistro_presentation, 0.1.0)
+
+require {
+	type unconfined_t;
+	role unconfined_r;
+}
+
+type qdistro_presentation_t;
+files_type(qdistro_presentation_t)
+
+# Traversal of /var/lib/qdistro
+allow unconfined_t qdistro_presentation_t:dir { getattr search open read add_name remove_name write watch };
+allow unconfined_t qdistro_presentation_t:file { getattr open read create write setattr unlink rename };
+
+optional_policy(`
+	gen_require(`
+		type staff_t;
+		role staff_r;
+	')
+	allow staff_t qdistro_presentation_t:dir { getattr search open read add_name remove_name write watch };
+	allow staff_t qdistro_presentation_t:file { getattr open read create write setattr unlink rename };
+')
+
+optional_policy(`
+	gen_require(`
+		type qdistro_tier1_t;
+	')
+	allow qdistro_tier1_t qdistro_presentation_t:dir { getattr search open read watch };
+	allow qdistro_tier1_t qdistro_presentation_t:file { getattr open read };
+')
+
+optional_policy(`
+	gen_require(`
+		type container_t;
+	')
+	allow container_t qdistro_presentation_t:dir { getattr search open read };
+	allow container_t qdistro_presentation_t:file { getattr open read };
+')
+
+optional_policy(`
+	gen_require(`
+		type qdistro_tier2_t;
+	')
+	allow qdistro_tier2_t qdistro_presentation_t:dir { getattr search open read };
+	allow qdistro_tier2_t qdistro_presentation_t:file { getattr open read };
+')

@@ -137,6 +137,7 @@ ShellRoot {
         ImageCacheService.init();
         AppThemeService.init();
         ColorSchemeService.init();
+        AppPresentationService.init();
         DarkModeService.init();
 
         // Defer non-critical services to unblock first frame

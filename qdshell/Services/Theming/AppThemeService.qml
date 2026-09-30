@@ -71,7 +71,8 @@ Singleton {
       return;
     }
     const mode = Settings.data.colorSchemes.darkMode ? "dark" : "light";
-    TemplateProcessor.processWallpaperColors(wp, mode);
+    const req = Color.beginRequest(mode);
+    TemplateProcessor.processWallpaperColors(wp, mode, req);
   }
 
   function generateFromPredefinedScheme(schemeData) {

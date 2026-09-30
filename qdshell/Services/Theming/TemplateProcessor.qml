@@ -14,6 +14,8 @@ Singleton {
 
   // Signal emitted when color generation completes successfully (for wallpaper-based theming)
   signal colorsGenerated
+  property int currentRequestId: 0
+  property string currentMode: ""
 
   readonly property string dynamicConfigPath: Settings.cacheDir + "theming.dynamic.toml"
   readonly property string templateProcessorScript: Quickshell.shellDir + "/Scripts/python/src/theming/template-processor.py"
@@ -85,11 +87,12 @@ Singleton {
   * Dual-path architecture (wallpaper generation)
   * Uses debouncing to prevent spawning multiple processes when spamming wallpaper changes
   */
-  function processWallpaperColors(wallpaperPath, mode) {
+  function processWallpaperColors(wallpaperPath, mode, requestId) {
     Logger.d("TemplateProcessor", `processWallpaperColors called: path=${wallpaperPath}, mode=${mode}`);
     pendingWallpaperRequest = {
       wallpaperPath: wallpaperPath,
-      mode: mode
+      mode: mode,
+      requestId: requestId || 0
     };
     pendingPredefinedRequest = null;
     debounceTimer.restart();
@@ -547,6 +550,8 @@ Singleton {
     if (pendingWallpaperRequest) {
       const req = pendingWallpaperRequest;
       pendingWallpaperRequest = null;
+      root.currentRequestId = req.requestId || 0;
+      root.currentMode = req.mode;
       executeWallpaperColors(req.wallpaperPath, req.mode);
     } else if (pendingPredefinedRequest) {
       const req = pendingPredefinedRequest;
@@ -588,8 +593,11 @@ Singleton {
         Logger.d("TemplateProcessor", "generateProcess onExited: has pending request, executing");
         executePendingRequest();
       } else if (exitCode === 0) {
-        // No pending request and successful completion - emit signal
+        // No pending request and successful completion - emit signal.
+        // Color.qml's colors.json FileView commits the whole adapter.
         root.colorsGenerated();
+      } else if (root.currentRequestId) {
+        Color.cancelRequest(root.currentRequestId);
       }
     }
 

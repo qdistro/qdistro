@@ -1295,6 +1295,13 @@ PODMAN_HARDENING=(
 # state_path is admin-owned on the host and the container runs
 # --userns=keep-id, so the uids already line up; `:U` on persistent state
 # would rewrite ownership of a real home and is forbidden.
+if [ -d /var/lib/qdistro/presentation ]; then
+    # Mount the directory (not current.json) so atomic replacement is visible.
+    # No :Z — this is a shared public tree, not a per-container label.
+    PODMAN_HARDENING+=(
+        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec
+    )
+fi
 if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
     PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
 elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then

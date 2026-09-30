@@ -4,6 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import "../Services/Theming/ColorPalette.js" as ColorPalette
 
 /*
 Qdshell is not strictly a Material Design project, it supports both some predefined
@@ -25,6 +26,16 @@ Singleton {
 
   // Flag indicating theme colors are currently transitioning (for widgets to disable their own animations)
   property bool isTransitioning: false
+
+  // Committed (unanimated) target palette for first-party app export.
+  property bool committingTarget: false
+  property int nextRequestId: 0
+  property int pendingRequestId: 0
+  property int acceptedRequestId: 0
+  property string pendingMode: ""
+  property string acceptedMode: "dark"
+  property var acceptedPalette: ({})
+  signal acceptedTargetChanged(int requestId, string mode, var palette)
 
   // Timer to reset isTransitioning after animation completes
   Timer {
@@ -182,97 +193,97 @@ Singleton {
   Connections {
     target: customColorsData
     function onMPrimaryChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mPrimary = customColorsData.mPrimary;
     }
     function onMOnPrimaryChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnPrimary = customColorsData.mOnPrimary;
     }
     function onMSecondaryChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mSecondary = customColorsData.mSecondary;
     }
     function onMOnSecondaryChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnSecondary = customColorsData.mOnSecondary;
     }
     function onMTertiaryChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mTertiary = customColorsData.mTertiary;
     }
     function onMOnTertiaryChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnTertiary = customColorsData.mOnTertiary;
     }
     function onMErrorChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mError = customColorsData.mError;
     }
     function onMOnErrorChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnError = customColorsData.mOnError;
     }
     function onMSurfaceChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mSurface = customColorsData.mSurface;
     }
     function onMOnSurfaceChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnSurface = customColorsData.mOnSurface;
     }
     function onMSurfaceVariantChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mSurfaceVariant = customColorsData.mSurfaceVariant;
     }
     function onMOnSurfaceVariantChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnSurfaceVariant = customColorsData.mOnSurfaceVariant;
     }
     function onMOutlineChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOutline = customColorsData.mOutline;
     }
     function onMShadowChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mShadow = customColorsData.mShadow;
     }
     function onMHoverChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mHover = customColorsData.mHover;
     }
     function onMOnHoverChanged() {
-      if (!root.skipTransition) {
+      if (!root.skipTransition && !root.committingTarget) {
         startTransition();
       }
       root.mOnHover = customColorsData.mOnHover;
@@ -347,6 +358,96 @@ Singleton {
     }
   ]
 
+  function beginRequest(mode) {
+    root.nextRequestId += 1;
+    root.pendingRequestId = root.nextRequestId;
+    root.pendingMode = (mode === "light") ? "light" : "dark";
+    return root.pendingRequestId;
+  }
+
+  function cancelRequest(requestId) {
+    if (requestId === root.pendingRequestId)
+      root.pendingRequestId = root.acceptedRequestId;
+  }
+
+  function paletteFromAdapter() {
+    return ColorPalette.completePalette({
+                                          "mPrimary": customColorsData.mPrimary,
+                                          "mOnPrimary": customColorsData.mOnPrimary,
+                                          "mSecondary": customColorsData.mSecondary,
+                                          "mOnSecondary": customColorsData.mOnSecondary,
+                                          "mTertiary": customColorsData.mTertiary,
+                                          "mOnTertiary": customColorsData.mOnTertiary,
+                                          "mError": customColorsData.mError,
+                                          "mOnError": customColorsData.mOnError,
+                                          "mSurface": customColorsData.mSurface,
+                                          "mOnSurface": customColorsData.mOnSurface,
+                                          "mSurfaceVariant": customColorsData.mSurfaceVariant,
+                                          "mOnSurfaceVariant": customColorsData.mOnSurfaceVariant,
+                                          "mOutline": customColorsData.mOutline,
+                                          "mShadow": customColorsData.mShadow,
+                                          "mHover": customColorsData.mHover,
+                                          "mOnHover": customColorsData.mOnHover
+                                        });
+  }
+
+  function commitTargetPalette(requestId, mode, palette) {
+    if (requestId !== root.pendingRequestId && requestId < root.pendingRequestId)
+      return false;
+    const pal = ColorPalette.completePalette(palette);
+    if (!pal) {
+      Logger.w("Color", "refusing incomplete target palette");
+      return false;
+    }
+    root.committingTarget = true;
+    customColorsData.mPrimary = pal.mPrimary;
+    customColorsData.mOnPrimary = pal.mOnPrimary;
+    customColorsData.mSecondary = pal.mSecondary;
+    customColorsData.mOnSecondary = pal.mOnSecondary;
+    customColorsData.mTertiary = pal.mTertiary;
+    customColorsData.mOnTertiary = pal.mOnTertiary;
+    customColorsData.mError = pal.mError;
+    customColorsData.mOnError = pal.mOnError;
+    customColorsData.mSurface = pal.mSurface;
+    customColorsData.mOnSurface = pal.mOnSurface;
+    customColorsData.mSurfaceVariant = pal.mSurfaceVariant;
+    customColorsData.mOnSurfaceVariant = pal.mOnSurfaceVariant;
+    customColorsData.mOutline = pal.mOutline;
+    customColorsData.mShadow = pal.mShadow;
+    customColorsData.mHover = pal.mHover;
+    customColorsData.mOnHover = pal.mOnHover;
+    root.committingTarget = false;
+    if (!root.skipTransition)
+      startTransition();
+    root.acceptedRequestId = requestId;
+    root.pendingRequestId = requestId;
+    root.acceptedMode = (mode === "light") ? "light" : "dark";
+    root.acceptedPalette = pal;
+    root.acceptedTargetChanged(requestId, root.acceptedMode, pal);
+    return true;
+  }
+
+  function _commitFromAdapterIfNeeded() {
+    const pal = paletteFromAdapter();
+    if (!pal)
+      return;
+    if (root.pendingRequestId !== root.acceptedRequestId) {
+      commitTargetPalette(root.pendingRequestId, root.pendingMode, pal);
+      return;
+    }
+    if (root.acceptedRequestId === 0) {
+      const mode = (Settings.data.colorSchemes && Settings.data.colorSchemes.darkMode) ? "dark" : "light";
+      commitTargetPalette(beginRequest(mode), mode, pal);
+      return;
+    }
+    if (root.skipTransition)
+      return;
+    if (ColorPalette.palettesEqual(pal, root.acceptedPalette))
+      return;
+    const req = beginRequest(root.acceptedMode);
+    commitTargetPalette(req, root.acceptedMode, pal);
+  }
+
   // --------------------------------
   // Default colors: Qdshell (default) dark — must match Assets/ColorScheme/Qdshell-default
   QtObject {
@@ -400,6 +501,9 @@ Singleton {
           root.skipTransition = false;
         });
       }
+      Qt.callLater(function () {
+        root._commitFromAdapterIfNeeded();
+      });
     }
 
     // Trigger initial load when path changes from empty to actual path

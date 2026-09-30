@@ -6,6 +6,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Services.UI
+import "ColorPalette.js" as ColorPalette
 
 Singleton {
   id: root
@@ -247,29 +248,34 @@ Singleton {
   }
 
   function writeColorsToDisk(obj) {
-    function pick(o, a, b, fallback) {
-      return (o && (o[a] || o[b])) || fallback;
+    const pal = ColorPalette.completePaletteFromScheme(obj);
+    if (!pal) {
+      Logger.e("ColorScheme", "incomplete palette, not committing");
+      return;
     }
-    out.mPrimary = pick(obj, "mPrimary", "primary", out.mPrimary);
-    out.mOnPrimary = pick(obj, "mOnPrimary", "onPrimary", out.mOnPrimary);
-    out.mSecondary = pick(obj, "mSecondary", "secondary", out.mSecondary);
-    out.mOnSecondary = pick(obj, "mOnSecondary", "onSecondary", out.mOnSecondary);
-    out.mTertiary = pick(obj, "mTertiary", "tertiary", out.mTertiary);
-    out.mOnTertiary = pick(obj, "mOnTertiary", "onTertiary", out.mOnTertiary);
-    out.mError = pick(obj, "mError", "error", out.mError);
-    out.mOnError = pick(obj, "mOnError", "onError", out.mOnError);
-    out.mSurface = pick(obj, "mSurface", "surface", out.mSurface);
-    out.mOnSurface = pick(obj, "mOnSurface", "onSurface", out.mOnSurface);
-    out.mSurfaceVariant = pick(obj, "mSurfaceVariant", "surfaceVariant", out.mSurfaceVariant);
-    out.mOnSurfaceVariant = pick(obj, "mOnSurfaceVariant", "onSurfaceVariant", out.mOnSurfaceVariant);
-    out.mOutline = pick(obj, "mOutline", "outline", out.mOutline);
-    out.mShadow = pick(obj, "mShadow", "shadow", out.mShadow);
-    out.mHover = pick(obj, "mHover", "hover", out.mHover);
-    out.mOnHover = pick(obj, "mOnHover", "onHover", out.mOnHover);
+    const mode = Settings.data.colorSchemes.darkMode ? "dark" : "light";
+    const req = Color.beginRequest(mode);
+    out.mPrimary = pal.mPrimary;
+    out.mOnPrimary = pal.mOnPrimary;
+    out.mSecondary = pal.mSecondary;
+    out.mOnSecondary = pal.mOnSecondary;
+    out.mTertiary = pal.mTertiary;
+    out.mOnTertiary = pal.mOnTertiary;
+    out.mError = pal.mError;
+    out.mOnError = pal.mOnError;
+    out.mSurface = pal.mSurface;
+    out.mOnSurface = pal.mOnSurface;
+    out.mSurfaceVariant = pal.mSurfaceVariant;
+    out.mOnSurfaceVariant = pal.mOnSurfaceVariant;
+    out.mOutline = pal.mOutline;
+    out.mShadow = pal.mShadow;
+    out.mHover = pal.mHover;
+    out.mOnHover = pal.mOnHover;
 
     // Force a rewrite by updating the path
     colorsWriter.path = "";
     colorsWriter.path = colorsJsonFilePath;
     colorsWriter.writeAdapter();
+    Color.commitTargetPalette(req, mode, pal);
   }
 }

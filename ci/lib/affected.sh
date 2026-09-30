@@ -174,6 +174,10 @@ affected_gates_for_path() {
         # and isolation policy live in later slices and widen this mapping.
         sdk/presentation/*)
             printf 'host\n' ;;
+        scripts/install/install-presentation-for-vm.sh)
+            printf 'host\n' ;;
+        tier2/*|tier3/*)
+            printf 'host\nbats\n' ;;
         # Maintained project docs run the deterministic local-link/anchor lint.
         doc/*|README*|MIGRATION.md|AGENTS.md)
             printf 'lint\n' ;;
