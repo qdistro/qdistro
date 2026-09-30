@@ -134,6 +134,7 @@ QD22_LOG=/tmp/qd22-popup.$QD22_RUN.log
 # The LAUNCHER's own stdout/stderr (runuser/env/setsid/pid publication), kept
 # apart from $QD22_LOG because the probe truncates that one when it starts.
 QD22_LAUNCH_LOG=/tmp/qd22-popup.$QD22_RUN.launch.log
+QD22_LAUNCHER=/tmp/qd22-popup.$QD22_RUN.launch.sh
 QD22_PID=/tmp/qd22-popup.$QD22_RUN.pid
 QD22_CANCEL=/tmp/qd22-popup.$QD22_RUN.cancel
 QD22_INTENT=/tmp/qd22-popup.$QD22_RUN.intent
@@ -523,8 +524,26 @@ intent nothing was ever started.
 ```bash
 CURSOR=$(qdwin_apps_journal_cursor)
 
-"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_LAUNCH_LOG $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null \
+"$QDWIN_VM_EXEC" "$VMNAME" "rm -f $QD22_LOG $QD22_LAUNCH_LOG $QD22_LAUNCHER $QD22_PID $QD22_CANCEL $QD22_INTENT" >/dev/null \
     || { echo "ERROR: could not clear per-run state in the VM"; exit 1; }
+# The launcher is a guest script staged from a QUOTED heredoc, so `$$` and `$?`
+# reach the guest shell exactly as written and there is no escape layer left
+# to re-type: full-20260930T051422Z-65193 transcribed the old inline
+# `sh -c '... echo rc=\$? ...'` with one backslash too many and the log said a
+# literal `rc=$?` (ERROR, though the probe had passed). Per-run paths are
+# arguments, never interpolated into the script text.
+QD22_LAUNCHER_B64=$(base64 -w0 <<'SH'
+#!/bin/sh
+# usage: launch.sh <cancel-flag> <pid-file> <probe-log> <output>
+[ -e "$1" ] && exit 91
+echo $$ > "$2.tmp" && mv "$2.tmp" "$2" || exit 90
+[ -e "$1" ] && { rm -f "$2"; exit 91; }
+qdwin-nested-probe --destroy-with-popup --click-timeout 120 --output "$4" >"$3" 2>&1
+echo "rc=$?" >>"$3"
+SH
+)
+"$QDWIN_VM_EXEC" "$VMNAME" "echo $QD22_LAUNCHER_B64 | base64 -d > $QD22_LAUNCHER && chmod 0755 $QD22_LAUNCHER" >/dev/null \
+    || { echo "ERROR: could not stage the popup launcher in the VM"; exit 1; }
 # SYNCHRONOUS: after this returns, an absent pid means "pending", not "never".
 "$QDWIN_VM_EXEC" "$VMNAME" "touch $QD22_INTENT" >/dev/null \
     || { echo "ERROR: could not record launch intent in the VM"; exit 1; }
@@ -532,7 +551,7 @@ CURSOR=$(qdwin_apps_journal_cursor)
 # DETACH THE LAUNCHER'S OWN STDIO, not just the probe's. vm-exec runs through
 # qga guest-exec with capture-output, and qga reports a command finished only
 # once EVERY holder of its stdout/stderr pipes has closed them. Without the
-# `</dev/null >$QD22_LAUNCH_LOG 2>&1` below, the backgrounded `sh -c` keeps those pipes
+# `</dev/null >$QD22_LAUNCH_LOG 2>&1` below, the backgrounded launcher keeps those pipes
 # and this vm-exec does not return until the PROBE exits -- i.e. until its
 # click timeout expires and the proxy is destroyed. Every "black S3 preview"
 # ERROR from 2026-09-17 to 09-24 was that: the driver read CLICK_TARGET and
@@ -548,13 +567,8 @@ S3_LAUNCH_T0=$SECONDS
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
      WAYLAND_DISPLAY=$ACTIVE_SOCKET \
-     setsid sh -c '[ -e $QD22_CANCEL ] && exit 91; \
-                   echo \$\$ > $QD22_PID.tmp && mv $QD22_PID.tmp $QD22_PID || exit 90; \
-                   [ -e $QD22_CANCEL ] && { rm -f $QD22_PID; exit 91; }; \
-                   qdwin-nested-probe --destroy-with-popup --click-timeout 120 \
-                     --output $QD22_OUTPUT \
-                     >$QD22_LOG 2>&1; \
-                   echo rc=\$? >>$QD22_LOG' </dev/null >$QD22_LAUNCH_LOG 2>&1 &" \
+     setsid sh $QD22_LAUNCHER $QD22_CANCEL $QD22_PID $QD22_LOG $QD22_OUTPUT \
+       </dev/null >$QD22_LAUNCH_LOG 2>&1 &" \
   >/dev/null
 echo "S3 launch returned after $((SECONDS - S3_LAUNCH_T0))s (expected ~0s; a launch that takes as long as the click timeout means the launcher pinned vm-exec again)"
 
@@ -627,7 +641,9 @@ done
 ```
 
 **Assert (3.1):** the log ends with `rc=0` and carries `proxy destroyed under a
-LIVE chrome popup; dismissed fired; compositor alive`.
+LIVE chrome popup; dismissed fired; compositor alive`. The launcher writes the
+probe's numeric status; a literal `rc=$?` means the block was not run as
+written (re-run it verbatim) and is an ERROR, never a product verdict.
 **Assert (3.2):** `qdwin_compositor_pid` still equals `$COMP_PID_BEFORE`.
 
 **Assert (3.3) — calibration, check this FIRST if S3 goes wrong:** in the
@@ -814,5 +830,6 @@ without establishing that the probe was gone — recovery, not a pass.
 
 Leftovers this scenario owns: the probe's proxies (destroyed by the probe
 itself), the probe group and S4's terminal (both reaped by `qd22_cleanup`), and
-`$QD22_LOG` and `$QD22_LAUNCH_LOG` in the VM's /tmp — per-run and deliberately
-kept, since they hold the popup step's verdict and its launcher's diagnostics.
+`$QD22_LOG`, `$QD22_LAUNCH_LOG` and `$QD22_LAUNCHER` in the VM's /tmp — per-run and
+deliberately kept, since they hold the popup step's verdict and its launcher's
+diagnostics.
