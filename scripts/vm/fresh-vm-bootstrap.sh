@@ -146,6 +146,10 @@ if ! command -v bats >/dev/null 2>&1 && [ "${QCI_OFFLINE:-0}" = 1 ]; then
     log "ERROR: tester-as-base needs CI extras (bats) and QCI_OFFLINE=1 forbids zypper; import a ci-profile kiwi base or run with egress"
     exit 3
 fi
+if ! command -v jq >/dev/null 2>&1 && [ "${QCI_OFFLINE:-0}" = 1 ]; then
+    log "ERROR: GUI scenario drivers need jq and QCI_OFFLINE=1 forbids zypper; use a base with jq baked in"
+    exit 3
+fi
 
 # qga-up is not DHCP/DNS. Later zypper (qnotebook, extras, weston deps)
 # needs guest egress even when bats is already present.

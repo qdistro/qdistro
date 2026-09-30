@@ -73,6 +73,9 @@ QDISTRO_PKGS=(
   # verifies the qdshell clock bar with tesseract and skips when the binary
   # is missing, which makes absence from the baked GUI VM a dependency gap.
   tesseract-ocr
+  # GUI scenario drivers query guest JSON with jq. Bake it for offline runs;
+  # fresh-vm-bootstrap.sh also ensures it for older cloud-derived bases.
+  jq
   # Test-VM-only synthetic input. Requires a kernel with uinput; production
   # images must not depend on this package.
   ydotool
