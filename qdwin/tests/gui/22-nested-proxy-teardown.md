@@ -84,8 +84,16 @@ not in this markdown. Run it; do not re-type it into a driver of your own.**
 It is a HOST script: Setup, S1-S4 and Teardown run in ONE host bash process,
 each guest action is its own short `vm-exec`, and the cleanup trap lives on the
 host, so no guest shell exiting between steps can tear the scenario down.
-There is no guest driver to write or claim for this scenario -- the "one guest
-shell" rule exists for hand-written drivers and this one is not hand-written.
+Do not write or claim a guest driver for this scenario, and do not wrap
+run.sh in one. The "one claimed guest shell" rule protects hand-written
+drivers from their own EXIT traps and from a second driver; here the trap is
+on the host, and ownership is run.sh's own: an flock per VM on this host (a
+second copy refuses with ERROR), and a guest record of the current run id so
+the next run.sh reaps a popup probe orphaned by one that was SIGKILLed. A
+`qci_claim_driver` claim could not cover this scenario anyway: the popup probe
+is deliberately detached from every guest shell (`setsid`, own stdio) so the
+launching `vm-exec` returns while it waits, and a claim's cgroup would not
+contain it.
 
 Why: every translation of this scenario's old host code blocks into a guest
 driver dropped the one host-only precondition, `qdwin_prime_pointer` (a QMP
@@ -108,7 +116,9 @@ bash <directory of this scenario>/22-nested-proxy-teardown.d/run.sh "$VMNAME" \
 cat "$QCI_GUI_ARTIFACT_DIR/summary.txt"
 ```
 
-It writes to `$QCI_GUI_ARTIFACT_DIR`: `asserts.tsv` (one row per assertion
+It refuses (ERROR, touching nothing) an artifact directory that already holds
+its frames or summary -- evidence is never overwritten. It writes to
+`$QCI_GUI_ARTIFACT_DIR`: `asserts.tsv` (one row per assertion
 below, also printed as `ASSERT <id> <PASS|FAIL|ERROR|SKIP|VISUAL> <detail>`
 lines in `run.log`), `s3-preview.png`, `s4-typed.png` and `summary.txt`, which
 ends with `RESULT <PASS|FAIL|ERROR>`. Exit 0 = every machine assertion passed,
@@ -259,7 +269,9 @@ default `x=240 y=100`), and `CLICK_TARGET` lies inside that band (verified
 live 2026-09-23 and again 2026-09-30 on the preserved disk of
 gui-20260930T114916Z-4162368: band rgb(0,170,170) at (640,84), body
 rgb(51,56,71) at (640,400)). run.sh takes `s3-preview.png` only between two
-checks that the probe is still WAITING (no `rc=` in its log) and grades those
+checks that the probe is still WAITING (one guest read: its log exists, has
+no `rc=`, and its process group is alive -- a failed read is never "waiting")
+and grades those
 two pixels before it clicks (assert 3.4). Every all-black S3 preview recorded
 from 2026-09-17 to 09-30 was taken AFTER the probe had exited -- by `rc=77` "no
 pointer on the seat" because nothing primed the pointer, or by its click

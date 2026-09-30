@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2030,SC2031  # qd22_reap_previous rebinds the QD22_* paths in a subshell on purpose
 # 22-nested-proxy-teardown.d/run.sh <vmname> — HOST runner of
 # qdwin/tests/gui/22-nested-proxy-teardown.md. Setup, S1-S4 and Teardown, in
 # ONE host bash process; every guest action is its own short vm-exec call and
@@ -230,6 +231,31 @@ qd22_cleanup() {
     return 0
 }
 
+# OWNERSHIP. The GUI lane's guest-driver claim (qci_claim_driver) cannot
+# cover this scenario: the popup probe is deliberately DETACHED from every
+# guest shell (setsid, own stdio) so vm-exec returns while it waits, and a
+# claim's cgroup would not contain it. Ownership is therefore held here:
+#  - one runner per VM on this host: an flock on a per-VM lock file, taken
+#    before anything touches the guest (a second copy refuses, ERROR);
+#  - a guest record of the CURRENT run id, written before any launch, so a
+#    later runner can reap a probe orphaned by a runner that died without its
+#    trap (SIGKILL): qd22_reap_previous, before the shell role is taken.
+QD22_CURRENT=/tmp/qd22-popup.current
+qd22_reap_previous() {
+    local prev
+    prev=$("$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_CURRENT 2>/dev/null || true") \
+        || { echo "could not read $QD22_CURRENT in the guest"; return 1; }
+    case $prev in
+        '') return 0 ;;
+        *[!0-9-]*) echo "unexpected content in $QD22_CURRENT: '$prev'"; return 1 ;;
+    esac
+    echo "reaping any probe left by earlier run $prev"
+    ( QD22_PID=/tmp/qd22-popup.$prev.pid
+      QD22_CANCEL=/tmp/qd22-popup.$prev.cancel
+      QD22_INTENT=/tmp/qd22-popup.$prev.intent
+      qd22_reap_probe )
+}
+
 qd22_summary() {
     local result=PASS n_fail
     n_fail=$(grep -c $'\tFAIL\t' "$QD22_ASSERTS" 2>/dev/null) || n_fail=0
@@ -335,16 +361,33 @@ qd22_s3_target() {
     return 1
 }
 
-# Is the popup probe still WAITING (no rc= yet)? It destroys the proxy when it
-# exits, so a frame taken after rc= is legitimately black and grades nothing.
-# An older probe printed CLICK_TARGET BEFORE its pointer check, so this guard
-# is what stood between that and a black preview; keep it.
+# Is the popup probe still WAITING? It destroys the proxy when it exits, so a
+# frame taken after that is legitimately black and grades nothing. "Waiting"
+# is claimed only on POSITIVE evidence from one guest read: the log exists,
+# has no rc= line, and the published probe group is alive. Anything else --
+# including a failed or empty read (transport error, missing log) -- is
+# "not established", never "still waiting". An older probe printed
+# CLICK_TARGET BEFORE its pointer check, so this guard was all that stood
+# between that and a black preview; keep it.
 qd22_s3_waiting() {
-    if "$QDWIN_VM_EXEC" "$VMNAME" "grep -q '^rc=' $QD22_LOG"; then
-        echo "the popup probe already exited (proxy destroyed); any S3 frame now would be black. Probe log:"
-        "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG"
-        return 1
-    fi
+    local st
+    case "${PROBE_PID:-}" in
+        ''|*[!0-9]*) echo "no published probe group pid ('${PROBE_PID:-}'); cannot establish that the probe is waiting"; return 1 ;;
+    esac
+    st=$("$QDWIN_VM_EXEC" "$VMNAME" \
+      "if [ ! -f $QD22_LOG ]; then echo NOLOG; \
+       elif grep -q '^rc=' $QD22_LOG; then echo EXITED; \
+       elif kill -0 -$PROBE_PID 2>/dev/null; then echo WAITING; \
+       else echo GONE; fi")
+    case $st in
+        WAITING) return 0 ;;
+        EXITED) echo "the popup probe already exited (proxy destroyed); any S3 frame now would be black. Probe log:"
+                "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG" ;;
+        GONE)   echo "the probe group $PROBE_PID is gone but its log has no rc= (killed?); the proxy is not on screen" ;;
+        NOLOG)  echo "the probe log $QD22_LOG does not exist; cannot establish that the probe is waiting" ;;
+        *)      echo "could not read the probe's state from the guest (got '$st'); cannot establish that it is waiting" ;;
+    esac
+    return 1
 }
 
 # rgb <png> <x> <y> -> "R G B" (0..255). ImageMagick's %[pixel:] can print a
@@ -401,17 +444,28 @@ VMNAME=${1:-${VMNAME:-}}
 [ -n "$VMNAME" ] || { echo "usage: run.sh <vmname>" >&2; exit 3; }
 ART=${QCI_GUI_ARTIFACT_DIR:?run.sh needs QCI_GUI_ARTIFACT_DIR}
 mkdir -p "$ART" || exit 3
+# Never delete or overwrite an earlier capture: frames are evidence, and each
+# has a capture-ledger row. A reused artifact directory is refused untouched.
+for f in asserts.tsv summary.txt s3-preview.png s4-typed.png; do
+    if [ -e "$ART/$f" ]; then
+        echo "ERROR: $ART already holds $f from an earlier run.sh; refusing to overwrite evidence. Report the earlier run, or run in a fresh QCI_GUI_ARTIFACT_DIR."
+        exit 3
+    fi
+done
+QD22_LOCK="${TMPDIR:-/tmp}/qd22-runner.$(printf '%s' "$VMNAME" | tr -c 'A-Za-z0-9._-' '_').lock"
+exec {QD22_LOCK_FD}>>"$QD22_LOCK" || { echo "ERROR: cannot open $QD22_LOCK"; exit 3; }
+flock -n "$QD22_LOCK_FD" \
+    || { echo "ERROR: another run.sh is already driving $VMNAME ($QD22_LOCK is held); never run two copies"; exit 3; }
 QD22_ASSERTS=$ART/asserts.tsv
 : >"$QD22_ASSERTS" || exit 3
-rm -f "$ART/summary.txt" "$ART/s3-preview.png" "$ART/s4-typed.png"
 QD22_DONE=0
 # Until the shell role is taken there is nothing to clean up, only a summary.
 trap 'trap - EXIT; qd22_summary; exit $?' EXIT
 
 QDWIN_REPO=$(cd -- "$HERE/../../.." && pwd)
-# shellcheck source=../qdwin-helpers.sh
+# shellcheck source=SCRIPTDIR/../qdwin-helpers.sh
 source "$QDWIN_REPO/tests/gui/qdwin-helpers.sh" || { echo "ERROR: cannot source qdwin-helpers.sh"; exit 3; }
-# shellcheck source=../../apps/qdwin-apps-helpers.sh
+# shellcheck source=SCRIPTDIR/../../apps/qdwin-apps-helpers.sh
 source "$QDWIN_REPO/tests/apps/qdwin-apps-helpers.sh" || { echo "ERROR: cannot source qdwin-apps-helpers.sh"; exit 3; }
 qdwin_set_vm "$VMNAME"
 qdwin_apps_set_vm "$VMNAME"
@@ -447,7 +501,13 @@ COMP_PID_BEFORE=$(qdwin_compositor_pid)
 echo "compositor pid before = $COMP_PID_BEFORE"
 
 # Per-invocation guest state. `$$` alone repeats across reruns in one shell.
+# A probe orphaned by an earlier runner that died untrapped still holds the
+# shell role; reap it before anything else touches the session.
+msg=$(qd22_reap_previous) || { echo "$msg"; qd22_assert 0.0 ERROR "a probe from an earlier run could not be reaped: $msg"; exit 3; }
+[ -z "$msg" ] || echo "$msg"
 QD22_RUN="$$-$(date +%s)-$RANDOM"
+"$QDWIN_VM_EXEC" "$VMNAME" "echo $QD22_RUN > $QD22_CURRENT" >/dev/null \
+    || { qd22_assert 0.0 ERROR "could not record the run id in the guest ($QD22_CURRENT)"; exit 3; }
 QD22_LOG=/tmp/qd22-popup.$QD22_RUN.log
 # The LAUNCHER's own output, apart from $QD22_LOG (the probe truncates that).
 QD22_LAUNCH_LOG=/tmp/qd22-popup.$QD22_RUN.launch.log

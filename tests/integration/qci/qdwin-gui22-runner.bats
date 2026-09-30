@@ -135,6 +135,7 @@ teardown() {
     export FAKE_PROBE_S=0
     qd22_s3_stage
     qd22_s3_launch
+    qd22_s3_ack
     for _ in $(seq 1 40); do grep -q '^rc=' "$QD22_LOG" 2>/dev/null && break; sleep 0.1; done
     run qd22_s3_waiting
     [ "$status" -eq 1 ]
@@ -158,6 +159,87 @@ SHIM
     [ "$status" -eq 1 ]
     [[ "$output" == *"never published its pid"* ]]
     [[ "$output" == *"RUNUSER-FAILED: injected"* ]]
+}
+
+@test "waiting guard: a failed or empty guest read is NOT 'still waiting'" {
+    export FAKE_PROBE_S=20
+    qd22_s3_stage
+    qd22_s3_launch
+    qd22_s3_ack
+    qd22_s3_target
+    run qd22_s3_waiting
+    [ "$status" -eq 0 ]
+    # the transport fails: no output, nonzero status
+    cat > "$T/bin/broken-vm-exec" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+    chmod +x "$T/bin/broken-vm-exec"
+    QDWIN_VM_EXEC="$T/bin/broken-vm-exec" run qd22_s3_waiting
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not read"* ]]
+}
+
+@test "waiting guard: a missing log, or a dead group with no rc=, is not 'still waiting'" {
+    export FAKE_PROBE_S=20
+    qd22_s3_stage
+    qd22_s3_launch
+    qd22_s3_ack
+    qd22_s3_target
+    kill -KILL -- "-$PROBE_PID"
+    sleep 0.3
+    run qd22_s3_waiting
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is gone"* ]]
+    rm -f "$QD22_LOG"
+    run qd22_s3_waiting
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not exist"* ]]
+    PROBE_PID= run qd22_s3_waiting
+    [ "$status" -eq 1 ]
+}
+
+@test "an orphaned probe from an earlier run is reaped via the guest run record" {
+    export FAKE_PROBE_S=30
+    qd22_s3_stage
+    qd22_s3_launch
+    qd22_s3_ack
+    local orphan=$PROBE_PID
+    kill -0 -- "-$orphan"
+    # the record the earlier runner left, with its paths in the default layout
+    local prev=11-22-33
+    QD22_CURRENT="$T/current"
+    echo "$prev" > "$QD22_CURRENT"
+    mv "$QD22_PID" "/tmp/qd22-popup.$prev.pid"
+    touch "/tmp/qd22-popup.$prev.intent"
+    run qd22_reap_previous
+    rm -f /tmp/qd22-popup.$prev.*
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reaped"* || "$output" == *"killed"* ]]
+    ! kill -0 -- "-$orphan" 2>/dev/null
+}
+
+@test "run.sh refuses a second copy on the same VM (host lock) before touching anything" {
+    local art="$T/art" lock
+    mkdir -p "$art"
+    lock="${TMPDIR:-/tmp}/qd22-runner.fake-vm.lock"
+    exec {fd}>>"$lock"
+    flock -n "$fd"
+    QCI_GUI_ARTIFACT_DIR="$art" run bash "$RUNSH" fake-vm
+    exec {fd}>&-
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"another run.sh is already driving"* ]]
+    [ ! -e "$art/asserts.tsv" ]
+}
+
+@test "run.sh refuses a reused artifact dir and leaves the earlier frames untouched" {
+    local art="$T/art2"
+    mkdir -p "$art"
+    printf 'earlier' > "$art/s3-preview.png"
+    QCI_GUI_ARTIFACT_DIR="$art" run bash "$RUNSH" fake-vm
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"refusing to overwrite evidence"* ]]
+    [ "$(cat "$art/s3-preview.png")" = earlier ]
 }
 
 # ------------------------------------------------------------- pixel gate
