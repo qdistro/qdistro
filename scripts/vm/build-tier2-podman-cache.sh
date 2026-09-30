@@ -8,6 +8,13 @@ repo=$(cd "$here/../.." && pwd)
 . "$here/lib/test-substrate.sh"
 qdistro_load_test_substrate
 
+# qci's GUI gate points the session bus at /dev/null to keep agents off the
+# host desktop. Rootless Podman's systemd cgroup manager needs the real user
+# bus, or runc falls back to the system bus and polkit refuses the scope.
+if [ "${QCI_HOST_GUI_ISOLATED:-0}" = 1 ] && [ -S "${XDG_RUNTIME_DIR:-}/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+
 command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2; exit 2; }
 [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || {
     echo 'ERROR: Podman must run rootless' >&2; exit 2;
