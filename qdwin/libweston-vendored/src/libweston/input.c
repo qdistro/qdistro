@@ -4426,7 +4426,7 @@ weston_seat_init(struct weston_seat *seat, struct weston_compositor *ec,
 WL_EXPORT void
 weston_seat_release(struct weston_seat *seat)
 {
-	struct wl_resource *resource;
+	struct wl_resource *resource, *tmp_resource;
 	struct weston_tablet *tablet, *tmp;
 	struct weston_tablet_tool *tool, *tmp_tool;
 
@@ -4440,6 +4440,18 @@ weston_seat_release(struct weston_seat *seat)
 
 	wl_list_remove(&seat->base_resource_list);
 	wl_list_remove(&seat->drag_resource_list);
+
+	/* qdistro patch: detach and inert the zwp_tablet_seat_v2 resources
+	 * too. Their links otherwise stay threaded through this seat's list
+	 * head, and unbind_resource writes through it when the client later
+	 * destroys them — after the owner may have freed the seat (qdwin
+	 * embeds per-stream seats in its view-stream struct). */
+	wl_resource_for_each_safe(resource, tmp_resource,
+				  &seat->tablet_seat_resource_list) {
+		wl_resource_set_user_data(resource, NULL);
+		wl_list_remove(wl_resource_get_link(resource));
+		wl_list_init(wl_resource_get_link(resource));
+	}
 
 	wl_list_remove(&seat->link);
 
@@ -4616,6 +4628,15 @@ tablet_manager_get_tablet_seat(struct wl_client *client, struct wl_resource *res
 				wl_resource_get_version(resource), id);
 	if (cr == NULL) {
 		wl_client_post_no_memory(client);
+		return;
+	}
+
+	/* qdistro patch: an inert wl_seat (released seat) gets an inert
+	 * tablet seat, as seat_get_pointer does for wl_pointer. */
+	if (!seat) {
+		wl_list_init(wl_resource_get_link(cr));
+		wl_resource_set_implementation(cr, &tablet_seat_interface, NULL,
+					       unbind_resource);
 		return;
 	}
 

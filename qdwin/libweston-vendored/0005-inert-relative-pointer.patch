@@ -1,18 +1,23 @@
 From: qdistro <qdistro@local>
 Date: 2026-09-30
-Subject: [PATCH] libweston/input: inert relative pointer for an inert wl_pointer
+Subject: [PATCH] libweston/input: inert objects for a released seat's resources
 
 Once a seat (or its pointer) is released, libweston clears the user data
-of every wl_seat / wl_pointer resource a client still holds. A client that
-then asks zwp_relative_pointer_manager_v1.get_relative_pointer for such a
-wl_pointer made the compositor pass NULL to
-weston_pointer_ensure_pointer_client and SIGSEGV. qdwin releases a
-per-stream seat whenever a view stream's server state goes away, so any
-client racing that release could crash the session (qdwin gui/22 S2).
+of every wl_seat / wl_pointer resource a client still holds. qdwin
+releases a per-stream seat whenever a view stream's server state goes
+away, then frees the struct embedding it, so any client racing that
+release holds such inert resources (qdwin gui/22 S2).
 
-Hand back an inert zwp_relative_pointer_v1 instead, as seat_get_pointer
-already does for an inert seat. unbind_pointer_client_resource copes with
-NULL user data. Regression gate: run-inert-relptr-test.sh.
+- get_relative_pointer passed the NULL weston_pointer of an inert
+  wl_pointer to weston_pointer_ensure_pointer_client and SIGSEGVed. Hand
+  back an inert zwp_relative_pointer_v1, as seat_get_pointer already does
+  for an inert seat.
+- get_tablet_seat inserted into the NULL seat's list: same treatment.
+- weston_seat_release left zwp_tablet_seat_v2 resources linked through the
+  seat's list head, which unbind_resource later wrote through after the
+  owner freed the seat. Detach and inert them like the base resources.
+
+Regression gate: run-inert-relptr-test.sh.
 
 Vendored against weston 16.0.0 for ${QDWIN_REPO}/.
 ---
@@ -38,3 +43,47 @@ Vendored against weston 16.0.0 for ${QDWIN_REPO}/.
  	pointer_client = weston_pointer_ensure_pointer_client(pointer, client);
  	if (!pointer_client) {
  		wl_client_post_no_memory(client);
+@@ -4413,7 +4426,7 @@ weston_seat_init(struct weston_seat *seat, struct weston_compositor *ec,
+ WL_EXPORT void
+ weston_seat_release(struct weston_seat *seat)
+ {
+-	struct wl_resource *resource;
++	struct wl_resource *resource, *tmp_resource;
+ 	struct weston_tablet *tablet, *tmp;
+ 	struct weston_tablet_tool *tool, *tmp_tool;
+ 
+@@ -4428,6 +4441,18 @@ weston_seat_release(struct weston_seat *seat)
+ 	wl_list_remove(&seat->base_resource_list);
+ 	wl_list_remove(&seat->drag_resource_list);
+ 
++	/* qdistro patch: detach and inert the zwp_tablet_seat_v2 resources
++	 * too. Their links otherwise stay threaded through this seat's list
++	 * head, and unbind_resource writes through it when the client later
++	 * destroys them — after the owner may have freed the seat (qdwin
++	 * embeds per-stream seats in its view-stream struct). */
++	wl_resource_for_each_safe(resource, tmp_resource,
++				  &seat->tablet_seat_resource_list) {
++		wl_resource_set_user_data(resource, NULL);
++		wl_list_remove(wl_resource_get_link(resource));
++		wl_list_init(wl_resource_get_link(resource));
++	}
++
+ 	wl_list_remove(&seat->link);
+ 
+ 	if (seat->saved_kbd_focus)
+@@ -4606,6 +4631,15 @@ tablet_manager_get_tablet_seat(struct wl_client *client, struct wl_resource *res
+ 		return;
+ 	}
+ 
++	/* qdistro patch: an inert wl_seat (released seat) gets an inert
++	 * tablet seat, as seat_get_pointer does for wl_pointer. */
++	if (!seat) {
++		wl_list_init(wl_resource_get_link(cr));
++		wl_resource_set_implementation(cr, &tablet_seat_interface, NULL,
++					       unbind_resource);
++		return;
++	}
++
+ 	/* store the resource in the weston_seat */
+ 	wl_list_insert(&seat->tablet_seat_resource_list, wl_resource_get_link(cr));
+ 	wl_resource_set_implementation(cr, &tablet_seat_interface, seat,

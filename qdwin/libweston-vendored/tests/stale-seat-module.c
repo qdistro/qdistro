@@ -5,9 +5,12 @@
  * when the view stream's server state is released) — a trigger only the
  * test client pulls, and one that needs no signal, which the weston frontend
  * reserves. Clients weston spawns itself (desktop-shell helper, ...) come in
- * over a socketpair and so report weston's own pid; they are ignored. A client that still holds that
- * seat's wl_seat or wl_pointer then owns an INERT resource — the state in
- * which qdwin gui/22 S2 crashed the compositor. */
+ * over a socketpair and so report weston's own pid; they are ignored.
+ *
+ * A client that still holds that seat's wl_seat or wl_pointer then owns an
+ * INERT resource — the state in which qdwin gui/22 S2 crashed the
+ * compositor. The tablet manager global is advertised too, so the client
+ * can reach the tablet-seat paths of a released seat. */
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -22,6 +25,7 @@ void weston_seat_init(struct weston_seat *seat,
 void weston_seat_release(struct weston_seat *seat);
 int  weston_seat_init_pointer(struct weston_seat *seat);
 void weston_seat_release_pointer(struct weston_seat *seat);
+void weston_tablet_manager_init(struct weston_compositor *compositor);
 
 struct stale_seat {
 	struct weston_seat seat;
@@ -36,6 +40,7 @@ on_client_created(struct wl_listener *listener, void *data)
 {
 	struct stale_seat *s =
 		wl_container_of(listener, s, client_created);
+	struct wl_list *tablet_seats = &s->seat.tablet_seat_resource_list;
 	pid_t pid;
 	int i;
 
@@ -52,9 +57,16 @@ on_client_created(struct wl_listener *listener, void *data)
 		return;
 	}
 	s->released = 1;
+	weston_log("stale-seat-test: tablet seats bound before release: %d\n",
+		   wl_list_length(tablet_seats));
 	weston_seat_release_pointer(&s->seat);
 	weston_seat_release(&s->seat);
-	weston_log("stale-seat-test: seat released\n");
+	/* qdwin frees the struct embedding a released seat, so no resource
+	 * may still be linked through this list head. */
+	weston_log("stale-seat-test: seat released; tablet seat list %s\n",
+		   tablet_seats->next == tablet_seats &&
+		   tablet_seats->prev == tablet_seats ?
+		   "detached" : "STILL LINKED");
 }
 
 WL_EXPORT int
@@ -68,6 +80,7 @@ wet_module_init(struct weston_compositor *compositor,
 	weston_seat_init(&s->seat, compositor, "stale-seat-test");
 	if (weston_seat_init_pointer(&s->seat) < 0)
 		return -1;
+	weston_tablet_manager_init(compositor);
 	s->client_created.notify = on_client_created;
 	wl_display_add_client_created_listener(compositor->wl_display,
 					       &s->client_created);

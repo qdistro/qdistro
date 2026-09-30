@@ -516,10 +516,10 @@ fi'
     run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    # Patch 0005 regression: a relative pointer requested for a released
-    # seat's (inert) wl_pointer must not SIGSEGV the compositor — the qdwin
-    # per-stream-seat crash of gui/22 S2. Runs headless against the production
-    # prefix the step above just built.
+    # Patch 0005 regression: requests on a released seat's inert wl_seat /
+    # wl_pointer must not SIGSEGV the compositor — the qdwin per-stream-seat
+    # crash of gui/22 S2. Headless; builds its own libweston from the current
+    # sources (the production prefix above is reused across checkouts).
     c="bash libweston-vendored/run-inert-relptr-test.sh"
     run_logged host qdwin-vendored-libweston-inert-relptr "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston survives get_relative_pointer on an inert wl_pointer"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
