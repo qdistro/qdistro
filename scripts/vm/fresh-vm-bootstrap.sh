@@ -186,6 +186,16 @@ else
     fi
 fi
 
+# GUI scenario drivers use jq inside the guest. The baked base can have bats
+# without jq, so this check must be independent of the CI-extras bats probe.
+if ! command -v jq >/dev/null 2>&1; then
+    log "installing jq for GUI scenario drivers"
+    zypper -n install --no-recommends jq >/tmp/qdistro-jq-install.log 2>&1 \
+        || { log "  ERROR: zypper install of jq failed"; tail -80 /tmp/qdistro-jq-install.log; exit 3; }
+    command -v jq >/dev/null 2>&1 \
+        || { log "  ERROR: jq is still unavailable after installation"; exit 3; }
+fi
+
 # ---- 0c. Keep spice-vdagent off test VMs -----------------------------------
 # Nobody installs it on purpose: the package SUPPLEMENTS xwayland on a host
 # with a virtio-serial console, so zypper pulls it in automatically (it was in
