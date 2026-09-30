@@ -141,7 +141,10 @@ MD_EXT = (".md",)
 #     agent prompt, not here; see the module docstring.
 # MAX_BYTES is likewise a heuristic about where source lives, not a fact about
 # where a caller can live.
-SKIP_DIRS = {".git", "__pycache__", "build", ".worktrees", "node_modules",
+# .claude/ holds Claude Code's agent worktrees: whole checkouts of other
+# branches, like .worktrees/.
+SKIP_DIRS = {".git", "__pycache__", "build", ".worktrees", ".claude",
+             "node_modules",
              ".venv", "artifacts", "triage-artifacts", "results",
              "runs", "qdistro-src"}
 # Source files are small, so anything larger is USUALLY a log or a blob.
