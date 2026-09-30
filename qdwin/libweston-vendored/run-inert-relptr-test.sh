@@ -60,9 +60,10 @@ else
     BUILD="$HERE/src/build-inert-relptr"
     PREFIX="$BUILD/prefix"
     # One build/install tree per checkout: serialize concurrent runs through
-    # the build AND the cases (which load from that prefix). The lock lives
-    # outside the tree, which a reconfigure removes.
-    LOCK="${XDG_RUNTIME_DIR:-/tmp}/qdwin-inert-relptr-$(printf '%s' "$BUILD" | sha256sum | cut -c1-16).lock"
+    # the build AND the cases (which load from that prefix). The lock sits
+    # beside the tree (a reconfigure removes the tree) at a path fixed by the
+    # checkout alone, so every caller's environment agrees on it.
+    LOCK="$BUILD.lock"
     exec 8>"$LOCK" || die "cannot open lock $LOCK"
     flock 8 || die "cannot take lock $LOCK"
     QDWIN_LIBWESTON_PROFILE=headless QDWIN_LIBWESTON_BUILD_DIR="$BUILD" \
