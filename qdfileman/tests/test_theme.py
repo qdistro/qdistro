@@ -102,3 +102,57 @@ def test_attach_presentation_follows_snapshot(qapp, tmp_path):
     ctrl.set_theme_mode("native")
     ctrl.stop()
     reset_controller_for_tests()
+
+
+def test_presentation_update_keeps_two_pane_paths(qapp, tmp_dir, tmp_path):
+    from dataclasses import replace
+
+    from qdistro_presentation.model import example_snapshot, with_generation
+    from qdistro_presentation.paths import ResolvedPath
+    from qdistro_presentation.publish import write_snapshot
+    from qdistro_presentation.qt import PresentationController
+
+    from qfileman.theme import apply_theme, reset_controller_for_tests
+    from qfileman.window import FileManagerWindow
+
+    other = tmp_path / "other"
+    other.mkdir()
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    reset_controller_for_tests()
+    ctrl = PresentationController(
+        qapp,
+        theme_mode="system",
+        snapshot_path=ResolvedPath(
+            path=str(tmp_path / "current.json"),
+            kind="override",
+            expected_uid=None,
+            watch=False,
+        ),
+        apply_legacy=lambda app, mode: apply_theme(app, mode),
+        apply_system_fallback=lambda app: apply_theme(app, "system"),
+        watch=False,
+    )
+    win = FileManagerWindow()
+    try:
+        win._update_path(str(tmp_dir))
+        new_pane = win._split_right()
+        new_pane._update_path(str(other))
+        before = [pane.current_path for pane in win._split_root.find_panes()]
+        write_snapshot(
+            str(tmp_path),
+            with_generation(replace(example_snapshot(), mode="light")),
+            require_unwritable_dirs=False,
+            skip_unchanged=False,
+        )
+        ctrl._reload()
+        win.apply_presentation_update()
+        after = [pane.current_path for pane in win._split_root.find_panes()]
+        assert after == before
+        assert str(tmp_dir) in after
+        assert str(other) in after
+        assert len(after) == 2
+    finally:
+        win.close()
+        win.deleteLater()
+        ctrl.stop()
+        reset_controller_for_tests()

@@ -152,3 +152,67 @@ def test_changed_signal_and_existing_widget(qapp, tmp_path):
     assert "using_shared_palette" in seen[0]
     label.setParent(None)
     ctrl.stop()
+
+
+def test_same_generation_reload_is_noop(qapp, tmp_path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    seen = []
+    ctrl.changed.connect(lambda *_args: seen.append(True))
+    ctrl._reload()
+    assert seen == []
+    ctrl.stop()
+
+
+def test_replacement_storm_last_valid_wins(qapp, tmp_path):
+    from dataclasses import replace
+
+    from qdistro_presentation.model import with_generation
+
+    first = example_snapshot()
+    write_snapshot(str(tmp_path), first, require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    (tmp_path / "current.json").write_text("{truncated", encoding="utf-8")
+    ctrl._reload()
+    assert ctrl.state.generation == first.generation
+    second = with_generation(replace(first, mode="light"))
+    write_snapshot(str(tmp_path), second, require_unwritable_dirs=False, skip_unchanged=False)
+    ctrl._reload()
+    assert ctrl.state.generation == second.generation
+    assert ctrl.state.snapshot.mode == "light"
+    ctrl.stop()
+
+
+def test_active_and_inactive_palette_groups_match(qapp, tmp_path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    pal = qapp.palette()
+    surface = example_snapshot().colors.mSurface
+    assert pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name() == surface
+    assert pal.color(QPalette.ColorGroup.Inactive, QPalette.ColorRole.Window).name() == surface
+    assert pal.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Window).name() == surface
+    ctrl.stop()
+
+
+def test_ui_scale_applied_once_to_app_font(qapp, tmp_path):
+    from qdistro_presentation.model import DEFAULT_DARK_COLORS, normalize_producer
+
+    snap = normalize_producer(
+        mode="dark",
+        colors=DEFAULT_DARK_COLORS,
+        settings={"ui": {"fontDefaultScale": 1.1}, "general": {"scaleRatio": 1.1}},
+    )
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    assert qapp.font().pointSizeF() == pytest.approx(11 * 1.1 * 1.1)
+    assert ctrl.state.ui_point_size == pytest.approx(11 * 1.1 * 1.1)
+    assert ctrl.state.content_ui_point_size == pytest.approx(11 * 1.1)
+    ctrl.stop()

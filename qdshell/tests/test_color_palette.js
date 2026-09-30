@@ -60,4 +60,31 @@ const P = require("../Services/Theming/ColorPalette.js");
   assert.strictEqual(P.untaggedFileMayCommit(2, 2, false, false), false, "stale load after settle still cannot mint a generation");
 })();
 
+(function testUntaggedRejectedForEveryPendingIdOnceAccepted() {
+  // ensures: after the first accepted generation, untagged loads cannot mint
+  // regardless of pending id or producer/suppression flags.
+  for (const pending of [0, 1, 2, 3]) {
+    for (const producer of [false, true]) {
+      for (const suppress of [false, true]) {
+        assert.strictEqual(
+          P.untaggedFileMayCommit(pending, 2, producer, suppress),
+          false,
+          `pending=${pending} producer=${producer} suppress=${suppress}`
+        );
+      }
+    }
+  }
+})();
+
+(function testPalettesEqual() {
+  const a = {};
+  P.COLOR_KEYS.forEach(k => { a[k] = "#010203"; });
+  a.mOnSurface = "#f3edf7";
+  const b = Object.assign({}, a);
+  assert.ok(P.palettesEqual(a, b));
+  b.mPrimary = "#ffffff";
+  assert.strictEqual(P.palettesEqual(a, b), false);
+  assert.strictEqual(P.palettesEqual(a, null), false);
+})();
+
 console.log("test_color_palette.js ok");

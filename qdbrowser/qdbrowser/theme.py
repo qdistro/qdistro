@@ -253,6 +253,22 @@ def current_controller():
     return _CONTROLLER
 
 
+def reset_controller_for_tests() -> None:
+    global _CONTROLLER
+    if _CONTROLLER is not None:
+        try:
+            _CONTROLLER.stop()
+        except Exception:  # noqa: BLE001
+            pass
+    _CONTROLLER = None
+    try:
+        from qdistro_presentation.qt import reset_controller_for_tests as _reset
+
+        _reset()
+    except ImportError:
+        pass
+
+
 LIGHT_QSS = f"""
 QMainWindow {{ background-color: {LT_BG}; }}
 QToolBar {{ background-color: {LT_BG}; border: none; padding: 2px; }}

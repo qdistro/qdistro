@@ -251,3 +251,37 @@ def test_oversize_rejected():
     text = json.dumps(snap)
     with pytest.raises(SnapshotError, match="64 KiB"):
         parse_snapshot_text(text)
+
+
+def test_shell_payload_shape_normalizes():
+    """AppPresentationService.buildPayload() is this object, minus Qt.application.font."""
+    snap = normalize_producer(
+        mode="dark",
+        colors=DEFAULT_DARK_COLORS,
+        settings={
+            "ui": {
+                "fontDefault": "Inter",
+                "fontFixed": "JetBrains Mono",
+                "fontDefaultScale": 1.0,
+                "fontFixedScale": 1.05,
+                "tooltipsEnabled": False,
+            },
+            "general": {
+                "scaleRatio": 1.0,
+                "radiusRatio": 1.0,
+                "iRadiusRatio": 1.0,
+                "animationDisabled": False,
+                "animationSpeed": 1.0,
+            },
+            "appearance": {"iconTheme": "breeze"},
+        },
+        default_ui_family="Sans Serif",
+    )
+    assert snap.mode == "dark"
+    assert snap.fonts.ui_family == "Inter"
+    assert snap.fonts.fixed_family == "JetBrains Mono"
+    assert snap.fonts.fixed_scale == pytest.approx(1.05)
+    assert snap.tooltips_enabled is False
+    assert snap.icon_theme == "breeze"
+    parsed = parse_snapshot_text(snap.to_json())
+    assert parsed == snap
