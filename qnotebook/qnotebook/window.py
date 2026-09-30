@@ -2576,10 +2576,11 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QApplication
 
         from .appearance import load_overrides, save_theme_mode
-        from .theme import apply_theme, current_controller
+        from .theme import apply_theme, current_controller, refresh_windows
 
         if persist:
             save_theme_mode(self._settings, mode, update_legacy=(mode != "system"))
+        app = QApplication.instance()
         ctrl = current_controller()
         if ctrl is not None:
             try:
@@ -2588,12 +2589,14 @@ class MainWindow(QMainWindow):
                 ctrl.set_theme_mode(mode)
                 ctrl.set_local(parse_local_overrides(load_overrides(self._settings)))
             except Exception:
-                apply_theme(QApplication.instance(), mode)
+                if app is not None:
+                    apply_theme(app, mode)
+        elif app is not None:
+            apply_theme(app, mode)
+        if app is not None:
+            refresh_windows(app)
         else:
-            app = QApplication.instance()
-            if app is not None:
-                apply_theme(app, mode)
-        self.apply_presentation_update()
+            self.apply_presentation_update()
 
     def apply_saved_appearance(self) -> None:
         from .appearance import load_theme_mode

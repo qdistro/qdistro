@@ -60,6 +60,15 @@ def _adapter(theme_mode: str = "system"):
     return SettingsAdapter(s)
 
 
+def _distinct_ui_family(native_family: str) -> str:
+    from PyQt6.QtGui import QFontDatabase
+
+    for family in QFontDatabase.families():
+        if family and family != native_family:
+            return family
+    pytest.skip("need two installed font families")
+
+
 def test_attach_presentation_follows_snapshot(qapp, tmp_path, monkeypatch):
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
@@ -95,18 +104,20 @@ def test_editor_keeps_pinned_body_font_when_ui_font_applies(
     qapp, tmp_path, tmp_notebook, qtbot, monkeypatch,
 ):
     native_family = qapp.font().family()
+    ui_family = _distinct_ui_family(native_family)
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
     adapter = _adapter("system")
     save_overrides(adapter._settings, {
         "version": 1,
-        "ui_font_family": "DejaVu Sans Mono",
+        "ui_font_family": ui_family,
         "ui_font_size_pt": 18.0,
     })
     attach_presentation(qapp, adapter)
     win = MainWindow()
     win.open_notebook(str(tmp_notebook))
     qtbot.addWidget(win)
+    assert qapp.font().family() != native_family
     assert qapp.font().pointSizeF() == 18.0
     assert win.editor.font().family() == native_family
     assert win.editor.font().pointSize() == BODY_POINT_SIZE
@@ -119,17 +130,19 @@ def test_repeated_attach_does_not_replace_native_pin(
     qapp, tmp_path, monkeypatch,
 ):
     native_family = qapp.font().family()
+    ui_family = _distinct_ui_family(native_family)
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
     adapter = _adapter("system")
     save_overrides(adapter._settings, {
         "version": 1,
-        "ui_font_family": "DejaVu Sans Mono",
+        "ui_font_family": ui_family,
         "ui_font_size_pt": 18.0,
     })
     first = attach_presentation(qapp, adapter)
     second = attach_presentation(qapp, adapter)
     assert first is second
+    assert qapp.font().family() != native_family
     assert native_body_font().family() == native_family
     assert qapp.font().pointSizeF() == 18.0
 
@@ -174,6 +187,26 @@ def test_two_windows_follow_same_generation_without_resetting(
     assert second.act_appearance_dark.isChecked()
     assert first.editor.markdown() == md
     assert first.editor.is_dirty() is dirty
+
+
+def test_two_windows_sync_mode_without_controller(qapp, tmp_notebook, qtbot):
+    from qnotebook.settings_dialog import SettingsDialog
+    from qnotebook.theme import current_controller as _ctrl
+
+    assert _ctrl() is None
+    first = MainWindow()
+    first.open_notebook(str(tmp_notebook))
+    qtbot.addWidget(first)
+    second = MainWindow()
+    second.open_notebook(str(tmp_notebook))
+    qtbot.addWidget(second)
+    dlg = SettingsDialog(second)
+    qtbot.addWidget(dlg)
+    first.act_appearance_dark.trigger()
+    qapp.processEvents()
+    assert first.act_appearance_dark.isChecked()
+    assert second.act_appearance_dark.isChecked()
+    assert dlg._combo_appearance.currentText() == "Dark"
 
 
 def test_theme_change_does_not_dirty_or_rewrite_editor(

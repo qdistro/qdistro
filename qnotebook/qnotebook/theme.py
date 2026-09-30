@@ -40,8 +40,8 @@ EDITOR_PALETTE_QSS = (
 def apply_theme(app: QApplication, mode: str = "system") -> str:
     """Apply dark, light, native, or system theme to ``app``.
 
-    ``system`` without a presentation controller is a no-op so the host
-    desktop theme is used. ``native`` restores a default QPalette.
+    ``system`` and ``native`` restore the palette captured on first
+    ``attach_presentation`` (or a default ``QPalette`` if none was captured).
     """
     if mode not in _VALID_MODES:
         log.warning("unknown theme mode %r; falling back to 'system'", mode)
