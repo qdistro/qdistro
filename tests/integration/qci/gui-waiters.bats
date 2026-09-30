@@ -129,6 +129,31 @@ setup() {
     [[ "$output" == *"app.send-to:3000:org.qdistro.Qnotebook.uid3000"* ]]
 }
 
+@test "await_x11_window_title: whole-title match, not a prefix" {
+    runuser() { shift 3; printf 'admin approvals (1 pending)\n'; }
+    export -f runuser
+    run await_x11_window_title admin 'admin approvals \(1 pending\)' 2 1
+    [ "$status" -eq 0 ]
+    # the emptied title must NOT be satisfied by the pending one
+    run await_x11_window_title admin 'admin approvals' 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"titles=[admin approvals (1 pending)]"* ]]
+}
+
+@test "await_x11_window_title: succeeds once the title reaches the state mid-wait" {
+    local n="$BATS_TEST_TMPDIR/title"; echo 0 > "$n"
+    runuser() {
+        local c; c=$(cat "$n"); c=$((c + 1)); echo "$c" > "$n"
+        if [ "$c" -ge 2 ]; then echo 'admin approvals'; else echo 'admin approvals (1 pending)'; fi
+    }
+    export -f runuser
+    run await_x11_window_title admin 'admin approvals' 5 1
+    [ "$status" -eq 0 ]
+    run await_x11_window_title "" 'x' 1 1
+    [ "$status" -eq 2 ]
+}
+
 @test "await_broker_pending_action: rejects an empty action" {
     run await_broker_pending_action "" 1 1
     [ "$status" -eq 2 ]
