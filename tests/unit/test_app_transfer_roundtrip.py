@@ -206,3 +206,40 @@ def test_relay_restart_makes_receipt_unknown_without_second_delivery(route, qapp
     system.owner = ":relay.system.2"
     assert sdk.get_transfer_status(receipt["transfer_id"])["state"] == "unknown"
     assert proxy.receive_count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("route", [2000, 3000], indirect=True)
+def test_multibyte_limit_is_measured_before_delivery(route, qapp):
+    window, _, _, _, proxy, uid, service = route
+    caps = sdk.get_transfer_capabilities(uid, service)
+    at_limit = "ž" * (caps["max_bytes"] // 2)
+    oversized = sdk.send_transfer(uid, service, caps["instance_id"], "text/plain", at_limit + "ž")
+    assert oversized["state"] == "rejected", oversized
+    assert proxy.receive_count == 0
+    receipt = sdk.send_transfer(uid, service, caps["instance_id"], "text/plain", at_limit)
+    assert receipt["state"] == "staged", receipt
+    qapp.processEvents()
+    assert sdk.get_transfer_status(receipt["transfer_id"])["state"] == "applied"
+    assert at_limit in window.editor.toPlainText()
+    assert proxy.receive_count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("route", [2000], indirect=True)
+def test_full_inbox_rejects_before_staging_without_losing_existing_work(route, qapp):
+    window, _, _, _, proxy, uid, service = route
+    caps = sdk.get_transfer_capabilities(uid, service)
+    handles = []
+    for index in range(notebook.MAX_PENDING_DROPS):
+        receipt = sdk.send_transfer(uid, service, caps["instance_id"], "text/plain", f"Payload {index}")
+        assert receipt["state"] == "staged", receipt
+        handles.append(receipt["transfer_id"])
+    assert sdk.get_transfer_capabilities(uid, service)["available"] is False
+    overflow = sdk.send_transfer(uid, service, caps["instance_id"], "text/plain", "Overflow")
+    assert overflow["state"] == "rejected", overflow
+    assert proxy.receive_count == notebook.MAX_PENDING_DROPS
+    qapp.processEvents()
+    assert all(sdk.get_transfer_status(handle)["state"] == "applied" for handle in handles)
+    assert "Overflow" not in window.editor.toPlainText()
+    assert not window._qdistro_inbox
