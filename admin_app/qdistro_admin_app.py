@@ -3874,9 +3874,12 @@ class _FirstPaintMarker(QObject):
     created, named and mapped before Qt paints it, and a capture taken in
     between shows the desktop or a half-drawn surface. The first paint event
     of an exposed window is followed, in the same event-loop pass, by the
-    backing-store flush; the zero-delay timer runs after that pass, so the
-    file appears only once Qt has flushed the frame to the display server.
-    (That is not presentation: the launcher adds an X round trip after it.)
+    backing-store flush; the zero-delay timer runs after that pass. Flushed
+    is not received, and X orders requests only per connection, so before
+    writing the file the marker syncs Qt's OWN display connection
+    (QGuiApplication.sync(); on xcb a GetInputFocus round trip): its reply
+    comes back after the server has processed the frame upload, so XWayland
+    holds the frame and commits it for the compositor's next repaint.
 
     Qt may paint before the window is exposed and then present that backing
     store on exposure without another paint. A paint that finds the window
@@ -3915,6 +3918,7 @@ class _FirstPaintMarker(QObject):
         self._window.removeEventFilter(self)
         if self._watched_handle is not None:
             self._watched_handle.removeEventFilter(self)
+        QApplication.sync()  # round trip on Qt's own connection (see above)
         try:
             fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except OSError as exc:

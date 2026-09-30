@@ -50,6 +50,32 @@ def test_marker_is_written_after_first_paint_not_at_construction(app, tmp_path):
     win.close()
 
 
+def test_marker_syncs_qt_display_connection_before_the_file_appears(app, tmp_path, monkeypatch):
+    """X orders requests per connection only: the round trip that proves the
+    server has the frame must run on Qt's own connection, before the file."""
+    import qdistro_admin_app as mod
+
+    marker = tmp_path / "painted"
+    seen = []
+
+    class _App:
+        @staticmethod
+        def sync():
+            seen.append(marker.exists())
+
+    monkeypatch.setattr(mod, "QApplication", _App)
+    win = QMainWindow()
+    _FirstPaintMarker(win, str(marker))
+    win.show()
+    for _ in range(40):
+        if marker.exists():
+            break
+        _spin(50)
+    assert marker.exists()
+    assert seen == [False], "synced exactly once, before the marker existed"
+    win.close()
+
+
 def test_paint_before_exposure_is_rechecked_when_the_window_is_exposed(app, tmp_path):
     """Qt may paint before exposure and present that store without a second
     paint; the marker must request a repaint on Expose, not wait forever."""
@@ -109,18 +135,8 @@ def _fake_launcher(tmp_path, app_body: str):
     launcher = launcher.replace(app_line, f'APP_PY="{app_dir}/qdistro_admin_app.py"')
     script = tmp_path / "start-admin-app.sh"
     script.write_text(launcher)
-    # A recording xdotool: the X round trip after the marker is observable
-    # without an X server, and FAKE_XDOTOOL_RC makes it fail on demand.
-    fakebin = tmp_path / "bin"
-    fakebin.mkdir()
-    calls = tmp_path / "xdotool-calls"
-    (fakebin / "xdotool").write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {calls}\n'
-        'exit "${FAKE_XDOTOOL_RC:-0}"\n')
-    (fakebin / "xdotool").chmod(0o755)
     env = {**os.environ, "HOME": str(home), "XDG_STATE_HOME": str(tmp_path / "state"),
-           "QDISTRO_ADMIN_APP_READY_TIMEOUT": "5",
-           "PATH": f"{fakebin}:{os.environ['PATH']}"}
+           "QDISTRO_ADMIN_APP_READY_TIMEOUT": "5"}
     return script, env, runtime
 
 
@@ -146,24 +162,6 @@ def test_launcher_waits_for_marker_then_prints_pid(tmp_path):
         pid = int(proc.stdout.strip().splitlines()[-1])
         os.kill(pid, 0)
         assert not list(runtime.glob("qdistro-admin-app-ready.*")), "ready dir removed"
-        # Then an X round trip on the app's own viewable window.
-        assert (tmp_path / "xdotool-calls").read_text() == (
-            f"search --sync --onlyvisible --pid {pid}\n")
-    finally:
-        subprocess.run(["pkill", "-f", str(tmp_path / "home")], check=False)
-
-
-def test_launcher_fails_when_painted_window_is_not_viewable(tmp_path):
-    script, env, _ = _fake_launcher(tmp_path, (
-        "import os, time\n"
-        "open(os.environ['QDISTRO_ADMIN_APP_READY_FILE'], 'x').write('painted\\n')\n"
-        "time.sleep(30)\n"))
-    env["FAKE_XDOTOOL_RC"] = "1"
-    proc = _run_as_self(script, env)
-    try:
-        assert proc.returncode == 3
-        assert "painted but has no viewable X window" in proc.stderr
-        assert proc.stdout.strip().isdigit()
     finally:
         subprocess.run(["pkill", "-f", str(tmp_path / "home")], check=False)
 
@@ -177,7 +175,6 @@ def test_launcher_fails_when_app_dies_before_painting(tmp_path):
     assert proc.returncode == 3
     assert "exited before painting its window" in proc.stderr
     assert proc.stdout.strip().isdigit()
-    assert not (tmp_path / "xdotool-calls").exists(), "no X check without a frame"
     assert (tmp_path / "home" / "qdistro" / "admin_app" / "ran").exists(), "stand-in app ran"
 
 

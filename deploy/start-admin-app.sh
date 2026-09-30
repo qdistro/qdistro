@@ -101,7 +101,10 @@ qdistro_open_launch_log admin-app.log
 # `xdotool search --sync` proves a frame; under a loaded full run the first
 # paint took longer than both (full-20260930T051422Z-65193: permissions-gui/22
 # captured the bare desktop, /47 a half-drawn surface). The app creates the
-# marker after its first exposed paint (QDISTRO_ADMIN_APP_READY_FILE).
+# marker after its first exposed paint and a round trip on its own X
+# connection (QDISTRO_ADMIN_APP_READY_FILE; see _FirstPaintMarker), so the
+# server has the frame when this returns. No round trip from here can stand
+# in for that one: X orders requests per connection only.
 READY_DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/qdistro-admin-app-ready.XXXXXXXX" 2>/dev/null) \
     || READY_DIR=$(mktemp -d)
 READY_FILE=$READY_DIR/painted
@@ -126,19 +129,5 @@ until [ -e "$READY_FILE" ]; do
     sleep 0.1
 done
 rm -rf -- "$READY_DIR"
-# The marker says Qt flushed the frame to the X server, not that the server
-# has it. Its requests were sent before the marker existed; a round trip from
-# here on the app's now-viewable window returns after the server has handled
-# them, so XWayland holds the frame and commits it for the compositor's next
-# repaint. The remaining gap is one compositor frame, far below the time any
-# caller takes to request a screenshot.
-if [ "$ready_rc" = 0 ]; then
-    remaining=$((deadline - SECONDS))
-    [ "$remaining" -ge 1 ] || remaining=1
-    if ! timeout "$remaining" xdotool search --sync --onlyvisible --pid "$APP_PID" >/dev/null 2>&1; then
-        echo "start-admin-app: admin app (pid $APP_PID) painted but has no viewable X window" >&2
-        ready_rc=3
-    fi
-fi
 echo "$APP_PID"
 exit "$ready_rc"
