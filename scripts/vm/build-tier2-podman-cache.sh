@@ -7,6 +7,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 . "$here/lib/test-substrate.sh"
 qdistro_load_test_substrate
+# Rootless Podman needs the user bus the GUI gate dead-ends for its agents.
+. "$here/lib/podman-user-bus.sh"
+qdistro_podman_user_bus
 
 command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2; exit 2; }
 [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || {

@@ -322,3 +322,30 @@ SH
     grep -q -- '--build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT"' "$REPO_ROOT/scripts/vm/build-tier2-podman-cache.sh"
     grep -q -- '--build-arg "SNAPSHOT=$tier2_snapshot"' "$REPO_ROOT/tier2/make-tier2-image.sh"
 }
+
+# The GUI gate dead-ends DBUS_SESSION_BUS_ADDRESS (unix:path=/dev/null) for its
+# agents and then builds goldens; rootless Podman then could not create a
+# container's cgroup scope ("interactive authentication has not been
+# enabled"). The builders restore the user's own bus -- and only a dead one.
+@test "podman builders use the user bus even when the GUI gate dead-ended it" {
+    local fake="$WORK/bin" calls="$WORK/podman-env" rt="$WORK/runtime" script
+    mkdir -p "$fake" "$rt"
+    python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$rt/bus"
+    cat > "$fake/podman" <<SH
+#!/bin/sh
+printf '%s\n' "\$DBUS_SESSION_BUS_ADDRESS" >> "$calls"
+case "\$1" in info) echo true ;; *) exit 3 ;; esac
+SH
+    chmod +x "$fake/podman"
+    for script in build-native-podman.sh build-tier2-podman-cache.sh; do
+        : > "$calls"
+        run env PATH="$fake:$PATH" XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null \
+            bash "$REPO_ROOT/scripts/vm/$script"
+        [ "$(sort -u "$calls")" = "unix:path=$rt/bus" ]
+        # a real, explicit address is left alone
+        : > "$calls"
+        run env PATH="$fake:$PATH" XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS=unix:path=/elsewhere \
+            bash "$REPO_ROOT/scripts/vm/$script"
+        [ "$(sort -u "$calls")" = "unix:path=/elsewhere" ]
+    done
+}
