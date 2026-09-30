@@ -178,6 +178,25 @@ EOF
     QDWIN_VM_EXEC="$T/bin/broken-vm-exec" run qd22_s3_waiting
     [ "$status" -eq 1 ]
     [[ "$output" == *"could not read"* ]]
+    # the transport fails AFTER printing WAITING: still not evidence
+    cat > "$T/bin/lying-vm-exec" <<'EOF'
+#!/bin/bash
+echo WAITING
+exit 1
+EOF
+    chmod +x "$T/bin/lying-vm-exec"
+    QDWIN_VM_EXEC="$T/bin/lying-vm-exec" run qd22_s3_waiting
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"vm-exec rc=1"* ]]
+    # an unreadable log (grep status 2) is not "no rc="
+    chmod 000 "$QD22_LOG"
+    if ! grep -q x "$QD22_LOG" 2>/dev/null && [ "$(id -u)" -ne 0 ]; then
+        run qd22_s3_waiting
+        chmod 644 "$QD22_LOG"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"could not be read"* ]]
+    fi
+    chmod 644 "$QD22_LOG"
 }
 
 @test "waiting guard: a missing log, or a dead group with no rc=, is not 'still waiting'" {

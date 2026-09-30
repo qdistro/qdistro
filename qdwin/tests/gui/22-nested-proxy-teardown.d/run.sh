@@ -378,21 +378,28 @@ qd22_s3_target() {
 # CLICK_TARGET BEFORE its pointer check, so this guard was all that stood
 # between that and a black preview; keep it.
 qd22_s3_waiting() {
-    local st
+    local st rc=0
     case "${PROBE_PID:-}" in
         ''|*[!0-9]*) echo "no published probe group pid ('${PROBE_PID:-}'); cannot establish that the probe is waiting"; return 1 ;;
     esac
+    # grep status is kept apart: 0 = rc= present, 1 = no match (the only
+    # "not exited" answer), anything else = the log could not be read.
     st=$("$QDWIN_VM_EXEC" "$VMNAME" \
-      "if [ ! -f $QD22_LOG ]; then echo NOLOG; \
-       elif grep -q '^rc=' $QD22_LOG; then echo EXITED; \
+      "if [ ! -f $QD22_LOG ]; then echo NOLOG; exit 0; fi; \
+       grep -q '^rc=' $QD22_LOG 2>/dev/null; g=\$?; \
+       if [ \$g -eq 0 ]; then echo EXITED; \
+       elif [ \$g -ne 1 ]; then echo READERR; \
        elif kill -0 -$PROBE_PID 2>/dev/null; then echo WAITING; \
-       else echo GONE; fi")
+       else echo GONE; fi") || rc=$?
+    # A failed vm-exec is never evidence, whatever it printed.
+    [ "$rc" -eq 0 ] || st="vm-exec rc=$rc: $st"
     case $st in
         WAITING) return 0 ;;
         EXITED) echo "the popup probe already exited (proxy destroyed); any S3 frame now would be black. Probe log:"
                 "$QDWIN_VM_EXEC" "$VMNAME" "cat $QD22_LOG" ;;
         GONE)   echo "the probe group $PROBE_PID is gone but its log has no rc= (killed?); the proxy is not on screen" ;;
         NOLOG)  echo "the probe log $QD22_LOG does not exist; cannot establish that the probe is waiting" ;;
+        READERR) echo "the probe log $QD22_LOG could not be read; cannot establish that the probe is waiting" ;;
         *)      echo "could not read the probe's state from the guest (got '$st'); cannot establish that it is waiting" ;;
     esac
     return 1
