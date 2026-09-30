@@ -645,6 +645,15 @@ check_req "[broker] daemon module"     /usr/libexec/qdistro/qdistro_admin_broker
 check_link "[broker] enabled"          /etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service
 check_link "[broker] dbus-reload enabled" /etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service
 check_link "[broker] dbus-reload wanted by broker" /etc/systemd/system/qdistro-admin-broker.service.wants/qdistro-dbus-reload.service
+check_req "[admin-app] UI module" /usr/libexec/qdistro/qdistro_admin_app.py
+check_req "[admin-app] launcher" /usr/local/bin/qdistro-start-admin-app
+check_req "[admin-app] desktop entry" /usr/share/applications/qdistro-admin-app.desktop
+check_line "[admin-app] desktop entry launches installed UI" \
+    /usr/share/applications/qdistro-admin-app.desktop '^Exec=/usr/local/bin/qdistro-start-admin-app$'
+check_line "[admin-app] launcher uses native Wayland" \
+    /usr/local/bin/qdistro-start-admin-app '^export QT_QPA_PLATFORM=wayland$'
+check_line "[admin-app] launcher runs installed module" \
+    /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_admin_app.py'
 check_req "[user-relay] bus policy"    /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
 check_req "[session-manager] unit"     /etc/systemd/system/qdistro-session-manager.service
 check_req "[session-manager] bus policy" /etc/dbus-1/system.d/org.qdistro.SessionManager1.conf

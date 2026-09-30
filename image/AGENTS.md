@@ -69,6 +69,7 @@ image's profile and `verify.sh` repeats the diff on the booted image.
 | step | what lands | tester image (dev) | release profile |
 |---|---|---|---|
 | `sdk` | `qdistro_app` in the system python | yes | yes |
+| `admin-app` | graphical approval queue in `/usr/libexec/qdistro`, a native Wayland launcher, and a discoverable desktop entry | yes | yes |
 | `broker`, `session-manager`, `user-relay`, `polkit`, `pwd`, `qsu`, `browser-bridge`, `portal-backend`, `print`, `snapshots` | the permission arbiter, silo launcher, relay, credential vault, root-exec helper, browser bridge, portals, print proxy, backups | yes | yes |
 | `phone` | phone companion daemon (cut from v1, decision D4) | yes, dev-only guard | **no** (skipped, not a gap) |
 | `tier3` | `qdistro-tier3` group, locked silo users `user1`/`user2`, `/usr/local/bin/qdistro-tier3-spawn`, tmpfiles entry, polkit action | yes | yes |
@@ -80,10 +81,11 @@ installs the host side only. The guest base image is not in the image;
 build it on the booted system with `qdistro-bootstrap.sh --tier4-base`
 (or `qdistro-tier5-build-guest-image`), which needs KVM on the hardware.
 
-**Not installed, and asserted absent** by `verify-contents.sh`: `recall`
-(cut from v1, decision D2), `media` and `multimachine` (audit
-recommendation DEMOTE, never promoted into the chain), the admin
-approval-queue TUI (neither chain has ever installed it). Adding any of
+**Not installed:** `recall` (cut from v1, decision D2), `media` and
+`multimachine` (audit recommendation DEMOTE, never promoted into the
+chain), and the admin approval-queue TUI. The static checklist asserts
+the absent service artefacts for the first three; the TUI has no chain
+installer. Adding any of
 them to the image means adding it to the bootstrap chain, where the
 decision is recorded.
 
