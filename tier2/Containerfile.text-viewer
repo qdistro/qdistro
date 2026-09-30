@@ -13,8 +13,9 @@
 # The image ships ONLY the workload binaries + the weston runtime. qdwin-shell.so
 # is bind-mounted at run time (not baked), same as weston-terminal.
 # The base follows the snapshot.conf pin (make-tier2-image.sh passes it), so
-# the base layer and the zypper repos come from one snapshot.
-ARG SNAPSHOT=latest
+# the base layer and the zypper repos come from one snapshot. No default: a
+# build without the pin fails instead of pulling the rolling :latest.
+ARG SNAPSHOT
 FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}
 
 # The base tag is rolling, including its repo definitions. Replace those

@@ -35,7 +35,8 @@ fi
 #   2. a SNAPSHOT file already in this directory: the installed build context
 #      (/usr/lib/qdistro/tier2, written by install-templates-for-vm.sh) or a
 #      probe's staged copy;
-#   3. /etc/qdistro/release on a qdistro image.
+#   3. /etc/qdistro/release on a qdistro image, or /etc/qdistro/test-substrate
+#      on a cloud-derived qci VM (drivers that copy tier2/ alone to /tmp).
 # When both 1 and 2 exist they must agree; a stale staged pin is refused.
 pin_from_conf() { sed -n 's/^snapshot=\([0-9]\{8\}\)$/\1/p' "$1" | head -n1; }
 tier2_snapshot=""
@@ -55,11 +56,12 @@ if [ -s SNAPSHOT ]; then
     fi
     tier2_snapshot="$local_snapshot"
 fi
-if [ -z "$tier2_snapshot" ] && [ -r /etc/qdistro/release ]; then
-    tier2_snapshot="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' /etc/qdistro/release | head -n1)"
-fi
+for stamp in /etc/qdistro/release /etc/qdistro/test-substrate; do
+    [ -z "$tier2_snapshot" ] && [ -r "$stamp" ] || continue
+    tier2_snapshot="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' "$stamp" | head -n1)"
+done
 if [ -z "$tier2_snapshot" ]; then
-    log "FATAL: no snapshot pin (snapshot.conf, $SCRIPT_DIR/SNAPSHOT or /etc/qdistro/release)"
+    log "FATAL: no snapshot pin (snapshot.conf, $SCRIPT_DIR/SNAPSHOT, /etc/qdistro/release or /etc/qdistro/test-substrate)"
     exit 2
 fi
 

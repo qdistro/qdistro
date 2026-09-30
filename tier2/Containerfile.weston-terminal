@@ -10,8 +10,9 @@
 # the compositor with a wp_security_context_v1 tag of
 # (qdistro.tier2, <container>/<app>, <launch-token>).
 # The base follows the snapshot.conf pin (make-tier2-image.sh passes it), so
-# the base layer and the zypper repos come from one snapshot.
-ARG SNAPSHOT=latest
+# the base layer and the zypper repos come from one snapshot. No default: a
+# build without the pin fails instead of pulling the rolling :latest.
+ARG SNAPSHOT
 FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}
 
 # Replace the rolling repositories inherited from the base before zypper reads
