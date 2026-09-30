@@ -266,3 +266,24 @@ def test_malformed_receiver_receipt_is_unknown_through_relay_broker_and_sdk(rout
     assert sdk.get_transfer_status(receipt["transfer_id"])["state"] == "unknown"
     assert len(calls) == 1, "an ambiguous receipt must not trigger another delivery"
     assert window.editor.toPlainText() == before
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("route", [2000, 3000], indirect=True)
+@pytest.mark.parametrize("suffix", [',"state":"applied"', ',"unused":NaN',
+                                    ',"nested":{"key":1,"key":2}'])
+def test_malformed_status_receipt_cannot_promote_staged_work(route, monkeypatch, suffix):
+    _, _, _, _, proxy, uid, service = route
+    caps = sdk.get_transfer_capabilities(uid, service)
+    receipt = sdk.send_transfer(uid, service, caps["instance_id"], "text/plain", "Payload")
+    assert receipt["state"] == "staged", receipt
+    queries = []
+    def status(instance, receiver_id, **kwargs):
+        queries.append(receiver_id)
+        return json.dumps({"version": 1, "instance_id": instance, "transfer_id": receiver_id,
+                           "state": "failed", "reason": ""})[:-1] + suffix + '}'
+    monkeypatch.setattr(proxy, "GetTransferStatus", status)
+    for _ in range(2):
+        assert sdk.get_transfer_status(receipt["transfer_id"])["state"] == "unknown"
+    assert len(queries) == 2
+    assert proxy.receive_count == 1, "querying an uncertain disposition must never resend"
