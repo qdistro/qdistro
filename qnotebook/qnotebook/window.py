@@ -2614,6 +2614,18 @@ class MainWindow(QMainWindow):
         for editor in self.findChildren(MarkdownEditor):
             editor.setFont(body)
             editor.setStyleSheet(EDITOR_PALETTE_QSS)
+        from .appearance import load_theme_mode
+        from .theme import current_controller
+
+        ctrl = current_controller()
+        mode = ctrl.theme_mode if ctrl is not None else load_theme_mode(self._settings)
+        self._set_appearance_checks(mode)
+        from PyQt6.QtWidgets import QDialog
+
+        for dlg in self.findChildren(QDialog):
+            method = getattr(dlg, "apply_presentation_update", None)
+            if callable(method) and dlg is not self:
+                method()
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()

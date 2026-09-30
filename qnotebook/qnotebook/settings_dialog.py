@@ -240,6 +240,8 @@ class SettingsDialog(QDialog):
 
         self._combo_appearance = QComboBox()
         self._combo_appearance.addItems(list(THEME_LABEL_TO_KEY))
+        self._appearance_dirty = False
+        self._combo_appearance.currentIndexChanged.connect(self._mark_appearance_dirty)
         global_form.addRow("Application appearance:", self._combo_appearance)
 
         self._chk_desktop_fonts = QCheckBox("Use desktop fonts")
@@ -422,6 +424,7 @@ class SettingsDialog(QDialog):
         self._chk_session_restore.setChecked(
             bool(self._settings.value("session_restore_enabled", True, type=bool))
         )
+        self._appearance_dirty = False
 
     # --------------------------------------------------------------- apply
 
@@ -429,20 +432,28 @@ class SettingsDialog(QDialog):
         # Per-notebook
         if self._nb_root is not None:
             versioning_enabled = self._chk_versioning.isChecked()
-            nb_settings.set_value(
-                self._nb_root, "versioning_enabled", versioning_enabled
+            strict_preserve = self._chk_strict_preserve.isChecked()
+            current_versioning = bool(
+                nb_settings.get(self._nb_root, "versioning_enabled", True)
             )
-            nb_settings.set_value(
-                self._nb_root, "strict_preserve", self._chk_strict_preserve.isChecked()
+            current_strict = bool(
+                nb_settings.get(self._nb_root, "strict_preserve", True)
             )
-            # Mirror to QSettings since other code paths read it there.
-            self._settings.setValue("versioning_enabled", versioning_enabled)
-            if versioning_enabled:
-                try:
-                    from . import versioning as _v
-                    _v.init_repo(self._nb_root)
-                except Exception:
-                    pass
+            if current_versioning != versioning_enabled:
+                nb_settings.set_value(
+                    self._nb_root, "versioning_enabled", versioning_enabled
+                )
+                self._settings.setValue("versioning_enabled", versioning_enabled)
+                if versioning_enabled:
+                    try:
+                        from . import versioning as _v
+                        _v.init_repo(self._nb_root)
+                    except Exception:
+                        pass
+            if current_strict != strict_preserve:
+                nb_settings.set_value(
+                    self._nb_root, "strict_preserve", strict_preserve
+                )
 
         # Global
         autosave_ms = int(self._spin_autosave_secs.value()) * 1000
@@ -473,6 +484,7 @@ class SettingsDialog(QDialog):
             elif existing is not None:
                 appearance["ui_font_size_pt"] = float(existing)
         save_overrides(self._settings, appearance)
+        self._appearance_dirty = False
         if hasattr(self._window, "apply_saved_appearance"):
             self._window.apply_saved_appearance()
 
@@ -485,6 +497,23 @@ class SettingsDialog(QDialog):
             cell = self._shortcut_table.item(r, 1)
             key_text = cell.text().strip() if cell is not None else ""
             self._window.set_action_shortcut(label, key_text)
+
+    def _mark_appearance_dirty(self, _index: int = 0) -> None:
+        self._appearance_dirty = True
+
+    def apply_presentation_update(self) -> None:
+        """Follow a live mode change unless the user has unapplied edits."""
+        if self._appearance_dirty:
+            return
+        from .theme import current_controller
+
+        ctrl = current_controller()
+        mode = ctrl.theme_mode if ctrl is not None else load_theme_mode(self._settings)
+        self._combo_appearance.blockSignals(True)
+        self._combo_appearance.setCurrentText(
+            THEME_KEY_TO_LABEL.get(mode, "Follow desktop")
+        )
+        self._combo_appearance.blockSignals(False)
 
     def _mark_ui_font_size_dirty(self, _value: int) -> None:
         self._ui_font_size_dirty = True

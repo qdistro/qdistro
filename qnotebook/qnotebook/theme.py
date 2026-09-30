@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 _VALID_MODES = ("system", "light", "dark", "native")
 _CONTROLLER = None
+_NATIVE_PALETTE: QPalette | None = None
 
 # Legacy dark palette (used when the shared snapshot is absent).
 _DARK_WINDOW = "#2b2b2b"
@@ -46,11 +47,11 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
         log.warning("unknown theme mode %r; falling back to 'system'", mode)
         mode = "system"
 
-    if mode == "system":
-        return mode
-
-    if mode == "native":
-        app.setPalette(QPalette())
+    if mode in ("system", "native"):
+        if _NATIVE_PALETTE is not None:
+            app.setPalette(QPalette(_NATIVE_PALETTE))
+        else:
+            app.setPalette(QPalette())
         return mode
 
     app.setStyle("Fusion")
@@ -89,7 +90,14 @@ def _system_fallback(app: QApplication) -> None:
 
 def attach_presentation(app: QApplication, config: Any):
     """Attach the shared presentation controller. Missing package is non-fatal."""
-    global _CONTROLLER
+    global _CONTROLLER, _NATIVE_PALETTE
+    if _NATIVE_PALETTE is None:
+        _NATIVE_PALETTE = QPalette(app.palette())
+    if _CONTROLLER is not None:
+        theme_mode = config.get("general", "theme_mode", default="system")
+        if theme_mode in _VALID_MODES:
+            _CONTROLLER.set_theme_mode(theme_mode)
+        return _CONTROLLER
     pin_native_body_font(app.font())
     try:
         from qdistro_presentation.model import LocalOverrides, parse_local_overrides
@@ -99,12 +107,6 @@ def attach_presentation(app: QApplication, config: Any):
         mode = config.get("general", "theme_mode", default="system")
         apply_theme(app, mode)
         return None
-
-    if _CONTROLLER is not None:
-        theme_mode = config.get("general", "theme_mode", default="system")
-        if theme_mode in _VALID_MODES:
-            _CONTROLLER.set_theme_mode(theme_mode)
-        return _CONTROLLER
 
     theme_mode = config.get("general", "theme_mode", default="system")
     if theme_mode not in _VALID_MODES:
@@ -146,13 +148,14 @@ def refresh_windows(app: QApplication) -> None:
 
 
 def reset_controller_for_tests() -> None:
-    global _CONTROLLER
+    global _CONTROLLER, _NATIVE_PALETTE
     if _CONTROLLER is not None:
         try:
             _CONTROLLER.stop()
         except Exception:  # noqa: BLE001
             pass
     _CONTROLLER = None
+    _NATIVE_PALETTE = None
     try:
         from qdistro_presentation.qt import reset_controller_for_tests as _reset
 

@@ -10,15 +10,14 @@ from PyQt6.QtGui import QFont, QPalette
 from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
-from qnotebook.appearance import SettingsAdapter
+from qnotebook.appearance import SettingsAdapter, save_overrides
 from qnotebook.editor import (
     BODY_POINT_SIZE,
     native_body_font,
-    pin_native_body_font,
     reset_pinned_body_font_for_tests,
 )
 from qnotebook.theme import (
-    EDITOR_PALETTE_QSS,
+    apply_theme,
     attach_presentation,
     current_controller,
     reset_controller_for_tests,
@@ -96,23 +95,54 @@ def test_editor_keeps_pinned_body_font_when_ui_font_applies(
     qapp, tmp_path, tmp_notebook, qtbot, monkeypatch,
 ):
     native_family = qapp.font().family()
-    pin_native_body_font(qapp.font())
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
-    attach_presentation(qapp, _adapter("system"))
+    adapter = _adapter("system")
+    save_overrides(adapter._settings, {
+        "version": 1,
+        "ui_font_family": "DejaVu Sans Mono",
+        "ui_font_size_pt": 18.0,
+    })
+    attach_presentation(qapp, adapter)
     win = MainWindow()
     win.open_notebook(str(tmp_notebook))
     qtbot.addWidget(win)
+    assert qapp.font().pointSizeF() == 18.0
     assert win.editor.font().family() == native_family
     assert win.editor.font().pointSize() == BODY_POINT_SIZE
+    assert win.editor.document().defaultFont().family() == native_family
     assert native_body_font().family() == native_family
-    assert qapp.font().pointSizeF() != 0
-    # Shared UI font may differ from the pinned body family; the document widget
-    # must not have followed QApplication.setFont.
-    assert win.editor.font().family() == native_family
-    assert EDITOR_PALETTE_QSS.split("{")[0].strip() in win.editor.styleSheet() or (
-        "palette(base)" in win.editor.styleSheet()
-    )
+    assert "palette(base)" in win.editor.styleSheet()
+
+
+def test_repeated_attach_does_not_replace_native_pin(
+    qapp, tmp_path, monkeypatch,
+):
+    native_family = qapp.font().family()
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    adapter = _adapter("system")
+    save_overrides(adapter._settings, {
+        "version": 1,
+        "ui_font_family": "DejaVu Sans Mono",
+        "ui_font_size_pt": 18.0,
+    })
+    first = attach_presentation(qapp, adapter)
+    second = attach_presentation(qapp, adapter)
+    assert first is second
+    assert native_body_font().family() == native_family
+    assert qapp.font().pointSizeF() == 18.0
+
+
+def test_system_restores_captured_native_palette(qapp):
+    from PyQt6.QtGui import QColor
+
+    native = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
+    attach_presentation(qapp, _adapter("system"))
+    apply_theme(qapp, "dark")
+    assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("#2b2b2b")
+    apply_theme(qapp, "system")
+    assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == native
 
 
 def test_two_windows_follow_same_generation_without_resetting(
@@ -138,27 +168,40 @@ def test_two_windows_follow_same_generation_without_resetting(
     assert first.act_appearance_system.isChecked()
     assert second.act_appearance_system.isChecked()
     assert qapp.palette().color(QPalette.ColorRole.Window).name() == example_snapshot().colors.mSurface
+    first.act_appearance_dark.trigger()
+    qapp.processEvents()
+    assert first.act_appearance_dark.isChecked()
+    assert second.act_appearance_dark.isChecked()
+    assert first.editor.markdown() == md
+    assert first.editor.is_dirty() is dirty
 
 
 def test_theme_change_does_not_dirty_or_rewrite_editor(
     qapp, tmp_notebook, qtbot,
 ):
+    from PyQt6.QtGui import QTextCursor
+
     win = MainWindow()
     win.open_notebook(str(tmp_notebook))
     qtbot.addWidget(win)
     win.load_page("Home")
+    cur = win.editor.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.End)
+    cur.insertText("\nunsaved chrome-test edit")
+    win.editor.setTextCursor(cur)
     md = win.editor.markdown()
-    dirty = win.editor.is_dirty()
+    assert win.editor.is_dirty() is True
     stack = win.editor.document().availableUndoSteps()
+    assert stack > 0
     win.act_appearance_dark.trigger()
     qapp.processEvents()
     assert win.editor.markdown() == md
-    assert win.editor.is_dirty() is dirty
+    assert win.editor.is_dirty() is True
     assert win.editor.document().availableUndoSteps() == stack
     win.act_appearance_light.trigger()
     qapp.processEvents()
     assert win.editor.markdown() == md
-    assert win.editor.is_dirty() is dirty
+    assert win.editor.is_dirty() is True
 
 
 def test_package_import_is_stdlib_only():
@@ -186,7 +229,7 @@ def test_package_import_is_stdlib_only():
 def test_cli_pdf_export_does_not_attach_presentation(
     tmp_notebook, tmp_path, monkeypatch, qapp,
 ):
-    from qnotebook import cli
+    from qnotebook.__main__ import main
 
     called = {"n": 0}
 
@@ -196,8 +239,9 @@ def test_cli_pdf_export_does_not_attach_presentation(
 
     monkeypatch.setattr("qnotebook.theme.attach_presentation", _boom)
     out = tmp_path / "Home.pdf"
-    rc = cli.run(
-        ["--export", str(tmp_notebook), "Home", "--format", "pdf", "--output", str(out)]
+    rc = main(
+        ["qnotebook", "--export", str(tmp_notebook), "Home",
+         "--format", "pdf", "--output", str(out)]
     )
     assert rc == 0
     assert called["n"] == 0

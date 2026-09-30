@@ -176,6 +176,50 @@ def test_resolving_conflict_clears_flag(win, qtbot):
     assert dlg._shortcut_conflicts[label_a] is False
 
 
+def test_appearance_only_apply_does_not_write_nb_settings(win, tmp_notebook, qtbot, monkeypatch):
+    from qnotebook import nb_settings
+
+    path = nb_settings.path_for(tmp_notebook)
+    nb_settings.save(
+        tmp_notebook,
+        {
+            "versioning_enabled": True,
+            "versioning_prompted": False,
+            "strict_preserve": True,
+        },
+    )
+    before = path.read_bytes()
+    writes: list = []
+    real_set = nb_settings.set_value
+
+    def _spy(*args, **kwargs):
+        writes.append(args)
+        return real_set(*args, **kwargs)
+
+    monkeypatch.setattr("qnotebook.settings_dialog.nb_settings.set_value", _spy)
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    dlg._combo_appearance.setCurrentText("Light")
+    dlg._apply()
+    assert writes == []
+    assert path.read_bytes() == before
+    s = QSettings("qnotebook", "qnotebook")
+    assert s.value("appearance/theme_mode") == "light"
+
+
+def test_open_settings_follows_other_window_mode(win, qtbot, qapp):
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    assert dlg._combo_appearance.currentText() == "Follow desktop"
+    win.act_appearance_dark.trigger()
+    qapp.processEvents()
+    assert dlg._combo_appearance.currentText() == "Dark"
+    dlg._combo_appearance.setCurrentText("Light")
+    win.act_appearance_native.trigger()
+    qapp.processEvents()
+    assert dlg._combo_appearance.currentText() == "Light"
+
+
 def test_cancel_does_not_materialize_font_overrides(win, qtbot):
     s = QSettings("qnotebook", "qnotebook")
     dlg = SettingsDialog(win)
