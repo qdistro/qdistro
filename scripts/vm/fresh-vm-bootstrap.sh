@@ -146,6 +146,10 @@ if ! command -v bats >/dev/null 2>&1 && [ "${QCI_OFFLINE:-0}" = 1 ]; then
     log "ERROR: tester-as-base needs CI extras (bats) and QCI_OFFLINE=1 forbids zypper; import a ci-profile kiwi base or run with egress"
     exit 3
 fi
+if ! command -v jq >/dev/null 2>&1 && [ "${QCI_OFFLINE:-0}" = 1 ]; then
+    log "ERROR: GUI scenario drivers need jq and QCI_OFFLINE=1 forbids zypper; use a base with jq baked in"
+    exit 3
+fi
 
 # qga-up is not DHCP/DNS. Later zypper (qnotebook, extras, weston deps)
 # needs guest egress even when bats is already present.
@@ -184,6 +188,16 @@ else
         tail -80 /tmp/qdistro-ci-extras.log | sed 's/^/[bootstrap]   zypper: /'
         exit 3
     fi
+fi
+
+# GUI scenario drivers use jq inside the guest. The baked base can have bats
+# without jq, so this check must be independent of the CI-extras bats probe.
+if ! command -v jq >/dev/null 2>&1; then
+    log "installing jq for GUI scenario drivers"
+    zypper -n install --no-recommends jq >/tmp/qdistro-jq-install.log 2>&1 \
+        || { log "  ERROR: zypper install of jq failed"; tail -80 /tmp/qdistro-jq-install.log; exit 3; }
+    command -v jq >/dev/null 2>&1 \
+        || { log "  ERROR: jq is still unavailable after installation"; exit 3; }
 fi
 
 # ---- 0c. Keep spice-vdagent off test VMs -----------------------------------
