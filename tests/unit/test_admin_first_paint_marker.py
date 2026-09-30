@@ -50,6 +50,38 @@ def test_marker_is_written_after_first_paint_not_at_construction(app, tmp_path):
     win.close()
 
 
+def test_paint_before_exposure_is_rechecked_when_the_window_is_exposed(app, tmp_path):
+    """Qt may paint before exposure and present that store without a second
+    paint; the marker must request a repaint on Expose, not wait forever."""
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtGui import QPaintEvent, QWindow
+
+    marker = tmp_path / "painted"
+    win = QMainWindow()
+    native = QWindow()  # stands in for win's handle; unexposed until shown
+    win.windowHandle = lambda: native
+    repaints = []
+    win.update = lambda: repaints.append(1)
+    _FirstPaintMarker(win, str(marker))
+
+    app.sendEvent(win, QPaintEvent(QRect(0, 0, 10, 10)))  # pre-exposure paint
+    _spin(50)
+    assert not marker.exists(), "an unexposed paint is not a frame"
+    assert repaints == []
+
+    native.show()  # exposure without any further paint of win
+    for _ in range(40):
+        if repaints:
+            break
+        _spin(50)
+    assert repaints, "exposure requested a repaint"
+
+    app.sendEvent(win, QPaintEvent(QRect(0, 0, 10, 10)))  # the requested repaint
+    _spin(50)
+    assert marker.read_text() == f"painted pid={os.getpid()}\n"
+    native.close()
+
+
 def test_hidden_window_never_marks(app, tmp_path):
     marker = tmp_path / "painted"
     win = QMainWindow()
@@ -77,8 +109,18 @@ def _fake_launcher(tmp_path, app_body: str):
     launcher = launcher.replace(app_line, f'APP_PY="{app_dir}/qdistro_admin_app.py"')
     script = tmp_path / "start-admin-app.sh"
     script.write_text(launcher)
+    # A recording xdotool: the X round trip after the marker is observable
+    # without an X server, and FAKE_XDOTOOL_RC makes it fail on demand.
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    calls = tmp_path / "xdotool-calls"
+    (fakebin / "xdotool").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {calls}\n'
+        'exit "${FAKE_XDOTOOL_RC:-0}"\n')
+    (fakebin / "xdotool").chmod(0o755)
     env = {**os.environ, "HOME": str(home), "XDG_STATE_HOME": str(tmp_path / "state"),
-           "QDISTRO_ADMIN_APP_READY_TIMEOUT": "5"}
+           "QDISTRO_ADMIN_APP_READY_TIMEOUT": "5",
+           "PATH": f"{fakebin}:{os.environ['PATH']}"}
     return script, env, runtime
 
 
@@ -104,6 +146,24 @@ def test_launcher_waits_for_marker_then_prints_pid(tmp_path):
         pid = int(proc.stdout.strip().splitlines()[-1])
         os.kill(pid, 0)
         assert not list(runtime.glob("qdistro-admin-app-ready.*")), "ready dir removed"
+        # Then an X round trip on the app's own viewable window.
+        assert (tmp_path / "xdotool-calls").read_text() == (
+            f"search --sync --onlyvisible --pid {pid}\n")
+    finally:
+        subprocess.run(["pkill", "-f", str(tmp_path / "home")], check=False)
+
+
+def test_launcher_fails_when_painted_window_is_not_viewable(tmp_path):
+    script, env, _ = _fake_launcher(tmp_path, (
+        "import os, time\n"
+        "open(os.environ['QDISTRO_ADMIN_APP_READY_FILE'], 'x').write('painted\\n')\n"
+        "time.sleep(30)\n"))
+    env["FAKE_XDOTOOL_RC"] = "1"
+    proc = _run_as_self(script, env)
+    try:
+        assert proc.returncode == 3
+        assert "painted but has no viewable X window" in proc.stderr
+        assert proc.stdout.strip().isdigit()
     finally:
         subprocess.run(["pkill", "-f", str(tmp_path / "home")], check=False)
 
@@ -117,6 +177,7 @@ def test_launcher_fails_when_app_dies_before_painting(tmp_path):
     assert proc.returncode == 3
     assert "exited before painting its window" in proc.stderr
     assert proc.stdout.strip().isdigit()
+    assert not (tmp_path / "xdotool-calls").exists(), "no X check without a frame"
     assert (tmp_path / "home" / "qdistro" / "admin_app" / "ran").exists(), "stand-in app ran"
 
 

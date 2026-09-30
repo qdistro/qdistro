@@ -126,5 +126,19 @@ until [ -e "$READY_FILE" ]; do
     sleep 0.1
 done
 rm -rf -- "$READY_DIR"
+# The marker says Qt flushed the frame to the X server, not that the server
+# has it. Its requests were sent before the marker existed; a round trip from
+# here on the app's now-viewable window returns after the server has handled
+# them, so XWayland holds the frame and commits it for the compositor's next
+# repaint. The remaining gap is one compositor frame, far below the time any
+# caller takes to request a screenshot.
+if [ "$ready_rc" = 0 ]; then
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -ge 1 ] || remaining=1
+    if ! timeout "$remaining" xdotool search --sync --onlyvisible --pid "$APP_PID" >/dev/null 2>&1; then
+        echo "start-admin-app: admin app (pid $APP_PID) painted but has no viewable X window" >&2
+        ready_rc=3
+    fi
+fi
 echo "$APP_PID"
 exit "$ready_rc"

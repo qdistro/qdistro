@@ -3875,7 +3875,14 @@ class _FirstPaintMarker(QObject):
     between shows the desktop or a half-drawn surface. The first paint event
     of an exposed window is followed, in the same event-loop pass, by the
     backing-store flush; the zero-delay timer runs after that pass, so the
-    file appears only once the frame has been handed to the display server.
+    file appears only once Qt has flushed the frame to the display server.
+    (That is not presentation: the launcher adds an X round trip after it.)
+
+    Qt may paint before the window is exposed and then present that backing
+    store on exposure without another paint. A paint that finds the window
+    unexposed therefore watches the native window for its Expose event and
+    requests a repaint then, so the check runs on a real exposed frame
+    instead of waiting for a paint that may never come.
     """
 
     def __init__(self, window, path: str):
@@ -3883,6 +3890,7 @@ class _FirstPaintMarker(QObject):
         self._window = window
         self._path = path
         self._scheduled = False
+        self._watched_handle = None
         window.installEventFilter(self)
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
@@ -3890,15 +3898,23 @@ class _FirstPaintMarker(QObject):
                 and event.type() == QEvent.Type.Paint):
             self._scheduled = True
             QTimer.singleShot(0, self._mark)
+        elif (obj is self._watched_handle and event.type() == QEvent.Type.Expose
+                and obj.isExposed()):
+            # Exposed now: repaint so the next Paint re-runs the check.
+            self._window.update()
         return False
 
     def _mark(self) -> None:
         handle = self._window.windowHandle()
         if handle is None or not handle.isExposed():
-            # Painted while not on screen: wait for the next real frame.
             self._scheduled = False
+            if handle is not None and self._watched_handle is None:
+                self._watched_handle = handle
+                handle.installEventFilter(self)
             return
         self._window.removeEventFilter(self)
+        if self._watched_handle is not None:
+            self._watched_handle.removeEventFilter(self)
         try:
             fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except OSError as exc:
