@@ -112,6 +112,14 @@ for _cand in reversed(_BROKER_DIR_CANDIDATES):
     if _cand.is_dir() and str(_cand) not in sys.path:
         sys.path.insert(0, str(_cand))
 
+# Old relay-only/non-flat installs must retain legacy forwarding and the
+# rules-engine diagnostic. New transfer calls fail closed without the helper.
+try:
+    import transfer_protocol as transfer_wire
+except ImportError:
+    transfer_wire = None
+
+
 # Import the rules engine EAGERLY, at module import, so a broken install is
 # visible the moment the daemon starts rather than only on the first (and
 # every subsequent) denied container op.
@@ -529,6 +537,58 @@ class UserRelay(dbus.service.Object):
                 f"Forward to {service_s!r} failed: {e}",
                 name=BUS_NAME + ".ForwardFailed",
             ) from e
+
+    def _transfer_root(self, sender, conn):
+        if conn is None or not sender or int(conn.get_unix_user(sender)) != 0:
+            raise dbus.DBusException("transfer relay methods require root",
+                                     name=BUS_NAME + ".AccessDenied")
+
+    def _transfer_receiver(self, service, expected_owner=None):
+        if transfer_wire is None:
+            raise dbus.DBusException("transfer protocol is not installed", name=BUS_NAME + ".Unavailable")
+        service = str(service)
+        if not service.startswith(RECEIVER_PREFIX) or service in EXCLUDED_NAMES:
+            raise dbus.DBusException("invalid transfer receiver", name=BUS_NAME + ".BadTarget")
+        owner = str(self._bus.get_name_owner(service))
+        if not owner.startswith(":") or (expected_owner is not None and owner != str(expected_owner)):
+            raise dbus.DBusException("receiver owner changed", name=BUS_NAME + ".BadTarget")
+        obj = self._bus.get_object(owner, APP1_OBJ_PATH, introspect=False)
+        caps = transfer_wire.capabilities(str(obj.GetTransferCapabilities(dbus_interface=APP1_IFACE, timeout=3.0)))
+        if str(self._bus.get_name_owner(service)) != owner:
+            raise dbus.DBusException("receiver owner changed", name=BUS_NAME + ".BadTarget")
+        return owner, obj, caps
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetTransferCapabilities(self, service, sender=None, conn=None):
+        self._transfer_root(sender, conn)
+        owner, _obj, caps = self._transfer_receiver(service)
+        return json.dumps({"owner": owner, "capabilities": caps})
+
+    @dbus.service.method(BUS_NAME, in_signature="sssss", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ForwardTransfer(self, service, expected_owner, expected_instance, kind, payload,
+                        sender=None, conn=None):
+        self._transfer_root(sender, conn)
+        _owner, obj, caps = self._transfer_receiver(service, expected_owner)
+        if caps["instance_id"] != str(expected_instance):
+            raise dbus.DBusException("receiver instance changed", name=BUS_NAME + ".BadTarget")
+        transfer_wire.payload(str(kind), str(payload), caps)
+        raw = obj.ReceiveTransfer(str(expected_instance), str(kind), str(payload),
+                                  dbus_interface=APP1_IFACE, timeout=3.0)
+        return json.dumps(transfer_wire.validate_receipt(str(raw), str(expected_instance)))
+
+    @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetTransferStatus(self, service, expected_owner, expected_instance, receiver_id,
+                          sender=None, conn=None):
+        self._transfer_root(sender, conn)
+        _owner, obj, caps = self._transfer_receiver(service, expected_owner)
+        if caps["instance_id"] != str(expected_instance):
+            raise dbus.DBusException("receiver instance changed", name=BUS_NAME + ".BadTarget")
+        raw = obj.GetTransferStatus(str(expected_instance), str(receiver_id),
+                                    dbus_interface=APP1_IFACE, timeout=3.0)
+        return json.dumps(transfer_wire.validate_receipt(str(raw), str(expected_instance), str(receiver_id)))
 
     @dbus.service.signal(BUS_NAME, signature="i")
     def LocalReceiversChanged(self, uid):

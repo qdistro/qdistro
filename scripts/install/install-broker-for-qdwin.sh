@@ -50,7 +50,7 @@ install -d -o root -g root -m 0755 "$DEST"
 # (broker-policy/ Phase 2 / module 0.2.0). The other modules are
 # import-only so they stay 0644.
 install -o root -g root -m 0755 "$BROKER_SRC/qdistro_admin_broker.py" "$DEST/qdistro_admin_broker.py"
-for f in qdistro_admin_cache.py qdistro_admin_audit.py \
+for f in transfer_protocol.py qdistro_admin_cache.py qdistro_admin_audit.py \
          qdistro_admin_ratelimit.py qdistro_admin_rules.py \
          qdistro_audisp_parser.py qdistro_hook_client.py \
          qdistro_proc_identity.py qdistro_launch_record.py \
