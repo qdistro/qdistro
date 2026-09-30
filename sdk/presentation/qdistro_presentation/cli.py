@@ -51,11 +51,11 @@ def main(argv: list[str] | None = None) -> int:
     if len(raw_b) > MAX_BYTES:
         print("qdistro-presentation-publish: stdin exceeds 64 KiB", file=sys.stderr)
         return 1
-    raw = raw_b.decode("utf-8")
     directory = _destination(args.directory)
     os.makedirs(directory, mode=0o700, exist_ok=True)
     require_unwritable = os.path.abspath(directory) == os.path.abspath(MANAGED_DIR)
     try:
+        raw = raw_b.decode("utf-8")
         if args.reset:
             if raw.strip():
                 template = parse_snapshot(loads_strict(raw))

@@ -129,6 +129,8 @@ def loads_strict(text: str) -> Any:
         raise SnapshotError(f"invalid JSON: {exc}") from exc
     except RecursionError as exc:
         raise SnapshotError("JSON nesting exceeds decoder limits") from exc
+    except ValueError as exc:
+        raise SnapshotError(f"invalid JSON value: {exc}") from exc
     _check_depth(value, 0)
     return value
 

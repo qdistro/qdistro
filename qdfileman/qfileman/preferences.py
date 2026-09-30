@@ -99,6 +99,8 @@ class PreferencesDialog(QDialog):
         self.spin_ui_font_size = QSpinBox()
         self.spin_ui_font_size.setRange(6, 48)
         form.addRow("UI font size:", self.spin_ui_font_size)
+        self._ui_font_size_dirty = False
+        self.spin_ui_font_size.valueChanged.connect(self._mark_ui_font_size_dirty)
 
         self.cb_desktop_fonts.toggled.connect(self._on_desktop_fonts_toggled)
 
@@ -140,10 +142,13 @@ class PreferencesDialog(QDialog):
         self.cb_desktop_fonts.setChecked(not has_font_override)
         if appearance.get("ui_font_family"):
             self.combo_ui_font.setCurrentText(str(appearance["ui_font_family"]))
+        self.spin_ui_font_size.blockSignals(True)
         if appearance.get("ui_font_size_pt"):
             self.spin_ui_font_size.setValue(int(appearance["ui_font_size_pt"]))
         else:
             self.spin_ui_font_size.setValue(11)
+        self.spin_ui_font_size.blockSignals(False)
+        self._ui_font_size_dirty = False
         self._on_desktop_fonts_toggled(self.cb_desktop_fonts.isChecked())
         self.spin_icon_size.setValue(int(self.config.get(g, "icon_size", default=32)))
 
@@ -165,14 +170,11 @@ class PreferencesDialog(QDialog):
             appearance.pop("ui_font_size_pt", None)
         else:
             appearance["ui_font_family"] = self.combo_ui_font.currentText()
-            if "ui_font_size_pt" in (self.config.get("appearance", default={}) or {}) or self.spin_ui_font_size.isEnabled():
-                # Only persist size when the user is not inheriting it. A family-only
-                # override must not grow a size key from the dialog default.
-                existing = (self.config.get("appearance", default={}) or {}).get("ui_font_size_pt")
-                if existing is not None:
-                    appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
-                elif self.spin_ui_font_size.value() != 11:
-                    appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
+            existing = (self.config.get("appearance", default={}) or {}).get("ui_font_size_pt")
+            if self._ui_font_size_dirty:
+                appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
+            elif existing is not None:
+                appearance["ui_font_size_pt"] = float(existing)
         self.config.set("appearance", appearance)
         self.config.save()
         try:
@@ -186,6 +188,9 @@ class PreferencesDialog(QDialog):
                 ctrl.set_local(parse_local_overrides(appearance))
         except Exception as exc:  # noqa: BLE001
             log.warning("could not apply appearance: %s", exc)
+
+    def _mark_ui_font_size_dirty(self, _value: int) -> None:
+        self._ui_font_size_dirty = True
 
     def _on_desktop_fonts_toggled(self, checked: bool) -> None:
         self.combo_ui_font.setEnabled(not checked)

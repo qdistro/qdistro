@@ -53,9 +53,7 @@ def test_enabled_false_clears_shared_stylesheet(qapp, tmp_path):
         qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
     )
     assert "QMenu" in qapp.styleSheet()
-    write_disabled_envelope(
-        str(tmp_path), example_snapshot(), require_unwritable_dirs=False
-    )
+    write_disabled_envelope(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     ctrl._reload()
     assert ctrl.state.using_shared_palette is False
     assert qapp.styleSheet() == ctrl._native_stylesheet

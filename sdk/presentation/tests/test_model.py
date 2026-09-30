@@ -49,6 +49,11 @@ def test_deeply_nested_json_is_snapshot_error():
         loads_strict(nested)
 
 
+def test_oversized_json_integer_is_snapshot_error():
+    with pytest.raises(SnapshotError):
+        loads_strict('{"version":' + ("9" * 5000) + "}")
+
+
 def test_rejects_nan_and_infinity():
     with pytest.raises(SnapshotError, match="non-finite"):
         loads_strict('{"v": NaN}')

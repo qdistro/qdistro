@@ -108,9 +108,7 @@ def walk_open(
                 # The directory that contains a file leaf is the protected
                 # presentation directory even though it is not the walk's last
                 # component. Sticky /tmp may only be a non-protected ancestor.
-                protect_as_leaf = is_leaf or (
-                    not leaf_directory and index == len(parts) - 2
-                )
+                protect_as_leaf = is_leaf or (not leaf_directory and index == len(parts) - 2)
                 if require_unwritable_dirs and _unsafe_dir_mode(
                     info.st_mode, is_leaf=protect_as_leaf
                 ):
@@ -284,7 +282,17 @@ def read_snapshot_at(
         )
     elif kind == "state":
         uid = os.geteuid() if expected_uid is None else expected_uid
-        fd = walk_open(path, leaf_uid=uid, require_unwritable_dirs=True)
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 3:
+            raise SnapshotPathError("state path too short")
+        # Effective UID throughout the qdistro/presentation suffix.
+        suffix_uids = {len(parts) - 3: uid, len(parts) - 2: uid}
+        fd = walk_open(
+            path,
+            leaf_uid=uid,
+            ancestor_uids=suffix_uids,
+            require_unwritable_dirs=True,
+        )
     else:
         fd = walk_open(path, leaf_uid=expected_uid, require_unwritable_dirs=False)
     try:

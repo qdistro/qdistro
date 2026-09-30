@@ -93,9 +93,12 @@ function completePaletteFromScheme(obj) {
   return out;
 }
 
-function untaggedFileMayCommit(pendingId, acceptedId) {
+function untaggedFileMayCommit(pendingId, acceptedId, producerRunning) {
   // Untagged colors.json contents must never inherit a pending generation's
-  // identity. Only the producer completion path may commit a pending id.
+  // identity, and must not be treated as a manual edit while a producer
+  // process is still running.
+  if (producerRunning)
+    return false;
   return pendingId === acceptedId;
 }
 

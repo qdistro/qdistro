@@ -122,6 +122,20 @@ def test_apply_preserves_unrelated_appearance_overrides(qapp, isolated_config):
     assert "ui_font_size_pt" not in appearance
 
 
+def test_explicit_eleven_point_size_is_saved(qapp, isolated_config):
+    isolated_config.set("appearance", {"version": 1, "ui_font_family": "Inter"})
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.cb_desktop_fonts.setChecked(False)
+        dlg.spin_ui_font_size.setValue(10)
+        dlg.spin_ui_font_size.setValue(11)
+        dlg._apply()
+    finally:
+        dlg.deleteLater()
+    appearance = isolated_config.get("appearance", default={})
+    assert appearance.get("ui_font_size_pt") == 11.0
+
+
 def test_cancel_does_not_write_inherited_fonts(qapp, isolated_config):
     dlg = PreferencesDialog(isolated_config)
     try:

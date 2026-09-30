@@ -89,6 +89,7 @@ Singleton {
   */
   function processWallpaperColors(wallpaperPath, mode, requestId) {
     Logger.d("TemplateProcessor", `processWallpaperColors called: path=${wallpaperPath}, mode=${mode}`);
+    Color.producerGenerationRunning = true;
     pendingWallpaperRequest = {
       wallpaperPath: wallpaperPath,
       mode: mode,
@@ -596,8 +597,12 @@ Singleton {
         root.colorsGenerated();
         if (root.currentRequestId)
           Color.commitProcessResult(root.currentRequestId, root.currentMode);
+        Color.producerGenerationRunning = false;
       } else if (root.currentRequestId) {
         Color.cancelRequest(root.currentRequestId);
+        Color.producerGenerationRunning = false;
+      } else {
+        Color.producerGenerationRunning = false;
       }
     }
 

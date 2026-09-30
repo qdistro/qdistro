@@ -37,6 +37,7 @@ Singleton {
   property var acceptedPalette: ({})
   property int fileCommitRequestId: 0
   property string fileCommitMode: ""
+  property bool producerGenerationRunning: false
   signal acceptedTargetChanged(int requestId, string mode, var palette)
 
   // Timer to reset isTransitioning after animation completes
@@ -449,7 +450,7 @@ Singleton {
       commitTargetPalette(id, mode, pal);
       return;
     }
-    if (!ColorPalette.untaggedFileMayCommit(root.pendingRequestId, root.acceptedRequestId))
+    if (!ColorPalette.untaggedFileMayCommit(root.pendingRequestId, root.acceptedRequestId, root.producerGenerationRunning))
       return;
     if (root.acceptedRequestId === 0) {
       const mode = (Settings.data.colorSchemes && Settings.data.colorSchemes.darkMode) ? "dark" : "light";
