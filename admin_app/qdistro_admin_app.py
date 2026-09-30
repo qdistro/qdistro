@@ -3866,6 +3866,69 @@ def _maybe_session_bridge() -> SessionManagerBridge | None:
         return None
 
 
+class _FirstPaintMarker(QObject):
+    """Create a file once the main window has painted its first frame.
+
+    A launcher that must hand back a window someone can look at (the GUI test
+    launcher) cannot learn that from the X or Wayland side: the window is
+    created, named and mapped before Qt paints it, and a capture taken in
+    between shows the desktop or a half-drawn surface. The first paint event
+    of an exposed window is followed, in the same event-loop pass, by the
+    backing-store flush; the zero-delay timer runs after that pass. Flushed
+    is not received, and X orders requests only per connection, so before
+    writing the file the marker syncs Qt's OWN display connection
+    (QGuiApplication.sync(); on xcb a GetInputFocus round trip): its reply
+    comes back after the server has processed the frame upload, so XWayland
+    holds the frame and commits it for the compositor's next repaint.
+
+    Qt may paint before the window is exposed and then present that backing
+    store on exposure without another paint. A paint that finds the window
+    unexposed therefore watches the native window for its Expose event and
+    requests a repaint then, so the check runs on a real exposed frame
+    instead of waiting for a paint that may never come.
+    """
+
+    def __init__(self, window, path: str):
+        super().__init__(window)
+        self._window = window
+        self._path = path
+        self._scheduled = False
+        self._watched_handle = None
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
+        if (obj is self._window and not self._scheduled
+                and event.type() == QEvent.Type.Paint):
+            self._scheduled = True
+            QTimer.singleShot(0, self._mark)
+        elif (obj is self._watched_handle and event.type() == QEvent.Type.Expose
+                and obj.isExposed()):
+            # Exposed now: repaint so the next Paint re-runs the check.
+            self._window.update()
+        return False
+
+    def _mark(self) -> None:
+        handle = self._window.windowHandle()
+        if handle is None or not handle.isExposed():
+            self._scheduled = False
+            if handle is not None and self._watched_handle is None:
+                self._watched_handle = handle
+                handle.installEventFilter(self)
+            return
+        self._window.removeEventFilter(self)
+        if self._watched_handle is not None:
+            self._watched_handle.removeEventFilter(self)
+        QApplication.sync()  # round trip on Qt's own connection (see above)
+        try:
+            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            logging.warning("could not write first-paint marker %s: %s",
+                            self._path, exc)
+            return
+        with os.fdopen(fd, "w") as f:
+            f.write(f"painted pid={os.getpid()}\n")
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -3876,6 +3939,9 @@ def main():
     broker = BrokerBridge()
     session = _maybe_session_bridge()
     win = MainWindow(broker, session=session)
+    ready_file = os.environ.get("QDISTRO_ADMIN_APP_READY_FILE", "")
+    if os.path.isabs(ready_file):
+        _FirstPaintMarker(win, ready_file)
     win.show()
     sys.exit(app.exec())
 

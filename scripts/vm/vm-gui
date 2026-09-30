@@ -85,6 +85,111 @@ run_input() {
     "$VM_EXEC" "$VM" "runuser -u admin -- env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock $1"
 }
 
+# LABWC PRESENTS A FRESH FRAME BEFORE EVERY HOST CAPTURE. In the labwc/XWayland
+# lane the frame labwc last committed can hold an XWayland window that was
+# only partly drawn when it was composited (a black band or staircase over
+# the bottom of a Qt window), and labwc commits no later frame on its own, so
+# `virsh screenshot` returned that stale frame for 15 s and more while the
+# client had long finished (F6, 2026-09-30: 12 of 52 relaunches of the admin
+# app; permissions-gui/22 S1 and 04 S2). A wlr-screencopy request makes labwc
+# render and commit a new frame from the clients' CURRENT buffers.
+#
+# So before every capture the guest (lib/labwc-present-frame.sh) asks labwc
+# itself for one screencopy and returns that frame; the host then captures
+# with `virsh screenshot` until the host frame MATCHES it (the screencopy's
+# `ready` is not a scanout barrier, so it is observed, not assumed). The graded
+# frame is still the host capture, attested as before; the guest frame is only
+# the reference and is never published.
+#
+# QCI_VM_GUI_SESSION says which lane this is: `auto` (default) asks the guest,
+# `labwc` requires labwc, `none` declares a guest without labwc and skips the
+# refresh (the fake-virsh tests; a qdwin guest answers not-labwc by itself).
+# Everything that is not an explicit answer -- no reply, a malformed reply,
+# labwc without grim or without its socket, a host frame that never matches --
+# refuses the capture: an unrefreshed labwc frame is never delivered.
+QCI_VM_GUI_SESSION=${QCI_VM_GUI_SESSION:-auto}
+# Differing pixels tolerated between labwc's frame and the host frame (a text
+# caret blinking between the two), and how many host captures, 0.2 s apart,
+# may pass before it shows. A bounded similarity check, not exact identity: a
+# stale region smaller than this would pass, but the stale frames seen differ
+# by 10^4 pixels and more. Requires ImageMagick; without it: refused.
+QCI_VM_GUI_PRESENT_TOLERANCE=${QCI_VM_GUI_PRESENT_TOLERANCE:-600}
+QCI_VM_GUI_PRESENT_TRIES=${QCI_VM_GUI_PRESENT_TRIES:-15}
+
+vm_gui_guest_script() {
+    "$VM_GUI_DIR/vm-script" "$VM"
+}
+
+# Pixels that differ between two images; fails when they cannot be compared
+# (different sizes, undecodable). `magick compare` exits 1 for "different".
+vm_gui_pixel_diff() {
+    local n rc=0
+    n=$(magick compare -metric AE "$1" "$2" null: 2>&1 >/dev/null) || rc=$?
+    [ "$rc" -le 1 ] || return 1
+    n=${n%% *}
+    [[ "$n" =~ ^[0-9]+(\.[0-9]+)?([eE][+]?[0-9]+)?$ ]] || return 1
+    printf '%.0f\n' "$n"
+}
+
+# The only way this file takes a host frame: make labwc present a fresh frame,
+# then capture RAW and unattested (callers publish/attest as before) once the
+# host frame shows it. Args: vm out [uri]
+capture_presented_shot() {
+    local out=$2 reply token ref i diff=""
+    case "$QCI_VM_GUI_SESSION" in
+        none) capture_virsh_shot "$@"; return ;;
+        auto|labwc) ;;
+        *) echo "vm-gui: QCI_VM_GUI_SESSION must be auto, labwc or none (got '$QCI_VM_GUI_SESSION')" >&2; return 2 ;;
+    esac
+    local grc=0
+    reply=$(vm_gui_guest_script < "$VM_GUI_DIR/lib/labwc-present-frame.sh" 2>&1) || grc=$?
+    if [ "$grc" -ne 0 ]; then
+        echo "vm-gui: the guest's labwc frame refresh failed (status $grc); refusing a capture that may show a stale frame (QCI_VM_GUI_SESSION=none declares a guest without labwc)" >&2
+        return 1
+    fi
+    token=$(printf '%s\n' "$reply" | sed -n 's/^qci-labwc-refresh=\([a-z-]*\)$/\1/p' | tail -n1)
+    case "$token" in
+        not-labwc)
+            if [ "$QCI_VM_GUI_SESSION" = labwc ]; then
+                echo "vm-gui: QCI_VM_GUI_SESSION=labwc but the guest runs no labwc; refusing the capture" >&2
+                return 1
+            fi
+            capture_virsh_shot "$@"; return ;;
+        ok) ;;
+        "")
+            echo "vm-gui: no answer from the guest to the labwc frame refresh; refusing a capture that may show a stale frame (QCI_VM_GUI_SESSION=none declares a guest without labwc)" >&2
+            return 1 ;;
+        *)
+            echo "vm-gui: labwc could not be made to present a fresh frame ($token); refusing a capture that may show a stale XWayland frame" >&2
+            return 1 ;;
+    esac
+    ref="$out.labwc-ref.png"
+    printf '%s\n' "$reply" | sed -n 's/^qci-labwc-frame=//p' | tail -n1 | base64 -d > "$ref" 2>/dev/null || true
+    if [ ! -s "$ref" ]; then
+        rm -f -- "$ref"
+        echo "vm-gui: labwc answered ok without its frame; refusing the capture" >&2
+        return 1
+    fi
+    # The comparison IS the barrier; without it a stale host frame could pass.
+    if ! command -v magick >/dev/null 2>&1; then
+        rm -f -- "$ref"
+        echo "vm-gui: labwc presented a fresh frame, but without ImageMagick the host frame cannot be checked against it; refusing the capture" >&2
+        return 1
+    fi
+    for (( i=1; i<=QCI_VM_GUI_PRESENT_TRIES; i++ )); do
+        capture_virsh_shot "$@" || { local crc=$?; rm -f -- "$ref"; return "$crc"; }
+        diff=$(vm_gui_pixel_diff "$ref" "$out") || diff=""
+        if [ -n "$diff" ] && [ "$diff" -le "$QCI_VM_GUI_PRESENT_TOLERANCE" ]; then
+            rm -f -- "$ref"
+            return 0
+        fi
+        sleep 0.2
+    done
+    rm -f -- "$ref" "$out"
+    echo "vm-gui: the host frame never showed the frame labwc presented (last difference: ${diff:-not comparable} pixels, tolerance $QCI_VM_GUI_PRESENT_TOLERANCE); refusing the capture" >&2
+    return 1
+}
+
 have_ydotool() {
     "$VM_EXEC" "$VM" "runuser -u admin -- bash -lc 'command -v ydotool >/dev/null 2>&1 && [ -S /run/user/1000/ydotool.sock ]'" >/dev/null 2>&1
 }
@@ -405,7 +510,7 @@ click_preview() {
     # this capture, the annotated and zoomed views without one (they are
     # derivatives, linked to the raw frame by their sidecars and manifest).
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-click.XXXXXX") || return 1
-    capture_virsh_shot "$VM" "$scratch/raw.png" || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
+    capture_presented_shot "$VM" "$scratch/raw.png" || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
     read -r width height < <(click_image_size "$scratch/raw.png")
     [ -n "$width" ] && [ -n "$height" ] || { rm -rf -- "$scratch"; return 2; }
     if [ "$width" -ne "$expected_w" ] || [ "$height" -ne "$expected_h" ]; then
@@ -505,7 +610,7 @@ click_confirm() {
     # Unattested raw capture, then padded to its own view-unique size and
     # published with its ledger row (see click_preview).
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-click.XXXXXX") || return 1
-    capture_virsh_shot "$VM" "$scratch/post.png" || { local crc=$?; rm -rf -- "$scratch"; return "$crc"; }
+    capture_presented_shot "$VM" "$scratch/post.png" || { local crc=$?; rm -rf -- "$scratch"; return "$crc"; }
     qci_view_publish "$scratch/post.png" "$post" click-post "virsh:$VM" deliver_attested_frame \
         || { rm -rf -- "$scratch"; return 1; }
     rm -rf -- "$scratch"
@@ -681,7 +786,7 @@ capture_usable_screenshot() {
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shot.XXXXXX") || return 1
     for (( i=1; i<=attempts; i++ )); do
         candidate="$scratch/attempt-${i}.png"
-        capture_virsh_shot "$VM" "$candidate" \
+        capture_presented_shot "$VM" "$candidate" \
             || { rc=$?; rm -rf -- "$scratch"; return "$rc"; }
         rc=0
         screenshot_is_usable "$candidate" || rc=$?
@@ -759,7 +864,7 @@ screenshot_fresh() {
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/qci-shotfresh.XXXXXX") || return 1
     for (( i=1; i<=attempts; i++ )); do
         candidate="$scratch/attempt-${i}.png"
-        capture_virsh_shot "$VM" "$candidate" \
+        capture_presented_shot "$VM" "$candidate" \
             || { local caprc=$?; rm -rf -- "$scratch"; return "$caprc"; }
         # ONE USABILITY GATE FOR BOTH LANES. This loop used to carry its own
         # black-only check (`screenshot_is_black`, a hard-coded 0.15 cutoff),

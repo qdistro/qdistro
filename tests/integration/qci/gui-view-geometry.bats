@@ -14,6 +14,9 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+    # A fake virsh has no guest to answer the labwc frame refresh; these
+    # suites test capture attestation (vm-gui-labwc-refresh.bats covers it).
+    export QCI_VM_GUI_SESSION=none
     VM_GUI="$REPO_ROOT/scripts/vm/vm-gui"
     VIEWLIB="$REPO_ROOT/scripts/vm/lib/view-geometry.sh"
     ADAPTER="$REPO_ROOT/ci/lib/gui_rollout_views.py"

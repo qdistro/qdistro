@@ -45,6 +45,9 @@
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+    # A fake virsh has no guest to answer the labwc frame refresh; these
+    # suites test capture attestation (vm-gui-labwc-refresh.bats covers it).
+    export QCI_VM_GUI_SESSION=none
     # shellcheck disable=SC1090
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
     EXIT_USAGE=2
@@ -956,11 +959,15 @@ EOF
     # it PUBLISHES the padded frame (view-geometry.sh): the retry lanes'
     # candidates and, since the padding work, click-preview raw and
     # click-confirm post too.
-    grep -q 'capture_virsh_shot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
+    # (Every host frame goes through capture_presented_shot, which first makes
+    # labwc present a fresh frame and then calls capture_virsh_shot.)
+    grep -q 'capture_presented_shot "\$VM" "\$candidate"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q '^capture_presented_shot() {' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_virsh_shot "\$@"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'capture_publish_frame "\$src" "\$dst"' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_shot "\$VM" "\$scratch/raw.png"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_presented_shot "\$VM" "\$scratch/raw.png"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'qci_view_publish "\$scratch/raw.png" "\$raw" click-raw "virsh:\$VM" deliver_attested_frame' "$REPO_ROOT/scripts/vm/vm-gui"
-    grep -q 'capture_virsh_shot "\$VM" "\$scratch/post.png"' "$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q 'capture_presented_shot "\$VM" "\$scratch/post.png"' "$REPO_ROOT/scripts/vm/vm-gui"
     grep -q 'qci_view_publish "\$scratch/post.png" "\$post" click-post "virsh:\$VM" deliver_attested_frame' "$REPO_ROOT/scripts/vm/vm-gui"
     # qdwin_screenshot (in-guest qdshell capture, qdwin/qdlocker lane). Without
     # this, every qci:visual=required scenario in those repos would be ERROR.
@@ -2573,7 +2580,7 @@ printf '\211PNG\r\n\032\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\10\6\0\0\0\37\25\304\211\0
 printf '\n%s\n' "$(date +%s%N)" >> "$out"
 EOF
     chmod +x "$farm/virsh"
-    run env -i PATH="$farm" HOME="$TDIR" \
+    run env -i PATH="$farm" HOME="$TDIR" QCI_VM_GUI_SESSION=none \
         QCI_GUI_CAPTURE_LOG="$CAPLOG" QCI_GUI_ARTIFACT_DIR="$ADIR" \
         LIBVIRT_DEFAULT_URI=qemu:///session \
         "$REPO_ROOT/scripts/vm/vm-gui" "$CAPVM" screenshot-fresh "$ADIR/unchecked.png"

@@ -541,6 +541,32 @@ _probe_broker_pending_action() {
     printf '%s' "$reply"
     grep -Fq "string \"$action\"" <<<"$reply"
 }
+# await_x11_window_title <user> <title-ere> [timeout] [interval]
+# Wait until an XWayland window owned by <user>'s display :0 carries a title
+# that matches <title-ere> as a WHOLE line (grep -Ex). Use it where the app
+# publishes model state in its title -- the admin approvals window titles
+# itself `admin approvals (N pending)` from the rows it actually displays --
+# so a capture waits for that state instead of a fixed sleep a runner can
+# drop. Only VISIBLE windows count; the caller owns the one-window
+# precondition (the scenarios kill stale admin apps in Setup). On timeout the
+# titles seen are printed, so "no window" and "window in the wrong state"
+# stay distinct.
+await_x11_window_title() {
+    local user=$1 pattern=$2 timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    if [ -z "$user" ] || [ -z "$pattern" ]; then
+        printf '[await] x11 window title needs a user and a title pattern\n' >&2
+        return 2
+    fi
+    _await "x11 window title /$pattern/ (user $user)" "$timeout" "$interval" \
+        _probe_x11_window_title "$user" "$pattern"
+}
+_probe_x11_window_title() {
+    local user=$1 pattern=$2 titles
+    titles=$(runuser -u "$user" -- env DISPLAY=:0 \
+        xdotool search --onlyvisible --name "$pattern" getwindowname %@ 2>/dev/null)
+    printf 'titles=[%s]' "$(printf '%s' "$titles" | paste -sd '|')"
+    grep -Exq -- "$pattern" <<<"$titles"
+}
 _probe_system_unit_active() {
     local unit=$1 state
     state=$(systemctl is-active "$unit" 2>/dev/null)

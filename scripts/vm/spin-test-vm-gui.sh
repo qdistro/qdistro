@@ -561,7 +561,7 @@ WPEOF
 # BOTH profiles. The body is intentionally left un-indented to keep the diff
 # reviewable; it is bracketed by this `if`/`fi`.
 if [ "$SESSION" = labwc ]; then
-# 6. Install labwc + lxqt + XWayland + qterminal + xdotool + fonts.
+# 6. Install labwc + lxqt + XWayland + qterminal + xdotool + grim + fonts.
 #    The permissions-gui scenarios assume `labwc + lxqt on tty3 as
 #    user admin, autologged via greetd` (AGENTS.md), not the
 #    qdwin-shell session that install-qdwin-session-for-vm.sh wires
@@ -574,13 +574,18 @@ if [ "$SESSION" = labwc ]; then
 #      - xwayland (provides /usr/bin/Xwayland)
 #      - dejavu-fonts noto-sans-fonts (labwc aborts on no fonts)
 zypper -n install labwc lxqt-session lxqt-labwc-session \
-    qterminal xdotool xhost xwayland git swaybg \
+    qterminal xdotool xhost xwayland git swaybg grim \
     python313-rich python313-textual python313-mistune \
     dejavu-fonts google-noto-sans-fonts \
     perl-Net-DBus \
     >/dev/null 2>&1 || \
     echo "[gui-spin] WARN: zypper install of GUI stack failed"
 fc-cache -f >/dev/null 2>&1 || true
+# grim is how vm-gui makes labwc present a fresh frame before each host
+# capture (see labwc_present_frame in scripts/vm/vm-gui); without it every
+# labwc-lane screenshot fails closed, so refuse the golden here instead.
+command -v grim >/dev/null 2>&1 \
+    || { echo "[gui-spin] ERROR: grim is not installed; vm-gui cannot refresh labwc frames"; exit 1; }
 
 # Install the qdistro labwc-startup override + session wrapper.
 install -m 0755 "$SRC/deploy/qdistro-startlxqtwayland.sh" \
