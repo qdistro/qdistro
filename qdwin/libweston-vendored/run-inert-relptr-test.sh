@@ -35,8 +35,11 @@
 # never rests on a prefix some earlier checkout installed.
 #
 # Env:
-#   QDWIN_LIBWESTON_PREFIX  test an already-installed prefix instead of
-#                           building one (manual use; qci builds)
+#   QDWIN_INERT_RELPTR_PREFIX  test an already-installed prefix instead of
+#                           building one (manual use only). Deliberately NOT
+#                           QDWIN_LIBWESTON_PREFIX: qci may export that for the
+#                           production prefix, which must not opt this gate
+#                           out of building the current sources.
 #   KEEP_WORK=1             keep the module build and weston logs
 set -uo pipefail
 
@@ -51,11 +54,17 @@ command -v weston >/dev/null || die "weston binary not found"
 python3 -c 'import pywayland.protocol.relative_pointer_unstable_v1, pywayland.protocol.tablet_unstable_v2' 2>/dev/null \
     || die "python3 pywayland (relative-pointer + tablet-v2 bindings) not importable"
 
-if [ -n "${QDWIN_LIBWESTON_PREFIX:-}" ]; then
-    PREFIX=$QDWIN_LIBWESTON_PREFIX
+if [ -n "${QDWIN_INERT_RELPTR_PREFIX:-}" ]; then
+    PREFIX=$QDWIN_INERT_RELPTR_PREFIX
 else
     BUILD="$HERE/src/build-inert-relptr"
     PREFIX="$BUILD/prefix"
+    # One build/install tree per checkout: serialize concurrent runs through
+    # the build AND the cases (which load from that prefix). The lock lives
+    # outside the tree, which a reconfigure removes.
+    LOCK="${XDG_RUNTIME_DIR:-/tmp}/qdwin-inert-relptr-$(printf '%s' "$BUILD" | sha256sum | cut -c1-16).lock"
+    exec 8>"$LOCK" || die "cannot open lock $LOCK"
+    flock 8 || die "cannot take lock $LOCK"
     QDWIN_LIBWESTON_PROFILE=headless QDWIN_LIBWESTON_BUILD_DIR="$BUILD" \
         QDWIN_LIBWESTON_PREFIX="$PREFIX" bash "$HERE/build-libweston.sh" >/dev/null \
         || die "building the headless vendored libweston from $HERE/src failed"
