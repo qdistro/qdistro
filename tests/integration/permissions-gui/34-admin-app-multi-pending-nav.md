@@ -89,7 +89,7 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
+runuser -u admin -- env DISPLAY=:0 timeout 10 xdotool search --sync \
   --name "admin approvals" windowactivate --sync
 EOF
 )
@@ -205,7 +205,16 @@ done
 exit $bad'
 ```
 
-**Assert**: `/tmp/34-s5-drained.png` shows empty pending list.
+Open `s5-drained.png` before grading it. The title is updated from the
+model before the XWayland surface necessarily displays the empty list. If
+the frame still shows any row or stale detail text, keep it and capture up
+to four more frames, 2 s apart, as `34-s5-drained-r2.png` through `-r5.png`.
+Open each new frame. The first frame with an empty list and `(no selection)`
+is the S5 evidence. If all five disagree with the empty title, S5 fails on
+the last frame and all captures remain in the artifacts.
+
+**Assert**: the S5 evidence frame shows an empty pending list and
+`(no selection)` in the detail pane.
 
 ## Teardown
 
