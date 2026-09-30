@@ -93,6 +93,12 @@ function completePaletteFromScheme(obj) {
   return out;
 }
 
+function untaggedFileMayCommit(pendingId, acceptedId) {
+  // Untagged colors.json contents must never inherit a pending generation's
+  // identity. Only the producer completion path may commit a pending id.
+  return pendingId === acceptedId;
+}
+
 function palettesEqual(a, b) {
   if (!a || !b)
     return false;
@@ -110,6 +116,7 @@ if (typeof module !== "undefined") {
     colorToHex: colorToHex,
     completePalette: completePalette,
     completePaletteFromScheme: completePaletteFromScheme,
-    palettesEqual: palettesEqual
+    palettesEqual: palettesEqual,
+    untaggedFileMayCommit: untaggedFileMayCommit
   };
 }

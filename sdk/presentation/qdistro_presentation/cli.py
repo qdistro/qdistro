@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 
 from .model import (
+    MAX_BYTES,
     SnapshotError,
     example_snapshot,
+    loads_strict,
     normalize_producer,
     parse_snapshot,
 )
@@ -46,14 +47,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    raw = sys.stdin.read()
+    raw_b = sys.stdin.buffer.read(MAX_BYTES + 1)
+    if len(raw_b) > MAX_BYTES:
+        print("qdistro-presentation-publish: stdin exceeds 64 KiB", file=sys.stderr)
+        return 1
+    raw = raw_b.decode("utf-8")
     directory = _destination(args.directory)
     os.makedirs(directory, mode=0o700, exist_ok=True)
     require_unwritable = os.path.abspath(directory) == os.path.abspath(MANAGED_DIR)
     try:
         if args.reset:
             if raw.strip():
-                template = parse_snapshot(json.loads(raw))
+                template = parse_snapshot(loads_strict(raw))
             else:
                 template = example_snapshot()
             result = write_disabled_envelope(
@@ -65,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not raw.strip():
                 raise SnapshotError("stdin JSON is required")
-            payload = json.loads(raw)
+            payload = loads_strict(raw)
             if "colors" in payload and "mode" in payload and "version" not in payload:
                 snapshot = normalize_producer(
                     mode=payload.get("mode"),
@@ -82,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                 owner_uid=args.owner_uid,
                 require_unwritable_dirs=require_unwritable,
             )
-    except (SnapshotError, OSError, json.JSONDecodeError) as exc:
+    except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"qdistro-presentation-publish: {exc}", file=sys.stderr)
         return 1
     print(result.generation)

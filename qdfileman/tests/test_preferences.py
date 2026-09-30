@@ -97,6 +97,31 @@ def test_follow_desktop_and_desktop_fonts_persist(qapp, isolated_config):
     assert "ui_font_family" not in appearance
 
 
+def test_apply_preserves_unrelated_appearance_overrides(qapp, isolated_config):
+    isolated_config.set(
+        "appearance",
+        {
+            "version": 1,
+            "tooltips_enabled": False,
+            "icon_theme": "Adwaita",
+            "ui_scale": 1.1,
+            "ui_font_family": "Inter",
+        },
+    )
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.cb_desktop_fonts.setChecked(False)
+        dlg._apply()
+    finally:
+        dlg.deleteLater()
+    appearance = isolated_config.get("appearance", default={})
+    assert appearance.get("tooltips_enabled") is False
+    assert appearance.get("icon_theme") == "Adwaita"
+    assert appearance.get("ui_scale") == 1.1
+    assert appearance.get("ui_font_family")
+    assert "ui_font_size_pt" not in appearance
+
+
 def test_cancel_does_not_write_inherited_fonts(qapp, isolated_config):
     dlg = PreferencesDialog(isolated_config)
     try:

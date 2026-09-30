@@ -12,7 +12,7 @@ from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QApplication, QLabel
 from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.paths import ResolvedPath
-from qdistro_presentation.publish import write_snapshot
+from qdistro_presentation.publish import write_disabled_envelope, write_snapshot
 from qdistro_presentation.qt import PresentationController, snapshot_palette
 
 
@@ -44,6 +44,43 @@ def test_native_restore_and_snapshot_palette(qapp, tmp_path):
     assert highlight == example_snapshot().colors.mOnPrimary
     ctrl.set_theme_mode("native")
     assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == native_window
+    ctrl.stop()
+
+
+def test_enabled_false_clears_shared_stylesheet(qapp, tmp_path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    assert "QMenu" in qapp.styleSheet()
+    write_disabled_envelope(
+        str(tmp_path), example_snapshot(), require_unwritable_dirs=False
+    )
+    ctrl._reload()
+    assert ctrl.state.using_shared_palette is False
+    assert qapp.styleSheet() == ctrl._native_stylesheet
+    ctrl.stop()
+
+
+def test_explicit_light_clears_shared_stylesheet(qapp, tmp_path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+
+    def legacy(app, mode):
+        from PyQt6.QtGui import QPalette
+
+        app.setStyle("Fusion")
+        app.setPalette(QPalette())
+
+    ctrl = PresentationController(
+        qapp,
+        theme_mode="system",
+        snapshot_path=_path(tmp_path),
+        apply_legacy=legacy,
+        watch=False,
+    )
+    assert "QMenu" in qapp.styleSheet()
+    ctrl.set_theme_mode("light")
+    assert "QMenu" not in qapp.styleSheet()
     ctrl.stop()
 
 

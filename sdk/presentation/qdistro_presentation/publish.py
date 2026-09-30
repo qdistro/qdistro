@@ -83,6 +83,9 @@ def write_snapshot(
     created exclusive inside ``directory`` and replaced with ``os.rename``.
     """
     snapshot = with_generation(snapshot)
+    from .model import parse_snapshot
+
+    snapshot = parse_snapshot(snapshot.to_dict())
     payload = snapshot.to_json().encode("utf-8")
     if len(payload) > 64 * 1024:
         raise SnapshotError("serialized snapshot exceeds 64 KiB")

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from qdistro_presentation.model import SnapshotPathError, example_snapshot, with_generation
+from qdistro_presentation.model import (
+    SnapshotError,
+    SnapshotPathError,
+    example_snapshot,
+    with_generation,
+)
 from qdistro_presentation.publish import write_disabled_envelope, write_snapshot
 
 
@@ -64,6 +70,16 @@ def test_rejects_symlink_directory(tmp_path: Path):
     link.symlink_to(real)
     with pytest.raises(SnapshotPathError):
         write_snapshot(str(link), example_snapshot(), require_unwritable_dirs=False)
+
+
+def test_invalid_model_does_not_replace_existing(tmp_path: Path):
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    original = (tmp_path / "current.json").read_bytes()
+    bad = replace(snap, version=2)
+    with pytest.raises(SnapshotError):
+        write_snapshot(str(tmp_path), bad, require_unwritable_dirs=False, skip_unchanged=False)
+    assert (tmp_path / "current.json").read_bytes() == original
 
 
 def test_disabled_envelope_changes_generation(tmp_path: Path):

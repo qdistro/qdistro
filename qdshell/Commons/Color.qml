@@ -35,6 +35,8 @@ Singleton {
   property string pendingMode: ""
   property string acceptedMode: "dark"
   property var acceptedPalette: ({})
+  property int fileCommitRequestId: 0
+  property string fileCommitMode: ""
   signal acceptedTargetChanged(int requestId, string mode, var palette)
 
   // Timer to reset isTransitioning after animation completes
@@ -392,7 +394,7 @@ Singleton {
   }
 
   function commitTargetPalette(requestId, mode, palette) {
-    if (requestId !== root.pendingRequestId && requestId < root.pendingRequestId)
+    if (requestId !== root.pendingRequestId)
       return false;
     const pal = ColorPalette.completePalette(palette);
     if (!pal) {
@@ -427,14 +429,28 @@ Singleton {
     return true;
   }
 
+  function commitProcessResult(requestId, mode) {
+    if (requestId !== root.pendingRequestId)
+      return false;
+    root.fileCommitRequestId = requestId;
+    root.fileCommitMode = (mode === "light") ? "light" : "dark";
+    customColorsFile.reload();
+    return true;
+  }
+
   function _commitFromAdapterIfNeeded() {
     const pal = paletteFromAdapter();
     if (!pal)
       return;
-    if (root.pendingRequestId !== root.acceptedRequestId) {
-      commitTargetPalette(root.pendingRequestId, root.pendingMode, pal);
+    if (root.fileCommitRequestId && root.fileCommitRequestId === root.pendingRequestId) {
+      const id = root.fileCommitRequestId;
+      const mode = root.fileCommitMode;
+      root.fileCommitRequestId = 0;
+      commitTargetPalette(id, mode, pal);
       return;
     }
+    if (!ColorPalette.untaggedFileMayCommit(root.pendingRequestId, root.acceptedRequestId))
+      return;
     if (root.acceptedRequestId === 0) {
       const mode = (Settings.data.colorSchemes && Settings.data.colorSchemes.darkMode) ? "dark" : "light";
       commitTargetPalette(beginRequest(mode), mode, pal);

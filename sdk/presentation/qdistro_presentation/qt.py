@@ -278,7 +278,7 @@ class PresentationController(QObject):
             return None
         try:
             snapshot, identity = load_snapshot(resolved)
-        except (OSError, SnapshotError, SnapshotPathError) as exc:
+        except (OSError, SnapshotError, SnapshotPathError, RecursionError) as exc:
             log.debug("presentation snapshot unread: %s", exc)
             return self._snapshot
         if self._identity == identity and self._snapshot is not None:
@@ -399,12 +399,20 @@ class PresentationController(QObject):
                 self.changed.emit(old, resolved, fields)
                 self._notify_widgets()
 
+    def _restore_native(self) -> None:
+        app = self._app
+        app.setStyle(self._native_style)
+        app.setPalette(QPalette(self._native_palette))
+        app.setStyleSheet(self._native_stylesheet)
+
     def _apply_to_app(self, resolved: ResolvedPresentation) -> None:
         app = self._app
+        # Always restore the captured baseline first so leftover Fusion/QSS
+        # from a previous shared snapshot cannot linger on reset or explicit
+        # dark/light.
+        self._restore_native()
         if resolved.theme_mode == "native":
-            app.setStyle(self._native_style)
-            app.setPalette(QPalette(self._native_palette))
-            app.setStyleSheet(self._native_stylesheet)
+            pass
         elif resolved.using_shared_palette and resolved.colors is not None:
             app.setStyle("Fusion")
             app.setPalette(snapshot_palette(resolved.colors))
@@ -415,10 +423,6 @@ class PresentationController(QObject):
             self._apply_legacy(app, resolved.theme_mode)  # type: ignore[arg-type]
         elif resolved.theme_mode == "system" and self._apply_system_fallback is not None:
             self._apply_system_fallback(app)
-        elif resolved.theme_mode == "system":
-            app.setStyle(self._native_style)
-            app.setPalette(QPalette(self._native_palette))
-            app.setStyleSheet(self._native_stylesheet)
 
         ui_family = pick_family(
             resolved.ui_family, fallback=self._native_font.family(), fixed=False

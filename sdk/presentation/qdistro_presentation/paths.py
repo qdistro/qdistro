@@ -105,16 +105,24 @@ def walk_open(
                 if not stat.S_ISDIR(info.st_mode):
                     _close_quietly(new_fd)
                     raise SnapshotPathError("expected a directory")
-                if require_unwritable_dirs and _unsafe_dir_mode(info.st_mode, is_leaf=is_leaf):
+                # The directory that contains a file leaf is the protected
+                # presentation directory even though it is not the walk's last
+                # component. Sticky /tmp may only be a non-protected ancestor.
+                protect_as_leaf = is_leaf or (
+                    not leaf_directory and index == len(parts) - 2
+                )
+                if require_unwritable_dirs and _unsafe_dir_mode(
+                    info.st_mode, is_leaf=protect_as_leaf
+                ):
                     _close_quietly(new_fd)
                     raise SnapshotPathError("directory is group/other-writable")
                 if ancestor_uids is not None and index in ancestor_uids:
                     if info.st_uid != ancestor_uids[index]:
                         _close_quietly(new_fd)
                         raise SnapshotPathError("directory owner mismatch")
-                if is_leaf and leaf_uid is not None and info.st_uid != leaf_uid:
+                if protect_as_leaf and leaf_uid is not None and info.st_uid != leaf_uid:
                     _close_quietly(new_fd)
-                    raise SnapshotPathError("leaf owner mismatch")
+                    raise SnapshotPathError("directory owner mismatch")
             _close_quietly(dir_fd)
             dir_fd = new_fd
         return dir_fd
@@ -148,24 +156,25 @@ class DeploymentMeta:
 
 def load_deployment_meta(path: str = DEPLOYMENT_META) -> DeploymentMeta | None:
     """Return install metadata, or None if the managed source is unavailable."""
+    fd = -1
     try:
         fd = walk_open(
             path,
             ancestor_uids={0: 0, 1: 0, 2: 0, 3: 0},  # usr, share, qdistro, presentation
             leaf_uid=0,
         )
-    except (OSError, SnapshotPathError, SnapshotError):
-        return None
-    try:
+        info = os.fstat(fd)
+        if _group_or_other_writable(stat.S_IMODE(info.st_mode)):
+            return None
         data = read_regular_fd(fd, max_bytes=4096)
-    finally:
-        _close_quietly(fd)
-    try:
         from .model import loads_strict
 
         obj = loads_strict(data.decode("utf-8"))
-    except (UnicodeDecodeError, SnapshotError):
+    except (OSError, SnapshotPathError, SnapshotError, RecursionError, UnicodeDecodeError):
         return None
+    finally:
+        if fd >= 0:
+            _close_quietly(fd)
     if not isinstance(obj, dict):
         return None
     version = obj.get("version")

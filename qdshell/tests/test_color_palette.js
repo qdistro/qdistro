@@ -49,4 +49,12 @@ const P = require("../Services/Theming/ColorPalette.js");
   assert.strictEqual(P.completePaletteFromScheme({ primary: "#fff59b" }), null);
 })();
 
+(function testUntaggedFileMustNotInheritPendingId() {
+  // ensures: a colors.json load during a pending wallpaper request cannot
+  // acquire that request's identity.
+  assert.strictEqual(P.untaggedFileMayCommit(2, 1), false, "pending generation blocks untagged commit");
+  assert.strictEqual(P.untaggedFileMayCommit(1, 1), true, "no pending generation allows manual/initial commit");
+  assert.strictEqual(P.untaggedFileMayCommit(0, 0), true, "startup ids equal");
+})();
+
 console.log("test_color_palette.js ok");

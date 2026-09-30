@@ -158,10 +158,21 @@ class PreferencesDialog(QDialog):
         self.config.set(g, "sort_order", _ORDER_LABEL_TO_KEY[self.combo_order.currentText()])
         self.config.set(g, "theme_mode", _THEME_LABEL_TO_KEY[self.combo_theme.currentText()])
         self.config.set(g, "icon_size", self.spin_icon_size.value())
-        appearance = {"version": 1}
-        if not self.cb_desktop_fonts.isChecked():
+        appearance = dict(self.config.get("appearance", default={}) or {})
+        appearance["version"] = 1
+        if self.cb_desktop_fonts.isChecked():
+            appearance.pop("ui_font_family", None)
+            appearance.pop("ui_font_size_pt", None)
+        else:
             appearance["ui_font_family"] = self.combo_ui_font.currentText()
-            appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
+            if "ui_font_size_pt" in (self.config.get("appearance", default={}) or {}) or self.spin_ui_font_size.isEnabled():
+                # Only persist size when the user is not inheriting it. A family-only
+                # override must not grow a size key from the dialog default.
+                existing = (self.config.get("appearance", default={}) or {}).get("ui_font_size_pt")
+                if existing is not None:
+                    appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
+                elif self.spin_ui_font_size.value() != 11:
+                    appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
         self.config.set("appearance", appearance)
         self.config.save()
         try:

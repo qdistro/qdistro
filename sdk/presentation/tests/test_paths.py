@@ -57,6 +57,15 @@ def test_writable_leaf_directory_rejected(tmp_path: Path):
         walk_open(str(leaf), leaf_directory=True, require_unwritable_dirs=True)
 
 
+def test_sticky_world_writable_parent_of_file_rejected(tmp_path: Path):
+    leaf = tmp_path / "presentation"
+    leaf.mkdir()
+    (leaf / "current.json").write_text("{}", encoding="utf-8")
+    os.chmod(leaf, 0o1777)
+    with pytest.raises(SnapshotPathError, match="group/other-writable"):
+        walk_open(str(leaf / "current.json"), require_unwritable_dirs=True)
+
+
 def test_forced_override_path_kind():
     resolved = ResolvedPath(
         path="/tmp/fixture.json", kind="override", expected_uid=None, watch=True

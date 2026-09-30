@@ -593,9 +593,9 @@ Singleton {
         Logger.d("TemplateProcessor", "generateProcess onExited: has pending request, executing");
         executePendingRequest();
       } else if (exitCode === 0) {
-        // No pending request and successful completion - emit signal.
-        // Color.qml's colors.json FileView commits the whole adapter.
         root.colorsGenerated();
+        if (root.currentRequestId)
+          Color.commitProcessResult(root.currentRequestId, root.currentMode);
       } else if (root.currentRequestId) {
         Color.cancelRequest(root.currentRequestId);
       }

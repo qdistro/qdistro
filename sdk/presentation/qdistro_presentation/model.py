@@ -127,6 +127,8 @@ def loads_strict(text: str) -> Any:
         )
     except json.JSONDecodeError as exc:
         raise SnapshotError(f"invalid JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise SnapshotError("JSON nesting exceeds decoder limits") from exc
     _check_depth(value, 0)
     return value
 
@@ -833,7 +835,7 @@ def resolve_presentation(
     local = local or LocalOverrides()
     shared = snapshot if snapshot is not None and snapshot.enabled else None
     desktop_available = shared is not None
-    base_size = shared.fonts.base_point_size if shared else BASE_POINT_SIZE_DEFAULT
+    base_size = shared.fonts.base_point_size if shared else native_ui_point_size
     font_ui_scale = shared.fonts.ui_scale if shared else 1.0
     font_fixed_scale = shared.fonts.fixed_scale if shared else 1.0
     metrics_ui_scale = shared.metrics.ui_scale if shared else 1.0

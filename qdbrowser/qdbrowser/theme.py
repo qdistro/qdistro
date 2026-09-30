@@ -74,6 +74,9 @@ def palette_dict(mode: str = "auto") -> dict:
       - ``"light"`` — force light palette
     """
     if mode == "auto":
+        from PyQt6.QtGui import QPalette
+        from PyQt6.QtWidgets import QApplication as _QApplication
+
         ctrl = current_controller()
         if ctrl is not None and ctrl.state.using_shared_palette and ctrl.state.colors:
             colors = ctrl.state.colors
@@ -89,6 +92,20 @@ def palette_dict(mode: str = "auto") -> dict:
                 "selection_fg": colors.mOnPrimary,
                 "hover": colors.mHover,
                 "hover_fg": colors.mOnHover,
+            }
+        app = _QApplication.instance()
+        if app is not None:
+            pal = app.palette()
+            return {
+                "bg": pal.color(QPalette.ColorRole.Base).name(),
+                "bg_mid": pal.color(QPalette.ColorRole.Window).name(),
+                "bg_dim": pal.color(QPalette.ColorRole.AlternateBase).name(),
+                "fg": pal.color(QPalette.ColorRole.Text).name(),
+                "fg_dim": pal.color(QPalette.ColorRole.PlaceholderText).name(),
+                "accent": pal.color(QPalette.ColorRole.Highlight).name(),
+                "border": pal.color(QPalette.ColorRole.Mid).name(),
+                "selection": pal.color(QPalette.ColorRole.Highlight).name(),
+                "selection_fg": pal.color(QPalette.ColorRole.HighlightedText).name(),
             }
         mode = detect_system_theme()
     if mode == "light":
