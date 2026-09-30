@@ -194,3 +194,18 @@ def test_lock_request_does_not_double_confirm_without_compositor(qapp):
     # Now the compositor confirms.
     bridge._on_locked_changed(True)
     assert fired == [1]
+
+
+def test_initially_locked_ready_begins_a_lock_session(qapp):
+    """A locker that binds into an already-locked compositor (restarted after
+    a crash) must arm auth exactly like a fresh lock_requested: the controller
+    starts the lock session (fprintd + PAM fallback -> "Password" prompt)."""
+    bridge, controller = _make_bridge()
+    bridge._on_ready(True)
+    controller.notify_lock_begin.assert_called_once_with()
+
+
+def test_unlocked_ready_does_not_begin_a_lock_session(qapp):
+    bridge, controller = _make_bridge()
+    bridge._on_ready(False)
+    controller.notify_lock_begin.assert_not_called()

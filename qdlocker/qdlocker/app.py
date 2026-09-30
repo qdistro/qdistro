@@ -428,6 +428,17 @@ class WaylandBridge(QObject):
             self._locked = initially_locked
             self.lockedChanged.emit(initially_locked)
         self.lockedChangedForCtrl.emit(initially_locked)
+        if initially_locked:
+            # Binding into an already-locked compositor (a locker restarted
+            # after a crash, qdlocker/tests/gui/08) starts a lock session just
+            # like lock_requested does: without this the fresh locker never
+            # armed fprintd or started the PAM fallback, so the recovered lock
+            # screen showed no "Password" prompt and a fingerprint could not
+            # unlock it.
+            try:
+                self._controller.notify_lock_begin()
+            except Exception:
+                log.exception("controller.notify_lock_begin raised")
         if initially_locked and self._pwd_lifecycle is not None:
             try:
                 self._pwd_lifecycle.notify_screen_lock("manual")
