@@ -44,7 +44,7 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 # live in noctalia-helpers.sh (sourced above). The count is cursor-scoped,
 # not a --since window: a same-second stale remap from a prior move cannot
 # satisfy it. The waiter polls that same predicate (mapped on cursor_layer,
-# nonzero_alpha>0) until it is true or NOCT_CURSOR_WAIT_S (default 10s,
+# nonzero_alpha>0) until it is true or NOCT_CURSOR_WAIT_S (default 30s,
 # every NOCT_CURSOR_POLL_S, default 0.25s). A fixed sleep races journal
 # visibility when many GUI workers share the host.
 # Capture the current qdwin-compositor user-journal cursor (empty string on
@@ -81,10 +81,25 @@ hard-fails the journal asserts even though the cursor code is fine.
 
 ### Step 1 — park cursor in the dark wallpaper area
 
+qdwin re-maps the sprite only on a cursor TRANSITION (pointer focus
+leaving a client for the bare desktop, or a client setting a shape), not
+on every motion event. A move from one wallpaper point to another logs
+nothing. So step 1 first puts the pointer on the bar (a client surface),
+then captures the journal cursor and moves onto the wallpaper: the
+focus-leave re-installs the default sprite on every attempt, including a
+retry that starts with the pointer already parked at (1000, 600).
+(full-20260930T051422Z-65193 failed 1.1 exactly that way: the first
+attempt's remap landed after the old 10s bound, and the three retries
+moved wallpaper→same wallpaper point, so no remap could ever appear.)
+
 ```bash
+CUR_PRE1=$(compositor_journal_cursor)
+qdwin_mouse_move 640 15
+# Settle the bar's own shape remap first (not asserted here; step 2 does).
+noct_wait_cursor_layer_nonzero_alpha "$CUR_PRE1" 10 >/dev/null 2>&1 || true
 CUR_STEP1=$(compositor_journal_cursor)
 qdwin_mouse_move 1000 600
-# Bounded journal poll (default 10s), not a fixed sleep. Same condition as
+# Bounded journal poll (default 30s), not a fixed sleep. Same condition as
 # assert 1.1. Screenshot stays soft corroboration and still runs if the
 # waiter times out; the exit below is the loud failure.
 noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP1" || step1_cursor_rc=$?
@@ -177,7 +192,7 @@ start) plus the load-bearing compositor-evidence asserts (1.1, 2.1,
 move) plus 3.2/3.3 (session alive, no protocol errors) pass. Each
 load-bearing assert is preceded by `noct_wait_cursor_layer_nonzero_alpha`,
 which polls that same journal predicate until it holds or
-`NOCT_CURSOR_WAIT_S` (default 10s) expires, then fails loud. Screenshot-based
+`NOCT_CURSOR_WAIT_S` (default 30s) expires, then fails loud. Screenshot-based
 cursor-position checks are soft corroboration only — the hardware
 cursor plane is not captured by `virsh screenshot`, so their absence
 is NOT a failure. Soft asserts (2.2) may be downgraded to "info only"

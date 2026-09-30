@@ -65,7 +65,9 @@ teardown_file() {
     # client is incompatible with this image's system-weston/vendored-libweston
     # boundary. Capture the actual virtual display from outside the guest. This
     # is the same honest pixel source a person sees through SPICE/RDP.
-    local shot="$BATS_TEST_TMPDIR/s103-foot.png"
+    # Kept in the qci per-file scratch dir (when set) so a failed OCR leaves
+    # the exact frame behind for diagnosis.
+    local shot="${QCI_SCENARIO_TMPDIR:-$BATS_TEST_TMPDIR}/s103-foot.png"
     run virsh screenshot "$VM_NAME" "$shot"
     assert_success
     [ -s "$shot" ] || fail_loud "virsh screenshot produced no image at $shot"
@@ -75,7 +77,23 @@ teardown_file() {
     cp "$shot" "$(_qd_driver_stage_dir)/s103-foot.png"
     vm_run "command -v tesseract >/dev/null"
     require "tesseract not installed on VM (needed for launcher visual assertion)"
-    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png && tesseract /tmp/s103-foot.png - 2>/dev/null"
+    # tesseract 5.5.3 (snapshot 20260924) intermittently aborts in its exit-
+    # time destructors AFTER printing the full text ("free(): invalid size",
+    # rc=134; upstream tesseract-ocr/tesseract#4633). Seen twice under the
+    # 12-way full run, never in ~120 isolated/stressed reruns. Retry only such
+    # an abort (134/139), take the text only from an attempt that exited 0, and
+    # still fail if every attempt aborts. OMP_THREAD_LIMIT=1: one frame needs
+    # no threads, and it keeps OpenMP out of a loaded guest.
+    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png || exit 1
+        for attempt in 1 2 3; do
+            rm -f /tmp/s103-ocr.txt
+            OMP_THREAD_LIMIT=1 tesseract /tmp/s103-foot.png /tmp/s103-ocr 2>/tmp/s103-ocr.err
+            rc=\$?
+            if [ \"\$rc\" -eq 0 ]; then cat /tmp/s103-ocr.txt; exit 0; fi
+            echo \"tesseract attempt \$attempt rc=\$rc: \$(tail -n1 /tmp/s103-ocr.err)\" >&2
+            case \"\$rc\" in 134|139) ;; *) exit \"\$rc\" ;; esac
+        done
+        exit 1"
     assert_success
 
     local ocr_text="$output" hits=0 d

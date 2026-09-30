@@ -18,11 +18,11 @@ _remap_line() {
     printf 'qdwin: %s: mapped on cursor_layer (hotspot=1,1) payload=32x32 nonzero_alpha=%s\n' "$1" "$2"
 }
 
-@test "default cursor wait bound is 10s" {
+@test "default cursor wait bound is 30s" {
     env -u NOCT_CURSOR_WAIT_S -u NOCT_CURSOR_POLL_S -u NOCT_CURSOR_JOURNAL_FILE \
         bash -c '
             source "$1"
-            [ "$NOCT_CURSOR_WAIT_S" = 10 ]
+            [ "$NOCT_CURSOR_WAIT_S" = 30 ]
             [ "$NOCT_CURSOR_POLL_S" = 0.25 ]
         ' bash "$REPO_ROOT/tests/integration/qdwin-noctalia/noctalia-helpers.sh"
 }

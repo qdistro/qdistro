@@ -54,8 +54,11 @@ noct_restart() {
 }
 
 # How long scenario 04 polls for a runtime cursor-plane remap, and how often.
-# A fixed one-second sleep raced journal visibility under parallel GUI load.
-: "${NOCT_CURSOR_WAIT_S:=10}"
+# A fixed one-second sleep raced journal visibility under parallel GUI load,
+# and under the 12-way full run the first remap landed ~10s after the move
+# (full-20260930T051422Z-65193), so the bound is 30s. The poll returns on the
+# first sighting, so a healthy run does not wait any longer.
+: "${NOCT_CURSOR_WAIT_S:=30}"
 : "${NOCT_CURSOR_POLL_S:=0.25}"
 
 # Count `mapped on cursor_layer` remaps whose nonzero_alpha token is not 0.
