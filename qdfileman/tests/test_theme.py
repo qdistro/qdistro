@@ -62,9 +62,43 @@ def test_apply_theme_system_is_a_noop(qapp):
     palette_before = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
     resolved = apply_theme(qapp, "system")
     assert resolved == "system"
-    assert qapp.style().objectName() == style_before, (
-        "system mode must not call setStyle"
+    assert qapp.style().objectName() == style_before, "system mode must not call setStyle"
+    assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == palette_before, (
+        "system mode must not call setPalette"
     )
+
+
+def test_attach_presentation_follows_snapshot(qapp, tmp_path):
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ResolvedPath
+    from qdistro_presentation.publish import write_snapshot
+    from qdistro_presentation.qt import PresentationController
+    from qfileman.config import Config
+    from qfileman.theme import apply_theme, reset_controller_for_tests
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    Config._instance = None
+    Config._data = None
+    cfg = Config()
+    cfg.set("general", "theme_mode", "system")
+    reset_controller_for_tests()
+    ctrl = PresentationController(
+        qapp,
+        theme_mode="system",
+        snapshot_path=ResolvedPath(
+            path=str(tmp_path / "current.json"),
+            kind="override",
+            expected_uid=None,
+            watch=False,
+        ),
+        apply_legacy=lambda app, mode: apply_theme(app, mode),
+        apply_system_fallback=lambda app: apply_theme(app, "system"),
+        watch=False,
+    )
+    assert ctrl.state.using_shared_palette is True
     assert (
-        qapp.palette().color(QPalette.ColorRole.Window).getRgb() == palette_before
-    ), "system mode must not call setPalette"
+        qapp.palette().color(QPalette.ColorRole.Window).name() == example_snapshot().colors.mSurface
+    )
+    ctrl.set_theme_mode("native")
+    ctrl.stop()
+    reset_controller_for_tests()

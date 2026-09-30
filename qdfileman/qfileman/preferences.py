@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFontComboBox,
     QFormLayout,
     QGroupBox,
     QSpinBox,
@@ -38,7 +39,12 @@ _SORT_KEY_TO_LABEL = {v: k for k, v in _SORT_LABEL_TO_KEY.items()}
 _ORDER_LABEL_TO_KEY = {"Ascending": "asc", "Descending": "desc"}
 _ORDER_KEY_TO_LABEL = {v: k for k, v in _ORDER_LABEL_TO_KEY.items()}
 
-_THEME_LABEL_TO_KEY = {"System": "system", "Light": "light", "Dark": "dark"}
+_THEME_LABEL_TO_KEY = {
+    "Follow desktop": "system",
+    "Native": "native",
+    "Light": "light",
+    "Dark": "dark",
+}
 _THEME_KEY_TO_LABEL = {v: k for k, v in _THEME_LABEL_TO_KEY.items()}
 
 
@@ -82,7 +88,19 @@ class PreferencesDialog(QDialog):
 
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(list(_THEME_LABEL_TO_KEY))
-        form.addRow("Theme:", self.combo_theme)
+        form.addRow("Application appearance:", self.combo_theme)
+
+        self.cb_desktop_fonts = QCheckBox("Use desktop fonts")
+        form.addRow(self.cb_desktop_fonts)
+
+        self.combo_ui_font = QFontComboBox()
+        form.addRow("UI font:", self.combo_ui_font)
+
+        self.spin_ui_font_size = QSpinBox()
+        self.spin_ui_font_size.setRange(6, 48)
+        form.addRow("UI font size:", self.spin_ui_font_size)
+
+        self.cb_desktop_fonts.toggled.connect(self._on_desktop_fonts_toggled)
 
         self.spin_icon_size = QSpinBox()
         self.spin_icon_size.setRange(16, 256)
@@ -104,15 +122,9 @@ class PreferencesDialog(QDialog):
 
     def _load_values(self) -> None:
         g = "general"
-        self.cb_show_hidden.setChecked(
-            bool(self.config.get(g, "show_hidden", default=False))
-        )
-        self.cb_confirm_delete.setChecked(
-            bool(self.config.get(g, "confirm_delete", default=True))
-        )
-        self.cb_single_click.setChecked(
-            bool(self.config.get(g, "single_click", default=False))
-        )
+        self.cb_show_hidden.setChecked(bool(self.config.get(g, "show_hidden", default=False)))
+        self.cb_confirm_delete.setChecked(bool(self.config.get(g, "confirm_delete", default=True)))
+        self.cb_single_click.setChecked(bool(self.config.get(g, "single_click", default=False)))
         view = self.config.get(g, "default_view", default="list")
         self.combo_view.setCurrentText(_VIEW_KEY_TO_LABEL.get(view, "List"))
         sort = self.config.get(g, "sort_by", default="name")
@@ -120,10 +132,20 @@ class PreferencesDialog(QDialog):
         order = self.config.get(g, "sort_order", default="asc")
         self.combo_order.setCurrentText(_ORDER_KEY_TO_LABEL.get(order, "Ascending"))
         theme = self.config.get(g, "theme_mode", default="system")
-        self.combo_theme.setCurrentText(_THEME_KEY_TO_LABEL.get(theme, "System"))
-        self.spin_icon_size.setValue(
-            int(self.config.get(g, "icon_size", default=32))
+        self.combo_theme.setCurrentText(_THEME_KEY_TO_LABEL.get(theme, "Follow desktop"))
+        appearance = self.config.get("appearance", default={}) or {}
+        has_font_override = bool(
+            appearance.get("ui_font_family") or appearance.get("ui_font_size_pt")
         )
+        self.cb_desktop_fonts.setChecked(not has_font_override)
+        if appearance.get("ui_font_family"):
+            self.combo_ui_font.setCurrentText(str(appearance["ui_font_family"]))
+        if appearance.get("ui_font_size_pt"):
+            self.spin_ui_font_size.setValue(int(appearance["ui_font_size_pt"]))
+        else:
+            self.spin_ui_font_size.setValue(11)
+        self._on_desktop_fonts_toggled(self.cb_desktop_fonts.isChecked())
+        self.spin_icon_size.setValue(int(self.config.get(g, "icon_size", default=32)))
 
     def _apply(self) -> None:
         """Write the current dialog state back to Config and persist."""
@@ -136,7 +158,27 @@ class PreferencesDialog(QDialog):
         self.config.set(g, "sort_order", _ORDER_LABEL_TO_KEY[self.combo_order.currentText()])
         self.config.set(g, "theme_mode", _THEME_LABEL_TO_KEY[self.combo_theme.currentText()])
         self.config.set(g, "icon_size", self.spin_icon_size.value())
+        appearance = {"version": 1}
+        if not self.cb_desktop_fonts.isChecked():
+            appearance["ui_font_family"] = self.combo_ui_font.currentText()
+            appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
+        self.config.set("appearance", appearance)
         self.config.save()
+        try:
+            from qdistro_presentation.model import parse_local_overrides
+
+            from qfileman.theme import current_controller
+
+            ctrl = current_controller()
+            if ctrl is not None:
+                ctrl.set_theme_mode(_THEME_LABEL_TO_KEY[self.combo_theme.currentText()])
+                ctrl.set_local(parse_local_overrides(appearance))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not apply appearance: %s", exc)
+
+    def _on_desktop_fonts_toggled(self, checked: bool) -> None:
+        self.combo_ui_font.setEnabled(not checked)
+        self.spin_ui_font_size.setEnabled(not checked)
 
     def accept(self) -> None:
         self._apply()
