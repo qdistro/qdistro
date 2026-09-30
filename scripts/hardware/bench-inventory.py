@@ -6,10 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import shutil
-
+from pathlib import Path
 
 SERIAL_TTY = re.compile(r"tty(?:USB|ACM)[0-9]+$")
 DISK_NAME = re.compile(r"(?:sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|mmcblk[0-9]+)$")

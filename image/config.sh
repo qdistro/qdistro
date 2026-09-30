@@ -77,7 +77,7 @@ sed 's/^/[qdistro-image]   /' /etc/qdistro/release
 
 # kiwi does not persist description <repository> entries into the packed
 # image (iso/14 Phase G.2: /etc/zypp/repos.d is empty). Bootstrap still
-# zyppers. Write the same history/<snapshot>/ URLs config.xml pinned.
+# zyppers. Write the same history/<snapshot>/ URLs build.sh gave kiwi.
 . "$QD/image/lib/snapshot-repos.sh"
 if ! qdistro_write_snapshot_repos /etc/qdistro/release; then
     echo "[qdistro-image] FATAL: could not write snapshot zypper repos. Aborting build." >&2

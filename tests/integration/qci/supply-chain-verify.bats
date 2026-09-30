@@ -212,7 +212,7 @@ make_local_signed_fixture() {
     [ ! -e "$root/etc/zypp/repos.d/rolling.repo" ]
     [ ! -e "$root/etc/zypp/services.d/rolling.service" ]
     [ "$(find "$root/etc/zypp/repos.d" -name '*.repo' | wc -l)" -eq 2 ]
-    grep -Fq "history/$(sed -n 's/^snapshot=//p' "$REPO_ROOT/scripts/vm/test-substrate.conf")/tumbleweed/repo/oss/" "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
+    grep -Fq "history/$(sed -n 's/^snapshot=//p' "$REPO_ROOT/snapshot.conf")/tumbleweed/repo/oss/" "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
     grep -Fq 'gpgcheck=1' "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
     grep -Fq 'keeppackages=1' "$root/etc/zypp/repos.d/qdistro-snapshot-oss.repo"
 }
@@ -286,4 +286,39 @@ provenance_reuse() {
     printf 'tampered' >> "$WORK/baked.qcow2"
     run provenance_reuse "$WORK/baked.qcow2" "deadbeef"
     [ "$status" -ne 0 ]
+}
+
+# Every rootless Podman base that builds test payloads comes from the one
+# snapshot.conf pin: the native (test binary) builder and the tier-2 workload
+# cache pull tumbleweed:<snapshot>, never the rolling :latest. The real scripts
+# run against a recording podman that stops them at the pull.
+@test "podman builders pull the snapshot.conf-pinned Tumbleweed base, not :latest" {
+    local snap fake="$WORK/bin" calls="$WORK/podman-calls" script
+    snap="$(sed -n 's/^snapshot=//p' "$REPO_ROOT/snapshot.conf")"
+    mkdir -p "$fake"
+    cat > "$fake/podman" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >> "$calls"
+case "\$1" in
+    info) echo true ;;
+    image) exit 1 ;;
+    *) exit 3 ;;
+esac
+SH
+    chmod +x "$fake/podman"
+    for script in build-native-podman.sh build-tier2-podman-cache.sh; do
+        : > "$calls"
+        run env -u QCI_PODMAN_IMAGE PATH="$fake:$PATH" QCI_OFFLINE=0 \
+            bash "$REPO_ROOT/scripts/vm/$script"
+        [ "$status" -ne 0 ]
+        grep -qx "pull registry.opensuse.org/opensuse/tumbleweed:$snap" "$calls"
+        run grep -c ':latest' "$calls"
+        [ "$output" = 0 ]
+    done
+    # the tier-2 Containerfiles take the same pin as their FROM tag
+    for script in "$REPO_ROOT"/tier2/Containerfile.*; do
+        grep -qx 'FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}' "$script"
+    done
+    grep -q -- '--build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT"' "$REPO_ROOT/scripts/vm/build-tier2-podman-cache.sh"
+    grep -q -- '--build-arg "SNAPSHOT=$tier2_snapshot"' "$REPO_ROOT/tier2/make-tier2-image.sh"
 }

@@ -12,7 +12,9 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
 [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || {
     echo 'ERROR: Podman must run rootless' >&2; exit 2;
 }
-image=${QCI_PODMAN_IMAGE:-registry.opensuse.org/opensuse/tumbleweed:latest}
+# The base is the container build of the pinned snapshot, so the in-container
+# alignment to the snapshot repos is a no-op instead of a rolling delta.
+image=${QCI_PODMAN_IMAGE:-registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT}
 if ! podman image exists "$image"; then
     case "${QCI_OFFLINE:-0}" in
         1|true|yes|on) echo "ERROR: native base image $image is missing (QCI_OFFLINE=1)" >&2; exit 3 ;;

@@ -1,6 +1,6 @@
 #!/bin/bash
 # snapshot-repos.sh — write the Tumbleweed history snapshot zypper repos
-# that config.xml pinned. Sourced by image/config.sh inside the kiwi
+# that snapshot.conf pinned (via the source manifest). Sourced by image/config.sh inside the kiwi
 # chroot and by tests on the host. kiwi OEM does not persist the
 # description's <repository> entries into /etc/zypp/repos.d (the dir
 # is empty on a packed image), so bootstrap-on-kiwi has nothing to

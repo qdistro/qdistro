@@ -108,14 +108,18 @@ the checklist has a row per app.
 
 ## Tumbleweed snapshot pin and provenance
 
-`config.xml` pins both repositories to
+The image is built on one Tumbleweed snapshot,
 `https://download.opensuse.org/history/<YYYYMMDD>/tumbleweed/repo/{oss,non-oss}/`.
-The id is written **only** in that block at the top of `config.xml` (kiwi's
-XML parser rejects entities, so it cannot be spelled once); `build.sh
---snapshot-id` reads it and refuses to build if the two paths disagree or a
-path is unpinned. `history/` is a rolling window of about four weeks, so a
-rebuild is exact inside the window and a bug report can always name its
-snapshot after it. Bump the id deliberately per tester release.
+The id is written **only** in the repo-root `snapshot.conf`, the pin the
+tier-2 workloads, the Podman native builder and the qci test VM bases share,
+so all of them download from one snapshot. `config.xml` has no
+`<repository>` elements (kiwi's XML parser rejects entities, so the id could
+not be spelled once there); `build.sh` passes both HTTPS history repositories
+to kiwi with `--ignore-repos --add-repo`. `build.sh --snapshot-id` prints the
+pin and refuses a malformed one or one older than 14 days. `history/` is a
+rolling window of about four weeks, so a rebuild is exact inside the window
+and a bug report can always name its snapshot after it. Bump the pin
+deliberately (newest available snapshot) and rebuild everything with it.
 
 What went into an image is in **`/etc/qdistro/release`** on the image:
 `VERSION`, `SNAPSHOT`, `PROFILE`, `BUILD_DATE`, `ARTIFACT` and one
@@ -132,7 +136,7 @@ its presence.
 
 | File | What it does |
 | --- | --- |
-| `config.xml` | kiwi description: pinned Tumbleweed OSS + non-OSS repos (top of file), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. Kiwi XML profiles: `tester` (default, import=true, the published stick) and `ci` (additive: bats/ydotool extras; config.sh masks greetd). Orthogonal to `QDISTRO_PROFILE` (dev/release). |
+| `config.xml` | kiwi description (repositories come from `snapshot.conf` via `build.sh`), OEM raw type (`firmware="uefi"` UEFI-only, `target_removable="true"`, `installiso="false"`, `bundle_format="%N-%v-%I"`, 28 GiB), grub2, btrfs root with subvolumes, admin (uid 1000) + user (uid 1001) baked in. Kiwi XML profiles: `tester` (default, import=true, the published stick) and `ci` (additive: bats/ydotool extras; config.sh masks greetd). Orthogonal to `QDISTRO_PROFILE` (dev/release). |
 | `config.sh` | in-chroot post-install script. Branding override, `/etc/qdistro/release`, build qdwin + qdistro daemons + qdshell from `/root/qdistro-src/`, run **the bootstrap's** installer chain (sources `scripts/install/qdistro-bootstrap.sh`, strict, state on the image; every step honours the offline-install contract in `scripts/install/lib/qdistro-offline.sh`), SELinux policy modules and explicit global mode (dev permissive, release enforcing), qdwin session with `QDWIN_SESSION_AUTOSTART=0`, greetd (enabled on tester; **masked** on kiwi profile `ci` so admin's user manager starts the compositor), compositor-VT hardening (`--offline`), qemu-ga RPC filter cleared. A missing or failing installer, or a short chain record, aborts the build. |
 | `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` copies git's view of the monorepo (tracked + untracked-not-ignored files, so ignored build output and caches are omitted; `image/root/root/`, `.worktrees/`, `ci/runs/`, `image/logs/`, `image/keys/` are always excluded) into a fresh `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
 | `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder; always `--from-baked`, never the kiwi tester image — that would be circular), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). Forwards `QDISTRO_KIWI_PROFILE` (tester\|ci). |
@@ -164,7 +168,7 @@ Or through CI: `qci` image gate = resolve `bundle/*.raw.xz` (digest +
 `verify.sh --stick` on the **same** decompressed raw (install-test is
 inert without an ISO: no row, not a skip). The full run also compares the
 image's five clean source commits with its captured release manifest, and
-checks version/snapshot against config.xml and profile against
+checks version against config.xml, snapshot against snapshot.conf, and profile against
 `QDISTRO_PROFILE` (default release; pass `dev` explicitly for a pinned tester).
 Expected/observed identities and the artifact digest are recorded in the run.
 Part of `qci full`; a

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Shared, explicit input for cloud-derived test VMs. Callers may select a
-# different qualified manifest with QDISTRO_TEST_SUBSTRATE=<absolute path>.
+# Loader for the repo-root snapshot.conf, the one Tumbleweed snapshot pin (also
+# read by image/build.sh). Shared, explicit input for cloud-derived test VMs.
+# Callers may select a different qualified manifest with QDISTRO_TEST_SUBSTRATE=<absolute path>.
 
 qdistro_substrate_snapshot_fresh() {
     local snapshot="$1" today="${2:-$(date -u +%Y%m%d)}" snapshot_epoch today_epoch
@@ -13,7 +14,7 @@ qdistro_substrate_snapshot_fresh() {
 }
 
 qdistro_load_test_substrate() {
-    local file="${QDISTRO_TEST_SUBSTRATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-substrate.conf}"
+    local file="${QDISTRO_TEST_SUBSTRATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/snapshot.conf}"
     local key value schema='' arch='' cloud_url='' cloud_sha256='' snapshot=''
     [ -f "$file" ] || { echo "ERROR: test substrate manifest missing: $file" >&2; return 1; }
     while IFS='=' read -r key value || [ -n "$key" ]; do

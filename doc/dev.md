@@ -104,7 +104,8 @@ pinned snapshot on the host; a checked payload is installed while provisioning
 each run's golden VM.
 Install rootless Podman on the host before running VM integration gates.
 Its cloud SHA256 and Tumbleweed repository snapshot are pinned together in
-[`scripts/vm/test-substrate.conf`](../scripts/vm/test-substrate.conf); see
+[`snapshot.conf`](../snapshot.conf), the one snapshot pin the image, tier-2 and
+Podman builds share; see
 [`ci/README.md`](../ci/README.md#cloud-test-substrate) for rotation, the RPM
 download cache, and the explicit `QDISTRO_VM_BASE=kiwi` alternative.
 

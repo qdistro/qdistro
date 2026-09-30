@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "bench-inventory.py"
 spec = importlib.util.spec_from_file_location("bench_inventory", SCRIPT)
