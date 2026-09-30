@@ -37,6 +37,15 @@ from collections.abc import Callable, Iterable
 import dbus
 import dbus.service
 
+from .transfers import (
+    TransferController,
+    load_metadata,
+    normalize_capabilities,
+    normalize_receipt,
+    unknown_capabilities,
+    unknown_receipt,
+)
+
 log = logging.getLogger("qdistro_app")
 
 _BUS_NAME = "org.qdistro.AdminBroker1"
@@ -613,7 +622,9 @@ class AppReceiver(dbus.service.Object):
                  *,
                  friendly_name: str | None = None,
                  silo: str | None = None,
-                 supported_kinds: Iterable[str] | None = None):
+                 supported_kinds: Iterable[str] | None = None,
+                 transfer_capabilities: Callable[[], dict] | None = None,
+                 on_transfer: Callable | None = None):
         if bus is None:
             bus = dbus.SessionBus()
         # Claim the bus name before registering the object — a name
@@ -640,6 +651,7 @@ class AppReceiver(dbus.service.Object):
         # caller's on_receive callback, so even if on_receive raises,
         # the probe still reports what landed.
         self._last_received: tuple[str, str] | None = None
+        self._transfers = TransferController(transfer_capabilities, on_transfer)
 
     # ---- properties ------------------------------------------------
 
@@ -675,6 +687,25 @@ class AppReceiver(dbus.service.Object):
         so observers (``last_received``, ``GetLastReceived``,
         ``PayloadReceived`` signal) see a single normalised entry."""
         self._deliver(DEFAULT_KIND, str(payload))
+
+    @dbus.service.method(APP1_IFACE, in_signature="", out_signature="s")
+    def GetTransferCapabilities(self) -> str:
+        """Versioned limits/availability; legacy Receive remains arrival-only."""
+        return json.dumps(self._transfers.capabilities())
+
+    @dbus.service.method(APP1_IFACE, in_signature="sss", out_signature="s",
+                         sender_keyword="sender")
+    def ReceiveTransfer(self, expected_instance: str, kind: str, payload: str,
+                        sender=None) -> str:
+        """Validate and stage an obligation without broadcasting its payload."""
+        return json.dumps(self._transfers.receive(str(expected_instance), str(kind), str(payload),
+                                                  str(sender or "")))
+
+    @dbus.service.method(APP1_IFACE, in_signature="ss", out_signature="s",
+                         sender_keyword="sender")
+    def GetTransferStatus(self, expected_instance: str, transfer_id: str, sender=None) -> str:
+        return json.dumps(self._transfers.status(str(expected_instance), str(transfer_id),
+                                                 str(sender or "")))
 
     @dbus.service.method(APP1_IFACE, in_signature="", out_signature="s")
     def GetName(self) -> str:
@@ -770,7 +801,7 @@ def list_receivers() -> list[tuple[int, str, str]]:
     """
     bus = dbus.SystemBus()
     broker = bus.get_object(_BUS_NAME, _OBJ_PATH)
-    rows = broker.ListReceivers(dbus_interface=_BUS_NAME)
+    rows = broker.ListReceivers(dbus_interface=_BUS_NAME, timeout=3.0)
     return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
 
 
@@ -795,3 +826,46 @@ def send_to(target_uid: int, target_service: str,
         timeout=float(timeout),
     )
     return True
+
+
+def get_transfer_capabilities(target_uid: int, target_service: str) -> dict:
+    """Ask the broker for anchored receiver capabilities, including same-uid peers."""
+    try:
+        bus = dbus.SystemBus()
+        broker = bus.get_object(_BUS_NAME, _OBJ_PATH)
+        raw = broker.GetTransferCapabilities(dbus.Int32(int(target_uid)),
+                                            dbus.String(str(target_service)),
+                                            dbus_interface=_BUS_NAME, timeout=3.0)
+        return normalize_capabilities(load_metadata(raw))
+    except Exception:  # noqa: BLE001
+        return unknown_capabilities()
+
+
+def send_transfer(target_uid: int, target_service: str, expected_instance: str,
+                  kind: str, payload: str, *, timeout: float = 60) -> dict:
+    """Submit once through the broker. A timeout is unknown; never auto-resend."""
+    try:
+        bus = dbus.SystemBus()
+        broker = bus.get_object(_BUS_NAME, _OBJ_PATH)
+        raw = broker.RelayTransfer(dbus.Int32(int(target_uid)), dbus.String(str(target_service)),
+                                   dbus.String(str(expected_instance)), dbus.String(str(kind)),
+                                   dbus.String(str(payload)), dbus_interface=_BUS_NAME,
+                                   timeout=float(timeout))
+        receipt = normalize_receipt(load_metadata(raw))
+        if receipt["state"] in {"staged", "applied", "declined", "failed"} and receipt["instance_id"] != expected_instance:
+            return unknown_receipt(str(expected_instance), reason="receiver instance changed")
+        return receipt
+    except Exception:  # noqa: BLE001 — an unconfirmed call may have taken effect
+        return unknown_receipt(str(expected_instance), reason="transfer was not confirmed; do not resend automatically")
+
+
+def get_transfer_status(broker_transfer_id: str, *, timeout: float = 3) -> dict:
+    """Query a broker-owned opaque handle without replaying the transfer."""
+    try:
+        bus = dbus.SystemBus()
+        broker = bus.get_object(_BUS_NAME, _OBJ_PATH)
+        raw = broker.GetTransferStatus(dbus.String(str(broker_transfer_id)),
+                                       dbus_interface=_BUS_NAME, timeout=float(timeout))
+        return normalize_receipt(load_metadata(raw))
+    except Exception:  # noqa: BLE001
+        return unknown_receipt(transfer_id=str(broker_transfer_id))

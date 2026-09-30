@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
@@ -30,8 +30,8 @@ sys.path.insert(0, str(_SDK))
 from qdistro_app import (  # noqa: E402
     APP1_IFACE,
     APP1_OBJ_PATH,
-    AppReceiver,
     DEFAULT_KIND,
+    AppReceiver,
     _friendly_from_service,
     _kind_accepted,
     _resolve_silo,
@@ -390,7 +390,9 @@ class TestSendToMenuTargets:
         rows = app_receiver_mod.send_to_menu_targets()
         assert len(rows) == 1
         r = rows[0]
-        assert set(r.keys()) == {"uid", "service", "name", "silo"}
+        assert set(r.keys()) == {"uid", "service", "name", "silo", "capabilities", "capability_state"}
+        assert r["capabilities"]["version"] == 0
+        assert r["capability_state"] == "unknown"
         assert r["uid"] == 2000
         assert r["service"] == "org.qdistro.QNotebook.uid2000"
         assert r["name"] == "QNotebook"

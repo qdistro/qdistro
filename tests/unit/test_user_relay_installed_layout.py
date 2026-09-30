@@ -164,6 +164,7 @@ def test_installed_relay_resolves_the_broker_rules_engine(tmp_path):
     rules = _rules_dir(tmp_path)
     proc = _run_probe(root, f"""
         import qdistro_user_relay as R
+        assert R.transfer_wire is not None
         ok, why = R._containers_cross_uid_allowed(
             2000, "containers.create", {str(rules)!r})
         print("RESULT", ok, why)
@@ -335,6 +336,7 @@ def test_relay_finds_the_rules_engine_from_a_non_flat_install(tmp_path):
     modules = tmp_path / "modules"
     modules.mkdir()
     shutil.copy2(_REPO / "broker" / "qdistro_admin_rules.py", modules)
+    shutil.copy2(_REPO / "broker" / "transfer_protocol.py", modules)
 
     elsewhere = tmp_path / "root" / "opt" / "somewhere"
     elsewhere.mkdir(parents=True)
@@ -344,6 +346,7 @@ def test_relay_finds_the_rules_engine_from_a_non_flat_install(tmp_path):
     probe = elsewhere / "_probe.py"
     probe.write_text(textwrap.dedent(f"""
         import qdistro_user_relay as R
+        assert R.transfer_wire is not None
         ok, why = R._containers_cross_uid_allowed(
             2000, "containers.create", {str(rules)!r})
         print("RESULT", ok, why)
@@ -522,3 +525,18 @@ def test_only_static_policy_refusals_are_treated_as_permanent():
     assert not R._is_permanent_name_denial(
         _Exc("org.freedesktop.DBus.Error.Failed", "name already owned"))
     assert not R._is_permanent_name_denial(OSError("connection refused"))
+
+
+@_needs_runtime
+def test_installer_supplies_transfer_validation_without_checkout_paths(tmp_path):
+    """The relay transfer protocol must work from the real flattened install."""
+    root = _installed_tree(tmp_path)
+    proc = _run_probe(root, """
+        import qdistro_user_relay as R
+        assert R.transfer_wire is not None
+        result = R.transfer_wire.receipt('instance', 'opaque', 'staged', '')
+        assert result['state'] == 'staged'
+        print('TRANSFER INSTALLED')
+    """, tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert 'TRANSFER INSTALLED' in proc.stdout
