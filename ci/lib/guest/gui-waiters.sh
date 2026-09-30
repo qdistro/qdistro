@@ -547,8 +547,10 @@ _probe_broker_pending_action() {
 # publishes model state in its title -- the admin approvals window titles
 # itself `admin approvals (N pending)` from the rows it actually displays --
 # so a capture waits for that state instead of a fixed sleep a runner can
-# drop. On timeout the titles seen are printed, so "no window" and "window in
-# the wrong state" stay distinct.
+# drop. Only VISIBLE windows count; the caller owns the one-window
+# precondition (the scenarios kill stale admin apps in Setup). On timeout the
+# titles seen are printed, so "no window" and "window in the wrong state"
+# stay distinct.
 await_x11_window_title() {
     local user=$1 pattern=$2 timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
     if [ -z "$user" ] || [ -z "$pattern" ]; then
@@ -561,7 +563,7 @@ await_x11_window_title() {
 _probe_x11_window_title() {
     local user=$1 pattern=$2 titles
     titles=$(runuser -u "$user" -- env DISPLAY=:0 \
-        xdotool search --name "$pattern" getwindowname %@ 2>/dev/null)
+        xdotool search --onlyvisible --name "$pattern" getwindowname %@ 2>/dev/null)
     printf 'titles=[%s]' "$(printf '%s' "$titles" | paste -sd '|')"
     grep -Exq -- "$pattern" <<<"$titles"
 }

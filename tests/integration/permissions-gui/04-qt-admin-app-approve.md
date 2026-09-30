@@ -152,6 +152,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 -separator '|' /var/lib/qdist
 # A second call with the same uid/action/exe should be short-circuited
 # by the 1-hour cache entry written in S2. Admin app should see no
 # new pending row appear.
+# Audit baseline BEFORE the second call: S3 proves the cache hit from the
+# broker's own audit rows written after this id, not from the end state.
+$VMEXEC "$VM" "sqlite3 /var/lib/qdistro/audit/audit.sqlite 'SELECT COALESCE(MAX(id),0) FROM audit;' > /tmp/04-s3.baseid"
 B64=$(base64 -w0 <<'EOF'
 source /tmp/qci-gui-waiters.sh
 bg_start work2 work 'python3 /usr/local/bin/qdistro-test-permission'
@@ -167,12 +170,24 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait work2 60'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log work2; echo "rc=$(bg_rc work2)"'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window_title admin "admin approvals" 10'
 $VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s3-cachehit.png
+
+# Every audit row for test.action since the baseline, as
+# caller_uid|decision|source. A cache hit writes exactly one row with
+# source=cache (qdistro_admin_broker.py, _record_check from the cache
+# lookup); a prompted decision writes source=prompt. Expected output is
+# exactly the single line `2000|1|cache`.
+$VMEXEC "$VM" 'b=$(cat /tmp/04-s3.baseid); sqlite3 -separator "|" /var/lib/qdistro/audit/audit.sqlite "SELECT caller_uid, decision, source FROM audit WHERE id > $b AND action = '"'"'test.action'"'"' ORDER BY id;"'
 ```
 
 **Assert (cache hit):**
 - Screenshot still shows empty list (no new pending row appeared).
 - `/tmp/work2.log` contains `ALLOWED`, confirming the SDK returned
  true via the cache path without any admin interaction.
+- The audit query prints exactly one line, `2000|1|cache`. This is the
+ mechanical proof of the cache hit: a `prompt` row (or two rows) means a
+ new pending request was created, even if the list is empty again by
+ the time the frame is taken — FAIL. An empty result or a missing
+ baseline file is ERROR (the proof could not be taken), never a pass.
 
 ## Teardown
 
@@ -184,7 +199,7 @@ DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /home/admin/.local/state/qdistro/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /tmp/04-s3.baseid /home/admin/.local/state/qdistro/admin-app.log'
 ```
 
 ## Notes for the runner
