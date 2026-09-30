@@ -116,10 +116,13 @@ noct_wait_cursor_layer_nonzero_alpha "$CUR_PRE1" \
     || { echo "FAIL: entering the bar produced no cursor remap (step 1 precondition)"; exit 1; }
 CUR_STEP1=$(compositor_journal_cursor)
 qdwin_mouse_move 1000 600
-# Bounded journal poll (default 30s), not a fixed sleep. Same condition as
-# assert 1.1. Screenshot stays soft corroboration and still runs if the
+# Bounded journal poll (default 30s), not a fixed sleep, for the SAME
+# predicate as assert 1.1: the wallpaper's default-shape install with
+# nonzero alpha on one line (a late bar `shape=pointer` remap cannot end the
+# wait early). Screenshot stays soft corroboration and still runs if the
 # waiter times out; the exit below is the loud failure.
-noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP1" || step1_cursor_rc=$?
+STEP1_SHAPE='cursor-shape install shape=default: mapped on cursor_layer'
+noct_wait_cursor_layer_nonzero_alpha "$CUR_STEP1" "" "$STEP1_SHAPE" || step1_cursor_rc=$?
 qdwin_screenshot /tmp/04-step1-wallpaper-area.png
 [ "${step1_cursor_rc:-0}" -eq 0 ] || exit 1
 ```
@@ -133,13 +136,10 @@ screenshot` cannot capture the hardware cursor PLANE, so assert the
 compositor's own journal rather than the screenshot:
 
 ```bash
-[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP1")" -ge 1 ] \
-    || { echo "FAIL: cursor not mapped on cursor_layer with nonzero_alpha"; exit 1; }
 # The wallpaper's default-shape install itself must be visible: shape and
-# non-zero alpha on the SAME line (a late bar `shape=pointer` remap must not
-# stand in for a transparent wallpaper default).
-noct_compositor_journal_after "$CUR_STEP1" \
-    | grep -Eq 'cursor-shape install shape=default: mapped on cursor_layer .*nonzero_alpha=[1-9][0-9]*' \
+# non-zero alpha counted on the SAME line (a late bar `shape=pointer` remap
+# must not stand in for a transparent wallpaper default).
+[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP1" 'cursor-shape install shape=default: mapped on cursor_layer')" -ge 1 ] \
     || { echo "FAIL: no visible wallpaper-enter default-shape install after the move"; exit 1; }
 ```
 

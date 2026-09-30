@@ -103,17 +103,25 @@ noct_compositor_journal_after() {
 # Runtime nonzero-alpha cursor remaps after a journal cursor captured
 # immediately before the move. Prints a single integer.
 cursor_layer_nonzero_alpha_after() {
-    local cur="$1"
-    noct_compositor_journal_after "$cur" | noct_count_cursor_layer_nonzero_alpha
+    local cur="$1" filter="${2:-}"
+    if [ -n "$filter" ]; then
+        noct_compositor_journal_after "$cur" | grep -E -- "$filter" | noct_count_cursor_layer_nonzero_alpha
+    else
+        noct_compositor_journal_after "$cur" | noct_count_cursor_layer_nonzero_alpha
+    fi
 }
 
 # Poll cursor_layer_nonzero_alpha_after until it is >= 1 or the deadline
-# passes. $1 is the journal cursor; $2 overrides NOCT_CURSOR_WAIT_S (seconds).
-# Returns 0 on the first sighting. On expiry prints FAIL (bound, cursor, last
-# count, journal tail) and returns 1. Each iteration re-reads the journal.
+# passes. $1 is the journal cursor; $2 overrides NOCT_CURSOR_WAIT_S (seconds;
+# empty = default). $3, optional, is an ERE a counted line must ALSO match
+# (e.g. 'cursor-shape install shape=default:'), so the shape and its nonzero
+# alpha are read from the same line. Returns 0 on the first sighting. On
+# expiry prints FAIL (bound, cursor, last count, journal tail) and returns 1.
+# Each iteration re-reads the journal.
 noct_wait_cursor_layer_nonzero_alpha() {
     local cur="$1"
     local timeout="${2:-$NOCT_CURSOR_WAIT_S}"
+    local filter="${3:-}"
     local interval="$NOCT_CURSOR_POLL_S"
     local start_ms now_ms limit_ms elapsed_ms count text
     case "$timeout" in
@@ -138,7 +146,11 @@ noct_wait_cursor_layer_nonzero_alpha() {
         if text=$(noct_compositor_journal_after "$cur"); then
             :
         fi
-        count=$(printf '%s\n' "$text" | noct_count_cursor_layer_nonzero_alpha)
+        if [ -n "$filter" ]; then
+            count=$(printf '%s\n' "$text" | grep -E -- "$filter" | noct_count_cursor_layer_nonzero_alpha)
+        else
+            count=$(printf '%s\n' "$text" | noct_count_cursor_layer_nonzero_alpha)
+        fi
         case "$count" in
             ''|*[!0-9]*) count=0 ;;
         esac
@@ -148,7 +160,7 @@ noct_wait_cursor_layer_nonzero_alpha() {
         now_ms=$(date +%s%3N) || now_ms=$start_ms
         elapsed_ms=$(( now_ms - start_ms ))
         if [ "$elapsed_ms" -ge "$limit_ms" ]; then
-            echo "FAIL: timed out after ${timeout}s waiting for mapped on cursor_layer with nonzero_alpha>0 (elapsed_ms=${elapsed_ms} cursor=${cur} last_count=${count})"
+            echo "FAIL: timed out after ${timeout}s waiting for mapped on cursor_layer with nonzero_alpha>0${filter:+ on a line matching '$filter'} (elapsed_ms=${elapsed_ms} cursor=${cur} last_count=${count})"
             printf '%s\n' "$text" | tail -n 12
             return 1
         fi
