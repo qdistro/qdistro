@@ -310,7 +310,8 @@ GEOM="PROXY_GEOM x=240 y=100 w=800 h=600 output=Virtual-1 out=1280x800@0,0 outpu
     cat > "$T/bin/fake-virsh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$3" >> "$FAKE_VIRSH_LOG"
-printf '%s\n' "${FAKE_VIRSH_REPLY:-{\"return\":{},\"id\":\"libvirt-1\"}}"
+ok='{"return":{},"id":"libvirt-1"}'
+printf '%s\n' "${FAKE_VIRSH_REPLY:-$ok}"
 exit "${FAKE_VIRSH_RC:-0}"
 EOF
     chmod +x "$T/bin/fake-virsh"
