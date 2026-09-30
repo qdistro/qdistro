@@ -136,6 +136,49 @@ proves the broker isn't broken — only the over-broad scope is
 rejected.
 
 ```bash
+# S3's rejection is a modal QMessageBox titled "Decision not recorded" (the
+# admin app's designed refusal surface, S3's PASS shape). While it is open it
+# owns the keyboard: Ctrl+Shift+6 and Ctrl+Y below would go to the modal, not
+# the main window, and the S4 frame would show the modal. Dismiss it with its
+# default OK button (Enter) and prove it is gone before S4 touches the main
+# window. `DIALOG=absent` is only possible for S3's inline-only shape.
+DLG_FIND=$(base64 -w0 <<'EOF'
+wid=
+for _ in $(seq 1 20); do
+  wid=$(runuser -u admin -- env DISPLAY=:0 xdotool search --onlyvisible \
+    --name '^Decision not recorded$' 2>/dev/null | head -n1)
+  [ -n "$wid" ] && break
+  sleep 0.5
+done
+if [ -z "$wid" ]; then echo "DIALOG=absent"; exit 0; fi
+runuser -u admin -- env DISPLAY=:0 timeout 10 xdotool windowactivate --sync "$wid"
+echo "DIALOG=open wid=$wid"
+EOF
+)
+DLG_GONE=$(base64 -w0 <<'EOF'
+for _ in $(seq 1 20); do
+  if [ -z "$(runuser -u admin -- env DISPLAY=:0 xdotool search --onlyvisible \
+      --name '^Decision not recorded$' 2>/dev/null)" ]; then
+    echo "DIALOG=gone"; exit 0
+  fi
+  sleep 0.5
+done
+echo "DIALOG=still-open"; exit 1
+EOF
+)
+dlg_state=absent
+for attempt in 1 2; do
+  out=$($VMEXEC "$VM" "echo $DLG_FIND | base64 -d | bash")
+  echo "[s4-dismiss attempt $attempt] $out"
+  case "$out" in *DIALOG=open*) ;; *) break ;; esac
+  virsh send-key "$VM" --codeset linux KEY_ENTER
+  if out=$($VMEXEC "$VM" "echo $DLG_GONE | base64 -d | bash"); then
+    echo "[s4-dismiss attempt $attempt] $out"; dlg_state=dismissed; break
+  fi
+  echo "[s4-dismiss attempt $attempt] $out"; dlg_state=still-open
+done
+echo "S4-DIALOG-STATE=$dlg_state"
+
 # Activate the admin window, then select the forever_argv scope via the
 # deterministic keyboard shortcut Ctrl+Shift+6 (index 6 = forever_argv).
 # This replaces the mouse-click on the radio, which is unreliable on the
@@ -163,7 +206,12 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 47-qsu; echo "rc=$(bg_rc 4
 ```
 
 **Assert**:
-- `/tmp/47-s4a-forever-argv-selected.png` shows `forever_argv` radio
+- The dismissal printed `S4-DIALOG-STATE=dismissed` when S3 showed the
+  modal (or `absent` only when S3 passed on its inline-only shape). If it
+  printed `still-open`, the modal did not close on OK: report S4 FAIL
+  with the S3b and S4a frames.
+- `/tmp/47-s4a-forever-argv-selected.png` shows no `Decision not
+  recorded` modal, and shows `forever_argv` radio
   filled.
 - `/tmp/47-qsu.log` is empty or has no error; the qsu process has
   exited with rc=0 (`/bin/true` succeeded after admin approval).
