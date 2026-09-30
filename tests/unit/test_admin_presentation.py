@@ -160,7 +160,7 @@ def test_live_update_refreshes_detail_heading_font(qapp, tmp_path):
     win = MainWindow(_stub_broker())
     pane = win.detail
     before = pane.lbl_user.font().pointSizeF()
-    fonts = replace(example_snapshot().fonts, ui_scale=1.25)
+    fonts = replace(example_snapshot().fonts, ui_scale=1.25, fixed_scale=1.2)
     second = with_generation(replace(example_snapshot(), fonts=fonts))
     write_snapshot(str(tmp_path), second, require_unwritable_dirs=False, skip_unchanged=False)
     ctrl._reload()
@@ -169,5 +169,6 @@ def test_live_update_refreshes_detail_heading_font(qapp, tmp_path):
     after = pane.lbl_user.font().pointSizeF()
     assert after == pytest.approx(13.75 * 14.0 / 11.0)
     assert after > before
+    assert pane.lbl_exe.font().pointSizeF() == pytest.approx(ctrl.state.fixed_ui_point_size)
     win.close()
     ctrl.stop()
