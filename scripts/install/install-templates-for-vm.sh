@@ -185,10 +185,18 @@ fi
 # (tier2/) so the browser candidate builds without hand-duplicated copies.
 if [ -d "$UMBRELLA/tier2" ]; then
     install -d -m 0755 /usr/lib/qdistro/tier2
-    for asset in weston.ini entrypoint.sh SNAPSHOT configure-snapshot-repos.sh; do
+    for asset in weston.ini entrypoint.sh configure-snapshot-repos.sh; do
         [ -f "$UMBRELLA/tier2/$asset" ] \
             && install -m 0644 "$UMBRELLA/tier2/$asset" "/usr/lib/qdistro/tier2/$asset"
     done
+    # The recipes COPY SNAPSHOT; its one source is the repo-root snapshot.conf.
+    tier2_snapshot="$(sed -n 's/^snapshot=\([0-9]\{8\}\)$/\1/p' "$UMBRELLA/snapshot.conf" 2>/dev/null | head -n1)"
+    if [ -n "$tier2_snapshot" ]; then
+        printf '%s\n' "$tier2_snapshot" > /usr/lib/qdistro/tier2/SNAPSHOT
+        chmod 0644 /usr/lib/qdistro/tier2/SNAPSHOT
+    else
+        echo "install-templates-for-vm: WARNING: no snapshot pin in $UMBRELLA/snapshot.conf; tier-2 recipes cannot build" >&2
+    fi
 fi
 if [ -f "$SRC/examples/tier2-browser.toml" ]; then
     install -m 0644 "$SRC/examples/tier2-browser.toml" \

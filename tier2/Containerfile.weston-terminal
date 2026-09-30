@@ -9,7 +9,10 @@
 # qdistro-secctx-exec so the inner weston's outer-connection lands on
 # the compositor with a wp_security_context_v1 tag of
 # (qdistro.tier2, <container>/<app>, <launch-token>).
-FROM registry.opensuse.org/opensuse/tumbleweed:latest
+# The base follows the snapshot.conf pin (make-tier2-image.sh passes it), so
+# the base layer and the zypper repos come from one snapshot.
+ARG SNAPSHOT=latest
+FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}
 
 # Replace the rolling repositories inherited from the base before zypper reads
 # metadata. The shared helper pins both repos and leaves GPG checks enabled.

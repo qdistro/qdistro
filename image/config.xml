@@ -11,23 +11,13 @@
        The build is pinned to one Tumbleweed snapshot so a rebuild inside
        download.opensuse.org's ~4-week history window is exact, and a bug
        report can name the snapshot it ran (todo/iso/13, decided 2026-09-04).
-       Bump the id deliberately per tester release: it is the 8-digit
-       directory under https://download.opensuse.org/history/ and MUST be the
-       same in both source paths below. build.sh reads it from here (the
-       only place it is written) for the artifact name and /etc/qdistro/release,
-       and refuses to build if the two paths disagree. kiwi's XML parser
-       rejects entities, so there is no way to spell it once.
-       HTTPS transport (J25): plain http:// leaves repo metadata + RPMs open
-       to a MITM/poisoned-mirror substituting a trojaned package into the
-       baked image. kiwi still verifies the openSUSE repo GPG signatures;
-       https adds transport integrity + confidentiality on top.
+       The id lives in the repo-root snapshot.conf, the one pin shared with
+       the tier-2 workloads and the qci test VM bases. There are deliberately
+       no repository elements here: build.sh passes the two HTTPS history
+       repositories (Tumbleweed-OSS, Tumbleweed-NonOSS) to kiwi on the
+       command line, because kiwi's XML parser rejects entities and the id
+       could not be spelled once in this file.
        ====================================================================== -->
-  <repository type="rpm-md" alias="Tumbleweed-OSS">
-    <source path="https://download.opensuse.org/history/20260902/tumbleweed/repo/oss/"/>
-  </repository>
-  <repository type="rpm-md" alias="Tumbleweed-NonOSS">
-    <source path="https://download.opensuse.org/history/20260902/tumbleweed/repo/non-oss/"/>
-  </repository>
 
   <description type="system">
     <author>qdistro contributors</author>

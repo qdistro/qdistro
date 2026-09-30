@@ -30,6 +30,7 @@ elif what == 'size': print(t.findtext('size', ''), t.find('size').get('unit', ''
 elif what == 'oem': print(' '.join(sorted(c.tag for c in t.find('oemconfig'))))
 elif what == 'repos':
     for r in root.findall('repository'): print(r.get('alias'), r.find('source').get('path'))
+    print('count', len(root.findall('.//repository')))
 elif what == 'version': print(root.findtext('preferences/version'))
 elif what == 'profiles':
     for p in root.findall('profiles/profile'):
@@ -44,13 +45,17 @@ PY
 
 # Fake monorepo: $T/tree/qdistro is ONE git repository holding image/ (a copy
 # of build.sh and a config.xml) and the in-tree components qdwin/ qdshell/
-# qdgreeter/ qdlocker/, so build.sh's $HERE/.. repo-root walk and its
-# snapshot parser run for real.
+# qdgreeter/ qdlocker/, plus snapshot.conf and its loader, so build.sh's
+# $HERE/.. repo-root walk and its snapshot pin run for real.
 fake_tree() {
     local cfg="${1:-$IMAGE/config.xml}"
     mkdir -p "$T/tree/qdistro/image"
     cp "$IMAGE/build.sh" "$T/tree/qdistro/image/build.sh"
     cp "$cfg" "$T/tree/qdistro/image/config.xml"
+    # build.sh reads the pin from the repo-root snapshot.conf via the loader
+    mkdir -p "$T/tree/qdistro/scripts/vm/lib"
+    cp "$REPO/scripts/vm/lib/test-substrate.sh" "$T/tree/qdistro/scripts/vm/lib/"
+    cp "${2:-$REPO/snapshot.conf}" "$T/tree/qdistro/snapshot.conf"
     # same ignores as the real image/.gitignore: the sync's own output must
     # not make the tree look dirty
     printf 'root/root/\nlogs/\n' > "$T/tree/qdistro/image/.gitignore"
@@ -140,37 +145,47 @@ PY
     grep -q '^gpgcheck=1$' "$T/repos.d/qdistro-snapshot-oss.repo"
 }
 
-@test "config.xml: both repositories pin the same Tumbleweed snapshot over https" {
+@test "snapshot.conf is the one pin: config.xml names no repository, build.sh reads the conf" {
     run xml repos
-    [ "${#lines[@]}" -eq 2 ]
-    local ids=()
-    for l in "${lines[@]}"; do
-        [[ "$l" =~ ^Tumbleweed-(OSS|NonOSS)\ https://download\.opensuse\.org/history/([0-9]{8})/tumbleweed/repo/(oss|non-oss)/$ ]]
-        ids+=("${BASH_REMATCH[2]}")
-    done
-    [ "${ids[0]}" = "${ids[1]}" ]
-    # and build.sh reads exactly that id from the file
+    [ "$output" = "count 0" ]
+    run grep -rEl 'history/[0-9]{8}/' "$IMAGE/config.xml" "$REPO/tier2"
+    [ "$status" -eq 1 ]
+    run git -C "$REPO" ls-files --error-unmatch tier2/SNAPSHOT
+    [ "$status" -ne 0 ]
+    local pinned; pinned="$(sed -n 's/^snapshot=//p' "$REPO/snapshot.conf")"
+    [[ "$pinned" =~ ^[0-9]{8}$ ]]
     run bash "$IMAGE/build.sh" --snapshot-id
     [ "$status" -eq 0 ]
-    [ "$output" = "${ids[0]}" ]
+    [ "$output" = "$pinned" ]
 }
 
-@test "build.sh: --snapshot-id refuses repositories pinned to different snapshots" {
-    sed 's|history/\([0-9]\{8\}\)/tumbleweed/repo/non-oss/|history/19990101/tumbleweed/repo/non-oss/|' \
-        "$IMAGE/config.xml" > "$T/bad.xml"
-    fake_tree "$T/bad.xml"
-    run bash "$T/tree/qdistro/image/build.sh" --snapshot-id
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"pin different snapshots"* ]]
+@test "build.sh: kiwi gets both HTTPS history repositories for the manifest snapshot, and nothing else" {
+    # the function the build runs, not a copy of it
+    eval "$(sed -n '/^snapshot_repo_args() {$/,/^}$/p' "$IMAGE/build.sh")"
+    run snapshot_repo_args 20260924
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "--ignore-repos" ]
+    [ "${lines[1]}" = "--add-repo=https://download.opensuse.org/history/20260924/tumbleweed/repo/oss/,rpm-md,Tumbleweed-OSS" ]
+    [ "${lines[2]}" = "--add-repo=https://download.opensuse.org/history/20260924/tumbleweed/repo/non-oss/,rpm-md,Tumbleweed-NonOSS" ]
+    [ "${#lines[@]}" -eq 3 ]
+    run snapshot_repo_args latest
+    [ "$status" -ne 0 ]
+    grep -q '"${KIWI_REPO_ARGS\[@\]}"' "$IMAGE/build.sh"
 }
 
-@test "build.sh: --snapshot-id refuses an unpinned (rolling) repository" {
-    sed 's|https://download.opensuse.org/history/[0-9]\{8\}/tumbleweed/repo/oss/|https://download.opensuse.org/tumbleweed/repo/oss/|' \
-        "$IMAGE/config.xml" > "$T/bad.xml"
-    fake_tree "$T/bad.xml"
+@test "build.sh: --snapshot-id refuses a stale, malformed or missing pin" {
+    local old; old="$(date -u -d '-20 days' +%Y%m%d)"
+    sed "s/^snapshot=.*/snapshot=$old/" "$REPO/snapshot.conf" > "$T/stale.conf"
+    fake_tree "$IMAGE/config.xml" "$T/stale.conf"
     run bash "$T/tree/qdistro/image/build.sh" --snapshot-id
     [ "$status" -eq 2 ]
-    [[ "$output" == *"exactly two repositories"* ]]
+    [[ "$output" == *"older than 14 days"* ]]
+    sed -i "s/^snapshot=.*/snapshot=latest/" "$T/tree/qdistro/snapshot.conf"
+    run bash "$T/tree/qdistro/image/build.sh" --snapshot-id
+    [ "$status" -eq 2 ]
+    rm "$T/tree/qdistro/snapshot.conf"
+    run bash "$T/tree/qdistro/image/build.sh" --snapshot-id
+    [ "$status" -eq 2 ]
 }
 
 @test "build.sh: --sync-only writes the source manifest: snapshot + the monorepo commit with clean/DIRTY state" {
@@ -1298,14 +1313,16 @@ GF
 identity_fixture() {
     fake_root release
     sed -i "s/ DIRTY .*$/ clean/" "$T/root/etc/qdistro/release"
-    # The fixture stamp uses 20260902, so fix only the test XML's pin.
-    sed -E 's@/history/[0-9]{8}/@/history/20260902/@g' "$IMAGE/config.xml" > "$T/identity.xml"
+    # The fixture stamp uses 20260902, so pin the test's snapshot.conf to it
+    # (beside image/, where the gate's default lookup finds it).
+    cp "$IMAGE/config.xml" "$T/identity.xml"
+    printf 'snapshot=20260902\n' > "$T/snapshot.conf"
     awk '/^SOURCE / {print $2, $3}' "$T/root/etc/qdistro/release" > "$T/expected-manifest"
 }
 
 identity_check() {
     python3 "$IMAGE/lib/verify-release-identity.py" "$T/expected-manifest" \
-        "$T/root" "$T/identity.xml" --profile "${1:-release}"
+        "$T/root" "$T/identity.xml" --profile "${1:-release}" --snapshot-conf "$T/snapshot.conf"
 }
 
 @test "release identity: matches the monorepo pin and admits explicitly requested clean dev tester" {

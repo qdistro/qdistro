@@ -10,7 +10,7 @@
 #    installiso="false" in config.xml.)
 #
 # <version> is config.xml's <version>; <snapshot> is the Tumbleweed snapshot
-# id both repositories in config.xml are pinned to (snapshot_id below).
+# pinned in the repo-root snapshot.conf (snapshot_id below).
 # The five source commits that went in are written by sync_sources into the
 # overlay as root/root/qdistro-source-manifest and installed by config.sh as
 # /etc/qdistro/release, together with version and snapshot.
@@ -43,24 +43,34 @@ MANIFEST="$HERE/root/root/qdistro-source-manifest"
 # Components config.sh builds from the synced tree; checked for presence.
 REQUIRED_COMPONENTS="qdwin qdshell qdgreeter qdlocker"
 
-# snapshot_id: the Tumbleweed snapshot both repositories in config.xml are
-# pinned to. config.xml is the only place the id is written (kiwi's parser
-# rejects XML entities, so it cannot be spelled once); the two source paths
-# must agree, and a build with a mismatched or unpinned pair is refused
-# rather than silently mixing snapshots.
+# snapshot_id: the Tumbleweed snapshot the image is built on. The repo-root
+# snapshot.conf is the one place it is written, shared with the tier-2
+# workloads, the native builder and the qci test VM bases, so every build
+# downloads from one snapshot (and one RPM cache). The loader refuses a
+# malformed pin or one older than 14 days: the history service keeps about a
+# month, so an older pin is a build that will soon be impossible to repeat.
 snapshot_id() {
-    local ids n
-    ids="$(sed -n 's|.*<source path="https://download.opensuse.org/history/\([0-9]\{8\}\)/tumbleweed/repo/[a-z-]*/"/>.*|\1|p' "$HERE/config.xml")"
-    n="$(printf '%s\n' "$ids" | grep -c .)"
-    if [ "$n" -ne 2 ]; then
-        echo "[build] ERROR: config.xml must pin exactly two repositories to history/<YYYYMMDD>/ (found $n)" >&2
+    # shellcheck source=../scripts/vm/lib/test-substrate.sh
+    . "$REPO_ROOT/scripts/vm/lib/test-substrate.sh" || return 2
+    qdistro_load_test_substrate >&2 || {
+        echo "[build] ERROR: $REPO_ROOT/snapshot.conf does not hold a valid, current snapshot pin" >&2
         return 2
-    fi
-    if [ "$(printf '%s\n' "$ids" | sort -u | wc -l)" -ne 1 ]; then
-        echo "[build] ERROR: config.xml repositories pin different snapshots: $(printf '%s ' $ids)" >&2
-        return 2
-    fi
-    printf '%s\n' "$ids" | head -n1
+    }
+    printf '%s\n' "$QDISTRO_SUBSTRATE_SNAPSHOT"
+}
+
+# snapshot_repo_args: kiwi takes the repositories from the command line, not
+# config.xml (whose XML parser rejects entities, so the id could not be
+# spelled once there). The aliases match what config.sh persists into the
+# image's /etc/zypp/repos.d, and the URLs are HTTPS (J25): plain http:// leaves
+# repo metadata + RPMs open to a MITM substituting a trojaned package; kiwi
+# still verifies the openSUSE repo GPG signatures on top.
+snapshot_repo_args() {
+    local snap="$1" base="https://download.opensuse.org/history/$1/tumbleweed/repo"
+    [[ "$snap" =~ ^[0-9]{8}$ ]] || return 2
+    printf '%s\n' --ignore-repos \
+        "--add-repo=$base/oss/,rpm-md,Tumbleweed-OSS" \
+        "--add-repo=$base/non-oss/,rpm-md,Tumbleweed-NonOSS"
 }
 
 image_version() {
@@ -275,13 +285,24 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 mkdir -p "$BUILD_DIR"
-SNAPSHOT="$(snapshot_id)" || exit 2
+# The snapshot comes from the source manifest the sync wrote from
+# snapshot.conf: a --no-sync build inside the builder VM has the description
+# and the synced tree, and the manifest is what the image records as
+# /etc/qdistro/release, so building on anything else would mislabel it. When
+# the checkout is beside us, a pin bumped after the sync is refused.
+SNAPSHOT="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' "$MANIFEST" | head -n1)"
+[ -n "$SNAPSHOT" ] || { echo "[build] ERROR: $MANIFEST has no SNAPSHOT=<YYYYMMDD> line; re-sync" >&2; exit 2; }
+if [ -f "$REPO_ROOT/snapshot.conf" ]; then
+    pinned="$(snapshot_id)" || exit 2
+    if [ "$pinned" != "$SNAPSHOT" ]; then
+        echo "[build] ERROR: manifest snapshot ($SNAPSHOT) != snapshot.conf ($pinned); re-sync" >&2
+        exit 2
+    fi
+fi
+mapfile -t KIWI_REPO_ARGS < <(snapshot_repo_args "$SNAPSHOT")
+[ "${#KIWI_REPO_ARGS[@]}" -eq 3 ] || { echo "[build] ERROR: could not form repositories for snapshot $SNAPSHOT" >&2; exit 2; }
 VERSION="$(image_version)"
 [ -n "$VERSION" ] || { echo "[build] ERROR: no <version> in config.xml" >&2; exit 2; }
-if ! grep -q "^SNAPSHOT=$SNAPSHOT\$" "$MANIFEST"; then
-    echo "[build] ERROR: manifest snapshot ($(sed -n 's/^SNAPSHOT=//p' "$MANIFEST")) != config.xml snapshot ($SNAPSHOT); re-sync" >&2
-    exit 2
-fi
 
 KIWI_PROFILE_ARGS=()
 case "${QDISTRO_KIWI_PROFILE:-tester}" in
@@ -298,6 +319,7 @@ kiwi-ng --debug \
   system build \
     --description "$HERE" \
     --target-dir "$BUILD_DIR" \
+    "${KIWI_REPO_ARGS[@]}" \
   2>&1 | tee "$HERE/logs/kiwi-build.log"
 # `set -o pipefail` above: a kiwi failure is this script's failure.
 

@@ -85,6 +85,9 @@ cmd_setup() {
     # spawn runs podman as admin, so the image must live in admin's store.
     rm -rf "$TIER2_BUILD_DIR" 2>/dev/null || true
     cp -r "$SRC/tier2" "$TIER2_BUILD_DIR" || fail setup "stage tier2 build dir"
+    # tier2/ carries no pin of its own; stage the one from snapshot.conf.
+    sed -n 's/^snapshot=\([0-9]\{8\}\)$/\1/p' "$SRC/snapshot.conf" > "$TIER2_BUILD_DIR/SNAPSHOT" \
+        && [ -s "$TIER2_BUILD_DIR/SNAPSHOT" ] || fail setup "stage tier2 snapshot pin"
     chmod -R a+rX "$TIER2_BUILD_DIR"
     find "$TIER2_BUILD_DIR" -name '*.sh' -exec chmod a+rx {} +
     if ! as_admin podman image exists "$IMAGE" 2>/dev/null; then

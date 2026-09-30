@@ -209,7 +209,7 @@ main() {
             . "$VM_TOOLS/lib/test-substrate.sh"
             if ! qdistro_load_test_substrate; then
                 record_result preflight "cloud test substrate freshness" fail "$EXIT_PREFLIGHT" preflight tool \
-                    "$RDIR/preflight/preflight.txt" "pinned snapshot is invalid, future-dated, or older than 14 days; update test-substrate.conf"
+                    "$RDIR/preflight/preflight.txt" "pinned snapshot is invalid, future-dated, or older than 14 days; update snapshot.conf"
                 finish_run "$EXIT_PREFLIGHT"
             fi
         fi

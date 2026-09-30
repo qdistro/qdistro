@@ -147,7 +147,7 @@ gate_preflight() {
                     rc=$EXIT_PREFLIGHT
                 fi
             else
-                record_result preflight "baseweed substrate" fail "$EXIT_PREFLIGHT" preflight tool "$report" "invalid test-substrate.conf"
+                record_result preflight "baseweed substrate" fail "$EXIT_PREFLIGHT" preflight tool "$report" "invalid snapshot.conf"
                 rc=$EXIT_PREFLIGHT
             fi
             ;;

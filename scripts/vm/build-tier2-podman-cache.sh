@@ -12,9 +12,9 @@ command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2;
 [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || {
     echo 'ERROR: Podman must run rootless' >&2; exit 2;
 }
-# These Containerfiles name this image in FROM. Its resolved ID is part of the
-# cache key; the test-only build context replaces their old release snapshot.
-base_image=registry.opensuse.org/opensuse/tumbleweed:latest
+# These Containerfiles name this image in FROM (tumbleweed:${SNAPSHOT}, passed
+# below). Its resolved ID is part of the cache key.
+base_image=registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT
 if ! podman image exists "$base_image"; then
     case "${QCI_OFFLINE:-0}" in
         1|true|yes|on)
@@ -31,9 +31,8 @@ mkdir -p "$cache"
 work=$(mktemp -d "$cache/.work.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-# Only visible source files enter the key or the build context. Keep the
-# production tier2/SNAPSHOT untouched: test workload images follow the test
-# cloud snapshot, while the product image retains its separate release pin.
+# Only visible source files enter the key or the build context. The pin is
+# written into the staged context from snapshot.conf (tier2/ tracks none).
 git -C "$repo" ls-files -z --cached --others --exclude-standard -- tier2 \
     | LC_ALL=C sort -zu > "$work/source-files.list"
 tar -C "$repo" --mtime=@0 --owner=0 --group=0 --numeric-owner \
@@ -69,6 +68,7 @@ for workload in "${workloads[@]}"; do
     echo "[tier2-podman] building $tag against test snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
     podman build --pull=never --layers \
         --file "$work/context/tier2/Containerfile.$workload" \
+        --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         --tag "$tag" \
         --label "org.qdistro.test-snapshot=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         "$work/context/tier2" >&2

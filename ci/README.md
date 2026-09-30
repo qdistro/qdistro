@@ -120,7 +120,8 @@ qdistro/ci/bin/qci snapshot-daily
 
 The image gate in `full` checks the image's five clean `SOURCE` commits
 against `release-manifest/manifest.snapshot` before boot qualification. It
-also checks the version and Tumbleweed snapshot against `image/config.xml`,
+also checks the version against `image/config.xml`, the Tumbleweed snapshot
+against the repo-root `snapshot.conf`,
 and the profile against `QDISTRO_PROFILE` (default `release`). A pinned dev
 tester remains supported with `QDISTRO_PROFILE=dev`; dirty source stamps do
 not qualify as release evidence. Standalone `QCI_RELEASE=1 qci image` captures
@@ -178,9 +179,9 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 | `QCI_GUI_RETRY` | 0 | Classified GUI retry. `0`/unset = **report-only**: classify each failure and log to `flake.tsv` what *would* retry, but never re-run. `1`/`classified` = retry **exactly once on a fresh VM**, and only for tight retriable infra/tooling signatures such as `transport-timeout` (qemu-agent/vm-exec wedge), `agent-api-unreachable` (exact external provider connection or selected-model-capacity failure), and `agent-tooling` (agent command-construction failure). `status=FAIL`/`ERROR`, generic `UNKNOWN`, `no-verdict`, and `agent-timeout` (slow agent — possible product hang) are **never** auto-retried. A retried pass always emits a `flake.tsv` row + a note on the result row, so a flake is never silently green. |
 | `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
 | `QDISTRO_VM_BASE` | baked | `baked` uses the pinned cloud-derived baseweed image. `kiwi` explicitly uses the imported Kiwi base; `auto` prefers Kiwi when imported, otherwise baseweed. The product image gate still qualifies Kiwi. |
-| `QDISTRO_TEST_SUBSTRATE` | `scripts/vm/test-substrate.conf` | Select an alternate manifest with a cloud URL, SHA256, architecture and Tumbleweed repository snapshot for a test substrate experiment. |
+| `QDISTRO_TEST_SUBSTRATE` | `snapshot.conf` (repo root) | Select an alternate manifest with a cloud URL, SHA256, architecture and Tumbleweed repository snapshot for a test substrate experiment. |
 | `QCI_NATIVE_BUILDER` | `podman` for baked cloud, `guest` for Kiwi | Select the native build location. The baked cloud base omits compilers and headers, so its supported mode is `podman`. |
-| `QCI_PODMAN_IMAGE` | `registry.opensuse.org/opensuse/tumbleweed:latest` | Change the rootless builder image. The resolved image ID is part of the native cache key; the container aligns its packages to the pinned snapshot before building. |
+| `QCI_PODMAN_IMAGE` | `registry.opensuse.org/opensuse/tumbleweed:<snapshot>` (the `snapshot.conf` pin) | Change the rootless builder image. The resolved image ID is part of the native cache key; the container aligns its packages to the pinned snapshot before building. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |
 | `QDISTRO_VM_EXEC_TIMEOUT` | 1800 | Overall deadline (s) for a single `vm-exec` in-guest command. On expiry `vm-exec` attempts an identity-checked TERM, then KILL, of the discovered and pinned guest process tree, and exits 124. It reports its own verification limits: a descendant whose identity it cannot pin is named (`unpinnable-descendants:`) and deliberately **not** signalled, and it cannot guarantee it discovers a reparented process, so reaping is attempted and reported, not guaranteed. The deadline is also checked against elapsed time BETWEEN steps, not enforced as wall clock, so a true wall-clock cap must come from outside — use `timeout -k 30 <n> vm-exec ...`, where `-k` makes the cap an undeniable KILL-at-cap+grace for **vm-exec itself**, which a plain `timeout` does not give you against a TERM-resistant process. It does **not** reach descendants: `timeout` waits only for its direct child, so if vm-exec exits on the TERM the later group KILL is never sent. An outer cap bounds how long you wait; it does not bound cleanup, and a short grace can cut vm-exec's own cleanup verification short. The counter is also clamped across host suspend, so it measures elapsed time as the host saw it, not as the guest experienced it. `0` = unbounded. |
@@ -226,20 +227,25 @@ pilot registry before any automatic per-component selection is attempted.
 ### Cloud test substrate
 
 The default VM base is built from openSUSE's Minimal-VM cloud qcow2. The
-checked-in [`scripts/vm/test-substrate.conf`](../scripts/vm/test-substrate.conf)
-pins its SHA256 and the OSS/non-OSS history snapshot. The download must also
+checked-in [`snapshot.conf`](../snapshot.conf) at the repo root pins its SHA256
+and the OSS/non-OSS history snapshot. It is the **one** Tumbleweed pin: the kiwi
+tester image (`image/build.sh` passes the history repositories to kiwi), the
+tier-2 workload images, and the rootless Podman native builder (base image
+`tumbleweed:<snapshot>`) all read it, so every build downloads from one
+snapshot and shares one RPM cache. The download must also
 match openSUSE's signed checksum. Changing the manifest or build recipe gives
 the next base a new filename; old disks remain available to preserved workers.
 `QDISTRO_VM_BASE=kiwi` remains available when image parity is the test target.
 
-To rotate the test substrate, choose an available history snapshot, verify the
+To rotate the snapshot, choose the newest available history snapshot, verify the
 new cloud checksum signature, edit the manifest's digest and snapshot together,
 then build with `scripts/vm/build-baseweed-from-scratch.sh` followed by
 `scripts/vm/build-baked-baseweed.sh`. The history service retains snapshots for
 roughly a month; schedule a candidate build about weekly. Cloud base builders
 and qci VM test entry points reject a pin more than 14 UTC calendar days old,
 including when a matching base is already cached. Refresh the pin and rebuild
-both bases before launching tests. An expired snapshot is an error, not a
+both bases (and the tester image) before launching tests. The image build
+refuses a pin older than 14 days the same way. An expired snapshot is an error, not a
 reason to use rolling repositories. An explicit alternate
 manifest via `QDISTRO_TEST_SUBSTRATE` keeps experiments separate.
 
@@ -269,7 +275,8 @@ Tier-2 test images use Podman's local image layers and a separate archive cache
 under `$QDWIN_CACHE_DIR/tier2-podman/<snapshot>/<arch>/`. Changes to tier-2
 source, the base container image or the pinned test snapshot rebuild that
 archive. `QCI_OFFLINE=1` requires both the base container and archive to be
-cached. The production `tier2/SNAPSHOT` pin is separate from the test pin.
+cached. There is no separate tier-2 pin: `tier2/make-tier2-image.sh` and the
+installed `/usr/lib/qdistro/tier2/SNAPSHOT` both derive from `snapshot.conf`.
 
 ## Agent-assisted GUI scenarios
 
