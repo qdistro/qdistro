@@ -460,14 +460,18 @@ qd22_s3_pixels() {
 # `e` 1.3 s between separate down/up calls: the identical frame. A failed
 # injection is reported, never ignored (qdwin_apps_type drops the status).
 qd22_type() {   # qd22_type <word>
-    local s=$1 i ch ev
+    local s=$1 i ch ev reply
     for (( i=0; i<${#s}; i++ )); do
         ch=${s:i:1}
         case $ch in [a-z]) ;; *) echo "qd22_type: unsupported character '$ch'"; return 2 ;; esac
         ev="{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"$ch\"}}},{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"$ch\"}}}"
-        $QDWIN_VIRSH qemu-monitor-command "$VMNAME" \
-            "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[$ev]}}" >/dev/null \
-            || { echo "qd22_type: QMP injection of '$ch' failed"; return 1; }
+        # virsh exits 0 on a QMP {"error":...} reply, so the reply is checked.
+        if ! reply=$($QDWIN_VIRSH qemu-monitor-command "$VMNAME" \
+                "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[$ev]}}" 2>&1) \
+           || [[ "$reply" != *'"return"'* ]] || [[ "$reply" == *'"error"'* ]]; then
+            echo "qd22_type: QMP injection of '$ch' failed: $reply"
+            return 1
+        fi
         sleep 0.05
     done
 }

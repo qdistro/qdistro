@@ -310,6 +310,7 @@ GEOM="PROXY_GEOM x=240 y=100 w=800 h=600 output=Virtual-1 out=1280x800@0,0 outpu
     cat > "$T/bin/fake-virsh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$3" >> "$FAKE_VIRSH_LOG"
+printf '%s\n' "${FAKE_VIRSH_REPLY:-{\"return\":{},\"id\":\"libvirt-1\"}}"
 exit "${FAKE_VIRSH_RC:-0}"
 EOF
     chmod +x "$T/bin/fake-virsh"
@@ -327,6 +328,10 @@ EOF
     FAKE_VIRSH_RC=1 run qd22_type a
     [ "$status" -eq 1 ]
     [[ "$output" == *"injection of 'a' failed"* ]]
+    # virsh succeeds but QEMU rejected the event: still a failed injection
+    FAKE_VIRSH_REPLY='{"id":"libvirt-2","error":{"class":"GenericError","desc":"nope"}}' run qd22_type a
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"GenericError"* ]]
     run qd22_type 'a!'
     [ "$status" -eq 2 ]
 }
