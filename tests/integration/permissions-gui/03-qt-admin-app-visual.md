@@ -49,6 +49,14 @@ sleep 3
 $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s1-empty.png
 ```
 
+Open the S1 frame before grading it. If the window is only partly drawn
+(a black, transparent, or desktop-patterned rectangle cuts through its
+contents), keep that frame and capture up to four more frames, 2 s apart,
+under distinct `-r2.png` ... `-r5.png` names. Open each new frame. Use the
+first fully drawn frame as the S1 evidence; if none is fully drawn, report
+the rendering failure with all captures. This does not relax any visual
+assertion below.
+
 **Assert (empty):**
 - A window with titlebar text `admin approvals` is visible on the
  admin compositor desktop.
@@ -93,6 +101,10 @@ echo "s2 title-wait rc=$title_rc"
 $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s2-populated.png
 ```
 
+Apply the same bounded recapture procedure to S2 if the frame is partly
+drawn. The title wait proves the model row exists; it does not prove that
+the guest framebuffer has finished drawing the detail pane.
+
 A non-zero `s2 title-wait rc` FAILS S2 regardless of the frame.
 
 **Assert (populated):**
@@ -125,7 +137,7 @@ XWayland Qt apps under the GUI test compositor (see AGENTS.md caveat).
 B64=$(base64 -w0 <<'EOF'
 #!/bin/bash
 runuser -u admin -- env DISPLAY=:0 \
- xdotool search --sync --name "admin approvals" windowactivate --sync
+ timeout 10 xdotool search --sync --name "admin approvals" windowactivate --sync
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"

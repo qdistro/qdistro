@@ -50,7 +50,12 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
  await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2 30 1'
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
+$VMEXEC "$VM" 'for _ in $(seq 1 60); do
+  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
+  [ "$t" = "admin approvals" ] && exit 0
+  sleep 0.5
+done
+echo "admin approvals window did not map: $t" >&2; exit 1'
 ```
 
 ## Steps
@@ -76,6 +81,13 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMGUI "$VM" screenshot /tmp/14-s1-pending.png
 ```
+
+Open S1 before targeting any control. If a black or desktop-patterned
+rectangle obscures the detail pane, keep the frame and capture up to four
+more frames, 2 s apart, under distinct `-r2.png` ... `-r5.png` names.
+Open each new frame. Use the first fully drawn frame for the assertions and
+click targeting. If all five are obscured, report the rendering failure;
+do not infer a control's location from another scenario or a later frame.
 
 **Assert (OCR /tmp/14-s1-pending.png)**:
 - `uid=2000` and `app.send-to:3000:org.qdistro.StubNotepad.uid3000` visible.
@@ -111,6 +123,12 @@ $VMGUI "$VM" screenshot /tmp/14-s2-1hour-selected.png
 sleep 1
 $VMGUI "$VM" screenshot /tmp/14-s3-rejected.png
 ```
+
+The broker may reject the decision before XWayland has presented the modal.
+Open the S3 frame and, if the required modal is absent, capture up to four
+more frames 2 s apart under distinct `-r2.png` ... `-r5.png` names. Open
+each frame and grade the first one with the modal. If the modal remains
+absent, S3 fails; keep all captures and the broker refusal evidence.
 
 **Assert (OCR /tmp/14-s3-rejected.png)**:
 - A modal with heading text `Decision not recorded` has appeared.

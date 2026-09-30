@@ -34,7 +34,15 @@ SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
+# The launcher detaches before Qt maps its XWayland window. Under a busy GUI
+# run, a fixed sleep can capture only the desktop even though the process is
+# alive. Wait for the window the S1 assertion actually needs.
+$VMEXEC "$VM" 'for _ in $(seq 1 60); do
+  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
+  [ "$t" = "admin approvals" ] && exit 0
+  sleep 0.5
+done
+echo "admin approvals window did not map: $t" >&2; exit 1'
 ```
 
 ## Steps

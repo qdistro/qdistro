@@ -25,7 +25,7 @@ $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 
 APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
@@ -140,6 +140,15 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 **Assert**:
 - Audit row: `2000|test.action|0|rule`.
 - Cache count is `0`.
+
+When driving this as the required single guest shell, S4's audit/cache
+queries and Teardown are guest-only work. After the host has captured and
+opened S3, release that host step and let the guest shell complete S4,
+Teardown, and its final verdict without another `qci_host_step` wait.
+The previous full run inserted an unneeded `s4_cleanup` host gate; the
+driver then waited for a release the model session never sent and was
+terminated before writing its verdict. Keep the S1–S4 checks and cleanup
+status authoritative: a missing completion marker remains ERROR.
 
 ## Teardown
 
