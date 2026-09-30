@@ -182,3 +182,30 @@ def test_receipt_expiry_during_admin_prompt_prevents_dispatch(setup):
     req.waiters[0][0](True)
     assert json.loads(results[0])['state'] == 'unknown'
     assert not setup.relay.forwarded
+
+
+@pytest.mark.parametrize('raw', [
+    '{"state":"failed","state":"applied"}',
+    '{"nested":{"state":"failed","state":"applied"}}',
+    '{"unused":NaN}', '{"unused":Infinity}', '{"unused":-Infinity}',
+])
+def test_raw_metadata_is_validated_before_normalizing(raw):
+    with pytest.raises(ValueError):
+        wire.load_object(raw)
+
+
+@pytest.mark.parametrize('token', ['line\nbreak', 'tab\t', 'control\x7f'])
+def test_control_characters_cannot_be_transfer_identities(token):
+    with pytest.raises(ValueError):
+        wire.identity(token)
+
+
+@pytest.mark.parametrize('suffix', [',"available":false,"available":true',
+                                   ',"unused":NaN', ',"nested":{"key":1,"key":2}'])
+def test_malformed_capability_envelope_cannot_become_known(setup, monkeypatch, suffix):
+    envelope = json.dumps(dict(owner=':1.8', capabilities=setup.relay.capabilities))
+    raw = envelope[:-1] + suffix + '}'
+    monkeypatch.setattr(setup.relay, 'GetTransferCapabilities', lambda *args, **kwargs: raw)
+    result = json.loads(setup.broker.GetTransferCapabilities(2000, SERVICE))
+    assert result['version'] == 0 and result['state'] == 'unknown'
+    assert not setup.relay.forwarded

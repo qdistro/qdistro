@@ -13,14 +13,26 @@ STATES = TERMINAL | {'staged', 'unknown'}
 def load_object(raw):
     if not isinstance(raw, str) or len(raw.encode('utf-8')) > 8192:
         raise ValueError('transfer metadata exceeds budget')
-    obj = json.loads(raw)
+    def unique_pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate transfer metadata key')
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ValueError('invalid transfer metadata constant')
+    # Validate the raw envelope before relaying a sanitized receipt. Otherwise
+    # duplicate/conflicting fields could become a seemingly valid application.
+    obj = json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
     if not isinstance(obj, dict):
         raise ValueError('transfer metadata must be an object')
     return obj
 
 
 def identity(value, *, empty=False):
-    if (not isinstance(value, str) or len(value) > 128 or '\x00' in value
+    if (not isinstance(value, str) or len(value) > 128
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
             or (not empty and not value)):
         raise ValueError('invalid transfer identity')
     value.encode("utf-8", errors="strict")

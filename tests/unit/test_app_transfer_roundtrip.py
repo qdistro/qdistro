@@ -5,6 +5,7 @@ installed system/session-bus policy or VM GUI acceptance.
 """
 from __future__ import annotations
 
+import json
 import threading
 
 import dbus
@@ -243,3 +244,25 @@ def test_full_inbox_rejects_before_staging_without_losing_existing_work(route, q
     assert all(sdk.get_transfer_status(handle)["state"] == "applied" for handle in handles)
     assert "Overflow" not in window.editor.toPlainText()
     assert not window._qdistro_inbox
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("route", [2000, 3000], indirect=True)
+@pytest.mark.parametrize("suffix", [',"state":"applied"', ',"unused":NaN',
+                                    ',"nested":{"key":1,"key":2}'])
+def test_malformed_receiver_receipt_is_unknown_through_relay_broker_and_sdk(route, monkeypatch, suffix):
+    window, _, _, _, proxy, uid, service = route
+    caps = sdk.get_transfer_capabilities(uid, service)
+    before = window.editor.toPlainText()
+    raw = json.dumps({"version": 1, "instance_id": caps["instance_id"],
+                      "transfer_id": "receiver-id", "state": "failed", "reason": ""})[:-1] + suffix + '}'
+    calls = []
+    def receive(*args, **kwargs):
+        calls.append(args)
+        return raw
+    monkeypatch.setattr(proxy, "ReceiveTransfer", receive)
+    receipt = sdk.send_transfer(uid, service, caps["instance_id"], "text/plain", "Payload")
+    assert receipt["state"] == "unknown", receipt
+    assert sdk.get_transfer_status(receipt["transfer_id"])["state"] == "unknown"
+    assert len(calls) == 1, "an ambiguous receipt must not trigger another delivery"
+    assert window.editor.toPlainText() == before
