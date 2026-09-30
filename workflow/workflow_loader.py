@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from workflow_schema import WorkflowDef  # type: ignore[import-not-found]
+from workflow_schema import WorkflowDef, WorkflowPlan  # type: ignore[import-not-found]
 
 try:
     import yaml  # PyYAML
@@ -144,6 +144,7 @@ class WorkflowLoader:
             for i, entry in enumerate(entries):
                 try:
                     wf = WorkflowDef.from_dict(entry, source_path=path)
+                    WorkflowPlan.capture(wf)
                     workflows.append(wf)
                 except ValueError as e:
                     self._errors.append(f"{path} [{i}]: {e}")

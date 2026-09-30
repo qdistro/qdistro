@@ -51,9 +51,10 @@ from __future__ import annotations
 import datetime
 import os
 import sys
+import threading
 from dataclasses import dataclass, field
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QMessageBox
 
 try:  # pragma: no cover — VM-only path
@@ -113,6 +114,7 @@ class StagedDrop:
     # drop was refused rather than queued. Lets callers/tests distinguish
     # "staged" from "rejected at the door" without re-reading the inbox.
     refused: bool = False
+    complete: object = field(default=None, repr=False)
 
     @property
     def size_bytes(self) -> int:
@@ -153,14 +155,16 @@ def maybe_install(window) -> object | None:
               file=sys.stderr, flush=True)
         return None
 
-    def on_receive(kind: str, payload: str) -> None:
-        QTimer.singleShot(0, lambda: _deliver_to_page(window, kind, payload))
+    dispatcher = NotebookTransfers(window)
+    window._qdistro_transfers = dispatcher
 
     receiver = _app_receiver.register_app(
         APP_FRIENDLY_NAME,
-        on_receive=on_receive,
+        on_receive=dispatcher.receive_legacy,
         friendly_name=APP_FRIENDLY_NAME,
         supported_kinds=APP_SUPPORTED_KINDS,
+        transfer_capabilities=dispatcher.capabilities,
+        on_transfer=dispatcher.stage,
     )
     if receiver is None:
         return None
@@ -168,6 +172,68 @@ def maybe_install(window) -> object | None:
           f"{receiver.service_name} (silo={receiver.silo!r})",
           flush=True)
     return receiver
+
+
+def _inbox_lock(window):
+    lock = getattr(window, "_qdistro_inbox_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        window._qdistro_inbox_lock = lock
+    return lock
+
+
+class NotebookTransfers(QObject):
+    """Reserve bounded inbox space on the receiver thread; confirm on Qt."""
+
+    wake = pyqtSignal()
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        window._qdistro_transfers = self
+        self._closed = False
+        self.lock = _inbox_lock(window)
+        _inbox(window)
+        self.wake.connect(self.pump, Qt.ConnectionType.QueuedConnection)
+
+    def capabilities(self):
+        with self.lock:
+            available = not self._closed and len(_inbox(self.window)) < MAX_PENDING_DROPS
+        return {"version": 1, "kinds": list(ACCEPTED_TEXT_KINDS),
+                "max_bytes": MAX_PAYLOAD_BYTES, "encoding": "utf-8",
+                "confirmation_required": True, "available": available,
+                "reason": "" if available else "Notebook closed or inbox full"}
+
+    def shutdown(self):
+        with self.lock:
+            self._closed = True
+        self.wake.emit()
+
+    def receive_legacy(self, kind, payload):
+        self.stage(kind, payload, None)
+
+    def stage(self, kind, payload, complete):
+        # SDK checks the wire envelope; repeat application constraints before
+        # taking ownership, including current capacity after discovery.
+        try:
+            size = len(payload.encode("utf-8", errors="strict"))
+        except (AttributeError, UnicodeError):
+            return {"state": "rejected", "reason": "Invalid UTF-8 text"}
+        if not _is_text_kind(kind) or "\x00" in payload or size > MAX_PAYLOAD_BYTES:
+            return {"state": "rejected", "reason": "Unsupported kind or text exceeds notebook limit"}
+        with self.lock:
+            inbox = _inbox(self.window)
+            if self._closed:
+                return {"state": "rejected", "reason": "Notebook closed"}
+            if len(inbox) >= MAX_PENDING_DROPS:
+                return {"state": "rejected", "reason": "Notebook inbox full"}
+            inbox.append(StagedDrop(kind=kind, payload=payload, complete=complete))
+        self.wake.emit()
+        return {"state": "staged", "reason": "Awaiting notebook confirmation"}
+
+    @pyqtSlot()
+    def pump(self):
+        _pump_inbox(self.window)
 
 
 def _deliver_to_page(window, kind: str, payload: str) -> None:
@@ -251,8 +317,13 @@ def _stage_for_confirmation(window, drop: StagedDrop) -> None:
     cannot stack arbitrarily many simultaneous ``QMessageBox`` dialogs;
     each is answered before the next is shown.
     """
+    lock = _inbox_lock(window)
     inbox = _inbox(window)
-    if len(inbox) >= MAX_PENDING_DROPS:
+    with lock:
+        full = len(inbox) >= MAX_PENDING_DROPS
+        if not full:
+            inbox.append(drop)
+    if full:
         _status(window,
                 f"qdistro: inbox full ({MAX_PENDING_DROPS} pending) — "
                 f"refused {drop.size_bytes}-byte {drop.kind} drop")
@@ -260,7 +331,6 @@ def _stage_for_confirmation(window, drop: StagedDrop) -> None:
         # accepted into the queue; mark it so tests/callers can tell.
         drop.refused = True
         return
-    inbox.append(drop)
     _pump_inbox(window)
 
 
@@ -275,61 +345,68 @@ def _pump_inbox(window) -> None:
     the documented disposition — there is no Drafts/recovery surface for
     unconfirmed remote drops.
     """
-    if getattr(window, "_qdistro_dialog_open", False):
-        return
+    lock = _inbox_lock(window)
     inbox = _inbox(window)
-    while inbox:
-        drop = inbox[0]
-        try:
+    while True:
+        with lock:
+            if getattr(window, "_qdistro_dialog_open", False) or not inbox:
+                return
+            drop = inbox[0]
             window._qdistro_dialog_open = True
-        except Exception:  # noqa: BLE001
-            pass
+        state, reason = "declined", "User declined notebook insertion"
         try:
+            if getattr(getattr(window, "_qdistro_transfers", None), "_closed", False):
+                raise RuntimeError("Notebook closed")
             confirmed = _confirm_drop(window, drop)
+            if getattr(getattr(window, "_qdistro_transfers", None), "_closed", False):
+                raise RuntimeError("Notebook closed during confirmation")
+            if confirmed:
+                if _append_confirmed(window, drop):
+                    state, reason = "applied", "Inserted into notebook editor; saving is separate"
+                else:
+                    state, reason = "failed", "No editable notebook page"
+            else:
+                _status(window, f"qdistro: discarded {drop.size_bytes}-byte {drop.kind} drop (declined)")
         except Exception as e:  # noqa: BLE001
-            print(f"[qnotebook/qdistro] confirmation failed: {e}",
+            state, reason = "failed", "Notebook confirmation or insertion failed"
+            print(f"[qnotebook/qdistro] receive failed: {e}",
                   file=sys.stderr, flush=True)
-            confirmed = False
         finally:
-            try:
+            with lock:
+                inbox.remove(drop)
                 window._qdistro_dialog_open = False
-            except Exception:  # noqa: BLE001
-                pass
-        # The drop we just judged is always removed from the queue: on
-        # yes it is appended, on no it is discarded (documented: declined
-        # remote drops are NOT durably buffered).
-        try:
-            inbox.remove(drop)
-        except ValueError:
-            pass
-        if confirmed:
+        if drop.complete is not None:
+            complete, drop.complete = drop.complete, None
+            drop.payload = ""
             try:
-                _append_confirmed(window, drop)
+                complete(state, reason)
             except Exception as e:  # noqa: BLE001
-                print(f"[qnotebook/qdistro] append failed: {e}",
-                      file=sys.stderr, flush=True)
-        else:
-            _status(window,
-                    f"qdistro: discarded {drop.size_bytes}-byte "
-                    f"{drop.kind} drop (declined)")
+                print(f"[qnotebook/qdistro] receipt update failed: {e}", file=sys.stderr, flush=True)
 
 
-def _append_confirmed(window, drop: StagedDrop) -> None:
+def _append_confirmed(window, drop: StagedDrop) -> bool:
     """Append a user-confirmed drop to the active page. Only reached
     after :func:`_confirm_drop` returns True."""
     text = drop.header() + drop.payload
+    if hasattr(window, "_current_page") and window._current_page is None:
+        return False
+    editor = getattr(window, "editor", None)
+    before = editor.document().characterCount() if editor is not None else None
     if hasattr(window, "append_text_to_current_page"):
         window.append_text_to_current_page(text)
-        return
-    editor = getattr(window, "editor", None)
+        return (drop.complete is None or
+                (before is not None and editor.document().characterCount() > before))
     if editor is not None and hasattr(editor, "textCursor"):
+        if editor.isReadOnly():
+            return False
         cur = editor.textCursor()
         cur.movePosition(cur.MoveOperation.End)
         cur.insertText(text)
         editor.setTextCursor(cur)
-        return
+        return True
     _status(window, f"qdistro: {drop.kind} payload accepted "
                     f"({drop.size_bytes} bytes) — open a page to insert")
+    return False
 
 
 def send_to_targets(*, kind: str = "text/plain") -> list[dict]:

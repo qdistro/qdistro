@@ -440,7 +440,19 @@ class Silo:
     # "none" = default-deny. Only meaningful for tier3-user silos.
     egress: str | None = None
 
+    # Observations are ephemeral evidence, never lifecycle authority or persistence.
+    observed_status: str = "unknown"
+    observed_reason: str = "not observed since daemon start"
+    observed_at: float = 0.0
+    observed_monotonic: float = 0.0
+    operation_generation: int = 0
+    runtime_incarnation: str = field(default_factory=lambda: secrets.token_hex(16))
+    start_unresolved: bool = False
+
     def to_dict(self) -> dict[str, Any]:
+        age = time.monotonic() - self.observed_monotonic
+        fresh = (self.observed_monotonic > 0
+                 and 0 <= age < 30)
         return {
             "name": self.name,
             "uid": int(self.uid),
@@ -451,6 +463,12 @@ class Silo:
             "kind": self.kind,
             "launch": dict(self.launch),
             "egress": self.egress,
+            "observed_status": self.observed_status if fresh else "unknown",
+            "observed_reason": self.observed_reason if fresh else "observation stale or unavailable",
+            "observed_at": self.observed_at,
+            "observed_ttl_seconds": 30 - age if fresh else 0.0,
+            "operation_generation": self.operation_generation,
+            "runtime_incarnation": self.runtime_incarnation,
         }
 
 
@@ -2040,6 +2058,57 @@ class _SystemOps:
                     unit, r.returncode, (r.stderr or "").strip()[:200])
         return False
 
+    def observe_silo(self, name: str, uid: int, kind: str) -> tuple[str, str]:
+        """Read runtime evidence only. No observation authorizes a lifecycle op."""
+        unit = (TIER2_SILO_LAUNCHER_FMT.format(name=name)
+                if kind == KIND_TIER2_TEMPLATE else
+                SILO_LAUNCHER_FMT.format(name=name, uid=uid))
+        result = subprocess.run(
+            ["systemctl", "show", unit, "--property=LoadState",
+             "--property=ActiveState", "--property=Job"],
+            capture_output=True, text=True, timeout=3)
+        properties = dict(line.split("=", 1) for line in result.stdout.splitlines()
+                          if "=" in line)
+        if result.returncode or properties.get("LoadState") != "loaded":
+            return "unknown", "launcher observation unavailable"
+        if properties.get("Job") not in ("", "0"):
+            return "unknown", "launcher has a pending or unknown job"
+        active = properties.get("ActiveState")
+        if active in ("activating", "reloading"):
+            return "starting", "launcher is activating"
+        if active not in ("active", "inactive", "failed"):
+            return "unknown", "launcher state is transitional or unknown"
+        if kind == KIND_TIER2_TEMPLATE:
+            container = TIER2_CONTAINER_FMT.format(name=name)
+            exists = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
+                 "container", "exists", container], capture_output=True, timeout=3)
+            if exists.returncode == 0:
+                running = subprocess.run(
+                    ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
+                     "inspect", "--format", "{{.State.Running}}", container],
+                    capture_output=True, text=True, timeout=3)
+                if active == "active" and not running.returncode and running.stdout.strip() == "true":
+                    return "launcher-running", "launcher and container observed running; application health unverified"
+                return "unknown", "container exists; launcher alone does not establish workload status"
+            if exists.returncode != 1:
+                return "unknown", "container observation unavailable"
+            if active == "active":
+                return "unknown", "launcher active but container absent"
+        elif active == "active":
+            return "launcher-running", "launcher observed active; application health unverified"
+        else:
+            # cgroup.events includes descendants; cgroup.procs alone misses them.
+            events = CGROUP_ROOT / name / "cgroup.events"
+            try:
+                data = events.read_text()
+            except FileNotFoundError:
+                data = "populated 0\n"
+            if "populated 0" not in data.splitlines():
+                return "unknown", "workload cgroup populated or unreadable"
+        return ("failed", "launcher observed failed") if active == "failed" else (
+            "stopped", "launcher inactive and workload boundary observed absent")
+
     def tier2_silo_running(self, name: str) -> bool:
         """True if a tier-2 stop did NOT fully take effect: the launcher unit
         is still active, OR the rootless container still exists. The daemon is
@@ -3233,6 +3302,7 @@ class _SiloStore:
             silo.state = prev_state
             silo.last_change = prev_last_change
             raise
+        self._invalidate_observation(silo)
         self._emit_change(silo.name, silo.state)
 
     def _force_state(self, silo: Silo, new_state: str) -> None:
@@ -3244,7 +3314,41 @@ class _SiloStore:
         silo.state = new_state
         silo.last_change = int(time.time())
         self.save()
+        self._invalidate_observation(silo)
         self._emit_change(silo.name, silo.state)
+
+    def _invalidate_observation(self, silo: Silo) -> None:
+        silo.operation_generation += 1
+        silo.observed_status = "unknown"
+        silo.observed_reason = "lifecycle operation changed; observation pending"
+        silo.observed_at = time.time()
+        silo.observed_monotonic = time.monotonic()
+        if silo.state == State.STOPPED:
+            silo.start_unresolved = False
+
+    def observe_runtime_once(self) -> None:
+        with self._lock:
+            targets = [(s, s.operation_generation) for s in self._silos.values()]
+        for silo, generation in targets:
+            began = time.monotonic()
+            try:
+                status, reason = self._ops.observe_silo(silo.name, silo.uid, silo.kind)
+            except Exception:  # A failed probe is unknown, never proof of absence.
+                status, reason = "unknown", "runtime probe failed or timed out"
+            with self._lock:
+                if (self._silos.get(silo.name) is not silo
+                        or silo.operation_generation != generation):
+                    continue
+                if silo.start_unresolved:
+                    status, reason = "unknown", "start outcome unresolved; stop before retry"
+                if time.monotonic() - began >= 30:
+                    status, reason = "unknown", "runtime probe evidence expired"
+                changed = (silo.observed_status, silo.observed_reason) != (status, reason)
+                silo.observed_status, silo.observed_reason = status, reason
+                silo.observed_at = time.time()
+                silo.observed_monotonic = began
+                if changed:
+                    self._emit_change(silo.name, silo.state)
 
     def _emit_change(self, name: str, state: str) -> None:
         if self._on_change is not None:
@@ -3986,6 +4090,8 @@ class _SiloStore:
                         # workload on a half-removed netns.
                         if isinstance(e, StartNotCancelled):
                             self._force_state(silo, State.ACTIVE)
+                            silo.start_unresolved = True
+                            silo.observed_reason = "start outcome unresolved; stop before retry"
                             # The remedy is stop-then-start, NOT a plain retry:
                             # start() from ACTIVE is an idempotent no-op that
                             # reports success without launching anything. Said
@@ -4002,6 +4108,8 @@ class _SiloStore:
                             self._teardown_egress(silo.name, silo.uid,
                                                   silo.egress)
                         self._force_state(silo, State.STOPPED)
+                        silo.observed_status = "failed"
+                        silo.observed_reason = "launcher start failed"
                         if isinstance(e, SessionError):
                             raise
                         raise SessionError(
@@ -6335,11 +6443,22 @@ def main():  # pragma: no cover - exercised in the VM
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
     mgr = SessionManager(name)
     _install_lease_sweep(mgr)
+    observer_stop = threading.Event()
+
+    def observe_runtime():
+        while not observer_stop.is_set():
+            mgr.store.observe_runtime_once()
+            observer_stop.wait(10)
+
+    threading.Thread(target=observe_runtime, name="silo-runtime-observer",
+                     daemon=True).start()
     loop = GLib.MainLoop()
     try:
         loop.run()
     except KeyboardInterrupt:
         pass
+    finally:
+        observer_stop.set()
 
 
 if __name__ == "__main__":

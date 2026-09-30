@@ -43,6 +43,23 @@ dispatch, peer discovery). Per-app integration (what "read-only" means for
 *this* editor, where an incoming payload *goes* in *this* app) lives in
 each app's qdistro plugin — that's the only piece that understands the host.
 
+## Text receiver receipts
+
+`app_receiver.register_app` accepts optional `transfer_capabilities` and
+`on_transfer` callbacks. An opted-in `AppReceiver` exposes JSON-returning
+`GetTransferCapabilities()`, `ReceiveTransfer(expected_instance, kind, payload)`
+and `GetTransferStatus(expected_instance, transfer_id)` on App1. Admission must
+return staged or rejected without waiting for a modal confirmation; the
+completion callback later records applied, declined or failed. Only successful
+editor insertion is applied; saving is separate.
+
+Senders use `get_transfer_capabilities`, `send_transfer` and
+`get_transfer_status` through the admin broker for both UID cases. Existing
+`send_to` remains transport-only for identified legacy consumers. The
+[transfer contract](app-transfers.md) defines wire fields, byte limits,
+endpoint and sender binding, expiry and unknown outcomes. No timeout triggers
+an automatic resend.
+
 ## Standard D-Bus interface
 
 Each SDK-using app exposes `org.qdistro.App1` on its session bus.

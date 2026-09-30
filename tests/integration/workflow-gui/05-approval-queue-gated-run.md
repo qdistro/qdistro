@@ -83,7 +83,7 @@ B64=$(base64 -w0 <<EOF
 runuser -u dev -- gdbus call --system \
   --dest org.qdistro.AdminBroker1 \
   --object-path /org/qdistro/AdminBroker1 \
-  --method org.qdistro.AdminBroker1.ApproveWorkflowRun "$RUN_ID" \
+  --method org.qdistro.AdminBroker1.ApproveWorkflowRun "$RUN_ID" "0000000000000000000000000000000000000000000000000000000000000000" \
   2>&1 || true
 EOF
 )
@@ -112,6 +112,10 @@ $VMGUI "$VM" screenshot /tmp/05-approval-queue-s3-tabs.png
 $VMGUI "$VM" screenshot /tmp/05-approval-queue-s3-selected.png
 # Runner: OCR-click the "Approve selected run" button.
 # $VMGUI "$VM" click <bx> <by>
+$VMGUI "$VM" screenshot /tmp/05-approval-queue-s3-preview.png
+# Runner: verify the review dialog shows this run ID, definition SHA-256,
+# and the seeded workflow actions/resources. The run must remain pending.
+# OCR-preview/confirm and click "Approve plan" to release this exact plan.
 sleep 1
 $VMGUI "$VM" screenshot /tmp/05-approval-queue-s3-afterapprove.png
 ```
@@ -119,7 +123,10 @@ $VMGUI "$VM" screenshot /tmp/05-approval-queue-s3-afterapprove.png
 **Assert (gated run executes only after approve):**
 - Before clicking Approve, the `wfgui-approval` run row shows state
   `pending`.
-- After clicking "Approve selected run" (and the tab auto-refreshing), the
+- Clicking "Approve selected run" displays the captured plan with its run ID,
+  SHA-256 digest and concrete actions/resources; the run remains pending
+  until the review dialog's "Approve plan" action is confirmed.
+- After confirming "Approve plan" (and the tab auto-refreshing), the
   same run transitions to `running` then `completed` — no new run id; the
   parked run is the one that executed.
 

@@ -74,7 +74,7 @@ print_triage() {
 # main() and the Usage: block in usage.sh; qci-subcommand-help.bats derives
 # the real case arms from this file and fails on any difference.
 QCI_COMMANDS="preflight lint selftest image registry-check release-manifest \
-bootstrap-release-profile affected edit-guard replay host vm-smoke bats gui \
+bootstrap-release-profile affected edit-guard replay host feedback vm-smoke bats gui \
 gui-admin full snapshot-daily mmnet cleanup report triage list-runs"
 
 qci_is_command() {
@@ -168,6 +168,11 @@ main() {
     fi
     if [ "$cmd" = full ] && [ "${QCI_SKIP_IMAGE:-0}" = 1 ] && [ "${QCI_RELEASE:-0}" = 1 ]; then
         echo "qci full: QCI_SKIP_IMAGE=1 is forbidden with QCI_RELEASE=1" >&2
+        exit "$EXIT_USAGE"
+    fi
+
+    if [ "$cmd" = feedback ] && [ "${QCI_RELEASE:-0}" = 1 ]; then
+        echo "qci feedback: development feedback is forbidden with QCI_RELEASE=1" >&2
         exit "$EXIT_USAGE"
     fi
 
@@ -270,6 +275,8 @@ main() {
         replay)
             local replay_scenario=${1:-} replay_vm=${2:-}
             gate_replay "$replay_scenario" "$replay_vm"; rc=$?; finish_run "$rc" ;;
+        feedback)
+            gate_feedback "$@"; rc=$?; finish_run "$rc" ;;
         host)
             gate_host; rc=$?; finish_run "$rc" ;;
         vm-smoke)

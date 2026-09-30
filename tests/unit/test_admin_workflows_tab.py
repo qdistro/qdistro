@@ -111,14 +111,18 @@ def _pending_run(run_id="p1"):
             "started_at": 1716800000.0, "completed_at": 0.0, "error": ""}
 
 
-def test_approve_selected_calls_broker(qapp):
+def test_approve_selected_calls_broker(qapp, monkeypatch):
     br = _broker([], [_pending_run("p1")])
     br.approve_workflow_run.return_value = True
+    preview = {"run_id": "p1", "definition_digest": "reviewed-digest", "definition": {}}
+    br.preview_workflow_run.return_value = preview
+    monkeypatch.setattr(WorkflowsTab, "_confirm_preview", lambda self, p: p == preview)
     tab = WorkflowsTab(br)
     # Select the pending run row, then approve.
     tab.runs_table.selectRow(0)
     tab.approve_selected()
-    br.approve_workflow_run.assert_called_once_with("p1")
+    br.preview_workflow_run.assert_called_once_with("p1")
+    br.approve_workflow_run.assert_called_once_with("p1", "reviewed-digest")
 
 
 def test_approve_skips_non_pending(qapp):
@@ -148,3 +152,76 @@ def test_pending_signal_triggers_refresh(qapp):
     tab._on_reloaded("p9", "wf")
     assert tab._runs_model.rowCount() == 1
     assert tab._runs_model.item(0, 2).text() == "pending"
+
+
+def test_cancel_preview_does_not_release(qapp, monkeypatch):
+    br = _broker([], [_pending_run()])
+    br.preview_workflow_run.return_value = {"definition_digest": "d"}
+    monkeypatch.setattr(WorkflowsTab, "_confirm_preview", lambda self, p: False)
+    tab = WorkflowsTab(br)
+    tab.runs_table.selectRow(0)
+    tab.approve_selected()
+    br.approve_workflow_run.assert_not_called()
+
+
+def test_missing_preview_does_not_release(qapp):
+    br = _broker([], [_pending_run()])
+    br.preview_workflow_run.return_value = {}
+    tab = WorkflowsTab(br)
+    tab.runs_table.selectRow(0)
+    tab.approve_selected()
+    br.approve_workflow_run.assert_not_called()
+
+
+def test_cleanup_failure_is_visible_separately_from_completed_task(qapp):
+    run = {"run_id":"done", "workflow_name":"wf", "state":"completed",
+           "cleanup_state":"unresolved", "cleanup_pending":1,
+           "cleanup_error":"channel cleanup attempts exhausted; requires review"}
+    tab = WorkflowsTab(_broker([], [run]))
+    assert tab._runs_model.item(0, 2).text() == "completed"
+    assert tab._runs_model.item(0, 6).text() == "unresolved"
+    assert tab._runs_model.item(0, 7).text() == "1"
+    assert "requires review" in tab._runs_model.item(0, 8).text()
+
+
+def test_cleanup_outcome_survives_broker_bridge_into_workflow_table(qapp, tmp_path):
+    from PyQt6.QtCore import QObject
+    from qdistro_admin_app import BrokerBridge
+    from audit_logger import WorkflowAuditLogger
+    from workflow_engine import WorkflowEngine
+    import qdistro_admin_broker as broker_module
+
+    audit = WorkflowAuditLogger(str(tmp_path / "bridge.sqlite"))
+    engine = WorkflowEngine(audit_logger=audit, own_dbus_loop=False)
+    audit.log_run_start("residue", "wf", {})
+    audit.log_run_complete("residue", "wf")
+    audit.log_plan_binding("residue", "reviewed-digest")
+    audit.log_cleanup_state("residue", "unresolved", 2, "cleanup requires review")
+    broker = broker_module.Broker.__new__(broker_module.Broker)
+    broker.workflow_engine = engine
+    broker._peer_info = lambda sender, conn: (0, 1, "test", 0)
+
+    # Replace only transport establishment. Exercise the real broker methods,
+    # bridge _call/conversion and table refresh without a system-bus daemon.
+    class Proxy:
+        def ListWorkflows(self, **kwargs):
+            return broker.ListWorkflows(sender=":test", conn=None)
+        def ListWorkflowRuns(self, limit, **kwargs):
+            return broker.ListWorkflowRuns(limit, sender=":test", conn=None)
+    bridge = BrokerBridge.__new__(BrokerBridge)
+    QObject.__init__(bridge)
+    bridge.bus = MagicMock()
+    bridge._proxy = Proxy()
+    try:
+        tab = WorkflowsTab(bridge)
+        assert tab._runs_model.item(0, 0).text() == "residue"
+        assert tab._runs_model.item(0, 2).text() == "completed"
+        assert tab._runs_model.item(0, 6).text() == "unresolved"
+        assert tab._runs_model.item(0, 7).text() == "2"
+        assert tab._runs_model.item(0, 8).text() == "cleanup requires review"
+        tab.runs_table.selectRow(0)
+        selected = tab._selected_run()
+        assert selected["definition_digest"] == "reviewed-digest"
+        assert selected["cleanup_pending"] == 2
+    finally:
+        engine.shutdown(); audit.close()

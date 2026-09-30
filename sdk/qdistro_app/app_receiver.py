@@ -38,9 +38,13 @@ from . import (
     APP1_OBJ_PATH,
     DEFAULT_KIND,
     AppReceiver,
+    get_transfer_capabilities,
+    get_transfer_status,
     list_receivers,
     send_to,
+    send_transfer,
 )
+from .transfers import unknown_capabilities
 
 __all__ = [
     "APP1_IFACE",
@@ -92,6 +96,8 @@ def register_app(
     friendly_name: str | None = None,
     silo: str | None = None,
     supported_kinds: Iterable[str] | None = None,
+    transfer_capabilities: Callable[[], dict] | None = None,
+    on_transfer: Callable | None = None,
     install_glib_mainloop: bool = True,
     bus_connect_timeout_s: float = 2.0,
     bus_connect_interval_s: float = 0.1,
@@ -104,6 +110,12 @@ def register_app(
     ``ReceivePayload`` entry points). Defaults to a no-op so apps that
     only care about "I'm registered so I show up in PodApps" can pass
     nothing.
+
+    ``transfer_capabilities`` and ``on_transfer`` opt into versioned receipts.
+    The admission callback receives ``(kind, payload, complete)`` and returns
+    staged/rejected without opening a modal dialog. It must explicitly marshal
+    GUI work onto the main thread and call complete with applied/declined/failed.
+    The completion callback is thread-safe, and its first terminal result wins.
 
     ``install_glib_mainloop`` is True by default — dbus-python's GLib
     loop dispatches incoming methods, and Qt's loop coexists. Set
@@ -166,6 +178,8 @@ def register_app(
                     friendly_name=friendly_name,
                     silo=silo,
                     supported_kinds=supported_kinds,
+                    transfer_capabilities=transfer_capabilities,
+                    on_transfer=on_transfer,
                 )
             except dbus.exceptions.NameExistsException as e:
                 _log(f"qdistro_app: failed to claim {service_name!r}: {e}")
@@ -190,7 +204,8 @@ def register_app(
 
 
 def send_to_menu_targets(*, self_service: str | None = None,
-                         kind: str | None = None) -> list[dict]:
+                         kind: str | None = None,
+                         probe_capabilities: bool = True) -> list[dict]:
     """Build the Send-To menu rows for the current process.
 
     Asks the broker for every registered ``org.qdistro.App1`` receiver,
@@ -200,11 +215,20 @@ def send_to_menu_targets(*, self_service: str | None = None,
     a receiver that doesn't implement ``CanReceive`` (or whose probe
     raises) stays in the list so the user can still try.
 
+    Versioned capabilities are queried through the broker for both same-uid
+    and cross-uid peers. Unknown legacy candidates remain explicitly unknown;
+    a legacy CanReceive probe never establishes a versioned capability match.
+
+    ``probe_capabilities=False`` returns unknown candidate rows without any
+    per-target calls, so GUI clients can enrich them asynchronously.
+
     Each returned dict has keys:
       - ``uid`` (int)
       - ``service`` (str, the bus name to pass to ``send_to``)
       - ``name`` (str, friendly label)
       - ``silo`` (str, best-effort from GetSilo or "")
+      - ``capabilities`` (validated versioned contract, or version 0 unknown)
+      - ``capability_state`` (``known`` or ``unknown``)
     """
     try:
         rows = list_receivers()
@@ -221,10 +245,13 @@ def send_to_menu_targets(*, self_service: str | None = None,
         if self_service and service == self_service:
             continue
         silo_label = ""
-        accept = True
-        if dbus is not None:
+        capabilities = (get_transfer_capabilities(int(uid), str(service))
+                        if probe_capabilities else unknown_capabilities())
+        known = capabilities.get("version") == 1
+        accept = kind is None or (kind in capabilities["kinds"] if known else True)
+        if dbus is not None and probe_capabilities:
             silo_label = _probe_silo(uid, service)
-            if kind is not None:
+            if kind is not None and not known:
                 accept = _probe_can_receive(uid, service, kind)
         if not accept:
             continue
@@ -233,6 +260,8 @@ def send_to_menu_targets(*, self_service: str | None = None,
             "service": service,
             "name": friendly,
             "silo": silo_label,
+            "capabilities": capabilities,
+            "capability_state": "known" if known else "unknown",
         })
     return out
 
@@ -271,8 +300,8 @@ def _probe_can_receive(uid: int, service: str, kind: str) -> bool:
         return True
     if int(uid) != os.geteuid():
         # Same reasoning as _probe_silo — cross-uid probe isn't
-        # available; assume the receiver will accept rather than
-        # silently dropping the menu entry.
+        # available; retain an unknown legacy candidate without claiming
+        # a versioned capability match.
         return True
     try:
         bus = dbus.SessionBus()
@@ -292,4 +321,5 @@ def _stderr_log(msg: str) -> None:
 
 # Backwards-compat: tests / docs may import these names from
 # ``qdistro_app.app_receiver`` directly.
-__all__ += ["AppReceiver", "list_receivers", "send_to"]
+__all__ += ["AppReceiver", "list_receivers", "send_to", "get_transfer_capabilities",
+            "send_transfer", "get_transfer_status"]

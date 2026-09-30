@@ -7,11 +7,13 @@ failure cleanup (secret scrubbing, run-state marking).
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import os
 import select
 import threading
 import time
+import uuid
 from typing import Any
 
 import condition_eval  # type: ignore[import-not-found]
@@ -31,6 +33,7 @@ from workflow_schema import (  # type: ignore[import-not-found]
     StepResult,
     StepType,
     WorkflowDef,
+    WorkflowPlan,
     WorkflowRun,
 )
 
@@ -271,6 +274,14 @@ class WorkflowEngine:
         # instead of being tracked into a dict that's already drained.
         self._secrets_lock = threading.Lock()
         self._stopping = False
+        self._cleanup_lock = threading.RLock()
+        self._cleanup_items: dict[DeliveryHandle, tuple[str, str]] = {}
+        self._cleanup_attempts: dict[DeliveryHandle, int] = {}
+        self._cleanup_pending_runs: set[str] = set()
+        self._relay_cleanup_attempts: dict[tuple[str, str], int] = {}
+        self._relay_cleared: set[tuple[str, str]] = set()
+        if self._audit is not None:
+            self._audit.reconcile_interrupted_runs()
         # When a real vault backend is wired up, sweep any secret dirs a
         # previously-crashed engine left mounted/on tmpfs before we start.
         if secret_source is not None:
@@ -290,7 +301,13 @@ class WorkflowEngine:
     def load_workflows(self) -> list[str]:
         """Load workflow definitions from disk. Returns load errors."""
         wf_list = self._loader.load()
-        self._workflows = {wf.name: wf for wf in wf_list}
+        with self._runs_lock:
+            self._workflows = {wf.name: wf for wf in wf_list}
+            invalidated = [run for run in self._runs.values()
+                           if (run.plan is not None and not run.execution_started
+                               and run.state in (RunState.PENDING, RunState.RUNNING)
+                               and not self._plan_matches(run))]
+            self._invalidate_runs(invalidated)
         errors = self._loader.load_errors()
         for err in errors:
             logger.warning("workflow load error: %s", err)
@@ -369,17 +386,16 @@ class WorkflowEngine:
         On failure mid-step, delivered secrets are scrubbed and the
         run is marked failed.
         """
-        wf = self._workflows.get(workflow_name)
-        if wf is None:
-            raise ValueError(f"unknown workflow: {workflow_name!r}")
-
-        run = WorkflowRun(
-            workflow_name=workflow_name,
-            trigger_context=dict(trigger_context or {}),
-        )
-        run.mark_running()
-
         with self._runs_lock:
+            wf = self._workflows.get(workflow_name)
+            if wf is None:
+                raise ValueError(f"unknown workflow: {workflow_name!r}")
+            run = WorkflowRun(
+                workflow_name=workflow_name,
+                trigger_context=dict(trigger_context or {}),
+                plan=WorkflowPlan.capture(wf),
+            )
+            run.mark_running()
             self._runs[run.run_id] = run
 
         return self._execute_existing_run(run)
@@ -393,22 +409,21 @@ class WorkflowEngine:
         (scrub + audit) on success or failure.
         """
         workflow_name = run.workflow_name
-        wf = self._workflows.get(workflow_name)
-        if wf is None:
-            error_msg = "workflow no longer loaded"
-            run.mark_failed(error_msg)
-            if self._audit:
-                self._audit.log_run_failed(
-                    run.run_id, workflow_name, error_msg)
-            return run
-
-        if run.state != RunState.RUNNING:
-            run.mark_running()
+        with self._runs_lock:
+            if run.state == RunState.FAILED or not self._validate_plan(run):
+                return run
+            wf = run.plan.definition()
+            # This is the dispatch boundary. Reload invalidates queued work;
+            # a run already executing keeps its selected definition.
+            run.execution_started = True
+            if run.state != RunState.RUNNING:
+                run.mark_running()
 
         if self._audit:
             self._audit.log_run_start(
                 run.run_id, workflow_name, run.trigger_context,
             )
+            self._audit.log_plan_binding(run.run_id, run.plan.digest)
 
         logger.info(
             "starting workflow run %s for %s",
@@ -456,6 +471,42 @@ class WorkflowEngine:
 
         return run
 
+    def _plan_matches(self, run: WorkflowRun) -> bool:
+        current = self._workflows.get(run.workflow_name)
+        return (run.plan is not None and current is not None
+                and WorkflowPlan.capture(current).digest == run.plan.digest)
+
+    def _invalidate_runs(self, runs: list[WorkflowRun]) -> None:
+        # Revocation must complete for the entire batch before any fallible
+        # persistence operation. An unavailable audit DB cannot keep a plan live.
+        for run in runs:
+            run.mark_failed("workflow definition changed or was removed; approval invalidated")
+        if self._audit:
+            for run in runs:
+                try:
+                    self._audit.log_run_failed(run.run_id, run.workflow_name, run.error)
+                except Exception as exc:  # noqa: BLE001
+                    run.audit_entries.append({"event": "audit_failure", "operation": "plan_invalidation",
+                                              "error": repr(exc)})
+                    logger.error("run %s approval invalidated but audit persistence failed: %r",
+                                 run.run_id, exc)
+
+    def _validate_plan(self, run: WorkflowRun) -> bool:
+        """Called under _runs_lock at preview, approval and worker dispatch."""
+        if self._plan_matches(run):
+            return True
+        self._invalidate_runs([run])
+        return False
+
+    def preview_run(self, run_id: str) -> dict[str, Any]:
+        with self._runs_lock:
+            run = self._runs.get(run_id)
+            if run is None or run.state != RunState.PENDING or not self._validate_plan(run):
+                return {}
+            return {"run_id": run.run_id, "workflow_name": run.workflow_name,
+                    "definition_digest": run.plan.digest,
+                    "definition": json.loads(run.plan.definition_json)}
+
     def get_run(self, run_id: str) -> WorkflowRun | None:
         with self._runs_lock:
             return self._runs.get(run_id)
@@ -483,7 +534,15 @@ class WorkflowEngine:
         """Recent run records from the audit DB (durable across restarts).
         Falls back to in-memory runs when no audit logger is configured."""
         if self._audit is not None:
-            return self._audit.recent_runs(limit)
+            records = self._audit.recent_runs(limit)
+            with self._runs_lock:
+                for record in records:
+                    live = self._runs.get(record["run_id"])
+                    if live:
+                        record.update(cleanup_state=live.cleanup_state,
+                                      cleanup_pending=live.cleanup_pending,
+                                      cleanup_error=live.cleanup_error)
+            return records
         runs = sorted(self.list_runs(), key=lambda r: r.started_at,
                       reverse=True)[:limit]
         return [
@@ -491,6 +550,9 @@ class WorkflowEngine:
                 "run_id": r.run_id, "workflow_name": r.workflow_name,
                 "state": r.state.value, "started_at": r.started_at,
                 "completed_at": r.completed_at, "error": r.error,
+                "definition_digest": r.plan.digest if r.plan else "",
+                "cleanup_state": r.cleanup_state, "cleanup_pending": r.cleanup_pending,
+                "cleanup_error": r.cleanup_error,
             }
             for r in runs
         ]
@@ -818,13 +880,15 @@ class WorkflowEngine:
                 delivery_config["base_env"] = base
         try:
             handle = make_delivery(delivery_method, secret, delivery_config)
-            handle.deliver()
+            with handle._lock:
+                self._own_delivery(run, handle, item)
+                handle.deliver()
         except Exception as e:  # noqa: BLE001
             # Scrub any partial channel state (open fd, mounted tmpfs,
             # started agent) AND wipe the buffer — never leave a
             # half-delivered secret behind on a failed step.
             if handle is not None:
-                handle.scrub()
+                self._cleanup_secrets(run.run_id, run.workflow_name)
             else:
                 secret.wipe()
             msg = e if isinstance(e, DeliveryError) else repr(e)
@@ -839,11 +903,8 @@ class WorkflowEngine:
         with self._secrets_lock:
             track = (scrub_on not in _STEP_SCRUB_LIFETIMES
                      and not self._stopping)
-            if track:
-                self._delivery_handles.setdefault(
-                    run.run_id, []).append(handle)
         if not track:
-            handle.scrub()
+            self._cleanup_owned(run.run_id, run.workflow_name, handle)
         logger.info(
             "deliver_secret: delivered %r via %s (scrub_on=%s) run %s",
             item, handle.method, scrub_on, run.run_id,
@@ -1227,56 +1288,104 @@ class WorkflowEngine:
     # Cleanup
     # ------------------------------------------------------------------
 
-    def _cleanup_secrets(self, run_id: str, workflow_name: str) -> None:
-        """Scrub every secret delivered during this run.
-
-        Called on both success and failure (including mid-step failure).
-        Each live delivery handle is revoked (agent killed, fds closed,
-        tmpfs unmounted, buffer wiped); the scrub is audited by item name
-        only — never the secret value.
-        """
+    def _own_delivery(self, run: WorkflowRun, handle: DeliveryHandle, item: str) -> None:
         with self._secrets_lock:
-            handles = self._delivery_handles.pop(run_id, [])
-            secrets = self._delivered_secrets.pop(run_id, [])
-        # Zero-coordination relay hook: re-arm any fixed-path agent relay to
-        # fail closed BEFORE the per-run agent is torn down, so a connection
-        # arriving during teardown never even sees the (about-to-die) target
-        # path. Clearing first, then scrubbing, removes the window where the
-        # relay still points at an agent the very next lines are about to kill.
-        # The registrar only re-arms if THIS run still owns the relay target
-        # (overlap is fail-closed, so another run can't have taken it; a stale
-        # clear is ignored regardless), so this can't stomp another run.
-        # Best-effort; a registrar failure must not break cleanup.
-        if self._channel_registrar is not None:
+            self._delivery_handles.setdefault(run.run_id, []).append(handle)
+            self._cleanup_items[handle] = (item, uuid.uuid4().hex)
+            self._cleanup_pending_runs.add(run.run_id)
+            run.cleanup_state = "pending"
+            run.cleanup_pending = len(self._delivery_handles[run.run_id])
+        if self._audit:
+            self._audit.log_cleanup_state(run.run_id, "pending", run.cleanup_pending, "")
+
+    def _cleanup_secrets(self, run_id: str, workflow_name: str) -> None:
+        self._cleanup_owned(run_id, workflow_name)
+
+    def _cleanup_owned(self, run_id: str, workflow_name: str,
+                       only_handle: DeliveryHandle | None = None) -> None:
+        """One bounded attempt per owned handle. Failed or unaudited work stays owned."""
+        with self._cleanup_lock:
+            with self._secrets_lock:
+                handles = list(self._delivery_handles.get(run_id, []))
+                secrets = list(self._delivered_secrets.get(run_id, []))
+            if only_handle is not None:
+                handles = [handle for handle in handles if handle is only_handle]
             run = self.get_run(run_id)
-            chan = (run.context.get("channel_env") or {}) if run else {}
-            for name in list(chan):
+            errors = []
+            # Disarm relays before touching agents. A failed clear remains an
+            # obligation even when channel revocation itself later succeeds.
+            channels = run.context.get("channel_env", {}) if run else {}
+            if self._channel_registrar is not None and only_handle is None:
+                for name in list(channels):
+                    key = (run_id, name)
+                    if key in self._relay_cleared:
+                        continue
+                    attempts = self._relay_cleanup_attempts.get(key, 0)
+                    if attempts >= 3:
+                        errors.append("relay cleanup attempts exhausted")
+                        continue
+                    self._relay_cleanup_attempts[key] = attempts + 1
+                    try:
+                        self._channel_registrar(run_id, name, None)
+                    except Exception:
+                        errors.append("relay cleanup failed")
+                    else:
+                        self._relay_cleared.add(key)
+                        self._relay_cleanup_attempts.pop(key, None)
+            for index, handle in enumerate(handles):
+                item, delivery_id = self._cleanup_items.setdefault(
+                    handle, (secrets[index] if index < len(secrets) else "", uuid.uuid4().hex))
+                attempts = self._cleanup_attempts.get(handle, 0)
+                if attempts >= 3 and not getattr(handle, "scrubbed", False):
+                    errors.append("channel cleanup attempts exhausted; requires review")
+                    continue
                 try:
-                    self._channel_registrar(run_id, name, None)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "channel registrar clear for %s failed: %r", name, e)
-        for handle in handles:
+                    if not getattr(handle, "scrubbed", False):
+                        self._cleanup_attempts[handle] = attempts + 1
+                        handle.scrub()
+                    if self._audit:
+                        self._audit.log_secret_scrub(run_id, workflow_name, item, delivery_id)
+                except Exception:
+                    errors.append("channel revocation or scrub audit unconfirmed")
+                    continue
+                with self._secrets_lock:
+                    owned = self._delivery_handles.get(run_id, [])
+                    if handle in owned:
+                        owned.remove(handle)
+                    self._cleanup_items.pop(handle, None)
+                    self._cleanup_attempts.pop(handle, None)
+                logger.info("scrubbed secret %r from run %s", item, run_id)
+            with self._secrets_lock:
+                remaining = len(self._delivery_handles.get(run_id, []))
+                if not remaining:
+                    self._delivery_handles.pop(run_id, None)
+                    self._delivered_secrets.pop(run_id, None)
+            state = ("unresolved" if errors else
+                     "pending" if remaining and only_handle is not None else
+                     "unresolved" if remaining else "confirmed")
+            if run:
+                run.cleanup_state = state
+                run.cleanup_pending = remaining
+                run.cleanup_error = "; ".join(sorted(set(errors)))
             try:
-                handle.scrub()
-            except Exception as e:  # noqa: BLE001
-                logger.error(
-                    "secret scrub failed for run %s (%s): %r",
-                    run_id, handle.method, e,
-                )
-        for item in secrets:
-            logger.info("scrubbed secret %r from run %s", item, run_id)
-            if self._audit:
-                self._audit.log_secret_scrub(run_id, workflow_name, item)
+                if self._audit:
+                    self._audit.log_cleanup_state(run_id, state, remaining,
+                                                   run.cleanup_error if run else "; ".join(errors))
+            except Exception:
+                state = "unresolved"
+                if run:
+                    run.cleanup_state = state
+                    run.cleanup_error = "cleanup status audit failed; requires review"
+            with self._secrets_lock:
+                if state == "confirmed":
+                    self._cleanup_pending_runs.discard(run_id)
+                else:
+                    self._cleanup_pending_runs.add(run_id)
 
     def scrub_all_runs(self) -> None:
-        """Revoke every outstanding delivery across all runs.
-
-        Best-effort safety net for shutdown so a secret never outlives
-        the engine process when a clean per-run scrub was missed.
-        """
+        """Retry owned cleanup once per call; exhausted residue remains visible."""
         with self._secrets_lock:
-            run_ids = list(self._delivery_handles.keys())
+            run_ids = list(self._cleanup_pending_runs | set(self._delivery_handles))
         with self._runs_lock:
             names = {rid: self._runs[rid].workflow_name
                      for rid in run_ids if rid in self._runs}
@@ -1307,45 +1416,53 @@ class WorkflowEngine:
         broker main loop for D-Bus triggers) is never occupied by
         workflow execution.
         """
-        wf = self._workflows.get(workflow_name)
-        if wf is None:
-            logger.warning("trigger fired for unknown workflow %s",
-                           workflow_name)
-            return
-
-        # F3: human-in-the-loop default. A workflow only auto-executes if
-        # it opted in with ``auto_run: true``; otherwise the fire records a
-        # PENDING run awaiting admin approval.
-        if not wf.auto_run:
+        dedup_key = self._dedup_key(workflow_name, trigger_context)
+        with self._runs_lock:
+            wf = self._workflows.get(workflow_name)
+            if wf is None:
+                logger.warning("trigger fired for unknown workflow %s", workflow_name)
+                return
+            auto_run = wf.auto_run
+            if auto_run:
+                with self._active_lock:
+                    if self._inflight >= self._max_inflight:
+                        logger.warning("workflow run queue saturated; dropping trigger for %s", workflow_name)
+                        return
+                    if dedup_key is not None and dedup_key in self._active_keys:
+                        return
+                    if dedup_key is not None:
+                        self._active_keys.add(dedup_key)
+                    self._inflight += 1
+                run = WorkflowRun(workflow_name=workflow_name,
+                                  trigger_context=dict(trigger_context or {}),
+                                  plan=WorkflowPlan.capture(wf))
+                run.mark_running()
+                # A queued automatic fire must be visible to reload, including
+                # a temporary revocation followed by restoration of its plan.
+                self._runs[run.run_id] = run
+                try:
+                    if self._audit:
+                        self._audit.log_run_queued(run.run_id, workflow_name, run.trigger_context,
+                                                   run.plan.digest)
+                except Exception as exc:  # noqa: BLE001
+                    run.mark_failed("automatic run admission audit failed")
+                    try:
+                        self._audit.log_run_failed(run.run_id, workflow_name, run.error)
+                    except Exception:
+                        logger.error("automatic admission failure could not be persisted")
+                    self._release_inflight(dedup_key)
+                    logger.error("automatic run %s refused: %r", run.run_id, exc)
+                    return
+        if not auto_run:
             self._enqueue_pending(workflow_name, trigger_context)
             return
-
-        dedup_key = self._dedup_key(workflow_name, trigger_context)
-        with self._active_lock:
-            if self._inflight >= self._max_inflight:
-                logger.warning(
-                    "workflow run queue saturated (%d in flight); dropping "
-                    "trigger for %s", self._inflight, workflow_name)
-                return
-            if dedup_key is not None and dedup_key in self._active_keys:
-                logger.info(
-                    "collapsing duplicate trigger for %s (cgroup %s already "
-                    "has an active run)", workflow_name, dedup_key[1])
-                return
-            if dedup_key is not None:
-                self._active_keys.add(dedup_key)
-            self._inflight += 1
-
-        logger.info("trigger fired for workflow %s, dispatching run",
-                    workflow_name)
         try:
-            self._run_pool.submit(self._run_from_trigger,
-                                  workflow_name, trigger_context, dedup_key)
-        except RuntimeError as e:
-            # Pool already shut down (engine stopping) — drop the fire and
-            # release the accounting we just took.
+            self._run_pool.submit(self._run_from_trigger, run, dedup_key)
+        except RuntimeError as exc:
+            with self._runs_lock:
+                run.mark_failed("worker pool unavailable")
             self._release_inflight(dedup_key)
-            logger.warning("dropping trigger for %s: %r", workflow_name, e)
+            logger.warning("dropping trigger for %s: %r", workflow_name, exc)
 
     def _release_inflight(self, dedup_key: tuple[str, str] | None) -> None:
         with self._active_lock:
@@ -1353,14 +1470,12 @@ class WorkflowEngine:
             if dedup_key is not None:
                 self._active_keys.discard(dedup_key)
 
-    def _run_from_trigger(self, workflow_name: str,
-                          trigger_context: dict[str, Any],
+    def _run_from_trigger(self, run: WorkflowRun,
                           dedup_key: tuple[str, str] | None = None) -> None:
         try:
-            self.start_run(workflow_name, trigger_context)
-        except Exception as e:  # noqa: BLE001
-            logger.error("failed to start run for workflow %s: %s",
-                         workflow_name, e)
+            self._execute_existing_run(run)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("failed to start run %s: %s", run.run_id, exc)
         finally:
             self._release_inflight(dedup_key)
 
@@ -1375,33 +1490,26 @@ class WorkflowEngine:
         The trigger context is captured so the eventual approved run sees
         the same firing process (conditions are re-checked at execution).
         """
-        # Don't flood the queue: a periodic trigger (cron) that keeps
-        # firing while its previous run is still awaiting approval must not
-        # accumulate a new PENDING run every tick. Collapse to the existing
-        # pending run for the same (workflow, cgroup).
         dedup_key = self._dedup_key(workflow_name, trigger_context)
         with self._runs_lock:
             for existing in self._runs.values():
                 if (existing.state == RunState.PENDING
                         and existing.workflow_name == workflow_name
-                        and self._dedup_key(
-                            workflow_name, existing.trigger_context)
-                        == dedup_key):
-                    logger.info(
-                        "workflow %s already has a pending run %s; not "
-                        "enqueuing another", workflow_name, existing.run_id)
+                        and self._dedup_key(workflow_name, existing.trigger_context) == dedup_key
+                        and self._validate_plan(existing)):
                     return existing
-
-        run = WorkflowRun(
-            workflow_name=workflow_name,
-            trigger_context=dict(trigger_context or {}),
-        )
-        # state defaults to PENDING.
-        with self._runs_lock:
+            wf = self._workflows.get(workflow_name)
+            if wf is None:
+                raise ValueError(f"unknown workflow: {workflow_name!r}")
+            run = WorkflowRun(
+                workflow_name=workflow_name,
+                trigger_context=dict(trigger_context or {}),
+                plan=WorkflowPlan.capture(wf),
+            )
             self._runs[run.run_id] = run
-        if self._audit:
-            self._audit.log_run_pending(
-                run.run_id, workflow_name, run.trigger_context)
+            if self._audit:
+                self._audit.log_run_pending(run.run_id, workflow_name, run.trigger_context)
+                self._audit.log_plan_binding(run.run_id, run.plan.digest)
         logger.info("workflow %s run %s PENDING admin approval",
                     workflow_name, run.run_id)
         # Best-effort: nudge the admin UI / approval queue.
@@ -1418,34 +1526,30 @@ class WorkflowEngine:
             return [r for r in self._runs.values()
                     if r.state == RunState.PENDING]
 
-    def approve_run(self, run_id: str) -> bool:
-        """Approve a PENDING run and dispatch it for execution.
-
-        Returns True if a pending run was found and scheduled. The run is
-        executed on the worker pool (conditions are re-evaluated there, so
-        approval does not bypass the identity gate).
-        """
+    def approve_run(self, run_id: str, expected_digest: str,
+                    approver: dict[str, Any] | None = None) -> bool:
+        """Release only the captured plan matching the caller's preview digest."""
         with self._runs_lock:
             run = self._runs.get(run_id)
-            if run is None or run.state != RunState.PENDING:
+            if run is None or run.state != RunState.PENDING or not self._validate_plan(run):
                 return False
-            # Flip out of PENDING immediately so a double-approve can't
-            # schedule the same run twice.
-            run.mark_running()
-        with self._active_lock:
-            if self._inflight >= self._max_inflight:
-                logger.warning("queue saturated; cannot approve run %s now",
-                               run_id)
+            if not expected_digest or expected_digest != run.plan.digest:
+                return False
+            with self._active_lock:
+                if self._inflight >= self._max_inflight:
+                    return False
+                self._inflight += 1
+            try:
+                if self._audit:
+                    self._audit.log_run_approval(run.run_id, run.workflow_name,
+                                                 run.plan.digest, approver or {})
+                run.mark_running()
+                self._run_pool.submit(self._run_approved, run)
+            except Exception as exc:
+                self._release_inflight(None)
                 run.state = RunState.PENDING
+                logger.warning("cannot approve run %s: %r", run_id, exc)
                 return False
-            self._inflight += 1
-        try:
-            self._run_pool.submit(self._run_approved, run)
-        except RuntimeError as e:
-            self._release_inflight(None)
-            run.state = RunState.PENDING
-            logger.warning("cannot approve run %s (pool down): %r", run_id, e)
-            return False
         logger.info("approved workflow run %s (%s)", run_id, run.workflow_name)
         return True
 

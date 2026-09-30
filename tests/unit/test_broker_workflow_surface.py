@@ -211,7 +211,12 @@ class TestApproveWorkflowRunAuditOrdering:
         def __init__(self):
             self.calls = []
 
-        def approve_run(self, run_id):
+        def preview_run(self, run_id):
+            return {"definition_digest": "captured-digest"}
+
+        def approve_run(self, run_id, digest, approver):
+            assert digest == "captured-digest"
+            assert approver["uid"] == ADMIN
             self.calls.append(run_id)
             return True
 
@@ -229,7 +234,7 @@ class TestApproveWorkflowRunAuditOrdering:
     def test_audit_failure_refuses_approval(self, capsys):
         engine = self._Engine()
         br = self._broker(engine, self._FailingAudit())
-        assert br.ApproveWorkflowRun("run-1", sender=":1", conn=None) is False
+        assert br.ApproveWorkflowRun("run-1", "captured-digest", sender=":1", conn=None) is False
         assert engine.calls == [], (
             "the run was released despite the audit row failing to write")
         out = capsys.readouterr().out
@@ -239,10 +244,25 @@ class TestApproveWorkflowRunAuditOrdering:
         audit = self._RecordingAudit()
         engine = self._Engine()
         br = self._broker(engine, audit)
-        assert br.ApproveWorkflowRun("run-1", sender=":1", conn=None) is True
+        assert br.ApproveWorkflowRun("run-1", "captured-digest", sender=":1", conn=None) is True
         assert engine.calls == ["run-1"]
         assert len(audit.rows) == 1
         row = audit.rows[0]
         assert row["action"] == "qdistro.workflow.approve:run-1"
         assert row["decision"] is True
         assert row["approver_uid"] == ADMIN
+
+
+def test_workflow_history_exposes_cleanup_outcome_through_real_broker_surface(tmp_path):
+    audit = WorkflowAuditLogger(str(tmp_path / "cleanup.sqlite"))
+    engine = WorkflowEngine(audit_logger=audit, own_dbus_loop=False)
+    audit.log_run_start("residue", "wf", {})
+    audit.log_run_complete("residue", "wf")
+    audit.log_cleanup_state("residue", "unresolved", 1, "requires review")
+    broker = _broker(engine)
+    rows = broker.ListWorkflowRuns(10, sender=":1", conn=None)
+    assert rows[0]["state"] == "completed"
+    assert rows[0]["cleanup_state"] == "unresolved"
+    assert rows[0]["cleanup_pending"] == 1
+    assert rows[0]["cleanup_error"] == "requires review"
+    engine.shutdown(); audit.close()

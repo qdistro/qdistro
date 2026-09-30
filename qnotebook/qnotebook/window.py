@@ -2844,4 +2844,7 @@ class MainWindow(QMainWindow):
                 _locks.remove(self.notebook.root)
             except Exception:
                 pass
+        transfers = getattr(self, "_qdistro_transfers", None)
+        if transfers is not None:
+            transfers.shutdown()
         super().closeEvent(event)
