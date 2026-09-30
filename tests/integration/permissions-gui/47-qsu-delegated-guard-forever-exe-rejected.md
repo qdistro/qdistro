@@ -141,41 +141,87 @@ rejected.
 # owns the keyboard: Ctrl+Shift+6 and Ctrl+Y below would go to the modal, not
 # the main window, and the S4 frame would show the modal. Dismiss it with its
 # default OK button (Enter) and prove it is gone before S4 touches the main
-# window. `DIALOG=absent` is only possible for S3's inline-only shape.
-DLG_FIND=$(base64 -w0 <<'EOF'
-wid=
-for _ in $(seq 1 20); do
-  wid=$(runuser -u admin -- env DISPLAY=:0 xdotool search --onlyvisible \
-    --name '^Decision not recorded$' 2>/dev/null | head -n1)
-  [ -n "$wid" ] && break
-  sleep 0.5
-done
-if [ -z "$wid" ]; then echo "DIALOG=absent"; exit 0; fi
-runuser -u admin -- env DISPLAY=:0 timeout 10 xdotool windowactivate --sync "$wid"
-echo "DIALOG=open wid=$wid"
+# window.
+#
+# Every probe distinguishes "no such window" from "could not look":
+# `xdotool search` exits 1 on no match, but also on a dead display, so a
+# dialog miss counts only when the SAME probe still finds the main
+# `admin approvals` window. Any other xdotool status, a failed activation or
+# a failed vm-exec/virsh call is `probe-error`, never `absent`/`dismissed`.
+# Guest exit codes: 0 = condition met, 1 = dialog still open, 2 = probe error.
+DLG_LIB=$(cat <<'EOF'
+# xsearch <name-regex>: print visible window ids; 0 found, 1 none, 2 error.
+xsearch() {
+  local out rc
+  out=$(runuser -u admin -- env DISPLAY=:0 timeout 10 xdotool search \
+    --onlyvisible --name "$1"); rc=$?
+  case "$rc" in
+    0) [ -n "$out" ] || { echo "xsearch '$1': rc=0 but no id" >&2; return 2; }
+       printf '%s\n' "$out"; return 0 ;;
+    1) [ -z "$out" ] || { echo "xsearch '$1': rc=1 with output" >&2; return 2; }
+       return 1 ;;
+    *) echo "xsearch '$1': xdotool rc=$rc" >&2; return 2 ;;
+  esac
+}
+# dialog_state: 0 dialog visible (id on stdout), 1 dialog not visible while
+# the main window is, 2 probe error.
+dialog_state() {
+  local ids rc
+  ids=$(xsearch '^Decision not recorded$'); rc=$?
+  [ "$rc" -eq 0 ] && { printf '%s\n' "$ids" | head -n1; return 0; }
+  [ "$rc" -eq 1 ] || return 2
+  xsearch '^admin approvals' >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] && return 1
+  echo "dialog_state: main window not visible either (xsearch rc=$rc)" >&2
+  return 2
+}
 EOF
 )
-DLG_GONE=$(base64 -w0 <<'EOF'
-for _ in $(seq 1 20); do
-  if [ -z "$(runuser -u admin -- env DISPLAY=:0 xdotool search --onlyvisible \
-      --name '^Decision not recorded$' 2>/dev/null)" ]; then
-    echo "DIALOG=gone"; exit 0
-  fi
+DLG_FIND=$(base64 -w0 <<EOF
+$DLG_LIB
+for _ in \$(seq 1 20); do
+  wid=\$(dialog_state); rc=\$?
+  [ "\$rc" -eq 2 ] && { echo "DIALOG=probe-error"; exit 2; }
+  [ "\$rc" -eq 0 ] && break
+  sleep 0.5
+done
+[ "\$rc" -eq 1 ] && { echo "DIALOG=absent"; exit 0; }
+runuser -u admin -- env DISPLAY=:0 timeout 10 xdotool windowactivate --sync "\$wid" \
+  || { echo "DIALOG=probe-error (windowactivate \$wid failed)"; exit 2; }
+echo "DIALOG=open wid=\$wid"
+EOF
+)
+DLG_GONE=$(base64 -w0 <<EOF
+$DLG_LIB
+for _ in \$(seq 1 20); do
+  dialog_state >/dev/null; rc=\$?
+  [ "\$rc" -eq 1 ] && { echo "DIALOG=gone"; exit 0; }
+  [ "\$rc" -eq 2 ] && { echo "DIALOG=probe-error"; exit 2; }
   sleep 0.5
 done
 echo "DIALOG=still-open"; exit 1
 EOF
 )
-dlg_state=absent
+dlg_state=
 for attempt in 1 2; do
-  out=$($VMEXEC "$VM" "echo $DLG_FIND | base64 -d | bash")
-  echo "[s4-dismiss attempt $attempt] $out"
-  case "$out" in *DIALOG=open*) ;; *) break ;; esac
-  virsh send-key "$VM" --codeset linux KEY_ENTER
-  if out=$($VMEXEC "$VM" "echo $DLG_GONE | base64 -d | bash"); then
-    echo "[s4-dismiss attempt $attempt] $out"; dlg_state=dismissed; break
+  if ! out=$($VMEXEC "$VM" "echo $DLG_FIND | base64 -d | bash"); then
+    echo "[s4-dismiss $attempt] find: $out"; dlg_state=probe-error; break
   fi
-  echo "[s4-dismiss attempt $attempt] $out"; dlg_state=still-open
+  echo "[s4-dismiss $attempt] find: $out"
+  case "$out" in
+    *DIALOG=absent*) dlg_state=absent; break ;;
+    *DIALOG=open*) ;;
+    *) dlg_state=probe-error; break ;;
+  esac
+  virsh send-key "$VM" --codeset linux KEY_ENTER || { dlg_state=probe-error; break; }
+  if out=$($VMEXEC "$VM" "echo $DLG_GONE | base64 -d | bash"); then
+    echo "[s4-dismiss $attempt] gone: $out"; dlg_state=dismissed; break
+  else
+    rc=$?
+    echo "[s4-dismiss $attempt] gone: $out (rc=$rc)"
+    [ "$rc" -eq 1 ] || { dlg_state=probe-error; break; }
+    dlg_state=still-open
+  fi
 done
 echo "S4-DIALOG-STATE=$dlg_state"
 
@@ -206,10 +252,13 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 47-qsu; echo "rc=$(bg_rc 4
 ```
 
 **Assert**:
-- The dismissal printed `S4-DIALOG-STATE=dismissed` when S3 showed the
-  modal (or `absent` only when S3 passed on its inline-only shape). If it
-  printed `still-open`, the modal did not close on OK: report S4 FAIL
-  with the S3b and S4a frames.
+- The dismissal printed `S4-DIALOG-STATE=dismissed`. `absent` is
+  acceptable only when the S3b frame shows no modal (S3 passed on its
+  inline-only shape); `absent` after an S3b frame WITH the modal is an S4
+  FAIL. `still-open` (the modal did not close on OK) is an S4 FAIL with
+  the S3b and S4a frames. `probe-error` (xdotool, vm-exec or virsh could
+  not observe or drive the windows) is an ERROR, not a PASS: report it
+  with the printed `[s4-dismiss ...]` lines and vm-exec stderr.
 - `/tmp/47-s4a-forever-argv-selected.png` shows no `Decision not
   recorded` modal, and shows `forever_argv` radio
   filled.
