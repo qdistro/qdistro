@@ -3,9 +3,16 @@
 <!-- qci:visual: none -->
 
 **Acceptance criterion:** moving the mouse via QMP `input-send-event`
-results in the cursor visibly following on screen. Hovering over a
-bar widget triggers the appropriate hover state (color shift or
-icon highlight).
+across Noctalia surfaces makes qdwin (re)install a visible cursor sprite
+(non-zero alpha) on the cursor plane at each pointer-enter transition
+(bar, wallpaper). Hovering over a bar widget triggers the appropriate
+hover state (color shift or icon highlight), soft-checked.
+
+Scope limit: the compositor journal records shape, payload and alpha,
+not the pointer or cursor-plane position, and `virsh screenshot` does
+not capture the hardware cursor plane. This scenario therefore proves
+pointer delivery to the right surfaces (their enter handlers fire) and
+a visible sprite, NOT the cursor's pixel position.
 
 This exercises:
 - Pointer event delivery (already proven in scenario 02 by the
@@ -33,8 +40,8 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 #     Both cursor paths carry this line — the no-client default path
 #     (`install_default_cursor:` prefix) and the client cursor-shape
 #     path (`cursor-shape install shape=...` prefix) — so grepping the
-#     `mapped on cursor_layer` line catches either. This is the proof
-#     the cursor followed the pointer at runtime.
+#     `mapped on cursor_layer` line catches either. It proves a visible
+#     sprite was (re)installed on a pointer transition, not a position.
 #   * BOOT (once per session): the default sprite is `registered` at
 #     session start (`cursor-sprite registered shape=default`). This
 #     never re-fires on a runtime move, so it is a boot precondition,
@@ -128,9 +135,12 @@ compositor's own journal rather than the screenshot:
 ```bash
 [ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP1")" -ge 1 ] \
     || { echo "FAIL: cursor not mapped on cursor_layer with nonzero_alpha"; exit 1; }
+# The wallpaper's default-shape install itself must be visible: shape and
+# non-zero alpha on the SAME line (a late bar `shape=pointer` remap must not
+# stand in for a transparent wallpaper default).
 noct_compositor_journal_after "$CUR_STEP1" \
-    | grep -q 'cursor-shape install shape=default: mapped on cursor_layer' \
-    || { echo "FAIL: no wallpaper-enter default-shape install after the move"; exit 1; }
+    | grep -Eq 'cursor-shape install shape=default: mapped on cursor_layer .*nonzero_alpha=[1-9][0-9]*' \
+    || { echo "FAIL: no visible wallpaper-enter default-shape install after the move"; exit 1; }
 ```
 
 What 1.1 proves: the pointer left the bar and entered the wallpaper
@@ -186,8 +196,9 @@ qdwin_screenshot /tmp/04-step3-sweep-end.png
 ```
 
 **Assert (3.1) — compositor evidence (load-bearing):** the cursor
-sprite stayed mapped on the cursor plane with non-zero alpha through
-the sweep (the cursor followed the motion). Assert the journal, not
+sprite was re-installed on the cursor plane with non-zero alpha during
+the sweep (pointer transitions reached the bar; not a position proof,
+see Scope limit). Assert the journal, not
 the screenshot (the final position (1260, 15) is soft-only):
 
 ```bash
