@@ -52,10 +52,11 @@ const P = require("../Services/Theming/ColorPalette.js");
 (function testUntaggedFileMustNotInheritPendingId() {
   // ensures: a colors.json load during a pending wallpaper request cannot
   // acquire that request's identity.
-  assert.strictEqual(P.untaggedFileMayCommit(2, 1, false), false, "pending generation blocks untagged commit");
-  assert.strictEqual(P.untaggedFileMayCommit(1, 1, false), true, "no pending generation allows manual/initial commit");
-  assert.strictEqual(P.untaggedFileMayCommit(0, 0, false), true, "startup ids equal");
-  assert.strictEqual(P.untaggedFileMayCommit(2, 2, true), false, "producer still running blocks untagged commit even if ids match");
+  assert.strictEqual(P.untaggedFileMayCommit(2, 1, false, false), false, "pending generation blocks untagged commit");
+  assert.strictEqual(P.untaggedFileMayCommit(1, 1, false, false), true, "no pending generation allows manual/initial commit");
+  assert.strictEqual(P.untaggedFileMayCommit(0, 0, false, false), true, "startup ids equal");
+  assert.strictEqual(P.untaggedFileMayCommit(2, 2, true, false), false, "producer still running blocks untagged commit even if ids match");
+  assert.strictEqual(P.untaggedFileMayCommit(2, 2, false, true), false, "post-exit settle window blocks delayed producer loads");
 })();
 
 console.log("test_color_palette.js ok");

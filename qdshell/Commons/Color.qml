@@ -38,7 +38,27 @@ Singleton {
   property int fileCommitRequestId: 0
   property string fileCommitMode: ""
   property bool producerGenerationRunning: false
+  property bool suppressUntaggedCommits: false
   signal acceptedTargetChanged(int requestId, string mode, var palette)
+
+  Timer {
+    id: untaggedSettle
+    interval: 250
+    repeat: false
+    onTriggered: root.suppressUntaggedCommits = false
+  }
+
+  function markProducerBusy() {
+    root.producerGenerationRunning = true
+    root.suppressUntaggedCommits = true
+    untaggedSettle.stop()
+  }
+
+  function markProducerIdle() {
+    root.producerGenerationRunning = false
+    root.suppressUntaggedCommits = true
+    untaggedSettle.restart()
+  }
 
   // Timer to reset isTransitioning after animation completes
   Timer {
@@ -450,7 +470,7 @@ Singleton {
       commitTargetPalette(id, mode, pal);
       return;
     }
-    if (!ColorPalette.untaggedFileMayCommit(root.pendingRequestId, root.acceptedRequestId, root.producerGenerationRunning))
+    if (!ColorPalette.untaggedFileMayCommit(root.pendingRequestId, root.acceptedRequestId, root.producerGenerationRunning, root.suppressUntaggedCommits))
       return;
     if (root.acceptedRequestId === 0) {
       const mode = (Settings.data.colorSchemes && Settings.data.colorSchemes.darkMode) ? "dark" : "light";

@@ -89,7 +89,7 @@ Singleton {
   */
   function processWallpaperColors(wallpaperPath, mode, requestId) {
     Logger.d("TemplateProcessor", `processWallpaperColors called: path=${wallpaperPath}, mode=${mode}`);
-    Color.producerGenerationRunning = true;
+    Color.markProducerBusy();
     pendingWallpaperRequest = {
       wallpaperPath: wallpaperPath,
       mode: mode,
@@ -104,7 +104,7 @@ Singleton {
     const content = buildThemeConfig();
     if (!content) {
       Logger.d("TemplateProcessor", "executeWallpaperColors: no config content, aborting");
-      return;
+      return false;
     }
     const wp = wallpaperPath.replace(/'/g, "'\\''");
 
@@ -112,6 +112,7 @@ Singleton {
 
     generateProcess.command = ["sh", "-c", script];
     generateProcess.running = true;
+    return true;
   }
 
   readonly property string schemeJsonPath: Settings.cacheDir + "predefined-scheme.json"
@@ -139,7 +140,7 @@ Singleton {
     const tomlContent = buildPredefinedTemplateConfig(mode);
     if (!tomlContent) {
       Logger.d("TemplateProcessor", "No application templates enabled for predefined scheme");
-      return;
+      return false;
     }
 
     // 3. Build script to write files and run Python
@@ -172,6 +173,7 @@ Singleton {
 
     generateProcess.command = ["sh", "-c", script];
     generateProcess.running = true;
+    return true;
   }
 
   /**
@@ -553,13 +555,16 @@ Singleton {
       pendingWallpaperRequest = null;
       root.currentRequestId = req.requestId || 0;
       root.currentMode = req.mode;
-      executeWallpaperColors(req.wallpaperPath, req.mode);
+      if (!executeWallpaperColors(req.wallpaperPath, req.mode))
+        Color.markProducerIdle();
     } else if (pendingPredefinedRequest) {
       const req = pendingPredefinedRequest;
       pendingPredefinedRequest = null;
-      executePredefinedScheme(req.schemeData, req.mode);
+      if (!executePredefinedScheme(req.schemeData, req.mode))
+        Color.markProducerIdle();
     } else {
       Logger.d("TemplateProcessor", "executePendingRequest: no pending request");
+      Color.markProducerIdle();
     }
   }
 
@@ -597,12 +602,12 @@ Singleton {
         root.colorsGenerated();
         if (root.currentRequestId)
           Color.commitProcessResult(root.currentRequestId, root.currentMode);
-        Color.producerGenerationRunning = false;
+        Color.markProducerIdle();
       } else if (root.currentRequestId) {
         Color.cancelRequest(root.currentRequestId);
-        Color.producerGenerationRunning = false;
+        Color.markProducerIdle();
       } else {
-        Color.producerGenerationRunning = false;
+        Color.markProducerIdle();
       }
     }
 

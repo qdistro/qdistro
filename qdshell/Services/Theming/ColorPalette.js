@@ -93,11 +93,11 @@ function completePaletteFromScheme(obj) {
   return out;
 }
 
-function untaggedFileMayCommit(pendingId, acceptedId, producerRunning) {
+function untaggedFileMayCommit(pendingId, acceptedId, producerRunning, suppressUntagged) {
   // Untagged colors.json contents must never inherit a pending generation's
-  // identity, and must not be treated as a manual edit while a producer
-  // process is still running.
-  if (producerRunning)
+  // identity. Delayed FileView loads after a producer exits must not be
+  // reclassified as manual edits.
+  if (producerRunning || suppressUntagged)
     return false;
   return pendingId === acceptedId;
 }
