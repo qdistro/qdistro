@@ -306,6 +306,31 @@ GEOM="PROXY_GEOM x=240 y=100 w=800 h=600 output=Virtual-1 out=1280x800@0,0 outpu
     [ "$status" -eq 2 ]
 }
 
+@test "S4 typing sends each key's press AND release in one QMP call, and reports a failed injection" {
+    cat > "$T/bin/fake-virsh" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$3" >> "$FAKE_VIRSH_LOG"
+exit "${FAKE_VIRSH_RC:-0}"
+EOF
+    chmod +x "$T/bin/fake-virsh"
+    export FAKE_VIRSH_LOG="$T/virsh.log"
+    QDWIN_VIRSH="$T/bin/fake-virsh"
+    run qd22_type ab
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$FAKE_VIRSH_LOG")" -eq 2 ]
+    local k line
+    for k in a b; do
+        line=$(grep -F "\"data\":\"$k\"" "$FAKE_VIRSH_LOG")
+        [[ "$line" == *'"down":true,"key":{"type":"qcode","data":"'$k'"}'* ]]
+        [[ "$line" == *'"down":false,"key":{"type":"qcode","data":"'$k'"}'* ]]
+    done
+    FAKE_VIRSH_RC=1 run qd22_type a
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"injection of 'a' failed"* ]]
+    run qd22_type 'a!'
+    [ "$status" -eq 2 ]
+}
+
 # ------------------------------------------------------------ structure
 @test "run.sh primes the pointer after taking the shell role and before S1's probe" {
     local take prime s1

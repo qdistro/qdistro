@@ -472,8 +472,13 @@ compositor's own `toplevel_added handle=N uid=1000 pid=<that pid>` line. Not by
 title: foot has no title yet when it maps (the bystander logs `title=""`,
 `tests/apps/03-foot-vs-xterm-tagging.md`) and nothing logs later title
 changes, so the title grep this step used to do never matched; not by app_id
-alone, which would select any terminal. Then type `qdwinlives` over QMP and
-capture `s4-typed.png`.
+alone, which would select any terminal. Then type `qdwinlives` over QMP --
+each key's press AND release in ONE `input-send-event`, so no delivery stall
+can separate them and let the terminal's key repeat run (the first Luna run
+of run.sh saw `qdwinlive` + ~34 `e`; a 1.3 s gap between separate down/up
+calls reproduces that frame exactly) -- wait 3 s, and capture `s4-typed.png`.
+A run of one repeated letter in the frame is therefore a delivery defect to
+report as FAIL, not an injection artifact to excuse.
 
 **Assert (4.1):** a handle was found — the compositor still admits new
 toplevels after three proxy teardowns. (No `foot` process at all is ERROR: the

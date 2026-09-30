@@ -451,6 +451,27 @@ qd22_s3_pixels() {
     return 1
 }
 
+# Type a lowercase ASCII word, each key's press AND release in ONE QMP
+# input-send-event, so nothing can separate them. qdwin_apps_type sends them
+# as two virsh calls; any stall between the two deliveries lets the client's
+# key repeat run, and the frame then shows a run of one letter (the first
+# Luna run of this runner, gui-20260930T130630Z-436698: "qdwinlive" + ~34
+# "e", "s" not yet delivered). Reproduced on its preserved disk by holding
+# `e` 1.3 s between separate down/up calls: the identical frame. A failed
+# injection is reported, never ignored (qdwin_apps_type drops the status).
+qd22_type() {   # qd22_type <word>
+    local s=$1 i ch ev
+    for (( i=0; i<${#s}; i++ )); do
+        ch=${s:i:1}
+        case $ch in [a-z]) ;; *) echo "qd22_type: unsupported character '$ch'"; return 2 ;; esac
+        ev="{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"$ch\"}}},{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"$ch\"}}}"
+        $QDWIN_VIRSH qemu-monitor-command "$VMNAME" \
+            "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[$ev]}}" >/dev/null \
+            || { echo "qd22_type: QMP injection of '$ch' failed"; return 1; }
+        sleep 0.05
+    done
+}
+
 [ "${QD22_RUNSH_LIB:-0}" = 1 ] && return 0
 
 # ==================================================================== main
@@ -734,12 +755,13 @@ else
     done
     if [ -n "$HANDLE" ]; then
         qd22_assert 4.1 PASS "post-teardown toplevel handle=$HANDLE (foot pid $FOOT_PID)"
-        qdwin_apps_type "qdwinlives"
-        sleep 1
-        if qdwin_apps_screenshot "$ART/s4-typed.png"; then
-            qd22_assert 4.3 VISUAL "open s4-typed.png: 'qdwinlives' must be echoed in the foot window (absent while the window is visible and focused = FAIL)"
-        else
+        if ! msg=$(qd22_type "qdwinlives"); then
+            qd22_assert 4.3 ERROR "keystroke injection failed: $msg"
+        # Let the last keys reach the terminal and repaint before the frame.
+        elif ! sleep 3 || ! qdwin_apps_screenshot "$ART/s4-typed.png"; then
             qd22_assert 4.3 ERROR "could not capture $ART/s4-typed.png"
+        else
+            qd22_assert 4.3 VISUAL "open s4-typed.png: 'qdwinlives' must be echoed in the foot window (absent while the window is visible and focused = FAIL)"
         fi
     else
         if [ -z "$FOOT_PID" ]; then
