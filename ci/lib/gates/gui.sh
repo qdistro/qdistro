@@ -1012,7 +1012,13 @@ Rules:
   fine when these lines and all the driver's work are in that script. Never
   claim in a subshell, \`\$( )\`, or a helper that exits before the work.
   Exit 2 means the claim could not be taken (library missing, lock not
-  openable): record ERROR. The claim is held while the driver SHELL, or a
+  openable): record ERROR. It also refuses any /tmp/qci lock path other
+  than exactly the one above (\`is not a scenario lock\`): fix your path
+  and retry. Copy that path, never retype it, in a retry too: its
+  directory is where \`qci_host_step\` advertises \`waiting\`, and a
+  driver in a mistyped directory waits for go markers you create in the
+  real one (permissions-gui/25, full-20261001T124446Z-1395361).
+  The claim is held while the driver SHELL, or a
   \`bg_start\` job it started, is alive (a helper watches them; nothing the
   driver starts inherits the lock), and is released within a second after
   the last of them exits, even when the driver is SIGKILLed. An app the

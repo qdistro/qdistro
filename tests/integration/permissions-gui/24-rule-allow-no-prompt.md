@@ -106,18 +106,17 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 24-work 60'
 $VMGUI "$VM" screenshot /tmp/24-s3-stillempty.png
 
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 24-work; echo "rc=$(bg_rc 24-work)"'
-$VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=org.qdistro.AdminBroker1 \
-  /org/qdistro/AdminBroker1 \
-  org.qdistro.AdminBroker1.GetPending'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; echo "pending=$(broker_pending_count)"'
 ```
 
 **Assert**:
 - `/tmp/24-s3-stillempty.png` shows the same empty admin app —
   no new row in the Pending list, detail pane still `(no selection)`.
 - `/tmp/24-work.log` contains `ALLOWED` on its own line.
-- `GetPending` dbus-send output is `array []` (empty array — no
-  request was ever enqueued).
+- `broker_pending_count` prints exactly `0` (`pending=0`; no
+  request was ever enqueued). Compare that helper's own stdout; do
+  not parse `dbus-send --print-reply` text, which spreads an empty
+  array over an indented `array [` / `]` pair.
 
 ### S4 — audit row carries `source='rule'`, no cache row written
 

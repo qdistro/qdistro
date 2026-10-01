@@ -541,6 +541,35 @@ _probe_broker_pending_action() {
     printf '%s' "$reply"
     grep -Fq "string \"$action\"" <<<"$reply"
 }
+# broker_pending_count
+# Print ONE line: the number of undecided requests GetPending returns (`0`
+# when none). Use it instead of parsing dbus-send's pretty-printed array:
+# `--print-reply` spreads an empty array over an indented `array [` / `]`
+# pair under a `method return` header, and hand-written matchers of that
+# layout keep breaking (permissions-gui/25, full-20261001T124446Z-1395361:
+# `grep '^]$'` missed the indented `]` and the run went ERROR on a correct
+# broker). busctl prints the signature and the element count first
+# (`aa{sv} 0`), so the count is exact. The reply is checked to be that
+# signature; anything else (an error, a changed method) prints the raw reply
+# to stderr and returns 1, never a count. Compare the stdout of this call
+# alone, e.g. `n=$(broker_pending_count) && [ "$n" = 0 ]`.
+broker_pending_count() {
+    local reply sig n
+    # stdout only: busctl's diagnostics go straight to the caller's stderr
+    # and can never be read as part of the reply.
+    if ! reply=$(busctl --system call org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1 GetPending); then
+        printf 'ERROR: broker_pending_count: GetPending failed: %s\n' "$reply" >&2
+        return 1
+    fi
+    read -r sig n _ <<<"$reply"
+    case $n in ''|*[!0-9]*) sig= ;; esac
+    if [ "$sig" != 'aa{sv}' ]; then
+        printf 'ERROR: broker_pending_count: unexpected GetPending reply: %s\n' "$reply" >&2
+        return 1
+    fi
+    printf '%s\n' "$n"
+}
 # await_x11_window_title <user> <title-ere> [timeout] [interval]
 # Wait until an XWayland window owned by <user>'s display :0 carries a title
 # that matches <title-ere> as a WHOLE line (grep -Ex). Use it where the app
@@ -857,8 +886,10 @@ bg_log() {
 # a short-lived subshell that claims releases the claim when IT exits, and
 # the rest of the driver would run with no claim.
 #
-# Pass a scenario-scoped path: /tmp/qci/<slug>/driver.lock. The parent
-# directory is created. If the argument is omitted the default is
+# Pass a scenario-scoped path: /tmp/qci/<slug>/driver.lock. Under /tmp/qci
+# the <slug> directory must already exist (the gate creates it) and any other
+# shape is refused with exit 2 (_qci_claim_scenario_path); elsewhere the
+# parent directory is created. If the argument is omitted the default is
 # /tmp/qci-driver.lock (one lock for the whole guest — prefer the scenario
 # path).
 #
@@ -1425,6 +1456,44 @@ qci_claim_done() {
     _qci_driver_stop "$rc"
 }
 
+# _qci_claim_scenario_path <lock> — a lock under the guest scratch root
+# (/tmp/qci) must be EXACTLY <root>/<slug>/driver.lock for a <slug> directory
+# the gate already created (prepare_guest_scratch). The claim's directory is
+# also qci_host_step's: a mistyped slug used to be created silently, the
+# driver then advertised `waiting` in that stray directory while the host,
+# following the prompt, mkdir'ed every go marker in the real one, and the
+# driver stalled for the whole host-step timeout with nothing saying why
+# (permissions-gui/25, full-20261001T124446Z-1395361: a retry claimed
+# /tmp/qci/qdistro/<slug>/driver.lock). Refuse it up front, naming the
+# directories that do exist. Paths outside the root are left alone; a
+# non-canonical spelling of a path inside it (/tmp//qci/..., /tmp/./qci/...)
+# counts as inside and must then be spelled exactly.
+_qci_claim_scenario_path() {
+    local lock=$1 root=${QCI_GUEST_SCRATCH_ROOT:-/tmp/qci} rel slug have norm nroot
+    case $lock in
+        "$root"/*) ;;
+        *)
+            norm=$(realpath -m -s -- "$lock" 2>/dev/null) || norm=$lock
+            nroot=$(realpath -m -s -- "$root" 2>/dev/null) || nroot=$root
+            case $norm in
+                "$nroot"/*) ;;
+                *) return 0 ;;
+            esac
+            ;;
+    esac
+    rel=${lock#"$root"/}
+    slug=${rel%/driver.lock}
+    if [ "$slug/driver.lock" = "$rel" ] && [ -n "$slug" ] \
+        && case $slug in */*|.|..) false ;; *) true ;; esac \
+        && [ -d "$root/$slug" ] && [ ! -L "$root/$slug" ]; then
+        return 0
+    fi
+    have=$(find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null)
+    printf 'ERROR: qci_claim_driver: %s is not a scenario lock: use exactly %s/<slug>/driver.lock for a scenario directory the gate created (existing: %s). Fix the path in the driver; do not create the directory.\n' \
+        "$lock" "$root" "${have:-none}" >&2
+    return 1
+}
+
 qci_claim_driver() {
     local lock=${1:-/tmp/qci-driver.lock} dir start marker rc=0 me=$BASHPID
 
@@ -1443,6 +1512,7 @@ qci_claim_driver() {
     fi
 
     dir=$(dirname -- "$lock")
+    _qci_claim_scenario_path "$lock" || exit 2
     if ! mkdir -p -- "$dir" 2>/dev/null; then
         printf 'ERROR: qci_claim_driver: cannot create %s\n' "$dir" >&2
         exit 2
