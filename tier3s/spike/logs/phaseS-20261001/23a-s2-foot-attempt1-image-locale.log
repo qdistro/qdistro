@@ -1,0 +1,91 @@
+### host 2026-10-01T20:51:33Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && sha256sum tier3s/spike/s2-waypipe.sh && tier3s/spike/s2-waypipe.sh start foot
+CMD
+[vm-exec] guest identity pinned (pid 48682 start 220818)
+576743ea2d7bc4ef5e4c783364760f455f3949f8c78073ea1e2a11c16fe2aade  tier3s/spike/s2-waypipe.sh
+client argv (as admin, WAYLAND_DISPLAY=wayland-1): waypipe -s /run/user/1000/t3s-bridge-foot/link.sock -o --no-gpu --title-prefix \[tier3s\]\  client
+total 0
+srw-------. 1 admin admin 0 Oct  1 20:51 link.sock
+sandbox argv (as admin, in unit t3s-s2-sbx-foot): podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/tier3s-spike/s2-foot/runsc-debug/ --runtime-flag=host-uds=open run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s2-foot -v /run/user/1000/t3s-bridge-foot:/run/qdistro/link:rw -e XDG_RUNTIME_DIR=/run/user/1000 -e HOME=/tmp -e LANG=C.UTF-8 localhost/tier3s-spike/tw-terminals:20260929 waypipe -s /run/qdistro/link/link.sock -o --no-gpu server -- foot /usr/local/bin/t3s-banner
+units: client=active sandbox=active
+### exit=0
+### host 2026-10-01T20:52:18Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && tier3s/spike/s2-waypipe.sh status foot | grep -v "^    cmdline=" | cut -c1-200; echo "=== same image under runc: locale"; . tier3s/spike/lib.sh; as_admin podman run --rm --runtime runc --network=none -e LANG=C.UTF-8 'localhost/tier3s-spike/tw-terminals:20260929' sh -c "locale -a; locale charmap" 2>&1; echo "=== VM itself: rpm -qf /usr/lib/locale/C.utf8/LC_CTYPE"; rpm -qf /usr/lib/locale/C.utf8/LC_CTYPE; echo "=== STOP"; tier3s/spike/s2-waypipe.sh stop foot
+CMD
+[vm-exec] guest identity pinned (pid 49317 start 225254)
+units: client=active sandbox=active
+OCIRuntime=/usr/libexec/qdistro/tier3s-runsc State=running Pid=48753 ConmonPid=48740 Mounts=/run/user/1000/t3s-bridge-foot->/run/qdistro/link 
+--- sandbox process tree (conmon 48740)
+pid=48740 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon pin=- cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-c925a37f15f2f906b6e6d0416c1128710b0d2b1a088f0e7bf0b431278f
+pid=48748 ppid=48740 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc pin=runsc_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-c925a37f15f2f906b6e6d0416c1
+pid=48753 ppid=48740 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48754 ppid=48740 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking pin=sidecar_runsc-fd-parking_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/u
+pid=48771 ppid=48753 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48787 ppid=48753 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48791 ppid=48753 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48798 ppid=48753 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48800 ppid=48753 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48788 ppid=48787 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48796 ppid=48787 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48797 ppid=48787 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48792 ppid=48791 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48802 ppid=48791 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48803 ppid=48791 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48804 ppid=48791 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48799 ppid=48798 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+pid=48801 ppid=48800 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.sl
+--- inside the sandbox (runsc ps, run in podman's userns as admin)
+UID       PID       PPID      PGID      C         TTY       STIME     TIME      CMD
+1000      1         0         1         0         ?         20:51     30ms      waypipe
+1000      2         1         1         0         ?         20:51     70ms      foot
+--- host waypipe client (unit t3s-s2-client-foot)
+pid=48716 comm=runuser uid=0 exe=/usr/sbin/runuser
+pid=48719 comm=waypipe uid=1000 exe=/usr/bin/waypipe
+--- host processes named like the app (expect none: the app runs inside the Sentry)
+(end)
+  48716 root     runuser         /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland
+  48719 admin    waypipe         waypipe -s /run/user/1000/t3s-bridge-foot/link.sock -o --no-gpu --title-prefix [tier3s]  client
+  48726 root     runuser         /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/100
+  48728 admin    podman          podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runti
+  49317 root     sh              /bin/sh -c cd /root/qdistro-src && tier3s/spike/s2-waypipe.sh status foot | grep -v "^    cmdline=" | cut -c1-200; echo "=== sa
+  49319 root     s2-waypipe.sh   /bin/bash tier3s/spike/s2-waypipe.sh status foot
+--- sandbox log
+ err: main.c:471: setlocale() failed. The most common cause is that the configured locale is not available, or has been misspelled
+ err: main.c:528: invalid locale, and failed to find a fallback
+warn: config.c:3724: no configuration found, using defaults
+warn: wayland.c:1888: compositor does not implement the xdg-toplevel-icon protocol
+warn: shm.c:428: fallocate(FALLOC_FL_PUNCH_HOLE) not supported (Operation not supported): expect lower performance
+[08.486785 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=0 y=0 w=696 h=0
+[08.486834 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=0 y=494 w=696 h=0
+[08.486842 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=0 y=0 w=0 h=494
+[08.486864 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=696 y=0 w=0 h=494
+--- client log
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      1 Syscall 221: denied by seccomp
+      2 Syscall 86: denied by seccomp
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+=== same image under runc: locale
+C
+POSIX
+locale: Cannot set LC_CTYPE to default locale: No such file or directory
+locale: Cannot set LC_MESSAGES to default locale: No such file or directory
+locale: Cannot set LC_COLLATE to default locale: No such file or directory
+ANSI_X3.4-1968
+locale: Cannot set LC_CTYPE to default locale: No such file or directory
+locale: Cannot set LC_MESSAGES to default locale: No such file or directory
+locale: Cannot set LC_ALL to default locale: No such file or directory
+=== VM itself: rpm -qf /usr/lib/locale/C.utf8/LC_CTYPE
+glibc-locale-base-2.44-2.1.x86_64
+=== STOP
+t3s-s2-foot
+podman stop rc=0
+units: client=inactive sandbox=inactive
+(end ps -a)
+(end leftovers)
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      1 Syscall 221: denied by seccomp
+      2 Syscall 86: denied by seccomp
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+### exit=0

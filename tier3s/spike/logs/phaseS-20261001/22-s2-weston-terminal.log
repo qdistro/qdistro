@@ -61,3 +61,51 @@ could not load cursor 'dnd-none'
       1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
 (end denials)
 ### exit=0
+### host 2026-10-01T20:51:24Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s2-waypipe.sh && tier3s/spike/s2-waypipe.sh status weston-terminal | grep -v "^pid=\|^    cmdline=" ; echo "=== STOP"; tier3s/spike/s2-waypipe.sh stop weston-terminal
+CMD
+[vm-exec] guest identity pinned (pid 47665 start 219894)
+576743ea2d7bc4ef5e4c783364760f455f3949f8c78073ea1e2a11c16fe2aade  tier3s/spike/s2-waypipe.sh
+units: client=active sandbox=active
+OCIRuntime=/usr/libexec/qdistro/tier3s-runsc State=running Pid=46557 ConmonPid=46544 Mounts=/run/user/1000/t3s-bridge-weston-terminal->/run/qdistro/link 
+--- sandbox process tree (conmon 46544)
+--- inside the sandbox (runsc ps, run in podman's userns as admin)
+UID       PID       PPID      PGID      C         TTY       STIME     TIME      CMD
+1000      1         0         1         0         ?         20:50     90ms      waypipe
+1000      2         1         1         0         ?         20:50     60ms      weston-terminal
+1000      5         2         5         0         pts/0     20:50     10ms      bash
+--- host waypipe client (unit t3s-s2-client-weston-terminal)
+--- host processes named like the app (expect none: the app runs inside the Sentry)
+(end)
+  46520 root     runuser         /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland
+  46523 admin    waypipe         waypipe -s /run/user/1000/t3s-bridge-weston-terminal/link.sock -o --no-gpu --title-prefix [tier3s]  client
+  46530 root     runuser         /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/100
+  46532 admin    podman          podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runti
+  47665 root     sh              /bin/sh -c cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s2-waypipe.sh 
+  47677 root     s2-waypipe.sh   /bin/bash tier3s/spike/s2-waypipe.sh status weston-terminal
+--- sandbox log
+could not load cursor 'dnd-move'
+could not load cursor 'dnd-copy'
+could not load cursor 'dnd-none'
+--- client log
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      2 Syscall 122: denied by seccomp
+      2 Syscall 123: denied by seccomp
+      2 Syscall 221: denied by seccomp
+      2 Syscall 86: denied by seccomp
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+=== STOP
+t3s-s2-weston-terminal
+podman stop rc=0
+units: client=inactive sandbox=inactive
+(end ps -a)
+(end leftovers)
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      2 Syscall 122: denied by seccomp
+      2 Syscall 123: denied by seccomp
+      2 Syscall 221: denied by seccomp
+      2 Syscall 86: denied by seccomp
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+### exit=0

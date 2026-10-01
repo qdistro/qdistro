@@ -18,7 +18,7 @@ RPMDIR=${1:?usage: stage-image.sh <rpm-dir>}
 ROOTFS=$WORK/rootfs
 SEEDS="filesystem glibc bash coreutils util-linux iproute2 procps grep sed findutils
 python313-base weston waypipe wayland-utils foot dejavu-fonts fontconfig
-xkeyboard-config terminfo-base"
+xkeyboard-config terminfo-base glibc-locale-base"
 
 say "1. foot set: sha256 + rpm signature, then offline rpm install into the VM"
 ( cd "$RPMDIR" && sha256sum -c SHA256SUMS )
