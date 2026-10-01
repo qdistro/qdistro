@@ -60,16 +60,43 @@ fired at restart+8.0s (qdlocker journal `idle threshold reached`) before the
 Shift (restart+9.6s), and 1.1 read `locked=True` on both attempts — a HARNESS
 artifact, not a product bug. (run full-20260926T153217Z failed the same way.)
 
+The block is a readiness barrier, not a fixed sleep: it records the old
+MainPID, restarts (the unit is `Type=simple`, so `restart` returns before the
+locker is up), polls until a NEW MainPID answers on the ctrl socket, and
+reads the baseline right then. qdlocker arms its idle watcher before it opens
+the ctrl socket (journal order `idle watcher started` → `ctrl socket at`), so
+`elapsed_ms` measured from just before the restart is an upper bound on how
+far into the 8 s window the read happened.
+
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" '
-  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
-  sleep 2
-  printf "status\n" | runuser -u admin -- socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock'
-# ^ baseline — must be locked=False (read ~2 s into the 8 s window)
+  U() { runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
+  now_ms() { awk "{printf \"%d\", \$1*1000}" /proc/uptime; }   # monotonic
+  old=$(U systemctl --user show -p MainPID --value qdlocker.service)
+  t0=$(now_ms)
+  U systemctl --user restart qdlocker.service || { echo "SETUP_ERROR restart-failed"; exit 2; }
+  st=""; pid=""
+  while [ $(( $(now_ms) - t0 )) -lt 7000 ]; do
+    pid=$(U systemctl --user show -p MainPID --value qdlocker.service)
+    if [ -n "$pid" ] && [ "$pid" != 0 ] && [ "$pid" != "$old" ]; then
+      st=$(printf "status\n" | U socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock 2>/dev/null)
+      case "$st" in *locked=*) break ;; esac
+    fi
+    sleep 0.1
+  done
+  el=$(( $(now_ms) - t0 ))
+  echo "STEP1 old_pid=$old new_pid=$pid elapsed_ms=$el status=$st"
+  case "$st" in *locked=*) ;; *) echo "SETUP_ERROR no-ready-locker elapsed_ms=$el"; exit 2 ;; esac
+  [ "$el" -lt 7000 ] || { echo "SETUP_ERROR baseline-read-late elapsed_ms=$el"; exit 2; }'
 qdwin_screenshot /tmp/qdlocker-03-step1-baseline.png
 ```
 
-**Assert (1.1):** `locked=False`. If the locker came up locked-by-default
+A `SETUP_ERROR` line (restart failed, no new locker answered, or the read
+landed ≥ 7 s after the restart began) makes the scenario **ERROR**, not FAIL:
+the baseline was not observed inside the 8 s window, which says nothing about
+the product.
+
+**Assert (1.1):** the `STEP1` line shows `locked=False` with `elapsed_ms` < 7000. If the locker came up locked-by-default
 (`initially_locked=True` from `qdwin_locker_v1.ready`), this scenario
 is meaningless — abort and run after a clean unlock cycle. The screenshot is
 supporting evidence only (`qci:visual: none`); it is taken after the status
