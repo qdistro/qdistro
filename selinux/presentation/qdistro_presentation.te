@@ -38,7 +38,7 @@ optional_policy(`
 	gen_require(`
 		type container_t;
 	')
-	allow container_t qdistro_presentation_t:dir { getattr search open read };
+	allow container_t qdistro_presentation_t:dir { getattr search open read watch };
 	allow container_t qdistro_presentation_t:file { getattr open read };
 ')
 
@@ -46,6 +46,6 @@ optional_policy(`
 	gen_require(`
 		type qdistro_tier2_t;
 	')
-	allow qdistro_tier2_t qdistro_presentation_t:dir { getattr search open read };
+	allow qdistro_tier2_t qdistro_presentation_t:dir { getattr search open read watch };
 	allow qdistro_tier2_t qdistro_presentation_t:file { getattr open read };
 ')

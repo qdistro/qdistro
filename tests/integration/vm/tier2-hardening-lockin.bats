@@ -14,6 +14,7 @@
 #   6. /run/user/ contains only allowed sockets/logs
 #   7. No bus/pipewire-pulse/ssh-agent/gnupg sockets in /run/user/
 #   8. qdistro_tier2_token label set (orphan-dir reaper)
+#   9. presentation dir bound ro without :Z; write denied; no sibling trees
 #
 # Relies on the existing s40-tier2-hardening.sh driver which already
 # runs inside the VM. This bats file wraps it in the standard
@@ -61,6 +62,13 @@ teardown_file() {
 
     # Container label (orphan-dir reaper depends on this)
     assert_output_contains "PASS: qdistro_tier2_token label set"
+
+    assert_output_contains "PASS: presentation bind source is the host public directory"
+    assert_output_contains "PASS: presentation bind is read-only"
+    assert_output_contains "PASS: presentation bind does not use :Z relabel"
+    assert_output_contains "PASS: container write into presentation directory denied"
+    assert_output_contains "PASS: container /var/lib/qdistro exposes only presentation"
+    assert_output_contains "PASS: container does not see host qdshell settings"
 
     assert_output_contains "PASS: §Phase-7 tier-2 hardening invariants enforced"
 }

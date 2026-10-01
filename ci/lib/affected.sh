@@ -170,12 +170,13 @@ affected_gates_for_path() {
         # Browser extensions are covered by their host test/build rows.
         qdchrome-extension/*|qdfirefox-extension/*)
             printf 'host\n' ;;
-        # Presentation snapshot library: host pytest/ruff. Producer, installer
-        # and isolation policy live in later slices and widen this mapping.
+        # Presentation snapshot library and its installer: host pytest plus
+        # the VM isolation/delivery bats. SELinux policy stays on the
+        # selinux/* arm (host + vm-smoke + bats + gui).
         sdk/presentation/*)
-            printf 'host\n' ;;
+            printf 'host\nbats\n' ;;
         scripts/install/install-presentation-for-vm.sh)
-            printf 'host\n' ;;
+            printf 'host\nbats\n' ;;
         tier2/*|tier3/*)
             printf 'host\nbats\n' ;;
         # Maintained project docs run the deterministic local-link/anchor lint.
