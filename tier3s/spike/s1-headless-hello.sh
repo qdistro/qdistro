@@ -79,7 +79,7 @@ echo "--- conmon pid $CPID: process tree (exe + cgroup per pid)"
 proc_report "$CPID" | tee "$OUT/proctree.txt"
 echo "--- sandbox pid from podman (State.Pid=$SPID)"
 echo "exe=$(readlink /proc/$SPID/exe)"
-echo "pinned runsc=$RUNSC sha512 match: $( [ "$(sha512sum < "$RUNSC")" = "$(sha512sum < "/proc/$SPID/exe" 2>/dev/null)" ] && echo yes || echo no)"
+echo "pin key of /proc/$SPID/exe by sha512: $(pin_key_of "$SPID")  (runsc itself = runsc_sha512)"
 echo "cmdline=$(tr '\0' ' ' < /proc/$SPID/cmdline | cut -c1-400)"
 echo "uid_map(host view of $SPID):"; cat /proc/$SPID/uid_map; echo "gid_map:"; cat /proc/$SPID/gid_map
 echo "--- every process on the host whose exe is under /usr/libexec/qdistro/runsc"
@@ -97,11 +97,23 @@ as_admin podman inspect --format 'plain inspect: {{.State.Status}} {{.OCIRuntime
 echo "--- stop with the tier3s global flags"
 as_admin "${G[@]}" stop -t 2 "$NAME" 2>&1; echo "stop rc=$?"
 sleep 2
+as_admin podman ps -a --format '{{.Names}} {{.Status}}' 2>&1; echo "(end ps -a)"
+sleep 2
 echo "--- after stop: leftover processes under the runsc bundle (expect none)"
 for p in /proc/[0-9]*; do e=$(readlink $p/exe 2>/dev/null) || continue
   case $e in /usr/libexec/qdistro/runsc/*) echo "LEFTOVER pid=${p#/proc/} exe=$e";; esac; done; echo "(end leftovers)"
 echo "--- runsc debug log files"
 ls -l "$OUT/runsc-debug/"
+
+say "B2. a second held container stopped WITHOUT the tier3s global flags (plain podman stop)"
+T3S_RTFLAGS=(); T3S_RUNOPTS=(--name t3s-s1-plainstop -d); t3s_podman_argv
+as_admin "${T3S_ARGV[@]}" "$IMG" sleep 60 >/dev/null 2>&1; sleep 3
+as_admin podman stop -t 2 t3s-s1-plainstop 2>&1; echo "plain stop rc=$?"
+sleep 2
+as_admin podman ps -a --format '{{.Names}} {{.Status}}' 2>&1; echo "(end ps -a)"
+for p in /proc/[0-9]*; do e=$(readlink $p/exe 2>/dev/null) || continue
+  case $e in /usr/libexec/qdistro/runsc/*) echo "LEFTOVER pid=${p#/proc/} exe=$e";; esac; done; echo "(end leftovers)"
+t3s_global; as_admin "${T3S_GLOBAL[@]}" rm -f t3s-s1-plainstop >/dev/null 2>&1
 
 say "C. denied-syscall errno: same image + same profile, three runtimes"
 PROBE='import ctypes, os, errno
@@ -131,5 +143,14 @@ for rt in tier3s runc crun; do
     esac
     printf 'argv:'; printf ' %q' "${argv[@]:0:6}"; echo ' …'
     as_admin "${argv[@]}" "$IMG" python3 -c "$PROBE"; echo "rc=$?"
+    echo "coreutils ls -ld /run/user/1000 under $rt:"
+    as_admin "${argv[@]}" "$IMG" ls -ld /run/user/1000 2>&1; echo "rc=$?"
 done
+
+say "C2. which syscall makes ls report EPERM under tier3s (runsc --strace)"
+mkdir -p "$OUT/strace-ls"; chown $ADMIN: "$OUT/strace-ls"
+T3S_RTFLAGS=(--runtime-flag=debug --runtime-flag=strace "--runtime-flag=debug-log=$OUT/strace-ls/"); T3S_RUNOPTS=(); t3s_podman_argv
+as_admin "${T3S_ARGV[@]}" "$IMG" ls -ld /run/user/1000 2>&1; echo "rc=$?"
+grep -h ' X ' "$OUT"/strace-ls/*boot* | grep -iE 'errno=|not permitted|EPERM' | sed 's/^.*strace.go:[0-9]*\] //' | tail -15
+echo "(end strace excerpt)"
 echo "S1 DONE"

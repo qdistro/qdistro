@@ -61,19 +61,30 @@ t3s_podman_argv() {
 T3S_RTFLAGS=()
 T3S_RUNOPTS=()
 
-# Print every descendant of $1 (inclusive) with exe, cgroup and comm.
+PIN=$SPIKE_SRC/../RUNSC_RELEASE
+# Which pinned file (RUNSC_RELEASE key) a pid's executable is, by sha512 of
+# /proc/<pid>/exe (the running inode, not the path). "-" if none.
+pin_key_of() {
+    local h
+    h=$(sha512sum < "/proc/$1/exe" 2>/dev/null | cut -d' ' -f1) || { echo "?"; return; }
+    awk -F= -v h="$h" '$1 ~ /_sha512$/ && $2 == h { print $1; f=1 } END { if (!f) print "-" }' "$PIN"
+}
+
+# Print every descendant of $1 (inclusive) with exe, pin key, cgroup, cmdline.
 proc_report() {
     local root=$1 p kids
     local -a q=("$root")
     while [ ${#q[@]} -gt 0 ]; do
         p=${q[0]}; q=("${q[@]:1}")
         [ -d /proc/$p ] || continue
-        printf 'pid=%s ppid=%s uid=%s comm=%s exe=%s cgroup=%s\n' "$p" \
+        printf 'pid=%s ppid=%s uid=%s comm=%s exe=%s pin=%s cgroup=%s\n    cmdline=%s\n' "$p" \
             "$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)" \
             "$(awk '/^Uid:/{print $2}' /proc/$p/status 2>/dev/null)" \
             "$(cat /proc/$p/comm 2>/dev/null)" \
             "$(readlink /proc/$p/exe 2>/dev/null || echo '?')" \
-            "$(sed 's/^0:://' /proc/$p/cgroup 2>/dev/null)"
+            "$(pin_key_of "$p")" \
+            "$(sed 's/^0:://' /proc/$p/cgroup 2>/dev/null)" \
+            "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-240)"
         kids=$(cat /proc/$p/task/*/children 2>/dev/null)
         for k in $kids; do q+=("$k"); done
     done

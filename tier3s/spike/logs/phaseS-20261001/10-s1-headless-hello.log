@@ -1,0 +1,167 @@
+### host 2026-10-01T20:43:41Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s1-headless-hello.sh tier3s/spike/lib.sh && tier3s/spike/s1-headless-hello.sh
+CMD
+[vm-exec] guest identity pinned (pid 33435 start 173528)
+92c9629175deaa52f0468b19e1d09b358aa58f314584e0da78e9290e193d5688  tier3s/spike/s1-headless-hello.sh
+77a0f42e5d07d86e377c5261977accadc09af42858412c9aba0bae06fdcc5622  tier3s/spike/lib.sh
+
+## A0. exact 03 step-1 command, Phase 0 wrapper as-is (no runsc --root)
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none localhost/tier3s-spike/tw-terminals:20260929 sh -c cat\ /proc/version\;\ dmesg\ --syslog\ \|\ head\ -3\;\ id\;\ ls\ -ld\ /run/user/1000\;\ ip\ route
+Error: /usr/libexec/qdistro/tier3s-runsc: creating container: creating container root directory "/var/run/runsc": mkdir /var/run/runsc: permission denied: OCI permission denied
+rc=126
+(expected per runsc/config/flags.go: root = $XDG_RUNTIME_DIR/runsc, which env -i removed)
+
+## A. exact 03 step-1 command + --runtime-flag=root=/run/user/1000/runsc (no debug flags)
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none localhost/tier3s-spike/tw-terminals:20260929 sh -c cat\ /proc/version\;\ dmesg\ --syslog\ \|\ head\ -3\;\ id\;\ ls\ -ld\ /run/user/1000\;\ ip\ route
+Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+[    0.000000] Starting gVisor...
+[    0.244982] Synthesizing system calls...
+[    0.531092] Generating random numbers by fair dice roll...
+uid=1000(admin) gid=1000(admin) groups=1000(admin)
+ls: /run/user/1000: Operation not permitted
+drwx------ 2 admin admin 40 Oct  1 20:43 /run/user/1000
+::1 dev lo proto unspec scope link 
+127.0.0.0/8 dev lo proto unspec scope link 
+rc=0 wall=.601343147s (observation only, O8)
+
+## B. same flags + runsc debug log, held alive for inspection
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/tier3s-spike/s1/runsc-debug/ run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s1-held -d localhost/tier3s-spike/tw-terminals:20260929 sh -c cat\ /proc/version\;\ dmesg\ --syslog\ \|\ head\ -3\;\ id\;\ ls\ -ld\ /run/user/1000\;\ ip\ route\;\ stat\ -c\ \'stat\ %n\ %u:%g\ %a\'\ /run/user/1000\ /tmp\;\ cat\ /proc/self/uid_map\ /proc/self/gid_map\;\ sleep\ 60
+4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b
+--- podman inspect
+OCIRuntime=/usr/libexec/qdistro/tier3s-runsc
+ProcessLabel=""
+SecurityOpt=[no-new-privileges label=disable seccomp=/var/tmp/tier3s-spike/smoke.json]
+Tmpfs=map[/run/user/1000:rw,uid=1000,gid=1000,mode=0700,rprivate,nosuid,nodev,tmpcopyup /tmp:size=64m,rprivate,nosuid,nodev,tmpcopyup]
+ReadonlyRootfs=true
+CapDrop=[CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL CAP_NET_BIND_SERVICE CAP_SETFCAP CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_CHROOT]
+UsernsMode=private
+NetworkMode=none
+Cgroups=default CgroupParent="user.slice"
+StatePid=33628 ConmonPid=33615
+OCIConfigPath=/home/admin/.local/share/containers/storage/overlay-containers/4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b/userdata/config.json
+--- emitted OCI config.json (/home/admin/.local/share/containers/storage/overlay-containers/4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b/userdata/config.json), selected fields
+process.user = {'uid': 1000, 'gid': 1000, 'umask': 18, 'additionalGids': [1000]}
+process.noNewPrivileges = True
+process.selinuxLabel = ''
+process.capabilities = {}
+root.readonly = True
+linux.uidMappings = [{'containerID': 0, 'hostID': 1, 'size': 1000}, {'containerID': 1000, 'hostID': 0, 'size': 1}, {'containerID': 1001, 'hostID': 1001, 'size': 64536}]
+linux.gidMappings = [{'containerID': 0, 'hostID': 1, 'size': 1000}, {'containerID': 1000, 'hostID': 0, 'size': 1}, {'containerID': 1001, 'hostID': 1001, 'size': 64536}]
+linux.namespaces = ['pid', 'network', 'ipc', 'uts', 'mount', 'user', 'cgroup']
+linux.cgroupsPath = user.slice:libpod:4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b
+tmpfs /tmp ['size=64m', 'rprivate', 'nosuid', 'nodev', 'tmpcopyup']
+tmpfs /run/user/1000 ['rw', 'uid=1000', 'gid=1000', 'mode=0700', 'rprivate', 'nosuid', 'nodev', 'tmpcopyup']
+seccomp.defaultAction = SCMP_ACT_ERRNO defaultErrnoRet = 38 rules = 12 names = 172 syslog allowed = True
+--- conmon pid 33615: process tree (exe + cgroup per pid)
+pid=33615 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33628 ppid=33615 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33629 ppid=33615 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33623 ppid=33615 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33645 ppid=33628 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33659 ppid=33628 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33664 ppid=33628 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33666 ppid=33628 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33669 ppid=33628 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33660 ppid=33659 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33665 ppid=33664 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33667 ppid=33666 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33670 ppid=33669 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+--- sandbox pid from podman (State.Pid=33628)
+exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+pinned runsc=/usr/libexec/qdistro/runsc/runsc sha512 match: no
+cmdline=runsc-sandbox --debug-log=/var/tmp/tier3s-spike/s1/runsc-debug/ --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --systemd-cgroup=true --root=/run/user/1000/runsc --debug=true --debug-log-fd=3 boot --bundle=/home/admin/.local/share/containers/storage/overlay-containers/4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b/userdata --gofer-mount-confs=lisafs:non
+uid_map(host view of 33628):
+         0     100000       1000
+      1000       1000          1
+      1001     101000      64536
+gid_map:
+         0     100000       1000
+      1000       1000          1
+      1001     101000      64536
+--- every process on the host whose exe is under /usr/libexec/qdistro/runsc
+pid=33623 exe=/usr/libexec/qdistro/runsc/runsc cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33628 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33629 exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33645 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33659 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33660 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33664 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33665 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33666 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33667 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33669 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+pid=33670 exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry cg=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-4ca1567253bff19f53038097219bb0feeaf0424f7f16c2b069bba08f9f88de8b.scope
+--- any host process named like an app (expect none: sh/sleep/ip run inside the Sentry)
+--- pasta (expect none: --network=none)
+(end pasta)
+--- container output so far
+Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+[    0.000000] Starting gVisor...
+[    0.399810] Committing treasure map to memory...
+[    0.469269] Recruiting cron-ies...
+uid=1000(admin) gid=1000(admin) groups=1000(admin)
+drwx------ 2 admin admin 40 Oct  1 20:43 /run/user/1000
+::1 dev lo proto unspec scope link 
+127.0.0.0/8 dev lo proto unspec scope link 
+stat /run/user/1000 1000:1000 700
+stat /tmp 0:0 1777
+uid_map:
+         0          0 4294967295
+gid_map:
+         0          0 4294967295
+--- podman ps / inspect WITHOUT the tier3s global flags (does a plain podman call reach runsc state?)
+t3s-s1-held Up 7 seconds
+plain inspect: running /usr/libexec/qdistro/tier3s-runsc
+--- stop with the tier3s global flags
+t3s-s1-held
+stop rc=0
+--- after stop: leftover processes under the runsc bundle (expect none)
+(end leftovers)
+--- runsc debug log files
+total 300
+-rw-r--r--. 1 admin admin 201660 Oct  1 20:44 runsc.log.20261001-204356.485972.boot.txt
+-rw-r--r--. 1 admin admin  21622 Oct  1 20:43 runsc.log.20261001-204356.485972.create.txt
+-rw-r--r--. 1 admin admin  28640 Oct  1 20:44 runsc.log.20261001-204356.485972.gofer.txt
+-rw-r--r--. 1 admin admin  15757 Oct  1 20:43 runsc.log.20261001-204356.540973.start.txt
+-rw-r--r--. 1 admin admin  12350 Oct  1 20:44 runsc.log.20261001-204403.417014.kill.txt
+-rw-r--r--. 1 admin admin  13224 Oct  1 20:44 runsc.log.20261001-204403.452014.delete.txt
+
+## C. denied-syscall errno: same image + same profile, three runtimes
+--- runtime: tier3s
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc run …
+getpid(allow)  nr=39   ret=1   errno=0 -
+unshare(dflt)  nr=272  ret=-1  errno=1 EPERM
+sysinfo(dflt)  nr=99   ret=-1  errno=1 EPERM
+fchmodat2(dfl) nr=452  ret=-1  errno=1 EPERM
+ptrace(EPERM)  nr=101  ret=-1  errno=1 EPERM
+io_uring(EPERM) nr=425  ret=-1  errno=1 EPERM
+syslog(added)  nr=103  ret=131072 errno=0 -
+glibc lchmod(fchmodat AT_SYMLINK_NOFOLLOW): EPERM Operation not permitted
+rc=0
+--- runtime: runc
+argv: podman --runtime runc run --rm --security-opt …
+getpid(allow)  nr=39   ret=1   errno=0 -
+unshare(dflt)  nr=272  ret=-1  errno=38 ENOSYS
+sysinfo(dflt)  nr=99   ret=-1  errno=38 ENOSYS
+fchmodat2(dfl) nr=452  ret=-1  errno=38 ENOSYS
+ptrace(EPERM)  nr=101  ret=-1  errno=1 EPERM
+io_uring(EPERM) nr=425  ret=-1  errno=1 EPERM
+syslog(added)  nr=103  ret=-1  errno=1 EPERM
+glibc lchmod(fchmodat AT_SYMLINK_NOFOLLOW): ok
+rc=0
+--- runtime: crun
+argv: podman --runtime crun run --rm --security-opt …
+getpid(allow)  nr=39   ret=1   errno=0 -
+unshare(dflt)  nr=272  ret=-1  errno=38 ENOSYS
+sysinfo(dflt)  nr=99   ret=-1  errno=38 ENOSYS
+fchmodat2(dfl) nr=452  ret=-1  errno=38 ENOSYS
+ptrace(EPERM)  nr=101  ret=-1  errno=1 EPERM
+io_uring(EPERM) nr=425  ret=-1  errno=1 EPERM
+syslog(added)  nr=103  ret=-1  errno=1 EPERM
+glibc lchmod(fchmodat AT_SYMLINK_NOFOLLOW): ok
+rc=0
+S1 DONE
+[vm-exec] --- stderr ---
+ls: /run/user/1000: Operation not permitted
+[vm-exec] --- end stderr ---
+### exit=0
