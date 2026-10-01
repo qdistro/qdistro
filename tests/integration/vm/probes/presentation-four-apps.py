@@ -3,8 +3,10 @@
 
 Starts the qfileman, qdterm, qdbrowser, and qnotebook chrome adapters as
 separate offscreen processes against one snapshot directory. Missing file
-is fallback; publish A then B is followed without calling _reload; deletion
-keeps B. This is not the live compositor GUI matrix and does not write
+is fallback; publish A then B is followed without calling _reload; a late
+join reads B; malformed JSON keeps B; publish C is followed; deletion
+keeps C; a post-delete join is fallback; enabled:false restores native.
+This is not the live compositor GUI matrix and does not write
 /var/lib/qdistro.
 """
 
@@ -25,9 +27,22 @@ APPS = (
 )
 COLOR_A = "#112233"
 COLOR_B = "#445566"
+COLOR_C = "#223344"
 NATIVE = "#fedcba"
 PHASE_TIMEOUT = 10.0
-DELETE_SETTLE = 0.5
+SETTLE = 0.5
+SETTLE_PHASES = frozenset({"malformed", "delete"})
+# disable drops the shared layer; adapters may then paint their own
+# system fallback, so the window color is any non-snapshot value.
+PHASE_EXPECT = {
+    "A": ("1", COLOR_A),
+    "B": ("1", COLOR_B),
+    "malformed": ("1", COLOR_B),
+    "C": ("1", COLOR_C),
+    "delete": ("1", COLOR_C),
+    "disable": ("0", None),
+}
+SNAPSHOT_COLORS = (COLOR_A, COLOR_B, COLOR_C)
 
 
 def repo_root() -> Path:
@@ -71,7 +86,21 @@ def window_hex(app) -> str:
     return app.palette().color(QPalette.ColorRole.Window).name().lower()
 
 
-def run_worker(app_name: str, module_name: str, snap_dir: Path, status_path: Path, cmd_path: Path) -> int:
+def surface_of(ctrl) -> str:
+    if not ctrl.state.using_shared_palette:
+        return "-"
+    return ctrl.state.colors.mSurface
+
+
+def run_worker(
+    app_name: str,
+    module_name: str,
+    snap_dir: Path,
+    status_path: Path,
+    cmd_path: Path,
+    expect_shared: str,
+    expect_window: str,
+) -> int:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["QDISTRO_PRESENTATION_FILE"] = str(snap_dir / "current.json")
 
@@ -93,17 +122,37 @@ def run_worker(app_name: str, module_name: str, snap_dir: Path, status_path: Pat
     if ctrl is None:
         print(f"FAIL: {app_name} attach returned no controller", file=sys.stderr)
         return 1
-    if ctrl.state.using_shared_palette:
-        print(f"FAIL: {app_name} used shared palette before publish", file=sys.stderr)
+    shared = "1" if ctrl.state.using_shared_palette else "0"
+    color = window_hex(app)
+    if shared != expect_shared:
+        print(
+            f"FAIL: {app_name} start shared={shared} window={color} "
+            f"want shared={expect_shared} window={expect_window}",
+            file=sys.stderr,
+        )
+        return 1
+    if expect_window == "-":
+        if color in (COLOR_A, COLOR_B, COLOR_C):
+            print(
+                f"FAIL: {app_name} fallback already painted snapshot color {color}",
+                file=sys.stderr,
+            )
+            return 1
+    elif color != expect_window:
+        print(
+            f"FAIL: {app_name} start shared={shared} window={color} "
+            f"want shared={expect_shared} window={expect_window}",
+            file=sys.stderr,
+        )
         return 1
     atomic_write(
         status_path,
-        f"phase=ready shared=0 window={window_hex(app)}\n",
+        f"phase=ready shared={shared} window={color}\n",
     )
 
     seen = "idle"
     deadline = 0.0
-    delete_started = 0.0
+    settle_started = 0.0
     while True:
         app.processEvents()
         cmd = read_text(cmd_path) or "idle"
@@ -113,44 +162,44 @@ def run_worker(app_name: str, module_name: str, snap_dir: Path, status_path: Pat
         if cmd != seen:
             seen = cmd
             deadline = time.monotonic() + PHASE_TIMEOUT
-            delete_started = time.monotonic() if cmd == "delete" else 0.0
+            settle_started = time.monotonic() if cmd in SETTLE_PHASES else 0.0
+        if cmd not in PHASE_EXPECT:
+            time.sleep(0.05)
+            continue
+        want_shared, want_window = PHASE_EXPECT[cmd]
         now = time.monotonic()
         shared = "1" if ctrl.state.using_shared_palette else "0"
         color = window_hex(app)
-        if cmd == "A":
-            if shared == "1" and color == COLOR_A and ctrl.state.colors.mSurface == COLOR_A:
-                atomic_write(status_path, f"phase=A shared=1 window={COLOR_A}\n")
-                seen = "A-done"
-            elif now > deadline:
+        if want_window is None:
+            matched = shared == want_shared and color not in SNAPSHOT_COLORS
+        else:
+            matched = shared == want_shared and color == want_window
+            if want_shared == "1":
+                matched = matched and ctrl.state.colors.mSurface == want_window
+        if cmd in SETTLE_PHASES:
+            if now - settle_started < SETTLE:
+                time.sleep(0.05)
+                continue
+            if matched:
+                atomic_write(status_path, f"phase={cmd} shared={shared} window={color}\n")
+                seen = f"{cmd}-done"
+            else:
                 print(
-                    f"FAIL: {app_name} did not follow A: shared={shared} window={color} "
-                    f"surface={ctrl.state.colors.mSurface if ctrl.state.using_shared_palette else '-'}",
+                    f"FAIL: {app_name} lost last-known-good on {cmd}: "
+                    f"shared={shared} window={color} surface={surface_of(ctrl)}",
                     file=sys.stderr,
                 )
                 return 1
-        elif cmd == "B":
-            if shared == "1" and color == COLOR_B and ctrl.state.colors.mSurface == COLOR_B:
-                atomic_write(status_path, f"phase=B shared=1 window={COLOR_B}\n")
-                seen = "B-done"
-            elif now > deadline:
-                print(
-                    f"FAIL: {app_name} did not follow B without _reload: shared={shared} "
-                    f"window={color} surface={ctrl.state.colors.mSurface if ctrl.state.using_shared_palette else '-'}",
-                    file=sys.stderr,
-                )
-                return 1
-        elif cmd == "delete":
-            if now - delete_started >= DELETE_SETTLE:
-                if shared == "1" and color == COLOR_B:
-                    atomic_write(status_path, f"phase=delete shared=1 window={COLOR_B}\n")
-                    seen = "delete-done"
-                else:
-                    print(
-                        f"FAIL: {app_name} dropped last-known-good after delete: "
-                        f"shared={shared} window={color}",
-                        file=sys.stderr,
-                    )
-                    return 1
+        elif matched:
+            atomic_write(status_path, f"phase={cmd} shared={shared} window={color}\n")
+            seen = f"{cmd}-done"
+        elif now > deadline:
+            print(
+                f"FAIL: {app_name} did not follow {cmd}: shared={shared} "
+                f"window={color} surface={surface_of(ctrl)}",
+                file=sys.stderr,
+            )
+            return 1
         time.sleep(0.05)
 
 
@@ -166,7 +215,24 @@ def publish(directory: Path, surface: str) -> str:
     return result.generation
 
 
-def wait_phase(statuses: dict[str, Path], procs: dict[str, subprocess.Popen], phase: str, timeout: float) -> None:
+def publish_disabled(directory: Path) -> None:
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.publish import write_disabled_envelope
+
+    result = write_disabled_envelope(str(directory), example_snapshot())
+    if not result.wrote:
+        raise SystemExit(f"FAIL: enabled:false did not write ({result.reason})")
+
+
+def wait_phase(
+    statuses: dict[str, Path],
+    procs: dict[str, subprocess.Popen],
+    phase: str,
+    timeout: float,
+    *,
+    shared: str,
+    window: str | None = None,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for name, proc in procs.items():
@@ -178,13 +244,10 @@ def wait_phase(statuses: dict[str, Path], procs: dict[str, subprocess.Popen], ph
             if parsed.get("phase") != phase:
                 done = False
                 break
-            if phase in ("A", "B", "delete") and parsed.get("shared") != "1":
+            if parsed.get("shared") != shared:
                 done = False
                 break
-            if phase == "A" and parsed.get("window") != COLOR_A:
-                done = False
-                break
-            if phase in ("B", "delete") and parsed.get("window") != COLOR_B:
+            if window is not None and parsed.get("window") != window:
                 done = False
                 break
         if done:
@@ -192,6 +255,23 @@ def wait_phase(statuses: dict[str, Path], procs: dict[str, subprocess.Popen], ph
         time.sleep(0.05)
     details = {name: read_text(path) for name, path in statuses.items()}
     raise SystemExit(f"FAIL: timeout waiting for phase {phase}: {details}")
+
+
+def assert_status(
+    statuses: dict[str, Path],
+    *,
+    phase: str,
+    shared: str,
+    window: str,
+) -> None:
+    for name, path in statuses.items():
+        parsed = parse_status(read_text(path))
+        if (
+            parsed.get("phase") != phase
+            or parsed.get("shared") != shared
+            or parsed.get("window") != window
+        ):
+            raise SystemExit(f"FAIL: {name} expected {phase} shared={shared} window={window}: {read_text(path)}")
 
 
 def pythonpath(repo: Path) -> str:
@@ -203,6 +283,52 @@ def pythonpath(repo: Path) -> str:
         str(repo / "qnotebook"),
     ]
     return os.pathsep.join(parts)
+
+
+def spawn_workers(
+    *,
+    suffix: str,
+    expect_shared: str,
+    expect_window: str,
+    work: Path,
+    snap: Path,
+    cmd_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    procs: dict[str, subprocess.Popen],
+    statuses: dict[str, Path],
+    logs: dict[str, Path],
+) -> dict[str, Path]:
+    group: dict[str, Path] = {}
+    probe = str(Path(__file__).resolve())
+    for name, _src, module in APPS:
+        key = name if not suffix else f"{name}-{suffix}"
+        status_path = work / f"{key}.status"
+        log_path = work / f"{key}.log"
+        statuses[key] = status_path
+        logs[key] = log_path
+        group[key] = status_path
+        log_f = open(log_path, "w", encoding="utf-8")
+        procs[key] = subprocess.Popen(
+            [
+                sys.executable,
+                probe,
+                "--worker",
+                name,
+                module,
+                str(snap),
+                str(status_path),
+                str(cmd_path),
+                expect_shared,
+                expect_window,
+            ],
+            cwd=str(repo),
+            env=env,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+        )
+        log_f.close()
+    return group
 
 
 def run_orchestrator() -> int:
@@ -238,50 +364,82 @@ def run_orchestrator() -> int:
     statuses: dict[str, Path] = {}
     logs: dict[str, Path] = {}
     try:
-        for name, _src, module in APPS:
-            status_path = work / f"{name}.status"
-            log_path = work / f"{name}.log"
-            statuses[name] = status_path
-            logs[name] = log_path
-            log_f = open(log_path, "w", encoding="utf-8")
-            procs[name] = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--worker",
-                    name,
-                    module,
-                    str(snap),
-                    str(status_path),
-                    str(cmd_path),
-                ],
-                cwd=str(repo),
-                env=env,
-                stdout=log_f,
-                stderr=subprocess.STDOUT,
-            )
-            log_f.close()
-
-        wait_phase(statuses, procs, "ready", PHASE_TIMEOUT)
-        for name, path in statuses.items():
-            parsed = parse_status(read_text(path))
-            if parsed.get("shared") != "0":
-                raise SystemExit(f"FAIL: {name} shared palette before publish ({read_text(path)})")
+        boot = spawn_workers(
+            suffix="",
+            expect_shared="0",
+            expect_window="-",
+            work=work,
+            snap=snap,
+            cmd_path=cmd_path,
+            env=env,
+            repo=repo,
+            procs=procs,
+            statuses=statuses,
+            logs=logs,
+        )
+        wait_phase(boot, procs, "ready", PHASE_TIMEOUT, shared="0")
 
         gen_a = publish(snap, COLOR_A)
         atomic_write(cmd_path, "A\n")
-        wait_phase(statuses, procs, "A", PHASE_TIMEOUT)
+        wait_phase(boot, procs, "A", PHASE_TIMEOUT, shared="1", window=COLOR_A)
 
         gen_b = publish(snap, COLOR_B)
         if gen_a == gen_b:
             raise SystemExit("FAIL: A and B reused generation")
         atomic_write(cmd_path, "B\n")
-        wait_phase(statuses, procs, "B", PHASE_TIMEOUT)
+        wait_phase(boot, procs, "B", PHASE_TIMEOUT, shared="1", window=COLOR_B)
 
-        current = snap / "current.json"
-        current.unlink()
+        atomic_write(cmd_path, "idle\n")
+        join = spawn_workers(
+            suffix="join",
+            expect_shared="1",
+            expect_window=COLOR_B,
+            work=work,
+            snap=snap,
+            cmd_path=cmd_path,
+            env=env,
+            repo=repo,
+            procs=procs,
+            statuses=statuses,
+            logs=logs,
+        )
+        wait_phase(join, procs, "ready", PHASE_TIMEOUT, shared="1", window=COLOR_B)
+        running = {**boot, **join}
+
+        atomic_write(snap / "current.json", "{not json\n")
+        atomic_write(cmd_path, "malformed\n")
+        wait_phase(running, procs, "malformed", PHASE_TIMEOUT, shared="1", window=COLOR_B)
+
+        gen_c = publish(snap, COLOR_C)
+        if gen_c in (gen_a, gen_b):
+            raise SystemExit("FAIL: C reused generation")
+        atomic_write(cmd_path, "C\n")
+        wait_phase(running, procs, "C", PHASE_TIMEOUT, shared="1", window=COLOR_C)
+
+        (snap / "current.json").unlink()
         atomic_write(cmd_path, "delete\n")
-        wait_phase(statuses, procs, "delete", PHASE_TIMEOUT)
+        wait_phase(running, procs, "delete", PHASE_TIMEOUT, shared="1", window=COLOR_C)
+
+        atomic_write(cmd_path, "idle\n")
+        post = spawn_workers(
+            suffix="post",
+            expect_shared="0",
+            expect_window="-",
+            work=work,
+            snap=snap,
+            cmd_path=cmd_path,
+            env=env,
+            repo=repo,
+            procs=procs,
+            statuses=statuses,
+            logs=logs,
+        )
+        wait_phase(post, procs, "ready", PHASE_TIMEOUT, shared="0")
+        assert_status(running, phase="delete", shared="1", window=COLOR_C)
+
+        publish_disabled(snap)
+        atomic_write(cmd_path, "disable\n")
+        wait_phase(running, procs, "disable", PHASE_TIMEOUT, shared="0")
 
         atomic_write(cmd_path, "quit\n")
         for name, proc in procs.items():
@@ -291,7 +449,9 @@ def run_orchestrator() -> int:
                 proc.kill()
                 raise SystemExit(f"FAIL: {name} worker did not exit")
             if rc != 0:
-                raise SystemExit(f"FAIL: {name} worker exit {rc}: {logs[name].read_text(encoding='utf-8')[-500:]}")
+                raise SystemExit(
+                    f"FAIL: {name} worker exit {rc}: {logs[name].read_text(encoding='utf-8')[-500:]}"
+                )
         print("ok")
         return 0
     except SystemExit as exc:
@@ -316,11 +476,19 @@ def run_orchestrator() -> int:
 
 def main(argv: list[str]) -> int:
     if argv[:1] == ["--worker"]:
-        if len(argv) != 6:
+        if len(argv) != 8:
             print("FAIL: worker argv", file=sys.stderr)
             return 2
-        _, name, module, snap, status, cmd = argv
-        return run_worker(name, module, Path(snap), Path(status), Path(cmd))
+        _, name, module, snap, status, cmd, expect_shared, expect_window = argv
+        return run_worker(
+            name,
+            module,
+            Path(snap),
+            Path(status),
+            Path(cmd),
+            expect_shared,
+            expect_window,
+        )
     if argv:
         print("FAIL: unexpected argv", file=sys.stderr)
         return 2
