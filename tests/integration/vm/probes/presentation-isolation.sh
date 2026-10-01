@@ -15,13 +15,16 @@ die() { fail "$*"; echo "[presentation-isolation] $PASSCOUNT passes, $FAILCOUNT 
 DIR=/var/lib/qdistro/presentation
 FILE=$DIR/current.json
 META=/usr/share/qdistro/presentation/deployment.json
-BACKUP=$DIR/current.json.p7bak
+ORIG_BACKUP=$DIR/current.json.p7orig
+HAD_ORIGINAL=0
 
 cleanup() {
-    if [ -f "$BACKUP" ]; then
-        mv -f "$BACKUP" "$FILE" 2>/dev/null || true
+    rm -f "$DIR/qdistro-write-probe" "$DIR/real.json" 2>/dev/null || true
+    if [ "$HAD_ORIGINAL" = 1 ] && [ -f "$ORIG_BACKUP" ]; then
+        mv -f "$ORIG_BACKUP" "$FILE"
+    else
+        rm -f "$FILE" "$ORIG_BACKUP"
     fi
-    rm -f "$DIR/qdistro-write-probe" "$DIR/evil-link" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -66,7 +69,8 @@ else
 fi
 
 if [ -f "$FILE" ]; then
-    cp -a "$FILE" "$BACKUP"
+    cp -a "$FILE" "$ORIG_BACKUP"
+    HAD_ORIGINAL=1
 fi
 
 # Distinct palettes A then B so generation must change.
@@ -157,10 +161,13 @@ else
     die "work account missing; cannot prove DAC denial"
 fi
 
-# Symlink leaf is rejected even when planted by root.
-cp -a "$FILE" "$BACKUP"
+# Symlink leaf is rejected even when the target is admin-owned (so a
+# missing O_NOFOLLOW cannot hide behind an ownership mismatch).
+cp -a "$FILE" "$DIR/real.json"
+chown admin:admin "$DIR/real.json" 2>/dev/null || true
 rm -f "$FILE"
-ln -s /etc/passwd "$FILE"
+ln -s "$DIR/real.json" "$FILE"
+chown -h admin:admin "$FILE" 2>/dev/null || true
 SYM_OUT=$(cd / && env -u PYTHONPATH -u QDISTRO_PRESENTATION_FILE PYTHONSAFEPATH=1 python3 - <<'PY'
 from qdistro_presentation.paths import resolve_snapshot_path, load_snapshot
 from qdistro_presentation.model import SnapshotPathError
@@ -168,16 +175,17 @@ resolved = resolve_snapshot_path(role="ordinary")
 assert resolved is not None
 try:
     load_snapshot(resolved)
-except SnapshotPathError:
-    print("rejected")
+except SnapshotPathError as exc:
+    print("rejected", type(exc).__name__)
 else:
     print("accepted")
 PY
 ) || SYM_OUT="python-failed"
-[ "$SYM_OUT" = "rejected" ] && pass "reader rejects a symlink current.json" \
+echo "$SYM_OUT" | grep -q "^rejected" \
+    && pass "reader rejects a symlink current.json" \
     || fail "reader accepted a symlink current.json ($SYM_OUT)"
-rm -f "$FILE"
-mv -f "$BACKUP" "$FILE"
+rm -f "$FILE" "$DIR/real.json"
+GEN_B=$(publish_palette "#445566") || die "restore after symlink failed"
 
 # polkit/locker ignore QDISTRO_PRESENTATION_FILE.
 OVERRIDE_OUT=$(cd / && env QDISTRO_PRESENTATION_FILE=/tmp/p7-does-not-exist.json PYTHONSAFEPATH=1 python3 - <<'PY'
@@ -205,6 +213,7 @@ import os
 import time
 from dataclasses import replace
 
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.publish import write_snapshot, write_disabled_envelope
@@ -214,26 +223,45 @@ DIR = "/var/lib/qdistro/presentation"
 FILE = DIR + "/current.json"
 
 def publish(surface: str):
-    snap = replace(example_snapshot(), colors=replace(example_snapshot().colors, mSurface=surface), enabled=True)
+    base = example_snapshot()
+    snap = replace(base, colors=replace(base.colors, mSurface=surface), enabled=True)
     return write_snapshot(DIR, snap, owner_uid=1000, skip_unchanged=False)
+
+def window_hex(app):
+    return app.palette().color(QPalette.ColorRole.Window).name().lower()
 
 reset_controller_for_tests()
 app = QApplication.instance() or QApplication(["presentation-isolation"])
+native = QPalette(app.palette())
+native.setColor(QPalette.ColorRole.Window, QColor("#fedcba"))
+app.setPalette(native)
+app.setStyleSheet("QWidget { background: #fedcba; }")
+native_window = window_hex(app)
+native_ss = app.styleSheet()
+assert native_window == "#fedcba"
+
 publish("#112233")
 ctrl = PresentationController(app, theme_mode="system", watch=True, role="ordinary")
 assert ctrl.state.using_shared_palette is True
 assert ctrl.state.colors.mSurface == "#112233"
+assert window_hex(app) == "#112233", window_hex(app)
+assert app.styleSheet() != native_ss
 gen_a = ctrl.state.generation
 
 os.unlink(FILE)
 ctrl._reload()
 assert ctrl.state.using_shared_palette is True, "deletion dropped last-known-good"
 assert ctrl.state.generation == gen_a
+assert window_hex(app) == "#112233", "deletion did not keep painted shared palette"
 print("last-good-on-delete")
 
 write_disabled_envelope(DIR, example_snapshot(), owner_uid=1000)
 ctrl._reload()
 assert ctrl.state.using_shared_palette is False, "enabled:false kept shared palette"
+assert window_hex(app) == native_window, (
+    f"enabled:false left painted palette {window_hex(app)} instead of native {native_window}"
+)
+assert app.styleSheet() == native_ss, "enabled:false left shared QSS"
 print("enabled-false-clears")
 
 publish("#112233")

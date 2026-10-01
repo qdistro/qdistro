@@ -53,47 +53,105 @@ setup() {
 }
 
 @test "tier-2 spawn binds the presentation directory read-only without :Z" {
-    grep -F 'if [ -d /var/lib/qdistro/presentation ]; then' "$SPAWN"
-    grep -F -- '-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec' "$SPAWN"
-    grep -F 'Mount the directory (not current.json)' "$SPAWN"
-    # Any presentation volume that carries a SELinux relabel is a contract break.
-    if awk '
-        /qdistro\/presentation/ {
-            if ($0 ~ /:Z|:z/) { found=1 }
-        }
-        END { exit found ? 0 : 1 }
-    ' "$SPAWN"; then
-        echo "spawn-tier2.sh presentation bind uses :Z/:z" >&2
-        awk '/qdistro\/presentation/' "$SPAWN" >&2
-        return 1
-    fi
+    python3 - "$SPAWN" <<'PY'
+from pathlib import Path
+import sys
+
+wanted = "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec"
+active = []
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    code = stripped.split("#", 1)[0].rstrip()
+    if "qdistro/presentation" in code:
+        active.append(code)
+if not any(wanted in line for line in active):
+    raise SystemExit(f"no active presentation volume line, active={active!r}")
+for line in active:
+    if ":Z" in line or ":z" in line:
+        raise SystemExit(f"presentation bind uses SELinux relabel: {line}")
+print("ok")
+PY
 }
 
 @test "isolated SELinux domains may watch the snapshot and must not write it" {
     python3 - "$POLICY" <<'PY'
+from collections import defaultdict
 from pathlib import Path
+import re
 import sys
+
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-# Isolated consumers: read + watch, never mutate.
+allow_re = re.compile(
+    r"^allow\s+(\S+)\s+(qdistro_presentation_t):(\S+)\s*\{([^}]+)\}"
+)
+grants = defaultdict(set)
+for raw in text.splitlines():
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    match = allow_re.match(stripped)
+    if match is None:
+        continue
+    domain, _typ, cls, body = match.groups()
+    grants[(domain, cls)].update(body.split())
+
+dir_need = {"getattr", "search", "open", "read", "watch"}
+file_need = {"getattr", "open", "read"}
+dir_forbid = {"write", "add_name", "remove_name", "create", "unlink", "rename"}
+file_forbid = {"write", "create", "unlink", "rename", "setattr"}
 for domain in ("qdistro_tier1_t", "container_t", "qdistro_tier2_t"):
-    needle = f"allow {domain} qdistro_presentation_t:dir"
-    if needle not in text:
-        raise SystemExit(f"missing dir allow for {domain}")
-    line = next(line for line in text.splitlines() if needle in line)
-    for perm in ("getattr", "search", "open", "read", "watch"):
-        if perm not in line:
-            raise SystemExit(f"{domain} dir allow missing {perm}: {line}")
-    for perm in ("write", "add_name", "remove_name", "create", "unlink", "rename"):
-        if perm in line:
-            raise SystemExit(f"{domain} dir allow includes {perm}: {line}")
-    file_needle = f"allow {domain} qdistro_presentation_t:file"
-    file_line = next(line for line in text.splitlines() if file_needle in line)
-    for perm in ("getattr", "open", "read"):
-        if perm not in file_line:
-            raise SystemExit(f"{domain} file allow missing {perm}: {file_line}")
-    for perm in ("write", "create", "unlink", "rename", "setattr"):
-        if perm in file_line:
-            raise SystemExit(f"{domain} file allow includes {perm}: {file_line}")
+    have_dir = grants[(domain, "dir")]
+    have_file = grants[(domain, "file")]
+    missing = dir_need - have_dir
+    if missing:
+        raise SystemExit(f"{domain} dir missing {sorted(missing)}: {sorted(have_dir)}")
+    extra = have_dir & dir_forbid
+    if extra:
+        raise SystemExit(f"{domain} dir has mutation perms {sorted(extra)}")
+    missing_f = file_need - have_file
+    if missing_f:
+        raise SystemExit(f"{domain} file missing {sorted(missing_f)}: {sorted(have_file)}")
+    extra_f = have_file & file_forbid
+    if extra_f:
+        raise SystemExit(f"{domain} file has mutation perms {sorted(extra_f)}")
+
+# Parser fixtures: a commented grant is inactive; a second write grant counts.
+sample = """
+# allow container_t qdistro_presentation_t:dir { getattr search open read watch };
+allow container_t qdistro_presentation_t:dir { getattr search open read watch };
+allow container_t qdistro_presentation_t:dir { write unlink };
+"""
+sample_grants = defaultdict(set)
+for raw in sample.splitlines():
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    match = allow_re.match(stripped)
+    if match is None:
+        continue
+    domain, _typ, cls, body = match.groups()
+    sample_grants[(domain, cls)].update(body.split())
+if "write" not in sample_grants[("container_t", "dir")]:
+    raise SystemExit("parser missed extra write grant")
+if "watch" not in sample_grants[("container_t", "dir")]:
+    raise SystemExit("parser missed active watch grant")
+commented_only = """
+# allow container_t qdistro_presentation_t:dir { getattr search open read watch };
+"""
+commented_grants = defaultdict(set)
+for raw in commented_only.splitlines():
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    match = allow_re.match(stripped)
+    if match is None:
+        continue
+    domain, _typ, cls, body = match.groups()
+    commented_grants[(domain, cls)].update(body.split())
+if commented_grants[("container_t", "dir")]:
+    raise SystemExit("parser treated a commented allow as active")
 print("ok")
 PY
 }
@@ -102,14 +160,30 @@ PY
     python3 - "$AFFECTED" <<'PY'
 from pathlib import Path
 import sys
+
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-for needle in ("sdk/presentation/*)", "scripts/install/install-presentation-for-vm.sh)"):
-    idx = text.find(needle)
+
+def arm_body(pattern: str) -> str:
+    idx = text.find(pattern)
     if idx < 0:
-        raise SystemExit(f"missing arm {needle}")
-    chunk = text[idx : idx + 240]
-    if "host\\nbats" not in chunk:
-        raise SystemExit(f"{needle} does not select host+bats:\n{chunk}")
+        raise SystemExit(f"missing arm {pattern}")
+    rest = text[idx + len(pattern) :]
+    end = rest.find(";;")
+    if end < 0:
+        raise SystemExit(f"unclosed arm {pattern}")
+    return rest[:end]
+
+sdk = arm_body("sdk/presentation/*)")
+inst = arm_body("scripts/install/install-presentation-for-vm.sh)")
+if "install-presentation-for-vm.sh" in sdk:
+    raise SystemExit("sdk arm window leaked into the installer arm")
+if "tier2/*" in inst or "tier3/*" in inst:
+    raise SystemExit("installer arm window leaked into tier2/tier3")
+for name, body in (("sdk", sdk), ("installer", inst)):
+    if "printf 'host\\nbats\\n'" not in body:
+        raise SystemExit(f"{name} arm does not printf host+bats:\n{body}")
+    if "printf 'host\\n'" in body:
+        raise SystemExit(f"{name} arm still prints host-only:\n{body}")
 print("ok")
 PY
 }

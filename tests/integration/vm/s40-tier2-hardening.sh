@@ -247,11 +247,15 @@ if not hits:
     print("missing")
     raise SystemExit(0)
 m = hits[0]
-opts = [str(x) for x in (m.get("Options") or [])]
+tokens = []
+for item in m.get("Options") or []:
+    tokens.extend(str(item).split(","))
+tokens = [t for t in tokens if t]
 print("src=" + str(m.get("Source") or ""))
 print("rw=" + str(m.get("RW")).lower())
-print("opts=" + ",".join(opts))
-print("prop=" + str(m.get("Propagation") or ""))
+print("opts=" + ",".join(tokens))
+print("relabel=" + ("yes" if any(t in ("z", "Z") for t in tokens) else "no"))
+print("ro=" + ("yes" if "ro" in tokens else "no"))
 ' <<<"$MOUNT_JSON")
 if echo "$PRES_PARSE" | grep -qx "missing"; then
     fail "presentation directory not bound into the container"
@@ -264,10 +268,10 @@ else
     echo "$PRES_PARSE" | grep -qx "rw=false" \
         && pass "presentation bind is read-only" \
         || fail "presentation bind is writable ($PRES_PARSE)"
-    echo "$PRES_PARSE" | grep -E "^opts=" | grep -q "ro" \
+    echo "$PRES_PARSE" | grep -qx "ro=yes" \
         && pass "presentation bind options include ro" \
         || fail "presentation bind options missing ro ($PRES_PARSE)"
-    if echo "$PRES_PARSE" | grep -E "^opts=" | grep -Eq "(^|,)[zZ](,|$)"; then
+    if echo "$PRES_PARSE" | grep -qx "relabel=yes"; then
         fail "presentation bind uses :Z/:z relabel ($PRES_PARSE)"
     else
         pass "presentation bind does not use :Z relabel"
