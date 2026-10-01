@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.5",
     "tomli_w>=1.0",
+    "qdistro-presentation[qt]>=1,<2",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +40,7 @@ include = ["qfileman*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyqt6"
+pythonpath = [".", "../sdk/presentation"]
 
 [tool.ruff]
 line-length = 100

@@ -27,9 +27,11 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
     QIcon,
     QKeySequence,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QShortcut,
@@ -1025,7 +1027,6 @@ class DetailPane(QWidget):
         self.lbl_user = QLabel("(no selection)")
         self.lbl_user.setObjectName("detail_user")
         self.lbl_user.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_user.setStyleSheet("font-weight: bold; font-size: 14pt;")
         lay.addWidget(self.lbl_user)
 
         self.lbl_action = QLabel("")
@@ -1036,7 +1037,7 @@ class DetailPane(QWidget):
         self.lbl_exe = QLabel("")
         self.lbl_exe.setObjectName("detail_exe")
         self.lbl_exe.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_exe.setStyleSheet("color: gray; font-family: monospace;")
+        self.lbl_exe.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         lay.addWidget(self.lbl_exe)
 
         self.lbl_details = QLabel("")
@@ -1096,6 +1097,41 @@ class DetailPane(QWidget):
         # rid -> (bounded guidance label, raw diagnostic) for broker
         # refusals on still-pending requests (e.g. ScopeNotPermitted).
         self._broker_errors: dict[int, tuple[str, str]] = {}
+        self.apply_presentation_update()
+
+    def apply_presentation_update(self) -> None:
+        """Refresh cosmetic chrome from the shared UI font and secondary-text role."""
+        app = QApplication.instance()
+        base = QFont(app.font()) if app is not None else QFont()
+        heading = QFont(base)
+        heading.setWeight(QFont.Weight.Bold)
+        size = heading.pointSizeF()
+        if size <= 0:
+            size = 11.0
+        heading.setPointSizeF(size * 14.0 / 11.0)
+        self.lbl_user.setFont(heading)
+
+        fixed = QFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        ctrl = None
+        try:
+            from qdistro_presentation.qt import current_controller, pick_family
+        except ImportError:
+            current_controller = None
+            pick_family = None
+        if current_controller is not None:
+            ctrl = current_controller()
+        if ctrl is not None and pick_family is not None:
+            try:
+                state = ctrl.state
+            except Exception:
+                state = None
+            if state is not None:
+                fixed.setFamily(
+                    pick_family(state.fixed_family, fallback=fixed.family(), fixed=True)
+                )
+                fixed.setPointSizeF(state.fixed_ui_point_size)
+        self.lbl_exe.setFont(fixed)
+        self.lbl_exe.setForegroundRole(QPalette.ColorRole.PlaceholderText)
 
     def show_request(self, req: dict):
         self._rid = req["id"]
@@ -2226,6 +2262,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._update_tray_icon)
 
         self.refresh()
+
+    def apply_presentation_update(self) -> None:
+        self.detail.apply_presentation_update()
 
     def refresh(self):
         prev_rid = None
@@ -3929,6 +3968,61 @@ class _FirstPaintMarker(QObject):
             f.write(f"painted pid={os.getpid()}\n")
 
 
+_PRESENTATION = None
+
+
+def _refresh_admin_windows(app: QApplication) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_presentation_update", None)
+        if callable(method):
+            method()
+
+
+def _on_presentation_changed(*_args: object) -> None:
+    app = QApplication.instance()
+    if app is not None:
+        _refresh_admin_windows(app)
+
+
+def attach_presentation(app: QApplication, **kwargs):
+    """Attach the shared presentation controller. Missing package is non-fatal."""
+    global _PRESENTATION
+    try:
+        from qdistro_presentation.qt import attach_controller
+    except ImportError:
+        return None
+    theme_mode = kwargs.pop("theme_mode", "system")
+    watch = kwargs.pop("watch", True)
+    try:
+        ctrl = attach_controller(app, theme_mode=theme_mode, watch=watch, **kwargs)
+    except Exception:
+        logging.getLogger("qdistro.admin_app").debug(
+            "presentation attach failed", exc_info=True
+        )
+        return None
+    if _PRESENTATION is ctrl:
+        return ctrl
+    ctrl.changed.connect(_on_presentation_changed)
+    _PRESENTATION = ctrl
+    return ctrl
+
+
+def reset_presentation_for_tests() -> None:
+    global _PRESENTATION
+    if _PRESENTATION is not None:
+        try:
+            _PRESENTATION.stop()
+        except Exception:
+            pass
+    _PRESENTATION = None
+    try:
+        from qdistro_presentation.qt import reset_controller_for_tests
+
+        reset_controller_for_tests()
+    except ImportError:
+        pass
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -3936,6 +4030,7 @@ def main():
         stream=sys.stderr,
     )
     app = QApplication(sys.argv)
+    attach_presentation(app)
     broker = BrokerBridge()
     session = _maybe_session_bridge()
     win = MainWindow(broker, session=session)

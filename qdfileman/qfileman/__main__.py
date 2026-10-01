@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import QApplication
 from qfileman import __version__
 from qfileman.config import Config
 from qfileman.plugin import PluginManager
-from qfileman.theme import apply_theme
+from qfileman.theme import attach_presentation
 from qfileman.window import FileManagerWindow
 
 log = logging.getLogger(__name__)
@@ -68,8 +68,7 @@ def main():
 
     # Theme must be applied before any widgets are constructed so the
     # palette propagates to every QPalette inheritor at creation time.
-    theme_mode = Config().get("general", "theme_mode", default="system")
-    apply_theme(app, theme_mode)
+    attach_presentation(app, Config())
 
     window = FileManagerWindow()
     plugin_manager = PluginManager()
@@ -79,10 +78,10 @@ def main():
     # blocks the file manager from starting.
     try:
         from qfileman import qdistro_integration as _qdi
+
         window._qdistro_receiver = _qdi.maybe_install(window)
     except Exception as _qd_e:  # noqa: BLE001
-        print(f"[qfileman] qdistro App1 registration failed: {_qd_e}",
-              file=sys.stderr, flush=True)
+        print(f"[qfileman] qdistro App1 registration failed: {_qd_e}", file=sys.stderr, flush=True)
 
     window.show()
 

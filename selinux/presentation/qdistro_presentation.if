@@ -1,0 +1,17 @@
+## <summary>qdistro public presentation snapshot interfaces.</summary>
+
+########################################
+## <summary>
+##	Read the public presentation snapshot.
+## </summary>
+## <param name="domain">
+##	<summary>Domain allowed to read current.json.</summary>
+## </param>
+#
+interface(`qdistro_presentation_read',`
+	gen_require(`
+		type qdistro_presentation_t;
+	')
+	allow $1 qdistro_presentation_t:dir { getattr search open read watch };
+	allow $1 qdistro_presentation_t:file { getattr open read };
+')

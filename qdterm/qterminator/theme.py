@@ -42,6 +42,7 @@ def detect_system_theme() -> str:
             scheme = hints.colorScheme()
             # Qt.ColorScheme.Dark == 2, Light == 1, Unknown == 0
             from PyQt6.QtCore import Qt as _Qt
+
             if hasattr(_Qt, "ColorScheme"):
                 if scheme == _Qt.ColorScheme.Dark:
                     return "dark"
@@ -71,13 +72,14 @@ def detect_system_theme() -> str:
 
 
 def resolve_theme(theme_mode: str) -> str:
-    """Resolve theme_mode config value to 'dark' or 'light'."""
+    """Resolve theme_mode config value to 'dark', 'light', or 'native'."""
     if theme_mode == "dark":
         return "dark"
-    elif theme_mode == "light":
+    if theme_mode == "light":
         return "light"
-    else:  # "system" or unknown
-        return detect_system_theme()
+    if theme_mode == "native":
+        return "native"
+    return detect_system_theme()
 
 
 def apply_dark_theme(app: QApplication):
@@ -139,11 +141,70 @@ def apply_light_theme(app: QApplication):
 def apply_theme(app: QApplication, theme_mode: str = "system"):
     """Apply theme based on mode. Returns the resolved theme ('dark' or 'light')."""
     resolved = resolve_theme(theme_mode)
+    if resolved == "native":
+        return "native"
     if resolved == "light":
         apply_light_theme(app)
     else:
         apply_dark_theme(app)
     return resolved
+
+
+_CONTROLLER = None
+
+
+def attach_presentation(app: QApplication, config):
+    global _CONTROLLER
+    try:
+        from qdistro_presentation.model import LocalOverrides, parse_local_overrides
+        from qdistro_presentation.qt import PresentationController
+    except ImportError:
+        return apply_theme(app, config.get("general", "theme_mode", default="system"))
+
+    theme_mode = config.get("general", "theme_mode", default="system")
+    if theme_mode not in ("system", "dark", "light", "native"):
+        theme_mode = "system"
+    appearance = config.get("appearance", default={}) or {}
+    try:
+        local = parse_local_overrides(appearance)
+    except Exception:
+        local = LocalOverrides()
+    ctrl = PresentationController(
+        app,
+        theme_mode=theme_mode,
+        local=local,
+        apply_legacy=lambda a, mode: apply_theme(a, mode),
+        apply_system_fallback=lambda a: apply_theme(a, detect_system_theme()),
+        watch=True,
+    )
+    _CONTROLLER = ctrl
+    if ctrl.state.using_shared_palette:
+        return ctrl.state.snapshot.mode if ctrl.state.snapshot else "dark"
+    if theme_mode in ("dark", "light"):
+        return theme_mode
+    if theme_mode == "native":
+        return "native"
+    return detect_system_theme()
+
+
+def current_controller():
+    return _CONTROLLER
+
+
+def reset_controller_for_tests() -> None:
+    global _CONTROLLER
+    if _CONTROLLER is not None:
+        try:
+            _CONTROLLER.stop()
+        except Exception:  # noqa: BLE001
+            pass
+    _CONTROLLER = None
+    try:
+        from qdistro_presentation.qt import reset_controller_for_tests as _reset
+
+        _reset()
+    except ImportError:
+        pass
 
 
 STYLESHEET = f"""

@@ -410,6 +410,7 @@ log "installing Python modules..."
 cd "$SRC"
 QD="$SRC"
 INSTALLERS=(
+    "scripts/install/install-presentation-for-vm.sh    $QD/sdk/presentation/qdistro_presentation"
     "scripts/install/install-sdk-for-vm.sh             $QD/sdk/qdistro_app"
     "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
     "scripts/install/install-session-manager.sh        $QD/session_manager"
