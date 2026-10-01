@@ -13,10 +13,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6.QtGui")
 pytest.importorskip("PyQt6.QtQml")
 
+from PyQt6.QtCore import QUrl  # noqa: E402
 from PyQt6.QtGui import QGuiApplication  # noqa: E402
 from PyQt6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
-from PyQt6.QtCore import QUrl  # noqa: E402
-
 from qdlocker.app import WaylandBridge  # noqa: E402
 from qdlocker.presentation import LockerPresentation, try_load_trusted_snapshot  # noqa: E402
 

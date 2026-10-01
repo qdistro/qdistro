@@ -111,7 +111,6 @@ def test_presentation_update_keeps_two_pane_paths(qapp, tmp_dir, tmp_path):
     from qdistro_presentation.paths import ResolvedPath
     from qdistro_presentation.publish import write_snapshot
     from qdistro_presentation.qt import PresentationController
-
     from qfileman.theme import apply_theme, reset_controller_for_tests
     from qfileman.window import FileManagerWindow
 

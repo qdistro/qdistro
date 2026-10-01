@@ -51,8 +51,10 @@ python3 -m pytest            # root unit tests (tests/unit)
 (with a `message`) when the FreeRDP 3 / PipeWire development packages are
 missing, and the build still exits 0. See [doc/dev.md](doc/dev.md).
 
-Before `ci/bin/qci host` in a fresh clone, install the two WebExtensions' npm
-dependencies (the `host` gate runs their tests but does not install them):
+The `host` gate installs the two WebExtensions' npm dependencies itself when
+`node_modules/.bin/vitest` is absent (`npm ci --prefer-offline`; npm is a
+prerequisite, and a cold npm cache needs network). It reuses an existing
+`node_modules`, so after a `package-lock.json` change refresh it by hand:
 
 ```sh
 (cd qdchrome-extension && npm ci)

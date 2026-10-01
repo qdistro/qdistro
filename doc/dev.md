@@ -31,10 +31,11 @@ The build steps assume these tools are on `PATH`:
 - **meson** + **ninja** + **pkg-config** — build the qdwin compositor and the C
   daemons.
 - **Python 3** + **pytest** — headless unit tests.
-- **npm** — WebExtension tests/builds. In a fresh clone, run
-  `(cd qdchrome-extension && npm ci)` and `(cd qdfirefox-extension && npm ci)`
-  once before `qci host`; the gate runs their tests but does not install their
-  dependencies (without them it fails with `vitest: command not found`).
+- **npm** — WebExtension tests/builds. `qci host` runs
+  `npm ci --prefer-offline` in each extension when `node_modules/.bin/vitest`
+  is absent (a cold npm cache needs network). It reuses an existing
+  `node_modules`; after a `package-lock.json` change refresh it with
+  `(cd qdchrome-extension && npm ci)` and `(cd qdfirefox-extension && npm ci)`.
 - **Optional:** FreeRDP 3 (`freerdp3`, `freerdp-shadow3`, `winpr3`) and
   PipeWire (`libpipewire-0.3`) development packages. Without them meson skips
   `qdistro-forward` (and, without PipeWire, `qdistro-nested-pixelfeed`) and
