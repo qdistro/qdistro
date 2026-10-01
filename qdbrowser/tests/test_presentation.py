@@ -125,22 +125,39 @@ def test_theme_mode_light_updates_desktop_dark(
     assert dark._desktop_dark is False
 
 
-def test_apply_presentation_update_restyles_every_webview(window):
+def test_apply_presentation_update_restyles_tab_and_sidebar(window):
     from unittest.mock import MagicMock
 
-    extra = MagicMock()
+    from qdbrowser.webview import WebView
+
+    plug = window.plugins._instances["web_panels"]
+    host = plug._host
+    sidebar = WebView(url="about:blank")
+    host._slot_layout.addWidget(sidebar)
+    host._current_webview = sidebar
+    views = list(window.iter_webviews())
+    assert window._active_webview in views
+    assert sidebar in views
+
     window._active_webview.view.page().runJavaScript = MagicMock()
-    window.iter_webviews = lambda: [window._active_webview, extra]
+    sidebar.view.page().runJavaScript = MagicMock()
+    dark = window.plugins._instances["dark_mode"]
+    dark._desktop_dark = False
+    dark._global_default = "auto"
+    dark.apply = MagicMock()
+
     window.apply_presentation_update()
     window._active_webview.view.page().runJavaScript.assert_called()
-    extra.view.page().runJavaScript.assert_called()
+    sidebar.view.page().runJavaScript.assert_called()
     for mock_js in (
         window._active_webview.view.page().runJavaScript,
-        extra.view.page().runJavaScript,
+        sidebar.view.page().runJavaScript,
     ):
         js = mock_js.call_args[0][0]
         assert "removed:true" not in js
         assert "__qdb_translate_overlay" in js
+    dark.apply.assert_any_call(window._active_webview)
+    dark.apply.assert_any_call(sidebar)
 
 
 def test_new_window_reads_live_controller_theme(monkeypatch, window):

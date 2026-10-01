@@ -794,10 +794,8 @@ class MainWindow(QMainWindow):
             plug.open()
 
     def iter_webviews(self):
-        for i in range(self._tabs.count()):
-            split = self._tabs.widget(i)
-            if isinstance(split, SplitContainer):
-                yield from split.find_webviews()
+        # Tab splits and application-owned sidebar views (Web panels).
+        yield from self.findChildren(WebView)
 
     def apply_presentation_update(self) -> None:
         from qdbrowser.theme import current_resolved_theme
