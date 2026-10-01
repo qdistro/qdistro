@@ -1,0 +1,123 @@
+"""tier3s/provision-runsc.sh against a fake pinned bundle (QDISTRO_RUNSC_PREFIX hook).
+
+Runs the real script; never touches /usr. Requires bash, tar with zstd.
+"""
+import hashlib
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / "tier3s" / "provision-runsc.sh"
+WRAPPER = REPO / "tier3s" / "tier3s-runsc"
+VERSION = "runsc version release-29990101.0"
+
+pytestmark = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd missing")
+
+
+def sha(p):
+    return hashlib.sha512(Path(p).read_bytes()).hexdigest()
+
+
+def make_bundle(tmp, version=VERSION, extra=None):
+    b = tmp / "bundle"
+    (b / "gvisor-bin").mkdir(parents=True)
+    (b / "runsc").write_text(f"#!/bin/sh\necho '{version}'\n")
+    (b / "gvisor-bin" / "gvisor_sentry").write_text("#!/bin/sh\n")
+    (b / "gvisor-bin" / "runsc-fd-parking").write_text("#!/bin/sh\n# parking\n")
+    if extra:
+        (b / "gvisor-bin" / extra).write_text("x")
+    for f in b.rglob("*"):
+        if f.is_file():
+            f.chmod(0o755)
+    cache = tmp / "cache" / "29990101.0"
+    cache.mkdir(parents=True)
+    tar = cache / "gvisor.tar.zstd"
+    subprocess.run(["tar", "--zstd", "-cf", str(tar), "-C", str(b), "."], check=True)
+    return b, tar
+
+
+def write_pin(tmp, b, tar, **over):
+    vals = {
+        "release": "29990101.0",
+        "arch": os.uname().machine,
+        "base_url": "https://invalid.example/none",
+        "version_string": VERSION,
+        "tarball": "gvisor.tar.zstd",
+        "tarball_sha512": sha(tar),
+        "runsc_sha512": sha(b / "runsc"),
+        "sidecar_gvisor_sentry_sha512": sha(b / "gvisor-bin" / "gvisor_sentry"),
+        "sidecar_runsc-fd-parking_sha512": sha(b / "gvisor-bin" / "runsc-fd-parking"),
+    }
+    vals.update(over)
+    pin = tmp / "RUNSC_RELEASE"
+    pin.write_text("# test pin\n" + "".join(f"{k}={v}\n" for k, v in vals.items()))
+    return pin
+
+
+def run(tmp, pin, offline=True):
+    root = tmp / "root"
+    env = dict(os.environ, QDISTRO_RUNSC_PREFIX=str(root), TMPDIR=str(tmp))
+    args = ["bash", str(SCRIPT), "--pin", str(pin), "--cache-dir", str(tmp / "cache")]
+    if offline:
+        args.append("--offline")
+    return subprocess.run(args, env=env, capture_output=True, text=True), root
+
+
+def test_installs_then_idempotent(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    r, root = run(tmp_path, pin)
+    assert r.returncode == 0, r.stderr
+    d = root / "usr/libexec/qdistro/runsc"
+    assert sha(d / "runsc") == sha(b / "runsc")
+    assert (d / "gvisor-bin" / "gvisor_sentry").exists()
+    assert (root / "usr/libexec/qdistro/tier3s-runsc").read_bytes() == WRAPPER.read_bytes()
+    assert (root / "etc/qdistro/runsc-release").read_bytes() == pin.read_bytes()
+    r2, _ = run(tmp_path, pin)
+    assert r2.returncode == 0 and "already installed" in r2.stdout
+
+
+def test_tarball_hash_mismatch_fails_closed(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar, tarball_sha512="0" * 128)
+    r, root = run(tmp_path, pin)
+    assert r.returncode != 0 and "tarball sha512 mismatch" in r.stderr
+    assert not (root / "usr/libexec/qdistro/runsc").exists()
+
+
+def test_file_hash_mismatch_fails_closed(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar, sidecar_gvisor_sentry_sha512="a" * 128)
+    r, root = run(tmp_path, pin)
+    assert r.returncode != 0 and "gvisor-bin/gvisor_sentry" in r.stderr
+    assert not (root / "usr/libexec/qdistro/runsc").exists()
+
+
+def test_unpinned_sidecar_fails_closed(tmp_path):
+    b, tar = make_bundle(tmp_path, extra="surprise")
+    pin = write_pin(tmp_path, b, tar)
+    r, _ = run(tmp_path, pin)
+    assert r.returncode != 0 and "unpinned file" in r.stderr
+
+
+def test_version_skew_fails_and_keeps_old_install(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    assert run(tmp_path, pin)[0].returncode == 0
+    pin2 = write_pin(tmp_path, b, tar, version_string="runsc version release-other")
+    r, root = run(tmp_path, pin2)
+    assert r.returncode != 0 and "release skew" in r.stderr
+    assert (root / "usr/libexec/qdistro/runsc/runsc").exists()
+    assert (root / "etc/qdistro/runsc-release").read_bytes() == pin.read_bytes()
+
+
+def test_offline_without_cache_fails(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    tar.unlink()
+    r, _ = run(tmp_path, pin)
+    assert r.returncode != 0 and "offline" in r.stderr
