@@ -100,7 +100,11 @@ gate_selftest() {
     # qci runner rediscovers both from bin/qci's own location, so this does not
     # affect the self-test's real qci invocations. Derived from PROJECTS so it can
     # never rot when a project is added.
-    local -a sf_scrub=(-u WORKSPACE)
+    # QCI_GUI_SCENARIO_AGENT marks a GUI scenario agent's process tree and makes
+    # dispatch refuse VM commands; the self-tests drive those commands against
+    # fixtures and assert lock contention (98), so an inherited marker would
+    # turn them into false refusals (2). The refusal test sets it explicitly.
+    local -a sf_scrub=(-u WORKSPACE -u QCI_GUI_SCENARIO_AGENT)
     local _sf_proj _sf_var
     for _sf_proj in "${PROJECTS[@]}"; do
         _sf_var=$(printf '%s' "$_sf_proj" | tr '[:lower:]-' '[:upper:]_')_REPO

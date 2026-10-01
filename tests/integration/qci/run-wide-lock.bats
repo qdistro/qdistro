@@ -2,6 +2,9 @@
 # Host-only contention contract: no libvirt or VM is touched.
 
 setup() {
+    # A GUI scenario agent's marker would turn the contention checks below into
+    # refusals; only the refusal test sets it, explicitly.
+    unset QCI_GUI_SCENARIO_AGENT
     REPO=$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)
     T=$BATS_TEST_TMPDIR
     export QDWIN_IMG_DIR="$T/images"
@@ -60,6 +63,26 @@ teardown() {
         [[ "$output" != *"held by pid"* ]]
         [ ! -e "$QCI_RUNS_DIR" ]
     done
+    # affected --run reaches the VM gates through gate_affected: refused too,
+    # wherever --run sits among the flags.
+    local -a args
+    for args in "--run" "--vm vmx --run" "--changed-from HEAD --run -- x.md"; do
+        # shellcheck disable=SC2086
+        QCI_GUI_SCENARIO_AGENT=apps_13 run "$REPO/ci/bin/qci" affected $args
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"qci affected --run: refused inside GUI scenario agent"* ]]
+        [ ! -e "$QCI_RUNS_DIR" ]
+    done
+    # An operand or a path spelled --run is not the flag: not refused.
+    for args in "--vm --run" "--changed-from HEAD -- --run"; do
+        # shellcheck disable=SC2086
+        QCI_GUI_SCENARIO_AGENT=apps_13 run "$REPO/ci/bin/qci" affected $args
+        [[ "$output" != *"refused inside GUI scenario agent"* ]]
+    done
+}
+
+@test "an inherited scenario-agent marker does not reach the host selftest's bats" {
+    grep -Eq 'sf_scrub=\(.*-u QCI_GUI_SCENARIO_AGENT' "$REPO/ci/lib/gates/selftest.sh"
 }
 
 @test "all qci VM commands and kiwi teardown share the same lock" {
