@@ -83,7 +83,7 @@ info)
     echo "--- client unit after the one-shot connection: $(systemctl is-active t3s-s2-client-$tag)"
     echo "--- client log"; cat "$WORK/s2-$tag/client.log"
     denials $tag
-    systemctl stop "t3s-s2-client-$tag" 2>/dev/null
+    systemctl stop "t3s-s2-client-$tag" 2>/dev/null || true
     ;;
 start)
     app=${1:?app}; prep "$app"; start_client "$app"; sandbox_argv "$app" "$app" open

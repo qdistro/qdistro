@@ -1,0 +1,30 @@
+### host 2026-10-01T20:49:45Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s2-waypipe.sh tier3s/spike/lib.sh && tier3s/spike/s2-waypipe.sh info
+CMD
+[vm-exec] guest identity pinned (pid 45907 start 209925)
+bdceb91931c39e3f2a8e0f6fbb7ae6d86cb22f660c60edde4674a11ee62db471  tier3s/spike/s2-waypipe.sh
+054ef4f2588be9a61cf789d2182e4ad0944dea3d3e51ce264201923699567dd3  tier3s/spike/lib.sh
+client argv (as admin, WAYLAND_DISPLAY=wayland-1): waypipe -s /run/user/1000/t3s-bridge-info/link.sock -o --no-gpu --title-prefix \[tier3s\]\  client
+total 0
+srw-------. 1 admin admin 0 Oct  1 20:49 link.sock
+sandbox argv (as admin): podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/tier3s-spike/s2-info/runsc-debug/ --runtime-flag=host-uds=open run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s2-info -v /run/user/1000/t3s-bridge-info:/run/qdistro/link:rw -e XDG_RUNTIME_DIR=/run/user/1000 -e HOME=/tmp -e LANG=C.UTF-8 localhost/tier3s-spike/tw-terminals:20260929 waypipe -s /run/qdistro/link/link.sock -o --no-gpu server -- wayland-info
+sandbox rc=0 wall=0.47s
+--- wayland-info output: 231 lines; interfaces:
+interface: 'ext_idle_notifier_v1' interface: 'ext_workspace_manager_v1' interface: 'qdwin_locker_v1' interface: 'qdwin_nested_manager_v1' interface: 'qdwin_shell_v1' interface: 'qdwin_stream_input_v1' interface: 'weston_content_protection' interface: 'weston_direct_display_v1' interface: 'wl_compositor' interface: 'wl_data_device_manager' interface: 'wl_output' interface: 'wl_seat' interface: 'wl_shm' interface: 'wl_subcompositor' interface: 'wp_alpha_modifier_v1' interface: 'wp_color_representation_manager_v1' interface: 'wp_commit_timing_manager_v1' interface: 'wp_cursor_shape_manager_v1' interface: 'wp_fifo_manager_v1' interface: 'wp_fractional_scale_manager_v1' interface: 'wp_presentation' interface: 'wp_single_pixel_buffer_manager_v1' interface: 'wp_tearing_control_manager_v1' interface: 'wp_viewporter' interface: 'xdg_activation_v1' interface: 'xdg_wm_base' interface: 'zwlr_layer_shell_v1' interface: 'zwlr_output_manager_v1' interface: 'zwp_idle_inhibit_manager_v1' interface: 'zwp_input_method_manager_v2' interface: 'zwp_input_timestamps_manager_v1' interface: 'zwp_pointer_constraints_v1' interface: 'zwp_primary_selection_device_manager_v1' interface: 'zwp_relative_pointer_manager_v1' interface: 'zwp_text_input_manager_v3' interface: 'zwp_virtual_keyboard_manager_v1' interface: 'zxdg_decoration_manager_v1' interface: 'zxdg_output_manager_v1' 
+interface: 'wl_compositor',                              version:  5, name:  1
+interface: 'wl_subcompositor',                           version:  1, name:  2
+interface: 'wp_viewporter',                              version:  1, name:  3
+interface: 'zxdg_output_manager_v1',                     version:  2, name:  4
+		name: 'pipewire-1'
+		logical_width: 640, logical_height: 480
+interface: 'zwp_input_method_manager_v2',                version:  1, name: 38
+interface: 'zwp_virtual_keyboard_manager_v1',            version:  1, name: 39
+interface: 'qdwin_nested_manager_v1',                    version:  3, name: 41
+interface: 'zwlr_layer_shell_v1',                        version:  5, name: 42
+interface: 'zxdg_decoration_manager_v1',                 version:  1, name: 43
+--- client unit after the one-shot connection: inactive
+--- client log
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+### exit=5
