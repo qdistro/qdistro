@@ -1,0 +1,15 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && printf x >> /usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking && ln -s /bin/sh /usr/libexec/qdistro/runsc/gvisor-bin/extra && tier3s/probe.sh --user admin | grep -E "^(FAIL|RESULT)"; echo "### probe exit=${PIPESTATUS[0]} (expect 1)"; tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc; echo "### provision exit=$?"; ls /usr/libexec/qdistro/ | grep -c "\.new\.\|\.old\." ; true'
+[vm-exec] guest identity pinned (pid 10584 start 58779)
+FAIL bundle: file set differs: 
+RESULT FAIL: first missing prerequisite: bundle (file set differs: )
+### probe exit=1 (expect 1)
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: rolling back
+### provision exit=1
+0
+### exit=0
+[vm-exec] --- stderr ---
+mv: cannot exchange '/usr/libexec/qdistro/runsc.new.10746' and '/usr/libexec/qdistro/runsc/runsc.new.10746': Unknown error -1
+[vm-exec] --- end stderr ---

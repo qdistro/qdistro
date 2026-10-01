@@ -1,0 +1,4 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && cp /etc/qdistro/profile /root/profile.keep && echo QDISTRO_PROFILE=release > /etc/qdistro/profile && tier3s/probe.sh; echo "### probe exit=$? (expect 2)"; cp /root/profile.keep /etc/qdistro/profile'
+REFUSE profile: tier 3s is dev-profile only (README O4); /etc/qdistro/profile says release
+### probe exit=2 (expect 2)
+### exit=0

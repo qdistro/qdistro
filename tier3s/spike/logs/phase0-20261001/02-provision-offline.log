@@ -1,0 +1,19 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc && ls -lR /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release'
+[vm-exec] guest identity pinned (pid 10100 start 58138)
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+-rw-r--r--. 1 root root 1571 Oct  1 20:17 /etc/qdistro/runsc-release
+-rwxr-xr-x. 1 root root  487 Oct  1 20:17 /usr/libexec/qdistro/tier3s-runsc
+
+/usr/libexec/qdistro/runsc:
+total 107284
+drwxr-xr-x. 2 root root       132 Oct  1 20:17 gvisor-bin
+-rwxr-xr-x. 1 root root 109857335 Oct  1 20:17 runsc
+
+/usr/libexec/qdistro/runsc/gvisor-bin:
+total 170292
+-rwxr-xr-x. 1 root root 69107264 Oct  1 20:17 checkpointgofer
+-rwxr-xr-x. 1 root root 52098769 Oct  1 20:17 gvisor_sentry
+-rwxr-xr-x. 1 root root     1416 Oct  1 20:17 gvisor-sentry-prewarmer
+-rwxr-xr-x. 1 root root     1320 Oct  1 20:17 runsc-fd-parking
+-rwxr-xr-x. 1 root root 53158765 Oct  1 20:17 runsc-metric-server
+### exit=0

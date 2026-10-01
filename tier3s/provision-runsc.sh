@@ -177,7 +177,7 @@ SWAPPED=0
 rollback() {
     log "rolling back"
     if [ "$SWAPPED" -eq 1 ]; then
-        if [ "$HAD_OLD" -eq 1 ]; then mv --exchange "$NEW" "$DEST"; else rm -rf "$DEST"; fi
+        if [ "$HAD_OLD" -eq 1 ]; then mv -T --exchange "$NEW" "$DEST"; else rm -rf "$DEST"; fi
     fi
     if [ -e "$WOLD" ]; then mv -f "$WOLD" "$WRAPPER_DEST"; else rm -f "$WRAPPER_DEST"; fi
     if [ -e "$SOLD" ]; then mv -f "$SOLD" "$STAMP"; else rm -f "$STAMP"; fi
@@ -185,7 +185,7 @@ rollback() {
 [ ! -e "$WRAPPER_DEST" ] || cp -a "$WRAPPER_DEST" "$WOLD"
 [ ! -e "$STAMP" ] || cp -a "$STAMP" "$SOLD"
 trap 'rc=$?; [ $rc -eq 0 ] || rollback; rm -f "$WOLD" "$SOLD"; cleanup_new' EXIT
-if [ "$HAD_OLD" -eq 1 ]; then mv --exchange "$NEW" "$DEST"   # NEW now holds the old tree
+if [ "$HAD_OLD" -eq 1 ]; then mv -T --exchange "$NEW" "$DEST"   # NEW now holds the old tree
 else mv -T "$NEW" "$DEST"; fi
 SWAPPED=1
 mv -f "$WNEW" "$WRAPPER_DEST"

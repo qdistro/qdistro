@@ -1,0 +1,22 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/probe.sh --user admin'
+[vm-exec] guest identity pinned (pid 9908 start 57804)
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: runsc version release-20260928.0 (matches pin, rc=0)
+PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT PASS: tier 3s prerequisites present
+### exit=0

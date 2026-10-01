@@ -1,0 +1,4 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc'
+[vm-exec] guest identity pinned (pid 10143 start 58264)
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+### exit=0
