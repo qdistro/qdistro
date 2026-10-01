@@ -123,3 +123,38 @@ def test_on_load_finished_ignored_when_not_ok(fresh_config, window):
     with patch.object(plug, "apply") as a:
         plug.on_load_finished(window._active_webview, False)
         a.assert_not_called()
+
+
+def test_color_only_does_not_reapply_dark_mode(fresh_config):
+    plug = _make_plugin(fresh_config, desktop_dark=True)
+    auto = MagicMock()
+    auto.url.return_value = "https://auto.example"
+    never = MagicMock()
+    never.url.return_value = "https://never.example"
+    plug._site_overrides["never.example"] = "never"
+    plug.on_appearance_changed("dark", [auto, never])
+    auto.view.page().runJavaScript.assert_not_called()
+    never.view.page().runJavaScript.assert_not_called()
+
+
+def test_mode_change_reapplies_only_auto_pages(fresh_config):
+    plug = _make_plugin(fresh_config, desktop_dark=True)
+    auto = MagicMock()
+    auto.url.return_value = "https://auto.example"
+    never = MagicMock()
+    never.url.return_value = "https://never.example"
+    always = MagicMock()
+    always.url.return_value = "https://always.example"
+    contrast = MagicMock()
+    contrast.url.return_value = "https://contrast.example"
+    plug._site_overrides["never.example"] = "never"
+    plug._site_overrides["always.example"] = "always"
+    plug._site_overrides["contrast.example"] = "contrast"
+    plug.on_appearance_changed("light", [auto, never, always, contrast])
+    auto.view.page().runJavaScript.assert_called_once()
+    never.view.page().runJavaScript.assert_not_called()
+    always.view.page().runJavaScript.assert_not_called()
+    contrast.view.page().runJavaScript.assert_not_called()
+    js = auto.view.page().runJavaScript.call_args[0][0]
+    assert '"off"' in js
+    assert plug._desktop_dark is False

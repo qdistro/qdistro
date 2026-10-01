@@ -793,10 +793,32 @@ class MainWindow(QMainWindow):
         if plug is not None and hasattr(plug, "open"):
             plug.open()
 
+    def iter_webviews(self):
+        for i in range(self._tabs.count()):
+            split = self._tabs.widget(i)
+            if isinstance(split, SplitContainer):
+                yield from split.find_webviews()
+
+    def apply_presentation_update(self) -> None:
+        from qdbrowser.theme import current_resolved_theme
+
+        self._resolved_theme = current_resolved_theme(self._resolved_theme)
+        views = list(self.iter_webviews())
+        translate = self.plugins._instances.get("translate")
+        if translate is not None and hasattr(translate, "restyle_overlays"):
+            translate.restyle_overlays(views)
+        dark = self.plugins._instances.get("dark_mode")
+        if dark is not None and hasattr(dark, "on_appearance_changed"):
+            dark.on_appearance_changed(self._resolved_theme, views)
+
     def _new_window(self):
         # A second top-level window in the same process; sessions are
-        # tracked per-window.
-        win = MainWindow(resolved_theme=self._resolved_theme)
+        # tracked per-window. Read the live controller so a stale copy
+        # of the creating window's theme is not reused.
+        from qdbrowser.theme import current_resolved_theme
+
+        win = MainWindow(
+            resolved_theme=current_resolved_theme(self._resolved_theme))
         win.new_tab()
         win.show()
 
