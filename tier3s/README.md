@@ -3,7 +3,10 @@
 Plan: `todo/paravirt/03-implementation-plan.md` (Track A). Decisions:
 `todo/paravirt/README.md` — D1 = (a), O1–O9.
 
-Status: **Phase 0** (provision + prerequisite screen). Nothing here is wired
+Status: **Phase 0** (provision + prerequisite screen) and **Phase S**
+(feasibility spike, `spike/README.md`, results in
+`todo/paravirt/05-phase-S-results.md`: GO, with three conditions: a runsc
+state root, an admin-delegated owning scope, a secctx-wrapped bridge client). Nothing here is wired
 into the image, kiwi config or any installer, and nothing in qdistro selects
 this tier automatically (O6: explicit launch, no fallback). Dev profile only
 (O4); `probe.sh` refuses on any other profile. No KVM claims (O5).

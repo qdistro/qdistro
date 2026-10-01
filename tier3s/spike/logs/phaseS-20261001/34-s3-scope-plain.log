@@ -1,0 +1,30 @@
+### host 2026-10-01T21:04:31Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s3-cgroups.sh && tier3s/spike/s3-cgroups.sh scope-plain
+CMD
+[vm-exec] guest identity pinned (pid 88275 start 298554)
+6604a9f65870fcb3a712ba4fb63d302df5448f30cd787f7ea2cfe570c182d40f  tier3s/spike/s3-cgroups.sh
+scope argv: systemd-run --scope --unit=t3s-s3-scope-plain -p MemoryMax=1G -p TasksMax=512 -- runuser -u admin -- env -i …  podman --cgroup-manager=cgroupfs --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s3-scope-plain localhost/tier3s-spike/tw-terminals:20260929 sleep 45
+--- launch output
+inspect: State=running Cgroups=default CgroupParent= CgroupManager=cgroupfs ConmonPid=88322 Pid=88336
+OCI linux.cgroupsPath = None
+--- target cgroup: /system.slice/t3s-s3-scope-plain.scope
+controllers: memory pids | memory.max=1073741824 pids.max=512 owner=root
+--- recursive cgroup.procs of the target
+/system.slice/t3s-s3-scope-plain.scope	pid=88308 comm=runuser exe=/usr/sbin/runuser
+--- every sandbox process (conmon subtree) classified against the target
+OUTSIDE pid=88322 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon pin=- cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+OUTSIDE pid=88336 ppid=88322 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+OUTSIDE pid=88337 ppid=88322 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking pin=sidecar_runsc-fd-parking_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+OUTSIDE pid=88331 ppid=88322 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc pin=runsc_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+OUTSIDE pid=88352 ppid=88336 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+OUTSIDE pid=88367 ppid=88336 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+OUTSIDE pid=88368 ppid=88367 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+VERDICT shape=scope-plain: 0/7 sandbox processes inside /system.slice/t3s-s3-scope-plain.scope -> DOES NOT CONTAIN ALL
+--- podman CLI / runuser / systemd-run processes of this launch
+pid=88308 comm=runuser cgroup=/system.slice/t3s-s3-scope-plain.scope
+pid=88311 comm=podman cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+pid=88322 comm=conmon cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-88311.scope
+--- stop
+(end leftovers)
+target after stop: gone
+### exit=0

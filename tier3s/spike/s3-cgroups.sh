@@ -80,9 +80,8 @@ IN
         runuser -u $ADMIN -- "${ENVA[@]}" "${ARGV[@]}" > "$OUT/run.log" 2>&1 < /dev/null &
     TARGET=/system.slice/$U.scope ;;
   parent-user)
-    t3s_podman_argv; ARGV=("${T3S_ARGV[@]}" "$IMG" sleep 45)
-    printf 'argv (as admin, run -d):'; printf ' %q' "${ARGV[@]}"; echo
     T3S_RUNOPTS+=(-d); t3s_podman_argv; ARGV=("${T3S_ARGV[@]}" "$IMG" sleep 45)
+    printf 'argv (as admin):'; printf ' %q' "${ARGV[@]}"; echo
     as_admin "${ARGV[@]}" > "$OUT/run.log" 2>&1
     TARGET=/user.slice/user-$ADMIN_UID.slice/user@$ADMIN_UID.service/t3sspike.slice ;;  # no dash: systemd nests a-b.slice under a.slice
   split)
