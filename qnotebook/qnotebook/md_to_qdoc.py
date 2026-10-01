@@ -46,6 +46,7 @@ CHAR_WIKILINK = QTextCharFormat.Property.UserProperty + 10  # str target
 CHAR_CODE = QTextCharFormat.Property.UserProperty + 11  # bool
 CHAR_IMAGE_ALT = QTextCharFormat.Property.UserProperty + 12  # str alt text for images
 CHAR_TAG = QTextCharFormat.Property.UserProperty + 13  # str tag name (e.g. "todo" for `#todo`)
+CHAR_STRONG = QTextCharFormat.Property.UserProperty + 26  # bool: authored markdown bold
 BLOCK_TOC_MARKER = QTextCharFormat.Property.UserProperty + 14
 BLOCK_TRANSCLUSION = QTextCharFormat.Property.UserProperty + 22
 BLOCK_TRANSCLUDED_CHILD = QTextCharFormat.Property.UserProperty + 23
@@ -173,6 +174,7 @@ class _InlineStyle:
         f = QTextCharFormat()
         if self.bold:
             f.setFontWeight(QFont.Weight.Bold)
+            f.setProperty(CHAR_STRONG, True)
         if self.italic:
             f.setFontItalic(True)
         if self.strike:
@@ -819,9 +821,25 @@ def markdown_to_qdoc(
     doc: QTextDocument,
     base_path: Path | None = None,
     transclusion_resolver=None,
+    content_style=None,
 ) -> None:
     """Parse markdown and populate `doc` with styled blocks."""
     doc.clear()
+    undo = doc.isUndoRedoEnabled()
+    doc.setUndoRedoEnabled(False)
+    try:
+        _markdown_to_qdoc_body(md_text, doc, base_path, transclusion_resolver, content_style)
+    finally:
+        doc.setUndoRedoEnabled(undo)
+
+
+def _markdown_to_qdoc_body(
+    md_text: str,
+    doc: QTextDocument,
+    base_path: Path | None,
+    transclusion_resolver,
+    content_style,
+) -> None:
     doc.setDefaultStyleSheet("")
     root_fmt = QTextFrameFormat()
     root_fmt.setMargin(0)
@@ -853,6 +871,9 @@ def markdown_to_qdoc(
     _post_process_toc_markers(doc)
     _post_process_transclusions(doc, transclusion_targets, transclusion_resolver)
     _post_process_footnotes(doc)
+    from .content_style import apply_document_presentation, legacy_content_style
+
+    apply_document_presentation(doc, content_style or legacy_content_style())
 
 
 # --------------------------------------------------------------------

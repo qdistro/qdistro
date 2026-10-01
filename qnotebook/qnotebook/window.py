@@ -2608,15 +2608,18 @@ class MainWindow(QMainWindow):
     def apply_presentation_update(self) -> None:
         """Refresh chrome after a shared appearance change.
 
-        Editor body font, serialized text, dirty flag and undo stack stay put.
+        Editor serialized text, dirty flag and undo stack stay put.
         """
+        from .content_style import resolve_content_style
         from .editor import MarkdownEditor, native_body_font
         from .theme import EDITOR_PALETTE_QSS
 
-        body = native_body_font()
+        style = resolve_content_style()
+        body = style.body_qfont() if style.inherit_desktop else native_body_font()
         for editor in self.findChildren(MarkdownEditor):
             editor.setFont(body)
             editor.setStyleSheet(EDITOR_PALETTE_QSS)
+            editor.apply_content_presentation()
         from .appearance import load_theme_mode
         from .theme import current_controller
 
@@ -2835,7 +2838,18 @@ class MainWindow(QMainWindow):
         dlg = QPrintDialog(printer, self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
-        self.editor.document().print(printer)
+        from .content_style import legacy_content_style
+        from .md_to_qdoc import markdown_to_qdoc
+        from PyQt6.QtGui import QTextDocument
+
+        export_doc = QTextDocument()
+        markdown_to_qdoc(
+            self.notebook.get_page(self._current_page),
+            export_doc,
+            base_path=self.notebook.file_for(self._current_page).parent,
+            content_style=legacy_content_style(),
+        )
+        export_doc.print(printer)
 
     # ---- misc ----
 
@@ -2921,6 +2935,7 @@ class MainWindow(QMainWindow):
             pass
         if self.index:
             self.index.close()
+            self.index = None
         # Release the per-notebook lock (only if we own it — read-only sessions
         # should not remove another process's lock).
         if self.notebook is not None and not getattr(self, "_read_only", False):

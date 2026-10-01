@@ -61,6 +61,11 @@ class SpellHighlighter(QSyntaxHighlighter):
         self._fmt.setUnderlineStyle(
             QTextCharFormat.UnderlineStyle.WaveUnderline
         )
+        self._content_style = None
+
+    def set_content_style(self, style) -> None:
+        self._content_style = style
+        self.rehighlight()
 
     def is_active(self) -> bool:
         return self._dict is not None
@@ -96,6 +101,9 @@ class SpellHighlighter(QSyntaxHighlighter):
             return []
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802
+        from .content_style import highlight_block_content
+
+        highlight_block_content(self, text, self._content_style)
         if self._dict is None:
             return
         for m in WORD_RE.finditer(text):
@@ -104,6 +112,9 @@ class SpellHighlighter(QSyntaxHighlighter):
                 continue
             try:
                 if not self._dict.check(word):
-                    self.setFormat(m.start(), m.end() - m.start(), self._fmt)
+                    fmt = QTextCharFormat(self.format(m.start()))
+                    fmt.setUnderlineColor(self._fmt.underlineColor())
+                    fmt.setUnderlineStyle(self._fmt.underlineStyle())
+                    self.setFormat(m.start(), m.end() - m.start(), fmt)
             except Exception:
                 continue

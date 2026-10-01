@@ -47,8 +47,10 @@ from .appearance import (
     THEME_LABEL_TO_KEY,
     load_overrides,
     load_theme_mode,
+    load_use_desktop_document_fonts,
     save_overrides,
     save_theme_mode,
+    save_use_desktop_document_fonts,
 )
 
 
@@ -247,6 +249,13 @@ class SettingsDialog(QDialog):
         self._chk_desktop_fonts = QCheckBox("Use desktop fonts")
         global_form.addRow(self._chk_desktop_fonts)
 
+        self._chk_document_fonts = QCheckBox("Use desktop document fonts")
+        self._chk_document_fonts.setToolTip(
+            "When enabled, notebook body and code fonts follow the desktop "
+            "presentation snapshot. Off by default; does not change Markdown."
+        )
+        global_form.addRow(self._chk_document_fonts)
+
         self._combo_ui_font = QFontComboBox()
         global_form.addRow("UI font:", self._combo_ui_font)
 
@@ -411,6 +420,7 @@ class SettingsDialog(QDialog):
             appearance.get("ui_font_family") or appearance.get("ui_font_size_pt")
         )
         self._chk_desktop_fonts.setChecked(not has_font_override)
+        self._chk_document_fonts.setChecked(load_use_desktop_document_fonts(self._settings))
         if appearance.get("ui_font_family"):
             self._combo_ui_font.setCurrentText(str(appearance["ui_font_family"]))
         self._spin_ui_font_size.blockSignals(True)
@@ -484,6 +494,9 @@ class SettingsDialog(QDialog):
             elif existing is not None:
                 appearance["ui_font_size_pt"] = float(existing)
         save_overrides(self._settings, appearance)
+        save_use_desktop_document_fonts(
+            self._settings, self._chk_document_fonts.isChecked()
+        )
         self._appearance_dirty = False
         if hasattr(self._window, "apply_saved_appearance"):
             self._window.apply_saved_appearance()
