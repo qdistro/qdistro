@@ -82,20 +82,40 @@ from pathlib import Path
 import re
 import sys
 
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
-allow_re = re.compile(
-    r"^allow\s+(\S+)\s+(qdistro_presentation_t):(\S+)\s*\{([^}]+)\}"
+ALLOW_RE = re.compile(
+    r"allow\s+(\S+)\s+(qdistro_presentation_t)\s*:\s*(\S+)\s+"
+    r"(?:\{([^}]*)\}|(\S+))\s*;"
 )
-grants = defaultdict(set)
-for raw in text.splitlines():
-    stripped = raw.strip()
-    if not stripped or stripped.startswith("#"):
-        continue
-    match = allow_re.match(stripped)
-    if match is None:
-        continue
-    domain, _typ, cls, body = match.groups()
-    grants[(domain, cls)].update(body.split())
+LEFTOVER_RE = re.compile(r"allow\s+\S+\s+qdistro_presentation_t\s*:")
+
+
+def parse_allows(src: str):
+    """Union permissions from complete allow statements (braced or singleton)."""
+    lines = []
+    for raw in src.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        code = stripped.split("#", 1)[0].rstrip()
+        if code:
+            lines.append(code)
+    text = " ".join(lines)
+    grants = defaultdict(set)
+    for match in ALLOW_RE.finditer(text):
+        domain, _typ, cls, braced, single = match.groups()
+        tokens = braced.split() if braced is not None else [single]
+        grants[(domain, cls)].update(tokens)
+    remainder = ALLOW_RE.sub(" ", text)
+    leftover = LEFTOVER_RE.search(remainder)
+    if leftover is not None:
+        snippet = remainder[leftover.start() : leftover.start() + 120].strip()
+        raise SystemExit(
+            f"unparsed allow involving qdistro_presentation_t: {snippet}"
+        )
+    return grants
+
+
+grants = parse_allows(Path(sys.argv[1]).read_text(encoding="utf-8"))
 
 dir_need = {"getattr", "search", "open", "read", "watch"}
 file_need = {"getattr", "open", "read"}
@@ -117,43 +137,59 @@ for domain in ("qdistro_tier1_t", "container_t", "qdistro_tier2_t"):
     if extra_f:
         raise SystemExit(f"{domain} file has mutation perms {sorted(extra_f)}")
 
-# Parser fixtures: a commented grant is inactive; a second write grant counts.
-sample = """
+braced_extra = parse_allows(
+    """
 # allow container_t qdistro_presentation_t:dir { getattr search open read watch };
 allow container_t qdistro_presentation_t:dir { getattr search open read watch };
 allow container_t qdistro_presentation_t:dir { write unlink };
 """
-sample_grants = defaultdict(set)
-for raw in sample.splitlines():
-    stripped = raw.strip()
-    if not stripped or stripped.startswith("#"):
-        continue
-    match = allow_re.match(stripped)
-    if match is None:
-        continue
-    domain, _typ, cls, body = match.groups()
-    sample_grants[(domain, cls)].update(body.split())
-if "write" not in sample_grants[("container_t", "dir")]:
-    raise SystemExit("parser missed extra write grant")
-if "watch" not in sample_grants[("container_t", "dir")]:
+)
+if "write" not in braced_extra[("container_t", "dir")]:
+    raise SystemExit("parser missed extra braced write grant")
+if "watch" not in braced_extra[("container_t", "dir")]:
     raise SystemExit("parser missed active watch grant")
-commented_only = """
+
+commented_only = parse_allows(
+    """
 # allow container_t qdistro_presentation_t:dir { getattr search open read watch };
 """
-commented_grants = defaultdict(set)
-for raw in commented_only.splitlines():
-    stripped = raw.strip()
-    if not stripped or stripped.startswith("#"):
-        continue
-    match = allow_re.match(stripped)
-    if match is None:
-        continue
-    domain, _typ, cls, body = match.groups()
-    commented_grants[(domain, cls)].update(body.split())
-if commented_grants[("container_t", "dir")]:
+)
+if commented_only[("container_t", "dir")]:
     raise SystemExit("parser treated a commented allow as active")
+
+singleton_extra = parse_allows(
+    """
+allow container_t qdistro_presentation_t:dir { getattr search open read watch };
+allow container_t qdistro_presentation_t:dir write;
+allow container_t qdistro_presentation_t:file { getattr open read };
+allow container_t qdistro_presentation_t:file unlink;
+"""
+)
+if "write" not in singleton_extra[("container_t", "dir")]:
+    raise SystemExit("parser missed singleton dir write grant")
+if "unlink" not in singleton_extra[("container_t", "file")]:
+    raise SystemExit("parser missed singleton file unlink grant")
+if "watch" not in singleton_extra[("container_t", "dir")]:
+    raise SystemExit("parser missed active watch next to singleton write")
+
+multiline_extra = parse_allows(
+    """
+allow container_t qdistro_presentation_t:dir { getattr search open read watch };
+allow container_t qdistro_presentation_t:dir {
+    write
+};
+"""
+)
+if "write" not in multiline_extra[("container_t", "dir")]:
+    raise SystemExit("parser missed multiline extra write grant")
 print("ok")
 PY
+}
+
+@test "isolation probe restores original snapshot state on host-safe fixtures" {
+    run bash "$REPO/tests/integration/vm/probes/presentation-isolation.sh" --host-cleanup-self-test
+    [ "$status" -eq 0 ]
+    [ "$output" = "ok" ]
 }
 
 @test "affected map selects host and bats for the library and installer" {

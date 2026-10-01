@@ -12,21 +12,138 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 die() { fail "$*"; echo "[presentation-isolation] $PASSCOUNT passes, $FAILCOUNT failures"; exit 1; }
 
+# Snapshot restoration state:
+#   untouched     — original current.json has not been captured; cleanup is a no-op
+#   had_original  — capture copied the pre-test file; cleanup restores it
+#   absent        — capture confirmed no pre-test file; cleanup removes probe output
+STATE=untouched
 DIR=/var/lib/qdistro/presentation
 FILE=$DIR/current.json
 META=/usr/share/qdistro/presentation/deployment.json
 ORIG_BACKUP=$DIR/current.json.p7orig
-HAD_ORIGINAL=0
 
 cleanup() {
     rm -f "$DIR/qdistro-write-probe" "$DIR/real.json" 2>/dev/null || true
-    if [ "$HAD_ORIGINAL" = 1 ] && [ -f "$ORIG_BACKUP" ]; then
-        mv -f "$ORIG_BACKUP" "$FILE"
+    case "$STATE" in
+        untouched)
+            return 0
+            ;;
+        had_original)
+            if ! mv -f "$ORIG_BACKUP" "$FILE"; then
+                echo "FAIL: restore original snapshot failed" >&2
+                return 1
+            fi
+            return 0
+            ;;
+        absent)
+            rm -f "$FILE" "$ORIG_BACKUP"
+            return 0
+            ;;
+        *)
+            echo "FAIL: unknown presentation isolation state $STATE" >&2
+            return 1
+            ;;
+    esac
+}
+
+capture_original() {
+    if [ -f "$FILE" ]; then
+        if ! cp -a "$FILE" "$ORIG_BACKUP"; then
+            rm -f "$ORIG_BACKUP" 2>/dev/null || true
+            return 1
+        fi
+        STATE=had_original
     else
-        rm -f "$FILE" "$ORIG_BACKUP"
+        STATE=absent
+    fi
+    return 0
+}
+
+cleanup_on_exit() {
+    if ! cleanup; then
+        exit 1
     fi
 }
-trap cleanup EXIT
+
+host_cleanup_self_test() {
+    local root=$1 rc
+
+    mkdir -p "$root/early"
+    DIR="$root/early"
+    FILE="$DIR/current.json"
+    ORIG_BACKUP="$DIR/current.json.p7orig"
+    STATE=untouched
+    printf 'ORIGINAL\n' >"$FILE"
+    cleanup || { echo "FAIL: untouched cleanup returned error"; return 1; }
+    grep -qx ORIGINAL "$FILE" || { echo "FAIL: untouched cleanup mutated current.json"; return 1; }
+    [ ! -e "$ORIG_BACKUP" ] || { echo "FAIL: untouched cleanup created a backup"; return 1; }
+
+    mkdir -p "$root/bakfail"
+    DIR="$root/bakfail"
+    FILE="$DIR/current.json"
+    ORIG_BACKUP="$DIR/current.json.p7orig"
+    STATE=untouched
+    printf 'ORIGINAL\n' >"$FILE"
+    chmod a-w "$DIR"
+    rc=0
+    capture_original 2>/dev/null || rc=$?
+    chmod u+w "$DIR"
+    [ "$rc" -ne 0 ] || { echo "FAIL: capture_original succeeded on an unwritable dir"; return 1; }
+    [ "$STATE" = untouched ] || { echo "FAIL: backup failure marked $STATE"; return 1; }
+    grep -qx ORIGINAL "$FILE" || { echo "FAIL: backup failure mutated current.json"; return 1; }
+    cleanup || { echo "FAIL: backup-failure cleanup returned error"; return 1; }
+    grep -qx ORIGINAL "$FILE" || { echo "FAIL: backup-failure cleanup deleted original"; return 1; }
+
+    mkdir -p "$root/had"
+    DIR="$root/had"
+    FILE="$DIR/current.json"
+    ORIG_BACKUP="$DIR/current.json.p7orig"
+    STATE=untouched
+    printf 'ORIGINAL\n' >"$FILE"
+    capture_original || { echo "FAIL: capture existing original failed"; return 1; }
+    [ "$STATE" = had_original ] || { echo "FAIL: expected had_original got $STATE"; return 1; }
+    [ -f "$ORIG_BACKUP" ] || { echo "FAIL: missing orig backup"; return 1; }
+    printf 'SYNTHETIC\n' >"$FILE"
+    cleanup || { echo "FAIL: had_original cleanup failed"; return 1; }
+    grep -qx ORIGINAL "$FILE" || { echo "FAIL: did not restore original"; return 1; }
+
+    mkdir -p "$root/absent"
+    DIR="$root/absent"
+    FILE="$DIR/current.json"
+    ORIG_BACKUP="$DIR/current.json.p7orig"
+    STATE=untouched
+    capture_original || { echo "FAIL: capture absent failed"; return 1; }
+    [ "$STATE" = absent ] || { echo "FAIL: expected absent got $STATE"; return 1; }
+    printf 'SYNTHETIC\n' >"$FILE"
+    cleanup || { echo "FAIL: absent cleanup failed"; return 1; }
+    [ ! -e "$FILE" ] || { echo "FAIL: absent cleanup left synthetic current.json"; return 1; }
+
+    mkdir -p "$root/restorefail"
+    DIR="$root/restorefail"
+    FILE="$DIR/current.json"
+    ORIG_BACKUP="$DIR/current.json.p7orig"
+    STATE=untouched
+    printf 'ORIGINAL\n' >"$FILE"
+    capture_original || { echo "FAIL: capture for restore-fail failed"; return 1; }
+    rm -f "$ORIG_BACKUP"
+    printf 'SYNTHETIC\n' >"$FILE"
+    rc=0
+    cleanup 2>/dev/null || rc=$?
+    [ "$rc" -ne 0 ] || { echo "FAIL: missing-backup restore succeeded"; return 1; }
+    grep -qx SYNTHETIC "$FILE" || { echo "FAIL: restore-fail mutated current.json away"; return 1; }
+
+    echo "ok"
+    return 0
+}
+
+if [ "${1:-}" = "--host-cleanup-self-test" ]; then
+    SELF_TEST_TMP=$(mktemp -d)
+    trap 'rm -rf "$SELF_TEST_TMP"' EXIT
+    host_cleanup_self_test "$SELF_TEST_TMP"
+    exit $?
+fi
+
+trap cleanup_on_exit EXIT
 
 [ -d "$DIR" ] || die "managed presentation directory missing"
 [ -f "$META" ] || die "deployment.json missing"
@@ -68,10 +185,7 @@ else
     fail "installed import failed: out='$IMPORT_OUT' err=$(tr '\n' ' ' </tmp/p7-import.err)"
 fi
 
-if [ -f "$FILE" ]; then
-    cp -a "$FILE" "$ORIG_BACKUP"
-    HAD_ORIGINAL=1
-fi
+capture_original || die "failed to backup original current.json"
 
 # Distinct palettes A then B so generation must change.
 publish_palette() {
