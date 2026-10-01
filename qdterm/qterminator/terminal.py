@@ -1,5 +1,6 @@
 """Terminal widget wrapping QTermWidget."""
 
+import logging
 import os
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
@@ -9,7 +10,14 @@ from QTermWidget import QTermWidget
 
 from qterminator.config import Config
 from qterminator.plugin import select_url_handler
+from qterminator.terminal_style import (
+    MIN_TERMINAL_POINT_SIZE,
+    resolve_color_scheme,
+    resolve_terminal_font,
+)
 from qterminator.titlebar import TerminalTitlebar
+
+log = logging.getLogger(__name__)
 
 
 class _ReadOnlyFilter(QObject):
@@ -98,8 +106,14 @@ class TerminalWidget(QWidget):
         self._monitor_activity = False
         self._monitor_silence = False
         self._shell_command = shell_command
+        self._zoom_delta = 0.0
+        self._applied_scheme = None
         self._setup_ui(working_directory)
         self._connect_signals()
+
+    @property
+    def profile_name(self):
+        return self._profile_name
 
     def _setup_ui(self, working_directory):
         layout = QVBoxLayout(self)
@@ -135,16 +149,8 @@ class TerminalWidget(QWidget):
 
         # Apply config
         profile = self._config.get_profile(self._profile_name)
-        font = QFont(profile["font_family"], profile["font_size"])
-        # Ligatures: enable OpenType ligature shaping when requested.
-        # PreferDefault = full text shaping (ligatures); NoSubpixelAntialias is unset.
-        # Note: QTermWidget always disables kerning at the C++ level for performance,
-        # but ligature substitution (separate OpenType feature) is honored by Qt's
-        # text shaper when drawing multi-character strings.
-        if profile.get("font_ligatures", False):
-            font.setStyleStrategy(QFont.StyleStrategy.PreferDefault)
-        self._term.setTerminalFont(font)
-        self._term.setColorScheme(profile["color_scheme"])
+        self._apply_resolved_font(profile)
+        self._apply_resolved_scheme(profile)
         self._term.setHistorySize(profile["scrollback_lines"])
         self._term.setScrollBarPosition(QTermWidget.ScrollBarPosition.ScrollBarRight)
         self._term.setKeyBindings("linux")
@@ -335,10 +341,17 @@ class TerminalWidget(QWidget):
         self._term.clear()
 
     def zoom_in(self):
-        self._term.zoomIn()
+        self._zoom_delta += 1.0
+        self._apply_resolved_font()
 
     def zoom_out(self):
-        self._term.zoomOut()
+        self._zoom_delta -= 1.0
+        self._apply_resolved_font()
+
+    def zoom_reset(self):
+        """Clear the transient zoom delta and restore this terminal's base."""
+        self._zoom_delta = 0.0
+        self._apply_resolved_font()
 
     def send_text(self, text, force=False):
         """Write text to the pty.
@@ -368,26 +381,61 @@ class TerminalWidget(QWidget):
         return self._term.workingDirectory()
 
     def set_font(self, family, size):
-        font = QFont(family, size)
+        font = QFont(family)
+        font.setPointSizeF(max(MIN_TERMINAL_POINT_SIZE, float(size)))
         self._term.setTerminalFont(font)
 
     def set_color_scheme(self, name):
         self._term.setColorScheme(name)
+        self._applied_scheme = name
 
     def set_scrollback(self, lines):
         self._term.setHistorySize(lines)
 
-    def apply_profile(self, profile_name):
-        """Apply a named profile to this terminal."""
-        self._profile_name = profile_name
-        profile = self._config.get_profile(profile_name)
-        self.set_font(profile["font_family"], profile["font_size"])
-        self.set_color_scheme(profile["color_scheme"])
-        self.set_scrollback(profile["scrollback_lines"])
+    def _apply_resolved_font(self, profile=None):
+        profile = profile or self._config.get_profile(self._profile_name)
+        font = resolve_terminal_font(profile)
+        size = max(MIN_TERMINAL_POINT_SIZE, font.pointSizeF() + self._zoom_delta)
+        font.setPointSizeF(size)
+        self._term.setTerminalFont(font)
+
+    def _apply_resolved_scheme(self, profile=None):
+        profile = profile or self._config.get_profile(self._profile_name)
+        wanted = resolve_color_scheme(profile, self._config)
+        available = set(QTermWidget.availableColorSchemes())
+        if wanted not in available:
+            log.warning("color scheme %r is unavailable; keeping the last valid scheme", wanted)
+            return
+        self._term.setColorScheme(wanted)
+        self._applied_scheme = wanted
+
+    def apply_inherited_presentation(self):
+        """Reapply desktop font / appearance-mode ANSI. Keep zoom and PTY."""
+        profile = self._config.get_profile(self._profile_name)
+        if (profile.get("font_source") or "local") == "desktop":
+            self._apply_resolved_font(profile)
+        if (profile.get("color_source") or "profile") == "appearance-mode":
+            self._apply_resolved_scheme(profile)
+
+    def apply_profile_fields(self, *, font=True, color=True, scrollback=True):
+        """Apply this terminal's current profile without respawning the PTY."""
+        profile = self._config.get_profile(self._profile_name)
+        if font:
+            self._apply_resolved_font(profile)
+        if color:
+            self._apply_resolved_scheme(profile)
+        if scrollback:
+            self.set_scrollback(profile["scrollback_lines"])
         if profile.get("show_titlebar", True):
             self._titlebar.show()
         else:
             self._titlebar.hide()
+
+    def apply_profile(self, profile_name):
+        """Apply a named profile to this terminal."""
+        self._profile_name = profile_name
+        self._zoom_delta = 0.0
+        self.apply_profile_fields()
 
     def has_running_process(self):
         """Check if a foreground process (other than shell) is running."""

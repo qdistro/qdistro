@@ -273,6 +273,7 @@ class TestLoadingSettings:
     def test_loads_custom_config_values(self, window, qtbot):
         """If config has custom values, dialog reflects them."""
         cfg = Config()
+        cfg.set("profiles", "default", "font_source", "local")
         cfg.set("profiles", "default", "font_size", 18)
         cfg.set("profiles", "default", "scrollback_lines", 999)
         cfg.set("profiles", "default", "background_opacity", 0.75)
