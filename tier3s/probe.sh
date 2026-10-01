@@ -121,8 +121,12 @@ if [ "${#WANT[@]}" -lt 2 ]; then
 elif [ ! -d "$RUNSC_DIR" ] || [ -L "$RUNSC_DIR" ]; then
     fail bundle "$RUNSC_DIR missing"
 else
-    exp="$({ echo "d gvisor-bin"; for f in "${!WANT[@]}"; do echo "f $f"; done; } | LC_ALL=C sort)"
-    have="$(find "$RUNSC_DIR" -mindepth 1 -printf '%y %P\n' | LC_ALL=C sort)"
+    # type, mode, owner and path of every entry must match (root:root 0755);
+    # a test root (QDISTRO_PROBE_ROOT) is owned by the caller.
+    own="root:root"; [ -z "$ROOT" ] || own="$(id -un):$(id -gn)"
+    exp="$({ echo "d 755 $own ."; echo "d 755 $own gvisor-bin"
+             for f in "${!WANT[@]}"; do echo "f 755 $own $f"; done; } | LC_ALL=C sort)"
+    have="$(find "$RUNSC_DIR" -printf '%y %m %u:%g %P\n' | sed 's/ $/ ./' | LC_ALL=C sort)"
     bad=""
     if [ "$have" != "$exp" ]; then
         bad="file set differs: missing=[$(comm -23 <(echo "$exp") <(echo "$have") | tr '\n' ',')] unexpected=[$(comm -13 <(echo "$exp") <(echo "$have") | tr '\n' ',')]"
@@ -134,9 +138,11 @@ else
     if [ -z "$bad" ]; then pass bundle "$RUNSC_DIR: ${#WANT[@]} files, exact set, sha512 match pin"
     else fail bundle "$bad"; fi
 fi
-if [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ -x "$WRAPPER" ] && cmp -s "$HERE/tier3s-runsc" "$WRAPPER"; then
+wown="root:root"; [ -z "$ROOT" ] || wown="$(id -un):$(id -gn)"
+if [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPPER")" = "755 $wown" ] \
+   && cmp -s "$HERE/tier3s-runsc" "$WRAPPER"; then
     pass wrapper "$WRAPPER (identical to $HERE/tier3s-runsc)"
-else fail wrapper "$WRAPPER missing or differs from $HERE/tier3s-runsc"; fi
+else fail wrapper "$WRAPPER missing, not $wown 0755, or differs from $HERE/tier3s-runsc"; fi
 
 # --- podman as the launching user ------------------------------------------
 as_user() {
