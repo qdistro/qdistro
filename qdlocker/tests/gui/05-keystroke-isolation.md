@@ -24,13 +24,21 @@ source "$(dirname "$0")/qdlocker-helpers.sh"
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 
-# Drain stale lock state.
+# Drain stale lock state through the real keyboard unlock path. Do NOT
+# "drain" by restarting qdlocker.service: qdwin holds the lock fail-secure
+# across a locker restart (journal: `lock held (fail-secure)
+# cause=locker_disconnect`; the fresh locker binds with initially_locked=1),
+# so the session stays locked. Step 1's Ctrl+Alt+L then lands on an
+# already-locked screen: the binding does not fire (the locker's overlay grab
+# owns the keyboard) and the chord's `l` is delivered to the locker as a key
+# press. That is how qci runs full-20260929T182319Z and
+# full-20260930T212305Z read prompt-len=1 at 1.1 — on a retry, after the first
+# attempt had left the session locked.
+qdlocker_drain_lock_state || { echo "ERROR: could not drain a stale lock"; exit 2; }
+# Baseline: Step 1 must observe a real unlocked -> locked transition.
 case "$(qdlocker_ctrl status 2>/dev/null)" in
-    *locked=True*)
-        "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
-          >/dev/null
-        ;;
+    *locked=False*prompt-len=0*) ;;
+    *) echo "ERROR: baseline not unlocked/empty: $(qdlocker_ctrl status 2>&1)"; exit 2 ;;
 esac
 
 # The qdshell-side counter for overlay_key receipts is the load-
@@ -64,7 +72,8 @@ echo "shell overlay_key after-lock=$SHELL_AFTER_LOCK"
 ```
 
 **Assert (1.1):** `qdlocker_ctrl status` reports `locked=True
-prompt-len=0`.
+prompt-len=0`. The setup baseline was `locked=False`, so this lock is the one
+the chord just engaged; nothing of the chord may land in the prompt.
 **Assert (1.2):** `$SHELL_AFTER_LOCK == $SHELL_BASELINE` — engaging
 the locker MUST NOT cause any overlay_key delivery to qdshell.
 Earlier drafts allowed ≤2 to absorb test flakiness; we changed to
@@ -149,7 +158,13 @@ assertion; a FAIL here is a release-blocker security regression.
 - 3.1 FAIL with the literal password in the response — `ctrl.py`'s
   `prompt-text` handler is returning `self._controller.currentText`
   directly. It must mask.
-- 1.1 FAIL with `prompt-len > 0` at the lock instant — a residual
-  buffer from a prior test wasn't cleared on lock. Setup must drain
-  the controller; the easiest is the
-  `systemctl --user restart qdlocker.service` path.
+- 1.1 FAIL with `prompt-len > 0` at the lock instant — first check
+  the compositor journal for `overlay_key role=2` lines BEFORE the
+  chord's `lock_requested`: if Ctrl/Alt (sym 65507/65513) arrive as
+  overlay keys, the session was already locked when Step 1 ran (setup
+  did not really unlock it). The `l` of that chord carries utf8 `\x0c`
+  (journald shows it as `[71B blob data]`); qdlocker drops control
+  characters (`controller.py` `handle_overlay_key`), so a prompt-len of
+  1 there means that filter regressed. With a genuine unlocked baseline,
+  `prompt-len > 0` means a key reached the locker across the lock
+  transition — investigate `qdwin_overlay_grab_start(role=2)`.

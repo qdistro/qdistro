@@ -17,14 +17,11 @@ source "$(dirname "$0")/qdlocker-helpers.sh"
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 
-# Drain a stale locked state from a prior scenario.
-case "$(qdlocker_ctrl status 2>/dev/null)" in
-    *locked=True*)
-        "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
-          >/dev/null
-        ;;
-esac
+# Drain a stale locked state (a prior scenario, or this scenario's own earlier
+# attempt whose idle timer fired) through the real keyboard unlock path.
+# Restarting qdlocker does NOT unlock: qdwin holds the lock fail-secure across
+# a locker restart and the fresh locker binds with initially_locked=1.
+qdlocker_drain_lock_state || { echo "ERROR: could not drain a stale lock"; exit 2; }
 
 # Shorten the idle threshold so the scenario doesn't wall-clock wait for the
 # default 5min (QDLOCKER_IDLE_MS=300000). The `idle.conf` name sorts AFTER the
@@ -45,28 +42,30 @@ EOF
 
 ### Step 1 — apply the 8s threshold and confirm baseline unlocked
 
-The 8s idle timer starts counting the moment the restarted qdlocker binds, and
-a keypress only RESETS it — it never unlocks. So the restart, the resetting
-keypress and the baseline read must all happen inside one 8s window. (8s,
-not 3s, leaves room for the restart and the vm-exec round-trips of this block
-— a 3s threshold let the timer fire during setup.)
+The 8s idle timer starts counting the moment the restarted qdlocker binds:
+qdwin runs ext-idle-notify in internal-idle mode (`weston.ini idle-time=0`;
+journal `ext-idle-notify idle_time=0 internal_mode=1`), which arms each
+notification's timer for the full timeout at creation
+(`qdwin_idle_notification_create`, qdwin.c). So the restart itself opens a
+fresh 8s window and the baseline read needs NO keypress — only that the
+restart and the read happen in ONE uninterrupted guest command.
 
-**Run the whole block below as a SINGLE command** (one tool call; a guest-side
-driver must do it in one uninterrupted phase) — do NOT restart qdlocker in one
-phase and read the baseline after an agent round-trip or a `*-go` handshake.
-In qci run full-20260926T153217Z the driver restarted qdlocker, then waited
-15 s (16 s on the retry) for the agent's `setup-go` before the baseline read;
-the idle timer had long fired, so 1.1 read `locked=True` on both attempts — a
-HARNESS artifact, not a product bug.
+**Run the block below as a SINGLE guest-side command** (one vm-exec, or one
+uninterrupted phase of a guest driver). There is NO host keyboard action in
+this step: do NOT put a `qci_host_step` / `*-go` handshake (or any agent
+round-trip) between the restart and the status read. In qci run
+full-20260930T212305Z the guest driver restarted qdlocker, then blocked on a
+host step for a Shift press; the agent's round-trip took >8s, the idle timer
+fired at restart+8.0s (qdlocker journal `idle threshold reached`) before the
+Shift (restart+9.6s), and 1.1 read `locked=True` on both attempts — a HARNESS
+artifact, not a product bug. (run full-20260926T153217Z failed the same way.)
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service'
-sleep 2
-# A lone Shift press (no text side-effect on the focused desktop) restarts the
-# 8s idle window at ~0 so it cannot fire during the baseline read below.
-qdwin_qmp_key shift down; sleep 0.05; qdwin_qmp_key shift up
-qdlocker_ctrl status   # baseline — must be locked=False
+"$QDWIN_VM_EXEC" "$VMNAME" '
+  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
+  sleep 2
+  printf "status\n" | runuser -u admin -- socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock'
+# ^ baseline — must be locked=False (read ~2 s into the 8 s window)
 qdwin_screenshot /tmp/qdlocker-03-step1-baseline.png
 ```
 
@@ -101,11 +100,15 @@ unlock for the next part of the test, send the password through
 qdlocker's overlay_key channel using the same pattern as scenario
 01 step 3+4.
 
-**Run the whole block below as a SINGLE command** — do NOT split the unlock,
-the activity keypress, and the status read across separate tool calls. The idle
-timer keeps ticking between calls, so a multi-second gap between the unlock and
-the activity keypress lets the 8s window re-fire and re-lock before the check,
-producing a spurious `locked=True` that is a HARNESS artifact, not a product bug.
+**Run the whole block below as a SINGLE HOST-side command** — do NOT split the
+unlock, the activity keypress, and the status read across separate tool calls.
+The idle timer keeps ticking between calls, so a multi-second gap between the
+unlock and the activity keypress lets the 8s window re-fire and re-lock before
+the check, producing a spurious `locked=True` that is a HARNESS artifact, not a
+product bug. With a guest-side driver this block is ONE host step whose host
+side performs the status read itself (via vm-exec) and records it; the guest
+must NOT do the 3.1 read after the step's `go` — the agent round-trip before
+the `go` can exceed 8s, exactly the Step 1 failure mode.
 
 ```bash
 qdlocker_unlock_with_password
