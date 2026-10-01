@@ -432,10 +432,16 @@ No GObject, no GTK, no `pyxdg`.
 
 ## Non-obvious gotchas
 
-- **Headings emit bold char runs.** The serializer must suppress `**…**`
-  for fragments whose font point size exceeds 11.5 (heuristic used to
-  distinguish heading-level bold from explicit `**` bold). Same logic
-  for table header cells.
+- **Headings emit bold char runs.** Authored markdown bold is `CHAR_STRONG`
+  (UserProperty+26). Heading default bold and table-header bold do not set
+  that property; the serializer emits `**` only for `CHAR_STRONG` in those
+  contexts. Inline code is `CHAR_CODE` only — rendered family is not syntax.
+  Do not infer heading vs body from `fontPointSize > 11.5`.
+- **Live document fonts.** Qt allows one `QSyntaxHighlighter` per document
+  and `QTextDocument.setUndoRedoEnabled(False)` clears the undo stack.
+  Inherited desktop fonts paint via `ContentPresentationHighlighter`
+  (merged into `SpellHighlighter` when spell is on). Do not restyle a live
+  editor by mutating char formats. Export/print use `legacy_content_style()`.
 - **Empty paragraphs.** `QTextCursor.insertTable` leaves an empty block
   before the table. The serializer skips any block whose inline
   rendering is empty rather than emitting a stray blank line.

@@ -98,6 +98,17 @@ def load_overrides(settings: QSettings | None = None) -> dict[str, Any]:
     return payload
 
 
+def load_use_desktop_document_fonts(settings: QSettings | None = None) -> bool:
+    settings = settings or default_settings()
+    return bool(settings.value("appearance/use_desktop_document_fonts", False, type=bool))
+
+
+def save_use_desktop_document_fonts(settings: QSettings, enabled: bool) -> None:
+    settings.setValue("appearance/version", APPEARANCE_VERSION)
+    settings.setValue("appearance/use_desktop_document_fonts", bool(enabled))
+    settings.sync()
+
+
 def save_overrides(settings: QSettings, appearance: dict[str, Any]) -> None:
     settings.setValue("appearance/version", int(appearance.get("version", APPEARANCE_VERSION)))
     family = appearance.get("ui_font_family")

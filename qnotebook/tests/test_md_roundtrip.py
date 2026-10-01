@@ -56,6 +56,10 @@ SAMPLES = [
     pytest.param("![[embed.png|200x100]]\n", id="obs-image-embed"),
     pytest.param("[[Page#heading]]\n", id="obs-heading-link"),
     pytest.param("[[Page#^blockid]]\n", id="obs-blockref-link"),
+    pytest.param("# Hello **world** and _it_\n", id="h1-inline-emphasis"),
+    pytest.param("## Title with `code`\n", id="h2-inline-code"),
+    pytest.param("# **whole heading**\n", id="h1-all-strong"),
+    pytest.param("| **a** | b |\n| --- | --- |\n| 1 | 2 |\n", id="table-header-strong"),
 ]
 
 
@@ -272,3 +276,80 @@ def test_task_list_roundtrip_without_plugin(qapp):
     out = _normalize(md)
     assert "[ ] todo" in out
     assert "[x] done" in out
+
+
+def test_heading_preserves_authored_emphasis(qapp):
+    md = "# Hello **world** and _it_\n"
+    out = _normalize(md)
+    assert "**world**" in out
+    assert "_it_" in out
+    assert out.startswith("# ")
+
+
+def test_large_body_bold_is_not_heading_heuristic(qapp):
+    """Point size > 11.5 must not strip authored bold on a paragraph."""
+    from PyQt6.QtGui import QFont, QTextCharFormat, QTextCursor, QTextDocument
+    from qnotebook.md_to_qdoc import CHAR_STRONG, markdown_to_qdoc
+    from qnotebook.qdoc_to_md import qdoc_to_markdown
+
+    doc = QTextDocument()
+    markdown_to_qdoc("**loud** body\n", doc)
+    cur = QTextCursor(doc)
+    cur.select(QTextCursor.SelectionType.Document)
+    fmt = QTextCharFormat()
+    fmt.setFontPointSize(20)
+    cur.mergeCharFormat(fmt)
+    out = qdoc_to_markdown(doc)
+    assert "**loud**" in out
+    assert "#" not in out.split("\n")[0]
+    # CHAR_STRONG survives the size restyle
+    cur.setPosition(1)
+    assert bool(cur.charFormat().property(CHAR_STRONG))
+    assert cur.charFormat().fontWeight() >= QFont.Weight.Bold
+
+
+def test_named_monospace_without_char_code_is_not_inline_code(qapp):
+    from PyQt6.QtGui import QTextCharFormat, QTextCursor, QTextDocument
+    from qnotebook.md_to_qdoc import markdown_to_qdoc
+    from qnotebook.qdoc_to_md import qdoc_to_markdown
+
+    doc = QTextDocument()
+    markdown_to_qdoc("plain run\n", doc)
+    cur = QTextCursor(doc)
+    cur.select(QTextCursor.SelectionType.Document)
+    fmt = QTextCharFormat()
+    fmt.setFontFamilies(["Consolas"])
+    cur.mergeCharFormat(fmt)
+    out = qdoc_to_markdown(doc)
+    assert "`" not in out
+    assert "plain run" in out
+
+
+def test_literal_monospace_without_char_code_is_not_inline_code(qapp):
+    from PyQt6.QtGui import QTextCharFormat, QTextCursor, QTextDocument
+    from qnotebook.md_to_qdoc import markdown_to_qdoc
+    from qnotebook.qdoc_to_md import qdoc_to_markdown
+
+    doc = QTextDocument()
+    markdown_to_qdoc("plain run\n", doc)
+    cur = QTextCursor(doc)
+    cur.select(QTextCursor.SelectionType.Document)
+    fmt = QTextCharFormat()
+    fmt.setFontFamilies(["monospace"])
+    cur.mergeCharFormat(fmt)
+    out = qdoc_to_markdown(doc)
+    assert "`" not in out
+    assert "plain run" in out
+
+
+def test_inline_code_sets_char_code(qapp):
+    from PyQt6.QtGui import QTextCursor, QTextDocument
+    from qnotebook.md_to_qdoc import CHAR_CODE, markdown_to_qdoc
+
+    doc = QTextDocument()
+    markdown_to_qdoc("see `x` here\n", doc)
+    text = doc.toPlainText()
+    idx = text.index("x")
+    cur = QTextCursor(doc)
+    cur.setPosition(idx + 1)
+    assert bool(cur.charFormat().property(CHAR_CODE))

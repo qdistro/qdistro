@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QMimeData, QStringListModel, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
+    QBrush,
+    QColor,
     QFont,
     QImage,
     QMouseEvent,
@@ -20,7 +22,9 @@ from .md_to_qdoc import (
     BLOCK_KIND,
     BLOCK_LEVEL,
     BLOCK_TASK_STATE,
+    CHAR_CODE,
     CHAR_IMAGE_ALT,
+    CHAR_STRONG,
     CHAR_WIKILINK,
     IMAGE_MAX_WIDTH,
     markdown_to_qdoc,
@@ -102,6 +106,11 @@ class MarkdownEditor(QTextEdit):
         self._setup_completer()
         from .live_reparse import LiveReparser
         self._live_reparser = LiveReparser(self, delay_ms=200)
+        from .content_style import ContentPresentationHighlighter
+
+        self._content_style = None
+        self._content_highlighter = ContentPresentationHighlighter(self.document())
+        self._spell_highlighter = None
 
     def set_live_reparse_enabled(self, on: bool) -> None:
         self._live_reparser.set_enabled(on)
@@ -143,10 +152,14 @@ class MarkdownEditor(QTextEdit):
     ) -> None:
         self._loading = True
         try:
+            from .content_style import resolve_content_style
+
             markdown_to_qdoc(
                 md_text or "", self.document(), base_path=base_path,
                 transclusion_resolver=transclusion_resolver,
+                content_style=resolve_content_style(),
             )
+            self.apply_content_presentation()
             self.document().setModified(False)
             self._current_path = page_path
             self._base_path = base_path
@@ -302,9 +315,18 @@ class MarkdownEditor(QTextEdit):
 
     def toggle_bold(self) -> None:
         cur = self.textCursor()
+        current = cur.charFormat()
+        heading = str(cur.blockFormat().property(BLOCK_KIND) or "") == "h"
+        explicit = bool(current.property(CHAR_STRONG))
         fmt = QTextCharFormat()
-        is_bold = cur.charFormat().fontWeight() >= QFont.Weight.Bold
-        fmt.setFontWeight(QFont.Weight.Normal if is_bold else QFont.Weight.Bold)
+        if heading:
+            on = not explicit
+            fmt.setProperty(CHAR_STRONG, on)
+            fmt.setFontWeight(QFont.Weight.Bold)
+        else:
+            on = not (explicit or current.fontWeight() >= QFont.Weight.Bold)
+            fmt.setProperty(CHAR_STRONG, on)
+            fmt.setFontWeight(QFont.Weight.Bold if on else QFont.Weight.Normal)
         self._apply_char_format(fmt)
 
     def toggle_italic(self) -> None:
@@ -322,25 +344,101 @@ class MarkdownEditor(QTextEdit):
     def toggle_code(self) -> None:
         cur = self.textCursor()
         fmt = QTextCharFormat()
-        current_is_mono = "monospace" in [s.lower() for s in (cur.charFormat().fontFamilies() or [])]
-        if current_is_mono:
-            fmt.setFontFamilies([self.font().family()])
-        else:
+        on = not bool(cur.charFormat().property(CHAR_CODE))
+        fmt.setProperty(CHAR_CODE, on)
+        if on:
             fmt.setFontFamilies(["monospace"])
+            fmt.setBackground(QColor("#f4f4f4"))
+        else:
+            fmt.setFontFamilies([self.font().family()])
+            fmt.setBackground(QBrush())
         self._apply_char_format(fmt)
 
     def set_heading(self, level: int) -> None:
-        """Set (or clear with level=0) the heading level for the current block."""
+        """Set (or clear with level=0) heading level for the cursor block or selection."""
         cur = self.textCursor()
-        block_fmt = cur.blockFormat()
-        if level == 0:
-            block_fmt.setHeadingLevel(0)
-            block_fmt.setProperty(BLOCK_KIND, "p")
+        doc = self.document()
+        now_heading = level > 0
+        if cur.hasSelection():
+            start = min(cur.selectionStart(), cur.selectionEnd())
+            end = max(cur.selectionStart(), cur.selectionEnd())
         else:
-            block_fmt.setHeadingLevel(level)
-            block_fmt.setProperty(BLOCK_KIND, "h")
-            block_fmt.setProperty(BLOCK_LEVEL, level)
-        cur.setBlockFormat(block_fmt)
+            start = end = cur.position()
+        start_block = doc.findBlock(start)
+        end_block = doc.findBlock(end)
+        if (
+            cur.hasSelection()
+            and end_block.isValid()
+            and end_block.position() == end
+            and end_block.blockNumber() > start_block.blockNumber()
+        ):
+            end_block = end_block.previous()
+        positions: list[int] = []
+        block = start_block
+        while block.isValid() and block.blockNumber() <= end_block.blockNumber():
+            positions.append(block.position())
+            block = block.next()
+
+        grouped = QTextCursor(doc)
+        grouped.beginEditBlock()
+        try:
+            for pos in positions:
+                block = doc.findBlock(pos)
+                if not block.isValid():
+                    continue
+                was_heading = str(block.blockFormat().property(BLOCK_KIND) or "") == "h"
+                block_fmt = block.blockFormat()
+                if level == 0:
+                    block_fmt.setHeadingLevel(0)
+                    block_fmt.setProperty(BLOCK_KIND, "p")
+                    block_fmt.setProperty(BLOCK_LEVEL, 0)
+                else:
+                    block_fmt.setHeadingLevel(level)
+                    block_fmt.setProperty(BLOCK_KIND, "h")
+                    block_fmt.setProperty(BLOCK_LEVEL, level)
+                block_cur = QTextCursor(block)
+                block_cur.setBlockFormat(block_fmt)
+                if was_heading != now_heading:
+                    self._sync_heading_default_weight(doc.findBlock(pos), heading=now_heading)
+        finally:
+            grouped.endEditBlock()
+
+    def _sync_heading_default_weight(self, block, heading: bool) -> None:
+        """Heading default is Bold without CHAR_STRONG; paragraphs must not inherit it."""
+        ranges: list[tuple[int, int, QTextCharFormat]] = []
+        it = block.begin()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid() and frag.length() > 0 and not frag.charFormat().isImageFormat():
+                fmt = QTextCharFormat(frag.charFormat())
+                strong = bool(fmt.property(CHAR_STRONG))
+                fmt.setFontWeight(
+                    QFont.Weight.Bold if heading or strong else QFont.Weight.Normal
+                )
+                ranges.append((frag.position(), frag.position() + frag.length(), fmt))
+            it += 1
+        cursor = QTextCursor(self.document())
+        for start, end, fmt in ranges:
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.setCharFormat(fmt)
+
+    def apply_content_presentation(self) -> None:
+        """Paint inherited document fonts without dirtying or touching undo."""
+        from .content_style import resolve_content_style
+
+        style = resolve_content_style()
+        self._content_style = style
+        self.setFont(style.body_qfont() if style.inherit_desktop else native_body_font())
+        spell = getattr(self, "_spell_highlighter", None)
+        if spell is not None:
+            set_style = getattr(spell, "set_content_style", None)
+            if callable(set_style):
+                set_style(style)
+            else:
+                spell.rehighlight()
+        elif getattr(self, "_content_highlighter", None) is not None:
+            self._content_highlighter.set_style(style)
 
     def _apply_char_format(self, fmt: QTextCharFormat) -> None:
         cur = self.textCursor()
@@ -552,6 +650,15 @@ class MarkdownEditor(QTextEdit):
         """Lets MainWindow tell the editor about the spell highlighter so the
         context menu can offer suggestions."""
         self._spell_highlighter = sh
+        if sh is not None:
+            if self._content_highlighter is not None:
+                self._content_highlighter.setDocument(None)
+            set_style = getattr(sh, "set_content_style", None)
+            if callable(set_style):
+                set_style(self._content_style)
+        elif self._content_highlighter is not None:
+            self._content_highlighter.setDocument(self.document())
+            self._content_highlighter.set_style(self._content_style)
 
     def heading_level_at_cursor(self) -> int:
         return int(self.textCursor().blockFormat().property(BLOCK_LEVEL) or 0)
