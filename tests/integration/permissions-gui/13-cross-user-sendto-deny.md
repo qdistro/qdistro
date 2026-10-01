@@ -161,7 +161,16 @@ $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 ```
 
-Then, as a separate command, the title wait:
+Then, as a separate command, the title wait. **It must start only AFTER
+the Ctrl+N keystroke has been sent** (`virsh send-key` returned). In the single
+guest driver the keystroke is a host step, so the driver runs
+`qci_host_step s2_deny_key` FIRST and the title-wait loop on the line after
+it; the host sends the keystroke and only then `mkdir`s that step's `.go`.
+Do not put the loop before the keystroke's host step: it then polls while the
+request is still pending, times out on `admin approvals (1 pending)` before the
+keystroke is even sent, and S2 fails with a deny that actually worked
+(permissions-gui/17, full-20260930T212305Z-2206698: the loop ran at
+22:44-22:45, the Deny click was confirmed at 22:47).
 
 ```bash
 # Settle before grading. The title is computed from the Pending model's row
