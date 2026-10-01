@@ -7,8 +7,9 @@
 # if every required check passes; otherwise exits 1 and the final line names
 # the FIRST missing prerequisite. Dev profile only (README O4): on any other
 # profile — or when the profile cannot be determined — it refuses (exit 2).
-# It never starts a sandbox: the podman checks use `create --rootfs /`
-# (no image, no runtime invocation) and remove the container again.
+# It never starts a sandbox: the podman checks use `podman create`
+# against an empty scratch image (no runtime invocation, nothing started)
+# and remove the container again.
 set -uo pipefail
 
 USER_NAME=admin
@@ -109,9 +110,19 @@ elif [ "${pv%%.*}" -ge 6 ] 2>/dev/null; then pass podman "$pv (>= 6)"
 else fail podman "$pv < 6"; fi
 
 if [ -n "$pv" ] && [ -x "$WRAPPER" ]; then
+    # An image-backed create, not `--rootfs /`: podman 6.0.2 silently DROPS
+    # `--security-opt label=disable` on a --rootfs container (observed in the
+    # dev VM, spike/logs/phase0-20261001/). The image is an empty scratch
+    # import, kept in the user's store for reuse; nothing is ever started.
+    img=localhost/tier3s-probe:empty
+    if ! as_user podman image exists "$img" 2>/dev/null; then
+        empty="$(mktemp -d)"; chmod 0755 "$empty"
+        tar -C "$empty" -cf - . | as_user podman import -q - "$img" >/dev/null 2>&1
+        rm -rf "$empty"
+    fi
     name="tier3s-probe-$$"
-    out="$(as_user podman --runtime "$WRAPPER" create --name "$name" --rootfs / \
-            --security-opt label=disable --network=none true 2>&1)"
+    out="$(as_user podman --runtime "$WRAPPER" create --name "$name" \
+            --security-opt label=disable --network=none "$img" /none 2>&1)"
     rc=$?
     if [ $rc -eq 0 ]; then
         rt="$(as_user podman inspect --format '{{.OCIRuntime}}' "$name" 2>&1)"
