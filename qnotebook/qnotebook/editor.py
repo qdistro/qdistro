@@ -355,22 +355,53 @@ class MarkdownEditor(QTextEdit):
         self._apply_char_format(fmt)
 
     def set_heading(self, level: int) -> None:
-        """Set (or clear with level=0) the heading level for the current block."""
+        """Set (or clear with level=0) heading level for the cursor block or selection."""
         cur = self.textCursor()
-        block_fmt = cur.blockFormat()
-        was_heading = str(block_fmt.property(BLOCK_KIND) or "") == "h"
-        if level == 0:
-            block_fmt.setHeadingLevel(0)
-            block_fmt.setProperty(BLOCK_KIND, "p")
-            block_fmt.setProperty(BLOCK_LEVEL, 0)
-        else:
-            block_fmt.setHeadingLevel(level)
-            block_fmt.setProperty(BLOCK_KIND, "h")
-            block_fmt.setProperty(BLOCK_LEVEL, level)
-        cur.setBlockFormat(block_fmt)
+        doc = self.document()
         now_heading = level > 0
-        if was_heading != now_heading:
-            self._sync_heading_default_weight(cur.block(), heading=now_heading)
+        if cur.hasSelection():
+            start = min(cur.selectionStart(), cur.selectionEnd())
+            end = max(cur.selectionStart(), cur.selectionEnd())
+        else:
+            start = end = cur.position()
+        start_block = doc.findBlock(start)
+        end_block = doc.findBlock(end)
+        if (
+            cur.hasSelection()
+            and end_block.isValid()
+            and end_block.position() == end
+            and end_block.blockNumber() > start_block.blockNumber()
+        ):
+            end_block = end_block.previous()
+        positions: list[int] = []
+        block = start_block
+        while block.isValid() and block.blockNumber() <= end_block.blockNumber():
+            positions.append(block.position())
+            block = block.next()
+
+        grouped = QTextCursor(doc)
+        grouped.beginEditBlock()
+        try:
+            for pos in positions:
+                block = doc.findBlock(pos)
+                if not block.isValid():
+                    continue
+                was_heading = str(block.blockFormat().property(BLOCK_KIND) or "") == "h"
+                block_fmt = block.blockFormat()
+                if level == 0:
+                    block_fmt.setHeadingLevel(0)
+                    block_fmt.setProperty(BLOCK_KIND, "p")
+                    block_fmt.setProperty(BLOCK_LEVEL, 0)
+                else:
+                    block_fmt.setHeadingLevel(level)
+                    block_fmt.setProperty(BLOCK_KIND, "h")
+                    block_fmt.setProperty(BLOCK_LEVEL, level)
+                block_cur = QTextCursor(block)
+                block_cur.setBlockFormat(block_fmt)
+                if was_heading != now_heading:
+                    self._sync_heading_default_weight(doc.findBlock(pos), heading=now_heading)
+        finally:
+            grouped.endEditBlock()
 
     def _sync_heading_default_weight(self, block, heading: bool) -> None:
         """Heading default is Bold without CHAR_STRONG; paragraphs must not inherit it."""

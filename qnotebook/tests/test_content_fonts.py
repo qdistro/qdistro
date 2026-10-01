@@ -115,6 +115,66 @@ def test_set_heading_on_plain_does_not_emit_strong(qapp, qtbot):
     assert ed.markdown() == "## hello\n"
 
 
+def test_clear_heading_undo_restores_heading(qapp, qtbot):
+    from PyQt6.QtGui import QFont
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("# hello\n")
+    ed.clear_dirty()
+    ed.set_heading(0)
+    assert ed.markdown() == "hello\n"
+    ed.undo()
+    assert ed.markdown() == "# hello\n"
+    assert not ed.is_dirty()
+    ed.redo()
+    assert ed.markdown() == "hello\n"
+    c = QTextCursor(ed.document())
+    c.setPosition(1)
+    assert not bool(c.charFormat().property(CHAR_STRONG))
+    assert c.charFormat().fontWeight() < QFont.Weight.Bold
+
+
+def test_clear_heading_undo_preserves_authored_strong(qapp, qtbot):
+    from PyQt6.QtGui import QFont
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("# Hello **world**\n")
+    ed.set_heading(0)
+    assert ed.markdown() == "Hello **world**\n"
+    text = ed.document().toPlainText()
+    idx = text.index("world")
+    c = QTextCursor(ed.document())
+    c.setPosition(idx + 1)
+    assert bool(c.charFormat().property(CHAR_STRONG))
+    assert c.charFormat().fontWeight() >= QFont.Weight.Bold
+    ed.undo()
+    assert ed.markdown() == "# Hello **world**\n"
+
+
+def test_clear_heading_selection_all_headings(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("# one\n\n# two\n")
+    cur = ed.textCursor()
+    cur.select(QTextCursor.SelectionType.Document)
+    ed.setTextCursor(cur)
+    ed.set_heading(0)
+    assert ed.markdown() == "one\n\ntwo\n"
+
+
+def test_clear_heading_mixed_selection(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("# one\n\npara\n")
+    cur = ed.textCursor()
+    cur.select(QTextCursor.SelectionType.Document)
+    ed.setTextCursor(cur)
+    ed.set_heading(0)
+    assert ed.markdown() == "one\n\npara\n"
+
+
 def test_desktop_opt_in_restyles_without_dirty_or_undo(qapp, tmp_path, tmp_notebook, qtbot, monkeypatch):
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
