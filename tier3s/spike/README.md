@@ -16,7 +16,7 @@ ran inside the VM as admin (uid 1000); the host only staged source, took
 |---|---|---|
 | 1 headless hello | `10-s1-headless-hello.log` (+ `s1-artifacts/`) | PASS with one required change: runsc's state root (`--runtime-flag=root=…`) |
 | 2 waypipe bridge | `20-…wayland-info`, `22-…weston-terminal`, `23-…foot` (+ `screens/`) | PASS: wayland-info, weston-terminal and foot render through the bridge and take keyboard input |
-| 3 cgroup placement | `30`–`34-s3-*.log` | PARTIAL by design: the root unit as written contains nothing; three shapes contain every process class, only one carries root-owned limits |
+| 3 cgroup placement | `30`–`37-s3-*.log` | PARTIAL: the root unit as written contains none of the sandbox; three shapes contain every process class, only one carries root-owned limits |
 
 ## Go / no-go
 
@@ -33,11 +33,13 @@ conditions are not optional:
 2. The owning cgroup must be a scope that admin can write: either a
    root-created scope delegated to admin with podman's cgroupfs manager, or
    `--cgroups=split` inside a delegated user scope. A root unit wrapping
-   `runuser … podman` contains none of the sandbox.
+   `runuser … podman` contains none of the sandbox. One-variable controls show
+   that admin-writability is the deciding input and `--cgroup-parent` is not
+   (`35`/`36`).
 3. The bridge's host-side waypipe client must run under
-   `qdistro-secctx-exec`. Through the plain dev-lane client, the sandboxed app
-   sees qdwin's privileged globals (locker, shell, virtual keyboard, layer
-   shell).
+   `qdistro-secctx-exec`. Through the plain dev-lane client, the sandboxed
+   app's registry advertises qdwin's privileged globals (locker, shell,
+   virtual keyboard, layer shell). Binds were not tested.
 
 ## Scripts
 
@@ -51,4 +53,4 @@ conditions are not optional:
 | `smoke.json` / `make-smoke-json.py` | — | tier-2 `weston-terminal.json` + one `syslog` ALLOW entry; `--check` proves the file equals a fresh render |
 | `s1-headless-hello.sh` | VM | Step 1 |
 | `s2-waypipe.sh` | VM | Step 2 (`info`, `start`, `status`, `stop`) |
-| `s3-cgroups.sh` | VM | Step 3 shapes `root-unit`, `parent-root`, `scope-plain`, `parent-user`, `split` |
+| `s3-cgroups.sh` | VM | Step 3 shapes `root-unit`, `parent-root` (+ one-variable controls `deleg-noparent`, `nodeleg-parent`), `scope-plain`, `parent-user`, `split` |

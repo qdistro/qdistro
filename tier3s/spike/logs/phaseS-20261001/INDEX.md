@@ -5,7 +5,7 @@ Each one starts with the exact command, ends with `### exit=<rc>`, and every
 command in it ran inside the VM. Logs 00–40 come from one run of
 `tier3s/spike/run-phaseS.sh` at commit `8270755f2`. `00-stage-src.log` shows
 the guest sha256 of every spike script. Log 34 was added afterwards, at
-commit `daa9c5e71` (its own sha256 line shows `s3-cgroups.sh`).
+commit `daa9c5e71`, and logs 35–37 at `ce77d3f6e` (sol r1). Each one's own sha256 line shows `s3-cgroups.sh`.
 Screenshots are `virsh` captures (`vm-gui screenshot-fresh`), graded by
 opening the PNG, not by OCR.
 
@@ -29,6 +29,9 @@ opening the PNG, not by OCR.
 | 34-s3-scope-plain.log | control for (a): the same root scope without delegation and without `--cgroup-parent` gives **0/7**, because podman moves itself to `user@1000…/podman-<pid>.scope`. So (a) works because admin can write the scope, not because of the parent flag | finding |
 | 32-s3-parent-user.log | (a′) systemd manager `--cgroup-parent=t3sspike.slice` (user manager): **7/7**, but only `pids` is delegated to user@1000 and no limit was set. The printed argv omits the `-d` the script appended before running it (print order fixed after the run) | contains all |
 | 33-s3-split.log | (b) `systemd-run --user --scope -p Delegate=yes` → `podman run --cgroups=split`: **7/7** in `<scope>/runtime` (podman CLI included); controllers: pids only | contains all |
+| 35-s3-deleg-noparent.log | one-variable control (sol r1): (a) minus `--cgroup-parent` only gives **7/7** | finding |
+| 36-s3-nodeleg-parent.log | one-variable control (sol r1): (a) minus the chown only (scope root-owned, flag kept) gives **0/7**; podman CLI and conmon go to `user@1000…/podman-<pid>.scope` | finding |
+| 37-s3-parent-root-rerun.log | (a) re-run with the toggled script that produced 35/36: **7/7**, the same as 31 | contains all |
 | 40-final-state.log | after the run: no containers, no runsc/conmon/waypipe processes, no `t3s-*` units | PASS |
 
 ## attempts/ (kept because they record a finding)
@@ -37,6 +40,7 @@ opening the PNG, not by OCR.
 |---|---|
 | 10a-s1-attempt1-runsc-root-denied.log | first step-1 run: `--rm` + exact 03 command fails on `/var/run/runsc`; diagnosis in `runsc/config/flags.go` `DefaultRootDir` (pinned tag) |
 | 23a-s2-foot-attempt1-image-locale.log, 24a-foot-attempt1-image-locale.png | first foot run: the window rendered through the bridge but foot printed `invalid locale` (the image lacked `glibc-locale-base`); the same image under runc lacks a UTF-8 locale too, so this is an image defect, not gVisor; fixed in `stage-image.sh` seeds |
+| 32a-s3-parent-user-dashed-slice-trial.log | trial run (scratch, before the final run) with `--cgroup-parent=t3s-s3.slice`: conmon landed in `…/t3s.slice/t3s-s3.slice/…` (systemd dash nesting). Its VERDICT line reads 0/7 only because the script's target guessed the flat path; the per-process cgroups show all 7 in the nested slice. The final 32 uses `t3sspike.slice` |
 | 01-stage-image-run0-foot-rpm-install.log | the first image stage, the only run that actually installed the six foot RPMs into the VM (later runs say "already installed") |
 
 Superseded intermediate runs (identical in substance) were dropped from the
