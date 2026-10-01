@@ -41,7 +41,7 @@ install -Dm0644 /usr/share/pkgconfig/wayland-protocols.pc \
 # snapshot and install the packages (not the toolchain) in the guest.
 install -d /out/stage/usr/share/qdistro-build/selinux \
     /usr/share/selinux/devel/include/contrib
-for policy in pwd broker session_manager tier1; do
+for policy in pwd broker session_manager tier1 presentation; do
     policy_dir=/src/selinux/$policy
     for interface in "$policy_dir"/*.if; do
         [ -f "$interface" ] || continue
