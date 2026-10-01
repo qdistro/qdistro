@@ -121,21 +121,20 @@ def test_overlay_key_printable_appends(qapp, auth):
 @pytest.mark.parametrize(
     "sym,utf8",
     [
-        (0x006C, "\x0c"),  # Ctrl+L (the Ctrl+Alt+L lock chord on a locked screen)
+        (0x006C, "\x0c"),  # Ctrl+L
         (0x0063, "\x03"),  # Ctrl+C
-        (0x0040, "\x00"),  # Ctrl+@
-        (0xFFFF, "\x7f"),  # Delete
-        (0x0061, "a\x01"),  # mixed: any control code rejects the whole event
     ],
 )
-def test_overlay_key_control_chars_ignored(qapp, auth, sym, utf8):
-    """A Ctrl chord resolves to a C0 control code in qdwin's xkb_state. It must
-    not land in the password buffer: an invisible char there makes the next
-    correctly typed password fail PAM."""
+def test_overlay_key_control_chars_still_append(qapp, auth, sym, utf8):
+    """The controller accepts whatever text qdwin forwards, control codes
+    included: an existing password containing one must stay enterable. The
+    repeated lock chord (Ctrl+Alt+L on an already locked screen) is consumed
+    in qdwin's overlay grab instead (qdwin_overlay_key_disposition), so it
+    never reaches here."""
     ctrl = LockController(auth)
     ctrl._current_text = "ab"
     ctrl.handle_overlay_key(sym, utf8)
-    assert ctrl.currentText == "ab"
+    assert ctrl.currentText == "ab" + utf8
 
 
 def test_overlay_key_non_ascii_printable_appends(qapp, auth):

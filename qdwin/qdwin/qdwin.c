@@ -1014,6 +1014,8 @@ struct qdwin {
 	uint32_t overlay_grab_role;
 	/* The manual-lock chord can finish after the locker grab starts. */
 	uint32_t lock_hotkey_pending_release;
+	/* Count of forwarded overlay keys, logged instead of their content. */
+	uint32_t overlay_key_seq;
 
 	/* Opaque black curtain covering the whole output. Ensures pixels
 	 * are overwritten every frame — without this, the pixman renderer
@@ -7207,15 +7209,29 @@ qdwin_overlay_grab_key(struct weston_keyboard_grab *grab,
 	uint32_t key = ke->key;
 	uint32_t state_w = ke->key_state;
 	struct qdwin *qdwin = wl_container_of(grab, qdwin, overlay_grab);
-	if (qdwin->overlay_grab_role == 2 &&
-	    qdwin->lock_hotkey_pending_release == key) {
-		if (state_w == WL_KEYBOARD_KEY_STATE_RELEASED)
-			qdwin->lock_hotkey_pending_release = 0;
+	struct weston_keyboard *kb = grab->keyboard;
+	bool pressed = state_w == WL_KEYBOARD_KEY_STATE_PRESSED;
+	/* One lock-chord guard for the locker grab (lock_hotkey_pending_release):
+	 * swallow the still-held key of the chord that just locked (press
+	 * repeat + release), and a fresh Ctrl+Alt+L on an already locked
+	 * screen — weston runs no key bindings under this grab, so that chord
+	 * would otherwise reach the locker as Ctrl+L ("\x0c") and land in the
+	 * password field. Same match as the binding (qdwin_lock_hotkey_matches);
+	 * a plain Ctrl+L still reaches the locker. */
+	uint32_t pending_before = qdwin->lock_hotkey_pending_release;
+	if (qdwin_overlay_key_disposition(
+		    qdwin->overlay_grab_role, key, pressed,
+		    (kb && kb->seat) ? (uint32_t)kb->seat->modifier_state : 0u,
+		    &qdwin->lock_hotkey_pending_release) ==
+	    QDWIN_LOGIC_OVERLAY_KEY_CONSUME) {
+		if (pressed && pending_before != key)
+			weston_log("qdwin: overlay_key role=%u lock-hotkey "
+				   "consumed (already locked)\n",
+				   qdwin->overlay_grab_role);
 		return;
 	}
-	if (state_w != WL_KEYBOARD_KEY_STATE_PRESSED)
+	if (!pressed)
 		return;     /* releases absorbed; v17 forwards press only */
-	struct weston_keyboard *kb = grab->keyboard;
 	if (!kb || !kb->xkb_state.state)
 		return;
 	/* keycode in evdev space; xkb adds the 8 X11 offset. */
@@ -7223,8 +7239,14 @@ qdwin_overlay_grab_key(struct weston_keyboard_grab *grab,
 	xkb_keysym_t sym = xkb_state_key_get_one_sym(kb->xkb_state.state, kc);
 	char utf8[16] = {0};
 	xkb_state_key_get_utf8(kb->xkb_state.state, kc, utf8, sizeof utf8);
-	weston_log("qdwin: overlay_key role=%u sym=%u utf8=\"%s\" state=PRESSED\n",
-		   qdwin->overlay_grab_role, (uint32_t)sym, utf8);
+	/* Never log key content: role 2 is the lock-screen password and roles
+	 * 0/1 carry launcher/switcher text. Log only the role, the routing
+	 * target and a sequence number (enough to prove routing/counts). */
+	qdwin->overlay_key_seq++;
+	weston_log("qdwin: overlay_key role=%u seq=%u to=%s\n",
+		   qdwin->overlay_grab_role, qdwin->overlay_key_seq,
+		   (qdwin->overlay_grab_role == 2 && qdwin->locker_resource)
+			   ? "locker" : "shell");
 	/* Security boundary: locker keystrokes go to the locker process,
 	 * NOT the shell. The shell never observes the password buffer.
 	 * See qdlocker/tests/gui/05-keystroke-isolation.md. The fallback
@@ -24049,9 +24071,16 @@ wet_shell_init(struct weston_compositor *ec, int *argc, char *argv[])
 					       qdwin_on_alt_released, qdwin);
 	/* §6.6 S5 full: Ctrl+Alt+L → lock_requested event.
 	 * Shell decides whether to enter lock; compositor only relays. */
+	_Static_assert(QDWIN_LOGIC_KEY_L == KEY_L,
+		       "lock hotkey key drift vs qdwin-logic.h");
+	_Static_assert(QDWIN_LOGIC_MOD_CTRL == MODIFIER_CTRL &&
+		       QDWIN_LOGIC_MOD_ALT == MODIFIER_ALT,
+		       "lock hotkey modifier drift vs qdwin-logic.h");
+	/* The overlay grab consumes this same chord while the locker owns
+	 * the keyboard (qdwin_overlay_key_disposition). */
 	weston_compositor_add_key_binding(
-		ec, KEY_L, (enum weston_keyboard_modifier)
-		(MODIFIER_CTRL | MODIFIER_ALT),
+		ec, QDWIN_LOGIC_LOCK_HOTKEY_KEY, (enum weston_keyboard_modifier)
+		QDWIN_LOGIC_LOCK_HOTKEY_MODS,
 		qdwin_on_lock_key, qdwin);
 
 	qdwin->idle_signal_listener.notify = qdwin_on_idle_signal;

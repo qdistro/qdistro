@@ -319,6 +319,49 @@ uint32_t qdwin_lock_hotkey_pending_for_grab(uint32_t pending,
 					    const uint32_t *held_keys,
 					    size_t held_count);
 
+/* ------------------------------------------------------------------
+ * Lock hotkey (Ctrl+Alt+L) and the locker overlay grab.
+ *
+ * The values mirror linux/input-event-codes.h KEY_L and libweston's
+ * enum weston_keyboard_modifier (MODIFIER_CTRL = 1<<0, MODIFIER_ALT =
+ * 1<<1); qdwin.c static-asserts both and registers the weston key
+ * binding from these same constants, so the binding and the overlay
+ * grab use one definition of the chord.
+ * ------------------------------------------------------------------ */
+#define QDWIN_LOGIC_KEY_L               38u
+#define QDWIN_LOGIC_MOD_CTRL            (1u << 0)
+#define QDWIN_LOGIC_MOD_ALT             (1u << 1)
+#define QDWIN_LOGIC_LOCK_HOTKEY_KEY     QDWIN_LOGIC_KEY_L
+#define QDWIN_LOGIC_LOCK_HOTKEY_MODS    (QDWIN_LOGIC_MOD_CTRL | QDWIN_LOGIC_MOD_ALT)
+#define QDWIN_LOGIC_OVERLAY_ROLE_LOCKER 2u
+
+/* Same match weston_compositor_run_key_binding applies to the lock
+ * binding: a PRESS of the key with the seat's modifier_state EXACTLY
+ * equal to the binding's modifiers (Ctrl+Alt+Shift+L does not match). */
+bool qdwin_lock_hotkey_matches(uint32_t key, bool pressed,
+			       uint32_t modifier_state);
+
+/* Disposition of one key event inside the overlay grab. */
+#define QDWIN_LOGIC_OVERLAY_KEY_FORWARD 0u
+#define QDWIN_LOGIC_OVERLAY_KEY_CONSUME 1u
+
+/* The single lock-chord guard of the locker overlay grab (role 2), on
+ * qdwin->lock_hotkey_pending_release (*pending; 0 = none):
+ *  - *pending == key: the key of a lock chord is still down (set by
+ *    qdwin_on_lock_key when the binding fired just before the grab
+ *    started, kept by qdwin_lock_hotkey_pending_for_grab only while
+ *    held, or set below). Its press (repeat) and release are CONSUMED;
+ *    the release clears the latch.
+ *  - a fresh Ctrl+Alt+L press (qdwin_lock_hotkey_matches): while the
+ *    locker owns the keyboard weston runs no key bindings, so on an
+ *    already locked screen the chord would reach the locker as `l` with
+ *    Control applied (utf8 "\x0c") and land in the password field.
+ *    CONSUMED, and *pending = key so its release is consumed too.
+ * Everything else (a plain Ctrl+L, every key for roles 0/1) is FORWARD. */
+uint32_t qdwin_overlay_key_disposition(uint32_t role, uint32_t key,
+				       bool pressed, uint32_t modifier_state,
+				       uint32_t *pending);
+
 #ifdef __cplusplus
 }
 #endif

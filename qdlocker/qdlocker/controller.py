@@ -8,7 +8,6 @@ without reimplementing the controller flow.
 from __future__ import annotations
 
 import logging
-import unicodedata
 
 from PyQt6.QtCore import QObject, Qt, pyqtProperty, pyqtSignal, pyqtSlot
 
@@ -319,13 +318,5 @@ class LockController(QObject):
             return
         if sym == XKB_Tab:
             return
-        # Drop control characters. qdwin resolves utf8 from its own xkb_state
-        # with the Control modifier applied, so a Ctrl chord arrives as a C0
-        # control code: Ctrl+Alt+L pressed on an ALREADY locked screen (the
-        # binding does not fire while the locker's overlay grab is active)
-        # delivers "\x0c". Appending it put an invisible char in the field, so
-        # the user's next correctly typed password failed PAM (and counted
-        # toward faillock). No password is typed as control codes; the named
-        # editing keys (Return/BackSpace/Escape) are handled by keysym above.
-        if utf8 and not any(unicodedata.category(c) == "Cc" for c in utf8):
+        if utf8:
             self.currentText = self._current_text + utf8
