@@ -10,7 +10,7 @@ ADMIN_RT=/run/user/$ADMIN_UID
 WRAPPER=/usr/libexec/qdistro/tier3s-runsc
 RUNSC=/usr/libexec/qdistro/runsc/runsc
 IMG=localhost/tier3s-spike/tw-terminals:20260929
-SPIKE_SRC=$(cd "$(dirname "$0")" && pwd)
+SPIKE_SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Work dir readable by admin (/root is 0700 in the VM, so the seccomp JSON
 # and anything podman-as-admin reads is copied here).
 WORK=/var/tmp/tier3s-spike

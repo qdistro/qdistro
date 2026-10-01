@@ -10,7 +10,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 vmexec=$here/../../scripts/vm/vm-exec
 mkdir -p "$(dirname "$log")"
 {
-    printf '### host %s: vm-exec %s %q\n' "$(date -u +%FT%TZ)" "$vm" "$cmd"
+    printf '### host %s: vm-exec %s <<CMD\n%s\nCMD\n' "$(date -u +%FT%TZ)" "$vm" "$cmd"
     timeout "${VMLOG_TIMEOUT:-900}" "$vmexec" "$vm" "$cmd" 2>&1
     rc=$?
     printf '### exit=%s\n' "$rc"

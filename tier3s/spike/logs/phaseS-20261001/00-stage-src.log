@@ -1,0 +1,18 @@
+### host 2026-10-01T20:40:04Z: vm-exec tier3s-261001-221428-2070491-12685 set\ -e\;\ mkdir\ -p\ /root/qdistro-src\ /var/tmp/tier3s-rpms\;\ cd\ /root/qdistro-src\ \&\&\ curl\ -fsS\ http://10.0.2.2:18931/src.tar\ \|\ tar\ -xf\ -\ \&\&\ sha256sum\ tier3s/spike/\*.sh\ tier3s/spike/smoke.json\ tier3s/tier3s-runsc\ tier3s/RUNSC_RELEASE\;\ cd\ /var/tmp/tier3s-rpms\ \&\&\ rm\ -f\ \*.rpm\ SHA256SUMS\ \&\&\ curl\ -fsS\ -O\ http://10.0.2.2:18931/rpms/SHA256SUMS\ \&\&\ for\ f\ in\ \$\(awk\ \"\{print\ \\\$2\}\"\ SHA256SUMS\)\;\ do\ curl\ -fsS\ -O\ http://10.0.2.2:18931/rpms/\$f\;\ done\;\ sha256sum\ -c\ SHA256SUMS\;\ cat\ /etc/qdistro/profile\;\ /usr/libexec/qdistro/runsc/runsc\ --version
+[vm-exec] guest identity pinned (pid 24782 start 151881)
+f94cc7fd268eba1b8d34a955ec07837e831cf058dfb53991474a1693f6883fc0  tier3s/spike/lib.sh
+04039dff305e7d26c019fd1b8de8dfb994a2a96ea72fe8da67d13c1def5d690f  tier3s/spike/stage-image.sh
+f010cf96c8ded53297191eb3b82d2a4464736432994d1a2d5fb49dc5a8a48b4d  tier3s/spike/vmlog.sh
+c00d6cfdf28d40f0f6ff1fd8453cbb3de460f6913f75e5171b0ae4dbcb9c2bd2  tier3s/spike/smoke.json
+eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
+b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
+foot-1.28.0-1.1.x86_64.rpm: OK
+libfcft4-3.3.3-1.5.x86_64.rpm: OK
+libnanosvg0-2022.12.22-1.10.x86_64.rpm: OK
+libnanosvgrast0-2022.12.22-1.10.x86_64.rpm: OK
+libutf8proc3-2.12.0-1.1.x86_64.rpm: OK
+terminfo-6.6.20260919-113.1.x86_64.rpm: OK
+QDISTRO_PROFILE=dev
+runsc version release-20260928.0
+spec: 1.2.1
+### exit=0
