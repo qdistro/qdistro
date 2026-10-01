@@ -53,8 +53,18 @@ qdwin_apps_screenshot /tmp/01-step2-max.png
 
 **Assert (2.1):** screenshot shows Firefox filling the entire 1280×800
 output. No black margin on any edge. Tabs/URL bar at the very top.
+Judge the screen area only: the frame's `.raw` sidecar gives the raw
+screen size (1280×800), and the thin black right/bottom margin beyond
+it (1–3 px, unique per frame) is the harness's view padding, not a gap
+in the window. A real failure leaves a black band INSIDE the 1280×800
+area (the step-1 floating window leaves ~25 px bands on several edges).
 **Assert (2.2):** bystander log shows `cmd max handle=<N>` followed by
 `toplevel_state handle=<N> state=0x1` (bit 0 = maximised).
+**Assert (2.3):** after that `cmd max`, the bystander log's last
+`toplevel_geometry handle=<N>` line reads `x=0 y=0 w=1280 h=800` — the
+compositor's own record that the maximised window covers the whole
+output. It must agree with 2.1: a full-output geometry with a visibly
+short frame (or the reverse) is a FAIL, cited with both.
 
 ### Step 3 — restore via shell
 

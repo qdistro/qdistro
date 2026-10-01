@@ -55,7 +55,12 @@ Procedure:
    same position in an image of the same size, something it already showed you
    in this session. So every image the harness writes gets a size of its own (a
    thin black right/bottom margin; the raw screen size is in the frame's `.raw`
-   sidecar), and a capture you open for the first time is seen correctly. For
+   sidecar), and a capture you open for the first time is seen correctly.
+   **THE VIEW PAD IS NOT THE SCREEN.** That right/bottom margin (1-3 px, its
+   size is the third field of the `.raw` sidecar) lies OUTSIDE the raw screen
+   area: never report it as a black strip, gap or margin, and never let it
+   fail a "fills the screen" / "no black margin on any edge" assertion. Judge
+   edges at the raw screen size; only black INSIDE that area counts. For
    ANY second look, and for any image the harness did not just hand you (a crop
    you made, a copy), run `vm-gui "$VMNAME" view-copy <image>` (for a crop add
    `--source <capture> --crop WxH+X+Y`) and open the path it prints; never open

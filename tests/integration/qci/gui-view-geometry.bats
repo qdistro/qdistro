@@ -839,6 +839,11 @@ run_scen() {
         grep -q 'same screen pixels' "$f" || grep -q 'SAME SCREEN PIXELS' "$f"
         grep -q '\.post\.png' "$f"
         grep -q 'cp F F.raw' "$f"
+        # apps/01 follow-up: the view pad lies outside the screen area
+        grep -q 'THE VIEW PAD IS NOT' "$f"
+        grep -q 'only black INSIDE that area' "$f"
+        # the generated prompt embeds the .md, so pin gui.sh's own copy too
+        [ "$f" != "$p" ] || grep -q 'graded "a substantial black strip"' "$f"
         # pg/05 follow-up: freshness is not the UI having reacted
         grep -q 'A FRESH FRAME IS NOT A REACTED UI' "$f"
         grep -q 'proves only' "$f"
