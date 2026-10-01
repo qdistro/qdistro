@@ -4,6 +4,7 @@
 #   vmlog.sh <logfile> <vm> '<command>'
 # The log starts with the exact command, then vm-exec's capture (its stderr
 # rides inside the capture), then `### exit=<rc>`. Appends if the log exists.
+# Exits with the VM command's status (sol r1: callers must see failures).
 set -u
 log=$1 vm=$2 cmd=$3
 here=$(cd "$(dirname "$0")" && pwd)
@@ -16,4 +17,4 @@ mkdir -p "$(dirname "$log")"
     printf '### exit=%s\n' "$rc"
 } >> "$log"
 tail -n "${VMLOG_TAIL:-40}" "$log"
-exit 0
+exit "$rc"

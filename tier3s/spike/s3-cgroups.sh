@@ -10,6 +10,8 @@
 #                 --cgroup-parent=<that scope's cgroup>
 #     parent-user (a') systemd cgroup manager: --cgroup-parent=t3sspike.slice (user manager)
 #                 (rootless podman + systemd manager only accepts a slice)
+#     deleg-noparent / nodeleg-parent  one-variable controls for (a): drop
+#                 only --cgroup-parent / only the chown to admin
 #     scope-plain control for (a): the same root scope with MemoryMax/TasksMax
 #                 but NO Delegate, NO chown and NO --cgroup-parent; cgroupfs
 #                 manager. Shows whether (a)'s containment comes from the
@@ -22,7 +24,7 @@
 # (conmon, runsc gofer, gvisor_sentry, stubs, fd-parking) as INSIDE/OUTSIDE.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-shape=${1:?usage: s3-cgroups.sh <root-unit|parent-root|scope-plain|parent-user|split>}
+shape=${1:?usage: s3-cgroups.sh <root-unit|parent-root|deleg-noparent|nodeleg-parent|scope-plain|parent-user|split>}
 NAME=t3s-s3-$shape
 U=t3s-s3-$shape
 OUT=$WORK/s3-$shape; rm -rf "$OUT"; mkdir -p "$OUT"; chown $ADMIN: "$OUT"
@@ -47,7 +49,15 @@ launch() {
         -p StandardOutput=file:"$OUT/run.log" -p StandardError=file:"$OUT/run.log" -- \
         runuser -u $ADMIN -- "${ENVA[@]}" "${ARGV[@]}"
     TARGET=/system.slice/$U.service ;;
-  parent-root)
+  parent-root|deleg-noparent|nodeleg-parent)
+    # parent-root = delegated (chowned) scope + --cgroup-parent (both on).
+    # One-variable controls (sol r1): deleg-noparent drops ONLY the
+    # --cgroup-parent flag; nodeleg-parent drops ONLY the chown (admin can no
+    # longer write the scope). Everything else (Delegate=yes, limits, the
+    # sandbox child, cgroupfs manager) is identical.
+    PARENT=1; CHOWN=1
+    [ $shape = deleg-noparent ] && PARENT=0
+    [ $shape = nodeleg-parent ] && CHOWN=0
     # Root creates the scope (MemoryMax/TasksMax/Delegate) and hands its cgroup
     # to admin the way systemd delegation does (chown dir + procs/subtree files);
     # the scope's first process then drops to admin and runs podman with the
@@ -55,16 +65,17 @@ launch() {
     # itself holds runuser/podman, and cgroup v2 forbids controllers on a
     # cgroup with member processes).
     t3s_global; EXTRA_GLOBAL=(--cgroup-manager=cgroupfs)
-    T3S_RUNOPTS+=(--cgroup-parent=/system.slice/$U.scope/sandbox)
+    [ $PARENT = 1 ] && T3S_RUNOPTS+=(--cgroup-parent=/system.slice/$U.scope/sandbox)
     t3s_podman_argv
     ARGV=("${T3S_ARGV[@]:0:1}" "${EXTRA_GLOBAL[@]}" "${T3S_ARGV[@]:1}" "$IMG" sleep 45)
-    printf 'scope argv: systemd-run --scope --unit=%s -p Delegate=yes -p MemoryMax=1G -p TasksMax=512 -- sh -c <chown own cgroup to admin; mkdir sandbox> runuser -u admin -- env -i … ' "$U"; printf ' %q' "${ARGV[@]}"; echo
+    printf 'scope argv: systemd-run --scope --unit=%s -p Delegate=yes -p MemoryMax=1G -p TasksMax=512 -- sh -c <%s; mkdir sandbox> runuser -u admin -- env -i … ' "$U" "$([ $CHOWN = 1 ] && echo 'chown own cgroup to admin' || echo 'NO chown')"; printf ' %q' "${ARGV[@]}"; echo
+    echo "toggles: --cgroup-parent=$PARENT chown-to-admin=$CHOWN"
     cat > "$OUT/inner.sh" <<IN
 #!/bin/sh
 cg=/sys/fs/cgroup\$(sed 's/^0:://' /proc/self/cgroup)
 mkdir -p "\$cg/sandbox"
-chown $ADMIN: "\$cg" "\$cg/cgroup.procs" "\$cg/cgroup.subtree_control" "\$cg/cgroup.threads" "\$cg/sandbox" "\$cg/sandbox/cgroup.procs" "\$cg/sandbox/cgroup.subtree_control" "\$cg/sandbox/cgroup.threads"
-echo "scope cgroup: \$cg controllers=\$(cat \$cg/cgroup.controllers)"
+[ $CHOWN = 1 ] && chown $ADMIN: "\$cg" "\$cg/cgroup.procs" "\$cg/cgroup.subtree_control" "\$cg/cgroup.threads" "\$cg/sandbox" "\$cg/sandbox/cgroup.procs" "\$cg/sandbox/cgroup.subtree_control" "\$cg/sandbox/cgroup.threads"
+echo "scope cgroup: \$cg controllers=\$(cat \$cg/cgroup.controllers) owner=\$(stat -c %U \$cg) sandbox-owner=\$(stat -c %U \$cg/sandbox)"
 exec "\$@"
 IN
     chmod 0755 "$OUT/inner.sh"
