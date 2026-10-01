@@ -253,19 +253,30 @@ else
         || fail "second publish reused generation $GEN_A"
 fi
 
+# Prefer an explicit work account; otherwise any unprivileged login
+# (uid >= 1001, e.g. the golden's tier-3 user1) or nobody.
+WORK_USER=""
 if getent passwd work >/dev/null; then
-    if runuser -u work -- touch "$DIR/qdistro-write-probe" 2>/dev/null; then
+    WORK_USER=work
+else
+    WORK_USER=$(getent passwd | awk -F: '$3 >= 1001 && $1 != "admin" { print $1; exit }')
+fi
+if [ -z "$WORK_USER" ] && getent passwd nobody >/dev/null; then
+    WORK_USER=nobody
+fi
+if [ -n "$WORK_USER" ]; then
+    if runuser -u "$WORK_USER" -- touch "$DIR/qdistro-write-probe" 2>/dev/null; then
         fail "work user could create a file in the presentation directory"
         rm -f "$DIR/qdistro-write-probe"
     else
         pass "work user cannot create files in the presentation directory"
     fi
-    if runuser -u work -- rm -f "$FILE" 2>/dev/null; then
+    if runuser -u "$WORK_USER" -- rm -f "$FILE" 2>/dev/null; then
         fail "work user could unlink current.json"
     else
         pass "work user cannot unlink current.json"
     fi
-    if runuser -u work -- mv "$FILE" "$DIR/renamed.json" 2>/dev/null; then
+    if runuser -u "$WORK_USER" -- mv "$FILE" "$DIR/renamed.json" 2>/dev/null; then
         fail "work user could rename current.json"
         mv -f "$DIR/renamed.json" "$FILE" 2>/dev/null || true
     else
