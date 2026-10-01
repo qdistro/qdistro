@@ -108,11 +108,12 @@ def test_version_skew_fails_and_keeps_old_install(tmp_path):
     b, tar = make_bundle(tmp_path)
     pin = write_pin(tmp_path, b, tar)
     assert run(tmp_path, pin)[0].returncode == 0
+    good = pin.read_bytes()
     pin2 = write_pin(tmp_path, b, tar, version_string="runsc version release-other")
     r, root = run(tmp_path, pin2)
     assert r.returncode != 0 and "release skew" in r.stderr
     assert (root / "usr/libexec/qdistro/runsc/runsc").exists()
-    assert (root / "etc/qdistro/runsc-release").read_bytes() == pin.read_bytes()
+    assert (root / "etc/qdistro/runsc-release").read_bytes() == good
 
 
 def test_offline_without_cache_fails(tmp_path):
