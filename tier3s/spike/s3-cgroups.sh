@@ -8,7 +8,7 @@
 #     parent-root (a) a transient scope created and owned by the root unit,
 #                 delegated to admin; podman --cgroup-manager=cgroupfs
 #                 --cgroup-parent=<that scope's cgroup>
-#     parent-user (a') systemd cgroup manager: --cgroup-parent=<a user slice>
+#     parent-user (a') systemd cgroup manager: --cgroup-parent=t3sspike.slice (user manager)
 #                 (rootless podman + systemd manager only accepts a slice)
 #     split       (b) runuser -u admin -> systemd-run --user --scope
 #                 -p Delegate=yes -> podman run --cgroups=split
@@ -30,7 +30,7 @@ systemctl stop "$U.service" "$U.scope" 2>/dev/null; systemctl reset-failed "$U.s
 
 T3S_RTFLAGS=(); T3S_RUNOPTS=(--name "$NAME"); EXTRA_GLOBAL=()
 case $shape in
-  parent-user) T3S_RUNOPTS+=(--cgroup-parent=t3s-s3.slice) ;;
+  parent-user) T3S_RUNOPTS+=(--cgroup-parent=t3sspike.slice) ;;
   split)       T3S_RUNOPTS+=(--cgroups=split) ;;
 esac
 
@@ -72,7 +72,7 @@ IN
     printf 'argv (as admin, run -d):'; printf ' %q' "${ARGV[@]}"; echo
     T3S_RUNOPTS+=(-d); t3s_podman_argv; ARGV=("${T3S_ARGV[@]}" "$IMG" sleep 45)
     as_admin "${ARGV[@]}" > "$OUT/run.log" 2>&1
-    TARGET=/user.slice/user-$ADMIN_UID.slice/user@$ADMIN_UID.service/t3s-s3.slice ;;
+    TARGET=/user.slice/user-$ADMIN_UID.slice/user@$ADMIN_UID.service/t3sspike.slice ;;  # no dash: systemd nests a-b.slice under a.slice
   split)
     t3s_podman_argv; ARGV=("${T3S_ARGV[@]}" "$IMG" sleep 45)
     printf 'argv: runuser -u admin -- env -i … systemd-run --user --scope --unit=%s -p Delegate=yes --' "$U"; printf ' %q' "${ARGV[@]}"; echo

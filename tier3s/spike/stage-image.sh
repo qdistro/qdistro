@@ -118,4 +118,6 @@ as_admin podman import --change 'USER 1000:1000' --change 'WORKDIR /tmp' \
     --change 'ENV LANG=C.UTF-8' "$WORK/rootfs.tar" "$IMG"
 as_admin podman image inspect --format '{{.Id}} {{.Size}} {{.Config.User}} {{.Config.Env}}' "$IMG"
 rm -f "$WORK/rootfs.tar"
+say "6. closure (NVRA) the image was assembled from"
+cat "$WORK/closure-nvra.txt"
 echo "STAGE-IMAGE DONE"
