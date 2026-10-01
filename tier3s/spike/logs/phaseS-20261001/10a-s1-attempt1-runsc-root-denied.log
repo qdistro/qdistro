@@ -1,0 +1,87 @@
+### host 2026-10-01T20:41:57Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && sha256sum tier3s/spike/s1-headless-hello.sh tier3s/spike/lib.sh && tier3s/spike/s1-headless-hello.sh
+CMD
+[vm-exec] guest identity pinned (pid 30929 start 163136)
+f112ce578d1ab496cfd2c3a8e34dd861e6c35b7d2e57def616708fb802f0924b  tier3s/spike/s1-headless-hello.sh
+dba25b2041bf9442355fcc0d1f1444b23126ade918f60221a520088fa3cc75cb  tier3s/spike/lib.sh
+
+## A. exact 03 step-1 command (no debug flags)
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none localhost/tier3s-spike/tw-terminals:20260929 sh -c cat\ /proc/version\;\ dmesg\ --syslog\ \|\ head\ -3\;\ id\;\ ls\ -ld\ /run/user/1000\;\ ip\ route
+rc=126 wall=1.409632663s (observation only, O8)
+
+## B. same flags + runsc debug log, held alive for inspection
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/tier3s-spike/s1/runsc-debug/ run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s1-held -d localhost/tier3s-spike/tw-terminals:20260929 sh -c cat\ /proc/version\;\ dmesg\ --syslog\ \|\ head\ -3\;\ id\;\ ls\ -ld\ /run/user/1000\;\ ip\ route\;\ stat\ -c\ \'stat\ %n\ %u:%g\ %a\'\ /run/user/1000\ /tmp\;\ cat\ /proc/self/uid_map\ /proc/self/gid_map\;\ sleep\ 60
+--- podman inspect
+--- emitted OCI config.json (), selected fields
+--- conmon pid : process tree (exe + cgroup per pid)
+pid= ppid= uid= comm= exe=? cgroup=
+--- sandbox pid from podman (State.Pid=)
+exe=
+pinned runsc=/usr/libexec/qdistro/runsc/runsc sha512 match: no
+cmdline=BOOT_IMAGE=/boot/vmlinuz-7.2.8-1-default root=UUID=1df5576d-c0e8-4d58-8321-036cc145665a rw quiet systemd.show_status=1 console=ttyS0,115200 console=tty0 security=selinux selinux=1
+uid_map(host view of ):
+gid_map:
+--- every process on the host whose exe is under /usr/libexec/qdistro/runsc
+--- any host process named like an app (expect none: sh/sleep/ip run inside the Sentry)
+--- pasta (expect none: --network=none)
+(end pasta)
+--- container output so far
+--- after stop: leftover processes under the runsc bundle (expect none)
+(end leftovers)
+--- runsc debug log files
+total 28
+-rw-r--r--. 1 admin admin 12382 Oct  1 20:42 runsc.log.20261001-204212.795377.create.txt
+-rw-r--r--. 1 admin admin 12151 Oct  1 20:42 runsc.log.20261001-204212.800377.delete.txt
+
+## C. denied-syscall errno: same image + same profile, three runtimes
+--- runtime: tier3s
+argv: podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none run --rm …
+rc=126
+--- runtime: runc
+argv: podman --runtime runc run --rm --security-opt …
+getpid(allow)  nr=39   ret=1   errno=0 -
+unshare(dflt)  nr=272  ret=-1  errno=38 ENOSYS
+sysinfo(dflt)  nr=99   ret=-1  errno=38 ENOSYS
+fchmodat2(dfl) nr=452  ret=-1  errno=38 ENOSYS
+ptrace(EPERM)  nr=101  ret=-1  errno=1 EPERM
+io_uring(EPERM) nr=425  ret=-1  errno=1 EPERM
+syslog(added)  nr=103  ret=-1  errno=1 EPERM
+rc=1
+--- runtime: crun
+argv: podman --runtime crun run --rm --security-opt …
+getpid(allow)  nr=39   ret=1   errno=0 -
+unshare(dflt)  nr=272  ret=-1  errno=38 ENOSYS
+sysinfo(dflt)  nr=99   ret=-1  errno=38 ENOSYS
+fchmodat2(dfl) nr=452  ret=-1  errno=38 ENOSYS
+ptrace(EPERM)  nr=101  ret=-1  errno=1 EPERM
+io_uring(EPERM) nr=425  ret=-1  errno=1 EPERM
+syslog(added)  nr=103  ret=-1  errno=1 EPERM
+rc=1
+S1 DONE
+[vm-exec] --- stderr ---
+Error: /usr/libexec/qdistro/tier3s-runsc: creating container: creating container root directory "/var/run/runsc": mkdir /var/run/runsc: permission denied: OCI permission denied
+Error: /usr/libexec/qdistro/tier3s-runsc: creating container: creating container root directory "/var/run/runsc": mkdir /var/run/runsc: permission denied: OCI permission denied
+Error: no such object: "t3s-s1-held"
+Error: no such object: "t3s-s1-held"
+Error: no such object: "t3s-s1-held"
+Error: no such object: "t3s-s1-held"
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/var/tmp/tier3s-spike/s1/config.json'
+tier3s/spike/s1-headless-hello.sh: line 75: /proc//exe: No such file or directory
+cat: /proc//uid_map: No such file or directory
+cat: /proc//gid_map: No such file or directory
+Error: no container with name or ID "t3s-s1-held" found: no such container
+Error: /usr/libexec/qdistro/tier3s-runsc: creating container: creating container root directory "/var/run/runsc": mkdir /var/run/runsc: permission denied: OCI permission denied
+Traceback (most recent call last):
+  File "<string>", line 13, in <module>
+    open("/tmp/f", "w").close(); os.symlink("/tmp/f", "/tmp/l")
+                                 ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 38] Function not implemented: '/tmp/f' -> '/tmp/l'
+Traceback (most recent call last):
+  File "<string>", line 13, in <module>
+    open("/tmp/f", "w").close(); os.symlink("/tmp/f", "/tmp/l")
+                                 ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 38] Function not implemented: '/tmp/f' -> '/tmp/l'
+[vm-exec] --- end stderr ---
+### exit=0

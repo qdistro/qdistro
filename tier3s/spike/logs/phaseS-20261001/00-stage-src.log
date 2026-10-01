@@ -16,3 +16,13 @@ QDISTRO_PROFILE=dev
 runsc version release-20260928.0
 spec: 1.2.1
 ### exit=0
+### host 2026-10-01T20:41:52Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/*.sh tier3s/spike/smoke.json
+CMD
+[vm-exec] guest identity pinned (pid 30848 start 162647)
+dba25b2041bf9442355fcc0d1f1444b23126ade918f60221a520088fa3cc75cb  tier3s/spike/lib.sh
+f112ce578d1ab496cfd2c3a8e34dd861e6c35b7d2e57def616708fb802f0924b  tier3s/spike/s1-headless-hello.sh
+04039dff305e7d26c019fd1b8de8dfb994a2a96ea72fe8da67d13c1def5d690f  tier3s/spike/stage-image.sh
+b1e8dd2447610ffc02527f3f957ade2942f14399ba7644611017b7c39f649070  tier3s/spike/vmlog.sh
+c00d6cfdf28d40f0f6ff1fd8453cbb3de460f6913f75e5171b0ae4dbcb9c2bd2  tier3s/spike/smoke.json
+### exit=0

@@ -29,12 +29,27 @@ as_admin() {
 
 say() { printf '\n## %s\n' "$*"; }
 
-# The Phase S step-1 podman flag set, verbatim from 03 (minus image/argv).
-# Callers append extra --runtime-flag values BEFORE `run` via T3S_RTFLAGS
-# and extra run options via T3S_RUNOPTS.
+# runsc's state root. runsc defaults it to $XDG_RUNTIME_DIR/runsc, else
+# /var/run/runsc (runsc/config/flags.go DefaultRootDir); the Phase 0 wrapper's
+# `env -i` strips XDG_RUNTIME_DIR, so the exact 03 command fails with
+# "mkdir /var/run/runsc: permission denied" (logged in s1 section A0). The
+# spike passes the root as a per-launch runtime flag, and must then pass the
+# SAME global flags to every later podman call on that container.
+T3S_ROOTFLAG=--runtime-flag=root=$ADMIN_RT/runsc
+
+# podman global options for tier 3s (everything before the subcommand).
+t3s_global() {
+    T3S_GLOBAL=(podman --runtime "$WRAPPER" --runtime-flag=network=none)
+    [ -n "${T3S_ROOTFLAG:-}" ] && T3S_GLOBAL+=("$T3S_ROOTFLAG")
+    T3S_GLOBAL+=("${T3S_RTFLAGS[@]}")
+}
+
+# The Phase S step-1 podman flag set, verbatim from 03 (minus image/argv),
+# plus $T3S_ROOTFLAG. Callers append extra --runtime-flag values BEFORE
+# `run` via T3S_RTFLAGS and extra run options via T3S_RUNOPTS.
 t3s_podman_argv() {
-    T3S_ARGV=(podman --runtime "$WRAPPER" --runtime-flag=network=none)
-    T3S_ARGV+=("${T3S_RTFLAGS[@]}")
+    t3s_global
+    T3S_ARGV=("${T3S_GLOBAL[@]}")
     T3S_ARGV+=(run --rm
         --security-opt label=disable --security-opt no-new-privileges
         --security-opt "seccomp=$SMOKE"
