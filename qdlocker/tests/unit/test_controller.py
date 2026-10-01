@@ -118,6 +118,32 @@ def test_overlay_key_printable_appends(qapp, auth):
     assert ctrl.currentText == "abx"
 
 
+@pytest.mark.parametrize(
+    "sym,utf8",
+    [
+        (0x006C, "\x0c"),  # Ctrl+L
+        (0x0063, "\x03"),  # Ctrl+C
+    ],
+)
+def test_overlay_key_control_chars_still_append(qapp, auth, sym, utf8):
+    """The controller accepts whatever text qdwin forwards, control codes
+    included: an existing password containing one must stay enterable. The
+    repeated lock chord (Ctrl+Alt+L on an already locked screen) is consumed
+    in qdwin's overlay grab instead (qdwin_overlay_key_disposition), so it
+    never reaches here."""
+    ctrl = LockController(auth)
+    ctrl._current_text = "ab"
+    ctrl.handle_overlay_key(sym, utf8)
+    assert ctrl.currentText == "ab" + utf8
+
+
+def test_overlay_key_non_ascii_printable_appends(qapp, auth):
+    ctrl = LockController(auth)
+    ctrl._current_text = ""
+    ctrl.handle_overlay_key(0x00E9, "\u00e9")  # e-acute
+    assert ctrl.currentText == "\u00e9"
+
+
 def test_overlay_key_return_triggers_unlock(qapp, auth):
     from qdlocker.keysyms import XKB_Return
 

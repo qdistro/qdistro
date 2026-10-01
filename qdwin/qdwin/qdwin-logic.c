@@ -429,3 +429,29 @@ qdwin_idle_inhibit_should_hold(bool have_surface, bool surface_mapped,
 {
 	return have_surface && surface_mapped && has_buffer && has_view;
 }
+
+bool
+qdwin_lock_hotkey_matches(uint32_t key, bool pressed, uint32_t modifier_state)
+{
+	return pressed && key == QDWIN_LOGIC_LOCK_HOTKEY_KEY &&
+	       modifier_state == QDWIN_LOGIC_LOCK_HOTKEY_MODS;
+}
+
+uint32_t
+qdwin_overlay_key_disposition(uint32_t role, uint32_t key, bool pressed,
+			      uint32_t modifier_state, uint32_t *pending)
+{
+	if (role != QDWIN_LOGIC_OVERLAY_ROLE_LOCKER)
+		return QDWIN_LOGIC_OVERLAY_KEY_FORWARD;
+	if (pending && *pending != 0 && *pending == key) {
+		if (!pressed)
+			*pending = 0;
+		return QDWIN_LOGIC_OVERLAY_KEY_CONSUME;
+	}
+	if (qdwin_lock_hotkey_matches(key, pressed, modifier_state)) {
+		if (pending)
+			*pending = key;
+		return QDWIN_LOGIC_OVERLAY_KEY_CONSUME;
+	}
+	return QDWIN_LOGIC_OVERLAY_KEY_FORWARD;
+}

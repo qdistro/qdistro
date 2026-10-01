@@ -810,6 +810,79 @@ static void test_lock_hotkey_pending_for_grab(void)
 		"non-hotkey locker grab has no suppression");
 }
 
+/* ---- lock hotkey inside the locker overlay grab ---- */
+static void test_overlay_lock_hotkey(void)
+{
+	const uint32_t L = QDWIN_LOGIC_KEY_L;
+	const uint32_t CA = QDWIN_LOGIC_MOD_CTRL | QDWIN_LOGIC_MOD_ALT;
+	const uint32_t LOCKER = QDWIN_LOGIC_OVERLAY_ROLE_LOCKER;
+	uint32_t latch = 0;
+	uint32_t r;
+
+	CHECK(qdwin_lock_hotkey_matches(L, true, CA), "Ctrl+Alt+L press matches");
+	CHECK(!qdwin_lock_hotkey_matches(L, false, CA), "release never matches");
+	CHECK(!qdwin_lock_hotkey_matches(L, true, QDWIN_LOGIC_MOD_CTRL),
+	      "Ctrl+L alone does not match");
+	CHECK(!qdwin_lock_hotkey_matches(L, true, CA | (1u << 3)),
+	      "Ctrl+Alt+Shift+L does not match (exact, like weston)");
+	CHECK(!qdwin_lock_hotkey_matches(L + 1, true, CA), "other key does not match");
+
+	/* Chord on a locked screen: press consumed, latch set, its release
+	 * consumed, latch cleared. */
+	r = qdwin_overlay_key_disposition(LOCKER, L, true, CA, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_CONSUME, "locker: Ctrl+Alt+L press");
+	CHECK_U(latch, L, "latch holds L after chord press");
+	r = qdwin_overlay_key_disposition(LOCKER, L, false, 0, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_CONSUME, "locker: chord L release");
+	CHECK_U(latch, 0u, "latch cleared after release");
+
+	/* Plain Ctrl+L and ordinary keys still reach the locker. */
+	r = qdwin_overlay_key_disposition(LOCKER, L, true,
+					      QDWIN_LOGIC_MOD_CTRL, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "locker: Ctrl+L forwarded");
+	r = qdwin_overlay_key_disposition(LOCKER, L, true, 0, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "locker: l forwarded");
+	CHECK_U(latch, 0u, "no latch for forwarded keys");
+
+	/* Roles 0/1 (launcher/switcher) are not touched. */
+	r = qdwin_overlay_key_disposition(0u, L, true, CA, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "launcher: chord forwarded");
+	r = qdwin_overlay_key_disposition(1u, L, true, CA, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "switcher: chord forwarded");
+
+	/* An unrelated release with no latch is not consumed. */
+	r = qdwin_overlay_key_disposition(LOCKER, L, false, 0, &latch);
+	CHECK_U(r,
+		QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "locker: stray release not consumed");
+
+	/* Main's guard: the binding set the latch (chord held as the locker
+	 * grab starts). Repeat press of L is consumed whatever the mods, the
+	 * release clears it, and the next intentional l reaches the locker. */
+	latch = L;
+	r = qdwin_overlay_key_disposition(LOCKER, L, true, 0, &latch);
+	CHECK_U(r, QDWIN_LOGIC_OVERLAY_KEY_CONSUME, "locker: held chord L repeat");
+	CHECK_U(latch, L, "latch kept across repeat press");
+	r = qdwin_overlay_key_disposition(LOCKER, L, false, 0, &latch);
+	CHECK_U(r, QDWIN_LOGIC_OVERLAY_KEY_CONSUME, "locker: held chord L release");
+	CHECK_U(latch, 0u, "latch cleared by held chord release");
+	r = qdwin_overlay_key_disposition(LOCKER, L, true, 0, &latch);
+	CHECK_U(r, QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "locker: next l after chord forwarded");
+
+	/* Other keys pass while the latch is set; non-locker roles ignore it. */
+	latch = L;
+	r = qdwin_overlay_key_disposition(LOCKER, L + 1, true, 0, &latch);
+	CHECK_U(r, QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "locker: other key with latch set");
+	r = qdwin_overlay_key_disposition(0u, L, false, 0, &latch);
+	CHECK_U(r, QDWIN_LOGIC_OVERLAY_KEY_FORWARD, "launcher: latch ignored");
+	CHECK_U(latch, L, "launcher does not clear the locker latch");
+}
+
 int main(void)
 {
 	test_lock_hotkey_pending_for_grab();
@@ -831,6 +904,7 @@ int main(void)
 	test_nested_input_peer_event_identity();
 	test_s13_fail_open_pins();
 	test_popup_constrain();
+	test_overlay_lock_hotkey();
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 	if (failures) {
