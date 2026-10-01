@@ -45,11 +45,20 @@ sleep 2
 qdwin_apps_screenshot /tmp/11-step2-max.png
 ```
 
-**Assert (2.1):** the image stays its natural size (256×256 px) but
-the window now fills the screen — feh draws the image in the upper-
-left of an enlarged window, not stretched. Behaviour is feh-specific
-("don't auto-zoom on maximise"); the test verifies qdwin's
-configure-event handling, not feh's UX.
+**Assert (2.1):** the window now fills the screen and the image stays
+its natural size (256×256 px, the same on-screen size as in step 1) —
+not stretched or zoomed to the enlarged window. feh draws it CENTERED
+in the enlarged window, over the checkerboard: on every resize feh
+recomputes the image origin as `(window - image * zoom) / 2` with
+zoom 1.0 unless `--scale-down`, `--zoom`/`--auto-zoom` or a
+`--geometry` offset is given (feh `src/winwidget.c`,
+`winwidget_render_image`), and this scenario passes none of those. A
+centered natural-size image is therefore the correct result; the
+failure signatures are an image scaled up to the window, an image
+still drawn at the old (pre-maximise) window size/position with
+unpainted or black area around it, or the window not filling the
+screen. The test verifies qdwin's configure-event handling (feh
+received the maximised size and re-rendered), not feh's UX.
 
 ```bash
 qdwin_apps_ctl "restorelast"
