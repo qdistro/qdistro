@@ -77,23 +77,32 @@ teardown_file() {
     cp "$shot" "$(_qd_driver_stage_dir)/s103-foot.png"
     vm_run "command -v tesseract >/dev/null"
     require "tesseract not installed on VM (needed for launcher visual assertion)"
-    # tesseract 5.5.3 (snapshot 20260924) intermittently aborts in its exit-
-    # time destructors AFTER printing the full text ("free(): invalid size",
-    # rc=134; upstream tesseract-ocr/tesseract#4633). Seen twice under the
-    # 12-way full run, never in ~120 isolated/stressed reruns. Retry only such
-    # an abort (134/139), take the text only from an attempt that exited 0, and
-    # still fail if every attempt aborts. OMP_THREAD_LIMIT=1: one frame needs
-    # no threads, and it keeps OpenMP out of a loaded guest.
+    # The guest's tesseract (openSUSE libtesseract5 5.5.3-2.1, snapshot
+    # 20260924) aborts on EVERY run during teardown, after the text is out:
+    # "free(): invalid size", rc=134. Not load, not intermittent: the distro's
+    # CVE-2026-88053 backport (tesseract-CVE-2026-88053.patch) dropped the
+    # loop in ADAPT_CLASS_STRUCT's constructor that nulled Config[], because
+    # upstream made Config[] a value-initialized std::array -- a change the
+    # backport left out (adaptive.h still has a plain C array). So
+    # ~ADAPT_CLASS_STRUCT, run by TessBaseAPI::End -> EndAdaptiveClassifier,
+    # deletes uninitialized heap words. Any memory a `new` reuses from an
+    # earlier free holds garbage, so the abort is deterministic per build.
+    # Workaround until openSUSE fixes the package: have glibc hand out zeroed
+    # memory (perturb=255 fills each allocation with 0xff^0xff; tcache off
+    # because its fast path skips the perturb fill). Then Config[] is null as
+    # upstream intends and tesseract exits 0 with byte-identical text. The
+    # exit status is still asserted: any other failure fails the test.
+    # OMP_THREAD_LIMIT=1: one frame needs no OpenMP threads.
     vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png || exit 1
-        for attempt in 1 2 3; do
-            rm -f /tmp/s103-ocr.txt
-            OMP_THREAD_LIMIT=1 tesseract /tmp/s103-foot.png /tmp/s103-ocr 2>/tmp/s103-ocr.err
-            rc=\$?
-            if [ \"\$rc\" -eq 0 ]; then cat /tmp/s103-ocr.txt; exit 0; fi
-            echo \"tesseract attempt \$attempt rc=\$rc: \$(tail -n1 /tmp/s103-ocr.err)\" >&2
-            case \"\$rc\" in 134|139) ;; *) exit \"\$rc\" ;; esac
-        done
-        exit 1"
+        rm -f /tmp/s103-ocr.txt
+        GLIBC_TUNABLES=glibc.malloc.perturb=255:glibc.malloc.tcache_count=0 OMP_THREAD_LIMIT=1 \\
+            tesseract /tmp/s103-foot.png /tmp/s103-ocr 2>/tmp/s103-ocr.err
+        rc=\$?
+        if [ \"\$rc\" -ne 0 ]; then
+            echo \"tesseract rc=\$rc: \$(tail -n1 /tmp/s103-ocr.err)\" >&2
+            exit \"\$rc\"
+        fi
+        cat /tmp/s103-ocr.txt"
     assert_success
 
     local ocr_text="$output" hits=0 d
