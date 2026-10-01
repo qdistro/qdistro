@@ -54,10 +54,32 @@ def _parse() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _attach_trusted_appearance(app):
+    """Apply the managed snapshot once. Ignore developer overrides.
+
+    Appearance failure must not block or alter the prompt. Do not log to
+    stdout (it carries the password). No file watch, network, or D-Bus.
+    """
+    try:
+        from qdistro_presentation.qt import PresentationController
+    except ImportError:
+        return
+    try:
+        return PresentationController(
+            app,
+            theme_mode="system",
+            role="polkit",
+            watch=False,
+        )
+    except Exception:
+        return None
+
+
 def _qt_prompt(action: str, message: str) -> str | None:
     """Open a small modal Qt dialog and return the entered password,
     or None on cancel / Escape / window-close."""
     from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QPalette
     from PyQt6.QtWidgets import (
         QApplication,
         QDialog,
@@ -67,7 +89,11 @@ def _qt_prompt(action: str, message: str) -> str | None:
         QLineEdit,
         QVBoxLayout,
     )
-    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
+    app = QApplication.instance() or QApplication(sys.argv)
+    try:
+        _attach_trusted_appearance(app)
+    except Exception:
+        pass
     dlg = QDialog()
     dlg.setWindowTitle("Authentication Required")
     dlg.setModal(True)
@@ -81,7 +107,7 @@ def _qt_prompt(action: str, message: str) -> str | None:
         root.addWidget(msg_label)
     if action:
         sub = QLabel(f"Action: {action}")
-        sub.setStyleSheet("color: #666;")
+        sub.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         sub.setWordWrap(True)
         root.addWidget(sub)
 

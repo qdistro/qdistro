@@ -46,8 +46,11 @@ class Config:
                 "default_view": "list",  # "list" or "grid"
                 "sort_by": "name",  # "name", "size", "date", "type"
                 "sort_order": "asc",  # "asc" or "desc"
-                "theme_mode": "system",  # "system", "light", "dark"
+                "theme_mode": "system",  # "system", "light", "dark", "native"
                 "icon_size": 32,
+            },
+            "appearance": {
+                "version": 1,
             },
             "window": {
                 "width": 900,

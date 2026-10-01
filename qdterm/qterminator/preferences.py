@@ -413,7 +413,7 @@ class PreferencesDialog(QDialog):
         win_layout = QFormLayout(win_group)
 
         self._theme_mode = QComboBox()
-        self._theme_mode.addItems(["System", "Dark", "Light"])
+        self._theme_mode.addItems(["System", "Dark", "Light", "Native"])
         win_layout.addRow(tr("Theme mode:"), self._theme_mode)
 
         self._confirm_close = QCheckBox(tr("Confirm before closing with running processes"))
@@ -608,7 +608,7 @@ class PreferencesDialog(QDialog):
         self._tab_position.setCurrentIndex(pos_map.get(tab_pos, 0))
 
         theme_mode = self._config.get("general", "theme_mode", default="system")
-        mode_map = {"system": 0, "dark": 1, "light": 2}
+        mode_map = {"system": 0, "dark": 1, "light": 2, "native": 3}
         self._theme_mode.setCurrentIndex(mode_map.get(theme_mode, 0))
 
         dark_scheme = self._config.get("general", "dark_color_scheme", default="Linux")
@@ -644,7 +644,7 @@ class PreferencesDialog(QDialog):
         opacity = self._opacity.value()
         tab_positions = ["top", "bottom", "left", "right"]
         tab_pos = tab_positions[self._tab_position.currentIndex()]
-        theme_modes = ["system", "dark", "light"]
+        theme_modes = ["system", "dark", "light", "native"]
         theme_mode = theme_modes[self._theme_mode.currentIndex()]
         dark_color_scheme = self._dark_color_scheme.currentText()
         light_color_scheme = self._light_color_scheme.currentText()
@@ -675,10 +675,20 @@ class PreferencesDialog(QDialog):
 
         self._config.save()
 
-        from qterminator.theme import apply_theme
+        from qterminator.theme import apply_theme, current_controller
         app = QApplication.instance()
         if app:
-            resolved = apply_theme(app, theme_mode)
+            ctrl = current_controller()
+            if ctrl is not None:
+                ctrl.set_theme_mode(theme_mode)
+                if ctrl.state.using_shared_palette and ctrl.state.snapshot:
+                    resolved = ctrl.state.snapshot.mode
+                elif theme_mode in ("dark", "light"):
+                    resolved = theme_mode
+                else:
+                    resolved = "dark"
+            else:
+                resolved = apply_theme(app, theme_mode)
             if hasattr(parent, '_resolved_theme'):
                 parent._resolved_theme = resolved
 

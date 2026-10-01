@@ -1807,6 +1807,32 @@ pip_install_apps() {
     else
         log "installing Python apps to isolated $QDISTRO_OPT_PREFIX (+ /usr/bin wrappers)..."
     fi
+    if [ -f "$REPO_ROOT/sdk/presentation/pyproject.toml" ]; then
+        log "  pip install qdistro-presentation..."
+        if is_dev; then
+            python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
+                "$REPO_ROOT/sdk/presentation" \
+                || fail_or_warn "  pip install qdistro-presentation failed"
+        else
+            install -d -m 0755 "$QDISTRO_OPT_PREFIX"
+            python3 -m pip install --no-deps --prefix="$QDISTRO_OPT_PREFIX" --quiet \
+                "$REPO_ROOT/sdk/presentation" \
+                || fail_or_warn "  pip install qdistro-presentation -> $QDISTRO_OPT_PREFIX failed"
+            launcher="$QDISTRO_OPT_PREFIX/bin/qdistro-presentation-publish"
+            if [ -x "$launcher" ]; then
+                cat > /usr/bin/qdistro-presentation-publish <<EOF
+#!/bin/sh
+PYBASE="$QDISTRO_OPT_PREFIX/lib"
+for d in "\$PYBASE"/python*/site-packages; do
+    [ -d "\$d" ] && PYTHONPATH="\${PYTHONPATH:+\$PYTHONPATH:}\$d"
+done
+export PYTHONPATH PYTHONNOUSERSITE=1
+exec "$launcher" "\$@"
+EOF
+                chmod 0755 /usr/bin/qdistro-presentation-publish
+            fi
+        fi
+    fi
     for app in qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman; do
         if [ -f "$REPO_ROOT/$(comp_dir "$app")/pyproject.toml" ]; then
             # qterminator's runtime QTermWidget binding is not a pip dep;
@@ -1848,6 +1874,12 @@ pip_install_apps() {
         for d in "$QDISTRO_OPT_PREFIX"/lib/python*/site-packages; do
             [ -d "$d" ] && smoke_pp="${smoke_pp:+$smoke_pp:}$d"
         done
+    fi
+    if QT_QPA_PLATFORM=offscreen PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 \
+            python3 -c "import qdistro_presentation"; then
+        :
+    else
+        warn "  import smoke check failed: \"import qdistro_presentation\" — presentation library installed but not importable"
     fi
     # repo -> module to import. Most apps' top-level package import suffices,
     # but qterminator's missing-binding failure (finding #20) only surfaces
@@ -1896,6 +1928,7 @@ pip_install_apps() {
 # whether the file is executed or sourced by the test harness.
 installer_chain_entries() {
     cat <<'EOF'
+presentation|scripts/install/install-presentation-for-vm.sh|/sdk/presentation/qdistro_presentation
 sdk|scripts/install/install-sdk-for-vm.sh|/sdk/qdistro_app
 broker|scripts/install/install-broker-for-qdwin.sh|/broker
 admin-app|scripts/install/install-admin-app-for-vm.sh|/admin_app
@@ -2460,7 +2493,7 @@ install_selinux_policies() {
     fi
 
     cd "$REPO_ROOT"
-    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/presentation; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             log "  -> $pol"
             if ! (cd "$pol" && bash install-policy.sh); then
