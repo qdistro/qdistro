@@ -1,7 +1,7 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && printf x >> /usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking && ln -s /bin/sh /usr/libexec/qdistro/runsc/gvisor-bin/extra && tier3s/probe.sh --user admin | grep -E "^(FAIL|RESULT)"; echo "### probe exit=${PIPESTATUS[0]} (expect 1)"; tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc; echo "### provision exit=$? (expect 0, exchange swap)"; echo "leftover .new/.old: $(ls /usr/libexec/qdistro/ /etc/qdistro | grep -c "\.new\.\|\.old\.")"; tier3s/probe.sh --user admin | tail -1'
-[vm-exec] guest identity pinned (pid 12427 start 62888)
-FAIL bundle: file set differs: missing=[] unexpected=[l gvisor-bin/extra,]
-RESULT FAIL: first missing prerequisite: bundle (file set differs: missing=[] unexpected=[l gvisor-bin/extra,])
+[vm-exec] guest identity pinned (pid 17129 start 95871)
+FAIL bundle: file set differs: missing=[] unexpected=[l 777 root:root gvisor-bin/extra,]
+RESULT FAIL: first missing prerequisite: bundle (file set differs: missing=[] unexpected=[l 777 root:root gvisor-bin/extra,])
 ### probe exit=1 (expect 1)
 provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd)
 provision-runsc: all 6 pinned files verified

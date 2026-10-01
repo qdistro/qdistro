@@ -1,5 +1,5 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/probe.sh --user admin'
-[vm-exec] guest identity pinned (pid 11798 start 62124)
+[vm-exec] guest identity pinned (pid 16153 start 94876)
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)
 PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
@@ -12,7 +12,7 @@ PASS newgidmap: /usr/bin/newgidmap
 PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
 FAIL runsc: not provisioned (/etc/qdistro/runsc-release missing; run tier3s/provision-runsc.sh as root)
 FAIL bundle: /usr/libexec/qdistro/runsc missing
-FAIL wrapper: /usr/libexec/qdistro/tier3s-runsc missing or differs from /root/qdistro-src/tier3s/tier3s-runsc
+FAIL wrapper: /usr/libexec/qdistro/tier3s-runsc missing, not root:root 0755, or differs from /root/qdistro-src/tier3s/tier3s-runsc
 PASS podman: 6.0.2 (>= 6)
 FAIL podman_runtime: not checked: podman or wrapper missing
 FAIL label_disable: not checked: podman or wrapper missing

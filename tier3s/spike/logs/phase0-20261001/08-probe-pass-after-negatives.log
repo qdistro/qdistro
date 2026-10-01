@@ -1,5 +1,5 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc && tier3s/probe.sh --user admin | tail -1'
-[vm-exec] guest identity pinned (pid 12964 start 63239)
+[vm-exec] guest identity pinned (pid 17682 start 96223)
 provision-runsc: already installed and matching pin 20260928.0; nothing to do
 RESULT PASS: tier 3s prerequisites present
 ### exit=0

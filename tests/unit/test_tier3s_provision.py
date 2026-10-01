@@ -166,7 +166,7 @@ def test_failure_after_swap_restores_previous_install(tmp_path):
     side = d / "gvisor-bin" / "gvisor_sentry"
     side.chmod(0o700)  # make the live install differ so provision really swaps
     env = dict(os.environ, QDISTRO_RUNSC_PREFIX=str(root), TMPDIR=str(tmp_path),
-               QDISTRO_RUNSC_FAIL_AFTER_SWAP=1)
+               QDISTRO_RUNSC_FAIL_AFTER_SWAP="1")
     r2 = subprocess.run(["bash", str(SCRIPT), "--pin", str(pin), "--cache-dir",
                          str(tmp_path / "cache"), "--offline"],
                         env=env, capture_output=True, text=True)

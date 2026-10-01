@@ -1,7 +1,7 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && echo "(python313-pytest was installed in the VM via zypper from the snapshot repo)"; runuser -u admin -- python3 -m pytest -q -p no:cacheprovider tests/unit/test_tier3s_provision.py tests/unit/test_tier3s_probe.py 2>&1 | tail -3'
-[vm-exec] guest identity pinned (pid 13170 start 63362)
+[vm-exec] guest identity pinned (pid 17894 start 96348)
 (python313-pytest was installed in the VM via zypper from the snapshot repo)
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-12 passed, 1 warning in 0.46s
+=========================== short test summary info ============================
+FAILED tests/unit/test_tier3s_provision.py::test_failure_after_swap_restores_previous_install
+1 failed, 13 passed, 1 warning in 0.75s
 ### exit=0

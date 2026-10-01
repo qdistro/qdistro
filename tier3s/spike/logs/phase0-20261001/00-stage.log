@@ -1,11 +1,11 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'set -e; cd /root/qdistro-src && curl -fsS http://10.0.2.2:42909/src.tar | tar -xf - && sha512sum /var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd && cat /etc/qdistro/profile && uname -r && sha256sum tier3s/RUNSC_RELEASE tier3s/*.sh tier3s/tier3s-runsc; rm -rf /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release; echo "reset: prior install removed"'
-[vm-exec] guest identity pinned (pid 11769 start 61999)
+[vm-exec] guest identity pinned (pid 16138 start 94752)
 4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b  /var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd
 QDISTRO_PROFILE=dev
 7.2.8-1-default
 b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
-d3bd0ef7567e4cdd8c438182c71ee8df5cc3dfac73c2f512ac9bb72899b91ce3  tier3s/probe.sh
-9eb2e0440b82facda8aeb61462d3273941ba805b5a64fe872031ae5ed13ff867  tier3s/provision-runsc.sh
+20ada64c5480b1734fe3555942ce52a38b19bc15b60ae9260bcb7781a9537d52  tier3s/probe.sh
+2a833839cb9c3aa7de825658ae40cc51f15bdcd936b1bc3ff172f68ca5657eb1  tier3s/provision-runsc.sh
 eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
 reset: prior install removed
 ### exit=0

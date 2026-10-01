@@ -1,22 +1,22 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc && ls -lR /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release'
-[vm-exec] guest identity pinned (pid 11854 start 62144)
+[vm-exec] guest identity pinned (pid 16210 start 94896)
 provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd)
 provision-runsc: all 6 pinned files verified
 provision-runsc: runsc --version: runsc version release-20260928.0
 provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
--rw-r--r--. 1 root root 1571 Oct  1 20:25 /etc/qdistro/runsc-release
--rwxr-xr-x. 1 root root  487 Oct  1 20:25 /usr/libexec/qdistro/tier3s-runsc
+-rw-r--r--. 1 root root 1571 Oct  1 20:30 /etc/qdistro/runsc-release
+-rwxr-xr-x. 1 root root  487 Oct  1 20:30 /usr/libexec/qdistro/tier3s-runsc
 
 /usr/libexec/qdistro/runsc:
 total 107284
-drwxr-xr-x. 2 root root       132 Oct  1 20:25 gvisor-bin
--rwxr-xr-x. 1 root root 109857335 Oct  1 20:25 runsc
+drwxr-xr-x. 2 root root       132 Oct  1 20:30 gvisor-bin
+-rwxr-xr-x. 1 root root 109857335 Oct  1 20:30 runsc
 
 /usr/libexec/qdistro/runsc/gvisor-bin:
 total 170292
--rwxr-xr-x. 1 root root 69107264 Oct  1 20:25 checkpointgofer
--rwxr-xr-x. 1 root root 52098769 Oct  1 20:25 gvisor_sentry
--rwxr-xr-x. 1 root root     1416 Oct  1 20:25 gvisor-sentry-prewarmer
--rwxr-xr-x. 1 root root     1320 Oct  1 20:25 runsc-fd-parking
--rwxr-xr-x. 1 root root 53158765 Oct  1 20:25 runsc-metric-server
+-rwxr-xr-x. 1 root root 69107264 Oct  1 20:30 checkpointgofer
+-rwxr-xr-x. 1 root root 52098769 Oct  1 20:30 gvisor_sentry
+-rwxr-xr-x. 1 root root     1416 Oct  1 20:30 gvisor-sentry-prewarmer
+-rwxr-xr-x. 1 root root     1320 Oct  1 20:30 runsc-fd-parking
+-rwxr-xr-x. 1 root root 53158765 Oct  1 20:30 runsc-metric-server
 ### exit=0
