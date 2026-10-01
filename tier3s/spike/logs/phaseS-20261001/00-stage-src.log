@@ -1,0 +1,40 @@
+### host 2026-10-01T21:00:39Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+mkdir -p /root/qdistro-src && cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/*.sh tier3s/spike/smoke.json tier3s/tier3s-runsc tier3s/RUNSC_RELEASE && /usr/libexec/qdistro/runsc/runsc --version && cat /etc/qdistro/profile && tier3s/probe.sh --user admin; python3 tier3s/spike/make-smoke-json.py --check && echo smoke.json-matches-generator
+CMD
+[vm-exec] guest identity pinned (pid 71657 start 275399)
+ec87c7a478fe92cab302d635b806f588f3e82f356cd8dd33641ea33096d316dc  tier3s/spike/host-unlock.sh
+054ef4f2588be9a61cf789d2182e4ad0944dea3d3e51ce264201923699567dd3  tier3s/spike/lib.sh
+fe15f0d30eb2c71c61f0399506f20628635a1af43f3d3e676d9ff802105a704b  tier3s/spike/run-phaseS.sh
+c70abdecc9f20e20ad969f182317fe6c723a0ce356d5f8def49e537a15a210d6  tier3s/spike/s1-headless-hello.sh
+576743ea2d7bc4ef5e4c783364760f455f3949f8c78073ea1e2a11c16fe2aade  tier3s/spike/s2-waypipe.sh
+062fb72b988f0f6c411f5edab68ef9b2aafbd8302bcacace3d5b327c385ad59c  tier3s/spike/s3-cgroups.sh
+e89607da7478f0148486aaf13bb05625c7609598ce85010625013e1d84bf2309  tier3s/spike/stage-image.sh
+2f6322ddacbe289f1efb3686b5c52a52d2720c9279d1f03832cb43f9ff4fa0a4  tier3s/spike/vmfetch.sh
+b1e8dd2447610ffc02527f3f957ade2942f14399ba7644611017b7c39f649070  tier3s/spike/vmlog.sh
+c00d6cfdf28d40f0f6ff1fd8453cbb3de460f6913f75e5171b0ae4dbcb9c2bd2  tier3s/spike/smoke.json
+eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
+b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
+runsc version release-20260928.0
+spec: 1.2.1
+QDISTRO_PROFILE=dev
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: runsc version release-20260928.0 (matches pin, rc=0)
+PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT PASS: tier 3s prerequisites present
+smoke.json-matches-generator
+### exit=0

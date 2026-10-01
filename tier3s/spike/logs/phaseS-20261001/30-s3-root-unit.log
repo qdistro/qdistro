@@ -1,0 +1,29 @@
+### host 2026-10-01T21:02:52Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && tier3s/spike/s3-cgroups.sh root-unit
+CMD
+[vm-exec] guest identity pinned (pid 83590 start 288637)
+unit argv: systemd-run --unit=t3s-s3-root-unit -p MemoryMax=1G -p TasksMax=512 -- runuser -u admin -- env -i …  podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s3-root-unit localhost/tier3s-spike/tw-terminals:20260929 sleep 45
+--- launch output
+inspect: State=running Cgroups=default CgroupParent=user.slice CgroupManager=systemd ConmonPid=83636 Pid=83648
+OCI linux.cgroupsPath = user.slice:libpod:34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a
+--- target cgroup: /system.slice/t3s-s3-root-unit.service
+controllers: memory pids | memory.max=1073741824 pids.max=512 owner=root
+--- recursive cgroup.procs of the target
+/system.slice/t3s-s3-root-unit.service	pid=83621 comm=runuser exe=/usr/sbin/runuser
+--- every sandbox process (conmon subtree) classified against the target
+OUTSIDE pid=83636 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon pin=- cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+OUTSIDE pid=83648 ppid=83636 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+OUTSIDE pid=83649 ppid=83636 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking pin=sidecar_runsc-fd-parking_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+OUTSIDE pid=83644 ppid=83636 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc pin=runsc_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+OUTSIDE pid=83665 ppid=83648 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+OUTSIDE pid=83679 ppid=83648 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+OUTSIDE pid=83680 ppid=83679 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+VERDICT shape=root-unit: 0/7 sandbox processes inside /system.slice/t3s-s3-root-unit.service -> DOES NOT CONTAIN ALL
+--- podman CLI / runuser / systemd-run processes of this launch
+pid=83621 comm=runuser cgroup=/system.slice/t3s-s3-root-unit.service
+pid=83624 comm=podman cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/podman-83624.scope
+pid=83636 comm=conmon cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-34a4205db7728b406bc1e36ed901c6f54258c3d771b9bca2dd3bcad66d21061a.scope
+--- stop
+(end leftovers)
+target after stop: gone
+### exit=0

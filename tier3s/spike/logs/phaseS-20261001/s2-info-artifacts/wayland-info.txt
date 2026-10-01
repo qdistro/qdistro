@@ -1,0 +1,231 @@
+interface: 'wl_compositor',                              version:  5, name:  1
+interface: 'wl_subcompositor',                           version:  1, name:  2
+interface: 'wp_viewporter',                              version:  1, name:  3
+interface: 'zxdg_output_manager_v1',                     version:  2, name:  4
+	xdg_output_v1
+		output: 24
+		name: 'pipewire-1'
+		logical_x: 2560, logical_y: 0
+		logical_width: 640, logical_height: 480
+	xdg_output_v1
+		output: 23
+		name: 'pipewire-0'
+		logical_x: 1920, logical_y: 0
+		logical_width: 640, logical_height: 480
+	xdg_output_v1
+		output: 22
+		name: 'Virtual-1'
+		logical_x: 0, logical_y: 0
+		logical_width: 1920, logical_height: 1080
+interface: 'wp_presentation',                            version:  2, name:  5
+	presentation clock id: 1 (CLOCK_MONOTONIC)
+interface: 'wp_single_pixel_buffer_manager_v1',          version:  1, name:  6
+interface: 'wp_tearing_control_manager_v1',              version:  1, name:  7
+interface: 'wp_fifo_manager_v1',                         version:  1, name:  8
+interface: 'wp_commit_timing_manager_v1',                version:  1, name:  9
+interface: 'wp_alpha_modifier_v1',                       version:  1, name: 10
+interface: 'zwp_relative_pointer_manager_v1',            version:  1, name: 11
+interface: 'zwp_pointer_constraints_v1',                 version:  1, name: 12
+interface: 'zwp_input_timestamps_manager_v1',            version:  1, name: 13
+interface: 'wl_data_device_manager',                     version:  3, name: 15
+interface: 'wl_shm',                                     version:  2, name: 16
+	formats (fourcc):
+	0x56555958 = 'XYUV'
+	0x34325659 = 'YV24'
+	0x34325559 = 'YU24'
+	0x36315659 = 'YV16'
+	0x36315559 = 'YU16'
+	0x32315659 = 'YV12'
+	0x32315559 = 'YU12'
+	0x36313050 = 'P016'
+	0x32313050 = 'P012'
+	0x30313050 = 'P010'
+	0x3234564e = 'NV42'
+	0x3432564e = 'NV24'
+	0x3136564e = 'NV61'
+	0x3631564e = 'NV16'
+	0x3132564e = 'NV21'
+	0x3231564e = 'NV12'
+	0x59555956 = 'VYUY'
+	0x59565955 = 'UYVY'
+	0x55595659 = 'YVYU'
+	0x56595559 = 'YUYV'
+	0x48345241 = 'AR4H'
+	0x48345258 = 'XR4H'
+	0x48344241 = 'AB4H'
+	0x48344258 = 'XB4H'
+	0x38345241 = 'AR48'
+	0x38345258 = 'XR48'
+	0x38344241 = 'AB48'
+	0x38344258 = 'XB48'
+	0x30334241 = 'AB30'
+	0x30334258 = 'XB30'
+	0x30335241 = 'AR30'
+	0x30335258 = 'XR30'
+	0x34324142 = 'BA24'
+	0x34325842 = 'BX24'
+	0x34324152 = 'RA24'
+	0x34325852 = 'RX24'
+	0x34324241 = 'AB24'
+	0x34324258 = 'XB24'
+	0x34325241 = 'AR24'
+	0x34325258 = 'XR24'
+	0x34324742 = 'BG24'
+	0x34324752 = 'RG24'
+	0x36314742 = 'BG16'
+	0x36314752 = 'RG16'
+	0x35314142 = 'BA15'
+	0x35315842 = 'BX15'
+	0x35314152 = 'RA15'
+	0x35315852 = 'RX15'
+	0x32314142 = 'BA12'
+	0x32315842 = 'BX12'
+	0x32314152 = 'RA12'
+	0x32315852 = 'RX12'
+	0x32314241 = 'AB12'
+	0x32314258 = 'XB12'
+	0x32315241 = 'AR12'
+	0x32315258 = 'XR12'
+	         1 = 'XR24'
+	         0 = 'AR24'
+interface: 'wl_seat',                                    version:  7, name: 18
+	name: default
+	capabilities: pointer keyboard
+	keyboard repeat rate: 25
+	keyboard repeat delay: 500
+interface: 'weston_direct_display_v1',                   version:  1, name: 19
+interface: 'weston_content_protection',                  version:  1, name: 20
+interface: 'wp_color_representation_manager_v1',         version:  1, name: 21
+	supported alpha modes:
+		premultiplied alpha in electrical values
+	supported matrix coefficients and ranges:
+		identity, full range
+		bt601, limited range
+		bt601, full range
+		bt709, limited range
+		bt709, full range
+		bt2020, limited range
+		bt2020, full range
+interface: 'wl_output',                                  version:  4, name: 22
+	name: Virtual-1
+	description: QEMU Monitor
+	x: 0, y: 0, scale: 1,
+	physical_width: 320 mm, physical_height: 200 mm,
+	make: 'Red Hat, Inc.', model: 'QEMU Monitor',
+	subpixel_orientation: unknown, output_transform: normal,
+	mode:
+		width: 1280 px, height: 800 px, refresh: 74.994 Hz,
+		flags: preferred
+	mode:
+		width: 5120 px, height: 2160 px, refresh: 50.000 Hz,
+		flags:
+	mode:
+		width: 4096 px, height: 2160 px, refresh: 50.000 Hz,
+		flags:
+	mode:
+		width: 3840 px, height: 2160 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 3840 px, height: 2160 px, refresh: 59.940 Hz,
+		flags:
+	mode:
+		width: 3840 px, height: 2160 px, refresh: 50.000 Hz,
+		flags:
+	mode:
+		width: 1920 px, height: 1440 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 2560 px, height: 1080 px, refresh: 50.000 Hz,
+		flags:
+	mode:
+		width: 1856 px, height: 1392 px, refresh: 59.995 Hz,
+		flags:
+	mode:
+		width: 1792 px, height: 1344 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 2048 px, height: 1152 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 1920 px, height: 1200 px, refresh: 59.885 Hz,
+		flags:
+	mode:
+		width: 1920 px, height: 1080 px, refresh: 60.000 Hz,
+		flags: current
+	mode:
+		width: 1920 px, height: 1080 px, refresh: 50.000 Hz,
+		flags:
+	mode:
+		width: 1600 px, height: 1200 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 1680 px, height: 1050 px, refresh: 59.954 Hz,
+		flags:
+	mode:
+		width: 1400 px, height: 1050 px, refresh: 59.978 Hz,
+		flags:
+	mode:
+		width: 1280 px, height: 1024 px, refresh: 60.020 Hz,
+		flags:
+	mode:
+		width: 1440 px, height: 900 px, refresh: 59.887 Hz,
+		flags:
+	mode:
+		width: 1280 px, height: 960 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 1360 px, height: 768 px, refresh: 60.015 Hz,
+		flags:
+	mode:
+		width: 1280 px, height: 768 px, refresh: 59.870 Hz,
+		flags:
+	mode:
+		width: 1024 px, height: 768 px, refresh: 60.004 Hz,
+		flags:
+	mode:
+		width: 800 px, height: 600 px, refresh: 60.317 Hz,
+		flags:
+	mode:
+		width: 640 px, height: 480 px, refresh: 60.000 Hz,
+		flags:
+	mode:
+		width: 640 px, height: 480 px, refresh: 59.940 Hz,
+		flags:
+interface: 'wl_output',                                  version:  4, name: 23
+	name: pipewire-0
+	description: pipewire-0
+	x: 1920, y: 0, scale: 1,
+	physical_width: 640 mm, physical_height: 480 mm,
+	make: 'PipeWire', model: 'pipewire-0',
+	subpixel_orientation: unknown, output_transform: normal,
+	mode:
+		width: 640 px, height: 480 px, refresh: 30.000 Hz,
+		flags: current preferred
+interface: 'wl_output',                                  version:  4, name: 24
+	name: pipewire-1
+	description: pipewire-1
+	x: 2560, y: 0, scale: 1,
+	physical_width: 640 mm, physical_height: 480 mm,
+	make: 'PipeWire', model: 'pipewire-1',
+	subpixel_orientation: unknown, output_transform: normal,
+	mode:
+		width: 640 px, height: 480 px, refresh: 30.000 Hz,
+		flags: current preferred
+interface: 'xdg_wm_base',                                version:  5, name: 25
+interface: 'qdwin_shell_v1',                             version: 34, name: 26
+interface: 'ext_workspace_manager_v1',                   version:  1, name: 27
+interface: 'zwlr_output_manager_v1',                     version:  4, name: 28
+interface: 'qdwin_locker_v1',                            version:  1, name: 29
+interface: 'qdwin_stream_input_v1',                      version:  2, name: 30
+interface: 'xdg_activation_v1',                          version:  1, name: 31
+interface: 'ext_idle_notifier_v1',                       version:  2, name: 32
+interface: 'zwp_idle_inhibit_manager_v1',                version:  1, name: 33
+interface: 'wp_cursor_shape_manager_v1',                 version:  2, name: 34
+interface: 'wp_fractional_scale_manager_v1',             version:  1, name: 35
+interface: 'zwp_primary_selection_device_manager_v1',    version:  1, name: 36
+interface: 'zwp_text_input_manager_v3',                  version:  1, name: 37
+interface: 'zwp_input_method_manager_v2',                version:  1, name: 38
+interface: 'zwp_virtual_keyboard_manager_v1',            version:  1, name: 39
+interface: 'qdwin_nested_manager_v1',                    version:  3, name: 41
+interface: 'zwlr_layer_shell_v1',                        version:  5, name: 42
+interface: 'zxdg_decoration_manager_v1',                 version:  1, name: 43

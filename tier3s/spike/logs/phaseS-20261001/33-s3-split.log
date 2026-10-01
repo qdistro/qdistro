@@ -1,0 +1,36 @@
+### host 2026-10-01T21:03:30Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && tier3s/spike/s3-cgroups.sh split
+CMD
+[vm-exec] guest identity pinned (pid 86470 start 292459)
+argv: runuser -u admin -- env -i … systemd-run --user --scope --unit=t3s-s3-split -p Delegate=yes -- podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s3-split --cgroups=split localhost/tier3s-spike/tw-terminals:20260929 sleep 45
+--- launch output
+inspect: State=running Cgroups=default CgroupParent= CgroupManager=systemd ConmonPid=86513 Pid=86525
+OCI linux.cgroupsPath = /user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/libpod-payload-8e72a029689f699a966fa1f62351eb75623830402d98bf3bfdc5df2c1a0a651f
+--- target cgroup: /user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope
+controllers: pids | memory.max= pids.max=4611 owner=admin
+--- recursive cgroup.procs of the target
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86501 comm=podman exe=/usr/bin/podman
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86513 comm=conmon exe=/usr/bin/conmon
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86521 comm=exe exe=/usr/libexec/qdistro/runsc/runsc
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86525 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86526 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86542 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86558 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime	pid=86559 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+--- every sandbox process (conmon subtree) classified against the target
+INSIDE pid=86513 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon pin=- cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+INSIDE pid=86521 ppid=86513 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc pin=runsc_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+INSIDE pid=86525 ppid=86513 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+INSIDE pid=86526 ppid=86513 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking pin=sidecar_runsc-fd-parking_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+INSIDE pid=86542 ppid=86525 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+INSIDE pid=86558 ppid=86525 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+INSIDE pid=86559 ppid=86558 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+VERDICT shape=split: 7/7 sandbox processes inside /user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope -> CONTAINS ALL
+--- podman CLI / runuser / systemd-run processes of this launch
+pid=86499 comm=runuser cgroup=/system.slice/qemu-guest-agent.service
+pid=86501 comm=podman cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+pid=86513 comm=conmon cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/t3s-s3-split.scope/runtime
+--- stop
+(end leftovers)
+target after stop: gone
+### exit=0

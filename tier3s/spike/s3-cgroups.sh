@@ -10,6 +10,10 @@
 #                 --cgroup-parent=<that scope's cgroup>
 #     parent-user (a') systemd cgroup manager: --cgroup-parent=t3sspike.slice (user manager)
 #                 (rootless podman + systemd manager only accepts a slice)
+#     scope-plain control for (a): the same root scope with MemoryMax/TasksMax
+#                 but NO Delegate, NO chown and NO --cgroup-parent; cgroupfs
+#                 manager. Shows whether (a)'s containment comes from the
+#                 parent flag or simply from nobody moving the processes.
 #     split       (b) runuser -u admin -> systemd-run --user --scope
 #                 -p Delegate=yes -> podman run --cgroups=split
 # (a) and (b) are never combined (podman-run(1): split excludes --cgroup-parent).
@@ -18,7 +22,7 @@
 # (conmon, runsc gofer, gvisor_sentry, stubs, fd-parking) as INSIDE/OUTSIDE.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-shape=${1:?usage: s3-cgroups.sh <root-unit|parent-root|parent-user|split>}
+shape=${1:?usage: s3-cgroups.sh <root-unit|parent-root|scope-plain|parent-user|split>}
 NAME=t3s-s3-$shape
 U=t3s-s3-$shape
 OUT=$WORK/s3-$shape; rm -rf "$OUT"; mkdir -p "$OUT"; chown $ADMIN: "$OUT"
@@ -66,6 +70,14 @@ IN
     chmod 0755 "$OUT/inner.sh"
     setsid systemd-run --quiet --scope --unit="$U" -p Delegate=yes -p MemoryMax=1G -p TasksMax=512 -- \
         "$OUT/inner.sh" runuser -u $ADMIN -- "${ENVA[@]}" "${ARGV[@]}" > "$OUT/run.log" 2>&1 < /dev/null &
+    TARGET=/system.slice/$U.scope ;;
+  scope-plain)
+    t3s_global; EXTRA_GLOBAL=(--cgroup-manager=cgroupfs)
+    t3s_podman_argv
+    ARGV=("${T3S_ARGV[@]:0:1}" "${EXTRA_GLOBAL[@]}" "${T3S_ARGV[@]:1}" "$IMG" sleep 45)
+    printf 'scope argv: systemd-run --scope --unit=%s -p MemoryMax=1G -p TasksMax=512 -- runuser -u admin -- env -i … ' "$U"; printf ' %q' "${ARGV[@]}"; echo
+    setsid systemd-run --quiet --scope --unit="$U" -p MemoryMax=1G -p TasksMax=512 -- \
+        runuser -u $ADMIN -- "${ENVA[@]}" "${ARGV[@]}" > "$OUT/run.log" 2>&1 < /dev/null &
     TARGET=/system.slice/$U.scope ;;
   parent-user)
     t3s_podman_argv; ARGV=("${T3S_ARGV[@]}" "$IMG" sleep 45)

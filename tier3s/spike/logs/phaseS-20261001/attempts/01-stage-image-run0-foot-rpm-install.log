@@ -1,0 +1,57 @@
+### host 2026-10-01T20:40:13Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && tier3s/spike/stage-image.sh /var/tmp/tier3s-rpms
+CMD
+[vm-exec] guest identity pinned (pid 24863 start 152774)
+
+## 1. foot set: sha256 + rpm signature, then offline rpm install into the VM
+foot-1.28.0-1.1.x86_64.rpm: OK
+libfcft4-3.3.3-1.5.x86_64.rpm: OK
+libnanosvg0-2022.12.22-1.10.x86_64.rpm: OK
+libnanosvgrast0-2022.12.22-1.10.x86_64.rpm: OK
+libutf8proc3-2.12.0-1.1.x86_64.rpm: OK
+terminfo-6.6.20260919-113.1.x86_64.rpm: OK
+/var/tmp/tier3s-rpms/foot-1.28.0-1.1.x86_64.rpm: digests signatures OK
+/var/tmp/tier3s-rpms/libfcft4-3.3.3-1.5.x86_64.rpm: digests signatures OK
+/var/tmp/tier3s-rpms/libnanosvg0-2022.12.22-1.10.x86_64.rpm: digests signatures OK
+/var/tmp/tier3s-rpms/libnanosvgrast0-2022.12.22-1.10.x86_64.rpm: digests signatures OK
+/var/tmp/tier3s-rpms/libutf8proc3-2.12.0-1.1.x86_64.rpm: digests signatures OK
+/var/tmp/tier3s-rpms/terminfo-6.6.20260919-113.1.x86_64.rpm: digests signatures OK
+Verifying...                          ########################################
+Preparing...                          ########################################
+Updating / installing...
+libutf8proc3-2.12.0-1.1               ########################################
+terminfo-6.6.20260919-113.1           ########################################
+libnanosvgrast0-2022.12.22-1.10       ########################################
+libnanosvg0-2022.12.22-1.10           ########################################
+libfcft4-3.3.3-1.5                    ########################################
+foot-1.28.0-1.1                       ########################################
+foot-1.28.0-1.1.x86_64
+libfcft4-3.3.3-1.5.x86_64
+libutf8proc3-2.12.0-1.1.x86_64
+libnanosvg0-2022.12.22-1.10.x86_64
+libnanosvgrast0-2022.12.22-1.10.x86_64
+terminfo-6.6.20260919-113.1.x86_64
+
+## 2. dependency closure of the seeds over the VM rpmdb
+closure: 283 packages
+283
+
+## 3. assemble rootfs from the closure's files (docs/ghosts/man/locale skipped)
+tar warnings: 0
+
+## 4. minimal identity + caches + banner
+fc-cache ok
+533M	/var/tmp/tier3s-spike/rootfs
+
+## 5. import into admin's rootless store as localhost/tier3s-spike/tw-terminals:20260929
+783937ceeec9b643cef4c478f5d254eeb321f0c7bbab77ae307211bdaf42f805  /var/tmp/tier3s-spike/rootfs.tar
+sha256:24eab98f8ce5d18104c4552cc4ca7093c5ee721cb3c7e7e1ee493844a511b771
+24eab98f8ce5d18104c4552cc4ca7093c5ee721cb3c7e7e1ee493844a511b771 557774074 1000:1000 [LANG=C.UTF-8]
+STAGE-IMAGE DONE
+[vm-exec] --- stderr ---
+Getting image source signatures
+Copying blob sha256:783937ceeec9b643cef4c478f5d254eeb321f0c7bbab77ae307211bdaf42f805
+Copying config sha256:24eab98f8ce5d18104c4552cc4ca7093c5ee721cb3c7e7e1ee493844a511b771
+Writing manifest to image destination
+[vm-exec] --- end stderr ---
+### exit=0
