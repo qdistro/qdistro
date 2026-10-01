@@ -9,7 +9,12 @@ import sys
 from pathlib import Path
 
 from qdistro_presentation.cli import main
-from qdistro_presentation.model import DEFAULT_DARK_COLORS, MAX_BYTES, example_snapshot, parse_snapshot_text
+from qdistro_presentation.model import (
+    DEFAULT_DARK_COLORS,
+    MAX_BYTES,
+    example_snapshot,
+    parse_snapshot_text,
+)
 
 
 class _Stdin:
