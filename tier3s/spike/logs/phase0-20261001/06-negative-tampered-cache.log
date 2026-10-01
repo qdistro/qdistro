@@ -1,5 +1,5 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && rm -rf /var/tmp/negcache && mkdir -p /var/tmp/negcache/20260928.0 && cp /var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd /var/tmp/negcache/20260928.0/ && printf x >> /var/tmp/negcache/20260928.0/gvisor.tar.zstd && mv /usr/libexec/qdistro/runsc /var/tmp/runsc.keep && tier3s/provision-runsc.sh --offline --cache-dir /var/tmp/negcache; echo "### provision exit=$? (expect 1)"; ls /usr/libexec/qdistro/runsc 2>&1; rm -rf /var/tmp/negcache; mv /var/tmp/runsc.keep /usr/libexec/qdistro/runsc'
-[vm-exec] guest identity pinned (pid 10534 start 58638)
+[vm-exec] guest identity pinned (pid 12385 start 62746)
 ### provision exit=1 (expect 1)
 ls: cannot access '/usr/libexec/qdistro/runsc': No such file or directory
 ### exit=0

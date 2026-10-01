@@ -1,10 +1,5 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc && tier3s/probe.sh --user admin | tail -1'
-[vm-exec] guest identity pinned (pid 10872 start 59024)
-provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd)
-provision-runsc: all 6 pinned files verified
-provision-runsc: runsc --version: runsc version release-20260928.0
-provision-runsc: rolling back
-### exit=1
-[vm-exec] --- stderr ---
-mv: cannot exchange '/usr/libexec/qdistro/runsc.new.10874' and '/usr/libexec/qdistro/runsc/runsc.new.10874': Unknown error -1
-[vm-exec] --- end stderr ---
+[vm-exec] guest identity pinned (pid 12964 start 63239)
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+RESULT PASS: tier 3s prerequisites present
+### exit=0

@@ -1,5 +1,5 @@
 ### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && mv /usr/libexec/qdistro/runsc/runsc /root/runsc.aside && tier3s/probe.sh --user admin; echo "### probe exit=$? (expect 1)"; mv /root/runsc.aside /usr/libexec/qdistro/runsc/runsc'
-[vm-exec] guest identity pinned (pid 10376 start 58513)
+[vm-exec] guest identity pinned (pid 12226 start 62621)
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)
 PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
@@ -11,7 +11,7 @@ PASS newuidmap: /usr/bin/newuidmap
 PASS newgidmap: /usr/bin/newgidmap
 PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
 FAIL runsc: /usr/libexec/qdistro/runsc/runsc missing (run tier3s/provision-runsc.sh as root)
-FAIL bundle: file set differs: 
+FAIL bundle: file set differs: missing=[f runsc,] unexpected=[]
 PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
 PASS podman: 6.0.2 (>= 6)
 PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
