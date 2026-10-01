@@ -41,6 +41,10 @@ conditions are not optional:
    app's registry advertises qdwin's privileged globals (locker, shell,
    virtual keyboard, layer shell). Binds were not tested.
 
+Reviews (in `todo/paravirt/reviews/`): codex sol r1 REVISE (folded), sol r2
+APPROVE, codex astra milestone APPROVE. Astra's P1–P3 items are Phase A/B
+planning changes, folded into `05` and marked *[astra s]*.
+
 ## Scripts
 
 | File | Runs on | Role |

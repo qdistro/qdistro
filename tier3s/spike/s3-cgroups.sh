@@ -70,6 +70,9 @@ launch() {
     ARGV=("${T3S_ARGV[@]:0:1}" "${EXTRA_GLOBAL[@]}" "${T3S_ARGV[@]:1}" "$IMG" sleep 45)
     printf 'scope argv: systemd-run --scope --unit=%s -p Delegate=yes -p MemoryMax=1G -p TasksMax=512 -- sh -c <%s; mkdir sandbox> runuser -u admin -- env -i … ' "$U" "$([ $CHOWN = 1 ] && echo 'chown own cgroup to admin' || echo 'NO chown')"; printf ' %q' "${ARGV[@]}"; echo
     echo "toggles: --cgroup-parent=$PARENT chown-to-admin=$CHOWN"
+    # SPIKE ONLY [astra s]: root executes inner.sh from $OUT, which is
+    # chowned to admin, so admin could swap it. Never copy this into a
+    # launcher; use an installed root-owned helper under root-owned dirs.
     cat > "$OUT/inner.sh" <<IN
 #!/bin/sh
 cg=/sys/fs/cgroup\$(sed 's/^0:://' /proc/self/cgroup)
