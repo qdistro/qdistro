@@ -1,6 +1,11 @@
 """Reader mode plugin."""
 
+import json
+import shutil
+import subprocess
 from unittest.mock import MagicMock
+
+import pytest
 
 
 def test_plugin_has_command(window):
@@ -88,3 +93,112 @@ def test_inject_and_restyle_reject_non_hex(monkeypatch):
         assert "url(" not in js
         assert "#1e1e1e" in js
         assert "#3d8fd4" in js
+
+
+_READER_RESTYLE_HARNESS = r"""
+const article = "Keep this article";
+const iframe = {
+  id: "__qdb_reader_overlay",
+  srcdoc: "<p>Keep this article</p>",
+  style: {
+    _props: {
+      "--qdb-bg": "#f4ecd8",
+      "--qdb-fg": "#222222",
+      "--qdb-accent": "#444444",
+    },
+    background: "#f4ecd8",
+    setProperty(name, value) { this._props[name] = value; },
+  },
+  contentDocument: {
+    documentElement: {
+      style: {
+        _props: {
+          "--qdb-bg": "#f4ecd8",
+          "--qdb-fg": "#222222",
+          "--qdb-accent": "#444444",
+        },
+        setProperty(name, value) { this._props[name] = value; },
+      },
+    },
+    body: { textContent: article },
+  },
+};
+const same = iframe;
+globalThis.document = {
+  getElementById(id) {
+    return id === "__qdb_reader_overlay" ? iframe : null;
+  },
+};
+const result = __RESTYLE__;
+const root = iframe.contentDocument.documentElement.style._props;
+process.stdout.write(JSON.stringify({
+  result,
+  sameIframe: iframe === same,
+  article: iframe.contentDocument.body.textContent,
+  srcdoc: iframe.srcdoc,
+  rootBg: root["--qdb-bg"],
+  rootFg: root["--qdb-fg"],
+  rootAccent: root["--qdb-accent"],
+  outerBg: iframe.style._props["--qdb-bg"],
+  outerBackground: iframe.style.background,
+}));
+"""
+
+
+def _run_reader_restyle_fixture(restyle_js: str) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the reader restyle fixture")
+    harness = _READER_RESTYLE_HARNESS.replace("__RESTYLE__", restyle_js)
+    proc = subprocess.run(
+        [node, "--input-type=commonjs", "-e", harness],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout or "node restyle fixture failed")
+    return json.loads(proc.stdout)
+
+
+def test_restyle_script_updates_iframe_document_root():
+    from qdbrowser.plugins.reader_mode import _build_restyle_js
+    from qdbrowser.theme import overlay_palette
+
+    colors = overlay_palette("dark")
+    assert colors["bg"] != "#f4ecd8"
+    out = _run_reader_restyle_fixture(_build_restyle_js("dark"))
+    assert out["sameIframe"] is True
+    assert out["article"] == "Keep this article"
+    assert out["srcdoc"] == "<p>Keep this article</p>"
+    assert out["result"] == {"ok": True, "restyled": True}
+    assert out["rootBg"] == colors["bg"]
+    assert out["rootFg"] == colors["fg"]
+    assert out["rootAccent"] == colors["accent"]
+    assert out["outerBg"] == colors["bg"]
+    assert out["outerBackground"] == colors["bg"]
+
+
+def test_restyle_document_root_assignments_are_required():
+    from qdbrowser.plugins.reader_mode import _build_restyle_js
+    from qdbrowser.theme import overlay_palette
+
+    colors = overlay_palette("dark")
+    stripped = _build_restyle_js("dark")
+    for prop, key in (
+        ("--qdb-bg", "bg"),
+        ("--qdb-fg", "fg"),
+        ("--qdb-accent", "accent"),
+    ):
+        stripped = stripped.replace(
+            f"doc.documentElement.style.setProperty('{prop}', colors.{key});",
+            "",
+        )
+    assert "doc.documentElement.style.setProperty" not in stripped
+    out = _run_reader_restyle_fixture(stripped)
+    assert out["sameIframe"] is True
+    assert out["article"] == "Keep this article"
+    assert out["rootBg"] == "#f4ecd8"
+    assert out["rootFg"] == "#222222"
+    assert out["rootAccent"] == "#444444"
+    assert out["rootBg"] != colors["bg"]
