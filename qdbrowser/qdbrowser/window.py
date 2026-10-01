@@ -793,6 +793,12 @@ class MainWindow(QMainWindow):
         if plug is not None and hasattr(plug, "open"):
             plug.open()
 
+    def _open_preferences(self):
+        from qdbrowser.preferences import PreferencesDialog
+
+        dlg = PreferencesDialog(self._config, parent=self)
+        dlg.exec()
+
     def iter_webviews(self):
         # Tab splits and application-owned sidebar views (Web panels).
         yield from self.findChildren(WebView)

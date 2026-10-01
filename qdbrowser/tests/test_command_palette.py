@@ -7,7 +7,7 @@ def test_palette_gathers_builtin_and_plugin_entries(window):
     labels = [lbl for lbl, _ in dlg._entries]
     # A handful of built-ins:
     for needed in ("New tab", "Reload", "Toggle reader mode", "Quit",
-                   "Save session", "Toggle DevTools"):
+                   "Save session", "Toggle DevTools", "Preferences…"):
         assert needed in labels, f"missing: {needed}"
     # Plugin contributions:
     assert any("Bookmark" in label for label in labels)

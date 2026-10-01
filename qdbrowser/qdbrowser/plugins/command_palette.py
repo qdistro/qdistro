@@ -82,6 +82,7 @@ class CommandPaletteDialog(QDialog):
             ("Reset zoom", lambda: self._window._zoom_set(1.0)),
             ("Toggle reader mode", self._window._toggle_reader),
             ("Save session", self._window.save_session),
+            ("Preferences…", self._window._open_preferences),
             ("Toggle side panel", self._window._toggle_side_panel),
             ("Split right",
              lambda: self._window._split(Qt.Orientation.Horizontal)),

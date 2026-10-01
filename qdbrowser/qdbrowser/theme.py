@@ -48,14 +48,16 @@ def detect_system_theme() -> str:
 
 
 def resolve_theme(mode: str) -> str:
-    if mode == "dark":
-        return "dark"
-    if mode == "light":
-        return "light"
+    if mode in ("dark", "light", "native"):
+        return mode
     return detect_system_theme()
 
 
 def apply_theme(app: QApplication, mode: str = "system") -> str:
+    if mode == "native":
+        # Without a PresentationController there is no captured platform
+        # palette to restore; leave the current style in place.
+        return "native"
     resolved = resolve_theme(mode)
     if resolved == "light":
         _apply_light(app)

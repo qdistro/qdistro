@@ -27,7 +27,7 @@ DEFAULTS = {
         "show_toolbar": True,
         "show_side_panel": True,
         "side_panel_width": 280,
-        "theme_mode": "system",  # dark / light / system
+        "theme_mode": "system",  # system (Follow desktop) / dark / light / native
         "homepage": "about:blank",
         "search_engine": "https://duckduckgo.com/?q={query}",
         "user_agent": "",  # empty = Qt default
