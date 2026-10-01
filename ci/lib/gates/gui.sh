@@ -714,6 +714,12 @@ Rules:
   rules below apply, and a PASS/FAIL with no attested frame is
   recorded ERROR.
 - Do not edit source files.
+- YOU are the scenario driver. qci already started this run, created the VM
+  above, and launched you; there is no other agent waiting to do the work.
+  Never run \`qci\` (\`ci/bin/qci gui\`, \`full\`, \`bats\`, ...) from here: it
+  refuses inside a scenario agent, and the codex process you find alive in
+  \`ps\` is YOU, not a "parent attempt" to wait for. Execute the scenario's
+  Setup/Steps/Assertions yourself with vm-exec/vm-gui.
 - Every graphical process, dialog, compositor, and input action belongs inside
   the disposable VM named above. Never launch a host GUI program (including
   virt-manager, virt-viewer, remote-viewer, xdg-open, or an app under the host
@@ -3536,7 +3542,12 @@ gui_run_scenario() {
     # fake-VM test declaring `none`) wins; the scenario driver cannot set it.
     local vm_gui_session=${QCI_VM_GUI_SESSION:-auto}
     [ "$lane" = admin ] && vm_gui_session=${QCI_VM_GUI_SESSION:-labwc}
+    # QCI_GUI_SCENARIO_AGENT marks the agent process tree: dispatch.sh refuses
+    # a nested `qci full|bats|gui|...` from inside it (apps/13 ERROR,
+    # full-20261001T124446Z: luna ran `qci gui` on its own VM, hit the run
+    # lock, then waited 8 min on its own codex pid as a "parent agent").
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+        QCI_GUI_SCENARIO_AGENT="$slug" \
         QCI_GUI_ARTIFACT_DIR="$art_alias" QCI_GUI_CAPTURE_LOG="$caplog" \
         QCI_GUI_VIEW_STATE="$viewstate" QCI_VM_GUI_SESSION="$vm_gui_session" \
         run_agent_command "$prompt" "$log_path" "$obs"
@@ -3708,6 +3719,7 @@ gui_run_scenario() {
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
+                    QCI_GUI_SCENARIO_AGENT="$slug" \
                     QCI_GUI_ARTIFACT_DIR="$art_aliasN" QCI_GUI_CAPTURE_LOG="$caplogN" \
                     QCI_GUI_VIEW_STATE="$viewstateN" \
                     run_agent_command "$prompt" "$logN" "$obsN"

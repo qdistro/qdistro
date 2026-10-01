@@ -176,6 +176,20 @@ main() {
         exit "$EXIT_USAGE"
     fi
 
+    # A GUI scenario agent (QCI_GUI_SCENARIO_AGENT, set by gui.sh around
+    # run_agent_command) must drive its scenario, never re-enter the runner.
+    # full-20261001T124446Z apps/13: luna ran `qci gui --vm <its own VM>`, got
+    # "run lock held", then waited on its own codex pid and recorded ERROR.
+    if [ -n "${QCI_GUI_SCENARIO_AGENT:-}" ]; then
+        case "$cmd" in
+            full|bats|gui|gui-admin|image|cleanup|vm-smoke|replay|mmnet|snapshot-daily)
+                echo "qci $cmd: refused inside GUI scenario agent ($QCI_GUI_SCENARIO_AGENT)." >&2
+                echo "You ARE the scenario driver; qci already launched you on \$VMNAME." >&2
+                echo "Run the scenario's steps yourself with scripts/vm/vm-exec and vm-gui." >&2
+                exit "$EXIT_USAGE" ;;
+        esac
+    fi
+
     # Take the host-wide lock before init_run or any VM-destructive gate work.
     # The flock guardian owns the fd for this command's full lifetime; worker
     # children inherit no lock fd. image and cleanup share it with full/bats/gui.

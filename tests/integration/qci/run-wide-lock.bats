@@ -48,6 +48,20 @@ teardown() {
     [ "$(stat -c %i "$lock")" = "$inode" ]
 }
 
+@test "a GUI scenario agent cannot re-enter qci (refused before the lock)" {
+    # full-20261001T124446Z apps/13: the luna driver ran `qci gui` on its own
+    # VM, hit this lock, then waited on its own codex pid. The refusal must
+    # come first (exit 2, not 98) and tell the agent to drive the scenario.
+    local command
+    for command in full bats gui gui-admin image cleanup; do
+        QCI_GUI_SCENARIO_AGENT=apps_13 run "$REPO/ci/bin/qci" "$command"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"refused inside GUI scenario agent"* ]]
+        [[ "$output" != *"held by pid"* ]]
+        [ ! -e "$QCI_RUNS_DIR" ]
+    done
+}
+
 @test "all qci VM commands and kiwi teardown share the same lock" {
     local command
     for command in bats gui gui-admin image cleanup; do
