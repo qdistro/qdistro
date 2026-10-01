@@ -3,7 +3,7 @@
 import os
 
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 # -- Dark palette colors --
 BG_DARK = "#1e1e1e"
@@ -177,6 +177,7 @@ def attach_presentation(app: QApplication, config):
         apply_system_fallback=lambda a: apply_theme(a, detect_system_theme()),
         watch=True,
     )
+    ctrl.changed.connect(lambda *_args: refresh_windows(app))
     _CONTROLLER = ctrl
     if ctrl.state.using_shared_palette:
         return ctrl.state.snapshot.mode if ctrl.state.snapshot else "dark"
@@ -189,6 +190,24 @@ def attach_presentation(app: QApplication, config):
 
 def current_controller():
     return _CONTROLLER
+
+
+def refresh_windows(app: QApplication) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_presentation_update", None)
+        if callable(method):
+            method()
+        else:
+            widget.update()
+            for child in widget.findChildren(QWidget):
+                child.update()
+
+
+def apply_profile_to_all_windows(app: QApplication, profile_name: str) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_profile_to_terminals", None)
+        if callable(method):
+            method(profile_name)
 
 
 def reset_controller_for_tests() -> None:

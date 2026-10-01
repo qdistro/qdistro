@@ -177,6 +177,10 @@ class Config:
         """Get a profile dict, falling back to default profile."""
         profiles = self._data.get("profiles", {})
         profile = copy.deepcopy(DEFAULTS["profiles"]["default"])
+        # Incomplete in-memory profiles should not inherit the fresh-default
+        # desktop source from the template. Stored keys still win.
+        profile["font_source"] = "local"
+        profile["color_source"] = "profile"
         if name in profiles:
             profile.update(profiles[name])
         return profile
