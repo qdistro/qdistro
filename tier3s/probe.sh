@@ -22,7 +22,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-ROOT="${QDISTRO_PROBE_ROOT:-}"          # test hook: alternate root for /etc + /usr/libexec
+HERE="$(cd "$(dirname "$0")" && pwd)"
+PIN="$HERE/RUNSC_RELEASE"               # authoritative pin (the checked-in one)
+# Unit-test hook ONLY: alternate root for /etc + /usr/libexec. In this mode
+# every run is labelled TEST and a clean result exits 3, never 0, so a
+# redirected probe can never be read as a host PASS.
+ROOT="${QDISTRO_PROBE_ROOT:-}"
+[ -z "$ROOT" ] || printf 'TEST MODE: QDISTRO_PROBE_ROOT=%s (not a host verdict)\n' "$ROOT"
 RUNSC_DIR="$ROOT/usr/libexec/qdistro/runsc"
 WRAPPER="$ROOT/usr/libexec/qdistro/tier3s-runsc"
 STAMP="$ROOT/etc/qdistro/runsc-release"
@@ -48,9 +54,9 @@ kv="$(uname -r)"; kmaj="${kv%%.*}"; kmin="${kv#*.}"; kmin="${kmin%%[!0-9]*}"
 if [ "$kmaj" -gt 5 ] || { [ "$kmaj" -eq 5 ] && [ "$kmin" -ge 6 ]; }; then
     pass kernel ">= 5.6 ($kv)"; else fail kernel "$kv < 5.6"; fi
 
-if [ -e /proc/sys/kernel/seccomp ] || grep -q '^Seccomp:' /proc/self/status; then
-    pass seccomp "present ($(grep '^Seccomp:' /proc/self/status | tr -s '\t ' ' '))"
-else fail seccomp "kernel seccomp not compiled in (/proc/sys/kernel/seccomp absent)"; fi
+if [ -e /proc/sys/kernel/seccomp ]; then
+    pass seccomp "/proc/sys/kernel/seccomp present (actions: $(cat /proc/sys/kernel/seccomp/actions_avail 2>/dev/null))"
+else fail seccomp "kernel seccomp filter support absent (/proc/sys/kernel/seccomp missing)"; fi
 
 mun="$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)"
 if [ "$mun" -ge 2 ]; then pass userns "max_user_namespaces=$mun (minimum, not capacity)"
@@ -63,6 +69,11 @@ else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
 # --- launching user's id mapping ------------------------------------------
 if ! id "$USER_NAME" >/dev/null 2>&1; then
     fail user "$USER_NAME does not exist"
+    for c in subuid subgid; do fail "$c" "not checked: user $USER_NAME missing"; done
+    for t in newuidmap newgidmap; do
+        p="$(command -v "$t" 2>/dev/null)"
+        if [ -n "$p" ] && [ -x "$p" ]; then pass "$t" "$p"; else fail "$t" "not installed (shadow package)"; fi
+    done
 else
     for db in subuid subgid; do
         if grep -q "^$USER_NAME:[0-9]*:[1-9][0-9]*$" "/etc/$db" 2>/dev/null; then
@@ -76,24 +87,56 @@ else
     done
 fi
 
-# --- runsc bundle -----------------------------------------------------------
-if [ ! -r "$STAMP" ]; then
+# --- runsc bundle: compared against the checked-in pin, not the stamp -----
+declare -A WANT=()
+pin_get() { sed -n "s/^$1=//p" "$PIN" | tail -1; }
+if [ ! -r "$PIN" ]; then
+    fail pin "$PIN unreadable (run probe.sh from the qdistro tree)"
+else
+    pass pin "$PIN release=$(pin_get release)"
+    WANT[runsc]="$(pin_get runsc_sha512)"
+    while IFS='=' read -r k v; do
+        [[ "$k" =~ ^sidecar_(.+)_sha512$ ]] && WANT["gvisor-bin/${BASH_REMATCH[1]}"]="$v"
+    done < <(grep '^sidecar_' "$PIN")
+fi
+sha() { sha512sum "$1" 2>/dev/null | cut -d' ' -f1; }
+if [ ! -r "$PIN" ]; then
+    fail runsc "not checked: no pin"
+elif [ ! -e "$STAMP" ]; then
     fail runsc "not provisioned ($STAMP missing; run tier3s/provision-runsc.sh as root)"
-elif [ ! -x "$RUNSC_DIR/runsc" ]; then
+elif ! cmp -s "$PIN" "$STAMP"; then
+    fail runsc "installed release stamp $STAMP differs from pin $PIN (re-run provision-runsc.sh)"
+elif [ ! -f "$RUNSC_DIR/runsc" ] || [ -L "$RUNSC_DIR/runsc" ] || [ ! -x "$RUNSC_DIR/runsc" ]; then
     fail runsc "$RUNSC_DIR/runsc missing (run tier3s/provision-runsc.sh as root)"
 else
-    want="$(sed -n 's/^version_string=//p' "$STAMP")"
-    got="$(env -i PATH=/usr/bin:/bin "$RUNSC_DIR/runsc" --version 2>&1 | head -1)"
-    if [ -n "$want" ] && [ "$got" = "$want" ]; then pass runsc "$got (matches pin)"
-    else fail runsc "version '$got' != pin '$want'"; fi
+    want="$(pin_get version_string)"
+    out="$(env -i PATH=/usr/bin:/bin "$RUNSC_DIR/runsc" --version 2>&1)"; rc=$?
+    got="$(printf '%s\n' "$out" | head -1)"
+    if [ "$rc" -eq 0 ] && [ -n "$want" ] && [ "$got" = "$want" ]; then pass runsc "$got (matches pin, rc=0)"
+    else fail runsc "version '$got' rc=$rc != pin '$want'"; fi
 fi
-nside="$(sed -n 's/^sidecar_\(.*\)_sha512=.*/\1/p' "$STAMP" 2>/dev/null)"
-miss=""
-for s in $nside; do [ -x "$RUNSC_DIR/gvisor-bin/$s" ] || miss="$miss $s"; done
-if [ -z "$nside" ]; then fail sidecars "no pin to compare (see runsc)"
-elif [ -z "$miss" ]; then pass sidecars "$RUNSC_DIR/gvisor-bin ($(echo $nside | wc -w) files)"
-else fail sidecars "missing:$miss"; fi
-if [ -x "$WRAPPER" ]; then pass wrapper "$WRAPPER"; else fail wrapper "$WRAPPER missing"; fi
+# Exact installed file set + per-file sha512 against the pin.
+if [ "${#WANT[@]}" -lt 2 ]; then
+    fail bundle "not checked: no pin"
+elif [ ! -d "$RUNSC_DIR" ] || [ -L "$RUNSC_DIR" ]; then
+    fail bundle "$RUNSC_DIR missing"
+else
+    exp="$({ echo "d gvisor-bin"; for f in "${!WANT[@]}"; do echo "f $f"; done; } | LC_ALL=C sort)"
+    have="$(find "$RUNSC_DIR" -mindepth 1 -printf '%y %P\n' | LC_ALL=C sort)"
+    bad=""
+    if [ "$have" != "$exp" ]; then
+        bad="file set differs: $(diff <(echo "$exp") <(echo "$have") | grep '^[<>]' | tr '\n' ' ')"
+    else
+        for f in "${!WANT[@]}"; do
+            [ "$(sha "$RUNSC_DIR/$f")" = "${WANT[$f]}" ] || bad="$bad sha512:$f"
+        done
+    fi
+    if [ -z "$bad" ]; then pass bundle "$RUNSC_DIR: ${#WANT[@]} files, exact set, sha512 match pin"
+    else fail bundle "$bad"; fi
+fi
+if [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ -x "$WRAPPER" ] && cmp -s "$HERE/tier3s-runsc" "$WRAPPER"; then
+    pass wrapper "$WRAPPER (identical to $HERE/tier3s-runsc)"
+else fail wrapper "$WRAPPER missing or differs from $HERE/tier3s-runsc"; fi
 
 # --- podman as the launching user ------------------------------------------
 as_user() {
@@ -134,9 +177,11 @@ if [ -n "$pv" ] && [ -x "$WRAPPER" ]; then
             *) fail label_disable "not recorded ($lbl)" ;; esac
     else
         fail podman_runtime "create with --runtime $WRAPPER --security-opt label=disable failed (rc=$rc): $(echo "$out" | tail -1)"
+        fail label_disable "not checked: create failed"
     fi
 else
-    fail podman_runtime "skipped: podman or wrapper missing"
+    fail podman_runtime "not checked: podman or wrapper missing"
+    fail label_disable "not checked: podman or wrapper missing"
 fi
 
 # --- reported, not required -------------------------------------------------
@@ -147,6 +192,10 @@ info selinux "$(getenforce 2>/dev/null || echo 'getenforce unavailable')"
 if [ -n "$FIRST_FAIL" ]; then
     printf 'RESULT FAIL: first missing prerequisite: %s\n' "$FIRST_FAIL"
     exit 1
+fi
+if [ -n "$ROOT" ]; then
+    printf 'RESULT TEST-PASS: test root %s (exit 3, not a host verdict)\n' "$ROOT"
+    exit 3
 fi
 printf 'RESULT PASS: tier 3s prerequisites present\n'
 exit 0

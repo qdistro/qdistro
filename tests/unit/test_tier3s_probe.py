@@ -35,3 +35,9 @@ def test_names_first_missing_when_runsc_absent(tmp_path):
     fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL ")]
     assert fails and fails[0].split()[1].rstrip(":") in last
     assert "FAIL runsc: not provisioned" in r.stdout
+
+
+def test_test_root_never_exits_zero(tmp_path):
+    r = run(tmp_path)
+    assert r.returncode != 0
+    assert r.stdout.startswith("TEST MODE:")

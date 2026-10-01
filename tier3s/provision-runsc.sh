@@ -26,7 +26,10 @@ PIN="$HERE/RUNSC_RELEASE"
 WRAPPER_SRC="$HERE/tier3s-runsc"
 CACHE_DIR="${QDISTRO_CACHE_DIR:-/var/cache/qdistro}/runsc"
 OFFLINE=0
-PREFIX="${QDISTRO_RUNSC_PREFIX:-}"   # test hook only: alternate root; empty = /
+# Test hook ONLY: an alternate install root for tests/unit. Refused for root
+# (a root run always installs to the real /), and every message says TEST.
+PREFIX="${QDISTRO_RUNSC_PREFIX:-}"
+PIN_OVERRIDE=0
 
 die() { printf 'provision-runsc: FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf 'provision-runsc: %s\n' "$*"; }
@@ -35,14 +38,20 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --offline) OFFLINE=1 ;;
         --cache-dir) shift; CACHE_DIR="${1:?--cache-dir needs a value}" ;;
-        --pin) shift; PIN="${1:?--pin needs a value}" ;;
+        --pin) shift; PIN="${1:?--pin needs a value}"; PIN_OVERRIDE=1 ;;
         -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
     shift
 done
 
-[ -n "$PREFIX" ] || [ "$(id -u)" -eq 0 ] || die "must run as root"
+if [ -n "$PREFIX" ]; then
+    [ "$(id -u)" -ne 0 ] || die "QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root"
+    log "TEST MODE: installing under prefix $PREFIX (not a real install)"
+else
+    [ "$(id -u)" -eq 0 ] || die "must run as root"
+    [ "$PIN_OVERRIDE" -eq 0 ] || die "--pin is a unit-test option (needs QDISTRO_RUNSC_PREFIX); a real install uses $HERE/RUNSC_RELEASE"
+fi
 [ -r "$PIN" ] || die "pin file not readable: $PIN"
 [ -r "$WRAPPER_SRC" ] || die "wrapper not found: $WRAPPER_SRC"
 
@@ -77,18 +86,29 @@ STAMP="$PREFIX/etc/qdistro/runsc-release"
 sha() { sha512sum "$1" | cut -d' ' -f1; }
 
 # --- idempotence: already installed and matching? -------------------------
-installed_matches() {
-    [ -d "$DEST" ] || return 1
-    local f n
+# Expected tree listing: `<type> <relpath>` for every entry, types from
+# find -printf %y (d dir, f regular file, l symlink, ...). Exact match only.
+expected_listing() {
+    { echo "d gvisor-bin"; for f in "${!WANT[@]}"; do echo "f $f"; done; } | LC_ALL=C sort
+}
+tree_matches() {   # $1 = tree root
+    local root="$1" f
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+    [ "$(find "$root" -mindepth 1 -printf '%y %P\n' | LC_ALL=C sort)" = "$(expected_listing)" ] || return 1
     for f in "${!WANT[@]}"; do
-        [ -f "$DEST/$f" ] || return 1
-        [ "$(sha "$DEST/$f")" = "${WANT[$f]}" ] || return 1
+        [ "$(sha "$root/$f")" = "${WANT[$f]}" ] || return 1
     done
-    n="$(find "$DEST" -type f | wc -l)"
-    [ "$n" -eq "${#WANT[@]}" ] || return 1
-    cmp -s "$WRAPPER_SRC" "$WRAPPER_DEST" || return 1
-    cmp -s "$PIN" "$STAMP" || return 1
-    return 0
+}
+installed_matches() {
+    tree_matches "$DEST" || return 1
+    [ -f "$WRAPPER_DEST" ] && [ ! -L "$WRAPPER_DEST" ] && cmp -s "$WRAPPER_SRC" "$WRAPPER_DEST" || return 1
+    [ -f "$STAMP" ] && [ ! -L "$STAMP" ] && cmp -s "$PIN" "$STAMP" || return 1
+}
+check_version() {  # $1 = runsc path; exit 0 AND exact first line required
+    local out rc
+    out="$(env -i PATH=/usr/bin:/bin "$1" --version 2>&1)"; rc=$?
+    VER_SEEN="$(printf '%s\n' "$out" | head -1)"
+    [ "$rc" -eq 0 ] && [ "$VER_SEEN" = "${P[version_string]}" ]
 }
 if installed_matches; then
     log "already installed and matching pin $REL; nothing to do"
@@ -129,31 +149,48 @@ while IFS= read -r f; do
 done < <(find "$STAGE/gvisor-bin" -mindepth 1)
 log "all ${#WANT[@]} pinned files verified"
 
-# --- assemble the new tree, check the version, swap atomically ------------
+# --- assemble everything beside the live paths, then swap ------------------
+# Nothing live changes until the new runsc tree, wrapper and stamp are all
+# staged and verified. The tree swap is one renameat2(RENAME_EXCHANGE)
+# (`mv --exchange`), so /usr/libexec/qdistro/runsc is never absent. Any
+# failure after the swap restores the previous tree, wrapper and stamp.
 install -d -m 0755 "$PREFIX/usr/libexec/qdistro" "$PREFIX/etc/qdistro"
-NEW="$DEST.new.$$"
+NEW="$DEST.new.$$"; WNEW="$WRAPPER_DEST.new.$$"; SNEW="$STAMP.new.$$"
+WOLD="$WRAPPER_DEST.old.$$"; SOLD="$STAMP.old.$$"
+cleanup_new() { rm -rf "$NEW" "$WNEW" "$SNEW"; rm -rf "$STAGE"; }
+trap cleanup_new EXIT
 rm -rf "$NEW"
-install -d -m 0755 "$NEW/gvisor-bin"
-for f in "${!WANT[@]}"; do
-    install -m 0755 "$STAGE/$f" "$NEW/$f"
-done
-[ -n "$PREFIX" ] || chown -R root:root "$NEW"
-for f in "${!WANT[@]}"; do
-    [ "$(sha "$NEW/$f")" = "${WANT[$f]}" ] || { rm -rf "$NEW"; die "post-copy hash mismatch for $f"; }
-done
-ver="$(env -i PATH=/usr/bin:/bin "$NEW/runsc" --version 2>&1 | head -1)" || true
-if [ "$ver" != "${P[version_string]}" ]; then
-    rm -rf "$NEW"
-    die "release skew: runsc --version says '$ver', pin says '${P[version_string]}'"
-fi
-log "runsc --version: $ver"
+install -d -m 0755 "$NEW" "$NEW/gvisor-bin"
+for f in "${!WANT[@]}"; do install -m 0755 "$STAGE/$f" "$NEW/$f"; done
+install -m 0755 "$WRAPPER_SRC" "$WNEW"
+install -m 0644 "$PIN" "$SNEW"
+[ -n "$PREFIX" ] || chown -R root:root "$NEW" "$WNEW" "$SNEW"
+tree_matches "$NEW" || die "staged tree does not match the pin"
+check_version "$NEW/runsc" || die "release skew: runsc --version says '$VER_SEEN', pin says '${P[version_string]}'"
+log "runsc --version: $VER_SEEN"
 
-OLD="$DEST.old.$$"
-[ ! -e "$DEST" ] || mv "$DEST" "$OLD"
-mv "$NEW" "$DEST"
-rm -rf "$OLD"
-install -m 0755 "$WRAPPER_SRC" "$WRAPPER_DEST.new.$$" && mv "$WRAPPER_DEST.new.$$" "$WRAPPER_DEST"
-install -m 0644 "$PIN" "$STAMP.new.$$" && mv "$STAMP.new.$$" "$STAMP"
-[ -n "$PREFIX" ] || chown root:root "$WRAPPER_DEST" "$STAMP"
+HAD_OLD=0; [ -e "$DEST" ] && HAD_OLD=1
+if [ "$HAD_OLD" -eq 1 ] && { [ -L "$DEST" ] || [ ! -d "$DEST" ]; }; then
+    die "$DEST exists and is not a directory"
+fi
+SWAPPED=0
+rollback() {
+    log "rolling back"
+    if [ "$SWAPPED" -eq 1 ]; then
+        if [ "$HAD_OLD" -eq 1 ]; then mv --exchange "$NEW" "$DEST"; else rm -rf "$DEST"; fi
+    fi
+    if [ -e "$WOLD" ]; then mv -f "$WOLD" "$WRAPPER_DEST"; else rm -f "$WRAPPER_DEST"; fi
+    if [ -e "$SOLD" ]; then mv -f "$SOLD" "$STAMP"; else rm -f "$STAMP"; fi
+}
+[ ! -e "$WRAPPER_DEST" ] || cp -a "$WRAPPER_DEST" "$WOLD"
+[ ! -e "$STAMP" ] || cp -a "$STAMP" "$SOLD"
+trap 'rc=$?; [ $rc -eq 0 ] || rollback; rm -f "$WOLD" "$SOLD"; cleanup_new' EXIT
+if [ "$HAD_OLD" -eq 1 ]; then mv --exchange "$NEW" "$DEST"   # NEW now holds the old tree
+else mv -T "$NEW" "$DEST"; fi
+SWAPPED=1
+mv -f "$WNEW" "$WRAPPER_DEST"
+mv -f "$SNEW" "$STAMP"
 installed_matches || die "post-install verification failed"
-log "PASS: installed runsc $REL to $DEST"
+check_version "$DEST/runsc" || die "post-install version check failed ('$VER_SEEN')"
+if [ -n "$PREFIX" ]; then log "PASS (TEST prefix $PREFIX): installed runsc $REL"
+else log "PASS: installed runsc $REL to $DEST"; fi

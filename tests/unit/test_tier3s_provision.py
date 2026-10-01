@@ -122,3 +122,24 @@ def test_offline_without_cache_fails(tmp_path):
     tar.unlink()
     r, _ = run(tmp_path, pin)
     assert r.returncode != 0 and "offline" in r.stderr
+
+
+def test_extra_symlink_breaks_idempotence_and_is_replaced(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    r, root = run(tmp_path, pin)
+    assert r.returncode == 0, r.stderr
+    d = root / "usr/libexec/qdistro/runsc"
+    (d / "gvisor-bin" / "evil").symlink_to("/bin/sh")
+    r2, _ = run(tmp_path, pin)
+    assert r2.returncode == 0, r2.stderr
+    assert "already installed" not in r2.stdout
+    assert not (d / "gvisor-bin" / "evil").exists()
+    assert not list(d.parent.glob("runsc.new.*"))
+
+
+def test_pin_override_refused_without_prefix(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k != "QDISTRO_RUNSC_PREFIX"}
+    r = subprocess.run(["bash", str(SCRIPT), "--pin", str(tmp_path / "x")],
+                       env=env, capture_output=True, text=True)
+    assert r.returncode != 0
