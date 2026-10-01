@@ -151,6 +151,8 @@ say "C2. which syscall makes ls report EPERM under tier3s (runsc --strace)"
 mkdir -p "$OUT/strace-ls"; chown $ADMIN: "$OUT/strace-ls"
 T3S_RTFLAGS=(--runtime-flag=debug --runtime-flag=strace "--runtime-flag=debug-log=$OUT/strace-ls/"); T3S_RUNOPTS=(); t3s_podman_argv
 as_admin "${T3S_ARGV[@]}" "$IMG" ls -ld /run/user/1000 2>&1; echo "rc=$?"
-grep -h ' X ' "$OUT"/strace-ls/*boot* | grep -iE 'errno=|not permitted|EPERM' | sed 's/^.*strace.go:[0-9]*\] //' | tail -15
+# seccomp-denied calls never reach the strace hook; the Sentry logs them as
+# "Syscall <nr>: denied by seccomp" (task_syscall.go). x86_64 numbers.
+grep -h -E 'denied by seccomp|Unsupported syscall' "$OUT"/strace-ls/*boot* | sed -E 's/^.*\] //' | cut -c1-120 | sort | uniq -c
 echo "(end strace excerpt)"
 echo "S1 DONE"
