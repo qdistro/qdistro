@@ -1,9 +1,10 @@
 """Theme palette + stylesheet for qdbrowser (dark / light / system)."""
 
 import os
+import re
 
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 BG_DARK = "#1e1e1e"
 BG_MID = "#2d2d2d"
@@ -131,6 +132,43 @@ def palette_dict(mode: str = "auto") -> dict:
     }
 
 
+_CSS_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_OVERLAY_FALLBACK = {
+    "bg": BG_DARK,
+    "bg_mid": BG_MID,
+    "fg": FG,
+    "border": BORDER,
+    "accent": ACCENT_LIGHT,
+}
+
+
+def css_color_literal(value: object, fallback: str) -> str:
+    """Return an opaque #rrggbb literal, else ``fallback``.
+
+    Overlay JS interpolates these into CSS custom properties. Reject
+    anything that is not a six-digit hex color so a snapshot or palette
+    value cannot become executable JS or unescaped CSS.
+    """
+    if isinstance(value, str) and _CSS_HEX.fullmatch(value.strip()):
+        return value.strip().lower()
+    if isinstance(fallback, str) and _CSS_HEX.fullmatch(fallback.strip()):
+        return fallback.strip().lower()
+    return "#000000"
+
+
+def overlay_palette(mode: str = "auto") -> dict[str, str]:
+    """Validated colors for application-owned page overlays."""
+    raw = palette_dict(mode)
+    fallback = _OVERLAY_FALLBACK
+    return {
+        "bg": css_color_literal(raw.get("bg"), fallback["bg"]),
+        "bg_mid": css_color_literal(raw.get("bg_mid"), fallback["bg_mid"]),
+        "fg": css_color_literal(raw.get("fg"), fallback["fg"]),
+        "border": css_color_literal(raw.get("border"), fallback["border"]),
+        "accent": css_color_literal(raw.get("accent"), fallback["accent"]),
+    }
+
+
 def _apply_dark(app):
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(BG_MID))
@@ -241,6 +279,7 @@ def attach_presentation(app: QApplication, config):
         apply_system_fallback=lambda a: apply_theme(a, detect_system_theme()),
         watch=True,
     )
+    ctrl.changed.connect(lambda *_args: refresh_windows(app))
     _CONTROLLER = ctrl
     if ctrl.state.using_shared_palette:
         return ctrl.state.snapshot.mode if ctrl.state.snapshot else "dark"
@@ -251,6 +290,30 @@ def attach_presentation(app: QApplication, config):
 
 def current_controller():
     return _CONTROLLER
+
+
+def current_resolved_theme(fallback: str = "dark") -> str:
+    """Effective dark/light/native mode for chrome and overlay restyle."""
+    ctrl = current_controller()
+    if ctrl is None:
+        return fallback
+    state = ctrl.state
+    if state.using_shared_palette and state.snapshot is not None:
+        return state.snapshot.mode
+    if state.theme_mode in ("dark", "light", "native"):
+        return state.theme_mode
+    return detect_system_theme()
+
+
+def refresh_windows(app: QApplication) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_presentation_update", None)
+        if callable(method):
+            method()
+        else:
+            widget.update()
+            for child in widget.findChildren(QWidget):
+                child.update()
 
 
 def reset_controller_for_tests() -> None:
