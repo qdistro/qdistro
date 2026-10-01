@@ -7,6 +7,8 @@
 # masking-critical contract: a waiter returns 0 the instant the condition holds,
 # and on TIMEOUT fails LOUD with the last observed state + elapsed seconds.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
     # The production root driver uses cgroup.kill; host bats has no delegated
@@ -158,6 +160,64 @@ setup() {
     run await_broker_pending_action "" 1 1
     [ "$status" -eq 2 ]
     [[ "$output" == *"must be non-empty"* ]]
+}
+
+@test "broker_pending_count: prints exactly the element count of GetPending" {
+    busctl() {
+        [ "$*" = "--system call org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1 GetPending" ] || return 9
+        printf '%s\n' "$BUSCTL_REPLY"
+    }
+    export -f busctl
+    BUSCTL_REPLY='aa{sv} 0' run broker_pending_count
+    [ "$status" -eq 0 ]
+    [ "$output" = 0 ]
+    BUSCTL_REPLY='aa{sv} 2 1 "id" i 7 1 "id" i 8' run broker_pending_count
+    [ "$status" -eq 0 ]
+    [ "$output" = 2 ]
+}
+
+@test "broker_pending_count: never prints a count for an unexpected reply" {
+    busctl() { printf '%s\n' "$BUSCTL_REPLY"; return "${BUSCTL_RC:-0}"; }
+    export -f busctl
+    local bad
+    for bad in 'as 0' 'aa{sv}' 'aa{sv} x' '' 'Call failed: Access denied'; do
+        BUSCTL_REPLY=$bad run --separate-stderr broker_pending_count
+        [ "$status" -eq 1 ]
+        [ -z "$output" ]
+        [[ "$stderr" == *"unexpected GetPending reply"* ]]
+    done
+    BUSCTL_REPLY='' BUSCTL_RC=1 run --separate-stderr broker_pending_count
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"GetPending failed"* ]]
+}
+
+@test "qci_claim_driver: a lock under the scratch root must be an existing <slug>/driver.lock" {
+    local root="$BATS_TEST_TMPDIR/scratch"
+    mkdir -p "$root/the_slug.md"
+    export QCI_GUEST_SCRATCH_ROOT=$root
+    run _qci_claim_scenario_path "$root/the_slug.md/driver.lock"
+    [ "$status" -eq 0 ]
+    run _qci_claim_scenario_path "$BATS_TEST_TMPDIR/elsewhere/driver.lock"
+    [ "$status" -eq 0 ]
+    local bad
+    for bad in "$root/qdistro/the_slug.md/driver.lock" "$root/other.md/driver.lock" \
+        "$root/the_slug.md/other.lock" "$root/driver.lock" "$root/../driver.lock" \
+        "$root/./driver.lock"; do
+        run _qci_claim_scenario_path "$bad"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"is not a scenario lock"* ]]
+        [[ "$output" == *"existing: the_slug.md"* ]]
+    done
+    # The whole claim stops with exit 2 and creates nothing.
+    run bash -c '
+        source "$1"
+        qci_claim_driver "$2"
+        echo RAN
+    ' _ "$REPO_ROOT/ci/lib/guest/gui-waiters.sh" "$root/qdistro/the_slug.md/driver.lock"
+    [ "$status" -eq 2 ]
+    [[ "$output" != *RAN* ]]
+    [ ! -e "$root/qdistro" ]
 }
 
 @test "await_domain_gone: passes when the domain is absent (virsh errors)" {

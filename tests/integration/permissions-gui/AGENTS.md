@@ -329,6 +329,13 @@ stdout** as ground truth:
  `runuser -u admin -- python3 -` (live-stdin) or an installed
  admin script. Do not grep dbus-send text for `dict {` — the
  token is `dict entry(`, and `grep -q` exits 1 on empty.
+ To assert "nothing pending" (or any exact count), use
+ `source /tmp/qci-gui-waiters.sh; broker_pending_count`: it prints
+ one line, the count (`0` when empty), from busctl's `aa{sv} N`
+ header, and fails loudly on any other reply. Compare its own
+ stdout; never pattern-match dbus-send's pretty-printed
+ `array [` / `]` layout, whose `]` is indented
+ (permissions-gui/25, full-20261001T124446Z-1395361).
  - Cached approvals (post-decision):
  ```bash
  SQL_B64=$(base64 -w0 <<'SQL'
