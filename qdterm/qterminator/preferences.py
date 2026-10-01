@@ -774,7 +774,12 @@ class PreferencesDialog(QDialog):
 
         self._config.save()
 
-        from qterminator.theme import apply_theme, current_controller
+        from qterminator.theme import (
+            apply_profile_to_all_windows,
+            apply_theme,
+            current_controller,
+            refresh_windows,
+        )
         app = QApplication.instance()
         if app:
             ctrl = current_controller()
@@ -790,16 +795,10 @@ class PreferencesDialog(QDialog):
                 resolved = apply_theme(app, theme_mode)
             if hasattr(parent, '_resolved_theme'):
                 parent._resolved_theme = resolved
-
-        if hasattr(parent, "apply_profile_to_terminals"):
-            parent.apply_profile_to_terminals("default")
-        elif hasattr(parent, "_tabs"):
-            for i in range(parent._tabs.count()):
-                split = parent._tabs.widget(i)
-                for term in split.find_terminals():
-                    if getattr(term, "profile_name", "default") != "default":
-                        continue
-                    term.apply_profile_fields()
+            # Theme-mode no-op does not emit changed; general ANSI and
+            # other-window profile edits still need an explicit push.
+            refresh_windows(app)
+            apply_profile_to_all_windows(app, "default")
 
         if hasattr(parent, '_tabs'):
             tab_pos_map = {

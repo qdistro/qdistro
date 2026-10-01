@@ -203,6 +203,13 @@ def refresh_windows(app: QApplication) -> None:
                 child.update()
 
 
+def apply_profile_to_all_windows(app: QApplication, profile_name: str) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_profile_to_terminals", None)
+        if callable(method):
+            method(profile_name)
+
+
 def reset_controller_for_tests() -> None:
     global _CONTROLLER
     if _CONTROLLER is not None:
