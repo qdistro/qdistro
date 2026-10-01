@@ -671,7 +671,7 @@ chain_root() {
     [[ "$output" == *"OK   [identity] grub root=UUID"* ]]
     [[ "$output" == *"OK   [identity] EFI/BOOT fallback loader"* ]]
     [[ "$output" == *"OK   [identity] swap in fstab by UUID"* ]]
-    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 17 steps): sdk broker admin-app"*"phone"*"tier5b"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 18 steps): presentation sdk broker admin-app"*"phone"*"tier5b"* ]]
     [[ "$output" == *"OK   [media] socket unit not shipped: absent as required"* ]]
     [[ "$output" == *"OK   [multimachine] broker CLI not shipped: absent as required"* ]]
     # dev: phone rows are requirements (the fixture has no phone unit, so MISS)
@@ -679,12 +679,12 @@ chain_root() {
     [[ "$output" != *"[phone] unit not shipped"* ]]
 }
 
-@test "verify-contents: Phase D rows -- release profile expects 16 steps and NO phone; media present is a FAIL" {
+@test "verify-contents: Phase D rows -- release profile expects 17 steps and NO phone; media present is a FAIL" {
     chain_root release
     mkdir -p "$T/root/etc/systemd/system"; : > "$T/root/etc/systemd/system/qdistro-media-exec.socket"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (release profile, 16 steps):"* ]]
-    [[ "$output" != *"(release profile, 16 steps):"*"phone"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (release profile, 17 steps):"* ]]
+    [[ "$output" != *"(release profile, 17 steps):"*"phone"* ]]
     [[ "$output" == *"OK   [phone] unit not shipped (release profile): absent as required"* ]]
     [[ "$output" == *"FAIL [media] socket unit not shipped: must be absent but exists"* ]]
     [ "$status" -eq 1 ]
@@ -717,7 +717,7 @@ chain_root() {
     # blank lines and comments in the record are tolerated
     chain_root dev "$(printf '# written by config.sh\n\n%s\n' "$(QDISTRO_PROFILE=dev bash -c '. "$1"; resolve_profile >/dev/null; chain_expected_names' _ "$REPO/scripts/install/qdistro-bootstrap.sh")")"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 17 steps)"* ]]
+    [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 18 steps)"* ]]
 }
 
 @test "verify-contents: missing admin app script or wrong desktop command fails its required rows" {

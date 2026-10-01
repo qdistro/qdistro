@@ -68,6 +68,7 @@ image's profile and `verify.sh` repeats the diff on the booted image.
 
 | step | what lands | tester image (dev) | release profile |
 |---|---|---|---|
+| `presentation` | `qdistro_presentation` in the system python, the admin-owned `/var/lib/qdistro/presentation` snapshot directory (no default `current.json`) and its deployment metadata | yes | yes |
 | `sdk` | `qdistro_app` in the system python | yes | yes |
 | `admin-app` | graphical approval queue at the broker-approved `/usr/local/bin/qdistro-admin-approval-app`, a native Wayland launcher, and a discoverable desktop entry | yes | yes |
 | `broker`, `session-manager`, `user-relay`, `polkit`, `pwd`, `qsu`, `browser-bridge`, `portal-backend`, `print`, `snapshots` | the permission arbiter, silo launcher, relay, credential vault, root-exec helper, browser bridge, portals, print proxy, backups | yes | yes |
