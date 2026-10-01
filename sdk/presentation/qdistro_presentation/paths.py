@@ -29,8 +29,10 @@ ENV_OVERRIDE = "QDISTRO_PRESENTATION_FILE"
 Role = Literal["ordinary", "polkit", "locker"]
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | _O_NOFOLLOW
-_O_FILE = os.O_RDONLY | _O_NOFOLLOW
+# O_NONBLOCK so a FIFO/device leaf cannot stall open() before S_ISREG.
+_O_FILE = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
 
 
 def _group_or_other_writable(mode: int) -> bool:

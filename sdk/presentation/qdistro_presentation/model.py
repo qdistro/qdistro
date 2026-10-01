@@ -215,7 +215,10 @@ def _validate_palette(colors: Mapping[str, str]) -> None:
 def _finite_number(value: Any, *, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SnapshotError(f"{field} must be a finite number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise SnapshotError(f"{field} must be a finite number") from exc
     if not math.isfinite(number):
         raise SnapshotError(f"{field} must be a finite number")
     return number
@@ -533,7 +536,10 @@ def _producer_bool(value: Any, *, default: bool) -> bool:
 def _producer_clamp(value: Any, *, default: float, lo: float, hi: float, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return default
     if not math.isfinite(number):
         return default
     return _clamp(number, lo, hi)

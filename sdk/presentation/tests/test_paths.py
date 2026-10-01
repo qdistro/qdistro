@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,23 @@ from qdistro_presentation.paths import (
     walk_open,
 )
 from qdistro_presentation.publish import write_snapshot
+
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
+
+
+def _bounded_python(
+    source: str, *args: str, timeout: float = 2.0
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _PACKAGE_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run(
+        [sys.executable, "-c", source, *args],
+        timeout=timeout,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_symlink_leaf_rejected(tmp_path: Path):
@@ -64,6 +83,40 @@ def test_sticky_world_writable_parent_of_file_rejected(tmp_path: Path):
     os.chmod(leaf, 0o1777)
     with pytest.raises(SnapshotPathError, match="group/other-writable"):
         walk_open(str(leaf / "current.json"), require_unwritable_dirs=True)
+
+
+def test_fifo_leaf_rejected_without_blocking(tmp_path: Path):
+    fifo = tmp_path / "current.json"
+    os.mkfifo(fifo, 0o600)
+    source = (
+        "import sys\n"
+        "from qdistro_presentation.model import SnapshotPathError\n"
+        "from qdistro_presentation.paths import walk_open\n"
+        "try:\n"
+        "    walk_open(sys.argv[1], require_unwritable_dirs=False)\n"
+        "except SnapshotPathError as exc:\n"
+        "    sys.exit(0 if 'regular file' in str(exc) else 2)\n"
+        "sys.exit(3)\n"
+    )
+    proc = _bounded_python(source, str(fifo))
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_fifo_read_snapshot_rejected_without_blocking(tmp_path: Path):
+    fifo = tmp_path / "current.json"
+    os.mkfifo(fifo, 0o600)
+    source = (
+        "import sys\n"
+        "from qdistro_presentation.model import SnapshotPathError\n"
+        "from qdistro_presentation.paths import read_snapshot_at\n"
+        "try:\n"
+        "    read_snapshot_at(sys.argv[1], kind='override', expected_uid=None)\n"
+        "except SnapshotPathError as exc:\n"
+        "    sys.exit(0 if 'regular file' in str(exc) else 2)\n"
+        "sys.exit(3)\n"
+    )
+    proc = _bounded_python(source, str(fifo))
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_forced_override_path_kind():

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -80,6 +82,34 @@ def test_invalid_model_does_not_replace_existing(tmp_path: Path):
     with pytest.raises(SnapshotError):
         write_snapshot(str(tmp_path), bad, require_unwritable_dirs=False, skip_unchanged=False)
     assert (tmp_path / "current.json").read_bytes() == original
+
+
+def test_skip_unchanged_fifo_does_not_block(tmp_path: Path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    path = tmp_path / "current.json"
+    path.unlink()
+    os.mkfifo(path, 0o600)
+    source = (
+        "import sys\n"
+        "from qdistro_presentation.model import example_snapshot\n"
+        "from qdistro_presentation.publish import write_snapshot\n"
+        "result = write_snapshot(sys.argv[1], example_snapshot(), require_unwritable_dirs=False)\n"
+        "sys.exit(0 if result.wrote else 2)\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get(
+        "PYTHONPATH", ""
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", source, str(tmp_path)],
+        timeout=2,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert path.is_file()
 
 
 def test_disabled_envelope_changes_generation(tmp_path: Path):

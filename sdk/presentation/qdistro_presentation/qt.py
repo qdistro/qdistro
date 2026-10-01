@@ -278,7 +278,7 @@ class PresentationController(QObject):
             return None
         try:
             snapshot, identity = load_snapshot(resolved)
-        except (OSError, SnapshotError, SnapshotPathError, RecursionError) as exc:
+        except (OSError, SnapshotError, SnapshotPathError, RecursionError, OverflowError) as exc:
             log.debug("presentation snapshot unread: %s", exc)
             return self._snapshot
         if self._identity == identity and self._snapshot is not None:
@@ -356,7 +356,7 @@ class PresentationController(QObject):
         if os.path.isfile(path):
             try:
                 snapshot, identity = load_snapshot(resolved)
-            except (OSError, SnapshotError, SnapshotPathError):
+            except (OSError, SnapshotError, SnapshotPathError, RecursionError, OverflowError):
                 return
             if identity != self._identity:
                 self._identity = identity

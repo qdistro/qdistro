@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 
 from .model import PresentationSnapshot, SnapshotError, SnapshotPathError, with_generation
-from .paths import _O_NOFOLLOW, _close_quietly, walk_open
+from .paths import _O_NOFOLLOW, _O_NONBLOCK, _close_quietly, walk_open
 
 _TEMP_PREFIX = ".qdistro-presentation-"
 _FILE_MODE = 0o644
@@ -105,7 +105,11 @@ def write_snapshot(
 
         if skip_unchanged:
             try:
-                existing_fd = os.open(filename, os.O_RDONLY | _O_NOFOLLOW, dir_fd=dir_fd)
+                existing_fd = os.open(
+                    filename,
+                    os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                    dir_fd=dir_fd,
+                )
             except OSError:
                 existing_fd = -1
             if existing_fd >= 0:

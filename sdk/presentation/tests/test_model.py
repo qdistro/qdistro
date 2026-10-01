@@ -54,6 +54,22 @@ def test_oversized_json_integer_is_snapshot_error():
         loads_strict('{"version":' + ("9" * 5000) + "}")
 
 
+def test_unrepresentable_font_size_is_snapshot_error():
+    snap = example_snapshot().to_dict()
+    snap["fonts"]["basePointSize"] = int("1" + "0" * 400)
+    with pytest.raises(SnapshotError, match="finite number"):
+        parse_snapshot(snap)
+
+
+def test_producer_unrepresentable_scale_uses_default():
+    snap = normalize_producer(
+        mode="dark",
+        colors=DEFAULT_DARK_COLORS,
+        settings={"ui": {"fontDefaultScale": int("1" + "0" * 400)}},
+    )
+    assert snap.fonts.ui_scale == 1.0
+
+
 def test_rejects_nan_and_infinity():
     with pytest.raises(SnapshotError, match="non-finite"):
         loads_strict('{"v": NaN}')

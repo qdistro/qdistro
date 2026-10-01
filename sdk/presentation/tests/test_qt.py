@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -10,7 +12,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtGui import QFont, QPalette
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
-from qdistro_presentation.model import example_snapshot
+from qdistro_presentation.model import example_snapshot, with_generation
 from qdistro_presentation.paths import ResolvedPath
 from qdistro_presentation.publish import write_disabled_envelope, write_snapshot
 from qdistro_presentation.qt import PresentationController, snapshot_palette
@@ -96,6 +98,32 @@ def test_missing_file_uses_fallback_then_recovers(qapp, tmp_path):
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     ctrl._reload()
     assert ctrl.state.using_shared_palette is True
+    ctrl.stop()
+
+
+def test_unrepresentable_number_keeps_last_good_then_recovers(qapp, tmp_path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    generation = ctrl.state.generation
+    payload = example_snapshot().to_dict()
+    payload["fonts"]["basePointSize"] = int("1" + "0" * 400)
+    (tmp_path / "current.json").write_text(json.dumps(payload), encoding="utf-8")
+    ctrl._reload()
+    assert ctrl.state.generation == generation
+    recovered = with_generation(
+        replace(example_snapshot(), fonts=replace(example_snapshot().fonts, ui_scale=1.25))
+    )
+    write_snapshot(
+        str(tmp_path),
+        recovered,
+        require_unwritable_dirs=False,
+        skip_unchanged=False,
+    )
+    ctrl._reload()
+    assert ctrl.state.generation == recovered.generation
+    assert ctrl.state.ui_point_size == pytest.approx(13.75)
     ctrl.stop()
 
 
