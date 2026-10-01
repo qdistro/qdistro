@@ -1,6 +1,6 @@
 # Phase 0 evidence — 2026-10-01, VM tier3s-261001-221428-2070491-12685 (dev profile)
 
-Logs 00–09 except 04a were re-run with the sol-r1-revised scripts (commit
+Logs 00–09 except 04a were re-run with the sol-r2-revised scripts (commit
 noted in the review brief). All transcripts are `scripts/vm/vm-exec` captures run from the host; every
 command executed inside the VM. Source staged from branch claude/tier3s via a
 host HTTP server (git archive) to /root/qdistro-src; the runsc tarball was
@@ -16,12 +16,13 @@ checked there against upstream's .sha512) and re-checked in the guest.
 | 04a-probe-rootfs-label-dropped.log | (historical, from the FIRST probe version ca63337ad) first probe build: `--rootfs /` create drops `label=disable` (podman 6.0.2) — probe fixed to an image-backed create | finding |
 | 04-probe-pass.log | full probe PASS, exit 0 | PASS |
 | 05-negative-runsc-removed.log | runsc binary moved aside: probe exit 1 naming `runsc` | PASS (negative) |
-| 06-negative-tampered-cache.log | tarball +1 byte: provision exit 1, nothing installed | PASS (negative) |
+| 06-negative-tampered-cache.log | tarball +1 byte: (a) with a differing live install present, provision exit 1 and the live tree is left untouched (sidecar still 644); (b) with no install, exit 1 and nothing installed | PASS (negative) |
+| 07a-negative-sidecar-mode-then-repair.log | sidecar left at 0644 by 06a: probe names `bundle` (mode), provision repairs to 0755 | PASS (negative + repair) |
 | 07-negative-hardened-profile.log | profile=release: probe REFUSE, exit 2 | PASS (negative) |
 | 07b-negative-tampered-install-then-repair.log | installed sidecar +1 byte and an extra symlink: probe names `bundle`; provision repairs via `mv -T --exchange` swap, no leftovers, probe PASS | PASS (negative + repair) |
 | 07c-negative-prefix-hook-refused-for-root.log | root with QDISTRO_RUNSC_PREFIX, or with --pin: refused, exit 1 | PASS (negative) |
 | 08-probe-pass-after-negatives.log | restored state: idempotent provision + probe PASS | PASS |
-| 09-unit-tests.log | tests/unit/test_tier3s_{provision,probe}.py: 12 passed (pytest installed in VM via zypper) | PASS |
+| 09-unit-tests.log | tests/unit/test_tier3s_{provision,probe}.py: 14 passed incl. injected failure-after-swap rollback (pytest installed in VM via zypper) | PASS |
 
 Host deviation (disclosed): while computing per-file hashes on the host the
 extracted `runsc --version` was executed once on the host (prints version, no
