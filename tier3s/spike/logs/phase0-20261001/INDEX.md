@@ -27,3 +27,4 @@ checked there against upstream's .sha512) and re-checked in the guest.
 Host deviation (disclosed): while computing per-file hashes on the host the
 extracted `runsc --version` was executed once on the host (prints version, no
 sandbox). No podman/runsc sandbox step ran on the host.
+| 10-probe-comm-locale.log | sol r3 minor: `LC_ALL=C comm`; 0644 sidecar negative shows no comm warnings, then repair + PASS | PASS |

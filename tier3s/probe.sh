@@ -129,7 +129,7 @@ else
     have="$(find "$RUNSC_DIR" -printf '%y %m %u:%g %P\n' | sed 's/ $/ ./' | LC_ALL=C sort)"
     bad=""
     if [ "$have" != "$exp" ]; then
-        bad="file set differs: missing=[$(comm -23 <(echo "$exp") <(echo "$have") | tr '\n' ',')] unexpected=[$(comm -13 <(echo "$exp") <(echo "$have") | tr '\n' ',')]"
+        bad="file set differs: missing=[$(LC_ALL=C comm -23 <(echo "$exp") <(echo "$have") | tr '\n' ',')] unexpected=[$(LC_ALL=C comm -13 <(echo "$exp") <(echo "$have") | tr '\n' ',')]"
     else
         for f in "${!WANT[@]}"; do
             [ "$(sha "$RUNSC_DIR/$f")" = "${WANT[$f]}" ] || bad="$bad sha512:$f"

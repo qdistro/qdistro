@@ -1,0 +1,11 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 <10 sol-r3 minor: LC_ALL=C comm; sidecar 0644 negative + repair>
+[vm-exec] guest identity pinned (pid 20918 start 109790)
+917d704abdfe1d5ec382b5490df1eb282c60c8df40964299c74f977187c7904d  tier3s/probe.sh
+FAIL bundle: file set differs: missing=[f 755 root:root gvisor-bin/runsc-fd-parking,] unexpected=[f 644 root:root gvisor-bin/runsc-fd-parking,]
+RESULT FAIL: first missing prerequisite: bundle (file set differs: missing=[f 755 root:root gvisor-bin/runsc-fd-parking,] unexpected=[f 644 root:root gvisor-bin/runsc-fd-parking,])
+### probe exit=1 (expect 1)
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+RESULT PASS: tier 3s prerequisites present
