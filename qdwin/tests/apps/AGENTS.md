@@ -186,7 +186,12 @@ image viewer shows as BLACK any region of an image that repeats, at the same
 position in an image of the same size, something it already showed you in this
 session. So the harness gives every image it writes a size of its own (a thin
 black right/bottom margin; the raw screen size is in the frame's `.raw`
-sidecar), and a capture you open for the first time is seen correctly. What
+sidecar), and a capture you open for the first time is seen correctly. THE
+VIEW PAD IS NOT THE SCREEN: that right/bottom margin (1-3 px, the third field
+of the `.raw` sidecar) lies outside the raw screen area, so never report it as
+a black strip, gap or margin, and never let it fail a "fills the screen" / "no
+black margin on any edge" assertion; only black inside the raw screen area
+counts. What
 still breaks it is opening the SAME file again, or a same-size copy of one. For
 any second look, and for any image the harness did not just hand you (a crop
 you made, a copy), run

@@ -933,8 +933,15 @@ Rules:
   pixel, and a second look at the same file are all read as black). So every
   image the harness writes gets a size of its own (a thin black right/bottom
   margin; the raw screen size is in the frame's \`.raw\` sidecar), and a
-  capture you open for the first time is seen correctly. What still breaks it
-  is opening the SAME file again, or a same-size copy of one:
+  capture you open for the first time is seen correctly. THE VIEW PAD IS NOT
+  THE SCREEN: that right/bottom margin (1-3 px, its size is the third field of
+  the \`.raw\` sidecar) lies OUTSIDE the raw screen area, so never report it as
+  a black strip, gap or margin, and never let it fail a "fills the screen" /
+  "no black margin on any edge" assertion; judge edges at the raw screen size
+  and count only black INSIDE that area (qdwin apps/01, 2026-10-01: a 2 px pad
+  under a correctly maximised window was graded "a substantial black strip").
+  What still breaks it is opening the SAME file again, or a same-size copy of
+  one:
   - For ANY second look at an image, and for any image the harness did not just
     hand you (a crop you made, a copy), run
     \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" view-copy <image>\` and open
