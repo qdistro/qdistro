@@ -103,6 +103,9 @@ status)
     as_admin "${T3S_GLOBAL[@]}" inspect --format 'OCIRuntime={{.OCIRuntime}} State={{.State.Status}} Pid={{.State.Pid}} ConmonPid={{.State.ConmonPid}} Mounts={{range .Mounts}}{{.Source}}->{{.Destination}} {{end}}' "t3s-s2-$app" 2>&1
     CPID=$(as_admin "${T3S_GLOBAL[@]}" inspect --format '{{.State.ConmonPid}}' "t3s-s2-$app" 2>/dev/null)
     echo "--- sandbox process tree (conmon $CPID)"; [ -n "$CPID" ] && proc_report "$CPID" | grep -v '^    cmdline=$'
+    echo "--- inside the sandbox (runsc ps, run in podman's userns as admin)"
+    CID=$(as_admin "${T3S_GLOBAL[@]}" inspect --format '{{.Id}}' "t3s-s2-$app" 2>/dev/null)
+    as_admin podman unshare env -i PATH=/usr/bin:/bin "$RUNSC" --root "$ADMIN_RT/runsc" ps "$CID" 2>&1
     echo "--- host waypipe client (unit t3s-s2-client-$app)"
     for p in $(cat /sys/fs/cgroup/system.slice/t3s-s2-client-$app.service/cgroup.procs 2>/dev/null); do
         echo "pid=$p comm=$(cat /proc/$p/comm) uid=$(awk '/^Uid:/{print $2}' /proc/$p/status) exe=$(readlink /proc/$p/exe)"; done

@@ -1,0 +1,63 @@
+### host 2026-10-01T20:50:21Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && sha256sum tier3s/spike/s2-waypipe.sh && tier3s/spike/s2-waypipe.sh start weston-terminal
+CMD
+[vm-exec] guest identity pinned (pid 46485 start 213539)
+5aa0f5826411f2f4d512f380ff892006c62870b2f3a1b6eb23ff999313c7a5f2  tier3s/spike/s2-waypipe.sh
+client argv (as admin, WAYLAND_DISPLAY=wayland-1): waypipe -s /run/user/1000/t3s-bridge-weston-terminal/link.sock -o --no-gpu --title-prefix \[tier3s\]\  client
+total 0
+srw-------. 1 admin admin 0 Oct  1 20:50 link.sock
+sandbox argv (as admin, in unit t3s-s2-sbx-weston-terminal): podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --runtime-flag=host-uds=open run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s2-weston-terminal -v /run/user/1000/t3s-bridge-weston-terminal:/run/qdistro/link:rw -e XDG_RUNTIME_DIR=/run/user/1000 -e HOME=/tmp -e LANG=C.UTF-8 localhost/tier3s-spike/tw-terminals:20260929 waypipe -s /run/qdistro/link/link.sock -o --no-gpu server -- weston-terminal --shell=/usr/local/bin/t3s-banner
+units: client=active sandbox=active
+### exit=0
+### host 2026-10-01T20:50:59Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && tier3s/spike/s2-waypipe.sh status weston-terminal
+CMD
+[vm-exec] guest identity pinned (pid 47022 start 217368)
+units: client=active sandbox=active
+OCIRuntime=/usr/libexec/qdistro/tier3s-runsc State=running Pid=46557 ConmonPid=46544 Mounts=/run/user/1000/t3s-bridge-weston-terminal->/run/qdistro/link 
+--- sandbox process tree (conmon 46544)
+pid=46544 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon pin=- cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+    cmdline=/usr/bin/conmon --api-version 1 -c 505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355 -u 505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355 -r /usr/libexec/qdistro/tier3s-runsc -b /home/admin/.local/share/contain
+pid=46552 ppid=46544 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc pin=runsc_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+    cmdline=runsc-gofer --root=/run/user/1000/runsc --debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --host-uds=open --oci-seccomp=true --ignore-cgroups=true --debug=true --network=none --platform=systrap --systemd-cgroup=true --debug-
+pid=46557 ppid=46544 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+    cmdline=runsc-sandbox --ignore-cgroups=true --debug=true --debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --host-uds=open --network=none --platform=systrap --oci-seccomp=true --systemd-cgroup=true --root=/run/user/1000/runsc --debu
+pid=46558 ppid=46544 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking pin=sidecar_runsc-fd-parking_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46575 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46591 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46594 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46603 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46605 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46607 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46609 ppid=46557 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46592 ppid=46591 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46599 ppid=46591 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46601 ppid=46591 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46595 ppid=46594 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46604 ppid=46603 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46606 ppid=46605 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46608 ppid=46607 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+pid=46610 ppid=46609 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-505805fa9ffe9b710d0dc3999ba3171a3b74f4486586b9f0827fcda7c8472355.scope
+--- host waypipe client (unit t3s-s2-client-weston-terminal)
+pid=46520 comm=runuser uid=0 exe=/usr/sbin/runuser
+pid=46523 comm=waypipe uid=1000 exe=/usr/bin/waypipe
+--- host processes named like the app (expect none: the app runs inside the Sentry)
+(end)
+  46520 root     runuser         /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland
+  46523 admin    waypipe         waypipe -s /run/user/1000/t3s-bridge-weston-terminal/link.sock -o --no-gpu --title-prefix [tier3s]  client
+  46530 root     runuser         /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/100
+  46532 admin    podman          podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runti
+  47022 root     s2-waypipe.sh   /bin/bash tier3s/spike/s2-waypipe.sh status weston-terminal
+--- sandbox log
+could not load cursor 'dnd-move'
+could not load cursor 'dnd-copy'
+could not load cursor 'dnd-none'
+--- client log
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      2 Syscall 122: denied by seccomp
+      2 Syscall 123: denied by seccomp
+      2 Syscall 221: denied by seccomp
+      2 Syscall 86: denied by seccomp
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+### exit=0

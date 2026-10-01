@@ -1,0 +1,26 @@
+### host 2026-10-01T20:50:11Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s2-waypipe.sh && tier3s/spike/s2-waypipe.sh info --no-host-uds; echo "--- sandbox output"; cat /var/tmp/tier3s-spike/s2-info-nohostuds/wayland-info.txt; grep -h -i "connect\|host-uds\|hostuds" /var/tmp/tier3s-spike/s2-info-nohostuds/runsc-debug/*gofer* | tail -5 | cut -c1-250
+CMD
+[vm-exec] guest identity pinned (pid 46259 start 212606)
+5aa0f5826411f2f4d512f380ff892006c62870b2f3a1b6eb23ff999313c7a5f2  tier3s/spike/s2-waypipe.sh
+client argv (as admin, WAYLAND_DISPLAY=wayland-1): waypipe -s /run/user/1000/t3s-bridge-info-nohostuds/link.sock -o --no-gpu --title-prefix \[tier3s\]\  client
+total 0
+srw-------. 1 admin admin 0 Oct  1 20:50 link.sock
+sandbox argv (as admin): podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/tier3s-spike/s2-info-nohostuds/runsc-debug/ run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s2-info-nohostuds -v /run/user/1000/t3s-bridge-info-nohostuds:/run/qdistro/link:rw -e XDG_RUNTIME_DIR=/run/user/1000 -e HOME=/tmp -e LANG=C.UTF-8 localhost/tier3s-spike/tw-terminals:20260929 waypipe -s /run/qdistro/link/link.sock -o --no-gpu server -- wayland-info
+sandbox rc=1 wall=0.21s
+--- wayland-info output: 1 lines; interfaces:
+
+Error: "src/main.rs:475: Failed to connnect to socket at \"/run/qdistro/link/link.sock\": ECONNREFUSED: Connection refused"
+--- client unit after the one-shot connection: active
+--- client log
+--- Sentry: seccomp denials / unsupported syscalls (x86_64 nr)
+      1 Unsupported syscall rseq(…). It is likely that you can safely ignore this message and that this is not the cau
+(end denials)
+--- sandbox output
+Error: "src/main.rs:475: Failed to connnect to socket at \"/run/qdistro/link/link.sock\": ECONNREFUSED: Connection refused"
+D1001 20:50:26.439620       1 connection.go:150] sock read failed, closing connection: EOF
+D1001 20:50:26.439662       1 connection.go:150] sock read failed, closing connection: EOF
+D1001 20:50:26.439712       1 connection.go:150] sock read failed, closing connection: EOF
+D1001 20:50:26.439734       1 connection.go:150] sock read failed, closing connection: EOF
+D1001 20:50:26.439997       1 connection.go:150] sock read failed, closing connection: EOF
+### exit=0
