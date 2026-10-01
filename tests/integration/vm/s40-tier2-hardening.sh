@@ -251,11 +251,14 @@ tokens = []
 for item in m.get("Options") or []:
     tokens.extend(str(item).split(","))
 tokens = [t for t in tokens if t]
+# podman inspect records `-v ...:ro` as Mounts[].RW=false and does not
+# echo a `ro` token in Options (it keeps nodev,nosuid,noexec,rbind).
+rw_false = m.get("RW") is False
 print("src=" + str(m.get("Source") or ""))
 print("rw=" + str(m.get("RW")).lower())
 print("opts=" + ",".join(tokens))
 print("relabel=" + ("yes" if any(t in ("z", "Z") for t in tokens) else "no"))
-print("ro=" + ("yes" if "ro" in tokens else "no"))
+print("ro=" + ("yes" if rw_false or "ro" in tokens else "no"))
 ' <<<"$MOUNT_JSON")
 if echo "$PRES_PARSE" | grep -qx "missing"; then
     fail "presentation directory not bound into the container"
