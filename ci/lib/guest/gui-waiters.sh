@@ -1465,12 +1465,21 @@ qci_claim_done() {
 # driver stalled for the whole host-step timeout with nothing saying why
 # (permissions-gui/25, full-20261001T124446Z-1395361: a retry claimed
 # /tmp/qci/qdistro/<slug>/driver.lock). Refuse it up front, naming the
-# directories that do exist. Paths outside the root are left alone.
+# directories that do exist. Paths outside the root are left alone; a
+# non-canonical spelling of a path inside it (/tmp//qci/..., /tmp/./qci/...)
+# counts as inside and must then be spelled exactly.
 _qci_claim_scenario_path() {
-    local lock=$1 root=${QCI_GUEST_SCRATCH_ROOT:-/tmp/qci} rel slug have
+    local lock=$1 root=${QCI_GUEST_SCRATCH_ROOT:-/tmp/qci} rel slug have norm nroot
     case $lock in
         "$root"/*) ;;
-        *) return 0 ;;
+        *)
+            norm=$(realpath -m -s -- "$lock" 2>/dev/null) || norm=$lock
+            nroot=$(realpath -m -s -- "$root" 2>/dev/null) || nroot=$root
+            case $norm in
+                "$nroot"/*) ;;
+                *) return 0 ;;
+            esac
+            ;;
     esac
     rel=${lock#"$root"/}
     slug=${rel%/driver.lock}

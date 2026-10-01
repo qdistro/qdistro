@@ -203,7 +203,9 @@ setup() {
     local bad
     for bad in "$root/qdistro/the_slug.md/driver.lock" "$root/other.md/driver.lock" \
         "$root/the_slug.md/other.lock" "$root/driver.lock" "$root/../driver.lock" \
-        "$root/./driver.lock"; do
+        "$root/./driver.lock" "$BATS_TEST_TMPDIR//scratch/qdistro/the_slug.md/driver.lock" \
+        "$BATS_TEST_TMPDIR/./scratch/qdistro/the_slug.md/driver.lock" \
+        "$BATS_TEST_TMPDIR//scratch/the_slug.md/driver.lock"; do
         run _qci_claim_scenario_path "$bad"
         [ "$status" -eq 1 ]
         [[ "$output" == *"is not a scenario lock"* ]]
