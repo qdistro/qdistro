@@ -88,6 +88,33 @@ def test_toggle_bold_in_heading_emits_strong(qapp, qtbot):
     assert md.startswith("# ")
 
 
+def test_clear_heading_does_not_invent_strong(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("# hello\n")
+    ed.set_heading(0)
+    assert ed.markdown() == "hello\n"
+
+
+def test_clear_heading_preserves_authored_strong(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("# Hello **world**\n")
+    ed.set_heading(0)
+    out = ed.markdown()
+    assert not out.startswith("#")
+    assert "**world**" in out
+    assert out == "Hello **world**\n"
+
+
+def test_set_heading_on_plain_does_not_emit_strong(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("hello\n")
+    ed.set_heading(2)
+    assert ed.markdown() == "## hello\n"
+
+
 def test_desktop_opt_in_restyles_without_dirty_or_undo(qapp, tmp_path, tmp_notebook, qtbot, monkeypatch):
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
@@ -167,12 +194,62 @@ def test_export_uses_legacy_style_not_live_screen(qapp, tmp_notebook, tmp_path, 
     html_path = tmp_path / "page.html"
     export_page_html(win.notebook, page, html_path)
     html = html_path.read_text()
-    # HTML export CSS is the notebook default serif, not the live snapshot family
-    assert "Georgia" in html or "font-family" in html
+    assert "Georgia" in html
+    assert "Sans Serif" not in html
     pdf_path = tmp_path / "page.pdf"
     export_page_pdf(win.notebook, page, pdf_path)
     assert pdf_path.is_file() and pdf_path.stat().st_size > 0
     win.close()
+
+
+def test_print_uses_dirty_editor_not_disk(qapp, tmp_notebook, qtbot):
+    win = MainWindow()
+    win.open_notebook(str(tmp_notebook))
+    qtbot.addWidget(win)
+    win.editor.set_autosave_enabled(False)
+    page = win._current_page
+    path = win.notebook.file_for(page)
+    before = path.read_text(encoding="utf-8")
+    win.editor.insert_text_at_cursor("DIRTYPRINT")
+    assert win.editor.is_dirty()
+    assert "DIRTYPRINT" not in before
+    doc = win._legacy_export_document()
+    assert "DIRTYPRINT" in doc.toPlainText()
+    assert path.read_text(encoding="utf-8") == before
+    win.close()
+
+
+def test_highlighter_covers_text_after_emoji(qapp):
+    from PyQt6.QtGui import QTextDocument
+    from qnotebook.content_style import ContentPresentationHighlighter, ContentStyle
+
+    recorded: list[tuple[int, int]] = []
+
+    class _Recorder(ContentPresentationHighlighter):
+        def setFormat(self, start, count, fmt):  # noqa: N802
+            recorded.append((int(start), int(count)))
+            super().setFormat(start, count, fmt)
+
+    doc = QTextDocument()
+    doc.setPlainText("😀x")
+    style = ContentStyle(
+        body_family="DejaVu Sans",
+        body_point_size=16,
+        code_family="DejaVu Sans Mono",
+        code_point_size=16,
+        inherit_desktop=True,
+    )
+    hi = _Recorder(doc)
+    hi.set_style(style)
+    block = doc.firstBlock()
+    content_len = max(0, block.length() - 1)
+    covered = [False] * content_len
+    for start, count in recorded:
+        for i in range(start, min(start + count, content_len)):
+            if 0 <= i < content_len:
+                covered[i] = True
+    assert content_len >= 3  # emoji is two UTF-16 units plus 'x'
+    assert all(covered), covered
 
 
 def test_document_fonts_checkbox_default_off_and_distinct(qapp, tmp_notebook, qtbot):

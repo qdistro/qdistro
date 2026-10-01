@@ -125,13 +125,18 @@ def highlight_block_content(highlighter: QSyntaxHighlighter, text: str, style: C
     block = highlighter.currentBlock()
     kind = str(block.blockFormat().property(BLOCK_KIND) or "p")
     level = int(block.blockFormat().property(BLOCK_LEVEL) or 1)
+    block_pos = block.position()
+    # Fragment geometry is UTF-16. Do not clamp with len(text) (Python
+    # code points): a supplementary character is one Python char and two
+    # QTextDocument units, which would skip the rest of the block.
+    content_len = max(0, block.length() - 1)
     it = block.begin()
     while not it.atEnd():
         frag = it.fragment()
         if frag.isValid() and frag.length() > 0 and not frag.charFormat().isImageFormat():
-            rel = frag.position() - block.position()
-            if 0 <= rel < len(text) + 1:
-                length = min(frag.length(), max(0, len(text) - rel))
+            rel = frag.position() - block_pos
+            if rel >= 0:
+                length = min(frag.length(), max(0, content_len - rel))
                 if length > 0:
                     highlighter.setFormat(
                         rel,

@@ -358,14 +358,39 @@ class MarkdownEditor(QTextEdit):
         """Set (or clear with level=0) the heading level for the current block."""
         cur = self.textCursor()
         block_fmt = cur.blockFormat()
+        was_heading = str(block_fmt.property(BLOCK_KIND) or "") == "h"
         if level == 0:
             block_fmt.setHeadingLevel(0)
             block_fmt.setProperty(BLOCK_KIND, "p")
+            block_fmt.setProperty(BLOCK_LEVEL, 0)
         else:
             block_fmt.setHeadingLevel(level)
             block_fmt.setProperty(BLOCK_KIND, "h")
             block_fmt.setProperty(BLOCK_LEVEL, level)
         cur.setBlockFormat(block_fmt)
+        now_heading = level > 0
+        if was_heading != now_heading:
+            self._sync_heading_default_weight(cur.block(), heading=now_heading)
+
+    def _sync_heading_default_weight(self, block, heading: bool) -> None:
+        """Heading default is Bold without CHAR_STRONG; paragraphs must not inherit it."""
+        ranges: list[tuple[int, int, QTextCharFormat]] = []
+        it = block.begin()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid() and frag.length() > 0 and not frag.charFormat().isImageFormat():
+                fmt = QTextCharFormat(frag.charFormat())
+                strong = bool(fmt.property(CHAR_STRONG))
+                fmt.setFontWeight(
+                    QFont.Weight.Bold if heading or strong else QFont.Weight.Normal
+                )
+                ranges.append((frag.position(), frag.position() + frag.length(), fmt))
+            it += 1
+        cursor = QTextCursor(self.document())
+        for start, end, fmt in ranges:
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.setCharFormat(fmt)
 
     def apply_content_presentation(self) -> None:
         """Paint inherited document fonts without dirtying or touching undo."""

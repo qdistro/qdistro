@@ -325,6 +325,23 @@ def test_named_monospace_without_char_code_is_not_inline_code(qapp):
     assert "plain run" in out
 
 
+def test_literal_monospace_without_char_code_is_not_inline_code(qapp):
+    from PyQt6.QtGui import QTextCharFormat, QTextCursor, QTextDocument
+    from qnotebook.md_to_qdoc import markdown_to_qdoc
+    from qnotebook.qdoc_to_md import qdoc_to_markdown
+
+    doc = QTextDocument()
+    markdown_to_qdoc("plain run\n", doc)
+    cur = QTextCursor(doc)
+    cur.select(QTextCursor.SelectionType.Document)
+    fmt = QTextCharFormat()
+    fmt.setFontFamilies(["monospace"])
+    cur.mergeCharFormat(fmt)
+    out = qdoc_to_markdown(doc)
+    assert "`" not in out
+    assert "plain run" in out
+
+
 def test_inline_code_sets_char_code(qapp):
     from PyQt6.QtGui import QTextCursor, QTextDocument
     from qnotebook.md_to_qdoc import CHAR_CODE, markdown_to_qdoc

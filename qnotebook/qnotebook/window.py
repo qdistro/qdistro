@@ -2830,6 +2830,29 @@ class MainWindow(QMainWindow):
             return
         export_page_pdf(self.notebook, self._current_page, Path(path))
 
+    def _legacy_export_document(self):
+        """Deterministic print/export document from the live editor, not disk."""
+        from PyQt6.QtGui import QTextDocument
+
+        from .content_style import legacy_content_style
+        from .md_to_qdoc import markdown_to_qdoc
+
+        export_doc = QTextDocument()
+        page = self._current_page
+        base_path = None
+        resolver = None
+        if self.notebook is not None and page is not None:
+            base_path = self.notebook.file_for(page).parent
+            resolver = self._make_transclusion_resolver(page)
+        markdown_to_qdoc(
+            self.editor.markdown(),
+            export_doc,
+            base_path=base_path,
+            transclusion_resolver=resolver,
+            content_style=legacy_content_style(),
+        )
+        return export_doc
+
     def _print_current_page(self) -> None:
         from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
         if self.notebook is None or self._current_page is None:
@@ -2838,18 +2861,7 @@ class MainWindow(QMainWindow):
         dlg = QPrintDialog(printer, self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
-        from .content_style import legacy_content_style
-        from .md_to_qdoc import markdown_to_qdoc
-        from PyQt6.QtGui import QTextDocument
-
-        export_doc = QTextDocument()
-        markdown_to_qdoc(
-            self.notebook.get_page(self._current_page),
-            export_doc,
-            base_path=self.notebook.file_for(self._current_page).parent,
-            content_style=legacy_content_style(),
-        )
-        export_doc.print(printer)
+        self._legacy_export_document().print(printer)
 
     # ---- misc ----
 
