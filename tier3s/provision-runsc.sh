@@ -86,23 +86,32 @@ STAMP="$PREFIX/etc/qdistro/runsc-release"
 sha() { sha512sum "$1" | cut -d' ' -f1; }
 
 # --- idempotence: already installed and matching? -------------------------
-# Expected tree listing: `<type> <relpath>` for every entry, types from
-# find -printf %y (d dir, f regular file, l symlink, ...). Exact match only.
+# Expected tree listing: `<type> <mode> <owner:group> <relpath>` for every
+# entry (find -printf %y %m %u:%g %P). Exact match only, so an extra entry,
+# a symlink, a lost exec bit or a foreign owner all count as "not installed".
+# Owner is root:root for a real install; the TEST prefix uses the caller.
+OWN="root:root"
+[ -z "$PREFIX" ] || OWN="$(id -un):$(id -gn)"
 expected_listing() {
-    { echo "d gvisor-bin"; for f in "${!WANT[@]}"; do echo "f $f"; done; } | LC_ALL=C sort
+    { echo "d 755 $OWN ."; echo "d 755 $OWN gvisor-bin"
+      for f in "${!WANT[@]}"; do echo "f 755 $OWN $f"; done; } | LC_ALL=C sort
 }
+listing() { find "$1" -printf '%y %m %u:%g %P\n' | sed 's/ $/ ./' | LC_ALL=C sort; }
 tree_matches() {   # $1 = tree root
     local root="$1" f
     [ -d "$root" ] && [ ! -L "$root" ] || return 1
-    [ "$(find "$root" -mindepth 1 -printf '%y %P\n' | LC_ALL=C sort)" = "$(expected_listing)" ] || return 1
+    [ "$(listing "$root")" = "$(expected_listing)" ] || return 1
     for f in "${!WANT[@]}"; do
         [ "$(sha "$root/$f")" = "${WANT[$f]}" ] || return 1
     done
 }
+file_is() {        # $1 path, $2 mode, $3 reference content
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%a %U:%G' "$1")" = "$2 $OWN" ] && cmp -s "$3" "$1"
+}
 installed_matches() {
     tree_matches "$DEST" || return 1
-    [ -f "$WRAPPER_DEST" ] && [ ! -L "$WRAPPER_DEST" ] && cmp -s "$WRAPPER_SRC" "$WRAPPER_DEST" || return 1
-    [ -f "$STAMP" ] && [ ! -L "$STAMP" ] && cmp -s "$PIN" "$STAMP" || return 1
+    file_is "$WRAPPER_DEST" 755 "$WRAPPER_SRC" || return 1
+    file_is "$STAMP" 644 "$PIN" || return 1
 }
 check_version() {  # $1 = runsc path; exit 0 AND exact first line required
     local out rc
@@ -173,23 +182,47 @@ HAD_OLD=0; [ -e "$DEST" ] && HAD_OLD=1
 if [ "$HAD_OLD" -eq 1 ] && { [ -L "$DEST" ] || [ ! -d "$DEST" ]; }; then
     die "$DEST exists and is not a directory"
 fi
-SWAPPED=0
-rollback() {
-    log "rolling back"
-    if [ "$SWAPPED" -eq 1 ]; then
-        if [ "$HAD_OLD" -eq 1 ]; then mv -T --exchange "$NEW" "$DEST"; else rm -rf "$DEST"; fi
+for x in "$WRAPPER_DEST" "$STAMP"; do
+    if [ -e "$x" ] || [ -L "$x" ]; then
+        [ -f "$x" ] && [ ! -L "$x" ] || die "$x exists and is not a regular file"
     fi
-    if [ -e "$WOLD" ]; then mv -f "$WOLD" "$WRAPPER_DEST"; else rm -f "$WRAPPER_DEST"; fi
-    if [ -e "$SOLD" ]; then mv -f "$SOLD" "$STAMP"; else rm -f "$STAMP"; fi
-}
+done
+# Backups of the live wrapper/stamp; the old tree is kept in $NEW after the
+# exchange. All three are deleted only after success or a VERIFIED rollback;
+# otherwise they are left on disk and named.
 [ ! -e "$WRAPPER_DEST" ] || cp -a "$WRAPPER_DEST" "$WOLD"
 [ ! -e "$STAMP" ] || cp -a "$STAMP" "$SOLD"
-trap 'rc=$?; [ $rc -eq 0 ] || rollback; rm -f "$WOLD" "$SOLD"; cleanup_new' EXIT
+SWAPPED=0
+rollback() {       # returns 0 only if the previous state is back in place
+    local ok=0
+    log "rolling back"
+    if [ "$SWAPPED" -eq 1 ]; then
+        if [ "$HAD_OLD" -eq 1 ]; then mv -T --exchange "$NEW" "$DEST" || ok=1
+        else rm -rf "$DEST" || ok=1; fi
+    fi
+    if [ -e "$WOLD" ]; then mv -fT "$WOLD" "$WRAPPER_DEST" || ok=1; else rm -f "$WRAPPER_DEST" || ok=1; fi
+    if [ -e "$SOLD" ]; then mv -fT "$SOLD" "$STAMP" || ok=1; else rm -f "$STAMP" || ok=1; fi
+    return $ok
+}
+on_exit() {
+    local rc=$1
+    if [ "$rc" -ne 0 ]; then
+        if ! rollback; then
+            printf 'provision-runsc: ROLLBACK INCOMPLETE; kept for manual recovery: %s %s %s\n' \
+                "$NEW" "$WOLD" "$SOLD" >&2
+            rm -rf "$STAGE"
+            return
+        fi
+    fi
+    rm -f "$WOLD" "$SOLD"; cleanup_new
+}
+trap 'on_exit $?' EXIT
 if [ "$HAD_OLD" -eq 1 ]; then mv -T --exchange "$NEW" "$DEST"   # NEW now holds the old tree
 else mv -T "$NEW" "$DEST"; fi
 SWAPPED=1
-mv -f "$WNEW" "$WRAPPER_DEST"
-mv -f "$SNEW" "$STAMP"
+[ -z "${QDISTRO_RUNSC_FAIL_AFTER_SWAP:-}" ] || [ -z "$PREFIX" ] || die "TEST: injected failure after swap"
+mv -fT "$WNEW" "$WRAPPER_DEST"
+mv -fT "$SNEW" "$STAMP"
 installed_matches || die "post-install verification failed"
 check_version "$DEST/runsc" || die "post-install version check failed ('$VER_SEEN')"
 if [ -n "$PREFIX" ]; then log "PASS (TEST prefix $PREFIX): installed runsc $REL"

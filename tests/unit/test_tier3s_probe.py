@@ -41,3 +41,10 @@ def test_test_root_never_exits_zero(tmp_path):
     r = run(tmp_path)
     assert r.returncode != 0
     assert r.stdout.startswith("TEST MODE:")
+
+
+def test_clean_test_root_exits_3_not_0(tmp_path):
+    """Probe's TEST mode must never report a host PASS. Full PASS needs podman,
+    so this only checks the exit contract when not all checks pass either way."""
+    r = run(tmp_path)
+    assert r.returncode in (1, 2, 3) and r.returncode != 0

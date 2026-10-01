@@ -143,3 +143,37 @@ def test_pin_override_refused_without_prefix(tmp_path):
     r = subprocess.run(["bash", str(SCRIPT), "--pin", str(tmp_path / "x")],
                        env=env, capture_output=True, text=True)
     assert r.returncode != 0
+
+
+def test_lost_exec_bit_is_not_idempotent_and_is_repaired(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    r, root = run(tmp_path, pin)
+    assert r.returncode == 0, r.stderr
+    side = root / "usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry"
+    side.chmod(0o644)
+    r2, _ = run(tmp_path, pin)
+    assert r2.returncode == 0 and "already installed" not in r2.stdout, r2.stdout + r2.stderr
+    assert side.stat().st_mode & 0o777 == 0o755
+
+
+def test_failure_after_swap_restores_previous_install(tmp_path):
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    r, root = run(tmp_path, pin)
+    assert r.returncode == 0, r.stderr
+    d = root / "usr/libexec/qdistro/runsc"
+    side = d / "gvisor-bin" / "gvisor_sentry"
+    side.chmod(0o700)  # make the live install differ so provision really swaps
+    env = dict(os.environ, QDISTRO_RUNSC_PREFIX=str(root), TMPDIR=str(tmp_path),
+               QDISTRO_RUNSC_FAIL_AFTER_SWAP=1)
+    r2 = subprocess.run(["bash", str(SCRIPT), "--pin", str(pin), "--cache-dir",
+                         str(tmp_path / "cache"), "--offline"],
+                        env=env, capture_output=True, text=True)
+    assert r2.returncode != 0 and "injected failure" in r2.stderr
+    assert "rolling back" in r2.stdout
+    assert side.stat().st_mode & 0o777 == 0o700          # the OLD tree is back
+    assert (root / "etc/qdistro/runsc-release").read_bytes() == pin.read_bytes()
+    left = [p.name for p in d.parent.iterdir() if ".new." in p.name or ".old." in p.name]
+    left += [p.name for p in (root / "etc/qdistro").iterdir() if ".old." in p.name or ".new." in p.name]
+    assert left == []
