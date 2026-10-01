@@ -78,18 +78,21 @@ teardown_file() {
     vm_run "command -v tesseract >/dev/null"
     require "tesseract not installed on VM (needed for launcher visual assertion)"
     # The guest's tesseract (openSUSE libtesseract5 5.5.3-2.1, snapshot
-    # 20260924) aborts on EVERY run during teardown, after the text is out:
-    # "free(): invalid size", rc=134. Not load, not intermittent: the distro's
+    # 20260924) aborted on every observed run during teardown, after the text
+    # was out: "free(): invalid size", rc=134 (4 full runs, 10/10 offline
+    # repros on several inputs). Not load: the distro's
     # CVE-2026-88053 backport (tesseract-CVE-2026-88053.patch) dropped the
     # loop in ADAPT_CLASS_STRUCT's constructor that nulled Config[], because
     # upstream made Config[] a value-initialized std::array -- a change the
     # backport left out (adaptive.h still has a plain C array). So
     # ~ADAPT_CLASS_STRUCT, run by TessBaseAPI::End -> EndAdaptiveClassifier,
-    # deletes uninitialized heap words. Any memory a `new` reuses from an
-    # earlier free holds garbage, so the abort is deterministic per build.
-    # Workaround until openSUSE fixes the package: have glibc hand out zeroed
-    # memory (perturb=255 fills each allocation with 0xff^0xff; tcache off
-    # because its fast path skips the perturb fill). Then Config[] is null as
+    # deletes uninitialized heap words (whatever an earlier free left there,
+    # so whether it aborts depends on the heap layout, not on load).
+    # Workaround until openSUSE fixes the package: perturb=255 makes glibc
+    # fill each fresh malloc-backed allocation with 0xff^0xff = 0 (tcache off
+    # because its fast path skips the perturb fill). This is NOT a general
+    # zeroing allocator (in-place realloc growth is not cleared), but the
+    # ADAPT_CLASS_STRUCT objects come from plain `new`. Then Config[] is null as
     # upstream intends and tesseract exits 0 with byte-identical text. The
     # exit status is still asserted: any other failure fails the test.
     # OMP_THREAD_LIMIT=1: one frame needs no OpenMP threads.
