@@ -138,6 +138,7 @@ _OVERLAY_FALLBACK = {
     "bg_mid": BG_MID,
     "fg": FG,
     "border": BORDER,
+    "accent": ACCENT_LIGHT,
 }
 
 
@@ -164,6 +165,7 @@ def overlay_palette(mode: str = "auto") -> dict[str, str]:
         "bg_mid": css_color_literal(raw.get("bg_mid"), fallback["bg_mid"]),
         "fg": css_color_literal(raw.get("fg"), fallback["fg"]),
         "border": css_color_literal(raw.get("border"), fallback["border"]),
+        "accent": css_color_literal(raw.get("accent"), fallback["accent"]),
     }
 
 

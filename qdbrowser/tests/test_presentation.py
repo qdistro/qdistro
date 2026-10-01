@@ -101,10 +101,14 @@ def test_live_snapshot_restyles_overlay_without_reload(
     current_controller()._reload()
 
     wv.view.page().runJavaScript.assert_called()
-    js = wv.view.page().runJavaScript.call_args[0][0]
-    assert snap_b.colors.mSurface in js
-    assert "removed:true" not in js
-    assert "location.reload" not in js
+    scripts = [call.args[0] for call in wv.view.page().runJavaScript.call_args_list]
+    joined = "\n".join(scripts)
+    assert snap_b.colors.mSurface in joined
+    assert "removed:true" not in joined
+    assert "location.reload" not in joined
+    assert any("__qdb_translate_overlay" in js for js in scripts)
+    assert any("__qdb_reader_overlay" in js for js in scripts)
+    assert any("pickRoot" in js for js in scripts) is False
     dark.apply.assert_not_called()
     assert overlay_palette("auto")["bg"] == snap_b.colors.mSurface
 
@@ -153,9 +157,12 @@ def test_apply_presentation_update_restyles_tab_and_sidebar(window):
         window._active_webview.view.page().runJavaScript,
         sidebar.view.page().runJavaScript,
     ):
-        js = mock_js.call_args[0][0]
-        assert "removed:true" not in js
-        assert "__qdb_translate_overlay" in js
+        scripts = [call.args[0] for call in mock_js.call_args_list]
+        joined = "\n".join(scripts)
+        assert "removed:true" not in joined
+        assert any("__qdb_translate_overlay" in js for js in scripts)
+        assert any("__qdb_reader_overlay" in js for js in scripts)
+        assert any("pickRoot" in js for js in scripts) is False
     dark.apply.assert_any_call(window._active_webview)
     dark.apply.assert_any_call(sidebar)
 

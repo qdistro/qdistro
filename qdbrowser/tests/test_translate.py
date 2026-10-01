@@ -239,10 +239,12 @@ def test_overlay_palette_rejects_non_hex(monkeypatch):
         "bg_mid": "javascript:alert(1)",
         "fg": "#gggggg",
         "border": "url(https://evil.example/x)",
+        "accent": "expression(alert(1))",
     })
     p = theme_mod.overlay_palette("auto")
     assert p["bg"] == "#1e1e1e"
     assert p["fg"] == "#d4d4d4"
+    assert p["accent"] == "#3d8fd4"
     inject = _build_overlay_js("hello", "bonjour")
     restyle = _build_restyle_js()
     for js in (inject, restyle):

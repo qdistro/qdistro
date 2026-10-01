@@ -805,6 +805,9 @@ class MainWindow(QMainWindow):
         translate = self.plugins._instances.get("translate")
         if translate is not None and hasattr(translate, "restyle_overlays"):
             translate.restyle_overlays(views)
+        reader = self.plugins._instances.get("reader_mode")
+        if reader is not None and hasattr(reader, "restyle_overlays"):
+            reader.restyle_overlays(views)
         dark = self.plugins._instances.get("dark_mode")
         if dark is not None and hasattr(dark, "on_appearance_changed"):
             dark.on_appearance_changed(self._resolved_theme, views)
