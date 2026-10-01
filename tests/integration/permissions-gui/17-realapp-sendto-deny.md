@@ -185,7 +185,16 @@ $VMGUI "$VM" screenshot /tmp/17-s1-pending.png
 # 3. Click its center.
 ```
 
-Then, as a separate command, the title wait:
+Then, as a separate command, the title wait. **It must start only AFTER
+the Deny click has been confirmed** (`click-confirm` returned). In the single
+guest driver the click is a host step, so the driver runs
+`qci_host_step s2_deny_click` FIRST and the title-wait loop on the line after
+it; the host does click-preview → click-confirm on `Deny` and only then
+`mkdir`s that step's `.go`. Do not put the loop between S1's capture step and
+the click step: it then polls while the request is still pending, times out on
+`admin approvals (1 pending)` before the click is even made, and S2 fails with
+a deny that actually worked (full-20260930T212305Z-2206698: the loop ran at
+22:44-22:45, the Deny click was confirmed at 22:47).
 
 ```bash
 # Settle before grading. The title is computed from the Pending model's row
