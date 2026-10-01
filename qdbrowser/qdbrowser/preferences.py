@@ -62,6 +62,8 @@ class PreferencesDialog(QDialog):
 
         self.combo_ui_font = QFontComboBox()
         form.addRow("UI font:", self.combo_ui_font)
+        self._ui_font_family_dirty = False
+        self.combo_ui_font.currentTextChanged.connect(self._mark_ui_font_family_dirty)
 
         self.spin_ui_font_size = QSpinBox()
         self.spin_ui_font_size.setRange(6, 48)
@@ -113,10 +115,13 @@ class PreferencesDialog(QDialog):
         )
         self.cb_desktop_fonts.setChecked(not has_font_override)
         effective_family, effective_size = self._effective_ui_font()
+        self.combo_ui_font.blockSignals(True)
         if appearance.get("ui_font_family"):
             self.combo_ui_font.setCurrentText(str(appearance["ui_font_family"]))
         else:
             self.combo_ui_font.setCurrentText(effective_family)
+        self.combo_ui_font.blockSignals(False)
+        self._ui_font_family_dirty = False
         self.spin_ui_font_size.blockSignals(True)
         if appearance.get("ui_font_size_pt"):
             self.spin_ui_font_size.setValue(int(appearance["ui_font_size_pt"]))
@@ -135,14 +140,19 @@ class PreferencesDialog(QDialog):
             appearance.pop("ui_font_family", None)
             appearance.pop("ui_font_size_pt", None)
         else:
-            appearance["ui_font_family"] = self.combo_ui_font.currentText()
-            existing = (self.config.get("appearance", default={}) or {}).get(
-                "ui_font_size_pt"
-            )
+            existing = self.config.get("appearance", default={}) or {}
+            if self._ui_font_family_dirty:
+                appearance["ui_font_family"] = self.combo_ui_font.currentText()
+            elif existing.get("ui_font_family"):
+                appearance["ui_font_family"] = str(existing["ui_font_family"])
+            else:
+                appearance.pop("ui_font_family", None)
             if self._ui_font_size_dirty:
                 appearance["ui_font_size_pt"] = float(self.spin_ui_font_size.value())
-            elif existing is not None:
-                appearance["ui_font_size_pt"] = float(existing)
+            elif existing.get("ui_font_size_pt") is not None:
+                appearance["ui_font_size_pt"] = float(existing["ui_font_size_pt"])
+            else:
+                appearance.pop("ui_font_size_pt", None)
         self.config.set("appearance", appearance)
         self.config.save()
         self._apply_live(theme_mode, appearance)
@@ -173,6 +183,9 @@ class PreferencesDialog(QDialog):
                     refresh_windows(app)
             except Exception as inner:  # noqa: BLE001
                 log.warning("legacy appearance apply failed: %s", inner)
+
+    def _mark_ui_font_family_dirty(self, _value: str) -> None:
+        self._ui_font_family_dirty = True
 
     def _mark_ui_font_size_dirty(self, _value: int) -> None:
         self._ui_font_size_dirty = True

@@ -143,6 +143,29 @@ def test_apply_preserves_unrelated_plugin_keys(qapp, isolated_config):
     assert isolated_config.get("dark_mode", "default") == "never"
 
 
+def test_theme_only_apply_keeps_size_only_override(
+    qapp, isolated_config, tmp_path, monkeypatch
+):
+    isolated_config.set("appearance", {"version": 1, "ui_font_size_pt": 14.0})
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, isolated_config)
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        assert dlg.cb_desktop_fonts.isChecked() is False
+        dlg.combo_theme.setCurrentText("Dark")
+        dlg._apply()
+    finally:
+        dlg.deleteLater()
+    appearance = isolated_config.get("appearance", default={})
+    assert appearance.get("ui_font_size_pt") == 14.0
+    assert "ui_font_family" not in appearance
+    ctrl = current_controller()
+    assert ctrl is not None
+    assert ctrl.state.theme_mode == "dark"
+    assert ctrl.state.ui_family == example_snapshot().fonts.ui_family
+
+
 def test_explicit_eleven_point_size_is_saved(qapp, isolated_config):
     isolated_config.set("appearance", {"version": 1, "ui_font_family": "Inter"})
     dlg = PreferencesDialog(isolated_config)
