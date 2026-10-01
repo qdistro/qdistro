@@ -97,15 +97,19 @@ class DarkModePlugin(PageObserver, CommandProvider):
             resolved = detect_system_theme()
         self._desktop_dark = (resolved == "dark")
 
-    def _effective_mode(self, host: str) -> str:
-        """Resolve the mode that should apply to ``host`` right now."""
+    def _policy_for_host(self, host: str) -> str:
+        """Configured policy for ``host``: auto/always/never/contrast."""
         override = self._site_overrides.get(host)
         if override is None:
             for k, v in self._site_overrides.items():
                 if host == k or host.endswith("." + k):
                     override = v
                     break
-        mode = override or self._global_default
+        return override or self._global_default
+
+    def _effective_mode(self, host: str) -> str:
+        """Resolve the mode that should apply to ``host`` right now."""
+        mode = self._policy_for_host(host)
         if mode == "auto":
             return "always" if self._desktop_dark else "off"
         if mode == "never":
@@ -113,6 +117,23 @@ class DarkModePlugin(PageObserver, CommandProvider):
         if mode in ("always", "contrast"):
             return mode
         return "off"
+
+    def on_appearance_changed(self, resolved_theme: str, webviews) -> None:
+        """Re-evaluate only auto pages when effective app mode changes.
+
+        A color-only palette update keeps ``_desktop_dark`` and must not
+        re-inject page filters.
+        """
+        desktop_dark = resolved_theme == "dark"
+        if desktop_dark == self._desktop_dark:
+            return
+        self._desktop_dark = desktop_dark
+        for wv in webviews or []:
+            if wv is None:
+                continue
+            host = _url_host(wv.url())
+            if self._policy_for_host(host) == "auto":
+                self.apply(wv)
 
     def on_load_finished(self, webview, ok: bool):
         if not ok:

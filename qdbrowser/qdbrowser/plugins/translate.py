@@ -70,17 +70,30 @@ GET_SELECTION_JS = r"""(window.getSelection() || '').toString()"""
 
 
 OVERLAY_JS_TEMPLATE = r"""
-(function(original, translated){
+(function(payload){
+  var original = payload.original;
+  var translated = payload.translated;
+  var colors = payload.colors;
   var id = '__qdb_translate_overlay';
   var old = document.getElementById(id);
   if (old) { old.remove(); return {ok:true, removed:true}; }
+  function applyColors(el, c){
+    el.style.setProperty('--qdb-bg', c.bg);
+    el.style.setProperty('--qdb-fg', c.fg);
+    el.style.setProperty('--qdb-bg-mid', c.bg_mid);
+    el.style.setProperty('--qdb-border', c.border);
+  }
   var wrap = document.createElement('div');
   wrap.id = id;
-  wrap.style.cssText = ''
-    + 'position:fixed;inset:0;z-index:2147483647;'
-    + 'background:__BG__;color:__FG__;'
-    + 'display:flex;font:14px/1.55 system-ui,sans-serif;'
-    + 'overflow:hidden;';
+  applyColors(wrap, colors);
+  wrap.style.position = 'fixed';
+  wrap.style.inset = '0';
+  wrap.style.zIndex = '2147483647';
+  wrap.style.background = 'var(--qdb-bg)';
+  wrap.style.color = 'var(--qdb-fg)';
+  wrap.style.display = 'flex';
+  wrap.style.font = '14px/1.55 system-ui,sans-serif';
+  wrap.style.overflow = 'hidden';
   var left = document.createElement('div');
   var right = document.createElement('div');
   for (var col of [left, right]) {
@@ -88,14 +101,15 @@ OVERLAY_JS_TEMPLATE = r"""
       + 'flex:1 1 50%;padding:24px;overflow:auto;'
       + 'white-space:pre-wrap;word-wrap:break-word;';
   }
-  left.style.borderRight = '1px solid __BORDER__';
+  left.style.borderRight = '1px solid var(--qdb-border)';
   left.textContent = original;
   right.textContent = translated;
   var close = document.createElement('button');
   close.textContent = '×';
   close.style.cssText = ''
     + 'position:absolute;top:12px;right:12px;'
-    + 'background:__BG_MID__;color:__FG__;border:1px solid __BORDER__;'
+    + 'background:var(--qdb-bg-mid);color:var(--qdb-fg);'
+    + 'border:1px solid var(--qdb-border);'
     + 'border-radius:4px;width:32px;height:32px;cursor:pointer;'
     + 'font-size:18px;';
   close.onclick = function(){ wrap.remove(); };
@@ -104,25 +118,43 @@ OVERLAY_JS_TEMPLATE = r"""
   wrap.appendChild(close);
   document.documentElement.appendChild(wrap);
   return {ok:true};
-})(__ARGS__)
+})(__PAYLOAD__)
+"""
+
+
+RESTYLE_JS_TEMPLATE = r"""
+(function(colors){
+  var wrap = document.getElementById('__qdb_translate_overlay');
+  if (!wrap) return {ok:true, missing:true};
+  wrap.style.setProperty('--qdb-bg', colors.bg);
+  wrap.style.setProperty('--qdb-fg', colors.fg);
+  wrap.style.setProperty('--qdb-bg-mid', colors.bg_mid);
+  wrap.style.setProperty('--qdb-border', colors.border);
+  return {ok:true, restyled:true};
+})(__COLORS__)
 """
 
 
 def _build_overlay_js(original: str, translated: str,
                        mode: str = "auto") -> str:
-    """Build the overlay JS. Args go in via one substitution so an
-    ``__ARGS__`` literal inside the page text can't corrupt anything,
-    and the theme palette is interpolated so the overlay matches the
-    user's selected theme."""
-    from qdbrowser.theme import palette_dict
-    p = palette_dict(mode)
-    args = f"{_js_str(original)}, {_js_str(translated)}"
-    return (OVERLAY_JS_TEMPLATE
-            .replace("__ARGS__", args)
-            .replace("__BG__", p["bg"])
-            .replace("__BG_MID__", p["bg_mid"])
-            .replace("__FG__", p["fg"])
-            .replace("__BORDER__", p["border"]))
+    """Build the overlay JS. Payload goes in via one JSON substitution
+    so page text cannot corrupt the script, and colors are validated
+    hex literals assigned to CSS variables."""
+    from qdbrowser.theme import overlay_palette
+    payload = {
+        "original": original,
+        "translated": translated,
+        "colors": overlay_palette(mode),
+    }
+    return OVERLAY_JS_TEMPLATE.replace("__PAYLOAD__", json.dumps(payload))
+
+
+def _build_restyle_js(mode: str = "auto") -> str:
+    """Update CSS variables on an existing overlay. Missing overlay is
+    a no-op; this must not recreate the overlay or touch its text."""
+    from qdbrowser.theme import overlay_palette
+    return RESTYLE_JS_TEMPLATE.replace(
+        "__COLORS__", json.dumps(overlay_palette(mode)))
 
 
 def _js_str(s: str) -> str:
@@ -274,6 +306,26 @@ class TranslatePlugin(CommandProvider):
 
         self._notify(webview, "Translating…")
         threading.Thread(target=_worker, daemon=True).start()
+
+    def restyle_overlays(self, webviews=None):
+        """Restyle existing translate overlays without reload or re-translate."""
+        if webviews is None:
+            win = self._window
+            if win is None:
+                return
+            iter_views = getattr(win, "iter_webviews", None)
+            webviews = list(iter_views()) if callable(iter_views) else []
+            active = getattr(win, "_active_webview", None)
+            if active is not None and active not in webviews:
+                webviews.append(active)
+        js = _build_restyle_js()
+        for wv in webviews:
+            if wv is None:
+                continue
+            try:
+                wv.view.page().runJavaScript(js)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("overlay restyle failed: %s", exc)
 
     def _on_done(self, wv, original: str, translation: str, error: str):
         if wv is None:
