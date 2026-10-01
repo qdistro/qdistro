@@ -101,7 +101,10 @@ desktop. If title chrome is not rendered or OCR is unavailable, use the
 gated `toplevel_added` handle and the visible client surface as evidence;
 do not fail solely because the title text `ws-zero` is unreadable.
 **Assert (1.2):** `qsipc call workspace list` reports `active=0` and
-`occupied` includes `0`.
+`occupied` includes `0`. `occupied=` is a comma-separated list of
+workspace INDICES, not a count: `count=4 active=0 occupied=0` means
+workspace 0 holds a window and PASSES 1.2 (Step 4 then reads
+`occupied=0,1`). Only an empty `occupied=` or a list without `0` fails.
 
 ### Step 2 — switch to workspace 1: WIN-A must vanish
 

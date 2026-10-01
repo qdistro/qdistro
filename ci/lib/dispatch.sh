@@ -176,6 +176,38 @@ main() {
         exit "$EXIT_USAGE"
     fi
 
+    # A GUI scenario agent (QCI_GUI_SCENARIO_AGENT, set by gui.sh around
+    # run_agent_command) must drive its scenario, never re-enter the runner.
+    # full-20261001T124446Z apps/13: luna ran `qci gui --vm <its own VM>`, got
+    # "run lock held", then waited on its own codex pid and recorded ERROR.
+    # `affected --run` reaches the same VM gates through gate_affected, so it
+    # is refused too; selection-only `affected` stays allowed. The scan mirrors
+    # the affected parser: operands of --changed-from/--vm and paths after `--`
+    # are never read as the flag.
+    if [ -n "${QCI_GUI_SCENARIO_AGENT:-}" ]; then
+        local refuse_cmd=$cmd
+        if [ "$cmd" = affected ]; then
+            refuse_cmd=affected-select
+            local -a aff_args=("$@")
+            local aff_i=0
+            while [ "$aff_i" -lt "${#aff_args[@]}" ]; do
+                case "${aff_args[$aff_i]}" in
+                    --changed-from|--vm) aff_i=$((aff_i + 1)) ;;
+                    --run) refuse_cmd="affected --run"; break ;;
+                    --) break ;;
+                esac
+                aff_i=$((aff_i + 1))
+            done
+        fi
+        case "$refuse_cmd" in
+            full|bats|gui|gui-admin|image|cleanup|vm-smoke|replay|mmnet|snapshot-daily|"affected --run")
+                echo "qci $refuse_cmd: refused inside GUI scenario agent ($QCI_GUI_SCENARIO_AGENT)." >&2
+                echo "You ARE the scenario driver; qci already launched you on \$VMNAME." >&2
+                echo "Run the scenario's steps yourself with scripts/vm/vm-exec and vm-gui." >&2
+                exit "$EXIT_USAGE" ;;
+        esac
+    fi
+
     # Take the host-wide lock before init_run or any VM-destructive gate work.
     # The flock guardian owns the fd for this command's full lifetime; worker
     # children inherit no lock fd. image and cleanup share it with full/bats/gui.
