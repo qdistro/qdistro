@@ -484,7 +484,12 @@ class TmuxSharePlugin(MenuProvider):
         for i in range(tabs.count()):
             split = tabs.widget(i)
             for terminal in split.find_terminals():
-                label = getattr(terminal._titlebar, "_tmux_share_label", None)
+                titlebar = getattr(terminal, "_titlebar", None)
+                if titlebar is None:
+                    continue
+                label = titlebar.titlebar_widget("tmux-share")
+                if label is None:
+                    label = getattr(titlebar, "_tmux_share_label", None)
                 if label is not None:
                     label.hide()
 
@@ -492,12 +497,13 @@ class TmuxSharePlugin(MenuProvider):
         titlebar = getattr(terminal, "_titlebar", None)
         if titlebar is None:
             return
-        label = getattr(titlebar, "_tmux_share_label", None)
+        label = titlebar.titlebar_widget("tmux-share")
         if label is None:
             label = QLabel(titlebar)
-            label.setStyleSheet("color: #8fd19e; font-size: 10px; font-weight: bold;")
-            titlebar.layout().insertWidget(3, label)
-            titlebar._tmux_share_label = label
+            titlebar.add_titlebar_widget(
+                "tmux-share", label, side="left", role="secondary"
+            )
+        titlebar._tmux_share_label = label
         if count <= 0:
             label.hide()
             return
