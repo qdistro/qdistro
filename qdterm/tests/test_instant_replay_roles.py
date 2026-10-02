@@ -140,6 +140,7 @@ def test_mainwindow_presentation_update_restyles_replay_overlay(
     win.iter_terminals = lambda: iter(())
     win.badges = None
     win.instant_replay = _Replay()
+    win.timestamps = None
     MainWindow.apply_presentation_update(win)
 
     sheet = overlay.styleSheet()

@@ -14,11 +14,16 @@ Configuration (config.toml):
 
 import time
 
-from PyQt6.QtGui import QColor, QFont, QPainter
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QWidget
 
 from qterminator.config import Config
 from qterminator.plugin import Plugin
+from qterminator.theme import pane_roles
+from qterminator.titlebar import _ui_font
+
+_FALLBACK_SURFACE = "#1e1e1e"
+_FALLBACK_ON_SURFACE_VARIANT = "#646464"
 
 
 class TimestampMargin(QWidget):
@@ -28,7 +33,11 @@ class TimestampMargin(QWidget):
         super().__init__(parent)
         self._timestamps = []  # list of (y_position, timestamp)
         self._line_height = 16
+        self._bg = QColor(_FALLBACK_SURFACE)
+        self._fg = QColor(_FALLBACK_ON_SURFACE_VARIANT)
+        self._font = _ui_font(relative=0.9)
         self.setFixedWidth(80)
+        self.apply_presentation_update()
 
     def set_line_height(self, height):
         self._line_height = height
@@ -37,13 +46,27 @@ class TimestampMargin(QWidget):
         self._timestamps = timestamps
         self.update()
 
+    def apply_presentation_update(self) -> None:
+        self._apply_style()
+        self.update()
+
+    def _apply_style(self) -> None:
+        roles = pane_roles(self)
+        bg = QColor(roles["surface"])
+        if not bg.isValid():
+            bg = QColor(_FALLBACK_SURFACE)
+        fg = QColor(roles["on_surface_variant"])
+        if not fg.isValid():
+            fg = QColor(_FALLBACK_ON_SURFACE_VARIANT)
+        self._bg = bg
+        self._fg = fg
+        self._font = _ui_font(relative=0.9)
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(30, 30, 30))
-
-        painter.setPen(QColor(100, 100, 100))
-        font = QFont("monospace", 9)
-        painter.setFont(font)
+        painter.fillRect(self.rect(), self._bg)
+        painter.setPen(self._fg)
+        painter.setFont(self._font)
 
         for y_pos, ts in self._timestamps:
             # Convert timestamp to string
@@ -80,6 +103,8 @@ class TimestampsPlugin(Plugin):
             return
 
         self._window = app_controller
+        if not hasattr(app_controller, "timestamps"):
+            app_controller.timestamps = self
 
         # Attach to existing terminals
         tabs = getattr(app_controller, "_tabs", None)
@@ -100,6 +125,10 @@ class TimestampsPlugin(Plugin):
                 _orig(terminal)
                 _self._attach_terminal(terminal)
             app_controller._connect_terminal = wrapped
+
+    def apply_presentation_update(self) -> None:
+        for margin in self._margins.values():
+            margin.apply_presentation_update()
 
     def _attach_terminal(self, terminal):
         """Attach to a terminal to track timestamps.

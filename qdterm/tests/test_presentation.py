@@ -127,6 +127,7 @@ def test_mainwindow_presentation_update_restyles_titlebar(qapp, tmp_path, monkey
     win.iter_terminals = lambda: iter(terms)
     win.badges = None
     win.instant_replay = None
+    win.timestamps = None
     win.apply_presentation_update()
     assert snap.colors.mPrimary in active.styleSheet()
     assert snap.colors.mOnPrimary in active._title_label.styleSheet()
