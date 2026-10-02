@@ -144,6 +144,7 @@ def test_mainwindow_presentation_update_restyles_badge_overlays(
     win.badges = _Badges()
     win.instant_replay = None
     win.timestamps = None
+    win.tmux_share_plugin = None
     MainWindow.apply_presentation_update(win)
 
     sheet = overlay.styleSheet().replace(" ", "")

@@ -128,6 +128,7 @@ def test_mainwindow_presentation_update_restyles_titlebar(qapp, tmp_path, monkey
     win.badges = None
     win.instant_replay = None
     win.timestamps = None
+    win.tmux_share_plugin = None
     win.apply_presentation_update()
     assert snap.colors.mPrimary in active.styleSheet()
     assert snap.colors.mOnPrimary in active._title_label.styleSheet()
