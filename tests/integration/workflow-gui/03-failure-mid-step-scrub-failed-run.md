@@ -1,5 +1,7 @@
 # 03 — failure mid-step → secrets scrubbed → run marked failed
 
+<!-- qci:visual: required -->
+
 **What**: a workflow delivers a real secret into a per-run ssh-agent and
 then runs a step that fails. Verify that (a) the run is marked `failed` in
 both the audit DB and the admin Workflows tab, and (b) the delivered

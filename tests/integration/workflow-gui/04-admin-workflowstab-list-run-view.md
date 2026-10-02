@@ -1,5 +1,7 @@
 # 04 — admin app Workflows tab: list + run view + Refresh
 
+<!-- qci:visual: required -->
+
 **What**: with several workflows loaded and at least one run on record,
 open the Qt admin app, switch to the Workflows tab, and verify the tab
 renders the workflow definitions table and the recent-runs table with the

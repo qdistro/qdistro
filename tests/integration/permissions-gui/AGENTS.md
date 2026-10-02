@@ -726,16 +726,16 @@ without the drain wrapper.
 
 ### Smoke subset (5-minute pre-push sweep)
 
-The full GUI corpus is 49 scenarios. For a pre-push smoke pass, run the
-five scenarios below — they cover the broker → compositor → shell
+For a pre-push smoke pass, run the six scenarios below (each with
+`ci/bin/qci gui --scenario <absolute path>`) — they cover the broker → compositor → shell
 happy path end-to-end with ~5 min of orchestrator wall-clock per VM.
 
 | Scenario | Why it's load-bearing |
 |---|---|
 | `tests/integration/permissions-gui/04-qt-admin-app-approve.md` | broker + Qt admin app + scope cache — the cross-cutting permission path that touches almost every component |
 | `tests/integration/qdwin-noctalia/01-bar-visible.md` | qdshell renders at all; smoke-detects a fully-broken shell |
-| `qdwin/tests/gui/04-alt-tab-switch.md` | switcher + focus + raise + close-and-refocus; the most-touched compositor code path |
-| `qdwin/tests/gui/03-locker-cycle.md` | lock + unlock end-to-end; exercises the pwd vault binding |
+| `qdwin/tests/gui/16-qdshell-binding-protocol-events.md` | qdshell binds `qdwin_shell_v1`; toplevel add/remove, seat focus and Alt+Tab switching round-trip through the protocol |
+| `qdlocker/tests/gui/01-lock-cycle.md` | Ctrl+Alt+L → qdlocker → password → unlock, and post-unlock typing reaches the app |
 | `qdwin/tests/gui/13-focus-events-emitted.md` | spawn / close / drop-to-no-window — the focus-event ground truth that downstream window-list highlight depends on |
 | `tests/integration/workflow-gui/01-one-trigger-one-run-audit-row.md` | workflow engine spine — a trigger fires a run on the broker loop and it lands in the audit DB + admin Workflows tab (see `tests/integration/workflow-gui/AGENTS.md`) |
 

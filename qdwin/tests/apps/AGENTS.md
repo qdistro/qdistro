@@ -31,6 +31,18 @@ qdwin protocol path against a real client.
 | `12-keystroke-roundtrip.md` | wl_keyboard delivery to focused native + XWayland clients |
 | `13-rdp-subscribe-frame.md` | single-window RDP sharing: subscribe → qdistro-forward spawns → xfreerdp completes handshake + decodes frames |
 
+## Blocking vs the opt-in gui-apps lane
+
+- **Blocking** (every `qci gui`/`qci full`): 02, 03, 04, 12, 13. They are
+  qdwin regressions, not app compatibility, and need only the core test
+  clients `foot`, `xterm` and `xfreerdp`, which `fresh-vm-bootstrap.sh`
+  bakes into every golden. A missing core client is a broken golden: report
+  `ERROR`, not `SKIP`.
+- **gui-apps lane** (periodic, opt-in with `QCI_GUI_APPS=1`): 01 and 05–11,
+  the third-party toolkit apps. The gate skips them before any agent starts
+  unless the run opted in; opting in also bakes their packages
+  (`QDWIN_APP_DEPS=1`) into the gui-qdwin golden.
+
 ## Running
 
 The scenarios use a shared helper at `qdwin-apps-helpers.sh`. Source it
@@ -141,10 +153,11 @@ Pre-conditions for app-deps runs:
   parallel-CI collision hazard). If Tk fails only on the font, report
   `INFRA: Tk font allocation failed`, not a compositor FAIL.
 
-These heavy app dependencies are opt-in for lean GUI goldens. If an
-app-specific package such as `chromium` is absent because the VM was
-not built with `QDWIN_APP_DEPS=1`, report a clean `SKIP: <app> not
-installed; qdwin app deps are opt-in`, not a compositor failure. If
+These heavy app dependencies are opt-in for lean GUI goldens (the gui-apps
+lane above). If an app-specific package such as `chromium` is absent because
+the VM was not built with `QDWIN_APP_DEPS=1`, report a clean `SKIP: <app> not
+installed; qdwin app deps are opt-in`, not a compositor failure. This never
+applies to `foot`, `xterm` or `xfreerdp`. If
 the app-deps lane was explicitly requested and a listed package is
 still missing, report `INFRA: <thing>` so the orchestrator can rebake
 or fix the package list.

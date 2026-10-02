@@ -1,4 +1,4 @@
-# 12 — single-window RDP sharing: subscribe + xfreerdp sees frames
+# 13 — single-window RDP sharing: subscribe + xfreerdp sees frames
 
 <!-- qci:visual: none -->
 
@@ -36,11 +36,9 @@ since the subscribe cursor, with that reason at the end of the line and
 outside the quotes: Step 1 prints `SKIP:` naming that check and exits 77.
 The wire string `no free pipewire output` is not itself a skip.
 Any other missing approval (credentials absent without that denial, a real
-product deny, a bad port) stays a loud FAIL. The *subject* app `foot`,
-however, is part of the opt-in
-`QDWIN_APP_DEPS` matrix: on a lean GUI golden (no `QDWIN_APP_DEPS=1`) it is
-legitimately absent, so SKIP cleanly per the apps/AGENTS.md rule rather than
-ERROR (see the Setup guard below).
+product deny, a bad port) stays a loud FAIL. The *subject* app `foot` is a
+core test client baked into every golden, so a missing `foot` is an ERROR
+(see the Setup guard below).
 
 ## Setup
 
@@ -64,12 +62,12 @@ ACTIVE_SOCKET=$(qdwin_apps_active_socket)
     '/usr/bin/qdwin-bystander --help 2>&1 | grep -q -- --ignore-torn-down' \
     || { echo "FAIL: deploy qdwin-bystander with --ignore-torn-down"; exit 1; }
 
-# Subject app: foot is the toplevel shared over RDP and is part of the opt-in
-# qdwin app-deps matrix. On a lean GUI golden (no QDWIN_APP_DEPS=1) it is
-# legitimately absent — SKIP cleanly rather than ERROR, matching apps/05/07/08.
+# Subject app: foot is the toplevel shared over RDP. It is a core test client
+# baked into every golden (fresh-vm-bootstrap.sh), so its absence is a broken
+# golden: ERROR, not SKIP.
 if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1'; then
-    echo "SKIP: foot not installed; qdwin app deps are opt-in (rerun with QDWIN_APP_DEPS=1)"
-    exit 0
+    echo "ERROR: foot not installed; the golden lacks the core test clients (fresh-vm-bootstrap.sh)"
+    exit 2
 fi
 
 # Arm restoration before the first helper that can stop qdshell or replace the

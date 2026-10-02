@@ -1,5 +1,7 @@
 # 02 — secret delivery: ephemeral ssh-agent socket exists, then gone
 
+<!-- qci:visual: required -->
+
 **What**: a `process_spawn` git-sign workflow delivers a real SSH key from
 the vault into a per-run ssh-agent and waits on the triggering process.
 While that process lives, assert the agent socket EXISTS (and holds the

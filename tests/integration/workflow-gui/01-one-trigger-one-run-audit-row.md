@@ -1,5 +1,7 @@
 # 01 — one trigger → one run → audit row chain
 
+<!-- qci:visual: required -->
+
 **What**: seed a cron workflow with a short interval, let it fire at
 least one run inside the broker, then verify the run is visible both in
 the admin app's Workflows tab (Recent runs, state `completed`) and in the

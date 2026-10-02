@@ -26,6 +26,7 @@ GUI_DIRS = {
     "gui-noctalia": "tests/integration/qdwin-noctalia",
     "gui-qdwin": "qdwin/tests/gui",
     "gui-apps": "qdwin/tests/apps",
+    "gui-workflow": "tests/integration/workflow-gui",
 }
 LANES = ("bats-fast", "bats-slow", *GUI_DIRS)
 
@@ -134,6 +135,10 @@ def main() -> int:
     os.chdir(ROOT)
     env = os.environ.copy()
     env["QCI_TEST_LANE"] = args.lane
+    if args.lane == "gui-apps":
+        # The periodic gui-apps lane: opt into the third-party app scenarios
+        # (qdwin/tests/apps/01, 05-11) and bake their packages into the golden.
+        env["QCI_GUI_APPS"] = "1"
     os.execve(QCI, command, env)
 
 

@@ -591,6 +591,34 @@ log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
 zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
     || { log "  ERROR: zypper install xwayland failed"; exit 3; }
 
+# ---- Core test clients (ALWAYS — not gated by QDWIN_APP_DEPS) -------------
+# Three small clients that BLOCKING tests type into or connect with:
+#   foot     native-Wayland terminal: qdlocker/tests/gui/01 (the only live
+#            lock -> unlock test), qdwin/tests/gui/13, qdwin/tests/apps/03, 12,
+#            13, compositor-shell.bats launcher round-trip.
+#   xterm    XWayland client: qdwin/tests/apps/02, 03, 12.
+#   xfreerdp RDP client (package freerdp): qdwin/tests/apps/13.
+# They used to come only with the opt-in QDWIN_APP_DEPS set, so on the lean
+# default golden those blocking tests SKIPped. The heavy third-party apps
+# (firefox, chromium, vlc, ...) stay opt-in below (the `gui-apps` lane).
+# Fatal like jq above: a golden without them silently skips blocking tests.
+_core_missing=""
+command -v foot >/dev/null 2>&1 || _core_missing="$_core_missing foot"
+command -v xterm >/dev/null 2>&1 || _core_missing="$_core_missing xterm"
+{ command -v xfreerdp3 >/dev/null 2>&1 || command -v xfreerdp >/dev/null 2>&1; } \
+    || _core_missing="$_core_missing freerdp"
+if [ -n "$_core_missing" ]; then
+    log "installing core test clients:$_core_missing"
+    # shellcheck disable=SC2086 # word-split the package list on purpose
+    zypper -n install --no-recommends $_core_missing >/tmp/qdistro-core-clients.log 2>&1 \
+        || { log "  ERROR: zypper install of core test clients failed"; tail -80 /tmp/qdistro-core-clients.log; exit 3; }
+    if ! command -v foot >/dev/null 2>&1 || ! command -v xterm >/dev/null 2>&1 \
+            || ! { command -v xfreerdp3 >/dev/null 2>&1 || command -v xfreerdp >/dev/null 2>&1; }; then
+        log "  ERROR: core test clients still missing after install"
+        exit 3
+    fi
+fi
+
 # ---- Baseline desktop fonts (ALWAYS — not gated by QDWIN_APP_DEPS) ---------
 # qdshell's bar (Clock, ActiveWindow title, Workspace labels, etc.) needs at
 # least one real scalable face backing fontconfig's Sans/Monospace aliases.
@@ -620,15 +648,15 @@ if [ "$_font_ok" -eq 0 ]; then
 fi
 
 # ---- GUI app-deps lane (qdwin XWayland/Wayland app tests) — OPT-IN ---------
-# The qdwin app tests (qdwin/tests/apps/*.md) drive real desktop apps —
-# firefox, xterm, foot, thunar, vlc, chromium, audacity, feh, tk/fltk/swing.
-# OPT-IN (QDWIN_APP_DEPS=1), DEFAULT OFF: this bootstrap is shared by EVERY
+# The third-party app-compatibility tests (qdwin/tests/apps/01, 05-11) drive
+# real desktop apps — firefox, thunar, vlc, chromium, audacity, feh,
+# tk/fltk/swing. OPT-IN (QDWIN_APP_DEPS=1, which `QCI_GUI_APPS=1` sets for
+# the periodic gui-apps lane), DEFAULT OFF: this bootstrap is shared by EVERY
 # golden (bats, gui-admin, gui-qdwin), so installing these heavy packages
-# unconditionally bloated all goldens and (with foot present) unmasked a
-# dormant compositor-shell.bats launcher failure. Only the app-test lane
-# needs them, so it must opt in (e.g. a dedicated `QDWIN_APP_DEPS=1 qci gui`
-# run); the default full run stays lean and stable. With deps absent the app
-# tests are infra-blocked, exactly as before this lane existed.
+# unconditionally bloated all goldens. With deps absent those scenarios SKIP.
+# The marker file written below is what the GUI gate probes to decide that
+# this golden carries the app set (foot alone no longer says so: it is a core
+# test client, installed above).
 #
 # Baseline fonts (dejavu/liberation) are installed ABOVE, always — they are
 # not part of this opt-in set.
@@ -647,7 +675,7 @@ if [ "${QDWIN_APP_DEPS:-0}" = 1 ]; then
     # fltk demo needs fltk-devel+gcc-c++, swing=java(jdk for javac), imlib2=feh.
     # Fonts: already installed in the baseline lane above; listed again here
     # as a no-op ensure for goldens that only hit the app-deps path.
-    _app_pkgs="MozillaFirefox xterm foot gnome-text-editor thunar gvfs gvfs-backends vlc chromium \
+    _app_pkgs="MozillaFirefox gnome-text-editor thunar gvfs gvfs-backends vlc chromium \
 audacity python3-tk fltk fltk-devel gcc-c++ feh \
 java-21-openjdk java-21-openjdk-devel java-17-openjdk java-17-openjdk-devel \
 dejavu-fonts liberation-fonts"
@@ -661,6 +689,8 @@ dejavu-fonts liberation-fonts"
     done
     log "  app-deps: $_app_ok package(s) installed;${_app_fail:+ failed:$_app_fail}"
     [ -n "$_app_fail" ] && log "  (failed packages leave their app test infra-blocked, not the build)"
+    mkdir -p /var/lib/qdistro-ci
+    printf 'installed=%s\nfailed=%s\n' "$_app_ok" "${_app_fail# }" > /var/lib/qdistro-ci/qdwin-app-deps
 else
     log "skipping qdwin app-test deps (QDWIN_APP_DEPS=0)"
 fi
