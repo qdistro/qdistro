@@ -106,6 +106,12 @@ teardown() {   # teardown <token> (caller holds the lock)
         say "$tok: runsc state root $root is missing, replaced or loose; refusing to query or stop $ctr (record and scope preserved)"
         return 3
     fi
+    # the recorded scope is the verified target: systemd's cgroup for scope_unit
+    # must be the recorded one before anything is stopped
+    rel="$(systemctl show -p ControlGroup --value "$scope" 2>/dev/null)"
+    if [ -n "$rel" ] && [ -n "${S[scope_cgroup]:-}" ] && [ "$rel" != "${S[scope_cgroup]}" ]; then
+        say "$tok: $scope is at $rel, not the recorded ${S[scope_cgroup]}; refusing (record preserved)"; return 6
+    fi
     as_admin "$admin" podman container exists "$ctr"; rc=$?
     case "$rc" in
         0)  want="$(as_admin "$admin" podman container inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr")" \
@@ -120,11 +126,7 @@ teardown() {   # teardown <token> (caller holds the lock)
         1)  ;;
         *)  say "$tok: podman query failed (rc=$rc) for $ctr; NOT treating it as absent (record preserved)"; return 4 ;;
     esac
-    # the recorded scope, verified: systemd's cgroup for scope_unit must be the recorded one
     rel="$(systemctl show -p ControlGroup --value "$scope" 2>/dev/null)"
-    if [ -n "$rel" ] && [ -n "${S[scope_cgroup]:-}" ] && [ "$rel" != "${S[scope_cgroup]}" ]; then
-        say "$tok: $scope is at $rel, not the recorded ${S[scope_cgroup]}; refusing"; return 6
-    fi
     [ -n "$rel" ] || rel="${S[scope_cgroup]:-}"
     if [ -n "$rel" ]; then
         dir="$CGROOT$rel"
@@ -150,11 +152,14 @@ teardown() {   # teardown <token> (caller holds the lock)
     return 0
 }
 
-orphan_dir() {   # a per-launch dir without a record: remove only when its scope is gone
+orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a record is
+    # removed only when its scope is gone; a live scope is an error only when
+    # this token was asked for explicitly (strict)
     local tok="$1"
     [ ! -e "$CTL/$tok" ] || return 0
     if unit_live "qdistro-tier3s-$tok.scope"; then
-        say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
+        say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"
+        [ -z "${2:-}" ]; return; fi
     [ ! -d "$LAUNCH_PARENT/$tok" ] || [ -L "$LAUNCH_PARENT/$tok" ] || rm -rf -- "${LAUNCH_PARENT:?}/$tok"
 }
 
@@ -208,7 +213,7 @@ case "${1:-}" in
         tok="${1:-}"
         [ "$#" -eq 1 ] && [[ "$tok" =~ ^[0-9a-f]{32}$ ]] || { say "usage: qdistro-tier3s-cleanup <token> | --unit <unit> | --reap-stale [--except-unit <unit>]"; exit 2; }
         if [ ! -e "$CTL/$tok" ] && [ ! -L "$CTL/$tok" ]; then
-            orphan_dir "$tok"; exit $?
+            orphan_dir "$tok" strict; exit $?
         fi
         teardown "$tok"; exit $? ;;
 esac
