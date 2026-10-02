@@ -705,7 +705,8 @@ def _write_stanza(tmp_path, **over):
     ({"TIER3S_BINDING": None}, "missing"),
     ({"TIER3S_SECCOMP_PROFILE": "/tmp/x"}, "unexpected key"),
     ({"TIER3S_SILO": "other"}, "names silo 'other'"),
-])
+], ids=["network", "token", "empty-argv", "empty-argv0", "missing-key", "unknown-key",
+        "silo-mismatch"])
 def test_helper_refuses_a_bad_stanza(tmp_path, over, needle):
     _write_stanza(tmp_path, **over)
     env, rec = _helper_env(tmp_path)
@@ -723,7 +724,7 @@ def test_helper_refuses_a_duplicate_key(tmp_path):
     assert r.returncode == 2 and "duplicate key" in r.stderr and not rec.exists()
 
 
-@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666], ids=["g+w", "o+w", "a+w"])
 def test_helper_refuses_a_writable_stanza(tmp_path, mode):
     _write_stanza(tmp_path).chmod(mode)
     env, rec = _helper_env(tmp_path)

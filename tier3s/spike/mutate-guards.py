@@ -5,7 +5,9 @@ For each mutation: replace one exact snippet (must occur once) in the REAL
 script, or apply a list of such edits for an order mutation, run the tests
 that cover that guard, require every named test to be reported FAILED, then
 restore the original bytes and re-check their sha256. IDs: P probe, V
-provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A).
+provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A,
+milestone A-i); S session manager, L root launch helper, B broker, I installer,
+U launch unit, A21+ spawn deltas (milestone A-ii).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -30,6 +32,14 @@ MKP = "tier3s/seccomp/make-profiles.py"
 TP = "tests/unit/test_tier3s_probe.py"
 TV = "tests/unit/test_tier3s_provision.py"
 TS = "tests/unit/test_tier3s_spawn.py"
+SM = "session_manager/qdistro_session_manager.py"
+LH = "session_manager/qdistro-tier3s-silo-launch"
+UNITF = "session_manager/qdistro-tier3s-silo@.service"
+BRK = "broker/qdistro_admin_broker.py"
+INST = "scripts/install/install-session-manager.sh"
+TSM = "tests/unit/test_session_manager_tier3s.py"
+TB = "tests/unit/test_broker_check_permission.py"
+TBR = f"{TB}::TestCheckPermissionResolution"
 GATE = 'broker_gate "$SPAWN_ACTION" "$WORKLOAD/$APP_BASE"\n'
 DENY = f"{TS}::test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]"
 ORDER = f"{TS}::test_gate_order_probe_resolve_gate_record_then_podman"
@@ -261,6 +271,100 @@ MUTATIONS = [
     ("G2 decision flipped without a re-render", MKP,
      '"llistxattr": ("ALLOW",', '"llistxattr": ("DENY",',
      [f"{TS}::test_seccomp_profile_is_rendered_and_decided"]),
+    # --- A-ii: spawn deltas
+    ("A21 pod-app launch no longer refused", SPAWN,
+     '[ -n "$SILO" ] || refuse "tier 3s pod apps', 'true || refuse "tier 3s pod apps',
+     [f"{TS}::test_podapp_launch_is_refused_in_phase_a"]),
+    ("A22 silo name resolved instead of the row's binding", SPAWN,
+     'out="$(as_admin "${RESOLVER[@]}" "$BINDING" "$@" --launch-env)"',
+     'out="$(as_admin "${RESOLVER[@]}" "$SILO" "$@" --launch-env)"',
+     [f"{TS}::test_template_binding_is_resolved_instead_of_the_silo_name"]),
+    # --- A-ii: session manager (no fallback, dev only, freeze/resume, fail-closed stop)
+    ("S1 tier3s start branch removed (falls back to the tier-3 launcher)", SM,
+     "                        if silo.kind == KIND_TIER3S:\n                            # Tier 3s: its own unit only.",
+     "                        if False:\n                            # Tier 3s: its own unit only.",
+     [f"{TSM}::test_start_exports_the_stanza_and_starts_only_the_tier3s_unit",
+      f"{TSM}::test_failed_start_rolls_back_and_falls_back_to_nothing"]),
+    ("S2 start no longer refuses a non-dev profile", SM,
+     "# before any state change (paravirt O4)\n                        self._require_tier3s_profile()",
+     "# before any state change (paravirt O4)\n                        pass",
+     [f"{TSM}::test_start_on_a_non_dev_profile_is_refused_before_any_state_change"]),
+    ("S3 create no longer refuses a non-dev profile", SM,
+     "            if kind == KIND_TIER3S:\n                self._require_tier3s_profile()",
+     "            if False:\n                self._require_tier3s_profile()",
+     [f"{TSM}::test_create_refused_on_a_non_dev_profile[daily-driver]",
+      f"{TSM}::test_create_refused_on_a_non_dev_profile[release]"]),
+    ("S4 profile gate accepts any profile", SM,
+     '        if profile != "dev":\n            raise BadArgument(TIER3S_PROFILE_REFUSAL',
+     '        if False:\n            raise BadArgument(TIER3S_PROFILE_REFUSAL',
+     [f"{TSM}::test_create_refused_on_a_non_dev_profile[release]",
+      f"{TSM}::test_start_on_a_non_dev_profile_is_refused_before_any_state_change"]),
+    ("S5 freeze refusal removed", SM,
+     "                if silo.kind == KIND_TIER3S:\n                    # tier3s/CONTRACT.md §6: freezing",
+     "                if False:\n                    # tier3s/CONTRACT.md §6: freezing",
+     [f"{TSM}::test_freeze_and_resume_are_unsupported[freeze]"]),
+    ("S6 resume refusal removed", SM,
+     "                if silo.kind == KIND_TIER3S:\n                    raise BadArgument(\n"
+     "                        \"freeze/resume is unsupported for tier3s silos\")\n"
+     "                if silo.state == State.ACTIVE:",
+     "                if False:\n                    raise BadArgument(\n"
+     "                        \"freeze/resume is unsupported for tier3s silos\")\n"
+     "                if silo.state == State.ACTIVE:",
+     [f"{TSM}::test_freeze_and_resume_are_unsupported[resume]"]),
+    ("S7 stop reports STOPPED over a surviving launch", SM,
+     "        if survived or not stop_done:\n            with self._lock:",
+     "        if not stop_done:\n            with self._lock:",
+     [f"{TSM}::test_stop_fails_closed_when_the_launch_survives"]),
+    ("S8 failed podman query read as stopped", SM,
+     "        if proc.returncode != 1:\n            return True\n        try:\n            left",
+     "        if proc.returncode == 0:\n            return True\n        try:\n            left",
+     [f"{TSM}::test_running_true_when_the_container_exists_or_the_query_fails[125]"]),
+    ("S9 surviving control record ignored", SM,
+     "        if left:\n            log.warning", "        if False:\n            log.warning",
+     [f"{TSM}::test_running_true_while_a_control_record_of_the_unit_survives"]),
+    ("S10 startup reconciliation removed", SM,
+     "            self.reconcile_tier3s_launches()\n        except",
+     "            pass\n        except",
+     [f"{TSM}::test_restart_reconciles_before_relaunching_with_a_fresh_token"]),
+    ("S11 tier3s uid not checked", SM,
+     '        if int(uid) != ADMIN_UID:\n            raise BadArgument(\n                f"tier3s silo uid',
+     '        if False:\n            raise BadArgument(\n                f"tier3s silo uid',
+     [f"{TSM}::test_uid_must_be_the_admin_launch_owner"]),
+    ("S12 tier3s network other than none accepted", SM,
+     '    if network != "none":\n        raise BadArgument(\n            f"tier3s launch.network',
+     '    if False:\n        raise BadArgument(\n            f"tier3s launch.network',
+     [f"{TSM}::test_launch_network_is_none_only[pasta]"]),
+    # --- A-ii: root launch helper
+    ("L1 trusted-stanza check removed", LH,
+     'require_trusted_env "$ENV_FILE"\n', ":\n",
+     [f"{TSM}::test_helper_refuses_a_writable_stanza[g+w]",
+      f"{TSM}::test_helper_refuses_a_symlinked_stanza"]),
+    ("L2 ambient environment reaches the spawn", LH,
+     "exec env -i \\\n", "exec env \\\n",
+     [f"{TSM}::test_helper_execs_the_spawn_with_exactly_the_stanza"]),
+    ("L3 stanza of another silo accepted", LH,
+     '[ "$SILO" = "$NAME" ] || {', 'true || {',
+     [f"{TSM}::test_helper_refuses_a_bad_stanza[silo-mismatch]"]),
+    ("L4 unknown stanza key accepted", LH,
+     "        if k not in want:\n", "        if False:\n",
+     [f"{TSM}::test_helper_refuses_a_bad_stanza[unknown-key]"]),
+    ("L5 test overrides honoured for root", LH,
+     'if [ "$EUID" -ne 0 ]; then\n    ENV_DIR=', 'if true; then\n    ENV_DIR=',
+     [f"{TSM}::test_helper_test_overrides_are_ignored_for_root"]),
+    # --- A-ii: broker, installer, unit
+    ("B1 tier3s spawn prefix dropped from the rules-only set", BRK,
+     '                                "qdistro.tier3s.spawn:",\n', "",
+     [f"{TBR}::test_tier3s_spawn_is_rules_only",
+      f"{TBR}::test_tier_spawn_ignores_cache_without_rule[qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke]"]),
+    ("I1 installer drops the cleanup helper", INST,
+     'install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-cleanup" "$DEST/qdistro-tier3s-cleanup"\n', "",
+     [f"{TSM}::test_installer_installs_exactly_the_contract_paths"]),
+    ("I2 installer skips the tmpfiles creation", INST,
+     "    systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-tier3s.conf\n", "    true\n",
+     [f"{TSM}::test_installer_installs_exactly_the_contract_paths"]),
+    ("U1 unit loses its ExecStopPost cleanup", UNITF,
+     "ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n\n", "",
+     [f"{TSM}::test_unit_file_shape"]),
 ]
 
 
@@ -287,12 +391,13 @@ def main():
     if only is not None and len(muts) != len(only):
         print(f"unknown mutation id in {sorted(only)}")
         return 2
-    files = {f: REPO / f for f in (PROBE, PROV, WRAP, SPAWN, CLEAN, HELP, MKP)}
+    files = {f: REPO / f for f in (PROBE, PROV, WRAP, SPAWN, CLEAN, HELP, MKP,
+                                   SM, LH, UNITF, BRK, INST)}
     orig = {f: p.read_bytes() for f, p in files.items()}
     orig_sha = {f: sha(p) for f, p in files.items()}
     for f in orig_sha:
         print(f"original sha256 {orig_sha[f]}  {f}")
-    rc, failed, skipped, summary = pytest([TP, TV, TS])
+    rc, failed, skipped, summary = pytest([TP, TV, TS, TSM, TB])
     print(f"BASELINE (no mutation): rc={rc} {summary}")
     if rc != 0:
         print("baseline must pass; aborting")
@@ -334,7 +439,7 @@ def main():
         same = sha(p) == orig_sha[f]
         print(f"restored {'OK' if same else 'MISMATCH'} sha256 {sha(p)}  {f}")
         bad += 0 if same else 1
-    rc, failed, skipped, summary = pytest([TP, TV, TS])
+    rc, failed, skipped, summary = pytest([TP, TV, TS, TSM, TB])
     print(f"AFTER RESTORE: rc={rc} {summary}")
     bad += 0 if rc == 0 else 1
     print(f"RESULT {'PASS' if bad == 0 else 'FAIL'}: {len(muts)} mutations, {bad} problem(s)")

@@ -2,7 +2,9 @@
 # qdistro-tier3s-smoke — default command of qdistro/tier3s-headless-smoke.
 # Prints one `SMOKE <key>=<value>` line per fact the A-iii driver asserts
 # (tier3s/CONTRACT.md §7); the driver, not this script, decides PASS/FAIL.
-# Exits 0 unless the shell itself breaks.
+# Exits 0 unless the shell itself breaks. `--hold [SECONDS]` (default 600)
+# then stays up until SIGTERM (exit 0) or the time runs out, so a driver can
+# stop a LIVE launch (podman stop, session-manager stop, SIGKILL).
 echo "SMOKE snapshot=$(cat /etc/qdistro/tier3s-image 2>/dev/null | sed -n 's/^SNAPSHOT=//p')"
 echo "SMOKE kernel=$(cat /proc/version)"
 echo "SMOKE dmesg=$(dmesg --syslog 2>&1 | head -1)"
@@ -20,3 +22,9 @@ chmod -h 640 "$f" 2>/dev/null; echo "SMOKE chmod_nofollow rc=$? mode=$(stat -c %
 ls -l /tmp > /dev/null 2>/tmp/smoke-ls.err; echo "SMOKE ls_l rc=$? stderr_bytes=$(wc -c < /tmp/smoke-ls.err)"
 echo "SMOKE routes=$(ip -o route show 2>&1 | wc -l) links=$(ip -o link show 2>/dev/null | cut -d: -f2 | tr -d ' ' | tr '\n' ',')"
 echo "SMOKE done"
+if [ "${1:-}" = --hold ]; then
+    trap 'echo "SMOKE term"; exit 0' TERM INT
+    echo "SMOKE holding ${2:-600}s"
+    sleep "${2:-600}" &
+    wait $!
+fi
