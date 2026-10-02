@@ -63,7 +63,9 @@ Each run directory below holds, per bats file: the qci per-file log
 
 | Dir | Tested commit | qci run dir (host) | Result |
 |---|---|---|---|
-| `a-r2-qci/` | `92f7d07c0` (astra+fable r2 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-r2/qci-runs/bats-20261002T164956Z-3634433` | **3/3 PASS, the acceptance run** (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-185253-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-185055-3640111-31651.qcow2` was removed by hand (nothing referenced it) |
+| `a-r3-qci/` | `1bec207b2` (astra+fable r3 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-qci-1bec207b2/ci/runs/bats-20261002T193045Z-66479` | **3/3 PASS, the acceptance run** (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-213307-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-213103-73971-23307.qcow2` was removed by hand (nothing referenced it) |
+| `a-r3-dev/` | dev VM `t3sr3-261002-210307-2819389-18202` (staged `1bec207b2`) | n/a (vm-exec) | development run of the r3 fix: `dev-prov2.log` (dev-only `dev-prov.sh`, **65/0**): the `PMRC=<rc>` provenance protocol end-to-end on real systemd 261 / podman 6.0.2 — a refusing `systemd-run` and a failing `runuser` each read as a failed query (cleanup rc 4, launch/record/container/scope preserved), a verdict sharing its output is a failed query, the real chain tears a live launch down completely, a genuine absent tears its record down, and the manager's verdict on the real `runuser→env→sh→podman` chain gives present/absent/None as designed. `dev-prov.log` is the first attempt (three dev-script bugs, none product); `dev-setup.log` 54/0 staged the tested commit. Destroyed after the runs |
+| `a-r2-qci/` | `92f7d07c0` (astra+fable r2 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-r2/qci-runs/bats-20261002T164956Z-3634433` | 3/3 PASS, the acceptance run before the astra+fable r3 fixes; superseded by `a-r3-qci/` (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-185253-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-185055-3640111-31651.qcow2` was removed by hand (nothing referenced it) |
 | `a-r2-dev/` | dev VM `t3sr2-261002-180333-3108422-16926` (staged `aa16c9aa8`, then the s121 forge fix that became `92f7d07c0`) | n/a (vm-exec) | development runs of the r2 fixes: `dev-kill.log` (dev-only `dev-kill.sh`, 30/0): the installed cleanup against a podman that starts a TERM-ignoring helper in a new session and hangs, bind-mounted in a private mount namespace: a timed-out call, a SIGTERM to the cleanup and a SIGKILL of the cleanup's own scope each leave nothing behind (the last by systemd's `RuntimeMaxSec` stop of the call scope, journal lines in the log); `dev-s121a-excerpt.log`: the first forged-READY step moved nothing (wrong cgroup path for a template instance) and its own positive control failed it (152/3); `dev-s121b.log` 155/0 after the fix; `dev-s120.log` 196/0, `dev-s122.log` 152/0. Destroyed after the runs |
 | `a-r1-qci/` | `bd565f612` (astra+fable r1 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-r1/qci-runs/bats-20261002T151149Z-2090267` | 3/3 PASS, the acceptance run before the astra+fable r2 fixes; superseded by `a-r2-qci/` (`results.tsv`): s120 192 passes / 0 failures, s121 126/0, s122 142/0; each worker's setup 57/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-171447-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-171250-2112384-4652.qcow2` was removed by hand |
 | `a-r1-dev/` | dev VM `t3sr1-261002-142725-106982-11270` (staged `793b7de1f`, then the `bd565f612` guest lib) | n/a (vm-exec) | development runs of the r1 fixes: `dev-s121.log` 121/5 = a **driver** bug (`silo_state` decoded busctl's text form; the new `observed_reason` carries a `'` that busctl escapes; the manager's state was Stopped), fixed in `bd565f612`; then s121 126/0, s120 192/0, s122 142/0; `dev-r4-repro.log` (dev-only `r4-repro.sh`): the sol r4 stale-record case on the real system, refused with the launch untouched (17/0). Destroyed after the run |
@@ -74,13 +76,15 @@ Each run directory below holds, per bats file: the qci per-file log
 | `a-iii-qci-r1/` | `0d9ade612` | `/var/tmp/t3s-aiii/qci-runs/bats-20261002T102945Z-2723488` | 2/3 PASS; s122 FAIL 106/2 = **finding**: on the launcher SIGKILL, `ExecStopPost`'s cleanup lost a race with `podman run --rm` (the container vanished between `exists` and `inspect`), so it preserved the record and the per-launch dir although sandbox, scope and container were gone (`phase7-tier3s-sigkill-cleanup.scratch/s122.log:18`–`35`). Fixed in `4fbeb43c7` (a failed inspect/stop is re-queried; only a definitive "absent" continues); the SIGKILL case now runs 3× (`3d924d726`). The failed worker (kept powered off by qci) was destroyed and undefined |
 | `a-iii-dev/` | dev VM `tier3s-261002-115945-2329209-31246` | n/a (vm-exec) | development runs kept for two findings: `s122-dev1-reaper-findings.log` (podman 6 rejects `index .Labels` in a `ps` template, so `--reap-stale` failed whenever a labelled container existed; an orphan per-launch dir was left when the reap raced the scope's BindsTo stop; fixed in `007fab313`) and `s120-dev2-smoke-sigterm-race.log` (a driver bug: `podman stop` before the smoke installed its TERM trap; the drivers now wait for `SMOKE holding`) |
 
-### Δ DONE bar → evidence (all in `a-r2-qci/`, tested commit `92f7d07c0`; `file:line`)
+### Δ DONE bar → evidence (all in `a-r3-qci/`, tested commit `1bec207b2`; `file:line`)
 
-The r2 fixes (astra + fable round 2) changed the cleanup's call
-supervision, deadlines and unit-state reads, the launch unit's
-`NotifyAccess` and the drivers (s121 step 6; every `assert_all_clear` also
-requires no cleanup call scope and no work dir), so every line below points
-at the r2 run. The r1 lines (`a-r1-qci/`) were re-mapped mechanically
+The r3 fixes (astra + fable round 3) changed the cleanup's and the
+manager's existence-verdict protocol, NSS lookup bounds, call-output caps
+and the `.call-*` sweep — none of the drivers — so every line below points
+at the r3 run. All 45 r2 citations were re-checked against the r3
+transcripts (masked for tokens, pids and timestamps): 40 carry over
+unchanged; five s121 citations shifted +1 (one extra event-log line) and
+were re-pointed. The r1 lines were originally re-mapped mechanically
 (difflib over the transcripts with tokens, pids and hashes masked) and
 spot-checked. The A-iii run r5 table (`a-iii-qci-r5/`) is kept in git
 history (`8a18b7c8d`).
@@ -107,15 +111,25 @@ Abbreviations: `s120` = `phase7-tier3s-headless.scratch/s120.log`, `s121` =
 | 4 | state-root policy (ΔA1): plain `ps`/`ps --sync`/`stop`/`rm -f` reach the sandbox; missing or replaced root: a plain stop fails visibly, nothing minted, record and scope kept | PASS | `s120:62`–`65`, `s120:250`, `s120:263`; `s120:197`–`213` |
 | ΔA8 | the control record's fields and modes | PASS | `s120:66`–`75` |
 | 5 | broker denial (no rule = unknown, explicit deny; untemplated and templated) ⇒ no `podman run`, no activation record; the refused StartSilo **fails with the refusal and the silo reads Stopped without a StopSilo** (astra 4 / fable P2-1); the allow-rule start of the refused silo is a real retry; positive control sees both | PASS | fixture `s121:16`–`17`; oracle self-tests `s121:18`–`22`; denials `s121:28`–`103` (API outcome `:31`–`33`, `:49`–`51`, `:69`–`71`, `:87`–`89`); retry + control `s121:104`–`139` (`:106`–`107`) |
-| 6 | hardened profiles (release, daily) refuse with a clear message at create, start, in the spawn (the direct `systemctl start` now fails too) and the probe; a probe failure refuses (StartSilo fails, Stopped); no fallback | PASS | `s121:143`–`188`; `s121:190`–`208` |
+| 6 | hardened profiles (release, daily) refuse with a clear message at create, start, in the spawn (the direct `systemctl start` now fails too) and the probe; a probe failure refuses (StartSilo fails, Stopped); no fallback | PASS | `s121:144`–`189`; `s121:191`–`209` |
 | 7 | tier-2 unit and static suites unchanged and passing; no `tier2/` file in the diff | PASS | `../tier2-suites-a-r2-host.log` (code = `92f7d07c0`): 0 `tier2/` files changed; unit 130 passed; static `bash -n` rc 0, `shellcheck -S warning -e SC1090` rc 0 under the documented baseline waiver |
 | 8 | posture from the OCI spec and the running sandbox; ΔA5 image; `fchmodat2` path; each ΔA4 decision | PASS | spec `s120:97`–`118`; sandbox and image `s120:151`–`169` |
 | O10 | the installer installs tier 3s only with `QDISTRO_TIER3S=1` (fresh worker: none before; none after a flag-less run; all after the flagged run) | PASS | `setup:6`–`17`, `setup:19`–`53` |
 | lane | qci-lane provisioning: tested commit, runsc sha512, offline provision, probe PASS, image ID = manifest | PASS | `setup:8`–`103`; tested commit on `phase7-tier3s-*.bats.log:2` |
 | r1 | `Type=notify`: StartSilo returns only once the launch is recorded running | PASS | `s120:42` |
-| r2 | `NotifyAccess=main`: an admin process inside the launch unit's cgroup that sends `READY=1` to systemd's socket leaves the start job running; the launch then runs on the spawn's own READY; positive control: with a runtime `NotifyAccess=all` drop-in the same forgery completes the start (astra r2 #4) | PASS | `s121:211`, `:213`–`219`; control `s121:220`–`227`; a workload that ends at once also starts under `main` `s121:106`, path `:132` (INFO) |
-| r2 | no cleanup call scope (`qdistro-t3s-call-*.scope`) and no cleanup work dir survive any teardown path (astra r2 #2) | PASS | `s120:14`–`15`, `:282`–`283`; `s121:140`–`141`, `:234`–`235`, `:246`–`247`; `s122:13`–`14`, `:89`–`90`, `:105`–`106`, `:152`–`153`, `:192`–`193`; `setup:117`–`118` |
+| r2 | `NotifyAccess=main`: an admin process inside the launch unit's cgroup that sends `READY=1` to systemd's socket leaves the start job running; the launch then runs on the spawn's own READY; positive control: with a runtime `NotifyAccess=all` drop-in the same forgery completes the start (astra r2 #4) | PASS | `s121:212`, `:214`–`220`; control `s121:221`–`228`; a workload that ends at once also starts under `main` `s121:106`, path `:133` (INFO) |
+| r2 | no cleanup call scope (`qdistro-t3s-call-*.scope`) and no cleanup work dir survive any teardown path (astra r2 #2) | PASS | `s120:14`–`15`, `:282`–`283`; `s121:141`–`142`, `:235`–`236`, `:247`–`248`; `s122:13`–`14`, `:89`–`90`, `:105`–`106`, `:152`–`153`, `:192`–`193`; `setup:117`–`118` |
+| r3 | existence verdicts have in-call provenance (the `PMRC=<rc>` line): a refused `StartTransientUnit` or a `runuser` failure is a failed query — nonzero rc, record/scope/container preserved — never "absent"; a genuine `PMRC=1` still tears down (astra+fable r3 P1) | PASS (dev VM, not a DONE-bar driver) | `../a-r3-dev/dev-prov2.log` (65/0) |
 | r2 | call supervision on real systemd/cgroups (timeout, SIGTERM, SIGKILL of the supervisor) | PASS (dev VM, not a DONE-bar driver) | `../a-r2-dev/dev-kill.log` |
+
+### Host logs (astra+fable r3)
+
+| Log | Tree | Result |
+|---|---|---|
+| `affected-suites-a-r3-host.log` | code = `1bec207b2` | tier3s spawn/probe/provision + session-manager tier3s/base/bounds + silo observation + broker suites: **747 passed, 1 skipped** (the pre-existing real-root skip) |
+| `unit-all-a-r3-host.log` | code = `1bec207b2` | full `tests/unit`: **6801 passed, 8 skipped** |
+| `tier2-suites-a-r3-host.log` | code = `1bec207b2` | DONE bar 7: 0 `tier2/` files changed; tier-2 unit 130 passed; `shellcheck -S warning` of the cleanup, the spawn and the scope helper rc 0 |
+| `mutate-guards-a-r3-host.log` | code = `1bec207b2` | **155 mutations, 0 problems**: the 149 earlier ones plus 6 r3 ones (R49–R54: verdict provenance, whole-output requirement, NSS bound, output cap, `$PROC` sweep, the same in the manager); files restored byte-identical |
 
 ### Host logs (astra+fable r2)
 
