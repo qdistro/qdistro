@@ -276,6 +276,25 @@ elif [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPP
     WRAPPER_OK=1
 else fail wrapper "$WRAPPER missing, not $EXP_OWN 0755, or differs from $HERE/tier3s-runsc"; fi
 
+# --- runsc state root (tier3s/CONTRACT.md D-A1) -----------------------------
+# The wrapper uses /run/qdistro-tier3s-runsc/<host uid> for every runsc call
+# and refuses to create it; provisioning (tmpfiles.d/qdistro-tier3s.conf) does.
+SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
+if ! id "$USER_NAME" >/dev/null 2>&1; then
+    fail state_root "not checked: user $USER_NAME missing"
+else
+    sr_uid="$(id -u "$USER_NAME")"; SR="$SR_BASE/$sr_uid"
+    if [ -L "$SR_BASE" ] || [ ! -d "$SR_BASE" ] || [ "$(stat -c '%u %a' -- "$SR_BASE")" != "$EXP_UID 755" ]; then
+        fail state_root "$SR_BASE missing, a symlink or not uid $EXP_UID 0755 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+    elif [ -L "$SR" ] || [ ! -d "$SR" ] || [ "$(stat -c '%u %a' -- "$SR")" != "$sr_uid 700" ]; then
+        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+    elif [ -z "$ROOT" ] && [ "${#SR}" -gt 31 ]; then
+        fail state_root "$SR is longer than 31 bytes (runsc control socket path)"
+    else
+        pass state_root "$SR (uid $sr_uid 0700 under $SR_BASE)"
+    fi
+fi
+
 # --- podman as the launching user ------------------------------------------
 as_user() {
     if [ "$(id -un)" = "$USER_NAME" ]; then "$@"

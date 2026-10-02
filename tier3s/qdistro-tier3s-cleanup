@@ -1,0 +1,214 @@
+#!/bin/bash
+# qdistro-tier3s-cleanup — the final teardown path of tier 3s launches
+# (installed root-owned as /usr/libexec/qdistro/qdistro-tier3s-cleanup;
+# tier3s/CONTRACT.md §4 "D-A8"). Root only.
+#
+#   qdistro-tier3s-cleanup <token>            one launch (the spawn's EXIT trap)
+#   qdistro-tier3s-cleanup --unit <unit>      every record of a launch unit (ExecStop/ExecStopPost)
+#   qdistro-tier3s-cleanup --reap-stale [--except-unit <unit>]
+#                                             records and labelled containers whose launch unit is
+#                                             not live (spawn reaper, restart reconciliation)
+#
+# Teardown of one token, in order; ANY failure exits non-zero and PRESERVES the
+# control record (and the scope, while it lives): validate the root-only
+# record -> require the recorded runsc state root (never "no container" from a
+# lost root) -> podman (as the recorded admin) exists/stop/rm, where a failed
+# query is an error, never "absent" -> the recorded scope (verified cgroup):
+# wait for it to empty, else systemctl stop it -> the recorded (pid,
+# starttime) of conmon and the Sentry must be dead -> remove the per-launch
+# dir, then the record. Never by uid (100000 is shared) or process name.
+#
+# Test hook ONLY: TIER3S_TEST_ROOT prefixes /run, /sys/fs/cgroup and /proc and
+# keeps the caller's PATH (fakes); refused for root.
+set -uo pipefail
+if [ "$EUID" -eq 0 ] || [ -z "${TIER3S_TEST_ROOT:-}" ]; then PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; fi
+umask 077
+say() { printf 'qdistro-tier3s-cleanup: %s\n' "$*" >&2; }
+T="${TIER3S_TEST_ROOT:-}"
+if [ -n "$T" ]; then
+    [ "$EUID" -ne 0 ] || { say "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"; exit 2; }
+    case "$T" in /?*) ;; *) say "TIER3S_TEST_ROOT must be absolute"; exit 2 ;; esac
+    ADMIN_PATH="$PATH"; WANT_ADMIN="$(id -u)"; STEP=0.01
+else
+    [ "$EUID" -eq 0 ] || { say "must run as root"; exit 2; }
+    ADMIN_PATH=/usr/bin:/bin; WANT_ADMIN=1000; STEP=0.25
+fi
+CTL="$T/run/qdistro-tier3s-ctl"
+LAUNCH_PARENT="$T/run/qdistro-tier3s"
+CGROOT="$T/sys/fs/cgroup"
+PROC="$T/proc"
+LOCK="$CTL/.lock"
+GRACE=10
+
+# A record is "live" while its launch unit is; only then may it be skipped.
+unit_live() {
+    case "$(systemctl is-active "$1" 2>/dev/null)" in
+        active|activating|deactivating|reloading|refreshing) return 0 ;;
+    esac
+    return 1
+}
+as_admin() {   # as_admin <uid> cmd...
+    local uid="$1" user home
+    user="$(getent passwd "$uid" | cut -d: -f1)"; home="$(getent passwd "$uid" | cut -d: -f6)"
+    [ -n "$user" ] || { say "no user for uid $uid"; return 125; }
+    shift
+    runuser -u "$user" -- env -i PATH="$ADMIN_PATH" HOME="$home" USER="$user" LOGNAME="$user" \
+        XDG_RUNTIME_DIR="/run/user/$uid" "$@"
+}
+starttime() {
+    local s; read -r s < "$PROC/$1/stat" 2>/dev/null || return 1
+    s="${s##*) }"; set -- $s; [ -n "${20:-}" ] && echo "${20}"
+}
+tree_procs() {   # every pid in a cgroup subtree (recursive cgroup.procs)
+    local f p
+    while IFS= read -r -d '' f; do
+        while read -r p; do [ -n "$p" ] && echo "$p"; done < "$f"
+    done < <(find "$1" -name cgroup.procs -print0 2>/dev/null)
+}
+wait_empty() {   # wait_empty <cgroup dir> <steps>
+    for _ in $(seq 1 "$2"); do
+        [ -d "$1" ] || return 0
+        [ -z "$(tree_procs "$1")" ] && return 0
+        sleep "$STEP"
+    done
+    [ ! -d "$1" ] || [ -z "$(tree_procs "$1")" ]
+}
+
+declare -A S
+read_record() {   # read_record <token>: validated fields into S, or return 1
+    local tok="$1" dir="$CTL/$1" k v
+    S=()
+    if [ -L "$dir" ] || [ ! -d "$dir" ] || [ "$(stat -c '%u %a' -- "$dir")" != "$EUID 700" ]; then
+        say "$tok: control dir $dir is not a root 0700 directory"; return 1; fi
+    if [ -L "$dir/state" ] || [ ! -f "$dir/state" ] || [ "$(stat -c '%u %a' -- "$dir/state")" != "$EUID 600" ]; then
+        say "$tok: $dir/state is not a root 0600 file"; return 1; fi
+    while IFS='=' read -r k v; do [[ "$k" =~ ^[a-z_]+$ ]] && S["$k"]="$v"; done < "$dir/state"
+    [ "${S[schema]:-}" = 1 ] && [ "${S[token]:-}" = "$tok" ] || { say "$tok: bad schema/token in record"; return 1; }
+    [[ "${S[container]:-}" =~ ^qdistro-tier3s-[a-z0-9_-]+$ ]] || { say "$tok: bad container '${S[container]:-}'"; return 1; }
+    [[ "${S[unit]:-}" =~ ^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service$ ]] || { say "$tok: bad unit '${S[unit]:-}'"; return 1; }
+    [ "${S[scope_unit]:-}" = "qdistro-tier3s-$tok.scope" ] || { say "$tok: bad scope_unit '${S[scope_unit]:-}'"; return 1; }
+    [ "${S[per_launch_dir]:-}" = "/run/qdistro-tier3s/$tok" ] || { say "$tok: bad per_launch_dir"; return 1; }
+    [ "${S[admin_uid]:-}" = "$WANT_ADMIN" ] || { say "$tok: recorded admin uid '${S[admin_uid]:-}' is not $WANT_ADMIN"; return 1; }
+    # D-A1: the root the wrapper derives for the recorded admin; root's own uid would derive another
+    [ "${S[runsc_root]:-}" = "/run/qdistro-tier3s-runsc/${S[admin_uid]}" ] \
+        || { say "$tok: recorded runsc_root '${S[runsc_root]:-}' is not the wrapper's root for uid ${S[admin_uid]}"; return 1; }
+    [ -z "${S[scope_cgroup]:-}" ] || [[ "${S[scope_cgroup]}" == /*"/qdistro-tier3s-$tok.scope" ]] \
+        || { say "$tok: bad scope_cgroup '${S[scope_cgroup]}'"; return 1; }
+    return 0
+}
+
+teardown() {   # teardown <token> (caller holds the lock)
+    local tok="$1" root rc rel dir p want
+    read_record "$tok" || return 1
+    local admin="${S[admin_uid]}" ctr="${S[container]}" scope="${S[scope_unit]}"
+    root="$T${S[runsc_root]}"
+    if [ -L "$root" ] || [ ! -d "$root" ] || [ "$(stat -c '%u %a' -- "$root")" != "$admin 700" ]; then
+        say "$tok: runsc state root $root is missing, replaced or loose; refusing to query or stop $ctr (record and scope preserved)"
+        return 3
+    fi
+    as_admin "$admin" podman container exists "$ctr"; rc=$?
+    case "$rc" in
+        0)  want="$(as_admin "$admin" podman container inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr")" \
+                || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
+            [ "$want" = "$tok" ] || { say "$tok: container $ctr carries token '$want', not ours; refusing"; return 4; }
+            as_admin "$admin" podman stop -t "$GRACE" "$ctr" >/dev/null \
+                || { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }
+            as_admin "$admin" podman rm -f --ignore "$ctr" >/dev/null \
+                || { say "$tok: podman rm $ctr failed (record preserved)"; return 5; }
+            as_admin "$admin" podman container exists "$ctr"; rc=$?
+            [ "$rc" -eq 1 ] || { say "$tok: $ctr still present or query failed after stop (rc=$rc)"; return 5; } ;;
+        1)  ;;
+        *)  say "$tok: podman query failed (rc=$rc) for $ctr; NOT treating it as absent (record preserved)"; return 4 ;;
+    esac
+    # the recorded scope, verified: systemd's cgroup for scope_unit must be the recorded one
+    rel="$(systemctl show -p ControlGroup --value "$scope" 2>/dev/null)"
+    if [ -n "$rel" ] && [ -n "${S[scope_cgroup]:-}" ] && [ "$rel" != "${S[scope_cgroup]}" ]; then
+        say "$tok: $scope is at $rel, not the recorded ${S[scope_cgroup]}; refusing"; return 6
+    fi
+    [ -n "$rel" ] || rel="${S[scope_cgroup]:-}"
+    if [ -n "$rel" ]; then
+        dir="$CGROOT$rel"
+        if ! wait_empty "$dir" $((15 * 4)); then
+            say "$tok: scope $scope still holds [$(tree_procs "$dir" | tr '\n' ' ')]; stopping the scope"
+            systemctl stop "$scope" 2>/dev/null
+            wait_empty "$dir" $((10 * 4)) || { say "$tok: scope $scope not empty after stop (record preserved)"; return 6; }
+        fi
+    fi
+    for p in sentry conmon; do
+        [ -n "${S[${p}_pid]:-}" ] || continue
+        if [ "$(starttime "${S[${p}_pid]}")" = "${S[${p}_starttime]:-x}" ]; then
+            say "$tok: recorded $p ${S[${p}_pid]} is alive outside the scope (record preserved)"; return 7
+        fi
+    done
+    dir="$LAUNCH_PARENT/$tok"
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+        { [ -d "$dir" ] && [ ! -L "$dir" ]; } || { say "$tok: $dir is not a directory"; return 8; }
+        rm -rf -- "$dir" || return 8
+    fi
+    rm -rf -- "${CTL:?}/$tok" || return 8
+    say "$tok: torn down ($ctr)"
+    return 0
+}
+
+orphan_dir() {   # a per-launch dir without a record: remove only when its scope is gone
+    local tok="$1"
+    [ ! -e "$CTL/$tok" ] || return 0
+    if unit_live "qdistro-tier3s-$tok.scope"; then
+        say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
+    [ ! -d "$LAUNCH_PARENT/$tok" ] || [ -L "$LAUNCH_PARENT/$tok" ] || rm -rf -- "${LAUNCH_PARENT:?}/$tok"
+}
+
+[ -d "$CTL" ] && [ ! -L "$CTL" ] && [ "$(stat -c '%u %a' -- "$CTL")" = "$EUID 700" ] \
+    || { say "$CTL is not a root 0700 directory"; exit 2; }
+exec 9>"$LOCK"
+flock -w 120 9 || { say "cannot take $LOCK"; exit 2; }
+
+tokens() { local d; for d in "$CTL"/*/; do d="${d%/}"; d="${d##*/}"; [[ "$d" =~ ^[0-9a-f]{32}$ ]] && echo "$d"; done; }
+
+case "${1:-}" in
+    --unit)
+        u="${2:-}"
+        [[ "$u" =~ ^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service$ ]] || { say "bad unit '$u'"; exit 2; }
+        fails=0
+        for tok in $(tokens); do
+            [ "$(sed -n 's/^unit=//p' "$CTL/$tok/state" 2>/dev/null)" = "$u" ] || continue
+            teardown "$tok" || fails=$((fails + 1))
+        done
+        exit $((fails > 0)) ;;
+    --reap-stale)
+        except=""
+        if [ "${2:-}" = --except-unit ]; then except="${3:-}"; [ -n "$except" ] || exit 2; fi
+        fails=0
+        for tok in $(tokens); do
+            u="$(sed -n 's/^unit=//p' "$CTL/$tok/state" 2>/dev/null)"
+            if [ -n "$u" ] && [ "$u" != "$except" ] && unit_live "$u"; then continue; fi
+            say "$tok: stale (unit ${u:-?} not live${except:+ or is $except}); reaping"
+            teardown "$tok" || fails=$((fails + 1))
+        done
+        # labelled containers whose launch unit is gone (restart reconciliation)
+        listing="$(as_admin "$WANT_ADMIN" podman ps -a --filter label=qdistro_tier3s_token \
+            --format '{{index .Labels "qdistro_tier3s_token"}} {{index .Labels "qdistro_tier3s_unit"}} {{.Names}}')" \
+            || { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }
+        while read -r tok u name; do
+            [[ "${tok:-}" =~ ^[0-9a-f]{32}$ ]] || continue
+            [ ! -e "$CTL/$tok" ] || continue          # recorded: handled above
+            if [ -n "$u" ] && [ "$u" != "$except" ] && unit_live "$u"; then continue; fi
+            say "$tok: UNRECORDED labelled container $name (unit ${u:-?} not live); reaping"
+            if ! as_admin "$WANT_ADMIN" podman rm -f -t "$GRACE" "$name" >/dev/null; then
+                say "$tok: podman rm -f $name failed"; fails=$((fails + 1)); continue; fi
+            systemctl stop "qdistro-tier3s-$tok.scope" 2>/dev/null
+            orphan_dir "$tok" || fails=$((fails + 1))
+        done <<< "$listing"
+        for d in "$LAUNCH_PARENT"/*/; do
+            d="${d%/}"; d="${d##*/}"; [[ "$d" =~ ^[0-9a-f]{32}$ ]] || continue
+            orphan_dir "$d" || fails=$((fails + 1))
+        done
+        exit $((fails > 0)) ;;
+    *)
+        tok="${1:-}"
+        [ "$#" -eq 1 ] && [[ "$tok" =~ ^[0-9a-f]{32}$ ]] || { say "usage: qdistro-tier3s-cleanup <token> | --unit <unit> | --reap-stale [--except-unit <unit>]"; exit 2; }
+        if [ ! -e "$CTL/$tok" ] && [ ! -L "$CTL/$tok" ]; then
+            orphan_dir "$tok"; exit $?
+        fi
+        teardown "$tok"; exit $? ;;
+esac

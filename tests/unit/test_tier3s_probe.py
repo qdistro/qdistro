@@ -61,6 +61,8 @@ class Install:
         (self.root / "etc/qdistro/profile").write_text("QDISTRO_PROFILE=dev\n")
         for db in ("subuid", "subgid"):
             (self.root / "etc" / db).write_text(f"{ME}:100000:65536\n")
+        self.state_root = self.root / "run/qdistro-tier3s-runsc" / str(os.getuid())
+        self.state_root.mkdir(parents=True)
         (self.runsc_dir / "runsc").write_text(fake_runsc(self.marker, version, rc))
         (self.runsc_dir / "gvisor-bin/gvisor_sentry").write_text("#!/bin/sh\n# sentry\n")
         (self.runsc_dir / "gvisor-bin/runsc-fd-parking").write_text("#!/bin/sh\n# parking\n")
@@ -70,6 +72,7 @@ class Install:
         for d in [self.root, *self.root.rglob("*")]:
             if d.is_dir():
                 d.chmod(0o755)
+        self.state_root.chmod(0o700)
         for f in (self.runsc_dir / "runsc", self.wrapper,
                   *(self.runsc_dir / "gvisor-bin").iterdir()):
             f.chmod(0o755)
@@ -451,3 +454,30 @@ def test_probe_never_uses_caller_path_tools(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 2 and "QDISTRO_PROBE_PIN is a unit-test hook" in r.stderr
     assert not marker.exists(), "caller PATH tool ran: " + marker.read_text()
+
+
+# --- runsc state root (CONTRACT.md D-A1) ------------------------------------
+
+def test_state_root_passes_when_provisioned(tmp_path):
+    inst = Install(tmp_path)
+    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    assert f"PASS state_root: {inst.state_root} (uid {os.getuid()} 0700" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("damage", ["missing", "mode", "symlink", "base-mode"])
+def test_state_root_missing_or_loose_fails(tmp_path, damage):
+    inst = Install(tmp_path)
+    if damage == "missing":
+        inst.state_root.rmdir()
+    elif damage == "mode":
+        inst.state_root.chmod(0o750)
+    elif damage == "symlink":
+        inst.state_root.rmdir()
+        (tmp_path / "elsewhere").mkdir(mode=0o700)
+        inst.state_root.symlink_to(tmp_path / "elsewhere")
+    else:
+        inst.state_root.parent.chmod(0o775)
+    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    assert r.returncode == 1, r.stdout
+    assert "FAIL state_root:" in r.stdout
+    assert "systemd-tmpfiles --create qdistro-tier3s.conf" in r.stdout

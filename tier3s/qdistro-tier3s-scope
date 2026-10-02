@@ -16,8 +16,8 @@
 # conmon and every runsc process inside it (Phase S logs 35/36). It never runs
 # anything as root and accepts no other mode or program.
 #
-# Test hook ONLY: TIER3S_TEST_ROOT prefixes /proc/self/cgroup and
-# /sys/fs/cgroup and keeps the caller's PATH (fakes); refused for root.
+# Test hook ONLY: TIER3S_TEST_ROOT reads our cgroup from $TIER3S_TEST_ROOT/proc/<pid>/cgroup,
+# prefixes /sys/fs/cgroup and keeps the caller's PATH (fakes); refused for root.
 set -euo pipefail
 if [ "$EUID" -eq 0 ] || [ -z "${TIER3S_TEST_ROOT:-}" ]; then PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; fi
 die() { printf 'qdistro-tier3s-scope: FAIL: %s\n' "$*" >&2; exit 2; }
@@ -25,7 +25,7 @@ T="${TIER3S_TEST_ROOT:-}"
 if [ -n "$T" ]; then
     [ "$EUID" -ne 0 ] || die "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"
     case "$T" in /?*) ;; *) die "TIER3S_TEST_ROOT must be absolute" ;; esac
-    SELF_CGROUP="$T/proc/self/cgroup"; SELF_PID="${TIER3S_TEST_PID:-$$}"
+    SELF_CGROUP="$T/proc/$$/cgroup"; SELF_PID=$$
 else
     [ "$EUID" -eq 0 ] || die "must run as root (first process of the launch scope)"
     SELF_CGROUP=/proc/self/cgroup; SELF_PID=$$
