@@ -1,0 +1,21 @@
+=== affected tier3s/session/broker suites (at 69a2cc116 — run on the pre-amend tree 2cf0ef588, which differs only in mutate-guards.py, a harness no unit test reads; 2026-10-02T20:18:06Z)
+python3 -m pytest -q tests/unit/test_tier3s_spawn.py tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py tests/unit/test_session_manager.py tests/unit/test_session_manager_tier3s.py tests/unit/test_session_manager_subprocess_bounds.py tests/unit/test_silo_runtime_observation.py tests/unit/test_broker_check_permission.py
+........................................................................ [  9%]
+........................................................................ [ 19%]
+.............................................s.......................... [ 28%]
+........................................................................ [ 38%]
+........................................................................ [ 47%]
+........................................................................ [ 57%]
+........................................................................ [ 66%]
+........................................................................ [ 76%]
+........................................................................ [ 85%]
+........................................................................ [ 95%]
+...................................                                      [100%]
+=============================== warnings summary ===============================
+../../../../../usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159
+  /usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159: PyGIDeprecationWarning: GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead
+    value = getattr(proxy, attr)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+754 passed, 1 skipped, 1 warning in 101.30s (0:01:41)
+pytest rc=0

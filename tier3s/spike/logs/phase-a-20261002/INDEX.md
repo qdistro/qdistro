@@ -63,7 +63,8 @@ Each run directory below holds, per bats file: the qci per-file log
 
 | Dir | Tested commit | qci run dir (host) | Result |
 |---|---|---|---|
-| `a-r3-qci/` | `1bec207b2` (astra+fable r3 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-qci-1bec207b2/ci/runs/bats-20261002T193045Z-66479` | **3/3 PASS, the acceptance run** (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-213307-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-213103-73971-23307.qcow2` was removed by hand (nothing referenced it) |
+| `a-r4-qci/` | `69a2cc116` (sol r5 fixes; run from a pinned, detached worktree of that commit, since removed) | `/var/tmp/t3s-qci-69a2cc11/ci/runs/bats-20261002T204332Z-2307389` | **3/3 PASS, the acceptance run** (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-230058-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-225629-2392293-10077.qcow2` was removed by hand after a referrer audit (no qcow2 backed by it, no domain XML named it) |
+| `a-r3-qci/` | `1bec207b2` (astra+fable r3 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-qci-1bec207b2/ci/runs/bats-20261002T193045Z-66479` | 3/3 PASS, the acceptance run before the sol r5 fixes; superseded by `a-r4-qci/` (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-213307-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-213103-73971-23307.qcow2` was removed by hand (nothing referenced it) |
 | `a-r3-dev/` | dev VM `t3sr3-261002-210307-2819389-18202` (staged `1bec207b2`) | n/a (vm-exec) | development run of the r3 fix: `dev-prov2.log` (dev-only `dev-prov.sh`, **65/0**): the `PMRC=<rc>` provenance protocol end-to-end on real systemd 261 / podman 6.0.2 — a refusing `systemd-run` and a failing `runuser` each read as a failed query (cleanup rc 4, launch/record/container/scope preserved), a verdict sharing its output is a failed query, the real chain tears a live launch down completely, a genuine absent tears its record down, and the manager's verdict on the real `runuser→env→sh→podman` chain gives present/absent/None as designed. `dev-prov.log` is the first attempt (three dev-script bugs, none product); `dev-setup.log` 54/0 staged the tested commit. Destroyed after the runs |
 | `a-r2-qci/` | `92f7d07c0` (astra+fable r2 fixes; run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-r2/qci-runs/bats-20261002T164956Z-3634433` | 3/3 PASS, the acceptance run before the astra+fable r3 fixes; superseded by `a-r3-qci/` (`results.tsv`): s120 196 passes / 0 failures, s121 155/0, s122 152/0; each worker's setup 59/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-185253-*` were reaped by qci; the run's golden disk `qci-golden-bats-261002-185055-3640111-31651.qcow2` was removed by hand (nothing referenced it) |
 | `a-r2-dev/` | dev VM `t3sr2-261002-180333-3108422-16926` (staged `aa16c9aa8`, then the s121 forge fix that became `92f7d07c0`) | n/a (vm-exec) | development runs of the r2 fixes: `dev-kill.log` (dev-only `dev-kill.sh`, 30/0): the installed cleanup against a podman that starts a TERM-ignoring helper in a new session and hangs, bind-mounted in a private mount namespace: a timed-out call, a SIGTERM to the cleanup and a SIGKILL of the cleanup's own scope each leave nothing behind (the last by systemd's `RuntimeMaxSec` stop of the call scope, journal lines in the log); `dev-s121a-excerpt.log`: the first forged-READY step moved nothing (wrong cgroup path for a template instance) and its own positive control failed it (152/3); `dev-s121b.log` 155/0 after the fix; `dev-s120.log` 196/0, `dev-s122.log` 152/0. Destroyed after the runs |
@@ -76,18 +77,24 @@ Each run directory below holds, per bats file: the qci per-file log
 | `a-iii-qci-r1/` | `0d9ade612` | `/var/tmp/t3s-aiii/qci-runs/bats-20261002T102945Z-2723488` | 2/3 PASS; s122 FAIL 106/2 = **finding**: on the launcher SIGKILL, `ExecStopPost`'s cleanup lost a race with `podman run --rm` (the container vanished between `exists` and `inspect`), so it preserved the record and the per-launch dir although sandbox, scope and container were gone (`phase7-tier3s-sigkill-cleanup.scratch/s122.log:18`–`35`). Fixed in `4fbeb43c7` (a failed inspect/stop is re-queried; only a definitive "absent" continues); the SIGKILL case now runs 3× (`3d924d726`). The failed worker (kept powered off by qci) was destroyed and undefined |
 | `a-iii-dev/` | dev VM `tier3s-261002-115945-2329209-31246` | n/a (vm-exec) | development runs kept for two findings: `s122-dev1-reaper-findings.log` (podman 6 rejects `index .Labels` in a `ps` template, so `--reap-stale` failed whenever a labelled container existed; an orphan per-launch dir was left when the reap raced the scope's BindsTo stop; fixed in `007fab313`) and `s120-dev2-smoke-sigterm-race.log` (a driver bug: `podman stop` before the smoke installed its TERM trap; the drivers now wait for `SMOKE holding`) |
 
-### Δ DONE bar → evidence (all in `a-r3-qci/`, tested commit `1bec207b2`; `file:line`)
+### Δ DONE bar → evidence (all in `a-r4-qci/`, tested commit `69a2cc116`; `file:line`)
 
-The r3 fixes (astra + fable round 3) changed the cleanup's and the
-manager's existence-verdict protocol, NSS lookup bounds, call-output caps
-and the `.call-*` sweep — none of the drivers — so every line below points
-at the r3 run. All 45 r2 citations were re-checked against the r3
-transcripts (masked for tokens, pids and timestamps): 40 carry over
-unchanged; five s121 citations shifted +1 (one extra event-log line) and
-were re-pointed. The r1 lines were originally re-mapped mechanically
-(difflib over the transcripts with tokens, pids and hashes masked) and
-spot-checked. The A-iii run r5 table (`a-iii-qci-r5/`) is kept in git
-history (`8a18b7c8d`).
+The r5 fixes (sol round 5) changed the cleanup's verdict parsing, NSS
+lookup status checks and CONTRACT wording — none of the drivers — so every
+line below points at the r4 run. All 46 r3 citations were re-checked
+mechanically against the r4 transcripts (every digit run and ≥8-hex token
+masked; difflib alignment): s120, s121 and the setup log carry over at the
+**same** line numbers; s122 is identical shifted **+1** from line 2 (one
+extra `[vm-exec] Waiting…` poll line) — the re-pointed citations below are
+already the r4 numbers. The two legitimately different lines are the
+expected ones: `setup:10` "tested commit" names `69a2cc116` and
+`setup:22–34` name the new blob hashes (which equal the sha256s the
+mutation harness verified after restore). The r3→r4 guest diffs are
+otherwise only per-run pids, tokens, timings and launch-process counts
+(17 vs 19; both "all gone" PASSes). The r1 lines were originally re-mapped
+mechanically (difflib over the transcripts with tokens, pids and hashes
+masked) and spot-checked. The A-iii run r5 table (`a-iii-qci-r5/`) is kept
+in git history (`8a18b7c8d`).
 
 Abbreviations: `s120` = `phase7-tier3s-headless.scratch/s120.log`, `s121` =
 `phase7-tier3s-denied.scratch/s121.log`, `s122` =
@@ -101,26 +108,36 @@ Abbreviations: `s120` = `phase7-tier3s-headless.scratch/s120.log`, `s121` =
 | 2 | normal exit | PASS | `s120:24`–`38` |
 | 2 | plain `podman stop`; plain `podman rm -f` | PASS | `s120:248`–`259`; `s120:261`–`271` |
 | 2 | session-manager stop (`StopSilo`) | PASS | `s120:183`–`192` |
-| 2 | launcher SIGKILL / service failure, 3× | PASS | `s122:20`–`62` |
-| 2 | session-manager crash (SIGKILL) and restart | PASS | `s122:108`–`127`, `s122:128`–`146`: the old launch got a completed **stop job** (PID 1 journal fields, fable P3-4) `s122:125`, `:144` and the verified cleanup `:126`, `:145`; everything gone; relaunched with a fresh token whose record is `phase=running`, container running under it and scope live (astra 6) `s122:117`–`120`, `:136`–`139` |
-| 2 | restart reconciliation after state loss: a live launch unit the manager never started; the same with its record removed; a live labelled container with no unit | PASS | `s122:155`–`165`; `s122:166`–`176`; `s122:178`–`182` |
+| 2 | launcher SIGKILL / service failure, 3× | PASS | `s122:21`–`63` |
+| 2 | session-manager crash (SIGKILL) and restart | PASS | `s122:109`–`128`, `s122:129`–`147`: the old launch got a completed **stop job** (PID 1 journal fields, fable P3-4) `s122:126`, `:145` and the verified cleanup `:127`, `:146`; everything gone; relaunched with a fresh token whose record is `phase=running`, container running under it and scope live (astra 6) `s122:118`–`121`, `:137`–`140` |
+| 2 | restart reconciliation after state loss: a live launch unit the manager never started; the same with its record removed; a live labelled container with no unit | PASS | `s122:156`–`166`; `s122:167`–`177`; `s122:179`–`183` |
 | 2 | forced runtime failure while live (root replaced, then missing): an error, record + scope preserved, no false "no container"; restored root → complete teardown | PASS | `s120:215`–`234`; `s120:235`–`246` |
-| O11 | a session-manager **stop** leaves no launch-owned process, scope, token dir or control dir | PASS | `s122:64`–`88` (two live launches, each stopped through the verified cleanup before the manager, then every absence check); the relaunch after it is a running launch `s122:92`–`99` |
+| O11 | a session-manager **stop** leaves no launch-owned process, scope, token dir or control dir | PASS | `s122:65`–`89` (two live launches, each stopped through the verified cleanup before the manager, then every absence check); the relaunch after it is a running launch `s122:93`–`100` |
 | 3 | two concurrent launches; tearing one down preserves the other | PASS | `s120:171`–`195` |
 | 4 | runtime identity (ΔA9); corroboration as INFO only | PASS | `s120:54`–`61` |
 | 4 | state-root policy (ΔA1): plain `ps`/`ps --sync`/`stop`/`rm -f` reach the sandbox; missing or replaced root: a plain stop fails visibly, nothing minted, record and scope kept | PASS | `s120:62`–`65`, `s120:250`, `s120:263`; `s120:197`–`213` |
 | ΔA8 | the control record's fields and modes | PASS | `s120:66`–`75` |
 | 5 | broker denial (no rule = unknown, explicit deny; untemplated and templated) ⇒ no `podman run`, no activation record; the refused StartSilo **fails with the refusal and the silo reads Stopped without a StopSilo** (astra 4 / fable P2-1); the allow-rule start of the refused silo is a real retry; positive control sees both | PASS | fixture `s121:16`–`17`; oracle self-tests `s121:18`–`22`; denials `s121:28`–`103` (API outcome `:31`–`33`, `:49`–`51`, `:69`–`71`, `:87`–`89`); retry + control `s121:104`–`139` (`:106`–`107`) |
 | 6 | hardened profiles (release, daily) refuse with a clear message at create, start, in the spawn (the direct `systemctl start` now fails too) and the probe; a probe failure refuses (StartSilo fails, Stopped); no fallback | PASS | `s121:144`–`189`; `s121:191`–`209` |
-| 7 | tier-2 unit and static suites unchanged and passing; no `tier2/` file in the diff | PASS | `../tier2-suites-a-r3-host.log` (code = `1bec207b2`): 0 `tier2/` files changed; unit 130 passed; static `bash -n` rc 0, `shellcheck -S warning -e SC1090` rc 0 under the documented baseline waiver |
+| 7 | tier-2 unit and static suites unchanged and passing; no `tier2/` file in the diff | PASS | `../tier2-suites-a-r5-host.log` (code = `69a2cc116`): 0 `tier2/` files changed; unit 130 passed; static `bash -n` rc 0, `shellcheck -S warning -e SC1090` rc 0 under the documented baseline waiver |
 | 8 | posture from the OCI spec and the running sandbox; ΔA5 image; `fchmodat2` path; each ΔA4 decision | PASS | spec `s120:97`–`118`; sandbox and image `s120:151`–`169` |
 | O10 | the installer installs tier 3s only with `QDISTRO_TIER3S=1` (fresh worker: none before; none after a flag-less run; all after the flagged run) | PASS | `setup:6`–`17`, `setup:19`–`53` |
 | lane | qci-lane provisioning: tested commit, runsc sha512, offline provision, probe PASS, image ID = manifest | PASS | `setup:8`–`103`; tested commit on `phase7-tier3s-*.bats.log:2` |
 | r1 | `Type=notify`: StartSilo returns only once the launch is recorded running | PASS | `s120:42` |
 | r2 | `NotifyAccess=main`: an admin process inside the launch unit's cgroup that sends `READY=1` to systemd's socket leaves the start job running; the launch then runs on the spawn's own READY; positive control: with a runtime `NotifyAccess=all` drop-in the same forgery completes the start (astra r2 #4) | PASS | `s121:212`, `:214`–`220`; control `s121:221`–`228`; a workload that ends at once also starts under `main` `s121:106`, path `:133` (INFO) |
-| r2 | no cleanup call scope (`qdistro-t3s-call-*.scope`) and no cleanup work dir survive any teardown path (astra r2 #2) | PASS | `s120:14`–`15`, `:282`–`283`; `s121:141`–`142`, `:235`–`236`, `:247`–`248`; `s122:13`–`14`, `:89`–`90`, `:105`–`106`, `:152`–`153`, `:192`–`193`; `setup:117`–`118` |
+| r2 | no cleanup call scope (`qdistro-t3s-call-*.scope`) and no cleanup work dir survive any teardown path (astra r2 #2) | PASS | `s120:14`–`15`, `:282`–`283`; `s121:141`–`142`, `:235`–`236`, `:247`–`248`; `s122:14`–`15`, `:90`–`91`, `:106`–`107`, `:153`–`154`, `:193`–`194`; `setup:117`–`118` |
 | r3 | existence verdicts have in-call provenance (the `PMRC=<rc>` line): a refused `StartTransientUnit` or a `runuser` failure is a failed query — nonzero rc, record/scope/container preserved — never "absent"; a genuine `PMRC=1` still tears down (astra+fable r3 P1) | PASS (dev VM, not a DONE-bar driver) | `../a-r3-dev/dev-prov2.log` (65/0) |
+| r5 | the verdict is the call's **complete output file**, byte for byte — a `PMRC=1\0PMRC=0\n` (NUL-truncated prefix), an extra byte or a NUL-poisoned prop/inspect answer is a failed query, never a verdict; a complete passwd line printed before an NSS stall is no result (sol r5 P1, P3-4) | PASS (host fakes, not a DONE-bar driver) | `../affected-suites-a-r5-host.log` (7 new regressions, all PASS) and `../mutate-guards-a-r5-host.log` (R55–R61 + re-targeted A10/R49/R50 caught) |
 | r2 | call supervision on real systemd/cgroups (timeout, SIGTERM, SIGKILL of the supervisor) | PASS (dev VM, not a DONE-bar driver) | `../a-r2-dev/dev-kill.log` |
+
+### Host logs (sol r5)
+
+| Log | Tree | Result |
+|---|---|---|
+| `affected-suites-a-r5-host.log` | code = `69a2cc116` (run on the pre-amend tree `2cf0ef588`, differing only in `mutate-guards.py`, a harness no unit test reads) | tier3s spawn/probe/provision + session-manager tier3s/base/bounds + silo observation + broker suites: **754 passed, 1 skipped** (the pre-existing real-root skip); includes the 7 new sol-r5 regressions |
+| `unit-all-a-r5-host.log` | code = `69a2cc116` (same pre-amend note) | full `tests/unit`: **6808 passed, 8 skipped** |
+| `tier2-suites-a-r5-host.log` | code = `69a2cc116` | DONE bar 7: 0 `tier2/` files changed; tier-2 unit 130 passed; `bash -n` rc 0, `shellcheck -S warning -e SC1090` rc 0 under the waiver; `shellcheck -S warning` of the cleanup, the spawn and the scope helper rc 0; probe.sh keeps only its pre-existing SC2209:20 (identical on `claude/tier3s`) |
+| `mutate-guards-a-r5-host.log` | code = `69a2cc116` | **162 mutations, 0 problems**: the 155 earlier ones plus 7 r5 ones (R55–R61: byte-exact verdict, whole-line prop/inspect answers, NSS status gating ×4), with R49, R50 and A10 re-targeted at the r5 verdict code (the old A10 swapped the now-dead `1)`/`*)` case arms — PM_RC can no longer take a value other than 0 or 1); files restored byte-identical |
 
 ### Host logs (astra+fable r3)
 
