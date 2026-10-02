@@ -1,17 +1,20 @@
-"""Timestamp margin restyle from presentation pane roles without pyte."""
+"""Tmux share dialog warning restyle from presentation error role."""
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 
 import pytest
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QWidget
 from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
-from qterminator.plugins.timestamps import TimestampMargin, TimestampsPlugin
+from qterminator.plugins.tmux_share import (
+    Share,
+    TmuxSharePlugin,
+    _ShareDialog,
+)
 from qterminator.theme import attach_presentation, reset_controller_for_tests
 from qterminator.titlebar import _ui_font
 from qterminator.window import MainWindow
@@ -45,71 +48,76 @@ def _attach_snapshot(qapp, tmp_path, monkeypatch, snap):
     attach_presentation(qapp, _config("system"))
 
 
-def test_timestamp_margin_uses_snapshot_pane_roles(
+def _public_share() -> Share:
+    share = Share(session="qterm-1", bind="0.0.0.0")
+    share.port = 60001
+    share.key = "KEY"
+    return share
+
+
+def test_share_dialog_warning_uses_snapshot_error_role(
     qtbot, qapp, tmp_path, monkeypatch
 ):
     host = QWidget()
     qtbot.addWidget(host)
-    margin = TimestampMargin(host)
-    now = time.time()
-    stored = [(0, now), (16, now + 1)]
-    margin.set_timestamps(stored)
+    dialog = _ShareDialog(_public_share(), public_bind=True, parent=host)
     snap = example_snapshot()
-    old_bg = QColor(margin._bg).name()
-    old_fg = QColor(margin._fg).name()
-    old_ts = list(margin._timestamps)
-    assert QColor(snap.colors.mSurface).name().lower() != old_bg.lower()
-    assert QColor(snap.colors.mOnSurfaceVariant).name().lower() != old_fg.lower()
+    warn = dialog._warn
+    assert warn is not None
+    old_sheet = warn.styleSheet()
+    old_text = warn.text()
+    assert snap.colors.mError.lower() not in old_sheet.lower()
 
     _attach_snapshot(qapp, tmp_path, monkeypatch, snap)
-    assert QColor(margin._bg).name() == old_bg
-    assert QColor(margin._fg).name() == old_fg
-    assert margin._timestamps == old_ts
+    assert warn.styleSheet() == old_sheet
+    assert warn.text() == old_text
 
-    margin.apply_presentation_update()
-    expected_font = _ui_font(relative=0.9)
-    assert QColor(margin._bg).name().lower() == snap.colors.mSurface.lower()
-    assert QColor(margin._fg).name().lower() == snap.colors.mOnSurfaceVariant.lower()
-    assert margin._timestamps == old_ts
-    assert margin._font.family() == expected_font.family()
-    assert margin._font.pointSizeF() == expected_font.pointSizeF()
+    dialog.apply_presentation_update()
+    expected_font = _ui_font(bold=True)
+    sheet = warn.styleSheet()
+    assert snap.colors.mError.lower() in sheet.lower()
+    assert "#e74c3c" not in sheet.lower()
+    assert "font-size" not in sheet
+    assert warn.font().family() == expected_font.family()
+    assert warn.font().pointSizeF() == expected_font.pointSizeF()
+    assert warn.font().bold()
+    assert warn.text() == old_text
     reset_controller_for_tests()
 
 
-def test_timestamps_plugin_restyles_existing_margins(
+def test_tmux_share_plugin_restyles_existing_dialog(
     qtbot, qapp, tmp_path, monkeypatch
 ):
     host = QWidget()
     qtbot.addWidget(host)
-    margin = TimestampMargin(host)
-    plugin = TimestampsPlugin()
-    plugin._margins[id(margin)] = margin
+    dialog = _ShareDialog(_public_share(), public_bind=True, parent=host)
+    plugin = TmuxSharePlugin()
+    plugin._dialogs.append(dialog)
     snap = example_snapshot()
-    old_bg = QColor(margin._bg).name()
-    old_fg = QColor(margin._fg).name()
+    old_sheet = dialog._warn.styleSheet()
 
     _attach_snapshot(qapp, tmp_path, monkeypatch, snap)
-    assert QColor(margin._bg).name() == old_bg
-    assert QColor(margin._fg).name() == old_fg
+    assert dialog._warn.styleSheet() == old_sheet
 
     plugin.apply_presentation_update()
-    assert QColor(margin._bg).name().lower() == snap.colors.mSurface.lower()
-    assert QColor(margin._fg).name().lower() == snap.colors.mOnSurfaceVariant.lower()
+    sheet = dialog._warn.styleSheet()
+    assert snap.colors.mError.lower() in sheet.lower()
+    assert "#e74c3c" not in sheet.lower()
     reset_controller_for_tests()
 
 
-def test_mainwindow_presentation_update_restyles_timestamp_margins(
+def test_mainwindow_presentation_update_restyles_share_dialog(
     qtbot, qapp, tmp_path, monkeypatch
 ):
     host = QWidget()
     qtbot.addWidget(host)
-    margin = TimestampMargin(host)
+    dialog = _ShareDialog(_public_share(), public_bind=True, parent=host)
     snap = example_snapshot()
-    old_bg = QColor(margin._bg).name()
-    assert QColor(snap.colors.mSurface).name().lower() != old_bg.lower()
+    old_sheet = dialog._warn.styleSheet()
+    assert snap.colors.mError.lower() not in old_sheet.lower()
 
     _attach_snapshot(qapp, tmp_path, monkeypatch, snap)
-    assert QColor(margin._bg).name() == old_bg
+    assert dialog._warn.styleSheet() == old_sheet
 
     class _EmptyBar:
         def apply_presentation_update(self):
@@ -122,9 +130,9 @@ def test_mainwindow_presentation_update_restyles_timestamp_margins(
         def widget(self, _index):
             return None
 
-    class _Timestamps:
+    class _SharePlugin:
         def apply_presentation_update(self):
-            margin.apply_presentation_update()
+            dialog.apply_presentation_update()
 
     win = MainWindow.__new__(MainWindow)
     win._tab_bar = _EmptyBar()
@@ -132,10 +140,11 @@ def test_mainwindow_presentation_update_restyles_timestamp_margins(
     win.iter_terminals = lambda: iter(())
     win.badges = None
     win.instant_replay = None
-    win.timestamps = _Timestamps()
-    win.tmux_share_plugin = None
+    win.timestamps = None
+    win.tmux_share_plugin = _SharePlugin()
     MainWindow.apply_presentation_update(win)
 
-    assert QColor(margin._bg).name().lower() == snap.colors.mSurface.lower()
-    assert QColor(margin._fg).name().lower() == snap.colors.mOnSurfaceVariant.lower()
+    sheet = dialog._warn.styleSheet()
+    assert snap.colors.mError.lower() in sheet.lower()
+    assert "#e74c3c" not in sheet.lower()
     reset_controller_for_tests()
