@@ -13,3 +13,33 @@ error: guest agent command failed: unable to execute QEMU agent command 'guest-e
 error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
 [vm-exec] WARN: guest agent RPC failed (attempt 5/30, virsh_exit=1); retry in 5s
 error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 10/30, virsh_exit=1); retry in 5s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 15/30, virsh_exit=1); retry in 10s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 20/30, virsh_exit=1); retry in 10s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 25/30, virsh_exit=1); retry in 10s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] ERROR: Guest agent not responding after 30 attempts
+### exit=1
