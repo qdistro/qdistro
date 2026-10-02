@@ -1,17 +1,121 @@
 """Per-terminal titlebar widget showing title, group, and status indicators."""
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QToolButton, QWidget
+from __future__ import annotations
 
-ACTIVE_BG = "#2a6ea8"
-INACTIVE_BG = "#3c3c3c"
+import re
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPalette
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QToolButton,
+    QWidget,
+)
+
 TITLE_HEIGHT = 20
 
-# Group colors for visual distinction
+# Group colors identify a named group. They are not appearance palette roles.
 GROUP_COLORS = [
     "#c0392b", "#27ae60", "#2980b9", "#8e44ad",
     "#d35400", "#16a085", "#2c3e50", "#f39c12",
 ]
+
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+_FALLBACK_ERROR = "#e74c3c"
+_FALLBACK_ACTIVITY = "#f1c40f"
+_FALLBACK_VM_FG = "#111111"
+_NEAR_WHITE = {"#ffffff", "#f3edf7", "#dddddd", "#d4d4d4"}
+_NEAR_BLACK = {"#000000", "#0e0e43", "#1e1e1e", "#111111"}
+
+
+def _css_hex(value: object, fallback: str) -> str:
+    if isinstance(value, str) and _HEX.fullmatch(value.strip()):
+        return value.strip().lower()
+    if isinstance(fallback, str) and _HEX.fullmatch(fallback.strip()):
+        return fallback.strip().lower()
+    return "#000000"
+
+
+def _qcolor_hex(color: QColor, fallback: str) -> str:
+    if color.isValid():
+        return _css_hex(
+            f"#{color.red():02x}{color.green():02x}{color.blue():02x}",
+            fallback,
+        )
+    return _css_hex(fallback, "#000000")
+
+
+def titlebar_roles(widget: QWidget) -> dict[str, str]:
+    """Chrome colors from the shared snapshot, else the widget palette."""
+    colors = None
+    try:
+        from qterminator.theme import current_controller
+
+        ctrl = current_controller()
+        state = getattr(ctrl, "state", None) if ctrl is not None else None
+        snap = getattr(state, "snapshot", None) if state is not None else None
+        if getattr(state, "using_shared_palette", False) and snap is not None:
+            colors = snap.colors
+    except Exception:  # noqa: BLE001
+        colors = None
+    if colors is not None:
+        return {
+            "active_bg": _css_hex(colors.mPrimary, "#2a6ea8"),
+            "active_fg": _css_hex(colors.mOnPrimary, "#ffffff"),
+            "inactive_bg": _css_hex(colors.mSurfaceVariant, "#3c3c3c"),
+            "inactive_fg": _css_hex(colors.mOnSurface, "#dddddd"),
+            "dim": _css_hex(colors.mOnSurfaceVariant, "#aaaaaa"),
+            "error": _css_hex(colors.mError, _FALLBACK_ERROR),
+            "activity": _css_hex(colors.mTertiary, _FALLBACK_ACTIVITY),
+            "hover_bg": _css_hex(colors.mHover, colors.mPrimary),
+            "hover_fg": _css_hex(colors.mOnHover, colors.mOnPrimary),
+            "vm_bg": _css_hex(colors.mTertiary, _FALLBACK_ACTIVITY),
+            "vm_fg": _css_hex(colors.mOnTertiary, _FALLBACK_VM_FG),
+        }
+    pal = widget.palette()
+    highlight = _qcolor_hex(pal.color(QPalette.ColorRole.Highlight), "#2a6ea8")
+    highlighted = _qcolor_hex(
+        pal.color(QPalette.ColorRole.HighlightedText), "#ffffff"
+    )
+    alt = _qcolor_hex(pal.color(QPalette.ColorRole.AlternateBase), "#3c3c3c")
+    fg = _qcolor_hex(pal.color(QPalette.ColorRole.WindowText), "#dddddd")
+    dim = _qcolor_hex(pal.color(QPalette.ColorRole.PlaceholderText), "#aaaaaa")
+    bright = _qcolor_hex(pal.color(QPalette.ColorRole.BrightText), _FALLBACK_ERROR)
+    error = bright
+    if bright.lower() in {fg.lower(), highlighted.lower()} | _NEAR_WHITE | _NEAR_BLACK:
+        error = _FALLBACK_ERROR
+    link = _qcolor_hex(pal.color(QPalette.ColorRole.LinkVisited), _FALLBACK_ACTIVITY)
+    activity = link
+    if link.lower() in {error.lower(), fg.lower(), highlight.lower()}:
+        activity = _FALLBACK_ACTIVITY
+    return {
+        "active_bg": highlight,
+        "active_fg": highlighted,
+        "inactive_bg": alt,
+        "inactive_fg": fg,
+        "dim": dim,
+        "error": error,
+        "activity": activity,
+        "hover_bg": highlight,
+        "hover_fg": highlighted,
+        "vm_bg": activity,
+        "vm_fg": _FALLBACK_VM_FG,
+    }
+
+
+def _ui_font(*, relative: float = 1.0, bold: bool = False) -> QFont:
+    app = QApplication.instance()
+    font = QFont(app.font()) if app is not None else QFont()
+    size = font.pointSizeF()
+    if size <= 0:
+        size = float(font.pointSize() or 11)
+    font.setPointSizeF(max(6.0, size * relative))
+    font.setBold(bold)
+    return font
 
 
 class TerminalTitlebar(QFrame):
@@ -22,9 +126,10 @@ class TerminalTitlebar(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(TITLE_HEIGHT)
         self.setAutoFillBackground(True)
         self._active = False
+        self._group_name = None
+        self._vm_name = None
         self._extra_widgets = {}
 
         layout = QHBoxLayout(self)
@@ -32,21 +137,16 @@ class TerminalTitlebar(QFrame):
         layout.setSpacing(4)
         self._layout = layout
 
-        # Group indicator (colored dot)
         self._group_label = QLabel()
         self._group_label.setFixedSize(12, 12)
         self._group_label.hide()
         layout.addWidget(self._group_label)
 
-        # Read-only indicator
         self._readonly_label = QLabel("[RO]")
-        self._readonly_label.setStyleSheet("color: #e74c3c; font-size: 10px; font-weight: bold;")
         self._readonly_label.hide()
         layout.addWidget(self._readonly_label)
 
-        # Activity indicator
-        self._activity_label = QLabel("\u25cf")  # ● dot
-        self._activity_label.setStyleSheet("color: #f1c40f; font-size: 10px;")
+        self._activity_label = QLabel("\u25cf")
         self._activity_label.setToolTip("Activity detected")
         self._activity_label.hide()
         layout.addWidget(self._activity_label)
@@ -54,26 +154,73 @@ class TerminalTitlebar(QFrame):
         self._left_extra_start = layout.count()
         self._left_extra_count = 0
 
-        # Title
         self._title_label = QLabel("Terminal")
-        self._title_label.setStyleSheet("color: #ddd; font-size: 11px;")
         layout.addWidget(self._title_label, 1)
 
         self._right_extra_start = layout.count()
         self._right_extra_count = 0
 
-        # Close button
-        self._close_btn = QPushButton("\u00d7")  # × symbol
+        self._close_btn = QPushButton("\u00d7")
         self._close_btn.setFixedSize(16, 16)
         self._close_btn.setFlat(True)
-        self._close_btn.setStyleSheet(
-            "QPushButton { color: #aaa; font-size: 12px; border: none; }"
-            "QPushButton:hover { color: #fff; background: #555; border-radius: 3px; }"
-        )
         self._close_btn.clicked.connect(self.close_clicked.emit)
         layout.addWidget(self._close_btn)
 
-        self.set_active(False)
+        self._apply_chrome()
+
+    def apply_presentation_update(self) -> None:
+        self._apply_chrome()
+
+    def _apply_chrome(self) -> None:
+        roles = titlebar_roles(self)
+        title_font = _ui_font()
+        small_font = _ui_font(relative=0.9)
+        height = max(TITLE_HEIGHT, QFontMetrics(title_font).height() + 6)
+        self.setFixedHeight(height)
+        bg = roles["active_bg"] if self._active else roles["inactive_bg"]
+        fg = roles["active_fg"] if self._active else roles["inactive_fg"]
+        self.setStyleSheet(f"TerminalTitlebar {{ background-color: {bg}; }}")
+
+        self._title_label.setFont(title_font)
+        self._title_label.setStyleSheet(f"color: {fg};")
+
+        self._readonly_label.setFont(_ui_font(relative=0.9, bold=True))
+        self._readonly_label.setStyleSheet(f"color: {roles['error']};")
+
+        self._activity_label.setFont(small_font)
+        self._activity_label.setStyleSheet(f"color: {roles['activity']};")
+
+        btn = max(16, height - 4)
+        self._close_btn.setFixedSize(btn, btn)
+        self._close_btn.setFont(title_font)
+        self._close_btn.setStyleSheet(
+            f"QPushButton {{ color: {roles['dim']}; border: none; }}"
+            f"QPushButton:hover {{ color: {roles['hover_fg']}; "
+            f"background: {roles['hover_bg']}; border-radius: 3px; }}"
+        )
+
+        if self._group_name:
+            color = GROUP_COLORS[hash(self._group_name) % len(GROUP_COLORS)]
+            self._group_label.setStyleSheet(
+                f"background-color: {color}; border-radius: 6px;"
+            )
+
+        vm = self.titlebar_widget("vm-indicator")
+        if isinstance(vm, QLabel) and self._vm_name:
+            vm.setFont(_ui_font(relative=0.9, bold=True))
+            vm.setStyleSheet(
+                f"color: {roles['vm_fg']}; background: {roles['vm_bg']}; "
+                "border-radius: 3px; padding: 0 4px;"
+            )
+
+        for widget, _side in self._extra_widgets.values():
+            if isinstance(widget, QToolButton):
+                widget.setFont(small_font)
+                widget.setStyleSheet(
+                    f"QToolButton {{ color: {roles['dim']}; border: none; }}"
+                    f"QToolButton:hover {{ color: {roles['hover_fg']}; "
+                    f"background: {roles['hover_bg']}; border-radius: 3px; }}"
+                )
 
     def set_title(self, title):
         if len(title) > 60:
@@ -82,19 +229,15 @@ class TerminalTitlebar(QFrame):
 
     def set_active(self, active):
         self._active = active
-        bg = ACTIVE_BG if active else INACTIVE_BG
-        self.setStyleSheet(f"TerminalTitlebar {{ background-color: {bg}; }}")
+        self._apply_chrome()
 
     def set_group(self, group_name):
         """Show group indicator with a color based on group name."""
-        if group_name:
-            color_idx = hash(group_name) % len(GROUP_COLORS)
-            color = GROUP_COLORS[color_idx]
-            self._group_label.setStyleSheet(
-                f"background-color: {color}; border-radius: 6px;"
-            )
-            self._group_label.setToolTip(f"Group: {group_name}")
+        self._group_name = group_name or None
+        if self._group_name:
+            self._group_label.setToolTip(f"Group: {self._group_name}")
             self._group_label.show()
+            self._apply_chrome()
         else:
             self._group_label.hide()
 
@@ -131,6 +274,7 @@ class TerminalTitlebar(QFrame):
 
         self._layout.insertWidget(index, widget)
         self._extra_widgets[name] = (widget, side)
+        self._apply_chrome()
         return widget
 
     def add_titlebar_button(
@@ -146,10 +290,6 @@ class TerminalTitlebar(QFrame):
         button.setText(text)
         button.setFixedSize(16, 16)
         button.setToolTip(tooltip)
-        button.setStyleSheet(
-            "QToolButton { color: #aaa; font-size: 11px; border: none; }"
-            "QToolButton:hover { color: #fff; background: #555; border-radius: 3px; }"
-        )
         if callback is not None:
             button.clicked.connect(callback)
         return self.add_titlebar_widget(name, button, side)
@@ -169,6 +309,8 @@ class TerminalTitlebar(QFrame):
             self._right_extra_start -= 1
         else:
             self._right_extra_count -= 1
+        if name == "vm-indicator":
+            self._vm_name = None
         return True
 
     def titlebar_widget(self, name: str) -> QWidget | None:
@@ -180,12 +322,15 @@ class TerminalTitlebar(QFrame):
         if not vm_name:
             self.remove_titlebar_widget("vm-indicator")
             return
+        self._vm_name = vm_name
+        existing = self.titlebar_widget("vm-indicator")
+        if isinstance(existing, QLabel):
+            existing.setText(f"VM: {vm_name}")
+            existing.setToolTip(f"Running in VM: {vm_name}")
+            self._apply_chrome()
+            return
         label = QLabel(f"VM: {vm_name}", self)
         label.setToolTip(f"Running in VM: {vm_name}")
-        label.setStyleSheet(
-            "color: #111; background: #f1c40f; border-radius: 3px;"
-            "font-size: 10px; font-weight: bold; padding: 0 4px;"
-        )
         self.add_titlebar_widget("vm-indicator", label, side="left")
 
     def mousePressEvent(self, event):

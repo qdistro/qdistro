@@ -5,11 +5,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QLabel, QToolButton
 from qterminator.titlebar import (
-    ACTIVE_BG,
     GROUP_COLORS,
-    INACTIVE_BG,
     TITLE_HEIGHT,
     TerminalTitlebar,
+    titlebar_roles,
 )
 
 
@@ -53,10 +52,10 @@ def test_default_activity_hidden(titlebar):
 
 
 def test_fixed_height(titlebar):
-    """Titlebar has the expected fixed height."""
-    assert titlebar.maximumHeight() == TITLE_HEIGHT
-    assert titlebar.minimumHeight() == TITLE_HEIGHT
+    """Titlebar height is at least the unscaled baseline."""
     assert TITLE_HEIGHT == 20
+    assert titlebar.minimumHeight() >= TITLE_HEIGHT
+    assert titlebar.maximumHeight() == titlebar.minimumHeight()
 
 
 # --- set_title ---
@@ -106,27 +105,31 @@ def test_set_title_special_characters(titlebar):
 # --- set_active ---
 
 def test_set_active_true(titlebar):
-    """Activating sets _active flag and changes stylesheet."""
+    """Activating sets _active flag and uses the highlight role."""
     titlebar.set_active(True)
     assert titlebar._active is True
-    assert ACTIVE_BG in titlebar.styleSheet()
+    roles = titlebar_roles(titlebar)
+    assert roles["active_bg"] in titlebar.styleSheet()
 
 
 def test_set_active_false(titlebar):
-    """Deactivating sets _active flag and changes stylesheet."""
+    """Deactivating sets _active flag and uses the inactive surface role."""
     titlebar.set_active(True)
     titlebar.set_active(False)
     assert titlebar._active is False
-    assert INACTIVE_BG in titlebar.styleSheet()
+    roles = titlebar_roles(titlebar)
+    assert roles["inactive_bg"] in titlebar.styleSheet()
 
 
 def test_set_active_then_inactive(titlebar):
     """Toggling active state updates background each time."""
+    roles = titlebar_roles(titlebar)
     titlebar.set_active(True)
-    assert ACTIVE_BG in titlebar.styleSheet()
+    assert roles["active_bg"] in titlebar.styleSheet()
     titlebar.set_active(False)
-    assert INACTIVE_BG in titlebar.styleSheet()
-    assert ACTIVE_BG not in titlebar.styleSheet()
+    assert roles["inactive_bg"] in titlebar.styleSheet()
+    if roles["active_bg"] != roles["inactive_bg"]:
+        assert roles["active_bg"] not in titlebar.styleSheet()
 
 
 # --- set_group ---
@@ -363,3 +366,114 @@ def test_vm_indicator_show_and_hide(titlebar):
 
     titlebar.set_vm_indicator(None)
     assert titlebar.titlebar_widget("vm-indicator") is None
+
+
+def test_chrome_uses_point_sizes_not_pixels(titlebar):
+    """Label fonts are point sizes; QSS does not set device-pixel font-size."""
+    assert "font-size" not in titlebar._title_label.styleSheet()
+    assert "px" not in titlebar._title_label.styleSheet()
+    assert "font-size" not in titlebar._readonly_label.styleSheet()
+    assert "font-size" not in titlebar._activity_label.styleSheet()
+    assert "font-size" not in titlebar._close_btn.styleSheet()
+    assert titlebar._title_label.font().pointSizeF() >= 6.0
+    assert titlebar._readonly_label.font().pointSizeF() >= 6.0
+
+
+def test_snapshot_restyle_uses_semantic_roles(qtbot, qapp, tmp_path, monkeypatch):
+    """Follow-desktop snapshot colors replace hardcoded titlebar hex."""
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QWidget
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import attach_presentation, reset_controller_for_tests
+
+    reset_controller_for_tests()
+    host = QWidget()
+    qtbot.addWidget(host)
+    titlebar = TerminalTitlebar(host)
+    titlebar.set_group("gamma")
+    titlebar.set_read_only(True)
+    titlebar.set_activity(True)
+    titlebar.set_vm_indicator("work")
+    titlebar.set_active(True)
+    snap = example_snapshot()
+    old_sheet = titlebar.styleSheet()
+    old_ro = titlebar._readonly_label.styleSheet()
+    old_activity = titlebar._activity_label.styleSheet()
+    expected_group = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
+    assert snap.colors.mPrimary not in old_sheet
+    assert expected_group in titlebar._group_label.styleSheet()
+
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    assert titlebar.styleSheet() == old_sheet
+    assert titlebar._readonly_label.styleSheet() == old_ro
+    assert titlebar._activity_label.styleSheet() == old_activity
+
+    titlebar.apply_presentation_update()
+    assert snap.colors.mPrimary in titlebar.styleSheet()
+    assert "#2a6ea8" not in titlebar.styleSheet()
+    assert snap.colors.mOnPrimary in titlebar._title_label.styleSheet()
+    assert "#ddd" not in titlebar._title_label.styleSheet()
+    assert snap.colors.mError in titlebar._readonly_label.styleSheet()
+    assert "#e74c3c" not in titlebar._readonly_label.styleSheet()
+    assert snap.colors.mTertiary in titlebar._activity_label.styleSheet()
+    assert "#f1c40f" not in titlebar._activity_label.styleSheet()
+    assert expected_group in titlebar._group_label.styleSheet()
+    vm = titlebar.titlebar_widget("vm-indicator")
+    assert snap.colors.mTertiary in vm.styleSheet()
+    assert snap.colors.mOnTertiary in vm.styleSheet()
+    reset_controller_for_tests()
+
+
+def test_group_identity_survives_palette_restyle(qtbot, qapp, tmp_path, monkeypatch):
+    """Group color stays an identity token across snapshot restyle."""
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QWidget
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import attach_presentation, reset_controller_for_tests
+
+    reset_controller_for_tests()
+    host = QWidget()
+    qtbot.addWidget(host)
+    titlebar = TerminalTitlebar(host)
+    titlebar.set_group("gamma")
+    expected = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
+    before = titlebar._group_label.styleSheet()
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    assert titlebar._group_label.styleSheet() == before
+    titlebar.apply_presentation_update()
+    assert expected in titlebar._group_label.styleSheet()
+    assert expected in before
+    assert example_snapshot().colors.mSurfaceVariant in titlebar.styleSheet()
+    reset_controller_for_tests()

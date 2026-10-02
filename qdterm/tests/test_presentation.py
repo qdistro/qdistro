@@ -73,3 +73,46 @@ def test_missing_snapshot_applies_system_fallback(qapp, tmp_path, monkeypatch):
     assert ctrl.state.using_shared_palette is False
     assert qapp.palette().color(QPalette.ColorRole.Window) == QColor(LT_BG)
     assert qapp.palette().color(QPalette.ColorRole.WindowText) == QColor(LT_FG)
+
+
+def test_mainwindow_presentation_update_restyles_titlebar(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QWidget
+    from qdistro_presentation.model import example_snapshot
+    from qterminator.terminal import TerminalWidget
+    from qterminator.titlebar import TerminalTitlebar
+    from qterminator.window import MainWindow
+
+    host = QWidget()
+    active = TerminalTitlebar(host)
+    inactive = TerminalTitlebar(host)
+    active.set_active(True)
+    inactive.set_active(False)
+    snap = example_snapshot()
+    old_active = active.styleSheet()
+    old_inactive = inactive.styleSheet()
+    assert snap.colors.mPrimary not in old_active
+
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _config("system"))
+    assert active.styleSheet() == old_active
+    assert inactive.styleSheet() == old_inactive
+
+    class _Term:
+        def __init__(self, titlebar):
+            self._titlebar = titlebar
+
+        def apply_inherited_presentation(self):
+            return None
+
+        apply_presentation_update = TerminalWidget.apply_presentation_update
+
+    win = MainWindow.__new__(MainWindow)
+    terms = (_Term(active), _Term(inactive))
+    win.iter_terminals = lambda: iter(terms)
+    win.apply_presentation_update()
+    assert snap.colors.mPrimary in active.styleSheet()
+    assert snap.colors.mOnPrimary in active._title_label.styleSheet()
+    assert snap.colors.mSurfaceVariant in inactive.styleSheet()
+    assert snap.colors.mOnSurface in inactive._title_label.styleSheet()
+    host.deleteLater()

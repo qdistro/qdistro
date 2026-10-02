@@ -417,6 +417,10 @@ class TerminalWidget(QWidget):
         if (profile.get("color_source") or "profile") == "appearance-mode":
             self._apply_resolved_scheme(profile)
 
+    def apply_presentation_update(self) -> None:
+        self.apply_inherited_presentation()
+        self._titlebar.apply_presentation_update()
+
     def apply_profile_fields(self, *, font=True, color=True, scrollback=True):
         """Apply this terminal's current profile without respawning the PTY."""
         profile = self._config.get_profile(self._profile_name)
