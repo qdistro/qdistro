@@ -71,9 +71,10 @@ as_admin() {   # the same scrubbed admin environment the spawn and cleanup use
 }
 pm() { as_admin podman "$@"; }   # PLAIN podman: no --runtime, no --root, no runtime flags
 # StartSilo of a tier3s silo returns only once the launch runs (the unit is
-# Type=notify), so the call gets more than busctl's default 25 s
+# Type=notify), so the call gets more than busctl's default 25 s: the start
+# path can hold the manager up to ~255 s in the worst case (CONTRACT §6)
 sm() {
-    as_admin busctl --system --timeout=150 call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    as_admin busctl --system --timeout=300 call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
         org.qdistro.SessionManager1 "$@"
 }
 broker_check() {   # broker_check <action> -> allow|deny|unknown|ERR
@@ -85,7 +86,7 @@ broker_check() {   # broker_check <action> -> allow|deny|unknown|ERR
 # busctl's JSON output, not its text form: the text form escapes more than
 # `"` (an observed_reason with a `'` broke the old sed-based decoding)
 silo_state() {   # silo_state <name> -> its ListSilos state, or "absent" (QUERY-FAILED on a failed call)
-    as_admin busctl --system --timeout=150 --json=short call org.qdistro.SessionManager1 \
+    as_admin busctl --system --timeout=300 --json=short call org.qdistro.SessionManager1 \
         /org/qdistro/SessionManager1 org.qdistro.SessionManager1 ListSilos | python3 -c '
 import json, sys
 try:
@@ -338,4 +339,7 @@ assert_all_clear() {   # assert_all_clear <tag>
     is "$1: runsc-bundle processes" "$(runsc_pids | wc -l)" 0
     # runsc keeps one shared, empty, read-only null-netns file for network=none
     is "$1: state root holds no container state" "$(qry find "$SROOT" -mindepth 1 ! -name null-netns | grep -c .)" 0
+    # the cleanup's per-call scopes and work dirs end with each call / run (astra A r2 #2)
+    is "$1: no cleanup call scope left" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-t3s-call-*.scope' | grep -c .)" 0
+    is "$1: no cleanup work dir left" "$(qry find "$CTL" -mindepth 1 -maxdepth 1 -name '.call-*' | grep -c .)" 0
 }

@@ -37,6 +37,10 @@ teardown_file() {
         assert_output_contains "PASS: $prof/spawn (direct unit start): the spawn refused with the expected message"
         assert_output_contains "PASS: $prof/spawn (direct unit start): no podman run"
     done
+    # astra A r2 #4: an admin process in the launch unit's cgroup cannot ack
+    assert_output_contains "PASS: the installed launch unit takes notifications from its main PID only (main)"
+    assert_output_contains "PASS: forged READY/main: launch unit state after the admin process's READY=1 (activating)"
+    assert_output_contains "PASS: forged READY/control (NotifyAccess=all): launch unit state after the admin process's READY=1 (active)"
     assert_output_contains "PASS: probe-failure: the spawn refused with the expected message"
     assert_output_contains "PASS: probe-failure: no fallback"
 }

@@ -8,6 +8,11 @@
 #           and for a TEMPLATED silo no activation record
 #           (/run/qdistro/silo-generation/<silo>, bindings/<silo>.activated).
 #           A positive control (allow) shows both oracles DO see a launch.
+#   astra A r2 #4: only the spawn (the launch unit's main PID) completes the
+#           start job: an admin process inside the launch unit's cgroup that
+#           sends READY=1 to systemd's socket does not (NotifyAccess=main),
+#           with a positive control (a runtime NotifyAccess=all drop-in: the
+#           same forged READY=1 DOES complete it).
 #   item 6  the hardened profiles (release, daily: every non-dev profile)
 #           refuse with a clear message at CreateTier3sSilo, at StartSilo and in the spawn
 #           itself (direct unit start); a probe failure refuses; no fallback
@@ -143,6 +148,11 @@ is "control: the same scope oracle sees the owning scope start" "$(units_started
 tok=$(unit_log "$(unit_of $ST)" "$cur" | sed -n 's/^LAUNCH_TOKEN=\([0-9a-f]\{32\}\)$/\1/p' | head -1)
 is "control: templated launch ran the image by its generation digest" "$(unit_log "$(unit_of $ST)" "$cur" | grep -c "^IMAGE=$GEN\$")" 1
 is "control: the smoke ran to its end under gVisor" "$(scope_log "$tok" | grep -c '^SMOKE done' | sed 's/[1-9][0-9]*/yes/')" yes
+if unit_log "$(unit_of $ST)" "$cur" | grep -q 'spawn-tier3s: running: '; then
+    info "control: READY=1 came after the launch was recorded running (NotifyAccess=main)"
+else
+    info "control: the short workload ended before it was seen running; READY=1 came after its verified teardown (NotifyAccess=main)"
+fi
 is "control: launch unit Result" "$(systemctl show -p Result --value "$(unit_of $ST)")" success
 sm StopSilo si $ST 10 > /dev/null; is "control: StopSilo" "$(silo_state $ST)" Stopped
 assert_all_clear control
@@ -183,7 +193,56 @@ refused "probe-failure" $SA "probe failed (rc=1): RESULT FAIL: first missing pre
 mv "$WRAPPER.s121-aside" "$WRAPPER"
 is "probe PASS again with the wrapper restored" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
 
-step "6. cleanup"
+step "6. astra A r2 #4: only the spawn (the unit's main PID) can complete the start"
+U6=$(unit_of $SA)
+is "the installed launch unit takes notifications from its main PID only" "$(systemctl show -p NotifyAccess --value "$U6")" main
+set_rule allow; is "broker answers allow" "$(broker_check "$ACTION")" allow
+# forge_ready <tag> <want>: start the launch with the global record lock held
+# (the spawn blocks on it inside its start job, before any scope), move an
+# ADMIN process into the launch unit's cgroup, have it send READY=1 to
+# systemd's socket (the path is not a secret), and read the unit's state
+# 3 s later: <want>. Then release the lock and see the launch run.
+forge_ready() {
+    local tag="$1" want="$2" tok pid cg i
+    tok=$(write_stanza $SA "[\"$SMOKE_APP\", \"--hold\", \"600\"]")
+    rm -f "$WORK/forge.go"
+    exec 7>"$CTL/.lock"; flock 7
+    systemctl start --no-block "$U6"
+    wait_for 30 bash -c "[ \"\$(systemctl show -p ActiveState --value '$U6')\" = activating ] && [ \"\$(systemctl show -p MainPID --value '$U6')\" != 0 ]"
+    is "$tag: the launch unit is starting (the spawn waits on the record lock)" "$(unit_state "$U6")" activating
+    setpriv --reuid=1000 --regid=1000 --init-groups bash -c \
+        "while [ ! -e '$WORK/forge.go' ]; do sleep 0.1; done; exec timeout 10 env NOTIFY_SOCKET=/run/systemd/notify systemd-notify --ready" &
+    pid=$!
+    cg="/sys/fs/cgroup/system.slice/$U6"
+    echo "$pid" > "$cg/cgroup.procs"
+    is "$tag: an admin (uid 1000) process now runs in the launch unit's cgroup" \
+        "$(stat -c %u "/proc/$pid"):$(sed -n 's/^0:://p' "/proc/$pid/cgroup")" "1000:/system.slice/$U6"
+    touch "$WORK/forge.go"; wait "$pid"
+    info "$tag: the admin process sent READY=1 (systemd-notify rc=$?)"
+    sleep 3
+    is "$tag: launch unit state after the admin process's READY=1" "$(unit_state "$U6")" "$want"
+    flock -u 7; exec 7>&-
+    wait_for 90 bash -c "[ \"\$(systemctl show -p ActiveState --value '$U6')\" = active ] && grep -qx phase=running '$CTL/$tok/state'"
+    is "$tag: then the launch runs on the spawn's own READY=1 (record phase)" "$(rec "$tok" phase)" running
+    is "$tag: launch unit active" "$(unit_state "$U6")" active
+    systemctl stop "$U6"; wait_for 60 unit_down "$U6"
+    is "$tag: launch unit stopped" "$(yes_no unit_down "$U6")" yes
+    systemctl reset-failed "$U6" 2>/dev/null
+    rm -f "/run/qdistro/silo-launch/$SA.env"
+}
+forge_ready "forged READY/main" activating
+journalctl _PID=1 --since "-2min" --no-pager -o cat 2>/dev/null | grep -i 'notification message from PID' | tail -2 | sed 's/^/    pid1: /'
+# positive control: with NotifyAccess=all the same forged READY=1 DOES complete
+# the start, so the check above can see an acknowledgement
+DROP=/run/systemd/system/$U6.d
+mkdir -p "$DROP"; printf '[Service]\nNotifyAccess=all\n' > "$DROP/50-s121-control.conf"; systemctl daemon-reload
+is "control: a runtime drop-in sets NotifyAccess=all" "$(systemctl show -p NotifyAccess --value "$U6")" all
+forge_ready "forged READY/control (NotifyAccess=all)" active
+rm -rf "$DROP"; systemctl daemon-reload
+is "control drop-in removed" "$(systemctl show -p NotifyAccess --value "$U6")" main
+assert_all_clear forged-ready
+
+step "7. cleanup"
 for s in $SA $ST; do sm DeleteSilo s "$s" > /dev/null; is "DeleteSilo $s" "$(silo_state "$s")" absent; done
 as_admin env PYTHONPATH=/usr/libexec/qdistro python3 - "$ST" "$FIX_TEMPLATE" <<'PY'
 import os, shutil, sys
