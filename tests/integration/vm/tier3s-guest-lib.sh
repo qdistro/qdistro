@@ -132,7 +132,8 @@ launch_events_since() {   # launch_events_since <iso time>; a failed query yield
     qry pm events --since "$1" --until "$(date --iso-8601=seconds)" --filter type=container \
         --format '{{.Status}} {{.Name}}' | grep -vE '^(create|remove) tier3s-probe-[0-9]+$' | grep .
 }
-records() { find "$CTL" -mindepth 1 -maxdepth 1 -regextype egrep -regex '.*/[0-9a-f]{32}' -printf '%f\n' 2>/dev/null; }
+# control-record tokens; a failed find yields a QUERY-FAILED line (sol A-iii r2 P2)
+records() { qry find "$CTL" -mindepth 1 -maxdepth 1 -regextype egrep -regex '.*/[0-9a-f]{32}' -printf '%f\n'; }
 rec() { sed -n "s/^$2=//p" "$CTL/$1/state" 2>/dev/null; }   # rec <token> <key>
 token_of_unit() {   # the control record whose unit= is $1 (exactly one)
     local t

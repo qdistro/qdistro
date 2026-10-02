@@ -150,6 +150,7 @@ F=@F@; T=@T@
 echo "systemctl $*" >> "$F/calls"
 case "$1" in
 is-active)
+    [ ! -e "$F/units/$2.fail" ] || { echo "Failed to connect to bus" >&2; exit 1; }
     if [ -s "$F/units/$2.seq" ]; then          # a scripted state sequence, one state per query
         s="$(head -1 "$F/units/$2.seq")"; sed -i 1d "$F/units/$2.seq"; echo "$s" > "$F/units/$2.state"
     else s="$(cat "$F/units/$2.state" 2>/dev/null || echo inactive)"; fi
@@ -1015,7 +1016,40 @@ def test_reap_stale_rechecks_the_launch_unit_before_stopping_the_scope(w):
     (w.F / "units/qdistro-tier3s-silo@a.service.seq").write_text("inactive\nactive\n")
     r = w.cleanup("--reap-stale")
     assert r.returncode == 1, r.stderr
-    assert "became live again" in r.stderr
+    assert "is live again or unknown" in r.stderr
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
+    assert (w.launch_parent / TOKEN).exists()
+
+
+# sol A-iii r2 P1: a failed unit-state query is "unknown", never "not live"
+
+def test_reap_stale_unknown_unit_state_preserves_a_recorded_launch(w):
+    w.make_launch(TOKEN, "qdistro-tier3s-silo@a.service", "qdistro-tier3s-a", pids=(4001, 4002))
+    (w.F / "units/qdistro-tier3s-silo@a.service.fail").write_text("")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "cannot tell whether qdistro-tier3s-silo@a.service is live" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.F / "c/qdistro-tier3s-a/running").exists()
+    assert not any(c.startswith(("podman stop", "podman rm", "systemctl stop")) for c in w.calls())
+
+
+def test_reap_stale_unknown_unit_state_preserves_an_unrecorded_container(w):
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    shutil.rmtree(w.ctl / TOKEN2)
+    (w.F / "units/qdistro-tier3s-silo@b.service.fail").write_text("")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "NOT reaping qdistro-tier3s-b" in r.stderr
+    assert (w.F / "c/qdistro-tier3s-b/running").exists() and (w.launch_parent / TOKEN2).exists()
+    assert not any(c.startswith(("podman rm", "systemctl stop")) for c in w.calls())
+
+
+@pytest.mark.parametrize("which", ["scope", "bound-unit"])
+def test_reap_stale_unknown_state_preserves_an_orphan_scope(w, which):
+    _orphan_with_live_scope(w)
+    w.set_unit("qdistro-tier3s-silo@a.service", "inactive")
+    unit = f"qdistro-tier3s-{TOKEN}.scope" if which == "scope" else "qdistro-tier3s-silo@a.service"
+    (w.F / f"units/{unit}.fail").write_text("")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "cannot tell whether" in r.stderr
     assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
     assert (w.launch_parent / TOKEN).exists()
 

@@ -65,6 +65,10 @@ is "oracle self-test: a failing podman event query is reported, not counted as n
     "$(launch_events_since not-a-time | grep -c '^QUERY-FAILED')" 1
 is "oracle self-test: a failing journal query is reported, not counted as no unit" \
     "$(units_started_since not-a-cursor "$T3S_SCOPE_RE")" QUERY-FAILED
+is "oracle self-test: a failing control-record listing is reported, not counted as no record" \
+    "$(CTL=/nonexistent-t3s-ctl records | grep -c '^QUERY-FAILED')" 1
+is "oracle self-test: a failing per-launch dir listing is reported, not counted as no dir" \
+    "$(qry find /nonexistent-t3s-launches -mindepth 1 | grep -c '^QUERY-FAILED')" 1
 is "oracle self-test: a failing podman ps is reported, not counted as no container" \
     "$(qry pm ps -a --format '{{.Names}}' --filter bogus=1 | grep -c '^QUERY-FAILED')" 1
 for s in $SA $ST; do
@@ -91,7 +95,7 @@ refused() {
     launch_events_since "$t0" | sed 's/^/    podman event: /'
     is "$tag: no podman run (no container event but the probe's scratch create/remove)" "$(launch_events_since "$t0" | grep -c .)" 0
     is "$tag: systemd never started an owning scope" "$(units_started_since "$cur" "$T3S_SCOPE_RE")" 0
-    is "$tag: no control record, no per-launch dir" "$(records | wc -l):$(find "$LAUNCHES" -mindepth 1 | wc -l)" "0:0"
+    is "$tag: no control record, no per-launch dir" "$(records | grep -c .):$(qry find "$LAUNCHES" -mindepth 1 | grep -c .)" "0:0"
     is "$tag: no container of any kind" "$(qry pm ps -a --format '{{.Names}}' | grep -c .)" 0
     if [ "$silo" = "$ST" ]; then
         is "$tag: no activation record for the templated silo" "$(yes_no no_activation)" yes

@@ -8,7 +8,7 @@ restore the original bytes and re-check their sha256. IDs: P probe, V
 provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A,
 milestone A-i); S session manager, L root launch helper, B broker, I installer,
 U launch unit, A21+ spawn deltas (milestone A-ii); I3-I5, U2, U3 the owner
-answers O10/O11, R1-R5 the reaper/teardown fixes from the s122 VM and qci runs, R6/R7 the sol r1 P1 (milestone A-iii).
+answers O10/O11, R1-R5 the reaper/teardown fixes from the s122 VM and qci runs, R6/R7 the sol r1 P1, R8 the sol r2 P1 (milestone A-iii).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -390,7 +390,7 @@ MUTATIONS = [
      '; stopping it"\n            systemctl stop "$scope" 2>/dev/null\n', '; stopping it"\n',
      [f"{TS}::test_reap_stale_stops_a_stale_scope_then_removes_the_orphan_dir"]),
     ("R3 reaper ignores the scope's live launch unit", CLEAN,
-     '        if unit_live "$bound"; then\n            say "$tok: no control record; its scope serves', '        if false; then\n            say "$tok: no control record; its scope serves',
+     '        if [ "$bst" = live ]; then\n', '        if false; then\n',
      [f"{TS}::test_reap_stale_leaves_an_orphan_dir_whose_scope_serves_a_live_unit"]),
     ("R4 a container removed during inspect fails the teardown", CLEAN,
      '                vanished "$admin" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }\n',
@@ -406,9 +406,15 @@ MUTATIONS = [
      [f"{TS}::test_reap_stale_preserves_a_live_scope_whose_owner_is_unknown[no-bindsto]",
       f"{TS}::test_reap_stale_preserves_a_live_scope_whose_owner_is_unknown[foreign-bindsto]"]),
     ("R7 reaper does not recheck the launch unit before the stop (sol r1 P1)", CLEAN,
-     '            if unit_live "$bound"; then\n                say "$tok: $bound became live again',
-     '            if false; then\n                say "$tok: $bound became live again',
+     '            if [ "$(unit_status "$bound")" != dead ]; then\n                say "$tok: $bound is live again or unknown',
+     '            if false; then\n                say "$tok: $bound is live again or unknown',
      [f"{TS}::test_reap_stale_rechecks_the_launch_unit_before_stopping_the_scope"]),
+    ("R8 a failed unit-state query reads as 'dead' (sol r2 P1)", CLEAN,
+     '        *) echo unknown ;;\n', '        *) echo dead ;;\n',
+     [f"{TS}::test_reap_stale_unknown_unit_state_preserves_a_recorded_launch",
+      f"{TS}::test_reap_stale_unknown_unit_state_preserves_an_unrecorded_container",
+      f"{TS}::test_reap_stale_unknown_state_preserves_an_orphan_scope[scope]",
+      f"{TS}::test_reap_stale_unknown_state_preserves_an_orphan_scope[bound-unit]"]),
     ("U3 stop propagation replaced by PartOf (restart would relaunch)", UNITF,
      "StopPropagatedFrom=qdistro-session-manager.service\n", "PartOf=qdistro-session-manager.service\n",
      [f"{TSM}::test_unit_file_shape"]),

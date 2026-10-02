@@ -40,13 +40,18 @@ PROC="$T/proc"
 LOCK="$CTL/.lock"
 GRACE=10
 
-# A record is "live" while its launch unit is; only then may it be skipped.
-unit_live() {
+# Unit state, TRI-state (sol A-iii r2 P1): `live`, `dead` (systemd positively
+# says inactive or failed) or `unknown` (the query failed or answered anything
+# else). The reaper acts only on `dead`; `unknown` preserves everything and is
+# an error, never "not live".
+unit_status() {
     case "$(systemctl is-active "$1" 2>/dev/null)" in
-        active|activating|deactivating|reloading|refreshing) return 0 ;;
+        active|activating|deactivating|reloading|refreshing) echo live ;;
+        inactive|failed) echo dead ;;
+        *) echo unknown ;;
     esac
-    return 1
 }
+unit_live() { [ "$(unit_status "$1")" = live ]; }
 as_admin() {   # as_admin <uid> cmd...
     local uid="$1" user home
     user="$(getent passwd "$uid" | cut -d: -f1)"; home="$(getent passwd "$uid" | cut -d: -f6)"
@@ -172,18 +177,21 @@ teardown() {   # teardown <token> (caller holds the lock)
 }
 
 orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a record is
-    # removed only when its scope is gone. Asked for explicitly (strict), a
-    # live scope is an error. From the reaper, a live scope is stopped only
-    # when systemd positively reports its BindsTo= launch unit (a valid
-    # tier3s launch unit name) and that unit is not live, both before the
+    # removed only when systemd positively reports its scope gone. Asked for
+    # explicitly (strict), a live scope is an error. From the reaper, a live
+    # scope is stopped only when systemd positively reports its BindsTo=
+    # launch unit (a valid tier3s launch unit name) dead, both before the
     # bounded wait for systemd's own BindsTo stop and again immediately before
-    # the stop; a failed or ambiguous lookup, or a unit that is (again) live,
-    # preserves the scope and the dir and is an error (sol A-iii r1 P1).
-    # (A-iii s122: a reconciliation reap raced the scope's own stop and left
-    # the dir behind.)
-    local tok="$1" scope="qdistro-tier3s-$1.scope" bound
+    # the stop; a failed or ambiguous lookup or an unknown unit state, or a
+    # unit that is live (again), preserves the scope and the dir and is an
+    # error (sol A-iii r1 P1, r2 P1). (A-iii s122: a reconciliation reap raced
+    # the scope's own stop and left the dir behind.)
+    local tok="$1" scope="qdistro-tier3s-$1.scope" bound st bst
     [ ! -e "$CTL/$tok" ] || return 0
-    if unit_live "$scope"; then
+    st="$(unit_status "$scope")"
+    if [ "$st" = unknown ]; then
+        say "$tok: cannot tell whether $scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
+    if [ "$st" = live ]; then
         if [ -n "${2:-}" ]; then
             say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
         if ! bound="$(systemctl show -p BindsTo --value "$scope" 2>/dev/null)" \
@@ -191,17 +199,22 @@ orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a recor
             say "$tok: no control record; cannot tell which launch unit owns the live $scope (BindsTo='${bound:-?}'); leaving it and $LAUNCH_PARENT/$tok"
             return 1
         fi
-        if unit_live "$bound"; then
+        bst="$(unit_status "$bound")"
+        if [ "$bst" = live ]; then
             say "$tok: no control record; its scope serves the live $bound; leaving $LAUNCH_PARENT/$tok"; return 0; fi
-        for _ in $(seq 1 $((20 * 4))); do unit_live "$scope" || break; sleep "$STEP"; done
-        if unit_live "$scope"; then
-            if unit_live "$bound"; then
-                say "$tok: $bound became live again; leaving $scope and $LAUNCH_PARENT/$tok"; return 1; fi
+        if [ "$bst" != dead ]; then
+            say "$tok: cannot tell whether $bound is live; leaving $scope and $LAUNCH_PARENT/$tok"; return 1; fi
+        for _ in $(seq 1 $((20 * 4))); do [ "$(unit_status "$scope")" = live ] || break; sleep "$STEP"; done
+        st="$(unit_status "$scope")"
+        if [ "$st" = live ]; then
+            if [ "$(unit_status "$bound")" != dead ]; then
+                say "$tok: $bound is live again or unknown; leaving $scope and $LAUNCH_PARENT/$tok"; return 1; fi
             say "$tok: stale scope $scope (launch unit $bound not live); stopping it"
             systemctl stop "$scope" 2>/dev/null
+            st="$(unit_status "$scope")"
         fi
-        if unit_live "$scope"; then
-            say "$tok: scope $scope still live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
+        if [ "$st" != dead ]; then
+            say "$tok: scope $scope still $st; leaving $LAUNCH_PARENT/$tok"; return 1; fi
     fi
     [ ! -d "$LAUNCH_PARENT/$tok" ] || [ -L "$LAUNCH_PARENT/$tok" ] || rm -rf -- "${LAUNCH_PARENT:?}/$tok"
 }
@@ -229,7 +242,13 @@ case "${1:-}" in
         fails=0
         for tok in $(tokens); do
             u="$(sed -n 's/^unit=//p' "$CTL/$tok/state" 2>/dev/null)"
-            if [ -n "$u" ] && [ "$u" != "$except" ] && unit_live "$u"; then continue; fi
+            if [ -n "$u" ] && [ "$u" != "$except" ]; then
+                case "$(unit_status "$u")" in
+                    live) continue ;;
+                    unknown) say "$tok: cannot tell whether $u is live; NOT reaping (record preserved)"
+                             fails=$((fails + 1)); continue ;;
+                esac
+            fi
             say "$tok: stale (unit ${u:-?} not live${except:+ or is $except}); reaping"
             teardown "$tok" || fails=$((fails + 1))
         done
@@ -243,7 +262,13 @@ case "${1:-}" in
         while read -r tok u name; do
             [[ "${tok:-}" =~ ^[0-9a-f]{32}$ ]] || continue
             [ ! -e "$CTL/$tok" ] || continue          # recorded: handled above
-            if [ -n "$u" ] && [ "$u" != "$except" ] && unit_live "$u"; then continue; fi
+            if [ -n "$u" ] && [ "$u" != "$except" ]; then
+                case "$(unit_status "$u")" in
+                    live) continue ;;
+                    unknown) say "$tok: cannot tell whether $u is live; NOT reaping $name"
+                             fails=$((fails + 1)); continue ;;
+                esac
+            fi
             say "$tok: UNRECORDED labelled container $name (unit ${u:-?} not live); reaping"
             if ! as_admin "$WANT_ADMIN" podman rm -f -t "$GRACE" "$name" >/dev/null; then
                 say "$tok: podman rm -f $name failed"; fails=$((fails + 1)); continue; fi
