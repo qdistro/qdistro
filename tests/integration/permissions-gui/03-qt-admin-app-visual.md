@@ -2,64 +2,63 @@
 
 <!-- qci:visual: required -->
 
-**What**: launch the PyQt admin app in admin's compositor session,
-inject one pending request, verify the master (list) / detail (form)
-layout renders with correct empty and populated states, and confirm
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
+**What**: launch the PyQt admin app in admin's qdwin session the way the
+image does, inject one pending request, verify the master (list) / detail
+(form) layout renders with correct empty and populated states, and confirm
 Deny returns the pane to empty.
 
-**Why**: the Qt app is the primary approver (TUI is the
-terminal companion). Its pixel layout — list on the left, detail on
-the right with scope radio buttons + Approve/Deny — is the authority
-for what "done" looks like on tty3. Tests pass the model but can't
-see that the radio group rendered or the Approve button is focused.
+**Why**: the Qt app is the shipped approver. Its pixel layout — list on the
+left, detail on the right with scope radio buttons + Approve/Deny — is the
+authority for what "done" looks like on the product desktop. Tests pass the
+model but can't see that the radio group rendered or the Approve button is
+focused.
 
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-0052}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
-$VMEXEC "$VM" 'test -S /run/user/1000/wayland-0 || test -S /run/user/1000/wayland-1'
-# Clean slate: no stray admin app, no stray qterminal+TUI, no stray test.
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
-$VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_tui 2>/dev/null; true'
+# Session up, work/work2 silo fixtures, idle locker held off and proven
+# unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+# Clean slate: no stray admin app, no stray test caller.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 
 # Drain broker state — a prior scenario may have left a stale pending
 # request, which would falsify the S1 empty-state assertion.
 # Restarting the service empties the in-memory queue.
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 ```
 
 ## Steps
 
 ### S1 — launch admin app, empty state
 
-`qdistro-start-admin-app` (installed to `/usr/local/bin` by
-bootstrap) is the admin-runnable launcher; it sets Wayland/X env vars
-and detaches via `setsid`.
+`qdwin_start_admin_app` runs the shipped `/usr/local/bin/qdistro-start-admin-app`
+in its first-paint mode: it returns (printing the app pid) only after the
+window has painted its first frame and the compositor holds it. A nonzero exit
+FAILS S1.
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
-$VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s1-empty.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app > /tmp/03-app.pid'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/03-qt-admin-app-visual-s1-empty.png"
 ```
 
-Open the S1 frame before grading it. If the window is only partly drawn
-(a black, transparent, or desktop-patterned rectangle cuts through its
-contents), keep that frame and capture up to four more frames, 2 s apart,
-under distinct `-r2.png` ... `-r5.png` names. Open each new frame. Use the
-first fully drawn frame as the S1 evidence; if none is fully drawn, report
-the rendering failure with all captures. This does not relax any visual
-assertion below.
-
 **Assert (empty):**
-- A window with titlebar text `admin approvals` is visible on the
- admin compositor desktop.
+- The admin approvals window is visible on the qdwin desktop. qdwin draws
+ no titlebar for ordinary apps, so look for the window body, not a
+ titlebar; the title itself is proved by the title wait above.
 - The window content is split horizontally: a left-side list view
  (empty — no items) and a right-side detail pane.
 - The detail pane's user label reads literally `(no selection)`.
@@ -72,14 +71,15 @@ assertion below.
  selected.
 - Two buttons labeled `Approve` and `Deny` are visible below the
  scope group.
+- The window is fully drawn: no black, transparent or desktop-patterned
+ region cuts through it. On this lane a partly drawn window is a FAIL.
 
 ### S2 — inject one pending request, populated state
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
- >/tmp/test-output.txt 2>&1 & echo $! >/tmp/test-pid'
+source /tmp/qci-gui-waiters.sh
+bg_start 03-work work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -87,23 +87,15 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 Then, as a separate command, wait for the app to SHOW the request. The
 title is computed from the Pending model's row count (see
-`_update_window_title`), so `(1 pending)` means the row is in the list:
+`_update_window_title`), so `(1 pending)` means the row is in the list, and
+qdwin logs the title on the commit that carries it:
 
 ```bash
 title_rc=0
-$VMEXEC "$VM" 'for _ in $(seq 1 60); do
-  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
-  [ "$t" = "admin approvals (1 pending)" ] && exit 0
-  sleep 0.5
-done
-echo "title never showed the request: $t" >&2; exit 1' || title_rc=$?
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30' || title_rc=$?
 echo "s2 title-wait rc=$title_rc"
-$VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s2-populated.png
+qdwin_screenshot "$ART/03-qt-admin-app-visual-s2-populated.png"
 ```
-
-Apply the same bounded recapture procedure to S2 if the frame is partly
-drawn. The title wait proves the model row exists; it does not prove that
-the guest framebuffer has finished drawing the detail pane.
 
 A non-zero `s2 title-wait rc` FAILS S2 regardless of the frame.
 
@@ -124,85 +116,54 @@ A non-zero `s2 title-wait rc` FAILS S2 regardless of the frame.
 The Qt admin app wires `Ctrl+Y`/`Ctrl+N` as `WindowShortcut`-scoped
 QShortcuts for Approve/Deny (see `_mk_shortcut` in
 `admin_app/qdistro_admin_app.py`). They fire only while the admin
-window is active, and the decision keys are guarded by the Pending
-tab — but this test launches straight into the Pending tab with the
-window focused, so a single Ctrl+N decides as expected (no tab
-switch is needed). We inject Ctrl+N at the KVM keyboard level via
-`virsh send-key` because xdotool modifier combos don't reach
-XWayland Qt apps under the GUI test compositor (see AGENTS.md caveat).
+window has keyboard focus, and the decision keys are guarded by the Pending
+tab — this test launches straight into the Pending tab, so a single Ctrl+N
+decides. Focus the window through the compositor first (`qdwin_focus_window`
+returns only once qdwin reports keyboard focus on it), then inject Ctrl+N at
+the KVM keyboard from the HOST:
 
 ```bash
-# Focus the admin-approvals window before the KVM-level keystroke,
-# so the focused X client that receives the event is the Qt app.
-B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-runuser -u admin -- env DISPLAY=:0 \
- timeout 10 xdotool search --sync --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 ```
 
-Then, as a separate command, the title wait. Never screenshot straight
-after the keystroke: the deny is a D-Bus round trip plus a 250 ms
-debounced refresh, and a capture taken 158 ms after `send-key` under a
-16-way run graded the still-populated pane as "Ctrl+N did not deny"
-(2026-09-28). A bare `admin approvals` title (no `(N pending)`) means the
-model is empty:
+Then, as a separate command, the title wait. Never capture straight after
+the keystroke: the deny is a D-Bus round trip plus a 250 ms debounced
+refresh. A bare `admin approvals` title (no `(N pending)`) means the model is
+empty:
 
 ```bash
 title_rc=0
-$VMEXEC "$VM" 'for _ in $(seq 1 60); do
-  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
-  [ "$t" = "admin approvals" ] && exit 0
-  sleep 0.5
-done
-echo "title never settled: $t" >&2; exit 1' || title_rc=$?
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30' || title_rc=$?
 echo "s3 title-wait rc=$title_rc"
+qdwin_screenshot "$ART/03-qt-admin-app-visual-s3-afterdeny.png"
+# The caller got the deny (ground truth, independent of the frame).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 03-work 60; bg_log 03-work; echo "rc=$(bg_rc 03-work)"'
 ```
 
-A non-zero `s3 title-wait rc` (about 30 s) means the deny never emptied
-the model: S3 FAILS on that ground regardless of the frames.
-
-The client surface can lag the title by a frame, so capture at most 5
-frames, 2 s apart, each as a separate runner action (not a shell loop),
-starting with N=1:
-
-1. `$VMGUI "$VM" screenshot /tmp/03-s3-afterdeny-N.png` (substitute N).
-2. Open it and grade by vision: the empty state is `(no selection)` in
-   the detail pane and no row in the list.
-3. If it shows the empty state, make it canonical and stop:
-   `$VMGUI "$VM" view-copy /tmp/03-s3-afterdeny-N.png --out /tmp/03-qt-admin-app-visual-s3-afterdeny.png`
-4. Otherwise, if N < 5: `sleep 2`, increment N, go back to 1.
-5. If frame 5 is still stale, S3 FAILS: `view-copy` frame 5 to the
-   canonical path and grade that below.
-
-Keep every numbered frame. Use `view-copy`, not `cp`: a same-size twin
-of a frame you have already seen reads as black where it repeats.
+A non-zero `s3 title-wait rc` means the deny never emptied the model: S3
+FAILS on that ground regardless of the frame.
 
 **Assert (after deny):**
 - Left list view is empty again.
 - Detail pane user label returns to `(no selection)`.
 - `Action:`, exe, and `Details:` labels are empty / blank.
 - No error dialog, modal, or red banner appears.
+- The caller's log shows `DENIED` (not `ALLOWED`).
 
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /home/admin/.local/state/qdistro/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/03-app.pid'
 ```
 
 ## Notes for the runner
 
-- The admin app is a Qt widget app running under XWayland
- (`QT_QPA_PLATFORM=xcb`). `xdotool search --name` works on it,
- unlike native Wayland surfaces.
-- If the launch fails, inspect `/home/admin/.local/state/qdistro/admin-app.log` inside the VM.
- Typical cause: stale Wayland env vars or missing
- `DBUS_SESSION_BUS_ADDRESS`.
+- The admin app is a native Wayland Qt client here (`QT_QPA_PLATFORM=wayland`,
+ set by the shipped launcher). If the launch fails, the launcher names the
+ app log it wrote under `/run/user/1000/qdistro-admin-app.*.log`; read it.
 - S3 uses `Ctrl+N` (the app's wired shortcut) rather than a pixel
  click — font/DPI/placement changes won't break it.
 - Deny vs. Approve: both have shortcuts (`Ctrl+Y` / `Ctrl+N`); the

@@ -5,17 +5,29 @@ User-authored GUI acceptance scenarios for qdistro . Each
 prose. A graphic-aware subagent executes them against a running VM
 following the instructions in `AGENTS.md`.
 
+## Lanes
+
+Two GUI lanes run these scenarios (see `AGENTS.md`, "qdwin lane"):
+
+- **qdwin lane** — the product session (qdwin + qdshell) with the admin
+  app started through the shipped native-Wayland launcher: 03, 04, 06,
+  08, 10, 12, 13, 14, 34, 43, 47 (and 18–21, 56, 57).
+- **labwc admin lane** — labwc + LXQt + XWayland with the test-only xcb
+  launcher: every other scenario here. None of that stack ships.
+
 ## Scenario index by area
 
 Numbering is roughly chronological; each scenario stands on its own.
 
 - **01–10** — admin app + TUI smoke (visual / scope picker / approve /
-  deny / mouse / CLI round-trip / restart-resilience / cache revoke).
+  deny / mouse / CLI round-trip / restart-resilience / cache revoke and
+  its `ApprovalRevoked` signal, formerly 22).
 - **11–17** — cross-user `RelayMessage` flow (headless + visual,
   approve / deny / forbidden scope, realapp variants).
 - **18** — pod-apps launcher badge.
 - **19–21** — tier-5 loopback / cold-start / close-cleanup.
-- **22–23** — `ApprovalRevoked` and `RevokeAllForUid` signal contracts.
+- **23** — `RevokeAllForUid` signal contract (the GUI-revoke
+  `ApprovalRevoked` contract, formerly 22, is part of 10).
 - **24–28** — declarative rules: allow-short-circuit, deny-short-circuit,
   inotify hot-reload, first-match-wins ordering, exe glob match.
 - **29** — `CheckPermission` `"unknown"` fast-path (no prompt, no audit).

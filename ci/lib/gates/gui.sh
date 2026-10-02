@@ -169,6 +169,25 @@ gui_scenario_rel() {
 
 gui_scenario_requires_qdwin() {
     local rel=$1
+    # The admin-app scenarios ported off the labwc/XWayland lane: they run the
+    # SHIPPED native-Wayland admin app on the product session
+    # (permissions-gui/AGENTS.md, "qdwin lane"). Matched with or without the
+    # leading `qdistro/` that gui_scenario_rel may print.
+    case "${rel#qdistro/}" in
+        tests/integration/permissions-gui/03-qt-admin-app-visual.md|\
+        tests/integration/permissions-gui/04-qt-admin-app-approve.md|\
+        tests/integration/permissions-gui/06-qt-admin-app-mouse.md|\
+        tests/integration/permissions-gui/08-admin-app-survives-broker-restart.md|\
+        tests/integration/permissions-gui/10-qt-cache-revoke.md|\
+        tests/integration/permissions-gui/12-cross-user-sendto-visual.md|\
+        tests/integration/permissions-gui/13-cross-user-sendto-deny.md|\
+        tests/integration/permissions-gui/14-cross-user-sendto-forbidden-scope.md|\
+        tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md|\
+        tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md|\
+        tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md|\
+        tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md)
+            return 0 ;;
+    esac
     case "$rel" in
         qdwin/tests/gui/[0-9][0-9]-*.md|\
         qdwin/tests/apps/[0-9][0-9]-*.md|\
