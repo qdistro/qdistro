@@ -289,6 +289,14 @@ and left the dir behind).
 
 ### Reaper and reconciliation
 
+Every reaper decision reads a unit's state as **live**, **dead** (systemd
+positively answers `inactive` or `failed`) or **unknown** (the query failed or
+answered anything else). It acts only on dead; unknown preserves the record,
+container, scope and per-launch dir and makes `--reap-stale` exit non-zero
+(sol A-iii r2). A live orphan scope (no record) is stopped only when its
+`BindsTo=` positively names a tier3s launch unit that is dead, checked before
+and again after the bounded wait (sol A-iii r1).
+
 The spawn runs `qdistro-tier3s-cleanup --reap-stale --except-unit <own unit>`
 before creating its record. A record whose `unit` is not live is stale, and so
 is a record carrying the spawn's own unit but another token (one unit runs
