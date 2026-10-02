@@ -72,14 +72,19 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   0755, root, sha512 read through the fd) and executed via
   `/proc/self/fd/N`, so swapping the path after validation cannot change what
   runs, and the inode can only be rewritten by root (execve also refuses a
-  file open for writing).
+  file open for writing). Under an untrusted install path the probe reads no
+  file content at all (a FIFO swapped in there cannot hang it), and the
+  wrapper is handed to podman only once it verified.
 - **Provisioning was not serialized.** Now one exclusive `flock` on
   `/run/qdistro-runsc/provision.lock` (root 0700) is taken before the live
   state is inspected and held through swap, verification, rollback and
   cleanup; a second run waits and then re-inspects. The cached tarball is
   copied into a private stage dir and verified and extracted from that copy;
   a download is verified in the stage dir before an atomic publish into the
-  cache (no shared `.part`).
+  cache (no shared `.part`). A real install stages under `/var/tmp` (root-owned
+  and sticky, checked) whatever `$TMPDIR` says, and the existing parents of the
+  install, stamp and lock paths must be root-owned and not
+  group/other-writable.
 - **Tests that never reached their guards** now do: a clean synthetic probe
   must be TEST-PASS / exit 3; the `--pin`, prefix and test-hook refusals run
   with euid 0 (real root in the VM, else a user namespace) using a readable
@@ -87,7 +92,8 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   loop; plus version text with a nonzero exit, wrapper env scrubbing, failed
   rollback preservation, a two-process lock test and swap-during-window
   tests. `tier3s/spike/mutate-guards.py` breaks each guard in the real
-  scripts and shows its test failing (20 mutations).
+  scripts and shows its test failing (21 mutations; 3 of them also with
+  real euid 0 in the VM).
 
 ## Phase S — the feasibility spike
 

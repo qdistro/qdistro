@@ -207,7 +207,7 @@ echo '## real install with a hostile TMPDIR (0777, not sticky): the stage must s
 TMPDIR=/var/tmp/t3s-evil strace -f -qq -e trace=mkdir,mkdirat -o /var/tmp/t3s-tr-mk \"\${PROVISION[@]}\" > /var/tmp/t3s-prov.out 2>&1; rc=\$?
 cat /var/tmp/t3s-prov.out; expect_rc provision-exit 0 \$rc; has installed /var/tmp/t3s-prov.out 'PASS: installed runsc'
 grep 'runsc-stage' /var/tmp/t3s-tr-mk
-is stage-made-under-var-tmp \"\$(grep -c 'mkdir[a-z]*(.*\"/var/tmp/runsc-stage\.' /var/tmp/t3s-tr-mk)\" 1
+is stage-made-under-var-tmp \"\$(grep -cE 'mkdir[a-z]*\\(.*\"/var/tmp/runsc-stage\.[A-Za-z0-9]+\", 0700\\) = 0' /var/tmp/t3s-tr-mk)\" 1
 is nothing-under-hostile-tmpdir \"\$(grep -c 't3s-evil/runsc-stage' /var/tmp/t3s-tr-mk)\" 0
 is hostile-tmpdir-empty \"\$(ls -A /var/tmp/t3s-evil | wc -l)\" 0
 echo '## /var/tmp without its sticky bit: provision refuses before staging'
