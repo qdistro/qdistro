@@ -1,0 +1,37 @@
+[Unit]
+Description=qdistro tier-3s (gVisor) silo %i (Experimental, dev profile only)
+# Referenced by qdistro_session_manager.TIER3S_SILO_LAUNCHER_FMT
+# (qdistro-tier3s-silo@<name>.service); tier3s/CONTRACT.md §1 and §6. The
+# session manager (root) writes /run/qdistro/silo-launch/<name>.env (root 0600,
+# with a fresh launch token per start), then `systemctl start`s this unit.
+#
+# No PartOf=qdistro-session-manager.service (unlike the tier-2 unit): PartOf
+# would turn a manager restart into a restart of this unit, re-launching with
+# the previous start's token. Instead the manager's startup reconciliation
+# stops every live tier3s launch unit and runs `qdistro-tier3s-cleanup
+# --reap-stale`; its autostart sweep then relaunches wanted silos with a fresh
+# token. No launch survives a manager restart.
+After=qdistro-session-manager.service
+
+[Service]
+Type=simple
+# ROOT, as the launch SUPERVISOR only: spawn-tier3s.sh creates the control
+# record and the root-owned owning scope (qdistro-tier3s-<token>.scope,
+# BindsTo= + Before= this unit), and drops every podman, broker and binding
+# call to admin. podman and runsc never run as root. No fallback: a refused
+# launch exits 2 and this unit fails visibly (paravirt O6).
+User=root
+ExecStart=/usr/libexec/qdistro/qdistro-tier3s-silo-launch %i
+# The verified teardown (CONTRACT §4): ExecStop runs it while the owning scope
+# is still alive (the scope is Before= this unit, so on a stop job it outlives
+# ExecStop and ExecStopPost). `-` on ExecStop only: ExecStopPost repeats it,
+# and a failure there fails the unit visibly with the control record and (if
+# still alive) the scope preserved.
+ExecStop=-/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
+ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
+# A stop ends `podman run` with SIGTERM (143) or SIGKILL (137): success.
+SuccessExitStatus=143 137
+# No Restart: a tier3s launch is explicit (paravirt O6).
+Restart=no
+StandardOutput=journal
+StandardError=journal

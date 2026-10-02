@@ -402,6 +402,11 @@ class _FakeOps:
     # as a completed stop (a queued start is indistinguishable from one).
     systemctl_stop_unacknowledged = False
 
+    def tier3s_installed(self) -> bool:
+        # No tier3s launch path on this fake host: startup reconciliation of
+        # tier3s launches is a no-op (test_session_manager_tier3s covers it).
+        return False
+
     def tier2_silo_running(self, name: str) -> bool:
         # Fail-closed verification hook: True means the stop did NOT take
         # effect (unit still active or container survives).
