@@ -52,6 +52,8 @@ if [[ "${name:-}" =~ ^[0-9a-f]{64}$ ]]; then   # a container ID: the container d
     for c in "$F"/c/*/; do [ "$(cat "$c/id" 2>/dev/null)" = "$name" ] && { name="$(basename "$c")"; break; }; done
 fi
 if [ -e "$F/hang_name" ] && [ "${name:-}" = "$(cat "$F/hang_name")" ] && [ "$sub" != run ]; then
+    # astra A r2 #2: a helper that ignores SIGTERM, in the call's process group
+    [ ! -e "$F/hang_desc" ] || bash -c "trap '' TERM; echo \$\$ >> '$F/desc.pids'; exec sleep 600" &
     echo $$ >> "$F/hung.pids"; sleep 600; exit 0      # a wedged podman call (timeout(1) must kill it)
 fi
 finish() {   # the container's processes end, --rm removes it, its scope goes away
@@ -68,7 +70,10 @@ finish() {   # the container's processes end, --rm removes it, its scope goes aw
 case "$sub" in
 image) exit "$(cat "$F/image_rc" 2>/dev/null || echo 0)" ;;
 inspect)
+    [ ! -e "$F/inspect_delay" ] || sleep "$(cat "$F/inspect_delay")"
     [ -e "$F/c/$name/running" ] || { echo "Error: no such container $name" >&2; exit 125; }
+    # a launch that never reaches running (fable A r2 P3-3)
+    if [ -e "$F/inspect_created" ]; then echo "created 0 0 x"; exit 0; fi
     cat "$F/c/$name/inspect_line" ;;
 container)
     case "$1" in
@@ -83,6 +88,10 @@ container)
                 echo "Error: no such container $name" >&2; exit 125; fi
             [ ! -e "$F/inspect_fail" ] || { echo "Error: inspect failed" >&2; exit 125; }
             [ -e "$F/c/$name/exists" ] || { echo "Error: no such container $name" >&2; exit 125; }
+            # astra A r2 #2: a helper in a NEW session keeps the captured
+            # output open after the call returned (a process-group kill
+            # misses it; only the call scope's cgroup would get it)
+            if [ -e "$F/inspect_leak" ]; then setsid sleep 600 & echo $! >> "$F/leak.pids"; fi
             echo "$(cat "$F/c/$name/id") $(cat "$F/c/$name/label")" ;;
     esac ;;
 stop)
@@ -157,6 +166,18 @@ exit 0
 
 FAKE_SYSTEMD_RUN = r'''#!/bin/bash
 F=@F@; T=@T@
+case " $* " in
+*" --unit=qdistro-t3s-call-"*)
+    # the cleanup's per-call scope (astra A r2 #2): logged on its own line,
+    # its cgroup modelled as an (empty) dir the cleanup must SIGKILL
+    # (cgroup.kill) after the call; callscope_sticky keeps a process in it
+    unit=""; for a in "$@"; do case "$a" in --unit=*) unit="${a#--unit=}" ;; esac; done
+    echo "callscope $unit $*" >> "$F/callscopes"
+    d="$T/sys/fs/cgroup/system.slice/$unit"; mkdir -p "$d"; : > "$d/cgroup.procs"
+    [ ! -e "$F/callscope_sticky" ] || echo 999999 > "$d/cgroup.procs"
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
+    exec "$@" ;;
+esac
 echo "systemd-run $*" >> "$F/calls"
 echo "systemd-run NOTIFY_SOCKET=${NOTIFY_SOCKET-unset}" >> "$F/env_seen"
 printf '%s\n' "$@" > "$F/scope_argv"
@@ -175,16 +196,28 @@ exec "$@"
 
 FAKE_SYSTEMCTL = r'''#!/bin/bash
 F=@F@; T=@T@
+[ "$1" != --no-ask-password ] || shift
 echo "systemctl $*" >> "$F/calls"
+state() {   # the unit's ActiveState as systemd would answer it
+    if [ -s "$F/units/$1.seq" ]; then          # a scripted state sequence, one state per query
+        s="$(head -1 "$F/units/$1.seq")"; sed -i 1d "$F/units/$1.seq"; echo "$s" > "$F/units/$1.state"
+    else s="$(cat "$F/units/$1.state" 2>/dev/null || echo inactive)"; fi
+}
 case "$1" in
 is-active)
     [ ! -e "$F/units/$2.fail" ] || { echo "Failed to connect to bus" >&2; exit 1; }
-    if [ -s "$F/units/$2.seq" ]; then          # a scripted state sequence, one state per query
-        s="$(head -1 "$F/units/$2.seq")"; sed -i 1d "$F/units/$2.seq"; echo "$s" > "$F/units/$2.state"
-    else s="$(cat "$F/units/$2.state" 2>/dev/null || echo inactive)"; fi
-    echo "$s"; [ "$s" = active ] ;;
+    state "$2"; echo "$s"; [ "$s" = active ] ;;
 show) for a; do u="$a"; done
     case " $* " in
+        *" ActiveState "*)
+            [ ! -e "$F/units/$u.fail" ] || { echo "Failed to connect to bus" >&2; exit 1; }
+            [ ! -e "$F/show_delay" ] || sleep "$(cat "$F/show_delay")"
+            [ ! -e "$F/units/$u.hang_before" ] || sleep 600
+            state "$u"; echo "$s"
+            # astra A r2 #1: an answer printed by a query that then hangs or fails
+            [ ! -e "$F/units/$u.hang_after" ] || { echo $$ >> "$F/hung.pids"; sleep 600; }
+            [ ! -e "$F/units/$u.fail_after" ] || exit 1
+            exit 0 ;;
         *" BindsTo "*) [ ! -e "$F/show_fail" ] || exit 1; cat "$F/units/$u.bindsto" 2>/dev/null ;;
         *" ControlGroup "*) [ ! -e "$F/show_cg_fail" ] || exit 1
             [ ! -e "$F/show_cg_fail_after_stop" ] || ! grep -q '^podman stop' "$F/calls" || exit 1
@@ -245,7 +278,22 @@ exec /usr/bin/chown "$@"
 
 FAKE_NOTIFY = r'''#!/bin/bash
 echo "systemd-notify $* NOTIFY_SOCKET=${NOTIFY_SOCKET-unset}" >> @F@/calls
+echo "$PPID" > @F@/notify_ppid
 exit "$(cat @F@/notify_rc 2>/dev/null || echo 0)"
+'''
+
+# fable A r2 P3-6: is the global lock held while .new-<token> is removed?
+FAKE_RM = r'''#!/bin/bash
+case " $* " in *"/.new-"*)
+    if flock -n @T@/run/qdistro-tier3s-ctl/.lock true 2>/dev/null; then echo "rm .new unlocked" >> @F@/calls
+    else echo "rm .new locked" >> @F@/calls; fi ;;
+esac
+exec /usr/bin/rm "$@"
+'''
+
+FAKE_MV = r'''#!/bin/bash
+case " $* " in *"/.new-"*) [ ! -e @F@/mv_new_fail ] || { echo "fake mv: refused" >&2; exit 1; } ;; esac
+exec /usr/bin/mv "$@"
 '''
 
 FAKE_PROBE = r'''#!/bin/bash
@@ -292,7 +340,8 @@ class World:
         for name, text in (("podman", FAKE_PODMAN), ("systemd-run", FAKE_SYSTEMD_RUN),
                            ("systemctl", FAKE_SYSTEMCTL), ("runuser", FAKE_RUNUSER),
                            ("dbus-send", FAKE_DBUS), ("qdistro-resolve-binding", FAKE_RESOLVER),
-                           ("chown", FAKE_CHOWN), ("systemd-notify", FAKE_NOTIFY)):
+                           ("chown", FAKE_CHOWN), ("systemd-notify", FAKE_NOTIFY),
+                           ("rm", FAKE_RM), ("mv", FAKE_MV)):
             write_exec(self.bin / name, fill(text))
         run = self.T / "run"
         for d, mode in (("qdistro-tier3s-ctl", 0o700), ("qdistro-tier3s", 0o755),
@@ -1555,6 +1604,9 @@ def test_reap_stale_deadline_preserves_what_it_did_not_reach(w):
     assert r.returncode == 1
     # A (first) hangs past the deadline; B is not started and stays intact
     assert f"{TOKEN2}: reap deadline reached" in r.stderr
+    # nor is the label listing, or any orphan dir, started after it (astra A r2 #3)
+    assert "labelled containers and orphan per-launch dirs not processed" in r.stderr
+    assert not any(c.startswith("podman ps") for c in w.calls())
     assert (w.ctl / TOKEN / "state").exists() and (w.ctl / TOKEN2 / "state").exists()
     assert (w.F / "c/qdistro-tier3s-b/running").exists()
 
@@ -1629,3 +1681,276 @@ def test_a_failed_ready_tears_the_launch_down(w):
     r = w.spawn(NOTIFY_SOCKET="/run/systemd/notify")
     assert r.returncode == 2 and "cannot send READY=1" in r.stderr
     assert w.launch_gone(TOKEN)
+
+
+# --- astra A r2 #1: a state printed by a query that did not complete is unknown
+
+def _pid_gone(pid, timeout=5):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                if fh.read().split(") ", 1)[1].startswith("Z"):
+                    return True
+        except (FileNotFoundError, IndexError):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize("how", ["hang_after", "fail_after"])
+@pytest.mark.parametrize("path", ["record", "label", "incomplete", "scope"])
+def test_a_state_printed_before_a_timeout_or_error_is_no_evidence(w, path, how):
+    unit = "qdistro-tier3s-silo@a.service"
+    if path == "incomplete":
+        _incomplete(w)
+        probe = f"qdistro-tier3s-{TOKEN}.scope"
+        w.set_unit(probe, "inactive")
+    else:
+        w.make_launch(TOKEN, unit, "qdistro-tier3s-a", pids=(4001, 4002))
+        if path == "label":
+            shutil.rmtree(w.ctl / TOKEN)
+        if path == "scope":
+            # the unit is genuinely dead, but the LIVE token scope's state
+            # query prints "inactive" and then hangs/fails: rule 3 must not be
+            # skipped (the scope is owned by another unit)
+            w.set_unit(unit, "failed")
+            (w.F / "units" / f"qdistro-tier3s-{TOKEN}.scope.bindsto").write_text(
+                "qdistro-tier3s-silo@other.service\n")
+            probe = f"qdistro-tier3s-{TOKEN}.scope"
+            w.set_unit(probe, "inactive")       # what the broken query prints
+        else:
+            probe = unit
+            w.set_unit(unit, "inactive")
+    (w.F / "units" / f"{probe}.{how}").write_text("")
+    r = w.cleanup("--reap-stale", TIER3S_TEST_TMO="1")
+    assert r.returncode != 0, r.stderr
+    assert not any(c.startswith(("podman stop", "podman rm", "systemctl stop")) for c in w.calls()), w.calls()
+    if path in ("record", "scope", "incomplete"):
+        assert (w.ctl / TOKEN).is_dir()
+    if path != "incomplete":
+        assert (w.F / "c/qdistro-tier3s-a/running").exists()
+    for pid in (w.F / "hung.pids").read_text().split() if (w.F / "hung.pids").exists() else []:
+        assert _pid_gone(pid), f"the hung state query {pid} survived"
+
+
+# --- astra A r2 #2: every process of a call ends with it; nothing blocks on a pipe
+
+def _token_lock_free(w, token=TOKEN):
+    import fcntl
+    fd = os.open(w.ctl / token, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_a_term_ignoring_helper_of_a_timed_out_call_is_killed(w):
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("hang_name", "qdistro-tier3s-smoke")
+    w.set("hang_desc")
+    t0 = time.time()
+    r = w.cleanup(TOKEN, TIER3S_TEST_TMO="1")
+    assert r.returncode == 4 and "podman query failed" in r.stderr, r.stderr
+    assert time.time() - t0 < 10
+    desc = (w.F / "desc.pids").read_text().split()
+    assert desc, "the fake did not start its TERM-ignoring helper"
+    for pid in desc + (w.F / "hung.pids").read_text().split():
+        assert _pid_gone(pid), f"{pid} of the timed-out call survived"
+    assert (w.ctl / TOKEN / "state").exists() and _token_lock_free(w)
+
+
+def test_a_helper_holding_the_output_open_blocks_nothing(w):
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("inspect_leak")
+    p = w.cleanup_bg(TOKEN)
+    try:
+        out, err = p.communicate(timeout=20)
+    finally:
+        for pid in ((w.F / "leak.pids").read_text().split() if (w.F / "leak.pids").exists() else []):
+            try:
+                os.kill(int(pid), 9)
+            except ProcessLookupError:
+                pass
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0, err
+    assert (w.F / "leak.pids").exists() and w.launch_gone(TOKEN)
+
+
+def test_a_term_to_the_cleanup_kills_its_call_in_flight(w):
+    import signal
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("hang_name", "qdistro-tier3s-smoke")
+    w.set("hang_desc")
+    p = w.cleanup_bg(TOKEN, TIER3S_TEST_TMO="30")
+    try:
+        wait_for(lambda: (w.F / "desc.pids").exists() and (w.F / "hung.pids").exists(), "the hung call", p)
+        t0 = time.time()
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=10)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 143 and time.time() - t0 < 5, err
+    for pid in (w.F / "desc.pids").read_text().split() + (w.F / "hung.pids").read_text().split():
+        assert _pid_gone(pid), f"{pid} of the cancelled call survived"
+    assert (w.ctl / TOKEN / "state").exists() and _token_lock_free(w)
+    assert not list(w.ctl.glob(".call-*")), "the work dir survived"
+
+
+def test_admin_calls_run_in_their_own_scope_killed_after_the_call(w):
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 0, r.stderr
+    podman = [c for c in w.calls() if c.startswith("podman ")]
+    scopes = (w.F / "callscopes").read_text().splitlines()
+    assert len(scopes) == len(podman) >= 4
+    for ln in scopes:
+        unit = ln.split()[1]
+        assert "--scope" in ln and "-p DefaultDependencies=no" in ln and "-p TimeoutStopSec=" in ln
+        assert " -p RuntimeMaxSec=" in ln and "runuser -u" in ln
+        kill = w.T / f"sys/fs/cgroup/system.slice/{unit}/cgroup.kill"
+        assert kill.exists() and kill.read_text().strip() == "1", f"{unit} was not killed"
+    assert len({ln.split()[1] for ln in scopes}) == len(scopes), "a call scope was reused"
+    assert not list(w.ctl.glob(".call-*")), "the work dir survived"
+
+
+def test_a_call_scope_that_does_not_empty_is_a_failed_query(w):
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("callscope_sticky")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "did not empty" in r.stderr and "podman query failed" in r.stderr, r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+    assert not any(c.startswith(("podman stop", "podman rm")) for c in w.calls())
+
+
+def test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup(w):
+    dead = 4194300
+    while Path(f"/proc/{dead}").exists():
+        dead -= 1
+    stale = w.ctl / f".call-{dead}-abcdef"
+    stale.mkdir()
+    (stale / "out").write_text("x")
+    live = w.ctl / f".call-{os.getpid()}-abcdef"
+    live.mkdir()
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+    assert not stale.exists() and live.exists()
+
+
+# --- astra A r2 #3 / fable A r2 P3-3: deadlines and waits are by the clock
+
+def test_reap_stale_deadline_covers_the_orphan_dirs(w):
+    toks = [f"{i:x}" * 32 for i in range(1, 7)]
+    for t in toks:
+        (w.launch_parent / t).mkdir()
+    w.set("show_delay", "0.4")
+    t0 = time.time()
+    r = w.cleanup("--reap-stale", "--deadline", "1")
+    took = time.time() - t0
+    assert r.returncode == 1, r.stderr
+    assert "orphan per-launch dir not processed" in r.stderr
+    left = [t for t in toks if (w.launch_parent / t).exists()]
+    assert 1 <= len(left) < 6, left
+    assert took < 4, took
+
+
+def test_a_query_is_cut_at_the_batch_deadline(w):
+    w.make_launch(TOKEN, "qdistro-tier3s-silo@a.service", "qdistro-tier3s-a", pids=(4001, 4002))
+    (w.F / "units" / "qdistro-tier3s-silo@a.service.hang_before").write_text("")
+    t0 = time.time()
+    r = w.cleanup("--reap-stale", "--deadline", "2")      # real bounds: 10 s query, 5 s kill
+    took = time.time() - t0
+    assert r.returncode == 1 and "cannot tell whether" in r.stderr, r.stderr
+    assert took < 6, f"the 10 s query was not cut at the 2 s deadline ({took:.1f} s)"
+    assert (w.ctl / TOKEN / "state").exists()
+
+
+def test_the_unit_lock_wait_is_capped_by_the_deadline(w):
+    import fcntl
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    fd = os.open(w.ctl / TOKEN, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        t0 = time.time()
+        p = w.cleanup_bg("--unit", w.unit, "--deadline", "1")      # LOCK_WAIT is 120 s
+        try:
+            out, err = p.communicate(timeout=15)
+        finally:
+            if p.poll() is None:
+                p.kill()
+        took = time.time() - t0
+    finally:
+        os.close(fd)
+    assert p.returncode == 1 and "another teardown holds it" in err, err
+    assert took < 5, took
+
+
+def test_the_bindsto_wait_is_by_the_clock(w):
+    t = TOKEN
+    (w.launch_parent / t).mkdir()
+    rel = f"/system.slice/qdistro-tier3s-{t}.scope"
+    (w.T / f"sys/fs/cgroup{rel}").mkdir(parents=True)
+    (w.F / "units" / f"qdistro-tier3s-{t}.scope.cgroup").write_text(rel + "\n")
+    (w.F / "units" / f"qdistro-tier3s-{t}.scope.bindsto").write_text("qdistro-tier3s-silo@a.service\n")
+    w.set_unit(f"qdistro-tier3s-{t}.scope", "active")
+    w.set_unit("qdistro-tier3s-silo@a.service", "failed")
+    w.set("show_delay", "0.3")
+    t0 = time.time()
+    r = w.cleanup("--reap-stale")
+    took = time.time() - t0
+    assert r.returncode == 0, r.stderr
+    assert f"systemctl stop qdistro-tier3s-{t}.scope" in w.calls()
+    assert not (w.launch_parent / t).exists()
+    assert took < 8, f"the 20 s (x4% in tests) wait ran by query count ({took:.1f} s)"
+
+
+def test_the_start_poll_is_bounded_by_the_clock(w):
+    w.set("run_block")
+    w.set("inspect_created")
+    w.set("inspect_delay", "0.5")
+    t0 = time.time()
+    p = w.start(TIER3S_TEST_POLL_S="2")
+    try:
+        out, err = p.communicate(timeout=20)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 2 and "did not reach running within 2 s" in err, err
+    assert time.time() - t0 < 10
+    assert w.first("systemd-notify") is None and w.launch_gone(TOKEN)
+
+
+# --- astra A r2 #4: READY=1 comes from the unit's main PID (the spawn) itself
+
+def test_ready_is_sent_by_the_spawn_process_itself(w):
+    w.set("run_block")
+    p = w.start(NOTIFY_SOCKET="/run/systemd/notify")
+    try:
+        wait_for(lambda: (w.F / "notify_ppid").exists(), "READY", p)
+        ready = [c for c in w.calls() if c.startswith("systemd-notify")]
+        assert len(ready) == 1 and "--pid" not in ready[0]
+        # a direct child of the spawn: privileged systemd-notify then sends
+        # with the spawn's PID, the one NotifyAccess=main accepts
+        assert (w.F / "notify_ppid").read_text().strip() == str(p.pid)
+        w.set("release")
+        p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0
+
+
+# --- fable A r2 P3-6: .new-<token> only ever exists under the global lock
+
+def test_unpublished_record_is_removed_under_the_global_lock(w):
+    w.set("mv_new_fail")
+    r = w.spawn()
+    assert r.returncode == 2 and "cannot write the control record" in r.stderr, r.stderr
+    assert not list(w.ctl.glob(".new-*"))
+    rms = [c for c in w.calls() if c.startswith("rm .new")]
+    assert rms and rms[-1] == "rm .new locked", rms

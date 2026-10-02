@@ -27,13 +27,20 @@ StopPropagatedFrom=qdistro-session-manager.service
 # launch is recorded running (or a short workload completed and was torn
 # down). Every refusal (broker, profile, probe, image, binding) exits before
 # READY, so `systemctl start` - and StartSilo - fails instead of reporting a
-# start that never ran. NotifyAccess=all: READY comes from the spawn's
-# systemd-notify child; no sandbox process runs in this unit's cgroup (they
-# are in the owning scope) and none is given the socket.
+# start that never ran. NotifyAccess=main (astra A r2 #4): systemd accepts a
+# notification only from the main PID, the root spawn (the launch helper
+# execs into it); its root systemd-notify sends with the spawn's PID. The
+# admin processes the spawn and its pre-launch reaper run inside this unit's
+# cgroup (podman, dbus-send, the resolver, an OCI runtime helper they start)
+# cannot claim that PID, so none of them can acknowledge a launch, even
+# knowing the socket path; the sandbox runs in the owning scope, not here.
 Type=notify
-NotifyAccess=all
-# Above the spawn's own bounds (reap 30 s + podman start poll 60 s + probe);
-# the manager's start bound (_T_TIER3S_START) is above this.
+NotifyAccess=main
+# Above the spawn's own bounds before READY (stale reap: its 30 s deadline
+# plus kill grace; start poll: 60 s by the clock; plus the probe and the
+# broker call). systemd's timeout fires first; the manager's start bound
+# (_T_TIER3S_START, 135 s) covers the teardown that follows it only when
+# that ends within 15 s, else the start is reported unresolved (CONTRACT §6).
 TimeoutStartSec=120
 # ROOT, as the launch SUPERVISOR only: spawn-tier3s.sh creates the control
 # record and the root-owned owning scope (qdistro-tier3s-<token>.scope,

@@ -626,7 +626,8 @@ def test_tier3s_start_uses_the_notify_bound(real_ops, monkeypatch):
     argv, kw = rec.calls[0]
     assert argv == ["systemctl", "start", UNIT] and kw["timeout"] == sm._T_TIER3S_START
     assert kw.get("check") is True
-    # above the unit's own TimeoutStartSec, so systemd decides first
+    # above the unit's own TimeoutStartSec, so systemd's timeout fires first
+    # (its teardown afterwards may outlast the 15 s difference: unresolved)
     assert sm._T_TIER3S_START > int(_unit_kv()["TimeoutStartSec"][0])
 
 
@@ -920,8 +921,10 @@ def test_unit_file_shape():
     assert kv["ExecStop"] == ["-/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n"]
     assert kv["ExecStopPost"] == ["/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n"]
     assert kv["SuccessExitStatus"] == ["143 137"]
-    # astra/fable A r1: a refused launch must fail the start job
-    assert kv["Type"] == ["notify"] and kv["NotifyAccess"] == ["all"]
+    # astra/fable A r1: a refused launch must fail the start job; astra A r2
+    # #4: only the main PID (the root spawn) may acknowledge it, never an
+    # admin process in the unit's cgroup (VM: s121 step 7)
+    assert kv["Type"] == ["notify"] and kv["NotifyAccess"] == ["main"]
     assert kv["TimeoutStartSec"] == ["120"]
     assert kv["Restart"] == ["no"]
     assert "PartOf" not in kv, "a manager restart must not restart the launch (reconciliation does)"

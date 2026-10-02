@@ -149,9 +149,18 @@ _T_TIER3S_START = 135  # `systemctl start` of a tier3s launch unit. The unit is
                       # recorded running (spawn-tier3s.sh), so the start job
                       # spans the probe, the broker gate, the stale reap and
                       # the sandbox start. Above the unit's TimeoutStartSec=120
-                      # so systemd decides first. NB StartSilo is synchronous:
-                      # a tier3s start holds the main loop up to this long in
-                      # the worst case (a few seconds measured in the VM).
+                      # so systemd's timeout fires first (the teardown after it
+                      # may outlast the difference: then unresolved). NB this
+                      # bounds the start CALL only. StartSilo is synchronous
+                      # and holds the main loop (every other D-Bus call and
+                      # callback waits) for the whole start path: this call,
+                      # then on a timeout the compensating stop
+                      # (_T_SYSTEMCTL_CANCEL, 30 s), or on a failed start the
+                      # stop verifier (systemctl is-active _T_SYSTEMCTL +
+                      # podman exists _T_PODMAN) and the best-effort refusal
+                      # lookup (systemctl show + journalctl, _T_SYSTEMCTL
+                      # each): about 165 s and 255 s in the worst case
+                      # (astra A r2 #5). Measured in the VM: seconds.
 _T_DNSMASQ = 15       # forks and daemonizes; the parent returns immediately
 ADMIN_USER_NAME = "admin"
 # qdistro is single-tenant: the admin role is the fixed 'admin' account, which

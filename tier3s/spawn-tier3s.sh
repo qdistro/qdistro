@@ -20,11 +20,13 @@
 #   TIER3S_DEBUG_LOG_DIR     dev diagnostics: admin-owned dir for runsc --debug-log
 #   TIER3S_PRINT_PLAN=1      print the plan, exit 0 before the broker gate
 #   QDISTRO_PROFILE          must be dev
-#   NOTIFY_SOCKET            systemd's (the unit is Type=notify): READY=1 is sent
-#                            only once the launch is recorded running (or a short
-#                            workload completed and was torn down), so a refused
-#                            launch fails the start job (astra/fable A r1). Unset
-#                            at once: never passed to the probe, podman or the scope.
+#   NOTIFY_SOCKET            systemd's (the unit is Type=notify, NotifyAccess=main):
+#                            READY=1 is sent only once the launch is recorded running
+#                            (or a short workload completed and was torn down), so a
+#                            refused launch fails the start job (astra/fable A r1).
+#                            Unset at once: never passed to the probe, podman or the
+#                            scope. systemd accepts READY=1 only from this process
+#                            (the unit's main PID; astra A r2 #4), see notify_ready.
 # Refused from env: TIER3S_SECCOMP_PROFILE TIER3S_ALLOW_PRIVESC
 #   TIER3S_KEEP_CAPS TIER3S_RUNTIME TIER3S_CGROUP_PARENT
 #
@@ -46,11 +48,13 @@ say() { printf 'spawn-tier3s: %s\n' "$*" >&2; }
 refuse() { say "REFUSE: $*"; exit 2; }
 
 T="${TIER3S_TEST_ROOT:-}"
+POLL_S=60        # the start poll: wall-clock seconds for the launch to reach running
 if [ -n "$T" ]; then
     [ "$EUID" -ne 0 ] || refuse "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"
     case "$T" in /?*) ;; *) refuse "TIER3S_TEST_ROOT must be absolute" ;; esac
     say "TEST MODE: TIER3S_TEST_ROOT=$T (not a real launch)"
     ADMIN_PATH="$PATH"
+    [[ "${TIER3S_TEST_POLL_S:-}" =~ ^[1-9][0-9]?$ ]] && POLL_S="$TIER3S_TEST_POLL_S"
 else
     ADMIN_PATH=/usr/bin:/bin
 fi
@@ -114,6 +118,9 @@ as_admin() {   # every podman / broker / resolver call runs as the admin uid
         USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" "$@"
 }
 pm() { as_admin podman "$@"; }
+pm_bounded() { local t="$1"; shift; timeout -k 2 "$t" runuser -u "$ADMIN_USER" -- env -i PATH="$ADMIN_PATH" \
+    HOME="$(getent passwd "$ADMIN_UID" | cut -d: -f6)" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" \
+    XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" podman "$@"; }
 
 # --- 4. prerequisite screen (no fallback) ---------------------------------
 probe_out="$("$PROBE" --user "$ADMIN_USER" 2>&1)"; probe_rc=$?
@@ -291,8 +298,11 @@ run_cleanup() {
 }
 on_exit() {
     local rc=$?
-    exec 9>&-           # never call the cleanup holding the global lock
+    # .new-<token> is removed while the global lock may still be held (a
+    # refusal between its mkdir and the rename), so it exists only under the
+    # lock (fable A r2 P3-6); then the lock goes: never call the cleanup holding it
     [ "$ARMED" = 0 ] || rm -rf -- "${CTL:?}/.new-$TOKEN" 2>/dev/null
+    exec 9>&-
     run_cleanup || [ "$rc" -ne 0 ] || rc=70
     exit "$rc"
 }
@@ -312,7 +322,15 @@ printf '%s\n' schema=1 "token=$TOKEN" "container=$CONTAINER" "unit=$UNIT" "scope
 mkdir -m 0700 "$LAUNCH_DIR" && chown "$ADMIN_UID:$(id -g "$ADMIN_USER")" "$LAUNCH_DIR" \
     || refuse "cannot create the per-launch dir $LAUNCH_DIR"
 exec 9>&-
-notify_ready() {   # the start job completes here (Type=notify); a no-op without systemd's socket
+# The start job completes here (Type=notify); a no-op without systemd's socket.
+# The unit has NotifyAccess=main (astra A r2 #4): systemd takes READY=1 only
+# from this process, the unit's main PID (ExecStart's helper execs into it).
+# Run as root and directly from this shell, systemd-notify sends with this
+# shell's PID (it first tries its parent's PID, which needs privilege). An
+# admin process in the unit's cgroup (the probe's, image or inspect podman,
+# dbus-send, the resolver, or anything they run) cannot claim this PID, so
+# it cannot complete the start even knowing the socket path.
+notify_ready() {
     [ -n "$NOTIFY_SOCK" ] || return 0
     NOTIFY_SOCKET="$NOTIFY_SOCK" systemd-notify --ready --status="tier3s launch $TOKEN running"
 }
@@ -332,10 +350,17 @@ in_scope() {   # in_scope <pid> <scope cgroup rel>
     local c; c="$(sed -n 's/^0:://p' "$PROC/$1/cgroup" 2>/dev/null | head -1)"
     [ -n "$c" ] && { [ "$c" = "$2" ] || [[ "$c" == "$2"/* ]]; }
 }
+# The start poll is bounded by the clock, not by a query count (fable A r2
+# P3-3): POLL_S seconds from here, each inspect bounded to 5 s and its answer
+# waited for at most 7 s, so the spawn's own verdict comes inside the unit's
+# TimeoutStartSec.
 recorded=0
-for _ in $(seq 1 240); do
+poll_end=$((SECONDS + POLL_S))
+while [ "$SECONDS" -lt "$poll_end" ]; do
     kill -0 "$child" 2>/dev/null || break
-    read -r st spid cpid cid < <(pm inspect --format '{{.State.Status}} {{.State.Pid}} {{.State.ConmonPid}} {{.Id}}' "$CONTAINER" 2>/dev/null)
+    st=""; spid=""; cpid=""; cid=""
+    read -t 7 -r st spid cpid cid \
+        < <(pm_bounded 5 inspect --format '{{.State.Status}} {{.State.Pid}} {{.State.ConmonPid}} {{.Id}}' "$CONTAINER" 2>/dev/null)
     if [ "${st:-}" = running ] && [[ "${spid:-}" =~ ^[1-9][0-9]*$ ]] && [[ "${cpid:-}" =~ ^[1-9][0-9]*$ ]]; then
         rel="$(systemctl show -p ControlGroup --value "$SCOPE_UNIT" 2>/dev/null)"
         [[ "$rel" == /*"/$SCOPE_UNIT" ]] || { say "scope $SCOPE_UNIT has no cgroup ('$rel')"; exit 2; }
@@ -355,7 +380,7 @@ for _ in $(seq 1 240); do
 done
 [ "$recorded" = 1 ] || kill -0 "$child" 2>/dev/null || say "podman exited before the launch was recorded"
 if [ "$recorded" != 1 ] && kill -0 "$child" 2>/dev/null; then
-    say "launch did not reach running within 60 s; tearing down"; exit 2
+    say "launch did not reach running within ${POLL_S} s; tearing down"; exit 2
 fi
 wait "$child"; rc=$?
 # A short workload can finish before it was seen running: with a clean exit

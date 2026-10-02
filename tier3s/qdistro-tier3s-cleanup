@@ -22,13 +22,24 @@
 # (pid, starttime) of conmon and the Sentry must be dead -> remove the
 # per-launch dir, then the record. Never by uid (100000 is shared) or name.
 #
-# Bounds (astra A r1 #5): every external call runs under timeout(1), which
-# kills the call's whole process group; a timeout is a failed query. Locks:
-# one per token (flock on /run/qdistro-tier3s-ctl/<token>) held for that
-# token's teardown only, and the global /run/qdistro-tier3s-ctl/.lock held only
-# for short record-publication and orphan-removal steps. A batch (--unit,
-# --reap-stale) starts no new token after its deadline. Lock fds are closed
-# for every child process.
+# Calls (astra A r1 #5, A r2 #2): every external call (systemctl, podman,
+# python3) goes through `bounded`, in this shell: its stdout and stderr go to
+# files, never to a pipe a leftover process could hold open; it runs in its
+# own process group (timeout(1)'s), which is SIGKILLed as soon as the call
+# returns or its bound passes, whether or not the call itself exited; admin
+# (podman) calls also run in their own root-created transient scope, whose
+# cgroup is SIGKILLed (cgroup.kill) the same way and which systemd stops by
+# itself at RuntimeMaxSec should this script die first. A TERM/INT/HUP kills
+# the call in flight. A timeout is a failed query, never "absent". Lock fds
+# are closed for every child process.
+# Locks: one per token (flock on /run/qdistro-tier3s-ctl/<token>) held for
+# that token's teardown only, and the global /run/qdistro-tier3s-ctl/.lock
+# held only for short record-publication and orphan-removal steps.
+# Deadline (astra A r2 #3): a batch (--unit, --reap-stale) starts no new
+# token, orphan dir or listing after it, and every call, lock wait and wait
+# loop inside it is capped by the time left, so a batch ends at its deadline
+# plus at most the kill grace of the call in flight; whatever it did not
+# reach, or reached too late, is preserved and the run exits non-zero.
 #
 # Test hook ONLY: TIER3S_TEST_ROOT prefixes /run, /sys/fs/cgroup and /proc and
 # keeps the caller's PATH (fakes); refused for root.
@@ -38,10 +49,11 @@ umask 077
 say() { printf 'qdistro-tier3s-cleanup: %s\n' "$*" >&2; }
 T="${TIER3S_TEST_ROOT:-}"
 PODMAN_TMO=20; SYSTEMCTL_TMO=10; SCOPE_STOP_TMO=30; KILL_AFTER=5; LOCK_WAIT=120; GLOBAL_WAIT=60
+WAIT_PCT=100     # wall-clock waits (scope emptying, systemd's BindsTo stop), in % of their seconds
 if [ -n "$T" ]; then
     [ "$EUID" -ne 0 ] || { say "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"; exit 2; }
     case "$T" in /?*) ;; *) say "TIER3S_TEST_ROOT must be absolute"; exit 2 ;; esac
-    ADMIN_PATH="$PATH"; WANT_ADMIN="$(id -u)"; STEP=0.01
+    ADMIN_PATH="$PATH"; WANT_ADMIN="$(id -u)"; STEP=0.01; WAIT_PCT=4
     if [[ "${TIER3S_TEST_TMO:-}" =~ ^[1-9][0-9]*$ ]]; then
         PODMAN_TMO=$TIER3S_TEST_TMO; SYSTEMCTL_TMO=$TIER3S_TEST_TMO; SCOPE_STOP_TMO=$TIER3S_TEST_TMO
         KILL_AFTER=1; LOCK_WAIT=$TIER3S_TEST_TMO; GLOBAL_WAIT=$TIER3S_TEST_TMO
@@ -58,29 +70,104 @@ LOCK="$CTL/.lock"
 GRACE=10
 TOK_RE='^[0-9a-f]{32}$'
 UNIT_RE='^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service$'
-EXCEPT_UNIT=""; EXCEPT_TOK=""; END=""
+EXCEPT_UNIT=""; EXCEPT_TOK=""; END_US=""
 
-# bounded <seconds> cmd...: the call, killed (with its process group) at the
-# deadline; never holding a lock fd (8 = token lock, 9 = global lock)
-bounded() { local t="$1"; shift; timeout -k "$KILL_AFTER" "$t" "$@" 8<&- 9>&-; }
-sd() { bounded "$SYSTEMCTL_TMO" systemctl "$@"; }
-prop() { sd show -p "$2" --value "$1" 2>/dev/null; }   # prop <unit> <property>; rc = the query's
-# Unit state, TRI-state (sol A-iii r2 P1): `live`, `dead` (systemd positively
-# says inactive or failed) or `unknown` (the query failed or timed out, or
-# answered anything else). Every decision acts only on `dead`.
-unit_status() {
-    case "$(sd is-active "$1" 2>/dev/null)" in
-        active|activating|deactivating|reloading|refreshing) echo live ;;
-        inactive|failed) echo dead ;;
-        *) echo unknown ;;
-    esac
+# --- time: microseconds (bash's EPOCHREALTIME, no fork) ---------------------
+now_us() { local t="$EPOCHREALTIME"; NOW_US=$((10#${t//[!0-9]/})); }
+# cap <seconds>: CAP ("S.mmm") / CAP_MS = <seconds>, or the time left before
+# the batch deadline if that is shorter. Non-zero once the deadline has
+# passed: the caller fails that step (fail-closed: the record stays).
+cap() {
+    local ms=$(($1 * 1000)) left
+    if [ -n "$END_US" ]; then
+        now_us; left=$(((END_US - NOW_US) / 1000))
+        [ "$left" -gt 0 ] || { CAP=0; CAP_MS=0; return 1; }
+        [ "$left" -ge "$ms" ] || ms=$left
+    fi
+    CAP_MS=$ms; printf -v CAP '%d.%03d' $((ms / 1000)) $((ms % 1000))
 }
-as_admin() {   # as_admin <seconds> <uid> cmd...
+# until_us <seconds> [nocap]: UNTIL = now + <seconds> (x WAIT_PCT), capped by
+# the batch deadline unless nocap
+until_us() {
+    now_us; UNTIL=$((NOW_US + $1 * 10000 * WAIT_PCT))
+    [ -n "${2:-}" ] || [ -z "$END_US" ] || [ "$END_US" -ge "$UNTIL" ] || UNTIL=$END_US
+}
+past_deadline() { [ -n "$END_US" ] && { now_us; [ "$NOW_US" -ge "$END_US" ]; }; }
+
+# --- external calls (astra A r1 #5, A r2 #2) --------------------------------
+# bounded [--scope] <seconds> cmd...: one external call, run in THIS shell (so
+# a TERM to the cleanup reaches it at once). Its stdout lands in $OUTF and
+# $OUT (up to a NUL, trailing newlines stripped); its stderr is copied to ours
+# afterwards; stdin is $CALL_IN (default /dev/null). It runs in timeout(1)'s
+# own process group; when timeout returns (the call ended, or its bound passed
+# and timeout signalled it) the whole group is SIGKILLed, so a descendant that
+# ignores SIGTERM or outlives its parent does not survive it. --scope (admin
+# calls) also puts it in a fresh root-created transient scope: rootless podman
+# and runuser start helpers in new sessions, which a process-group kill misses
+# but the scope's cgroup does not. That cgroup is SIGKILLed (cgroup.kill) the
+# same way and must then be empty or gone; systemd itself stops the scope at
+# RuntimeMaxSec if this script dies first. Returns the call's status, or 124
+# when it timed out, the batch deadline had passed, or its scope would not
+# empty: always a failed query. Lock fds (8 token, 9 global) never leak.
+CALLN=0; CUR_PG=""; CUR_SCOPE=""; OUT=""; OUTF=""; CALL_IN=/dev/null
+bounded() {
+    local scoped="" rc
+    if [ "$1" = --scope ]; then scoped=1; shift; fi
+    local t="$1"; shift
+    OUT=""; OUTF="$WORKDIR/out"; : > "$OUTF"
+    cap "$t" || { say "batch deadline reached; not running: $*"; CALL_IN=/dev/null; return 124; }
+    if [ -n "$scoped" ]; then
+        CALLN=$((CALLN + 1)); CUR_SCOPE="qdistro-t3s-call-$$-$CALLN-$SRANDOM.scope"
+        set -- systemd-run --scope --quiet --collect --slice=system.slice --unit="$CUR_SCOPE" \
+            -p DefaultDependencies=no -p "RuntimeMaxSec=$((CAP_MS + 1000 * KILL_AFTER + 1000))ms" \
+            -p "TimeoutStopSec=${KILL_AFTER}s" -- "$@"
+    fi
+    timeout -k "$KILL_AFTER" "$CAP" "$@" < "$CALL_IN" > "$OUTF" 2> "$WORKDIR/err" 8<&- 9>&- &
+    CUR_PG=$!
+    wait "$CUR_PG"; rc=$?
+    CALL_IN=/dev/null
+    reap_call || { say "the call scope of '$*' did not empty after SIGKILL"; rc=124; }
+    cat -- "$WORKDIR/err" >&2 2>/dev/null
+    IFS= read -r -d '' OUT < "$OUTF"
+    while [[ "$OUT" == *$'\n' ]]; do OUT="${OUT%$'\n'}"; done
+    return "$rc"
+}
+# reap_call: SIGKILL what is left of the call in flight: its process group,
+# then its scope's cgroup. Non-zero if that cgroup does not empty.
+reap_call() {
+    local ok=0
+    [ -z "$CUR_PG" ] || kill -KILL -- "-$CUR_PG" 2>/dev/null
+    if [ -n "$CUR_SCOPE" ]; then kill_cgroup "$CGROOT/system.slice/$CUR_SCOPE" || ok=1; fi
+    CUR_PG=""; CUR_SCOPE=""
+    return "$ok"
+}
+kill_cgroup() {   # kill_cgroup <dir>: SIGKILL its whole subtree; 0 once positively empty or gone
+    [ -e "$1" ] || return 0
+    { echo 1 > "$1/cgroup.kill"; } 2>/dev/null
+    wait_empty "$1" "$KILL_AFTER" nocap
+}
+sd() { bounded "$SYSTEMCTL_TMO" systemctl --no-ask-password "$@"; }
+prop() { local rc; sd show -p "$2" --value "$1" 2>/dev/null; rc=$?; PROP="$OUT"; return "$rc"; }   # prop <unit> <property>: PROP; rc = the query's
+# unit_status <unit>: US = live | dead | unknown (sol A-iii r2 P1). From
+# `systemctl show -p ActiveState`, and only from a call that COMPLETED with
+# status 0 (astra A r2 #1): a timed-out, killed or failed query is unknown
+# whatever it printed before. dead = inactive or failed; every decision acts
+# only on dead.
+unit_status() {
+    US=unknown
+    prop "$1" ActiveState || return 0
+    case "$PROP" in
+        active|activating|deactivating|reloading|refreshing) US=live ;;
+        inactive|failed) US=dead ;;
+    esac
+    return 0
+}
+as_admin() {   # as_admin <seconds> <uid> cmd...: bounded, in its own scope, as the uid
     local t="$1" uid="$2" user home
     user="$(getent passwd "$uid" | cut -d: -f1)"; home="$(getent passwd "$uid" | cut -d: -f6)"
     [ -n "$user" ] || { say "no user for uid $uid"; return 125; }
     shift 2
-    bounded "$t" runuser -u "$user" -- env -i PATH="$ADMIN_PATH" HOME="$home" USER="$user" LOGNAME="$user" \
+    bounded --scope "$t" runuser -u "$user" -- env -i PATH="$ADMIN_PATH" HOME="$home" USER="$user" LOGNAME="$user" \
         XDG_RUNTIME_DIR="/run/user/$uid" "$@"
 }
 starttime() {
@@ -100,16 +187,19 @@ tree_procs() {
         { while read -r p; do [ -n "$p" ] && echo "$p"; done < "$f"; } 2>/dev/null || return 1
     done
 }
-wait_empty() {   # wait_empty <cgroup dir> <steps>: 0 only if positively absent or empty
+# wait_empty <cgroup dir> <seconds> [nocap]: 0 only if positively absent or
+# empty. Wall-clock (astra A r2 #3), capped by the batch deadline unless
+# nocap; it always scans at least once.
+wait_empty() {
     local out
-    for _ in $(seq 1 "$2"); do
+    until_us "$2" "${3:-}"
+    while :; do
         [ -e "$1" ] || return 0
         if out="$(tree_procs "$1")" && [ -z "$out" ]; then return 0; fi
+        now_us; [ "$NOW_US" -lt "$UNTIL" ] || return 1
         sleep "$STEP"
     done
-    return 1
 }
-past_deadline() { [ -n "$END" ] && [ "$SECONDS" -ge "$END" ]; }
 
 # lock_token <token> <seconds|0>: take the token's lock (0 = try once).
 # Returns 0 locked (record still there), 1 no record (or it went away while we
@@ -120,7 +210,10 @@ lock_token() {
     { [ -d "$d" ] && [ ! -L "$d" ]; } || return 1
     { exec 8<"$d"; } 2>/dev/null || return 1
     if [ "$2" = 0 ]; then flock -n 8 || { exec 8<&-; return 2; }
-    else flock -w "$2" 8 || { exec 8<&-; return 2; }; fi
+    else
+        cap "$2" || { exec 8<&-; return 2; }       # the batch deadline caps the wait
+        flock -w "$CAP" 8 || { exec 8<&-; return 2; }
+    fi
     [ -d "$d" ] || { exec 8<&-; return 1; }
 }
 unlock_token() { exec 8<&-; }
@@ -134,14 +227,16 @@ vanished() {   # vanished <admin uid> <container>: podman definitively says it i
 # labelled [token]: admin's containers carrying the token label (one token's
 # with an argument), from `podman ps --format json`, decoded and validated in
 # python3: admin-chosen label bytes are never split by a separator (fable A r1
-# P2-2). Prints NUL-separated records "<verdict> <token> <unit> <id> <name>",
-# verdict ok|badtoken|badunit|badid (an invalid field prints as "-"; the name
-# is display-only, sanitized). Non-zero on a failed listing or bad JSON.
+# P2-2). Sets L to records of 5 fields "<verdict> <token> <unit> <id> <name>",
+# verdict ok|badtoken|badunit|badid (an invalid field is "-"; the name is
+# display-only, sanitized). Non-zero on a failed listing or bad JSON.
 labelled() {
-    local out
-    out="$(as_admin "$PODMAN_TMO" "$WANT_ADMIN" podman ps -a --filter "label=qdistro_tier3s_token${1:+=$1}" --format json)" \
+    L=()
+    as_admin "$PODMAN_TMO" "$WANT_ADMIN" podman ps -a --filter "label=qdistro_tier3s_token${1:+=$1}" --format json \
         || return 1
-    printf '%s' "$out" | bounded 30 python3 -c '
+    mv -f -- "$OUTF" "$WORKDIR/ps.json" || return 1
+    CALL_IN="$WORKDIR/ps.json"
+    bounded 30 python3 -c '
 import json, re, sys
 TOK, CID = re.compile(r"[0-9a-f]{32}"), re.compile(r"[0-9a-f]{64}")
 UNIT = re.compile(r"qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service")
@@ -170,7 +265,8 @@ for c in data:
     out += [v, tok if ok(TOK, tok) else "-", unit if ok(UNIT, unit) else "-",
             cid if ok(CID, cid) else "-", name]
 sys.stdout.write("".join(f + "\0" for f in out))
-'
+' || return 1
+    mapfile -d '' -t L < "$OUTF"
 }
 
 declare -A S
@@ -206,13 +302,15 @@ scope_owned() {
     local tok="$1" unit="$2" want="$3" dead="$4" scope="qdistro-tier3s-$1.scope" st bound rel
     SC_ST=""; SC_REL=""
     for _ in 1 2 3; do
-        st="$(unit_status "$scope")"
+        unit_status "$scope"; st="$US"
         if [ "$st" = unknown ]; then say "$tok: cannot tell whether $scope is live"; return 1; fi
-        rel="$(prop "$scope" ControlGroup)" || { say "$tok: ControlGroup query for $scope failed"; return 1; }
+        prop "$scope" ControlGroup || { say "$tok: ControlGroup query for $scope failed"; return 1; }
+        rel="$PROP"
         if [ -n "$rel" ] && ! [[ "$rel" == /*"/$scope" ]]; then
             say "$tok: $scope reports cgroup '$rel', not one of its own"; return 1; fi
         if [ "$st" = dead ]; then SC_ST=dead; SC_REL="$rel"; return 0; fi
-        bound="$(prop "$scope" BindsTo)" || { say "$tok: BindsTo query for the live $scope failed"; return 1; }
+        prop "$scope" BindsTo || { say "$tok: BindsTo query for the live $scope failed"; return 1; }
+        bound="$PROP"
         # an empty answer while live: the scope may have been collected between
         # the queries; look again rather than guess
         [ -n "$bound" ] && [ -n "$rel" ] || { sleep "$STEP"; continue; }
@@ -220,7 +318,7 @@ scope_owned() {
             say "$tok: the live $scope is bound to '$bound', not to $unit"; return 1; fi
         if [ -n "$want" ] && [ "$rel" != "$want" ]; then
             say "$tok: $scope is at $rel, not the recorded $want"; return 1; fi
-        if [ "$dead" = 1 ] && [ "$(unit_status "$unit")" != dead ]; then
+        if [ "$dead" = 1 ] && { unit_status "$unit"; [ "$US" != dead ]; }; then
             say "$tok: its owner $unit is live (again) or unknown"; return 1; fi
         SC_ST=live; SC_REL="$rel"; return 0
     done
@@ -248,8 +346,10 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
             # stop is re-queried; only a definitive "absent" lets the teardown
             # go on. Stop and rm act on the inspected container ID, so a
             # same-named container created meanwhile is never touched.
-            if ! out="$(as_admin "$PODMAN_TMO" "$admin" podman container inspect \
-                        --format '{{.Id}} {{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr")"; then
+            if as_admin "$PODMAN_TMO" "$admin" podman container inspect \
+                        --format '{{.Id}} {{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr"; then
+                out="$OUT"
+            else
                 vanished "$admin" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
                 say "$tok: $ctr vanished during the teardown (removed concurrently)"; out=""
             fi
@@ -273,10 +373,10 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
     scope_owned "$tok" "${S[unit]}" "${S[scope_cgroup]:-$rel1}" "$dead" || { say "$tok: refusing (record preserved)"; return 6; }
     if [ "$SC_ST" = live ]; then
         dir="$CGROOT$SC_REL"
-        if ! wait_empty "$dir" $((15 * 4)); then
+        if ! wait_empty "$dir" 15; then
             say "$tok: scope $scope still holds [$(tree_procs "$dir" | tr '\n' ' ')]; stopping the scope"
-            bounded "$SCOPE_STOP_TMO" systemctl stop "$scope" 2>/dev/null
-            wait_empty "$dir" $((10 * 4)) || { say "$tok: scope $scope not empty after stop (record preserved)"; return 6; }
+            bounded "$SCOPE_STOP_TMO" systemctl --no-ask-password stop "$scope" 2>/dev/null
+            wait_empty "$dir" 10 || { say "$tok: scope $scope not empty after stop (record preserved)"; return 6; }
         fi
     fi
     # every cgroup the scope can have (systemd's answer, the recorded one, and
@@ -284,7 +384,7 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
     # must be positively absent or empty by a complete recursive scan
     for c in "$SC_REL" "${S[scope_cgroup]:-}" "/system.slice/$scope"; do
         [ -n "$c" ] || continue
-        wait_empty "$CGROOT$c" $((5 * 4)) \
+        wait_empty "$CGROOT$c" 5 \
             || { say "$tok: cgroup $c of $scope holds processes or cannot be read (record preserved)"; return 6; }
     done
     for p in sentry conmon; do
@@ -314,12 +414,11 @@ recover_incomplete() {   # recover_incomplete <token> (caller holds the token's 
     local -a L
     [ "$(stat -c '%u %a' -- "$CTL/$tok")" = "$EUID 700" ] \
         || { say "$tok: control dir $CTL/$tok is not a root 0700 directory"; return 1; }
-    st="$(unit_status "$scope")"
+    unit_status "$scope"; st="$US"
     [ "$st" = dead ] || { say "$tok: incomplete control record (no state) while $scope is $st; preserved"; return 1; }
-    wait_empty "$CGROOT/system.slice/$scope" 4 \
+    wait_empty "$CGROOT/system.slice/$scope" 1 \
         || { say "$tok: incomplete control record and $scope's cgroup holds processes or cannot be read; preserved"; return 1; }
-    mapfile -d '' -t L < <(labelled "$tok")
-    wait "$!" || { say "$tok: incomplete control record; podman listing failed; preserved"; return 1; }
+    labelled "$tok" || { say "$tok: incomplete control record; podman listing failed; preserved"; return 1; }
     n=$(( ${#L[@]} / 5 ))
     [ "$n" -eq 0 ] || { say "$tok: incomplete control record but $n container(s) carry its token; preserved"; return 1; }
     if [ -e "$LAUNCH_PARENT/$tok" ] || [ -L "$LAUNCH_PARENT/$tok" ]; then
@@ -334,8 +433,9 @@ recover_incomplete() {   # recover_incomplete <token> (caller holds the token's 
 # still no record (a spawn publishes its record and creates its per-launch dir
 # under the same lock).
 remove_orphan_dir() {
+    cap "$GLOBAL_WAIT" || { say "$1: batch deadline reached; leaving $LAUNCH_PARENT/$1"; return 1; }
     (
-        flock -w "$GLOBAL_WAIT" 9 || { say "$1: cannot take $LOCK; leaving $LAUNCH_PARENT/$1"; exit 1; }
+        flock -w "$CAP" 9 || { say "$1: cannot take $LOCK; leaving $LAUNCH_PARENT/$1"; exit 1; }
         [ ! -e "$CTL/$1" ] && [ ! -L "$CTL/$1" ] || exit 0
         [ ! -d "$LAUNCH_PARENT/$1" ] || [ -L "$LAUNCH_PARENT/$1" ] || rm -rf -- "${LAUNCH_PARENT:?}/$1"
     ) 9>"$LOCK"
@@ -351,14 +451,16 @@ orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a recor
     # scope and the dir and is an error (sol A-iii r1 P1, r2 P1).
     local tok="$1" scope="qdistro-tier3s-$1.scope" bound st bst own=0 why
     [ ! -e "$CTL/$tok" ] || return 0
-    st="$(unit_status "$scope")"
+    unit_status "$scope"; st="$US"
     if [ "$st" = unknown ]; then
         say "$tok: cannot tell whether $scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
     if [ "$st" = live ]; then
         if [ -n "${2:-}" ]; then
             say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
-        if ! bound="$(prop "$scope" BindsTo)" || ! [[ "$bound" =~ $UNIT_RE ]]; then
-            if [ "$(unit_status "$scope")" != dead ]; then
+        bound=""; prop "$scope" BindsTo && bound="$PROP"
+        if [ -z "$bound" ] || ! [[ "$bound" =~ $UNIT_RE ]]; then
+            unit_status "$scope"
+            if [ "$US" != dead ]; then
                 say "$tok: no control record; cannot tell which launch unit owns the live $scope (BindsTo='${bound:-?}'); leaving it and $LAUNCH_PARENT/$tok"
                 return 1
             fi
@@ -367,22 +469,27 @@ orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a recor
     fi
     if [ "$st" = live ]; then
         [ -z "$EXCEPT_UNIT" ] || [ "$bound" != "$EXCEPT_UNIT" ] || [ "$tok" = "$EXCEPT_TOK" ] || own=1
-        bst=dead; [ "$own" = 1 ] || bst="$(unit_status "$bound")"
+        bst=dead; [ "$own" = 1 ] || { unit_status "$bound"; bst="$US"; }
         if [ "$bst" = live ]; then
             say "$tok: no control record; its scope serves the live $bound; leaving $LAUNCH_PARENT/$tok"; return 0; fi
         if [ "$bst" != dead ]; then
             say "$tok: cannot tell whether $bound is live; leaving $scope and $LAUNCH_PARENT/$tok"; return 1; fi
         if [ "$own" = 0 ]; then
-            for _ in $(seq 1 $((20 * 4))); do [ "$(unit_status "$scope")" = live ] || break; sleep "$STEP"; done
+            # systemd's own BindsTo stop: up to 20 s by the clock, not by query count (astra A r2 #3)
+            until_us 20
+            while unit_status "$scope"; [ "$US" = live ]; do
+                now_us; [ "$NOW_US" -lt "$UNTIL" ] || break
+                sleep "$STEP"
+            done
         fi
-        st="$(unit_status "$scope")"
+        unit_status "$scope"; st="$US"
         if [ "$st" = live ]; then
-            if [ "$own" = 0 ] && [ "$(unit_status "$bound")" != dead ]; then
+            if [ "$own" = 0 ] && { unit_status "$bound"; [ "$US" != dead ]; }; then
                 say "$tok: $bound is live again or unknown; leaving $scope and $LAUNCH_PARENT/$tok"; return 1; fi
             [ "$own" = 1 ] && why="is the spawn own unit under an older token" || why="not live"
             say "$tok: stale scope $scope (launch unit $bound $why); stopping it"
-            bounded "$SCOPE_STOP_TMO" systemctl stop "$scope" 2>/dev/null
-            st="$(unit_status "$scope")"
+            bounded "$SCOPE_STOP_TMO" systemctl --no-ask-password stop "$scope" 2>/dev/null
+            unit_status "$scope"; st="$US"
         fi
         if [ "$st" != dead ]; then
             say "$tok: scope $scope still $st; leaving $LAUNCH_PARENT/$tok"; return 1; fi
@@ -393,18 +500,31 @@ orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a recor
 # .new-<token>: a record a spawn was publishing when it died. It only ever
 # exists under the global lock, so holding the lock it is a dead spawn's.
 sweep_unpublished() {
+    cap "$GLOBAL_WAIT" || { say "batch deadline reached; unpublished records not swept"; return 1; }
     (
-        flock -w "$GLOBAL_WAIT" 9 || { say "cannot take $LOCK; unpublished records not swept"; exit 1; }
+        flock -w "$CAP" 9 || { say "cannot take $LOCK; unpublished records not swept"; exit 1; }
         for d in "$CTL"/.new-*; do
             [ -e "$d" ] || [ -L "$d" ] || continue
             [[ "${d##*/.new-}" =~ $TOK_RE ]] && [ -d "$d" ] && [ ! -L "$d" ] || { say "unexpected $d; left"; continue; }
             rm -rf -- "$d" && say "removed $d (a spawn died while publishing its record)"
+        done
+        for d in "$CTL"/.call-*; do      # work dirs of cleanup runs that were SIGKILLed
+            [ -d "$d" ] && [ ! -L "$d" ] || continue
+            p="${d##*/.call-}"; p="${p%%-*}"
+            if [[ "$p" =~ ^[0-9]+$ ]] && [ ! -e "/proc/$p" ]; then rm -rf -- "$d"; fi
         done
     ) 9>"$LOCK"
 }
 
 [ -d "$CTL" ] && [ ! -L "$CTL" ] && [ "$(stat -c '%u %a' -- "$CTL")" = "$EUID 700" ] \
     || { say "$CTL is not a root 0700 directory"; exit 2; }
+# the calls' output files: root-only, removed on exit (a SIGKILLed run's are
+# swept by the next --reap-stale)
+WORKDIR="$(mktemp -d "$CTL/.call-$$-XXXXXX")" || { say "cannot create a work dir under $CTL"; exit 2; }
+trap 'rm -rf -- "$WORKDIR"' EXIT
+# cancellation (astra A r2 #2): kill the call in flight, keep every record
+on_signal() { trap - TERM INT HUP; reap_call; say "signal: the call in flight was killed; records preserved"; exit 143; }
+trap on_signal TERM INT HUP
 
 tokens() { local d; for d in "$CTL"/*/; do d="${d%/}"; d="${d##*/}"; [[ "$d" =~ $TOK_RE ]] && echo "$d"; done; }
 usage() { say "usage: qdistro-tier3s-cleanup <token> | --unit <unit> [--deadline <s>] | --reap-stale [--except-unit <unit> --token <token>] [--deadline <s>]"; exit 2; }
@@ -427,7 +547,7 @@ case "$mode" in
             [[ "$EXCEPT_UNIT" =~ $UNIT_RE ]] && [[ "$EXCEPT_TOK" =~ $TOK_RE ]] || usage
         fi
         [[ "$deadline" =~ ^[1-9][0-9]{0,3}$ ]] || usage
-        END=$((SECONDS + deadline)) ;;
+        now_us; END_US=$((NOW_US + deadline * 1000000)) ;;
 esac
 
 case "$mode" in
@@ -470,7 +590,8 @@ case "$mode" in
             if [ -n "$EXCEPT_UNIT" ] && [ "$u" = "$EXCEPT_UNIT" ]; then
                 dead=0     # this spawn's own unit under an older token: stale (one unit runs one launch)
             else
-                case "$(unit_status "$u")" in
+                unit_status "$u"
+                case "$US" in
                     live) unlock_token; continue ;;
                     unknown) say "$tok: cannot tell whether $u is live; NOT reaping (record preserved)"
                              fails=$((fails + 1)); unlock_token; continue ;;
@@ -482,8 +603,9 @@ case "$mode" in
             unlock_token
         done
         # labelled containers whose launch unit is gone (restart reconciliation)
-        mapfile -d '' -t L < <(labelled)
-        wait "$!" || { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }
+        if past_deadline; then
+            say "reap deadline reached; labelled containers and orphan per-launch dirs not processed"; exit 1; fi
+        labelled || { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }
         for ((i = 0; i + 4 < ${#L[@]}; i += 5)); do
             v="${L[i]}" tok="${L[i+1]}" u="${L[i+2]}" id="${L[i+3]}" name="${L[i+4]}"
             if [ "$v" = badtoken ]; then
@@ -499,7 +621,8 @@ case "$mode" in
             dead=1
             if [ -n "$EXCEPT_UNIT" ] && [ "$u" = "$EXCEPT_UNIT" ]; then dead=0
             else
-                case "$(unit_status "$u")" in
+                unit_status "$u"
+                case "$US" in
                     live) continue ;;
                     unknown) say "$tok: cannot tell whether $u is live; NOT reaping $name"; fails=$((fails + 1)); continue ;;
                 esac
@@ -517,6 +640,7 @@ case "$mode" in
         for d in "$LAUNCH_PARENT"/*/; do
             d="${d%/}"; d="${d##*/}"; [[ "$d" =~ $TOK_RE ]] || continue
             [ "$d" != "$EXCEPT_TOK" ] || continue
+            if past_deadline; then say "$d: reap deadline reached; orphan per-launch dir not processed (preserved)"; fails=$((fails + 1)); continue; fi
             orphan_dir "$d" || fails=$((fails + 1))
         done
         exit $((fails > 0)) ;;
