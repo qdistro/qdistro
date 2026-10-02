@@ -10,8 +10,11 @@
 #   TIER3S_ROOT_LAUNCHER=1   required; there is no direct-admin lane
 #   TIER3S_LAUNCH_UNIT       the unit this runs in (verified against our cgroup)
 #   TIER3S_ADMIN_UID         admin uid, default 1000 (must be 1000)
-#   TIER3S_SILO              silo name (container qdistro-tier3s-<silo>);
-#                            unset = podapp (container qdistro-tier3s-app-<token>)
+#   TIER3S_SILO              silo name (container qdistro-tier3s-<silo>); required:
+#                            podapps (qdistro-tier3s-app@<token>) are refused in
+#                            Phase A (CONTRACT.md §1)
+#   TIER3S_BINDING           the template binding to resolve (the silo row's
+#                            template_silo); default TIER3S_SILO
 #   TIER3S_LAUNCH_TOKEN      32 lowercase hex, pre-committed by the manager
 #   TIER3S_NETWORK           only "none"
 #   TIER3S_DEBUG_LOG_DIR     dev diagnostics: admin-owned dir for runsc --debug-log
@@ -88,6 +91,11 @@ ADMIN_USER="$(getent passwd "$ADMIN_UID" | cut -d: -f1)"
 [ -n "$ADMIN_USER" ] || refuse "no user for uid $ADMIN_UID"
 SILO="${TIER3S_SILO:-}"
 [ -z "$SILO" ] || [[ "$SILO" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || refuse "invalid silo name '$SILO'"
+# Phase A ships silos only (CONTRACT.md §1): no tier3s pod-app unit exists and
+# no session-manager API starts one, so a launch without a silo is refused here.
+[ -n "$SILO" ] || refuse "tier 3s pod apps (qdistro-tier3s-app@<token>.service) are not shipped in Phase A; launch a tier3s silo (TIER3S_SILO)"
+BINDING="${TIER3S_BINDING:-$SILO}"
+[[ "$BINDING" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || refuse "invalid binding name '$BINDING'"
 UNIT="${TIER3S_LAUNCH_UNIT:-}"
 [[ "$UNIT" =~ ^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service$ ]] \
     || refuse "TIER3S_LAUNCH_UNIT '$UNIT' is not a tier3s launch unit"
@@ -115,7 +123,7 @@ if [ -n "$SILO" ]; then
     else refuse "TIER3S_SILO=$SILO set but qdistro-resolve-binding not found"; fi
     read_binding() {   # read_binding [--record]: sets RB_GEN RB_STATE, returns the resolver rc
         local out rc k v
-        out="$(as_admin "${RESOLVER[@]}" "$SILO" "$@" --launch-env)"; rc=$?
+        out="$(as_admin "${RESOLVER[@]}" "$BINDING" "$@" --launch-env)"; rc=$?
         RB_GEN=""; RB_STATE=""
         while IFS='=' read -r k v; do
             case "$k" in GENERATION) RB_GEN="$v" ;; STATE_PATH) RB_STATE="$v" ;; esac
@@ -193,8 +201,8 @@ SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
 if [ "${TIER3S_PRINT_PLAN:-0}" = 1 ]; then
     printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\n' \
         "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT"
-    printf 'SPAWN_ACTION=%s\nIMAGE=%s\nSTATE=%s\nSECCOMP=%s\nNETWORK=none\n' \
-        "$SPAWN_ACTION" "$IMAGE" "${STATE_PATH:-none}" "$SECCOMP"
+    printf 'SPAWN_ACTION=%s\nIMAGE=%s\nSTATE=%s\nSECCOMP=%s\nNETWORK=none\nBINDING=%s\n' \
+        "$SPAWN_ACTION" "$IMAGE" "${STATE_PATH:-none}" "$SECCOMP" "$BINDING"
     printf 'CTL_DIR=%s\nLAUNCH_DIR=%s\nRUNSC_ROOT=%s\n' "$CTL_DIR" "$LAUNCH_DIR" "$RUNSC_ROOT"
     printf 'SCOPE_ARG=%s\n' "${SCOPE_ARGV[@]}"
     printf 'PODMAN_ARG=%s\n' "${PODMAN_ARGV[@]}"

@@ -422,11 +422,39 @@ def test_templated_silo_mounts_state_and_uses_the_digest(w):
     assert [c for c in w.calls() if c.startswith("resolver")] == ["resolver smoke --launch-env"]
 
 
-def test_podapp_names_by_token(tmp_path):
+def test_podapp_launch_is_refused_in_phase_a(tmp_path):
+    """CONTRACT §1: A-ii ships silos only, so the pod-app path is refused
+    explicitly, before the plan, the gate or any side effect."""
     w = World(tmp_path, silo=None)
+    for extra in ({}, {"TIER3S_PRINT_PLAN": "1"}):
+        r = w.spawn(**extra)
+        assert r.returncode == 2
+        assert "pod apps (qdistro-tier3s-app@<token>.service) are not shipped in Phase A" in r.stderr
+    assert w.first("dbus-send") is None and w.first("podman") is None
+    assert not any(w.ctl.iterdir())
+
+
+def test_binding_defaults_to_the_silo_and_is_resolved_by_name(w):
     p = w.plan()
-    assert p["CONTAINER"] == f"qdistro-tier3s-app-{TOKEN}"
-    assert p["UNIT"] == f"qdistro-tier3s-app@{TOKEN}.service"
+    assert p["BINDING"] == "smoke"
+    assert "resolver smoke --launch-env" in w.calls()
+
+
+def test_template_binding_is_resolved_instead_of_the_silo_name(w):
+    """The silo row's template_silo reaches the spawn as TIER3S_BINDING: the
+    binding resolved is that one, the container and unit stay the silo's."""
+    w.set("resolver_mode", "digest")
+    p = w.plan(TIER3S_BINDING="browser1")
+    assert p["BINDING"] == "browser1"
+    assert p["CONTAINER"] == "qdistro-tier3s-smoke"
+    assert [c for c in w.calls() if c.startswith("resolver")] == ["resolver browser1 --launch-env"]
+
+
+@pytest.mark.parametrize("bad", ["../x", "Bad", "a b", "x" * 40])
+def test_bad_binding_name_refused(w, bad):
+    r = w.spawn(TIER3S_BINDING=bad)
+    assert r.returncode == 2 and "invalid binding name" in r.stderr
+    assert w.first("resolver") is None and w.first("podman") is None
 
 
 def test_debug_log_dir_adds_runtime_debug_flags(w):
