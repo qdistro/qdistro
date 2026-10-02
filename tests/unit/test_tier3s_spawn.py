@@ -149,9 +149,16 @@ FAKE_SYSTEMCTL = r'''#!/bin/bash
 F=@F@; T=@T@
 echo "systemctl $*" >> "$F/calls"
 case "$1" in
-is-active) s="$(cat "$F/units/$2.state" 2>/dev/null || echo inactive)"; echo "$s"; [ "$s" = active ] ;;
+is-active)
+    if [ -s "$F/units/$2.seq" ]; then          # a scripted state sequence, one state per query
+        s="$(head -1 "$F/units/$2.seq")"; sed -i 1d "$F/units/$2.seq"; echo "$s" > "$F/units/$2.state"
+    else s="$(cat "$F/units/$2.state" 2>/dev/null || echo inactive)"; fi
+    echo "$s"; [ "$s" = active ] ;;
 show) for a; do u="$a"; done
-    case " $* " in *" BindsTo "*) cat "$F/units/$u.bindsto" 2>/dev/null ;; *) cat "$F/units/$u.cgroup" 2>/dev/null ;; esac
+    case " $* " in
+        *" BindsTo "*) [ ! -e "$F/show_fail" ] || exit 1; cat "$F/units/$u.bindsto" 2>/dev/null ;;
+        *) cat "$F/units/$u.cgroup" 2>/dev/null ;;
+    esac
     exit 0 ;;
 stop)
     [ ! -e "$F/scope_stop_fail" ] || exit 1
@@ -343,6 +350,8 @@ class World:
         d.mkdir(parents=True)
         (d / "cgroup.procs").write_text("".join(f"{p}\n" for p in pids))
         (self.F / "units" / f"qdistro-tier3s-{token}.scope.cgroup").write_text(rel + "\n")
+        # a spawn-created scope always carries BindsTo=<launch unit>
+        (self.F / "units" / f"qdistro-tier3s-{token}.scope.bindsto").write_text(unit + "\n")
         self.set_unit(f"qdistro-tier3s-{token}.scope", "active")
         for p, comm, start in ((pids[0], "conmon", 777001), (pids[1], "gvisor_sentry", 777002)):
             (self.T / f"proc/{p}").mkdir(parents=True, exist_ok=True)
@@ -975,6 +984,40 @@ def test_reap_stale_leaves_an_orphan_dir_whose_scope_serves_a_live_unit(w):
     assert r.returncode == 0, r.stderr
     assert (w.launch_parent / TOKEN).exists()
     assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
+
+
+def _orphan_with_live_scope(w, bound="qdistro-tier3s-silo@a.service"):
+    (w.launch_parent / TOKEN).mkdir()
+    w.set_unit(f"qdistro-tier3s-{TOKEN}.scope", "active")
+    (w.F / f"units/qdistro-tier3s-{TOKEN}.scope.bindsto").write_text(bound + "\n")
+
+
+@pytest.mark.parametrize("case", ["show-fails", "no-bindsto", "foreign-bindsto"])
+def test_reap_stale_preserves_a_live_scope_whose_owner_is_unknown(w, case):
+    # sol A-iii r1 P1: a failed or ambiguous BindsTo lookup must never lead
+    # to stopping a live scope
+    _orphan_with_live_scope(w, {"show-fails": "qdistro-tier3s-silo@a.service", "no-bindsto": "",
+                                "foreign-bindsto": "sshd.service"}[case])
+    if case == "show-fails":
+        w.set("show_fail")
+    w.set_unit("qdistro-tier3s-silo@a.service", "inactive")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1, r.stderr
+    assert "cannot tell which launch unit owns" in r.stderr
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
+    assert (w.launch_parent / TOKEN).exists()
+
+
+def test_reap_stale_rechecks_the_launch_unit_before_stopping_the_scope(w):
+    # the bound unit is not live at the first look but live again by the time
+    # the bounded wait ends: the scope is left alone
+    _orphan_with_live_scope(w)
+    (w.F / "units/qdistro-tier3s-silo@a.service.seq").write_text("inactive\nactive\n")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1, r.stderr
+    assert "became live again" in r.stderr
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
+    assert (w.launch_parent / TOKEN).exists()
 
 
 def test_cleanup_without_record_removes_only_an_orphan_dir(w):

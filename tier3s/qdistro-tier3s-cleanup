@@ -173,22 +173,31 @@ teardown() {   # teardown <token> (caller holds the lock)
 
 orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a record is
     # removed only when its scope is gone. Asked for explicitly (strict), a
-    # live scope is an error. From the reaper, a live scope whose launch unit
-    # (its BindsTo=) is still live is left alone; otherwise systemd is already
-    # stopping it (BindsTo): wait for that, bounded, then stop it ourselves
+    # live scope is an error. From the reaper, a live scope is stopped only
+    # when systemd positively reports its BindsTo= launch unit (a valid
+    # tier3s launch unit name) and that unit is not live, both before the
+    # bounded wait for systemd's own BindsTo stop and again immediately before
+    # the stop; a failed or ambiguous lookup, or a unit that is (again) live,
+    # preserves the scope and the dir and is an error (sol A-iii r1 P1).
     # (A-iii s122: a reconciliation reap raced the scope's own stop and left
-    # the dir behind).
+    # the dir behind.)
     local tok="$1" scope="qdistro-tier3s-$1.scope" bound
     [ ! -e "$CTL/$tok" ] || return 0
     if unit_live "$scope"; then
         if [ -n "${2:-}" ]; then
             say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
-        bound="$(systemctl show -p BindsTo --value "$scope" 2>/dev/null)"
-        if [ -n "$bound" ] && unit_live "$bound"; then
+        if ! bound="$(systemctl show -p BindsTo --value "$scope" 2>/dev/null)" \
+           || ! [[ "$bound" =~ ^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service$ ]]; then
+            say "$tok: no control record; cannot tell which launch unit owns the live $scope (BindsTo='${bound:-?}'); leaving it and $LAUNCH_PARENT/$tok"
+            return 1
+        fi
+        if unit_live "$bound"; then
             say "$tok: no control record; its scope serves the live $bound; leaving $LAUNCH_PARENT/$tok"; return 0; fi
         for _ in $(seq 1 $((20 * 4))); do unit_live "$scope" || break; sleep "$STEP"; done
         if unit_live "$scope"; then
-            say "$tok: stale scope $scope (launch unit ${bound:-?} not live); stopping it"
+            if unit_live "$bound"; then
+                say "$tok: $bound became live again; leaving $scope and $LAUNCH_PARENT/$tok"; return 1; fi
+            say "$tok: stale scope $scope (launch unit $bound not live); stopping it"
             systemctl stop "$scope" 2>/dev/null
         fi
         if unit_live "$scope"; then

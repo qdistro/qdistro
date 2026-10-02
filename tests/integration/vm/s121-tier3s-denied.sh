@@ -59,6 +59,14 @@ out=$(as_admin /usr/bin/python3 /usr/libexec/qdistro/qdistro_resolve_binding.py 
 is "fixture: $ST resolves as templated (read-only resolution)" "$rc:$(printf '%s\n' "$out" | sed -n 's/^GENERATION=//p')" "0:$GEN"
 no_activation() { [ ! -e "$GEN_STATUS" ] && [ ! -e "$MARKER" ]; }
 is "fixture: no activation record yet" "$(yes_no no_activation)" yes
+# the absence oracles must not read a FAILED query as "nothing happened"
+# (sol A-iii r1 P2): inject a failing producer into each
+is "oracle self-test: a failing podman event query is reported, not counted as no event" \
+    "$(launch_events_since not-a-time | grep -c '^QUERY-FAILED')" 1
+is "oracle self-test: a failing journal query is reported, not counted as no unit" \
+    "$(units_started_since not-a-cursor "$T3S_SCOPE_RE")" QUERY-FAILED
+is "oracle self-test: a failing podman ps is reported, not counted as no container" \
+    "$(qry pm ps -a --format '{{.Names}}' --filter bogus=1 | grep -c '^QUERY-FAILED')" 1
 for s in $SA $ST; do
     sm CreateTier3sSilo ssss "$s" headless-smoke "$s" none > /dev/null; is "CreateTier3sSilo $s" "$(silo_state "$s")" Created
 done
@@ -84,7 +92,7 @@ refused() {
     is "$tag: no podman run (no container event but the probe's scratch create/remove)" "$(launch_events_since "$t0" | grep -c .)" 0
     is "$tag: systemd never started an owning scope" "$(units_started_since "$cur" "$T3S_SCOPE_RE")" 0
     is "$tag: no control record, no per-launch dir" "$(records | wc -l):$(find "$LAUNCHES" -mindepth 1 | wc -l)" "0:0"
-    is "$tag: no container of any kind" "$(pm ps -a --format '{{.Names}}' | grep -c .)" 0
+    is "$tag: no container of any kind" "$(qry pm ps -a --format '{{.Names}}' | grep -c .)" 0
     if [ "$silo" = "$ST" ]; then
         is "$tag: no activation record for the templated silo" "$(yes_no no_activation)" yes
     fi

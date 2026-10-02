@@ -31,6 +31,15 @@ WORK=/var/tmp/t3s-drv
 mkdir -p "$WORK"
 
 pass() { echo "PASS: $*"; T3S_PASS=$((T3S_PASS + 1)); }
+# qry <cmd...>: run a query for an ABSENCE oracle. Its output, or the single
+# line `QUERY-FAILED(<rc>): <cmd>` when it fails, so a count over it can never
+# read a failed query as "nothing there" (sol A-iii r1 P2).
+qry() {
+    local out rc
+    out="$("$@" 2>/dev/null)"; rc=$?
+    if [ "$rc" -ne 0 ]; then echo "QUERY-FAILED($rc): $*"; return 1; fi
+    [ -z "$out" ] || printf '%s\n' "$out"
+}
 fail() { echo "FAIL: $*"; T3S_FAIL=$((T3S_FAIL + 1)); }
 info() { echo "INFO: $*"; }
 step() { printf '\n## %s\n' "$*"; }
@@ -84,7 +93,8 @@ wait_for() {   # wait_for <secs> <cmd...>
     return 1
 }
 unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
-unit_down() { case "$(unit_state "$1")" in inactive|failed|"") return 0 ;; esac; return 1; }
+# a failed `systemctl show` (empty answer) is NOT "down" (sol A-iii r1 P2)
+unit_down() { case "$(unit_state "$1")" in inactive|failed) return 0 ;; esac; return 1; }
 unit_of() { echo "qdistro-tier3s-silo@$1.service"; }
 ctr_of() { echo "qdistro-tier3s-$1"; }
 ctr_status() { pm inspect --format '{{.State.Status}}' "$1" 2>/dev/null; }
@@ -99,11 +109,14 @@ unit_log() { journalctl -u "$1" --no-pager -o cat --after-cursor="$2" 2>/dev/nul
 scope_log() { journalctl _SYSTEMD_UNIT="qdistro-tier3s-$1.scope" --no-pager -o cat 2>/dev/null; }
 # Units systemd (pid 1) started since a cursor whose UNIT field matches a
 # regex: journal fields, never the message text of other processes.
+# A failed query prints QUERY-FAILED instead of a count (sol A-iii r1 P2).
 units_started_since() {   # units_started_since <cursor> <python regex>
-    journalctl --after-cursor="$1" _PID=1 -o json --no-pager 2>/dev/null | python3 -c '
+    qry journalctl --after-cursor="$1" _PID=1 -o json --no-pager | python3 -c '
 import json, re, sys
 n = 0
 for line in sys.stdin:
+    if line.startswith("QUERY-FAILED"):
+        print("QUERY-FAILED"); sys.exit(0)
     j = json.loads(line)
     if j.get("JOB_TYPE") == "start" and re.fullmatch(sys.argv[1], j.get("UNIT", "")):
         n += 1
@@ -115,9 +128,9 @@ FALLBACK_RE='(qdistro-tier2-.*|qdistro-podapp@.*|qdshell-session.*|qdistro-silo-
 # admin's podman container events since a time, minus the probe's own scratch
 # container (probe.sh creates and removes tier3s-probe-<pid> to check the
 # runtime; it is never started)
-launch_events_since() {   # launch_events_since <iso time>
-    pm events --since "$1" --until "$(date --iso-8601=seconds)" --filter type=container \
-        --format '{{.Status}} {{.Name}}' 2>&1 | grep -vE '^(create|remove) tier3s-probe-[0-9]+$' | grep .
+launch_events_since() {   # launch_events_since <iso time>; a failed query yields a QUERY-FAILED line
+    qry pm events --since "$1" --until "$(date --iso-8601=seconds)" --filter type=container \
+        --format '{{.Status}} {{.Name}}' | grep -vE '^(create|remove) tier3s-probe-[0-9]+$' | grep .
 }
 records() { find "$CTL" -mindepth 1 -maxdepth 1 -regextype egrep -regex '.*/[0-9a-f]{32}' -printf '%f\n' 2>/dev/null; }
 rec() { sed -n "s/^$2=//p" "$CTL/$1/state" 2>/dev/null; }   # rec <token> <key>
@@ -273,16 +286,16 @@ assert_launch_gone() {
     esac
     id=$(cat "$WORK/$tok.id" 2>/dev/null)
     if [ -z "$id" ]; then fail "$tag: no container id captured for $tok"
-    elif [ -z "$(find "$SROOT" -mindepth 1 -name "*$id*" 2>/dev/null)" ]; then pass "$tag: no runsc state for ${id:0:12} in $SROOT"
+    elif [ -z "$(qry find "$SROOT" -mindepth 1 -name "*$id*")" ]; then pass "$tag: no runsc state for ${id:0:12} in $SROOT"
     else fail "$tag: runsc state for ${id:0:12} left in $SROOT: $(find "$SROOT" -mindepth 1 -name "*$id*" | tr '\n' ' ')"; fi
 }
 
 # Nothing tier 3s is running at all (end of a driver / between sections).
 assert_all_clear() {   # assert_all_clear <tag>
     is "$1: control records" "$(records | wc -l)" 0
-    is "$1: scopes" "$(systemctl list-units --all --plain --no-legend 'qdistro-tier3s-*.scope' | grep -c .)" 0
-    is "$1: labelled containers" "$(pm ps -a --filter label=qdistro_tier3s_token --format '{{.Names}}' | grep -c .)" 0
+    is "$1: scopes" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-tier3s-*.scope' | grep -c .)" 0
+    is "$1: labelled containers" "$(qry pm ps -a --filter label=qdistro_tier3s_token --format '{{.Names}}' | grep -c .)" 0
     is "$1: runsc-bundle processes" "$(runsc_pids | wc -l)" 0
     # runsc keeps one shared, empty, read-only null-netns file for network=none
-    is "$1: state root holds no container state" "$(find "$SROOT" -mindepth 1 ! -name null-netns | grep -c .)" 0
+    is "$1: state root holds no container state" "$(qry find "$SROOT" -mindepth 1 ! -name null-netns | grep -c .)" 0
 }
