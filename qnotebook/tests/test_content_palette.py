@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 from PyQt6.QtCore import QSettings
-from PyQt6.QtGui import QPalette, QTextCharFormat, QTextDocument
+from PyQt6.QtGui import QPalette, QTextCharFormat, QTextDocument, QTextFormat
 from qdistro_presentation.model import example_snapshot, with_generation
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
@@ -20,7 +20,7 @@ from qnotebook.content_style import (
 )
 from qnotebook.editor import MarkdownEditor, native_body_font, reset_pinned_body_font_for_tests
 from qnotebook.export import export_page_html
-from qnotebook.md_to_qdoc import CHAR_CODE, markdown_to_qdoc
+from qnotebook.md_to_qdoc import BLOCK_KIND, CHAR_CODE, markdown_to_qdoc
 from qnotebook.theme import attach_presentation, current_controller, reset_controller_for_tests
 from qnotebook.window import MainWindow
 
@@ -169,6 +169,35 @@ def test_highlighter_without_palette_keeps_parse_colors(qapp):
     assert all(color == "#f4f4f4" for color in code_bgs)
 
 
+def _alt_snapshot():
+    return with_generation(
+        replace(
+            example_snapshot(),
+            colors=replace(
+                example_snapshot().colors,
+                mSurfaceVariant="#222244",
+                mOnSurfaceVariant="#c5cae9",
+                mPrimary="#c5cae9",
+                mOnPrimary="#0e0e43",
+            ),
+        )
+    )
+
+
+def _code_extra_colors(editor):
+    colors = []
+    for sel in editor.extraSelections():
+        if sel.format.property(int(QTextFormat.Property.FullWidthSelection)):
+            colors.append(
+                (
+                    sel.cursor.block().position(),
+                    sel.cursor.block().text(),
+                    sel.format.background().color().name(),
+                )
+            )
+    return colors
+
+
 def test_highlighter_paints_fenced_code_block(qapp):
     doc = QTextDocument()
     markdown_to_qdoc("```\nhello\n```\n", doc, content_style=legacy_content_style())
@@ -183,6 +212,70 @@ def test_highlighter_paints_fenced_code_block(qapp):
     recorded = _record_formats(doc, style)
     bgs = {fmt.background().color().name() for fmt in recorded}
     assert "#11112d" in bgs
+
+
+def test_fenced_blank_line_gets_full_width_selection(
+    qapp, tmp_path, qtbot, monkeypatch,
+):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _adapter("system"))
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("```\nhello\n\nworld\n```\n")
+    expected = example_snapshot().colors.mSurfaceVariant
+    extras = _code_extra_colors(ed)
+    texts = [text for _pos, text, color in extras if color == expected]
+    assert "hello" in texts
+    assert "world" in texts
+    assert "" in texts
+    code_blocks = 0
+    empty_code = 0
+    block = ed.document().firstBlock()
+    while block.isValid():
+        if str(block.blockFormat().property(BLOCK_KIND) or "") == "code":
+            code_blocks += 1
+            if block.text() == "":
+                empty_code += 1
+        block = block.next()
+    assert empty_code >= 1
+    assert len(extras) == code_blocks
+    ed.setExtraSelections([])
+    extras_after = _code_extra_colors(ed)
+    assert len(extras_after) == code_blocks
+    assert all(color == expected for _pos, _text, color in extras_after)
+
+
+def test_live_fenced_blank_line_restyle_updates_block_area(
+    qapp, tmp_path, tmp_notebook, qtbot, monkeypatch,
+):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _adapter("system"))
+    win = MainWindow()
+    win.open_notebook(str(tmp_notebook))
+    qtbot.addWidget(win)
+    ed = win.editor
+    page = win._current_page
+    md = "```\nhello\n\nworld\n```\n"
+    ed.load_markdown(md, page_path=page)
+    first = example_snapshot().colors.mSurfaceVariant
+    extras = _code_extra_colors(ed)
+    assert any(text == "" and color == first for _pos, text, color in extras)
+    ed.insert_text_at_cursor("Z")
+    stack_before = ed.document().availableUndoSteps()
+    md_before = ed.markdown()
+    write_snapshot(str(tmp_path), _alt_snapshot(), require_unwritable_dirs=False)
+    current_controller()._reload()
+    win.apply_presentation_update()
+    assert ed.markdown() == md_before
+    assert ed.is_dirty()
+    assert ed.document().availableUndoSteps() == stack_before
+    extras = _code_extra_colors(ed)
+    assert any(text == "" and color == "#222244" for _pos, text, color in extras)
+    assert all(color == "#222244" for _pos, _text, color in extras)
+    assert first not in {color for _pos, _text, color in extras}
+    win.close()
 
 
 def test_highlighter_leaves_equation_gold(qapp):
@@ -241,19 +334,7 @@ def test_live_restyle_changes_highlighter_not_markdown(
     stack_before = ed.document().availableUndoSteps()
     md_before = ed.markdown()
 
-    other = with_generation(
-        replace(
-            example_snapshot(),
-            colors=replace(
-                example_snapshot().colors,
-                mSurfaceVariant="#222244",
-                mOnSurfaceVariant="#c5cae9",
-                mPrimary="#c5cae9",
-                mOnPrimary="#0e0e43",
-            ),
-        )
-    )
-    write_snapshot(str(tmp_path), other, require_unwritable_dirs=False)
+    write_snapshot(str(tmp_path), _alt_snapshot(), require_unwritable_dirs=False)
     current_controller()._reload()
     recorded.clear()
     win.apply_presentation_update()
