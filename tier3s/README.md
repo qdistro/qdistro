@@ -13,14 +13,27 @@ into the image, kiwi config or any installer, and nothing in qdistro selects
 this tier automatically (O6: explicit launch, no fallback). Dev profile only
 (O4); `probe.sh` refuses on any other profile. No KVM claims (O5).
 
+**Phase A** (headless launch path), milestone A-i: the lifecycle contract
+**[`CONTRACT.md`](CONTRACT.md)** and the launch-path scripts below, tested on
+the host against fakes (`tests/unit/test_tier3s_spawn.py`) with feasibility
+evidence in `spike/logs/phase-a-20261002/`. Not yet wired into the session
+manager, broker or installer (A-ii), no acceptance drivers yet (A-iii).
+
 ## Files
 
 | File | Role |
 |---|---|
 | `RUNSC_RELEASE` | The pin: dated release, base URL, tarball sha512, per-file sha512 for `runsc` and every `gvisor-bin/` sidecar, expected `runsc --version` |
 | `provision-runsc.sh` | Root, on demand. Installs the pinned bundle to `/usr/libexec/qdistro/runsc/{runsc,gvisor-bin/…}`, the wrapper to `/usr/libexec/qdistro/tier3s-runsc`, the pin to `/etc/qdistro/runsc-release`. Fails closed on any hash, file-set or version mismatch (version: exact text **and** exit 0); idempotent; `--offline` takes the tarball only from the cache. One exclusive lock (`/run/qdistro-runsc/provision.lock`) covers inspect → swap → verify → rollback; the cached tarball is verified and extracted from a private copy staged under a checked `/var/tmp`; parents of the install/stamp/lock paths must be root-owned and not group/other-writable |
-| `tier3s-runsc` | The runtime path given to `podman --runtime`. `env -i` + constant flags `--ignore-cgroups --platform=systrap --oci-seccomp` |
+| `tier3s-runsc` | The runtime path given to `podman --runtime`. `env -i` + constant flags `--ignore-cgroups --platform=systrap --oci-seccomp` + the fixed state root `--root=/run/qdistro-tier3s-runsc/<host uid>`, which it never creates and refuses when missing or loose (`CONTRACT.md` D-A1) |
 | `probe.sh` | Prerequisite screen, one line per check, exits 1 naming the first missing prerequisite, 2 on a non-dev profile. Executes nothing from the install until stamp, trusted ancestors, exact file set and every sha512 pass; then runs `runsc --version` through the verified open fd (`/proc/self/fd/N`) |
+| `CONTRACT.md` | Phase A lifecycle contract: state-root, scope, record/cleanup decisions; spawn order; session-manager interface |
+| `spawn-tier3s.sh` | Root supervisor of one launch (dev only, root launcher, probe, broker gate, record, scope, podman as admin) |
+| `qdistro-tier3s-scope` | Root-owned first process of the launch scope: verifies it, delegates it to admin selectively, execs podman as admin |
+| `qdistro-tier3s-cleanup` | The only teardown path (`<token>`, `--unit`, `--reap-stale`); preserves the record on any failure |
+| `tmpfiles/qdistro-tier3s.conf` | Creates the runsc state root and the control/per-launch parents |
+| `seccomp/make-profiles.py`, `seccomp/<workload>.json` | Per-workload profiles derived from tier 2, with explicit decisions |
+| `Containerfile.headless-smoke`, `headless-smoke.sh`, `make-tier3s-image.sh`, `configure-snapshot-repos.sh` | The headless smoke workload image on the snapshot pin |
 | `spike/` | Throwaway Phase S scripts, the evidence logs (`spike/logs/`), `RESULTS.md` |
 
 ## The pin

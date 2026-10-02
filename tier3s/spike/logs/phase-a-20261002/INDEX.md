@@ -19,6 +19,9 @@ script, no session manager).
 | `feasibility/21` | `ad4e575ba` | 1 BAD = **finding**: SIGKILL of the launch main pid → BindsTo stops the scope concurrently with ExecStopPost (no stop job, so Before= orders nothing); everything gone ~2 s later |
 | `feasibility/30`, `31` | (ad hoc, profile from `41d98aa51` rendering) | D-A4: `OCI seccomp: ignoring syscall "fchmodat2"` — the ALLOW was inert, `chmod -h` EPERM, `Syscall 452: denied by seccomp`; plain `chmod` OK; `llistxattr` and `syslog` ALLOWs effective (`ls -l` clean, dmesg banner); `utimensat` (280), `linkat`/`symlinkat` (265/266) and `fadvise64` (221) denied by the tier-2 base |
 
+| `feasibility/40` | `ef56049ea` | D-A5: `make-tier3s-image.sh --oci-archive` builds `qdistro/tier3s-headless-smoke` in the VM on pin 20260929 (label checked, IMAGE_ID/DIGEST and archive sha256 printed); its smoke output under runsc with the shipped flags: snapshot 20260929, gVisor kernel/dmesg, uid 1000 passwd entry and HOME, `C.UTF-8` charmap UTF-8, `/run/user/1000` and `/home/admin/.cache` 1000:1000 0700, plain chmod rc 0, `chmod -h` rc 1, `ls -l` clean, loopback only |
+| `mutate-guards-host.log` | `fbf2a57c8` tree | host: 55 mutations (29 Phase 0 + 26 Phase A: gate order A1–A3, control-dir location A4/A5, …) all caught; files restored byte-identical |
+
 Note on 30: that profile still listed `fchmodat2` as ALLOW (the render
 before the decision changed); 31 is the same profile. The checked-in
 `headless-smoke.json` decides DENY.
