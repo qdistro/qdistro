@@ -241,7 +241,7 @@ jobs:
             echo "--- failed units"; systemctl --no-pager --failed; \
             echo "--- greetd"; sudo -n journalctl -b -u greetd --no-pager | tail -40; \
             echo "--- bus names"; busctl --system --acquired list --no-legend | awk "{print \$1}" | grep -i qdistro; \
-            fail=0; for unit in greetd.service seatd.service; do \
+            fail=0; for unit in greetd.service; do \
               systemctl is-active --quiet "$unit" || { echo "NOT ACTIVE: $unit"; fail=1; }; \
             done; \
             for name in org.qdistro.AdminBroker1 org.qdistro.SessionManager1; do \

@@ -103,6 +103,9 @@ pip_app_qml_gate qdgreeter qdlocker
 # The qsu and session installers take the staged binaries instead of
 # compiling. QDWIN_SESSION_AUTOSTART=0: the greeter starts the session, as in
 # the kiwi image.
+# install-qdwin-session-for-vm.sh adds admin to `seat`, a group only
+# fresh-vm-bootstrap.sh and image/config.sh create; the seatd RPM does not.
+getent group seat >/dev/null || groupadd -r seat
 export QCI_NATIVE_STAGE=1 QSU_PREBUILT_BINARY=/usr/local/bin/qsu
 export QDWIN_SESSION_AUTOSTART=0
 export QDISTRO_REPO_ROOT="$SRC" QDISTRO_PROFILE=dev QDISTRO_STRICT=1
