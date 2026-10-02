@@ -203,7 +203,7 @@ set_rule allow; is "broker answers allow" "$(broker_check "$ACTION")" allow
 # systemd's socket (the path is not a secret), and read the unit's state
 # 3 s later: <want>. Then release the lock and see the launch run.
 forge_ready() {
-    local tag="$1" want="$2" tok pid cg i
+    local tag="$1" want="$2" tok pid cg
     tok=$(write_stanza $SA "[\"$SMOKE_APP\", \"--hold\", \"600\"]")
     rm -f "$WORK/forge.go"
     exec 7>"$CTL/.lock"; flock 7
@@ -213,16 +213,18 @@ forge_ready() {
     setpriv --reuid=1000 --regid=1000 --init-groups bash -c \
         "while [ ! -e '$WORK/forge.go' ]; do sleep 0.1; done; exec timeout 10 env NOTIFY_SOCKET=/run/systemd/notify systemd-notify --ready" &
     pid=$!
-    cg="/sys/fs/cgroup/system.slice/$U6"
-    echo "$pid" > "$cg/cgroup.procs"
+    wait_for 10 bash -c "[ \"\$(stat -c %u /proc/$pid 2>/dev/null)\" = 1000 ]"    # setpriv has dropped to admin
+    # a template instance lives under its own slice: ask systemd where
+    cg=$(systemctl show -p ControlGroup --value "$U6")
+    echo "$pid" > "/sys/fs/cgroup$cg/cgroup.procs"
     is "$tag: an admin (uid 1000) process now runs in the launch unit's cgroup" \
-        "$(stat -c %u "/proc/$pid"):$(sed -n 's/^0:://p' "/proc/$pid/cgroup")" "1000:/system.slice/$U6"
+        "$(stat -c %u "/proc/$pid"):$(sed -n 's/^0:://p' "/proc/$pid/cgroup")" "1000:${cg:-<no ControlGroup>}"
     touch "$WORK/forge.go"; wait "$pid"
     info "$tag: the admin process sent READY=1 (systemd-notify rc=$?)"
     sleep 3
     is "$tag: launch unit state after the admin process's READY=1" "$(unit_state "$U6")" "$want"
     flock -u 7; exec 7>&-
-    wait_for 90 bash -c "[ \"\$(systemctl show -p ActiveState --value '$U6')\" = active ] && grep -qx phase=running '$CTL/$tok/state'"
+    wait_for 90 bash -c "[ \"\$(systemctl show -p ActiveState --value '$U6')\" = active ] && grep -qx phase=running '$CTL/$tok/state' 2>/dev/null"
     is "$tag: then the launch runs on the spawn's own READY=1 (record phase)" "$(rec "$tok" phase)" running
     is "$tag: launch unit active" "$(unit_state "$U6")" active
     systemctl stop "$U6"; wait_for 60 unit_down "$U6"
@@ -231,7 +233,7 @@ forge_ready() {
     rm -f "/run/qdistro/silo-launch/$SA.env"
 }
 forge_ready "forged READY/main" activating
-journalctl _PID=1 --since "-2min" --no-pager -o cat 2>/dev/null | grep -i 'notification message from PID' | tail -2 | sed 's/^/    pid1: /'
+journalctl _PID=1 --since "-3min" --no-pager -o cat 2>/dev/null | grep -F "$U6: Got notification message" | tail -3 | sed 's/^/    pid1: /'
 # positive control: with NotifyAccess=all the same forged READY=1 DOES complete
 # the start, so the check above can see an acknowledgement
 DROP=/run/systemd/system/$U6.d
