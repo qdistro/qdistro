@@ -52,9 +52,7 @@ fix has regressed — see `Settings.data.bar.exclusionZoneBleed`.
 
 ### Step 2 — maximize a base weston-terminal and observe its outer geometry
 
-We use `weston-terminal` (from the base-image `weston` package), NOT
-`foot` — `foot` lives in the opt-in `QDWIN_APP_DEPS` lane (off by
-default since 5f48e17) and is absent from the lean GUI golden. The
+We use `weston-terminal` (from the base-image `weston` package). The
 assertion is about the COMPOSITOR's `set_maximized` geometry, not any
 specific client, so any maximizable toplevel works. `weston-terminal`
 has no `--maximized` flag, so we maximize it through qdwin's own path:

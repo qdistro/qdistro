@@ -383,6 +383,14 @@ setup() {
     assert_output_contains "PASS: /run/user/1000/ contains only allowed sockets/logs"
     assert_output_contains "PASS: no host bus/pulse/gnupg/ssh-agent in /run/user/1000/"
     assert_output_contains "PASS: qdistro_tier2_token label set"
+    # Presentation-bind invariants (moved from the retired duplicate
+    # tier2-hardening-lockin.bats, which ran this same driver).
+    assert_output_contains "PASS: presentation bind source is the host public directory"
+    assert_output_contains "PASS: presentation bind is read-only"
+    assert_output_contains "PASS: presentation bind does not use :Z relabel"
+    assert_output_contains "PASS: container write into presentation directory denied"
+    assert_output_contains "PASS: container /var/lib/qdistro exposes only presentation"
+    assert_output_contains "PASS: container does not see host qdshell settings"
     assert_output_contains "PASS: §Phase-7 tier-2 hardening invariants enforced"
 }
 

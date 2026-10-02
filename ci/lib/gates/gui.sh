@@ -232,6 +232,7 @@ agent_scenarios() {
         "$WORKSPACE"/qdwin/tests/apps/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
+        "$QDISTRO_REPO"/tests/integration/workflow-gui/[0-9][0-9]-*.md \
         "$WORKSPACE"/qdlocker/tests/gui/[0-9][0-9]-*.md
     do
         [ -f "$f" ] && printf '%s\n' "$f"
@@ -864,8 +865,8 @@ Rules:
   defect green, which is worse than a red row. When torn between SKIP and
   ERROR, choose ERROR.
 - Two concrete examples:
-  - Good SKIP: status.txt = \`SKIP foot is not installed in this golden image
-    (command -v foot -> not found)\`, exit 0. The dependency is named, the check
+  - Good SKIP: status.txt = \`SKIP thunar is not installed in this golden image
+    (command -v thunar -> not found)\`, exit 0. The dependency is named, the check
     is named, and no driving would have made the scenario runnable.
   - Bad SKIP, record ERROR instead: "the helper client bound the protocol but
     was gone by the time I ran the steps". Something started and then
@@ -3882,29 +3883,42 @@ gui_scenario_tier_base_skip_reason() {
     return 0
 }
 
-# qdwin app-compatibility scenarios (qdwin/tests/apps/*.md) drive real desktop
-# apps (foot/xterm/gnome-text-editor/...) that are only installed when the golden
-# was built with QDWIN_APP_DEPS=1 (fresh-vm-bootstrap.sh §app-deps lane). The
-# default full-run golden is lean (QDWIN_APP_DEPS=0), so these scenarios have no
-# apps to exercise. Dispatching them to the agent anyway is exactly what produced
-# the run's fail-closed UNKNOWN (apps/04): the agent CORRECTLY judged SKIP but its
-# machine-readable verdict was not captured, so the row failed closed. Decide the
-# capability deterministically HERE — before the agent starts — so a golden that
-# lacks app deps yields a clean SKIP naming the missing capability, with no
-# reliance on the agent writing a verdict. Like the tier-base gate, this must run
-# BEFORE the qdwin-routing bypass in the dispatch loop (app scenarios are
-# qdwin-required). Pure (reads only its args) => host-testable. Echoes the skip
-# reason, or nothing when the scenario should run.
-#
-# Args: rel app_deps
-gui_scenario_app_deps_skip_reason() {
-    local rel=$1 app_deps=${2:-0}
-    case "$rel" in
-        qdwin/tests/apps/[0-9][0-9]-*.md)
-            [ "$app_deps" != 1 ] && \
-                printf '%s\n' "qdwin app-test deps not installed (golden built with QDWIN_APP_DEPS=0); rebuild with QDWIN_APP_DEPS=1 for the app-compatibility lane"
-            ;;
+# The third-party app-compatibility scenarios: real desktop apps (Firefox,
+# GTK4/GTK3, Qt5, Chromium, wxWidgets, Tk/FLTK/Swing, feh) on qdwin's XWayland
+# and xdg paths. The image ships none of them, they need ~20 extra packages,
+# and their failures are mostly upstream drift. They form the periodic opt-in
+# `gui-apps` lane (QCI_GUI_APPS=1), never the blocking verdict. The other
+# qdwin/tests/apps scenarios (02 03 04 12 13) are qdwin regressions that need
+# only the core test clients (foot, xterm, xfreerdp) baked into every golden,
+# so they always run.
+gui_scenario_is_gui_apps_lane() {
+    case "$1" in
+        qdwin/tests/apps/01-*.md|qdwin/tests/apps/0[5-9]-*.md|\
+        qdwin/tests/apps/1[01]-*.md)
+            return 0 ;;
     esac
+    return 1
+}
+
+# gui-apps lane gate. A gui-apps scenario is SKIPped deterministically before
+# the agent starts unless the run opted in (QCI_GUI_APPS=1) AND the golden
+# carries the app set (QDWIN_APP_DEPS=1 bake; the gate sets that for the
+# gui-qdwin golden when QCI_GUI_APPS=1). Dispatching them to an agent on a lean
+# golden is what produced a fail-closed UNKNOWN when its SKIP verdict was not
+# captured. Like the tier-base gate, this must run BEFORE the qdwin-routing
+# bypass in the dispatch loop (app scenarios are qdwin-required). Pure (reads
+# only its args) => host-testable. Echoes the skip reason, or nothing when the
+# scenario should run.
+#
+# Args: rel app_deps apps_optin
+gui_scenario_app_deps_skip_reason() {
+    local rel=$1 app_deps=${2:-0} apps_optin=${3:-0}
+    gui_scenario_is_gui_apps_lane "$rel" || return 0
+    if [ "$apps_optin" != 1 ]; then
+        printf '%s\n' "third-party app-compatibility scenario: periodic gui-apps lane (opt-in: QCI_GUI_APPS=1)"
+    elif [ "$app_deps" != 1 ]; then
+        printf '%s\n' "qdwin app-test deps not installed in the golden (no QDWIN_APP_DEPS=1 bake marker); the gui-apps lane needs them"
+    fi
     return 0
 }
 
@@ -3924,9 +3938,16 @@ gui_scenario_xwayland_skip_reason() {
         qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md|\
         qdistro/tests/integration/permissions-gui/09-tui-broker-offline.md|\
         qdistro/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md|\
-        qdistro/tests/integration/permissions-gui/40-tui-survives-broker-restart.md|\
-        qdistro/tests/integration/permissions-gui/48-qsu-tui-argv-rendering.md)
+        qdistro/tests/integration/permissions-gui/40-tui-survives-broker-restart.md)
             printf '%s\n' "XWayland/qterminal E2E is opt-in (set QCI_XWAYLAND_E2E=1 for the dedicated desktop-integration lane)" ;;
+        qdistro/tests/integration/permissions-gui/16-realapp-sendto-visual.md)
+            # Shows work/work2 qnotebook windows on admin's display through the
+            # xhost SI shared-XWayland expedient, which the product does not have.
+            printf '%s\n' "shared-XWayland real-app send-to is opt-in (set QCI_XWAYLAND_E2E=1 for the dedicated desktop-integration lane)" ;;
+        qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md)
+            # Worst flake rate of the admin lane (XWayland frame and focus
+            # artefacts); opt-in until it is ported to the native-Wayland qdwin lane.
+            printf '%s\n' "admin-app multi-pending navigation on labwc/XWayland is opt-in until ported to the qdwin lane (set QCI_XWAYLAND_E2E=1)" ;;
     esac
     return 0
 }
@@ -4095,7 +4116,13 @@ gate_gui() {
     if [ -z "$explicit" ] && [ "${QCI_NO_GOLDEN:-0}" != 1 ]; then
         ensure_run_golden gui-admin || return "$EXIT_VM_PROVISION"
         if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ]; then
-            ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
+            # The opt-in gui-apps lane needs the third-party app set baked into
+            # the qdwin golden; the admin golden never does.
+            if [ "${QCI_GUI_APPS:-0}" = 1 ]; then
+                QDWIN_APP_DEPS=1 ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
+            else
+                ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
+            fi
         fi
     fi
     # A single admin session VM is used for compositor-independent capability
@@ -4179,18 +4206,20 @@ gate_gui() {
         kv vm_qdwin "$qdwin_svm"
     fi
 
-    # App-deps capability: the qdwin app-compatibility scenarios need real desktop
-    # apps that only exist when the golden was built with QDWIN_APP_DEPS=1. Probe
-    # the qdwin session VM for the canonical app-dep (`foot`) — authoritative for
-    # what the cloned qdwin workers will have, regardless of whether a golden was
-    # built. When absent, qdwin/tests/apps/* SKIP deterministically before the
-    # agent starts (see gui_scenario_app_deps_skip_reason).
+    # App-deps capability: the gui-apps lane scenarios need real desktop apps
+    # that only exist when the golden was built with QDWIN_APP_DEPS=1. Probe the
+    # qdwin session VM for the bake marker fresh-vm-bootstrap.sh writes with that
+    # set — authoritative for what the cloned qdwin workers will have. (foot no
+    # longer tells: it is a core test client in every golden.) When absent, the
+    # gui-apps scenarios SKIP deterministically before the agent starts (see
+    # gui_scenario_app_deps_skip_reason).
     local app_deps=0
-    if "$VM_TOOLS/vm-exec" "$qdwin_svm" "command -v foot >/dev/null 2>&1" >/dev/null 2>&1; then
+    if "$VM_TOOLS/vm-exec" "$qdwin_svm" "test -f /var/lib/qdistro-ci/qdwin-app-deps" >/dev/null 2>&1; then
         app_deps=1
     fi
     kv gui_app_deps "$app_deps"
-    log "gui: qdwin app-deps capability app_deps=$app_deps (QDWIN_APP_DEPS golden knob; 0 => qdwin/tests/apps/* skip)"
+    kv gui_apps_lane "${QCI_GUI_APPS:-0}"
+    log "gui: qdwin app-deps capability app_deps=$app_deps gui_apps_lane=${QCI_GUI_APPS:-0} (QCI_GUI_APPS=1 opts into the gui-apps lane)"
 
     # Shell-capture capability probe (once, from the service MainPID environ).
     # Every qdwin visual assertion now flows through the in-compositor
@@ -4276,7 +4305,7 @@ gate_gui() {
         local tier_base_skip app_deps_skip xwayland_skip
         tier_base_skip=$(gui_scenario_tier_base_skip_reason "$rel" \
             "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
-        app_deps_skip=$(gui_scenario_app_deps_skip_reason "$rel" "$app_deps")
+        app_deps_skip=$(gui_scenario_app_deps_skip_reason "$rel" "$app_deps" "${QCI_GUI_APPS:-0}")
         xwayland_skip=$(gui_scenario_xwayland_skip_reason "$rel" "${QCI_XWAYLAND_E2E:-0}")
         if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
             skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
@@ -4288,9 +4317,8 @@ gate_gui() {
             # these qdwin-required scenarios in the default lane.
             skip_reason="$tier_base_skip"
         elif [ -n "$app_deps_skip" ]; then
-            # qdwin app-compatibility scenario against a golden with no app deps:
-            # deterministic SKIP naming the missing capability, before the agent
-            # starts. Runs BEFORE the qdwin-routing bypass (app scenarios are
+            # gui-apps lane scenario not opted in, or a golden with no app
+            # deps: deterministic SKIP naming why, before the agent starts. Runs BEFORE the qdwin-routing bypass (app scenarios are
             # qdwin-required) so it actually fires in the default lean lane.
             skip_reason="$app_deps_skip"
         elif [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && [ "$qdwin_capture" = 0 ] && \

@@ -170,11 +170,14 @@ The classified retry covers an exact provider-capacity response as well as a
 provider connection outage. It retries the selected model once on a fresh VM;
 it never retries a product `FAIL` or `ERROR`.
 
-For the complete GUI matrix, including real third-party application coverage,
-build a clean app-deps golden and use eight disposable VM workers:
+For the complete GUI matrix, including the opt-in third-party application
+coverage (the periodic `gui-apps` lane, `qdwin/tests/apps/01` and `05`–`11`),
+opt into that lane (it bakes the app-deps golden) and use eight disposable VM
+workers. A normal `qci full` leaves the lane off; do not export
+`QCI_GUI_APPS` or `QDWIN_APP_DEPS` in routine full-run scripts:
 
 ```sh
-QCI_GUI_JOBS=8 QDWIN_APP_DEPS=1 \
+QCI_GUI_JOBS=8 QCI_GUI_APPS=1 \
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui

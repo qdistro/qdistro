@@ -91,7 +91,7 @@ ls ~/.mozilla/firefox/*.default*/extensions/  # qdistro-firefox@qdistro.local.xp
 test -f /usr/lib/mozilla/native-messaging-hosts/qdistro.json
 ```
 
-A passing scenario in `tests/integration/firefox-gui/` would assert all three after a fresh-VM boot. Blocked on the VM-GUI tooling gap (`project-vm-gui-tooling-gap` memory) until weston has XWayland + screencopy.
+A VM test would assert all three after a fresh-VM boot. (The old stub-host `tests/integration/firefox-gui/` scenarios were never run by qci and were removed on 2026-10-02; the real bridge is covered by `tests/integration/vm/browser-9e-daemons.bats`.)
 
 ## See also
 

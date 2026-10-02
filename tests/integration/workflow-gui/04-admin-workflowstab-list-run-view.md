@@ -1,5 +1,7 @@
 # 04 — admin app Workflows tab: list + run view + Refresh
 
+<!-- qci:visual: required -->
+
 **What**: with several workflows loaded and at least one run on record,
 open the Qt admin app, switch to the Workflows tab, and verify the tab
 renders the workflow definitions table and the recent-runs table with the
@@ -28,6 +30,8 @@ mkdir -p /etc/qdistro/workflows
 # Two workflows up front; a cron one that will also produce a run.
 cat > /etc/qdistro/workflows/wfgui-list-a.yaml <<'YAML'
 - name: wfgui-list-a
+  # Unattended: without auto_run a fire only parks a PENDING run (see 05).
+  auto_run: true
   description: cron lister A
   trigger:
     type: cron
@@ -38,6 +42,8 @@ cat > /etc/qdistro/workflows/wfgui-list-a.yaml <<'YAML'
 YAML
 cat > /etc/qdistro/workflows/wfgui-list-b.yaml <<'YAML'
 - name: wfgui-list-b
+  # Unattended: without auto_run a fire only parks a PENDING run (see 05).
+  auto_run: true
   description: dbus-signal placeholder B
   trigger:
     type: qbus_event
@@ -93,6 +99,8 @@ $VMGUI "$VM" screenshot /tmp/04-admin-workflowstab-list-run-view-s1-workflows.pn
 B64=$(base64 -w0 <<'EOF'
 cat > /etc/qdistro/workflows/wfgui-list-c.yaml <<'YAML'
 - name: wfgui-list-c
+  # Unattended: without auto_run a fire only parks a PENDING run (see 05).
+  auto_run: true
   description: added live
   trigger:
     type: cron

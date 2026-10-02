@@ -7,8 +7,8 @@
 can type a password; correct password unlocks; lock surface is torn
 down; post-unlock typing reaches the previously-focused toplevel.
 
-Equivalent of qdwin/tests/gui/03-locker-cycle.md but driving the new
-qdlocker process instead of qdshell's deprecated LockScreen module.
+Replaces the retired qdwin/tests/gui/03-locker-cycle.md, which drove
+qdshell's removed LockScreen module; this one drives the qdlocker process.
 
 ## Setup
 
@@ -25,14 +25,14 @@ sleep 1
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
 # foot is the throwaway toplevel we type into to prove pre/post-unlock
-# keystroke routing (asserts 1.1, 4.3, 5.1). It ships only in the
-# QDWIN_APP_DEPS=1 app-test lane (fresh-vm-bootstrap.sh), not the default
-# golden — SKIP rather than ERROR when it is absent. The foot-free
-# security path (overlay_key routing) is also covered by
-# 05-keystroke-isolation.md. Mirrors 04-lid-close-lock.md's skip-guard.
+# keystroke routing (asserts 1.1, 4.3, 5.1). It is one of the core test
+# clients fresh-vm-bootstrap.sh bakes into EVERY golden (not the opt-in
+# QDWIN_APP_DEPS set), so a missing foot is a broken golden: ERROR, never
+# SKIP. This is the only live lock -> password -> unlock test; it used to
+# SKIP silently whenever the golden was lean.
 if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1'; then
-    echo "SKIP: foot not installed in guest (QDWIN_APP_DEPS=1 lane only)"
-    exit 77   # bats convention for skip
+    echo "ERROR: foot not installed in guest; the golden lacks the core test clients (fresh-vm-bootstrap.sh)"
+    exit 2
 fi
 
 # qdlocker should be running under systemd --user. If a previous test
@@ -120,8 +120,8 @@ qdlocker_ctrl status
 **Assert (4.1):** qdlocker ctrl reports `last=success`; status
 reports `locked=False`.
 **Assert (4.2):** verify the lock-surface proxy was destroyed, not just
-the flag flipped (B1 regression guard from
-qdwin/tests/gui/03-locker-cycle.md:94), using the qdwin journal line `qdwin:
+the flag flipped (the B1 regression guard of the retired qdwin locker
+scenario), using the qdwin journal line `qdwin:
 locked_changed=0 cause=locker_set_locked`:
 
 ```bash

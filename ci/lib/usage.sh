@@ -150,8 +150,15 @@ Environment:
                             scenarios are recorded as intentional skips.
                             `qci gui-admin` sets this automatically.
   QCI_XWAYLAND_E2E=1        Opt into qterminal/Textual scenarios that depend on
-                            XWayland focus and framebuffer capture. They skip
-                            by default in the normal GUI/full lane.
+                            XWayland focus and framebuffer capture, plus
+                            permissions-gui/16 (shared-XWayland real apps) and
+                            /34 (until ported to qdwin). They skip by default
+                            in the normal GUI/full lane.
+  QCI_GUI_APPS=1            Opt into the periodic gui-apps lane: the third-party
+                            app-compatibility scenarios qdwin/tests/apps/01 and
+                            05-11 (Firefox, GTK, Qt5, Chromium, wx, Tk/FLTK/
+                            Swing, feh). Bakes the app set into the qdwin golden
+                            (QDWIN_APP_DEPS=1). They skip by default.
                             Without this, disposable `qci gui` provisions a
                             separate qdwin-profile VM for qdwin-dependent rows.
   QDWIN_IMG_DIR             libvirt image directory, default

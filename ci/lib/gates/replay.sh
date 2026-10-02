@@ -49,9 +49,9 @@ resolve_replay_scenario() {
     fi
     # GUI markdown basename across the known scenario roots. This list MUST
     # cover every root agent_scenarios enumerates (qdwin tests/gui + tests/apps,
-    # qdistro permissions-gui + qdwin-noctalia, qdlocker tests/gui) — otherwise
-    # `qci replay <basename>` cannot find a scenario that `qci gui` actually
-    # runs. workflow-gui is also accepted (a valid replay target). Defined once
+    # qdistro permissions-gui + qdwin-noctalia + workflow-gui, qdlocker
+    # tests/gui) — otherwise `qci replay <basename>` cannot find a scenario that
+    # `qci gui` actually runs. Defined once
     # and reused by both the exact-match and the glob-prefix passes below.
     local root mdbase=${s%.md}
     local gui_roots=(

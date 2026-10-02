@@ -1,5 +1,7 @@
 # 02 — secret delivery: ephemeral ssh-agent socket exists, then gone
 
+<!-- qci:visual: required -->
+
 **What**: a `process_spawn` git-sign workflow delivers a real SSH key from
 the vault into a per-run ssh-agent and waits on the triggering process.
 While that process lives, assert the agent socket EXISTS (and holds the
@@ -37,6 +39,8 @@ shred -u /tmp/wf-sign-key /tmp/wf-sign-key.pub 2>/dev/null || rm -f /tmp/wf-sign
 mkdir -p /etc/qdistro/workflows
 cat > /etc/qdistro/workflows/wfgui-git-sign.yaml <<'YAML'
 - name: wfgui-git-sign
+  # Unattended: without auto_run a fire only parks a PENDING run (see 05).
+  auto_run: true
   description: deliver SSH signing key for one process, then scrub
   trigger:
     type: process_spawn

@@ -374,7 +374,8 @@ write_status() {
              "$REPO_ROOT"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
              "$REPO_ROOT"/qdwin/tests/gui/[0-9][0-9]-*.md \
              "$REPO_ROOT"/qdwin/tests/apps/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/qdlocker/tests/gui/[0-9][0-9]-*.md; do
+             "$REPO_ROOT"/qdlocker/tests/gui/[0-9][0-9]-*.md \
+             "$REPO_ROOT"/tests/integration/workflow-gui/[0-9][0-9]-*.md; do
         [ -f "$f" ] || continue
         n=$((n + 1))
         local m; m=$(gui_scenario_visual_mode "$f")

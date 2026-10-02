@@ -188,16 +188,6 @@ hard-coded coordinates across clones.
 
 | File | What it covers |
 |---|---|
-| `01-open-terminal.md` | end-to-end: launcher → filter → activate → type into focused terminal (B2 + auto-focus + ctrl-socket launcher path) |
-| `02-launcher-keyboard.md` | real-keyboard input into launcher overlay — type, arrows, Esc, Enter (B3) |
-| `03-locker-cycle.md` | Ctrl+Alt+L → type password → Enter unlock → keyboard reaches focused toplevel again (B1 + B4 + post-unlock regression) |
-| `04-alt-tab-switch.md` | Alt+Tab single-press swaps focus + raises + survives close-and-refocus (switcher_grab + anchor + request_raise re-stack + on_toplevel_removed refocus) |
-| `05-launcher-rescan.md` | new app installed mid-session appears in launcher on next toggle (B5) |
-| `06-mouse-click-focus.md` | clicking a background window's chrome focuses + raises it (mouse path) |
-| `07-titlebar-buttons.md` | clicking maximize / restore / minimize glyphs on the titlebar actually changes window state (mouse path) + ctrl-socket control comparison; also verifies maximised window leaves room for chrome + panel (not fullscreen) |
-| `08-titlebar-close-button.md` | clicking the red × on the titlebar destroys the toplevel; chrome_button right-click+left-click cycle for the close action |
-| `09-titlebar-context-menu.md` | right-click on titlebar opens qdshell context-menu popup; clicking "Restore"/"Maximise" / "Minimise" / "Close" items dispatches the right action via qdwin_shell_v1@v21 popup_button |
-| `10-context-menu-relabel.md` | the maximise/restore row label flips with `tl.state & 1` on every menu open ("Maximise" ↔ "Restore"), proving the label is recomputed not cached |
 | `12-bar-no-overdraw.md` | bar `content` and `exclusion-top` agree on height; maximized windows do not have their top row clipped by the bar's bottom row (pixel-mismatch fix + `exclusionZoneBleed` toggle round-trip) |
 | `13-focus-events-emitted.md` | every keyboard-focus transition between toplevels emits a `qdwin: focus handle=N (was M) seat=…` line, including the spawn / spawn / close-handoff / last-close-to-no-window sequence |
 | `14-bar-content-quiet-when-idle.md` | journal grows by ≤2 bar-content remap lines over 10 s idle (no remap storm) and re-settles to quiet after a window cycle |
