@@ -94,6 +94,10 @@ for how in crash restart; do
     if [ -n "$t" ] && [ "$t" != "$TA" ]; then pass "manager-$how: the Active silo was relaunched with a fresh token ($t)"
     else fail "manager-$how: relaunch token '${t:-none}' (old $TA)"; fi
     unit_log "$(unit_of $SA)" "$cur" | grep -E 'Stopping|Stopped|torn down|signal' | sed 's/^/    unit: /'
+    # systemd propagates the manager's stop/failure to the launch unit
+    # (StopPropagatedFrom=): a stop job with the verified cleanup, not a kill
+    is "manager-$how: the old launch got a stop job and the verified cleanup (StopPropagatedFrom)" \
+        "$(unit_log "$(unit_of $SA)" "$cur" | grep -c "qdistro-tier3s-cleanup: $TA: torn down")" 1
     sm StopSilo si $SA 10 > /dev/null; is "manager-$how: StopSilo" "$(silo_state $SA)" Stopped
     wait_for 30 bash -c '[ -z "$(ls /run/qdistro-tier3s-ctl/ 2>/dev/null)" ]'
 done
