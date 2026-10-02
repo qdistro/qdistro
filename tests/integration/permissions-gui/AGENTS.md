@@ -726,7 +726,7 @@ without the drain wrapper.
 
 ### Smoke subset (5-minute pre-push sweep)
 
-The full GUI corpus is 49 scenarios. For a pre-push smoke pass, run the
+The full GUI corpus is the `NN-*.md` files in this directory (the D-Bus-only ones moved to headless bats on 2026-10-02; see README.md). For a pre-push smoke pass, run the
 five scenarios below — they cover the broker → compositor → shell
 happy path end-to-end with ~5 min of orchestrator wall-clock per VM.
 

@@ -9,6 +9,8 @@
 #                              is FAIL; a candidate that returns PASS here has
 #                              FALSE-PASSED and is rejected.
 #
+# (2026-10-02: permissions-gui 07 and 24 left this set when they became
+# headless bats in tests/integration/vm/permissions-headless.bats.)
 # The PASS rows are the "admin-9" set validated 2026-06-23/06-28 as genuine
 # (non-rubber-stamping) passes under the driver in use at that date. The FAIL
 # rows are the ground-truth
@@ -19,8 +21,6 @@
 # with one expected value inverted) to also catch a driver that pattern-matches
 # "admin scenario shape => PASS". Keep any such file under ci/integrity/.
 
-qdistro/tests/integration/permissions-gui/07-cli-roundtrip.md	PASS
-qdistro/tests/integration/permissions-gui/24-rule-allow-no-prompt.md	PASS
 qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md	PASS
 qdistro/tests/integration/permissions-gui/06-qt-admin-app-mouse.md	PASS
 qdistro/tests/integration/permissions-gui/10-qt-cache-revoke.md	PASS

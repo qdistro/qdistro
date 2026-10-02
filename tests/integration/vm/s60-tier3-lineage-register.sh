@@ -16,7 +16,7 @@
 #      RegisterLaunch re-verified the live pid and stored the record).
 #
 # Pairs with s35/s36/s37 (tier3 bring-up) and the broker-level agent
-# scenario permissions-gui/59-lineage-cross-silo-source-pid.md.
+# scenario permissions-gui/59 (now pg59 in permissions-headless.bats).
 
 set -u
 
