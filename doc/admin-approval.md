@@ -69,12 +69,21 @@ default `secure_path` on openSUSE does not include `/usr/local/sbin`, so
 `sudo qdistro-approvals` may not find it; use
 `sudo /usr/local/sbin/qdistro-approvals ...` or `sudo -i`.
 
-After `approve`/`deny` the CLI reads the decision back from the audit
-history (`ListHistory`) and matches it to the request (id, uid, pid, action,
-timestamp). If someone else decided the request first it exits 1 and names
-the decision that was actually recorded; if it cannot find the row it exits
-3 with "outcome unconfirmed". It never reports success from the request
-merely leaving the pending list.
+`DecideRequest` returns, atomically with the decision, what that call did:
+`applied`, `already-allow`/`already-deny` (someone decided first; nothing
+changed) or `unknown`. The CLI exits 0 only on `applied`. On `already-*` it
+exits 1 and names the decision that holds; this includes a second root CLI
+that decides the same request identically, so exactly one concurrent
+decider reports success. Anything else exits 3 with "outcome unconfirmed".
+The CLI never infers success from the request leaving the pending list or
+from audit rows (request ids restart with the broker and audit timestamps
+follow the wall clock). Its D-Bus proxy is bound to the broker's unique bus
+name, so a broker restart between `pending`-snapshot and decision fails the
+call rather than deciding a reused id. Exit codes: 0 applied; 1 refused,
+already decided, unknown id, or broker error; 2 usage or a missing
+database; 3 outcome unconfirmed, or (`list`/`audit`) a database path that
+is not a regular file; 4 dbus-python missing; 5 broker unreachable. The Qt
+app and the TUI ignore the return value.
 
 ## Never block admin's work
 

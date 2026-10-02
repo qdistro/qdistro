@@ -18,7 +18,6 @@ import json
 import re
 import sqlite3
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -76,7 +75,7 @@ class _FakeBroker:
         self.pending: dict[int, dict] = {}
         self.calls: list[tuple] = []
         self.ignore_decide = False
-        self.history: list[dict] = []   # newest first, like ListHistory
+        self.decided: dict[int, str] = {}
 
     def add(self, rid, uid=1001, pid=4242, exe="/usr/bin/foo",
             action="qdistro.test.cli", details=None):
@@ -95,17 +94,13 @@ class _FakeBroker:
                 f"scope must be one of ..., got {scope!r}",
                 "org.qdistro.AdminBroker1.BadArgument")
         if self.ignore_decide:
-            return
-        req = self.pending.pop(int(rid), None)
-        if req is not None:
-            self.history.insert(0, {
-                "ts": int(time.time()), "request_id": req["id"],
-                "caller_uid": req["uid"], "caller_pid": req["pid"],
-                "action": req["action"], "decision": decision == "allow",
-                "scope": scope, "source": "prompt", "approver_uid": 0})
-
-    def ListHistory(self, limit):
-        return list(self.history[:limit])
+            return None          # a broker that predates the return value
+        if int(rid) in self.decided:
+            return "already-" + self.decided[int(rid)]
+        if self.pending.pop(int(rid), None) is None:
+            return "unknown"
+        self.decided[int(rid)] = decision
+        return "applied"
 
 
 @pytest.fixture
@@ -206,10 +201,9 @@ def test_unknown_id_is_an_error_and_never_decided(fake, capsys, verb):
     assert fake.calls == []
 
 
-def test_unconfirmed_outcome_is_not_success(fake, capsys):
-    # The request may vanish from pending for reasons other than this
-    # command (a concurrent decider); with no matching audit row the CLI
-    # must say so and fail.
+def test_result_without_applied_is_unconfirmed(fake, capsys):
+    # A broker that answers nothing (or anything but "applied"/"already-*")
+    # must not be read as success.
     fake.add(2)
     fake.ignore_decide = True
     rc, out, err = _run(["approve", "2"], capsys)
@@ -218,30 +212,21 @@ def test_unconfirmed_outcome_is_not_success(fake, capsys):
     assert "approved" not in out
 
 
-def test_unreadable_history_is_not_success(fake, capsys, monkeypatch):
+def test_unknown_result_is_unconfirmed(fake, capsys, monkeypatch):
     fake.add(2)
-
-    def boom(_limit):
-        raise _FakeDBusException("nope", "org.freedesktop.DBus.Error.NoReply")
-    monkeypatch.setattr(fake, "ListHistory", boom)
+    monkeypatch.setattr(fake, "DecideRequest", lambda *_a: "unknown")
     rc, out, err = _run(["deny", "2"], capsys)
-    assert rc == 3
-    assert "outcome is unconfirmed" in err and "NoReply" in err
-    assert "denied" not in out
+    assert rc == 3 and "unconfirmed" in err and "denied" not in out
 
 
-def test_stale_audit_row_from_reused_id_does_not_confirm(fake, capsys):
-    # Broker ids restart at 1: an old row with the same id but another
-    # caller must not count as this command's decision.
-    fake.add(1, uid=1001, pid=4242)
-    fake.ignore_decide = True
-    fake.history.append({"ts": int(time.time()), "request_id": 1,
-                         "caller_uid": 1001, "caller_pid": 99,
-                         "action": "qdistro.test.cli", "decision": True,
-                         "scope": "once", "source": "prompt",
-                         "approver_uid": 0})
-    rc, _out, err = _run(["approve", "1"], capsys)
-    assert rc == 3 and "unconfirmed" in err
+def test_already_decided_result_names_the_holding_decision(fake, capsys,
+                                                           monkeypatch):
+    fake.add(2)
+    monkeypatch.setattr(fake, "DecideRequest", lambda *_a: "already-allow")
+    rc, out, err = _run(["deny", "2"], capsys)
+    assert rc == 1
+    assert "NOT decided by this command" in err and "(allow)" in err
+    assert out == ""
 
 
 def test_broker_error_is_reported_with_its_name(fake, capsys, monkeypatch):
@@ -310,8 +295,6 @@ def real(tmp_path, monkeypatch):
                 hook(rid)
             return broker.DecideRequest(rid, decision, scope)
 
-        def ListHistory(self, limit):
-            return broker.ListHistory(limit)
 
     iface = _Iface()
     monkeypatch.setattr(cli, "_broker", lambda: (iface, dbus))
@@ -425,7 +408,7 @@ def test_concurrent_decision_is_not_reported_as_ours(real, capsys, verb, other):
     rc, out, err = _run([verb, str(rid)], capsys)
     assert rc == 1, (out, err)
     assert "NOT decided by this command" in err
-    assert f"recorded {other}" in err and "by uid 1000" in err
+    assert f"already been decided ({other})" in err
     assert got == [other == "allow"]
     assert out == ""
 
@@ -443,3 +426,99 @@ def test_root_argv_spoof_is_admitted_documented(real, capsys):
     rc, out, err = _run(["approve", str(rid)], capsys)
     assert rc == 0, err
     assert broker._pending[rid].decision is True
+
+
+# --- astra r2 probe: broker restart reuses request ids ----------------------
+
+@pytest.mark.parametrize("kind", ["restart_clock_step", "restart_no_clock_step"])
+def test_restart_reused_id_is_judged_by_this_broker_only(tmp_path, monkeypatch,
+                                                         capsys, kind):
+    """An old broker instance recorded a deny for request id 1 (audit rows
+    persist). After a restart the same requester's new request gets id 1
+    again. The CLI's outcome must come from THIS broker's atomic answer, not
+    from matching audit rows by (id, uid, pid, action, wall-clock time):
+
+    * restart_clock_step: the host clock steps back and a competing approver
+      allows the new request first. The old deny row must not make
+      `deny 1` report success (it did on 99c621fd8: rc 0 "denied").
+    * restart_no_clock_step: the CLI's own deny applies. The old row must
+      not make it report "NOT decided by this command" (rc 1 on 99c621fd8).
+    """
+    pytest.importorskip("dbus")
+    import types
+    import dbus
+    import qdistro_admin_audit as A
+    import qdistro_admin_broker as B
+    from test_broker_check_permission import _StubBroker
+
+    (tmp_path / "rules").mkdir()
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _p: "")
+    monkeypatch.setattr(B, "_read_proc_cmdline",
+                        lambda _p: _installed_cli_argv("deny", "1"))
+    clock = {"now": 1000}
+    monkeypatch.setattr(A, "time", types.SimpleNamespace(time=lambda: clock["now"]))
+    monkeypatch.setattr(cli, "time", types.SimpleNamespace(time=lambda: 1001),
+                        raising=False)
+
+    def new_broker():
+        b = _StubBroker(str(tmp_path / "cache"), str(tmp_path / "audit"),
+                        str(tmp_path / "rules"))
+        b.set_peer(uid=0, pid=4321, exe="/usr/bin/python3.13")
+        return b
+
+    def enqueue(b):
+        return b._enqueue(2000, 4242, "/usr/bin/requester", 0,
+                          "qdistro.test.retry", {}, delegated=True)
+
+    old = new_broker()
+    rid = enqueue(old)
+    old.DecideRequest(rid, "deny", "once")          # audit row at t=1000
+    new = new_broker()
+    rid2 = enqueue(new)
+    assert rid == rid2 == 1
+    replies = []
+    new._pending[rid2].waiters.append((replies.append, print))
+
+    class Iface:
+        def GetPending(self):
+            return new.GetPending()
+
+        def ListHistory(self, n):
+            return new.ListHistory(n)
+
+        def DecideRequest(self, r, d, sc):
+            if kind == "restart_clock_step":
+                clock["now"] = 990
+                new.DecideRequest(r, "allow", "once")   # competing winner
+            else:
+                clock["now"] = 1001
+            return new.DecideRequest(r, d, sc)
+
+    monkeypatch.setattr(cli, "_broker", lambda: (Iface(), dbus))
+    try:
+        rc, out, err = _run(["deny", str(rid2)], capsys)
+    finally:
+        old._io_pool.shutdown()
+        new._io_pool.shutdown()
+    if kind == "restart_clock_step":
+        assert new._pending[rid2].decision is True and replies == [True]
+        assert rc == 1, (out, err)
+        assert "denied" not in out
+        assert "already been decided (allow)" in err
+    else:
+        assert new._pending[rid2].decision is False and replies == [False]
+        assert rc == 0, (out, err)
+        assert "denied request id=1" in out
+
+
+def test_real_broker_decide_returns_atomic_result(real):
+    """DecideRequest's return value is the CLI's only evidence: applied once,
+    already-<decision> afterwards (a second root CLI deciding identically
+    gets this, not success), unknown for an id this broker never issued."""
+    broker, as_peer, enqueue, waiter, _uid, _tmp = real
+    rid = enqueue()
+    as_peer(_installed_cli_argv("approve", str(rid)))
+    assert broker.DecideRequest(rid, "allow", "once") == "applied"
+    assert broker.DecideRequest(rid, "allow", "once") == "already-allow"
+    assert broker.DecideRequest(rid, "deny", "once") == "already-allow"
+    assert broker.DecideRequest(rid + 99, "deny", "once") == "unknown"

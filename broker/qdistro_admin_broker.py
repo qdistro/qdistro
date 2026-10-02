@@ -4300,8 +4300,20 @@ class Broker(dbus.service.Object):
                 })
             return out
 
-    @dbus.service.method(BUS_NAME, in_signature="iss", out_signature="", sender_keyword="sender", connection_keyword="conn")
-    def DecideRequest(self, request_id: int, decision: str, scope: str, sender=None, conn=None):
+    @dbus.service.method(BUS_NAME, in_signature="iss", out_signature="s", sender_keyword="sender", connection_keyword="conn")
+    def DecideRequest(self, request_id: int, decision: str, scope: str, sender=None, conn=None) -> str:
+        """Apply an admin decision to a pending request.
+
+        Returns, atomically with the decision (it is taken under the same
+        lock that sets req.decision), what THIS call did:
+          "applied"       this call's decision and scope were applied
+          "already-allow" / "already-deny"
+                          the request had already been decided by someone
+                          else; this call changed nothing
+          "unknown"       no such request in this broker instance
+        Errors (bad argument, scope refused, caller gone, audit failure)
+        still raise. Callers that predate the return value ignore it.
+        """
         admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
             sender, conn, "DecideRequest")
         decision_s = str(decision)
@@ -4318,8 +4330,10 @@ class Broker(dbus.service.Object):
             )
         with self._lock:
             req = self._pending.get(int(request_id))
-            if req is None or req.decision is not None:
-                return
+            if req is None:
+                return "unknown"
+            if req.decision is not None:
+                return "already-allow" if req.decision else "already-deny"
             # Delegated requests can't produce long-lived grants — the
             # broker never authenticated the claimed peer identity
             # itself, so persisting trust against it would let one
@@ -4446,6 +4460,7 @@ class Broker(dbus.service.Object):
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] reply_cb failed: {e}", flush=True)
         self.RequestDecided(int(request_id), "allow" if allowed else "deny")
+        return "applied"
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}",
                          sender_keyword="sender", connection_keyword="conn")
