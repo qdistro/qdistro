@@ -124,14 +124,46 @@ OVERLAY_JS_TEMPLATE = r"""
 
 RESTYLE_JS_TEMPLATE = r"""
 (function(colors){
+  function applyColors(el, c){
+    if (!el) return;
+    el.style.setProperty('--qdb-bg', c.bg);
+    el.style.setProperty('--qdb-fg', c.fg);
+    el.style.setProperty('--qdb-bg-mid', c.bg_mid);
+    el.style.setProperty('--qdb-border', c.border);
+  }
   var wrap = document.getElementById('__qdb_translate_overlay');
+  applyColors(wrap, colors);
+  applyColors(document.getElementById('__qdb_translate_toast'), colors);
   if (!wrap) return {ok:true, missing:true};
-  wrap.style.setProperty('--qdb-bg', colors.bg);
-  wrap.style.setProperty('--qdb-fg', colors.fg);
-  wrap.style.setProperty('--qdb-bg-mid', colors.bg_mid);
-  wrap.style.setProperty('--qdb-border', colors.border);
   return {ok:true, restyled:true};
 })(__COLORS__)
+"""
+
+
+TOAST_JS_TEMPLATE = r"""
+(function(payload){
+  var text = payload.text;
+  var colors = payload.colors;
+  var id = '__qdb_translate_toast';
+  var t = document.getElementById(id);
+  if (!t) {
+    t = document.createElement('div');
+    t.id = id;
+    t.style.cssText = ''
+      + 'position:fixed;top:12px;right:12px;z-index:2147483647;'
+      + 'background:var(--qdb-bg);color:var(--qdb-fg);'
+      + 'border:1px solid var(--qdb-border);padding:8px 14px;'
+      + 'border-radius:6px;font-family:system-ui,sans-serif;';
+    document.documentElement.appendChild(t);
+  }
+  t.style.setProperty('--qdb-bg', colors.bg);
+  t.style.setProperty('--qdb-fg', colors.fg);
+  t.style.setProperty('--qdb-bg-mid', colors.bg_mid);
+  t.style.setProperty('--qdb-border', colors.border);
+  t.textContent = text;
+  setTimeout(function(){ if (t.parentNode) t.remove(); }, 2200);
+  return {ok:true};
+})(__PAYLOAD__)
 """
 
 
@@ -150,15 +182,24 @@ def _build_overlay_js(original: str, translated: str,
 
 
 def _build_restyle_js(mode: str = "auto") -> str:
-    """Update CSS variables on an existing overlay. Missing overlay is
-    a no-op; this must not recreate the overlay or touch its text."""
+    """Update CSS variables on an existing overlay and toast.
+
+    Missing nodes are a no-op; this must not recreate either widget or
+    touch overlay/toast text.
+    """
     from qdbrowser.theme import overlay_palette
     return RESTYLE_JS_TEMPLATE.replace(
         "__COLORS__", json.dumps(overlay_palette(mode)))
 
 
-def _js_str(s: str) -> str:
-    return json.dumps(s)
+def _build_toast_js(msg: str, mode: str = "auto") -> str:
+    """Build the inline toast JS with validated overlay palette colors."""
+    from qdbrowser.theme import overlay_palette
+    payload = {
+        "text": msg,
+        "colors": overlay_palette(mode),
+    }
+    return TOAST_JS_TEMPLATE.replace("__PAYLOAD__", json.dumps(payload))
 
 
 def call_openai_chat(api_base: str, api_key: str, model: str,
@@ -341,20 +382,7 @@ class TranslatePlugin(CommandProvider):
 
     def _notify(self, webview, msg: str):
         """Inline toast — top-right corner, fades after 2s."""
-        js = (
-            "(function(text){"
-            "var id='__qdb_translate_toast';"
-            "var t=document.getElementById(id);"
-            "if(!t){t=document.createElement('div');t.id=id;"
-            "t.style.cssText='position:fixed;top:12px;right:12px;"
-            "z-index:2147483647;background:#1e1e1e;color:#fff;"
-            "border:1px solid #555;padding:8px 14px;border-radius:6px;"
-            "font:13px system-ui,sans-serif;';"
-            "document.documentElement.appendChild(t);}"
-            "t.textContent=text;"
-            "setTimeout(function(){t.remove();},2200);"
-            f"}})({_js_str(msg)})"
-        )
+        js = _build_toast_js(msg)
         try:
             webview.view.page().runJavaScript(js)
         except Exception:
