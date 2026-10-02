@@ -954,6 +954,18 @@ def test_reap_stale_reaps_an_unrecorded_labelled_container(w):
     assert not (w.launch_parent / TOKEN2).exists()
 
 
+@pytest.mark.parametrize("label", ["", "sshd.service"])
+def test_reap_stale_preserves_a_container_without_a_valid_unit_label(w, label):
+    # sol A-iii r3 P1: no positive 'dead' launch unit, no reap
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    shutil.rmtree(w.ctl / TOKEN2)
+    (w.F / "c/qdistro-tier3s-b/unit_label").write_text(label + "\n" if label else "")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "has no valid qdistro_tier3s_unit label" in r.stderr
+    assert (w.F / "c/qdistro-tier3s-b/running").exists()
+    assert not any(c.startswith(("podman rm", "systemctl stop")) for c in w.calls())
+
+
 def test_reap_stale_keeps_a_labelled_container_of_a_live_unit(w):
     w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
     shutil.rmtree(w.ctl / TOKEN2)

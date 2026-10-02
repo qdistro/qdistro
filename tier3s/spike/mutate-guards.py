@@ -8,7 +8,7 @@ restore the original bytes and re-check their sha256. IDs: P probe, V
 provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A,
 milestone A-i); S session manager, L root launch helper, B broker, I installer,
 U launch unit, A21+ spawn deltas (milestone A-ii); I3-I5, U2, U3 the owner
-answers O10/O11, R1-R5 the reaper/teardown fixes from the s122 VM and qci runs, R6/R7 the sol r1 P1, R8 the sol r2 P1 (milestone A-iii).
+answers O10/O11, R1-R5 the reaper/teardown fixes from the s122 VM and qci runs, R6/R7 the sol r1 P1, R8 the sol r2 P1, R9 the sol r3 P1 (milestone A-iii).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -383,8 +383,8 @@ MUTATIONS = [
      [f"{TSM}::test_unit_file_shape"]),
     # --- A-iii: VM findings in the reaper (s122)
     ("R1 reaper lists labels with index .Labels (podman 6 rejects it)", CLEAN,
-     """--format '{{.Label "qdistro_tier3s_token"}} {{.Label "qdistro_tier3s_unit"}} {{.Names}}'""",
-     """--format '{{index .Labels "qdistro_tier3s_token"}} {{index .Labels "qdistro_tier3s_unit"}} {{.Names}}'""",
+     """--format '{{.Label "qdistro_tier3s_token"}}|{{.Label "qdistro_tier3s_unit"}}|{{.Names}}'""",
+     """--format '{{index .Labels "qdistro_tier3s_token"}}|{{index .Labels "qdistro_tier3s_unit"}}|{{.Names}}'""",
      [f"{TS}::test_reap_stale_reaps_an_unrecorded_labelled_container"]),
     ("R2 reaper never stops a stale scope (orphan per-launch dir left)", CLEAN,
      '; stopping it"\n            systemctl stop "$scope" 2>/dev/null\n', '; stopping it"\n',
@@ -415,6 +415,11 @@ MUTATIONS = [
       f"{TS}::test_reap_stale_unknown_unit_state_preserves_an_unrecorded_container",
       f"{TS}::test_reap_stale_unknown_state_preserves_an_orphan_scope[scope]",
       f"{TS}::test_reap_stale_unknown_state_preserves_an_orphan_scope[bound-unit]"]),
+    ("R9 a container without a valid unit label is reaped (sol r3 P1)", CLEAN,
+     '            if ! [[ "${u:-}" =~ ^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\\.service$ ]]; then\n',
+     '            if false; then\n',
+     [f"{TS}::test_reap_stale_preserves_a_container_without_a_valid_unit_label[]",
+      f"{TS}::test_reap_stale_preserves_a_container_without_a_valid_unit_label[sshd.service]"]),
     ("U3 stop propagation replaced by PartOf (restart would relaunch)", UNITF,
      "StopPropagatedFrom=qdistro-session-manager.service\n", "PartOf=qdistro-session-manager.service\n",
      [f"{TSM}::test_unit_file_shape"]),

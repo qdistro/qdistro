@@ -257,12 +257,19 @@ case "${1:-}" in
         # (podman 6 rejects `index .Labels`; A-iii s122 found the label reap
         # failed on every labelled container)
         listing="$(as_admin "$WANT_ADMIN" podman ps -a --filter label=qdistro_tier3s_token \
-            --format '{{.Label "qdistro_tier3s_token"}} {{.Label "qdistro_tier3s_unit"}} {{.Names}}')" \
+            --format '{{.Label "qdistro_tier3s_token"}}|{{.Label "qdistro_tier3s_unit"}}|{{.Names}}')" \
             || { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }
-        while read -r tok u name; do
+        # '|'-separated so an empty label stays an empty field
+        while IFS='|' read -r tok u name; do
             [[ "${tok:-}" =~ ^[0-9a-f]{32}$ ]] || continue
             [ ! -e "$CTL/$tok" ] || continue          # recorded: handled above
-            if [ -n "$u" ] && [ "$u" != "$except" ]; then
+            # a container without a valid launch-unit label cannot be shown
+            # to be stale: preserve it (sol A-iii r3 P1)
+            if ! [[ "${u:-}" =~ ^qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service$ ]]; then
+                say "$tok: labelled container ${name:-?} has no valid qdistro_tier3s_unit label ('${u:-}'); NOT reaping it"
+                fails=$((fails + 1)); continue
+            fi
+            if [ "$u" != "$except" ]; then
                 case "$(unit_status "$u")" in
                     live) continue ;;
                     unknown) say "$tok: cannot tell whether $u is live; NOT reaping $name"

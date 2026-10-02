@@ -295,7 +295,10 @@ answered anything else). It acts only on dead; unknown preserves the record,
 container, scope and per-launch dir and makes `--reap-stale` exit non-zero
 (sol A-iii r2). A live orphan scope (no record) is stopped only when its
 `BindsTo=` positively names a tier3s launch unit that is dead, checked before
-and again after the bounded wait (sol A-iii r1).
+and again after the bounded wait (sol A-iii r1). An unrecorded labelled
+container is reaped only when its `qdistro_tier3s_unit` label is a valid tier3s
+launch unit that is dead (or is the spawn's own `--except-unit`); a missing or
+invalid label preserves it and is an error (sol A-iii r3).
 
 The spawn runs `qdistro-tier3s-cleanup --reap-stale --except-unit <own unit>`
 before creating its record. A record whose `unit` is not live is stale, and so
