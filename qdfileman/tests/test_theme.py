@@ -158,3 +158,16 @@ def test_presentation_update_keeps_two_pane_paths(qapp, tmp_dir, tmp_path):
         win.deleteLater()
         ctrl.stop()
         reset_controller_for_tests()
+
+
+def test_preferences_dialog_apply_presentation_update_polishes(qapp):
+    from qfileman.preferences import PreferencesDialog
+
+    dlg = PreferencesDialog()
+    try:
+        dlg.show()
+        dlg.apply_presentation_update()
+        assert dlg.isVisible()
+    finally:
+        dlg.close()
+        dlg.deleteLater()

@@ -286,3 +286,14 @@ def test_missing_controller_still_applies_legacy_theme(
         dlg.deleteLater()
     assert isolated_config.get("general", "theme_mode") == "light"
     assert "light" in applied
+
+
+def test_preferences_dialog_apply_presentation_update_polishes(qapp, isolated_config):
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.show()
+        dlg.apply_presentation_update()
+        assert dlg.isVisible()
+    finally:
+        dlg.close()
+        dlg.deleteLater()
