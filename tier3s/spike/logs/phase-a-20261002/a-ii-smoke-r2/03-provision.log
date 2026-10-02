@@ -1,0 +1,37 @@
+### host 2026-10-02T09:51:31Z: vm-exec tier3s-261002-114938-2289239-8644 <<CMD
+bash /root/qdistro-src/tier3s/spike/phase-a-ii-smoke.sh provision
+CMD
+[vm-exec] guest identity pinned (pid 5285 start 9533)
+CHECK tarball-sha512: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK provision-rc: OK (0)
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /usr/lib/qdistro/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:39854163)
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /usr/lib/qdistro/tier3s/tier3s-runsc)
+PASS state_root: /run/qdistro-tier3s-runsc/1000 (uid 1000 0700 under /run/qdistro-tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT PASS: tier 3s prerequisites present
+CHECK probe-rc: OK (0)
+CHECK probe-state-root: OK (1)
+### BAD=0
+### exit=0

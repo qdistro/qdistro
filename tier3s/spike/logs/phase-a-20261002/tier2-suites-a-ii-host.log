@@ -1,0 +1,12 @@
+### tier-2 suites at 04593b87a6673ed90b896c59a69b9871eeda53c5 2026-10-02T09:52:40Z
+### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
+212 passed, 1 warning in 4.25s
+### shellcheck -S warning tier2/*.sh (tier2/ byte-identical to claude/tier3s)
+
+In tier2/spawn-tier2.sh line 800:
+. "$SPAWN_COMMON"
+  ^-------------^ SC1090 (warning): ShellCheck can't follow non-constant source. Use a directive to specify location.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1090 -- ShellCheck can't follow non-const...
+shellcheck rc=1

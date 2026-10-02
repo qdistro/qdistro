@@ -1,0 +1,17 @@
+### host 2026-10-02T09:52:11Z: vm-exec tier3s-261002-114938-2289239-8644 <<CMD
+bash /root/qdistro-src/tier3s/spike/phase-a-ii-smoke.sh final
+CMD
+[vm-exec] guest identity pinned (pid 10870 start 13510)
+CHECK delete-rc: OK (0)
+CHECK silo-deleted: OK (absent)
+CHECK final-records: OK (0)
+CHECK final-scopes: OK (0)
+CHECK final-container: OK (0)
+CHECK final-runsc-procs: OK (0)
+total 0
+drwx------. 2 admin admin 60 Oct  2 09:52 .
+drwxr-xr-x. 3 root  root  60 Oct  2 09:50 ..
+-r--r--r--. 1 admin admin  0 Oct  2 09:52 null-netns
+CHECK final-state-root-no-container-state: OK (0)
+### BAD=0
+### exit=0

@@ -25,3 +25,16 @@ script, no session manager).
 Note on 30: that profile still listed `fchmodat2` as ALLOW (the render
 before the decision changed); 31 is the same profile. The checked-in
 `headless-smoke.json` decides DENY.
+
+## Milestone A-ii (session manager, broker, units, installer), 2026-10-02
+
+Host driver `tier3s/spike/run-phase-a-ii-smoke.sh`, guest script
+`tier3s/spike/phase-a-ii-smoke.sh` (asserting: a step's exit status is its BAD
+count). A smoke, not the A-iii DONE-bar drivers.
+
+| Dir / log | Tree | Result |
+|---|---|---|
+| `a-ii-smoke-r2/` | VM `tier3s-261002-114938-2289239-8644`, spun **fresh** from `04593b87a`, which is also the staged HEAD (`00-host.log`); destroyed after the run | **0 BAD in all 9 steps.** `01`: the spin's bootstrap installer left every CONTRACT §1 artifact (+ the session manager, its bus policy, the broker) byte-identical to HEAD, root-owned with the contract modes, tmpfiles dirs in place, runsc **not** installed, `qdistro-tier3s-silo@smoke.service` loaded from `/etc/systemd/system/` with `ExecMainStartTimestampMonotonic=0` (never started), the running daemon started after its file was written and serves `CreateTier3sSilo ssss`. `02`: the same after re-running the installer from the staged HEAD. `03`: offline provision from the pin-checked tarball, the INSTALLED probe PASS (state_root PASS). `04`: image on the snapshot pin. `05`: no rule → `unknown`; rule → `allow`. `10`: `CreateTier3sSilo` → `StartSilo` → the smoke ran under gVisor, exited 0, `torn down`, `StopSilo` → Stopped; FreezeSilo refused; no record/scope/container/runsc process. `11`: argv `--hold` via silos.yaml + manager restart; live launch: record unit/container/phase=running, token = container label, runtime = the wrapper, scope active with all 20 runsc-bundle processes inside and 0 outside, Sentry exe = pin; FreezeSilo refused and the silo stays Active; `StopSilo` → `SMOKE term`, torn down, unit Result=success, scope inactive, nothing left. `12`: DeleteSilo, nothing left |
+| `a-ii-smoke-r1/` | VM `tier3s-261002-113918-2224374-3622` (fresh spin, staged `2748f778e`; destroyed) | 00–05 0 BAD; 10–12 launch up and torn down, BADs = driver bugs: the workload output is journalled under the owning **scope** (podman/conmon), not the launch unit, and runsc's shared empty `null-netns` file in the state root was counted as container state (fixed `25664540f`, which also silences the cleanup's `/proc/<pid>/stat` redirect noise) |
+| `mutate-guards-a-ii-host.log` | `04593b87a` | 78 mutations (29 Phase 0 + 26 A-i + 23 A-ii) all caught; files restored byte-identical |
+| `tier2-suites-a-ii-host.log` | `04593b87a` | tier-2 unit suites 212 passed; `git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin` empty; `shellcheck -S warning tier2/*.sh` reports one SC1090 in an unchanged file (pre-existing) |

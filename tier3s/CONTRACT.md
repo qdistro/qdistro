@@ -35,9 +35,27 @@ SessionManager1.StartSilo(name)                                                 
     ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
 ```
 
-Podapps (`LaunchPodApp` analogue) use the same spawn with no `TIER3S_SILO`,
-unit `qdistro-tier3s-app@<token>.service`; A-ii may ship silos first and
-must then refuse the podapp path explicitly.
+Podapps (`LaunchPodApp` analogue) would use the same spawn with no
+`TIER3S_SILO`, unit `qdistro-tier3s-app@<token>.service`. **A-ii ships silos
+only**: no app unit is installed, no session-manager API starts one, and
+`spawn-tier3s.sh` refuses a launch without `TIER3S_SILO` at step 3.
+
+The launch stanza (`/run/qdistro/silo-launch/<name>.env`, root 0600) holds
+exactly `TIER3S_SILO`, `TIER3S_BINDING` (the row's `template_silo`),
+`TIER3S_WORKLOAD`, `TIER3S_NETWORK=none`, `TIER3S_LAUNCH_TOKEN` (fresh per
+start) and `TIER3S_ARGV_JSON`. `qdistro-tier3s-silo-launch` **parses** it
+(fixed key set, each once, shell-quoted values decoded by `shlex`), never
+sources it, requires `TIER3S_SILO` = the unit instance and admin = uid 1000,
+and passes no `QDISTRO_PROFILE` (the spawn reads `/etc/qdistro/profile`).
+
+The unit has **no `PartOf=qdistro-session-manager.service`** (unlike tier 2):
+PartOf would turn a manager restart into a unit restart that relaunches with
+the previous start's token. Reconciliation (§4) replaces it.
+
+Journald files the workload's output (podman's attached stdout and conmon's
+log driver) under the owning **scope** unit, where those processes run, not
+under the launch unit: read it with `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.scope`
+(A-ii smoke r1).
 
 Every podman call runs **as admin (uid 1000)**, rootless, `--userns=keep-id`
 (D4 C1). Root does three things only: supervise, create the scope, and tear
@@ -253,10 +271,16 @@ is a record carrying the spawn's own unit but another token (one unit runs
 one launch at a time). Reap failures are logged and do not block the new
 launch; launches are independent.
 
-Restart reconciliation (A-ii):
-- After a session-manager restart, the manager runs `qdistro-tier3s-cleanup
-  --reap-stale` and stops every tier3s launch unit it does not mean to keep;
-  that unit's `ExecStopPost` reaps it.
+Restart reconciliation (A-ii, as implemented):
+- **No tier3s launch survives a session-manager restart.** At startup
+  (`autostart_pass`, before the autostart sweep) the manager stops every
+  live `qdistro-tier3s-{silo,app}@*.service` (ExecStop/ExecStopPost run the
+  verified cleanup), then runs `qdistro-tier3s-cleanup --reap-stale`. The
+  sweep then relaunches silos that were Active or are autostart, each with a
+  fresh token. Skipped on a host without the tier3s install; failures are
+  logged and never block other silos.
+- A manager **stop** (no restart) leaves running launches alone until the next
+  manager start reconciles them.
 - `--reap-stale` also lists labelled containers as admin (`podman ps -a
   --filter label=qdistro_tier3s_token`). A failed listing is an error, never
   "nothing to reap". A container whose `qdistro_tier3s_unit` label names a
@@ -291,7 +315,8 @@ oracle is "no `podman run` and no activation record":
 3. **Root launcher:** `TIER3S_ROOT_LAUNCHER=1`, euid 0, admin uid 1000, and
    `TIER3S_LAUNCH_UNIT` matching `qdistro-tier3s-(silo|app)@….service` and
    equal to the unit of the spawn's own cgroup. There is no direct-admin
-   lane.
+   lane. `TIER3S_SILO` is required in Phase A (pod apps refused, §1);
+   `TIER3S_BINDING` (default `TIER3S_SILO`) must be a silo name.
 4. **Probe:** `/usr/lib/qdistro/tier3s/probe.sh --user admin` must exit 0.
    Anything else refuses with its `RESULT` line (prerequisites, state root,
    pinned runsc, wrapper). There is no fallback tier.
@@ -299,7 +324,7 @@ oracle is "no `podman run` and no activation record":
    - the workload name, and its seccomp file
      `/usr/lib/qdistro/tier3s/seccomp/<workload>.json`, which must exist
      (there is no podman-default fallback);
-   - the image: for a templated silo, `qdistro-resolve-binding <silo>
+   - the image: for a templated silo, `qdistro-resolve-binding <binding>
      --launch-env` **without** `--record` (a digest plus the state path);
      otherwise `localhost/qdistro/tier3s-<workload>:latest`.
 6. **Token:** `TIER3S_LAUNCH_TOKEN` (validated `^[0-9a-f]{32}$`) or a fresh
@@ -384,6 +409,33 @@ would have to cover the whole contract below before it pays off).
 Broker (A-ii): add `"qdistro.tier3s.spawn:"` to the rules-only prefix
 tuple, add a unit test, and document it in `doc/permissions.md`. Tier 3s has
 no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
+
+### As implemented in A-ii
+
+- create **and** start refuse every profile but dev (`/etc/qdistro/profile`,
+  parsed, root-owned and not group/other-writable, else unset) with
+  "tier 3s is dev-profile only in this PoC (profile=…); there is no hardened
+  launch path and no fallback tier", before any state change. The spawn and
+  probe refuse again on their own.
+- `validate_launch` (tier3s): `workload` matches the spawn's
+  `^[a-z0-9][a-z0-9-]{0,40}$`, `template_silo` is a silo name, `network` is
+  exactly `none` (no legacy mapping), argv as tier 2. An empty argv uses the
+  workload's default (`headless-smoke` → `qdistro-tier3s-smoke`), else
+  `[workload]`.
+- A failed start rolls back to Stopped and starts nothing else; an unresolved
+  start (StartNotCancelled) stays Active, like tier 2.
+- `tier3s_silo_running` (stop verification) is true unless the unit is
+  `inactive`/`failed`, admin's `podman container exists` answers 1, and no
+  control record names the unit (an unreadable control dir counts as a
+  record). Scanning records by `unit=` covers a token the manager lost. When a
+  **completed** `systemctl stop` still leaves records (the unit's cleanup
+  failed and the unit is now failed), the manager runs `qdistro-tier3s-cleanup
+  --unit <unit>` once and re-verifies, so a retried StopSilo can succeed;
+  otherwise the silo is forced Active and the error names the unit.
+- `FreezeSilo`/`ResumeSilo` refuse a tier3s silo in any state, audited as
+  `deny`.
+- runsc keeps one shared, empty, read-only `null-netns` file in the state root
+  for `network=none`; it is not per-container state and is never removed.
 
 ## 7. Workload image and seccomp (D-A4, D-A5)
 

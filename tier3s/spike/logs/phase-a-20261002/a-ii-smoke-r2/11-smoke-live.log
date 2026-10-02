@@ -1,0 +1,177 @@
+### host 2026-10-02T09:52:08Z: vm-exec tier3s-261002-114938-2289239-8644 <<CMD
+bash /root/qdistro-src/tier3s/spike/phase-a-ii-smoke.sh smoke-live
+CMD
+[vm-exec] guest identity pinned (pid 9132 start 13176)
+## argv --hold via silos.yaml (manager restart), StartSilo, live launch checks, StopSilo
+# qdistro-session-manager persistence file. Schema:
+#   silos:
+#     - name: <str>          # POSIX-ish silo name (= Linux user name)
+#       uid: <int>           # Linux uid (2000..60000)
+#       state: <Created|Active|Frozen|Stopping|Stopped|Deleting>
+#       autostart: <bool>    # restart on daemon startup if true
+#       created_at: <int>    # epoch seconds
+#       last_change: <int>   # epoch seconds of last state change
+#       kind: <tier3-user|tier2-template|tier3s>
+#       egress: <none|direct|wg:NAME>  # tier3-user netns egress;
+#                              # omit/null = legacy host net (no netns)
+#       launch:              # tier2-template and tier3s only:
+#         workload: <str>    #   spawn-tier2 workload (seccomp/image)
+#         template_silo: <str>  # TIER2_SILO (binding to resolve)
+#         network: <none|pasta>  # TIER2_NETWORK (legacy slirp4netns→pasta); tier3s: none only
+#         argv: [<str>, ...] #   app argv after `--`
+#   quarantined_silos:
+#     - reason: <str>        # rows preserved but not loaded
+#       row_json: <json>     # original row for manual repair
+#
+# This file is regenerated atomically on every state change.
+# Hand-editing while qdistro-session-manager is running will be
+# overwritten; stop the service first.
+silos:
+  - name: smoke
+    uid: 1000
+    state: Stopped
+    autostart: false
+    created_at: 1790934739
+    last_change: 1790934741
+    kind: tier3s
+    launch:
+      workload: headless-smoke
+      template_silo: smoke
+      network: none
+      argv: ["qdistro-tier3s-smoke", "--hold", "600"]
+
+CHECK silo-stopped-after-restart: OK (Stopped)
+CHECK start-rc: OK (0)
+CHECK container-running: OK (running)
+CHECK silo-active: OK (Active)
+token=773d391ae099259edba27f08eb895370
+admin_uid=1000
+conmon_pid=9624
+conmon_starttime=13312
+container=qdistro-tier3s-smoke
+container_id=823ba79480207b0a11d68ed026d8831d2fe813647da84e1cfab6a3b7d47534a0
+per_launch_dir=/run/qdistro-tier3s/773d391ae099259edba27f08eb895370
+phase=running
+runsc_root=/run/qdistro-tier3s-runsc/1000
+schema=1
+scope_cgroup=/system.slice/qdistro-tier3s-773d391ae099259edba27f08eb895370.scope
+scope_unit=qdistro-tier3s-773d391ae099259edba27f08eb895370.scope
+sentry_pid=9639
+sentry_starttime=13313
+token=773d391ae099259edba27f08eb895370
+unit=qdistro-tier3s-silo@smoke.service
+CHECK record-unit: OK (qdistro-tier3s-silo@smoke.service)
+CHECK record-container: OK (qdistro-tier3s-smoke)
+CHECK record-phase: OK (running)
+CHECK record-token-is-the-stanza-token: OK (773d391ae099259edba27f08eb895370)
+CHECK runtime: OK (/usr/libexec/qdistro/tier3s-runsc)
+CHECK scope-active: OK (active)
+CHECK runsc-procs-outside-scope: OK (0)
+CHECK runsc-procs-in-scope: OK (20)
+CHECK sentry-exe-pin: OK (sidecar_gvisor_sentry_sha512)
+Call failed: freeze/resume is unsupported for tier3s silos
+CHECK freeze-refused: OK (1)
+CHECK still-active-after-freeze: OK (Active)
+CHECK stop-rc: OK (0)
+CHECK silo-stopped: OK (Stopped)
+CONTAINER=qdistro-tier3s-smoke
+IMAGE=localhost/qdistro/tier3s-headless-smoke:latest
+SCOPE_UNIT=qdistro-tier3s-773d391ae099259edba27f08eb895370.scope
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+spawn-tier3s: running: qdistro-tier3s-smoke sentry=9639 conmon=9624 in /system.slice/qdistro-tier3s-773d391ae099259edba27f08eb895370.scope
+Stopping qdistro tier-3s (gVisor) silo smoke (Experimental, dev profile only)...
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+pam_unix(runuser:session): session closed for user admin
+qdistro-tier3s-cleanup: 773d391ae099259edba27f08eb895370: torn down (qdistro-tier3s-smoke)
+Terminated                 exit $?
+spawn-tier3s: signal: tearing down 773d391ae099259edba27f08eb895370
+qdistro-tier3s-silo@smoke.service: Deactivated successfully.
+Stopped qdistro tier-3s (gVisor) silo smoke (Experimental, dev profile only).
+qdistro-tier3s-silo@smoke.service: Consumed 1.018s CPU time over 2.419s wall clock time.
+Running as unit: qdistro-tier3s-773d391ae099259edba27f08eb895370.scope; invocation ID: 54e5a4873de84f5aa7f21b98443a38dd
+qdistro-tier3s-scope: /system.slice/qdistro-tier3s-773d391ae099259edba27f08eb895370.scope delegated to uid 1000 (dir, cgroup.procs, cgroup.subtree_control, cgroup.threads)
+pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+2026-10-02 09:52:23.943938795 +0000 UTC m=+0.030744884 container create 823ba79480207b0a11d68ed026d8831d2fe813647da84e1cfab6a3b7d47534a0 (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-smoke, qdistro_tier3s_unit=qdistro-tier3s-silo@smoke.service, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., io.buildah.version=1.44.1, qdistro_tier3s_token=773d391ae099259edba27f08eb895370, org.qdistro.tier3s.workload=headless-smoke, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opencontainers.image.version=20260929.37.205, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.created=2026-09-29T17:59:23.577212528Z, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.created=2026-09-29T17:59:23.577212528Z, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.qdistro.snapshot=20260929, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.version=20260929.37.205, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914)
+2026-10-02 09:52:23.993933376 +0000 UTC m=+0.080739475 container init 823ba79480207b0a11d68ed026d8831d2fe813647da84e1cfab6a3b7d47534a0 (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-smoke, org.qdistro.tier3s.workload=headless-smoke, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.version=20260929.37.205, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, qdistro_tier3s_unit=qdistro-tier3s-silo@smoke.service, org.opensuse.base.version=20260929.37.205, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.created=2026-09-29T17:59:23.577212528Z, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.created=2026-09-29T17:59:23.577212528Z, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.snapshot=20260929, qdistro_tier3s_token=773d391ae099259edba27f08eb895370, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., io.buildah.version=1.44.1)
+2026-10-02 09:52:24.012572052 +0000 UTC m=+0.099378141 container start 823ba79480207b0a11d68ed026d8831d2fe813647da84e1cfab6a3b7d47534a0 (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-smoke, org.opencontainers.image.version=20260929.37.205, org.qdistro.snapshot=20260929, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.created=2026-09-29T17:59:23.577212528Z, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, io.buildah.version=1.44.1, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.version=20260929.37.205, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., qdistro_tier3s_unit=qdistro-tier3s-silo@smoke.service, org.qdistro.tier3s.workload=headless-smoke, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.created=2026-09-29T17:59:23.577212528Z, qdistro_tier3s_token=773d391ae099259edba27f08eb895370, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker)
+2026-10-02 09:52:24.022190701 +0000 UTC m=+0.108996800 container attach 823ba79480207b0a11d68ed026d8831d2fe813647da84e1cfab6a3b7d47534a0 (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-smoke, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.qdistro.tier3s.workload=headless-smoke, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opencontainers.image.vendor=openSUSE Project, org.qdistro.snapshot=20260929, io.buildah.version=1.44.1, org.opencontainers.image.created=2026-09-29T17:59:23.577212528Z, org.opensuse.base.created=2026-09-29T17:59:23.577212528Z, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, qdistro_tier3s_unit=qdistro-tier3s-silo@smoke.service, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.version=20260929.37.205, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., qdistro_tier3s_token=773d391ae099259edba27f08eb895370, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.base.version=20260929.37.205)
+2026-10-02 09:52:23.928235066 +0000 UTC m=+0.015041165 image pull 695808a56a9ca1e0542b80a26dc074145a342f731346c0d9a0606db691da2839 localhost/qdistro/tier3s-headless-smoke:latest
+SMOKE snapshot=20260929
+
+SMOKE snapshot=20260929
+SMOKE kernel=Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+
+SMOKE kernel=Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+SMOKE dmesg=[    0.000000] Starting gVisor...
+
+SMOKE dmesg=[    0.000000] Starting gVisor...
+SMOKE id=uid=1000(admin) gid=1000(admin) groups=1000(admin)
+
+SMOKE id=uid=1000(admin) gid=1000(admin) groups=1000(admin)
+SMOKE passwd=admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash
+
+SMOKE passwd=admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash
+SMOKE home=/home/admin
+
+SMOKE home=/home/admin
+SMOKE lang=C.UTF-8 charmap=UTF-8 utf8_locales=2
+
+SMOKE lang=C.UTF-8 charmap=UTF-8 utf8_locales=2
+SMOKE mount /run/user/1000=1000:1000 700
+
+SMOKE mount /run/user/1000=1000:1000 700
+SMOKE mount /home/admin/.cache=1000:1000 700
+
+SMOKE mount /home/admin/.cache=1000:1000 700
+SMOKE mount /tmp=0:0 1777
+
+SMOKE mount /tmp=0:0 1777
+SMOKE chmod rc=0 mode=600
+
+SMOKE chmod rc=0 mode=600
+SMOKE chmod_nofollow rc=1 mode=600
+
+SMOKE chmod_nofollow rc=1 mode=600
+SMOKE ls_l rc=0 stderr_bytes=0
+
+SMOKE ls_l rc=0 stderr_bytes=0
+SMOKE routes=2 links=lo,
+
+SMOKE routes=2 links=lo,
+SMOKE done
+
+SMOKE done
+SMOKE holding 600s
+
+SMOKE holding 600s
+SMOKE term
+
+SMOKE term
+2026-10-02 09:52:24.971146206 +0000 UTC m=+1.057952285 container died 823ba79480207b0a11d68ed026d8831d2fe813647da84e1cfab6a3b7d47534a0 (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-smoke, io.buildah.version=1.44.1, org.opensuse.base.version=20260929.37.205, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.vendor=openSUSE Project, qdistro_tier3s_unit=qdistro-tier3s-silo@smoke.service, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.created=2026-09-29T17:59:23.577212528Z, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.qdistro.tier3s.workload=headless-smoke, org.opencontainers.image.created=2026-09-29T17:59:23.577212528Z, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.version=20260929.37.205, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.qdistro.snapshot=20260929, qdistro_tier3s_token=773d391ae099259edba27f08eb895370, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260929.37.205, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime)
+pam_unix(runuser:session): session closed for user admin
+CHECK smoke-term: OK (yes)
+CHECK torn-down: OK (1)
+CHECK unit-result: OK (success)
+CHECK scope-gone: OK (inactive)
+CHECK after-stop-records: OK (0)
+CHECK after-stop-scopes: OK (0)
+CHECK after-stop-container: OK (0)
+CHECK after-stop-runsc-procs: OK (0)
+total 0
+drwx------. 2 admin admin 60 Oct  2 09:52 .
+drwxr-xr-x. 3 root  root  60 Oct  2 09:50 ..
+-r--r--r--. 1 admin admin  0 Oct  2 09:52 null-netns
+CHECK after-stop-state-root-no-container-state: OK (0)
+### BAD=0
+### exit=0
