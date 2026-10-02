@@ -35,6 +35,16 @@ PROG=$(basename "$0")
 # image's record against it.
 CHECKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOTSTRAP_SH="$CHECKER_DIR/../scripts/install/qdistro-bootstrap.sh"
+# The names of host build output / caches that must not ship in the source
+# tree (shared with extract-root.sh's prune).
+# Fail closed: without the lists the no-debris rows would pass vacuously.
+# shellcheck source=/dev/null  # image/lib/src-debris.sh
+if ! . "$CHECKER_DIR/lib/src-debris.sh" 2>/dev/null \
+        || [ "${#QDISTRO_SRC_DEBRIS_NAMES[@]}" -eq 0 ] \
+        || [ "${#QDISTRO_SRC_DEBRIS_FILES[@]}" -eq 0 ]; then
+    printf 'FATAL: %s did not load (or its debris lists are empty)\n' "$CHECKER_DIR/lib/src-debris.sh" >&2
+    exit 2
+fi
 
 usage() {
     cat <<EOF
@@ -292,6 +302,44 @@ check_absent() {
     fi
 }
 
+# check_src_debris_absent <label> <rel-dir> — no entry named in
+# QDISTRO_SRC_DEBRIS_NAMES anywhere under the directory (symlinks are not
+# followed). A directory absent from the image has nothing in it; its
+# presence is a separate check_req row.
+check_src_debris_absent() {
+    local label=$1 full="$ROOT/${2#/}" host n expr=() hits frc ferr out errf
+    REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+    for n in "${QDISTRO_SRC_DEBRIS_NAMES[@]}"; do
+        expr+=(${expr[0]:+-o} -name "$n")
+    done
+    host="$(resolve_in_image "$full")" || host=""
+    if [ -z "$host" ] || [ ! -d "$host" ]; then
+        printf 'OK   %s: none under %s\n' "$label" "$full"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+        return
+    fi
+    # find's status is the verdict's precondition: an unreadable directory
+    # is a subtree nobody looked at, not an absence. Output goes to files
+    # (no pipe, so no SIGPIPE and no lost exit status).
+    out="$(mktemp)"; errf="$(mktemp)"
+    # -prune: name the debris entry, not everything inside it.
+    find "$host" \( "${expr[@]}" \) -prune -print > "$out" 2> "$errf"; frc=$?
+    hits="$(awk 'NR <= 20' "$out")"
+    ferr="$(awk 'NR <= 3' "$errf")"
+    rm -f "$out" "$errf"
+    if [ "$frc" -ne 0 ]; then
+        printf 'FAIL %s: %s (INDETERMINATE: find failed rc=%s: %s; not a verdict on absence)\n' \
+            "$label" "$full" "$frc" "${ferr//$'\n'/ | }"
+        FAIL=1
+    elif [ -z "$hits" ]; then
+        printf 'OK   %s: none under %s\n' "$label" "$full"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+    else
+        printf 'FAIL %s: found under %s: %s\n' "$label" "$full" "${hits//$'\n'/ }"
+        FAIL=1
+    fi
+}
+
 # check_link <label> <rel> — a systemd wants-link (or any symlink) that must
 # exist AND whose target must exist inside the image. systemd writes these
 # ABSOLUTE (`-> /etc/systemd/user/foo.service`), so read from the host they
@@ -344,6 +392,9 @@ check_opt     "qdistro-release marker"    /etc/qdistro-release
 # an empty or truncated file is exactly what a broken manifest step would
 # leave, and a bug report needs these lines.
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+# The writer's SOURCE grammar (shared with image/lib/release-stamp.sh).
+# shellcheck source=lib/release-stamp.sh
+. "$CHECKER_DIR/lib/release-stamp.sh"
 release_file="$(file_in_image "$ROOT/etc/qdistro/release" 2>/dev/null || true)"
 release_problem=""
 # field <KEY> -- the value of exactly one KEY= line, or nothing (so a
@@ -368,8 +419,9 @@ else
     # fields disagree is corrupt, not merely oddly named (round-1 review).
     [ -n "$rel_version" ] && [ -n "$rel_snapshot" ] && [ "$rel_artifact" = "qdistro-$rel_version-$rel_snapshot.raw.xz" ] \
         || release_problem="$release_problem ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"
-    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
-    [ "$(grep -cE "^SOURCE qdistro [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$release_file")" -eq 1 ] \
+    qdistro_file_has_nul "$release_file" && release_problem="$release_problem contains a NUL byte;"
+    [ "$(LC_ALL=C grep -ac '^SOURCE ' "$release_file")" -eq 1 ] || release_problem="$release_problem not exactly one SOURCE line;"
+    [ "$(LC_ALL=C grep -acE "$(qdistro_source_line_ere qdistro)" "$release_file")" -eq 1 ] \
         || release_problem="$release_problem no single well-formed SOURCE qdistro line;"
 fi
 if [ -z "$release_problem" ]; then
@@ -409,6 +461,16 @@ check_req "qdistro source root"  /root/qdistro-src
 check_req "qdistro src"          /root/qdistro-src/daemons
 check_req "qdwin src"            /root/qdistro-src/qdwin
 check_req "qdshell src"         /root/qdistro-src/qdshell
+# ...and it is SOURCE: no host build output or tool caches. build.sh ships
+# git's view of the tree; before that, the sync leaked qdwin/build-qci,
+# qdshell/build-qci (host-built binaries) and the caches (fu review). The
+# names are shared with extract-root.sh's prune (lib/src-debris.sh).
+check_absent "qdistro-src: no host qdwin build dir"   /root/qdistro-src/qdwin/build-qci
+check_absent "qdistro-src: no host qdshell build dir" /root/qdistro-src/qdshell/build-qci
+for _f in "${QDISTRO_SRC_DEBRIS_FILES[@]}"; do
+    check_absent "qdistro-src: no $_f" "/root/qdistro-src/$_f"
+done
+check_src_debris_absent "qdistro-src: no build output or caches at any depth" /root/qdistro-src
 
 echo
 echo "-- qdwin / qdshell / qdistro install roots --"
@@ -583,6 +645,15 @@ check_req "[broker] daemon module"     /usr/libexec/qdistro/qdistro_admin_broker
 check_link "[broker] enabled"          /etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service
 check_link "[broker] dbus-reload enabled" /etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service
 check_link "[broker] dbus-reload wanted by broker" /etc/systemd/system/qdistro-admin-broker.service.wants/qdistro-dbus-reload.service
+check_req "[admin-app] UI script" /usr/local/bin/qdistro-admin-approval-app
+check_req "[admin-app] launcher" /usr/local/bin/qdistro-start-admin-app
+check_req "[admin-app] desktop entry" /usr/share/applications/qdistro-admin-app.desktop
+check_line "[admin-app] desktop entry launches installed UI" \
+    /usr/share/applications/qdistro-admin-app.desktop '^Exec=/usr/local/bin/qdistro-start-admin-app$'
+check_line "[admin-app] launcher uses native Wayland" \
+    /usr/local/bin/qdistro-start-admin-app '^export QT_QPA_PLATFORM=wayland$'
+check_line "[admin-app] launcher runs installed script" \
+    /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "\$@"$'
 check_req "[user-relay] bus policy"    /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
 check_req "[session-manager] unit"     /etc/systemd/system/qdistro-session-manager.service
 check_req "[session-manager] bus policy" /etc/dbus-1/system.d/org.qdistro.SessionManager1.conf

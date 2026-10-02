@@ -86,7 +86,9 @@ if ! command -v identify >/dev/null 2>&1; then
     echo "INFRA: ImageMagick identify is required to verify the 1280x800 GUI CI output"
     exit 1
 fi
-CASE_OUTPUT_GEOMETRY=$(identify -format '%wx%h' "$CASE_ARTIFACT_DIR/screenshots/output-precondition.png" 2>/dev/null || true)
+# Raw screen geometry: the harness pads every frame it issues with a unique
+# black margin, so read the size its `.raw` sidecar records, not the PNG's.
+CASE_OUTPUT_GEOMETRY=$(qci_view_raw_dims "$CASE_ARTIFACT_DIR/screenshots/output-precondition.png" 2>/dev/null | tr ' ' x || true)
 if [ "$CASE_OUTPUT_GEOMETRY" != 1280x800 ]; then
     echo "INFRA: scenario 10 requires GUI CI output 1280x800; observed ${CASE_OUTPUT_GEOMETRY:-unreadable}"
     exit 1

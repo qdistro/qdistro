@@ -31,10 +31,11 @@ The build steps assume these tools are on `PATH`:
 - **meson** + **ninja** + **pkg-config** — build the qdwin compositor and the C
   daemons.
 - **Python 3** + **pytest** — headless unit tests.
-- **npm** — WebExtension tests/builds. In a fresh clone, run
-  `(cd qdchrome-extension && npm ci)` and `(cd qdfirefox-extension && npm ci)`
-  once before `qci host`; the gate runs their tests but does not install their
-  dependencies (without them it fails with `vitest: command not found`).
+- **npm** — WebExtension tests/builds. `qci host` runs
+  `npm ci --prefer-offline` in each extension when `node_modules/.bin/vitest`
+  is absent (a cold npm cache needs network). It reuses an existing
+  `node_modules`; after a `package-lock.json` change refresh it with
+  `(cd qdchrome-extension && npm ci)` and `(cd qdfirefox-extension && npm ci)`.
 - **Optional:** FreeRDP 3 (`freerdp3`, `freerdp-shadow3`, `winpr3`) and
   PipeWire (`libpipewire-0.3`) development packages. Without them meson skips
   `qdistro-forward` (and, without PipeWire, `qdistro-nested-pixelfeed`) and
@@ -97,6 +98,18 @@ scripts/vm/build-baked-baseweed.sh
 scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
 ```
 
+The qci VM base defaults to the cloud-derived, dependency-baked image. It has
+runtime and test packages but no native compiler toolchain. Rootless Podman
+builds qdwin, qdshell, the daemons, qsu and SELinux policy modules against the
+pinned snapshot on the host; a checked payload is installed while provisioning
+each run's golden VM.
+Install rootless Podman on the host before running VM integration gates.
+Its cloud SHA256 and Tumbleweed repository snapshot are pinned together in
+[`snapshot.conf`](../snapshot.conf), the one snapshot pin the image, tier-2 and
+Podman builds share; see
+[`ci/README.md`](../ci/README.md#cloud-test-substrate) for rotation, the RPM
+download cache, and the explicit `QDISTRO_VM_BASE=kiwi` alternative.
+
 Prerequisites for the libvirt session (set up once):
 
 ```sh
@@ -123,10 +136,14 @@ mechanical markdown scenarios. Run it non-interactively and let qci place each
 attempt in its own temporary working directory:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
+
+Do not add `--ephemeral`: the gate reads each attempt's codex rollout to see
+which frames the driver actually opened, and records a pixel-dependent verdict
+whose driver opened none as ERROR (see `ci/README.md`).
 
 The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
 named in `QCI_AGENT_CMD`, and otherwise records `unknown` — there is NO default,
@@ -143,7 +160,7 @@ blocked run, not a substitute model. A runner that cannot open an image must
 record `ERROR` rather than a verdict. To retry a single scenario on a fresh VM:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
 QCI_GUI_RETRY=1 \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
@@ -158,7 +175,7 @@ build a clean app-deps golden and use eight disposable VM workers:
 
 ```sh
 QCI_GUI_JOBS=8 QDWIN_APP_DEPS=1 \
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
@@ -566,8 +583,8 @@ covers in-codebase intelligence, while MCP is for external systems
 - Man pages under `doc/`. At minimum: `<app>.1` (usage) and
  `<app>-config.5` (config file reference).
 - `README.md` covers features, installation, runtime deps, quickstart.
-- User-facing docs live in the app repo. Admin/devops docs stay in the
- umbrella qdistro repo.
+- User-facing docs live in the app's component directory. Admin/devops docs
+ stay in the root `doc/`.
 
 ## Why these specifics
 

@@ -1,6 +1,6 @@
 # qci test taxonomy
 
-This is the canonical, cross-repo vocabulary for *what kind of evidence a
+This is the canonical, cross-component vocabulary for *what kind of evidence a
 test row carries*. The qdistro umbrella runs suites of very different
 confidence under one `host`/`gui`/`bats` gate — a qdwin "meson unit test"
 that only pattern-matches source text is **not** the same strength of
@@ -78,17 +78,17 @@ needs labelling at the source, is:
 | --- | --- | --- | --- | --- |
 | qdistro `tests/unit` | pytest | `unit` | `unit` (+ `slow`/`needs_ssh` on the relay tests) | DONE — markers registered + applied. |
 | qdistro `tests/integration/vm` | bats | `integration`/`vm` | `vm` / `real_backend` | OK by gate. |
-| **qdwin meson "unit tests"** | meson | `unit` (by host gate) | **`source_invariant`** — these are source-text pattern matches, the code is not executed | **ACTION (separate repo):** retag these meson tests with `suite : 'source_invariant'` in qdwin's `meson.build`. qdwin source is NOT in this worktree, so this cannot be edited from here — it must be done in the qdwin repo. Until then the host report over-states their strength. |
-| qterminator pytest | pytest | `unit` | `fake_backend` — runs product code against a Python fake terminal | ACTION (separate repo): mark these `@pytest.mark.fake_backend` in qterminator. |
+| **qdwin meson "unit tests"** | meson | `unit` (by host gate) | **`source_invariant`** — these are source-text pattern matches, the code is not executed | DONE — `qdwin/meson.build` tags its source-text tests `suite: 'source_invariant'` (the compiled `logic`/`protocol` suites keep their own labels). |
+| qterminator pytest | pytest | `unit` | `fake_backend` — runs product code against a Python fake terminal | ACTION (in-tree `qdterm/`): mark these `@pytest.mark.fake_backend` in qterminator. |
 | qdshell UI vision pytest | pytest/vision | `gui` | `gui` | OK. |
-| WebExtension npm tests | npm/vitest | `unit` | mixed `unit`/`integration` | ACTION (separate repos): tag integration specs `[integration]` in the test name. |
+| WebExtension npm tests | npm/vitest | `unit` | mixed `unit`/`integration` | ACTION (in-tree extension components): tag integration specs `[integration]` in the test name. |
 
-### qdwin relabel (item 3) — required action, do NOT edit from here
+### qdwin relabel (item 3) — done
 
-qdwin's static-source meson tests must be relabelled `source_invariant`
-(honesty fix, no behavioural refactor). Because qdwin lives in a **separate
-repo** that is not part of this worktree, the relabel is recorded here as an
-action item rather than applied:
+qdwin's static-source meson tests had to be relabelled `source_invariant`
+(honesty fix, no behavioural refactor). qdwin was a separate repository when
+this was written, so the relabel was recorded here as an action item; it has
+since been applied in `qdwin/meson.build`. The original instruction:
 
 > In `qdwin/.../meson.build`, change the `suite :` argument of every meson
 > test that only greps/parses source text (no compiled binary is run) from

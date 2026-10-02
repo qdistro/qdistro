@@ -78,9 +78,10 @@ or the compositor's lock state.
 that banner is part of the LOCK UI, not the qdshell bar). OPEN THIS FILE
 itself before grading it; do not infer it from the Step 1 or Step 4 frame.
 While locked the shell draws nothing visible, so the Step 2 frame normally
-looks the same as Step 1 and is often BYTE-IDENTICAL to it (same clock
-minute) — identical is the expected PASS shape, not a sign of a stale
-capture (a stale capture is flagged by the helper's `WARN: stale-capture`).
+looks the same as Step 1 and often has IDENTICAL RAW PIXELS (same clock
+minute; the files differ only in their view-unique margin) — identical is the
+expected PASS shape, not a sign of a stale capture (a stale capture is flagged
+by the helper's `WARN: stale-capture`).
 In two 2026-09-23 verification runs the runner opened only one image and
 graded this frame "black with only the panel" while the file showed the
 full lock UI. The LOCK

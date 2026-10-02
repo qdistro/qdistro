@@ -11,9 +11,13 @@ an LLM assistant to modify. In qdistro sessions it is intended to be a
 low-friction target for captured text, links, and research artifacts from other
 silos.
 
-Inbound qdistro App1 delivery should be treated as a data-integrity boundary:
-large or non-text payloads need staging/confirmation before they are appended to
-the active document.
+Inbound qdistro App1 text is admitted to a shared bounded inbox, then confirmed
+one item at a time on the Qt thread. Only plain text and Markdown up to 256 KiB
+of UTF-8 bytes are admitted. Versioned transfers report staged before consent,
+applied after actual editor insertion, declined after No, or failed if the
+confirmation/insertion cannot complete. Applied does not mean saved: existing
+manual saving and autosave remain separate. A full inbox rejects new transfers
+before acknowledging staging; terminal dispositions discard queued payloads.
 
 ## Quick start
 

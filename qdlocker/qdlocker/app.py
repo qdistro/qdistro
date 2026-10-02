@@ -35,6 +35,7 @@ from .ctrl import CtrlSocket
 from .idle import IdleWatcher
 from .indicators import LockIndicators
 from .logind import LogindWatcher
+from .presentation import LockerPresentation
 from .pwd_lifecycle import PwdLifecycleNotifier
 from .wayland import LockerClient, LockerEvents
 
@@ -351,6 +352,7 @@ class WaylandBridge(QObject):
         self._client: LockerClient | None = None
         self._idle_watcher = idle_watcher
         self._pwd_lifecycle = pwd_lifecycle
+        self._presentation: LockerPresentation | None = None
         self._initially_locked = False
         self._locked = False
         # `_locked` mirrors *intent*: it is set True on the request path
@@ -372,6 +374,19 @@ class WaylandBridge(QObject):
         self._lockedChangedSignal.connect(self._on_locked_changed, Qt.ConnectionType.QueuedConnection)
         self._lockRequestedSignal.connect(self._on_lock_requested, Qt.ConnectionType.QueuedConnection)
         self._overlayKeySignal.connect(self._on_overlay_key, Qt.ConnectionType.QueuedConnection)
+
+    def set_presentation(self, presentation: LockerPresentation | None) -> None:
+        self._presentation = presentation
+
+    def _freeze_presentation(self) -> None:
+        """One-shot trusted snapshot at lock entry. Never blocks locking."""
+        pres = self._presentation
+        if pres is None:
+            return
+        try:
+            pres.freeze_for_lock()
+        except Exception:
+            log.debug("presentation freeze failed", exc_info=True)
 
     @pyqtProperty(bool, notify=lockedChanged)
     def locked(self) -> bool:
@@ -421,6 +436,8 @@ class WaylandBridge(QObject):
         # suspend arriving before any fresh locked_changed(1) confirms
         # immediately instead of waiting out the inhibitor timeout.
         self._compositor_locked = initially_locked
+        if initially_locked and not self._locked:
+            self._freeze_presentation()
         if self._initially_locked != initially_locked:
             self._initially_locked = initially_locked
             self.initiallyLockedChanged.emit(initially_locked)
@@ -428,6 +445,17 @@ class WaylandBridge(QObject):
             self._locked = initially_locked
             self.lockedChanged.emit(initially_locked)
         self.lockedChangedForCtrl.emit(initially_locked)
+        if initially_locked:
+            # Binding into an already-locked compositor (a locker restarted
+            # after a crash, qdlocker/tests/gui/08) starts a lock session just
+            # like lock_requested does: without this the fresh locker never
+            # armed fprintd or started the PAM fallback, so the recovered lock
+            # screen showed no "Password" prompt and a fingerprint could not
+            # unlock it.
+            try:
+                self._controller.notify_lock_begin()
+            except Exception:
+                log.exception("controller.notify_lock_begin raised")
         if initially_locked and self._pwd_lifecycle is not None:
             try:
                 self._pwd_lifecycle.notify_screen_lock("manual")
@@ -440,6 +468,9 @@ class WaylandBridge(QObject):
         # This is the compositor's authoritative lock state — track it
         # separately from the intent mirror `_locked`.
         self._compositor_locked = locked
+        entering = locked and not self._locked
+        if entering:
+            self._freeze_presentation()
         if self._locked != locked:
             self._locked = locked
             self.lockedChanged.emit(locked)
@@ -495,6 +526,7 @@ class WaylandBridge(QObject):
         # (compositor + client-side idle racing) gets caught by the
         # `if self._locked` guard above. The compositor will follow
         # up with a locked_changed=true event that confirms it.
+        self._freeze_presentation()
         self._locked = True
         self.lockedChanged.emit(True)
         self.lockedChangedForCtrl.emit(True)
@@ -557,6 +589,14 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QGuiApplication(argv)
 
+    presentation = None
+    try:
+        presentation = LockerPresentation()
+        presentation.reload_trusted()
+    except Exception:
+        log.debug("presentation adapter unavailable", exc_info=True)
+        presentation = None
+
     config = load_config()
 
     qmlRegisterUncreatableType(
@@ -573,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     controller = LockController(auth)
     bridge = WaylandBridge(controller, pwd_lifecycle=PwdLifecycleNotifier())
+    if presentation is not None:
+        bridge.set_presentation(presentation)
 
     events = LockerEvents(
         on_ready=bridge._thread_on_ready,
@@ -605,6 +647,8 @@ def main(argv: list[str] | None = None) -> int:
     engine.rootContext().setContextProperty("controller", controller)
     engine.rootContext().setContextProperty("bridge", bridge)
     engine.rootContext().setContextProperty("indicators", indicators)
+    if presentation is not None:
+        engine.rootContext().setContextProperty("presentation", presentation)
     engine.load(QUrl.fromLocalFile(str(QML_ROOT / "Main.qml")))
 
     if not engine.rootObjects():

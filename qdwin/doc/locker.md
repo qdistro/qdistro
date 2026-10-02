@@ -87,13 +87,23 @@ only the LOCK layer can render.
      the keystroke to `qdwin_locker_v1_send_overlay_key(locker_resource, sym, utf8)`
      instead of the shell's overlay_key event. **Important**: this
      is the security boundary that means the typed password never
-     reaches the shell process.
+     reaches the shell process. Two related rules in
+     `qdwin_overlay_grab_key`: (a) it never logs key content — the
+     journal line is `qdwin: overlay_key role=<r> seq=<n> to=<locker|shell>`
+     (it used to log keysym + utf8, i.e. the password in plaintext;
+     pinned by `qdwin/qdwin/test_lock_fail_secure.py`
+     `check_overlay_key_log_redacted`); (b) while role=2 is active, a
+     fresh Ctrl+Alt+L (same exact-modifier match as the weston binding,
+     `qdwin_lock_hotkey_matches`) and its release are consumed, so a
+     repeated lock chord on a locked screen does not type Ctrl+L
+     (`\x0c`) into the password field. A plain Ctrl+L still reaches the
+     locker.
 
 6. **Shell-side deprecation** of `attach_lock_surface` /
    `set_locked` / `lock_requested` on `qdwin_shell_v1`: not yet.
    Keep them functional during qdlocker rollout. Once
-   `qdshell/Modules/LockScreen/*` is deleted (sibling-repo
-   migration), bump `qdwin_shell_v1` and remove the shell-side
+   `qdshell/Modules/LockScreen/*` is deleted (in the
+   `qdshell/` component), bump `qdwin_shell_v1` and remove the shell-side
    handlers in the same commit.
 
 ## Lifecycle invariants

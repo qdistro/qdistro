@@ -15,6 +15,7 @@ from .md_to_qdoc import (
     BLOCK_TRANSCLUSION,
     CHAR_CODE,
     CHAR_IMAGE_ALT,
+    CHAR_STRONG,
     CHAR_WIKILINK,
 )
 
@@ -88,7 +89,7 @@ def qdoc_to_markdown(doc: QTextDocument) -> str:
         if kind == "h":
             level = int(fmt.property(BLOCK_LEVEL) or 1)
             _ensure_blank(out, last_kind)
-            out.append("#" * max(1, min(6, level)) + " " + _emit_inline(block))
+            out.append("#" * max(1, min(6, level)) + " " + _emit_inline(block, heading_default=True))
             last_kind = "h"
             i += 1
             continue
@@ -185,7 +186,11 @@ def _ensure_blank(out: list[str], last_kind: str | None) -> None:
     out.append("")
 
 
-def _emit_inline(block: QTextBlock, in_table_header: bool = False) -> str:
+def _emit_inline(
+    block: QTextBlock,
+    in_table_header: bool = False,
+    heading_default: bool = False,
+) -> str:
     parts: list[str] = []
     it = block.begin()
     while not it.atEnd():
@@ -193,12 +198,24 @@ def _emit_inline(block: QTextBlock, in_table_header: bool = False) -> str:
         if frag.isValid():
             text = frag.text()
             if text:
-                parts.append(_emit_fragment(text, frag.charFormat(), in_table_header))
+                parts.append(
+                    _emit_fragment(
+                        text,
+                        frag.charFormat(),
+                        in_table_header,
+                        heading_default=heading_default,
+                    )
+                )
         it += 1
     return "".join(parts)
 
 
-def _emit_fragment(text: str, fmt, in_table_header: bool = False) -> str:
+def _emit_fragment(
+    text: str,
+    fmt,
+    in_table_header: bool = False,
+    heading_default: bool = False,
+) -> str:
     # Equation fragment: round-trips back to `$..$` / `$$..$$`.
     from .equations import serialize_equation_fragment
     eq = serialize_equation_fragment(fmt)
@@ -217,27 +234,20 @@ def _emit_fragment(text: str, fmt, in_table_header: bool = False) -> str:
         if text == target:
             return f"[[{target}]]"
         return f"[[{target}|{text}]]"
-    # Inline code: wrap in backticks, no other formatting
-    if fmt.property(CHAR_CODE) or (fmt.fontFamilies() and "monospace" in [s.lower() for s in fmt.fontFamilies()] and not fmt.isAnchor()):
+    # Inline code: CHAR_CODE only. Rendered family is presentation, not syntax.
+    if fmt.property(CHAR_CODE):
         # Escape backticks by using a longer fence
         if "`" in text:
             return f"`` {text} ``"
         return f"`{text}`"
-    bold = fmt.fontWeight() >= QFont.Weight.Bold
+    explicit_strong = bool(fmt.property(CHAR_STRONG))
+    if heading_default or in_table_header:
+        bold = explicit_strong
+    else:
+        bold = explicit_strong or fmt.fontWeight() >= QFont.Weight.Bold
     italic = fmt.fontItalic()
     strike = fmt.fontStrikeOut()
     is_link = fmt.isAnchor() and fmt.anchorHref() and not fmt.anchorHref().startswith("qnotebook:")
-
-    # Don't treat heading char bold as markdown bold: heading's block kind already marks it.
-    # We pass a flag via... just check: the block format BLOCK_KIND handles headings.
-    # So if bold comes from heading font, we should strip it. We can't tell here easily.
-    # Heuristic: if fontPointSize > 11, assume heading — skip bold/italic wrappers.
-    font_size = fmt.fontPointSize()
-    if font_size and font_size > 11.5:
-        bold = False  # heading
-        italic = False
-    if in_table_header:
-        bold = False  # table header bolding is a rendering choice, not content
 
     s = text
     if is_link:

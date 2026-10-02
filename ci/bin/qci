@@ -53,5 +53,6 @@ QCI_LIB="$QCI_DIR/lib"
 for _qci_gate in "$QCI_LIB"/gates/*.sh; do . "$_qci_gate"; done
 unset _qci_gate
 . "$QCI_LIB/dispatch.sh"      # gate_full, triage helpers, main()
+. "$VM_TOOLS/run-lock.sh"     # one host-wide flock for VM runs and kiwi build
 
 main "$@"

@@ -19,6 +19,10 @@
 # Run: bats tests/integration/vm/bootstrap-installer-resume.bats
 
 setup() {
+    # The profile under test is chosen per case. An ambient QDISTRO_PROFILE
+    # (qci takes it as the image gate's expected profile, and the tester
+    # image is dev) must not stand in for the default.
+    unset QDISTRO_PROFILE
     REPO_ROOT="$(git -C "$(dirname "$BATS_TEST_FILENAME")" \
                     rev-parse --show-toplevel 2>/dev/null)"
     BOOT="$REPO_ROOT/scripts/install/qdistro-bootstrap.sh"
@@ -39,8 +43,10 @@ setup() {
     # It records the script's basename (so the trace is by-script) plus the
     # src-dir argument it was handed.
     local installers=(
+        install-presentation-for-vm.sh
         install-sdk-for-vm.sh
         install-broker-for-qdwin.sh
+        install-admin-app-for-vm.sh
         install-session-manager.sh
         install-user-relay-for-vm.sh
         install-polkit-agent-for-vm.sh
@@ -98,8 +104,10 @@ _trace_scripts() { awk '{print $1}' "$TRACE"; }
     # Exact ordered set of scripts that ran.
     run _trace_scripts
     [ "$status" -eq 0 ]
-    expected="install-sdk-for-vm.sh
+    expected="install-presentation-for-vm.sh
+install-sdk-for-vm.sh
 install-broker-for-qdwin.sh
+install-admin-app-for-vm.sh
 install-session-manager.sh
 install-user-relay-for-vm.sh
 install-polkit-agent-for-vm.sh
@@ -118,8 +126,10 @@ install-tier5b-for-vm.sh"
     # State file records every step NAME (not script basename), in order.
     run cat "$STATE_DIR/installer-chain.state"
     [ "$status" -eq 0 ]
-    state_expected="sdk
+    state_expected="presentation
+sdk
 broker
+admin-app
 session-manager
 user-relay
 polkit
@@ -150,6 +160,8 @@ tier5b"
     _run_chain ''
     [ "$status" -eq 0 ]
     grep -qx "install-broker-for-qdwin.sh $FAKE_QD/broker" "$TRACE"
+    grep -qx "install-admin-app-for-vm.sh $FAKE_QD/admin_app" "$TRACE"
+    grep -qx "install-presentation-for-vm.sh $FAKE_QD/sdk/presentation/qdistro_presentation" "$TRACE"
     grep -qx "install-sdk-for-vm.sh $FAKE_QD/sdk/qdistro_app" "$TRACE"
     grep -qx "install-session-manager.sh $FAKE_QD/session_manager" "$TRACE"
     grep -qx "install-user-relay-for-vm.sh $FAKE_QD/user_relay" "$TRACE"
@@ -160,14 +172,16 @@ tier5b"
 
 # --- --resume: skips the recorded-complete prefix, runs only the remainder --
 
-@test "resume: with broker..qsu recorded, runs ONLY sdk plus browser-bridge..tier5b" {
+@test "resume: with broker and session-manager..qsu recorded, runs sdk, admin-app, and browser-bridge..tier5b" {
     mkdir -p "$STATE_DIR"
     printf 'broker\nsession-manager\nuser-relay\npolkit\npwd\nqsu\n' \
         > "$STATE_DIR/installer-chain.state"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run _trace_scripts
-    expected="install-sdk-for-vm.sh
+    expected="install-presentation-for-vm.sh
+install-sdk-for-vm.sh
+install-admin-app-for-vm.sh
 install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
 install-print-proxy-for-vm.sh
@@ -192,8 +206,10 @@ install-tier5b-for-vm.sh"
     ! grep -q "install-qsu-for-vm.sh" "$TRACE"
     # ... but every other release-profile step ran, in order.
     run _trace_scripts
-    expected="install-sdk-for-vm.sh
+    expected="install-presentation-for-vm.sh
+install-sdk-for-vm.sh
 install-broker-for-qdwin.sh
+install-admin-app-for-vm.sh
 install-session-manager.sh
 install-user-relay-for-vm.sh
 install-polkit-agent-for-vm.sh
@@ -214,7 +230,8 @@ install-tier5b-for-vm.sh"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run bash -c 'wc -l < "'"$TRACE"'"'
-    [ "$(echo "$output" | tr -d ' ')" = "15" ]
+    [ "$(echo "$output" | tr -d ' ')" = "17" ]
+    grep -q "install-presentation-for-vm.sh" "$TRACE"
     grep -q "install-sdk-for-vm.sh" "$TRACE"
     grep -q "install-broker-for-qdwin.sh" "$TRACE"
     grep -q "install-tier5b-for-vm.sh" "$TRACE"
@@ -259,10 +276,10 @@ install-tier5b-for-vm.sh"
 }
 
 @test "rerun-step: first step in the chain works too" {
-    _run_chain 'RERUN_STEP=sdk'
+    _run_chain 'RERUN_STEP=presentation'
     [ "$status" -eq 0 ]
     run _trace_scripts
-    [ "$output" = "install-sdk-for-vm.sh" ]
+    [ "$output" = "install-presentation-for-vm.sh" ]
 }
 
 @test "rerun-step: unknown step name is rejected (fail-closed) and runs nothing" {
@@ -349,8 +366,8 @@ EOF
 @test "completeness: a clean hardened run reports the chain complete (phone is not a gap)" {
     _run_chain ''
     [ "$status" -eq 0 ]
-    # 16 steps, phone skipped as dev-only, so 15 expected and 15 recorded.
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    # 18 steps, phone skipped as dev-only, so 17 expected and 17 recorded.
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
     ! grep -qx phone "$STATE_DIR/installer-chain.state"
     ! grep -q "install-phone-for-vm.sh" "$TRACE"
 }
@@ -432,7 +449,7 @@ EOF
 # A full run never removes what it does not install, so a record left behind
 # by an earlier install (a dev-only step on a machine now installed as
 # release, or a step this bootstrap no longer knows) must be a gap too, or a
-# release run would exit 0 "15 of 15" with phone still on disk.
+# release run would exit 0 "17 of 17" with phone still on disk.
 
 _seed_state() {
     mkdir -p "$STATE_DIR"
@@ -451,10 +468,10 @@ _seed_state() {
     [[ "$output" != *"installer chain complete"* ]]
     # every release step ran and was recorded; phone was not run and its
     # line is KEPT (it is the only evidence the artifacts are on disk).
-    [ "$(_trace_scripts | wc -l)" -eq 15 ]
+    [ "$(_trace_scripts | wc -l)" -eq 17 ]
     ! grep -q "install-phone-for-vm.sh" "$TRACE"
     grep -qx phone "$STATE_DIR/installer-chain.state"
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 16 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 18 ]
     # ...so the natural retry (no cleanup) dies again -- it must not forget
     # (opus round 2 B5: a truncate-first design passed on the second run).
     : > "$TRACE"
@@ -465,7 +482,7 @@ _seed_state() {
     sed -i '/^phone$/d' "$STATE_DIR/installer-chain.state"
     _run_chain 'QDISTRO_PROFILE=release; log() { echo "LOG: $*"; }'
     [ "$status" -eq 0 ]
-    [[ "$output" == *"installer chain complete: 15 of 15"* ]]
+    [[ "$output" == *"installer chain complete: 17 of 17"* ]]
 }
 
 # --- completeness judges THIS run: a full run resets a stale record -----------
@@ -475,14 +492,14 @@ _seed_state() {
     # chain with pwd now broken: the old 'pwd' line must not count.
     _run_chain ''
     [ "$status" -eq 0 ]
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
     : > "$TRACE"
     _break_step install-pwd-for-vm.sh
     _run_chain ''
     [ "$status" -ne 0 ]
     [[ "$output" == *"INCOMPLETE in 'daily-driver' profile: not recorded as installed: pwd."* ]]
     ! grep -qx pwd "$STATE_DIR/installer-chain.state"
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 14 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 16 ]
     # ...and --resume now re-runs exactly pwd
     cat > "$FAKE_QD/scripts/install/install-pwd-for-vm.sh" <<EOF
 #!/bin/bash
@@ -503,12 +520,12 @@ EOF
     [[ "$output" == *"no longer has (retired)"* ]]
     [[ "$output" != *"dev-only step"* ]]
     grep -qx retired-thing "$STATE_DIR/installer-chain.state"
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 19 ]
     # second run: still reported (WARN in dev), no accumulation
     _run_chain 'QDISTRO_PROFILE=dev'
     [ "$status" -eq 0 ]
     [[ "$output" == *"retired-thing(unknown)"* ]]
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 19 ]
 }
 
 @test "completeness: a scoped run's message does not claim a reset happened (N13)" {
@@ -524,7 +541,7 @@ EOF
     _run_chain 'QDISTRO_PROFILE=dev; STRICT=1; QDISTRO_STATE_DIR="'"$BATS_TEST_TMPDIR"'/ro/state"; CHAIN_STATE_FILE="$QDISTRO_STATE_DIR/installer-chain.state"'
     chmod 0755 "$BATS_TEST_TMPDIR/ro"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"ran OK but the record could not be written: sdk broker"* ]]
+    [[ "$output" == *"ran OK but the record could not be written: presentation sdk"* ]]
     [[ "$output" == *"fix $BATS_TEST_TMPDIR/ro/state"* ]]
 }
 
@@ -572,7 +589,7 @@ EOF
     _seed_state $names
     _run_chain 'QDISTRO_PROFILE=release; RESUME=1; log() { echo "LOG: $*"; }'
     [ "$status" -eq 0 ]
-    [[ "$output" == *"installer chain complete: 15 of 15 expected steps recorded, nothing unexpected"* ]]
+    [[ "$output" == *"installer chain complete: 17 of 17 expected steps recorded, nothing unexpected"* ]]
     [ "$(tail -1 "$STATE_DIR/installer-chain.state")" = pwd ]
     [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
 }
@@ -582,7 +599,7 @@ EOF
     _run_chain 'QDISTRO_PROFILE=dev; STRICT=1'
     [ "$status" -ne 0 ]
     [[ "$output" == *"exists but is not a regular file"* ]]
-    [[ "$output" == *"ran OK but the record could not be written: sdk broker"* ]]
+    [[ "$output" == *"ran OK but the record could not be written: presentation sdk"* ]]
     # nothing was moved INTO the directory
     [ -z "$(ls -A "$STATE_DIR/installer-chain.state")" ]
 }
@@ -630,7 +647,7 @@ EOF
 @test "completeness: strict full abort on a complete machine unrecords the failed step; --resume re-runs it (codex r3 N1)" {
     _run_chain ''
     [ "$status" -eq 0 ]
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
     grep -qx pwd "$STATE_DIR/installer-chain.state"
     : > "$TRACE"
     _break_step install-pwd-for-vm.sh

@@ -37,6 +37,7 @@ import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
 import qdistro_silo_security as _silo_security  # type: ignore[import-not-found]
 import qdistro_upload_lineage as _upload_lineage  # type: ignore[import-not-found]
 import qdistro_upload_lineage_entry as _upload_entry  # type: ignore[import-not-found]
+import transfer_protocol as transfer_wire
 from gi.repository import Gio, GLib
 from qdistro_admin_audit import AuditLog  # type: ignore[import-not-found]
 from qdistro_admin_cache import ApprovalCache  # type: ignore[import-not-found]
@@ -3560,6 +3561,12 @@ class Broker(dbus.service.Object):
                          sender_keyword="sender", connection_keyword="conn")
     def RelayMessage(self, target_uid, target_service, kind, payload,
                      _reply, _error, sender=None, conn=None):
+        return self._relay_message_common(target_uid, target_service, kind, payload,
+                                          _reply, _error, sender, conn)
+
+    def _relay_message_common(self, target_uid, target_service, kind, payload,
+                              _reply, _error, sender=None, conn=None, forward=None):
+        forward = forward or self._relay_forward
         """Cross-user app message. Admin approves each cross-silo send
         individually (one-shot; only scope='once' is permitted). On
         allow, broker opens the target uid's session bus and asks
@@ -3620,7 +3627,7 @@ class Broker(dbus.service.Object):
         # than rejecting).
         if same_silo:
             try:
-                self._relay_forward(target_uid_i, target_service_s,
+                forward(target_uid_i, target_service_s,
                                     kind_s, payload_s)
             except dbus.DBusException as e:
                 _error(e)
@@ -3679,7 +3686,7 @@ class Broker(dbus.service.Object):
                     name=BUS_NAME + ".Denied"))
                 return
             try:
-                self._relay_forward(target_uid_i, target_service_s,
+                forward(target_uid_i, target_service_s,
                                     kind_s, payload_s)
             except dbus.DBusException as e:
                 _error(e)
@@ -3709,6 +3716,155 @@ class Broker(dbus.service.Object):
                 dispatch = None
         if dispatch is not None:
             dispatch()
+
+    def _transfer_actor(self, sender, conn):
+        actor = tuple(self._peer_info(sender, conn))
+        if len(actor) != 4 or actor[0] < 0 or actor[1] <= 0 or not actor[2] or actor[3] <= 0:
+            raise dbus.DBusException("transfer caller identity unavailable", name=BUS_NAME + ".AccessDenied")
+        return actor
+
+    def _transfer_ledger(self):
+        if not hasattr(self, "_transfer_receipts"):
+            self._transfer_receipts = transfer_wire.ReceiptLedger()
+        return self._transfer_receipts
+
+    def _transfer_target(self, uid, service):
+        if int(uid) < 0 or not _SERVICE_NAME_RE.fullmatch(str(service)):
+            raise ValueError("invalid transfer target")
+        bus = dbus.SystemBus()
+        relay_name = USER_RELAY_SYSTEM_NAME_FMT.format(uid=int(uid))
+        owner = str(bus.get_name_owner(relay_name))
+        if not owner.startswith(":"):
+            raise ValueError("relay unique owner unavailable")
+        relay = bus.get_object(owner, USER_RELAY_OBJ_PATH, introspect=False)
+        envelope = transfer_wire.load_object(str(relay.GetTransferCapabilities(
+            str(service), dbus_interface=USER_RELAY_IFACE, timeout=3.0)))
+        receiver_owner = transfer_wire.identity(envelope.get("owner"))
+        if not receiver_owner.startswith(":") or str(bus.get_name_owner(relay_name)) != owner:
+            raise ValueError("transfer owner changed")
+        caps = transfer_wire.capabilities(json.dumps(envelope.get("capabilities")))
+        return bus, owner, receiver_owner, caps
+
+    def _pinned_transfer_relay(self, route):
+        bus, uid, service, relay_owner, receiver_owner = route
+        if str(bus.get_name_owner(USER_RELAY_SYSTEM_NAME_FMT.format(uid=uid))) != relay_owner:
+            raise ValueError("relay owner changed")
+        return bus.get_object(relay_owner, USER_RELAY_OBJ_PATH, introspect=False)
+
+    @dbus.service.method(BUS_NAME, in_signature="is", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetTransferCapabilities(self, target_uid, target_service, sender=None, conn=None):
+        self._transfer_actor(sender, conn)
+        try:
+            _bus, _owner, _receiver_owner, caps = self._transfer_target(target_uid, target_service)
+            return json.dumps(caps)
+        except Exception:
+            return json.dumps({"version": 0, "state": "unknown", "reason": "receiver capabilities unavailable"})
+
+    @dbus.service.method(BUS_NAME, in_signature="issss", out_signature="s",
+                         async_callbacks=("_reply", "_error"),
+                         sender_keyword="sender", connection_keyword="conn")
+    def RelayTransfer(self, target_uid, target_service, expected_instance, kind, payload,
+                      _reply, _error, sender=None, conn=None):
+        try:
+            actor = self._transfer_actor(sender, conn)
+            instance = transfer_wire.identity(str(expected_instance))
+            # Enforce the global wire budget before any receiver RPC.
+            value = str(payload)
+            if "\x00" in value or len(value.encode("utf-8", errors="strict")) > transfer_wire.MAX_BYTES:
+                raise ValueError("payload exceeds transfer contract")
+            if int(target_uid) < 0 or not _SERVICE_NAME_RE.fullmatch(str(target_service)):
+                raise ValueError("invalid transfer target")
+        except dbus.DBusException as exc:
+            _error(exc)
+            return
+        except Exception:
+            _reply(json.dumps(transfer_wire.receipt(str(expected_instance)[:128], state="rejected",
+                                                   reason="invalid transfer input")))
+            return
+        try:
+            bus, relay_owner, receiver_owner, caps = self._transfer_target(target_uid, target_service)
+            if caps["instance_id"] != instance:
+                raise ValueError("receiver instance changed")
+        except Exception:
+            _reply(json.dumps(transfer_wire.receipt(instance, reason="receiver capabilities unknown")))
+            return
+        try:
+            transfer_wire.payload(str(kind), value, caps)
+        except ValueError:
+            _reply(json.dumps(transfer_wire.receipt(instance, state="rejected",
+                                                   reason="receiver does not accept transfer")))
+            return
+        uid, service = int(target_uid), str(target_service)
+        ledger = self._transfer_ledger()
+        try:
+            token, row = ledger.reserve(actor, (bus, uid, service, relay_owner, receiver_owner), instance)
+        except ValueError:
+            _reply(json.dumps(transfer_wire.receipt(instance, state="rejected", reason="receipt capacity exhausted")))
+            return
+
+        def forward(_uid, _service, _kind, _payload):
+            try:
+                if self._transfer_actor(sender, conn) != actor:
+                    raise PermissionError("transfer actor changed during approval")
+                if ledger.get(token, actor) is not row:
+                    raise ValueError("transfer admission expired")
+                if actor[0] != uid:
+                    state = self._silo_state(uid)
+                    if state == "Unreachable" or (state is not None and state != "Active"):
+                        raise ValueError("target no longer active")
+                relay = self._pinned_transfer_relay(row["route"])
+                raw = relay.ForwardTransfer(service, receiver_owner, instance, str(kind), value,
+                                            dbus_interface=USER_RELAY_IFACE, timeout=3.0)
+                result = transfer_wire.validate_receipt(str(raw), instance)
+                row["receiver_id"] = result["transfer_id"]
+                result["transfer_id"] = token
+                row["receipt"] = result
+            except Exception:
+                # A lost acknowledgement might follow staging. Never repeat the
+                # send or promote this uncertainty to successful application.
+                row["receipt"] = transfer_wire.receipt(instance, token, reason="dispatch outcome unknown")
+
+        def reply():
+            _reply(json.dumps(row["receipt"]))
+
+        def error(exc):
+            row["receipt"] = transfer_wire.receipt(instance, token, "rejected", "approval or active gate denied")
+            _reply(json.dumps(row["receipt"]))
+
+        self._relay_message_common(uid, service, str(kind), value, reply, error,
+                                   sender, conn, forward=forward)
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetTransferStatus(self, transfer_id, sender=None, conn=None):
+        actor = self._transfer_actor(sender, conn)
+        token = str(transfer_id)
+        try:
+            row = self._transfer_ledger().get(token, actor)
+        except PermissionError as exc:
+            raise dbus.DBusException("transfer receipt belongs to another actor",
+                                     name=BUS_NAME + ".AccessDenied") from exc
+        if row is None:
+            return json.dumps(transfer_wire.receipt(token=token[:128], reason="receipt expired or unknown"))
+        if row["receipt"]["state"] in transfer_wire.TERMINAL or not row["receiver_id"]:
+            return json.dumps(row["receipt"])
+        try:
+            relay = self._pinned_transfer_relay(row["route"])
+            _bus, uid, service, _owner, receiver_owner = row["route"]
+            if actor[0] != uid:
+                state = self._silo_state(uid)
+                if state == "Unreachable" or (state is not None and state != "Active"):
+                    raise ValueError("target no longer active")
+            raw = relay.GetTransferStatus(service, receiver_owner, row["receipt"]["instance_id"],
+                                           row["receiver_id"], dbus_interface=USER_RELAY_IFACE, timeout=3.0)
+            result = transfer_wire.validate_receipt(str(raw), row["receipt"]["instance_id"], row["receiver_id"])
+            result["transfer_id"] = token
+            row["receipt"] = result
+        except Exception:
+            row["receipt"] = transfer_wire.receipt(row["receipt"]["instance_id"], token,
+                                                    reason="status outcome unknown")
+        return json.dumps(row["receipt"])
 
     def _silo_state(self, target_uid: int) -> str | None:
         """Ask the session manager for the silo state of `target_uid`.
@@ -4895,54 +5051,46 @@ class Broker(dbus.service.Object):
                 "completed_at":  dbus.Double(
                     float(r.get("completed_at") or 0.0)),
                 "error":         dbus.String(str(r.get("error") or "")),
+                "definition_digest": dbus.String(str(r.get("definition_digest") or "")),
+                "cleanup_state": dbus.String(str(r.get("cleanup_state") or "unknown")),
+                "cleanup_pending": dbus.UInt32(int(r.get("cleanup_pending") or 0)),
+                "cleanup_error": dbus.String(str(r.get("cleanup_error") or "")),
             })
         return out
 
-    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
-    def ApproveWorkflowRun(self, run_id: str, sender=None,
-                           conn=None) -> bool:
-        """Approve a PENDING workflow run so it executes (F3).
+    def PreviewWorkflowRun(self, run_id: str, sender=None, conn=None) -> str:
+        """Admin-only captured plan preview; never fetches vault values."""
+        self._require_admin_control_peer(sender, conn, "PreviewWorkflowRun")
+        engine = getattr(self, "workflow_engine", None)
+        return json.dumps(engine.preview_run(str(run_id)) if engine else {})
 
-        Human-in-the-loop gate: a workflow that did not opt into
-        ``auto_run`` parks each fire as a PENDING run; an admin approves it
-        here. Admin/root only at the bus level AND server-side. Returns
-        True if a pending run was found and scheduled (conditions are still
-        re-evaluated at execution, so approval never bypasses the identity
-        gate). False if no such pending run exists.
-        """
-        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+    @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="b",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ApproveWorkflowRun(self, run_id: str, expected_digest: str,
+                            sender=None, conn=None) -> bool:
+        """Approve the exact preview digest, auditing identity before release."""
+        uid, pid, exe, start = self._require_admin_control_peer(
             sender, conn, "ApproveWorkflowRun")
         engine = getattr(self, "workflow_engine", None)
         if engine is None:
             return False
-        # Audit BEFORE the release, and fail closed if it raises (iso2 `14`
-        # E2). The old order called approve_run() first and swallowed a
-        # failing audit.log with a bare `except: pass`, so a human approval
-        # could schedule a run with no forensic row at all. Same shape the
-        # prompt path already gets right at DecideRequest: never grant past
-        # a failed audit. The row is written for the attempt, so an approve
-        # that finds no pending run leaves a decision=True row for an
-        # approval that released nothing — cheaper than the alternative.
+        digest = str(expected_digest)
+        preview = engine.preview_run(str(run_id))
+        if not digest or preview.get("definition_digest") != digest:
+            return False
         try:
             self.audit.log(
-                caller_uid=admin_uid, caller_pid=_pid,
-                caller_exe=_exe or "qdistro-admin",
-                action=f"qdistro.workflow.approve:{run_id}",
-                decision=True, scope=None,
-                source=f"run_id={run_id}", approver_uid=admin_uid,
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[broker] qdistro.audit.failure: ApproveWorkflowRun "
-                  f"run_id={run_id!r}, reason={e!r}; approval refused",
-                  flush=True)
+                caller_uid=uid, caller_pid=pid, caller_exe=exe or "qdistro-admin",
+                action=f"qdistro.workflow.approve:{run_id}", decision=True,
+                scope=None, source=f"run_id={run_id} definition_digest={digest}",
+                approver_uid=uid)
+            return bool(engine.approve_run(str(run_id), digest,
+                        {"uid": uid, "pid": pid, "exe": exe, "start_time": start}))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: ApproveWorkflowRun refused: {exc!r}", flush=True)
             return False
-        try:
-            approved = bool(engine.approve_run(str(run_id)))
-        except Exception as e:  # noqa: BLE001
-            print(f"[broker] ApproveWorkflowRun failed: {e!r}", flush=True)
-            return False
-        return approved
 
     @dbus.service.method(BUS_NAME, in_signature="sasi", out_signature="a{ss}",
                          sender_keyword="sender", connection_keyword="conn")
@@ -5426,7 +5574,7 @@ class Broker(dbus.service.Object):
         """Emitted when a non-auto-run workflow fires and parks a run for
         admin approval (F3). The admin Workflows tab refreshes its run
         list so the new PENDING entry appears; an admin then calls
-        ApproveWorkflowRun(run_id). Carries only identifiers, never any
+        ApproveWorkflowRun(run_id, expected_digest). Carries only identifiers, never any
         secret or trigger payload."""
         pass
 

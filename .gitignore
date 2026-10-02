@@ -8,6 +8,11 @@ __pycache__/
 .eggs/
 *.egg
 .pytest_cache/
+# Tool caches. mypy/ruff/hypothesis also drop a self-ignoring .gitignore
+# inside, but image/build.sh ships git's view of the tree, so say it here.
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 .coverage
 .coverage-report.json
 htmlcov/

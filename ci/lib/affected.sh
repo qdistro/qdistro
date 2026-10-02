@@ -71,6 +71,10 @@ affected_gates_for_path() {
     fi
     # 2. conservative path-prefix rules.
     case "$p" in
+        # VM provisioning and golden lifecycle are shared by every VM lane.
+        # Match before ci/*, whose default is host-only.
+        ci/lib/vm.sh)
+            printf 'selftest\nlint\nhost\nvm-smoke\nbats\ngui\n' ;;
         # CI runner / registry / lint inputs themselves. A change to the runner
         # or its self-test must re-run the host-only runner self-test.
         ci/*|tests/registry.tsv)
@@ -110,12 +114,18 @@ affected_gates_for_path() {
         # Pure host unit tests.
         tests/unit/*)
             printf 'host\n' ;;
-        # VM lifecycle tooling -> exercise a VM boot at least.
+        # VM build, bootstrap, execution and capture tooling is shared by the
+        # smoke, Bats and GUI goldens. Host runner selftests cover its failure
+        # handling; lint covers shell/Containerfile-adjacent changes.
         scripts/vm/*)
-            printf 'vm-smoke\n' ;;
-        # Source under a component dir that the host gate builds/tests.
-        src/*|broker/*|selinux/*|qsu/*|workflow/*)
-            printf 'host\n' ;;
+            printf 'selftest\nlint\nvm-smoke\nbats\ngui\n' ;;
+        # Broker authorization and SELinux policy also run in the guest;
+        # host tests alone cannot exercise their runtime boundaries.
+        broker/*|selinux/*)
+            printf 'host\nvm-smoke\nbats\ngui\n' ;;
+        # These root components also have Bats/permissions-GUI coverage.
+        src/*|qsu/*|workflow/*)
+            printf 'host\nbats\ngui\n' ;;
         # --- In-tree components (monorepo). Before the migration a component
         # path never reached this map (it lived in another repo) and an agent
         # passing one got UNKNOWN -> FULL. Scope each component to the gates
@@ -133,12 +143,12 @@ affected_gates_for_path() {
         # then the VM lanes. (image is left to image/* changes and full runs.)
         qdwin/*)
             printf 'host\nvm-smoke\nbats\ngui\n' ;;
-        # qdshell: host build/qmltest/jstest, plus the shell UI scenarios.
+        # qdshell: host, shell Bats, and GUI scenarios all exercise it.
         qdshell/*)
-            printf 'host\ngui\n' ;;
-        # qdlocker: host pytest, plus its locker GUI scenarios.
+            printf 'host\nbats\ngui\n' ;;
+        # qdlocker: shell/locker Bats and GUI scenarios exercise it.
         qdlocker/*)
-            printf 'host\ngui\n' ;;
+            printf 'host\nbats\ngui\n' ;;
         # qdbrowser: host pytest, plus the VM bats lane. Its own
         # tests/integration/vm/*.bats (certificate pin, launch smoke) exercise
         # behaviour the host tests do not, and the rule above only selects
@@ -154,10 +164,21 @@ affected_gates_for_path() {
         # gate also enables it, but that is not a per-change gate.
         qdgreeter/*)
             printf 'host\nbats\n' ;;
-        # Pure host-tested components (pytest / npm test + build).
-        qdfileman/*|qdterm/*|qnotebook/*|\
+        # App launch/integration Bats and GUI scenarios exercise these apps.
+        qdfileman/*|qdterm/*|qnotebook/*)
+            printf 'host\nbats\ngui\n' ;;
+        # Browser extensions are covered by their host test/build rows.
         qdchrome-extension/*|qdfirefox-extension/*)
             printf 'host\n' ;;
+        # Presentation snapshot library and its installer: host pytest plus
+        # the VM isolation/delivery bats. SELinux policy stays on the
+        # selinux/* arm (host + vm-smoke + bats + gui).
+        sdk/presentation/*)
+            printf 'host\nbats\n' ;;
+        scripts/install/install-presentation-for-vm.sh)
+            printf 'host\nbats\n' ;;
+        tier2/*|tier3/*)
+            printf 'host\nbats\n' ;;
         # Maintained project docs run the deterministic local-link/anchor lint.
         doc/*|README*|MIGRATION.md|AGENTS.md)
             printf 'lint\n' ;;

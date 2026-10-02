@@ -32,7 +32,17 @@ QTermWidget Python bindings: built from source via sip-wheel (see README.md).
 - `config.py` — Singleton TOML config with profiles
 - `plugin.py` — Plugin system with URLHandler/MenuProvider/OutputWatcher
 - `layout.py` — Serialize/restore split trees
-- `theme.py` — Dark theme stylesheet
+- `theme.py` — Dark/light/native palettes and PresentationController attach
+- `terminal_style.py` — profile `font_source` / `color_source` resolution
+
+## Presentation gotchas
+
+- Terminal content fonts are independent of chrome. `font_source=desktop` uses
+  snapshot `fixedFamily` and `content_fixed_point_size` (not UI scale). Zoom is
+  a per-terminal delta on that base; reset uses the terminal's own profile.
+- Theme changes must not call `apply_color_scheme_to_all`. `color_source=profile`
+  keeps the profile scheme; `appearance-mode` uses general dark/light schemes.
+- `QTermWidget.zoomIn/zoomOut` are not the live path; they would desync the delta.
 
 ## Test conventions
 

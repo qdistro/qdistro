@@ -64,7 +64,7 @@ ws_spawn_gated() {
     local h
     for _ in $(seq 1 30); do
         h=$("$QDWIN_VM_EXEC" "$VMNAME" \
-          "journalctl _UID=1000 --after-cursor='$cur' --no-pager | \
+          "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$cur' --no-pager | \
            grep -E 'qdwin: toplevel_added handle=[0-9]+ uid=1000 pid=[0-9]+ app_id=qdistro-test-window' | \
            tail -1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'")
         [ -n "$h" ] && { echo "$h"; return 0; }
@@ -101,7 +101,10 @@ desktop. If title chrome is not rendered or OCR is unavailable, use the
 gated `toplevel_added` handle and the visible client surface as evidence;
 do not fail solely because the title text `ws-zero` is unreadable.
 **Assert (1.2):** `qsipc call workspace list` reports `active=0` and
-`occupied` includes `0`.
+`occupied` includes `0`. `occupied=` is a comma-separated list of
+workspace INDICES, not a count: `count=4 active=0 occupied=0` means
+workspace 0 holds a window and PASSES 1.2 (Step 4 then reads
+`occupied=0,1`). Only an empty `occupied=` or a list without `0` fails.
 
 ### Step 2 — switch to workspace 1: WIN-A must vanish
 

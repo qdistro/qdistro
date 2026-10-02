@@ -17,23 +17,17 @@ source "$(dirname "$0")/qdlocker-helpers.sh"
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 
-# Drain a stale locked state from a prior scenario.
-case "$(qdlocker_ctrl status 2>/dev/null)" in
-    *locked=True*)
-        "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
-          >/dev/null
-        ;;
-esac
+# Drain a stale locked state (a prior scenario, or this scenario's own earlier
+# attempt whose idle timer fired) through the real keyboard unlock path.
+# Restarting qdlocker does NOT unlock: qdwin holds the lock fail-secure across
+# a locker restart and the fresh locker binds with initially_locked=1.
+qdlocker_drain_lock_state || { echo "ERROR: could not drain a stale lock"; exit 2; }
 
 # Shorten the idle threshold so the scenario doesn't wall-clock wait for the
-# default 5min (QDLOCKER_IDLE_MS=300000). 8s — NOT 3s — is deliberate: the
-# setup restart + vm-exec round-trips can take >3s, so a 3s threshold let the
-# idle timer fire and lock the screen DURING setup, before the baseline check
-# could read the unlocked state (the test raced itself). 8s is comfortably
-# larger than the setup+round-trip budget yet still short enough to exercise.
-# The `idle.conf` name sorts AFTER the GUI-lane `90-ci-gui.conf` dropin (which
-# disables idle for ordinary scenarios), so this override wins for THIS test.
+# default 5min (QDLOCKER_IDLE_MS=300000). The `idle.conf` name sorts AFTER the
+# GUI-lane `90-ci-gui.conf` dropin (which disables idle for ordinary
+# scenarios), so this override wins for THIS test. Only the drop-in is written
+# here; the restart that APPLIES it is in Step 1 (see there for why).
 "$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
   mkdir -p ~/.config/systemd/user/qdlocker.service.d
   cat > ~/.config/systemd/user/qdlocker.service.d/idle.conf <<EOF
@@ -41,29 +35,72 @@ esac
 Environment=QDLOCKER_IDLE_MS=8000
 EOF
   systemctl --user daemon-reload
-  systemctl --user restart qdlocker.service
 '"
-sleep 2
-
-# Reset the idle counter immediately before reading the baseline: a lone Shift
-# press (no text side-effect on the focused desktop) generates input so the 8s
-# idle window restarts at ~0 and cannot fire during the baseline read below.
-qdwin_qmp_key shift down; sleep 0.05; qdwin_qmp_key shift up
-qdlocker_ctrl status   # baseline — must be locked=False
 ```
 
 ## Steps
 
-### Step 1 — confirm baseline unlocked
+### Step 1 — apply the 8s threshold and confirm baseline unlocked
+
+The 8s idle timer starts counting the moment the restarted qdlocker binds:
+qdwin runs ext-idle-notify in internal-idle mode (`weston.ini idle-time=0`;
+journal `ext-idle-notify idle_time=0 internal_mode=1`), which arms each
+notification's timer for the full timeout at creation
+(`qdwin_idle_notification_create`, qdwin.c). So the restart itself opens a
+fresh 8s window and the baseline read needs NO keypress — only that the
+restart and the read happen in ONE uninterrupted guest command.
+
+**Run the block below as a SINGLE guest-side command** (one vm-exec, or one
+uninterrupted phase of a guest driver). There is NO host keyboard action in
+this step: do NOT put a `qci_host_step` / `*-go` handshake (or any agent
+round-trip) between the restart and the status read. In qci run
+full-20260930T212305Z the guest driver restarted qdlocker, then blocked on a
+host step for a Shift press; the agent's round-trip took >8s, the idle timer
+fired at restart+8.0s (qdlocker journal `idle threshold reached`) before the
+Shift (restart+9.6s), and 1.1 read `locked=True` on both attempts — a HARNESS
+artifact, not a product bug. (run full-20260926T153217Z failed the same way.)
+
+The block is a readiness barrier, not a fixed sleep: it records the old
+MainPID, restarts (the unit is `Type=simple`, so `restart` returns before the
+locker is up), polls until a NEW MainPID answers on the ctrl socket, and
+reads the baseline right then. qdlocker arms its idle watcher before it opens
+the ctrl socket (journal order `idle watcher started` → `ctrl socket at`), so
+`elapsed_ms` measured from just before the restart is an upper bound on how
+far into the 8 s window the read happened.
 
 ```bash
-qdlocker_ctrl status
+"$QDWIN_VM_EXEC" "$VMNAME" '
+  U() { runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
+  now_ms() { awk "{printf \"%d\", \$1*1000}" /proc/uptime; }   # monotonic
+  old=$(U systemctl --user show -p MainPID --value qdlocker.service)
+  t0=$(now_ms)
+  U systemctl --user restart qdlocker.service || { echo "SETUP_ERROR restart-failed"; exit 2; }
+  st=""; pid=""
+  while [ $(( $(now_ms) - t0 )) -lt 7000 ]; do
+    pid=$(U systemctl --user show -p MainPID --value qdlocker.service)
+    if [ -n "$pid" ] && [ "$pid" != 0 ] && [ "$pid" != "$old" ]; then
+      st=$(printf "status\n" | U socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock 2>/dev/null)
+      case "$st" in *locked=*) break ;; esac
+    fi
+    sleep 0.1
+  done
+  el=$(( $(now_ms) - t0 ))
+  echo "STEP1 old_pid=$old new_pid=$pid elapsed_ms=$el status=$st"
+  case "$st" in *locked=*) ;; *) echo "SETUP_ERROR no-ready-locker elapsed_ms=$el"; exit 2 ;; esac
+  [ "$el" -lt 7000 ] || { echo "SETUP_ERROR baseline-read-late elapsed_ms=$el"; exit 2; }'
 qdwin_screenshot /tmp/qdlocker-03-step1-baseline.png
 ```
 
-**Assert (1.1):** `locked=False`. If the locker came up locked-by-default
+A `SETUP_ERROR` line (restart failed, no new locker answered, or the read
+landed ≥ 7 s after the restart began) makes the scenario **ERROR**, not FAIL:
+the baseline was not observed inside the 8 s window, which says nothing about
+the product.
+
+**Assert (1.1):** the `STEP1` line shows `locked=False` with `elapsed_ms` < 7000. If the locker came up locked-by-default
 (`initially_locked=True` from `qdwin_locker_v1.ready`), this scenario
-is meaningless — abort and run after a clean unlock cycle.
+is meaningless — abort and run after a clean unlock cycle. The screenshot is
+supporting evidence only (`qci:visual: none`); it is taken after the status
+read.
 
 ### Step 2 — wait 9s without touching the keyboard/pointer
 
@@ -90,11 +127,15 @@ unlock for the next part of the test, send the password through
 qdlocker's overlay_key channel using the same pattern as scenario
 01 step 3+4.
 
-**Run the whole block below as a SINGLE command** — do NOT split the unlock,
-the activity keypress, and the status read across separate tool calls. The idle
-timer keeps ticking between calls, so a multi-second gap between the unlock and
-the activity keypress lets the 8s window re-fire and re-lock before the check,
-producing a spurious `locked=True` that is a HARNESS artifact, not a product bug.
+**Run the whole block below as a SINGLE HOST-side command** — do NOT split the
+unlock, the activity keypress, and the status read across separate tool calls.
+The idle timer keeps ticking between calls, so a multi-second gap between the
+unlock and the activity keypress lets the 8s window re-fire and re-lock before
+the check, producing a spurious `locked=True` that is a HARNESS artifact, not a
+product bug. With a guest-side driver this block is ONE host step whose host
+side performs the status read itself (via vm-exec) and records it; the guest
+must NOT do the 3.1 read after the step's `go` — the agent round-trip before
+the `go` can exceed 8s, exactly the Step 1 failure mode.
 
 ```bash
 qdlocker_unlock_with_password

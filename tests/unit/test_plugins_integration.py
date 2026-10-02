@@ -314,7 +314,8 @@ class TestQnotebookPluginSend:
         monkeypatch.setattr(mod.QMenu, "exec", _fake_exec)
 
         plugin._open_send_menu()
-        assert ("ListReceivers", (), {"dbus_interface": "org.qdistro.AdminBroker1"}) \
+        assert ("ListReceivers", (),
+                {"dbus_interface": "org.qdistro.AdminBroker1", "timeout": 3.0}) \
             in fake_broker.calls
         assert any("Qterminator" in a for a in captured.get("actions", []))
         assert any("Qnotebook" in a for a in captured.get("actions", []))
@@ -486,7 +487,7 @@ class TestQterminatorPluginMenu:
         term._selection = "some selected text"
         plugin._open_send_menu(term)
         assert ("ListReceivers", (),
-                {"dbus_interface": "org.qdistro.AdminBroker1"}) \
+                {"dbus_interface": "org.qdistro.AdminBroker1", "timeout": 3.0}) \
             in fake_broker.calls
         assert any("Qnotebook" in a for a in captured.get("actions", []))
 

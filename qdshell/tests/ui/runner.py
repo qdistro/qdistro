@@ -450,6 +450,25 @@ VM_WAYLAND_DISPLAY = "wayland-1"
 VM_XDG_RUNTIME_DIR = "/run/user/1000"
 VM_USER = "admin"
 
+# How long socat keeps reading qdshell's reply after the one-line request hits
+# EOF (`-t`), and its inactivity ceiling (`-T`), in seconds.
+#
+# qdshell answers `capture` only AFTER the capture completes, and its own pump
+# deadline is kCaptureTimeoutMs = 8000 (qml-plugin/qdwin-binding.cpp) -- plus
+# however long the shell's event loop is busy before it even reads the
+# request (a Settings tab that was just opened is still instantiating QML).
+# A `-t` below that deadline makes socat exit 0 with an EMPTY reply while
+# qdshell goes on to write a perfectly good PNG: `-t 2` did exactly that to
+# settings_sessionmenu in full-20260926T153217Z-3807077 (12 GUI VMs in
+# parallel), surfacing as `shell capture failed: ''`. qdwin-helpers.sh
+# (QDWIN_CAPTURE_SOCAT_T) already learned this for qdwin_screenshot.
+#
+# This bounds LIVENESS, not latency: qdshell closes the connection right after
+# it replies (ctrl-server.cpp), so the happy path returns at once. INVARIANT:
+# every ctrl_socket_vm caller's host `timeout` must exceed this, or the host
+# gives up first (asserted in ctrl_socket_vm).
+CTRL_SOCAT_T = 25
+
 # Defense-in-depth: only safe shell-free tokens may reach the guest sh -c.
 _IPC_TOKEN_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:=/-]*\Z")
 
@@ -644,6 +663,10 @@ def ctrl_socket_vm(session: VMSession, command: str, *, timeout: float = 30.0) -
     base = command.split(" ", 1)[0]
     if base not in allowed:
         raise ValueError(f"refusing ctrl-socket command {command!r} (base {base!r} not allowlisted)")
+    if timeout <= CTRL_SOCAT_T:
+        raise ValueError(
+            f"ctrl-socket timeout {timeout}s must exceed CTRL_SOCAT_T={CTRL_SOCAT_T}s "
+            "or the host gives up before socat does")
     b64 = base64.b64encode((command + "\n").encode()).decode("ascii")
     if base == "capture":
         # Capture is deliberately root-peer-only (SO_PEERCRED) so qdshell
@@ -651,19 +674,21 @@ def ctrl_socket_vm(session: VMSession, command: str, *, timeout: float = 30.0) -
         script = (
             f"set -eu\n"
             f"echo {b64} | base64 -d | "
-            # `-t 2` matters: without it socat lingers only its 0.5s DEFAULT
+            # `-t` matters: without it socat lingers only its 0.5s DEFAULT
             # after the shell closes its end, and a capture reply that arrives
             # later is lost -- the caller then sees an EMPTY reply and reports
             # a capture/transport failure for a capture that actually
-            # succeeded. The admin branch below already passed `-t 2`; this
-            # branch did not, and the asymmetry was the bug.
-            f"socat -t 2 -T 10 - UNIX-CONNECT:{VM_XDG_RUNTIME_DIR}/qdshell.sock\n"
+            # succeeded. It must also outlast qdshell's own 8s capture
+            # deadline; see CTRL_SOCAT_T.
+            f"socat -t {CTRL_SOCAT_T} -T {CTRL_SOCAT_T} - "
+            f"UNIX-CONNECT:{VM_XDG_RUNTIME_DIR}/qdshell.sock\n"
         )
     else:
         script = (
             f"set -eu\n"
             f"runuser -u {VM_USER} -- bash -c "
-            f"'echo {b64} | base64 -d | socat -t 2 - UNIX-CONNECT:{VM_XDG_RUNTIME_DIR}/qdshell.sock'\n"
+            f"'echo {b64} | base64 -d | socat -t {CTRL_SOCAT_T} -T {CTRL_SOCAT_T} - "
+            f"UNIX-CONNECT:{VM_XDG_RUNTIME_DIR}/qdshell.sock'\n"
         )
     res = _vm_run_script(session, script, timeout=timeout)
     if res.returncode != 0:
@@ -861,8 +886,10 @@ def screenshot_vm(session: VMSession, out_path: Path, *,
         attempts = max(1, live_retries + 1)
         for _attempt in range(attempts):
             guest = _next_guest()
+            # Host deadline > CTRL_SOCAT_T, with room for vm-exec's own
+            # guest-agent round trips on a loaded host.
             reply = ctrl_socket_vm(session, f"capture Virtual-1 {guest}",
-                                   timeout=30.0)
+                                   timeout=CTRL_SOCAT_T + 20.0)
             # A retained frame often means the repaint had not landed yet.
             # Ask once more before treating staleness as terminal.
             if " live=0" not in reply:

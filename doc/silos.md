@@ -42,8 +42,10 @@ Examples:
 
 This document is the owner-facing contract qdistro is building toward; the v1
 runtime implements only a narrower slice. The shipped session manager has a
-low-level uid/cgroup lifecycle for created, stopped, starting, active,
-stopping, and failed sessions, plus crash-safe persistence for that lifecycle.
+low-level uid/cgroup lifecycle with `Created`, `Active`, `Frozen`, `Stopping`,
+`Stopped`, and `Deleting` states, plus crash-safe persistence for that lifecycle.
+Observed runtime status is separate evidence and does not change those states
+or the lifecycle safeguards described below.
 Template bindings, candidate validation, promotion, and first-activation state
 snapshots are implemented in the template layer; see
 [templates.md](templates.md).
@@ -645,3 +647,43 @@ to different sessions at different times, subject to attachment policy in
 The session manager's current D-Bus lifecycle states in [sessions.md](sessions.md)
 are implementation states for uid-backed silos. They are compatible with this
 model but lower-level than the owner-facing health and bootstrap states above.
+
+## Observed runtime evidence
+
+`ListSilos` retains the conservative lifecycle `state` used for stop, delete
+and broker policy. It additionally returns `observed_status`, `observed_reason`,
+`observed_at` (epoch seconds), `observed_ttl_seconds` (remaining validity computed
+from the daemon's monotonic clock), `operation_generation`, and an opaque
+`runtime_incarnation` identifying the current in-memory silo object. Incarnations
+are never persisted and change after daemon restart or silo recreation; generation
+counters are comparable only within one incarnation. The admin silo table
+shows the runtime observation separately from lifecycle state and refreshes it
+every five seconds, including when the status stays the same. Status is one of
+`starting`, `launcher-running`, `stopped`, `failed` or `unknown`.
+
+Automatic reads are asynchronous with a three-second timeout and one request
+in flight. The table also expires displayed observations locally every second,
+using a monotonic deadline that subtracts the full request duration from the
+server's remaining validity. Delayed or outdated replies cannot extend evidence
+past that deadline, and failed reads display unknown. Polling never retries
+lifecycle effects.
+Invalidating a read cancels its local pending call and ignores late replies;
+this does not retract a request already sent to the daemon. A replaced silo
+clears the table selection so actions require selecting its new incarnation.
+
+A background observer samples systemd's launcher state and pending job, plus
+container existence/running status for tier-2 workloads or the recursive
+cgroup population for uid-backed workloads. Each subprocess is bounded to three
+seconds. Observations expire after thirty seconds; unavailable or timed-out
+probes report unknown. Results from a preceding lifecycle generation are
+ignored, and no observations survive daemon restart. Within the current daemon
+lifetime, unresolved starts remain unknown until a successful stop. Restart
+resets that unresolved-start latch and initializes observations as unknown;
+subsequent probes may report runtime evidence, while the persisted lifecycle
+remains conservative. A plain start retry remains an idempotent
+operation from Active; follow the existing stop-then-start recovery path.
+
+Launcher activation and container existence do not establish application
+health. Observations never authorize deletion, relaunch, or broker transfers;
+they do not replace the lifecycle safeguards. Probe snapshots may become stale
+between reads, so a stopped observation is evidence about that sample only.

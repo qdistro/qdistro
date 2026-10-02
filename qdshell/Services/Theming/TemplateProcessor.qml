@@ -14,6 +14,8 @@ Singleton {
 
   // Signal emitted when color generation completes successfully (for wallpaper-based theming)
   signal colorsGenerated
+  property int currentRequestId: 0
+  property string currentMode: ""
 
   readonly property string dynamicConfigPath: Settings.cacheDir + "theming.dynamic.toml"
   readonly property string templateProcessorScript: Quickshell.shellDir + "/Scripts/python/src/theming/template-processor.py"
@@ -85,11 +87,13 @@ Singleton {
   * Dual-path architecture (wallpaper generation)
   * Uses debouncing to prevent spawning multiple processes when spamming wallpaper changes
   */
-  function processWallpaperColors(wallpaperPath, mode) {
+  function processWallpaperColors(wallpaperPath, mode, requestId) {
     Logger.d("TemplateProcessor", `processWallpaperColors called: path=${wallpaperPath}, mode=${mode}`);
+    Color.markProducerBusy();
     pendingWallpaperRequest = {
       wallpaperPath: wallpaperPath,
-      mode: mode
+      mode: mode,
+      requestId: requestId || 0
     };
     pendingPredefinedRequest = null;
     debounceTimer.restart();
@@ -100,7 +104,7 @@ Singleton {
     const content = buildThemeConfig();
     if (!content) {
       Logger.d("TemplateProcessor", "executeWallpaperColors: no config content, aborting");
-      return;
+      return false;
     }
     const wp = wallpaperPath.replace(/'/g, "'\\''");
 
@@ -108,6 +112,7 @@ Singleton {
 
     generateProcess.command = ["sh", "-c", script];
     generateProcess.running = true;
+    return true;
   }
 
   readonly property string schemeJsonPath: Settings.cacheDir + "predefined-scheme.json"
@@ -135,7 +140,7 @@ Singleton {
     const tomlContent = buildPredefinedTemplateConfig(mode);
     if (!tomlContent) {
       Logger.d("TemplateProcessor", "No application templates enabled for predefined scheme");
-      return;
+      return false;
     }
 
     // 3. Build script to write files and run Python
@@ -168,6 +173,7 @@ Singleton {
 
     generateProcess.command = ["sh", "-c", script];
     generateProcess.running = true;
+    return true;
   }
 
   /**
@@ -547,13 +553,18 @@ Singleton {
     if (pendingWallpaperRequest) {
       const req = pendingWallpaperRequest;
       pendingWallpaperRequest = null;
-      executeWallpaperColors(req.wallpaperPath, req.mode);
+      root.currentRequestId = req.requestId || 0;
+      root.currentMode = req.mode;
+      if (!executeWallpaperColors(req.wallpaperPath, req.mode))
+        Color.markProducerIdle();
     } else if (pendingPredefinedRequest) {
       const req = pendingPredefinedRequest;
       pendingPredefinedRequest = null;
-      executePredefinedScheme(req.schemeData, req.mode);
+      if (!executePredefinedScheme(req.schemeData, req.mode))
+        Color.markProducerIdle();
     } else {
       Logger.d("TemplateProcessor", "executePendingRequest: no pending request");
+      Color.markProducerIdle();
     }
   }
 
@@ -588,8 +599,15 @@ Singleton {
         Logger.d("TemplateProcessor", "generateProcess onExited: has pending request, executing");
         executePendingRequest();
       } else if (exitCode === 0) {
-        // No pending request and successful completion - emit signal
         root.colorsGenerated();
+        if (root.currentRequestId)
+          Color.commitProcessResult(root.currentRequestId, root.currentMode);
+        Color.markProducerIdle();
+      } else if (root.currentRequestId) {
+        Color.cancelRequest(root.currentRequestId);
+        Color.markProducerIdle();
+      } else {
+        Color.markProducerIdle();
       }
     }
 

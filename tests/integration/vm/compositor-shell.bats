@@ -65,7 +65,9 @@ teardown_file() {
     # client is incompatible with this image's system-weston/vendored-libweston
     # boundary. Capture the actual virtual display from outside the guest. This
     # is the same honest pixel source a person sees through SPICE/RDP.
-    local shot="$BATS_TEST_TMPDIR/s103-foot.png"
+    # Kept in the qci per-file scratch dir (when set) so a failed OCR leaves
+    # the exact frame behind for diagnosis.
+    local shot="${QCI_SCENARIO_TMPDIR:-$BATS_TEST_TMPDIR}/s103-foot.png"
     run virsh screenshot "$VM_NAME" "$shot"
     assert_success
     [ -s "$shot" ] || fail_loud "virsh screenshot produced no image at $shot"
@@ -75,7 +77,35 @@ teardown_file() {
     cp "$shot" "$(_qd_driver_stage_dir)/s103-foot.png"
     vm_run "command -v tesseract >/dev/null"
     require "tesseract not installed on VM (needed for launcher visual assertion)"
-    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png && tesseract /tmp/s103-foot.png - 2>/dev/null"
+    # The guest's tesseract (openSUSE libtesseract5 5.5.3-2.1, snapshot
+    # 20260924) aborted on every observed run during teardown, after the text
+    # was out: "free(): invalid size", rc=134 (4 full runs, 10/10 offline
+    # repros on several inputs). Not load: the distro's
+    # CVE-2026-88053 backport (tesseract-CVE-2026-88053.patch) dropped the
+    # loop in ADAPT_CLASS_STRUCT's constructor that nulled Config[], because
+    # upstream made Config[] a value-initialized std::array -- a change the
+    # backport left out (adaptive.h still has a plain C array). So
+    # ~ADAPT_CLASS_STRUCT, run by TessBaseAPI::End -> EndAdaptiveClassifier,
+    # deletes uninitialized heap words (whatever an earlier free left there,
+    # so whether it aborts depends on the heap layout, not on load).
+    # Workaround until openSUSE fixes the package: perturb=255 makes glibc
+    # fill each fresh malloc-backed allocation with 0xff^0xff = 0 (tcache off
+    # because its fast path skips the perturb fill). This is NOT a general
+    # zeroing allocator (in-place realloc growth is not cleared), but the
+    # ADAPT_CLASS_STRUCT objects come from plain `new`. Then Config[] is null as
+    # upstream intends and tesseract exits 0 with byte-identical text. The
+    # exit status is still asserted: any other failure fails the test.
+    # OMP_THREAD_LIMIT=1: one frame needs no OpenMP threads.
+    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png || exit 1
+        rm -f /tmp/s103-ocr.txt
+        GLIBC_TUNABLES=glibc.malloc.perturb=255:glibc.malloc.tcache_count=0 OMP_THREAD_LIMIT=1 \\
+            tesseract /tmp/s103-foot.png /tmp/s103-ocr 2>/tmp/s103-ocr.err
+        rc=\$?
+        if [ \"\$rc\" -ne 0 ]; then
+            echo \"tesseract rc=\$rc: \$(tail -n1 /tmp/s103-ocr.err)\" >&2
+            exit \"\$rc\"
+        fi
+        cat /tmp/s103-ocr.txt"
     assert_success
 
     local ocr_text="$output" hits=0 d

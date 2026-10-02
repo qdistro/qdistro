@@ -94,6 +94,54 @@ qdistro_open_launch_log() {
     return 0
 }
 qdistro_open_launch_log admin-app.log
-setsid python3 "$APP_PY" < /dev/null >&9 2>&1 &
+
+# Return only once the window has painted its first frame. Callers screenshot
+# right after this launcher (permissions-gui S1 steps). The X window exists,
+# carries its title and is mapped before Qt paints it, so neither a sleep nor
+# `xdotool search --sync` proves a frame; under a loaded full run the first
+# paint took longer than both (full-20260930T051422Z-65193: permissions-gui/22
+# captured the bare desktop, /47 a half-drawn surface). The app creates the
+# marker after its first exposed paint and a round trip on its own X
+# connection (QDISTRO_ADMIN_APP_READY_FILE; see _FirstPaintMarker), so the
+# server has the frame when this returns. No round trip from here can stand
+# in for that one: X orders requests per connection only.
+#
+# If no private directory can be made for the marker, the app is still
+# started (a launcher must never keep it from starting) but without a marker
+# path, and the launcher exits 3: it cannot prove the frame, and an empty
+# READY_DIR must never turn the marker into a fixed path such as /painted.
+READY_DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/qdistro-admin-app-ready.XXXXXXXX" 2>/dev/null) \
+    || READY_DIR=$(mktemp -d 2>/dev/null) || READY_DIR=
+if [ -z "$READY_DIR" ] || [ ! -d "$READY_DIR" ]; then
+    unset QDISTRO_ADMIN_APP_READY_FILE
+    setsid python3 "$APP_PY" < /dev/null >&9 2>&1 &
+    APP_PID=$!
+    disown
+    echo "start-admin-app: no private directory for the first-paint marker; admin app (pid $APP_PID) started without the readiness wait" >&2
+    echo "$APP_PID"
+    exit 3
+fi
+READY_FILE=$READY_DIR/painted
+QDISTRO_ADMIN_APP_READY_FILE=$READY_FILE setsid python3 "$APP_PY" < /dev/null >&9 2>&1 &
+APP_PID=$!
 disown
-echo "$!"
+READY_TIMEOUT=${QDISTRO_ADMIN_APP_READY_TIMEOUT:-60}
+case "$READY_TIMEOUT" in ''|*[!0-9]*) READY_TIMEOUT=60 ;; esac
+deadline=$((SECONDS + READY_TIMEOUT))
+ready_rc=0
+until [ -e "$READY_FILE" ]; do
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+        echo "start-admin-app: admin app (pid $APP_PID) exited before painting its window" >&2
+        ready_rc=3
+        break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "start-admin-app: admin app (pid $APP_PID) painted no window within ${READY_TIMEOUT}s" >&2
+        ready_rc=3
+        break
+    fi
+    sleep 0.1
+done
+rm -rf -- "$READY_DIR"
+echo "$APP_PID"
+exit "$ready_rc"

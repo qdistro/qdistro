@@ -14,7 +14,7 @@ Maintenance policy:
 
 - Prefer the system `libdisplay-info` dependency when packaging allows it.
 - If qdwin needs to vendor this code, record the upstream tag/commit, import
-  date, local patches, and update procedure in the qdwin repo.
+  date, local patches, and update procedure under `qdwin/`.
 - Do not push qdistro vendoring notes to the upstream `display-info` remote.
 - Avoid installing a vendored shared library as a system replacement unless the
   package explicitly intends to own that ABI.

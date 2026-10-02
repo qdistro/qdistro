@@ -12,6 +12,7 @@ Usage:
   qci lint
   qci selftest
   qci host
+  qci feedback qdfileman [<changed-path> ...]
   qci vm-smoke [--vm <name>]
   qci bats [--vm <name>] [--file <file.bats> ...]
   qci gui [--vm <name>] [--skip-qdwin] [--scenario <path.md> ...]
@@ -32,6 +33,12 @@ Usage:
   qci list-runs
 
 Notes:
+  qci feedback  Development feedback only: runs the SAME qdfileman pytest job
+              as host, records dependencies and outcome, and reports required
+              acceptance gates for the supplied repo-relative changed paths.
+              No paths or unknown/shared paths widen to full. Never satisfies
+              host/full acceptance; forbidden with QCI_RELEASE=1. Use an isolated
+              worktree. The default per-job timeout is 600 seconds.
   qci lint    Static pre-VM lint: shellcheck (warn-by-default), blocking bats
               syntax and maintained-doc link checks, plus GUI-scenario structure
               and flake metrics. Runs without a VM; missing shellcheck/bats =>
@@ -149,7 +156,7 @@ Environment:
                             separate qdwin-profile VM for qdwin-dependent rows.
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
-  QDISTRO_VM_BASE           auto|kiwi|baked. Which backing image spin-test-vm
+  QDISTRO_VM_BASE           baked (default)|kiwi|auto. Which backing image spin-test-vm
                             clones for qci workers. auto (default): imported
                             kiwi qcow2 if present (scripts/vm/import-kiwi-base.sh;
                             tester or ci profile), else baseweed-baked. kiwi
@@ -174,6 +181,10 @@ Environment:
                             run to EXIT_RELEASE (15); a real failure keeps its own
                             class. Infra gates (preflight/selftest/lint/…) are
                             excluded.
+  QCI_SKIP_IMAGE=1          Developer `full` runs record an explicit image
+                            skip with the selected .sha256 sidecar digest.
+                            The report marks the run outside full image/P8
+                            qualification. Forbidden with QCI_RELEASE=1.
   QCI_HOST_STEP_TIMEOUT     Per-step wall budget for the `host` gate, in seconds
                             (default 600). It does NOT cover the qdistro pytest
                             step, which carries its own budget below — raising

@@ -29,6 +29,20 @@ set -u
 
 PASSCOUNT=0
 FAILCOUNT=0
+# The broker has no ExecReload, so reload-or-restart is a full restart, and the
+# tiered-isolation file restarts it several times within seconds (the previous
+# script's cleanup, this script's start, this rule reload). That tripped
+# systemd's start limit on 2026-09-24 ("Start request repeated too quickly",
+# start-limit-hit), and a unit in that state never starts again on its own.
+# reset-failed clears the start-rate counter, so the restart is allowed; a
+# restart that still fails is reported with the unit status, never swallowed.
+broker_restart() {
+    systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true
+    if ! systemctl restart qdistro-admin-broker.service; then
+        systemctl status --no-pager --lines=20 qdistro-admin-broker.service >&2 || true
+        return 1
+    fi
+}
 pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
@@ -149,7 +163,7 @@ cleanup() {
     # mkfs/mount would otherwise leak it.
     rm -f "$BTRFS_IMG" 2>/dev/null || true
     rm -f /tmp/s64-*.log 2>/dev/null || true
-    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+    broker_restart || true
 }
 trap cleanup EXIT INT TERM
 
@@ -193,6 +207,7 @@ else
     pass "tier2-template prerequisites present (backed silos dir with a btrfs loopback)"
 fi
 
+systemctl reset-failed qdistro-admin-broker.service 2>/dev/null || true
 systemctl start qdistro-admin-broker.service 2>/dev/null || true
 
 # --- 2. build the weston-terminal tier-2 image (cached) --------------
@@ -217,7 +232,7 @@ cat >"$RULE_FILE" <<EOF
   match:
     action: qdistro.nested.advertise:org.freedesktop.weston.wayland-terminal
 EOF
-systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+broker_restart || fail "broker restart after writing the lineage rules failed (unit status above)"
 r1=""; r2=""
 for _ in $(seq 1 20); do
     r1=$(broker_check_admin "qdistro.tier2.spawn:${WORKLOAD}/${WORKLOAD}")

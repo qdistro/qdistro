@@ -138,6 +138,23 @@ host_mypy_targets() {
     done
 }
 
+# Emit the extension-step dependency-provisioning prefix (run in the
+# extension dir by run_logged). node_modules/ is gitignored, so a fresh checkout
+# or a fresh `git worktree` (every qci run worktree) has none, and
+# `npm test` died with "vitest: command not found" (rc 127) — failing the
+# extension rows AND, through the missing coverage artifact, their
+# -coverage-floor rows. AGENTS.md/doc/dev.md document `npm ci` as a manual
+# setup step, which a throwaway run worktree never gets. So the gate owns
+# it: when the locked toolchain is absent, run `npm ci` from the committed
+# package-lock.json (--prefer-offline: served from the npm cache when it
+# holds the locked versions, network only for misses). An existing
+# node_modules is left alone (no reinstall on every run). A provisioning
+# failure is FATAL with a FAIL: line naming the fix, never a confusing
+# downstream "command not found".
+host_ext_deps_cmd() {
+    printf '%s' 'if [ ! -x node_modules/.bin/vitest ]; then echo "provision: node_modules/.bin/vitest absent in $PWD; running npm ci --prefer-offline"; command -v npm >/dev/null 2>&1 || { echo "FAIL: npm not installed; cannot provision extension deps"; exit 127; }; npm ci --prefer-offline --no-audit --no-fund || { echo "FAIL: npm ci failed in $PWD (offline cache miss and no network?); provision with: (cd $PWD && npm ci)"; exit 1; }; [ -x node_modules/.bin/vitest ] || { echo "FAIL: npm ci succeeded but node_modules/.bin/vitest is still absent"; exit 1; }; fi; '
+}
+
 # Emit the shell snippet run_logged executes for the ruff step. Skips (exit 0)
 # when ruff is not on PATH so optional tooling never reddens the gate (gate_host
 # also records a visible SKIP row in that case — see the preflight tool check).
@@ -320,6 +337,12 @@ except (KeyError, TypeError):
         record_result host "$project-coverage-floor" pass 0 pass coverage "$log_path" "measured=$pct% >= floor=$floor%"
     fi
     return "$rc"
+}
+
+# One invocation shared by full host acceptance and component development feedback.
+host_job_qdfileman() {
+    local gate=${1:-host}
+    run_logged "$gate" qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)"         "${2:-}"
 }
 
 gate_host() {
@@ -510,6 +533,14 @@ fi'
     run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
+    # Patch 0005 regression: requests on a released seat's inert wl_seat /
+    # wl_pointer must not SIGSEGV the compositor — the qdwin per-stream-seat
+    # crash of gui/22 S2. Headless; builds its own libweston from the current
+    # sources (the production prefix above is reused across checkouts).
+    c="bash libweston-vendored/run-inert-relptr-test.sh"
+    run_logged host qdwin-vendored-libweston-inert-relptr "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston survives get_relative_pointer on an inert wl_pointer"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
     # Configure qdwin against the vendored prefix's pkgconfig (see the ordering
     # note above). pkgconfig-dir.sh prints that dir and exits nonzero when the
     # prefix is absent; on that path we deliberately leave PKG_CONFIG_PATH
@@ -531,6 +562,8 @@ fi'
     # non-recursive tests/test_*.py glob) to bound QtWebEngine native residue.
     run_logged host qdbrowser-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdbrowser" "$(host_pytest_cmd 'glob:tests/test_*.py' 1)" "qdbrowser pytest per file to reduce QtWebEngine residue"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host presentation-pytest "$EXIT_HOST" pytest "$WORKSPACE/sdk/presentation" "$(host_pytest_cmd all)" "qdistro-presentation unit tests"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # qdgreeter/qdlocker/qdfileman/qnotebook/qdterm: single-process run via
     # the shared runner ("all" mode). The selector arg reproduces each repo's
     # prior bare invocation (explicit dir, or empty => pyproject testpaths).
@@ -538,7 +571,7 @@ fi'
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qdlocker-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdlocker" "$(host_pytest_cmd all 0 '' tests/unit)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)" ""; step_rc=$?
+    host_job_qdfileman host; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
@@ -598,14 +631,14 @@ fi'
         printf "export QDISTRO_REQUIRE_SIBLING=1 QDISTRO_SIBLING_GOLDEN=%q; " \
             "$WORKSPACE/$1/tests/fixtures/golden-frames.js"
     }
-    c="$(_ext_drift_env qdfirefox-extension)npm test && npm run build"
+    c="$(host_ext_deps_cmd)$(_ext_drift_env qdfirefox-extension)npm test && npm run build"
     run_logged host qdchrome-extension "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     c="$(_ext_cov_artifact_cmd "$WORKSPACE/qdchrome-extension" "$RDIR/host" "qdchrome-extension")"
     run_logged host qdchrome-extension-coverage "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" "coverage (report-only)" || true
     coverage_floor_check qdchrome-extension "$RDIR/host/qdchrome-extension-coverage.json"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    c="$(_ext_drift_env qdchrome-extension)npm test && npm run build"
+    c="$(host_ext_deps_cmd)$(_ext_drift_env qdchrome-extension)npm test && npm run build"
     run_logged host qdfirefox-extension "$EXIT_HOST" npm "$WORKSPACE/qdfirefox-extension" "$c" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     c="$(_ext_cov_artifact_cmd "$WORKSPACE/qdfirefox-extension" "$RDIR/host" "qdfirefox-extension")"

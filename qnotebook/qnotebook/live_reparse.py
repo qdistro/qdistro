@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QFont, QTextBlock, QTextCharFormat, QTextCursor
 from .md_to_qdoc import (
     BLOCK_KIND,
     CHAR_CODE,
+    CHAR_STRONG,
     CHAR_TAG,
     CHAR_WIKILINK,
     TAG_INLINE_RE,
@@ -127,6 +128,7 @@ def _inline_runs(text: str) -> list[tuple[int, int, QTextCharFormat]]:
 def _bold_fmt() -> QTextCharFormat:
     f = QTextCharFormat()
     f.setFontWeight(QFont.Weight.Bold)
+    f.setProperty(CHAR_STRONG, True)
     return f
 
 

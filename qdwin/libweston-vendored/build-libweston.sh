@@ -17,6 +17,10 @@
 #       /usr/libexec/qdistro/qdwin-libweston/. See
 #       doc/decisions/0001-vendored-libweston-packaging.md.
 #
+# QDWIN_LIBWESTON_BUILD_DIR overrides the profile's build dir. A reused build
+# dir keeps the --prefix it was configured with, so a caller that needs its
+# own prefix (run-inert-relptr-test.sh) must pair it with its own build dir.
+#
 # This is intentionally not wired into qdwin's meson.build because
 # (a) it builds a different pinned-version sub-project with its own
 # meson, (b) we want the build cache invalidated only when the
@@ -65,7 +69,7 @@ prepare_pinned_git_subproject() {
 
 case "$PROFILE" in
 headless)
-    BUILD="$SRC/build"
+    BUILD="${QDWIN_LIBWESTON_BUILD_DIR:-$SRC/build}"
     PREFIX="${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prefix}"
     MESON_OPTS=(
         -Dbackend-drm=false
@@ -89,7 +93,7 @@ headless)
 production)
     # Separate build dir so the production cache does not clobber the
     # headless test cache (different backend set → full reconfigure).
-    BUILD="$SRC/build-prod"
+    BUILD="${QDWIN_LIBWESTON_BUILD_DIR:-$SRC/build-prod}"
     PREFIX="${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}"
     # Backend set mirrors the qdwin systemd unit's WESTON_MODULE_MAP
     # (drm + pipewire + rdp + wayland + x11 + headless + xwayland + lcms).

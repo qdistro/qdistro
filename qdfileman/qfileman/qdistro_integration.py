@@ -134,7 +134,7 @@ def send_to_targets(*, kind: str = "text/plain") -> list[dict]:
     try:
         self_service = f"org.qdistro.{APP_FRIENDLY_NAME}.uid{os.geteuid()}"
         return _app_receiver.send_to_menu_targets(
-            self_service=self_service, kind=kind)
+            self_service=self_service, kind=kind, probe_capabilities=False)
     except Exception as e:  # noqa: BLE001
         print(f"[qfileman/qdistro] send_to_menu_targets failed: {e}",
               file=sys.stderr, flush=True)
@@ -146,13 +146,30 @@ def send_payload(target_uid: int, target_service: str, payload: str, *,
     if _app_receiver is None:
         return False
     try:
-        return bool(_app_receiver.send_to(int(target_uid),
-                                          str(target_service),
+        return bool(_app_receiver.send_to(int(target_uid), str(target_service),
                                           str(kind), str(payload)))
     except Exception as e:  # noqa: BLE001
         print(f"[qfileman/qdistro] send_to({target_service}) failed: {e}",
               file=sys.stderr, flush=True)
         return False
+
+
+def get_transfer_capabilities(uid, service):
+    if _app_receiver is None:
+        return {"version": 0, "reason": "SDK unavailable"}
+    return _app_receiver.get_transfer_capabilities(uid, service)
+
+
+def send_transfer(uid, service, expected_instance, kind, payload, *, timeout=60):
+    if _app_receiver is None:
+        raise RuntimeError("SDK unavailable")
+    return _app_receiver.send_transfer(uid, service, expected_instance, kind, payload, timeout=timeout)
+
+
+def get_transfer_status(handle, *, timeout=3):
+    if _app_receiver is None:
+        raise RuntimeError("SDK unavailable")
+    return _app_receiver.get_transfer_status(handle, timeout=timeout)
 
 
 def qsu_run(argv: Sequence[str], *, target_user: str = "root") -> int:

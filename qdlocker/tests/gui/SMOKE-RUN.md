@@ -21,7 +21,7 @@ work — see "Known gaps" below).
 | 4 | `set_locked(1)` → `locked_changed(1)` | PASS | probe + journal `locked_changed=1 cause=locker_set_locked` |
 | 5 | `set_locked(0)` → `locked_changed(0)` | PASS | probe + journal `locked_changed=0` |
 | 6 | Ctrl+Alt+L hotkey → `lock_requested(reason=3=manual)` reaches locker | PASS | probe `[('lock_requested', 3)]` + journal `qdwin: lock_requested` |
-| 7 | **Security boundary**: typed-while-locked keystrokes route to locker via `overlay_key`, NOT to qdshell | **PASS** | probe reassembled the test password from overlay events + journal `qdwin: overlay_key role=2 sym=… utf8="x" state=PRESSED` for each char |
+| 7 | **Security boundary**: typed-while-locked keystrokes route to locker via `overlay_key`, NOT to qdshell | **PASS** | probe reassembled the test password from overlay events + journal `qdwin: overlay_key role=2 sym=… utf8="x" state=PRESSED` for each char (historical: that log line wrote the typed password to the journal and was redacted 2026-10-01; it is now `qdwin: overlay_key role=2 seq=<n> to=locker`) |
 
 Scenarios 03 (idle), 04 (lid/suspend), 06 (shell crash) — not
 exercised in this run. Note that 03 (idle, via `ext-idle-notify-v1`)

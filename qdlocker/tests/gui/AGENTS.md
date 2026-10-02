@@ -63,7 +63,7 @@ wall-clock parallelism, clone the base VM per
 | Ctrl+Alt+L → locker engages | `qdwin_chord ctrl alt -- l` then `qdlocker_wait_for_lock` | qdwin's global hotkey emits `lock_requested(3=manual)` on `qdwin_locker_v1`; qdlocker calls `set_locked(1)`. If `qdlocker_wait_for_lock` times out, the C-side `bind_qdwin_locker` plumbing isn't wired — see `qdwin/doc/locker.md` |
 | Password input while locked | **NOT** keyboard typed into a TextInput — keys arrive via `overlay_key` event on `qdwin_locker_v1`. Type via `qdwin_chord` / `qdwin_qmp_key` and assert via `qdlocker_ctrl status` (`prompt-len=N`) | If the prompt length advances on `qdshell_ctrl` instead, the overlay_key router isn't checking `qdwin->locker_resource` first — security regression, see scenario 05 |
 | Forcing a lock without keyboard | `qdlocker_ctrl lock` | injects a synthetic `lock_requested(reason=manual)` into the controller; equivalent to Ctrl+Alt+L for non-keyboard scenarios |
-| Forcing an unlock for cleanup | restart the user unit: `systemctl --user restart qdlocker.service` from inside the VM | tears the lock surface down, recreates it in the unlocked state |
+| Forcing an unlock for cleanup | `qdlocker_drain_lock_state` (types the password through the overlay path; falls back to restarting the qdwin session) | do NOT restart only `qdlocker.service`: qdwin holds the lock fail-secure across a locker restart (`lock held (fail-secure) cause=locker_disconnect`), the fresh locker binds with `initially_locked=1`, and the session stays locked — a following Ctrl+Alt+L then types its `l` into the prompt instead of locking |
 | Lock-state introspection | `qdlocker_ctrl status` → `locked=<bool> prompt-len=<n> pam-ready=<bool>` | always-on; the load-bearing assertion in every scenario |
 | Last-auth-result | `qdlocker_ctrl unlock-result` → `last=success\|failed\|none` | survives until the next lock cycle |
 | Idle-trigger | wall-clock wait for `QDLOCKER_IDLE_MS` (default 300000 ms = 5 min) — scenarios shorten via a `qdlocker.service.d` drop-in (`QDLOCKER_IDLE_MS=8000`) + restart. NOT 3000: setup+vm-exec latency can exceed a 3s threshold and pre-lock the baseline (the test races itself) | watches `ext-idle-notify-v1`; scenario 03 |
@@ -94,8 +94,8 @@ qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running |
 qdlocker_session_healthy || { echo "session not up"; exit 2; }
 ```
 
-`qdlocker-helpers.sh` sources `qdwin-helpers.sh` from the qdwin
-sibling repo (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`, and
+`qdlocker-helpers.sh` sources `qdwin-helpers.sh` from the in-tree
+`qdwin/` component (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`, and
 `qdwin_qmp_key` work as documented in qdwin's AGENTS.md) and adds
 locker-specific accessors. qdlocker core scenarios use the qdlocker socket,
 Quickshell IPC where explicitly required, and direct VM commands; they must
@@ -315,6 +315,24 @@ produces a confident wrong verdict in either direction. Run OCR only to pull
 long text out of a frame you have ALSO opened. If you cannot open images at
 all, record ERROR naming the missing capability - never PASS, never FAIL, and
 never fall back to OCR and grade anyway.
+
+**NEVER RE-OPEN A PATH; JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.** Your
+image viewer shows as BLACK any region of an image that repeats, at the same
+position in an image of the same size, something it already showed you in this
+session. So the harness gives every image it writes a size of its own (a thin
+black right/bottom margin; the raw screen size is in the frame's `.raw`
+sidecar), and a capture you open for the first time is seen correctly. What
+still breaks it is opening the SAME file again, or a same-size copy of one. For
+any second look, and for any image the harness did not just hand you (a crop
+you made, a copy), run
+`$QDISTRO_REPO/scripts/vm/vm-gui "$VMNAME" view-copy <image>` (for a crop add
+`--source <capture> --crop WxH+X+Y`) and open the path it prints. Click-preview
+`.raw.png` and click-confirm `.post.png` files are frames like any other.
+Decide that a frame is black, blank, or missing something ONLY from the pixels
+of a frame you have just opened - never from process state, from rejected
+attempts, from the harness's "same screen pixels" note, or from an earlier
+frame. When you copy a frame, copy its `.raw` sidecar with it
+(`cp F F.raw DEST/`), or use `view-copy`.
 
 For a `required` scenario the gate also reads the frames itself, host-side,
 after the agent exits: it checks every attested frame is DECODABLE and, when a

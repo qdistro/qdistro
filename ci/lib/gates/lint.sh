@@ -31,13 +31,27 @@ lint_shell_files() {
             | tr '\0' '\n' \
             | awk -v root="$QDISTRO_REPO" '
                 /^tests\/integration\// { n = gsub("/", "/"); if (n > 3 || $0 !~ /\.sh$/) next; print root "/" $0; next }
-                /^ci\/bin\// { if ($0 ~ /\.sh$/ || $0 !~ /\./) print root "/" $0; next }
+                /^ci\/bin\// {
+                    if ($0 ~ /\.sh$/) { print root "/" $0; next }
+                    if ($0 !~ /\./) {
+                        file = root "/" $0
+                        if ((getline shebang < file) > 0 && shebang ~ /^#!.*(\/|[[:space:]])(ba)?sh([[:space:]]|$)/)
+                            print file
+                        close(file)
+                    }
+                    next
+                }
                 /\.sh$/ { print root "/" $0 }'
         return 0
     fi
     find "$QDISTRO_REPO/scripts" "$QDISTRO_REPO/ci/bin" "$QDISTRO_REPO/ci/lib" "$QDISTRO_REPO/image" \
         -type f -name '*.sh' 2>/dev/null
-    find "$QDISTRO_REPO/ci/bin" -type f ! -name '*.*' 2>/dev/null   # qci itself
+    find "$QDISTRO_REPO/ci/bin" -type f ! -name '*.*' 2>/dev/null | while IFS= read -r f; do
+        IFS= read -r shebang < "$f" || true
+        if [[ $shebang =~ ^#!.*(/|[[:space:]])(ba)?sh([[:space:]]|$) ]]; then
+            printf '%s\n' "$f"
+        fi
+    done
     find "$QDISTRO_REPO/tests/integration" -maxdepth 2 -type f -name '*.sh' 2>/dev/null
 }
 

@@ -139,7 +139,7 @@ content inside host qdwin chrome.
 ### S4 — journal and process cross-checks
 
 ```bash
-$VMEXEC "$VM" "journalctl --since '3min ago' | grep -E 'qdwin: view_stream approved|stream_input claim OK' | tail -20"
+$VMEXEC "$VM" "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --since '3min ago' | grep -E 'qdwin: view_stream approved|stream_input claim OK' | tail -20"
 $VMEXEC "$VM" 'pgrep -af "socat.*VSOCK-CONNECT|freerdp|xfreerdp|wlfreerdp|sdl-freerdp"'
 ```
 

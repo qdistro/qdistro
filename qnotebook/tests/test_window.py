@@ -444,18 +444,26 @@ def test_quick_note_appends_with_timestamp(win):
 
 
 def test_dark_mode_toggle_applies_palette(win, qapp):
-    win.act_dark.setChecked(True)
+    from PyQt6.QtGui import QColor, QPalette
+
+    win.act_appearance_dark.trigger()
     qapp.processEvents()
     s = QSettings("qnotebook", "qnotebook")
+    assert s.value("appearance/theme_mode") == "dark"
     assert bool(s.value("dark_mode", False, type=bool))
     sheet = win.editor.styleSheet()
-    assert "#1e1e1e" in sheet
-    win.act_dark.setChecked(False)
+    assert "palette(base)" in sheet
+    assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("#2b2b2b")
+    win.act_appearance_native.trigger()
     qapp.processEvents()
-    assert win.editor.styleSheet() == ""
+    assert s.value("appearance/theme_mode") == "native"
+    assert bool(s.value("dark_mode", True, type=bool)) is False
+    assert "palette(base)" in win.editor.styleSheet()
 
 
 def test_dark_mode_persists_across_open(qapp, tmp_notebook, qtbot):
+    from PyQt6.QtGui import QColor, QPalette
+
     s = QSettings("qnotebook", "qnotebook")
     s.setValue("dark_mode", True)
     s.sync()
@@ -463,8 +471,10 @@ def test_dark_mode_persists_across_open(qapp, tmp_notebook, qtbot):
     w.open_notebook(str(tmp_notebook))
     qtbot.addWidget(w)
     qapp.processEvents()
-    assert w.act_dark.isChecked()
-    assert "#1e1e1e" in w.editor.styleSheet()
+    assert w.act_appearance_dark.isChecked()
+    assert s.value("appearance/theme_mode") == "dark"
+    assert "palette(base)" in w.editor.styleSheet()
+    assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("#2b2b2b")
 
 
 def test_save_atomic_write(win, tmp_notebook):

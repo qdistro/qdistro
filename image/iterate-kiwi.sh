@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 EXEC="$HERE/../scripts/vm/vm-exec"
 SCRIPT="$HERE/../scripts/vm/vm-script"
 
-# The pin in config.xml must agree with the manifest build.sh --no-sync reads
+# The pin in snapshot.conf must agree with the manifest build.sh --no-sync reads
 # (a bumped snapshot would otherwise stop the loop with "re-sync"), so
 # refresh the manifest here and push it too. release-stamp.sh is sourced by
 # config.sh from the SYNCED tree (/root/qdistro-src/image/lib/), not

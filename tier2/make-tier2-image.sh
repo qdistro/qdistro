@@ -28,34 +28,51 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 2
 fi
 
-# Validate the local pin even when probes copy tier2/ alone to a temporary
-# build directory. When the qdistro image source is beside us, additionally
-# require the two pins to agree; a snapshot bump must update both atomically.
-if [ ! -s SNAPSHOT ]; then
-    log "FATAL: tier2/SNAPSHOT is missing"
-    exit 2
+# The Tumbleweed snapshot the workloads' zypper repos are pinned to. The one
+# place it is written is the repo-root snapshot.conf (shared with the image and
+# the test VM bases); there is no tracked tier2/SNAPSHOT. Sources, in order:
+#   1. snapshot.conf of the checkout beside us;
+#   2. a SNAPSHOT file already in this directory: the installed build context
+#      (/usr/lib/qdistro/tier2, written by install-templates-for-vm.sh) or a
+#      probe's staged copy;
+#   3. /etc/qdistro/release on a qdistro image, or /etc/qdistro/test-substrate
+#      on a cloud-derived qci VM (drivers that copy tier2/ alone to /tmp).
+# When both 1 and 2 exist they must agree; a stale staged pin is refused.
+pin_from_conf() { sed -n 's/^snapshot=\([0-9]\{8\}\)$/\1/p' "$1" | head -n1; }
+tier2_snapshot=""
+if [ -e "$REPO_ROOT/snapshot.conf" ]; then
+    tier2_snapshot="$(pin_from_conf "$REPO_ROOT/snapshot.conf")"
+    [ -n "$tier2_snapshot" ] || { log "FATAL: $REPO_ROOT/snapshot.conf has no snapshot=YYYYMMDD line"; exit 2; }
 fi
-tier2_snapshot="$(<SNAPSHOT)"
-if [[ ! "$tier2_snapshot" =~ ^[0-9]{8}$ ]]; then
-    log "FATAL: tier2/SNAPSHOT must contain exactly YYYYMMDD"
-    exit 2
-fi
-if [ -e "$REPO_ROOT/image/config.xml" ] \
-        || [ -e "$REPO_ROOT/image/build.sh" ]; then
-    if [ ! -x "$REPO_ROOT/image/build.sh" ] \
-            || [ ! -s "$REPO_ROOT/image/config.xml" ]; then
-        log "FATAL: adjacent qdistro image snapshot source is incomplete"
+if [ -s SNAPSHOT ]; then
+    local_snapshot="$(<SNAPSHOT)"
+    if [[ ! "$local_snapshot" =~ ^[0-9]{8}$ ]]; then
+        log "FATAL: $SCRIPT_DIR/SNAPSHOT must contain exactly YYYYMMDD"
         exit 2
     fi
-    image_snapshot="$(bash "$REPO_ROOT/image/build.sh" --snapshot-id)" || {
-        log "FATAL: could not read qdistro's pinned image snapshot"
-        exit 2
-    }
-    if [ "$tier2_snapshot" != "$image_snapshot" ]; then
-        log "FATAL: tier2/SNAPSHOT ($tier2_snapshot) does not match image snapshot ($image_snapshot)"
+    if [ -n "$tier2_snapshot" ] && [ "$local_snapshot" != "$tier2_snapshot" ]; then
+        log "FATAL: $SCRIPT_DIR/SNAPSHOT ($local_snapshot) does not match snapshot.conf ($tier2_snapshot)"
         exit 2
     fi
+    tier2_snapshot="$local_snapshot"
 fi
+for stamp in /etc/qdistro/release /etc/qdistro/test-substrate; do
+    [ -z "$tier2_snapshot" ] && [ -r "$stamp" ] || continue
+    tier2_snapshot="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' "$stamp" | head -n1)"
+done
+if [ -z "$tier2_snapshot" ]; then
+    log "FATAL: no snapshot pin (snapshot.conf, $SCRIPT_DIR/SNAPSHOT, /etc/qdistro/release or /etc/qdistro/test-substrate)"
+    exit 2
+fi
+
+# Build from a staged copy of this directory so the pin is part of the context
+# without writing into the source tree (COPY hashes content, so the layer cache
+# still hits across stagings).
+context="$(mktemp -d "${TMPDIR:-/tmp}/tier2-context.XXXXXX")"
+trap 'rm -rf "$context"' EXIT
+cp -a . "$context/"
+printf '%s\n' "$tier2_snapshot" > "$context/SNAPSHOT"
+log "tier-2 workloads pinned to Tumbleweed snapshot $tier2_snapshot"
 
 discover_workloads() {
     local -a out=()
@@ -82,10 +99,11 @@ build_workload() {
 
     log "building $tag from $cf"
     if ! podman build \
-            --file "$cf" \
+            --file "$context/$cf" \
+            --build-arg "SNAPSHOT=$tier2_snapshot" \
             --tag "$tag" \
             --layers \
-            .; then
+            "$context"; then
         log "FAIL: $tag (podman build returned non-zero)"
         return 1
     fi

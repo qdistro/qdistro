@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 
 import pytest
 
@@ -37,6 +38,73 @@ def broker(tmp_path: Path, rules_dir: Path) -> _StubBroker:
 
 def _as_arbitrary_admin(broker: _StubBroker) -> None:
     broker.set_peer(uid=ADMIN_UID, pid=DEAD_PID, exe=ARBITRARY_ADMIN_EXE)
+
+
+def _installed_admin_app_argv() -> list[str]:
+    """Read the production command and ensure the installer lays it down.
+
+    The broker sees the Python process argv, not the desktop wrapper path.
+    Deriving that argv from the shipped launcher prevents an independent test
+    fixture from silently retaining the broker's old trusted script path.
+    """
+    root = Path(__file__).resolve().parents[2]
+    launcher = root / "deploy/start-admin-app-wayland.sh"
+    installer = root / "scripts/install/install-admin-app-for-vm.sh"
+    lines = [line for line in launcher.read_text().splitlines()
+             if line.startswith("exec /usr/bin/python3 ")]
+    assert len(lines) == 1, f"expected one Python exec in {launcher}: {lines}"
+    argv = shlex.split(lines[0])
+    assert len(argv) == 4 and argv[0] == "exec" and argv[-1] == "$@", argv
+    assert f'"$DESTDIR{argv[2]}"' in installer.read_text(), (
+        f"installer does not install the launched script {argv[2]}")
+    return argv[1:3]
+
+
+@pytest.mark.parametrize("decision,allowed", [("allow", True), ("deny", False)])
+def test_installed_admin_app_can_read_and_decide_pending(
+        broker, monkeypatch, decision, allowed):
+    argv = _installed_admin_app_argv()
+    rid = broker._enqueue(NON_ADMIN_UID, 0, PEER_EXE, 0,
+                          "qdistro.test.installed-admin-app", {},
+                          delegated=False, one_shot=True)
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe=argv[0])
+    monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid: argv)
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+
+    pending = broker.GetPending()
+    assert [int(row["id"]) for row in pending] == [rid]
+    assert str(pending[0]["action"]) == "qdistro.test.installed-admin-app"
+    broker.DecideRequest(rid, decision, "once")
+    assert broker._pending[rid].decision is allowed
+    assert broker.decided_signals[-1] == (rid, decision)
+    assert broker.GetPending() == []
+
+
+@pytest.mark.cheat_aware(
+    protects="Installed app identity must not admit unrelated or non-admin peers",
+    severity="critical",
+    cheats=["trust any uid-1000 Python script", "skip the broker peer check"],
+    consequence="A different process could approve a request without the admin UI",
+)
+def test_installed_admin_app_identity_does_not_trust_other_peers(
+        broker, monkeypatch):
+    trusted_argv = _installed_admin_app_argv()
+    rid = broker._enqueue(NON_ADMIN_UID, 0, PEER_EXE, 0,
+                          "qdistro.test.installed-admin-app", {},
+                          delegated=False, one_shot=True)
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    # An arbitrary admin Python process and a non-admin process claiming the
+    # approved script argv must both be refused by the real broker methods.
+    for uid, argv in ((ADMIN_UID, [trusted_argv[0], "/tmp/other.py"]),
+                      (NON_ADMIN_UID, trusted_argv)):
+        broker.set_peer(uid=uid, pid=1234, exe=trusted_argv[0])
+        monkeypatch.setattr(B, "_read_proc_cmdline", lambda _pid, a=argv: a)
+        for method, args in ((broker.GetPending, ()),
+                             (broker.DecideRequest, (rid, "allow", "once"))):
+            with pytest.raises(dbus.DBusException) as ei:
+                method(*args)
+            assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+    assert broker._pending[rid].decision is None
 
 
 def test_arbitrary_uid_1000_cannot_decide_request(broker):

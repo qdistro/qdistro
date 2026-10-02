@@ -35,7 +35,7 @@ CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
   --show-cursor --no-pager 2>/dev/null | tail -1 | sed 's/^-- cursor: //'")
 sleep 10
 N=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager 2>/dev/null \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager 2>/dev/null \
    | grep -c 'qdshell-bar-content-Virtual-1'")
 echo "bar-content lines in 10 s idle: $N"
 ```
@@ -68,7 +68,7 @@ CURSOR2=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
   --show-cursor --no-pager 2>/dev/null | tail -1 | sed 's/^-- cursor: //'")
 sleep 5
 N2=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 --after-cursor='$CURSOR2' --no-pager 2>/dev/null \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR2' --no-pager 2>/dev/null \
    | grep -c 'qdshell-bar-content-Virtual-1'")
 echo "bar-content lines in 5 s idle after window cycle: $N2"
 ```
@@ -82,7 +82,7 @@ commit again.
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  "journalctl _UID=1000 -n 20 --no-pager | grep '^.*qdwin:'" | head -20
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service -n 20 --no-pager | grep '^.*qdwin:'" | head -20
 ```
 
 **Assert (3.1):** diagnostic only. The load-bearing checks are the

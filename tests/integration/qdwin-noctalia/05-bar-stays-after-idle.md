@@ -8,6 +8,12 @@ policy) and the test wakes it via mouse motion, the Noctalia bar
 reappears at its original position with no protocol errors during the
 wake transition.
 
+A host that can commit DPMS-on stays on that path: the bar is visible in
+the top 31 px after wake, and the compositor journal has zero error lines.
+virtio-gpu may reject the DPMS-on atomic commit. That journal record is a
+SKIP from step 3 (shell exit 0), not a failed bar assert. Step 4 does not
+run after that SKIP.
+
 This exercises:
 - Configure/ack handling on output power-cycle
 - weston's DPMS-on path through layer-shell surfaces
@@ -219,8 +225,9 @@ PY
 "$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p' > /tmp/05-arm.cur"
 noct_restart
 
-# Fail fast (don't burn the 75s idle wait) if the policy didn't actually arm:
-# the proven smoke asserts the same 'idle policy armed: ... displayOff=60000ms'
+# Fail fast (don't burn the 75s idle wait) if the policy didn't actually arm.
+# THIS WAIT IS CURSOR-SCOPED ON PURPOSE -- see the driver note under this block.
+# The proven smoke asserts the same 'idle policy armed: ... displayOff=60000ms'
 # journal line. Wait (bounded) for it AFTER the restart cursor; a missing line
 # means the write-path/schema is wrong, not that DPMS is slow.
 "$QDWIN_VM_EXEC" "$VMNAME" 'source /tmp/qci-gui-waiters.sh
@@ -229,6 +236,30 @@ cur=$(cat /tmp/05-arm.cur 2>/dev/null)
 await_journal_line_after_cursor "$cur" "idle policy armed:.*displayOff=60000ms" 15 1 _UID=1000' \
     || { echo "FAIL: qdshell did not arm displayOff=60000ms after settings write (schema/path regression?)"; exit 1; }
 ```
+
+> **Driver note (MUST): carry the arm wait over exactly.** When you fold this
+> Setup into your one claimed guest driver, the arm check stays the
+> cursor-scoped wait above, in this order:
+>
+> 1. `cur=$(journalctl _UID=1000 -n0 --show-cursor | sed -n 's/^-- cursor: //p')`
+>    BEFORE the restart (fail if `$cur` is empty);
+> 2. the restart (`runuser -l admin -c "systemctl --user reset-failed qdshell.service qdwin-compositor.service && systemctl --user restart qdshell.service"`);
+> 3. `await_journal_line_after_cursor "$cur" "idle policy armed:.*displayOff=60000ms" 15 1 _UID=1000`
+>    — defined by `/tmp/qci-gui-waiters.sh`, which your driver's first line
+>    already sourced.
+>
+> Do NOT replace step 3 with a tail or time window (`journalctl -n <N> | grep`,
+> `--since '<N> seconds ago'`, a fixed `sleep` and one look). A qdshell restart
+> writes well over a hundred more UID-1000 journal lines (layer-shell maps, QML
+> warnings) within seconds AFTER the arm line, so a tail window misses a line
+> that WAS logged. full-20260926T153217Z-3807077 lost this scenario exactly
+> that way: `sleep 8` then `journalctl _UID=1000 -n 80 | grep` recorded FAIL
+> "qdshell did not arm displayOff=60000ms". Replayed on a fresh VM from a
+> golden of the same main commit (30fc68cf7), 8 s after the restart the
+> `displayOff=60000ms` arm line was present after the cursor but followed by
+> 114 more lines, so `-n 80` held 0 hits. A missing arm line
+> after the cursor-scoped 15 s wait is a real FAIL; a miss from any other
+> shape of check is your driver's error, not the product's.
 
 ## Steps
 
@@ -271,10 +302,33 @@ qdshell `power.displayOff*` settings, and the user journal for
 
 ### Step 3 — wake screen, capture wake transition
 
+> **Driver note (MUST):** after the mouse moves, the shell below polls the
+> cursor-scoped `qdwin-compositor.service` journal for about 5s. If that
+> shell prints a line starting with `SKIP:`, write `SKIP <reason>` to
+> status.txt and exit 0. Do not keep polling screenshots for the bar.
+> Step 4 does not run after this SKIP (the atomic line would also trip the
+> error-line assert, which is why the skip must happen before that assert
+> and must end the scenario). A missing `/tmp/05-wake.cur` is FAIL, not
+> SKIP. If the shell does not print `SKIP:`, fall through to the screenshot
+> and the strict bar assert. Absence of the signature is not a skip.
+
 ```bash
 qdwin_mouse_move 800 400
 sleep 0.5
 qdwin_mouse_move 850 450
+# Wake check is the compositor journal after the step-2 cursor in
+# /tmp/05-wake.cur (journalctl --user -u qdwin-compositor.service
+# --after-cursor), not a black screenshot. The poll returns 0 only for a
+# line that ends in "atomic: couldn't commit new state: Invalid argument".
+# "couldn't compile atomic state", another errno, and the same words inside
+# quotes do not match. No hit within 5s falls through; that is not a skip.
+# shell exit on this SKIP is 0 (not 77). Step 4 does not run after it.
+wake_cur=$("$QDWIN_VM_EXEC" "$VMNAME" 'cat /tmp/05-wake.cur 2>/dev/null' || true)
+[ -n "$wake_cur" ] || { echo "FAIL: missing pre-idle/wake compositor cursor"; exit 1; }
+if noct_poll_dpms_on_atomic_einval "$wake_cur" 5; then
+    echo "SKIP: virtio-gpu rejected the DPMS-on atomic commit (atomic: couldn't commit new state: Invalid argument)"
+    exit 0
+fi
 sleep 2
 qdwin_screenshot /tmp/05-step3-wake.png
 ```
@@ -287,6 +341,10 @@ log is clean. OCR can miss the small clock text, and unchanged minute text
 is possible when the wait/wake lands within the same displayed minute.
 
 ### Step 4 — confirm clean journal
+
+This step does not run when step 3 exited 0 on the virtio-gpu DPMS-on
+atomic EINVAL SKIP. On the capable-host path (that record absent), the
+error-line assert below is unchanged.
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" 'cur=$(cat /tmp/05-wake.cur 2>/dev/null)
@@ -325,7 +383,11 @@ noct_restart
 
 ## Pass criteria
 
-All asserts in steps 1-4 pass.
+On a host that can commit DPMS-on, all asserts in steps 1-4 pass (bar
+visible in the top 31 px after wake, clean journal). The virtio-gpu
+DPMS-on EINVAL record is neither a pass nor a fail of those asserts:
+step 3 prints `SKIP:` and exits 0, and step 3's bar assert and step 4
+do not run.
 
 ## Known failure modes
 
@@ -345,3 +407,10 @@ All asserts in steps 1-4 pass.
  Battery}` in MINUTES (not the retired `idle.screenOffTimeout`, and not
  `~/.config/noctalia/`); (c) the user journal shows
  `idle policy armed: ... displayOff=60000ms` after `noct_restart`.
+
+4. **DPMS-on atomic commit rejected (virtio-gpu)** — after the step-2
+ cursor, `qdwin-compositor.service` logs `atomic: couldn't commit new
+ state: Invalid argument`. That is a host GPU capability gap, the same
+ class as `idleDpms!=true`. Step 3 prints `SKIP:` and exits 0. Do not
+ keep polling screenshots for the bar. Step 4 does not run. A black
+ screenshot is not this signal, and a different errno is not this skip.

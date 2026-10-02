@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from qterminator.config import Config
-from qterminator.theme import apply_theme
+from qterminator.theme import attach_presentation
 from qterminator.window import MainWindow
 
 
@@ -18,22 +18,26 @@ def parse_args():
     )
     # Compatible with Terminator
     parser.add_argument(
-        "-d", "--working-directory",
+        "-d",
+        "--working-directory",
         metavar="DIR",
         help="Set the working directory for the terminal",
     )
     parser.add_argument(
-        "-T", "--title",
+        "-T",
+        "--title",
         dest="title",
         help="Specify a title for the window",
     )
     parser.add_argument(
-        "-e", "--command",
+        "-e",
+        "--command",
         dest="command",
         help="Specify a single command to execute inside the terminal",
     )
     parser.add_argument(
-        "-x", "--execute",
+        "-x",
+        "--execute",
         dest="execute",
         nargs=argparse.REMAINDER,
         help="Use the rest of the command line as a command to execute",
@@ -43,32 +47,40 @@ def parse_args():
         help="Window geometry as WxH or WxH+X+Y (e.g., 1024x768 or 1024x768+100+50)",
     )
     parser.add_argument(
-        "-m", "--maximise", "-M", "--maximize",
+        "-m",
+        "--maximise",
+        "-M",
+        "--maximize",
         action="store_true",
         dest="maximise",
         help="Maximize the window",
     )
     parser.add_argument(
-        "-f", "--fullscreen",
+        "-f",
+        "--fullscreen",
         action="store_true",
         help="Make the window fill the screen",
     )
     parser.add_argument(
-        "-b", "--borderless",
+        "-b",
+        "--borderless",
         action="store_true",
         help="Disable window borders (frameless window)",
     )
     parser.add_argument(
-        "-H", "--hidden",
+        "-H",
+        "--hidden",
         action="store_true",
         help="Hide the window at startup",
     )
     parser.add_argument(
-        "-p", "--profile",
+        "-p",
+        "--profile",
         help="Use a different profile as the default",
     )
     parser.add_argument(
-        "-l", "--layout",
+        "-l",
+        "--layout",
         help="Launch with the given saved layout name",
     )
     parser.add_argument(
@@ -82,12 +94,14 @@ def parse_args():
         help="List all saved layouts and exit",
     )
     parser.add_argument(
-        "-r", "--role",
+        "-r",
+        "--role",
         dest="role",
         help="Set a custom WM_WINDOW_ROLE property on the window",
     )
     parser.add_argument(
-        "-i", "--icon",
+        "-i",
+        "--icon",
         dest="icon",
         help="Set a custom icon for the window (path to image file)",
     )
@@ -118,14 +132,15 @@ def _apply_geometry(window, geometry):
         size_part = geom
         x = y = None
         # Check for position
-        for sep in ['+', '-']:
+        for sep in ["+", "-"]:
             if sep in geom[1:]:
                 idx = geom.index(sep, 1)
                 size_part = geom[:idx]
                 pos_part = geom[idx:]
                 # Parse "+X+Y" or "+X-Y" etc.
                 import re
-                m = re.match(r'([+-]\d+)([+-]\d+)', pos_part)
+
+                m = re.match(r"([+-]\d+)([+-]\d+)", pos_part)
                 if m:
                     x = int(m.group(1))
                     y = int(m.group(2))
@@ -146,6 +161,7 @@ def _set_process_name(name="qterminator"):
     """
     try:
         import setproctitle
+
         setproctitle.setproctitle(name)
         return
     except ImportError:
@@ -153,6 +169,7 @@ def _set_process_name(name="qterminator"):
     # Fallback: Linux-specific prctl
     try:
         import ctypes
+
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         # PR_SET_NAME = 15. Comm is limited to 15 chars + null.
         libc.prctl(15, name.encode("ascii")[:15], 0, 0, 0)
@@ -188,12 +205,12 @@ def main():
     app.setApplicationVersion("0.1.0")
 
     config = Config()
-    theme_mode = config.get("general", "theme_mode", default="system")
-    resolved_theme = apply_theme(app, theme_mode)
+    resolved_theme = attach_presentation(app, config)
 
     # Set custom icon if given
     if args.icon:
         from PyQt6.QtGui import QIcon
+
         app.setWindowIcon(QIcon(args.icon))
 
     # Borderless window (frameless)
@@ -225,12 +242,15 @@ def main():
         layouts = config.get("layouts", default={})
         if isinstance(layouts, dict) and args.layout in layouts:
             from qterminator.layout import restore_layout
+
             restore_layout(window, layouts[args.layout])
             restored = True
-    elif (not args.no_restore
-            and not args.working_directory
-            and args.execute is None
-            and not args.command):
+    elif (
+        not args.no_restore
+        and not args.working_directory
+        and args.execute is None
+        and not args.command
+    ):
         restored = window.restore_layout()
 
     execute_argv = _execute_shell_command(args)
@@ -265,11 +285,13 @@ def main():
     # automatic when window (and so the receiver) is GC'd at exit.
     try:
         from qterminator import qdistro_integration as _qdi
+
         window._qdistro_receiver = _qdi.maybe_install(window)
     except Exception as _qd_e:  # noqa: BLE001
         # Never let a bus / SDK quirk block app startup.
-        print(f"[qterminator] qdistro App1 registration failed: {_qd_e}",
-              file=sys.stderr, flush=True)
+        print(
+            f"[qterminator] qdistro App1 registration failed: {_qd_e}", file=sys.stderr, flush=True
+        )
 
     # Window state
     if args.fullscreen:

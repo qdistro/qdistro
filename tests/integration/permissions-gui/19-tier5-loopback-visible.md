@@ -165,7 +165,7 @@ enough: a binary without a live daemon cannot inject.
 ### S4 — journal cross-check (soft / diagnostic)
 
 ```bash
-$VMEXEC "$VM" "journalctl --since '1min ago' | grep -E 'qdwin:.*tier5|tier5.*qdwin' | head -20"
+$VMEXEC "$VM" "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --since '1min ago' | grep -E 'qdwin:.*tier5|tier5.*qdwin' | head -20"
 ```
 
 **Assert**: at least one journal line indicating qdwin saw the

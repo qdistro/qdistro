@@ -33,16 +33,24 @@ setup() {
 #!/bin/bash
 printf 'fakeadmin:x:%s:100:Fake Admin:%s:/bin/bash\n' "\$2" "\$QDT_FAKE_HOME"
 EOF
-    # Stand-ins for the launched programs: they only have to write a marker to
-    # the inherited log fd.
-    for prog in python3 qterminal; do
-        cat > "$FAKEBIN/$prog" <<'EOF'
+    # Stand-ins for the launched programs: they write a marker to the
+    # inherited log fd. start-admin-app.sh returns only once the app reports
+    # its first painted frame by creating $QDISTRO_ADMIN_APP_READY_FILE (see
+    # _FirstPaintMarker in admin_app/qdistro_admin_app.py), so the python3
+    # stand-in keeps that contract too and logs the marker path it was given.
+    cat > "$FAKEBIN/qterminal" <<'EOF'
 #!/bin/bash
 echo "LAUNCHED-MARKER"
 EOF
-        chmod +x "$FAKEBIN/$prog"
-    done
-    chmod +x "$FAKEBIN/getent"
+    cat > "$FAKEBIN/python3" <<'EOF'
+#!/bin/bash
+echo "LAUNCHED-MARKER"
+echo "READY-FILE=${QDISTRO_ADMIN_APP_READY_FILE-<unset>}"
+if [ -n "${QDISTRO_ADMIN_APP_READY_FILE:-}" ]; then
+    : > "$QDISTRO_ADMIN_APP_READY_FILE"
+fi
+EOF
+    chmod +x "$FAKEBIN/qterminal" "$FAKEBIN/python3" "$FAKEBIN/getent"
 
     QDT_FAKE_HOME="$HOMEDIR"
     HOMELOG="$HOMEDIR/.local/state/qdistro/admin-app.log"
@@ -191,14 +199,17 @@ assert_launched() {
 }
 
 @test "the launcher still starts when logging is impossible" {
-    # No mktemp, unwritable state homes: the last resort is /dev/null and the
-    # program must still be launched.
+    # No mktemp log file, unwritable state homes: the last resort is /dev/null
+    # and the program must still be launched. Only the log's mktemp fails;
+    # the first-paint marker directory (mktemp -d) is still made, so this
+    # isolates the logging fallback (a later test covers losing both).
     local xdg="$BATS_TEST_TMPDIR/ro-state"
     mkdir -p "$xdg"
     chmod 0500 "$xdg"
     chmod 0500 "$HOMEDIR"
     cat > "$FAKEBIN/mktemp" <<'EOF'
 #!/bin/bash
+[ "$1" = "-d" ] && exec /usr/bin/mktemp "$@"
 exit 1
 EOF
     chmod +x "$FAKEBIN/mktemp"
@@ -258,4 +269,41 @@ EOF
     [[ "$stderr" == *"no private state dir for admin-app.log"* ]]
     [ ! -e "$xdg/qdistro/admin-app.log" ]
     [ ! -e "$HOMELOG" ]
+}
+
+@test "no directory for the first-paint marker: app still started, launcher exits 3" {
+    # Every mktemp fails, so there is neither a log file nor a private marker
+    # directory. The app must still be started, but never handed a marker
+    # path built from an empty directory (/painted) or one inherited from the
+    # caller, and the launcher must report it could not prove the frame.
+    local xdg="$BATS_TEST_TMPDIR/state"
+    mkdir -p "$xdg"
+    cat > "$FAKEBIN/mktemp" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+    chmod +x "$FAKEBIN/mktemp"
+    run_launcher "$APP" XDG_STATE_HOME="$xdg" \
+        QDISTRO_ADMIN_APP_READY_FILE="$BATS_TEST_TMPDIR/inherited-painted"
+    [ "$status" -eq 3 ]
+    [[ "$output" =~ ^[0-9]+$ ]]
+    [[ "$stderr" == *"no private directory for the first-paint marker"* ]]
+    wait_for_marker "$xdg/qdistro/admin-app.log"
+    grep -qx 'READY-FILE=<unset>' "$xdg/qdistro/admin-app.log"
+    [ ! -e "$BATS_TEST_TMPDIR/inherited-painted" ]
+}
+
+@test "the app gets a fresh private marker path that the launcher removes" {
+    local xdg="$BATS_TEST_TMPDIR/state"
+    mkdir -p "$xdg"
+    run_launcher "$APP" XDG_STATE_HOME="$xdg"
+    assert_launched
+    [ -z "$stderr" ]
+    wait_for_marker "$xdg/qdistro/admin-app.log"
+    local ready
+    ready=$(sed -n 's/^READY-FILE=//p' "$xdg/qdistro/admin-app.log")
+    [[ "$ready" == /*/painted ]]
+    [[ "$(basename "$(dirname "$ready")")" == qdistro-admin-app-ready.* \
+        || "$(basename "$(dirname "$ready")")" == tmp.* ]]
+    [ ! -e "$(dirname "$ready")" ]
 }

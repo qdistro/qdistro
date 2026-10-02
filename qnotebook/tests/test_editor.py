@@ -84,8 +84,7 @@ def test_clear_heading(qapp):
     ed.load_markdown("# hello\n")
     ed.set_heading(0)
     out = ed.markdown()
-    assert not out.startswith("#")
-    assert "hello" in out
+    assert out == "hello\n"
     ed.deleteLater()
 
 

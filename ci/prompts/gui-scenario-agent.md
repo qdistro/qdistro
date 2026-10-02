@@ -50,7 +50,42 @@ Procedure:
    **ERROR** naming the missing capability. Do not record PASS, do not
    record FAIL, and do not fall back to OCR and grade anyway. If the
    scenario is `qci:visual: none`, missing image capability is not ERROR.
-7. Before every model-targeted mouse click, activate the window and run
+   **NEVER RE-OPEN A PATH; JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.**
+   Your image viewer shows as BLACK any region of an image that repeats, at the
+   same position in an image of the same size, something it already showed you
+   in this session. So every image the harness writes gets a size of its own (a
+   thin black right/bottom margin; the raw screen size is in the frame's `.raw`
+   sidecar), and a capture you open for the first time is seen correctly.
+   **THE VIEW PAD IS NOT THE SCREEN.** That right/bottom margin (1-3 px, its
+   size is the third field of the `.raw` sidecar) lies OUTSIDE the raw screen
+   area: never report it as a black strip, gap or margin, and never let it
+   fail a "fills the screen" / "no black margin on any edge" assertion. Judge
+   edges at the raw screen size; only black INSIDE that area counts. For
+   ANY second look, and for any image the harness did not just hand you (a crop
+   you made, a copy), run `vm-gui "$VMNAME" view-copy <image>` (for a crop add
+   `--source <capture> --crop WxH+X+Y`) and open the path it prints; never open
+   the same file twice. Click-preview `.raw.png` and click-confirm `.post.png`
+   files are frames like any other. Decide that a frame is black, blank, or
+   missing something ONLY from the pixels of a frame you have just opened —
+   never from process state, from rejected attempts, from the harness's
+   "same screen pixels" note, or from an earlier frame. Copy a frame together with
+   its `.raw` sidecar (`cp F F.raw DEST/`), or use `view-copy`. The harness
+   reads your session record afterwards: a PASS or FAIL on a `required`
+   scenario whose frames you never opened is recorded ERROR.
+   **A FRESH FRAME IS NOT A REACTED UI.** `screenshot-fresh` accepting a frame,
+   or two frames having different raw pixels (`raw_pix_sha`), proves only that
+   a NEW frame was captured — never that your key or click was processed or
+   that the UI reached the state the step expects. A live clock, a blinking
+   cursor or an animation changes pixels on its own. Keep every settle wait and
+   wait-for-state check the scenario lists, exactly as written, between the
+   input and the capture. Do not add waits or re-captures the scenario does not
+   authorize, and never past a deadline it states: a frame taken at a
+   scenario's deadline stands. Where a scenario authorizes a late re-capture
+   (permissions-gui/05 does), take it once, to a NEW name, and judge from it.
+7. Drive keys and clicks through the harness.
+   A hotkey asserted by typing into a focused field is not evidence the
+   binding fired. Modifier chords go through `virsh send-key`.
+   Before every model-targeted mouse click, activate the window and run
    `vm-gui "$VMNAME" click-preview X Y "visible target label"`. It moves the
    real VM pointer without a button press, then captures the evidence. Read both
    the command-line-generated annotated screenshot and zoomed crop. Confirm the
@@ -59,6 +94,7 @@ Procedure:
    A preview moves but never clicks. Only after visually confirming the marker may you run
    `vm-gui "$VMNAME" click-confirm <preview-manifest>`. Never use raw
    `vm-gui click X Y` or `xdotool click` for a model-targeted action.
+   Click preview and click-confirm apply only to mouse clicks.
 8. Save screenshots, OCR/vision notes, command logs, click preview manifests,
    `click-targets/clicks.tsv`, and journal excerpts under
    the artifact directory. Everything except the harness's own captures is
@@ -131,6 +167,45 @@ Procedure:
    survived before starting a second one -- that verification is load-bearing,
    not a formality, because discovery of a reparented process is not
    guaranteed.
+   The guest driver (the ONE root guest shell running Setup through Cleanup;
+   other users via `runuser`/`bg_start` inside it) claims the scenario as its
+   FIRST commands, in that shell itself:
+   `source /tmp/qci-gui-waiters.sh || exit 2` then
+   `qci_claim_driver /tmp/qci/<slug>/driver.lock || exit 2`. Exit 2 (library
+   missing, lock not openable) is ERROR. The claim lasts while the driver
+   SHELL or a `bg_start` job it started is alive (a helper watches them;
+   nothing the driver starts inherits the lock). The root driver enters a
+   dedicated cgroup before the claim returns; unexpected driver death kills
+   that cgroup before the lock releases, including newly forked children.
+   Call `qci_claim_done` as the final command after all foreground
+   work if a detached app must remain for inspection; it exits the driver.
+   `qci_host_step` marks its timeout as an intentional stop. Apps left by
+   an intentional stop do not block a retry -- its Setup must stop them first.
+   A second driver prints `ERROR: a second guest driver is already running`,
+   one line per process the claim is held for, and exits 1. Do not delete the
+   lock or change its path; send a waiting driver its go, stop a leftover
+   `bg_start` job, or record ERROR. Short read-only vm-exec checks do not claim.
+   Each mid-scenario HOST step (capture, click, send-key) is gated in the
+   driver by `qci_host_step <name>`: it writes a token such as `s1.2213.83917264`
+   to `/tmp/qci/<slug>/waiting` and waits up to 900s for the DIRECTORY
+   `/tmp/qci/<slug>/<token>.go`; on timeout it stops the driver (no EXIT-trap
+   teardown). The driver cannot finish until you do its host steps, so do NOT
+   wait for the driver command to return first: run it as its own
+   long-running command and, meanwhile, for each step poll `waiting` through
+   vm-exec, act, and `mkdir` that exact token's `.go` (qdwin gui/16 and
+   permissions-gui/14, full-20260926T153217Z-3807077).
+   YOUR SHELL TOOL SIGKILLS every process a command started when that command
+   returns, and SIGKILL runs no trap. A `vm-exec ... &` left in the
+   background of a command that exits (an early `exit 2`, say) is
+   therefore killed WITHOUT cleaning up its guest command, which keeps running
+   and keeps waiting on your markers. Keep vm-exec in the FOREGROUND of the
+   command that owns it, or `wait` for it before that command returns. (vm-exec
+   reaps such an orphan at its next call against the same VM, but only if the
+   orphan's identity was pinned first; permissions-gui/13 on 2026-09-25 had two
+   such orphans released by one `touch s1-go`, three RelayMessage requests, and
+   no attributable verdict.) vm-exec EXIT 75 means it refused to launch and
+   started nothing, because such an orphan is not yet confirmed gone: retry the
+   same command once before diagnosing.
 
 11. NEVER put a PIPE on vm-exec's stderr. Do NOT open your driver with
    `exec > >(tee "$LOG") 2>&1`, and do not write `out=$(vm-exec ... 2>&1)` or

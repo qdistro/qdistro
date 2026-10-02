@@ -40,6 +40,19 @@ def test_config_get_profile():
     profile = c.get_profile("default")
     assert profile["font_family"] == "Monospace"
     assert profile["scrollback_lines"] == 5000
+    assert profile["font_source"] == "desktop"
+    assert profile["color_source"] == "profile"
+
+
+def test_existing_profiles_migrate_to_local_font(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        '[profiles.default]\nfont_family = "Monospace"\nfont_size = 11\n',
+        encoding="utf-8",
+    )
+    Config._instance = None
+    c = Config()
+    assert c.get("profiles", "default", "font_source") == "local"
+    assert c.get("profiles", "default", "color_source") == "profile"
 
 
 def test_config_get_profile_fallback():
@@ -117,6 +130,7 @@ def test_config_extended_profile_defaults():
 
 # -- TOML serialization / deserialization tests --
 
+
 class TestTomlValue:
     def test_bool_true(self):
         assert _toml_value(True) == "true"
@@ -169,6 +183,7 @@ class TestTomlRoundtrip:
     def _roundtrip(self, data):
         """Write data as TOML, read it back with tomllib."""
         import io
+
         try:
             import tomllib
         except ImportError:
@@ -268,7 +283,10 @@ class TestConfigLayoutSaveLoad:
 
     def test_layout_restore_parses_json_strings(self):
         """restore_layout parses JSON-encoded tab strings."""
-        tab_dict = {"name": "Tab 1", "tree": {"type": "terminal", "working_directory": "/tmp", "group": None}}
+        tab_dict = {
+            "name": "Tab 1",
+            "tree": {"type": "terminal", "working_directory": "/tmp", "group": None},
+        }
         tab_str = json.dumps(tab_dict)
         # Verify the string gets parsed back to a dict
         parsed = json.loads(tab_str)
@@ -277,6 +295,7 @@ class TestConfigLayoutSaveLoad:
     def test_layout_restore_parses_legacy_python_repr(self):
         """Legacy Python repr strings can be parsed with ast.literal_eval."""
         import ast
+
         legacy_str = "{'name': 'Terminal', 'tree': {'type': 'terminal', 'working_directory': '/tmp', 'group': None}}"
         parsed = ast.literal_eval(legacy_str)
         assert parsed["name"] == "Terminal"
@@ -522,12 +541,12 @@ class TestSaveLoadEdgeCases:
     def test_roundtrip_very_large_numbers(self, tmp_path):
         c = Config()
         c.set("test", "big_int", 10**18)
-        c.set("test", "big_float", 1.7976931348623157e+308)
+        c.set("test", "big_float", 1.7976931348623157e308)
         c.save()
         Config._instance = None
         c2 = Config()
         assert c2.get("test", "big_int") == 10**18
-        assert c2.get("test", "big_float") == 1.7976931348623157e+308
+        assert c2.get("test", "big_float") == 1.7976931348623157e308
 
 
 class TestConfigFileStates:
@@ -548,9 +567,7 @@ class TestConfigFileStates:
 
     def test_partial_config_file_merged_with_defaults(self, tmp_path):
         """Partial config file gets missing values from defaults."""
-        (tmp_path / "config.toml").write_text(
-            '[general]\nwindow_width = 1024\n'
-        )
+        (tmp_path / "config.toml").write_text("[general]\nwindow_width = 1024\n")
         c = Config()
         assert c.get("general", "window_width") == 1024
         assert c.get("general", "window_height") == 500
@@ -596,6 +613,7 @@ class TestWriteTomlEdgeCases:
 
     def _roundtrip(self, data):
         import io
+
         try:
             import tomllib
         except ImportError:
@@ -611,6 +629,7 @@ class TestWriteTomlEdgeCases:
 
     def test_empty_dict_at_top_level(self):
         import io
+
         buf = io.StringIO()
         _write_toml(buf, {})
         assert buf.getvalue() == ""
@@ -630,6 +649,7 @@ class TestLayoutComplexRoundtrips:
 
     def _roundtrip(self, data):
         import io
+
         try:
             import tomllib
         except ImportError:

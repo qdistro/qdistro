@@ -77,7 +77,7 @@ sed 's/^/[qdistro-image]   /' /etc/qdistro/release
 
 # kiwi does not persist description <repository> entries into the packed
 # image (iso/14 Phase G.2: /etc/zypp/repos.d is empty). Bootstrap still
-# zyppers. Write the same history/<snapshot>/ URLs config.xml pinned.
+# zyppers. Write the same history/<snapshot>/ URLs build.sh gave kiwi.
 . "$QD/image/lib/snapshot-repos.sh"
 if ! qdistro_write_snapshot_repos /etc/qdistro/release; then
     echo "[qdistro-image] FATAL: could not write snapshot zypper repos. Aborting build." >&2
@@ -207,9 +207,9 @@ cd "$QD"
 # them: recall (cut from v1, decision D2; its installer refuses without
 # QDISTRO_ENABLE_POSTV1_RECALL=1), media and multimachine (audit
 # recommendation DEMOTE, fable-release/13 rows 11d/11e; never promoted into
-# the chain), the admin approval-queue TUI (admin_app/, tui/; neither chain
-# has ever installed it). verify-contents.sh asserts their artefacts are
-# absent. What IS installed is stated in image/AGENTS.md ("What the chain
+# the chain), and the admin approval-queue TUI (tui/; the chain does not
+# install it). The graphical admin approval app is installed by the chain's
+# admin-app step for the uid-1000 Wayland session. What IS installed is stated in image/AGENTS.md ("What the chain
 # installs").
 export QDISTRO_REPO_ROOT="$SRC"
 export QDISTRO_PROFILE="$QDISTRO_IMAGE_PROFILE"

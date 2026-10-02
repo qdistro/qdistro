@@ -29,7 +29,7 @@ def test_dialog_loads_defaults(qapp, isolated_config):
         assert dlg.combo_view.currentText() == "List"
         assert dlg.combo_sort.currentText() == "Name"
         assert dlg.combo_order.currentText() == "Ascending"
-        assert dlg.combo_theme.currentText() == "System"
+        assert dlg.combo_theme.currentText() == "Follow desktop"
         assert dlg.spin_icon_size.value() == 32
     finally:
         dlg.deleteLater()
@@ -78,6 +78,73 @@ def test_apply_persists_to_disk(qapp, isolated_config, tmp_path):
     assert fresh.get("general", "sort_order") == "desc"
     assert fresh.get("general", "theme_mode") == "dark"
     assert fresh.get("general", "icon_size") == 48
+
+
+def test_follow_desktop_and_desktop_fonts_persist(qapp, isolated_config):
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.combo_theme.setCurrentText("Follow desktop")
+        dlg.cb_desktop_fonts.setChecked(True)
+        dlg._apply()
+    finally:
+        dlg.deleteLater()
+    Config._instance = None
+    Config._data = None
+    fresh = Config()
+    assert fresh.get("general", "theme_mode") == "system"
+    appearance = fresh.get("appearance", default={})
+    assert appearance.get("version") == 1
+    assert "ui_font_family" not in appearance
+
+
+def test_apply_preserves_unrelated_appearance_overrides(qapp, isolated_config):
+    isolated_config.set(
+        "appearance",
+        {
+            "version": 1,
+            "tooltips_enabled": False,
+            "icon_theme": "Adwaita",
+            "ui_scale": 1.1,
+            "ui_font_family": "Inter",
+        },
+    )
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.cb_desktop_fonts.setChecked(False)
+        dlg._apply()
+    finally:
+        dlg.deleteLater()
+    appearance = isolated_config.get("appearance", default={})
+    assert appearance.get("tooltips_enabled") is False
+    assert appearance.get("icon_theme") == "Adwaita"
+    assert appearance.get("ui_scale") == 1.1
+    assert appearance.get("ui_font_family")
+    assert "ui_font_size_pt" not in appearance
+
+
+def test_explicit_eleven_point_size_is_saved(qapp, isolated_config):
+    isolated_config.set("appearance", {"version": 1, "ui_font_family": "Inter"})
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.cb_desktop_fonts.setChecked(False)
+        dlg.spin_ui_font_size.setValue(10)
+        dlg.spin_ui_font_size.setValue(11)
+        dlg._apply()
+    finally:
+        dlg.deleteLater()
+    appearance = isolated_config.get("appearance", default={})
+    assert appearance.get("ui_font_size_pt") == 11.0
+
+
+def test_cancel_does_not_write_inherited_fonts(qapp, isolated_config):
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        dlg.combo_ui_font.setCurrentText("Serif")
+        dlg.reject()
+    finally:
+        dlg.deleteLater()
+    appearance = isolated_config.get("appearance", default={})
+    assert appearance.get("ui_font_family") is None
 
 
 def test_accept_applies_before_closing(qapp, isolated_config):

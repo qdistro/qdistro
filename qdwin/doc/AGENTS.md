@@ -12,9 +12,10 @@ nested-compositor client glue file. Do not refactor it into multiple
 files "for cleanliness" — the file is organized by protocol surface
 and that is the structure that matters.
 
-The rest of qdistro (broker, SDK, polkit-agent, etc.) lives in the
-qdistro umbrella repo and the qdshell repo. qdwin must not depend on
-either. A different shell client can implement `qdwin_shell_v1` and
+The rest of qdistro (broker, SDK, polkit-agent, etc.) lives outside
+the `qdwin/` directory of the monorepo: the root services and the
+`qdshell/` component. qdwin must not acquire a source, build, or runtime
+dependency on either — the directory boundary is an architectural boundary. A different shell client can implement `qdwin_shell_v1` and
 work against qdwin without ever touching qdshell.
 
 ## Language policy
@@ -33,7 +34,7 @@ When adding code:
   `*_pending` event and accepts a `*_decision` reply. Adding policy
   to qdwin permanently couples it to a specific shell.
 - **Helpers and tools**: write them in Python and put them in the
-  umbrella repo as a daemon, not in qdwin.
+  root qdistro services (e.g. as a daemon), not in `qdwin/`.
 
 ## Protocol versioning
 

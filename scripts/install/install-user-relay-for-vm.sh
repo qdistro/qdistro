@@ -77,6 +77,8 @@ if [ ! -f "$DEST_LIB/qdistro_admin_rules.py" ]; then
     exit 2
 fi
 
+install "${OWN[@]}" -m 0644 "$SRC/../broker/transfer_protocol.py" "$DEST_LIB/transfer_protocol.py"
+
 install "${OWN[@]}" -m 0644 "$SRC/qdistro_user_relay.py" \
     "$DEST_LIB/qdistro_user_relay.py"
 

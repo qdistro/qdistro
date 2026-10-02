@@ -263,7 +263,7 @@ sleep 5
 $VMGUI "$VM" screenshot /tmp/s18-warm.png
 
 # Cross-check journal for the matching secctx event (diagnostic NOTE only).
-$VMEXEC "$VM" "journalctl --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'" || true
+$VMEXEC "$VM" "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'" || true
 ```
 
 **NOTE** (diagnostic, not a pass criterion): a matching

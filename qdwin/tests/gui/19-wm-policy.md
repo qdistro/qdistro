@@ -236,7 +236,7 @@ CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
 HANDLE=
 for _ in $(seq 1 20); do
     HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-      "journalctl _UID=1000 --after-cursor='$CURSOR' --no-pager | \
+      "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
        grep -E 'qdwin: toplevel_added handle=[0-9]+ uid=1000 pid=[0-9]+ app_id=qdistro-test-window' | \
        tail -1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'")
     [ -n "$HANDLE" ] && break
@@ -261,7 +261,7 @@ qdwin_chord meta_l -- left
 # capture's own damage-repaint then guarantees fresh content.
 for _ in $(seq 1 20); do
     "$QDWIN_VM_EXEC" "$VMNAME" \
-        "journalctl _UID=1000 --after-cursor='$TILE_CURSOR' --no-pager | \
+        "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$TILE_CURSOR' --no-pager | \
          grep -q 'qdwin: configure_extent handle=$HANDLE '" && break
     sleep 0.5
 done

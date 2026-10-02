@@ -175,7 +175,12 @@ qdlocker_unlock_with_password() {
 }
 
 qdlocker_drain_lock_state() {
-    case "$(qdlocker_ctrl status 2>/dev/null)" in
+    local state
+    state=$(qdlocker_ctrl status 2>/dev/null) || {
+        echo "qdlocker_drain_lock_state: status command failed" >&2
+        return 1
+    }
+    case "$state" in
         *locked=True*)
             if qdlocker_unlock_with_password "${1:-Pa_ssw0rd45}"; then
                 return 0
@@ -192,6 +197,11 @@ qdlocker_drain_lock_state() {
                     ;;
             esac
             ;;
+        *locked=False*) return 0 ;;
+        *)
+            echo "qdlocker_drain_lock_state: unreadable status: $state" >&2
+            return 1
+            ;;
     esac
 }
 
@@ -201,13 +211,18 @@ qdlocker_drain_lock_state() {
 # ImageMagick on the host screenshot, not agent vision, so "a thin strip
 # of desktop is visible" turns into a deterministic failure.
 
+# The SCREEN dimensions of a capture: the raw frame's, from its `.raw` sidecar
+# (view-geometry.sh pads every harness frame with a unique black margin), or
+# the decoded size of a legacy frame without one. Output format unchanged:
+# "W H" with no trailing newline.
 qdlocker_screenshot_dimensions() {
-    local image="$1"
+    local image="$1" dims
     if ! command -v magick >/dev/null 2>&1; then
         echo "qdlocker_screenshot_dimensions: ImageMagick 'magick' not found" >&2
         return 2
     fi
-    magick identify -format '%w %h' "$image"
+    dims=$(qci_view_raw_dims "$image") || return 1
+    printf '%s' "$dims"
 }
 
 qdlocker_count_color_in_crop() {
@@ -218,9 +233,19 @@ qdlocker_count_color_in_crop() {
         echo "qdlocker_count_color_in_crop: ImageMagick 'magick' not found" >&2
         return 2
     fi
-    magick "$image" -alpha off -crop "$crop" \
-        -format %c histogram:info:- \
-        | awk -v hex="$hex" '
+    # The histogram is captured FIRST and checked: in `magick | awk` the
+    # pipeline's status is awk's, so a failed decode used to print 0 with
+    # status 0 -- a "colour absent" PASS on pixels nobody counted.
+    local hist
+    if ! hist=$(magick "$image" -alpha off -crop "$crop" -format %c histogram:info:-); then
+        echo "qdlocker_count_color_in_crop: magick could not decode $image (crop $crop)" >&2
+        return 2
+    fi
+    if ! printf '%s\n' "$hist" | grep -qE '^[[:space:]]*[0-9]+:'; then
+        echo "qdlocker_count_color_in_crop: no histogram for $image (crop $crop)" >&2
+        return 2
+    fi
+    printf '%s\n' "$hist" | awk -v hex="$hex" '
             toupper($0) ~ ("#" hex) {
                 gsub(":", "", $1);
                 sum += $1;
@@ -259,7 +284,8 @@ qdlocker_assert_color_present_in_crop() {
 # scenarios assert on are authorized only by the ROOT-OWNED marker
 # /etc/qdistro/locker-ctrl-introspection (a user-controlled env var would let a
 # same-uid process re-enable the side channel). Install the marker as root and
-# restart the unit. Idempotent — only restarts when the marker was just created.
+# restart the unit. A stale marker with an unresponsive socket gets one
+# additional restart to apply the marker to the running process.
 # Fails loudly (non-zero) if it cannot install/restart, so the health check
 # below does not silently run scenarios without introspection.
 qdlocker_enable_introspection() {
@@ -278,7 +304,15 @@ if [ ! -f "$f" ]; then
 fi
 # Verify it took effect: the locker must now answer `status`. Connect as admin —
 # the ctrl socket is uid-gated to the session owner and refuses the root context.
-reply=$(runuser -u admin -- bash -c "printf 'status\n' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock")
+reply=$(runuser -u admin -- bash -c "printf 'status\n' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock") || reply=
+case "$reply" in
+    *locked=*) exit 0 ;;
+esac
+# The marker may predate a locker process started before it was staged into
+# the guest. Restart once to apply it, then require an actual status reply.
+runuser -l admin -c "systemctl --user restart qdlocker.service"
+sleep 4
+reply=$(runuser -u admin -- bash -c "printf 'status\n' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock") || reply=
 case "$reply" in
     *locked=*) exit 0 ;;
     *) echo "introspection not active (status: $reply)" >&2; exit 1 ;;

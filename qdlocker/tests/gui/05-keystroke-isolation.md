@@ -24,13 +24,22 @@ source "$(dirname "$0")/qdlocker-helpers.sh"
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 
-# Drain stale lock state.
+# Drain stale lock state through the real keyboard unlock path. Do NOT
+# "drain" by restarting qdlocker.service: qdwin holds the lock fail-secure
+# across a locker restart (journal: `lock held (fail-secure)
+# cause=locker_disconnect`; the fresh locker binds with initially_locked=1),
+# so the session stays locked. Step 1's Ctrl+Alt+L then lands on an
+# already-locked screen: the binding does not fire (the locker's overlay grab
+# owns the keyboard). Before qdwin consumed that chord in the overlay grab
+# (qdwin_overlay_key_disposition), its `l` reached the locker as Ctrl+L and
+# landed in the prompt — how qci runs full-20260929T182319Z and
+# full-20260930T212305Z read prompt-len=1 at 1.1, on a retry after the first
+# attempt had left the session locked. Step 1 must test a real transition.
+qdlocker_drain_lock_state || { echo "ERROR: could not drain a stale lock"; exit 2; }
+# Baseline: Step 1 must observe a real unlocked -> locked transition.
 case "$(qdlocker_ctrl status 2>/dev/null)" in
-    *locked=True*)
-        "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
-          >/dev/null
-        ;;
+    *locked=False*prompt-len=0*) ;;
+    *) echo "ERROR: baseline not unlocked/empty: $(qdlocker_ctrl status 2>&1)"; exit 2 ;;
 esac
 
 # The qdshell-side counter for overlay_key receipts is the load-
@@ -47,6 +56,13 @@ if ! [[ "$SHELL_BASELINE" =~ ^[0-9]+$ ]]; then
     exit 78  # bats: hard ERROR (not SKIP), this is a security regression risk
 fi
 echo "shell overlay_key baseline=$SHELL_BASELINE"
+
+# Journal cursor for Step 3.2, scoped to the compositor unit (a whole-journal
+# grep through vm-exec would match qemu-ga's own log of the grep command).
+JCURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  'journalctl -n0 --show-cursor _SYSTEMD_USER_UNIT=qdwin-compositor.service' \
+  | sed -n 's/^-- cursor: //p')
+[ -n "$JCURSOR" ] || { echo "ERROR: no compositor journal cursor"; exit 2; }
 ```
 
 ## Steps
@@ -64,7 +80,8 @@ echo "shell overlay_key after-lock=$SHELL_AFTER_LOCK"
 ```
 
 **Assert (1.1):** `qdlocker_ctrl status` reports `locked=True
-prompt-len=0`.
+prompt-len=0`. The setup baseline was `locked=False`, so this lock is the one
+the chord just engaged; nothing of the chord may land in the prompt.
 **Assert (1.2):** `$SHELL_AFTER_LOCK == $SHELL_BASELINE` — engaging
 the locker MUST NOT cause any overlay_key delivery to qdshell.
 Earlier drafts allowed ≤2 to absorb test flakiness; we changed to
@@ -112,6 +129,19 @@ asterisks, no plaintext. The locker's ctrl socket must NOT leak the
 buffer even to a privileged test caller. (Tests would otherwise
 become a documented exfiltration path.)
 
+```bash
+"$QDWIN_VM_EXEC" "$VMNAME" "journalctl -a -o cat --after-cursor='$JCURSOR' \
+  _SYSTEMD_USER_UNIT=qdwin-compositor.service | grep 'overlay_key'"
+```
+
+**Assert (3.2):** the compositor journal since setup has at least 11
+`qdwin: overlay_key role=2 seq=<n> to=locker` lines (routing evidence) and
+NO overlay_key line carries key content: no `utf8=`, no `sym=`, and no
+`[NNB blob data]` placeholder. qdwin used to log every overlay key's keysym
+and utf8, i.e. the typed password in plaintext; a content-bearing line here
+is a security regression (`qdwin_overlay_grab_key`, guarded at build time by
+`qdwin/qdwin/test_lock_fail_secure.py` `check_overlay_key_log_redacted`).
+
 ### Step 4 — cleanup unlock
 
 ```bash
@@ -130,7 +160,7 @@ true
 
 ## Pass criteria
 
-Asserts 1.1, 2.1, 2.2, 3.1 must all PASS. 2.2 is the boundary
+Asserts 1.1, 2.1, 2.2, 3.1, 3.2 must all PASS. 2.2 is the boundary
 assertion; a FAIL here is a release-blocker security regression.
 
 ## Known-broken-if
@@ -149,7 +179,17 @@ assertion; a FAIL here is a release-blocker security regression.
 - 3.1 FAIL with the literal password in the response — `ctrl.py`'s
   `prompt-text` handler is returning `self._controller.currentText`
   directly. It must mask.
-- 1.1 FAIL with `prompt-len > 0` at the lock instant — a residual
-  buffer from a prior test wasn't cleared on lock. Setup must drain
-  the controller; the easiest is the
-  `systemctl --user restart qdlocker.service` path.
+- 1.1 FAIL with `prompt-len > 0` at the lock instant — first make
+  sure the baseline really was `locked=False` (setup refuses otherwise).
+  On a locked screen qdwin consumes a fresh Ctrl+Alt+L in the overlay
+  grab (journal: `overlay_key role=2 lock-hotkey consumed`); if that
+  line is missing and the prompt grew by one, the consume regressed
+  (`qdwin_overlay_key_disposition`, unit-tested in
+  `qdwin/tests/unit/test-qdwin-logic.c`). With a genuine unlocked
+  baseline, `prompt-len > 0` means a key reached the locker across the
+  lock transition — investigate `qdwin_overlay_grab_start(role=2)`. The
+  journal no longer shows WHICH key arrived (overlay_key lines are
+  content-free since the password-logging fix); the earlier diagnosis of
+  the stray key as Ctrl+L relied on that now-removed leak (a 71-byte
+  journald blob = `sym=108 utf8="\x0c"`). To identify a key now, use
+  `seq=` counts around `lock_requested` and reproduce interactively.

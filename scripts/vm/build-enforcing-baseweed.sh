@@ -55,7 +55,9 @@ REPO_ROOT="$(cd "$COMPOSITOR_DIR/.." && pwd)"
 VM_TOOLS="$REPO_ROOT/scripts/vm"
 IMG="${IMG_DIR_OVERRIDE:-${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}}"
 
-BASE="$IMG/baseweed-baked.qcow2"
+. "$SCRIPT_DIR/lib/test-substrate.sh"
+qdistro_load_test_substrate
+BASE="$(qdistro_substrate_base_path baked "$IMG")"
 ENFORCING="$IMG/baseweed-enforcing-baked.qcow2"
 KEYFILE="$HOME/.ssh/qdistro_enforcing_id_ed25519"
 

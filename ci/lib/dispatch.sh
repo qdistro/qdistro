@@ -9,6 +9,8 @@ gate_full() {
     qci_assert_run_dir || return $?
     local rc=$EXIT_OK step_rc
     QCI_LINT_RC=0
+    # Record the developer-only omission before preflight can short-circuit.
+    [ "${QCI_SKIP_IMAGE:-0}" = 1 ] && gate_image_developer_skip
     gate_preflight || return $?
     # gate_preflight runs gate_lint for its rows but keeps it out of its own
     # required/optional accounting; the rc arrives here. Without this, a blocking
@@ -26,8 +28,10 @@ gate_full() {
     # it is NOT in the golden-sharing cascade below. A missing artifact
     # records blocked rows and returns 0 in normal mode; QCI_RELEASE=1
     # escalates those blocked rows.
-    gate_image; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    if [ "${QCI_SKIP_IMAGE:-0}" != 1 ]; then
+        gate_image; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    fi
     # VM-dependent gates share ONE infra resource (libvirt provisioning + the
     # per-run golden). When one fails with EXIT_VM_PROVISION that is a single
     # infra root cause; running the rest into the same wall books N independent
@@ -66,11 +70,150 @@ print_triage() {
     echo "Artifacts: $dir"
 }
 
+# Every subcommand main() dispatches. Keep in sync with the case arms in
+# main() and the Usage: block in usage.sh; qci-subcommand-help.bats derives
+# the real case arms from this file and fails on any difference.
+QCI_COMMANDS="preflight lint selftest image registry-check release-manifest \
+bootstrap-release-profile affected edit-guard replay host feedback vm-smoke bats gui \
+gui-admin full snapshot-daily mmnet cleanup report triage list-runs"
+
+qci_is_command() {
+    local c
+    for c in $QCI_COMMANDS; do
+        [ "$c" = "$1" ] && return 0
+    done
+    return 1
+}
+
+# Options of <cmd> that CONSUME the next argument as their value, as parsed
+# by its arm in main() (or by the gate it hands "$@" to: gate_image,
+# gate_cleanup). The help pre-scan skips these values, so `bats --file -h`
+# or `report --run -h` keep meaning a file/run dir named `-h`.
+# qci-subcommand-help.bats extracts every `--opt) shift` from the real
+# parsers and fails if this table drifts from them.
+qci_value_opts() {
+    case "$1" in
+        affected) echo "--changed-from --vm" ;;
+        edit-guard) echo "--changed-from" ;;
+        vm-smoke) echo "--vm" ;;
+        bats) echo "--vm --file" ;;
+        gui|gui-admin) echo "--vm --scenario" ;;
+        image) echo "--root" ;;
+        snapshot-daily) echo "--date --name" ;;
+        cleanup) echo "--age-hours" ;;
+        report|triage) echo "--run" ;;
+    esac
+}
+
+# Commands whose parser treats `--` as the end of options (the rest are
+# path operands).
+qci_has_terminator() {
+    case "$1" in
+        affected|edit-guard) return 0 ;;
+    esac
+    return 1
+}
+
+# True when <cmd>'s args ask for help: -h/--help in an OPTION position, i.e.
+# not the value of a value-taking option and not after a `--` terminator.
+qci_wants_help() {
+    local cmd=$1 o v takes
+    local -a vopts
+    shift
+    # One array element per option; membership is exact per-element equality
+    # (a joined-string substring test let "" or "--vm --file" pose as one).
+    read -r -a vopts <<< "$(qci_value_opts "$cmd")"
+    while [ $# -gt 0 ]; do
+        o=$1
+        case "$o" in
+            -h|--help) return 0 ;;
+            --) qci_has_terminator "$cmd" && return 1 ;;
+        esac
+        takes=0
+        for v in "${vopts[@]}"; do
+            [ "$o" = "$v" ] && { takes=1; break; }
+        done
+        # Skip a value-taking option's operand, whatever it looks like.
+        [ "$takes" = 1 ] && [ $# -gt 1 ] && shift
+        shift
+    done
+    return 1
+}
+
 main() {
     local cmd=${1:-}
     shift || true
     case "$cmd" in
         -h|--help|help|"") usage; exit "$EXIT_USAGE" ;;
+    esac
+    # Reject an unknown command BEFORE init_run, so a typo never leaves an
+    # empty run dir behind. QCI_COMMANDS must list every case arm below; a
+    # missing entry fails loudly as "unknown command", never as a silent run.
+    if ! qci_is_command "$cmd"; then
+        echo "unknown command: $cmd" >&2
+        usage >&2
+        exit "$EXIT_USAGE"
+    fi
+    # `qci <sub> -h|--help` prints usage and exits EXIT_USAGE, the same code as
+    # top-level `qci --help` (pinned by qci-runner-contract.bats): a help
+    # request ran no gate, so it must never read as a pass to `&&` chains.
+    # This runs BEFORE init_run: no run dir, no results row, no VM. Without
+    # it every subcommand either ran its gate (--help ignored or taken as a
+    # bats file / triage run dir) or created a run dir to record the flag as
+    # "unknown arg". Option VALUES (bats --file -h) and operands after an
+    # affected/edit-guard `--` are not help requests.
+    if qci_wants_help "$cmd" "$@"; then
+        usage
+        exit "$EXIT_USAGE"
+    fi
+    if [ "$cmd" = full ] && [ "${QCI_SKIP_IMAGE:-0}" = 1 ] && [ "${QCI_RELEASE:-0}" = 1 ]; then
+        echo "qci full: QCI_SKIP_IMAGE=1 is forbidden with QCI_RELEASE=1" >&2
+        exit "$EXIT_USAGE"
+    fi
+
+    if [ "$cmd" = feedback ] && [ "${QCI_RELEASE:-0}" = 1 ]; then
+        echo "qci feedback: development feedback is forbidden with QCI_RELEASE=1" >&2
+        exit "$EXIT_USAGE"
+    fi
+
+    # A GUI scenario agent (QCI_GUI_SCENARIO_AGENT, set by gui.sh around
+    # run_agent_command) must drive its scenario, never re-enter the runner.
+    # full-20261001T124446Z apps/13: luna ran `qci gui --vm <its own VM>`, got
+    # "run lock held", then waited on its own codex pid and recorded ERROR.
+    # `affected --run` reaches the same VM gates through gate_affected, so it
+    # is refused too; selection-only `affected` stays allowed. The scan mirrors
+    # the affected parser: operands of --changed-from/--vm and paths after `--`
+    # are never read as the flag.
+    if [ -n "${QCI_GUI_SCENARIO_AGENT:-}" ]; then
+        local refuse_cmd=$cmd
+        if [ "$cmd" = affected ]; then
+            refuse_cmd=affected-select
+            local -a aff_args=("$@")
+            local aff_i=0
+            while [ "$aff_i" -lt "${#aff_args[@]}" ]; do
+                case "${aff_args[$aff_i]}" in
+                    --changed-from|--vm) aff_i=$((aff_i + 1)) ;;
+                    --run) refuse_cmd="affected --run"; break ;;
+                    --) break ;;
+                esac
+                aff_i=$((aff_i + 1))
+            done
+        fi
+        case "$refuse_cmd" in
+            full|bats|gui|gui-admin|image|cleanup|vm-smoke|replay|mmnet|snapshot-daily|"affected --run")
+                echo "qci $refuse_cmd: refused inside GUI scenario agent ($QCI_GUI_SCENARIO_AGENT)." >&2
+                echo "You ARE the scenario driver; qci already launched you on \$VMNAME." >&2
+                echo "Run the scenario's steps yourself with scripts/vm/vm-exec and vm-gui." >&2
+                exit "$EXIT_USAGE" ;;
+        esac
+    fi
+
+    # Take the host-wide lock before init_run or any VM-destructive gate work.
+    # The flock guardian owns the fd for this command's full lifetime; worker
+    # children inherit no lock fd. image and cleanup share it with full/bats/gui.
+    case "$cmd" in
+        full|bats|gui|gui-admin|image|cleanup)
+            qdistro_run_lock_reexec "$SELF" "$cmd" "$@" ;;
     esac
 
     case "$cmd" in
@@ -80,6 +223,29 @@ main() {
             init_run "$cmd" "$@"
             ;;
     esac
+
+    # Fail before any VM test gate starts when the cloud substrate has aged
+    # beyond its short-lived upstream history repository. Pure host gates do
+    # not depend on this image; explicit Kiwi runs use their own source.
+    local check_substrate=0 arg base_kind
+    case "$cmd" in
+        preflight|full|vm-smoke|bats|gui|gui-admin|replay|mmnet|snapshot-daily)
+            check_substrate=1 ;;
+        affected)
+            for arg in "$@"; do [ "$arg" = --run ] && check_substrate=1; done ;;
+    esac
+    if [ "$check_substrate" -eq 1 ]; then
+        . "$VM_TOOLS/lib/vm-base.sh"
+        base_kind="$(qdistro_vm_base_kind)" || base_kind=invalid
+        if [ "$base_kind" = baked ]; then
+            . "$VM_TOOLS/lib/test-substrate.sh"
+            if ! qdistro_load_test_substrate; then
+                record_result preflight "cloud test substrate freshness" fail "$EXIT_PREFLIGHT" preflight tool \
+                    "$RDIR/preflight/preflight.txt" "pinned snapshot is invalid, future-dated, or older than 14 days; update snapshot.conf"
+                finish_run "$EXIT_PREFLIGHT"
+            fi
+        fi
+    fi
 
     local rc=$EXIT_OK date_arg="" name_arg="" files=() scenarios=() run_dir="" latest=0
     case "$cmd" in
@@ -141,6 +307,8 @@ main() {
         replay)
             local replay_scenario=${1:-} replay_vm=${2:-}
             gate_replay "$replay_scenario" "$replay_vm"; rc=$?; finish_run "$rc" ;;
+        feedback)
+            gate_feedback "$@"; rc=$?; finish_run "$rc" ;;
         host)
             gate_host; rc=$?; finish_run "$rc" ;;
         vm-smoke)

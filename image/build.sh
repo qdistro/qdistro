@@ -10,7 +10,7 @@
 #    installiso="false" in config.xml.)
 #
 # <version> is config.xml's <version>; <snapshot> is the Tumbleweed snapshot
-# id both repositories in config.xml are pinned to (snapshot_id below).
+# pinned in the repo-root snapshot.conf (snapshot_id below).
 # The five source commits that went in are written by sync_sources into the
 # overlay as root/root/qdistro-source-manifest and installed by config.sh as
 # /etc/qdistro/release, together with version and snapshot.
@@ -43,24 +43,34 @@ MANIFEST="$HERE/root/root/qdistro-source-manifest"
 # Components config.sh builds from the synced tree; checked for presence.
 REQUIRED_COMPONENTS="qdwin qdshell qdgreeter qdlocker"
 
-# snapshot_id: the Tumbleweed snapshot both repositories in config.xml are
-# pinned to. config.xml is the only place the id is written (kiwi's parser
-# rejects XML entities, so it cannot be spelled once); the two source paths
-# must agree, and a build with a mismatched or unpinned pair is refused
-# rather than silently mixing snapshots.
+# snapshot_id: the Tumbleweed snapshot the image is built on. The repo-root
+# snapshot.conf is the one place it is written, shared with the tier-2
+# workloads, the native builder and the qci test VM bases, so every build
+# downloads from one snapshot (and one RPM cache). The loader refuses a
+# malformed pin or one older than 14 days: the history service keeps about a
+# month, so an older pin is a build that will soon be impossible to repeat.
 snapshot_id() {
-    local ids n
-    ids="$(sed -n 's|.*<source path="https://download.opensuse.org/history/\([0-9]\{8\}\)/tumbleweed/repo/[a-z-]*/"/>.*|\1|p' "$HERE/config.xml")"
-    n="$(printf '%s\n' "$ids" | grep -c .)"
-    if [ "$n" -ne 2 ]; then
-        echo "[build] ERROR: config.xml must pin exactly two repositories to history/<YYYYMMDD>/ (found $n)" >&2
+    # shellcheck source=../scripts/vm/lib/test-substrate.sh
+    . "$REPO_ROOT/scripts/vm/lib/test-substrate.sh" || return 2
+    qdistro_load_test_substrate >&2 || {
+        echo "[build] ERROR: $REPO_ROOT/snapshot.conf does not hold a valid, current snapshot pin" >&2
         return 2
-    fi
-    if [ "$(printf '%s\n' "$ids" | sort -u | wc -l)" -ne 1 ]; then
-        echo "[build] ERROR: config.xml repositories pin different snapshots: $(printf '%s ' $ids)" >&2
-        return 2
-    fi
-    printf '%s\n' "$ids" | head -n1
+    }
+    printf '%s\n' "$QDISTRO_SUBSTRATE_SNAPSHOT"
+}
+
+# snapshot_repo_args: kiwi takes the repositories from the command line, not
+# config.xml (whose XML parser rejects entities, so the id could not be
+# spelled once there). The aliases match what config.sh persists into the
+# image's /etc/zypp/repos.d, and the URLs are HTTPS (J25): plain http:// leaves
+# repo metadata + RPMs open to a MITM substituting a trojaned package; kiwi
+# still verifies the openSUSE repo GPG signatures on top.
+snapshot_repo_args() {
+    local snap="$1" base="https://download.opensuse.org/history/$1/tumbleweed/repo"
+    [[ "$snap" =~ ^[0-9]{8}$ ]] || return 2
+    printf '%s\n' --ignore-repos \
+        "--add-repo=$base/oss/,rpm-md,Tumbleweed-OSS" \
+        "--add-repo=$base/non-oss/,rpm-md,Tumbleweed-NonOSS"
 }
 
 image_version() {
@@ -125,7 +135,6 @@ write_manifest() {
 }
 
 sync_sources() {
-    install -d -m 0755 "$SRC_OVERLAY"
     # qdgreeter + qdlocker are part of the production boot/session path:
     # greetd execs /usr/bin/qdgreeter (greetd-config.toml) and the
     # qdwin-session.target Wants= qdlocker.service. config.sh pip-installs
@@ -137,45 +146,89 @@ sync_sources() {
             exit 2
         fi
     done
-    # A pre-monorepo overlay held one directory per sibling repo, including
-    # a nested qdistro/ copy of the root. Its leftovers must not survive into
-    # the monorepo-shaped overlay (rsync --delete would keep an excluded
-    # path, and qdistro/ is not in the new tree at all, so it WOULD be
-    # deleted -- but say so explicitly rather than rely on it).
-    rm -rf "$SRC_OVERLAY/qdistro"
-    echo "[build] rsyncing the monorepo $REPO_ROOT -> $SRC_OVERLAY"
-    # Leading slashes anchor these at the repo root: an unanchored
-    # `ci/runs` would also drop an unrelated `anything/ci/runs`.
-    #   /image/root/root — the repo contains this very overlay, so an
-    #     unfiltered sync copies the destination into itself.
-    #   /image/logs — build logs, each holding the tarball of a previous
-    #     run (which holds the run before it). Left in, they made the
-    #     overlay 169 MB of stale nested tarballs and shipped them to
-    #     /root/qdistro-src in the image, differing run to run.
-    #   /ci/runs — gigabytes of untracked CI run artifacts in a working
-    #     checkout; never part of the image.
-    #   /.worktrees — linked worktrees of this repo (full source copies).
-    # Excluded paths are also protected from --delete, so debris left by
-    # an earlier unfiltered sync would survive forever: clear it first.
-    rm -rf "$SRC_OVERLAY/image/root/root" \
-           "$SRC_OVERLAY/image/logs" \
-           "$SRC_OVERLAY/ci/runs" \
-           "$SRC_OVERLAY/.worktrees"
-    # `build`, `node_modules`, `__pycache__` and `*.pyc` stay UNanchored on
-    # purpose: they are build products at any depth (meson/cmake build
-    # dirs, vendored JS). No tracked path in the monorepo is named `build`
-    # or `node_modules` today, so nothing shipped is dropped by that.
-    rsync -a --delete \
-          --exclude=.git \
-          --exclude=__pycache__ \
-          --exclude='*.pyc' \
-          --exclude=build \
-          --exclude=node_modules \
-          --exclude=/image/root/root \
-          --exclude=/image/logs \
-          --exclude=/ci/runs \
-          --exclude=/.worktrees \
-          "$REPO_ROOT/" "$SRC_OVERLAY/"
+    # The sync reads its file list from git, so the tree must be its own
+    # checkout; write_manifest refuses the same trees, but only after a
+    # copy -- refuse before touching the overlay.
+    if ! repo_head "$REPO_ROOT" >/dev/null; then
+        echo "[build] ERROR: $REPO_ROOT is not a git checkout with a commit at HEAD; the image could not say what went in" >&2
+        exit 2
+    fi
+    # WHAT is copied: the source as git sees it -- every tracked file plus
+    # every untracked file that is not ignored (what `git add -A` would
+    # stage), and nothing else. An exclude list could only ever name the
+    # debris somebody had already noticed: the rsync-with-excludes this
+    # replaces still shipped qdwin/build-qci/ and qdshell/build-qci/ (meson
+    # dirs with host-built binaries), .mypy_cache/, .pytest_cache/,
+    # .hypothesis/, .ruff_cache/, .coverage-report.json, extension dist/ and
+    # coverage/, qdshell/tests/ui/artifacts/, *.egg-info -- and would have
+    # shipped image/keys/ (gitignored signing material) had it existed.
+    # Everything is gitignored for a reason; .gitignore is the maintained
+    # list of "not source". Untracked-but-not-ignored files ARE copied: a
+    # dirty dev build must contain the new file the manifest counts in
+    # `untracked=N`. Nothing the image builds from is generated on the
+    # host: config.sh runs meson from scratch (`setup build --wipe`),
+    # browser extensions are staged from source with dist/ and
+    # node_modules/ stripped, qsu is compiled in the chroot.
+    #   Belt and braces, whatever git says: never the overlay itself
+    #   (image/root/root -- it is inside the repo), linked worktrees, CI
+    #   run artifacts, build logs, or key material.
+    #   A path ending in `/` is an untracked nested git repository (git
+    #   lists it as a unit); it is not source of this repo, skip it.
+    #   A tracked path deleted in the working tree is skipped, not an
+    #   rsync error (the manifest records the tree as DIRTY).
+    local list path n=0
+    # Outside the overlay tree (image/root/ is copied into the image).
+    list="$(mktemp "${TMPDIR:-/tmp}/qdistro-src-files.XXXXXX")"
+    # core.excludesFile=/dev/null: what ships is decided by the repo's own
+    # .gitignore files, not by the building user's global ignore file.
+    # (.git/info/exclude is still honoured: it is per-checkout, and empty
+    # in a fresh clone.)
+    if ! git -C "$REPO_ROOT" -c core.excludesFile=/dev/null \
+            ls-files -z --cached --others --exclude-standard \
+            > "$list.raw"; then
+        echo "[build] ERROR: git ls-files failed in $REPO_ROOT" >&2
+        rm -f "$list" "$list.raw"
+        exit 2
+    fi
+    # Sorted as its own checked step: a failure inside a `< <(...)`
+    # process substitution is invisible to set -e and pipefail, and an
+    # empty list would wipe the overlay and stamp the manifest clean
+    # (fu review: a failing `sort -zu` synced 0 files with exit 0).
+    if ! LC_ALL=C sort -zu -o "$list.raw" "$list.raw"; then
+        echo "[build] ERROR: sorting the git file list failed" >&2
+        rm -f "$list" "$list.raw"
+        exit 2
+    fi
+    while IFS= read -r -d '' path; do
+        case "$path" in
+            */) echo "[build] skipping untracked nested repository $path" >&2; continue ;;
+            image/root/root|image/root/root/*|.worktrees|.worktrees/*|ci/runs|ci/runs/*|\
+            image/logs|image/logs/*|image/keys|image/keys/*|.git|.git/*) continue ;;
+        esac
+        [ -e "$REPO_ROOT/$path" ] || [ -L "$REPO_ROOT/$path" ] || continue
+        printf '%s\0' "$path"
+        n=$((n + 1))
+    done < "$list.raw" > "$list"
+    rm -f "$list.raw"
+    # A fresh overlay every time: rsync --files-from cannot --delete, and
+    # the overlay is a generated, gitignored copy. This also clears debris
+    # of any earlier sync (the pre-monorepo per-repo qdistro/ copy, the
+    # unfiltered syncs that nested image/root/root and image/logs).
+    # The previous run's manifest goes first: from here on the overlay is
+    # being replaced, and a copy that fails half-way must not leave a
+    # partial tree labelled by the old manifest, which --no-sync would
+    # accept (fu review, fable). write_manifest writes the new one only
+    # after the copy succeeded.
+    rm -f "$MANIFEST" "$MANIFEST.tmp"
+    rm -rf "$SRC_OVERLAY"
+    install -d -m 0755 "$SRC_OVERLAY"
+    echo "[build] copying $n git-visible files of $REPO_ROOT -> $SRC_OVERLAY"
+    if ! rsync -a --from0 --files-from="$list" "$REPO_ROOT/" "$SRC_OVERLAY/"; then
+        echo "[build] ERROR: rsync of the source tree failed" >&2
+        rm -f "$list"
+        exit 2
+    fi
+    rm -f "$list"
     echo "[build] source overlay size:"
     du -sh "$SRC_OVERLAY" 2>&1 | sed 's/^/  /'
     write_manifest
@@ -232,13 +285,24 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 mkdir -p "$BUILD_DIR"
-SNAPSHOT="$(snapshot_id)" || exit 2
+# The snapshot comes from the source manifest the sync wrote from
+# snapshot.conf: a --no-sync build inside the builder VM has the description
+# and the synced tree, and the manifest is what the image records as
+# /etc/qdistro/release, so building on anything else would mislabel it. When
+# the checkout is beside us, a pin bumped after the sync is refused.
+SNAPSHOT="$(sed -n 's/^SNAPSHOT=\([0-9]\{8\}\)$/\1/p' "$MANIFEST" | head -n1)"
+[ -n "$SNAPSHOT" ] || { echo "[build] ERROR: $MANIFEST has no SNAPSHOT=<YYYYMMDD> line; re-sync" >&2; exit 2; }
+if [ -f "$REPO_ROOT/snapshot.conf" ]; then
+    pinned="$(snapshot_id)" || exit 2
+    if [ "$pinned" != "$SNAPSHOT" ]; then
+        echo "[build] ERROR: manifest snapshot ($SNAPSHOT) != snapshot.conf ($pinned); re-sync" >&2
+        exit 2
+    fi
+fi
+mapfile -t KIWI_REPO_ARGS < <(snapshot_repo_args "$SNAPSHOT")
+[ "${#KIWI_REPO_ARGS[@]}" -eq 3 ] || { echo "[build] ERROR: could not form repositories for snapshot $SNAPSHOT" >&2; exit 2; }
 VERSION="$(image_version)"
 [ -n "$VERSION" ] || { echo "[build] ERROR: no <version> in config.xml" >&2; exit 2; }
-if ! grep -q "^SNAPSHOT=$SNAPSHOT\$" "$MANIFEST"; then
-    echo "[build] ERROR: manifest snapshot ($(sed -n 's/^SNAPSHOT=//p' "$MANIFEST")) != config.xml snapshot ($SNAPSHOT); re-sync" >&2
-    exit 2
-fi
 
 KIWI_PROFILE_ARGS=()
 case "${QDISTRO_KIWI_PROFILE:-tester}" in
@@ -255,6 +319,7 @@ kiwi-ng --debug \
   system build \
     --description "$HERE" \
     --target-dir "$BUILD_DIR" \
+    "${KIWI_REPO_ARGS[@]}" \
   2>&1 | tee "$HERE/logs/kiwi-build.log"
 # `set -o pipefail` above: a kiwi failure is this script's failure.
 

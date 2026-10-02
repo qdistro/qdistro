@@ -60,6 +60,7 @@ vitest tags), and the per-suite relabel action items.
 | `preflight` | Verify the in-tree component dirs (and warn about stale pre-monorepo sibling checkouts next to the repo), libvirt session, VM tools, prebaked image, and common host tools. |
 | `lint` | Run warn-only shellcheck/scenario-structure metrics plus blocking Bats syntax and maintained-document local-link/anchor validation. `QCI_FLAKE_STRICT=1` also makes scenario flake findings fatal. |
 | `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
+| `feedback qdfileman [paths...]` | Run the shared qdfileman host pytest job for development feedback only; record paths, dependencies, timing and outcome. Refuses release mode. |
 | `host` | Run host tests/builds across all in-tree components: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `tests/integration/vm/*.bats` file (and each component's `<component>/tests/integration/vm/*.bats`). Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
@@ -68,6 +69,13 @@ vitest tags), and the per-suite relabel action items.
 | `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `image`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
+
+For a developer full run, `QCI_SKIP_IMAGE=1 ci/bin/qci full` omits the image
+gate and records an explicit skip row. The report Summary names the selected
+published artifact and its `.sha256` sidecar digest (or `none`), without
+decompressing or booting it. Such a run does not qualify the image or count as
+P8 green full evidence. `QCI_RELEASE=1` rejects this switch before any gate or
+VM starts; release full runs always exercise the image gate.
 
 `QCI_RELEASE=1` strengthens `full`: every `skip` or `blocked` row from a
 release-relevant gate is fatal. Release evidence is green only when the
@@ -112,7 +120,8 @@ qdistro/ci/bin/qci snapshot-daily
 
 The image gate in `full` checks the image's five clean `SOURCE` commits
 against `release-manifest/manifest.snapshot` before boot qualification. It
-also checks the version and Tumbleweed snapshot against `image/config.xml`,
+also checks the version against `image/config.xml`, the Tumbleweed snapshot
+against the repo-root `snapshot.conf`,
 and the profile against `QDISTRO_PROFILE` (default `release`). A pinned dev
 tester remains supported with `QDISTRO_PROFILE=dev`; dirty source stamps do
 not qualify as release evidence. Standalone `QCI_RELEASE=1 qci image` captures
@@ -140,10 +149,18 @@ binding constraint; CPU is intentionally overprovisioned.
   agent timeouts that do not reproduce in isolation. `QCI_GUI_JOBS` is an explicit
   opt-in for throughput experiments and is still RAM-clamped.
 
-**Per-run golden image:** the expensive part of provisioning is building
-qdwin/qdshell from current source (`fresh-vm-bootstrap.sh`, ~150–310 s per VM).
-Instead of paying that on every VM, the `bats` gate builds the compositor **once
-per run** into a golden qcow2 (`qci-golden-bats-*.qcow2`), then every worker
+**Per-run golden image:** native qdwin, qdshell, daemons and qsu binaries, plus
+the SELinux policy modules, are built from current source in rootless Podman and
+cached by source, container image and snapshot. The runtime-only cloud VM
+receives that verified payload;
+`fresh-vm-bootstrap.sh` installs the remaining Python services, QML and units.
+When tier-2 workloads are requested, rootless Podman also builds their three
+images against the test substrate snapshot and caches a checksum-verified
+archive. The golden loads the archive into admin's Podman store and verifies
+each image's snapshot label. A cache hit avoids rebuilding these images inside
+every golden; the normal guest build remains available with the Kiwi base.
+The `bats` gate provisions this **once per run** into a golden qcow2
+(`qci-golden-bats-*.qcow2`), then every worker
 clones that golden and **skips the build** (per-VM provisioning drops to ~10 s).
 The golden is built from *current* source each run (still fresh), cleaned up at
 run end, and preserved only if a failed worker that references it is preserved.
@@ -161,11 +178,16 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 | `QCI_AGENT_TIMEOUT` | 0 | Host-side backstop deadline (s) on each agent scenario, wrapping `QCI_AGENT_CMD` in `timeout -k 15`. `0` = unbounded (the operator command owns the budget). When both are set the smaller wins; on expiry the agent is killed and the scenario fails closed (rc=124, no verdict). |
 | `QCI_GUI_RETRY` | 0 | Classified GUI retry. `0`/unset = **report-only**: classify each failure and log to `flake.tsv` what *would* retry, but never re-run. `1`/`classified` = retry **exactly once on a fresh VM**, and only for tight retriable infra/tooling signatures such as `transport-timeout` (qemu-agent/vm-exec wedge), `agent-api-unreachable` (exact external provider connection or selected-model-capacity failure), and `agent-tooling` (agent command-construction failure). `status=FAIL`/`ERROR`, generic `UNKNOWN`, `no-verdict`, and `agent-timeout` (slow agent — possible product hang) are **never** auto-retried. A retried pass always emits a `flake.tsv` row + a note on the result row, so a flake is never silently green. |
 | `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
-| `QDISTRO_VM_BASE` | auto | `auto`: clone qci workers from the imported kiwi image (`qdistro-kiwi-base.qcow2`, tester or ci profile) if present, else `baseweed-baked`. `kiwi` requires the import (`scripts/vm/import-kiwi-base.sh`). `baked` always uses baseweed-baked. `build-in-vm.sh` always clones baked. |
+| `QDISTRO_VM_BASE` | baked | `baked` uses the pinned cloud-derived baseweed image. `kiwi` explicitly uses the imported Kiwi base; `auto` prefers Kiwi when imported, otherwise baseweed. The product image gate still qualifies Kiwi. |
+| `QDISTRO_TEST_SUBSTRATE` | `snapshot.conf` (repo root) | Select an alternate manifest with a cloud URL, SHA256, architecture and Tumbleweed repository snapshot for a test substrate experiment. |
+| `QCI_NATIVE_BUILDER` | `podman` for baked cloud, `guest` for Kiwi | Select the native build location. The baked cloud base omits compilers and headers, so its supported mode is `podman`. |
+| `QCI_PODMAN_IMAGE` | `registry.opensuse.org/opensuse/tumbleweed:<snapshot>` (the `snapshot.conf` pin) | Change the rootless builder image. The resolved image ID is part of the native cache key; the container aligns its packages to the pinned snapshot before building. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |
 | `QDISTRO_VM_EXEC_TIMEOUT` | 1800 | Overall deadline (s) for a single `vm-exec` in-guest command. On expiry `vm-exec` attempts an identity-checked TERM, then KILL, of the discovered and pinned guest process tree, and exits 124. It reports its own verification limits: a descendant whose identity it cannot pin is named (`unpinnable-descendants:`) and deliberately **not** signalled, and it cannot guarantee it discovers a reparented process, so reaping is attempted and reported, not guaranteed. The deadline is also checked against elapsed time BETWEEN steps, not enforced as wall clock, so a true wall-clock cap must come from outside — use `timeout -k 30 <n> vm-exec ...`, where `-k` makes the cap an undeniable KILL-at-cap+grace for **vm-exec itself**, which a plain `timeout` does not give you against a TERM-resistant process. It does **not** reach descendants: `timeout` waits only for its direct child, so if vm-exec exits on the TERM the later group KILL is never sent. An outer cap bounds how long you wait; it does not bound cleanup, and a short grace can cut vm-exec's own cleanup verification short. The counter is also clamped across host suspend, so it measures elapsed time as the host saw it, not as the guest experienced it. `0` = unbounded. |
 | `QDISTRO_VM_AGENT_RPC_TIMEOUT` | 30 | Host-side cap (s) per `virsh qemu-agent-command` RPC, bounding any ONE wedged agent call. It does not bound the total: the deadline above is checked between steps, so many capped calls can still overrun it. `0` = unbounded. |
+| `QDISTRO_VM_EXEC_ORPHAN_REAP` | 1 | `vm-exec` orphan registry. Each call whose guest command is pinned records it (guest pid, start time, guest boot id, domain uuid); the record is removed once the command is known finished. Before launching, `vm-exec` resolves records left by a **SIGKILLed** `vm-exec` (identity- and boot-checked kill in the guest). If an orphan cannot be confirmed gone, or the per-VM lock is not obtained within `QDISTRO_VM_EXEC_REAP_LOCK_WAIT` (default 4 x (`QDISTRO_VM_KILL_VERIFY_TIMEOUT`+grace+1)+10 s), the launch is **refused with exit 75** (retryable, nothing started). Records are also KEPT when a call exits while its command may still run -- a poll error such as `Guest agent not responding`, qga losing its bookkeeping (`PID ... does not exist`), or an unverified signal cleanup -- and the next call on that VM resolves them (normally as `already-gone`) once the agent answers. `0` disables recording and reaping. |
+| `QDISTRO_VM_EXEC_STATE_DIR` | `$XDG_RUNTIME_DIR/qdistro-vm-exec-<uid>` | Where the orphan registry lives (one subdirectory per VM name). When `XDG_RUNTIME_DIR` is unset it falls back to `/tmp/qdistro-vm-exec-<uid>`. Records are only seen by `vm-exec` calls that resolve to the SAME directory, so a caller with `XDG_RUNTIME_DIR` set and one without it do not see each other's orphans. Set this explicitly when mixing such environments. Per-VM directories are never removed automatically; they are tiny, and stale ones may be deleted by hand when no `vm-exec` is running. A malformed or unknown-format record refuses launches (exit 75) until reconciled by hand: if no such driver runs in the guest, `rm` the file the error names. |
 | `QD_VM_START_MAX_WAIT` | 300 | Backstop cap (s) on guest-agent readiness in `vm-start-and-wait` (raised from 120 for parallel boot contention). |
 | `QCI_HOST_STEP_TIMEOUT` | 600 | Per-step wall budget (s) for the `host` gate. It does **not** cover the `qdistro-pytest` step — see the next row. Raising this alone does not give pytest more time. |
 | `QCI_QDISTRO_PYTEST_TIMEOUT` | 1800 | Wall budget (s) for the `qdistro-pytest` host step **only**, deliberately independent of `QCI_HOST_STEP_TIMEOUT`. The suite's honest cost is ~550s across ten batches, so the shared 600s step budget left no headroom and one slow test killed the gate; 1800s is ~3.3x the honest cost, which keeps the step a wedge detector without being sensitive to normal variance. Set **both** knobs to slow down every host step. |
@@ -173,6 +195,88 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 
 A per-task timing breakdown (provision vs work seconds per file/scenario) is
 written to `<run-dir>/timings.tsv` for spotting outliers.
+The [test split proposal](TEST-SPLITS.md) summarizes a measured full run and
+the coverage work needed before automatic selection can omit slow scenarios.
+For quick Python app feedback, use an isolated worktree and run
+`ci/bin/qci feedback qdfileman qdfileman/qfileman/window.py` (replace the path
+with the changed files). It calls the same job as `host`, with the same default
+600-second step timeout. A pass is development feedback only and does not
+satisfy `host` or `full`; `QCI_RELEASE=1` is refused before a run is created.
+The `feedback_*` manifest fields and `host/feedback-paths.txt` record selection,
+revision, elapsed time to result, job counts and exit outcome. Dependency content
+hashes and Python/pytest/Qt package versions appear in
+`host/feedback-dependencies.txt`; `repo-state.tsv` records checkout state.
+Compare timings only at matching revision, clean/dirty state and dependency
+identity; no speedup against full host has been measured here. Job counts describe
+jobs, not pytest test cases; the pytest log has case counts.
+
+The consumer map is deliberately a shadow report: qdfileman changes still need
+`host bats gui`, and no paths, shared SDK receive/send, installation changes or
+unknown paths require full acceptance coverage. The command executes one explicit
+job regardless of this report, and never changes `qci affected` selections.
+SDK or installation feedback alone cannot validate their other consumers.
+
+For focused development runs, `ci/bin/qci-lane check` lists the available
+group sizes, `ci/bin/qci-lane list bats-fast` prints its files, and
+`ci/bin/qci-lane run gui-locker` executes only that scenario group through
+the normal qci gate. The group and exact file selection appear in the run
+manifest. These explicit lanes do not alter `qci full` or `qci affected`.
+`ci/bin/qci-lane audit` lists discovered Bats and GUI cases missing from the
+pilot registry before any automatic per-component selection is attempted.
+
+### Cloud test substrate
+
+The default VM base is built from openSUSE's Minimal-VM cloud qcow2. The
+checked-in [`snapshot.conf`](../snapshot.conf) at the repo root pins its SHA256
+and the OSS/non-OSS history snapshot. It is the **one** Tumbleweed pin: the kiwi
+tester image (`image/build.sh` passes the history repositories to kiwi), the
+tier-2 workload images, and the rootless Podman native builder (base image
+`tumbleweed:<snapshot>`) all read it, so every build downloads from one
+snapshot and shares one RPM cache. The download must also
+match openSUSE's signed checksum. Changing the manifest or build recipe gives
+the next base a new filename; old disks remain available to preserved workers.
+`QDISTRO_VM_BASE=kiwi` remains available when image parity is the test target.
+
+To rotate the snapshot, choose the newest available history snapshot, verify the
+new cloud checksum signature, edit the manifest's digest and snapshot together,
+then build with `scripts/vm/build-baseweed-from-scratch.sh` followed by
+`scripts/vm/build-baked-baseweed.sh`. The history service retains snapshots for
+roughly a month; schedule a candidate build about weekly. Cloud base builders
+and qci VM test entry points reject a pin more than 14 UTC calendar days old,
+including when a matching base is already cached. Refresh the pin and rebuild
+both bases (and the tester image) before launching tests. The image build
+refuses a pin older than 14 days the same way. An expired snapshot is an error, not a
+reason to use rolling repositories. An explicit alternate
+manifest via `QDISTRO_TEST_SUBSTRATE` keeps experiments separate.
+
+Downloaded RPMs from the base builders, the tier-5 base, and Bats/qdwin
+goldens are exported to
+`$QDWIN_CACHE_DIR/rpm/<snapshot>/<arch>/` (default
+`~/.cache/qdistro/rpm/`) and seeded on a later rebuild. The repository files
+retain `gpgcheck=1`; cached RPMs are only download hints. The cloud qcow2 and
+its signed sidecars live in a SHA256-named cache entry. The existing fixed-name
+baseweed disks are left untouched when the pinned substrate is first built.
+The rootless native builder has a separate RPM cache under
+`$QDWIN_CACHE_DIR/podman-rpm/<snapshot>/<arch>/packages/` and stores its staged
+archive under `$QDWIN_CACHE_DIR/native-podman/<snapshot>/<arch>/`. A changed
+source tree, container image, snapshot or Meson options triggers a rebuild.
+Its dependency installation lives in a rootless Podman toolchain image keyed
+by the base image ID, snapshot and dependency recipe. A source-only rebuild
+reuses that image and skips `zypper dup` and the development-package install; the RPM
+cache supplies downloads when the toolchain image itself must be rebuilt.
+Golden bootstraps install the local qdbrowser and qdlocker Python packages
+without pip build isolation or an index; the snapshot's setuptools RPM supplies
+their build backend instead of a fresh PyPI download.
+The guest loads the staged SELinux modules with `semodule`; no native compiler,
+Meson, Ninja, `make` or policy headers are needed in the cloud test base.
+The native builder checks the broker SELinux neverallow negative control
+against the pinned snapshot policy store before it caches the payload.
+Tier-2 test images use Podman's local image layers and a separate archive cache
+under `$QDWIN_CACHE_DIR/tier2-podman/<snapshot>/<arch>/`. Changes to tier-2
+source, the base container image or the pinned test snapshot rebuild that
+archive. `QCI_OFFLINE=1` requires both the base container and archive to be
+cached. There is no separate tier-2 pin: `tier2/make-tier2-image.sh` and the
+installed `/usr/lib/qdistro/tier2/SNAPSHOT` both derive from `snapshot.conf`.
 
 ## Agent-assisted GUI scenarios
 
@@ -193,13 +297,25 @@ runner takes. The supported runner is Codex with `gpt-5.6-luna`, which reads the
 prompt on stdin:
 
 ```bash
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
 
 `--yolo` is required because the agent must run `vm-exec`/`virsh` and write its
-`status.txt` without interactive approval. Each attempt gets its own working
+`status.txt` without interactive approval. Do NOT add `--ephemeral`: the gate
+reads each attempt's codex rollout (`$CODEX_HOME/sessions`, default
+`~/.codex/sessions`) to see which attested frames the driver actually opened
+(`ci/lib/gui_rollout_views.py`, sidecar `gui/<slug>.views.txt`). A
+`qci:visual: required` PASS or FAIL whose driver opened no attested frame is
+recorded ERROR (`agent-unviewed-verdict`); with `--ephemeral` there is no
+rollout and every attempt is `unobservable:ephemeral` (no verdict changes). If
+the template sets its own `CODEX_HOME=...`, also export `QCI_GUI_CODEX_HOME`
+with the same value, or the attempts are `unobservable:codex-home`. Retention:
+the rollouts are codex's own files and keep every viewed frame as base64, so
+`~/.codex/sessions` grows by roughly the encoded size of every frame each
+attempt opened (a 1280x800 admin-app frame is about 50 KB of base64; a two-frame
+grading session measured 148 KB); prune it as you would any codex history. Each attempt gets its own working
 directory regardless of the template: `run_agent_command` creates one with
 `mktemp -d` and `cd`s into it before running the agent. Set `QCI_AGENT_MODEL` whenever a wrapper selects the
 model outside the visible template, or the manifest records `unknown`.

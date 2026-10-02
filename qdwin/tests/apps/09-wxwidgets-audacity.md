@@ -33,10 +33,16 @@ qdwin_apps_screenshot /tmp/09-step1-launched.png
 **Assert (1.1):** screenshot shows the audacity main window:
 titlebar "Audacity", menu bar (File / Edit / Select / View /
 Transport / Tracks / Generate / Effect / Analyze / Tools / Help),
-playback transport buttons (pause / play / stop), and a "Welcome to
-Audacity!" first-run popup with "Try the new Audacity 4 Beta release",
-the "Test the Beta release" action, and the "View tutorials" / "Visit our
-forum" links.
+playback transport buttons (pause / play / stop), and a first-run popup
+titled "Welcome to Audacity!" drawn above the main window, containing:
+a promo carousel (a headline, an image panel with `<` / `>` navigation
+buttons, and one action button beneath it), the "View tutorials" /
+"Visit our forum" links, a "Don't show this again at start up" checkbox,
+and an "OK" button. Do NOT assert the carousel's wording: it is
+upstream promo content that changes between Audacity builds (seen:
+"Try the new Audacity 4 Beta release" / "Test the Beta release";
+"Audacity Feature Survey" / "Take part in survey"). Any headline plus
+exactly one action button under the panel passes.
 **Assert (1.2):** bystander log records `xwayland=1` for the audacity
 toplevel.
 
@@ -85,6 +91,9 @@ qdwin_apps_kill_all
   wx-side modal grabs input synchronously; if step 2's Escape fires
   too early, send another. The scenario gives a 12s wait for full
   initialization.
+- **Promo carousel content changes** — the welcome popup's carousel
+  is served by the Audacity build (beta invite, feature survey, ...).
+  Only the popup's structure is asserted in 1.1, never its promo copy.
 - **Audacity can't find audio device** — the welcome popup now reads
   "Audacity could not find any audio devices". Still passes step 1
   (window rendered). Note for the audio-stack follow-up only.

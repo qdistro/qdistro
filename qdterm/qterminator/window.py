@@ -820,12 +820,9 @@ class MainWindow(QMainWindow):
             self._active_terminal.zoom_out()
 
     def _zoom_normal(self):
-        """Reset zoom to default font size."""
+        """Reset zoom to this terminal's own profile/source base."""
         if self._active_terminal:
-            profile = Config().get_profile("default")
-            self._active_terminal.set_font(
-                profile["font_family"], profile["font_size"]
-            )
+            self._active_terminal.zoom_reset()
 
     # -- Fullscreen --
 
@@ -1051,12 +1048,27 @@ class MainWindow(QMainWindow):
 
     # -- Theme --
 
-    def apply_color_scheme_to_all(self, scheme_name):
-        """Set the color scheme on every terminal in every tab."""
+    def iter_terminals(self):
         for i in range(self._tabs.count()):
             split = self._tabs.widget(i)
-            for term in split.find_terminals():
-                term.set_color_scheme(scheme_name)
+            if split is None:
+                continue
+            yield from split.find_terminals()
+
+    def apply_presentation_update(self) -> None:
+        for term in self.iter_terminals():
+            term.apply_inherited_presentation()
+
+    def apply_profile_to_terminals(self, profile_name: str) -> None:
+        for term in self.iter_terminals():
+            if term.profile_name != profile_name:
+                continue
+            term.apply_profile_fields()
+
+    def apply_color_scheme_to_all(self, scheme_name):
+        """Set the color scheme on every terminal in every tab."""
+        for term in self.iter_terminals():
+            term.set_color_scheme(scheme_name)
 
     # -- Preferences --
 

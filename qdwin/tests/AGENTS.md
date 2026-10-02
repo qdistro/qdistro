@@ -9,7 +9,8 @@ mechanics.
 
 qdwin is **not a pytest project**. It is meson + C, with shell helpers and
 markdown GUI scenarios. The `@pytest.mark.cheat_aware` marker used in the
-Python sibling repos (`qdistro/tests/unit/`) **does not apply here — do not
+Python components and root tests elsewhere in the monorepo
+(`tests/unit/`) **does not apply here — do not
 add it.** The discipline it encodes still applies: every test must declare,
 in its name or a comment, what user-visible compositor behavior it
 protects.

@@ -389,3 +389,235 @@ MD
     run lint "$f"
     [[ "$output" != *"cross-shell-wait"* ]]
 }
+
+# qemu-ga echoes every guest-exec into the guest journal. An unscoped
+# `journalctl | grep` inside that command can match the echo. The pipe may
+# sit on the next line of the same quoted guest script.
+
+@test "flake-lint: fires qga-journal-self-match on guest journalctl piped to grep" {
+    local f="$BATS_TEST_TMPDIR/80-qga.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --no-pager | grep -q some-token'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    # A literal vm-exec binary is a guest command even though it is not $VMEXEC.
+    printf '# x\n```bash\nscripts/vm/vm-exec "$VM" '"'"'journalctl --no-pager | egrep -q some-token'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: fires qga-journal-self-match when the pipe is on the next guest line" {
+    local f="$BATS_TEST_TMPDIR/81-qga-ml.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --no-pager\n| grep -q some-token'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: -u scoped guest journalctl|grep is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/82-qga-u.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user -u qdwin-compositor.service --after-cursor "$c" | grep -q mapped'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: _SYSTEMD_USER_UNIT= scoped guest journalctl|grep is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/83-qga-field.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service | grep -q mapped'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: a host journalctl|grep is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/84-qga-host.md"
+    printf '# x\n```bash\njournalctl --no-pager | grep -q some-token\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: guest journalctl redirected to a file is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/85-qga-redir.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user -u unit > /tmp/log'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: dropping -u from a scoped guest journalctl|grep starts flagging" {
+    # Mutation of the safe `-u <unit>` form above: without the unit match the
+    # same guest pipeline is qga-journal-self-match.
+    local safe="$BATS_TEST_TMPDIR/86-qga-safe.md" dropped="$BATS_TEST_TMPDIR/86-qga-dropped.md"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user -u qdwin-compositor.service --after-cursor "$c" | grep -q mapped'"'"'\n```\n' > "$safe"
+    printf '# x\n```bash\n"$QDWIN_VM_EXEC" "$VM" '"'"'journalctl --user --after-cursor "$c" | grep -q mapped'"'"'\n```\n' > "$dropped"
+    run lint "$safe"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    run lint "$dropped"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: guest double-quoted command substitution is qga-journal-self-match" {
+    # Outer single quotes: the guest executes $(...) / backticks, the host
+    # does not. The pipe may sit on the next line inside that substitution.
+    local f="$BATS_TEST_TMPDIR/87-qga-subst.md"
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="$(journalctl --no-pager | grep token)"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="$(journalctl --no-pager
+| grep token)"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="`journalctl --no-pager | grep token`"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+    # A unit match inside the substitution is still scoped.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'x="$(journalctl --user -u qdwin-compositor.service | grep token)"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    # Host-expanded $(...) in the remote double quotes is not a guest command.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" "$(journalctl --no-pager | grep token)"
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: journalctl as an argument is not qga-journal-self-match" {
+    local f="$BATS_TEST_TMPDIR/88-qga-arg.md"
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'echo journalctl | grep token'
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    # The pipe inside quotes is echo's text, not a pipeline.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'echo "journalctl | grep token"'
+```
+EOF
+    run lint "$f"
+    [[ "$output" != *"qga-journal-self-match"* ]]
+    # command/exec wrap the program that actually runs.
+    cat > "$f" <<'EOF'
+# x
+```bash
+"$VMEXEC" "$VM" 'command journalctl --no-pager | grep token'
+```
+EOF
+    run lint "$f"
+    [[ "$output" == *"qga-journal-self-match"* ]]
+}
+
+@test "flake-lint: fires unbounded-xdotool-sync; a timeout-wrapped --sync is clean" {
+    local f="$BATS_TEST_TMPDIR/32-xdo.md"
+    cat > "$f" <<'MD'
+# xdotool
+
+## Steps
+
+```bash
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "Shell No. 1" windowactivate --sync'
+runuser -u admin -- env DISPLAY=:0 timeout -k 5 20 xdotool search --sync --name "x" windowactivate --sync || exit 1
+runuser -u admin -- env DISPLAY=:0 xdotool search --name "x" || exit 1
+MD
+    run lint "$f"
+    [ "$(grep -c ': unbounded-xdotool-sync: ' <<<"$output")" -eq 1 ]
+    [[ "$output" == *"32-xdo.md:6: unbounded-xdotool-sync"* ]]
+}
+
+@test "permissions-gui/05: XWayland forced, every xdotool --sync bounded, settle wait after each key" {
+    local sc="$REPO_ROOT/tests/integration/permissions-gui/05-tui-help-overlay.md"
+    run lint --strict "$sc"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unbounded-xdotool-sync"* ]]
+    # the launcher runs qterminal on the Qt xcb platform (XWayland)
+    grep -q "env QT_QPA_PLATFORM=xcb /usr/local/bin/qdistro-start-admin-tui" "$sc"
+    # an XWayland proof that can fail: a bounded xdotool search before any key
+    grep -q 'timeout 20 xdotool search --sync --name "Shell No. 1"'"'" "$sc"
+    # every `virsh send-key` is followed, before the next capture, by sleep >= 2
+    python3 - "$sc" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+keys = [i for i, l in enumerate(lines) if l.startswith("virsh send-key")]
+assert len(keys) == 2, keys
+for i in keys:
+    j = next(k for k in range(i + 1, len(lines)) if "screenshot" in lines[k] and "$VMGUI" in lines[k])
+    sl = [float(m.group(1)) for l in lines[i + 1:j] for m in [re.match(r"^sleep ([0-9.]+)\s*$", l)] if m]
+    assert sl and max(sl) >= 2, (i, lines[i + 1:j])
+PY
+    # the misleading claim is gone and its correction is present
+    ! grep -q 'its hash differs from S1' "$sc"
+    grep -q 'proves only that a new frame was captured' "$sc"
+}
+
+# Run one fenced bash block of the REAL pg/05 scenario (the first one after a
+# heading) with host stubs: VMEXEC fails with $XDO_RC when the guest command
+# runs xdotool, virsh/sleep log to $LOG, VMGUI logs its capture. Args: heading.
+pg05_block() {
+    local sc="$REPO_ROOT/tests/integration/permissions-gui/05-tui-help-overlay.md"
+    python3 - "$sc" "$1" > "$BATS_TEST_TMPDIR/block.sh" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+i = next(k for k, l in enumerate(lines) if l.startswith(sys.argv[2]))
+i = next(k for k in range(i, len(lines)) if lines[k].strip() == "```bash") + 1
+j = next(k for k in range(i, len(lines)) if lines[k].strip() == "```")
+print("\n".join(lines[i:j]))
+PY
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cat > "$BATS_TEST_TMPDIR/bin/vmexec" <<'SH'
+#!/bin/bash
+echo "vmexec $2" >> "$LOG"
+case "$2" in *xdotool*) exit "${XDO_RC:-0}" ;; esac
+exit 0
+SH
+    printf '#!/bin/bash\necho "virsh $*" >> "$LOG"\n' > "$BATS_TEST_TMPDIR/bin/virsh"
+    printf '#!/bin/bash\necho "sleep $*" >> "$LOG"\n' > "$BATS_TEST_TMPDIR/bin/sleep"
+    printf '#!/bin/bash\necho "vmgui $*" >> "$LOG"\n' > "$BATS_TEST_TMPDIR/bin/vmgui"
+    chmod +x "$BATS_TEST_TMPDIR/bin/"*
+    : > "$BATS_TEST_TMPDIR/log"
+    run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" LOG="$BATS_TEST_TMPDIR/log" VM=vm \
+        VMEXEC="$BATS_TEST_TMPDIR/bin/vmexec" VMGUI="$BATS_TEST_TMPDIR/bin/vmgui" \
+        XDO_RC="${XDO_RC:-0}" bash "$BATS_TEST_TMPDIR/block.sh"
+}
+
+@test "permissions-gui/05: a failed XWayland proof or focus handoff stops before any key or capture" {
+    XDO_RC=124 pg05_block "### S2"
+    [ "$status" -eq 124 ]
+    [[ "$output" == *"XWAYLAND-FOCUS-FAILED rc=124"* ]]
+    ! grep -q '^virsh' "$BATS_TEST_TMPDIR/log"
+    ! grep -q '^vmgui' "$BATS_TEST_TMPDIR/log"
+    XDO_RC=124 pg05_block "### S1"
+    [ "$status" -eq 124 ]
+    [[ "$output" == *"XWAYLAND-SETUP-FAILED rc=124"* ]]
+    grep -q 'QT_QPA_PLATFORM=xcb' "$BATS_TEST_TMPDIR/log"
+    ! grep -q '^vmgui' "$BATS_TEST_TMPDIR/log"
+    # healthy handoff: key, then the 2 s settle, then the capture -- in order
+    XDO_RC=0 pg05_block "### S2"
+    [ "$status" -eq 0 ]
+    [ "$(grep -v '^vmexec' "$BATS_TEST_TMPDIR/log" | cut -d' ' -f1-2)" = "virsh send-key
+sleep 2
+vmgui vm" ]
+}

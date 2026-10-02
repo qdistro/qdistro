@@ -84,8 +84,12 @@ def find_protocol_xmls() -> dict[str, list[Path]]:
             rel = xml.relative_to(root).parts
             if repo == "qdistro" and rel[:3] == ("image", "root", "root"):
                 continue
+            # .worktrees/ and .claude/worktrees/ hold whole checkouts of
+            # other branches (Claude Code puts agent worktrees under the
+            # latter), not second sources of a protocol.
             if repo == "qdistro" and rel and (rel[0] in COMPONENT_DIRS
-                                              or rel[0] == ".worktrees"):
+                                              or rel[0] in (".worktrees",
+                                                            ".claude")):
                 continue
             if any(part in EXCLUDE_PARTS for part in xml.parts):
                 continue

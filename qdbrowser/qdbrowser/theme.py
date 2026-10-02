@@ -1,9 +1,10 @@
 """Theme palette + stylesheet for qdbrowser (dark / light / system)."""
 
 import os
+import re
 
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 BG_DARK = "#1e1e1e"
 BG_MID = "#2d2d2d"
@@ -32,6 +33,7 @@ def detect_system_theme() -> str:
             hints = app.styleHints()
             scheme = hints.colorScheme()
             from PyQt6.QtCore import Qt
+
             if hasattr(Qt, "ColorScheme"):
                 if scheme == Qt.ColorScheme.Dark:
                     return "dark"
@@ -46,14 +48,16 @@ def detect_system_theme() -> str:
 
 
 def resolve_theme(mode: str) -> str:
-    if mode == "dark":
-        return "dark"
-    if mode == "light":
-        return "light"
+    if mode in ("dark", "light", "native"):
+        return mode
     return detect_system_theme()
 
 
 def apply_theme(app: QApplication, mode: str = "system") -> str:
+    if mode == "native":
+        # Without a PresentationController there is no captured platform
+        # palette to restore; leave the current style in place.
+        return "native"
     resolved = resolve_theme(mode)
     if resolved == "light":
         _apply_light(app)
@@ -68,11 +72,44 @@ def palette_dict(mode: str = "auto") -> dict:
     keys are stable across theme changes; values are CSS colors.
 
     ``mode``:
-      - ``"auto"`` — follow ``detect_system_theme()``
+      - ``"auto"`` — follow the effective app palette
       - ``"dark"`` — force dark palette
       - ``"light"`` — force light palette
     """
     if mode == "auto":
+        from PyQt6.QtGui import QPalette
+        from PyQt6.QtWidgets import QApplication as _QApplication
+
+        ctrl = current_controller()
+        if ctrl is not None and ctrl.state.using_shared_palette and ctrl.state.colors:
+            colors = ctrl.state.colors
+            return {
+                "bg": colors.mSurface,
+                "bg_mid": colors.mSurfaceVariant,
+                "bg_dim": colors.mSurfaceVariant,
+                "fg": colors.mOnSurface,
+                "fg_dim": colors.mOnSurfaceVariant,
+                "accent": colors.mPrimary,
+                "border": colors.mOutline,
+                "selection": colors.mPrimary,
+                "selection_fg": colors.mOnPrimary,
+                "hover": colors.mHover,
+                "hover_fg": colors.mOnHover,
+            }
+        app = _QApplication.instance()
+        if app is not None:
+            pal = app.palette()
+            return {
+                "bg": pal.color(QPalette.ColorRole.Base).name(),
+                "bg_mid": pal.color(QPalette.ColorRole.Window).name(),
+                "bg_dim": pal.color(QPalette.ColorRole.AlternateBase).name(),
+                "fg": pal.color(QPalette.ColorRole.Text).name(),
+                "fg_dim": pal.color(QPalette.ColorRole.PlaceholderText).name(),
+                "accent": pal.color(QPalette.ColorRole.Highlight).name(),
+                "border": pal.color(QPalette.ColorRole.Mid).name(),
+                "selection": pal.color(QPalette.ColorRole.Highlight).name(),
+                "selection_fg": pal.color(QPalette.ColorRole.HighlightedText).name(),
+            }
         mode = detect_system_theme()
     if mode == "light":
         return {
@@ -97,6 +134,43 @@ def palette_dict(mode: str = "auto") -> dict:
     }
 
 
+_CSS_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_OVERLAY_FALLBACK = {
+    "bg": BG_DARK,
+    "bg_mid": BG_MID,
+    "fg": FG,
+    "border": BORDER,
+    "accent": ACCENT_LIGHT,
+}
+
+
+def css_color_literal(value: object, fallback: str) -> str:
+    """Return an opaque #rrggbb literal, else ``fallback``.
+
+    Overlay JS interpolates these into CSS custom properties. Reject
+    anything that is not a six-digit hex color so a snapshot or palette
+    value cannot become executable JS or unescaped CSS.
+    """
+    if isinstance(value, str) and _CSS_HEX.fullmatch(value.strip()):
+        return value.strip().lower()
+    if isinstance(fallback, str) and _CSS_HEX.fullmatch(fallback.strip()):
+        return fallback.strip().lower()
+    return "#000000"
+
+
+def overlay_palette(mode: str = "auto") -> dict[str, str]:
+    """Validated colors for application-owned page overlays."""
+    raw = palette_dict(mode)
+    fallback = _OVERLAY_FALLBACK
+    return {
+        "bg": css_color_literal(raw.get("bg"), fallback["bg"]),
+        "bg_mid": css_color_literal(raw.get("bg_mid"), fallback["bg_mid"]),
+        "fg": css_color_literal(raw.get("fg"), fallback["fg"]),
+        "border": css_color_literal(raw.get("border"), fallback["border"]),
+        "accent": css_color_literal(raw.get("accent"), fallback["accent"]),
+    }
+
+
 def _apply_dark(app):
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(BG_MID))
@@ -111,12 +185,9 @@ def _apply_dark(app):
     pal.setColor(QPalette.ColorRole.Link, QColor(ACCENT_LIGHT))
     pal.setColor(QPalette.ColorRole.Highlight, QColor(SELECTION))
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    pal.setColor(QPalette.ColorGroup.Disabled,
-                 QPalette.ColorRole.WindowText, QColor(FG_DIM))
-    pal.setColor(QPalette.ColorGroup.Disabled,
-                 QPalette.ColorRole.Text, QColor(FG_DIM))
-    pal.setColor(QPalette.ColorGroup.Disabled,
-                 QPalette.ColorRole.ButtonText, QColor(FG_DIM))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(FG_DIM))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(FG_DIM))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(FG_DIM))
     app.setPalette(pal)
     app.setStyleSheet(DARK_QSS)
 
@@ -182,6 +253,86 @@ QScrollBar::handle:vertical {{ background-color: {BG_LIGHT};
                                border-radius: 4px; min-height: 20px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 """
+
+_CONTROLLER = None
+
+
+def attach_presentation(app: QApplication, config):
+    global _CONTROLLER
+    try:
+        from qdistro_presentation.model import LocalOverrides, parse_local_overrides
+        from qdistro_presentation.qt import PresentationController
+    except ImportError:
+        return apply_theme(app, config.get("general", "theme_mode", default="system"))
+
+    theme_mode = config.get("general", "theme_mode", default="system")
+    if theme_mode not in ("system", "dark", "light", "native"):
+        theme_mode = "system"
+    appearance = config.get("appearance", default={}) or {}
+    try:
+        local = parse_local_overrides(appearance)
+    except Exception:
+        local = LocalOverrides()
+    ctrl = PresentationController(
+        app,
+        theme_mode=theme_mode,
+        local=local,
+        apply_legacy=lambda a, mode: apply_theme(a, mode),
+        apply_system_fallback=lambda a: apply_theme(a, detect_system_theme()),
+        watch=True,
+    )
+    ctrl.changed.connect(lambda *_args: refresh_windows(app))
+    _CONTROLLER = ctrl
+    if ctrl.state.using_shared_palette:
+        return ctrl.state.snapshot.mode if ctrl.state.snapshot else "dark"
+    if theme_mode in ("dark", "light", "native"):
+        return theme_mode
+    return detect_system_theme()
+
+
+def current_controller():
+    return _CONTROLLER
+
+
+def current_resolved_theme(fallback: str = "dark") -> str:
+    """Effective dark/light/native mode for chrome and overlay restyle."""
+    ctrl = current_controller()
+    if ctrl is None:
+        return fallback
+    state = ctrl.state
+    if state.using_shared_palette and state.snapshot is not None:
+        return state.snapshot.mode
+    if state.theme_mode in ("dark", "light", "native"):
+        return state.theme_mode
+    return detect_system_theme()
+
+
+def refresh_windows(app: QApplication) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_presentation_update", None)
+        if callable(method):
+            method()
+        else:
+            widget.update()
+            for child in widget.findChildren(QWidget):
+                child.update()
+
+
+def reset_controller_for_tests() -> None:
+    global _CONTROLLER
+    if _CONTROLLER is not None:
+        try:
+            _CONTROLLER.stop()
+        except Exception:  # noqa: BLE001
+            pass
+    _CONTROLLER = None
+    try:
+        from qdistro_presentation.qt import reset_controller_for_tests as _reset
+
+        _reset()
+    except ImportError:
+        pass
+
 
 LIGHT_QSS = f"""
 QMainWindow {{ background-color: {LT_BG}; }}

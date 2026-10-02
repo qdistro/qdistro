@@ -18,6 +18,8 @@
 #                             no sibling tier-2 sockets)
 #   7. Container has the qdistro_tier2_token label
 #                            (orphan-dir reaper depends on this)
+#   8. Public presentation directory is bound read-only (no :Z), writable
+#      attempts fail, and sibling /var/lib/qdistro trees are absent
 #
 # Builds the tier-2 image on demand, so this driver can run either
 # standalone or after s32 / s33 / s34 in the larger tiered suite.
@@ -99,6 +101,12 @@ for _ in $(seq 1 20); do
 done
 [ "$broker_reply" = "allow" ] \
     || die "broker did not load the tier-2 hardening allow rule (CheckPermission='$broker_reply')"
+
+# The spawn wrapper only binds the presentation directory when it exists.
+# A missing public dir would silently omit the mount and look like a
+# successful spawn with no appearance data.
+[ -d /var/lib/qdistro/presentation ] \
+    || die "presentation public dir missing; installer should have created it before app launch"
 
 # Cleanup any leftover container with the same name.
 runuser -u admin -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -222,6 +230,81 @@ if [ -n "$LABEL_TOKEN" ] && [ "$LABEL_TOKEN" != "<no value>" ]; then
     pass "qdistro_tier2_token label set ($LABEL_TOKEN)"
 else
     fail "qdistro_tier2_token label missing — orphan-dir reaper will fail to identify live containers"
+fi
+
+# --- 8. Presentation directory bind: ro, no :Z, no sibling /var/lib/qdistro ---
+MOUNT_JSON=$(runuser -u admin -- podman inspect "$CONTAINER" --format '{{json .Mounts}}' 2>/dev/null)
+PRES_PARSE=$(python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    mounts = json.loads(raw)
+except Exception as exc:
+    print("parse-error", exc)
+    raise SystemExit(0)
+hits = [m for m in mounts if m.get("Destination") == "/var/lib/qdistro/presentation"]
+if not hits:
+    print("missing")
+    raise SystemExit(0)
+m = hits[0]
+tokens = []
+for item in m.get("Options") or []:
+    tokens.extend(str(item).split(","))
+tokens = [t for t in tokens if t]
+# podman inspect records `-v ...:ro` as Mounts[].RW=false and does not
+# echo a `ro` token in Options (it keeps nodev,nosuid,noexec,rbind).
+rw_false = m.get("RW") is False
+print("src=" + str(m.get("Source") or ""))
+print("rw=" + str(m.get("RW")).lower())
+print("opts=" + ",".join(tokens))
+print("relabel=" + ("yes" if any(t in ("z", "Z") for t in tokens) else "no"))
+print("ro=" + ("yes" if rw_false or "ro" in tokens else "no"))
+' <<<"$MOUNT_JSON")
+if echo "$PRES_PARSE" | grep -qx "missing"; then
+    fail "presentation directory not bound into the container"
+elif echo "$PRES_PARSE" | grep -q "^parse-error"; then
+    fail "could not parse container mounts: $PRES_PARSE"
+else
+    echo "$PRES_PARSE" | grep -qx "src=/var/lib/qdistro/presentation" \
+        && pass "presentation bind source is the host public directory" \
+        || fail "presentation bind source is not /var/lib/qdistro/presentation ($PRES_PARSE)"
+    echo "$PRES_PARSE" | grep -qx "rw=false" \
+        && pass "presentation bind is read-only" \
+        || fail "presentation bind is writable ($PRES_PARSE)"
+    echo "$PRES_PARSE" | grep -qx "ro=yes" \
+        && pass "presentation bind options include ro" \
+        || fail "presentation bind options missing ro ($PRES_PARSE)"
+    if echo "$PRES_PARSE" | grep -qx "relabel=yes"; then
+        fail "presentation bind uses :Z/:z relabel ($PRES_PARSE)"
+    else
+        pass "presentation bind does not use :Z relabel"
+    fi
+fi
+
+if runuser -u admin -- podman exec "$CONTAINER" \
+        touch /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null; then
+    fail "container could write into the presentation directory"
+    runuser -u admin -- podman exec "$CONTAINER" \
+        rm -f /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null || true
+else
+    pass "container write into presentation directory denied"
+fi
+
+SIBLINGS=$(runuser -u admin -- podman exec "$CONTAINER" \
+    ls /var/lib/qdistro 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+if [ "$SIBLINGS" = "presentation" ]; then
+    pass "container /var/lib/qdistro exposes only presentation"
+elif echo "$SIBLINGS" | grep -Eq '(^| )(bindings|lineage|identity|approvals)( |$)'; then
+    fail "container can see sibling /var/lib/qdistro trees: $SIBLINGS"
+else
+    fail "container /var/lib/qdistro contents unexpected: $SIBLINGS"
+fi
+
+if runuser -u admin -- podman exec "$CONTAINER" \
+        test -e /home/admin/.config/noctalia 2>/dev/null; then
+    fail "container can see host qdshell settings under /home/admin/.config/noctalia"
+else
+    pass "container does not see host qdshell settings"
 fi
 
 # --- Cleanup --------------------------------------------------------------

@@ -53,13 +53,9 @@ if ! "$QDWIN_VM_EXEC" "$VMNAME" \
 fi
 
 # Drain stale locked state.
-case "$(qdlocker_ctrl status 2>/dev/null)" in
-    *locked=True*)
-        "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
-          >/dev/null
-        ;;
-esac
+# (Restarting only qdlocker.service does not unlock: qdwin holds the lock
+# fail-secure across a locker restart. Unlock through the keyboard path.)
+qdlocker_drain_lock_state || { echo "ERROR: could not drain a stale lock"; exit 2; }
 ```
 
 ## Steps

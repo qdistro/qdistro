@@ -73,10 +73,12 @@
  *                     Virtual-1 — the qdwin golden also advertises the
  *                     PipeWire forwarding outputs, which take no seat input),
  *                     moving the proxy onto that head first if the
- *                     compositor placed it elsewhere, print
- *                     CLICK_TARGET in that head's LOCAL pixels (plus
- *                     CLICK_TARGET_GLOBAL for diagnosis) and block until a
- *                     real pointer press
+ *                     compositor placed it elsewhere, exit 77 if the seat
+ *                     has no pointer yet (before printing any click target),
+ *                     otherwise print CLICK_TARGET in that head's LOCAL
+ *                     pixels (plus CLICK_TARGET_GLOBAL for diagnosis) — so a
+ *                     printed CLICK_TARGET means "mapped and waiting" — and
+ *                     block until a real pointer press
  *                     arrives as chrome_button (--click-timeout, default 30s),
  *                     show_popup with that grab serial, THEN destroy the
  *                     qdwin_nested_toplevel_v1. Assert qdwin_popup_v1.dismissed
@@ -1595,19 +1597,32 @@ int main(int argc, char *argv[])
 		       p.out_x, p.out_y, p.output_count,
 		       p.out_scale > 0 ? p.out_scale : 1, p.out_transform,
 		       use_north ? "N" : "S", ch);
-		printf("CLICK_TARGET x=%d y=%d\n", click_lx, click_ly);
-		printf("CLICK_TARGET_GLOBAL x=%d y=%d\n", click_x, click_y);
 		fflush(stdout);
 
+		/* The pointer check comes BEFORE CLICK_TARGET, so that
+		 * CLICK_TARGET means exactly "the proxy and its chrome are
+		 * mapped and this probe is now waiting for the click". It
+		 * used to be printed first: a lane that had not primed the
+		 * pointer read CLICK_TARGET, and by the time it screenshotted
+		 * the proxy this probe had already exited 77 and destroyed it,
+		 * so the frame was legitimately black and read as a capture
+		 * or product fault (qci gui-20260930T114916Z-4162368: proxy
+		 * created and destroyed within 1 ms, preview taken seconds
+		 * later). PROXY_GEOM stays above for the 77 diagnosis. */
 		if (!p.seat_has_pointer) {
 			fprintf(stderr, "qdwin-nested-probe: no pointer on the "
 				"seat — show_popup needs a live pointer grab "
 				"serial; this mode needs a VM/DRM session "
 				"whose pointer has moved at least once "
 				"(libweston 16 adds the capability on a "
-				"device's first event)\n");
+				"device's first event). No CLICK_TARGET is "
+				"printed: the proxy is destroyed on exit\n");
 			return 77;
 		}
+
+		printf("CLICK_TARGET x=%d y=%d\n", click_lx, click_ly);
+		printf("CLICK_TARGET_GLOBAL x=%d y=%d\n", click_x, click_y);
+		fflush(stdout);
 
 		int r = wait_for(&p, &p.got_chrome_button, NULL,
 				 click_timeout_sec);

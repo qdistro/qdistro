@@ -4,7 +4,8 @@
 # on a bad QDISTRO_VM_BASE or a required kiwi base that is missing.
 #
 # QDISTRO_VM_BASE:
-#   auto  (default)  qdistro-kiwi-base.qcow2 if imported, else baseweed-baked
+#   baked (default)  use the pinned cloud-derived baseweed-baked image
+#   auto             qdistro-kiwi-base.qcow2 if imported, else baseweed-baked
 #   kiwi             require the imported kiwi image (iso/14 Phase G)
 #   baked            always baseweed-baked (build-in-vm.sh hard-wires this)
 #
@@ -91,7 +92,7 @@ qdistro_backing_needs_ovmf() {
 }
 
 qdistro_vm_base_kind() {
-    local want="${QDISTRO_VM_BASE:-auto}"
+    local want="${QDISTRO_VM_BASE:-baked}"
     local kiwi
     kiwi="$(qdistro_kiwi_base_path)"
     case "$want" in

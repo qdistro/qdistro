@@ -12,6 +12,7 @@ Ctrl+Shift+1..8 scope picker.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -26,9 +27,11 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
     QIcon,
     QKeySequence,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QShortcut,
@@ -970,12 +973,19 @@ class BrokerBridge(QObject):
                 "started_at":    float(r["started_at"]),
                 "completed_at":  float(r["completed_at"]),
                 "error":         str(r["error"]),
+                "definition_digest": str(r.get("definition_digest", "")),
+                "cleanup_state": str(r.get("cleanup_state", "unknown")),
+                "cleanup_pending": int(r.get("cleanup_pending", 0)),
+                "cleanup_error": str(r.get("cleanup_error", "")),
             })
         return out
 
-    def approve_workflow_run(self, run_id: str) -> bool:
-        """Approve a PENDING workflow run (admin-gated, server-side)."""
-        return bool(self._call("ApproveWorkflowRun", str(run_id)))
+    def preview_workflow_run(self, run_id: str) -> dict:
+        return json.loads(str(self._call("PreviewWorkflowRun", str(run_id))))
+
+    def approve_workflow_run(self, run_id: str, expected_digest: str) -> bool:
+        """Approve exactly the captured definition shown in the preview."""
+        return bool(self._call("ApproveWorkflowRun", str(run_id), str(expected_digest)))
 
     def list_history(self, limit: int) -> list[dict]:
         raw = self._call("ListHistory", int(limit))
@@ -1017,7 +1027,6 @@ class DetailPane(QWidget):
         self.lbl_user = QLabel("(no selection)")
         self.lbl_user.setObjectName("detail_user")
         self.lbl_user.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_user.setStyleSheet("font-weight: bold; font-size: 14pt;")
         lay.addWidget(self.lbl_user)
 
         self.lbl_action = QLabel("")
@@ -1028,7 +1037,7 @@ class DetailPane(QWidget):
         self.lbl_exe = QLabel("")
         self.lbl_exe.setObjectName("detail_exe")
         self.lbl_exe.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_exe.setStyleSheet("color: gray; font-family: monospace;")
+        self.lbl_exe.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         lay.addWidget(self.lbl_exe)
 
         self.lbl_details = QLabel("")
@@ -1088,6 +1097,41 @@ class DetailPane(QWidget):
         # rid -> (bounded guidance label, raw diagnostic) for broker
         # refusals on still-pending requests (e.g. ScopeNotPermitted).
         self._broker_errors: dict[int, tuple[str, str]] = {}
+        self.apply_presentation_update()
+
+    def apply_presentation_update(self) -> None:
+        """Refresh cosmetic chrome from the shared UI font and secondary-text role."""
+        app = QApplication.instance()
+        base = QFont(app.font()) if app is not None else QFont()
+        heading = QFont(base)
+        heading.setWeight(QFont.Weight.Bold)
+        size = heading.pointSizeF()
+        if size <= 0:
+            size = 11.0
+        heading.setPointSizeF(size * 14.0 / 11.0)
+        self.lbl_user.setFont(heading)
+
+        fixed = QFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        ctrl = None
+        try:
+            from qdistro_presentation.qt import current_controller, pick_family
+        except ImportError:
+            current_controller = None
+            pick_family = None
+        if current_controller is not None:
+            ctrl = current_controller()
+        if ctrl is not None and pick_family is not None:
+            try:
+                state = ctrl.state
+            except Exception:
+                state = None
+            if state is not None:
+                fixed.setFamily(
+                    pick_family(state.fixed_family, fallback=fixed.family(), fixed=True)
+                )
+                fixed.setPointSizeF(state.fixed_ui_point_size)
+        self.lbl_exe.setFont(fixed)
+        self.lbl_exe.setForegroundRole(QPalette.ColorRole.PlaceholderText)
 
     def show_request(self, req: dict):
         self._rid = req["id"]
@@ -1321,6 +1365,42 @@ class SessionManagerBridge(QObject):
         raw = self._call("ListSilos")
         return json.loads(str(raw))
 
+    def list_silos_async(self, reply, error):
+        """Bounded read only; never reconnect or retry lifecycle operations."""
+        import json
+        import math
+
+        def parsed(raw):
+            try:
+                rows = json.loads(str(raw))
+                if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+                    raise ValueError("Invalid ListSilos response")
+                for row in rows:
+                    ttl = float(row.get("observed_ttl_seconds", 0))
+                    generation = row.get("operation_generation", 0)
+                    if (not math.isfinite(ttl) or not 0 <= ttl <= 30
+                            or not isinstance(generation, int) or generation < 0
+                            or not isinstance(row.get("name"), str)
+                            or not isinstance(row.get("runtime_incarnation"), str)
+                            or not row["runtime_incarnation"]):
+                        raise ValueError("Invalid ListSilos observation")
+                    row["observed_ttl_seconds"] = ttl
+            except (ValueError, TypeError) as exc:
+                error(exc)
+                return
+            reply(rows)
+
+        try:
+            # ProxyObject's async method discards PendingCall. Use Connection
+            # directly so invalidation owns a cancellable local reply handler.
+            return self.bus.call_async(
+                SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH,
+                SESSION_MANAGER_BUS_NAME, "ListSilos", "", (),
+                parsed, error, timeout=3.0)
+        except dbus.DBusException as exc:
+            error(exc)
+            return None
+
     def create(self, name: str, uid: int) -> None:
         self._call("CreateSilo", str(name), int(uid))
 
@@ -1364,13 +1444,14 @@ class NewSiloDialog(QDialog):
 class SilosTab(QWidget):
     """Tab listing silos with state badges + lifecycle action buttons.
 
-    Refreshes on SiloChanged or after a successful action. Refuses to
+    Refreshes periodically, on SiloChanged, or after a successful action. Refuses to
     construct without a SessionManagerBridge — the tab is gated at
     MainWindow startup based on whether the system bus has the
     SessionManager1 well-known name.
     """
 
-    COLUMNS = ("name", "uid", "state", "autostart")
+    COLUMNS = ("name", "uid", "state", "autostart", "runtime observation")
+    OBSERVATION_REFRESH_MS = 5000
     STATE_COLOURS = {
         "Created":  QColor("#a0a0a0"),
         "Active":   QColor("#7bc97b"),
@@ -1400,6 +1481,10 @@ class SilosTab(QWidget):
         self.model = QStandardItemModel(self)
         self.model.setHorizontalHeaderLabels(list(self.COLUMNS))
         self.table.setModel(self.model)
+        self._observation_deadlines = {}
+        self._read_generation = 0
+        self._pending_generation = None
+        self._pending_call = None
 
         btns = QHBoxLayout()
         self.btn_new = QPushButton("+ New silo"); self.btn_new.setObjectName("btn_new_silo")
@@ -1430,26 +1515,129 @@ class SilosTab(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(200)
-        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.timeout.connect(self._refresh_observations)
         self.session.siloChanged.connect(
-            lambda _n, _s: self._refresh_timer.start())
+            lambda _n, _s: self._schedule_observation_refresh())
 
-    def refresh(self) -> None:
+        # Same-result samples and expiry do not emit SiloChanged. Polling keeps
+        # rendered evidence current even when lifecycle and status stay stable.
+        self._observation_timer = QTimer(self)
+        self._observation_timer.setInterval(self.OBSERVATION_REFRESH_MS)
+        self._observation_timer.timeout.connect(self._refresh_observations)
+        self._observation_timer.start()
+        self._expiry_timer = QTimer(self)
+        self._expiry_timer.setInterval(1000)
+        self._expiry_timer.timeout.connect(self._expire_observations)
+        self._expiry_timer.start()
+        self._read_timeout = QTimer(self)
+        self._read_timeout.setSingleShot(True)
+        self._read_timeout.setInterval(3000)
+        self._read_timeout.timeout.connect(self._observation_timeout)
+
+    def _invalidate_observation_read(self) -> None:
+        self._read_generation += 1
+        self._pending_generation = None
+        self._read_timeout.stop()
+        if self._pending_call is not None:
+            self._pending_call.cancel()
+            self._pending_call = None
+
+    def _schedule_observation_refresh(self) -> None:
+        self._invalidate_observation_read()
+        self._refresh_timer.start()
+
+    def _mark_observations_unknown(self, reason: str) -> None:
+        self._observation_deadlines.clear()
+        for i in range(self.model.rowCount()):
+            self.model.item(i, 4).setText("unknown")
+            self.model.item(i, 4).setToolTip(reason)
+
+    def _expire_observations(self) -> None:
+        now = _time.monotonic()
+        for i in range(self.model.rowCount()):
+            name = self.model.item(i, 0).text()
+            deadline = self._observation_deadlines.get(name)
+            if deadline is not None and now >= deadline:
+                self.model.item(i, 4).setText("unknown")
+                self.model.item(i, 4).setToolTip("Runtime observation expired; awaiting fresh evidence")
+                del self._observation_deadlines[name]
+
+    def _observation_timeout(self) -> None:
+        self._invalidate_observation_read()
+        self._mark_observations_unknown("Runtime observation unavailable: refresh timed out")
+
+    def _refresh_observations(self) -> None:
+        if self._pending_generation is not None:
+            return
+        self._read_generation += 1
+        generation = self._read_generation
+        self._pending_generation = generation
+        began = _time.monotonic()
+        self._read_timeout.start()
+
+        def finished(rows=None, error=None):
+            if self._pending_generation != generation or self._read_generation != generation:
+                return
+            self._pending_generation = None
+            self._pending_call = None
+            self._read_timeout.stop()
+            if error is not None:
+                self._mark_observations_unknown("Runtime observation unavailable: refresh failed")
+                return
+            previous = {self.model.item(i, 0).text(): self.model.item(i, 0).data(Qt.ItemDataRole.UserRole + 1)
+                        for i in range(self.model.rowCount())}
+            if any(r.get("runtime_incarnation") == previous.get(r.get("name"), {}).get("runtime_incarnation")
+                   and r.get("operation_generation", 0) < previous.get(r.get("name"), {}).get("operation_generation", 0)
+                   for r in rows):
+                self._mark_observations_unknown("Runtime observation unavailable: outdated reply")
+                return
+            self._render_silos(rows, elapsed=_time.monotonic() - began)
+
+        pending = self.session.list_silos_async(
+            lambda rows: finished(rows=rows), lambda error: finished(error=error))
+        if self._pending_generation == generation:
+            self._pending_call = pending
+
+    def refresh(self, *, background: bool = False) -> None:
+        self._invalidate_observation_read()
         try:
             rows = self.session.list_silos()
         except dbus.DBusException as e:
+            if background:
+                # Failed polling cannot leave old affirmative evidence visible.
+                self._mark_observations_unknown("Runtime observation unavailable: refresh failed")
+                return
             title, label = _friendly_broker_error(e)
             QMessageBox.warning(self, title,
                                 f"Couldn't list silos.\n\n{label}")
             return
+        self._render_silos(rows)
+
+    def _render_silos(self, rows, *, elapsed: float = 0.0) -> None:
+        selected = self._selected_row()
+        selected_name = selected.get("name") if selected is not None else None
+        selected_incarnation = selected.get("runtime_incarnation") if selected is not None else None
+        self._observation_deadlines.clear()
+        now = _time.monotonic()
         self.model.removeRows(0, self.model.rowCount())
+        selected_index = None
         for r in rows:
             items = [
                 QStandardItem(str(r.get("name", ""))),
                 QStandardItem(str(r.get("uid", ""))),
                 QStandardItem(str(r.get("state", ""))),
                 QStandardItem("yes" if r.get("autostart") else "no"),
+                QStandardItem(str(r.get("observed_status", "unknown"))),
             ]
+            items[4].setToolTip(str(r.get("observed_reason", "")) +
+                                f"\nObserved at: {r.get('observed_at', 0)}; generation: {r.get('operation_generation', 0)}")
+            # Backend monotonic TTL avoids wall-clock drift. Subtracting the
+            # entire request duration conservatively includes transit delay.
+            ttl = min(30.0, max(0.0, float(r.get("observed_ttl_seconds", 0)))) - elapsed
+            if ttl > 0:
+                self._observation_deadlines[str(r.get("name", ""))] = now + ttl
+            else:
+                items[4].setText("unknown")
             colour = self.STATE_COLOURS.get(str(r.get("state", "")))
             if colour is not None:
                 items[2].setForeground(colour)
@@ -1457,6 +1645,16 @@ class SilosTab(QWidget):
                 it.setEditable(False)
             items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
             self.model.appendRow(items)
+            if (selected_name is not None and r.get("name") == selected_name
+                    and r.get("runtime_incarnation") == selected_incarnation):
+                selected_index = self.model.rowCount() - 1
+        # A refresh may reorder or remove silos. Preserve action targeting by
+        # name and incarnation; a replaced silo requires a new selection.
+        if selected_index is not None:
+            self.table.selectRow(selected_index)
+        else:
+            self.table.clearSelection()
+            self.table.setCurrentIndex(self.model.index(-1, -1))
         self.table.resizeColumnsToContents()
 
     def _selected_row(self) -> dict | None:
@@ -2064,6 +2262,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._update_tray_icon)
 
         self.refresh()
+
+    def apply_presentation_update(self) -> None:
+        self.detail.apply_presentation_update()
 
     def refresh(self):
         prev_rid = None
@@ -3225,7 +3426,7 @@ class WorkflowsTab(QWidget):
     """
     WF_COLUMNS = ("name", "trigger", "steps", "needs", "description")
     RUN_COLUMNS = ("run_id", "workflow", "state", "started", "finished",
-                   "error")
+                   "error", "cleanup", "cleanup pending", "cleanup error")
 
     def __init__(self, broker: BrokerBridge):
         super().__init__()
@@ -3302,7 +3503,15 @@ class WorkflowsTab(QWidget):
             return
         run_id = str(run.get("run_id", ""))
         try:
-            ok = self.broker.approve_workflow_run(run_id)
+            preview = self.broker.preview_workflow_run(run_id)
+            if not preview:
+                QMessageBox.warning(self, "Preview unavailable",
+                                    "The run changed or is no longer awaiting approval. Refresh and review a new run.")
+                self.refresh()
+                return
+            if not self._confirm_preview(preview):
+                return
+            ok = self.broker.approve_workflow_run(run_id, preview["definition_digest"])
         except dbus.DBusException as e:
             _title, label = _friendly_broker_error(e)
             QMessageBox.warning(self, "Approve failed",
@@ -3314,6 +3523,28 @@ class WorkflowsTab(QWidget):
                 f"Run {run_id} could not be approved (already running, "
                 f"gone, or queue saturated).")
         self.refresh()
+
+    def _confirm_preview(self, preview: dict) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review workflow plan")
+        dialog.resize(700, 600)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            f"Run {preview['run_id']}\nDefinition SHA-256: {preview['definition_digest']}"))
+        details = QTextEdit(dialog)
+        details.setReadOnly(True)
+        details.setPlainText(json.dumps(preview["definition"], indent=2, sort_keys=True))
+        layout.addWidget(details)
+        layout.addWidget(QLabel(
+            "Review actions, resources, destinations and cleanup settings.\n"
+            "Vault values are not fetched. Hook contents and external resources can change."))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Approve plan")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
     @staticmethod
     def _configure_table(table: QTableView, model: QStandardItemModel) -> None:
@@ -3374,6 +3605,9 @@ class WorkflowsTab(QWidget):
                 QStandardItem(started),
                 QStandardItem(finished),
                 QStandardItem(str(r.get("error", "")) or "-"),
+                QStandardItem(str(r.get("cleanup_state", "unknown"))),
+                QStandardItem(str(r.get("cleanup_pending", 0))),
+                QStandardItem(str(r.get("cleanup_error", "")) or "-"),
             ]
             items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
             for it in items:
@@ -3671,6 +3905,124 @@ def _maybe_session_bridge() -> SessionManagerBridge | None:
         return None
 
 
+class _FirstPaintMarker(QObject):
+    """Create a file once the main window has painted its first frame.
+
+    A launcher that must hand back a window someone can look at (the GUI test
+    launcher) cannot learn that from the X or Wayland side: the window is
+    created, named and mapped before Qt paints it, and a capture taken in
+    between shows the desktop or a half-drawn surface. The first paint event
+    of an exposed window is followed, in the same event-loop pass, by the
+    backing-store flush; the zero-delay timer runs after that pass. Flushed
+    is not received, and X orders requests only per connection, so before
+    writing the file the marker syncs Qt's OWN display connection
+    (QGuiApplication.sync(); on xcb a GetInputFocus round trip): its reply
+    comes back after the server has processed the frame upload, so XWayland
+    holds the frame and commits it for the compositor's next repaint.
+
+    Qt may paint before the window is exposed and then present that backing
+    store on exposure without another paint. A paint that finds the window
+    unexposed therefore watches the native window for its Expose event and
+    requests a repaint then, so the check runs on a real exposed frame
+    instead of waiting for a paint that may never come.
+    """
+
+    def __init__(self, window, path: str):
+        super().__init__(window)
+        self._window = window
+        self._path = path
+        self._scheduled = False
+        self._watched_handle = None
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
+        if (obj is self._window and not self._scheduled
+                and event.type() == QEvent.Type.Paint):
+            self._scheduled = True
+            QTimer.singleShot(0, self._mark)
+        elif (obj is self._watched_handle and event.type() == QEvent.Type.Expose
+                and obj.isExposed()):
+            # Exposed now: repaint so the next Paint re-runs the check.
+            self._window.update()
+        return False
+
+    def _mark(self) -> None:
+        handle = self._window.windowHandle()
+        if handle is None or not handle.isExposed():
+            self._scheduled = False
+            if handle is not None and self._watched_handle is None:
+                self._watched_handle = handle
+                handle.installEventFilter(self)
+            return
+        self._window.removeEventFilter(self)
+        if self._watched_handle is not None:
+            self._watched_handle.removeEventFilter(self)
+        QApplication.sync()  # round trip on Qt's own connection (see above)
+        try:
+            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            logging.warning("could not write first-paint marker %s: %s",
+                            self._path, exc)
+            return
+        with os.fdopen(fd, "w") as f:
+            f.write(f"painted pid={os.getpid()}\n")
+
+
+_PRESENTATION = None
+
+
+def _refresh_admin_windows(app: QApplication) -> None:
+    for widget in app.topLevelWidgets():
+        method = getattr(widget, "apply_presentation_update", None)
+        if callable(method):
+            method()
+
+
+def _on_presentation_changed(*_args: object) -> None:
+    app = QApplication.instance()
+    if app is not None:
+        _refresh_admin_windows(app)
+
+
+def attach_presentation(app: QApplication, **kwargs):
+    """Attach the shared presentation controller. Missing package is non-fatal."""
+    global _PRESENTATION
+    try:
+        from qdistro_presentation.qt import attach_controller
+    except ImportError:
+        return None
+    theme_mode = kwargs.pop("theme_mode", "system")
+    watch = kwargs.pop("watch", True)
+    try:
+        ctrl = attach_controller(app, theme_mode=theme_mode, watch=watch, **kwargs)
+    except Exception:
+        logging.getLogger("qdistro.admin_app").debug(
+            "presentation attach failed", exc_info=True
+        )
+        return None
+    if _PRESENTATION is ctrl:
+        return ctrl
+    ctrl.changed.connect(_on_presentation_changed)
+    _PRESENTATION = ctrl
+    return ctrl
+
+
+def reset_presentation_for_tests() -> None:
+    global _PRESENTATION
+    if _PRESENTATION is not None:
+        try:
+            _PRESENTATION.stop()
+        except Exception:
+            pass
+    _PRESENTATION = None
+    try:
+        from qdistro_presentation.qt import reset_controller_for_tests
+
+        reset_controller_for_tests()
+    except ImportError:
+        pass
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -3678,9 +4030,13 @@ def main():
         stream=sys.stderr,
     )
     app = QApplication(sys.argv)
+    attach_presentation(app)
     broker = BrokerBridge()
     session = _maybe_session_bridge()
     win = MainWindow(broker, session=session)
+    ready_file = os.environ.get("QDISTRO_ADMIN_APP_READY_FILE", "")
+    if os.path.isabs(ready_file):
+        _FirstPaintMarker(win, ready_file)
     win.show()
     sys.exit(app.exec())
 

@@ -88,8 +88,8 @@ the greeter, not leaked to a background VT. Properties of this surface, which is
 
 ## PyQt locker
 
-**qdlocker is a separate process, in a separate repo, with its own systemd
-unit** (`qdlocker/systemd/qdlocker.service`, `Restart=always`, installed by
+**qdlocker is a separate process (the in-tree `qdlocker/` component) with its
+own systemd unit** (`qdlocker/systemd/qdlocker.service`, `Restart=always`, installed by
 `qdistro-bootstrap.sh`'s `install_qdlocker_service`). It is a PyQt6 application
 that connects to qdwin as an ordinary Wayland client over pywayland and binds
 the private `qdwin_locker_v1` protocol; its UI is `LockUI.qml` in qdlocker's own

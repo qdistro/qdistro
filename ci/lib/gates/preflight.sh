@@ -126,18 +126,42 @@ gate_preflight() {
     check_required "spin-test-vm.sh" "[ -x '$VM_TOOLS/spin-test-vm.sh' ]"
     # shellcheck source=../../../scripts/vm/lib/vm-base.sh
     . "$VM_TOOLS/lib/vm-base.sh"
-    case "${QDISTRO_VM_BASE:-auto}" in
+    case "${QDISTRO_VM_BASE:-baked}" in
         kiwi)
             check_required "imported kiwi base" "test -f '$(qdistro_kiwi_base_path)' && test -f '$(qdistro_kiwi_base_path).stamp'"
             ;;
         baked)
-            check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
+            # A pre-pin image can boot while silently combining an old cloud
+            # base with new snapshot repos. Refuse that before VM work begins.
+            . "$VM_TOOLS/lib/test-substrate.sh"
+            if qdistro_load_test_substrate; then
+                local _admin_base _baked_base
+                _admin_base="$(qdistro_substrate_base_path admin)"
+                _baked_base="$(qdistro_substrate_base_path baked)"
+                check_required "baseweed-baked image" "test -f '$_baked_base'"
+                if qdistro_substrate_stamp_ok "$_baked_base" baked \
+                    "$(sha256sum "$_admin_base" 2>/dev/null | awk '{print $1}')"; then
+                    record_result preflight "baseweed substrate" pass 0 pass tool "$report" "$QDISTRO_SUBSTRATE_SNAPSHOT $QDISTRO_SUBSTRATE_CLOUD_SHA256"
+                else
+                    record_result preflight "baseweed substrate" fail "$EXIT_PREFLIGHT" preflight tool "$report" "baseweed image missing/mismatched substrate stamp; rebuild it"
+                    rc=$EXIT_PREFLIGHT
+                fi
+            else
+                record_result preflight "baseweed substrate" fail "$EXIT_PREFLIGHT" preflight tool "$report" "invalid snapshot.conf"
+                rc=$EXIT_PREFLIGHT
+            fi
             ;;
         auto|"")
             if qdistro_kiwi_base_ok; then
                 check_required "imported kiwi base" "test -f '$(qdistro_kiwi_base_path)' && test -f '$(qdistro_kiwi_base_path).stamp'"
             else
-                check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
+                . "$VM_TOOLS/lib/test-substrate.sh"
+                qdistro_load_test_substrate || { check_required "test substrate manifest" false; return "$EXIT_PREFLIGHT"; }
+                check_required "baseweed-baked image" "test -f '$(qdistro_substrate_base_path baked)'"
+                if ! qdistro_substrate_stamp_ok "$(qdistro_substrate_base_path baked)" baked \
+                    "$(sha256sum "$(qdistro_substrate_base_path admin)" 2>/dev/null | awk '{print $1}')"; then
+                    check_required "baseweed substrate" false
+                fi
             fi
             ;;
         *)
@@ -155,6 +179,9 @@ gate_preflight() {
     local min_free=${QCI_MIN_FREE_GIB:-20} img_dir img_ref
     img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
     img_ref="$img_dir/baseweed-baked.qcow2"
+    if [ "${QDISTRO_VM_BASE:-baked}" = baked ] && [ -n "${QDISTRO_SUBSTRATE_CLOUD_SHA256:-}" ]; then
+        img_ref="$(qdistro_substrate_base_path baked)"
+    fi
     [ -e "$img_ref" ] || img_ref="$img_dir"
     check_disk_space "images volume ($img_dir)" "$(fs_free_gib "$img_ref")" "$min_free"
     check_disk_space "run dir ($RDIR)" "$(fs_free_gib "$RDIR")" "$min_free"

@@ -28,6 +28,16 @@ capture() {
     qdwin_screenshot "$path" >/dev/null
     [ -s "$path" ] || fail "capture did not create $path"
 }
+# Equal-size pixel diffs compare RAW content: every harness frame is padded to
+# a unique size (view-geometry.sh), so two captures of one scene differ in
+# size by design. Echoes a raw copy of FRAME under $RAWCMP.
+RAWCMP=$(mktemp -d "${TMPDIR:-/tmp}/qdwin-shell-capture-raw.XXXXXX")
+raw_of() {
+    local out
+    out="$RAWCMP/$(basename -- "$1").raw-content"
+    qci_view_raw_extract "$1" "$out" || fail "could not read the raw content of $1"
+    printf '%s\n' "$out"
+}
 wait_healthy() {
     local end=$((SECONDS + 15))
     until qdwin_session_healthy >/dev/null 2>&1; do
@@ -37,6 +47,7 @@ wait_healthy() {
 }
 
 cleanup() {
+    rm -rf "${RAWCMP:-}"
     vm_exec "rm -f /run/user/1000/capture-{admin,bad,pipewire,ordinary}.png" \
         >/dev/null 2>&1 || true
     user_systemctl stop qdwin-capture-mutation.service >/dev/null 2>&1 || true
@@ -114,7 +125,7 @@ sleep 2
 
 capture "$ART/static-1.png"
 capture "$ART/static-2.png"
-python3 - "$ART/static-1.png" "$ART/static-2.png" <<'PY' \
+python3 - "$(raw_of "$ART/static-1.png")" "$(raw_of "$ART/static-2.png")" <<'PY' \
     || fail "two captures of an unchanged scene were not stable"
 from PIL import Image, ImageChops
 import sys
@@ -141,7 +152,7 @@ mutation_seen=0
 while [ "$SECONDS" -lt "$mutation_deadline" ]; do
     sleep 2
     capture "$ART/mutated.png"
-    if python3 - "$ART/static-2.png" "$ART/mutated.png" 2>/dev/null <<'PY'
+    if python3 - "$(raw_of "$ART/static-2.png")" "$(raw_of "$ART/mutated.png")" 2>/dev/null <<'PY'
 from PIL import Image, ImageChops
 import sys
 a = Image.open(sys.argv[1]).convert("RGB")

@@ -325,15 +325,14 @@ class TestFatalSitesPropagate:
 
 
 class TestCheckFalseStillPropagatesAWedge:
-    """`check=False` means "ignore a non-zero exit status", NOT "ignore a wedge".
+    """A timeout is not success, and neither is an arbitrary non-zero exit.
 
-    These three are teardown-flavoured, so swallowing a timeout looks tempting.
-    It is a fail-OPEN. link_del() and the netns/ipv6 ops all run on the APPLY
-    path (EgressBackend.apply tears stale devices down first), where a
-    swallowed timeout lets apply(none) return dark=True while the old wg device
-    is still up with its default route — a silo reported as networkless that
-    still has a working tunnel. "The delete failed" and "the device was already
-    absent" must never collapse into the same answer.
+    link_del / netns_remove / ipv6_disable all run on the APPLY path
+    (EgressBackend.apply tears stale devices down first, and ipv6_disable runs
+    immediately before a direct silo is declared non-dark). Swallowing a
+    timeout, or a real netlink/sysctl failure, lets that path report success
+    while the old device is still up or v6 SLAAC was never closed. Only the
+    absence text `ip` prints for a missing device or netns is a silent no-op.
     """
 
     def test_link_del_timeout_propagates(self, monkeypatch):
@@ -356,22 +355,74 @@ class TestCheckFalseStillPropagatesAWedge:
         with pytest.raises(sm.subprocess.TimeoutExpired):
             sm._SystemOps().ipv6_disable("ns0", "veth0")
 
-    def test_a_nonzero_exit_is_still_ignored(self, monkeypatch):
-        # The other half of the contract, so the fix above cannot be "read" as
-        # making check=False strict: a device that is simply already gone must
-        # still be a silent no-op.
-        #
-        # The fake HONOURS check=, which is the whole point — a fake that
-        # ignores it passes this test no matter what the caller requested, and
-        # a `check=check` quietly changed to `check=True` would sail through.
-        def rc_1(argv, **kw):
+    def _completed(self, returncode, stdout, stderr):
+        """A subprocess.run stand-in that honours check=.
+
+        A fake that ignores check= is invalid: it passes no matter what the
+        caller requested. When the code inspects the completed process
+        (check is false), this returns returncode/stdout/stderr. When check
+        is true and the exit is non-zero, it raises, the way subprocess.run
+        would — so an absence path implemented as check=True cannot see the
+        absence text and fails the no-op test.
+        """
+        def fake(argv, **kw):
+            if kw.get("check") and returncode != 0:
+                raise sm.subprocess.CalledProcessError(
+                    returncode, [str(a) for a in argv],
+                    output=stdout, stderr=stderr)
+            return types.SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr=stderr)
+        return fake
+
+    def test_a_generic_nonzero_exit_raises(self, monkeypatch):
+        # rc=1 is not absence. `ip` prints this for EPERM; it must not be
+        # treated as "device already gone".
+        denied = "RTNETLINK answers: Operation not permitted\n"
+        monkeypatch.setattr(
+            sm.subprocess, "run", self._completed(1, "", denied))
+        ops = sm._SystemOps()
+        with pytest.raises(sm.subprocess.CalledProcessError) as link_err:
+            ops.link_del("ns0", "wg-2000")
+        assert link_err.value.stderr == denied
+        assert link_err.value.stdout == ""
+        with pytest.raises(sm.subprocess.CalledProcessError) as ns_err:
+            ops.netns_remove("ns0")
+        assert "Operation not permitted" in (ns_err.value.stderr or "")
+
+    def test_missing_device_or_netns_is_a_silent_noop(self, monkeypatch):
+        # Absence is the text `ip` actually prints, on either stream — not a
+        # generic return code. link: "Cannot find device". netns: "No such
+        # file or directory".
+        cases = iter([
+            ("", 'Cannot find device "wg-2000"\n'),
+            ('Cannot find device "wg-2000"\n', ""),
+            ("", 'Cannot remove namespace file "/run/netns/ns0": '
+                 "No such file or directory\n"),
+            ("No such file or directory\n", ""),
+        ])
+
+        def fake(argv, **kw):
+            stdout, stderr = next(cases)
             if kw.get("check"):
                 raise sm.subprocess.CalledProcessError(
-                    1, [str(a) for a in argv])
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-        monkeypatch.setattr(sm.subprocess, "run", rc_1)
-        sm._SystemOps().link_del("ns0", "wg-2000")        # must not raise
-        sm._SystemOps().netns_remove("ns0")
+                    1, [str(a) for a in argv], output=stdout, stderr=stderr)
+            return types.SimpleNamespace(
+                returncode=1, stdout=stdout, stderr=stderr)
+
+        monkeypatch.setattr(sm.subprocess, "run", fake)
+        ops = sm._SystemOps()
+        ops.link_del("ns0", "wg-2000")
+        ops.link_del(None, "wg-2000")
+        ops.netns_remove("ns0")
+        ops.netns_remove("ns0")
+
+    def test_ipv6_disable_nonzero_raises(self, monkeypatch):
+        # No "already disabled" success path: a non-zero sysctl raises.
+        monkeypatch.setattr(
+            sm.subprocess, "run",
+            self._completed(1, "", "sysctl: permission denied\n"))
+        with pytest.raises(sm.subprocess.CalledProcessError):
+            sm._SystemOps().ipv6_disable("ns0", "veth0")
 
     def test_the_apply_path_still_checks_its_exit_status(self, monkeypatch):
         # And the converse: check=True callers must still fail on a non-zero

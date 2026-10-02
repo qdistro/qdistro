@@ -63,6 +63,18 @@ class FileManagerWindow(QMainWindow):
         if app is not None:
             app.focusChanged.connect(self._on_focus_changed)
 
+    def apply_presentation_update(self) -> None:
+        """Refresh chrome after a shared appearance change. Pane state stays."""
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+        for pane in self.findChildren(FilePane):
+            pane.style().unpolish(pane)
+            pane.style().polish(pane)
+            pane.update()
+            if hasattr(pane, "file_list"):
+                pane.file_list.viewport().update()
+
     # ---------------------------------------------------------------- UI
     def _init_ui(self) -> None:
         self.setWindowTitle("QFileMan")
@@ -242,7 +254,7 @@ class FileManagerWindow(QMainWindow):
 
         # qdistro Send-To — lazy-populated so the menu reflects the
         # live broker view of registered peer apps.
-        self._send_to_menu = edit_menu.addMenu("Send &To")
+        self._send_to_menu = edit_menu.addMenu("Send Text &To")
         self._send_to_menu.aboutToShow.connect(self._populate_send_to_menu)
 
         edit_menu.addSeparator()
@@ -362,11 +374,7 @@ class FileManagerWindow(QMainWindow):
         for w in (self.view_combo, self.sort_combo, self.hidden_check):
             w.blockSignals(True)
         try:
-            view = (
-                "List"
-                if pane.file_list.viewMode() == QListWidget.ViewMode.ListMode
-                else "Grid"
-            )
+            view = "List" if pane.file_list.viewMode() == QListWidget.ViewMode.ListMode else "Grid"
             self.view_combo.setCurrentText(view)
             label = pane._model.sort_by.capitalize()
             if self.sort_combo.findText(label) >= 0:
@@ -570,6 +578,7 @@ class FileManagerWindow(QMainWindow):
             return
         import shutil
         import subprocess
+
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
         if editor and shutil.which(editor.split()[0]):
             try:
@@ -604,13 +613,13 @@ class FileManagerWindow(QMainWindow):
         path = self._selected_path()
         if not path:
             return
-        default_dest = os.path.join(
-            self._other_pane_path(), os.path.basename(path)
-        )
+        default_dest = os.path.join(self._other_pane_path(), os.path.basename(path))
         title = "Move" if move else "Copy"
         dest, ok = QInputDialog.getText(
-            self, f"{title} — {os.path.basename(path)}",
-            f"{title} to:", text=default_dest,
+            self,
+            f"{title} — {os.path.basename(path)}",
+            f"{title} to:",
+            text=default_dest,
         )
         if not ok or not dest.strip():
             return
@@ -623,11 +632,13 @@ class FileManagerWindow(QMainWindow):
         # the whole tree at dest/basename), so resolve the real conflict against
         # the branch we're about to take and confirm before clobbering.
         from qfileman.file_model import copy_move_conflict
+
         use_rsync = bool(shutil.which("rsync"))
         conflict = copy_move_conflict(path, dest, rsync=use_rsync)
         if conflict is not None:
             reply = QMessageBox.question(
-                self, f"{title} — Overwrite?",
+                self,
+                f"{title} — Overwrite?",
                 f"'{conflict}' already exists at the destination. Overwrite it?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -638,6 +649,7 @@ class FileManagerWindow(QMainWindow):
         if use_rsync:
             from qfileman.plugins.builtin._runner import run_command_dialog
             from qfileman.plugins.builtin.rsync_sync import rsync_argv
+
             # rsync needs a trailing slash on a source directory to
             # mean "the contents of"; without it we'd nest src/ inside
             # dest/src/, which is not the copy semantics F5 implies.
@@ -666,6 +678,7 @@ class FileManagerWindow(QMainWindow):
         # target (``dest`` itself, or ``dest/basename`` when ``dest`` is a
         # directory). The visible view that changes is that target's parent.
         from qfileman.file_model import effective_copy_target
+
         final_target = effective_copy_target(path, dest)
         dest_dir = os.path.dirname(os.path.abspath(str(final_target)))
 
@@ -685,16 +698,17 @@ class FileManagerWindow(QMainWindow):
             # successful copy/move changes both the source and target views.
             panes = self._split_root.find_panes()
             for pane in panes:
-                if pane is source_pane or (
-                    os.path.abspath(pane.current_path) == dest_dir
-                ):
+                if pane is source_pane or (os.path.abspath(pane.current_path) == dest_dir):
                     pane._refresh()
 
         def on_error(message: str) -> None:
             QMessageBox.warning(self, title, f"{title} failed: {message}")
 
         runner = ProgressRunner(
-            work, title=title, label=label, parent=self,
+            work,
+            title=title,
+            label=label,
+            parent=self,
             on_result=on_result,
             on_error=on_error,
         )
@@ -702,14 +716,13 @@ class FileManagerWindow(QMainWindow):
         # reference once it's done so the attribute doesn't dangle at a
         # deleted runner.
         self._copy_move_runner = runner
-        runner._worker.finished.connect(
-            lambda: setattr(self, "_copy_move_runner", None)
-        )
+        runner._worker.finished.connect(lambda: setattr(self, "_copy_move_runner", None))
         runner.start()
 
     def _new_file(self) -> None:
         """Shift+F4 — Create an empty file and open it for editing."""
         from PyQt6.QtWidgets import QInputDialog, QMessageBox
+
         if self._active_pane is None:
             return
         name, ok = QInputDialog.getText(self, "New Text File", "Filename:")
@@ -792,8 +805,10 @@ class FileManagerWindow(QMainWindow):
     def _show_about(self) -> None:
         """F1 — About dialog."""
         from PyQt6.QtWidgets import QMessageBox
+
         QMessageBox.about(
-            self, "About QFileMan",
+            self,
+            "About QFileMan",
             "<b>QFileMan</b><br><br>"
             "A dual-pane file manager with a plugin system inspired by "
             "Total Commander, Krusader, and Double Commander.<br><br>"
@@ -871,61 +886,138 @@ class FileManagerWindow(QMainWindow):
                 break
 
     def _populate_send_to_menu(self) -> None:
-        """Lazy-fill the qdistro Send-To submenu from the broker.
-
-        Payload = full contents of the currently-selected file (UTF-8
-        decoded, capped at 1 MiB to stay below the broker's detail
-        sanitiser budget). The cap is conservative — for binaries the
-        receiving app gets only the readable prefix; users who need
-        full-fidelity binary transfer should use the file manager's
-        copy-to-pane operation, not Send-To.
-        """
+        """Discover receivers; read the current selection only at dispatch."""
         self._send_to_menu.clear()
+        self._receiver_actions = {}
         try:
             from qfileman import qdistro_integration as _qi
         except ImportError:
             act = self._send_to_menu.addAction("(qdistro SDK not available)")
             act.setEnabled(False)
             return
-        payload = self._collect_send_to_payload()
         targets = _qi.send_to_targets(kind="text/plain")
         if not targets:
             act = self._send_to_menu.addAction("(no receivers running)")
             act.setEnabled(False)
             return
+        to_probe = []
         for row in targets:
             label = row["name"]
+            caps = row.get("capabilities", {})
+            known = caps.get("version") == 1
+            if known:
+                consent = (
+                    "confirmation required"
+                    if caps.get("confirmation_required")
+                    else "no confirmation"
+                )
+                label += f" ({caps.get('max_bytes', 0)} bytes; {consent})"
+            else:
+                label += " (acceptance unknown)"
             silo = row.get("silo") or ""
             if silo:
                 label = f"{label}  [{silo}]"
             act = self._send_to_menu.addAction(label)
-            if not payload:
-                act.setEnabled(False)
-                act.setToolTip("Select a readable file first")
+            if known:
+                act.setToolTip("UTF-8 text. " + str(caps.get("reason", "")))
+                act.setEnabled(bool(caps.get("available")))
             else:
-                uid = int(row["uid"])
-                svc = str(row["service"])
-                act.triggered.connect(
-                    lambda _checked=False, u=uid, s=svc, p=payload:
-                        _qi.send_payload(u, s, p, kind="text/plain"))
+                act.setToolTip(
+                    "Send one UTF-8 text file (up to 256 KiB). Receiver acceptance is unknown."
+                )
+            uid = int(row["uid"])
+            svc = str(row["service"])
+            current_caps = dict(caps)
+            self._receiver_actions[(uid, svc)] = (act, current_caps, row)
+            act.triggered.connect(
+                lambda _checked=False, u=uid, s=svc, c=current_caps: self._send_selected_text(
+                    u, s, capabilities=c
+                )
+            )
+            if not known:
+                to_probe.append((uid, svc))
+        from qfileman.transfer_jobs import CapabilityDiscovery
+
+        discovery = getattr(self, "_capability_discovery", None)
+        if discovery is None:
+            discovery = CapabilityDiscovery(self, _qi)
+            discovery.enriched.connect(self._update_receiver_capabilities)
+            self._capability_discovery = discovery
+        discovery.start(to_probe)
+
+    def _update_receiver_capabilities(self, uid, service, caps):
+        entry = self._receiver_actions.get((uid, service))
+        if entry is None or caps.get("version") != 1:
+            return
+        action, current_caps, row = entry
+        current_caps.clear()
+        current_caps.update(caps)
+        consent = (
+            "confirmation required" if caps.get("confirmation_required") else "no confirmation"
+        )
+        label = row["name"] + f" ({caps.get('max_bytes', 0)} bytes; {consent})"
+        if row.get("silo"):
+            label += f"  [{row['silo']}]"
+        action.setText(label)
+        action.setToolTip("UTF-8 text. " + str(caps.get("reason", "")))
+        action.setEnabled(bool(caps.get("available")) and "text/plain" in caps.get("kinds", []))
+
+    def _send_selected_text(self, uid: int, service: str, *, capabilities=None) -> None:
+        self.statusBar().clearMessage()
+        from PyQt6.QtWidgets import QMessageBox
+
+        from qfileman import qdistro_integration as qi
+
+        try:
+            payload = self._collect_send_to_payload()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Send Text To", str(exc))
+            return
+        if capabilities and capabilities.get("version") == 1:
+            from qfileman.transfer_jobs import TransferSender
+
+            sender = getattr(self, "_transfer_sender", None)
+            if sender is None:
+                sender = TransferSender(self, qi)
+                sender.changed.connect(lambda text: self.statusBar().showMessage(text, 15000))
+                self._transfer_sender = sender
+            if not sender.start(uid, service, capabilities.get("instance_id", ""), payload):
+                QMessageBox.warning(
+                    self, "Send Text To", "A text transfer is already pending in this window."
+                )
+            return
+        try:
+            arrived = qi.send_payload(uid, service, payload, kind="text/plain")
+        except Exception as exc:
+            log.warning("Text transfer was not confirmed: %s", exc)
+            arrived = False
+        if arrived:
+            self.statusBar().showMessage("Text arrived at receiver; acceptance is unknown.", 10000)
+        else:
+            QMessageBox.warning(
+                self,
+                "Send Text To",
+                "Text transfer was not confirmed. Receiver acceptance is unknown; "
+                "the receiver may have received the text.",
+            )
 
     def _collect_send_to_payload(self) -> str:
+        from qfileman.text_transfer import read_selected_text
+
         pane = self._active_pane
         if pane is None:
-            return ""
+            raise ValueError("Select exactly one text file to send.")
         try:
-            selected = pane.selected_paths() if hasattr(pane, "selected_paths") else []
-        except Exception:
             selected = []
-        if not selected:
-            return ""
-        path = selected[0]
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read(1024 * 1024)
-            return data.decode("utf-8", errors="replace")
-        except OSError:
-            return ""
+            for item in pane.file_list.selectedItems():
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                path = data.get("path")
+                if not path:
+                    raise ValueError("The selected item has no file path.")
+                selected.append(path)
+        except Exception as exc:
+            raise ValueError("Cannot read the current selection.") from exc
+        return read_selected_text(selected)
 
     def _open_preferences(self) -> None:
         from qfileman.config import Config
@@ -975,6 +1067,12 @@ class FileManagerWindow(QMainWindow):
             pane.set_plugin_manager(self._plugin_manager)
 
     def closeEvent(self, event):  # noqa: N802
+        discovery = getattr(self, "_capability_discovery", None)
+        if discovery is not None:
+            discovery.close()
+        sender = getattr(self, "_transfer_sender", None)
+        if sender is not None:
+            sender.close()
         if self._plugin_manager:
             for name in self._plugin_manager.enabled_plugins():
                 self._plugin_manager.disable(name)

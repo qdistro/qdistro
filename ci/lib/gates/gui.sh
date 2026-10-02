@@ -5,6 +5,21 @@
 # NOT executed standalone. See ci/AGENTS.md for the module map.
 # shellcheck shell=bash
 
+# VIEW-UNIQUE GEOMETRY (todo/test-blankscreenshots/SPEC.md F1-F4). The one
+# allocator/pad/sidecar/canonical-pixel library the capture tools use; the gate
+# reads raw identities through it (reconcile's distinct count, OCR input).
+GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../../scripts/vm/lib/view-geometry.sh
+. "$GUI_GATE_DIR/../../../scripts/vm/lib/view-geometry.sh"
+# Frame usability/darkness (screenshot_is_usable's thresholds and measures),
+# shared with vm-gui; the F5 darkness diagnostic asks qci_frame_not_dark.
+# shellcheck source=../../../scripts/vm/lib/frame-usable.sh
+. "$GUI_GATE_DIR/../../../scripts/vm/lib/frame-usable.sh"
+GUI_ROLLOUT_ADAPTER="$GUI_GATE_DIR/../gui_rollout_views.py"
+# The per-attempt allocator state: a dotfile in the artifact directory the
+# agent is given (harvest copies `$parent/*`, which skips it).
+GUI_VIEW_STATE_NAME=.qci-view-state
+
 run_qdwin_executable_gui_smokes() {
     local vm=$1 qdwin_capture=${2:-1} rc=$EXIT_OK scenario file step_rc
     export VMNAME="$vm"
@@ -699,6 +714,12 @@ Rules:
   rules below apply, and a PASS/FAIL with no attested frame is
   recorded ERROR.
 - Do not edit source files.
+- YOU are the scenario driver. qci already started this run, created the VM
+  above, and launched you; there is no other agent waiting to do the work.
+  Never run \`qci\` (\`ci/bin/qci gui\`, \`full\`, \`bats\`, ...) from here: it
+  refuses inside a scenario agent, and the codex process you find alive in
+  \`ps\` is YOU, not a "parent attempt" to wait for. Execute the scenario's
+  Setup/Steps/Assertions yourself with vm-exec/vm-gui.
 - Every graphical process, dialog, compositor, and input action belongs inside
   the disposable VM named above. Never launch a host GUI program (including
   virt-manager, virt-viewer, remote-viewer, xdg-open, or an app under the host
@@ -733,6 +754,11 @@ Rules:
   work, silo uids) can write into it; if you ever recreate it, keep it
   world-writable (\`install -d -m 1777\`) — a plain root \`mkdir\` leaves it
   root-owned 0755 and every non-root write fails.
+  That directory exists ONLY INSIDE THE GUEST. The host has a \`/tmp\` too, so
+  a host-side \`test -f /tmp/qci/$slug/<marker>\` is not an error -- it is
+  silently, permanently false. Poll a guest marker THROUGH vm-exec
+  (\`vm-exec "\$VMNAME" 'test -f /tmp/qci/$slug/<marker>'\`); permissions-gui/13
+  lost two runs on 2026-09-25 to a host driver waiting on guest markers.
   The
   \`\$QCI_SCENARIO_SLUG\` variable is HOST-side only — it is not set inside guest
   shells unless you pass it through yourself (e.g. \`QCI_SCENARIO_SLUG=$slug\`).
@@ -756,11 +782,35 @@ Rules:
   guest driver, teardown included, has finished, and every "mid-scenario"
   frame is then a frame of the torn-down screen (permissions-gui/32,
   full-20260922T193137Z-881799: all frames black because the admin app had
-  already been killed by the driver's own teardown). Instead make the guest
-  driver WAIT for a host-created marker file before each host-side step
-  (\`await_file\` on a path you \`touch\` with a separate vm-exec after the
-  capture/click), and read guest progress from files with separate short
-  vm-exec calls.
+  already been killed by the driver's own teardown). Instead the guest
+  driver WAITS for the host before each host-side step, with the library's
+  \`qci_host_step <name>\` (after the claim, below; names are
+  [A-Za-z0-9_-]). It writes a fresh token such as \`s1.2213.83917264\` into
+  \`/tmp/qci/$slug/waiting\` and waits up to 900s for the DIRECTORY
+  \`/tmp/qci/$slug/<token>.go\`. On timeout it STOPS the driver itself: it
+  writes \`<token>.timeout\`, clears the EXIT trap and exits 1, leaving the
+  app and requests in place. Do not hand-roll these waits with short
+  deadlines: you need minutes per host step (capture, open the image,
+  decide, click), and a 30s wait expires before you can act (qdwin gui/16,
+  full-20260926T153217Z-3807077).
+  THE DRIVER DOES NOT RETURN UNTIL YOU HAVE DONE ITS HOST STEPS. Start it as
+  its own long-running tool command (timeout-capped, in that command's
+  foreground) and do NOT wait for that command to finish -- while it runs,
+  issue the host steps as SEPARATE tool commands. Waiting for the driver
+  first is a deadlock that ends only at the step's timeout (gui/16 again).
+  For EACH host step: poll \`cat /tmp/qci/$slug/waiting\` through short
+  vm-exec calls until the token it prints starts with that step's name
+  (\`waiting\` is withdrawn within a second of its driver dying, and a new
+  driver clears it when it claims, so never act on a token from before you
+  started the current driver), do
+  the step, then run \`mkdir /tmp/qci/$slug/<token>.go\` through vm-exec with
+  the EXACT token you read (mkdir, not touch: only a directory counts, and
+  a go for an older token releases nothing). Always read \`waiting\` before
+  acting: it is the step the driver is blocked on, and a step whose go you
+  never sent leaves the driver stuck there while you drive later steps
+  against a driver that has already given up (permissions-gui/14, same run:
+  S2-S4 done on the host, the S1 go never sent). Read other guest progress
+  from files with separate short vm-exec calls.
   \`virsh\` (\`send-key\`, \`screenshot\`), \`vm-gui\` and \`vm-exec\` are HOST
   commands: the libvirt domain \`$vm\` does not exist INSIDE the guest. Never
   put them in the guest driver script -- the guest has its own \`virsh\`, which
@@ -769,7 +819,8 @@ Rules:
   navigation did not work" (permissions-gui/04, 22, 34 and 46 in
   full-20260923T163219Z-1188602; 22 also in full-20260923T123113Z-2785403).
   Every \`virsh send-key\` a scenario lists runs on the host, between the
-  guest's ready-marker and your go-marker, and you check its exit status.
+  guest's \`waiting\` token and your \`<token>.go\`, and you check its exit
+  status.
   Never let the driver reach its teardown before the last
   frame the scenario asks for has been captured -- and that includes the
   TIMEOUT path: if a wait for a host marker times out, the driver must write a
@@ -861,7 +912,8 @@ Rules:
     2. CAPTURE INTO THE ARTIFACT DIRECTORY, e.g.
        \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" screenshot $artifact_dir/s1.png\`
        (click-preview captures already land there). A capture written elsewhere
-       is recorded but is not graded unless you copy it in.
+       is recorded but is not graded unless you copy it in, together with its
+       \`.raw\` sidecar (\`cp F F.raw $artifact_dir/\`).
     3. NEVER DELETE OR OVERWRITE A CAPTURE. Once the tool has written a frame
        into \`$artifact_dir/\`, removing it or replacing its bytes is detected
        and your verdict is recorded ERROR — including the case where the frame
@@ -880,6 +932,50 @@ Rules:
   whenever you need them. If the scenario is \`<!-- qci:visual: none -->\`,
   the harness does not require frames; a PASS or FAIL without captures
   stands.
+- NEVER RE-OPEN A PATH, AND JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.
+  Your image viewer shows as BLACK any region of an image that repeats, at the
+  same position in an image of the same size, something it already showed you
+  in this session (measured: a byte-identical frame, a frame with one changed
+  pixel, and a second look at the same file are all read as black). So every
+  image the harness writes gets a size of its own (a thin black right/bottom
+  margin; the raw screen size is in the frame's \`.raw\` sidecar), and a
+  capture you open for the first time is seen correctly. THE VIEW PAD IS NOT
+  THE SCREEN: that right/bottom margin (1-3 px, its size is the third field of
+  the \`.raw\` sidecar) lies OUTSIDE the raw screen area, so never report it as
+  a black strip, gap or margin, and never let it fail a "fills the screen" /
+  "no black margin on any edge" assertion; judge edges at the raw screen size
+  and count only black INSIDE that area (qdwin apps/01, 2026-10-01: a 2 px pad
+  under a correctly maximised window was graded "a substantial black strip").
+  What still breaks it is opening the SAME file again, or a same-size copy of
+  one:
+  - For ANY second look at an image, and for any image the harness did not just
+    hand you (a crop you made, a copy), run
+    \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" view-copy <image>\` and open
+    the path it prints. For a crop you made, pass its lineage:
+    \`... view-copy <crop.png> --source <capture.png> --crop WxH+X+Y\`.
+  - Click-preview \`.raw.png\` and click-confirm \`.post.png\` files are
+    frames like any other.
+  - Decide that a frame is black, blank, or missing something ONLY from the
+    pixels of a frame you have just opened. Never infer it from process state
+    (\`pgrep\` found nothing), from rejected capture attempts, from the
+    harness's "same screen pixels" note, or from an earlier frame.
+  - When you copy a frame, copy its \`.raw\` sidecar with it
+    (\`cp F F.raw DEST/\`), or use \`view-copy\`.
+  The harness reads your session record afterwards: a PASS or FAIL on a
+  \`required\` scenario whose frames you never opened is recorded ERROR.
+- A FRESH FRAME IS NOT A REACTED UI. \`screenshot-fresh\` accepting a frame,
+  or two frames having different raw pixels (\`raw_pix_sha\`), proves only
+  that a NEW frame was captured -- never that your key or click was processed
+  or that the UI reached the state the step expects. A live clock, a blinking
+  cursor or an animation changes pixels on its own (permissions-gui/05,
+  2026-09-25: the settle waits were dropped, each frame showed the state
+  before its key, and the differing clock was taken as proof the key had
+  landed). Keep every settle wait and wait-for-state check the scenario lists,
+  exactly as written, between the input and the capture. Do not add waits or
+  re-captures the scenario does not authorize, and never past a deadline it
+  states: a frame taken at a scenario's deadline stands. Where a scenario
+  authorizes a late re-capture (permissions-gui/05 does), take it once, to a
+  NEW name, and judge from it.
 - NEVER kill a running \`vm-exec\` and re-issue the same driver. Its periodic
   \`[vm-exec] Waiting... (polls=Ns elapsed=Ns)\` lines mean the TRANSPORT IS
   HEALTHY and your guest command is still running; they are progress, not a
@@ -897,6 +993,65 @@ Rules:
   not pin instead of signalling it) rather than
   killing it with SIGKILL, and verify in the guest that nothing from the first
   attempt survived before starting a second one.
+  YOUR SHELL TOOL SIGKILLS every process a command started when that command
+  returns, and SIGKILL runs no trap: a \`vm-exec ... &\` left in
+  the background of a command that exits is killed WITHOUT cleaning up its
+  guest command, which keeps running and keeps waiting on your markers. Keep
+  vm-exec in the FOREGROUND of the command that owns it, or \`wait\` for it
+  before that command returns (permissions-gui/13, 2026-09-25: two such orphans
+  released by one \`touch s1-go\` sent two extra requests).
+  vm-exec EXIT 75 means it REFUSED TO LAUNCH, and nothing was started: an
+  orphaned guest command from an earlier SIGKILLed vm-exec on this VM could not
+  yet be confirmed gone, or another vm-exec was still cleaning one up. It is
+  retryable. A slow guest's cleanup usually resolves on the very next call, so
+  retry the SAME command once before diagnosing, and quote the refusal line in
+  your report if it repeats.
+- CLAIM THE GUEST DRIVER. Your guest driver is the ONE guest shell that runs
+  this scenario's Setup, Steps, Assertions, and Cleanup (see the one-shell rule
+  above); a scenario written as many separate host \`vm-exec\` calls is adapted
+  into that one driver. It runs as ROOT (vm-exec's default user; reach other
+  users with \`runuser\`/\`bg_start\` from inside it), and its FIRST commands,
+  directly in that shell, are exactly:
+      source /tmp/qci-gui-waiters.sh || exit 2
+      qci_claim_driver /tmp/qci/$slug/driver.lock || exit 2
+  Piping the decoded script into bash (\`echo \$B64 | base64 -d | bash\`) is
+  fine when these lines and all the driver's work are in that script. Never
+  claim in a subshell, \`\$( )\`, or a helper that exits before the work.
+  Exit 2 means the claim could not be taken (library missing, lock not
+  openable): record ERROR. It also refuses any /tmp/qci lock path other
+  than exactly the one above (\`is not a scenario lock\`): fix your path
+  and retry. Copy that path, never retype it, in a retry too: its
+  directory is where \`qci_host_step\` advertises \`waiting\`, and a
+  driver in a mistyped directory waits for go markers you create in the
+  real one (permissions-gui/25, full-20261001T124446Z-1395361).
+  The claim is held while the driver SHELL, or a
+  \`bg_start\` job it started, is alive (a helper watches them; nothing the
+  driver starts inherits the lock), and is released within a second after
+  the last of them exits, even when the driver is SIGKILLed. An app the
+  driver merely launched (or that a \`bg_start\` launcher daemonized) does
+  NOT hold it. The ROOT driver enters a dedicated cgroup before the claim
+  returns. If it dies unexpectedly, the holder kills that entire cgroup,
+  including children that fork or reparent during teardown, before unlock.
+  After your last foreground action and Cleanup, call \`qci_claim_done\`
+  immediately before a normal exit if a detached app must remain for
+  inspection. \`qci_host_step\` does this on its timeout path. A retry
+  driver's Setup must stop whatever the previous attempt left running
+  (an admin app, a test window, a pending request) before it files anything.
+  If it prints
+  \`ERROR: a second guest driver is already running\` and exits 1, an earlier
+  driver of yours, or one of its \`bg_start\` jobs, is still alive in the
+  guest (permissions-gui/08 in gui-20260924T193011Z-2597819 ran four drivers
+  at once and read another driver's rc); the lines after the ERROR name each
+  process it is held for. A driver shell is typically still in
+  \`qci_host_step\` (\`cat /tmp/qci/$slug/waiting\` names the step): send it
+  its go or wait for it. A leftover \`bg_start\` job: stop it, and what it
+  started, with a short vm-exec, then retry. Do NOT work around the claim:
+  do not delete the lock file, do not use another lock path, and do not
+  start yet another driver while one is alive; if it cannot be released,
+  record ERROR. Short read-only
+  \`vm-exec\` checks (\`bg_wait\`, \`bg_log\`, a sqlite query) and host
+  go-marker mkdirs do not claim; they must never file a broker request or
+  run scenario steps.
 - NEVER put a PIPE on vm-exec's stderr in your driver script. Concretely, do
   NOT open your driver with \`exec > >(tee "\$LOG") 2>&1\`, and do not write
   \`out=\$(vm-exec ... 2>&1)\` or \`vm-exec ... 2>&1 | reader\`. This is the
@@ -1607,7 +1762,7 @@ gui_frame_is_decodable() {
 gui_harness_ocr_frames() {
     local adir=$1 outdir=$2 flist=${3:-} bin=${QCI_OCR_BIN:-tesseract}
     local f n=0 ok=0 bad=0 textf=0 words=0 total=0 base stem sum bytes rc have=1
-    local dec undec=0 decunk=0
+    local dec undec=0 decunk=0 ocr_in
     # OCR is OPTIONAL corroboration. Without a backend the manifest is still
     # written (sha256/bytes per attested frame -- which is the part that matters
     # for attestation); only the text column degrades to `skip`.
@@ -1643,7 +1798,16 @@ gui_harness_ocr_frames() {
                 >> "$outdir/manifest.tsv"
             continue
         fi
-        if "$bin" "$f" "$outdir/$stem" -c tessedit_create_tsv=1 >>"$outdir/ocr.log" 2>&1 \
+        # OCR reads the RAW content (the frame cropped to its `.raw` sidecar
+        # dims): the view-unique margin is not screen. The manifest row keeps
+        # the PUBLISHED file's sha256/bytes, and decodability above was judged
+        # on the published file itself. A sidecar-less copy of an issued frame
+        # is resolved through the attempt's view state (qci_view_raw_extract).
+        ocr_in=$f
+        if qci_view_raw_extract "$f" "$outdir/.ocr-raw.png" 2>/dev/null; then
+            ocr_in="$outdir/.ocr-raw.png"
+        fi
+        if "$bin" "$ocr_in" "$outdir/$stem" -c tessedit_create_tsv=1 >>"$outdir/ocr.log" 2>&1 \
            && [ -f "$outdir/$stem.tsv" ]; then
             rc=0; ok=$((ok + 1))
             # A data row counts only when its text column holds a non-whitespace
@@ -1662,6 +1826,7 @@ gui_harness_ocr_frames() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sum" "$bytes" "$base" "$dec" "$stem.tsv" "$rc" "$words" \
             >> "$outdir/manifest.tsv"
     done < <(if [ -n "$flist" ]; then cat -- "$flist"; else gui_visual_frames "$adir"; fi)
+    rm -f -- "$outdir/.ocr-raw.png"
     printf 'frames=%d ocr_ok=%d ocr_fail=%d text_frames=%d words=%d undecodable=%d dec_unknown=%d\n' \
         "$n" "$ok" "$bad" "$textf" "$total" "$undec" "$decunk"
     # Success means the PASS completed and the manifest was written. OCR success
@@ -1697,9 +1862,14 @@ gui_capture_reconcile() {
     local adir=$1 log=$2 outfile=$3 caproot=${4:-}
     local line seq ts vm scope bytes sum fpath chain
     local n=0 present=0 missing=0 unharv=0
-    local f d rel best absdir pass rowroot
+    local f d rel best absdir pass rowroot rawid
     rowroot=$(readlink -f "${caproot:-}" 2>/dev/null || printf '%s' "${caproot:-}")
-    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=()
+    # present_sum dedups the evidence LIST by file digest (what OCR reads);
+    # raw_distinct counts DISTINCT SCREENS by raw canonical pixels. They were
+    # one map until frames were padded to unique sizes: two captures of an
+    # unchanged screen now always differ in file bytes, so a file-digest count
+    # would report them distinct.
+    declare -A disk_sum=() disk_rel=() disk_taken=() present_sum=() raw_distinct=()
     declare -A matched=() last_row_for=() bydigest=()
     local relocated=0
     declare -a keep=()
@@ -1872,6 +2042,8 @@ gui_capture_reconcile() {
                 present_sum[$sum]=1
                 printf '%s\n' "${matched[$seq]}" >> "$outfile"
             fi
+            rawid=$(qci_view_raw_pix_sha "${matched[$seq]}" 2>/dev/null) || rawid="file:$sum"
+            raw_distinct[$rawid]=1
             continue
         fi
         [ "${last_row_for[$fpath]:-}" = "$seq" ] || continue
@@ -1884,7 +2056,7 @@ gui_capture_reconcile() {
         fi
     done
     printf 'attested=%d present=%d distinct=%d missing_in_tree=%d unharvested=%d relocated=%d\n' \
-        "$n" "$present" "${#present_sum[@]}" "$missing" "$unharv" "$relocated"
+        "$n" "$present" "${#raw_distinct[@]}" "$missing" "$unharv" "$relocated"
 }
 
 # Combined evidence decision for one scenario's harvested artifacts.
@@ -2521,10 +2693,20 @@ gui_agent_verdict() {
 # a partial report.md verdict + rc=124 is an inconsistent agent result, not an
 # infra timeout. Pure (args only) => host-testable (gui-retry-classify.bats).
 # A nonzero-rc SKIP reaches here because gui_agent_verdict now fails it closed.
+#   agent-unviewed-verdict
+#                     a `qci:visual: required` PASS or FAIL whose attempt was
+#                     OBSERVED (codex rollout, F3) to open ZERO attested frames:
+#                     a verdict about pixels nobody looked at. The gate records
+#                     it ERROR and passes the flag here as an ARGUMENT (never a
+#                     note-string match) with the ORIGINAL status/rc. Retriable
+#                     ONLY for an original PASS rc=0 (see gui_classifier_retriable):
+#                     an original FAIL never enters a retry through this path,
+#                     so it can never turn green by re-rolling.
 # Args: status agent_rc transport_marker(0/1) agent_tooling_marker(0/1, optional)
-#       agent_api_marker(0/1, optional)
+#       agent_api_marker(0/1, optional) extnet_marker(0/1, optional)
+#       unviewed(0/1, optional; status is then the ORIGINAL agent status)
 gui_classify_failure() {
-    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0} extnet=${6:-0}
+    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0} extnet=${6:-0} unviewed=${7:-0}
     case "$status" in
         FAIL)
             # A FAIL whose evidence shows the agent's OWN command was malformed is
@@ -2532,7 +2714,11 @@ gui_classify_failure() {
             # Only status=FAIL is flipped — ERROR/PASS/SKIP/UNKNOWN are untouched.
             # A provider-unreachable marker does NOT flip a FAIL: the agent ran the
             # asserts and one genuinely failed; the marker's scope is UNKNOWN only.
-            if [ "$tooling" = 1 ]; then printf 'agent-tooling'; else printf 'product-fail'; fi
+            # The tooling marker keeps precedence over an unviewed FAIL: it was
+            # retriable before the view gate existed and still is.
+            if [ "$tooling" = 1 ]; then printf 'agent-tooling'
+            elif [ "$unviewed" = 1 ]; then printf 'agent-unviewed-verdict'
+            else printf 'product-fail'; fi
             return ;;
         ERROR)
             # An ERROR caused by an upstream external FETCH failure (curl/zypper/
@@ -2548,6 +2734,9 @@ gui_classify_failure() {
             # selected-model-capacity error while finalizing its response.
             if [ "$rc" != 0 ] && [ "$api" = 1 ]; then
                 printf 'agent-api-after-verdict'; return
+            fi
+            if [ "$unviewed" = 1 ]; then
+                printf 'agent-unviewed-verdict'; return
             fi ;;
         SKIP)
             # Only reachable with a nonzero rc (gui_agent_verdict accepts SKIP:0
@@ -2581,10 +2770,15 @@ gui_classify_failure() {
 # failures (no product/guest failure signal) and are safe to re-run on a fresh
 # attempt. The latter still requires a fresh PASS; its first PASS is never
 # accepted directly because the process rc contradicted it.
-# Args: classifier
+# agent-unviewed-verdict is retriable ONLY when the second argument, the
+# attempt's ORIGINAL "<status>:<rc>", is exactly PASS:0 -- an unviewed PASS
+# may be re-run on a fresh VM, an unviewed FAIL/ERROR never is (and without the
+# argument it is not retriable at all: fail safe).
+# Args: classifier [original_status:rc]
 gui_classifier_retriable() {
     case "$1" in
         transport-timeout|agent-tooling|agent-api-unreachable|agent-api-after-verdict) return 0 ;;
+        agent-unviewed-verdict) [ "${2:-}" = "PASS:0" ] ;;
         *) return 1 ;;
     esac
 }
@@ -2697,6 +2891,232 @@ GUI_IMAGE_OPEN_PATTERNS=${QCI_IMAGE_OPEN_PATTERNS:-'view_image|image_view|read_i
 # function was built to detect -- a lane-wide drop to zero -- was unreachable.
 # Lines identical to prompt lines are therefore dropped before matching
 # (fable, B round 1).
+# The "did the driver look?" DIAGNOSTIC for one attempt, as a note fragment
+# ("; DIAGNOSTIC: ..." or empty). Never changes a verdict. When the rollout
+# adapter OBSERVED the session (F3 sidecar reason=observed), its credited-open
+# count is the answer and the prose-mention count is not consulted: on
+# 2026-09-25 pg/13 carried "never MENTIONED opening an image" while its rollout
+# proved two credited opens. The prose count remains the fallback for attempts
+# the adapter could not observe. Args: scenario prose_opens obs_file.
+gui_image_opens_diag_note() {
+    local scenario=$1 opens=$2 obs=${3:-} reason="" credited=""
+    [ "$(gui_scenario_visual_mode "$scenario")" = required ] || return 0
+    if [ -n "$obs" ] && [ -f "$obs" ] && [ ! -L "$obs" ]; then
+        reason=$(sed -n 's/^reason=//p' "$obs" | head -1)
+        credited=$(sed -n 's/^credited=//p' "$obs" | head -1)
+    fi
+    if [ "$reason" = observed ] && [[ "$credited" =~ ^[0-9]+$ ]]; then
+        if [ "$credited" -eq 0 ]; then
+            printf '%s' "; DIAGNOSTIC: the driver's rollout shows no opened attested frame for a pixel-dependent scenario (verdict NOT changed here; if this verdict is wrong, start here)"
+        fi
+        return 0
+    fi
+    if [[ "$opens" =~ ^[0-9]+$ ]] && [ "$opens" -eq 0 ]; then
+        printf '%s' "; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
+    fi
+    return 0
+}
+
+# F5. THE DARKNESS CONTRADICTION DIAGNOSTIC -- ADVISORY ONLY. A report that
+# calls a WHOLE FRAME black/near-black/all-dark, naming an attested frame of THIS
+# attempt whose raw pixels measure NOT dark, is the class-A misgrade shape
+# (todo/test-blankscreenshots/README.md: pg/06 `s3-r2.png` "fully black" at
+# sigma 0.486, bright 0.56). This records it as a note fragment
+# ("; DIAGNOSTIC: ..." or empty) plus `qci_gui_darkness:` log lines.
+#
+# INVARIANT: it changes NO status, classifier or retry decision. Regex over
+# free prose cannot establish scope, referent, negation or sole cause (astra,
+# blankss spec r1), so this is a pointer for a human, never a verdict input.
+# Its log lines are therefore written AFTER the attempt is classified: the
+# marker detectors grep the agent log unanchored, and a frame NAME such as
+# `guest-agent-not-responding.png` in a diagnostic line would otherwise turn an
+# agent-timeout into a retriable transport-timeout (astra, F5 code r1, P1).
+#
+# CONSERVATIVE BY CONSTRUCTION. A false positive points a human at the wrong
+# frame; a false negative costs nothing (this is advisory). So every ambiguity
+# is a SKIP -- one pattern, no prose interpreter (astra, F5 code r1, P2/P3):
+#   * the unit is a CLAUSE: each line of status.txt/report.md is split into
+#     sentences at `. ; :` (followed by a space or the end), and each sentence
+#     into clauses at ", but", "but", "while", "whereas" and ", so";
+#   * a clause is a claim when GUI_DARKNESS_CLAIM_RE matches it ("fully black
+#     frame", "the frame [`x.png`] was fully black", "`x.png` was near-black")
+#     and it
+#     contains NO negation word and NO region word ANYWHERE in its prose (file
+#     names excluded) ("not any sign of a
+#     black screen", "black only in the top pane", "the pane inside the frame
+#     was black", "a black background with white text", "black-and-white" are
+#     all skipped -- scope words such as background/wallpaper/theme/text/colour
+#     count as region words);
+#   * "BLANK" IS NOT A DARKNESS WORD. Brightness can contradict "black", never
+#     "blank": a bright wallpaper-only desktop is correctly blank when the
+#     required app is absent (astra spec r1; fable F5 code r1; coordinator);
+#   * its referent is the ONE png-bearing token in that clause, taken whole
+#     (`s3.png.attempt-1.rejected` is its own token and names no accepted
+#     frame). Two tokens, or a token that is not a plain `*.png` -> skip. A
+#     clause with none borrows the line's referent ONLY in the ADJACENT house
+#     style "<claim>. Evidence: `one.png`[, `other.log`]": the claim is in the
+#     sentence right before the single marker and the only claim on the line,
+#     no png before the marker, and after it nothing but references with
+#     exactly one png;
+#   * the token resolves only inside THIS attempt's artifact root or its
+#     capture-root alias, with a UNIQUE match among the frames the sealed,
+#     VM-bound ledger attests (gui_capture_reconcile). An explicit path must
+#     equal an attested frame's relative path exactly; only a bare name is
+#     matched by basename. `..`, paths into other directories (a previous
+#     attempt's) and a bare basename shared by two attested frames -> skip;
+#   * "not dark": qci_frame_not_dark (scripts/vm/lib/frame-usable.sh) on the
+#     RAW content (qci_view_raw_extract), never the padded frame --
+#     screenshot_is_usable's thresholds, sourced, never copied. Dark UI, noisy
+#     black and flat frames stay "dark".
+# ACCEPTED FALSE NEGATIVES: "The frame was fully black, but the terminal
+# crashed (s3.png)" (the referent sits in another clause); any claim whose
+# clause mentions a negation or a region word for an unrelated reason.
+# Missing ImageMagick, an unsealed/unverifiable ledger or an unmeasurable frame
+# skip with a logged reason and no note. Only the first 256 KiB of each of
+# status.txt/report.md is read; a claim past that is not seen (a false
+# negative, which is the safe direction).
+# Args: adir caplog anchor caproot log_path. QCI_GUI_VIEW_STATE as for the
+# evidence contract (resolves sidecar-less copies to their raw content).
+GUI_DARK_WORD='(near[- ]?black|all[- ]black|pitch[- ]black|black|all[- ]dark)'
+GUI_FRAME_NOUN='(frame|screen|screenshot|capture|image|display|framebuffer)s?'
+GUI_DARKNESS_CLAIM_RE="(${GUI_DARK_WORD}[ -]+${GUI_FRAME_NOUN}([^a-z]|\$)|(${GUI_FRAME_NOUN} +(\`?[a-z0-9_./+~-]+\.png\`? +)?|\`?[a-z0-9_./+~-]+\.png\`? +)(is|was|were|are|looks|looked|appears|appeared|shows|showed|stayed|remained|came back|rendered) +([a-z'-]+ +){0,2}${GUI_DARK_WORD}([^a-z]|\$))"
+GUI_DARKNESS_NEGATION_RE="(^|[^a-z'])(not|no|none|nothing|never|without|nor|neither|non|than|instead|hardly|barely)([^a-z]|\$)|n't([^a-z]|\$)"
+GUI_DARKNESS_REGION_RE='(^|[^a-z])(pane|panel|area|region|window|list|dialog|widget|column|sidebar|tab|field|box|section|corner|half|portion|part|terminal|content|contents|viewport|tile|cell|strip|rectangle|border|margin|thumbnail|bar|menu|toolbar|popup|tooltip|top|bottom|left|right|edge|inside|within|background|backdrop|wallpaper|theme|text|font|colou?r|title|and-white)s?([^a-z]|$)'
+# The clause splitter, one sed program (GNU: `\n` in the replacement, `I`).
+# SENTENCES first (`. ; :` + space/end), then CLAUSES within each sentence.
+GUI_DARKNESS_SENTENCE_SED='s/[.;:]([[:space:]]|$)/\n/g'
+GUI_DARKNESS_CLAUSE_SED='s/,? but /\n/gI; s/ (while|whereas) /\n/gI; s/, so /\n/gI'
+# Helpers of gui_darkness_contradiction_note. One `qci_gui_darkness:` line to
+# the agent log (args: log_path message); the png-bearing tokens of a text,
+# each taken WHOLE (a rejected name keeps its suffix).
+_gui_dark_log() { [ -n "$1" ] && printf 'qci_gui_darkness: %s\n' "$2" >> "$1" 2>/dev/null; return 0; }
+_gui_dark_toks() { printf '%s\n' "$1" | grep -oE '[A-Za-z0-9_.+/~-]+' | grep -iE '\.png' || true; }
+gui_darkness_contradiction_note() {
+    local adir=$1 caplog=${2:-} anchor=${3:-} caproot=${4:-} log_path=${5:-}
+    local src line clause lc prose n tok f rel absdir rootr tmp metrics mrc before after
+    local nclaims fb_claim fb_sent si sentence bare a_vm="" a_rows="" a_head="" shown=0 out=""
+    local -a claims=() attested=() toks=() hits=() lsent=()
+    for src in status.txt report.md; do
+        [ -f "$adir/$src" ] && [ ! -L "$adir/$src" ] || continue
+        n=0
+        while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1)); line=${line//$'\r'/}
+            nclaims=0; fb_claim=""; fb_sent=-1; si=-1; lsent=()
+            while IFS= read -r sentence; do
+                si=$((si + 1))
+                lsent+=("$(printf '%s' "${sentence,,}" | tr -s ' ' | sed 's/^[ -]*//; s/ $//')")
+                while IFS= read -r clause; do
+                    lc=${clause,,}
+                    [[ "$lc" =~ $GUI_DARKNESS_CLAIM_RE ]] || continue
+                    nclaims=$((nclaims + 1))
+                    # Negation/region words are judged on the PROSE: png-bearing
+                    # tokens are removed first (`guest-agent-not-responding.png`
+                    # holds a "not" that negates nothing).
+                    prose=$(printf '%s\n' "$lc" | sed -E 's/[a-z0-9_.+\/~-]*\.png[a-z0-9_.+\/~-]*/ /g')
+                    [[ "$prose" =~ $GUI_DARKNESS_NEGATION_RE ]] && continue
+                    [[ "$prose" =~ $GUI_DARKNESS_REGION_RE ]] && continue
+                    mapfile -t toks < <(_gui_dark_toks "$clause")
+                    if [ ${#toks[@]} -eq 0 ]; then
+                        fb_claim=$lc; fb_sent=$si
+                    elif [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]]; then
+                        claims+=("$src:$n"$'\t'"$(printf '%s' "$lc" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
+                    fi
+                done < <(printf '%s\n' "$sentence" | sed -E "$GUI_DARKNESS_CLAUSE_SED")
+            done < <(printf '%s\n' "$line" | sed -E "$GUI_DARKNESS_SENTENCE_SED")
+            # The "Evidence:" house style, ADJACENT form only: the only claim
+            # on the line sits in the SENTENCE immediately before a single
+            # "Evidence:" marker (no other sentence between; a ", so ..."
+            # consequence of the claim is the same sentence, as in pg/06),
+            # no png before the marker, and after it only references --
+            # exactly one plain png,
+            # other file names, backticks and separators, no prose and so no
+            # claim (astra F5 code r2, P2).
+            [ -n "$fb_claim" ] && [ "$nclaims" -eq 1 ] || continue
+            [ "${lsent[$((fb_sent + 1))]:-}" = evidence ] || continue
+            [ "$(grep -oi 'evidence:' <<<"$line" | wc -l)" -eq 1 ] || continue
+            before=${line%%[Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]:*}; after=${line:$((${#before} + 9))}
+            [ -z "$(_gui_dark_toks "$before")" ] || continue
+            [ -z "$(printf '%s\n' "$after" | sed -E 's/[A-Za-z0-9_.+\/~-]+\.[A-Za-z0-9]+//g; s/(^|[^a-z])and([^a-z]|$)/ /g; s/[][`"(),.;:[:space:]]//g')" ] || continue
+            mapfile -t toks < <(_gui_dark_toks "$after")
+            [ ${#toks[@]} -eq 1 ] && [[ "${toks[0],,}" == *.png ]] || continue
+            claims+=("$src:$n"$'\t'"$(printf '%s' "$fb_claim" | tr -s ' ' | sed 's/^ //; s/ $//')"$'\t'"${toks[0]}")
+        done < <(head -c 262144 -- "$adir/$src" 2>/dev/null)
+    done
+    [ ${#claims[@]} -gt 0 ] || return 0
+    if ! command -v magick >/dev/null 2>&1; then
+        _gui_dark_log "$log_path" "skipped: ImageMagick 'magick' is not installed, so the ${#claims[@]} whole-frame darkness claim(s) were not measured"
+        return 0
+    fi
+    IFS=$'\t' read -r a_vm a_rows a_head <<<"$anchor"
+    if [ -z "$a_head" ] || ! gui_capture_log_verify "$caplog" "$a_vm" "$a_rows" "$a_head" >/dev/null 2>&1; then
+        _gui_dark_log "$log_path" "skipped: the capture ledger is unsealed or does not verify, so no frame is attested"
+        return 0
+    fi
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/qci-dark.XXXXXX") || return 0
+    gui_capture_reconcile "$adir" "$caplog" "$tmp/attested" "$caproot" >/dev/null 2>&1 || true
+    mapfile -t attested < "$tmp/attested" 2>/dev/null || attested=()
+    absdir=$(readlink -f "$adir" 2>/dev/null || printf '%s' "$adir")
+    rootr=$(readlink -f "$caproot" 2>/dev/null || printf '%s' "$caproot")
+    declare -A seen=()
+    for line in "${claims[@]}"; do
+        IFS=$'\t' read -r src clause tok <<<"$line"
+        # An EXPLICIT path (`./x.png`, absolute, anything with a `/`) keeps its
+        # identity: it must equal one attested frame's relative path exactly.
+        # Only an originally BARE name is searched by basename (astra F5 code
+        # r2, P1: `./s3.png` must not resolve to an attested `sub/s3.png`).
+        bare=1; [[ "$tok" == */* ]] && bare=0
+        tok=${tok#./}
+        # Only this attempt's own tree: its root, or the alias it was given.
+        case "$tok" in
+            *..*) _gui_dark_log "$log_path" "skipped $src $tok: a relative path out of this attempt's tree"; continue ;;
+            "$absdir"/*) tok=${tok#"$absdir"/} ;;
+            "$caproot"/*) [ -n "$caproot" ] || continue; tok=${tok#"$caproot"/} ;;
+            "$rootr"/*) [ -n "$rootr" ] || continue; tok=${tok#"$rootr"/} ;;
+            /*) _gui_dark_log "$log_path" "skipped $src $tok: not inside this attempt's artifact directory"; continue ;;
+        esac
+        hits=()
+        for f in "${attested[@]}"; do
+            rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f"); rel=${rel#"$absdir"/}
+            if [ "$bare" = 0 ]; then
+                [ "$rel" = "$tok" ] && hits+=("$f")
+            else
+                [ "${rel##*/}" = "$tok" ] && hits+=("$f")
+            fi
+        done
+        if [ ${#hits[@]} -ne 1 ]; then
+            [ ${#hits[@]} -gt 1 ] && _gui_dark_log "$log_path" "skipped $src $tok: ambiguous (${#hits[@]} attested frames share that name)"
+            continue
+        fi
+        f=${hits[0]}
+        rel=$(readlink -f "$f" 2>/dev/null || printf '%s' "$f"); rel=${rel#"$absdir"/}
+        # A bare name that exists at the artifact root names THAT file; if the
+        # unique basename hit is some other (sub-directory) frame, skip.
+        if [ "$bare" = 1 ] && [ -e "$absdir/$tok" ] && [ "$rel" != "$tok" ]; then
+            _gui_dark_log "$log_path" "skipped $src $tok: the root file of that name is not the attested frame"
+            continue
+        fi
+        [ -z "${seen[$src/$rel]:-}" ] || continue
+        seen[$src/$rel]=1
+        rm -f -- "$tmp/raw.png"
+        if ! qci_view_raw_extract "$f" "$tmp/raw.png" >/dev/null 2>&1; then
+            _gui_dark_log "$log_path" "skipped $rel: its raw content could not be extracted"
+            continue
+        fi
+        mrc=0; metrics=$(qci_frame_not_dark "$tmp/raw.png") || mrc=$?
+        case "$mrc" in
+            0) _gui_dark_log "$log_path" "CONTRADICTION $src \"$clause\" names $rel, whose raw pixels measure $metrics (not dark: sigma >= $FRAME_FLAT_SIGMA and bright >= $FRAME_BRIGHT_MIN)"
+               shown=$((shown + 1))
+               [ "$shown" -le 3 ] && out="$out; DIAGNOSTIC: darkness claim contradicted: $src \"$clause\" names $rel, whose raw pixels measure $metrics, not dark (verdict NOT changed; if this verdict is wrong, start here)" ;;
+            1) ;;
+            *) _gui_dark_log "$log_path" "skipped $rel: could not measure its raw pixels (code $mrc)" ;;
+        esac
+    done
+    rm -rf -- "$tmp"
+    [ "$shown" -le 3 ] || out="$out; DIAGNOSTIC: $((shown - 3)) more darkness contradiction(s) in the agent log (qci_gui_darkness)"
+    printf '%s' "$out"
+    return 0
+}
+
 gui_count_image_opens() {
     local log_path=$1 prompt_path=${2:-} n=0
     [ -f "$log_path" ] || { printf '0\n'; return 0; }
@@ -2858,8 +3278,76 @@ gui_host_sandbox_args() {
     done
 }
 
+# F3. Observe which attested frames THIS attempt's driver actually opened, from
+# its codex rollout (ci/lib/gui_rollout_views.py), and persist the per-attempt
+# observation sidecar. Called by run_agent_command after the agent exits and
+# BEFORE its cwd is removed or the artifact alias is harvested, so relative
+# paths and in-alias files still resolve. Reads the attempt env it runs in:
+# QCI_AGENT_CMD (`--ephemeral` or an explicit child CODEX_HOME make it
+# unobservable unless QCI_GUI_CODEX_HOME names the home), QCI_GUI_CAPTURE_LOG,
+# QCI_GUI_VIEW_STATE. Never fails the attempt: an adapter failure is recorded
+# as unobservable. Args: log_path out_file.
+gui_observe_attempt() {
+    local log_path=$1 obs_out=${2:-} summary
+    [ -n "$obs_out" ] || return 0
+    if [ -n "${QCI_GUI_VIEW_STATE:-}" ] && [ -f "$QCI_GUI_VIEW_STATE" ]; then
+        cp -- "$QCI_GUI_VIEW_STATE" "${obs_out%.views.txt}.view-state.tsv" 2>/dev/null || true
+    fi
+    if ! summary=$(python3 "$GUI_ROLLOUT_ADAPTER" --log "$log_path" --out "$obs_out" \
+            --agent-cmd "${QCI_AGENT_CMD:-}" --codex-home "${QCI_GUI_CODEX_HOME:-}" \
+            --ledger "${QCI_GUI_CAPTURE_LOG:-}" --state "${QCI_GUI_VIEW_STATE:-}" 2>"$obs_out.err"); then
+        printf 'parser_version=1\nreason=unobservable:adapter-failed\nopens=unobservable\ncredited=unobservable\n' \
+            > "$obs_out" 2>/dev/null || true
+        summary="reason=unobservable:adapter-failed opens=unobservable credited=unobservable"
+    fi
+    [ -s "$obs_out.err" ] || rm -f -- "$obs_out.err"
+    printf '\nqci_gui_views: %s (%s)\n' "$summary" "$obs_out" >> "$log_path" 2>/dev/null || true
+}
+
+# F4. THE ZERO-LOOK GATE. Runs AFTER the visual-evidence contract, only for a
+# `qci:visual: required` scenario whose verdict survived it (PASS or FAIL). When
+# the attempt was OBSERVED (F3) to open ZERO attested frames, the verdict is
+# about pixels the driver never looked at: the status becomes ERROR and the
+# caller passes unviewed=1 to gui_classify_failure with the ORIGINAL status/rc.
+# Evidence failures keep precedence (their ERROR never reaches here), and so do
+# rc failures: a PASS with a nonzero rc is already a failure and is left alone.
+# UNOBSERVABLE IS NEVER ZERO: it changes no verdict and is only noted.
+# Echoes "<status>\t<unviewed 0|1>\t<note>". Args: status rc scenario obs_file.
+gui_apply_view_gate() {
+    local status=$1 rc=$2 scenario=$3 obs=${4:-} reason="" credited=""
+    if [ "$(gui_scenario_visual_mode "$scenario")" != required ]; then
+        printf '%s\t0\t\n' "$status"; return 0
+    fi
+    case "$status" in
+        PASS|FAIL) ;;
+        *) printf '%s\t0\t\n' "$status"; return 0 ;;
+    esac
+    if [ -n "$obs" ] && [ -f "$obs" ] && [ ! -L "$obs" ]; then
+        reason=$(sed -n 's/^reason=//p' "$obs" | head -1)
+        credited=$(sed -n 's/^credited=//p' "$obs" | head -1)
+    fi
+    if [ "$reason" != observed ]; then
+        printf '%s\t0\tdriver views %s (verdict not changed)\n' "$status" "${reason:-unobservable:no-observation}"
+        return 0
+    fi
+    if ! [[ "$credited" =~ ^[0-9]+$ ]]; then
+        printf '%s\t0\tdriver views unobservable:malformed-observation (verdict not changed)\n' "$status"
+        return 0
+    fi
+    if [ "$credited" -gt 0 ]; then
+        printf '%s\t0\tthe driver opened %s view(s) of attested frames (codex rollout)\n' "$status" "$credited"
+        return 0
+    fi
+    if [ "$status" = PASS ] && [ "$rc" != 0 ]; then
+        printf '%s\t0\tthe driver opened NO attested frame (codex rollout); the nonzero rc already fails this PASS\n' "$status"
+        return 0
+    fi
+    printf 'ERROR\t1\tagent-unviewed-verdict: the codex rollout shows the driver opened NO attested frame of this attempt, so its %s (rc=%s) on a pixel-dependent scenario was never looked at\n' \
+        "$status" "$rc"
+}
+
 run_agent_command() {
-    local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded workdir rc
+    local prompt=$1 log_path=$2 observe_out=${3:-} cmd=${QCI_AGENT_CMD:-} expanded workdir rc
     local -a host_sandbox=()
     if [ -z "$cmd" ]; then
         return 127
@@ -2906,6 +3394,8 @@ run_agent_command() {
         fi
     )
     rc=$?
+    # F3: observe BEFORE the cwd goes (relative view_image paths resolve there).
+    [ -z "$observe_out" ] || gui_observe_attempt "$log_path" "$observe_out"
     if [ "$rc" -eq 0 ]; then
         rm -rf -- "$workdir" 2>/dev/null || true
         printf '\nqci_agent_workdir=%s (removed after success)\n' "$workdir" >> "$log_path"
@@ -3008,7 +3498,7 @@ gui_run_scenario() {
         own=1
     fi
     t1=$(date +%s)
-    local slug scratch art_alias caplog
+    local slug scratch art_alias caplog viewstate obs
     slug=$(safe_name "$rel")
     adir="$RDIR/gui/$slug"
     prompt="$RDIR/agent-notes/$slug.prompt.md"
@@ -3018,6 +3508,13 @@ gui_run_scenario() {
     # ImageMagick policies that reject symlinked output paths. Harvest copies it
     # into the canonical run directory after the agent exits.
     art_alias=$(gui_make_artifact_alias "$adir") || art_alias=$adir
+    # VIEW-UNIQUE GEOMETRY state for this attempt (view-geometry.sh): created
+    # empty before the driver starts, never replaced while it runs; every
+    # capture tool the driver calls inherits it and reserves a (W,H) in it.
+    viewstate="$art_alias/$GUI_VIEW_STATE_NAME"
+    : > "$viewstate" 2>/dev/null || viewstate=""
+    # F3 observation sidecar: which attested frames the driver opened.
+    obs="${log_path%.agent.log}.views.txt"
     # Per-scenario isolated scratch dir (host) + slug (for guest scratch on a
     # shared session VM). Passed to the agent's env at run_agent_command so a
     # scenario routes scratch here instead of a collision-prone fixed /tmp path.
@@ -3045,9 +3542,21 @@ gui_run_scenario() {
     # set it from the prompt (or a racy `virsh list | head` fallback).
     # QCI_GUI_ARTIFACT_DIR is the SHORT alias (preferred for agents); harvest
     # still grades the canonical adir after recovery.
+    # The admin lane IS labwc: vm-gui then requires labwc's frame refresh
+    # instead of trusting the guest's own "no labwc" (scripts/vm/vm-gui). An
+    # explicit value in the gate's own environment (the operator's, or a
+    # fake-VM test declaring `none`) wins; the scenario driver cannot set it.
+    local vm_gui_session=${QCI_VM_GUI_SESSION:-auto}
+    [ "$lane" = admin ] && vm_gui_session=${QCI_VM_GUI_SESSION:-labwc}
+    # QCI_GUI_SCENARIO_AGENT marks the agent process tree: dispatch.sh refuses
+    # a nested `qci full|bats|gui|...` from inside it (apps/13 ERROR,
+    # full-20261001T124446Z: luna ran `qci gui` on its own VM, hit the run
+    # lock, then waited 8 min on its own codex pid as a "parent agent").
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+        QCI_GUI_SCENARIO_AGENT="$slug" \
         QCI_GUI_ARTIFACT_DIR="$art_alias" QCI_GUI_CAPTURE_LOG="$caplog" \
-        run_agent_command "$prompt" "$log_path"
+        QCI_GUI_VIEW_STATE="$viewstate" QCI_VM_GUI_SESSION="$vm_gui_session" \
+        run_agent_command "$prompt" "$log_path" "$obs"
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
@@ -3071,8 +3580,18 @@ gui_run_scenario() {
     # when the harness could read those frames. Nothing the agent wrote is
     # accepted as evidence, so artifact ordering is irrelevant here.
     local ev_note=""
-    IFS=$'\t' read -r status ev_note < <(gui_apply_visual_evidence_contract \
+    # The attempt's view state (saved beside the log before the alias went)
+    # lets reconcile's raw distinct count and the OCR input resolve a
+    # sidecar-less copy of an issued frame to its raw identity.
+    IFS=$'\t' read -r status ev_note < <(QCI_GUI_VIEW_STATE="${obs%.views.txt}.view-state.tsv" \
+        gui_apply_visual_evidence_contract \
         "$status" "$scenario" "$adir" "$caplog" "$capanchor" "$art_alias")
+    # F4 ZERO-LOOK GATE, after the evidence contract and BEFORE the verdict,
+    # classification and record_attempt. The ORIGINAL status/rc are kept for
+    # the classifier and the retry decision: only an original PASS rc=0 may be
+    # retried for it.
+    local orig_status=$status unviewed=0 vg_note=""
+    IFS=$'\t' read -r status unviewed vg_note < <(gui_apply_view_gate "$status" "$agent_rc" "$scenario" "$obs")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
     # not the silent pass it used to be.
@@ -3088,6 +3607,10 @@ gui_run_scenario() {
         note="$note; $ev_note"
         printf '\nqci_gui_visual_evidence: %s\n' "$ev_note" >> "$log_path" 2>/dev/null || true
     fi
+    if [ -n "$vg_note" ]; then
+        note="$note; $vg_note"
+        printf '\nqci_gui_view_gate: %s\n' "$vg_note" >> "$log_path" 2>/dev/null || true
+    fi
     # DIAGNOSTIC, never a gate (see gui_count_image_opens). Recorded for EVERY
     # attempt so the report can answer "did the driver look?" without anyone
     # grepping a thousand-line log, and so a lane-wide drop to zero -- the shape
@@ -3096,9 +3619,7 @@ gui_run_scenario() {
     local img_opens
     img_opens=$(gui_count_image_opens "$log_path" "$prompt")
     printf '\nqci_gui_image_opens: %s\n' "$img_opens" >> "$log_path" 2>/dev/null || true
-    if [ "$(gui_scenario_visual_mode "$scenario")" = required ] && [ "$img_opens" -eq 0 ]; then
-        note="$note; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
-    fi
+    note="$note$(gui_image_opens_diag_note "$scenario" "$img_opens" "$obs")"
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
     local classifier="" transport=0 tooling=0 api=0 extnet=0
@@ -3111,7 +3632,11 @@ gui_run_scenario() {
         gui_detect_agent_tooling_marker "$log_path" && tooling=1
         gui_detect_agent_api_marker "$log_path" && api=1
         gui_detect_external_network_marker "$log_path" && extnet=1
-        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet")
+        if [ "$unviewed" = 1 ]; then
+            classifier=$(gui_classify_failure "$orig_status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet" 1)
+        else
+            classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet")
+        fi
         # Classifier-drift alarm (H6b): a fail with NO marker matched fell through
         # to a generic classifier — snapshot the log tail so a drifted infra
         # marker is not lost. report.py counts these rows (rising count => drift).
@@ -3123,6 +3648,13 @@ gui_run_scenario() {
     # classifier, before the verdict collapses it. This is where the flake signal
     # lives (rc=124, UNKNOWN, slow walls under load).
     record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path" "$ta0" "$ta1" "$lane"
+    # F5 DIAGNOSTIC, never a gate: a whole-frame darkness claim contradicted by
+    # the named attested frame's raw pixels. It writes the agent log, so it runs
+    # only AFTER the marker detectors and the classifier have read that log
+    # (a frame NAME in its lines must not become a transport marker), and
+    # before the retry decision -- the same place as on the retry path.
+    note="$note$(QCI_GUI_VIEW_STATE="${obs%.views.txt}.view-state.tsv" \
+        gui_darkness_contradiction_note "$adir" "$caplog" "$capanchor" "$art_alias" "$log_path")"
 
     # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
     # retriable signature (transport-timeout, agent-tooling,
@@ -3139,7 +3671,10 @@ gui_run_scenario() {
     # result, so a retry can never silently turn a flake green.
     local retry_max
     retry_max=$(gui_retry_max "${QCI_GUI_RETRY:-0}")
-    if [ "$verdict" = fail ] && [ "$own" = 1 ] && gui_classifier_retriable "$classifier"; then
+    # The ORIGINAL status:rc of the current attempt, for agent-unviewed-verdict
+    # (retriable only for an original PASS rc=0).
+    local orig_src="$orig_status:$agent_rc"
+    if [ "$verdict" = fail ] && [ "$own" = 1 ] && gui_classifier_retriable "$classifier" "$orig_src"; then
         if [ "$retry_max" -ge 1 ]; then
             # Snapshot the FIRST attempt's evidence — the basis for the retriable
             # classification and the audit trail that makes retry acceptable.
@@ -3147,7 +3682,7 @@ gui_run_scenario() {
             local attempt=0 provision_failed=0
             while [ "$attempt" -lt "$retry_max" ] \
                   && [ "$verdict" = fail ] \
-                  && gui_classifier_retriable "$classifier"; do
+                  && gui_classifier_retriable "$classifier" "$orig_src"; do
                 attempt=$((attempt + 1))
                 local ordinal=$((attempt + 1))   # attempt-2 is the first retry
                 log "agent scenario $rel: retriable signature ($classifier); retry $attempt/$retry_max on a fresh VM"
@@ -3156,11 +3691,15 @@ gui_run_scenario() {
                 vm_live=0   # previous VM collected+released; nothing live until a fresh one is up
                 # Each retry writes to its OWN log + artifact dir so every attempt's
                 # evidence is preserved and each fresh agent starts clean.
-                local vmN logN adirN scratchN art_aliasN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN caplogN_vm
+                local vmN logN adirN scratchN art_aliasN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN caplogN_vm viewstateN obsN
                 logN="${log_path_base%.agent.log}.retry${attempt}.agent.log"
                 adirN="${adir%.retry*}.retry${attempt}"
                 mkdir -p "$adirN"
                 art_aliasN=$(gui_make_artifact_alias "$adirN") || art_aliasN=$adirN
+                # A fresh view state per attempt: sizes are unique per ATTEMPT.
+                viewstateN="$art_aliasN/$GUI_VIEW_STATE_NAME"
+                : > "$viewstateN" 2>/dev/null || viewstateN=""
+                obsN="${logN%.agent.log}.views.txt"
                 # Fresh host scratch PER RETRY so stale scratch from the failed
                 # attempt can't leak into the retry (mirrors the per-attempt
                 # logN/adirN discipline).
@@ -3186,8 +3725,10 @@ gui_run_scenario() {
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
+                    QCI_GUI_SCENARIO_AGENT="$slug" \
                     QCI_GUI_ARTIFACT_DIR="$art_aliasN" QCI_GUI_CAPTURE_LOG="$caplogN" \
-                    run_agent_command "$prompt" "$logN"
+                    QCI_GUI_VIEW_STATE="$viewstateN" \
+                    run_agent_command "$prompt" "$logN" "$obsN"
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
                 gui_harvest_agent_artifacts "$adirN" "$slug" "$logN" "$art_aliasN"
@@ -3200,8 +3741,12 @@ gui_run_scenario() {
                 fi
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 local ev_noteN=""
-                IFS=$'\t' read -r statusN ev_noteN < <(gui_apply_visual_evidence_contract \
+                IFS=$'\t' read -r statusN ev_noteN < <(QCI_GUI_VIEW_STATE="${obsN%.views.txt}.view-state.tsv" \
+                    gui_apply_visual_evidence_contract \
                     "$statusN" "$scenario" "$adirN" "$caplogN" "$capanchorN" "$art_aliasN")
+                # Same F4 zero-look gate as the first attempt, same place.
+                local orig_statusN=$statusN unviewedN=0 vg_noteN=""
+                IFS=$'\t' read -r statusN unviewedN vg_noteN < <(gui_apply_view_gate "$statusN" "$agent_rc" "$scenario" "$obsN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
                 if [ "$verdictN" = skip ]; then
@@ -3212,12 +3757,20 @@ gui_run_scenario() {
                     noteN="$noteN; $ev_noteN"
                     printf '\nqci_gui_visual_evidence: %s\n' "$ev_noteN" >> "$logN" 2>/dev/null || true
                 fi
+                if [ -n "$vg_noteN" ]; then
+                    noteN="$noteN; $vg_noteN"
+                    printf '\nqci_gui_view_gate: %s\n' "$vg_noteN" >> "$logN" 2>/dev/null || true
+                fi
                 if [ "$verdictN" = fail ]; then
                     gui_detect_transport_marker "$logN" && transportN=1
                     gui_detect_agent_tooling_marker "$logN" && toolingN=1
                     gui_detect_agent_api_marker "$logN" && apiN=1
                     gui_detect_external_network_marker "$logN" && extnetN=1
-                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN")
+                    if [ "$unviewedN" = 1 ]; then
+                        classifierN=$(gui_classify_failure "$orig_statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN" 1)
+                    else
+                        classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN")
+                    fi
                     if [ "$((transportN + toolingN + apiN + extnetN))" -eq 0 ]; then
                         gui_capture_unmatched_tail "$logN" "${logN%.agent.log}.unmatched-tail.txt"
                     fi
@@ -3232,10 +3785,12 @@ gui_run_scenario() {
                 local img_opensN
                 img_opensN=$(gui_count_image_opens "$logN" "$prompt")
                 printf '\nqci_gui_image_opens: %s\n' "$img_opensN" >> "$logN" 2>/dev/null || true
-                if [ "$(gui_scenario_visual_mode "$scenario")" = required ] && [ "$img_opensN" -eq 0 ]; then
-                    noteN="$noteN; DIAGNOSTIC: the driver never MENTIONED opening an image for a pixel-dependent scenario (verdict NOT changed; if this verdict is wrong, start here)"
-                fi
+                noteN="$noteN$(gui_image_opens_diag_note "$scenario" "$img_opensN" "$obsN")"
+                # Same F5 darkness DIAGNOSTIC as the first attempt, same place.
+                noteN="$noteN$(QCI_GUI_VIEW_STATE="${obsN%.views.txt}.view-state.tsv" \
+                    gui_darkness_contradiction_note "$adirN" "$caplogN" "$capanchorN" "$art_aliasN" "$logN")"
                 status=$statusN; verdict=$verdictN; note=$noteN; classifier=$classifierN; log_path=$logN; adir=$adirN
+                orig_src="$orig_statusN:$agent_rc"
             done
             # Summarize the retried run (skip when we bailed on a provision failure,
             # which already recorded its own flake row).

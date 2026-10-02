@@ -52,14 +52,20 @@ done
 VM_PASSWORD='Pa_ssw0rd45'
 
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
-CACHE_DIR="$HOME/.cache/qdistro"
-CLOUD_URL="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
-CLOUD_CACHE="$CACHE_DIR/tumbleweed-cloud-base.qcow2"
-DEST="$IMG/baseweed-admin.qcow2"
+. "$SCRIPT_DIR/lib/test-substrate.sh"
+. "$SCRIPT_DIR/lib/rpm-cache.sh"
+qdistro_load_test_substrate
+CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
+CLOUD_URL="$QDISTRO_SUBSTRATE_CLOUD_URL"
+CLOUD_CACHE="$CACHE_DIR/cloud/$QDISTRO_SUBSTRATE_CLOUD_SHA256.qcow2"
+DEST="$(qdistro_substrate_base_path admin "$IMG")"
 PARTIAL="$DEST.partial"
 
 if [ -f "$DEST" ] && [ "$FORCE" -ne 1 ]; then
-    echo "$DEST already exists. Use --force to rebuild." >&2
+    qdistro_substrate_stamp_ok "$DEST" admin "$QDISTRO_SUBSTRATE_CLOUD_SHA256" || {
+        echo "ERROR: $DEST has no matching test-substrate stamp; rebuild safely after clearing its backing users" >&2; exit 2;
+    }
+    echo "$DEST already matches the pinned test substrate. Use --force to rebuild." >&2
     qemu-img info "$DEST" | sed 's/^/  /'
     exit 0
 fi
@@ -71,15 +77,17 @@ for tool in virt-customize virt-resize qemu-img wget virt-sparsify; do
     }
 done
 
-install -d "$CACHE_DIR" "$IMG"
+install -d "$(dirname "$CLOUD_CACHE")" "$IMG"
 
 # J25: verified download. The cloud qcow2 becomes the root-disk base of every
 # VM built from this image, so refuse to proceed unless it matches the
 # openSUSE-signed checksum (an existing cache is re-verified, not trusted).
 # shellcheck source=lib/opensuse-cloud-image.sh
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
-download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" \
+download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
     || { echo "[scratch] ERROR: base cloud image failed openSUSE signature/digest verification; refusing to build on an unverified root image" >&2; exit 4; }
+
+[ "$FORCE" -ne 1 ] || qdistro_substrate_replace_safe "$DEST" || exit 2
 
 rm -f "$PARTIAL"
 echo "[scratch] resizing cloud image to 25 GB..."
@@ -93,10 +101,12 @@ virt-resize --quiet --expand /dev/sda3 "$CLOUD_CACHE" "$PARTIAL" >/dev/null || {
 }
 
 echo "[scratch] customizing: admin user + qga + SELinux + cloud-init mask..."
+qdistro_rpm_cache_import "$PARTIAL"
 virt-customize \
     --memsize 2048 \
     --smp 2 \
     -a "$PARTIAL" \
+    --run-command "$(qdistro_substrate_repo_command)" \
     --root-password "password:${VM_PASSWORD}" \
     --run-command 'getent passwd admin >/dev/null || useradd -m -u 1000 -U -s /bin/bash admin' \
     --run-command 'getent group wheel >/dev/null && usermod -aG wheel admin || true' \
@@ -113,11 +123,12 @@ virt-customize \
     --run-command 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service cloud-init.target 2>/dev/null || true' \
     --run-command 'systemctl mask jeos-firstboot.service 2>/dev/null || true' \
     --run-command 'echo baseweed-admin >/etc/hostname' \
-    --run-command 'zypper clean -a' \
-    --run-command 'rm -rf /var/cache/zypp/* /tmp/* /var/tmp/* 2>/dev/null; true'
+    --run-command 'rm -rf /tmp/* /var/tmp/* 2>/dev/null; true'
+
+qdistro_rpm_cache_export "$PARTIAL"
 
 virt-sparsify --in-place "$PARTIAL" 2>/dev/null || true
-mv "$PARTIAL" "$DEST"
+qdistro_substrate_publish "$PARTIAL" "$DEST" admin "$QDISTRO_SUBSTRATE_CLOUD_SHA256"
 
 echo "[scratch] done: $DEST"
 qemu-img info "$DEST" | sed 's/^/  /'

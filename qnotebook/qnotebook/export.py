@@ -254,9 +254,12 @@ def export_page_pdf(notebook: Notebook, page: str, out_path: Path | str) -> Path
     md_text = notebook.get_page(page)
     base_path = notebook.file_for(page).parent
 
+    from .content_style import legacy_content_style
     from .md_to_qdoc import markdown_to_qdoc
     doc = QTextDocument()
-    markdown_to_qdoc(md_text, doc, base_path=base_path)
+    markdown_to_qdoc(
+        md_text, doc, base_path=base_path, content_style=legacy_content_style()
+    )
 
     writer = QPdfWriter(str(out_path))
     writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))

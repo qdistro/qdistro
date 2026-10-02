@@ -62,9 +62,112 @@ def test_apply_theme_system_is_a_noop(qapp):
     palette_before = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
     resolved = apply_theme(qapp, "system")
     assert resolved == "system"
-    assert qapp.style().objectName() == style_before, (
-        "system mode must not call setStyle"
+    assert qapp.style().objectName() == style_before, "system mode must not call setStyle"
+    assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == palette_before, (
+        "system mode must not call setPalette"
     )
+
+
+def test_attach_presentation_follows_snapshot(qapp, tmp_path):
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ResolvedPath
+    from qdistro_presentation.publish import write_snapshot
+    from qdistro_presentation.qt import PresentationController
+    from qfileman.config import Config
+    from qfileman.theme import apply_theme, reset_controller_for_tests
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    Config._instance = None
+    Config._data = None
+    cfg = Config()
+    cfg.set("general", "theme_mode", "system")
+    reset_controller_for_tests()
+    ctrl = PresentationController(
+        qapp,
+        theme_mode="system",
+        snapshot_path=ResolvedPath(
+            path=str(tmp_path / "current.json"),
+            kind="override",
+            expected_uid=None,
+            watch=False,
+        ),
+        apply_legacy=lambda app, mode: apply_theme(app, mode),
+        apply_system_fallback=lambda app: apply_theme(app, "system"),
+        watch=False,
+    )
+    assert ctrl.state.using_shared_palette is True
     assert (
-        qapp.palette().color(QPalette.ColorRole.Window).getRgb() == palette_before
-    ), "system mode must not call setPalette"
+        qapp.palette().color(QPalette.ColorRole.Window).name() == example_snapshot().colors.mSurface
+    )
+    ctrl.set_theme_mode("native")
+    ctrl.stop()
+    reset_controller_for_tests()
+
+
+def test_presentation_update_keeps_two_pane_paths(qapp, tmp_dir, tmp_path):
+    from dataclasses import replace
+
+    from qdistro_presentation.model import example_snapshot, with_generation
+    from qdistro_presentation.paths import ResolvedPath
+    from qdistro_presentation.publish import write_snapshot
+    from qdistro_presentation.qt import PresentationController
+    from qfileman.theme import apply_theme, reset_controller_for_tests
+    from qfileman.window import FileManagerWindow
+
+    other = tmp_path / "other"
+    other.mkdir()
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    reset_controller_for_tests()
+    ctrl = PresentationController(
+        qapp,
+        theme_mode="system",
+        snapshot_path=ResolvedPath(
+            path=str(tmp_path / "current.json"),
+            kind="override",
+            expected_uid=None,
+            watch=False,
+        ),
+        apply_legacy=lambda app, mode: apply_theme(app, mode),
+        apply_system_fallback=lambda app: apply_theme(app, "system"),
+        watch=False,
+    )
+    win = FileManagerWindow()
+    try:
+        win._update_path(str(tmp_dir))
+        new_pane = win._split_right()
+        new_pane._update_path(str(other))
+        before = [pane.current_path for pane in win._split_root.find_panes()]
+        second = with_generation(replace(example_snapshot(), mode="light"))
+        write_snapshot(
+            str(tmp_path),
+            second,
+            require_unwritable_dirs=False,
+            skip_unchanged=False,
+        )
+        ctrl._reload()
+        win.apply_presentation_update()
+        after = [pane.current_path for pane in win._split_root.find_panes()]
+        assert after == before
+        assert str(tmp_dir) in after
+        assert str(other) in after
+        assert len(after) == 2
+        assert ctrl.state.generation == second.generation
+        assert ctrl.state.snapshot.mode == "light"
+    finally:
+        win.close()
+        win.deleteLater()
+        ctrl.stop()
+        reset_controller_for_tests()
+
+
+def test_preferences_dialog_apply_presentation_update_polishes(qapp):
+    from qfileman.preferences import PreferencesDialog
+
+    dlg = PreferencesDialog()
+    try:
+        dlg.show()
+        dlg.apply_presentation_update()
+        assert dlg.isVisible()
+    finally:
+        dlg.close()
+        dlg.deleteLater()

@@ -49,7 +49,7 @@ qdlocker = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
-pythonpath = ["."]
+pythonpath = [".", "../sdk/presentation"]
 # pytest-qt otherwise auto-imports PySide6 first if it's installed
 # anywhere on the path, which loads PySide6's bundled libQt6Core.so
 # and then breaks the subsequent PyQt6 import with a missing

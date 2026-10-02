@@ -74,12 +74,24 @@ OBJ_PATH = "/org/qdistro/SessionManager1"
 # So these bounds are load-bearing, not hygiene: they turn the common
 # userspace hang into a failure the surrounding handling can act on instead of
 # a hang nothing can act on. That is the whole claim. It is NOT that the daemon
-# is now guaranteed responsive, NOT that every failure reaches the client as a
-# domain-typed error (CreateSilo still re-raises non-SessionError failures raw),
-# and NOT that every site's answer is safe in every dimension — account
-# operations remain non-transactional, and `check=False` callers still ignore
-# arbitrary non-zero exits, only the timeout direction is fixed. Both are filed
-# in todo/open-followups.md.
+# is now guaranteed responsive, and NOT that every site's answer is safe in
+# every dimension — account operations remain non-transactional (see
+# todo/open-followups.md). Three holes this paragraph used to leave open are
+# closed:
+#   * CreateSilo translates a non-SessionError (store.create audits, then
+#     re-raises the original class) to org.qdistro.SessionManager1.Generic.
+#     The store method still raises that original class for unit tests.
+#   * link_del / netns_remove ignore a non-zero exit only for the absence
+#     text `ip` prints ("Cannot find device", "No such file or directory").
+#     Any other failure raises. ipv6_disable uses check=True: sysctl returns
+#     0 when the write succeeds, including when the value is already set, so
+#     there is no "already disabled" non-zero to swallow.
+#   * Freeze/resume/stop waiters on an in-flight slot give up after
+#     _T_INFLIGHT_WAIT. That bounds the waiter, not the cgroup.freeze write
+#     (the write staying unbounded is still a separate filed item).
+# Other check=False sites still treat a specific non-zero as non-fatal on
+# purpose (userdel "does not exist", systemctl stop "not established", the
+# btrfs probe, a best-effort bus reload).
 #
 # TWO HONEST LIMITS, so nobody reads more into these than they carry:
 #
@@ -315,6 +327,15 @@ SILO_UID_MAX = 60000
 # Default grace seconds for StopSilo (SIGTERM → wait → SIGKILL).
 DEFAULT_STOP_GRACE_S = 5
 
+# How long freeze/resume/stop will wait for another thread's in-flight
+# lifecycle op on the same silo. This bounds the WAITER, not the
+# cgroup.freeze write itself (that write staying unbounded is a separate
+# filed item). Longer than _T_SYSTEMCTL (30s) and DEFAULT_STOP_GRACE_S
+# (5s), shorter than the _T_ACCOUNT (300s) allowance: a slow-but-live holder
+# is given time to finish, and a waiter is not stuck forever if the holder
+# never clears the slot.
+_T_INFLIGHT_WAIT = 120
+
 log = logging.getLogger("qdistro_session_manager")
 
 
@@ -419,7 +440,19 @@ class Silo:
     # "none" = default-deny. Only meaningful for tier3-user silos.
     egress: str | None = None
 
+    # Observations are ephemeral evidence, never lifecycle authority or persistence.
+    observed_status: str = "unknown"
+    observed_reason: str = "not observed since daemon start"
+    observed_at: float = 0.0
+    observed_monotonic: float = 0.0
+    operation_generation: int = 0
+    runtime_incarnation: str = field(default_factory=lambda: secrets.token_hex(16))
+    start_unresolved: bool = False
+
     def to_dict(self) -> dict[str, Any]:
+        age = time.monotonic() - self.observed_monotonic
+        fresh = (self.observed_monotonic > 0
+                 and 0 <= age < 30)
         return {
             "name": self.name,
             "uid": int(self.uid),
@@ -430,6 +463,12 @@ class Silo:
             "kind": self.kind,
             "launch": dict(self.launch),
             "egress": self.egress,
+            "observed_status": self.observed_status if fresh else "unknown",
+            "observed_reason": self.observed_reason if fresh else "observation stale or unavailable",
+            "observed_at": self.observed_at,
+            "observed_ttl_seconds": 30 - age if fresh else 0.0,
+            "operation_generation": self.operation_generation,
+            "runtime_incarnation": self.runtime_incarnation,
         }
 
 
@@ -770,6 +809,18 @@ class _SystemOps:
         # boundary + per-quota target. Falls through (warning only)
         # on non-btrfs hosts so dev VMs without btrfs still work.
         self._convert_home_to_subvolume(name, uid)
+
+    def install_silo_skill(self, name: str) -> None:
+        # The installer's refusal reason (unsafe path, redirected home)
+        # belongs in the error the D-Bus caller sees, not only the journal.
+        r = subprocess.run(
+            ["/usr/bin/python3", "/usr/libexec/qdistro/qdistro_silo_skill.py",
+             str(name)], check=False, capture_output=True, text=True,
+            timeout=_T_ACCOUNT)
+        if r.returncode != 0:
+            raise RuntimeError(
+                (r.stderr or r.stdout).strip()
+                or f"silo skill installer exited {r.returncode}")
 
     def _convert_home_to_subvolume(self, name: str, uid: int) -> None:
         home = Path("/home") / name
@@ -1350,16 +1401,31 @@ class _SystemOps:
         if ns:
             cmd += ["-n", str(ns)]
         cmd += [str(a) for a in args]
-        # check=False means "ignore a non-zero EXIT STATUS" — a device that is
-        # already gone. It deliberately does NOT mean "ignore a wedge": a
-        # TimeoutExpired propagates either way. The distinction is load-bearing
-        # because link_del() runs on the APPLY path too (EgressBackend.apply
-        # tears down stale devices first), and there a swallowed timeout would
-        # let apply(none) return dark=True while the old wg device is still up
-        # with its default route — a silo reported as networkless that still
-        # has a tunnel. "The delete failed" and "the device was already absent"
-        # must never collapse into the same answer.
+        # check=True callers (link_up, addr_add, routes) fail on any non-zero
+        # exit. Absence-tolerant deletes do not come through here: this call
+        # does not capture stderr, so it cannot tell "Cannot find device" from
+        # "Operation not permitted". TimeoutExpired propagates either way — a
+        # swallowed timeout on the apply path would let apply(none) return
+        # dark=True while the old wg device is still up with its default route.
         subprocess.run(cmd, check=check, timeout=_T_NETLINK)
+
+    def _run_absent_ok(self, cmd: list[str], absent_marker: str) -> None:
+        """Run *cmd*. rc 0 succeeds. A non-zero exit whose stdout or stderr
+        contains *absent_marker* is a missing object and stays a silent no-op.
+        Any other non-zero exit raises CalledProcessError carrying both
+        streams. TimeoutExpired propagates unchanged — it is never success.
+        """
+        proc = subprocess.run(
+            cmd, check=False, capture_output=True, text=True,
+            timeout=_T_NETLINK)
+        if proc.returncode == 0:
+            return
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        if absent_marker in out or absent_marker in err:
+            return
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr)
 
     def netns_exists(self, ns: str) -> bool:
         return (NETNS_RUN_DIR / str(ns)).exists()
@@ -1371,22 +1437,30 @@ class _SystemOps:
                            timeout=_T_NETLINK)
 
     def netns_remove(self, ns: str) -> None:
-        # Deleting the netns destroys every interface still inside it. Best
-        # effort: a missing netns is not an error.
-        # check=False covers "no such netns". A timeout is a different claim —
-        # the netns may still exist with devices in it — so it propagates to
-        # the caller, which already wraps this in its own "log and continue"
-        # handler and is the right place for that policy to live.
-        subprocess.run(["ip", "netns", "del", str(ns)], check=False,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=_T_NETLINK)
+        # Deleting the netns destroys every interface still inside it.
+        # `ip netns del` on a missing netns prints "No such file or directory"
+        # (Cannot remove namespace file "...": No such file or directory) and
+        # that stays a silent no-op. A generic rc=1 is not absence: permission,
+        # busy, or any other netlink error raises. A timeout is a different
+        # claim — the netns may still exist — so TimeoutExpired propagates.
+        # Callers that want "log and continue" already wrap this themselves.
+        self._run_absent_ok(
+            ["ip", "netns", "del", str(ns)], "No such file or directory")
 
     def link_up(self, ns, ifname) -> None:
         self._ip(ns, "link", "set", ifname, "up")
 
     def link_del(self, ns, ifname) -> None:
-        # Idempotent teardown: a missing device must not raise.
-        self._ip(ns, "link", "del", ifname, check=False)
+        # Idempotent teardown for a missing device only. `ip link del` prints
+        # `Cannot find device "<name>"` in that case. Any other non-zero exit
+        # (EPERM, EBUSY, netlink) raises, with the captured streams attached.
+        # Done here rather than via _ip(check=False): _ip does not capture
+        # stderr, and check=True callers must keep failing on every non-zero.
+        cmd = ["ip"]
+        if ns:
+            cmd += ["-n", str(ns)]
+        cmd += ["link", "del", str(ifname)]
+        self._run_absent_ok(cmd, "Cannot find device")
 
     def link_set_netns(self, ifname, ns) -> None:
         # The device is in the init netns; move it into `ns`.
@@ -1408,13 +1482,17 @@ class _SystemOps:
 
     def ipv6_disable(self, ns, ifname) -> None:
         # Stop SLAAC handing a direct-egress silo a v6 path around the NAT.
+        # Runs on the direct APPLY path immediately before the silo is
+        # declared non-dark, so a non-zero sysctl must raise (check=True),
+        # not be ignored. sysctl writes the value; an already-applied `=1`
+        # is still a successful write (exit 0). There is no separate
+        # "already disabled" non-zero to special-case. TimeoutExpired
+        # propagates as well: swallowing it would hand out a silo whose v6
+        # path around the NAT was never actually closed.
         argv = ["sysctl", "-q", f"net.ipv6.conf.{ifname}.disable_ipv6=1"]
         if ns:
             argv = ["ip", "netns", "exec", str(ns)] + argv
-        # Propagates on timeout: this runs on the `direct` APPLY path, right
-        # before the silo is declared non-dark. Swallowing it would hand out a
-        # silo whose v6 SLAAC path around the NAT was never actually closed.
-        subprocess.run(argv, check=False, timeout=_T_NETLINK)
+        subprocess.run(argv, check=True, timeout=_T_NETLINK)
 
     def wg_add_dev(self, ifname) -> None:
         # Born in the init netns so WireGuard binds its encrypted UDP socket
@@ -1979,6 +2057,57 @@ class _SystemOps:
                     "the stop transaction may never have been enqueued",
                     unit, r.returncode, (r.stderr or "").strip()[:200])
         return False
+
+    def observe_silo(self, name: str, uid: int, kind: str) -> tuple[str, str]:
+        """Read runtime evidence only. No observation authorizes a lifecycle op."""
+        unit = (TIER2_SILO_LAUNCHER_FMT.format(name=name)
+                if kind == KIND_TIER2_TEMPLATE else
+                SILO_LAUNCHER_FMT.format(name=name, uid=uid))
+        result = subprocess.run(
+            ["systemctl", "show", unit, "--property=LoadState",
+             "--property=ActiveState", "--property=Job"],
+            capture_output=True, text=True, timeout=3)
+        properties = dict(line.split("=", 1) for line in result.stdout.splitlines()
+                          if "=" in line)
+        if result.returncode or properties.get("LoadState") != "loaded":
+            return "unknown", "launcher observation unavailable"
+        if properties.get("Job") not in ("", "0"):
+            return "unknown", "launcher has a pending or unknown job"
+        active = properties.get("ActiveState")
+        if active in ("activating", "reloading"):
+            return "starting", "launcher is activating"
+        if active not in ("active", "inactive", "failed"):
+            return "unknown", "launcher state is transitional or unknown"
+        if kind == KIND_TIER2_TEMPLATE:
+            container = TIER2_CONTAINER_FMT.format(name=name)
+            exists = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
+                 "container", "exists", container], capture_output=True, timeout=3)
+            if exists.returncode == 0:
+                running = subprocess.run(
+                    ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
+                     "inspect", "--format", "{{.State.Running}}", container],
+                    capture_output=True, text=True, timeout=3)
+                if active == "active" and not running.returncode and running.stdout.strip() == "true":
+                    return "launcher-running", "launcher and container observed running; application health unverified"
+                return "unknown", "container exists; launcher alone does not establish workload status"
+            if exists.returncode != 1:
+                return "unknown", "container observation unavailable"
+            if active == "active":
+                return "unknown", "launcher active but container absent"
+        elif active == "active":
+            return "launcher-running", "launcher observed active; application health unverified"
+        else:
+            # cgroup.events includes descendants; cgroup.procs alone misses them.
+            events = CGROUP_ROOT / name / "cgroup.events"
+            try:
+                data = events.read_text()
+            except FileNotFoundError:
+                data = "populated 0\n"
+            if "populated 0" not in data.splitlines():
+                return "unknown", "workload cgroup populated or unreadable"
+        return ("failed", "launcher observed failed") if active == "failed" else (
+            "stopped", "launcher inactive and workload boundary observed absent")
 
     def tier2_silo_running(self, name: str) -> bool:
         """True if a tier-2 stop did NOT fully take effect: the launcher unit
@@ -3173,6 +3302,7 @@ class _SiloStore:
             silo.state = prev_state
             silo.last_change = prev_last_change
             raise
+        self._invalidate_observation(silo)
         self._emit_change(silo.name, silo.state)
 
     def _force_state(self, silo: Silo, new_state: str) -> None:
@@ -3184,7 +3314,41 @@ class _SiloStore:
         silo.state = new_state
         silo.last_change = int(time.time())
         self.save()
+        self._invalidate_observation(silo)
         self._emit_change(silo.name, silo.state)
+
+    def _invalidate_observation(self, silo: Silo) -> None:
+        silo.operation_generation += 1
+        silo.observed_status = "unknown"
+        silo.observed_reason = "lifecycle operation changed; observation pending"
+        silo.observed_at = time.time()
+        silo.observed_monotonic = time.monotonic()
+        if silo.state == State.STOPPED:
+            silo.start_unresolved = False
+
+    def observe_runtime_once(self) -> None:
+        with self._lock:
+            targets = [(s, s.operation_generation) for s in self._silos.values()]
+        for silo, generation in targets:
+            began = time.monotonic()
+            try:
+                status, reason = self._ops.observe_silo(silo.name, silo.uid, silo.kind)
+            except Exception:  # A failed probe is unknown, never proof of absence.
+                status, reason = "unknown", "runtime probe failed or timed out"
+            with self._lock:
+                if (self._silos.get(silo.name) is not silo
+                        or silo.operation_generation != generation):
+                    continue
+                if silo.start_unresolved:
+                    status, reason = "unknown", "start outcome unresolved; stop before retry"
+                if time.monotonic() - began >= 30:
+                    status, reason = "unknown", "runtime probe evidence expired"
+                changed = (silo.observed_status, silo.observed_reason) != (status, reason)
+                silo.observed_status, silo.observed_reason = status, reason
+                silo.observed_at = time.time()
+                silo.observed_monotonic = began
+                if changed:
+                    self._emit_change(silo.name, silo.state)
 
     def _emit_change(self, name: str, state: str) -> None:
         if self._on_change is not None:
@@ -3414,6 +3578,19 @@ class _SiloStore:
                             "cannot create silo "
                             f"{name!r}: {self._unsafe_fragment_error(_unpurged)}")
                     self._ops.useradd(name, uid)
+                    # The skill is agent guidance, not a boundary: a failed
+                    # install keeps the silo, and startup reconciliation
+                    # (reconcile_silo_skills) retries it for every registered
+                    # silo. Rolling back the account instead would mean a
+                    # check-then-userdel by name, which can delete an
+                    # account an administrator recreated in between.
+                    try:
+                        self._ops.install_silo_skill(name)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "could not install the silo skill for %r; the "
+                            "next session-manager start retries it: %s",
+                            name, e)
                     # Issue this silo's user-relay bus-name grant. Without
                     # it qdistro-user-relay@<uid> is refused the name and
                     # exits 78, so cross-silo Send-To and the
@@ -3913,6 +4090,8 @@ class _SiloStore:
                         # workload on a half-removed netns.
                         if isinstance(e, StartNotCancelled):
                             self._force_state(silo, State.ACTIVE)
+                            silo.start_unresolved = True
+                            silo.observed_reason = "start outcome unresolved; stop before retry"
                             # The remedy is stop-then-start, NOT a plain retry:
                             # start() from ACTIVE is an idempotent no-op that
                             # reports success without launching anything. Said
@@ -3929,6 +4108,8 @@ class _SiloStore:
                             self._teardown_egress(silo.name, silo.uid,
                                                   silo.egress)
                         self._force_state(silo, State.STOPPED)
+                        silo.observed_status = "failed"
+                        silo.observed_reason = "launcher start failed"
                         if isinstance(e, SessionError):
                             raise
                         raise SessionError(
@@ -3963,17 +4144,13 @@ class _SiloStore:
                    grace_s: int = DEFAULT_STOP_GRACE_S) -> None:
         # Phase 1: validate state and transition to STOPPING under the lock.
         with self._lock:
-            silo = self.get(name)
             # A concurrent/retried StopSilo while a stop is already in its
             # phase-2 teardown (running without the lock) must NOT return
             # success prematurely — the first stop may still fail. Wait for
-            # the in-flight stop to finish, then re-check the final state.
-            while silo.name in self._stopping_inflight:
-                self._stop_cv.wait()
-                # Re-fetch in case the silo was deleted while we waited.
-                silo = self._silos.get(name)
-                if silo is None:
-                    raise UnknownSilo(f"no such silo {name!r}")
+            # the in-flight op to finish (same bounded helper as freeze and
+            # resume), then re-check the final state. A deadline raises and
+            # leaves the holder's slot and the silo state alone.
+            silo = self._await_inflight_locked(name)
             if silo.state == State.STOPPED:
                 return
             if silo.state not in (State.ACTIVE, State.FROZEN):
@@ -4230,12 +4407,39 @@ class _SiloStore:
 
     def _await_inflight_locked(self, name: str) -> Silo:
         """Wait (on _stop_cv, with _lock held) until no lock-free lifecycle
-        write is in flight for *name*, then return the current silo. Raises
-        UnknownSilo if the silo is deleted while we wait. Caller must hold
-        _lock and must not yet have claimed the slot."""
+        write is in flight for *name*, then return the current silo.
+
+        Bounded by _T_INFLIGHT_WAIT — the waiter, not the cgroup write the
+        other thread is stuck in. Condition.wait returns False when the
+        timeout elapses and True on a wakeup, including a spurious one, so
+        this loops until the slot is clear or the deadline passes. Remaining
+        time comes from time.monotonic(); a burst of spurious wakeups cannot
+        extend the wait.
+
+        On deadline, raises SessionError naming the silo. Does NOT clear the
+        other thread's _stopping_inflight slot and does NOT force silo state.
+        Raises UnknownSilo if the silo is deleted while we wait. Caller must
+        hold _lock and must not yet have claimed the slot.
+        """
         silo = self.get(name)
-        while silo.name in self._stopping_inflight:
-            self._stop_cv.wait()
+        deadline = time.monotonic() + _T_INFLIGHT_WAIT
+
+        def _stuck() -> SessionError:
+            return SessionError(
+                f"in-flight lifecycle op for silo {name!r} did not finish "
+                f"within {_T_INFLIGHT_WAIT:g}s")
+
+        while name in self._stopping_inflight:
+            remaining = deadline - time.monotonic()
+            # wait() is False on timeout. Short-circuit when the deadline has
+            # already passed so a zero/negative remaining cannot block again.
+            if remaining <= 0 or not self._stop_cv.wait(remaining):
+                silo = self._silos.get(name)
+                if name not in self._stopping_inflight:
+                    if silo is None:
+                        raise UnknownSilo(f"no such silo {name!r}")
+                    return silo
+                raise _stuck()
             silo = self._silos.get(name)
             if silo is None:
                 raise UnknownSilo(f"no such silo {name!r}")
@@ -4403,6 +4607,26 @@ class _SiloStore:
             linked.append(name)
             log.info("linked the launcher unit for silo %r", name)
         return linked
+
+    def reconcile_silo_skills(self) -> list[str]:
+        """Seed image-built rules into homes of silos created before upgrade."""
+        installed: list[str] = []
+        with self._lock:
+            want = [(s.name, s.uid) for s in self._silos.values()
+                    if s.kind == KIND_TIER3_USER]
+        for name, uid in sorted(want):
+            try:
+                # A stale or hand-edited row must never select another uid's
+                # home for a privileged installer invocation.
+                if not self._ops.user_uid_matches(name, uid):
+                    log.error("cannot install silo skill for %r: account uid mismatch", name)
+                    continue
+                self._ops.install_silo_skill(name)
+            except Exception as e:  # noqa: BLE001
+                log.error("could not install silo skill for %r: %s", name, e)
+                continue
+            installed.append(name)
+        return installed
 
     def reconcile_relay_policies(self) -> tuple[list[str], list[str]]:
         """Make the on-disk per-silo relay grants match the silo table.
@@ -5419,6 +5643,7 @@ class _SiloStore:
         # sweep below, or a silo this pass would have repaired fails to start
         # on this very boot.
         self.reconcile_silo_launcher_links()
+        self.reconcile_silo_skills()
         # Reclaim any cgroup dirs leaked by a previous stop()'s EBUSY rmdir
         # before we (re)start silos (02/S14a). Runs lock-free internally.
         self.reap_orphan_cgroups()
@@ -5644,9 +5869,23 @@ except ImportError:  # pragma: no cover - exercised on hosts without dbus
     GLib = None  # type: ignore[assignment]
 
 
-def _to_dbus_exception(e: SessionError):
+def _dbus_error_name_and_message(exc: BaseException) -> tuple[str, str]:
+    """(error name, message) for a SessionManager1 D-Bus failure.
+
+    No live bus: unit tests call this directly. A SessionError keeps
+    ``org.qdistro.SessionManager1.<dbus_name>``. Anything else — the raw
+    OSError ``store.create`` re-raises after it has already audited — is
+    ``org.qdistro.SessionManager1.Generic``, message ``str(exc)``.
+    """
+    if isinstance(exc, SessionError):
+        return f"{BUS_NAME}.{exc.dbus_name}", str(exc)
+    return f"{BUS_NAME}.Generic", str(exc)
+
+
+def _to_dbus_exception(exc: BaseException):
+    name, message = _dbus_error_name_and_message(exc)
     return dbus.DBusException(  # type: ignore[union-attr]
-        str(e), name=f"{BUS_NAME}.{e.dbus_name}")
+        message, name=name)
 
 
 if dbus is not None:
@@ -5777,7 +6016,13 @@ if dbus is not None:
             try:
                 self.store.create(str(name), int(uid), caller=caller)
                 log.info("CreateSilo name=%s uid=%d", name, int(uid))
-            except SessionError as e:
+            except Exception as e:  # noqa: BLE001 — raw create() stays raw
+                # store.create() is the lifecycle method that audits and then
+                # re-raises the original class (OSError included), so unit
+                # tests still see that class. The bus boundary is what turns
+                # a non-SessionError into SessionManager1.Generic. start()
+                # already wraps into SessionError; delete()'s teardown path
+                # does too. Sibling methods are left on `except SessionError`.
                 raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
@@ -6198,11 +6443,22 @@ def main():  # pragma: no cover - exercised in the VM
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
     mgr = SessionManager(name)
     _install_lease_sweep(mgr)
+    observer_stop = threading.Event()
+
+    def observe_runtime():
+        while not observer_stop.is_set():
+            mgr.store.observe_runtime_once()
+            observer_stop.wait(10)
+
+    threading.Thread(target=observe_runtime, name="silo-runtime-observer",
+                     daemon=True).start()
     loop = GLib.MainLoop()
     try:
         loop.run()
     except KeyboardInterrupt:
         pass
+    finally:
+        observer_stop.set()
 
 
 if __name__ == "__main__":

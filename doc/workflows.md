@@ -390,6 +390,42 @@ approvals, sensitive exports, and authority-bearing runs require admin unlock
 unless a previously approved workflow explicitly carries lock-continuation
 semantics.
 
+## Approval binding in the current engine
+
+Pending runs capture an immutable canonical definition and SHA-256 digest.
+The identity includes trigger configuration, conditions, roles, needs,
+`auto_run`, and every step's complete configuration. Description and source
+filename are display metadata and do not change the digest. Configuration
+must contain JSON-compatible values with string mapping keys and finite
+numbers; unsupported YAML types are reported as load errors.
+
+The admin Workflows tab previews the captured definition before approval.
+`PreviewWorkflowRun(run_id)` returns JSON with `run_id`, `workflow_name`,
+`definition_digest`, and `definition`; `{}` means the pending run is no longer
+approvable. `ApproveWorkflowRun(run_id, expected_digest)` releases only the
+matching plan and records the digest and control peer identity before dispatch.
+Both methods require an admin control peer. Approval requires the digest from
+the preview; calls using the previous digestless signature must migrate.
+The engine also refuses empty or mismatched approval digests.
+
+Reloading a materially changed or removed definition invalidates pending and
+approved-but-queued runs. Returning to the old definition does not resurrect
+an invalidated run. An unchanged reload, description edit or file move
+preserves approval identity. Automatic trigger fires are registered with their
+captured run before submission and are subject to the same permanent queued-run
+invalidation. A failed audit write does not abort revocation of any affected
+run; the failure is retained in memory and reported in the broker log.
+Once worker dispatch starts, a running workflow
+continues using its captured definition; reload does not splice in new steps.
+Live firing-process identity checks still run immediately before execution.
+
+The preview reads configuration and resource references without fetching vault
+values; do not put plaintext credentials in workflow configuration. Audit
+stores the definition digest and approving process identity, rather than the
+preview or secret values. The binding does not freeze hook executable contents,
+mutable broker policy, secret contents or other external resources. It is an
+execution-definition consistency guarantee, not immutable external authority.
+
 ## Open Decisions
 
 - Exact strict manifest attribute names and validation language.
@@ -408,3 +444,51 @@ semantics.
 - [guards.md](guards.md)
 - [vm-definitions.md](vm-definitions.md)
 - [permissions.md](permissions.md)
+
+### Secret-channel cleanup outcomes
+
+Delivery handles mark `scrubbed` only after their backend confirms revocation.
+Every attempt wipes the in-memory buffer; failures raise and retain resource
+identity for retry. Buffer wiping does not retract material already copied by a
+consumer. `metadata()` reports buffer wiping separately from channel cleanup.
+
+For env/fd children, Linux `waitid(WNOWAIT)` observes command completion without
+reaping the session leader. The owned leader remains a zombie until scrub, pinning
+the group ID against PID reuse. Cleanup signals only that owned group, waits up to
+two seconds for live members to disappear, then reaps the leader. An external
+reaper invalidates this identity and cleanup reports unresolved rather than
+signalling a potentially reused group. SSH agents run in foreground as owned
+children and use the same identity protection. This retains one child process
+record per delivered command until cleanup.
+
+Tmpfs cleanup requires ordinary unmount and observed mount disappearance. Lazy
+detach is not successful revocation. Startup reaping counts only successfully
+removed tmpfs directories and reports failed mounts, unknown entries and stale
+SSH directories as unresolved. An SSH directory has no trustworthy process
+identity after a crash; existing key TTL and service supervision still apply.
+These backend guarantees do not provide durable cleanup manifests or replay
+workflow side effects.
+
+Workflow task state and channel cleanup are separate outcomes. History and the
+admin workflow table show `cleanup_state`, unresolved delivery count and a
+nonsecret cleanup error alongside task state. A completed task can therefore
+have unresolved cleanup and must still be reviewed. Each delivery is owned before
+backend creation; partial, step-scoped and shutdown-time failures remain owned.
+A sweep attempts each unconfirmed backend once, with at most three backend
+attempts per handle across sweeps. Exhaustion retains the obligation for review
+rather than treating it as scrubbed. `scrub_all_runs()` and shutdown sweep this
+queue; no automatic side-effect replay occurs.
+
+Scrub audit success is emitted only after backend confirmation, once per delivery
+ID. A missing audit acknowledgement retains ownership even when the channel has
+been revoked; retrying audit does not invoke a confirmed backend again. Legacy
+history lacks verified cleanup evidence and is shown as unknown.
+
+At engine startup, durable pending approvals expire and prior queued/running
+work is marked interrupted. No approval, step or remote side effect is replayed.
+Interrupted cleanup stays unknown and requires review, including any recorded
+unresolved delivery count. Cleanup identities live only in the owning engine;
+restart does not reconstruct handles or signal numeric PIDs. A durable resource
+manifest and a write-before-create provenance protocol remain deferred, so
+crashes during resource creation cannot be claimed as automatically reconciled.
+History retention preserves pending, unresolved and unknown cleanup rows.

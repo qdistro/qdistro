@@ -1,6 +1,6 @@
 [Unit]
 Description=qdwin compositor (libweston + qdwin-shell.so)
-Documentation=https://github.com/qdistro/qdwin
+Documentation=https://github.com/qdistro/qdistro/tree/main/qdwin
 PartOf=qdwin-session.target
 
 [Service]

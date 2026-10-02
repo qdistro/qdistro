@@ -347,8 +347,9 @@ class EgressBackend:
     # ---- teardown ----------------------------------------------------------
 
     def _teardown_devices(self, ns, uid, ops) -> None:
-        # link_del is idempotent in the ops layer (ignores a missing device),
-        # so this is safe over a never-applied or half-applied netns. We must
+        # link_del ignores only a missing device ("Cannot find device"). A real
+        # netlink failure propagates to the caller, which already decides
+        # whether to log-and-continue. Safe over a never-applied netns. We must
         # delete the wg device in BOTH the init netns and the silo netns: a
         # `wg set` failure in _apply_wg (e.g. a boot-time endpoint-DNS race)
         # leaves the device orphaned in the INIT netns *before* the move, and a

@@ -69,8 +69,13 @@ rm -f '$BACKUP' '$MISSING_MARKER'" >/dev/null 2>&1
 }
 trap restore_settings EXIT
 
+# Brightness is measured on the RAW frame: every harness capture carries a
+# unique black margin (view-geometry.sh) that is not scanout content.
 nonblack_fraction() {
-    python3 -W ignore - "$1" <<'PY'
+    local raw rc=0
+    raw=$(mktemp "${TMPDIR:-/tmp}/qdwin-dpms-raw.XXXXXX") || return 1
+    qci_view_raw_extract "$1" "$raw" || { rm -f "$raw"; return 1; }
+    python3 -W ignore - "$raw" <<'PY' || rc=$?
 import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert("RGB").resize((192, 108))
@@ -79,6 +84,8 @@ n = len(b) // 3
 nb = sum(1 for i in range(0, len(b), 3) if max(b[i], b[i + 1], b[i + 2]) > 24) / n
 print(f"{nb:.4f}")
 PY
+    rm -f "$raw"
+    return "$rc"
 }
 
 is_number() {
@@ -174,13 +181,7 @@ take_screenshot "$before" || setup_fail "initial screenshot failed; output may a
 assert_lit "$before"
 
 if [ "$ACTIVE_CHECK_S" -gt 0 ]; then
-    read -r active_sw active_sh < <(python3 - "$before" <<'PY'
-import sys
-from PIL import Image
-im = Image.open(sys.argv[1])
-print(im.size[0], im.size[1])
-PY
-)
+    read -r active_sw active_sh < <(qci_view_raw_dims "$before")
     export QDWIN_SCREEN_W=$active_sw QDWIN_SCREEN_H=$active_sh
     echo "keeping pointer motion active for ${ACTIVE_CHECK_S}s; display must not blank..."
     elapsed=0
@@ -214,13 +215,7 @@ qdwin_qmp_key shift down
 sleep 0.05
 qdwin_qmp_key shift up
 sleep 0.05
-read -r sw sh < <(python3 - "$before" <<'PY'
-import sys
-from PIL import Image
-im = Image.open(sys.argv[1])
-print(im.size[0], im.size[1])
-PY
-)
+read -r sw sh < <(qci_view_raw_dims "$before")
 export QDWIN_SCREEN_W=$sw QDWIN_SCREEN_H=$sh
 qdwin_mouse_move "$((sw / 2))" "$((sh / 2))"
 sleep "$RECOVER_WAIT_S"

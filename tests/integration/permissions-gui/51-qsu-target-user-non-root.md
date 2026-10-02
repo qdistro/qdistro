@@ -30,6 +30,9 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qsu 2>/dev/null; true'
+# Stale S3 gate from a prior run must not exist. S3 awaits this file
+# and must not see it until the host touches it after S2 is settled.
+$VMEXEC "$VM" 'rm -f /tmp/51-go-s3'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
@@ -97,6 +100,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_6
 sleep 1
 $VMGUI "$VM" screenshot /tmp/51-s2b-selected.png
+# Exactly one Ctrl+Y. Do not send it again later in this scenario.
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
@@ -121,11 +125,33 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 51-id-work; echo "rc=$(bg_
   Output: `1000|qsu.exec:work|forever_argv`. The caller_uid is
   admin's uid (1000) and the action's target is `work`.
 
+S2 is settled only after that cache row is observed. Only then, and
+not before, create the guest marker with a separate vm-exec. Do not
+send Ctrl+Y again after this marker; a second Ctrl+Y is a driver
+error. Do not start the root request in the same guest script as the
+S2 approval key — that key stays the single host `virsh send-key`
+above, and `bg_start 51-id-root` belongs only to S3.
+
+```bash
+$VMEXEC "$VM" 'touch /tmp/51-go-s3'
+```
+
 ### S3 — same argv targeting `root` does NOT cache-hit
+
+The root `qsu` must not start until `/tmp/51-go-s3` exists. That file
+is the host gate from the end of S2. If the marker is missing,
+`await_file` times out: that is a driver ERROR (exit nonzero), not a
+product FAIL. Do not treat it as a cache-hit failure, and do not send
+Ctrl+Y to paper over it.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /tmp/qci-gui-waiters.sh
+# Missing /tmp/51-go-s3 is a driver ERROR, not a product FAIL.
+if ! await_file /tmp/51-go-s3 30; then
+  echo "ERROR: /tmp/51-go-s3 missing; S2 was not settled before the root request" >&2
+  exit 1
+fi
 bg_start 51-id-root admin '/usr/local/bin/qsu -u root /usr/bin/id'
 EOF
 )
@@ -184,7 +210,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin -f qsu 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/51-*.log /tmp/51-*.pid'
+$VMEXEC "$VM" 'rm -f /tmp/51-*.log /tmp/51-*.pid /tmp/51-go-s3'
 B64=$(base64 -w0 <<'EOF'
 sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
 sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
@@ -208,3 +234,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
   not a scenario problem.
 - The `id` output may include extra group memberships; the
   load-bearing substrings are `uid=2000(work)` and `gid=2000`.
+- S3's root `qsu` is gated on `/tmp/51-go-s3`. Touch that marker
+  only after the S2 cache row `1000|qsu.exec:work|forever_argv` is
+  observed, via its own vm-exec. Do not send Ctrl+Y again after
+  this marker; a second Ctrl+Y is a driver error. A missing marker
+  is ERROR (the guest script exits nonzero), not a product FAIL.
+  Do not start `51-id-root` in the same guest script as the S2
+  approval key.

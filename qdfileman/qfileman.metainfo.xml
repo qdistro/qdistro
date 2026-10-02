@@ -33,8 +33,8 @@
     <category>FileManager</category>
     <category>System</category>
   </categories>
-  <url type="homepage">https://github.com/qdistro/qdfileman</url>
-  <url type="bugtracker">https://github.com/qdistro/qdfileman/issues</url>
+  <url type="homepage">https://github.com/qdistro/qdistro/tree/main/qdfileman</url>
+  <url type="bugtracker">https://github.com/qdistro/qdistro/issues</url>
   <developer_name>QDistro</developer_name>
   <content_rating type="oars-1.1" />
   <releases>

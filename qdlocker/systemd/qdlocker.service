@@ -1,6 +1,6 @@
 [Unit]
 Description=qdistro screen locker (qdlocker)
-Documentation=https://github.com/qdistro/qdlocker
+Documentation=https://github.com/qdistro/qdistro/tree/main/qdlocker
 # Peer to the shell — comes up alongside it, not after it (qdshell may be
 # slow to start; the locker must not be blocked behind it). Wants= keeps the
 # historical graphical-session.target pull-in.

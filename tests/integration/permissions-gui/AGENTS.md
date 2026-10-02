@@ -139,7 +139,20 @@ silences only the success announcement, never a timeout. Set it per call, never
  these instead of hand-rolling `runuser -u admin -- env ...`:
 
  - `/usr/local/bin/qdistro-start-admin-app` — launches the PyQt6
- admin approval app.
+ admin approval app and returns (printing its pid) only after the window
+ has painted its first frame; it exits 3 if the app dies first or paints
+ nothing within `QDISTRO_ADMIN_APP_READY_TIMEOUT` (60 s). Check its exit
+ status. A sleep or `xdotool search --sync --name` is not a paint
+ readiness check: the X window exists and is named before Qt paints it,
+ and a capture in that gap shows the bare desktop or a half-drawn window
+ (full-20260930T051422Z-65193 permissions-gui/22 and /47).
+ A separate, open display-path stall on this labwc/XWayland lane can
+ still freeze the SCREEN on an older or partly black frame after the app
+ has drawn a newer one (the app and compositor hold the right content; a
+ compositor-wide redraw such as `pkill -HUP -x labwc` shows it). It is not
+ limited to launch (04's post-approve frame kept the pending row). Such a
+ frame is harness evidence, not a product FAIL: record ERROR with that
+ reason rather than grading the app from it.
  - `/usr/local/bin/qdistro-start-admin-tui` — launches qterminal
  wrapping the Textual TUI (`qdistro-admin-tui`).
 
@@ -184,7 +197,10 @@ silences only the success announcement, never a timeout. Set it per call, never
  --sync --name "<window title>" windowactivate --sync` (as the
  right user, with `DISPLAY=:0`) immediately before a `send-key`
  burst so the intended window holds X focus when the evdev event
- arrives. This is the supported, portable contract for this VM
+ arrives. Bound it (`timeout 20 xdotool search --sync ...`) and check its
+ exit status: `--sync` waits forever when no X window matches, e.g. when
+ the client came up as a native Wayland window (qterminal does unless it
+ is launched with `QT_QPA_PLATFORM=xcb`; see permissions-gui/05). This is the supported, portable contract for this VM
  template; do not introduce new scenarios that depend on pixel
  clicks.
 
@@ -313,6 +329,13 @@ stdout** as ground truth:
  `runuser -u admin -- python3 -` (live-stdin) or an installed
  admin script. Do not grep dbus-send text for `dict {` — the
  token is `dict entry(`, and `grep -q` exits 1 on empty.
+ To assert "nothing pending" (or any exact count), use
+ `source /tmp/qci-gui-waiters.sh; broker_pending_count`: it prints
+ one line, the count (`0` when empty), from busctl's `aa{sv} N`
+ header, and fails loudly on any other reply. Compare its own
+ stdout; never pattern-match dbus-send's pretty-printed
+ `array [` / `]` layout, whose `]` is indented
+ (permissions-gui/25, full-20261001T124446Z-1395361).
  - Cached approvals (post-decision):
  ```bash
  SQL_B64=$(base64 -w0 <<'SQL'
@@ -353,12 +376,22 @@ note the screenshot staleness in your justification and decide from
 the broker.
 
 For visual-only assertions such as a Textual modal appearing, also verify that
-the post-action capture is fresh before interpreting it: hash the baseline and
-post-action PNGs and reject byte-identical captures as **invalid evidence**.
-The admin TUI header has a live clock, so a capture after the scenario's normal
-one-second wait should not be byte-identical to the baseline. An identical PNG
-does not prove an input binding failed; it proves the capture path did not
-produce a new frame.
+the post-action capture is fresh before interpreting it: take it with
+`vm-gui "$VMNAME" screenshot-fresh <out> <baseline>`, which refuses a frame
+whose RAW pixels equal the baseline's, and treat a refused capture as
+**invalid evidence**. Do not compare PNG file hashes yourself: every frame is
+padded to a size of its own, so two captures of an unchanged screen never have
+equal file bytes (the raw identity is `raw_pix_sha`, field 4 of the frame's
+`.raw` sidecar). The admin TUI header has a live clock, so a capture after the
+scenario's settle wait should not show the same raw pixels as the baseline.
+Identical raw pixels do not prove an input binding failed; they prove the
+capture path did not produce a new frame. The converse does not hold either:
+**different raw pixels do not prove the input took effect.** The clock alone
+changes the frame every second, so a capture taken before the TUI processed the
+key is still "fresh" (permissions-gui/05, 2026-09-25: both post-key waits were
+dropped, S2 showed the main view and S3 the overlay, one step behind). Freshness
+proves a new frame; only the settle wait and the frame's content say whether
+the UI reached the expected state. Keep the scenario's waits as written.
 
 ## Running a scenario
 
@@ -420,6 +453,24 @@ produces a confident wrong verdict in either direction. Run OCR only to pull
 long text out of a frame you have ALSO opened. If you cannot open images at
 all, record ERROR naming the missing capability - never PASS, never FAIL, and
 never fall back to OCR and grade anyway.
+
+**NEVER RE-OPEN A PATH; JUDGE DARKNESS ONLY FROM PIXELS YOU JUST OPENED.** Your
+image viewer shows as BLACK any region of an image that repeats, at the same
+position in an image of the same size, something it already showed you in this
+session. So the harness gives every image it writes a size of its own (a thin
+black right/bottom margin; the raw screen size is in the frame's `.raw`
+sidecar), and a capture you open for the first time is seen correctly. What
+still breaks it is opening the SAME file again, or a same-size copy of one. For
+any second look, and for any image the harness did not just hand you (a crop
+you made, a copy), run
+`$QDISTRO_REPO/scripts/vm/vm-gui "$VMNAME" view-copy <image>` (for a crop add
+`--source <capture> --crop WxH+X+Y`) and open the path it prints. Click-preview
+`.raw.png` and click-confirm `.post.png` files are frames like any other.
+Decide that a frame is black, blank, or missing something ONLY from the pixels
+of a frame you have just opened - never from process state, from rejected
+attempts, from the harness's "same screen pixels" note, or from an earlier
+frame. When you copy a frame, copy its `.raw` sidecar with it
+(`cp F F.raw DEST/`), or use `view-copy`.
 
 For a `required` scenario the gate also reads the frames itself, host-side,
 after the agent exits: it checks every attested frame is DECODABLE and, when a

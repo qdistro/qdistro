@@ -159,11 +159,82 @@ $VMGUI "$VM" screenshot /tmp/13-s1-pending.png
 # path documented in AGENTS.md.
 $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "admin approvals" windowactivate --sync'
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
-sleep 2
-$VMGUI "$VM" screenshot /tmp/13-s2-denied.png
 ```
 
-**Assert (OCR /tmp/13-s2-denied.png)**:
+Then, as a separate command, the title wait. **It must start only AFTER
+the Ctrl+N keystroke has been sent** (`virsh send-key` returned). In the single
+guest driver the keystroke is a host step, so the driver runs
+`qci_host_step s2_deny_key` FIRST and the title-wait loop on the line after
+it; the host sends the keystroke and only then `mkdir`s that step's `.go`.
+Do not put the loop before the keystroke's host step: it then polls while the
+request is still pending, times out on `admin approvals (1 pending)` before the
+keystroke is even sent, and S2 fails with a deny that actually worked
+(permissions-gui/17, full-20260930T212305Z-2206698: the loop ran at
+22:44-22:45, the Deny click was confirmed at 22:47).
+
+```bash
+# Settle before grading. The title is computed from the Pending model's row
+# count, so "admin approvals" with no "(N pending)" means the model is empty.
+# The client surface can lag the title: a fixed `sleep 2` once captured the
+# emptied title over the stale, still-selected row (2026-09-24, scenario 13).
+title_rc=0
+$VMEXEC "$VM" 'for _ in $(seq 1 60); do
+  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
+  [ "$t" = "admin approvals" ] && exit 0
+  sleep 0.5
+done
+echo "title never settled: $t" >&2; exit 1' 2>"${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.err" || title_rc=$?
+echo "$title_rc" >"${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.rc"
+echo "title-wait rc=$title_rc"
+cat "${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.err"
+```
+
+**Readiness, step 1 — title wait** (up to 60 polls, ~30 s). Run the
+block above as its own command and record the printed `title-wait rc=`
+line together with the stderr shown after it (both are also kept in
+`${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.rc` and `.err`; the `|| title_rc=$?` form keeps them
+even in a shell with errexit on). Any rc other than 0 is a
+failed step: S2 FAILS on that ground regardless of what the frames below
+show. Still capture and grade the frames as evidence; a later good frame
+does not erase the timeout.
+
+**Readiness, step 2 — bounded frame capture** (at most 5 frames, 2 s
+apart). Start with N=1. Each iteration is a separate runner action, not
+a shell loop:
+
+1. Capture frame N (substitute the number for `N`):
+
+   ```bash
+   $VMGUI "$VM" screenshot /tmp/13-s2-denied-N.png
+   ```
+
+2. Open `/tmp/13-s2-denied-N.png` and grade it by looking at the image
+   (vision; no OCR helper). The empty state is: `(no selection)` in the
+   details pane and no request row in the Pending list.
+3. If frame N shows the empty state, copy it to the canonical path and
+   stop capturing:
+
+   ```bash
+   $VMGUI "$VM" view-copy /tmp/13-s2-denied-N.png --out /tmp/13-s2-denied.png
+   ```
+
+4. Otherwise, if N < 5: `sleep 2`, increment N, and go back to 1.
+5. If frame 5 still does not show the empty state, the surface stayed
+   stale across five frames with 2 s pauses between them (8 s of sleeps
+   plus capture and grading time) after the model emptied: S2 FAILS. Copy the last
+   frame to the canonical path and grade that below:
+
+   ```bash
+   $VMGUI "$VM" view-copy /tmp/13-s2-denied-5.png --out /tmp/13-s2-denied.png
+   ```
+
+Keep every numbered frame; do not delete or overwrite them.
+The canonical copy is made with `view-copy`, not `cp`: it carries the frame's
+raw identity (`.raw` sidecar, lineage to frame N) and a size of its own. You
+have already looked at frame N, and a same-size twin of a frame you have seen
+is read as black where it repeats.
+
+**Assert (open and grade /tmp/13-s2-denied.png by vision)**:
 - `(no selection)` visible again.
 - No `uid=2000` / `app.send-to:` text on screen.
 

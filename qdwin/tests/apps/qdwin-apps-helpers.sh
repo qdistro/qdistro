@@ -39,6 +39,12 @@ fi
 if ! declare -f capture_attest_frame >/dev/null 2>&1; then
     capture_attest_frame() { :; }
 fi
+# Raw SCREEN dimensions of a capture (view-geometry.sh pads harness frames with
+# a unique black margin and keeps the raw size in a `.raw` sidecar). Without
+# the library a frame is raw, so its decoded size is the screen size.
+if ! declare -f qci_view_raw_dims >/dev/null 2>&1; then
+    qci_view_raw_dims() { identify -format '%w %h\n' "$1" 2>/dev/null; }
+fi
 export QDWIN_VM_EXEC
 : "${QDWIN_HTTP_DIR:=${QDWIN_REPO}/extra}"
 : "${QDWIN_HTTP_URL:=http://10.0.2.2:8765/extra}"
@@ -519,7 +525,7 @@ qdwin_apps_screenshot() {
     # itself just capture, and it can never attest another worker's VM.
     if declare -f capture_virsh_screenshot >/dev/null 2>&1; then
         uri=$(qdwin_apps_libvirt_uri) || return 1
-        capture_virsh_screenshot "$VMNAME" "$out" "$uri" || rc=$?
+        capture_virsh_screenshot "$VMNAME" "$out" "$uri" apps || rc=$?
         return "$rc"
     fi
     # Standalone / older qdistro checkout: no ledger, plain capture.

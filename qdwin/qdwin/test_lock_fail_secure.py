@@ -283,6 +283,29 @@ def check_locker_disconnect_holds_and_audits(source):
     return 0
 
 
+def check_overlay_key_log_redacted(source):
+    """qdwin_overlay_grab_key must never log key content. The overlay grab
+    carries the lock-screen password (role 2) and launcher/switcher text
+    (roles 0/1); a weston_log of the resolved utf8 or keysym wrote every
+    typed character to the compositor journal.
+    """
+    body, err = _function_body(
+        source,
+        r"static void\s+qdwin_overlay_grab_key\s*\(",
+        "qdwin_overlay_grab_key")
+    if err:
+        return fail(err)
+    code = _strip_comments(body)
+    for m in re.finditer(r"weston_log\s*\((.*?)\)\s*;", code, re.DOTALL):
+        args = m.group(1)
+        if re.search(r"\b(utf8|sym|kc|key)\b", args) or \
+                re.search(r"(utf8|sym)=", args):
+            return fail("qdwin_overlay_grab_key logs key content (utf8/sym/"
+                        "key) — typed text, including the lock-screen "
+                        "password, would reach the compositor journal")
+    return 0
+
+
 def main():
     if len(sys.argv) != 2:
         return fail("usage: test_lock_fail_secure.py <qdwin.c>")
@@ -293,6 +316,7 @@ def main():
             check_default_modifiers_drop_while_locked,
             check_bind_rearms_grab_when_locked,
             check_overlay_modifiers_contained_for_locker,
+            check_overlay_key_log_redacted,
             check_locker_unlock_resyncs_modifiers,
             check_locker_disconnect_holds_and_audits):
         rc = check(source)

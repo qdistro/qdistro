@@ -397,6 +397,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_toolbar()
         self.apply_custom_shortcuts()
+        self._init_appearance()
 
         path = notebook_path or self._settings.value("last_notebook", type=str)
         if path:
@@ -799,11 +800,28 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_view_tree)
         m_view.addAction(self.act_view_recent)
         m_view.addSeparator()
-        self.act_dark = QAction("&Dark Mode", self, checkable=True)
-        self.act_dark.toggled.connect(self._toggle_dark_mode)
-        m_view.addAction(self.act_dark)
-        if bool(self._settings.value("dark_mode", False, type=bool)):
-            self.act_dark.setChecked(True)
+        from .appearance import VALID_MODES
+        self._appearance_group = QActionGroup(self)
+        self._appearance_group.setExclusive(True)
+        self._appearance_actions: dict[str, QAction] = {}
+        labels = {
+            "system": "&Follow Desktop",
+            "dark": "&Dark",
+            "light": "&Light",
+            "native": "&Native",
+        }
+        for mode in VALID_MODES:
+            act = QAction(labels[mode], self, checkable=True)
+            self._appearance_group.addAction(act)
+            m_view.addAction(act)
+            act.triggered.connect(
+                lambda checked, m=mode: self._on_appearance_mode(m) if checked else None
+            )
+            self._appearance_actions[mode] = act
+        self.act_appearance_system = self._appearance_actions["system"]
+        self.act_appearance_dark = self._appearance_actions["dark"]
+        self.act_appearance_light = self._appearance_actions["light"]
+        self.act_appearance_native = self._appearance_actions["native"]
         self.act_toggle_spell = QAction("&Spell Check", self, checkable=True)
         self.act_toggle_spell.setEnabled(HAS_ENCHANT)
         self.act_toggle_spell.triggered.connect(self._toggle_spell_check)
@@ -1577,6 +1595,7 @@ class MainWindow(QMainWindow):
         total = self._editor_split.size().width() if orient == Qt.Orientation.Horizontal else self._editor_split.size().height()
         if total > 0:
             self._editor_split.setSizes([total // 2, total // 2])
+        self.apply_presentation_update()
 
     def close_split(self) -> None:
         """Close the secondary editor pane, if any."""
@@ -2529,36 +2548,105 @@ class MainWindow(QMainWindow):
                 self.editor.attach_spell_highlighter(None)
         self._settings.setValue("spell_enabled", bool(checked))
 
-    # ---- dark mode ----
+    # ---- appearance ----
 
-    def _toggle_dark_mode(self, on: bool) -> None:
-        from PyQt6.QtGui import QColor, QPalette
-        from PyQt6.QtWidgets import QApplication
-        self._settings.setValue("dark_mode", bool(on))
-        app = QApplication.instance()
-        if app is None:
+    def _init_appearance(self) -> None:
+        from .appearance import load_theme_mode
+
+        mode = load_theme_mode(self._settings)
+        self._set_appearance_checks(mode)
+        self._apply_appearance(mode, persist=False)
+
+    def _set_appearance_checks(self, mode: str) -> None:
+        act = self._appearance_actions.get(mode)
+        if act is None:
             return
-        if on:
-            pal = QPalette()
-            pal.setColor(QPalette.ColorRole.Window, QColor("#2b2b2b"))
-            pal.setColor(QPalette.ColorRole.WindowText, QColor("#d4d4d4"))
-            pal.setColor(QPalette.ColorRole.Base, QColor("#1e1e1e"))
-            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#2d2d2d"))
-            pal.setColor(QPalette.ColorRole.Text, QColor("#d4d4d4"))
-            pal.setColor(QPalette.ColorRole.Button, QColor("#3a3a3a"))
-            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#d4d4d4"))
-            pal.setColor(QPalette.ColorRole.Highlight, QColor("#264f78"))
-            pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-            pal.setColor(QPalette.ColorRole.Link, QColor("#9cdcfe"))
-            app.setStyle("Fusion")
-            app.setPalette(pal)
-            self.editor.setStyleSheet(
-                "QTextEdit { background: #1e1e1e; color: #d4d4d4; "
-                "selection-background-color: #264f78; }"
-            )
+        self._appearance_group.blockSignals(True)
+        for other in self._appearance_actions.values():
+            other.blockSignals(True)
+        act.setChecked(True)
+        for other in self._appearance_actions.values():
+            other.blockSignals(False)
+        self._appearance_group.blockSignals(False)
+
+    def _on_appearance_mode(self, mode: str) -> None:
+        self._apply_appearance(mode, persist=True)
+
+    def _apply_appearance(self, mode: str, *, persist: bool) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from .appearance import load_overrides, save_theme_mode
+        from .theme import apply_theme, current_controller, refresh_windows
+
+        if persist:
+            save_theme_mode(self._settings, mode, update_legacy=(mode != "system"))
+        app = QApplication.instance()
+        ctrl = current_controller()
+        if ctrl is not None:
+            try:
+                from qdistro_presentation.model import parse_local_overrides
+
+                ctrl.set_theme_mode(mode)
+                ctrl.set_local(parse_local_overrides(load_overrides(self._settings)))
+            except Exception:
+                if app is not None:
+                    apply_theme(app, mode)
+        elif app is not None:
+            apply_theme(app, mode)
+        if app is not None:
+            refresh_windows(app)
         else:
-            app.setPalette(QPalette())
-            self.editor.setStyleSheet("")
+            self.apply_presentation_update()
+
+    def apply_saved_appearance(self) -> None:
+        from .appearance import load_theme_mode
+
+        mode = load_theme_mode(self._settings)
+        self._set_appearance_checks(mode)
+        self._apply_appearance(mode, persist=False)
+
+    def apply_presentation_update(self) -> None:
+        """Refresh chrome after a shared appearance change.
+
+        Editor serialized text, dirty flag and undo stack stay put.
+        """
+        from .content_style import resolve_content_style
+        from .editor import MarkdownEditor, native_body_font
+        from .theme import EDITOR_PALETTE_QSS
+
+        style = resolve_content_style()
+        body = style.body_qfont() if style.inherit_desktop else native_body_font()
+        for editor in self.findChildren(MarkdownEditor):
+            editor.setFont(body)
+            editor.setStyleSheet(EDITOR_PALETTE_QSS)
+            editor.apply_content_presentation()
+        from .appearance import load_theme_mode
+        from .theme import current_controller
+
+        ctrl = current_controller()
+        mode = ctrl.theme_mode if ctrl is not None else load_theme_mode(self._settings)
+        self._set_appearance_checks(mode)
+        from PyQt6.QtWidgets import QDialog
+
+        for dlg in self.findChildren(QDialog):
+            method = getattr(dlg, "apply_presentation_update", None)
+            if callable(method) and dlg is not self:
+                method()
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+        for child in (self.tree, self.menuBar(), self.statusBar()):
+            child.style().unpolish(child)
+            child.style().polish(child)
+            child.update()
+        for dock in self.findChildren(QDockWidget):
+            dock.style().unpolish(dock)
+            dock.style().polish(dock)
+            dock.update()
+        for tb in self.findChildren(QToolBar):
+            tb.style().unpolish(tb)
+            tb.style().polish(tb)
+            tb.update()
 
     # ---- toc ----
 
@@ -2742,6 +2830,29 @@ class MainWindow(QMainWindow):
             return
         export_page_pdf(self.notebook, self._current_page, Path(path))
 
+    def _legacy_export_document(self):
+        """Deterministic print/export document from the live editor, not disk."""
+        from PyQt6.QtGui import QTextDocument
+
+        from .content_style import legacy_content_style
+        from .md_to_qdoc import markdown_to_qdoc
+
+        export_doc = QTextDocument()
+        page = self._current_page
+        base_path = None
+        resolver = None
+        if self.notebook is not None and page is not None:
+            base_path = self.notebook.file_for(page).parent
+            resolver = self._make_transclusion_resolver(page)
+        markdown_to_qdoc(
+            self.editor.markdown(),
+            export_doc,
+            base_path=base_path,
+            transclusion_resolver=resolver,
+            content_style=legacy_content_style(),
+        )
+        return export_doc
+
     def _print_current_page(self) -> None:
         from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
         if self.notebook is None or self._current_page is None:
@@ -2750,7 +2861,7 @@ class MainWindow(QMainWindow):
         dlg = QPrintDialog(printer, self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
-        self.editor.document().print(printer)
+        self._legacy_export_document().print(printer)
 
     # ---- misc ----
 
@@ -2836,6 +2947,7 @@ class MainWindow(QMainWindow):
             pass
         if self.index:
             self.index.close()
+            self.index = None
         # Release the per-notebook lock (only if we own it — read-only sessions
         # should not remove another process's lock).
         if self.notebook is not None and not getattr(self, "_read_only", False):
@@ -2844,4 +2956,7 @@ class MainWindow(QMainWindow):
                 _locks.remove(self.notebook.root)
             except Exception:
                 pass
+        transfers = getattr(self, "_qdistro_transfers", None)
+        if transfers is not None:
+            transfers.shutdown()
         super().closeEvent(event)

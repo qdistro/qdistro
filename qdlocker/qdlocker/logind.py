@@ -342,20 +342,99 @@ class LogindWatcher:
             if active and name == "org.freedesktop.login1" and old_owner != new_owner:
                 changed.set()
 
+        # Session membership changes are NOT connection failures. Every
+        # `runuser -l`/ssh/su login adds a logind session, so tearing the
+        # whole connection down here (as for a logind restart) released the
+        # sleep delay inhibitor and dropped the PrepareForSleep subscription
+        # for the reconnect backoff: a suspend requested inside that window
+        # went through without locking. Rebind only the per-session Lock
+        # subscription, in place, keeping the inhibitor and sleep signal.
+        session_subscriptions = []
+        session_lock = asyncio.Lock()
+        session_binding = None
+        # Every SessionNew/SessionRemoved bumps the membership generation. A
+        # resolution records the generation it started from and repeats until
+        # none changed while it was awaiting logind, so an event that lands
+        # mid-resolution (e.g. the chosen session being removed before the
+        # result is published) is never lost.
+        membership_gen = 0
+        resolved_gen = -1
+
+        def is_current(binding: object):
+            # Bind this pass's token now; session_binding is read live, so a
+            # later pass (even in the same resolution loop) retires it.
+            return lambda: active and session_binding is binding
+
+        async def rebind_session(initial: bool) -> None:
+            nonlocal session_path, session_binding, resolved_gen
+            async with session_lock:
+                first = initial
+                while active and (first or resolved_gen != membership_gen):
+                    gen = membership_gen
+                    for proxy, signal, callback in reversed(session_subscriptions):
+                        try:
+                            getattr(proxy, "off_" + signal)(callback)
+                        except Exception:
+                            log.debug("could not remove logind session %s subscription",
+                                      signal, exc_info=True)
+                    session_subscriptions.clear()
+                    session_path = None
+                    # Callbacks of a replaced binding stay inert even if a
+                    # signal already queued for them is still delivered.
+                    binding = session_binding = object()
+                    try:
+                        session_path = await self._subscribe_session(
+                            bus, self._mgr, session_subscriptions,
+                            is_current(binding),
+                            quiet=not initial,
+                        )
+                    except Exception:
+                        log.exception("session lock subscription unavailable; "
+                                      "suspend protection remains active")
+                    resolved_gen = gen
+                    if not first:
+                        log.info("logind session rebound in place; session=%s",
+                                 session_path)
+                    first = False
+
+        resolver = None
+
+        def rebind_soon() -> None:
+            # At most one resolver: a resolution in progress (the startup one
+            # or a worker) already repeats until the generation is stable, so
+            # an event during it only dirties the generation. A burst of
+            # logins therefore never queues more than one task.
+            nonlocal resolver
+            if session_lock.locked() or (resolver is not None and not resolver.done()):
+                return
+            resolver = asyncio.create_task(rebind_session(False))
+            tasks.add(resolver)
+            resolver.add_done_callback(completed)
+
         def session_new(session_id: str, path: str) -> None:
-            if active and session_path is None:
-                changed.set()
+            nonlocal membership_gen
+            if not active:
+                return
+            membership_gen += 1
+            # A bound session stays valid when someone else logs in; while
+            # unbound the new session may be ours. (Mid-resolution changes
+            # are picked up by the running resolver via the generation.)
+            if session_path is None:
+                rebind_soon()
 
         def session_removed(session_id: str, path: str) -> None:
-            if active and path == session_path:
-                changed.set()
+            nonlocal membership_gen
+            if not active:
+                return
+            membership_gen += 1
+            if path == session_path:
+                rebind_soon()
 
         def subscribe(proxy, signal, callback) -> None:
             getattr(proxy, "on_" + signal)(callback)
             subscriptions.append((proxy, signal, callback))
 
         async def setup() -> None:
-            nonlocal session_path
             await bus.connect()
             # Register owner changes before introspecting logind so a restart
             # during setup also invalidates this connection generation.
@@ -371,12 +450,18 @@ class LogindWatcher:
             subscribe(mgr, "session_new", session_new)
             subscribe(mgr, "session_removed", session_removed)
             await self._acquire_inhibitor()
+            await rebind_session(True)
+            # A suspend already in progress when this generation connected
+            # (e.g. logind restarted, or the bus dropped mid-cycle) sent its
+            # PrepareForSleep(true) before we subscribed; lock for it now.
             try:
-                session_path = await self._subscribe_session(
-                    bus, mgr, subscriptions, lambda: active
-                )
+                preparing = await mgr.get_preparing_for_sleep()
             except Exception:
-                log.exception("session lock subscription unavailable; suspend protection remains active")
+                log.debug("could not read PreparingForSleep", exc_info=True)
+                preparing = False
+            if preparing is True and not sleeping:
+                log.warning("logind already preparing for sleep at connect; locking")
+                sleep_changed(True)
             if self._inhibit_fd is not None:
                 self._ready.set()
                 log.info("logind automatic sleep locking ready; session=%s", session_path)
@@ -404,7 +489,7 @@ class LogindWatcher:
         finally:
             active = False
             self._ready.clear()
-            for proxy, signal, callback in reversed(subscriptions):
+            for proxy, signal, callback in reversed([*subscriptions, *session_subscriptions]):
                 try:
                     getattr(proxy, "off_" + signal)(callback)
                 except Exception:
@@ -422,7 +507,8 @@ class LogindWatcher:
                 log.warning("logind connection ended; automatic locking unavailable until reconnected")
 
     async def _subscribe_session(self, bus, mgr, subscriptions=None,
-                                 is_active=lambda: True) -> str | None:
+                                 is_active=lambda: True, *,
+                                 quiet: bool = False) -> str | None:
         try:
             session_path = await mgr.call_get_session_by_pid(os.getpid())
         except Exception:
@@ -455,8 +541,11 @@ class LogindWatcher:
                             and not await candidate.get_remote()):
                         candidates.append(path)
                 if len(candidates) != 1:
-                    log.warning("cannot identify one owned active Wayland session (%d candidates); "
-                                "session lock unavailable", len(candidates))
+                    # Re-resolution on every unrelated SessionNew stays quiet;
+                    # the startup warning already names the degradation.
+                    (log.debug if quiet else log.warning)(
+                        "cannot identify one owned active Wayland session (%d candidates); "
+                        "session lock unavailable", len(candidates))
                     return None
                 session_path = candidates[0]
         intro = await bus.introspect("org.freedesktop.login1", session_path)

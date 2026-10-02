@@ -55,11 +55,17 @@ Three independent test frameworks live here. They cover different layers:
 ## How qci runs the tests
 
 - Host gate: `scripts/ci-local.sh` runs `qmltest` (every `Tests/tst_*.qml`),
-  `jstest` (every `tests/test_*.js` via `node`, skipped on a node-less
-  host), `qmllint` (informational unless `--strict`), and `qmlformat
-  --check` over `Services/Qdshell/`. Non-zero exit on any qmltest/jstest
-  failure. `--no-int` skips the broker bats gate; `--quick` is qmltest
-  only.
+  `jstest` (every `tests/test_*.js` via `node`), `qmllint` (informational
+  unless `--strict`), `pytest` over the explicit host-only top-level glob
+  (`python3 -m pytest -q -p no:cacheprovider tests/test_*.py`), and
+  `qmlformat --check` over `Services/Qdshell/`. Do not replace that glob with
+  recursive `pytest tests`: collecting `tests/ui/conftest.py` without the
+  live-VM environment can skip the host tests. A missing `node` when JS tests
+  exist, missing Python/pytest when Python tests exist, missing `socat` for the
+  ctrl-socket transport regression, an empty `Tests/tst_*.qml` set, or a
+  `qmltestrunner` that exits nonzero are failures, including when the totals
+  line says 0 failed. Non-zero exit on any qmltest/jstest/pytest failure.
+  `--no-int` skips the broker bats gate; `--quick` is qmltest only.
 - Integration gate: the qdshell↔broker bats (`broker-e2e.bats`) is driven
   from the monorepo root (`../tests/integration/vm/`, relative to `qdshell/`)
   and needs a broker-present VM; skipped when that repo/VM is absent.

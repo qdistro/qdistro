@@ -239,14 +239,14 @@ while [ $SECONDS -lt $deadline ]; do
     # up). The secctx line is emitted at security-context SETUP — necessary to map
     # app_id→handle, but NOT proof the window painted, hence stage 2.
     if [ -z "$handle" ]; then
-        handle=$($VMEXEC "$VM" "cur=\$(cat /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur 2>/dev/null); [ -n \"\$cur\" ] || { echo MISSING_CURSOR >&2; exit 2; }; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor \"\$cur\" --no-pager -o cat 2>/dev/null | grep -F 'app_id=qdistro.tier5.$VM5' | grep -oE 'toplevel_security_context handle=[0-9]+' | grep -oE '[0-9]+' | head -1" | tr -d '[:space:]')
+        handle=$($VMEXEC "$VM" "cur=\$(cat /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur 2>/dev/null); [ -n \"\$cur\" ] || { echo MISSING_CURSOR >&2; exit 2; }; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u qdwin-compositor.service --after-cursor \"\$cur\" --no-pager -o cat 2>/dev/null | grep -F 'app_id=qdistro.tier5.$VM5' | grep -oE 'toplevel_security_context handle=[0-9]+' | grep -oE '[0-9]+' | head -1" | tr -d '[:space:]')
     fi
     # Stage 2: that handle actually MAPPED. qdwin emits `qdwin: mapped handle=N`
     # ONLY after the toplevel's first buffer commit — i.e. it is painted, the same
     # condition the screenshot asserts. Matching `mapped` (not the earlier
     # secctx-committed setup line) is what makes this a true readiness gate and
     # avoids the original race where a screenshot beat the first frame.
-    if [ -n "$handle" ] && $VMEXEC "$VM" "cur=\$(cat /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur 2>/dev/null); [ -n \"\$cur\" ] || { echo MISSING_CURSOR >&2; exit 2; }; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor \"\$cur\" --no-pager -o cat 2>/dev/null | grep -qE 'qdwin: mapped handle=$handle '"; then
+    if [ -n "$handle" ] && $VMEXEC "$VM" "cur=\$(cat /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur 2>/dev/null); [ -n \"\$cur\" ] || { echo MISSING_CURSOR >&2; exit 2; }; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u qdwin-compositor.service --after-cursor \"\$cur\" --no-pager -o cat 2>/dev/null | grep -qE 'qdwin: mapped handle=$handle '"; then
         mapped=1; break
     fi
     sleep 2
@@ -317,12 +317,12 @@ qs_ipc closeWindow "$handle" \
 request_seen=0; removed=0
 for _ in $(seq 1 10); do
     if [ "$request_seen" = 0 ] && $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-        journalctl --user --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
+        journalctl --user -u qdwin-compositor.service --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
         | grep -qE 'qdwin: request_close handle=$handle( |\$)'"; then
         request_seen=1
     fi
     if $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-        journalctl --user --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
+        journalctl --user -u qdwin-compositor.service --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
         | grep -qE 'qdwin: toplevel_removed handle=$handle( |\$)'"; then
         removed=1; break
     fi

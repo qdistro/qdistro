@@ -288,15 +288,15 @@ sleep 2
 # shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 26-work 60'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 26-work; echo "rc=$(bg_rc 26-work)"'
-$VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=org.qdistro.AdminBroker1 \
-  /org/qdistro/AdminBroker1 \
-  org.qdistro.AdminBroker1.GetPending'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; echo "pending=$(broker_pending_count)"'
 ```
 
 **Assert**:
 - `/tmp/26-work.log` contains `ALLOWED`.
-- `GetPending` output is `array []`.
+- `broker_pending_count` prints exactly `0` (`pending=0`). Compare
+  that helper's own stdout; do not parse `dbus-send --print-reply`
+  text, which spreads an empty array over an indented `array [` / `]`
+  pair.
 
 ## Teardown
 

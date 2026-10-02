@@ -51,8 +51,10 @@ python3 -m pytest            # root unit tests (tests/unit)
 (with a `message`) when the FreeRDP 3 / PipeWire development packages are
 missing, and the build still exits 0. See [doc/dev.md](doc/dev.md).
 
-Before `ci/bin/qci host` in a fresh clone, install the two WebExtensions' npm
-dependencies (the `host` gate runs their tests but does not install them):
+The `host` gate installs the two WebExtensions' npm dependencies itself when
+`node_modules/.bin/vitest` is absent (`npm ci --prefer-offline`; npm is a
+prerequisite, and a cold npm cache needs network). It reuses an existing
+`node_modules`, so after a `package-lock.json` change refresh it by hand:
 
 ```sh
 (cd qdchrome-extension && npm ci)
@@ -84,13 +86,24 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   checkouts or symlinks are needed.
 - **Pick gates with `qci affected`**, then run the gates it selects from the
   worktree. It selects whole **gates**, not component-precise tests: a change
-  inside one component usually avoids some gates (a qdterm change selects only
-  `host`), but every gate it does select runs in full. `host` builds and
-  tests every component, and `gui` runs every GUI scenario, so a qdshell or
-  qdlocker change (`host gui`) costs most of the 2–3 h suite. For quicker
+  inside one component usually avoids some gates (a qdterm change selects
+  `host bats gui`), but every gate it does select runs in full. `host` builds
+  and tests every component, and `gui` runs every GUI scenario, so a qdshell or
+  qdlocker change (`host bats gui`) costs most of the 2–3 h suite. For quicker
   feedback while developing, run single scenarios
   (`ci/bin/qci gui --scenario <abs path>`); the selected gates are the
   acceptance bar.
+- **Cheap per-component host checks** (development feedback only; they do
+  **not** satisfy a selected `host` gate). `qci host` has no component
+  selector; these are three of its rows (`ci/lib/gates/host.sh:537-541`). Run each
+  independently from the repository root (the host's Python/Qt test
+  dependencies must be installed); each takes seconds:
+
+  ```sh
+  (cd qdlocker && python3 -m pytest -q tests/unit)
+  (cd qdgreeter && python3 -m pytest -q tests)
+  (cd qdfileman && python3 -m pytest -q)
+  ```
 - **Review before merge.** Get the change reviewed (diff + gate evidence)
   before it lands on `main`.
 - **The live checkout on `main` is merge-only.** Agents never edit it
@@ -103,8 +116,12 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
 
 ## Shared-host qci rule
 
-Run **one `qci full` / GUI run at a time per host**: the HTTP staging port
-(8765) and VM/golden names are host-wide singletons. Before starting one, check
+Run **one `qci full` / GUI run at a time per host**. Per-run VM and golden
+names are generated uniquely, but runs share fixed resources: the
+`qdistro-template` domain in the user's libvirt session, the base images in the
+image directory (`baseweed-baked.qcow2`, `baseweed-enforcing-baked.qcow2`), and
+host CPU/memory. Port 8765 remains the default of the manual
+`fresh-vm-bootstrap.sh` path and of `build-enforcing-baseweed.sh`. Before starting one, check
 what is running:
 
 ```sh
@@ -112,6 +129,10 @@ systemctl --user list-units 'qci-*'          # runs launched under systemd-run
 pgrep -af '[c]i/bin/qci'                     # any qci process ([c] keeps pgrep from matching this command)
 virsh -c qemu:///session list --all | grep qci-
 ```
+
+Only an *active/running* `qci-*` unit, a live `ci/bin/qci` process, or a
+*running* `qci-*` domain means the host is in use; `failed` units and
+`shut off` domains are residue of earlier runs.
 
 Launch long runs under `systemd-run --user --unit=qci-<name> ...` and never
 edit a script while a run that sources it is going. Each run's

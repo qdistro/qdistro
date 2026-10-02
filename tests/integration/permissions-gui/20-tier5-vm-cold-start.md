@@ -238,7 +238,7 @@ end-to-end. Soft-pass if ydotool unavailable (see caveats).
 ### S5 — journal cross-check (soft / diagnostic)
 
 ```bash
-$VMEXEC "$VM" "journalctl --since '3min ago' | grep -E 'qdwin:.*qdistro\.tier5\.' | head -20"
+$VMEXEC "$VM" "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --since '3min ago' | grep -E 'qdwin:.*qdistro\.tier5\.' | head -20"
 ```
 
 **Assert**: at least one matching line. If logging is sparse, note

@@ -70,6 +70,18 @@ fi
 if ! declare -f capture_attest_frame >/dev/null 2>&1; then
     capture_attest_frame() { :; }
 fi
+# View-unique geometry (scripts/vm/lib/view-geometry.sh, sourced by the
+# attestation library): frames are padded to a size not issued before in this
+# attempt, with the raw identity in a `.raw` sidecar. Without the library the
+# helpers publish raw, as before.
+if ! declare -f qci_view_publish >/dev/null 2>&1; then
+    qci_view_publish() { local raw=$1 dst=$2; shift 4; "$@" "$raw" "$dst"; }
+    qci_view_mv_publish() { mv -fT -- "$1" "$2"; }
+fi
+if ! declare -f qci_view_raw_dims >/dev/null 2>&1; then
+    qci_view_raw_dims() { magick identify -quiet -format '%w %h\n' "${1}[0]" 2>/dev/null | head -1; }
+    qci_view_raw_extract() { cp -T -- "$1" "$2"; }
+fi
 : "${QDWIN_HTTP_DIR:=${QDWIN_REPO}/extra}"
 : "${QDWIN_HTTP_URL:=http://10.0.2.2:8765/extra}"
 
@@ -577,9 +589,15 @@ qdwin_drag() {
 qdwin_screenshot_virsh_diag() {
     qdwin_require_vm
     local out="${1:-/tmp/qdwin-virsh-diag.png}"
-    local tmp="${out%.png}.ppm"
-    $QDWIN_VIRSH screenshot "$VMNAME" "$tmp" >/dev/null || return 1
-    mv "$tmp" "$out"
+    local tmp rc=0
+    # Staged under a non-image name, then padded to this attempt's next unique
+    # geometry like every other image the harness hands out. DIAGNOSTIC: it
+    # gets no ledger row and is never compositor evidence.
+    tmp=$(mktemp "$(dirname -- "$out")/.qdwin-virsh-diag.XXXXXX") || return 1
+    $QDWIN_VIRSH screenshot "$VMNAME" "$tmp" >/dev/null || { rm -f "$tmp"; return 1; }
+    qci_view_publish "$tmp" "$out" virsh-diag "virsh:$VMNAME" qci_view_mv_publish || rc=$?
+    rm -f "$tmp"
+    [ "$rc" -eq 0 ] || return 1
     echo "$out"
 }
 # Host-side deadlines for the capture round-trip, in seconds, scaled by
@@ -883,36 +901,53 @@ with Image.open(sys.argv[1]) as im:
         rm -f "$host_tmp"
         return 1
     fi
-    if ! mv "$host_tmp" "$out"; then
-        echo "ERROR: shell-capture-publish-failed: could not move to $out" >&2
-        rm -f "$host_tmp"
-        return 1
-    fi
     # v33 stale marking. Policy: a stale frame may support "the session was
     # showing X before the incident" but never a post-action assertion,
     # unless the action provably predates the retained frame (age_ms).
-    # Scenario reports must quote the WARN.
+    # Scenario reports must quote the WARN. Written BEFORE the frame is
+    # published ($out does not exist yet), so the frame is never visible
+    # without its stale marking.
     rm -f "$out.meta"
+    local stale_fields=""
     case "$reply" in
         *" live=0 age_ms="*)
-            local stale_fields
             stale_fields=$(sed -n 's/.* \(live=0 age_ms=[0-9]* msc=[0-9]*\)$/\1/p' <<<"$reply")
             printf '%s\n' "${stale_fields:-live=0}" > "$out.meta"
-            echo "WARN: stale-capture: $out is the compositor's RETAINED last frame (${stale_fields:-live=0}), not a fresh repaint — not valid post-action evidence" >&2
             ;;
     esac
-    # Record the capture in the gate's ledger BEFORE returning the path, so the
-    # frame is attested the moment it becomes visible to the caller. A REFUSAL
-    # (the ledger is bound to a different VM) fails the capture: returning an
-    # unattested frame as if it were evidence is exactly what the contract
-    # forbids, and a silent `|| true` here would restore that.
-    if ! capture_attest_frame "$out" "$VMNAME"; then
-        echo "ERROR: capture-attestation-refused: $out was not recorded as evidence for $VMNAME" >&2
-        rm -f "$out"
+    # All raw checks above (guest size/sha, full decode, reply dimensions,
+    # compositor identity) ran on the RAW frame. Now pad it to this attempt's
+    # next unique geometry and publish: move to $out, then record it in the
+    # gate's ledger BEFORE returning the path, so the frame is attested the
+    # moment it becomes visible to the caller and the ledger digest is of the
+    # file as written. A REFUSAL (the ledger is bound to a different VM) fails
+    # the capture: returning an unattested frame as if it were evidence is
+    # exactly what the contract forbids, and a silent `|| true` here would
+    # restore that.
+    if ! qci_view_publish "$host_tmp" "$out" qdwin "qdshell:$VMNAME" _qdwin_publish_attested; then
+        rm -f "$host_tmp" "$out.meta"
         return 1
     fi
+    rm -f "$host_tmp"
+    [ ! -f "$out.meta" ] || \
+        echo "WARN: stale-capture: $out is the compositor's RETAINED last frame (${stale_fields:-live=0}), not a fresh repaint — not valid post-action evidence" >&2
     echo "capture=Virtual-1 width=$width height=$height path=$out" >&2
     echo "$out"
+}
+
+# Publisher for qdwin_screenshot (called by qci_view_publish with the staged,
+# padded frame): move it to its final path, then attest it. Args: staged dst.
+_qdwin_publish_attested() {
+    local staged=$1 dst=$2
+    if ! mv -fT -- "$staged" "$dst"; then
+        echo "ERROR: shell-capture-publish-failed: could not move to $dst" >&2
+        return 1
+    fi
+    if ! capture_attest_frame "$dst" "$VMNAME"; then
+        echo "ERROR: capture-attestation-refused: $dst was not recorded as evidence for $VMNAME" >&2
+        rm -f "$dst"
+        return 1
+    fi
 }
 
 # The service compositor's stable identity: qdwin-compositor.service MainPID

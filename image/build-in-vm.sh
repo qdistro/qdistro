@@ -33,6 +33,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # (iso/14 Phase A item 1).
 QDISTRO="$(cd "$HERE/.." && pwd)"
 VM_TOOLS="$QDISTRO/scripts/vm"
+. "$VM_TOOLS/run-lock.sh"
 IMG_DIR="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 URI="qemu:///session"
 export LIBVIRT_DEFAULT_URI="$URI"
@@ -72,7 +73,6 @@ case "$QDISTRO_KIWI_PROFILE" in
     *) printf '\033[1;31m[in-vm] FATAL:\033[0m QDISTRO_KIWI_PROFILE must be tester or ci, got: %s\n' "$QDISTRO_KIWI_PROFILE" >&2; exit 1 ;;
 esac
 LOGS="$HERE/logs/in-vm-$(date +%y%m%d-%H%M%S)"
-mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
 log()  { printf '\033[1;36m[in-vm]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[in-vm] WARN:\033[0m %s\n' "$*" >&2; }
@@ -93,6 +93,7 @@ vms() {
 }
 
 #-- 0. Args -------------------------------------------------------------------
+BUILD_IN_VM_ARGS=("$@")
 TEARDOWN=0
 KEEP_RUNNING=0
 REUSE=0
@@ -113,6 +114,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+qdistro_run_lock_reexec "$0" "${BUILD_IN_VM_ARGS[@]}"
+mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
 if [ "$TEARDOWN" = 1 ]; then
     [ -n "$TEARDOWN_VM" ] && VM="$TEARDOWN_VM"
@@ -139,7 +143,7 @@ MANIFEST="$HERE/root/root/qdistro-source-manifest"
 [ -s "$MANIFEST" ] || die "sync did not write $MANIFEST"
 cp "$MANIFEST" "$LOGS/sources.txt"
 cat "$LOGS/sources.txt"
-SNAPSHOT="$(bash "$HERE/build.sh" --snapshot-id)" || die "config.xml snapshot pin is inconsistent"
+SNAPSHOT="$(bash "$HERE/build.sh" --snapshot-id)" || die "snapshot.conf does not hold a valid, current snapshot pin"
 IMAGE_VERSION="$(sed -n 's|.*<version>\([0-9][0-9.]*\)</version>.*|\1|p' "$HERE/config.xml" | head -n1)"
 IMAGE_SIZE_MB="$(sed -n 's|.*<size unit="M">\([0-9]*\)</size>.*|\1|p' "$HERE/config.xml" | head -n1)"
 [ -n "$IMAGE_VERSION" ] && [ -n "$IMAGE_SIZE_MB" ] || die "config.xml: could not read <version> or <size unit=\"M\">"
@@ -166,7 +170,10 @@ host_free_check $(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 )) "the
 
 # The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
-[ -f "$IMG_DIR/baseweed-baked.qcow2" ] || die "$IMG_DIR/baseweed-baked.qcow2 missing (build it via scripts/vm/build-baked-baseweed.sh)"
+. "$VM_TOOLS/lib/test-substrate.sh"
+qdistro_load_test_substrate || die "invalid cloud test substrate manifest"
+BAKED_BASE="$(qdistro_substrate_base_path baked)"
+[ -f "$BAKED_BASE" ] || die "$BAKED_BASE missing (build it via scripts/vm/build-baked-baseweed.sh)"
 virsh dominfo qdistro-template >/dev/null 2>&1 || die "qdistro-template domain missing"
 
 #-- 2. Clone baseweed via the project's own tool ------------------------------
@@ -205,8 +212,9 @@ log "copying qdistro-image/ into the VM rootfs (offline)"
 # Tar first so we copy one stream; virt-copy-in can take a directory
 # but for ~50MB it's faster to land a single archive.
 TAR="$LOGS/qdistro-image.tar"
+# (root/root/qdistro-src needs no excludes: build.sh --sync-only puts
+# only git's view of the tree there, never a nested .git.)
 tar --exclude='./logs' --exclude='./keys/gnupg' \
-    --exclude='./root/root/qdistro-src/tests/integration/qdwin-noctalia/.git' \
     -cf "$TAR" -C "$HERE" .
 
 # Wait until VM is shut off; virt-copy-in needs the disk exclusive.
