@@ -161,9 +161,19 @@ def test_running_dispatch_timeout_reports_unconfirmed_outcome(tmp_path, monkeypa
     proxy = b._WorkflowBrokerProxy(br)
     pending = queue.Queue()
     finished = threading.Event()
+    started = threading.Event()
+    future_type = b.concurrent.futures.Future
+    class WaitUntilRunningFuture(future_type):
+        def result(self, timeout=None):
+            # Scheduling the owner callback is not the operation being timed.
+            # Open the unchanged 20-ms timeout only after maintenance begins.
+            assert started.wait(timeout=2)
+            return super().result(timeout=timeout)
+    monkeypatch.setattr(b.concurrent.futures, 'Future', WaitUntilRunningFuture)
     calls = []
     def maintenance(**kwargs):
         # The worker's bounded wait expires while the broker action is live.
+        started.set()
         assert finished.wait(timeout=2)
         calls.append('gc')
         return 1
