@@ -968,9 +968,10 @@ class _WorkflowBrokerProxy:
         # broker's state, rules reload and sqlite connections are mainloop-only.
         self._mainloop_thread = threading.get_ident()
 
-    def _invoke(self, fn, args):
+    def _invoke(self, fn, args, *, with_sender=True):
+        kwargs = {'sender': _WORKFLOW_SENDER} if with_sender else {}
         if threading.get_ident() == self._mainloop_thread:
-            return fn(*args, sender=_WORKFLOW_SENDER)
+            return fn(*args, **kwargs)
         future = concurrent.futures.Future()
 
         def dispatch():
@@ -979,7 +980,7 @@ class _WorkflowBrokerProxy:
             if not future.set_running_or_notify_cancel():
                 return False
             try:
-                future.set_result(fn(*args, sender=_WORKFLOW_SENDER))
+                future.set_result(fn(*args, **kwargs))
             except Exception as exc:  # noqa: BLE001
                 future.set_exception(exc)
             return False
@@ -998,8 +999,11 @@ class _WorkflowBrokerProxy:
             raise TimeoutError(f"workflow broker dispatch timed out: {outcome}") from None
 
     def __getattr__(self, name):
-        if name in {"hooks", "WorkflowRunPending"}:
+        if name == "hooks":
             return getattr(self._broker, name)
+        if name == "WorkflowRunPending":
+            fn = getattr(self._broker, name)
+            return lambda *args: self._invoke(fn, args, with_sender=False)
         from workflow_engine import _BROKER_METHOD_WHITELIST
         if name not in _BROKER_METHOD_WHITELIST:
             raise AttributeError(name)

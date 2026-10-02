@@ -186,3 +186,61 @@ def test_running_dispatch_timeout_reports_unconfirmed_outcome(tmp_path, monkeypa
     assert calls == ['gc']
     assert len(results) == 1 and not results[0].success
     assert 'operation already running; outcome unconfirmed' in results[0].error
+
+
+def test_worker_reload_preserves_policy_until_mainloop_dispatch(tmp_path, monkeypatch):
+    br = broker(tmp_path)
+    rules_dir = tmp_path / 'rules'
+    rules_dir.mkdir()
+    rule_file = rules_dir / 'deny.yaml'
+    rule_file.write_text('- name: guarded\n  decision: deny\n  match:\n    action: guarded\n')
+    br.rules.reload()
+    assert [r.decision for r in br.rules.rules()] == ['deny']
+    br.RulesReloaded = lambda count: None
+    proxy = b._WorkflowBrokerProxy(br)
+    pending = queue.Queue()
+    owner = threading.get_ident()
+    file_reads = []
+    import builtins
+    original_open = builtins.open
+    def tracked_open(file, *args, **kwargs):
+        if str(file) == str(rule_file):
+            file_reads.append(threading.get_ident())
+        return original_open(file, *args, **kwargs)
+    monkeypatch.setattr(builtins, 'open', tracked_open)
+    monkeypatch.setattr(b.os, 'getuid', lambda: 0)
+    monkeypatch.setattr(b.GLib, 'idle_add', lambda callback: pending.put(callback))
+    results = []
+    thread = threading.Thread(target=lambda: results.append(proxy.ReloadRules()))
+    thread.start()
+    callback = pending.get(timeout=2)
+    # Real RulesEngine.reload clears policy before reading files. While the
+    # worker waits, the explicit deny must still be present and no worker may
+    # enter that disk-I/O window. The eventual real reload runs on our owner.
+    assert [r.decision for r in br.rules.rules()] == ['deny']
+    assert file_reads == []
+    assert callback() is False
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert file_reads == [owner]
+    assert [r.decision for r in br.rules.rules()] == ['deny']
+    assert int(results[0][0]) == 1
+
+
+def test_pending_signal_from_worker_is_emitted_on_owner_thread(tmp_path, monkeypatch):
+    br = broker(tmp_path)
+    owner = threading.get_ident()
+    calls = []
+    # The real signal accepts exactly two arguments, not a sender keyword.
+    br.WorkflowRunPending = lambda run_id, name: calls.append((threading.get_ident(), run_id, name))
+    proxy = b._WorkflowBrokerProxy(br)
+    pending = queue.Queue()
+    monkeypatch.setattr(b.GLib, 'idle_add', lambda callback: pending.put(callback))
+    thread = threading.Thread(target=lambda: proxy.WorkflowRunPending('run-1', 'workflow'))
+    thread.start()
+    callback = pending.get(timeout=2)
+    assert calls == []
+    assert callback() is False
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert calls == [(owner, 'run-1', 'workflow')]
