@@ -88,6 +88,7 @@ class EditableTabBar(QTabBar):
         self._edited_index = -1
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self.apply_presentation_update()
 
     def mouseDoubleClickEvent(self, event):
         idx = self.tabAt(event.pos())
@@ -150,6 +151,28 @@ class EditableTabBar(QTabBar):
                 menu.addAction(close_others)
 
         menu.exec(self.mapToGlobal(pos))
+
+    def apply_presentation_update(self) -> None:
+        """Restyle tabs from the shared snapshot, else the application QSS."""
+        from qterminator.theme import pane_roles, using_shared_palette
+        from qterminator.titlebar import _ui_font
+
+        self.setFont(_ui_font())
+        if using_shared_palette():
+            roles = pane_roles(self)
+            self.setStyleSheet(
+                f"QTabBar {{ background-color: {roles['surface']}; }}"
+                f"QTabBar::tab {{ background-color: {roles['surface']}; "
+                f"color: {roles['on_surface_variant']}; padding: 4px 12px; "
+                f"border: none; border-right: 1px solid {roles['outline']}; "
+                f"min-width: 80px; }}"
+                f"QTabBar::tab:selected {{ background-color: {roles['surface_variant']}; "
+                f"color: {roles['on_surface']}; }}"
+                f"QTabBar::tab:hover {{ background-color: {roles['hover']}; "
+                f"color: {roles['on_hover']}; }}"
+            )
+        else:
+            self.setStyleSheet("")
 
 
 class MainWindow(QMainWindow):
@@ -1056,6 +1079,12 @@ class MainWindow(QMainWindow):
             yield from split.find_terminals()
 
     def apply_presentation_update(self) -> None:
+        self._tab_bar.apply_presentation_update()
+        for i in range(self._tabs.count()):
+            widget = self._tabs.widget(i)
+            split_update = getattr(widget, "apply_presentation_update", None)
+            if callable(split_update):
+                split_update()
         for term in self.iter_terminals():
             term.apply_presentation_update()
 
