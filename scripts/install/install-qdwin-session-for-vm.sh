@@ -75,8 +75,10 @@ fi
 # 1. Groups + linger.
 # `seat` is required so libseat's seatd backend can open a seat for
 # weston when the compositor runs under admin's lingering user manager
-# (which has no logind seat of its own). The group is created by
-# fresh-vm-bootstrap.sh's seatd setup step.
+# (which has no logind seat of its own). fresh-vm-bootstrap.sh's seatd setup
+# creates the group, but qdistro-bootstrap.sh on a fresh Tumbleweed does not
+# and the seatd RPM ships none, so create it here when it is missing.
+getent group seat >/dev/null || groupadd -r seat
 usermod -aG video,input,render,seat admin
 linger_enable admin
 
