@@ -37,6 +37,8 @@ rm -f /tmp/wf-fail-key /tmp/wf-fail-key.pub
 mkdir -p /etc/qdistro/workflows
 cat > /etc/qdistro/workflows/wfgui-failstep.yaml <<'YAML'
 - name: wfgui-failstep
+  # Unattended: without auto_run a fire only parks a PENDING run (see 05).
+  auto_run: true
   description: deliver a secret then fail on a forbidden call_broker
   trigger:
     type: process_spawn
