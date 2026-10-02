@@ -1095,6 +1095,10 @@ class MainWindow(QMainWindow):
         replay_update = getattr(instant_replay, "apply_presentation_update", None)
         if callable(replay_update):
             replay_update()
+        timestamps = getattr(self, "timestamps", None)
+        timestamps_update = getattr(timestamps, "apply_presentation_update", None)
+        if callable(timestamps_update):
+            timestamps_update()
 
     def apply_profile_to_terminals(self, profile_name: str) -> None:
         for term in self.iter_terminals():
