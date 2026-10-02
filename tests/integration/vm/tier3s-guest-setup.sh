@@ -117,7 +117,11 @@ is "probe state_root" "$(printf '%s\n' "$out" | grep -c '^PASS state_root')" 1
 
 step "5. workload image from the OCI archive (built once with registry access)"
 d=/var/tmp/t3s-img; rm -rf "$d"; install -d -m 0755 "$d"
-curl -fsS "$U/image-manifest.txt" -o "$d/manifest.txt" && curl -fsS "$U/tier3s-headless-smoke.oci.tar" -o "$d/image.oci.tar"
+if curl -fsS "$U/image-manifest.txt" -o "$d/manifest.txt" && curl -fsS "$U/tier3s-headless-smoke.oci.tar" -o "$d/image.oci.tar"; then
+    pass "image archive and manifest staged"
+else
+    fail "image archive not served (host: tier3s/cache-image-archive.sh <dev-vm> builds it once)"; finish
+fi
 chmod 0644 "$d"/*
 sed 's/^/    /' "$d/manifest.txt"
 m() { sed -n "s/^$1=//p" "$d/manifest.txt"; }

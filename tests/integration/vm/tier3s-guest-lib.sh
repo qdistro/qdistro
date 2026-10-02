@@ -34,8 +34,9 @@ pass() { echo "PASS: $*"; T3S_PASS=$((T3S_PASS + 1)); }
 fail() { echo "FAIL: $*"; T3S_FAIL=$((T3S_FAIL + 1)); }
 info() { echo "INFO: $*"; }
 step() { printf '\n## %s\n' "$*"; }
-is() {   # is <name> <got> <want>
-    if [ "$2" = "$3" ]; then pass "$1 ($2)"; else fail "$1: got '$2', want '$3'"; fi
+is() {   # is <name> <got> <want>; an empty <want> is never a match
+    if [ -z "$3" ]; then fail "$1: nothing to compare against (empty expected value; got '$2')"
+    elif [ "$2" = "$3" ]; then pass "$1 ($2)"; else fail "$1: got '$2', want '$3'"; fi
 }
 yes_no() { if "$@"; then echo yes; else echo no; fi; }
 finish() {

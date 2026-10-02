@@ -15,6 +15,15 @@ echo "SMOKE lang=$LANG charmap=$(locale charmap 2>&1) utf8_locales=$(locale -a 2
 for d in /run/user/1000 /home/admin/.cache /tmp; do
     echo "SMOKE mount $d=$(stat -c '%u:%g %a' "$d" 2>&1)"
 done
+# posture as the sandboxed process sees it (gVisor's /proc and mount table)
+st() { sed -n "s/^$1:[[:space:]]*//p" /proc/self/status; }
+echo "SMOKE caps=inh:$(st CapInh),prm:$(st CapPrm),eff:$(st CapEff),bnd:$(st CapBnd),amb:$(st CapAmb)"
+echo "SMOKE nnp=$(st NoNewPrivs) seccomp=$(st Seccomp)"
+echo "SMOKE rootfs=$(awk '$2 == "/" { split($4, o, ","); print o[1] }' /proc/self/mounts)"
+for d in /run/user/1000 /home/admin/.cache; do
+    echo "SMOKE mountopts $d=$(awk -v d="$d" '$2 == d { print $3 ":" $4 }' /proc/self/mounts)"
+done
+touch /home/admin/.smoke-rw 2>/tmp/smoke-rw.err; echo "SMOKE rootfs_write rc=$? err=$(cat /tmp/smoke-rw.err)"
 f=/tmp/smoke-chmod
 : > "$f"
 chmod 600 "$f" 2>/dev/null; echo "SMOKE chmod rc=$? mode=$(stat -c %a "$f")"
