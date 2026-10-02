@@ -22,8 +22,11 @@ the `tier3s` silo kind in the session manager (`CreateTier3sSilo`, the
 `qdistro-tier3s-silo@.service` unit and its root launch helper), the broker's
 rules-only `qdistro.tier3s.spawn:` prefix, and `install-session-manager.sh`
 (scripts, units, seccomp profiles and tmpfiles; **not** runsc, which stays on
-demand). The A-ii VM smoke is `spike/run-phase-a-ii-smoke.sh`. No acceptance
-drivers yet (A-iii).
+demand). The A-ii VM smoke is `spike/run-phase-a-ii-smoke.sh`. Milestone
+A-iii adds the acceptance drivers (`tests/integration/vm/s120`–`s122`, run in
+the qci VM lane), the owner answers O10 (the installer installs tier 3s only
+with `QDISTRO_TIER3S=1`) and O11 (a session-manager stop tears every tier 3s
+launch down), and the operator page below.
 
 ## Files
 
@@ -40,6 +43,7 @@ drivers yet (A-iii).
 | `tmpfiles/qdistro-tier3s.conf` | Creates the runsc state root and the control/per-launch parents |
 | `seccomp/make-profiles.py`, `seccomp/<workload>.json` | Per-workload profiles derived from tier 2, with explicit decisions |
 | `Containerfile.headless-smoke`, `headless-smoke.sh`, `make-tier3s-image.sh`, `configure-snapshot-repos.sh` | The headless smoke workload image on the snapshot pin |
+| `cache-image-archive.sh` | Host side: build the workload image once in a dev VM and keep its OCI archive for the qci workers (`--key`, `--dir`) |
 | `spike/` | Throwaway Phase S scripts, the evidence logs (`spike/logs/`), `RESULTS.md` |
 
 ## The pin
@@ -75,5 +79,101 @@ Tests: `python3 -m pytest tests/unit/test_tier3s_*.py` (real scripts,
 synthetic bundles, no podman/runsc); `spike/mutate-guards.py` shows each
 guard's test failing when the guard is broken.
 
-Not done in Phase 0, by design (kickoff `04`): no `QDISTRO_TIER3S` wiring into
-`install-deps.sh` / `image/config.sh` (D1: optional, on demand), no launch path.
+Not wired, by design (D1: optional, on demand): runsc is in no image, kiwi
+config or installer; `QDISTRO_TIER3S=1` gates only `install-session-manager.sh`
+(owner O10), not `install-deps.sh` / `image/config.sh`.
+
+## Operator page (Phase A: headless launch path)
+
+### What it is
+
+A tier-3s silo runs one headless workload under gVisor (`runsc`, platform
+systrap) in rootless podman as admin (uid 1000, `--userns=keep-id`), with no
+network (podman `--network=none` and runsc `network=none`), a read-only root,
+no capabilities, no-new-privileges, `label=disable` and a per-workload seccomp
+file. A root supervisor (`spawn-tier3s.sh`, run by
+`qdistro-tier3s-silo@<name>.service`) gates the launch through the broker,
+records it under `/run/qdistro-tier3s-ctl/<token>/`, and places every runtime
+process in a root-created, admin-delegated scope
+`qdistro-tier3s-<token>.scope`. `qdistro-tier3s-cleanup` is the only teardown
+path. The lifecycle is in [`CONTRACT.md`](CONTRACT.md).
+
+It is **Experimental and dev-profile only**. Nothing selects it automatically:
+a silo is tier 3s only because it was created with `CreateTier3sSilo`, and a
+refused launch never falls back to tier 2 or 3.
+
+### Enabling it on a dev VM (as root)
+
+```sh
+# 1. install the launch path from a root-owned checkout (owner O10: opt-in)
+QDISTRO_TIER3S=1 scripts/install/install-session-manager.sh /root/qdistro-src/session_manager
+# 2. provision the pinned runsc (D1: on demand; the host cache must hold the tarball)
+tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc
+/usr/lib/qdistro/tier3s/probe.sh --user admin          # must print RESULT PASS
+# 3. the workload image, as admin (needs registry access), or load the archive
+#    that tier3s/cache-image-archive.sh <vm> keeps on the host
+runuser -u admin -- bash tier3s/make-tier3s-image.sh headless-smoke
+# 4. a broker rule (qdistro.tier3s.spawn: is rules-only: no rule = refused)
+#    - decision: allow, match: {uid: 1000, action: "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke"}
+# 5. the silo, as admin over D-Bus
+busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 CreateTier3sSilo ssss smoke headless-smoke smoke none
+busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 StartSilo s smoke
+```
+
+The workload's output is in `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.scope`
+(the token is the `LAUNCH_TOKEN=` line in the launch unit's journal).
+
+### Flags and knobs
+
+| Knob | Where | Effect |
+|---|---|---|
+| `QDISTRO_TIER3S=1` | `install-session-manager.sh` | installs the tier 3s files (CONTRACT §1). Unset/empty/`0`: nothing tier 3s; any other value: exit 2 |
+| `CreateTier3sSilo(name, workload, template_silo, network)` | session manager | `network` must be `none`; `template_silo` names the binding to resolve (none = untemplated, image `localhost/qdistro/tier3s-<workload>:latest`) |
+| silo row `launch.argv` | `/etc/qdistro/silos.yaml` (manager stopped) | the workload argv; empty = the workload default (`headless-smoke` → `qdistro-tier3s-smoke`; `--hold N` keeps it live) |
+| `FreezeSilo`/`ResumeSilo` | session manager | refused for tier 3s silos |
+| `TIER3S_DEBUG_LOG_DIR` | spawn env (dev diagnostics) | runsc `--debug --debug-log=<dir>/`, where seccomp denials show. Not reachable through the launch unit: the stanza's key set is fixed and the helper execs the spawn with `env -i` |
+| `TIER3S_SECCOMP_PROFILE`, `TIER3S_ALLOW_PRIVESC`, `TIER3S_KEEP_CAPS`, `TIER3S_RUNTIME`, `TIER3S_CGROUP_PARENT` | spawn env | **refused** (exit 2): posture is not configurable per launch |
+| `probe.sh --user <name>` | prerequisite screen | exit 0 PASS, 1 missing prerequisite, 2 non-dev profile |
+| `qdistro-tier3s-cleanup <token> \| --unit <unit> \| --reap-stale` | root | the only teardown path; a failure exits non-zero and preserves the record |
+| `cache-image-archive.sh <vm> \| --key \| --dir` | host | builds the workload image once in a VM and keeps the OCI archive for the qci workers |
+
+### Lifecycle guarantees that are tested (A-iii, qci VM lane)
+
+`tests/integration/vm/phase7-tier3s-{headless,denied,sigkill-cleanup}.bats`
+run the drivers `s120`–`s122` on fresh workers; the evidence table is
+[`spike/logs/phase-a-20261002/INDEX.md`](spike/logs/phase-a-20261002/INDEX.md)
+("Milestone A-iii"). In short: every runtime process class is in the owning
+scope; normal exit, plain `podman stop`/`rm -f`, `StopSilo`, launcher SIGKILL,
+a session-manager stop (O11), crash and restart each leave no process, scope,
+`/run/qdistro-tier3s/<token>` or `/run/qdistro-tier3s-ctl/<token>`; a lost or
+replaced runsc state root makes a stop or a cleanup fail visibly with the
+record and scope preserved, and the restored root tears it down; restart
+reconciliation reaps launches and labelled containers the manager does not
+know; broker denial, a non-dev profile and a probe failure refuse with no
+`podman run`, no activation record and no fallback.
+
+### What is NOT claimed
+
+- **Dev profile only.** There is no hardened or release launch path; the
+  manager, the spawn and the probe all refuse it (O4).
+- **No KVM claim** (O5): systrap only; nothing here measures or relies on
+  gVisor's KVM platform.
+- **No network** (O3): `network=none` is the only mode.
+- **Not a containment proof.** The scope's `TasksMax`/`MemoryMax` are set by
+  root and admin cannot raise them, but enforcement is Phase C. `--pids-limit`
+  is parity with tier 2 only (runsc `--ignore-cgroups` does not enforce it).
+- **Identity is hash-based, not name-based.** The Sentry and gofer are
+  identified by their `/proc/<pid>/exe` sha512 against the pin; process names,
+  the gVisor `dmesg` banner and `/proc/version` are corroboration only.
+- **`fchmodat2` is denied by the pin**, not by choice: runsc 20260928.0's
+  seccomp converter drops the name, so `chmod -h`/`lchmod` get EPERM.
+- **No GUI, no bridge, no pod apps.** Phase B adds the waypipe bridge; the
+  `qdistro-tier3s-app@` unit is not shipped and the spawn refuses a launch
+  without a silo.
+- **Under SIGKILL of the launch service** teardown is systemd killing the
+  scope's cgroup, then verification; it is not a graceful `podman stop`.
+- **Templated tier 3s silos** are exercised only through a hand-written
+  binding fixture (s121); no tier 3s template recipe or promotion flow exists.
+

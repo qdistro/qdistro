@@ -55,7 +55,13 @@ the previous start's token. It has **`StopPropagatedFrom=` + `After=`
 **stop** enqueues a stop of every tier3s launch unit, which stops first (the
 reverse of `After=`), so its `ExecStop`/`ExecStopPost` cleanup tears the
 sandbox down while the manager is still up. No sandbox outlives its
-supervisor. A manager crash has no stop job; reconciliation (§4) covers it.
+supervisor. Measured on systemd 261 (A-iii dev VM, re-asserted by s122): the
+propagation also fires when the manager is **restarted** (the launch unit gets
+a stop job, never a restart, so no relaunch with the old token) and when the
+manager **fails** (SIGKILL: "Failed with result 'signal'" is followed by the
+launch unit's stop job). Reconciliation (§4) covers what propagation cannot:
+launch units the manager never started (started while it was down) and
+labelled containers without a live unit.
 
 Journald files the workload's output (podman's attached stdout and conmon's
 log driver) under the owning **scope** unit, where those processes run, not
@@ -274,7 +280,12 @@ record (and the scope, if it is still alive)**:
    `rm -rf` does not follow symlinks), then the control dir.
 
 A missing control record with a leftover per-launch dir: the dir is removed
-only when `qdistro-tier3s-<token>.scope` is not active.
+only when `qdistro-tier3s-<token>.scope` is not active. Asked for explicitly
+(`cleanup <token>`), a live scope is an error. From the reaper, a live scope
+whose `BindsTo=` launch unit is still live is left alone; otherwise the reaper
+waits up to 20 s for systemd's own BindsTo stop, then stops the scope itself
+and removes the dir (A-iii s122: a reconciliation reap raced the scope stop
+and left the dir behind).
 
 ### Reaper and reconciliation
 
@@ -294,10 +305,14 @@ Restart reconciliation (A-ii, as implemented):
   logged and never block other silos.
 - A manager **stop** (no restart) stops every live launch unit through
   `StopPropagatedFrom=` (§1, owner O11): each unit's `ExecStop`/`ExecStopPost`
-  runs the verified cleanup before the manager itself stops. Reconciliation at
-  the next start is then the crash-recovery path only.
+  runs the verified cleanup before the manager itself stops. systemd does the
+  same on a manager restart or failure (§1), so reconciliation at the next
+  start is the recovery path for launches the manager did not start, records
+  of failed teardowns and labelled containers without a live unit.
 - `--reap-stale` also lists labelled containers as admin (`podman ps -a
-  --filter label=qdistro_tier3s_token`). A failed listing is an error, never
+  --filter label=qdistro_tier3s_token`, template `{{.Label "<key>"}}`:
+  podman 6 rejects `index .Labels` in a ps template, which made every label
+  reap fail until A-iii s122 found it). A failed listing is an error, never
   "nothing to reap". A container whose `qdistro_tier3s_unit` label names a
   unit that is not live gets the per-token teardown. With no control record,
   that teardown is a stop/rm by name plus stopping
