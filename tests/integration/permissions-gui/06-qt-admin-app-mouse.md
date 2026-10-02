@@ -103,10 +103,19 @@ qdwin_screenshot "$ART/06-qt-admin-app-mouse-s1b-1h-selected.png"
 ```bash
 # Focus check again in case clicking the radio changed it.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+```
 
-# >>> Runner: using a fresh screenshot, locate the "Approve" button, generate
-# and visually confirm its marked preview, click-confirm it, then wait for the
-# list to empty and capture. A title-wait timeout FAILS S2.
+Now, on the HOST: using the s1b frame (or a fresh `qdwin_screenshot`),
+locate the "Approve" button and click it with the preview / confirm
+handshake (AGENTS.md 3b). **Only after `click-confirm` has returned**, run
+the block below. Running its title wait before the click times out on
+`(1 pending)` and fails a step whose product behaviour was never exercised
+(first qci run of this port did exactly that). If you drive the guest from
+one driver script, put a `qci_host_step s2_approve_click` BEFORE the wait and
+send its go only after the click-confirm.
+
+```bash
+# After the Approve click-confirm. A title-wait timeout FAILS S2.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
 qdwin_screenshot "$ART/06-qt-admin-app-mouse-s2-afterapprove.png"
 
