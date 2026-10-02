@@ -50,7 +50,12 @@ and passes no `QDISTRO_PROFILE` (the spawn reads `/etc/qdistro/profile`).
 
 The unit has **no `PartOf=qdistro-session-manager.service`** (unlike tier 2):
 PartOf would turn a manager restart into a unit restart that relaunches with
-the previous start's token. Reconciliation (§4) replaces it.
+the previous start's token. It has **`StopPropagatedFrom=` + `After=`
+`qdistro-session-manager.service`** instead (owner O11, A-iii): a manager
+**stop** enqueues a stop of every tier3s launch unit, which stops first (the
+reverse of `After=`), so its `ExecStop`/`ExecStopPost` cleanup tears the
+sandbox down while the manager is still up. No sandbox outlives its
+supervisor. A manager crash has no stop job; reconciliation (§4) covers it.
 
 Journald files the workload's output (podman's attached stdout and conmon's
 log driver) under the owning **scope** unit, where those processes run, not
@@ -61,7 +66,15 @@ Every podman call runs **as admin (uid 1000)**, rootless, `--userns=keep-id`
 (D4 C1). Root does three things only: supervise, create the scope, and tear
 down through the recorded scope. Nothing runs podman or runsc as root.
 
-### Installed paths (the A-ii installer installs exactly these, root-owned)
+### Installed paths (root-owned; only with `QDISTRO_TIER3S=1`)
+
+**Opt-in (owner O10, A-iii).** `install-session-manager.sh` installs the rows
+below only when `QDISTRO_TIER3S=1`. Unset, empty or `0` installs nothing
+tier-3s-specific (it logs `tier 3s not installed`); any other value is an
+error (exit 2), so a typo never silently skips it. Re-running without the flag
+does not remove an earlier install. The session manager's tier3s branches and
+the broker prefix ship in their shared files regardless; without these paths
+the manager skips reconciliation and a tier3s start fails (no unit, no spawn).
 
 | Path | From |
 |---|---|
@@ -279,8 +292,10 @@ Restart reconciliation (A-ii, as implemented):
   sweep then relaunches silos that were Active or are autostart, each with a
   fresh token. Skipped on a host without the tier3s install; failures are
   logged and never block other silos.
-- A manager **stop** (no restart) leaves running launches alone until the next
-  manager start reconciles them.
+- A manager **stop** (no restart) stops every live launch unit through
+  `StopPropagatedFrom=` (§1, owner O11): each unit's `ExecStop`/`ExecStopPost`
+  runs the verified cleanup before the manager itself stops. Reconciliation at
+  the next start is then the crash-recovery path only.
 - `--reap-stale` also lists labelled containers as admin (`podman ps -a
   --filter label=qdistro_tier3s_token`). A failed listing is an error, never
   "nothing to reap". A container whose `qdistro_tier3s_unit` label names a
@@ -297,6 +312,7 @@ Restart reconciliation (A-ii, as implemented):
 | normal exit | `podman run --rm` returns. The spawn's EXIT trap runs `cleanup <token>`, which verifies absence and removes the records. Then the unit's `ExecStopPost` finds nothing |
 | plain `podman stop` (admin) | reaches the sandbox through the wrapper root, so it continues as normal exit |
 | session-manager / `systemctl stop` | `ExecStop` cleanup with the scope alive, then the scope stops (Before=, BindsTo) |
+| manager service stop (`systemctl stop qdistro-session-manager`, O11) | `StopPropagatedFrom=` enqueues the launch unit's stop, ordered before the manager's; then as the row above |
 | launcher SIGKILL / service failure | `ExecStopPost` cleanup runs while BindsTo stops the scope, then verifies |
 | manager restart, state lost | `--reap-stale` + unit stop |
 | runtime query/stop failure (root missing or replaced) while live | `cleanup` errors, and the record and scope stay. After the root is restored, `cleanup` tears everything down |
@@ -403,7 +419,8 @@ would have to cover the whole contract below before it pays off).
 - **Egress:** none. The tier3-user-only egress branches stay tier3-user only,
   and a tier3s silo with egress is rejected at creation.
 - **Restart reconciliation:** §4 "Reaper and reconciliation".
-- **Installer:** `scripts/install/install-session-manager.sh` installs the §1
+- **Installer:** `scripts/install/install-session-manager.sh` installs, only with
+  `QDISTRO_TIER3S=1` (O10), the §1
   paths and units (only those lines).
 
 Broker (A-ii): add `"qdistro.tier3s.spawn:"` to the rules-only prefix

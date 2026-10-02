@@ -5,13 +5,19 @@ Description=qdistro tier-3s (gVisor) silo %i (Experimental, dev profile only)
 # session manager (root) writes /run/qdistro/silo-launch/<name>.env (root 0600,
 # with a fresh launch token per start), then `systemctl start`s this unit.
 #
+# A manager STOP stops this unit (paravirt O11: no sandbox outlives its
+# supervisor): StopPropagatedFrom= propagates the stop job, and After= orders
+# it, so on a manager stop this unit stops FIRST and its ExecStop/ExecStopPost
+# run the verified cleanup while the manager is still up.
 # No PartOf=qdistro-session-manager.service (unlike the tier-2 unit): PartOf
-# would turn a manager restart into a restart of this unit, re-launching with
-# the previous start's token. Instead the manager's startup reconciliation
-# stops every live tier3s launch unit and runs `qdistro-tier3s-cleanup
-# --reap-stale`; its autostart sweep then relaunches wanted silos with a fresh
-# token. No launch survives a manager restart.
+# would also turn a manager restart into a restart of this unit, re-launching
+# with the previous start's token. StopPropagatedFrom= propagates stop only.
+# A manager crash (no stop job) is covered by the manager's startup
+# reconciliation: it stops every live tier3s launch unit and runs
+# `qdistro-tier3s-cleanup --reap-stale`; its autostart sweep then relaunches
+# wanted silos with a fresh token. No launch survives a manager restart.
 After=qdistro-session-manager.service
+StopPropagatedFrom=qdistro-session-manager.service
 
 [Service]
 Type=simple

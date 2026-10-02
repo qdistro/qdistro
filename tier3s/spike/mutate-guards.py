@@ -7,7 +7,8 @@ that cover that guard, require every named test to be reported FAILED, then
 restore the original bytes and re-check their sha256. IDs: P probe, V
 provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A,
 milestone A-i); S session manager, L root launch helper, B broker, I installer,
-U launch unit, A21+ spawn deltas (milestone A-ii).
+U launch unit, A21+ spawn deltas (milestone A-ii); I3-I5, U2, U3 the owner
+answers O10/O11 (milestone A-iii).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -357,13 +358,31 @@ MUTATIONS = [
      [f"{TBR}::test_tier3s_spawn_is_rules_only",
       f"{TBR}::test_tier_spawn_ignores_cache_without_rule[qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke]"]),
     ("I1 installer drops the cleanup helper", INST,
-     'install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-cleanup" "$DEST/qdistro-tier3s-cleanup"\n', "",
+     '    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-cleanup" "$DEST/qdistro-tier3s-cleanup"\n', "",
      [f"{TSM}::test_installer_installs_exactly_the_contract_paths"]),
     ("I2 installer skips the tmpfiles creation", INST,
-     "    systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-tier3s.conf\n", "    true\n",
+     "        systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-tier3s.conf\n", "        true\n",
      [f"{TSM}::test_installer_installs_exactly_the_contract_paths"]),
     ("U1 unit loses its ExecStopPost cleanup", UNITF,
      "ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n\n", "",
+     [f"{TSM}::test_unit_file_shape"]),
+    # --- A-iii: owner answers O10 (installer opt-in) and O11 (manager stop)
+    ("I3 installer gate removed (tier3s installed without the flag)", INST,
+     'if [ "$_qd_t3s" = 1 ]; then\n', "if true; then\n",
+     [f"{TSM}::test_installer_installs_nothing_tier3s_without_the_flag[None]",
+      f"{TSM}::test_installer_installs_nothing_tier3s_without_the_flag[0]"]),
+    ("I4 unset flag treated as opt-in", INST,
+     "    0|'') _qd_t3s=0 ;;\n", "    0|'') _qd_t3s=1 ;;\n",
+     [f"{TSM}::test_installer_installs_nothing_tier3s_without_the_flag[None]"]),
+    ("I5 unrecognised flag value silently skips", INST,
+     "    *)    echo \"ERROR: QDISTRO_TIER3S must be 0 or 1 (got '${QDISTRO_TIER3S}')\" >&2\n          exit 2 ;;\n",
+     "    *)    _qd_t3s=0 ;;\n",
+     [f"{TSM}::test_installer_refuses_an_unrecognised_flag_value[yes]"]),
+    ("U2 manager stop no longer stops the launch unit", UNITF,
+     "StopPropagatedFrom=qdistro-session-manager.service\n", "",
+     [f"{TSM}::test_unit_file_shape"]),
+    ("U3 stop propagation replaced by PartOf (restart would relaunch)", UNITF,
+     "StopPropagatedFrom=qdistro-session-manager.service\n", "PartOf=qdistro-session-manager.service\n",
      [f"{TSM}::test_unit_file_shape"]),
 ]
 

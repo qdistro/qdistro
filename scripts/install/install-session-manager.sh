@@ -164,48 +164,64 @@ install -o root -g root -m 0755 "$SRC/qdistro-podapp-stop" \
     "$DEST/qdistro-podapp-stop"
 
 # Tier 3s (gVisor runsc; Experimental, dev profile only): the launch path of
-# tier3s/CONTRACT.md §1, all root-owned. runsc itself is NOT installed here
-# (paravirt D1: provisioned on demand by tier3s/provision-runsc.sh, which also
-# installs the runtime wrapper /usr/libexec/qdistro/tier3s-runsc); without it
-# the probe refuses every tier3s launch, so these files are inert on a host
-# that never opts in.
-_qd_t3s_src="$(dirname "$SRC")/tier3s"
-_qd_t3s_lib=/usr/lib/qdistro/tier3s
-if [ ! -d "$_qd_t3s_src" ]; then
-    echo "ERROR: tier3s source not found at $_qd_t3s_src" >&2
-    exit 2
+# tier3s/CONTRACT.md §1, all root-owned. OPT-IN (paravirt O10): installed only
+# when QDISTRO_TIER3S=1; without it nothing tier-3s-specific is installed
+# (scripts, units, seccomp profiles, tmpfiles), so an image built without the
+# flag carries none of it. Any value but unset, empty, 0 or 1 is an error, so
+# a typo never silently skips the install. runsc itself is NOT installed here
+# even with the flag (paravirt D1: provisioned on demand by
+# tier3s/provision-runsc.sh, which also installs the runtime wrapper
+# /usr/libexec/qdistro/tier3s-runsc); without it the probe refuses every
+# tier3s launch. Re-running without the flag does not remove an earlier
+# tier3s install.
+case "${QDISTRO_TIER3S:-0}" in
+    1)    _qd_t3s=1 ;;
+    0|'') _qd_t3s=0 ;;
+    *)    echo "ERROR: QDISTRO_TIER3S must be 0 or 1 (got '${QDISTRO_TIER3S}')" >&2
+          exit 2 ;;
+esac
+if [ "$_qd_t3s" = 1 ]; then
+    _qd_t3s_src="$(dirname "$SRC")/tier3s"
+    _qd_t3s_lib=/usr/lib/qdistro/tier3s
+    if [ ! -d "$_qd_t3s_src" ]; then
+        echo "ERROR: tier3s source not found at $_qd_t3s_src" >&2
+        exit 2
+    fi
+    install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp"
+    # The root supervisor and the prerequisite screen. probe.sh compares the
+    # provisioned wrapper and pin against the copies beside it, and refuses to run
+    # as root unless this directory chain is root-owned.
+    install -o root -g root -m 0755 "$_qd_t3s_src/spawn-tier3s.sh" "$_qd_t3s_lib/spawn-tier3s.sh"
+    install -o root -g root -m 0755 "$_qd_t3s_src/probe.sh" "$_qd_t3s_lib/probe.sh"
+    install -o root -g root -m 0755 "$_qd_t3s_src/tier3s-runsc" "$_qd_t3s_lib/tier3s-runsc"
+    install -o root -g root -m 0644 "$_qd_t3s_src/RUNSC_RELEASE" "$_qd_t3s_lib/RUNSC_RELEASE"
+    # Per-workload seccomp profiles (rendered by seccomp/make-profiles.py; the
+    # spawn refuses a workload without one, no podman-default fallback).
+    for _qd_f in "$_qd_t3s_src"/seccomp/*.json; do
+        install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/seccomp/$(basename "$_qd_f")"
+    done
+    # The root scope helper (first process of the owning scope) and the only
+    # teardown path (spawn EXIT trap, unit ExecStop/ExecStopPost, reconciliation).
+    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-scope" "$DEST/qdistro-tier3s-scope"
+    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-cleanup" "$DEST/qdistro-tier3s-cleanup"
+    # The runsc state root and the control/per-launch parents: tmpfiles is their
+    # ONLY creator (CONTRACT §2); create them now, and systemd recreates them at
+    # every boot.
+    install -d -o root -g root -m 0755 /usr/lib/tmpfiles.d
+    install -o root -g root -m 0644 "$_qd_t3s_src/tmpfiles/qdistro-tier3s.conf" \
+        /usr/lib/tmpfiles.d/qdistro-tier3s.conf
+    live_only "systemd-tmpfiles --create qdistro-tier3s.conf" \
+        systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-tier3s.conf
+    # The silo launch unit (SessionManager1.CreateTier3sSilo + StartSilo) and its
+    # root launch helper (parses the stanza, execs spawn-tier3s.sh).
+    install -o root -g root -m 0644 "$SRC/qdistro-tier3s-silo@.service" \
+        /etc/systemd/system/qdistro-tier3s-silo@.service
+    install -o root -g root -m 0755 "$SRC/qdistro-tier3s-silo-launch" \
+        "$DEST/qdistro-tier3s-silo-launch"
+else
+    echo "install-session-manager: tier 3s not installed (QDISTRO_TIER3S is not 1; paravirt O10)"
 fi
-install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp"
-# The root supervisor and the prerequisite screen. probe.sh compares the
-# provisioned wrapper and pin against the copies beside it, and refuses to run
-# as root unless this directory chain is root-owned.
-install -o root -g root -m 0755 "$_qd_t3s_src/spawn-tier3s.sh" "$_qd_t3s_lib/spawn-tier3s.sh"
-install -o root -g root -m 0755 "$_qd_t3s_src/probe.sh" "$_qd_t3s_lib/probe.sh"
-install -o root -g root -m 0755 "$_qd_t3s_src/tier3s-runsc" "$_qd_t3s_lib/tier3s-runsc"
-install -o root -g root -m 0644 "$_qd_t3s_src/RUNSC_RELEASE" "$_qd_t3s_lib/RUNSC_RELEASE"
-# Per-workload seccomp profiles (rendered by seccomp/make-profiles.py; the
-# spawn refuses a workload without one, no podman-default fallback).
-for _qd_f in "$_qd_t3s_src"/seccomp/*.json; do
-    install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/seccomp/$(basename "$_qd_f")"
-done
-# The root scope helper (first process of the owning scope) and the only
-# teardown path (spawn EXIT trap, unit ExecStop/ExecStopPost, reconciliation).
-install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-scope" "$DEST/qdistro-tier3s-scope"
-install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-cleanup" "$DEST/qdistro-tier3s-cleanup"
-# The runsc state root and the control/per-launch parents: tmpfiles is their
-# ONLY creator (CONTRACT §2); create them now, and systemd recreates them at
-# every boot.
-install -d -o root -g root -m 0755 /usr/lib/tmpfiles.d
-install -o root -g root -m 0644 "$_qd_t3s_src/tmpfiles/qdistro-tier3s.conf" \
-    /usr/lib/tmpfiles.d/qdistro-tier3s.conf
-live_only "systemd-tmpfiles --create qdistro-tier3s.conf" \
-    systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-tier3s.conf
-# The silo launch unit (SessionManager1.CreateTier3sSilo + StartSilo) and its
-# root launch helper (parses the stanza, execs spawn-tier3s.sh).
-install -o root -g root -m 0644 "$SRC/qdistro-tier3s-silo@.service" \
-    /etc/systemd/system/qdistro-tier3s-silo@.service
-install -o root -g root -m 0755 "$SRC/qdistro-tier3s-silo-launch" \
-    "$DEST/qdistro-tier3s-silo-launch"
+# --- end tier 3s ---
 
 install -o root -g root -m 0644 "$SRC/qdistro_silo_launch.py" \
     "$DEST/qdistro_silo_launch.py"

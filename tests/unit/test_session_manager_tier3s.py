@@ -788,6 +788,12 @@ def test_unit_file_shape():
     assert kv["SuccessExitStatus"] == ["143 137"]
     assert kv["Restart"] == ["no"]
     assert "PartOf" not in kv, "a manager restart must not restart the launch (reconciliation does)"
+    # paravirt O11: a manager STOP stops every tier3s launch unit (stop only,
+    # never restart), and After= makes the launch stop first
+    assert kv["StopPropagatedFrom"] == ["qdistro-session-manager.service"]
+    assert kv["After"] == ["qdistro-session-manager.service"]
+    for k in ("BindsTo", "Requires", "Requisite", "Upholds", "PropagatesReloadTo", "ReloadPropagatedFrom"):
+        assert k not in kv, f"{k}= would couple the launch to manager restarts"
     # the unit name the manager starts and the record's unit= match the helper's
     assert sm.TIER3S_SILO_LAUNCHER_FMT.format(name="x") == "qdistro-tier3s-silo@x.service"
     assert 'TIER3S_LAUNCH_UNIT="qdistro-tier3s-silo@${NAME}.service"' in LAUNCH_HELPER.read_text()
@@ -850,3 +856,76 @@ def test_installed_sources_exist():
     for s, _d, _m in inst:
         assert (REPO / s).is_file(), s
     assert (REPO / "tier3s/seccomp/headless-smoke.json").is_file()
+
+
+# --- installer opt-in (paravirt O10) ---------------------------------------------
+
+def _t3s_installer_block() -> str:
+    """The installer's tier3s section, verbatim: from its header comment up to
+    the end marker. The tests below EXECUTE this text (the real installer
+    lines), with `install`, `live_only` and `systemd-tmpfiles` replaced by
+    recorders, so a guard change in the installer changes what they see."""
+    text = INSTALLER.read_text()
+    start = text.index("# Tier 3s (gVisor runsc; Experimental, dev profile only)")
+    end = text.index("# --- end tier 3s ---", start)
+    return text[start:end]
+
+
+def _run_t3s_block(tmp_path, env_value):
+    log = tmp_path / "calls.log"
+    script = (
+        "set -eu\n"
+        f"SRC={shlex.quote(str(REPO / 'session_manager'))}\n"
+        "DEST=/usr/libexec/qdistro\n"
+        f"LOG={shlex.quote(str(log))}\n"
+        'install() { printf "install %s\\n" "$*" >> "$LOG"; }\n'
+        'live_only() { printf "live_only %s\\n" "$1" >> "$LOG"; }\n'
+        'systemd-tmpfiles() { printf "tmpfiles %s\\n" "$*" >> "$LOG"; }\n'
+        + _t3s_installer_block()
+        + 'echo "BLOCK-END"\n'
+    )
+    env = {k: v for k, v in os.environ.items() if k != "QDISTRO_TIER3S"}
+    if env_value is not None:
+        env["QDISTRO_TIER3S"] = env_value
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+    calls = log.read_text().splitlines() if log.exists() else []
+    return r, calls
+
+
+@pytest.mark.parametrize("value", [None, "", "0"])
+def test_installer_installs_nothing_tier3s_without_the_flag(tmp_path, value):
+    r, calls = _run_t3s_block(tmp_path, value)
+    assert r.returncode == 0, r.stderr
+    assert "BLOCK-END" in r.stdout
+    assert calls == [], calls
+    assert "tier 3s not installed (QDISTRO_TIER3S is not 1" in r.stdout
+
+
+def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
+    r, calls = _run_t3s_block(tmp_path, "1")
+    assert r.returncode == 0, r.stderr
+    dests = {c.split()[-1] for c in calls if c.startswith("install -o root")}
+    seccomp = {f"/usr/lib/qdistro/tier3s/seccomp/{p.name}" for p in (REPO / "tier3s/seccomp").glob("*.json")}
+    want = {"/usr/lib/qdistro/tier3s/spawn-tier3s.sh", "/usr/lib/qdistro/tier3s/probe.sh",
+            "/usr/lib/qdistro/tier3s/tier3s-runsc", "/usr/lib/qdistro/tier3s/RUNSC_RELEASE",
+            "/usr/libexec/qdistro/qdistro-tier3s-scope", "/usr/libexec/qdistro/qdistro-tier3s-cleanup",
+            "/usr/lib/tmpfiles.d/qdistro-tier3s.conf", "/etc/systemd/system/qdistro-tier3s-silo@.service",
+            "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"} | seccomp
+    assert dests == want, dests ^ want
+    assert "live_only systemd-tmpfiles --create qdistro-tier3s.conf" in calls
+    assert "not installed" not in r.stdout
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "2", " 1"])
+def test_installer_refuses_an_unrecognised_flag_value(tmp_path, value):
+    r, calls = _run_t3s_block(tmp_path, value)
+    assert r.returncode == 2 and "QDISTRO_TIER3S must be 0 or 1" in r.stderr
+    assert calls == [] and "BLOCK-END" not in r.stdout
+
+
+def test_installer_has_no_tier3s_lines_outside_the_gated_block():
+    text = INSTALLER.read_text()
+    block = _t3s_installer_block()
+    rest = text.replace(block, "")
+    code = [ln for ln in rest.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code if "tier3s" in ln.lower() or "t3s" in ln], code
