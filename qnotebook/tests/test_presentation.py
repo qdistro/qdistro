@@ -158,41 +158,34 @@ def test_system_restores_captured_native_palette(qapp):
     assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == native
 
 
-def test_native_restores_captured_style_after_fusion(qapp):
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_native_restores_captured_style_after_fusion(qapp, with_qss):
     from PyQt6.QtGui import QColor, QPalette
     from PyQt6.QtWidgets import QStyleFactory
-    from qnotebook.theme import reset_controller_for_tests
+    from qnotebook.theme import _underlying_style_name, reset_controller_for_tests
 
+    windows = next((n for n in QStyleFactory.keys() if n.lower() == "windows"), None)
+    if windows is None:
+        pytest.skip("Windows style required to distinguish Fusion")
     original_style = qapp.style().objectName()
     original_pal = QPalette(qapp.palette())
     original_qss = qapp.styleSheet()
     reset_controller_for_tests()
     try:
-        keys = {name.lower(): name for name in QStyleFactory.keys()}
-        current = qapp.style().objectName()
-        alt = None
-        for candidate in ("Windows", "GTK+", "Oxygen"):
-            mapped = keys.get(candidate.lower())
-            if mapped and mapped.lower() != current.lower():
-                alt = mapped
-                qapp.setStyle(mapped)
-                break
+        qapp.setStyle(windows)
         pal = QPalette(qapp.palette())
         pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
         qapp.setPalette(pal)
-        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }")
-        style = qapp.style().objectName()
+        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
         window_rgb = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
         qss = qapp.styleSheet()
         apply_theme(qapp, "dark")
         assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("#2b2b2b")
-        dark_style = qapp.style().objectName()
+        assert _underlying_style_name(qapp).lower() == "fusion"
         assert apply_theme(qapp, "native") == "native"
-        assert qapp.style().objectName() == style
+        assert _underlying_style_name(qapp).lower() == "windows"
         assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
         assert qapp.styleSheet() == qss
-        if alt is not None and style:
-            assert dark_style != style
     finally:
         reset_controller_for_tests()
         qapp.setStyle(original_style)

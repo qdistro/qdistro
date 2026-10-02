@@ -24,13 +24,25 @@ _NATIVE_PALETTE: QPalette | None = None
 _NATIVE_STYLESHEET: str | None = None
 
 
+def _underlying_style_name(app: QApplication) -> str:
+    """Factory style name, unwrapping QStyleSheetStyle's empty objectName."""
+    qss = app.styleSheet()
+    if not qss:
+        return app.style().objectName()
+    app.setStyleSheet("")
+    try:
+        return app.style().objectName()
+    finally:
+        app.setStyleSheet(qss)
+
+
 def _capture_native(app: QApplication) -> None:
     global _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
     if _NATIVE_PALETTE is not None:
         return
-    _NATIVE_STYLE = app.style().objectName()
     _NATIVE_PALETTE = QPalette(app.palette())
     _NATIVE_STYLESHEET = app.styleSheet()
+    _NATIVE_STYLE = _underlying_style_name(app)
 
 
 def _restore_native(app: QApplication) -> None:

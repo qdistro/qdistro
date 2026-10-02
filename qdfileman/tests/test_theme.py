@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from PyQt6.QtGui import QPalette
 from qfileman.theme import apply_theme
 
@@ -53,34 +54,32 @@ def test_apply_theme_dark_uses_fusion_style(qapp):
     assert qapp.style().objectName().lower() == "fusion"
 
 
-def test_apply_theme_native_restores_captured_baseline(qapp):
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_apply_theme_native_restores_captured_baseline(qapp, with_qss):
     from PyQt6.QtGui import QColor
     from PyQt6.QtWidgets import QStyleFactory
-    from qfileman.theme import reset_controller_for_tests
+    from qfileman.theme import _underlying_style_name, reset_controller_for_tests
 
+    windows = next((n for n in QStyleFactory.keys() if n.lower() == "windows"), None)
+    if windows is None:
+        pytest.skip("Windows style required to distinguish Fusion")
     original_style = qapp.style().objectName()
     original_pal = QPalette(qapp.palette())
     original_qss = qapp.styleSheet()
     reset_controller_for_tests()
     try:
-        keys = {name.lower(): name for name in QStyleFactory.keys()}
-        current = qapp.style().objectName()
-        for candidate in ("Windows", "GTK+", "Oxygen"):
-            mapped = keys.get(candidate.lower())
-            if mapped and mapped.lower() != current.lower():
-                qapp.setStyle(mapped)
-                break
+        qapp.setStyle(windows)
         pal = QPalette(qapp.palette())
         pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
         qapp.setPalette(pal)
-        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }")
-        style = qapp.style().objectName()
+        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
         window_rgb = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
         qss = qapp.styleSheet()
         apply_theme(qapp, "dark")
         assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+        assert _underlying_style_name(qapp).lower() == "fusion"
         assert apply_theme(qapp, "native") == "native"
-        assert qapp.style().objectName() == style
+        assert _underlying_style_name(qapp).lower() == "windows"
         assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
         assert qapp.styleSheet() == qss
     finally:

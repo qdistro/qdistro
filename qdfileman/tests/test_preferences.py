@@ -188,51 +188,60 @@ def _scaled_snapshot():
     )
 
 
-def _prime_native_baseline(app):
-    from PyQt6.QtGui import QColor, QPalette
+def _windows_style_name():
     from PyQt6.QtWidgets import QStyleFactory
 
-    keys = {name.lower(): name for name in QStyleFactory.keys()}
-    current = app.style().objectName()
-    for candidate in ("Windows", "GTK+", "Oxygen"):
-        mapped = keys.get(candidate.lower())
-        if mapped and mapped.lower() != current.lower():
-            app.setStyle(mapped)
-            break
+    for name in QStyleFactory.keys():
+        if name.lower() == "windows":
+            return name
+    pytest.skip("Windows style required to distinguish Fusion")
+
+
+def _prime_native_baseline(app, *, with_qss):
+    from PyQt6.QtGui import QColor, QPalette
+    from qfileman.theme import _underlying_style_name
+
+    style_name = _windows_style_name()
+    app.setStyle(style_name)
     pal = QPalette(app.palette())
     pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
     pal.setColor(QPalette.ColorRole.Base, QColor("#dce8dc"))
     app.setPalette(pal)
-    app.setStyleSheet("QWidget { background-color: #c8dcc8; }")
+    app.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
     return (
-        app.style().objectName(),
+        _underlying_style_name(app).lower(),
         app.palette().color(QPalette.ColorRole.Window).getRgb(),
         app.styleSheet(),
     )
 
 
-def test_native_without_controller_restores_captured_baseline(qapp, isolated_config):
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_native_without_controller_restores_captured_baseline(
+    qapp, isolated_config, with_qss
+):
     from PyQt6.QtGui import QPalette
-    from qfileman.theme import current_controller
+    from qfileman.theme import _underlying_style_name, current_controller
 
     original_style = qapp.style().objectName()
     original_pal = QPalette(qapp.palette())
     original_qss = qapp.styleSheet()
     reset_controller_for_tests()
     try:
-        style, window_rgb, qss = _prime_native_baseline(qapp)
+        style, window_rgb, qss = _prime_native_baseline(qapp, with_qss=with_qss)
+        assert style == "windows"
         assert current_controller() is None
         dlg = PreferencesDialog(isolated_config)
         try:
             dlg.combo_theme.setCurrentText("Dark")
             dlg._apply()
             assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+            assert _underlying_style_name(qapp).lower() == "fusion"
             dlg.combo_theme.setCurrentText("Native")
             dlg._apply()
         finally:
             dlg.deleteLater()
         assert current_controller() is None
-        assert qapp.style().objectName() == style
+        assert _underlying_style_name(qapp).lower() == "windows"
         assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
         assert qapp.styleSheet() == qss
         assert isolated_config.get("general", "theme_mode") == "native"
