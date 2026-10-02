@@ -79,10 +79,10 @@ human decides whether the test or the source is at fault. Silently
   Promise-returning `browser.*`. Reuse these; do not hand-roll a second
   fake-`browser` per file or stub `connectNative` ad hoc — extend
   `helpers.js` so every spec shares one fixture.
-- `tests/integration/firefox-gui/` — visual GUI scenarios (`NN-*.md`) run
-  in the VM against a stub native host; the load-bearing assertion there
-  is journal lines, not pixels. Read that directory's `AGENTS.md` before
-  authoring a scenario.
+- There is no in-component GUI scenario directory: the old stub-host
+  `tests/integration/firefox-gui/` scenarios were never dispatched by qci
+  and were removed (2026-10-02). The real browser bridge is covered live by
+  the root `tests/integration/vm/browser-9e-daemons.bats`.
 
 ### Anti-cheat rules (JS phrasing)
 

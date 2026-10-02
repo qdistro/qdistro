@@ -37,7 +37,6 @@ None of the source files are uncovered now. Iframe-specific tests for pwd-conten
 
 - Visual regression / pixel diff. That's the integration corpus, not vitest.
 - Real Firefox process startup. `web-ext run` is for the integration corpus.
-- Coverage of `tests/integration/firefox-gui/*.md` — those are agent-driven and have their own assertion model.
 
 ## See also
 
