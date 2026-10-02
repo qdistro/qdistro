@@ -63,7 +63,7 @@ restore_settings() {
 elif [ -f '$BACKUP' ]; then
     install -D -o admin -g users -m 600 '$BACKUP' '$SETTINGS'
 fi
-runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart noctalia-shell.service >/dev/null 2>&1 || true
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdshell.service >/dev/null 2>&1 || true
 rm -f '$BACKUP' '$MISSING_MARKER'" >/dev/null 2>&1
     fi
 }
@@ -90,15 +90,6 @@ PY
 
 is_number() {
     [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
-}
-
-assert_black() {
-    local shot="$1" frac
-    frac=$(nonblack_fraction "$shot")
-    is_number "$frac" || setup_fail "could not measure screenshot brightness: $shot"
-    awk "BEGIN { exit !($frac <= 0.005) }" \
-        || fail "expected blank/black screenshot, got non-black fraction $frac: $shot"
-    pass "display blanked as expected (non-black fraction=$frac): $shot"
 }
 
 assert_lit() {
@@ -129,10 +120,12 @@ mkdir -p "$ART"
 stamp=$(date +%Y%m%d-%H%M%S)
 before="$ART/qdwin-idle-dpms-before-$stamp.png"
 active="$ART/qdwin-idle-dpms-active-$stamp.png"
-blank="$ART/qdwin-idle-dpms-blank-$stamp.png"
 recovered="$ART/qdwin-idle-dpms-recovered-$stamp.png"
 
 journal_since="@$(date -u +%s)"
+# Cursor BEFORE the qdshell restart: the arm line must come from THIS restart.
+ARM_CUR=$(vm_exec "journalctl _UID=1000 -n 1 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' | tail -1" 2>/dev/null | grep -E '^s=' | tail -1 || true)
+[ -n "$ARM_CUR" ] || setup_fail "could not read a journal cursor before the qdshell restart"
 
 # Save settings, force qdshell display-off to one minute on both AC/battery,
 # arm a safe 2-minute inactivity notification, then restart qdshell so the
@@ -159,17 +152,26 @@ power.update({
 })
 p.write_text(json.dumps(data, indent=2, sort_keys=False) + '\\n')
 PY
-chown admin:users '$SETTINGS' '$BACKUP'
-runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart noctalia-shell.service"
+chown admin:users '$SETTINGS' '$BACKUP' 2>/dev/null || chown admin:users '$SETTINGS'
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user reset-failed qdshell.service 2>/dev/null || true
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdshell.service"
 
-# Wait for qdshell IPC so we know PowerService had a chance to initialize.
-vm_exec "for i in \$(seq 1 30); do
-  if runuser -u admin -- bash -lc 'printf \"status\\n\" | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null | grep -qx ok'; then
-    exit 0
-  fi
+# Wait for the restarted qdshell to re-bind (the retired qdshell.py ctrl socket
+# used to be the readiness probe; the supported surface is `qs ipc`), then for
+# THIS restart's PowerService arm line (cursor-scoped: a qdshell restart writes
+# 100+ lines after it, so a tail window misses it).
+vm_exec "for i in \$(seq 1 40); do
+  runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+    qs ipc -p /usr/share/quickshell/qdshell call qdwin capabilities 2>/dev/null | grep -q 'idleDpms=true' && exit 0
   sleep 1
 done
-exit 1" >/dev/null || setup_fail "qdshell ctrl socket did not return after restart"
+exit 1" >/dev/null || setup_fail "qdshell did not re-bind with idleDpms=true after restart"
+vm_exec "for i in \$(seq 1 30); do
+  journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdshell.service --after-cursor='$ARM_CUR' --no-pager 2>/dev/null \
+    | grep -q 'idle policy armed: inactivity=120000ms (ask), displayOff=60000ms' && exit 0
+  sleep 1
+done
+exit 1" >/dev/null || fail "qdshell did not arm 'inactivity=120000ms (ask), displayOff=60000ms' after the settings write"
 pass "qdshell restarted with display-off=1 minute"
 
 qdwin_qmp_key shift down
@@ -203,11 +205,13 @@ fi
 
 echo "waiting ${WAIT_S}s for qdshell display-off idle..."
 sleep "$WAIT_S"
-if take_screenshot "$blank"; then
-    assert_black "$blank"
-else
-    pass "display blanked as expected: virsh screenshot failed while output was inactive"
-fi
+# DPMS verdict from the kernel DRM connector, not a screenshot: while the output
+# is DPMS-off the compositor suspends repaint, so the shell-capture path cannot
+# service a capture until wake (tests/integration/qdwin-noctalia/05).
+dpms=$(vm_exec "for c in /sys/class/drm/card*-*; do [ \"\$(cat \$c/status 2>/dev/null)\" = connected ] && { cat \$c/dpms; break; }; done" 2>/dev/null | grep -E '^(On|Off|Standby|Suspend)$' | tail -1 || true)
+[ "$dpms" = Off ] || fail "expected the connected DRM connector DPMS=Off after ${WAIT_S}s idle, got '${dpms:-unreadable}'"
+pass "display blanked as expected (DRM connector dpms=Off)"
+WAKE_CUR=$(vm_exec "journalctl _UID=1000 -n 1 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' | tail -1" 2>/dev/null | grep -E '^s=' | tail -1 || true)
 
 # Real input path: one harmless key tap and a mouse move. This must trigger
 # qdwin internal-idle resume, qdshell's `resumed`, and set_display_power(true).
@@ -219,6 +223,14 @@ read -r sw sh < <(qci_view_raw_dims "$before")
 export QDWIN_SCREEN_W=$sw QDWIN_SCREEN_H=$sh
 qdwin_mouse_move "$((sw / 2))" "$((sh / 2))"
 sleep "$RECOVER_WAIT_S"
+
+# virtio-gpu may reject the DPMS-on atomic commit; that is an environment
+# limit recorded by the compositor, not a qdwin/qdshell regression (same SKIP
+# contract as qdwin-noctalia/05: print SKIP and exit 0).
+if [ -n "${WAKE_CUR:-}" ] && vm_exec "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$WAKE_CUR' --no-pager -o cat 2>/dev/null | grep -qE \"(^|[[:space:]])atomic: couldn't commit new state: Invalid argument\\\$\"" >/dev/null 2>&1; then
+    echo "SKIP: virtio-gpu rejected the DPMS-on atomic commit (atomic: couldn't commit new state: Invalid argument)"
+    exit 0
+fi
 
 take_screenshot "$recovered" || fail "recovered screenshot failed; output did not become capturable"
 assert_lit "$recovered"
@@ -247,5 +259,4 @@ echo "PASS: idle DPMS recovery scenario on $VMNAME"
 echo "artifacts:"
 echo "  before:    $before"
 echo "  active:    $active"
-echo "  blank:     $blank"
 echo "  recovered: $recovered"

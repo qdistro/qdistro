@@ -57,6 +57,7 @@ if node.found()
   test('remote-display-lease', node, args: files('tests/test_remote_display_lease.js'))
   test('r9-input-gate', node, args: files('tests/test_r9_input_gate.js'))
   test('qdwin-only-guard', node, args: files('tests/test_qdwin_only_guard.js'))
+  test('fork-strip-guard', node, args: files('tests/test_fork_strip_guard.js'))
   # Mirror/logic + misc tests that existed on disk but were never wired into
   # `meson test` (they passed locally but never ran in CI). The drift guard is
   # the load-bearing protection for the security-relevant QML/JS mirrors

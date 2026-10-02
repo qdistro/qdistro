@@ -23,6 +23,31 @@ GUI_VIEW_STATE_NAME=.qci-view-state
 run_qdwin_executable_gui_smokes() {
     local vm=$1 qdwin_capture=${2:-1} rc=$EXIT_OK scenario file step_rc
     export VMNAME="$vm"
+    # Deterministic (no-agent) smokes that replaced `qci:visual: none` agent
+    # scenarios (test-audit-261002 convert-to-headless) plus the executable
+    # twins of qdlocker/07 and qdwin-noctalia/05. Workspace-relative; each
+    # records its own `<component>-<basename>` row and runs after the core
+    # smokes, which they must not perturb (each restores the session it
+    # changes: qdshell role, lock state, test windows, settings).
+    local headless_smokes=(
+        qdwin/tests/gui/agent-focus-events-smoke.sh
+        qdwin/tests/gui/agent-bar-quiet-idle-smoke.sh
+        qdwin/tests/gui/agent-keybinding-events-smoke.sh
+        qdwin/tests/gui/agent-shell-binding-events-smoke.sh
+        qdwin/tests/gui/agent-shell-drives-close-smoke.sh
+        qdwin/tests/gui/agent-idle-dpms-capability-smoke.sh
+        qdwin/tests/gui/agent-wm-policy-bystander-smoke.sh
+        qdwin/tests/gui/agent-cursor-tracking-smoke.sh
+        qdwin/tests/gui/agent-idle-dpms-recovery-smoke.sh
+        qdlocker/tests/gui/agent-fprintd-fallback-smoke.sh
+        qdlocker/tests/gui/agent-lock-occlusion-smoke.sh
+    )
+    _record_headless_smoke_skips() {
+        local f
+        for f in "${headless_smokes[@]}"; do
+            record_result gui "${f%%/*}-$(basename "$f")" skip 0 pass gui "" "$1"
+        done
+    }
     # Every executable smoke takes at least one qdwin_screenshot(), which now
     # requires the golden's shell-capture bake. On an old golden, skip the
     # WHOLE lane with the same rebake hint the vision/markdown lanes use —
@@ -39,6 +64,7 @@ run_qdwin_executable_gui_smokes() {
             record_result gui "qdwin-$scenario" skip 0 pass gui "" \
                 "golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (qdwin_screenshot needs the shell-capture path); rebake the golden with fresh-vm-bootstrap"
         done
+        _record_headless_smoke_skips "golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (qdwin_screenshot needs the shell-capture path); rebake the golden with fresh-vm-bootstrap"
         return 0
     fi
     if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
@@ -52,6 +78,7 @@ run_qdwin_executable_gui_smokes() {
         done
         record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
         record_result gui "qdwin-agent-shell-capture-smoke.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
+        _record_headless_smoke_skips "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
         return 0
     fi
     if ! "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && ! pgrep -x labwc >/dev/null && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-compositor.service qdshell.service qdistro-cursor-sprites.service >/dev/null" >/dev/null 2>&1; then
@@ -65,6 +92,7 @@ run_qdwin_executable_gui_smokes() {
         done
         record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "qdwin production session not active in this VM profile"
         record_result gui "qdwin-agent-shell-capture-smoke.sh" skip 0 pass gui "" "qdwin production session not active in this VM profile"
+        _record_headless_smoke_skips "qdwin production session not active in this VM profile"
         return 0
     fi
     for scenario in \
@@ -123,6 +151,18 @@ run_qdwin_executable_gui_smokes() {
         run_logged gui "qdwin-agent-shell-capture-smoke.sh" "$EXIT_GUI" gui "$WORKSPACE/qdwin" "VMNAME='$vm' '$sc_file'" ""; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     fi
+
+    local hs
+    for hs in "${headless_smokes[@]}"; do
+        file="$WORKSPACE/$hs"
+        if [ ! -x "$file" ]; then
+            record_blocked gui "${hs%%/*}-$(basename "$hs")" "$EXIT_GUI" gui "scenario script missing or not executable"
+            [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+            continue
+        fi
+        run_logged gui "${hs%%/*}-$(basename "$hs")" "$EXIT_GUI" gui "$WORKSPACE/${hs%%/*}" "VMNAME='$vm' '$file'" ""; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    done
     return "$rc"
 }
 
