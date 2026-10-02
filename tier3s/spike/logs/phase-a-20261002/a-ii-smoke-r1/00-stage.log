@@ -1,0 +1,16 @@
+### host 2026-10-02T09:44:33Z: vm-exec tier3s-261002-113918-2224374-3622 <<CMD
+set -e; mkdir -p /var/tmp/t3s; curl -fsS http://10.0.2.2:42961/expect.txt -o /var/tmp/t3s/expect.txt
+rm -rf /root/qdistro-src.aii; mkdir -p /root/qdistro-src.aii; cd /root/qdistro-src.aii
+curl -fsS http://10.0.2.2:42961/src.tar | tar -xf -; chown -R root:root /root/qdistro-src.aii
+echo "staged commit $(curl -fsS http://10.0.2.2:42961/commit.txt)"
+mkdir -p /var/cache/qdistro/runsc/20260928.0; curl -fsS http://10.0.2.2:42961/gvisor.tar.zstd -o /var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd
+cat /etc/qdistro/profile; uname -r; podman --version; systemctl --version | head -1; getenforce
+CMD
+[vm-exec] guest identity pinned (pid 6082 start 29742)
+staged commit 5e884c19e742e9ede26f74119fb8c647f2402b5e
+QDISTRO_PROFILE=dev
+7.2.8-1-default
+podman version 6.0.2
+systemd 261 (261.2)
+Permissive
+### exit=0

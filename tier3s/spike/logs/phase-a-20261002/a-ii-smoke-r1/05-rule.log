@@ -1,0 +1,9 @@
+### host 2026-10-02T09:45:16Z: vm-exec tier3s-261002-113918-2224374-3622 <<CMD
+bash /root/qdistro-src/tier3s/spike/phase-a-ii-smoke.sh rule
+CMD
+[vm-exec] guest identity pinned (pid 9446 start 34024)
+CHECK installed-broker-has-prefix: OK (1)
+CHECK check-without-rule: OK (s "unknown")
+CHECK check-with-rule: OK (s "allow")
+### BAD=0
+### exit=0
