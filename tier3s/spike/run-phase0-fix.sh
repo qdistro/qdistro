@@ -36,7 +36,7 @@ step() {   # step <log name> <guest command>
     printf '%-48s rc=%s %s\n' "$1" "$rc" "$(grep -c ': BAD' "$out/$1.log") BAD"
     [ "$rc" -eq 0 ] || fails=$((fails + 1))
 }
-L='. tier3s/spike/phase0-fix-lib.sh'
+L='. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh'
 U=http://10.0.2.2:$port
 
 { echo "### host: staged commit $(cat "$serve/commit.txt"); host sha256 of the staged files:"
