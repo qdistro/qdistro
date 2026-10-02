@@ -1,7 +1,10 @@
-#!/usr/bin/env python3
-"""qdistro-approvals — admin CLI for the approval cache + audit log.
+#!/usr/bin/python3
+"""qdistro-approvals — admin CLI for pending requests, the approval cache and the audit log.
 
 Subcommands:
+    pending [--json]           List requests waiting for an admin decision
+    approve <id> [--scope S]   Allow a pending request (default scope: once)
+    deny <id>                  Deny a pending request
     list                       List currently-cached approvals
     revoke <id>                Delete one cached approval by id
     revoke --all-for-uid <N>   Delete all cached approvals for a uid
@@ -9,11 +12,17 @@ Subcommands:
                                Show recent audit rows (newest first)
     gc                         Run cache GC immediately (delete expired rows)
 
-Root-only (writes to /var/lib/qdistro/...).
+Root-only. The broker trusts this tool as a root admin-control peer only
+when it runs from its installed path, /usr/local/sbin/qdistro-approvals
+(the path must appear in the Python process's argv; see
+_peer_matches_admin_control in broker/qdistro_admin_broker.py). Run it as
+`qdistro-approvals ...` (PATH lookup) or by that absolute path, not as
+`python3 cli/qdistro_approvals.py` from a source tree.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import stat
@@ -180,6 +189,140 @@ def cmd_audit(args) -> int:
     return 0
 
 
+# Mirrors broker/qdistro_admin_broker.py _VALID_SCOPES (and the TUI/Qt app
+# scope pickers). The broker re-validates every scope and refuses the ones a
+# given request cannot take (delegated, one-shot, argv-less); this list only
+# keeps an obvious typo from reaching the bus.
+SCOPES = ("once", "1h", "24h", "forever", "forever_exe",
+          "forever_argv", "forever_basename", "forever_prefix")
+
+
+def _safe(value) -> str:
+    """Render requester-controlled text for a root terminal.
+
+    action, exe and details come from the (untrusted) requesting process.
+    Escape every non-printable character so a crafted request cannot emit
+    terminal control sequences into the admin's shell.
+    """
+    s = str(value)
+    if s.isprintable():
+        return s
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in s)
+
+
+def _dbus_error_text(exc) -> str:
+    name = ""
+    try:
+        name = exc.get_dbus_name() or ""
+    except Exception:  # noqa: BLE001
+        name = ""
+    msg = ""
+    try:
+        msg = exc.get_dbus_message() or ""
+    except Exception:  # noqa: BLE001
+        msg = str(exc)
+    short = name.rsplit(".", 1)[-1] if name else ""
+    return f"{short}: {msg}" if short else (msg or str(exc))
+
+
+def _pending_rows(iface) -> list[dict]:
+    """GetPending, normalized to plain Python types."""
+    out = []
+    for r in iface.GetPending():
+        row = {}
+        for k, v in dict(r).items():
+            k = str(k)
+            if k in ("id", "uid", "pid"):
+                row[k] = int(v)
+            elif k == "details":
+                row[k] = {str(dk): str(dv) for dk, dv in dict(v).items()}
+            elif k == "layered_pending":
+                row[k] = bool(v)
+            else:
+                row[k] = str(v)
+        out.append(row)
+    out.sort(key=lambda r: r.get("id", 0))
+    return out
+
+
+def cmd_pending(args) -> int:
+    iface, dbus_mod = _broker()
+    try:
+        rows = _pending_rows(iface)
+    except dbus_mod.DBusException as e:
+        print(f"qdistro-approvals: pending failed: {_dbus_error_text(e)}",
+              file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("(no pending requests)")
+        return 0
+    print(f"{'id':>5}  {'uid':>5}  {'pid':>7}  action")
+    print("-" * 72)
+    for r in rows:
+        print(f"{r.get('id', 0):>5}  {r.get('uid', 0):>5}  "
+              f"{r.get('pid', 0):>7}  {_safe(r.get('action', ''))}")
+        print(f"{'':>5}  exe={_safe(r.get('exe', ''))}")
+        details = r.get("details") or {}
+        for k in sorted(details):
+            print(f"{'':>5}  {_safe(k)}={_safe(details[k])}")
+    return 0
+
+
+def _decide(args, decision: str, scope: str) -> int:
+    verb = "approve" if decision == "allow" else "deny"
+    iface, dbus_mod = _broker()
+    rid = int(args.id)
+    try:
+        before = {r["id"]: r for r in _pending_rows(iface)}
+    except dbus_mod.DBusException as e:
+        print(f"qdistro-approvals: {verb} failed: {_dbus_error_text(e)}",
+              file=sys.stderr)
+        return 1
+    req = before.get(rid)
+    # DecideRequest silently ignores an unknown or already-decided id, so
+    # check first: a typo must not look like a successful decision.
+    if req is None:
+        print(f"qdistro-approvals: no pending request with id={rid}",
+              file=sys.stderr)
+        return 1
+    if decision == "allow" and scope != "once":
+        print(f"qdistro-approvals: warning: scope {scope!r} caches this "
+              f"approval beyond this one request (revoke with "
+              f"`qdistro-approvals list` / `revoke`)", file=sys.stderr)
+    try:
+        iface.DecideRequest(rid, decision, scope)
+    except dbus_mod.DBusException as e:
+        print(f"qdistro-approvals: {verb} failed: {_dbus_error_text(e)}",
+              file=sys.stderr)
+        return 1
+    try:
+        still = any(r["id"] == rid for r in _pending_rows(iface))
+    except dbus_mod.DBusException:
+        still = False
+    if still:
+        print(f"qdistro-approvals: request id={rid} is still pending after "
+              f"{verb}", file=sys.stderr)
+        return 1
+    done = "approved" if decision == "allow" else "denied"
+    print(f"{done} request id={rid} uid={req.get('uid', 0)} "
+          f"pid={req.get('pid', 0)} action={_safe(req.get('action', ''))} "
+          f"(scope: {scope})")
+    return 0
+
+
+def cmd_approve(args) -> int:
+    return _decide(args, "allow", args.scope)
+
+
+def cmd_deny(args) -> int:
+    # A deny is never cached (the broker writes cache rows on allow only),
+    # so it carries the narrowest scope.
+    return _decide(args, "deny", "once")
+
+
 def cmd_audit_gc(args) -> int:
     iface, dbus_mod = _broker()
     try:
@@ -210,6 +353,22 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--version", action="version",
                     version="%(prog)s (qdistro)")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    pp = sub.add_parser("pending", help="List requests waiting for a decision")
+    pp.add_argument("--json", action="store_true",
+                    help="print the broker's GetPending rows as JSON")
+    pp.set_defaults(fn=cmd_pending)
+
+    pap = sub.add_parser("approve", help="Allow a pending request")
+    pap.add_argument("id", type=int, help="request id from `pending`")
+    pap.add_argument("--scope", choices=SCOPES, default="once",
+                     help="how long the approval holds (default: once; "
+                          "anything else is cached)")
+    pap.set_defaults(fn=cmd_approve)
+
+    pd = sub.add_parser("deny", help="Deny a pending request")
+    pd.add_argument("id", type=int, help="request id from `pending`")
+    pd.set_defaults(fn=cmd_deny)
 
     sub.add_parser("list", help="List currently-cached approvals").set_defaults(fn=cmd_list)
 

@@ -1,14 +1,20 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """qdistro admin TUI — terminal companion to the PyQt admin app.
 
 Same broker, same scope picker, same approve/deny semantics. Designed
 to be runnable on any TTY (incl. an ssh session, a GRUB rescue/emergency
 shell, or a serial console) — no compositor required.
 
-See  for the playbook + acceptance.
+Installed command: /usr/local/bin/qdistro-admin-tui (a symlink to the
+modules under /usr/local/lib/qdistro/admin-tui/, laid down by
+scripts/install/install-admin-cli-for-vm.sh). Run it as the admin user
+(uid 1000): the broker admits an admin-uid Python peer only when the
+installed path is in its argv. As root, use `qdistro-approvals pending /
+approve / deny` instead. See doc/admin-approval.md.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -680,6 +686,13 @@ class AdminTuiApp(App):
 
 
 def main() -> int:
+    if os.geteuid() == 0:
+        # The broker trusts the TUI only as the uid-1000 admin; as root
+        # every call would come back AccessDenied. Say so up front.
+        print("qdistro-admin-tui: run as the admin user (uid 1000); "
+              "as root use `qdistro-approvals pending|approve|deny`",
+              file=sys.stderr)
+        return 2
     app = AdminTuiApp()
     app.run()
     return 0
