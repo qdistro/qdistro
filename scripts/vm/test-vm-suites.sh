@@ -110,6 +110,16 @@ if [[ $PHASES == *" bats "* ]]; then
         for b in $QDISTRO_SUITES_BATS_FILES; do BATS_FILES+=("$REPO/tests/integration/vm/$b.bats"); done
     else
         BATS_FILES=("$REPO"/tests/integration/vm/*.bats)
+        # shell-modules wrecks the shared guest by design: its per-test setup
+        # stops the broker and its failing probes leave their own outer
+        # compositor. qci never notices (a disposable VM per file); here it
+        # runs last so its debris cannot cut the files after it.
+        for i in "${!BATS_FILES[@]}"; do
+            [ "$(basename "${BATS_FILES[i]}")" = shell-modules.bats ] || continue
+            BATS_FILES+=("${BATS_FILES[i]}")
+            unset 'BATS_FILES[i]'
+        done
+        BATS_FILES=("${BATS_FILES[@]}")
     fi
 fi
 {
@@ -548,6 +558,30 @@ for f in "${BATS_FILES[@]}"; do
         break
     fi
     if SSH_CAP=300 baseline > "$W/baseline.out" 2>&1; then brc=0; else brc=$?; fi
+    if [ "$brc" -ne 0 ] && vmssh 'pgrep -u _greeter -f qdgreeter >/dev/null' 2>/dev/null; then
+        # In-place restarts can lose the seat to the greeter that reappears
+        # when admin's session dies; log admin in again, the way the session
+        # first came up.
+        log "greeter is up after $base; logging admin in again"
+        sleep 10   # the password field takes focus once the greeter has painted
+        send_text "$IMAGE_PASSWORD"
+        SECONDS=0
+        until session_up; do
+            [ "$SECONDS" -lt 150 ] || break
+            sleep 2
+        done
+        if session_up && SSH_CAP=120 baseline >> "$W/baseline.out" 2>&1; then
+            echo "harness: admin re-logged at the greeter after this file" >> "$W/baseline.out"
+            brc=0
+        fi
+    fi
+    if [ "$brc" -ne 0 ]; then
+        SSH_CAP=60 rootssh 'echo "--- failed units"; systemctl --no-pager --failed; \
+            echo "--- admin session units"; systemctl --user -M admin@ --no-pager list-units "qdwin*" "qdshell*" 2>&1 | tail -12; \
+            echo "--- wayland sockets"; ls -l /run/user/1000/wayland-* 2>&1; \
+            echo "--- compositor journal"; journalctl -b --no-pager _COMM=weston 2>/dev/null | tail -12' \
+            >> "$W/baseline.out" 2>&1 || true
+    fi
     sed 's/^/# /' "$W/baseline.out" | tee -a "$OUT/bats/$base.tap"
     if [ "$brc" -ne 0 ]; then
         echo "$base: core services or admin's session not restored" > "$OUT/baseline-failed"
