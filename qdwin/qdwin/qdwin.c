@@ -1994,15 +1994,27 @@ qdwin_surface_added(struct weston_desktop_surface *dsurf, void *data)
 		 * once the inner nested weston runs with a pipewire-only backend
 		 * (no wayland-backend host-output window), NO regular
 		 * toplevel_added line should ever carry the nested-publisher's
-		 * pid. With a wayland-backend that pid WOULD appear here. */
+		 * pid. With a wayland-backend that pid WOULD appear here.
+		 *
+		 * The title closes the journal's account of every window's
+		 * title: later changes are logged as `toplevel_title`, but
+		 * only as a diff against the title cached at add time, so
+		 * without it a window that never renames itself has no title
+		 * in the journal at all. GUI tests find a window by title
+		 * from these two lines (ci/lib/guest/gui-waiters.sh,
+		 * qdwin_windows). It is appended last so readers that match
+		 * a prefix up to app_id keep working. */
 		pid_t peer_pid = 0; uid_t peer_uid = (uid_t)-1;
+		const char *title =
+			weston_desktop_surface_get_title(dsurf);
 		qdwin_desktop_surface_peer(dsurf, &peer_pid, &peer_uid);
 		(void)peer_uid;
 		weston_log("qdwin: toplevel_added handle=%u uid=%u pid=%d "
-			   "app_id=%s\n",
+			   "app_id=%s title=\"%s\"\n",
 			   tl->handle, (unsigned)qdwin_client_uid(dsurf),
 			   (int)peer_pid,
-			   weston_desktop_surface_get_app_id(dsurf) ?: "(null)");
+			   weston_desktop_surface_get_app_id(dsurf) ?: "(null)",
+			   title ? title : "");
 	}
 
 	qdwin_send_toplevel_added(qdwin, tl);

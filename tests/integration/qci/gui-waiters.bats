@@ -156,6 +156,116 @@ setup() {
     [ "$status" -eq 2 ]
 }
 
+# ---- qdwin lane window helpers (journal of the running compositor) ---------
+# Fixture journal: what qdwin logs for the admin app (handle 3, pid 111), a
+# window that renamed itself, one that was removed, and focus moves.
+_qdwin_fake_journal() {
+    export QDWIN_FAKE_JOURNAL="$BATS_TEST_TMPDIR/journal"
+    cat > "$QDWIN_FAKE_JOURNAL" <<'EOF'
+[13:00:00.000] qdwin: toplevel_added handle=3 uid=1000 pid=111 app_id=python3 title="admin approvals"
+[13:00:00.010] qdwin: mapped handle=3 size=900x600 pos=190,115 (normal)
+[13:00:00.020] qdwin: focus handle=3 (was 4294967295) seat=default
+[13:00:01.000] qdwin: toplevel_added handle=4 uid=1000 pid=222 app_id=foo title="say "hi" pid=999 x"
+[13:00:01.010] qdwin: mapped handle=4 size=100x100 pos=0,0 (normal)
+[13:00:02.000] qdwin: toplevel_title handle=3 title="admin approvals (1 pending)"
+[13:00:03.000] qdwin: toplevel_added handle=5 uid=1000 pid=333 app_id=old title="admin approvals"
+[13:00:04.000] qdwin: toplevel_removed handle=5
+[13:00:05.000] qdwin: focus handle=4 (was 3) seat=default
+EOF
+    qdwin_compositor_pid() { echo 4242; }
+    journalctl() { [ "$1" = "_PID=4242" ] || return 1; cat "$QDWIN_FAKE_JOURNAL"; }
+    export -f qdwin_compositor_pid journalctl
+}
+
+@test "qdwin_windows: live toplevels with their CURRENT titles; removed ones gone" {
+    _qdwin_fake_journal
+    run qdwin_windows
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "$(printf '3\t111\t1000\tpython3\tadmin approvals (1 pending)')" ]
+    [ "${lines[1]}" = "$(printf '4\t222\t1000\tfoo\tsay "hi" pid=999 x')" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "qdwin_window_handle: whole-title match, optional pid filter" {
+    _qdwin_fake_journal
+    run qdwin_window_handle 'admin approvals \(1 pending\)'
+    [ "$status" -eq 0 ]
+    [ "$output" = 3 ]
+    # The removed handle 5 still has the bare title in the journal; it must
+    # not satisfy a live-window lookup, and the prefix must not match either.
+    run qdwin_window_handle 'admin approvals'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run qdwin_window_handle 'admin approvals.*' 111
+    [ "$status" -eq 0 ]
+    [ "$output" = 3 ]
+    run qdwin_window_handle 'admin approvals.*' 222
+    [ "$status" -ne 0 ]
+}
+
+@test "await_qdwin_window_title: OK on the state, TIMEOUT names every live title" {
+    _qdwin_fake_journal
+    run await_qdwin_window_title 'admin approvals \(1 pending\)' 2 1
+    [ "$status" -eq 0 ]
+    run await_qdwin_window_title 'admin approvals' 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"3=admin approvals (1 pending)"* ]]
+    run await_qdwin_window_title '' 1 1
+    [ "$status" -eq 2 ]
+}
+
+@test "await_qdwin_window_mapped_pid: needs a mapped line for THAT pid's handle" {
+    _qdwin_fake_journal
+    run await_qdwin_window_mapped_pid 111 2 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"mapped handle=3 pid=111"* ]]
+    # Handle 4's TITLE contains "pid=999": its pid is still 222.
+    run await_qdwin_window_mapped_pid 222 2 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"mapped handle=4 pid=222"* ]]
+    run await_qdwin_window_mapped_pid 999 1 1
+    [ "$status" -ne 0 ]
+    # pid 333 was added (handle 5) but never mapped.
+    run await_qdwin_window_mapped_pid 333 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no mapped toplevel for pid 333"* ]]
+}
+
+@test "qdwin_focused_handle: the last focus line wins" {
+    _qdwin_fake_journal
+    run qdwin_focused_handle
+    [ "$status" -eq 0 ]
+    [ "$output" = 4 ]
+}
+
+@test "qdwin_focus_window: asks qdshell, returns only once focus is on the window" {
+    _qdwin_fake_journal
+    # Focus starts on handle 4; the fake qs moves it to the requested handle.
+    runuser() {
+        local a; for a in "$@"; do :; done
+        printf '[13:00:09.000] qdwin: focus handle=%s (was 4) seat=default\n' "$a" >> "$QDWIN_FAKE_JOURNAL"
+        echo "$*" >> "$BATS_TEST_TMPDIR/qs-calls"
+    }
+    export -f runuser
+    run qdwin_focus_window 'admin approvals.*' 5
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = 3 ]
+    grep -q 'qs ipc -p /usr/share/quickshell/qdshell call qdwin focusWindow 3' "$BATS_TEST_TMPDIR/qs-calls"
+}
+
+@test "qdwin_focus_window: fails loudly when focus never lands" {
+    _qdwin_fake_journal
+    runuser() { :; }
+    export -f runuser
+    run qdwin_focus_window 'admin approvals.*' 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"focus stayed on handle 4, not 3"* ]]
+    run qdwin_focus_window 'no such window' 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no live window titled"* ]]
+}
+
 @test "await_broker_pending_action: rejects an empty action" {
     run await_broker_pending_action "" 1 1
     [ "$status" -eq 2 ]

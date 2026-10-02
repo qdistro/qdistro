@@ -161,6 +161,11 @@ Environment:
                             (QDWIN_APP_DEPS=1). They skip by default.
                             Without this, disposable `qci gui` provisions a
                             separate qdwin-profile VM for qdwin-dependent rows.
+  QCI_LABWC_ADMIN_LANE=1    Run the labwc/XWayland admin lane: the
+                            permissions-gui/workflow-gui scenarios not routed
+                            to the qdwin lane. None of labwc, LXQt, XWayland
+                            or the xcb launcher ships, so they skip by default;
+                            `qci gui-admin` sets this automatically.
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
   QDISTRO_VM_BASE           baked (default)|kiwi|auto. Which backing image spin-test-vm

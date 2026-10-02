@@ -97,6 +97,63 @@ silences only the success announcement, never a timeout. Set it per call, never
  activation and some keyboard fallbacks use xdotool in XWayland (`DISPLAY=:0`).
 - VM user password is `Pa_ssw0rd45` for `admin` and `work`.
 
+## qdwin lane: the admin app as the image ships it
+
+The admin-app scenarios 03, 04, 06, 08, 10, 12, 13, 14, 34, 43 and 47 run on
+the **qdwin lane** (`gui_scenario_requires_qdwin` in `ci/lib/gates/gui.sh`),
+like 18–21: the product session (qdwin compositor + qdshell on `wayland-1`),
+with the admin app started through the **shipped** native-Wayland launcher
+`/usr/local/bin/qdistro-start-admin-app` (`deploy/start-admin-app-wayland.sh`).
+There is no X server, so nothing in those scenarios may use `xdotool`,
+`DISPLAY=:0`, `vm-gui activate`, `await_x11_window_title`, or
+`vm-gui screenshot` for a graded frame. Everything else on this page (vm-exec
+quoting, `bg_start`/`bg_wait`, broker ground truth, preview/confirm clicks)
+still applies. The scenarios that do NOT name the qdwin lane run on the labwc
+admin lane, which is opt-in (`QCI_LABWC_ADMIN_LANE=1`; see ci/README.md).
+
+The lane's primitives (guest side, in `/tmp/qci-gui-waiters.sh`):
+
+| need | qdwin lane | labwc lane equivalent |
+| --- | --- | --- |
+| preconditions | `qdwin_admin_lane_setup [--silos]`: session up, `--silos` provisions work/work2 (the qdwin golden has none), idle locker held off and proven unlocked | baked into the gui-admin golden |
+| launch, wait for first painted frame | `qdwin_start_admin_app` (prints the app pid; fails if the launcher exits nonzero) | `runuser -u admin -- /usr/local/bin/qdistro-start-admin-app` |
+| stop the app | `qdwin_stop_admin_app` | `pkill -u admin -f qdistro_admin_app` |
+| wait for the app's model state | `await_qdwin_window_title 'admin approvals \(1 pending\)' 30` | `await_x11_window_title admin ...` |
+| focus a window before keys | `qdwin_focus_window 'admin approvals.*'` (returns once the compositor reports keyboard focus on it) | `xdotool search --sync ... windowactivate --sync` |
+| list windows | `qdwin_windows` (handle, pid, uid, app_id, title) | `xdotool search` |
+
+Keys still go through `virsh send-key` on the HOST (the KVM keyboard reaches
+the focused Wayland client through the compositor). Graded frames are taken
+with qdwin's in-compositor capture on the HOST:
+
+```bash
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
+qdwin_set_vm "$VM"
+qdwin_screenshot "${QCI_GUI_ARTIFACT_DIR:-/tmp}/NN-s1.png"
+```
+
+It renders the compositor's current scene from the clients' committed
+buffers, so the XWayland stale/half-drawn frame that the labwc lane suffers
+(the "display-path stall" in pitfall 2) does not exist here, and the
+labwc-era "recapture up to N frames" allowances are gone from these
+scenarios: a partly drawn or stale admin window on this lane is a FAIL
+(product or compositor), not harness noise. Model-targeted clicks keep the
+`vm-gui click-preview` / `click-confirm` handshake (it drives the QEMU pointer,
+which qdwin receives like a mouse); grade the RESULT from a `qdwin_screenshot`
+taken after the state wait, not from the click-confirm post frame.
+
+How the paint wait works: with `QDISTRO_ADMIN_APP_WAIT_PAINTED=1` the shipped
+launcher starts the app detached and returns only after the app created its
+first-paint marker, which it does after the first paint of its exposed window
+(whose flush is the commit of that frame). `qdwin_start_admin_app` then waits
+for qdwin's own `mapped handle=` journal line for that pid, logged while the
+compositor processes the window's first buffer, so on return the compositor
+holds the painted frame. (Qt's `sync()`, the X11 launcher's round trip, is a
+no-op on Wayland.) Window titles come from the compositor's journal lines
+(`toplevel_added ... title=`, `toplevel_title`), and a title change is logged
+on the commit that carries it, so a title wait followed by a capture shows the
+frame of that state.
+
 ## Hard-learned pitfalls (read before running commands)
 
 1. **vm-exec quoting is fragile.** vm-exec builds qemu-ga's JSON

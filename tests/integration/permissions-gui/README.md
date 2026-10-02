@@ -5,6 +5,17 @@ User-authored GUI acceptance scenarios for qdistro . Each
 prose. A graphic-aware subagent executes them against a running VM
 following the instructions in `AGENTS.md`.
 
+## Lanes
+
+Two GUI lanes run these scenarios (see `AGENTS.md`, "qdwin lane"):
+
+- **qdwin lane** — the product session (qdwin + qdshell) with the admin
+  app started through the shipped native-Wayland launcher: 03, 04, 06,
+  08, 10, 12, 13, 14, 34, 43, 47 (and 18–21, 56, 57).
+- **labwc admin lane** — labwc + LXQt + XWayland with the test-only xcb
+  launcher: every other scenario here. None of that stack ships, so the
+  lane is opt-in (`QCI_LABWC_ADMIN_LANE=1`, or `qci gui-admin`).
+
 ## Scenario index by area
 
 Numbering is roughly chronological; each scenario stands on its own.
@@ -16,19 +27,19 @@ screenshots) in the bats gate — 07, 11, 15, 17, 23–33, 36–39,
 `tests/integration/vm/s58-qsu-real-flow.sh` (run by `tiered-isolation.bats`).
 
 - **01–10** — admin app + TUI smoke (visual / scope picker / approve /
-  deny / mouse / restart-resilience / cache revoke).
+  deny / mouse / restart-resilience / cache revoke and its
+  `ApprovalRevoked` signal, formerly 22).
 - **12–14** — cross-user `RelayMessage` flow, visual approve / deny /
   forbidden scope.
 - **16** — realapp send-to, visual (shared-XWayland expedient).
 - **18** — pod-apps launcher badge.
 - **19–21** — tier-5 loopback / cold-start / close-cleanup.
-- **22** — `ApprovalRevoked` signal from the Cache-tab revoke.
 - **34** — admin-app navigation across multiple pending requests.
 - **35** — TUI + Qt admin app concurrent subscribers stay in sync.
 - **40-tui** — TUI survives a broker restart.
-- **43, 47, 48, 55** — `qsu` admin UX: 43 (prompt + scope radios
+- **43, 47, 55** — `qsu` admin UX: 43 (prompt + scope radios
   rendered), 47 (delegated `forever_exe` rejected with a
-  `ScopeNotPermitted` modal), 48 (TUI argv rendering), 55 (qsu end-to-end
+  `ScopeNotPermitted` modal), 55 (qsu end-to-end
   under SELinux Enforcing; its headless twin `phase7-qsu-enforcing` in
   `tiered-isolation.bats` needs an SSH-transport enforcing VM).
 - **56–57** — tier-4 RDP transport visual acceptance: single guest

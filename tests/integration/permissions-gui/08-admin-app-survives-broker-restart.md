@@ -2,6 +2,10 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
 **What**: start the Qt admin app, restart `qdistro-admin-broker.service`
 mid-session, inject a permission request from `work`, verify the
 admin app shows the new pending row **without** being manually
@@ -17,11 +21,16 @@ the failure is invisible (admin quietly goes blind to new requests).
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-1336}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures, idle locker held off and proven
+# unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 # Pending requests live in the broker's in-memory queue, not sqlite.
 # Restart empties it. Prove GetPending is empty before launching the
@@ -55,17 +64,18 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | runuser -u admin -- python3 -"
 ### S1 — launch admin app on a clean broker, verify empty state
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
+# The shipped launcher, first-paint mode (a nonzero exit FAILS S1).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
 $VMEXEC "$VM" 'dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.GetPending'
-$VMGUI "$VM" screenshot /tmp/08-s1-empty.png
+qdwin_screenshot "$ART/08-s1-empty.png"
 ```
 
 **Assert:**
 - Setup printed `pending_count=0`. This is the model behind the
   pane; a leftover request here is a setup failure, not a
   signal-subscription regression.
-- Window `admin approvals` is visible.
+- The admin approvals window is visible (the title wait proved its title).
 - Left list is empty; detail pane reads `(no selection)`.
 
 ### S2 — restart the broker while the admin app stays up
@@ -74,14 +84,14 @@ $VMGUI "$VM" screenshot /tmp/08-s1-empty.png
 # Note the broker's current PID before, and after — must differ.
 $VMEXEC "$VM" 'pgrep -f "[q]distro_admin_broker.py" | head -1 > /tmp/08-pid-before'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-sleep 2
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 $VMEXEC "$VM" 'pgrep -f "[q]distro_admin_broker.py" | head -1 > /tmp/08-pid-after'
 # Print both pids as separate lines — "before=...\nafter=..." would
 # need embedded double quotes which vm-exec's JSON encoder doesn't
 # handle (AGENTS.md ). One cat per file keeps the payload quote-free.
 $VMEXEC "$VM" 'echo before=$(cat /tmp/08-pid-before); echo after=$(cat /tmp/08-pid-after)'
-# Admin app should still be alive.
-$VMEXEC "$VM" 'pgrep -u admin -f "[q]distro_admin_app.py" | head -1'
+# Admin app should still be alive (the shipped app path).
+$VMEXEC "$VM" 'pgrep -u admin -f "[q]distro-admin-approval-app" | head -1'
 ```
 
 **Assert:**
@@ -101,13 +111,19 @@ bg_start 08-work work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-# Give the admin app at least a debounce cycle (250ms) plus DBus
-# signal delivery; 2s is plenty.
-sleep 2
-$VMGUI "$VM" screenshot /tmp/08-s3-pending.png
+# The request is in the broker; the APP shows it only if its signal
+# subscription survived the restart. Its title counts the rows its Pending
+# list displays, so this wait IS the crux: a timeout FAILS S3 (the app went
+# blind), whatever the frame shows.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_broker_pending_action test.action 30'
+s3_rc=0
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30' || s3_rc=$?
+echo "s3 title-wait rc=$s3_rc"
+qdwin_screenshot "$ART/08-s3-pending.png"
 ```
 
 **Assert:**
+- `s3 title-wait rc=0`.
 - Screenshot shows one pending row `uid=2000 test.action` in the
  left list, row selected (highlighted).
 - Detail pane shows `uid=2000 pid=<N>`, `Action: test.action`,
@@ -118,16 +134,11 @@ $VMGUI "$VM" screenshot /tmp/08-s3-pending.png
 ### S4 — deny the request, confirm return to empty
 
 ```bash
-B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-runuser -u admin -- env DISPLAY=:0 \
- xdotool search --sync --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
-sleep 1
-$VMGUI "$VM" screenshot /tmp/08-s4-afterdeny.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
+# The list is empty again (title back to bare) before the frame is taken.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/08-s4-afterdeny.png"
 # bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
 # shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 08-work 60'
@@ -149,7 +160,7 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; if ! out=$(bg_log 08-work); then 
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /tmp/08-pid-before /tmp/08-pid-after /tmp/08-work.log /tmp/08-work.pid /tmp/08-work.rc /tmp/08-work.rc.part'
 ```
@@ -162,7 +173,7 @@ $VMEXEC "$VM" 'rm -f /tmp/08-pid-before /tmp/08-pid-after /tmp/08-work.log /tmp/
 - Do not start `qdistro-test-permission` (or any work request) until
   S3. S1 asserts an empty pane; injecting the request early is a
   setup failure, not a product FAIL.
-- If S3 sees an empty list, also check `pgrep qdistro_admin_app`
+- If S3 sees an empty list, also check `pgrep -u admin -f qdistro-admin-approval-app`
  to rule out the app having crashed — if it crashed the bug is
  different (not the signal-filter regression the scenario
  targets).

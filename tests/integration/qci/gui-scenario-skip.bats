@@ -51,6 +51,49 @@ setup() {
     [ -z "$output" ]
 }
 
+@test "gui labwc admin lane: opt-in; the ported admin-app scenarios run on qdwin" {
+    local rel
+    # Ported off the labwc lane: routed to qdwin and never labwc-skipped, with
+    # or without the leading qdistro/ that gui_scenario_rel may print.
+    for rel in \
+        qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md \
+        tests/integration/permissions-gui/04-qt-admin-app-approve.md \
+        qdistro/tests/integration/permissions-gui/06-qt-admin-app-mouse.md \
+        qdistro/tests/integration/permissions-gui/08-admin-app-survives-broker-restart.md \
+        qdistro/tests/integration/permissions-gui/10-qt-cache-revoke.md \
+        qdistro/tests/integration/permissions-gui/12-cross-user-sendto-visual.md \
+        qdistro/tests/integration/permissions-gui/13-cross-user-sendto-deny.md \
+        qdistro/tests/integration/permissions-gui/14-cross-user-sendto-forbidden-scope.md \
+        qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md \
+        qdistro/tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md \
+        qdistro/tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md \
+        qdistro/tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md; do
+        gui_scenario_requires_qdwin "$rel" || { echo "not qdwin-routed: $rel"; return 1; }
+        run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    # Still on the labwc lane: skipped by default, run when opted in.
+    rel=qdistro/tests/integration/permissions-gui/07-cli-roundtrip.md
+    run gui_scenario_requires_qdwin "$rel"
+    [ "$status" -ne 0 ]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"QCI_LABWC_ADMIN_LANE=1"* ]]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 1 0
+    [ -z "$output" ]
+    # QCI_XWAYLAND_E2E=1 admits the qterminal/TUI scenarios (labwc-only by
+    # nature), not the rest of the lane.
+    run gui_scenario_labwc_lane_skip_reason \
+        qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md 0 1
+    [ -z "$output" ]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 0 1
+    [[ "$output" == *"QCI_LABWC_ADMIN_LANE=1"* ]]
+    # Lanes that were always qdwin are untouched.
+    run gui_scenario_labwc_lane_skip_reason qdwin/tests/gui/12-bar-no-overdraw.md 0 0
+    [ -z "$output" ]
+}
+
 # All outer-stack capabilities present (a fully provisioned tier-4/5 GUI VM).
 reason_full_stack() {
     local rel=$1

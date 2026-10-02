@@ -2,6 +2,10 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
 **What**: invoke `/usr/local/bin/qsu /bin/true` as `work` (uid
 2000). The admin app's pending list shows one row whose action is
 `qsu.exec:root`. The detail pane's Scope group shows EIGHT radios
@@ -26,16 +30,21 @@ UI to pre-task(072) state without breaking any backend test.
 ## Setup
 
 ```bash
-VM=${VMNAME:-qd-sudo}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures (qsu runs as work), idle locker held
+# off and proven unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 
 B64=$(base64 -w0 <<'EOF'
 sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
@@ -50,9 +59,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ### S1 — launch admin app
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
-$VMGUI "$VM" screenshot /tmp/43-s1-empty.png
+# The shipped launcher, first-paint mode (a nonzero exit FAILS S1).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/43-s1-empty.png"
 ```
 
 **Assert**: pending list empty.
@@ -66,11 +76,13 @@ bg_start 43-qsu work '/usr/local/bin/qsu /bin/true'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
-$VMGUI "$VM" screenshot /tmp/43-s2-pending.png
+# The request is in the broker AND displayed as the one row. A timeout FAILS S2.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_broker_pending_action qsu.exec:root 30'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30'
+qdwin_screenshot "$ART/43-s2-pending.png"
 ```
 
-**Assert** (`/tmp/43-s2-pending.png`):
+**Assert** (vision, on `43-s2-pending.png`):
 - One row in the pending list. Visible columns include
   `uid=2000`, `action=qsu.exec:root`.
 - The detail pane (right side or below the table) reads:
@@ -94,32 +106,28 @@ $VMGUI "$VM" screenshot /tmp/43-s2-pending.png
   7. `Forever, this argv basename anywhere`
   8. `Forever, this argv prefix + any trailing args`
 
-  Use OCR to capture each label; if any label is missing, that's
-  the regression to flag.
+  Read each label from the frame; if any label is missing, that's
+  the regression to flag. (OCR may help read long text, but the
+  verdict comes from the frame you opened.)
 
 ### S3 — approve with default `once` scope
 
 ```bash
-B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
-  --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
-sleep 2
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 
 # bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
 # shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
 # `echo "qsu-rc=$?"` after a `cat` reported the CAT's status, never qsu's.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 43-qsu 60'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 43-qsu; echo "qsu-rc=$(bg_rc 43-qsu)"'
-$VMGUI "$VM" screenshot /tmp/43-s3-afterapprove.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/43-s3-afterapprove.png"
 ```
 
 **Assert**:
 - qsu process exited rc=0 (`/bin/true` succeeded).
-- `/tmp/43-s3-afterapprove.png` shows the pending list empty
+- `43-s3-afterapprove.png` shows the pending list empty
   again — the row was consumed by the approve.
 
 ### S4 — once-scope does NOT persist a cache row
@@ -147,8 +155,9 @@ bg_start 43-qsu2 work '/usr/local/bin/qsu /bin/true'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
-$VMGUI "$VM" screenshot /tmp/43-s5-pending-again.png
+# A re-prompt shows as one pending row again. A timeout FAILS S5.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30'
+qdwin_screenshot "$ART/43-s5-pending-again.png"
 ```
 
 **Assert**: pending list has one row again — the once-scope from
@@ -157,14 +166,8 @@ S3 left nothing behind, so the same invocation re-prompts.
 ### S6 — deny the second invocation to clean up
 
 ```bash
-B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
-  --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 # bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
 # shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait 43-qsu2 60'
@@ -176,7 +179,7 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log 43-qsu2; echo "rc=$(bg_rc 
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /tmp/43-*.log /tmp/43-*.pid'
 B64=$(base64 -w0 <<'EOF'
@@ -196,7 +199,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
   the action and any rule keyed `qsu.exec:root` won't match — a
   real regression worth filing.
 - Approve / Deny keyboard chords go via `virsh send-key` (Ctrl+Y
-  / Ctrl+N); `vm-gui key ctrl+y` does NOT work consistently with
-  XWayland under the GUI test compositor (see AGENTS.md pitfall 3).
+  / Ctrl+N), the KVM keyboard, after `qdwin_focus_window` has the
+  compositor's keyboard focus on the admin window.
 - This scenario is the entry point for the qsu series — 44-46
   exercise the same shape but pick different forever-* scopes.

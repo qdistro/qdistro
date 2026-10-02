@@ -2,31 +2,44 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
 **What**: cover the primary mouse interaction path end to end — select
 the "1 hour" scope by clicking its radio, commit the decision by
 clicking the Approve button, verify the SDK got `ALLOWED` and the
 cache hit short-circuits a second request.
 
-**Why**: scenario 04 covers the keyboard path (Tab + Down + Ctrl+Y).
+**Why**: scenario 04 covers the keyboard path (Ctrl+Shift+2 + Ctrl+Y).
 A non-keyboard-first admin using a mouse is equally supported; a
 regression in mouse handling (e.g. a radio button group going
 non-clickable, Approve wired to the wrong slot) would pass the
 keyboard scenario but break this one. Both paths must stay green.
 
-This scenario uses intent-level mouse instructions (AGENTS.md ).
+This scenario uses intent-level mouse instructions (AGENTS.md 3b).
 The runner takes screenshots, visually locates the target widgets,
 generates an ImageMagick `click-preview` with the coordinates it computes,
 visually confirms the moved cursor and red ring, then issues `click-confirm` —
 no hardcoded pixel offsets, portable across Qt font / DPI / theme changes.
+On the qdwin lane the click goes through the QEMU pointer into qdwin, which
+delivers it to the native Wayland window under it; the RESULT of each click
+is graded from a `qdwin_screenshot`, not from the click-confirm post frame.
 
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-1336}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui            # click-preview / click-confirm
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures, idle locker held off and proven
+# unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
@@ -34,7 +47,7 @@ DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 ```
 
 ## Steps
@@ -42,8 +55,9 @@ sleep 1
 ### S1 — launch admin app, inject request, click "1 hour" radio
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
+# The shipped launcher, first-paint mode (a nonzero exit FAILS S1).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
 
 B64=$(base64 -w0 <<'EOF'
 source /tmp/qci-gui-waiters.sh
@@ -51,7 +65,9 @@ bg_start work1 work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
+# The request is in the broker AND displayed as the one row.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_broker_pending_action test.action 30'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30'
 
 # Focus the admin-approvals window, take a baseline screenshot, then
 # CLICK THE "1 HOUR" RADIO BUTTON.
@@ -61,19 +77,15 @@ sleep 2
 # "Just this once" and "24 hours"), compute the click point on the
 # radio's bullet or label, then use `click-preview` / `click-confirm`.
 # See AGENTS.md.
-B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-runuser -u admin -- env DISPLAY=:0 \
- xdotool search --sync --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s1a-baseline.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+qdwin_screenshot "$ART/06-qt-admin-app-mouse-s1a-baseline.png"
 
 # >>> Runner: take over here. Read the baseline screenshot, preview the
 # proposed target, visually confirm its red ring, click-confirm the "1 hour"
-# radio, then capture:
-$VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s1b-1h-selected.png
+# radio, then (a radio tick publishes no state a waiter can read) settle
+# briefly and capture:
+sleep 1
+qdwin_screenshot "$ART/06-qt-admin-app-mouse-s1b-1h-selected.png"
 ```
 
 **Assert (1h selected via click):**
@@ -90,17 +102,22 @@ $VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s1b-1h-selected.png
 
 ```bash
 # Focus check again in case clicking the radio changed it.
-B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-runuser -u admin -- env DISPLAY=:0 \
- xdotool search --sync --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+```
 
-# >>> Runner: using a fresh screenshot, locate the "Approve" button, generate
-# and visually confirm its marked preview, click-confirm it, then capture:
-$VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s2-afterapprove.png
+Now, on the HOST: using the s1b frame (or a fresh `qdwin_screenshot`),
+locate the "Approve" button and click it with the preview / confirm
+handshake (AGENTS.md 3b). **Only after `click-confirm` has returned**, run
+the block below. Running its title wait before the click times out on
+`(1 pending)` and fails a step whose product behaviour was never exercised
+(first qci run of this port did exactly that). If you drive the guest from
+one driver script, put a `qci_host_step s2_approve_click` BEFORE the wait and
+send its go only after the click-confirm.
+
+```bash
+# After the Approve click-confirm. A title-wait timeout FAILS S2.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/06-qt-admin-app-mouse-s2-afterapprove.png"
 
 # bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
 # shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
@@ -127,12 +144,14 @@ bg_start work2 work 'python3 /usr/local/bin/qdistro-test-permission'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 2
-$VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s3-cachehit.png
-# bg_wait, never `wait $(cat X.pid)` — that does not wait in a separate guest
-# shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS this step's failure.
+# A cache hit returns without a prompt, so the caller FINISHING is the
+# readiness signal. bg_wait, never `wait $(cat X.pid)` — that does not wait in
+# a separate guest shell (AGENTS.md, "A backgrounded job"). A TIMEOUT here IS
+# this step's failure (a prompt appeared and nobody answered it).
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait work2 60'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log work2; echo "rc=$(bg_rc work2)"'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 10'
+qdwin_screenshot "$ART/06-qt-admin-app-mouse-s3-cachehit.png"
 ```
 
 **Assert (cache hit):**
@@ -142,14 +161,14 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log work2; echo "rc=$(bg_rc wo
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /home/admin/.local/state/qdistro/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid'
 ```
 
 ## Notes for the runner

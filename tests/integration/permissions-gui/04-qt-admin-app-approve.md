@@ -2,6 +2,10 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
 **What**: with one pending request and the "1 hour" scope radio
 selected, press Ctrl+Y and verify the work process was allowed (not
 denied), the list returns to empty, and the approval was cached (a
@@ -18,11 +22,16 @@ the SDK return value and the cache.
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-0052}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures, idle locker held off and proven
+# unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 # Broker restart drains any stale pending AND clears the sqlite-backed
 # scope cache of prior "test.action" entries from earlier runs (cache
@@ -33,7 +42,7 @@ DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-sleep 1
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 ```
 
 ## Steps
@@ -42,7 +51,9 @@ sleep 1
 Each capture below is preceded by a waiter on the admin window's title,
 which the app computes from the rows its Pending list actually displays
 (`admin approvals (N pending)`, or `admin approvals` when empty;
-`_update_window_title` in `qdistro_admin_app.py`). A waiter that TIMES OUT
+`_update_window_title` in `qdistro_admin_app.py`); qdwin logs a title on the
+commit that carries it, so the frame taken after the waiter shows that
+state. A waiter that TIMES OUT
 is that step's failure — record it and keep the frame as evidence. Do not
 replace a waiter with a sleep, drop it, or write a readiness loop of your
 own; that is what lost the 2026-09-30 full run (captures taken with no
@@ -51,9 +62,11 @@ settle, then a hand-written waiter that stalled).
 ### S1 — launch admin app, inject one pending request, pick "1 hour"
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
+# The shipped launcher, first-paint mode: returns only after the window has
+# painted and the compositor holds the frame. A nonzero exit FAILS S1.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
 # Ready 1: the admin window is up with an EMPTY Pending list.
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window_title admin "admin approvals" 45'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "admin approvals" 45'
 
 B64=$(base64 -w0 <<'EOF'
 source /tmp/qci-gui-waiters.sh
@@ -63,7 +76,7 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # Ready 2: the request is in the broker AND displayed as the one row.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action test.action 30'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window_title admin "admin approvals \(1 pending\)" 30'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "admin approvals \(1 pending\)" 30'
 
 # Select the "1 hour" scope via its dedicated keyboard shortcut.
 # The admin app binds Ctrl+Shift+1..8 directly to the scope radios
@@ -75,26 +88,20 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window_title admin "adm
 # also fragile (radio-bullet offset guesswork). The scope keys are
 # unguarded (they only tick a radio and commit nothing) so they take
 # effect immediately, and the chord is delivered via `virsh send-key`
-# — the blessed input path for modifier chords on XWayland Qt apps.
+# (the KVM keyboard) to the window qdwin reports as keyboard-focused.
 # See `tests/integration/permissions-gui/AGENTS.md`. The binding lives
 # in `qdistro_admin_app.py` at the `_mk_shortcut("Ctrl+Shift+{i+1}", ...)`
 # scope loop.
-B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-# Bounded: a bare `--sync` waits forever when no X window matches.
-runuser -u admin -- env DISPLAY=:0 timeout 15 xdotool search --sync \
- --name "admin approvals" windowactivate --sync \
- || { echo "admin approvals window did not activate within 15s" >&2; exit 1; }
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s1-pre-select.png
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_2
+# Focus through the compositor; returns once qdwin reports keyboard focus
+# on the admin window, fails (S1 FAIL) otherwise.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+qdwin_screenshot "$ART/04-qt-admin-app-approve-s1-pre-select.png"
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_2
 # A radio tick publishes no state a waiter can read; this frame is
 # corroboration only. The scope is PROVED after S2 by the cache row
 # (scope=1h, a 3600 s lifetime), which only the 1 hour radio produces.
 sleep 1
-$VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s1-1h-selected.png
+qdwin_screenshot "$ART/04-qt-admin-app-approve-s1-1h-selected.png"
 ```
 
 **Assert (1h selected):**
@@ -105,19 +112,12 @@ $VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s1-1h-selected.png
 ### S2 — Ctrl+Y, confirm approval lands
 
 ```bash
-# Modifier combo must go via KVM keyboard (AGENTS.md ).
-B64=$(base64 -w0 <<'EOF'
-#!/bin/bash
-runuser -u admin -- env DISPLAY=:0 \
- timeout 15 xdotool search --sync --name "admin approvals" windowactivate --sync \
- || { echo "admin approvals window did not activate within 15s" >&2; exit 1; }
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
+# Modifier combo goes via the KVM keyboard to the focused window.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 # Ready 3: the Pending list is empty again before the frame is taken.
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window_title admin "admin approvals" 30'
-$VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s2-afterapprove.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/04-qt-admin-app-approve-s2-afterapprove.png"
 
 # Confirm the SDK-side process actually got ALLOWED (not just that
 # the list emptied).
@@ -168,8 +168,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # failure (a prompt appeared and nobody answered it).
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_wait work2 60'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; bg_log work2; echo "rc=$(bg_rc work2)"'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window_title admin "admin approvals" 10'
-$VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s3-cachehit.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_qdwin_window_title "admin approvals" 10'
+qdwin_screenshot "$ART/04-qt-admin-app-approve-s3-cachehit.png"
 
 # Every audit row for test.action since the baseline, as
 # caller_uid|decision|source. A cache hit writes exactly one row with
@@ -192,14 +192,14 @@ $VMEXEC "$VM" 'b=$(cat /tmp/04-s3.baseid); sqlite3 -separator "|" /var/lib/qdist
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /tmp/04-s3.baseid /home/admin/.local/state/qdistro/admin-app.log'
+$VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid /tmp/04-s3.baseid'
 ```
 
 ## Notes for the runner

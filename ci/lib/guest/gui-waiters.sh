@@ -596,6 +596,271 @@ _probe_x11_window_title() {
     printf 'titles=[%s]' "$(printf '%s' "$titles" | paste -sd '|')"
     grep -Exq -- "$pattern" <<<"$titles"
 }
+# ---- qdwin lane: windows by title, focus, idle locker ----------------------
+#
+# The qdwin lane runs the product session (qdwin compositor + qdshell), where
+# there is no X server for xdotool to ask. These helpers are its window
+# primitives. Everything comes from what the compositor itself records:
+#
+#   qdwin: toplevel_added handle=H uid=U pid=P app_id=A title="T"
+#   qdwin: toplevel_title handle=H title="T"     (each later change)
+#   qdwin: toplevel_removed handle=H
+#   qdwin: focus handle=H (was P) seat=S          (keyboard focus moves)
+#
+# read from the journal of the RUNNING compositor process only (its MainPID),
+# so handles a restarted compositor reused can never be confused. A window's
+# current title is its add-time title overridden by its latest
+# toplevel_title line. Run as root (the journal reader), like every helper here.
+
+# qdwin_compositor_pid — MainPID of admin's qdwin-compositor.service, or fail.
+qdwin_compositor_pid() {
+    local pid
+    pid=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        systemctl --user show qdwin-compositor.service -p MainPID --value 2>/dev/null)
+    case "$pid" in ''|0|*[!0-9]*)
+        printf 'ERROR: qdwin-compositor.service has no running MainPID (got %s)\n' "${pid:-nothing}" >&2
+        return 1 ;;
+    esac
+    printf '%s\n' "$pid"
+}
+
+# qdwin_windows — one line per LIVE toplevel of the running compositor:
+#   <handle>\t<pid>\t<uid>\t<app_id>\t<title>
+# in handle order. Fails only when the compositor is not running.
+qdwin_windows() {
+    local pid
+    pid=$(qdwin_compositor_pid) || return 1
+    journalctl _PID="$pid" --no-pager -o cat 2>/dev/null | awk '
+        function after(s, key,   i) { i = index(s, key); return i ? substr(s, i + length(key)) : "" }
+        function unquote(s) { sub(/^"/, "", s); sub(/"$/, "", s); return s }
+        /qdwin: toplevel_added handle=[0-9]+ / {
+            rest = after($0, "qdwin: toplevel_added ")
+            split(rest, f, " ")
+            h = after(f[1], "handle="); u = after(f[2], "uid="); p = after(f[3], "pid=")
+            a = after(f[4], "app_id=")
+            t = index(rest, " title=\"") ? unquote(after(rest, " title=")) : ""
+            live[h] = 1; P[h] = p; U[h] = u; A[h] = a; T[h] = t
+            next
+        }
+        /qdwin: toplevel_title handle=[0-9]+ / {
+            rest = after($0, "qdwin: toplevel_title ")
+            h = after(substr(rest, 1, index(rest, " ") - 1), "handle=")
+            if (h in live) T[h] = unquote(after(rest, " title="))
+            next
+        }
+        /qdwin: toplevel_removed handle=[0-9]+/ {
+            h = after($0, "qdwin: toplevel_removed handle="); sub(/[^0-9].*$/, "", h)
+            delete live[h]
+            next
+        }
+        END { for (h in live) printf "%s\t%s\t%s\t%s\t%s\n", h, P[h], U[h], A[h], T[h] }
+    ' | sort -n
+}
+
+# qdwin_window_handle <title-ere> [pid] — the handle of the NEWEST live
+# toplevel whose current title matches <title-ere> as a WHOLE string (the same
+# whole-line rule as await_x11_window_title), optionally only one owned by
+# client <pid>. Prints nothing and fails when there is none.
+qdwin_window_handle() {
+    local pattern=$1 want_pid=${2:-} h p u a t found=""
+    [ -n "$pattern" ] || { printf 'qdwin_window_handle: needs a title pattern\n' >&2; return 2; }
+    while IFS=$'\t' read -r h p u a t; do
+        [ -n "$h" ] || continue
+        [ -z "$want_pid" ] || [ "$p" = "$want_pid" ] || continue
+        if printf '%s\n' "$t" | grep -Exq -- "$pattern"; then found=$h; fi
+    done < <(qdwin_windows)
+    [ -n "$found" ] || return 1
+    printf '%s\n' "$found"
+}
+
+# await_qdwin_window_title <title-ere> [timeout] [interval] [pid]
+# The qdwin-lane twin of await_x11_window_title: wait until a live toplevel's
+# current title matches <title-ere> as a whole string. The admin approvals
+# window titles itself `admin approvals (N pending)` from the rows its Pending
+# list displays, and qdwin logs a title change on the commit that carries it,
+# so this waits for the app's state instead of a sleep. On timeout every live
+# window's title is printed.
+await_qdwin_window_title() {
+    local pattern=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT} want_pid=${4:-}
+    [ -n "$pattern" ] || { printf '[await] qdwin window title needs a title pattern\n' >&2; return 2; }
+    _await "qdwin window title /$pattern/${want_pid:+ (pid $want_pid)}" "$timeout" "$interval" \
+        _probe_qdwin_window_title "$pattern" "$want_pid"
+}
+_probe_qdwin_window_title() {
+    local pattern=$1 want_pid=$2 h titles
+    titles=$(qdwin_windows 2>&1 | awk -F'\t' '{printf "%s%s=%s", (NR>1?"|":""), $1, $5}')
+    if h=$(qdwin_window_handle "$pattern" "$want_pid"); then
+        printf 'handle=%s titles=[%s]' "$h" "$titles"
+        return 0
+    fi
+    printf 'titles=[%s]' "$titles"
+    return 1
+}
+
+# qdwin_focused_handle — the handle that holds keyboard focus now (the last
+# `qdwin: focus` line of the running compositor), 4294967295 for none.
+qdwin_focused_handle() {
+    local pid h
+    pid=$(qdwin_compositor_pid) || return 1
+    h=$(journalctl _PID="$pid" --no-pager -o cat 2>/dev/null \
+        | sed -n 's/.*qdwin: focus handle=\([0-9][0-9]*\) (was .*/\1/p' | tail -n1)
+    printf '%s\n' "${h:-4294967295}"
+}
+
+# qdwin_focus_window <title-ere> [timeout] [pid]
+# The qdwin-lane replacement for `xdotool windowactivate --sync`: find the
+# newest live window whose title matches, ask qdshell to focus it (the same
+# `qs ipc call qdwin focusWindow` the taskbar uses), and return only once the
+# compositor reports keyboard focus on that handle. Prints the handle.
+# Fails, naming what it saw, when no window matches or focus never lands.
+qdwin_focus_window() {
+    local pattern=$1 timeout=${2:-15} want_pid=${3:-} h start=$SECONDS f
+    h=$(QCI_AWAIT_QUIET=1 await_qdwin_window_title "$pattern" "$timeout" 0.5 "$want_pid" >/dev/null \
+        && qdwin_window_handle "$pattern" "$want_pid") \
+        || { printf 'ERROR: qdwin_focus_window: no live window titled /%s/\n' "$pattern" >&2; return 1; }
+    while :; do
+        f=$(qdwin_focused_handle) || return 1
+        if [ "$f" = "$h" ]; then
+            printf '%s\n' "$h"
+            return 0
+        fi
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then
+            printf 'ERROR: qdwin_focus_window: focus stayed on handle %s, not %s (/%s/)\n' "$f" "$h" "$pattern" >&2
+            return 1
+        fi
+        runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+            qs ipc -p /usr/share/quickshell/qdshell call qdwin focusWindow "$h" >/dev/null 2>&1 || true
+        sleep 0.5
+    done
+}
+
+# qdwin_guard_idle_locker — keep qdlocker from taking the screen and the
+# keyboard mid-scenario, then PROVE it is unlocked (permissions-gui/18's
+# guard). The gate's suppress_idle_lock already installs the idle drop-in; this
+# also enables the root-owned status introspection marker, restarts the locker
+# so both take effect, and fails closed unless it answers locked=False.
+qdwin_guard_idle_locker() {
+    local d=/home/admin/.config/systemd/user/qdlocker.service.d reply i
+    faillock --user admin --reset 2>/dev/null || true
+    install -d -m 0755 -o 0 -g 0 /etc/qdistro || return 1
+    : > /etc/qdistro/locker-ctrl-introspection || return 1
+    chown 0:0 /etc/qdistro/locker-ctrl-introspection
+    chmod 0644 /etc/qdistro/locker-ctrl-introspection
+    install -d -m 0755 -o admin -g users "$d" || return 1
+    printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' > "$d/90-ci-gui.conf" || return 1
+    chown admin:users "$d/90-ci-gui.conf"
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload || return 1
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service || return 1
+    reply=""
+    for i in $(seq 1 20); do
+        reply=$(runuser -u admin -- bash -c "printf 'status\n' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock" 2>/dev/null) || reply=""
+        case "$reply" in *locked=*) break ;; esac
+        sleep 0.5
+    done
+    case "$reply" in
+        *locked=False*) printf 'qdlocker unlocked (idle lock suppressed)\n'; return 0 ;;
+        *locked=True*) printf 'ERROR: qdlocker is locked; input would go to the lock overlay\n' >&2; return 1 ;;
+        *) printf 'ERROR: qdlocker status introspection unavailable (%s); cannot prove input is unobstructed\n' "${reply:-no reply}" >&2; return 1 ;;
+    esac
+}
+
+# ---- qdwin lane: the admin approvals app -----------------------------------
+#
+# The permissions-gui admin-app scenarios that run on the qdwin lane drive the
+# SHIPPED app the way the image launches it: native Wayland, through
+# /usr/local/bin/qdistro-start-admin-app (deploy/start-admin-app-wayland.sh).
+
+# qdwin_admin_lane_setup [--silos] — preconditions for an admin-app scenario
+# on the qdwin lane: the product session is up, the idle locker is held off
+# (qdwin_guard_idle_locker), and, with --silos, the work (uid 2000) / work2
+# (uid 3000) silo fixtures exist. The qdwin golden has no silos on purpose
+# (scripts/vm/lib/gui-silo-fixtures.sh says why), so the scenarios that file
+# requests as work/work2 provision them here, on their own disposable VM.
+qdwin_admin_lane_setup() {
+    local silos=0
+    case "${1:-}" in
+        "") ;;
+        --silos) silos=1 ;;
+        *) printf 'usage: qdwin_admin_lane_setup [--silos]\n' >&2; return 2 ;;
+    esac
+    await_socket /run/user/1000/wayland-1 60 >/dev/null || return 1
+    await_user_unit_active qdwin-compositor.service admin 60 >/dev/null || return 1
+    await_user_unit_active qdshell.service admin 60 >/dev/null || return 1
+    systemctl is-active --quiet qdistro-admin-broker.service \
+        || systemctl start qdistro-admin-broker.service || return 1
+    grep -qx 'export QT_QPA_PLATFORM=wayland' /usr/local/bin/qdistro-start-admin-app \
+        || { printf 'ERROR: /usr/local/bin/qdistro-start-admin-app is not the shipped Wayland launcher\n' >&2; return 1; }
+    if [ "$silos" = 1 ]; then
+        bash /root/qdistro-src/scripts/vm/lib/gui-silo-fixtures.sh || return 1
+    fi
+    qdwin_guard_idle_locker
+}
+
+# qdwin_start_admin_app [app args...] — start the admin app through the shipped
+# launcher in its first-paint mode and print the app's pid. Returns only once
+# the window has painted its first frame and the compositor holds it (see the
+# launcher), so a capture right after it is not a bare desktop or a half-drawn
+# window; fails (with the launcher's account) otherwise.
+qdwin_start_admin_app() {
+    local out rc=0 pid
+    out=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+        QDISTRO_ADMIN_APP_WAIT_PAINTED=1 /usr/local/bin/qdistro-start-admin-app "$@") || rc=$?
+    pid=$(printf '%s\n' "$out" | sed -n '/^[0-9][0-9]*$/p' | tail -n1)
+    if [ "$rc" -ne 0 ] || [ -z "$pid" ]; then
+        printf 'ERROR: qdistro-start-admin-app exited %s (pid %s); see the launcher output above and the app log it named\n' \
+            "$rc" "${pid:-none}" >&2
+        return 1
+    fi
+    # The launcher proved the APP painted its first frame (the app's marker).
+    # Qt's sync() is a no-op on Wayland, so the app cannot prove the
+    # COMPOSITOR processed that frame; qdwin can: it logs `mapped handle=H`
+    # while processing the first commit that carries a buffer, and Qt's first
+    # buffer is that painted frame. Wait for that line for THIS pid.
+    QCI_AWAIT_QUIET=1 await_qdwin_window_mapped_pid "$pid" 30 0.2 >/dev/null || return 1
+    printf '%s\n' "$pid"
+}
+
+# await_qdwin_window_mapped_pid <pid> [timeout] [interval] — wait until the
+# running compositor has mapped a toplevel of client <pid> (its
+# `toplevel_added ... pid=<pid>` handle has a `mapped handle=` line), i.e. it
+# has processed a commit carrying that window's first buffer.
+await_qdwin_window_mapped_pid() {
+    local pid=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "qdwin mapped a window of pid $pid" "$timeout" "$interval" \
+        _probe_qdwin_window_mapped_pid "$pid"
+}
+_probe_qdwin_window_mapped_pid() {
+    local want=$1 cpid
+    cpid=$(qdwin_compositor_pid) || return 1
+    journalctl _PID="$cpid" --no-pager -o cat 2>/dev/null | awk -v want="$want" '
+        /qdwin: toplevel_added handle=[0-9]+ uid=[0-9]+ pid=/ {
+            h = $0; sub(/.*qdwin: toplevel_added handle=/, "", h); sub(/ .*/, "", h)
+            p = $0; sub(/.*qdwin: toplevel_added handle=[0-9]+ uid=[0-9]+ pid=/, "", p); sub(/ .*/, "", p)
+            if (p == want) mine[h] = 1
+            next
+        }
+        /qdwin: mapped handle=[0-9]+ / {
+            h = $0; sub(/.*qdwin: mapped handle=/, "", h); sub(/ .*/, "", h)
+            if (h in mine) { print "mapped handle=" h " pid=" want; found = 1; exit }
+        }
+        END { if (!found) { printf "no mapped toplevel for pid %s yet", want; exit 1 } }'
+}
+
+# qdwin_stop_admin_app — stop every admin app instance and wait until gone.
+# (`-u admin` keeps pkill -f from matching the root vm-exec shell itself.)
+qdwin_stop_admin_app() {
+    local i
+    pkill -u admin -f '[q]distro-admin-approval-app|[q]distro_admin_app' 2>/dev/null || true
+    for i in $(seq 1 50); do
+        pgrep -u admin -f '[q]distro-admin-approval-app|[q]distro_admin_app' >/dev/null || return 0
+        sleep 0.1
+    done
+    pkill -KILL -u admin -f '[q]distro-admin-approval-app|[q]distro_admin_app' 2>/dev/null || true
+    sleep 0.5
+    ! pgrep -u admin -f '[q]distro-admin-approval-app|[q]distro_admin_app' >/dev/null
+}
+
 _probe_system_unit_active() {
     local unit=$1 state
     state=$(systemctl is-active "$unit" 2>/dev/null)

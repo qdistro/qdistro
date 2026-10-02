@@ -209,6 +209,25 @@ gui_scenario_rel() {
 
 gui_scenario_requires_qdwin() {
     local rel=$1
+    # The admin-app scenarios ported off the labwc/XWayland lane: they run the
+    # SHIPPED native-Wayland admin app on the product session
+    # (permissions-gui/AGENTS.md, "qdwin lane"). Matched with or without the
+    # leading `qdistro/` that gui_scenario_rel may print.
+    case "${rel#qdistro/}" in
+        tests/integration/permissions-gui/03-qt-admin-app-visual.md|\
+        tests/integration/permissions-gui/04-qt-admin-app-approve.md|\
+        tests/integration/permissions-gui/06-qt-admin-app-mouse.md|\
+        tests/integration/permissions-gui/08-admin-app-survives-broker-restart.md|\
+        tests/integration/permissions-gui/10-qt-cache-revoke.md|\
+        tests/integration/permissions-gui/12-cross-user-sendto-visual.md|\
+        tests/integration/permissions-gui/13-cross-user-sendto-deny.md|\
+        tests/integration/permissions-gui/14-cross-user-sendto-forbidden-scope.md|\
+        tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md|\
+        tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md|\
+        tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md|\
+        tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md)
+            return 0 ;;
+    esac
     case "$rel" in
         qdwin/tests/gui/[0-9][0-9]-*.md|\
         qdwin/tests/apps/[0-9][0-9]-*.md|\
@@ -3969,6 +3988,30 @@ gui_scenario_app_deps_skip_reason() {
 # scenarios available in an explicit opt-in lane rather than deleting them.
 #
 # Args: rel xwayland_optin
+# The labwc/XWayland ADMIN lane is opt-in. It drives the admin approvals app
+# (and the other permissions-gui/workflow-gui scenarios that are not routed to
+# the qdwin lane) through labwc + LXQt + XWayland + xdotool with the test-only
+# xcb launcher -- none of which the image ships (image/config.sh) -- and it is
+# the source of the chronic stale/half-drawn frame flakes (XWayland commit vs
+# labwc screencopy). The admin-app scenarios that test shipped behaviour now
+# run on the qdwin lane with the shipped native-Wayland launcher
+# (gui_scenario_requires_qdwin). The lane is kept, not deleted: set
+# QCI_LABWC_ADMIN_LANE=1 (or run `qci gui-admin`) to run it. The qterminal/TUI
+# scenarios behind QCI_XWAYLAND_E2E=1 live on this lane by nature, so that
+# opt-in also admits them. Prints a skip reason, or nothing when the scenario
+# runs. Args: rel labwc_optin xwayland_optin.
+gui_scenario_labwc_lane_skip_reason() {
+    local rel=$1 labwc_optin=${2:-0} xwayland_optin=${3:-0}
+    gui_scenario_requires_qdwin "$rel" && return 0
+    [ "$labwc_optin" = 1 ] && return 0
+    if [ "$xwayland_optin" = 1 ] && \
+            [ -n "$(gui_scenario_xwayland_skip_reason "$rel" 0)" ]; then
+        return 0
+    fi
+    printf '%s\n' "labwc/XWayland admin lane is opt-in (none of labwc, LXQt, XWayland or the xcb launcher ships); set QCI_LABWC_ADMIN_LANE=1 or run \`qci gui-admin\`"
+    return 0
+}
+
 gui_scenario_xwayland_skip_reason() {
     local rel=$1 xwayland_optin=${2:-0}
     [ "$xwayland_optin" = 1 ] && return 0
@@ -4342,15 +4385,19 @@ gate_gui() {
         # content, in EVERY path (this runs before the qdwin-routing bypass below
         # so routing qdwin scenarios to the qdwin profile doesn't unleash them as
         # agent ERRORs). Opt into a legacy lane with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
-        local tier_base_skip app_deps_skip xwayland_skip
+        local tier_base_skip app_deps_skip xwayland_skip labwc_skip
         tier_base_skip=$(gui_scenario_tier_base_skip_reason "$rel" \
             "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
         app_deps_skip=$(gui_scenario_app_deps_skip_reason "$rel" "$app_deps" "${QCI_GUI_APPS:-0}")
         xwayland_skip=$(gui_scenario_xwayland_skip_reason "$rel" "${QCI_XWAYLAND_E2E:-0}")
+        labwc_skip=$(gui_scenario_labwc_lane_skip_reason "$rel" \
+            "${QCI_LABWC_ADMIN_LANE:-0}" "${QCI_XWAYLAND_E2E:-0}")
         if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
             skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
         elif [ -n "$xwayland_skip" ]; then
             skip_reason="$xwayland_skip"
+        elif [ -n "$labwc_skip" ]; then
+            skip_reason="$labwc_skip"
         elif [ -n "$tier_base_skip" ]; then
             # Opt-in tier-4/5 base image absent (and not opted in): clean SKIP.
             # Runs BEFORE the qdwin-routing bypass below so it actually fires for

@@ -2,6 +2,11 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`; every click uses the preview / confirm handshake
+(AGENTS.md 3b).
+
 **What**: admin receives a RelayMessage, picks `1 hour` via the
 scope radio group, clicks **Approve**. Broker rejects the forbidden
 one-shot scope; admin app surfaces this in a modal
@@ -19,12 +24,19 @@ or the admin would assume the click worked).
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-1336}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui            # click-preview / click-confirm
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures (the relay target is work2's notepad),
+# idle locker held off and proven unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 # Establish work2's user manager before addressing its units. A linger-enabled
 # account can still be between manager teardown and startup under an 8-worker
 # GUI run; `systemctl --machine` then fails with a misleading transport error.
@@ -49,13 +61,11 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
 # the qci1 classifier work, not something a waiter can fix.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
  await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2 30 1'
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-$VMEXEC "$VM" 'for _ in $(seq 1 60); do
-  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
-  [ "$t" = "admin approvals" ] && exit 0
-  sleep 0.5
-done
-echo "admin approvals window did not map: $t" >&2; exit 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_dbus_system_name org.qdistro.UserRelay.uid3000'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_receiver 3000 org.qdistro.StubNotepad.uid3000'
+# The shipped launcher, first-paint mode (a nonzero exit is a Setup ERROR).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
 ```
 
 ## Steps
@@ -75,62 +85,55 @@ runuser -u work -- dbus-send --system --print-reply \
  string:scope_test_payload \
  >/tmp/14-relay.out 2>&1 &
 echo $! >/tmp/14-relay.pid
-sleep 1
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/14-s1-pending.png
+# The app displays the request as its one row. A timeout FAILS S1.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+qdwin_screenshot "$ART/14-s1-pending.png"
 ```
 
-Open S1 before targeting any control. If a black or desktop-patterned
-rectangle obscures the detail pane, keep the frame and capture up to four
-more frames, 2 s apart, under distinct `-r2.png` ... `-r5.png` names.
-Open each new frame. Use the first fully drawn frame for the assertions and
-click targeting. If all five are obscured, report the rendering failure;
-do not infer a control's location from another scenario or a later frame.
+Open S1 before targeting any control. On this lane the frame after the
+title wait is the app's committed state: a black or desktop-patterned
+rectangle over the detail pane is a FAIL, not a reason to recapture.
 
-**Assert (OCR /tmp/14-s1-pending.png)**:
+**Assert (vision, on `14-s1-pending.png`)**:
 - `uid=2000` and `app.send-to:3000:org.qdistro.StubNotepad.uid3000` visible.
 - `payload=scope_test_payload` visible.
 - Scope labels `Just this once`, `1 hour`, `24 hours`, `Forever`
  all visible (default radio is `Just this once`).
 
-### S2 — select "1 hour" via OCR targeting
+### S2 — select "1 hour" with a click
 
 ```bash
-# Runner:
-# 1. OCR /tmp/14-s1-pending.png.
-# 2. Find the bounding box of the visible text "1 hour".
-# 3. The clickable radio is immediately to the LEFT of that
-# label; click a point ~15px left of the label's left
-# edge at the label's vertical center.
-$VMGUI "$VM" click <cx> <cy>
-sleep 0.5
-$VMGUI "$VM" screenshot /tmp/14-s2-1hour-selected.png
+# Runner: in 14-s1-pending.png find the visible text "1 hour". The clickable
+# radio is immediately to the LEFT of that label (~15 px left of the label's
+# left edge, at its vertical centre). Click it with the handshake:
+#   $VMGUI "$VM" click-preview <cx> <cy> "1 hour radio"
+#   $VMGUI "$VM" click-confirm <preview-manifest>
+# A radio tick publishes no state a waiter can read: settle briefly, capture.
+sleep 1
+qdwin_screenshot "$ART/14-s2-1hour-selected.png"
 ```
 
-**Assert (OCR /tmp/14-s2-1hour-selected.png)**:
-- `1 hour` still visible (just confirming no layout collapse).
-- Radio-state verification is optional at the OCR level — if OCR
- can't reliably read the filled-vs-unfilled glyph, pass on text
- alone; S3 will pin the state indirectly (only a non-once scope
- can trigger ScopeNotPermitted).
+**Assert (vision, on `14-s2-1hour-selected.png`)**:
+- `1 hour` still visible (no layout collapse), and its radio reads as
+ filled. If the glyph state is genuinely ambiguous, S3 pins the state
+ indirectly (only a non-once scope can trigger ScopeNotPermitted).
 
 ### S3 — click Approve, expect forbidden-scope modal
 
 ```bash
-# Runner: OCR again and click the "Approve" button.
-sleep 1
-$VMGUI "$VM" screenshot /tmp/14-s3-rejected.png
+# Runner: find the "Approve" button in a fresh frame and click it with the
+# preview / confirm handshake. The refusal modal is its own toplevel titled
+# `Decision not recorded`; wait for the compositor to map it (a timeout
+# FAILS S3: no modal means the admin never learns the decision was refused).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "Decision not recorded" 30'
+qdwin_screenshot "$ART/14-s3-rejected.png"
 ```
 
-The broker may reject the decision before XWayland has presented the modal.
-Open the S3 frame and, if the required modal is absent, capture up to four
-more frames 2 s apart under distinct `-r2.png` ... `-r5.png` names. Open
-each frame and grade the first one with the modal. If the modal remains
-absent, S3 fails; keep all captures and the broker refusal evidence.
-
-**Assert (OCR /tmp/14-s3-rejected.png)**:
+**Assert (vision, on `14-s3-rejected.png`)**:
 - A modal with heading text `Decision not recorded` has appeared.
 - The modal body makes the forbidden-scope reason visible. Accept either
  the legacy raw exception text (`ScopeNotPermitted` / `scope '1h' not
@@ -146,16 +149,20 @@ absent, S3 fails; keep all captures and the broker refusal evidence.
 ### S4 — dismiss modal, retry with "Just this once"
 
 ```bash
-# Runner:
-# 1. OCR /tmp/14-s3-rejected.png, find "OK" button, click it.
-# 2. OCR the next screenshot, find "Just this once", click the
-# radio ~15px left of that label.
-# 3. OCR again, find "Approve", click it.
-sleep 2
-$VMGUI "$VM" screenshot /tmp/14-s4-once-approved.png
+# Runner, each click with the preview / confirm handshake:
+# 1. In 14-s3-rejected.png find the modal's "OK" button and click it. The
+#    modal must go away before you target the main window:
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; for i in $(seq 1 60); do qdwin_window_handle "Decision not recorded" >/dev/null || exit 0; sleep 0.5; done; echo "modal still mapped" >&2; exit 1'
+# 2. Take a fresh frame, find "Just this once", click the radio ~15 px left
+#    of that label:
+qdwin_screenshot "$ART/14-s4a-modal-dismissed.png"
+# 3. Find "Approve" and click it. Then wait for the list to empty (a timeout
+#    FAILS S4) and capture:
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/14-s4-once-approved.png"
 ```
 
-**Assert (OCR /tmp/14-s4-once-approved.png)**:
+**Assert (vision, on `14-s4-once-approved.png`)**:
 - `(no selection)` visible.
 - No modal on screen.
 - No `uid=2000` / `app.send-to:` text remaining.
@@ -186,7 +193,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'rm -f /tmp/14-relay.out /tmp/14-relay.pid'
 ```
 
@@ -197,7 +204,9 @@ $VMEXEC "$VM" 'rm -f /tmp/14-relay.out /tmp/14-relay.pid'
  modal doesn't appear, report FAIL before attempting S4 — the
  admin app's `on_decide_failed` handler (or equivalent) is
  broken and the whole scope-enforcement UX collapses.
-- S2's assertion on radio-filled-state is intentionally soft.
- OCR glyph reading for radio bullets is unreliable; rely on S3's
- forbidden-scope modal to prove that the broker saw a `1h` scope,
+- S2's assertion on radio-filled-state is intentionally soft; S3's
+ forbidden-scope modal proves that the broker saw a `1h` scope,
  which can only happen if the radio actually flipped.
+- S1's `dbus-send` keeps its 25 s default reply timeout: the sender may
+ give up with NoReply before S4; S4's assertions read the broker and
+ notepad, not the sender's exit.
