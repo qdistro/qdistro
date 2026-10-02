@@ -3,7 +3,7 @@
 import os
 import re
 
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QColor, QFont, QPalette
 from PyQt6.QtWidgets import QApplication, QWidget
 
 BG_DARK = "#1e1e1e"
@@ -203,6 +203,18 @@ def overlay_palette(mode: str = "auto") -> dict[str, str]:
         "border": css_color_literal(raw.get("border"), fallback["border"]),
         "accent": css_color_literal(raw.get("accent"), fallback["accent"]),
     }
+
+
+def _ui_font(*, relative: float = 1.0, bold: bool = False) -> QFont:
+    """Application UI font, optionally scaled for secondary chrome text."""
+    app = QApplication.instance()
+    font = QFont(app.font()) if app is not None else QFont()
+    size = font.pointSizeF()
+    if size <= 0:
+        size = float(font.pointSize() or 11)
+    font.setPointSizeF(max(6.0, size * relative))
+    font.setBold(bold)
+    return font
 
 
 def _apply_dark(app):
