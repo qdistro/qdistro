@@ -505,7 +505,22 @@ baseline() {
             systemctl --user -M admin@ start qdwin-session.target || true
             break
         done
-        for _ in $(seq 1 30); do healthy && exit 0; sleep 2; done
+        # One start can lose to units still settling or to a failed member of
+        # an already-active target; keep re-issuing start for whatever stays
+        # inactive while wayland-1 is missing. Slow emulation needs the time.
+        for _ in $(seq 1 45); do
+            healthy && exit 0
+            for u in $sys; do
+                systemctl is-active --quiet "$u" ||
+                    { systemctl reset-failed "$u" 2>/dev/null; systemctl start "$u" 2>/dev/null || true; }
+            done
+            for u in $usr; do
+                systemctl --user -M admin@ is-active --quiet "$u" ||
+                    { systemctl --user -M admin@ reset-failed "$u" 2>/dev/null;
+                      systemctl --user -M admin@ start "$u" 2>/dev/null || true; }
+            done
+            sleep 2
+        done
         echo "harness: baseline NOT restored after this file"
         exit 1' 2>&1
 }

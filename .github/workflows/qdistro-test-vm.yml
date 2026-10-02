@@ -170,9 +170,23 @@ jobs:
           vmssh() {
             ssh -i "$VM_DIR/builder-key" -p 2222 \
               -o BatchMode=yes -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
               -o ServerAliveInterval=30 -o LogLevel=ERROR \
               admin@127.0.0.1 "$@"
+          }
+          # A transport failure (255: refused, reset, banner timeout) right
+          # after a boot is transient on a slow emulated guest; retry it.
+          # Only short idempotent commands use this; the polling wait_ssh has
+          # its own loop and the guest install must not be re-run blindly.
+          vmsshx() {
+            local n rc
+            for n in 1 2 3; do
+              vmssh "$@" && return 0
+              rc=$?
+              [ "$rc" -eq 255 ] || return "$rc"
+              sleep 4
+            done
+            return "$rc"
           }
           wait_ssh() {
             for _ in $(seq 1 120); do
@@ -198,14 +212,14 @@ jobs:
           boot_vm install
           wait_ssh install
           SECONDS=0
-          vmssh 'sudo -n bash /root/qdistro-substrate-repos.sh && sudo -n rm -f /root/qdistro-substrate-repos.sh'
+          vmsshx 'sudo -n bash /root/qdistro-substrate-repos.sh && sudo -n rm -f /root/qdistro-substrate-repos.sh'
           vmssh 'sudo -n bash /root/qdistro-src/scripts/vm/test-vm-guest-install.sh' 2>&1 \
             | tee "$VM_DIR/guest-install.log"
           echo "guest install took ${SECONDS}s"
-          vmssh 'df -h /; rpm -qa | wc -l'
+          vmsshx 'df -h /; rpm -qa | wc -l'
 
           # Headless qdwin: the shell plugin loads and answers its probe.
-          vmssh 'set -eu; export XDG_RUNTIME_DIR=/run/user/1000; \
+          vmsshx 'set -eu; export XDG_RUNTIME_DIR=/run/user/1000; \
             export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
             export WESTON_MODULE_MAP=headless-backend.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so; \
             export WAYLAND_DISPLAY=wayland-ci; \
@@ -224,7 +238,7 @@ jobs:
 
           # qdshell: the installed QML tree runs on a headless qdwin for 30 s
           # with the qdshell.service environment.
-          vmssh 'set -u; export XDG_RUNTIME_DIR=/run/user/1000; \
+          vmsshx 'set -u; export XDG_RUNTIME_DIR=/run/user/1000; \
             export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
             d=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16; \
             export WESTON_MODULE_MAP="headless-backend.so=$d/headless-backend.so;gl-renderer.so=$d/gl-renderer.so"; \
@@ -246,11 +260,11 @@ jobs:
             test "$qs_rc" -eq 124' 2>&1 | tee "$VM_DIR/qdshell-smoke.log"
 
           # Second boot of the installed system: services and the greeter.
-          vmssh 'sudo -n systemctl poweroff' || true
+          vmsshx 'sudo -n systemctl poweroff' || true
           wait_down
           boot_vm reboot
           wait_ssh reboot
-          vmssh 'set -u; sleep 20; \
+          vmsshx 'set -u; sleep 20; \
             systemctl --no-pager list-units "qdistro*" "greetd*" "seatd*"; \
             echo "--- failed units"; systemctl --no-pager --failed; \
             echo "--- greetd"; sudo -n journalctl -b -u greetd --no-pager | tail -40; \
@@ -265,13 +279,13 @@ jobs:
             exit "$fail"' 2>&1 | tee "$VM_DIR/reboot-check.log"
 
           # The consumer boot must not inherit these.
-          vmssh 'cat /etc/machine-id' > "$VM_DIR/build-machine-id"
-          vmssh 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub' > "$VM_DIR/build-hostkey"
+          vmsshx 'cat /etc/machine-id' > "$VM_DIR/build-machine-id"
+          vmsshx 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub' > "$VM_DIR/build-hostkey"
 
           # Ship state: no builder key or cache; SSH stays enabled for a
           # cloud-init key, password logins are refused remotely. An empty
           # machine-id makes each copy generate its own on first boot.
-          vmssh 'sudo -n sh -c "set -e; \
+          vmsshx 'sudo -n sh -c "set -e; \
             zypper -n clean -a; \
             : > /etc/machine-id; \
             install -d -m 0755 /etc/ssh/sshd_config.d; \
