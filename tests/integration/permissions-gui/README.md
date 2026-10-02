@@ -13,7 +13,8 @@ Two GUI lanes run these scenarios (see `AGENTS.md`, "qdwin lane"):
   app started through the shipped native-Wayland launcher: 03, 04, 06,
   08, 10, 12, 13, 14, 34, 43, 47 (and 18–21, 56, 57).
 - **labwc admin lane** — labwc + LXQt + XWayland with the test-only xcb
-  launcher: every other scenario here. None of that stack ships.
+  launcher: every other scenario here. None of that stack ships, so the
+  lane is opt-in (`QCI_LABWC_ADMIN_LANE=1`, or `qci gui-admin`).
 
 ## Scenario index by area
 

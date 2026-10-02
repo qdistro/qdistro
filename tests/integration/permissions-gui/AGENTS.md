@@ -109,7 +109,7 @@ There is no X server, so nothing in those scenarios may use `xdotool`,
 `vm-gui screenshot` for a graded frame. Everything else on this page (vm-exec
 quoting, `bg_start`/`bg_wait`, broker ground truth, preview/confirm clicks)
 still applies. The scenarios that do NOT name the qdwin lane run on the labwc
-admin lane.
+admin lane, which is opt-in (`QCI_LABWC_ADMIN_LANE=1`; see ci/README.md).
 
 The lane's primitives (guest side, in `/tmp/qci-gui-waiters.sh`):
 
