@@ -250,6 +250,24 @@ is c-cached-sha512 \"\$(sha512sum < /var/cache/t3s-dl/$rel/gvisor.tar.zstd | cut
 rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
 is no-leftovers \"\$(leftovers)\" 0; probe_tail_pass after; finish"
 
+step 19-probe-scratch-image "$L; rm -rf /var/tmp/t3s-hostile /etc/t3s-sentinel
+runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman rmi -f localhost/tier3s-probe:empty
+if runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image exists localhost/tier3s-probe:empty; then bad scratch-image-absent; else ok scratch-image-absent; fi
+mkdir -m 0777 /var/tmp/t3s-hostile; printf 'precious\\n' > /etc/t3s-sentinel; chmod 0600 /etc/t3s-sentinel
+s0=\$(stat -c '%a %U %s' /etc/t3s-sentinel)\$(sha256sum < /etc/t3s-sentinel)
+echo '## probe as root with a hostile TMPDIR (0777, not sticky) and the scratch image absent'
+TMPDIR=/var/tmp/t3s-hostile strace -f -qq -e trace=mkdir,mkdirat,chmod,fchmod,fchmodat,fchmodat2 -o /var/tmp/t3s-tr-ch tier3s/probe.sh --user admin > \$PO 2>&1; PRC=\$?
+cat \$PO; expect_rc probe-exit 0 \$PRC
+has probe-pass \$PO 'RESULT PASS: tier 3s prerequisites present'
+has runtime-recorded \$PO 'PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded'
+echo \"--- mkdir/chmod-family syscalls naming the hostile TMPDIR: \$(grep -c t3s-hostile /var/tmp/t3s-tr-ch)\"
+is no-syscall-touches-tmpdir \"\$(grep -c t3s-hostile /var/tmp/t3s-tr-ch)\" 0
+is hostile-tmpdir-empty \"\$(ls -A /var/tmp/t3s-hostile | wc -l)\" 0
+is sentinel-unchanged \"\$(stat -c '%a %U %s' /etc/t3s-sentinel)\$(sha256sum < /etc/t3s-sentinel)\" \"\$s0\"
+if runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image exists localhost/tier3s-probe:empty; then ok scratch-image-imported; else bad scratch-image-imported; fi
+runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image inspect --format '{{.Id}} layers={{len .RootFS.Layers}}' localhost/tier3s-probe:empty
+rm -rf /var/tmp/t3s-hostile /etc/t3s-sentinel; finish"
+
 step 08-probe-pass-after-negatives "$L; provision idempotent-exit 0; has nothing-to-do \$VO 'already installed and matching pin $rel; nothing to do'
 probe_strace; expect_rc probe-exit 0 \$PRC; has result-pass \$PO 'RESULT PASS: tier 3s prerequisites present'
 is strace-one-runsc-exec \"\$NEXEC\" 1; is no-leftovers \"\$(leftovers)\" 0; finish"

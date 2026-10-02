@@ -74,7 +74,11 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   runs, and the inode can only be rewritten by root (execve also refuses a
   file open for writing). Under an untrusted install path the probe reads no
   file content at all (a FIFO swapped in there cannot hang it), and the
-  wrapper is handed to podman only once it verified.
+  wrapper is handed to podman only once it verified. The probe's empty
+  scratch image is imported from a one-entry archive built from `/`'s
+  metadata (`tar --no-recursion`): no temporary directory, no chmod, so a
+  hostile `$TMPDIR` cannot redirect a root write; an import failure is
+  reported as such.
 - **Provisioning was not serialized.** Now one exclusive `flock` on
   `/run/qdistro-runsc/provision.lock` (root 0700) is taken before the live
   state is inspected and held through swap, verification, rollback and
@@ -95,9 +99,10 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   loop; plus version text with a nonzero exit, wrapper env scrubbing, failed
   rollback preservation, a two-process lock test and swap-during-window
   tests. `tier3s/spike/mutate-guards.py` breaks each guard in the real
-  scripts and shows its test failing (22 mutations; 3 of them also with
+  scripts and shows its test failing (24 mutations; 3 of them also with
   real euid 0 in the VM). The stage-parent and cache-trust rules for real
-  root installs are shown in the VM (`logs/phase0-fix-20261002/17`, `18`).
+  root installs, and the probe's scratch-image import under a hostile
+  `$TMPDIR`, are shown in the VM (`logs/phase0-fix-20261002/17`–`19`).
 
 ## Phase S — the feasibility spike
 
