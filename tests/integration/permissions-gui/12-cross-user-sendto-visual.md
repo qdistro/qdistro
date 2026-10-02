@@ -53,7 +53,18 @@ echo "admin approvals window did not map: $t" >&2; exit 1'
 $VMGUI "$VM" screenshot /tmp/12-s1-empty.png
 ```
 
-**Assert (OCR /tmp/12-s1-empty.png)**:
+Open `s1-empty.png` before grading it. The setup waits for the window
+title, but Qt can map the XWayland window before it paints it, so the
+first frame may still show black or half-drawn widgets (2026-10-01:
+black detail pane, `(no selection)` not yet drawn). If the frame shows
+any unpainted region, keep it and capture up to four more frames, 2 s
+apart, as `12-s1-empty-r2.png` through `-r5.png`. Open each new frame.
+The first fully painted frame is the S1 evidence. If none of the five is
+fully painted, S1 fails on the last frame and all captures remain in the
+artifacts. A fully painted frame that lacks `(no selection)` fails S1
+at once; do not retry it.
+
+**Assert (OCR the S1 evidence frame)**:
 - Text `admin approvals` appears (window titlebar).
 - Text `(no selection)` appears in the detail pane.
 - Text `Pending` appears (tab label).
