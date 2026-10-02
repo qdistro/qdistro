@@ -8,8 +8,9 @@
 #     stops both launch units (before the manager stops) through the cleanup
 #     path; no launch-owned process, scope, token dir or control dir is left;
 #   - session-manager crash (SIGKILL) and session-manager restart: the old
-#     launch is gone and the restarted manager relaunches the Active silo
-#     with a FRESH token;
+#     launch gets a stop JOB (StopPropagatedFrom) and is gone, and the
+#     restarted manager relaunches the Active silo with a FRESH token whose
+#     record, container and scope are running (not just a new record);
 #   - restart reconciliation after the manager's in-memory state is lost:
 #     (a) a live launch unit the manager never started (started directly
 #     while the manager was down) is stopped and reaped; (b) the same with
@@ -72,9 +73,8 @@ systemctl start "$MGR"; wait_for 30 manager_up
 is "manager-stop: manager started again" "$(yes_no manager_up)" yes
 # the silos were Active: the autostart sweep relaunches them with fresh tokens
 for s in $SA $SB; do
-    wait_for 60 bash -c "[ -n \"\$(find $CTL -mindepth 2 -name state -exec grep -l 'unit=$(unit_of "$s")' {} + 2>/dev/null)\" ]"
-    t=$(token_of_unit "$(unit_of "$s")"); old=$TA; [ "$s" = "$SB" ] && old=$TB
-    info "manager-stop: after the restart $s relaunched as ${t:-none} (was $old)"
+    old=$TA; [ "$s" = "$SB" ] && old=$TB
+    assert_relaunched "manager-stop/$s" "$s" "$old"
     sm StopSilo si "$s" 10 > /dev/null
 done
 wait_for 30 bash -c '[ -z "$(ls /run/qdistro-tier3s-ctl/ 2>/dev/null)" ]'
@@ -91,14 +91,14 @@ for how in crash restart; do
     wait_for 30 manager_up
     is "manager-$how: manager back with a new pid" "$(yes_no test "$(mgr_pid)" != "$old_pid")" yes
     assert_launch_gone "manager-$how" "$TA" "$(ctr_of $SA)"
-    wait_for 60 bash -c "[ -n \"\$(find $CTL -mindepth 2 -name state -exec grep -l 'unit=$(unit_of $SA)' {} + 2>/dev/null)\" ]"
-    t=$(token_of_unit "$(unit_of $SA)")
-    if [ -n "$t" ] && [ "$t" != "$TA" ]; then pass "manager-$how: the Active silo was relaunched with a fresh token ($t)"
-    else fail "manager-$how: relaunch token '${t:-none}' (old $TA)"; fi
+    assert_relaunched "manager-$how" $SA "$TA"
     unit_log "$(unit_of $SA)" "$cur" | grep -E 'Stopping|Stopped|torn down|signal' | sed 's/^/    unit: /'
     # systemd propagates the manager's stop/failure to the launch unit
-    # (StopPropagatedFrom=): a stop job with the verified cleanup, not a kill
-    is "manager-$how: the old launch got a stop job and the verified cleanup (StopPropagatedFrom)" \
+    # (StopPropagatedFrom=): a stop JOB (fable A r1 P3-4: asserted from PID 1's
+    # journal fields) with the verified cleanup, not a kill
+    is "manager-$how: systemd completed a stop job for the old launch unit" \
+        "$(units_jobs_since "$cur" stop "$(unit_of $SA | sed 's/[.@]/\\&/g')" | sed 's/^[1-9][0-9]*$/yes/')" yes
+    is "manager-$how: the old launch got the verified cleanup" \
         "$(unit_log "$(unit_of $SA)" "$cur" | grep -c "qdistro-tier3s-cleanup: $TA: torn down")" 1
     sm StopSilo si $SA 10 > /dev/null; is "manager-$how: StopSilo" "$(silo_state $SA)" Stopped
     wait_for 30 bash -c '[ -z "$(ls /run/qdistro-tier3s-ctl/ 2>/dev/null)" ]'

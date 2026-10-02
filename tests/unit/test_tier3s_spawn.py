@@ -38,6 +38,7 @@ ARGV = ["headless-smoke", "--", "qdistro-tier3s-smoke"]
 FAKE_PODMAN = r'''#!/bin/bash
 F=@F@; T=@T@
 echo "podman $*" >> "$F/calls"
+for fd in 8 9; do [ ! -e "/proc/$$/fd/$fd" ] || echo "podman HELD lock fd $fd" >> "$F/calls"; done
 while [ $# -gt 0 ]; do
     case "$1" in
         --runtime|--cgroup-manager) shift 2 ;;
@@ -802,8 +803,11 @@ def test_cleanup_tears_down_a_running_launch(w):
     # container could take meanwhile
     assert f"podman stop -t 10 {TOKEN}{TOKEN}" in calls, calls
     assert f"podman rm -f --ignore {TOKEN}{TOKEN}" in calls, calls
-    # podman runs as the recorded admin, never as root
-    assert all(calls[i - 1].startswith("runuser -u") for i, c in enumerate(calls) if c.startswith("podman"))
+    # podman runs as the recorded admin, never as root, and never holding a
+    # lock fd (a long-lived podman child would keep the lock)
+    assert all(calls[i - 1].startswith("runuser -u") for i, c in enumerate(calls)
+               if c.startswith("podman") and "HELD" not in c)
+    assert not any("HELD lock fd" in c for c in calls), calls
 
 
 def test_cleanup_with_missing_state_root_preserves_record_and_scope(w):
@@ -1245,6 +1249,48 @@ def test_reap_stale_refuses_a_stale_unit_name_on_a_live_scope_owned_by_another_u
     assert (w.launch_parent / TOKEN2).exists()
 
 
+def _scopeless_container(w, name, token, unit_label):
+    c = w.F / "c" / name
+    c.mkdir(parents=True)
+    for f, v in (("exists", ""), ("running", ""), ("label", token + "\n"), ("id", token * 2 + "\n"),
+                 ("unit_label", unit_label)):
+        (c / f).write_text(v)
+    return c
+
+
+@pytest.mark.parametrize("label", ["", "sshd.service\n"])
+def test_reap_stale_preserves_a_scopeless_container_without_a_valid_unit_label(w, label):
+    c = _scopeless_container(w, "qdistro-tier3s-nolabel", TOKEN2, label)
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "has no valid qdistro_tier3s_unit label" in r.stderr
+    assert c.exists()
+    assert not any(x.startswith("podman rm") for x in w.calls())
+
+
+def test_reap_stale_rechecks_the_owner_before_any_stop(w):
+    # the recorded unit reads dead at the reaper's first look, live again by
+    # the time the teardown checks the scope's owner: nothing is stopped
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    (w.F / "units/qdistro-tier3s-silo@b.service.seq").write_text("inactive\nactive\n")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1, r.stderr
+    assert "its owner qdistro-tier3s-silo@b.service is live (again)" in r.stderr
+    assert not any(c.startswith(("podman stop", "podman rm", "systemctl stop")) for c in w.calls())
+    assert (w.ctl / TOKEN2 / "state").exists()
+
+
+def test_cleanup_a_dead_scope_with_a_populated_cgroup_preserves(w):
+    # systemd reports the scope inactive/failed but its cgroup still holds a
+    # process (abandoned): never "gone"
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("scope_sticky")
+    w.set_unit(f"qdistro-tier3s-{TOKEN}.scope", "failed")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 6, r.stderr
+    assert "holds processes or cannot be read" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+
+
 def test_reap_stale_reaps_a_labelled_container_that_has_no_scope(w):
     # the s122 "ghost": a labelled container started outside any launch unit
     # (no scope, no record) whose unit label is dead is still reaped
@@ -1320,6 +1366,7 @@ def test_cleanup_a_failed_recursive_scan_is_not_empty(w, damage):
     w.set("scope_sticky")
     w.set("scope_stop_fail")
     d = Path(f"{w.T}/sys/fs/cgroup/system.slice/qdistro-tier3s-{TOKEN}.scope")
+    (d / "cgroup.procs").write_text("")          # the recorded processes ended
     (d / "sub").mkdir()
     (d / "sub/cgroup.procs").write_text("4999\n")
     target = d / "sub/cgroup.procs" if damage == "unreadable-procs" else d / "sub"
@@ -1489,8 +1536,8 @@ def test_reap_stale_skips_a_token_another_teardown_holds(w):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         t0 = time.time()
-        r = w.cleanup("--reap-stale")
-        assert time.time() - t0 < 10
+        r = w.cleanup("--reap-stale", TIER3S_TEST_TMO="5")
+        assert time.time() - t0 < 3, "the reaper must not wait on a busy token"
     finally:
         os.close(fd)
     assert r.returncode == 0 and "busy" in r.stderr
@@ -1506,8 +1553,10 @@ def test_reap_stale_deadline_preserves_what_it_did_not_reach(w):
     w.set_unit("qdistro-tier3s-silo@b.service", "failed")
     r = w.cleanup("--reap-stale", "--deadline", "1", TIER3S_TEST_TMO="2")
     assert r.returncode == 1
-    assert "deadline reached" in r.stderr
-    assert (w.ctl / TOKEN / "state").exists()
+    # A (first) hangs past the deadline; B is not started and stays intact
+    assert f"{TOKEN2}: reap deadline reached" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.ctl / TOKEN2 / "state").exists()
+    assert (w.F / "c/qdistro-tier3s-b/running").exists()
 
 
 # fable P2-2: admin-chosen label bytes never steer the reaper

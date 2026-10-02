@@ -70,8 +70,10 @@ as_admin() {   # the same scrubbed admin environment the spawn and cleanup use
         XDG_RUNTIME_DIR=/run/user/1000 "$@"
 }
 pm() { as_admin podman "$@"; }   # PLAIN podman: no --runtime, no --root, no runtime flags
+# StartSilo of a tier3s silo returns only once the launch runs (the unit is
+# Type=notify), so the call gets more than busctl's default 25 s
 sm() {
-    as_admin busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
+    as_admin busctl --system --timeout=150 call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
         org.qdistro.SessionManager1 "$@"
 }
 broker_check() {   # broker_check <action> -> allow|deny|unknown|ERR
@@ -110,7 +112,11 @@ scope_log() { journalctl _SYSTEMD_UNIT="qdistro-tier3s-$1.scope" --no-pager -o c
 # Units systemd (pid 1) started since a cursor whose UNIT field matches a
 # regex: journal fields, never the message text of other processes.
 # A failed query prints QUERY-FAILED instead of a count (sol A-iii r1 P2).
-units_started_since() {   # units_started_since <cursor> <python regex>
+units_started_since() { units_jobs_since "$1" start "$2"; }   # <cursor> <python regex>
+# Jobs of a type that systemd COMPLETED since a cursor (JOB_TYPE=<type>,
+# JOB_RESULT=done for start/stop... "Stopped"/"Started" messages), or, for
+# start, the "Starting" messages too (the historic count of units_started_since).
+units_jobs_since() {   # units_jobs_since <cursor> <start|stop> <python regex>
     qry journalctl --after-cursor="$1" _PID=1 -o json --no-pager | python3 -c '
 import json, re, sys
 n = 0
@@ -118,9 +124,11 @@ for line in sys.stdin:
     if line.startswith("QUERY-FAILED"):
         print("QUERY-FAILED"); sys.exit(0)
     j = json.loads(line)
-    if j.get("JOB_TYPE") == "start" and re.fullmatch(sys.argv[1], j.get("UNIT", "")):
+    if j.get("JOB_TYPE") != sys.argv[1] or not re.fullmatch(sys.argv[2], j.get("UNIT", "")):
+        continue
+    if sys.argv[1] == "start" or j.get("JOB_RESULT") == "done":
         n += 1
-print(n)' "$2"
+print(n)' "$2" "$3"
 }
 T3S_SCOPE_RE='qdistro-tier3s-[0-9a-f]{32}\.scope'
 # no fallback tier: tier-2 silo/podapp units and tier-3 user-silo sessions
@@ -232,6 +240,8 @@ up_silo() {
     local s="$1" unit tok cur
     unit=$(unit_of "$s"); cur=$(journal_cursor)
     sm StartSilo s "$s" > /dev/null || { echo ""; return 1; }
+    # Type=notify: StartSilo returns only once the launch is recorded running
+    { tok=$(token_of_unit "$unit" | head -1); echo "${tok:+$(rec "$tok" phase)}"; } > "$WORK/up-phase.$s"
     if ! wait_for 120 bash -c "journalctl -u '$unit' --no-pager -o cat --after-cursor='$cur' | grep -q 'spawn-tier3s: running: '"; then
         unit_log "$unit" "$cur" | tail -20 >&2; echo ""; return 1
     fi
@@ -244,6 +254,28 @@ up_silo() {
         echo "up_silo: $s never reached 'SMOKE holding'" >&2; echo ""; return 1
     fi
     echo "$tok"
+}
+
+# A relaunch counts only when the NEW token's record is phase=running, its
+# container runs with that token label and its owning scope is live (astra A
+# r1 #6): a freshly published phase=created record is not a running launch.
+# assert_relaunched <tag> <silo> <old token> -> prints nothing; PASS/FAIL lines
+assert_relaunched() {
+    local tag="$1" s="$2" old="$3" u t=""
+    u=$(unit_of "$s")
+    for _ in $(seq 1 360); do
+        t=$(token_of_unit "$u" | head -1)
+        [ -n "$t" ] && [ "$t" != "$old" ] && [ "$(rec "$t" phase)" = running ] && break
+        sleep 0.25
+    done
+    if [ -n "$t" ] && [ "$t" != "$old" ]; then pass "$tag: relaunched with a fresh token ($t, was $old)"
+    else fail "$tag: no fresh token (record '${t:-none}', old $old)"; return; fi
+    is "$tag: the new launch is recorded running" "$(rec "$t" phase)" running
+    is "$tag: its container runs under the new token" \
+        "$(ctr_status "$(ctr_of "$s")"):$(pm inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$(ctr_of "$s")" 2>/dev/null)" \
+        "running:$t"
+    is "$tag: its owning scope is live" "$(unit_state "qdistro-tier3s-$t.scope")" active
+    echo "$t" > "$WORK/relaunched.$s"
 }
 
 # Eventual absence of everything one launch owned (DONE bar 2). Each item is

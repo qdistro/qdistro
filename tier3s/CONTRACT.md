@@ -21,19 +21,31 @@ drivers.
 SessionManager1.CreateTier3sSilo(name, workload, template_silo, network="none")   [A-ii]
 SessionManager1.StartSilo(name)                                                   [A-ii]
   writes /run/qdistro/silo-launch/<name>.env  (root 0600, KEY='VALUE')
-  systemctl start qdistro-tier3s-silo@<name>.service            (User=root)       [A-ii]
+  systemctl start qdistro-tier3s-silo@<name>.service   (User=root, Type=notify)     [A-ii, r1]
     ExecStart=/usr/libexec/qdistro/qdistro-tier3s-silo-launch %i                  [A-ii]
-      env -i … TIER3S_ROOT_LAUNCHER=1 TIER3S_LAUNCH_UNIT=%n TIER3S_LAUNCH_TOKEN=<t> TIER3S_SILO=<name> …
+      env -i … NOTIFY_SOCKET=<systemd's> TIER3S_ROOT_LAUNCHER=1 TIER3S_LAUNCH_UNIT=%n TIER3S_LAUNCH_TOKEN=<t> TIER3S_SILO=<name> …
       exec /usr/lib/qdistro/tier3s/spawn-tier3s.sh <workload> -- <argv…>         (root supervisor)
         probe → read-only binding → token → broker gate → activation record
-        → control record + per-launch dir → transient scope:
+        → reap stale → control record (published whole) + per-launch dir → transient scope:
         systemd-run --scope --unit=qdistro-tier3s-<t>.scope -p Delegate=yes
                     -p BindsTo=<launch unit> -p Before=<launch unit> -p TasksMax= -p MemoryMax=
           -- /usr/libexec/qdistro/qdistro-tier3s-scope enter <t> 1000 -- podman …
                (root: verify own cgroup, delegate it to admin, exec runuser -u admin podman …)
+          … recorded running → READY=1 (the start job completes only here)
     ExecStop=-/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
     ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
 ```
+
+**The start acknowledges a running launch (astra/fable A r1).** The unit is
+`Type=notify`, `NotifyAccess=all`, `TimeoutStartSec=120`. The spawn sends
+`READY=1` (through `systemd-notify`, from the launch unit's cgroup) only once
+the launch is recorded `phase=running`, or once a short workload that exited 0
+before it was seen running has been torn down and verified. Every refusal
+(profile, probe, broker, binding, seccomp file, image) and every failure
+before that exits without `READY=1`, so `systemctl start` fails and the
+manager sees it (§6). The spawn unsets `NOTIFY_SOCKET` at once and keeps it for
+its own `systemd-notify` only; the probe, podman (`env -i`) and the scope never
+get it, and no sandbox process runs in the launch unit's cgroup.
 
 Podapps (`LaunchPodApp` analogue) would use the same spawn with no
 `TIER3S_SILO`, unit `qdistro-tier3s-app@<token>.service`. **A-ii ships silos
@@ -206,8 +218,24 @@ No runsc-bundle process was outside the scope, and admin could not raise
 - `/run/qdistro-tier3s-ctl/` root 0700 (tmpfiles). It is **never mounted into
   a sandbox**.
 - `/run/qdistro-tier3s-ctl/<token>/` root 0700, with `state` root 0600:
-  `KEY=VALUE` lines, **parsed, never sourced**, written atomically (temp file
-  plus `mv`) under the lock.
+  `KEY=VALUE` lines, **parsed, never sourced**. The record appears **complete
+  or not at all** (astra/fable A r1): the spawn builds it in
+  `/run/qdistro-tier3s-ctl/.new-<token>/` and renames it into place under the
+  global lock, after checking the token is unused, and creates the per-launch
+  dir under the same lock. No scope exists before it. Later updates
+  (`phase=running`) take the token's lock and replace `state` by rename.
+- A `.new-<token>` dir exists only while a spawn holds the global lock; one
+  seen by `--reap-stale` (which takes that lock) belongs to a spawn that died,
+  and is removed.
+- An **incomplete record** (a token dir without `state`, which earlier code
+  could leave behind when the spawn died between `mkdir` and its first write)
+  has no unit. The cleanup removes it only on positive evidence that nothing
+  ran under it: `qdistro-tier3s-<token>.scope` positively dead, its cgroup
+  absent or empty, and admin's podman listing (which must succeed) shows no
+  container with that token label. Otherwise it is preserved and the cleanup
+  exits non-zero. `--unit <any unit>`, `--reap-stale` and `<token>` all
+  apply this, and the manager's stop verification keeps counting it for every
+  unit until it is gone.
 - `/run/qdistro-tier3s/<token>/` admin 0700 under a root 0755 parent: the
   per-launch dir. It is Phase B's bridge socket dir and holds **no control
   state** (03 step 8). Phase A mounts nothing from it.
@@ -234,21 +262,46 @@ At start the spawn **verifies** that the conmon and Sentry pids sit inside
 the scope's cgroup before recording them. If they do not, it tears the
 launch down and fails.
 
-### Lock
+### Locks and bounds (astra A r1 #5, fable P3-1/P3-2/P3-7)
 
-There is one `flock` on `/run/qdistro-tier3s-ctl/.lock`. It serializes record
-creation and every cleanup or reap. The spawn holds it only to create its
-record and never while waiting on podman. A cleanup holds it for one token's
-teardown.
+- **Per token:** `flock` on the record dir `/run/qdistro-tier3s-ctl/<token>`.
+  A teardown holds it for that token only; the spawn's `phase=running` update
+  takes it too. `<token>` and `--unit` wait up to 120 s for it (a concurrent
+  teardown of the same token: ExecStop and the spawn's EXIT trap); after the
+  wait, a record that is gone counts as torn down. `--reap-stale` never waits:
+  a token another teardown holds is skipped (logged as busy, not a failure).
+- **Global:** `flock` on `/run/qdistro-tier3s-ctl/.lock`, held only for short
+  steps with no podman or systemd call inside: the spawn's record publication
+  (check unused, write `.new-<token>`, rename, create the per-launch dir), the
+  removal of an orphan per-launch dir (re-checking that there is still no
+  record) and the `.new-*` sweep. Waits are bounded (60 s).
+- **Calls:** every external podman/systemctl call in the cleanup runs under
+  `timeout(1)` (podman 20 s, `podman stop` grace + 20 s, systemctl queries
+  10 s, a scope stop 30 s, kill 5 s later), which kills the call's whole
+  process group; a timeout is a failed query, never "absent". Lock fds are
+  closed for every child.
+- **Batches:** `--unit` and `--reap-stale` start no new token after a
+  deadline (`--deadline`, default 90 s; the spawn's reaper uses 30 s); tokens
+  not reached stay preserved and the run exits non-zero. A wedged podman or
+  systemd fails a token at its first call (a 20 s or 10 s bound plus the 5 s
+  kill); only calls that each answer just under their bound add up, to a few
+  minutes for one token at most. A batch is bounded by its deadline plus the
+  token in progress; the manager bounds the whole helper run at 300 s
+  (`_T_SYSTEMCTL_STOP`) and treats a timeout as a failed cleanup.
+
+So a wedged teardown of launch A blocks neither B's teardown nor a new
+launch's record publication (tested with a hanging fake podman).
 
 ### `qdistro-tier3s-cleanup` (root; the final teardown path)
 
 ```
 qdistro-tier3s-cleanup <token>                 # one launch
-qdistro-tier3s-cleanup --unit <launch unit>    # every record whose unit= matches (ExecStop/ExecStopPost)
-qdistro-tier3s-cleanup --reap-stale [--except-unit <unit>]
-                                               # records whose unit is not active/activating/deactivating,
-                                               # plus labelled containers with no live launch unit (reconciliation)
+qdistro-tier3s-cleanup --unit <launch unit> [--deadline <s>]
+                                               # every record whose unit= matches (ExecStop/ExecStopPost),
+                                               # plus incomplete records (recovered on evidence)
+qdistro-tier3s-cleanup --reap-stale [--except-unit <unit> --token <new token>] [--deadline <s>]
+                                               # records whose unit is positively dead, plus labelled
+                                               # containers with no live launch unit (reconciliation)
 ```
 
 Per token, in order; any failure **exits non-zero and preserves the control
@@ -260,31 +313,50 @@ record (and the scope, if it is still alive)**:
 2. The state root is present, not a symlink, owned by `admin_uid`, 0700. A
    missing or replaced root fails here with "refusing to query or stop", so
    it never produces a false "no container".
-3. Query `podman container exists <container>` as the recorded admin. 0 is
+3. **The token scope's owner, before anything is stopped** (sol A-iii r4 P1,
+   astra/fable A r1). The scope's state is live, dead or unknown (unknown:
+   preserve). If live, systemd's `BindsTo=` of the scope must be exactly the
+   record's `unit` (the spawn always creates it with `BindsTo=<unit>`) and its
+   `ControlGroup` the recorded `scope_cgroup` (when recorded), under
+   `…/qdistro-tier3s-<token>.scope`; for the reaper the unit must also be
+   positively dead at that moment. Every query's exit status counts: a failed
+   or empty answer for a live scope is looked at again and then preserves.
+   So a valid but stale unit name in a record never tears down a live launch
+   that another unit owns.
+4. Query `podman container exists <container>` as the recorded admin. 0 is
    present, 1 is absent, anything else is "**podman query failed**" (error,
    preserve). It never conflates a failed query with "no container" (unlike
    tier 2's `spawn-tier2.sh` reaper, which suppresses errors). If present,
-   the container's `qdistro_tier3s_token` label must equal the token.
-4. If present: `podman stop -t 10`, then `podman rm -f --ignore`, then
-   re-query. The container must be absent; a stop or rm error is an error.
-5. Scope: if systemd still knows `scope_unit`, its `ControlGroup` must equal
-   the recorded `scope_cgroup` (the verified target). Wait for the cgroup
-   subtree to be empty, reading `cgroup.procs` recursively. If it is not
-   empty, `systemctl stop <scope_unit>` (systemd kills by cgroup) and wait
-   again; still not empty is an error.
-6. The recorded `(pid, starttime)` of conmon and the Sentry must be dead. If
+   `podman container inspect` gives its ID and its `qdistro_tier3s_token`
+   label, which must equal the token.
+5. If present: `podman stop -t 10 <id>`, then `podman rm -f --ignore <id>`,
+   then re-query by ID: it must be absent; a stop or rm error is an error. A
+   container that vanishes concurrently is re-queried, and only a definitive
+   "absent" goes on. Acting on the ID means a same-named container created
+   meanwhile is never touched.
+6. Scope again, re-validated against the first lookup. If live: wait for its
+   cgroup subtree to be empty, else `systemctl stop <scope_unit>` (systemd
+   kills by cgroup) and wait again. Then every cgroup the scope can have
+   (systemd's answer, the recorded one, and `/system.slice/<scope>`, where
+   `systemd-run --scope` puts it) must be absent or empty by a **complete**
+   recursive scan: a failed `find` or any unreadable `cgroup.procs` is "not
+   empty" (astra A r1 #2). A dead scope whose cgroup still holds a process is
+   an error.
+7. The recorded `(pid, starttime)` of conmon and the Sentry must be dead. If
    either is alive with the same starttime, it escaped the scope: error,
    preserve. It is never killed by pid, uid (100000 is shared by every
    keep-id launch, 05 fact 4) or process name.
-7. Remove `per_launch_dir` (a real directory under the root-owned parent;
+8. Remove `per_launch_dir` (a real directory under the root-owned parent;
    `rm -rf` does not follow symlinks), then the control dir.
 
 A missing control record with a leftover per-launch dir: the dir is removed
-only when `qdistro-tier3s-<token>.scope` is not active. Asked for explicitly
+only when `qdistro-tier3s-<token>.scope` is not active, and under the global
+lock after re-checking that there is still no record. Asked for explicitly
 (`cleanup <token>`), a live scope is an error. From the reaper, a live scope
-whose `BindsTo=` launch unit is still live is left alone; otherwise the reaper
-waits up to 20 s for systemd's own BindsTo stop, then stops the scope itself
-and removes the dir (A-iii s122: a reconciliation reap raced the scope stop
+whose `BindsTo=` launch unit is still live is left alone; one bound to a
+positively dead unit (or to the spawn's own unit under an older token) is
+waited for up to 20 s (systemd's own BindsTo stop), then stopped by the reaper,
+and the dir removed (A-iii s122: a reconciliation reap raced the scope stop
 and left the dir behind).
 
 ### Reaper and reconciliation
@@ -298,13 +370,22 @@ container, scope and per-launch dir and makes `--reap-stale` exit non-zero
 and again after the bounded wait (sol A-iii r1). An unrecorded labelled
 container is reaped only when its `qdistro_tier3s_unit` label is a valid tier3s
 launch unit that is dead (or is the spawn's own `--except-unit`); a missing or
-invalid label preserves it and is an error (sol A-iii r3).
+invalid label preserves it and is an error (sol A-iii r3). For a recorded
+launch and an unrecorded labelled container alike, the token scope must be
+dead, or live and bound to exactly that unit (rule 3 above, sol A-iii r4):
+a valid but **stale** unit name never authorizes the teardown of a scope
+another unit owns. The unrecorded path then removes the container by ID and
+leaves the scope to the guarded orphan path; there is no unconditional scope
+stop.
 
-The spawn runs `qdistro-tier3s-cleanup --reap-stale --except-unit <own unit>`
-before creating its record. A record whose `unit` is not live is stale, and so
-is a record carrying the spawn's own unit but another token (one unit runs
-one launch at a time). Reap failures are logged and do not block the new
-launch; launches are independent.
+The spawn runs `qdistro-tier3s-cleanup --reap-stale --except-unit <own unit>
+--token <its new token> --deadline 30` before publishing its record. A record
+whose `unit` is positively dead is stale, and so is a record (or labelled
+container) carrying the spawn's own unit under **another** token (one unit
+runs one launch at a time); the new token itself is never a candidate, and
+`--except-unit` is refused without a valid `--token`. Reap failures are
+logged and do not block the new launch. The reaper never waits on a token
+another teardown holds, so launches do not stall each other.
 
 Restart reconciliation (A-ii, as implemented):
 - **No tier3s launch survives a session-manager restart.** At startup
@@ -321,13 +402,17 @@ Restart reconciliation (A-ii, as implemented):
   start is the recovery path for launches the manager did not start, records
   of failed teardowns and labelled containers without a live unit.
 - `--reap-stale` also lists labelled containers as admin (`podman ps -a
-  --filter label=qdistro_tier3s_token`, template `{{.Label "<key>"}}`:
-  podman 6 rejects `index .Labels` in a ps template, which made every label
-  reap fail until A-iii s122 found it). A failed listing is an error, never
-  "nothing to reap". A container whose `qdistro_tier3s_unit` label names a
-  unit that is not live gets the per-token teardown. With no control record,
-  that teardown is a stop/rm by name plus stopping
-  `qdistro-tier3s-<token>.scope`, reported as "unrecorded".
+  --filter label=qdistro_tier3s_token --format json`), decoded and validated
+  in python3 (fable A r1 P2-2): label values are admin-chosen bytes, so they
+  are never split on a separator. Each entry's token, unit label and ID must
+  match their patterns; an entry that does not is preserved and counted as a
+  failure. (A-iii s122 had found that podman 6 rejects `index .Labels` in a ps
+  template; the JSON listing replaces the template.) A failed listing or bad
+  JSON is an error, never "nothing to reap". A container whose
+  `qdistro_tier3s_unit` names a positively dead unit, and whose token scope
+  passes rule 3, is removed by ID (`podman rm -f -t 10 <id>`, re-queried),
+  reported as "unrecorded"; its scope and per-launch dir then go through the
+  guarded orphan path.
 - Containers carry the labels `qdistro_tier3s_token=<token>` and
   `qdistro_tier3s_unit=<launch unit>`.
 
@@ -341,6 +426,7 @@ Restart reconciliation (A-ii, as implemented):
 | manager service stop (`systemctl stop qdistro-session-manager`, O11) | `StopPropagatedFrom=` enqueues the launch unit's stop, ordered before the manager's; then as the row above |
 | launcher SIGKILL / service failure | `ExecStopPost` cleanup runs while BindsTo stops the scope, then verifies |
 | manager restart, state lost | `--reap-stale` + unit stop |
+| refused launch (broker, profile, probe, image, …) | exits before `READY=1`: `systemctl start` fails, `ExecStopPost` runs the cleanup, the manager verifies the launch gone and reports the refusal (§6) |
 | runtime query/stop failure (root missing or replaced) while live | `cleanup` errors, and the record and scope stay. After the root is restored, `cleanup` tears everything down |
 
 ## 5. Spawn contract (`spawn-tier3s.sh`)
@@ -361,7 +447,12 @@ oracle is "no `podman run` and no activation record":
    `TIER3S_BINDING` (default `TIER3S_SILO`) must be a silo name.
 4. **Probe:** `/usr/lib/qdistro/tier3s/probe.sh --user admin` must exit 0.
    Anything else refuses with its `RESULT` line (prerequisites, state root,
-   pinned runsc, wrapper). There is no fallback tier.
+   pinned runsc, wrapper). There is no fallback tier. The probe runs **before**
+   the broker gate and does work as admin on every launch attempt, denied ones
+   included: it imports `localhost/tier3s-probe:empty` and runs
+   `podman create`/`rm` of a never-started `tier3s-probe-<pid>` container to
+   check the runtime (fable A r1 P3-8). That is no `podman run`; the s121
+   event oracle filters exactly these two events, and nothing else.
 5. **Read-only resolution:**
    - the workload name, and its seccomp file
      `/usr/lib/qdistro/tier3s/seccomp/<workload>.json`, which must exist
@@ -382,12 +473,16 @@ oracle is "no `podman run` and no activation record":
 9. **Activation recording:** for a templated silo, `qdistro-resolve-binding
    --record --launch-env` as admin. The digest must equal step 5's, or the
    launch refuses.
-10. Reap stale launches; under the lock, create the control record and the
-    per-launch dir. The EXIT/TERM trap runs `cleanup <token>` from here on.
+10. Reap stale launches (`--except-unit <unit> --token <token> --deadline
+    30`). Then, under the global lock: refuse a token already in use, arm the
+    EXIT/TERM trap's `cleanup <token>`, publish the complete record
+    (`.new-<token>` renamed into place) and create the per-launch dir.
 11. `podman image exists` as admin.
 12. `systemd-run --scope …` (D-A3b) in the background. Poll `podman inspect`
     until running, verify that conmon and the Sentry are in the scope, then
-    record them (`phase=running`). Wait, and exit with podman's status.
+    record them (`phase=running`, under the token's lock) and send `READY=1`.
+    A workload that exits 0 before it was seen running is torn down and
+    verified first, then `READY=1`. Wait, and exit with podman's status.
 
 The podman command (as admin, inside the scope):
 
@@ -465,8 +560,22 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
   exactly `none` (no legacy mapping), argv as tier 2. An empty argv uses the
   workload's default (`headless-smoke` → `qdistro-tier3s-smoke`), else
   `[workload]`.
-- A failed start rolls back to Stopped and starts nothing else; an unresolved
-  start (StartNotCancelled) stays Active, like tier 2.
+- **Start (astra/fable A r1).** `StartSilo` runs `systemctl start` of the
+  `Type=notify` unit with its own bound (`_T_TIER3S_START` = 135 s, above the
+  unit's `TimeoutStartSec=120`), so it returns once the launch runs, or fails
+  when the spawn refuses it or the launch dies first. On such a failure the
+  manager clears the Active intent only after verifying the launch gone (the
+  stop verifier `tier3s_silo_running`: unit inactive/failed, no container, no
+  control record); then the silo is Stopped with `observed_status=failed`,
+  and the D-Bus error says the launch was refused or failed before it ran,
+  with the spawn's `REFUSE:` line when the journal already has it (best
+  effort). A retry after the cause is fixed is a real start. If the launch
+  cannot be verified gone, the silo stays Active with `start_unresolved`
+  (stop before retrying), like a start timeout (`StartNotCancelled`). It
+  starts nothing else (no fallback). On a manager start the autostart sweep
+  relaunches an Active silo once; a refused relaunch leaves it Stopped.
+- `StartSilo` is synchronous on the manager's main loop, so a tier3s start
+  holds it until READY (seconds in the VM runs; at most the 135 s bound).
 - `tier3s_silo_running` (stop verification) is true unless the unit is
   `inactive`/`failed`, admin's `podman container exists` answers 1, and no
   control record names the unit (an unreadable control dir counts as a
@@ -523,3 +632,6 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
 - Under SIGKILL of the launch service, teardown is systemd killing the
   scope's cgroup, then verification. It is not a graceful `podman stop`.
 - `network=none` only, dev profile only, no KVM claim.
+- The cleanup's bounds are per call and per batch, not a hard wall-clock
+  limit on one token: a teardown whose calls each answer just under their
+  bounds can take a few minutes before it gives up (preserving the record).

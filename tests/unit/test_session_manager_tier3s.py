@@ -838,8 +838,9 @@ def _write_stanza(tmp_path, **over):
     ({"TIER3S_BINDING": None}, "missing"),
     ({"TIER3S_SECCOMP_PROFILE": "/tmp/x"}, "unexpected key"),
     ({"TIER3S_SILO": "other"}, "names silo 'other'"),
+    ({"TIER3S_ARGV_JSON": '["qdistro-tier3s-smoke", "a\\u0000b"]'}, "NUL in a value"),
 ], ids=["network", "token", "empty-argv", "empty-argv0", "missing-key", "unknown-key",
-        "silo-mismatch"])
+        "silo-mismatch", "nul"])
 def test_helper_refuses_a_bad_stanza(tmp_path, over, needle):
     _write_stanza(tmp_path, **over)
     env, rec = _helper_env(tmp_path)

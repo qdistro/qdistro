@@ -78,14 +78,25 @@ set_argv "$SA=default" "$ST=default" | sed 's/^/    /'
 
 # One refused launch and every "nothing happened" oracle. refused <tag> <silo>
 # <REFUSE substring> [start-cmd...]: default start = StartSilo through the manager.
+# The launch unit is Type=notify (astra/fable A r1): a refused launch fails the
+# start itself, StartSilo reports it, and the silo reads Stopped at once (no
+# StopSilo to repair it), so a retry after the fix is a real start.
 refused() {
-    local tag="$1" silo="$2" want="$3" unit cur t0 rc n
+    local tag="$1" silo="$2" want="$3" unit cur t0 rc n via=StartSilo
     shift 3
+    [ "$#" -eq 0 ] || via="systemctl start"
     unit=$(unit_of "$silo"); cur=$(journal_cursor); t0=$(date --iso-8601=seconds)
     sleep 1
     if [ "$#" -gt 0 ]; then "$@" > "$WORK/start.out" 2>&1; rc=$?
     else sm StartSilo s "$silo" > "$WORK/start.out" 2>&1; rc=$?; fi
-    info "$tag: start rc=$rc $(tr '\n' ' ' < "$WORK/start.out" | cut -c1-200)"
+    info "$tag: start rc=$rc $(tr '\n' ' ' < "$WORK/start.out" | cut -c1-300)"
+    if [ "$rc" -ne 0 ]; then pass "$tag: $via fails for the refused launch (rc=$rc)"
+    else fail "$tag: $via returned 0 for a refused launch"; fi
+    if [ "$via" = StartSilo ]; then
+        is "$tag: StartSilo reports the refusal" \
+            "$(grep -cF "failed: the launch was refused or failed before it ran" "$WORK/start.out")" 1
+        is "$tag: the silo reads Stopped right after the refused start" "$(silo_state "$silo")" Stopped
+    fi
     wait_for 60 unit_down "$unit"
     sleep 1
     unit_log "$unit" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
@@ -101,8 +112,6 @@ refused() {
         is "$tag: no activation record for the templated silo" "$(yes_no no_activation)" yes
     fi
     is "$tag: no fallback: no tier-2/podapp/tier-3 session unit was started" "$(units_started_since "$cur" "$FALLBACK_RE")" 0
-    info "$tag: silo state afterwards: $(silo_state "$silo")"
-    sm StopSilo si "$silo" 10 > /dev/null 2>&1
     systemctl reset-failed "$unit" 2>/dev/null
 }
 GATE_UNKNOWN="broker has no allow rule for headless-smoke/$SMOKE_APP (action='$ACTION' decision=unknown)"
@@ -120,8 +129,10 @@ refused "deny/templated" $ST "$GATE_DENY"
 
 step "3. positive control: allow => both oracles see the launch"
 set_rule allow; is "broker answers allow" "$(broker_check "$ACTION")" allow
+# the retry after four refusals is a real start, not an idempotent no-op
+is "retry: $ST reads Stopped after its refused starts" "$(silo_state $ST)" Stopped
 cur=$(journal_cursor); t0=$(date --iso-8601=seconds); sleep 1
-sm StartSilo s $ST > /dev/null; is "control: StartSilo $ST rc" "$?" 0
+sm StartSilo s $ST > /dev/null; is "control/retry: StartSilo $ST rc" "$?" 0
 wait_for 90 unit_down "$(unit_of $ST)"
 unit_log "$(unit_of $ST)" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
 is "control: activation status written (generation = fixture)" "$(sed -n "s/^generation = '\(.*\)'$/\1/p" "$GEN_STATUS" 2>/dev/null)" "$GEN"

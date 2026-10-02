@@ -102,24 +102,35 @@ It is **Experimental and dev-profile only**. Nothing selects it automatically:
 a silo is tier 3s only because it was created with `CreateTier3sSilo`, and a
 refused launch never falls back to tier 2 or 3.
 
-### Enabling it on a dev VM (as root)
+### Enabling it on a dev VM
+
+Every command below runs **as root** in the guest; the steps that must run
+as admin say so with `runuser -u admin --`. The checkout is staged root-owned
+and world-readable at `/var/tmp/qdistro-src` (`chown -R root:root`,
+`chmod 0755` on the top), so both root and admin can read it and the
+provisioner accepts it; a checkout under `/root` would be unreadable to admin.
 
 ```sh
-# 1. install the launch path from a root-owned checkout (owner O10: opt-in)
-QDISTRO_TIER3S=1 scripts/install/install-session-manager.sh /root/qdistro-src/session_manager
+cd /var/tmp/qdistro-src
+# 1. install the launch path (owner O10: opt-in)
+QDISTRO_TIER3S=1 scripts/install/install-session-manager.sh "$PWD/session_manager"
 # 2. provision the pinned runsc (D1: on demand; the host cache must hold the tarball)
 tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc
 /usr/lib/qdistro/tier3s/probe.sh --user admin          # must print RESULT PASS
-# 3. the workload image, as admin (needs registry access), or load the archive
-#    that tier3s/cache-image-archive.sh <vm> keeps on the host
-runuser -u admin -- bash tier3s/make-tier3s-image.sh headless-smoke
-# 4. a broker rule (qdistro.tier3s.spawn: is rules-only: no rule = refused)
+# 3. the workload image, as admin: build it (needs registry access) ...
+runuser -u admin -- bash /var/tmp/qdistro-src/tier3s/make-tier3s-image.sh headless-smoke
+#    ... or load the archive tier3s/cache-image-archive.sh <vm> keeps on the
+#    host, copied to a path admin can read (what the qci worker setup does)
+runuser -u admin -- podman load -i /var/tmp/tier3s-headless-smoke.oci.tar
+# 4. a broker rule (qdistro.tier3s.spawn: is rules-only: no rule = refused),
+#    e.g. /etc/qdistro/rules.d/50-tier3s.yaml:
 #    - decision: allow, match: {uid: 1000, action: "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke"}
-# 5. the silo, as admin over D-Bus
-busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 CreateTier3sSilo ssss smoke headless-smoke smoke none
-busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 StartSilo s smoke
+# 5. the silo, as admin over D-Bus (the manager accepts admin, uid 1000, only).
+#    StartSilo returns once the launch runs, or fails with the refusal.
+runuser -u admin -- busctl --system --timeout=150 call org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 org.qdistro.SessionManager1 CreateTier3sSilo ssss smoke headless-smoke smoke none
+runuser -u admin -- busctl --system --timeout=150 call org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StartSilo s smoke
 ```
 
 The workload's output is in `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.scope`
@@ -136,7 +147,7 @@ The workload's output is in `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.sco
 | `TIER3S_DEBUG_LOG_DIR` | spawn env (dev diagnostics) | runsc `--debug --debug-log=<dir>/`, where seccomp denials show. Not reachable through the launch unit: the stanza's key set is fixed and the helper execs the spawn with `env -i` |
 | `TIER3S_SECCOMP_PROFILE`, `TIER3S_ALLOW_PRIVESC`, `TIER3S_KEEP_CAPS`, `TIER3S_RUNTIME`, `TIER3S_CGROUP_PARENT` | spawn env | **refused** (exit 2): posture is not configurable per launch |
 | `probe.sh --user <name>` | prerequisite screen | exit 0 PASS, 1 missing prerequisite, 2 non-dev profile |
-| `qdistro-tier3s-cleanup <token> \| --unit <unit> \| --reap-stale` | root | the only teardown path; a failure exits non-zero and preserves the record |
+| `qdistro-tier3s-cleanup <token> \| --unit <unit> \| --reap-stale` | root | the only teardown path; a failure exits non-zero and preserves the record. Every podman/systemctl call is bounded; locks are per token; `--deadline <s>` bounds a batch (default 90) |
 | `cache-image-archive.sh <vm> \| --key \| --dir` | host | builds the workload image once in a VM and keeps the OCI archive for the qci workers |
 
 ### Lifecycle guarantees that are tested (A-iii, qci VM lane)
@@ -174,12 +185,11 @@ know; broker denial, a non-dev profile and a probe failure refuse with no
   without a silo.
 - **Under SIGKILL of the launch service** teardown is systemd killing the
   scope's cgroup, then verification; it is not a graceful `podman stop`.
-- **Open reaper gap (sol A-iii r4 P1, not fixed):** `--reap-stale` trusts the
-  unit named in a record or a container label. If that name is valid but
-  stale, while the token's scope is live and bound to another unit, the reaper
-  can tear down a live launch. Shipped launches always record and label their
-  own unit, so this needs corrupted or hand-edited metadata. The fix is
-  specified in `todo/paravirt/07-phase-A-progress.md` (A-iii, "Open").
+- **A refused launch fails the start.** The launch unit is `Type=notify`:
+  `StartSilo` returns once the launch is recorded running, and a refusal
+  (broker, profile, probe, image) fails it with the reason; the silo reads
+  Stopped, so a retry after the fix is a real start. `StartSilo` blocks the
+  manager's main loop until then (seconds; at most 135 s).
 - **Templated tier 3s silos** are exercised only through a hand-written
   binding fixture (s121); no tier 3s template recipe or promotion flow exists.
 

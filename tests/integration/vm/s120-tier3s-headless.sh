@@ -56,6 +56,7 @@ step "2. live launch A: placement, identity, state root, record, posture"
 TA=$(up_silo $SA); CA=$(ctr_of $SA); UA=$(unit_of $SA)
 if [ -n "$TA" ]; then pass "launch A $TA recorded running"; else fail "launch A did not come up"; finish; fi
 is "silo A Active" "$(silo_state $SA)" Active
+is "Type=notify: StartSilo returned only once launch A was recorded running" "$(cat "$WORK/up-phase.$SA")" running
 spid=$(rec "$TA" sentry_pid); cpid=$(rec "$TA" conmon_pid)
 cg="/sys/fs/cgroup$(rec "$TA" scope_cgroup)"
 read -r i_pid i_cpid i_id i_rt < <(pm inspect --format '{{.State.Pid}} {{.State.ConmonPid}} {{.Id}} {{.OCIRuntime}}' "$CA")
@@ -95,6 +96,22 @@ for p in $(runsc_pids); do if tree_procs "$cg" | grep -qx "$p"; then inside=$((i
 is "placement[A]: runsc-bundle processes outside the owning scope (of $inside inside)" "$outside" 0
 is "placement[A]: recorded sentry and conmon are in the scope" \
     "$(tree_procs "$cg" | grep -cx "$spid"):$(tree_procs "$cg" | grep -cx "$cpid")" "1:1"
+# fable A r1 P3-5: every conmon of THIS container host-wide (by its full
+# container id argument) and every podman CLI of THIS launch (by its token
+# label argument) is inside the scope, not only "at least one inside"
+declare -A own_in=([conmon]=0 [podman]=0) own_out=([conmon]=0 [podman]=0)
+for p in /proc/[0-9]*; do
+    case "$(readlink "$p/exe" 2>/dev/null)" in
+        /usr/bin/conmon) c=conmon; tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$i_id" || continue ;;
+        /usr/bin/podman) c=podman; tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "qdistro_tier3s_token=$TA" || continue ;;
+        *) continue ;;
+    esac
+    if tree_procs "$cg" | grep -qx "${p#/proc/}"; then own_in[$c]=$((own_in[$c] + 1)); else own_out[$c]=$((own_out[$c] + 1)); fi
+done
+for c in conmon podman; do
+    is "placement[A]: every $c of this launch host-wide is inside the scope (inside:outside)" \
+        "$([ "${own_in[$c]}" -ge 1 ] && echo some || echo none):${own_out[$c]}" "some:0"
+done
 
 # --- DONE 4 / ΔA9: identity (asserted), corroboration (INFO only)
 is "identity: podman's selected runtime is the tier3s wrapper" "$i_rt" "$WRAPPER"
