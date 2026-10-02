@@ -37,15 +37,32 @@ SessionManager1.StartSilo(name)                                                 
 ```
 
 **The start acknowledges a running launch (astra/fable A r1).** The unit is
-`Type=notify`, `NotifyAccess=all`, `TimeoutStartSec=120`. The spawn sends
-`READY=1` (through `systemd-notify`, from the launch unit's cgroup) only once
-the launch is recorded `phase=running`, or once a short workload that exited 0
-before it was seen running has been torn down and verified. Every refusal
-(profile, probe, broker, binding, seccomp file, image) and every failure
-before that exits without `READY=1`, so `systemctl start` fails and the
-manager sees it (§6). The spawn unsets `NOTIFY_SOCKET` at once and keeps it for
-its own `systemd-notify` only; the probe, podman (`env -i`) and the scope never
-get it, and no sandbox process runs in the launch unit's cgroup.
+`Type=notify`, `NotifyAccess=main`, `TimeoutStartSec=120`. The spawn sends
+`READY=1` only once the launch is recorded `phase=running`, or once a short
+workload that exited 0 before it was seen running has been torn down and
+verified. Every refusal (profile, probe, broker, binding, seccomp file,
+image) and every failure before that exits without `READY=1`, so `systemctl
+start` fails and the manager sees it (§6). The spawn unsets `NOTIFY_SOCKET`
+at once and keeps it for its own `systemd-notify` only; the probe, podman
+(`env -i`) and the scope never get it.
+
+**Who can send `READY=1` (astra A r2 #4, fable A r2 P3-2).** Only the unit's
+main PID: the root spawn (the launch helper execs into it). The spawn runs
+`systemd-notify --ready` as a direct child, as root; `systemd-notify` first
+tries to send with its parent's PID, which takes privilege, so the message is
+attributed to the spawn itself. Every other process in the launch unit's
+cgroup is refused by systemd however it learns the socket path (the path is
+not a secret): the admin processes the spawn runs there (the probe's podman,
+`podman image exists`, the start poll's inspect, `dbus-send`, the resolver)
+and the admin podman calls of the pre-launch reaper (which run in their own
+call scopes, §4), with anything they start, such as a container's OCI runtime
+helper during a `podman rm` of a stale labelled container. A forged
+`READY=1` therefore cannot acknowledge a launch that never ran. The sandbox
+runs in the owning scope, not in the unit's cgroup. VM test: s121 step 6
+moves an admin process into the launch unit's cgroup while the spawn waits,
+has it send `READY=1`, and finds the unit still `activating`; with a runtime
+`NotifyAccess=all` drop-in the same forgery completes the start (the positive
+control).
 
 Podapps (`LaunchPodApp` analogue) would use the same spawn with no
 `TIER3S_SILO`, unit `qdistro-tier3s-app@<token>.service`. **A-ii ships silos
@@ -224,9 +241,13 @@ No runsc-bundle process was outside the scope, and admin could not raise
   global lock, after checking the token is unused, and creates the per-launch
   dir under the same lock. No scope exists before it. Later updates
   (`phase=running`) take the token's lock and replace `state` by rename.
-- A `.new-<token>` dir exists only while a spawn holds the global lock; one
-  seen by `--reap-stale` (which takes that lock) belongs to a spawn that died,
-  and is removed.
+- A `.new-<token>` dir exists only while a spawn holds the global lock (its
+  EXIT trap removes a leftover one before releasing the lock, fable A r2
+  P3-6); one seen by `--reap-stale` (which takes that lock) belongs to a
+  spawn that died, and is removed.
+- `/run/qdistro-tier3s-ctl/.call-<pid>-*`: a cleanup run's private work dir
+  (its calls' output files), removed when the run exits; `--reap-stale`
+  removes those of runs that no longer exist (SIGKILLed).
 - An **incomplete record** (a token dir without `state`, which earlier code
   could leave behind when the spawn died between `mkdir` and its first write)
   has no unit. The cleanup removes it only on positive evidence that nothing
@@ -235,7 +256,16 @@ No runsc-bundle process was outside the scope, and admin could not raise
   container with that token label. Otherwise it is preserved and the cleanup
   exits non-zero. `--unit <any unit>`, `--reap-stale` and `<token>` all
   apply this, and the manager's stop verification keeps counting it for every
-  unit until it is gone.
+  unit until it is gone. The cost of never ignoring it (fable A r2 P3-4):
+  while one incomplete record is legitimately preserved (its scope is live or
+  unknown, or a container still carries its token), **every** tier3s
+  `StopSilo` reports "did not take effect" (the silo stays Active) and every
+  refused `StartSilo` ends Active + `start_unresolved` instead of Stopped,
+  for unrelated silos too; the manager's log names the surviving
+  `/run/qdistro-tier3s-ctl/<token>` ("control record(s) … survive the stop").
+  Only pre-r1 code could leave one, and preserving it needs real evidence;
+  the operator's fix is the cause the cleanup names, then
+  `qdistro-tier3s-cleanup <token>`.
 - `/run/qdistro-tier3s/<token>/` admin 0700 under a root 0755 parent: the
   per-launch dir. It is Phase B's bridge socket dir and holds **no control
   state** (03 step 8). Phase A mounts nothing from it.
@@ -262,7 +292,7 @@ At start the spawn **verifies** that the conmon and Sentry pids sit inside
 the scope's cgroup before recording them. If they do not, it tears the
 launch down and fails.
 
-### Locks and bounds (astra A r1 #5, fable P3-1/P3-2/P3-7)
+### Locks and bounds (astra A r1 #5, A r2 #2/#3, fable P3-1/P3-2/P3-7, A r2 P3-1)
 
 - **Per token:** `flock` on the record dir `/run/qdistro-tier3s-ctl/<token>`.
   A teardown holds it for that token only; the spawn's `phase=running` update
@@ -275,22 +305,62 @@ launch down and fails.
   (check unused, write `.new-<token>`, rename, create the per-launch dir), the
   removal of an orphan per-launch dir (re-checking that there is still no
   record) and the `.new-*` sweep. Waits are bounded (60 s).
-- **Calls:** every external podman/systemctl call in the cleanup runs under
-  `timeout(1)` (podman 20 s, `podman stop` grace + 20 s, systemctl queries
-  10 s, a scope stop 30 s, kill 5 s later), which kills the call's whole
-  process group; a timeout is a failed query, never "absent". Lock fds are
-  closed for every child.
-- **Batches:** `--unit` and `--reap-stale` start no new token after a
-  deadline (`--deadline`, default 90 s; the spawn's reaper uses 30 s); tokens
-  not reached stay preserved and the run exits non-zero. A wedged podman or
-  systemd fails a token at its first call (a 20 s or 10 s bound plus the 5 s
-  kill); only calls that each answer just under their bound add up, to a few
-  minutes for one token at most. A batch is bounded by its deadline plus the
-  token in progress; the manager bounds the whole helper run at 300 s
+- **Calls (what "bounded" means).** Every external call of the cleanup
+  (`systemctl`, admin's `podman`, the `python3` label decoder) runs in the
+  cleanup's own shell under one supervisor, with these properties:
+  - its bound: podman 20 s, `podman stop` grace + 20 s, systemctl queries
+    10 s, a scope stop 30 s, the decoder 30 s, each capped by what is left
+    of a batch deadline. A call that times out, or that the deadline cut,
+    is a **failed query**, never "absent" or "dead";
+  - its stdout and stderr go to files in the run's work dir, never to a
+    pipe, so a leftover process holding them blocks nothing (the cleanup
+    reads the files once the call is over, and the manager's pipe from the
+    cleanup is never handed to a call);
+  - it runs in `timeout(1)`'s own process group, and that **whole group is
+    SIGKILLed as soon as the call returns or its bound passes**, whether or
+    not the call itself exited: a descendant that ignores SIGTERM, or
+    outlives its parent, does not survive the call;
+  - **admin calls** (every `podman`, through `runuser`) also run in their own
+    root-created transient scope `qdistro-t3s-call-<pid>-<n>-<rand>.scope`
+    (`DefaultDependencies=no`, so it also works during shutdown). `runuser`
+    and rootless podman start helpers in **new sessions**, which a
+    process-group kill misses; the scope's cgroup holds them all. After the
+    call the cleanup writes `cgroup.kill` and the cgroup must then be empty
+    or gone (else the call failed). If the cleanup itself dies first,
+    systemd stops the scope at `RuntimeMaxSec` (the call's bound + 6 s) and
+    SIGKILLs it `TimeoutStopSec` (5 s) later;
+  - a TERM/INT/HUP to the cleanup kills the call in flight (group and
+    scope) and exits 143 with every record preserved;
+  - lock fds are closed for every call; `systemctl` runs with
+    `--no-ask-password`.
+  The guarantee, exactly: every process of an admin call is SIGKILLed by
+  the call's bound + 5 s while the cleanup runs, and by its bound + 11 s
+  (systemd's `RuntimeMaxSec` + `TimeoutStopSec`) if the cleanup was
+  SIGKILLed; only a process that
+  root (or systemd on root's behalf) moves out of the call's cgroup escapes,
+  and admin cannot move a process out of a root-owned cgroup. Root's
+  `systemctl` and `python3` calls start no helpers; their process group is
+  killed the same way, but a SIGKILL of the cleanup itself leaves such a
+  call to its own `timeout(1)` (which still enforces the bound). The token
+  lock is released when the call is over, whatever its descendants do.
+- **Batches and the deadline:** `--unit` and `--reap-stale` take
+  `--deadline` (default 90 s; the spawn's reaper uses 30 s). After it no new
+  token, no label listing and no orphan per-launch dir is started, and
+  inside it every call, lock wait and wait loop is capped by the time left.
+  Waits are by the clock, not by a query count (the 20 s wait for systemd's
+  BindsTo stop of an orphan scope, the scope-emptying waits). So a batch
+  ends at its deadline plus at most the kill grace of the call in flight
+  (`timeout -k 5`, then up to 5 s for its scope to empty) and local file
+  work. What it did not reach, or reached too late, is preserved, and the
+  run exits non-zero. One token (`<token>`, the spawn's EXIT trap) has no
+  deadline: its calls are bounded one by one, and only calls that each
+  answer just under their bound add up, to a few minutes at most (record
+  preserved). The manager bounds the whole helper run at 300 s
   (`_T_SYSTEMCTL_STOP`) and treats a timeout as a failed cleanup.
 
 So a wedged teardown of launch A blocks neither B's teardown nor a new
-launch's record publication (tested with a hanging fake podman).
+launch's record publication (tested with a hanging fake podman), and a
+wedged call cannot keep A's own token lock held past its bound.
 
 ### `qdistro-tier3s-cleanup` (root; the final teardown path)
 
@@ -355,7 +425,7 @@ lock after re-checking that there is still no record. Asked for explicitly
 (`cleanup <token>`), a live scope is an error. From the reaper, a live scope
 whose `BindsTo=` launch unit is still live is left alone; one bound to a
 positively dead unit (or to the spawn's own unit under an older token) is
-waited for up to 20 s (systemd's own BindsTo stop), then stopped by the reaper,
+waited for up to 20 s by the clock (systemd's own BindsTo stop), then stopped by the reaper,
 and the dir removed (A-iii s122: a reconciliation reap raced the scope stop
 and left the dir behind).
 
@@ -363,7 +433,10 @@ and left the dir behind).
 
 Every reaper decision reads a unit's state as **live**, **dead** (systemd
 positively answers `inactive` or `failed`) or **unknown** (the query failed or
-answered anything else). It acts only on dead; unknown preserves the record,
+answered anything else). The state comes from `systemctl show -p
+ActiveState --value`, and only from a call that **completed with status 0**
+(astra A r2 #1): an answer printed by a query that then timed out, was
+killed or failed is unknown, whatever it said. It acts only on dead; unknown preserves the record,
 container, scope and per-launch dir and makes `--reap-stale` exit non-zero
 (sol A-iii r2). A live orphan scope (no record) is stopped only when its
 `BindsTo=` positively names a tier3s launch unit that is dead, checked before
@@ -479,8 +552,10 @@ oracle is "no `podman run` and no activation record":
     (`.new-<token>` renamed into place) and create the per-launch dir.
 11. `podman image exists` as admin.
 12. `systemd-run --scope …` (D-A3b) in the background. Poll `podman inspect`
-    until running, verify that conmon and the Sentry are in the scope, then
-    record them (`phase=running`, under the token's lock) and send `READY=1`.
+    until running, for 60 s **by the clock** (each inspect bounded to 5 s and
+    its answer awaited 7 s at most; fable A r2 P3-3), verify that conmon and
+    the Sentry are in the scope, then record them (`phase=running`, under the
+    token's lock) and send `READY=1` (§1: from the spawn's own PID).
     A workload that exits 0 before it was seen running is torn down and
     verified first, then `READY=1`. Wait, and exit with podman's status.
 
@@ -574,8 +649,25 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
   (stop before retrying), like a start timeout (`StartNotCancelled`). It
   starts nothing else (no fallback). On a manager start the autostart sweep
   relaunches an Active silo once; a refused relaunch leaves it Stopped.
-- `StartSilo` is synchronous on the manager's main loop, so a tier3s start
-  holds it until READY (seconds in the VM runs; at most the 135 s bound).
+- `StartSilo` is synchronous on the manager's main loop (astra A r2 #5,
+  fable A r2 P3-5). The 135 s is the bound of the `systemctl start` call
+  only. The whole start path holds the main loop, and with it every other
+  D-Bus call and main-loop callback of the manager: the start (≤ 135 s),
+  then on a timeout the compensating stop (`_T_SYSTEMCTL_CANCEL`, ≤ 30 s),
+  or on a failed start the stop verifier (`systemctl is-active` ≤ 30 s,
+  `podman container exists` ≤ 30 s) and the best-effort refusal lookup
+  (`systemctl show` + `journalctl`, ≤ 30 s each). Worst cases: about 165 s
+  (timeout path) and 255 s (failed path); measured in the VM runs: seconds.
+  A D-Bus client with busctl's or qdshell's default 25 s call timeout sees
+  its own timeout for a start that takes longer; the start goes on and the
+  silo's state is still right afterwards. The manager has no `WatchdogSec`
+  and owns its bus name before the autostart sweep, so a slow start cannot
+  fail the manager's own start. Making StartSilo asynchronous is a
+  manager-wide change outside Phase A.
+- `systemctl start` vs the unit's `TimeoutStartSec=120`: systemd's timeout
+  fires first; the manager's 135 s covers the teardown after it only when
+  that ends within 15 s, else the start is reported unresolved (Active +
+  `start_unresolved`, stop before retrying). Both answers are honest.
 - `tier3s_silo_running` (stop verification) is true unless the unit is
   `inactive`/`failed`, admin's `podman container exists` answers 1, and no
   control record names the unit (an unreadable control dir counts as a
@@ -632,6 +724,13 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
 - Under SIGKILL of the launch service, teardown is systemd killing the
   scope's cgroup, then verification. It is not a graceful `podman stop`.
 - `network=none` only, dev profile only, no KVM claim.
-- The cleanup's bounds are per call and per batch, not a hard wall-clock
-  limit on one token: a teardown whose calls each answer just under their
+- The cleanup's bound for **one token** is per call, not a wall-clock
+  limit: a single-token teardown whose calls each answer just under their
   bounds can take a few minutes before it gives up (preserving the record).
+  A batch (`--unit`, `--reap-stale`) is wall-clock bounded by its deadline
+  plus the kill grace (§4).
+- Call supervision kills what stays in a call's process group or call scope.
+  A process that root moves out of the call's cgroup is not covered. The
+  manager's own `podman container exists` query (stop verification) is a
+  Python `subprocess` with a timeout: it kills `runuser`, not podman's
+  helpers in new sessions, and holds no tier3s lock.

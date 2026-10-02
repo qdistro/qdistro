@@ -126,10 +126,12 @@ runuser -u admin -- podman load -i /var/tmp/tier3s-headless-smoke.oci.tar
 #    e.g. /etc/qdistro/rules.d/50-tier3s.yaml:
 #    - decision: allow, match: {uid: 1000, action: "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke"}
 # 5. the silo, as admin over D-Bus (the manager accepts admin, uid 1000, only).
-#    StartSilo returns once the launch runs, or fails with the refusal.
-runuser -u admin -- busctl --system --timeout=150 call org.qdistro.SessionManager1 \
+#    StartSilo returns once the launch runs, or fails with the refusal; the
+#    manager can take up to ~255 s in the worst case (CONTRACT §6), so give
+#    busctl more than its default 25 s.
+runuser -u admin -- busctl --system --timeout=300 call org.qdistro.SessionManager1 \
     /org/qdistro/SessionManager1 org.qdistro.SessionManager1 CreateTier3sSilo ssss smoke headless-smoke smoke none
-runuser -u admin -- busctl --system --timeout=150 call org.qdistro.SessionManager1 \
+runuser -u admin -- busctl --system --timeout=300 call org.qdistro.SessionManager1 \
     /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StartSilo s smoke
 ```
 
@@ -147,7 +149,7 @@ The workload's output is in `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.sco
 | `TIER3S_DEBUG_LOG_DIR` | spawn env (dev diagnostics) | runsc `--debug --debug-log=<dir>/`, where seccomp denials show. Not reachable through the launch unit: the stanza's key set is fixed and the helper execs the spawn with `env -i` |
 | `TIER3S_SECCOMP_PROFILE`, `TIER3S_ALLOW_PRIVESC`, `TIER3S_KEEP_CAPS`, `TIER3S_RUNTIME`, `TIER3S_CGROUP_PARENT` | spawn env | **refused** (exit 2): posture is not configurable per launch |
 | `probe.sh --user <name>` | prerequisite screen | exit 0 PASS, 1 missing prerequisite, 2 non-dev profile |
-| `qdistro-tier3s-cleanup <token> \| --unit <unit> \| --reap-stale` | root | the only teardown path; a failure exits non-zero and preserves the record. Every podman/systemctl call is bounded; locks are per token; `--deadline <s>` bounds a batch (default 90) |
+| `qdistro-tier3s-cleanup <token> \| --unit <unit> \| --reap-stale` | root | the only teardown path; a failure exits non-zero and preserves the record. Every external call is bounded and supervised: its process group, and for admin's podman its own transient `qdistro-t3s-call-*.scope`, is SIGKILLed when the call ends or times out, and a timed-out query is never evidence (CONTRACT §4 "Locks and bounds"). Locks are per token. `--deadline <s>` (default 90) bounds a batch by the clock, plus the kill grace of the call in flight |
 | `cache-image-archive.sh <vm> \| --key \| --dir` | host | builds the workload image once in a VM and keeps the OCI archive for the qci workers |
 
 ### Lifecycle guarantees that are tested (A-iii, qci VM lane)
@@ -165,7 +167,9 @@ reconciliation reaps launches and labelled containers the manager does not
 know; broker denial, a non-dev profile and a probe failure refuse with no
 `podman run`, no activation record and no fallback, and the refused
 `StartSilo` fails with the reason and leaves the silo Stopped (astra+fable
-r1, run `a-r1-qci/`). The reaper's refusal of a stale unit name on a live
+r1, run `a-r1-qci/`); an admin process inside the launch unit cannot
+acknowledge a launch (`NotifyAccess=main`, s121 step 6 with a positive
+control, astra+fable r2, run `a-r2-qci/`). The reaper's refusal of a stale unit name on a live
 scope owned by another unit is host-tested (both the record and the label
 case) and was reproduced once on a dev VM for the record case
 (`a-r1-dev/dev-r4-repro.log`); it is not a DONE-bar driver.
@@ -190,11 +194,21 @@ case) and was reproduced once on a dev VM for the record case
   without a silo.
 - **Under SIGKILL of the launch service** teardown is systemd killing the
   scope's cgroup, then verification; it is not a graceful `podman stop`.
-- **A refused launch fails the start.** The launch unit is `Type=notify`:
-  `StartSilo` returns once the launch is recorded running, and a refusal
-  (broker, profile, probe, image) fails it with the reason; the silo reads
-  Stopped, so a retry after the fix is a real start. `StartSilo` blocks the
-  manager's main loop until then (seconds; at most 135 s).
+- **A refused launch fails the start.** The launch unit is `Type=notify`
+  with `NotifyAccess=main`: `StartSilo` returns once the spawn itself reports
+  the launch recorded running, and a refusal (broker, profile, probe, image)
+  fails it with the reason; the silo reads Stopped, so a retry after the fix
+  is a real start. `StartSilo` blocks the manager's main loop, and every
+  other manager D-Bus call, for the whole start path: seconds measured; the
+  `systemctl start` alone is bounded at 135 s, the whole path at about
+  165 s (start timeout) or 255 s (failed start) in the worst case
+  (CONTRACT §6). A client with busctl's default 25 s timeout sees its own
+  timeout for a slower start.
+- **Cleanup bounds.** A batch (`--unit`, `--reap-stale`) ends at its
+  deadline plus the kill grace; one token's teardown has per-call bounds
+  only and can take a few minutes in the worst case, record preserved.
+  Call supervision kills what stays in a call's process group or call
+  scope; it does not cover a process root moves out of that cgroup.
 - **Templated tier 3s silos** are exercised only through a hand-written
   binding fixture (s121); no tier 3s template recipe or promotion flow exists.
 

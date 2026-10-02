@@ -198,8 +198,13 @@ So a tier 3s launch needs an explicit rule, for example:
 ```
 
 `spawn-tier3s.sh` asks as the admin uid, after the prerequisite probe and
-before it records an activation or runs podman; anything but `allow` refuses
-the launch (`tier3s/CONTRACT.md` §5).
+before it records an activation or runs the workload (`podman run`);
+anything but `allow` refuses the launch (`tier3s/CONTRACT.md` §5). The probe
+before the gate does run podman as admin on every attempt, refused ones
+included: it imports an empty scratch image and creates and removes a
+never-started `tier3s-probe-<pid>` container to check the runtime. So a
+refused attempt can show those podman events, but never a workload
+container, a `podman run` or an activation record.
 
 ## Revocation as a signal
 
