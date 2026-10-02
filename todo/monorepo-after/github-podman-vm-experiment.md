@@ -5,7 +5,75 @@ This is a continuation of the monorepo migration work, on the
 path. The final workflow is `.github/workflows/qdistro-test-vm.yml`. Earlier
 Podman and in-guest-build experiment workflows were removed after validation.
 
-## Verified result
+## 2026-10-02: snapshot 20260930, QML shell, Python services, greeter
+
+[Run 36991468544](https://github.com/qdistro/qdistro/actions/runs/36991468544)
+succeeded in 8m41s on the free 4-vCPU runner, with KVM (the runner exposes
+`/dev/kvm` once a udev rule opens it; the earlier runs used TCG).
+[QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/36991468544/artifacts/11220680256),
+956 MiB compressed, 8 GiB virtual, retained until 2026-11-01.
+
+What changed:
+
+- Pinned to `snapshot.conf` 20260930 (cloud image, Podman builder base and
+  guest repos all from that one pin; on this branch only, `main` still pins
+  20260929).
+- Native build: the canonical `scripts/vm/build-native-podman.sh` instead of
+  the inline build. Its stage now also carries prebuilt `qsu` and the SELinux
+  `.pp` modules, so the guest stays free of compilers, `make` and headers.
+- `scripts/vm/test-vm-guest-install.sh` installs `QDISTRO_RUNTIME_PKGS` (62
+  requested, 439 with dependencies, 239.5 MiB download / 833.8 MiB installed,
+  zero `-devel` packages), pip-installs the presentation SDK, qdgreeter and
+  qdlocker, then runs the bootstrap's own `main()` with the installer chain
+  filtered. 11 steps ran: presentation, sdk, broker, admin-app,
+  session-manager, user-relay, polkit, pwd, qsu, portal-backend, tier3.
+  Skipped as optional or needing nested VMs/btrfs: browser-bridge, phone,
+  print, snapshots, tier4-host, tier5, tier5b.
+- No optional apps: no browser, and qterminator, qfileman and qnotebook are
+  not installed (as in the kiwi tester image).
+
+Verified in the run:
+
+- All 45 staged dynamic ELFs resolve; the four core RPM versions match the
+  build container.
+- Headless Weston loads `qdwin-shell.so`; `qdwin-probe` connects.
+- QML shell: `qs -p /usr/share/quickshell/qdshell` under Weston's GL renderer
+  (llvmpipe) logs `Configuration Loaded` and runs 30 s without QML type or
+  import errors. The remaining errors are environmental (no network, PipeWire,
+  BlueZ or UPower).
+- After a full poweroff and second boot: greetd, the admin broker, session
+  manager, pwd and the root-exec socket are active, no unit failed, and
+  `org.qdistro.AdminBroker1`, `org.qdistro.Pwd1` and
+  `org.qdistro.SessionManager1` are on the system bus.
+- Runner disk delta 5.5 GB (budget 30 GiB).
+
+Time: 2m11s native Podman build, 40s QCOW2 preparation, 4m04s guest boot and
+install plus both checks, 1m00s artifact upload. The cloud image came from the
+Actions cache.
+
+Accounts: `admin` (uid 1000) and `user`, both with the testing password
+`qdistro`; the last boot removes cloud-init state and `authorized_keys` and
+disables SSH password login. SELinux is permissive (dev profile) with the
+prebuilt modules loaded.
+
+Findings for `main`:
+
+- `qdistro-bootstrap.sh` on a fresh Tumbleweed never creates the `seat` group
+  that `install-qdwin-session-for-vm.sh` adds admin to; only
+  `fresh-vm-bootstrap.sh` and `image/config.sh` do, and the seatd RPM does not.
+  The test VM creates it before calling `main()`.
+- Sourcing the bootstrap resets globals such as `ADMIN_PASSWORD`; a caller
+  must not keep its own values under those names.
+- Without `selinux-policy-devel` and `make`, the bootstrap's policy installs
+  only warn under dev; a runtime-only install needs the prebuilt modules.
+
+Known limit: the cloud image URL is the rolling one, verified against the
+pinned checksum. Once Tumbleweed publishes a newer image the download fails
+until the pin is bumped; the Actions cache only covers a hit.
+
+## Earlier results (2026-09-24)
+
+### Verified result
 
 - [Final manually triggered Docker run 36013692783](https://github.com/qdistro/qdistro/actions/runs/36013692783): successful in 15m49s; [downloadable test VM ZIP](https://github.com/qdistro/qdistro/actions/runs/36013692783/artifacts/10814472674), 677 MB, retained until 2026-10-24. The guest root had 1.4 GiB used / 6.1 GiB free; runner final disk-use delta was 2.68 GB. All 44 staged dynamic ELFs passed dependency checks, and `qdwin-probe` received `hello uid=1000` from the launched shell. No build tools were installed in the guest. This run also verified `workflow_dispatch` on the experiment branch.
 - [Runtime-only run 35993860510](https://github.com/qdistro/qdistro/actions/runs/35993860510): successful; 15m08s job; [QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/35993860510/artifacts/10805489190), 676 MB compressed.
@@ -40,7 +108,7 @@ provides native ZIP/zlib compression at level 6; no extra gzip/XZ layer is
 used. The 8 GiB disk leaves about 6 GiB free in the successful runtime image
 and does not imply an 8 GiB download. The artifact is retained for 30 days.
 
-The artifact is a native-components *test VM*, not a complete qdistro desktop or a KIWI replacement. `qdshell/meson.build` installs only its native QML plugin, not the QML shell/session wiring. The VM has no baked builder SSH key; SSH remains enabled so cloud-init can provision the user's key on first boot. Artifact retention is 30 days.
+(2026-09-24; superseded by the 2026-10-02 section above, which adds the QML shell, services and greeter.) The artifact was a native-components *test VM*, not a complete qdistro desktop or a KIWI replacement. `qdshell/meson.build` installs only its native QML plugin, not the QML shell/session wiring. The VM has no baked builder SSH key; SSH remains enabled so cloud-init can provision the user's key on first boot. Artifact retention is 30 days.
 
 RPM distribution was considered and rejected for this test-image workflow.
 Keep more extensive VM testing on the user's own hardware as requested, with
