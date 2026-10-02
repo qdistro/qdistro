@@ -65,7 +65,15 @@ pkgs+=(python313-pip dejavu-fonts google-noto-coloremoji-fonts seatd
        selinux-policy-targeted policycoreutils qemu-guest-agent libpango-1_0-0)
 tvm_log "installing ${#pkgs[@]} runtime packages from snapshot $snap..."
 zypper -n refresh
-zypper -n install --no-recommends "${pkgs[@]}"
+# One retry: download.opensuse.org's history mirrors occasionally fail a
+# download mid-preload (zypper exit 4, "Installation has completed with
+# error"; run 37032421943). A real resolver or package problem fails twice.
+if ! zypper -n install --no-recommends "${pkgs[@]}"; then
+    tvm_log "zypper install failed; refreshing and retrying once"
+    sleep 30
+    zypper -n refresh
+    zypper -n install --no-recommends "${pkgs[@]}"
+fi
 for tool in meson gcc cc ninja; do
     if command -v "$tool" >/dev/null; then tvm_die "build tool $tool is installed in the runtime guest"; fi
 done
