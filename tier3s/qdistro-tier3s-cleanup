@@ -74,6 +74,12 @@ wait_empty() {   # wait_empty <cgroup dir> <steps>
     [ ! -d "$1" ] || [ -z "$(tree_procs "$1")" ]
 }
 
+vanished() {   # vanished <admin uid> <container>: podman definitively says it is gone now
+    local r
+    as_admin "$1" podman container exists "$2"; r=$?
+    [ "$r" -eq 1 ]
+}
+
 declare -A S
 read_record() {   # read_record <token>: validated fields into S, or return 1
     local tok="$1" dir="$CTL/$1" k v
@@ -114,13 +120,26 @@ teardown() {   # teardown <token> (caller holds the lock)
     fi
     as_admin "$admin" podman container exists "$ctr"; rc=$?
     case "$rc" in
-        0)  want="$(as_admin "$admin" podman container inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr")" \
-                || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
-            [ "$want" = "$tok" ] || { say "$tok: container $ctr carries token '$want', not ours; refusing"; return 4; }
-            as_admin "$admin" podman stop -t "$GRACE" "$ctr" >/dev/null \
-                || { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }
-            as_admin "$admin" podman rm -f --ignore "$ctr" >/dev/null \
-                || { say "$tok: podman rm $ctr failed (record preserved)"; return 5; }
+        0)  # A concurrent teardown can remove the container between two podman
+            # calls: on a launcher SIGKILL systemd stops the scope while this
+            # runs as ExecStopPost, and `podman run --rm` removes the container
+            # (A-iii qci s122). A failed inspect or stop is therefore re-queried:
+            # only a definitive "absent" (exists rc 1, with the state root
+            # already verified above) lets the teardown go on; anything else
+            # preserves the record. Never "absent" from a failed query.
+            if ! want="$(as_admin "$admin" podman container inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr")"; then
+                vanished "$admin" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
+                say "$tok: $ctr vanished during the teardown (removed concurrently)"; want=""
+            fi
+            if [ -n "$want" ]; then
+                [ "$want" = "$tok" ] || { say "$tok: container $ctr carries token '$want', not ours; refusing"; return 4; }
+                if ! as_admin "$admin" podman stop -t "$GRACE" "$ctr" >/dev/null; then
+                    vanished "$admin" "$ctr" || { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }
+                    say "$tok: $ctr vanished during podman stop (removed concurrently)"
+                fi
+                as_admin "$admin" podman rm -f --ignore "$ctr" >/dev/null \
+                    || { say "$tok: podman rm $ctr failed (record preserved)"; return 5; }
+            fi
             as_admin "$admin" podman container exists "$ctr"; rc=$?
             [ "$rc" -eq 1 ] || { say "$tok: $ctr still present or query failed after stop (rc=$rc)"; return 5; } ;;
         1)  ;;

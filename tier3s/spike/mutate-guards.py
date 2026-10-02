@@ -8,7 +8,7 @@ restore the original bytes and re-check their sha256. IDs: P probe, V
 provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A,
 milestone A-i); S session manager, L root launch helper, B broker, I installer,
 U launch unit, A21+ spawn deltas (milestone A-ii); I3-I5, U2, U3 the owner
-answers O10/O11, R1-R3 the reaper fixes from the s122 VM run (milestone A-iii).
+answers O10/O11, R1-R5 the reaper/teardown fixes from the s122 VM and qci runs (milestone A-iii).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -392,6 +392,14 @@ MUTATIONS = [
     ("R3 reaper ignores the scope's live launch unit", CLEAN,
      '        if [ -n "$bound" ] && unit_live "$bound"; then\n', '        if false; then\n',
      [f"{TS}::test_reap_stale_leaves_an_orphan_dir_whose_scope_serves_a_live_unit"]),
+    ("R4 a container removed during inspect fails the teardown", CLEAN,
+     '                vanished "$admin" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }\n',
+     '                say "$tok: podman inspect of $ctr failed (record preserved)"; return 4\n',
+     [f"{TS}::test_cleanup_container_removed_concurrently_is_torn_down[inspect_vanish]"]),
+    ("R5 a container removed during stop fails the teardown", CLEAN,
+     '                    vanished "$admin" "$ctr" || { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }\n',
+     '                    say "$tok: podman stop $ctr failed (record preserved)"; return 5\n',
+     [f"{TS}::test_cleanup_container_removed_concurrently_is_torn_down[stop_vanish]"]),
     ("U3 stop propagation replaced by PartOf (restart would relaunch)", UNITF,
      "StopPropagatedFrom=qdistro-session-manager.service\n", "PartOf=qdistro-session-manager.service\n",
      [f"{TSM}::test_unit_file_shape"]),

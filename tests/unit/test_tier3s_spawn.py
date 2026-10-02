@@ -67,10 +67,19 @@ container)
     case "$1" in
         exists)
             [ ! -e "$F/query_fail" ] || { echo "Error: database is locked" >&2; exit 125; }
+            if [ -e "$F/query_fail_after_stop" ] && grep -q '^podman stop' "$F/calls"; then
+                echo "Error: database is locked" >&2; exit 125; fi
             [ -e "$F/c/$name/exists" ] && exit 0; exit 1 ;;
-        inspect) cat "$F/c/$name/label" ;;
+        inspect)
+            # a concurrent teardown removes the container under our feet
+            if [ -e "$F/inspect_vanish" ]; then finish "$name"; rm -rf "${F:?}/c/$name"
+                echo "Error: no such container $name" >&2; exit 125; fi
+            [ ! -e "$F/inspect_fail" ] || { echo "Error: inspect failed" >&2; exit 125; }
+            cat "$F/c/$name/label" ;;
     esac ;;
 stop)
+    if [ -e "$F/stop_vanish" ]; then finish "$name"; rm -rf "${F:?}/c/$name"
+        echo "Error: no container with name or ID $name found" >&2; exit 125; fi
     [ ! -e "$F/stop_fail" ] || { echo "Error: given PID did not die within timeout" >&2; exit 125; }
     finish "$name" ;;
 rm) finish "$name"; rm -rf "${F:?}/c/$name" ;;
@@ -800,6 +809,36 @@ def test_cleanup_failed_stop_preserves_record_and_scope(w):
     assert not any(c.startswith("systemctl stop") for c in w.calls())
     (w.F / "stop_fail").unlink()
     assert w.cleanup(TOKEN).returncode == 0 and w.launch_gone(TOKEN)
+
+
+@pytest.mark.parametrize("flag", ["inspect_vanish", "stop_vanish"])
+def test_cleanup_container_removed_concurrently_is_torn_down(w, flag):
+    # launcher SIGKILL: systemd stops the scope while ExecStopPost runs, and
+    # podman run --rm removes the container between two of our podman calls
+    # (A-iii qci s122). A definitive "absent" on re-query continues the teardown.
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set(flag)
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 0, r.stderr
+    assert "vanished during" in r.stderr and "torn down" in r.stderr
+    assert w.launch_gone(TOKEN)
+
+
+def test_cleanup_failed_inspect_of_a_present_container_preserves(w):
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("inspect_fail")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "podman inspect of qdistro-tier3s-smoke failed" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and "torn down" not in r.stderr
+
+
+def test_cleanup_failed_stop_with_a_failing_requery_preserves(w):
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("stop_fail")
+    w.set("query_fail_after_stop")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 5, r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
 
 
 def test_cleanup_refuses_a_container_with_another_token(w):
