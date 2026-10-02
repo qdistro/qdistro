@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — validates DESTDIR fixtures on the host; no guest required.
 # Host-only proof of the non-graphical approval surfaces' installed layout
 # (scripts/install/install-admin-cli-for-vm.sh, run by the chain's admin-app
 # step and by fresh-vm-bootstrap.sh). The paths are the broker's trusted
