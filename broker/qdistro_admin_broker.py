@@ -947,6 +947,32 @@ class _Request:
         self.decided_at: float | None = None
 
 
+# A Python-only capability: D-Bus always supplies a string sender, so no
+# external connection can impersonate a workflow's in-process call.
+_WORKFLOW_SENDER = object()
+
+
+class _WorkflowBrokerProxy:
+    """Expose only the engine's existing read/maintenance broker allowlist.
+
+    Calling our own D-Bus proxy synchronously would deadlock the broker's
+    main loop. Direct calls instead carry a private capability, and still
+    enter the real methods (including their audit and cache effects).
+    """
+
+    def __init__(self, broker):
+        self._broker = broker
+
+    def __getattr__(self, name):
+        if name in {"hooks", "WorkflowRunPending"}:
+            return getattr(self._broker, name)
+        from workflow_engine import _BROKER_METHOD_WHITELIST
+        if name not in _BROKER_METHOD_WHITELIST:
+            raise AttributeError(name)
+        fn = getattr(self._broker, name)
+        return lambda *args: fn(*args, sender=_WORKFLOW_SENDER)
+
+
 class Broker(dbus.service.Object):
     # Debounce window (ms) for coalescing per-uid UserRelay
     # LocalReceiversChanged signals into a single ReceiversChanged. A
@@ -1163,7 +1189,7 @@ class Broker(dbus.service.Object):
                           flush=True)
                     channel_registrar = None
             engine = WorkflowEngine(
-                broker_proxy=self,
+                broker_proxy=_WorkflowBrokerProxy(self),
                 audit_logger=wf_audit,
                 secret_source=PwdSecretSource(),
                 # The broker owns the process main loop; D-Bus triggers
@@ -1354,6 +1380,13 @@ class Broker(dbus.service.Object):
         process and the admin's click must not grant trust to that
         process's action.
         """
+        if sender is _WORKFLOW_SENDER:
+            # Only _WorkflowBrokerProxy supplies this capability. Use the
+            # actual process identity, never fabricate uid 0 for test or
+            # standalone engines running without root privileges.
+            pid = os.getpid()
+            exe, start_time = _read_proc_identity(pid)
+            return os.getuid(), pid, exe, start_time
         bus = dbus.SystemBus()
         dbus_proxy = bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus")
         dbus_iface = dbus.Interface(dbus_proxy, "org.freedesktop.DBus")
@@ -1433,6 +1466,14 @@ class Broker(dbus.service.Object):
     def _require_admin_control_peer(self, sender, conn, method: str
                                     ) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
+        if sender is _WORKFLOW_SENDER:
+            from workflow_engine import _BROKER_METHOD_WHITELIST
+            if uid == 0 and method in _BROKER_METHOD_WHITELIST:
+                return uid, pid, exe, st
+            raise dbus.DBusException(
+                f"{method} not permitted for the in-process workflow",
+                name=BUS_NAME + ".AccessDenied",
+            )
         ok, reason = self._peer_matches_admin_control(uid=uid, pid=pid,
                                                       exe=exe, method=method)
         if not ok:
