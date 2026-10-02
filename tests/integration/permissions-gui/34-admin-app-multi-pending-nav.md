@@ -193,17 +193,31 @@ wait_title 'admin approvals'
 sleep 2
 $VMGUI "$VM" screenshot /tmp/34-s5-drained.png
 
-# All three were denied above, so all three must now finish. `wait $(cat
-# X.pid)` here never waited (the pid is not this shell's child), so this
-# drain was a no-op and the teardown pkill did the real work.
+# Every request is decided now (S4 approved one, S5 denied the other two),
+# so all three callers must finish. `wait $(cat X.pid)` here never waited
+# (the pid is not this shell's child), so this drain was a no-op and the
+# teardown pkill did the real work. bg_wait only says a caller FINISHED;
+# the caller's own exit status is the decision it received: 0 = ALLOWED,
+# 1 = DENIED. Two denied callers exiting 1 is the expected outcome, not a
+# failure. The drain checks the multiset: exactly one 0 and two 1s.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
-bad=0
+bad=0 rcs=
 for i in 1 2 3; do
-  bg_wait "34-w$i" 60 || bad=1
-  echo "34-w$i rc=$(bg_rc "34-w$i")"
+  bg_wait "34-w$i" 60 || { echo "34-w$i never finished" >&2; bad=1; }
+  rc=$(bg_rc "34-w$i") || rc=none
+  echo "34-w$i rc=$rc"
+  rcs="$rcs$rc "
 done
+[ "$(printf "%s\n" $rcs | sort | tr "\n" " ")" = "0 1 1 " ] ||
+  { echo "caller exit codes are [$rcs], wanted one 0 (approved) and two 1 (denied)" >&2; bad=1; }
 exit $bad'
 ```
+
+**Assert** (drain): the command exits 0. Each caller prints `rc=0`
+(`ALLOWED`) or `rc=1` (`DENIED`), and the set is exactly one `0` and two
+`1`s. Do not FAIL the scenario because the denied callers exited 1. That
+is the decision they were sent. FAIL only when a caller never finished or
+the set of exit codes is different.
 
 Open `s5-drained.png` before grading it. The title is updated from the
 model before the XWayland surface necessarily displays the empty list. If

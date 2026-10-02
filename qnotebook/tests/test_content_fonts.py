@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from PyQt6.QtCore import QSettings
 from PyQt6.QtGui import QTextCursor
@@ -17,7 +15,6 @@ from qnotebook.content_style import (
     ContentStyle,
     apply_document_presentation,
     desktop_content_style,
-    legacy_content_style,
     resolve_content_style,
 )
 from qnotebook.editor import MarkdownEditor, reset_pinned_body_font_for_tests

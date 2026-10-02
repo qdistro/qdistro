@@ -64,7 +64,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # rebuilt its model.  Capturing immediately after vm-exec returns races the
 # queued Qt refresh and can photograph the old empty frame.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action qsu.exec:root 20 1'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals \\(1 pending\\)$" admin :0 20 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals [(]1 pending[)]$" admin :0 20 1'
 $VMGUI "$VM" screenshot /tmp/44-s1-pending.png
 ```
 
@@ -149,7 +149,7 @@ EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action qsu.exec:root 20 1'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals \\(1 pending\\)$" admin :0 20 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals [(]1 pending[)]$" admin :0 20 1'
 $VMGUI "$VM" screenshot /tmp/44-s4-pending.png
 ```
 
@@ -182,7 +182,7 @@ EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_pending_action qsu.exec:root 20 1'
-$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals \\(1 pending\\)$" admin :0 20 1'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_x11_window "^admin approvals [(]1 pending[)]$" admin :0 20 1'
 $VMGUI "$VM" screenshot /tmp/44-s5-pending.png
 ```
 
