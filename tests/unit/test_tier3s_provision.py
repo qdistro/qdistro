@@ -559,3 +559,72 @@ def test_root_refuses_untrusted_checkout(tmp_path, how):
     assert r.returncode == 1
     assert r.stderr.strip() == ("provision-runsc: FAIL: refusing to run as root from a checkout another "
                                 f"user could modify: {why} (use a root-owned copy)")
+
+
+# --- the caller's PATH never supplies a tool (astra fix r3 P2) -------------
+
+SHADOWED = ["dirname", "basename", "id", "stat", "sed", "grep", "find", "sha512sum", "cut",
+            "sort", "comm", "tr", "head", "tail", "cat", "cmp", "readlink", "uname", "env",
+            "mktemp", "install", "mv", "cp", "rm", "flock", "tar", "curl", "runuser",
+            "podman", "getenforce", "seq", "sleep", "chmod", "chown", "mkdir", "ln", "ls",
+            "wc", "zstd", "realpath"]
+
+
+def shadow_path(tmp, names=SHADOWED):
+    """A PATH dir whose tools append to a marker and then delegate to the real
+    tool, so the script still behaves normally while any use is recorded."""
+    d = tmp / "shadow"
+    d.mkdir()
+    marker = tmp / "SHADOW-RAN"
+    for name in names:
+        real = shutil.which(name)
+        body = f'#!/bin/sh\necho "{name} $*" >> "{marker}"\n'
+        body += f'exec "{real}" "$@"\n' if real else "exit 127\n"
+        (d / name).write_text(body)
+        (d / name).chmod(0o755)
+    return d, marker
+
+
+BASH = shutil.which("bash")
+
+
+def test_provision_never_uses_caller_path_tools(tmp_path):
+    shadow, marker = shadow_path(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QDISTRO_RUNSC_")}
+    env["PATH"] = f"{shadow}:{os.environ['PATH']}"
+    # non-root, no prefix: dies "must run as root" after computing HERE
+    r = subprocess.run([BASH, str(SCRIPT), "--offline"], cwd=tmp_path, env=env,
+                       capture_output=True, text=True)
+    if os.geteuid() != 0:
+        assert r.stderr.strip() == "provision-runsc: FAIL: must run as root"
+    # euid 0: dies at the --pin refusal after computing HERE
+    pin = bogus_arch_pin(tmp_path)
+    cmd = root_capable_cmd([BASH, str(SCRIPT), "--pin", str(pin), "--offline"])
+    if cmd[0] == "unshare":
+        cmd[0] = shutil.which("unshare")
+    r = subprocess.run(cmd, cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert "--pin is a unit-test option" in r.stderr, r.stderr
+    # help
+    subprocess.run([BASH, str(SCRIPT), "-h"], env=env, capture_output=True, text=True)
+    assert not marker.exists(), "caller PATH tool ran: " + marker.read_text()
+
+
+def test_wrapper_never_uses_caller_path_env(tmp_path):
+    """Same mount-namespace fixture as the scrubbing test, with a shadow `env`
+    first on PATH: the wrapper must use /usr/bin/env, not the caller's."""
+    if not shutil.which("unshare") or subprocess.run(
+            ["unshare", "-rm", "true"], capture_output=True).returncode != 0:
+        pytest.skip("needs user+mount namespaces")
+    shadow, marker = shadow_path(tmp_path, names=["env"])
+    fake = tmp_path / "libexec"
+    (fake / "qdistro/runsc").mkdir(parents=True)
+    dump = fake / "qdistro/runsc/runsc"
+    dump.write_text('#!/bin/sh\ntr "\\0" "\\n" < /proc/$$/environ\n')
+    dump.chmod(0o755)
+    env = dict(os.environ, PATH=f"{shadow}:{os.environ['PATH']}", EVIL="1")
+    r = subprocess.run([shutil.which("unshare"), "-rm", "--", "/bin/sh", "-c",
+                        'mount --bind "$1" /usr/libexec && exec "$2" x', "sh", str(fake), str(WRAPPER)],
+                       env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert [l for l in r.stdout.split("\n") if l] == ["PATH=/usr/bin:/bin"]
+    assert not marker.exists(), "the caller's env ran: " + marker.read_text()

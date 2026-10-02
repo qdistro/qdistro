@@ -434,3 +434,20 @@ def test_root_refuses_untrusted_checkout(tmp_path, how):
     assert r.returncode == 2, r.stdout + r.stderr
     assert r.stdout.strip() == ("REFUSE checkout: refusing to run as root from a checkout another user "
                                 f"could modify: {why} (use a root-owned copy)")
+
+
+# --- the caller's PATH never supplies a tool (astra fix r3 P2) -------------
+
+def test_probe_never_uses_caller_path_tools(tmp_path):
+    """Real (non-test) mode, stopped early on purpose (help; a refused test
+    hook) so nothing beyond the bootstrap runs on the host."""
+    from test_tier3s_provision import BASH, shadow_path
+    shadow, marker = shadow_path(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QDISTRO_PROBE_")}
+    env["PATH"] = f"{shadow}:{os.environ['PATH']}"
+    r = subprocess.run([BASH, str(SCRIPT), "-h"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "PREREQUISITE SCREEN" in r.stdout
+    r = subprocess.run([BASH, str(SCRIPT)], cwd=tmp_path, env=dict(env, QDISTRO_PROBE_PIN="x"),
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "QDISTRO_PROBE_PIN is a unit-test hook" in r.stderr
+    assert not marker.exists(), "caller PATH tool ran: " + marker.read_text()

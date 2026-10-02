@@ -32,6 +32,11 @@
 # and is published into the cache by an atomic rename only after its sha512
 # matched the pin.
 set -euo pipefail
+# The FIRST statement that matters (astra fix r3): root, and any run that is
+# not the non-root TEST prefix, uses only the system tool dirs before any
+# external command runs (bash's own $EUID, no PATH-resolved `id`). Only the
+# non-root unit-test prefix keeps the test operator's PATH (fake curl).
+if [ "$EUID" -eq 0 ] || [ -z "${QDISTRO_RUNSC_PREFIX:-}" ]; then PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; fi
 umask 022   # created parents must not be group/other-writable (trusted_chain)
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"   # physical path: its real ancestors are checked
@@ -63,14 +68,14 @@ case "$CACHE_DIR" in /*) ;; *) CACHE_DIR="$PWD/$CACHE_DIR" ;; esac
 while [ "$CACHE_DIR" != "/" ] && [ "${CACHE_DIR%/}" != "$CACHE_DIR" ]; do CACHE_DIR="${CACHE_DIR%/}"; done
 ! has_dot_part "$CACHE_DIR" || die "cache dir must not contain . or .. components: $CACHE_DIR"
 if [ -n "$PREFIX" ]; then
-    [ "$(id -u)" -ne 0 ] || die "QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root"
+    [ "$EUID" -ne 0 ] || die "QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root"
     case "$PREFIX" in /*) ;; *) die "QDISTRO_RUNSC_PREFIX must be absolute" ;; esac
     while [ "$PREFIX" != "/" ] && [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX="${PREFIX%/}"; done
     [ "$PREFIX" != "/" ] || die "QDISTRO_RUNSC_PREFIX=/ is not a test prefix"
     ! has_dot_part "$PREFIX" || die "QDISTRO_RUNSC_PREFIX must not contain . or .. components"
     log "TEST MODE: installing under prefix $PREFIX (not a real install)"
 else
-    [ "$(id -u)" -eq 0 ] || die "must run as root"
+    [ "$EUID" -eq 0 ] || die "must run as root"
     [ "$PIN_OVERRIDE" -eq 0 ] || die "--pin is a unit-test option (needs QDISTRO_RUNSC_PREFIX); a real install uses $HERE/RUNSC_RELEASE"
     for h in QDISTRO_RUNSC_FAIL_AFTER_SWAP QDISTRO_RUNSC_PAUSE_AFTER_SWAP; do
         [ -z "${!h:-}" ] || die "$h is a unit-test hook (needs QDISTRO_RUNSC_PREFIX)"
@@ -105,13 +110,12 @@ checkout_untrusted() {   # prints the first problem and returns 0, else 1
         x="$(dirname -- "$x")"
     done
 }
-if [ "$(id -u)" -eq 0 ]; then
+if [ "$EUID" -eq 0 ]; then
     if why="$(checkout_untrusted)"; then
         die "refusing to run as root from a checkout another user could modify: $why (use a root-owned copy)"
     fi
-    # root's own environment, pinned: tools from the system dirs only, no
-    # TAR_OPTIONS, and curl -q below ignores ~/.curlrc
-    PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; unset TAR_OPTIONS
+    # (PATH was pinned at the top) no TAR_OPTIONS; curl -q ignores ~/.curlrc
+    unset TAR_OPTIONS
 fi
 [ -r "$PIN" ] || die "pin file not readable: $PIN"
 [ -r "$WRAPPER_SRC" ] || die "wrapper not found: $WRAPPER_SRC"
@@ -245,6 +249,10 @@ else
     [ ! -L "$STAGE_PARENT" ] && [ -d "$STAGE_PARENT" ] && [ "${st%% *}" = 0 ] \
         && (( (8#${st#* } & 8#1000) != 0 || (8#${st#* } & 8#022) == 0 )) \
         || die "untrusted stage parent $STAGE_PARENT ($st): must be root-owned, sticky or not group/other-writable"
+    # ...and nothing above it may be replaceable either (astra fix r3): /var
+    # and / must be real, root-owned, not group/other-writable directories, or
+    # someone could rename the whole /var/tmp away and substitute their own.
+    trusted_chain "$(dirname -- "$STAGE_PARENT")"
 fi
 STAGE="$(mktemp -d "$STAGE_PARENT/runsc-stage.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT

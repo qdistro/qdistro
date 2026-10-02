@@ -1,7 +1,8 @@
 #!/bin/sh
 # tier3s-runsc — the ONLY runtime path podman is given for tier 3s
 # (podman --runtime /usr/libexec/qdistro/tier3s-runsc). Constant flags;
-# env -i so no caller environment can flip runsc's release-skew enforcement
-# or any other env-read knob. Per-launch flags (network, host-uds, debug-log)
+# /usr/bin/env -i (absolute: the caller's PATH must not even choose `env`) so
+# no caller environment can flip runsc's release-skew enforcement or any
+# other env-read knob. Per-launch flags (network, host-uds, debug-log)
 # arrive via podman --runtime-flag. No fallback runtime, ever.
-exec env -i PATH=/usr/bin:/bin /usr/libexec/qdistro/runsc/runsc --ignore-cgroups --platform=systrap --oci-seccomp "$@"
+exec /usr/bin/env -i PATH=/usr/bin:/bin /usr/libexec/qdistro/runsc/runsc --ignore-cgroups --platform=systrap --oci-seccomp "$@"

@@ -11,6 +11,11 @@
 # against an empty scratch image (no runtime invocation, nothing started)
 # and remove the container again.
 set -uo pipefail
+# The FIRST statement that matters (astra fix r3): before any external command
+# runs, a real (non-test) run uses only the system tool dirs, so no directory
+# on the caller's PATH can supply dirname/id/stat/... to a root probe. A TEST
+# run (QDISTRO_PROBE_ROOT) keeps the trusted test operator's PATH for its fakes.
+[ -n "${QDISTRO_PROBE_ROOT:-}" ] || { PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; }
 
 USER_NAME=admin
 while [ $# -gt 0 ]; do
@@ -82,12 +87,10 @@ checkout_untrusted() {   # prints the first problem and returns 0, else 1
         x="$(dirname -- "$x")"
     done
 }
-if [ "$(id -u)" -eq 0 ] && why="$(checkout_untrusted)"; then
+if [ "$EUID" -eq 0 ] && why="$(checkout_untrusted)"; then
     printf 'REFUSE checkout: refusing to run as root from a checkout another user could modify: %s (use a root-owned copy)\n' "$why"
     exit 2
 fi
-# A real (non-test) run uses only the system tool dirs and no TAR_OPTIONS.
-[ -n "$ROOT" ] || { PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; }
 unset TAR_OPTIONS
 RUNSC_DIR="$ROOT/usr/libexec/qdistro/runsc"
 WRAPPER="$ROOT/usr/libexec/qdistro/tier3s-runsc"
