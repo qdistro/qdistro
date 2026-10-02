@@ -8,7 +8,7 @@ restore the original bytes and re-check their sha256. IDs: P probe, V
 provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A,
 milestone A-i); S session manager, L root launch helper, B broker, I installer,
 U launch unit, A21+ spawn deltas (milestone A-ii); I3-I5, U2, U3 the owner
-answers O10/O11 (milestone A-iii).
+answers O10/O11, R1-R3 the reaper fixes from the s122 VM run (milestone A-iii).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -381,6 +381,17 @@ MUTATIONS = [
     ("U2 manager stop no longer stops the launch unit", UNITF,
      "StopPropagatedFrom=qdistro-session-manager.service\n", "",
      [f"{TSM}::test_unit_file_shape"]),
+    # --- A-iii: VM findings in the reaper (s122)
+    ("R1 reaper lists labels with index .Labels (podman 6 rejects it)", CLEAN,
+     """--format '{{.Label "qdistro_tier3s_token"}} {{.Label "qdistro_tier3s_unit"}} {{.Names}}'""",
+     """--format '{{index .Labels "qdistro_tier3s_token"}} {{index .Labels "qdistro_tier3s_unit"}} {{.Names}}'""",
+     [f"{TS}::test_reap_stale_reaps_an_unrecorded_labelled_container"]),
+    ("R2 reaper never stops a stale scope (orphan per-launch dir left)", CLEAN,
+     '; stopping it"\n            systemctl stop "$scope" 2>/dev/null\n', '; stopping it"\n',
+     [f"{TS}::test_reap_stale_stops_a_stale_scope_then_removes_the_orphan_dir"]),
+    ("R3 reaper ignores the scope's live launch unit", CLEAN,
+     '        if [ -n "$bound" ] && unit_live "$bound"; then\n', '        if false; then\n',
+     [f"{TS}::test_reap_stale_leaves_an_orphan_dir_whose_scope_serves_a_live_unit"]),
     ("U3 stop propagation replaced by PartOf (restart would relaunch)", UNITF,
      "StopPropagatedFrom=qdistro-session-manager.service\n", "PartOf=qdistro-session-manager.service\n",
      [f"{TSM}::test_unit_file_shape"]),

@@ -33,3 +33,6 @@ tests/integration/vm/compositor-shell.bats	bats	vm	qdwin-compositor.service,qdsh
 tests/integration/permissions-gui/03-qt-admin-app-visual.md	gui	vm	qdistro-admin-broker.service	loopback	agent	qdistro	slow
 tests/integration/qdwin-noctalia/03-clock-updates.md	gui	vm	qdshell.service	none	ocr	qdshell	slow,flaky
 tests/unit/test_component_version_smoke.py	host	none	none	none	none	qdistro	no
+tests/integration/vm/phase7-tier3s-headless.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service	loopback	none	tier3s	slow
+tests/integration/vm/phase7-tier3s-denied.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service	loopback	none	tier3s	slow
+tests/integration/vm/phase7-tier3s-sigkill-cleanup.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service	loopback	none	tier3s	slow

@@ -76,9 +76,20 @@ stop)
 rm) finish "$name"; rm -rf "${F:?}/c/$name" ;;
 ps)
     [ ! -e "$F/ps_fail" ] || { echo "Error: cannot list" >&2; exit 125; }
+    fmt=""; prev=""
+    for a in "$@"; do [ "$prev" = --format ] && fmt="$a"; prev="$a"; done
     for c in "$F"/c/*/; do
         [ -e "$c/exists" ] || continue
-        echo "$(cat "$c/label") $(cat "$c/unit_label" 2>/dev/null) $(basename "$c")"
+        # render the caller's template like podman 6 does for these fields;
+        # `index .Labels` is an error there (.Labels is not a map in ps)
+        case "$fmt" in *"index .Labels"*)
+            echo 'Error: template: ps:1:13: executing "ps" at <index .Labels "qdistro_tier3s_token">: error calling index: cannot index slice/array with type string' >&2
+            exit 125 ;; esac
+        line="${fmt//'{{.Label "qdistro_tier3s_token"}}'/$(cat "$c/label")}"
+        line="${line//'{{.Label "qdistro_tier3s_unit"}}'/$(cat "$c/unit_label" 2>/dev/null)}"
+        line="${line//'{{.Names}}'/$(basename "$c")}"
+        case "$line" in *"{{"*) echo "fake podman ps: unsupported template '$fmt'" >&2; exit 125 ;; esac
+        echo "$line"
     done ;;
 run)
     printf '%s\n' "$@" > "$F/run_argv"
@@ -121,6 +132,7 @@ for f in cgroup.subtree_control cgroup.threads; do : > "$d/$f"; done
 echo max > "$d/memory.max"; echo max > "$d/pids.max"
 mkdir -p "$T/proc/$$"; echo "0::$rel" > "$T/proc/$$/cgroup"
 echo "$rel" > "$F/units/$unit.cgroup"; echo active > "$F/units/$unit.state"
+sed -n 's/^BindsTo=//p' "$F/scope_argv" > "$F/units/$unit.bindsto"
 exec "$@"
 '''
 
@@ -129,7 +141,9 @@ F=@F@; T=@T@
 echo "systemctl $*" >> "$F/calls"
 case "$1" in
 is-active) s="$(cat "$F/units/$2.state" 2>/dev/null || echo inactive)"; echo "$s"; [ "$s" = active ] ;;
-show) for a; do u="$a"; done; cat "$F/units/$u.cgroup" 2>/dev/null; exit 0 ;;
+show) for a; do u="$a"; done
+    case " $* " in *" BindsTo "*) cat "$F/units/$u.bindsto" 2>/dev/null ;; *) cat "$F/units/$u.cgroup" 2>/dev/null ;; esac
+    exit 0 ;;
 stop)
     [ ! -e "$F/scope_stop_fail" ] || exit 1
     rel="$(cat "$F/units/$2.cgroup" 2>/dev/null)"
@@ -897,6 +911,31 @@ def test_reap_stale_keeps_a_labelled_container_of_a_live_unit(w):
     r = w.cleanup("--reap-stale")
     assert r.returncode == 0, r.stderr
     assert (w.F / "c/qdistro-tier3s-b/running").exists()
+
+
+def test_reap_stale_stops_a_stale_scope_then_removes_the_orphan_dir(w):
+    # the record is gone, the launch unit is not live, but its scope is still
+    # live (systemd's BindsTo stop not finished): the reaper waits, stops the
+    # scope itself and removes the per-launch dir (A-iii s122 finding)
+    (w.launch_parent / TOKEN).mkdir()
+    w.set_unit(f"qdistro-tier3s-{TOKEN}.scope", "active")
+    (w.F / f"units/qdistro-tier3s-{TOKEN}.scope.bindsto").write_text("qdistro-tier3s-silo@a.service\n")
+    w.set_unit("qdistro-tier3s-silo@a.service", "inactive")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" in w.calls()
+    assert not (w.launch_parent / TOKEN).exists()
+
+
+def test_reap_stale_leaves_an_orphan_dir_whose_scope_serves_a_live_unit(w):
+    (w.launch_parent / TOKEN).mkdir()
+    w.set_unit(f"qdistro-tier3s-{TOKEN}.scope", "active")
+    (w.F / f"units/qdistro-tier3s-{TOKEN}.scope.bindsto").write_text("qdistro-tier3s-silo@a.service\n")
+    w.set_unit("qdistro-tier3s-silo@a.service", "active")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+    assert (w.launch_parent / TOKEN).exists()
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
 
 
 def test_cleanup_without_record_removes_only_an_orphan_dir(w):

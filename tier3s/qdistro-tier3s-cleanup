@@ -153,13 +153,28 @@ teardown() {   # teardown <token> (caller holds the lock)
 }
 
 orphan_dir() {   # orphan_dir <token> [strict]: a per-launch dir without a record is
-    # removed only when its scope is gone; a live scope is an error only when
-    # this token was asked for explicitly (strict)
-    local tok="$1"
+    # removed only when its scope is gone. Asked for explicitly (strict), a
+    # live scope is an error. From the reaper, a live scope whose launch unit
+    # (its BindsTo=) is still live is left alone; otherwise systemd is already
+    # stopping it (BindsTo): wait for that, bounded, then stop it ourselves
+    # (A-iii s122: a reconciliation reap raced the scope's own stop and left
+    # the dir behind).
+    local tok="$1" scope="qdistro-tier3s-$1.scope" bound
     [ ! -e "$CTL/$tok" ] || return 0
-    if unit_live "qdistro-tier3s-$tok.scope"; then
-        say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"
-        [ -z "${2:-}" ]; return; fi
+    if unit_live "$scope"; then
+        if [ -n "${2:-}" ]; then
+            say "$tok: no control record but its scope is live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
+        bound="$(systemctl show -p BindsTo --value "$scope" 2>/dev/null)"
+        if [ -n "$bound" ] && unit_live "$bound"; then
+            say "$tok: no control record; its scope serves the live $bound; leaving $LAUNCH_PARENT/$tok"; return 0; fi
+        for _ in $(seq 1 $((20 * 4))); do unit_live "$scope" || break; sleep "$STEP"; done
+        if unit_live "$scope"; then
+            say "$tok: stale scope $scope (launch unit ${bound:-?} not live); stopping it"
+            systemctl stop "$scope" 2>/dev/null
+        fi
+        if unit_live "$scope"; then
+            say "$tok: scope $scope still live; leaving $LAUNCH_PARENT/$tok"; return 1; fi
+    fi
     [ ! -d "$LAUNCH_PARENT/$tok" ] || [ -L "$LAUNCH_PARENT/$tok" ] || rm -rf -- "${LAUNCH_PARENT:?}/$tok"
 }
 
@@ -190,9 +205,12 @@ case "${1:-}" in
             say "$tok: stale (unit ${u:-?} not live${except:+ or is $except}); reaping"
             teardown "$tok" || fails=$((fails + 1))
         done
-        # labelled containers whose launch unit is gone (restart reconciliation)
+        # labelled containers whose launch unit is gone (restart reconciliation).
+        # `podman ps` templates take .Label "<key>": its .Labels is not a map
+        # (podman 6 rejects `index .Labels`; A-iii s122 found the label reap
+        # failed on every labelled container)
         listing="$(as_admin "$WANT_ADMIN" podman ps -a --filter label=qdistro_tier3s_token \
-            --format '{{index .Labels "qdistro_tier3s_token"}} {{index .Labels "qdistro_tier3s_unit"}} {{.Names}}')" \
+            --format '{{.Label "qdistro_tier3s_token"}} {{.Label "qdistro_tier3s_unit"}} {{.Names}}')" \
             || { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }
         while read -r tok u name; do
             [[ "${tok:-}" =~ ^[0-9a-f]{32}$ ]] || continue
