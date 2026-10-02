@@ -1,17 +1,20 @@
-"""Document (content) fonts, independent of chrome UI fonts.
+"""Document (content) presentation, independent of chrome UI fonts.
 
 Semantic identity lives on QTextFormat user properties. This module only
-applies view presentation: family and point size. It must not serialize,
-dirty the document, or push undo commands.
+applies view presentation: family, point size, and readable code/link
+colors. It must not serialize, dirty the document, or push undo commands.
+Export keeps :func:`legacy_content_style` without live palette colors.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QPalette,
     QSyntaxHighlighter,
     QTextBlockFormat,
     QTextCharFormat,
@@ -20,6 +23,8 @@ from PyQt6.QtGui import (
 )
 
 from .md_to_qdoc import BLOCK_KIND, BLOCK_LEVEL, CHAR_CODE
+
+_HEX_COLOR = re.compile(r"^#[0-9a-f]{6}$")
 
 # Legacy heading sizes were 20/17/15/13/12/11 on an 11 pt body.
 _HEADING_RATIO = {1: 20 / 11, 2: 17 / 11, 3: 15 / 11, 4: 13 / 11, 5: 12 / 11, 6: 1.0}
@@ -46,6 +51,60 @@ class ContentStyle:
         return font
 
 
+def _hex_color(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if _HEX_COLOR.fullmatch(text):
+        return text
+    return None
+
+
+def document_palette_colors() -> tuple[str | None, str | None]:
+    """Code-background and link colors for dark/light readability.
+
+    Independent of the document-font opt-in. A missing controller leaves
+    parse-time hardcoded colors in place. Snapshot colors apply when the
+    shared palette is active; otherwise the application palette is used
+    (explicit Dark/Light/Native, or a missing snapshot).
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    from .theme import current_controller
+
+    ctrl = current_controller()
+    if ctrl is None:
+        return None, None
+    try:
+        state = ctrl.state
+    except Exception:  # noqa: BLE001
+        state = None
+    if state is not None and state.colors is not None:
+        bg = _hex_color(state.colors.mSurfaceVariant)
+        link = _hex_color(state.colors.mPrimary)
+        if bg or link:
+            return bg, link
+    app = QApplication.instance()
+    if app is None:
+        return None, None
+    pal = app.palette()
+    return (
+        _hex_color(pal.color(QPalette.ColorRole.AlternateBase).name()),
+        _hex_color(pal.color(QPalette.ColorRole.Link).name()),
+    )
+
+
+def with_document_palette(style: ContentStyle) -> ContentStyle:
+    bg, link = document_palette_colors()
+    if bg is None and link is None:
+        return style
+    return replace(
+        style,
+        code_background=bg if bg is not None else style.code_background,
+        link_color=link if link is not None else style.link_color,
+    )
+
+
 def legacy_content_style() -> ContentStyle:
     from .editor import BODY_POINT_SIZE, native_body_font
 
@@ -61,12 +120,19 @@ def legacy_content_style() -> ContentStyle:
 
 
 def resolve_content_style() -> ContentStyle:
-    """Legacy native body/code fonts unless the document-font opt-in is on."""
+    """Native body/code fonts unless the document-font opt-in is on.
+
+    Code/link colors follow the active presentation or application
+    palette even when fonts stay native. Export must call
+    :func:`legacy_content_style` directly.
+    """
     from .appearance import default_settings, load_use_desktop_document_fonts
 
-    if not load_use_desktop_document_fonts(default_settings()):
-        return legacy_content_style()
-    return desktop_content_style()
+    if load_use_desktop_document_fonts(default_settings()):
+        style = desktop_content_style()
+    else:
+        style = legacy_content_style()
+    return with_document_palette(style)
 
 
 def desktop_content_style() -> ContentStyle:
@@ -83,19 +149,14 @@ def desktop_content_style() -> ContentStyle:
         return legacy
     if state is None or not state.desktop_available:
         return legacy
-    code_bg = None
-    link = None
-    if state.colors is not None:
-        code_bg = state.colors.mSurfaceVariant
-        link = state.colors.mPrimary
-    return ContentStyle(
-        body_family=state.ui_family or legacy.body_family,
-        body_point_size=float(state.content_ui_point_size or legacy.body_point_size),
-        code_family=state.fixed_family or legacy.code_family,
-        code_point_size=float(state.content_fixed_point_size or legacy.code_point_size),
-        inherit_desktop=True,
-        code_background=code_bg,
-        link_color=link,
+    return with_document_palette(
+        ContentStyle(
+            body_family=state.ui_family or legacy.body_family,
+            body_point_size=float(state.content_ui_point_size or legacy.body_point_size),
+            code_family=state.fixed_family or legacy.code_family,
+            code_point_size=float(state.content_fixed_point_size or legacy.code_point_size),
+            inherit_desktop=True,
+        )
     )
 
 
@@ -209,7 +270,10 @@ def _presented_char_format(
     if is_code:
         new.setFontFamilies([style.code_family])
         new.setFontPointSize(style.code_point_size)
-        if style.code_background and fmt.property(CHAR_CODE):
+        # Equations keep their gold chip; fenced blocks may lack CHAR_CODE.
+        if style.code_background and not fmt.property(eq_latex_prop) and (
+            bool(fmt.property(CHAR_CODE)) or kind == "code"
+        ):
             new.setBackground(QColor(style.code_background))
     elif kind == "h":
         new.setFontFamilies([style.body_family])
