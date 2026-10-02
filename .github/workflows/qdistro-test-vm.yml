@@ -1,12 +1,22 @@
 name: qdistro downloadable VM test image
 
-# Native compile in openSUSE Docker, offline copy into a signed cloud QCOW2,
-# then verify library closure and a headless qdwin/Weston launch. Build tools
-# stay in the container; this is a VM test image, not a release image.
+# Builds a downloadable qdistro test VM on a free GitHub runner:
+#   1. native components in rootless Podman (scripts/vm/build-native-podman.sh,
+#      the same builder the local qci cloud test bases use), against the
+#      Tumbleweed snapshot pinned in snapshot.conf;
+#   2. offline copy of that stage plus the source tree into the signed,
+#      SHA256-pinned Minimal-VM cloud QCOW2;
+#   3. in the booted guest, runtime packages from the same snapshot and the
+#      qdistro bootstrap chain (scripts/vm/test-vm-guest-install.sh): the
+#      QML shell, Python services, greeter and locker. Build tools stay in
+#      the container; this is a test VM, not a release image.
 on:
   push:
     branches: [experiment/github-qdistro-image]
-    paths: [.github/workflows/qdistro-test-vm.yml]
+    paths:
+      - .github/workflows/qdistro-test-vm.yml
+      - scripts/vm/test-vm-guest-install.sh
+      - snapshot.conf
   workflow_dispatch:
 
 permissions:
@@ -15,89 +25,59 @@ permissions:
 jobs:
   build-test-image:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     env:
       LIBGUESTFS_BACKEND: direct
-      LIBGUESTFS_BACKEND_SETTINGS: force_tcg
-      CLOUD_URL: https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up paths and runner budget
+      - name: Set up paths, KVM and the snapshot pin
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/qdistro-build/stage" "$RUNNER_TEMP/qdistro-vm"
-          echo "CLOUD_CACHE=$RUNNER_TEMP/qdistro-vm/cloud-base.qcow2" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/qdistro-vm" "$RUNNER_TEMP/qdistro-cache" "$RUNNER_TEMP/qdistro-cloud"
+          echo "VM_DIR=$RUNNER_TEMP/qdistro-vm" >> "$GITHUB_ENV"
           echo "VM_IMAGE=$RUNNER_TEMP/qdistro-vm/qdistro-test-vm.qcow2" >> "$GITHUB_ENV"
+          echo "CLOUD_CACHE=$RUNNER_TEMP/qdistro-cloud/cloud-base.qcow2" >> "$GITHUB_ENV"
+          echo "QDWIN_CACHE_DIR=$RUNNER_TEMP/qdistro-cache" >> "$GITHUB_ENV"
           echo "DISK_BASELINE=$(df -B1 --output=used / | tail -1 | tr -d ' ')" >> "$GITHUB_ENV"
-          docker --version
-          docker info --format 'server={{.ServerVersion}}'
-          df -h /
+          # Hosted Linux runners expose /dev/kvm to root only.
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          if [ -w /dev/kvm ]; then
+            echo "QEMU_ACCEL=kvm" >> "$GITHUB_ENV"
+          else
+            echo "QEMU_ACCEL=tcg" >> "$GITHUB_ENV"
+            echo "LIBGUESTFS_BACKEND_SETTINGS=force_tcg" >> "$GITHUB_ENV"
+          fi
+          . scripts/vm/lib/test-substrate.sh
+          qdistro_load_test_substrate
+          {
+            echo "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT"
+            echo "CLOUD_URL=$QDISTRO_SUBSTRATE_CLOUD_URL"
+            echo "CLOUD_SHA256=$QDISTRO_SUBSTRATE_CLOUD_SHA256"
+          } >> "$GITHUB_ENV"
+          echo "snapshot $QDISTRO_SUBSTRATE_SNAPSHOT, cloud $QDISTRO_SUBSTRATE_CLOUD_SHA256"
+          ls -l /dev/kvm || true
+          nproc; free -g; df -h /
+          podman --version
 
-      - name: Compile native components in an openSUSE Docker container
+      - name: Compile native components in rootless Podman
         shell: bash
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/src:rw" \
-            --volume "$RUNNER_TEMP/qdistro-build:/out:rw" \
-            --workdir /src \
-            registry.opensuse.org/opensuse/tumbleweed:latest \
-            bash -euo pipefail -c '
-              zypper -n refresh
-              zypper -n install --no-recommends \
-                meson ninja gcc gcc-c++ pkgconf-pkg-config git file \
-                weston-devel libweston-16 libweston-16-0 \
-                wayland-devel wayland-protocols-devel libinput-devel libXcursor-devel \
-                freerdp-devel winpr-devel pipewire-devel libselinux-devel \
-                qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
-                qt6-declarative-devel qt6-svg-devel qt6-shadertools \
-                libpixman-1-0-devel libxkbcommon-devel libevdev-devel \
-                libgbm-devel libdrm-devel seatd-devel \
-                Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \
-                liblcms2-devel libdisplay-info-devel libX11-devel libxcb-devel \
-                cairo-devel libpng16-devel libpng16-compat-devel pango-devel \
-                fontconfig-devel glib2-devel libva-devel
-              echo "Container OS:"
-              cat /etc/os-release
-              # This source tree contains the patched libweston-16 that
-              # qdwin expects. The wrapper writes its Meson build under src.
-              QDWIN_LIBWESTON_PROFILE=production \
-                bash /src/qdwin/libweston-vendored/build-libweston.sh
-              export PKG_CONFIG_PATH="$(bash /src/qdwin/libweston-vendored/pkgconfig-dir.sh):${PKG_CONFIG_PATH:-}"
-              DEST=/out/stage/usr/libexec/qdistro/qdwin-libweston \
-                bash /src/scripts/install/install-vendored-libweston.sh /src/qdwin
-              for component in qdwin daemons qdshell; do
-                meson setup "/out/build-$component" "/src/$component" --prefix=/usr
-                meson compile -C "/out/build-$component"
-                # Install into the pod first so later components find the
-                # protocol pkg-config files; also stage exactly those files.
-                meson install -C "/out/build-$component"
-                meson install -C "/out/build-$component" --destdir /out/stage
-              done
-              test -f /out/stage/usr/lib64/weston/qdwin-shell.so
-              test -f /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
-              test -f /out/stage/usr/bin/qdistro-secctx-exec
-              test -f /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so
-              mkdir -p /out/stage/usr/share/qdistro-build
-              rpm -q --qf "%{NAME} %{VERSION}-%{RELEASE}\n" \
-                glibc libwayland-client0 libweston-16-0 libQt6Core6 \
-                > /out/stage/usr/share/qdistro-build/build-rpms.txt
-              find /out/stage -type f -print0 | while IFS= read -r -d "" staged_file; do
-                if file -b "$staged_file" | grep -Eq "^ELF .* (dynamically linked|shared object)"; then
-                  printf "%s\n" "${staged_file#/out/stage}"
-                fi
-              done > /out/stage/usr/share/qdistro-build/elf-manifest
-              test -s /out/stage/usr/share/qdistro-build/elf-manifest
-              wc -l /out/stage/usr/share/qdistro-build/elf-manifest
-              tar -C /out/stage -cf /out/staged-files.tar .
-              du -sh /out/stage /out/staged-files.tar
-            '
+          archive=$(bash scripts/vm/build-native-podman.sh)
+          cp "$archive" "$VM_DIR/native-stage.tar"
+          tar -tf "$VM_DIR/native-stage.tar" | wc -l
+          du -h "$VM_DIR/native-stage.tar"
           df -h /
 
-      - name: Install image tools and make libguestfs kernel readable
+      - name: Install image tools
         shell: bash
         run: |
           set -euo pipefail
@@ -105,98 +85,120 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libguestfs-tools libguestfs-xfs xfsprogs qemu-utils \
             qemu-system-x86 ovmf cloud-image-utils gnupg wget jq openssh-client
-          sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$RUNNER_TEMP/qdistro-vm/vmlinuz-$(uname -r)"
-          echo "SUPERMIN_KERNEL=$RUNNER_TEMP/qdistro-vm/vmlinuz-$(uname -r)" >> "$GITHUB_ENV"
+          # libguestfs builds its appliance from the host kernel, which the
+          # runner keeps root-only.
+          sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$VM_DIR/vmlinuz-$(uname -r)"
+          echo "SUPERMIN_KERNEL=$VM_DIR/vmlinuz-$(uname -r)" >> "$GITHUB_ENV"
           echo "SUPERMIN_MODULES=/lib/modules/$(uname -r)" >> "$GITHUB_ENV"
-          df -h /
 
-      - name: Copy staged components into signed cloud QCOW2
+      - name: Restore the verified cloud image
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/qdistro-cloud
+          key: qdistro-cloud-${{ env.CLOUD_SHA256 }}
+
+      - name: Copy the stage and source into the signed cloud QCOW2
         shell: bash
         run: |
           set -euo pipefail
-          source scripts/vm/lib/opensuse-cloud-image.sh
-          download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"
+          . scripts/vm/lib/opensuse-cloud-image.sh
+          . scripts/vm/lib/test-substrate.sh
+          qdistro_load_test_substrate
+          # openSUSE signature, then the snapshot.conf pin.
+          download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$CLOUD_SHA256"
           qemu-img create -f qcow2 "$VM_IMAGE" 8G
           virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
-          guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : xfs-growfs /
-          guestfish --rw -a "$VM_IMAGE" run : mount /dev/sda3 / : tar-in "$RUNNER_TEMP/qdistro-build/staged-files.tar" /
+          git archive --format=tar --prefix=qdistro-src/ HEAD > "$VM_DIR/source.tar"
+          # The guest takes only the snapshot repositories; the stamp is what
+          # the installer and qci compare the native stage against.
+          qdistro_substrate_repo_command > "$VM_DIR/substrate-repos.sh"
+          guestfish --rw -a "$VM_IMAGE" <<EOF
+          run
+          mount /dev/sda3 /
+          xfs-growfs /
+          tar-in $VM_DIR/native-stage.tar /
+          tar-in $VM_DIR/source.tar /root
+          upload $VM_DIR/substrate-repos.sh /root/qdistro-substrate-repos.sh
+          EOF
+          rm -f "$VM_DIR/source.tar"
           qemu-img check "$VM_IMAGE"
-          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/lib64/weston/qdwin-shell.so)" = true
           df -h /
 
-      - name: Install runtime packages and test launch in VM
+      - name: Boot the guest and install qdistro
         shell: bash
-        timeout-minutes: 35
+        timeout-minutes: 90
         run: |
           set -euo pipefail
-          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/qdistro-vm/builder-key"
+          ssh-keygen -q -t ed25519 -N '' -f "$VM_DIR/builder-key"
           {
             printf '#cloud-config\n'
             printf 'users:\n  - name: admin\n    uid: 1000\n    groups: [wheel]\n    shell: /bin/bash\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    ssh_authorized_keys:\n'
-            printf '      - %s\n' "$(cat "$RUNNER_TEMP/qdistro-vm/builder-key.pub")"
+            printf '      - %s\n' "$(cat "$VM_DIR/builder-key.pub")"
             printf 'ssh_pwauth: false\ndisable_root: true\n'
             printf 'runcmd:\n  - [systemctl, enable, --now, sshd.service]\n'
-          } > "$RUNNER_TEMP/qdistro-vm/user-data"
-          printf 'instance-id: qdistro-test-vm\nlocal-hostname: qdistro-test-vm\n' > "$RUNNER_TEMP/qdistro-vm/meta-data"
-          cloud-localds "$RUNNER_TEMP/qdistro-vm/seed.img" "$RUNNER_TEMP/qdistro-vm/user-data" "$RUNNER_TEMP/qdistro-vm/meta-data"
-          cp /usr/share/OVMF/OVMF_VARS_4M.fd "$RUNNER_TEMP/qdistro-vm/OVMF_VARS.fd"
-          qemu-system-x86_64 -machine q35,accel=tcg -m 4096 -smp 2 \
-            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-            -drive if=pflash,format=raw,file="$RUNNER_TEMP/qdistro-vm/OVMF_VARS.fd" \
-            -drive if=virtio,format=qcow2,file="$VM_IMAGE" \
-            -drive if=virtio,format=raw,readonly=on,file="$RUNNER_TEMP/qdistro-vm/seed.img" \
-            -netdev user,id=vmnet,hostfwd=tcp:127.0.0.1:2222-:22 \
-            -device virtio-net-pci,netdev=vmnet \
-            -display none -serial file:"$RUNNER_TEMP/qdistro-vm/serial.log" -monitor none \
-            > "$RUNNER_TEMP/qdistro-vm/qemu.log" 2>&1 &
-          qemu_pid=$!
-          trap 'df -h /; du -h "$VM_IMAGE"; kill "$qemu_pid" 2>/dev/null || true' EXIT
+          } > "$VM_DIR/user-data"
+          printf 'instance-id: qdistro-test-vm\nlocal-hostname: qdistro-test-vm\n' > "$VM_DIR/meta-data"
+          cloud-localds "$VM_DIR/seed.img" "$VM_DIR/user-data" "$VM_DIR/meta-data"
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VM_DIR/OVMF_VARS.fd"
+
+          boot_vm() {
+            qemu-system-x86_64 -machine "q35,accel=$QEMU_ACCEL" -cpu max -m 6144 -smp "$(nproc)" \
+              -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+              -drive if=pflash,format=raw,file="$VM_DIR/OVMF_VARS.fd" \
+              -drive if=virtio,format=qcow2,file="$VM_IMAGE" \
+              -drive if=virtio,format=raw,readonly=on,file="$VM_DIR/seed.img" \
+              -netdev user,id=vmnet,hostfwd=tcp:127.0.0.1:2222-:22 \
+              -device virtio-net-pci,netdev=vmnet \
+              -display none -serial file:"$VM_DIR/serial-$1.log" -monitor none \
+              > "$VM_DIR/qemu-$1.log" 2>&1 &
+            qemu_pid=$!
+          }
           vmssh() {
-            ssh -i "$RUNNER_TEMP/qdistro-vm/builder-key" -p 2222 \
+            ssh -i "$VM_DIR/builder-key" -p 2222 \
               -o BatchMode=yes -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+              -o ServerAliveInterval=30 -o LogLevel=ERROR \
               admin@127.0.0.1 "$@"
           }
-          ready=0
-          for attempt in $(seq 1 90); do
-            if vmssh 'sudo -n true' >/dev/null 2>&1; then ready=1; break; fi
-            if ! kill -0 "$qemu_pid" 2>/dev/null; then break; fi
-            sleep 5
-          done
-          if [ "$ready" -ne 1 ]; then tail -120 "$RUNNER_TEMP/qdistro-vm/serial.log"; exit 1; fi
-          vmssh 'sudo -n zypper -n install --no-recommends \
-            weston libweston-16 libweston-16-0 libinput10 libXcursor1 libpango-1_0-0 \
-            freerdp libpipewire-0_3-0 qt6-wayland qt6-declarative-imports \
-            libQt6Core6 libQt6Gui6 libQt6Qml6 libQt6Network6'
-          vmssh 'test ! -x /usr/bin/meson; test ! -x /usr/bin/gcc; df -h /'
-          vmssh 'rpm -q --qf "%{NAME} %{VERSION}-%{RELEASE}\n" \
-            glibc libwayland-client0 libweston-16-0 libQt6Core6 \
-            > /tmp/qdistro-guest-rpms; \
-            if test "$(cat /usr/share/qdistro-build/build-rpms.txt)" != "$(cat /tmp/qdistro-guest-rpms)"; then \
-              echo "Build and guest RPM versions differ:"; \
-              cat /usr/share/qdistro-build/build-rpms.txt /tmp/qdistro-guest-rpms; \
-              exit 1; \
-            fi'
-          vmssh 'set -eu; export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
-            for f in /usr/lib64/weston/qdwin-shell.so \
-              /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so \
-              /usr/bin/qdistro-secctx-exec \
-              /usr/bin/qdistro-cursor-sprites; do test -s "$f"; done; \
-            n=0; while IFS= read -r f; do \
-              test -s "$f"; ldd "$f" > /tmp/qdistro-ldd-last; \
-              if grep -q "not found" /tmp/qdistro-ldd-last; then cat /tmp/qdistro-ldd-last; exit 1; fi; \
-              n=$((n + 1)); \
-            done < /usr/share/qdistro-build/elf-manifest; \
-            test "$n" -ge 10; echo "Checked $n staged ELF files"; weston --version; df -h /'
-          vmssh 'set -eu; sudo -n install -d -m 0700 -o admin -g admin /run/user/1000; \
-            export XDG_RUNTIME_DIR=/run/user/1000; \
+          wait_ssh() {
+            for _ in $(seq 1 120); do
+              if vmssh 'sudo -n true' >/dev/null 2>&1; then return 0; fi
+              kill -0 "$qemu_pid" 2>/dev/null || break
+              sleep 5
+            done
+            tail -120 "$VM_DIR/serial-$1.log"
+            return 1
+          }
+          wait_down() {
+            for _ in $(seq 1 90); do
+              kill -0 "$qemu_pid" 2>/dev/null || return 0
+              sleep 2
+            done
+            echo "guest did not power off; killing QEMU" >&2
+            kill "$qemu_pid" 2>/dev/null || true
+            wait "$qemu_pid" 2>/dev/null || true
+            return 1
+          }
+          trap 'df -h /; du -h "$VM_IMAGE"; kill "$qemu_pid" 2>/dev/null || true' EXIT
+
+          boot_vm install
+          wait_ssh install
+          SECONDS=0
+          vmssh 'sudo -n bash /root/qdistro-substrate-repos.sh && sudo -n rm -f /root/qdistro-substrate-repos.sh'
+          vmssh 'sudo -n bash /root/qdistro-src/scripts/vm/test-vm-guest-install.sh' 2>&1 \
+            | tee "$VM_DIR/guest-install.log"
+          echo "guest install took ${SECONDS}s"
+          vmssh 'df -h /; rpm -qa | wc -l'
+
+          # Headless qdwin: the shell plugin loads and answers its probe.
+          vmssh 'set -eu; export XDG_RUNTIME_DIR=/run/user/1000; \
             export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
             export WESTON_MODULE_MAP=headless-backend.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so; \
-            export WAYLAND_DISPLAY=wayland-pod-test; \
+            export WAYLAND_DISPLAY=wayland-ci; \
             timeout 20s weston --backend=headless-backend.so --renderer=pixman \
-              --shell=qdwin-shell.so --socket=wayland-pod-test \
+              --shell=qdwin-shell.so --socket=wayland-ci \
               --idle-time=0 --log=/tmp/qdistro-weston.log & compositor_pid=$!; \
-            ready=0; for attempt in $(seq 1 30); do \
+            ready=0; for attempt in $(seq 1 50); do \
               if test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; then ready=1; break; fi; \
               if ! kill -0 "$compositor_pid" 2>/dev/null; then break; fi; sleep 0.2; \
             done; \
@@ -205,34 +207,88 @@ jobs:
             cat /tmp/qdistro-weston.log; \
             test "$ready" -eq 1; test "${rc:-0}" -eq 124; \
             grep -q "qdwin: shell loaded" /tmp/qdistro-weston.log'
-          vmssh 'sudo -n zypper clean -a && \
-            sudo -n rm -f /home/admin/.ssh/authorized_keys && \
-            test "$(systemctl is-enabled sshd.service)" = enabled && \
-            test ! -e /home/admin/.ssh/authorized_keys && \
-            sudo -n cloud-init clean --logs'
+
+          # qdshell: the installed QML tree runs on a headless qdwin for 30 s
+          # with the qdshell.service environment.
+          vmssh 'set -u; export XDG_RUNTIME_DIR=/run/user/1000; \
+            export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
+            d=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16; \
+            export WESTON_MODULE_MAP="headless-backend.so=$d/headless-backend.so;gl-renderer.so=$d/gl-renderer.so"; \
+            timeout 45s weston --backend=headless-backend.so --renderer=gl \
+              --shell=qdwin-shell.so --socket=wayland-shell \
+              --idle-time=0 --log=/tmp/qdshell-weston.log & compositor_pid=$!; \
+            for attempt in $(seq 1 50); do \
+              test -S "$XDG_RUNTIME_DIR/wayland-shell" && break; sleep 0.2; \
+            done; \
+            test -S "$XDG_RUNTIME_DIR/wayland-shell" || { cat /tmp/qdshell-weston.log; exit 1; }; \
+            env -u LD_LIBRARY_PATH -u WESTON_MODULE_MAP WAYLAND_DISPLAY=wayland-shell \
+              QT_QPA_PLATFORM=wayland XDG_SESSION_TYPE=wayland QML_DISABLE_DISK_CACHE=1 \
+              QML_IMPORT_PATH=/usr/share/qdistro/qml \
+              timeout 30s dbus-run-session -- qs -p /usr/share/quickshell/qdshell \
+              > /tmp/qdshell.log 2>&1; qs_rc=$?; \
+            kill "$compositor_pid" 2>/dev/null; wait "$compositor_pid" 2>/dev/null; \
+            echo "--- weston"; cat /tmp/qdshell-weston.log; \
+            echo "--- qdshell (rc=$qs_rc)"; cat /tmp/qdshell.log; \
+            test "$qs_rc" -eq 124' 2>&1 | tee "$VM_DIR/qdshell-smoke.log"
+
+          # Second boot of the installed system: services and the greeter.
           vmssh 'sudo -n systemctl poweroff' || true
-          for attempt in $(seq 1 60); do
-            kill -0 "$qemu_pid" 2>/dev/null || break
-            sleep 2
-          done
-          kill "$qemu_pid" 2>/dev/null || true
-          wait "$qemu_pid" 2>/dev/null || true
+          wait_down
+          boot_vm reboot
+          wait_ssh reboot
+          vmssh 'set -u; sleep 20; \
+            systemctl --no-pager list-units "qdistro*" "greetd*" "seatd*"; \
+            echo "--- failed units"; systemctl --no-pager --failed; \
+            echo "--- greetd"; sudo -n journalctl -b -u greetd --no-pager | tail -40; \
+            echo "--- bus names"; busctl --system --acquired list --no-legend | awk "{print \$1}" | grep -i qdistro; \
+            fail=0; for unit in greetd.service seatd.service; do \
+              systemctl is-active --quiet "$unit" || { echo "NOT ACTIVE: $unit"; fail=1; }; \
+            done; \
+            for name in org.qdistro.AdminBroker1 org.qdistro.SessionManager1; do \
+              busctl --system --acquired list --no-legend | awk -v n="$name" "\$1==n{f=1} END{exit !f}" \
+                || { echo "NOT ON BUS: $name"; fail=1; }; \
+            done; \
+            exit "$fail"' 2>&1 | tee "$VM_DIR/reboot-check.log"
+
+          # Ship state: no builder key or cache; SSH stays enabled for a
+          # cloud-init key, password logins are refused remotely.
+          vmssh 'sudo -n sh -c "set -e; \
+            zypper -n clean -a; \
+            install -d -m 0755 /etc/ssh/sshd_config.d; \
+            printf \"PasswordAuthentication no\nKbdInteractiveAuthentication no\n\" \
+              > /etc/ssh/sshd_config.d/10-qdistro-test-vm.conf; \
+            test \"\$(systemctl is-enabled sshd.service)\" = enabled; \
+            cloud-init clean --logs; \
+            rm -f /home/admin/.ssh/authorized_keys; \
+            systemctl poweroff"' || true
+          wait_down
+          trap - EXIT
           qemu-img check "$VM_IMAGE"
 
-      - name: Offline image checks and 15 GiB runner budget
+      - name: Offline image checks and runner budget
         shell: bash
         run: |
           set -euo pipefail
           test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/lib64/weston/qdwin-shell.so)" = true
-          virt-customize --no-network -a "$VM_IMAGE" \
-            --run-command 'set -eu; export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; n=0; while IFS= read -r f; do test -s "$f"; ldd "$f" > /tmp/qdistro-ldd-offline; if grep -q "not found" /tmp/qdistro-ldd-offline; then cat /tmp/qdistro-ldd-offline; exit 1; fi; n=$((n + 1)); done < /usr/share/qdistro-build/elf-manifest; test "$n" -ge 10; echo "Offline checked $n staged ELF files"'
+          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/bin/qdgreeter)" = true
+          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /home/admin/.ssh/authorized_keys)" = false
           used_now="$(df -B1 --output=used / | tail -1 | tr -d ' ')"
           used_delta="$((used_now - DISK_BASELINE))"
           echo "Runner disk used since start: $used_delta bytes"
-          test "$used_delta" -lt 16106127360
+          test "$used_delta" -lt 32212254720
           qemu-img info --output=json "$VM_IMAGE" | jq -e '.format == "qcow2" and .["virtual-size"] == 8589934592 and .["backing-filename"] == null'
-          (cd "$(dirname "$VM_IMAGE")" && sha256sum "$(basename "$VM_IMAGE")" > "$(basename "$VM_IMAGE").sha256")
+          (cd "$VM_DIR" && sha256sum qdistro-test-vm.qcow2 > qdistro-test-vm.qcow2.sha256)
           du -h "$VM_IMAGE"
+
+      - name: Upload install logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdistro-test-vm-logs
+          path: |
+            ${{ env.VM_DIR }}/*.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload downloadable test VM image
         uses: actions/upload-artifact@v4
