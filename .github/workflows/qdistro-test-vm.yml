@@ -19,6 +19,8 @@ on:
       - scripts/vm/test-vm-consumer-check.sh
       - scripts/vm/test-vm-suites.sh
       - scripts/vm/test-vm-suites-summary.py
+      - scripts/vm/vm-exec
+      - tests/integration/vm/**
       - snapshot.conf
   workflow_dispatch:
 
@@ -88,6 +90,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libguestfs-tools libguestfs-xfs xfsprogs qemu-utils \
             qemu-system-x86 ovmf cloud-image-utils gnupg wget jq openssh-client
+          # bats-core as in Tumbleweed (Ubuntu ships 1.10), for the VM suites.
+          git clone -q --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats-core"
+          sudo "$RUNNER_TEMP/bats-core/install.sh" /usr/local
+          bats --version
           # libguestfs builds its appliance from the host kernel, which the
           # runner keeps root-only.
           sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$VM_DIR/vmlinuz-$(uname -r)"
@@ -310,8 +316,9 @@ jobs:
           retention-days: 30
 
       # After the upload: the image is published whatever the suites find.
-      # The step fails only when the suites could not run; the pass/fail
-      # counts go to the job summary and the logs artifact.
+      # The step fails when a suite did not run to completion (exit 2) or the
+      # harness broke; assertion failures are the result, in the job summary
+      # and the logs artifact.
       - name: Run the pytest and VM bats suites in the guest
         shell: bash
         timeout-minutes: 240
@@ -319,6 +326,16 @@ jobs:
           set -euo pipefail
           bash scripts/vm/test-vm-suites.sh "$VM_DIR" "$VM_IMAGE" "$QEMU_ACCEL"
           (cd "$VM_DIR" && sha256sum -c qdistro-test-vm.qcow2.sha256)
+
+      - name: Suites summary
+        if: always()
+        shell: bash
+        run: |
+          s="$VM_DIR/suites/summary.md"
+          if [ ! -s "$s" ] && [ -f "$VM_DIR/suites/expected" ]; then
+            python3 scripts/vm/test-vm-suites-summary.py "$VM_DIR/suites" > "$s" || true
+          fi
+          if [ -s "$s" ]; then cat "$s" >> "$GITHUB_STEP_SUMMARY"; fi
 
       - name: Upload install logs
         if: always()
