@@ -26,7 +26,8 @@ set -euo pipefail
 umask 022
 
 SRC=/root/qdistro-src
-ADMIN_PASSWORD=${QDISTRO_TEST_VM_PASSWORD:-qdistro}
+# Not ADMIN_PASSWORD: sourcing the bootstrap resets that global to "".
+TVM_PASSWORD=${QDISTRO_TEST_VM_PASSWORD:-qdistro}
 SKIP_STEPS=${QDISTRO_TEST_VM_SKIP_STEPS:-browser-bridge phone print snapshots tier4-host tier5 tier5b}
 
 tvm_log() { echo "[test-vm] $*"; }
@@ -121,8 +122,8 @@ tvm_log "installer chain: $(installer_chain_names | tr '\n' ' ')"
 main --profile=dev --noninteractive --yes \
     --skip-packages --skip-sources --skip-build --reset-passwords \
     --repo-root="$SRC" \
-    --admin-password="$ADMIN_PASSWORD" \
-    --user=user --user-password="$ADMIN_PASSWORD"
+    --admin-password="$TVM_PASSWORD" \
+    --user=user --user-password="$TVM_PASSWORD"
 
 # ---- 6. Prebuilt SELinux modules ----------------------------------------------
 # The bootstrap's install-policy.sh calls skip without selinux-policy-devel;
