@@ -379,35 +379,52 @@ def test_chrome_uses_point_sizes_not_pixels(titlebar):
     assert titlebar._readonly_label.font().pointSizeF() >= 6.0
 
 
-def test_snapshot_restyle_uses_semantic_roles(titlebar, qapp, tmp_path, monkeypatch):
+def test_snapshot_restyle_uses_semantic_roles(qtbot, qapp, tmp_path, monkeypatch):
     """Follow-desktop snapshot colors replace hardcoded titlebar hex."""
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QWidget
     from qdistro_presentation.model import example_snapshot
     from qdistro_presentation.paths import ENV_OVERRIDE
     from qdistro_presentation.publish import write_snapshot
     from qterminator.theme import attach_presentation, reset_controller_for_tests
 
     reset_controller_for_tests()
-    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
-    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
-
-    def get(*keys, default=None):
-        if keys[:2] == ("general", "theme_mode"):
-            return "system"
-        if keys == ("appearance",):
-            return {}
-        return default
-
-    from types import SimpleNamespace
-
-    attach_presentation(qapp, SimpleNamespace(get=get))
-    snap = example_snapshot()
+    host = QWidget()
+    qtbot.addWidget(host)
+    titlebar = TerminalTitlebar(host)
     titlebar.set_group("gamma")
     titlebar.set_read_only(True)
     titlebar.set_activity(True)
     titlebar.set_vm_indicator("work")
     titlebar.set_active(True)
-    titlebar.apply_presentation_update()
+    snap = example_snapshot()
+    old_sheet = titlebar.styleSheet()
+    old_ro = titlebar._readonly_label.styleSheet()
+    old_activity = titlebar._activity_label.styleSheet()
+    expected_group = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
+    assert snap.colors.mPrimary not in old_sheet
+    assert expected_group in titlebar._group_label.styleSheet()
 
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    assert titlebar.styleSheet() == old_sheet
+    assert titlebar._readonly_label.styleSheet() == old_ro
+    assert titlebar._activity_label.styleSheet() == old_activity
+
+    titlebar.apply_presentation_update()
     assert snap.colors.mPrimary in titlebar.styleSheet()
     assert "#2a6ea8" not in titlebar.styleSheet()
     assert snap.colors.mOnPrimary in titlebar._title_label.styleSheet()
@@ -416,7 +433,6 @@ def test_snapshot_restyle_uses_semantic_roles(titlebar, qapp, tmp_path, monkeypa
     assert "#e74c3c" not in titlebar._readonly_label.styleSheet()
     assert snap.colors.mTertiary in titlebar._activity_label.styleSheet()
     assert "#f1c40f" not in titlebar._activity_label.styleSheet()
-    expected_group = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
     assert expected_group in titlebar._group_label.styleSheet()
     vm = titlebar.titlebar_widget("vm-indicator")
     assert snap.colors.mTertiary in vm.styleSheet()
@@ -424,31 +440,40 @@ def test_snapshot_restyle_uses_semantic_roles(titlebar, qapp, tmp_path, monkeypa
     reset_controller_for_tests()
 
 
-def test_group_identity_survives_palette_restyle(titlebar, qapp, tmp_path, monkeypatch):
+def test_group_identity_survives_palette_restyle(qtbot, qapp, tmp_path, monkeypatch):
     """Group color stays an identity token across snapshot restyle."""
     from types import SimpleNamespace
 
+    from PyQt6.QtWidgets import QWidget
     from qdistro_presentation.model import example_snapshot
     from qdistro_presentation.paths import ENV_OVERRIDE
     from qdistro_presentation.publish import write_snapshot
     from qterminator.theme import attach_presentation, reset_controller_for_tests
 
+    reset_controller_for_tests()
+    host = QWidget()
+    qtbot.addWidget(host)
+    titlebar = TerminalTitlebar(host)
     titlebar.set_group("gamma")
     expected = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
     before = titlebar._group_label.styleSheet()
-    reset_controller_for_tests()
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
-
-    def get(*keys, default=None):
-        if keys[:2] == ("general", "theme_mode"):
-            return "system"
-        if keys == ("appearance",):
-            return {}
-        return default
-
-    attach_presentation(qapp, SimpleNamespace(get=get))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    assert titlebar._group_label.styleSheet() == before
     titlebar.apply_presentation_update()
     assert expected in titlebar._group_label.styleSheet()
     assert expected in before
+    assert example_snapshot().colors.mSurfaceVariant in titlebar.styleSheet()
     reset_controller_for_tests()
