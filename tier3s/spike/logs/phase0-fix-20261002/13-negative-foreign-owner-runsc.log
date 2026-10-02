@@ -1,4 +1,4 @@
-### host 2026-10-02T06:13:14Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:25:26Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chown admin $R; ls -l $R
 probe_strace; expect_rc probe-exit 1 $PRC
 has names-owner $PO 'f 755 admin:root runsc'
@@ -6,8 +6,8 @@ never_executed foreign-owner
 provision repair-exit 0; has repaired $VO 'PASS: installed runsc'
 is owner-root "$(stat -c %U:%G $R)" root:root; probe_tail_pass repaired; finish
 CMD
-[vm-exec] guest identity pinned (pid 84106 start 133394)
--rwxr-xr-x. 1 admin root 109857335 Oct  2 06:13 /usr/libexec/qdistro/runsc/runsc
+[vm-exec] guest identity pinned (pid 135779 start 206574)
+-rwxr-xr-x. 1 admin root 109857335 Oct  2 06:25 /usr/libexec/qdistro/runsc/runsc
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)
 PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)

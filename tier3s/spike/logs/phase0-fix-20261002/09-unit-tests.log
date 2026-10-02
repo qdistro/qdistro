@@ -1,4 +1,4 @@
-### host 2026-10-02T06:13:35Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:26:22Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh
 echo '## as root (root-only guards run for real; prefix-hook tests skip by design)'
 python3 -m pytest -p no:cacheprovider -v -rs tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py; expect_rc pytest-root 0 $?
@@ -8,54 +8,57 @@ echo '## as admin (prefix-hook tests; root guards via an unprivileged user names
 cd /var/tmp/t3s-unit && runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin python3 -m pytest -p no:cacheprovider -v -rs tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py
 expect_rc pytest-admin 0 $?; finish
 CMD
-[vm-exec] guest identity pinned (pid 86653 start 135500)
+[vm-exec] guest identity pinned (pid 139091 start 212160)
 ## as root (root-only guards run for real; prefix-hook tests skip by design)
 ============================= test session starts ==============================
 platform linux -- Python 3.13.15, pytest-9.0.3, pluggy-1.6.0 -- /usr/bin/python3
 rootdir: /root/qdistro-src
 configfile: pyproject.toml
-collecting ... collected 40 items
+collecting ... collected 43 items
 
 tests/unit/test_tier3s_probe.py::test_refuses_without_profile PASSED     [  2%]
-tests/unit/test_tier3s_probe.py::test_refuses_hardened_profile PASSED    [  5%]
-tests/unit/test_tier3s_probe.py::test_pin_hook_refused_without_test_root PASSED [  7%]
-tests/unit/test_tier3s_probe.py::test_names_first_missing_when_runsc_absent PASSED [ 10%]
-tests/unit/test_tier3s_probe.py::test_test_root_never_exits_zero PASSED  [ 12%]
-tests/unit/test_tier3s_probe.py::test_version_text_with_nonzero_exit_fails PASSED [ 15%]
-tests/unit/test_tier3s_probe.py::test_replaced_runsc_with_correct_stamp_is_never_executed PASSED [ 17%]
-tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_runsc_is_never_executed PASSED [ 20%]
-tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_sidecar_hits_the_hash_loop PASSED [ 22%]
-tests/unit/test_tier3s_probe.py::test_symlinked_runsc_dir_is_never_executed PASSED [ 25%]
-tests/unit/test_tier3s_probe.py::test_writable_ancestor_is_never_executed PASSED [ 27%]
-tests/unit/test_tier3s_probe.py::test_fifo_swapped_in_under_untrusted_path_does_not_hang PASSED [ 30%]
-tests/unit/test_tier3s_probe.py::test_group_writable_runsc_is_never_executed PASSED [ 32%]
-tests/unit/test_tier3s_probe.py::test_foreign_owned_runsc_is_never_executed PASSED [ 35%]
-tests/unit/test_tier3s_probe.py::test_unverified_wrapper_is_not_handed_to_podman PASSED [ 37%]
-tests/unit/test_tier3s_probe.py::test_test_hooks_refused_without_test_root PASSED [ 40%]
-tests/unit/test_tier3s_probe.py::test_swap_between_validation_and_open_is_never_executed PASSED [ 42%]
-tests/unit/test_tier3s_probe.py::test_in_place_rewrite_between_validation_and_open_is_never_executed PASSED [ 45%]
-tests/unit/test_tier3s_probe.py::test_swap_between_verify_and_exec_runs_the_verified_inode PASSED [ 47%]
-tests/unit/test_tier3s_provision.py::test_installs_then_idempotent SKIPPED [ 50%]
-tests/unit/test_tier3s_provision.py::test_tarball_hash_mismatch_fails_closed SKIPPED [ 52%]
-tests/unit/test_tier3s_provision.py::test_file_hash_mismatch_fails_closed SKIPPED [ 55%]
-tests/unit/test_tier3s_provision.py::test_unpinned_sidecar_fails_closed SKIPPED [ 57%]
-tests/unit/test_tier3s_provision.py::test_version_skew_fails_and_keeps_old_install SKIPPED [ 60%]
-tests/unit/test_tier3s_provision.py::test_offline_without_cache_fails SKIPPED [ 62%]
-tests/unit/test_tier3s_provision.py::test_extra_symlink_breaks_idempotence_and_is_replaced SKIPPED [ 65%]
-tests/unit/test_tier3s_provision.py::test_lost_exec_bit_is_not_idempotent_and_is_repaired SKIPPED [ 67%]
-tests/unit/test_tier3s_provision.py::test_failure_after_swap_restores_previous_install SKIPPED [ 70%]
-tests/unit/test_tier3s_provision.py::test_pin_override_refused_for_root PASSED [ 72%]
-tests/unit/test_tier3s_provision.py::test_prefix_hook_refused_for_root PASSED [ 75%]
-tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP] PASSED [ 77%]
-tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP] PASSED [ 80%]
-tests/unit/test_tier3s_provision.py::test_must_run_as_root_without_prefix SKIPPED [ 82%]
-tests/unit/test_tier3s_provision.py::test_version_text_with_nonzero_exit_fails_closed SKIPPED [ 85%]
-tests/unit/test_tier3s_provision.py::test_wrapper_scrubs_environment_and_fixes_flags PASSED [ 87%]
-tests/unit/test_tier3s_provision.py::test_concurrent_provisions_are_serialized SKIPPED [ 90%]
-tests/unit/test_tier3s_provision.py::test_failed_rollback_preserves_recovery_material SKIPPED [ 92%]
-tests/unit/test_tier3s_provision.py::test_untrusted_lock_dir_is_refused SKIPPED [ 95%]
-tests/unit/test_tier3s_provision.py::test_symlinked_lock_dir_is_refused SKIPPED [ 97%]
-tests/unit/test_tier3s_provision.py::test_download_is_verified_before_it_is_published SKIPPED [100%]
+tests/unit/test_tier3s_probe.py::test_refuses_hardened_profile PASSED    [  4%]
+tests/unit/test_tier3s_probe.py::test_pin_hook_refused_without_test_root PASSED [  6%]
+tests/unit/test_tier3s_probe.py::test_names_first_missing_when_runsc_absent PASSED [  9%]
+tests/unit/test_tier3s_probe.py::test_test_root_never_exits_zero PASSED  [ 11%]
+tests/unit/test_tier3s_probe.py::test_version_text_with_nonzero_exit_fails PASSED [ 13%]
+tests/unit/test_tier3s_probe.py::test_replaced_runsc_with_correct_stamp_is_never_executed PASSED [ 16%]
+tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_runsc_is_never_executed PASSED [ 18%]
+tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_sidecar_hits_the_hash_loop PASSED [ 20%]
+tests/unit/test_tier3s_probe.py::test_symlinked_runsc_dir_is_never_executed PASSED [ 23%]
+tests/unit/test_tier3s_probe.py::test_writable_ancestor_is_never_executed PASSED [ 25%]
+tests/unit/test_tier3s_probe.py::test_fifo_swapped_in_under_untrusted_path_does_not_hang PASSED [ 27%]
+tests/unit/test_tier3s_probe.py::test_group_writable_runsc_is_never_executed PASSED [ 30%]
+tests/unit/test_tier3s_probe.py::test_foreign_owned_runsc_is_never_executed PASSED [ 32%]
+tests/unit/test_tier3s_probe.py::test_unverified_wrapper_is_not_handed_to_podman PASSED [ 34%]
+tests/unit/test_tier3s_probe.py::test_test_hooks_refused_without_test_root PASSED [ 37%]
+tests/unit/test_tier3s_probe.py::test_swap_between_validation_and_open_is_never_executed PASSED [ 39%]
+tests/unit/test_tier3s_probe.py::test_in_place_rewrite_between_validation_and_open_is_never_executed PASSED [ 41%]
+tests/unit/test_tier3s_probe.py::test_swap_between_verify_and_exec_runs_the_verified_inode PASSED [ 44%]
+tests/unit/test_tier3s_provision.py::test_installs_then_idempotent SKIPPED [ 46%]
+tests/unit/test_tier3s_provision.py::test_tarball_hash_mismatch_fails_closed SKIPPED [ 48%]
+tests/unit/test_tier3s_provision.py::test_file_hash_mismatch_fails_closed SKIPPED [ 51%]
+tests/unit/test_tier3s_provision.py::test_unpinned_sidecar_fails_closed SKIPPED [ 53%]
+tests/unit/test_tier3s_provision.py::test_version_skew_fails_and_keeps_old_install SKIPPED [ 55%]
+tests/unit/test_tier3s_provision.py::test_offline_without_cache_fails SKIPPED [ 58%]
+tests/unit/test_tier3s_provision.py::test_extra_symlink_breaks_idempotence_and_is_replaced SKIPPED [ 60%]
+tests/unit/test_tier3s_provision.py::test_lost_exec_bit_is_not_idempotent_and_is_repaired SKIPPED [ 62%]
+tests/unit/test_tier3s_provision.py::test_failure_after_swap_restores_previous_install SKIPPED [ 65%]
+tests/unit/test_tier3s_provision.py::test_pin_override_refused_for_root PASSED [ 67%]
+tests/unit/test_tier3s_provision.py::test_prefix_hook_refused_for_root PASSED [ 69%]
+tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP] PASSED [ 72%]
+tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP] PASSED [ 74%]
+tests/unit/test_tier3s_provision.py::test_must_run_as_root_without_prefix SKIPPED [ 76%]
+tests/unit/test_tier3s_provision.py::test_version_text_with_nonzero_exit_fails_closed SKIPPED [ 79%]
+tests/unit/test_tier3s_provision.py::test_wrapper_scrubs_environment_and_fixes_flags PASSED [ 81%]
+tests/unit/test_tier3s_provision.py::test_concurrent_provisions_are_serialized SKIPPED [ 83%]
+tests/unit/test_tier3s_provision.py::test_failed_rollback_preserves_recovery_material SKIPPED [ 86%]
+tests/unit/test_tier3s_provision.py::test_untrusted_lock_dir_is_refused SKIPPED [ 88%]
+tests/unit/test_tier3s_provision.py::test_symlinked_lock_dir_is_refused SKIPPED [ 90%]
+tests/unit/test_tier3s_provision.py::test_download_is_verified_before_it_is_published SKIPPED [ 93%]
+tests/unit/test_tier3s_provision.py::test_download_refused_into_writable_cache_dir SKIPPED [ 95%]
+tests/unit/test_tier3s_provision.py::test_download_refused_through_symlinked_cache_dir SKIPPED [ 97%]
+tests/unit/test_tier3s_provision.py::test_existing_tarball_in_untrusted_cache_is_still_read_safely SKIPPED [100%]
 
 =============================== warnings summary ===============================
 ../../usr/lib/python3.13/site-packages/_pytest/config/__init__.py:1434
@@ -65,60 +68,63 @@ tests/unit/test_tier3s_provision.py::test_download_is_verified_before_it_is_publ
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-SKIPPED [15] tests/unit/test_tier3s_provision.py:64: QDISTRO_RUNSC_PREFIX is refused for root by design; run as a normal user
+SKIPPED [18] tests/unit/test_tier3s_provision.py:64: QDISTRO_RUNSC_PREFIX is refused for root by design; run as a normal user
 SKIPPED [1] tests/unit/test_tier3s_provision.py:263: caller is root
-================== 24 passed, 16 skipped, 1 warning in 1.23s ===================
+================== 24 passed, 19 skipped, 1 warning in 1.21s ===================
 CHECK pytest-root: OK (rc=0)
 ## as admin (prefix-hook tests; root guards via an unprivileged user namespace)
 ============================= test session starts ==============================
 platform linux -- Python 3.13.15, pytest-9.0.3, pluggy-1.6.0 -- /usr/bin/python3
 rootdir: /var/tmp/t3s-unit
-collecting ... collected 40 items
+collecting ... collected 43 items
 
 tests/unit/test_tier3s_probe.py::test_refuses_without_profile PASSED     [  2%]
-tests/unit/test_tier3s_probe.py::test_refuses_hardened_profile PASSED    [  5%]
-tests/unit/test_tier3s_probe.py::test_pin_hook_refused_without_test_root PASSED [  7%]
-tests/unit/test_tier3s_probe.py::test_names_first_missing_when_runsc_absent PASSED [ 10%]
-tests/unit/test_tier3s_probe.py::test_test_root_never_exits_zero PASSED  [ 12%]
-tests/unit/test_tier3s_probe.py::test_version_text_with_nonzero_exit_fails PASSED [ 15%]
-tests/unit/test_tier3s_probe.py::test_replaced_runsc_with_correct_stamp_is_never_executed PASSED [ 17%]
-tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_runsc_is_never_executed PASSED [ 20%]
-tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_sidecar_hits_the_hash_loop PASSED [ 22%]
-tests/unit/test_tier3s_probe.py::test_symlinked_runsc_dir_is_never_executed PASSED [ 25%]
-tests/unit/test_tier3s_probe.py::test_writable_ancestor_is_never_executed PASSED [ 27%]
-tests/unit/test_tier3s_probe.py::test_fifo_swapped_in_under_untrusted_path_does_not_hang PASSED [ 30%]
-tests/unit/test_tier3s_probe.py::test_group_writable_runsc_is_never_executed PASSED [ 32%]
-tests/unit/test_tier3s_probe.py::test_foreign_owned_runsc_is_never_executed SKIPPED [ 35%]
-tests/unit/test_tier3s_probe.py::test_unverified_wrapper_is_not_handed_to_podman PASSED [ 37%]
-tests/unit/test_tier3s_probe.py::test_test_hooks_refused_without_test_root PASSED [ 40%]
-tests/unit/test_tier3s_probe.py::test_swap_between_validation_and_open_is_never_executed PASSED [ 42%]
-tests/unit/test_tier3s_probe.py::test_in_place_rewrite_between_validation_and_open_is_never_executed PASSED [ 45%]
-tests/unit/test_tier3s_probe.py::test_swap_between_verify_and_exec_runs_the_verified_inode PASSED [ 47%]
-tests/unit/test_tier3s_provision.py::test_installs_then_idempotent PASSED [ 50%]
-tests/unit/test_tier3s_provision.py::test_tarball_hash_mismatch_fails_closed PASSED [ 52%]
-tests/unit/test_tier3s_provision.py::test_file_hash_mismatch_fails_closed PASSED [ 55%]
-tests/unit/test_tier3s_provision.py::test_unpinned_sidecar_fails_closed PASSED [ 57%]
-tests/unit/test_tier3s_provision.py::test_version_skew_fails_and_keeps_old_install PASSED [ 60%]
-tests/unit/test_tier3s_provision.py::test_offline_without_cache_fails PASSED [ 62%]
-tests/unit/test_tier3s_provision.py::test_extra_symlink_breaks_idempotence_and_is_replaced PASSED [ 65%]
-tests/unit/test_tier3s_provision.py::test_lost_exec_bit_is_not_idempotent_and_is_repaired PASSED [ 67%]
-tests/unit/test_tier3s_provision.py::test_failure_after_swap_restores_previous_install PASSED [ 70%]
-tests/unit/test_tier3s_provision.py::test_pin_override_refused_for_root PASSED [ 72%]
-tests/unit/test_tier3s_provision.py::test_prefix_hook_refused_for_root PASSED [ 75%]
-tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP] PASSED [ 77%]
-tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP] PASSED [ 80%]
-tests/unit/test_tier3s_provision.py::test_must_run_as_root_without_prefix PASSED [ 82%]
-tests/unit/test_tier3s_provision.py::test_version_text_with_nonzero_exit_fails_closed PASSED [ 85%]
-tests/unit/test_tier3s_provision.py::test_wrapper_scrubs_environment_and_fixes_flags PASSED [ 87%]
-tests/unit/test_tier3s_provision.py::test_concurrent_provisions_are_serialized PASSED [ 90%]
-tests/unit/test_tier3s_provision.py::test_failed_rollback_preserves_recovery_material PASSED [ 92%]
-tests/unit/test_tier3s_provision.py::test_untrusted_lock_dir_is_refused PASSED [ 95%]
-tests/unit/test_tier3s_provision.py::test_symlinked_lock_dir_is_refused PASSED [ 97%]
-tests/unit/test_tier3s_provision.py::test_download_is_verified_before_it_is_published PASSED [100%]
+tests/unit/test_tier3s_probe.py::test_refuses_hardened_profile PASSED    [  4%]
+tests/unit/test_tier3s_probe.py::test_pin_hook_refused_without_test_root PASSED [  6%]
+tests/unit/test_tier3s_probe.py::test_names_first_missing_when_runsc_absent PASSED [  9%]
+tests/unit/test_tier3s_probe.py::test_test_root_never_exits_zero PASSED  [ 11%]
+tests/unit/test_tier3s_probe.py::test_version_text_with_nonzero_exit_fails PASSED [ 13%]
+tests/unit/test_tier3s_probe.py::test_replaced_runsc_with_correct_stamp_is_never_executed PASSED [ 16%]
+tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_runsc_is_never_executed PASSED [ 18%]
+tests/unit/test_tier3s_probe.py::test_byte_only_tamper_of_sidecar_hits_the_hash_loop PASSED [ 20%]
+tests/unit/test_tier3s_probe.py::test_symlinked_runsc_dir_is_never_executed PASSED [ 23%]
+tests/unit/test_tier3s_probe.py::test_writable_ancestor_is_never_executed PASSED [ 25%]
+tests/unit/test_tier3s_probe.py::test_fifo_swapped_in_under_untrusted_path_does_not_hang PASSED [ 27%]
+tests/unit/test_tier3s_probe.py::test_group_writable_runsc_is_never_executed PASSED [ 30%]
+tests/unit/test_tier3s_probe.py::test_foreign_owned_runsc_is_never_executed SKIPPED [ 32%]
+tests/unit/test_tier3s_probe.py::test_unverified_wrapper_is_not_handed_to_podman PASSED [ 34%]
+tests/unit/test_tier3s_probe.py::test_test_hooks_refused_without_test_root PASSED [ 37%]
+tests/unit/test_tier3s_probe.py::test_swap_between_validation_and_open_is_never_executed PASSED [ 39%]
+tests/unit/test_tier3s_probe.py::test_in_place_rewrite_between_validation_and_open_is_never_executed PASSED [ 41%]
+tests/unit/test_tier3s_probe.py::test_swap_between_verify_and_exec_runs_the_verified_inode PASSED [ 44%]
+tests/unit/test_tier3s_provision.py::test_installs_then_idempotent PASSED [ 46%]
+tests/unit/test_tier3s_provision.py::test_tarball_hash_mismatch_fails_closed PASSED [ 48%]
+tests/unit/test_tier3s_provision.py::test_file_hash_mismatch_fails_closed PASSED [ 51%]
+tests/unit/test_tier3s_provision.py::test_unpinned_sidecar_fails_closed PASSED [ 53%]
+tests/unit/test_tier3s_provision.py::test_version_skew_fails_and_keeps_old_install PASSED [ 55%]
+tests/unit/test_tier3s_provision.py::test_offline_without_cache_fails PASSED [ 58%]
+tests/unit/test_tier3s_provision.py::test_extra_symlink_breaks_idempotence_and_is_replaced PASSED [ 60%]
+tests/unit/test_tier3s_provision.py::test_lost_exec_bit_is_not_idempotent_and_is_repaired PASSED [ 62%]
+tests/unit/test_tier3s_provision.py::test_failure_after_swap_restores_previous_install PASSED [ 65%]
+tests/unit/test_tier3s_provision.py::test_pin_override_refused_for_root PASSED [ 67%]
+tests/unit/test_tier3s_provision.py::test_prefix_hook_refused_for_root PASSED [ 69%]
+tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP] PASSED [ 72%]
+tests/unit/test_tier3s_provision.py::test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP] PASSED [ 74%]
+tests/unit/test_tier3s_provision.py::test_must_run_as_root_without_prefix PASSED [ 76%]
+tests/unit/test_tier3s_provision.py::test_version_text_with_nonzero_exit_fails_closed PASSED [ 79%]
+tests/unit/test_tier3s_provision.py::test_wrapper_scrubs_environment_and_fixes_flags PASSED [ 81%]
+tests/unit/test_tier3s_provision.py::test_concurrent_provisions_are_serialized PASSED [ 83%]
+tests/unit/test_tier3s_provision.py::test_failed_rollback_preserves_recovery_material PASSED [ 86%]
+tests/unit/test_tier3s_provision.py::test_untrusted_lock_dir_is_refused PASSED [ 88%]
+tests/unit/test_tier3s_provision.py::test_symlinked_lock_dir_is_refused PASSED [ 90%]
+tests/unit/test_tier3s_provision.py::test_download_is_verified_before_it_is_published PASSED [ 93%]
+tests/unit/test_tier3s_provision.py::test_download_refused_into_writable_cache_dir PASSED [ 95%]
+tests/unit/test_tier3s_provision.py::test_download_refused_through_symlinked_cache_dir PASSED [ 97%]
+tests/unit/test_tier3s_provision.py::test_existing_tarball_in_untrusted_cache_is_still_read_safely PASSED [100%]
 
 =========================== short test summary info ============================
 SKIPPED [1] tests/unit/test_tier3s_probe.py:277: needs root to chown (VM run)
-======================== 39 passed, 1 skipped in 3.36s =========================
+======================== 42 passed, 1 skipped in 3.55s =========================
 CHECK pytest-admin: OK (rc=0)
 ### checks failed: 0
 ### exit=0

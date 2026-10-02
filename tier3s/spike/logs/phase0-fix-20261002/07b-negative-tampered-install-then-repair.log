@@ -1,4 +1,4 @@
-### host 2026-10-02T06:12:58Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:25:11Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; printf x >> $SIDE/runsc-fd-parking; ln -s /bin/sh $SIDE/extra
 probe_strace; expect_rc probe-exit 1 $PRC
 has names-extra-symlink $PO 'unexpected=[l 777 root:root gvisor-bin/extra,]'
@@ -6,7 +6,7 @@ never_executed tampered
 provision repair-exit 0; has repaired $VO 'PASS: installed runsc'
 is no-leftovers "$(leftovers)" 0; probe_tail_pass repaired; finish
 CMD
-[vm-exec] guest identity pinned (pid 82244 start 131744)
+[vm-exec] guest identity pinned (pid 133927 start 205031)
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)
 PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)

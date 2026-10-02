@@ -1,0 +1,81 @@
+### host 2026-10-02T06:25:44Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chmod 0700 $SIDE/gvisor_sentry
+rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
+pv() { # pv <name> <want rc> <args...>: real provision, output in $VO
+  VO=/var/tmp/t3s-prov.out; tier3s/provision-runsc.sh "${@:3}" > $VO 2>&1; local rc=$?; cat $VO; expect_rc $1 $2 $rc; }
+echo '## (a) online, no tarball, cache under sticky /var/tmp (1777): refused before any download'
+mkdir -m 0755 /var/tmp/t3s-cache
+pv a-refused 1 --cache-dir /var/tmp/t3s-cache
+has a-names-var-tmp $VO 'untrusted path: /var/tmp is group/other-writable (mode 1777)'
+hasnt a-no-download $VO 'provision-runsc: downloading'
+is a-cache-empty "$(find /var/tmp/t3s-cache -mindepth 1 | wc -l)" 0
+is a-live-untouched "$(stat -c %a $SIDE/gvisor_sentry)" 700
+echo '## (b) cache release dir is a symlink into an attacker dir that links a root 0600 sentinel'
+printf 'precious\n' > /etc/t3s-sentinel; chmod 0600 /etc/t3s-sentinel; s0=$(stat -c '%a %U %s' /etc/t3s-sentinel)$(sha256sum < /etc/t3s-sentinel)
+mkdir -m 0777 /var/tmp/t3s-attacker; ln -s /etc/t3s-sentinel /var/tmp/t3s-attacker/gvisor.tar.zstd.x
+mkdir -m 0755 /var/cache/t3s-c; ln -s /var/tmp/t3s-attacker /var/cache/t3s-c/20260928.0
+pv b-refused 1 --cache-dir /var/cache/t3s-c
+has b-names-symlink $VO 'untrusted path: /var/cache/t3s-c/20260928.0 is a symlink'
+hasnt b-no-download $VO 'provision-runsc: downloading'
+is b-attacker-dir-unchanged "$(ls -A /var/tmp/t3s-attacker)" gvisor.tar.zstd.x
+is b-sentinel-unchanged "$(stat -c '%a %U %s' /etc/t3s-sentinel)$(sha256sum < /etc/t3s-sentinel)" "$s0"
+echo '## (c) positive control: fresh root-owned cache, online: real download from the pinned URL, verified, published, installed'
+pv c-installed 0 --cache-dir /var/cache/t3s-dl
+has c-downloaded $VO 'provision-runsc: downloading https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64/gvisor.tar.zstd'
+has c-verified $VO 'tarball sha512 OK (download)'
+has c-cached $VO 'cached /var/cache/t3s-dl/20260928.0/gvisor.tar.zstd'
+has c-pass $VO 'PASS: installed runsc 20260928.0'
+ls -la /var/cache/t3s-dl/20260928.0
+is c-no-temporaries "$(ls -A /var/cache/t3s-dl/20260928.0)" gvisor.tar.zstd
+is c-cached-mode-owner "$(stat -c '%a %U:%G' /var/cache/t3s-dl/20260928.0/gvisor.tar.zstd)" '644 root:root'
+is c-cached-sha512 "$(sha512sum < /var/cache/t3s-dl/20260928.0/gvisor.tar.zstd | cut -d' ' -f1)" "$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)"
+rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
+is no-leftovers "$(leftovers)" 0; probe_tail_pass after; finish
+CMD
+[vm-exec] guest identity pinned (pid 138014 start 208352)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+## (a) online, no tarball, cache under sticky /var/tmp (1777): refused before any download
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: a download is published only into a trusted cache dir: /var/tmp/t3s-cache/20260928.0
+provision-runsc: FAIL: untrusted path: /var/tmp is group/other-writable (mode 1777)
+CHECK a-refused: OK (rc=1)
+CHECK a-names-var-tmp: OK
+CHECK a-no-download: OK
+CHECK a-cache-empty: OK (0)
+CHECK a-live-untouched: OK (700)
+## (b) cache release dir is a symlink into an attacker dir that links a root 0600 sentinel
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: a download is published only into a trusted cache dir: /var/cache/t3s-c/20260928.0
+provision-runsc: FAIL: untrusted path: /var/cache/t3s-c/20260928.0 is a symlink
+CHECK b-refused: OK (rc=1)
+CHECK b-names-symlink: OK
+CHECK b-no-download: OK
+CHECK b-attacker-dir-unchanged: OK (gvisor.tar.zstd.x)
+CHECK b-sentinel-unchanged: OK (600 root 9a37214679d4cdc0b4724e05883a60eb979d19dd3a394438f17ef85846fadcee0  -)
+## (c) positive control: fresh root-owned cache, online: real download from the pinned URL, verified, published, installed
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: a download is published only into a trusted cache dir: /var/cache/t3s-dl/20260928.0
+provision-runsc: downloading https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64/gvisor.tar.zstd
+provision-runsc: tarball sha512 OK (download)
+provision-runsc: cached /var/cache/t3s-dl/20260928.0/gvisor.tar.zstd
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK c-installed: OK (rc=0)
+CHECK c-downloaded: OK
+CHECK c-verified: OK
+CHECK c-cached: OK
+CHECK c-pass: OK
+total 126720
+drwxr-xr-x. 2 root root        29 Oct  2 06:26 .
+drwxr-xr-x. 3 root root        24 Oct  2 06:26 ..
+-rw-r--r--. 1 root root 129758317 Oct  2 06:26 gvisor.tar.zstd
+CHECK c-no-temporaries: OK (gvisor.tar.zstd)
+CHECK c-cached-mode-owner: OK (644 root:root)
+CHECK c-cached-sha512: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+CHECK no-leftovers: OK (0)
+RESULT PASS: tier 3s prerequisites present
+CHECK after-probe-exit: OK (rc=0)
+CHECK after-probe-pass: OK
+### checks failed: 0
+### exit=0

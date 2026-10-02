@@ -2,8 +2,8 @@
 
 Re-run of Phase 0 after the full-branch codex astra review (REVISE: the probe
 executed the install before verifying it; no provisioning transaction lock;
-guard tests that never reached their guards). One run of
-`tier3s/spike/run-phase0-fix.sh` (host) at commit `bf2b7a6f9`, every step a
+guard tests that never reached their guards) and its r1 re-review (REVISE: a download was published into the cache through an unchecked path). One run of
+`tier3s/spike/run-phase0-fix.sh` (host) at commit `88425f4ea`, every step a
 `vmlog.sh` capture of `scripts/vm/vm-exec`: the log starts with the exact
 command and ends with `### exit=<rc>`; every command ran inside the VM as
 guest root unless it says `runuser -u admin`. Steps are **asserting**: they
@@ -40,19 +40,24 @@ shows the fake runsc writes its marker when executed directly.
 | 15-negative-writable-ancestor.log | `/usr/libexec/qdistro` 0775: `FAIL install_path`, no content read (`sha512 not checked`, wrapper not compared, podman not given the wrapper), not executed; provision refuses (`untrusted path`); restored, PASS | PASS (negative) |
 | 16-concurrent-provisions.log | two real-root provisions on a damaged install: A holds the lock and repairs; B logs `waiting for the provisioning lock`, then sees `already installed`; both rc 0; final state PASS, no leftovers | PASS |
 | 17-stage-parent.log | hostile `TMPDIR` (0777, not sticky): strace shows the stage made under `/var/tmp`, nothing under TMPDIR; `/var/tmp` briefly 0777 (restored 1777 by trap): provision refuses before staging, live install untouched; repair, PASS | PASS (negative) |
+| 18-cache-trust.log | real root, online: (a) cache under sticky `/var/tmp` (1777) refused **before any download** (`untrusted path: /var/tmp …`), cache empty, live install untouched; (b) cache release dir a symlink into an attacker dir that links a root 0600 sentinel: refused before download, attacker dir and sentinel (mode, owner, size, sha256) unchanged; (c) positive control: fresh root-owned cache, real download from the pinned URL, sha512 = pin, published 0644 root with no temporaries left, installed, probe PASS | PASS (negative + positive) |
 | 08-probe-pass-after-negatives.log | idempotent provision + probe PASS, exactly one exec via the fd, no leftovers | PASS |
-| 09-unit-tests.log | `tests/unit/test_tier3s_{probe,provision}.py` as root: 24 passed, 16 skipped (the prefix hook is refused for root by design; the root-only tests — foreign owner, `--pin`/prefix/test-hook refusals with euid 0 — run for real); as admin on a copy: 39 passed, 1 skipped (foreign owner needs root). The one warning is the repo's `qt_api` pytest option without pytest-qt | PASS |
-| 10-mutation-harness.log | `tier3s/spike/mutate-guards.py` as admin: 21 mutations of the real probe/provision/wrapper, each caught by every named test, files restored byte-identical (sha256), baseline and after-restore green; as root: V2–V4 caught with real euid 0 | PASS |
+| 09-unit-tests.log | `tests/unit/test_tier3s_{probe,provision}.py` as root: 24 passed, 19 skipped (the prefix hook is refused for root by design; the root-only tests — foreign owner, `--pin`/prefix/test-hook refusals with euid 0 — run for real); as admin on a copy: 42 passed, 1 skipped (foreign owner needs root). The one warning is the repo's `qt_api` pytest option without pytest-qt | PASS |
+| 10-mutation-harness.log | `tier3s/spike/mutate-guards.py` as admin: 22 mutations of the real probe/provision/wrapper, each caught by every named test, files restored byte-identical (sha256), baseline and after-restore green; as root: V2–V4 caught with real euid 0 | PASS |
 
-Order: logs ran 00–07c, 11–17, 08, 09, 10 (numbers keep the Phase 0 names
+Order: logs ran 00–07c, 11–18, 08, 09, 10 (numbers keep the Phase 0 names
 for the steps that repeat `phase0-20261001/`).
 
-Not kept: four earlier runs of this driver (scratch, outside the tree) that
-differed only by driver/check bugs fixed in the branch history: a relative
-lib path, a stage-dir count that also matched `tree/`, and a run superseded
-by the stage-parent and untrusted-path hardening. One of them was disturbed by an
-edit to the running driver (bash reads scripts incrementally); it stopped at
-a parse error after its last step, executed nothing extra, and was discarded.
+Superseded: the run committed at `88e4d84a2` (staged `bf2b7a6f9`, reviewed in
+astra fix r1) is in history; this run replaces it after the cache-trust fix.
+Not kept (scratch, outside the tree): earlier runs that differed only by
+driver/check bugs fixed in the branch history (a relative lib path; a
+stage-dir count that also matched `tree/`; a mutation anchor left stale by
+the `trusted_chain` signature change, which the harness reported as a
+HARNESS ERROR), and one run superseded by the stage-parent/untrusted-path
+hardening. One of them was disturbed by an edit to the running driver (bash
+reads scripts incrementally); it stopped at a parse error after its last
+step, executed nothing extra, and was discarded.
 
 Not shown here: SIGKILL/power-loss recovery of the provisioner, and the
 probe's fd-swap windows under real root (the unit tests drive those windows

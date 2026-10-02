@@ -1,4 +1,4 @@
-### host 2026-10-02T06:13:04Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:25:16Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; f=$SIDE/runsc-fd-parking
 s0=$(stat -c '%s %a %U:%G %i' $f); h0=$(sha512sum < $f)
 b=$(dd if=$f bs=1 skip=200 count=1 2>/dev/null); if [ "$b" = Z ]; then n=Y; else n=Z; fi
@@ -13,9 +13,9 @@ hasnt not-a-file-set-failure $PO 'file set differs'
 never_executed byte-only
 provision repair-exit 0; has repaired $VO 'PASS: installed runsc'; probe_tail_pass repaired; finish
 CMD
-[vm-exec] guest identity pinned (pid 82870 start 132411)
-before: 1320 755 root:root 51884725  after: 1320 755 root:root 51884725
-CHECK same-size-mode-owner-inode: OK (1320 755 root:root 51884725)
+[vm-exec] guest identity pinned (pid 134550 start 205593)
+before: 1320 755 root:root 20978929  after: 1320 755 root:root 20978929
+CHECK same-size-mode-owner-inode: OK (1320 755 root:root 20978929)
 CHECK bytes-changed: OK
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)

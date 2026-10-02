@@ -1,4 +1,4 @@
-### host 2026-10-02T06:13:19Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:25:30Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; mkdir -m 0755 /usr/libexec/t3s-elsewhere
 mv /usr/libexec/qdistro/runsc /usr/libexec/t3s-elsewhere/runsc; ln -s /usr/libexec/t3s-elsewhere/runsc /usr/libexec/qdistro/runsc
 ls -l /usr/libexec/qdistro/
@@ -8,7 +8,7 @@ never_executed symlinked-dir
 rm /usr/libexec/qdistro/runsc; mv /usr/libexec/t3s-elsewhere/runsc /usr/libexec/qdistro/runsc; rmdir /usr/libexec/t3s-elsewhere
 probe_tail_pass restored; finish
 CMD
-[vm-exec] guest identity pinned (pid 84681 start 133831)
+[vm-exec] guest identity pinned (pid 136350 start 207015)
 total 2064
 drwxr-xr-x. 2 root root   4096 Oct  2 05:52 __pycache__
 -rw-r--r--. 1 root root   8857 Oct  2 05:51 qdistro_admin_audit.py
@@ -98,8 +98,8 @@ drwxr-xr-x. 2 root root   4096 Oct  2 05:52 __pycache__
 -rwxr-xr-x. 1 root root   9119 Oct  2 05:51 qdistro_wg_provision.py
 -rwxr-xr-x. 1 root root   4357 Oct  2 05:51 qdshell-session-launcher
 drwxr-xr-x. 3 root root     19 Jan  1  1970 qdwin-libweston
-lrwxrwxrwx. 1 root root     32 Oct  2 06:13 runsc -> /usr/libexec/t3s-elsewhere/runsc
--rwxr-xr-x. 1 root root    487 Oct  2 06:13 tier3s-runsc
+lrwxrwxrwx. 1 root root     32 Oct  2 06:25 runsc -> /usr/libexec/t3s-elsewhere/runsc
+-rwxr-xr-x. 1 root root    487 Oct  2 06:25 tier3s-runsc
 -rw-r--r--. 1 root root   5469 Oct  2 05:51 transfer_protocol.py
 drwxr-xr-x. 3 root root   4096 Oct  2 05:51 workflow
 PASS profile: dev (/etc/qdistro/profile)
