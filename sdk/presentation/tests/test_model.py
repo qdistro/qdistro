@@ -8,10 +8,13 @@ from dataclasses import replace
 import pytest
 from qdistro_presentation.model import (
     DEFAULT_DARK_COLORS,
+    DESKTOP_SETTINGS_UNAVAILABLE,
     LocalOverrides,
     SnapshotError,
     contrast_ratio,
+    desktop_status_text,
     example_snapshot,
+    format_point_size,
     generation_for_content,
     loads_strict,
     normalize_producer,
@@ -301,3 +304,70 @@ def test_shell_payload_shape_normalizes():
     assert snap.icon_theme == "breeze"
     parsed = parse_snapshot_text(snap.to_json())
     assert parsed == snap
+
+
+def _scaled_resolved(**kwargs):
+    snap = example_snapshot()
+    snap = with_generation(
+        replace(snap, fonts=replace(snap.fonts, ui_scale=1.25, fixed_scale=1.25))
+    )
+    return resolve_presentation(
+        theme_mode="system",
+        snapshot=snap,
+        native_ui_family="DejaVu Sans",
+        native_fixed_family="DejaVu Sans Mono",
+        native_icon_theme="breeze",
+        **kwargs,
+    )
+
+
+def test_format_point_size_keeps_fraction():
+    assert format_point_size(11.0) == "11"
+    assert format_point_size(12.1) == "12.1"
+    assert format_point_size(13.75) == "13.75"
+
+
+def test_desktop_status_unavailable_without_snapshot():
+    assert (
+        desktop_status_text(None, follow_desktop=True, use_desktop_fonts=True)
+        == DESKTOP_SETTINGS_UNAVAILABLE
+    )
+    assert (
+        desktop_status_text(None, follow_desktop=True, use_desktop_fonts=False)
+        == DESKTOP_SETTINGS_UNAVAILABLE
+    )
+    assert (
+        desktop_status_text(None, follow_desktop=False, use_desktop_fonts=True)
+        == DESKTOP_SETTINGS_UNAVAILABLE
+    )
+    assert (
+        desktop_status_text(None, follow_desktop=False, use_desktop_fonts=False)
+        == ""
+    )
+
+
+def test_desktop_status_inherited_fractional_ui_size():
+    resolved = _scaled_resolved()
+    assert resolved.ui_point_size == pytest.approx(13.75)
+    text = desktop_status_text(
+        resolved, follow_desktop=True, use_desktop_fonts=True
+    )
+    assert DESKTOP_SETTINGS_UNAVAILABLE not in text
+    assert "13.75" in text
+    assert resolved.ui_family in text
+    local_fonts = desktop_status_text(
+        resolved, follow_desktop=True, use_desktop_fonts=False
+    )
+    assert local_fonts == ""
+
+
+def test_desktop_status_inherited_fixed_content_size():
+    resolved = _scaled_resolved()
+    text = desktop_status_text(
+        resolved,
+        follow_desktop=False,
+        use_desktop_fonts=True,
+        font_kind="fixed",
+    )
+    assert "13.75" in text
+    assert resolved.fixed_family in text

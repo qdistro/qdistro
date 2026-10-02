@@ -422,6 +422,7 @@ class PreferencesDialog(QDialog):
             self._dormant_family = self._font_combo.currentFont().family()
             self._dormant_size = self._font_size.value()
         self._fill_font_widgets(desktop=checked)
+        self._refresh_desktop_status()
 
     def _on_color_scheme_edited(self, *_args):
         if self._chk_appearance_colors.isChecked():
@@ -456,6 +457,32 @@ class PreferencesDialog(QDialog):
             self._fill_font_widgets(desktop=True)
         else:
             self._update_font_preview()
+        self._refresh_desktop_status()
+
+    def _refresh_desktop_status(self) -> None:
+        if not hasattr(self, "lbl_desktop_status"):
+            return
+        follow = self._theme_mode.currentText() == "Follow desktop"
+        use_fonts = self._chk_desktop_font.isChecked()
+        try:
+            from qdistro_presentation.model import desktop_status_text
+
+            from qterminator.theme import current_controller
+
+            ctrl = current_controller()
+            state = ctrl.state if ctrl is not None else None
+            text = desktop_status_text(
+                state,
+                follow_desktop=follow,
+                use_desktop_fonts=use_fonts,
+                font_kind="fixed",
+            )
+        except Exception:
+            text = (
+                "desktop settings unavailable" if follow or use_fonts else ""
+            )
+        self.lbl_desktop_status.setText(text)
+        self.lbl_desktop_status.setVisible(bool(text))
 
     def _build_behavior_page(self):
         widget = QWidget()
@@ -490,6 +517,14 @@ class PreferencesDialog(QDialog):
         self._theme_mode = QComboBox()
         self._theme_mode.addItems(["Follow desktop", "Dark", "Light", "Native"])
         win_layout.addRow(tr("Application appearance:"), self._theme_mode)
+        self._theme_mode.currentIndexChanged.connect(
+            lambda *_args: self._refresh_desktop_status()
+        )
+
+        self.lbl_desktop_status = QLabel("")
+        self.lbl_desktop_status.setObjectName("lbl_desktop_status")
+        self.lbl_desktop_status.setWordWrap(True)
+        win_layout.addRow(self.lbl_desktop_status)
 
         self._confirm_close = QCheckBox(tr("Confirm before closing with running processes"))
         win_layout.addRow(self._confirm_close)
@@ -713,6 +748,7 @@ class PreferencesDialog(QDialog):
         self._show_menubar.setChecked(
             self._config.get("general", "show_menubar", default=False)
         )
+        self._refresh_desktop_status()
 
     def _apply(self):
         """Apply settings to all open terminals and save to config."""

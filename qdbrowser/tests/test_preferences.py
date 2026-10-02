@@ -12,7 +12,13 @@ from qdbrowser.theme import (
     current_controller,
     reset_controller_for_tests,
 )
-from qdistro_presentation.model import example_snapshot
+from dataclasses import replace
+
+from qdistro_presentation.model import (
+    DESKTOP_SETTINGS_UNAVAILABLE,
+    example_snapshot,
+    with_generation,
+)
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
 
@@ -296,4 +302,45 @@ def test_preferences_dialog_apply_presentation_update_polishes(qapp, isolated_co
         assert dlg.isVisible()
     finally:
         dlg.close()
+        dlg.deleteLater()
+
+
+def _scaled_snapshot():
+    snap = example_snapshot()
+    return with_generation(
+        replace(snap, fonts=replace(snap.fonts, ui_scale=1.25, fixed_scale=1.25))
+    )
+
+
+def test_follow_desktop_without_snapshot_shows_unavailable(qapp, isolated_config):
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        assert dlg.combo_theme.currentText() == "Follow desktop"
+        assert dlg.cb_desktop_fonts.isChecked() is True
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        dlg.combo_theme.setCurrentText("Dark")
+        dlg.cb_desktop_fonts.setChecked(False)
+        assert DESKTOP_SETTINGS_UNAVAILABLE not in dlg.lbl_desktop_status.text()
+        assert dlg.lbl_desktop_status.text() == ""
+    finally:
+        dlg.deleteLater()
+
+
+def test_live_update_replaces_unavailable_with_inherited_size(
+    qapp, isolated_config, tmp_path, monkeypatch
+):
+    dlg = PreferencesDialog(isolated_config)
+    try:
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        snap = _scaled_snapshot()
+        write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+        monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+        attach_presentation(qapp, isolated_config)
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        dlg.apply_presentation_update()
+        text = dlg.lbl_desktop_status.text()
+        assert DESKTOP_SETTINGS_UNAVAILABLE not in text
+        assert "13.75" in text
+        assert snap.fonts.ui_family in text
+    finally:
         dlg.deleteLater()
