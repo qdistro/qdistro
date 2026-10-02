@@ -67,6 +67,46 @@ Findings for `main`:
 - Without `selinux-policy-devel` and `make`, the bootstrap's policy installs
   only warn under dev; a runtime-only install needs the prebuilt modules.
 
+### Consumer validation (run 36994730839)
+
+[Run 36994730839](https://github.com/qdistro/qdistro/actions/runs/36994730839)
+adds `scripts/vm/test-vm-consumer-check.sh` and passed in 14m40s;
+[QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/36994730839/artifacts/11221194788),
+955 MiB, retained until 2026-11-01. After the image is final, the check boots
+it through a throwaway overlay with fresh UEFI variables and a key-only
+cloud-init seed (65 s), then requires:
+
+- the consumer key logs in, the build key does not, SSH password login is
+  off, passwordless sudo works and the QEMU guest agent answers;
+- admin's password is usable and machine-id and SSH host keys are new;
+- `systemctl is-system-running` is `running` with no failed unit, the
+  qdistro services and bus names are up and the chain state has 11 steps;
+- the repositories are only `history/20260930` and resolve `bats` and `jq`;
+- qdgreeter is on the virtual display (virtio-vga), and typing the password
+  with QMP `send-key` starts qdwin-session.target, the compositor, qdshell and
+  qdlocker; `consumer-greeter.png` and `consumer-desktop.png` (qdshell bar at
+  1920x1080) are in the logs artifact;
+- the artifact's sha256 is unchanged afterwards.
+
+It found one image bug: a seed listing admin under `users:` locked admin's
+password (cloud-init's `lock_passwd` default), so the greeter refused the
+documented password. The image now sets cloud-init's default user to admin
+with `lock_passwd: false` and ships an empty `/etc/machine-id`. This run also
+exercised main's `seat` group fix (`8b0c51fc5`); the guest script no longer
+creates the group itself.
+
+Using the image: give cloud-init a seed whose user-data is only
+
+```yaml
+#cloud-config
+ssh_authorized_keys:
+  - ssh-ed25519 AAAA... you@host
+```
+
+then `ssh admin@<vm>`; at the console or greeter, admin and user log in with
+`qdistro`. Attach a `virtio-vga` display to see the greeter, and a
+`org.qemu.guest_agent.0` virtio-serial port for guest-agent exec.
+
 Known limit: the cloud image URL is the rolling one, verified against the
 pinned checksum. Once Tumbleweed publishes a newer image the download fails
 until the pin is bumped; the Actions cache only covers a hit.
