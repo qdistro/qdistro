@@ -223,18 +223,20 @@ send_text() {
 }
 
 SECONDS=0
-until vmssh true 2>/dev/null; do
+until SSH_CAP=$(cap 120) vmssh true 2>/dev/null; do
     kill -0 "$qemu_pid" 2>/dev/null || { tail -40 "$VM_DIR/serial-suites.log"; exit 1; }
-    [ "$SECONDS" -lt 600 ] || { tail -40 "$VM_DIR/serial-suites.log"; exit 1; }
+    # Budget before the boot ceiling: a spent budget at 600 s is an
+    # incomplete run, not a harness failure.
     [ "$(budget_left)" -gt 0 ] || setup_failed
+    [ "$SECONDS" -lt 600 ] || { tail -40 "$VM_DIR/serial-suites.log"; exit 1; }
     sleep 5
 done
 log "guest up after ${SECONDS}s"
 
 # Test harness access and tools, in the overlay only.
-vmssh 'sudo -n sh -c "set -e; install -d -m 0700 /root/.ssh; \
-    install -m 0600 /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys"'
-rootssh true
+SSH_CAP=$(cap 120) vmssh 'sudo -n sh -c "set -e; install -d -m 0700 /root/.ssh; \
+    install -m 0600 /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys"' || setup_failed
+SSH_CAP=$(cap 60) rootssh true || setup_failed
 log "installing ${#TEST_PKGS[@]} test packages..."
 SSH_CAP=$(cap 1800) rootssh "zypper -n --quiet install --no-recommends ${TEST_PKGS[*]}" > "$OUT/test-packages.log" 2>&1 \
     || { tail -30 "$OUT/test-packages.log"; setup_failed; }
