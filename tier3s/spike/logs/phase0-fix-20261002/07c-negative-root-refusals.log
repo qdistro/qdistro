@@ -1,4 +1,4 @@
-### host 2026-10-02T06:39:06Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:51:42Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; cp tier3s/RUNSC_RELEASE /var/tmp/t3s-alt-pin; chmod 0644 /var/tmp/t3s-alt-pin; ls -l /var/tmp/t3s-alt-pin
 if [ -r /var/tmp/t3s-alt-pin ]; then ok alt-pin-readable; else bad alt-pin-readable; fi
 before=$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc $R | sha512sum)
@@ -14,8 +14,8 @@ expect_rc probe-pin-hook-refused 2 $rc; is probe-pin-hook-message "$(cat /var/tm
 is install-unchanged "$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc $R | sha512sum)" "$before"
 is no-test-prefix-created "$(ls -d /var/tmp/t3s-x 2>/dev/null | wc -l)" 0; finish
 CMD
-[vm-exec] guest identity pinned (pid 190830 start 288579)
--rw-r--r--. 1 root root 1571 Oct  2 06:39 /var/tmp/t3s-alt-pin
+[vm-exec] guest identity pinned (pid 224788 start 364202)
+-rw-r--r--. 1 root root 1571 Oct  2 06:51 /var/tmp/t3s-alt-pin
 CHECK alt-pin-readable: OK
 provision-runsc: FAIL: QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root
 CHECK prefix-hook-exit: OK (rc=1)
@@ -32,7 +32,7 @@ CHECK pause-hook-message: OK (provision-runsc: FAIL: QDISTRO_RUNSC_PAUSE_AFTER_S
 probe: QDISTRO_PROBE_PIN is a unit-test hook and needs QDISTRO_PROBE_ROOT
 CHECK probe-pin-hook-refused: OK (rc=2)
 CHECK probe-pin-hook-message: OK (probe: QDISTRO_PROBE_PIN is a unit-test hook and needs QDISTRO_PROBE_ROOT)
-CHECK install-unchanged: OK (a08f8b17c3f4dc7fbdb7377e4f54d19f65afb9059b152d0d13885e170dbf8caf8dabbb5b1e9f3f17fbdc84e8377ff390aad2a2c786594b28644389e8610e3ee7  -)
+CHECK install-unchanged: OK (6b059d2107edc7af8304423842be6b743a0da490d806da793d4cc4ce75b8b69f42ff547d4900daae1d94933246bf3206b2c43e848bfc5908795ae30ed3d28622  -)
 CHECK no-test-prefix-created: OK (0)
 ### checks failed: 0
 ### exit=0

@@ -1,4 +1,4 @@
-### host 2026-10-02T06:39:13Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:51:49Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; M=/var/tmp/t3s-MARKER; rm -f $M
 printf '#!/bin/sh\ntouch /var/tmp/t3s-MARKER\necho "runsc version release-20260928.0"\n' > /var/tmp/t3s-fake-runsc
 install -m 0755 -o root -g root /var/tmp/t3s-fake-runsc $R; ls -l $R
@@ -11,8 +11,8 @@ echo '## positive control: the fake does write the marker when executed directly
 $R; if [ -e $M ]; then ok control-marker-written; else bad control-marker-written; fi; rm -f $M
 provision repair-exit 0; has repaired $VO 'PASS: installed runsc'; probe_tail_pass repaired; finish
 CMD
-[vm-exec] guest identity pinned (pid 191534 start 289247)
--rwxr-xr-x. 1 root root 76 Oct  2 06:39 /usr/libexec/qdistro/runsc/runsc
+[vm-exec] guest identity pinned (pid 225478 start 364871)
+-rwxr-xr-x. 1 root root 76 Oct  2 06:52 /usr/libexec/qdistro/runsc/runsc
 CHECK stamp-intact: OK
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)

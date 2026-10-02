@@ -1,11 +1,11 @@
-### host 2026-10-02T06:38:50Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:51:28Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; probe_strace; expect_rc probe-exit 0 $PRC
 has result-pass $PO 'RESULT PASS: tier 3s prerequisites present'
 has executed-verified-inode $PO 'PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode'
 is strace-one-runsc-exec "$NEXEC" 1
 is exec-was-via-fd "$(runsc_execs /var/tmp/t3s-tr | grep -c 'execve("/proc/self/fd/')" 1; finish
 CMD
-[vm-exec] guest identity pinned (pid 188702 start 286991)
+[vm-exec] guest identity pinned (pid 222732 start 362725)
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)
 PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
@@ -19,7 +19,7 @@ PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
 PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
 PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
 PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
-PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:26220336)
+PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:9442329)
 PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
 PASS podman: 6.0.2 (>= 6)
 PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
@@ -28,7 +28,7 @@ INFO kvm: /dev/kvm present (not used: --platform=systrap)
 INFO selinux: Permissive
 RESULT PASS: tier 3s prerequisites present
 --- runsc-bundle / fd executions seen by strace -f -e trace=execve:
-188813 execve("/proc/self/fd/10", ["/proc/self/fd/10", "--version"], 0x560423062bc0 /* 1 var */) = 0
+222836 execve("/proc/self/fd/10", ["/proc/self/fd/10", "--version"], 0x563836c36bc0 /* 1 var */) = 0
 CHECK probe-exit: OK (rc=0)
 CHECK result-pass: OK
 CHECK executed-verified-inode: OK

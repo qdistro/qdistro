@@ -1,4 +1,4 @@
-### host 2026-10-02T06:38:57Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:51:33Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; is sidecar-still-644 "$(stat -c %a $SIDE/gvisor_sentry)" 644
 probe_strace; expect_rc probe-exit 1 $PRC
 has names-bundle-mode $PO 'f 644 root:root gvisor-bin/gvisor_sentry'
@@ -6,7 +6,7 @@ never_executed mode
 provision repair-exit 0; has repaired $VO 'PASS: installed runsc'
 is sidecar-755 "$(stat -c %a $SIDE/gvisor_sentry)" 755; probe_tail_pass repaired; finish
 CMD
-[vm-exec] guest identity pinned (pid 189536 start 287680)
+[vm-exec] guest identity pinned (pid 223525 start 363306)
 CHECK sidecar-still-644: OK (644)
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)

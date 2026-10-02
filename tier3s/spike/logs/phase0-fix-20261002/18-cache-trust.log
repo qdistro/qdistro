@@ -1,4 +1,4 @@
-### host 2026-10-02T06:39:36Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:52:12Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chmod 0700 $SIDE/gvisor_sentry
 rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
 pv() { # pv <name> <want rc> <args...>: real provision, output in $VO
@@ -32,7 +32,7 @@ is c-cached-sha512 "$(sha512sum < /var/cache/t3s-dl/20260928.0/gvisor.tar.zstd |
 rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
 is no-leftovers "$(leftovers)" 0; probe_tail_pass after; finish
 CMD
-[vm-exec] guest identity pinned (pid 194623 start 291568)
+[vm-exec] guest identity pinned (pid 228667 start 367190)
 ## (a) online, no tarball, cache under sticky /var/tmp (1777): refused before any download
 provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
 provision-runsc: a download is published only into a trusted cache dir: /var/tmp/t3s-cache/20260928.0
@@ -66,9 +66,9 @@ CHECK c-verified: OK
 CHECK c-cached: OK
 CHECK c-pass: OK
 total 126720
-drwxr-xr-x. 2 root root        29 Oct  2 06:40 .
-drwxr-xr-x. 3 root root        24 Oct  2 06:40 ..
--rw-r--r--. 1 root root 129758317 Oct  2 06:40 gvisor.tar.zstd
+drwxr-xr-x. 2 root root        29 Oct  2 06:52 .
+drwxr-xr-x. 3 root root        24 Oct  2 06:52 ..
+-rw-r--r--. 1 root root 129758317 Oct  2 06:52 gvisor.tar.zstd
 CHECK c-no-temporaries: OK (gvisor.tar.zstd)
 CHECK c-cached-mode-owner: OK (644 root:root)
 CHECK c-cached-sha512: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)

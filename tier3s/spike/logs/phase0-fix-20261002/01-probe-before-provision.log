@@ -1,9 +1,9 @@
-### host 2026-10-02T06:38:45Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:51:23Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; probe_strace; expect_rc probe-exit 1 $PRC
 has first-missing-is-runsc $PO 'RESULT FAIL: first missing prerequisite: runsc (not provisioned'
 never_executed unprovisioned; finish
 CMD
-[vm-exec] guest identity pinned (pid 188314 start 286509)
+[vm-exec] guest identity pinned (pid 222315 start 362246)
 PASS profile: dev (/etc/qdistro/profile)
 PASS kernel: >= 5.6 (7.2.8-1-default)
 PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)

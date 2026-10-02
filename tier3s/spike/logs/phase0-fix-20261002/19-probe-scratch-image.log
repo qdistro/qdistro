@@ -1,4 +1,4 @@
-### host 2026-10-02T06:39:56Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:52:33Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; rm -rf /var/tmp/t3s-hostile /etc/t3s-sentinel
 runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman rmi -f localhost/tier3s-probe:empty
 if runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image exists localhost/tier3s-probe:empty; then bad scratch-image-absent; else ok scratch-image-absent; fi
@@ -17,9 +17,9 @@ if runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DI
 runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image inspect --format '{{.Id}} layers={{len .RootFS.Layers}}' localhost/tier3s-probe:empty
 rm -rf /var/tmp/t3s-hostile /etc/t3s-sentinel; finish
 CMD
-[vm-exec] guest identity pinned (pid 195336 start 293575)
+[vm-exec] guest identity pinned (pid 229392 start 369305)
 Untagged: localhost/tier3s-probe:empty
-Deleted: 9bb1f9895386309aa5ef86bfa6cd99f3582833efba01a2f6c29aca3cc133dd47
+Deleted: 95382523122799f4bfd3d60b5d267dfae6c4ce9421364be3ba27950bccc661da
 CHECK scratch-image-absent: OK
 ## probe as root with a hostile TMPDIR (0777, not sticky) and the scratch image absent
 PASS profile: dev (/etc/qdistro/profile)
@@ -35,7 +35,7 @@ PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
 PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
 PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
 PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
-PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:9442333)
+PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:61866945)
 PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
 PASS podman: 6.0.2 (>= 6)
 PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
@@ -51,6 +51,6 @@ CHECK no-syscall-touches-tmpdir: OK (0)
 CHECK hostile-tmpdir-empty: OK (0)
 CHECK sentinel-unchanged: OK (600 root 9a37214679d4cdc0b4724e05883a60eb979d19dd3a394438f17ef85846fadcee0  -)
 CHECK scratch-image-imported: OK
-95382523122799f4bfd3d60b5d267dfae6c4ce9421364be3ba27950bccc661da layers=1
+c869e8c2409a08b34fb53a7a1758c5d8933242f8878830da86fda43a37baa380 layers=1
 ### checks failed: 0
 ### exit=0
