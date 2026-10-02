@@ -41,4 +41,13 @@ setup() {
     grep -qF 'FONT_UI_SCALE = 1.25' "$PROBE"
     grep -qF 'size=FONT_SIZE_TOKEN' "$PROBE"
     grep -qF 'generation=gen_fonts' "$PROBE"
+    grep -qF 'parsed.get("gen") != generation' "$PROBE"
+}
+
+@test "assert_chrome rejects stale generation" {
+    run env -u QDISTRO_PRESENTATION_FILE -u PYTHONPATH \
+        PYTHONSAFEPATH=1 python3 "$PROBE" --assert-chrome-self-test
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ok" ]
 }

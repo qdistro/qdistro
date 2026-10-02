@@ -536,6 +536,49 @@ def assert_chrome(
             )
 
 
+def assert_chrome_self_test() -> int:
+    """Negative control: stale generation must fail even when palette/size match."""
+    import tempfile
+
+    work = Path(tempfile.mkdtemp(prefix="p7-chrome-self-"))
+    try:
+        gen = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        stale = "00000000-0000-0000-0000-000000000000"
+        common = (
+            f"phase=fonts shared=1 window={COLOR_C} "
+            f"win0={COLOR_C} win1={COLOR_C} dlg={COLOR_C} "
+            f"uifamily={FONT_FAMILY_TOKEN} uisize={FONT_SIZE_TOKEN}"
+        )
+        good = work / "good.status"
+        bad = work / "stale.status"
+        atomic_write(good, f"{common} gen={gen}\n")
+        atomic_write(bad, f"{common} gen={stale}\n")
+        assert_chrome(
+            {"good": good},
+            window=COLOR_C,
+            family=FONT_FAMILY_TOKEN,
+            size=FONT_SIZE_TOKEN,
+            generation=gen,
+        )
+        try:
+            assert_chrome(
+                {"stale": bad},
+                window=COLOR_C,
+                family=FONT_FAMILY_TOKEN,
+                size=FONT_SIZE_TOKEN,
+                generation=gen,
+            )
+        except SystemExit:
+            print("ok")
+            return 0
+        print("FAIL: stale generation did not fail assert_chrome", file=sys.stderr)
+        return 1
+    finally:
+        import shutil
+
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def pythonpath(repo: Path) -> str:
     parts = [
         str(repo / "sdk" / "presentation"),
@@ -777,6 +820,11 @@ def main(argv: list[str]) -> int:
             expect_window,
             with_windows,
         )
+    if argv[:1] == ["--assert-chrome-self-test"]:
+        if len(argv) != 1:
+            print("FAIL: unexpected argv", file=sys.stderr)
+            return 2
+        return assert_chrome_self_test()
     if argv:
         print("FAIL: unexpected argv", file=sys.stderr)
         return 2
