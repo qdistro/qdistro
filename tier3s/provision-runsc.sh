@@ -7,7 +7,10 @@
 #
 # Source: ${cache_dir}/${release}/gvisor.tar.zstd (cache_dir defaults to
 # ${QDISTRO_CACHE_DIR:-/var/cache/qdistro}/runsc). Without --offline a missing
-# tarball is downloaded from the pinned base_url; with --offline it is fatal.
+# tarball is downloaded from the pinned base_url, and only into a cache dir
+# whose existing ancestors are real, root-owned, not group/other-writable dirs
+# (an untrusted cache can still be READ, through a verified private copy);
+# with --offline a missing tarball is fatal.
 # Fails closed: any tarball/file sha512 mismatch, unexpected or missing file,
 # or a `runsc --version` that differs from the pin aborts before (or rolls
 # back) the install. There is no unpinned fallback.
@@ -55,11 +58,16 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+has_dot_part() { case "/$1/" in */./*|*/../*) return 0 ;; *) return 1 ;; esac; }
+case "$CACHE_DIR" in /*) ;; *) CACHE_DIR="$PWD/$CACHE_DIR" ;; esac
+while [ "$CACHE_DIR" != "/" ] && [ "${CACHE_DIR%/}" != "$CACHE_DIR" ]; do CACHE_DIR="${CACHE_DIR%/}"; done
+! has_dot_part "$CACHE_DIR" || die "cache dir must not contain . or .. components: $CACHE_DIR"
 if [ -n "$PREFIX" ]; then
     [ "$(id -u)" -ne 0 ] || die "QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root"
     case "$PREFIX" in /*) ;; *) die "QDISTRO_RUNSC_PREFIX must be absolute" ;; esac
     while [ "$PREFIX" != "/" ] && [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX="${PREFIX%/}"; done
     [ "$PREFIX" != "/" ] || die "QDISTRO_RUNSC_PREFIX=/ is not a test prefix"
+    ! has_dot_part "$PREFIX" || die "QDISTRO_RUNSC_PREFIX must not contain . or .. components"
     log "TEST MODE: installing under prefix $PREFIX (not a real install)"
 else
     [ "$(id -u)" -eq 0 ] || die "must run as root"
@@ -102,16 +110,18 @@ STAMP="$PREFIX/etc/qdistro/runsc-release"
 sha() { sha512sum "$1" | cut -d' ' -f1; }
 
 # Owner is root:root for a real install; the TEST prefix uses the caller.
-OWN="root:root"; OWN_UID=0; TRUST_STOP=/
-[ -z "$PREFIX" ] || { OWN="$(id -un):$(id -gn)"; OWN_UID="$(id -u)"; TRUST_STOP="$PREFIX"; }
+# The cache dir is walked to / for a real install; under the TEST prefix the
+# test owns everything from its --cache-dir down.
+OWN="root:root"; OWN_UID=0; TRUST_STOP=/; CACHE_STOP=/
+[ -z "$PREFIX" ] || { OWN="$(id -un):$(id -gn)"; OWN_UID="$(id -u)"; TRUST_STOP="$PREFIX"; CACHE_STOP="$CACHE_DIR"; }
 
 # --- trusted parents --------------------------------------------------------
 # Every EXISTING component from $1 up to / (to the TEST prefix) must be a real
 # directory owned by OWN_UID and not group/other-writable, so nobody else can
 # swap the staged tree, the live paths or the lock between check and use.
 # Missing components are created later by install -d (0755, root).
-trusted_chain() {
-    local d="$1" st owner mode
+trusted_chain() {   # trusted_chain <dir> [<stop>, default TRUST_STOP]
+    local d="$1" stop="${2:-$TRUST_STOP}" st owner mode
     while :; do
         if [ -e "$d" ] || [ -L "$d" ]; then
             [ ! -L "$d" ] || die "untrusted path: $d is a symlink"
@@ -120,8 +130,8 @@ trusted_chain() {
             [ "$owner" = "$OWN_UID" ] || die "untrusted path: $d owned by uid $owner, want $OWN_UID"
             (( (8#$mode & 8#022) == 0 )) || die "untrusted path: $d is group/other-writable (mode $mode)"
         fi
-        [ "$d" != "$TRUST_STOP" ] || return 0
-        [ "$d" != / ] || die "untrusted path: walked past / without meeting $TRUST_STOP"
+        [ "$d" != "$stop" ] || return 0
+        [ "$d" != / ] && [ "$d" != . ] || die "untrusted path: walked past / without meeting $stop"
         d="$(dirname -- "$d")"
     done
 }
@@ -211,12 +221,18 @@ if [ -f "$TARBALL" ]; then
 else
     [ "$OFFLINE" -eq 0 ] || die "offline and $TARBALL is not in the cache"
     command -v curl >/dev/null || die "curl missing and tarball not cached"
+    # Root writes into the cache only through a trusted chain: check, create,
+    # re-check (no one else can then substitute $PUB or a parent between the
+    # mktemp, the copy, the chmod and the rename).
+    log "a download is published only into a trusted cache dir: $SRC_DIR"
+    trusted_chain "$SRC_DIR" "$CACHE_STOP"
     log "downloading ${P[base_url]}/${P[tarball]}"
     curl -fsS --proto =https -o "$PRIV" "${P[base_url]}/${P[tarball]}" || die "download failed"
     got="$(sha "$PRIV")"
     [ "$got" = "${P[tarball_sha512]}" ] || die "tarball sha512 mismatch: got $got (download not cached)"
     log "tarball sha512 OK (download)"
     install -d -m 0755 "$SRC_DIR"
+    trusted_chain "$SRC_DIR" "$CACHE_STOP"
     PUB="$(mktemp "$SRC_DIR/.${P[tarball]}.XXXXXX")"
     if cp -- "$PRIV" "$PUB" && chmod 0644 "$PUB" && mv -fT -- "$PUB" "$TARBALL"; then
         log "cached $TARBALL"

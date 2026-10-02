@@ -457,3 +457,73 @@ def test_download_is_verified_before_it_is_published(tmp_path):
     assert "cached " in r.stdout
     assert [p.name for p in cache.iterdir()] == ["gvisor.tar.zstd"]   # no temporaries
     assert sha(cache / "gvisor.tar.zstd") == sha(src)
+
+
+# --- cache publication only through a trusted chain (astra fix r1 P2) ------
+
+def _logging_curl(tmp, src):
+    """Fake curl that records each invocation, then serves src."""
+    d = tmp / "logcurl"
+    d.mkdir()
+    log = tmp / "curl.calls"
+    c = d / "curl"
+    c.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n'
+                 'while [ $# -gt 0 ]; do [ "$1" = -o ] && { shift; out=$1; }; shift; done\n'
+                 f'cp "{src}" "$out"\n')
+    c.chmod(0o755)
+    return d, log
+
+
+def _online_without_cached_tarball(tmp):
+    b, tar = make_bundle(tmp)
+    pin = write_pin(tmp, b, tar)
+    src = tmp / "served.tar.zstd"
+    tar.rename(src)
+    fc, calls = _logging_curl(tmp, src)
+    return pin, fc, calls
+
+
+def test_download_refused_into_writable_cache_dir(tmp_path):
+    pin, fc, calls = _online_without_cached_tarball(tmp_path)
+    cache = tmp_path / "cache"
+    cache.chmod(0o777)
+    r, root = run(tmp_path, pin, offline=False, PATH=f"{fc}:{os.environ['PATH']}")
+    assert r.returncode == 1
+    assert f"untrusted path: {cache} is group/other-writable (mode 777)" in r.stderr
+    assert not calls.exists(), "downloaded although the cache dir is untrusted"
+    assert list((cache / "29990101.0").iterdir()) == []
+    assert not (root / "usr/libexec/qdistro/runsc").exists()
+
+
+def test_download_refused_through_symlinked_cache_dir(tmp_path):
+    """cache/<release> is a symlink into a dir someone else controls, next to
+    an unrelated sentinel file: nothing is downloaded or written there and the
+    sentinel's content and mode are unchanged."""
+    pin, fc, calls = _online_without_cached_tarball(tmp_path)
+    rel = tmp_path / "cache/29990101.0"
+    rel.rmdir()
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("precious\n")
+    sentinel.chmod(0o600)
+    (attacker / "gvisor.tar.zstd.lnk").symlink_to(sentinel)
+    rel.symlink_to(attacker)
+    r, root = run(tmp_path, pin, offline=False, PATH=f"{fc}:{os.environ['PATH']}")
+    assert r.returncode == 1
+    assert f"untrusted path: {rel} is a symlink" in r.stderr
+    assert not calls.exists()
+    assert sorted(p.name for p in attacker.iterdir()) == ["gvisor.tar.zstd.lnk"]
+    assert sentinel.read_text() == "precious\n" and sentinel.stat().st_mode & 0o777 == 0o600
+    assert not (root / "usr/libexec/qdistro/runsc").exists()
+
+
+def test_existing_tarball_in_untrusted_cache_is_still_read_safely(tmp_path):
+    """Reading stays supported: the tarball is copied privately and verified."""
+    b, tar = make_bundle(tmp_path)
+    pin = write_pin(tmp_path, b, tar)
+    (tmp_path / "cache").chmod(0o777)
+    r, root = run(tmp_path, pin)
+    assert r.returncode == 0, r.stderr
+    assert "verified private copy" in r.stdout
+    assert sha(root / "usr/libexec/qdistro/runsc/runsc") == sha(b / "runsc")
