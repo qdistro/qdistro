@@ -217,6 +217,39 @@ chmod 1777 /var/tmp; is var-tmp-restored \"\$(stat -c %a /var/tmp)\" 1777
 is live-untouched \"\$(stat -c %a \$SIDE/gvisor_sentry)\" 700
 provision repair-exit 0; rmdir /var/tmp/t3s-evil; is no-leftovers \"\$(leftovers)\" 0; probe_tail_pass after; finish"
 
+step 18-cache-trust "$L; chmod 0700 \$SIDE/gvisor_sentry
+rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
+pv() { # pv <name> <want rc> <args...>: real provision, output in \$VO
+  VO=/var/tmp/t3s-prov.out; tier3s/provision-runsc.sh \"\${@:3}\" > \$VO 2>&1; local rc=\$?; cat \$VO; expect_rc \$1 \$2 \$rc; }
+echo '## (a) online, no tarball, cache under sticky /var/tmp (1777): refused before any download'
+mkdir -m 0755 /var/tmp/t3s-cache
+pv a-refused 1 --cache-dir /var/tmp/t3s-cache
+has a-names-var-tmp \$VO 'untrusted path: /var/tmp is group/other-writable (mode 1777)'
+hasnt a-no-download \$VO 'provision-runsc: downloading'
+is a-cache-empty \"\$(find /var/tmp/t3s-cache -mindepth 1 | wc -l)\" 0
+is a-live-untouched \"\$(stat -c %a \$SIDE/gvisor_sentry)\" 700
+echo '## (b) cache release dir is a symlink into an attacker dir that links a root 0600 sentinel'
+printf 'precious\\n' > /etc/t3s-sentinel; chmod 0600 /etc/t3s-sentinel; s0=\$(stat -c '%a %U %s' /etc/t3s-sentinel)\$(sha256sum < /etc/t3s-sentinel)
+mkdir -m 0777 /var/tmp/t3s-attacker; ln -s /etc/t3s-sentinel /var/tmp/t3s-attacker/gvisor.tar.zstd.x
+mkdir -m 0755 /var/cache/t3s-c; ln -s /var/tmp/t3s-attacker /var/cache/t3s-c/$rel
+pv b-refused 1 --cache-dir /var/cache/t3s-c
+has b-names-symlink \$VO 'untrusted path: /var/cache/t3s-c/$rel is a symlink'
+hasnt b-no-download \$VO 'provision-runsc: downloading'
+is b-attacker-dir-unchanged \"\$(ls -A /var/tmp/t3s-attacker)\" gvisor.tar.zstd.x
+is b-sentinel-unchanged \"\$(stat -c '%a %U %s' /etc/t3s-sentinel)\$(sha256sum < /etc/t3s-sentinel)\" \"\$s0\"
+echo '## (c) positive control: fresh root-owned cache, online: real download from the pinned URL, verified, published, installed'
+pv c-installed 0 --cache-dir /var/cache/t3s-dl
+has c-downloaded \$VO 'provision-runsc: downloading https://storage.googleapis.com/gvisor/releases/release/$rel/x86_64/gvisor.tar.zstd'
+has c-verified \$VO 'tarball sha512 OK (download)'
+has c-cached \$VO 'cached /var/cache/t3s-dl/$rel/gvisor.tar.zstd'
+has c-pass \$VO 'PASS: installed runsc $rel'
+ls -la /var/cache/t3s-dl/$rel
+is c-no-temporaries \"\$(ls -A /var/cache/t3s-dl/$rel)\" gvisor.tar.zstd
+is c-cached-mode-owner \"\$(stat -c '%a %U:%G' /var/cache/t3s-dl/$rel/gvisor.tar.zstd)\" '644 root:root'
+is c-cached-sha512 \"\$(sha512sum < /var/cache/t3s-dl/$rel/gvisor.tar.zstd | cut -d' ' -f1)\" \"\$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)\"
+rm -rf /var/tmp/t3s-cache /var/tmp/t3s-attacker /var/cache/t3s-c /var/cache/t3s-dl /etc/t3s-sentinel
+is no-leftovers \"\$(leftovers)\" 0; probe_tail_pass after; finish"
+
 step 08-probe-pass-after-negatives "$L; provision idempotent-exit 0; has nothing-to-do \$VO 'already installed and matching pin $rel; nothing to do'
 probe_strace; expect_rc probe-exit 0 \$PRC; has result-pass \$PO 'RESULT PASS: tier 3s prerequisites present'
 is strace-one-runsc-exec \"\$NEXEC\" 1; is no-leftovers \"\$(leftovers)\" 0; finish"
