@@ -950,6 +950,7 @@ class _Request:
 # A Python-only capability: D-Bus always supplies a string sender, so no
 # external connection can impersonate a workflow's in-process call.
 _WORKFLOW_SENDER = object()
+_WORKFLOW_DISPATCH_TIMEOUT_S = 30
 
 
 class _WorkflowBrokerProxy:
@@ -962,6 +963,39 @@ class _WorkflowBrokerProxy:
 
     def __init__(self, broker):
         self._broker = broker
+        # Constructed by Broker._setup_workflow_engine on the broker thread,
+        # before its GLib loop starts. Workflow steps execute in a pool; the
+        # broker's state, rules reload and sqlite connections are mainloop-only.
+        self._mainloop_thread = threading.get_ident()
+
+    def _invoke(self, fn, args):
+        if threading.get_ident() == self._mainloop_thread:
+            return fn(*args, sender=_WORKFLOW_SENDER)
+        future = concurrent.futures.Future()
+
+        def dispatch():
+            # A timed-out queued operation must not run later. Once running,
+            # it cannot be undone, just like an ordinary timed-out RPC.
+            if not future.set_running_or_notify_cancel():
+                return False
+            try:
+                future.set_result(fn(*args, sender=_WORKFLOW_SENDER))
+            except Exception as exc:  # noqa: BLE001
+                future.set_exception(exc)
+            return False
+
+        GLib.idle_add(dispatch)
+        try:
+            return future.result(timeout=_WORKFLOW_DISPATCH_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            if future.done():
+                # Preserve a TimeoutError raised by the method itself (and
+                # an operation that completed at the timeout boundary).
+                return future.result()
+            canceled = future.cancel()
+            outcome = ("queued operation canceled" if canceled else
+                       "operation already running; outcome unconfirmed")
+            raise TimeoutError(f"workflow broker dispatch timed out: {outcome}") from None
 
     def __getattr__(self, name):
         if name in {"hooks", "WorkflowRunPending"}:
@@ -970,7 +1004,7 @@ class _WorkflowBrokerProxy:
         if name not in _BROKER_METHOD_WHITELIST:
             raise AttributeError(name)
         fn = getattr(self._broker, name)
-        return lambda *args: fn(*args, sender=_WORKFLOW_SENDER)
+        return lambda *args: self._invoke(fn, args)
 
 
 class Broker(dbus.service.Object):

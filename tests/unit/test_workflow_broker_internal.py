@@ -1,5 +1,6 @@
 """Exercise workflow call_broker against the real broker authorization boundary."""
 import threading
+import queue
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,3 +99,90 @@ def test_nonroot_internal_engine_does_not_acquire_root_privileges(tmp_path, monk
     result = call(w.WorkflowEngine(broker_proxy=b._WorkflowBrokerProxy(br)), 'ListRules')
     assert not result.success
     assert 'not permitted' in result.error
+
+
+@pytest.mark.parametrize('failure', [None, RuntimeError, TimeoutError])
+def test_worker_step_dispatches_to_broker_thread_and_preserves_errors(tmp_path, monkeypatch, failure):
+    br = broker(tmp_path)
+    proxy = b._WorkflowBrokerProxy(br)
+    engine = w.WorkflowEngine(broker_proxy=proxy)
+    monkeypatch.setattr(b.os, 'getuid', lambda: 0)
+    owner = threading.get_ident()
+    pending = queue.Queue()
+    calls = []
+    original = br.ListRules
+    def list_rules(*args, **kwargs):
+        calls.append(threading.get_ident())
+        if failure:
+            raise failure('maintenance refused')
+        return original(*args, **kwargs)
+    br.ListRules = list_rules
+    monkeypatch.setattr(b.GLib, 'idle_add', lambda callback: pending.put(callback))
+    results = []
+    thread = threading.Thread(target=lambda: results.append(call(engine, 'ListRules')))
+    thread.start()
+    try:
+        callback = pending.get(timeout=2)
+        assert calls == []  # worker cannot touch broker state before dispatch
+        assert callback() is False  # GLib removes this one-shot callback
+    finally:
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert calls == [owner]
+    assert len(results) == 1
+    assert results[0].success is (failure is None)
+    if failure:
+        assert 'maintenance refused' in results[0].error
+
+
+def test_dispatch_timeout_cancels_queued_maintenance_without_late_effect(tmp_path, monkeypatch):
+    br = broker(tmp_path)
+    proxy = b._WorkflowBrokerProxy(br)
+    pending = queue.Queue()
+    calls = []
+    br.RunCacheGc = lambda **kwargs: calls.append('gc')
+    monkeypatch.setattr(b.GLib, 'idle_add', lambda callback: pending.put(callback))
+    monkeypatch.setattr(b, '_WORKFLOW_DISPATCH_TIMEOUT_S', 0.02)
+    results = []
+    engine = w.WorkflowEngine(broker_proxy=proxy)
+    thread = threading.Thread(target=lambda: results.append(call(engine, 'RunCacheGc')))
+    thread.start()
+    callback = pending.get(timeout=2)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert len(results) == 1 and not results[0].success
+    assert 'queued operation canceled' in results[0].error
+    assert callback() is False
+    assert calls == []
+
+
+def test_running_dispatch_timeout_reports_unconfirmed_outcome(tmp_path, monkeypatch):
+    br = broker(tmp_path)
+    proxy = b._WorkflowBrokerProxy(br)
+    pending = queue.Queue()
+    finished = threading.Event()
+    calls = []
+    def maintenance(**kwargs):
+        # The worker's bounded wait expires while the broker action is live.
+        assert finished.wait(timeout=2)
+        calls.append('gc')
+        return 1
+    br.RunCacheGc = maintenance
+    monkeypatch.setattr(b.GLib, 'idle_add', lambda callback: pending.put(callback))
+    monkeypatch.setattr(b, '_WORKFLOW_DISPATCH_TIMEOUT_S', 0.02)
+    results = []
+    engine = w.WorkflowEngine(broker_proxy=proxy)
+    def step():
+        try:
+            results.append(call(engine, 'RunCacheGc'))
+        finally:
+            finished.set()
+    thread = threading.Thread(target=step)
+    thread.start()
+    callback = pending.get(timeout=2)
+    assert callback() is False
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert calls == ['gc']
+    assert len(results) == 1 and not results[0].success
+    assert 'operation already running; outcome unconfirmed' in results[0].error
