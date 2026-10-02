@@ -194,6 +194,11 @@ class PreferencesDialog(QDialog):
         self.combo_ui_font.setEnabled(not checked)
         self.spin_ui_font_size.setEnabled(not checked)
 
+    def apply_presentation_update(self) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
     def accept(self) -> None:
         self._apply()
         super().accept()
