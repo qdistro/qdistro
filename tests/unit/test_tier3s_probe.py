@@ -481,3 +481,23 @@ def test_state_root_missing_or_loose_fails(tmp_path, damage):
     assert r.returncode == 1, r.stdout
     assert "FAIL state_root:" in r.stdout
     assert "systemd-tmpfiles --create qdistro-tier3s.conf" in r.stdout
+
+
+def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):
+    """sol r5 P3-4: as_user's `timeout 5 getent … | cut` dropped timeout's
+    status — a provider that prints a complete passwd line and then wedges
+    is killed at the bound, and what it printed is not a result: runuser
+    must never run."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "nssbin"; b.mkdir()
+    marker = tmp_path / "runuser-ran"
+    (b / "getent").write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{other.pw_name}:x:{other.pw_uid}:{other.pw_gid}"
+        f"::{other.pw_dir or '/nonexistent'}:{other.pw_shell or '/sbin/nologin'}'\nsleep 60\n")
+    (b / "runuser").write_text(f"#!/bin/sh\necho runuser >> '{marker}'\nexit 0\n")
+    for f in ("getent", "runuser"):
+        (b / f).chmod(0o755)
+    r = run(inst.root, user=other.pw_name, pin=inst.pin, path_prepend=f"{b}:{inst.bin}")
+    assert "FAIL nss:" in r.stdout, r.stdout
+    assert not marker.exists(), "a killed NSS lookup still reached runuser"

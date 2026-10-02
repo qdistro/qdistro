@@ -15,6 +15,11 @@ code: the same guard, new text. R36-R48, A27-A29 and U5 are the astra+fable
 A r2 fixes; R1, R2, R6-R8, R11, R18, R20, R23, R24 and R26 were re-targeted at
 the r2 code (calls in this shell, results in variables). R49-R54 are the
 astra+fable A r3 fixes; S8, R24 and R38 were re-targeted at the r3 code.
+R55-R61 are the sol r5 fixes (the verdict and every prop/inspect answer are
+the call's complete output file; a killed NSS lookup's printed prefix is no
+result); R49, R50 and A10 were re-targeted at the r5 verdict code (the old
+A10 swapped the now-dead `1)`/`*)` case arms; the verdict can no longer take
+a value other than 0 or 1).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -228,9 +233,14 @@ MUTATIONS = [
      'in_scope "$p" "$rel" || {', "true || {",
      [f"{TS}::test_sentry_outside_the_scope_tears_down"]),
     ("A10 failed podman query read as no container", CLEAN,
-     '        1)  ;;\n        *)  say "$tok: podman query failed',
-     '        *)  ;;\n        999)  say "$tok: podman query failed',
-     [f"{TS}::test_cleanup_failed_podman_query_is_not_no_container"]),
+     '''    if printf 'PMRC=0\\n' | cmp -s -- - "$OUTF"; then PM_RC=0
+    elif printf 'PMRC=1\\n' | cmp -s -- - "$OUTF"; then PM_RC=1
+    else return 1; fi''',
+     '''    if printf 'PMRC=0\\n' | cmp -s -- - "$OUTF"; then PM_RC=0
+    elif printf 'PMRC=1\\n' | cmp -s -- - "$OUTF"; then PM_RC=1
+    else PM_RC=1; fi''',
+     [f"{TS}::test_cleanup_failed_podman_query_is_not_no_container",
+      f"{TS}::test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query"]),
     ("A11 cleanup ignores the state root", CLEAN,
      '    if [ -L "$root" ] || [ ! -d "$root" ] || [ "$(stat -c \'%u %a\' -- "$root")" != "$admin 700" ]; then',
      "    if false; then",
@@ -643,8 +653,9 @@ MUTATIONS = [
     PM_RC=""
     as_admin "$PODMAN_TMO" "$1" sh -c 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"' sh "$2" \\
         || return 1
-    [[ "$OUT" =~ ^PMRC=[0-9]+$ ]] || return 1
-    PM_RC="${OUT#PMRC=}"
+    if printf 'PMRC=0\\n' | cmp -s -- - "$OUTF"; then PM_RC=0
+    elif printf 'PMRC=1\\n' | cmp -s -- - "$OUTF"; then PM_RC=1
+    else return 1; fi
     return 0
 }
 ''',
@@ -660,11 +671,13 @@ MUTATIONS = [
       f"{TS}::test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query",
       f"{TS}::test_reap_stale_labelled_recheck_with_a_failed_chain_preserves"]),
     ("R50 the verdict line need not be the call's whole output (A r3 P1)", CLEAN,
-     '''    [[ "$OUT" =~ ^PMRC=[0-9]+$ ]] || return 1
-    PM_RC="${OUT#PMRC=}"''',
-     '''    PM_RC="$(printf '%s' "$OUT" | grep -o 'PMRC=[0-9]*' | head -1 | cut -d= -f2)"
-    [ -n "$PM_RC" ] || return 1''',
-     [f"{TS}::test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query"]),
+     '''    if printf 'PMRC=0\\n' | cmp -s -- - "$OUTF"; then PM_RC=0
+    elif printf 'PMRC=1\\n' | cmp -s -- - "$OUTF"; then PM_RC=1
+    else return 1; fi''',
+     '''    PM_RC="$(grep -ao 'PMRC=[0-9]*' "$OUTF" | head -1 | cut -d= -f2)"
+    case "$PM_RC" in 0|1) ;; *) return 1 ;; esac''',
+     [f"{TS}::test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query",
+      f"{TS}::test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query"]),
     ("R51 the NSS lookup under the token lock is unbounded again (fable r3 P3-2)", CLEAN,
      'pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)"',
      'pw="$(getent passwd "$uid" 2>/dev/null)"',
@@ -688,6 +701,41 @@ MUTATIONS = [
     ("R54 the .call-* sweep checks /proc instead of $PROC (fable r3 P3-5)", CLEAN,
      '[ ! -e "$PROC/$p" ]', '[ ! -e "/proc/$p" ]',
      [f"{TS}::test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup"]),
+    # --- sol r5
+    ("R55 the verdict is the NUL-truncated prefix again (sol r5 P1)", CLEAN,
+     '''    if printf 'PMRC=0\\n' | cmp -s -- - "$OUTF"; then PM_RC=0
+    elif printf 'PMRC=1\\n' | cmp -s -- - "$OUTF"; then PM_RC=1
+    else return 1; fi''',
+     '''    [[ "$OUT" =~ ^PMRC=[01]$ ]] || return 1
+    PM_RC="${OUT#PMRC=}"''',
+     [f"{TS}::test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query"]),
+    ("R56 a prop answer need not be the call's whole output (sol r5 P1)", CLEAN,
+     'sd show -p "$2" --value "$1" 2>/dev/null && out_line',
+     'sd show -p "$2" --value "$1" 2>/dev/null',
+     [f"{TS}::test_cleanup_a_nul_poisoned_unit_state_is_unknown"]),
+    ("R57 the inspect answer need not be the call's whole output (sol r5 P1)", CLEAN,
+     '\' "$ctr" \\\n                    && out_line; then',
+     '\' "$ctr"; then',
+     [f"{TS}::test_cleanup_an_inspect_answer_with_extra_bytes_is_a_failed_query"]),
+    ("R58 a killed NSS lookup's printed line is a result again (sol r5 P3-4)", CLEAN,
+     '''        pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)" \\
+            || { say "no user for uid $uid (the NSS lookup failed or timed out)"; return 125; }''',
+     '        pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)"',
+     [f"{TS}::test_a_complete_nss_line_printed_before_a_stall_is_not_a_lookup"]),
+    ("R59 the same in the spawn (sol r5 P3-4)", SPAWN,
+     '''ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \\
+    || refuse "no user/home for uid $ADMIN_UID (the NSS lookup failed or timed out)"''',
+     'ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")"',
+     [f"{TS}::test_spawn_a_stalled_nss_answer_is_not_a_lookup"]),
+    ("R60 the same in the scope helper (sol r5 P3-4)", HELP,
+     '''ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \\
+    || die "no passwd entry for uid $ADMIN_UID (the NSS lookup failed or timed out)"''',
+     'ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")"',
+     [f"{TS}::test_helper_a_stalled_nss_answer_is_not_a_lookup"]),
+    ("R61 the same in the probe (sol r5 P3-4)", PROBE,
+     '    [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \\\n',
+     '    [ -n "$AS_UID" ] && { pw="$(timeout 5 getent passwd "$USER_NAME")" || :; } \\\n',
+     [f"{TP}::test_a_stalled_nss_answer_is_not_a_lookup"]),
 ]
 
 

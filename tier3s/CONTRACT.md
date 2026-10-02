@@ -340,12 +340,20 @@ launch down and fails.
     podman ran (astra+fable A r3 P1): the
     `timeout`→`systemd-run`→`runuser` chain's own status can be a bare 1
     without podman ever running, so it is never read as "absent". The
-    verdict must be the call's whole output; the same discipline covers
-    the initial check, the vanished re-queries and both post-removal
-    checks. The admin's NSS lookup (`getent`, run under a deadline-capped
-    `timeout`, resolved once per run) is the one call outside the
-    supervisor; it is still bounded, so a wedged NSS cannot hold the
-    token lock (fable A r3 P3-2);
+    verdict must be the call's **complete output file**, compared byte
+    for byte: exactly `PMRC=0\n` or `PMRC=1\n` — a NUL byte, extra bytes
+    or any other content is a failed query (a captured *string* stops at
+    the first NUL, so only the file proves nothing followed; sol r5 P1).
+    The same discipline covers the initial check, the vanished re-queries
+    and both post-removal checks, and every other one-line answer a call
+    returns (`ActiveState`, `BindsTo`, `ControlGroup`, the inspect line):
+    each counts only when it is the call's complete output. The admin's
+    NSS lookup (`getent`, run under a deadline-capped `timeout`, resolved
+    once per run) is the one call outside the supervisor; it is still
+    bounded, so a wedged NSS cannot hold the token lock, and the lookup's
+    own exit status gates acceptance — a provider that prints a
+    complete-looking line and then stalls is killed at the bound and is a
+    failed lookup, not a result (fable A r3 P3-2, sol r5 P3-4);
   - lock fds are closed for every call; `systemctl` runs with
     `--no-ask-password`.
   The guarantee, exactly: every process of an admin call is SIGKILLed by
@@ -365,10 +373,11 @@ launch down and fails.
   inside it every call, lock wait and wait loop is capped by the time left.
   Waits are by the clock, not by a query count (the 20 s wait for systemd's
   BindsTo stop of an orphan scope, the scope-emptying waits). The clock is
-  `EPOCHREALTIME` — realtime, not monotonic: a clock step shifts when a
-  wait ends but never extends one past its deadline plus the slack already
-  named. So a batch
-  ends at its deadline plus at most the kill grace of the call in flight
+  `EPOCHREALTIME` — realtime, not monotonic (sol r5 P3-2): a forward clock
+  step ends a wait or a batch early; a **backward step extends it by the
+  amount stepped** — a one-hour backward step can hold a nominal 90 s reap
+  for about an hour. So a batch ends at its (wall-clock) deadline plus at
+  most the kill grace of the call in flight
   (`timeout -k 5`, then up to 5 s for its scope to empty) and local file
   work. What it did not reach, or reached too late, is preserved, and the
   run exits non-zero. One token (`<token>`, the spawn's EXIT trap) has no
@@ -414,7 +423,9 @@ record (and the scope, if it is still alive)**:
    that another unit owns.
 4. Query `podman container exists <container>` as the recorded admin. 0 is
    present, 1 is absent, anything else is "**podman query failed**" (error,
-   preserve). It never conflates a failed query with "no container" (unlike
+   preserve) — and only when the call's complete stdout file is exactly the
+   `PMRC=<rc>` line (§4; a NUL or any extra byte is a failed query). It
+   never conflates a failed query with "no container" (unlike
    tier 2's `spawn-tier2.sh` reaper, which suppresses errors). If present,
    `podman container inspect` gives its ID and its `qdistro_tier3s_token`
    label, which must equal the token.
@@ -454,8 +465,9 @@ Every reaper decision reads a unit's state as **live**, **dead** (systemd
 positively answers `inactive` or `failed`) or **unknown** (the query failed or
 answered anything else). The state comes from `systemctl show -p
 ActiveState --value`, and only from a call that **completed with status 0**
-(astra A r2 #1): an answer printed by a query that then timed out, was
-killed or failed is unknown, whatever it said. It acts only on dead; unknown preserves the record,
+whose complete output is the one state line (astra A r2 #1, sol r5 P1): an
+answer printed by a query that then timed out, was killed or failed — or a
+NUL-truncated prefix of a larger output — is unknown, whatever it said. It acts only on dead; unknown preserves the record,
 container, scope and per-launch dir and makes `--reap-stale` exit non-zero
 (sol A-iii r2). A live orphan scope (no record) is stopped only when its
 `BindsTo=` positively names a tier3s launch unit that is dead, checked before

@@ -296,14 +296,25 @@ else
 fi
 
 # --- podman as the launching user ------------------------------------------
+# A foreign user's passwd entry is resolved once here, bounded (fable A r3
+# P3-2) and status-checked (sol r5 P3-4): a wedged lookup — even one that
+# printed a complete line first — fails the probe instead of hanging the
+# spawn that called it, and its printed prefix is not a result.
+AS_UID=""; AS_HOME=""
+if [ "$(id -un)" != "$USER_NAME" ]; then
+    AS_UID="$(id -u "$USER_NAME" 2>/dev/null)"; puid=""; pw=""
+    [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \
+        && puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
+        && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
+    [ -n "$AS_UID" ] && [ "$puid" = "$AS_UID" ] && [ "${AS_HOME#/}" != "$AS_HOME" ] \
+        && [[ "$pw" != *$'\n'* ]] \
+        || { fail nss "no passwd entry for $USER_NAME within the 5 s bound"; AS_UID=""; AS_HOME=""; }
+fi
 as_user() {
-    if [ "$(id -un)" = "$USER_NAME" ]; then "$@"
+    if [ -z "$AS_UID" ]; then [ "$(id -un)" = "$USER_NAME" ] || return 1; "$@"
     else
-        local uid; uid="$(id -u "$USER_NAME")"
-        # NSS bounded (fable A r3 P3-2): a wedged getent must fail the probe,
-        # not hang the spawn that called it
-        runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$(timeout 5 getent passwd "$USER_NAME" | cut -d: -f6)" \
-            USER="$USER_NAME" XDG_RUNTIME_DIR="/run/user/$uid" "$@"
+        runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$AS_HOME" \
+            USER="$USER_NAME" XDG_RUNTIME_DIR="/run/user/$AS_UID" "$@"
     fi
 }
 pv="$(as_user podman version --format '{{.Client.Version}}' 2>/dev/null)"

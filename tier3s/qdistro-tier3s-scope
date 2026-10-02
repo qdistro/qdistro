@@ -41,11 +41,15 @@ if [ -z "$T" ]; then
     [ "$ADMIN_UID" = 1000 ] || die "qdistro's admin uid is 1000, got $ADMIN_UID"
 fi
 # NSS is resolved once, under a bound (fable A r3 P3-2): a wedged lookup dies
-# the launch rather than wedging the scope's first process.
-ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")"
+# the launch rather than wedging the scope's first process. Its status counts
+# (sol r5 P3-4): a line printed before the stall is not a result.
+ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \
+    || die "no passwd entry for uid $ADMIN_UID (the NSS lookup failed or timed out)"
 ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
+ADMIN_PUID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f3)"
 ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
-[ -n "$ADMIN_USER" ] && [ -n "$ADMIN_HOME" ] || die "no passwd entry for uid $ADMIN_UID"
+[ -n "$ADMIN_USER" ] && [ "$ADMIN_PUID" = "$ADMIN_UID" ] && [[ "$ADMIN_HOME" == /* ]] \
+    && [[ "$ADMIN_PW" != *$'\n'* ]] || die "no passwd entry for uid $ADMIN_UID"
 
 # (1) exactly our scope, and we are its only process
 mapfile -t lines < "$SELF_CGROUP"

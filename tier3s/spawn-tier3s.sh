@@ -99,11 +99,16 @@ ADMIN_UID="${TIER3S_ADMIN_UID:-1000}"
 [[ "$ADMIN_UID" =~ ^[1-9][0-9]*$ ]] || refuse "TIER3S_ADMIN_UID '$ADMIN_UID' is not a non-root uid"
 [ -n "$T" ] || [ "$ADMIN_UID" = 1000 ] || refuse "qdistro's admin uid is 1000, got $ADMIN_UID"
 # The NSS lookup is resolved once, under a bound (fable A r3 P3-2): a wedged
-# NSS must refuse the launch, never hang it.
-ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")"
+# NSS must refuse the launch, never hang it. Its status counts (sol r5 P3-4):
+# a provider that prints a complete-looking line and then stalls is killed at
+# the bound, and what it printed is not a result.
+ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \
+    || refuse "no user/home for uid $ADMIN_UID (the NSS lookup failed or timed out)"
 ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
+ADMIN_PUID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f3)"
 ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
-[ -n "$ADMIN_USER" ] && [ -n "$ADMIN_HOME" ] || refuse "no user/home for uid $ADMIN_UID"
+[ -n "$ADMIN_USER" ] && [ "$ADMIN_PUID" = "$ADMIN_UID" ] && [[ "$ADMIN_HOME" == /* ]] \
+    && [[ "$ADMIN_PW" != *$'\n'* ]] || refuse "no user/home for uid $ADMIN_UID"
 SILO="${TIER3S_SILO:-}"
 [ -z "$SILO" ] || [[ "$SILO" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || refuse "invalid silo name '$SILO'"
 # Phase A ships silos only (CONTRACT.md §1): no tier3s pod-app unit exists and

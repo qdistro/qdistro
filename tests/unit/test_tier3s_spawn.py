@@ -85,7 +85,9 @@ container)
             if [ -e "$F/query_fail_after_stop" ] && grep -q '^podman stop' "$F/calls"; then
                 echo "Error: database is locked" >&2; exit 125; fi
             # exists_stdout: junk on stdout the PMRC verdict then shares —
-            # a verdict must be alone on the call's output (A r3 P1/P3-4)
+            # a verdict must be alone on the call's output (A r3 P1/P3-4).
+            # Written raw (a NUL included): a NUL-prefixed 'PMRC=1' is sol
+            # r5 P1's truncated-read acceptance
             [ ! -e "$F/exists_stdout" ] || cat "$F/exists_stdout"
             [ -e "$F/c/$name/exists" ] && exit 0; exit 1 ;;
         inspect)
@@ -98,7 +100,13 @@ container)
             # output open after the call returned (a process-group kill
             # misses it; only the call scope's cgroup would get it)
             if [ -e "$F/inspect_leak" ]; then setsid sleep 600 & echo $! >> "$F/leak.pids"; fi
-            echo "$(cat "$F/c/$name/id") $(cat "$F/c/$name/label")" ;;
+            # inspect_nul: '<id> <token>' followed by a NUL and junk — the
+            # truncated read would accept the prefix (sol r5 P1)
+            if [ -e "$F/inspect_nul" ]; then
+                printf '%s %s\0junk\n' "$(cat "$F/c/$name/id")" "$(cat "$F/c/$name/label")"
+            else
+                echo "$(cat "$F/c/$name/id") $(cat "$F/c/$name/label")"
+            fi ;;
     esac ;;
 stop)
     if [ -e "$F/stop_vanish" ]; then finish "$name"; rm -rf "${F:?}/c/$name"
@@ -227,7 +235,11 @@ show) for a; do u="$a"; done
             [ ! -e "$F/units/$u.fail" ] || { echo "Failed to connect to bus" >&2; exit 1; }
             [ ! -e "$F/show_delay" ] || sleep "$(cat "$F/show_delay")"
             [ ! -e "$F/units/$u.hang_before" ] || sleep 600
-            state "$u"; echo "$s"
+            state "$u"
+            # units/<u>.nul_state: a (wrong) state followed by a NUL and junk —
+            # read -d '' would accept the truncated prefix (sol r5 P1)
+            if [ -e "$F/units/$u.nul_state" ]; then printf 'inactive\0junk\n'
+            else echo "$s"; fi
             # astra A r2 #1: an answer printed by a query that then hangs or fails
             [ ! -e "$F/units/$u.hang_after" ] || { echo $$ >> "$F/hung.pids"; sleep 600; }
             [ ! -e "$F/units/$u.fail_after" ] || exit 1
@@ -265,6 +277,9 @@ F=@F@
 # getent_hang: a wedged NSS lookup — must die at its bound, not hold the
 # token lock for the lock's whole allowance (fable A r3 P3-2)
 [ ! -e "$F/getent_hang" ] || sleep 600
+# getent_hang_after: a complete-looking answer, THEN a wedge — killed at the
+# bound, and what it printed is not a result (sol r5 P3-4)
+if [ -e "$F/getent_hang_after" ]; then /usr/bin/getent "$@"; sleep 600; fi
 exec /usr/bin/getent "$@"
 '''
 
@@ -1047,6 +1062,80 @@ def test_an_nss_lookup_is_bounded_under_the_token_lock(w):
     assert took < 30, f"an unbounded getent held the run for {took:.0f}s"
     assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
     assert not any(c.startswith("podman") for c in w.calls())
+
+
+def test_a_complete_nss_line_printed_before_a_stall_is_not_a_lookup(w):
+    """sol r5 P3-4: a provider that prints a full passwd line and then
+    wedges is killed at the bound — the substitution's status is timeout's,
+    and a killed lookup is a failure, not a result to parse."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("getent_hang_after")
+    r = w.cleanup(TOKEN, TIER3S_TEST_TMO="3")
+    assert r.returncode == 4 and "NSS lookup failed or timed out" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls())
+
+
+def test_spawn_a_stalled_nss_answer_is_not_a_lookup(w):
+    """sol r5 P3-4 in the spawn: a passwd line printed before the wedge is
+    not a result — the launch refuses, before the probe, gate or podman."""
+    w.set("getent_hang_after")
+    r = w.spawn()
+    assert r.returncode == 2 and "NSS lookup failed or timed out" in r.stderr
+    assert not any(c.startswith(("dbus-send", "podman", "systemd-run")) for c in w.calls())
+
+
+def test_helper_a_stalled_nss_answer_is_not_a_lookup(w):
+    """sol r5 P3-4 in the scope helper: same status discipline."""
+    w.set("getent_hang_after")
+    r = run_helper(w, ["enter", TOKEN, str(UID), "--", "podman", "version"])
+    assert r.returncode == 2 and "NSS lookup failed or timed out" in r.stderr, r.stderr
+    assert not any(c.startswith(("chown", "runuser")) for c in w.calls())
+
+
+def test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query(w):
+    """sol r5 P1: `read -d ''` stops at the first NUL — a call printing
+    'PMRC=1\\0' then exiting 0 leaves 'PMRC=1\\0PMRC=0\\n' in the output
+    file. The truncated prefix must never be the verdict: the query failed,
+    record/container/scope survive and no stop/rm ran."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    (w.F / "exists_stdout").write_bytes(b"PMRC=1\x00")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "NOT treating it as absent" in r.stderr
+    assert "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+    calls = w.calls()
+    assert [c for c in calls if c.startswith("podman")] == \
+        ["podman container exists qdistro-tier3s-smoke"]
+    assert not any(c.startswith("systemctl stop") for c in calls)
+
+
+def test_cleanup_a_nul_poisoned_unit_state_is_unknown(w):
+    """sol r5 P1 audit: prop answers get the same whole-file discipline — a
+    state line followed by a NUL and junk is a failed query (unknown), never
+    the truncated 'inactive'. The scope is live; the launch must survive."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    (w.F / "units" / f"qdistro-tier3s-{TOKEN}.scope.nul_state").write_text("")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 6 and "cannot tell whether" in r.stderr
+    assert "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls())
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+
+
+def test_cleanup_an_inspect_answer_with_extra_bytes_is_a_failed_query(w):
+    """sol r5 P1 audit: the inspect line must also be the call's whole
+    output — '<id> <token>' followed by a NUL and junk is re-queried like
+    any failed inspect, and a still-present container means preserve."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("inspect_nul")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "inspect" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and "torn down" not in r.stderr
+    assert not any(c.startswith(("podman stop", "podman rm")) for c in w.calls())
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
 
 
 def test_cleanup_failed_stop_preserves_record_and_scope(w):

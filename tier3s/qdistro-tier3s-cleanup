@@ -33,11 +33,17 @@
 # itself at RuntimeMaxSec should this script die first. A TERM/INT/HUP kills
 # the call in flight. A timeout is a failed query, never "absent". The
 # admin's NSS lookups (getent) run under a deadline-capped timeout and are
-# resolved once per run. A `podman container exists` verdict counts only through an
-# in-call PMRC=<rc> line the dropped-privilege command itself prints (astra+
-# fable A r3 P1): the timeout→systemd-run→runuser chain's own status can be a
-# bare 1 without ever reaching podman, so it is never read as "absent". Lock
-# fds are closed for every child process.
+# resolved once per run; a lookup that fails or is killed at its bound is no
+# result, whatever it printed first (sol r5 P3-4). A `podman container exists`
+# verdict counts only through an in-call PMRC=<rc> line the dropped-privilege
+# command itself prints (astra+ fable A r3 P1): the
+# timeout→systemd-run→runuser chain's own status can be a bare 1 without ever
+# reaching podman, so it is never read as "absent". And the line counts only
+# when it IS the call's complete output file, byte for byte — read stops at
+# the first NUL, so a NUL-prefixed or otherwise padded output is a failed
+# query, not a verdict (sol r5 P1); the same whole-file discipline covers
+# every other answer a call returns (out_line). Lock fds are closed for every
+# child process.
 # Locks: one per token (flock on /run/qdistro-tier3s-ctl/<token>) held for
 # that token's teardown only, and the global /run/qdistro-tier3s-ctl/.lock
 # held only for short record-publication and orphan-removal steps.
@@ -159,13 +165,26 @@ kill_cgroup() {   # kill_cgroup <dir>: SIGKILL its whole subtree; 0 once positiv
     { echo 1 > "$1/cgroup.kill"; } 2>/dev/null
     wait_empty "$1" "$KILL_AFTER" nocap
 }
+# out_line: 0 iff the call's COMPLETE stdout file is exactly one
+# LF-terminated line — the content OUT already holds — or nothing at all
+# (an rc-0 call that printed nothing is the empty answer, e.g. ControlGroup
+# of a collected unit; callers never treat empty as authoritative). read
+# -d '' stops at the first NUL, so OUT alone cannot tell a value from a
+# truncated prefix; a NUL, extra lines or bytes, or a missing newline is a
+# failed answer, not a value (sol r5 P1).
+out_line() {
+    case "$OUT" in *$'\n'*) return 1 ;; esac
+    printf '%s\n' "$OUT" | cmp -s -- - "$OUTF" && return 0
+    [ -z "$OUT" ] && [ ! -s "$OUTF" ]
+}
 sd() { bounded "$SYSTEMCTL_TMO" systemctl --no-ask-password "$@"; }
-prop() { local rc; sd show -p "$2" --value "$1" 2>/dev/null; rc=$?; PROP="$OUT"; return "$rc"; }   # prop <unit> <property>: PROP; rc = the query's
+prop() { local rc; sd show -p "$2" --value "$1" 2>/dev/null && out_line; rc=$?; PROP="$OUT"; return "$rc"; }   # prop <unit> <property>: PROP; rc 0 only when the call's whole output is exactly that one line
 # unit_status <unit>: US = live | dead | unknown (sol A-iii r2 P1). From
 # `systemctl show -p ActiveState`, and only from a call that COMPLETED with
-# status 0 (astra A r2 #1): a timed-out, killed or failed query is unknown
-# whatever it printed before. dead = inactive or failed; every decision acts
-# only on dead.
+# status 0 whose whole output is the state line (astra A r2 #1, sol r5 P1):
+# a timed-out, killed, failed or truncated query is unknown whatever it
+# printed before. dead = inactive or failed; every decision acts only on
+# dead.
 unit_status() {
     US=unknown
     prop "$1" ActiveState || return 0
@@ -180,12 +199,18 @@ as_admin() {   # as_admin <seconds> <uid> cmd...: bounded, in its own scope, as 
     local t="$1" uid="$2"
     if [ "$uid" != "$A_UID" ]; then
         # NSS can hang while the token lock is held (fable A r3 P3-2): the
-        # lookup is bounded and capped by the batch deadline, once per run
+        # lookup is bounded and capped by the batch deadline, once per run.
+        # Its status counts (sol r5 P3-4): a provider that prints a
+        # complete-looking line and then stalls is killed at the bound, and
+        # what it printed is not a result — nor is a line whose uid/home
+        # fields are not the ones asked for.
         cap "$GETENT_TMO" || { say "batch deadline reached; cannot resolve uid $uid"; return 125; }
-        local pw
-        pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)"
-        IFS=: read -r A_USER _ _ _ _ A_HOME _ <<< "$pw"
-        [ -n "$A_USER" ] || { say "no user for uid $uid"; return 125; }
+        local pw puid
+        pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)" \
+            || { say "no user for uid $uid (the NSS lookup failed or timed out)"; return 125; }
+        IFS=: read -r A_USER _ puid _ _ A_HOME _ <<< "$pw"
+        [ -n "$A_USER" ] && [ "$puid" = "$uid" ] && [[ "$A_HOME" == /* ]] && [[ "$pw" != *$'\n'* ]] \
+            || { say "no user for uid $uid"; return 125; }
         A_UID="$uid"
     fi
     shift 2
@@ -198,14 +223,18 @@ as_admin() {   # as_admin <seconds> <uid> cmd...: bounded, in its own scope, as 
 # after podman ran (astra+fable A r3 P1): the timeout→systemd-run→runuser
 # chain can return a bare 1 without ever reaching podman (a refused
 # StartTransientUnit, a runuser setup failure), so the chain's status is
-# never the verdict. Non-zero return: the call did not complete, or the line
-# is missing or shares the output with anything else — a failed query.
+# never the verdict. And the verdict is the call's COMPLETE stdout FILE,
+# compared byte for byte (sol r5 P1): OUT stops at the first NUL, so only
+# the file proves nothing followed the line — exactly 'PMRC=0\n' (present)
+# or 'PMRC=1\n' (absent) is an answer; a NUL, an extra byte or any other
+# content is a failed query. Non-zero return = failed query, never "absent".
 pm_exists() {
     PM_RC=""
     as_admin "$PODMAN_TMO" "$1" sh -c 'podman container exists "$1"; printf "PMRC=%d\n" "$?"' sh "$2" \
         || return 1
-    [[ "$OUT" =~ ^PMRC=[0-9]+$ ]] || return 1
-    PM_RC="${OUT#PMRC=}"
+    if printf 'PMRC=0\n' | cmp -s -- - "$OUTF"; then PM_RC=0
+    elif printf 'PMRC=1\n' | cmp -s -- - "$OUTF"; then PM_RC=1
+    else return 1; fi
     return 0
 }
 starttime() {
@@ -385,7 +414,8 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
             # go on. Stop and rm act on the inspected container ID, so a
             # same-named container created meanwhile is never touched.
             if as_admin "$PODMAN_TMO" "$admin" podman container inspect \
-                        --format '{{.Id}} {{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr"; then
+                        --format '{{.Id}} {{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr" \
+                    && out_line; then
                 out="$OUT"
             else
                 vanished "$admin" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
