@@ -1,0 +1,23 @@
+[vm-exec] guest identity pinned (pid 39469 start 35576)
+    silos.yaml: r4b argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+PASS: live launch 0b2c39343cfb172edbd95bdf2a304033 of qdistro-tier3s-silo@r4b.service
+PASS: record now names the dead old.service (qdistro-tier3s-silo@old.service:inactive)
+    cleanup: qdistro-tier3s-cleanup: 0b2c39343cfb172edbd95bdf2a304033: stale (unit qdistro-tier3s-silo@old.service not live); reaping
+    cleanup: qdistro-tier3s-cleanup: 0b2c39343cfb172edbd95bdf2a304033: the live qdistro-tier3s-0b2c39343cfb172edbd95bdf2a304033.scope is bound to 'qdistro-tier3s-silo@r4b.service', not to qdistro-tier3s-silo@old.service
+    cleanup: qdistro-tier3s-cleanup: 0b2c39343cfb172edbd95bdf2a304033: refusing (record preserved)
+PASS: stale record: --reap-stale refuses (rc=1)
+PASS: stale record: refusal names the real owner (1)
+PASS: stale record: the launch is untouched (running:active:active)
+PASS: StopSilo afterwards (Stopped)
+PASS: r4-stop: all 17 launch processes gone (pid+starttime)
+PASS: r4-stop: scope qdistro-tier3s-0b2c39343cfb172edbd95bdf2a304033.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-0b2c39343cfb172edbd95bdf2a304033.scope absent)
+PASS: r4-stop: per-launch dir /run/qdistro-tier3s/0b2c39343cfb172edbd95bdf2a304033 gone
+PASS: r4-stop: control record /run/qdistro-tier3s-ctl/0b2c39343cfb172edbd95bdf2a304033 gone
+PASS: r4-stop: container qdistro-tier3s-r4b gone (podman exists rc=1)
+PASS: r4-stop: no runsc state for a1470672545d in /run/qdistro-tier3s-runsc/1000
+PASS: r4-end: control records (0)
+PASS: r4-end: scopes (0)
+PASS: r4-end: labelled containers (0)
+PASS: r4-end: runsc-bundle processes (0)
+PASS: r4-end: state root holds no container state (0)
+[r4] 17 passes, 0 failures

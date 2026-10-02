@@ -82,10 +82,17 @@ broker_check() {   # broker_check <action> -> allow|deny|unknown|ERR
         org.qdistro.AdminBroker1 CheckPermission 'sa{sv}' "$1" 0 2>&1)" || { echo ERR; return; }
     out="${out#s \"}"; echo "${out%\"}"
 }
-silo_state() {   # silo_state <name> -> its ListSilos state, or "absent"
-    sm ListSilos | sed 's/^s "//; s/"$//; s/\\"/"/g' | python3 -c '
+# busctl's JSON output, not its text form: the text form escapes more than
+# `"` (an observed_reason with a `'` broke the old sed-based decoding)
+silo_state() {   # silo_state <name> -> its ListSilos state, or "absent" (QUERY-FAILED on a failed call)
+    as_admin busctl --system --timeout=150 --json=short call org.qdistro.SessionManager1 \
+        /org/qdistro/SessionManager1 org.qdistro.SessionManager1 ListSilos | python3 -c '
 import json, sys
-for s in json.load(sys.stdin):
+try:
+    rows = json.loads(json.load(sys.stdin)["data"][0])
+except Exception:
+    print("QUERY-FAILED"); sys.exit(0)
+for s in rows:
     if s["name"] == sys.argv[1]: print(s["state"]); break
 else: print("absent")' "$1"
 }
