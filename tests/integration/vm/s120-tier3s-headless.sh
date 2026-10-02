@@ -184,7 +184,7 @@ for call in fchmodat2:DENY llistxattr:ALLOW setfsuid:DENY setfsgid:DENY fadvise6
 done
 
 # --- DONE 8 / ΔA5: the running sandbox (the smoke's own report from inside gVisor)
-sm_line() { scope_log "$TA" | grep -m1 "^SMOKE $1" | sed "s/^SMOKE $1//"; }
+sm_line() { scope_log "$TA" | grep -m1 -F "SMOKE $1" | sed "s|^SMOKE $1||"; }
 scope_log "$TA" | awk '!seen[$0]++' | sed 's/^/    sandbox: /'
 pin=$(sed -n 's/^snapshot=\([0-9]\{8\}\)$/\1/p' /root/qdistro-src-t3s/snapshot.conf | head -1)
 is "ΔA5: image snapshot label = snapshot.conf pin" "$(pm image inspect --format '{{index .Labels "org.qdistro.snapshot"}}' "$IMAGE")" "$pin"
@@ -205,7 +205,9 @@ is "ΔA4 fchmodat2 path exercised: plain chmod works" "$(sm_line 'chmod ')" "rc=
 is "ΔA4 fchmodat2 path exercised: chmod -h (fchmodat2) is denied, mode unchanged" "$(sm_line 'chmod_nofollow ')" "rc=1 mode=600"
 is "ΔA4 llistxattr ALLOW effective: ls -l clean" "$(sm_line 'ls_l ')" "rc=0 stderr_bytes=0"
 is "ΔA4 syslog ALLOW effective: dmesg answers (gVisor banner)" "$(sm_line dmesg= | grep -c 'gVisor')" 1
-is "sandbox: no routes, loopback only" "$(sm_line routes=)" "0 links=lo,"
+is "sandbox: loopback is the only link" "$(sm_line routes= | sed 's/^.* links=//')" "lo,"
+is "sandbox: no default route, every route on lo" \
+    "$(sm_line route_table= | tr ';' '\n' | grep -c . | sed 's/^0$/none/;s/[1-9][0-9]*/some/'):$(sm_line route_table= | tr ';' '\n' | grep -c '^default'):$(sm_line route_table= | tr ';' '\n' | grep . | grep -vc ' dev lo')" "some:0:0"
 
 # ---------------------------------------------------------------------------
 step "3. two concurrent launches; StopSilo (session-manager stop) of A preserves B"

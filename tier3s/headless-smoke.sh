@@ -19,10 +19,10 @@ done
 st() { sed -n "s/^$1:[[:space:]]*//p" /proc/self/status; }
 echo "SMOKE caps=inh:$(st CapInh),prm:$(st CapPrm),eff:$(st CapEff),bnd:$(st CapBnd),amb:$(st CapAmb)"
 echo "SMOKE nnp=$(st NoNewPrivs) seccomp=$(st Seccomp)"
-echo "SMOKE rootfs=$(awk '$2 == "/" { split($4, o, ","); print o[1] }' /proc/self/mounts)"
-for d in /run/user/1000 /home/admin/.cache; do
-    echo "SMOKE mountopts $d=$(awk -v d="$d" '$2 == d { print $3 ":" $4 }' /proc/self/mounts)"
-done
+# (no awk in the image: read the mount table with the shell)
+mnt() { while read -r _ mp ty opts _; do [ "$mp" = "$1" ] && { echo "$ty:$opts"; break; }; done < /proc/self/mounts; }
+r=$(mnt /); r=${r#*:}; echo "SMOKE rootfs=${r%%,*}"
+for d in /run/user/1000 /home/admin/.cache; do echo "SMOKE mountopts $d=$(mnt "$d")"; done
 touch /home/admin/.smoke-rw 2>/tmp/smoke-rw.err; echo "SMOKE rootfs_write rc=$? err=$(cat /tmp/smoke-rw.err)"
 f=/tmp/smoke-chmod
 : > "$f"
@@ -30,6 +30,7 @@ chmod 600 "$f" 2>/dev/null; echo "SMOKE chmod rc=$? mode=$(stat -c %a "$f")"
 chmod -h 640 "$f" 2>/dev/null; echo "SMOKE chmod_nofollow rc=$? mode=$(stat -c %a "$f")"
 ls -l /tmp > /dev/null 2>/tmp/smoke-ls.err; echo "SMOKE ls_l rc=$? stderr_bytes=$(wc -c < /tmp/smoke-ls.err)"
 echo "SMOKE routes=$(ip -o route show 2>&1 | wc -l) links=$(ip -o link show 2>/dev/null | cut -d: -f2 | tr -d ' ' | tr '\n' ',')"
+echo "SMOKE route_table=$(ip -o route show table all 2>&1 | tr -s ' ' | tr '\n' ';')"
 echo "SMOKE done"
 if [ "${1:-}" = --hold ]; then
     trap 'echo "SMOKE term"; exit 0' TERM INT
