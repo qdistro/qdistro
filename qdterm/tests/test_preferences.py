@@ -750,6 +750,61 @@ def _scaled_snapshot():
     )
 
 
+def _prime_native_baseline(app):
+    from PyQt6.QtGui import QColor, QPalette
+    from PyQt6.QtWidgets import QStyleFactory
+
+    keys = {name.lower(): name for name in QStyleFactory.keys()}
+    current = app.style().objectName()
+    for candidate in ("Windows", "GTK+", "Oxygen"):
+        mapped = keys.get(candidate.lower())
+        if mapped and mapped.lower() != current.lower():
+            app.setStyle(mapped)
+            break
+    pal = QPalette(app.palette())
+    pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+    pal.setColor(QPalette.ColorRole.Base, QColor("#dce8dc"))
+    app.setPalette(pal)
+    app.setStyleSheet("QWidget { background-color: #c8dcc8; }")
+    return (
+        app.style().objectName(),
+        app.palette().color(QPalette.ColorRole.Window).getRgb(),
+        app.styleSheet(),
+    )
+
+
+def test_native_without_controller_restores_captured_baseline(window, qtbot):
+    from PyQt6.QtGui import QPalette
+    from PyQt6.QtWidgets import QApplication
+    from qterminator.theme import current_controller, reset_controller_for_tests
+
+    app = QApplication.instance()
+    original_style = app.style().objectName()
+    original_pal = QPalette(app.palette())
+    original_qss = app.styleSheet()
+    reset_controller_for_tests()
+    try:
+        style, window_rgb, qss = _prime_native_baseline(app)
+        assert current_controller() is None
+        dlg = PreferencesDialog(window)
+        qtbot.addWidget(dlg)
+        dlg._theme_mode.setCurrentText("Dark")
+        dlg._apply()
+        assert app.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+        assert app.styleSheet() != qss
+        dlg._theme_mode.setCurrentText("Native")
+        dlg._apply()
+        assert current_controller() is None
+        assert app.style().objectName() == style
+        assert app.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert app.styleSheet() == qss
+    finally:
+        reset_controller_for_tests()
+        app.setStyle(original_style)
+        app.setPalette(original_pal)
+        app.setStyleSheet(original_qss)
+
+
 def test_follow_desktop_without_snapshot_shows_unavailable(window, qtbot):
     from qdistro_presentation.model import DESKTOP_SETTINGS_UNAVAILABLE
     from qterminator.theme import reset_controller_for_tests

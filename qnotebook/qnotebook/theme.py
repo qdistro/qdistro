@@ -19,7 +19,26 @@ log = logging.getLogger(__name__)
 
 _VALID_MODES = ("system", "light", "dark", "native")
 _CONTROLLER = None
+_NATIVE_STYLE: str | None = None
 _NATIVE_PALETTE: QPalette | None = None
+_NATIVE_STYLESHEET: str | None = None
+
+
+def _capture_native(app: QApplication) -> None:
+    global _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
+    if _NATIVE_PALETTE is not None:
+        return
+    _NATIVE_STYLE = app.style().objectName()
+    _NATIVE_PALETTE = QPalette(app.palette())
+    _NATIVE_STYLESHEET = app.styleSheet()
+
+
+def _restore_native(app: QApplication) -> None:
+    _capture_native(app)
+    if _NATIVE_STYLE:
+        app.setStyle(_NATIVE_STYLE)
+    app.setPalette(QPalette(_NATIVE_PALETTE))
+    app.setStyleSheet(_NATIVE_STYLESHEET or "")
 
 # Legacy dark palette (used when the shared snapshot is absent).
 _DARK_WINDOW = "#2b2b2b"
@@ -40,18 +59,16 @@ EDITOR_PALETTE_QSS = (
 def apply_theme(app: QApplication, mode: str = "system") -> str:
     """Apply dark, light, native, or system theme to ``app``.
 
-    ``system`` and ``native`` restore the palette captured on first
-    ``attach_presentation`` (or a default ``QPalette`` if none was captured).
+    ``system`` and ``native`` restore the style, palette, and stylesheet
+    captured before the first legacy theme application.
     """
+    _capture_native(app)
     if mode not in _VALID_MODES:
         log.warning("unknown theme mode %r; falling back to 'system'", mode)
         mode = "system"
 
     if mode in ("system", "native"):
-        if _NATIVE_PALETTE is not None:
-            app.setPalette(QPalette(_NATIVE_PALETTE))
-        else:
-            app.setPalette(QPalette())
+        _restore_native(app)
         return mode
 
     app.setStyle("Fusion")
@@ -90,9 +107,8 @@ def _system_fallback(app: QApplication) -> None:
 
 def attach_presentation(app: QApplication, config: Any):
     """Attach the shared presentation controller. Missing package is non-fatal."""
-    global _CONTROLLER, _NATIVE_PALETTE
-    if _NATIVE_PALETTE is None:
-        _NATIVE_PALETTE = QPalette(app.palette())
+    global _CONTROLLER
+    _capture_native(app)
     if _CONTROLLER is not None:
         theme_mode = config.get("general", "theme_mode", default="system")
         if theme_mode in _VALID_MODES:
@@ -148,14 +164,16 @@ def refresh_windows(app: QApplication) -> None:
 
 
 def reset_controller_for_tests() -> None:
-    global _CONTROLLER, _NATIVE_PALETTE
+    global _CONTROLLER, _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
     if _CONTROLLER is not None:
         try:
             _CONTROLLER.stop()
         except Exception:  # noqa: BLE001
             pass
     _CONTROLLER = None
+    _NATIVE_STYLE = None
     _NATIVE_PALETTE = None
+    _NATIVE_STYLESHEET = None
     try:
         from qdistro_presentation.qt import reset_controller_for_tests as _reset
 

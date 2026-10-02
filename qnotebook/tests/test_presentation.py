@@ -158,6 +158,48 @@ def test_system_restores_captured_native_palette(qapp):
     assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == native
 
 
+def test_native_restores_captured_style_after_fusion(qapp):
+    from PyQt6.QtGui import QColor, QPalette
+    from PyQt6.QtWidgets import QStyleFactory
+    from qnotebook.theme import reset_controller_for_tests
+
+    original_style = qapp.style().objectName()
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
+    reset_controller_for_tests()
+    try:
+        keys = {name.lower(): name for name in QStyleFactory.keys()}
+        current = qapp.style().objectName()
+        alt = None
+        for candidate in ("Windows", "GTK+", "Oxygen"):
+            mapped = keys.get(candidate.lower())
+            if mapped and mapped.lower() != current.lower():
+                alt = mapped
+                qapp.setStyle(mapped)
+                break
+        pal = QPalette(qapp.palette())
+        pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+        qapp.setPalette(pal)
+        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }")
+        style = qapp.style().objectName()
+        window_rgb = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
+        qss = qapp.styleSheet()
+        apply_theme(qapp, "dark")
+        assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("#2b2b2b")
+        dark_style = qapp.style().objectName()
+        assert apply_theme(qapp, "native") == "native"
+        assert qapp.style().objectName() == style
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert qapp.styleSheet() == qss
+        if alt is not None and style:
+            assert dark_style != style
+    finally:
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)
+
+
 def test_two_windows_follow_same_generation_without_resetting(
     qapp, tmp_path, tmp_notebook, qtbot, monkeypatch,
 ):

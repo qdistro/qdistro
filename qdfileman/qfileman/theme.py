@@ -16,20 +16,45 @@ log = logging.getLogger(__name__)
 
 _VALID_MODES = ("system", "light", "dark", "native")
 _CONTROLLER = None
+_NATIVE_STYLE: str | None = None
+_NATIVE_PALETTE: QPalette | None = None
+_NATIVE_STYLESHEET: str | None = None
+
+
+def _capture_native(app: QApplication) -> None:
+    global _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
+    if _NATIVE_PALETTE is not None:
+        return
+    _NATIVE_STYLE = app.style().objectName()
+    _NATIVE_PALETTE = QPalette(app.palette())
+    _NATIVE_STYLESHEET = app.styleSheet()
+
+
+def _restore_native(app: QApplication) -> None:
+    _capture_native(app)
+    if _NATIVE_STYLE:
+        app.setStyle(_NATIVE_STYLE)
+    app.setPalette(QPalette(_NATIVE_PALETTE))
+    app.setStyleSheet(_NATIVE_STYLESHEET or "")
 
 
 def apply_theme(app: QApplication, mode: str = "system") -> str:
     """Apply dark, light, native, or system theme to ``app``.
 
     ``system`` without a presentation controller is a no-op so the host
-    desktop theme is used. ``native`` is also a no-op here; the controller
-    restores the captured platform palette.
+    desktop theme is used. ``native`` restores the captured platform
+    style, palette, and stylesheet even when the shared package is missing.
     """
+    _capture_native(app)
     if mode not in _VALID_MODES:
         log.warning("unknown theme mode %r; falling back to 'system'", mode)
         mode = "system"
 
-    if mode in ("system", "native"):
+    if mode == "native":
+        _restore_native(app)
+        return "native"
+
+    if mode == "system":
         return mode
 
     app.setStyle("Fusion")
@@ -70,6 +95,7 @@ def _system_fallback(app: QApplication) -> None:
 def attach_presentation(app: QApplication, config: Any):
     """Attach the shared presentation controller. Missing package is non-fatal."""
     global _CONTROLLER
+    _capture_native(app)
     try:
         from qdistro_presentation.model import LocalOverrides, parse_local_overrides
         from qdistro_presentation.qt import PresentationController
@@ -119,13 +145,16 @@ def refresh_windows(app: QApplication) -> None:
 
 
 def reset_controller_for_tests() -> None:
-    global _CONTROLLER
+    global _CONTROLLER, _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
     if _CONTROLLER is not None:
         try:
             _CONTROLLER.stop()
         except Exception:  # noqa: BLE001
             pass
     _CONTROLLER = None
+    _NATIVE_STYLE = None
+    _NATIVE_PALETTE = None
+    _NATIVE_STYLESHEET = None
     try:
         from qdistro_presentation.qt import reset_controller_for_tests as _reset
 
