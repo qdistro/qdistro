@@ -2,8 +2,10 @@
 """tier3s/spike/mutate-guards.py - prove the tier3s guard tests can fail.
 
 For each mutation: replace one exact snippet (must occur once) in the REAL
-script, run the tests that cover that guard, require every named test to be
-reported FAILED, then restore the original bytes and re-check their sha256.
+script, or apply a list of such edits for an order mutation, run the tests
+that cover that guard, require every named test to be reported FAILED, then
+restore the original bytes and re-check their sha256. IDs: P probe, V
+provisioner, W wrapper (Phase 0); A launch path, G seccomp generator (Phase A).
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -21,8 +23,16 @@ REPO = Path(__file__).resolve().parents[2]
 PROBE = "tier3s/probe.sh"
 PROV = "tier3s/provision-runsc.sh"
 WRAP = "tier3s/tier3s-runsc"
+SPAWN = "tier3s/spawn-tier3s.sh"
+CLEAN = "tier3s/qdistro-tier3s-cleanup"
+HELP = "tier3s/qdistro-tier3s-scope"
+MKP = "tier3s/seccomp/make-profiles.py"
 TP = "tests/unit/test_tier3s_probe.py"
 TV = "tests/unit/test_tier3s_provision.py"
+TS = "tests/unit/test_tier3s_spawn.py"
+GATE = 'broker_gate "$SPAWN_ACTION" "$WORKLOAD/$APP_BASE"\n'
+DENY = f"{TS}::test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]"
+ORDER = f"{TS}::test_gate_order_probe_resolve_gate_record_then_podman"
 
 # (id, file, old, new, [tests that must FAIL])
 MUTATIONS = [
@@ -153,6 +163,104 @@ MUTATIONS = [
      "exec /usr/bin/env -i PATH=/usr/bin:/bin",
      "exec /usr/bin/env PATH=/usr/bin:/bin",
      [f"{TV}::test_wrapper_scrubs_environment_and_fixes_flags"]),
+    ("W3 wrapper creates a missing state root", WRAP,
+     'if [ -L "$root" ] || [ ! -d "$root" ]; then die "state root $root is missing or not a directory"; fi',
+     'mkdir -p "$root"',
+     [f"{TV}::test_wrapper_never_creates_the_state_root",
+      f"{TV}::test_wrapper_refuses_bad_state_root_without_creating_it[root-missing]"]),
+    ("W4 wrapper accepts a caller --root", WRAP,
+     '    case "$a" in --root|--root=*|-root|-root=*) die "caller-supplied $a" ;; esac',
+     "    :",
+     [f"{TV}::test_wrapper_refuses_caller_root[--root=/run/user/1000/runsc]"]),
+    ("W5 wrapper state-root owner/mode check removed", WRAP,
+     '[ "$meta" = "$euid 700" ] || die',
+     "true || die",
+     [f"{TV}::test_wrapper_refuses_bad_state_root_without_creating_it[root-mode]"]),
+    ("P17 probe state_root check removed", PROBE,
+     '    elif [ -L "$SR" ] || [ ! -d "$SR" ] || [ "$(stat -c \'%u %a\' -- "$SR")" != "$sr_uid 700" ]; then',
+     "    elif false; then",
+     [f"{TP}::test_state_root_missing_or_loose_fails[missing]",
+      f"{TP}::test_state_root_missing_or_loose_fails[mode]"]),
+    # --- Phase A launch path: gate order (broker before activation and podman run)
+    ("A1 broker gate removed", SPAWN, GATE, ":\n", [DENY, ORDER]),
+    ("A2 activation recorded before the broker gate", SPAWN, GATE,
+     '[ -z "$GENERATION" ] || read_binding --record\n' + GATE,
+     [DENY, ORDER]),
+    ("A3 podman run before the broker gate", SPAWN,
+     [(GATE, ":\n"), ('wait "$child"\nexit $?', GATE + 'wait "$child"\nexit $?')], None,
+     [DENY, ORDER]),
+    # --- control-dir location
+    ("A4 control record inside the exported per-launch dir", SPAWN,
+     'CTL_DIR="$CTL/$TOKEN"', 'CTL_DIR="$LAUNCH_PARENT/$TOKEN/ctl"',
+     [f"{TS}::test_plan_control_record_is_outside_the_per_launch_dir",
+      f"{TS}::test_launch_records_then_cleans_up_on_normal_exit"]),
+    ("A5 cleanup reads records from the exported parent", CLEAN,
+     'CTL="$T/run/qdistro-tier3s-ctl"', 'CTL="$T/run/qdistro-tier3s"',
+     [f"{TS}::test_cleanup_tears_down_a_running_launch"]),
+    # --- other launch guards
+    ("A6 dev-profile gate removed", SPAWN,
+     '[ "$profile" = dev ] \\\n', 'true \\\n',
+     [f"{TS}::test_hardened_profile_refused[daily-driver]"]),
+    ("A7 probe failure ignored", SPAWN,
+     '[ "$probe_rc" -eq 0 ] || refuse', "true || refuse",
+     [f"{TS}::test_probe_failure_refuses_with_its_result"]),
+    ("A8 literal tmpfs uid= instead of U", SPAWN,
+     "--tmpfs /run/user/1000:rw,U,mode=0700", "--tmpfs /run/user/1000:rw,uid=1000,gid=1000,mode=0700",
+     [f"{TS}::test_plan_podman_command_shape"]),
+    ("A9 scope placement check removed", SPAWN,
+     'in_scope "$p" "$rel" || {', "true || {",
+     [f"{TS}::test_sentry_outside_the_scope_tears_down"]),
+    ("A10 failed podman query read as no container", CLEAN,
+     '        1)  ;;\n        *)  say "$tok: podman query failed',
+     '        *)  ;;\n        999)  say "$tok: podman query failed',
+     [f"{TS}::test_cleanup_failed_podman_query_is_not_no_container"]),
+    ("A11 cleanup ignores the state root", CLEAN,
+     '    if [ -L "$root" ] || [ ! -d "$root" ] || [ "$(stat -c \'%u %a\' -- "$root")" != "$admin 700" ]; then',
+     "    if false; then",
+     [f"{TS}::test_cleanup_with_missing_state_root_preserves_record_and_scope",
+      f"{TS}::test_cleanup_with_replaced_state_root_preserves_record[mode]",
+      f"{TS}::test_cleanup_with_replaced_state_root_preserves_record[symlink]"]),
+    ("A12 cleanup accepts any recorded runsc root", CLEAN,
+     '    [ "${S[runsc_root]:-}" = "/run/qdistro-tier3s-runsc/${S[admin_uid]}" ] \\',
+     "    true \\",
+     [f"{TS}::test_cleanup_with_replaced_state_root_preserves_record[owner-record]"]),
+    ("A13 record dropped after a failed stop", CLEAN,
+     '|| { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }', "|| true",
+     [f"{TS}::test_cleanup_failed_stop_preserves_record_and_scope"]),
+    ("A14 escaped-process check removed", CLEAN,
+     '        if [ "$(starttime "${S[${p}_pid]}")" = "${S[${p}_starttime]:-x}" ]; then',
+     "        if false; then",
+     [f"{TS}::test_cleanup_reports_a_recorded_process_alive_outside_the_scope"]),
+    ("A15 --unit tears down every record", CLEAN,
+     '            [ "$(sed -n \'s/^unit=//p\' "$CTL/$tok/state" 2>/dev/null)" = "$u" ] || continue',
+     "            :",
+     [f"{TS}::test_two_launches_tearing_down_one_preserves_the_other"]),
+    ("A16 failed label listing read as nothing to reap", CLEAN,
+     '|| { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }',
+     "|| true",
+     [f"{TS}::test_reap_stale_podman_listing_failure_is_an_error"]),
+    ("A17 scope helper delegates the limit files too", HELP,
+     'chown "$ADMIN_UID" -- "$DIR" "$DIR/cgroup.procs" "$DIR/cgroup.subtree_control" "$DIR/cgroup.threads"',
+     'chown "$ADMIN_UID" -- "$DIR" "$DIR"/*',
+     [f"{TS}::test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin"]),
+    ("A18 scope helper accepts a foreign scope", HELP,
+     '[ "${REL##*/}" = "$UNIT" ] || die', "true || die",
+     [f"{TS}::test_helper_refuses_bad_invocations[foreign-scope]"]),
+    ("A19 scope helper accepts an occupied scope", HELP,
+     '[ "${procs[*]}" = "$SELF_PID" ] || die', "true || die",
+     [f"{TS}::test_helper_refuses_a_scope_that_already_holds_processes"]),
+    ("A20 cleanup does not verify the scope target", CLEAN,
+     '    if [ -n "$rel" ] && [ -n "${S[scope_cgroup]:-}" ] && [ "$rel" != "${S[scope_cgroup]}" ]; then',
+     "    if false; then",
+     [f"{TS}::test_cleanup_refuses_a_scope_at_another_cgroup"]),
+    # --- seccomp generator
+    ("G1 converter-drop guard removed", MKP,
+     '        assert not (verdict == "ALLOW" and name in CONVERTER_DROPS), \\',
+     '        assert True or not (verdict == "ALLOW" and name in CONVERTER_DROPS), \\',
+     [f"{TS}::test_seccomp_generator_refuses_an_inert_allow"]),
+    ("G2 decision flipped without a re-render", MKP,
+     '"llistxattr": ("ALLOW",', '"llistxattr": ("DENY",',
+     [f"{TS}::test_seccomp_profile_is_rendered_and_decided"]),
 ]
 
 
@@ -179,12 +287,12 @@ def main():
     if only is not None and len(muts) != len(only):
         print(f"unknown mutation id in {sorted(only)}")
         return 2
-    files = {f: REPO / f for f in (PROBE, PROV, WRAP)}
+    files = {f: REPO / f for f in (PROBE, PROV, WRAP, SPAWN, CLEAN, HELP, MKP)}
     orig = {f: p.read_bytes() for f, p in files.items()}
     orig_sha = {f: sha(p) for f, p in files.items()}
     for f in orig_sha:
         print(f"original sha256 {orig_sha[f]}  {f}")
-    rc, failed, skipped, summary = pytest([TP, TV])
+    rc, failed, skipped, summary = pytest([TP, TV, TS])
     print(f"BASELINE (no mutation): rc={rc} {summary}")
     if rc != 0:
         print("baseline must pass; aborting")
@@ -193,12 +301,19 @@ def main():
     try:
         for mid, f, old, new, tests in muts:
             src = orig[f].decode()
-            n = src.count(old)
-            if n != 1:
-                print(f"MUTATION {mid}: snippet occurs {n} times in {f} -> HARNESS ERROR")
+            edits = old if isinstance(old, list) else [(old, new)]
+            harness_error = False
+            for o, nw in edits:
+                n = src.count(o)
+                if n != 1:
+                    print(f"MUTATION {mid}: snippet occurs {n} times in {f} -> HARNESS ERROR")
+                    harness_error = True
+                    break
+                src = src.replace(o, nw)
+            if harness_error:
                 bad += 1
                 continue
-            files[f].write_text(src.replace(old, new))
+            files[f].write_text(src)
             try:
                 rc, failed, skipped, summary = pytest(tests)
             finally:
@@ -219,7 +334,7 @@ def main():
         same = sha(p) == orig_sha[f]
         print(f"restored {'OK' if same else 'MISMATCH'} sha256 {sha(p)}  {f}")
         bad += 0 if same else 1
-    rc, failed, skipped, summary = pytest([TP, TV])
+    rc, failed, skipped, summary = pytest([TP, TV, TS])
     print(f"AFTER RESTORE: rc={rc} {summary}")
     bad += 0 if rc == 0 else 1
     print(f"RESULT {'PASS' if bad == 0 else 'FAIL'}: {len(muts)} mutations, {bad} problem(s)")

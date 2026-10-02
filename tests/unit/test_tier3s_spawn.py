@@ -669,7 +669,7 @@ def test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin(w):
     (["enter", "XYZ", str(UID), "--", "podman", "ps"], "32 lowercase hex"),
     (["enter", TOKEN, "0", "--", "podman", "ps"], "non-root numeric uid"),
     (["enter", TOKEN2, str(UID), "--", "podman", "ps"], f"not in qdistro-tier3s-{TOKEN2}.scope"),
-])
+], ids=["not-podman", "bad-mode", "bad-token", "root-uid", "foreign-scope"])
 def test_helper_refuses_bad_invocations(w, args, needle):
     r = run_helper(w, args)
     assert r.returncode == 2, r.stderr
