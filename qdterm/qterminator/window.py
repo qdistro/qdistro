@@ -1057,7 +1057,7 @@ class MainWindow(QMainWindow):
 
     def apply_presentation_update(self) -> None:
         for term in self.iter_terminals():
-            term.apply_inherited_presentation()
+            term.apply_presentation_update()
 
     def apply_profile_to_terminals(self, profile_name: str) -> None:
         for term in self.iter_terminals():

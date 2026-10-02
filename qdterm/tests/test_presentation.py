@@ -73,3 +73,24 @@ def test_missing_snapshot_applies_system_fallback(qapp, tmp_path, monkeypatch):
     assert ctrl.state.using_shared_palette is False
     assert qapp.palette().color(QPalette.ColorRole.Window) == QColor(LT_BG)
     assert qapp.palette().color(QPalette.ColorRole.WindowText) == QColor(LT_FG)
+
+
+def test_mainwindow_presentation_update_restyles_titlebar(qapp, tmp_path, monkeypatch):
+    from qdistro_presentation.model import example_snapshot
+    from qterminator.titlebar import TerminalTitlebar
+    from qterminator.window import MainWindow
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _config("system"))
+    tb = TerminalTitlebar()
+    term = SimpleNamespace(
+        apply_presentation_update=lambda: tb.apply_presentation_update()
+    )
+    win = MainWindow.__new__(MainWindow)
+    win.iter_terminals = lambda: iter([term])
+    tb.set_active(True)
+    win.apply_presentation_update()
+    snap = example_snapshot()
+    assert snap.colors.mPrimary in tb.styleSheet()
+    tb.deleteLater()
