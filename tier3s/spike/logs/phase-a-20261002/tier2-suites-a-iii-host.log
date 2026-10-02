@@ -1,9 +1,9 @@
-### tier-2 unit + static suites at 0f10449f7b9ec0ac43f206962030b70af2eb99d2 2026-10-02T11:05:44Z
+### tier-2 unit + static suites at 30ac7b819d626860782a58284d9ed2c3081b3f60 2026-10-02T11:16:04Z
 ### git diff --stat claude/tier3s..HEAD -- tier2/ (DONE bar 7: must be empty):
 ### files under tier2/ changed: 0
 ### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
 ### UNIT: python3 -m pytest tests/unit/test_tier2_spawn.py tests/unit/test_tier2_snapshot_repos.py tests/unit/test_podapp_launch.py tests/unit/test_podapps_scan.py tests/unit/test_silo_launch.py tests/unit/test_spawn_common.py
-130 passed, 1 warning in 3.73s
+130 passed, 1 warning in 3.56s
 pytest rc=0
 ### STATIC 1: bash -n on every tier2/*.sh
 bash -n rc=0
@@ -15,5 +15,5 @@ shellcheck (waiver) rc=0
     HEAD: tier2/spawn-tier2.sh:800:3: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]
 identical to baseline, single SC1090: yes
 ### tier3s + session-manager + broker host suites (context, not item 7)
-1317 passed, 1 skipped, 1 warning in 29.27s
+1321 passed, 1 skipped, 1 warning in 28.35s
 ### RESULT: PASS
