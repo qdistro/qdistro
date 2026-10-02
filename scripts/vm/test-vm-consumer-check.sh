@@ -9,7 +9,8 @@
 # overlay with fresh UEFI variables and its own cloud-init seed (new
 # instance-id, new SSH key), as on a tester's machine. Checks:
 #   access    the consumer's key logs in; the build key and password SSH do
-#             not; the QEMU guest agent answers (the qci exec path)
+#             not; the QEMU guest agent answers and runs commands (guest-exec,
+#             the qci exec path)
 #   identity  machine-id regenerated; SSH host keys regenerated (warning)
 #   health    systemd reaches "running" with no failed unit; qdistro
 #             services and bus names are up; the installer chain is complete
@@ -154,9 +155,12 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 python3 "$C/qmp.py" "$SOCK/qga" '{"execute":"guest-ping"}' 5 >/dev/null || fail "QEMU guest agent does not answer"
+# scripts/vm/vm-exec, qci's guest transport, runs commands with guest-exec.
+python3 "$C/qmp.py" "$SOCK/qga" '{"execute":"guest-exec","arguments":{"path":"/usr/bin/true"}}' 5 \
+    || fail "the guest agent refuses guest-exec"
 pw_status=$(vmssh 'sudo -n passwd -S admin')
 [ "$(echo "$pw_status" | cut -d' ' -f2)" = P ] || fail "admin password is not usable: $pw_status"
-log "access: consumer key only, password SSH off, sudo, guest agent, admin password set"
+log "access: consumer key only, password SSH off, sudo, guest agent with guest-exec, admin password set"
 
 # ---- identity ---------------------------------------------------------------
 mid=$(vmssh 'cat /etc/machine-id')

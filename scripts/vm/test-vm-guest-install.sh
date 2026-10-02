@@ -155,6 +155,17 @@ system_info:
     lock_passwd: false
 EOF_CLOUD
 
+# ---- 9. Guest agent runs commands ---------------------------------------------
+# As image/config.sh: openSUSE's vendor default blocks guest-exec and
+# guest-exec-status, which scripts/vm/vm-exec (qci's guest transport) needs.
+# The agent listens only on the hypervisor's virtio-serial port.
+cat > /etc/sysconfig/qemu-ga <<'EOF_QGA'
+# qdistro test VM: allow every guest-agent RPC (the vendor default blocks
+# guest-exec/guest-exec-status). See image/config.sh.
+FILTER_RPC_ARGS=""
+EOF_QGA
+chmod 0644 /etc/sysconfig/qemu-ga
+
 tvm_log "installed chain steps:"
 sed 's/^/[test-vm]   /' /var/lib/qdistro/bootstrap/installer-chain.state
 tvm_log "done"
