@@ -1114,6 +1114,28 @@ setup() {
     assert_output_contains "PASS: 0 new denials — qdistro_broker.te 0.3.0 covers the enforcing workload"
 }
 
+@test "phase7-qsu-enforcing: qsu end to end under Enforcing — zero qdistro-domain AVCs" {
+    # Headless port of permissions-gui/55 (+ its host runner run-55): real
+    # `qsu /usr/bin/id` as the non-admin user, admin approve over D-Bus, the
+    # command must run and no new qdistro_root_exec_t / qsu_child_t /
+    # qdistro_broker_t / qdistro_tier1_t / qdistro_pwd_t AVC may appear.
+    # qga cannot setenforce, so this needs the SSH transport
+    # (run-bats-enforcing.sh exports VM_SSH_PORT); on the default bake the
+    # driver also SKIPs because /etc/selinux/config pins permissive.
+    [ -n "${VM_SSH_PORT:-}" ] \
+        || skip "qsu enforcing needs the SSH transport (VM_SSH_PORT unset; qga cannot setenforce)"
+    stage_vm_driver "s54-qsu-enforcing.sh"
+    vm_run "curl -fsS -o /tmp/s54.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s54-qsu-enforcing.sh && chmod +x /tmp/s54.sh && bash /tmp/s54.sh 2>/dev/null"
+    if [[ "$output" == *"SKIP:"* ]]; then
+        skip "qsu enforcing not enabled in this bake (config-pinned permissive; opt-in QDISTRO_BUILD_TIER1=1)"
+    fi
+    assert_success
+    assert_output_contains "PASS: SELinux mode now Enforcing"
+    assert_output_contains "PASS: admin approved the qsu request over D-Bus under Enforcing"
+    assert_output_contains "PASS: qsu /usr/bin/id ran under Enforcing (uid=0(root))"
+    assert_output_contains "PASS: 0 new denials — qsu policy covers the enforcing qsu flow"
+}
+
 @test "phase7-session-manager-enforcing: S6 — qdistro_sessmgr_t lifecycle AVC budget" {
     # S6 VM half: flip SELinux to enforcing, restart the session manager
     # under qdistro_sessmgr_t, run the representative s101 lifecycle
@@ -1192,7 +1214,72 @@ setup() {
     assert_output_contains "PASS: second qsu /bin/true cache-hit"
     assert_output_contains "PASS: qsu /bin/echo re-prompted"
     assert_output_contains "PASS: qsu /bin/echo rc=0 stdout='hello-from-s58' after admin allow once"
+    # Headless ports of permissions-gui 44/45/46/49/50/51/52/53/54 (the GUI
+    # scenarios' load-bearing checks: qsu rc/stdout, GetPending, ListHistory,
+    # approvals/audit rows). See the extension block in s58-qsu-real-flow.sh.
+    # pg/44 forever_argv
+    assert_output_contains "PASS: pg44: qsu /bin/echo hello ran after admin forever_argv"
+    assert_output_contains "PASS: pg44: cache row argv_exact|forever_argv for [/bin/echo, hello]"
+    assert_output_contains "PASS: pg44: same argv cache-hit, no prompt"
+    assert_output_contains "PASS: pg44: different argv [echo, hi] re-prompted (denied: request denied)"
+    assert_output_contains "PASS: pg44: longer argv [echo, hello, world] re-prompted (denied: request denied)"
+    # pg/45 forever_basename
+    assert_output_contains "PASS: pg45: python3 ran after admin forever_basename"
+    assert_output_contains "PASS: pg45: cache row basename||python3|forever_basename"
+    assert_output_contains "PASS: pg45: same argv[0], different payload cache-hit"
+    assert_output_contains "PASS: pg45: different path, same basename python3 cache-hit"
+    assert_output_contains "PASS: pg45: different basename perl re-prompted"
+    # pg/46 forever_prefix
+    assert_output_contains "PASS: pg46: systemctl status ran after admin forever_prefix"
+    assert_output_contains "PASS: pg46: cache row prefix|forever_prefix"
+    assert_output_contains "PASS: pg46: prefix + one trailing arg cache-hit (status output streamed)"
+    assert_output_contains "PASS: pg46: prefix + two trailing args cache-hit"
+    assert_output_contains "PASS: pg46: different verb [systemctl, restart] re-prompted"
+    # pg/49 ListHistory argv shape
+    assert_output_contains "PASS: pg49: qsu echo 'hello world' streamed after forever_argv"
+    assert_output_contains "|qsu.exec:root|argv_exact|forever_argv"
+    assert_output_contains "PASS: pg49: ListHistory argv is the lossless list [/usr/bin/echo, 'hello world'], caller_exe=/usr/local/bin/qsu, source=prompt"
+    assert_output_contains "PASS: pg49: second call cache-hit"
+    assert_output_contains "PASS: pg49: ListHistory newest qsu sources = cache,prompt"
+    # pg/50 argv_prefix rule
+    assert_output_contains "PASS: pg50: SaveRule wrote /etc/qdistro/rules.d/s58-allow-systemctl-status.yaml"
+    assert_output_contains "PASS: pg50: argv_prefix rule allowed systemctl status with no prompt"
+    assert_output_contains "PASS: pg50: audit row 1||rule|/etc/qdistro/rules.d/s58-allow-systemctl-status.yaml"
+    assert_output_contains "PASS: pg50: systemctl restart not matched by the rule (prompted, denied)"
+    assert_output_contains "PASS: pg50: newest audit rows 0|prompt,1|rule"
+    # pg/51 target_user in the action key
+    assert_output_contains "PASS: pg51: qsu -u work pends as action qsu.exec:work"
+    assert_output_contains "PASS: pg51: id ran as work (uid="
+    assert_output_contains "|qsu.exec:work|forever_argv"
+    assert_output_contains "PASS: pg51: same argv as root re-prompted as qsu.exec:root (no cross-target cache hit)"
+    assert_output_contains "PASS: pg51: root request denied (request denied)"
+    assert_output_contains "PASS: pg51: audit rows keyed by distinct actions (root|0, work|1)"
+    # pg/54 sanitized env
+    assert_output_contains "PASS: pg54: privileged env is the fixed baseline (no LD_PRELOAD/LD_LIBRARY_PATH/PYTHONPATH, PATH reset, USER/LOGNAME/HOME root)"
+    # pg/52 invalid target_user
+    assert_output_contains "PASS: pg52: root dbus-monitor live and sees unicast broker calls (positive control)"
+    assert_output_contains "PASS: pg52: root-exec answered error 'invalid target_user' + exit 1, no stdout/stderr frames"
+    assert_output_contains "PASS: pg52: broker saw zero RequestPermissionAs / qsu.exec traffic"
+    assert_output_contains "PASS: pg52: no qsu.exec audit row written"
+    # pg/53 in-flight cap
+    assert_output_contains "PASS: pg53: exactly one of 5 concurrent qsu calls rejected"
+    assert_output_contains "PASS: pg53: rejected qsu exited promptly with rc="
+    assert_output_contains "1..4 pending, the rejected argv never reached the broker"
     assert_output_contains "PASS: s58 — qsu real-flow argv-aware cache + re-prompt end-to-end"
+}
+
+@test "phase7-qsu-binary-installed: /usr/local/bin/qsu is an ELF binary, not a wrapper" {
+    # Moved from qsu-binary.bats (now host-only): after fresh-vm-bootstrap the
+    # REAL install path must ship the compiled client, not a shell/python
+    # wrapper — the s58 flow above depends on /proc/<pid>/exe being qsu.
+    vm_run "file -b /usr/local/bin/qsu"
+    assert_success
+    [[ "$output" == *ELF* ]] || fail_loud "qsu is not ELF: $output"
+    [[ "$output" != *"shell script"* ]] || fail_loud "qsu is a shell script: $output"
+    # ELF magic is 7f 45 4c 46.
+    vm_run "head -c 4 /usr/local/bin/qsu | od -An -tx1"
+    assert_success
+    assert_output_contains "7f 45 4c 46"
 }
 
 @test "phase7-tier1-audisp: spec/30 step 7 audispd → broker AVC ingestion" {
