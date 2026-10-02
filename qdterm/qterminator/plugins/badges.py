@@ -42,6 +42,12 @@ from PyQt6.QtWidgets import QLabel
 
 from qterminator.config import Config
 from qterminator.plugin import Plugin
+from qterminator.theme import pane_roles
+from qterminator.titlebar import _ui_font
+
+_BADGE_ALPHA = 96
+_FALLBACK_BADGE_COLOR = "#cccccc"
+_FALLBACK_SURFACE = "#1e1e1e"
 
 # ---------------------------------------------------------------------------
 # Template + variable resolution
@@ -189,6 +195,7 @@ class _BadgeOverlay(QLabel):
         self._corner = corner
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._color = color
         self._apply_style(color)
         self.setText("")
         self.hide()
@@ -239,20 +246,32 @@ class _BadgeOverlay(QLabel):
             self.hide()
         self._unhide_timer.start(self.HIDE_AFTER_KEYPRESS_MS)
 
+    def apply_presentation_update(self) -> None:
+        self._apply_style(self._color)
+        if self.text():
+            self.adjustSize()
+            self.reposition()
+
     def _apply_style(self, color: str) -> None:
+        self._color = color
         col = QColor(color)
         if not col.isValid():
-            col = QColor("#cccccc")
-        # Stylesheet keeps it self-contained — no need to subclass paint.
+            col = QColor(_FALLBACK_BADGE_COLOR)
+        surface = QColor(pane_roles(self)["surface"])
+        if not surface.isValid():
+            surface = QColor(_FALLBACK_SURFACE)
         css = (
             "QLabel { "
             f"color: {col.name()}; "
-            "background: rgba(0,0,0, 96); "
+            "background: "
+            f"rgba({surface.red()}, {surface.green()}, {surface.blue()}, "
+            f"{_BADGE_ALPHA}); "
             "border-radius: 4px; "
             "padding: 2px 6px; "
             "font-weight: 600; "
             "}"
         )
+        self.setFont(_ui_font(relative=0.9, bold=True))
         self.setStyleSheet(css)
 
 
@@ -357,6 +376,10 @@ class BadgesService:
             term = overlay._terminal
             ctx = collect_context(self._window, term, self._branch_cache)
             overlay.update_text(render_template(overlay.template, ctx))
+
+    def apply_presentation_update(self) -> None:
+        for overlay in self._overlays.values():
+            overlay.apply_presentation_update()
 
     @property
     def overlays(self) -> dict[int, _BadgeOverlay]:

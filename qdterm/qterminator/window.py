@@ -1087,6 +1087,10 @@ class MainWindow(QMainWindow):
                 split_update()
         for term in self.iter_terminals():
             term.apply_presentation_update()
+        badges = getattr(self, "badges", None)
+        badges_update = getattr(badges, "apply_presentation_update", None)
+        if callable(badges_update):
+            badges_update()
 
     def apply_profile_to_terminals(self, profile_name: str) -> None:
         for term in self.iter_terminals():
