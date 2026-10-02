@@ -31,6 +31,7 @@ import sqlite3
 import stat
 import sys
 import time
+from typing import Any
 
 CACHE_DB = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_DB = "/var/lib/qdistro/audit/audit.sqlite"
@@ -232,7 +233,7 @@ def _pending_rows(iface) -> list[dict]:
     """GetPending, normalized to plain Python types."""
     out = []
     for r in iface.GetPending():
-        row = {}
+        row: dict[str, Any] = {}
         for k, v in dict(r).items():
             k = str(k)
             if k in ("id", "uid", "pid"):
