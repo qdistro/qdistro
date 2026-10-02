@@ -55,7 +55,7 @@ qt.write_binding(L.binding_file(silo), {
     "state_path": state, "activation_policy": "manual", "identity_revision": 0})
 print(f"fixture: binding {L.binding_file(silo)} -> {gen}")
 PY
-out=$(as_admin qdistro-resolve-binding "$ST" --launch-env 2>&1); rc=$?
+out=$(as_admin /usr/bin/python3 /usr/libexec/qdistro/qdistro_resolve_binding.py "$ST" --launch-env 2>&1); rc=$?
 is "fixture: $ST resolves as templated (read-only resolution)" "$rc:$(printf '%s\n' "$out" | sed -n 's/^GENERATION=//p')" "0:$GEN"
 no_activation() { [ ! -e "$GEN_STATUS" ] && [ ! -e "$MARKER" ]; }
 is "fixture: no activation record yet" "$(yes_no no_activation)" yes
@@ -80,17 +80,15 @@ refused() {
     is "$tag: the spawn refused with the expected message" "$(unit_log "$unit" "$cur" | grep -cF "spawn-tier3s: REFUSE: $want")" 1
     is "$tag: refusal fails the launch unit visibly (exit 2)" \
         "$(systemctl show -p Result --value "$unit"):$(systemctl show -p ExecMainStatus --value "$unit")" "exit-code:2"
-    n=$(pm events --since "$t0" --until "$(date --iso-8601=seconds)" --filter type=container --format '{{.Status}} {{.Name}}' 2>&1 | grep -c .)
-    is "$tag: no podman run (admin's podman event stream has no container event)" "$n" 0
-    is "$tag: systemd never started an owning scope" \
-        "$(journalctl --after-cursor="$cur" _PID=1 --no-pager -o cat | grep -c 'qdistro-tier3s-[0-9a-f]\{32\}\.scope')" 0
+    launch_events_since "$t0" | sed 's/^/    podman event: /'
+    is "$tag: no podman run (no container event but the probe's scratch create/remove)" "$(launch_events_since "$t0" | grep -c .)" 0
+    is "$tag: systemd never started an owning scope" "$(units_started_since "$cur" "$T3S_SCOPE_RE")" 0
     is "$tag: no control record, no per-launch dir" "$(records | wc -l):$(find "$LAUNCHES" -mindepth 1 | wc -l)" "0:0"
     is "$tag: no container of any kind" "$(pm ps -a --format '{{.Names}}' | grep -c .)" 0
     if [ "$silo" = "$ST" ]; then
         is "$tag: no activation record for the templated silo" "$(yes_no no_activation)" yes
     fi
-    is "$tag: no fallback: no tier-2/podapp/tier-3 session unit was started" \
-        "$(journalctl --after-cursor="$cur" _PID=1 --no-pager -o cat | grep -E '^Start(ed|ing) ' | grep -ciE 'tier2|tier-2|podapp|qdshell-session|silo-launch@')" 0
+    is "$tag: no fallback: no tier-2/podapp/tier-3 session unit was started" "$(units_started_since "$cur" "$FALLBACK_RE")" 0
     info "$tag: silo state afterwards: $(silo_state "$silo")"
     sm StopSilo si "$silo" 10 > /dev/null 2>&1
     systemctl reset-failed "$unit" 2>/dev/null
@@ -116,10 +114,9 @@ wait_for 90 unit_down "$(unit_of $ST)"
 unit_log "$(unit_of $ST)" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
 is "control: activation status written (generation = fixture)" "$(sed -n "s/^generation = '\(.*\)'$/\1/p" "$GEN_STATUS" 2>/dev/null)" "$GEN"
 is "control: activation marker committed" "$(tr -d ' \n' < "$MARKER" 2>/dev/null)" "$GEN"
-is "control: podman event stream shows the container run" \
-    "$(pm events --since "$t0" --until "$(date --iso-8601=seconds)" --filter type=container --format '{{.Status}} {{.Name}}' | grep -c "^start qdistro-tier3s-$ST\$")" 1
-is "control: systemd started an owning scope" \
-    "$(journalctl --after-cursor="$cur" _PID=1 --no-pager -o cat | grep -c 'Started .*qdistro-tier3s-[0-9a-f]\{32\}\.scope' | sed 's/[1-9][0-9]*/yes/')" yes
+launch_events_since "$t0" | sed 's/^/    podman event: /'
+is "control: the same event oracle sees the container start" "$(launch_events_since "$t0" | grep -c "^start qdistro-tier3s-$ST\$")" 1
+is "control: the same scope oracle sees the owning scope start" "$(units_started_since "$cur" "$T3S_SCOPE_RE")" 1
 tok=$(unit_log "$(unit_of $ST)" "$cur" | sed -n 's/^LAUNCH_TOKEN=\([0-9a-f]\{32\}\)$/\1/p' | head -1)
 is "control: templated launch ran the image by its generation digest" "$(unit_log "$(unit_of $ST)" "$cur" | grep -c "^IMAGE=$GEN\$")" 1
 is "control: the smoke ran to its end under gVisor" "$(scope_log "$tok" | grep -c '^SMOKE done' | sed 's/[1-9][0-9]*/yes/')" yes
@@ -139,7 +136,7 @@ cur=$(journal_cursor)
 out=$(sm StartSilo s $SA 2>&1); rc=$?
 info "StartSilo on release: rc=$rc $out"
 is "release: StartSilo refused with the message" "$([ "$rc" -ne 0 ] && printf '%s' "$out" | grep -cF "$MSG")" 1
-is "release: StartSilo started no launch unit" "$(journalctl --after-cursor="$cur" _PID=1 --no-pager -o cat | grep -c "qdistro-tier3s-silo@$SA")" 0
+is "release: StartSilo started no launch unit" "$(units_started_since "$cur" 'qdistro-tier3s-silo@.*')" 0
 is "release: silo state unchanged" "$(silo_state $SA)" Stopped
 # the spawn refuses on its own: a hand-written stanza, the unit started directly
 start_direct() {

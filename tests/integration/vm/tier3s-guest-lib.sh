@@ -96,6 +96,28 @@ unit_log() { journalctl -u "$1" --no-pager -o cat --after-cursor="$2" 2>/dev/nul
 # The workload's output: journald files it under the owning scope (podman's
 # attached stdout and conmon's log driver run there), not under the launch unit.
 scope_log() { journalctl _SYSTEMD_UNIT="qdistro-tier3s-$1.scope" --no-pager -o cat 2>/dev/null; }
+# Units systemd (pid 1) started since a cursor whose UNIT field matches a
+# regex: journal fields, never the message text of other processes.
+units_started_since() {   # units_started_since <cursor> <python regex>
+    journalctl --after-cursor="$1" _PID=1 -o json --no-pager 2>/dev/null | python3 -c '
+import json, re, sys
+n = 0
+for line in sys.stdin:
+    j = json.loads(line)
+    if j.get("JOB_TYPE") == "start" and re.fullmatch(sys.argv[1], j.get("UNIT", "")):
+        n += 1
+print(n)' "$2"
+}
+T3S_SCOPE_RE='qdistro-tier3s-[0-9a-f]{32}\.scope'
+# no fallback tier: tier-2 silo/podapp units and tier-3 user-silo sessions
+FALLBACK_RE='(qdistro-tier2-.*|qdistro-podapp@.*|qdshell-session.*|qdistro-silo-launch.*)\.(service|scope)'
+# admin's podman container events since a time, minus the probe's own scratch
+# container (probe.sh creates and removes tier3s-probe-<pid> to check the
+# runtime; it is never started)
+launch_events_since() {   # launch_events_since <iso time>
+    pm events --since "$1" --until "$(date --iso-8601=seconds)" --filter type=container \
+        --format '{{.Status}} {{.Name}}' 2>&1 | grep -vE '^(create|remove) tier3s-probe-[0-9]+$' | grep .
+}
 records() { find "$CTL" -mindepth 1 -maxdepth 1 -regextype egrep -regex '.*/[0-9a-f]{32}' -printf '%f\n' 2>/dev/null; }
 rec() { sed -n "s/^$2=//p" "$CTL/$1/state" 2>/dev/null; }   # rec <token> <key>
 token_of_unit() {   # the control record whose unit= is $1 (exactly one)
