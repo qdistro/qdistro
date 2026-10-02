@@ -9,7 +9,7 @@ flips the qdshell WindowManager settings tab from persist-only to live-apply),
 plus one real visual proof that a tile resizes the live client. This is the
 qdshell-driven half of the v25 surface; the direct-compositor functional proof
 (FIFO-driven `set_wm_policy`/`request_tile`/`request_fullscreen`/`register_hotkey`
-against `qdwin-bystander`) lives in its sibling `21-wm-policy-bystander.md`.
+against `qdwin-bystander`) lives in the executable smoke `agent-wm-policy-bystander-smoke.sh`.
 
 **Why**: v25 is what flips the qdshell WindowManager settings tab from
 persist-only to live-apply (`CapabilityService.wmPolicy` /
@@ -313,6 +313,6 @@ or is a justified SKIP) and STOP.
 
 The direct-compositor functional proof (bystander as shell: `set_wm_policy`
 focus/placement/snap, `request_tile` left/right/restore, `request_fullscreen`
-fill/restore, `register_hotkey`) is exercised in `21-wm-policy-bystander.md`.
+fill/restore, `register_hotkey`) is exercised in `agent-wm-policy-bystander-smoke.sh`.
 Focus-follows-mouse retarget-delay and edge-snapping during an interactive drag
 remain out of scope (timing-sensitive).

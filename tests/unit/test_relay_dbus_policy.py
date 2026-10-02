@@ -40,7 +40,6 @@ import qdistro_session_manager as sm
 from qdistro_session_manager import (
     BadArgument,
     KIND_TIER2_TEMPLATE,
-    KIND_TIER3_USER,
     RELAY_POLICY_PREFIX,
     SessionError,
     State,
@@ -963,6 +962,23 @@ class TestInstalledPath:
         return [ln for ln in path.read_text().splitlines()
                 if needle in ln and not ln.strip().startswith("#")]
 
+    def _gui_fixture_source(self) -> str:
+        """Follow the real provisioning helper, retaining caller checks too."""
+        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
+        helper = _REPO / "scripts" / "vm" / "lib" / "gui-silo-fixtures.sh"
+        text = gui.read_text()
+        code = "\n".join(ln for ln in text.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert 'bash "$SRC/scripts/vm/lib/gui-silo-fixtures.sh" --prove-restart' in code, (
+            "spin-test-vm-gui.sh must invoke the durable-silo helper with "
+            "--prove-restart, not just mention it in a comment")
+        assert '|| { echo "[gui-spin] ERROR: work/work2 silo fixtures failed"; exit 1; }' in code, (
+            "spin-test-vm-gui.sh must stop golden construction when the "
+            "durable-silo helper fails")
+        # Positive invariants moved into the helper; prohibitions must still
+        # cover the caller as well, so an old shortcut cannot return there.
+        return text + "\n" + helper.read_text()
+
     def test_bootstrap_installs_the_session_manager(self):
         """qdistro-session-manager is the ONLY thing that issues a relay
         grant. An install chain without it leaves every silo's relay unable
@@ -1011,13 +1027,15 @@ class TestInstalledPath:
         instead of revoking it — and the scenarios exercise the production
         path rather than a harness-only shortcut.
         """
-        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
-        text = gui.read_text()
+        text = self._gui_fixture_source()
         # Match the CALL, not a comment that mentions it: this test's
         # predecessor asserted a bare `"relay_policy_xml" in text` and was
         # satisfied by the rationale comment alone, so it stayed green while
         # the script called something else entirely.
         code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+        assert any("sm_call CreateSilo" in ln for ln in code), (
+            "the GUI fixture helper must actually call CreateSilo; an echo "
+            "or comment naming the method is not provisioning")
         assert any("CreateSilo" in ln for ln in code), (
             "spin-test-vm-gui.sh does not create work/work2 through "
             "SessionManager1.CreateSilo; hand-made users have no silos.yaml "
@@ -1043,8 +1061,7 @@ class TestInstalledPath:
         results. The harness must restart the session manager and re-check
         the fragments, so a regression fails once, during golden
         construction, where it is cheap and unambiguous."""
-        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
-        code = [ln for ln in gui.read_text().splitlines()
+        code = [ln for ln in self._gui_fixture_source().splitlines()
                 if not ln.lstrip().startswith("#")]
         joined = "\n".join(code)
         assert "restart qdistro-session-manager.service" in joined, (
@@ -1065,10 +1082,12 @@ class TestInstalledPath:
         The harness must therefore StartSilo both and assert the daemon's own
         view of their state after the restart, not just that a file exists.
         """
-        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
-        code = [ln for ln in gui.read_text().splitlines()
+        code = [ln for ln in self._gui_fixture_source().splitlines()
                 if not ln.lstrip().startswith("#")]
         joined = "\n".join(code)
+        assert "sm_call StartSilo" in joined, (
+            "the GUI fixture helper must actually call StartSilo, not just "
+            "mention the method in a diagnostic")
         assert "StartSilo" in joined, (
             "spin-test-vm-gui.sh creates the fixture silos but never starts "
             "them; a Created (not Active) silo is refused by the broker's "
@@ -1088,8 +1107,7 @@ class TestInstalledPath:
         reconcile. That state must stop the bake with a migration message —
         not be silently skipped, and not be auto-repaired with userdel, which
         would destroy a reused VM's fixture home."""
-        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
-        code = [ln for ln in gui.read_text().splitlines()
+        code = [ln for ln in self._gui_fixture_source().splitlines()
                 if not ln.lstrip().startswith("#")]
         joined = "\n".join(code)
         assert "is NOT a registered" in joined, (

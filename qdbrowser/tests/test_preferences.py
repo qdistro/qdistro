@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QWidget
-from qdbrowser.config import Config
-from qdbrowser.preferences import PreferencesDialog, THEME_KEY_TO_LABEL
+from qdbrowser.preferences import THEME_KEY_TO_LABEL, PreferencesDialog
 from qdbrowser.theme import (
     attach_presentation,
     current_controller,
     reset_controller_for_tests,
 )
-from dataclasses import replace
-
 from qdistro_presentation.model import (
     DESKTOP_SETTINGS_UNAVAILABLE,
     example_snapshot,

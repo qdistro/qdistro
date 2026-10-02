@@ -1,5 +1,7 @@
 # 05 — human-in-the-loop: pending approval queue gates the run
 
+<!-- qci:visual: required -->
+
 **What**: seed a workflow that does NOT opt into `auto_run`. Fire its
 trigger and confirm the engine parks a **PENDING** run instead of
 executing it. In the admin app's Workflows tab, select the pending run and

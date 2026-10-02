@@ -11,6 +11,85 @@ qdshell where applicable, or the root maintenance helper. The system-bus
 policy makes these methods reachable to the admin account, but the server-side
 peer identity check is the authority boundary.
 
+## Approving without the graphical app
+
+The image ships two non-graphical approval surfaces next to the Qt app. All
+three are installed by the bootstrap chain's `admin-app` step
+(`scripts/install/install-admin-app-for-vm.sh`, which runs
+`install-admin-cli-for-vm.sh`), so a machine install and the image get the
+same files.
+
+| Command | Run as | What it is |
+|---|---|---|
+| `qdistro-approvals` (`/usr/local/sbin`) | root | CLI: `pending`, `approve`, `deny`, plus the cache and audit commands (`list`, `revoke`, `audit`, `gc`, `audit-gc`) |
+| `qdistro-admin-tui` (`/usr/local/bin`) | the admin user (uid 1000) | Textual approval queue for any terminal (a VT, SSH, a serial console); same scopes and keys as the Qt app, see `tui/SHORTCUTS.md` |
+
+As root, for example over SSH while the admin's session is down:
+
+```sh
+qdistro-approvals pending                  # id, uid, pid, action, exe, details
+qdistro-approvals pending --json           # the broker's GetPending rows
+qdistro-approvals approve 12               # scope once (the default)
+qdistro-approvals approve 12 --scope 24h   # cached; warns, revoke with `revoke`
+qdistro-approvals deny 12
+qdistro-approvals audit --limit 5          # the decision's audit row
+```
+
+`approve` and `deny` call the broker's `DecideRequest` with the same
+semantics as the Qt app and the TUI: `--scope` takes the broker's scopes
+(`once`, `1h`, `24h`, `forever`, `forever_exe`, `forever_argv`,
+`forever_basename`, `forever_prefix`), and the broker refuses the ones a
+request cannot take (delegated and one-shot requests, argv scopes without a
+captured argv) with an error the CLI prints. A deny is never cached, so it is
+always sent with scope `once`. The CLI checks `GetPending` first and exits
+1 with `no pending request with id=N` for an id that is not pending (see
+below for how the broker reports the outcome). Requester-
+supplied text (action, exe, details) is printed with control characters
+escaped. The audit row records `approver_uid` 0 for a CLI decision.
+
+How the broker recognises them, and what that is worth: it reads
+`/proc/<pid>/exe`, which for a Python script is the interpreter
+(`/usr/bin/python3.13`), so for a Python peer it also requires the installed
+script path somewhere in the process argv. When the kernel runs a script
+through its shebang it puts the path the script was executed by into argv,
+so the installed `qdistro-approvals` and `qdistro-admin-tui` are admitted,
+while `python3 cli/qdistro_approvals.py` from a source tree or a copy
+elsewhere is refused with `AccessDenied`. This identifies the genuine tool
+for honest callers; it is **not** a security boundary against root (or
+against other code running as the admin uid). Any root Python process that
+merely names `/usr/local/sbin/qdistro-approvals` in its argv is admitted
+without running the script (`tests/unit/test_cli_pending_decide.py` pins
+that), and root can reach the broker through `busctl` anyway. Root is fully
+trusted here; the boundary the broker enforces is against other uids. The TUI
+refuses to start as root and points at the CLI.
+
+Run the CLI by its absolute path or from a root login shell: `sudo`'s
+default `secure_path` on openSUSE does not include `/usr/local/sbin`, so
+`sudo qdistro-approvals` may not find it; use
+`sudo /usr/local/sbin/qdistro-approvals ...` or `sudo -i`.
+
+`DecideRequest` returns, atomically with the decision, what that call did:
+`applied`; `applied-uncached` (the request is decided, but storing a cached
+scope's row failed, so later identical requests prompt again; caching is
+best-effort); `already-allow`/`already-deny` (someone decided first; nothing
+changed); `deciding` (another call's decision is still being audited and
+may yet be downgraded to deny); or `unknown` (no such request in this
+broker instance). The CLI exits 0 on `applied`, and on `applied-uncached`
+with a warning. On `already-*` it exits 1 and names the decision that
+holds; this includes a second root CLI that decides the same request
+identically, so exactly one concurrent decider reports success. Anything
+else exits 3 with "outcome unconfirmed". The CLI never infers success from
+the request leaving the pending list or from audit rows (request ids
+restart with the broker and audit timestamps follow the wall clock). Its
+D-Bus proxy is bound to the broker's unique bus name, so a broker restart
+between `pending`-snapshot and decision fails the call rather than deciding
+a reused id. Exit codes: 0 applied; 1 refused, already decided by another
+approver, an id not pending at the `pending` check, or a broker error; 2
+usage or a missing database; 3 outcome unconfirmed (including a
+broker-side `unknown` or `deciding`), or (`list`/`audit`) a database path
+that is not a regular file; 4 dbus-python missing; 5 broker unreachable.
+The Qt app and the TUI ignore the return value.
+
 ## Never block admin's work
 
 Traditional polkit agents pop modal dialogs that steal focus and block

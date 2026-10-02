@@ -147,6 +147,6 @@ virt-customize -a "$IMG" \
 # qdistro-fprintd-fake is staged but NOT enabled — it claims the
 # same bus name as the real fprintd and would race on boot. Tests
 # that need it call `systemctl start qdistro-fprintd-fake.service`
-# AFTER stopping fprintd; see qdlocker/tests/gui/02-fprintd-fallback.md.
+# AFTER stopping fprintd; see qdlocker/tests/gui/agent-fprintd-fallback-smoke.sh.
 
 echo "[qdlocker-install] done."

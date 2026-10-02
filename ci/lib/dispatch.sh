@@ -338,7 +338,10 @@ main() {
             done
             gate_bats "$EXPLICIT_VM" "${files[@]}"; rc=$?; finish_run "$rc" ;;
         gui|gui-admin)
-            [ "$cmd" = gui-admin ] && export QCI_GUI_SKIP_QDWIN=1
+            # `qci gui-admin` IS the labwc admin lane, which is otherwise opt-in
+            # (gui_scenario_labwc_lane_skip_reason); an explicit 0 still wins.
+            [ "$cmd" = gui-admin ] && export QCI_GUI_SKIP_QDWIN=1 \
+                QCI_LABWC_ADMIN_LANE=${QCI_LABWC_ADMIN_LANE:-1}
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --vm) shift; EXPLICIT_VM=${1:-} ;;

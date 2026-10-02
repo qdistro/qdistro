@@ -887,7 +887,7 @@ class _Request:
         "id", "uid", "pid", "exe", "start_time", "action", "details",
         "decision", "waiters", "delegated", "one_shot",
         "exe_sha256", "selinux_label", "cgroup", "layered_pending",
-        "decided_at",
+        "decided_at", "finalizing",
     )
 
     def __init__(self, rid: int, uid: int, pid: int, exe: str,
@@ -909,6 +909,11 @@ class _Request:
         self.action = action
         self.details = details
         self.decision: bool | None = None
+        # True while DecideRequest has set `decision` but has not yet
+        # written its audit row: an audit failure there still downgrades
+        # the decision to deny, so a concurrent DecideRequest must not
+        # report the provisional value as final.
+        self.finalizing = False
         # callbacks waiting for a decision; each is (reply_cb, error_cb)
         self.waiters: list[tuple] = []
         # True if identity was claimed by a trusted delegator
@@ -940,6 +945,70 @@ class _Request:
         # audit-failure downgrade) gets reaped without each one having
         # to remember to set it.
         self.decided_at: float | None = None
+
+
+# A Python-only capability: D-Bus always supplies a string sender, so no
+# external connection can impersonate a workflow's in-process call.
+_WORKFLOW_SENDER = object()
+_WORKFLOW_DISPATCH_TIMEOUT_S = 30
+
+
+class _WorkflowBrokerProxy:
+    """Expose only the engine's existing read/maintenance broker allowlist.
+
+    Calling our own D-Bus proxy synchronously would deadlock the broker's
+    main loop. Direct calls instead carry a private capability, and still
+    enter the real methods (including their audit and cache effects).
+    """
+
+    def __init__(self, broker):
+        self._broker = broker
+        # Constructed by Broker._setup_workflow_engine on the broker thread,
+        # before its GLib loop starts. Workflow steps execute in a pool; the
+        # broker's state, rules reload and sqlite connections are mainloop-only.
+        self._mainloop_thread = threading.get_ident()
+
+    def _invoke(self, fn, args, *, with_sender=True):
+        kwargs = {'sender': _WORKFLOW_SENDER} if with_sender else {}
+        if threading.get_ident() == self._mainloop_thread:
+            return fn(*args, **kwargs)
+        future = concurrent.futures.Future()
+
+        def dispatch():
+            # A timed-out queued operation must not run later. Once running,
+            # it cannot be undone, just like an ordinary timed-out RPC.
+            if not future.set_running_or_notify_cancel():
+                return False
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:  # noqa: BLE001
+                future.set_exception(exc)
+            return False
+
+        GLib.idle_add(dispatch)
+        try:
+            return future.result(timeout=_WORKFLOW_DISPATCH_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            if future.done():
+                # Preserve a TimeoutError raised by the method itself (and
+                # an operation that completed at the timeout boundary).
+                return future.result()
+            canceled = future.cancel()
+            outcome = ("queued operation canceled" if canceled else
+                       "operation already running; outcome unconfirmed")
+            raise TimeoutError(f"workflow broker dispatch timed out: {outcome}") from None
+
+    def __getattr__(self, name):
+        if name == "hooks":
+            return getattr(self._broker, name)
+        if name == "WorkflowRunPending":
+            fn = getattr(self._broker, name)
+            return lambda *args: self._invoke(fn, args, with_sender=False)
+        from workflow_engine import _BROKER_METHOD_WHITELIST
+        if name not in _BROKER_METHOD_WHITELIST:
+            raise AttributeError(name)
+        fn = getattr(self._broker, name)
+        return lambda *args: self._invoke(fn, args)
 
 
 class Broker(dbus.service.Object):
@@ -1158,7 +1227,7 @@ class Broker(dbus.service.Object):
                           flush=True)
                     channel_registrar = None
             engine = WorkflowEngine(
-                broker_proxy=self,
+                broker_proxy=_WorkflowBrokerProxy(self),
                 audit_logger=wf_audit,
                 secret_source=PwdSecretSource(),
                 # The broker owns the process main loop; D-Bus triggers
@@ -1349,6 +1418,13 @@ class Broker(dbus.service.Object):
         process and the admin's click must not grant trust to that
         process's action.
         """
+        if sender is _WORKFLOW_SENDER:
+            # Only _WorkflowBrokerProxy supplies this capability. Use the
+            # actual process identity, never fabricate uid 0 for test or
+            # standalone engines running without root privileges.
+            pid = os.getpid()
+            exe, start_time = _read_proc_identity(pid)
+            return os.getuid(), pid, exe, start_time
         bus = dbus.SystemBus()
         dbus_proxy = bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus")
         dbus_iface = dbus.Interface(dbus_proxy, "org.freedesktop.DBus")
@@ -1428,6 +1504,14 @@ class Broker(dbus.service.Object):
     def _require_admin_control_peer(self, sender, conn, method: str
                                     ) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
+        if sender is _WORKFLOW_SENDER:
+            from workflow_engine import _BROKER_METHOD_WHITELIST
+            if uid == 0 and method in _BROKER_METHOD_WHITELIST:
+                return uid, pid, exe, st
+            raise dbus.DBusException(
+                f"{method} not permitted for the in-process workflow",
+                name=BUS_NAME + ".AccessDenied",
+            )
         ok, reason = self._peer_matches_admin_control(uid=uid, pid=pid,
                                                       exe=exe, method=method)
         if not ok:
@@ -4300,8 +4384,26 @@ class Broker(dbus.service.Object):
                 })
             return out
 
-    @dbus.service.method(BUS_NAME, in_signature="iss", out_signature="", sender_keyword="sender", connection_keyword="conn")
-    def DecideRequest(self, request_id: int, decision: str, scope: str, sender=None, conn=None):
+    @dbus.service.method(BUS_NAME, in_signature="iss", out_signature="s", sender_keyword="sender", connection_keyword="conn")
+    def DecideRequest(self, request_id: int, decision: str, scope: str, sender=None, conn=None) -> str:
+        """Apply an admin decision to a pending request.
+
+        Returns, atomically with the decision (it is taken under the same
+        lock that sets req.decision), what THIS call did:
+          "applied"       this call's decision was applied to the request
+                          (and, for a cached scope, stored in the cache)
+          "applied-uncached"
+                          applied, but storing the cache row failed: the
+                          request is decided, the scope is not remembered
+          "already-allow" / "already-deny"
+                          the request had already been decided by someone
+                          else; this call changed nothing
+          "deciding"      another call is still finalizing its decision
+                          (audit pending; it may yet be downgraded to deny)
+          "unknown"       no such request in this broker instance
+        Errors (bad argument, scope refused, caller gone, audit failure)
+        still raise. Callers that predate the return value ignore it.
+        """
         admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
             sender, conn, "DecideRequest")
         decision_s = str(decision)
@@ -4318,8 +4420,14 @@ class Broker(dbus.service.Object):
             )
         with self._lock:
             req = self._pending.get(int(request_id))
-            if req is None or req.decision is not None:
-                return
+            if req is None:
+                return "unknown"
+            if req.decision is not None:
+                if req.finalizing:
+                    # another DecideRequest is between its decision and
+                    # its audit row; the outcome is not final yet
+                    return "deciding"
+                return "already-allow" if req.decision else "already-deny"
             # Delegated requests can't produce long-lived grants — the
             # broker never authenticated the claimed peer identity
             # itself, so persisting trust against it would let one
@@ -4384,6 +4492,7 @@ class Broker(dbus.service.Object):
                     )
             allowed = (decision_s == "allow")
             req.decision = allowed
+            req.finalizing = True
             waiters = list(req.waiters)
             req.waiters.clear()
             cache_uid, cache_pid, cache_action, cache_exe = req.uid, req.pid, req.action, req.exe
@@ -4412,6 +4521,7 @@ class Broker(dbus.service.Object):
                     req2 = self._pending.get(int(request_id))
                     if req2 is not None:
                         req2.decision = False
+                        req2.finalizing = False
                 for reply_cb, _err in waiters:
                     try:
                         reply_cb(False)
@@ -4424,11 +4534,17 @@ class Broker(dbus.service.Object):
                     name=BUS_NAME + ".AuditUnavailable",
                 ) from e
 
+        with self._lock:
+            req.finalizing = False
+        # (A non-AUDIT_REQUIRED audit failure falls through to here too:
+        # the decision stands, as before.)
+
         # Cache writes only happen on allow, and only after audit has
         # succeeded — we never extend trust past a failed audit.
         # one_shot explicitly skips the cache: scope_s is 'once' for
         # these (enforced above) so scope_to_row would already be None,
         # but an explicit guard makes the intent obvious.
+        cached_ok = True
         if allowed and not req.one_shot:
             try:
                 wrote = self.cache.store(cache_uid, cache_action, cache_exe,
@@ -4439,6 +4555,7 @@ class Broker(dbus.service.Object):
                           f"exe={cache_exe!r} scope={scope}", flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] cache.store failed: {e}", flush=True)
+                cached_ok = False
 
         for reply_cb, _err in waiters:
             try:
@@ -4446,6 +4563,10 @@ class Broker(dbus.service.Object):
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] reply_cb failed: {e}", flush=True)
         self.RequestDecided(int(request_id), "allow" if allowed else "deny")
+        # Caching is best-effort: the request's decision stands either way;
+        # "applied-uncached" lets a caller warn that a non-once scope will
+        # not be remembered.
+        return "applied" if cached_ok else "applied-uncached"
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}",
                          sender_keyword="sender", connection_keyword="conn")

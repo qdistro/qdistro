@@ -82,7 +82,7 @@ MAX_REQUEST_BYTES = 1_000_000
 # target_user must be a plausible POSIX username. Without a whitelist,
 # embedded newlines / control chars flow into the broker action string
 # and the audit syslog line.
-_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\Z")
 
 # Workflow-run ids are uuid4 hex-with-dashes (see WorkflowRun.run_id).
 # Validate before it flows into the broker call / syslog: a hostile

@@ -192,7 +192,7 @@ gate_lint() {
 # can never conflate "qdistro-owned is strict-clean" with "umbrella is
 # strict-clean" (the plan's §3 requirement):
 #   qdistro-owned strict = qdistro/tests/integration/{permissions-gui,
-#                          qdwin-noctalia} — the migration metric for the scenarios
+#                          qdwin-noctalia,workflow-gui} — the migration metric for the scenarios
 #                          this repo owns and can fix directly.
 #   umbrella      strict = the SAME path set `qci gui` schedules (qdistro + in-tree
 #                          qdwin/qdlocker roots) — the readiness metric for widening

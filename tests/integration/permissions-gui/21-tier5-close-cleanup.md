@@ -20,8 +20,8 @@ the title-bar glyph: clicking depends on OCR aim and on the idle
 locker not stealing the frame, so a missed click was historically
 mis-read as "window persists after close". The IPC path removes both
 variables, so a toplevel that survives the close is an unambiguous
-product signal. The title-bar chrome close button itself is covered
-separately by `qdwin/tests/gui/08-titlebar-close-button.md`.
+product signal. (qdwin no longer draws server-side title-bar chrome
+for ordinary apps, so there is no chrome close button to click.)
 
 ## Setup
 

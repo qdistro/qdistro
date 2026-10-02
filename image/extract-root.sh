@@ -75,6 +75,8 @@ PATHS=(
 # above already carries the [sdk] row's file.) The two pip apps go to /usr:
 if [ -n "$PYLIB" ]; then
     PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")
+    # The admin TUI's Textual (RPM): only the file the [admin-app] row checks.
+    PATHS+=("$PYLIB/site-packages/textual/__init__.py")
 fi
 # The copy includes the image's /etc (shadow with the baked test-password
 # hash, generated SSH host keys). File modes survive the copy, and the tree

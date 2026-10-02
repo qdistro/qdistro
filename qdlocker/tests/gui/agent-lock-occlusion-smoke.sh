@@ -6,7 +6,11 @@
 # sentinel toplevel behind the locker, then asserting no magenta pixels
 # remain visible after qdlocker reports locked=True.
 
-set -euo pipefail
+# NOT pipefail: qdlocker_count_color_in_crop validates the histogram with
+# `printf | grep -q`, and grep -q exits on the first match; with a large
+# histogram printf then dies of SIGPIPE and pipefail turns that into a bogus
+# "no histogram" setup failure (rc=2) on a perfectly good frame.
+set -eu
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -22,7 +26,7 @@ locked="/tmp/qdlocker-occlusion-${run_id}-locked.png"
 cleanup() {
     qdlocker_drain_lock_state >/dev/null 2>&1 || true
     "$QDWIN_VM_EXEC" "$VMNAME" '
-      pkill -u admin -x qdistro-test-window 2>/dev/null || true
+      pkill -KILL -u admin -f ^qdistro-test-window 2>/dev/null || true
     ' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -33,14 +37,16 @@ qdlocker_drain_lock_state
 # hardcoding 1920x1080.  Crop geometry must match the real framebuffer
 # or asserts silently pass/fail at the wrong coordinates.
 qdwin_screenshot "$pre" >/dev/null
-read -r SW SH < <(qdlocker_screenshot_dimensions "$pre")
+# here-string, not < <(...): the helper prints "W H" with NO trailing newline,
+# so `read` hit EOF, returned 1 and set -e killed the smoke right here.
+read -r SW SH <<<"$(qdlocker_screenshot_dimensions "$pre")"
 if [ -z "$SW" ] || [ -z "$SH" ] || [ "$SW" -lt 640 ] || [ "$SH" -lt 480 ]; then
     echo "FAIL: unexpected screenshot dimensions ${SW}x${SH}" >&2
     exit 2
 fi
 
 "$QDWIN_VM_EXEC" "$VMNAME" "
-  pkill -u admin -x qdistro-test-window 2>/dev/null || true
+  pkill -KILL -u admin -f ^qdistro-test-window 2>/dev/null || true
   pkill -u admin -x foot 2>/dev/null || true
   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
     qdistro-test-window --title qdlocker-sentinel \

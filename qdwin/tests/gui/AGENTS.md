@@ -188,26 +188,16 @@ hard-coded coordinates across clones.
 
 | File | What it covers |
 |---|---|
-| `01-open-terminal.md` | end-to-end: launcher → filter → activate → type into focused terminal (B2 + auto-focus + ctrl-socket launcher path) |
-| `02-launcher-keyboard.md` | real-keyboard input into launcher overlay — type, arrows, Esc, Enter (B3) |
-| `03-locker-cycle.md` | Ctrl+Alt+L → type password → Enter unlock → keyboard reaches focused toplevel again (B1 + B4 + post-unlock regression) |
-| `04-alt-tab-switch.md` | Alt+Tab single-press swaps focus + raises + survives close-and-refocus (switcher_grab + anchor + request_raise re-stack + on_toplevel_removed refocus) |
-| `05-launcher-rescan.md` | new app installed mid-session appears in launcher on next toggle (B5) |
-| `06-mouse-click-focus.md` | clicking a background window's chrome focuses + raises it (mouse path) |
-| `07-titlebar-buttons.md` | clicking maximize / restore / minimize glyphs on the titlebar actually changes window state (mouse path) + ctrl-socket control comparison; also verifies maximised window leaves room for chrome + panel (not fullscreen) |
-| `08-titlebar-close-button.md` | clicking the red × on the titlebar destroys the toplevel; chrome_button right-click+left-click cycle for the close action |
-| `09-titlebar-context-menu.md` | right-click on titlebar opens qdshell context-menu popup; clicking "Restore"/"Maximise" / "Minimise" / "Close" items dispatches the right action via qdwin_shell_v1@v21 popup_button |
-| `10-context-menu-relabel.md` | the maximise/restore row label flips with `tl.state & 1` on every menu open ("Maximise" ↔ "Restore"), proving the label is recomputed not cached |
 | `12-bar-no-overdraw.md` | bar `content` and `exclusion-top` agree on height; maximized windows do not have their top row clipped by the bar's bottom row (pixel-mismatch fix + `exclusionZoneBleed` toggle round-trip) |
 | `13-focus-events-emitted.md` | every keyboard-focus transition between toplevels emits a `qdwin: focus handle=N (was M) seat=…` line, including the spawn / spawn / close-handoff / last-close-to-no-window sequence |
-| `14-bar-content-quiet-when-idle.md` | journal grows by ≤2 bar-content remap lines over 10 s idle (no remap storm) and re-settles to quiet after a window cycle |
-| `15-keybinding-events.md` | Ctrl+Space / Alt+Tab / Ctrl+Alt+L / registered hotkeys all emit `qdwin: <event>` log lines independent of shell binding state (silent-drop guard) |
-| `16-qdshell-binding-protocol-events.md` | qdshell binds qdwin_shell_v1 at v14 via the Qdistro.Qdwin QML plugin; `hello`, `toplevel_added/removed`, `seat_focus_changed`, and switcher_next/commit all round-trip; alt+tab cycles focus via the protocol |
-| `17-qdshell-drives-close.md` | qdshell's `Qdwin.closeWindow` Q_INVOKABLE invokes `qdwin_shell_v1.request_close(handle)`; target toplevel exits cleanly and the removal propagates back through the protocol to the QML side |
+| `agent-bar-quiet-idle-smoke.sh` | executable (was 14): journal grows by ≤2 bar-content remap lines over 10 s idle and after a window cycle (no remap storm) |
+| `agent-keybinding-events-smoke.sh` | executable (was 15): Ctrl+Space / Alt+Tab / Ctrl+Alt+L each emit their `qdwin: <event>` log line independent of shell binding state |
+| `agent-shell-binding-events-smoke.sh` | executable (was 16): qdshell binds qdwin_shell_v1 ≥v14; `Qdwin.windows` matches the compositor's toplevel/focus events |
+| `agent-shell-drives-close-smoke.sh` | executable (was 17): `qs ipc` `Qdwin.closeWindow` → `request_close` dispatched → `toplevel_removed`; focus leaves the closed handle |
 | `18-workspace-switch.md` | v24 workspaces: switching hides/shows windows across workspaces and the settings count reconciles to the compositor (ext-workspace-v1 + qdshell `workspace` IPC) |
 | `19-wm-policy.md` | v25 window-manager-policy qdshell-driven gate: IPC `capabilities` reports `bound=true wmPolicy=true keybindRegistration=true` (WindowManager tab live-apply) + one visual proof a tile resizes the live client. Direct-compositor proof split out to `21-wm-policy-bystander.md` |
-| `20-idle-dpms.md` | v26 idle/DPMS: Path A reads the idle/DPMS capability deterministically via qdshell IPC (`idleDpms=true`, journal `idleDpms -> true` fallback); Path B drives `set_display_power` off/on directly via `qdwin-bystander`. Modern `qdshell.service`/`qdwin-compositor.service` contract (legacy `noctalia-*` units retired) |
-| `21-wm-policy-bystander.md` | v25 window-manager-policy direct-compositor functional proof (split from 19): `qdwin-bystander` drives `set_wm_policy`/`request_tile` left/right/restore/`request_fullscreen`/`register_hotkey` over its FIFO; all deterministic journal asserts (tiled client resizes, not just chrome) |
+| `agent-idle-dpms-capability-smoke.sh` | executable (was 20): IPC `idleDpms=true` at ≥v26; bystander `set_display_power` off/on; no protocol errors |
+| `agent-wm-policy-bystander-smoke.sh` | executable (was 21): `qdwin-bystander` drives `set_wm_policy`, tile left/right/restore, fullscreen, `register_hotkey`; journal-checked |
 | `agent-mvp-session-smoke.sh` | executable agent/CI smoke for plan2 MVP session invariants: qdwin/qdshell active, qdshell bound to qdwin_shell_v1, legacy LXQt/labwc absent, cursor sprites active, Ctrl+Space logged, and ordinary toplevels released from qdwin's holding layer |
 | `agent-click-smoke.sh` | executable agent/CI smoke: launches two known test windows, injects QMP mouse clicks, asserts focus moves to the clicked toplevel, and reports the qdshell launcher-icon click as a named gap unless `QDWIN_REQUIRE_LAUNCHER_CLICK=1` is set |
 | `agent-protocol-audit.sh` | executable agent/CI audit: records qdwin Wayland globals, scans qdshell's Quickshell/Wayland usage, and checks that opening the qdshell launcher does not hit the xdg-popup null-parent protocol error |

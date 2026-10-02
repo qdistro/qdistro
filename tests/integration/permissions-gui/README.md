@@ -5,54 +5,45 @@ User-authored GUI acceptance scenarios for qdistro . Each
 prose. A graphic-aware subagent executes them against a running VM
 following the instructions in `AGENTS.md`.
 
+## Lanes
+
+Two GUI lanes run these scenarios (see `AGENTS.md`, "qdwin lane"):
+
+- **qdwin lane** — the product session (qdwin + qdshell) with the admin
+  app started through the shipped native-Wayland launcher: 03, 04, 06,
+  08, 10, 12, 13, 14, 34, 43, 47 (and 18–21, 56, 57).
+- **labwc admin lane** — labwc + LXQt + XWayland with the test-only xcb
+  launcher: every other scenario here. None of that stack ships, so the
+  lane is opt-in (`QCI_LABWC_ADMIN_LANE=1`, or `qci gui-admin`).
+
 ## Scenario index by area
 
 Numbering is roughly chronological; each scenario stands on its own.
+Gaps are scenarios whose hard checks were D-Bus replies, sqlite rows or
+journal lines only: since 2026-10-02 they run headless (no agent, no
+screenshots) in the bats gate — 07, 11, 15, 17, 23–33, 36–39,
+40-clipboard, 41, 42, 58, 59 in `tests/integration/vm/permissions-headless.bats`
+(one `pgNN-*` @test each), and the qsu ones 44–46, 49–54 in
+`tests/integration/vm/s58-qsu-real-flow.sh` (run by `tiered-isolation.bats`).
 
 - **01–10** — admin app + TUI smoke (visual / scope picker / approve /
-  deny / mouse / CLI round-trip / restart-resilience / cache revoke).
-- **11–17** — cross-user `RelayMessage` flow (headless + visual,
-  approve / deny / forbidden scope, realapp variants).
+  deny / mouse / restart-resilience / cache revoke and its
+  `ApprovalRevoked` signal, formerly 22).
+- **12–14** — cross-user `RelayMessage` flow, visual approve / deny /
+  forbidden scope.
+- **16** — realapp send-to, visual (shared-XWayland expedient).
 - **18** — pod-apps launcher badge.
 - **19–21** — tier-5 loopback / cold-start / close-cleanup.
-- **22–23** — `ApprovalRevoked` and `RevokeAllForUid` signal contracts.
-- **24–28** — declarative rules: allow-short-circuit, deny-short-circuit,
-  inotify hot-reload, first-match-wins ordering, exe glob match.
-- **29** — `CheckPermission` `"unknown"` fast-path (no prompt, no audit).
-- **30** — rate-limit raises `.RateLimited`.
-- **31** — fire-and-forget `RequestPermission` (no waiter).
-- **32** — `forever_exe` cache scope grants only the approved exe.
-- **33** — `RunCacheGc` deletes expired rows (and lookup filters them).
 - **34** — admin-app navigation across multiple pending requests.
 - **35** — TUI + Qt admin app concurrent subscribers stay in sync.
-- **36–37** — clipboard transfer policy: same-silo allow, cross-silo
-  default-deny + rule allow.
-- **38** — `ListRules` surface for tooling.
-- **39** — `SaveRule` validation rejects bad filename / YAML / shape.
-- **40–41** — clipboard *receive* gate: same-silo short-circuit (40),
-  cross-silo default-deny + rule allow + MIME glob (`text/*`) + rate-
-  limit (41).
-- **42** — `CheckHandoffActivation`: same-silo allow, cross-silo
-  default-deny + per-`app_id` rule allow + non-admin bus-policy deny.
-- **43–55** — `qsu` admin-UX + audit + security invariants. 43
-  (prompt + scope radios rendered), 44 (`forever_argv` isolation),
-  45 (`forever_basename` cross-binary), 46 (`forever_prefix`
-  trailing args), 47 (delegated `forever_exe` rejected with
-  `ScopeNotPermitted`), 48 (TUI argv on its own line, not 30
-  `argv[NN]=` rows), 49 (`ListHistory` argv shape is lossless
-  `as`), 50 (rule `argv_prefix:` pre-approves with `source=rule`
-  + `rule_path`), 51 (`qsu -u target` ⇒ action key
-  `qsu.exec:<target>`), 52 (invalid target_user rejected at
-  qdistro-root-exec, never reaches broker), 53 (per-uid in-flight
-  cap at 4), 54 (sanitized env strips LD_* / PYTHONPATH), 55
-  (qsu end-to-end under SELinux Enforcing — zero new AVCs;
-  requires SSH transport, qga cannot setenforce).
+- **40-tui** — TUI survives a broker restart.
+- **43, 47, 55** — `qsu` admin UX: 43 (prompt + scope radios
+  rendered), 47 (delegated `forever_exe` rejected with a
+  `ScopeNotPermitted` modal), 55 (qsu end-to-end
+  under SELinux Enforcing; its headless twin `phase7-qsu-enforcing` in
+  `tiered-isolation.bats` needs an SSH-transport enforcing VM).
 - **56–57** — tier-4 RDP transport visual acceptance: single guest
   window visible over FreeRDP/vsock and close-cleanup of the RDP path.
-- **58** — permission lineage (findings P0-1): a forged `sandbox_engine`
-  matches a tier-1 rule in shadow mode but is denied under
-  `lineage_enforce=true` unless the caller has a `RegisterLaunch` record;
-  `RegisterLaunch` is root-only.
 
 ## Running
 

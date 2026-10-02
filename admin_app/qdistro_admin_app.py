@@ -3918,7 +3918,12 @@ class _FirstPaintMarker(QObject):
     writing the file the marker syncs Qt's OWN display connection
     (QGuiApplication.sync(); on xcb a GetInputFocus round trip): its reply
     comes back after the server has processed the frame upload, so XWayland
-    holds the frame and commits it for the compositor's next repaint.
+    holds the frame and commits it for the compositor's next repaint. On
+    Qt's Wayland platform sync() is a no-op: there the marker means the
+    first frame was painted and committed (the backing-store flush IS the
+    wl_surface commit), and a caller that needs the compositor to hold it
+    waits on the compositor (the qdwin GUI lane waits for qdwin's `mapped`
+    journal line for the app's pid; deploy/start-admin-app-wayland.sh).
 
     Qt may paint before the window is exposed and then present that backing
     store on exposure without another paint. A paint that finds the window

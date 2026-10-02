@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Detached-signature tests for scripts/install/verify-source-manifest.sh.
 #
 # No network and no VM required: a throwaway GPG home generates a local

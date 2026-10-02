@@ -8,14 +8,12 @@ import subprocess
 from unittest.mock import MagicMock
 
 import pytest
-
 from qdbrowser.plugins.content_blocker import (
     ContentBlockerPlugin,
-    _CosmeticRule,
     _build_inject_js,
     _build_restyle_js,
+    _CosmeticRule,
 )
-
 
 _PARCHMENT = {
     "--qdb-bg": "#f4ecd8",

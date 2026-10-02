@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # guest-image-perms — base-image permission + baked-credential hardening
 # for the Tier-4-guest / Tier-5 / Tier-5b guest base-image builders.
 #

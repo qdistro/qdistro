@@ -44,7 +44,7 @@ bash -x 01-lock-cycle.md     # or feed step-by-step to an agent
   `qdlocker_ctrl`, `qdlocker_wait_for_lock`,
   `qdlocker_wait_for_unlock`, `qdlocker_assert_prompt_len`.
 - `01-lock-cycle.md` — manual lock → password type → unlock.
-- `02-fprintd-fallback.md` — fingerprint path on the system bus.
+- `agent-fprintd-fallback-smoke.sh` — fingerprint path on the system bus (executable; was 02).
 - `09-capture-indicators.md` — J28 live-capture / egress indicators.
   Unconditional: quiet lock, a real `pw-record` mic capture started and
   stopped *while locked*, observer timeout failing **visible**, silo

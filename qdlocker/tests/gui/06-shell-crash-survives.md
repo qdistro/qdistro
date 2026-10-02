@@ -203,5 +203,5 @@ neither process owns the other.
   (`qdwin_layer_remap_after_unlock`), and damage the outputs.
 - Step 4 reports `locked=False` but screenshot still shows lock UI —
   qdwin destroyed the lock_surface resource but did not flip the
-  compositor state machine. B1-style bug; see qdwin's 03-locker-cycle
+  compositor state machine. B1-style bug; see 01-lock-cycle
   §"Known-broken-if".

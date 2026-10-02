@@ -1,5 +1,7 @@
 # 01 — one trigger → one run → audit row chain
 
+<!-- qci:visual: required -->
+
 **What**: seed a cron workflow with a short interval, let it fire at
 least one run inside the broker, then verify the run is visible both in
 the admin app's Workflows tab (Recent runs, state `completed`) and in the
@@ -26,6 +28,8 @@ rm -f /etc/qdistro/workflows/wfgui-*.yaml 2>/dev/null || true
 mkdir -p /etc/qdistro/workflows
 cat > /etc/qdistro/workflows/wfgui-tick.yaml <<'YAML'
 - name: wfgui-tick
+  # Unattended: without auto_run a fire only parks a PENDING run (see 05).
+  auto_run: true
   description: cron tick that lists rules (no secret needed)
   trigger:
     type: cron
