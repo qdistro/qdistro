@@ -1,0 +1,33 @@
+### host 2026-10-02T06:12:52Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; T=$CACHE/20260928.0/gvisor.tar.zstd
+cp $T /var/tmp/t3s-good.tar.zstd; printf x >> $T
+echo '## (a) live install present but differing (sidecar 0644): provision must fail and leave it untouched'
+chmod 0644 $SIDE/gvisor_sentry
+provision a-provision-exit 1; has a-tarball-mismatch $VO 'tarball sha512 mismatch'
+is a-live-sidecar-untouched "$(stat -c %a $SIDE/gvisor_sentry)" 644
+echo '## (b) no install: provision must fail and install nothing'
+mkdir -p /var/tmp/t3s-saved; mv /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /var/tmp/t3s-saved/
+provision b-provision-exit 1; has b-tarball-mismatch $VO 'tarball sha512 mismatch'
+is b-nothing-installed "$(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release 2>/dev/null | wc -l)" 0
+mv /var/tmp/t3s-saved/runsc /var/tmp/t3s-saved/tier3s-runsc /usr/libexec/qdistro/; mv /var/tmp/t3s-saved/runsc-release /etc/qdistro/; rmdir /var/tmp/t3s-saved
+cp /var/tmp/t3s-good.tar.zstd $T; rm -f /var/tmp/t3s-good.tar.zstd
+is cache-restored "$(sha512sum < $T | cut -d' ' -f1)" "$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)"
+is no-leftovers "$(leftovers)" 0; finish
+CMD
+[vm-exec] guest identity pinned (pid 81492 start 131161)
+## (a) live install present but differing (sidecar 0644): provision must fail and leave it untouched
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: FAIL: tarball sha512 mismatch: got cb26476dd8d9f84d6df16349d1365ae5f28d9bc00939fe3509060d9a21f52cfb1c01312931018471dffd5536cf0437669cd567ece6f1b7d1a89764786c1f684d
+CHECK a-provision-exit: OK (rc=1)
+CHECK a-tarball-mismatch: OK
+CHECK a-live-sidecar-untouched: OK (644)
+## (b) no install: provision must fail and install nothing
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: FAIL: tarball sha512 mismatch: got cb26476dd8d9f84d6df16349d1365ae5f28d9bc00939fe3509060d9a21f52cfb1c01312931018471dffd5536cf0437669cd567ece6f1b7d1a89764786c1f684d
+CHECK b-provision-exit: OK (rc=1)
+CHECK b-tarball-mismatch: OK
+CHECK b-nothing-installed: OK (0)
+CHECK cache-restored: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+CHECK no-leftovers: OK (0)
+### checks failed: 0
+### exit=0

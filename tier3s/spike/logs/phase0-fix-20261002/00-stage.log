@@ -1,0 +1,49 @@
+### host: staged commit bf2b7a6f9fbdb5ad39f583456477976346770119; host sha256 of the staged files:
+b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
+6a94fbff2f0e5e887cfd38004b69c639cbb0e853831a936f5f835cb5606ce396  tier3s/probe.sh
+e2b65621838bca83901639a7550beae24661b31ea4154b4cfb1152f2a2b95cd3  tier3s/provision-runsc.sh
+eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
+6dbfe0817f3c8ca57fe3ff3aa5c694d78333aa88758c40488ad183305470e8a8  tier3s/spike/phase0-fix-lib.sh
+664b6f2ec5d60cab7143038d5cff7ec5e7fc3b2771cfd0f50742371916954ce9  tier3s/spike/mutate-guards.py
+76ff5375eb79da86e4b70558f7264e48bf49a9d81db598f1b15b21dcc6545b6f  tests/unit/test_tier3s_probe.py
+38e4e5f2035aef1f1330642ba7e24f63cbdbf1997b69ee25d5a9d01dda1e7124  tests/unit/test_tier3s_provision.py
+### host 2026-10-02T06:12:39Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+set -e; cd /root/qdistro-src && curl -fsS http://10.0.2.2:42931/src.tar | tar -xf - && echo "staged commit $(curl -fsS http://10.0.2.2:42931/commit.txt)"
+set +e; . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh
+sha256sum tier3s/RUNSC_RELEASE tier3s/probe.sh tier3s/provision-runsc.sh tier3s/tier3s-runsc tier3s/spike/phase0-fix-lib.sh tier3s/spike/mutate-guards.py tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py
+mkdir -p $CACHE/20260928.0 && curl -fsS http://10.0.2.2:42931/gvisor.tar.zstd -o $CACHE/20260928.0/gvisor.tar.zstd
+is cache-tarball-sha512 "$(sha512sum < $CACHE/20260928.0/gvisor.tar.zstd | cut -d' ' -f1)" "$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)"
+is profile "$(cat /etc/qdistro/profile)" QDISTRO_PROFILE=dev
+uname -r; podman --version; getenforce
+zypper -n in --no-recommends python313-pytest strace > /var/tmp/t3s-zypper.log 2>&1; expect_rc zypper-pytest-strace 0 $?; tail -3 /var/tmp/t3s-zypper.log
+python3 -m pytest --version; strace -V | head -1
+echo "prior install before reset: $(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc 2>/dev/null | tr '\n' ' ')"
+rm -rf /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc /usr/libexec/t3s-elsewhere /var/tmp/t3s-*
+is no-install-after-reset "$(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc 2>/dev/null | wc -l)" 0
+finish
+CMD
+[vm-exec] guest identity pinned (pid 80462 start 129893)
+staged commit bf2b7a6f9fbdb5ad39f583456477976346770119
+b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
+6a94fbff2f0e5e887cfd38004b69c639cbb0e853831a936f5f835cb5606ce396  tier3s/probe.sh
+e2b65621838bca83901639a7550beae24661b31ea4154b4cfb1152f2a2b95cd3  tier3s/provision-runsc.sh
+eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
+6dbfe0817f3c8ca57fe3ff3aa5c694d78333aa88758c40488ad183305470e8a8  tier3s/spike/phase0-fix-lib.sh
+664b6f2ec5d60cab7143038d5cff7ec5e7fc3b2771cfd0f50742371916954ce9  tier3s/spike/mutate-guards.py
+76ff5375eb79da86e4b70558f7264e48bf49a9d81db598f1b15b21dcc6545b6f  tests/unit/test_tier3s_probe.py
+38e4e5f2035aef1f1330642ba7e24f63cbdbf1997b69ee25d5a9d01dda1e7124  tests/unit/test_tier3s_provision.py
+CHECK cache-tarball-sha512: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+CHECK profile: OK (QDISTRO_PROFILE=dev)
+7.2.8-1-default
+podman version 6.0.2
+Permissive
+CHECK zypper-pytest-strace: OK (rc=0)
+No update candidate for 'strace-7.2-2.1.x86_64'. The highest available version is already installed.
+Resolving package dependencies...
+Nothing to do.
+pytest 9.0.3
+strace -- version 7.2
+prior install before reset: /etc/qdistro/runsc-release /run/qdistro-runsc /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc 
+CHECK no-install-after-reset: OK (0)
+### checks failed: 0
+### exit=0

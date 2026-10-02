@@ -1,0 +1,136 @@
+### host 2026-10-02T06:13:19Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; mkdir -m 0755 /usr/libexec/t3s-elsewhere
+mv /usr/libexec/qdistro/runsc /usr/libexec/t3s-elsewhere/runsc; ln -s /usr/libexec/t3s-elsewhere/runsc /usr/libexec/qdistro/runsc
+ls -l /usr/libexec/qdistro/
+probe_strace; expect_rc probe-exit 1 $PRC
+has names-symlink $PO 'FAIL install_path: untrusted: /usr/libexec/qdistro/runsc is a symlink'
+never_executed symlinked-dir
+rm /usr/libexec/qdistro/runsc; mv /usr/libexec/t3s-elsewhere/runsc /usr/libexec/qdistro/runsc; rmdir /usr/libexec/t3s-elsewhere
+probe_tail_pass restored; finish
+CMD
+[vm-exec] guest identity pinned (pid 84681 start 133831)
+total 2064
+drwxr-xr-x. 2 root root   4096 Oct  2 05:52 __pycache__
+-rw-r--r--. 1 root root   8857 Oct  2 05:51 qdistro_admin_audit.py
+-rwxr-xr-x. 1 root root 273019 Oct  2 05:51 qdistro_admin_broker.py
+-rw-r--r--. 1 root root  18647 Oct  2 05:51 qdistro_admin_cache.py
+-rw-r--r--. 1 root root   3757 Oct  2 05:51 qdistro_admin_ratelimit.py
+-rw-r--r--. 1 root root  26565 Oct  2 05:51 qdistro_admin_rules.py
+-rw-r--r--. 1 root root   9576 Oct  2 05:51 qdistro_audisp_parser.py
+-rw-r--r--. 1 root root  25721 Oct  2 05:51 qdistro_backup_cli.py
+-rw-r--r--. 1 root root  14295 Oct  2 05:51 qdistro_backup_manifest.py
+-rw-r--r--. 1 root root  15814 Oct  2 05:51 qdistro_backup_recovery.py
+-rw-r--r--. 1 root root  54663 Oct  2 05:51 qdistro_backup_service.py
+-rw-r--r--. 1 root root   7499 Oct  2 05:51 qdistro_browser_allowlist.py
+-rw-r--r--. 1 root root  86031 Oct  2 05:51 qdistro_browser_bridge.py
+-rw-r--r--. 1 root root  13409 Oct  2 05:51 qdistro_browser_daemon_identity.py
+-rw-r--r--. 1 root root  17921 Oct  2 05:51 qdistro_browser_install.py
+-rw-r--r--. 1 root root   9588 Oct  2 05:51 qdistro_commit_lineage.py
+-rwxr-xr-x. 1 root root  10945 Oct  2 05:51 qdistro_compositor_daemon.py
+-rwxr-xr-x. 1 root root  19701 Oct  2 05:51 qdistro_disposable_classes.py
+-rwxr-xr-x. 1 root root  49035 Oct  2 05:51 qdistro_disposable_export.py
+-rwxr-xr-x. 1 root root  30267 Oct  2 05:51 qdistro_disposables.py
+-rwxr-xr-x. 1 root root  12043 Oct  2 05:51 qdistro_downloads_daemon.py
+-rw-r--r--. 1 root root  15815 Oct  2 05:51 qdistro_export_lineage.py
+-rw-r--r--. 1 root root  19511 Oct  2 05:51 qdistro_guard_registry.py
+-rw-r--r--. 1 root root   4796 Oct  2 05:51 qdistro_hook_client.py
+-rw-r--r--. 1 root root   9906 Oct  2 05:51 qdistro_launch_record.py
+-rw-r--r--. 1 root root  16003 Oct  2 05:51 qdistro_lineage.py
+-rw-r--r--. 1 root root  44777 Oct  2 05:51 qdistro_lineage_receipts.py
+-rw-r--r--. 1 root root  48393 Oct  2 05:51 qdistro_lineage_store.py
+-rw-r--r--. 1 root root  14947 Oct  2 05:51 qdistro_metadata_schema.py
+-rwxr-xr-x. 1 root root  19161 Oct  2 05:51 qdistro_mpris_daemon.py
+-rwxr-xr-x. 1 root root   9934 Oct  2 05:51 qdistro_notifications_daemon.py
+-rw-r--r--. 1 root root   7397 Oct  2 05:51 qdistro_phone_cli.py
+-rw-r--r--. 1 root root  12013 Oct  2 05:51 qdistro_phone_daemon.py
+-rw-r--r--. 1 root root  10344 Oct  2 05:51 qdistro_phone.py
+-rwxr-xr-x. 1 root root  10045 Oct  2 05:51 qdistro-podapp-launch
+-rwxr-xr-x. 1 root root   4111 Oct  2 05:51 qdistro-podapp-stop
+-rwxr-xr-x. 1 root root  26421 Oct  2 05:51 qdistro_polkit_agent.py
+-rw-r--r--. 1 root root   3832 Oct  2 05:51 qdistro_print_audit.py
+-rw-r--r--. 1 root root   4011 Oct  2 05:51 qdistro_print_browse.py
+-rw-r--r--. 1 root root   7749 Oct  2 05:51 qdistro_proc_identity.py
+-rw-r--r--. 1 root root   3268 Oct  2 05:51 qdistro_pwd_atomic.py
+-rw-r--r--. 1 root root   5540 Oct  2 05:51 qdistro_pwd_audit.py
+-rwxr-xr-x. 1 root root  92752 Oct  2 05:51 qdistro_pwd_daemon.py
+-rw-r--r--. 1 root root   5191 Oct  2 05:51 qdistro_pwd_fprint.py
+-rw-r--r--. 1 root root   5536 Oct  2 05:51 qdistro_pwd_identity.py
+-rw-r--r--. 1 root root   6899 Oct  2 05:51 qdistro_pwd_pinstash.py
+-rw-r--r--. 1 root root   5644 Oct  2 05:51 qdistro_pwd_polkit.py
+-rwxr-xr-x. 1 root root   7172 Oct  2 05:51 qdistro_pwd_portal.py
+-rw-r--r--. 1 root root  28902 Oct  2 05:51 qdistro_pwd_tpm.py
+-rw-r--r--. 1 root root  22102 Oct  2 05:51 qdistro_pwd_vault.py
+-rwxr-xr-x. 1 root root     87 Oct  2 05:51 qdistro-resolve-binding
+-rw-r--r--. 1 root root  19008 Oct  2 05:51 qdistro_resolve_binding.py
+-rw-r--r--. 1 root root   7337 Oct  2 05:51 qdistro_resolver.py
+-rwxr-xr-x. 1 root root 335639 Oct  2 05:51 qdistro_session_manager.py
+-rwxr-xr-x. 1 root root  17728 Oct  2 05:51 qdistro_silo_egress.py
+-rwxr-xr-x. 1 root root     83 Oct  2 05:51 qdistro-silo-launch
+-rw-r--r--. 1 root root   3526 Oct  2 05:51 qdistro_silo_launch.py
+-rw-r--r--. 1 root root  28647 Oct  2 05:51 qdistro_silo_security.py
+-rwxr-xr-x. 1 root root   2417 Oct  2 05:51 qdistro_silo_skill.py
+-rw-r--r--. 1 root root   9595 Oct  2 05:51 qdistro_snapshots.py
+-rwxr-xr-x. 1 root root     81 Oct  2 05:51 qdistro-snap-swap
+-rw-r--r--. 1 root root  19590 Oct  2 05:51 qdistro_snap_swap.py
+-rw-r--r--. 1 root root  16443 Oct  2 05:51 qdistro_state_snapshot.py
+-rw-r--r--. 1 root root  12256 Oct  2 05:51 qdistro_template_audit.py
+-rwxr-xr-x. 1 root root     86 Oct  2 05:51 qdistro-template-build
+-rw-r--r--. 1 root root  16637 Oct  2 05:51 qdistro_template_build.py
+-rwxr-xr-x. 1 root root     90 Oct  2 05:51 qdistro-template-freshness
+-rw-r--r--. 1 root root  13951 Oct  2 05:51 qdistro_template_freshness.py
+-rwxr-xr-x. 1 root root     83 Oct  2 05:51 qdistro-template-gc
+-rw-r--r--. 1 root root  30256 Oct  2 05:51 qdistro_template_gc.py
+-rwxr-xr-x. 1 root root     88 Oct  2 05:51 qdistro-template-promote
+-rw-r--r--. 1 root root  33541 Oct  2 05:51 qdistro_template_promote.py
+-rwxr-xr-x. 1 root root    842 Oct  2 05:51 qdistro-template-promote-unit
+-rw-r--r--. 1 root root  27518 Oct  2 05:51 qdistro_templates.py
+-rwxr-xr-x. 1 root root     87 Oct  2 05:51 qdistro-template-status
+-rw-r--r--. 1 root root   6492 Oct  2 05:51 qdistro_template_status.py
+-rwxr-xr-x. 1 root root     89 Oct  2 05:51 qdistro-template-validate
+-rw-r--r--. 1 root root  24435 Oct  2 05:51 qdistro_template_validate.py
+-rwxr-xr-x. 1 root root   9320 Oct  2 05:51 qdistro-tier2-silo-launch
+-rwxr-xr-x. 1 root root   4652 Oct  2 05:51 qdistro-tier2-silo-stop
+-rw-r--r--. 1 root root   7860 Oct  2 05:51 qdistro_upload_lineage_entry.py
+-rw-r--r--. 1 root root  11497 Oct  2 05:51 qdistro_upload_lineage.py
+-rw-r--r--. 1 root root  37001 Oct  2 05:51 qdistro_user_relay.py
+-rw-r--r--. 1 root root  16839 Oct  2 05:51 qdistro_vault_recovery_export.py
+-rw-r--r--. 1 root root   7841 Oct  2 05:51 qdistro_vault_recovery.py
+-rwxr-xr-x. 1 root root   9119 Oct  2 05:51 qdistro_wg_provision.py
+-rwxr-xr-x. 1 root root   4357 Oct  2 05:51 qdshell-session-launcher
+drwxr-xr-x. 3 root root     19 Jan  1  1970 qdwin-libweston
+lrwxrwxrwx. 1 root root     32 Oct  2 06:13 runsc -> /usr/libexec/t3s-elsewhere/runsc
+-rwxr-xr-x. 1 root root    487 Oct  2 06:13 tier3s-runsc
+-rw-r--r--. 1 root root   5469 Oct  2 05:51 transfer_protocol.py
+drwxr-xr-x. 3 root root   4096 Oct  2 05:51 workflow
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+FAIL install_path: untrusted: /usr/libexec/qdistro/runsc is a symlink
+FAIL bundle: /usr/libexec/qdistro/runsc missing or a symlink
+FAIL runsc_version: not executed: installation integrity checks failed (see above)
+FAIL wrapper: not checked: install path untrusted (see install_path)
+PASS podman: 6.0.2 (>= 6)
+FAIL podman_runtime: not checked: podman missing or wrapper not verified
+FAIL label_disable: not checked: podman missing or wrapper not verified
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT FAIL: first missing prerequisite: install_path (untrusted: /usr/libexec/qdistro/runsc is a symlink)
+--- runsc-bundle / fd executions seen by strace -f -e trace=execve:
+(none)
+CHECK probe-exit: OK (rc=1)
+CHECK names-symlink: OK
+CHECK symlinked-dir-reported-not-executed: OK
+CHECK symlinked-dir-strace-runsc-execs: OK (0)
+RESULT PASS: tier 3s prerequisites present
+CHECK restored-probe-exit: OK (rc=0)
+CHECK restored-probe-pass: OK
+### checks failed: 0
+### exit=0

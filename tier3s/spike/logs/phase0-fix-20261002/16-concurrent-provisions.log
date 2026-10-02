@@ -1,0 +1,39 @@
+### host 2026-10-02T06:13:21Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chmod 0700 $SIDE/gvisor_sentry; rm -f /var/tmp/t3s-A.log /var/tmp/t3s-B.log
+( "${PROVISION[@]}" > /var/tmp/t3s-A.log 2>&1; echo "rc=$?" >> /var/tmp/t3s-A.log ) & a=$!
+for i in $(seq 1 200); do grep -q 'holding the provisioning lock' /var/tmp/t3s-A.log && break; sleep 0.05; done
+( "${PROVISION[@]}" > /var/tmp/t3s-B.log 2>&1; echo "rc=$?" >> /var/tmp/t3s-B.log ) & b=$!
+wait $a; wait $b
+echo '## A'; cat /var/tmp/t3s-A.log; echo '## B'; cat /var/tmp/t3s-B.log
+has A-installed /var/tmp/t3s-A.log 'PASS: installed runsc'; has A-rc0 /var/tmp/t3s-A.log 'rc=0'
+has B-waited /var/tmp/t3s-B.log 'waiting for the provisioning lock /run/qdistro-runsc/provision.lock'
+has B-then-saw-installed /var/tmp/t3s-B.log 'already installed and matching pin 20260928.0; nothing to do'
+has B-rc0 /var/tmp/t3s-B.log 'rc=0'
+is sidecar-755 "$(stat -c %a $SIDE/gvisor_sentry)" 755
+is no-leftovers "$(leftovers)" 0; probe_tail_pass after; finish
+CMD
+[vm-exec] guest identity pinned (pid 85239 start 134078)
+## A
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+rc=0
+## B
+provision-runsc: waiting for the provisioning lock /run/qdistro-runsc/provision.lock (another provision-runsc.sh holds it)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+rc=0
+CHECK A-installed: OK
+CHECK A-rc0: OK
+CHECK B-waited: OK
+CHECK B-then-saw-installed: OK
+CHECK B-rc0: OK
+CHECK sidecar-755: OK (755)
+CHECK no-leftovers: OK (0)
+RESULT PASS: tier 3s prerequisites present
+CHECK after-probe-exit: OK (rc=0)
+CHECK after-probe-pass: OK
+### checks failed: 0
+### exit=0

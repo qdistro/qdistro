@@ -1,0 +1,19 @@
+### host 2026-10-02T06:12:58Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; cp -a /etc/qdistro/profile /var/tmp/t3s-profile.bak
+trap 'cp -a /var/tmp/t3s-profile.bak /etc/qdistro/profile' EXIT
+sed -i 's/^QDISTRO_PROFILE=.*/QDISTRO_PROFILE=release/' /etc/qdistro/profile
+probe_strace; expect_rc probe-exit 2 $PRC
+has refuses $PO 'REFUSE profile: tier 3s is dev-profile only (README O4); /etc/qdistro/profile says release'
+is no-runsc-exec "$NEXEC" 0
+cp -a /var/tmp/t3s-profile.bak /etc/qdistro/profile; is profile-restored "$(cat /etc/qdistro/profile)" QDISTRO_PROFILE=dev; finish
+CMD
+[vm-exec] guest identity pinned (pid 82213 start 131724)
+REFUSE profile: tier 3s is dev-profile only (README O4); /etc/qdistro/profile says release
+--- runsc-bundle / fd executions seen by strace -f -e trace=execve:
+(none)
+CHECK probe-exit: OK (rc=2)
+CHECK refuses: OK
+CHECK no-runsc-exec: OK (0)
+CHECK profile-restored: OK (QDISTRO_PROFILE=dev)
+### checks failed: 0
+### exit=0

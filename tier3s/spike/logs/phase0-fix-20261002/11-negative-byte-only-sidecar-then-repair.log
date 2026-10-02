@@ -1,0 +1,59 @@
+### host 2026-10-02T06:13:04Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; f=$SIDE/runsc-fd-parking
+s0=$(stat -c '%s %a %U:%G %i' $f); h0=$(sha512sum < $f)
+b=$(dd if=$f bs=1 skip=200 count=1 2>/dev/null); if [ "$b" = Z ]; then n=Y; else n=Z; fi
+printf %s "$n" | dd of=$f bs=1 seek=200 conv=notrunc 2>/dev/null
+s1=$(stat -c '%s %a %U:%G %i' $f); h1=$(sha512sum < $f)
+echo "before: $s0  after: $s1"
+is same-size-mode-owner-inode "$s1" "$s0"
+if [ "$h1" != "$h0" ]; then ok bytes-changed; else bad bytes-changed; fi
+probe_strace; expect_rc probe-exit 1 $PRC
+has hash-loop-names-sidecar $PO 'FAIL bundle: sha512:gvisor-bin/runsc-fd-parking'
+hasnt not-a-file-set-failure $PO 'file set differs'
+never_executed byte-only
+provision repair-exit 0; has repaired $VO 'PASS: installed runsc'; probe_tail_pass repaired; finish
+CMD
+[vm-exec] guest identity pinned (pid 82870 start 132411)
+before: 1320 755 root:root 51884725  after: 1320 755 root:root 51884725
+CHECK same-size-mode-owner-inode: OK (1320 755 root:root 51884725)
+CHECK bytes-changed: OK
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+FAIL bundle: sha512:gvisor-bin/runsc-fd-parking
+FAIL runsc_version: not executed: installation integrity checks failed (see above)
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT FAIL: first missing prerequisite: bundle (sha512:gvisor-bin/runsc-fd-parking)
+--- runsc-bundle / fd executions seen by strace -f -e trace=execve:
+(none)
+CHECK probe-exit: OK (rc=1)
+CHECK hash-loop-names-sidecar: OK
+CHECK not-a-file-set-failure: OK
+CHECK byte-only-reported-not-executed: OK
+CHECK byte-only-strace-runsc-execs: OK (0)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK repair-exit: OK (rc=0)
+CHECK repaired: OK
+RESULT PASS: tier 3s prerequisites present
+CHECK repaired-probe-exit: OK (rc=0)
+CHECK repaired-probe-pass: OK
+### checks failed: 0
+### exit=0

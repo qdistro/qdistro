@@ -1,0 +1,38 @@
+### host 2026-10-02T06:13:03Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; cp tier3s/RUNSC_RELEASE /var/tmp/t3s-alt-pin; chmod 0644 /var/tmp/t3s-alt-pin; ls -l /var/tmp/t3s-alt-pin
+if [ -r /var/tmp/t3s-alt-pin ]; then ok alt-pin-readable; else bad alt-pin-readable; fi
+before=$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc $R | sha512sum)
+refused() { # refused <name> <exact stderr> <cmd...>
+  "${@:3}" > /var/tmp/t3s-o 2> /var/tmp/t3s-e; local rc=$?; cat /var/tmp/t3s-o /var/tmp/t3s-e
+  expect_rc $1-exit 1 $rc; is $1-message "$(cat /var/tmp/t3s-e)" "$2"; }
+refused prefix-hook 'provision-runsc: FAIL: QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root' env QDISTRO_RUNSC_PREFIX=/var/tmp/t3s-x tier3s/provision-runsc.sh --offline
+refused pin-override 'provision-runsc: FAIL: --pin is a unit-test option (needs QDISTRO_RUNSC_PREFIX); a real install uses /root/qdistro-src/tier3s/RUNSC_RELEASE' tier3s/provision-runsc.sh --pin /var/tmp/t3s-alt-pin --offline
+refused fail-hook 'provision-runsc: FAIL: QDISTRO_RUNSC_FAIL_AFTER_SWAP is a unit-test hook (needs QDISTRO_RUNSC_PREFIX)' env QDISTRO_RUNSC_FAIL_AFTER_SWAP=1 tier3s/provision-runsc.sh --offline
+refused pause-hook 'provision-runsc: FAIL: QDISTRO_RUNSC_PAUSE_AFTER_SWAP is a unit-test hook (needs QDISTRO_RUNSC_PREFIX)' env QDISTRO_RUNSC_PAUSE_AFTER_SWAP=/var/tmp tier3s/provision-runsc.sh --offline
+env QDISTRO_PROBE_PIN=/var/tmp/t3s-alt-pin tier3s/probe.sh > /var/tmp/t3s-o 2> /var/tmp/t3s-e; rc=$?; cat /var/tmp/t3s-e
+expect_rc probe-pin-hook-refused 2 $rc; is probe-pin-hook-message "$(cat /var/tmp/t3s-e)" 'probe: QDISTRO_PROBE_PIN is a unit-test hook and needs QDISTRO_PROBE_ROOT'
+is install-unchanged "$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc $R | sha512sum)" "$before"
+is no-test-prefix-created "$(ls -d /var/tmp/t3s-x 2>/dev/null | wc -l)" 0; finish
+CMD
+[vm-exec] guest identity pinned (pid 82820 start 132287)
+-rw-r--r--. 1 root root 1571 Oct  2 06:13 /var/tmp/t3s-alt-pin
+CHECK alt-pin-readable: OK
+provision-runsc: FAIL: QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root
+CHECK prefix-hook-exit: OK (rc=1)
+CHECK prefix-hook-message: OK (provision-runsc: FAIL: QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root)
+provision-runsc: FAIL: --pin is a unit-test option (needs QDISTRO_RUNSC_PREFIX); a real install uses /root/qdistro-src/tier3s/RUNSC_RELEASE
+CHECK pin-override-exit: OK (rc=1)
+CHECK pin-override-message: OK (provision-runsc: FAIL: --pin is a unit-test option (needs QDISTRO_RUNSC_PREFIX); a real install uses /root/qdistro-src/tier3s/RUNSC_RELEASE)
+provision-runsc: FAIL: QDISTRO_RUNSC_FAIL_AFTER_SWAP is a unit-test hook (needs QDISTRO_RUNSC_PREFIX)
+CHECK fail-hook-exit: OK (rc=1)
+CHECK fail-hook-message: OK (provision-runsc: FAIL: QDISTRO_RUNSC_FAIL_AFTER_SWAP is a unit-test hook (needs QDISTRO_RUNSC_PREFIX))
+provision-runsc: FAIL: QDISTRO_RUNSC_PAUSE_AFTER_SWAP is a unit-test hook (needs QDISTRO_RUNSC_PREFIX)
+CHECK pause-hook-exit: OK (rc=1)
+CHECK pause-hook-message: OK (provision-runsc: FAIL: QDISTRO_RUNSC_PAUSE_AFTER_SWAP is a unit-test hook (needs QDISTRO_RUNSC_PREFIX))
+probe: QDISTRO_PROBE_PIN is a unit-test hook and needs QDISTRO_PROBE_ROOT
+CHECK probe-pin-hook-refused: OK (rc=2)
+CHECK probe-pin-hook-message: OK (probe: QDISTRO_PROBE_PIN is a unit-test hook and needs QDISTRO_PROBE_ROOT)
+CHECK install-unchanged: OK (a08f8b17c3f4dc7fbdb7377e4f54d19f65afb9059b152d0d13885e170dbf8caf8dabbb5b1e9f3f17fbdc84e8377ff390aad2a2c786594b28644389e8610e3ee7  -)
+CHECK no-test-prefix-created: OK (0)
+### checks failed: 0
+### exit=0
