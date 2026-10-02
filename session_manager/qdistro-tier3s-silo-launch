@@ -95,8 +95,11 @@ ADMIN_UID="$(id -u admin 2>/dev/null || true)"
 [ "$ADMIN_UID" = 1000 ] || { say "admin must be uid 1000 (got '${ADMIN_UID:-missing}'); refusing"; exit 6; }
 [ -x "$SPAWN" ] || { say "spawn-tier3s.sh not installed at $SPAWN (install-session-manager.sh); refusing"; exit 5; }
 
+# NOTIFY_SOCKET is systemd's (the unit is Type=notify): the spawn sends READY=1
+# only once the launch runs, and keeps the socket from everything it starts.
 exec env -i \
     PATH="/usr/sbin:/usr/bin:/sbin:/bin" \
+    NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" \
     TIER3S_ROOT_LAUNCHER=1 \
     TIER3S_ADMIN_UID="$ADMIN_UID" \
     TIER3S_LAUNCH_UNIT="qdistro-tier3s-silo@${NAME}.service" \

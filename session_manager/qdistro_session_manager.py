@@ -144,6 +144,14 @@ _T_SYSTEMCTL_STOP = 300   # `systemctl stop` is several phases, each with its ow
                       # Used by the StopSilo worker's teardown. (The main loop's
                       # compensating stop uses _T_SYSTEMCTL_CANCEL instead.)
 _T_PODMAN = 30        # matches the disposable sweep/dispose bounds below
+_T_TIER3S_START = 135  # `systemctl start` of a tier3s launch unit. The unit is
+                      # Type=notify and READY=1 comes only once the launch is
+                      # recorded running (spawn-tier3s.sh), so the start job
+                      # spans the probe, the broker gate, the stale reap and
+                      # the sandbox start. Above the unit's TimeoutStartSec=120
+                      # so systemd decides first. NB StartSilo is synchronous:
+                      # a tier3s start holds the main loop up to this long in
+                      # the worst case (a few seconds measured in the VM).
 _T_DNSMASQ = 15       # forks and daemonizes; the parent returns immediately
 ADMIN_USER_NAME = "admin"
 # qdistro is single-tenant: the admin role is the fixed 'admin' account, which
@@ -2380,6 +2388,50 @@ class _SystemOps:
             return False
         return True
 
+    def tier3s_systemctl_start(self, unit: str) -> None:
+        """`systemctl start` of a tier3s launch unit with the tier3s bound
+        (_T_TIER3S_START): the unit is Type=notify, so the job completes at
+        READY=1 (the launch runs) or fails on any refusal before it. A timeout
+        is an unresolved start, exactly as in systemctl_start."""
+        try:
+            subprocess.run(["systemctl", "start", unit], check=True,
+                           timeout=_T_TIER3S_START)
+            return
+        except subprocess.TimeoutExpired as start_err:
+            log.warning("systemctl start %s timed out after %ds; issuing a "
+                        "best-effort stop and reporting the start as "
+                        "unresolved", unit, _T_TIER3S_START)
+            try:
+                self.systemctl_stop(unit, timeout=_T_SYSTEMCTL_CANCEL)
+            except Exception as stop_err:  # noqa: BLE001
+                log.error("could not issue the compensating stop for %s: %s",
+                          unit, stop_err)
+            raise StartNotCancelled(
+                f"start of {unit} timed out after {_T_TIER3S_START}s; the "
+                f"launch may still be starting and was not verified absent"
+            ) from start_err
+
+    def tier3s_start_refusal(self, unit: str) -> str:
+        """The spawn's last `REFUSE:` line from the unit's latest invocation,
+        or "" (best effort: journald may not have it yet, and any failed or
+        timed-out query is ""). Only ever added to an error message."""
+        try:
+            inv = subprocess.run(
+                ["systemctl", "show", "-p", "InvocationID", "--value", unit],
+                capture_output=True, text=True,
+                timeout=_T_SYSTEMCTL).stdout.strip()
+            if not _re.fullmatch(r"[0-9a-f]{32}", inv):
+                return ""
+            out = subprocess.run(
+                ["journalctl", "--no-pager", "-o", "cat",
+                 f"_SYSTEMD_INVOCATION_ID={inv}"],
+                capture_output=True, text=True, timeout=_T_SYSTEMCTL).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        lines = [ln for ln in out.splitlines()
+                 if ln.startswith("spawn-tier3s: REFUSE: ")]
+        return lines[-1][len("spawn-tier3s: "):][:400] if lines else ""
+
     def tier3s_installed(self) -> bool:
         """Whether this host carries the tier3s launch path (installer +
         tmpfiles). Reconciliation is skipped on a host without it."""
@@ -4171,6 +4223,45 @@ class _SiloStore:
         self._ops.write_launch_env(silo.name, "\n".join(lines))
         return token
 
+    def _fail_tier3s_start(self, silo: Silo, err: BaseException) -> None:
+        """A tier3s start that FAILED (not timed out): the spawn refused or
+        the launch died before READY=1. Clear the Active intent only once the
+        launch is verified gone (unit inactive/failed, no container, no
+        control record: tier3s_silo_running, the stop verifier); then record
+        STOPPED/failed and raise the refusal to the caller, so a retry after
+        the cause is fixed is a real start. If the launch cannot be verified
+        gone, keep the conservative unresolved-start answer: Active, not
+        deletable, stop before retrying. Called with the store lock held."""
+        unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
+        try:
+            survived = self._ops.tier3s_silo_running(silo.name)
+        except Exception as check_err:  # noqa: BLE001
+            log.error("tier3s start of %r failed and its teardown could not "
+                      "be verified: %s", silo.name, check_err)
+            survived = True
+        if survived:
+            self._force_state(silo, State.ACTIVE)
+            silo.start_unresolved = True
+            silo.observed_reason = "start failed, teardown unverified; stop before retry"
+            raise StartNotCancelled(
+                f"start of tier3s silo {silo.name!r} failed ({err}) and its "
+                f"launch could not be verified gone; it is left Active. Stop "
+                f"it before starting it again (see journalctl -u {unit})"
+            ) from err
+        refusal = ""
+        try:
+            refusal = self._ops.tier3s_start_refusal(unit)
+        except Exception:  # noqa: BLE001
+            refusal = ""
+        self._force_state(silo, State.STOPPED)
+        silo.observed_status = "failed"
+        silo.observed_reason = (refusal or "launch refused or failed before it ran")[:200]
+        raise SessionError(
+            f"start of tier3s silo {silo.name!r} failed: the launch was "
+            f"refused or failed before it ran"
+            f"{': ' + refusal if refusal else ''}; the silo is Stopped "
+            f"(see journalctl -u {unit})") from err
+
     def reconcile_tier3s_launches(self) -> list[str]:
         """Startup reconciliation (tier3s/CONTRACT.md §4): the manager's
         in-memory view of every tier3s launch is gone (restart or crash), so
@@ -4331,15 +4422,19 @@ class _SiloStore:
                         # before any state change (paravirt O4)
                         self._require_tier3s_profile()
                     self._transition(silo, State.ACTIVE)
+                    start_unit = self._ops.systemctl_start
                     try:
                         if silo.kind == KIND_TIER3S:
                             # Tier 3s: its own unit only. No per-silo cgroup
                             # (the spawn creates the owning scope) and no
-                            # fallback: a failed start rolls back to STOPPED
-                            # below and launches nothing else (paravirt O6).
+                            # fallback: a failed start rolls back below and
+                            # launches nothing else (paravirt O6). The unit is
+                            # Type=notify, so a launch the spawn refuses fails
+                            # this start (astra/fable A r1).
                             token = self._export_tier3s_launch_env(silo)
                             unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
                             reason = f"started (tier3s token {token})"
+                            start_unit = self._ops.tier3s_systemctl_start
                         elif silo.kind == KIND_TIER2_TEMPLATE:
                             # Tier-2 templated silo: launch through its unit,
                             # which runs spawn-tier2 as admin (rootless podman
@@ -4395,7 +4490,7 @@ class _SiloStore:
                                     self._force_clear_egress(silo.name, silo.uid)
                             unit = SILO_LAUNCHER_FMT.format(name=silo.name,
                                                             uid=silo.uid)
-                        self._ops.systemctl_start(unit)
+                        start_unit(unit)
                     except Exception as e:  # noqa: BLE001
                         # Roll back state on failure. _force_state emits
                         # SiloChanged so the admin UI / PodApps don't stick
@@ -4430,6 +4525,8 @@ class _SiloStore:
                                 f"is an idempotent no-op from Active and would "
                                 f"report success without launching anything"
                             ) from e
+                        if silo.kind == KIND_TIER3S:
+                            self._fail_tier3s_start(silo, e)
                         if self._is_netns_backed(silo):
                             self._teardown_egress(silo.name, silo.uid,
                                                   silo.egress)

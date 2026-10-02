@@ -20,13 +20,19 @@
 #   TIER3S_DEBUG_LOG_DIR     dev diagnostics: admin-owned dir for runsc --debug-log
 #   TIER3S_PRINT_PLAN=1      print the plan, exit 0 before the broker gate
 #   QDISTRO_PROFILE          must be dev
+#   NOTIFY_SOCKET            systemd's (the unit is Type=notify): READY=1 is sent
+#                            only once the launch is recorded running (or a short
+#                            workload completed and was torn down), so a refused
+#                            launch fails the start job (astra/fable A r1). Unset
+#                            at once: never passed to the probe, podman or the scope.
 # Refused from env: TIER3S_SECCOMP_PROFILE TIER3S_ALLOW_PRIVESC
 #   TIER3S_KEEP_CAPS TIER3S_RUNTIME TIER3S_CGROUP_PARENT
 #
 # Order (fail closed, exit 2 on every refusal; the denial oracle is "no podman
 # run and no activation record"): profile -> refused knobs -> root launcher +
 # unit -> probe -> read-only resolution -> token -> [plan] -> broker gate ->
-# activation record -> reap stale + control record -> image -> scope + podman.
+# activation record -> reap stale -> control record (published atomically) ->
+# image -> scope + podman -> recorded running -> READY=1.
 #
 # Test hook ONLY: TIER3S_TEST_ROOT=<dir> prefixes /etc/qdistro, /usr/lib/qdistro,
 # /usr/libexec/qdistro, /run, /proc (own cgroup: proc/self),
@@ -35,6 +41,7 @@
 set -uo pipefail
 if [ "$EUID" -eq 0 ] || [ -z "${TIER3S_TEST_ROOT:-}" ]; then PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; fi
 umask 077
+NOTIFY_SOCK="${NOTIFY_SOCKET:-}"; unset NOTIFY_SOCKET
 say() { printf 'spawn-tier3s: %s\n' "$*" >&2; }
 refuse() { say "REFUSE: $*"; exit 2; }
 
@@ -254,40 +261,61 @@ trusted_dir "$CTL" 700 || refuse "$CTL is not a root 0700 directory (systemd-tmp
 trusted_dir "$LAUNCH_PARENT" 755 || refuse "$LAUNCH_PARENT is not a root 0755 directory (tmpfiles)"
 [ -d "$RUNSC_BASE/$ADMIN_UID" ] && [ ! -L "$RUNSC_BASE/$ADMIN_UID" ] \
     || refuse "runsc state root $RUNSC_BASE/$ADMIN_UID is missing (tmpfiles; the probe checks it)"
-"$CLEANUP" --reap-stale --except-unit "$UNIT" || say "WARN: reaping stale tier3s launches failed (see above); continuing with $TOKEN"
+# the reaper never waits on a token another teardown holds, and stops starting
+# new teardowns after 30 s, so a wedged stale launch cannot stall this start
+"$CLEANUP" --reap-stale --except-unit "$UNIT" --token "$TOKEN" --deadline 30 \
+    || say "WARN: reaping stale tier3s launches failed (see above); continuing with $TOKEN"
 
-state_write() {   # state_write KEY=VALUE...: merge into $CTL_DIR/state atomically, under the lock
+# The control record. It appears COMPLETE or not at all (astra/fable A r1):
+# built in $CTL/.new-<token> and renamed into place under the global lock,
+# which is held for nothing else; the per-launch dir is made under the same
+# lock. No scope exists before it. Later updates take the token's own lock
+# (flock on the record dir) and replace `state` by rename.
+state_write() {   # state_write KEY=VALUE...: merge into $CTL_DIR/state atomically, under the token's lock
     (
-        flock -w 60 9 || { say "cannot take $CTL/.lock"; exit 1; }
+        { exec 8<"$CTL_DIR"; } 2>/dev/null || { say "the control record $CTL_DIR is gone"; exit 1; }
+        flock -w 60 8 || { say "cannot lock $CTL_DIR"; exit 1; }
+        [ -f "$CTL_DIR/state" ] || { say "the control record $CTL_DIR is gone"; exit 1; }
         declare -A S=(); local k v kv
-        if [ -f "$CTL_DIR/state" ]; then
-            while IFS='=' read -r k v; do [ -n "$k" ] && S["$k"]="$v"; done < "$CTL_DIR/state"
-        fi
+        while IFS='=' read -r k v; do [ -n "$k" ] && S["$k"]="$v"; done < "$CTL_DIR/state"
         for kv in "$@"; do S["${kv%%=*}"]="${kv#*=}"; done
         for k in "${!S[@]}"; do printf '%s=%s\n' "$k" "${S[$k]}"; done | LC_ALL=C sort > "$CTL_DIR/state.new.$$" \
             && mv -f "$CTL_DIR/state.new.$$" "$CTL_DIR/state"
-    ) 9>"$CTL/.lock"
+    )
 }
-[ ! -e "$CTL_DIR" ] && [ ! -e "$LAUNCH_DIR" ] || refuse "token $TOKEN is already in use"
-mkdir -m 0700 "$CTL_DIR" || refuse "cannot create $CTL_DIR"
-CLEANED=0
+ARMED=0; CLEANED=0
 run_cleanup() {
-    [ "$CLEANED" = 0 ] || return 0
+    [ "$ARMED" = 1 ] && [ "$CLEANED" = 0 ] || return 0
     CLEANED=1
     "$CLEANUP" "$TOKEN" || { say "cleanup of $TOKEN FAILED; control record $CTL_DIR preserved"; return 1; }
 }
 on_exit() {
     local rc=$?
+    exec 9>&-           # never call the cleanup holding the global lock
+    [ "$ARMED" = 0 ] || rm -rf -- "${CTL:?}/.new-$TOKEN" 2>/dev/null
     run_cleanup || [ "$rc" -ne 0 ] || rc=70
     exit "$rc"
 }
 trap on_exit EXIT
 trap 'say "signal: tearing down $TOKEN"; exit 143' TERM INT HUP
-state_write schema=1 "token=$TOKEN" "container=$CONTAINER" "unit=$UNIT" "scope_unit=$SCOPE_UNIT" \
+exec 9>"$CTL/.lock"
+flock -w 60 9 || refuse "cannot take $CTL/.lock"
+# another launch's token is never armed for teardown here
+[ ! -e "$CTL_DIR" ] && [ ! -L "$CTL_DIR" ] && [ ! -e "$LAUNCH_DIR" ] && [ ! -L "$LAUNCH_DIR" ] \
+    || refuse "token $TOKEN is already in use"
+ARMED=1
+NEW="$CTL/.new-$TOKEN"
+rm -rf -- "$NEW"; mkdir -m 0700 "$NEW" || refuse "cannot create $NEW"
+printf '%s\n' schema=1 "token=$TOKEN" "container=$CONTAINER" "unit=$UNIT" "scope_unit=$SCOPE_UNIT" \
     "admin_uid=$ADMIN_UID" "runsc_root=$RUNSC_ROOT" "per_launch_dir=/run/qdistro-tier3s/$TOKEN" phase=created \
-    || refuse "cannot write the control record"
+    | LC_ALL=C sort > "$NEW/state" && mv -T -- "$NEW" "$CTL_DIR" || refuse "cannot write the control record"
 mkdir -m 0700 "$LAUNCH_DIR" && chown "$ADMIN_UID:$(id -g "$ADMIN_USER")" "$LAUNCH_DIR" \
     || refuse "cannot create the per-launch dir $LAUNCH_DIR"
+exec 9>&-
+notify_ready() {   # the start job completes here (Type=notify); a no-op without systemd's socket
+    [ -n "$NOTIFY_SOCK" ] || return 0
+    NOTIFY_SOCKET="$NOTIFY_SOCK" systemd-notify --ready --status="tier3s launch $TOKEN running"
+}
 
 # --- 11. image ---------------------------------------------------------------
 pm image exists "$IMAGE" || refuse "image $IMAGE is not in admin's store (tier3s/make-tier3s-image.sh $WORKLOAD)"
@@ -320,6 +348,7 @@ for _ in $(seq 1 240); do
             || { say "cannot record the running launch"; exit 2; }
         say "running: $CONTAINER sentry=$spid conmon=$cpid in $rel"
         recorded=1
+        notify_ready || { say "cannot send READY=1 to systemd; tearing down"; exit 2; }
         break
     fi
     sleep 0.25
@@ -328,5 +357,11 @@ done
 if [ "$recorded" != 1 ] && kill -0 "$child" 2>/dev/null; then
     say "launch did not reach running within 60 s; tearing down"; exit 2
 fi
-wait "$child"
-exit $?
+wait "$child"; rc=$?
+# A short workload can finish before it was seen running: with a clean exit
+# and a verified teardown the launch succeeded, so the start job does too.
+if [ "$recorded" != 1 ] && [ "$rc" -eq 0 ]; then
+    run_cleanup || exit 70
+    notify_ready || exit 70
+fi
+exit "$rc"

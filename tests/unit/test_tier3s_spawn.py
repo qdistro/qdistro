@@ -47,6 +47,12 @@ while [ $# -gt 0 ]; do
 done
 sub="$1"; shift
 for a in "$@"; do name="$a"; done          # the container is the last argument (except run)
+if [[ "${name:-}" =~ ^[0-9a-f]{64}$ ]]; then   # a container ID: the container dir that carries it
+    for c in "$F"/c/*/; do [ "$(cat "$c/id" 2>/dev/null)" = "$name" ] && { name="$(basename "$c")"; break; }; done
+fi
+if [ -e "$F/hang_name" ] && [ "${name:-}" = "$(cat "$F/hang_name")" ] && [ "$sub" != run ]; then
+    echo $$ >> "$F/hung.pids"; sleep 600; exit 0      # a wedged podman call (timeout(1) must kill it)
+fi
 finish() {   # the container's processes end, --rm removes it, its scope goes away
     local c="$F/c/$1" p rel
     [ -d "$c" ] || return 0
@@ -75,7 +81,8 @@ container)
             if [ -e "$F/inspect_vanish" ]; then finish "$name"; rm -rf "${F:?}/c/$name"
                 echo "Error: no such container $name" >&2; exit 125; fi
             [ ! -e "$F/inspect_fail" ] || { echo "Error: inspect failed" >&2; exit 125; }
-            cat "$F/c/$name/label" ;;
+            [ -e "$F/c/$name/exists" ] || { echo "Error: no such container $name" >&2; exit 125; }
+            echo "$(cat "$F/c/$name/id") $(cat "$F/c/$name/label")" ;;
     esac ;;
 stop)
     if [ -e "$F/stop_vanish" ]; then finish "$name"; rm -rf "${F:?}/c/$name"
@@ -85,27 +92,46 @@ stop)
 rm) finish "$name"; rm -rf "${F:?}/c/$name" ;;
 ps)
     [ ! -e "$F/ps_fail" ] || { echo "Error: cannot list" >&2; exit 125; }
-    fmt=""; prev=""
-    for a in "$@"; do [ "$prev" = --format ] && fmt="$a"; prev="$a"; done
-    for c in "$F"/c/*/; do
-        [ -e "$c/exists" ] || continue
-        # render the caller's template like podman 6 does for these fields;
-        # `index .Labels` is an error there (.Labels is not a map in ps)
-        case "$fmt" in *"index .Labels"*)
-            echo 'Error: template: ps:1:13: executing "ps" at <index .Labels "qdistro_tier3s_token">: error calling index: cannot index slice/array with type string' >&2
-            exit 125 ;; esac
-        line="${fmt//'{{.Label "qdistro_tier3s_token"}}'/$(cat "$c/label")}"
-        line="${line//'{{.Label "qdistro_tier3s_unit"}}'/$(cat "$c/unit_label" 2>/dev/null)}"
-        line="${line//'{{.Names}}'/$(basename "$c")}"
-        case "$line" in *"{{"*) echo "fake podman ps: unsupported template '$fmt'" >&2; exit 125 ;; esac
-        echo "$line"
-    done ;;
+    if [ -e "$F/ps_garbage" ]; then echo '{"not": "a list"'; exit 0; fi
+    fmt=""; filt=""; prev=""
+    for a in "$@"; do [ "$prev" = --format ] && fmt="$a"; [ "$prev" = --filter ] && filt="$a"; prev="$a"; done
+    [ "$fmt" = json ] || { echo "fake podman ps: only --format json is modelled, got '$fmt'" >&2; exit 125; }
+    # podman 6's JSON: Labels is a map, Names a list (the label FILES hold the
+    # raw label bytes, newlines and '|' included)
+    python3 - "$F/c" "$filt" <<'PY'
+import json, os, sys
+root, filt = sys.argv[1], sys.argv[2]
+want = filt.split("=", 2)[2] if filt.count("=") >= 2 else None
+out = []
+for n in sorted(os.listdir(root)):
+    d = os.path.join(root, n)
+    if not os.path.exists(os.path.join(d, "exists")):
+        continue
+    def rd(f):
+        try:
+            with open(os.path.join(d, f)) as fh:
+                v = fh.read()
+        except FileNotFoundError:
+            return None
+        return v[:-1] if v.endswith("\n") else v
+    labels = {}
+    if rd("label") is not None:
+        labels["qdistro_tier3s_token"] = rd("label")
+    if rd("unit_label") is not None:
+        labels["qdistro_tier3s_unit"] = rd("unit_label")
+    if "qdistro_tier3s_token" not in labels or (want is not None and labels["qdistro_tier3s_token"] != want):
+        continue
+    out.append({"Id": rd("id"), "Names": [n], "Labels": labels})
+print(json.dumps(out, indent=1))
+PY
+    ;;
 run)
     printf '%s\n' "$@" > "$F/run_argv"
     while [ $# -gt 0 ]; do [ "$1" = --name ] && { name="$2"; break; }; shift; done
     c="$F/c/$name"; mkdir -p "$c"; touch "$c/exists" "$c/running"
     tok="$(sed -n 's/^qdistro_tier3s_token=//p' "$F/run_argv")"
     echo "$tok" > "$c/label"; sed -n 's/^qdistro_tier3s_unit=//p' "$F/run_argv" > "$c/unit_label"
+    echo "$tok$tok" > "$c/id"
     rel="$(sed -n 's/^0:://p' "$T/proc/$$/cgroup")"; echo "$rel" > "$c/scope"
     srel="$rel"; [ ! -e "$F/sentry_cgroup" ] || srel="$(cat "$F/sentry_cgroup")"
     for spec in "4001 conmon $rel 777001" "4002 gvisor_sentry $srel 777002"; do
@@ -131,6 +157,7 @@ exit 0
 FAKE_SYSTEMD_RUN = r'''#!/bin/bash
 F=@F@; T=@T@
 echo "systemd-run $*" >> "$F/calls"
+echo "systemd-run NOTIFY_SOCKET=${NOTIFY_SOCKET-unset}" >> "$F/env_seen"
 printf '%s\n' "$@" > "$F/scope_argv"
 unit=""
 for a in "$@"; do case "$a" in --unit=*) unit="${a#--unit=}" ;; esac; done
@@ -158,7 +185,10 @@ is-active)
 show) for a; do u="$a"; done
     case " $* " in
         *" BindsTo "*) [ ! -e "$F/show_fail" ] || exit 1; cat "$F/units/$u.bindsto" 2>/dev/null ;;
-        *) cat "$F/units/$u.cgroup" 2>/dev/null ;;
+        *" ControlGroup "*) [ ! -e "$F/show_cg_fail" ] || exit 1
+            [ ! -e "$F/show_cg_fail_after_stop" ] || ! grep -q '^podman stop' "$F/calls" || exit 1
+            cat "$F/units/$u.cgroup" 2>/dev/null ;;
+        *) exit 1 ;;
     esac
     exit 0 ;;
 stop)
@@ -212,8 +242,14 @@ echo "chown $*" >> @F@/calls
 exec /usr/bin/chown "$@"
 '''
 
+FAKE_NOTIFY = r'''#!/bin/bash
+echo "systemd-notify $* NOTIFY_SOCKET=${NOTIFY_SOCKET-unset}" >> @F@/calls
+exit "$(cat @F@/notify_rc 2>/dev/null || echo 0)"
+'''
+
 FAKE_PROBE = r'''#!/bin/bash
 echo "probe $*" >> @F@/calls
+echo "probe NOTIFY_SOCKET=${NOTIFY_SOCKET-unset}" >> @F@/env_seen
 rc="$(cat @F@/probe_rc 2>/dev/null || echo 0)"
 if [ "$rc" = 0 ]; then echo "RESULT PASS: tier 3s prerequisites present"
 else echo "RESULT FAIL: first missing prerequisite: state_root (/run/qdistro-tier3s-runsc/1000 missing)"; fi
@@ -255,7 +291,7 @@ class World:
         for name, text in (("podman", FAKE_PODMAN), ("systemd-run", FAKE_SYSTEMD_RUN),
                            ("systemctl", FAKE_SYSTEMCTL), ("runuser", FAKE_RUNUSER),
                            ("dbus-send", FAKE_DBUS), ("qdistro-resolve-binding", FAKE_RESOLVER),
-                           ("chown", FAKE_CHOWN)):
+                           ("chown", FAKE_CHOWN), ("systemd-notify", FAKE_NOTIFY)):
             write_exec(self.bin / name, fill(text))
         run = self.T / "run"
         for d, mode in (("qdistro-tier3s-ctl", 0o700), ("qdistro-tier3s", 0o755),
@@ -310,9 +346,13 @@ class World:
         return subprocess.Popen(["bash", str(SPAWN), *argv], env=self.env(**kw),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    def cleanup(self, *args):
-        return subprocess.run(["bash", str(CLEANUP), *args], env=self.env(),
+    def cleanup(self, *args, **kw):
+        return subprocess.run(["bash", str(CLEANUP), *args], env=self.env(**kw),
                               capture_output=True, text=True, timeout=60)
+
+    def cleanup_bg(self, *args, **kw):
+        return subprocess.Popen(["bash", str(CLEANUP), *args], env=self.env(**kw),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def plan(self, **kw):
         r = self.spawn(TIER3S_PRINT_PLAN="1", **kw)
@@ -364,6 +404,7 @@ class World:
             (c / f).write_text("")
         (c / "label").write_text(token + "\n")
         (c / "unit_label").write_text(unit + "\n")
+        (c / "id").write_text(token + token + "\n")
         (c / "scope").write_text(rel + "\n")
         (c / "pids").write_text("".join(f"{p}\n" for p in pids))
 
@@ -757,7 +798,10 @@ def test_cleanup_tears_down_a_running_launch(w):
     assert r.returncode == 0, r.stderr
     assert w.launch_gone(TOKEN)
     calls = w.calls()
-    assert any(c == f"podman stop -t 10 qdistro-tier3s-smoke" for c in calls), calls
+    # stop and rm act on the inspected container ID, never on a name another
+    # container could take meanwhile
+    assert f"podman stop -t 10 {TOKEN}{TOKEN}" in calls, calls
+    assert f"podman rm -f --ignore {TOKEN}{TOKEN}" in calls, calls
     # podman runs as the recorded admin, never as root
     assert all(calls[i - 1].startswith("runuser -u") for i, c in enumerate(calls) if c.startswith("podman"))
 
@@ -942,15 +986,22 @@ def test_reap_stale_podman_listing_failure_is_an_error(w):
     assert r.returncode == 1 and "nothing reaped by label" in r.stderr
 
 
-def test_reap_stale_reaps_an_unrecorded_labelled_container(w):
+@pytest.mark.parametrize("sticky", [False, True])
+def test_reap_stale_reaps_an_unrecorded_labelled_container(w, sticky):
     w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
     w.set_unit("qdistro-tier3s-silo@b.service", "inactive")
     shutil.rmtree(w.ctl / TOKEN2)                    # the manager lost the record
+    if sticky:
+        w.set("scope_sticky")                        # the scope outlives the container
     r = w.cleanup("--reap-stale")
     assert r.returncode == 0, r.stderr
     assert "UNRECORDED labelled container qdistro-tier3s-b" in r.stderr
-    assert "podman rm -f -t 10 qdistro-tier3s-b" in w.calls()
-    assert f"systemctl stop qdistro-tier3s-{TOKEN2}.scope" in w.calls()
+    assert f"podman rm -f -t 10 {TOKEN2}{TOKEN2}" in w.calls()
+    # a scope that outlives its container (live, bound to the dead b.service)
+    # is stopped through the guarded orphan path, never unconditionally
+    # (sol A-iii r4 P1); an emptied scope ends by itself
+    assert (f"systemctl stop qdistro-tier3s-{TOKEN2}.scope" in w.calls()) == sticky
+    assert (w.F / f"units/qdistro-tier3s-{TOKEN2}.scope.state").read_text().strip() == "inactive"
     assert not (w.launch_parent / TOKEN2).exists()
 
 
@@ -1161,3 +1212,371 @@ def test_image_recipe_pins_repos_before_refresh_and_sets_identity():
     assert (T3S / "make-tier3s-image.sh").read_text().splitlines()[1] == \
         "# copied from tier2/make-tier2-image.sh, unify later"
     assert "/usr/lib/qdistro/tier3s/SNAPSHOT" in (T3S / "configure-snapshot-repos.sh").read_text()
+
+
+# --- astra + fable Phase A r1 ----------------------------------------------------
+# sol A-iii r4 P1 / astra 3 / fable P1-1: a valid but STALE unit name never
+# authorizes the teardown of a live scope that another unit owns.
+
+def _live_b_with_stale_name(w, where):
+    """A live launch of b.service (token TOKEN2, its scope bound to b) whose
+    record or container label names the valid but dead old.service."""
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    w.set_unit("qdistro-tier3s-silo@old.service", "inactive")
+    if where == "record":
+        st = w.ctl / TOKEN2 / "state"
+        st.write_text(st.read_text().replace("unit=qdistro-tier3s-silo@b.service",
+                                             "unit=qdistro-tier3s-silo@old.service"))
+    else:
+        shutil.rmtree(w.ctl / TOKEN2)
+        (w.F / "c/qdistro-tier3s-b/unit_label").write_text("qdistro-tier3s-silo@old.service\n")
+
+
+@pytest.mark.parametrize("where", ["record", "label"])
+def test_reap_stale_refuses_a_stale_unit_name_on_a_live_scope_owned_by_another_unit(w, where):
+    _live_b_with_stale_name(w, where)
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1, r.stderr
+    assert "is bound to 'qdistro-tier3s-silo@b.service', not to qdistro-tier3s-silo@old.service" in r.stderr
+    assert (w.F / "c/qdistro-tier3s-b/running").exists() and (w.T / "proc/5002/stat").exists()
+    assert not any(c.startswith(("podman stop", "podman rm", "systemctl stop")) for c in w.calls())
+    if where == "record":
+        assert (w.ctl / TOKEN2 / "state").exists()
+    assert (w.launch_parent / TOKEN2).exists()
+
+
+def test_reap_stale_reaps_a_labelled_container_that_has_no_scope(w):
+    # the s122 "ghost": a labelled container started outside any launch unit
+    # (no scope, no record) whose unit label is dead is still reaped
+    c = w.F / "c/qdistro-tier3s-ghost"
+    c.mkdir(parents=True)
+    for f, v in (("exists", ""), ("running", ""), ("label", TOKEN2 + "\n"), ("id", TOKEN2 * 2 + "\n"),
+                 ("unit_label", "qdistro-tier3s-silo@ghost.service\n")):
+        (c / f).write_text(v)
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+    assert f"podman rm -f -t 10 {TOKEN2}{TOKEN2}" in w.calls()
+    assert not c.exists()
+
+
+def test_reap_stale_except_unit_reaps_only_an_older_token_of_the_spawn_unit(w):
+    # fable P3-6: the spawn's own unit is live; its record under an OLDER token
+    # is stale (one unit runs one launch); its NEW token is never a candidate
+    w.make_launch(TOKEN2, w.unit, "qdistro-tier3s-old", pids=(5001, 5002))
+    newer = "44444444444444444444444444444444"
+    w.make_launch(newer, w.unit, "qdistro-tier3s-new", pids=(6001, 6002))
+    r = w.cleanup("--reap-stale", "--except-unit", w.unit, "--token", newer)
+    assert r.returncode == 0, r.stderr
+    assert w.launch_gone(TOKEN2)
+    assert (w.ctl / newer / "state").exists() and (w.F / "c/qdistro-tier3s-new/running").exists()
+    # without the exception the live unit's records are not stale at all
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0 and (w.ctl / TOKEN / "state").exists() and (w.ctl / newer / "state").exists()
+
+
+@pytest.mark.parametrize("args", [["--except-unit", "qdistro-tier3s-silo@smoke.service"],
+                                  ["--token", TOKEN], ["--except-unit", "sshd.service", "--token", TOKEN],
+                                  ["--deadline", "0"]])
+def test_reap_stale_option_validation(w, args):
+    r = w.cleanup("--reap-stale", *args)
+    assert r.returncode == 2 and "usage" in r.stderr
+    assert w.calls() == []
+
+
+# astra 2: a failed scope query or recursive scan never reads as "gone/empty"
+
+def _created_record(w, token=TOKEN):
+    """A phase=created record (no scope_cgroup, no pids yet) whose scope is
+    live with a process and whose container is absent."""
+    w.make_launch(token, w.unit, "qdistro-tier3s-smoke")
+    st = w.ctl / token / "state"
+    st.write_text("".join(l + "\n" for l in st.read_text().splitlines()
+                          if not l.startswith(("scope_cgroup=", "conmon_", "sentry_", "container_id="))
+                          ).replace("phase=running", "phase=created"))
+    shutil.rmtree(w.F / "c/qdistro-tier3s-smoke")
+
+
+@pytest.mark.parametrize("flag", ["show_cg_fail", "show_cg_fail_after_stop"])
+def test_cleanup_a_failed_controlgroup_query_preserves(w, flag):
+    if flag == "show_cg_fail":
+        _created_record(w)
+    else:
+        w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")     # the LATER lookup fails
+    w.set(flag)
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 6, r.stderr
+    assert "ControlGroup query for" in r.stderr and "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" not in w.calls()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+@pytest.mark.parametrize("damage", ["unreadable-procs", "unreadable-dir"])
+def test_cleanup_a_failed_recursive_scan_is_not_empty(w, damage):
+    # the recorded container, conmon and Sentry are gone, but the scope has a
+    # child cgroup the scan cannot read; the scope cannot be stopped
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("scope_sticky")
+    w.set("scope_stop_fail")
+    d = Path(f"{w.T}/sys/fs/cgroup/system.slice/qdistro-tier3s-{TOKEN}.scope")
+    (d / "sub").mkdir()
+    (d / "sub/cgroup.procs").write_text("4999\n")
+    target = d / "sub/cgroup.procs" if damage == "unreadable-procs" else d / "sub"
+    target.chmod(0)
+    try:
+        r = w.cleanup(TOKEN)
+    finally:
+        target.chmod(0o755)
+    assert r.returncode == 6, r.stderr
+    assert "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+
+
+def test_tree_scan_counts_a_child_cgroup_process(w):
+    # the recursive scan sees a descendant in a child cgroup (gofer/stub
+    # leftovers), so the scope is stopped rather than declared empty
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("scope_sticky")
+    d = Path(f"{w.T}/sys/fs/cgroup/system.slice/qdistro-tier3s-{TOKEN}.scope")
+    (d / "cgroup.procs").write_text("")
+    (d / "sub").mkdir()
+    (d / "sub/cgroup.procs").write_text("4999\n")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 0, r.stderr
+    assert f"systemctl stop qdistro-tier3s-{TOKEN}.scope" in w.calls()
+
+
+# astra 1 / fable P2-3: the record appears complete or not at all
+
+def test_spawn_killed_before_publication_leaves_no_record(w):
+    import fcntl
+    w.set("run_block")
+    lock = open(w.ctl / ".lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)            # the global lock is busy
+    p = subprocess.Popen(["bash", str(SPAWN), *ARGV], env=w.env(TIER3S_TEST_TMO="1"),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    try:
+        wait_for(lambda: any(c.startswith("podman ps") for c in w.calls()), "the reaper ran", p)
+        time.sleep(0.5)                          # the spawn now waits on the lock
+        assert p.poll() is None
+        os.killpg(p.pid, 9)                      # SIGKILL: no trap runs
+        p.communicate(timeout=10)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+    assert sorted(x.name for x in w.ctl.iterdir()) == [".lock"]
+    assert list(w.launch_parent.iterdir()) == []
+    assert w.first("systemd-run") is None
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+
+
+def test_published_record_is_complete(w):
+    w.set("run_block")
+    seen = []
+    p = w.start()
+    try:
+        # every time the record dir exists, its state already has every create field
+        def complete():
+            d = w.ctl / TOKEN
+            if d.exists():
+                st = w.state()
+                seen.append(st.get("phase"))
+                assert {"schema", "token", "container", "unit", "scope_unit", "admin_uid",
+                        "runsc_root", "per_launch_dir", "phase"} <= set(st)
+                return st.get("phase") == "running"
+            return False
+        wait_for(complete, "phase=running", p)
+        w.set("release")
+        p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0 and w.launch_gone(TOKEN)
+
+
+def test_reap_stale_removes_a_dead_spawns_unpublished_record(w):
+    d = w.ctl / f".new-{TOKEN}"
+    d.mkdir(mode=0o700)
+    (d / "state").write_text("schema=1\n")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+    assert not d.exists()
+
+
+def _incomplete(w, token=TOKEN):
+    d = w.ctl / token
+    d.mkdir(mode=0o700)
+    d.chmod(0o700)
+    (w.launch_parent / token).mkdir()
+    return d
+
+
+@pytest.mark.parametrize("how", [["--reap-stale"], ["--unit", "qdistro-tier3s-silo@unrelated.service"], [TOKEN]])
+def test_an_incomplete_record_is_recovered_when_nothing_ran_under_it(w, how):
+    # earlier code could leave a record dir without its state (interrupted
+    # creation): restart recovery (--reap-stale), an unrelated unit's stop
+    # (--unit) and the token's own cleanup all recover it on positive evidence
+    d = _incomplete(w)
+    r = w.cleanup(*how)
+    assert r.returncode == 0, r.stderr
+    assert "incomplete control record removed" in r.stderr
+    assert not d.exists() and not (w.launch_parent / TOKEN).exists()
+
+
+@pytest.mark.parametrize("case", ["scope-live", "scope-unknown", "container", "listing-fails"])
+def test_an_incomplete_record_is_preserved_without_positive_evidence(w, case):
+    d = _incomplete(w)
+    if case == "scope-live":
+        w.set_unit(f"qdistro-tier3s-{TOKEN}.scope", "active")
+    elif case == "scope-unknown":
+        (w.F / f"units/qdistro-tier3s-{TOKEN}.scope.fail").write_text("")
+    elif case == "container":
+        c = w.F / "c/qdistro-tier3s-x"
+        c.mkdir(parents=True)
+        for f, v in (("exists", ""), ("label", TOKEN + "\n"), ("id", TOKEN * 2 + "\n"),
+                     ("unit_label", "qdistro-tier3s-silo@x.service\n")):
+            (c / f).write_text(v)
+        w.set_unit("qdistro-tier3s-silo@x.service", "active")
+    else:
+        w.set("ps_fail")
+    r = w.cleanup("--unit", "qdistro-tier3s-silo@unrelated.service")
+    assert r.returncode == 1, r.stderr
+    assert d.exists() and (w.launch_parent / TOKEN).exists()
+
+
+# astra 5 / fable P3-1, P3-2: bounded calls, per-token locks
+
+def test_a_wedged_podman_call_is_bounded_and_blocks_no_other_launch(w):
+    import fcntl
+    w.make_launch(TOKEN, "qdistro-tier3s-silo@a.service", "qdistro-tier3s-a", pids=(4001, 4002))
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    w.set("hang_name", "qdistro-tier3s-a")
+    t0 = time.time()
+    pa = w.cleanup_bg("--unit", "qdistro-tier3s-silo@a.service", TIER3S_TEST_TMO="3")
+    try:
+        wait_for(lambda: (w.F / "hung.pids").exists(), "A's podman call to hang", pa)
+        # B's teardown and a new record publication proceed while A hangs
+        r = w.cleanup("--unit", "qdistro-tier3s-silo@b.service", TIER3S_TEST_TMO="3")
+        assert r.returncode == 0, r.stderr
+        assert w.launch_gone(TOKEN2)
+        with open(w.ctl / ".lock", "w") as g:
+            fcntl.flock(g, fcntl.LOCK_EX | fcntl.LOCK_NB)      # the global lock is free
+        assert pa.poll() is None, "A's cleanup is still bounded by its timeout"
+        out, err = pa.communicate(timeout=30)
+    finally:
+        if pa.poll() is None:
+            pa.kill()
+    assert pa.returncode == 1, err
+    assert "podman query failed" in err and time.time() - t0 < 25
+    assert (w.ctl / TOKEN / "state").exists() and (w.F / "c/qdistro-tier3s-a/running").exists()
+    for pid in (w.F / "hung.pids").read_text().split():
+        assert not Path(f"/proc/{pid}").exists(), f"the wedged podman {pid} was not killed"
+    # A's lock was released with the helper: once podman answers, it tears down
+    (w.F / "hang_name").unlink()
+    r = w.cleanup("--unit", "qdistro-tier3s-silo@a.service")
+    assert r.returncode == 0, r.stderr
+    assert w.launch_gone(TOKEN)
+
+
+def test_reap_stale_skips_a_token_another_teardown_holds(w):
+    import fcntl
+    w.make_launch(TOKEN, "qdistro-tier3s-silo@a.service", "qdistro-tier3s-a", pids=(4001, 4002))
+    w.set_unit("qdistro-tier3s-silo@a.service", "failed")
+    fd = os.open(w.ctl / TOKEN, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        t0 = time.time()
+        r = w.cleanup("--reap-stale")
+        assert time.time() - t0 < 10
+    finally:
+        os.close(fd)
+    assert r.returncode == 0 and "busy" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+    assert not any(c.startswith(("podman stop", "podman rm")) for c in w.calls())
+
+
+def test_reap_stale_deadline_preserves_what_it_did_not_reach(w):
+    w.make_launch(TOKEN, "qdistro-tier3s-silo@a.service", "qdistro-tier3s-a", pids=(4001, 4002))
+    w.set_unit("qdistro-tier3s-silo@a.service", "failed")
+    w.set("hang_name", "qdistro-tier3s-a")
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    w.set_unit("qdistro-tier3s-silo@b.service", "failed")
+    r = w.cleanup("--reap-stale", "--deadline", "1", TIER3S_TEST_TMO="2")
+    assert r.returncode == 1
+    assert "deadline reached" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+
+
+# fable P2-2: admin-chosen label bytes never steer the reaper
+
+def test_reap_stale_label_bytes_cannot_inject_or_shift_fields(w):
+    hexes = "55555555555555555555555555555555"
+    w.make_launch(TOKEN, "qdistro-tier3s-silo@live.service", "qdistro-tier3s-live", pids=(4001, 4002))
+    c = w.F / "c/qdistro-tier3s-evil"
+    c.mkdir(parents=True)
+    for f, v in (("exists", ""), ("running", ""), ("label", TOKEN2 + "\n"), ("id", TOKEN2 * 2 + "\n"),
+                 ("unit_label", f"qdistro-tier3s-silo@x.service\n{hexes}|qdistro-tier3s-silo@y.service"
+                                f"|qdistro-tier3s-live\n")):
+        (c / f).write_text(v)
+    for u in ("x", "y"):
+        w.set_unit(f"qdistro-tier3s-silo@{u}.service", "inactive")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1, r.stderr
+    assert f"{TOKEN2}: labelled container qdistro-tier3s-evil has no valid qdistro_tier3s_unit label" in r.stderr
+    assert (w.F / "c/qdistro-tier3s-live/running").exists() and c.exists()
+    assert not any(c_.startswith(("podman stop", "podman rm", "systemctl stop")) for c_ in w.calls())
+
+
+def test_reap_stale_bad_listing_json_is_an_error(w):
+    w.set("ps_garbage")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "nothing reaped by label" in r.stderr
+
+
+# astra 4 / fable P2-1: Type=notify; READY=1 only once the launch runs
+
+def test_spawn_sends_ready_once_recorded_running_and_hides_the_socket(w):
+    w.set("run_block")
+    p = w.start(NOTIFY_SOCKET="/run/systemd/notify")
+    try:
+        wait_for(lambda: any(c.startswith("systemd-notify") for c in w.calls()), "READY", p)
+        assert w.state()["phase"] == "running"
+        ready = [c for c in w.calls() if c.startswith("systemd-notify")]
+        assert len(ready) == 1 and "--ready" in ready[0] and "NOTIFY_SOCKET=/run/systemd/notify" in ready[0]
+        assert w.first("systemd-notify") > w.first("systemd-run")
+        # the socket never reaches the probe or the scope (podman runs under env -i)
+        assert (w.F / "env_seen").read_text().splitlines() == [
+            "probe NOTIFY_SOCKET=unset", "systemd-run NOTIFY_SOCKET=unset"]
+        w.set("release")
+        p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0
+
+
+@pytest.mark.parametrize("setup", ["deny", "probe", "image", "podman-fails"])
+def test_a_refused_or_failed_launch_never_sends_ready(w, setup):
+    {"deny": lambda: w.set("dbus_mode", "deny"), "probe": lambda: w.set("probe_rc", "1"),
+     "image": lambda: w.set("image_rc", "1"), "podman-fails": lambda: w.set("run_rc", "125")}[setup]()
+    r = w.spawn(NOTIFY_SOCKET="/run/systemd/notify")
+    assert r.returncode != 0, r.stderr
+    assert w.first("systemd-notify") is None
+
+
+def test_a_short_workload_that_completed_sends_ready(w):
+    r = w.spawn(NOTIFY_SOCKET="/run/systemd/notify")
+    assert r.returncode == 0, r.stderr
+    assert len([c for c in w.calls() if c.startswith("systemd-notify --ready")]) == 1
+    assert w.launch_gone(TOKEN)
+
+
+def test_a_failed_ready_tears_the_launch_down(w):
+    w.set("run_block")
+    w.set("notify_rc", "1")
+    r = w.spawn(NOTIFY_SOCKET="/run/systemd/notify")
+    assert r.returncode == 2 and "cannot send READY=1" in r.stderr
+    assert w.launch_gone(TOKEN)

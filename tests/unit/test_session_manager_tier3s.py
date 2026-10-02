@@ -55,6 +55,8 @@ class _T3sOps(_FakeOps):
         self.t3s_live: list[str] = []
         self.t3s_live_raises: BaseException | None = None
         self.start_raises: BaseException | None = None
+        self.refusal = ""
+        self.t3s_bound_starts: list[str] = []
         self.events: list[tuple] = []
 
     def qdistro_profile(self) -> str:
@@ -84,6 +86,15 @@ class _T3sOps(_FakeOps):
         if self.start_raises is not None:
             raise self.start_raises
         super().systemctl_start(unit)
+
+    def tier3s_systemctl_start(self, unit: str) -> None:
+        # the tier3s unit is Type=notify: a refused launch fails this call
+        self.t3s_bound_starts.append(unit)
+        self.systemctl_start(unit)
+
+    def tier3s_start_refusal(self, unit: str) -> str:
+        self.events.append(("refusal?", unit))
+        return self.refusal
 
     def systemctl_stop(self, unit: str, *, timeout=None) -> bool:
         self.events.append(("stop", unit))
@@ -273,6 +284,8 @@ def test_start_exports_the_stanza_and_starts_only_the_tier3s_unit(store, ops):
     assert set(env) == {"TIER3S_SILO", "TIER3S_BINDING", "TIER3S_WORKLOAD",
                         "TIER3S_NETWORK", "TIER3S_LAUNCH_TOKEN", "TIER3S_ARGV_JSON"}
     assert env["TIER3S_SILO"] == "smoke" and env["TIER3S_BINDING"] == "smoke"
+    # through the tier3s start (the Type=notify bound), never the generic one
+    assert ops.t3s_bound_starts == [UNIT]
     assert env["TIER3S_WORKLOAD"] == "headless-smoke"
     assert env["TIER3S_NETWORK"] == "none"
     assert re.fullmatch(r"[0-9a-f]{32}", env["TIER3S_LAUNCH_TOKEN"])
@@ -316,6 +329,57 @@ def test_failed_start_rolls_back_and_falls_back_to_nothing(store, ops):
     assert store.get("smoke").state == State.STOPPED
     assert [e for e in ops.events if e[0] == "start"] == [("start", UNIT)]
     assert ops.cgroups == set()
+
+
+def test_a_refused_launch_fails_start_leaves_stopped_and_a_retry_starts(store, ops):
+    """astra/fable A r1: the unit is Type=notify, so a launch the spawn
+    refuses fails `systemctl start`. StartSilo reports the refusal, the silo
+    is Stopped only after the launch is verified gone, and a retry once the
+    cause is fixed is a real start (not an idempotent no-op from Active)."""
+    make(store)
+    ops.start_raises = subprocess.CalledProcessError(1, ["systemctl", "start", UNIT])
+    ops.refusal = "REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke"
+    with pytest.raises(SessionError, match="refused or failed before it ran: REFUSE: broker denied") as ei:
+        store.start("smoke")
+    assert not isinstance(ei.value, sm.StartNotCancelled)
+    silo = store.get("smoke")
+    assert silo.state == State.STOPPED and silo.observed_status == "failed"
+    assert "broker denied" in silo.observed_reason
+    ev = ops.events
+    assert ev.index(("running?", "smoke")) > ev.index(("start", UNIT)), "verified gone after the failed start"
+    ops.start_raises = None
+    store.start("smoke")
+    assert store.get("smoke").state == State.ACTIVE
+    assert [e for e in ops.events if e[0] == "start"] == [("start", UNIT), ("start", UNIT)]
+
+
+def test_a_failed_start_whose_launch_is_not_verified_gone_stays_active(store, ops):
+    make(store)
+    ops.start_raises = subprocess.CalledProcessError(1, ["systemctl", "start", UNIT])
+    ops.t3s_running = True
+    with pytest.raises(sm.StartNotCancelled, match="could not be verified gone"):
+        store.start("smoke")
+    silo = store.get("smoke")
+    assert silo.state == State.ACTIVE and silo.start_unresolved
+    with pytest.raises(sm.SiloBusy):
+        store.delete("smoke")
+
+
+def test_autostart_of_a_refused_launch_ends_stopped(ops, tmp_path):
+    """fable P2-1: an Active row whose launch is now refused is relaunched
+    once by the next manager start and then reads Stopped, not Active."""
+    cfg = tmp_path / "silos.yaml"
+    s1 = _SiloStore(ops, config_path=cfg)
+    make(s1)
+    s1.start("smoke")
+    ops.start_raises = subprocess.CalledProcessError(1, ["systemctl", "start", UNIT])
+    s2 = _SiloStore(ops, config_path=cfg)
+    s2.autostart_pass()
+    assert s2.get("smoke").state == State.STOPPED
+    s3 = _SiloStore(ops, config_path=cfg)
+    n = len([e for e in ops.events if e[0] == "start"])
+    s3.autostart_pass()
+    assert len([e for e in ops.events if e[0] == "start"]) == n, "a Stopped row is not relaunched"
 
 
 def test_unresolved_start_stays_active(store, ops):
@@ -556,6 +620,71 @@ def test_live_units_parse(real_ops, monkeypatch):
     assert rec.calls[0][1].get("check") is True
 
 
+def test_tier3s_start_uses_the_notify_bound(real_ops, monkeypatch):
+    rec = _install(monkeypatch, [(_is("start"), (0, ""))])
+    real_ops.tier3s_systemctl_start(UNIT)
+    argv, kw = rec.calls[0]
+    assert argv == ["systemctl", "start", UNIT] and kw["timeout"] == sm._T_TIER3S_START
+    assert kw.get("check") is True
+    # above the unit's own TimeoutStartSec, so systemd decides first
+    assert sm._T_TIER3S_START > int(_unit_kv()["TimeoutStartSec"][0])
+
+
+def test_tier3s_start_timeout_is_unresolved(real_ops, monkeypatch):
+    _install(monkeypatch, [(_is("start"), subprocess.TimeoutExpired(["systemctl"], 1)),
+                           (_is("stop"), (0, ""))])
+    with pytest.raises(sm.StartNotCancelled):
+        real_ops.tier3s_systemctl_start(UNIT)
+
+
+def test_start_refusal_is_the_spawns_last_refuse_line(real_ops, monkeypatch):
+    inv = "c" * 32
+    _install(monkeypatch, [
+        (_is("InvocationID"), (0, inv + "\n")),
+        (lambda a: a[0] == "journalctl" and f"_SYSTEMD_INVOCATION_ID={inv}" in a,
+         (0, "spawn-tier3s: probe ok\nspawn-tier3s: REFUSE: broker denied x (decision=deny)\n"))])
+    assert real_ops.tier3s_start_refusal(UNIT) == "REFUSE: broker denied x (decision=deny)"
+    _install(monkeypatch, [(_is("InvocationID"), subprocess.TimeoutExpired(["systemctl"], 1))])
+    assert real_ops.tier3s_start_refusal(UNIT) == ""
+
+
+def test_an_incomplete_record_blocks_no_unrelated_stop(real_ops, monkeypatch, tmp_path):
+    """astra A r1 #1: a control dir without its state (interrupted creation by
+    earlier code) still counts for every unit's stop verification (it is not
+    ignored), and the stop's `cleanup --unit` recovers it on positive evidence,
+    so an unrelated silo's stop verifies. Runs the REAL cleanup (test mode,
+    the fake world of test_tier3s_spawn) through _SystemOps.tier3s_cleanup."""
+    from test_tier3s_spawn import World
+    w = World(tmp_path / "w")
+    d = w.ctl / ("d" * 32)
+    d.mkdir(mode=0o700)
+    d.chmod(0o700)
+    monkeypatch.setattr(sm, "TIER3S_CTL_DIR", w.ctl)
+    wrapper = tmp_path / "cleanup-wrapper"
+    env = w.env()
+    wrapper.write_text("#!/bin/bash\nexec env -i " + " ".join(
+        shlex.quote(f"{k}={v}") for k, v in env.items()) + f" bash {w.T}/usr/libexec/qdistro/qdistro-tier3s-cleanup \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(sm, "TIER3S_CLEANUP", wrapper)
+    real_run = subprocess.run
+    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_is("exists"), (1, "")),
+                           (lambda a: a[0] == str(wrapper), None)])
+    rec = sm.subprocess.run
+
+    def run(argv, **kw):
+        if argv[0] == str(wrapper):
+            rec.calls.append((list(argv), kw))
+            assert "timeout" in kw
+            return real_run(argv, **kw)
+        return rec(argv, **kw)
+    monkeypatch.setattr(sm.subprocess, "run", run)
+    other = "qdistro-tier3s-silo@unrelated.service"
+    assert real_ops.tier3s_silo_running("unrelated") is True       # counted, not ignored
+    assert real_ops.tier3s_cleanup("--unit", other) is True
+    assert not d.exists()
+    assert real_ops.tier3s_silo_running("unrelated") is False
+
+
 def test_cleanup_reports_failure(real_ops, monkeypatch):
     _install(monkeypatch, [(_is("--reap-stale"), (1, ""))])
     assert real_ops.tier3s_cleanup("--reap-stale") is False
@@ -656,11 +785,15 @@ def test_helper_execs_the_spawn_with_exactly_the_stanza(tmp_path, monkeypatch):
     assert r.returncode == 0, r.stderr
     got, args = _record(rec)
     assert {k: v for k, v in got.items() if k not in ("PWD", "SHLVL", "_")} == {
-        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "NOTIFY_SOCKET": "",
         "TIER3S_ROOT_LAUNCHER": "1", "TIER3S_ADMIN_UID": "1000",
         "TIER3S_LAUNCH_UNIT": UNIT, "TIER3S_LAUNCH_TOKEN": token,
         "TIER3S_SILO": "smoke", "TIER3S_BINDING": "smoke", "TIER3S_NETWORK": "none"}
     assert args == ["headless-smoke", "--", "qdistro-tier3s-smoke", "a b", "", "it's", "$(x)"]
+    # systemd's notify socket (Type=notify) is the one variable passed through
+    r = _run_helper(env, NOTIFY_SOCKET="/run/systemd/notify")
+    assert r.returncode == 0, r.stderr
+    assert _record(rec)[0]["NOTIFY_SOCKET"] == "/run/systemd/notify"
 
 
 def test_helper_parses_and_never_sources_the_stanza(tmp_path):
@@ -786,6 +919,9 @@ def test_unit_file_shape():
     assert kv["ExecStop"] == ["-/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n"]
     assert kv["ExecStopPost"] == ["/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n"]
     assert kv["SuccessExitStatus"] == ["143 137"]
+    # astra/fable A r1: a refused launch must fail the start job
+    assert kv["Type"] == ["notify"] and kv["NotifyAccess"] == ["all"]
+    assert kv["TimeoutStartSec"] == ["120"]
     assert kv["Restart"] == ["no"]
     assert "PartOf" not in kv, "a manager restart must not restart the launch (reconciliation does)"
     # paravirt O11: a manager STOP stops every tier3s launch unit (stop only,
