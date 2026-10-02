@@ -40,6 +40,7 @@ from qdbrowser import quarantine as quar_mod
 from qdbrowser.config import Config
 from qdbrowser.plugin import CommandProvider, SidePanelProvider
 from qdbrowser.quarantine import QuarantineStore
+from qdbrowser.theme import FG_DIM, _ui_font, css_color_literal, palette_dict
 
 log = logging.getLogger("qdbrowser.quarantine_panel")
 
@@ -52,6 +53,11 @@ def _format_timestamp(ts: int | None) -> str:
             "%Y-%m-%d %H:%M")
     except (ValueError, OSError, OverflowError):
         return "?"
+
+
+def _dim_color() -> str:
+    """Secondary chrome color from the shared palette, else the dim fallback."""
+    return css_color_literal(palette_dict("auto").get("fg_dim"), FG_DIM)
 
 
 def _row_summary(row: dict) -> dict:
@@ -125,10 +131,11 @@ class QuarantineController:
 class QuarantinePanel(QWidget):
     """Side-panel widget listing the quarantine queue."""
 
-    def __init__(self, window, controller: QuarantineController):
-        super().__init__()
+    def __init__(self, window, controller: QuarantineController, parent=None):
+        super().__init__(parent)
         self._window = window
         self._controller = controller
+        self._meta_labels: list[QLabel] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -137,7 +144,6 @@ class QuarantinePanel(QWidget):
         self._empty = QLabel("No quarantined downloads.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
-        self._empty.setStyleSheet("color: palette(mid);")
         layout.addWidget(self._empty)
 
         self._list = QListWidget()
@@ -149,9 +155,24 @@ class QuarantinePanel(QWidget):
         layout.addWidget(refresh_btn)
 
         self.refresh()
+        self.apply_presentation_update()
+
+    def apply_presentation_update(self) -> None:
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        color = _dim_color()
+        sheet = f"color: {color};"
+        self._empty.setFont(_ui_font())
+        self._empty.setStyleSheet(sheet)
+        meta_font = _ui_font(relative=0.9)
+        for meta in self._meta_labels:
+            meta.setFont(meta_font)
+            meta.setStyleSheet(sheet)
 
     def refresh(self):
         self._list.clear()
+        self._meta_labels.clear()
         items = []
         error = None
         try:
@@ -187,9 +208,10 @@ class QuarantinePanel(QWidget):
         meta = QLabel(
             f"{summary['source_url']}\n{scan} · {summary['timestamp']}")
         meta.setWordWrap(True)
-        meta.setStyleSheet("color: palette(mid); font-size: 11px;")
         meta.setToolTip(summary["source_url"])
         rlayout.addWidget(meta)
+        self._meta_labels.append(meta)
+        self._style_meta(meta)
 
         btns = QHBoxLayout()
         btns.setSpacing(4)
@@ -212,6 +234,10 @@ class QuarantinePanel(QWidget):
         item.setSizeHint(row_widget.sizeHint())
         self._list.addItem(item)
         self._list.setItemWidget(item, row_widget)
+
+    def _style_meta(self, meta: QLabel) -> None:
+        meta.setFont(_ui_font(relative=0.9))
+        meta.setStyleSheet(f"color: {_dim_color()};")
 
     def _default_release_dir(self) -> str:
         cfg = Config()
@@ -293,6 +319,12 @@ class QuarantinePanelPlugin(SidePanelProvider, CommandProvider):
             return placeholder
         self._panel = QuarantinePanel(window, controller)
         return self._panel
+
+    def apply_presentation_update(self) -> None:
+        panel = self._panel
+        update = getattr(panel, "apply_presentation_update", None)
+        if callable(update):
+            update()
 
     def get_commands(self, window):
         return [

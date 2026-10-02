@@ -820,6 +820,10 @@ class MainWindow(QMainWindow):
         dark = self.plugins._instances.get("dark_mode")
         if dark is not None and hasattr(dark, "on_appearance_changed"):
             dark.on_appearance_changed(self._resolved_theme, views)
+        quarantine = self.plugins._instances.get("quarantine_panel")
+        quarantine_update = getattr(quarantine, "apply_presentation_update", None)
+        if callable(quarantine_update):
+            quarantine_update()
 
     def _new_window(self):
         # A second top-level window in the same process; sessions are
