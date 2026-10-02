@@ -219,6 +219,11 @@ chmod 0700 \$SIDE/gvisor_sentry; trap 'chmod 1777 /var/tmp' EXIT; chmod 0777 /va
 provision refuses-unsticky-var-tmp 1; has names-stage-parent \$VO 'untrusted stage parent /var/tmp (0 777)'
 chmod 1777 /var/tmp; is var-tmp-restored \"\$(stat -c %a /var/tmp)\" 1777
 is live-untouched \"\$(stat -c %a \$SIDE/gvisor_sentry)\" 700
+echo '## /var group-writable while /var/tmp itself stays root 1777: provision refuses before staging'
+trap 'chmod 1777 /var/tmp; chmod 0755 /var' EXIT; stat -c '%n %a %U:%G' /var /var/tmp; chmod 0775 /var
+provision refuses-writable-var 1; has names-var \$VO 'untrusted path: /var is group/other-writable (mode 775)'
+chmod 0755 /var; is var-restored \"\$(stat -c %a:%U /var)\" 755:root
+is live-untouched-2 \"\$(stat -c %a \$SIDE/gvisor_sentry)\" 700
 provision repair-exit 0; rmdir /var/tmp/t3s-evil; is no-leftovers \"\$(leftovers)\" 0; probe_tail_pass after; finish"
 
 step 18-cache-trust "$L; chmod 0700 \$SIDE/gvisor_sentry
@@ -283,6 +288,22 @@ expect_rc probe-refused 2 \$rc
 is probe-message \"\$(cat /var/tmp/t3s-o)\" 'REFUSE checkout: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/probe.sh owned by uid 1000 (use a root-owned copy)'
 is install-unchanged \"\$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc \$R | sha512sum)\" \"\$before\"
 rm -rf /home/admin/t3s-co; probe_tail_pass trusted-checkout; finish"
+
+step 21-caller-path-shadow "$L; SH=/var/tmp/t3s-shadow; M=/var/tmp/t3s-SHADOW-RAN; rm -rf \$SH \$M; mkdir -m 0755 \$SH
+for t in dirname basename id stat sed grep find sha512sum cut sort comm tr head tail cat cmp readlink uname env mktemp install mv cp rm flock tar curl runuser podman getenforce seq sleep chmod mkdir ln ls wc zstd; do
+  r=\$(command -v \$t) || continue; printf '#!/bin/sh\\necho \"%s \$*\" >> %s\\nexec %s \"\$@\"\\n' \$t \$M \$r > \$SH/\$t; chmod 0755 \$SH/\$t; done
+echo \"shadow tools first on PATH: \$(ls \$SH | wc -l)\"; cat \$SH/dirname
+echo '## real probe, idempotent provision and the wrapper, as root, with the shadows first on PATH'
+PATH=\$SH:\$PATH tier3s/probe.sh --user admin > \$PO 2>&1; rc=\$?; tail -1 \$PO; expect_rc probe-exit 0 \$rc
+has probe-pass \$PO 'RESULT PASS: tier 3s prerequisites present'
+PATH=\$SH:\$PATH \"\${PROVISION[@]}\" > /var/tmp/t3s-prov.out 2>&1; rc=\$?; cat /var/tmp/t3s-prov.out; expect_rc provision-exit 0 \$rc
+has provision-idempotent /var/tmp/t3s-prov.out 'already installed and matching pin $rel; nothing to do'
+PATH=\$SH:\$PATH /usr/libexec/qdistro/tier3s-runsc --version > /var/tmp/t3s-o 2>&1; rc=\$?; head -1 /var/tmp/t3s-o; expect_rc wrapper-version-exit 0 \$rc
+has wrapper-ran-pinned-runsc /var/tmp/t3s-o 'runsc version release-$rel'
+is no-shadow-tool-ran \"\$(cat \$M 2>/dev/null | wc -l)\" 0
+echo '## positive control: a shadow does record when it is used'
+PATH=\$SH:\$PATH dirname /x/y > /dev/null; is control-shadow-records \"\$(cat \$M | wc -l)\" 1
+rm -rf \$SH \$M; finish"
 
 step 08-probe-pass-after-negatives "$L; provision idempotent-exit 0; has nothing-to-do \$VO 'already installed and matching pin $rel; nothing to do'
 probe_strace; expect_rc probe-exit 0 \$PRC; has result-pass \$PO 'RESULT PASS: tier 3s prerequisites present'

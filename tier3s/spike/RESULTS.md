@@ -80,8 +80,13 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   hostile `$TMPDIR` cannot redirect a root write; an import failure is
   reported as such. Run as root, the probe and the provisioner refuse a
   checkout another uid could modify (script, pin, wrapper and every ancestor
-  root-owned, not other-writable, group-writable only for gid 0), and pin
-  their own environment (system `PATH`, no `TAR_OPTIONS`, `curl -q`).
+  root-owned, not other-writable, group-writable only for gid 0). Their
+  first statement pins `PATH` to the system dirs before any external command
+  (root decisions use bash's `$EUID`), they unset `TAR_OPTIONS` and use
+  `curl -q`, and the wrapper calls `/usr/bin/env` by absolute path, so a
+  directory on the caller's `PATH` never supplies a tool (TEST mode keeps the
+  test operator's `PATH` for its fakes). Interpreter start-up itself
+  (`BASH_ENV`, the dynamic loader) must come from a trusted invocation.
 - **Provisioning was not serialized.** Now one exclusive `flock` on
   `/run/qdistro-runsc/provision.lock` (root 0700) is taken before the live
   state is inspected and held through swap, verification, rollback and
@@ -92,7 +97,8 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   group/other-writable, checked before the download and re-checked after
   creating it; an existing tarball in an untrusted cache can still be read,
   via the verified private copy (no shared `.part`). A real install stages under `/var/tmp` (root-owned
-  and sticky, checked) whatever `$TMPDIR` says, and the existing parents of the
+  and sticky, with `/var` and `/` root-owned and not writable, checked)
+  whatever `$TMPDIR` says, and the existing parents of the
   install, stamp and lock paths must be root-owned and not
   group/other-writable.
 - **Tests that never reached their guards** now do: a clean synthetic probe
@@ -102,11 +108,11 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   loop; plus version text with a nonzero exit, wrapper env scrubbing, failed
   rollback preservation, a two-process lock test and swap-during-window
   tests. `tier3s/spike/mutate-guards.py` breaks each guard in the real
-  scripts and shows its test failing (26 mutations; 3 of them also with
+  scripts and shows its test failing (29 mutations; 3 of them also with
   real euid 0 in the VM). The stage-parent and cache-trust rules for real
   root installs, and the probe's scratch-image import under a hostile
-  `$TMPDIR` and the checkout refusal, are shown in the VM
-  (`logs/phase0-fix-20261002/17`–`20`).
+  `$TMPDIR`, the checkout refusal and shadowed caller `PATH` tools, are shown
+  in the VM (`logs/phase0-fix-20261002/17`–`21`).
 
 ## Phase S — the feasibility spike
 
