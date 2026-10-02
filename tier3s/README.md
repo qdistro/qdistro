@@ -8,16 +8,22 @@ not needed to read this tree: the qdistro planning tracker
 
 Status: **Phase 0** (provision + prerequisite screen) and **Phase S**
 (feasibility spike, `spike/README.md`): GO, with three conditions: a runsc
-state root, an admin-delegated owning scope, a secctx-wrapped bridge client. Nothing here is wired
-into the image, kiwi config or any installer, and nothing in qdistro selects
-this tier automatically (O6: explicit launch, no fallback). Dev profile only
+state root, an admin-delegated owning scope, a secctx-wrapped bridge client.
+runsc is not in the image, kiwi config or any installer (provisioned on
+demand, D1), and nothing in qdistro selects this tier automatically (O6:
+explicit launch, no fallback). Dev profile only
 (O4); `probe.sh` refuses on any other profile. No KVM claims (O5).
 
 **Phase A** (headless launch path), milestone A-i: the lifecycle contract
 **[`CONTRACT.md`](CONTRACT.md)** and the launch-path scripts below, tested on
 the host against fakes (`tests/unit/test_tier3s_spawn.py`) with feasibility
-evidence in `spike/logs/phase-a-20261002/`. Not yet wired into the session
-manager, broker or installer (A-ii), no acceptance drivers yet (A-iii).
+evidence in `spike/logs/phase-a-20261002/`. Milestone A-ii wires it in:
+the `tier3s` silo kind in the session manager (`CreateTier3sSilo`, the
+`qdistro-tier3s-silo@.service` unit and its root launch helper), the broker's
+rules-only `qdistro.tier3s.spawn:` prefix, and `install-session-manager.sh`
+(scripts, units, seccomp profiles and tmpfiles; **not** runsc, which stays on
+demand). The A-ii VM smoke is `spike/run-phase-a-ii-smoke.sh`. No acceptance
+drivers yet (A-iii).
 
 ## Files
 
