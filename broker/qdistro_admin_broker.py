@@ -887,7 +887,7 @@ class _Request:
         "id", "uid", "pid", "exe", "start_time", "action", "details",
         "decision", "waiters", "delegated", "one_shot",
         "exe_sha256", "selinux_label", "cgroup", "layered_pending",
-        "decided_at",
+        "decided_at", "finalizing",
     )
 
     def __init__(self, rid: int, uid: int, pid: int, exe: str,
@@ -909,6 +909,11 @@ class _Request:
         self.action = action
         self.details = details
         self.decision: bool | None = None
+        # True while DecideRequest has set `decision` but has not yet
+        # written its audit row: an audit failure there still downgrades
+        # the decision to deny, so a concurrent DecideRequest must not
+        # report the provisional value as final.
+        self.finalizing = False
         # callbacks waiting for a decision; each is (reply_cb, error_cb)
         self.waiters: list[tuple] = []
         # True if identity was claimed by a trusted delegator
@@ -4306,10 +4311,16 @@ class Broker(dbus.service.Object):
 
         Returns, atomically with the decision (it is taken under the same
         lock that sets req.decision), what THIS call did:
-          "applied"       this call's decision and scope were applied
+          "applied"       this call's decision was applied to the request
+                          (and, for a cached scope, stored in the cache)
+          "applied-uncached"
+                          applied, but storing the cache row failed: the
+                          request is decided, the scope is not remembered
           "already-allow" / "already-deny"
                           the request had already been decided by someone
                           else; this call changed nothing
+          "deciding"      another call is still finalizing its decision
+                          (audit pending; it may yet be downgraded to deny)
           "unknown"       no such request in this broker instance
         Errors (bad argument, scope refused, caller gone, audit failure)
         still raise. Callers that predate the return value ignore it.
@@ -4333,6 +4344,10 @@ class Broker(dbus.service.Object):
             if req is None:
                 return "unknown"
             if req.decision is not None:
+                if req.finalizing:
+                    # another DecideRequest is between its decision and
+                    # its audit row; the outcome is not final yet
+                    return "deciding"
                 return "already-allow" if req.decision else "already-deny"
             # Delegated requests can't produce long-lived grants — the
             # broker never authenticated the claimed peer identity
@@ -4398,6 +4413,7 @@ class Broker(dbus.service.Object):
                     )
             allowed = (decision_s == "allow")
             req.decision = allowed
+            req.finalizing = True
             waiters = list(req.waiters)
             req.waiters.clear()
             cache_uid, cache_pid, cache_action, cache_exe = req.uid, req.pid, req.action, req.exe
@@ -4426,6 +4442,7 @@ class Broker(dbus.service.Object):
                     req2 = self._pending.get(int(request_id))
                     if req2 is not None:
                         req2.decision = False
+                        req2.finalizing = False
                 for reply_cb, _err in waiters:
                     try:
                         reply_cb(False)
@@ -4438,11 +4455,17 @@ class Broker(dbus.service.Object):
                     name=BUS_NAME + ".AuditUnavailable",
                 ) from e
 
+        with self._lock:
+            req.finalizing = False
+        # (A non-AUDIT_REQUIRED audit failure falls through to here too:
+        # the decision stands, as before.)
+
         # Cache writes only happen on allow, and only after audit has
         # succeeded — we never extend trust past a failed audit.
         # one_shot explicitly skips the cache: scope_s is 'once' for
         # these (enforced above) so scope_to_row would already be None,
         # but an explicit guard makes the intent obvious.
+        cached_ok = True
         if allowed and not req.one_shot:
             try:
                 wrote = self.cache.store(cache_uid, cache_action, cache_exe,
@@ -4453,6 +4476,7 @@ class Broker(dbus.service.Object):
                           f"exe={cache_exe!r} scope={scope}", flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] cache.store failed: {e}", flush=True)
+                cached_ok = False
 
         for reply_cb, _err in waiters:
             try:
@@ -4460,7 +4484,10 @@ class Broker(dbus.service.Object):
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] reply_cb failed: {e}", flush=True)
         self.RequestDecided(int(request_id), "allow" if allowed else "deny")
-        return "applied"
+        # Caching is best-effort: the request's decision stands either way;
+        # "applied-uncached" lets a caller warn that a non-once scope will
+        # not be remembered.
+        return "applied" if cached_ok else "applied-uncached"
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}",
                          sender_keyword="sender", connection_keyword="conn")

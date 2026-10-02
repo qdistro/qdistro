@@ -285,8 +285,8 @@ def _decide(args, decision: str, scope: str) -> int:
               file=sys.stderr)
         return 1
     req = before.get(rid)
-    # DecideRequest silently ignores an unknown or already-decided id, so
-    # check first: a typo must not look like a successful decision.
+    # Check first, so a typo is reported as such rather than as the
+    # broker's "unknown" (exit 3, unconfirmed) below.
     if req is None:
         print(f"qdistro-approvals: no pending request with id={rid}",
               file=sys.stderr)
@@ -312,7 +312,8 @@ def _decide(args, decision: str, scope: str) -> int:
 def _report_outcome(req: dict, decision: str, scope: str, result) -> int:
     """Map DecideRequest's atomic result to output and exit code.
 
-    "applied" is the only success. "already-allow"/"already-deny" means a
+    "applied" (or "applied-uncached", with a warning: caching is
+    best-effort) is the only success. "already-allow"/"already-deny" means a
     concurrent decider (Qt app, TUI, another CLI) got there first and this
     call changed nothing: exit 1 naming the decision that holds. Anything
     else (an id unknown to the broker, a broker that predates the return
@@ -321,7 +322,12 @@ def _report_outcome(req: dict, decision: str, scope: str, result) -> int:
     rid = int(req["id"])
     verb = "approve" if decision == "allow" else "deny"
     result = "" if result is None else str(result)
-    if result == "applied":
+    if result in ("applied", "applied-uncached"):
+        if result == "applied-uncached":
+            print(f"qdistro-approvals: warning: the decision was applied but "
+                  f"the broker could not store the {scope!r} cache row; "
+                  f"later identical requests will prompt again",
+                  file=sys.stderr)
         done = "approved" if decision == "allow" else "denied"
         print(f"{done} request id={rid} uid={req.get('uid', 0)} "
               f"pid={req.get('pid', 0)} action={_safe(req.get('action', ''))} "

@@ -522,3 +522,58 @@ def test_real_broker_decide_returns_atomic_result(real):
     assert broker.DecideRequest(rid, "allow", "once") == "already-allow"
     assert broker.DecideRequest(rid, "deny", "once") == "already-allow"
     assert broker.DecideRequest(rid + 99, "deny", "once") == "unknown"
+
+
+def test_concurrent_decide_during_audit_failure_window_is_not_final(
+        real, monkeypatch):
+    """fable r3: DecideRequest sets the decision, then writes the audit row;
+    an audit failure downgrades it to deny. A second DecideRequest landing
+    inside that window must not report the provisional allow as final."""
+    import dbus
+    import qdistro_admin_broker as B
+    broker, as_peer, enqueue, waiter, _uid, _tmp = real
+    monkeypatch.setattr(B, "AUDIT_REQUIRED", True)
+    rid = enqueue()
+    got = waiter(rid)
+    as_peer(_installed_cli_argv("approve", str(rid)))
+    inner = []
+    real_log = broker.audit.log
+
+    def failing_log(**kw):
+        if kw.get("source") == "prompt":
+            inner.append(broker.DecideRequest(rid, "allow", "once"))
+            raise RuntimeError("audit db broken")
+        return real_log(**kw)
+    monkeypatch.setattr(broker.audit, "log", failing_log)
+    with pytest.raises(dbus.DBusException) as ei:
+        broker.DecideRequest(rid, "allow", "once")
+    assert ei.value.get_dbus_name() == B.BUS_NAME + ".AuditUnavailable"
+    assert inner == ["deciding"]
+    assert broker._pending[rid].decision is False and got == [False]
+    monkeypatch.setattr(broker.audit, "log", real_log)
+    assert broker.DecideRequest(rid, "allow", "once") == "already-deny"
+
+
+def test_cache_failure_reports_applied_uncached(real, monkeypatch, capsys):
+    broker, as_peer, enqueue, waiter, _uid, _tmp = real
+    rid = enqueue()
+    got = waiter(rid)
+    as_peer(_installed_cli_argv("approve", str(rid), "--scope", "1h"))
+
+    def boom(*_a, **_k):
+        raise RuntimeError("cache db broken")
+    monkeypatch.setattr(broker.cache, "store", boom)
+    rc, out, err = _run(["approve", str(rid), "--scope", "1h"], capsys)
+    assert rc == 0, err
+    assert got == [True]
+    assert "approved request" in out
+    assert "could not store the '1h' cache row" in err
+
+
+@pytest.mark.parametrize("answer", ["deciding", "unknown", None])
+def test_non_final_broker_answers_are_unconfirmed(fake, capsys, monkeypatch,
+                                                  answer):
+    fake.add(2)
+    monkeypatch.setattr(fake, "DecideRequest", lambda *_a: answer)
+    rc, out, err = _run(["approve", "2"], capsys)
+    assert rc == 3 and "unconfirmed" in err and out == ""
