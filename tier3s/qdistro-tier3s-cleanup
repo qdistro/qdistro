@@ -56,7 +56,7 @@ as_admin() {   # as_admin <uid> cmd...
         XDG_RUNTIME_DIR="/run/user/$uid" "$@"
 }
 starttime() {
-    local s; read -r s < "$PROC/$1/stat" 2>/dev/null || return 1
+    local s; { read -r s < "$PROC/$1/stat"; } 2>/dev/null || return 1
     s="${s##*) }"; set -- $s; [ -n "${20:-}" ] && echo "${20}"
 }
 tree_procs() {   # every pid in a cgroup subtree (recursive cgroup.procs)

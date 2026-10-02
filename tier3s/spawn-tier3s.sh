@@ -297,7 +297,7 @@ printf 'LAUNCH_TOKEN=%s\nCONTAINER=%s\nIMAGE=%s\nSCOPE_UNIT=%s\n' "$TOKEN" "$CON
 systemd-run "${SCOPE_ARGV[@]}" "${PODMAN_ARGV[@]}" &
 child=$!
 starttime() {   # field 22 of /proc/<pid>/stat
-    local s; read -r s < "$PROC/$1/stat" 2>/dev/null || return 1
+    local s; { read -r s < "$PROC/$1/stat"; } 2>/dev/null || return 1
     s="${s##*) }"; set -- $s; [ -n "${20:-}" ] && echo "${20}"
 }
 in_scope() {   # in_scope <pid> <scope cgroup rel>

@@ -38,6 +38,10 @@ else: print("absent")'
 unit_log() {   # this unit's journal since a cursor file (scoped to the unit, never the whole journal)
     journalctl -u "$UNIT" --no-pager -o cat --after-cursor="$(cat /var/tmp/t3s-cursor)" 2>/dev/null
 }
+scope_log() {   # <token>: the workload's output. journald files it under the owning scope,
+    # where podman and conmon (the processes that write it) run, not under the launch unit
+    journalctl _SYSTEMD_UNIT="qdistro-tier3s-$1.scope" --no-pager -o cat 2>/dev/null
+}
 mark_cursor() { journalctl -n 0 --show-cursor --no-pager | sed -n 's/^-- cursor: //p' > /var/tmp/t3s-cursor; }
 runsc_pids() {
     local p e
@@ -65,7 +69,10 @@ assert_gone() {   # every trace of a tier3s launch is absent
     is "$1-scopes" "$(systemctl list-units --all --plain --no-legend 'qdistro-tier3s-*.scope' | grep -c .)" 0
     is "$1-container" "$(as_admin podman ps -a --filter label=qdistro_tier3s_token --format '{{.Names}}' | grep -c .)" 0
     is "$1-runsc-procs" "$(runsc_pids | wc -l)" 0
-    is "$1-state-root-empty" "$(find /run/qdistro-tier3s-runsc/1000 -mindepth 1 | grep -c .)" 0
+    # runsc keeps one shared, empty, read-only `null-netns` file in its root for
+    # network=none (present since the A-i feasibility runs); nothing per container
+    ls -la /run/qdistro-tier3s-runsc/1000
+    is "$1-state-root-no-container-state" "$(find /run/qdistro-tier3s-runsc/1000 -mindepth 1 ! -name null-netns | grep -c .)" 0
 }
 check_installed() {   # <expect-file>
     local sha mode path got
@@ -157,13 +164,16 @@ smoke-exit)
     sm StartSilo s smoke; is start-rc $? 0
     wait_for 120 unit_inactive; is unit-inactive-after-exit "$(systemctl is-active "$UNIT")" inactive
     unit_log
+    tok="$(unit_log | sed -n 's/^LAUNCH_TOKEN=\([0-9a-f]\{32\}\)$/\1/p' | head -1)"
+    echo "token=$tok"; scope_log "$tok"
     # a workload this short may exit before the spawn's 0.25 s poll records it running;
     # the smoke output below is what shows it ran under gVisor
     echo "INFO recorded-running: $(unit_log | grep -c "spawn-tier3s: running: $CTR sentry=")"
     is unit-result "$(systemctl show -p Result --value "$UNIT")" success
     is main-status "$(systemctl show -p ExecMainStatus --value "$UNIT")" 0
-    is smoke-done "$(unit_log | grep -c '^SMOKE done')" 1
-    is smoke-gvisor-kernel "$(unit_log | grep '^SMOKE dmesg=' | grep -c gVisor)" 1
+    # podman's attached stdout and conmon's journald log driver may both carry a line
+    is smoke-done "$(scope_log "$tok" | grep -q '^SMOKE done' && echo yes || echo no)" yes
+    is smoke-gvisor-kernel "$(scope_log "$tok" | grep '^SMOKE dmesg=' | grep -q gVisor && echo yes || echo no)" yes
     is torn-down "$(unit_log | grep -c "qdistro-tier3s-cleanup: [0-9a-f]\{32\}: torn down ($CTR)")" 1
     is stanza-token-in-record-line "$(unit_log | grep -c "LAUNCH_TOKEN=$(sed -n "s/^TIER3S_LAUNCH_TOKEN='\{0,1\}\([0-9a-f]\{32\}\).*/\1/p" /run/qdistro/silo-launch/smoke.env)")" 1
     sm StopSilo si smoke 10; is stop-rc $? 0
@@ -213,8 +223,8 @@ PY
     is still-active-after-freeze "$(silo_state)" Active
     sm StopSilo si smoke 10; is stop-rc $? 0
     is silo-stopped "$(silo_state)" Stopped
-    unit_log | tail -25
-    is smoke-term "$(unit_log | grep -c '^SMOKE term')" 1
+    unit_log | tail -25; scope_log "$tok"
+    is smoke-term "$(scope_log "$tok" | grep -q '^SMOKE term' && echo yes || echo no)" yes
     is torn-down "$(unit_log | grep -c "qdistro-tier3s-cleanup: $tok: torn down ($CTR)")" 1
     is unit-result "$(systemctl show -p Result --value "$UNIT")" success
     is scope-gone "$(systemctl is-active "$scope")" inactive
