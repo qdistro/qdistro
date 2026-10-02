@@ -1,4 +1,4 @@
-"""Badge overlays restyle from presentation pane roles without pyte."""
+"""Instant-replay overlay restyle from presentation pane roles without pyte."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import QWidget
 from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
-from qterminator.plugins.badges import BadgesService, _BadgeOverlay
+from qterminator.plugins.instant_replay import InstantReplayPlugin, ReplayOverlay
 from qterminator.theme import attach_presentation, reset_controller_for_tests
 from qterminator.window import MainWindow
 
@@ -43,81 +43,78 @@ def _attach_snapshot(qapp, tmp_path, monkeypatch, snap):
     attach_presentation(qapp, _config("system"))
 
 
-def _surface_rgba(hex_color: str) -> str:
+def _surface_rgba(hex_color: str, alpha: int = 220) -> str:
     color = QColor(hex_color)
-    return f"rgba({color.red()}, {color.green()}, {color.blue()},"
+    return (
+        f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha}"
+    )
 
 
-def test_badge_overlay_uses_snapshot_surface_and_keeps_profile_color(
+def test_replay_overlay_uses_snapshot_pane_roles(
     qtbot, qapp, tmp_path, monkeypatch
 ):
     host = QWidget()
     qtbot.addWidget(host)
-    overlay = _BadgeOverlay(
-        terminal=SimpleNamespace(_term=host),
-        template="{hostname}",
-        color="#abcdef",
-        parent_widget=host,
-    )
+    overlay = ReplayOverlay(host)
     snap = example_snapshot()
     old = overlay.styleSheet()
-    assert snap.colors.mSurface.lower() not in old.lower()
-    assert _surface_rgba(snap.colors.mSurface) not in old.replace(" ", "")
+    old_bg = QColor(overlay._status_bg).name()
+    old_fg = QColor(overlay._status_fg).name()
+    surface_rgba = _surface_rgba(snap.colors.mSurface)
+    assert surface_rgba.replace(" ", "") not in old.replace(" ", "")
+    assert snap.colors.mOnSurface.lower() not in old.lower()
 
     _attach_snapshot(qapp, tmp_path, monkeypatch, snap)
     assert overlay.styleSheet() == old
+    assert QColor(overlay._status_bg).name() == old_bg
+    assert QColor(overlay._status_fg).name() == old_fg
 
     overlay.apply_presentation_update()
-    sheet = overlay.styleSheet().replace(" ", "")
-    assert _surface_rgba(snap.colors.mSurface).replace(" ", "") in sheet
-    assert "#abcdef" in overlay.styleSheet().lower()
-    assert "rgba(0,0,0" not in sheet
-    assert "font-size" not in overlay.styleSheet()
+    sheet = overlay.styleSheet()
+    compact = sheet.replace(" ", "")
+    assert surface_rgba.replace(" ", "") in compact
+    assert snap.colors.mOnSurface.lower() in sheet.lower()
+    assert "rgba(30,30,30" not in compact
+    assert "font-size" not in sheet
+    assert QColor(overlay._status_bg).name().lower() == snap.colors.mSurfaceVariant.lower()
+    assert QColor(overlay._status_fg).name().lower() == snap.colors.mOnSurfaceVariant.lower()
     reset_controller_for_tests()
 
 
-def test_badges_service_restyles_existing_overlays(
+def test_instant_replay_plugin_restyles_existing_overlay(
     qtbot, qapp, tmp_path, monkeypatch
 ):
     host = QWidget()
     qtbot.addWidget(host)
-    overlay = _BadgeOverlay(
-        terminal=SimpleNamespace(_term=host),
-        template="X",
-        color="#e74c3c",
-        parent_widget=host,
-    )
-    service = BadgesService(window=SimpleNamespace())
-    service._overlays[id(overlay)] = overlay
+    overlay = ReplayOverlay(host)
+    plugin = InstantReplayPlugin()
+    plugin._overlay = overlay
     snap = example_snapshot()
     old = overlay.styleSheet()
+    old_bg = QColor(overlay._status_bg).name()
 
     _attach_snapshot(qapp, tmp_path, monkeypatch, snap)
     assert overlay.styleSheet() == old
+    assert QColor(overlay._status_bg).name() == old_bg
 
-    service.apply_presentation_update()
-    sheet = overlay.styleSheet().replace(" ", "")
-    assert _surface_rgba(snap.colors.mSurface).replace(" ", "") in sheet
-    assert "#e74c3c" in overlay.styleSheet().lower()
+    plugin.apply_presentation_update()
+    compact = overlay.styleSheet().replace(" ", "")
+    assert _surface_rgba(snap.colors.mSurface).replace(" ", "") in compact
+    assert snap.colors.mOnSurface.lower() in overlay.styleSheet().lower()
+    assert QColor(overlay._status_bg).name().lower() == snap.colors.mSurfaceVariant.lower()
     reset_controller_for_tests()
 
 
-def test_mainwindow_presentation_update_restyles_badge_overlays(
+def test_mainwindow_presentation_update_restyles_replay_overlay(
     qtbot, qapp, tmp_path, monkeypatch
 ):
     host = QWidget()
     qtbot.addWidget(host)
-    overlay = _BadgeOverlay(
-        terminal=SimpleNamespace(_term=host),
-        template="X",
-        color="#abcdef",
-        parent_widget=host,
-    )
+    overlay = ReplayOverlay(host)
     snap = example_snapshot()
     old = overlay.styleSheet()
-    assert _surface_rgba(snap.colors.mSurface).replace(" ", "") not in old.replace(
-        " ", ""
-    )
+    surface_rgba = _surface_rgba(snap.colors.mSurface)
+    assert surface_rgba.replace(" ", "") not in old.replace(" ", "")
 
     _attach_snapshot(qapp, tmp_path, monkeypatch, snap)
     assert overlay.styleSheet() == old
@@ -133,7 +130,7 @@ def test_mainwindow_presentation_update_restyles_badge_overlays(
         def widget(self, _index):
             return None
 
-    class _Badges:
+    class _Replay:
         def apply_presentation_update(self):
             overlay.apply_presentation_update()
 
@@ -141,12 +138,14 @@ def test_mainwindow_presentation_update_restyles_badge_overlays(
     win._tab_bar = _EmptyBar()
     win._tabs = _EmptyTabs()
     win.iter_terminals = lambda: iter(())
-    win.badges = _Badges()
-    win.instant_replay = None
+    win.badges = None
+    win.instant_replay = _Replay()
     MainWindow.apply_presentation_update(win)
 
-    sheet = overlay.styleSheet().replace(" ", "")
-    assert _surface_rgba(snap.colors.mSurface).replace(" ", "") in sheet
-    assert "#abcdef" in overlay.styleSheet().lower()
-    assert "font-size" not in overlay.styleSheet()
+    sheet = overlay.styleSheet()
+    compact = sheet.replace(" ", "")
+    assert surface_rgba.replace(" ", "") in compact
+    assert snap.colors.mOnSurface.lower() in sheet.lower()
+    assert "font-size" not in sheet
+    assert QColor(overlay._status_bg).name().lower() == snap.colors.mSurfaceVariant.lower()
     reset_controller_for_tests()

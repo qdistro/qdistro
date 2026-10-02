@@ -123,6 +123,7 @@ def test_mainwindow_presentation_update_restyles_tab_bar_and_splitter(
     win._tabs = _Tabs()
     win.iter_terminals = lambda: iter(())
     win.badges = None
+    win.instant_replay = None
     MainWindow.apply_presentation_update(win)
 
     assert snap.colors.mSurfaceVariant in bar.styleSheet()
