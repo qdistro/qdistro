@@ -154,10 +154,10 @@ class TestDialogStructure:
         assert isinstance(dlg._font_combo, QFontComboBox)
 
     def test_appearance_has_font_size_spinbox(self, window, qtbot):
-        """Appearance tab has a QSpinBox for font size."""
+        """Appearance tab has a QDoubleSpinBox for font size."""
         dlg = PreferencesDialog(window)
         qtbot.addWidget(dlg)
-        assert isinstance(dlg._font_size, QSpinBox)
+        assert isinstance(dlg._font_size, QDoubleSpinBox)
 
     def test_appearance_has_color_scheme_combo(self, window, qtbot):
         """Appearance tab has a QComboBox for color scheme."""
