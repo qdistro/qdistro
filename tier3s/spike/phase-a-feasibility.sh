@@ -139,10 +139,12 @@ P
     for p in $(runsc_pids); do nr=$((nr+1)); printf '%s\n' $in | grep -qx "$p" || { out=$((out+1)); echo "OUTSIDE: $p $(cat /proc/$p/comm) $(cat /proc/$p/cgroup)"; }; done
     echo "runsc-bundle processes on the host: $nr"
     is runsc-procs-outside-scope "$out" 0
-    for c in runsc-gofer runsc-sandbox runsc-fd-parking; do
+    for c in runsc-gofer runsc-sandbox; do
         found=0; for p in $in; do [ "$(tr '\0' ' ' < /proc/$p/cmdline | cut -d' ' -f1)" = "$c" ] && found=1; done
         is "class-$c-in-scope" $found 1
     done
+    found=0; for p in $in; do [ "$(pinkey "$p")" = sidecar_runsc-fd-parking_sha512 ] && found=1; done
+    is class-runsc-fd-parking-in-scope $found 1
     stubs=0; for p in $in; do [ "$(readlink /proc/$p/exe)" = /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry ] && [ -z "$(tr -d '\0' < /proc/$p/cmdline)" ] && stubs=$((stubs+1)); done
     echo "systrap stubs in scope: $stubs"; [ "$stubs" -ge 1 ] && ok stubs-in-scope "$stubs" || bad stubs-in-scope 0
     for c in podman runuser conmon; do
@@ -154,7 +156,8 @@ P
     else
         mp=$(systemctl show -p MainPID --value $SVC); echo "SIGKILL main pid $mp"; kill -9 "$mp"
     fi
-    for _ in $(seq 60); do [ "$(systemctl is-active $SC)" != active ] && [ "$(systemctl is-active $SVC)" != active ] && [ "$(systemctl is-active $SVC)" != deactivating ] && break; sleep 0.5; done
+    for i in $(seq 120); do [ "$(systemctl is-active $SC)" = inactive ] && break; sleep 0.25; done
+    echo "scope inactive after ~$((i / 4)) s"
     sleep 1
     cat $D/post-$1.log
     grep -q "scope=active" $D/post-$1.log && ok scope-alive-during-execstoppost || bad scope-alive-during-execstoppost

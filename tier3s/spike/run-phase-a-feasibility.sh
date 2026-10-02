@@ -38,6 +38,7 @@ step() {
 U=http://10.0.2.2:$port
 F=/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh
 echo "### host: staged commit $(cat "$serve/commit.txt")" > "$out/00-stage.log"
+if [ -z "${T3S_ONLY:-}" ]; then
 step 00-stage "set -e; rm -rf /root/qdistro-src; mkdir -p /root/qdistro-src; cd /root/qdistro-src
 curl -fsS $U/src.tar | tar -xf -; chown -R root:root /root/qdistro-src; echo \"staged commit \$(curl -fsS $U/commit.txt)\"
 mkdir -p /var/cache/qdistro/runsc/$rel; curl -fsS $U/gvisor.tar.zstd -o /var/cache/qdistro/runsc/$rel/gvisor.tar.zstd
@@ -46,6 +47,10 @@ tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc"
 step 01-setup "$F setup"
 step 10-a1-fixed-root "$F a1"
 step 11-a1-negative "$F a1neg"
+else   # T3S_ONLY=a3b: re-stage the checkout only, re-run the scope steps
+step 00-restage "set -e; rm -rf /root/qdistro-src; mkdir -p /root/qdistro-src; cd /root/qdistro-src
+curl -fsS $U/src.tar | tar -xf -; chown -R root:root /root/qdistro-src; echo \"staged commit \$(curl -fsS $U/commit.txt)\""
+fi
 step 20-a3b-scope-stop "$F a3b"
 step 21-a3b-scope-sigkill "$F a3bkill"
 echo "failed steps: $fails"
