@@ -4027,10 +4027,6 @@ gui_scenario_xwayland_skip_reason() {
             # Shows work/work2 qnotebook windows on admin's display through the
             # xhost SI shared-XWayland expedient, which the product does not have.
             printf '%s\n' "shared-XWayland real-app send-to is opt-in (set QCI_XWAYLAND_E2E=1 for the dedicated desktop-integration lane)" ;;
-        qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md)
-            # Worst flake rate of the admin lane (XWayland frame and focus
-            # artefacts); opt-in until it is ported to the native-Wayland qdwin lane.
-            printf '%s\n' "admin-app multi-pending navigation on labwc/XWayland is opt-in until ported to the qdwin lane (set QCI_XWAYLAND_E2E=1)" ;;
     esac
     return 0
 }

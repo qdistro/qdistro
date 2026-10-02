@@ -148,24 +148,26 @@ Environment:
   QCI_GUI_SKIP_QDWIN=1      Run the admin/non-qdwin GUI lane: qdwin/qdshell,
                             qdlocker, qdwin-noctalia, and tier-4/5 GUI
                             scenarios are recorded as intentional skips.
-                            `qci gui-admin` sets this automatically.
+                            `qci gui-admin` sets this automatically. Otherwise,
+                            disposable `qci gui` provisions a separate qdwin-
+                            profile VM for qdwin-dependent rows.
   QCI_XWAYLAND_E2E=1        Opt into qterminal/Textual scenarios that depend on
                             XWayland focus and framebuffer capture, plus
                             permissions-gui/16 (shared-XWayland real apps) and
-                            /34 (until ported to qdwin). They skip by default
+                            compatibility. They skip by default
                             in the normal GUI/full lane.
   QCI_GUI_APPS=1            Opt into the periodic gui-apps lane: the third-party
                             app-compatibility scenarios qdwin/tests/apps/01 and
                             05-11 (Firefox, GTK, Qt5, Chromium, wx, Tk/FLTK/
                             Swing, feh). Bakes the app set into the qdwin golden
                             (QDWIN_APP_DEPS=1). They skip by default.
-                            Without this, disposable `qci gui` provisions a
-                            separate qdwin-profile VM for qdwin-dependent rows.
   QCI_LABWC_ADMIN_LANE=1    Run the labwc/XWayland admin lane: the
                             permissions-gui/workflow-gui scenarios not routed
                             to the qdwin lane. None of labwc, LXQt, XWayland
                             or the xcb launcher ships, so they skip by default;
-                            `qci gui-admin` sets this automatically.
+                            `qci gui-admin` sets this automatically. Otherwise,
+                            disposable `qci gui` provisions a separate qdwin-
+                            profile VM for qdwin-dependent rows.
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
   QDISTRO_VM_BASE           baked (default)|kiwi|auto. Which backing image spin-test-vm
