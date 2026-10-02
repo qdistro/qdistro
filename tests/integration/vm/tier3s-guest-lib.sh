@@ -134,25 +134,32 @@ YAML
     wait_for 20 bash -c "[ \"\$(runuser -u admin -- busctl --system call org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1 CheckPermission 'sa{sv}' '$ACTION' 0 2>/dev/null)\" = 's \"$want\"' ]"
 }
 
-# Edit the argv of every tier3s row in /etc/qdistro/silos.yaml with the manager
-# STOPPED (it rewrites the file), then start it again. hold_argv <secs|default>
-set_argv_all() {
+# Set the launch argv of tier3s silo rows in /etc/qdistro/silos.yaml. The
+# manager rewrites that file, so it is edited with the manager STOPPED, then
+# started again (its startup reconciliation stops any live tier3s launch, so
+# call this only when none should be running). set_argv <silo>=<spec>...,
+# spec = default | <hold seconds>.
+set_argv() {
+    local rc
     systemctl stop qdistro-session-manager.service
-    python3 - "$1" <<'PY'
+    python3 - "$@" <<'PY'
 import re, sys, pathlib
 p = pathlib.Path("/etc/qdistro/silos.yaml")
 s = p.read_text()
-argv = '["qdistro-tier3s-smoke"]' if sys.argv[1] == "default" else \
-    f'["qdistro-tier3s-smoke", "--hold", "{sys.argv[1]}"]'
-new, n = re.subn(r'(workload: headless-smoke\n(?:\s+[a-z_]+: [^\n]*\n)*?\s+argv: )\[[^\n]*\]',
-                 lambda m: m.group(1) + argv, s)
-if n == 0:
-    new, n = re.subn(r'(\n\s+argv: )\[[^\n]*\]', lambda m: m.group(1) + argv, s)
-p.write_text(new)
-print(f"silos.yaml: argv set on {n} row(s) -> {argv}")
+for arg in sys.argv[1:]:
+    name, spec = arg.split("=", 1)
+    argv = '[]' if spec == "default" else f'["qdistro-tier3s-smoke", "--hold", "{spec}"]'
+    pat = re.compile(r'(\n  - name: ' + re.escape(name) + r'\n(?:    [^\n]*\n)*?      argv: )\[[^\n]*\]')
+    s, n = pat.subn(lambda m: m.group(1) + argv, s)
+    if n != 1:
+        sys.exit(f"silos.yaml: no argv for silo {name}")
+    print(f"silos.yaml: {name} argv -> {argv}")
+p.write_text(s)
 PY
+    rc=$?
     systemctl start qdistro-session-manager.service
     wait_for 30 manager_up
+    return $rc
 }
 
 # Snapshot every process of a live launch (recursive cgroup.procs of its

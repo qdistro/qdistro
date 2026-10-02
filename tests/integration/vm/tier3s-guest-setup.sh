@@ -86,7 +86,7 @@ is "installed broker = tested commit" "$(sha256sum < /usr/libexec/qdistro/qdistr
 is "tmpfiles: state root" "$(stat -c '%u:%g %a' "$SROOT" 2>/dev/null)" "1000:1000 700"
 is "tmpfiles: control dir" "$(stat -c '%U:%G %a' "$CTL" 2>/dev/null)" "root:root 700"
 is "tmpfiles: per-launch parent" "$(stat -c '%U:%G %a' "$LAUNCHES" 2>/dev/null)" "root:root 755"
-is "runsc not installed by the installer" "$(yes_no test -e /usr/libexec/qdistro/runsc)" no
+[ "$FRESH" != --expect-fresh ] || is "runsc not installed by the installer" "$(yes_no test -e /usr/libexec/qdistro/runsc)" no
 systemctl daemon-reload
 is "unit loaded from /etc" "$(systemctl show -p FragmentPath --value qdistro-tier3s-silo@setup.service)" /etc/systemd/system/qdistro-tier3s-silo@.service
 is "unit StopPropagatedFrom (O11)" "$(systemctl show -p StopPropagatedFrom --value qdistro-tier3s-silo@setup.service)" qdistro-session-manager.service
@@ -139,6 +139,7 @@ is "loaded image ID = manifest IMAGE_ID" "$got_id" "$(m IMAGE_ID)"
 is "image snapshot label = pin" "$(pm image inspect --format '{{index .Labels "org.qdistro.snapshot"}}' "$IMAGE" 2>/dev/null)" "$pin"
 echo "IMAGE_ID=$got_id"
 echo "IMAGE_DIGEST=$(pm image inspect --format '{{.Digest}}' "$IMAGE" 2>/dev/null)"
+info "the manifest digest changes across the oci-archive round trip (manifest re-serialized; build VM: $(m IMAGE_DIGEST)); the asserted identity is the image ID (config digest)"
 
 step "6. broker allow rule for the smoke spawn"
 is "broker without a rule" "$(set_rule none; broker_check "$ACTION")" unknown
