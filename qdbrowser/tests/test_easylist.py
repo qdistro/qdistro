@@ -106,6 +106,29 @@ def test_cosmetic_css_returns_empty_when_disabled(fresh_config):
     assert plug.cosmetic_css_for("example.com") == ""
 
 
+def test_cosmetic_css_drops_unsafe_selectors(fresh_config):
+    from qdbrowser.plugins.content_blocker import _safe_cosmetic_selector
+
+    plug = ContentBlockerPlugin()
+    plug._cosmetic_rules = [
+        _CosmeticRule(None, ".ok"),
+        _CosmeticRule(None, "div > .ad"),
+        _CosmeticRule(None, "body { background:red }"),
+        _CosmeticRule(None, "@import url(https://evil.example/x.css)"),
+        _CosmeticRule(None, ".x</style><script>alert(1)</script>"),
+    ]
+    plug._enabled = True
+    css = plug.cosmetic_css_for("example.com")
+    assert ".ok" in css
+    assert "div > .ad" in css
+    assert "display: none" in css
+    assert "background:red" not in css
+    assert "@import" not in css
+    assert "<script>" not in css
+    assert _safe_cosmetic_selector("div > .ad") == "div > .ad"
+    assert _safe_cosmetic_selector("body { color:red }") is None
+
+
 def test_per_site_state_default(fresh_config):
     plug = ContentBlockerPlugin()
     plug.activate(object())

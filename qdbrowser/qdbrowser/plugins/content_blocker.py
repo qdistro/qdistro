@@ -25,6 +25,7 @@ States: ``on`` (default), ``off``, ``cosmetic-only``, ``network-only``.
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import os
 import re
@@ -56,6 +57,98 @@ _DANGEROUS_REGEX_RE = re.compile(
     r"[+*?]\)[+*?]"
     r"|[.*+?]{4,}"
 )
+
+# Cosmetic selectors are concatenated into a stylesheet. Drop anything
+# that can close the hide rule or inject extra CSS/JS. Child combinator
+# ``>`` is allowed; ``{``, ``}``, ``<``, ``@``, and url()/expression()
+# are not.
+_UNSAFE_COSMETIC_SELECTOR = re.compile(
+    r"[{}@<]|url\s*\(|expression\s*\(|javascript:",
+    re.IGNORECASE,
+)
+_MAX_COSMETIC_SELECTOR_LEN = 512
+
+COSMETIC_STYLE_ID = "__qdb_cosmetic"
+
+# Inject creates/updates the hide stylesheet. Colors are one JSON object
+# of validated #rrggbb literals; restyle updates CSS variables only.
+INJECT_JS_TEMPLATE = r"""
+(function(payload){
+  var id='__qdb_cosmetic';
+  var el=document.getElementById(id);
+  if(!el){
+    el=document.createElement('style');
+    el.id=id;
+    document.documentElement.appendChild(el);
+  }
+  var c=payload.colors;
+  var root=document.documentElement;
+  root.style.setProperty('--qdb-bg', c.bg);
+  root.style.setProperty('--qdb-fg', c.fg);
+  root.style.setProperty('--qdb-bg-mid', c.bg_mid);
+  root.style.setProperty('--qdb-border', c.border);
+  root.style.setProperty('--qdb-accent', c.accent);
+  el.textContent=':root{--qdb-bg:'+c.bg
+    +';--qdb-fg:'+c.fg
+    +';--qdb-bg-mid:'+c.bg_mid
+    +';--qdb-border:'+c.border
+    +';--qdb-accent:'+c.accent
+    +'}'+payload.css;
+  return {ok:true, injected:true};
+})(__PAYLOAD__)
+"""
+
+RESTYLE_JS_TEMPLATE = r"""
+(function(colors){
+  var el=document.getElementById('__qdb_cosmetic');
+  if(!el) return {ok:true, missing:true};
+  var root=document.documentElement;
+  root.style.setProperty('--qdb-bg', colors.bg);
+  root.style.setProperty('--qdb-fg', colors.fg);
+  root.style.setProperty('--qdb-bg-mid', colors.bg_mid);
+  root.style.setProperty('--qdb-border', colors.border);
+  root.style.setProperty('--qdb-accent', colors.accent);
+  var css=el.textContent||'';
+  var prefix=':root{--qdb-bg:'+colors.bg
+    +';--qdb-fg:'+colors.fg
+    +';--qdb-bg-mid:'+colors.bg_mid
+    +';--qdb-border:'+colors.border
+    +';--qdb-accent:'+colors.accent+'}';
+  el.textContent=prefix+css.replace(/^:root\{[^}]*\}/, '');
+  return {ok:true, restyled:true};
+})(__COLORS__)
+"""
+
+
+def _safe_cosmetic_selector(sel: str) -> str | None:
+    """Return a hide-rule selector, or None if it cannot be stylesheet text."""
+    s = (sel or "").strip()
+    if not s or len(s) > _MAX_COSMETIC_SELECTOR_LEN:
+        return None
+    if _UNSAFE_COSMETIC_SELECTOR.search(s):
+        return None
+    return s
+
+
+def _build_inject_js(css: str, mode: str = "auto") -> str:
+    """Inject/update the cosmetic stylesheet. ``css`` is hide-rule text
+    built from sanitized selectors; colors are validated hex literals."""
+    from qdbrowser.theme import overlay_palette
+
+    payload = {"css": css, "colors": overlay_palette(mode)}
+    return INJECT_JS_TEMPLATE.replace("__PAYLOAD__", json.dumps(payload))
+
+
+def _build_restyle_js(mode: str = "auto") -> str:
+    """Update CSS variables on an existing cosmetic stylesheet.
+
+    Missing ``#__qdb_cosmetic`` is a no-op. Must not create the style
+    element, rewrite hide selectors, or go through ``on_load_finished``.
+    """
+    from qdbrowser.theme import overlay_palette
+
+    return RESTYLE_JS_TEMPLATE.replace(
+        "__COLORS__", json.dumps(overlay_palette(mode)))
 
 
 def _safe_compile(source: str) -> re.Pattern | None:
@@ -414,7 +507,9 @@ class ContentBlockerPlugin(UrlInterceptor, CommandProvider, PageObserver):
         for rule in self._cosmetic_rules:
             if rule.host_suffix is None \
                     or _is_host_suffix(doc_host, rule.host_suffix):
-                selectors.append(rule.selector)
+                sel = _safe_cosmetic_selector(rule.selector)
+                if sel:
+                    selectors.append(sel)
         if not selectors:
             return ""
         # Chunked: large pages may have thousands of selectors; one rule
@@ -428,22 +523,32 @@ class ContentBlockerPlugin(UrlInterceptor, CommandProvider, PageObserver):
         css = self.cosmetic_css_for(host)
         if not css:
             return
-        # Inject via JS — survives across SPA route changes if we re-run
-        # on title changes (cheap enough).
-        js = (
-            "(function(css){"
-            "var id='__qdb_cosmetic';"
-            "var el=document.getElementById(id);"
-            "if(!el){el=document.createElement('style');el.id=id;"
-            "document.documentElement.appendChild(el);}"
-            "el.textContent=css;"
-            f"}})({_js_string(css)})"
-        )
+        js = _build_inject_js(css)
         try:
             webview.view.page().runJavaScript(js)
             self._bump("cosmetic_hidden")
         except Exception:
             pass
+
+    def restyle_overlays(self, webviews=None):
+        """Restyle existing cosmetic stylesheets without reload or re-inject."""
+        if webviews is None:
+            win = self._window
+            if win is None:
+                return
+            iter_views = getattr(win, "iter_webviews", None)
+            webviews = list(iter_views()) if callable(iter_views) else []
+            active = getattr(win, "_active_webview", None)
+            if active is not None and active not in webviews:
+                webviews.append(active)
+        js = _build_restyle_js()
+        for wv in webviews:
+            if wv is None:
+                continue
+            try:
+                wv.view.page().runJavaScript(js)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cosmetic restyle failed: %s", exc)
 
     # -- commands ------------------------------------------------------
 
