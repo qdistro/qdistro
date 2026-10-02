@@ -176,6 +176,21 @@ if [ "$_net_ok" != 1 ]; then
     log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
 fi
 
+# The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
+# Textual. The kiwi image carries it (image/config.xml); the baked cloud base
+# does not yet (adding it to scripts/vm/install-deps.sh changes the baked
+# recipe key and forces a rebake, so it rides the next planned one).
+if ! /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1; then
+    if [ "${QCI_OFFLINE:-0}" = 1 ]; then
+        log "WARN: python313-textual missing and QCI_OFFLINE=1 forbids zypper; the admin TUI will not start in this VM"
+    else
+        log "installing python313-textual for the admin TUI"
+        zypper -n install --no-recommends python313-textual python313-rich \
+                >/tmp/qdistro-textual-install.log 2>&1 \
+            || { log "  WARN: zypper install of python313-textual failed; the admin TUI will not start in this VM (the CLI is unaffected)"; tail -20 /tmp/qdistro-textual-install.log; }
+    fi
+fi
+
 # ---- 0b. CI extras (iso/14 Phase G intermediate) ---------------------------
 # The tester kiwi image already has gcc/meson (config.sh compiles in-chroot)
 # but not bats/ydotool/tesseract/rage/jeepney/silo-egress tools. The ci kiwi
@@ -426,6 +441,11 @@ INSTALLERS=(
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
     "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
     "scripts/install/install-templates-for-vm.sh       $QD"
+    # qdistro-approvals (root CLI) + qdistro-admin-tui: the same installer
+    # the image chain's admin-app step runs, so test VMs get the broker-
+    # trusted paths the image ships (used by permissions scenarios and by
+    # operators over SSH).
+    "scripts/install/install-admin-cli-for-vm.sh       $QD"
 )
 for entry in "${INSTALLERS[@]}"; do
     set -- $entry
@@ -444,12 +464,6 @@ for entry in "${INSTALLERS[@]}"; do
     log "  running $(basename "$installer") <- $src_dir"
     bash "$installer" "$src_dir" || { echo "[bootstrap] $installer failed"; exit 3; }
 done
-
-# qdistro-approvals is the root/admin CLI used by the permissions GUI
-# scenarios and by operators over SSH. spin-test-vm-gui.sh staged it directly,
-# but the fresh-bootstrap path used by qci goldens did not, so admin-profile
-# scenarios could boot a VM with the broker installed but no CLI.
-install -m 0755 "$QD/cli/qdistro_approvals.py" /usr/local/sbin/qdistro-approvals
 
 # ---- 4b. Stage bats in-VM probes at /root/ ------------------------------
 # Bats tests in tests/integration/vm/*.bats run `bash

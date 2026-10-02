@@ -44,6 +44,8 @@ QDISTRO_PKGS=(
   python313-dbus-python python313-gobject python313-gobject-Gdk
   python313-PyYAML
   python313-cryptography
+  # Textual admin TUI (qdistro-admin-tui; install-admin-cli-for-vm.sh)
+  python313-textual python313-rich
   tpm2.0-tools
   sqlite3
   libselinux-devel selinux-policy-devel

@@ -587,3 +587,39 @@ class TestSplitArgvFromDetails:
         d = {"argv[00]": "ok", "argv[1025]": "ignored"}
         argv, _ = self._split(d)
         assert argv == "ok"
+
+
+# --- requester-controlled text is rendered literally ------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hostile", ["[/]", "[conceal]rm -rf /[/conceal]",
+                                     "[b]x", "trailing\\"])
+async def test_hostile_request_text_renders_literally(hostile):
+    """action/exe/argv/details come from the requesting process. Markup in
+    them must neither crash the TUI (`[/]` -> MarkupError) nor style/hide
+    text (`[conceal]`): the detail pane and the queue show it verbatim."""
+    from textual.widgets import DataTable
+    from qdistro_admin_tui import DetailPane
+    req = Request(id=1, uid=2000, pid=1235, exe=f"/usr/bin/{hostile}",
+                  action=f"test.{hostile}",
+                  details={"purpose": hostile, "argv[00]": "/bin/echo",
+                           "argv[01]": hostile})
+    broker = FakeBrokerClient(pending=[req])
+    app = AdminTuiApp(broker=broker)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.query_one(DetailPane)
+        content = pane.render()
+        plain = str(getattr(content, "plain", content))
+        assert f"Details: purpose={hostile}" in plain
+        assert f"Action: test.{hostile}" in plain
+        assert f"/usr/bin/{hostile}" in plain
+        # no span hides the hostile text
+        spans = getattr(content, "spans", [])
+        assert not any("conceal" in str(sp.style) for sp in spans)
+        table = app.query_one("#queue", DataTable)
+        row = table.get_row_at(0)
+        assert str(getattr(row[3], "plain", row[3])) == f"test.{hostile}"
+        await pilot.press("d")
+        await pilot.pause()
+    assert broker.decided == [(1, "deny", "once")]
