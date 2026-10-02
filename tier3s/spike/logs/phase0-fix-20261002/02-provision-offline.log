@@ -1,4 +1,4 @@
-### host 2026-10-02T06:24:57Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:38:47Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; provision provision-exit 0
 has took-lock $VO 'holding the provisioning lock /run/qdistro-runsc/provision.lock'
 has verified-private-copy $VO 'verified private copy'
@@ -8,7 +8,7 @@ stat -c '%n %a %U:%G %F' /run/qdistro-runsc /run/qdistro-runsc/provision.lock
 is lock-dir-root-0700 "$(stat -c '%a %U:%G' /run/qdistro-runsc)" '700 root:root'
 is no-leftovers "$(leftovers)" 0; finish
 CMD
-[vm-exec] guest identity pinned (pid 132289 start 203631)
+[vm-exec] guest identity pinned (pid 188402 start 286636)
 provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
 provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
 provision-runsc: all 6 pinned files verified
@@ -18,21 +18,21 @@ CHECK provision-exit: OK (rc=0)
 CHECK took-lock: OK
 CHECK verified-private-copy: OK
 CHECK installed: OK
--rw-r--r--. 1 root root 1571 Oct  2 06:25 /etc/qdistro/runsc-release
--rwxr-xr-x. 1 root root  487 Oct  2 06:25 /usr/libexec/qdistro/tier3s-runsc
+-rw-r--r--. 1 root root 1571 Oct  2 06:39 /etc/qdistro/runsc-release
+-rwxr-xr-x. 1 root root  487 Oct  2 06:39 /usr/libexec/qdistro/tier3s-runsc
 
 /usr/libexec/qdistro/runsc:
 total 107284
-drwxr-xr-x. 2 root root       132 Oct  2 06:25 gvisor-bin
--rwxr-xr-x. 1 root root 109857335 Oct  2 06:25 runsc
+drwxr-xr-x. 2 root root       132 Oct  2 06:39 gvisor-bin
+-rwxr-xr-x. 1 root root 109857335 Oct  2 06:39 runsc
 
 /usr/libexec/qdistro/runsc/gvisor-bin:
 total 170292
--rwxr-xr-x. 1 root root 69107264 Oct  2 06:25 checkpointgofer
--rwxr-xr-x. 1 root root 52098769 Oct  2 06:25 gvisor_sentry
--rwxr-xr-x. 1 root root     1416 Oct  2 06:25 gvisor-sentry-prewarmer
--rwxr-xr-x. 1 root root     1320 Oct  2 06:25 runsc-fd-parking
--rwxr-xr-x. 1 root root 53158765 Oct  2 06:25 runsc-metric-server
+-rwxr-xr-x. 1 root root 69107264 Oct  2 06:39 checkpointgofer
+-rwxr-xr-x. 1 root root 52098769 Oct  2 06:39 gvisor_sentry
+-rwxr-xr-x. 1 root root     1416 Oct  2 06:39 gvisor-sentry-prewarmer
+-rwxr-xr-x. 1 root root     1320 Oct  2 06:39 runsc-fd-parking
+-rwxr-xr-x. 1 root root 53158765 Oct  2 06:39 runsc-metric-server
 /run/qdistro-runsc 700 root:root directory
 /run/qdistro-runsc/provision.lock 644 root:root regular empty file
 CHECK lock-dir-root-0700: OK (700 root:root)

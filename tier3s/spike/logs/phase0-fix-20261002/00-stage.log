@@ -1,15 +1,19 @@
-### host: staged commit 88425f4ea8cf64bad7da04ae4ebaf0740e385888; host sha256 of the staged files:
+### host: staged commit f3ecdf9aadc66efcc8167192786475aab7afc7f2; host sha256 of the staged files:
 b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
-6a94fbff2f0e5e887cfd38004b69c639cbb0e853831a936f5f835cb5606ce396  tier3s/probe.sh
-f90e4d4d5c7ba807585511e1c4e5f8f57f1a1d250ed360fb8f0b9241a3bc5fc6  tier3s/provision-runsc.sh
+6a46a9f026fa99569a5cc30203abb3eee8c1573f7ea11167d5d7d06ef09991b1  tier3s/probe.sh
+4e541fe18cafac522c436865010b64c543cc770c53492c486acbb91c47665038  tier3s/provision-runsc.sh
 eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
 6dbfe0817f3c8ca57fe3ff3aa5c694d78333aa88758c40488ad183305470e8a8  tier3s/spike/phase0-fix-lib.sh
-eeafc5731c22e11d30bb9510bd54feb97cf55e13d64ff5592cfcd48aafd20ff0  tier3s/spike/mutate-guards.py
-76ff5375eb79da86e4b70558f7264e48bf49a9d81db598f1b15b21dcc6545b6f  tests/unit/test_tier3s_probe.py
-f3f3fee520e089e790ed6692cf31b79ce36de0e8bfc94989dadc4b4554493557  tests/unit/test_tier3s_provision.py
-### host 2026-10-02T06:24:53Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+2e3563f548f99ceb66dccb5f71e8ab7996f2e75a8d0c255ea32d59e9bb1e5280  tier3s/spike/mutate-guards.py
+2a9793702f57a0627d235d5c80cbe511abb99cd8dfdc781d63ebe7fc127e773a  tests/unit/test_tier3s_probe.py
+99925f1f7a23959a57b32210b4d8a41871c466ccc2dadefe2b81d8700a66ecff  tests/unit/test_tier3s_provision.py
+### host 2026-10-02T06:38:43Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 set -e; cd /root/qdistro-src && curl -fsS http://10.0.2.2:42931/src.tar | tar -xf - && echo "staged commit $(curl -fsS http://10.0.2.2:42931/commit.txt)"
 set +e; . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh
+echo "checkout dir as left by the VM spin: $(stat -c '%n %a uid=%u gid=%g' /root/qdistro-src)"
+echo 'root-run tier3s scripts refuse a checkout another uid owns (see step 20); the spin preserved the host uid, so:'
+chown root:root /root/qdistro-src; is checkout-dir-root-owned "$(stat -c %u:%g /root/qdistro-src)" 0:0
+stat -c '%n %a %U:%G' /root /root/qdistro-src /root/qdistro-src/tier3s tier3s/provision-runsc.sh tier3s/probe.sh tier3s/RUNSC_RELEASE tier3s/tier3s-runsc
 sha256sum tier3s/RUNSC_RELEASE tier3s/probe.sh tier3s/provision-runsc.sh tier3s/tier3s-runsc tier3s/spike/phase0-fix-lib.sh tier3s/spike/mutate-guards.py tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py
 mkdir -p $CACHE/20260928.0 && curl -fsS http://10.0.2.2:42931/gvisor.tar.zstd -o $CACHE/20260928.0/gvisor.tar.zstd
 is cache-tarball-sha512 "$(sha512sum < $CACHE/20260928.0/gvisor.tar.zstd | cut -d' ' -f1)" "$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)"
@@ -22,16 +26,26 @@ rm -rf /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro
 is no-install-after-reset "$(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc 2>/dev/null | wc -l)" 0
 finish
 CMD
-[vm-exec] guest identity pinned (pid 132108 start 203271)
-staged commit 88425f4ea8cf64bad7da04ae4ebaf0740e385888
+[vm-exec] guest identity pinned (pid 188233 start 286278)
+staged commit f3ecdf9aadc66efcc8167192786475aab7afc7f2
+checkout dir as left by the VM spin: /root/qdistro-src 755 uid=1007 gid=1007
+root-run tier3s scripts refuse a checkout another uid owns (see step 20); the spin preserved the host uid, so:
+CHECK checkout-dir-root-owned: OK (0:0)
+/root 755 root:root
+/root/qdistro-src 755 root:root
+/root/qdistro-src/tier3s 775 root:root
+tier3s/provision-runsc.sh 775 root:root
+tier3s/probe.sh 775 root:root
+tier3s/RUNSC_RELEASE 664 root:root
+tier3s/tier3s-runsc 775 root:root
 b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
-6a94fbff2f0e5e887cfd38004b69c639cbb0e853831a936f5f835cb5606ce396  tier3s/probe.sh
-f90e4d4d5c7ba807585511e1c4e5f8f57f1a1d250ed360fb8f0b9241a3bc5fc6  tier3s/provision-runsc.sh
+6a46a9f026fa99569a5cc30203abb3eee8c1573f7ea11167d5d7d06ef09991b1  tier3s/probe.sh
+4e541fe18cafac522c436865010b64c543cc770c53492c486acbb91c47665038  tier3s/provision-runsc.sh
 eed0d492aef801fd01ffe41cd02551f0ce39a2fd1ac86e0658782ff09387a984  tier3s/tier3s-runsc
 6dbfe0817f3c8ca57fe3ff3aa5c694d78333aa88758c40488ad183305470e8a8  tier3s/spike/phase0-fix-lib.sh
-eeafc5731c22e11d30bb9510bd54feb97cf55e13d64ff5592cfcd48aafd20ff0  tier3s/spike/mutate-guards.py
-76ff5375eb79da86e4b70558f7264e48bf49a9d81db598f1b15b21dcc6545b6f  tests/unit/test_tier3s_probe.py
-f3f3fee520e089e790ed6692cf31b79ce36de0e8bfc94989dadc4b4554493557  tests/unit/test_tier3s_provision.py
+2e3563f548f99ceb66dccb5f71e8ab7996f2e75a8d0c255ea32d59e9bb1e5280  tier3s/spike/mutate-guards.py
+2a9793702f57a0627d235d5c80cbe511abb99cd8dfdc781d63ebe7fc127e773a  tests/unit/test_tier3s_probe.py
+99925f1f7a23959a57b32210b4d8a41871c466ccc2dadefe2b81d8700a66ecff  tests/unit/test_tier3s_provision.py
 CHECK cache-tarball-sha512: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
 CHECK profile: OK (QDISTRO_PROFILE=dev)
 7.2.8-1-default

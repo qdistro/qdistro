@@ -1,4 +1,4 @@
-### host 2026-10-02T06:25:33Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:39:25Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chmod 0700 $SIDE/gvisor_sentry; rm -f /var/tmp/t3s-A.log /var/tmp/t3s-B.log
 ( "${PROVISION[@]}" > /var/tmp/t3s-A.log 2>&1; echo "rc=$?" >> /var/tmp/t3s-A.log ) & a=$!
 for i in $(seq 1 200); do grep -q 'holding the provisioning lock' /var/tmp/t3s-A.log && break; sleep 0.05; done
@@ -12,7 +12,7 @@ has B-rc0 /var/tmp/t3s-B.log 'rc=0'
 is sidecar-755 "$(stat -c %a $SIDE/gvisor_sentry)" 755
 is no-leftovers "$(leftovers)" 0; probe_tail_pass after; finish
 CMD
-[vm-exec] guest identity pinned (pid 136906 start 207264)
+[vm-exec] guest identity pinned (pid 193420 start 290479)
 ## A
 provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
 provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)

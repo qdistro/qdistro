@@ -1,4 +1,4 @@
-### host 2026-10-02T06:25:05Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:38:56Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; T=$CACHE/20260928.0/gvisor.tar.zstd
 cp $T /var/tmp/t3s-good.tar.zstd; printf x >> $T
 echo '## (a) live install present but differing (sidecar 0644): provision must fail and leave it untouched'
@@ -14,7 +14,7 @@ cp /var/tmp/t3s-good.tar.zstd $T; rm -f /var/tmp/t3s-good.tar.zstd
 is cache-restored "$(sha512sum < $T | cut -d' ' -f1)" "$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)"
 is no-leftovers "$(leftovers)" 0; finish
 CMD
-[vm-exec] guest identity pinned (pid 133158 start 204446)
+[vm-exec] guest identity pinned (pid 189384 start 287555)
 ## (a) live install present but differing (sidecar 0644): provision must fail and leave it untouched
 provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
 provision-runsc: FAIL: tarball sha512 mismatch: got cb26476dd8d9f84d6df16349d1365ae5f28d9bc00939fe3509060d9a21f52cfb1c01312931018471dffd5536cf0437669cd567ece6f1b7d1a89764786c1f684d

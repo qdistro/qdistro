@@ -2,8 +2,8 @@
 
 Re-run of Phase 0 after the full-branch codex astra review (REVISE: the probe
 executed the install before verifying it; no provisioning transaction lock;
-guard tests that never reached their guards) and its r1 re-review (REVISE: a download was published into the cache through an unchecked path). One run of
-`tier3s/spike/run-phase0-fix.sh` (host) at commit `88425f4ea`, every step a
+guard tests that never reached their guards) and its re-reviews r1 (REVISE: a download was published into the cache through an unchecked path) and r2 (REVISE: the probe's scratch-image import used a temporary directory under the caller's `$TMPDIR` and chmod'ed it as root). One run of
+`tier3s/spike/run-phase0-fix.sh` (host) at commit `f3ecdf9aa`, every step a
 `vmlog.sh` capture of `scripts/vm/vm-exec`: the log starts with the exact
 command and ends with `### exit=<rc>`; every command ran inside the VM as
 guest root unless it says `runuser -u admin`. Steps are **asserting**: they
@@ -22,7 +22,7 @@ shows the fake runsc writes its marker when executed directly.
 
 | Log | What | Verdict |
 |---|---|---|
-| 00-stage.log | staged commit, guest sha256 = host sha256 of the scripts/tests, cache tarball sha512 = pin, profile=dev, pytest + strace installed by zypper from the snapshot repo, logged reset of any prior install | info |
+| 00-stage.log | staged commit; the checkout dir as the VM spin left it (`/root/qdistro-src` owned by host uid 1007) is made root-owned, logged, because root-run tier3s scripts now refuse a checkout another uid owns (step 20); guest sha256 = host sha256 of the scripts/tests, cache tarball sha512 = pin, profile=dev, pytest + strace installed by zypper from the snapshot repo, logged reset of any prior install | info |
 | 01-probe-before-provision.log | probe names `runsc` (not provisioned) first, exit 1; `runsc_version` not executed, 0 runsc execs | PASS (negative) |
 | 02-provision-offline.log | offline install from the cache: lock `/run/qdistro-runsc/provision.lock` taken (dir root 0700), verified private copy of the tarball, 6 files, version, no leftovers | PASS |
 | 03-provision-idempotent.log | second run: nothing to do | PASS |
@@ -41,21 +41,25 @@ shows the fake runsc writes its marker when executed directly.
 | 16-concurrent-provisions.log | two real-root provisions on a damaged install: A holds the lock and repairs; B logs `waiting for the provisioning lock`, then sees `already installed`; both rc 0; final state PASS, no leftovers | PASS |
 | 17-stage-parent.log | hostile `TMPDIR` (0777, not sticky): strace shows the stage made under `/var/tmp`, nothing under TMPDIR; `/var/tmp` briefly 0777 (restored 1777 by trap): provision refuses before staging, live install untouched; repair, PASS | PASS (negative) |
 | 18-cache-trust.log | real root, online: (a) cache under sticky `/var/tmp` (1777) refused **before any download** (`untrusted path: /var/tmp …`), cache empty, live install untouched; (b) cache release dir a symlink into an attacker dir that links a root 0600 sentinel: refused before download, attacker dir and sentinel (mode, owner, size, sha256) unchanged; (c) positive control: fresh root-owned cache, real download from the pinned URL, sha512 = pin, published 0644 root with no temporaries left, installed, probe PASS | PASS (negative + positive) |
+| 19-probe-scratch-image.log | probe as real root with admin's scratch image removed (so the import branch runs), a hostile `TMPDIR` (0777, not sticky) and a root 0600 sentinel: PASS with the real podman import; strace of mkdir/chmod/fchmod/fchmodat/fchmodat2 across the whole probe shows **no** call naming TMPDIR; TMPDIR empty, sentinel unchanged, scratch image present afterwards | PASS (negative + positive) |
+| 20-untrusted-checkout.log | as root, both scripts run from an admin-owned copy of `tier3s/`: provision exits 1 and the probe prints `REFUSE checkout` (exit 2), exact messages naming the uid-1000 script; the install is unchanged; from the root-owned checkout the probe then PASSes | PASS (negative) |
 | 08-probe-pass-after-negatives.log | idempotent provision + probe PASS, exactly one exec via the fd, no leftovers | PASS |
-| 09-unit-tests.log | `tests/unit/test_tier3s_{probe,provision}.py` as root: 24 passed, 19 skipped (the prefix hook is refused for root by design; the root-only tests — foreign owner, `--pin`/prefix/test-hook refusals with euid 0 — run for real); as admin on a copy: 42 passed, 1 skipped (foreign owner needs root). The one warning is the repo's `qt_api` pytest option without pytest-qt | PASS |
-| 10-mutation-harness.log | `tier3s/spike/mutate-guards.py` as admin: 22 mutations of the real probe/provision/wrapper, each caught by every named test, files restored byte-identical (sha256), baseline and after-restore green; as root: V2–V4 caught with real euid 0 | PASS |
+| 09-unit-tests.log | `tests/unit/test_tier3s_{probe,provision}.py` as root: 31 passed, 19 skipped (the prefix hook is refused for root by design; the root-only tests — foreign owner, `--pin`/prefix/test-hook refusals with euid 0 — run for real); as admin on a copy: 49 passed, 1 skipped (foreign owner needs root). The one warning is the repo's `qt_api` pytest option without pytest-qt | PASS |
+| 10-mutation-harness.log | `tier3s/spike/mutate-guards.py` as admin: 26 mutations of the real probe/provision/wrapper, each caught by every named test, files restored byte-identical (sha256), baseline and after-restore green; as root: V2–V4 caught with real euid 0 | PASS |
 
-Order: logs ran 00–07c, 11–18, 08, 09, 10 (numbers keep the Phase 0 names
+Order: logs ran 00–07c, 11–20, 08, 09, 10 (numbers keep the Phase 0 names
 for the steps that repeat `phase0-20261001/`).
 
-Superseded: the run committed at `88e4d84a2` (staged `bf2b7a6f9`, reviewed in
-astra fix r1) is in history; this run replaces it after the cache-trust fix.
+Superseded: the runs committed at `88e4d84a2` (staged `bf2b7a6f9`, reviewed
+in astra fix r1) and `1f6311300` (staged `88425f4ea`, reviewed in r2) are in
+history; this run replaces them after the scratch-image and checkout fixes.
 Not kept (scratch, outside the tree): earlier runs that differed only by
 driver/check bugs fixed in the branch history (a relative lib path; a
 stage-dir count that also matched `tree/`; a mutation anchor left stale by
 the `trusted_chain` signature change, which the harness reported as a
-HARNESS ERROR), and one run superseded by the stage-parent/untrusted-path
-hardening. One of them was disturbed by an edit to the running driver (bash
+HARNESS ERROR), and runs superseded by later hardening before they were
+committed (stage parent/untrusted path; the r2 scratch-image fix before the
+checkout check). One of them was disturbed by an edit to the running driver (bash
 reads scripts incrementally); it stopped at a parse error after its last
 step, executed nothing extra, and was discarded.
 

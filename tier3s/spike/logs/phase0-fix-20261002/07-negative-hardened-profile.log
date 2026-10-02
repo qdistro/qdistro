@@ -1,4 +1,4 @@
-### host 2026-10-02T06:25:10Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+### host 2026-10-02T06:39:01Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
 . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; cp -a /etc/qdistro/profile /var/tmp/t3s-profile.bak
 trap 'cp -a /var/tmp/t3s-profile.bak /etc/qdistro/profile' EXIT
 sed -i 's/^QDISTRO_PROFILE=.*/QDISTRO_PROFILE=release/' /etc/qdistro/profile
@@ -7,7 +7,7 @@ has refuses $PO 'REFUSE profile: tier 3s is dev-profile only (README O4); /etc/q
 is no-runsc-exec "$NEXEC" 0
 cp -a /var/tmp/t3s-profile.bak /etc/qdistro/profile; is profile-restored "$(cat /etc/qdistro/profile)" QDISTRO_PROFILE=dev; finish
 CMD
-[vm-exec] guest identity pinned (pid 133896 start 205011)
+[vm-exec] guest identity pinned (pid 190136 start 288121)
 REFUSE profile: tier 3s is dev-profile only (README O4); /etc/qdistro/profile says release
 --- runsc-bundle / fd executions seen by strace -f -e trace=execve:
 (none)
