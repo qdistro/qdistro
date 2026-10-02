@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -P)"   # physical path: its real ancestors are checked
 PIN="$HERE/RUNSC_RELEASE"               # authoritative pin (the checked-in one)
 # Unit-test hooks ONLY: an alternate root for /etc + /usr/libexec
 # (QDISTRO_PROBE_ROOT) and, with it, an alternate pin (QDISTRO_PROBE_PIN). In
@@ -53,6 +53,42 @@ test_pause() {
     for _ in $(seq 1 600); do [ ! -e "$d/$1.release" ] || return 0; sleep 0.1; done
     echo "probe: TEST pause at $1 not released" >&2; exit 2
 }
+# --- root runs only a root-controlled checkout ------------------------------
+# The pin, the wrapper and (bash reads scripts incrementally) this script's own
+# code come from the checkout, so as root every one of them and every ancestor
+# directory must be root-owned and not other-writable (group-writable only for
+# gid 0: git archive extracts 0775 root:root). Otherwise another uid would
+# decide what root executes or installs.
+checkout_untrusted() {   # prints the first problem and returns 0, else 1
+    local x st u g m
+    if [ -L "$0" ]; then echo "$0 is a symlink"; return 0; fi
+    perm_bad() {
+        st="$(stat -c '%u %g %a' -- "$1")" || { echo "$1: stat failed"; return 0; }
+        u="${st%% *}"; m="${st##* }"; g="${st#* }"; g="${g%% *}"
+        if [ "$u" != 0 ]; then echo "$1 owned by uid $u"; return 0; fi
+        if (( (8#$m & 8#002) != 0 )); then echo "$1 is other-writable (mode $m)"; return 0; fi
+        if (( (8#$m & 8#020) != 0 )) && [ "$g" != 0 ]; then echo "$1 is writable by group $g (mode $m)"; return 0; fi
+        return 1
+    }
+    for x in "$HERE/$(basename -- "$0")" "$HERE/RUNSC_RELEASE" "$HERE/tier3s-runsc"; do
+        if [ -L "$x" ] || [ ! -f "$x" ]; then echo "$x is not a regular file"; return 0; fi
+        perm_bad "$x" && return 0
+    done
+    x="$HERE"
+    while :; do
+        if [ -L "$x" ] || [ ! -d "$x" ]; then echo "$x is not a directory"; return 0; fi
+        perm_bad "$x" && return 0
+        [ "$x" != / ] || return 1
+        x="$(dirname -- "$x")"
+    done
+}
+if [ "$(id -u)" -eq 0 ] && why="$(checkout_untrusted)"; then
+    printf 'REFUSE checkout: refusing to run as root from a checkout another user could modify: %s (use a root-owned copy)\n' "$why"
+    exit 2
+fi
+# A real (non-test) run uses only the system tool dirs and no TAR_OPTIONS.
+[ -n "$ROOT" ] || { PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; }
+unset TAR_OPTIONS
 RUNSC_DIR="$ROOT/usr/libexec/qdistro/runsc"
 WRAPPER="$ROOT/usr/libexec/qdistro/tier3s-runsc"
 STAMP="$ROOT/etc/qdistro/runsc-release"

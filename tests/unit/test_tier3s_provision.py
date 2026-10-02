@@ -527,3 +527,35 @@ def test_existing_tarball_in_untrusted_cache_is_still_read_safely(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "verified private copy" in r.stdout
     assert sha(root / "usr/libexec/qdistro/runsc/runsc") == sha(b / "runsc")
+
+
+# --- root runs only a root-controlled checkout ------------------------------
+
+def untrusted_checkout(tmp, script, how):
+    """Byte-identical copy of the real tier3s files in a checkout another user
+    could modify (copied, because the property under test is WHERE the script
+    lives; the copy is asserted identical to the real file)."""
+    co = tmp / "co" / "tier3s"
+    co.mkdir(parents=True)
+    for f in ("provision-runsc.sh", "probe.sh", "RUNSC_RELEASE", "tier3s-runsc"):
+        shutil.copy2(REPO / "tier3s" / f, co / f)
+        assert (co / f).read_bytes() == (REPO / "tier3s" / f).read_bytes()
+    if how == "dir":
+        co.chmod(0o777)
+        why = f"{co} is other-writable (mode 777)"
+    else:
+        (co / "RUNSC_RELEASE").chmod(0o646)
+        why = f"{co}/RUNSC_RELEASE is other-writable (mode 646)"
+    return co / script, why
+
+
+@pytest.mark.parametrize("how", ["dir", "pin"])
+def test_root_refuses_untrusted_checkout(tmp_path, how):
+    script, why = untrusted_checkout(tmp_path, "provision-runsc.sh", how)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QDISTRO_RUNSC_")}
+    r = subprocess.run(root_capable_cmd(["bash", str(script), "--offline",
+                                         "--cache-dir", str(tmp_path / "nocache")]),
+                       env=env, capture_output=True, text=True)
+    assert r.returncode == 1
+    assert r.stderr.strip() == ("provision-runsc: FAIL: refusing to run as root from a checkout another "
+                                f"user could modify: {why} (use a root-owned copy)")

@@ -34,7 +34,7 @@
 set -euo pipefail
 umask 022   # created parents must not be group/other-writable (trusted_chain)
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -P)"   # physical path: its real ancestors are checked
 PIN="$HERE/RUNSC_RELEASE"
 WRAPPER_SRC="$HERE/tier3s-runsc"
 CACHE_DIR="${QDISTRO_CACHE_DIR:-/var/cache/qdistro}/runsc"
@@ -75,6 +75,43 @@ else
     for h in QDISTRO_RUNSC_FAIL_AFTER_SWAP QDISTRO_RUNSC_PAUSE_AFTER_SWAP; do
         [ -z "${!h:-}" ] || die "$h is a unit-test hook (needs QDISTRO_RUNSC_PREFIX)"
     done
+fi
+# --- root runs only a root-controlled checkout ------------------------------
+# The pin, the wrapper and (bash reads scripts incrementally) this script's own
+# code come from the checkout, so as root every one of them and every ancestor
+# directory must be root-owned and not other-writable (group-writable only for
+# gid 0: git archive extracts 0775 root:root). Otherwise another uid would
+# decide what root executes or installs.
+checkout_untrusted() {   # prints the first problem and returns 0, else 1
+    local x st u g m
+    if [ -L "$0" ]; then echo "$0 is a symlink"; return 0; fi
+    perm_bad() {
+        st="$(stat -c '%u %g %a' -- "$1")" || { echo "$1: stat failed"; return 0; }
+        u="${st%% *}"; m="${st##* }"; g="${st#* }"; g="${g%% *}"
+        if [ "$u" != 0 ]; then echo "$1 owned by uid $u"; return 0; fi
+        if (( (8#$m & 8#002) != 0 )); then echo "$1 is other-writable (mode $m)"; return 0; fi
+        if (( (8#$m & 8#020) != 0 )) && [ "$g" != 0 ]; then echo "$1 is writable by group $g (mode $m)"; return 0; fi
+        return 1
+    }
+    for x in "$HERE/$(basename -- "$0")" "$HERE/RUNSC_RELEASE" "$HERE/tier3s-runsc"; do
+        if [ -L "$x" ] || [ ! -f "$x" ]; then echo "$x is not a regular file"; return 0; fi
+        perm_bad "$x" && return 0
+    done
+    x="$HERE"
+    while :; do
+        if [ -L "$x" ] || [ ! -d "$x" ]; then echo "$x is not a directory"; return 0; fi
+        perm_bad "$x" && return 0
+        [ "$x" != / ] || return 1
+        x="$(dirname -- "$x")"
+    done
+}
+if [ "$(id -u)" -eq 0 ]; then
+    if why="$(checkout_untrusted)"; then
+        die "refusing to run as root from a checkout another user could modify: $why (use a root-owned copy)"
+    fi
+    # root's own environment, pinned: tools from the system dirs only, no
+    # TAR_OPTIONS, and curl -q below ignores ~/.curlrc
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; unset TAR_OPTIONS
 fi
 [ -r "$PIN" ] || die "pin file not readable: $PIN"
 [ -r "$WRAPPER_SRC" ] || die "wrapper not found: $WRAPPER_SRC"
@@ -227,7 +264,7 @@ else
     log "a download is published only into a trusted cache dir: $SRC_DIR"
     trusted_chain "$SRC_DIR" "$CACHE_STOP"
     log "downloading ${P[base_url]}/${P[tarball]}"
-    curl -fsS --proto =https -o "$PRIV" "${P[base_url]}/${P[tarball]}" || die "download failed"
+    curl -q -fsS --proto =https -o "$PRIV" "${P[base_url]}/${P[tarball]}" || die "download failed"
     got="$(sha "$PRIV")"
     [ "$got" = "${P[tarball_sha512]}" ] || die "tarball sha512 mismatch: got $got (download not cached)"
     log "tarball sha512 OK (download)"

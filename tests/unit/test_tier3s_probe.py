@@ -421,3 +421,16 @@ def test_scratch_image_import_failure_is_reported(tmp_path):
             "localhost/tier3s-probe:empty (rc=1: fake import failed: boom)") in r.stdout, r.stdout
     assert "FAIL label_disable: not checked: scratch image import failed" in r.stdout
     assert " create " not in log.read_text()
+
+
+# --- root runs only a root-controlled checkout ------------------------------
+
+@pytest.mark.parametrize("how", ["dir", "pin"])
+def test_root_refuses_untrusted_checkout(tmp_path, how):
+    from test_tier3s_provision import root_capable_cmd, untrusted_checkout
+    script, why = untrusted_checkout(tmp_path, "probe.sh", how)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QDISTRO_PROBE_")}
+    r = subprocess.run(root_capable_cmd(["bash", str(script)]), env=env, capture_output=True, text=True)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.stdout.strip() == ("REFUSE checkout: refusing to run as root from a checkout another user "
+                                f"could modify: {why} (use a root-owned copy)")
