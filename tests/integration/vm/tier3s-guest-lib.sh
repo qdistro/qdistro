@@ -47,6 +47,7 @@ finish() {
 }
 _t3s_exit_trap() {
     local rc=$?
+    [ -z "${T3S_EXIT_HOOK:-}" ] || eval "$T3S_EXIT_HOOK"
     if [ "$T3S_DONE" = 0 ]; then
         echo "FAIL: $T3S_TAG exited early (rc=$rc) before its summary"
         echo "[$T3S_TAG] $T3S_PASS passes, $((T3S_FAIL + 1)) failures"

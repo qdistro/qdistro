@@ -8,8 +8,8 @@
 #           and for a TEMPLATED silo no activation record
 #           (/run/qdistro/silo-generation/<silo>, bindings/<silo>.activated).
 #           A positive control (allow) shows both oracles DO see a launch.
-#   item 6  a non-dev (release = the hardened config) profile refuses with a
-#           clear message at CreateTier3sSilo, at StartSilo and in the spawn
+#   item 6  the hardened profiles (release, daily: every non-dev profile)
+#           refuse with a clear message at CreateTier3sSilo, at StartSilo and in the spawn
 #           itself (direct unit start); a probe failure refuses; no fallback
 #           to tier 2/3 anywhere (no tier-2/podapp/tier-3 session unit starts,
 #           no container of any kind appears).
@@ -124,28 +124,32 @@ is "control: launch unit Result" "$(systemctl show -p Result --value "$(unit_of 
 sm StopSilo si $ST 10 > /dev/null; is "control: StopSilo" "$(silo_state $ST)" Stopped
 assert_all_clear control
 
-step "4. DONE 6: release (hardened config) profile refuses with a clear message"
+step "4. DONE 6: the hardened profiles (release, daily) refuse with a clear message"
+# is_hardened() = not dev (scripts/install/lib/qdistro-profile.sh): release and daily
 cp -a "$PROFILE" "$WORK/profile.orig"
-printf 'QDISTRO_PROFILE=release\n' > "$PROFILE"; chmod 0644 "$PROFILE"
-MSG="tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier"
-out=$(sm CreateTier3sSilo ssss s121h headless-smoke s121h none 2>&1); rc=$?
-info "CreateTier3sSilo on release: rc=$rc $out"
-is "release: CreateTier3sSilo refused with the message" "$([ "$rc" -ne 0 ] && printf '%s' "$out" | grep -cF "$MSG")" 1
-is "release: no silo was created" "$(silo_state s121h)" absent
-cur=$(journal_cursor)
-out=$(sm StartSilo s $SA 2>&1); rc=$?
-info "StartSilo on release: rc=$rc $out"
-is "release: StartSilo refused with the message" "$([ "$rc" -ne 0 ] && printf '%s' "$out" | grep -cF "$MSG")" 1
-is "release: StartSilo started no launch unit" "$(units_started_since "$cur" 'qdistro-tier3s-silo@.*')" 0
-is "release: silo state unchanged" "$(silo_state $SA)" Stopped
-# the spawn refuses on its own: a hand-written stanza, the unit started directly
+T3S_EXIT_HOOK='cp -a "$WORK/profile.orig" "$PROFILE"'   # never leave the VM on a non-dev profile
 start_direct() { write_stanza $SA "[\"$SMOKE_APP\"]" > /dev/null; systemctl start "$(unit_of $SA)"; }
-refused "release/spawn (direct unit start)" $SA \
-    "tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=release); there is no hardened launch path and no fallback tier" start_direct
-rm -f "/run/qdistro/silo-launch/$SA.env"
-out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
-is "release: the probe refuses a non-dev profile (rc 2)" "$rc" 2
-cp -a "$WORK/profile.orig" "$PROFILE"
+for prof in release daily; do
+    printf 'QDISTRO_PROFILE=%s\n' "$prof" > "$PROFILE"; chmod 0644 "$PROFILE"
+    MSG="tier 3s is dev-profile only in this PoC (profile=$prof); there is no hardened launch path and no fallback tier"
+    out=$(sm CreateTier3sSilo ssss s121h headless-smoke s121h none 2>&1); rc=$?
+    info "CreateTier3sSilo on $prof: rc=$rc $out"
+    is "$prof: CreateTier3sSilo refused with the message" "$([ "$rc" -ne 0 ] && printf '%s' "$out" | grep -cF "$MSG")" 1
+    is "$prof: no silo was created" "$(silo_state s121h)" absent
+    cur=$(journal_cursor)
+    out=$(sm StartSilo s $SA 2>&1); rc=$?
+    info "StartSilo on $prof: rc=$rc $out"
+    is "$prof: StartSilo refused with the message" "$([ "$rc" -ne 0 ] && printf '%s' "$out" | grep -cF "$MSG")" 1
+    is "$prof: StartSilo started no launch unit" "$(units_started_since "$cur" 'qdistro-tier3s-silo@.*')" 0
+    is "$prof: silo state unchanged" "$(silo_state $SA)" Stopped
+    # the spawn refuses on its own: a hand-written stanza, the unit started directly
+    refused "$prof/spawn (direct unit start)" $SA \
+        "tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=$prof); there is no hardened launch path and no fallback tier" start_direct
+    rm -f "/run/qdistro/silo-launch/$SA.env"
+    out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
+    is "$prof: the probe refuses a non-dev profile (rc 2)" "$rc" 2
+done
+cp -a "$WORK/profile.orig" "$PROFILE"; T3S_EXIT_HOOK=""
 is "profile restored to dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' "$PROFILE" | tail -1)" dev
 
 step "5. DONE 6: a probe failure refuses (runtime wrapper missing), no fallback"
