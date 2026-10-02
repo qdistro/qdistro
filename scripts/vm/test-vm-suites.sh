@@ -81,6 +81,11 @@ rm -rf "$OUT"
 mkdir -p "$OUT/junit" "$OUT/bats"
 W=$OUT/vm
 mkdir -p "$W"
+ssh_opts=(-i "$W/key" -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o ServerAliveInterval=30
+    -o LogLevel=ERROR)
+vmssh() { ssh "${ssh_opts[@]}" admin@127.0.0.1 "$@"; }
+rootssh() { ssh "${ssh_opts[@]}" root@127.0.0.1 "$@"; }
 
 # ---- what will run: written first, so a run that stops early is visible -----
 # name|dir|args. "unit" runs tests/unit 30 files per process, as the host gate
@@ -107,6 +112,8 @@ if [[ $PHASES == *" bats "* ]]; then
 fi
 {
     echo "commit $(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "phases${PHASES% }"
+    [ -z "${QDISTRO_SUITES_BATS_FILES:-}" ] || echo "bats-filter $QDISTRO_SUITES_BATS_FILES"
     for s in "${SUITES[@]}"; do echo "pytest ${s%%|*}"; done
     for f in "${BATS_FILES[@]}"; do echo "bats $(basename "$f" .bats)"; done
 } > "$OUT/expected"
@@ -116,18 +123,34 @@ summarize() {
 }
 SOCK=$(mktemp -d /tmp/qdsuites.XXXXXX)
 qemu_pid=""
+ended=""        # "complete" or "incomplete" once the summary decided
+interrupted=""
+fetch_junit() {  # pytest results so far, from the guest (bounded)
+    timeout -k 5 60 ssh "${ssh_opts[@]}" admin@127.0.0.1 \
+        'tar -C /home/admin/junit -cf - . 2>/dev/null' | tar -C "$OUT/junit" -xf - 2>/dev/null
+}
+# Exit status: 0 complete, 2 incomplete (including an interrupted run), 1 any
+# other harness failure.
 finish() {
     local rc=$?
+    trap - TERM INT
+    if [ -z "$ended" ] && [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" 2>/dev/null \
+            && [ "${#SUITES[@]}" -gt 0 ]; then
+        fetch_junit || true
+    fi
     [ -z "$qemu_pid" ] || kill "$qemu_pid" 2>/dev/null || true
     rm -rf "$W/disk.qcow2" "$SOCK"
-    if [ ! -s "$OUT/summary.md" ]; then
-        summarize || true
-        [ "$rc" -ne 0 ] || rc=1
-    fi
-    exit "$rc"
+    case "$ended" in
+        complete) exit 0 ;;
+        incomplete) exit 2 ;;
+    esac
+    summarize || true
+    [ -n "$interrupted" ] && exit 2
+    echo "[suites] harness failed (status $rc)" >&2
+    exit 1
 }
 trap finish EXIT
-trap 'exit 143' TERM INT
+trap 'interrupted=1; exit 2' TERM INT
 
 qemu-img create -q -f qcow2 -b "$VM_IMAGE" -F qcow2 "$W/disk.qcow2"
 ssh-keygen -q -t ed25519 -N '' -C suites -f "$W/key"
@@ -185,12 +208,6 @@ send_text() {
     qmp '{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"ret"}]}}'
 }
 
-ssh_opts=(-i "$W/key" -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o ServerAliveInterval=30
-    -o LogLevel=ERROR)
-vmssh() { ssh "${ssh_opts[@]}" admin@127.0.0.1 "$@"; }
-rootssh() { ssh "${ssh_opts[@]}" root@127.0.0.1 "$@"; }
-
 SECONDS=0
 until vmssh true 2>/dev/null; do
     kill -0 "$qemu_pid" 2>/dev/null || { tail -40 "$VM_DIR/serial-suites.log"; exit 1; }
@@ -217,14 +234,16 @@ cat > "$W/run-pytest.sh" <<'GUEST'
 #!/bin/bash
 # In the guest, as admin: run one suite; results land in /home/admin/junit.
 set -u
-name=$1 dir=$2 args=$3
+name=$1 dir=$2 args=$3 deadline=$4
 J=/home/admin/junit
 mkdir -p "$J"
 cd "/home/admin/qdistro-test/$dir" || exit 2
 export QT_QPA_PLATFORM=offscreen PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1
-run() {  # run TAG ARGS...
-    local rc=0
-    timeout -k 30 1800 dbus-run-session -- python3 -m pytest -p no:cacheprovider -q \
+run() {  # run TAG ARGS...: at most 30 min, and never past the deadline
+    local rc=0 left=$((deadline - $(date +%s)))
+    [ "$left" -lt 1800 ] || left=1800
+    if [ "$left" -le 0 ]; then echo budget > "$J/$1.rc"; return 1; fi
+    timeout -k 30 "$left" dbus-run-session -- python3 -m pytest -p no:cacheprovider -q \
         --junitxml="$J/$1.xml" "${@:2}" || rc=$?
     echo "$rc" > "$J/$1.rc"
     [ "$rc" -le 1 ]
@@ -246,16 +265,16 @@ GUEST
 vmssh 'cat > run-pytest.sh' < "$W/run-pytest.sh"
 for s in "${SUITES[@]}"; do
     IFS='|' read -r name dir args <<< "$s"
-    if [ "$(budget_left)" -le 0 ]; then log "budget spent; pytest $name not started"; break; fi
+    left=$(budget_left)
+    if [ "$left" -le 0 ]; then log "budget spent; pytest $name not started"; break; fi
     log "pytest $name..."
     SECONDS=0
-    if vmssh "bash run-pytest.sh '$name' '$dir' '$args'" > "$OUT/pytest-$name.log" 2>&1; then rc=0; else rc=$?; fi
+    if timeout -k 30 $((left + 120)) ssh "${ssh_opts[@]}" admin@127.0.0.1 \
+            "bash run-pytest.sh '$name' '$dir' '$args' $(($(date +%s) + left))" \
+            > "$OUT/pytest-$name.log" 2>&1; then rc=0; else rc=$?; fi
     log "pytest $name: $([ "$rc" = 0 ] && echo completed || echo "rc=$rc") (${SECONDS}s)"
+    fetch_junit || log "could not fetch the junit results after $name"
 done
-if [ "${#SUITES[@]}" -gt 0 ]; then
-    vmssh 'tar -C /home/admin/junit -cf - .' | tar -C "$OUT/junit" -xf - \
-        || log "could not fetch the junit results"
-fi
 
 # ---- bats, from the runner ---------------------------------------------------
 if [ "${#BATS_FILES[@]}" -gt 0 ]; then
@@ -374,7 +393,9 @@ class Stream:
             while b"\n" not in self.buf:
                 self._fill()
             line, self.buf = self.buf.split(b"\n", 1)
-            line = line.replace(b"\xff", b"").strip()
+            # A 0xFF starts a fresh reply: whatever came before it on this
+            # line is the tail of an abandoned one.
+            line = line.rsplit(b"\xff", 1)[-1].strip()
             if not line:
                 continue
             try:
@@ -443,28 +464,43 @@ chmod +x "$W/bin/virsh"
 # After each file: the core system services and admin's session, as the
 # consumer check requires them. What a file left stopped is restarted and
 # noted in its TAP, so a later file is not judged on an earlier one's state.
+# Exit status 0 when the baseline holds (restored or untouched); otherwise
+# nonzero, and the loop stops: later files would run on a broken guest.
 baseline() {
-    rootssh 'for u in greetd qdistro-admin-broker qdistro-session-manager qdistro-pwd qdistro-root-exec.socket; do
+    rootssh 'sys="greetd qdistro-admin-broker qdistro-session-manager qdistro-pwd qdistro-root-exec.socket"
+        usr="qdwin-session.target qdwin-compositor.service qdshell.service"
+        healthy() {
+            for u in $sys; do systemctl is-active --quiet "$u" || return 1; done
+            for u in $usr; do systemctl --user -M admin@ is-active --quiet "$u" || return 1; done
+            test -S /run/user/1000/wayland-1
+        }
+        healthy && exit 0
+        for u in $sys; do
             systemctl is-active --quiet "$u" && continue
             echo "harness: $u was not active after this file; restarting it"
-            systemctl reset-failed "$u" 2>/dev/null; systemctl start "$u" || echo "harness: $u did not start"
+            systemctl reset-failed "$u" 2>/dev/null; systemctl start "$u" || true
         done
-        for u in qdwin-session.target qdwin-compositor.service qdshell.service; do
+        for u in $usr; do
             systemctl --user -M admin@ is-active --quiet "$u" && continue
             echo "harness: admin $u was not active after this file; starting qdwin-session.target"
-            systemctl --user -M admin@ start qdwin-session.target || echo "harness: qdwin-session.target did not start"
+            systemctl --user -M admin@ start qdwin-session.target || true
             break
-        done' 2>&1
+        done
+        for _ in $(seq 1 30); do healthy && exit 0; sleep 2; done
+        echo "harness: baseline NOT restored after this file"
+        exit 1' 2>&1
 }
 
 for f in "${BATS_FILES[@]}"; do
     base=$(basename "$f" .bats)
-    if [ "$(budget_left)" -le 0 ]; then log "budget spent; bats $base and later files not started"; break; fi
+    left=$(budget_left)
+    if [ "$left" -le 0 ]; then log "budget spent; bats $base and later files not started"; break; fi
+    [ "$left" -lt "$BATS_TIMEOUT" ] || left=$BATS_TIMEOUT
     log "bats $base..."
     SECONDS=0
     if (cd "$REPO" && PATH="$W/bin:$PATH" QDSUITES_SOCK="$SOCK" VM_NAME=qdistro-suites \
             env -u QDISTRO_PROFILE -u VM_SSH_PORT -u VM_EXEC \
-            timeout -k 30 "$BATS_TIMEOUT" bats --tap "$f") \
+            timeout -k 30 "$left" bats --tap "$f") \
             > "$OUT/bats/$base.tap" 2>&1; then rc=0; else rc=$?; fi
     echo "# rc=$rc seconds=$SECONDS" >> "$OUT/bats/$base.tap"
     log "bats $base rc=$rc (${SECONDS}s)"
@@ -474,12 +510,21 @@ for f in "${BATS_FILES[@]}"; do
         log "guest unreachable after $base; stopping bats"
         break
     fi
-    baseline | sed 's/^/# /' | tee -a "$OUT/bats/$base.tap"
+    if baseline > "$W/baseline.out" 2>&1; then brc=0; else brc=$?; fi
+    sed 's/^/# /' "$W/baseline.out" | tee -a "$OUT/bats/$base.tap"
+    if [ "$brc" -ne 0 ]; then
+        echo "$base" > "$OUT/baseline-failed"
+        log "core services or admin's session not restored after $base; stopping bats"
+        break
+    fi
 done
 
 rootssh 'systemctl poweroff' 2>/dev/null || true
 for _ in $(seq 1 60); do kill -0 "$qemu_pid" 2>/dev/null || break; sleep 2; done
 
-if summarize; then rc=0; else rc=$?; fi
+if summarize; then ended=complete; else
+    rc=$?
+    [ "$rc" -eq 2 ] || exit 1
+    ended=incomplete
+fi
 cat "$OUT/summary.md"
-exit "$rc"

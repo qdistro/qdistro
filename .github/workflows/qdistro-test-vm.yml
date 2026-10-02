@@ -13,6 +13,9 @@ name: qdistro downloadable VM test image
 on:
   push:
     branches: [experiment/github-qdistro-image]
+    # The image, its harness and the guest transport. A change only to product
+    # code or to pytest suites does not trigger a build: run it by hand
+    # (workflow_dispatch).
     paths:
       - .github/workflows/qdistro-test-vm.yml
       - scripts/vm/test-vm-guest-install.sh
