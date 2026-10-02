@@ -626,7 +626,7 @@ qdwin_compositor_pid() {
 
 # qdwin_windows — one line per LIVE toplevel of the running compositor:
 #   <handle>\t<pid>\t<uid>\t<app_id>\t<title>
-# in handle order. Fails only when the compositor is not running.
+# in handle order. Fails when the compositor or its journal is unavailable.
 qdwin_windows() {
     local pid journal
     pid=$(qdwin_compositor_pid) || return 1
