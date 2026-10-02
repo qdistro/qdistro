@@ -167,7 +167,7 @@ def test_native_restores_captured_style_after_fusion(qapp, with_qss):
     windows = next((n for n in QStyleFactory.keys() if n.lower() == "windows"), None)
     if windows is None:
         pytest.skip("Windows style required to distinguish Fusion")
-    original_style = qapp.style().objectName()
+    original_style = _underlying_style_name(qapp)
     original_pal = QPalette(qapp.palette())
     original_qss = qapp.styleSheet()
     reset_controller_for_tests()

@@ -30,7 +30,7 @@ def test_apply_theme_native_restores_captured_baseline(themed_app, with_qss):
     windows = next((n for n in QStyleFactory.keys() if n.lower() == "windows"), None)
     if windows is None:
         pytest.skip("Windows style required to distinguish Fusion")
-    original_style = themed_app.style().objectName()
+    original_style = _underlying_style_name(themed_app)
     original_pal = QPalette(themed_app.palette())
     original_qss = themed_app.styleSheet()
     reset_controller_for_tests()

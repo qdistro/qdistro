@@ -307,7 +307,7 @@ def test_native_without_controller_restores_captured_baseline(
         current_controller,
     )
 
-    original_style = qapp.style().objectName()
+    original_style = _underlying_style_name(qapp)
     original_pal = QPalette(qapp.palette())
     original_qss = qapp.styleSheet()
     reset_controller_for_tests()
@@ -407,6 +407,11 @@ def test_follow_desktop_without_snapshot_shows_unavailable(qapp, isolated_config
 def test_live_update_replaces_unavailable_with_inherited_size(
     qapp, isolated_config, tmp_path, monkeypatch
 ):
+    from qdbrowser.theme import _underlying_style_name
+
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
     dlg = PreferencesDialog(isolated_config)
     try:
         assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
@@ -422,3 +427,7 @@ def test_live_update_replaces_unavailable_with_inherited_size(
         assert snap.fonts.ui_family in text
     finally:
         dlg.deleteLater()
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)

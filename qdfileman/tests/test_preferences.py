@@ -222,7 +222,7 @@ def test_native_without_controller_restores_captured_baseline(
     from PyQt6.QtGui import QPalette
     from qfileman.theme import _underlying_style_name, current_controller
 
-    original_style = qapp.style().objectName()
+    original_style = _underlying_style_name(qapp)
     original_pal = QPalette(qapp.palette())
     original_qss = qapp.styleSheet()
     reset_controller_for_tests()
@@ -270,6 +270,12 @@ def test_follow_desktop_without_snapshot_shows_unavailable(qapp, isolated_config
 def test_live_update_replaces_unavailable_with_inherited_size(
     qapp, isolated_config, tmp_path, monkeypatch
 ):
+    from PyQt6.QtGui import QPalette
+    from qfileman.theme import _underlying_style_name
+
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
     reset_controller_for_tests()
     dlg = PreferencesDialog(isolated_config)
     try:
@@ -287,3 +293,6 @@ def test_live_update_replaces_unavailable_with_inherited_size(
     finally:
         dlg.deleteLater()
         reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)
