@@ -38,7 +38,7 @@ That needs a seat with a keyboard. The weston **headless** backend has no
 input backend and exposes no `wl_seat` (verified — see
 tests/host/17-cursor-shape.md), and `weston-test` / `ext-virtual-pointer-v1`
 are not packaged on this host. So real keypress delivery and grab-suppression
-are **VM-only** (alongside `tests/gui/15-keybinding-events.md`).
+are **VM-only** (alongside `tests/gui/agent-keybinding-events-smoke.sh`).
 
 This scenario therefore pins the REGISTER state machine — which IS reachable
 headless (pure shell requests + server-log evidence) — and documents the

@@ -744,7 +744,7 @@ Optional add-ons when you're touching the bar:
 | Scenario | Why |
 |---|---|
 | `qdwin/tests/gui/12-bar-no-overdraw.md` | bar height == exclusion height; verifies the 1px-overdraw fix and the `exclusionZoneBleed` toggle round-trip |
-| `qdwin/tests/gui/14-bar-content-quiet-when-idle.md` | journal stays quiet when idle; catches a returning remap storm |
+| `qdwin/tests/gui/agent-bar-quiet-idle-smoke.sh` (runs in every gui-qdwin lane) | journal stays quiet when idle; catches a returning remap storm |
 
 Run them in series (`one VM at a time`) and drain state between scenarios
 per the [Between scenarios](#between-scenarios) block. A green smoke is

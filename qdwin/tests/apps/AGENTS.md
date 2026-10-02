@@ -20,7 +20,7 @@ qdwin protocol path against a real client.
 | `01-firefox-max-restore.md` | `request_maximize(0)` returns to pre-max geometry (was bug #1) |
 | `02-xterm-xwayland-launch.md` | XWayland surface attach doesn't NULL-deref (was bug #2) |
 | `03-foot-vs-xterm-tagging.md` | `is_xwayland=1` for X11, `0` for Wayland in `toplevel_added` (was bug #3) |
-| `04-cursor-spam-suppressed.md` | `install_default_cursor: no surface yet` logs at most once per session (was bug #4) |
+| (04 retired) | `install_default_cursor: no surface yet` logs at most once per session (was bug #4): now the static meson test `default-cursor-warn-once` (`qdwin/qdwin/test_default_cursor_warn_once.py`) |
 | `05-gtk4-gnome-text-editor.md` | Native Wayland GTK4 toolkit |
 | `06-gtk3-thunar-xwayland.md` | XWayland GTK3 toolkit + dbus-activated apps |
 | `07-qt5-vlc.md` | Qt5 widget app via XWayland |

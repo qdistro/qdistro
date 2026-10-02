@@ -40,7 +40,7 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 # in MINUTES — 1 is the smallest non-zero arm (IdlePolicy._toMs), so this test
 # runs in ~80s, not ~15s. weston.ini [core] idle-time and the retired Noctalia
 # `idle.screenOffTimeout` key are NOT read by qdshell. The proven path is
-# qdwin/tests/gui/agent-idle-dpms-recovery-smoke.sh + 20-idle-dpms.md.
+# qdwin/tests/gui/agent-idle-dpms-recovery-smoke.sh + agent-idle-dpms-capability-smoke.sh.
 ADMIN_USER=$("$QDWIN_VM_EXEC" "$VMNAME" 'getent passwd 1000 | cut -d: -f1' 2>/dev/null | tail -1)
 [ -n "$ADMIN_USER" ] || { echo "FAIL: no uid-1000 user in guest (getent passwd 1000 empty)"; exit 1; }
 SETTINGS=/home/$ADMIN_USER/.config/qdshell/settings.json
