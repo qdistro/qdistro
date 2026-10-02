@@ -187,9 +187,14 @@ else
     exp="$({ echo "d 755 $EXP_OWN ."; echo "d 755 $EXP_OWN gvisor-bin"
              for f in "${!WANT[@]}"; do echo "f 755 $EXP_OWN $f"; done; } | LC_ALL=C sort)"
     have="$(find "$RUNSC_DIR" -printf '%y %m %u:%g %P\n' | sed 's/ $/ ./' | LC_ALL=C sort)"
+    test_pause after-listing
     bad=""
     if [ "$have" != "$exp" ]; then
         bad="file set differs: missing=[$(LC_ALL=C comm -23 <(echo "$exp") <(echo "$have") | tr '\n' ',')] unexpected=[$(LC_ALL=C comm -13 <(echo "$exp") <(echo "$have") | tr '\n' ',')]"
+    elif [ "${PATH_OK:-0}" -ne 1 ]; then
+        # no content reads under an untrusted path (a FIFO swapped in there
+        # would hang the probe); the listing above opens no file
+        bad="sha512 not checked: install path untrusted"
     else
         # identity of the runsc inode whose bytes are hashed below
         RUNSC_ID="$(stat -c '%d:%i' -- "$RUNSC_DIR/runsc")"
@@ -224,7 +229,9 @@ else
     fi
     exec {RFD}<&-
 fi
-if [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPPER")" = "755 $EXP_OWN" ] \
+if [ "${PATH_OK:-0}" -ne 1 ]; then
+    fail wrapper "not checked: install path untrusted (see install_path)"
+elif [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPPER")" = "755 $EXP_OWN" ] \
    && cmp -s "$HERE/tier3s-runsc" "$WRAPPER"; then
     pass wrapper "$WRAPPER (identical to $HERE/tier3s-runsc)"
     WRAPPER_OK=1

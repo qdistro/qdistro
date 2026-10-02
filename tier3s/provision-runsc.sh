@@ -187,7 +187,19 @@ fi
 # matched the pin.
 SRC_DIR="$CACHE_DIR/$REL"
 TARBALL="$SRC_DIR/${P[tarball]}"
-STAGE="$(mktemp -d "${TMPDIR:-/var/tmp}/runsc-stage.XXXXXX")"
+# A real install stages under /var/tmp regardless of $TMPDIR, and only if
+# /var/tmp is root-owned and either sticky or not other-writable: then no one
+# else can rename the 0700 stage dir away and substitute their own between
+# verification and install. The TEST prefix honours $TMPDIR (tests set it).
+if [ -n "$PREFIX" ]; then STAGE_PARENT="${TMPDIR:-/var/tmp}"
+else
+    STAGE_PARENT=/var/tmp
+    st="$(stat -c '%u %a' -- "$STAGE_PARENT")" || die "cannot stat $STAGE_PARENT"
+    [ ! -L "$STAGE_PARENT" ] && [ -d "$STAGE_PARENT" ] && [ "${st%% *}" = 0 ] \
+        && (( (8#${st#* } & 8#1000) != 0 || (8#${st#* } & 8#022) == 0 )) \
+        || die "untrusted stage parent $STAGE_PARENT ($st): must be root-owned, sticky or not group/other-writable"
+fi
+STAGE="$(mktemp -d "$STAGE_PARENT/runsc-stage.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir "$STAGE/tree"
 PRIV="$STAGE/${P[tarball]}"

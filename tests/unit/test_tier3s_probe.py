@@ -233,8 +233,37 @@ def test_writable_ancestor_is_never_executed(tmp_path):
     parent.chmod(0o775)
     r = inst.probe()
     assert f"FAIL install_path: untrusted: {parent} is group/other-writable (mode 775)" in r.stdout
-    assert "PASS bundle:" in r.stdout          # the bundle itself is fine
+    # the file set is listed (opens nothing) but no content is read under an
+    # untrusted path, and the wrapper is not compared or handed to podman
+    assert "FAIL bundle: sha512 not checked: install path untrusted" in r.stdout
+    assert "FAIL wrapper: not checked: install path untrusted" in r.stdout
     assert_not_executed(r, inst)
+
+
+def test_fifo_swapped_in_under_untrusted_path_does_not_hang(tmp_path):
+    """A writable ancestor lets someone swap a sidecar for a FIFO after the
+    listing; the probe must not read content under that path (it would block)."""
+    inst = Install(tmp_path)
+    (inst.root / "usr/libexec/qdistro").chmod(0o775)
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    env = dict(os.environ, QDISTRO_PROBE_ROOT=str(inst.root), QDISTRO_PROBE_PIN=str(inst.pin),
+               QDISTRO_PROBE_PAUSE_AT="after-listing", QDISTRO_PROBE_PAUSE_DIR=str(ctl),
+               PATH=f"{inst.bin}:{os.environ['PATH']}")
+    p = subprocess.Popen(["timeout", "20", "bash", str(SCRIPT), "--user", ME], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 60
+    while not (ctl / "after-listing.reached").exists():
+        assert p.poll() is None and time.monotonic() < deadline, "never reached after-listing"
+        time.sleep(0.05)
+    side = inst.runsc_dir / "gvisor-bin/gvisor_sentry"
+    side.unlink()
+    os.mkfifo(side, 0o755)
+    (ctl / "after-listing.release").touch()
+    out, err = p.communicate(timeout=60)
+    assert p.returncode == 1, (p.returncode, out)          # 124 = hung on the FIFO
+    assert "FAIL bundle: sha512 not checked: install path untrusted" in out
+    assert_not_executed(subprocess.CompletedProcess([], p.returncode, out, err), inst)
 
 
 def test_group_writable_runsc_is_never_executed(tmp_path):
