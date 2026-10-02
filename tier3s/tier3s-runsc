@@ -29,7 +29,13 @@ case "$euid" in
             fi
         done < /proc/self/uid_map ;;
 esac
-die() { printf 'tier3s-runsc: %s; refusing (no fallback)\n' "$*" >&2; exit 125; }
+# podman keeps a runtime's stderr out of `podman stop`'s output (it reports
+# only "given PID did not die"), so the refusal also goes to the journal.
+die() {
+    printf 'tier3s-runsc: %s; refusing (no fallback)\n' "$*" >&2
+    /usr/bin/logger -t tier3s-runsc -p user.err -- "$*; refusing (no fallback)" 2>/dev/null
+    exit 125
+}
 case "$host" in ''|*[!0-9]*) die "cannot map uid '$euid' to a host uid" ;; esac
 [ "$host" -ne 0 ] || die "host root has no tier 3s state root"
 base=/run/qdistro-tier3s-runsc

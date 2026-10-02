@@ -72,11 +72,14 @@ a1neg)
     echo "## D-A1 negative: plain stop with the root moved aside / replaced must fail visibly, sandbox stays"
     pm3s run -d --name t3sf-b "${RUN_FLAGS[@]}" "$IMG" sleep 300; is run-rc $? 0
     sleep 2; spid=$(as_admin podman inspect --format '{{.State.Pid}}' t3sf-b)
+    since=$(date +%s); sleep 1
     mv $ROOTDIR $ROOTDIR.aside
     out=$(as_admin podman stop -t 2 t3sf-b 2>&1); rc=$?
     echo "$out"
     if [ "$rc" -ne 0 ]; then ok missing-root-stop-fails "rc=$rc"; else bad missing-root-stop-fails rc=0; fi
-    case "$out" in *"tier3s-runsc: state root $ROOTDIR is missing"*) ok missing-root-message ;; *) bad missing-root-message ;; esac
+    # podman hides the runtime's stderr; the wrapper's refusal is in the journal
+    if journalctl -t tier3s-runsc --since "@$since" -o cat --no-pager | grep -F "state root $ROOTDIR is missing"; then
+        ok missing-root-journal; else bad missing-root-journal; fi
     if alive "$spid"; then ok sentry-alive-after-failed-stop; else bad sentry-alive-after-failed-stop; fi
     is no-root-minted "$(ls -d $ROOTDIR 2>/dev/null | wc -l)" 0
     install -d -o 1000 -g 1000 -m 0700 $ROOTDIR
@@ -114,8 +117,9 @@ P
     for _ in $(seq 60); do [ "$(as_admin podman inspect --format '{{.State.Status}}' t3sf-c 2>/dev/null)" = running ] && break; sleep 0.5; done
     sleep 1
     systemctl show -p ControlGroup -p BindsTo -p Before -p Delegate -p TasksMax -p MemoryMax $SC
-    CG=/sys/fs/cgroup$(systemctl show -p ControlGroup --value $SC)
+    rel=$(systemctl show -p ControlGroup --value $SC); CG=/sys/fs/cgroup$rel
     is scope-active "$(systemctl is-active $SC)" active
+    if [ -z "$rel" ]; then journalctl -u $SVC --no-pager | tail; bad scope-cgroup-known; finish; fi
     case "$(systemctl show -p BindsTo --value $SC)" in *$SVC*) ok scope-bindsto ;; *) bad scope-bindsto ;; esac
     case "$(systemctl show -p Before --value $SC)" in *$SVC*) ok scope-before ;; *) bad scope-before ;; esac
     stat -c '%n %U %a' $CG $CG/cgroup.procs $CG/cgroup.subtree_control $CG/cgroup.threads $CG/memory.max $CG/pids.max

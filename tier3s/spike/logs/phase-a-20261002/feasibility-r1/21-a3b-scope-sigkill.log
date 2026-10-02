@@ -1,0 +1,15 @@
+### host 2026-10-02T08:58:03Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh a3bkill
+CMD
+[vm-exec] guest identity pinned (pid 14360 start 39303)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+error: Guest agent is not responding: QEMU guest agent is not connected
+[vm-exec] WARN: guest agent RPC failed (attempt 1/30, virsh_exit=1); retry in 2s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 2/30, virsh_exit=1); retry in 2s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 3/30, virsh_exit=1); retry in 2s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist
+[vm-exec] WARN: guest agent RPC failed (attempt 5/30, virsh_exit=1); retry in 5s
+error: guest agent command failed: unable to execute QEMU agent command 'guest-exec-status': PID ld does not exist

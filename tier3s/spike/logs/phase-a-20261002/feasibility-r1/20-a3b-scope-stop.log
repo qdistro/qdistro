@@ -1,0 +1,318 @@
+### host 2026-10-02T08:57:25Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh a3b
+CMD
+[vm-exec] guest identity pinned (pid 8247 start 35511)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+CHECK svc-start: OK (0)
+BindsTo=
+Before=
+ControlGroup=
+Delegate=no
+MemoryMax=infinity
+TasksMax=4611
+CHECK scope-active: BAD (got 'inactive', want 'active')
+CHECK scope-bindsto: BAD
+CHECK scope-before: BAD
+/sys/fs/cgroup root 555
+/sys/fs/cgroup/cgroup.procs root 644
+/sys/fs/cgroup/cgroup.subtree_control root 644
+/sys/fs/cgroup/cgroup.threads root 644
+CHECK delegated-dir: BAD (got '0', want '1000')
+CHECK limit-memory-root: BAD (got '', want '0')
+CHECK limit-pids-root: BAD (got '', want '0')
+CHECK memory-max: BAD (got '', want '2147483648')
+CHECK admin-cannot-raise-memory: OK
+CHECK admin-cannot-raise-pids: OK
+scope subtree procs:
+  /init.scope/cgroup.procs 1 systemd /usr/lib/systemd/systemd
+  /cgroup.procs 2 kthreadd 
+  /cgroup.procs 3 pool_workqueue_release 
+  /cgroup.procs 4 kworker/R-rcu_gp 
+  /cgroup.procs 5 kworker/R-sync_wq 
+  /cgroup.procs 6 kworker/R-kvfree_rcu_reclaim 
+  /cgroup.procs 7 kworker/R-slub_flushwq 
+  /cgroup.procs 8 kworker/R-netns 
+  /cgroup.procs 9 kworker/0:0-xfs-conv/vda3 
+  /cgroup.procs 10 kworker/0:1-xfs-conv/vda3 
+  /cgroup.procs 11 kworker/0:0H-kblockd 
+  /cgroup.procs 12 kworker/u16:0-ipv6_addrconf 
+  /cgroup.procs 13 kworker/R-mm_percpu_wq 
+  /cgroup.procs 14 ksoftirqd/0 
+  /cgroup.procs 15 rcu_preempt 
+  /cgroup.procs 16 rcu_exp_par_gp_kthread_worker/0 
+  /cgroup.procs 17 rcu_exp_gp_kthread_worker 
+  /cgroup.procs 18 migration/0 
+  /cgroup.procs 19 kprobe-optimizer 
+  /cgroup.procs 20 idle_inject/0 
+  /cgroup.procs 21 cpuhp/0 
+  /cgroup.procs 22 cpuhp/1 
+  /cgroup.procs 23 idle_inject/1 
+  /cgroup.procs 24 migration/1 
+  /cgroup.procs 25 ksoftirqd/1 
+  /cgroup.procs 26 kworker/1:0-xfs-conv/vda3 
+  /cgroup.procs 27 kworker/1:0H-kblockd 
+  /cgroup.procs 28 cpuhp/2 
+  /cgroup.procs 29 idle_inject/2 
+  /cgroup.procs 30 migration/2 
+  /cgroup.procs 31 ksoftirqd/2 
+  /cgroup.procs 32 kworker/2:0-xfs-conv/vda3 
+  /cgroup.procs 33 kworker/2:0H-kblockd 
+  /cgroup.procs 34 cpuhp/3 
+  /cgroup.procs 35 idle_inject/3 
+  /cgroup.procs 36 migration/3 
+  /cgroup.procs 37 ksoftirqd/3 
+  /cgroup.procs 38 kworker/3:0-events 
+  /cgroup.procs 39 kworker/3:0H-kblockd 
+  /cgroup.procs 40 kworker/u17:0-events_unbound 
+  /cgroup.procs 41 kworker/u18:0-events_unbound 
+  /cgroup.procs 43 kworker/u20:0-events_unbound 
+  /cgroup.procs 45 kworker/u18:1-events_unbound 
+  /cgroup.procs 46 kdevtmpfs 
+  /cgroup.procs 47 kworker/R-inet_frag_wq 
+  /cgroup.procs 48 rcu_tasks_kthread 
+  /cgroup.procs 49 rcu_tasks_rude_kthread 
+  /cgroup.procs 50 kauditd 
+  /cgroup.procs 51 khungtaskd 
+  /cgroup.procs 52 oom_reaper 
+  /cgroup.procs 53 kworker/u17:1-events_unbound 
+  /cgroup.procs 54 kworker/R-writeback 
+  /cgroup.procs 55 kworker/u17:2 
+  /cgroup.procs 56 kcompactd0 
+  /cgroup.procs 57 ksmd 
+  /cgroup.procs 58 khugepaged 
+  /cgroup.procs 59 kworker/R-kblockd 
+  /cgroup.procs 60 kworker/R-blkcg_punt_bio 
+  /cgroup.procs 61 kworker/R-kintegrityd 
+  /cgroup.procs 62 irq/9-acpi 
+  /cgroup.procs 63 kworker/1:1-xfs-conv/vda3 
+  /cgroup.procs 64 kworker/3:1-xfs-conv/vda3 
+  /cgroup.procs 65 kworker/R-tpm_dev_wq 
+  /cgroup.procs 66 kworker/R-edac-poller 
+  /cgroup.procs 67 kworker/R-devfreq_wq 
+  /cgroup.procs 68 watchdogd 
+  /cgroup.procs 69 kworker/R-quota_events_unbound 
+  /cgroup.procs 70 kworker/2:1-xfs-conv/vda3 
+  /cgroup.procs 71 kswapd0 
+  /cgroup.procs 72 kworker/u18:2-events_unbound 
+  /cgroup.procs 74 kworker/R-kthrotld 
+  /cgroup.procs 75 kworker/R-mld 
+  /cgroup.procs 76 kworker/1:2-xfs-conv/vda3 
+  /cgroup.procs 77 kworker/R-ipv6_addrconf 
+  /cgroup.procs 78 kworker/u16:1-netns 
+  /cgroup.procs 79 kworker/R-kstrp 
+  /cgroup.procs 81 kworker/u21:0 
+  /cgroup.procs 82 kworker/u22:0 
+  /cgroup.procs 83 kworker/u23:0 
+  /cgroup.procs 84 kworker/u24:0 
+  /cgroup.procs 85 kworker/u25:0 
+  /cgroup.procs 135 kworker/R-charger_manager 
+  /cgroup.procs 180 kworker/u19:1-events_unbound 
+  /cgroup.procs 183 kworker/2:2-xfs-conv/vda3 
+  /cgroup.procs 186 kworker/2:3-xfs-conv/vda3 
+  /cgroup.procs 198 kworker/2:4-xfs-conv/vda3 
+  /cgroup.procs 251 kworker/0:2-xfs-conv/vda3 
+  /cgroup.procs 315 kworker/0:3-xfs-conv/vda3 
+  /cgroup.procs 324 kworker/u20:2-writeback 
+  /cgroup.procs 344 kworker/3:2-xfs-conv/vda3 
+  /cgroup.procs 347 kworker/R-ata_sff 
+  /cgroup.procs 371 scsi_eh_0 
+  /cgroup.procs 373 kworker/R-scsi_tmf_0 
+  /cgroup.procs 374 scsi_eh_1 
+  /cgroup.procs 375 kworker/R-scsi_tmf_1 
+  /cgroup.procs 376 kworker/u20:3-xfs-cil/vda3 
+  /cgroup.procs 388 kworker/3:3-xfs-conv/vda3 
+  /cgroup.procs 389 kworker/R-xfsalloc 
+  /cgroup.procs 390 kworker/R-xfs_mru_cache 
+  /cgroup.procs 404 kworker/u18:3-events_unbound 
+  /cgroup.procs 438 kworker/0:1H-xfs-log/vda3 
+  /cgroup.procs 443 kworker/u19:2-events_unbound 
+  /cgroup.procs 444 kworker/1:1H-kblockd 
+  /cgroup.procs 502 kworker/R-xfs-buf/vda3 
+  /cgroup.procs 503 kworker/R-xfs-conv/vda3 
+  /cgroup.procs 504 kworker/R-xfs-reclaim/vda3 
+  /cgroup.procs 505 kworker/R-xfs-blockgc/vda3 
+  /cgroup.procs 506 kworker/R-xfs-inodegc/vda3 
+  /cgroup.procs 507 kworker/R-xfs-log/vda3 
+  /cgroup.procs 508 kworker/R-xfs-cil/vda3 
+  /cgroup.procs 509 xfsaild/vda3 
+  /cgroup.procs 543 kworker/2:1H-kblockd 
+  /cgroup.procs 594 kworker/u17:3-events_unbound 
+  /system.slice/systemd-journald.service/cgroup.procs 651 systemd-journal /usr/lib/systemd/systemd-journald
+  /cgroup.procs 680 kworker/1:3-cgroup_free 
+  /cgroup.procs 682 kworker/3:1H-xfs-log/vda3 
+  /system.slice/systemd-udevd.service/udev/cgroup.procs 692 systemd-udevd /usr/bin/udevadm
+  /cgroup.procs 693 psimon 
+  /cgroup.procs 724 card0-crtc0 
+  /system.slice/haveged.service/cgroup.procs 725 haveged /usr/sbin/haveged
+  /cgroup.procs 751 kworker/1:4-xfs-conv/vda3 
+  /system.slice/auditd.service/cgroup.procs 775 auditd /usr/sbin/auditd
+  /system.slice/dbus-broker.service/cgroup.procs 799 dbus-broker-lau /usr/bin/dbus-broker-launch
+  /system.slice/dbus-broker.service/cgroup.procs 801 dbus-broker /usr/bin/dbus-broker
+  /system.slice/qemu-guest-agent.service/cgroup.procs 805 qemu-ga /usr/bin/qemu-ga
+  /system.slice/systemd-logind.service/cgroup.procs 807 systemd-logind /usr/lib/systemd/systemd-logind
+  /system.slice/systemd-machined.service/cgroup.procs 814 systemd-machine /usr/lib/systemd/systemd-machined
+  /system.slice/NetworkManager.service/cgroup.procs 850 NetworkManager /usr/sbin/NetworkManager
+  /system.slice/chronyd.service/cgroup.procs 880 chronyd /usr/sbin/chronyd
+  /system.slice/system-getty.slice/getty@tty1.service/cgroup.procs 960 agetty /usr/sbin/agetty
+  /system.slice/system-serial\x2dgetty.slice/serial-getty@ttyS0.service/cgroup.procs 962 agetty /usr/sbin/agetty
+  /system.slice/sshd.service/cgroup.procs 972 sshd /usr/sbin/sshd
+  /cgroup.procs 1300 kworker/2:5-xfs-conv/vda3 
+  /cgroup.procs 1301 kworker/1:5-events 
+  /cgroup.procs 1743 kworker/u19:3-events_unbound 
+  /system.slice/polkit.service/cgroup.procs 2014 polkitd /usr/libexec/polkit-1/polkitd
+  /system.slice/qdistro-admin-broker.service/cgroup.procs 3218 python3 /usr/bin/python3.13
+  /cgroup.procs 3219 kworker/u16:2-ipv6_addrconf 
+  /system.slice/qdistro-pwd.service/cgroup.procs 3226 python3 /usr/bin/python3.13
+  /system.slice/qdistro-session-manager.service/cgroup.procs 3231 python3 /usr/bin/python3.13
+  /system.slice/qdistro-session-manager.service/cgroup.procs 3309 catatonit /usr/bin/catatonit
+  /system.slice/seatd.service/cgroup.procs 3808 seatd /usr/bin/seatd
+  /user.slice/user-1000.slice/user@1000.service/init.scope/cgroup.procs 4221 systemd /usr/lib/systemd/systemd
+  /user.slice/user-1000.slice/user@1000.service/init.scope/cgroup.procs 4222 (sd-pam) /usr/lib/systemd/systemd-executor
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-compositor.service/cgroup.procs 4237 python3 /usr/bin/python3.13
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-downloads.service/cgroup.procs 4238 python3 /usr/bin/python3.13
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-mpris.service/cgroup.procs 4239 python3 /usr/bin/python3.13
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-notifications.service/cgroup.procs 4240 python3 /usr/bin/python3.13
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-pwd-portal.service/cgroup.procs 4245 python3 /usr/bin/python3.13
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdwin-compositor.service/cgroup.procs 4246 weston /usr/bin/weston
+  /user.slice/user-1000.slice/user@1000.service/app.slice/ydotoold.service/cgroup.procs 4256 ydotoold /usr/bin/ydotoold
+  /user.slice/user-1000.slice/user@1000.service/session.slice/dbus-broker.service/cgroup.procs 4268 dbus-broker-lau /usr/bin/dbus-broker-launch
+  /user.slice/user-1000.slice/user@1000.service/session.slice/dbus-broker.service/cgroup.procs 4269 dbus-broker /usr/bin/dbus-broker
+  /user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service/cgroup.procs 4275 pipewire /usr/bin/pipewire
+  /user.slice/user-1000.slice/user@1000.service/session.slice/wireplumber.service/cgroup.procs 4276 wireplumber /usr/bin/wireplumber
+  /system.slice/rtkit-daemon.service/cgroup.procs 4277 rtkit-daemon /usr/libexec/rtkit/rtkit-daemon
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdlocker.service/cgroup.procs 4301 qdlocker /usr/bin/python3.13
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/cgroup.procs 4304 dbus-run-sessio /usr/bin/dbus-run-session
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-cursor-sprites.service/cgroup.procs 4305 qdistro-cursor- /usr/bin/qdistro-cursor-sprites
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/cgroup.procs 4306 dbus-daemon /usr/bin/dbus-daemon
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/cgroup.procs 4307 qs /usr/bin/quickshell
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/cgroup.procs 4430 sh /usr/bin/bash
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/cgroup.procs 4488 gdbus /usr/bin/gdbus
+  /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/cgroup.procs 4535 catatonit /usr/bin/catatonit
+  /cgroup.procs 6277 kworker/1:6-xfs-conv/vda3 
+  /cgroup.procs 6319 kworker/2:6-xfs-conv/vda3 
+  /cgroup.procs 6320 kworker/2:7-xfs-conv/vda3 
+  /cgroup.procs 6322 kworker/2:8-xfs-conv/vda3 
+  /cgroup.procs 6323 kworker/2:9-xfs-conv/vda3 
+  /cgroup.procs 6324 kworker/0:4-xfs-conv/vda3 
+  /cgroup.procs 6325 kworker/2:10-xfs-conv/vda3 
+  /cgroup.procs 6326 kworker/2:11-xfs-conv/vda3 
+  /cgroup.procs 6327 kworker/2:12-xfs-conv/vda3 
+  /cgroup.procs 6328 kworker/2:13-xfs-conv/vda3 
+  /cgroup.procs 6329 kworker/2:14-xfs-conv/vda3 
+  /cgroup.procs 6330 kworker/2:15-xfs-conv/vda3 
+  /cgroup.procs 6331 kworker/2:16-xfs-conv/vda3 
+  /cgroup.procs 6332 kworker/2:17-xfs-conv/vda3 
+  /cgroup.procs 6333 kworker/2:18-xfs-conv/vda3 
+  /cgroup.procs 6334 kworker/2:19-xfs-conv/vda3 
+  /cgroup.procs 6335 kworker/2:20-xfs-conv/vda3 
+  /cgroup.procs 6336 kworker/2:21-xfs-conv/vda3 
+  /cgroup.procs 6338 kworker/2:22-xfs-conv/vda3 
+  /cgroup.procs 6339 kworker/2:23-xfs-conv/vda3 
+  /cgroup.procs 6340 kworker/2:24-xfs-conv/vda3 
+  /cgroup.procs 6341 kworker/2:25-xfs-conv/vda3 
+  /cgroup.procs 6342 kworker/2:26-xfs-conv/vda3 
+  /cgroup.procs 6343 kworker/2:27-xfs-conv/vda3 
+  /cgroup.procs 6344 kworker/2:28-xfs-conv/vda3 
+  /cgroup.procs 6345 kworker/2:29-xfs-conv/vda3 
+  /cgroup.procs 6346 kworker/2:30-xfs-conv/vda3 
+  /cgroup.procs 6347 kworker/0:5-xfs-conv/vda3 
+  /cgroup.procs 6348 kworker/2:31-xfs-conv/vda3 
+  /cgroup.procs 6349 kworker/2:32-xfs-conv/vda3 
+  /cgroup.procs 6350 kworker/0:6-xfs-conv/vda3 
+  /cgroup.procs 6351 kworker/0:7-xfs-conv/vda3 
+  /cgroup.procs 6353 kworker/2:33-xfs-conv/vda3 
+  /cgroup.procs 6354 kworker/0:8-events 
+  /cgroup.procs 6355 kworker/2:34-xfs-conv/vda3 
+  /cgroup.procs 6356 kworker/0:9-xfs-conv/vda3 
+  /cgroup.procs 6357 kworker/2:35-events 
+  /cgroup.procs 6358 kworker/2:36-xfs-conv/vda3 
+  /cgroup.procs 6359 kworker/2:37 
+  /cgroup.procs 6360 kworker/2:38 
+  /cgroup.procs 6364 kworker/0:10-xfs-conv/vda3 
+  /cgroup.procs 6815 kworker/0:11-xfs-conv/vda3 
+  /cgroup.procs 6816 kworker/0:12 
+  /cgroup.procs 6817 kworker/0:13-xfs-conv/vda3 
+  /cgroup.procs 6861 kworker/3:4-cgroup_free 
+  /cgroup.procs 6862 kworker/3:5 
+  /system.slice/qemu-guest-agent.service/cgroup.procs 8247 phase-a-feasibi /usr/bin/bash
+  /cgroup.procs 8293 psimon 
+   9262  
+   9286  
+   9287  
+   9288  
+   9289  
+CHECK sentry-in-scope: BAD
+CHECK conmon-in-scope: BAD
+runsc-bundle processes on the host: 0
+CHECK runsc-procs-outside-scope: OK (0)
+CHECK class-runsc-gofer-in-scope: BAD (got '0', want '1')
+CHECK class-runsc-sandbox-in-scope: BAD (got '0', want '1')
+CHECK class-runsc-fd-parking-in-scope: BAD (got '0', want '1')
+systrap stubs in scope: 0
+CHECK stubs-in-scope: BAD (0)
+CHECK launcher-podman-in-scope: BAD (got '0', want '1')
+CHECK launcher-runuser-in-scope: BAD (got '0', want '1')
+CHECK launcher-conmon-in-scope: BAD (got '0', want '1')
+CHECK svc-stop: OK (0)
+ExecStopPost: SERVICE_RESULT=exit-code EXIT_CODE=exited scope=inactive
+ExecStopPost: scope procs=0
+CHECK scope-alive-during-execstoppost: BAD
+CHECK scope-gone-after-service: OK (inactive)
+CHECK cgroup-gone: BAD (got '1', want '0')
+CHECK sentry-gone: BAD
+CHECK no-runsc-left: OK (0)
+podman record afterwards (no cleanup ran):
+CHECK podman-rm-f-rc: OK (0)
+CHECK podman-record-gone: OK (0)
+total 0
+drwx------. 2 admin admin 60 Oct  2 08:57 .
+drwxr-xr-x. 3 root  root  60 Oct  2 08:57 ..
+-r--r--r--. 1 admin admin  0 Oct  2 08:57 null-netns
+### BAD=19
+[vm-exec] --- stderr ---
+Running as unit: t3sf-launch-a3b.service; invocation ID: 4d6c1391579e44538b678f89feb75fcb
+stat: cannot statx '/sys/fs/cgroup/memory.max': No such file or directory
+stat: cannot statx '/sys/fs/cgroup/pids.max': No such file or directory
+stat: cannot statx '/sys/fs/cgroup/memory.max': No such file or directory
+stat: cannot statx '/sys/fs/cgroup/pids.max': No such file or directory
+cat: /sys/fs/cgroup/memory.max: No such file or directory
+Error: no such object: "t3sf-c"
+Error: no such object: "t3sf-c"
+grep: /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice/podman-9276.scope/cgroup.procs: No such file or directory
+cat: /proc/9262/comm: No such file or directory
+cat: /proc/9286/comm: No such file or directory
+cat: /proc/9287/comm: No such file or directory
+cat: /proc/9288/comm: No such file or directory
+cat: /proc/9289/comm: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9262/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9286/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9287/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9288/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9289/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9262/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9286/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9287/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9288/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9289/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9262/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9286/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9287/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9288/cmdline: No such file or directory
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh: line 139: /proc/9289/cmdline: No such file or directory
+cat: /proc/9262/comm: No such file or directory
+cat: /proc/9286/comm: No such file or directory
+cat: /proc/9287/comm: No such file or directory
+cat: /proc/9288/comm: No such file or directory
+cat: /proc/9289/comm: No such file or directory
+cat: /proc/9262/comm: No such file or directory
+cat: /proc/9286/comm: No such file or directory
+cat: /proc/9287/comm: No such file or directory
+cat: /proc/9288/comm: No such file or directory
+cat: /proc/9289/comm: No such file or directory
+cat: /proc/9262/comm: No such file or directory
+cat: /proc/9286/comm: No such file or directory
+cat: /proc/9287/comm: No such file or directory
+cat: /proc/9288/comm: No such file or directory
+cat: /proc/9289/comm: No such file or directory
+[vm-exec] --- end stderr ---
+### exit=19

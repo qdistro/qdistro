@@ -54,8 +54,9 @@ case "$REL" in */../*|*/./*|*//*) die "odd cgroup path $REL" ;; esac
 DIR="$CGROOT$REL"
 [ -d "$DIR" ] && [ ! -L "$DIR" ] || die "scope cgroup $DIR is not a directory"
 [ "$(stat -c %u -- "$DIR")" = "$(id -u)" ] || die "scope cgroup $DIR is not owned by the caller"
-procs="$(tr '\n' ' ' < "$DIR/cgroup.procs")"
-[ "$procs" = "$SELF_PID " ] || die "scope $UNIT already holds processes [$procs], want only $SELF_PID"
+# mapfile, not $(...): a command substitution forks a process into the scope
+mapfile -t procs < "$DIR/cgroup.procs"
+[ "${procs[*]}" = "$SELF_PID" ] || die "scope $UNIT already holds processes [${procs[*]}], want only $SELF_PID"
 [ -z "$(find "$DIR" -mindepth 1 -type d -print -quit)" ] || die "scope $UNIT already has child cgroups"
 
 # (2) selective delegation: these four and nothing else

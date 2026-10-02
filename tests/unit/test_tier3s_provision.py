@@ -278,34 +278,95 @@ def test_version_text_with_nonzero_exit_fails_closed(tmp_path):
     assert not (root / "etc/qdistro/runsc-release").exists()
 
 
-# --- wrapper environment scrubbing (real tier3s-runsc) ----------------------
+# --- wrapper environment scrubbing + state root (real tier3s-runsc) ---------
 
-def test_wrapper_scrubs_environment_and_fixes_flags(tmp_path):
-    """Run the real wrapper in a private mount namespace whose /usr/libexec is a
-    bind of a fake tree, so /usr/libexec/qdistro/runsc/runsc is a script that
-    dumps the environ it was exec'd with and its argv."""
+UID = os.getuid()
+STATE_ROOT = f"/run/qdistro-tier3s-runsc/{UID}"
+# Inside `unshare -rm` the caller is uid 0 mapped onto this host uid, the same
+# shape rootless podman gives the wrapper (uid 0 in podman's user namespace).
+GOOD_ROOT = ("mount -t tmpfs none /run && mkdir -m 0755 /run/qdistro-tier3s-runsc"
+             f" && mkdir -m 0700 {STATE_ROOT}")
+
+
+def needs_userns():
     if not shutil.which("unshare") or subprocess.run(
             ["unshare", "-rm", "true"], capture_output=True).returncode != 0:
         pytest.skip("needs user+mount namespaces")
+
+
+def run_wrapper(tmp_path, args, setup=GOOD_ROOT, env=None, dump=None, after=None):
+    """Run the real wrapper in a private mount namespace whose /usr/libexec is a
+    bind of a fake tree (runsc = a script that dumps its environ and argv) and
+    whose /run is a tmpfs prepared by `setup`."""
+    needs_userns()
     fake = tmp_path / "libexec"
-    (fake / "qdistro/runsc").mkdir(parents=True)
-    dump = fake / "qdistro/runsc/runsc"
-    dump.write_text('#!/bin/sh\nprintf "ENV\\n"; tr "\\0" "\\n" < /proc/$$/environ\n'
-                    'printf "ARGS\\n"; for a in "$@"; do printf "%s\\n" "$a"; done\n')
-    dump.chmod(0o755)
+    (fake / "qdistro/runsc").mkdir(parents=True, exist_ok=True)
+    runsc = fake / "qdistro/runsc/runsc"
+    runsc.write_text(dump or ('#!/bin/sh\nprintf "ENV\\n"; tr "\\0" "\\n" < /proc/$$/environ\n'
+                              'printf "ARGS\\n"; for a in "$@"; do printf "%s\\n" "$a"; done\n'))
+    runsc.chmod(0o755)
+    script = f'mount --bind "$1" /usr/libexec && {setup} && shift 2 && '
+    script += f'{{ "$0" "$@"; rc=$?; {after}; exit $rc; }}' if after else 'exec "$0" "$@"'
+    return subprocess.run([shutil.which("unshare"), "-rm", "--", "/bin/sh", "-c", script,
+                           str(WRAPPER), str(fake), "x", *args],
+                          env=env or dict(os.environ), capture_output=True, text=True)
+
+
+def test_wrapper_scrubs_environment_and_fixes_flags(tmp_path):
     env = dict(os.environ, XDG_RUNTIME_DIR="/run/user/1000", RUNSC_TEST_KNOB="1",
                GVISOR_X="y", PATH=f"/nonexistent/evil:{os.environ['PATH']}")
-    r = subprocess.run(["unshare", "-rm", "--", "sh", "-c",
-                        'mount --bind "$1" /usr/libexec && exec "$2" create --bundle "a b"',
-                        "sh", str(fake), str(WRAPPER)],
-                       env=env, capture_output=True, text=True)
+    r = run_wrapper(tmp_path, ["create", "--bundle", "a b"], env=env)
     assert r.returncode == 0, r.stderr
     out = r.stdout.split("\n")
     env_lines = out[out.index("ENV") + 1:out.index("ARGS")]
     args = out[out.index("ARGS") + 1:-1]
     assert [l for l in env_lines if l] == ["PATH=/usr/bin:/bin"]
     assert args == ["--ignore-cgroups", "--platform=systrap", "--oci-seccomp",
-                    "create", "--bundle", "a b"]
+                    f"--root={STATE_ROOT}", "create", "--bundle", "a b"]
+
+
+@pytest.mark.parametrize("setup,why", [
+    ("mount -t tmpfs none /run && mkdir -m 0755 /run/qdistro-tier3s-runsc",
+     f"state root {STATE_ROOT} is missing or not a directory"),
+    ("mount -t tmpfs none /run",
+     "/run/qdistro-tier3s-runsc is missing or not a directory"),
+    ("mount -t tmpfs none /run && mkdir -m 0755 /run/qdistro-tier3s-runsc /run/elsewhere"
+     f" && chmod 0700 /run/elsewhere && ln -s /run/elsewhere {STATE_ROOT}",
+     f"state root {STATE_ROOT} is missing or not a directory"),
+    ("mount -t tmpfs none /run && mkdir -m 0755 /run/elsewhere"
+     f" && mkdir -m 0700 /run/elsewhere/{UID} && ln -s /run/elsewhere /run/qdistro-tier3s-runsc",
+     "/run/qdistro-tier3s-runsc is missing or not a directory"),
+    (GOOD_ROOT + f" && chmod 0750 {STATE_ROOT}",
+     f"state root {STATE_ROOT} is owner/mode '0 750', want '0 700'"),
+    (GOOD_ROOT + " && chmod 0775 /run/qdistro-tier3s-runsc",
+     "/run/qdistro-tier3s-runsc is not mode 755"),
+], ids=["root-missing", "base-missing", "root-symlink", "base-symlink", "root-mode", "base-mode"])
+def test_wrapper_refuses_bad_state_root_without_creating_it(tmp_path, setup, why):
+    """D-A1: the wrapper never mints a root; a missing/replaced/loose root fails
+    closed (exit 125) before runsc runs."""
+    r = run_wrapper(tmp_path, ["kill", "cid", "SIGKILL"], setup=setup)
+    assert r.returncode == 125, (r.returncode, r.stdout, r.stderr)
+    assert why in r.stderr, r.stderr
+    assert "refusing (no fallback)" in r.stderr
+    assert "ARGS" not in r.stdout, "runsc ran"
+
+
+def test_wrapper_never_creates_the_state_root(tmp_path):
+    """A control call against a missing root leaves the base empty (runsc's own
+    MkdirAll would otherwise mint an empty root and report "no container")."""
+    r = run_wrapper(tmp_path, ["delete", "cid"],
+                    setup="mount -t tmpfs none /run && mkdir -m 0755 /run/qdistro-tier3s-runsc",
+                    after='echo "LEFT:[$(ls -A /run/qdistro-tier3s-runsc)]"')
+    assert r.returncode == 125, r.stderr
+    assert "LEFT:[]" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("flag", ["--root=/run/user/1000/runsc", "--root", "-root=/x"])
+def test_wrapper_refuses_caller_root(tmp_path, flag):
+    r = run_wrapper(tmp_path, [flag, "/x", "state", "cid"] if flag == "--root" else [flag, "state", "cid"])
+    assert r.returncode == 125, r.stderr
+    assert f"caller-supplied {flag}" in r.stderr
+    assert "ARGS" not in r.stdout
 
 
 # --- concurrency (astra full P2) --------------------------------------------
@@ -612,19 +673,10 @@ def test_provision_never_uses_caller_path_tools(tmp_path):
 def test_wrapper_never_uses_caller_path_env(tmp_path):
     """Same mount-namespace fixture as the scrubbing test, with a shadow `env`
     first on PATH: the wrapper must use /usr/bin/env, not the caller's."""
-    if not shutil.which("unshare") or subprocess.run(
-            ["unshare", "-rm", "true"], capture_output=True).returncode != 0:
-        pytest.skip("needs user+mount namespaces")
     shadow, marker = shadow_path(tmp_path, names=["env"])
-    fake = tmp_path / "libexec"
-    (fake / "qdistro/runsc").mkdir(parents=True)
-    dump = fake / "qdistro/runsc/runsc"
-    dump.write_text('#!/bin/sh\ntr "\\0" "\\n" < /proc/$$/environ\n')
-    dump.chmod(0o755)
     env = dict(os.environ, PATH=f"{shadow}:{os.environ['PATH']}", EVIL="1")
-    r = subprocess.run([shutil.which("unshare"), "-rm", "--", "/bin/sh", "-c",
-                        'mount --bind "$1" /usr/libexec && exec "$2" x', "sh", str(fake), str(WRAPPER)],
-                       env=env, capture_output=True, text=True)
+    r = run_wrapper(tmp_path, ["x"], env=env,
+                    dump='#!/bin/sh\ntr "\\0" "\\n" < /proc/$$/environ\n')
     assert r.returncode == 0, r.stderr
     assert [l for l in r.stdout.split("\n") if l] == ["PATH=/usr/bin:/bin"]
     assert not marker.exists(), "the caller's env ran: " + marker.read_text()
