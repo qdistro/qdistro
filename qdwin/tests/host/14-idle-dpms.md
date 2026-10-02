@@ -16,7 +16,7 @@ and on resume `set_display_power(1)`.
 `set_dpms`), so `weston_output_power_off/on` are no-ops there — this scenario
 asserts the request is accepted and logged (the count of outputs acted on),
 not a real monitor power transition. Actual DPMS + the ext-idle-notify idle
-trigger are exercised on the live DRM VM (`tests/gui/20-idle-dpms.md`).
+trigger are exercised on the live DRM VM (`tests/gui/agent-idle-dpms-capability-smoke.sh`).
 
 ## Setup
 

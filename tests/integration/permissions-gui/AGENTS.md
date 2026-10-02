@@ -726,8 +726,10 @@ without the drain wrapper.
 
 ### Smoke subset (5-minute pre-push sweep)
 
-For a pre-push smoke pass, run the six scenarios below (each with
-`ci/bin/qci gui --scenario <absolute path>`) — they cover the broker → compositor → shell
+The full GUI corpus is the `NN-*.md` files in this directory; the D-Bus-only
+scenarios moved to headless bats on 2026-10-02 (see README.md). For a pre-push
+smoke pass, run the six scenarios below, each with
+`ci/bin/qci gui --scenario <absolute path>` — they cover the broker → compositor → shell
 happy path end-to-end with ~5 min of orchestrator wall-clock per VM.
 
 | Scenario | Why it's load-bearing |
@@ -744,7 +746,7 @@ Optional add-ons when you're touching the bar:
 | Scenario | Why |
 |---|---|
 | `qdwin/tests/gui/12-bar-no-overdraw.md` | bar height == exclusion height; verifies the 1px-overdraw fix and the `exclusionZoneBleed` toggle round-trip |
-| `qdwin/tests/gui/14-bar-content-quiet-when-idle.md` | journal stays quiet when idle; catches a returning remap storm |
+| `qdwin/tests/gui/agent-bar-quiet-idle-smoke.sh` (runs in every gui-qdwin lane) | journal stays quiet when idle; catches a returning remap storm |
 
 Run them in series (`one VM at a time`) and drain state between scenarios
 per the [Between scenarios](#between-scenarios) block. A green smoke is

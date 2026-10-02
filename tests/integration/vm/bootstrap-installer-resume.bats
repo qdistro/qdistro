@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Installer-chain step-level rerun / resume tests for
 # scripts/install/qdistro-bootstrap.sh (open-followups.md "Bootstrap /
 # packaging": step-level rerun controls / installer-chain skip-resume mode).

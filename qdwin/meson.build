@@ -1286,6 +1286,19 @@ test('global-filter-gate',
   ],
 )
 
+# qdwin bug #4: the "install_default_cursor: no surface yet" warning is logged
+# at most once per qdwin lifetime (replaces the agent scenario
+# tests/apps/04-cursor-spam-suppressed.md, which could only pass vacuously on
+# images where the cursor-sprites helper registers the default sprite).
+test('default-cursor-warn-once',
+  python3,
+  suite: 'source_invariant',
+  args: [
+    files('qdwin/test_default_cursor_warn_once.py'),
+    files('qdwin/qdwin.c'),
+  ],
+)
+
 # v32 shell-authorized screenshot invariants. This complements the global
 # filter gate (discovery) by pinning libweston's late authority decision and
 # the exact-output full-damage preparation request.

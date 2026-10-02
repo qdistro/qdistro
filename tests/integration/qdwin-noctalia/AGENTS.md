@@ -60,9 +60,9 @@ Noctalia has no equivalent ctrl-socket. Instead use:
 | # | Title | Tests |
 |---|---|---|
 | [01](./01-bar-visible.md) | bar + wallpaper render | smoke: layer-surface mapping at all |
-| [02](./02-dismiss-privacy-modal.md) | dismiss first-run privacy modal | left-click on layer-surface modal works |
+| 02 (retired) | no first-run privacy modal / setup wizard | static: `qdshell/tests/test_fork_strip_guard.js` |
 | [03](./03-clock-updates.md) | clock widget shows correct time | bar widget rendering, screenshot OCR |
-| [04](./04-cursor-tracking.md) | cursor follows mouse moves | pointer events into Noctalia |
+| 04 (retired) | cursor follows mouse moves | executable: `qdwin/tests/gui/agent-cursor-tracking-smoke.sh` |
 | [05](./05-bar-stays-after-idle.md) | bar still visible after DPMS wake | configure/ack cadence post-idle |
 
 (Add 06+ as strips need new validations.)

@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Behavioural lock-in for scripts/install/gen-source-manifest.sh, the
 # release/packaging tool that pins source-manifest.txt for qdistro-bootstrap.sh.
 #

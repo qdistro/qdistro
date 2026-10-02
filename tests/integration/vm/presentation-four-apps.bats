@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Host-only: four first-party chrome adapters follow one snapshot in
 # separate offscreen processes. Boot workers keep two windows and a
 # Preferences/Settings dialog open. No VM, no root, no /var/lib/qdistro

@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Installer idempotency + partial-install behaviour tests for
 # scripts/install/qdistro-bootstrap.sh (under-tested-areas.md §7, explicitly
 # requested in the hardening task).

@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # qci edit-guard — CI-integrity protected-path guard.
 #
 # An agent tasked with fixing PRODUCT code must not silently edit the tests

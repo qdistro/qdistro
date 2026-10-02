@@ -64,7 +64,7 @@ noct_restart() {
 # Count `mapped on cursor_layer` remaps whose nonzero_alpha token is not 0.
 # Reads a journal excerpt on stdin. nonzero_alpha=10 counts; nonzero_alpha=0,
 # a negative value, and a line with no nonzero_alpha token do not. This is the
-# predicate assert 1.1/2.1/3.1 in 04-cursor-tracking.md checks.
+# predicate assert 1.1/2.1/3.1 in agent-cursor-tracking-smoke.sh checks.
 noct_count_cursor_layer_nonzero_alpha() {
     awk '
         /mapped on cursor_layer/ {
