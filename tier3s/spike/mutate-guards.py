@@ -6,7 +6,7 @@ script, run the tests that cover that guard, require every named test to be
 reported FAILED, then restore the original bytes and re-check their sha256.
 A baseline run with no mutation must pass first. Run from the repo root:
 
-    python3 tier3s/spike/mutate-guards.py
+    python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
 
 Exit 0 only if the baseline passes, every mutation is caught by every named
 test, and every file is byte-identical to its original at the end.
@@ -129,6 +129,16 @@ def pytest(nodes):
 
 
 def main():
+    only = None
+    if len(sys.argv) == 3 and sys.argv[1] == "--only":
+        only = set(sys.argv[2].split(","))
+    elif len(sys.argv) != 1:
+        print(__doc__)
+        return 2
+    muts = [m for m in MUTATIONS if only is None or m[0].split()[0] in only]
+    if only is not None and len(muts) != len(only):
+        print(f"unknown mutation id in {sorted(only)}")
+        return 2
     files = {f: REPO / f for f in (PROBE, PROV, WRAP)}
     orig = {f: p.read_bytes() for f, p in files.items()}
     orig_sha = {f: sha(p) for f, p in files.items()}
@@ -141,7 +151,7 @@ def main():
         return 1
     bad = 0
     try:
-        for mid, f, old, new, tests in MUTATIONS:
+        for mid, f, old, new, tests in muts:
             src = orig[f].decode()
             n = src.count(old)
             if n != 1:
@@ -172,7 +182,7 @@ def main():
     rc, failed, skipped, summary = pytest([TP, TV])
     print(f"AFTER RESTORE: rc={rc} {summary}")
     bad += 0 if rc == 0 else 1
-    print(f"RESULT {'PASS' if bad == 0 else 'FAIL'}: {len(MUTATIONS)} mutations, {bad} problem(s)")
+    print(f"RESULT {'PASS' if bad == 0 else 'FAIL'}: {len(muts)} mutations, {bad} problem(s)")
     return 0 if bad == 0 else 1
 
 

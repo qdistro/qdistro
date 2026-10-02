@@ -60,6 +60,8 @@ def write_pin(tmp, b, tar, **over):
 
 
 def args_env(tmp, pin, offline=True, **extra_env):
+    if os.geteuid() == 0:
+        pytest.skip("QDISTRO_RUNSC_PREFIX is refused for root by design; run as a normal user")
     root = tmp / "root"
     env = dict(os.environ, QDISTRO_RUNSC_PREFIX=str(root), TMPDIR=str(tmp), **extra_env)
     args = ["bash", str(SCRIPT), "--pin", str(pin), "--cache-dir", str(tmp / "cache")]
@@ -235,7 +237,8 @@ def test_pin_override_refused_for_root(tmp_path):
 def test_prefix_hook_refused_for_root(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith("QDISTRO_RUNSC_")}
     env["QDISTRO_RUNSC_PREFIX"] = str(tmp_path / "root")
-    r = subprocess.run(root_capable_cmd(["bash", str(SCRIPT), "--offline"]),
+    r = subprocess.run(root_capable_cmd(["bash", str(SCRIPT), "--offline",
+                                         "--cache-dir", str(tmp_path / "nocache")]),
                        env=env, capture_output=True, text=True)
     assert r.returncode == 1
     assert r.stderr.strip() == ("provision-runsc: FAIL: QDISTRO_RUNSC_PREFIX is a unit-test hook "
