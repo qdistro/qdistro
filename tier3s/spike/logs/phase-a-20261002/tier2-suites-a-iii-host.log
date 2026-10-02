@@ -1,0 +1,22 @@
+### tier-2 unit + static suites at 3d924d7269f4daccd03f014dd92643e4b943f002 2026-10-02T10:45:10Z
+### git diff --stat claude/tier3s..HEAD -- tier2/ (DONE bar 7: must be empty):
+### files under tier2/ changed: 0
+### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
+### python3 -m pytest tests/unit/test_tier2_spawn.py tests/unit/test_tier2_snapshot_repos.py tests/unit/test_podapp_launch.py tests/unit/test_podapps_scan.py tests/unit/test_silo_launch.py tests/unit/test_spawn_common.py
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+130 passed, 1 warning in 3.84s
+pytest rc=0
+### static: shellcheck -S warning tier2/*.sh (tier2/ byte-identical to claude/tier3s)
+
+In tier2/spawn-tier2.sh line 800:
+. "$SPAWN_COMMON"
+  ^-------------^ SC1090 (warning): ShellCheck can't follow non-constant source. Use a directive to specify location.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1090 -- ShellCheck can't follow non-const...
+shellcheck rc=1
+### static: the same shellcheck on claude/tier3s's tier2/ (baseline)
+baseline shellcheck rc=1
+### tier3s + session-manager + broker host suites (context, not item 7)
+1313 passed, 1 skipped, 1 warning in 29.25s

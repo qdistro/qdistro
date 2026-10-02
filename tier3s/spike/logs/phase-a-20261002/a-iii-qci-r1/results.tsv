@@ -1,0 +1,5 @@
+gate	subject	status	exit_code	exit_class	kind	log	notes	category
+bats	phase7-tier3s-denied.bats	pass	0	pass	bats	bats/phase7-tier3s-denied.bats.log	VM=qci-bats-phase7-tier3s-denied-261002-123243-2737837-14442	integration
+bats	phase7-tier3s-headless.bats	pass	0	pass	bats	bats/phase7-tier3s-headless.bats.log	VM=qci-bats-phase7-tier3s-headless-261002-123243-2737836-9355	integration
+bats	phase7-tier3s-sigkill-cleanup.bats	fail	35	bats	bats	bats/phase7-tier3s-sigkill-cleanup.bats.log	VM=qci-bats-phase7-tier3s-sigkill-cleanup-261002-123243-2737852-3311 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-sigkill-cleanup-261002-123243-2737852-3311	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm

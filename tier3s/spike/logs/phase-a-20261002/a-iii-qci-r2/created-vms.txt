@@ -1,0 +1,3 @@
+qci-bats-phase7-tier3s-sigkill-cleanup-261002-124208-2842347-19645
+qci-bats-phase7-tier3s-headless-261002-124208-2842343-23754
+qci-bats-phase7-tier3s-denied-261002-124208-2842342-12460
