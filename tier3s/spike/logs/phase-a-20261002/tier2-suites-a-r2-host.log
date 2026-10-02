@@ -1,0 +1,21 @@
+### tier-2 unit + static suites at 92f7d07c0c541a34e56d583487a2e3d8a5ad2a61 2026-10-02T16:32:39Z
+### git diff --stat claude/tier3s..HEAD -- tier2/ (DONE bar 7: must be empty):
+### files under tier2/ changed: 0
+### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
+### UNIT: python3 -m pytest tests/unit/test_tier2_spawn.py tests/unit/test_tier2_snapshot_repos.py tests/unit/test_podapp_launch.py tests/unit/test_podapps_scan.py tests/unit/test_silo_launch.py tests/unit/test_spawn_common.py
+130 passed, 1 warning in 3.64s
+pytest rc=0
+### STATIC 1: bash -n on every tier2/*.sh
+bash -n rc=0
+### STATIC 2: shellcheck -S warning -e SC1090 tier2/*.sh
+#   documented baseline waiver: SC1090 at tier2/spawn-tier2.sh:800 (pre-existing on claude/tier3s; tier2/ frozen in Phase A)
+shellcheck (waiver) rc=0
+### STATIC 3: the waived finding is the only one, identical to the claude/tier3s baseline
+    HEAD: tier2/spawn-tier2.sh:800:3: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]
+identical to baseline, single SC1090: yes
+### product scripts: shellcheck -S warning tier3s/qdistro-tier3s-cleanup tier3s/spawn-tier3s.sh
+shellcheck rc=0
+### tier3s + session-manager + broker host suites
+### python3 -m pytest tests/unit/test_tier3s_*.py tests/unit/test_session_manager*.py tests/unit/test_broker*.py
+1392 passed, 1 skipped, 1 warning in 61.36s (0:01:01)
+### RESULT: PASS
