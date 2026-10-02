@@ -141,6 +141,7 @@ def test_mainwindow_presentation_update_restyles_replay_overlay(
     win.badges = None
     win.instant_replay = _Replay()
     win.timestamps = None
+    win.tmux_share_plugin = None
     MainWindow.apply_presentation_update(win)
 
     sheet = overlay.styleSheet()
