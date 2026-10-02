@@ -186,7 +186,13 @@ up_silo() {
         unit_log "$unit" "$cur" | tail -20 >&2; echo ""; return 1
     fi
     tok=$(token_of_unit "$unit")
-    [ -n "$tok" ] && snapshot_launch "$tok"
+    [ -n "$tok" ] || { echo ""; return 1; }
+    snapshot_launch "$tok"
+    # the smoke installs its SIGTERM handler only when it reaches --hold: act
+    # on the launch only after it says so (an earlier SIGTERM kills sh outright)
+    if ! wait_for 60 bash -c "journalctl _SYSTEMD_UNIT=qdistro-tier3s-$tok.scope --no-pager -o cat | grep -q '^SMOKE holding'"; then
+        echo "up_silo: $s never reached 'SMOKE holding'" >&2; echo ""; return 1
+    fi
     echo "$tok"
 }
 
