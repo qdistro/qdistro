@@ -153,6 +153,18 @@ finish() {
 }
 trap finish EXIT
 trap 'interrupted=1; exit 2' TERM INT
+# cap N: N seconds, or less when the budget has less left.
+cap() { local l; l=$(budget_left); [ "$l" -gt 1 ] || l=1; [ "$l" -lt "$1" ] && echo "$l" || echo "$1"; }
+# A setup step failed: incomplete (2) when the budget cut it, harness (1) otherwise.
+setup_failed() {
+    if [ "$(budget_left)" -le 0 ]; then log "setup cut by the time budget"; interrupted=1; exit 2; fi
+    exit 1
+}
+if [ "$(budget_left)" -le 0 ]; then
+    log "no time budget left; nothing started"
+    interrupted=1
+    exit 2
+fi
 
 qemu-img create -q -f qcow2 -b "$VM_IMAGE" -F qcow2 "$W/disk.qcow2"
 ssh-keygen -q -t ed25519 -N '' -C suites -f "$W/key"
@@ -214,6 +226,7 @@ SECONDS=0
 until vmssh true 2>/dev/null; do
     kill -0 "$qemu_pid" 2>/dev/null || { tail -40 "$VM_DIR/serial-suites.log"; exit 1; }
     [ "$SECONDS" -lt 600 ] || { tail -40 "$VM_DIR/serial-suites.log"; exit 1; }
+    [ "$(budget_left)" -gt 0 ] || setup_failed
     sleep 5
 done
 log "guest up after ${SECONDS}s"
@@ -223,10 +236,10 @@ vmssh 'sudo -n sh -c "set -e; install -d -m 0700 /root/.ssh; \
     install -m 0600 /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys"'
 rootssh true
 log "installing ${#TEST_PKGS[@]} test packages..."
-SSH_CAP=1800 rootssh "zypper -n --quiet install --no-recommends ${TEST_PKGS[*]}" > "$OUT/test-packages.log" 2>&1 \
-    || { tail -30 "$OUT/test-packages.log"; exit 1; }
-SSH_CAP=600 rootssh 'set -e; rm -rf /home/admin/qdistro-test; cp -a /root/qdistro-src /home/admin/qdistro-test;
-    chown -R admin: /home/admin/qdistro-test'
+SSH_CAP=$(cap 1800) rootssh "zypper -n --quiet install --no-recommends ${TEST_PKGS[*]}" > "$OUT/test-packages.log" 2>&1 \
+    || { tail -30 "$OUT/test-packages.log"; setup_failed; }
+SSH_CAP=$(cap 600) rootssh 'set -e; rm -rf /home/admin/qdistro-test; cp -a /root/qdistro-src /home/admin/qdistro-test;
+    chown -R admin: /home/admin/qdistro-test' || setup_failed
 
 # ---- pytest, inside the guest ------------------------------------------------
 # The guest lists a suite's process tags in <suite>.tags up front and records
@@ -289,7 +302,7 @@ if [ "${#BATS_FILES[@]}" -gt 0 ]; then
     # to the hardened profile without it), the media, multimachine and
     # template installers, the approvals CLI, the probes in a 0755 /root
     # (section 4b) and the RDP certificate of the nested probes (4c).
-    SSH_CAP=900 rootssh 'set -e; Q=/root/qdistro-src; cd "$Q"
+    SSH_CAP=$(cap 900) rootssh 'set -e; Q=/root/qdistro-src; cd "$Q"
         printf "QDISTRO_PROFILE=dev\n" > /etc/qdistro/profile; chmod 0644 /etc/qdistro/profile
         for i in "install-media-for-vm.sh $Q/media" \
                  "install-multimachine-for-vm.sh $Q/multimachine" \
@@ -309,7 +322,7 @@ if [ "${#BATS_FILES[@]}" -gt 0 ]; then
         for f in "$d"/*.key; do [ "$f" = "$d/rdp.key" ] || mv "$f" "$d/rdp.key"; done
         chown admin:"$g" "$d"/rdp.crt "$d"/rdp.key
         chmod 0600 "$d/rdp.key"; chmod 0644 "$d/rdp.crt"' > "$OUT/qci-lane-setup.log" 2>&1 \
-        || { tail -30 "$OUT/qci-lane-setup.log"; exit 1; }
+        || { tail -30 "$OUT/qci-lane-setup.log"; setup_failed; }
 
     # admin logs in at the greeter as a tester would, with the image password.
     session_up() {
