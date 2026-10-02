@@ -1,6 +1,7 @@
 """Theme support for QTerminator (dark, light, and system detection)."""
 
 import os
+import re
 
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QWidget
@@ -227,6 +228,93 @@ def attach_presentation(app: QApplication, config):
 
 def current_controller():
     return _CONTROLLER
+
+
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+_FALLBACK_SURFACE = "#1e1e1e"
+_FALLBACK_ON_SURFACE = "#d4d4d4"
+_FALLBACK_SURFACE_VARIANT = "#2d2d2d"
+_FALLBACK_ON_SURFACE_VARIANT = "#808080"
+_FALLBACK_HOVER = "#3c3c3c"
+_FALLBACK_OUTLINE = "#555555"
+
+
+def _css_hex(value: object, fallback: str) -> str:
+    if isinstance(value, str) and _HEX.fullmatch(value.strip()):
+        return value.strip().lower()
+    if isinstance(fallback, str) and _HEX.fullmatch(fallback.strip()):
+        return fallback.strip().lower()
+    return "#000000"
+
+
+def _qcolor_hex(color: QColor, fallback: str) -> str:
+    if color.isValid():
+        return _css_hex(
+            f"#{color.red():02x}{color.green():02x}{color.blue():02x}",
+            fallback,
+        )
+    return _css_hex(fallback, "#000000")
+
+
+def shared_palette_colors():
+    """Snapshot colors when Follow desktop is using the shared palette."""
+    try:
+        ctrl = current_controller()
+        state = getattr(ctrl, "state", None) if ctrl is not None else None
+        snap = getattr(state, "snapshot", None) if state is not None else None
+        if getattr(state, "using_shared_palette", False) and snap is not None:
+            return snap.colors
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def pane_roles(widget: QWidget) -> dict[str, str]:
+    """Tab/splitter chrome from the shared snapshot, else the widget palette."""
+    colors = shared_palette_colors()
+    if colors is not None:
+        return {
+            "surface": _css_hex(colors.mSurface, _FALLBACK_SURFACE),
+            "on_surface": _css_hex(colors.mOnSurface, _FALLBACK_ON_SURFACE),
+            "surface_variant": _css_hex(
+                colors.mSurfaceVariant, _FALLBACK_SURFACE_VARIANT
+            ),
+            "on_surface_variant": _css_hex(
+                colors.mOnSurfaceVariant, _FALLBACK_ON_SURFACE_VARIANT
+            ),
+            "hover": _css_hex(colors.mHover, _FALLBACK_HOVER),
+            "on_hover": _css_hex(colors.mOnHover, _FALLBACK_ON_SURFACE),
+            "outline": _css_hex(colors.mOutline, _FALLBACK_OUTLINE),
+        }
+    pal = widget.palette()
+    return {
+        "surface": _qcolor_hex(
+            pal.color(QPalette.ColorRole.Window), _FALLBACK_SURFACE
+        ),
+        "on_surface": _qcolor_hex(
+            pal.color(QPalette.ColorRole.WindowText), _FALLBACK_ON_SURFACE
+        ),
+        "surface_variant": _qcolor_hex(
+            pal.color(QPalette.ColorRole.AlternateBase), _FALLBACK_SURFACE_VARIANT
+        ),
+        "on_surface_variant": _qcolor_hex(
+            pal.color(QPalette.ColorRole.PlaceholderText),
+            _FALLBACK_ON_SURFACE_VARIANT,
+        ),
+        "hover": _qcolor_hex(
+            pal.color(QPalette.ColorRole.Highlight), _FALLBACK_HOVER
+        ),
+        "on_hover": _qcolor_hex(
+            pal.color(QPalette.ColorRole.HighlightedText), _FALLBACK_ON_SURFACE
+        ),
+        "outline": _qcolor_hex(
+            pal.color(QPalette.ColorRole.Mid), _FALLBACK_OUTLINE
+        ),
+    }
+
+
+def using_shared_palette() -> bool:
+    return shared_palette_colors() is not None
 
 
 def refresh_windows(app: QApplication) -> None:
