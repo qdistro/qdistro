@@ -41,6 +41,9 @@ this tier automatically (O6: explicit launch, no fallback). Dev profile only
 
 ## Use (dev VM, as root)
 
+Run both scripts from a root-owned checkout: as root they refuse one that
+another uid could modify (script, pin, wrapper or any ancestor directory).
+
 ```sh
 # host: cache the tarball once (the guest may have no egress)
 #   ~/.cache/qdistro/runsc/20260928.0/gvisor.tar.zstd   (sha512 checked)

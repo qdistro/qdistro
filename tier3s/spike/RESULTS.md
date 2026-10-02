@@ -78,7 +78,10 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   scratch image is imported from a one-entry archive built from `/`'s
   metadata (`tar --no-recursion`): no temporary directory, no chmod, so a
   hostile `$TMPDIR` cannot redirect a root write; an import failure is
-  reported as such.
+  reported as such. Run as root, the probe and the provisioner refuse a
+  checkout another uid could modify (script, pin, wrapper and every ancestor
+  root-owned, not other-writable, group-writable only for gid 0), and pin
+  their own environment (system `PATH`, no `TAR_OPTIONS`, `curl -q`).
 - **Provisioning was not serialized.** Now one exclusive `flock` on
   `/run/qdistro-runsc/provision.lock` (root 0700) is taken before the live
   state is inspected and held through swap, verification, rollback and
@@ -99,10 +102,11 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   loop; plus version text with a nonzero exit, wrapper env scrubbing, failed
   rollback preservation, a two-process lock test and swap-during-window
   tests. `tier3s/spike/mutate-guards.py` breaks each guard in the real
-  scripts and shows its test failing (24 mutations; 3 of them also with
+  scripts and shows its test failing (26 mutations; 3 of them also with
   real euid 0 in the VM). The stage-parent and cache-trust rules for real
   root installs, and the probe's scratch-image import under a hostile
-  `$TMPDIR`, are shown in the VM (`logs/phase0-fix-20261002/17`–`19`).
+  `$TMPDIR` and the checkout refusal, are shown in the VM
+  (`logs/phase0-fix-20261002/17`–`20`).
 
 ## Phase S — the feasibility spike
 

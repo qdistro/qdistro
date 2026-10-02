@@ -47,6 +47,10 @@ U=http://10.0.2.2:$port
 } > "$out/00-stage.log"
 step 00-stage "set -e; cd /root/qdistro-src && curl -fsS $U/src.tar | tar -xf - && echo \"staged commit \$(curl -fsS $U/commit.txt)\"
 set +e; $L
+echo \"checkout dir as left by the VM spin: \$(stat -c '%n %a uid=%u gid=%g' /root/qdistro-src)\"
+echo 'root-run tier3s scripts refuse a checkout another uid owns (see step 20); the spin preserved the host uid, so:'
+chown root:root /root/qdistro-src; is checkout-dir-root-owned \"\$(stat -c %u:%g /root/qdistro-src)\" 0:0
+stat -c '%n %a %U:%G' /root /root/qdistro-src /root/qdistro-src/tier3s tier3s/provision-runsc.sh tier3s/probe.sh tier3s/RUNSC_RELEASE tier3s/tier3s-runsc
 sha256sum tier3s/RUNSC_RELEASE tier3s/probe.sh tier3s/provision-runsc.sh tier3s/tier3s-runsc tier3s/spike/phase0-fix-lib.sh tier3s/spike/mutate-guards.py tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py
 mkdir -p \$CACHE/$rel && curl -fsS $U/gvisor.tar.zstd -o \$CACHE/$rel/gvisor.tar.zstd
 is cache-tarball-sha512 \"\$(sha512sum < \$CACHE/$rel/gvisor.tar.zstd | cut -d' ' -f1)\" \"\$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)\"
@@ -267,6 +271,18 @@ is sentinel-unchanged \"\$(stat -c '%a %U %s' /etc/t3s-sentinel)\$(sha256sum < /
 if runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image exists localhost/tier3s-probe:empty; then ok scratch-image-imported; else bad scratch-image-imported; fi
 runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman image inspect --format '{{.Id}} layers={{len .RootFS.Layers}}' localhost/tier3s-probe:empty
 rm -rf /var/tmp/t3s-hostile /etc/t3s-sentinel; finish"
+
+step 20-untrusted-checkout "$L; rm -rf /home/admin/t3s-co; mkdir -p /home/admin/t3s-co; cp -r tier3s /home/admin/t3s-co/; chown -R admin:admin /home/admin/t3s-co
+stat -c '%n %a %U:%G' /home/admin/t3s-co/tier3s /home/admin/t3s-co/tier3s/provision-runsc.sh /home/admin/t3s-co/tier3s/probe.sh
+before=\$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc \$R | sha512sum)
+/home/admin/t3s-co/tier3s/provision-runsc.sh --offline --cache-dir \$CACHE > /var/tmp/t3s-o 2> /var/tmp/t3s-e; rc=\$?; cat /var/tmp/t3s-o /var/tmp/t3s-e
+expect_rc provision-refused 1 \$rc
+is provision-message \"\$(cat /var/tmp/t3s-e)\" 'provision-runsc: FAIL: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/provision-runsc.sh owned by uid 1000 (use a root-owned copy)'
+/home/admin/t3s-co/tier3s/probe.sh --user admin > /var/tmp/t3s-o 2>&1; rc=\$?; cat /var/tmp/t3s-o
+expect_rc probe-refused 2 \$rc
+is probe-message \"\$(cat /var/tmp/t3s-o)\" 'REFUSE checkout: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/probe.sh owned by uid 1000 (use a root-owned copy)'
+is install-unchanged \"\$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc \$R | sha512sum)\" \"\$before\"
+rm -rf /home/admin/t3s-co; probe_tail_pass trusted-checkout; finish"
 
 step 08-probe-pass-after-negatives "$L; provision idempotent-exit 0; has nothing-to-do \$VO 'already installed and matching pin $rel; nothing to do'
 probe_strace; expect_rc probe-exit 0 \$PRC; has result-pass \$PO 'RESULT PASS: tier 3s prerequisites present'
