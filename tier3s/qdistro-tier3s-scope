@@ -40,8 +40,11 @@ TOKEN="$2"; ADMIN_UID="$3"; shift 5
 if [ -z "$T" ]; then
     [ "$ADMIN_UID" = 1000 ] || die "qdistro's admin uid is 1000, got $ADMIN_UID"
 fi
-ADMIN_USER="$(getent passwd "$ADMIN_UID" | cut -d: -f1)"
-ADMIN_HOME="$(getent passwd "$ADMIN_UID" | cut -d: -f6)"
+# NSS is resolved once, under a bound (fable A r3 P3-2): a wedged lookup dies
+# the launch rather than wedging the scope's first process.
+ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")"
+ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
+ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
 [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_HOME" ] || die "no passwd entry for uid $ADMIN_UID"
 
 # (1) exactly our scope, and we are its only process

@@ -59,7 +59,10 @@ fi
 finish() {   # the container's processes end, --rm removes it, its scope goes away
     local c="$F/c/$1" p rel
     [ -d "$c" ] || return 0
-    rm -f "$c/exists" "$c/running"
+    rm -f "$c/running"
+    # rm_keep: the marker survives — an rm that exits 0 but keeps the
+    # container, which only the post-removal verdict can expose (A r3 P1)
+    [ -e "$F/rm_keep" ] || rm -f "$c/exists"
     for p in $(cat "$c/pids" 2>/dev/null); do rm -rf "$T/proc/$p"; done
     rel="$(cat "$c/scope" 2>/dev/null)"
     if [ -n "$rel" ] && [ ! -e "$F/scope_sticky" ]; then
@@ -81,6 +84,9 @@ container)
             [ ! -e "$F/query_fail" ] || { echo "Error: database is locked" >&2; exit 125; }
             if [ -e "$F/query_fail_after_stop" ] && grep -q '^podman stop' "$F/calls"; then
                 echo "Error: database is locked" >&2; exit 125; fi
+            # exists_stdout: junk on stdout the PMRC verdict then shares —
+            # a verdict must be alone on the call's output (A r3 P1/P3-4)
+            [ ! -e "$F/exists_stdout" ] || cat "$F/exists_stdout"
             [ -e "$F/c/$name/exists" ] && exit 0; exit 1 ;;
         inspect)
             # a concurrent teardown removes the container under our feet
@@ -99,7 +105,7 @@ stop)
         echo "Error: no container with name or ID $name found" >&2; exit 125; fi
     [ ! -e "$F/stop_fail" ] || { echo "Error: given PID did not die within timeout" >&2; exit 125; }
     finish "$name" ;;
-rm) finish "$name"; rm -rf "${F:?}/c/$name" ;;
+rm) [ -e "$F/rm_keep" ] || { finish "$name"; rm -rf "${F:?}/c/$name"; } ;;
 ps)
     [ ! -e "$F/ps_fail" ] || { echo "Error: cannot list" >&2; exit 125; }
     if [ -e "$F/ps_garbage" ]; then echo '{"not": "a list"'; exit 0; fi
@@ -170,8 +176,16 @@ case " $* " in
 *" --unit=qdistro-t3s-call-"*)
     # the cleanup's per-call scope (astra A r2 #2): logged on its own line,
     # its cgroup modelled as an (empty) dir the cleanup must SIGKILL
-    # (cgroup.kill) after the call; callscope_sticky keeps a process in it
+    # (cgroup.kill) after the call; callscope_sticky keeps a process in it.
+    # sdrun_fail_at=<n>: the n-th call-scope StartTransientUnit fails BEFORE
+    # the payload (runuser/podman) ever runs — the A r3 P1 provenance hole.
     unit=""; for a in "$@"; do case "$a" in --unit=*) unit="${a#--unit=}" ;; esac; done
+    n=$(cat "$F/sdrun_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$F/sdrun_n"
+    if [ -e "$F/sdrun_fail_at" ] && [ "$n" -ge "$(cat "$F/sdrun_fail_at")" ]; then
+        echo "callscope $unit FAILED (injected StartTransientUnit failure)" >> "$F/callscopes"
+        echo "Failed to start transient scope unit: injected failure" >&2
+        exit 1
+    fi
     echo "callscope $unit $*" >> "$F/callscopes"
     d="$T/sys/fs/cgroup/system.slice/$unit"; mkdir -p "$d"; : > "$d/cgroup.procs"
     [ ! -e "$F/callscope_sticky" ] || echo 999999 > "$d/cgroup.procs"
@@ -240,7 +254,18 @@ FAKE_RUNUSER = r'''#!/bin/bash
 F=@F@
 echo "runuser $*" >> "$F/calls"
 [ "$1" = -u ] && [ "$3" = -- ] || { echo "fake runuser: bad args $*" >&2; exit 99; }
+# runuser_fail: the privilege drop itself fails (the payload never runs) —
+# rc 1 the supervisor produces, not podman's "absent" (A r3 P1)
+[ ! -e "$F/runuser_fail" ] || { echo "runuser: injected setup failure" >&2; exit 1; }
 shift 3; exec "$@"
+'''
+
+FAKE_GETENT = r'''#!/bin/bash
+F=@F@
+# getent_hang: a wedged NSS lookup — must die at its bound, not hold the
+# token lock for the lock's whole allowance (fable A r3 P3-2)
+[ ! -e "$F/getent_hang" ] || sleep 600
+exec /usr/bin/getent "$@"
 '''
 
 FAKE_DBUS = r'''#!/bin/bash
@@ -341,6 +366,7 @@ class World:
                            ("systemctl", FAKE_SYSTEMCTL), ("runuser", FAKE_RUNUSER),
                            ("dbus-send", FAKE_DBUS), ("qdistro-resolve-binding", FAKE_RESOLVER),
                            ("chown", FAKE_CHOWN), ("systemd-notify", FAKE_NOTIFY),
+                           ("getent", FAKE_GETENT),
                            ("rm", FAKE_RM), ("mv", FAKE_MV)):
             write_exec(self.bin / name, fill(text))
         run = self.T / "run"
@@ -905,6 +931,122 @@ def test_cleanup_failed_podman_query_is_not_no_container(w):
     assert "torn down" not in r.stderr
     assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
     assert not any(c.startswith("systemctl stop") for c in w.calls())
+
+
+def test_cleanup_systemd_run_failure_is_not_an_absent_verdict(w):
+    """astra+fable A r3 P1: a refused StartTransientUnit exits the
+    timeout→systemd-run→runuser→podman chain with a bare 1 BEFORE podman
+    runs. Without an in-call PMRC verdict there is no "absent": the run
+    fails, the record and the launch survive, and no podman call ever ran."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    (w.F / "sdrun_fail_at").write_text("1")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4, r.stderr
+    assert "podman query failed" in r.stderr and "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls())
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+
+
+def test_cleanup_runuser_failure_is_not_an_absent_verdict(w):
+    """A r3 P1: the privilege drop itself failing (the scope came up, podman
+    never ran) is likewise a failed query — never "absent"."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("runuser_fail")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4, r.stderr
+    assert "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls())
+
+
+def test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query(w):
+    """The PMRC line counts only when it IS the whole output: junk on the
+    call's stdout (a leaking layer above podman) must never smuggle an
+    "absent" past the verdict check."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    (w.F / "exists_stdout").write_text("garbage from an earlier layer\n")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "torn down" not in r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+
+
+def test_cleanup_failed_vanish_recheck_preserves(w):
+    """The re-check after a failed inspect gets the same provenance: a
+    supervisor failure there is a failed query, never 'vanished'."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("inspect_fail")
+    # calls in the scope chain: exists, inspect — the verdict re-check is third
+    (w.F / "sdrun_fail_at").write_text("3")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "podman inspect of qdistro-tier3s-smoke failed" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and "torn down" not in r.stderr
+    assert not any(c.startswith(("podman stop", "podman rm")) for c in w.calls())
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+
+
+def test_cleanup_post_rm_check_with_a_failed_chain_preserves(w):
+    """Post-removal: a failed supervisor chain is "still present or query
+    failed" — never the absent verdict that finishes a teardown."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    # exists, inspect, stop, rm run; the post-rm exists check's chain fails
+    (w.F / "sdrun_fail_at").write_text("5")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 5 and "still present or query failed" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and "torn down" not in r.stderr
+    assert not any(c.startswith("systemctl stop") for c in w.calls())
+
+
+def test_cleanup_rm_that_quietly_keeps_the_container_is_not_torn_down(w):
+    """podman rm exits 0 but the container survives: the post-rm verdict
+    PMRC=0 must block the teardown just like a failed query."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("rm_keep")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 5 and "still present or query failed" in r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and "torn down" not in r.stderr
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+
+
+def test_reap_stale_labelled_recheck_with_a_failed_chain_preserves(w):
+    """--reap-stale's labelled reaper: its post-rm existence check is a PMRC
+    verdict too — a failed supervisor chain must not close the reaper leg."""
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    w.set_unit("qdistro-tier3s-silo@b.service", "inactive")
+    shutil.rmtree(w.ctl / TOKEN2)                    # the manager lost the record
+    # the record loop is empty; calls: podman ps (listing), rm, then the check
+    (w.F / "sdrun_fail_at").write_text("3")
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "still present or query failed" in r.stderr
+    # the rm itself ran (it may), but a bare chain rc must not read as the
+    # "absent" verdict: the leg is an error, not a quiet success
+
+
+def test_a_call_that_overflows_its_output_file_is_a_failed_query(w):
+    """fable A r3 P3-4: a call writing more than OUT_MAX to its out file is
+    a failed query — the cap message proves the bound, and the record stays."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    (w.F / "exists_stdout").write_text("x" * 200000)
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4 and "cap" in r.stderr and "failed query" in r.stderr, r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and "torn down" not in r.stderr
+    assert (w.F / "c/qdistro-tier3s-smoke/exists").exists()
+
+
+def test_an_nss_lookup_is_bounded_under_the_token_lock(w):
+    """fable A r3 P3-2: the admin NSS lookup holds the token lock, so it must
+    be bounded — a wedged getent is killed at its (deadline-capped) bound and
+    the query fails closed, never waited on for the lock's full allowance."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    w.set("getent_hang")
+    t0 = time.time()
+    r = w.cleanup(TOKEN, TIER3S_TEST_TMO="3")
+    took = time.time() - t0
+    assert r.returncode == 4 and "no user for uid" in r.stderr
+    assert took < 30, f"an unbounded getent held the run for {took:.0f}s"
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls())
 
 
 def test_cleanup_failed_stop_preserves_record_and_scope(w):
@@ -1829,17 +1971,16 @@ def test_a_call_scope_that_does_not_empty_is_a_failed_query(w):
 
 
 def test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup(w):
-    dead = 4194300
-    while Path(f"/proc/{dead}").exists():
-        dead -= 1
+    dead = 4194300; live = 4194301
+    (w.T / f"proc/{live}").mkdir()        # the sweep checks $PROC, not /proc
     stale = w.ctl / f".call-{dead}-abcdef"
     stale.mkdir()
     (stale / "out").write_text("x")
-    live = w.ctl / f".call-{os.getpid()}-abcdef"
-    live.mkdir()
+    live_d = w.ctl / f".call-{live}-abcdef"
+    live_d.mkdir()
     r = w.cleanup("--reap-stale")
     assert r.returncode == 0, r.stderr
-    assert not stale.exists() and live.exists()
+    assert not stale.exists() and live_d.exists()
 
 
 # --- astra A r2 #3 / fable A r2 P3-3: deadlines and waits are by the clock

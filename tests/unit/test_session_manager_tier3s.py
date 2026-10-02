@@ -524,6 +524,17 @@ def _is(*words):
     return lambda argv: all(w in argv for w in words)
 
 
+def _exists(argv):
+    """The PMRC-wrapped `container exists` call: its argv carries the script
+    element, never a bare 'exists' word (tier3s A r3 P1)."""
+    return any("container exists" in str(a) for a in argv)
+
+
+def _verdict(podman_rc):
+    """A completed supervisor chain relaying podman's own verdict."""
+    return (0, f"PMRC={podman_rc}\n")
+
+
 @pytest.fixture
 def real_ops(monkeypatch, tmp_path):
     ctl = tmp_path / "ctl"
@@ -540,13 +551,16 @@ def _install(monkeypatch, answers):
 
 def test_running_false_only_when_unit_down_container_gone_and_no_record(real_ops, monkeypatch):
     rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")),
-                                 (_is("exists"), (1, ""))])
+                                 (_exists, _verdict(1))])
     assert real_ops.tier3s_silo_running("smoke") is False
-    pm = [c for c, _ in rec.calls if "podman" in c][0]
-    # podman as admin with the same fixed environment the spawn and cleanup use
+    pm = [c for c, _ in rec.calls if any("podman" in str(a) for a in c)][0]
+    # podman as admin with the same fixed environment the spawn and cleanup
+    # use, wrapped in the PMRC verdict protocol (A r3 P1): the chain's own rc
+    # is never the verdict.
     assert pm[:5] == ["runuser", "-u", "admin", "--", "env"]
     assert "-i" in pm and "XDG_RUNTIME_DIR=/run/user/1000" in pm
-    assert pm[-3:] == ["container", "exists", "qdistro-tier3s-smoke"]
+    assert pm[-4:-2] == ["-c", 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"']
+    assert pm[-2:] == ["sh", "qdistro-tier3s-smoke"]
 
 
 @pytest.mark.parametrize("active", ["active", "deactivating", "activating", "", "unknown"])
@@ -557,18 +571,28 @@ def test_running_true_while_the_unit_is_not_definitively_down(real_ops, monkeypa
 
 @pytest.mark.parametrize("rc", [0, 125, 2])
 def test_running_true_when_the_container_exists_or_the_query_fails(real_ops, monkeypatch, rc):
-    _install(monkeypatch, [(_is("is-active"), (3, "failed\n")), (_is("exists"), (rc, ""))])
+    _install(monkeypatch, [(_is("is-active"), (3, "failed\n")), (_exists, _verdict(rc))])
     assert real_ops.tier3s_silo_running("smoke") is True
+
+
+def test_running_true_when_the_supervisor_fails_before_podman(real_ops, monkeypatch):
+    """A r3 P1 (the session-manager leg): a bare rc 1 of the runuser chain is
+    NOT podman's "absent". No PMRC verdict — a failed chain, garbage, or a
+    verdict sharing its output — all count as still running."""
+    for ans in [(1, ""), (0, ""), (0, "garbage\n"), (0, "PMRC=1\nextra\n"),
+                (0, "PMRC=x\n"), (0, " PMRC=1\n")]:
+        _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_exists, ans)])
+        assert real_ops.tier3s_silo_running("smoke") is True, ans
 
 
 def test_running_true_when_the_query_times_out(real_ops, monkeypatch):
     _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")),
-                           (_is("exists"), subprocess.TimeoutExpired("podman", 30))])
+                           (_exists, subprocess.TimeoutExpired("podman", 30))])
     assert real_ops.tier3s_silo_running("smoke") is True
 
 
 def test_running_true_while_a_control_record_of_the_unit_survives(real_ops, monkeypatch):
-    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_is("exists"), (1, ""))])
+    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_exists, _verdict(1))])
     rec = sm.TIER3S_CTL_DIR / ("a" * 32)
     rec.mkdir()
     (rec / "state").write_text(f"schema=1\nunit=qdistro-tier3s-silo@other.service\n")
@@ -580,7 +604,7 @@ def test_running_true_while_a_control_record_of_the_unit_survives(real_ops, monk
 
 
 def test_running_true_when_the_control_dir_is_unreadable(real_ops, monkeypatch):
-    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_is("exists"), (1, ""))])
+    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_exists, _verdict(1))])
 
     def boom(self):
         raise PermissionError("denied")
@@ -601,13 +625,26 @@ def test_observe(real_ops, monkeypatch, active, exists, running, want):
     rec = _install(monkeypatch, [
         (_is("systemctl", "show"),
          (0, f"LoadState=loaded\nActiveState={active}\nJob=\n")),
-        (_is("exists"), (exists, "")),
+        (_exists, _verdict(exists)),
         (_is("inspect"), (0, running + "\n")),
     ])
     status, _reason = real_ops.observe_silo("smoke", sm.ADMIN_UID, "tier3s")
     assert status == want
     assert UNIT in rec.calls[0][0]
     assert not any("cgroup" in str(c) for c, _ in rec.calls)
+
+
+def test_observe_supervisor_failure_before_podman_is_unknown(real_ops, monkeypatch):
+    """A r3 P1: a bare rc 1 of the runuser chain (podman never ran) must not
+    pass for podman's "absent" — without a PMRC verdict the observation is
+    unknown, never 'container absent'."""
+    for ans in [(1, ""), (0, ""), (0, "PMRC=1\nextra\n")]:
+        _install(monkeypatch, [
+            (_is("systemctl", "show"),
+             (0, "LoadState=loaded\nActiveState=active\nJob=\n")),
+            (_exists, ans)])
+        status, reason = real_ops.observe_silo("smoke", sm.ADMIN_UID, "tier3s")
+        assert status == "unknown" and "unavailable" in reason, ans
 
 
 def test_live_units_parse(real_ops, monkeypatch):
@@ -668,7 +705,7 @@ def test_an_incomplete_record_blocks_no_unrelated_stop(real_ops, monkeypatch, tm
     wrapper.chmod(0o755)
     monkeypatch.setattr(sm, "TIER3S_CLEANUP", wrapper)
     real_run = subprocess.run
-    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_is("exists"), (1, "")),
+    _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")), (_exists, _verdict(1)),
                            (lambda a: a[0] == str(wrapper), None)])
     rec = sm.subprocess.run
 

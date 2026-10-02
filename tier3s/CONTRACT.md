@@ -312,10 +312,12 @@ launch down and fails.
     10 s, a scope stop 30 s, the decoder 30 s, each capped by what is left
     of a batch deadline. A call that times out, or that the deadline cut,
     is a **failed query**, never "absent" or "dead";
-  - its stdout and stderr go to files in the run's work dir, never to a
-    pipe, so a leftover process holding them blocks nothing (the cleanup
-    reads the files once the call is over, and the manager's pipe from the
-    cleanup is never handed to a call);
+  - its stdout and stderr go to files in the run's work dir, each
+    hard-capped at 64 KiB (`ulimit -f` in the call's subshell); a call that
+    reaches the cap is a **failed query** (fable A r3 P3-4). Output never
+    goes to a pipe, so a leftover process holding it blocks nothing (the
+    cleanup reads the files once the call is over, and the manager's pipe
+    from the cleanup is never handed to a call);
   - it runs in `timeout(1)`'s own process group, and that **whole group is
     SIGKILLed as soon as the call returns or its bound passes**, whether or
     not the call itself exited: a descendant that ignores SIGTERM, or
@@ -327,15 +329,29 @@ launch down and fails.
     process-group kill misses; the scope's cgroup holds them all. After the
     call the cleanup writes `cgroup.kill` and the cgroup must then be empty
     or gone (else the call failed). If the cleanup itself dies first,
-    systemd stops the scope at `RuntimeMaxSec` (the call's bound + 6 s) and
-    SIGKILLs it `TimeoutStopSec` (5 s) later;
+    systemd stops the scope at `RuntimeMaxSec` — the call's bound + 6 s
+    measured **from the scope's activation**, which is when
+    `RuntimeMaxSec` starts counting, not from the call's entry — and
+    SIGKILLs it `TimeoutStopSec` (5 s) later (fable A r3 P3-1);
   - a TERM/INT/HUP to the cleanup kills the call in flight (group and
     scope) and exits 143 with every record preserved;
+  - a `podman container exists` verdict counts only through an in-call
+    `PMRC=<rc>` line the dropped-privilege command itself prints after
+    podman ran (astra+fable A r3 P1): the
+    `timeout`→`systemd-run`→`runuser` chain's own status can be a bare 1
+    without podman ever running, so it is never read as "absent". The
+    verdict must be the call's whole output; the same discipline covers
+    the initial check, the vanished re-queries and both post-removal
+    checks. The admin's NSS lookup (`getent`, run under a deadline-capped
+    `timeout`, resolved once per run) is the one call outside the
+    supervisor; it is still bounded, so a wedged NSS cannot hold the
+    token lock (fable A r3 P3-2);
   - lock fds are closed for every call; `systemctl` runs with
     `--no-ask-password`.
   The guarantee, exactly: every process of an admin call is SIGKILLed by
   the call's bound + 5 s while the cleanup runs, and by its bound + 11 s
-  (systemd's `RuntimeMaxSec` + `TimeoutStopSec`) if the cleanup was
+  (systemd's `RuntimeMaxSec` + `TimeoutStopSec`, counted from the call
+  scope's activation) if the cleanup was
   SIGKILLed; only a process that
   root (or systemd on root's behalf) moves out of the call's cgroup escapes,
   and admin cannot move a process out of a root-owned cgroup. Root's
@@ -348,7 +364,10 @@ launch down and fails.
   token, no label listing and no orphan per-launch dir is started, and
   inside it every call, lock wait and wait loop is capped by the time left.
   Waits are by the clock, not by a query count (the 20 s wait for systemd's
-  BindsTo stop of an orphan scope, the scope-emptying waits). So a batch
+  BindsTo stop of an orphan scope, the scope-emptying waits). The clock is
+  `EPOCHREALTIME` — realtime, not monotonic: a clock step shifts when a
+  wait ends but never extends one past its deadline plus the slack already
+  named. So a batch
   ends at its deadline plus at most the kill grace of the call in flight
   (`timeout -k 5`, then up to 5 s for its scope to empty) and local file
   work. What it did not reach, or reached too late, is preserved, and the
@@ -552,8 +571,12 @@ oracle is "no `podman run` and no activation record":
     (`.new-<token>` renamed into place) and create the per-launch dir.
 11. `podman image exists` as admin.
 12. `systemd-run --scope …` (D-A3b) in the background. Poll `podman inspect`
-    until running, for 60 s **by the clock** (each inspect bounded to 5 s and
-    its answer awaited 7 s at most; fable A r2 P3-3), verify that conmon and
+    until running, within a 60 s **polling budget** by the clock (each
+    inspect bounded to 5 s and its answer awaited 7 s at most; fable A r2
+    P3-3). The budget is not a strict bound — one iteration may overrun it
+    by up to those per-iteration bounds — so the unit's `TimeoutStartSec`
+    (120 s) remains the outer bound on the start (astra A r3 P3-3). Then
+    verify that conmon and
     the Sentry are in the scope, then record them (`phase=running`, under the
     token's lock) and send `READY=1` (§1: from the spawn's own PID).
     A workload that exits 0 before it was seen running is torn down and

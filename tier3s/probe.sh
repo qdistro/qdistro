@@ -300,7 +300,9 @@ as_user() {
     if [ "$(id -un)" = "$USER_NAME" ]; then "$@"
     else
         local uid; uid="$(id -u "$USER_NAME")"
-        runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)" \
+        # NSS bounded (fable A r3 P3-2): a wedged getent must fail the probe,
+        # not hang the spawn that called it
+        runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$(timeout 5 getent passwd "$USER_NAME" | cut -d: -f6)" \
             USER="$USER_NAME" XDG_RUNTIME_DIR="/run/user/$uid" "$@"
     fi
 }

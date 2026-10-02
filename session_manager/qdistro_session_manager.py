@@ -162,6 +162,12 @@ _T_TIER3S_START = 135  # `systemctl start` of a tier3s launch unit. The unit is
                       # each): about 165 s and 255 s in the worst case
                       # (astra A r2 #5). Measured in the VM: seconds.
 _T_DNSMASQ = 15       # forks and daemonizes; the parent returns immediately
+# `podman container exists` verdict relayed through the supervisor chain
+# (astra+fable tier3s A r3 P1): the dropped-privilege command itself prints
+# podman's rc as a PMRC=<rc> line. The chain's own exit status is never the
+# verdict — runuser (or systemd-run upstream of it) can exit 1 without
+# podman ever running, which a bare-rc check would read as "absent".
+_PM_EXISTS_SH = 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"'
 ADMIN_USER_NAME = "admin"
 # qdistro is single-tenant: the admin role is the fixed 'admin' account, which
 # must be uid 1000. Resolve leniently at import (default 1000 when the account
@@ -2183,9 +2189,8 @@ class _SystemOps:
             # container running; a failed query is unknown, never stopped
             # (tier3s/CONTRACT.md §6).
             container = TIER3S_CONTAINER_FMT.format(name=name)
-            exists = self._tier3s_podman(
-                ["container", "exists", container], timeout=3)
-            if exists.returncode == 0:
+            exists = self._tier3s_container_exists(container, timeout=3)
+            if exists == 0:
                 running = self._tier3s_podman(
                     ["inspect", "--format", "{{.State.Running}}", container],
                     timeout=3)
@@ -2194,16 +2199,15 @@ class _SystemOps:
                     return ("launcher-running", "launcher and gVisor sandbox "
                             "observed running; application health unverified")
                 return "unknown", "container exists; launcher alone does not establish workload status"
-            if exists.returncode != 1:
+            if exists != 1:
                 return "unknown", "container observation unavailable"
             if active == "active":
                 return "unknown", "launcher active but container absent"
         elif kind == KIND_TIER2_TEMPLATE:
             container = TIER2_CONTAINER_FMT.format(name=name)
-            exists = subprocess.run(
-                ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
-                 "container", "exists", container], capture_output=True, timeout=3)
-            if exists.returncode == 0:
+            exists = self._podman_exists_verdict(
+                self._runuser_exists(container, timeout=3))
+            if exists == 0:
                 running = subprocess.run(
                     ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
                      "inspect", "--format", "{{.State.Running}}", container],
@@ -2211,7 +2215,7 @@ class _SystemOps:
                 if active == "active" and not running.returncode and running.stdout.strip() == "true":
                     return "launcher-running", "launcher and container observed running; application health unverified"
                 return "unknown", "container exists; launcher alone does not establish workload status"
-            if exists.returncode != 1:
+            if exists != 1:
                 return "unknown", "container observation unavailable"
             if active == "active":
                 return "unknown", "launcher active but container absent"
@@ -2257,23 +2261,23 @@ class _SystemOps:
             return True
         container = TIER2_CONTAINER_FMT.format(name=name)
         # `podman container exists` returns 0 when present, 1 when absent; run
-        # it as admin (the rootless owner). rc 0 = still running; rc 1 = gone;
-        # any OTHER rc means the check itself failed to run — fail closed and
+        # it as admin (the rootless owner) under the PMRC verdict protocol so
+        # a bare runuser rc is never read as podman's answer (A r3 P1).
+        # Verdict 0 = still running; verdict 1 = gone; any other verdict or a
+        # missing one means the check itself failed to run — fail closed and
         # treat that as still running, never silently report a clean stop.
         try:
-            proc = subprocess.run(
-                ["runuser", "-u", ADMIN_USER_NAME,
-                 "--", "podman", "container", "exists", container],
-                capture_output=True, timeout=_T_PODMAN)
+            verdict = self._podman_exists_verdict(
+                self._runuser_exists(container, timeout=_T_PODMAN))
         except subprocess.TimeoutExpired:
             # A wedged rootless podman is precisely the case this method has to
             # survive: "the check failed to run" is already fail-closed here
-            # (any rc other than 1), so a timeout gets the same answer.
+            # (any verdict other than 1), so a timeout gets the same answer.
             log.warning("podman container exists %s timed out after %ds; "
                         "reporting the silo as still running",
                         container, _T_PODMAN)
             return True
-        return proc.returncode != 1
+        return verdict != 1
 
     # ---- tier 3s (tier3s/CONTRACT.md §4, §6) -------------------------------
 
@@ -2300,11 +2304,11 @@ class _SystemOps:
         return value
 
     @staticmethod
-    def _tier3s_podman(args: list[str], *, timeout: int = _T_PODMAN):
-        """podman as admin with the same fixed environment spawn-tier3s.sh and
-        qdistro-tier3s-cleanup use, so every call sees admin's rootless store
-        (and, through the container's recorded runtime, the wrapper's runsc
-        state root). Raises subprocess.TimeoutExpired / OSError."""
+    def _tier3s_admin_cmd(cmd: list[str], *, timeout: int = _T_PODMAN):
+        """Run *cmd* as admin with the same fixed environment spawn-tier3s.sh
+        and qdistro-tier3s-cleanup use, so every call sees admin's rootless
+        store (and, through the container's recorded runtime, the wrapper's
+        runsc state root). Raises subprocess.TimeoutExpired / OSError."""
         try:
             home = pwd.getpwnam(ADMIN_USER_NAME).pw_dir
         except KeyError:
@@ -2313,8 +2317,45 @@ class _SystemOps:
             ["runuser", "-u", ADMIN_USER_NAME, "--", "env", "-i",
              "PATH=/usr/bin:/bin", f"HOME={home}", f"USER={ADMIN_USER_NAME}",
              f"LOGNAME={ADMIN_USER_NAME}",
-             f"XDG_RUNTIME_DIR=/run/user/{ADMIN_UID}", "podman", *args],
+             f"XDG_RUNTIME_DIR=/run/user/{ADMIN_UID}", *cmd],
             capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _tier3s_podman(args: list[str], *, timeout: int = _T_PODMAN):
+        """podman as admin; see _tier3s_admin_cmd for the environment.
+        Raises subprocess.TimeoutExpired / OSError."""
+        return _SystemOps._tier3s_admin_cmd(["podman", *args], timeout=timeout)
+
+    @staticmethod
+    def _podman_exists_verdict(proc) -> int | None:
+        """The podman `container exists` verdict carried by a PMRC-wrapped
+        call: podman's own rc (0 present, 1 absent, any other = the query
+        itself failed), or None when the supervisor chain did not deliver a
+        verdict — a non-zero chain rc, or a PMRC=<rc> line missing or not
+        alone on stdout (astra+fable tier3s A r3 P1)."""
+        if proc.returncode != 0:
+            return None
+        m = _re.fullmatch(r"PMRC=([0-9]+)\n?", proc.stdout or "")
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _runuser_exists(container: str, *, timeout: int = _T_PODMAN):
+        """`podman container exists` as admin under plain runuser, wrapped in
+        the PMRC verdict protocol (read the CompletedProcess with
+        _podman_exists_verdict). Raises subprocess.TimeoutExpired / OSError."""
+        return subprocess.run(
+            ["runuser", "-u", ADMIN_USER_NAME, "--", "sh", "-c",
+             _PM_EXISTS_SH, "sh", container],
+            capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _tier3s_container_exists(container: str, *, timeout: int = _T_PODMAN):
+        """podman's own `container exists` verdict on *container* (0 present,
+        1 absent, any other = the query itself failed), or None when the
+        runuser→env→sh chain delivered none. Raises TimeoutExpired / OSError."""
+        proc = _SystemOps._tier3s_admin_cmd(
+            ["sh", "-c", _PM_EXISTS_SH, "sh", container], timeout=timeout)
+        return _SystemOps._podman_exists_verdict(proc)
 
     def tier3s_unit_records(self, unit: str) -> list[str]:
         """Tokens of the control records whose launch unit is *unit*. Raises
@@ -2359,12 +2400,12 @@ class _SystemOps:
             return True
         container = TIER3S_CONTAINER_FMT.format(name=name)
         try:
-            proc = self._tier3s_podman(["container", "exists", container])
+            verdict = self._tier3s_container_exists(container)
         except subprocess.TimeoutExpired:
             log.warning("podman container exists %s timed out; reporting "
                         "the tier3s silo as still running", container)
             return True
-        if proc.returncode != 1:
+        if verdict != 1:
             return True
         try:
             left = self.tier3s_unit_records(unit)
@@ -2776,10 +2817,7 @@ class _SystemOps:
         last_err: BaseException | None = None
         for attempt in range(2):
             try:
-                proc = subprocess.run(
-                    ["runuser", "-u", ADMIN_USER_NAME,
-                     "--", "podman", "container", "exists", name],
-                    capture_output=True, timeout=10)
+                proc = self._runuser_exists(name, timeout=10)
             except subprocess.TimeoutExpired as e:
                 last_err = e
                 if attempt == 0:
@@ -2794,13 +2832,14 @@ class _SystemOps:
                 log.warning("disp remove: exists check for %r failed: %s",
                             name, e)
                 return False
-            # rc==1 definitively gone; rc==0 present; anything else uncertain.
-            if proc.returncode == 1:
+            # verdict 1 definitively gone; 0 present; anything else uncertain.
+            verdict = self._podman_exists_verdict(proc)
+            if verdict == 1:
                 return True
-            if proc.returncode == 0:
+            if verdict == 0:
                 return False
-            log.warning("disp remove: exists check for %r rc=%d (uncertain)",
-                        name, proc.returncode)
+            log.warning("disp remove: exists check for %r gave no "
+                        "authoritative verdict (uncertain)", name)
             return False
         if last_err is not None:
             log.warning("disp remove: exists check for %r failed: %s",

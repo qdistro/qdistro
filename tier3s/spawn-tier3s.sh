@@ -98,8 +98,12 @@ done
 ADMIN_UID="${TIER3S_ADMIN_UID:-1000}"
 [[ "$ADMIN_UID" =~ ^[1-9][0-9]*$ ]] || refuse "TIER3S_ADMIN_UID '$ADMIN_UID' is not a non-root uid"
 [ -n "$T" ] || [ "$ADMIN_UID" = 1000 ] || refuse "qdistro's admin uid is 1000, got $ADMIN_UID"
-ADMIN_USER="$(getent passwd "$ADMIN_UID" | cut -d: -f1)"
-[ -n "$ADMIN_USER" ] || refuse "no user for uid $ADMIN_UID"
+# The NSS lookup is resolved once, under a bound (fable A r3 P3-2): a wedged
+# NSS must refuse the launch, never hang it.
+ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")"
+ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
+ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
+[ -n "$ADMIN_USER" ] && [ -n "$ADMIN_HOME" ] || refuse "no user/home for uid $ADMIN_UID"
 SILO="${TIER3S_SILO:-}"
 [ -z "$SILO" ] || [[ "$SILO" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || refuse "invalid silo name '$SILO'"
 # Phase A ships silos only (CONTRACT.md §1): no tier3s pod-app unit exists and
@@ -114,12 +118,12 @@ own="$(sed -n 's/^0:://p' "$PROC/self/cgroup" 2>/dev/null | head -1)"
 [ "${own##*/}" = "$UNIT" ] || refuse "not running in $UNIT (own cgroup: ${own:-?})"
 
 as_admin() {   # every podman / broker / resolver call runs as the admin uid
-    runuser -u "$ADMIN_USER" -- env -i PATH="$ADMIN_PATH" HOME="$(getent passwd "$ADMIN_UID" | cut -d: -f6)" \
+    runuser -u "$ADMIN_USER" -- env -i PATH="$ADMIN_PATH" HOME="$ADMIN_HOME" \
         USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" "$@"
 }
 pm() { as_admin podman "$@"; }
 pm_bounded() { local t="$1"; shift; timeout -k 2 "$t" runuser -u "$ADMIN_USER" -- env -i PATH="$ADMIN_PATH" \
-    HOME="$(getent passwd "$ADMIN_UID" | cut -d: -f6)" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" \
+    HOME="$ADMIN_HOME" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" \
     XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" podman "$@"; }
 
 # --- 4. prerequisite screen (no fallback) ---------------------------------
@@ -350,10 +354,10 @@ in_scope() {   # in_scope <pid> <scope cgroup rel>
     local c; c="$(sed -n 's/^0:://p' "$PROC/$1/cgroup" 2>/dev/null | head -1)"
     [ -n "$c" ] && { [ "$c" = "$2" ] || [[ "$c" == "$2"/* ]]; }
 }
-# The start poll is bounded by the clock, not by a query count (fable A r2
-# P3-3): POLL_S seconds from here, each inspect bounded to 5 s and its answer
-# waited for at most 7 s, so the spawn's own verdict comes inside the unit's
-# TimeoutStartSec.
+# The start poll is a POLL_S-second polling BUDGET by the clock, not a strict
+# pre-TimeoutStartSec bound (fable A r2 P3-3, A r3 P3-3): one iteration can
+# overrun the budget by up to its own bounds (the 5 s inspect plus the 7 s
+# read), so the unit's TimeoutStartSec remains the outer bound on the start.
 recorded=0
 poll_end=$((SECONDS + POLL_S))
 while [ "$SECONDS" -lt "$poll_end" ]; do

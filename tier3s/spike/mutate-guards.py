@@ -13,7 +13,8 @@ R10-R36, S13-S18, A23-A26, L6-L8, U4 the astra+fable A r1 fixes (the sol r4
 P1 included). A3, A15, A20, R1, R2, R5-R7 and R9 were re-targeted at the r1
 code: the same guard, new text. R36-R48, A27-A29 and U5 are the astra+fable
 A r2 fixes; R1, R2, R6-R8, R11, R18, R20, R23, R24 and R26 were re-targeted at
-the r2 code (calls in this shell, results in variables).
+the r2 code (calls in this shell, results in variables). R49-R54 are the
+astra+fable A r3 fixes; S8, R24 and R38 were re-targeted at the r3 code.
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -323,8 +324,8 @@ MUTATIONS = [
      "        if not stop_done:\n            with self._lock:",
      [f"{TSM}::test_stop_fails_closed_when_the_launch_survives"]),
     ("S8 failed podman query read as stopped", SM,
-     "        if proc.returncode != 1:\n            return True\n        try:\n            left",
-     "        if proc.returncode == 0:\n            return True\n        try:\n            left",
+     "        if verdict != 1:\n            return True\n        try:\n            left",
+     "        if verdict == 0:\n            return True\n        try:\n            left",
      [f"{TSM}::test_running_true_when_the_container_exists_or_the_query_fails[125]"]),
     ("S9 surviving control record ignored", SM,
      "        if left:\n            log.warning", "        if False:\n            log.warning",
@@ -485,7 +486,8 @@ MUTATIONS = [
      '        wait_empty "$CGROOT$c" 5 \\\n', '        true \\\n',
      [f"{TS}::test_cleanup_a_dead_scope_with_a_populated_cgroup_preserves"]),
     ("R24 external calls are unbounded (astra 5)", CLEAN,
-     '    timeout -k "$KILL_AFTER" "$CAP" "$@" < "$CALL_IN"', '    "$@" < "$CALL_IN"',
+     '    ( ulimit -f $((OUT_MAX / 1024)); exec timeout -k "$KILL_AFTER" "$CAP" "$@" ) \\\n        < "$CALL_IN"',
+     '    "$@" < "$CALL_IN"',
      [f"{TS}::test_a_wedged_podman_call_is_bounded_and_blocks_no_other_launch"]),
     ("R25 one lock for every token (astra 5 / fable P3-1)", CLEAN,
      '    { exec 8<"$d"; } 2>/dev/null || return 1\n', '    { exec 8>"$LOCK"; } 2>/dev/null || return 1\n',
@@ -582,7 +584,7 @@ MUTATIONS = [
      '    [ -z "$CUR_PG" ] || kill -KILL -- "-$CUR_PG" 2>/dev/null\n', '    :\n',
      [f"{TS}::test_a_term_ignoring_helper_of_a_timed_out_call_is_killed"]),
     ("R38 a call's output is captured through a pipe a leftover can hold (astra r2 #2)", CLEAN,
-     '    timeout -k "$KILL_AFTER" "$CAP" "$@" < "$CALL_IN" > "$OUTF" 2> "$WORKDIR/err" 8<&- 9>&- &\n',
+     '    ( ulimit -f $((OUT_MAX / 1024)); exec timeout -k "$KILL_AFTER" "$CAP" "$@" ) \\\n        < "$CALL_IN" > "$OUTF" 2> "$WORKDIR/err" 8<&- 9>&- &\n',
      '    { timeout -k "$KILL_AFTER" "$CAP" "$@" < "$CALL_IN" 2> "$WORKDIR/err" 8<&- 9>&- | cat > "$OUTF"; } &\n',
      [f"{TS}::test_a_helper_holding_the_output_open_blocks_nothing"]),
     ("R39 a TERM to the cleanup leaves its call in flight running (astra r2 #2)", CLEAN,
@@ -635,6 +637,57 @@ MUTATIONS = [
     ("U5 any process in the launch unit's cgroup may send READY=1 (astra r2 #4)", UNITF,
      "NotifyAccess=main\n", "NotifyAccess=all\n",
      [f"{TSM}::test_unit_file_shape"]),
+    # --- astra + fable A r3
+    ("R49 the exists verdict is the chain's own rc again (A r3 P1)", CLEAN,
+     '''pm_exists() {
+    PM_RC=""
+    as_admin "$PODMAN_TMO" "$1" sh -c 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"' sh "$2" \\
+        || return 1
+    [[ "$OUT" =~ ^PMRC=[0-9]+$ ]] || return 1
+    PM_RC="${OUT#PMRC=}"
+    return 0
+}
+''',
+     '''pm_exists() {
+    as_admin "$PODMAN_TMO" "$1" podman container exists "$2"; PM_RC=$?
+    [ "$PM_RC" -le 1 ]
+}
+''',
+     [f"{TS}::test_cleanup_systemd_run_failure_is_not_an_absent_verdict",
+      f"{TS}::test_cleanup_runuser_failure_is_not_an_absent_verdict",
+      f"{TS}::test_cleanup_failed_vanish_recheck_preserves",
+      f"{TS}::test_cleanup_post_rm_check_with_a_failed_chain_preserves",
+      f"{TS}::test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query",
+      f"{TS}::test_reap_stale_labelled_recheck_with_a_failed_chain_preserves"]),
+    ("R50 the verdict line need not be the call's whole output (A r3 P1)", CLEAN,
+     '''    [[ "$OUT" =~ ^PMRC=[0-9]+$ ]] || return 1
+    PM_RC="${OUT#PMRC=}"''',
+     '''    PM_RC="$(printf '%s' "$OUT" | grep -o 'PMRC=[0-9]*' | head -1 | cut -d= -f2)"
+    [ -n "$PM_RC" ] || return 1''',
+     [f"{TS}::test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query"]),
+    ("R51 the NSS lookup under the token lock is unbounded again (fable r3 P3-2)", CLEAN,
+     'pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)"',
+     'pw="$(getent passwd "$uid" 2>/dev/null)"',
+     [f"{TS}::test_an_nss_lookup_is_bounded_under_the_token_lock"]),
+    ("R52 a call's output at the cap is not a failed query (fable r3 P3-4)", CLEAN,
+     '''    if [ "$(stat -c %s "$OUTF" 2>/dev/null || echo "$OUT_MAX")" -ge "$OUT_MAX" ] \\
+        || [ "$(stat -c %s "$WORKDIR/err" 2>/dev/null || echo "$OUT_MAX")" -ge "$OUT_MAX" ]; then
+        say "call output reached the ${OUT_MAX}-byte cap; failed query: $*"; rc=124
+    fi
+''', "",
+     [f"{TS}::test_a_call_that_overflows_its_output_file_is_a_failed_query"]),
+    ("R53 the manager's exists verdict is the chain's rc again (A r3 P1)", SM,
+     '''        if proc.returncode != 0:
+            return None
+        m = _re.fullmatch(r"PMRC=([0-9]+)\\n?", proc.stdout or "")
+        return int(m.group(1)) if m else None''',
+     "        return proc.returncode",
+     [f"{TSM}::test_running_true_when_the_supervisor_fails_before_podman",
+      f"{TSM}::test_observe_supervisor_failure_before_podman_is_unknown",
+      f"{TSM}::test_running_false_only_when_unit_down_container_gone_and_no_record"]),
+    ("R54 the .call-* sweep checks /proc instead of $PROC (fable r3 P3-5)", CLEAN,
+     '[ ! -e "$PROC/$p" ]', '[ ! -e "/proc/$p" ]',
+     [f"{TS}::test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup"]),
 ]
 
 

@@ -2906,8 +2906,9 @@ class TestDispContainerRemoveTimeout:
                 # cleanup top: unusable -> cleanup kills nothing, still tries
                 # the rm retry (which we also time out) then exists wins.
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
-                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            if any("container exists" in a for a in argv):
+                return types.SimpleNamespace(returncode=0, stdout="PMRC=1\n",
+                                             stderr="")
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -2924,8 +2925,9 @@ class TestDispContainerRemoveTimeout:
                                              stderr="")
             if "top" in argv:
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
-                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if any("container exists" in a for a in argv):
+                return types.SimpleNamespace(returncode=0, stdout="PMRC=0\n",
+                                             stderr="")
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -2944,7 +2946,7 @@ class TestDispContainerRemoveTimeout:
                                              stderr="")
             if "top" in argv:
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
@@ -2965,11 +2967,12 @@ class TestDispContainerRemoveTimeout:
                                              stderr="")
             if "top" in argv:
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 exists_n["n"] += 1
                 if exists_n["n"] == 1:
                     raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
-                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+                return types.SimpleNamespace(returncode=0, stdout="PMRC=1\n",
+                                             stderr="")
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
