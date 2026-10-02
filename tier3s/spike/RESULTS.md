@@ -80,8 +80,11 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   state is inspected and held through swap, verification, rollback and
   cleanup; a second run waits and then re-inspects. The cached tarball is
   copied into a private stage dir and verified and extracted from that copy;
-  a download is verified in the stage dir before an atomic publish into the
-  cache (no shared `.part`). A real install stages under `/var/tmp` (root-owned
+  a download is verified in the stage dir and published (unique temp name +
+  atomic rename) only into a cache dir whose chain is root-owned and not
+  group/other-writable, checked before the download and re-checked after
+  creating it; an existing tarball in an untrusted cache can still be read,
+  via the verified private copy (no shared `.part`). A real install stages under `/var/tmp` (root-owned
   and sticky, checked) whatever `$TMPDIR` says, and the existing parents of the
   install, stamp and lock paths must be root-owned and not
   group/other-writable.
@@ -92,8 +95,9 @@ test/documentation gaps (P3). Fixed and re-evidenced:
   loop; plus version text with a nonzero exit, wrapper env scrubbing, failed
   rollback preservation, a two-process lock test and swap-during-window
   tests. `tier3s/spike/mutate-guards.py` breaks each guard in the real
-  scripts and shows its test failing (21 mutations; 3 of them also with
-  real euid 0 in the VM).
+  scripts and shows its test failing (22 mutations; 3 of them also with
+  real euid 0 in the VM). The stage-parent and cache-trust rules for real
+  root installs are shown in the VM (`logs/phase0-fix-20261002/17`, `18`).
 
 ## Phase S — the feasibility spike
 
