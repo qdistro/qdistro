@@ -530,6 +530,16 @@ check_req "qdwin-session.target (admin user unit)" \
     /home/admin/.config/systemd/user/qdwin-session.target
 check_req "qdwin-compositor.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdwin-compositor.service
+# The vendored patched libweston must be staged AND the compositor unit must
+# load it: stock libweston-16 rejects null-parent xdg_popup with a fatal
+# protocol error, so qdshell dies on the first click that opens a popup, and
+# the layer-popup grab/position/dismiss paths run degraded (2026-10-02,
+# qdistro-0.1.0-20260929; todo/issues/qdistro/image.md).
+check_glob_req "vendored libweston core staged" \
+    "/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16.so.0*"
+check_line "compositor unit loads vendored libweston" \
+    /home/admin/.config/systemd/user/qdwin-compositor.service \
+    '^Environment=LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64'
 check_req "qdshell.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdshell.service
 check_req "qdlocker.service (admin user unit)" \

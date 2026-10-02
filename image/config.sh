@@ -259,6 +259,19 @@ for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     fi
 done
 
+# Vendored patched libweston MUST be staged before the session install:
+# install-qdwin-session-for-vm.sh emits the LD_LIBRARY_PATH/WESTON_MODULE_MAP
+# lines for it only when the tree exists at unit-writing time. Without it the
+# compositor loads stock libweston-16, where a null-parent xdg_popup
+# (Quickshell's popup mechanism for layer-anchored surfaces) is a fatal
+# protocol error — qdshell dies on the first click that opens a popup, and
+# the layer-popup paths run degraded (missing weston_desktop_xdg_popup_*
+# symbols). fresh-vm-bootstrap.sh stages it; the image did not
+# (todo/issues/qdistro/image.md). Builds the production profile on demand;
+# fatal on failure under set -e like every step here.
+echo "[qdistro-image] building + staging vendored libweston (production)..."
+bash "$QD/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"
+
 # install-qdwin-session-for-vm.sh honours the same offline contract
 # (linger marker written directly; user-unit wants-symlinks written
 # directly). QDWIN_SESSION_AUTOSTART=0: in the greeter image
