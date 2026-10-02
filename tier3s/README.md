@@ -163,7 +163,12 @@ replaced runsc state root makes a stop or a cleanup fail visibly with the
 record and scope preserved, and the restored root tears it down; restart
 reconciliation reaps launches and labelled containers the manager does not
 know; broker denial, a non-dev profile and a probe failure refuse with no
-`podman run`, no activation record and no fallback.
+`podman run`, no activation record and no fallback, and the refused
+`StartSilo` fails with the reason and leaves the silo Stopped (astra+fable
+r1, run `a-r1-qci/`). The reaper's refusal of a stale unit name on a live
+scope owned by another unit is host-tested (both the record and the label
+case) and was reproduced once on a dev VM for the record case
+(`a-r1-dev/dev-r4-repro.log`); it is not a DONE-bar driver.
 
 ### What is NOT claimed
 
