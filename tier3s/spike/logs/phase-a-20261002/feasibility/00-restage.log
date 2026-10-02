@@ -1,0 +1,7 @@
+### host 2026-10-02T09:03:40Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+set -e; rm -rf /root/qdistro-src; mkdir -p /root/qdistro-src; cd /root/qdistro-src
+curl -fsS http://10.0.2.2:42941/src.tar | tar -xf -; chown -R root:root /root/qdistro-src; echo "staged commit $(curl -fsS http://10.0.2.2:42941/commit.txt)"
+CMD
+[vm-exec] guest identity pinned (pid 26216 start 72997)
+staged commit ad4e575ba75d0c1b53190aa2d777b1df6fcff47c
+### exit=0
