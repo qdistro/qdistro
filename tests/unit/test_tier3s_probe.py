@@ -1,17 +1,122 @@
-"""tier3s/probe.sh profile gate and first-missing reporting (QDISTRO_PROBE_ROOT hook)."""
+"""tier3s/probe.sh: profile gate, first-missing reporting, and integrity-before-exec.
+
+Runs the REAL probe.sh against a synthetic installation under the
+QDISTRO_PROBE_ROOT test hook (with QDISTRO_PROBE_PIN naming a test pin made
+from that synthetic bundle). podman/newuidmap/newgidmap are PATH fakes; no
+podman, runsc or sandbox ever runs. The fake runsc is a harmless shell script
+that appends to a marker file and prints the pinned version string, so a test
+can prove whether the probe executed it.
+"""
+import hashlib
 import os
+import pwd
+import shutil
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "tier3s" / "probe.sh"
+WRAPPER = REPO / "tier3s" / "tier3s-runsc"
+VERSION = "runsc version release-29990101.0"
+ME = pwd.getpwuid(os.getuid()).pw_name
 
 
-def run(root, user=None):
+def sha(p):
+    return hashlib.sha512(Path(p).read_bytes()).hexdigest()
+
+
+def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
     env = dict(os.environ, QDISTRO_PROBE_ROOT=str(root))
-    args = ["bash", str(SCRIPT), "--user", user or os.environ.get("USER", "root")]
+    if pin is not None:
+        env["QDISTRO_PROBE_PIN"] = str(pin)
+    if path_prepend is not None:
+        env["PATH"] = f"{path_prepend}:{env['PATH']}"
+    env.update(extra_env or {})
+    args = ["bash", str(SCRIPT), "--user", user or ME]
     return subprocess.run(args, env=env, capture_output=True, text=True)
 
+
+def fake_runsc(marker, version=VERSION, rc=0, salt="", text="executed"):
+    return (f"#!/bin/sh\n# fake runsc {salt}\necho {text} >> '{marker}'\n"
+            f"echo '{version}'\nexit {rc}\n")
+
+
+class Install:
+    """A complete synthetic dev-profile installation under tmp/root."""
+
+    def __init__(self, tmp, version=VERSION, rc=0):
+        self.tmp = tmp
+        self.root = tmp / "root"
+        self.marker = tmp / "MARKER"
+        self.bin = tmp / "fakebin"
+        self.runsc_dir = self.root / "usr/libexec/qdistro/runsc"
+        self.wrapper = self.root / "usr/libexec/qdistro/tier3s-runsc"
+        for d in (self.root / "etc/qdistro", self.runsc_dir / "gvisor-bin", self.bin):
+            d.mkdir(parents=True, exist_ok=True)
+        (self.root / "etc/qdistro/profile").write_text("QDISTRO_PROFILE=dev\n")
+        for db in ("subuid", "subgid"):
+            (self.root / "etc" / db).write_text(f"{ME}:100000:65536\n")
+        (self.runsc_dir / "runsc").write_text(fake_runsc(self.marker, version, rc))
+        (self.runsc_dir / "gvisor-bin/gvisor_sentry").write_text("#!/bin/sh\n# sentry\n")
+        (self.runsc_dir / "gvisor-bin/runsc-fd-parking").write_text("#!/bin/sh\n# parking\n")
+        shutil.copyfile(WRAPPER, self.wrapper)
+        # explicit modes: the probe requires 0755 dirs/executables and refuses
+        # group/other-writable ancestors whatever the caller's umask is
+        for d in [self.root, *self.root.rglob("*")]:
+            if d.is_dir():
+                d.chmod(0o755)
+        for f in (self.runsc_dir / "runsc", self.wrapper,
+                  *(self.runsc_dir / "gvisor-bin").iterdir()):
+            f.chmod(0o755)
+        self.pin = tmp / "RUNSC_RELEASE"
+        self.pin.write_text(
+            "# test pin\nrelease=29990101.0\n"
+            f"version_string={VERSION}\n"
+            f"runsc_sha512={sha(self.runsc_dir / 'runsc')}\n"
+            f"sidecar_gvisor_sentry_sha512={sha(self.runsc_dir / 'gvisor-bin/gvisor_sentry')}\n"
+            f"sidecar_runsc-fd-parking_sha512={sha(self.runsc_dir / 'gvisor-bin/runsc-fd-parking')}\n")
+        shutil.copyfile(self.pin, self.root / "etc/qdistro/runsc-release")
+        (self.root / "etc/qdistro/runsc-release").chmod(0o644)
+        fakes = {
+            "podman": f"""#!/bin/sh
+case "$*" in
+  "version --format {{{{.Client.Version}}}}") echo 6.0.2 ;;
+  "image exists "*) exit 0 ;;
+  "--runtime {self.wrapper} create "*) echo fakeid ;;
+  "inspect --format {{{{.OCIRuntime}}}} "*) echo "{self.wrapper}" ;;
+  "inspect --format {{{{.ProcessLabel}}}}|{{{{.HostConfig.SecurityOpt}}}} "*) echo "|[label=disable]" ;;
+  "rm -f "*) ;;
+  *) echo "fake podman: unexpected: $*" >&2; exit 99 ;;
+esac
+""",
+            "newuidmap": "#!/bin/sh\nexit 0\n",
+            "newgidmap": "#!/bin/sh\nexit 0\n",
+        }
+        for name, body in fakes.items():
+            (self.bin / name).write_text(body)
+            (self.bin / name).chmod(0o755)
+
+    def probe(self, **kw):
+        return run(self.root, pin=self.pin, path_prepend=self.bin, **kw)
+
+    def executed(self):
+        return self.marker.exists()
+
+
+def lines(r, kind):
+    return [l for l in r.stdout.splitlines() if l.startswith(kind + " ")]
+
+
+def assert_not_executed(r, inst):
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "FAIL runsc_version: not executed:" in r.stdout, r.stdout
+    assert not inst.executed(), "probe executed an unverified runsc:\n" + r.stdout
+
+
+# --- profile gate / hooks --------------------------------------------------
 
 def test_refuses_without_profile(tmp_path):
     r = run(tmp_path)
@@ -25,6 +130,14 @@ def test_refuses_hardened_profile(tmp_path):
     assert r.returncode == 2 and "release" in r.stdout
 
 
+def test_pin_hook_refused_without_test_root(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k != "QDISTRO_PROBE_ROOT"}
+    env["QDISTRO_PROBE_PIN"] = str(tmp_path / "pin")
+    r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert r.returncode == 2
+    assert "QDISTRO_PROBE_PIN is a unit-test hook and needs QDISTRO_PROBE_ROOT" in r.stderr
+
+
 def test_names_first_missing_when_runsc_absent(tmp_path):
     (tmp_path / "etc/qdistro").mkdir(parents=True)
     (tmp_path / "etc/qdistro/profile").write_text("QDISTRO_PROFILE=dev\n")
@@ -32,13 +145,174 @@ def test_names_first_missing_when_runsc_absent(tmp_path):
     assert r.returncode == 1
     last = r.stdout.strip().splitlines()[-1]
     assert last.startswith("RESULT FAIL: first missing prerequisite:")
-    fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL ")]
+    fails = lines(r, "FAIL")
     assert fails and fails[0].split()[1].rstrip(":") in last
     assert "FAIL runsc: not provisioned" in r.stdout
 
 
-def test_test_root_never_exits_zero(tmp_path):
-    r = run(tmp_path)
-    assert r.returncode != 0
-    assert r.stdout.startswith("TEST MODE:")
+# --- the clean synthetic run (positive control) ----------------------------
 
+def test_test_root_never_exits_zero(tmp_path):
+    """An otherwise-clean probe under the test root is TEST-PASS / exit 3, never 0."""
+    inst = Install(tmp_path)
+    r = inst.probe()
+    assert r.stdout.startswith("TEST MODE:")
+    assert lines(r, "FAIL") == [], r.stdout
+    assert r.stdout.strip().splitlines()[-1].startswith("RESULT TEST-PASS:"), r.stdout
+    assert r.returncode == 3, r.stdout
+    # the verified runsc was executed exactly once, through the verified fd
+    assert inst.marker.read_text() == "executed\n"
+    assert "PASS runsc_version: " + VERSION in r.stdout
+
+
+def test_version_text_with_nonzero_exit_fails(tmp_path):
+    inst = Install(tmp_path, rc=1)       # prints the pinned version, exits 1
+    r = inst.probe()
+    assert r.returncode == 1
+    assert f"FAIL runsc_version: version '{VERSION}' rc=1" in r.stdout
+    assert inst.executed()               # verified, so it ran; the rc decides
+
+
+# --- integrity before execution (astra full P2) ----------------------------
+
+def test_replaced_runsc_with_correct_stamp_is_never_executed(tmp_path):
+    """The review's scenario: stamp intact, runsc replaced by a side-effecting
+    script that prints the expected version."""
+    inst = Install(tmp_path)
+    rs = inst.runsc_dir / "runsc"
+    rs.write_text(fake_runsc(inst.marker, salt="REPLACED BY ATTACKER"))
+    r = inst.probe()
+    assert "sha512:runsc" in r.stdout
+    assert_not_executed(r, inst)
+
+
+def test_byte_only_tamper_of_runsc_is_never_executed(tmp_path):
+    inst = Install(tmp_path)
+    rs = inst.runsc_dir / "runsc"
+    data = bytearray(rs.read_bytes())
+    i = data.index(b"fake runsc")
+    data[i] = ord("F")                   # same length, same path/mode/owner
+    rs.write_bytes(bytes(data))
+    r = inst.probe()
+    assert "file set differs" not in r.stdout
+    assert "FAIL bundle: sha512:runsc" in r.stdout, r.stdout
+    assert_not_executed(r, inst)
+
+
+def test_byte_only_tamper_of_sidecar_hits_the_hash_loop(tmp_path):
+    """Same paths/modes/owners, changed bytes: only the per-file hash loop sees it."""
+    inst = Install(tmp_path)
+    side = inst.runsc_dir / "gvisor-bin/gvisor_sentry"
+    before = os.stat(side)
+    data = bytearray(side.read_bytes())
+    data[-2] = ord("X")
+    side.write_bytes(bytes(data))
+    after = os.stat(side)
+    assert (before.st_size, before.st_mode, before.st_uid) == (after.st_size, after.st_mode, after.st_uid)
+    r = inst.probe()
+    assert "file set differs" not in r.stdout
+    assert "FAIL bundle: sha512:gvisor-bin/gvisor_sentry" in r.stdout, r.stdout
+    assert_not_executed(r, inst)
+
+
+def test_symlinked_runsc_dir_is_never_executed(tmp_path):
+    """A RUNSC_DIR symlink to an otherwise perfect bundle elsewhere."""
+    inst = Install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    inst.runsc_dir.rename(elsewhere)
+    inst.runsc_dir.symlink_to(elsewhere)
+    r = inst.probe()
+    assert f"FAIL install_path: untrusted: {inst.runsc_dir} is a symlink" in r.stdout, r.stdout
+    assert_not_executed(r, inst)
+
+
+def test_writable_ancestor_is_never_executed(tmp_path):
+    """Perfect bundle, but a parent directory others could rename things in."""
+    inst = Install(tmp_path)
+    parent = inst.root / "usr/libexec/qdistro"
+    parent.chmod(0o775)
+    r = inst.probe()
+    assert f"FAIL install_path: untrusted: {parent} is group/other-writable (mode 775)" in r.stdout
+    assert "PASS bundle:" in r.stdout          # the bundle itself is fine
+    assert_not_executed(r, inst)
+
+
+def test_group_writable_runsc_is_never_executed(tmp_path):
+    inst = Install(tmp_path)
+    (inst.runsc_dir / "runsc").chmod(0o775)
+    r = inst.probe()
+    assert "file set differs" in r.stdout and "f 775" in r.stdout
+    assert_not_executed(r, inst)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to chown (VM run)")
+def test_foreign_owned_runsc_is_never_executed(tmp_path):
+    inst = Install(tmp_path)
+    os.chown(inst.runsc_dir / "runsc", 65534, -1)       # nobody, bytes unchanged
+    r = inst.probe()
+    assert "file set differs" in r.stdout
+    assert_not_executed(r, inst)
+
+
+def test_unverified_wrapper_is_not_handed_to_podman(tmp_path):
+    inst = Install(tmp_path)
+    inst.wrapper.write_text("#!/bin/sh\nexec /bin/true\n")
+    log = tmp_path / "podman.log"
+    pod = inst.bin / "podman"
+    pod.write_text(pod.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\necho \"$*\" >> '{log}'\n", 1))
+    r = inst.probe()
+    assert r.returncode == 1
+    assert "FAIL wrapper:" in r.stdout
+    assert "FAIL podman_runtime: not checked: podman missing or wrapper not verified" in r.stdout
+    assert "--runtime" not in log.read_text()
+
+
+def test_test_hooks_refused_without_test_root(tmp_path):
+    for hook in ("QDISTRO_PROBE_PAUSE_AT", "QDISTRO_PROBE_PAUSE_DIR"):
+        env = {k: v for k, v in os.environ.items() if k != "QDISTRO_PROBE_ROOT"}
+        env[hook] = str(tmp_path)
+        r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
+        assert r.returncode == 2 and f"{hook} is a unit-test hook" in r.stderr
+
+
+def _swap_during(inst, point, tmp_path):
+    """Run the probe paused at <point>; while paused, atomically replace runsc
+    with a same-mode script that leaves a different marker."""
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    env = dict(os.environ, QDISTRO_PROBE_ROOT=str(inst.root), QDISTRO_PROBE_PIN=str(inst.pin),
+               QDISTRO_PROBE_PAUSE_AT=point, QDISTRO_PROBE_PAUSE_DIR=str(ctl),
+               PATH=f"{inst.bin}:{os.environ['PATH']}")
+    p = subprocess.Popen(["bash", str(SCRIPT), "--user", ME], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 60
+    while not (ctl / f"{point}.reached").exists():
+        assert p.poll() is None, "probe exited before reaching " + point + ":\n" + p.communicate()[0]
+        assert time.monotonic() < deadline, "probe never reached " + point
+        time.sleep(0.05)
+    evil = inst.runsc_dir / ".evil"
+    evil.write_text(fake_runsc(inst.marker, text="ATTACKER"))
+    evil.chmod(0o755)
+    os.replace(evil, inst.runsc_dir / "runsc")
+    (ctl / f"{point}.release").touch()
+    out, err = p.communicate(timeout=120)
+    return p.returncode, out, err
+
+
+def test_swap_between_validation_and_open_is_never_executed(tmp_path):
+    inst = Install(tmp_path)
+    rc, out, err = _swap_during(inst, "before-open", tmp_path)
+    assert rc == 1, out + err
+    assert "FAIL runsc_version: not executed: opened inode" in out, out
+    assert not inst.executed(), out
+
+
+def test_swap_between_verify_and_exec_runs_the_verified_inode(tmp_path):
+    """After the fd is verified, replacing the path does not change what runs."""
+    inst = Install(tmp_path)
+    rc, out, err = _swap_during(inst, "before-exec", tmp_path)
+    assert "PASS runsc_version: " + VERSION in out, out + err
+    assert inst.marker.read_text() == "executed\n", "the swapped-in path was executed"
+    # every check passed before the swap, so this point-in-time screen is a
+    # TEST-PASS; what matters is WHICH inode ran
+    assert rc == 3, out

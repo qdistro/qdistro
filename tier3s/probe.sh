@@ -24,15 +24,44 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PIN="$HERE/RUNSC_RELEASE"               # authoritative pin (the checked-in one)
-# Unit-test hook ONLY: alternate root for /etc + /usr/libexec. In this mode
-# every run is labelled TEST and a clean result exits 3, never 0, so a
-# redirected probe can never be read as a host PASS.
+# Unit-test hooks ONLY: an alternate root for /etc + /usr/libexec
+# (QDISTRO_PROBE_ROOT) and, with it, an alternate pin (QDISTRO_PROBE_PIN). In
+# this mode every run is labelled TEST and a clean result exits 3, never 0, so
+# a redirected probe can never be read as a host PASS.
 ROOT="${QDISTRO_PROBE_ROOT:-}"
-[ -z "$ROOT" ] || printf 'TEST MODE: QDISTRO_PROBE_ROOT=%s (not a host verdict)\n' "$ROOT"
+if [ -n "$ROOT" ]; then
+    case "$ROOT" in /*) ;; *) echo "probe: QDISTRO_PROBE_ROOT must be absolute: $ROOT" >&2; exit 2 ;; esac
+    while [ "$ROOT" != "/" ] && [ "${ROOT%/}" != "$ROOT" ]; do ROOT="${ROOT%/}"; done
+    [ "$ROOT" != "/" ] || { echo "probe: QDISTRO_PROBE_ROOT=/ is not a test root" >&2; exit 2; }
+    printf 'TEST MODE: QDISTRO_PROBE_ROOT=%s (not a host verdict)\n' "$ROOT"
+    [ -z "${QDISTRO_PROBE_PIN:-}" ] || PIN="$QDISTRO_PROBE_PIN"
+else
+    for h in QDISTRO_PROBE_PIN QDISTRO_PROBE_PAUSE_AT QDISTRO_PROBE_PAUSE_DIR; do
+        if [ -n "${!h:-}" ]; then
+            echo "probe: $h is a unit-test hook and needs QDISTRO_PROBE_ROOT" >&2
+            exit 2
+        fi
+    done
+fi
+# Unit-test hook (test root only): stop at a named point until
+# $QDISTRO_PROBE_PAUSE_DIR/<point>.release exists, announcing <point>.reached,
+# so a test can swap files inside the validate->open and verify->exec windows.
+test_pause() {
+    [ -n "$ROOT" ] && [ "${QDISTRO_PROBE_PAUSE_AT:-}" = "$1" ] || return 0
+    local d="${QDISTRO_PROBE_PAUSE_DIR:?QDISTRO_PROBE_PAUSE_DIR unset}"
+    : > "$d/$1.reached"
+    for _ in $(seq 1 600); do [ ! -e "$d/$1.release" ] || return 0; sleep 0.1; done
+    echo "probe: TEST pause at $1 not released" >&2; exit 2
+}
 RUNSC_DIR="$ROOT/usr/libexec/qdistro/runsc"
 WRAPPER="$ROOT/usr/libexec/qdistro/tier3s-runsc"
 STAMP="$ROOT/etc/qdistro/runsc-release"
 PROFILE_FILE="$ROOT/etc/qdistro/profile"
+SUBID_DIR="$ROOT/etc"
+# Expected owner of the installation and of its ancestors: root for a real
+# install; the caller for a test root (ancestors checked up to the test root).
+if [ -z "$ROOT" ]; then EXP_UID=0; EXP_OWN="root:root"; TRUST_STOP=/
+else EXP_UID="$(id -u)"; EXP_OWN="$(id -un):$(id -gn)"; TRUST_STOP="$ROOT"; fi
 
 FIRST_FAIL=""
 pass() { printf 'PASS %s: %s\n' "$1" "$2"; }
@@ -76,9 +105,9 @@ if ! id "$USER_NAME" >/dev/null 2>&1; then
     done
 else
     for db in subuid subgid; do
-        if grep -q "^$USER_NAME:[0-9]*:[1-9][0-9]*$" "/etc/$db" 2>/dev/null; then
-            pass "$db" "$(grep "^$USER_NAME:" "/etc/$db" | head -1)"
-        else fail "$db" "no range for $USER_NAME in /etc/$db"; fi
+        if grep -q "^$USER_NAME:[0-9]*:[1-9][0-9]*$" "$SUBID_DIR/$db" 2>/dev/null; then
+            pass "$db" "$(grep "^$USER_NAME:" "$SUBID_DIR/$db" | head -1)"
+        else fail "$db" "no range for $USER_NAME in $SUBID_DIR/$db"; fi
     done
     for t in newuidmap newgidmap; do
         p="$(command -v "$t" 2>/dev/null)"
@@ -88,6 +117,15 @@ else
 fi
 
 # --- runsc bundle: compared against the checked-in pin, not the stamp -----
+# Integrity first, execution last (astra full-review P2): nothing from the
+# installation is executed until the release stamp, the trusted ancestors, the
+# exact file set (type/mode/owner) and every per-file sha512 have passed. Then
+# runsc is opened ONCE, the open inode is re-verified (same dev:ino as the
+# validated path, regular file, owner/mode, sha512 read through that fd) and
+# `--version` executes that very inode via /proc/self/fd/N, so a rename or
+# path swap after validation cannot change what runs. The inode's content can
+# then only change through a write by its owner (root; mode 0755 checked on
+# the fd), and execve refuses a file that is open for writing (ETXTBSY).
 declare -A WANT=()
 pin_get() { sed -n "s/^$1=//p" "$PIN" | tail -1; }
 if [ ! -r "$PIN" ]; then
@@ -100,49 +138,97 @@ else
     done < <(grep '^sidecar_' "$PIN")
 fi
 sha() { sha512sum "$1" 2>/dev/null | cut -d' ' -f1; }
-if [ ! -r "$PIN" ]; then
+
+# (1) release stamp + presence (no execution)
+if [ "${#WANT[@]}" -lt 2 ]; then
     fail runsc "not checked: no pin"
 elif [ ! -e "$STAMP" ]; then
     fail runsc "not provisioned ($STAMP missing; run tier3s/provision-runsc.sh as root)"
 elif ! cmp -s "$PIN" "$STAMP"; then
     fail runsc "installed release stamp $STAMP differs from pin $PIN (re-run provision-runsc.sh)"
-elif [ ! -f "$RUNSC_DIR/runsc" ] || [ -L "$RUNSC_DIR/runsc" ] || [ ! -x "$RUNSC_DIR/runsc" ]; then
+elif [ ! -f "$RUNSC_DIR/runsc" ] || [ -L "$RUNSC_DIR/runsc" ]; then
     fail runsc "$RUNSC_DIR/runsc missing (run tier3s/provision-runsc.sh as root)"
 else
-    want="$(pin_get version_string)"
-    out="$(env -i PATH=/usr/bin:/bin "$RUNSC_DIR/runsc" --version 2>&1)"; rc=$?
-    got="$(printf '%s\n' "$out" | head -1)"
-    if [ "$rc" -eq 0 ] && [ -n "$want" ] && [ "$got" = "$want" ]; then pass runsc "$got (matches pin, rc=0)"
-    else fail runsc "version '$got' rc=$rc != pin '$want'"; fi
+    pass runsc "release stamp matches pin; $RUNSC_DIR/runsc present (not yet executed)"
+    STAMP_OK=1
 fi
-# Exact installed file set + per-file sha512 against the pin.
+
+# (2) trusted ancestors: RUNSC_DIR and every directory above it (to / for a
+# real install, to the test root otherwise) is a real directory, owned by the
+# expected owner, and not group/other-writable: no one else can rename or
+# replace anything on the path between validation and execution.
+untrusted_ancestor() {   # prints the first offending component, returns 1
+    local d="$1" st owner mode
+    while :; do
+        if [ -L "$d" ]; then echo "$d is a symlink"; return 1; fi
+        if [ ! -d "$d" ]; then echo "$d is not a directory"; return 1; fi
+        st="$(stat -c '%u %a' -- "$d")" || { echo "$d: stat failed"; return 1; }
+        owner="${st%% *}"; mode="${st#* }"
+        if [ "$owner" != "$EXP_UID" ]; then echo "$d owned by uid $owner, want $EXP_UID"; return 1; fi
+        if (( (8#$mode & 8#022) != 0 )); then echo "$d is group/other-writable (mode $mode)"; return 1; fi
+        [ "$d" != "$TRUST_STOP" ] || return 0
+        [ "$d" != / ] || { echo "walked past / without meeting $TRUST_STOP"; return 1; }
+        d="$(dirname -- "$d")"
+    done
+}
+if why="$(untrusted_ancestor "$RUNSC_DIR")"; then
+    pass install_path "$RUNSC_DIR and ancestors up to $TRUST_STOP: real dirs, uid $EXP_UID, not group/other-writable"
+    PATH_OK=1
+else
+    fail install_path "untrusted: $why"
+fi
+
+# (3) exact installed file set (type, mode, owner, path) + per-file sha512
 if [ "${#WANT[@]}" -lt 2 ]; then
     fail bundle "not checked: no pin"
 elif [ ! -d "$RUNSC_DIR" ] || [ -L "$RUNSC_DIR" ]; then
-    fail bundle "$RUNSC_DIR missing"
+    fail bundle "$RUNSC_DIR missing or a symlink"
 else
-    # type, mode, owner and path of every entry must match (root:root 0755);
-    # a test root (QDISTRO_PROBE_ROOT) is owned by the caller.
-    own="root:root"; [ -z "$ROOT" ] || own="$(id -un):$(id -gn)"
-    exp="$({ echo "d 755 $own ."; echo "d 755 $own gvisor-bin"
-             for f in "${!WANT[@]}"; do echo "f 755 $own $f"; done; } | LC_ALL=C sort)"
+    exp="$({ echo "d 755 $EXP_OWN ."; echo "d 755 $EXP_OWN gvisor-bin"
+             for f in "${!WANT[@]}"; do echo "f 755 $EXP_OWN $f"; done; } | LC_ALL=C sort)"
     have="$(find "$RUNSC_DIR" -printf '%y %m %u:%g %P\n' | sed 's/ $/ ./' | LC_ALL=C sort)"
     bad=""
     if [ "$have" != "$exp" ]; then
         bad="file set differs: missing=[$(LC_ALL=C comm -23 <(echo "$exp") <(echo "$have") | tr '\n' ',')] unexpected=[$(LC_ALL=C comm -13 <(echo "$exp") <(echo "$have") | tr '\n' ',')]"
     else
+        # identity of the runsc inode whose bytes are hashed below
+        RUNSC_ID="$(stat -c '%d:%i' -- "$RUNSC_DIR/runsc")"
         for f in "${!WANT[@]}"; do
-            [ "$(sha "$RUNSC_DIR/$f")" = "${WANT[$f]}" ] || bad="$bad sha512:$f"
+            [ "$(sha "$RUNSC_DIR/$f")" = "${WANT[$f]}" ] || bad="${bad:+$bad }sha512:$f"
         done
     fi
-    if [ -z "$bad" ]; then pass bundle "$RUNSC_DIR: ${#WANT[@]} files, exact set, sha512 match pin"
+    if [ -z "$bad" ]; then pass bundle "$RUNSC_DIR: ${#WANT[@]} files, exact set, sha512 match pin"; BUNDLE_OK=1
     else fail bundle "$bad"; fi
 fi
-wown="root:root"; [ -z "$ROOT" ] || wown="$(id -un):$(id -gn)"
-if [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPPER")" = "755 $wown" ] \
+
+# (4) only now: execute the verified inode
+if [ "${STAMP_OK:-0}" -ne 1 ] || [ "${PATH_OK:-0}" -ne 1 ] || [ "${BUNDLE_OK:-0}" -ne 1 ]; then
+    fail runsc_version "not executed: installation integrity checks failed (see above)"
+elif ! test_pause before-open || ! exec {RFD}<"$RUNSC_DIR/runsc"; then
+    fail runsc_version "not executed: cannot open $RUNSC_DIR/runsc"
+else
+    fdp="/proc/$$/fd/$RFD"
+    idnow="$(stat -L -c '%d:%i %F %a %u' -- "$fdp" 2>/dev/null)"
+    if [ "$idnow" != "$RUNSC_ID regular file 755 $EXP_UID" ]; then
+        fail runsc_version "not executed: opened inode ($idnow) is not the validated one ($RUNSC_ID regular file 755 $EXP_UID)"
+    elif [ "$(sha "$fdp")" != "${WANT[runsc]}" ]; then
+        fail runsc_version "not executed: sha512 of the opened inode differs from the pin"
+    else
+        want="$(pin_get version_string)"
+        test_pause before-exec
+        out="$(env -i PATH=/usr/bin:/bin "/proc/self/fd/$RFD" --version 2>&1)"; rc=$?
+        got="$(printf '%s\n' "$out" | head -1)"
+        if [ "$rc" -eq 0 ] && [ -n "$want" ] && [ "$got" = "$want" ]; then
+            pass runsc_version "$got (matches pin, rc=0; executed the verified inode $RUNSC_ID)"
+        else fail runsc_version "version '$got' rc=$rc != pin '$want'"; fi
+    fi
+    exec {RFD}<&-
+fi
+if [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPPER")" = "755 $EXP_OWN" ] \
    && cmp -s "$HERE/tier3s-runsc" "$WRAPPER"; then
     pass wrapper "$WRAPPER (identical to $HERE/tier3s-runsc)"
-else fail wrapper "$WRAPPER missing, not $wown 0755, or differs from $HERE/tier3s-runsc"; fi
+    WRAPPER_OK=1
+else fail wrapper "$WRAPPER missing, not $EXP_OWN 0755, or differs from $HERE/tier3s-runsc"; fi
 
 # --- podman as the launching user ------------------------------------------
 as_user() {
@@ -158,7 +244,9 @@ if [ -z "$pv" ]; then fail podman "podman not runnable as $USER_NAME"
 elif [ "${pv%%.*}" -ge 6 ] 2>/dev/null; then pass podman "$pv (>= 6)"
 else fail podman "$pv < 6"; fi
 
-if [ -n "$pv" ] && [ -x "$WRAPPER" ]; then
+# The wrapper is only handed to podman once it verified above (podman create
+# records it and does not execute it; nothing is started).
+if [ -n "$pv" ] && [ "${WRAPPER_OK:-0}" -eq 1 ]; then
     # An image-backed create, not `--rootfs /`: podman 6.0.2 silently DROPS
     # `--security-opt label=disable` on a --rootfs container (observed in the
     # dev VM, spike/logs/phase0-20261001/). The image is an empty scratch
@@ -186,8 +274,8 @@ if [ -n "$pv" ] && [ -x "$WRAPPER" ]; then
         fail label_disable "not checked: create failed"
     fi
 else
-    fail podman_runtime "not checked: podman or wrapper missing"
-    fail label_disable "not checked: podman or wrapper missing"
+    fail podman_runtime "not checked: podman missing or wrapper not verified"
+    fail label_disable "not checked: podman missing or wrapper not verified"
 fi
 
 # --- reported, not required -------------------------------------------------
