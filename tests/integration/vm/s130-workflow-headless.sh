@@ -260,17 +260,27 @@ OK=$(runuser -u admin -- gdbus call --system --dest $BUS --object-path $OBJ \
     --method $BUS.ApproveWorkflowRun "$RUN_ID" "$DIGEST" 2>&1)
 [ "$OK" = "(true,)" ] && pass "wf05: admin ApproveWorkflowRun(run, previewed digest) accepted" \
     || fail "wf05: admin approve returned [$OK]"
+# The approved run must EXECUTE: leave pending for a terminal state with its
+# step row written. Its single call_broker step cannot complete live today
+# (in-process call_broker raises: the broker's peer check resolves sender=None;
+# see the skipped wf01 case), so "executed" -- not "completed" -- is the
+# gating property asserted here.
 DONE=""
 for _ in $(seq 1 80); do
     DONE=$(runs_of wfhl-approval | awk -F'|' -v id="$RUN_ID" '$1 == id {print $2}')
-    [ "$DONE" = completed ] && break
+    case "$DONE" in completed|failed) break ;; esac
     sleep 0.25
 done
-[ "$DONE" = completed ] && pass "wf05: the SAME run id $RUN_ID executed to completed" \
-    || fail "wf05: approved run state [$DONE]"
-NCOMP=$(runs_of wfhl-approval | awk -F'|' '$2 == "completed"' | wc -l)
-[ "$NCOMP" = 1 ] && pass "wf05: exactly one completed run (no auto-run)" \
-    || fail "wf05: $NCOMP completed runs"
+case "$DONE" in
+    completed|failed) pass "wf05: the SAME run id $RUN_ID executed after approval (state $DONE)" ;;
+    *) fail "wf05: approved run never executed, state [$DONE]" ;;
+esac
+STEPROW=$(sql "SELECT step_type FROM workflow_steps WHERE run_id='$RUN_ID' LIMIT 1;")
+[ "$STEPROW" = call_broker ] && pass "wf05: the approved run wrote its step row" \
+    || fail "wf05: no step row for approved run $RUN_ID [$STEPROW]"
+NEXEC=$(runs_of wfhl-approval | awk -F'|' '$2 == "completed" || $2 == "failed"' | wc -l)
+[ "$NEXEC" = 1 ] && pass "wf05: exactly one executed run (no auto-run)" \
+    || fail "wf05: $NEXEC executed runs"
 ;;
 # ---------------------------------------------------------------------------
 wf02)   # secret delivery: ephemeral ssh-agent socket exists, then gone

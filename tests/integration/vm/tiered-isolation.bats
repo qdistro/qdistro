@@ -1248,12 +1248,16 @@ setup() {
     assert_output_contains "PASS: pg50: systemctl restart not matched by the rule (prompted, denied)"
     assert_output_contains "PASS: pg50: newest audit rows 0|prompt,1|rule"
     # pg/51 target_user in the action key
-    assert_output_contains "PASS: pg51: qsu -u work pends as action qsu.exec:work"
-    assert_output_contains "PASS: pg51: id ran as work (uid="
-    assert_output_contains "|qsu.exec:work|forever_argv"
+    # (the target is s58's non-admin user -- user1 on the bats golden -- so
+    # the user name is not pinned here; the driver checks it is that user)
+    assert_output_contains "PASS: pg51: qsu -u "
+    assert_output_contains " pends as action qsu.exec:"
+    assert_output_contains "PASS: pg51: id ran as "
+    assert_output_contains "), not root"
+    assert_output_contains "PASS: pg51: cache row "
     assert_output_contains "PASS: pg51: same argv as root re-prompted as qsu.exec:root (no cross-target cache hit)"
     assert_output_contains "PASS: pg51: root request denied (request denied)"
-    assert_output_contains "PASS: pg51: audit rows keyed by distinct actions (root|0, work|1)"
+    assert_output_contains "PASS: pg51: audit rows keyed by distinct actions (root|0, "
     # pg/54 sanitized env
     assert_output_contains "PASS: pg54: privileged env is the fixed baseline (no LD_PRELOAD/LD_LIBRARY_PATH/PYTHONPATH, PATH reset, USER/LOGNAME/HOME root)"
     # pg/52 invalid target_user

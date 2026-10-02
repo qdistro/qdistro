@@ -416,7 +416,8 @@ expect_cache_hit() {
     local label=$1 tag=$2 user=$3; shift 3
     local uid argv_json seen="" i
     uid=$(id -u "$user")
-    argv_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")
+    # qsu's own `-u <target>` option is not part of the requested argv.
+    argv_json=$(python3 -c 'import json,sys; a=sys.argv[1:]; a=a[2:] if a[:1]==["-u"] else a; print(json.dumps(a))' "$@")
     qsu_start "$tag" "$user" "$@"
     for ((i = 0; i < 100; i++)); do
         qsu_done "$tag" && break
@@ -440,7 +441,8 @@ expect_prompt() {
     local label=$1 tag=$2 user=$3; shift 3
     local uid argv_json row
     uid=$(id -u "$user")
-    argv_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")
+    # qsu's own `-u <target>` option is not part of the requested argv.
+    argv_json=$(python3 -c 'import json,sys; a=sys.argv[1:]; a=a[2:] if a[:1]==["-u"] else a; print(json.dumps(a))' "$@")
     qsu_start "$tag" "$user" "$@"
     row=$(pending_find "$uid" "$argv_json" 15)
     PROMPT_RID=${row%%|*}; row=${row#*|}
@@ -603,8 +605,8 @@ import dbus
 bus = dbus.SystemBus()
 iface = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
         "/org/qdistro/AdminBroker1"), "org.qdistro.AdminBroker1")
-print(",".join(str(r["source"]) for r in iface.ListHistory(20)
-               if str(r.get("action", "")).startswith("qsu.exec:"))[:2])
+print(",".join([str(r["source"]) for r in iface.ListHistory(20)
+                if str(r.get("action", "")).startswith("qsu.exec:")][:2]))
 ' 2>&1)
 case "$SOURCES" in
     cache,prompt*) pass "pg49: ListHistory newest qsu sources = cache,prompt" ;;
