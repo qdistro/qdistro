@@ -16,6 +16,7 @@ on:
     paths:
       - .github/workflows/qdistro-test-vm.yml
       - scripts/vm/test-vm-guest-install.sh
+      - scripts/vm/test-vm-consumer-check.sh
       - snapshot.conf
   workflow_dispatch:
 
@@ -250,10 +251,16 @@ jobs:
             done; \
             exit "$fail"' 2>&1 | tee "$VM_DIR/reboot-check.log"
 
+          # The consumer boot must not inherit these.
+          vmssh 'cat /etc/machine-id' > "$VM_DIR/build-machine-id"
+          vmssh 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub' > "$VM_DIR/build-hostkey"
+
           # Ship state: no builder key or cache; SSH stays enabled for a
-          # cloud-init key, password logins are refused remotely.
+          # cloud-init key, password logins are refused remotely. An empty
+          # machine-id makes each copy generate its own on first boot.
           vmssh 'sudo -n sh -c "set -e; \
             zypper -n clean -a; \
+            : > /etc/machine-id; \
             install -d -m 0755 /etc/ssh/sshd_config.d; \
             printf \"PasswordAuthentication no\nKbdInteractiveAuthentication no\n\" \
               > /etc/ssh/sshd_config.d/10-qdistro-test-vm.conf; \
@@ -280,6 +287,15 @@ jobs:
           (cd "$VM_DIR" && sha256sum qdistro-test-vm.qcow2 > qdistro-test-vm.qcow2.sha256)
           du -h "$VM_IMAGE"
 
+      - name: Validate the shipped image as a consumer would boot it
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          bash scripts/vm/test-vm-consumer-check.sh "$VM_DIR" "$VM_IMAGE" "$QEMU_ACCEL" "$SNAPSHOT"
+          # The check booted a throwaway overlay; the artifact is unchanged.
+          (cd "$VM_DIR" && sha256sum -c qdistro-test-vm.qcow2.sha256)
+
       - name: Upload install logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -287,6 +303,7 @@ jobs:
           name: qdistro-test-vm-logs
           path: |
             ${{ env.VM_DIR }}/*.log
+            ${{ env.VM_DIR }}/*.png
           if-no-files-found: ignore
           retention-days: 14
 
