@@ -22,7 +22,7 @@ shows the fake runsc writes its marker when executed directly.
 
 | Log | What | Verdict |
 |---|---|---|
-| 00-stage.log | staged commit; the checkout dir as the VM spin left it (`/root/qdistro-src` owned by host uid 1007) is made root-owned, logged, because root-run tier3s scripts now refuse a checkout another uid owns (step 20); guest sha256 = host sha256 of the scripts/tests, cache tarball sha512 = pin, profile=dev, pytest + strace installed by zypper from the snapshot repo, logged reset of any prior install | info |
+| 00-stage.log | staged commit; `/root/qdistro-src` checked root-owned, because root-run tier3s scripts refuse a checkout another uid owns (step 20). In this run it was already 0:0 at entry (the driver's explanatory line about preserved host ownership is unconditional); the VM spin had left it owned by host uid 1007, and that chown is recorded in the superseded run at `354895156`; guest sha256 = host sha256 of the scripts/tests, cache tarball sha512 = pin, profile=dev, pytest + strace installed by zypper from the snapshot repo, logged reset of any prior install | info |
 | 01-probe-before-provision.log | probe names `runsc` (not provisioned) first, exit 1; `runsc_version` not executed, 0 runsc execs | PASS (negative) |
 | 02-provision-offline.log | offline install from the cache: lock `/run/qdistro-runsc/provision.lock` taken (dir root 0700), verified private copy of the tarball, 6 files, version, no leftovers | PASS |
 | 03-provision-idempotent.log | second run: nothing to do | PASS |

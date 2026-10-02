@@ -48,8 +48,8 @@ U=http://10.0.2.2:$port
 step 00-stage "set -e; cd /root/qdistro-src && curl -fsS $U/src.tar | tar -xf - && echo \"staged commit \$(curl -fsS $U/commit.txt)\"
 set +e; $L
 echo \"checkout dir as left by the VM spin: \$(stat -c '%n %a uid=%u gid=%g' /root/qdistro-src)\"
-echo 'root-run tier3s scripts refuse a checkout another uid owns (see step 20); the spin preserved the host uid, so:'
-chown root:root /root/qdistro-src; is checkout-dir-root-owned \"\$(stat -c %u:%g /root/qdistro-src)\" 0:0
+if [ \"\$(stat -c %u:%g /root/qdistro-src)\" != 0:0 ]; then echo 'root-run tier3s scripts refuse a checkout another uid owns (step 20); the spin preserved the host uid, so: chown root:root'; chown root:root /root/qdistro-src
+else echo 'checkout dir already root-owned'; fi; is checkout-dir-root-owned \"\$(stat -c %u:%g /root/qdistro-src)\" 0:0
 stat -c '%n %a %U:%G' /root /root/qdistro-src /root/qdistro-src/tier3s tier3s/provision-runsc.sh tier3s/probe.sh tier3s/RUNSC_RELEASE tier3s/tier3s-runsc
 sha256sum tier3s/RUNSC_RELEASE tier3s/probe.sh tier3s/provision-runsc.sh tier3s/tier3s-runsc tier3s/spike/phase0-fix-lib.sh tier3s/spike/mutate-guards.py tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py
 mkdir -p \$CACHE/$rel && curl -fsS $U/gvisor.tar.zstd -o \$CACHE/$rel/gvisor.tar.zstd
