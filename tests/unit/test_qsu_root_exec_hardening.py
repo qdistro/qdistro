@@ -51,6 +51,7 @@ def stub_peer(monkeypatch):
 
 @pytest.mark.parametrize("target", [
     "root\n[OK] audit row trailer\x1b[2J",   # the permissions-gui/52 payload
+    "root\n",
     "\x00root",
     "ro ot",
     "Root",
@@ -74,11 +75,6 @@ def test_invalid_target_user_rejected_before_broker(pair, stub_peer, target,
     assert sent[1] == {"type": "exit", "code": 1}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "_USERNAME_RE uses ^...$ with re.match, and $ also matches before a "
-    "trailing newline, so 'root\n' passes the regex; only the later "
-    "getpwnam lookup refuses it. Use re.fullmatch / \\Z in qsu/"
-    "qdistro_root_exec.py, then drop this xfail."))
 def test_username_re_rejects_trailing_newline():
     assert Q._USERNAME_RE.match("root\n") is None
 
