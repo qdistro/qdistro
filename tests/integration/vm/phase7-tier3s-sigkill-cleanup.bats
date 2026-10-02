@@ -23,7 +23,7 @@ teardown_file() {
     t3s_log s122
     assert_success
     t3s_no_failures s122
-    for t in launcher-sigkill manager-stop/s122a manager-stop/s122b manager-crash manager-restart \
+    for t in launcher-sigkill#1 launcher-sigkill#2 launcher-sigkill#3 manager-stop/s122a manager-stop/s122b manager-crash manager-restart \
              reconcile/recorded reconcile/unrecorded; do
         assert_output_contains "PASS: $t: all "
         assert_output_contains "PASS: $t: scope "

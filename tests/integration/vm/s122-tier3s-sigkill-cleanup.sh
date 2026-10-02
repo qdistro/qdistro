@@ -38,17 +38,19 @@ mgr_pid() { systemctl show -p MainPID --value "$MGR"; }
 mgr_journal() { journalctl -u "$MGR" --no-pager -o cat --after-cursor="$1" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
-step "1. launcher SIGKILL (service failure)"
-TA=$(up_silo $SA); UA=$(unit_of $SA)
-if [ -n "$TA" ]; then pass "sigkill: launch $TA up"; else fail "sigkill: launch did not come up"; fi
-cur=$(journal_cursor)
-systemctl kill -s KILL --kill-whom=main "$UA"
-wait_for 60 unit_down "$UA"
-is "sigkill: launch unit failed visibly" "$(unit_state "$UA"):$(systemctl show -p Result --value "$UA")" "failed:signal"
-unit_log "$UA" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
-assert_launch_gone launcher-sigkill "$TA" "$(ctr_of $SA)"
-systemctl reset-failed "$UA"
-sm StopSilo si $SA 10 > /dev/null; is "sigkill: StopSilo afterwards reaches Stopped" "$(silo_state $SA)" Stopped
+step "1. launcher SIGKILL (service failure), three times (ExecStopPost races the scope stop)"
+for i in 1 2 3; do
+    TA=$(up_silo $SA); UA=$(unit_of $SA)
+    if [ -n "$TA" ]; then pass "sigkill#$i: launch $TA up"; else fail "sigkill#$i: launch did not come up"; fi
+    cur=$(journal_cursor)
+    systemctl kill -s KILL --kill-whom=main "$UA"
+    wait_for 60 unit_down "$UA"
+    is "sigkill#$i: launch unit failed visibly" "$(unit_state "$UA"):$(systemctl show -p Result --value "$UA")" "failed:signal"
+    unit_log "$UA" "$cur" | grep -v pam_unix | sed 's/^/    unit: /'
+    assert_launch_gone "launcher-sigkill#$i" "$TA" "$(ctr_of $SA)"
+    systemctl reset-failed "$UA"
+    sm StopSilo si $SA 10 > /dev/null; is "sigkill#$i: StopSilo afterwards reaches Stopped" "$(silo_state $SA)" Stopped
+done
 
 # ---------------------------------------------------------------------------
 step "2. O11: session-manager STOP tears down every live launch"
