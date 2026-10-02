@@ -1091,6 +1091,10 @@ class MainWindow(QMainWindow):
         badges_update = getattr(badges, "apply_presentation_update", None)
         if callable(badges_update):
             badges_update()
+        instant_replay = getattr(self, "instant_replay", None)
+        replay_update = getattr(instant_replay, "apply_presentation_update", None)
+        if callable(replay_update):
+            replay_update()
 
     def apply_profile_to_terminals(self, profile_name: str) -> None:
         for term in self.iter_terminals():

@@ -25,12 +25,21 @@ try:
 except ModuleNotFoundError:
     pyte = None
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtCore import QRect, Qt
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import QApplication, QPlainTextEdit, QWidget
 
 from qterminator.config import Config
 from qterminator.plugin import Plugin
+from qterminator.terminal_style import native_fixed_font
+from qterminator.theme import pane_roles
+from qterminator.titlebar import _ui_font
+
+_OVERLAY_ALPHA = 220
+_FALLBACK_SURFACE = "#1e1e1e"
+_FALLBACK_ON_SURFACE = "#cccccc"
+_FALLBACK_STATUS_BG = "#141414"
+_FALLBACK_STATUS_FG = "#888888"
 
 # ---------------------------------------------------------------------------
 # Replay state machine
@@ -205,22 +214,12 @@ class ReplayOverlay(QPlainTextEdit):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
-        # Style
-        self.setStyleSheet(
-            "QPlainTextEdit { "
-            "background-color: rgba(30, 30, 30, 220); "
-            "color: #cccccc; "
-            "font-family: monospace; "
-            "font-size: 12px; "
-            "border: none; "
-            "}"
-        )
-
-        # Make it fill the parent
-        self.setGeometry(parent.geometry())
-
-        # Status bar at bottom
         self._status_bar_height = 24
+        self._status_bg = QColor(_FALLBACK_STATUS_BG)
+        self._status_fg = QColor(_FALLBACK_STATUS_FG)
+        self._status_font = _ui_font(relative=0.9)
+        self.setGeometry(parent.geometry())
+        self.apply_presentation_update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -247,28 +246,64 @@ class ReplayOverlay(QPlainTextEdit):
 
         self._status_text = f"Replay: {time_str}   {nav}   ⏎ exit{new_indicator}"
 
+    def apply_presentation_update(self) -> None:
+        self._apply_style()
+        self.update()
+
+    def _content_font(self) -> QFont:
+        parent = self.parent()
+        if parent is not None:
+            font = QFont(parent.font())
+            if font.pointSizeF() > 0 or font.pointSize() > 0:
+                return font
+        return native_fixed_font()
+
+    def _apply_style(self) -> None:
+        roles = pane_roles(self)
+        surface = QColor(roles["surface"])
+        if not surface.isValid():
+            surface = QColor(_FALLBACK_SURFACE)
+        on_surface = QColor(roles["on_surface"])
+        if not on_surface.isValid():
+            on_surface = QColor(_FALLBACK_ON_SURFACE)
+        status_bg = QColor(roles["surface_variant"])
+        if not status_bg.isValid():
+            status_bg = QColor(_FALLBACK_STATUS_BG)
+        status_fg = QColor(roles["on_surface_variant"])
+        if not status_fg.isValid():
+            status_fg = QColor(_FALLBACK_STATUS_FG)
+        css = (
+            "QPlainTextEdit { "
+            "background-color: "
+            f"rgba({surface.red()}, {surface.green()}, {surface.blue()}, "
+            f"{_OVERLAY_ALPHA}); "
+            f"color: {on_surface.name()}; "
+            "border: none; "
+            "}"
+        )
+        self.setFont(self._content_font())
+        self.setStyleSheet(css)
+        self._status_bg = status_bg
+        self._status_fg = status_fg
+        self._status_font = _ui_font(relative=0.9)
+
     def paintEvent(self, event):
         super().paintEvent(event)
-        # Draw status bar in bottom margin
-        from PyQt6.QtCore import QRect
-        from PyQt6.QtGui import QColor, QFont, QPainter
-
         painter = QPainter(self)
         painter.fillRect(
             0, self.height() - self._status_bar_height,
             self.width(), self._status_bar_height,
-            QColor(20, 20, 20)
+            self._status_bg,
         )
 
-        painter.setPen(QColor("#888888"))
-        font = QFont("monospace", 10)
-        painter.setFont(font)
-        status = getattr(self, '_status_text', "Replay mode")
+        painter.setPen(self._status_fg)
+        painter.setFont(self._status_font)
+        status = getattr(self, "_status_text", "Replay mode")
         painter.drawText(
             QRect(10, self.height() - self._status_bar_height,
                   self.width() - 20, self._status_bar_height),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            status
+            status,
         )
 
 
@@ -303,7 +338,13 @@ class InstantReplayPlugin(Plugin):
             return
 
         self._window = app_controller
+        if not hasattr(app_controller, "instant_replay"):
+            app_controller.instant_replay = self
         self._setup_shortcut(app_controller)
+
+    def apply_presentation_update(self) -> None:
+        if self._overlay is not None:
+            self._overlay.apply_presentation_update()
 
     def _setup_shortcut(self, app_controller):
         """Set up the hotkey to enter replay mode."""
