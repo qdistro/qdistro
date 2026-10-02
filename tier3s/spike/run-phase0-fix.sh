@@ -184,7 +184,7 @@ probe_tail_pass restored; finish"
 step 15-negative-writable-ancestor "$L; chmod 0775 /usr/libexec/qdistro
 probe_strace; expect_rc probe-exit 1 \$PRC
 has names-ancestor \$PO 'FAIL install_path: untrusted: /usr/libexec/qdistro is group/other-writable (mode 775)'
-has bundle-itself-fine \$PO 'PASS bundle:'
+has no-content-reads-under-untrusted-path \$PO 'FAIL bundle: sha512 not checked: install path untrusted'
 never_executed writable-ancestor
 provision provision-refuses 1; has provision-names-ancestor \$VO 'untrusted path: /usr/libexec/qdistro is group/other-writable (mode 775)'
 chmod 0755 /usr/libexec/qdistro; probe_tail_pass restored; finish"
@@ -201,6 +201,21 @@ has B-then-saw-installed /var/tmp/t3s-B.log 'already installed and matching pin 
 has B-rc0 /var/tmp/t3s-B.log 'rc=0'
 is sidecar-755 \"\$(stat -c %a \$SIDE/gvisor_sentry)\" 755
 is no-leftovers \"\$(leftovers)\" 0; probe_tail_pass after; finish"
+
+step 17-stage-parent "$L; chmod 0700 \$SIDE/gvisor_sentry; rm -rf /var/tmp/t3s-evil; mkdir -m 0777 /var/tmp/t3s-evil
+echo '## real install with a hostile TMPDIR (0777, not sticky): the stage must still go to /var/tmp'
+TMPDIR=/var/tmp/t3s-evil strace -f -qq -e trace=mkdir,mkdirat -o /var/tmp/t3s-tr-mk \"\${PROVISION[@]}\" > /var/tmp/t3s-prov.out 2>&1; rc=\$?
+cat /var/tmp/t3s-prov.out; expect_rc provision-exit 0 \$rc; has installed /var/tmp/t3s-prov.out 'PASS: installed runsc'
+grep 'runsc-stage' /var/tmp/t3s-tr-mk
+is stage-made-under-var-tmp \"\$(grep -c 'mkdir[a-z]*(.*\"/var/tmp/runsc-stage\.' /var/tmp/t3s-tr-mk)\" 1
+is nothing-under-hostile-tmpdir \"\$(grep -c 't3s-evil/runsc-stage' /var/tmp/t3s-tr-mk)\" 0
+is hostile-tmpdir-empty \"\$(ls -A /var/tmp/t3s-evil | wc -l)\" 0
+echo '## /var/tmp without its sticky bit: provision refuses before staging'
+chmod 0700 \$SIDE/gvisor_sentry; trap 'chmod 1777 /var/tmp' EXIT; chmod 0777 /var/tmp
+provision refuses-unsticky-var-tmp 1; has names-stage-parent \$VO 'untrusted stage parent /var/tmp (0 777)'
+chmod 1777 /var/tmp; is var-tmp-restored \"\$(stat -c %a /var/tmp)\" 1777
+is live-untouched \"\$(stat -c %a \$SIDE/gvisor_sentry)\" 700
+provision repair-exit 0; rmdir /var/tmp/t3s-evil; is no-leftovers \"\$(leftovers)\" 0; probe_tail_pass after; finish"
 
 step 08-probe-pass-after-negatives "$L; provision idempotent-exit 0; has nothing-to-do \$VO 'already installed and matching pin $rel; nothing to do'
 probe_strace; expect_rc probe-exit 0 \$PRC; has result-pass \$PO 'RESULT PASS: tier 3s prerequisites present'
