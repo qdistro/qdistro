@@ -21,6 +21,7 @@ setup() {
     REPO_ROOT="$(git -C "$(dirname "$BATS_TEST_FILENAME")" \
                     rev-parse --show-toplevel 2>/dev/null)"
     GUI_SPIN="$REPO_ROOT/scripts/vm/spin-test-vm-gui.sh"
+    SILO_FIXTURES="$REPO_ROOT/scripts/vm/lib/gui-silo-fixtures.sh"
     TEMPLATE="$REPO_ROOT/scripts/vm/create-template-domain.sh"
     AGENTS="$REPO_ROOT/tests/integration/permissions-gui/AGENTS.md"
     [ -f "$GUI_SPIN" ] || {
@@ -59,16 +60,20 @@ in_file() {
     # The session manager owns the Linux-account creation.  A bare useradd
     # creates no silos.yaml row, so the first reconcile purges the relay grant
     # required by the cross-user GUI scenarios.
-    in_file "sm_call CreateSilo" "$GUI_SPIN"
-    in_file '"work:2000" "work2:3000"' "$GUI_SPIN"
-    in_file "sm_call StartSilo" "$GUI_SPIN"
-    in_file "silo_matches" "$GUI_SPIN"
-    in_file "silo_state" "$GUI_SPIN"
+    # Both the labwc golden and native-Wayland scenarios use this helper.
+    # Validate the call site as well as every original durable-silo check.
+    in_file 'bash "$SRC/scripts/vm/lib/gui-silo-fixtures.sh" --prove-restart' "$GUI_SPIN"
+    in_file 'ERROR: work/work2 silo fixtures failed' "$GUI_SPIN"
+    in_file "sm_call CreateSilo" "$SILO_FIXTURES"
+    in_file '"work:2000" "work2:3000"' "$SILO_FIXTURES"
+    in_file "sm_call StartSilo" "$SILO_FIXTURES"
+    in_file "silo_matches" "$SILO_FIXTURES"
+    in_file "silo_state" "$SILO_FIXTURES"
 }
 
 @test "gui-spin: enables linger for both work users" {
-    in_file "loginctl enable-linger work" "$GUI_SPIN"
-    in_file "loginctl enable-linger work2" "$GUI_SPIN"
+    in_file "loginctl enable-linger work" "$SILO_FIXTURES"
+    in_file "loginctl enable-linger work2" "$SILO_FIXTURES"
 }
 
 @test "gui-spin: installs /usr/local/bin/qdistro-test-permission" {
