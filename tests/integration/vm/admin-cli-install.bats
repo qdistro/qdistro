@@ -16,7 +16,7 @@ setup() {
     [[ "$output" == *"qdistro-approvals"*"qdistro-admin-tui"*"installed"* ]]
     cmp "$REPO/cli/qdistro_approvals.py" "$ROOT/usr/local/sbin/qdistro-approvals"
     [ "$(stat -c %a "$ROOT/usr/local/sbin/qdistro-approvals")" = 755 ]
-    head -1 "$ROOT/usr/local/sbin/qdistro-approvals" | grep -qx '#!/usr/bin/python3'
+    head -1 "$ROOT/usr/local/sbin/qdistro-approvals" | grep -qx '#!/usr/bin/python3 -I'
     # the broker's trust lists name these exact paths
     grep -q '"/usr/local/sbin/qdistro-approvals"' "$REPO/broker/qdistro_admin_broker.py"
     grep -q '"/usr/local/bin/qdistro-admin-tui"' "$REPO/broker/qdistro_admin_broker.py"
@@ -28,7 +28,7 @@ setup() {
     done
     [ "$(stat -c %a "$ROOT/usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py")" = 755 ]
     [ "$(stat -c %a "$ROOT/usr/local/lib/qdistro/admin-tui/broker_client.py")" = 644 ]
-    head -1 "$ROOT/usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py" | grep -qx '#!/usr/bin/python3'
+    head -1 "$ROOT/usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py" | grep -qx '#!/usr/bin/python3 -I'
 }
 
 @test "admin-app installer runs the admin-cli installer (one chain step lays down all three surfaces)" {

@@ -768,6 +768,10 @@ chain_root() {
     local x="$IMAGE/extract-root.sh"
     grep -q '^    /usr/local$' "$x"                      # sdk package + tier helpers
     grep -q 'PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")' "$x"   # pip apps' QML rows
+    # [admin-app] Textual row: the extractor must copy the exact file the row
+    # globs for, from the same $PYLIB the chain_root fixture stands in for
+    grep -q 'PATHS+=("$PYLIB/site-packages/textual/__init__.py")' "$x"
+    grep -q '"/usr/lib/python3\*/site-packages/textual/__init__.py"' "$IMAGE/verify-contents.sh"
     grep -q '^    /usr/etc/sysconfig/qemu-ga$' "$x"      # vendor default row
     grep -q '^    /usr/share/fonts/truetype$' "$x"        # fonts row
     grep -q '^    /boot/grub2/grub.cfg$' "$x"             # identity: root=UUID

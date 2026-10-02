@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """qdistro admin TUI — terminal companion to the PyQt admin app.
 
 Same broker, same scope picker, same approve/deny semantics. Designed
@@ -30,6 +30,7 @@ from broker_client import (  # noqa: E402
     broker_error_label,
     log_broker_error,
 )
+from rich.markup import escape  # noqa: E402
 from rich.text import Text  # noqa: E402
 from silo_colors import chip_for_uid  # noqa: E402
 from textual.app import App, ComposeResult  # noqa: E402
@@ -185,21 +186,33 @@ class DetailPane(Static):
             f"{k}={v}" for k, v in other_details.items()
         ) or "(none)"
         chip = chip_for_uid(req.uid)
-        text = (
-            f"[b][on {chip}] {req.uid} [/on {chip}]  pid={req.pid}[/b]\n"
-            f"Action: {req.action}\n"
-            f"[dim]{req.exe}[/dim]\n"
-        )
+        # action, exe, argv and details come from the requesting (untrusted)
+        # process. Build a rich Text with those fields appended as LITERAL
+        # spans: never interpolate them into markup, where `[/]` raises
+        # MarkupError (crashing the queue) and `[conceal]...` would hide
+        # the command the admin is approving.
+        text = Text()
+        text.append(f" {req.uid} ", style=f"bold on {chip}")
+        text.append(f"  pid={req.pid}\n", style="bold")
+        text.append("Action: ")
+        text.append(str(req.action))
+        text.append("\n")
+        text.append(str(req.exe), style="dim")
+        text.append("\n")
         if argv_line is not None:
             # qsu / spec/21 — show argv as its own line with shlex.join,
             # not as 30+ noisy `argv[NN]=...` entries inside Details.
-            text += f"Argv: [b]{argv_line}[/b]\n"
-        text += (
-            f"Details: {details}\n\n"
+            text.append("Argv: ")
+            text.append(str(argv_line), style="bold")
+            text.append("\n")
+        text.append("Details: ")
+        text.append(details)
+        text.append("\n\n")
+        text.append_text(Text.from_markup(
             f"Scope: [b]{scope_label}[/b]   "
             f"[dim](press 1-8 to change)[/dim]\n\n"
             f"[green]a[/green] approve   [red]d[/red] deny   [yellow]?[/yellow] help"
-        )
+        ))
         self.update(text)
 
 
@@ -390,7 +403,8 @@ class AdminTuiApp(App):
             # renderable pipeline (plain strings have no style channel).
             chip = chip_for_uid(req.uid)
             uid_cell = Text(f" {req.uid} ", style=f"black on {chip}")
-            table.add_row(" ", "●", uid_cell, req.action, req.exe)
+            table.add_row(" ", "●", uid_cell, Text(str(req.action)),
+                          Text(str(req.exe)))
             self._row_to_id.append(req.id)
 
         if not self._row_to_id:
@@ -553,8 +567,8 @@ class AdminTuiApp(App):
 
         self.push_screen(
             ConfirmScreen(
-                f"Save rule for uid={req.uid} action={req.action} as "
-                f"{filename}?"),
+                f"Save rule for uid={req.uid} action={escape(str(req.action))} as "
+                f"{escape(filename)}?"),
             _after_confirm,
         )
 
@@ -675,7 +689,7 @@ class AdminTuiApp(App):
         scope_label = SCOPES[self._scope]
         verb = "approved" if decision == "allow" else "denied"
         self.notify(
-            f"{verb} uid={req.uid} pid={req.pid} action={req.action}  "
+            f"{verb} uid={req.uid} pid={req.pid} action={escape(str(req.action))}  "
             f"(scope: {scope_label})",
             severity="information",
             timeout=4,

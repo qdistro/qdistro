@@ -660,7 +660,7 @@ check_line "[admin-app] launcher runs installed script" \
 # exactly these paths and run under the system python.
 check_req "[admin-app] root approvals CLI" /usr/local/sbin/qdistro-approvals
 check_line "[admin-app] CLI runs under the system python" \
-    /usr/local/sbin/qdistro-approvals '^#!/usr/bin/python3$'
+    /usr/local/sbin/qdistro-approvals '^#!/usr/bin/python3 -I$'
 check_link "[admin-app] admin TUI command" /usr/local/bin/qdistro-admin-tui
 check_req "[admin-app] admin TUI broker client" /usr/local/lib/qdistro/admin-tui/broker_client.py
 check_glob_req "[admin-app] Textual for the admin TUI" "/usr/lib/python3*/site-packages/textual/__init__.py"

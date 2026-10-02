@@ -11,8 +11,10 @@
 # exe, which for a Python script is the interpreter, so it also requires the
 # installed script path in the process argv. The kernel puts the path the
 # script was exec'd by into argv when it runs the shebang, so both files must
-# be exec'd by these exact paths (PATH lookup does that) and must NOT be
-# moved, wrapped in a shell script, or replaced by `python3 <copy>`.
+# be exec'd by these exact paths and must NOT be moved, wrapped in a shell
+# script, or replaced by `python3 <copy>`. That argv match identifies the
+# genuine tool; it is not a boundary against root or the admin uid (any
+# process of that uid can name the path in argv). See doc/admin-approval.md.
 #
 # $1 is the repo root (the chain passes $QD). DESTDIR allows a host-only
 # layout test; production paths remain absolute. File drops only: nothing

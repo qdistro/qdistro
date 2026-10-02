@@ -43,19 +43,38 @@ request cannot take (delegated and one-shot requests, argv scopes without a
 captured argv) with an error the CLI prints. A deny is never cached, so it is
 always sent with scope `once`. The broker ignores an unknown or
 already-decided id; the CLI checks `GetPending` first and exits 1 with
-`no pending request with id=N` instead of reporting success. Requester-
+`no pending request with id=N` instead of reporting success (and see
+below for how the outcome is confirmed). Requester-
 supplied text (action, exe, details) is printed with control characters
 escaped. The audit row records `approver_uid` 0 for a CLI decision.
 
-How the broker recognises them: it reads `/proc/<pid>/exe`, which for a
-Python script is the interpreter (`/usr/bin/python3.13`), so for a Python
-peer it requires the installed script path in the process argv. When the
-kernel runs a script through its shebang it puts the path the script was
-executed by into argv, so `qdistro-approvals` (found on `PATH`) and
-`qdistro-admin-tui` are admitted, while `python3 cli/qdistro_approvals.py`
-from a source tree, a copy elsewhere, or the TUI run as root are refused
-with `AccessDenied`. The TUI therefore refuses to start as root and points
-at the CLI.
+How the broker recognises them, and what that is worth: it reads
+`/proc/<pid>/exe`, which for a Python script is the interpreter
+(`/usr/bin/python3.13`), so for a Python peer it also requires the installed
+script path somewhere in the process argv. When the kernel runs a script
+through its shebang it puts the path the script was executed by into argv,
+so the installed `qdistro-approvals` and `qdistro-admin-tui` are admitted,
+while `python3 cli/qdistro_approvals.py` from a source tree or a copy
+elsewhere is refused with `AccessDenied`. This identifies the genuine tool
+for honest callers; it is **not** a security boundary against root (or
+against other code running as the admin uid). Any root Python process that
+merely names `/usr/local/sbin/qdistro-approvals` in its argv is admitted
+without running the script (`tests/unit/test_cli_pending_decide.py` pins
+that), and root can reach the broker through `busctl` anyway. Root is fully
+trusted here; the boundary the broker enforces is against other uids. The TUI
+refuses to start as root and points at the CLI.
+
+Run the CLI by its absolute path or from a root login shell: `sudo`'s
+default `secure_path` on openSUSE does not include `/usr/local/sbin`, so
+`sudo qdistro-approvals` may not find it; use
+`sudo /usr/local/sbin/qdistro-approvals ...` or `sudo -i`.
+
+After `approve`/`deny` the CLI reads the decision back from the audit
+history (`ListHistory`) and matches it to the request (id, uid, pid, action,
+timestamp). If someone else decided the request first it exits 1 and names
+the decision that was actually recorded; if it cannot find the row it exits
+3 with "outcome unconfirmed". It never reports success from the request
+merely leaving the pending list.
 
 ## Never block admin's work
 

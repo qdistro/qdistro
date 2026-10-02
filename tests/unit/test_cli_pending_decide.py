@@ -18,6 +18,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,7 @@ class _FakeBroker:
         self.pending: dict[int, dict] = {}
         self.calls: list[tuple] = []
         self.ignore_decide = False
+        self.history: list[dict] = []   # newest first, like ListHistory
 
     def add(self, rid, uid=1001, pid=4242, exe="/usr/bin/foo",
             action="qdistro.test.cli", details=None):
@@ -94,7 +96,16 @@ class _FakeBroker:
                 "org.qdistro.AdminBroker1.BadArgument")
         if self.ignore_decide:
             return
-        self.pending.pop(int(rid), None)
+        req = self.pending.pop(int(rid), None)
+        if req is not None:
+            self.history.insert(0, {
+                "ts": int(time.time()), "request_id": req["id"],
+                "caller_uid": req["uid"], "caller_pid": req["pid"],
+                "action": req["action"], "decision": decision == "allow",
+                "scope": scope, "source": "prompt", "approver_uid": 0})
+
+    def ListHistory(self, limit):
+        return list(self.history[:limit])
 
 
 @pytest.fixture
@@ -195,12 +206,42 @@ def test_unknown_id_is_an_error_and_never_decided(fake, capsys, verb):
     assert fake.calls == []
 
 
-def test_still_pending_after_decide_is_an_error(fake, capsys):
+def test_unconfirmed_outcome_is_not_success(fake, capsys):
+    # The request may vanish from pending for reasons other than this
+    # command (a concurrent decider); with no matching audit row the CLI
+    # must say so and fail.
     fake.add(2)
     fake.ignore_decide = True
-    rc, _out, err = _run(["approve", "2"], capsys)
-    assert rc == 1
-    assert "still pending" in err
+    rc, out, err = _run(["approve", "2"], capsys)
+    assert rc == 3
+    assert "outcome is unconfirmed" in err
+    assert "approved" not in out
+
+
+def test_unreadable_history_is_not_success(fake, capsys, monkeypatch):
+    fake.add(2)
+
+    def boom(_limit):
+        raise _FakeDBusException("nope", "org.freedesktop.DBus.Error.NoReply")
+    monkeypatch.setattr(fake, "ListHistory", boom)
+    rc, out, err = _run(["deny", "2"], capsys)
+    assert rc == 3
+    assert "outcome is unconfirmed" in err and "NoReply" in err
+    assert "denied" not in out
+
+
+def test_stale_audit_row_from_reused_id_does_not_confirm(fake, capsys):
+    # Broker ids restart at 1: an old row with the same id but another
+    # caller must not count as this command's decision.
+    fake.add(1, uid=1001, pid=4242)
+    fake.ignore_decide = True
+    fake.history.append({"ts": int(time.time()), "request_id": 1,
+                         "caller_uid": 1001, "caller_pid": 99,
+                         "action": "qdistro.test.cli", "decision": True,
+                         "scope": "once", "source": "prompt",
+                         "approver_uid": 0})
+    rc, _out, err = _run(["approve", "1"], capsys)
+    assert rc == 3 and "unconfirmed" in err
 
 
 def test_broker_error_is_reported_with_its_name(fake, capsys, monkeypatch):
@@ -262,10 +303,18 @@ def real(tmp_path, monkeypatch):
         def GetPending(self):
             return broker.GetPending()
 
+        before_decide = []   # hooks run just before the CLI's decision
+
         def DecideRequest(self, rid, decision, scope):
+            for hook in self.before_decide:
+                hook(rid)
             return broker.DecideRequest(rid, decision, scope)
 
-    monkeypatch.setattr(cli, "_broker", lambda: (_Iface(), dbus))
+        def ListHistory(self, limit):
+            return broker.ListHistory(limit)
+
+    iface = _Iface()
+    monkeypatch.setattr(cli, "_broker", lambda: (iface, dbus))
 
     def as_peer(argv, uid=0, exe="/usr/bin/python3.13"):
         # /proc/<pid>/exe of a Python script is the interpreter, never the
@@ -283,6 +332,7 @@ def real(tmp_path, monkeypatch):
         broker._pending[rid].waiters.append((got.append, lambda e: got.append(e)))
         return got
 
+    broker.cli_iface = iface
     return broker, as_peer, enqueue, waiter, NON_ADMIN_UID, tmp_path
 
 
@@ -347,3 +397,49 @@ def test_real_broker_scope_refusal_surfaces(real, capsys):
     assert rc == 1
     assert "ScopeNotPermitted" in err
     assert broker._pending[rid].decision is None
+
+
+@pytest.mark.parametrize("verb,other", [("deny", "allow"), ("approve", "deny")])
+def test_concurrent_decision_is_not_reported_as_ours(real, capsys, verb, other):
+    """Race: another approver (Qt app/TUI, here uid 1000) decides between
+    the CLI's GetPending snapshot and its DecideRequest. The broker ignores
+    the CLI's call; the CLI must report the decision it did NOT make, not
+    `denied`/`approved` with rc 0."""
+    import qdistro_admin_broker as B
+    broker, as_peer, enqueue, waiter, _uid, _tmp = real
+    rid = enqueue()
+    got = waiter(rid)
+    argv = _installed_cli_argv(verb, str(rid))
+    as_peer(argv)
+
+    def competing(_rid):
+        broker.set_peer(uid=B.ADMIN_UID, pid=4322, exe="/usr/bin/python3.13")
+        B._read_proc_cmdline = lambda _p: ["/usr/bin/python3",
+                                           "/usr/local/bin/qdistro-admin-tui"]
+        try:
+            broker.DecideRequest(rid, other, "once")
+        finally:
+            as_peer(argv)
+    broker.cli_iface.before_decide.append(competing)
+
+    rc, out, err = _run([verb, str(rid)], capsys)
+    assert rc == 1, (out, err)
+    assert "NOT decided by this command" in err
+    assert f"recorded {other}" in err and "by uid 1000" in err
+    assert got == [other == "allow"]
+    assert out == ""
+
+
+def test_root_argv_spoof_is_admitted_documented(real, capsys):
+    """Documents the trust model, not a boundary: the broker's root check
+    admits ANY root Python process that names the CLI path in argv (the
+    script need not run). It identifies the genuine tool for honest
+    callers; root is fully trusted (it could also use busctl). If this
+    starts failing, the broker got stricter: update doc/admin-approval.md."""
+    broker, as_peer, enqueue, waiter, _uid, _tmp = real
+    rid = enqueue()
+    as_peer(["/usr/bin/python3", "-c", "import dbus  # anything",
+             "/usr/local/sbin/qdistro-approvals"])
+    rc, out, err = _run(["approve", str(rid)], capsys)
+    assert rc == 0, err
+    assert broker._pending[rid].decision is True

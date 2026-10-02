@@ -187,7 +187,7 @@ if ! /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1; then
         log "installing python313-textual for the admin TUI"
         zypper -n install --no-recommends python313-textual python313-rich \
                 >/tmp/qdistro-textual-install.log 2>&1 \
-            || { log "  ERROR: zypper install of python313-textual failed"; tail -80 /tmp/qdistro-textual-install.log; exit 3; }
+            || { log "  WARN: zypper install of python313-textual failed; the admin TUI will not start in this VM (the CLI is unaffected)"; tail -20 /tmp/qdistro-textual-install.log; }
     fi
 fi
 

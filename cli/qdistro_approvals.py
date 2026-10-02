@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """qdistro-approvals — admin CLI for pending requests, the approval cache and the audit log.
 
 Subcommands:
@@ -16,8 +16,11 @@ Root-only. The broker trusts this tool as a root admin-control peer only
 when it runs from its installed path, /usr/local/sbin/qdistro-approvals
 (the path must appear in the Python process's argv; see
 _peer_matches_admin_control in broker/qdistro_admin_broker.py). Run it as
-`qdistro-approvals ...` (PATH lookup) or by that absolute path, not as
-`python3 cli/qdistro_approvals.py` from a source tree.
+`qdistro-approvals ...` (PATH lookup; under sudo use the absolute path,
+secure_path lacks /usr/local/sbin) or by that absolute path, not as
+`python3 cli/qdistro_approvals.py` from a source tree. The argv match
+identifies the genuine tool for honest callers; it is not a security
+boundary against root (root is fully trusted by the broker).
 """
 from __future__ import annotations
 
@@ -292,19 +295,62 @@ def _decide(args, decision: str, scope: str) -> int:
         print(f"qdistro-approvals: warning: scope {scope!r} caches this "
               f"approval beyond this one request (revoke with "
               f"`qdistro-approvals list` / `revoke`)", file=sys.stderr)
+    # Audit timestamps are whole seconds from the same host clock; allow
+    # a little slack so a row written in the same second still matches.
+    since = int(time.time()) - 2
     try:
         iface.DecideRequest(rid, decision, scope)
     except dbus_mod.DBusException as e:
         print(f"qdistro-approvals: {verb} failed: {_dbus_error_text(e)}",
               file=sys.stderr)
         return 1
+    return _confirm_outcome(iface, dbus_mod, req, decision, scope, since)
+
+
+def _confirm_outcome(iface, dbus_mod, req: dict, decision: str, scope: str,
+                     since: int) -> int:
+    """Report what the broker actually recorded for this request.
+
+    DecideRequest returns nothing and silently ignores a request that was
+    decided meanwhile (by the Qt app, the TUI or another CLI), so neither
+    its return nor the request leaving GetPending says that THIS command's
+    decision was applied. The broker writes the prompt-path audit row
+    before releasing the requester, so read it back (ListHistory) and
+    match it to this request: request id plus the uid/pid/action shown
+    by `pending` (ids restart with the broker) and a timestamp from this
+    run. Anything short of a matching row with our decision, scope and
+    approver uid 0 is reported, with a non-zero exit.
+    """
+    rid = int(req["id"])
+    verb = "approve" if decision == "allow" else "deny"
     try:
-        still = any(r["id"] == rid for r in _pending_rows(iface))
-    except dbus_mod.DBusException:
-        still = False
-    if still:
-        print(f"qdistro-approvals: request id={rid} is still pending after "
-              f"{verb}", file=sys.stderr)
+        history = [dict(r) for r in iface.ListHistory(200)]
+    except dbus_mod.DBusException as e:
+        print(f"qdistro-approvals: {verb} sent for request id={rid}, but the "
+              f"outcome is unconfirmed: audit history unreadable "
+              f"({_dbus_error_text(e)})", file=sys.stderr)
+        return 3
+    rows = [r for r in history
+            if str(r.get("source", "")) == "prompt"
+            and int(r.get("request_id", 0)) == rid
+            and int(r.get("caller_uid", -1)) == int(req.get("uid", -2))
+            and int(r.get("caller_pid", -1)) == int(req.get("pid", -2))
+            and str(r.get("action", "")) == str(req.get("action", ""))
+            and int(r.get("ts", 0)) >= since]
+    if not rows:
+        print(f"qdistro-approvals: {verb} sent for request id={rid}, but the "
+              f"outcome is unconfirmed: no audit row for it", file=sys.stderr)
+        return 3
+    row = rows[0]  # ListHistory is newest first
+    got_allow = bool(row.get("decision"))
+    got_scope = str(row.get("scope", ""))
+    approver = int(row.get("approver_uid", -1))
+    if (got_allow != (decision == "allow") or got_scope != scope
+            or approver != 0 or len(rows) != 1):
+        got = "allow" if got_allow else "deny"
+        print(f"qdistro-approvals: request id={rid} was NOT decided by this "
+              f"command: the broker recorded {got} (scope {got_scope or '-'}) "
+              f"by uid {approver}", file=sys.stderr)
         return 1
     done = "approved" if decision == "allow" else "denied"
     print(f"{done} request id={rid} uid={req.get('uid', 0)} "
