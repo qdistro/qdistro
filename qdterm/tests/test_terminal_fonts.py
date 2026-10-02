@@ -306,6 +306,65 @@ def test_font_preview_uses_selected_scheme_background(window, qtbot):
     assert "background: #ffffff" in dlg._font_preview.styleSheet()
 
 
+def test_font_preview_uses_pending_dark_scheme(window, qtbot):
+    cfg = Config()
+    cfg.set("general", "dark_color_scheme", "Linux")
+    cfg.set("general", "theme_mode", "dark")
+    cfg.set("profiles", "default", "color_source", "appearance-mode")
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    assert dlg._chk_appearance_colors.isChecked()
+    dlg._theme_mode.setCurrentIndex(1)  # Dark
+    old_sheet = dlg._font_preview.styleSheet()
+    idx = dlg._dark_color_scheme.findText("BlackOnWhite")
+    assert idx >= 0
+    dlg._dark_color_scheme.setCurrentIndex(idx)
+    sheet = dlg._font_preview.styleSheet()
+    assert sheet != old_sheet
+    assert "background: #ffffff" in sheet
+    assert cfg.get("general", "dark_color_scheme") == "Linux"
+
+
+def test_font_preview_shows_fractional_desktop_size(qtbot, tmp_path, monkeypatch):
+    cfg = Config()
+    cfg.set("profiles", "default", "font_source", "desktop")
+    cfg.set("profiles", "default", "font_family", "Monospace")
+    cfg.set("profiles", "default", "font_size", 11)
+    write_snapshot(
+        str(tmp_path),
+        _fixed_snapshot("Hack", 1.2),
+        require_unwritable_dirs=False,
+    )
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(QApplication.instance(), Config())
+    win = MainWindow()
+    qtbot.addWidget(win)
+    dlg = PreferencesDialog(win)
+    qtbot.addWidget(dlg)
+    assert dlg._chk_desktop_font.isChecked()
+    assert dlg._font_size.value() == pytest.approx(13.2)
+    assert dlg._font_preview.font().pointSizeF() == pytest.approx(13.2)
+    dlg._apply()
+    assert cfg.get("profiles", "default", "font_size") == 11
+    assert cfg.get("profiles", "default", "font_family") == "Monospace"
+
+
+def test_preview_scheme_colors_reads_scheme_file(tmp_path, monkeypatch):
+    from qterminator.terminal_style import parse_colorscheme_file, preview_scheme_colors
+
+    path = tmp_path / "CustomPreview.colorscheme"
+    path.write_text(
+        "[Background]\nColor=17,34,51\n\n[Foreground]\nColor=170,187,204\n",
+        encoding="utf-8",
+    )
+    assert parse_colorscheme_file(str(path)) == ("#112233", "#aabbcc")
+    monkeypatch.setattr(
+        "qterminator.terminal_style._scheme_search_dirs",
+        lambda: [str(tmp_path)],
+    )
+    assert preview_scheme_colors("CustomPreview") == ("#112233", "#aabbcc")
+
+
 def test_preferences_has_desktop_font_checkbox(window, qtbot):
     dlg = PreferencesDialog(window)
     qtbot.addWidget(dlg)
