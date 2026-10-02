@@ -1,5 +1,8 @@
 #!/bin/bash
-# Install the graphical admin approval UI for the uid-1000 qdwin session.
+# Install the admin approval surfaces (the chain's `admin-app` step): the
+# graphical approval UI for the uid-1000 qdwin session here, then the root
+# CLI (qdistro-approvals) and the terminal UI (qdistro-admin-tui) through
+# install-admin-cli-for-vm.sh, which fresh-vm-bootstrap.sh also runs.
 # DESTDIR allows a host-only layout test; production paths remain absolute.
 set -euo pipefail
 
@@ -52,3 +55,7 @@ if [ -z "$DESTDIR" ]; then
     /usr/bin/python3 -c 'import dbus, dbus.mainloop.glib, yaml; from PyQt6 import QtCore, QtGui, QtWidgets'
 fi
 echo "graphical admin approval UI installed for uid-1000 Wayland sessions"
+
+# Non-graphical approve/deny path: the shipped image must have one even when
+# the Wayland session is down. Same DESTDIR, same fatality.
+bash "$_QDO_DIR/install-admin-cli-for-vm.sh" "$REPO_ROOT"

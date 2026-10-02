@@ -207,10 +207,12 @@ cd "$QD"
 # them: recall (cut from v1, decision D2; its installer refuses without
 # QDISTRO_ENABLE_POSTV1_RECALL=1), media and multimachine (audit
 # recommendation DEMOTE, fable-release/13 rows 11d/11e; never promoted into
-# the chain), and the admin approval-queue TUI (tui/; the chain does not
-# install it). The graphical admin approval app is installed by the chain's
-# admin-app step for the uid-1000 Wayland session. What IS installed is stated in image/AGENTS.md ("What the chain
-# installs").
+# the chain). The chain's admin-app step installs all three admin approval
+# surfaces: the graphical app for the uid-1000 Wayland session, the root CLI
+# /usr/local/sbin/qdistro-approvals (pending/approve/deny) and the terminal
+# UI /usr/local/bin/qdistro-admin-tui (install-admin-cli-for-vm.sh; Textual
+# comes from config.xml). What IS installed is stated in image/AGENTS.md
+# ("What the chain installs").
 export QDISTRO_REPO_ROOT="$SRC"
 export QDISTRO_PROFILE="$QDISTRO_IMAGE_PROFILE"
 export QDISTRO_STRICT=1

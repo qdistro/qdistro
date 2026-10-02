@@ -617,6 +617,8 @@ chain_root() {
     cp "$REPO/admin_app/qdistro_admin_app.py" "$T/root/usr/local/bin/qdistro-admin-approval-app"
     cp "$REPO/deploy/start-admin-app-wayland.sh" "$T/root/usr/local/bin/qdistro-start-admin-app"
     cp "$REPO/admin_app/qdistro-admin-app.desktop" "$T/root/usr/share/applications/qdistro-admin-app.desktop"
+    DESTDIR="$T/root" bash "$REPO/scripts/install/install-admin-cli-for-vm.sh" "$REPO" >/dev/null
+    mkdir -p "$T/root/usr/lib/python3.13/site-packages/textual"; : > "$T/root/usr/lib/python3.13/site-packages/textual/__init__.py"
     : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
     mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
     : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim/qmldir"
@@ -667,6 +669,11 @@ chain_root() {
     [[ "$output" == *"OK   [admin-app] UI script"* ]]
     [[ "$output" == *"OK   [admin-app] launcher uses native Wayland"* ]]
     [[ "$output" == *"OK   [admin-app] desktop entry launches installed UI"* ]]
+    [[ "$output" == *"OK   [admin-app] root approvals CLI"* ]]
+    [[ "$output" == *"OK   [admin-app] CLI runs under the system python"* ]]
+    [[ "$output" == *"OK   [admin-app] admin TUI command"* ]]
+    [[ "$output" == *"OK   [admin-app] admin TUI broker client"* ]]
+    [[ "$output" == *"OK   [admin-app] Textual for the admin TUI"* ]]
     [[ "$output" == *"OK   [identity] fstab uses UUID"* ]]
     [[ "$output" == *"OK   [identity] grub root=UUID"* ]]
     [[ "$output" == *"OK   [identity] EFI/BOOT fallback loader"* ]]
@@ -729,6 +736,15 @@ chain_root() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"MISS [admin-app] UI script"* ]]
     [[ "$output" == *"MISS [admin-app] desktop entry launches installed UI"* ]]
+}
+
+@test "verify-contents: missing approvals CLI or a dangling admin TUI link fails its required rows" {
+    chain_root dev
+    rm "$T/root/usr/local/sbin/qdistro-approvals" "$T/root/usr/local/lib/qdistro/admin-tui/qdistro_admin_tui.py"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MISS [admin-app] root approvals CLI"* ]]
+    [[ "$output" == *"MISS [admin-app] admin TUI command"*"target absent"* ]]
 }
 
 @test "verify-contents: tier-3 content rows -- unlocked silo password or admin outside the group is a MISS" {

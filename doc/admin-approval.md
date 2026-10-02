@@ -11,6 +11,52 @@ qdshell where applicable, or the root maintenance helper. The system-bus
 policy makes these methods reachable to the admin account, but the server-side
 peer identity check is the authority boundary.
 
+## Approving without the graphical app
+
+The image ships two non-graphical approval surfaces next to the Qt app. All
+three are installed by the bootstrap chain's `admin-app` step
+(`scripts/install/install-admin-app-for-vm.sh`, which runs
+`install-admin-cli-for-vm.sh`), so a machine install and the image get the
+same files.
+
+| Command | Run as | What it is |
+|---|---|---|
+| `qdistro-approvals` (`/usr/local/sbin`) | root | CLI: `pending`, `approve`, `deny`, plus the cache and audit commands (`list`, `revoke`, `audit`, `gc`, `audit-gc`) |
+| `qdistro-admin-tui` (`/usr/local/bin`) | the admin user (uid 1000) | Textual approval queue for any terminal (a VT, SSH, a serial console); same scopes and keys as the Qt app, see `tui/SHORTCUTS.md` |
+
+As root, for example over SSH while the admin's session is down:
+
+```sh
+qdistro-approvals pending                  # id, uid, pid, action, exe, details
+qdistro-approvals pending --json           # the broker's GetPending rows
+qdistro-approvals approve 12               # scope once (the default)
+qdistro-approvals approve 12 --scope 24h   # cached; warns, revoke with `revoke`
+qdistro-approvals deny 12
+qdistro-approvals audit --limit 5          # the decision's audit row
+```
+
+`approve` and `deny` call the broker's `DecideRequest` with the same
+semantics as the Qt app and the TUI: `--scope` takes the broker's scopes
+(`once`, `1h`, `24h`, `forever`, `forever_exe`, `forever_argv`,
+`forever_basename`, `forever_prefix`), and the broker refuses the ones a
+request cannot take (delegated and one-shot requests, argv scopes without a
+captured argv) with an error the CLI prints. A deny is never cached, so it is
+always sent with scope `once`. The broker ignores an unknown or
+already-decided id; the CLI checks `GetPending` first and exits 1 with
+`no pending request with id=N` instead of reporting success. Requester-
+supplied text (action, exe, details) is printed with control characters
+escaped. The audit row records `approver_uid` 0 for a CLI decision.
+
+How the broker recognises them: it reads `/proc/<pid>/exe`, which for a
+Python script is the interpreter (`/usr/bin/python3.13`), so for a Python
+peer it requires the installed script path in the process argv. When the
+kernel runs a script through its shebang it puts the path the script was
+executed by into argv, so `qdistro-approvals` (found on `PATH`) and
+`qdistro-admin-tui` are admitted, while `python3 cli/qdistro_approvals.py`
+from a source tree, a copy elsewhere, or the TUI run as root are refused
+with `AccessDenied`. The TUI therefore refuses to start as root and points
+at the CLI.
+
 ## Never block admin's work
 
 Traditional polkit agents pop modal dialogs that steal focus and block
