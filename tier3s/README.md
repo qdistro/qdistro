@@ -174,6 +174,12 @@ know; broker denial, a non-dev profile and a probe failure refuse with no
   without a silo.
 - **Under SIGKILL of the launch service** teardown is systemd killing the
   scope's cgroup, then verification; it is not a graceful `podman stop`.
+- **Open reaper gap (sol A-iii r4 P1, not fixed):** `--reap-stale` trusts the
+  unit named in a record or a container label. If that name is valid but
+  stale, while the token's scope is live and bound to another unit, the reaper
+  can tear down a live launch. Shipped launches always record and label their
+  own unit, so this needs corrupted or hand-edited metadata. The fix is
+  specified in `todo/paravirt/07-phase-A-progress.md` (A-iii, "Open").
 - **Templated tier 3s silos** are exercised only through a hand-written
   binding fixture (s121); no tier 3s template recipe or promotion flow exists.
 
