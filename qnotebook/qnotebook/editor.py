@@ -14,6 +14,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QTextCharFormat,
     QTextCursor,
+    QTextFormat,
     QTextImageFormat,
 )
 from PyQt6.QtWidgets import QCompleter, QTextEdit
@@ -111,6 +112,8 @@ class MarkdownEditor(QTextEdit):
         self._content_style = None
         self._content_highlighter = ContentPresentationHighlighter(self.document())
         self._spell_highlighter = None
+        self._external_selections: list[QTextEdit.ExtraSelection] = []
+        self._code_selections: list[QTextEdit.ExtraSelection] = []
 
     def set_live_reparse_enabled(self, on: bool) -> None:
         self._live_reparser.set_enabled(on)
@@ -423,6 +426,11 @@ class MarkdownEditor(QTextEdit):
             cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             cursor.setCharFormat(fmt)
 
+    def setExtraSelections(self, selections) -> None:  # noqa: N802
+        """Keep search highlights without dropping fenced-code restyle."""
+        self._external_selections = list(selections)
+        self._publish_extra_selections()
+
     def apply_content_presentation(self) -> None:
         """Paint inherited document fonts without dirtying or touching undo."""
         from .content_style import resolve_content_style
@@ -439,6 +447,33 @@ class MarkdownEditor(QTextEdit):
                 spell.rehighlight()
         elif getattr(self, "_content_highlighter", None) is not None:
             self._content_highlighter.set_style(style)
+        self._rebuild_code_block_selections()
+
+    def _rebuild_code_block_selections(self) -> None:
+        """Full-width extras cover empty fenced lines the highlighter cannot."""
+        style = self._content_style
+        bg = getattr(style, "code_background", None) if style is not None else None
+        color = QColor(bg) if bg else QColor()
+        out: list[QTextEdit.ExtraSelection] = []
+        if color.isValid():
+            block = self.document().firstBlock()
+            while block.isValid():
+                if str(block.blockFormat().property(BLOCK_KIND) or "") == "code":
+                    sel = QTextEdit.ExtraSelection()
+                    fmt = QTextCharFormat()
+                    fmt.setBackground(color)
+                    fmt.setProperty(int(QTextFormat.Property.FullWidthSelection), True)
+                    sel.format = fmt
+                    sel.cursor = QTextCursor(block)
+                    out.append(sel)
+                block = block.next()
+        self._code_selections = out
+        self._publish_extra_selections()
+
+    def _publish_extra_selections(self) -> None:
+        super().setExtraSelections(
+            list(self._code_selections) + list(self._external_selections)
+        )
 
     def _apply_char_format(self, fmt: QTextCharFormat) -> None:
         cur = self.textCursor()
