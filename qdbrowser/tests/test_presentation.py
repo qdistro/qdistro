@@ -108,7 +108,9 @@ def test_live_snapshot_restyles_overlay_without_reload(
     assert "location.reload" not in joined
     assert any("__qdb_translate_overlay" in js for js in scripts)
     assert any("__qdb_reader_overlay" in js for js in scripts)
+    assert any("__qdb_cosmetic" in js for js in scripts)
     assert any("pickRoot" in js for js in scripts) is False
+    assert any("createElement('style')" in js for js in scripts) is False
     dark.apply.assert_not_called()
     assert overlay_palette("auto")["bg"] == snap_b.colors.mSurface
 
@@ -162,7 +164,9 @@ def test_apply_presentation_update_restyles_tab_and_sidebar(window):
         assert "removed:true" not in joined
         assert any("__qdb_translate_overlay" in js for js in scripts)
         assert any("__qdb_reader_overlay" in js for js in scripts)
+        assert any("__qdb_cosmetic" in js for js in scripts)
         assert any("pickRoot" in js for js in scripts) is False
+        assert any("createElement('style')" in js for js in scripts) is False
     dark.apply.assert_any_call(window._active_webview)
     dark.apply.assert_any_call(sidebar)
 

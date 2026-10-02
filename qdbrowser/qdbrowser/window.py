@@ -814,6 +814,9 @@ class MainWindow(QMainWindow):
         reader = self.plugins._instances.get("reader_mode")
         if reader is not None and hasattr(reader, "restyle_overlays"):
             reader.restyle_overlays(views)
+        blocker = self.plugins._instances.get("content_blocker")
+        if blocker is not None and hasattr(blocker, "restyle_overlays"):
+            blocker.restyle_overlays(views)
         dark = self.plugins._instances.get("dark_mode")
         if dark is not None and hasattr(dark, "on_appearance_changed"):
             dark.on_appearance_changed(self._resolved_theme, views)
