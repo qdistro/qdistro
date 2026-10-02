@@ -63,11 +63,12 @@ Each run directory below holds, per bats file: the qci per-file log
 
 | Dir | Tested commit | qci run dir (host) | Result |
 |---|---|---|---|
-| `a-iii-qci-r2/` | `3d924d726` (run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-aiii/qci-runs/bats-20261002T103923Z-2830933` | **3/3 PASS** (`results.tsv`): s120 189 passes / 0 failures, s121 103/0, s122 126/0; each worker's setup 57/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-124208-*` were reaped by qci; the run's golden disk was removed by hand |
+| `a-iii-qci-r3/` | `0f10449f7` (run from a pinned, detached worktree of that commit) | `/var/tmp/t3s-aiii/qci-runs/bats-20261002T110045Z-2959259` | **3/3 PASS, the acceptance run** (`results.tsv`): s120 189 passes / 0 failures, s121 106/0, s122 126/0; each worker's setup 57/0. Workers `qci-bats-phase7-tier3s-{headless,denied,sigkill-cleanup}-261002-130337-*` were reaped by qci; the run's golden disk was removed by hand |
+| `a-iii-qci-r2/` | `3d924d726` | `/var/tmp/t3s-aiii/qci-runs/bats-20261002T103923Z-2830933` | 3/3 PASS (s120 189/0, s121 103/0, s122 126/0) before the sol r1 fixes (`0f10449f7`: the reaper's BindsTo check, the oracles' query-failure handling); superseded by r3 |
 | `a-iii-qci-r1/` | `0d9ade612` | `/var/tmp/t3s-aiii/qci-runs/bats-20261002T102945Z-2723488` | 2/3 PASS; s122 FAIL 106/2 = **finding**: on the launcher SIGKILL, `ExecStopPost`'s cleanup lost a race with `podman run --rm` (the container vanished between `exists` and `inspect`), so it preserved the record and the per-launch dir although sandbox, scope and container were gone (`phase7-tier3s-sigkill-cleanup.scratch/s122.log:18`–`35`). Fixed in `4fbeb43c7` (a failed inspect/stop is re-queried; only a definitive "absent" continues); the SIGKILL case now runs 3× (`3d924d726`). The failed worker (kept powered off by qci) was destroyed and undefined |
 | `a-iii-dev/` | dev VM `tier3s-261002-115945-2329209-31246` | n/a (vm-exec) | development runs kept for two findings: `s122-dev1-reaper-findings.log` (podman 6 rejects `index .Labels` in a `ps` template, so `--reap-stale` failed whenever a labelled container existed; an orphan per-launch dir was left when the reap raced the scope's BindsTo stop; fixed in `007fab313`) and `s120-dev2-smoke-sigterm-race.log` (a driver bug: `podman stop` before the smoke installed its TERM trap; the drivers now wait for `SMOKE holding`) |
 
-### Δ DONE bar → evidence (all in `a-iii-qci-r2/`; `file:line`)
+### Δ DONE bar → evidence (all in `a-iii-qci-r3/`; `file:line`)
 
 Abbreviations: `s120` = `phase7-tier3s-headless.scratch/s120.log`, `s121` =
 `phase7-tier3s-denied.scratch/s121.log`, `s122` =
@@ -81,18 +82,18 @@ Abbreviations: `s120` = `phase7-tier3s-headless.scratch/s120.log`, `s121` =
 | 2 | normal exit | PASS | `s120:22`–`34` |
 | 2 | plain `podman stop`; plain `podman rm -f` | PASS | `s120:243`–`253`; `s120:256`–`265` |
 | 2 | session-manager stop (`StopSilo`) | PASS | `s120:177`–`186` |
-| 2 | launcher SIGKILL / service failure, 3× | PASS | `s122:19`–`61` |
-| 2 | session-manager crash (SIGKILL) and restart | PASS | `s122:98`–`112`, `s122:113`–`127` (old launch got a propagated stop job and the verified cleanup; everything gone; relaunched with a fresh token) |
-| 2 | restart reconciliation after state loss: a live launch unit the manager never started; the same with its record removed; a live labelled container with no unit | PASS | `s122:135`–`144`; `s122:145`–`155`; `s122:158`–`161` |
+| 2 | launcher SIGKILL / service failure, 3× | PASS | `s122:19`–`59` |
+| 2 | session-manager crash (SIGKILL) and restart | PASS | `s122:96`–`110`, `s122:111`–`125` (old launch got a propagated stop job and the verified cleanup; everything gone; relaunched with a fresh token) |
+| 2 | restart reconciliation after state loss: a live launch unit the manager never started; the same with its record removed; a live labelled container with no unit | PASS | `s122:133`–`142`; `s122:143`–`153`; `s122:156`–`159` |
 | 2 | forced runtime failure while live (root replaced, then missing): an error, record + scope preserved, no false "no container"; restored root → complete teardown | PASS | `s120:213`–`228`; `s120:229`–`240` |
-| O11 | a session-manager **stop** leaves no launch-owned process, scope, token dir or control dir | PASS | `s122:64`–`87` (two live launches, each stopped through the verified cleanup before the manager, then every absence check) |
+| O11 | a session-manager **stop** leaves no launch-owned process, scope, token dir or control dir | PASS | `s122:62`–`85` (two live launches, each stopped through the verified cleanup before the manager, then every absence check) |
 | 3 | two concurrent launches; tearing one down preserves the other | PASS | `s120:166`–`189` |
 | 4 | runtime identity (ΔA9); corroboration as INFO only | PASS | `s120:48`–`55` |
 | 4 | state-root policy (ΔA1): plain `ps`/`ps --sync`/`stop`/`rm -f` reach the sandbox; missing or replaced root: a plain stop fails visibly, nothing minted, record and scope kept | PASS | `s120:56`–`59`, `s120:244`, `s120:257`; `s120:191`–`207` |
 | ΔA8 | the control record's fields and modes | PASS | `s120:60`–`69` |
-| 5 | broker denial (no rule = unknown, explicit deny; untemplated and templated) ⇒ no `podman run`, no activation record; positive control sees both | PASS | fixture `s121:13`–`14`; denials `s121:20`–`81`; control `s121:84`–`116` |
-| 6 | hardened profiles (release, daily) refuse with a clear message at create, start, in the spawn and the probe; a probe failure refuses; no fallback | PASS | `s121:118`–`161`; `s121:163`–`178` |
-| 7 | tier-2 unit and static suites unchanged and passing; no `tier2/` file in the diff | PASS | `../tier2-suites-a-iii-host.log` |
+| 5 | broker denial (no rule = unknown, explicit deny; untemplated and templated) ⇒ no `podman run`, no activation record; positive control sees both | PASS | fixture `s121:13`–`14`; oracle self-tests (a failing query is reported, never counted as "nothing") `s121:15`–`17`; denials `s121:23`–`84`; control `s121:87`–`119` |
+| 6 | hardened profiles (release, daily) refuse with a clear message at create, start, in the spawn and the probe; a probe failure refuses; no fallback | PASS | `s121:121`–`163`; `s121:166`–`181` |
+| 7 | tier-2 unit and static suites unchanged and passing; no `tier2/` file in the diff | PASS | `../tier2-suites-a-iii-host.log`: 0 `tier2/` files changed; unit 130 passed; static: `bash -n` rc 0, `shellcheck -S warning -e SC1090` rc 0 under a documented baseline waiver (the single SC1090 at `tier2/spawn-tier2.sh:800` is pre-existing and byte-identical on `claude/tier3s`; `tier2/` may not be edited in Phase A) |
 | 8 | posture from the OCI spec and the running sandbox; ΔA5 image; `fchmodat2` path; each ΔA4 decision | PASS | spec `s120:91`–`112`; sandbox and image `s120:145`–`163` |
 | O10 | the installer installs tier 3s only with `QDISTRO_TIER3S=1` (fresh worker: none before; none after a flag-less run; all after the flagged run) | PASS | `setup:6`–`17`, `setup:19`–`53` |
 | lane | qci-lane provisioning: tested commit, runsc sha512, offline provision, probe PASS, image ID = manifest | PASS | `setup:8`–`103`; tested commit on `phase7-tier3s-*.bats.log:2` |
@@ -101,5 +102,5 @@ Abbreviations: `s120` = `phase7-tier3s-headless.scratch/s120.log`, `s121` =
 
 | Log | Tree | Result |
 |---|---|---|
-| `tier2-suites-a-iii-host.log` | `3d924d726` | DONE bar 7: `tier2/` files changed vs `claude/tier3s`: 0; `git diff … -- tier2 tier3 qdshell qdwin`: 0 lines; tier-2 unit suites (`test_tier2_spawn`, `test_tier2_snapshot_repos`, `test_podapp_launch`, `test_podapps_scan`, `test_silo_launch`, `test_spawn_common`) 130 passed; `shellcheck -S warning tier2/*.sh` rc 1 from the pre-existing SC1090, identical to the `claude/tier3s` baseline; tier3s + session-manager + broker suites 1309 passed, 1 skipped (the pre-existing real-root skip) |
-| `mutate-guards-a-iii-host.log` | `3d924d726` | 88 mutations (29 Phase 0 + 26 A-i + 23 A-ii + 10 A-iii: I3–I5 installer opt-in O10, U2/U3 stop propagation O11, R1–R5 reaper/teardown VM findings) all caught; files restored byte-identical |
+| `tier2-suites-a-iii-host.log` | the final branch tip (code = `0f10449f7`) | DONE bar 7 (`### RESULT: PASS`): `tier2/` files changed vs `claude/tier3s`: 0; tier-2 unit suites (`test_tier2_spawn`, `test_tier2_snapshot_repos`, `test_podapp_launch`, `test_podapps_scan`, `test_silo_launch`, `test_spawn_common`) 130 passed; static `bash -n` rc 0, `shellcheck -S warning -e SC1090` rc 0 with the SC1090 baseline waiver, the unwaived output a single SC1090 identical to the `claude/tier3s` baseline; tier3s + session-manager + broker suites (context) 1317 passed, 1 skipped (the pre-existing real-root skip) |
+| `mutate-guards-a-iii-host.log` | code = `0f10449f7` | 90 mutations (29 Phase 0 + 26 A-i + 23 A-ii + 12 A-iii: I3–I5 installer opt-in O10, U2/U3 stop propagation O11, R1–R7 reaper/teardown findings from the VM, qci and sol r1) all caught; files restored byte-identical |
