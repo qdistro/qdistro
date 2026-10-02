@@ -2531,9 +2531,12 @@ class Broker(dbus.service.Object):
         # (07-disposables-plan P2). Export-back (qdistro.dispose.export:<class>)
         # joins the set too: promoting bytes OUT of a throwaway into a real silo
         # (the D7 copy-exception) is a class-level decision only an explicit
-        # admin rule may authorize — never a cached/hook verdict.
+        # admin rule may authorize — never a cached/hook verdict. Tier 3s
+        # (gVisor, qdistro.tier3s.spawn:<workload>/<app>; tier3s/CONTRACT.md
+        # §5 step 8) is a tier launch like tier 1/2 and joins the set.
         if action_s.startswith(("qdistro.tier1.spawn:",
                                 "qdistro.tier2.spawn:",
+                                "qdistro.tier3s.spawn:",
                                 "qdistro.dispose.spawn:",
                                 "qdistro.dispose.open:",
                                 "qdistro.dispose.export:")):
