@@ -34,6 +34,10 @@ NATIVE = "#fedcba"
 FONT_FAMILY = "DejaVu Sans"
 FONT_FAMILY_TOKEN = "DejaVu_Sans"
 FONT_UI_SCALE = 1.25
+FONT_SIZE = 11.0 * FONT_UI_SCALE
+FONT_SIZE_TOKEN = f"{FONT_SIZE:.2f}"
+BASE_FAMILY_TOKEN = "Sans_Serif"
+SIZE_TOLERANCE = 0.05
 PHASE_TIMEOUT = 30.0
 SETTLE = 0.5
 SETTLE_PHASES = frozenset({"malformed", "delete"})
@@ -100,6 +104,14 @@ def widget_hex(widget) -> str:
 
 def family_token(widget) -> str:
     return widget.font().family().replace(" ", "_")
+
+
+def size_token(widget) -> str:
+    return f"{widget.font().pointSizeF():.2f}"
+
+
+def size_matches(widget, want: float) -> bool:
+    return abs(widget.font().pointSizeF() - want) <= SIZE_TOLERANCE
 
 
 def isolate_home(root: Path) -> None:
@@ -232,7 +244,7 @@ def chrome_status(windows) -> str:
         return " chrome=hidden"
     return (
         f" win0={widget_hex(w0)} win1={widget_hex(w1)} dlg={widget_hex(dlg)}"
-        f" uifamily={family_token(w0)}"
+        f" uifamily={family_token(w0)} uisize={size_token(w0)}"
     )
 
 
@@ -249,12 +261,14 @@ def chrome_matches(windows, want_window: str | None, *, fonts: bool) -> bool:
             return False
         if widget_hex(dlg) != want_window:
             return False
-    if fonts and family_token(w0) != FONT_FAMILY_TOKEN:
-        return False
-    if fonts and family_token(w1) != FONT_FAMILY_TOKEN:
-        return False
-    if fonts and family_token(dlg) != FONT_FAMILY_TOKEN:
-        return False
+    if fonts:
+        for widget in (w0, w1, dlg):
+            if family_token(widget) != FONT_FAMILY_TOKEN:
+                return False
+            if family_token(widget) == BASE_FAMILY_TOKEN:
+                return False
+            if not size_matches(widget, FONT_SIZE):
+                return False
     return True
 
 
@@ -371,34 +385,30 @@ def run_worker(
                 windows, want_window, fonts=(cmd == "fonts")
             )
         extra = chrome_status(windows)
+        gen = ctrl.state.generation or "-"
+        line = f"phase={cmd} shared={shared} window={color} gen={gen}{extra}\n"
         if cmd in SETTLE_PHASES:
             if now - settle_started < SETTLE:
                 time.sleep(0.05)
                 continue
             if matched:
-                atomic_write(
-                    status_path,
-                    f"phase={cmd} shared={shared} window={color}{extra}\n",
-                )
+                atomic_write(status_path, line)
                 seen = f"{cmd}-done"
             else:
                 print(
                     f"FAIL: {app_name} lost last-known-good on {cmd}: "
                     f"shared={shared} window={color} surface={surface_of(ctrl)}"
-                    f"{extra}",
+                    f" gen={gen}{extra}",
                     file=sys.stderr,
                 )
                 return 1
         elif matched:
-            atomic_write(
-                status_path,
-                f"phase={cmd} shared={shared} window={color}{extra}\n",
-            )
+            atomic_write(status_path, line)
             seen = f"{cmd}-done"
         elif now > deadline:
             print(
                 f"FAIL: {app_name} did not follow {cmd}: shared={shared} "
-                f"window={color} surface={surface_of(ctrl)}{extra}",
+                f"window={color} surface={surface_of(ctrl)} gen={gen}{extra}",
                 file=sys.stderr,
             )
             return 1
@@ -498,6 +508,8 @@ def assert_chrome(
     *,
     window: str,
     family: str | None = None,
+    size: str | None = None,
+    generation: str | None = None,
 ) -> None:
     for name, path in statuses.items():
         parsed = parse_status(read_text(path))
@@ -513,6 +525,14 @@ def assert_chrome(
         if family is not None and parsed.get("uifamily") != family:
             raise SystemExit(
                 f"FAIL: {name} chrome uifamily want {family}: {text}"
+            )
+        if size is not None and parsed.get("uisize") != size:
+            raise SystemExit(
+                f"FAIL: {name} chrome uisize want {size}: {text}"
+            )
+        if generation is not None and parsed.get("gen") != generation:
+            raise SystemExit(
+                f"FAIL: {name} chrome gen want {generation}: {text}"
             )
 
 
@@ -671,7 +691,13 @@ def run_orchestrator() -> int:
             raise SystemExit("FAIL: fonts reused generation")
         atomic_write(cmd_path, "fonts\n")
         wait_phase(running, procs, "fonts", PHASE_TIMEOUT, shared="1", window=COLOR_C)
-        assert_chrome(boot, window=COLOR_C, family=FONT_FAMILY_TOKEN)
+        assert_chrome(
+            boot,
+            window=COLOR_C,
+            family=FONT_FAMILY_TOKEN,
+            size=FONT_SIZE_TOKEN,
+            generation=gen_fonts,
+        )
 
         (snap / "current.json").unlink()
         atomic_write(cmd_path, "delete\n")

@@ -36,5 +36,9 @@ setup() {
     grep -q 'from qdbrowser.preferences import PreferencesDialog' "$PROBE"
     grep -q 'from qnotebook.settings_dialog import SettingsDialog' "$PROBE"
     grep -q 'with_windows=True' "$PROBE"
-    grep -q 'assert_chrome(boot, window=COLOR_C, family=FONT_FAMILY_TOKEN)' "$PROBE"
+    grep -qF 'size_matches(widget, FONT_SIZE)' "$PROBE"
+    grep -qF 'FONT_SIZE = 11.0 * FONT_UI_SCALE' "$PROBE"
+    grep -qF 'FONT_UI_SCALE = 1.25' "$PROBE"
+    grep -qF 'size=FONT_SIZE_TOKEN' "$PROBE"
+    grep -qF 'generation=gen_fonts' "$PROBE"
 }
