@@ -1,0 +1,73 @@
+#!/bin/bash
+# qdistro-tier3s-scope — root-owned helper (installed as
+# /usr/libexec/qdistro/qdistro-tier3s-scope). It is the FIRST process of a
+# tier-3s launch's transient scope (tier3s/CONTRACT.md "D-A3b"):
+#
+#   systemd-run --scope --unit=qdistro-tier3s-<token>.scope -p Delegate=yes ... \
+#     -- qdistro-tier3s-scope enter <token> <admin-uid> -- podman <args...>
+#
+# It (1) verifies it runs as root as the only process of exactly the cgroup of
+# qdistro-tier3s-<token>.scope; (2) delegates that cgroup to the admin uid
+# SELECTIVELY: the directory, cgroup.procs, cgroup.subtree_control and
+# cgroup.threads (what systemd's own Delegate= hands a unit's User=), while
+# every limit and accounting file (memory.max, pids.max, ...) stays root's;
+# (3) execs podman AS ADMIN through runuser with a fixed environment. An
+# admin-writable scope is what keeps rootless podman (cgroupfs manager),
+# conmon and every runsc process inside it (Phase S logs 35/36). It never runs
+# anything as root and accepts no other mode or program.
+#
+# Test hook ONLY: TIER3S_TEST_ROOT prefixes /proc/self/cgroup and
+# /sys/fs/cgroup and keeps the caller's PATH (fakes); refused for root.
+set -euo pipefail
+if [ "$EUID" -eq 0 ] || [ -z "${TIER3S_TEST_ROOT:-}" ]; then PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; fi
+die() { printf 'qdistro-tier3s-scope: FAIL: %s\n' "$*" >&2; exit 2; }
+T="${TIER3S_TEST_ROOT:-}"
+if [ -n "$T" ]; then
+    [ "$EUID" -ne 0 ] || die "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"
+    case "$T" in /?*) ;; *) die "TIER3S_TEST_ROOT must be absolute" ;; esac
+    SELF_CGROUP="$T/proc/self/cgroup"; SELF_PID="${TIER3S_TEST_PID:-$$}"
+else
+    [ "$EUID" -eq 0 ] || die "must run as root (first process of the launch scope)"
+    SELF_CGROUP=/proc/self/cgroup; SELF_PID=$$
+fi
+CGROOT="$T/sys/fs/cgroup"
+
+[ "$#" -ge 5 ] && [ "$1" = enter ] && [ "$4" = -- ] && [ "$5" = podman ] \
+    || die "usage: qdistro-tier3s-scope enter <token> <admin-uid> -- podman <args...>"
+TOKEN="$2"; ADMIN_UID="$3"; shift 5
+[[ "$TOKEN" =~ ^[0-9a-f]{32}$ ]] || die "token must be 32 lowercase hex digits"
+[[ "$ADMIN_UID" =~ ^[1-9][0-9]*$ ]] || die "admin uid must be a non-root numeric uid"
+if [ -z "$T" ]; then
+    [ "$ADMIN_UID" = 1000 ] || die "qdistro's admin uid is 1000, got $ADMIN_UID"
+fi
+ADMIN_USER="$(getent passwd "$ADMIN_UID" | cut -d: -f1)"
+ADMIN_HOME="$(getent passwd "$ADMIN_UID" | cut -d: -f6)"
+[ -n "$ADMIN_USER" ] && [ -n "$ADMIN_HOME" ] || die "no passwd entry for uid $ADMIN_UID"
+
+# (1) exactly our scope, and we are its only process
+mapfile -t lines < "$SELF_CGROUP"
+[ "${#lines[@]}" -eq 1 ] && [[ "${lines[0]}" == 0::/* ]] || die "not on a pure cgroup v2 hierarchy: ${lines[*]}"
+REL="${lines[0]#0::}"
+UNIT="qdistro-tier3s-$TOKEN.scope"
+[ "${REL##*/}" = "$UNIT" ] || die "running in cgroup $REL, not in $UNIT"
+case "$REL" in */../*|*/./*|*//*) die "odd cgroup path $REL" ;; esac
+DIR="$CGROOT$REL"
+[ -d "$DIR" ] && [ ! -L "$DIR" ] || die "scope cgroup $DIR is not a directory"
+[ "$(stat -c %u -- "$DIR")" = "$(id -u)" ] || die "scope cgroup $DIR is not owned by the caller"
+procs="$(tr '\n' ' ' < "$DIR/cgroup.procs")"
+[ "$procs" = "$SELF_PID " ] || die "scope $UNIT already holds processes [$procs], want only $SELF_PID"
+[ -z "$(find "$DIR" -mindepth 1 -type d -print -quit)" ] || die "scope $UNIT already has child cgroups"
+
+# (2) selective delegation: these four and nothing else
+for f in "$DIR/cgroup.procs" "$DIR/cgroup.subtree_control" "$DIR/cgroup.threads"; do
+    [ -f "$f" ] && [ ! -L "$f" ] || die "$f missing"
+done
+chown "$ADMIN_UID" -- "$DIR" "$DIR/cgroup.procs" "$DIR/cgroup.subtree_control" "$DIR/cgroup.threads"
+printf 'qdistro-tier3s-scope: %s delegated to uid %s (dir, cgroup.procs, cgroup.subtree_control, cgroup.threads)\n' "$REL" "$ADMIN_UID" >&2
+
+# (3) podman as admin, fixed environment (runuser stays as the PAM parent,
+# inside the scope)
+if [ -n "$T" ]; then PODMAN="$(command -v podman)"; else PODMAN=/usr/bin/podman; fi
+exec runuser -u "$ADMIN_USER" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$ADMIN_HOME" \
+    USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+    "$PODMAN" "$@"
