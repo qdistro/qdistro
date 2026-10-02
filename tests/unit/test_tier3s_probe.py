@@ -275,9 +275,10 @@ def test_test_hooks_refused_without_test_root(tmp_path):
         assert r.returncode == 2 and f"{hook} is a unit-test hook" in r.stderr
 
 
-def _swap_during(inst, point, tmp_path):
-    """Run the probe paused at <point>; while paused, atomically replace runsc
-    with a same-mode script that leaves a different marker."""
+def _swap_during(inst, point, tmp_path, in_place=False):
+    """Run the probe paused at <point>; while paused, replace runsc with a
+    same-mode script that leaves a different marker: atomically by rename (new
+    inode), or in_place (same inode, rewritten bytes)."""
     ctl = tmp_path / "ctl"
     ctl.mkdir()
     env = dict(os.environ, QDISTRO_PROBE_ROOT=str(inst.root), QDISTRO_PROBE_PIN=str(inst.pin),
@@ -290,10 +291,18 @@ def _swap_during(inst, point, tmp_path):
         assert p.poll() is None, "probe exited before reaching " + point + ":\n" + p.communicate()[0]
         assert time.monotonic() < deadline, "probe never reached " + point
         time.sleep(0.05)
-    evil = inst.runsc_dir / ".evil"
-    evil.write_text(fake_runsc(inst.marker, text="ATTACKER"))
-    evil.chmod(0o755)
-    os.replace(evil, inst.runsc_dir / "runsc")
+    if in_place:
+        rs = inst.runsc_dir / "runsc"
+        ino = os.stat(rs).st_ino
+        with open(rs, "r+") as f:
+            f.write(fake_runsc(inst.marker, text="ATTACKER"))
+            f.truncate()
+        assert os.stat(rs).st_ino == ino
+    else:
+        evil = inst.runsc_dir / ".evil"
+        evil.write_text(fake_runsc(inst.marker, text="ATTACKER"))
+        evil.chmod(0o755)
+        os.replace(evil, inst.runsc_dir / "runsc")
     (ctl / f"{point}.release").touch()
     out, err = p.communicate(timeout=120)
     return p.returncode, out, err
@@ -304,6 +313,16 @@ def test_swap_between_validation_and_open_is_never_executed(tmp_path):
     rc, out, err = _swap_during(inst, "before-open", tmp_path)
     assert rc == 1, out + err
     assert "FAIL runsc_version: not executed: opened inode" in out, out
+    assert not inst.executed(), out
+
+
+def test_in_place_rewrite_between_validation_and_open_is_never_executed(tmp_path):
+    """Same inode (dev:ino unchanged), new bytes: only the sha512 read through
+    the opened fd catches it."""
+    inst = Install(tmp_path)
+    rc, out, err = _swap_during(inst, "before-open", tmp_path, in_place=True)
+    assert rc == 1, out + err
+    assert "FAIL runsc_version: not executed: sha512 of the opened inode differs" in out, out
     assert not inst.executed(), out
 
 
