@@ -200,6 +200,10 @@ class TerminalTitlebar(QFrame):
 
         activity_role = self._activity_role if self._activity_role in CHROME_ROLES else "activity"
         activity_color = roles.get(activity_role, roles["activity"])
+        if activity_role == "primary" and self._active:
+            # primary fills the active bar; use the on-primary pair so the
+            # progress dot stays visible on that background.
+            activity_color = roles["active_fg"]
         self._activity_label.setFont(small_font)
         self._activity_label.setStyleSheet(f"color: {activity_color};")
 
