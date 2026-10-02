@@ -187,3 +187,108 @@ def test_launcher_times_out_when_app_never_paints(tmp_path):
         assert "painted no window within 1s" in proc.stderr
     finally:
         subprocess.run(["pkill", "-f", str(tmp_path / "home")], check=False)
+
+
+# The SHIPPED native-Wayland launcher (deploy/start-admin-app-wayland.sh) has
+# the same contract behind QDISTRO_ADMIN_APP_WAIT_PAINTED=1: the qdwin GUI lane
+# launches the admin app through it and captures right after it returns.
+def _fake_wayland_launcher(tmp_path, app_body: str):
+    """Run the real Wayland launcher against a stand-in app as 'uid 1000'."""
+    import socket
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "id").write_text("#!/bin/bash\nprintf '1000\\n'\n")
+    (bindir / "id").chmod(0o755)
+    app = tmp_path / "stand-in-app.py"
+    app.write_text(app_body)
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(str(runtime / "wayland-test"))
+    except OSError as exc:  # pragma: no cover - sandboxed hosts
+        pytest.skip(f"cannot bind a unix socket here: {exc}")
+    launcher = (ROOT / "deploy" / "start-admin-app-wayland.sh").read_text()
+    app_path = "/usr/local/bin/qdistro-admin-approval-app"
+    assert launcher.count(app_path) == 3  # two detached starts + the exec
+    script = tmp_path / "start-admin-app-wayland.sh"
+    script.write_text(launcher.replace(app_path, str(app)))
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}",
+           "XDG_RUNTIME_DIR": str(runtime), "WAYLAND_DISPLAY": "wayland-test",
+           "QDISTRO_ADMIN_APP_READY_TIMEOUT": "5"}
+    return script, env, runtime, sock
+
+
+def test_wayland_launcher_wait_mode_returns_pid_after_marker(tmp_path):
+    script, env, runtime, sock = _fake_wayland_launcher(tmp_path, (
+        "import os, sys, time\n"
+        "assert os.environ['QT_QPA_PLATFORM'] == 'wayland'\n"
+        "print('app output must not reach the launcher stdout', flush=True)\n"
+        "time.sleep(1)\n"
+        "open(sys.argv[0] + '.painted', 'w').close()\n"
+        "open(os.environ['QDISTRO_ADMIN_APP_READY_FILE'], 'x').write('painted\\n')\n"
+        "time.sleep(30)\n"))
+    env["QDISTRO_ADMIN_APP_WAIT_PAINTED"] = "1"
+    try:
+        proc = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                              text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+        # It returned only after the app painted, not straight after the fork.
+        assert (tmp_path / "stand-in-app.py.painted").exists()
+        # stdout carries the pid and nothing else; the app's output is in its log.
+        assert proc.stdout.strip().isdigit(), proc.stdout
+        os.kill(int(proc.stdout.strip()), 0)
+        logs = list(runtime.glob("qdistro-admin-app.*.log"))
+        assert len(logs) == 1 and str(logs[0]) in proc.stderr
+        assert not list(runtime.glob("qdistro-admin-app-ready.*")), "ready dir removed"
+    finally:
+        sock.close()
+        subprocess.run(["pkill", "-f", str(tmp_path / "stand-in-app.py")], check=False)
+    assert "app output must not reach" in logs[0].read_text()
+
+
+def test_wayland_launcher_wait_mode_fails_when_app_dies_before_painting(tmp_path):
+    script, env, _, sock = _fake_wayland_launcher(tmp_path, "raise SystemExit(1)\n")
+    env["QDISTRO_ADMIN_APP_WAIT_PAINTED"] = "1"
+    try:
+        proc = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                              text=True, timeout=30)
+    finally:
+        sock.close()
+    assert proc.returncode == 3
+    assert "exited before painting its window" in proc.stderr
+    assert proc.stdout.strip().isdigit()
+
+
+def test_wayland_launcher_wait_mode_times_out_when_app_never_paints(tmp_path):
+    script, env, _, sock = _fake_wayland_launcher(tmp_path, "import time\ntime.sleep(30)\n")
+    env["QDISTRO_ADMIN_APP_WAIT_PAINTED"] = "1"
+    env["QDISTRO_ADMIN_APP_READY_TIMEOUT"] = "1"
+    try:
+        proc = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                              text=True, timeout=30)
+        assert proc.returncode == 3
+        assert "painted no window within 1s" in proc.stderr
+    finally:
+        sock.close()
+        subprocess.run(["pkill", "-f", str(tmp_path / "stand-in-app.py")], check=False)
+
+
+def test_wayland_launcher_desktop_mode_execs_the_app(tmp_path):
+    # Without the opt-in the launcher must stay an exec: the pid the shell
+    # started IS the app, and its exit status is the app's.
+    script, env, _, sock = _fake_wayland_launcher(tmp_path, (
+        "import os, sys\n"
+        "print('pid', os.getpid(), 'ppid', os.getppid(),"
+        " 'ready', os.environ.get('QDISTRO_ADMIN_APP_READY_FILE', '-'), sys.argv[1:])\n"
+        "raise SystemExit(7)\n"))
+    try:
+        proc = subprocess.Popen(["bash", str(script), "approval-test"], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        sock.close()
+    assert proc.returncode == 7, err
+    assert out.split()[:2] == ["pid", str(proc.pid)], out
+    assert "ready -" in out and "['approval-test']" in out
