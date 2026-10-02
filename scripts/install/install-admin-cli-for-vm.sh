@@ -71,8 +71,18 @@ ln -sfn "$TUI_LIB/qdistro_admin_tui.py" "$DESTDIR/usr/local/bin/qdistro-admin-tu
 
 # The image and machine bootstrap install these from distro packages
 # (python313-dbus-python, python313-textual, python313-rich). Catch a
-# packaging omission here while the strict image chain can fail.
+# packaging omission here while the strict image chain can fail. The CLI
+# needs only dbus-python (always fatal); a missing Textual is fatal under
+# QDISTRO_STRICT=1 (the image chain) and a warning otherwise, so an older
+# test base without it still gets the CLI.
 if [ -z "$DESTDIR" ]; then
-    /usr/bin/python3 -c 'import dbus, dbus.mainloop.glib, textual, rich'
+    /usr/bin/python3 -c 'import dbus, dbus.mainloop.glib'
+    if ! /usr/bin/python3 -c 'import textual, rich' 2>/dev/null; then
+        if [ "${QDISTRO_STRICT:-0}" = 1 ]; then
+            echo "ERROR: python313-textual/python313-rich missing; qdistro-admin-tui cannot start" >&2
+            exit 1
+        fi
+        echo "WARN: python313-textual/python313-rich missing; qdistro-admin-tui will not start until installed" >&2
+    fi
 fi
 echo "admin approval CLI (qdistro-approvals) and TUI (qdistro-admin-tui) installed"

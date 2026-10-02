@@ -176,18 +176,19 @@ if [ "$_net_ok" != 1 ]; then
     log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
 fi
 
-# The admin TUI (installed below by install-admin-cli-for-vm.sh, which
-# import-checks it) needs Textual. The image and newly baked bases carry it
-# (image/config.xml, scripts/vm/install-deps.sh); older bases do not.
+# The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
+# Textual. The kiwi image carries it (image/config.xml); the baked cloud base
+# does not yet (adding it to scripts/vm/install-deps.sh changes the baked
+# recipe key and forces a rebake, so it rides the next planned one).
 if ! /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1; then
     if [ "${QCI_OFFLINE:-0}" = 1 ]; then
-        log "ERROR: the admin TUI needs python313-textual and QCI_OFFLINE=1 forbids zypper; rebake the base"
-        exit 3
+        log "WARN: python313-textual missing and QCI_OFFLINE=1 forbids zypper; the admin TUI will not start in this VM"
+    else
+        log "installing python313-textual for the admin TUI"
+        zypper -n install --no-recommends python313-textual python313-rich \
+                >/tmp/qdistro-textual-install.log 2>&1 \
+            || { log "  ERROR: zypper install of python313-textual failed"; tail -80 /tmp/qdistro-textual-install.log; exit 3; }
     fi
-    log "installing python313-textual for the admin TUI"
-    zypper -n install --no-recommends python313-textual python313-rich \
-            >/tmp/qdistro-textual-install.log 2>&1 \
-        || { log "  ERROR: zypper install of python313-textual failed"; tail -80 /tmp/qdistro-textual-install.log; exit 3; }
 fi
 
 # ---- 0b. CI extras (iso/14 Phase G intermediate) ---------------------------

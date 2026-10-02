@@ -42,8 +42,6 @@ QDISTRO_PKGS=(
   python313-jeepney
   python313-PyYAML
   python313-cryptography
-  # Textual admin TUI (qdistro-admin-tui; install-admin-cli-for-vm.sh)
-  python313-textual python313-rich
   # rage (Rust age impl): the backup CLI (snapshots/qdistro_backup_cli.py)
   # encrypts every blob through `rage -e | ... | rage -d` ($QDISTRO_RAGE,
   # default "rage"). The package is `rage-encryption` (provides /usr/bin/rage
