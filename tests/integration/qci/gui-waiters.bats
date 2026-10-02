@@ -186,6 +186,15 @@ EOF
     [ "${#lines[@]}" -eq 2 ]
 }
 
+@test "qdwin_windows: journal read failure is an error, not an empty window list" {
+    _qdwin_fake_journal
+    journalctl() { return 1; }
+    export -f journalctl
+    run qdwin_windows
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot read compositor journal for pid 4242"* ]]
+}
+
 @test "qdwin_window_handle: whole-title match, optional pid filter" {
     _qdwin_fake_journal
     run qdwin_window_handle 'admin approvals \(1 pending\)'

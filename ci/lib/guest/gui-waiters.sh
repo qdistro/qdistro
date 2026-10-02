@@ -628,9 +628,15 @@ qdwin_compositor_pid() {
 #   <handle>\t<pid>\t<uid>\t<app_id>\t<title>
 # in handle order. Fails only when the compositor is not running.
 qdwin_windows() {
-    local pid
+    local pid journal
     pid=$(qdwin_compositor_pid) || return 1
-    journalctl _PID="$pid" --no-pager -o cat 2>/dev/null | awk '
+    # An unreadable journal is an observation error, not an empty window
+    # list. In particular the dialog probe must not treat it as dismissal.
+    journal=$(journalctl _PID="$pid" --no-pager -o cat 2>/dev/null) || {
+        printf 'ERROR: qdwin_windows: cannot read compositor journal for pid %s\n' "$pid" >&2
+        return 1
+    }
+    printf '%s\n' "$journal" | awk '
         function after(s, key,   i) { i = index(s, key); return i ? substr(s, i + length(key)) : "" }
         function unquote(s) { sub(/^"/, "", s); sub(/"$/, "", s); return s }
         /qdwin: toplevel_added handle=[0-9]+ / {
