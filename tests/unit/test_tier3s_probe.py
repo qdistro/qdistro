@@ -8,7 +8,9 @@ that appends to a marker file and prints the pinned version string, so a test
 can prove whether the probe executed it.
 """
 import hashlib
+import io
 import os
+import tarfile
 import pwd
 import shutil
 import subprocess
@@ -84,7 +86,11 @@ class Install:
             "podman": f"""#!/bin/sh
 case "$*" in
   "version --format {{{{.Client.Version}}}}") echo 6.0.2 ;;
-  "image exists "*) exit 0 ;;
+  "image exists "*) exit "${{T3S_FAKE_IMG_EXISTS_RC:-0}}" ;;
+  "import -q - "*)
+    ls -A "${{TMPDIR:-/tmp}}" > "$T3S_FAKE_DIR/tmpdir-at-import"
+    cat > "$T3S_FAKE_DIR/imported.tar"
+    [ "${{T3S_FAKE_IMPORT_RC:-0}}" = 0 ] || {{ echo "fake import failed: boom" >&2; exit "$T3S_FAKE_IMPORT_RC"; }} ;;
   "--runtime {self.wrapper} create "*) echo fakeid ;;
   "inspect --format {{{{.OCIRuntime}}}} "*) echo "{self.wrapper}" ;;
   "inspect --format {{{{.ProcessLabel}}}}|{{{{.HostConfig.SecurityOpt}}}} "*) echo "|[label=disable]" ;;
@@ -364,3 +370,54 @@ def test_swap_between_verify_and_exec_runs_the_verified_inode(tmp_path):
     # every check passed before the swap, so this point-in-time screen is a
     # TEST-PASS; what matters is WHICH inode ran
     assert rc == 3, out
+
+
+# --- scratch-image import: no temporary path, no chmod (astra fix r2 P2) ---
+
+def _import_env(inst, **extra):
+    return dict(T3S_FAKE_IMG_EXISTS_RC="1", T3S_FAKE_DIR=str(inst.tmp), **extra)
+
+
+def _imported_members(inst):
+    t = tarfile.open(fileobj=io.BytesIO((inst.tmp / "imported.tar").read_bytes()))
+    return [(m.name, m.isdir(), m.mode, m.uid, m.gid) for m in t.getmembers()]
+
+
+def test_scratch_image_import_needs_no_temporary_path(tmp_path):
+    """Absent scratch image, TMPDIR unusable: the probe still imports a valid
+    one-entry archive, because it never creates a temporary directory."""
+    inst = Install(tmp_path)
+    ro = tmp_path / "ro-tmp"
+    ro.mkdir()
+    ro.chmod(0o555)
+    r = inst.probe(extra_env=_import_env(inst, TMPDIR=str(ro)))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert _imported_members(inst) == [(".", True, 0o755, 0, 0)]
+
+
+def test_scratch_image_import_leaves_hostile_tmpdir_and_sentinel_alone(tmp_path):
+    inst = Install(tmp_path)
+    hostile = tmp_path / "hostile-tmp"
+    hostile.mkdir()
+    hostile.chmod(0o777)
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("precious\n")
+    sentinel.chmod(0o600)
+    r = inst.probe(extra_env=_import_env(inst, TMPDIR=str(hostile)))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert (inst.tmp / "tmpdir-at-import").read_text() == ""   # nothing there while importing
+    assert list(hostile.iterdir()) == []
+    assert sentinel.read_text() == "precious\n" and sentinel.stat().st_mode & 0o777 == 0o600
+
+
+def test_scratch_image_import_failure_is_reported(tmp_path):
+    inst = Install(tmp_path)
+    log = tmp_path / "podman.log"
+    pod = inst.bin / "podman"
+    pod.write_text(pod.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\necho \"$*\" >> '{log}'\n", 1))
+    r = inst.probe(extra_env=_import_env(inst, T3S_FAKE_IMPORT_RC="1"))
+    assert r.returncode == 1
+    assert ("FAIL podman_runtime: could not import the empty scratch image "
+            "localhost/tier3s-probe:empty (rc=1: fake import failed: boom)") in r.stdout, r.stdout
+    assert "FAIL label_disable: not checked: scratch image import failed" in r.stdout
+    assert " create " not in log.read_text()

@@ -259,26 +259,36 @@ if [ -n "$pv" ] && [ "${WRAPPER_OK:-0}" -eq 1 ]; then
     # dev VM, spike/logs/phase0-20261001/). The image is an empty scratch
     # import, kept in the user's store for reuse; nothing is ever started.
     img=localhost/tier3s-probe:empty
+    import_err=""
     if ! as_user podman image exists "$img" 2>/dev/null; then
-        empty="$(mktemp -d)"; chmod 0755 "$empty"
-        tar -C "$empty" -cf - . | as_user podman import -q - "$img" >/dev/null 2>&1
-        rm -rf "$empty"
+        # No temporary directory and no chmod (astra fix r2): a one-entry
+        # archive ("./", 0755, uid/gid 0) built from /'s metadata alone with
+        # --no-recursion, so nothing on the host is created or modified and no
+        # attacker-replaceable pathname (e.g. under a hostile $TMPDIR) is used.
+        imp="$(tar -C / --no-recursion --numeric-owner --owner=0 --group=0 --mode=0755 -cf - . \
+               | as_user podman import -q - "$img" 2>&1)" \
+            || import_err="rc=$?: $(printf '%s\n' "$imp" | tail -1)"
     fi
-    name="tier3s-probe-$$"
-    out="$(as_user podman --runtime "$WRAPPER" create --name "$name" \
-            --security-opt label=disable --network=none "$img" /none 2>&1)"
-    rc=$?
-    if [ $rc -eq 0 ]; then
-        rt="$(as_user podman inspect --format '{{.OCIRuntime}}' "$name" 2>&1)"
-        lbl="$(as_user podman inspect --format '{{.ProcessLabel}}|{{.HostConfig.SecurityOpt}}' "$name" 2>&1)"
-        as_user podman rm -f "$name" >/dev/null 2>&1
-        if [ "$rt" = "$WRAPPER" ]; then pass podman_runtime "--runtime $WRAPPER recorded"
-        else fail podman_runtime "inspect OCIRuntime='$rt', want $WRAPPER"; fi
-        case "$lbl" in *label=disable*) pass label_disable "accepted ($lbl)" ;;
-            *) fail label_disable "not recorded ($lbl)" ;; esac
+    if [ -n "$import_err" ]; then
+        fail podman_runtime "could not import the empty scratch image $img ($import_err)"
+        fail label_disable "not checked: scratch image import failed"
     else
-        fail podman_runtime "create with --runtime $WRAPPER --security-opt label=disable failed (rc=$rc): $(echo "$out" | tail -1)"
-        fail label_disable "not checked: create failed"
+        name="tier3s-probe-$$"
+        out="$(as_user podman --runtime "$WRAPPER" create --name "$name" \
+                --security-opt label=disable --network=none "$img" /none 2>&1)"
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            rt="$(as_user podman inspect --format '{{.OCIRuntime}}' "$name" 2>&1)"
+            lbl="$(as_user podman inspect --format '{{.ProcessLabel}}|{{.HostConfig.SecurityOpt}}' "$name" 2>&1)"
+            as_user podman rm -f "$name" >/dev/null 2>&1
+            if [ "$rt" = "$WRAPPER" ]; then pass podman_runtime "--runtime $WRAPPER recorded"
+            else fail podman_runtime "inspect OCIRuntime='$rt', want $WRAPPER"; fi
+            case "$lbl" in *label=disable*) pass label_disable "accepted ($lbl)" ;;
+                *) fail label_disable "not recorded ($lbl)" ;; esac
+        else
+            fail podman_runtime "create with --runtime $WRAPPER --security-opt label=disable failed (rc=$rc): $(echo "$out" | tail -1)"
+            fail label_disable "not checked: create failed"
+        fi
     fi
 else
     fail podman_runtime "not checked: podman missing or wrapper not verified"
