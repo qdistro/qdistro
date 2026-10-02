@@ -215,43 +215,40 @@ SNIP
     grep -q "NOPASSWD: ALL" "$SUD"
 }
 
-# --- broken / missing source checkout -----------------------------------
+# --- broken source checkout ---------------------------------------------
 # fetch_repo is exercised in-process (current bats shell) so a `git()`
 # function override reliably shadows the real binary (PATH mocks did not
 # survive bats' nested `run bash -c`).
-
-@test "broken-source: required repo clone failure is fatal" {
+#
+# Sourcing the bootstrap turns on its `set -euo pipefail`. Relax only -u and
+# pipefail afterwards: bats detects a failed assertion ONLY through errexit,
+# so these cases used to run `set +e` and could not fail (every assertion but
+# the last was ignored, and even a false last one passed). Keep -e on.
+_source_boot_in_bats() {
     source "$BOOT"
-    set +e +u +o pipefail
+    set -e +u +o pipefail
+}
+
+@test "broken-source: clone failure into an empty source root is fatal" {
+    _source_boot_in_bats
     QDISTRO_PROFILE=dev; REPO_ROOT="$BATS_TEST_TMPDIR/src"; BRANCH=main
     log() { :; }; warn() { :; }
     git() { case "$1" in clone) return 1;; *) return 0;; esac; }
-    run fetch_repo qdwin fatal
+    run fetch_repo qdistro
     [ "$status" -ne 0 ]
-    [[ "$output" == *"clone failed"* ]]
-}
-
-@test "missing-sibling: optional repo clone failure is non-fatal (warn + skip)" {
-    source "$BOOT"
-    set +e +u +o pipefail
-    QDISTRO_PROFILE=dev; REPO_ROOT="$BATS_TEST_TMPDIR/src"; BRANCH=main
-    log() { :; }; warn() { echo "WARN: $*"; }
-    git() { case "$1" in clone) return 1;; *) return 0;; esac; }
-    run fetch_repo qfileman optional
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"clone failed (non-fatal"* ]]
+    [[ "$output" == *"qdistro: clone into $REPO_ROOT failed"* ]]
 }
 
 @test "existing-checkout: repo_present short-circuits clone (idempotent re-run)" {
-    mkdir -p "$BATS_TEST_TMPDIR/src/qdwin"
+    mkdir -p "$BATS_TEST_TMPDIR/src/qdwin" "$BATS_TEST_TMPDIR/src/daemons"
     : > "$BATS_TEST_TMPDIR/src/qdwin/meson.build"
-    source "$BOOT"
-    set +e +u +o pipefail
+    _source_boot_in_bats
     QDISTRO_PROFILE=dev; REPO_ROOT="$BATS_TEST_TMPDIR/src"; BRANCH=main
-    log() { :; }; warn() { :; }
+    log() { echo "LOG: $*"; }; warn() { :; }
     # git mock that LOUDLY marks a clone attempt; if reused, it must not fire.
     git() { case "$1" in clone) echo "CLONE-ATTEMPTED"; return 0;; *) return 0;; esac; }
-    run fetch_repo qdwin fatal
+    run fetch_repo qdistro
     [ "$status" -eq 0 ]
     [[ "$output" != *"CLONE-ATTEMPTED"* ]]   # existing checkout reused, no clone
+    [[ "$output" == *"using existing checkout at $REPO_ROOT"* ]]
 }
