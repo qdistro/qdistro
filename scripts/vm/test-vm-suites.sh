@@ -31,9 +31,9 @@
 #
 # QDISTRO_SUITES (default "pytest bats") picks the phases;
 # QDISTRO_SUITES_BATS_FILES (basenames, space-separated) narrows bats;
-# QDISTRO_SUITES_BUDGET (seconds, default 12000) stops starting new suites
-# once spent: the last one started (pytest 30 min, bats 20 min at most)
-# still ends inside the workflow step's 240 minutes.
+# QDISTRO_SUITES_BUDGET (seconds, default 12000) caps the suites: none starts
+# after it is spent, and each one is cut to what is left of it. The
+# workflow sizes it from the time its job has left.
 #
 # Output: $VM_DIR/suites/ (junit XML, per-file bats TAP, summary.md).
 # Exit status: 0 when every selected suite ran to completion, whatever its
@@ -84,8 +84,10 @@ mkdir -p "$W"
 ssh_opts=(-i "$W/key" -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o ServerAliveInterval=30
     -o LogLevel=ERROR)
-vmssh() { ssh "${ssh_opts[@]}" admin@127.0.0.1 "$@"; }
-rootssh() { ssh "${ssh_opts[@]}" root@127.0.0.1 "$@"; }
+# Every guest command is bounded: SSH_CAP seconds (default 120), set higher
+# for the few long setup steps.
+vmssh() { timeout -k 10 "${SSH_CAP:-120}" ssh "${ssh_opts[@]}" admin@127.0.0.1 "$@"; }
+rootssh() { timeout -k 10 "${SSH_CAP:-120}" ssh "${ssh_opts[@]}" root@127.0.0.1 "$@"; }
 
 # ---- what will run: written first, so a run that stops early is visible -----
 # name|dir|args. "unit" runs tests/unit 30 files per process, as the host gate
@@ -221,9 +223,9 @@ vmssh 'sudo -n sh -c "set -e; install -d -m 0700 /root/.ssh; \
     install -m 0600 /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys"'
 rootssh true
 log "installing ${#TEST_PKGS[@]} test packages..."
-rootssh "zypper -n --quiet install --no-recommends ${TEST_PKGS[*]}" > "$OUT/test-packages.log" 2>&1 \
+SSH_CAP=1800 rootssh "zypper -n --quiet install --no-recommends ${TEST_PKGS[*]}" > "$OUT/test-packages.log" 2>&1 \
     || { tail -30 "$OUT/test-packages.log"; exit 1; }
-rootssh 'set -e; rm -rf /home/admin/qdistro-test; cp -a /root/qdistro-src /home/admin/qdistro-test;
+SSH_CAP=600 rootssh 'set -e; rm -rf /home/admin/qdistro-test; cp -a /root/qdistro-src /home/admin/qdistro-test;
     chown -R admin: /home/admin/qdistro-test'
 
 # ---- pytest, inside the guest ------------------------------------------------
@@ -277,13 +279,17 @@ for s in "${SUITES[@]}"; do
 done
 
 # ---- bats, from the runner ---------------------------------------------------
+if [ "${#BATS_FILES[@]}" -gt 0 ] && [ "$(budget_left)" -le 0 ]; then
+    log "budget spent; no bats file started"
+    BATS_FILES=()
+fi
 if [ "${#BATS_FILES[@]}" -gt 0 ]; then
     # What a qci test lane gives its VM on top of the bootstrap chain
     # (fresh-vm-bootstrap.sh): the dev profile file (tier-2 launchers default
     # to the hardened profile without it), the media, multimachine and
     # template installers, the approvals CLI, the probes in a 0755 /root
     # (section 4b) and the RDP certificate of the nested probes (4c).
-    rootssh 'set -e; Q=/root/qdistro-src; cd "$Q"
+    SSH_CAP=900 rootssh 'set -e; Q=/root/qdistro-src; cd "$Q"
         printf "QDISTRO_PROFILE=dev\n" > /etc/qdistro/profile; chmod 0644 /etc/qdistro/profile
         for i in "install-media-for-vm.sh $Q/media" \
                  "install-multimachine-for-vm.sh $Q/multimachine" \
@@ -506,20 +512,21 @@ for f in "${BATS_FILES[@]}"; do
     log "bats $base rc=$rc (${SECONDS}s)"
     # A file that wedged or rebooted the guest must not poison the rest; the
     # summary lists every file after it as not run.
-    if ! rootssh true 2>/dev/null; then
+    if ! SSH_CAP=60 rootssh true 2>/dev/null; then
+        echo "$base: the guest stopped answering" > "$OUT/baseline-failed"
         log "guest unreachable after $base; stopping bats"
         break
     fi
-    if baseline > "$W/baseline.out" 2>&1; then brc=0; else brc=$?; fi
+    if SSH_CAP=300 baseline > "$W/baseline.out" 2>&1; then brc=0; else brc=$?; fi
     sed 's/^/# /' "$W/baseline.out" | tee -a "$OUT/bats/$base.tap"
     if [ "$brc" -ne 0 ]; then
-        echo "$base" > "$OUT/baseline-failed"
+        echo "$base: core services or admin's session not restored" > "$OUT/baseline-failed"
         log "core services or admin's session not restored after $base; stopping bats"
         break
     fi
 done
 
-rootssh 'systemctl poweroff' 2>/dev/null || true
+SSH_CAP=30 rootssh 'systemctl poweroff' 2>/dev/null || true
 for _ in $(seq 1 60); do kill -0 "$qemu_pid" 2>/dev/null || break; sleep 2; done
 
 if summarize; then ended=complete; else

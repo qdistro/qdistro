@@ -134,6 +134,8 @@ if want_bats:
                 unrun = plan
             elif missing > 0:
                 problems.append(f"{missing} planned tests have no result")
+            elif missing < 0:
+                problems.append(f"{-missing} results beyond the plan")
         done = "yes" if not problems else "**no**"
         lines.append(f"| {base} | {done} | {plan if plan is not None else '?'} | {ok} | {len(bad)} | {skip} | {unrun} | {rc or '?'} |")
         if teardown_failed:
@@ -149,8 +151,7 @@ if want_bats:
     lines.append(f"| **total** | | {btot[0]} | {btot[1]} | {btot[2]} | {btot[3]} | {btot[4]} | |")
 
 if (out / "baseline-failed").exists():
-    incomplete.append("bats: core services or admin's session could not be restored after "
-                      f"{(out / 'baseline-failed').read_text().strip()}; later files did not run")
+    incomplete.append(f"bats stopped after {(out / 'baseline-failed').read_text().strip()}")
 if incomplete:
     lines += ["", "### Incomplete", "",
               "These did not run to completion; their counts above are partial or missing.", ""]

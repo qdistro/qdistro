@@ -43,6 +43,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The suites step sizes its time budget from what the job has left.
+          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/qdistro-vm" "$RUNNER_TEMP/qdistro-cache" "$RUNNER_TEMP/qdistro-cloud"
           echo "VM_DIR=$RUNNER_TEMP/qdistro-vm" >> "$GITHUB_ENV"
           echo "VM_IMAGE=$RUNNER_TEMP/qdistro-vm/qdistro-test-vm.qcow2" >> "$GITHUB_ENV"
@@ -327,7 +329,15 @@ jobs:
         timeout-minutes: 240
         run: |
           set -euo pipefail
-          bash scripts/vm/test-vm-suites.sh "$VM_DIR" "$VM_IMAGE" "$QEMU_ACCEL"
+          # Every suite is capped to the budget; end it 20 minutes before
+          # either deadline (this step's 240 or the job's 330 minutes), for
+          # shutdown, the summary and the log upload.
+          job_left=$(( 330 * 60 - ($(date +%s) - JOB_START) ))
+          budget=$(( 220 * 60 ))
+          [ $((job_left - 20 * 60)) -ge "$budget" ] || budget=$((job_left - 20 * 60))
+          echo "suites budget: ${budget}s (job has ${job_left}s left)"
+          QDISTRO_SUITES_BUDGET=$budget \
+            bash scripts/vm/test-vm-suites.sh "$VM_DIR" "$VM_IMAGE" "$QEMU_ACCEL"
           (cd "$VM_DIR" && sha256sum -c qdistro-test-vm.qcow2.sha256)
 
       - name: Suites summary
