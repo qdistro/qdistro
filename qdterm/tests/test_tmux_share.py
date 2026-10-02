@@ -627,3 +627,70 @@ def test_discover_running_shares_skips_non_numeric_entries(monkeypatch):
     shares = _discover_running_shares("127.0.0.1")
     assert "qterm-1" in shares
     assert shares["qterm-1"][0].server_pid == 100
+
+
+def test_titlebar_indicator_uses_snapshot_secondary_role(
+    qtbot, qapp, tmp_path, monkeypatch,
+):
+    """Share badge uses mSecondary, not hardcoded green or pixel fonts."""
+    from types import SimpleNamespace
+
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import attach_presentation, reset_controller_for_tests
+    from qterminator.window import MainWindow
+
+    reset_controller_for_tests()
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    win = MainWindow()
+    qtbot.addWidget(win)
+    try:
+        win.apply_presentation_update()
+        plugin = TmuxSharePlugin()
+        plugin._window = win
+        plugin._service = TmuxShareService()
+
+        class _LiveShare(Share):
+            def is_alive(self):
+                return True
+
+            def kill(self):
+                pass
+
+        class _FakeTmuxMode:
+            def get_session_for_terminal(self, _terminal):
+                return "qterm-1"
+
+        share = _LiveShare(session="qterm-1", bind="127.0.0.1")
+        share.server_pid = 4242
+        share.port = 60001
+        share.key = "KEY"
+        plugin._service._shares["qterm-1"] = [share]
+        win.tmux_mode = _FakeTmuxMode()
+        plugin._update_titlebar_indicators()
+        titlebar = win._active_terminal._titlebar
+        label = titlebar.titlebar_widget("tmux-share")
+        assert label is not None
+        assert label.text() == "M1"
+        assert snap.colors.mSecondary in label.styleSheet()
+        assert "#8fd19e" not in label.styleSheet()
+        assert "font-size" not in label.styleSheet()
+        assert titlebar._tmux_share_label is label
+    finally:
+        reset_controller_for_tests()
+        win.close()

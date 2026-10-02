@@ -28,8 +28,10 @@ _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 _FALLBACK_ERROR = "#e74c3c"
 _FALLBACK_ACTIVITY = "#f1c40f"
 _FALLBACK_VM_FG = "#111111"
+_FALLBACK_SECONDARY = "#a9aefe"
 _NEAR_WHITE = {"#ffffff", "#f3edf7", "#dddddd", "#d4d4d4"}
 _NEAR_BLACK = {"#000000", "#0e0e43", "#1e1e1e", "#111111"}
+CHROME_ROLES = frozenset({"activity", "error", "primary", "secondary", "dim"})
 
 
 def _css_hex(value: object, fallback: str) -> str:
@@ -71,6 +73,8 @@ def titlebar_roles(widget: QWidget) -> dict[str, str]:
             "dim": _css_hex(colors.mOnSurfaceVariant, "#aaaaaa"),
             "error": _css_hex(colors.mError, _FALLBACK_ERROR),
             "activity": _css_hex(colors.mTertiary, _FALLBACK_ACTIVITY),
+            "primary": _css_hex(colors.mPrimary, "#2a6ea8"),
+            "secondary": _css_hex(colors.mSecondary, _FALLBACK_SECONDARY),
             "hover_bg": _css_hex(colors.mHover, colors.mPrimary),
             "hover_fg": _css_hex(colors.mOnHover, colors.mOnPrimary),
             "vm_bg": _css_hex(colors.mTertiary, _FALLBACK_ACTIVITY),
@@ -92,6 +96,9 @@ def titlebar_roles(widget: QWidget) -> dict[str, str]:
     activity = link
     if link.lower() in {error.lower(), fg.lower(), highlight.lower()}:
         activity = _FALLBACK_ACTIVITY
+    secondary = _qcolor_hex(
+        pal.color(QPalette.ColorRole.Link), _FALLBACK_SECONDARY
+    )
     return {
         "active_bg": highlight,
         "active_fg": highlighted,
@@ -100,6 +107,8 @@ def titlebar_roles(widget: QWidget) -> dict[str, str]:
         "dim": dim,
         "error": error,
         "activity": activity,
+        "primary": highlight,
+        "secondary": secondary,
         "hover_bg": highlight,
         "hover_fg": highlighted,
         "vm_bg": activity,
@@ -130,7 +139,9 @@ class TerminalTitlebar(QFrame):
         self._active = False
         self._group_name = None
         self._vm_name = None
+        self._activity_role = "activity"
         self._extra_widgets = {}
+        self._extra_roles = {}
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 2, 0)
@@ -187,8 +198,14 @@ class TerminalTitlebar(QFrame):
         self._readonly_label.setFont(_ui_font(relative=0.9, bold=True))
         self._readonly_label.setStyleSheet(f"color: {roles['error']};")
 
+        activity_role = self._activity_role if self._activity_role in CHROME_ROLES else "activity"
+        activity_color = roles.get(activity_role, roles["activity"])
+        if activity_role == "primary" and self._active:
+            # primary fills the active bar; use the on-primary pair so the
+            # progress dot stays visible on that background.
+            activity_color = roles["active_fg"]
         self._activity_label.setFont(small_font)
-        self._activity_label.setStyleSheet(f"color: {roles['activity']};")
+        self._activity_label.setStyleSheet(f"color: {activity_color};")
 
         btn = max(16, height - 4)
         self._close_btn.setFixedSize(btn, btn)
@@ -213,7 +230,7 @@ class TerminalTitlebar(QFrame):
                 "border-radius: 3px; padding: 0 4px;"
             )
 
-        for widget, _side in self._extra_widgets.values():
+        for name, (widget, _side) in self._extra_widgets.items():
             if isinstance(widget, QToolButton):
                 widget.setFont(small_font)
                 widget.setStyleSheet(
@@ -221,6 +238,13 @@ class TerminalTitlebar(QFrame):
                     f"QToolButton:hover {{ color: {roles['hover_fg']}; "
                     f"background: {roles['hover_bg']}; border-radius: 3px; }}"
                 )
+            elif isinstance(widget, QLabel) and name != "vm-indicator":
+                extra_role = self._extra_roles.get(name, "dim")
+                if extra_role not in CHROME_ROLES:
+                    extra_role = "dim"
+                extra_color = roles.get(extra_role, roles["dim"])
+                widget.setFont(_ui_font(relative=0.9, bold=True))
+                widget.setStyleSheet(f"color: {extra_color};")
 
     def set_title(self, title):
         if len(title) > 60:
@@ -245,13 +269,28 @@ class TerminalTitlebar(QFrame):
         self._readonly_label.setVisible(read_only)
 
     def set_activity(self, has_activity):
+        if not has_activity:
+            self._activity_role = "activity"
         self._activity_label.setVisible(has_activity)
 
-    def add_titlebar_widget(self, name: str, widget: QWidget, side: str = "right") -> QWidget:
+    def set_activity_style(self, role: str) -> None:
+        """Paint the activity indicator from a semantic chrome role."""
+        self._activity_role = role if role in CHROME_ROLES else "activity"
+        if not self._activity_label.isHidden():
+            self._apply_chrome()
+
+    def add_titlebar_widget(
+        self,
+        name: str,
+        widget: QWidget,
+        side: str = "right",
+        role: str | None = None,
+    ) -> QWidget:
         """Add or replace a named Qt widget in the titlebar extension area.
 
         side="left" inserts between the built-in indicators and the title.
         side="right" inserts between the title and the close button.
+        role names a semantic chrome color for extra QLabel widgets.
         """
         if not name:
             raise ValueError("titlebar widget name must be non-empty")
@@ -274,8 +313,16 @@ class TerminalTitlebar(QFrame):
 
         self._layout.insertWidget(index, widget)
         self._extra_widgets[name] = (widget, side)
+        if role is not None:
+            self._extra_roles[name] = role if role in CHROME_ROLES else "dim"
         self._apply_chrome()
         return widget
+
+    def set_titlebar_widget_role(self, name: str, role: str) -> None:
+        if name not in self._extra_widgets:
+            return
+        self._extra_roles[name] = role if role in CHROME_ROLES else "dim"
+        self._apply_chrome()
 
     def add_titlebar_button(
         self,
@@ -301,6 +348,7 @@ class TerminalTitlebar(QFrame):
             return False
 
         widget, side = entry
+        self._extra_roles.pop(name, None)
         self._layout.removeWidget(widget)
         widget.hide()
         widget.setParent(None)
