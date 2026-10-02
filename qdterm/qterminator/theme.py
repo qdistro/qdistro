@@ -138,10 +138,46 @@ def apply_light_theme(app: QApplication):
     app.setStyleSheet(LIGHT_STYLESHEET)
 
 
+_NATIVE_STYLE: str | None = None
+_NATIVE_PALETTE: QPalette | None = None
+_NATIVE_STYLESHEET: str | None = None
+
+
+def _underlying_style_name(app: QApplication) -> str:
+    """Factory style name, unwrapping QStyleSheetStyle's empty objectName."""
+    qss = app.styleSheet()
+    if not qss:
+        return app.style().objectName()
+    app.setStyleSheet("")
+    try:
+        return app.style().objectName()
+    finally:
+        app.setStyleSheet(qss)
+
+
+def _capture_native(app: QApplication) -> None:
+    global _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
+    if _NATIVE_PALETTE is not None:
+        return
+    _NATIVE_PALETTE = QPalette(app.palette())
+    _NATIVE_STYLESHEET = app.styleSheet()
+    _NATIVE_STYLE = _underlying_style_name(app)
+
+
+def _restore_native(app: QApplication) -> None:
+    _capture_native(app)
+    if _NATIVE_STYLE:
+        app.setStyle(_NATIVE_STYLE)
+    app.setPalette(QPalette(_NATIVE_PALETTE))
+    app.setStyleSheet(_NATIVE_STYLESHEET or "")
+
+
 def apply_theme(app: QApplication, theme_mode: str = "system"):
-    """Apply theme based on mode. Returns the resolved theme ('dark' or 'light')."""
+    """Apply theme based on mode. Returns the resolved theme ('dark', 'light', or 'native')."""
+    _capture_native(app)
     resolved = resolve_theme(theme_mode)
     if resolved == "native":
+        _restore_native(app)
         return "native"
     if resolved == "light":
         apply_light_theme(app)
@@ -155,6 +191,7 @@ _CONTROLLER = None
 
 def attach_presentation(app: QApplication, config):
     global _CONTROLLER
+    _capture_native(app)
     try:
         from qdistro_presentation.model import LocalOverrides, parse_local_overrides
         from qdistro_presentation.qt import PresentationController
@@ -211,13 +248,16 @@ def apply_profile_to_all_windows(app: QApplication, profile_name: str) -> None:
 
 
 def reset_controller_for_tests() -> None:
-    global _CONTROLLER
+    global _CONTROLLER, _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
     if _CONTROLLER is not None:
         try:
             _CONTROLLER.stop()
         except Exception:  # noqa: BLE001
             pass
     _CONTROLLER = None
+    _NATIVE_STYLE = None
+    _NATIVE_PALETTE = None
+    _NATIVE_STYLESHEET = None
     try:
         from qdistro_presentation.qt import reset_controller_for_tests as _reset
 

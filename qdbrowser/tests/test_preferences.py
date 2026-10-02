@@ -270,6 +270,84 @@ def test_apply_ui_font_override_reaches_controller(
     assert abs(ctrl.state.content_ui_point_size - 18.0) < 0.01
 
 
+def _windows_style_name():
+    from PyQt6.QtWidgets import QStyleFactory
+
+    for name in QStyleFactory.keys():
+        if name.lower() == "windows":
+            return name
+    pytest.skip("Windows style required to distinguish Fusion")
+
+
+def _prime_native_baseline(app, *, with_qss):
+    from PyQt6.QtGui import QColor
+    from qdbrowser.theme import _underlying_style_name
+
+    style_name = _windows_style_name()
+    app.setStyle(style_name)
+    pal = QPalette(app.palette())
+    pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+    pal.setColor(QPalette.ColorRole.Base, QColor("#dce8dc"))
+    app.setPalette(pal)
+    app.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
+    return (
+        _underlying_style_name(app).lower(),
+        app.palette().color(QPalette.ColorRole.Window).getRgb(),
+        app.styleSheet(),
+    )
+
+
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_native_without_controller_restores_captured_baseline(
+    qapp, isolated_config, with_qss
+):
+    from qdbrowser.theme import (
+        _underlying_style_name,
+        apply_theme,
+        current_controller,
+    )
+
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
+    reset_controller_for_tests()
+    try:
+        style, window_rgb, qss = _prime_native_baseline(qapp, with_qss=with_qss)
+        assert style == "windows"
+        assert current_controller() is None
+        dlg = PreferencesDialog(isolated_config)
+        try:
+            dlg.combo_theme.setCurrentText("Dark")
+            dlg._apply()
+            assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+            if with_qss:
+                assert qapp.styleSheet() != qss
+            dlg.combo_theme.setCurrentText("Native")
+            dlg._apply()
+        finally:
+            dlg.deleteLater()
+        assert current_controller() is None
+        assert _underlying_style_name(qapp).lower() == "windows"
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert qapp.styleSheet() == qss
+        assert isolated_config.get("general", "theme_mode") == "native"
+        apply_theme(qapp, "light")
+        dlg = PreferencesDialog(isolated_config)
+        try:
+            dlg.combo_theme.setCurrentText("Native")
+            dlg._apply()
+        finally:
+            dlg.deleteLater()
+        assert _underlying_style_name(qapp).lower() == "windows"
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert qapp.styleSheet() == qss
+    finally:
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)
+
+
 def test_missing_controller_still_applies_legacy_theme(
     qapp, isolated_config, monkeypatch
 ):
@@ -329,6 +407,11 @@ def test_follow_desktop_without_snapshot_shows_unavailable(qapp, isolated_config
 def test_live_update_replaces_unavailable_with_inherited_size(
     qapp, isolated_config, tmp_path, monkeypatch
 ):
+    from qdbrowser.theme import _underlying_style_name
+
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
     dlg = PreferencesDialog(isolated_config)
     try:
         assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
@@ -344,3 +427,7 @@ def test_live_update_replaces_unavailable_with_inherited_size(
         assert snap.fonts.ui_family in text
     finally:
         dlg.deleteLater()
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)

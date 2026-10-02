@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -187,17 +188,32 @@ class PreferencesDialog(QDialog):
                 appearance["ui_font_size_pt"] = float(existing)
         self.config.set("appearance", appearance)
         self.config.save()
+        theme_mode = _THEME_LABEL_TO_KEY[self.combo_theme.currentText()]
         try:
             from qdistro_presentation.model import parse_local_overrides
 
-            from qfileman.theme import current_controller
+            from qfileman.theme import apply_theme, current_controller, refresh_windows
 
             ctrl = current_controller()
             if ctrl is not None:
-                ctrl.set_theme_mode(_THEME_LABEL_TO_KEY[self.combo_theme.currentText()])
+                ctrl.set_theme_mode(theme_mode)
                 ctrl.set_local(parse_local_overrides(appearance))
+            else:
+                app = QApplication.instance()
+                if app is not None:
+                    apply_theme(app, theme_mode)
+                    refresh_windows(app)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not apply appearance: %s", exc)
+            try:
+                from qfileman.theme import apply_theme, refresh_windows
+
+                app = QApplication.instance()
+                if app is not None:
+                    apply_theme(app, theme_mode)
+                    refresh_windows(app)
+            except Exception as inner:  # noqa: BLE001
+                log.warning("legacy appearance apply failed: %s", inner)
 
     def _mark_ui_font_size_dirty(self, _value: int) -> None:
         self._ui_font_size_dirty = True

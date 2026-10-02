@@ -158,6 +158,41 @@ def test_system_restores_captured_native_palette(qapp):
     assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == native
 
 
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_native_restores_captured_style_after_fusion(qapp, with_qss):
+    from PyQt6.QtGui import QColor, QPalette
+    from PyQt6.QtWidgets import QStyleFactory
+    from qnotebook.theme import _underlying_style_name, reset_controller_for_tests
+
+    windows = next((n for n in QStyleFactory.keys() if n.lower() == "windows"), None)
+    if windows is None:
+        pytest.skip("Windows style required to distinguish Fusion")
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
+    reset_controller_for_tests()
+    try:
+        qapp.setStyle(windows)
+        pal = QPalette(qapp.palette())
+        pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+        qapp.setPalette(pal)
+        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
+        window_rgb = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
+        qss = qapp.styleSheet()
+        apply_theme(qapp, "dark")
+        assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("#2b2b2b")
+        assert _underlying_style_name(qapp).lower() == "fusion"
+        assert apply_theme(qapp, "native") == "native"
+        assert _underlying_style_name(qapp).lower() == "windows"
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert qapp.styleSheet() == qss
+    finally:
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)
+
+
 def test_two_windows_follow_same_generation_without_resetting(
     qapp, tmp_path, tmp_notebook, qtbot, monkeypatch,
 ):
