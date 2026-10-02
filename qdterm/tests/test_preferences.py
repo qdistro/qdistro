@@ -737,3 +737,57 @@ class TestShortcutConflicts:
         dlg._refresh_shortcut_conflicts()
         assert dlg._shortcut_conflicts["new_tab"] is False
         assert dlg._shortcut_conflicts["copy"] is False
+
+
+def _scaled_snapshot():
+    from dataclasses import replace
+
+    from qdistro_presentation.model import example_snapshot, with_generation
+
+    snap = example_snapshot()
+    return with_generation(
+        replace(snap, fonts=replace(snap.fonts, ui_scale=1.25, fixed_scale=1.25))
+    )
+
+
+def test_follow_desktop_without_snapshot_shows_unavailable(window, qtbot):
+    from qdistro_presentation.model import DESKTOP_SETTINGS_UNAVAILABLE
+    from qterminator.theme import reset_controller_for_tests
+
+    reset_controller_for_tests()
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    assert dlg._theme_mode.currentText() == "Follow desktop"
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    dlg._theme_mode.setCurrentText("Dark")
+    dlg._chk_desktop_font.setChecked(False)
+    assert dlg.lbl_desktop_status.text() == ""
+    reset_controller_for_tests()
+
+
+def test_live_update_replaces_unavailable_with_inherited_size(
+    window, qtbot, tmp_path, monkeypatch
+):
+    from PyQt6.QtWidgets import QApplication
+    from qdistro_presentation.model import DESKTOP_SETTINGS_UNAVAILABLE
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.config import Config
+    from qterminator.theme import attach_presentation, reset_controller_for_tests
+
+    reset_controller_for_tests()
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    dlg._chk_desktop_font.setChecked(True)
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    snap = _scaled_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(QApplication.instance(), Config())
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    dlg.apply_presentation_update()
+    text = dlg.lbl_desktop_status.text()
+    assert DESKTOP_SETTINGS_UNAVAILABLE not in text
+    assert "13.75" in text
+    assert snap.fonts.fixed_family in text
+    reset_controller_for_tests()

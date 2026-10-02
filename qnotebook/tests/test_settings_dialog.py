@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QSettings
+from qdistro_presentation.model import (
+    DESKTOP_SETTINGS_UNAVAILABLE,
+    example_snapshot,
+    with_generation,
+)
+from qdistro_presentation.paths import ENV_OVERRIDE
+from qdistro_presentation.publish import write_snapshot
 from qnotebook import nb_settings
+from qnotebook.appearance import SettingsAdapter
 from qnotebook.settings_dialog import SettingsDialog
+from qnotebook.theme import attach_presentation, reset_controller_for_tests
 from qnotebook.window import MainWindow
 
 
@@ -246,3 +256,42 @@ def test_opening_settings_action_works(win, qtbot, monkeypatch):
     )
     win.act_settings.trigger()
     assert captured.get("opened") is True
+
+
+def _scaled_snapshot():
+    snap = example_snapshot()
+    return with_generation(
+        replace(snap, fonts=replace(snap.fonts, ui_scale=1.25, fixed_scale=1.25))
+    )
+
+
+def test_follow_desktop_without_snapshot_shows_unavailable(win, qtbot):
+    reset_controller_for_tests()
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    assert dlg._combo_appearance.currentText() == "Follow desktop"
+    assert dlg._chk_desktop_fonts.isChecked() is True
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    dlg._combo_appearance.setCurrentText("Dark")
+    dlg._chk_desktop_fonts.setChecked(False)
+    assert dlg.lbl_desktop_status.text() == ""
+
+
+def test_live_update_replaces_unavailable_with_inherited_size(
+    win, qtbot, tmp_path, monkeypatch, qapp
+):
+    reset_controller_for_tests()
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    snap = _scaled_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, SettingsAdapter())
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    dlg.apply_presentation_update()
+    text = dlg.lbl_desktop_status.text()
+    assert DESKTOP_SETTINGS_UNAVAILABLE not in text
+    assert "13.75" in text
+    assert snap.fonts.ui_family in text
+    reset_controller_for_tests()

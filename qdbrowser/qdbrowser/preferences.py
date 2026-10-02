@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QFontComboBox,
     QFormLayout,
     QGroupBox,
+    QLabel,
     QSpinBox,
     QVBoxLayout,
 )
@@ -60,6 +61,11 @@ class PreferencesDialog(QDialog):
         self.cb_desktop_fonts = QCheckBox("Use desktop fonts")
         form.addRow(self.cb_desktop_fonts)
 
+        self.lbl_desktop_status = QLabel("")
+        self.lbl_desktop_status.setObjectName("lbl_desktop_status")
+        self.lbl_desktop_status.setWordWrap(True)
+        form.addRow(self.lbl_desktop_status)
+
         self.combo_ui_font = QFontComboBox()
         form.addRow("UI font:", self.combo_ui_font)
         self._ui_font_family_dirty = False
@@ -72,6 +78,9 @@ class PreferencesDialog(QDialog):
         self.spin_ui_font_size.valueChanged.connect(self._mark_ui_font_size_dirty)
 
         self.cb_desktop_fonts.toggled.connect(self._on_desktop_fonts_toggled)
+        self.combo_theme.currentTextChanged.connect(
+            lambda *_args: self._refresh_desktop_status()
+        )
 
         layout.addWidget(appearance)
 
@@ -130,6 +139,7 @@ class PreferencesDialog(QDialog):
         self.spin_ui_font_size.blockSignals(False)
         self._ui_font_size_dirty = False
         self._on_desktop_fonts_toggled(self.cb_desktop_fonts.isChecked())
+        self._refresh_desktop_status()
 
     def _apply(self) -> None:
         theme_mode = THEME_LABEL_TO_KEY[self.combo_theme.currentText()]
@@ -193,8 +203,41 @@ class PreferencesDialog(QDialog):
     def _on_desktop_fonts_toggled(self, checked: bool) -> None:
         self.combo_ui_font.setEnabled(not checked)
         self.spin_ui_font_size.setEnabled(not checked)
+        self._refresh_desktop_status()
+
+    def _refresh_desktop_status(self) -> None:
+        follow = self.combo_theme.currentText() == "Follow desktop"
+        use_fonts = self.cb_desktop_fonts.isChecked()
+        try:
+            from qdistro_presentation.model import desktop_status_text
+
+            from qdbrowser.theme import current_controller
+
+            ctrl = current_controller()
+            state = ctrl.state if ctrl is not None else None
+            text = desktop_status_text(
+                state, follow_desktop=follow, use_desktop_fonts=use_fonts
+            )
+        except Exception:  # noqa: BLE001
+            text = (
+                "desktop settings unavailable" if follow or use_fonts else ""
+            )
+        self.lbl_desktop_status.setText(text)
+        self.lbl_desktop_status.setVisible(bool(text))
+        if use_fonts:
+            family, size = self._effective_ui_font()
+            self.combo_ui_font.blockSignals(True)
+            if family:
+                self.combo_ui_font.setCurrentText(family)
+            self.combo_ui_font.blockSignals(False)
+            self._ui_font_family_dirty = False
+            self.spin_ui_font_size.blockSignals(True)
+            self.spin_ui_font_size.setValue(size)
+            self.spin_ui_font_size.blockSignals(False)
+            self._ui_font_size_dirty = False
 
     def apply_presentation_update(self) -> None:
+        self._refresh_desktop_status()
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
