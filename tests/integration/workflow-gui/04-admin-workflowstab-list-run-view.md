@@ -43,6 +43,9 @@ mkdir -p /etc/qdistro/workflows
 cat > /etc/qdistro/workflows/wfgui-list-a.yaml <<'YAML'
 - name: wfgui-list-a
   description: cron lister A
+  # Without auto_run a fired trigger only parks a PENDING run for admin
+  # approval (finding F3), which expires; S1 needs a completed run.
+  auto_run: true
   trigger:
     type: cron
     interval_seconds: 5
@@ -73,7 +76,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # from the engine's own audit DB, instead of a fixed sleep. A timeout is a
 # Setup ERROR (S1's runs table would have nothing to show).
 RUN_B64=$(base64 -w0 <<'EOF'
-for _ in $(seq 1 60); do
+for try in $(seq 1 60); do
   n=$(sqlite3 /var/lib/qdistro/audit/workflow_audit.sqlite     "SELECT count(*) FROM workflow_runs WHERE workflow_name='wfgui-list-a' AND state='completed';" 2>/dev/null)
   [ "${n:-0}" -ge 1 ] 2>/dev/null && { echo "completed runs: $n"; exit 0; }
   sleep 1
