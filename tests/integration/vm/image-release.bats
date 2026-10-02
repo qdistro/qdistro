@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Phase C of todo/iso/14: the tester image's configuration and provenance.
 # VM-free and rootless. Pins: config.xml (raw only, 28 GiB, snapshot pin,
 # bundle name), build.sh's snapshot parser and source manifest, the

@@ -106,6 +106,13 @@ def test_...():
 
 ## VM / bats tests (`tests/integration/vm/`)
 
+- **Host-only files.** A `.bats` file here that makes no guest call (static
+  greps, PATH-shimmed installer functions, offscreen probes) carries the header
+  line `# qci:host-only` in its first 40 lines. The bats gate then runs it on
+  the host and never spends a VM on it (`ci/lib/gates/bats.sh`). Such a file
+  must not `load helpers`, call `vm_run` or expand `$VM_NAME`; the gate refuses
+  it if it does (pinned by `tests/integration/qci/bats-host-only.bats`). Add a
+  live-VM case to a VM-backed file instead.
 - Source the shared helpers with `load helpers` at the top of the `.bats`
   file (bats resolves `helpers.bash` relative to the test file).
 - Run guest commands through the driver helpers in

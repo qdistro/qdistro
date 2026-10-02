@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Tier-5b launcher OPERATIONAL HARDENING lock-in. Like
 # bootstrap-hardening.bats this needs NO live VM and no root: it
 # exercises the two new shared primitives in lib/spawn-common.sh

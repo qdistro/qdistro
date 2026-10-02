@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Static-invariant + behavioural lock-in for the production bootstrap /
 # packaging HARDENING (security-hardening carry-forward "Bootstrap and
 # packaging"). Like spin-test-vm-gui-bootstrap.bats this needs NO live VM:

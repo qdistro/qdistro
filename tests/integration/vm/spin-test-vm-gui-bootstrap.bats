@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Static-invariant lock-in for scripts/vm/spin-test-vm-gui.sh.
 #
 # Unlike the rest of tests/integration/vm/*.bats, this file does NOT need

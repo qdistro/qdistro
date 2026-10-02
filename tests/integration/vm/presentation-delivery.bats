@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Host-only lock-in of presentation delivery: installer layout, tier-2 bind
 # construction, isolated-domain SELinux rights, and affected-gate mapping.
 # No VM, no root, no live /var/lib/qdistro writes.
