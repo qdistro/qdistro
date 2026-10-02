@@ -184,6 +184,19 @@ PY
     return $rc
 }
 
+# Write a launch stanza by hand (what the manager writes at StartSilo; root
+# 0600) so a launch unit can be started WITHOUT the manager. Prints the token.
+write_stanza() {   # write_stanza <silo> <argv json>
+    local tok
+    tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    install -d -m 0755 /run/qdistro/silo-launch
+    ( umask 077
+      printf '%s\n' "TIER3S_SILO=$1" "TIER3S_BINDING=$1" "TIER3S_WORKLOAD=headless-smoke" "TIER3S_NETWORK=none" \
+          "TIER3S_LAUNCH_TOKEN=$tok" "TIER3S_ARGV_JSON='$2'" > "/run/qdistro/silo-launch/$1.env" )
+    chmod 0600 "/run/qdistro/silo-launch/$1.env"
+    echo "$tok"
+}
+
 # Snapshot every process of a live launch (recursive cgroup.procs of its
 # scope) as "pid starttime" lines, so absence can later be asserted per
 # process, not by name or uid.

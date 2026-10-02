@@ -139,15 +139,7 @@ is "release: StartSilo refused with the message" "$([ "$rc" -ne 0 ] && printf '%
 is "release: StartSilo started no launch unit" "$(units_started_since "$cur" 'qdistro-tier3s-silo@.*')" 0
 is "release: silo state unchanged" "$(silo_state $SA)" Stopped
 # the spawn refuses on its own: a hand-written stanza, the unit started directly
-start_direct() {
-    umask 077
-    install -d -m 0755 /run/qdistro/silo-launch
-    printf "%s\n" "TIER3S_SILO=$SA" "TIER3S_BINDING=$SA" "TIER3S_WORKLOAD=headless-smoke" "TIER3S_NETWORK=none" \
-        "TIER3S_LAUNCH_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
-        "TIER3S_ARGV_JSON='[\"$SMOKE_APP\"]'" > "/run/qdistro/silo-launch/$SA.env"
-    chmod 0600 "/run/qdistro/silo-launch/$SA.env"
-    systemctl start "$(unit_of $SA)"
-}
+start_direct() { write_stanza $SA "[\"$SMOKE_APP\"]" > /dev/null; systemctl start "$(unit_of $SA)"; }
 refused "release/spawn (direct unit start)" $SA \
     "tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=release); there is no hardened launch path and no fallback tier" start_direct
 rm -f "/run/qdistro/silo-launch/$SA.env"
