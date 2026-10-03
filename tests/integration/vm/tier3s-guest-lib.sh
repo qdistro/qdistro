@@ -600,30 +600,17 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 
 # bridge_stream_live <token> — the waypipe client runs with -o (one shot):
 # it unlinks $LAUNCHES/<token>/link.sock the moment the sandbox's waypipe
-# server attaches, so post-attach the live proof is not the pathname but the
-# client's ESTABLISHED stream still carrying the bound path. ss/iproute2 is
-# not in the guest image; /proc/net/unix shows the accepted socket's bound
-# name (St=03 connected) even after unlink. The accepted fd may sit in a
-# waypipe child forked for the connection, not the recorded main pid — so
-# the owner's attribution is the launch unit's cgroup (any waypipe process
-# in <unit> holding the established stream), not one pid.
+# server attaches, so post-attach the live proof is not the pathname but
+# the established stream itself. The host's /proc/net/unix does NOT show
+# the channel (runsc host-uds=open proxies it through the gofer), so the
+# proof reads the SANDBOX's own unix table: an established socket on
+# /run/qdistro/link/link.sock is the waypipe server's live channel.
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
-    local tok="$1" unit ino p fd owner
-    unit=$(rec "$tok" unit)
-    [ -n "$unit" ] || return 1
-    ino=$(awk -v p="$LAUNCHES/$tok/link.sock" \
-        '$6=="03" && $NF==p {print $7; exit}' /proc/net/unix 2>/dev/null)
-    [ -n "$ino" ] || return 1
-    for p in /proc/[0-9]*; do
-        [ "$(cat "$p/comm" 2>/dev/null)" = waypipe ] || continue
-        for fd in "$p"/fd/*; do
-            [ "$(readlink "$fd" 2>/dev/null)" = "socket:[$ino]" ] || continue
-            case "$(sed -n 's|^0::||p' "$p/cgroup" 2>/dev/null)" in
-                *"/$unit") return 0 ;;
-            esac
-        done
-    done
-    return 1
+    local tok="$1" ctr
+    ctr=$(rec "$tok" container)
+    [ -n "$ctr" ] || return 1
+    pm exec "$ctr" cat /proc/net/unix 2>/dev/null \
+        | awk '$6=="03" && /link\.sock/ {found=1} END{exit !found}'
 }
 
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
@@ -647,15 +634,11 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     is "$tag: bridge client + wrapper in the launch unit cgroup" \
         "$(for p in "$bp" "$wp"; do sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null; done | grep -c "/${unit}$")" 2
     if bridge_stream_live "$tok"; then
-        pass "$tag: bridge channel live (unit waypipe holds the link.sock stream)"
+        pass "$tag: bridge channel live (sandbox-side link.sock stream established)"
     else
-        awk -v p="$LAUNCHES/$tok/link.sock" 'index($0, p)' /proc/net/unix 2>/dev/null \
-            | sed 's/^/    unix: /'
-        for p in /proc/[0-9]*; do
-            [ "$(cat "$p/comm" 2>/dev/null)" = waypipe ] || continue
-            echo "    waypipe ${p#/proc/}: $(sed -n 's|^0::||p' "$p/cgroup" 2>/dev/null) fds=$(ls "$p/fd" 2>/dev/null | wc -l)"
-        done
-        fail "$tag: no established link.sock stream in a $unit waypipe process"
+        pm exec "$(rec "$tok" container)" cat /proc/net/unix 2>&1 \
+            | sed 's/^/    sandbox-unix: /' | head -20
+        fail "$tag: no established link.sock stream in the sandbox's unix table"
     fi
 }
 
