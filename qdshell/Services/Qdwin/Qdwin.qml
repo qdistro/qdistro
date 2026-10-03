@@ -195,16 +195,37 @@ Singleton {
     // IPC handlers can drive qdwin without needing direct access to
     // the internal qdwinBinding id.
     function injectFocus(handle, seat) {
-        if (!qdwinBinding) return;
+        // Check `bound`, not just object presence: when the binding exists
+        // but is UNBOUND (dead compositor, stale shell slot after a shell
+        // respawn), focusWindow() black-holes — and the old unconditional
+        // Logger.i made lost inject requests look successful in the journal
+        // (the tiered-isolation cascade: "ipc injectFocus" logged, nothing
+        // delivered). Returns whether the request could be submitted; the
+        // IPC layer keeps its own reply contract unchanged.
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "ipc injectFocus handle=" + handle
+                     + " seat=" + (seat || "default")
+                     + " — NOT delivered (binding "
+                     + (qdwinBinding ? "unbound" : "absent") + ")");
+            return false;
+        }
         qdwinBinding.focusWindow(handle, seat || "default");
         Logger.i("Qdwin", "ipc injectFocus handle=" + handle
                  + " seat=" + (seat || "default"));
+        return true;
     }
     function clearSeatSelection(seat, isPrimary) {
-        if (!qdwinBinding) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "ipc clearSelection seat=" + (seat || "default")
+                     + " primary=" + (isPrimary ? 1 : 0)
+                     + " — NOT delivered (binding "
+                     + (qdwinBinding ? "unbound" : "absent") + ")");
+            return false;
+        }
         qdwinBinding.clearSelection(seat || "default", isPrimary ? 1 : 0);
         Logger.i("Qdwin", "ipc clearSelection seat=" + (seat || "default")
                  + " primary=" + (isPrimary ? 1 : 0));
+        return true;
     }
     // P05a Phase A: per-toplevel chrome colour. Tier4Apps / Tier3Apps
     // call this after resolving a toplevel's silo so qdwin stores the
@@ -212,11 +233,13 @@ Singleton {
     // the rgba arg was logged + dropped on the qdwin side; now the SSD
     // paint helper reads it back via the per-toplevel state. Returns
     // nothing — fire-and-forget. Logs on no-binding so a race during
-    // shell startup leaves a journal trace.
+    // shell startup leaves a journal trace; the unbound-but-present
+    // case (dead compositor) gets the same warning — an existing
+    // binding object that isn't bound can't deliver the request.
     function setBorderColor(handle, rgba) {
-        if (!qdwinBinding) {
+        if (!qdwinBinding || !qdwinBinding.bound) {
             Logger.w("Qdwin", "setBorderColor handle=" + handle
-                              + " rgba=" + rgba + " — no binding");
+                              + " rgba=" + rgba + " — not bound (dropped)");
             return;
         }
         qdwinBinding.setBorderColor(handle, rgba >>> 0);
@@ -314,6 +337,11 @@ Singleton {
                  "origin_uid=" + originUid,
                  "verdict=" + decision.verdict,
                  "reason=" + decision.reason);
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "nestedProxyDecision handle=" + handle
+                     + " — not bound (verdict reply lost)");
+            return;
+        }
         qdwinBinding.nestedProxyDecision(
             handle, BrokerGate.qdwinDecision(decision.verdict),
             decision.reason);
@@ -357,6 +385,11 @@ Singleton {
                  "src_app=" + (sourceAppId || ""),
                  "verdict=" + decision.verdict,
                  "reason=" + decision.reason);
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "activationDecision handle=" + handle
+                     + " — not bound (verdict reply lost)");
+            return;
+        }
         qdwinBinding.activationDecision(
             handle, BrokerGate.qdwinDecision(decision.verdict),
             decision.reason);
@@ -720,8 +753,12 @@ Singleton {
         onSwitcherCommit: () => {
             if (root._switcherIndex >= 0
                 && root._switcherIndex < root.windows.count) {
-                qdwinBinding.focusWindow(
-                    root.windows.get(root._switcherIndex).handle);
+                if (qdwinBinding && qdwinBinding.bound) {
+                    qdwinBinding.focusWindow(
+                        root.windows.get(root._switcherIndex).handle);
+                } else {
+                    Logger.w("Qdwin", "switcherCommit focus — not bound (dropped)");
+                }
             }
             root._switcherIndex = -1;
         }
@@ -895,6 +932,8 @@ Singleton {
         if (idx < 0) return;
         if (qdwinBinding && qdwinBinding.bound)
             qdwinBinding.activateWorkspace(idx);
+        else
+            Logger.w("Qdwin", "switchToWorkspace idx=" + idx + " — not bound (dropped)");
     }
 
     // Move a window to a workspace ("send to workspace N"). `window` is a
@@ -904,6 +943,8 @@ Singleton {
         if (h < 0 || index < 0) return;
         if (qdwinBinding && qdwinBinding.bound)
             qdwinBinding.moveToplevelToWorkspace(h, index);
+        else
+            Logger.w("Qdwin", "moveToWorkspace handle=" + h + " — not bound (dropped)");
     }
 
     function _handleOf(w) {
@@ -916,6 +957,10 @@ Singleton {
     function focusWindow(window) {
         const h = _handleOf(window);
         if (h < 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "focusWindow handle=" + h + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.focusWindow(h);
     }
 
@@ -983,6 +1028,10 @@ Singleton {
                 }
             }
         }
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "closeWindow handle=" + h + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.closeWindow(h);
     }
 
@@ -1011,12 +1060,20 @@ Singleton {
     function requestMaximize(window, maximized) {
         const h = _handleOf(window);
         if (h < 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "requestMaximize handle=" + h + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestMaximize(h, !!maximized);
     }
 
     function requestMinimize(window) {
         const h = _handleOf(window);
         if (h < 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "requestMinimize handle=" + h + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestMinimize(h);
     }
 
@@ -1026,6 +1083,10 @@ Singleton {
     function dismissUnattributedRemote(window) {
         const h = _handleOf(window);
         if (h < 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "dismissUnattributedRemote handle=" + h + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestMinimize(h);
     }
 
@@ -1036,7 +1097,10 @@ Singleton {
     // placement: 0=center, 1=under-mouse, 2=smart, 3=cascade.
     function applyWmPolicy(focusPolicy, ffmDelayMs, raiseOnClick, raiseOnHover,
                            placement, snapEnabled, snapDistance) {
-        if (!qdwinBinding) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "applyWmPolicy — not bound (dropped)");
+            return;
+        }
         qdwinBinding.setWmPolicy(focusPolicy, ffmDelayMs, raiseOnClick,
                                  raiseOnHover, placement, snapEnabled,
                                  snapDistance);
@@ -1049,7 +1113,10 @@ Singleton {
     function applyPointerConfig(accelSpeed, accelProfile, naturalScroll,
                                 tapToClick, leftHanded, middleEmulation,
                                 disableWhileTyping, scrollMethod) {
-      if (!qdwinBinding) return;
+      if (!qdwinBinding || !qdwinBinding.bound) {
+        Logger.w("Qdwin", "applyPointerConfig — not bound (dropped)");
+        return;
+      }
       qdwinBinding.setPointerConfig(accelSpeed, accelProfile, naturalScroll,
                                     tapToClick, leftHanded, middleEmulation,
                                     disableWhileTyping, scrollMethod);
@@ -1057,24 +1124,37 @@ Singleton {
     // Push the xkb key-repeat rate (Hz, 0=off) and initial delay (ms). Called
     // by KeyboardInputService when CapabilityService.xkbRepeat is live.
     function applyKeyRepeat(rate, delay) {
-      if (!qdwinBinding) return;
+      if (!qdwinBinding || !qdwinBinding.bound) {
+        Logger.w("Qdwin", "applyKeyRepeat — not bound (dropped)");
+        return;
+      }
       qdwinBinding.setKeyRepeat(rate, delay);
     }
     // WM-shortcut hotkey (de)registration. id is shell-assigned; modifiers is
     // the ctrl=1/alt=2/super=4/shift=8 bitmask; key is a linux input keycode.
     function registerHotkey(id, modifiers, key) {
-        if (!qdwinBinding) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "registerHotkey id=" + id + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.registerHotkey(id, modifiers, key);
     }
     function unregisterHotkey(id) {
-        if (!qdwinBinding) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "unregisterHotkey id=" + id + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.unregisterHotkey(id);
     }
     // Handle-based window actions for the WM shortcuts (which act on the
     // focusedHandle, not a window row object). `tileEdge`: 0=none, 1=left,
     // 2=right. windowState returns the QDWIN_TS_* bitmask (0 if unknown).
     function closeHandle(handle) {
-        if (!qdwinBinding || handle <= 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound || handle <= 0) {
+            if (handle > 0)
+                Logger.w("Qdwin", "closeHandle handle=" + handle + " — not bound (dropped)");
+            return;
+        }
         // Route through closeWindow(window) so a tier-4 VM window still gets
         // the _dispatchTier4Close() domain-teardown hook (closing the
         // wl_toplevel alone leaves the qemu domain running). Fall back to a
@@ -1086,28 +1166,52 @@ Singleton {
             qdwinBinding.closeWindow(handle);
     }
     function requestMaximizeHandle(handle, maximized) {
-        if (!qdwinBinding || handle <= 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound || handle <= 0) {
+            if (handle > 0)
+                Logger.w("Qdwin", "requestMaximizeHandle handle=" + handle + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestMaximize(handle, !!maximized);
     }
     function requestFullscreenHandle(handle, fullscreen) {
-        if (!qdwinBinding || handle <= 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound || handle <= 0) {
+            if (handle > 0)
+                Logger.w("Qdwin", "requestFullscreenHandle handle=" + handle + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestFullscreen(handle, !!fullscreen);
     }
     function requestTileHandle(handle, tileEdge) {
-        if (!qdwinBinding || handle <= 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound || handle <= 0) {
+            if (handle > 0)
+                Logger.w("Qdwin", "requestTileHandle handle=" + handle + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestTile(handle, tileEdge);
     }
     function requestSetPositionHandle(handle, x, y) {
-        if (!qdwinBinding || handle <= 0) return;
+        if (!qdwinBinding || !qdwinBinding.bound || handle <= 0) {
+            if (handle > 0)
+                Logger.w("Qdwin", "requestSetPositionHandle handle=" + handle + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.requestSetPosition(handle, x, y);
     }
     function setRemoteOutputInput(slotName, enabled) {
-        if (!qdwinBinding || qdwinBinding.shellVersion < 32) return false;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "setRemoteOutputInput slot=" + slotName + " — not bound (dropped)");
+            return false;
+        }
+        if (qdwinBinding.shellVersion < 32) return false;
         qdwinBinding.setRemoteOutputInput(slotName, !!enabled);
         return true;
     }
     function drainRemoteOutputState(slotName) {
-        if (!qdwinBinding || qdwinBinding.shellVersion < 33) return false;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "drainRemoteOutputState slot=" + slotName + " — not bound (dropped)");
+            return false;
+        }
+        if (qdwinBinding.shellVersion < 33) return false;
         qdwinBinding.drainRemoteOutputState(slotName);
         return true;
     }
@@ -1121,12 +1225,18 @@ Singleton {
     // `slot`; idleStateChanged(slot, idle) fires on idled/resumed. PowerService
     // uses slot 0 = inactivity action, slot 1 = display-off.
     function setIdleNotification(slot, timeoutMs) {
-        if (!qdwinBinding) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "setIdleNotification slot=" + slot + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.setIdleNotification(slot, timeoutMs);
     }
     // Force all outputs on/off (DPMS) via set_display_power (>= v26).
     function setDisplayPower(on) {
-        if (!qdwinBinding) return;
+        if (!qdwinBinding || !qdwinBinding.bound) {
+            Logger.w("Qdwin", "setDisplayPower on=" + !!on + " — not bound (dropped)");
+            return;
+        }
         qdwinBinding.setDisplayPower(!!on);
     }
 
