@@ -12,7 +12,7 @@
 # Only the directories the checklist reads are copied (a few hundred MB, not
 # the 20 GiB image); add a path here when a checklist row needs one.
 set -euo pipefail
-BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
 if [ -n "${1:-}" ]; then
     RAW="$1"
 else

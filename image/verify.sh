@@ -29,7 +29,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # Same default as build.sh/build-in-vm.sh: /tmp is a tmpfs on the build
 # hosts, so a default-env build followed by a default-env verify must agree
 # on /var/tmp or the artifact is simply not found (iso/14 Phase A item 6).
-BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
 STAMP="$(date +%y%m%d-%H%M)"
 VERIFY_DIR="$HERE/logs/verify-${STAMP}$(date +%S)"
 # AGENTS.md requires VM names end in YYMMDD-HHMM so parallel runs don't collide.
@@ -98,6 +98,9 @@ teardown() {
 # one top-level .raw. A digest selects the matching checksum file.
 qdistro_resolve_image || die "could not resolve image (see select-artifact)"
 qdistro_materialize_raw || die "could not materialise raw (see select-artifact)"
+# Raw and qcow2 inputs return from materialisation without creating the
+# per-user build directory, which also holds this run's overlay.
+mkdir -p "$BUILD_DIR" || die "could not create build directory: $BUILD_DIR"
 IMG="$QDISTRO_RESOLVED_DISK"
 log "image: $IMG (kind=${QDISTRO_RESOLVED_KIND} published=${QDISTRO_RESOLVED_PATH})"
 if [ -n "${QDISTRO_RESOLVED_DIGEST:-}" ]; then

@@ -5,10 +5,11 @@
 # QDISTRO_TIER3S=1 (owner O10). setup_file stages, on the file's private
 # driver-staging HTTP server (stage_vm_driver):
 #   - the tested commit (`git archive HEAD`; a dirty installed tree refuses);
-#   - the pinned runsc tarball from ~/.cache/qdistro/runsc/<release>/, its
-#     sha512 checked against tier3s/RUNSC_RELEASE here AND in the guest;
-#   - the workload image as an OCI archive built once in a VM with registry
-#     access (tier3s/cache-image-archive.sh <vm>), its sha256 checked here
+#   - the pinned runsc tarball from ~/.cache/qdistro/runsc/<release>/, fetched
+#     on a cache miss and sha512 checked against tier3s/RUNSC_RELEASE here AND
+#     in the guest;
+#   - the workload image as an OCI archive built once in a qci worker VM on a
+#     cache miss (tier3s/cache-image-archive.sh <vm>), its sha256 checked here
 #     against its manifest and its image ID asserted in the guest;
 # then runs tests/integration/vm/tier3s-guest-setup.sh in the guest
 # (installer with QDISTRO_TIER3S=1 from the tested commit, offline provision,
@@ -31,6 +32,52 @@ t3s_log() {
     printf '# [tier3s] %s transcript: %s\n' "$1" "$dir/$1.log" >&3
 }
 
+# The three files run in parallel against separate workers. Only one may fill
+# the shared host caches; the others recheck the pinned inputs after the lock.
+# Building the OCI archive in a worker changes its rootless podman image store,
+# but the guest setup below removes that tag and loads the checked archive.
+t3s_prepare_inputs() {
+    local repo=$1 rel=$2 want=$3 cdir=$4 cache tar lock tmp="" url key log
+    cache="$HOME/.cache/qdistro/runsc/$rel"
+    tar="$cache/gvisor.tar.zstd"
+    lock="$HOME/.cache/qdistro/tier3s-bootstrap.lock"
+    mkdir -p "$cache" "${QCI_SCENARIO_TMPDIR:-${BATS_FILE_TMPDIR:-/tmp}}" || return 1
+    log="${QCI_SCENARIO_TMPDIR:-${BATS_FILE_TMPDIR:-/tmp}}/tier3s-cache-build.log"
+    (
+        flock -w 4800 9 || { echo "tier3s: timed out waiting for the shared cache lock" >&2; exit 1; }
+        if [ "$(sha512sum "$tar" 2>/dev/null | cut -d' ' -f1)" != "$want" ]; then
+            if [ "${QCI_OFFLINE:-0}" = 1 ]; then
+                echo "tier3s: pinned runsc tarball missing or invalid in offline mode: $tar" >&2
+                exit 1
+            fi
+            url=$(sed -n 's/^base_url=//p' "$repo/tier3s/RUNSC_RELEASE")
+            [ -n "$url" ] || { echo "tier3s: pin has no base_url" >&2; exit 1; }
+            tmp=$(mktemp "$cache/.gvisor.tar.zstd.XXXXXXXX") || exit 1
+            trap 'rm -f -- "$tmp"' EXIT
+            curl -fLSs --connect-timeout 30 --max-time 900 "$url/gvisor.tar.zstd" -o "$tmp" || exit 1
+            [ "$(sha512sum < "$tmp" | cut -d' ' -f1)" = "$want" ] || {
+                echo "tier3s: downloaded runsc tarball sha512 differs from RUNSC_RELEASE" >&2; exit 1;
+            }
+            mv -f -- "$tmp" "$tar" || exit 1
+            tmp=""
+        fi
+        key=$(cd "$repo" && bash tier3s/cache-image-archive.sh --key) || exit 1
+        if [ ! -s "$cdir/manifest.txt" ] || [ ! -s "$cdir/tier3s-headless-smoke.oci.tar" ] ||
+           [ "$(sed -n 's/^INPUT_KEY=//p' "$cdir/manifest.txt" 2>/dev/null)" != "$key" ] ||
+           [ "$(sha256sum "$cdir/tier3s-headless-smoke.oci.tar" 2>/dev/null | cut -d' ' -f1)" != "$(sed -n 's/^IMAGE_ARCHIVE_SHA256=//p' "$cdir/manifest.txt" 2>/dev/null)" ]; then
+            if [ "${QCI_OFFLINE:-0}" = 1 ]; then
+                echo "tier3s: pinned OCI archive missing or invalid in offline mode: $cdir" >&2
+                exit 1
+            fi
+            echo "tier3s: building pinned OCI archive in worker $VM_NAME; log: $log" >&2
+            if ! (cd "$repo" && bash tier3s/cache-image-archive.sh "$VM_NAME" --force) >"$log" 2>&1; then
+                cat "$log" >&2
+                exit 1
+            fi
+        fi
+    ) 9>"$lock" || { fail_loud "tier 3s host inputs could not be prepared (see cache diagnostics above)"; return 1; }
+}
+
 # t3s_stage <driver>: serve the driver, the guest lib/setup and the inputs.
 t3s_stage() {
     local repo stage rel want got cdir man arch dirty
@@ -48,16 +95,17 @@ t3s_stage() {
     git -C "$repo" rev-parse HEAD > "$stage/commit.txt"
     rel=$(sed -n 's/^release=//p' "$repo/tier3s/RUNSC_RELEASE")
     want=$(sed -n 's/^tarball_sha512=//p' "$repo/tier3s/RUNSC_RELEASE")
-    got=$(sha512sum < "$HOME/.cache/qdistro/runsc/$rel/gvisor.tar.zstd" 2>/dev/null | cut -d' ' -f1)
+    cdir=$(cd "$repo" && bash tier3s/cache-image-archive.sh --dir)
+    t3s_prepare_inputs "$repo" "$rel" "$want" "$cdir" || return 1
+    got=$(sha512sum "$HOME/.cache/qdistro/runsc/$rel/gvisor.tar.zstd" 2>/dev/null | cut -d' ' -f1)
     if [ -z "$want" ] || [ "$got" != "$want" ]; then
         fail_loud "host runsc cache ~/.cache/qdistro/runsc/$rel/gvisor.tar.zstd missing or sha512 != tier3s/RUNSC_RELEASE"
         return 1
     fi
     ln -sf "$HOME/.cache/qdistro/runsc/$rel/gvisor.tar.zstd" "$stage/gvisor.tar.zstd"
-    cdir=$(cd "$repo" && bash tier3s/cache-image-archive.sh --dir)
     man="$cdir/manifest.txt"; arch="$cdir/tier3s-headless-smoke.oci.tar"
     if [ ! -s "$man" ] || [ ! -s "$arch" ]; then
-        fail_loud "no workload image archive for this commit's image inputs at $cdir (build it once: tier3s/cache-image-archive.sh <dev-vm>)"
+        fail_loud "no workload image archive for this commit's image inputs at $cdir after cache preparation"
         return 1
     fi
     if [ "$(sha256sum < "$arch" | cut -d' ' -f1)" != "$(sed -n 's/^IMAGE_ARCHIVE_SHA256=//p' "$man")" ]; then
