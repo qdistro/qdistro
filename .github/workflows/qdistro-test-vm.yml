@@ -1,0 +1,378 @@
+name: qdistro downloadable VM test image
+
+# Builds a downloadable qdistro test VM on a free GitHub runner:
+#   1. native components in rootless Podman (scripts/vm/build-native-podman.sh,
+#      the same builder the local qci cloud test bases use), against the
+#      Tumbleweed snapshot pinned in snapshot.conf;
+#   2. offline copy of that stage plus the source tree into the signed,
+#      SHA256-pinned Minimal-VM cloud QCOW2;
+#   3. in the booted guest, runtime packages from the same snapshot and the
+#      qdistro bootstrap chain (scripts/vm/test-vm-guest-install.sh): the
+#      QML shell, Python services, greeter and locker. Build tools stay in
+#      the container; this is a test VM, not a release image.
+on:
+  push:
+    branches: [experiment/github-qdistro-image]
+    # The image, its harness and the guest transport. A change only to product
+    # code or to pytest suites does not trigger a build: run it by hand
+    # (workflow_dispatch).
+    paths:
+      - .github/workflows/qdistro-test-vm.yml
+      - scripts/vm/test-vm-guest-install.sh
+      - scripts/vm/test-vm-consumer-check.sh
+      - scripts/vm/test-vm-suites.sh
+      - scripts/vm/test-vm-suites-summary.py
+      - scripts/vm/vm-exec
+      - tests/integration/vm/**
+      - snapshot.conf
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      LIBGUESTFS_BACKEND: direct
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up paths, KVM and the snapshot pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The suites step sizes its time budget from what the job has left.
+          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/qdistro-vm" "$RUNNER_TEMP/qdistro-cache" "$RUNNER_TEMP/qdistro-cloud"
+          echo "VM_DIR=$RUNNER_TEMP/qdistro-vm" >> "$GITHUB_ENV"
+          echo "VM_IMAGE=$RUNNER_TEMP/qdistro-vm/qdistro-test-vm.qcow2" >> "$GITHUB_ENV"
+          echo "CLOUD_CACHE=$RUNNER_TEMP/qdistro-cloud/cloud-base.qcow2" >> "$GITHUB_ENV"
+          echo "QDWIN_CACHE_DIR=$RUNNER_TEMP/qdistro-cache" >> "$GITHUB_ENV"
+          echo "DISK_BASELINE=$(df -B1 --output=used / | tail -1 | tr -d ' ')" >> "$GITHUB_ENV"
+          # Hosted Linux runners expose /dev/kvm to root only.
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          if [ -w /dev/kvm ]; then
+            echo "QEMU_ACCEL=kvm" >> "$GITHUB_ENV"
+          else
+            echo "QEMU_ACCEL=tcg" >> "$GITHUB_ENV"
+            echo "LIBGUESTFS_BACKEND_SETTINGS=force_tcg" >> "$GITHUB_ENV"
+          fi
+          . scripts/vm/lib/test-substrate.sh
+          qdistro_load_test_substrate
+          {
+            echo "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT"
+            echo "CLOUD_URL=$QDISTRO_SUBSTRATE_CLOUD_URL"
+            echo "CLOUD_SHA256=$QDISTRO_SUBSTRATE_CLOUD_SHA256"
+          } >> "$GITHUB_ENV"
+          echo "snapshot $QDISTRO_SUBSTRATE_SNAPSHOT, cloud $QDISTRO_SUBSTRATE_CLOUD_SHA256"
+          ls -l /dev/kvm || true
+          nproc; free -g; df -h /
+          podman --version
+
+      - name: Compile native components in rootless Podman
+        shell: bash
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          archive=$(bash scripts/vm/build-native-podman.sh)
+          cp "$archive" "$VM_DIR/native-stage.tar"
+          tar -tf "$VM_DIR/native-stage.tar" | wc -l
+          du -h "$VM_DIR/native-stage.tar"
+          df -h /
+
+      - name: Install image tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libguestfs-tools libguestfs-xfs xfsprogs qemu-utils \
+            qemu-system-x86 ovmf cloud-image-utils gnupg wget jq openssh-client
+          # bats-core as in Tumbleweed (Ubuntu ships 1.10), for the VM suites.
+          git clone -q --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats-core"
+          sudo "$RUNNER_TEMP/bats-core/install.sh" /usr/local
+          bats --version
+          # libguestfs builds its appliance from the host kernel, which the
+          # runner keeps root-only.
+          sudo install -m 0644 "/boot/vmlinuz-$(uname -r)" "$VM_DIR/vmlinuz-$(uname -r)"
+          echo "SUPERMIN_KERNEL=$VM_DIR/vmlinuz-$(uname -r)" >> "$GITHUB_ENV"
+          echo "SUPERMIN_MODULES=/lib/modules/$(uname -r)" >> "$GITHUB_ENV"
+
+      - name: Restore the verified cloud image
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/qdistro-cloud
+          key: qdistro-cloud-${{ env.CLOUD_SHA256 }}
+
+      - name: Copy the stage and source into the signed cloud QCOW2
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/vm/lib/opensuse-cloud-image.sh
+          . scripts/vm/lib/test-substrate.sh
+          qdistro_load_test_substrate
+          # openSUSE signature, then the snapshot.conf pin.
+          download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$CLOUD_SHA256"
+          qemu-img create -f qcow2 "$VM_IMAGE" 8G
+          virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
+          git archive --format=tar --prefix=qdistro-src/ HEAD > "$VM_DIR/source.tar"
+          # The guest takes only the snapshot repositories; the stamp is what
+          # the installer and qci compare the native stage against.
+          qdistro_substrate_repo_command > "$VM_DIR/substrate-repos.sh"
+          guestfish --rw -a "$VM_IMAGE" <<EOF
+          run
+          mount /dev/sda3 /
+          xfs-growfs /
+          tar-in $VM_DIR/native-stage.tar /
+          tar-in $VM_DIR/source.tar /root
+          upload $VM_DIR/substrate-repos.sh /root/qdistro-substrate-repos.sh
+          EOF
+          rm -f "$VM_DIR/source.tar"
+          qemu-img check "$VM_IMAGE"
+          df -h /
+
+      - name: Boot the guest and install qdistro
+        shell: bash
+        timeout-minutes: 90
+        run: |
+          set -euo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$VM_DIR/builder-key"
+          {
+            printf '#cloud-config\n'
+            printf 'users:\n  - name: admin\n    uid: 1000\n    groups: [wheel]\n    shell: /bin/bash\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    ssh_authorized_keys:\n'
+            printf '      - %s\n' "$(cat "$VM_DIR/builder-key.pub")"
+            printf 'ssh_pwauth: false\ndisable_root: true\n'
+            printf 'runcmd:\n  - [systemctl, enable, --now, sshd.service]\n'
+          } > "$VM_DIR/user-data"
+          printf 'instance-id: qdistro-test-vm\nlocal-hostname: qdistro-test-vm\n' > "$VM_DIR/meta-data"
+          cloud-localds "$VM_DIR/seed.img" "$VM_DIR/user-data" "$VM_DIR/meta-data"
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VM_DIR/OVMF_VARS.fd"
+
+          boot_vm() {
+            qemu-system-x86_64 -machine "q35,accel=$QEMU_ACCEL" -cpu max -m 6144 -smp "$(nproc)" \
+              -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+              -drive if=pflash,format=raw,file="$VM_DIR/OVMF_VARS.fd" \
+              -drive if=virtio,format=qcow2,file="$VM_IMAGE" \
+              -drive if=virtio,format=raw,readonly=on,file="$VM_DIR/seed.img" \
+              -netdev user,id=vmnet,hostfwd=tcp:127.0.0.1:2222-:22 \
+              -device virtio-net-pci,netdev=vmnet \
+              -display none -serial file:"$VM_DIR/serial-$1.log" -monitor none \
+              > "$VM_DIR/qemu-$1.log" 2>&1 &
+            qemu_pid=$!
+          }
+          vmssh() {
+            ssh -i "$VM_DIR/builder-key" -p 2222 \
+              -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+              -o ServerAliveInterval=30 -o LogLevel=ERROR \
+              admin@127.0.0.1 "$@"
+          }
+          # A transport failure (255: refused, reset, banner timeout) right
+          # after a boot is transient on a slow emulated guest; retry it.
+          # Only short idempotent commands use this; the polling wait_ssh has
+          # its own loop and the guest install must not be re-run blindly.
+          vmsshx() {
+            local n rc
+            for n in 1 2 3; do
+              vmssh "$@" && return 0
+              rc=$?
+              [ "$rc" -eq 255 ] || return "$rc"
+              sleep 4
+            done
+            return "$rc"
+          }
+          wait_ssh() {
+            for _ in $(seq 1 120); do
+              if vmssh 'sudo -n true' >/dev/null 2>&1; then return 0; fi
+              kill -0 "$qemu_pid" 2>/dev/null || break
+              sleep 5
+            done
+            tail -120 "$VM_DIR/serial-$1.log"
+            return 1
+          }
+          wait_down() {
+            for _ in $(seq 1 90); do
+              kill -0 "$qemu_pid" 2>/dev/null || return 0
+              sleep 2
+            done
+            echo "guest did not power off; killing QEMU" >&2
+            kill "$qemu_pid" 2>/dev/null || true
+            wait "$qemu_pid" 2>/dev/null || true
+            return 1
+          }
+          trap 'df -h /; du -h "$VM_IMAGE"; kill "$qemu_pid" 2>/dev/null || true' EXIT
+
+          boot_vm install
+          wait_ssh install
+          SECONDS=0
+          vmsshx 'sudo -n bash /root/qdistro-substrate-repos.sh && sudo -n rm -f /root/qdistro-substrate-repos.sh'
+          vmssh 'sudo -n bash /root/qdistro-src/scripts/vm/test-vm-guest-install.sh' 2>&1 \
+            | tee "$VM_DIR/guest-install.log"
+          echo "guest install took ${SECONDS}s"
+          vmsshx 'df -h /; rpm -qa | wc -l'
+
+          # Headless qdwin: the shell plugin loads and answers its probe.
+          vmsshx 'set -eu; export XDG_RUNTIME_DIR=/run/user/1000; \
+            export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
+            export WESTON_MODULE_MAP=headless-backend.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so; \
+            export WAYLAND_DISPLAY=wayland-ci; \
+            timeout 20s weston --backend=headless-backend.so --renderer=pixman \
+              --shell=qdwin-shell.so --socket=wayland-ci \
+              --idle-time=0 --log=/tmp/qdistro-weston.log & compositor_pid=$!; \
+            ready=0; for attempt in $(seq 1 50); do \
+              if test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; then ready=1; break; fi; \
+              if ! kill -0 "$compositor_pid" 2>/dev/null; then break; fi; sleep 0.2; \
+            done; \
+            if test "$ready" -eq 1; then qdwin-probe --timeout=5; fi; \
+            wait "$compositor_pid" || rc=$?; \
+            cat /tmp/qdistro-weston.log; \
+            test "$ready" -eq 1; test "${rc:-0}" -eq 124; \
+            grep -q "qdwin: shell loaded" /tmp/qdistro-weston.log'
+
+          # qdshell: the installed QML tree runs on a headless qdwin for 30 s
+          # with the qdshell.service environment.
+          vmsshx 'set -u; export XDG_RUNTIME_DIR=/run/user/1000; \
+            export LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64; \
+            d=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16; \
+            export WESTON_MODULE_MAP="headless-backend.so=$d/headless-backend.so;gl-renderer.so=$d/gl-renderer.so"; \
+            timeout 45s weston --backend=headless-backend.so --renderer=gl \
+              --shell=qdwin-shell.so --socket=wayland-shell \
+              --idle-time=0 --log=/tmp/qdshell-weston.log & compositor_pid=$!; \
+            for attempt in $(seq 1 50); do \
+              test -S "$XDG_RUNTIME_DIR/wayland-shell" && break; sleep 0.2; \
+            done; \
+            test -S "$XDG_RUNTIME_DIR/wayland-shell" || { cat /tmp/qdshell-weston.log; exit 1; }; \
+            env -u LD_LIBRARY_PATH -u WESTON_MODULE_MAP WAYLAND_DISPLAY=wayland-shell \
+              QT_QPA_PLATFORM=wayland XDG_SESSION_TYPE=wayland QML_DISABLE_DISK_CACHE=1 \
+              QML_IMPORT_PATH=/usr/share/qdistro/qml \
+              timeout 30s dbus-run-session -- qs -p /usr/share/quickshell/qdshell \
+              > /tmp/qdshell.log 2>&1; qs_rc=$?; \
+            kill "$compositor_pid" 2>/dev/null; wait "$compositor_pid" 2>/dev/null; \
+            echo "--- weston"; cat /tmp/qdshell-weston.log; \
+            echo "--- qdshell (rc=$qs_rc)"; cat /tmp/qdshell.log; \
+            test "$qs_rc" -eq 124' 2>&1 | tee "$VM_DIR/qdshell-smoke.log"
+
+          # Second boot of the installed system: services and the greeter.
+          vmsshx 'sudo -n systemctl poweroff' || true
+          wait_down
+          boot_vm reboot
+          wait_ssh reboot
+          vmsshx 'set -u; sleep 20; \
+            systemctl --no-pager list-units "qdistro*" "greetd*" "seatd*"; \
+            echo "--- failed units"; systemctl --no-pager --failed; \
+            echo "--- greetd"; sudo -n journalctl -b -u greetd --no-pager | tail -40; \
+            echo "--- bus names"; busctl --system --acquired list --no-legend | awk "{print \$1}" | grep -i qdistro; \
+            fail=0; for unit in greetd.service; do \
+              systemctl is-active --quiet "$unit" || { echo "NOT ACTIVE: $unit"; fail=1; }; \
+            done; \
+            for name in org.qdistro.AdminBroker1 org.qdistro.SessionManager1; do \
+              busctl --system --acquired list --no-legend | awk -v n="$name" "\$1==n{f=1} END{exit !f}" \
+                || { echo "NOT ON BUS: $name"; fail=1; }; \
+            done; \
+            exit "$fail"' 2>&1 | tee "$VM_DIR/reboot-check.log"
+
+          # The consumer boot must not inherit these.
+          vmsshx 'cat /etc/machine-id' > "$VM_DIR/build-machine-id"
+          vmsshx 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub' > "$VM_DIR/build-hostkey"
+
+          # Ship state: no builder key or cache; SSH stays enabled for a
+          # cloud-init key, password logins are refused remotely. An empty
+          # machine-id makes each copy generate its own on first boot.
+          vmsshx 'sudo -n sh -c "set -e; \
+            zypper -n clean -a; \
+            : > /etc/machine-id; \
+            install -d -m 0755 /etc/ssh/sshd_config.d; \
+            printf \"PasswordAuthentication no\nKbdInteractiveAuthentication no\n\" \
+              > /etc/ssh/sshd_config.d/10-qdistro-test-vm.conf; \
+            test \"\$(systemctl is-enabled sshd.service)\" = enabled; \
+            cloud-init clean --logs; \
+            rm -f /home/admin/.ssh/authorized_keys; \
+            systemctl poweroff"' || true
+          wait_down
+          trap - EXIT
+          qemu-img check "$VM_IMAGE"
+
+      - name: Offline image checks and runner budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/lib64/weston/qdwin-shell.so)" = true
+          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /usr/bin/qdgreeter)" = true
+          test "$(guestfish --ro -a "$VM_IMAGE" run : mount-ro /dev/sda3 / : is-file /home/admin/.ssh/authorized_keys)" = false
+          used_now="$(df -B1 --output=used / | tail -1 | tr -d ' ')"
+          used_delta="$((used_now - DISK_BASELINE))"
+          echo "Runner disk used since start: $used_delta bytes"
+          test "$used_delta" -lt 32212254720
+          qemu-img info --output=json "$VM_IMAGE" | jq -e '.format == "qcow2" and .["virtual-size"] == 8589934592 and .["backing-filename"] == null'
+          (cd "$VM_DIR" && sha256sum qdistro-test-vm.qcow2 > qdistro-test-vm.qcow2.sha256)
+          du -h "$VM_IMAGE"
+
+      - name: Validate the shipped image as a consumer would boot it
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          bash scripts/vm/test-vm-consumer-check.sh "$VM_DIR" "$VM_IMAGE" "$QEMU_ACCEL" "$SNAPSHOT"
+          # The check booted a throwaway overlay; the artifact is unchanged.
+          (cd "$VM_DIR" && sha256sum -c qdistro-test-vm.qcow2.sha256)
+
+      - name: Upload downloadable test VM image
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdistro-test-vm-qcow2
+          path: |
+            ${{ env.VM_IMAGE }}
+            ${{ env.VM_IMAGE }}.sha256
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
+
+      # After the upload: the image is published whatever the suites find.
+      # The step fails when a suite did not run to completion (exit 2) or the
+      # harness broke; assertion failures are the result, in the job summary
+      # and the logs artifact.
+      - name: Run the pytest and VM bats suites in the guest
+        shell: bash
+        timeout-minutes: 240
+        run: |
+          set -euo pipefail
+          # Every suite is capped to the budget; end it 20 minutes before
+          # either deadline (this step's 240 or the job's 330 minutes), for
+          # shutdown, the summary and the log upload.
+          job_left=$(( 330 * 60 - ($(date +%s) - JOB_START) ))
+          budget=$(( 220 * 60 ))
+          [ $((job_left - 20 * 60)) -ge "$budget" ] || budget=$((job_left - 20 * 60))
+          echo "suites budget: ${budget}s (job has ${job_left}s left)"
+          QDISTRO_SUITES_BUDGET=$budget \
+            bash scripts/vm/test-vm-suites.sh "$VM_DIR" "$VM_IMAGE" "$QEMU_ACCEL"
+          (cd "$VM_DIR" && sha256sum -c qdistro-test-vm.qcow2.sha256)
+
+      - name: Suites summary
+        if: always()
+        shell: bash
+        run: |
+          s="$VM_DIR/suites/summary.md"
+          if [ ! -s "$s" ] && [ -f "$VM_DIR/suites/expected" ]; then
+            python3 scripts/vm/test-vm-suites-summary.py "$VM_DIR/suites" > "$s" || true
+          fi
+          if [ -s "$s" ]; then cat "$s" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload install logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdistro-test-vm-logs
+          path: |
+            ${{ env.VM_DIR }}/*.log
+            ${{ env.VM_DIR }}/*.png
+            ${{ env.VM_DIR }}/suites/**
+            !${{ env.VM_DIR }}/suites/vm/**
+          if-no-files-found: ignore
+          retention-days: 14
