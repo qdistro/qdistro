@@ -103,6 +103,9 @@ The helper provides:
 - `qdwin_apps_launch <name> <cmd>` — start an app as `admin` against the
   active wayland socket with the standard env (`MOZ_ENABLE_WAYLAND=1`,
   `QT_QPA_PLATFORM=wayland`, `GDK_BACKEND=wayland`, `DISPLAY=:0`).
+- `qdwin_apps_guest_has_command <name>` — check a required client with
+  `command -v` inside the scenario VM. Call it from the host driver shell;
+  the host's installed commands do not describe the GUI golden.
 - `qdwin_apps_ctl <command>` — push a line to the bystander FIFO. Prefer
   `qdwin_apps_ctl maxlast` / `restorelast` after launching one app, or pass an
   explicit handle such as `qdwin_apps_ctl "max 7"`.
