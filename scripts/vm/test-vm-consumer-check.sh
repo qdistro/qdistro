@@ -238,10 +238,25 @@ if ! user_active qdwin-session.target qdwin-compositor.service qdshell.service q
     fail "greeter login did not start the qdwin session"
 fi
 log "session: qdwin-session.target, compositor, qdshell and qdlocker active"
-sleep 15   # let qdshell paint its bar and wallpaper
-desktop=$(shot consumer-desktop)
+# qdshell needs a moment to map and paint its layer surfaces; under TCG that
+# can stretch well past a fixed sleep, so poll like the greeter check does.
+desktop=""
+for _ in $(seq 1 36); do
+    sleep 5
+    desktop=$(shot consumer-desktop)
+    [ "${desktop%% *}" -gt 8 ] && break
+done
 log "desktop screenshot: $desktop"
-[ "${desktop%% *}" -gt 8 ] || fail "desktop screenshot is blank"
+if [ "${desktop%% *}" -le 8 ]; then
+    # A uniform frame is ambiguous: a crashed or never-painted qdshell, a
+    # rejected layer-shell bind, or plain TCG slowness all look identical in
+    # the screendump. Dump the session journals so the run log can tell them
+    # apart before failing.
+    vmssh 'echo "--- qdshell journal"; sudo -n journalctl -M admin@ --user-unit qdshell.service --no-pager -n 30 2>&1; \
+           echo "--- compositor journal"; sudo -n journalctl -b --no-pager _COMM=weston 2>/dev/null | tail -30; \
+           echo "--- qdlocker journal"; sudo -n journalctl -M admin@ --user-unit qdlocker.service --no-pager -n 15 2>&1' || true
+    fail "desktop screenshot is blank"
+fi
 [ "$(echo "$desktop" | cut -d' ' -f2)" != "$(echo "$greeter" | cut -d' ' -f2)" ] || fail "screen did not change after login"
 user_active qdwin-compositor.service qdshell.service || fail "session did not stay up"
 
