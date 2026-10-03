@@ -125,11 +125,19 @@ def test_cache_script_builds_qfileman_context_with_consumer_sources(tmp_path):
     calls = (tmp_path / "podman-calls").read_text()
     blocks = [b for b in listing.split("CONTEXT=") if b.strip()]
     assert len(blocks) == 4, listing
-    names = [set(b.split()) for b in blocks]
-    weston, _text_viewer, _url_preview, qfileman = names
-    assert "qdfileman" not in weston
-    assert "presentation" not in weston
-    assert "consumer" not in weston
+
+    def names_for(workload: str) -> set[str]:
+        marker = f"wcontext.{workload}."
+        matched = [b for b in blocks if b.split("\n", 1)[0].find(marker) >= 0]
+        assert len(matched) == 1, listing
+        return set(matched[0].split())
+
+    for other in ("weston-terminal", "text-viewer", "url-preview"):
+        names = names_for(other)
+        assert "qdfileman" not in names, other
+        assert "presentation" not in names, other
+        assert "consumer" not in names, other
+    qfileman = names_for("qfileman")
     assert "qdfileman" in qfileman
     assert "presentation" in qfileman
     assert "Containerfile.qfileman" in qfileman
