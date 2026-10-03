@@ -179,7 +179,10 @@ sys.exit(0 if ok else 1)' "$rid" 2>/dev/null; then
     local wpid=$!
     sleep 1
     r=$(broker_call_as admin DecideRequest "[$rid, \"deny\", \"once\"]")
-    expect_eq "pg28: admin DecideRequest(deny) accepted" "$r" "OK null"
+    # DecideRequest returns its atomic outcome ("applied" = THIS call
+    # decided the request; "already-*"/"deciding"/"unknown" would mean it
+    # did not). Contract: broker DecideRequest out_signature "s".
+    expect_eq "pg28: admin DecideRequest(deny) accepted" "$r" 'OK "applied"'
     wait "$wpid"
     wout=$(cat "$WORK/28-wait.out")
     if printf '%s' "$wout" | grep -qE 'boolean false|AdminBroker1\.Denied'; then

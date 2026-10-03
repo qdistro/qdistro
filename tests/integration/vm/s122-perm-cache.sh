@@ -202,7 +202,10 @@ pg31() {
     expect_eq "pg31: monitor up BEFORE the approval (request still pending)" \
         "$(pending_ids_for "$act")" "$rid"
     r=$(broker_call_as admin DecideRequest "[$rid, \"allow\", \"1h\"]")
-    expect_eq "pg31: admin DecideRequest(allow, 1h)" "$r" "OK null"
+    # "applied" is the only outcome where THIS call applied the decision
+    # (and, for a cached scope, wrote the row asserted below); a silent
+    # "already-*"/"unknown" must fail here, not pass as a void return.
+    expect_eq "pg31: admin DecideRequest(allow, 1h)" "$r" 'OK "applied"'
     sleep 1
     stop_signal_monitor "$log"
     check "pg31: one RequestDecided signal carrying (int32 $rid, \"allow\")" \
@@ -230,7 +233,7 @@ pg32() {
     id=$(pending_ids_for "$act")
     pyexe=$(pending_row_json "$act" | python3 -c 'import json,sys; print(json.load(sys.stdin)["exe"])')
     r=$(broker_call_as admin DecideRequest "[$id, \"allow\", \"forever_exe\"]")
-    expect_eq "pg32: admin DecideRequest(allow, forever_exe)" "$r" "OK null"
+    expect_eq "pg32: admin DecideRequest(allow, forever_exe)" "$r" 'OK "applied"'
     wait "$p1"
     expect_eq "pg32: first python request ALLOWED" "$(cat "$WORK/32-py1.out")/$(cat "$WORK/32-py1.rc")" "ALLOWED/0"
     case $pyexe in /usr/bin/python*) pass "pg32: caller exe is the python interpreter ($pyexe)" ;;
@@ -252,7 +255,7 @@ pg32() {
     local p2=$!
     sleep 1
     r=$(broker_call_as admin DecideRequest "[$id, \"deny\", \"once\"]")
-    expect_eq "pg32: admin denies the other-exe request" "$r" "OK null"
+    expect_eq "pg32: admin denies the other-exe request" "$r" 'OK "applied"'
     wait "$p2"
     check "pg32: the other-exe caller sees the deny" \
         grep -qE 'boolean false|AdminBroker1\.Denied' "$WORK/32-wait.out"

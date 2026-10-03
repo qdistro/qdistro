@@ -90,7 +90,9 @@ relay_and_decide() {
     rid=$(pending_ids_for "$action" | head -1)
     RELAY_RID=$rid
     r=$(broker_call_as admin DecideRequest "[$rid, \"$decision\", \"once\"]")
-    [ "$r" = "OK null" ] || fail "DecideRequest($rid, $decision, once) failed: $r"
+    # DecideRequest's outcome string: "applied" = this call decided it;
+    # anything else ("already-*", "deciding", "unknown") is a failure here.
+    [ "$r" = 'OK "applied"' ] || fail "DecideRequest($rid, $decision, once) failed: $r"
     wait "$spid"
 }
 
