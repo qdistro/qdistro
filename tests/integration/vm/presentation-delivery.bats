@@ -58,7 +58,7 @@ setup() {
 from pathlib import Path
 import sys
 
-wanted = "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec"
+wanted = "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate"
 active = []
 for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     stripped = raw.strip()
@@ -72,6 +72,216 @@ if not any(wanted in line for line in active):
 for line in active:
     if ":Z" in line or ":z" in line:
         raise SystemExit(f"presentation bind uses SELinux relabel: {line}")
+print("ok")
+PY
+}
+
+@test "tier-2 presentation bind is private and excludes sibling trees" {
+    python3 - "$SPAWN" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+PRES = "/var/lib/qdistro/presentation"
+PREFIX = "/var/lib/qdistro"
+NEED_OPTS = {"ro", "nodev", "nosuid", "noexec", "rprivate"}
+FORBID_OPTS = {"Z", "z"}
+VOLUME_RE = re.compile(r"(?:^|\s)-v\s+(\S+)")
+MOUNT_RE = re.compile(r"(?:^|\s)--mount\s+(\S+)")
+
+
+def extract_wrapper_body(src: str) -> str:
+    marker = "WRAPPER_BODY='"
+    start = src.find(marker)
+    if start < 0:
+        raise SystemExit("WRAPPER_BODY assignment missing")
+    i = start + len(marker)
+    out = []
+    while i < len(src):
+        if src.startswith("'\"'\"'", i):
+            out.append("'")
+            i += 5
+            continue
+        if src[i] == "'":
+            return "".join(out)
+        out.append(src[i])
+        i += 1
+    raise SystemExit("unterminated WRAPPER_BODY")
+
+
+def code_of(raw: str) -> str:
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        return ""
+    return stripped.split("#", 1)[0].rstrip()
+
+
+def active_text(wrapper: str) -> str:
+    lines = []
+    for raw in wrapper.splitlines():
+        code = code_of(raw)
+        if code:
+            lines.append(code)
+    return " ".join(lines)
+
+
+def unquote(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    return token
+
+
+def dest_kind(dst: str) -> str:
+    dst = dst.rstrip("/")
+    if dst == PRES:
+        return "presentation"
+    if dst == PREFIX or dst.startswith(PREFIX + "/"):
+        return "sibling"
+    return "other"
+
+
+def split_bind(spec: str) -> tuple[str, str, str]:
+    spec = unquote(spec)
+    parts = spec.split(":")
+    if len(parts) < 2:
+        raise SystemExit(f"bind spec missing destination: {spec}")
+    src, dst = parts[0], parts[1]
+    opts = parts[2] if len(parts) > 2 else ""
+    return src, dst, opts
+
+
+def mount_destination(spec: str) -> str:
+    spec = unquote(spec)
+    for item in spec.split(","):
+        if item.startswith("destination="):
+            return item.split("=", 1)[1]
+    return ""
+
+
+def check_wrapper(wrapper: str) -> None:
+    text = active_text(wrapper)
+    if "current.json" in text and ("-v " in text or "--mount" in text):
+        for spec in VOLUME_RE.findall(text):
+            if "current.json" in spec:
+                raise SystemExit(
+                    f"presentation bind mounts the file, not the directory: {spec}"
+                )
+        for spec in MOUNT_RE.findall(text):
+            if "current.json" in spec:
+                raise SystemExit(
+                    f"presentation bind mounts the file, not the directory: {spec}"
+                )
+    presentation = []
+    for spec in VOLUME_RE.findall(text):
+        src, dst, opts = split_bind(spec)
+        kind = dest_kind(dst)
+        if kind == "sibling":
+            raise SystemExit(f"sibling /var/lib/qdistro volume destination: {spec}")
+        if kind == "presentation":
+            presentation.append((src, dst, opts, spec))
+    for spec in MOUNT_RE.findall(text):
+        dst = mount_destination(spec)
+        if not dst:
+            continue
+        kind = dest_kind(dst)
+        if kind == "sibling":
+            raise SystemExit(f"sibling /var/lib/qdistro volume destination: {spec}")
+        if kind == "presentation":
+            raise SystemExit(
+                f"presentation bind must use -v, not --mount: {spec}"
+            )
+    if len(presentation) != 1:
+        raise SystemExit(
+            f"expected one presentation volume line, got {presentation!r}"
+        )
+    src, _dst, opts, spec = presentation[0]
+    if src != PRES:
+        raise SystemExit(f"presentation bind source is not {PRES}: {spec}")
+    tokens = {t for t in opts.split(",") if t}
+    missing = NEED_OPTS - tokens
+    if missing:
+        raise SystemExit(
+            f"presentation bind missing {sorted(missing)}: {spec}"
+        )
+    extra = tokens & FORBID_OPTS
+    if extra:
+        raise SystemExit(f"presentation bind uses SELinux relabel: {spec}")
+
+
+def expect_fail(wrapper: str, needle: str) -> None:
+    try:
+        check_wrapper(wrapper)
+    except SystemExit as exc:
+        msg = str(exc)
+        if needle not in msg:
+            raise SystemExit(f"expected {needle!r} in {msg!r}") from None
+        return
+    raise SystemExit(f"checker accepted a broken wrapper; wanted {needle!r}")
+
+
+GOOD = r"""
+if [ -d /var/lib/qdistro/presentation ]; then
+    PODMAN_HARDENING+=(
+        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate
+    )
+fi
+if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
+    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
+fi
+PODMAN_ARGS=(
+    run
+    "${PODMAN_HARDENING[@]}"
+    -v "$TIER2_PERCONT_DIR:/run/user/${TIER2_ADMIN_UID_RESOLVED}:rw"
+)
+"""
+check_wrapper(GOOD)
+
+expect_fail(
+    GOOD.replace(",rprivate", ""),
+    "missing ['rprivate']",
+)
+expect_fail(
+    GOOD.replace(
+        "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate",
+        "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate\n"
+        "        -v /var/lib/qdistro/bindings:/var/lib/qdistro/bindings:ro",
+    ),
+    "sibling /var/lib/qdistro volume destination",
+)
+expect_fail(
+    GOOD.replace(
+        "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate",
+        "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate\n"
+        "        -v /var/lib/qdistro:/var/lib/qdistro:ro",
+    ),
+    "sibling /var/lib/qdistro volume destination",
+)
+expect_fail(
+    GOOD.replace(
+        "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate",
+        "-v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate\n"
+        "        --mount type=bind,source=/var/lib/qdistro/lineage,destination=/var/lib/qdistro/lineage,ro",
+    ),
+    "sibling /var/lib/qdistro volume destination",
+)
+expect_fail(
+    GOOD.replace(",rprivate", ",rprivate,Z"),
+    "SELinux relabel",
+)
+expect_fail(
+    GOOD.replace(
+        "/var/lib/qdistro/presentation:/var/lib/qdistro/presentation:",
+        "/var/lib/qdistro/presentation/current.json:/var/lib/qdistro/presentation/current.json:",
+    ),
+    "file, not the directory",
+)
+expect_fail(
+    GOOD.replace(",rprivate", "#,rprivate"),
+    "missing ['rprivate']",
+)
+
+src = Path(sys.argv[1]).read_text(encoding="utf-8")
+check_wrapper(extract_wrapper_body(src))
 print("ok")
 PY
 }

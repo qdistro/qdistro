@@ -1298,8 +1298,10 @@ PODMAN_HARDENING=(
 if [ -d /var/lib/qdistro/presentation ]; then
     # Mount the directory (not current.json) so atomic replacement is visible.
     # No :Z — this is a shared public tree, not a per-container label.
+    # rprivate — mount events do not propagate either way. Do not bind
+    # sibling /var/lib/qdistro trees (bindings, lineage, identity, approvals).
     PODMAN_HARDENING+=(
-        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec
+        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate
     )
 fi
 if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
