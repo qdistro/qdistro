@@ -601,12 +601,21 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 # bridge_stream_live <token> — the waypipe client runs with -o (one shot):
 # it unlinks $LAUNCHES/<token>/link.sock the moment the sandbox's waypipe
 # server attaches, so post-attach the live proof is not the pathname but the
-# client's ESTABLISHED stream still carrying the bound path in `ss -xp`.
+# client's ESTABLISHED stream still carrying the bound path. ss/iproute2 is
+# not in the guest image; /proc/net/unix shows the accepted socket's bound
+# name (St=03 connected) even after unlink — resolve its inode back to a fd
+# of the recorded client pid so the stream is attributed, not just present.
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
-    local tok="$1" bp
+    local tok="$1" bp ino fd
     bp=$(rec "$tok" bridge_client_pid)
     [ -n "$bp" ] || return 1
-    ss -xp 2>/dev/null | grep -F "$LAUNCHES/$tok/link.sock" | grep -q "pid=$bp[),]"
+    ino=$(awk -v p="$LAUNCHES/$tok/link.sock" \
+        '$6=="03" && $NF==p {print $7; exit}' /proc/net/unix 2>/dev/null)
+    [ -n "$ino" ] || return 1
+    for fd in /proc/"$bp"/fd/*; do
+        [ "$(readlink "$fd" 2>/dev/null)" = "socket:[$ino]" ] && return 0
+    done
+    return 1
 }
 
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
