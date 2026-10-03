@@ -22,140 +22,17 @@
 "use strict";
 
 const assert = require("assert");
-const fs = require("fs");
-const path = require("path");
 
-var ROOT = path.resolve(__dirname, "..");
-
-function read(rel) {
-    return fs.readFileSync(path.join(ROOT, rel), "utf8");
-}
-
-// ─── helper: mask comments + string/template literals (offset-preserving) ────
-// Replaces the CONTENT of //-lines, block comments, and '...' / "..." / `...`
-// literals with spaces, keeping every character offset (and newlines) identical
-// to the original. Used so the function scanner below cannot match `function
-// name(` inside a comment or string, and so brace/paren balancing never counts
-// a brace that lives inside a string or comment.
-function maskCommentsAndStrings(src) {
-    var out = src.split("");
-    var i = 0, n = src.length;
-    var inLine = false, inBlock = false, inStr = false, q = "";
-    while (i < n) {
-        var c = src[i], c2 = i + 1 < n ? src[i + 1] : "";
-        if (inLine) {
-            if (c === "\n") inLine = false; else out[i] = " ";
-            i++; continue;
-        }
-        if (inBlock) {
-            if (c === "*" && c2 === "/") { out[i] = " "; out[i + 1] = " "; i += 2; inBlock = false; continue; }
-            if (c !== "\n") out[i] = " ";
-            i++; continue;
-        }
-        if (inStr) {
-            if (c === "\\") { out[i] = " "; if (i + 1 < n && src[i + 1] !== "\n") out[i + 1] = " "; i += 2; continue; }
-            if (c === q) { inStr = false; out[i] = " "; i++; continue; }
-            if (c !== "\n") out[i] = " ";
-            i++; continue;
-        }
-        if (c === "/" && c2 === "/") { inLine = true; out[i] = " "; i++; continue; }
-        if (c === "/" && c2 === "*") { inBlock = true; out[i] = " "; out[i + 1] = " "; i += 2; continue; }
-        if (c === '"' || c === "'" || c === "`") { inStr = true; q = c; out[i] = " "; i++; continue; }
-        i++;
-    }
-    return out.join("");
-}
-
-// ─── helper: extract a whole `function name(...) { ... }` (brace-balanced) ────
-// QML function bodies are plain ECMAScript, so the extracted text is directly
-// compilable under Node. Lexically robust: it scans a comment/string-MASKED
-// copy (so a commented-out or quoted `function name(` cannot be matched, and
-// braces inside strings/comments are never counted) and asserts there is
-// EXACTLY ONE real declaration, then slices the executable text from the
-// original source. Returns the source slice, or null if not found.
-// Caveat: the masker is a pragmatic scanner, not a full JS lexer — it does NOT
-// model regex literals or `${...}` template interpolation. The five targeted
-// functions use only plain strings + comments; if a future target uses those
-// constructs, extend maskCommentsAndStrings first.
-function extractFunction(source, name) {
-    var masked = maskCommentsAndStrings(source);
-    var re = new RegExp("function\\s+" + name + "\\s*\\(", "g");
-    var starts = [], m;
-    while ((m = re.exec(masked)) !== null) starts.push(m.index);
-    assert.strictEqual(starts.length, 1,
-        "expected exactly one real declaration of function " + name +
-        " in source; found " + starts.length +
-        " (a stale/duplicate copy would let the guard execute the wrong body)");
-    var start = starts[0];
-    var paren = masked.indexOf("(", start);
-    var depth = 0, i, close = -1;
-    for (i = paren; i < masked.length; i++) {
-        if (masked[i] === "(") depth++;
-        else if (masked[i] === ")") { depth--; if (depth === 0) { close = i; break; } }
-    }
-    if (close === -1) return null;
-    var brace = masked.indexOf("{", close);
-    if (brace === -1) return null;
-    depth = 0;
-    for (i = brace; i < masked.length; i++) {
-        if (masked[i] === "{") depth++;
-        else if (masked[i] === "}") { depth--; if (depth === 0) return source.slice(start, i + 1); }
-    }
-    return null;
-}
-
-// Compile a QML function into a callable, injecting a `root` object to satisfy
-// its `root.<prop>` member references (siloPalette / tierNPrefix). This lets
-// the guard execute the ACTUAL QML logic, not a re-typed copy — so a drift in
-// the algorithm (hash, slice offset, packing), not just the constants, fails.
-function compileQmlFunction(source, name, root) {
-    var text = extractFunction(source, name);
-    assert.ok(text, "QML function " + name + " not found in source");
-    return new Function("root", "return (" + text + ");")(root);
-}
-
-// ─── helper: extract a quoted string value ───────────────────────────────────
-// Finds `propertyName: "value"` or `property string foo: "value"` and returns
-// the value.
-function extractStringProp(source, propertyName) {
-    // Match patterns like:
-    //   readonly property string tier3Prefix: "qdistro.tier3."
-    //   var TIER3_PREFIX = "qdistro.tier3.";
-    var patterns = [
-        new RegExp('property\\s+string\\s+' + propertyName + '\\s*:\\s*"([^"]*)"'),
-        new RegExp('var\\s+' + propertyName + '\\s*=\\s*"([^"]*)"'),
-    ];
-    for (var i = 0; i < patterns.length; i++) {
-        var m = source.match(patterns[i]);
-        if (m) return m[1];
-    }
-    return null;
-}
-
-// ─── helper: extract a palette array ─────────────────────────────────────────
-// Extracts the comma-separated hex colour strings from a QML/JS array literal
-// whose property is named `propertyName` (e.g. siloPalette / SILO_PALETTE).
-function extractPalette(source, propertyName) {
-    // Find the block after `propertyName: [` or `var propertyName = [`
-    var patterns = [
-        new RegExp(propertyName + '\\s*(?::\\s*|=\\s*)\\[([^\\]]+)\\]', 's'),
-    ];
-    for (var i = 0; i < patterns.length; i++) {
-        var m = source.match(patterns[i]);
-        if (m) {
-            // Extract all "#rrggbb" strings from the block
-            var block = m[1];
-            var colours = [];
-            var re = /"(#[0-9a-fA-F]{6})"/g;
-            var cm;
-            while ((cm = re.exec(block)) !== null) {
-                colours.push(cm[1]);
-            }
-            return colours;
-        }
-    }
-    return null;
-}
+// The extraction/exec machinery lives in tests/lib/qmlextract.js so the
+// behavioural tests (test_tier3s_gate_behaviour.js) share the SAME
+// comment/string masker and function slicer — there must be exactly one
+// copy of the scanner that decides which QML body a test runs.
+const QE = require("./lib/qmlextract.js");
+var read = QE.read;
+var extractFunction = QE.extractFunction;
+var compileQmlFunction = QE.compileQmlFunction;
+var extractStringProp = QE.extractStringProp;
+var extractPalette = QE.extractPalette;
 
 // ─── 1. SiloChrome: palette byte-identity ────────────────────────────────────
 // The palette in Tier3Apps.qml, Tier3sApps.qml, Tier4Apps.qml, and

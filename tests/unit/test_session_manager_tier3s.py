@@ -994,6 +994,30 @@ def test_real_write_tier3s_launch_env_enforces_dir_mode(tmp_path, monkeypatch):
     assert _stat.S_IMODE(os.stat(p).st_mode) == 0o600
 
 
+def test_real_write_tier3s_launch_env_refuses_a_foreign_group(tmp_path,
+                                                             monkeypatch):
+    """sol B-ii P2-1: a root-owned dir with a non-root gid is NOT root:root
+    — the gid is verified, not just the uid."""
+    d = tmp_path / "tier3s-launch"
+    d.mkdir()
+    monkeypatch.setattr(sm, "TIER3S_LAUNCH_ENV_DIR", d)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    real_lstat = os.lstat
+
+    def fake_lstat(p, *a, **k):
+        st = real_lstat(p, *a, **k)
+        # lstat reports uid 0 but a foreign gid (the best-effort chown failed)
+        return os.stat_result((st.st_mode, st.st_ino, st.st_dev,
+                               st.st_nlink, 0, 65534, st.st_size,
+                               int(st.st_atime), int(st.st_mtime),
+                               int(st.st_ctime)))
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    with pytest.raises(PermissionError, match="not root:root"):
+        sm._SystemOps().write_tier3s_launch_env("smoke", "TIER3S_SILO='smoke'\n")
+    assert not (d / "smoke.env").exists()
+
+
 def test_real_write_tier3s_launch_env_refuses_a_symlinked_dir(tmp_path,
                                                             monkeypatch):
     """Fail closed: a symlinked stanza dir is refused, never written into."""

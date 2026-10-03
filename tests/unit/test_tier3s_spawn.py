@@ -2572,6 +2572,9 @@ def test_gui_launch_refuses_when_registration_keeps_failing(w):
     w.set("reg_fail")
     r = w.spawn(argv=GUI_ARGV)
     assert r.returncode == 2 and "RegisterLaunch failed" in r.stderr, r.stderr
+    # a post-client refusal goes through bridge_refuse: the client's log
+    # tail is attached even when it is empty (sol B-i r2)
+    assert "client log tail" in r.stderr, r.stderr
     regs = [l for l in w.dbus_full() if "RegisterLaunch" in l]
     assert len(regs) == 5, regs                     # bounded: exactly five tries
     assert w.first("systemd-run") is None           # refused BEFORE podman run

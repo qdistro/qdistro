@@ -891,8 +891,9 @@ def _enforce_launch_env_dir(env_dir: Path, mode: int) -> None:
     if stat.S_IMODE(st.st_mode) != mode:
         raise PermissionError(
             f"{env_dir} mode is {stat.S_IMODE(st.st_mode):o}, not {mode:o}")
-    if os.geteuid() == 0 and st.st_uid != 0:
-        raise PermissionError(f"{env_dir} is owned by uid {st.st_uid}, not root")
+    if os.geteuid() == 0 and (st.st_uid != 0 or st.st_gid != 0):
+        raise PermissionError(
+            f"{env_dir} is owned by {st.st_uid}:{st.st_gid}, not root:root")
 
 
 class _SystemOps:

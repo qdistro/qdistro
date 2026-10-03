@@ -530,7 +530,7 @@ if [ "$GUI" = 1 ]; then
         sleep 0.2
     done
     [ "$reg" = 1 ] \
-        || refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"
+        || bridge_refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"
     rm -f -- "$T$LAUNCH_RECORD"
 fi
 

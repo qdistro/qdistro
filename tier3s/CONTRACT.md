@@ -30,7 +30,7 @@ drivers.
 ```
 SessionManager1.CreateTier3sSilo(name, workload, template_silo, network="none")   [A-ii]
 SessionManager1.StartSilo(name)                                                   [A-ii]
-  writes /run/qdistro/silo-launch/<name>.env  (root 0600, KEY='VALUE')
+  writes /run/qdistro/tier3s-launch/<name>.env  (root 0600, KEY='VALUE')
   systemctl start qdistro-tier3s-silo@<name>.service   (User=root, Type=notify)     [A-ii, r1]
     ExecStart=/usr/libexec/qdistro/qdistro-tier3s-silo-launch %i                  [A-ii]
       env -i … NOTIFY_SOCKET=<systemd's> TIER3S_ROOT_LAUNCHER=1 TIER3S_LAUNCH_UNIT=%n TIER3S_LAUNCH_TOKEN=<t> TIER3S_SILO=<name> …
@@ -80,7 +80,7 @@ Podapps (`LaunchPodApp` analogue) would use the same spawn with no
 only**: no app unit is installed, no session-manager API starts one, and
 `spawn-tier3s.sh` refuses a launch without `TIER3S_SILO` at step 3.
 
-The launch stanza (`/run/qdistro/silo-launch/<name>.env`, root 0600) holds
+The launch stanza (`/run/qdistro/tier3s-launch/<name>.env`, root 0600) holds
 exactly `TIER3S_SILO`, `TIER3S_BINDING` (the row's `template_silo`),
 `TIER3S_WORKLOAD`, `TIER3S_NETWORK=none`, `TIER3S_LAUNCH_TOKEN` (fresh per
 start) and `TIER3S_ARGV_JSON`. `qdistro-tier3s-silo-launch` **parses** it
