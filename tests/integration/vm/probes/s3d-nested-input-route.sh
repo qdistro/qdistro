@@ -148,7 +148,7 @@ chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 
 # --- attach a peer so outer has a seat + paints ---------------------
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 90 sdl-freerdp /v:127.0.0.1:3389 \
+    nohup timeout 90 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
         >/tmp/s3d-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!

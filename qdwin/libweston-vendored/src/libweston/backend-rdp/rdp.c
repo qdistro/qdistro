@@ -1932,6 +1932,17 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 
 	settings = client->context->settings;
 #if USE_FREERDP_VERSION >= 3
+	/* FreeRDP >= 3.32 enables FreeRDP_ExtSecurity (the HYBRID_EX
+	 * "early user auth" security protocol) by default on server
+	 * settings. This backend has no credssp-capable auth backend — the
+	 * only NLA path feeds a SAM file to transport_accept_nla(), which
+	 * does not handle EUA — so whenever HYBRID_EX is negotiated the
+	 * server-side nla accept fails (SEC_E_NO_CREDENTIALS) and every
+	 * TLS-only peer is rejected before a seat is created. Pin it off
+	 * for all security modes. */
+	if (!freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE))
+		rdp_debug(b, "Error setting FreeRDP_ExtSecurity to 'FALSE'.\n");
+
 	/* configure security settings */
 	if (b->vmconnect) {
 		/* Special Hyper-V mode */

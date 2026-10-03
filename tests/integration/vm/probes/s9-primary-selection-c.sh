@@ -93,7 +93,7 @@ chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 # rdp-backend only creates a wl_seat when a peer connects.
 pkill -9 -f "sdl-freerdp.*:3389" 2>/dev/null || true
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 30 sdl-freerdp /v:127.0.0.1:3389 \
+    nohup timeout 30 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
         >/tmp/s9c-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!

@@ -23,6 +23,7 @@ shape that works. See the design note for full reasoning.
 VERSION                              # "16.0.0" (must match Tumbleweed package)
 0001-allow-null-parent-xdg-popup.patch
 0005-inert-relative-pointer.patch     # inert relptr/tablet-seat objects for a released seat
+0006-rdp-disable-extsecurity-freerdp-3.32.patch  # pin HYBRID_EX off: backend has no credssp-capable auth
 src/                                 # weston @ tag 16.0.0 with desktop/xdg-shell.c patched in-place
 build-libweston.sh                   # one-shot build wrapper
 README.md                            # this file

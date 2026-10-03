@@ -825,6 +825,12 @@ struct qdwin {
 	int shell_bound;
 	pid_t shell_pid;
 	uid_t shell_uid;
+	/* /proc/<pid>/stat starttime of the bound shell process, sampled at
+	 * bind_as_shell. Lets the bind gates prove the recorded shell peer is
+	 * still the same live process before refusing a rebind: a wl_client
+	 * kept alive by an inherited fd (dead shell, live child) otherwise
+	 * holds the shell slot forever. 0 = no baseline / unreadable at bind. */
+	uint64_t shell_starttime;
 
 	/* qdwin_locker_v1 — peer locker (qdlocker). Same trust shape as
 	 * the shell binding but on its own global so the locker is a
@@ -1315,6 +1321,10 @@ static void qdwin_install_default_cursor_on_pointer(struct qdwin *qdwin,
 						    struct weston_pointer *pointer);
 static void qdwin_default_cursor_on_focus_changed(struct wl_listener *l,
 						  void *data);
+/* Stale-shell-slot release — defined with the shell bind handlers far
+ * below; forward-declared so bind_as_shell can call it. */
+static void qdwin_release_dead_shell(struct qdwin *qdwin);
+static uint64_t qdwin_proc_starttime(pid_t pid);
 /* spec/10 v14 helpers — bodies live below the seat_tracker struct
  * because they walk seat_trackers via wl_list_for_each on the `link`
  * field which needs the struct to be complete. */
@@ -2695,6 +2705,14 @@ qdwin_handle_bind_as_shell(struct wl_client *client,
 
 	wl_client_get_credentials(client, &pid, &uid, &gid);
 
+	/* A dead shell whose wl_client is held open by an inherited fd keeps
+	 * the slot forever — release it first so this bind can re-claim.
+	 * Skipped when the caller IS the recorded shell resource's client:
+	 * destroying our own dispatch client mid-request is unsafe, and a
+	 * live-connection caller re-claiming its own slot is harmless. */
+	if (qdwin->shell_resource &&
+	    wl_resource_get_client(qdwin->shell_resource) != client)
+		qdwin_release_dead_shell(qdwin);
 	if (qdwin->shell_bound && qdwin->shell_resource != resource) {
 		wl_resource_post_error(resource,
 				       QDWIN_SHELL_V1_ERROR_ALREADY_BOUND,
@@ -2705,6 +2723,7 @@ qdwin_handle_bind_as_shell(struct wl_client *client,
 	qdwin->shell_resource = resource;
 	qdwin->shell_pid = pid;
 	qdwin->shell_uid = uid;
+	qdwin->shell_starttime = qdwin_proc_starttime(pid);
 	weston_log("qdwin: shell bound (uid=%u pid=%d); replaying %u toplevels\n",
 		   (unsigned)uid, (int)pid,
 		   (unsigned)wl_list_length(&qdwin->toplevels));
@@ -9685,11 +9704,56 @@ qdwin_shell_resource_destroy(struct wl_resource *resource)
 		qdwin->shell_bound = 0;
 		qdwin->shell_pid = 0;
 		qdwin->shell_uid = 0;
+		qdwin->shell_starttime = 0;
 		weston_log("qdwin: shell unbound\n");
 	}
 }
 
 static char *qdwin_proc_exe(pid_t pid);
+
+/* Is the recorded shell peer provably dead? Mirrors the locker check
+ * (qdwin_locker_peer_alive): death is concluded only from
+ * kill(pid,0)==ESRCH (pid truly gone) or a readable starttime that differs
+ * from the baseline sampled at bind_as_shell (pid recycled into a different
+ * process). An UNreadable starttime on a still-existing pid fails CLOSED —
+ * treated as alive — because qdwin_proc_starttime() returns 0 on any /proc
+ * read failure, including attacker-inducible fd exhaustion; concluding death
+ * from that alone would let a same-uid attacker evict the live shell. */
+static bool
+qdwin_shell_peer_dead(struct qdwin *qdwin)
+{
+	if (!qdwin->shell_bound || !qdwin->shell_resource ||
+	    qdwin->shell_pid <= 0)
+		return false;
+	if (kill(qdwin->shell_pid, 0) != 0 && errno == ESRCH)
+		return true;
+	uint64_t st_now = qdwin_proc_starttime(qdwin->shell_pid);
+	if (qdwin->shell_starttime != 0 && st_now != 0)
+		return st_now != qdwin->shell_starttime;
+	return false;
+}
+
+/* Stale shell slot / inherited-fd orphan case: the shell process died but a
+ * child or an inherited fd keeps its wl_client alive, so the shell resource
+ * is never destroyed and shell_bound/shell_pid hold the slot forever —
+ * every new qdshell is then rejected ("already claimed" /
+ * "not the shell client"). When the recorded shell peer is provably dead,
+ * drop the whole orphaned wl_client: that runs every resource destroy
+ * handler on the connection (qdwin_shell_resource_destroy clears the slot;
+ * the dead shell's lingering layer surfaces go with it). */
+static void
+qdwin_release_dead_shell(struct qdwin *qdwin)
+{
+	if (!qdwin_shell_peer_dead(qdwin))
+		return;
+	struct wl_client *orphan =
+		wl_resource_get_client(qdwin->shell_resource);
+	pid_t dead_pid = qdwin->shell_pid;
+	weston_log("qdwin: shell peer pid=%d is dead/recycled — dropping the "
+		   "orphaned wl_client (its connection outlived the process) "
+		   "so the shell slot can rebind\n", (int)dead_pid);
+	wl_client_destroy(orphan);
+}
 
 static void
 bind_qdwin_shell(struct wl_client *client, void *data,
@@ -9711,6 +9775,16 @@ bind_qdwin_shell(struct wl_client *client, void *data,
 			(unsigned)uid, (unsigned)qdwin->allowed_uid);
 		return;
 	}
+
+	/* Release a provably-dead shell's orphaned slot before the
+	 * already-claimed check — the stale wl_client must not hold the
+	 * role past the process's death. Guard on the caller not being the
+	 * recorded shell's own client: destroying the client we're
+	 * dispatching a request for is unsafe, and a rebind by the live
+	 * bound client is handled by the checks below anyway. */
+	if (qdwin->shell_resource &&
+	    wl_resource_get_client(qdwin->shell_resource) != client)
+		qdwin_release_dead_shell(qdwin);
 
 	/* Helpers that need a protocol resource without the shell role:
 	 * the nested pixel consumer (bind_proxy_pixels) and the
@@ -15517,6 +15591,15 @@ bind_qdwin_layer_shell(struct wl_client *client, void *data,
 			return;
 		}
 	}
+
+	/* Release a provably-dead shell's orphaned slot first: a wl_client
+	 * kept alive by an inherited fd otherwise makes this gate reject
+	 * every fresh qdshell's layer-shell bind forever. Guard on the
+	 * caller not being the recorded shell's own client — destroying
+	 * the client we're dispatching for is unsafe. */
+	if (qdwin->shell_resource &&
+	    wl_resource_get_client(qdwin->shell_resource) != client)
+		qdwin_release_dead_shell(qdwin);
 
 	if (qdwin->shell_bound && qdwin->shell_resource) {
 		struct wl_client *shell_client =

@@ -77,7 +77,7 @@ chown admin:admin /home/admin/s8-protocol-globals-probe.py
 # short sdl-freerdp just long enough for weston to register the seat.
 pkill -9 -f "sdl-freerdp.*:3389" 2>/dev/null || true
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 20 sdl-freerdp /v:127.0.0.1:3389 \
+    nohup timeout 20 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
         >/tmp/s8-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!
