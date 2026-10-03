@@ -582,7 +582,9 @@ if [ -e "/run/netns/$NETNS" ]; then
     NETNS_PREFIX=(ip netns exec "$NETNS")
 fi
 
-"${NETNS_PREFIX[@]}" runuser -u "$SILO" -- env \
+# Isolated silo apps read the public managed directory by DAC. Do not
+# forward a developer QDISTRO_PRESENTATION_FILE into the silo uid.
+"${NETNS_PREFIX[@]}" runuser -u "$SILO" -- env -u QDISTRO_PRESENTATION_FILE \
     XDG_RUNTIME_DIR="$SILO_RUNTIME" \
     HOME="$SILO_HOME" \
     USER="$SILO" \

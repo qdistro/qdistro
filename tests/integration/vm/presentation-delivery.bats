@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Host-only lock-in of presentation delivery: installer layout, tier-2 bind
-# construction, isolated-domain SELinux rights, and affected-gate mapping.
+# construction, silo launchers dropping QDISTRO_PRESENTATION_FILE,
+# isolated-domain SELinux rights, and affected-gate mapping.
 # No VM, no root, no live /var/lib/qdistro writes.
 
 setup() {
@@ -9,6 +10,8 @@ setup() {
     INSTALLER="$REPO/scripts/install/install-presentation-for-vm.sh"
     SRC="$REPO/sdk/presentation/qdistro_presentation"
     SPAWN="$REPO/tier2/spawn-tier2.sh"
+    SPAWN_TIER1="$REPO/selinux/tier1/spawn-tier1.sh"
+    SPAWN_TIER3="$REPO/tier3/spawn-tier3.sh"
     POLICY="$REPO/selinux/presentation/qdistro_presentation.te"
     AFFECTED="$REPO/ci/lib/affected.sh"
     ROOT="$BATS_TEST_TMPDIR/root"
@@ -305,6 +308,279 @@ expect_fail(
 
 src = Path(sys.argv[1]).read_text(encoding="utf-8")
 check_wrapper(extract_wrapper_body(src))
+print("ok")
+PY
+}
+
+@test "silo spawners drop QDISTRO_PRESENTATION_FILE" {
+    python3 - "$SPAWN" "$SPAWN_TIER1" "$SPAWN_TIER3" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+OVERRIDE = "QDISTRO_PRESENTATION_FILE"
+STRIP = f"-u {OVERRIDE}"
+
+
+def code_of(raw: str) -> str:
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        return ""
+    return stripped.split("#", 1)[0].rstrip()
+
+
+def active_lines(src: str) -> list[tuple[int, str]]:
+    out = []
+    for lineno, raw in enumerate(src.splitlines(), 1):
+        code = code_of(raw)
+        if code:
+            out.append((lineno, code))
+    return out
+
+
+def extract_wrapper_body(src: str) -> str:
+    marker = "WRAPPER_BODY='"
+    start = src.find(marker)
+    if start < 0:
+        raise SystemExit("WRAPPER_BODY assignment missing")
+    i = start + len(marker)
+    out = []
+    while i < len(src):
+        if src.startswith("'\"'\"'", i):
+            out.append("'")
+            i += 5
+            continue
+        if src[i] == "'":
+            return "".join(out)
+        out.append(src[i])
+        i += 1
+    raise SystemExit("unterminated WRAPPER_BODY")
+
+
+def join_continuations(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Join active lines that end with a backslash into one command."""
+    joined: list[tuple[int, str]] = []
+    buf = ""
+    start = 0
+    for lineno, code in lines:
+        if not buf:
+            start = lineno
+        if code.endswith("\\"):
+            buf += code[:-1] + " "
+            continue
+        buf += code
+        joined.append((start, " ".join(buf.split())))
+        buf = ""
+    if buf:
+        raise SystemExit("unterminated backslash continuation")
+    return joined
+
+
+def env_cmds(src: str) -> list[tuple[int, str]]:
+    cmds = []
+    for lineno, code in join_continuations(active_lines(src)):
+        if re.search(r"(^|exec\s+|;\s*)env\b", code) or code.startswith("env "):
+            cmds.append((lineno, code))
+        elif " env " in code or code.startswith("env"):
+            cmds.append((lineno, code))
+    return cmds
+
+
+def require_strip_on_env(src: str, predicate, label: str) -> None:
+    hits = [(ln, code) for ln, code in env_cmds(src) if predicate(code)]
+    if not hits:
+        raise SystemExit(f"{label}: no matching env launch")
+    for lineno, code in hits:
+        tokens = code.split()
+        stripped = any(
+            tokens[i] == "-u" and i + 1 < len(tokens) and tokens[i + 1] == OVERRIDE
+            for i in range(len(tokens))
+        )
+        if not stripped:
+            raise SystemExit(
+                f"{label} env at line {lineno} is missing {STRIP}: {code}"
+            )
+
+
+def check_tier1(src: str) -> None:
+    require_strip_on_env(
+        src,
+        lambda c: "QDISTRO_TIER1_TITLE_PREFIX" in c,
+        "spawn-tier1",
+    )
+
+
+def check_tier3(src: str) -> None:
+    require_strip_on_env(
+        src,
+        lambda c: "runuser" in c and "waypipe" in c and "server" in c,
+        "spawn-tier3 silo",
+    )
+
+
+def podman_args_tokens(wrapper: str) -> list[str]:
+    args_lines: list[str] = []
+    in_args = False
+    args_depth = 0
+    for _lineno, raw in enumerate(wrapper.splitlines(), 1):
+        code = code_of(raw)
+        if not code:
+            continue
+        if in_args:
+            args_lines.append(code)
+            args_depth += code.count("(") - code.count(")")
+            if args_depth <= 0:
+                in_args = False
+            continue
+        if code.startswith("PODMAN_ARGS=("):
+            in_args = True
+            args_depth = code.count("(") - code.count(")")
+            args_lines.append(code)
+            if args_depth <= 0:
+                in_args = False
+    return "\n".join(args_lines).split()
+
+
+def check_tier2_wrapper(wrapper: str) -> None:
+    require_strip_on_env(
+        wrapper,
+        lambda c: "podman" in c and ("exec env" in c or c.startswith("exec env")),
+        "spawn-tier2 wrapper",
+    )
+    tokens = podman_args_tokens(wrapper)
+    if not tokens:
+        raise SystemExit("PODMAN_ARGS missing")
+    if "--env-host" in tokens:
+        raise SystemExit("PODMAN_ARGS forwards host env via --env-host")
+    for i, tok in enumerate(tokens):
+        if tok in ("-e", "--env") and i + 1 < len(tokens) and OVERRIDE in tokens[i + 1]:
+            raise SystemExit(f"PODMAN_ARGS forwards {OVERRIDE}: {tokens[i]} {tokens[i + 1]}")
+        if tok.startswith("-e") and OVERRIDE in tok:
+            raise SystemExit(f"PODMAN_ARGS forwards {OVERRIDE}: {tok}")
+        if tok.startswith("--env=") and OVERRIDE in tok:
+            raise SystemExit(f"PODMAN_ARGS forwards {OVERRIDE}: {tok}")
+
+
+def expect_fail(fn, src: str, needle: str) -> None:
+    try:
+        fn(src)
+    except SystemExit as exc:
+        msg = str(exc)
+        if needle not in msg:
+            raise SystemExit(f"expected {needle!r} in {msg!r}") from None
+        return
+    raise SystemExit(f"checker accepted a broken source; wanted {needle!r}")
+
+
+TIER1_GOOD = r'''
+if [ -n "$LAUNCHREC_PATH" ]; then
+    env -u QDISTRO_PRESENTATION_FILE \
+        QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \
+        "${CMD[@]}" &
+fi
+exec env -u QDISTRO_PRESENTATION_FILE \
+    QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"
+'''
+check_tier1(TIER1_GOOD)
+expect_fail(
+    check_tier1,
+    TIER1_GOOD.replace("-u QDISTRO_PRESENTATION_FILE", "-u PYTHONPATH"),
+    "missing -u QDISTRO_PRESENTATION_FILE",
+)
+expect_fail(
+    check_tier1,
+    TIER1_GOOD.replace(
+        "exec env -u QDISTRO_PRESENTATION_FILE \\\n"
+        '    QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"',
+        'exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"',
+    ),
+    "missing -u QDISTRO_PRESENTATION_FILE",
+)
+expect_fail(
+    check_tier1,
+    TIER1_GOOD.replace(
+        "    env -u QDISTRO_PRESENTATION_FILE \\\n"
+        '        QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \\\n'
+        '        "${CMD[@]}" &',
+        "    env QDISTRO_TIER1_TITLE_PREFIX=\"$TITLE_PREFIX\" \\\n"
+        '        "${CMD[@]}" &',
+    ),
+    "missing -u QDISTRO_PRESENTATION_FILE",
+)
+commented = TIER1_GOOD.replace(
+    "-u QDISTRO_PRESENTATION_FILE",
+    "# -u QDISTRO_PRESENTATION_FILE",
+)
+expect_fail(check_tier1, commented, "no matching env launch")
+
+TIER3_GOOD = r'''
+"${NETNS_PREFIX[@]}" runuser -u "$SILO" -- env -u QDISTRO_PRESENTATION_FILE \
+    XDG_RUNTIME_DIR="$SILO_RUNTIME" \
+    HOME="$SILO_HOME" \
+    waypipe "${SERVER_OPTS[@]}" server -- "$@" >"$SERVER_LOG" 2>&1 &
+'''
+check_tier3(TIER3_GOOD)
+expect_fail(
+    check_tier3,
+    TIER3_GOOD.replace("-u QDISTRO_PRESENTATION_FILE", "-u PYTHONPATH"),
+    "missing -u QDISTRO_PRESENTATION_FILE",
+)
+expect_fail(
+    check_tier3,
+    TIER3_GOOD.replace("env -u QDISTRO_PRESENTATION_FILE \\", "env \\"),
+    "missing -u QDISTRO_PRESENTATION_FILE",
+)
+
+TIER2_GOOD = r'''
+PODMAN_ARGS=(
+    run
+    --userns=keep-id
+    -e WAYLAND_DISPLAY
+)
+exec env -u QDISTRO_PRESENTATION_FILE podman "${PODMAN_ARGS[@]}" "$@"
+'''
+check_tier2_wrapper(TIER2_GOOD)
+expect_fail(
+    check_tier2_wrapper,
+    TIER2_GOOD.replace("exec env -u QDISTRO_PRESENTATION_FILE podman", "exec podman"),
+    "no matching env launch",
+)
+expect_fail(
+    check_tier2_wrapper,
+    TIER2_GOOD.replace("-u QDISTRO_PRESENTATION_FILE", "-u PYTHONPATH"),
+    "missing -u QDISTRO_PRESENTATION_FILE",
+)
+expect_fail(
+    check_tier2_wrapper,
+    TIER2_GOOD.replace(
+        "    -e WAYLAND_DISPLAY\n",
+        "    -e WAYLAND_DISPLAY\n    --env-host\n",
+    ),
+    "--env-host",
+)
+expect_fail(
+    check_tier2_wrapper,
+    TIER2_GOOD.replace(
+        "    -e WAYLAND_DISPLAY\n",
+        "    -e WAYLAND_DISPLAY\n    -e QDISTRO_PRESENTATION_FILE\n",
+    ),
+    "forwards QDISTRO_PRESENTATION_FILE",
+)
+expect_fail(
+    check_tier2_wrapper,
+    TIER2_GOOD.replace(
+        "    -e WAYLAND_DISPLAY\n",
+        '    -e WAYLAND_DISPLAY\n    --env=QDISTRO_PRESENTATION_FILE=/tmp/x.json\n',
+    ),
+    "forwards QDISTRO_PRESENTATION_FILE",
+)
+
+tier1 = Path(sys.argv[2]).read_text(encoding="utf-8")
+tier3 = Path(sys.argv[3]).read_text(encoding="utf-8")
+tier2 = Path(sys.argv[1]).read_text(encoding="utf-8")
+check_tier1(tier1)
+check_tier3(tier3)
+check_tier2_wrapper(extract_wrapper_body(tier2))
 print("ok")
 PY
 }
