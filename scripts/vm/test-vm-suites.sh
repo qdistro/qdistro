@@ -554,19 +554,25 @@ baseline() {
         # and the service sits in auto-restart forever). Member restarts
         # cannot break that loop; restarting the compositor drops every
         # wl_client and frees the slot. Do it unconditionally once the poll
-        # above exhausted unhealthy — gating on is-active raced a respawn
-        # window in 37111198372 and skipped the escalation entirely.
-        echo "harness: session still not healthy; restarting the compositor"
-        systemctl --user -M admin@ restart qdwin-compositor.service || true
-        for _ in $(seq 1 30); do
-            healthy && exit 0
-            for u in $usr; do
-                systemctl --user -M admin@ is-active --quiet "$u" ||
-                    { systemctl --user -M admin@ reset-failed "$u" 2>/dev/null;
-                      systemctl --user -M admin@ start "$u" 2>/dev/null || true; }
+        # above exhausted unhealthy — gating on the qdshell is-active raced
+        # a respawn window in 37111198372 and skipped the escalation.
+        # But only while the admin session target still holds the seat: with
+        # the target down the seat fell back to greetd, and a standalone
+        # compositor restart can only fail ("no seat", run 37115937113)
+        # and burn the start-limit budget the greeter relogin below needs.
+        if systemctl --user -M admin@ is-active --quiet qdwin-session.target; then
+            echo "harness: session still not healthy; restarting the compositor"
+            systemctl --user -M admin@ restart qdwin-compositor.service || true
+            for _ in $(seq 1 30); do
+                healthy && exit 0
+                for u in $usr; do
+                    systemctl --user -M admin@ is-active --quiet "$u" ||
+                        { systemctl --user -M admin@ reset-failed "$u" 2>/dev/null;
+                          systemctl --user -M admin@ start "$u" 2>/dev/null || true; }
+                done
+                sleep 2
             done
-            sleep 2
-        done
+        fi
         echo "harness: baseline NOT restored after this file"
         exit 1' 2>&1
 }
@@ -584,6 +590,15 @@ for f in "${BATS_FILES[@]}"; do
             > "$OUT/bats/$base.tap" 2>&1; then rc=0; else rc=$?; fi
     echo "# rc=$rc seconds=$SECONDS" >> "$OUT/bats/$base.tap"
     log "bats $base rc=$rc (${SECONDS}s)"
+    # Restoring the baseline protects only the NEXT file. After the last
+    # file nothing runs again — the guest powers off next — so skip the
+    # restore rather than fail a fully-run suite on teardown debris
+    # (run 37115937113: shell-modules, deliberately last, left the
+    # session seatless and the restore marked the suite incomplete).
+    if [ "$f" = "${BATS_FILES[-1]}" ]; then
+        log "last bats file; skipping baseline restore"
+        break
+    fi
     # A file that wedged or rebooted the guest must not poison the rest; the
     # summary lists every file after it as not run.
     if ! SSH_CAP=60 rootssh true 2>/dev/null; then
@@ -598,6 +613,9 @@ for f in "${BATS_FILES[@]}"; do
         # first came up.
         log "greeter is up after $base; logging admin in again"
         sleep 10   # the password field takes focus once the greeter has painted
+        # The new session re-pulls the same units; a start-limit left by the
+        # failed restore above would fail the compositor job instantly.
+        rootssh 'systemctl --user -M admin@ reset-failed qdwin-session.target qdwin-compositor.service qdshell.service' 2>/dev/null || true
         send_text "$IMAGE_PASSWORD"
         SECONDS=0
         until session_up; do
