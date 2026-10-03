@@ -17,17 +17,23 @@ setup() {
     BOOT="$REPO/scripts/install/qdistro-bootstrap.sh"
     # The chain: every installer the bootstrap's installer_chain_entries names
     # (image/config.sh runs the SAME functions -- todo/iso/14 Phase D -- so
-    # there is one list) plus the qdwin-session installer config.sh calls
-    # directly. The other direct installer stages vendored libweston without
-    # live systemd calls; its presence is pinned in the image-chain test.
+    # there is one list) plus the direct image installers. Every installer is
+    # scanned for raw live calls; only the offline-aware ones must source the
+    # library. Vendored libweston stages files/build output without that library.
+    local direct_installers
+    direct_installers=$(grep -oE '^bash "\$QD/scripts/install/install-[a-z0-9-]+\.sh"' "$CONFIG_SH" |
+        grep -oE 'scripts/install/install-[a-z0-9-]+\.sh' | sort -u)
     CHAIN=$( { bash -c '. "$1"; installer_chain_entries' _ "$BOOT" | awk -F'|' 'NF{print $2}';
-               grep -oE '^bash "\$QD/scripts/install/install-qdwin-session-for-vm\.sh"' "$CONFIG_SH" | grep -oE 'scripts/install/install-qdwin-session-for-vm\.sh'; } | sort -u)
-    # Cardinality from the chain plus the one direct offline-aware installer.
-    # A new chain entry must appear in the walk; the direct list is pinned below.
+               printf '%s\n' "$direct_installers" | grep '^scripts/install/install-qdwin-session-for-vm\.sh$'; } | sort -u)
+    IMAGE_INSTALLERS=$(printf '%s\n%s\n' "$CHAIN" "$direct_installers" | sort -u)
+    # Cardinality checks keep the library walk and raw-call scan complete.
+    # The exact direct installer list is pinned in the image-chain test below.
     local n_chain
     n_chain=$(bash -c '. "$1"; installer_chain_names' _ "$BOOT" | grep -c .)
-    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_chain + 1 )) ] || [ "$n_chain" -lt 15 ]; then
-        echo "chain parse mismatch: chain=$n_chain parsed: $CHAIN" >&2; return 1
+    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_chain + 1 )) ] ||
+       [ "$(printf '%s\n' "$IMAGE_INSTALLERS" | wc -l)" -ne $(( n_chain + 2 )) ] ||
+       [ "$n_chain" -lt 15 ]; then
+        echo "image installer parse mismatch: chain=$n_chain offline-aware=[$CHAIN] all=[$IMAGE_INSTALLERS]" >&2; return 1
     fi
 }
 
@@ -44,9 +50,9 @@ setup() {
 # Live-only operations may appear ONLY through the library's sd_*/live_only
 # helpers or inside an `if is_offline; then ... else ... fi` block (the
 # else branch). Anything else is a live call that would run in the chroot.
-@test "offline: no raw live call outside an offline guard in any chain installer" {
+@test "offline: no raw live call outside an offline guard in any image installer" {
     local f bad=0
-    for f in $CHAIN; do
+    for f in $IMAGE_INSTALLERS; do
         run awk '
             function indent(s) { match(s, /^ */); return RLENGTH }
             /^[[:space:]]*#/ { next }

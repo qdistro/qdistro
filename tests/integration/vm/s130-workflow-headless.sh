@@ -121,7 +121,7 @@ seed() {  # <file> ; YAML on stdin, then reload the broker so it is loaded
         loaded=$(admin_json 'iface.ListWorkflows()' 2>/dev/null | python3 -c '
 import json, sys
 try:
-    names = {w["name"] for w in json.load(sys.stdin)
+    names = {w["name"] for w in json.load(sys.stdin)}
 except (ValueError, KeyError, TypeError):
     names = set()
 print("ready" if sys.argv[1] in names else ",".join(sorted(names)))
