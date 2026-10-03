@@ -76,3 +76,4 @@ tests/integration/s*.sh
 # they are separate checkouts and `git add -A` from the repo root would
 # otherwise stage them as embedded repositories.
 .worktrees/
+.claude/
