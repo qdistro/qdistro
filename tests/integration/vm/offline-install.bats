@@ -18,12 +18,12 @@ setup() {
     # The chain: every installer the bootstrap's installer_chain_entries names
     # (image/config.sh runs the SAME functions -- todo/iso/14 Phase D -- so
     # there is one list) plus the qdwin-session installer config.sh calls
-    # directly. Read from the executed definition, not from comments.
+    # directly. The other direct installer stages vendored libweston without
+    # live systemd calls; its presence is pinned in the image-chain test.
     CHAIN=$( { bash -c '. "$1"; installer_chain_entries' _ "$BOOT" | awk -F'|' 'NF{print $2}';
-               grep -oE '^bash "\$QD/scripts/install/install-[a-z0-9-]+\.sh"' "$CONFIG_SH" | grep -oE 'scripts/install/install-[a-z0-9-]+\.sh'; } | sort -u)
-    # Cardinality from the chain itself (+1 for the direct qdwin-session
-    # call), so an installer added to the chain is in the walk or the count
-    # check goes red.
+               grep -oE '^bash "\$QD/scripts/install/install-qdwin-session-for-vm\.sh"' "$CONFIG_SH" | grep -oE 'scripts/install/install-qdwin-session-for-vm\.sh'; } | sort -u)
+    # Cardinality from the chain plus the one direct offline-aware installer.
+    # A new chain entry must appear in the walk; the direct list is pinned below.
     local n_chain
     n_chain=$(bash -c '. "$1"; installer_chain_names' _ "$BOOT" | grep -c .)
     if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_chain + 1 )) ] || [ "$n_chain" -lt 15 ]; then
@@ -64,11 +64,11 @@ setup() {
 
 @test "offline: the image runs the bootstrap's chain -- strict, offline, recorded on the image; no parallel list" {
     # Phase D: config.sh has no INSTALLERS array and invokes no chain
-    # installer itself; the only install-*.sh it runs directly is the
-    # qdwin-session one (same contract).
+    # installers itself; the only direct install-*.sh calls stage vendored
+    # libweston and qdwin-session. The latter uses the offline library.
     ! grep -q '^INSTALLERS=(' "$CONFIG_SH"
     run bash -c 'grep -vE "^[[:space:]]*#" "$1" | grep -oE "scripts/install/install-[a-z0-9-]+\.sh" | sort -u' _ "$CONFIG_SH"
-    [ "$output" = "scripts/install/install-qdwin-session-for-vm.sh" ]
+    [ "$output" = $'scripts/install/install-qdwin-session-for-vm.sh\nscripts/install/install-vendored-libweston.sh' ]
     # The bootstrap is driven through its ENVIRONMENT forms (the source
     # clobbers the internal names), strict, with the state dir on the image.
     grep -q '^export QDISTRO_REPO_ROOT="\$SRC"$' "$CONFIG_SH"

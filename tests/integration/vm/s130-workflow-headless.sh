@@ -36,7 +36,7 @@ OBJ=/org/qdistro/AdminBroker1
 TARGET_PID=""
 CG=""
 # Runs from an earlier invocation stay in workflow_audit.sqlite (and a broker
-# restart leaves their rows in whatever state they had); only look at runs
+# reload leaves their rows in whatever state they had); only look at runs
 # started by THIS invocation.
 T0=$(( $(date +%s) - 1 ))
 
@@ -56,7 +56,9 @@ cleanup() {
     fi
     rm -f "$WF_DIR"/wfhl-*.yaml
     runuser -u admin -- qdistro-pwd-admin delete "$VAULT" sign-key >/dev/null 2>&1 || true
-    systemctl restart qdistro-admin-broker.service 2>/dev/null || true
+    # The broker reloads workflow definitions on SIGHUP. Avoid one restart
+    # per section: four rapid resets hit systemd's service start limit.
+    systemctl kill --kill-whom=main --signal=HUP qdistro-admin-broker.service 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -107,12 +109,28 @@ for r in json.load(sys.stdin):
 ' "$1" "$T0"
 }
 
-seed() {  # <file> ; YAML on stdin, then restart the broker so it is loaded
+seed() {  # <file> ; YAML on stdin, then reload the broker so it is loaded
     mkdir -p "$WF_DIR"
     rm -f "$WF_DIR"/wfhl-*.yaml
     cat >"$WF_DIR/$1"
-    systemctl restart qdistro-admin-broker.service
-    broker_up || { fail "broker did not come back after seeding $1"; finish; }
+    broker_up || { fail "broker unavailable before seeding $1"; finish; }
+    systemctl kill --kill-whom=main --signal=HUP qdistro-admin-broker.service \
+        || { fail "broker workflow reload signal failed for $1"; finish; }
+    local name=${1%.yaml} loaded=""
+    for _ in $(seq 1 60); do
+        loaded=$(admin_json 'iface.ListWorkflows()' 2>/dev/null | python3 -c '
+import json, sys
+try:
+    names = {w["name"] for w in json.load(sys.stdin)
+except (ValueError, KeyError, TypeError):
+    names = set()
+print("ready" if sys.argv[1] in names else ",".join(sorted(names)))
+' "$name" 2>/dev/null)
+        [ "$loaded" = ready ] && return 0
+        sleep 0.25
+    done
+    fail "broker did not load workflow $name after SIGHUP (last ListWorkflows=[$loaded])"
+    finish
 }
 
 ensure_user() {  # non-admin caller for the AccessDenied leg

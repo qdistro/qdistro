@@ -156,14 +156,21 @@ grep -q 'qdwin: shell loaded' "$WLOG" || {
 echo "PASS: outer qdwin started (broker-required + S3d route-test + allow-after-pending)"
 chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 
+# Weston has a TLS certificate but no NLA credential database. The route
+# assertion requires a real RDP input seat, so pin the TLS security mode.
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 120 sdl-freerdp /v:127.0.0.1:3389 /cert:ignore /u:probe /p:probe \
+    nohup timeout 120 sdl-freerdp /v:127.0.0.1:3389 /sec:tls /cert:ignore /u:probe /p:probe \
         >/tmp/s3f-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!
 for i in 1 2 3 4 5 6 7 8; do
     grep -q "seat '" "$WLOG" 2>/dev/null && break
     sleep 1
 done
+grep -q "seat '" "$WLOG" || {
+    echo "FAIL: RDP peer did not create an input seat"
+    tail -20 /tmp/s3f-sdl-freerdp.log
+    exit 11
+}
 
 # --- nested publisher (pipewire-only) ----------------------------------
 cat >/home/admin/run-s3f-nested.sh <<EOF
