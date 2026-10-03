@@ -1,0 +1,45 @@
+From: qdistro <qdistro@local>
+Date: 2026-11-26
+Subject: [PATCH] backend-rdp: pin FreeRDP_ExtSecurity off for FreeRDP >= 3.32
+
+FreeRDP 3.32 flips the server-settings default of FreeRDP_ExtSecurity
+(the HYBRID_EX "early user auth" security protocol) from FALSE to TRUE
+(FreeRDP commit 51f9ff1, settings.c). With a TLS-only weston rdp-backend
+the security negotiation then picks HYBRID_EX — SelectedProtocol bits are
+treated as an ordered preference list and EUA is preferred over plain
+HYBRID — and rdp_accept_peer() routes it into transport_accept_nla().
+That path feeds an NtlmSamFile the backend never configures, so the
+server-side credssp exchange fails with SEC_E_NO_CREDENTIALS and every
+client is rejected before a seat/pointer/keyboard is created. Observed
+as the shell-modules suite losing its RDP peer wholesale
+(s6.8-s3d/-s3f/-s3c: no seat, routed=0, keyboard grab never installed).
+
+The backend has no EUA-capable auth path; the only correct thing is to
+stop offering HYBRID_EX. Pin FreeRDP_ExtSecurity to FALSE for all
+security modes (vmconnect, legacy-RDP, TLS, TLS+NLA/SAM) in the FreeRDP 3
+branch of rdp_peer_init().
+
+Vendored against weston 16.0.0 for ${QDWIN_REPO}/.
+---
+diff --git a/libweston/backend-rdp/rdp.c b/libweston/backend-rdp/rdp.c
+index 5c986cbb2..ed976418b 100644
+--- a/libweston/backend-rdp/rdp.c
++++ b/libweston/backend-rdp/rdp.c
+@@ -1932,6 +1932,17 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
+ 
+ 	settings = client->context->settings;
+ #if USE_FREERDP_VERSION >= 3
++	/* FreeRDP >= 3.32 enables FreeRDP_ExtSecurity (the HYBRID_EX
++	 * "early user auth" security protocol) by default on server
++	 * settings. This backend has no credssp-capable auth backend — the
++	 * only NLA path feeds a SAM file to transport_accept_nla(), which
++	 * does not handle EUA — so whenever HYBRID_EX is negotiated the
++	 * server-side nla accept fails (SEC_E_NO_CREDENTIALS) and every
++	 * TLS-only peer is rejected before a seat is created. Pin it off
++	 * for all security modes. */
++	if (!freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE))
++		rdp_debug(b, "Error setting FreeRDP_ExtSecurity to 'FALSE'.\n");
++
+ 	/* configure security settings */
+ 	if (b->vmconnect) {
+ 		/* Special Hyper-V mode */
