@@ -954,12 +954,15 @@ broker_gate() {
     # qdistro.tier2.spawn rules keyed on the admin uid. A root caller would
     # miss them and be fail-closed DENIED, so we present the admin uid the
     # User=admin unit used to. In the default path as_admin_run is a no-op.
+    # Parse only the D-Bus reply on stdout. Shell xtrace and transport
+    # diagnostics go to stderr; merging them here turns a valid "allow" into
+    # an unsupported verdict when this script is run with bash -x.
     _out=$(as_admin_run dbus-send --system --print-reply=literal \
         --dest=org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 \
         org.qdistro.AdminBroker1.CheckPermission \
         "string:$_action" \
-        "dict:string:string:" 2>&1)
+        "dict:string:string:")
     _status=$?
     _reply=$(printf '%s' "$_out" | tr -d ' \t\n')
     if [ "$_status" -ne 0 ]; then

@@ -115,6 +115,7 @@ def _run_spawn(
     tmp_path: Path,
     *,
     dbus_mode: str | None,
+    trace: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -140,6 +141,7 @@ def _run_spawn(
         return subprocess.run(
             [
                 "/bin/bash",
+                *(["-x"] if trace else []),
                 str(SPAWN),
                 "tier2-c1",
                 "weston-terminal",
@@ -161,6 +163,16 @@ def test_tier2_spawn_requires_explicit_broker_allow(tmp_path: Path) -> None:
     result = _run_spawn(tmp_path, dbus_mode="allow")
 
     assert result.returncode == 0, result.stderr
+    assert "LAUNCH_TOKEN=" in result.stdout
+
+
+def test_tier2_spawn_trace_does_not_corrupt_broker_reply(tmp_path: Path) -> None:
+    # A GUI diagnostic runs the wrapper with bash -x. Its trace belongs on
+    # stderr and must not contaminate the broker verdict parsed from stdout.
+    result = _run_spawn(tmp_path, dbus_mode="allow", trace=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "++ dbus-send" in result.stderr
     assert "LAUNCH_TOKEN=" in result.stdout
 
 
