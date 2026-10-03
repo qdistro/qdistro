@@ -145,6 +145,8 @@ assert_launch_gone "lifecycle" "$TA" "$(ctr_of "$SA")"
 assert_bridge_gone "lifecycle" "$TA"
 
 step "5. concurrent launches come up and go down independently"
+# step 4 already observed a toplevel for $SA; count only this section's.
+cur=$(journal_cursor)
 TA=$(up_gui_silo "$SA"); TB=$(up_gui_silo "$SB")
 if [ -n "$TA" ] && [ -n "$TB" ] && [ "$TA" != "$TB" ]; then
     pass "concurrent: two launches up with distinct tokens ($TA, $TB)"
@@ -158,7 +160,7 @@ else fail "concurrent: launches did not come up (TA='$TA' TB='$TB')"; fi
 is "concurrent: both bridge channels live (distinct link.sock streams)" \
     "$(bridge_stream_live "$TA" && bridge_stream_live "$TB" && echo yes || echo no)" yes
 is "concurrent: qdshell observed both toplevels" \
-    "$(qdshell_log | grep -c '\[tier3s\] toplevel observed silo=s125[ab] ')" 2
+    "$(qdshell_log "$cur" | grep -c '\[tier3s\] toplevel observed silo=s125[ab] ')" 2
 # kill the launch unit under A (BindsTo the scope): B must survive
 systemctl kill -s KILL --kill-whom=main "$(unit_of "$SA")"
 wait_for 90 unit_down "$(unit_of "$SA")"

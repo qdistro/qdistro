@@ -93,6 +93,17 @@ systemctl restart qdistro-admin-broker.service
 wait_for 30 bash -c "busctl --system list --no-pager 2>/dev/null | grep -q '^org\.qdistro\.AdminBroker1 '"
 is "broker restarted under lineage_enforce" \
     "$(broker_log | grep -c 'lineage_enforce=True')" 1
+# the launch-record store is in-memory: the restart wiped A's registration
+# (verified on the b12 worker — post-restart every attested lookup came
+# back no-launch-record). Re-register the still-live bridge pid so the
+# attested-source probes below have a record to resolve, exactly as a
+# launch after the restart would.
+out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.RegisterLaunch \
+    "string:$SA" "string:qdistro.tier3s" "string:qdistro.tier3s.$SA" \
+    "string:$TA" "string:" "uint64:$BP" "string:tier3s" "uint64:0" 2>&1)
+is "re-registered A's bridge pid under the enforcing broker" \
+    "$(printf '%s' "$out" | grep -cE 'string "[0-9a-f]{32}"')" 1
 
 # shadow control: none — the broker is now enforcing; every probe below
 # exercises it. src_pid=0 / unverified pid / stale starttime all hard-deny.

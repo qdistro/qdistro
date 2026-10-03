@@ -54,11 +54,15 @@ drive_gui() {
     [ -n "$h" ] || { fail "$tag: no qdshell handle for $s"; return; }
     is "$tag: findSiloHandle resolves the tier3s toplevel" \
         "$(qs_ipc tier3focus findSiloHandle "$s" 2>/dev/null)" "HANDLE=$h"
+    # the toplevel may already hold a focus event from map-time; the proof
+    # is a NEW seat_focus_changed after the inject, not exactly one total.
+    local fbefore
+    fbefore=$(comp_log | grep -c "seat_focus_changed seat=default handle=$h")
     is "$tag: injectFocus accepted for the tier3s handle" \
         "$(qs_ipc tier3focus injectFocus "$h" default 2>/dev/null)" "ok handle=$h seat=default"
-    wait_for 20 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -q 'seat_focus_changed seat=default handle=$h'"
+    wait_for 20 bash -c "[ \$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -c 'seat_focus_changed seat=default handle=$h') -gt ${fbefore:-0} ]"
     is "$tag: compositor reports focus on handle $h" \
-        "$(comp_log | grep -c "seat_focus_changed seat=default handle=$h")" 1
+        "$(yes_no test "$(( $(comp_log | grep -c "seat_focus_changed seat=default handle=$h") - ${fbefore:-0} ))" -ge 1)" yes
     wait_for 15 qdwin_mapped "$h"
     is "$tag: compositor mapped a committed frame (mapped handle=$h)" \
         "$(comp_log | grep -c "mapped handle=$h")" 1
