@@ -846,8 +846,8 @@ Rules:
   host commands. A scenario that explicitly describes a guest-driver barrier
   (such as permissions-gui/12) follows that scenario's barrier instructions.
   The following streaming and host-step rules apply to guest-driver scenarios.
-  For these scenarios, vm-exec does NOT
-  stream: the guest command's output reaches the host only when that command
+  For these scenarios, vm-exec does NOT stream: the guest command's output
+  reaches the host only when that command
   EXITS. So a host-side step that must happen MID-scenario
   (a screenshot, click, send-key) cannot be synchronised by polling the
   running vm-exec's output for a phase marker -- the marker arrives after the
@@ -1082,7 +1082,7 @@ Rules:
   retryable. A slow guest's cleanup usually resolves on the very next call, so
   retry the SAME command once before diagnosing, and quote the refusal line in
   your report if it repeats.
-- For guest-driver scenarios, CLAIM THE GUEST DRIVER. It is the ONE guest
+- CLAIM THE GUEST DRIVER for guest-driver scenarios. It is the ONE guest
   shell that runs
   this scenario's Setup, Steps, Assertions, and Cleanup (see the one-shell rule
   above). It runs as ROOT (vm-exec's default user; reach other

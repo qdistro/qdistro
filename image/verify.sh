@@ -29,7 +29,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # Same default as build.sh/build-in-vm.sh: /tmp is a tmpfs on the build
 # hosts, so a default-env build followed by a default-env verify must agree
 # on /var/tmp or the artifact is simply not found (iso/14 Phase A item 6).
-BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
 STAMP="$(date +%y%m%d-%H%M)"
 VERIFY_DIR="$HERE/logs/verify-${STAMP}$(date +%S)"
 # AGENTS.md requires VM names end in YYMMDD-HHMM so parallel runs don't collide.

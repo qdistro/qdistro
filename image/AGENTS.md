@@ -194,7 +194,10 @@ import that image as the CI base so bootstrap skips the extras zypper.
 A tester-as-base still zypper-installs extras (needs guest egress);
 `QCI_OFFLINE=1` then fails closed before the DNS wait.
 
-- `QDISTRO_BUILD_DIR` defaults to `/var/tmp/qdistro-build`. **Never `/tmp`**:
+- `QDISTRO_BUILD_DIR` defaults to `/var/tmp/qdistro-build-<uid>` (using
+  `SUDO_UID` for a sudo build). Each host user gets a writable build tree;
+  builds and qci runs under different users do not share the extracted raw.
+  **Never `/tmp`**:
   it is a tmpfs on the build hosts and the 28 GiB raw does not fit in RAM.
   Outputs: `qdistro.x86_64-<version>.raw` (what verify/extract use) and
   `bundle/qdistro-<version>-<snapshot>.raw.xz{,.sha256}` (what ships).

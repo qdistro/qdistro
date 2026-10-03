@@ -44,7 +44,7 @@ VM="${QDISTRO_BUILDER_VM:-qdistro-builder-$(date +%y%m%d-%H%M)}"
 BUILD_DISK_GB="${QDISTRO_BUILD_DISK_GB:-120}"
 # Never /tmp: it is a tmpfs on the build hosts and a multi-GiB raw does not
 # fit in RAM (iso/14 Phase A item 6).
-HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
 # Forwarded into the in-VM kiwi run so config.sh's profile gate sees it
 # (release = no passwordless sudo; dev = passwordless sudo for test harnesses).
 # This is a shell variable read by config.sh, NOT a kiwi XML profile.

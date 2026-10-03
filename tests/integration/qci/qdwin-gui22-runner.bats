@@ -241,7 +241,10 @@ EOF
 @test "run.sh refuses a second copy on the same VM (host lock) before touching anything" {
     local art="$T/art" lock
     mkdir -p "$art"
-    lock="${TMPDIR:-/tmp}/qd22-runner.fake-vm.lock"
+    # The runner still locks by VM name; keep this fake VM's lock private to
+    # the test so another Unix user running the suite cannot own its inode.
+    export TMPDIR="$T"
+    lock="$TMPDIR/qd22-runner.fake-vm.lock"
     exec {fd}>>"$lock"
     flock -n "$fd"
     QCI_GUI_ARTIFACT_DIR="$art" run bash "$RUNSH" fake-vm
