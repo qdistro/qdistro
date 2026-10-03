@@ -19,8 +19,10 @@ location on a qdistro desktop:
 
 The directory is created by the installer, owned by the trusted admin
 account, mode 0755; the file is 0644. Isolated applications receive
-read-only access. There is no default `current.json` at install time:
-absence means native fallback, not a forced dark theme.
+read-only access. Tier-2 binds that directory with private propagation
+and does not mount sibling `/var/lib/qdistro` trees. There is no default
+`current.json` at install time: absence means native fallback, not a
+forced dark theme.
 
 On an ordinary (non-qdistro) desktop, qdshell may publish to
 `${XDG_STATE_HOME:-$HOME/.local/state}/qdistro/presentation/current.json`.

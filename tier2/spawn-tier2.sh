@@ -1299,9 +1299,11 @@ if [ -d /var/lib/qdistro/presentation ]; then
     # Directory bind, not current.json, so atomic replacement is visible.
     # Outside both home-mode branches so persistent and disposable launches
     # share it. No :Z — shared public tree, not a per-container label.
+    # rprivate — mount events do not propagate either way. Do not bind
+    # sibling /var/lib/qdistro trees (bindings, lineage, identity, approvals).
     # keep-id + --user $TIER2_ADMIN_UID_RESOLVED: same numeric owner inside.
     PODMAN_HARDENING+=(
-        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec
+        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate
     )
 fi
 if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
