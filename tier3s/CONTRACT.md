@@ -620,9 +620,9 @@ oracle is "no `podman run` and no activation record":
      (there is no podman-default fallback);
    - the **workload declaration** `/usr/lib/qdistro/tier3s/workloads/
      <workload>.env` (B-i): **parsed, never sourced** — blank lines and `#`
-     comments, then `GUI=0` or `GUI=1` at most once; anything else refuses.
-     A missing file means a headless workload (`GUI=0`); a present but
-     malformed one refuses the launch;
+     comments, then exactly one `GUI=0` or `GUI=1`; anything else refuses.
+     Every declared workload carries one — a missing, symlinked, malformed
+     or GUI-less file refuses the launch;
    - the image: for a templated silo, `qdistro-resolve-binding <binding>
      --launch-env` **without** `--record` (a digest plus the state path);
      otherwise `localhost/qdistro/tier3s-<workload>:latest`.
@@ -818,8 +818,9 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
 
 `tier3s/workloads/<workload>.env` declares what a workload needs of the
 launch path. It is **parsed, never sourced**: blank lines and `#` comments,
-then `GUI=0` or `GUI=1` at most once — anything else refuses the launch. A
-missing file means `GUI=0` (headless). `GUI=1` adds the whole §5 step-12
+then exactly one `GUI=0` or `GUI=1` — anything else refuses the launch, as
+does a missing, symlinked or GUI-less file: every declared workload must
+say out loud whether it wants the bridge. `GUI=1` adds the whole §5 step-12
 bridge (compositor check, secctx client, launch record, RegisterLaunch) and
 the two podman additions (`-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw`,
 `--runtime-flag=host-uds=open`); `GUI=0` leaves the launch byte-identical to
