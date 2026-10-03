@@ -113,7 +113,7 @@ ws=\$(cd "\$d/src/tier3s" && for f in Containerfile.*; do [ -f "\$f" ] && echo "
     done
     # one IMAGE= block per workload in build.log, split on the image tag.
     # IMAGE_SNAPSHOT is a shared (workload-invariant) key: emit it ONCE,
-    # outside the per-workload keys — guest-setup's `m IMAGE_SNAPSHOT`
+    # outside the per-workload keys — guest-setup's 'm IMAGE_SNAPSHOT'
     # compares a single line against the snapshot.conf pin (sol B-i r1 P1-2).
     awk '
         /^IMAGE=qdistro\/tier3s-/ { if (w != "") emit(); w = substr(\$0, 22); sub(/:.*/, "", w); blk = \$0 ORS; next }
