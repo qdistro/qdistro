@@ -88,9 +88,7 @@ def expect_replace(cache_src: str, boot_src: str, old: str, new: str, label: str
 
 check(cache, bootstrap)
 expect_fail(cache, bootstrap, WORKLOADS, "workloads array with qfileman")
-expect_fail(cache, bootstrap, "    tier2 qdfileman sdk/presentation |\n", "ls-files consumer pathspecs")
-expect_fail(cache, bootstrap, " qdfileman", "qdfileman ls-files pathspec")
-expect_fail(cache, bootstrap, " sdk/presentation", "presentation ls-files pathspec")
+expect_fail(cache, bootstrap, LS_FILES, "ls-files consumer pathspecs")
 expect_fail(cache, bootstrap, STAGE_QD, "qdfileman staging copy")
 expect_fail(cache, bootstrap, STAGE_PRES, "presentation staging copy")
 expect_fail(cache, bootstrap, STRIP, "consumer strip")
@@ -103,6 +101,14 @@ expect_replace(
     WORKLOADS,
     "workloads=(weston-terminal text-viewer url-preview)\n",
     "qfileman dropped from workloads",
+)
+expect_replace(
+    cache,
+    bootstrap,
+    LS_FILES,
+    'git -C "$repo" ls-files -z --cached --others --exclude-standard -- \\\n'
+    "    tier2 |\n",
+    "qdfileman and presentation dropped from ls-files",
 )
 expect_replace(
     cache,
