@@ -17,8 +17,10 @@
 # The unit names match deploy exactly (was the legacy noctalia-session /
 # noctalia-shell pair, retired 2026-06-16 — deploy-contract drift
 # followup). The [Unit] graph mirrors deploy/: the compositor + shell are
-# PartOf= the target, the shell After=/Requires= the compositor, and the
-# target Requires= the compositor + Wants= the shell.
+# PartOf= the target, the shell After=/Requires= the compositor (and, as
+# of the qdshell-persistence fix, PartOf= it too so a compositor restart
+# re-pulls the shell), and the target Requires= the compositor +
+# Wants= the shell.
 #
 # VM-vs-deploy divergence: this installer ENABLES qdwin-session.target
 # under default.target so the lingering admin user-manager auto-starts the
@@ -433,7 +435,8 @@ RestartSec=2
 EOF
 
 # Shell unit. Mirrors deploy/qdshell.service: After=/Requires= the
-# compositor, PartOf= the target, with deploy's start-limit guard. NO
+# compositor, PartOf= the target (and the compositor, so a compositor
+# restart re-pulls the shell), with deploy's start-limit guard. NO
 # [Install] — wired into the target via a .wants/ symlink (written below)
 # plus the target's Wants=.
 cat > /home/admin/.config/systemd/user/qdshell.service <<'EOF'
@@ -441,6 +444,18 @@ cat > /home/admin/.config/systemd/user/qdshell.service <<'EOF'
 Description=qdshell desktop (Quickshell QML on top of qdwin)
 After=qdwin-compositor.service
 Requires=qdwin-compositor.service
+# Requires= makes a compositor STOP take the shell down too — but it
+# pulls the shell in only when the SHELL starts, never the other way:
+# after a compositor restart the shell just stayed stopped (the
+# tiered-isolation cascade: Requires= dropped qdshell on compositor
+# teardown and nothing pulled it back). PartOf= adds stop AND restart
+# propagation from the compositor, so `systemctl restart
+# qdwin-compositor.service` (the harness's stale-shell-slot escalation,
+# or any manual restart) restarts the shell in the same transaction.
+# Safe because PartOf= adds no new start/enable edges — it only extends
+# stop/restart propagation — and After= + the ExecStartPre wayland-1
+# wait already cover the ordering gap while the compositor is down.
+PartOf=qdwin-compositor.service
 PartOf=qdwin-session.target
 StartLimitBurst=5
 StartLimitIntervalSec=30s
@@ -459,7 +474,14 @@ Environment=QML_DISABLE_DISK_CACHE=1
 Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
 ExecStartPre=/bin/sh -c 'i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done'
 ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
-Restart=on-failure
+# Restart=always, not on-failure: qs exits CLEANLY when its wl_display
+# connection drops (compositor teardown/restart) — an rc 0 exit that
+# on-failure never respawned, leaving the unit dead until an explicit
+# start. The StartLimitBurst=5/30s guard above is deliberately
+# unchanged: raising it would only mask the stale-shell-slot
+# bind-reject respawn loop (a separate qdwin-side fix), and a genuine
+# crash loop must still reach failed.
+Restart=always
 RestartSec=1
 EOF
 

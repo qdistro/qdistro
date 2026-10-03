@@ -3,6 +3,15 @@ Description=qdshell desktop (Quickshell QML on top of qdwin)
 Documentation=https://github.com/qdistro/qdistro/tree/main/qdshell
 After=qdwin-compositor.service
 Requires=qdwin-compositor.service
+# Requires= makes a compositor STOP take the shell down too — but it
+# pulls the shell in only when the SHELL starts, never the other way:
+# after a compositor restart the shell just stayed stopped. PartOf= adds
+# stop AND restart propagation from the compositor, so `systemctl restart
+# qdwin-compositor.service` restarts the shell in the same transaction.
+# Safe because PartOf= adds no new start/enable edges — it only extends
+# stop/restart propagation — and After= + the ExecStartPre wayland-1 wait
+# already cover the ordering gap while the compositor is down.
+PartOf=qdwin-compositor.service
 PartOf=qdwin-session.target
 # qdshell crashes should not bring qdwin down; the compositor keeps
 # the screen lit while systemd respawns the shell.
@@ -22,5 +31,9 @@ Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
 # unit starts, but a short guard keeps cold-start ordering stable.
 ExecStartPre=/bin/sh -c 'i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done'
 ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
-Restart=on-failure
+# Restart=always, not on-failure: qs exits CLEANLY when its wl_display
+# connection drops (compositor teardown/restart) — an rc 0 exit that
+# on-failure never respawned. The StartLimitBurst=5/30s guard above is
+# deliberately unchanged: a genuine crash loop must still reach failed.
+Restart=always
 RestartSec=1
