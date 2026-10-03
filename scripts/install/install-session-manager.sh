@@ -202,10 +202,25 @@ if [ "$_qd_t3s" = 1 ]; then
         install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/seccomp/$(basename "$_qd_f")"
     done
     # Per-workload declarations (parsed, never sourced): GUI= selects the
-    # waypipe bridge half of the launch (CONTRACT §5 step 12). A workload
-    # without a declaration refuses to launch.
+    # waypipe bridge half of the launch (CONTRACT §5 step 12). An absent
+    # declaration means GUI=0 (headless); a present-but-invalid one refuses.
     for _qd_f in "$_qd_t3s_src"/workloads/*.env; do
         install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/workloads/$(basename "$_qd_f")"
+    done
+    # The image-side bridge entrypoint and the image-build context
+    # (CONTRACT §1 installed-paths table: Containerfile.<workload>,
+    # headless-smoke.sh, configure-snapshot-repos.sh, make-tier3s-image.sh)
+    # so an installed tree can rebuild every workload image as admin.
+    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-entrypoint" \
+        "$_qd_t3s_lib/qdistro-tier3s-entrypoint"
+    install -o root -g root -m 0755 "$_qd_t3s_src/make-tier3s-image.sh" \
+        "$_qd_t3s_lib/make-tier3s-image.sh"
+    install -o root -g root -m 0755 "$_qd_t3s_src/headless-smoke.sh" \
+        "$_qd_t3s_lib/headless-smoke.sh"
+    install -o root -g root -m 0644 "$_qd_t3s_src/configure-snapshot-repos.sh" \
+        "$_qd_t3s_lib/configure-snapshot-repos.sh"
+    for _qd_f in "$_qd_t3s_src"/Containerfile.*; do
+        install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/$(basename "$_qd_f")"
     done
     # The root scope helper (first process of the owning scope) and the only
     # teardown path (spawn EXIT trap, unit ExecStop/ExecStopPost, reconciliation).

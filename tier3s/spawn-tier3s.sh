@@ -51,12 +51,15 @@ refuse() { say "REFUSE: $*"; exit 2; }
 
 T="${TIER3S_TEST_ROOT:-}"
 POLL_S=60        # the start poll: wall-clock seconds for the launch to reach running
+BRIDGE_WAIT_S=15 # the GUI bridge's link.sock wait (well under TimeoutStartSec)
 if [ -n "$T" ]; then
     [ "$EUID" -ne 0 ] || refuse "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"
     case "$T" in /?*) ;; *) refuse "TIER3S_TEST_ROOT must be absolute" ;; esac
     say "TEST MODE: TIER3S_TEST_ROOT=$T (not a real launch)"
     ADMIN_PATH="$PATH"
+    BRIDGE_WAIT_S=5
     [[ "${TIER3S_TEST_POLL_S:-}" =~ ^[1-9][0-9]?$ ]] && POLL_S="$TIER3S_TEST_POLL_S"
+    [[ "${TIER3S_TEST_BRIDGE_S:-}" =~ ^[1-9][0-9]?$ ]] && BRIDGE_WAIT_S="$TIER3S_TEST_BRIDGE_S"
 else
     ADMIN_PATH=/usr/bin:/bin
 fi
@@ -142,29 +145,32 @@ probe_out="$("$PROBE" --user "$ADMIN_USER" 2>&1)"; probe_rc=$?
 SECCOMP="$LIBDIR/seccomp/$WORKLOAD.json"
 [ -f "$SECCOMP" ] && [ ! -L "$SECCOMP" ] || refuse "no seccomp profile $SECCOMP for workload '$WORKLOAD' (tier 3s has no podman-default fallback)"
 # The workload declaration (CONTRACT.md §7): <workload>.env is PARSED, never
-# sourced — blank lines and '#' comments, then exactly one 'GUI=0|1'. Every
-# declared workload carries one; a missing, unreadable, malformed or
-# GUI-less declaration refuses. GUI=1 adds the waypipe bridge (compositor
-# check, host secctx client, launch record, RegisterLaunch) and the podman
-# mount + host-uds flag below; GUI=0 leaves the launch byte-identical to
-# Phase A.
+# sourced — blank lines and '#' comments, then exactly one 'GUI=0|1'. An
+# ABSENT file means GUI=0: the Phase A headless path, unchanged (ΔB1). A
+# PRESENT file must say out loud what it wants — a symlink, an unreadable or
+# malformed file, an unknown key or a missing GUI= line all refuse. GUI=1
+# adds the waypipe bridge (compositor check, host secctx client, launch
+# record, RegisterLaunch) and the podman mount + host-uds flag below; GUI=0
+# leaves the launch byte-identical to Phase A.
 GUI=0
 WENV="$LIBDIR/workloads/$WORKLOAD.env"
-{ [ -f "$WENV" ] && [ ! -L "$WENV" ]; } \
-    || refuse "no workload declaration $WENV (every tier3s workload declares GUI=0|1)"
-gui_seen=0
-while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|'#'*) continue ;; esac
-    case "$line" in
-        GUI=0|GUI=1) ;;
-        GUI=*) refuse "workload declaration $WENV: bad GUI value '${line#GUI=}' (want 0 or 1)" ;;
-        *=*)   refuse "workload declaration $WENV: unexpected key '${line%%=*}'" ;;
-        *)     refuse "workload declaration $WENV: malformed line '$line'" ;;
-    esac
-    [ "$gui_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GUI"
-    gui_seen=1; GUI="${line#GUI=}"
-done < "$WENV"
-[ "$gui_seen" = 1 ] || refuse "workload declaration $WENV: no GUI= declaration"
+if [ -e "$WENV" ] || [ -L "$WENV" ]; then
+    { [ -f "$WENV" ] && [ ! -L "$WENV" ] && [ -r "$WENV" ]; } \
+        || refuse "workload declaration $WENV is not a regular readable file"
+    gui_seen=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in
+            GUI=0|GUI=1) ;;
+            GUI=*) refuse "workload declaration $WENV: bad GUI value '${line#GUI=}' (want 0 or 1)" ;;
+            *=*)   refuse "workload declaration $WENV: unexpected key '${line%%=*}'" ;;
+            *)     refuse "workload declaration $WENV: malformed line '$line'" ;;
+        esac
+        [ "$gui_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GUI"
+        gui_seen=1; GUI="${line#GUI=}"
+    done < "$WENV"
+    [ "$gui_seen" = 1 ] || refuse "workload declaration $WENV: no GUI= declaration"
+fi
 IMAGE="localhost/qdistro/tier3s-$WORKLOAD:latest"
 STATE_PATH=""; GENERATION=""; RESOLVER=()
 if [ -n "$SILO" ]; then
@@ -227,9 +233,18 @@ SPAWN_ACTION="qdistro.tier3s.spawn:$WORKLOAD/$APP_BASE"
 XDG_RT_PROD="/run/user/$ADMIN_UID"; XDG_RT="$T$XDG_RT_PROD"
 WL_DISPLAY=wayland-1
 BRIDGE_SOCK="$LAUNCH_DIR/link.sock"
-LAUNCH_RECORD="$XDG_RT_PROD/qdistro-tier3s-launchrec-$TOKEN.pid"
-GUI_RTFLAG=(); GUI_MOUNT=(); BRIDGE_ARGV=()
+GUI_RTFLAG=(); GUI_MOUNT=(); BRIDGE_ARGV=(); LAUNCH_RECORD=""; LR_TOKEN=""
 if [ "$GUI" = 1 ]; then
+    # TWO independent randoms (ΔB2; tier3/spawn-tier3.sh does the same): the
+    # launch record's FILE id is not the launch token — $TOKEN is observable
+    # (podman labels, the container name suffix), and secctx-exec creates the
+    # file O_EXCL, so a same-uid process could otherwise pre-create it and
+    # block publication or force the read of its own file. The nonce verified
+    # INSIDE the file is likewise its own random: a record at a guessed path
+    # still cannot spoof the registration.
+    LR_FILE_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    LR_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    LAUNCH_RECORD="$XDG_RT_PROD/qdistro-tier3s-launchrec-$LR_FILE_ID.pid"
     GUI_RTFLAG=(--runtime-flag=host-uds=open)            # bind-mounted unix sockets into the sandbox
     GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:rw")    # the token bridge dir, holding only link.sock
     BRIDGE_ARGV=(
@@ -240,7 +255,7 @@ if [ "$GUI" = 1 ]; then
         "DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RT/bus"
         QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
         "QDISTRO_LAUNCH_RECORD_PATH=$LAUNCH_RECORD"
-        "QDISTRO_LAUNCH_RECORD_TOKEN=$TOKEN"
+        "QDISTRO_LAUNCH_RECORD_TOKEN=$LR_TOKEN"
         qdistro-secctx-exec
             --sandbox-engine qdistro.tier3s
             --app-id "qdistro.tier3s.$SILO"
@@ -276,10 +291,10 @@ PODMAN_ARGV=(
 )
 [ -z "$STATE_PATH" ] || PODMAN_ARGV+=(-v "$STATE_PATH:/home/admin:rw")   # no recursive chown
 PODMAN_ARGV+=("$IMAGE")
-# A GUI workload runs under the image's waypipe server side (CONTRACT.md §5
-# step 12): the entrypoint execs `waypipe ... server -- <workload argv>` over
-# the mounted bridge socket. A headless workload runs its argv directly.
-[ "$GUI" = 1 ] && PODMAN_ARGV+=(qdistro-tier3s-entrypoint)
+# A GUI image's ENTRYPOINT wraps the app argv in the waypipe server side
+# (CONTRACT.md §5 step 12, §7): the spawn passes ONLY the app argv after the
+# image name — the image's own ENTRYPOINT execs `waypipe ... server -- "$@"`.
+# A headless workload runs its argv directly.
 PODMAN_ARGV+=("${APP_ARGV[@]}")
 SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
     -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G     # set by root; enforcement is Phase C
@@ -440,8 +455,17 @@ pm image exists "$IMAGE" || refuse "image $IMAGE is not in admin's store (tier3s
 # BEFORE podman run, and the EXIT trap's cleanup tears the client down.
 if [ "$GUI" = 1 ]; then
     rm -f -- "$T$LAUNCH_RECORD"
-    ( umask 0177; exec "${BRIDGE_ARGV[@]}" ) &           # socket lands admin-owned 0600
+    # The client's stdout/stderr go to a log inside the root-0700 control
+    # record dir — never into $LAUNCH_DIR, which becomes admin-owned the
+    # moment it exists and where an admin could pre-plant a file (a refusal
+    # must be able to trust the log tail it reports; the cleanup removes the
+    # log with the record dir).
+    BRIDGE_LOG="$CTL_DIR/waypipe-client.log"
+    ( umask 0177; exec "${BRIDGE_ARGV[@]}" ) >"$BRIDGE_LOG" 2>&1 &   # socket lands admin-owned 0600
     BRIDGE_PID=$!
+    bridge_refuse() {   # a bridge refusal names the cause and the client's log tail
+        refuse "$* (client log tail: $(tail -n 5 -- "$BRIDGE_LOG" 2>/dev/null | tr '\n' '|'))"
+    }
     # record the wrapper at once (bounded retry: the task may still be
     # materializing): a refusal below still gets torn down
     bwst=""
@@ -453,9 +477,9 @@ if [ "$GUI" = 1 ]; then
     [ -n "$bwst" ] \
         && state_write "gui=1" "launch_record=$LAUNCH_RECORD" \
             "bridge_wrapper_pid=$BRIDGE_PID" "bridge_wrapper_starttime=$bwst" \
-        || refuse "cannot record the bridge wrapper"
-    # The launch record: secctx-exec publishes "<inner pid> <token>" (its own
-    # fork child, the waypipe that connects to the compositor). The token
+        || bridge_refuse "cannot record the bridge wrapper"
+    # The launch record: secctx-exec publishes "<inner pid> <nonce>" (its own
+    # fork child, the waypipe that connects to the compositor). The nonce
     # inside must be ours (a pre-created admin file cannot spoof it); the
     # pid must be live and in this unit's cgroup.
     INNER_PID=""; INNER_TOK=""; SEEN_PID=""
@@ -463,28 +487,36 @@ if [ "$GUI" = 1 ]; then
         if [ -s "$T$LAUNCH_RECORD" ]; then
             IFS=' ' read -r INNER_PID INNER_TOK _ < "$T$LAUNCH_RECORD"
             [[ "$INNER_PID" =~ ^[0-9]+$ ]] && SEEN_PID="$INNER_PID"
-            [ "$INNER_TOK" = "$TOKEN" ] && break
+            [ "$INNER_TOK" = "$LR_TOKEN" ] && break
             INNER_PID=""
         fi
         kill -0 "$BRIDGE_PID" 2>/dev/null || break
         sleep 0.05
     done
-    # a record whose token never became ours still names an inner pid this
+    # a record whose nonce never became ours still names an inner pid this
     # launch spawned: record it so the teardown kills it, then refuse
     if [ -z "$INNER_PID" ] && [[ "$SEEN_PID" =~ ^[1-9][0-9]*$ ]]; then
         bwst="$(starttime "$SEEN_PID")" \
             && state_write "bridge_client_pid=$SEEN_PID" "bridge_client_starttime=$bwst" || :
     fi
     [[ "$INNER_PID" =~ ^[1-9][0-9]*$ ]] && kill -0 "$INNER_PID" 2>/dev/null \
-        || refuse "the waypipe bridge client did not publish a live pid (launch record $LAUNCH_RECORD)"
+        || bridge_refuse "the waypipe bridge client did not publish a live pid (launch record $LAUNCH_RECORD)"
     bcg="$(sed -n 's/^0:://p' "$PROC/$INNER_PID/cgroup" 2>/dev/null | head -1)"
     [ "${bcg##*/}" = "$UNIT" ] \
-        || refuse "bridge client pid $INNER_PID is not in $UNIT's cgroup (${bcg:-?})"
-    bcst="$(starttime "$INNER_PID")" || refuse "cannot read bridge client pid $INNER_PID starttime"
+        || bridge_refuse "bridge client pid $INNER_PID is not in $UNIT's cgroup (${bcg:-?})"
+    bcst="$(starttime "$INNER_PID")" || bridge_refuse "cannot read bridge client pid $INNER_PID starttime"
     state_write "bridge_client_pid=$INNER_PID" "bridge_client_starttime=$bcst" \
-        || refuse "cannot record the bridge client"
-    for _ in $(seq 1 100); do [ -S "$BRIDGE_SOCK" ] && break; sleep 0.05; done
-    [ -S "$BRIDGE_SOCK" ] || refuse "bridge client did not bind $BRIDGE_SOCK"
+        || bridge_refuse "cannot record the bridge client"
+    # link.sock by the clock (ΔB2), or the client's death — whichever first:
+    # a dead client never binds, and waiting out the bound only delays the
+    # refusal (which then names the death and the log tail).
+    sock_end=$((SECONDS + BRIDGE_WAIT_S)); sock_ok=""
+    while [ "$SECONDS" -lt "$sock_end" ]; do
+        [ -S "$BRIDGE_SOCK" ] && { sock_ok=1; break; }
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    [ -n "$sock_ok" ] || bridge_refuse "bridge client did not bind $BRIDGE_SOCK within ${BRIDGE_WAIT_S} s"
     # Lineage registration is MANDATORY for a GUI launch (B-i is stricter
     # than tier 3's warning-only registration): the broker re-verifies
     # (pid, starttime, uid, exe) itself; target_starttime 0 = trust /proc.

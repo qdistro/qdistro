@@ -120,9 +120,10 @@ sandbox publishes. It binds
 admin-owned mode `0600` under the client's `umask 0177`; keep-id means no
 tier-3 group dance) and prefixes titles `[3s:<silo>] `. The podman run then
 bind-mounts the per-launch dir at `/run/qdistro/link` with
-`--runtime-flag=host-uds=open`, and the image-side
-`qdistro-tier3s-entrypoint` runs `waypipe -s /run/qdistro/link/link.sock -o
---no-gpu server -- <argv>`: the sandbox is the waypipe **server**, the admin
+`--runtime-flag=host-uds=open`, and the image's `ENTRYPOINT`
+(`/usr/lib/qdistro/tier3s-entrypoint`, §7) runs `waypipe -s
+/run/qdistro/link/link.sock -o --no-gpu server -- <argv>`: the sandbox is
+the waypipe **server**, the admin
 side the **client** (Phase S topology; `--no-gpu` on both ends, `-o`
 one-shot). The client is a new lifecycle member: recorded
 (`bridge_client_*`, §4), registered with the broker before `podman run`
@@ -150,7 +151,7 @@ the manager skips reconciliation and a tier3s start fails (no unit, no spawn).
 | `/usr/lib/qdistro/tier3s/` | root-owned copy of `tier3s/`: `spawn-tier3s.sh`, `probe.sh`, `RUNSC_RELEASE`, `tier3s-runsc`, `seccomp/<workload>.json` (the probe compares the installed wrapper and pin against this copy) |
 | `/usr/lib/qdistro/tier3s/workloads/<workload>.env` | `tier3s/workloads/`: the per-workload declarations (§7), parsed never sourced |
 | `/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint` | `tier3s/qdistro-tier3s-entrypoint`: the image-side waypipe-server launcher (§7); also the build-context copy |
-| `/usr/lib/qdistro/tier3s/Containerfile.<workload>`, `headless-smoke.sh`, `configure-snapshot-repos.sh`, `SNAPSHOT`, `make-tier3s-image.sh` | `tier3s/`: the image-build context (§7), so an installed tree can rebuild every workload image as admin |
+| `/usr/lib/qdistro/tier3s/Containerfile.<workload>`, `headless-smoke.sh`, `configure-snapshot-repos.sh`, `make-tier3s-image.sh` | `tier3s/`: the image-build context (§7), so an installed tree can rebuild every workload image as admin (`SNAPSHOT` is generated into the build context by `make-tier3s-image.sh`, not installed; the pin resolves via `/etc/qdistro/release`) |
 | `/usr/libexec/qdistro/qdistro-tier3s-scope` | `tier3s/qdistro-tier3s-scope` |
 | `/usr/libexec/qdistro/qdistro-tier3s-cleanup` | `tier3s/qdistro-tier3s-cleanup` |
 | `/usr/lib/tmpfiles.d/qdistro-tier3s.conf` | `tier3s/tmpfiles/qdistro-tier3s.conf`, then `systemd-tmpfiles --create` on it |
@@ -331,7 +332,7 @@ No runsc-bundle process was outside the scope, and admin could not raise
 | `conmon_pid`, `conmon_starttime` | start | `State.ConmonPid` + `/proc/<pid>/stat` field 22 |
 | `sentry_pid`, `sentry_starttime` | start | `State.Pid` (the Sentry) + field 22 |
 | `gui` | bridge (B-i) | `1` when the workload declared `GUI=1` |
-| `launch_record` | bridge (B-i) | the secctx launch-record path, `/run/user/<admin-uid>/qdistro-tier3s-launchrec-<token>.pid` |
+| `launch_record` | bridge (B-i) | the secctx launch-record path, `/run/user/<admin-uid>/qdistro-tier3s-launchrec-<file-id>.pid` (`<file-id>` is its own random, never the launch token) |
 | `bridge_wrapper_pid`, `bridge_wrapper_starttime` | bridge (B-i) | the supervisor's direct child heading the client chain (`runuser` → `qdistro-secctx-exec`) + field 22 |
 | `bridge_client_pid`, `bridge_client_starttime` | bridge (B-i) | the inner waypipe-client pid the launch record published (the pid `RegisterLaunch` registered) + field 22 |
 
@@ -620,9 +621,10 @@ oracle is "no `podman run` and no activation record":
      (there is no podman-default fallback);
    - the **workload declaration** `/usr/lib/qdistro/tier3s/workloads/
      <workload>.env` (B-i): **parsed, never sourced** — blank lines and `#`
-     comments, then exactly one `GUI=0` or `GUI=1`; anything else refuses.
-     Every declared workload carries one — a missing, symlinked, malformed
-     or GUI-less file refuses the launch;
+     comments, then exactly one `GUI=0` or `GUI=1`. An **absent** file means
+     a headless workload (`GUI=0`, the Phase A path, unchanged); a **present**
+     file that is a symlink, unreadable, malformed, carries an unknown key or
+     has no `GUI=` line refuses the launch;
    - the image: for a templated silo, `qdistro-resolve-binding <binding>
      --launch-env` **without** `--record` (a digest plus the state path);
      otherwise `localhost/qdistro/tier3s-<workload>:latest`.
@@ -654,20 +656,29 @@ oracle is "no `podman run` and no activation record":
       `runuser -u admin -- env -i … XDG_RUNTIME_DIR=/run/user/<uid>
       WAYLAND_DISPLAY=wayland-1 DBUS_SESSION_BUS_ADDRESS=unix:path=<rt>/bus
       QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
-      QDISTRO_LAUNCH_RECORD_PATH=/run/user/<uid>/qdistro-tier3s-launchrec-<token>.pid
-      QDISTRO_LAUNCH_RECORD_TOKEN=<token>
+      QDISTRO_LAUNCH_RECORD_PATH=/run/user/<uid>/qdistro-tier3s-launchrec-<file-id>.pid
+      QDISTRO_LAUNCH_RECORD_TOKEN=<nonce>
       qdistro-secctx-exec --sandbox-engine qdistro.tier3s
       --app-id qdistro.tier3s.<silo> --instance-id <token>
       -- waypipe -s /run/qdistro-tier3s/<token>/link.sock -o --no-gpu
       --title-prefix "[3s:<silo>] " client`, under `umask 0177` so the
-      socket is admin-owned 0600;
+      socket is admin-owned 0600 — and with its stdout/stderr captured to
+      `waypipe-client.log` inside the root-0700 control record dir (never
+      in the admin-owned per-launch dir, where an admin could pre-plant a
+      file). `<file-id>` and `<nonce>` are two independent fresh randoms:
+      the token is observable (podman labels, the container name), and the
+      record is created `O_EXCL`, so a coupled file name would let a
+      same-uid process pre-create it (sol B-i r1 P2-4);
     - it reads the launch record with a bounded retry: the file must
-      contain `<inner pid> <token>` whose token is the one just handed
+      contain `<inner pid> <nonce>` whose nonce is the one just handed
       down (a pre-created admin-owned file cannot spoof the registration;
       `secctx-exec` creates it `O_EXCL|O_NOFOLLOW` 0600 and refuses a path
       whose parent is not exactly `XDG_RUNTIME_DIR`), the inner pid must be
       live, in the **launch unit's** cgroup, and its starttime recorded;
-    - `link.sock` must appear as a bound socket within the bound;
+    - `link.sock` must appear as a bound socket within a **clock-bounded**
+      wait, or the client must be seen dead — whichever comes first (a dead
+      client never binds; the wait does not run out the bound). Every
+      bridge refusal carries the client log's tail;
     - `AdminBroker1.RegisterLaunch(silo, "qdistro.tier3s",
       "qdistro.tier3s.<silo>", <token>, "", <inner pid>, "tier3s", 0)` —
       **mandatory, as root, with bounded retries**: any failure refuses the
@@ -818,11 +829,14 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
 
 `tier3s/workloads/<workload>.env` declares what a workload needs of the
 launch path. It is **parsed, never sourced**: blank lines and `#` comments,
-then exactly one `GUI=0` or `GUI=1` — anything else refuses the launch, as
-does a missing, symlinked or GUI-less file: every declared workload must
-say out loud whether it wants the bridge. `GUI=1` adds the whole §5 step-12
-bridge (compositor check, secctx client, launch record, RegisterLaunch) and
-the two podman additions (`-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw`,
+then exactly one `GUI=0` or `GUI=1` — anything else refuses the launch. An
+**absent** file means `GUI=0` (headless, the Phase A path unchanged); a
+**present** file that is a symlink, unreadable, malformed, carries an
+unknown key or has no `GUI=` line also refuses: a declaration that exists
+must say out loud whether it wants the bridge. `GUI=1` adds the whole §5
+step-12 bridge (compositor check, secctx client, launch record,
+RegisterLaunch) and the two podman additions
+(`-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw`,
 `--runtime-flag=host-uds=open`); `GUI=0` leaves the launch byte-identical to
 Phase A.
 
@@ -847,14 +861,19 @@ Phase A.
   (B-i): same base and pin discipline, plus `weston` / `foot`, `waypipe`,
   `fontconfig`, `dejavu-fonts`, `xkeyboard-config`, `terminfo-base` and
   `glibc-locale-base` (the Phase S package set: W8 needed the UTF-8 locale;
-  fontconfig's link() behaviour drove the `link` decision below). Both use
-  `ENTRYPOINT ["/usr/local/bin/qdistro-tier3s-entrypoint"]`.
+  fontconfig's link() behaviour drove the `link` decision below). Both set
+  `ENTRYPOINT ["/usr/lib/qdistro/tier3s-entrypoint"]` (installed in the
+  image root 0755) — the spawn passes only the workload argv after the
+  image name, and the image's entrypoint wraps it.
 - `tier3s/qdistro-tier3s-entrypoint` is the image-side half of the bridge
-  (B-i, ΔB3): it waits a bounded time for `/run/qdistro/link/link.sock` (the
-  bind-mounted bridge socket) and execs `waypipe -s /run/qdistro/link/
-  link.sock -o --no-gpu server -- "$@"`, so the workload's Wayland traffic
-  crosses the mount as waypipe's byte stream. No fallback: a missing socket
-  exits non-zero.
+  (B-i, ΔB3): it refuses a missing `/run/qdistro/link/link.sock` (the
+  bind-mounted bridge socket), exports `XDG_RUNTIME_DIR=/run/user/1000`,
+  `LIBGL_ALWAYS_SOFTWARE=1`, `QT_QUICK_BACKEND=software`,
+  `GDK_BACKEND=wayland` and `QT_QPA_PLATFORM=wayland` (software rendering;
+  no GPU reaches the sandbox) and execs `waypipe -s
+  /run/qdistro/link/link.sock -o --no-gpu server -- "$@"`, so the
+  workload's Wayland traffic crosses the mount as waypipe's byte stream.
+  No fallback: a missing socket exits non-zero.
 - `tier3s/make-tier3s-image.sh` is copied from `tier2/make-tier2-image.sh`
   (unify later). It tags `qdistro/tier3s-<workload>:latest`, refuses an
   image whose snapshot label differs from the pin, prints `IMAGE_ID=` and

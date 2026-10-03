@@ -111,11 +111,14 @@ ws=\$(cd "\$d/src/tier3s" && for f in Containerfile.*; do [ -f "\$f" ] && echo "
         a="\$d/tier3s-\$w.oci.tar"
         [ -s "\$a" ] || { echo "archive for workload \$w missing after the build"; exit 1; }
     done
-    # one IMAGE= block per workload in build.log, split on the image tag
+    # one IMAGE= block per workload in build.log, split on the image tag.
+    # IMAGE_SNAPSHOT is a shared (workload-invariant) key: emit it ONCE,
+    # outside the per-workload keys — guest-setup's `m IMAGE_SNAPSHOT`
+    # compares a single line against the snapshot.conf pin (sol B-i r1 P1-2).
     awk '
         /^IMAGE=qdistro\/tier3s-/ { if (w != "") emit(); w = substr(\$0, 22); sub(/:.*/, "", w); blk = \$0 ORS; next }
         /^IMAGE_[A-Z]/ { blk = blk \$0 ORS; next }
-        END { if (w != "") emit() }
+        END { if (w != "") emit(); if (snap != "") print "IMAGE_SNAPSHOT=" snap }
         function emit(   n, W, i, a, L) {
             W = toupper(w); gsub(/-/, "_", W)
             n = split(blk, L, "\n")
@@ -123,7 +126,7 @@ ws=\$(cd "\$d/src/tier3s" && for f in Containerfile.*; do [ -f "\$f" ] && echo "
                 if (L[i] ~ /^IMAGE=/)            print "IMAGE_" W "=" substr(L[i], 7)
                 else if (L[i] ~ /^IMAGE_ID=/)    print "IMAGE_ID_" W "=" substr(L[i], 10)
                 else if (L[i] ~ /^IMAGE_DIGEST=/) print "IMAGE_DIGEST_" W "=" substr(L[i], 14)
-                else if (L[i] ~ /^IMAGE_SNAPSHOT=/) print "IMAGE_SNAPSHOT=" substr(L[i], 16)
+                else if (L[i] ~ /^IMAGE_SNAPSHOT=/) { if (snap == "") snap = substr(L[i], 16) }
             }
         }' "\$d/build.log"
     for w in \$ws; do

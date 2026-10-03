@@ -1,8 +1,9 @@
 #!/bin/sh
 # qdistro-tier3s-entrypoint — the in-image start of every tier 3s GUI
-# workload (tier3s/CONTRACT.md §5 step 12, §7). spawn-tier3s.sh prepends it
-# to the workload argv when the workload's declaration says GUI=1; it never
-# runs for a headless launch (GUI=0 runs its argv directly).
+# workload (tier3s/CONTRACT.md §5 step 12, §7). It is the image's ENTRYPOINT
+# (installed in the image root as /usr/lib/qdistro/tier3s-entrypoint): podman
+# passes it the workload's argv and it execs the waypipe server around it.
+# It never runs for a headless launch (GUI=0 runs its argv directly).
 #
 #   qdistro-tier3s-entrypoint <workload> [args...]
 #
@@ -14,8 +15,11 @@
 # waypipe server publishes a Wayland display for the workload over that
 # socket; it sets WAYLAND_DISPLAY for the workload itself. -o makes the
 # server exit when the client side goes away, so killing the host client
-# ends the workload.
+# ends the workload. Software rendering only (ΔB3): no GPU reaches the
+# sandbox, so GL and Qt are pinned to their software paths.
 SOCK=/run/qdistro/link/link.sock
 [ "$#" -ge 1 ] || { echo "qdistro-tier3s-entrypoint: no workload argv" >&2; exit 2; }
 [ -S "$SOCK" ] || { echo "qdistro-tier3s-entrypoint: GUI workload but no bridge socket at $SOCK" >&2; exit 2; }
+export XDG_RUNTIME_DIR=/run/user/1000 LIBGL_ALWAYS_SOFTWARE=1 \
+    QT_QUICK_BACKEND=software GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland
 exec waypipe -s "$SOCK" -o --no-gpu server -- "$@"

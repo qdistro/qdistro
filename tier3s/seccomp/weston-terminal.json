@@ -257,9 +257,8 @@
 			"errnoRet": 1
 		},
 		{
-			"comment": "tier3s weston-terminal decisions, ALLOW: link: fontconfig takes its per-cache-dir lock with link/linkat inside the terminal images (Phase S); on EPERM it cannot write the font cache under /home/admin/.cache and the terminal's first render path breaks. Hard links between files the workload can already write inside the sandboxed VFS. | llistxattr: as headless-smoke: `ls -l` inside the terminal checks ACLs with llistxattr and misprints 'Operation not permitted' on EPERM; read-only metadata, Sentry-answered.",
+			"comment": "tier3s weston-terminal decisions, ALLOW: llistxattr: as headless-smoke: `ls -l` inside the terminal checks ACLs with llistxattr and misprints 'Operation not permitted' on EPERM; read-only metadata, Sentry-answered.",
 			"names": [
-				"link",
 				"llistxattr"
 			],
 			"action": "SCMP_ACT_ALLOW"
@@ -275,8 +274,8 @@
 			"reason": "decided by the pin, not by us: runsc 20260928.0's converter drops the name ('OCI seccomp: ignoring syscall \"fchmodat2\"'), so an ALLOW entry would be inert \u2014 see the headless-smoke decision for the full effect."
 		},
 		"link": {
-			"decision": "ALLOW",
-			"reason": "fontconfig takes its per-cache-dir lock with link/linkat inside the terminal images (Phase S); on EPERM it cannot write the font cache under /home/admin/.cache and the terminal's first render path breaks. Hard links between files the workload can already write inside the sandboxed VFS."
+			"decision": "DENY",
+			"reason": "Phase S saw link only from fontconfig's cache lock, denied (syscall 86) and NON-FATAL (spike/logs/phaseS-20261001/attempts/23a-s2-foot-attempt1-image-locale.log) \u2014 nothing proves the terminals need it, so it stays denied per CONTRACT; revisit only on VM evidence (B-iii) that a terminal misbehaves on EPERM."
 		},
 		"llistxattr": {
 			"decision": "ALLOW",

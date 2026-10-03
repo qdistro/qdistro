@@ -57,7 +57,8 @@ WORKLOADS = {
     },
     # The GUI terminal workloads (Phase B): the same derived profile, the same
     # seven decisions — a terminal inside the sandbox is also where the user
-    # runs coreutils, so llistxattr/link stay ALLOW here too.
+    # runs coreutils, so llistxattr stays ALLOW here too; link does not —
+    # the only observed caller (fontconfig's cache lock) tolerated EPERM.
     "weston-terminal": {
         "fchmodat2": ("DENY",
             "decided by the pin, not by us: runsc 20260928.0's converter drops the name "
@@ -73,11 +74,11 @@ WORKLOADS = {
         "fadvise64": ("DENY",
             "advisory only; every Phase S caller (fontconfig, font rasterizers, coreutils) "
             "ignores its failure. Expect 'Syscall 221: denied by seccomp' in the debug log."),
-        "link": ("ALLOW",
-            "fontconfig takes its per-cache-dir lock with link/linkat inside the terminal "
-            "images (Phase S); on EPERM it cannot write the font cache under "
-            "/home/admin/.cache and the terminal's first render path breaks. Hard links "
-            "between files the workload can already write inside the sandboxed VFS."),
+        "link": ("DENY",
+            "Phase S saw link only from fontconfig's cache lock, denied (syscall 86) and "
+            "NON-FATAL (spike/logs/phaseS-20261001/attempts/23a-s2-foot-attempt1-image-locale.log) "
+            "— nothing proves the terminals need it, so it stays denied per CONTRACT; revisit "
+            "only on VM evidence (B-iii) that a terminal misbehaves on EPERM."),
         "syslog": ("DENY",
             "the GUI workloads have no dmesg banner step; a user typing dmesg in the "
             "terminal gets EPERM, which is correct posture, not a silent fallback."),
@@ -88,7 +89,7 @@ WORKLOADS = {
         "setfsuid": ("DENY", "as weston-terminal (Phase S terminal startup only, non-fatal)."),
         "setfsgid": ("DENY", "as setfsuid."),
         "fadvise64": ("DENY", "as weston-terminal (advisory; callers ignore it)."),
-        "link": ("ALLOW", "as weston-terminal (fontconfig cache lock)."),
+        "link": ("DENY", "as weston-terminal (fontconfig's cache lock was non-fatal on EPERM)."),
         "syslog": ("DENY", "as weston-terminal (no dmesg banner step)."),
     },
 }

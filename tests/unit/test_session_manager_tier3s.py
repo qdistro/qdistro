@@ -1183,11 +1183,14 @@ def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
     dests = {c.split()[-1] for c in calls if c.startswith("install -o root")}
     seccomp = {f"/usr/lib/qdistro/tier3s/seccomp/{p.name}" for p in (REPO / "tier3s/seccomp").glob("*.json")}
     decls = {f"/usr/lib/qdistro/tier3s/workloads/{p.name}" for p in (REPO / "tier3s/workloads").glob("*.env")}
+    cfiles = {f"/usr/lib/qdistro/tier3s/{p.name}" for p in REPO.glob("tier3s/Containerfile.*")}
     want = {"/usr/lib/qdistro/tier3s/spawn-tier3s.sh", "/usr/lib/qdistro/tier3s/probe.sh",
             "/usr/lib/qdistro/tier3s/tier3s-runsc", "/usr/lib/qdistro/tier3s/RUNSC_RELEASE",
+            "/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint", "/usr/lib/qdistro/tier3s/make-tier3s-image.sh",
+            "/usr/lib/qdistro/tier3s/headless-smoke.sh", "/usr/lib/qdistro/tier3s/configure-snapshot-repos.sh",
             "/usr/libexec/qdistro/qdistro-tier3s-scope", "/usr/libexec/qdistro/qdistro-tier3s-cleanup",
             "/usr/lib/tmpfiles.d/qdistro-tier3s.conf", "/etc/systemd/system/qdistro-tier3s-silo@.service",
-            "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"} | seccomp | decls
+            "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"} | seccomp | decls | cfiles
     assert dests == want, dests ^ want
     assert "live_only systemd-tmpfiles --create qdistro-tier3s.conf" in calls
     assert "not installed" not in r.stdout

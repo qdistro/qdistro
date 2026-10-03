@@ -38,10 +38,12 @@ RUN grep -q '^admin:' /etc/group  || echo 'admin:x:1000:' >> /etc/group \
  && install -d -m 0755 /etc/qdistro \
  && printf 'SNAPSHOT=%s\nWORKLOAD=weston-terminal\n' "${SNAPSHOT}" > /etc/qdistro/tier3s-image
 
-COPY qdistro-tier3s-entrypoint /usr/local/bin/qdistro-tier3s-entrypoint
-RUN chmod 0755 /usr/local/bin/qdistro-tier3s-entrypoint
+COPY qdistro-tier3s-entrypoint /usr/lib/qdistro/tier3s-entrypoint
+RUN chmod 0755 /usr/lib/qdistro/tier3s-entrypoint
 
 ENV LANG=C.UTF-8 HOME=/home/admin
 USER 1000:1000
 WORKDIR /home/admin
-CMD ["/usr/local/bin/qdistro-tier3s-entrypoint", "weston-terminal"]
+# ΔB3: the image's entrypoint wraps the app argv in `waypipe ... server --`;
+# the spawn passes only the workload argv (weston-terminal [args...]).
+ENTRYPOINT ["/usr/lib/qdistro/tier3s-entrypoint"]

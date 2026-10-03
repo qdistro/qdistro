@@ -257,9 +257,8 @@
 			"errnoRet": 1
 		},
 		{
-			"comment": "tier3s foot decisions, ALLOW: link: as weston-terminal (fontconfig cache lock). | llistxattr: as weston-terminal (ls -l inside the terminal).",
+			"comment": "tier3s foot decisions, ALLOW: llistxattr: as weston-terminal (ls -l inside the terminal).",
 			"names": [
-				"link",
 				"llistxattr"
 			],
 			"action": "SCMP_ACT_ALLOW"
@@ -275,8 +274,8 @@
 			"reason": "as weston-terminal (the pinned converter drops the name)."
 		},
 		"link": {
-			"decision": "ALLOW",
-			"reason": "as weston-terminal (fontconfig cache lock)."
+			"decision": "DENY",
+			"reason": "as weston-terminal (fontconfig's cache lock was non-fatal on EPERM)."
 		},
 		"llistxattr": {
 			"decision": "ALLOW",
