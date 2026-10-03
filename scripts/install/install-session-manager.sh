@@ -187,7 +187,8 @@ if [ "$_qd_t3s" = 1 ]; then
         echo "ERROR: tier3s source not found at $_qd_t3s_src" >&2
         exit 2
     fi
-    install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp"
+    install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp" \
+        "$_qd_t3s_lib/workloads"
     # The root supervisor and the prerequisite screen. probe.sh compares the
     # provisioned wrapper and pin against the copies beside it, and refuses to run
     # as root unless this directory chain is root-owned.
@@ -199,6 +200,12 @@ if [ "$_qd_t3s" = 1 ]; then
     # spawn refuses a workload without one, no podman-default fallback).
     for _qd_f in "$_qd_t3s_src"/seccomp/*.json; do
         install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/seccomp/$(basename "$_qd_f")"
+    done
+    # Per-workload declarations (parsed, never sourced): GUI= selects the
+    # waypipe bridge half of the launch (CONTRACT §5 step 12). A workload
+    # without a declaration refuses to launch.
+    for _qd_f in "$_qd_t3s_src"/workloads/*.env; do
+        install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/workloads/$(basename "$_qd_f")"
     done
     # The root scope helper (first process of the owning scope) and the only
     # teardown path (spawn EXIT trap, unit ExecStop/ExecStopPost, reconciliation).
