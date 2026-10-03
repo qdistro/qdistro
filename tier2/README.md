@@ -52,10 +52,15 @@ broker clipboard/handoff gates like every other toplevel.
   so qdshell can correlate the eventual `toplevel_added`.
 - `make-tier2-image.sh` — produces `qdistro/tier2-<workload>:latest`
   podman images, one per workload. First workload:
-  `qdistro/tier2-weston-terminal:latest` (the bats minimum).
+  `qdistro/tier2-weston-terminal:latest` (the bats minimum). The qfileman
+  workload stages `qdfileman/` and `sdk/presentation/` into the build
+  context (or `tier2/consumer/{qdfileman,presentation}` on a copied tree).
 - `Containerfile.weston-terminal` — minimal openSUSE Tumbleweed base +
   weston (with backend-pipewire) + qdwin-shell.so +
   weston-terminal + the in-container entrypoint.
+- `Containerfile.qfileman` — same nested weston stack plus installed
+  `qfileman` and `qdistro-presentation` (PyQt6, no WebEngine). First-party
+  presentation consumer for persistent and disposable tier-2 homes.
 - `entrypoint.sh` — runs inside the container. Starts inner weston in
   the foreground with the qdwin-shell.so plugin, exec's the guest app
   once the inner socket appears.
@@ -70,6 +75,7 @@ Each workload ships its own image:
 | Image                            | Workload      |
 |----------------------------------|---------------|
 | `qdistro/tier2-weston-terminal`  | weston-terminal (bats minimum) |
+| `qdistro/tier2-qfileman`         | qfileman (first-party presentation consumer) |
 | `qdistro/tier2-text-viewer`      | text-viewer (open class `text/plain`, network none) |
 | `qdistro/tier2-url-preview`      | url-preview (open class `url-preview-known-origin`, network egress) |
 | `qdistro/tier2-firefox`          | firefox       |
