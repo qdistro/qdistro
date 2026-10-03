@@ -1296,8 +1296,10 @@ PODMAN_HARDENING=(
 # --userns=keep-id, so the uids already line up; `:U` on persistent state
 # would rewrite ownership of a real home and is forbidden.
 if [ -d /var/lib/qdistro/presentation ]; then
-    # Mount the directory (not current.json) so atomic replacement is visible.
-    # No :Z — this is a shared public tree, not a per-container label.
+    # Directory bind, not current.json, so atomic replacement is visible.
+    # Outside both home-mode branches so persistent and disposable launches
+    # share it. No :Z — shared public tree, not a per-container label.
+    # keep-id + --user $TIER2_ADMIN_UID_RESOLVED: same numeric owner inside.
     PODMAN_HARDENING+=(
         -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec
     )

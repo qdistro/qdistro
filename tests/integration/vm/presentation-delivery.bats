@@ -76,6 +76,232 @@ print("ok")
 PY
 }
 
+@test "tier-2 presentation bind is shared by both homes and keep-id owner" {
+    python3 - "$SPAWN" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+WANTED = (
+    "-v /var/lib/qdistro/presentation:"
+    "/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec"
+)
+HOME_MARKERS = (
+    "TIER2_STATE_PATH_RESOLVED",
+    "TIER2_DISPOSABLE_RESOLVED",
+)
+
+
+def extract_wrapper_body(src: str) -> str:
+    marker = "WRAPPER_BODY='"
+    start = src.find(marker)
+    if start < 0:
+        raise SystemExit("WRAPPER_BODY assignment missing")
+    i = start + len(marker)
+    out = []
+    while i < len(src):
+        if src.startswith("'\"'\"'", i):
+            out.append("'")
+            i += 5
+            continue
+        if src[i] == "'":
+            return "".join(out)
+        out.append(src[i])
+        i += 1
+    raise SystemExit("unterminated WRAPPER_BODY")
+
+
+def code_of(raw: str) -> str:
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        return ""
+    return stripped.split("#", 1)[0].rstrip()
+
+
+def parse_condition(keyword: str, code: str) -> str:
+    rest = code[len(keyword) :].strip()
+    if rest.endswith("; then"):
+        rest = rest[: -len("; then")].strip()
+    elif rest.endswith("then"):
+        rest = rest[: -len("then")].strip()
+    return rest
+
+
+def check_wrapper(wrapper: str) -> None:
+    if_stack: list[str] = []
+    hits = []
+    persistent_if_line = None
+    disposable_elif_line = None
+    args_lines: list[str] = []
+    in_args = False
+    args_depth = 0
+
+    for lineno, raw in enumerate(wrapper.splitlines(), 1):
+        code = code_of(raw)
+        if not code:
+            continue
+        if in_args:
+            args_lines.append(code)
+            args_depth += code.count("(") - code.count(")")
+            if args_depth <= 0:
+                in_args = False
+            continue
+        if code.startswith("PODMAN_ARGS=("):
+            in_args = True
+            args_depth = code.count("(") - code.count(")")
+            args_lines.append(code)
+            if args_depth <= 0:
+                in_args = False
+            continue
+        if re.match(r"^if\b", code):
+            if_stack.append(parse_condition("if", code))
+            if "TIER2_STATE_PATH_RESOLVED" in if_stack[-1]:
+                persistent_if_line = lineno
+            continue
+        if re.match(r"^elif\b", code):
+            if not if_stack:
+                raise SystemExit(f"elif without if at wrapper:{lineno}")
+            if_stack[-1] = parse_condition("elif", code)
+            if "TIER2_DISPOSABLE_RESOLVED" in if_stack[-1]:
+                disposable_elif_line = lineno
+            continue
+        if code == "else" or code.startswith("else;"):
+            if not if_stack:
+                raise SystemExit(f"else without if at wrapper:{lineno}")
+            if_stack[-1] = "else:" + if_stack[-1]
+            continue
+        if code == "fi" or code.startswith("fi;"):
+            if not if_stack:
+                raise SystemExit(f"fi without if at wrapper:{lineno}")
+            if_stack.pop()
+            continue
+        if "qdistro/presentation" in code:
+            hits.append((lineno, list(if_stack), code))
+
+    if any("current.json" in h[2] for h in hits):
+        raise SystemExit(f"presentation bind mounts the file, not the directory: {hits!r}")
+    volume = [h for h in hits if WANTED in h[2]]
+    if len(volume) != 1:
+        raise SystemExit(f"expected one presentation volume line, got {hits!r}")
+    lineno, stack, code = volume[0]
+    if any(":Z" in h[2] or ":z" in h[2] for h in hits):
+        raise SystemExit(f"presentation bind uses SELinux relabel: {hits!r}")
+    home_on_stack = [c for c in stack if any(m in c for m in HOME_MARKERS)]
+    if home_on_stack:
+        raise SystemExit(
+            f"presentation bind is inside a home-mode branch {home_on_stack!r} at wrapper:{lineno}"
+        )
+    if persistent_if_line is None or disposable_elif_line is None:
+        raise SystemExit(
+            "wrapper is missing persistent or disposable home-mode branches"
+        )
+    if not (lineno < persistent_if_line and lineno < disposable_elif_line):
+        raise SystemExit(
+            f"presentation bind at wrapper:{lineno} is not before both home-mode "
+            f"branches (persistent={persistent_if_line}, disposable={disposable_elif_line})"
+        )
+    args_text = "\n".join(args_lines)
+    if "--userns=keep-id" not in args_text:
+        raise SystemExit("PODMAN_ARGS is missing --userns=keep-id")
+    if '"${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"' not in args_text:
+        raise SystemExit("PODMAN_ARGS is missing --user TIER2_ADMIN_UID_RESOLVED")
+    if '"${PODMAN_HARDENING[@]}"' not in args_text:
+        raise SystemExit("PODMAN_ARGS does not splice PODMAN_HARDENING")
+
+
+def expect_fail(wrapper: str, needle: str) -> None:
+    try:
+        check_wrapper(wrapper)
+    except SystemExit as exc:
+        msg = str(exc)
+        if needle not in msg:
+            raise SystemExit(f"expected {needle!r} in {msg!r}") from None
+        return
+    raise SystemExit(f"checker accepted a broken wrapper; wanted {needle!r}")
+
+
+GOOD = r"""
+if [ -d /var/lib/qdistro/presentation ]; then
+    PODMAN_HARDENING+=(
+        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec
+    )
+fi
+if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
+    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
+elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
+    PODMAN_HARDENING+=( --mount type=tmpfs,destination=/home/admin,tmpfs-size=256m,tmpfs-mode=0700,U )
+fi
+PODMAN_ARGS=(
+    run
+    --userns=keep-id
+    --user "${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"
+    "${PODMAN_HARDENING[@]}"
+)
+"""
+check_wrapper(GOOD)
+
+inside_persistent = GOOD.replace(
+    'if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then\n'
+    '    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )',
+    'if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then\n'
+    '    PODMAN_HARDENING+=(\n'
+    '        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec\n'
+    '    )\n'
+    '    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )',
+).replace(
+    'if [ -d /var/lib/qdistro/presentation ]; then\n'
+    '    PODMAN_HARDENING+=(\n'
+    '        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec\n'
+    '    )\n'
+    'fi\n',
+    '',
+)
+expect_fail(inside_persistent, "inside a home-mode branch")
+
+inside_disposable = GOOD.replace(
+    'elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then\n'
+    '    PODMAN_HARDENING+=( --mount type=tmpfs,destination=/home/admin,tmpfs-size=256m,tmpfs-mode=0700,U )',
+    'elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then\n'
+    '    PODMAN_HARDENING+=(\n'
+    '        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec\n'
+    '    )\n'
+    '    PODMAN_HARDENING+=( --mount type=tmpfs,destination=/home/admin,tmpfs-size=256m,tmpfs-mode=0700,U )',
+).replace(
+    'if [ -d /var/lib/qdistro/presentation ]; then\n'
+    '    PODMAN_HARDENING+=(\n'
+    '        -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec\n'
+    '    )\n'
+    'fi\n',
+    '',
+)
+expect_fail(inside_disposable, "inside a home-mode branch")
+
+expect_fail(GOOD.replace("--userns=keep-id\n", ""), "missing --userns=keep-id")
+expect_fail(
+    GOOD.replace(
+        '"${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"',
+        '"0:0"',
+    ),
+    "missing --user TIER2_ADMIN_UID_RESOLVED",
+)
+expect_fail(
+    GOOD.replace('"${PODMAN_HARDENING[@]}"', ""),
+    "does not splice PODMAN_HARDENING",
+)
+expect_fail(
+    GOOD.replace(
+        "/var/lib/qdistro/presentation:/var/lib/qdistro/presentation:",
+        "/var/lib/qdistro/presentation/current.json:/var/lib/qdistro/presentation/current.json:",
+    ),
+    "file, not the directory",
+)
+
+src = Path(sys.argv[1]).read_text(encoding="utf-8")
+check_wrapper(extract_wrapper_body(src))
+print("ok")
+PY
+}
+
 @test "isolated SELinux domains may watch the snapshot and must not write it" {
     python3 - "$POLICY" <<'PY'
 from collections import defaultdict
