@@ -829,14 +829,26 @@ Rules:
   accidentally writes a relative temporary output stays there instead of
   polluting the source checkout. Required evidence must still be saved under the
   artifact directory above.
-- Execute setup, steps, assertions, and cleanup serially, in ONE guest shell
-  invocation. Scenario setup helpers commonly arm an \`EXIT\` trap that restores
-  the compositor's shell role; if you run Setup in one \`vm-exec\`/\`guest-exec\`
-  and the Steps in another, that trap fires the instant Setup's shell exits and
-  silently tears down the state your Steps depend on. What then looks like a
-  missing precondition is your own teardown.
-  vm-exec does NOT stream: the guest command's output reaches the host only
-  when that command EXITS. So a host-side step that must happen MID-scenario
+- Execute setup, steps, assertions, and cleanup serially in the execution
+  context that owns the scenario's helpers. For guest-driver scenarios, keep
+  the work in ONE guest shell invocation: setup helpers may arm an \`EXIT\`
+  trap that restores the compositor's shell role, and splitting Setup from
+  Steps fires that trap as soon as Setup's \`vm-exec\` exits. For
+  \`qdwin/tests/apps/*.md\`, the \`qdwin_apps_*\` functions are HOST-side
+  helpers: source \`$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh\` in
+  your host driver and call them there. They invoke \`vm-exec\` internally;
+  never source this helper or call its functions inside the guest. Run each
+  such scenario's Setup/Steps/Assertions/Cleanup from one host shell so its
+  sourced functions and variables remain available. In both lanes, keep host
+  commands (\`vm-exec\`, \`vm-gui\`, \`virsh\`, screenshots) on the host and
+  guest commands inside \`vm-exec\`. The qdwin apps scenarios do not use a
+  guest driver claim or \`qci_host_step\`; their helper calls are synchronous
+  host commands. A scenario that explicitly describes a guest-driver barrier
+  (such as permissions-gui/12) follows that scenario's barrier instructions.
+  The following streaming and host-step rules apply to guest-driver scenarios.
+  For these scenarios, vm-exec does NOT
+  stream: the guest command's output reaches the host only when that command
+  EXITS. So a host-side step that must happen MID-scenario
   (a screenshot, click, send-key) cannot be synchronised by polling the
   running vm-exec's output for a phase marker -- the marker arrives after the
   guest driver, teardown included, has finished, and every "mid-scenario"
@@ -881,7 +893,11 @@ Rules:
   Every \`virsh send-key\` a scenario lists runs on the host, between the
   guest's \`waiting\` token and your \`<token>.go\`, and you check its exit
   status.
-  Never let the driver reach its teardown before the last
+  Never let the driver reach teardown before every required assertion and
+  evidence query has completed. This includes D-Bus replies, sqlite rows,
+  journal checks, and any bounded polling after the final screenshot. Signal
+  the matching host-step \`.go\` only after those checks are recorded. Never
+  let the driver reach teardown before the last
   frame the scenario asks for has been captured -- and that includes the
   TIMEOUT path: if a wait for a host marker times out, the driver must write a
   failure marker and STOP, leaving the app and requests in place, not fall
@@ -1066,10 +1082,10 @@ Rules:
   retryable. A slow guest's cleanup usually resolves on the very next call, so
   retry the SAME command once before diagnosing, and quote the refusal line in
   your report if it repeats.
-- CLAIM THE GUEST DRIVER. Your guest driver is the ONE guest shell that runs
+- For guest-driver scenarios, CLAIM THE GUEST DRIVER. It is the ONE guest
+  shell that runs
   this scenario's Setup, Steps, Assertions, and Cleanup (see the one-shell rule
-  above); a scenario written as many separate host \`vm-exec\` calls is adapted
-  into that one driver. It runs as ROOT (vm-exec's default user; reach other
+  above). It runs as ROOT (vm-exec's default user; reach other
   users with \`runuser\`/\`bg_start\` from inside it), and its FIRST commands,
   directly in that shell, are exactly:
       source /tmp/qci-gui-waiters.sh || exit 2

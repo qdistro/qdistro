@@ -43,15 +43,19 @@ core test client baked into every golden, so a missing `foot` is an ERROR
 ## Setup
 
 ```bash
-source ${QDWIN_REPO}/tests/apps/qdwin-apps-helpers.sh
+source "$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh"
 qdwin_apps_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
 ACTIVE_SOCKET=$(qdwin_apps_active_socket)
 [ -n "$ACTIVE_SOCKET" ] || { echo "FAIL: qdwin session not up"; exit 1; }
 
-# VM: confirm xfreerdp exists. The RDP listener is guest-local under QEMU user
-# networking, so the real client must run in this same disposable VM.
-"$QDWIN_VM_EXEC" "$VMNAME" 'command -v xfreerdp >/dev/null 2>&1 || command -v xfreerdp3 >/dev/null 2>&1' \
-    || { echo "FAIL: install freerdp3 in the VM"; exit 1; }
+# VM: resolve the installed client once. The RDP listener is guest-local under
+# QEMU user networking, so the real client must run in this same disposable VM.
+RDP_CLIENT=$("$QDWIN_VM_EXEC" "$VMNAME" \
+    'command -v xfreerdp || command -v xfreerdp3') || {
+    echo "FAIL: install freerdp3 in the VM"; exit 1;
+}
+[ -n "$RDP_CLIENT" ] || { echo "FAIL: xfreerdp binary not found in VM"; exit 1; }
+echo "RDP client: $RDP_CLIENT"
 
 # VM: confirm qdistro-forward.
 "$QDWIN_VM_EXEC" "$VMNAME" 'test -x /usr/bin/qdistro-forward' \
@@ -233,13 +237,17 @@ RDP_AUTH_CURSOR=$(qdwin_apps_journal_cursor) || {
 RDP_CLIENT_B64=$(base64 -w0 <<EOF
 set -o pipefail
 runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=$ACTIVE_SOCKET DISPLAY=:0 \\
-  timeout 8 xfreerdp /v:127.0.0.1:$RDP_PORT /cert:ignore \\
-  /u:test /p:$RDP_PASSWORD /size:640x480 +decorations -encryption \\
+  timeout 8 "$RDP_CLIENT" /v:127.0.0.1:$RDP_PORT /cert:ignore /sec:tls \\
+  /u:test /p:$RDP_PASSWORD /size:640x480 +decorations \\
   > /tmp/15-xfreerdp.log 2>&1
 rc=\$?
 # A full client remains connected until the deliberate timeout. Any earlier
 # exit is a handshake/auth/framebuffer failure and must stay red.
-[ "\$rc" -eq 124 ] || { cat /tmp/15-xfreerdp.log; exit "\$rc"; }
+[ "\$rc" -eq 124 ] || {
+  cat /tmp/15-xfreerdp.log
+  echo "FAIL: xfreerdp exited with rc=\$rc before the deliberate timeout (expected 124)" >&2
+  exit 1
+}
 EOF
 )
 "$QDWIN_VM_EXEC" "$VMNAME" "echo $RDP_CLIENT_B64 | base64 -d | bash" || {

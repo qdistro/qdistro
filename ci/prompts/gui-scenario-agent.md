@@ -243,12 +243,20 @@ Procedure:
    qterminal-tui.log), which is per-user and not a shared /tmp path - read it
    for diagnostics, never delete it as root.
 
-13. Run Setup, Steps, Assertions, and Cleanup as ONE guest shell invocation.
-   Scenario setup helpers commonly arm an `EXIT` trap that restores the
-   compositor's shell role; splitting Setup and Steps across separate
-   `vm-exec`/`guest-exec` calls fires that trap the moment Setup's shell exits
-   and silently tears down the state your Steps depend on. The resulting
-   "precondition missing" is your own teardown, not the environment.
+13. Run Setup, Steps, Assertions, and Cleanup serially in the execution
+   context that owns the scenario's helpers. Guest-driver scenarios with
+   guest-side setup traps must keep the work in ONE guest shell invocation;
+   splitting Setup and Steps can fire an `EXIT` trap and tear down state.
+   The `qdwin/tests/apps/*.md` scenarios are the host-side exception: source
+   `$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh` in the host shell and
+   call `qdwin_apps_*` there. Those helpers call `vm-exec` internally. Never
+   source that helper or call its functions inside the guest.
+
+   Keep the driver paused before teardown until every required assertion and
+   evidence query has completed, including D-Bus replies, sqlite rows, and
+   journal checks. Releasing a host-step `.go` marker permits the driver to
+   continue; send it only after those assertions are recorded, not just after
+   the final screenshot.
 
 Report format:
 

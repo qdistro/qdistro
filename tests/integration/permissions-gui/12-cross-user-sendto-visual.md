@@ -19,6 +19,18 @@ audit trail.
 
 Sender-side GUI (qstub-sender as `work`) is deferred.
 
+## Driver synchronization contract
+
+Run all guest-side Setup, waiters, and Teardown commands in the single claimed
+root guest driver required by the qci scenario prompt. Its first commands are
+`source /tmp/qci-gui-waiters.sh` and
+`qci_claim_driver /tmp/qci/qdistro_tests_integration_permissions-gui_12-cross-user-sendto-visual.md/driver.lock`.
+Keep that same driver alive through the S1–S4 host gates. After the S3 host
+capture/click gate is released, the guest driver must stop at
+`qci_host_step s4-delivery`; only the host runner performs the S4 D-Bus/sqlite
+queries while it is paused. Teardown runs in that driver only after the host
+releases the exact S4 token, and `qci_claim_done` is the driver's final command.
+
 ## Setup
 
 ```bash
@@ -128,14 +140,57 @@ qdwin_screenshot "$ART/12-s3-approved.png"
 
 ### S4 — delivery + audit + no-cache
 
+**Critical ordering:** after S3's screenshot and visual check, keep the guest
+driver paused at this guest-side barrier:
+
 ```bash
-$VMEXEC "$VM" 'runuser -u work2 -- env \
+# In the root guest driver, after the host has captured and checked S3:
+qci_host_step s4-delivery
+```
+
+Poll `/tmp/qci/qdistro_tests_integration_permissions-gui_12-cross-user-sendto-visual.md/waiting`
+through `vm-exec` until it contains the fresh `s4-delivery.*` token. Do not
+create that token's `.go` directory yet. While the guest is paused, run every
+S4 D-Bus and sqlite query below, record the outputs, and evaluate all four
+assertions. Only then run `vm-exec "$VM" "mkdir
+/tmp/qci/qdistro_tests_integration_permissions-gui_12-cross-user-sendto-visual.md/<exact-token>.go"`
+with the exact token read from `waiting`. Teardown restarts the notepad and
+destroys its in-memory document, so neither the guest driver nor a teardown
+trap may run before S4 is complete.
+
+The delivery call is asynchronous inside the notepad (Qt queues the append on
+its event loop). Poll `GetDocument` for at most 10 seconds, saving each result
+under `$ART`, until the exact payload appears. Each D-Bus call has a 1-second
+reply timeout. Capture the notepad service PID before and after that poll; it
+must remain the same nonzero PID throughout. This distinguishes a delayed
+append from a receiver restart. Do not treat the audit row as delivery proof:
+the broker writes it before forwarding.
+
+```bash
+NOTEPAD_PID_BEFORE=$($VMEXEC "$VM" \
+ 'systemctl --machine=work2@.host --user show qstub-notepad.service -p MainPID --value')
+GETDOC=
+deadline=$((SECONDS + 10))
+attempt=0
+while [ "$SECONDS" -lt "$deadline" ]; do
+  attempt=$((attempt + 1))
+  GETDOC=$($VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
+ --reply-timeout=1000 \
  --dest=org.qdistro.StubNotepad.uid3000 \
  /org/qdistro/App1 \
- org.qdistro.App1.GetDocument'
+ org.qdistro.App1.GetDocument') || {
+    echo "FAIL: GetDocument query failed"; exit 1;
+  }
+  printf '%s\n' "$GETDOC" > "$ART/12-s4-getdocument-attempt-${attempt}.log"
+  printf '%s\n' "$GETDOC" | grep -Fq '[text/plain] hello_visual' && break
+  sleep 0.25
+done
+printf '%s\n' "$GETDOC" > "$ART/12-s4-getdocument.log"
+NOTEPAD_PID_AFTER=$($VMEXEC "$VM" \
+ 'systemctl --machine=work2@.host --user show qstub-notepad.service -p MainPID --value')
 
 SQL_AUDIT_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT caller_uid, action, decision, scope, source, approver_uid
@@ -146,15 +201,20 @@ SQL_COUNT_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_AUDIT_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
-$VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+AUDIT_ROW=$($VMEXEC "$VM" "echo $SQL_AUDIT_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite")
+APPROVAL_COUNT=$($VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite")
+printf '%s\n' "$AUDIT_ROW" > "$ART/12-s4-audit-row.txt"
+printf '%s\n' "$APPROVAL_COUNT" > "$ART/12-s4-approval-count.txt"
+printf '%s\n' "$NOTEPAD_PID_BEFORE" "$NOTEPAD_PID_AFTER" > "$ART/12-s4-notepad-pid.txt"
+$VMEXEC "$VM" 'cat /tmp/12-relay.out 2>/dev/null || true' > "$ART/12-s4-sender.log"
 ```
 
 **Assert**:
-- GetDocument output contains the substring `[text/plain] hello_visual`.
-- Audit row equals
+- `12-s4-getdocument.log` contains `[text/plain] hello_visual` within 10 seconds.
+- `12-s4-notepad-pid.txt` contains the same nonzero PID on both lines.
+- `12-s4-audit-row.txt` equals
  `2000|app.send-to:3000:org.qdistro.StubNotepad.uid3000|1|once|prompt|1000`.
-- Approvals-row count is `0` — one_shot actions never cache.
+- `12-s4-approval-count.txt` is `0` — one_shot actions never cache.
 
 ## Teardown
 

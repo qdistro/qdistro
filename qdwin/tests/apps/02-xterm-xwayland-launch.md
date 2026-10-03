@@ -9,8 +9,12 @@ dereferenced inside `qdwin_client_uid`).
 
 ## Setup
 
+Run this block and every later block in the **host driver shell**. The helper
+functions perform their own guest calls; do not source the helper in the VM or
+replace `qdwin_apps_session_up` with a guest FIFO check.
+
 ```bash
-source ${QDWIN_REPO}/tests/apps/qdwin-apps-helpers.sh
+source "$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh"
 qdwin_apps_set_vm "${VMNAME}"
 qdwin_apps_session_up || { echo "FAIL: bystander/weston not healthy"; exit 1; }
 
@@ -44,7 +48,7 @@ WESTON_PID_AFTER_SETUP=$("$QDWIN_VM_EXEC" "$VMNAME" \
 ```bash
 qdwin_apps_launch xterm "xterm -fa Monospace -fs 12"
 sleep 6
-qdwin_apps_screenshot /tmp/02-step1-xterm.png
+qdwin_apps_screenshot "$QCI_GUI_ARTIFACT_DIR/02-step1-xterm.png"
 ```
 
 **Assert (1.1):** screenshot shows xterm rendered with XWayland CSD
@@ -61,10 +65,12 @@ identity as untrusted, never as admin-local. Assert with:
 
 ```bash
 qdwin_apps_log_grep 'toplevel_added .*owner_uid=4294967295 .*title="xterm" xwayland=1' \
-  || echo "FAIL: XWayland toplevel not attributed to uid=unknown (-1)"
+  || { echo "FAIL: XWayland toplevel not attributed to uid=unknown (-1)"; exit 1; }
 ADMIN_UID=$("$QDWIN_VM_EXEC" "$VMNAME" 'id -u admin')
-qdwin_apps_log_grep "toplevel_added .*owner_uid=${ADMIN_UID} .*title=\"xterm\"" \
-  && echo "FAIL: XWayland toplevel attributed to ADMIN uid (FINDING #6 regressed)" || true
+if qdwin_apps_log_grep "toplevel_added .*owner_uid=${ADMIN_UID} .*title=\"xterm\""; then
+    echo "FAIL: XWayland toplevel attributed to ADMIN uid (FINDING #6 regressed)" >&2
+    exit 1
+fi
 ```
 **Assert (1.3):** weston pid did NOT change between Setup and now —
 proving qdwin didn't crash. Use:
@@ -82,7 +88,7 @@ WESTON_PID_AFTER=$("$QDWIN_VM_EXEC" "$VMNAME" 'pgrep -u admin -x weston | head -
 ```bash
 qdwin_apps_send_key KEY_E KEY_C KEY_H KEY_O KEY_SPACE KEY_Q KEY_D KEY_W KEY_I KEY_N KEY_ENTER
 sleep 1
-qdwin_apps_screenshot /tmp/02-step2-typed.png
+qdwin_apps_screenshot "$QCI_GUI_ARTIFACT_DIR/02-step2-typed.png"
 ```
 
 **Assert (2.1):** screenshot shows the typed command on one line and
