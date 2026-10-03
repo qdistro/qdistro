@@ -252,9 +252,9 @@ if [ "${desktop%% *}" -le 8 ]; then
     # rejected layer-shell bind, or plain TCG slowness all look identical in
     # the screendump. Dump the session journals so the run log can tell them
     # apart before failing.
-    vmssh 'echo "--- qdshell journal"; sudo -n journalctl -M admin@ --user-unit qdshell.service --no-pager -n 30 2>&1; \
+    vmssh 'echo "--- qdshell journal"; sudo -n journalctl -b --no-pager _UID=1000 _SYSTEMD_USER_UNIT=qdshell.service -n 30 2>&1; \
            echo "--- compositor journal"; sudo -n journalctl -b --no-pager _COMM=weston 2>/dev/null | tail -30; \
-           echo "--- qdlocker journal"; sudo -n journalctl -M admin@ --user-unit qdlocker.service --no-pager -n 15 2>&1' || true
+           echo "--- qdlocker journal"; sudo -n journalctl -b --no-pager _UID=1000 _SYSTEMD_USER_UNIT=qdlocker.service -n 15 2>&1' || true
     fail "desktop screenshot is blank"
 fi
 [ "$(echo "$desktop" | cut -d' ' -f2)" != "$(echo "$greeter" | cut -d' ' -f2)" ] || fail "screen did not change after login"
