@@ -518,7 +518,34 @@ else
     fi
 fi
 
-# 4c. Polkit rule: let `admin` lock its own logind session without
+# 4c. Resolvable "default" cursor theme. qdwin's cursor-shape preload
+# (qdwin_cursor_theme_load) calls XcursorLibraryLoadImages with a NULL
+# theme — libXcursor then resolves the theme literally named "default"
+# through /usr/share/icons/default/index.theme, and neither
+# adwaita-icon-theme nor xcursor-themes ships that file on Tumbleweed.
+# Without it the compositor logs "cursor-shape theme=(default)
+# loaded=0/36", every wp_cursor_shape set is a theme miss, and ordinary
+# Wayland clients that set their own wl_pointer cursors (Qt/GTK via
+# libwayland-cursor) come up empty too — the pointer is invisible even
+# with the sprite helper running. The kiwi overlay ships the same file
+# from image/root/; installing it here too gives the live lanes
+# (fresh-vm-bootstrap, the GH test VM, bare-metal bootstrap) the same
+# resolution. Same WARN/exit-4 contract as the unit above: a live lane
+# can survive a missing file, an offline image build cannot.
+if [ -f "$QDISTRO_SRC/image/root/usr/share/icons/default/index.theme" ]; then
+    install -d -m 0755 /usr/share/icons/default
+    install -m 0644 \
+        "$QDISTRO_SRC/image/root/usr/share/icons/default/index.theme" \
+        /usr/share/icons/default/index.theme
+else
+    echo "WARN: $QDISTRO_SRC/image/root/usr/share/icons/default/index.theme not found — default cursor theme will not resolve" >&2
+    if is_offline; then
+        echo "ERROR: offline image build must ship the default cursor theme" >&2
+        exit 4
+    fi
+fi
+
+# 4d. Polkit rule: let `admin` lock its own logind session without
 # prompting for an admin password.
 #
 # org.freedesktop.login1.Session.Lock is gated by

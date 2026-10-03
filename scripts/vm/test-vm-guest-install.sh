@@ -66,7 +66,13 @@ pkgs+=(python313-pip dejavu-fonts google-noto-coloremoji-fonts seatd
        # The admin TUI's modules: install-admin-cli-for-vm.sh fails the
        # strict chain without them, and QDISTRO_PKGS cannot carry them (its
        # list feeds the baked base's recipe digest — a9abd7e15).
-       python313-textual python313-rich)
+       python313-textual python313-rich
+       # A real terminal on the host desktop: this VM ships no tier-5
+       # guest base, so the launcher's VM-app rows cannot start anything;
+       # weston-terminal comes with the weston package and foot gives the
+       # tester a usable fallback (the same role the dynamic-menu plan
+       # assigns it on the tester image).
+       foot)
 tvm_log "installing ${#pkgs[@]} runtime packages from snapshot $snap..."
 zypper -n refresh
 # One retry: download.opensuse.org's history mirrors occasionally fail a
