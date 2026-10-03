@@ -136,7 +136,7 @@ for variant in recorded unrecorded; do
         "$(mgr_journal "$cur" | grep -c "tier3s reconciliation: stopping $(unit_of $SA)")" 1
     assert_launch_gone "reconcile/$variant" "$TA" "$(ctr_of $SA)"
     is "reconcile/$variant: silo not relaunched (it was Stopped)" "$(silo_state $SA)" Stopped
-    rm -f "/run/qdistro/silo-launch/$SA.env"
+    rm -f "$STANZA_DIR/$SA.env"
     systemctl reset-failed "$(unit_of $SA)" 2>/dev/null
 done
 

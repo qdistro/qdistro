@@ -2,8 +2,10 @@
 Description=qdistro tier-3s (gVisor) silo %i (Experimental, dev profile only)
 # Referenced by qdistro_session_manager.TIER3S_SILO_LAUNCHER_FMT
 # (qdistro-tier3s-silo@<name>.service); tier3s/CONTRACT.md §1 and §6. The
-# session manager (root) writes /run/qdistro/silo-launch/<name>.env (root 0600,
-# with a fresh launch token per start), then `systemctl start`s this unit.
+# session manager (root) writes /run/qdistro/tier3s-launch/<name>.env (root
+# 0600 in a dedicated root-0700 dir — never the shared tier-2 silo-launch
+# dir, paravirt ΔB5 — with a fresh launch token per start), then
+# `systemctl start`s this unit.
 #
 # A manager STOP stops this unit (paravirt O11: no sandbox outlives its
 # supervisor): StopPropagatedFrom= propagates the stop job, and After= orders

@@ -113,7 +113,7 @@ def store(ops, tmp_path) -> _SiloStore:
 
 def env_of(ops, name="smoke") -> dict[str, str]:
     out = {}
-    for ln in ops.launch_envs[name].splitlines():
+    for ln in ops.tier3s_launch_envs[name].splitlines():
         if ln:
             k, v = ln.split("=", 1)
             out[k] = shlex.split(v)[0]
@@ -283,6 +283,9 @@ def test_start_exports_the_stanza_and_starts_only_the_tier3s_unit(store, ops):
     env = env_of(ops)
     assert set(env) == {"TIER3S_SILO", "TIER3S_BINDING", "TIER3S_WORKLOAD",
                         "TIER3S_NETWORK", "TIER3S_LAUNCH_TOKEN", "TIER3S_ARGV_JSON"}
+    # paravirt ΔB5: the stanza went to the dedicated tier3s writer, never
+    # the shared tier-2 launch-env store.
+    assert ops.launch_envs == {}, "a tier3s stanza must never land in the tier-2 dir"
     assert env["TIER3S_SILO"] == "smoke" and env["TIER3S_BINDING"] == "smoke"
     # through the tier3s start (the Type=notify bound), never the generic one
     assert ops.t3s_bound_starts == [UNIT]
@@ -316,7 +319,7 @@ def test_start_on_a_non_dev_profile_is_refused_before_any_state_change(store, op
     with pytest.raises(BadArgument, match="tier 3s is dev-profile only"):
         store.start("smoke")
     assert store.get("smoke").state == State.CREATED
-    assert ops.systemctl_calls == [] and ops.launch_envs == {}
+    assert ops.systemctl_calls == [] and ops.tier3s_launch_envs == {}
 
 
 def test_failed_start_rolls_back_and_falls_back_to_nothing(store, ops):
@@ -395,11 +398,16 @@ def test_unresolved_start_stays_active(store, ops):
 def test_stop_stops_the_unit_verifies_and_clears_the_stanza(store, ops):
     make(store)
     store.start("smoke")
+    assert "smoke" in ops.tier3s_launch_envs, "the stanza was written on start"
     store.stop("smoke")
     assert store.get("smoke").state == State.STOPPED
     assert ("stop", UNIT) in ops.systemctl_calls
     assert ("running?", "smoke") in ops.events
-    assert ops.t3s_cleanups == [] and "smoke" not in ops.launch_envs
+    # paravirt ΔB5: the verified stop removes the stanza from the dedicated
+    # tier3s dir via remove_tier3s_launch_env — a call to the tier-2 remover
+    # would leave it stranded here.
+    assert ops.t3s_cleanups == [] and "smoke" not in ops.tier3s_launch_envs
+    assert ops.launch_envs == {}, "no tier-2 stanza was ever touched"
     assert ops.cgroup_frozen == {}, "no per-silo cgroup is touched"
 
 
@@ -420,7 +428,7 @@ def test_stop_fails_closed_when_the_launch_survives(store, ops):
     with pytest.raises(SessionError, match="did not take effect"):
         store.stop("smoke")
     assert store.get("smoke").state == State.ACTIVE
-    assert "smoke" in ops.launch_envs
+    assert "smoke" in ops.tier3s_launch_envs
     with pytest.raises(sm.SiloBusy):
         store.delete("smoke")
 
@@ -782,24 +790,24 @@ def _helper_env(tmp_path, *, admin_uid="1000"):
     spawn.chmod(0o755)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("TIER3S_", "QDISTRO_"))}
     env.update(PATH=f"{bin_}:{os.environ['PATH']}",
-               QDISTRO_SILO_LAUNCH_ENV_DIR=str(tmp_path / "silo-launch"),
+               QDISTRO_TIER3S_LAUNCH_ENV_DIR=str(tmp_path / "tier3s-launch"),
                QDISTRO_TIER3S_SPAWN=str(spawn))
     return env, rec
 
 
 def _stanza_from_the_store(tmp_path, monkeypatch, argv=None, name="smoke") -> Path:
-    """Write the stanza with the REAL store + _SystemOps.write_launch_env."""
-    monkeypatch.setattr(sm, "TIER2_LAUNCH_ENV_DIR", tmp_path / "silo-launch")
+    """Write the stanza with the REAL store + _SystemOps.write_tier3s_launch_env."""
+    monkeypatch.setattr(sm, "TIER3S_LAUNCH_ENV_DIR", tmp_path / "tier3s-launch")
 
     class Ops(_T3sOps):
-        write_launch_env = _SystemOps.write_launch_env
+        write_tier3s_launch_env = _SystemOps.write_tier3s_launch_env
         _write_launch_env_in = _SystemOps._write_launch_env_in
 
     ops = Ops()
     store = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
     make(store, name, argv=argv or [])
     store.start(name)
-    return tmp_path / "silo-launch" / f"{name}.env"
+    return tmp_path / "tier3s-launch" / f"{name}.env"
 
 
 def _run_helper(env, name="smoke", **extra):
@@ -836,7 +844,7 @@ def test_helper_execs_the_spawn_with_exactly_the_stanza(tmp_path, monkeypatch):
 
 def test_helper_parses_and_never_sources_the_stanza(tmp_path):
     env, rec = _helper_env(tmp_path)
-    d = tmp_path / "silo-launch"
+    d = tmp_path / "tier3s-launch"
     d.mkdir()
     marker = tmp_path / "pwned"
     (d / "smoke.env").write_text(
@@ -860,7 +868,7 @@ def _write_stanza(tmp_path, **over):
           "TIER3S_LAUNCH_TOKEN": "a" * 32,
           "TIER3S_ARGV_JSON": '["qdistro-tier3s-smoke"]'}
     kv.update(over)
-    d = tmp_path / "silo-launch"
+    d = tmp_path / "tier3s-launch"
     d.mkdir(exist_ok=True)
     f = d / "smoke.env"
     f.write_text("".join(f"{k}={shlex.quote(v)}\n" for k, v in kv.items() if v is not None))
@@ -908,7 +916,7 @@ def test_helper_refuses_a_symlinked_stanza(tmp_path):
     real = _write_stanza(tmp_path)
     moved = tmp_path / "elsewhere.env"
     real.rename(moved)
-    (tmp_path / "silo-launch" / "smoke.env").symlink_to(moved)
+    (tmp_path / "tier3s-launch" / "smoke.env").symlink_to(moved)
     env, rec = _helper_env(tmp_path)
     r = _run_helper(env)
     assert r.returncode == 2 and "not a regular file" in r.stderr and not rec.exists()
@@ -934,10 +942,101 @@ def test_helper_refuses_a_bad_silo_name(tmp_path, name):
 def test_helper_test_overrides_are_ignored_for_root():
     src = LAUNCH_HELPER.read_text()
     guard = src.index('if [ "$EUID" -ne 0 ]; then')
-    assert src.index("QDISTRO_SILO_LAUNCH_ENV_DIR") > guard
+    assert src.index("QDISTRO_TIER3S_LAUNCH_ENV_DIR") > guard
     assert src.index("QDISTRO_TIER3S_SPAWN") > guard
     assert "SPAWN=/usr/lib/qdistro/tier3s/spawn-tier3s.sh" in src
     assert ". \"$ENV_FILE\"" not in src and "source " not in src
+
+
+# --- the dedicated stanza dir (paravirt ΔB5) ---------------------------------
+
+def test_stanza_dir_is_dedicated_and_root_0700_everywhere():
+    """ΔB5: tier3s stanzas have their own root-0700 dir — the manager constant,
+    the helper's default ENV_DIR, and the tmpfiles line all agree, and none of
+    them is the shared tier-2 /run/qdistro/silo-launch."""
+    assert str(sm.TIER3S_LAUNCH_ENV_DIR) == "/run/qdistro/tier3s-launch"
+    assert sm.TIER3S_LAUNCH_ENV_DIR != sm.TIER2_LAUNCH_ENV_DIR
+    src = LAUNCH_HELPER.read_text()
+    assert "ENV_DIR=/run/qdistro/tier3s-launch" in src
+    # The default is fixed; only a NON-ROOT caller may override it (unit tests).
+    guard = src.index('if [ "$EUID" -ne 0 ]; then')
+    assert src.index("QDISTRO_TIER3S_LAUNCH_ENV_DIR") > guard
+    conf = (REPO / "tier3s" / "tmpfiles" / "qdistro-tier3s.conf").read_text()
+    assert re.search(r"^d /run/qdistro/tier3s-launch\s+0700 root root", conf, re.M)
+
+
+def test_tier2_helper_never_reads_a_tier3s_stanza_and_vice_versa():
+    """ΔB5's whole point: the tier-2 helper keeps its shared dir, the tier3s
+    helper its own, and neither path crosses."""
+    t2 = (REPO / "session_manager" / "qdistro-tier2-silo-launch").read_text()
+    t3s = LAUNCH_HELPER.read_text()
+    assert "ENV_DIR=\"${QDISTRO_SILO_LAUNCH_ENV_DIR:-/run/qdistro/silo-launch}\"" in t2
+    assert "tier3s-launch" not in t2
+    assert "/run/qdistro/silo-launch" not in t3s
+    # and the writers are likewise dedicated
+    mgr = (REPO / "session_manager" / "qdistro_session_manager.py").read_text()
+    assert "self._ops.write_tier3s_launch_env(" in mgr
+    assert "self._ops.remove_tier3s_launch_env(silo_name)" in mgr
+
+
+def test_real_write_tier3s_launch_env_enforces_dir_mode(tmp_path, monkeypatch):
+    """The tmpfiles dir is enforced, not assumed: a pre-existing loose dir is
+    tightened to 0700 on write (the plain mkdir default 0755 is not a
+    substitute), and the stanza file itself is 0600."""
+    import stat as _stat
+    d = tmp_path / "tier3s-launch"
+    d.mkdir()
+    os.chmod(d, 0o755)          # a drifted/loose dir, explicit — umask-proof
+    assert _stat.S_IMODE(d.stat().st_mode) == 0o755
+    monkeypatch.setattr(sm, "TIER3S_LAUNCH_ENV_DIR", d)
+    p = sm._SystemOps().write_tier3s_launch_env("smoke", "TIER3S_SILO='smoke'\n")
+    assert _stat.S_IMODE(os.stat(d).st_mode) == 0o700, oct(d.stat().st_mode)
+    assert _stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+def test_real_write_tier3s_launch_env_refuses_a_symlinked_dir(tmp_path,
+                                                            monkeypatch):
+    """Fail closed: a symlinked stanza dir is refused, never written into."""
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    link = tmp_path / "tier3s-launch"
+    link.symlink_to(real)
+    monkeypatch.setattr(sm, "TIER3S_LAUNCH_ENV_DIR", link)
+    with pytest.raises(PermissionError):
+        sm._SystemOps().write_tier3s_launch_env("smoke", "TIER3S_SILO='smoke'\n")
+    assert not (real / "smoke.env").exists()
+
+
+def test_tier3s_stanza_never_lands_in_the_tier2_dir(tmp_path, monkeypatch):
+    """A tier3s write under the REAL ops touches only the tier3s dir; the
+    tier-2 dir and the podapp dir stay empty."""
+    t2 = tmp_path / "silo-launch"
+    t2.mkdir()
+    monkeypatch.setattr(sm, "TIER3S_LAUNCH_ENV_DIR", tmp_path / "tier3s-launch")
+    monkeypatch.setattr(sm, "TIER2_LAUNCH_ENV_DIR", t2)
+    p = sm._SystemOps().write_tier3s_launch_env("smoke", "TIER3S_SILO='smoke'\n")
+    assert p == tmp_path / "tier3s-launch" / "smoke.env"
+    assert p.exists() and list(t2.iterdir()) == []
+    # and the remover unlinks only in the tier3s dir
+    sm._SystemOps().remove_tier3s_launch_env("smoke")
+    assert not p.exists()
+
+
+def test_default_argv_for_the_gui_workloads():
+    """ΔB5: the Phase B PoC apps (paravirt O2) start themselves when the
+    stanza carries no argv."""
+    assert sm.TIER3S_DEFAULT_ARGV["weston-terminal"] == ["weston-terminal"]
+    assert sm.TIER3S_DEFAULT_ARGV["foot"] == ["foot"]
+    assert sm.TIER3S_DEFAULT_ARGV["headless-smoke"] == ["qdistro-tier3s-smoke"]
+
+
+@pytest.mark.parametrize("workload,argv", [("weston-terminal", ["weston-terminal"]),
+                                           ("foot", ["foot"])])
+def test_start_of_a_gui_workload_exports_its_default_argv(store, ops,
+                                                          workload, argv):
+    make(store, workload=workload)
+    store.start("smoke")
+    assert json.loads(env_of(ops)["TIER3S_ARGV_JSON"]) == argv
 
 
 # --- unit file and installer ----------------------------------------------------

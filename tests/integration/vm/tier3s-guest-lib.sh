@@ -22,6 +22,7 @@ CLEANUP=/usr/libexec/qdistro/qdistro-tier3s-cleanup
 WRAPPER=/usr/libexec/qdistro/tier3s-runsc
 CTL=/run/qdistro-tier3s-ctl
 LAUNCHES=/run/qdistro-tier3s
+STANZA_DIR=/run/qdistro/tier3s-launch
 SROOT=/run/qdistro-tier3s-runsc/1000
 IMAGE=localhost/qdistro/tier3s-headless-smoke:latest
 SMOKE_APP=qdistro-tier3s-smoke
@@ -220,11 +221,11 @@ PY
 write_stanza() {   # write_stanza <silo> <argv json>
     local tok
     tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-    install -d -m 0755 /run/qdistro/silo-launch
+    install -d -m 0700 "$STANZA_DIR"
     ( umask 077
       printf '%s\n' "TIER3S_SILO=$1" "TIER3S_BINDING=$1" "TIER3S_WORKLOAD=headless-smoke" "TIER3S_NETWORK=none" \
-          "TIER3S_LAUNCH_TOKEN=$tok" "TIER3S_ARGV_JSON='$2'" > "/run/qdistro/silo-launch/$1.env" )
-    chmod 0600 "/run/qdistro/silo-launch/$1.env"
+          "TIER3S_LAUNCH_TOKEN=$tok" "TIER3S_ARGV_JSON='$2'" > "$STANZA_DIR/$1.env" )
+    chmod 0600 "$STANZA_DIR/$1.env"
     echo "$tok"
 }
 

@@ -30,7 +30,8 @@ SRC=/root/qdistro-src-t3s
 T3S_PATHS="/usr/lib/qdistro/tier3s /usr/libexec/qdistro/qdistro-tier3s-scope
 /usr/libexec/qdistro/qdistro-tier3s-cleanup /usr/libexec/qdistro/qdistro-tier3s-silo-launch
 /usr/lib/tmpfiles.d/qdistro-tier3s.conf /etc/systemd/system/qdistro-tier3s-silo@.service
-/run/qdistro-tier3s-runsc /run/qdistro-tier3s-ctl /run/qdistro-tier3s"
+/run/qdistro-tier3s-runsc /run/qdistro-tier3s-ctl /run/qdistro-tier3s
+/run/qdistro/tier3s-launch"
 present_t3s() { local p; for p in $T3S_PATHS; do [ -e "$p" ] && echo "$p"; done; }
 
 step "0. guest"
@@ -86,6 +87,7 @@ is "installed broker = tested commit" "$(sha256sum < /usr/libexec/qdistro/qdistr
 is "tmpfiles: state root" "$(stat -c '%u:%g %a' "$SROOT" 2>/dev/null)" "1000:1000 700"
 is "tmpfiles: control dir" "$(stat -c '%U:%G %a' "$CTL" 2>/dev/null)" "root:root 700"
 is "tmpfiles: per-launch parent" "$(stat -c '%U:%G %a' "$LAUNCHES" 2>/dev/null)" "root:root 755"
+is "tmpfiles: tier3s stanza dir" "$(stat -c '%U:%G %a' "$STANZA_DIR" 2>/dev/null)" "root:root 700"
 [ "$FRESH" != --expect-fresh ] || is "runsc not installed by the installer" "$(yes_no test -e /usr/libexec/qdistro/runsc)" no
 systemctl daemon-reload
 is "unit loaded from /etc" "$(systemctl show -p FragmentPath --value qdistro-tier3s-silo@setup.service)" /etc/systemd/system/qdistro-tier3s-silo@.service
