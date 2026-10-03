@@ -491,12 +491,14 @@ t3s_clip_source() {
     # set_selection is silently swallowed by the tagged channel
     # (reproduced on the preserved s127 worker — the compositor logs no
     # selection_set for it). Real launches always get a unique token.
-    T3S_CLIPSEQ=$(( ${T3S_CLIPSEQ:-0} + 1 ))
+    # $BASHPID, not a counter: callers run this function backgrounded, so
+    # a shell-variable increment would stay trapped in the subshell and
+    # every call would reuse the same id.
     runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin \
         USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 \
         WAYLAND_DISPLAY=wayland-1 QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
         qdistro-secctx-exec --sandbox-engine qdistro.tier3s \
-            --app-id "qdistro.tier3s.$silo" --instance-id "clipsrc-$silo-$T3S_CLIPSEQ" \
+            --app-id "qdistro.tier3s.$silo" --instance-id "clipsrc-$silo-$BASHPID" \
             -- qdistro-test-clipboard-source --mime "$mime" --text "$text"
 }
 
