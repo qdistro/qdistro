@@ -98,6 +98,9 @@ teardown() {
 # one top-level .raw. A digest selects the matching checksum file.
 qdistro_resolve_image || die "could not resolve image (see select-artifact)"
 qdistro_materialize_raw || die "could not materialise raw (see select-artifact)"
+# Raw and qcow2 inputs return from materialisation without creating the
+# per-user build directory, which also holds this run's overlay.
+mkdir -p "$BUILD_DIR" || die "could not create build directory: $BUILD_DIR"
 IMG="$QDISTRO_RESOLVED_DISK"
 log "image: $IMG (kind=${QDISTRO_RESOLVED_KIND} published=${QDISTRO_RESOLVED_PATH})"
 if [ -n "${QDISTRO_RESOLVED_DIGEST:-}" ]; then
