@@ -1463,7 +1463,9 @@ eval "set -- $TIER2_APP_ARGV_JOINED"
 [ "${TIER2_DEBUG:-0}" = "1" ] && \
     echo "+ podman ${PODMAN_ARGS[*]} $*" >&2
 
-exec podman "${PODMAN_ARGS[@]}" "$@"
+# Isolated consumers use the bound public directory. Do not pass a host
+# QDISTRO_PRESENTATION_FILE into the container (no -e / --env-host).
+exec env -u QDISTRO_PRESENTATION_FILE podman "${PODMAN_ARGS[@]}" "$@"
 '
 
 # NOTE: we don'"'"'t add `podman -d`. The secctx wrapper around podman

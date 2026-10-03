@@ -25,7 +25,8 @@ absence means native fallback, not a forced dark theme.
 On an ordinary (non-qdistro) desktop, qdshell may publish to
 `${XDG_STATE_HOME:-$HOME/.local/state}/qdistro/presentation/current.json`.
 `QDISTRO_PRESENTATION_FILE` selects a fixture path for ordinary apps; it is
-ignored by the locker and polkit prompt.
+ignored by the locker and polkit prompt. Tier-1/2/3 silo launchers unset it
+so isolated apps read the public managed directory.
 
 ## Schema
 

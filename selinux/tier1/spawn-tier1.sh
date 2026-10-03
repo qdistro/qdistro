@@ -264,8 +264,11 @@ fi
 # Title prefix for chrome differentiation when secctx isn't used or
 # qdshell hasn't been extended with the tier-1 silo regex yet.
 # qdshell parse_silo_from_title fallback consumes "[<silo>] " prefix.
+# Isolated apps read the public managed directory. Do not forward a
+# developer QDISTRO_PRESENTATION_FILE into the sandbox.
 if [ -n "$LAUNCHREC_PATH" ]; then
-    env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \
+    env -u QDISTRO_PRESENTATION_FILE \
+        QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \
         QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH" \
         QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN" \
         "${CMD[@]}" &
@@ -277,4 +280,5 @@ if [ -n "$LAUNCHREC_PATH" ]; then
     exit $?
 fi
 
-exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"
+exec env -u QDISTRO_PRESENTATION_FILE \
+    QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"
