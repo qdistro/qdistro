@@ -530,8 +530,27 @@ check_req "qdwin-session.target (admin user unit)" \
     /home/admin/.config/systemd/user/qdwin-session.target
 check_req "qdwin-compositor.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdwin-compositor.service
+# The vendored patched libweston must be staged AND the compositor unit must
+# load it: stock libweston-16 rejects null-parent xdg_popup with a fatal
+# protocol error, so qdshell dies on the first click that opens a popup, and
+# the layer-popup grab/position/dismiss paths run degraded (2026-10-02,
+# qdistro-0.1.0-20260929; todo/issues/qdistro/image.md).
+check_glob_req "vendored libweston core staged" \
+    "/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16.so.0*"
+check_line "compositor unit loads vendored libweston" \
+    /home/admin/.config/systemd/user/qdwin-compositor.service \
+    '^Environment=LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64'
 check_req "qdshell.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdshell.service
+# The XDG "default" cursor theme must resolve or libXcursor finds nothing
+# and the pointer is invisible (weston: "theme=(default) loaded=0/36").
+# The overlay ships default/index.theme Inherits=Adwaita; neither
+# adwaita-icon-theme nor xcursor-themes provides it (2026-10-03).
+check_req "default cursor theme resolves (index.theme)" \
+    /usr/share/icons/default/index.theme
+# pkexec is a standalone package on Tumbleweed; tier-3/tier-5 launcher
+# entries and the chain-installed polkit actions exec through it.
+check_req "pkexec (tier-3/5 launcher polkit exec)" /usr/bin/pkexec
 check_req "qdlocker.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdlocker.service
 
@@ -554,6 +573,14 @@ check_link "qdshell wired into qdwin-session.target.wants" \
     /home/admin/.config/systemd/user/qdwin-session.target.wants/qdshell.service
 check_link "qdlocker wired into qdwin-session.target.wants" \
     /home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service
+# qdistro-cursor-sprites registers the actual wl_shm cursor surfaces;
+# without it every set_shape logs sprite=deferred and the pointer is
+# invisible in the qdshell session (qdistro-tester5). The unit is
+# WantedBy=qdshell.service and ships system-wide under /etc/systemd/user/.
+check_req "cursor-sprites helper unit" \
+    /etc/systemd/user/qdistro-cursor-sprites.service
+check_link "cursor-sprites wired into qdshell.service.wants" \
+    /etc/systemd/user/qdshell.service.wants/qdistro-cursor-sprites.service
 
 echo
 echo "-- SELinux policy modules / files --"

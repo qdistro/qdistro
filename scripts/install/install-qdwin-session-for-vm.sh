@@ -489,6 +489,35 @@ ln -sf ../qdshell.service \
 
 chown -R admin:users /home/admin/.config/systemd
 
+# 4b. Cursor sprite helper. qdwin does not own cursor image buffers:
+# every wp_cursor_shape set defers until qdistro-cursor-sprites registers
+# ARGB sprites through qdwin_shell_v1.set_cursor_sprite. Without the unit
+# the theme still loads (loaded=36/36) but every set logs
+# "sprite=deferred" and the pointer is INVISIBLE in the qdshell session
+# (the greeter does not need it — Qt sets its own wl_pointer cursors).
+# fresh-vm-bootstrap.sh used to install this unit ad-hoc for test VMs;
+# it lives here so the image and bare-metal installs get it too.
+# System-wide /etc/systemd/user + a qdshell.service.wants symlink works
+# offline (kiwi chroot) and for every user that runs qdshell — the
+# greeter session has no qdshell, so it stays inert there. The unit's
+# XDG_RUNTIME_DIR=/run/user/1000 is admin-specific; a non-admin qdshell
+# session is a separate known limitation.
+if [ -f "$QDISTRO_SRC/daemons/cursor-sprites/qdistro-cursor-sprites.service" ]; then
+    install -d -m 0755 /etc/systemd/user
+    install -m 0644 \
+        "$QDISTRO_SRC/daemons/cursor-sprites/qdistro-cursor-sprites.service" \
+        /etc/systemd/user/qdistro-cursor-sprites.service
+    install -d -m 0755 /etc/systemd/user/qdshell.service.wants
+    ln -sf ../qdistro-cursor-sprites.service \
+        /etc/systemd/user/qdshell.service.wants/qdistro-cursor-sprites.service
+else
+    echo "WARN: $QDISTRO_SRC/daemons/cursor-sprites/qdistro-cursor-sprites.service not found — cursor will be invisible in the qdshell session" >&2
+    if is_offline; then
+        echo "ERROR: offline image build must ship the cursor-sprites unit" >&2
+        exit 4
+    fi
+fi
+
 # 4c. Polkit rule: let `admin` lock its own logind session without
 # prompting for an admin password.
 #

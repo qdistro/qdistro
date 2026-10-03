@@ -261,6 +261,37 @@ for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     fi
 done
 
+# Vendored patched libweston MUST be staged before the session install:
+# install-qdwin-session-for-vm.sh emits the LD_LIBRARY_PATH/WESTON_MODULE_MAP
+# lines for it only when the tree exists at unit-writing time. Without it the
+# compositor loads stock libweston-16, where a null-parent xdg_popup
+# (Quickshell's popup mechanism for layer-anchored surfaces) is a fatal
+# protocol error — qdshell dies on the first click that opens a popup, and
+# the layer-popup paths run degraded (missing weston_desktop_xdg_popup_*
+# symbols). fresh-vm-bootstrap.sh stages it; the image did not
+# (todo/issues/qdistro/image.md). Builds the production profile on demand;
+# fatal on failure under set -e like every step here.
+echo "[qdistro-image] building + staging vendored libweston (production)..."
+bash "$QD/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"
+
+# The overlay's default-cursor-theme dir must be traversable by non-root
+# (libXcursor reads it as the session user); git does not track directory
+# modes, so pin it rather than trusting checkout umask.
+chmod 0755 /usr/share/icons/default
+
+# The tier-5 guest base is injected into the overlay outside git
+# (built by tier5-vm/build-guest-image.sh, staged next to this script
+# run — see image/AGENTS.md). Pin the ownership spawn-tier5.sh's
+# `test -r` check requires: session-libvirt domains run as admin, so
+# the base must be group-readable by libvirt (admin's group).
+if [ -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2 ]; then
+    chown root:libvirt /var/lib/libvirt/images/qdistro-tier5-base.qcow2
+    chmod 0640 /var/lib/libvirt/images/qdistro-tier5-base.qcow2
+    echo "[qdistro-image] tier5 base qcow2 present — pinned root:libvirt 0640"
+else
+    echo "[qdistro-image] WARN: no tier5 base qcow2 — launcher VM entries will not work"
+fi
+
 # install-qdwin-session-for-vm.sh honours the same offline contract
 # (linger marker written directly; user-unit wants-symlinks written
 # directly). QDWIN_SESSION_AUTOSTART=0: in the greeter image

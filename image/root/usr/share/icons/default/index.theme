@@ -1,0 +1,11 @@
+# Make the XDG "default" cursor theme resolvable. libXcursor looks up the
+# theme named "default" when XCURSOR_THEME is unset — qdwin's cursor-shape
+# preload (qdwin.c qdwin_cursor_theme_load) and the qdistro-cursor-sprites
+# helper both call it with a NULL theme, so without this file every shape
+# misses (weston logs "cursor-shape theme=(default) ... loaded=0/36" and
+# the pointer is invisible). Neither adwaita-icon-theme nor xcursor-themes
+# ships default/index.theme on Tumbleweed; baseweed test VMs share the gap
+# but screenshot-driven tests never notice a missing pointer.
+[Icon Theme]
+Name=Default
+Inherits=Adwaita
