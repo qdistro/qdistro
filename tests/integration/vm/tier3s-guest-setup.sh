@@ -9,11 +9,19 @@
 #                                the workload image built once in a VM with
 #                                registry access (tier3s/cache-image-archive.sh)
 #
-#   tier3s-guest-setup.sh <base-url> [--expect-fresh]
+#   tier3s-guest-setup.sh <base-url> [--expect-fresh] [--gui <workloads>]
 #
 # --expect-fresh (every qci worker): the image was built WITHOUT
 # QDISTRO_TIER3S=1, so no tier 3s file may exist before this script installs
 # one (owner O10), and the installer run without the flag must leave it so.
+#
+# --gui <workloads> (Phase B, s123-s129): a comma list of GUI workload names
+# (e.g. weston-terminal,foot). Each tier3s-<workload>.oci.tar is fetched from
+# the staging server, its sha256 checked against the manifest's
+# IMAGE_ARCHIVE_SHA256_<WORKLOAD>, loaded into admin's store, and its image ID
+# asserted against IMAGE_ID_<WORKLOAD>. The admin qdwin session must already
+# be up (tier3s.bash calls start_user_session first): the compositor socket,
+# qdshell, and the bridge/attestation tools are asserted here.
 #
 # Order: stage the tested commit root-owned -> installer without the flag
 # (nothing tier 3s) -> installer with QDISTRO_TIER3S=1 (every artifact equals
@@ -22,8 +30,18 @@
 # against its manifest, snapshot pin) -> broker allow rule. One PASS/FAIL line
 # per check; exits 1 on any failure.
 set -u
-U=${1:?usage: tier3s-guest-setup.sh <base-url> [--expect-fresh]}
-FRESH=${2:-}
+U=${1:?usage: tier3s-guest-setup.sh <base-url> [--expect-fresh] [--gui <workloads>]}
+FRESH=""
+GUI_WL=""
+shift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --expect-fresh) FRESH=--expect-fresh ;;
+        --gui) shift; GUI_WL="${1:?--gui needs a comma-separated workload list}" ;;
+        *) echo "tier3s-guest-setup.sh: unknown argument '$1'" >&2; exit 2 ;;
+    esac
+    shift
+done
 T3S_TAG=t3s-setup
 . "$(dirname "$0")/tier3s-guest-lib.sh"
 SRC=/root/qdistro-src-t3s
@@ -142,6 +160,47 @@ is "image snapshot label = pin" "$(pm image inspect --format '{{index .Labels "o
 echo "IMAGE_ID=$got_id"
 echo "IMAGE_DIGEST=$(pm image inspect --format '{{.Digest}}' "$IMAGE" 2>/dev/null)"
 info "the manifest digest changes across the oci-archive round trip (manifest re-serialized; build VM: $(m IMAGE_DIGEST)); the asserted identity is the image ID (config digest)"
+
+if [ -n "$GUI_WL" ]; then
+    step "5b. Phase B: per-workload GUI image archives ($GUI_WL)"
+    for w in ${GUI_WL//,/ }; do
+        W=$(printf '%s' "$w" | tr 'a-z-' 'A-Z_')
+        arch="tier3s-$w.oci.tar"
+        if ! curl -fsS "$U/$arch" -o "$d/$arch"; then
+            fail "GUI archive $arch not served (host: tier3s/cache-image-archive.sh <dev-vm> builds it)"; finish
+        fi
+        chmod 0644 "$d/$arch"
+        is "$w archive sha256 = manifest" "$(sha256sum < "$d/$arch" | cut -d' ' -f1)" "$(m "IMAGE_ARCHIVE_SHA256_$W")"
+        pm rmi -f "localhost/qdistro/tier3s-$w:latest" > /dev/null 2>&1
+        out=$(pm load -i "$d/$arch" 2>&1); rc=$?
+        printf '%s\n' "$out" | tail -2 | sed 's/^/    /'
+        is "podman load $w (admin) rc" "$rc" 0
+        is "loaded $w image ID = manifest" \
+            "$(pm image inspect --format '{{.Id}}' "localhost/qdistro/tier3s-$w:latest" 2>/dev/null)" \
+            "$(m "IMAGE_ID_$W")"
+        is "$w image snapshot label = pin" \
+            "$(pm image inspect --format '{{index .Labels "org.qdistro.snapshot"}}' "localhost/qdistro/tier3s-$w:latest" 2>/dev/null)" "$pin"
+        is "$w image workload label" \
+            "$(pm image inspect --format '{{index .Labels "org.qdistro.tier3s.workload"}}' "localhost/qdistro/tier3s-$w:latest" 2>/dev/null)" "$w"
+        is "$w workload declaration installed (GUI=1)" \
+            "$(sed -n 's/^GUI=//p' "/usr/lib/qdistro/tier3s/workloads/$w.env" 2>/dev/null)" "1"
+    done
+    # the waypipe bridge needs a live admin compositor and qdshell; the host
+    # helper (tier3s.bash) started qdwin-session — assert it here so a broken
+    # session never reads as an untestable driver precondition.
+    is "admin compositor socket present" "$(yes_no test -S /run/user/1000/wayland-1)" yes
+    is "qdshell is up" "$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null)" active
+    for t in runuser waypipe qdistro-secctx-exec dbus-send sqlite3 python3; do
+        is "tool $t installed" "$(yes_no command -v "$t")" yes
+    done
+    for t in qs ydotool; do
+        is "admin tool $t installed" "$(yes_no as_admin command -v "$t")" yes
+    done
+    is "clipboard-source helper installed" \
+        "$(command -v qdistro-test-clipboard-source 2>/dev/null)" "/usr/bin/qdistro-test-clipboard-source"
+    is "pywayland importable as admin" \
+        "$(yes_no as_admin python3 -c 'import pywayland.client' 2>/dev/null)" yes
+fi
 
 step "6. broker allow rule for the smoke spawn"
 is "broker without a rule" "$(set_rule none; broker_check "$ACTION")" unknown

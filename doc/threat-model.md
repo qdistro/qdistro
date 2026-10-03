@@ -222,6 +222,36 @@ Do not treat the broker pilot as evidence for those other domains.
   silos — a low-severity metadata side-channel (no input contents or pixels),
   the same class the now-gated `ext_idle_notifier_v1` once was. Enumeration is
   not gated; tracked for the future per-class visibility work.
+- **tier3s GUI bridge (gVisor + waypipe, dev profile only):** a `GUI=1`
+  tier-3s launch reaches the admin compositor through a host-side
+  `waypipe client` that runs as the admin uid inside the launch unit's
+  cgroup, wrapped by `qdistro-secctx-exec` so every sandbox window carries
+  the attested `(engine=qdistro.tier3s, app_id=qdistro.tier3s.<silo>,
+  instance=<launch token>)` triple — secctx identity, not title scraping,
+  is what qdshell keys chrome and clipboard silo decisions on. The
+  sandbox's waypipe server talks to that client over one bind-mounted
+  `link.sock` under runsc `host-uds=open` (the only host socket reachable
+  inside the sandbox) with software rendering — no GPU device, no
+  `SCM_RIGHTS` escapes gVisor. The claimed security properties, all
+  VM-lane evidence (`tests/integration/vm/s123`–`s129`): the bridge client
+  is `RegisterLaunch`-bound (pid+starttime) before `podman run`, so
+  lineage enforcement resolves a real attested subject and a forged or
+  stale source can only deny; the tagged client's wl_registry sees none
+  of the privileged globals (shell, layer-shell, locker, nested-manager,
+  secctx manager, weston capture, idle notifier, input method, virtual
+  keyboard, touch calibration); cross-silo clipboard is default-deny until
+  an admin `SaveRule` opts in, with the tier-4 strict MIME allow-list
+  (`text/plain`, `text/uri-list`) and the focus-aware clear; and a hostile
+  stream on the bridge kills only that connection — the compositor,
+  qdshell and sibling launches are unaffected. **Residuals:** the tag
+  attests the bridge client process, so a compromise of that host-side
+  waypipe inherits the silo tag (the tag is honest identity, not
+  containment of the bridge process); a waypipe parser bug crashes at most
+  the bridge it serves; `host-uds=open` is per-sandbox rather than
+  per-path, so any future host-socket bind mount into a tier3s sandbox
+  silently joins the reachable set — adding one is a policy decision, not
+  a neutral mount; and the whole tier remains `QDISTRO_PROFILE=dev` only
+  with no hardened launch path.
 - **qdwin global-filter classify default-ORDINARY:** the `qdwin_global_visible`
   matrix is fail-closed for an unknown *kind*, but the live filter feeds it
   `qdwin_classify_global`, which returns `QDWIN_GLOBAL_ORDINARY` (visible to

@@ -1,0 +1,113 @@
+#!/bin/bash
+# s124-tier3s-app.sh — GUEST driver (root) for phase7-tier3s-app.bats.
+# Phase B (ΔB7/ΔB8): the two shipped GUI workloads render and accept input
+# through the waypipe bridge:
+#   - weston-terminal and foot each map a toplevel that qdshell logs as
+#     "[tier3s] toplevel observed silo=<silo> secctx=qdistro.tier3s.<silo>
+#     color=<#hex> handle=<N>" and that the compositor maps (a `qdwin:
+#     mapped handle=N` line proves a frame was committed through the bridge);
+#   - title evidence: the window title carries waypipe's "[3s:<silo>] "
+#     prefix (compositor toplevel_added/toplevel_title lines);
+#   - input evidence: tier3focus injectFocus lands keyboard focus on the
+#     silo's toplevel, then ydotool-typed keys reach the sandboxed shell —
+#     the typed command creates a marker file inside the CONTAINER's /tmp
+#     (checked via `podman exec`, so the observability is the sandbox's own
+#     filesystem, not the host's);
+#   - teardown removes the toplevel (compositor toplevel_removed + qdshell
+#     model drop).
+# Runs after tier3s-guest-setup.sh --gui. One PASS/FAIL line per check;
+# `[s124] N passes, M failures`; exit 1 on any failure.
+set -u
+T3S_TAG=s124
+. "$(dirname "$0")/tier3s-guest-lib.sh"
+SW=s124w; SF=s124f
+ACT_W="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
+ACT_F="qdistro.tier3s.spawn:foot/foot"
+
+step "0. preconditions"
+is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "foot image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-foot:latest)" yes
+is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
+is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
+is "ydotoold socket present (input injection path)" "$(yes_no test -S /run/user/1000/ydotool.sock)" yes
+is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
+assert_all_clear pre
+sm CreateTier3sSilo ssss "$SW" weston-terminal "$SW" none > /dev/null
+is "CreateTier3sSilo $SW" "$(silo_state "$SW")" Created
+sm CreateTier3sSilo ssss "$SF" foot "$SF" none > /dev/null
+is "CreateTier3sSilo $SF" "$(silo_state "$SF")" Created
+set_rules "allow:$ACT_W" "allow:$ACT_F"
+is "broker answers allow (weston-terminal spawn)" "$(broker_check "$ACT_W")" allow
+is "broker answers allow (foot spawn)" "$(broker_check "$ACT_F")" allow
+
+# qdwin_mapped <handle> — the compositor processed a real frame commit for
+# this toplevel (the `qdwin: mapped handle=N` line is emitted while it
+# processes the client's first buffer).
+qdwin_mapped() { comp_log | grep -q "mapped handle=$1"; }
+
+# drive_gui <silo> <tag>: focus + type a marker command, then prove the
+# marker exists INSIDE the container.
+drive_gui() {
+    local s="$1" tag="$2" h pid ctr
+    h=$(t3s_window_handle "$s")
+    [ -n "$h" ] || { fail "$tag: no qdshell handle for $s"; return; }
+    is "$tag: findSiloHandle resolves the tier3s toplevel" \
+        "$(qs_ipc tier3focus findSiloHandle "$s" 2>/dev/null)" "HANDLE=$h"
+    is "$tag: injectFocus accepted for the tier3s handle" \
+        "$(qs_ipc tier3focus injectFocus "$h" default 2>/dev/null)" "ok handle=$h seat=default"
+    wait_for 20 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -q 'seat_focus_changed seat=default handle=$h'"
+    is "$tag: compositor reports focus on handle $h" \
+        "$(comp_log | grep -c "seat_focus_changed seat=default handle=$h")" 1
+    wait_for 15 qdwin_mapped "$h"
+    is "$tag: compositor mapped a committed frame (mapped handle=$h)" \
+        "$(comp_log | grep -c "mapped handle=$h")" 1
+    # the typed command runs in the sandboxed shell; the marker it creates
+    # lives in the container's /tmp tmpfs — `podman exec` reads the sandbox's
+    # own filesystem, so this is end-to-end input through the bridge.
+    ctr=$(ctr_of "$s")
+    as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+        ydotool type "touch /tmp/s124-$s-typed" || fail "$tag: ydotool type failed"
+    as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+        ydotool key 28:1 28:0 || fail "$tag: ydotool enter failed"
+    wait_for 30 bash -c "runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 podman exec '$ctr' test -f /tmp/s124-$s-typed"
+    if pm exec "$ctr" test -f "/tmp/s124-$s-typed" 2>/dev/null; then
+        pass "$tag: typed command created /tmp/s124-$s-typed INSIDE the sandbox"
+    else
+        fail "$tag: typed input never reached the sandboxed shell (no marker in the container)"
+    fi
+}
+
+step "1. weston-terminal renders through the bridge"
+TW=$(up_gui_silo "$SW")
+[ -n "$TW" ] && pass "$SW launch up (token $TW)" || fail "$SW did not come up"
+# the surface's own app_id is the app's (weston-terminal); the launch's
+# marking lands on the title via waypipe's --title-prefix "[3s:<silo>] "
+is "weston toplevel carries the [3s:$SW] title prefix" \
+    "$(comp_log | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SW\] ")" 1
+drive_gui "$SW" "weston"
+
+step "2. foot renders through the bridge"
+TF=$(up_gui_silo "$SF")
+[ -n "$TF" ] && pass "$SF launch up (token $TF)" || fail "$SF did not come up"
+is "foot toplevel carries the [3s:$SF] title prefix" \
+    "$(comp_log | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SF\] ")" 1
+drive_gui "$SF" "foot"
+
+step "3. teardown removes both toplevels"
+HW=$(t3s_window_handle "$SW"); HF=$(t3s_window_handle "$SF")
+cur=$(journal_cursor)
+for s in "$SW" "$SF"; do sm StopSilo si "$s" 10 > /dev/null; is "StopSilo $s" "$(silo_state "$s")" Stopped; done
+for s in "$SW" "$SF"; do
+    u=$(unit_of "$s"); t=$TW; h=$HW; [ "$s" = "$SF" ] && { t=$TF; h=$HF; }
+    wait_for 90 unit_down "$u"
+    assert_launch_gone "teardown/$s" "$t" "$(ctr_of "$s")"
+    assert_bridge_gone "teardown/$s" "$t"
+    wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat --after-cursor='$cur' | grep -q 'toplevel_removed handle=$h'"
+    is "$s: compositor logged toplevel_removed for handle $h" \
+        "$(comp_log "$cur" | grep -c "toplevel_removed handle=$h")" "1"
+done
+for s in "$SW" "$SF"; do sm DeleteSilo s "$s" > /dev/null; is "DeleteSilo $s" "$(silo_state "$s")" absent; done
+set_rules none
+assert_all_clear end
+finish

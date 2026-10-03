@@ -219,12 +219,17 @@ PY
 # Write a launch stanza by hand (what the manager writes at StartSilo; root
 # 0600) so a launch unit can be started WITHOUT the manager. Prints the token.
 write_stanza() {   # write_stanza <silo> <argv json>
+    write_stanza_workload "$1" headless-smoke "$2"
+}
+# Phase B variant: any workload (GUI drivers refuse-test weston-terminal /
+# foot launches this way). write_stanza_workload <silo> <workload> <argv json>
+write_stanza_workload() {
     local tok
     tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     install -d -m 0700 "$STANZA_DIR"
     ( umask 077
-      printf '%s\n' "TIER3S_SILO=$1" "TIER3S_BINDING=$1" "TIER3S_WORKLOAD=headless-smoke" "TIER3S_NETWORK=none" \
-          "TIER3S_LAUNCH_TOKEN=$tok" "TIER3S_ARGV_JSON='$2'" > "$STANZA_DIR/$1.env" )
+      printf '%s\n' "TIER3S_SILO=$1" "TIER3S_BINDING=$1" "TIER3S_WORKLOAD=$2" "TIER3S_NETWORK=none" \
+          "TIER3S_LAUNCH_TOKEN=$tok" "TIER3S_ARGV_JSON='$3'" > "$STANZA_DIR/$1.env" )
     chmod 0600 "$STANZA_DIR/$1.env"
     echo "$tok"
 }
@@ -343,4 +348,305 @@ assert_all_clear() {   # assert_all_clear <tag>
     # the cleanup's per-call scopes and work dirs end with each call / run (astra A r2 #2)
     is "$1: no cleanup call scope left" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-t3s-call-*.scope' | grep -c .)" 0
     is "$1: no cleanup work dir left" "$(qry find "$CTL" -mindepth 1 -maxdepth 1 -name '.call-*' | grep -c .)" 0
+}
+
+# ===========================================================================
+# Phase B (ΔB7-ΔB9): GUI/waypipe helpers for s123-s129. Everything below is
+# additive; the Phase A helpers above are unchanged.
+#
+# A GUI launch adds, on top of the Phase A topology (CONTRACT §5 step 12):
+#   - the bridge pair in the LAUNCH UNIT's cgroup (not the scope):
+#     spawn -> runuser(uid0->admin) -> qdistro-secctx-exec -> waypipe client;
+#   - the bridge socket $LAUNCHES/<token>/link.sock (bind-mounted into the
+#     sandbox at /run/qdistro/link);
+#   - the secctx listener /run/user/1000/wayland-secctx-<w>-<i> that the inner
+#     waypipe client connects to (its WAYLAND_DISPLAY);
+#   - the launch record /run/user/1000/qdistro-tier3s-launchrec-<file-id>.pid
+#     (removed by the spawn right after RegisterLaunch);
+#   - the broker RegisterLaunch binding the bridge client pid to
+#     (bare silo, qdistro.tier3s, qdistro.tier3s.<silo>, token).
+#
+# The bridge pair is deliberately NOT in the scope's cgroup, so
+# snapshot_launch/assert_launch_gone do not see it; GUI drivers snapshot it
+# with snapshot_bridge and assert its absence with assert_bridge_gone.
+
+ADMIN_RT=/run/user/1000
+GUI_DISPLAY=wayland-1
+GUI_ENGINE=qdistro.tier3s
+
+# --- session / journal evidence --------------------------------------------
+
+comp_pid() {   # the running compositor's MainPID, or empty
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        systemctl --user show qdwin-compositor.service -p MainPID --value 2>/dev/null
+}
+# qdshell and the compositor are admin --user units: their stdout lands in the
+# journal with the _SYSTEMD_USER_UNIT field. Scope every grep to the producing
+# unit (qemu-ga logs the guest-exec command TEXT; a whole-journal grep for a
+# marker that appears in a command line would self-match).
+qdshell_log() { journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
+comp_log()    { journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
+broker_log()  { journalctl -u qdistro-admin-broker.service --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
+
+# qs_ipc <target> <method> [args...] — Quickshell IPC as admin. `qs ipc`
+# filters by display connection by default and the runuser session has no
+# wayland of its own: --any-display bypasses the filter (s48's convention);
+# -p selects the qdshell instance.
+qs_ipc() {
+    as_admin qs -p /usr/share/quickshell/qdshell ipc --any-display call "$@" 2>&1 | head -1
+}
+
+# The toplevel handle qdshell recorded for a tier3s silo, from its own
+# journal line "[tier3s] toplevel observed silo=<s> ... handle=<N>". Empty
+# when none was logged (since the optional cursor).
+t3s_window_handle() {   # t3s_window_handle <silo> [cursor]
+    qdshell_log "${2:-}" | sed -n "s/.*\[tier3s\] toplevel observed silo=$1 .*handle=\([0-9]\{1,\}\).*/\1/p" | tail -1
+}
+# compositor-side handle for a secctx app_id (toplevel_added line).
+comp_toplevel() {   # comp_toplevel <app_id> [cursor] -> "handle=N pid=P title=..."
+    comp_log "${2:-}" | grep "toplevel_added .* app_id=$1 " | tail -1
+}
+
+# --- argv / rules -----------------------------------------------------------
+
+# set_argv_json <silo>=<argv-json> ... — like set_argv but takes the raw JSON
+# argv (GUI drivers need argv other than the smoke's --hold; e.g. a foot
+# command argv for the OSC-52 clipboard source). Same discipline: the manager
+# rewrites /etc/qdistro/silos.yaml, so edit it with the manager stopped.
+set_argv_json() {
+    local rc
+    systemctl stop qdistro-session-manager.service
+    python3 - "$@" <<'PY'
+import json, re, sys, pathlib
+p = pathlib.Path("/etc/qdistro/silos.yaml")
+s = p.read_text()
+for arg in sys.argv[1:]:
+    name, spec = arg.split("=", 1)
+    if spec == "default":
+        argv = '[]'
+    else:
+        argv = json.dumps(json.loads(spec))   # validate + normalize
+    pat = re.compile(r'(\n  - name: ' + re.escape(name) + r'\n(?:    [^\n]*\n)*?      argv: )\[[^\n]*\]')
+    s, n = pat.subn(lambda m: m.group(1) + argv, s)
+    if n != 1:
+        sys.exit(f"silos.yaml: no argv for silo {name}")
+    print(f"silos.yaml: {name} argv -> {argv}")
+p.write_text(s)
+PY
+    rc=$?
+    systemctl start qdistro-session-manager.service
+    wait_for 30 manager_up
+    return $rc
+}
+
+# set_rules <verdict:action> ... | set_rules none — write the shared test rule
+# file with one entry per <verdict:action> pair (GUI drivers need the spawn
+# action AND, in the clipboard drivers, the transfer action, with independent
+# verdicts). Waits until the broker answers the FIRST action with its verdict.
+# `none` removes the file entirely (the broker goes back to unknown/deny).
+set_rules() {
+    [ "$1" = none ] && { rm -f "$RULE_FILE"; return; }
+    {
+        echo "# test-authored by the tier 3s qci drivers (tests/integration/vm/tier3s-*)"
+        local spec verdict a
+        for spec in "$@"; do
+            verdict="${spec%%:*}"; a="${spec#*:}"
+            printf '%s\n' "- name: tier3s-qci-$verdict" \
+                "  decision: $verdict" "  match:" "    uid: 1000" \
+                "    action: \"$a\""
+        done
+    } > "$RULE_FILE"
+    chmod 0644 "$RULE_FILE"
+    local want="${1%%:*}" probe="${1#*:}"
+    wait_for 20 bash -c "[ \"\$(runuser -u admin -- busctl --system call org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1 CheckPermission 'sa{sv}' '$probe' 0 2>/dev/null)\" = 's \"$want\"' ]"
+}
+
+# save_rule <filename.yaml> <yaml-body> — the admin control-plane SaveRule
+# (root dbus-send, argv names the method → trusted admin-control helper).
+# Prints the saved path. save_rule_rc <...>: same but prints nothing and
+# returns the dbus-send rc.
+save_rule() {
+    local out
+    out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.SaveRule \
+        "string:$1" "string:$2" 2>&1) || { echo "ERR: $out"; return 1; }
+    printf '%s\n' "$out" | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g'
+}
+delete_rule() {   # delete_rule <filename.yaml>
+    dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.DeleteRule \
+        "string:$1" > /dev/null 2>&1
+}
+
+# t3s_clip_source <silo> <mime> <text> — run qdistro-test-clipboard-source
+# as admin under the SAME wrap the waypipe bridge client uses
+# (runuser -> env -i -> QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER ->
+# qdistro-secctx-exec tagged qdistro.tier3s.<silo>). The exec chain
+# preserves the pid, so the caller's $! IS the tagged source process;
+# kill it to drop the selection. Prints nothing.
+t3s_clip_source() {
+    local silo="$1" mime="${2:-text/plain}" text="${3:-qdistro-t3s-clip}"
+    runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin \
+        USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 \
+        WAYLAND_DISPLAY=wayland-1 QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+        qdistro-secctx-exec --sandbox-engine qdistro.tier3s \
+            --app-id "qdistro.tier3s.$silo" --instance-id "clipsrc-$silo" \
+            -- qdistro-test-clipboard-source --mime "$mime" --text "$text"
+}
+
+# broker_check_clip <src> <dst> <src_app_id> <engine> [src_pid src_starttime]
+# — a root CheckClipboardTransfer probe. The broker admits a root caller
+# whose exe is a known D-Bus CLI client and whose argv names the method (the
+# qdshell-gate-probe path) — this is the same trusted-caller path qdshell's
+# busctl call uses, but with an explicitly relayed source (pid, starttime)
+# so the lineage path under enforcement can be exercised deterministically.
+broker_check_clip() {   # -> allow|deny|ERR
+    local out
+    out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckClipboardTransfer \
+        "string:$1" "string:$2" array:string:"text/plain" \
+        "string:$3" "string:probe-dst" "string:$4" \
+        boolean:false "uint32:${5:-0}" "uint64:${6:-0}" 2>&1) || { echo "ERR: $out"; return 1; }
+    printf '%s\n' "$out" | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g'
+}
+# broker_check_clip_mime <src> <dst> <app_id> <engine> <mimes...> — same
+# probe with a caller-chosen offer list (strict-MIME coverage).
+broker_check_clip_mime() {
+    local src="$1" dst="$2" app="$3" eng="$4"; shift 4
+    local out
+    out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckClipboardTransfer \
+        "string:$src" "string:$dst" "array:string:$(IFS=,; echo "$*")" \
+        "string:$app" "string:probe-dst" "string:$eng" \
+        boolean:false uint32:0 uint64:0 2>&1) || { echo "ERR: $out"; return 1; }
+    printf '%s\n' "$out" | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g'
+}
+# broker_check_clip_recv <src> <dst> <mime> <src_app_id> <engine>
+# [src_pid src_starttime] — a root CheckClipboardReceive probe (the
+# receive-time gate; same trusted-caller path, signature ssssssbut).
+broker_check_clip_recv() {   # -> allow|deny|ERR
+    local out
+    out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckClipboardReceive \
+        "string:$1" "string:$2" "string:$3" \
+        "string:$4" "string:probe-dst" "string:$5" \
+        boolean:false "uint32:${6:-0}" "uint64:${7:-0}" 2>&1) || { echo "ERR: $out"; return 1; }
+    printf '%s\n' "$out" | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g'
+}
+
+# --- the bridge pair --------------------------------------------------------
+
+pid_starttime() { starttime "$1"; }   # alias for readability at call sites
+
+# The wayland-secctx listener the bridge client's waypipe connects to, from
+# its own environ (secctx-exec injects WAYLAND_DISPLAY=<basename>).
+secctx_listener() {   # secctx_listener <token> -> the listener basename
+    local bp disp
+    bp=$(rec "$1" bridge_client_pid)
+    [ -n "$bp" ] || return 1
+    disp=$(tr '\0' '\n' < "/proc/$bp/environ" 2>/dev/null | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)
+    [ -n "$disp" ] && [ -S "$ADMIN_RT/$disp" ] || return 1
+    printf '%s\n' "$disp"
+}
+
+# snapshot_bridge <token> — append the bridge pair's pid+starttime to
+# $WORK/<token>.bridge so assert_bridge_gone can prove their absence later.
+snapshot_bridge() {   # snapshot_bridge <token>
+    local p st
+    : > "$WORK/$1.bridge"
+    for p in bridge_client bridge_wrapper; do
+        local pid="${p}_pid" skey="${p}_starttime"
+        pid=$(rec "$1" "$pid"); skey=$(rec "$1" "$skey")
+        [ -n "$pid" ] && printf '%s %s\n' "$pid" "$skey" >> "$WORK/$1.bridge"
+    done
+    # the secctx listener path (removed when the wrapper's close_fd fires)
+    secctx_listener "$1" > "$WORK/$1.listener" 2>/dev/null || :
+    # the launch record path (the spawn removes it after RegisterLaunch; the
+    # cleanup also rm -f's it — absence is part of teardown)
+    rec "$1" launch_record > "$WORK/$1.launchrec" 2>/dev/null || :
+}
+
+# assert_bridge_gone <tag> <token> [secs] — the GUI half of assert_launch_gone:
+# bridge client + wrapper dead by pid+starttime, link.sock gone (the
+# per-launch dir check in assert_launch_gone already covers the dir itself),
+# secctx listener socket revoked, launch record file gone.
+assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
+    local tag="$1" tok="$2" secs="${3:-60}" left=0 p st lr ls
+    bridge_left() {
+        local n=0
+        while read -r p st; do
+            [ -n "$p" ] || continue
+            [ "$(starttime "$p" 2>/dev/null)" = "$st" ] && n=$((n + 1))
+        done < "$WORK/$tok.bridge" 2>/dev/null
+        [ "$n" -eq 0 ]
+    }
+    wait_for "$secs" bridge_left
+    while read -r p st; do
+        [ -n "$p" ] || continue
+        [ "$(starttime "$p" 2>/dev/null)" = "$st" ] && left=$((left + 1))
+    done < "$WORK/$tok.bridge" 2>/dev/null
+    if [ ! -s "$WORK/$tok.bridge" ]; then fail "$tag: no bridge snapshot for $tok (cannot prove absence)"
+    elif [ "$left" -eq 0 ]; then pass "$tag: bridge client+wrapper gone (pid+starttime)"
+    else fail "$tag: $left bridge processes still alive"; fi
+    ls=$(cat "$WORK/$tok.listener" 2>/dev/null)
+    if [ -z "$ls" ]; then fail "$tag: no secctx listener captured for $tok"
+    elif [ ! -S "$ADMIN_RT/$ls" ]; then pass "$tag: secctx listener $ls revoked"
+    else fail "$tag: secctx listener $ADMIN_RT/$ls still a socket"; fi
+    lr=$(cat "$WORK/$tok.launchrec" 2>/dev/null)
+    if [ -z "$lr" ]; then fail "$tag: no launch_record path captured for $tok"
+    elif [ ! -e "$lr" ]; then pass "$tag: launch record $lr removed"
+    else fail "$tag: launch record $lr still present"; fi
+}
+
+# assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
+# alive with matching starttimes, in the launch unit's cgroup; link.sock a
+# socket; the secctx listener present.
+assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
+    local tag="$1" tok="$2" bp bs wp ws unit
+    unit=$(rec "$tok" unit)
+    bp=$(rec "$tok" bridge_client_pid); bs=$(rec "$tok" bridge_client_starttime)
+    wp=$(rec "$tok" bridge_wrapper_pid); ws=$(rec "$tok" bridge_wrapper_starttime)
+    if [ -n "$bp" ] && [ "$(starttime "$bp" 2>/dev/null)" = "$bs" ]; then
+        pass "$tag: bridge client pid $bp live (starttime verified)"
+    else fail "$tag: bridge client pid '${bp:-?}' dead or starttime drifted"; fi
+    if [ -n "$wp" ] && [ "$(starttime "$wp" 2>/dev/null)" = "$ws" ]; then
+        pass "$tag: bridge wrapper pid $wp live (starttime verified)"
+    else fail "$tag: bridge wrapper pid '${wp:-?}' dead or starttime drifted"; fi
+    is "$tag: bridge client runs as admin, exec waypipe" \
+        "$(stat -c %u "/proc/$bp" 2>/dev/null):$(cat "/proc/$bp/comm" 2>/dev/null)" "1000:waypipe"
+    # the bridge is the launch unit's, not the owning scope's (CONTRACT §5.12)
+    is "$tag: bridge client + wrapper in the launch unit cgroup" \
+        "$(for p in "$bp" "$wp"; do sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null; done | grep -c "/${unit}$")" 2
+    if [ -S "$LAUNCHES/$tok/link.sock" ]; then pass "$tag: bridge socket $LAUNCHES/$tok/link.sock present"
+    else fail "$tag: no bridge socket at $LAUNCHES/$tok/link.sock"; fi
+}
+
+# Bring a GUI silo up live: StartSilo -> record phase=running -> the bridge
+# asserts -> the tagged toplevel observed by qdshell. Prints the token.
+# up_gui_silo <silo>
+up_gui_silo() {
+    local s="$1" unit tok cur h
+    unit=$(unit_of "$s"); cur=$(journal_cursor)
+    sm StartSilo s "$s" > /dev/null || { echo ""; return 1; }
+    if ! wait_for 150 bash -c "journalctl -u '$unit' --no-pager -o cat --after-cursor='$cur' | grep -q 'spawn-tier3s: running: '"; then
+        unit_log "$unit" "$cur" | tail -20 >&2; echo ""; return 1
+    fi
+    tok=$(token_of_unit "$unit")
+    [ -n "$tok" ] || { echo ""; return 1; }
+    snapshot_launch "$tok"; snapshot_bridge "$tok"
+    # the compositor + qdshell see the tagged toplevel once the sandboxed app
+    # maps through the bridge — wait for qdshell's own observation line so the
+    # caller can grep its handle/compositor evidence deterministically.
+    if ! wait_for 90 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q '\\[tier3s\\] toplevel observed silo=$s '"; then
+        echo "up_gui_silo: $s: no '[tier3s] toplevel observed silo=$s' in the qdshell journal" >&2
+        echo ""; return 1
+    fi
+    echo "$tok"
+}
+
+# audit_count <action>: rows in the broker audit DB carrying this exact action.
+AUDIT_DB=/var/lib/qdistro/audit/audit.sqlite
+audit_count() { sqlite3 "$AUDIT_DB" "SELECT count(*) FROM audit WHERE action='$1';" 2>/dev/null || echo QUERY-FAILED; }
+audit_last_source() {   # audit_last_source <action> -> the newest row's source column
+    sqlite3 "$AUDIT_DB" "SELECT source FROM audit WHERE action='$1' ORDER BY id DESC LIMIT 1;" 2>/dev/null
 }

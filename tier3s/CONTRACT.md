@@ -1,4 +1,4 @@
-# tier3s lifecycle contract (Phase A + Phase B milestone B-i)
+# tier3s lifecycle contract (Phase A + Phase B)
 
 Status: **Experimental, dev profile only** (owner O4), explicit launch, no
 fallback to tier 2/3 (O6), `network=none` only (O3). This file is the
@@ -14,9 +14,18 @@ proved (`05-phase-S-results.md` §S2). gVisor cannot pass host-backed
 `SCM_RIGHTS`, so a GUI workload's windows cannot reach the admin compositor
 over a Wayland socket directly; they go through waypipe instead. §1 gains the
 bridge client process class, §5 the bridge half of the spawn, §7 the workload
-declarations and terminal images/profiles. B-ii (manager stanza dir, pod-app
-surface) and B-iii (VM drivers, GUI acceptance) are separate milestones and
-not covered here.
+declarations and terminal images/profiles. B-ii added the manager stanza
+dir, `Tier3sApps.qml`/`Tier3FocusIPC.qml`/`ClipboardSilo.js` and the GUI
+argv. B-iii is the VM acceptance lane: `tests/integration/vm/s123`–`s129`
+(`phase7-tier3s-*.bats`), which assert the secctx tag the compositor sees
+(`qdistro.tier3s` / `qdistro.tier3s.<silo>` / the launch token), the
+mandatory `RegisterLaunch` ordering (a refused registration never reaches
+`podman run`), the clipboard gate (default-deny, `SaveRule` allow,
+tier-4-strict MIME strip, focus-aware clear, receive-time per-MIME),
+enforce-mode lineage (the relayed bridge-client pid+starttime must resolve
+to the launch record; forged or stale identity can only deny) and the
+hostile-stream blast radius (a malformed waypipe stream kills only that
+bridge connection — never the compositor, qdshell or a sibling launch).
 
 Decisions are numbered after the kickoff deltas (`D-A1` = ΔA1, …). Each cites
 the VM evidence it rests on; the feasibility checks ran in a dev test VM
@@ -918,11 +927,22 @@ Every ERRNO, the default included, is EPERM under runsc.
 - A green host unit test proves the launch scripts' logic against fakes, not
   scope delegation, `ExecStopPost`, placement or teardown. Those are VM facts
   (A-iii, through the qci VM lane).
-- The B-i GUI bridge is proven at the argv/record level only (bridge client
-  composition, secctx triple, launch record, RegisterLaunch arguments,
-  mount and `host-uds=open`, refusal ordering). A window actually appearing
-  tagged on the compositor, the `[3s:<silo>] ` title prefix, and cleanup of
-  a live GUI launch are B-iii's VM evidence.
+- The GUI bridge's evidence is the B-iii VM lane (`s123`–`s129`): a tagged
+  window reaching the compositor, input round-tripping through waypipe, the
+  clipboard/lineage gates and the hostile-stream blast radius are VM facts,
+  not host-test facts. Residuals that stay open even with a green lane:
+  the byte stream is only as strong as waypipe's protocol coverage (an
+  interface waypipe does not forward simply does not exist for the sandbox,
+  and a waypipe protocol bug is a bridge-crash, not a compositor
+  compromise — s129 asserts the radius, not the absence of crashes);
+  `host-uds=open` means the sandbox may connect AF_UNIX endpoints bind-
+  mounted into it — we mount exactly one (the per-launch `link.sock` dir)
+  and no other host socket is reachable, but the flag is per-sandbox, not
+  per-path; and clipboard/lineage enforcement is keyed on the
+  launcher-attested record of the bridge client, which is the identity the
+  compositor sees — a sandbox escape that compromises the *host* waypipe
+  client would inherit its silo tag (the tag is honest, not a containment
+  claim about the bridge process itself).
 - The scope limits are set, not yet shown to be enforced (Phase C). Admin
   cannot raise them by writing the files (`feasibility-r3/20`); that is not
   an adversarial containment proof.
