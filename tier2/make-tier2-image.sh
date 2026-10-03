@@ -69,10 +69,50 @@ fi
 # without writing into the source tree (COPY hashes content, so the layer cache
 # still hits across stagings).
 context="$(mktemp -d "${TMPDIR:-/tmp}/tier2-context.XXXXXX")"
-trap 'rm -rf "$context"' EXIT
+CLEANUP_DIRS=("$context")
+trap 'rm -rf "${CLEANUP_DIRS[@]}"' EXIT
 cp -a . "$context/"
 printf '%s\n' "$tier2_snapshot" > "$context/SNAPSHOT"
 log "tier-2 workloads pinned to Tumbleweed snapshot $tier2_snapshot"
+
+# qfileman COPYs first-party sources that live outside this directory in a
+# monorepo checkout. A copied-only-tier2 tree (s40) can stage the same trees
+# under consumer/. weston-terminal / text-viewer / url-preview stay self-
+# contained so those builds keep working from a tier2-only copy.
+resolve_consumer_src() {
+    local repo_rel="$1"
+    local staged_name="$2"
+    if [ -d "$REPO_ROOT/$repo_rel" ]; then
+        printf '%s\n' "$REPO_ROOT/$repo_rel"
+        return 0
+    fi
+    if [ -d "$SCRIPT_DIR/consumer/$staged_name" ]; then
+        printf '%s\n' "$SCRIPT_DIR/consumer/$staged_name"
+        return 0
+    fi
+    return 1
+}
+
+stage_workload_context() {
+    local dest="$1"
+    local workload="$2"
+    local app pres
+    case "$workload" in
+        qfileman)
+            if ! app="$(resolve_consumer_src qdfileman qdfileman)"; then
+                log "FATAL: qfileman sources missing (need $REPO_ROOT/qdfileman or $SCRIPT_DIR/consumer/qdfileman)"
+                return 2
+            fi
+            if ! pres="$(resolve_consumer_src sdk/presentation presentation)"; then
+                log "FATAL: presentation sources missing (need $REPO_ROOT/sdk/presentation or $SCRIPT_DIR/consumer/presentation)"
+                return 2
+            fi
+            cp -a "$app" "$dest/qdfileman"
+            cp -a "$pres" "$dest/presentation"
+            ;;
+    esac
+    return 0
+}
 
 discover_workloads() {
     local -a out=()
@@ -91,19 +131,27 @@ build_workload() {
     local workload="$1"
     local cf="Containerfile.${workload}"
     local tag="qdistro/tier2-${workload}:latest"
+    local wcontext
 
     if [ ! -f "$cf" ]; then
         log "ERROR: $cf not found"
         return 3
     fi
 
+    wcontext="$(mktemp -d "${TMPDIR:-/tmp}/tier2-${workload}.XXXXXX")"
+    CLEANUP_DIRS+=("$wcontext")
+    cp -a "$context/." "$wcontext/"
+    if ! stage_workload_context "$wcontext" "$workload"; then
+        return 2
+    fi
+
     log "building $tag from $cf"
     if ! podman build \
-            --file "$context/$cf" \
+            --file "$wcontext/$cf" \
             --build-arg "SNAPSHOT=$tier2_snapshot" \
             --tag "$tag" \
             --layers \
-            "$context"; then
+            "$wcontext"; then
         log "FAIL: $tag (podman build returned non-zero)"
         return 1
     fi
@@ -123,8 +171,10 @@ fi
 
 rc=0
 for w in "${workloads[@]}"; do
-    if ! build_workload "$w"; then
-        rc=1
+    if build_workload "$w"; then
+        :
+    else
+        rc=$?
         log "  → build failed for $w"
     fi
 done

@@ -1,0 +1,78 @@
+# Tier-2 first-party qfileman image. Pack 07 scenario 4 needs a real
+# snapshot consumer inside both persistent and disposable tier-2 homes;
+# this workload is that consumer. weston-terminal stays the bats-minimum
+# image and does not gain PyQt6.
+#
+# Built by tier2/make-tier2-image.sh, which stages qdfileman/ and
+# sdk/presentation/ into the build context as qdfileman/ and presentation/.
+# Produces: qdistro/tier2-qfileman:latest
+#
+# The host-side spawn-tier2.sh wraps `podman run` with the same nested
+# weston + qdwin-shell.so path as weston-terminal. Presentation is bind-
+# mounted at run time from /var/lib/qdistro/presentation; this image does
+# not bake current.json. The base follows the snapshot.conf pin.
+ARG SNAPSHOT
+FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}
+
+# Replace the rolling repositories inherited from the base before zypper reads
+# metadata. The shared helper pins both repos and leaves GPG checks enabled.
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive dup --no-recommends
+
+# Nested weston stack (same as weston-terminal) plus the Python/Qt runtime
+# qfileman needs. This is the file-manager pilot: Widgets Qt only, no
+# browser-engine RPM. tomli-w is a declared qfileman runtime dep;
+# bootstrap installs apps with --no-deps, so it is an RPM here. Fonts
+# are names-only in the snapshot; missing families fall back inside the
+# consumer.
+RUN zypper --non-interactive install --no-recommends \
+        weston \
+        libweston-16 \
+        libpipewire-0_3-0 \
+        libwayland-client0 \
+        libwayland-server0 \
+        Mesa-libGL1 \
+        Mesa-libEGL1 \
+        libxkbcommon0 \
+        xkeyboard-config \
+        coreutils \
+        python313 \
+        python313-pip \
+        python313-setuptools \
+        python313-PyQt6 \
+        python313-tomli-w \
+        qt6-wayland \
+        google-noto-sans-fonts \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# qdwin-shell.so is installed by the host build and bind-mounted at
+# /usr/lib64/weston/qdwin-shell.so, same as weston-terminal.
+
+COPY qdfileman /usr/src/qdfileman
+COPY presentation /usr/src/presentation
+RUN python3 -m pip install --no-deps --no-cache-dir --prefix=/usr \
+        /usr/src/presentation \
+        /usr/src/qdfileman \
+ && rm -rf /usr/src/qdfileman /usr/src/presentation \
+ && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -c \
+        "import qdistro_presentation, qfileman"
+
+# Inner weston needs a config that loads qdwin-shell.so + the pipewire
+# backend (per-toplevel pixel feed; the publisher reaches the outer on
+# its own connection, so no wayland-backend — see weston.ini).
+COPY weston.ini /etc/xdg/weston/weston.ini
+
+# In-container entrypoint: starts inner weston, exec's the inner app
+# once the inner socket appears.
+COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint
+
+# uid 1000 = admin on the host; --userns=keep-id maps it 1:1.
+USER 1000:1000
+WORKDIR /home/admin
+
+ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+CMD ["qfileman"]

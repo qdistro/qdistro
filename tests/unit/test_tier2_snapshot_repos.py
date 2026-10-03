@@ -58,7 +58,7 @@ def test_make_script_builds_with_snapshot_conf_pin(tmp_path):
 
 
 def test_every_shipped_tier2_recipe_replaces_repos_before_refresh():
-    assert len(CONTAINERFILES) == 5
+    assert len(CONTAINERFILES) == 6
     for path in CONTAINERFILES:
         text = path.read_text()
         configure = text.index("configure-snapshot-repos.sh")
@@ -164,3 +164,100 @@ def test_configurator_replaces_rolling_repos_with_signed_snapshot(tmp_path):
         assert f"https://download.opensuse.org/history/{snapshot}/" in text
         assert "\ngpgcheck=1\n" in text
         assert "tumbleweed:latest" not in text
+
+
+def _context_listing_podman(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    listing = tmp_path / "context-listing"
+    podman = fakebin / "podman"
+    podman.write_text(
+        "#!/bin/sh\n"
+        'for a; do last="$a"; done\n'
+        f'{{ echo CONTEXT="$last"; ls -1 "$last"; }} >> {listing}\n'
+    )
+    podman.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fakebin}:{os.environ['PATH']}"}
+    return listing, env, podman
+
+
+def test_make_script_stages_qfileman_sources_only_for_that_workload(tmp_path):
+    listing, env, _ = _context_listing_podman(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(TIER2 / "make-tier2-image.sh"), "weston-terminal", "qfileman"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    blocks = listing.read_text().split("CONTEXT=")
+    # Two CONTEXT blocks: first weston-terminal, second qfileman.
+    contexts = [b for b in blocks if b.strip()]
+    assert len(contexts) == 2, listing.read_text()
+    weston_names = set(contexts[0].split())
+    qfileman_names = set(contexts[1].split())
+    assert "qdfileman" not in weston_names
+    assert "presentation" not in weston_names
+    assert "qdfileman" in qfileman_names
+    assert "presentation" in qfileman_names
+    assert (ROOT / "qdfileman" / "pyproject.toml").exists()
+    assert (ROOT / "sdk" / "presentation" / "pyproject.toml").exists()
+
+
+def test_make_script_qfileman_fails_without_consumer_sources(tmp_path):
+    standalone, env, calls = _standalone_tier2(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(standalone / "make-tier2-image.sh"), "qfileman"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2
+    assert "qfileman sources missing" in proc.stderr
+    assert not calls.exists()
+
+
+def test_make_script_qfileman_accepts_staged_consumer_dir(tmp_path):
+    standalone, env, calls = _standalone_tier2(tmp_path)
+    consumer = standalone / "consumer"
+    consumer.mkdir()
+    shutil.copytree(ROOT / "qdfileman", consumer / "qdfileman")
+    shutil.copytree(ROOT / "sdk" / "presentation", consumer / "presentation")
+    listing = tmp_path / "staged-listing"
+    podman = Path(env["PATH"].split(":")[0]) / "podman"
+    podman.write_text(
+        "#!/bin/sh\n"
+        'for a; do last="$a"; done\n'
+        f'{{ echo CONTEXT="$last"; ls -1 "$last"; }} >> {listing}\n'
+        f'printf \'%s\\n\' "$*" >> {calls}\n'
+    )
+    proc = subprocess.run(
+        ["bash", str(standalone / "make-tier2-image.sh"), "qfileman"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    names = set(listing.read_text().split())
+    assert "qdfileman" in names
+    assert "presentation" in names
+
+
+def test_qfileman_containerfile_is_a_presentation_consumer_without_webengine():
+    text = (TIER2 / "Containerfile.qfileman").read_text()
+    assert "COPY qdfileman /usr/src/qdfileman" in text
+    assert "COPY presentation /usr/src/presentation" in text
+    assert "python313-PyQt6" in text
+    assert "python313-tomli-w" in text
+    assert "qt6-wayland" in text
+    assert "google-noto-sans-fonts" in text
+    assert "pip install --no-deps" in text
+    assert "/usr/src/presentation" in text
+    assert "/usr/src/qdfileman" in text
+    assert 'CMD ["qfileman"]' in text
+    assert "import qdistro_presentation, qfileman" in text
+    assert "WebEngine" not in text
+    assert "qdbrowser" not in text
+    assert "qterminator" not in text
+    assert "qnotebook" not in text
+    assert (TIER2 / "seccomp" / "qfileman.json").is_file()
