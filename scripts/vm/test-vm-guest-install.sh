@@ -62,7 +62,11 @@ done
 # apps, fonts for Qt text, the seat daemon, and the pinned SELinux policy the
 # staged modules load into.
 pkgs+=(python313-pip dejavu-fonts google-noto-coloremoji-fonts seatd
-       selinux-policy-targeted policycoreutils qemu-guest-agent libpango-1_0-0)
+       selinux-policy-targeted policycoreutils qemu-guest-agent libpango-1_0-0
+       # The admin TUI's modules: install-admin-cli-for-vm.sh fails the
+       # strict chain without them, and QDISTRO_PKGS cannot carry them (its
+       # list feeds the baked base's recipe digest — a9abd7e15).
+       python313-textual python313-rich)
 tvm_log "installing ${#pkgs[@]} runtime packages from snapshot $snap..."
 zypper -n refresh
 # One retry: download.opensuse.org's history mirrors occasionally fail a

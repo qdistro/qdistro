@@ -548,6 +548,25 @@ baseline() {
             done
             sleep 2
         done
+        # A dead qdshell can leave the compositor shell slot held by a
+        # stale wl_client (run 37102833917: each new qdshell layer-shell
+        # bind is then rejected as not-the-shell-client and the service
+        # sits in auto-restart forever). Member restarts cannot break that
+        # loop; restarting the compositor drops every wl_client and frees
+        # the slot. Escalate to it once before giving up.
+        if ! systemctl --user -M admin@ is-active --quiet qdshell.service; then
+            echo "harness: admin qdshell still not active; restarting the compositor"
+            systemctl --user -M admin@ restart qdwin-compositor.service || true
+            for _ in $(seq 1 30); do
+                healthy && exit 0
+                for u in $usr; do
+                    systemctl --user -M admin@ is-active --quiet "$u" ||
+                        { systemctl --user -M admin@ reset-failed "$u" 2>/dev/null;
+                          systemctl --user -M admin@ start "$u" 2>/dev/null || true; }
+                done
+                sleep 2
+            done
+        fi
         echo "harness: baseline NOT restored after this file"
         exit 1' 2>&1
 }
@@ -594,6 +613,7 @@ for f in "${BATS_FILES[@]}"; do
         SSH_CAP=60 rootssh 'echo "--- failed units"; systemctl --no-pager --failed; \
             echo "--- admin session units"; systemctl --user -M admin@ --no-pager list-units "qdwin*" "qdshell*" 2>&1 | tail -12; \
             echo "--- wayland sockets"; ls -l /run/user/1000/wayland-* 2>&1; \
+            echo "--- qdshell journal"; journalctl -M admin@ --user-unit qdshell.service --no-pager -n 15 2>&1; \
             echo "--- compositor journal"; journalctl -b --no-pager _COMM=weston 2>/dev/null | tail -12' \
             >> "$W/baseline.out" 2>&1 || true
     fi
