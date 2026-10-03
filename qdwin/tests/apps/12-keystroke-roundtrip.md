@@ -16,8 +16,13 @@ source "$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh"
 qdwin_apps_set_vm "${VMNAME}"
 qdwin_apps_session_up || { echo "FAIL: bystander/weston not healthy"; exit 1; }
 qdwin_apps_kill_all
-"$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1' || {
+# This host-side helper runs command -v inside VMNAME. The host's PATH is
+# unrelated to the GUI golden and must not be used for this prerequisite.
+qdwin_apps_guest_has_command foot || {
   echo "ERROR: foot, a core test client, is missing from the GUI golden"; exit 2;
+}
+qdwin_apps_guest_has_command xterm || {
+  echo "ERROR: xterm, a core test client, is missing from the GUI golden"; exit 2;
 }
 ```
 

@@ -65,6 +65,19 @@ qdwin_apps_require_vm() {
     fi
 }
 
+# Check a client in the guest image, never in the host driver environment.
+# A host-side `command -v foot` gave scenario 12 a false missing-client ERROR
+# while another worker launched foot from the same golden successfully.
+qdwin_apps_guest_has_command() {
+    qdwin_apps_require_vm || return 1
+    local client="${1:-}"
+    if ! [[ "$client" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]]; then
+        echo "qdwin-apps-helpers: invalid guest command name: $client" >&2
+        return 1
+    fi
+    "$QDWIN_VM_EXEC" "$VMNAME" "command -v $client >/dev/null 2>&1"
+}
+
 # Ask the VM which wayland-N socket weston is currently serving. Reads
 # /proc/<weston-pid>/fd/* lock targets — robust against the
 # wayland-1 / wayland-2 rotation that happens after weston restarts.
