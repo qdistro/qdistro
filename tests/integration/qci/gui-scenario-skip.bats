@@ -51,6 +51,49 @@ setup() {
     [ -z "$output" ]
 }
 
+@test "gui labwc admin lane: opt-in; the ported admin-app scenarios run on qdwin" {
+    local rel
+    # Ported off the labwc lane: routed to qdwin and never labwc-skipped, with
+    # or without the leading qdistro/ that gui_scenario_rel may print.
+    for rel in \
+        qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md \
+        tests/integration/permissions-gui/04-qt-admin-app-approve.md \
+        qdistro/tests/integration/permissions-gui/06-qt-admin-app-mouse.md \
+        qdistro/tests/integration/permissions-gui/08-admin-app-survives-broker-restart.md \
+        qdistro/tests/integration/permissions-gui/10-qt-cache-revoke.md \
+        qdistro/tests/integration/permissions-gui/12-cross-user-sendto-visual.md \
+        qdistro/tests/integration/permissions-gui/13-cross-user-sendto-deny.md \
+        qdistro/tests/integration/permissions-gui/14-cross-user-sendto-forbidden-scope.md \
+        qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md \
+        qdistro/tests/integration/permissions-gui/43-qsu-admin-app-argv-prompt.md \
+        qdistro/tests/integration/permissions-gui/47-qsu-delegated-guard-forever-exe-rejected.md \
+        qdistro/tests/integration/workflow-gui/04-admin-workflowstab-list-run-view.md; do
+        gui_scenario_requires_qdwin "$rel" || { echo "not qdwin-routed: $rel"; return 1; }
+        run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    # Still on the labwc lane: skipped by default, run when opted in.
+    rel=qdistro/tests/integration/permissions-gui/07-cli-roundtrip.md
+    run gui_scenario_requires_qdwin "$rel"
+    [ "$status" -ne 0 ]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"QCI_LABWC_ADMIN_LANE=1"* ]]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 1 0
+    [ -z "$output" ]
+    # QCI_XWAYLAND_E2E=1 admits the qterminal/TUI scenarios (labwc-only by
+    # nature), not the rest of the lane.
+    run gui_scenario_labwc_lane_skip_reason \
+        qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md 0 1
+    [ -z "$output" ]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 0 1
+    [[ "$output" == *"QCI_LABWC_ADMIN_LANE=1"* ]]
+    # Lanes that were always qdwin are untouched.
+    run gui_scenario_labwc_lane_skip_reason qdwin/tests/gui/12-bar-no-overdraw.md 0 0
+    [ -z "$output" ]
+}
+
 # All outer-stack capabilities present (a fully provisioned tier-4/5 GUI VM).
 reason_full_stack() {
     local rel=$1
@@ -158,43 +201,107 @@ reason_full_stack() {
 }
 
 # ---------------------------------------------------------------------------
-# qdwin app-compatibility deps gate (gui_scenario_app_deps_skip_reason)
+# gui-apps lane gate (gui_scenario_app_deps_skip_reason rel app_deps apps_optin)
 # ---------------------------------------------------------------------------
 
-@test "gui app-deps skip: apps/04 SKIPs when the golden lacks app deps (app_deps=0)" {
-    run gui_scenario_app_deps_skip_reason \
-        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 0
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"qdwin app-test deps not installed"* ]]
-    [[ "$output" == *"QDWIN_APP_DEPS=1"* ]]
+@test "gui-apps lane: third-party app scenarios SKIP unless QCI_GUI_APPS=1" {
+    local rel
+    for rel in qdwin/tests/apps/01-firefox-max-restore.md \
+               qdwin/tests/apps/05-gtk4-gnome-text-editor.md \
+               qdwin/tests/apps/07-qt5-vlc.md \
+               qdwin/tests/apps/09-wxwidgets-audacity.md \
+               qdwin/tests/apps/11-imlib2-feh.md; do
+        # Even a golden that HAS the app deps does not run them without opt-in:
+        # QDWIN_APP_DEPS=1 alone must no longer pull them into qci full.
+        run gui_scenario_app_deps_skip_reason "$rel" 1 0
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"gui-apps lane"* ]] || { echo "$rel: $output"; return 1; }
+        [[ "$output" == *"QCI_GUI_APPS=1"* ]]
+    done
 }
 
-@test "gui app-deps run: apps/04 RUNS when app deps are present (app_deps=1)" {
-    run gui_scenario_app_deps_skip_reason \
-        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 1
+@test "gui-apps lane: opted in with app deps, the app scenarios RUN" {
+    run gui_scenario_app_deps_skip_reason "qdwin/tests/apps/06-gtk3-thunar-xwayland.md" 1 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
-@test "gui app-deps run: apps/05 gtk4 also gated on app deps" {
-    run gui_scenario_app_deps_skip_reason \
-        "qdwin/tests/apps/05-gtk4-gnome-text-editor.md" 0
+@test "gui-apps lane: opted in on a golden without the app set SKIPs naming the bake" {
+    run gui_scenario_app_deps_skip_reason "qdwin/tests/apps/08-electron-chromium.md" 0 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"qdwin app-test deps not installed"* ]]
+    [[ "$output" == *"app-test deps not installed"* ]]
 }
 
-@test "gui app-deps run: a non-apps scenario is never app-deps-skipped" {
+@test "gui-apps lane: default args treat the lane as not opted in (skip)" {
+    run gui_scenario_app_deps_skip_reason "qdwin/tests/apps/10-tk-fltk-swing.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"QCI_GUI_APPS=1"* ]]
+}
+
+@test "gui-apps lane: blocking app scenarios 02 03 04 12 13 always run" {
+    local rel
+    for rel in qdwin/tests/apps/02-xterm-xwayland-launch.md \
+               qdwin/tests/apps/03-foot-vs-xterm-tagging.md \
+               qdwin/tests/apps/04-cursor-spam-suppressed.md \
+               qdwin/tests/apps/12-keystroke-roundtrip.md \
+               qdwin/tests/apps/13-rdp-subscribe-frame.md; do
+        run gui_scenario_app_deps_skip_reason "$rel" 0 0
+        [ "$status" -eq 0 ]
+        [ -z "$output" ] || { echo "$rel: $output"; return 1; }
+    done
+}
+
+@test "gui-apps lane: the lane split matches the scenario files on disk" {
+    # Every shipped apps scenario is either in the lane or blocking, and the
+    # lane names exactly 01 and 05-11 (8 files).
+    local f rel lane=0 blocking=0
+    for f in "$REPO_ROOT"/qdwin/tests/apps/[0-9][0-9]-*.md; do
+        rel=qdwin/tests/apps/${f##*/}
+        if gui_scenario_is_gui_apps_lane "$rel"; then lane=$((lane + 1)); else blocking=$((blocking + 1)); fi
+    done
+    [ "$lane" -eq 8 ]
+    [ "$blocking" -eq 4 ]
+}
+
+@test "gui-apps lane: a non-apps scenario is never app-deps-skipped" {
     run gui_scenario_app_deps_skip_reason \
-        "qdwin/tests/gui/12-bar-no-overdraw.md" 0
+        "qdwin/tests/gui/12-bar-no-overdraw.md" 0 0
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
-@test "gui app-deps run: default arg treats missing flag as absent (skip)" {
-    run gui_scenario_app_deps_skip_reason \
-        "qdwin/tests/apps/07-qt5-vlc.md"
+@test "opt-in lane: permissions-gui/16 skips unless QCI_XWAYLAND_E2E=1" {
+    local rel
+    for rel in qdistro/tests/integration/permissions-gui/16-realapp-sendto-visual.md; do
+        run gui_scenario_xwayland_skip_reason "$rel" 0
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"QCI_XWAYLAND_E2E=1"* ]] || { echo "$rel: $output"; return 1; }
+        run gui_scenario_xwayland_skip_reason "$rel" 1
+        [ -z "$output" ]
+    done
+}
+
+
+@test "ported multi-pending navigation runs on qdwin without XWayland opt-in" {
+    local rel=qdistro/tests/integration/permissions-gui/34-admin-app-multi-pending-nav.md
+    run gui_scenario_xwayland_skip_reason "$rel" 0
     [ "$status" -eq 0 ]
-    [[ "$output" == *"qdwin app-test deps not installed"* ]]
+    [ -z "$output" ]
+    run gui_scenario_labwc_lane_skip_reason "$rel" 0 0
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run gui_scenario_requires_qdwin "$rel"
+    [ "$status" -eq 0 ]
+}
+
+@test "agent_scenarios: workflow-gui is enumerated, deleted scenarios are not" {
+    WORKSPACE=$REPO_ROOT QDISTRO_REPO=$REPO_ROOT run agent_scenarios
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/tests/integration/workflow-gui/01-one-trigger-one-run-audit-row.md"* ]]
+    [[ "$output" == *"/tests/integration/workflow-gui/03-failure-mid-step-scrub-failed-run.md"* ]]
+    [[ "$output" != *"/qdwin/tests/gui/01-"* ]]
+    [[ "$output" != *"06-taskbar-isolation-menu"* ]]
+    [[ "$output" != *"48-qsu-tui-argv-rendering"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -329,8 +436,8 @@ reason_full_stack() {
     [ "$status" -eq 0 ]
 }
 
-@test "gui classify: admin rows do not require the qdwin profile" {
-    run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md"
+@test "gui classify: retained TUI rows do not require the qdwin profile" {
+    run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/01-tui-approver-visual.md"
     [ "$status" -ne 0 ]
 }
 
@@ -409,12 +516,12 @@ reason_full_stack() {
     [ "$status" -ne 0 ]
 }
 
-@test "gui run: admin permissions scenario still RUNS when qdwin lane is disabled" {
+@test "gui skip: ported admin permissions scenario requires the qdwin lane" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md" \
         0 0 0 "" 1
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
+    [[ "$output" == *"qdwin"* ]]
 }
 
 @test "gui skip: SELinux (55) SKIPs when VM_SSH_PORT unset" {

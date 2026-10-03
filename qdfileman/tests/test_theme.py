@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
 from PyQt6.QtGui import QPalette
-from qfileman.theme import apply_theme
+from qfileman.theme import _underlying_style_name, apply_theme
 
 
 def test_apply_theme_dark_sets_dark_window_color(qapp):
@@ -19,7 +20,7 @@ def test_apply_theme_light_is_default_palette(qapp):
     # Switch to dark first, then to light, to prove the override is removed.
     apply_theme(qapp, "dark")
     apply_theme(qapp, "light")
-    assert qapp.style().objectName().lower() == "fusion"
+    assert _underlying_style_name(qapp).lower() == "fusion"
     # Compare against a fresh QPalette() — light mode should match it.
     default = QPalette()
     assert (
@@ -44,13 +45,48 @@ def test_apply_theme_unknown_mode_falls_back_with_warning(qapp, caplog):
 def test_apply_theme_light_uses_fusion_style(qapp):
     """Light mode opts into Fusion for consistent rendering."""
     apply_theme(qapp, "light")
-    assert qapp.style().objectName().lower() == "fusion"
+    assert _underlying_style_name(qapp).lower() == "fusion"
 
 
 def test_apply_theme_dark_uses_fusion_style(qapp):
     """Dark mode also opts into Fusion (the palette is Fusion-shaped)."""
     apply_theme(qapp, "dark")
-    assert qapp.style().objectName().lower() == "fusion"
+    assert _underlying_style_name(qapp).lower() == "fusion"
+
+
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_apply_theme_native_restores_captured_baseline(qapp, with_qss):
+    from PyQt6.QtGui import QColor
+    from PyQt6.QtWidgets import QStyleFactory
+    from qfileman.theme import reset_controller_for_tests
+
+    windows = next((n for n in QStyleFactory.keys() if n.lower() == "windows"), None)
+    if windows is None:
+        pytest.skip("Windows style required to distinguish Fusion")
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
+    reset_controller_for_tests()
+    try:
+        qapp.setStyle(windows)
+        pal = QPalette(qapp.palette())
+        pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+        qapp.setPalette(pal)
+        qapp.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
+        window_rgb = qapp.palette().color(QPalette.ColorRole.Window).getRgb()
+        qss = qapp.styleSheet()
+        apply_theme(qapp, "dark")
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+        assert _underlying_style_name(qapp).lower() == "fusion"
+        assert apply_theme(qapp, "native") == "native"
+        assert _underlying_style_name(qapp).lower() == "windows"
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert qapp.styleSheet() == qss
+    finally:
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)
 
 
 def test_apply_theme_system_is_a_noop(qapp):

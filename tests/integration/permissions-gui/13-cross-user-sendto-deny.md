@@ -2,6 +2,10 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
 **What**: same RelayMessage as scenario 12, but admin clicks
 **Deny**. Assert notepad never received the payload, sender sees
 a `org.qdistro.AdminBroker1.Denied` DBusException, audit row
@@ -15,12 +19,18 @@ distinguishes them.
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-1336}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures (the relay target is work2's notepad),
+# idle locker held off and proven unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.service'
 # The suppression check below reads this stub's document. If the stub is not on
 # the bus yet, GetDocument errors instead of answering, and "the output does not
@@ -47,8 +57,12 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  echo "refused. What matters here: without the sentinel the suppression check"
  echo "below is unfalsifiable, so the scenario must not continue." >&2
  exit 1; }
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
+# The relay target must be visible to the broker before S1 sends to it.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_dbus_system_name org.qdistro.UserRelay.uid3000'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_receiver 3000 org.qdistro.StubNotepad.uid3000'
+# The shipped launcher, first-paint mode (a nonzero exit is a Setup ERROR).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
 ```
 
 ## Steps
@@ -139,14 +153,15 @@ print(ids[0] if len(ids) == 1 else ("ambiguous" if ids else "none"))
 done
 echo "${relay_reqid:-none}" >/tmp/13-relay.reqid
 echo "broker request_id=${relay_reqid:-none}"
-sleep 1
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/13-s1-pending.png
+# The app displays the request as its one row. A timeout FAILS S1.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30'
+qdwin_screenshot "$ART/13-s1-pending.png"
 ```
 
-**Assert (OCR /tmp/13-s1-pending.png)**:
+**Assert (vision, on `13-s1-pending.png`)**:
 - `uid=2000` visible.
 - `payload=deny_me_please` visible in the details line.
 - Buttons labeled `Approve` and `Deny` are present.
@@ -154,11 +169,10 @@ $VMGUI "$VM" screenshot /tmp/13-s1-pending.png
 ### S2 — deny via keyboard
 
 ```bash
-# Mouse click delivery to Qt/XWayland windows is platform-blocked on
-# this template. Drive the Deny action through the virtual keyboard
-# path documented in AGENTS.md.
-$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "admin approvals" windowactivate --sync'
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
+# Drive the Deny action through the KVM keyboard (AGENTS.md 3a) into the
+# window qdwin reports as keyboard-focused.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+virsh -c qemu:///session send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 ```
 
 Then, as a separate command, the title wait. **It must start only AFTER
@@ -174,67 +188,33 @@ keystroke is even sent, and S2 fails with a deny that actually worked
 
 ```bash
 # Settle before grading. The title is computed from the Pending model's row
-# count, so "admin approvals" with no "(N pending)" means the model is empty.
-# The client surface can lag the title: a fixed `sleep 2` once captured the
-# emptied title over the stale, still-selected row (2026-09-24, scenario 13).
+# count, so "admin approvals" with no "(N pending)" means the model is empty,
+# and qdwin logs the title on the commit that carries that frame.
 title_rc=0
-$VMEXEC "$VM" 'for _ in $(seq 1 60); do
-  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
-  [ "$t" = "admin approvals" ] && exit 0
-  sleep 0.5
-done
-echo "title never settled: $t" >&2; exit 1' 2>"${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.err" || title_rc=$?
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30' \
+  2>"${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.err" || title_rc=$?
 echo "$title_rc" >"${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.rc"
 echo "title-wait rc=$title_rc"
 cat "${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.err"
 ```
 
-**Readiness, step 1 — title wait** (up to 60 polls, ~30 s). Run the
-block above as its own command and record the printed `title-wait rc=`
-line together with the stderr shown after it (both are also kept in
-`${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.rc` and `.err`; the `|| title_rc=$?` form keeps them
-even in a shell with errexit on). Any rc other than 0 is a
-failed step: S2 FAILS on that ground regardless of what the frames below
-show. Still capture and grade the frames as evidence; a later good frame
-does not erase the timeout.
+**Readiness — title wait** (~30 s). Run the block above as its own command
+and record the printed `title-wait rc=` line together with the stderr shown
+after it (both are also kept in `${QCI_SCENARIO_TMPDIR:-/tmp}/13-s2-title.rc`
+and `.err`; the `|| title_rc=$?` form keeps them even in a shell with errexit
+on). Any rc other than 0 is a failed step: S2 FAILS on that ground regardless
+of what the frame below shows. Then capture the one S2 frame:
 
-**Readiness, step 2 — bounded frame capture** (at most 5 frames, 2 s
-apart). Start with N=1. Each iteration is a separate runner action, not
-a shell loop:
+```bash
+qdwin_screenshot "$ART/13-s2-denied.png"
+```
 
-1. Capture frame N (substitute the number for `N`):
+On this lane the capture renders the compositor's committed buffers, so the
+frame after the title wait shows the emptied list; the labwc lane's "capture
+up to five frames" allowance for a stale surface does not apply. A frame that
+still shows the request is a FAIL.
 
-   ```bash
-   $VMGUI "$VM" screenshot /tmp/13-s2-denied-N.png
-   ```
-
-2. Open `/tmp/13-s2-denied-N.png` and grade it by looking at the image
-   (vision; no OCR helper). The empty state is: `(no selection)` in the
-   details pane and no request row in the Pending list.
-3. If frame N shows the empty state, copy it to the canonical path and
-   stop capturing:
-
-   ```bash
-   $VMGUI "$VM" view-copy /tmp/13-s2-denied-N.png --out /tmp/13-s2-denied.png
-   ```
-
-4. Otherwise, if N < 5: `sleep 2`, increment N, and go back to 1.
-5. If frame 5 still does not show the empty state, the surface stayed
-   stale across five frames with 2 s pauses between them (8 s of sleeps
-   plus capture and grading time) after the model emptied: S2 FAILS. Copy the last
-   frame to the canonical path and grade that below:
-
-   ```bash
-   $VMGUI "$VM" view-copy /tmp/13-s2-denied-5.png --out /tmp/13-s2-denied.png
-   ```
-
-Keep every numbered frame; do not delete or overwrite them.
-The canonical copy is made with `view-copy`, not `cp`: it carries the frame's
-raw identity (`.raw` sidecar, lineage to frame N) and a size of its own. You
-have already looked at frame N, and a same-size twin of a frame you have seen
-is read as black where it repeats.
-
-**Assert (open and grade /tmp/13-s2-denied.png by vision)**:
+**Assert (open and grade `13-s2-denied.png` by vision)**:
 - `(no selection)` visible again.
 - No `uid=2000` / `app.send-to:` text on screen.
 
@@ -613,6 +593,6 @@ $VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service -n 200 --no-pager'
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'rm -f /tmp/13-relay.out /tmp/13-relay.pid /tmp/13-relay.pidstart /tmp/13-relay.start /tmp/13-relay.baseid /tmp/13-relay.reqid'
 ```

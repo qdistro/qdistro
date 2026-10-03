@@ -117,6 +117,42 @@ teardown_file() {
     fi
 }
 
+@test "taskbar-isolation: the disposable's window maps with its live pixel feed (nested proxy curtain swapped)" {
+    # shellcheck disable=SC1090
+    source "$STATE"
+    ensures "the isolated disposable is a real, painted window on the desktop: its nested proxy left the blank curtain for the live feed"
+    # Moved here from the retired GUI scenario qdwin-noctalia/06 (its hard
+    # assert 2.1). The window reaches qdwin as a NESTED PROXY: qdwin logs
+    # `toplevel_security_context (nested proxy) handle=<N> ... app_id=<APP_ID>
+    # instance=<TOKEN>`, then, once the live feed replaces the curtain on the
+    # approved window, either `bind_proxy_pixels handle=<N> ... curtain swapped
+    # for live feed` or `activate pixel surface handle=<N> (deferred swap on
+    # allow)`. A stashed feed (pending) or a failed view-create is NOT a map.
+    # Follow the NEWEST matching handle in case the window is re-created.
+    # Read ONLY qdwin's own unit: qemu-ga logs every guest-exec command line,
+    # so a whole-journal grep would match this poll's own text.
+    local appid_esc=${APP_ID//./\\.}
+    vm_run "
+      for i in \$(seq 1 60); do
+        j=\$(journalctl -b _SYSTEMD_USER_UNIT=qdwin-compositor.service 2>/dev/null)
+        m=\$(printf '%s\n' \"\$j\" | grep -nE 'toplevel_security_context \(nested proxy\) handle=[0-9]+ .*engine=qdistro\.tier2 app_id=${appid_esc} instance=${LAUNCH_TOKEN}' | tail -1)
+        n=\${m%%:*}
+        h=\$(printf '%s\n' \"\$m\" | sed -n 's/.*(nested proxy) handle=\([0-9]*\) .*/\1/p')
+        if [ -n \"\$h\" ] && printf '%s\n' \"\$j\" | tail -n \"+\$n\" | grep -qE \"qdwin/nested-proxy: (bind_proxy_pixels handle=\$h surface=.*curtain swapped for live feed|activate pixel surface handle=\$h \(deferred swap on allow\))\"; then
+          echo \"MAPPED handle=\$h\"; exit 0
+        fi
+        sleep 0.5
+      done
+      echo NO_MAP; exit 1
+    "
+    if [ "$status" -eq 0 ] && grep -qE '^MAPPED handle=[0-9]+$' <<<"$output"; then
+        check_pass "the disposable's nested proxy swapped its curtain for the live feed" "$output"
+    else
+        check_fail "MAPPED handle=<N> within 30 s" "${output:-<no output>}" \
+            "the disposable committed its identity but its window never showed live pixels (nested weston or its pipewire feed did not come up, or the proxy was denied/held)"
+    fi
+}
+
 @test "taskbar-isolation: the isolated disposable is a live container in admin's rootless store" {
     # shellcheck disable=SC1090
     source "$STATE"

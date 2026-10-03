@@ -18,6 +18,13 @@ from PyQt6.QtCore import QTimer
 from qterminator.plugin import OutputWatcher
 
 
+def _paint_activity(titlebar, role: str, tooltip: str) -> None:
+    """Show the activity indicator using a semantic titlebar role."""
+    titlebar.set_activity(True)
+    titlebar.set_activity_style(role)
+    titlebar._activity_label.setToolTip(tooltip)
+
+
 def _install_connect_hook(app_controller, hook):
     """Register a hook to be called for each newly connected terminal.
 
@@ -178,11 +185,7 @@ class ErrorDetector(_ShadowWatcher):
         tid = id(terminal)
         try:
             titlebar = terminal._titlebar
-            titlebar.set_activity(True)
-            titlebar._activity_label.setStyleSheet(
-                "color: #e74c3c; font-size: 10px;"  # red
-            )
-            titlebar._activity_label.setToolTip("Error detected in output")
+            _paint_activity(titlebar, "error", "Error detected in output")
             # Prefix the current title with an error marker if not already
             if tid not in self._triggered:
                 current = titlebar._title_label.text()
@@ -264,11 +267,9 @@ class BuildProgressMonitor(_ShadowWatcher):
             # Only update if changed to avoid excessive repaints
             if last != percent:
                 self._tracking[tid] = percent
-                titlebar.set_activity(True)
-                titlebar._activity_label.setStyleSheet(
-                    "color: #3498db; font-size: 10px;"  # blue
+                _paint_activity(
+                    titlebar, "primary", f"Build progress: {percent}%"
                 )
-                titlebar._activity_label.setToolTip(f"Build progress: {percent}%")
 
             # Auto-clear on 100%
             if percent >= 100:
@@ -366,12 +367,12 @@ class LogLevelColorizer(_ShadowWatcher):
     # Keep a rolling window of recent log levels
     WINDOW_SIZE = 200
 
-    # Dot colors by dominant level
-    _COLORS = {
-        "error": "#e74c3c",   # red
-        "warn": "#f39c12",    # yellow/orange
-        "info": "#2ecc71",    # green
-        "debug": "#95a5a6",   # grey
+    # Semantic chrome roles by dominant level
+    _ROLES = {
+        "error": "error",
+        "warn": "activity",
+        "info": "secondary",
+        "debug": "dim",
     }
 
     def __init__(self):
@@ -420,7 +421,6 @@ class LogLevelColorizer(_ShadowWatcher):
         else:
             dominant = "debug"
 
-        color = self._COLORS[dominant]
         tooltip = (
             f"Log levels (last {total}): "
             f"ERROR={counts['ERROR']} WARN={counts['WARN']} "
@@ -429,11 +429,7 @@ class LogLevelColorizer(_ShadowWatcher):
 
         try:
             titlebar = terminal._titlebar
-            titlebar.set_activity(True)
-            titlebar._activity_label.setStyleSheet(
-                f"color: {color}; font-size: 10px;"
-            )
-            titlebar._activity_label.setToolTip(tooltip)
+            _paint_activity(titlebar, self._ROLES[dominant], tooltip)
         except AttributeError:
             pass
 
@@ -480,12 +476,10 @@ class SensitiveDataWarner(_ShadowWatcher):
             if pattern.search(text):
                 try:
                     titlebar = terminal._titlebar
-                    titlebar.set_activity(True)
-                    titlebar._activity_label.setStyleSheet(
-                        "color: #e74c3c; font-size: 10px;"  # red
-                    )
-                    titlebar._activity_label.setToolTip(
-                        "\u26a0 Possible secret/credential detected in output!"
+                    _paint_activity(
+                        titlebar,
+                        "error",
+                        "\u26a0 Possible secret/credential detected in output!",
                     )
                     self._warned.add(tid)
                 except AttributeError:

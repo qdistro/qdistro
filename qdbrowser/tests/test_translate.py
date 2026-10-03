@@ -203,6 +203,7 @@ def test_restyle_js_updates_variables_without_removing_overlay():
     p = overlay_palette("dark")
     assert "__COLORS__" not in js
     assert "__qdb_translate_overlay" in js
+    assert "__qdb_translate_toast" in js
     assert "setProperty" in js
     assert p["bg"] in js
     assert "removed:true" not in js
@@ -210,6 +211,8 @@ def test_restyle_js_updates_variables_without_removing_overlay():
     assert "location.href" not in js
     assert "original" not in js
     assert "translated" not in js
+    assert "createElement" not in js
+    assert "textContent" not in js
 
 
 def test_restyle_does_not_call_translation_api(monkeypatch, window):
@@ -226,13 +229,19 @@ def test_restyle_does_not_call_translation_api(monkeypatch, window):
     wv.view.page().runJavaScript.assert_called_once()
     js = wv.view.page().runJavaScript.call_args[0][0]
     assert "__qdb_translate_overlay" in js
+    assert "__qdb_translate_toast" in js
     assert "removed:true" not in js
+    assert "createElement" not in js
     t.call_openai_chat.assert_not_called()
 
 
 def test_overlay_palette_rejects_non_hex(monkeypatch):
     from qdbrowser import theme as theme_mod
-    from qdbrowser.plugins.translate import _build_overlay_js, _build_restyle_js
+    from qdbrowser.plugins.translate import (
+        _build_overlay_js,
+        _build_restyle_js,
+        _build_toast_js,
+    )
 
     monkeypatch.setattr(theme_mod, "palette_dict", lambda mode="auto": {
         "bg": "red; } * { x:expression(alert(1))",
@@ -247,8 +256,85 @@ def test_overlay_palette_rejects_non_hex(monkeypatch):
     assert p["accent"] == "#3d8fd4"
     inject = _build_overlay_js("hello", "bonjour")
     restyle = _build_restyle_js()
-    for js in (inject, restyle):
+    toast = _build_toast_js("translate failed")
+    for js in (inject, restyle, toast):
         assert "javascript:" not in js
         assert "expression(" not in js
         assert "url(" not in js
         assert "#1e1e1e" in js
+        assert "color:#fff" not in js
+
+
+def test_toast_js_uses_overlay_palette_variables():
+    from qdbrowser.plugins.translate import _build_toast_js
+    from qdbrowser.theme import overlay_palette
+
+    p = overlay_palette("dark")
+    js = _build_toast_js("Translating...", "dark")
+    assert "__PAYLOAD__" not in js
+    assert "__qdb_translate_toast" in js
+    assert "var(--qdb-bg)" in js
+    assert "var(--qdb-fg)" in js
+    assert "var(--qdb-border)" in js
+    assert p["bg"] in js
+    assert p["fg"] in js
+    assert p["border"] in js
+    assert "background:#1e1e1e" not in js
+    assert "color:#fff" not in js
+    assert "1px solid #555" not in js
+    assert "font-size" not in js
+    assert "font:13px" not in js
+    assert "Translating..." in js
+
+
+def test_toast_js_follows_snapshot(qapp, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from qdbrowser.plugins.translate import _build_restyle_js, _build_toast_js
+    from qdbrowser.theme import attach_presentation, reset_controller_for_tests
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+
+    def get(*keys, default=None):
+        if keys[:2] == ("general", "theme_mode"):
+            return "system"
+        if keys == ("appearance",):
+            return {}
+        return default
+
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    reset_controller_for_tests()
+    try:
+        attach_presentation(qapp, SimpleNamespace(get=get))
+        js = _build_toast_js("Translating…")
+        restyle = _build_restyle_js()
+    finally:
+        reset_controller_for_tests()
+
+    assert snap.colors.mSurface in js
+    assert snap.colors.mOnSurface in js
+    assert snap.colors.mOutline in js
+    assert "background:#1e1e1e" not in js
+    assert "color:#fff" not in js
+    assert "1px solid #555" not in js
+    assert "font-size" not in js
+    assert "__qdb_translate_toast" in restyle
+    assert snap.colors.mSurface in restyle
+    assert "createElement" not in restyle
+    assert "textContent" not in restyle
+
+
+def test_notify_injects_toast_js(window):
+    plug = window.plugins._instances["translate"]
+    wv = window._active_webview
+    wv.view.page().runJavaScript = MagicMock()
+    plug._notify(wv, "Translating...")
+    js = wv.view.page().runJavaScript.call_args[0][0]
+    assert "__qdb_translate_toast" in js
+    assert "var(--qdb-bg)" in js
+    assert "color:#fff" not in js
+    assert "font:13px" not in js
+    assert "Translating..." in js

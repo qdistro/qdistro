@@ -2,47 +2,56 @@
 
 <!-- qci:visual: required -->
 
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `AGENTS.md` first: no xdotool, no `DISPLAY=:0`; graded frames come
+from `qdwin_screenshot`.
+
 **What**: trigger a RelayMessage from `work` in the background,
 visually confirm the admin approvals app shows the request with
 its full detail payload, click **Approve**, verify the payload
 landed in `work2`'s notepad.
 
-**Why**: proves the admin half of the thesis under a real UI —
+**Why**: proves the admin half of the thesis under the real UI —
 the RelayMessage detail pane must render kind/payload/target_uid,
 the "Just this once" radio is pre-selected (forbidden scopes are
 broker-rejected), and the Approve click produces a cache-free
 audit trail.
 
-Sender-side GUI (qstub-sender as `work` on the GUI test compositor) is
-deferred — see .
+Sender-side GUI (qstub-sender as `work`) is deferred.
 
 ## Setup
 
 ```bash
-VM=${VMNAME:-qdistro-dev-260421-1336}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui            # click-preview / click-confirm
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
 
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+# Session up, work/work2 silo fixtures (the relay target is work2's notepad),
+# idle locker held off and proven unlocked. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup --silos'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.service'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_user_unit_active qstub-notepad.service work2'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_socket /run/user/3000/bus'
+# The notepad and the work2 relay are Type=simple: wait for their NAMES, and
+# for the broker to see the notepad as a receiver, not just for the units.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_dbus_system_name org.qdistro.UserRelay.uid3000'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_receiver 3000 org.qdistro.StubNotepad.uid3000'
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action LIKE 'app.send-to:%';
 SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-# The launcher detaches before Qt maps its XWayland window. Under a busy GUI
-# run, a fixed sleep can capture only the desktop even though the process is
-# alive. Wait for the window the S1 assertion actually needs.
-$VMEXEC "$VM" 'for _ in $(seq 1 60); do
-  t=$(runuser -u admin -- env DISPLAY=:0 xdotool search --name "^admin approvals" getwindowname 2>/dev/null | head -1)
-  [ "$t" = "admin approvals" ] && exit 0
-  sleep 0.5
-done
-echo "admin approvals window did not map: $t" >&2; exit 1'
+# The shipped launcher, first-paint mode: returns only after the window has
+# painted and the compositor holds the frame. A nonzero exit is a Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
 ```
 
 ## Steps
@@ -50,22 +59,13 @@ echo "admin approvals window did not map: $t" >&2; exit 1'
 ### S1 — admin app up, pending empty
 
 ```bash
-$VMGUI "$VM" screenshot /tmp/12-s1-empty.png
+qdwin_screenshot "$ART/12-s1-empty.png"
 ```
 
-Open `s1-empty.png` before grading it. The setup waits for the window
-title, but Qt can map the XWayland window before it paints it, so the
-first frame may still show black or half-drawn widgets (2026-10-01:
-black detail pane, `(no selection)` not yet drawn). If the frame shows
-any unpainted region, keep it and capture up to four more frames, 2 s
-apart, as `12-s1-empty-r2.png` through `-r5.png`. Open each new frame.
-The first fully painted frame is the S1 evidence. If none of the five is
-fully painted, S1 fails on the last frame and all captures remain in the
-artifacts. A fully painted frame that lacks `(no selection)` fails S1
-at once; do not retry it.
-
-**Assert (OCR the S1 evidence frame)**:
-- Text `admin approvals` appears (window titlebar).
+**Assert (vision, on the S1 frame)**:
+- The admin approvals window is fully drawn (no black, transparent or
+ desktop-patterned region cuts through it; on this lane that is a FAIL,
+ not a reason to recapture).
 - Text `(no selection)` appears in the detail pane.
 - Text `Pending` appears (tab label).
 - No text starting with `uid=2000` or `app.send-to:` on screen.
@@ -85,17 +85,18 @@ runuser -u work -- dbus-send --system --print-reply \
  string:hello_visual \
  >/tmp/12-relay.out 2>&1 &
 echo $! >/tmp/12-relay.pid
-sleep 1
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/12-s2-pending.png
+# The request is in the broker AND displayed as the one row. A timeout FAILS S2.
+$VMEXEC "$VM" "source /tmp/qci-gui-waiters.sh; await_broker_pending_action 'app.send-to:3000:org.qdistro.StubNotepad.uid3000' 30"
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals \(1 pending\)" 30'
+qdwin_screenshot "$ART/12-s2-pending.png"
 ```
 
-**Assert (OCR /tmp/12-s2-pending.png)** — every bullet below is
-a substring that must be visible somewhere on screen. OCR
-whitespace can be flaky, so match on the core words, not
-character-perfect alignment:
+**Assert (vision, on `12-s2-pending.png`)** — every bullet below is
+a substring that must be visible somewhere on screen; match on the
+core words, not character-perfect alignment:
 - `uid=2000` (detail pane header).
 - `app.send-to:3000:org.qdistro.StubNotepad.uid3000` (action line).
 - `kind=text/plain`, `payload=hello_visual`, `target_uid=3000`,
@@ -103,29 +104,25 @@ character-perfect alignment:
  in the details line — the broker detail sanitiser may join them
  with `,` and the font may wrap, but each key=value substring
  must be present).
-- `Just this once` label with its radio in the filled state
- (scope picker default — if OCR can't reliably detect the radio
- glyph state, it's enough to verify the text is present and
- the other scope labels `1 hour` / `24 hours` / `Forever` appear
- after it).
+- `Just this once` label with its radio in the filled state (the
+ scope picker default).
 - Buttons labeled `Approve` and `Deny` are present.
 
-### S3 — click Approve via OCR targeting
+### S3 — click Approve
 
 ```bash
-# Runner:
-# 1. OCR /tmp/12-s2-pending.png.
-# 2. Find the bounding box of the visible text "Approve".
-# There's exactly one such button in this window; if OCR
-# returns multiple hits, pick the one closest to "Deny" (they
-# sit next to each other at the bottom of the scope pane).
-# 3. Click the center of that bounding box:
-# $VMGUI "$VM" click <cx> <cy>
-sleep 2
-$VMGUI "$VM" screenshot /tmp/12-s3-approved.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+# Runner: locate the "Approve" button in 12-s2-pending.png (there is exactly
+# one, next to "Deny" below the scope group) and click its centre with the
+# preview / confirm handshake (AGENTS.md 3b):
+#   $VMGUI "$VM" click-preview <cx> <cy> "Approve"
+#   $VMGUI "$VM" click-confirm <preview-manifest>
+# Then wait for the list to empty before the frame. A timeout FAILS S3.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin approvals" 30'
+qdwin_screenshot "$ART/12-s3-approved.png"
 ```
 
-**Assert (OCR /tmp/12-s3-approved.png)**:
+**Assert (vision, on `12-s3-approved.png`)**:
 - `(no selection)` is visible again.
 - No text starting with `uid=2000` or `app.send-to:` on screen.
 
@@ -162,7 +159,7 @@ $VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approv
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.service'
 $VMEXEC "$VM" 'rm -f /tmp/12-relay.out /tmp/12-relay.pid'
 ```
@@ -176,5 +173,5 @@ $VMEXEC "$VM" 'rm -f /tmp/12-relay.out /tmp/12-relay.pid'
  (the reply just goes nowhere). S4's assertions verify the
  broker and notepad state, not the sender's exit.
 - Don't hard-code pixel coordinates for the Approve click. The
- admin app's layout shifts with Qt font/DPI/theme; OCR targeting
- on the text `Approve` is what keeps this scenario portable.
+ admin app's layout shifts with Qt font/DPI/theme; locate the
+ `Approve` text in the frame you just took.

@@ -52,9 +52,7 @@ fix has regressed — see `Settings.data.bar.exclusionZoneBleed`.
 
 ### Step 2 — maximize a base weston-terminal and observe its outer geometry
 
-We use `weston-terminal` (from the base-image `weston` package), NOT
-`foot` — `foot` lives in the opt-in `QDWIN_APP_DEPS` lane (off by
-default since 5f48e17) and is absent from the lean GUI golden. The
+We use `weston-terminal` (from the base-image `weston` package). The
 assertion is about the COMPOSITOR's `set_maximized` geometry, not any
 specific client, so any maximizable toplevel works. `weston-terminal`
 has no `--maximized` flag, so we maximize it through qdwin's own path:
@@ -67,7 +65,7 @@ the WM `Super+Up` (toggle-maximize) shortcut, registered by qdshell's
 CURSOR=$("$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n 1 \
   --show-cursor --no-pager 2>/dev/null | tail -1 | sed 's/^-- cursor: //'")
 # setsid -f detaches the client so it survives the vm-exec shell
-# returning (same launch shape as 17-qdshell-drives-close.md).
+# returning (same launch shape as agent-shell-drives-close-smoke.sh).
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "setsid -f runuser -u admin -- env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 \
    WAYLAND_DISPLAY=wayland-1 weston-terminal \
@@ -103,7 +101,7 @@ HANDLE=$("$QDWIN_VM_EXEC" "$VMNAME" "${GUEST_POLL//__CURSOR__/$CURSOR}")
 
 # Focus the window so qdshell's WindowManagerService._onHotkey acts on
 # it (the toggle-maximize hotkey no-ops when focusedHandle <= 0). Uses
-# the proven qs-ipc shape from 17-qdshell-drives-close.md / 19-wm-policy.md.
+# the proven qs-ipc shape from agent-shell-drives-close-smoke.sh / 19-wm-policy.md.
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
    qs ipc -p /usr/share/quickshell/qdshell call qdwin focusWindow $HANDLE" >/dev/null 2>&1

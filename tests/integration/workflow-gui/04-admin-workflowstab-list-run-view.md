@@ -1,5 +1,12 @@
 # 04 — admin app Workflows tab: list + run view + Refresh
 
+<!-- qci:visual: required -->
+
+**Lane: qdwin** (native Wayland, the shipped launcher). Read the "qdwin lane"
+section of `tests/integration/permissions-gui/AGENTS.md` first: no xdotool,
+no `DISPLAY=:0`; graded frames come from `qdwin_screenshot`; clicks use the
+preview / confirm handshake (its pitfall 3b).
+
 **What**: with several workflows loaded and at least one run on record,
 open the Qt admin app, switch to the Workflows tab, and verify the tab
 renders the workflow definitions table and the recent-runs table with the
@@ -16,12 +23,19 @@ admin editing workflow YAML sees the change without relaunching.
 ## Setup
 
 ```bash
-VM=${VMNAME:-$(virsh list --name --state-running | head -1)}
+VM=${VMNAME:?set VMNAME to the target VM}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
-VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
+VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui            # click-preview / click-confirm
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh   # qdwin_screenshot (host side)
+qdwin_set_vm "$VM"
+ART=${QCI_GUI_ARTIFACT_DIR:-/tmp}
+
+# Session up, idle locker held off and proven unlocked. A nonzero exit is a
+# Setup ERROR.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_admin_lane_setup'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 
 B64=$(base64 -w0 <<'EOF'
-pkill -u admin -f qdistro_admin_app 2>/dev/null || true
 rm -f /etc/qdistro/workflows/wfgui-*.yaml 2>/dev/null || true
 mkdir -p /etc/qdistro/workflows
 
@@ -29,6 +43,9 @@ mkdir -p /etc/qdistro/workflows
 cat > /etc/qdistro/workflows/wfgui-list-a.yaml <<'YAML'
 - name: wfgui-list-a
   description: cron lister A
+  # Without auto_run a fired trigger only parks a PENDING run for admin
+  # approval (finding F3), which expires; S1 needs a completed run.
+  auto_run: true
   trigger:
     type: cron
     interval_seconds: 5
@@ -55,7 +72,19 @@ systemctl restart qdistro-admin-broker.service
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-sleep 12   # let wfgui-list-a's 5s cron fire at least once
+# Wait (bounded) for wfgui-list-a's 5 s cron to have completed a run, read
+# from the engine's own audit DB, instead of a fixed sleep. A timeout is a
+# Setup ERROR (S1's runs table would have nothing to show).
+RUN_B64=$(base64 -w0 <<'EOF'
+for try in $(seq 1 60); do
+  n=$(sqlite3 /var/lib/qdistro/audit/workflow_audit.sqlite     "SELECT count(*) FROM workflow_runs WHERE workflow_name='wfgui-list-a' AND state='completed';" 2>/dev/null)
+  [ "${n:-0}" -ge 1 ] 2>/dev/null && { echo "completed runs: $n"; exit 0; }
+  sleep 1
+done
+echo "no completed wfgui-list-a run within 60s" >&2; exit 1
+EOF
+)
+$VMEXEC "$VM" "echo $RUN_B64 | base64 -d | bash"
 ```
 
 ## Steps
@@ -63,18 +92,17 @@ sleep 12   # let wfgui-list-a's 5s cron fire at least once
 ### S1 — open the admin app and switch to the Workflows tab
 
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-sleep 3
-B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/04-admin-workflowstab-list-run-view-s1-tabs.png
-# Runner: OCR-click the "Workflows" tab label (5th tab), then screenshot.
-# $VMGUI "$VM" click <cx> <cy>
-sleep 0.5
-$VMGUI "$VM" screenshot /tmp/04-admin-workflowstab-list-run-view-s1-workflows.png
+# The shipped launcher, first-paint mode (a nonzero exit FAILS S1).
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+qdwin_screenshot "$ART/04-admin-workflowstab-list-run-view-s1-tabs.png"
+# Runner: locate the "Workflows" tab label (5th tab) in that frame and click it
+# with the handshake:
+#   $VMGUI "$VM" click-preview <cx> <cy> "Workflows tab"
+#   $VMGUI "$VM" click-confirm <preview-manifest>
+# The tab queries the broker when shown; settle, then capture.
+sleep 1
+qdwin_screenshot "$ART/04-admin-workflowstab-list-run-view-s1-workflows.png"
 ```
 
 **Assert (both tables populated):**
@@ -109,17 +137,12 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 1
 
-# Click the Refresh button (OCR target "Refresh"), then screenshot.
-B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "admin approvals" windowactivate --sync
-EOF
-)
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/04-admin-workflowstab-list-run-view-s2-prerefresh.png
-# Runner: OCR-click the "Refresh" button, then screenshot.
-# $VMGUI "$VM" click <cx> <cy>
-sleep 0.5
-$VMGUI "$VM" screenshot /tmp/04-admin-workflowstab-list-run-view-s2-afterrefresh.png
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_focus_window "admin approvals.*"'
+qdwin_screenshot "$ART/04-admin-workflowstab-list-run-view-s2-prerefresh.png"
+# Runner: locate the "Refresh" button in that frame and click it with the
+# preview / confirm handshake, then settle and capture.
+sleep 1
+qdwin_screenshot "$ART/04-admin-workflowstab-list-run-view-s2-afterrefresh.png"
 ```
 
 **Assert (live refresh):**
@@ -132,14 +155,13 @@ $VMGUI "$VM" screenshot /tmp/04-admin-workflowstab-list-run-view-s2-afterrefresh
 ## Teardown
 
 ```bash
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_stop_admin_app'
 B64=$(base64 -w0 <<'EOF'
-pkill -u admin -f qdistro_admin_app 2>/dev/null || true
 rm -f /etc/qdistro/workflows/wfgui-*.yaml 2>/dev/null || true
 systemctl restart qdistro-admin-broker.service
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMEXEC "$VM" 'rm -f /tmp/04-admin-workflowstab-list-run-view-*.png 2>/dev/null || true'
 ```
 
 ## Notes for the runner

@@ -3,7 +3,7 @@
 import os
 import re
 
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QColor, QFont, QPalette
 from PyQt6.QtWidgets import QApplication, QWidget
 
 BG_DARK = "#1e1e1e"
@@ -53,10 +53,44 @@ def resolve_theme(mode: str) -> str:
     return detect_system_theme()
 
 
+_NATIVE_STYLE: str | None = None
+_NATIVE_PALETTE: QPalette | None = None
+_NATIVE_STYLESHEET: str | None = None
+
+
+def _underlying_style_name(app: QApplication) -> str:
+    """Factory style name, unwrapping QStyleSheetStyle's empty objectName."""
+    qss = app.styleSheet()
+    if not qss:
+        return app.style().objectName()
+    app.setStyleSheet("")
+    try:
+        return app.style().objectName()
+    finally:
+        app.setStyleSheet(qss)
+
+
+def _capture_native(app: QApplication) -> None:
+    global _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
+    if _NATIVE_PALETTE is not None:
+        return
+    _NATIVE_PALETTE = QPalette(app.palette())
+    _NATIVE_STYLESHEET = app.styleSheet()
+    _NATIVE_STYLE = _underlying_style_name(app)
+
+
+def _restore_native(app: QApplication) -> None:
+    _capture_native(app)
+    if _NATIVE_STYLE:
+        app.setStyle(_NATIVE_STYLE)
+    app.setPalette(QPalette(_NATIVE_PALETTE))
+    app.setStyleSheet(_NATIVE_STYLESHEET or "")
+
+
 def apply_theme(app: QApplication, mode: str = "system") -> str:
+    _capture_native(app)
     if mode == "native":
-        # Without a PresentationController there is no captured platform
-        # palette to restore; leave the current style in place.
+        _restore_native(app)
         return "native"
     resolved = resolve_theme(mode)
     if resolved == "light":
@@ -171,6 +205,18 @@ def overlay_palette(mode: str = "auto") -> dict[str, str]:
     }
 
 
+def _ui_font(*, relative: float = 1.0, bold: bool = False) -> QFont:
+    """Application UI font, optionally scaled for secondary chrome text."""
+    app = QApplication.instance()
+    font = QFont(app.font()) if app is not None else QFont()
+    size = font.pointSizeF()
+    if size <= 0:
+        size = float(font.pointSize() or 11)
+    font.setPointSizeF(max(6.0, size * relative))
+    font.setBold(bold)
+    return font
+
+
 def _apply_dark(app):
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(BG_MID))
@@ -259,6 +305,7 @@ _CONTROLLER = None
 
 def attach_presentation(app: QApplication, config):
     global _CONTROLLER
+    _capture_native(app)
     try:
         from qdistro_presentation.model import LocalOverrides, parse_local_overrides
         from qdistro_presentation.qt import PresentationController
@@ -319,13 +366,16 @@ def refresh_windows(app: QApplication) -> None:
 
 
 def reset_controller_for_tests() -> None:
-    global _CONTROLLER
+    global _CONTROLLER, _NATIVE_STYLE, _NATIVE_PALETTE, _NATIVE_STYLESHEET
     if _CONTROLLER is not None:
         try:
             _CONTROLLER.stop()
         except Exception:  # noqa: BLE001
             pass
     _CONTROLLER = None
+    _NATIVE_STYLE = None
+    _NATIVE_PALETTE = None
+    _NATIVE_STYLESHEET = None
     try:
         from qdistro_presentation.qt import reset_controller_for_tests as _reset
 

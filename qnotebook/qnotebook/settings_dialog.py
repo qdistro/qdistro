@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QKeySequenceEdit,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -243,11 +244,16 @@ class SettingsDialog(QDialog):
         self._combo_appearance = QComboBox()
         self._combo_appearance.addItems(list(THEME_LABEL_TO_KEY))
         self._appearance_dirty = False
-        self._combo_appearance.currentIndexChanged.connect(self._mark_appearance_dirty)
+        self._combo_appearance.currentIndexChanged.connect(self._on_appearance_combo_changed)
         global_form.addRow("Application appearance:", self._combo_appearance)
 
         self._chk_desktop_fonts = QCheckBox("Use desktop fonts")
         global_form.addRow(self._chk_desktop_fonts)
+
+        self.lbl_desktop_status = QLabel("")
+        self.lbl_desktop_status.setObjectName("lbl_desktop_status")
+        self.lbl_desktop_status.setWordWrap(True)
+        global_form.addRow(self.lbl_desktop_status)
 
         self._chk_document_fonts = QCheckBox("Use desktop document fonts")
         self._chk_document_fonts.setToolTip(
@@ -431,6 +437,7 @@ class SettingsDialog(QDialog):
         self._spin_ui_font_size.blockSignals(False)
         self._ui_font_size_dirty = False
         self._on_desktop_fonts_toggled(self._chk_desktop_fonts.isChecked())
+        self._refresh_desktop_status()
         self._chk_session_restore.setChecked(
             bool(self._settings.value("session_restore_enabled", True, type=bool))
         )
@@ -514,19 +521,23 @@ class SettingsDialog(QDialog):
     def _mark_appearance_dirty(self, _index: int = 0) -> None:
         self._appearance_dirty = True
 
+    def _on_appearance_combo_changed(self, index: int = 0) -> None:
+        self._mark_appearance_dirty(index)
+        self._refresh_desktop_status()
+
     def apply_presentation_update(self) -> None:
         """Follow a live mode change unless the user has unapplied edits."""
-        if self._appearance_dirty:
-            return
-        from .theme import current_controller
+        if not self._appearance_dirty:
+            from .theme import current_controller
 
-        ctrl = current_controller()
-        mode = ctrl.theme_mode if ctrl is not None else load_theme_mode(self._settings)
-        self._combo_appearance.blockSignals(True)
-        self._combo_appearance.setCurrentText(
-            THEME_KEY_TO_LABEL.get(mode, "Follow desktop")
-        )
-        self._combo_appearance.blockSignals(False)
+            ctrl = current_controller()
+            mode = ctrl.theme_mode if ctrl is not None else load_theme_mode(self._settings)
+            self._combo_appearance.blockSignals(True)
+            self._combo_appearance.setCurrentText(
+                THEME_KEY_TO_LABEL.get(mode, "Follow desktop")
+            )
+            self._combo_appearance.blockSignals(False)
+        self._refresh_desktop_status()
 
     def _mark_ui_font_size_dirty(self, _value: int) -> None:
         self._ui_font_size_dirty = True
@@ -534,6 +545,37 @@ class SettingsDialog(QDialog):
     def _on_desktop_fonts_toggled(self, checked: bool) -> None:
         self._combo_ui_font.setEnabled(not checked)
         self._spin_ui_font_size.setEnabled(not checked)
+        self._refresh_desktop_status()
+
+    def _refresh_desktop_status(self) -> None:
+        follow = self._combo_appearance.currentText() == "Follow desktop"
+        use_fonts = self._chk_desktop_fonts.isChecked()
+        try:
+            from qdistro_presentation.model import desktop_status_text
+
+            from .theme import current_controller
+
+            ctrl = current_controller()
+            state = ctrl.state if ctrl is not None else None
+            text = desktop_status_text(
+                state, follow_desktop=follow, use_desktop_fonts=use_fonts
+            )
+            if use_fonts and state is not None and state.desktop_available:
+                self._combo_ui_font.blockSignals(True)
+                self._combo_ui_font.setCurrentText(state.ui_family)
+                self._combo_ui_font.blockSignals(False)
+                self._spin_ui_font_size.blockSignals(True)
+                self._spin_ui_font_size.setValue(
+                    max(6, min(48, int(state.ui_point_size)))
+                )
+                self._spin_ui_font_size.blockSignals(False)
+                self._ui_font_size_dirty = False
+        except Exception:
+            text = (
+                "desktop settings unavailable" if follow or use_fonts else ""
+            )
+        self.lbl_desktop_status.setText(text)
+        self.lbl_desktop_status.setVisible(bool(text))
 
     def _apply_and_close(self) -> None:
         self._apply()

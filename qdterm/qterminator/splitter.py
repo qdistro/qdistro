@@ -13,7 +13,7 @@ class SplitContainer(QSplitter):
         super().__init__(orientation, parent)
         self.setChildrenCollapsible(False)
         self.setHandleWidth(2)
-        self.setStyleSheet("QSplitter::handle { background-color: #555; }")
+        self.apply_presentation_update()
 
     def add_terminal(self, terminal=None, working_directory=None,
                      shell_command=None):
@@ -116,6 +116,22 @@ class SplitContainer(QSplitter):
             total = self.width() if self.orientation() == Qt.Orientation.Horizontal else self.height()
             size = max(total // self.count(), 1)
             self.setSizes([size] * self.count())
+
+    def apply_presentation_update(self) -> None:
+        """Restyle this splitter and nested splitters from presentation roles."""
+        from qterminator.theme import pane_roles, using_shared_palette
+
+        if using_shared_palette():
+            outline = pane_roles(self)["outline"]
+            self.setStyleSheet(
+                f"QSplitter::handle {{ background-color: {outline}; }}"
+            )
+        else:
+            self.setStyleSheet("")
+        for i in range(self.count()):
+            child = self.widget(i)
+            if isinstance(child, SplitContainer):
+                child.apply_presentation_update()
 
     def find_terminals(self):
         """Recursively find all TerminalWidgets in this tree."""

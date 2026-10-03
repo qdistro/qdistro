@@ -55,6 +55,14 @@ from PyQt6.QtWidgets import (
 
 from qterminator.config import Config
 from qterminator.plugin import MenuProvider
+from qterminator.titlebar import _ui_font, titlebar_roles
+
+_FALLBACK_ERROR = "#e74c3c"
+_WARN_TEXT = (
+    "⚠ Bound to a non-loopback interface. Anyone on this network "
+    "with the key below can attach. Treat the key as a one-time "
+    "password — share it only out-of-band."
+)
 
 _MOSH_CONNECT_RE = re.compile(rb"MOSH CONNECT\s+(\d+)\s+(\S+)")
 _MOSH_DETACHED_RE = re.compile(rb"mosh-server detached, pid\s*=\s*(\d+)")
@@ -278,17 +286,14 @@ class _ShareDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Share Tmux Session via Mosh")
         self._share = share
+        self._warn = None
         layout = QVBoxLayout(self)
 
         if public_bind:
-            warn = QLabel(
-                "<b style='color:#e74c3c'>⚠ Bound to a non-loopback "
-                "interface.</b> Anyone on this network with the key "
-                "below can attach. Treat the key as a one-time "
-                "password — share it only out-of-band."
-            )
+            warn = QLabel(_WARN_TEXT)
             warn.setWordWrap(True)
             layout.addWidget(warn)
+            self._warn = warn
 
         layout.addWidget(QLabel(f"<b>Session:</b> {share.session}"))
         layout.addWidget(QLabel(f"<b>UDP port:</b> {share.port}"))
@@ -329,6 +334,18 @@ class _ShareDialog(QDialog):
         )
         footer.setWordWrap(True)
         layout.addWidget(footer)
+        self.apply_presentation_update()
+
+    def apply_presentation_update(self) -> None:
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        if self._warn is None:
+            return
+        roles = titlebar_roles(self)
+        color = roles.get("error") or _FALLBACK_ERROR
+        self._warn.setFont(_ui_font(bold=True))
+        self._warn.setStyleSheet(f"color: {color};")
 
     @staticmethod
     def _qr_pixmap(text: str) -> QPixmap | None:
@@ -373,6 +390,7 @@ class TmuxSharePlugin(MenuProvider):
         self._service: TmuxShareService | None = None
         self._enabled = False
         self._show_qr = False
+        self._dialogs: list[_ShareDialog] = []
 
     def activate(self, app_controller):
         self._window = app_controller
@@ -393,8 +411,14 @@ class TmuxSharePlugin(MenuProvider):
         # state — they may want to introspect existing shares.
         if not hasattr(app_controller, "tmux_share"):
             app_controller.tmux_share = self._service
+        if not hasattr(app_controller, "tmux_share_plugin"):
+            app_controller.tmux_share_plugin = self
         self._service.restore_running()
         self._update_titlebar_indicators()
+
+    def apply_presentation_update(self) -> None:
+        for dialog in list(self._dialogs):
+            dialog.apply_presentation_update()
 
     def deactivate(self):
         if self._service:
@@ -448,8 +472,13 @@ class TmuxSharePlugin(MenuProvider):
             show_qr=self._show_qr,
             parent=self._window,
         )
+        self._dialogs.append(dlg)
         self._update_titlebar_indicators()
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            if dlg in self._dialogs:
+                self._dialogs.remove(dlg)
         self._update_titlebar_indicators()
 
     def _terminals_for_session(self, session: str):
@@ -484,7 +513,12 @@ class TmuxSharePlugin(MenuProvider):
         for i in range(tabs.count()):
             split = tabs.widget(i)
             for terminal in split.find_terminals():
-                label = getattr(terminal._titlebar, "_tmux_share_label", None)
+                titlebar = getattr(terminal, "_titlebar", None)
+                if titlebar is None:
+                    continue
+                label = titlebar.titlebar_widget("tmux-share")
+                if label is None:
+                    label = getattr(titlebar, "_tmux_share_label", None)
                 if label is not None:
                     label.hide()
 
@@ -492,12 +526,13 @@ class TmuxSharePlugin(MenuProvider):
         titlebar = getattr(terminal, "_titlebar", None)
         if titlebar is None:
             return
-        label = getattr(titlebar, "_tmux_share_label", None)
+        label = titlebar.titlebar_widget("tmux-share")
         if label is None:
             label = QLabel(titlebar)
-            label.setStyleSheet("color: #8fd19e; font-size: 10px; font-weight: bold;")
-            titlebar.layout().insertWidget(3, label)
-            titlebar._tmux_share_label = label
+            titlebar.add_titlebar_widget(
+                "tmux-share", label, side="left", role="secondary"
+            )
+        titlebar._tmux_share_label = label
         if count <= 0:
             label.hide()
             return

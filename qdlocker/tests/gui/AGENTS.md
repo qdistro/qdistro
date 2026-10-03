@@ -213,7 +213,7 @@ not depend on the removed qdshell.py ctrl API.
 | File | What it covers |
 |---|---|
 | [01-lock-cycle.md](01-lock-cycle.md) | Ctrl+Alt+L → type password → Enter unlocks → keyboard reaches focused toplevel again. End-to-end smoke; equivalent of qdwin's 03-locker-cycle but on the new path. |
-| [02-fprintd-fallback.md](02-fprintd-fallback.md) | fprintd `VerifyStatus("verify-match")` unlocks with an empty prompt buffer. Confirms the parallel D-Bus subscription. |
+| [agent-fprintd-fallback-smoke.sh](agent-fprintd-fallback-smoke.sh) | executable (was 02, run in the gui-qdwin smoke lane): fprintd `VerifyStatus("verify-match")` unlocks with an empty prompt buffer |
 | [03-idle-lock-trigger.md](03-idle-lock-trigger.md) | After `QDLOCKER_IDLE_MS` of no input, qdlocker engages the lock via the `ext-idle-notify-v1` subscription. |
 | [04-lid-close-lock.md](04-lid-close-lock.md) | A systemd-logind signal reaches qdlocker's own `LogindWatcher` (no qdwin C-side path) and engages the lock. The fake helper makes logind raise `PrepareForSleep`, so it validates the suspend path (reason=2); the scenario also documents the true-lid `Session.Lock` (reason=1) variant. |
 | [05-keystroke-isolation.md](05-keystroke-isolation.md) | **Security boundary.** While locked, password keystrokes reach qdlocker's `prompt-len` but NOT qdshell's. If qdshell's ctrl-socket sees the typed chars, the protocol's `overlay_key` routing is broken and the locker's purpose is defeated. |

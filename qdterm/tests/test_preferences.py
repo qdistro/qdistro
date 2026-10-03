@@ -154,10 +154,10 @@ class TestDialogStructure:
         assert isinstance(dlg._font_combo, QFontComboBox)
 
     def test_appearance_has_font_size_spinbox(self, window, qtbot):
-        """Appearance tab has a QSpinBox for font size."""
+        """Appearance tab has a QDoubleSpinBox for font size."""
         dlg = PreferencesDialog(window)
         qtbot.addWidget(dlg)
-        assert isinstance(dlg._font_size, QSpinBox)
+        assert isinstance(dlg._font_size, QDoubleSpinBox)
 
     def test_appearance_has_color_scheme_combo(self, window, qtbot):
         """Appearance tab has a QComboBox for color scheme."""
@@ -737,3 +737,137 @@ class TestShortcutConflicts:
         dlg._refresh_shortcut_conflicts()
         assert dlg._shortcut_conflicts["new_tab"] is False
         assert dlg._shortcut_conflicts["copy"] is False
+
+
+def _scaled_snapshot():
+    from dataclasses import replace
+
+    from qdistro_presentation.model import example_snapshot, with_generation
+
+    snap = example_snapshot()
+    return with_generation(
+        replace(snap, fonts=replace(snap.fonts, ui_scale=1.25, fixed_scale=1.25))
+    )
+
+
+def _windows_style_name():
+    from PyQt6.QtWidgets import QStyleFactory
+
+    for name in QStyleFactory.keys():
+        if name.lower() == "windows":
+            return name
+    pytest.skip("Windows style required to distinguish Fusion")
+
+
+def _prime_native_baseline(app, *, with_qss):
+    from PyQt6.QtGui import QColor, QPalette
+    from qterminator.theme import _underlying_style_name
+
+    style_name = _windows_style_name()
+    app.setStyle(style_name)
+    pal = QPalette(app.palette())
+    pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+    pal.setColor(QPalette.ColorRole.Base, QColor("#dce8dc"))
+    app.setPalette(pal)
+    app.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
+    return (
+        _underlying_style_name(app).lower(),
+        app.palette().color(QPalette.ColorRole.Window).getRgb(),
+        app.styleSheet(),
+    )
+
+
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_native_without_controller_restores_captured_baseline(window, qtbot, with_qss):
+    from PyQt6.QtGui import QPalette
+    from PyQt6.QtWidgets import QApplication
+    from qterminator.theme import (
+        _underlying_style_name,
+        current_controller,
+        reset_controller_for_tests,
+    )
+
+    app = QApplication.instance()
+    original_style = _underlying_style_name(app)
+    original_pal = QPalette(app.palette())
+    original_qss = app.styleSheet()
+    reset_controller_for_tests()
+    try:
+        style, window_rgb, qss = _prime_native_baseline(app, with_qss=with_qss)
+        assert style == "windows"
+        assert current_controller() is None
+        dlg = PreferencesDialog(window)
+        qtbot.addWidget(dlg)
+        dlg._theme_mode.setCurrentText("Dark")
+        dlg._apply()
+        assert app.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+        if with_qss:
+            assert app.styleSheet() != qss
+        dlg._theme_mode.setCurrentText("Native")
+        dlg._apply()
+        assert current_controller() is None
+        assert _underlying_style_name(app).lower() == "windows"
+        assert app.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert app.styleSheet() == qss
+    finally:
+        reset_controller_for_tests()
+        app.setStyle(original_style)
+        app.setPalette(original_pal)
+        app.setStyleSheet(original_qss)
+
+
+def test_follow_desktop_without_snapshot_shows_unavailable(window, qtbot):
+    from qdistro_presentation.model import DESKTOP_SETTINGS_UNAVAILABLE
+    from qterminator.theme import reset_controller_for_tests
+
+    reset_controller_for_tests()
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    assert dlg._theme_mode.currentText() == "Follow desktop"
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    dlg._theme_mode.setCurrentText("Dark")
+    dlg._chk_desktop_font.setChecked(False)
+    assert dlg.lbl_desktop_status.text() == ""
+    reset_controller_for_tests()
+
+
+def test_live_update_replaces_unavailable_with_inherited_size(
+    window, qtbot, tmp_path, monkeypatch
+):
+    from PyQt6.QtGui import QPalette
+    from PyQt6.QtWidgets import QApplication
+    from qdistro_presentation.model import DESKTOP_SETTINGS_UNAVAILABLE
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.config import Config
+    from qterminator.theme import (
+        _underlying_style_name,
+        attach_presentation,
+        reset_controller_for_tests,
+    )
+
+    app = QApplication.instance()
+    original_style = _underlying_style_name(app)
+    original_pal = QPalette(app.palette())
+    original_qss = app.styleSheet()
+    reset_controller_for_tests()
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    try:
+        dlg._chk_desktop_font.setChecked(True)
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        snap = _scaled_snapshot()
+        write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+        monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+        attach_presentation(app, Config())
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        dlg.apply_presentation_update()
+        text = dlg.lbl_desktop_status.text()
+        assert DESKTOP_SETTINGS_UNAVAILABLE not in text
+        assert "13.75" in text
+        assert snap.fonts.fixed_family in text
+    finally:
+        reset_controller_for_tests()
+        app.setStyle(original_style)
+        app.setPalette(original_pal)
+        app.setStyleSheet(original_qss)

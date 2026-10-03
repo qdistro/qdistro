@@ -997,6 +997,7 @@ def qdistro_owned_roots(repo: Path) -> list[Path]:
     return [
         repo / "tests/integration/permissions-gui",
         repo / "tests/integration/qdwin-noctalia",
+        repo / "tests/integration/workflow-gui",
     ]
 
 
@@ -1049,7 +1050,7 @@ def main(argv: list[str]) -> int:
                     dest="path_set",
                     help="which default path set to lint when no explicit paths "
                          "are given: `qdistro` (qdistro-owned strict = "
-                         "permissions-gui + qdwin-noctalia) or `umbrella` (the "
+                         "permissions-gui + qdwin-noctalia + workflow-gui) or `umbrella` (the "
                          "full set qci gui schedules; default)")
     args = ap.parse_args(argv)
 

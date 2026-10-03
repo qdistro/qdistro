@@ -369,19 +369,24 @@ write_status() {
 }
 
 @test "registry: every shipped GUI scenario carries a valid declaration" {
-    local f n=0
-    for f in "$REPO_ROOT"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/qdwin/tests/gui/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/qdwin/tests/apps/[0-9][0-9]-*.md \
-             "$REPO_ROOT"/qdlocker/tests/gui/[0-9][0-9]-*.md; do
-        [ -f "$f" ] || continue
-        n=$((n + 1))
-        local m; m=$(gui_scenario_visual_mode "$f")
-        [ "$m" = required ] || [ "$m" = none ] || {
-            echo "undeclared/invalid: $f -> $m"; return 1; }
+    local dir f lane_count
+    # Audited duplicate/legacy scenarios have been retired. Guard each lane
+    # against an empty glob rather than assuming the old corpus has 60 files.
+    for dir in tests/integration/permissions-gui \
+               tests/integration/qdwin-noctalia qdwin/tests/gui \
+               qdwin/tests/apps qdlocker/tests/gui \
+               tests/integration/workflow-gui; do
+        lane_count=0
+        for f in "$REPO_ROOT/$dir"/[0-9][0-9]-*.md; do
+            [ -f "$f" ] || continue
+            lane_count=$((lane_count + 1))
+            local m; m=$(gui_scenario_visual_mode "$f")
+            [ "$m" = required ] || [ "$m" = none ] || {
+                echo "undeclared/invalid: $f -> $m"; return 1; }
+        done
+        [ "$lane_count" -gt 0 ] || {
+            echo "no GUI scenarios found in shipped lane: $dir"; return 1; }
     done
-    [ "$n" -ge 60 ]
 }
 
 # --- the observer backend ----------------------------------------------------

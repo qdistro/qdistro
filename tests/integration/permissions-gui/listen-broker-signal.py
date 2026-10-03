@@ -5,7 +5,7 @@ A real in-process subscriber (dbus-python + DBusGMainLoop) — the same path the
 product's own subscribers use — instead of `dbus-monitor`. dbus-monitor uses
 the bus's BecomeMonitor eavesdrop privilege; a plain subscriber exercises the
 ordinary `<allow receive_sender=...>` policy that production qdshell relies on,
-so a pass here proves the wire-level contract the way scenario 22 intends.
+so a pass here proves the wire-level contract the way scenario 10 intends
 
 Usage:
     listen-broker-signal.py MEMBER [--ready FILE] [--out FILE] [--timeout SEC]

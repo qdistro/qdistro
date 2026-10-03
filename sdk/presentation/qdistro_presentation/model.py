@@ -915,6 +915,43 @@ def resolve_presentation(
     )
 
 
+DESKTOP_SETTINGS_UNAVAILABLE = "desktop settings unavailable"
+
+
+def format_point_size(size: float) -> str:
+    """Format a point size without trailing zeros (11, 12.1, 13.75)."""
+    text = f"{float(size):.2f}".rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
+def desktop_status_text(
+    state: ResolvedPresentation | None,
+    *,
+    follow_desktop: bool,
+    use_desktop_fonts: bool,
+    font_kind: str = "ui",
+) -> str:
+    """Status line for Preferences inherited-font / fallback labeling.
+
+    Returns ``DESKTOP_SETTINGS_UNAVAILABLE`` when Follow desktop or Use
+    desktop fonts is selected and no shared snapshot is available. When
+    desktop fonts are in use and a snapshot is present, returns the
+    effective inherited family and fractional point size as a read-only
+    caption. Otherwise returns an empty string.
+    """
+    available = bool(state is not None and state.desktop_available)
+    if not available and (follow_desktop or use_desktop_fonts):
+        return DESKTOP_SETTINGS_UNAVAILABLE
+    if use_desktop_fonts and state is not None:
+        if font_kind == "fixed":
+            return (
+                f"{state.fixed_family}, "
+                f"{format_point_size(state.content_fixed_point_size)} pt"
+            )
+        return f"{state.ui_family}, {format_point_size(state.ui_point_size)} pt"
+    return ""
+
+
 def example_snapshot() -> PresentationSnapshot:
     return with_generation(
         PresentationSnapshot(

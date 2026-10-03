@@ -146,6 +146,86 @@ bats_run_one() {
     return "$EXIT_BATS"
 }
 
+# HOST-ONLY bats files. A file whose header (first 40 lines) carries a marker
+# line starting `# qci:host-only` (then end of line or a space and a comment)
+# makes no guest call at all: static greps, PATH-shimmed installer functions,
+# offscreen probes or host tool round-trips.
+# It used to take a disposable VM anyway (~20 s provisioning + a RAM slot in the
+# pool) for a few seconds of host work (todo/test-audit-261002/audit-vm-bats.md).
+# Such a file now runs on the host, in the bats gate, with the same
+# result/companion-skip rows, and never acquires a VM.
+#
+# The marker is a CLAIM that is checked, not trusted: bats_host_only_violation
+# rejects a marked file that loads the VM helpers, calls vm_run, or expands
+# $VM_NAME — any of those would otherwise silently skip or fail without a VM.
+# A violation is recorded as a failed row for that file (the file is not run).
+bats_is_host_only() {
+    head -n 40 -- "$1" 2>/dev/null | grep -qE '^# qci:host-only([[:space:]]|$)'
+}
+
+# Echo why a host-only-marked file cannot run without a VM (empty + rc 1 when
+# it is fine). Pure: reads only the file.
+bats_host_only_violation() {
+    local file=$1 hit
+    hit=$(grep -nE '^[[:space:]]*load[[:space:]]+helpers\b|\bvm_run\b|\$\{?VM_NAME\b' -- "$file" 2>/dev/null \
+          | grep -vE '^[0-9]+:[[:space:]]*#' | head -n 3)
+    [ -n "$hit" ] || return 1
+    printf 'marked # qci:host-only but needs a VM: %s' "$(printf '%s' "$hit" | tr '\n' ' ' | tsv_note_sanitize)"
+    return 0
+}
+
+# Run one host-only bats file on the host. Same rows as bats_run_one (pass /
+# fail / companion skip) with note HOST instead of VM=<name>. Returns 0 or
+# EXIT_BATS.
+bats_run_host() {
+    local file=$1 base log_path gate_rc slug scratch why t0
+    base=$(basename "$file")
+    log_path="$RDIR/bats/$base.log"
+    mkdir -p "$(dirname "$log_path")"
+    t0=$(date +%s)
+    if why=$(bats_host_only_violation "$file"); then
+        record_result bats "$base" fail "$EXIT_BATS" bats bats "" "HOST $why"
+        record_timing bats "$base" 0 0 0 "$EXIT_BATS" host
+        return "$EXIT_BATS"
+    fi
+    slug=$(safe_name "$base")
+    scratch=$(scenario_scratch_dir bats "$slug")
+    mkdir -p "$scratch"
+    log "bats $base on the host (qci:host-only)"
+    (
+        cd "$QDISTRO_REPO" || exit 2
+        QCI_OFFLINE="$QCI_OFFLINE" \
+            QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+            env -u QDISTRO_PROFILE -u VM_NAME bats "$file"
+    ) > "$log_path" 2>&1
+    gate_rc=$?
+    record_timing bats "$base" 0 "$(( $(date +%s) - t0 ))" "$(( $(date +%s) - t0 ))" "$gate_rc" host
+    if [ "$gate_rc" -eq 0 ]; then
+        local n_skip
+        n_skip=$(bats_tap_skip_count "$log_path")
+        if [ "${n_skip:-0}" -gt 0 ]; then
+            record_result bats "$base" pass 0 pass bats "$log_path" "HOST skipped_cases=$n_skip"
+            record_result bats "$base (skipped cases)" skip 0 pass bats "$log_path" \
+                "$n_skip case(s) skipped inside a passing file: $(bats_tap_skip_reasons "$log_path")"
+        else
+            record_result bats "$base" pass 0 pass bats "$log_path" "HOST"
+        fi
+        return 0
+    fi
+    record_result bats "$base" fail "$EXIT_BATS" bats bats "$log_path" "HOST raw_rc=$gate_rc"
+    return "$EXIT_BATS"
+}
+
+# Run every host-only file serially; return the first failure's rc.
+bats_run_host_files() {
+    local file frc rc=0
+    for file in "$@"; do
+        bats_run_host "$file"; frc=$?
+        [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+    done
+    return "$rc"
+}
+
 # Acquire a fresh disposable VM, run one bats file on it, then release it.
 # Self-contained so it can run as a backgrounded pool worker. Returns EXIT_BATS
 # on test failure, EXIT_VM_PROVISION if the VM could not be created, else 0.
@@ -310,20 +390,33 @@ gate_bats() {
     # column 'external', skip it in offline mode rather than let it try (and
     # fail) to reach the network. Tests not in the registry see QCI_OFFLINE=1 in
     # their env and are expected to self-skip.
-    local run_files=()
+    local run_files=() host_files=()
     for file in "${files[@]}"; do
         base=$(basename "$file")
         if offline_should_skip_external "tests/integration/vm/$base"; then
             record_result bats "$base" skip 0 pass bats "" "QCI_OFFLINE=1: registry network=external; skipped"
             continue
         fi
+        if bats_is_host_only "$file"; then
+            host_files+=("$file")
+            continue
+        fi
         run_files+=("$file")
     done
-    [ "${#run_files[@]}" -eq 0 ] && return "$rc"
+
+    # No VM-backed file left: run the host-only files and stop (no golden).
+    if [ "${#run_files[@]}" -eq 0 ]; then
+        [ "${#host_files[@]}" -gt 0 ] && { bats_run_host_files "${host_files[@]}"; rc=$?; }
+        return "$rc"
+    fi
 
     # Explicit VM: every file shares one caller-provided VM, so they MUST run
     # serially (the in-VM session/sockets are single-tenant).
     if [ -n "$explicit" ]; then
+        if [ "${#host_files[@]}" -gt 0 ]; then
+            bats_run_host_files "${host_files[@]}"; frc=$?
+            [ "$frc" -ne 0 ] && rc=$frc
+        fi
         validate_vm bats "$explicit" || return "$EXIT_VM_PROVISION"
         for file in "${run_files[@]}"; do
             bats_run_one "$explicit" "$file"
@@ -337,8 +430,26 @@ gate_bats() {
     # every worker clones it and skips the in-guest build. Fail the gate fast if
     # the golden can't be built — do not silently fall back to per-worker builds.
     # Opt out with QCI_NO_GOLDEN=1 (workers then each run the full bootstrap).
+    #
+    # The host-only files need no VM, so they run in the background WHILE the
+    # golden builds (minutes), into their own result fragment; they are joined
+    # before the VM pool starts so the pool's `wait -n` accounting only ever
+    # sees pool workers.
+    local host_pid=""
+    if [ "${#host_files[@]}" -gt 0 ]; then
+        QCI_RESULT_FRAGMENTS=1 QCI_WORKER_ID=bats-host-only \
+            bats_run_host_files "${host_files[@]}" &
+        host_pid=$!
+    fi
     if [ "${QCI_NO_GOLDEN:-0}" != 1 ]; then
-        ensure_run_golden bats || return "$EXIT_VM_PROVISION"
+        if ! ensure_run_golden bats; then
+            [ -n "$host_pid" ] && wait "$host_pid"
+            return "$EXIT_VM_PROVISION"
+        fi
+    fi
+    if [ -n "$host_pid" ]; then
+        wait "$host_pid"; frc=$?
+        [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
     fi
 
     # Disposable VMs: run a bounded pool of one-VM-per-file workers in parallel.

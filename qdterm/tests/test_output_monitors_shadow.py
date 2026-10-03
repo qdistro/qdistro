@@ -327,9 +327,12 @@ def test_log_level_colorizer_dominant_level(terminal):
     assert "WARN=1" in tooltip
     assert "INFO=2" in tooltip
     assert "DEBUG=1" in tooltip
-    # ERROR > WARN > INFO > DEBUG, so dominant color should be error red
+    # ERROR > WARN > INFO > DEBUG, so the activity role is error
+    from qterminator.titlebar import titlebar_roles
+
     style = terminal._titlebar._activity_label.styleSheet()
-    assert "#e74c3c" in style  # red (error color)
+    assert titlebar_roles(terminal._titlebar)["error"] in style
+    assert "font-size" not in style
 
 
 def test_log_level_colorizer_warn_dominant(terminal):
@@ -343,8 +346,11 @@ def test_log_level_colorizer_warn_dominant(terminal):
     tooltip = terminal._titlebar._activity_label.toolTip()
     assert "ERROR=0" in tooltip
     assert "WARN=1" in tooltip
+    from qterminator.titlebar import titlebar_roles
+
     style = terminal._titlebar._activity_label.styleSheet()
-    assert "#f39c12" in style  # yellow/orange (warn color)
+    assert titlebar_roles(terminal._titlebar)["activity"] in style
+    assert "font-size" not in style
 
 
 def test_snapshot_text_empty_lines():

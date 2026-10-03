@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Unit tests for image/lib/build-guard.sh — the liveness/kill helpers behind
 # the in-VM kiwi retry loop (image/build-in-vm.sh). VM-free and rootless: the
 # process-tree helpers are exercised with real setsid'd process trees, the

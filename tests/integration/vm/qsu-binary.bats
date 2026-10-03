@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # qsu compiled-binary lock-in test.
 #
 # Asserts that /usr/local/bin/qsu is the COMPILED qsu.c ELF binary, not
@@ -127,25 +128,6 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-# --- Live-VM assertion ----------------------------------------------------
-# Only runs when VM_NAME is exported AND scripts/vm/vm-exec exists, so the
-# host-side `bats tests/integration/vm/qsu-binary.bats` run above SKIPs it
-# cleanly. After fresh-vm-bootstrap, /usr/local/bin/qsu must be the ELF
-# binary on the real install — this is what proves the install path (not
-# just a temp-dir compile) ships the binary, closing the coverage gap.
-@test "VM: installed /usr/local/bin/qsu is an ELF binary, not a wrapper" {
-    [ -n "${VM_NAME:-}" ] || skip "VM_NAME not set — host-only run"
-    local vm_exec="${VM_EXEC:-$REPO_ROOT/scripts/vm/vm-exec}"
-    [ -x "$vm_exec" ] || skip "vm-exec not found at $vm_exec"
-
-    run "$vm_exec" "$VM_NAME" "file -b /usr/local/bin/qsu"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *ELF* ]]
-    [[ "$output" != *"shell script"* ]]
-
-    # Belt-and-braces: the shebang+python exec line must be absent.
-    run "$vm_exec" "$VM_NAME" "head -c 4 /usr/local/bin/qsu | od -An -tx1"
-    [ "$status" -eq 0 ]
-    # ELF magic is 7f 45 4c 46.
-    [[ "$output" == *"7f 45 4c 46"* ]]
-}
+# The live-VM assertion (installed /usr/local/bin/qsu is an ELF binary, not a
+# wrapper) lives in tiered-isolation.bats next to the s58 real-qsu flow: this
+# file is # qci:host-only and never gets a VM.

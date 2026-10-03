@@ -8,8 +8,7 @@ wallpaper occupying the rest. No protocol errors in the weston
 journal during a 10-second observation window.
 
 This is the smoke test for "did the layer-shell port survive a
-visual run?" — equivalent of `qdwin/01-open-terminal.md` for the
-qdshell.py world but for the new shell.
+visual run?" for the Quickshell qdshell.
 
 ## Setup
 

@@ -21,10 +21,14 @@
 #   3. LAUNCH    — type "foot" into the launcher search box and press
 #                  Enter; the top result (the foot terminal) launches.
 #   4. WAIT      — wait for foot's toplevel to map in qdwin.
-#   5. TYPE      — type `ls /` into the now-focused terminal and Enter.
-#   6. VERIFY    — the host Bats test captures the VM display with libvirt
-#                  and sends the image back for OCR, asserting that the root
-#                  directory listing (usr / etc / bin / …) is on screen.
+#   5. TYPE      — type `logger -t qdistro-s103 <nonce>` into the
+#                  now-focused terminal and Enter.
+#   6. VERIFY    — the journal holds that nonce under identifier
+#                  qdistro-s103 with _UID=1000: the keystrokes reached the
+#                  terminal's shell, which ran the command as admin. This is
+#                  a deterministic oracle; the test no longer reads the
+#                  screen (it used guest tesseract OCR of a virsh screenshot,
+#                  which aborted with rc=134 in the openSUSE build).
 #
 # Every PASS string below is load-bearing — compositor-shell.bats
 # asserts on each one. Renaming a PASS line WILL silently green-wash
@@ -36,10 +40,6 @@
 #     /dev/uinput available). Missing tool/socket -> clean SKIP.
 #   - foot installed with a .desktop entry (so it shows in the launcher
 #     app list). foot ships /usr/share/applications/foot.desktop.
-#   - The enclosing host test provides the screenshot + OCR assertion. qdwin
-#     deliberately does not expose the wlr-screencopy protocol grim requires,
-#     and the Weston 14 screenshooter is not compatible across the VM's
-#     system-weston/vendored-libweston boundary.
 #   - A test password via $QDGREETER_TEST_PASSWORD and the staged
 #     /root/s100-type-password.sh helper (same as s100). When the VM is
 #     already logged in the login step is a no-op.
@@ -199,21 +199,40 @@ sleep 1.5
 pass "foot terminal is up and focused"
 
 # ---------------------------------------------------------------------------
-# Step 5 — TYPE `ls /` into the focused terminal and press Enter.
+# Step 5 — TYPE a logger command carrying a fresh nonce into the focused
+# terminal and press Enter.
 # ---------------------------------------------------------------------------
-yd type "ls /"
+NONCE="s103$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+[[ "$NONCE" =~ ^s103[0-9a-f]{12}$ ]] || { fail "could not mint a nonce"; echo "[s103] $PASSCOUNT passes, $FAILCOUNT failures"; exit 1; }
+yd type "logger -t qdistro-s103 $NONCE"
 sleep 0.4
 yd key 28:1 28:0           # Enter — run the command
-sleep 1.5                  # let ls output render
-pass "typed 'ls /' into foot"
+pass "typed a logger command into foot"
 
-# Leave foot mapped: compositor-shell.bats now takes the authoritative display
-# capture from the host with `virsh screenshot`, then sends that image back to
-# this VM's tesseract.  A guest Wayland client cannot independently capture the
-# qdwin output, by design.
+# ---------------------------------------------------------------------------
+# Step 6 — VERIFY: the nonce reached the journal from admin's shell. Only a
+# shell that read our keystrokes can produce it: the nonce exists nowhere but
+# in this driver's memory and in the keystrokes. Scope to the identifier and
+# the uid; qemu-ga logs the driver's own command line, but not the nonce.
+# ---------------------------------------------------------------------------
+GOT=""
+for _ in $(seq 1 20); do
+    GOT=$(journalctl --after-cursor="$CURSOR" _UID=$ADMIN_UID SYSLOG_IDENTIFIER=qdistro-s103 \
+            -o cat --no-pager 2>/dev/null | grep -Fx "$NONCE" || true)
+    [[ -n "$GOT" ]] && break
+    sleep 0.5
+done
+if [[ -n "$GOT" ]]; then
+    pass "foot ran the typed command as admin (journal holds the nonce)"
+else
+    fail "the typed command never ran: no qdistro-s103 journal line with the nonce from uid $ADMIN_UID"
+    journalctl --after-cursor="$CURSOR" SYSLOG_IDENTIFIER=qdistro-s103 -o verbose --no-pager 2>/dev/null | tail -20 >&2 || true
+fi
+
+pkill -9 -x foot >/dev/null 2>&1 || true
 if [[ "$FAILCOUNT" -eq 0 ]]; then
-    echo "READY: foot output is mapped for host display capture"
-    echo "[s103] $PASSCOUNT passes, 0 failures; host OCR pending"
+    pass "launcher → foot → command round-trip end-to-end"
+    echo "[s103] $PASSCOUNT passes, 0 failures"
     exit 0
 else
     echo "[s103] $PASSCOUNT passes, $FAILCOUNT failures"

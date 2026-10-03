@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # The offline-install contract (todo/iso/14 Phase B):
 # scripts/install/lib/qdistro-offline.sh and its use by every installer the
 # image chain runs. Static invariants (every chain installer sources the

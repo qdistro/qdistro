@@ -477,3 +477,85 @@ def test_group_identity_survives_palette_restyle(qtbot, qapp, tmp_path, monkeypa
     assert expected in before
     assert example_snapshot().colors.mSurfaceVariant in titlebar.styleSheet()
     reset_controller_for_tests()
+
+
+def test_activity_style_role_survives_snapshot_restyle(qtbot, qapp, tmp_path, monkeypatch):
+    """Plugin activity roles restyle from the snapshot, not leftover hex."""
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QWidget
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import attach_presentation, reset_controller_for_tests
+
+    reset_controller_for_tests()
+    host = QWidget()
+    qtbot.addWidget(host)
+    titlebar = TerminalTitlebar(host)
+    titlebar.set_activity(True)
+    titlebar.set_activity_style("error")
+    snap = example_snapshot()
+    old = titlebar._activity_label.styleSheet()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    assert titlebar._activity_label.styleSheet() == old
+    titlebar.apply_presentation_update()
+    style = titlebar._activity_label.styleSheet()
+    assert snap.colors.mError in style
+    assert snap.colors.mTertiary not in style
+    assert "#e74c3c" not in style
+    assert "font-size" not in style
+    reset_controller_for_tests()
+
+
+def test_extra_label_restyles_from_secondary_role(qtbot, qapp, tmp_path, monkeypatch):
+    """Named extra QLabel widgets follow a stored chrome role on restyle."""
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QWidget
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import attach_presentation, reset_controller_for_tests
+
+    reset_controller_for_tests()
+    host = QWidget()
+    qtbot.addWidget(host)
+    titlebar = TerminalTitlebar(host)
+    label = QLabel("M1")
+    titlebar.add_titlebar_widget("tmux-share", label, side="left", role="secondary")
+    snap = example_snapshot()
+    old = label.styleSheet()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(
+        qapp,
+        SimpleNamespace(
+            get=lambda *keys, default=None: (
+                "system"
+                if keys[:2] == ("general", "theme_mode")
+                else {}
+                if keys == ("appearance",)
+                else default
+            )
+        ),
+    )
+    assert label.styleSheet() == old
+    titlebar.apply_presentation_update()
+    assert snap.colors.mSecondary in label.styleSheet()
+    assert "#8fd19e" not in label.styleSheet()
+    assert "font-size" not in label.styleSheet()
+    reset_controller_for_tests()

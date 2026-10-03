@@ -654,6 +654,16 @@ check_line "[admin-app] launcher uses native Wayland" \
     /usr/local/bin/qdistro-start-admin-app '^export QT_QPA_PLATFORM=wayland$'
 check_line "[admin-app] launcher runs installed script" \
     /usr/local/bin/qdistro-start-admin-app '^exec /usr/bin/python3 /usr/local/bin/qdistro-admin-approval-app "\$@"$'
+# The non-graphical approval path (install-admin-cli-for-vm.sh, run by the
+# admin-app step). Both paths are the broker's trusted control-plane paths;
+# the broker binds a Python peer through its argv, so the files must sit at
+# exactly these paths and run under the system python.
+check_req "[admin-app] root approvals CLI" /usr/local/sbin/qdistro-approvals
+check_line "[admin-app] CLI runs under the system python" \
+    /usr/local/sbin/qdistro-approvals '^#!/usr/bin/python3 -I$'
+check_link "[admin-app] admin TUI command" /usr/local/bin/qdistro-admin-tui
+check_req "[admin-app] admin TUI broker client" /usr/local/lib/qdistro/admin-tui/broker_client.py
+check_glob_req "[admin-app] Textual for the admin TUI" "/usr/lib/python3*/site-packages/textual/__init__.py"
 check_req "[user-relay] bus policy"    /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
 check_req "[session-manager] unit"     /etc/systemd/system/qdistro-session-manager.service
 check_req "[session-manager] bus policy" /etc/dbus-1/system.d/org.qdistro.SessionManager1.conf

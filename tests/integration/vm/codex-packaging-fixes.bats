@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Static-invariant lock-in for the codex2 packaging/session-integration
 # fixes (findings #15, #16, #19, #20, #21). Like bootstrap-hardening.bats
 # this needs NO live VM: it inspects the install/image/deploy files as

@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QSettings
+from qdistro_presentation.model import (
+    DESKTOP_SETTINGS_UNAVAILABLE,
+    example_snapshot,
+    with_generation,
+)
+from qdistro_presentation.paths import ENV_OVERRIDE
+from qdistro_presentation.publish import write_snapshot
 from qnotebook import nb_settings
+from qnotebook.appearance import SettingsAdapter
 from qnotebook.settings_dialog import SettingsDialog
+from qnotebook.theme import attach_presentation, reset_controller_for_tests
 from qnotebook.window import MainWindow
 
 
@@ -246,3 +256,114 @@ def test_opening_settings_action_works(win, qtbot, monkeypatch):
     )
     win.act_settings.trigger()
     assert captured.get("opened") is True
+
+
+def _scaled_snapshot():
+    snap = example_snapshot()
+    return with_generation(
+        replace(snap, fonts=replace(snap.fonts, ui_scale=1.25, fixed_scale=1.25))
+    )
+
+
+def _windows_style_name():
+    from PyQt6.QtWidgets import QStyleFactory
+
+    for name in QStyleFactory.keys():
+        if name.lower() == "windows":
+            return name
+    pytest.skip("Windows style required to distinguish Fusion")
+
+
+def _prime_native_baseline(app, *, with_qss):
+    from PyQt6.QtGui import QColor, QPalette
+    from qnotebook.theme import _underlying_style_name
+
+    style_name = _windows_style_name()
+    app.setStyle(style_name)
+    pal = QPalette(app.palette())
+    pal.setColor(QPalette.ColorRole.Window, QColor("#c8dcc8"))
+    pal.setColor(QPalette.ColorRole.Base, QColor("#dce8dc"))
+    app.setPalette(pal)
+    app.setStyleSheet("QWidget { background-color: #c8dcc8; }" if with_qss else "")
+    return (
+        _underlying_style_name(app).lower(),
+        app.palette().color(QPalette.ColorRole.Window).getRgb(),
+        app.styleSheet(),
+    )
+
+
+@pytest.mark.parametrize("with_qss", [False, True])
+def test_native_without_controller_restores_captured_baseline(
+    win, qtbot, qapp, with_qss
+):
+    from PyQt6.QtGui import QPalette
+    from qnotebook.theme import _underlying_style_name, current_controller
+
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
+    reset_controller_for_tests()
+    try:
+        style, window_rgb, qss = _prime_native_baseline(qapp, with_qss=with_qss)
+        assert style == "windows"
+        assert current_controller() is None
+        dlg = SettingsDialog(win)
+        qtbot.addWidget(dlg)
+        dlg._combo_appearance.setCurrentText("Dark")
+        dlg._apply()
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() != window_rgb
+        assert _underlying_style_name(qapp).lower() == "fusion"
+        dlg._combo_appearance.setCurrentText("Native")
+        dlg._apply()
+        assert current_controller() is None
+        assert _underlying_style_name(qapp).lower() == "windows"
+        assert qapp.palette().color(QPalette.ColorRole.Window).getRgb() == window_rgb
+        assert qapp.styleSheet() == qss
+    finally:
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)
+
+
+def test_follow_desktop_without_snapshot_shows_unavailable(win, qtbot):
+    reset_controller_for_tests()
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    assert dlg._combo_appearance.currentText() == "Follow desktop"
+    assert dlg._chk_desktop_fonts.isChecked() is True
+    assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+    dlg._combo_appearance.setCurrentText("Dark")
+    dlg._chk_desktop_fonts.setChecked(False)
+    assert dlg.lbl_desktop_status.text() == ""
+
+
+def test_live_update_replaces_unavailable_with_inherited_size(
+    win, qtbot, tmp_path, monkeypatch, qapp
+):
+    from PyQt6.QtGui import QPalette
+    from qnotebook.theme import _underlying_style_name
+
+    original_style = _underlying_style_name(qapp)
+    original_pal = QPalette(qapp.palette())
+    original_qss = qapp.styleSheet()
+    reset_controller_for_tests()
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    try:
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        snap = _scaled_snapshot()
+        write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+        monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+        attach_presentation(qapp, SettingsAdapter())
+        assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
+        dlg.apply_presentation_update()
+        text = dlg.lbl_desktop_status.text()
+        assert DESKTOP_SETTINGS_UNAVAILABLE not in text
+        assert "13.75" in text
+        assert snap.fonts.ui_family in text
+    finally:
+        reset_controller_for_tests()
+        qapp.setStyle(original_style)
+        qapp.setPalette(original_pal)
+        qapp.setStyleSheet(original_qss)

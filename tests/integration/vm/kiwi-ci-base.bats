@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# qci:host-only — runs on the host in the bats gate, no VM (ci/lib/gates/bats.sh).
 # Phase G of todo/iso/14: kiwi tester image as the qci *base*, with the
 # per-run source overlay still built on top by fresh-vm-bootstrap.sh.
 # VM-free except the optional live clone (skipped unless the imported

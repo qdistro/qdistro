@@ -32,6 +32,8 @@ def _reset_presentation(qapp):
     qapp.setStyleSheet("")
     yield
     reset_controller_for_tests()
+    qapp.setPalette(QPalette())
+    qapp.setStyleSheet("")
 
 
 def test_attach_presentation_follows_snapshot(qapp, tmp_path, monkeypatch):
@@ -107,9 +109,26 @@ def test_mainwindow_presentation_update_restyles_titlebar(qapp, tmp_path, monkey
 
         apply_presentation_update = TerminalWidget.apply_presentation_update
 
+    class _EmptyTabs:
+        def count(self):
+            return 0
+
+        def widget(self, _index):
+            return None
+
+    class _EmptyBar:
+        def apply_presentation_update(self):
+            return None
+
     win = MainWindow.__new__(MainWindow)
     terms = (_Term(active), _Term(inactive))
+    win._tab_bar = _EmptyBar()
+    win._tabs = _EmptyTabs()
     win.iter_terminals = lambda: iter(terms)
+    win.badges = None
+    win.instant_replay = None
+    win.timestamps = None
+    win.tmux_share_plugin = None
     win.apply_presentation_update()
     assert snap.colors.mPrimary in active.styleSheet()
     assert snap.colors.mOnPrimary in active._title_label.styleSheet()

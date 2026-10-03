@@ -1,20 +1,28 @@
 #!/bin/bash
-# s104-admin-app-polish — P07 admin-app-polish round-trip.
+# s104-admin-app-polish — broker D-Bus surface behind the P07 admin-app
+# features (Rules tab, History tab, tray badge, approve/deny, rule editor,
+# scope rejection).
 #
 # Runs INSIDE the test VM (staged at /tmp/s104.sh by admin-app-polish.bats).
-# Verifies the load-bearing PASS strings from
-# plan2/tasks/P07-admin-app-polish.md "Success criterion":
 #
-#   PASS: Rules tab shows existing rules from broker
-#   PASS: Admin creates new rule via Rules tab (SaveRule called)
-#   PASS: History tab shows last 100 entries
-#   PASS: tray badge shows pending count
-#   PASS: Ctrl+Y approves pending request
-#   PASS: Ctrl+N denies pending request
-#   PASS: Ctrl+R creates rule from current request
-#   PASS: Alt+A approves all pending
-#   PASS: Alt+D denies all pending
-#   PASS: ScopeNotPermitted shows modal error
+# HONESTY NOTE: this driver never starts the admin app and sends no key or
+# click. It calls the broker methods the app calls, as the admin uid, and
+# checks the broker's answers. Its PASS strings therefore name broker
+# behaviour only. (They used to read "Ctrl+Y approves pending request",
+# "tray badge shows pending count", "ScopeNotPermitted shows modal error":
+# UI claims this driver never checked.) The real UI paths are proved by the
+# GUI scenarios permissions-gui/04 (Ctrl+Shift+2 + Ctrl+Y approve) and 06,
+# and the scope-error modal by tests/unit/test_admin_error_scope_ux.py.
+#
+# PASS contract (asserted by admin-app-polish.bats):
+#   PASS: broker ListRules returns an on-disk YAML rule
+#   PASS: broker SaveRule (as admin) writes a rule that ListRules returns
+#   PASS: broker ListHistory(100) returns the audit row of a decided request
+#   PASS: broker GetPending counts a newly queued request
+#   PASS: broker DecideRequest(allow) as admin removes the request from GetPending
+#   PASS: broker DecideRequest(deny) as admin removes the request from GetPending
+#   PASS: broker SaveRule of a rule-from-request YAML is returned by ListRules
+#   PASS: broker DecideRequest rejects an unknown scope with a D-Bus error
 #
 # Strategy (P07 fix-pass):
 # - Start the admin broker.
@@ -22,17 +30,13 @@
 # - Step 3/4 verify History tab + tray-count GetPending against real
 #   pending-request data (Step 4 enqueues a request before asking
 #   GetPending so the count is exercised with N>0).
-# - Step 5 exercises real shortcut->broker round-trips:
+# - Step 5 drives the broker calls the app's approve/deny/rule-editor
+#   actions end in (not the actions themselves):
 #     - Enqueue a pending request via RequestPermission.
-#     - Call DecideRequest(allow) as the admin uid to mimic Ctrl+Y/Alt+A.
-#     - Assert the rid disappeared from GetPending → PASS Ctrl+Y / Alt+A.
-#     - Repeat with decision=deny → PASS Ctrl+N / Alt+D.
-#     - SaveRule a fresh rule (mimics the Ctrl+R workflow) and verify
-#       ListRules surfaces it → PASS Ctrl+R.
-#     - Approve-all: enqueue several requests, decide each, assert all
-#       are gone → PASS Alt+A approves all (which the admin app gates
-#       behind Ctrl+Shift+A; the underlying broker path is the same).
-#     - Deny-all: same with deny.
+#     - Call DecideRequest(allow) as the admin uid; assert the rid left
+#       GetPending.
+#     - Repeat with decision=deny.
+#     - SaveRule a rule-from-request shaped YAML; assert ListRules has it.
 # - Step 6 deliberately calls DecideRequest with a syntactically valid
 #   but unknown scope to provoke a BadArgument; for the proper
 #   ScopeNotPermitted name we'd need a delegated request. We accept
@@ -180,7 +184,7 @@ sleep 1
 
 if busctl call "$BUS" "$OBJ" "$BUS" ListRules \
     | grep -q "P07 admin-app-polish test rule"; then
-    echo "PASS: Rules tab shows existing rules from broker"
+    echo "PASS: broker ListRules returns an on-disk YAML rule"
 else
     err "ListRules did not surface the on-disk YAML rule"
 fi
@@ -208,7 +212,7 @@ sleep 1
 
 if busctl call "$BUS" "$OBJ" "$BUS" ListRules \
     | grep -q "P07 SaveRule test rule"; then
-    echo "PASS: Admin creates new rule via Rules tab (SaveRule called)"
+    echo "PASS: broker SaveRule (as admin) writes a rule that ListRules returns"
 else
     err "SaveRule did not result in a visible rule"
 fi
@@ -237,16 +241,16 @@ sleep 0.5   # give the broker time to write the audit row
 hist_out=$(busctl call "$BUS" "$OBJ" "$BUS" ListHistory i 100 2>&1) \
     || err "ListHistory(100) call failed"
 if [ -n "$hist_out" ] && [ "$hist_out" != "aa{sv} 0" ]; then
-    echo "PASS: History tab shows last 100 entries"
+    echo "PASS: broker ListHistory(100) returns the audit row of a decided request"
 else
     err "ListHistory(100) returned empty after approve round-trip (rid=$HIST_RID)"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 — Tray badge: GetPending count reflects the request queue.
+# Step 4 — GetPending count (what the app's tray badge reads).
 # ---------------------------------------------------------------------------
 
-note "Step 4: GetPending count drives the tray badge"
+note "Step 4: GetPending counts a queued request"
 
 # F5 review fix: enqueue a request before asking GetPending so the
 # count > 0 path is exercised, not just D-Bus reachability.
@@ -257,7 +261,7 @@ if ! [ "$TRAY_RID" -ge 0 ] 2>/dev/null; then
 fi
 TRAY_COUNT=$(pending_count)
 if [ "$TRAY_COUNT" -ge 1 ]; then
-    echo "PASS: tray badge shows pending count"
+    echo "PASS: broker GetPending counts a newly queued request"
 else
     err "GetPending count is 0 right after enqueue (rid=$TRAY_RID)"
 fi
@@ -265,18 +269,14 @@ fi
 decide "$TRAY_RID" deny once >/dev/null
 
 # ---------------------------------------------------------------------------
-# Step 5 — Keyboard shortcuts: real round-trips. We can't drive the
-#          GUI key events headlessly (no DISPLAY in the CI VM), but
-#          the shortcut handler -> broker.decide path is the same code
-#          we'd test if we could. Drive it via DecideRequest and
-#          assert the broker honoured the call (rid disappeared from
-#          GetPending). Prior driver stopped at busctl-introspect; F1
-#          fix.
+# Step 5 — Approve / deny / rule-from-request at the broker. No key
+#          event is sent and the app is not running: this checks only
+#          that the broker honours the calls the app's handlers make.
 # ---------------------------------------------------------------------------
 
-note "Step 5: shortcuts exercise real RequestPermission/DecideRequest round-trips"
+note "Step 5: broker RequestPermission/DecideRequest/SaveRule round-trips"
 
-# Ctrl+Y / Alt+A path: enqueue then approve.
+# Approve: enqueue then DecideRequest(allow).
 APPROVE_RID=$(enqueue "test.p07.ctrl_y" "p07-ctrl-y-$$")
 [ "$APPROVE_RID" -ge 0 ] 2>/dev/null \
     || err "RequestPermission(test.p07.ctrl_y) failed"
@@ -284,13 +284,12 @@ result=$(decide "$APPROVE_RID" allow once)
 [ "$result" = "ok" ] || err "DecideRequest(allow) failed for rid=$APPROVE_RID"
 sleep 0.3
 if [ "$(has_rid "$APPROVE_RID")" = "no" ]; then
-    echo "PASS: Ctrl+Y approves pending request"
-    echo "PASS: Alt+A approves all pending"
+    echo "PASS: broker DecideRequest(allow) as admin removes the request from GetPending"
 else
     err "rid=$APPROVE_RID still pending after DecideRequest(allow)"
 fi
 
-# Ctrl+N / Alt+D path: enqueue then deny.
+# Deny: enqueue then DecideRequest(deny).
 DENY_RID=$(enqueue "test.p07.ctrl_n" "p07-ctrl-n-$$")
 [ "$DENY_RID" -ge 0 ] 2>/dev/null \
     || err "RequestPermission(test.p07.ctrl_n) failed"
@@ -298,15 +297,13 @@ result=$(decide "$DENY_RID" deny once)
 [ "$result" = "ok" ] || err "DecideRequest(deny) failed for rid=$DENY_RID"
 sleep 0.3
 if [ "$(has_rid "$DENY_RID")" = "no" ]; then
-    echo "PASS: Ctrl+N denies pending request"
-    echo "PASS: Alt+D denies all pending"
+    echo "PASS: broker DecideRequest(deny) as admin removes the request from GetPending"
 else
     err "rid=$DENY_RID still pending after DecideRequest(deny)"
 fi
 
-# Ctrl+R path: SaveRule via admin (mirrors RuleEditorDialog -> broker.save_rule).
-# The Ctrl+Y/Alt+A and SaveRule paths above already covered SaveRule
-# once; this step exercises the dedicated Ctrl+R yaml shape.
+# Rule from request: SaveRule as admin with the YAML shape the app's
+# RuleEditorDialog sends (broker.save_rule).
 ctrl_r_yaml=$'- name: "P07 Ctrl+R test rule"\n  decision: allow\n  match:\n    action: "test.p07.ctrl_r"\n    uid: 2002\n  scope: "once"\n  rationale: "Created via Ctrl+R workflow"\n'
 admin_py <<PYEOF >/dev/null
 import dbus
@@ -318,13 +315,13 @@ PYEOF
 sleep 1
 if busctl call "$BUS" "$OBJ" "$BUS" ListRules \
     | grep -q "P07 Ctrl+R test rule"; then
-    echo "PASS: Ctrl+R creates rule from current request"
+    echo "PASS: broker SaveRule of a rule-from-request YAML is returned by ListRules"
 else
     err "Ctrl+R SaveRule did not result in a visible rule"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 6 — ScopeNotPermitted: provoke the named D-Bus error.
+# Step 6 — Scope rejection: an unknown scope must raise a D-Bus error.
 # ---------------------------------------------------------------------------
 
 note "Step 6: deliberately request an invalid scope and verify the broker rejects"
@@ -355,7 +352,7 @@ PYEOF
 )
 case "$scope_err" in
     *ScopeNotPermitted*|*BadArgument*)
-        echo "PASS: ScopeNotPermitted shows modal error"
+        echo "PASS: broker DecideRequest rejects an unknown scope with a D-Bus error ($scope_err)"
         ;;
     __no_exception__)
         err "broker accepted an invalid scope without raising"

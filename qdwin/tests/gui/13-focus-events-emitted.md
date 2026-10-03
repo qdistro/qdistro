@@ -12,6 +12,12 @@ focus handoff bugs become invisible to the regression suite (see
 
 ## Setup
 
+foot is part of the core test clients baked into every GUI golden
+(`scripts/vm/fresh-vm-bootstrap.sh`), so its absence is a golden defect:
+report ERROR, not SKIP. The two spawns below detach foot from vm-exec's
+stdout (`setsid … </dev/null >/dev/null 2>&1 &`): a background child that
+keeps the guest-agent pipe open makes vm-exec wait until it exits.
+
 ```bash
 source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
 qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
@@ -41,7 +47,7 @@ echo "cursor=$CURSOR"
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 \
-   WAYLAND_DISPLAY=wayland-1 foot sleep 600 &' " >/dev/null
+   WAYLAND_DISPLAY=wayland-1 setsid foot sleep 600 </dev/null >/dev/null 2>&1 &' " >/dev/null
 sleep 2
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
@@ -57,16 +63,20 @@ line, where H is the toplevel handle of the new foot
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 \
-   WAYLAND_DISPLAY=wayland-1 foot sleep 600 &' " >/dev/null
+   WAYLAND_DISPLAY=wayland-1 setsid foot sleep 600 </dev/null >/dev/null 2>&1 &' " >/dev/null
 sleep 2
-qdwin_ctrl "list"
+# Map handles to the two foots from qdwin's toplevel_added log (oldest first).
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
+   grep -E 'qdwin: toplevel_added handle=[0-9]+ .*app_id=foot'"
 "$QDWIN_VM_EXEC" "$VMNAME" \
   "journalctl _UID=1000 _SYSTEMD_USER_UNIT=qdwin-compositor.service --after-cursor='$CURSOR' --no-pager | \
    grep -E 'qdwin: focus handle=' | tail -2"
 ```
 
 **Assert (3.1):** the latest focus line reports `handle=H2 (was H1)`
-where H2 is the new foot's handle and H1 is foot 1's. The `was=`
+where H1 and H2 are the handles of the first and second
+`toplevel_added … app_id=foot` lines. The `was=`
 field proves the dedup-on-same-handle guard is working AND the
 previous handle is being tracked.
 
