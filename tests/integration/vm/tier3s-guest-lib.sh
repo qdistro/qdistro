@@ -605,15 +605,24 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 # in every GUI image via wayland-utils) — it only lists the compositor's
 # globals if the whole chain app-socket -> waypipe server -> link.sock ->
 # host client -> compositor is live.
+# in_sandbox_display <container> — the WAYLAND_DISPLAY the workload got from
+# the waypipe server, read from the container processes' own environments
+# (waypipe picks the socket; /run/user/1000 was empty in b9's transcript).
+in_sandbox_display() {   # in_sandbox_display <container>
+    pm exec "$1" sh -c '
+        for e in /proc/[0-9]*/environ; do tr "\0" "\n" < "$e" 2>/dev/null; done \
+            | sed -n "s/^WAYLAND_DISPLAY=//p" | sort -u | head -1' 2>/dev/null
+}
+
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
-    local tok="$1" ctr sock
+    local tok="$1" ctr disp
     ctr=$(rec "$tok" container)
     [ -n "$ctr" ] || return 1
-    # the waypipe server picks its own wayland-N inside the sandbox — find it.
-    sock=$(pm exec "$ctr" sh -c 'ls /run/user/1000/wayland-* 2>/dev/null | head -1')
-    sock=${sock##*/}
-    [ -n "$sock" ] || return 1
-    pm exec "$ctr" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$sock" \
+    disp=$(in_sandbox_display "$ctr")
+    [ -n "$disp" ] || return 1
+    # libwayland uses an absolute WAYLAND_DISPLAY verbatim; a bare name is
+    # resolved under XDG_RUNTIME_DIR — set both and the client wins either way.
+    pm exec "$ctr" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$disp" \
         wayland-info 2>/dev/null | grep -q "wl_compositor\|xdg_wm_base\|wl_seat"
 }
 
@@ -641,7 +650,7 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
         pass "$tag: bridge channel live (in-sandbox wayland-info lists host globals)"
     else
         pm exec "$(rec "$tok" container)" sh -c \
-            'ls -l /run/user/1000/; for s in /run/user/1000/wayland-*; do XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=${s##*/} wayland-info; done' 2>&1 \
+            "find /tmp /run /dev/shm -type s 2>/dev/null; XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY='$(in_sandbox_display "$(rec "$tok" container)")' wayland-info" 2>&1 \
             | sed 's/^/    probe: /' | head -15
         fail "$tag: an in-sandbox wayland client cannot reach the host compositor"
     fi
