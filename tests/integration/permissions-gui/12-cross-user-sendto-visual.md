@@ -31,6 +31,15 @@ capture/click gate is released, the guest driver must stop at
 queries while it is paused. Teardown runs in that driver only after the host
 releases the exact S4 token, and `qci_claim_done` is the driver's final command.
 
+Put `qci_host_step s1-empty` immediately before the S2 RelayMessage, and
+`qci_host_step s2-pending` after the S2 broker and window-title waits. At each
+gate, the host runner must capture and inspect the frame before creating that
+gate's `.go` directory. Run capture, visual inspection, and gate release as
+separate commands; never append `; mkdir <token>.go` to a capture command. A
+failed helper import or failed capture must leave the guest paused. In
+`full-20261003T150632Z-1041444`, a failed S1 capture command still ran a
+later `; mkdir`, so the eventual S1 frame showed the S2 request.
+
 ## Setup
 
 ```bash
@@ -55,6 +64,20 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_socket /run/user/3000/bus'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_dbus_session_name org.qdistro.StubNotepad.uid3000 work2'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_dbus_system_name org.qdistro.UserRelay.uid3000'
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh; await_broker_receiver 3000 org.qdistro.StubNotepad.uid3000'
+# Pending requests live in the broker's memory; sqlite cache cleanup does not
+# clear them. Check the broker model before the app is launched.
+PENDING_B64=$(base64 -w0 <<'PYEOF'
+import dbus, sys
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1")
+pending = dbus.Interface(obj, "org.qdistro.AdminBroker1").GetPending()
+print(f"pending_count={len(pending)}")
+if pending:
+    print("FAIL(setup): GetPending not empty after broker restart", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+)
+$VMEXEC "$VM" "echo $PENDING_B64 | base64 -d | runuser -u admin -- python3 -"
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action LIKE 'app.send-to:%';
 SQL_EOF
@@ -71,8 +94,12 @@ $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_qdwin_window_title "admin
 ### S1 — admin app up, pending empty
 
 ```bash
-qdwin_screenshot "$ART/12-s1-empty.png"
+qdwin_screenshot "$ART/12-s1-empty.png" || exit 1
 ```
+
+Check all S1 assertions while the driver waits at `s1-empty`. Record the
+verdict, then release that exact gate so the guest may send the S2 request.
+If capture fails, keep the gate closed and report the capture error.
 
 **Assert (vision, on the S1 frame)**:
 - The admin approvals window is fully drawn (no black, transparent or
@@ -81,6 +108,7 @@ qdwin_screenshot "$ART/12-s1-empty.png"
 - Text `(no selection)` appears in the detail pane.
 - Text `Pending` appears (tab label).
 - No text starting with `uid=2000` or `app.send-to:` on screen.
+- Setup printed `pending_count=0` before the app was launched.
 
 ### S2 — trigger a RelayMessage as work
 
