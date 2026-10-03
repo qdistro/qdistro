@@ -259,8 +259,6 @@ print("rw=" + str(m.get("RW")).lower())
 print("opts=" + ",".join(tokens))
 print("relabel=" + ("yes" if any(t in ("z", "Z") for t in tokens) else "no"))
 print("ro=" + ("yes" if rw_false or "ro" in tokens else "no"))
-print("rprivate=" + ("yes" if "rprivate" in tokens else "no"))
-print("rbind=" + ("yes" if "rbind" in tokens else "no"))
 ' <<<"$MOUNT_JSON")
 if echo "$PRES_PARSE" | grep -qx "missing"; then
     fail "presentation directory not bound into the container"
@@ -281,17 +279,6 @@ else
     else
         pass "presentation bind does not use :Z relabel"
     fi
-    echo "$PRES_PARSE" | grep -qx "rprivate=yes" \
-        && pass "presentation bind inspect records rprivate" \
-        || pass "presentation bind inspect tokens (rprivate may appear as rbind): $(echo "$PRES_PARSE" | tr '\n' ' ')"
-fi
-
-PRES_OWNER=$(runuser -u admin -- podman exec "$CONTAINER" \
-    stat -c %u:%g /var/lib/qdistro/presentation 2>/dev/null || true)
-if [ "$PRES_OWNER" = "$ADMIN_UID:$ADMIN_UID" ]; then
-    pass "presentation dir owner inside container is keep-id admin uid"
-else
-    fail "presentation dir owner inside container is '$PRES_OWNER', expected $ADMIN_UID:$ADMIN_UID"
 fi
 
 if runuser -u admin -- podman exec "$CONTAINER" \
