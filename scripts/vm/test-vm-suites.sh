@@ -624,7 +624,7 @@ for f in "${BATS_FILES[@]}"; do
         # The new session re-pulls the same units; a start-limit left by the
         # failed restore above would fail the compositor job instantly.
         rootssh 'systemctl --user -M admin@ reset-failed qdwin-session.target qdwin-compositor.service qdshell.service' 2>/dev/null || true
-        send_text "$IMAGE_PASSWORD"
+        send_text "$QCI_PASSWORD"
         SECONDS=0
         until session_up; do
             [ "$SECONDS" -lt 150 ] || break

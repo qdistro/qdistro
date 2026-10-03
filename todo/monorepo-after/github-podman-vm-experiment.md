@@ -1,179 +1,375 @@
-# Podman-to-cloud-VM experiment (2026-09-24)
+# GitHub-hosted test VM build: experiment record
 
-This is a continuation of the monorepo migration work, on the
-`experiment/github-qdistro-image` branch. It does not change the KIWI release
-path. The final workflow is `.github/workflows/qdistro-test-vm.yml`. Earlier
-Podman and in-guest-build experiment workflows were removed after validation.
+Branch `experiment/github-qdistro-image` in the product repo; workflow
+`.github/workflows/qdistro-test-vm.yml`. Goal: build and smoke the minimal
+test VM image on a free hosted runner (no KVM, no libvirt), publish it as an
+artifact, then run the suites inside a throwaway overlay of it.
 
-## 2026-10-02: snapshot 20260930, QML shell, Python services, greeter
+Tradeoffs vs. qci: QEMU runs with TCG (`accel=tcg`), the virsh stand-in
+(`scripts/vm/test-vm-suites.sh`) answers `qemu-agent-command`/`domuuid`/
+`screenshot` over QEMU's own sockets so `vm-exec` works without libvirt, all
+bats files share one guest (qci gives each its own VM), and the test-only
+tools go into an overlay so the shipped image stays runtime-only. The suites
+step is after the image upload, fails with exit 2 when a suite did not run to
+completion (assertion failures are data, in `suites/summary.md`), and sizes
+its time budget from what the job has left.
 
-[Run 36991468544](https://github.com/qdistro/qdistro/actions/runs/36991468544)
-succeeded in 8m41s on the free 4-vCPU runner, with KVM (the runner exposes
-`/dev/kvm` once a udev rule opens it; the earlier runs used TCG).
-[QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/36991468544/artifacts/11220680256),
-956 MiB compressed, 8 GiB virtual, retained until 2026-11-01.
+## Runs
 
-What changed:
+| Run | Commit | Result | Note |
+|---|---|---|---|
+| 36991468544 | | success | build+boot+install green; first on snapshot 20260930 |
+| 36994730839 | | success | consumer check green |
+| 37032421943 | fed12f028 | failure | suites step added; runner had no `bats` — caught by astra r1 |
+| 37034194820 | af42fc2c2 | success | first complete suite run (68 min; suites 59 min) |
+| 37035548838 | bd1d89a54 | cancelled | superseded |
+| 37036822266 | 2ccb49759 | failure | flake: `vmssh` hit "Connection timed out during banner exchange" on the freshly rebooted guest (ConnectTimeout=5, one attempt). Fixed by `vmsshx` retry + ConnectTimeout=10 in bdc7f18e6 |
+| 37037304439 | e41d9952f | failure | suites exit 2: baseline not restored after `shell-modules` (single start + 60 s poll too short on TCG); 12 files unrun |
+| 37046652577 | bdc7f18e6 | failure | same stop: the restart loop still did not bring wayland-1 back — likely the greeter reclaimed the seat when admin's session died, so in-place starts can never win it |
+| 37052929450 | 35a675c93 | **success** | whole pipeline green: build, boot, checks, consumer validation, artifact upload, all 53 bats files + 8 pytest suites completed (suites step exit 0). `shell-modules` left its usual debris; the restart loop restored it in place (no relogin needed) |
+| 37101442488 | 35a675c93 | | workflow_dispatch re-build for local validation |
+| 37102833917 | 07ce955d6 | | validates the idle-lock suppression fix |
+| 37104111298 | 6cdfe5b8c | | merge of origin/main (72 commits) into the branch; validates the fix on merged code |
+| 37109215627 | e13947d3a | | merged main + admin-TUI pkgs + compositor-restart baseline fix |
+| 37111198372 | 47f822dc8 | | consumer-check desktop poll + journal dump on blank |
+| 37115937113 | 0dd68afe7 | | unconditional compositor-restart escalation + user-journal dump fix |
+| 37121328013 | 3471b9816 | **success** | last-file baseline skip + seat-gated compositor restart + keep-id o+x workaround |
 
-- Pinned to `snapshot.conf` 20260930 (cloud image, Podman builder base and
-  guest repos all from that one pin; on this branch only, `main` still pins
-  20260929).
-- Native build: the canonical `scripts/vm/build-native-podman.sh` instead of
-  the inline build. Its stage now also carries prebuilt `qsu` and the SELinux
-  `.pp` modules, so the guest stays free of compilers, `make` and headers.
-- `scripts/vm/test-vm-guest-install.sh` installs `QDISTRO_RUNTIME_PKGS` (62
-  requested, 439 with dependencies, 239.5 MiB download / 833.8 MiB installed,
-  zero `-devel` packages), pip-installs the presentation SDK, qdgreeter and
-  qdlocker, then runs the bootstrap's own `main()` with the installer chain
-  filtered. 11 steps ran: presentation, sdk, broker, admin-app,
-  session-manager, user-relay, polkit, pwd, qsu, portal-backend, tier3.
-  Skipped as optional or needing nested VMs/btrfs: browser-bridge, phone,
-  print, snapshots, tier4-host, tier5, tier5b.
-- No optional apps: no browser, and qterminator, qfileman and qnotebook are
-  not installed (as in the kiwi tester image).
+## Suite results (runs 37034194820 / 37052929450, both complete; 37037304439 agrees where it ran)
 
-Verified in the run:
+- pytest in-guest: 10,027 tests, 7 failed, 22 skipped — identical set in both runs.
+- bats: 600 planned, 517 ok, 44 failed, 39 skipped in the green run
+  (507/55 in the first). tiered-isolation improved 19→9 failures: the
+  tier-3/4 silo and secctx tests that failed earlier passed on the rerun —
+  timing/state sensitivity, not missing capability. The stable failures
+  break down as below.
 
-- All 45 staged dynamic ELFs resolve; the four core RPM versions match the
-  build container.
-- Headless Weston loads `qdwin-shell.so`; `qdwin-probe` connects.
-- QML shell: `qs -p /usr/share/quickshell/qdshell` under Weston's GL renderer
-  (llvmpipe) logs `Configuration Loaded` and runs 30 s without QML type or
-  import errors. The remaining errors are environmental (no network, PipeWire,
-  BlueZ or UPower).
-- After a full poweroff and second boot: greetd, the admin broker, session
-  manager, pwd and the root-exec socket are active, no unit failed, and
-  `org.qdistro.AdminBroker1`, `org.qdistro.Pwd1` and
-  `org.qdistro.SessionManager1` are on the system bus.
-- Runner disk delta 5.5 GB (budget 30 GiB).
+### Failure triage
 
-Time: 2m11s native Podman build, 40s QCOW2 preparation, 4m04s guest boot and
-install plus both checks, 1m00s artifact upload. The cloud image came from the
-Actions cache.
+1. **Rootless podman `--userns=keep-id` vs the 700 home dir** — verified
+   by booting the published artifact locally and A/B-testing against a
+   baseweed overlay (`/tmp/podman-selinux-verify`; both probe VMs cleaned
+   up after). `runc create failed: error preparing rootfs: remount-private
+   ... MS_PRIVATE: permission denied`. Explains: disposables-e2e (3),
+   disp-export-e2e (2), disp-open-e2e (1), disposable-secctx-wiretag (1),
+   wlimg-e2e (2), tier2-hardening-lockin (1), tier2-silo-secctx-wiretag (1),
+   qdwin-taskbar-isolation (1), podapp-launch-wiretag (1), templates-browser
+   (7), templates-promotion (1), and the tier-2 half of tiered-isolation.
 
-Accounts: `admin` (uid 1000) and `user`, both with the testing password
-`qdistro`; the last boot removes cloud-init state and `authorized_keys` and
-disables SSH password login. SELinux is permissive (dev profile) with the
-prebuilt modules loaded.
+   What was ruled out in the GH guest: XFS itself (baseweed-baked has the
+   same root filesystem UUID — the GH image was installed from it; a fresh
+   XFS loop-mount and a same-device remount both work), kernel (identical
+   7.2.8-1-default), podman/runc versions (identical 6.0.2-1.1 / 1.5.1-2.1),
+   storage config (`podman info` identical, rootless overlay graphroot
+   `~/.local/share/containers/storage`), stale graphroot state (fresh
+   directories fail), SELinux enforcing (**the image is actually
+   `SELINUX=permissive`** — the suites serial log's AVC flood was
+   permissive-mode logging, not enforcement), `/tmp` (tmpfs in both).
 
-Findings for `main`:
+   The mechanism, via strace: runc init inside the container userns does
+   `setresuid(0)` (container root = host subuid 100000 via uid_map) and then
+   `mount("", ".../merged", NULL, MS_PRIVATE)` on the overlay — that path
+   traverse hits `/home/admin` (mode 700, uid 1000), which host-uid 100000
+   cannot traverse → `EACCES`. Confirmed by `chmod o+x /home/admin`:
+   keep-id containers start (repeatedly: 700 fail / 755 pass / back to 700
+   fail). Everything below `/home/admin` fails; identical graphroot under
+   `/opt` passes.
 
-- `qdistro-bootstrap.sh` on a fresh Tumbleweed never creates the `seat` group
-  that `install-qdwin-session-for-vm.sh` adds admin to; only
-  `fresh-vm-bootstrap.sh` and `image/config.sh` do, and the seatd RPM does not.
-  The test VM creates it before calling `main()`.
-- Sourcing the bootstrap resets globals such as `ADMIN_PASSWORD`; a caller
-  must not keep its own values under those names.
-- Without `selinux-policy-devel` and `make`, the bootstrap's policy installs
-  only warn under dev; a runtime-only install needs the prebuilt modules.
+   The baseweed anomaly: identical perms, uid_map, bundle spec, kernel and
+   packages — but its runc init's `mount(merged, MS_PRIVATE)` **succeeds**.
+   Its mounting thread evidently resolves the path under credentials that
+   own the directory (i.e., it still sits in the parent rootless userns,
+   not the container userns). Same runc version and identical bundle spec,
+   so the residual difference is which thread/userns performs the remount —
+   left open; not needed for classification.
 
-### Consumer validation (run 36994730839)
+   Consequences: in the GH image every `--userns=keep-id` container is dead,
+   which is all tier-2/podapp launches. Note this is NOT proven to be a GH
+   image-only condition — baseweed's admin home is also 700, so a real
+   install whose tier-2 launch path matches `podman run --userns=keep-id`
+   may hit the same wall on hosts where the remount runs inside the
+   container userns. Worth a product-side check of the tier-2 launcher on
+   a real baseweed install (qci's bats VMs pass, so something in that path
+   differs).
 
-[Run 36994730839](https://github.com/qdistro/qdistro/actions/runs/36994730839)
-adds `scripts/vm/test-vm-consumer-check.sh` and passed in 14m40s;
-[QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/36994730839/artifacts/11221194788),
-955 MiB, retained until 2026-11-01. After the image is final, the check boots
-it through a throwaway overlay with fresh UEFI variables and a key-only
-cloud-init seed (65 s), then requires:
+   Workflow-level workaround candidates (harness, not tests): `chmod o+x
+   ~admin` during suite setup, or repoint the rootless graphroot to
+   `/var/tmp/containers-admin` via `~/.config/containers/storage.conf`.
+   Neither is applied — decided to leave the artifact faithful to a stock
+   install and report instead.
 
-- the consumer key logs in, the build key does not, SSH password login is
-  off, passwordless sudo works and the QEMU guest agent answers;
-- admin's password is usable and machine-id and SSH host keys are new;
-- `systemctl is-system-running` is `running` with no failed unit, the
-  qdistro services and bus names are up and the chain state has 11 steps;
-- the repositories are only `history/20260930` and resolve `bats` and `jq`;
-- qdgreeter is on the virtual display (virtio-vga), and typing the password
-  with QMP `send-key` starts qdwin-session.target, the compositor, qdshell and
-  qdlocker; `consumer-greeter.png` and `consumer-desktop.png` (qdshell bar at
-  1920x1080) are in the logs artifact;
-- the artifact's sha256 is unchanged afterwards.
+2. **Tier-3/4 silo tests are timing-sensitive, not missing** — they passed
+   on the second complete run (tiered-isolation 19→9 fails); what remains
+   is the tier-2 podman failures plus the two clipboard-focus-gate tests
+   below and `teardown_file failed`.
+3. **Clipboard-focus-gate (tiered-isolation tests 30–31): harness
+   artifact — qdlocker idle-lock on the shared guest, root-caused and
+   fixed** — first compared against qci run `full-20261002T122430Z`
+   (local green); then verified end-to-end by booting the published
+   artifact locally under libvirt/KVM (`gh-artifact-suites`,
+   /tmp/gh-image-local/run-local.sh). The pair fails identically under
+   KVM — not TCG timing — with the same two diagnostic lines. The
+   journal reveals the mechanism: `Tier3FocusIPC injectFocus` →
+   `qdwin_shell_v1#5: error 3: locked` — qdlocker's production 300 s
+   idle timer fires ~5 min after the (input-less) session starts and
+   latches `qdwin locked=1`; every privileged request is then refused
+   with a *fatal* protocol error that also kills qdshell's binding —
+   hence no `set_keyboard_focus`/`CLIPBOARD_FOCUS_GATE` lines and the
+   wedged `wl-paste`. qci never sees it: each bats file gets a fresh
+   VM whose session is younger than the lock, and
+   `tiered-isolation.bats`'s own `setup_file` installs the
+   `99-qci-no-idle-lock.conf` drop-in per-file — on the shared guest
+   that lands after the lock has already latched (and cannot un-latch
+   it). **Both tests PASS on the artifact with an unlocked session**
+   (clipboard-r4.tap). Fixed in `07ce955d6`: the suite installs the
+   same drop-in before the greeter login so the session's qdlocker
+   starts with the 24 h timeout (same as ci gui's suppress_idle_lock).
+4. **Optional surfaces absent from this minimal image** — pwd-print-recall's
+   probes for print-VM helpers, browser bridge, snapper bridge and phone
+   ("not installed (legacy bake)"); browser-9e-daemons (browser not shipped);
+   gui-fixes-verify (print-proxy, bystander FIFO, Xwayland absent). Local
+   qci run is green on all of these files — pure image-gap.
+5. **Missing kernel/env pieces** — kernel-default-base has no `uinput`
+   (ydotool paths fail); kiwi-ci-base tests 2/9 need a libvirt template
+   domain on the runner, which only exists on the qci host.
+6. **Unit tests that read the real system** — 6 deterministic unit failures
+   (session-manager autostart/persistence, relay dbus policy, user-relay
+   installed layout) + `test_polkit_ignores_override` (presentation).
+   Expected on an installed image — paths resolve where they don't on a
+   dev host.
+7. **shell-modules s3d/s3f/s3c — identical local failure, product-side** —
+   compared against qci run `full-20261002T122430Z`: the same three tests
+   fail at the same TAP positions in both environments with materially
+   identical diagnostics — s3d `routed=0 picked=proxy pick_matched=1
+   active_input_proxy_matched=0` (proxy visually picked but never armed as
+   active input proxy), s3f the same after the real allow transition, s3c
+   `keyboard-grab install log never appeared`. Also confirmed earlier on
+   run 37034194820 (identical signatures). Not a GH artifact — an open
+   qdwin nested-input bug: `pick_view` matches the proxy view but
+   `active_input_proxy` is never set, and the keyboard-grab object is not
+   installed on RDP connect. Belongs in the product bug list.
+8. **presentation-four-apps `qfileman worker exited 1 before ready`** —
+   still unexplained; appears GH-only (not in the local qci failures).
+   Likely a worker that needs an optional surface missing from the image
+   (same class as item 4) — needs one confirmation pass.
 
-It found one image bug: a seed listing admin under `users:` locked admin's
-password (cloud-init's `lock_passwd` default), so the greeter refused the
-documented password. The image now sets cloud-init's default user to admin
-with `lock_passwd: false` and ships an empty `/etc/machine-id`. This run also
-exercised main's `seat` group fix (`8b0c51fc5`); the guest script no longer
-creates the group itself.
+`shell-modules` also leaves the broker stopped and admin's qdwin session down
+(its `setup()` stops the broker for every test; qci never notices because the
+file gets a disposable VM). The shared-guest harness restores the baseline
+between files; bdc7f18e6 makes that restore keep re-issuing starts instead of
+one attempt in 60 s.
 
-Using the image: give cloud-init a seed whose user-data is only
+## Findings carried forward
 
-```yaml
-#cloud-config
-ssh_authorized_keys:
-  - ssh-ed25519 AAAA... you@host
-```
+- The image boots and installs green on TCG within the free-runner budget;
+  the artifact is published before the suites run, so suite outcomes never
+  gate availability.
+- Tests that depend on podman, silos, the browser, print/phone/backup
+  surfaces, uinput, or a libvirt template domain cannot pass on this image;
+  that is ~55 bats assertions of expected-vs-missing capability, which the
+  summary now enumerates per file.
+- Adversarial review (codex astra, rounds 1–5 in `reviews/`) drove: bats
+  presence on the runner, results-vs-expected accounting, bounded runs, no
+  exclusion list, budget-from-job-time-left. Round 5: **SHIP** on e41d9952f
+  with one minor (boot-probe budget classification, fixed in 16ed922c7).
+- todo commit 7b45389 (rotation row for the 20260930 pin) is on
+  `origin/main`; nothing left to push.
 
-then `ssh admin@<vm>`; at the console or greeter, admin and user log in with
-`qdistro`. Attach a `virtio-vga` display to see the greeter, and a
-`org.qemu.guest_agent.0` virtio-serial port for guest-agent exec.
+## Local validation of the published artifact (2026-10-03)
 
-Known limit: the cloud image URL is the rolling one, verified against the
-pinned checksum. Once Tumbleweed publishes a newer image the download fails
-until the pin is bumped; the Actions cache only covers a hit.
+Booted `qdistro-test-vm.qcow2` (run 37052929450) under libvirt/KVM as
+`gh-artifact-suites` (qemu:///session, q35+OVMF, virtio-vga, user net +
+hostfwd ssh; harness mirror in `/tmp/gh-image-local/run-local.sh`). The
+full qci-lane guest setup replicated: test packages via zypper,
+`qdistro-test` copy, dev profile, tier installers, probes, RDP cert,
+greeter login via `sendkey`, `vm-exec` works natively over the real
+qemu-guest-agent channel.
 
-## Earlier results (2026-09-24)
+Results vs the GH run — identical at every position:
 
-### Verified result
+| File | GH (TCG) | Local (KVM) |
+|---|---|---|
+| compositor-shell | 1 ok + 1 skip | same |
+| broker-e2e | pass | pass |
+| disposables-e2e | podman `remount-private` fails | identical |
+| tiered-isolation | 9 fails (tier-2 podman, 30/31) | identical positions |
+| shell-modules | s3d/s3f/s3c | s3d/s3f/s3c |
 
-- [Final manually triggered Docker run 36013692783](https://github.com/qdistro/qdistro/actions/runs/36013692783): successful in 15m49s; [downloadable test VM ZIP](https://github.com/qdistro/qdistro/actions/runs/36013692783/artifacts/10814472674), 677 MB, retained until 2026-10-24. The guest root had 1.4 GiB used / 6.1 GiB free; runner final disk-use delta was 2.68 GB. All 44 staged dynamic ELFs passed dependency checks, and `qdwin-probe` received `hello uid=1000` from the launched shell. No build tools were installed in the guest. This run also verified `workflow_dispatch` on the experiment branch.
-- [Runtime-only run 35993860510](https://github.com/qdistro/qdistro/actions/runs/35993860510): successful; 15m08s job; [QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/35993860510/artifacts/10805489190), 676 MB compressed.
-- [Developer-image run 35994485920](https://github.com/qdistro/qdistro/actions/runs/35994485920): successful; 20m12s job; [QCOW2 artifact](https://github.com/qdistro/qdistro/actions/runs/35994485920/artifacts/10806601494), 1.11 GB compressed. It retains the native compiler, Meson, Ninja, Git, pkg-config and development headers, per user preference. The 8 GiB virtual disk's 7.5 GiB root had 2.3 GiB used and 5.3 GiB free; the runner's final disk-use delta was 3.78 GB, below the 15 GiB target.
-- The earlier comparison builds compiled qdwin, daemons, qdshell's native plugin, and the patched production libweston 16 in an openSUSE Tumbleweed Podman pod; the final workflow uses Docker. The staged tree was about 12 MB. The signed Minimal-VM QCOW2 was verified, resized, and populated offline with libguestfs. No privileged container or KVM was required; the runner did use sudo to install host image tools.
-- In the guest, all 44 staged dynamic ELF files passed dependency checks with the vendored library path. Weston loaded `qdwin-shell.so` on a headless backend, and `qdwin-probe` received `hello uid=1000`. Offline dependency checks and `qemu-img check` passed. Boot/probe used QEMU TCG, not KVM.
+The artifact behaves byte-for-byte like the GH guest — the suites'
+failures are content/harness deterministic, not runner flukes. With the
+idle-lock suppressed, the two clipboard-focus tests pass on the same
+artifact (see triage item 3).
 
-## Time and space profile
+Fresh-build check (workflow_dispatch run 37101442488, same commit):
+sha256 verified, boots identically (kernel 7.2.8, permissive, podman
+6.0.2, admin home 700), keep-id failure and `chmod o+x` workaround both
+reproduce.
 
-The developer-image job spent 1m12s on native Podman compilation and dependency installation, 2m45s preparing/copying the QCOW2, 13m32s on TCG guest boot/package installation/launch, 53s on offline checks, and 1m09s uploading the artifact. The developer guest zypper transaction downloaded 318.3 MiB and estimated 1.23 GiB of installed packages. The container build dependencies downloaded 353.1 MiB and estimated 1.35 GiB installed in that run. These are transaction figures, not additive final filesystem usage.
+## Open
 
-The first smoke run found a missing runtime `libpango-1.0.so.0`; the workflow now installs `libpango-1_0-0` and checks staged ELF dependencies. This shows that the staging/launch tests have caught a real packaging gap.
+- Podman keep-id / 700-home interaction (triage item 1): the GH artifact
+  reproduces it deterministically; baseweed does not despite identical
+  visible state. Residual question is which userns performs runc's
+  `remount-private` on each system. Follow-ups: (a) check whether a real
+  baseweed install's tier-2 launch path can hit the same wall (qci's bats
+  VMs pass, so something differs), (b) decide whether the workflow applies
+  a workaround (`chmod o+x ~admin` or a `/var/tmp` graphroot) in suite
+  setup — currently unapplied, artifact stays stock.
+- presentation-four-apps `qfileman worker exited 1 before ready` — GH-only
+  so far; probably a missing optional surface, needs one confirmation pass.
+- shell-modules s3d/s3f/s3c is now classified product-side (triage item 7)
+  — file/track it in the product bug list if not already there.
+- Clipboard-focus-gate resolved (triage item 3): harness fix `07ce955d6`
+  confirmed locally; run 37102833917 validated it partially — no lock
+  events in the serial log at all, but the run stopped on a new failure
+  mode below.
 
-The successful runtime-only and developer images are a useful A/B comparison.
-Omitting the build dependencies from the guest changed its zypper transaction
-from 318.3 MiB downloaded / 1.23 GiB installed to 131.0 MiB downloaded /
-462.8 MiB installed. The guest root fell from 2.3 GiB to 1.4 GiB used, and
-the GitHub artifact fell from 1.11 GB to 676 MB. Total job time fell from
-20m12s to 15m08s. The TCG guest step alone fell from 13m32s to 9m25s; native
-Podman compilation was essentially unchanged (1m12s versus 1m09s). Thus
-removing build tools from a *test* image saves about 0.9 GiB in the guest and
-five minutes per build, while still allowing CI to rebuild the binaries.
+## Main-merge runs (2026-10-03)
 
-## Scope and next steps
+- **37101442488** (`35a675c93`, workflow_dispatch): success; artifact
+  sha256-verified, booted and re-tested locally — byte-identical
+  behaviour to the earlier build.
+- **37102833917** (`07ce955d6`, idle-lock fix): suites exit 2 after
+  `pwd-print-recall` (~35/53 files). The idle-lock fix **held** — zero
+  `lock_requested`/`set_locked`/`error 3` lines in the serial log. New
+  failure: qdshell died during/after `pwd-print-recall` (which never
+  touches it; residue of earlier podapp churn is likely), and every
+  restart was rejected by qdwin with `layer-shell bind REJECTED — not
+  the shell client`, pinning it in auto-restart while
+  `qdwin-session.target` stayed `active`. The restore loop's `start` is
+  a no-op on an active target, so baseline gave up → suite stop. Root
+  mechanism: qdwin's `shell_bound && shell_resource` gate keeps the
+  slot while the *wl_client* connection survives — a child process that
+  inherited the wayland socket keeps the dead shell's client alive.
+  Product-side question filed below; harness fix below.
+- **37104111298** (`6cdfe5b8c`, merge of main `676f0c9fd`): failed at
+  guest install (5 min). `ccd7afe63` added `qdistro-admin-tui` to the
+  `admin-app` chain step; `install-admin-cli-for-vm.sh` hard-fails the
+  strict chain without `python313-textual`/`python313-rich`.
+  `a9abd7e15` deliberately removed them from `scripts/vm/install-deps.sh`
+  (that list feeds the baked base's recipe digest → forced 15-25 min
+  rebake per host), so the pair goes to the GH-only `pkgs` additions in
+  `test-vm-guest-install.sh` instead.
+- Fixes in `e13947d3a`: textual+rich in the guest-install package set;
+  `baseline()` escalates to `restart qdwin-compositor.service` (drops
+  every wl_client, frees the stale shell slot) when qdshell stays down
+  after member restarts; baseline-failure dump now tails qdshell's own
+  journal.
+- **37109215627** (`e13947d3a`): the install fix held — guest install,
+  offline checks, and the install-time headless qdshell smoke (all
+  layer surfaces bound) passed. Failed at the consumer check's final
+  step: session reported `qdwin-session.target`/compositor/qdshell/
+  qdlocker active, but the desktop screenshot 15 s later was a uniform
+  frame (1 colour — the bare qdwin background; greeter painted fine at
+  10 colours). No guest journal was captured on that failure path, so
+  product-regression vs TCG-slowness is undecidable from this run;
+  the timing hypothesis is live (this guest was ~5× slower overall:
+  SSH up after 86 s vs 15 s in the passing run).
+- Fix in `47f822dc8`: the desktop check now polls like the greeter
+  check (36×5 s) instead of one fixed 15 s sleep, and dumps the
+  qdshell/compositor/qdlocker journals before failing — so a real
+  regression leaves its evidence in the run log.
+- **37111198372** (`47f822dc8`): consumer check passed — the desktop
+  painted 47 colours ~6 s after session-active (matching the green
+  run's signature exactly), confirming the earlier blank was TCG
+  slowness, not a merged-main regression. pytest identical to prior
+  complete runs (10,146 tests, same 7 failures). bats ran 50/55 files,
+  36 failed cases — mostly the container-dependent set the keep-id
+  breakage predicts (disposables, disp-open/export, podapp-wiretag,
+  taskbar-isolation, templates-browser/promotion,
+  disposable-secctx-wiretag) plus `permissions-headless` (6) and
+  `pwd-print-recall` probes (6) — the new-from-main files to compare
+  against a local qci run. Stopped after `tier5b-ops-hardening` on the
+  SAME stale-shell-slot signature (`layer-shell bind REJECTED`):
+  the compositor-restart escalation was gated on a point-in-time
+  `is-active qdshell` which raced a respawn window and skipped. Also
+  found: the baseline dump's `journalctl -M admin@` is machined syntax,
+  not `systemctl -M` — it failed as "non-root" and produced no qdshell
+  journal.
+- Fixes in `0dd68afe7`: the compositor restart is unconditional once
+  the healthy-poll exhausts (at that point the alternative is a
+  baseline-failed stop anyway); the journal dumps filter on
+  `_UID=1000 _SYSTEMD_USER_UNIT=` (both scripts).
+- **37115937113** (`0dd68afe7`): **all 55 bats files ran.** pytest
+  identical again (same 7 failures). The escalation DID fire — but
+  after `shell-modules` (deliberately last; wrecks the guest by
+  design) the session target itself was down: the standalone
+  compositor restart could only fail (`libseat: could not open seat`
+  — the seat had fallen back to greetd), churned into start-limit,
+  and the greeter relogin then could not recover in time. Net: suite
+  marked incomplete on teardown debris after the final file.
+  `tiered-isolation` finally ran (43 tests): no `error 3 locked`
+  anywhere — the idle-lock fix held on GH — but 30/31 failed on
+  `qdshell not running` after the broken-podman tests churned the
+  session mid-file.
+- Fixes in `3471b9816` (+ `b94c03573`): skip the post-file baseline
+  restore after the LAST bats file (nothing left to protect; the
+  guest powers off next); gate the compositor restart on
+  `qdwin-session.target` still holding the seat (relog-in path owns
+  seat loss) + reset-failed before a greeter relogin; `chmod o+x
+  /home/admin` in the qci-lane overlay so keep-id containers run —
+  the verified workaround for the mode-700 home / subuid traversal
+  failure, applied overlay-only with the product question left open.
+- **37121328013** (`3471b9816`): **all-green run, every suite
+  completed.** pytest identical again (same 7 failures). bats: 633
+  planned, 570 ok, 23 failed, 40 skipped, **0 not executed** — the
+  first run where nothing was lost to teardown debris. The seat-gated
+  restart fired once (after `podapp-launch-wiretag`) and worked;
+  `tiered-isolation` ran all 43 tests with only 2 failures
+  (tier2-launcher-click, tier2-template-snapshot-e2e) — the mass
+  `qdshell not running` collapse is gone. `shell-modules` ran its 24
+  tests cleanly as the last file (5 ok/3 failed/16 skipped).
+  Remaining failures are the usual product-side set:
+  browser-9e-daemons 2, gui-fixes-verify 1, kiwi-ci-base 2,
+  permissions-headless 6, presentation-four-apps 1, pwd-print-recall
+  6, tiered-isolation 2, shell-modules 3.
+  Local `gh-artifact-suites` VM rebuilt on this run's artifact
+  (sha256 `f6ebd399…`, verified) — full setup done, admin session up
+  on wayland-1, ready for local bats via `run-local.sh`.
 
-Final decision: publish **one runtime-only test VM** as a GitHub Actions ZIP
-artifact containing an 8 GiB virtual, sparse QCOW2 and its SHA-256 checksum.
-Build qdwin, daemons, qdshell's native plugin, and patched libweston inside an
-openSUSE Tumbleweed Docker container. Do not install the compiler, Meson,
-Ninja, or development headers in the guest. GitHub's `upload-artifact@v4`
-provides native ZIP/zlib compression at level 6; no extra gzip/XZ layer is
-used. The 8 GiB disk leaves about 6 GiB free in the successful runtime image
-and does not imply an 8 GiB download. The artifact is retained for 30 days.
+## Open (product-side, from the runs above)
 
-(2026-09-24; superseded by the 2026-10-02 section above, which adds the QML shell, services and greeter.) The artifact was a native-components *test VM*, not a complete qdistro desktop or a KIWI replacement. `qdshell/meson.build` installs only its native QML plugin, not the QML shell/session wiring. The VM has no baked builder SSH key; SSH remains enabled so cloud-init can provision the user's key on first boot. Artifact retention is 30 days.
+- qdwin keeps `shell_resource`/shell-client authority tied to the
+  wl_client connection, not process liveness — a qdshell that dies with
+  an inherited-socket child (or any surviving fd) leaves the shell slot
+  held forever and the compositor can never accept a new shell. On qci's
+  fresh-VM-per-file lane this never mattered; on any long-lived session
+  (or a crashed-then-restarted desktop, i.e. real usage) it means the
+  compositor wedging the shell permanently. Worth a product fix:
+  clear the slot on shell_resource destroy AND verify the recorded
+  shell pid is still the binding process (starttime bracket like the
+  layer-shell allowlist does), or kill orphaned wl_clients whose
+  recorded pid vanished.
+- Clipboard-focus-gate resolved (triage item 3): harness fix `07ce955d6`
+  confirmed locally; run 37102833917 showed no lock events — GH-side
+  confirmation pending the tests reaching `tiered-isolation` in
+  37109215627.
 
-RPM distribution was considered and rejected for this test-image workflow.
-Keep more extensive VM testing on the user's own hardware as requested, with
-the GitHub TCG boot/probe serving as a portable smoke test.
+## 2026-10-03: final astra review and merge
 
-## Astra review of a possible single RPM
+Astra review (`todo/reviews/2026-10-03-gh-test-vm-merge-review.md`, brief
+alongside it) of the full `origin/main...HEAD` delta at `3471b9816` returned
+**MERGE-AFTER-FIXES** with one blocking finding:
 
-One versioned RPM for qdistro-owned runtime files is a reasonable *future*
-ownership and upgrade boundary, but it should not replace the ready-to-use
-QCOW2 artifact. The current 12 MB staged tree is only native qdwin, daemons,
-patched libweston and qdshell's native plugin; `qdshell/meson.build` explicitly
-leaves the QML shell tree to another installer. Python apps, services, greeter
-and policy setup are likewise not captured. An RPM of this tree should be
-called `qdistro-native`, not `qdistro`, until the complete runtime manifest is
-defined against the bootstrap installer chain.
-
-If an RPM is introduced, it should own first-party immutable files and declare
-openSUSE runtime dependencies, not bundle openSUSE RPMs or invoke zypper/pip
-inside `%post`. Keep machine provisioning (users, storage, SSH, profile and
-service enablement) in an explicit image assembler/bootstrap. Audit generated
-RPM requirements/provides around the *private* vendored libweston tree so its
-SONAME cannot falsely satisfy unrelated system packages. An XFS Minimal-VM
-image would still lack the btrfs/subvolume/snapshot properties of the full
-release path. RPM packaging improves upgrade/removal hygiene, but does not
-remove the measured VM boot and dependency-install time; making testers assemble
-the image locally would also shift network and libguestfs work to their machines.
-
-Before calling this reproducible release packaging: pin or consistently snapshot the container, cloud image and RPM repositories; record their digests; inspect peak (not just final) runner disk use; and verify upgrades/rebuilds against the pinned Weston ABI. The current workflow compares four key container/guest RPM versions and performs full staged-ELF closure checks, but it does not prove snapshot identity for the entire dependency graph.
+- **[P1] Greeter relogin sent the obsolete image password.** The suites
+  setup changes admin/root passwords to `QCI_PASSWORD` (`Pa_ssw0rd45`)
+  before the bats loop, but the seat-loss recovery at the greeter still
+  sent `IMAGE_PASSWORD` (`qdistro`) — so the greeter-relogin path could
+  never have succeeded. Explains why relogin timed out in run
+  37115937113 (the seat-loss case after `shell-modules`-era churn).
+  Fixed: `send_text "$QCI_PASSWORD"`; stub-verified (the recovery block
+  now supplies the current password). The unused-fallback caveat stands:
+  the green run exercised the seat-gated compositor restart but not the
+  greeter relogin.
+- Nonblocking: `actions/*` are `@v4`-tagged not commit-pinned; push
+  trigger stays restricted to `experiment/github-qdistro-image` (main
+  needs `workflow_dispatch` — deliberate for the experimental lane);
+  the consumer check only *warns* on stale SSH host keys (the journal
+  here overstated it); this in-repo journal copy was a stale snapshot
+  and is re-synced in the fix commit.
+- Verified clean: no remaining single-quote/expansion traps in the
+  multiline SSH blocks; fail-closed accounting probes passed (truncated
+  middle TAP, missing exit marker, bailout, baseline marker, missing
+  pytest batch all return exit 2); overlay mutations (`chmod o+x`,
+  password change, test packages) provably cannot leak into the
+  uploaded artifact; no secrets in image or logs.
