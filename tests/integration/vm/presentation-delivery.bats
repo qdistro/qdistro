@@ -201,11 +201,17 @@ def check_wrapper(wrapper: str) -> None:
             f"branches (persistent={persistent_if_line}, disposable={disposable_elif_line})"
         )
     args_text = "\n".join(args_lines)
-    if "--userns=keep-id" not in args_text:
+    tokens = args_text.split()
+    uid = '"${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"'
+    if "--userns=keep-id" not in tokens:
         raise SystemExit("PODMAN_ARGS is missing --userns=keep-id")
-    if '"${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"' not in args_text:
+    user_ok = any(
+        tokens[i] == "--user" and i + 1 < len(tokens) and tokens[i + 1] == uid
+        for i in range(len(tokens))
+    )
+    if not user_ok:
         raise SystemExit("PODMAN_ARGS is missing --user TIER2_ADMIN_UID_RESOLVED")
-    if '"${PODMAN_HARDENING[@]}"' not in args_text:
+    if '"${PODMAN_HARDENING[@]}"' not in tokens:
         raise SystemExit("PODMAN_ARGS does not splice PODMAN_HARDENING")
 
 
@@ -277,6 +283,7 @@ inside_disposable = GOOD.replace(
 expect_fail(inside_disposable, "inside a home-mode branch")
 
 expect_fail(GOOD.replace("--userns=keep-id\n", ""), "missing --userns=keep-id")
+expect_fail(GOOD.replace("--user ", "--env "), "missing --user TIER2_ADMIN_UID_RESOLVED")
 expect_fail(
     GOOD.replace(
         '"${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"',
