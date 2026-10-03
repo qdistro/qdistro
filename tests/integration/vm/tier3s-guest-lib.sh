@@ -603,17 +603,25 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 # server attaches, so post-attach the live proof is not the pathname but the
 # client's ESTABLISHED stream still carrying the bound path. ss/iproute2 is
 # not in the guest image; /proc/net/unix shows the accepted socket's bound
-# name (St=03 connected) even after unlink — resolve its inode back to a fd
-# of the recorded client pid so the stream is attributed, not just present.
+# name (St=03 connected) even after unlink. The accepted fd may sit in a
+# waypipe child forked for the connection, not the recorded main pid — so
+# the owner's attribution is the launch unit's cgroup (any waypipe process
+# in <unit> holding the established stream), not one pid.
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
-    local tok="$1" bp ino fd
-    bp=$(rec "$tok" bridge_client_pid)
-    [ -n "$bp" ] || return 1
+    local tok="$1" unit ino p fd owner
+    unit=$(rec "$tok" unit)
+    [ -n "$unit" ] || return 1
     ino=$(awk -v p="$LAUNCHES/$tok/link.sock" \
         '$6=="03" && $NF==p {print $7; exit}' /proc/net/unix 2>/dev/null)
     [ -n "$ino" ] || return 1
-    for fd in /proc/"$bp"/fd/*; do
-        [ "$(readlink "$fd" 2>/dev/null)" = "socket:[$ino]" ] && return 0
+    for p in /proc/[0-9]*; do
+        [ "$(cat "$p/comm" 2>/dev/null)" = waypipe ] || continue
+        for fd in "$p"/fd/*; do
+            [ "$(readlink "$fd" 2>/dev/null)" = "socket:[$ino]" ] || continue
+            case "$(sed -n 's|^0::||p' "$p/cgroup" 2>/dev/null)" in
+                *"/$unit") return 0 ;;
+            esac
+        done
     done
     return 1
 }
@@ -639,8 +647,16 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     is "$tag: bridge client + wrapper in the launch unit cgroup" \
         "$(for p in "$bp" "$wp"; do sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null; done | grep -c "/${unit}$")" 2
     if bridge_stream_live "$tok"; then
-        pass "$tag: bridge channel live (client $bp holds the link.sock stream)"
-    else fail "$tag: no established link.sock stream owned by client pid $bp"; fi
+        pass "$tag: bridge channel live (unit waypipe holds the link.sock stream)"
+    else
+        awk -v p="$LAUNCHES/$tok/link.sock" 'index($0, p)' /proc/net/unix 2>/dev/null \
+            | sed 's/^/    unix: /'
+        for p in /proc/[0-9]*; do
+            [ "$(cat "$p/comm" 2>/dev/null)" = waypipe ] || continue
+            echo "    waypipe ${p#/proc/}: $(sed -n 's|^0::||p' "$p/cgroup" 2>/dev/null) fds=$(ls "$p/fd" 2>/dev/null | wc -l)"
+        done
+        fail "$tag: no established link.sock stream in a $unit waypipe process"
+    fi
 }
 
 # Bring a GUI silo up live: StartSilo -> record phase=running -> the bridge
