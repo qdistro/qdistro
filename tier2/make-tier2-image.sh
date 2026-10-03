@@ -72,6 +72,11 @@ context="$(mktemp -d "${TMPDIR:-/tmp}/tier2-context.XXXXXX")"
 CLEANUP_DIRS=("$context")
 trap 'rm -rf "${CLEANUP_DIRS[@]}"' EXIT
 cp -a . "$context/"
+# consumer/ is a copied-tree staging area for qfileman sources, not a
+# weston-terminal/text-viewer/url-preview COPY input. Strip it from the
+# shared context; stage_workload_context copies from SCRIPT_DIR/consumer
+# into the qfileman context only.
+rm -rf "$context/consumer"
 printf '%s\n' "$tier2_snapshot" > "$context/SNAPSHOT"
 log "tier-2 workloads pinned to Tumbleweed snapshot $tier2_snapshot"
 

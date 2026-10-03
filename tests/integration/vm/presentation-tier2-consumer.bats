@@ -22,6 +22,11 @@ cf_path, make_path, seccomp_path = (Path(p) for p in sys.argv[1:])
 text = cf_path.read_text(encoding="utf-8")
 make = make_path.read_text(encoding="utf-8")
 
+PIP_BLOCK = (
+    "RUN python3 -m pip install --no-deps --no-cache-dir --prefix=/usr \\\n"
+    "        /usr/src/presentation \\\n"
+    "        /usr/src/qdfileman \\\n"
+)
 NEED = (
     "COPY qdfileman /usr/src/qdfileman",
     "COPY presentation /usr/src/presentation",
@@ -29,7 +34,7 @@ NEED = (
     "python313-tomli-w",
     "qt6-wayland",
     "google-noto-sans-fonts",
-    "pip install --no-deps",
+    PIP_BLOCK,
     'CMD ["qfileman"]',
     "import qdistro_presentation, qfileman",
 )
@@ -53,6 +58,8 @@ if 'cp -a "$app" "$dest/qdfileman"' not in make:
     raise SystemExit("make-tier2-image.sh does not copy qdfileman into the context")
 if 'cp -a "$pres" "$dest/presentation"' not in make:
     raise SystemExit("make-tier2-image.sh does not copy presentation into the context")
+if 'rm -rf "$context/consumer"' not in make:
+    raise SystemExit("make-tier2-image.sh does not strip consumer/ from the shared context")
 if "qfileman)" not in make:
     raise SystemExit("make-tier2-image.sh qfileman staging is not workload-gated")
 
@@ -84,10 +91,14 @@ def check(src: str, make_src: str, seccomp: Path) -> None:
         raise SystemExit("seccomp missing")
     if STAGE_CALL not in make_src:
         raise SystemExit("staging missing")
+    if 'rm -rf "$context/consumer"' not in make_src:
+        raise SystemExit("consumer strip missing")
 
 check(text, make, seccomp_path)
 expect_fail(text, "COPY qdfileman /usr/src/qdfileman\n", "COPY qdfileman")
 expect_fail(text, "COPY presentation /usr/src/presentation\n", "COPY presentation")
+expect_fail(text, "        /usr/src/presentation \\\n", "pip operand presentation")
+expect_fail(text, "        /usr/src/qdfileman \\\n", "pip operand qdfileman")
 expect_fail(text, "python313-PyQt6 \\\n", "python313-PyQt6")
 expect_fail(text, 'CMD ["qfileman"]\n', "CMD qfileman")
 expect_fail(text, "import qdistro_presentation, qfileman", "import smoke")
@@ -109,6 +120,15 @@ except SystemExit as exc:
         raise SystemExit(f"staging mutation failed for the wrong reason: {exc}") from None
 else:
     raise SystemExit("checker accepted make-tier2-image.sh without staging")
+
+dropped_strip = make.replace('rm -rf "$context/consumer"\n', "", 1)
+try:
+    check(text, dropped_strip, seccomp_path)
+except SystemExit as exc:
+    if "consumer strip missing" not in str(exc):
+        raise SystemExit(f"consumer-strip mutation failed for the wrong reason: {exc}") from None
+else:
+    raise SystemExit("checker accepted make-tier2-image.sh without stripping consumer/")
 
 print("ok")
 PY

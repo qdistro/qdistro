@@ -217,6 +217,32 @@ def test_make_script_qfileman_fails_without_consumer_sources(tmp_path):
     assert not calls.exists()
 
 
+def test_make_script_weston_terminal_excludes_staged_consumer_dir(tmp_path):
+    standalone, env, _calls = _standalone_tier2(tmp_path)
+    consumer = standalone / "consumer"
+    consumer.mkdir()
+    shutil.copytree(ROOT / "qdfileman", consumer / "qdfileman")
+    shutil.copytree(ROOT / "sdk" / "presentation", consumer / "presentation")
+    listing = tmp_path / "weston-listing"
+    podman = Path(env["PATH"].split(":")[0]) / "podman"
+    podman.write_text(
+        "#!/bin/sh\n"
+        'for a; do last="$a"; done\n'
+        f'{{ echo CONTEXT="$last"; ls -1 "$last"; }} >> {listing}\n'
+    )
+    proc = subprocess.run(
+        ["bash", str(standalone / "make-tier2-image.sh"), "weston-terminal"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    names = set(listing.read_text().split())
+    assert "consumer" not in names
+    assert "qdfileman" not in names
+    assert "presentation" not in names
+
+
 def test_make_script_qfileman_accepts_staged_consumer_dir(tmp_path):
     standalone, env, calls = _standalone_tier2(tmp_path)
     consumer = standalone / "consumer"
