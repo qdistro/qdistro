@@ -336,6 +336,21 @@ if [ "${#BATS_FILES[@]}" -gt 0 ]; then
         chmod 0600 "$d/rdp.key"; chmod 0644 "$d/rdp.crt"' > "$OUT/qci-lane-setup.log" 2>&1 \
         || { tail -30 "$OUT/qci-lane-setup.log"; setup_failed; }
 
+    # The guest is headless: nothing ever feeds input, so qdlocker's
+    # production 5-minute idle timer locks the session shortly after it
+    # starts, and qdwin then refuses every privileged request (injectFocus,
+    # set_keyboard_focus, ...) with `error 3: locked` — fatal to the qdshell
+    # binding. qci never sees this because each bats file gets a fresh VM
+    # (session younger than the lock) and tiered-isolation's own setup_file
+    # installs this same drop-in per-file. Here the session outlives every
+    # file, so the suppression must land BEFORE the session exists: qdlocker
+    # then starts with the long timeout. Same mechanism as ci/lib/gates/
+    # gui.sh's suppress_idle_lock (QDLOCKER_IDLE_MS, 24 h).
+    rootssh 'install -d -m0755 /etc/systemd/user/qdlocker.service.d &&
+        printf "[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n" \
+            > /etc/systemd/user/qdlocker.service.d/99-qci-no-idle-lock.conf' \
+        || setup_failed
+
     # admin logs in at the greeter as a tester would, with the image password.
     session_up() {
         rootssh 'systemctl --user -M admin@ is-active --quiet qdwin-session.target &&
