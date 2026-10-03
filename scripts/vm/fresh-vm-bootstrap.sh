@@ -1137,7 +1137,7 @@ if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
     # Verify each expected tag actually landed in admin's store. A partial build
     # (script exits 0 but one tag missing) would silently leave the on-demand
     # path for that workload.
-    for _w in weston-terminal text-viewer url-preview; do
+    for _w in weston-terminal text-viewer url-preview qfileman; do
         if ! runuser -u admin -- podman image exists "qdistro/tier2-${_w}:latest"; then
             log "  ERROR: expected image qdistro/tier2-${_w}:latest missing after load/build"
             exit 1
@@ -1149,7 +1149,7 @@ if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
                 || { log "ERROR: tier-2 $_w image snapshot mismatch"; exit 3; }
         fi
     done
-    log "  tier-2 images pre-built: weston-terminal, text-viewer, url-preview"
+    log "  tier-2 images pre-built: weston-terminal, text-viewer, url-preview, qfileman"
 fi
 
 log "bootstrap complete."
