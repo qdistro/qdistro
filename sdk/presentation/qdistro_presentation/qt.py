@@ -172,6 +172,27 @@ def pick_family(requested: str, *, fallback: str, fixed: bool) -> str:
     return fallback
 
 
+def apply_logical_ui_font(
+    app: QApplication,
+    resolved: ResolvedPresentation,
+    *,
+    native_family: str,
+) -> QFont:
+    """Install the shared UI font in points.
+
+    ``resolved.ui_point_size`` already includes fonts.uiScale * metrics.uiScale.
+    Qt and the compositor apply device/output scale; this path must not
+    multiply by devicePixelRatio or call setPixelSize.
+    """
+    ui_family = pick_family(resolved.ui_family, fallback=native_family, fixed=False)
+    font = QFont(app.font())
+    font.setFamily(ui_family)
+    font.setPointSizeF(resolved.ui_point_size)
+    font.setWeight(QFont.Weight.Normal)
+    app.setFont(font)
+    return font
+
+
 class _TooltipFilter(QObject):
     def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:  # noqa: ARG002
         if event is not None and event.type() == QEvent.Type.ToolTip:
@@ -427,14 +448,9 @@ class PresentationController(QObject):
         elif resolved.theme_mode == "system" and self._apply_system_fallback is not None:
             self._apply_system_fallback(app)
 
-        ui_family = pick_family(
-            resolved.ui_family, fallback=self._native_font.family(), fixed=False
+        apply_logical_ui_font(
+            app, resolved, native_family=self._native_font.family()
         )
-        font = QFont(app.font())
-        font.setFamily(ui_family)
-        font.setPointSizeF(resolved.ui_point_size)
-        font.setWeight(QFont.Weight.Normal)
-        app.setFont(font)
 
         if resolved.icon_theme:
             QIcon.setThemeName(resolved.icon_theme)
