@@ -8,15 +8,15 @@ from types import SimpleNamespace
 import pytest
 from PyQt6.QtGui import QFont, QPalette
 from PyQt6.QtWidgets import QWidget
-from qdistro_presentation.model import example_snapshot, with_generation
-from qdistro_presentation.paths import ENV_OVERRIDE
-from qdistro_presentation.publish import write_snapshot
 from qdbrowser.theme import (
     _ui_font,
     attach_presentation,
     palette_dict,
     reset_controller_for_tests,
 )
+from qdistro_presentation.model import example_snapshot, with_generation
+from qdistro_presentation.paths import ENV_OVERRIDE
+from qdistro_presentation.publish import write_snapshot
 
 
 @pytest.fixture(autouse=True)
