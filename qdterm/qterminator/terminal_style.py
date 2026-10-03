@@ -7,7 +7,9 @@ zoom delta. UI scale is not terminal scale.
 
 from __future__ import annotations
 
+import configparser
 import logging
+import os
 
 from PyQt6.QtGui import QFont, QFontDatabase
 
@@ -16,13 +18,19 @@ log = logging.getLogger(__name__)
 MIN_TERMINAL_POINT_SIZE = 6.0
 NATIVE_FIXED_POINT_SIZE = 11.0
 
-# Preview only: QTermWidget scheme files are not a public color API.
+# Fallback when the matching .colorscheme file is not installed.
 _SCHEME_PREVIEW = {
     "Linux": ("#000000", "#00ff00"),
     "BlackOnWhite": ("#ffffff", "#000000"),
     "WhiteOnBlack": ("#000000", "#ffffff"),
     "BlackOnLightYellow": ("#ffffdd", "#000000"),
 }
+
+_SCHEME_DATA_SUBDIRS = (
+    ("qtermwidget6", "color-schemes"),
+    ("qtermwidget5", "color-schemes"),
+    ("konsole",),
+)
 
 
 def native_fixed_font() -> QFont:
@@ -103,9 +111,77 @@ def resolve_color_scheme(profile: dict, config) -> str:
 
 def preview_scheme_colors(scheme: str) -> tuple[str, str]:
     """Return (background, foreground) CSS colors for the font preview."""
+    parsed = _colors_from_scheme_file(scheme)
+    if parsed is not None:
+        return parsed
     if scheme in _SCHEME_PREVIEW:
         return _SCHEME_PREVIEW[scheme]
     lower = (scheme or "").lower()
     if "light" in lower or lower.endswith("onwhite") or "yellow" in lower:
         return ("#ffffdd", "#000000")
     return ("#1e1e1e", "#d3d7cf")
+
+
+def parse_colorscheme_file(path: str) -> tuple[str, str] | None:
+    """Read Background/Foreground ``Color=r,g,b`` from a Konsole scheme file."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        loaded = parser.read(path, encoding="utf-8")
+    except (OSError, configparser.Error, UnicodeDecodeError):
+        return None
+    if not loaded:
+        return None
+
+    def _hex(section: str) -> str | None:
+        if not parser.has_section(section) or not parser.has_option(section, "Color"):
+            return None
+        parts = [p.strip() for p in parser.get(section, "Color").split(",")]
+        if len(parts) < 3:
+            return None
+        try:
+            rgb = [max(0, min(255, int(float(p)))) for p in parts[:3]]
+        except ValueError:
+            return None
+        return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+    background = _hex("Background")
+    foreground = _hex("Foreground")
+    if background and foreground:
+        return (background, foreground)
+    return None
+
+
+def _scheme_search_dirs() -> list[str]:
+    dirs: list[str] = []
+    try:
+        from PyQt6.QtCore import QStandardPaths
+
+        roots = QStandardPaths.standardLocations(
+            QStandardPaths.StandardLocation.GenericDataLocation
+        )
+    except Exception:  # noqa: BLE001
+        roots = []
+    for root in roots:
+        for parts in _SCHEME_DATA_SUBDIRS:
+            dirs.append(os.path.join(root, *parts))
+    for extra in (
+        "/usr/share/qtermwidget6/color-schemes",
+        "/usr/share/qtermwidget5/color-schemes",
+    ):
+        if extra not in dirs:
+            dirs.append(extra)
+    return dirs
+
+
+def _colors_from_scheme_file(scheme: str) -> tuple[str, str] | None:
+    name = (scheme or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return None
+    filename = f"{name}.colorscheme"
+    for directory in _scheme_search_dirs():
+        path = os.path.join(directory, filename)
+        if os.path.isfile(path):
+            parsed = parse_colorscheme_file(path)
+            if parsed is not None:
+                return parsed
+    return None

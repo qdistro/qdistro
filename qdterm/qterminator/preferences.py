@@ -127,7 +127,7 @@ class PreferencesDialog(QDialog):
         self._config = Config()
         profile = self._config.get_profile("default")
         self._dormant_family = profile.get("font_family", "Monospace")
-        self._dormant_size = int(profile.get("font_size", 11) or 11)
+        self._dormant_size = float(profile.get("font_size", 11) or 11)
 
         outer = QVBoxLayout(self)
 
@@ -274,8 +274,10 @@ class PreferencesDialog(QDialog):
         family_row.addWidget(browse_btn)
         font_layout.addRow(tr("Family:"), family_row)
 
-        self._font_size = QSpinBox()
+        self._font_size = QDoubleSpinBox()
         self._font_size.setRange(6, 72)
+        self._font_size.setDecimals(2)
+        self._font_size.setSingleStep(1.0)
         self._font_size.valueChanged.connect(self._on_font_edited)
         font_layout.addRow(tr("Size:"), self._font_size)
 
@@ -339,11 +341,13 @@ class PreferencesDialog(QDialog):
         self._dark_color_scheme = QComboBox()
         for scheme in available_schemes:
             self._dark_color_scheme.addItem(scheme)
+        self._dark_color_scheme.currentTextChanged.connect(self._update_font_preview)
         color_layout.addRow(tr("Dark color scheme:"), self._dark_color_scheme)
 
         self._light_color_scheme = QComboBox()
         for scheme in available_schemes:
             self._light_color_scheme.addItem(scheme)
+        self._light_color_scheme.currentTextChanged.connect(self._update_font_preview)
         color_layout.addRow(tr("Light color scheme:"), self._light_color_scheme)
 
         self._opacity = QDoubleSpinBox()
@@ -376,34 +380,51 @@ class PreferencesDialog(QDialog):
 
     def _browse_font(self):
         """Open the full QFontDialog for advanced font selection."""
-        current = QFont(
-            self._font_combo.currentFont().family(),
-            self._font_size.value(),
-        )
+        current = QFont(self._font_combo.currentFont().family())
+        current.setPointSizeF(float(self._font_size.value()))
         font, ok = QFontDialog.getFont(current, self, tr("Select Font"))
         if ok:
             self._font_combo.setCurrentFont(font)
-            self._font_size.setValue(font.pointSize())
+            size = font.pointSizeF()
+            if size <= 0:
+                size = float(font.pointSize())
+            self._font_size.setValue(size)
+
+    def _pending_appearance_mode(self) -> str:
+        text = self._theme_mode.currentText() if hasattr(self, "_theme_mode") else ""
+        if text == "Dark":
+            return "dark"
+        if text == "Light":
+            return "light"
+        from qterminator.terminal_style import effective_appearance_mode
+
+        return effective_appearance_mode()
+
+    def _preview_scheme_name(self) -> str:
+        if self._chk_appearance_colors.isChecked():
+            combo = (
+                self._light_color_scheme
+                if self._pending_appearance_mode() == "light"
+                else self._dark_color_scheme
+            )
+            name = combo.currentText()
+            if name:
+                return name
+        name = self._color_scheme.currentText()
+        return name or "Linux"
 
     def _update_font_preview(self):
         """Update the preview label to reflect current font and content scheme."""
-        font = QFont(
-            self._font_combo.currentFont().family(),
-            self._font_size.value(),
-        )
+        if not hasattr(self, "_font_preview"):
+            return
+        font = QFont(self._font_combo.currentFont().family())
+        font.setPointSizeF(max(6.0, float(self._font_size.value())))
         if self._font_ligatures.isChecked():
             font.setStyleStrategy(QFont.StyleStrategy.PreferDefault)
         self._font_preview.setFont(font)
-        from qterminator.terminal_style import preview_scheme_colors, resolve_color_scheme
+        from qterminator.terminal_style import preview_scheme_colors
 
-        profile = {
-            "color_scheme": self._color_scheme.currentText(),
-            "color_source": (
-                "appearance-mode" if self._chk_appearance_colors.isChecked() else "profile"
-            ),
-        }
-        scheme = resolve_color_scheme(profile, self._config)
-        bg, fg = preview_scheme_colors(scheme)
+        bg, fg = preview_scheme_colors(self._preview_scheme_name())
         self._font_preview.setStyleSheet(
             f"background: {bg}; color: {fg}; padding: 8px;"
         )
@@ -444,7 +465,10 @@ class PreferencesDialog(QDialog):
             profile["font_source"] = "desktop"
             font = resolve_terminal_font(profile)
             self._font_combo.setCurrentFont(font)
-            self._font_size.setValue(max(6, int(round(font.pointSizeF()))))
+            size = float(font.pointSizeF())
+            if size <= 0:
+                size = float(font.pointSize() or 11)
+            self._font_size.setValue(max(6.0, size))
         else:
             self._font_combo.setCurrentFont(QFont(self._dormant_family))
             self._font_size.setValue(self._dormant_size)
@@ -458,6 +482,10 @@ class PreferencesDialog(QDialog):
         else:
             self._update_font_preview()
         self._refresh_desktop_status()
+
+    def _on_theme_mode_changed(self, *_args) -> None:
+        self._refresh_desktop_status()
+        self._update_font_preview()
 
     def _refresh_desktop_status(self) -> None:
         if not hasattr(self, "lbl_desktop_status"):
@@ -517,9 +545,7 @@ class PreferencesDialog(QDialog):
         self._theme_mode = QComboBox()
         self._theme_mode.addItems(["Follow desktop", "Dark", "Light", "Native"])
         win_layout.addRow(tr("Application appearance:"), self._theme_mode)
-        self._theme_mode.currentIndexChanged.connect(
-            lambda *_args: self._refresh_desktop_status()
-        )
+        self._theme_mode.currentIndexChanged.connect(self._on_theme_mode_changed)
 
         self.lbl_desktop_status = QLabel("")
         self.lbl_desktop_status.setObjectName("lbl_desktop_status")
@@ -693,7 +719,7 @@ class PreferencesDialog(QDialog):
 
         # Appearance
         self._dormant_family = profile.get("font_family", "Monospace")
-        self._dormant_size = int(profile.get("font_size", 11) or 11)
+        self._dormant_size = float(profile.get("font_size", 11) or 11)
         desktop = profile.get("font_source") == "desktop"
         self._chk_desktop_font.blockSignals(True)
         self._chk_desktop_font.setChecked(desktop)
@@ -757,7 +783,8 @@ class PreferencesDialog(QDialog):
             return
 
         font_family = self._font_combo.currentFont().family()
-        font_size = self._font_size.value()
+        raw_size = float(self._font_size.value())
+        font_size = int(raw_size) if raw_size.is_integer() else raw_size
         color_scheme = self._color_scheme.currentText()
         scrollback = self._scrollback.value()
         cursor_shapes = ["block", "underline", "ibeam"]
