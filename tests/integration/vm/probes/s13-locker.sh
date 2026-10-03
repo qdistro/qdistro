@@ -76,7 +76,7 @@ done
 chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 45 sdl-freerdp /v:127.0.0.1:3389 \
+    nohup timeout 45 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
         >/tmp/s13-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!

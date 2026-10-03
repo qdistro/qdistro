@@ -129,7 +129,7 @@ echo "PASS: outer qdwin started (S3b synthetic burst armed)"
 
 # --- attach SDL freerdp peer so outer paints + nested has a target ---
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 90 sdl-freerdp /v:127.0.0.1:3389 \
+    nohup timeout 90 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
         >/tmp/s25-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!

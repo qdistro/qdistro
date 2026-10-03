@@ -157,7 +157,7 @@ echo "PASS: outer qdwin started (broker-required + S3d route-test + allow-after-
 chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    nohup timeout 120 sdl-freerdp /v:127.0.0.1:3389 /cert:ignore /u:probe /p:probe \
+    nohup timeout 120 sdl-freerdp /v:127.0.0.1:3389 /sec:tls /cert:ignore /u:probe /p:probe \
         >/tmp/s3f-sdl-freerdp.log 2>&1 </dev/null &
 SDLPID=$!
 for i in 1 2 3 4 5 6 7 8; do
