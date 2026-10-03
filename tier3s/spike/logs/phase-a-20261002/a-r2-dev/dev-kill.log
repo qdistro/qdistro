@@ -1,0 +1,64 @@
+[vm-exec] guest identity pinned (pid 12613 start 103775)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+## 0. facts the r2 code relies on (systemd 261)
+PASS: show ActiveState of a never-loaded scope: completed, inactive (0:inactive)
+PASS: show ActiveState of a live unit (0:active)
+PASS: cgroup.kill exists (kernel >= 5.14) (yes)
+PASS: the fake is visible only inside fake_ns (1:0)
+
+## 1. a call that times out: its new-session, TERM-ignoring helper dies with the call scope
+    
+    Session terminated, killing shell... ...killed.
+    qdistro-tier3s-cleanup: 11111111111111111111111111111111: podman query failed (rc=124) for qdistro-tier3s-killtest; NOT treating it as absent (record preserved)
+PASS: cleanup fails the token (podman query failed, rc 4) (4:1)
+PASS: it returned within the call bound + kill grace (<= 30 s) (yes)
+PASS: the fake podman started its new-session helper (yes)
+PASS: the new-session TERM-ignoring helper is dead (dead)
+PASS: the hung podman is dead (dead)
+PASS: no call scope left (0)
+PASS: record preserved (yes)
+PASS: token lock free (yes)
+PASS: no work dir left (0)
+
+## 2. SIGTERM to the cleanup mid-call: the call in flight dies at once
+PASS: the TERM goes to the cleanup itself (/bin/bash /usr/libexec/qdistro/qdistro-tier3s-cleanup)
+    /usr/libexec/qdistro/qdistro-tier3s-cleanup: line 199: 12926 Killed                     timeout -k "$KILL_AFTER" "$CAP" "$@" < "$CALL_IN" > "$OUTF" 2> "$WORKDIR/err" 8>&- 9>&-
+    qdistro-tier3s-cleanup: signal: the call in flight was killed; records preserved
+PASS: cleanup exits 143 on TERM (143)
+PASS: the helper is dead right after (dead)
+PASS: the hung podman is dead right after (dead)
+PASS: no call scope left (0)
+PASS: record preserved, lock free (yes:yes)
+
+## 3. the whole supervisor SIGKILLed (its unit's cgroup killed): systemd ends the call by RuntimeMaxSec
+    call scope: qdistro-t3s-call-12967-1-2874040732.scope  RuntimeMaxUSec=26s TimeoutStopUSec=5s
+    supervisor scope procs: 12967 12989 
+    call scope procs: 12990 12991 12992 12993 
+PASS: the supervisor (cleanup + timeout) is gone (inactive)
+PASS: nothing of the supervisor is left to act on the call (0)
+PASS: systemd killed the TERM-ignoring helper after the call scope's RuntimeMaxSec (26 s) + TimeoutStopSec (5 s) (dead at ~31s)
+    (scope age when the helper was found dead: 31s)
+    pid1: Started [systemd-run] /usr/sbin/runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 podman container exists qdistro-tier3s-killtest.
+    pid1: pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+    pid1: pam_unix(runuser:session): session closed for user admin
+    pid1: qdistro-t3s-call-12967-1-2874040732.scope: Scope reached runtime time limit. Stopping.
+    pid1: qdistro-t3s-call-12967-1-2874040732.scope: Stopping timed out. Killing.
+    pid1: qdistro-t3s-call-12967-1-2874040732.scope: Killing process 12992 (sleep) with signal SIGKILL.
+    pid1: qdistro-t3s-call-12967-1-2874040732.scope: Failed with result 'timeout'.
+PASS: systemd stopped it for its runtime limit (1)
+PASS: and the hung podman (dead)
+PASS: no call scope left (0)
+PASS: record preserved, lock free (yes:yes)
+    (the SIGKILLed run's work dir: /run/qdistro-tier3s-ctl/.call-12967-Gt5vyS )
+
+## 4. --reap-stale sweeps the dead run's work dir; the real podman tears the record down
+PASS: real podman outside the namespace (podman version)
+    qdistro-tier3s-cleanup: 11111111111111111111111111111111: stale (unit qdistro-tier3s-silo@killtest.service not live); reaping
+    qdistro-tier3s-cleanup: 11111111111111111111111111111111: torn down (qdistro-tier3s-killtest)
+PASS: no work dir left after --reap-stale (0)
+PASS: the record was torn down with the real podman (0:gone)
+PASS: no call scope left (0)
+[dev-kill] 30 passes, 0 failures
+[vm-exec] --- stderr ---
+/var/tmp/t3s-dl/dev-kill.sh: line 105: 12967 Killed                     systemd-run --scope --unit=t3s-r2-supervisor --collect -q unshare -m --propagation private bash -c 'mount --bind "$1" /usr/bin/podman && shift && exec "$@"' _ "$D/podman" $CLEANUP $T1 > "$D/c3.out" 2>&1 < /dev/null
+[vm-exec] --- end stderr ---

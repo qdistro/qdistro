@@ -1,0 +1,28 @@
+### host 2026-10-02T08:57:03Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh a1
+CMD
+[vm-exec] guest identity pinned (pid 6829 start 33273)
+## D-A1: no --root anywhere; the wrapper derives the root from the host uid
+438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378
+CHECK run-rc: OK (0)
+State.Pid=6882 id=438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378
+CHECK sentry-exe-pin: OK (sidecar_gvisor_sentry_sha512)
+total 16
+drwx------. 2 admin admin   120 Oct  2 08:57 .
+drwxr-xr-x. 3 root  root     60 Oct  2 08:57 ..
+-rw-------. 1 admin admin     0 Oct  2 08:57 438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378_sandbox:438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378.lock
+-rw-r-----. 1 admin admin 14438 Oct  2 08:57 438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378_sandbox:438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378.state
+-r--r--r--. 1 admin admin     0 Oct  2 08:57 null-netns
+srwxr-xr-x. 1 admin admin     0 Oct  2 08:57 runsc-438d82bd3aea658dab7293b59ca941953eda0739601cbfcd8b3763c8c3640378.sock
+CHECK state-in-fixed-root: OK
+CHECK runtime: OK (/usr/libexec/qdistro/tier3s-runsc)
+CHECK plain-ps: OK (t3sf-a running)
+t3sf-a
+CHECK plain-stop-rc: OK (0)
+CHECK sentry-gone-after-plain-stop: OK
+t3sf-a
+CHECK plain-rm-rc: OK (0)
+CHECK root-clean-after-rm: OK
+CHECK no-runsc-left: OK (0)
+### BAD=0
+### exit=0

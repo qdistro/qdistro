@@ -1,0 +1,7 @@
+warn: config.c:3724: no configuration found, using defaults
+warn: wayland.c:1888: compositor does not implement the xdg-toplevel-icon protocol
+warn: shm.c:428: fallocate(FALLOC_FL_PUNCH_HOLE) not supported (Operation not supported): expect lower performance
+[54.000791 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=0 y=0 w=696 h=0
+[54.000985 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=0 y=494 w=696 h=0
+[54.001297 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=0 y=0 w=0 h=494
+[54.001315 ERR waypipe-server(1) tracking.rs:1875] Received degenerate damage rectangle: x=696 y=0 w=0 h=494

@@ -1,0 +1,11 @@
+### host 2026-10-02T06:51:26Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; provision provision-exit 0
+has nothing-to-do $VO 'already installed and matching pin 20260928.0; nothing to do'; finish
+CMD
+[vm-exec] guest identity pinned (pid 222643 start 362601)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+CHECK provision-exit: OK (rc=0)
+CHECK nothing-to-do: OK
+### checks failed: 0
+### exit=0

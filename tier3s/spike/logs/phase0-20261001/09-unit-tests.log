@@ -1,0 +1,21 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 <09 unit tests>
+[vm-exec] guest identity pinned (pid 19017 start 97666)
+6e10096fb537f7f790152a26315245b96d90ad1e2196ce28867a4cc9e180529d  tests/unit/test_tier3s_probe.py
+6781d8009e478059705df9b011efcdefdb0bc8c8df163807fb4e2129a973c8e9  tests/unit/test_tier3s_provision.py
+(python313-pytest was installed in the VM via zypper from the snapshot repo)
+tests/unit/test_tier3s_provision.py::test_installs_then_idempotent PASSED [  7%]
+tests/unit/test_tier3s_provision.py::test_tarball_hash_mismatch_fails_closed PASSED [ 14%]
+tests/unit/test_tier3s_provision.py::test_file_hash_mismatch_fails_closed PASSED [ 21%]
+tests/unit/test_tier3s_provision.py::test_unpinned_sidecar_fails_closed PASSED [ 28%]
+tests/unit/test_tier3s_provision.py::test_version_skew_fails_and_keeps_old_install PASSED [ 35%]
+tests/unit/test_tier3s_provision.py::test_offline_without_cache_fails PASSED [ 42%]
+tests/unit/test_tier3s_provision.py::test_extra_symlink_breaks_idempotence_and_is_replaced PASSED [ 50%]
+tests/unit/test_tier3s_provision.py::test_pin_override_refused_without_prefix PASSED [ 57%]
+tests/unit/test_tier3s_provision.py::test_lost_exec_bit_is_not_idempotent_and_is_repaired PASSED [ 64%]
+tests/unit/test_tier3s_provision.py::test_failure_after_swap_restores_previous_install PASSED [ 71%]
+tests/unit/test_tier3s_probe.py::test_refuses_without_profile PASSED     [ 78%]
+tests/unit/test_tier3s_probe.py::test_refuses_hardened_profile PASSED    [ 85%]
+tests/unit/test_tier3s_probe.py::test_names_first_missing_when_runsc_absent PASSED [ 92%]
+tests/unit/test_tier3s_probe.py::test_test_root_never_exits_zero PASSED  [100%]
+======================== 14 passed, 1 warning in 0.78s =========================
+### exit=0

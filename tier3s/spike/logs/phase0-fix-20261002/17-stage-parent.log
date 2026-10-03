@@ -1,0 +1,63 @@
+### host 2026-10-02T06:52:05Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chmod 0700 $SIDE/gvisor_sentry; rm -rf /var/tmp/t3s-evil; mkdir -m 0777 /var/tmp/t3s-evil
+echo '## real install with a hostile TMPDIR (0777, not sticky): the stage must still go to /var/tmp'
+TMPDIR=/var/tmp/t3s-evil strace -f -qq -e trace=mkdir,mkdirat -o /var/tmp/t3s-tr-mk "${PROVISION[@]}" > /var/tmp/t3s-prov.out 2>&1; rc=$?
+cat /var/tmp/t3s-prov.out; expect_rc provision-exit 0 $rc; has installed /var/tmp/t3s-prov.out 'PASS: installed runsc'
+grep 'runsc-stage' /var/tmp/t3s-tr-mk
+is stage-made-under-var-tmp "$(grep -cE 'mkdir[a-z]*\(.*"/var/tmp/runsc-stage\.[A-Za-z0-9]+", 0700\) = 0' /var/tmp/t3s-tr-mk)" 1
+is nothing-under-hostile-tmpdir "$(grep -c 't3s-evil/runsc-stage' /var/tmp/t3s-tr-mk)" 0
+is hostile-tmpdir-empty "$(ls -A /var/tmp/t3s-evil | wc -l)" 0
+echo '## /var/tmp without its sticky bit: provision refuses before staging'
+chmod 0700 $SIDE/gvisor_sentry; trap 'chmod 1777 /var/tmp' EXIT; chmod 0777 /var/tmp
+provision refuses-unsticky-var-tmp 1; has names-stage-parent $VO 'untrusted stage parent /var/tmp (0 777)'
+chmod 1777 /var/tmp; is var-tmp-restored "$(stat -c %a /var/tmp)" 1777
+is live-untouched "$(stat -c %a $SIDE/gvisor_sentry)" 700
+echo '## /var group-writable while /var/tmp itself stays root 1777: provision refuses before staging'
+trap 'chmod 1777 /var/tmp; chmod 0755 /var' EXIT; stat -c '%n %a %U:%G' /var /var/tmp; chmod 0775 /var
+provision refuses-writable-var 1; has names-var $VO 'untrusted path: /var is group/other-writable (mode 775)'
+chmod 0755 /var; is var-restored "$(stat -c %a:%U /var)" 755:root
+is live-untouched-2 "$(stat -c %a $SIDE/gvisor_sentry)" 700
+provision repair-exit 0; rmdir /var/tmp/t3s-evil; is no-leftovers "$(leftovers)" 0; probe_tail_pass after; finish
+CMD
+[vm-exec] guest identity pinned (pid 227862 start 366436)
+## real install with a hostile TMPDIR (0777, not sticky): the stage must still go to /var/tmp
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK provision-exit: OK (rc=0)
+CHECK installed: OK
+227931 mkdir("/var/tmp/runsc-stage.4rZdqb", 0700) = 0
+227932 mkdir("/var/tmp/runsc-stage.4rZdqb/tree", 0777) = 0
+CHECK stage-made-under-var-tmp: OK (1)
+CHECK nothing-under-hostile-tmpdir: OK (0)
+CHECK hostile-tmpdir-empty: OK (0)
+## /var/tmp without its sticky bit: provision refuses before staging
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: FAIL: untrusted stage parent /var/tmp (0 777): must be root-owned, sticky or not group/other-writable
+CHECK refuses-unsticky-var-tmp: OK (rc=1)
+CHECK names-stage-parent: OK
+CHECK var-tmp-restored: OK (1777)
+CHECK live-untouched: OK (700)
+## /var group-writable while /var/tmp itself stays root 1777: provision refuses before staging
+/var 755 root:root
+/var/tmp 1777 root:root
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: FAIL: untrusted path: /var is group/other-writable (mode 775)
+CHECK refuses-writable-var: OK (rc=1)
+CHECK names-var: OK
+CHECK var-restored: OK (755:root)
+CHECK live-untouched-2: OK (700)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK repair-exit: OK (rc=0)
+CHECK no-leftovers: OK (0)
+RESULT PASS: tier 3s prerequisites present
+CHECK after-probe-exit: OK (rc=0)
+CHECK after-probe-pass: OK
+### checks failed: 0
+### exit=0

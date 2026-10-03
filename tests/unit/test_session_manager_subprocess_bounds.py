@@ -1360,11 +1360,13 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
                     returncode=0,
                     stdout=("active\n" if argv[-1] in active else "inactive\n"),
                     stderr="")
-            if "exists" in argv:
-                # `podman container exists`: rc 0 present, rc 1 absent.
+            if any("container exists" in a for a in argv):
+                # the PMRC verdict (A r3 P1): the completed chain relays
+                # podman's own rc on stdout; the chain's rc is never it.
                 return types.SimpleNamespace(
-                    returncode=0 if argv[-1] in present else 1,
-                    stdout="", stderr="")
+                    returncode=0,
+                    stdout="PMRC=0\n" if argv[-1] in present else "PMRC=1\n",
+                    stderr="")
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
 
@@ -1380,11 +1382,12 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
             if "is-active" in argv:
                 return types.SimpleNamespace(
                     returncode=0, stdout="inactive\n", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 owner = argv[argv.index("-u") + 1] if "-u" in argv else None
                 return types.SimpleNamespace(
-                    returncode=0 if argv[-1] in by_owner.get(owner, ())
-                    else 1, stdout="", stderr="")
+                    returncode=0,
+                    stdout="PMRC=0\n" if argv[-1] in by_owner.get(owner, ())
+                    else "PMRC=1\n", stderr="")
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
 
@@ -1408,15 +1411,16 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
             if "is-active" in argv:
                 return types.SimpleNamespace(
                     returncode=0, stdout="inactive\n", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 asked.append(argv)
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="PMRC=1\n",
+                                         stderr="")
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
         sm._SystemOps().tier2_silo_running("work")
         assert asked == [[
-            "runuser", "-u", sm.ADMIN_USER_NAME, "--",
-            "podman", "container", "exists",
-            sm.TIER2_CONTAINER_FMT.format(name="work")]], asked
+            "runuser", "-u", sm.ADMIN_USER_NAME, "--", "sh", "-c",
+            'podman container exists "$1"; printf "PMRC=%d\\n" "$?"',
+            "sh", sm.TIER2_CONTAINER_FMT.format(name="work")]], asked
 
     def test_a_live_launcher_for_THIS_silo_is_seen(self, monkeypatch):
         unit = sm.TIER2_SILO_LAUNCHER_FMT.format(name="work")
@@ -1462,9 +1466,10 @@ class TestLivenessEvidenceIsBoundToTheSiloAsked_About:
             if "is-active" in argv:
                 return types.SimpleNamespace(
                     returncode=0, stdout="inactive\n", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 asked.append(argv[-1])
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="PMRC=1\n",
+                                         stderr="")
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
         sm._SystemOps().tier2_silo_running("work")
         assert asked == [sm.TIER2_CONTAINER_FMT.format(name="work")], asked

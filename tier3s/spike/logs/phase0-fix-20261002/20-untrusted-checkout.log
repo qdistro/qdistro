@@ -1,0 +1,29 @@
+### host 2026-10-02T06:52:37Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; rm -rf /home/admin/t3s-co; mkdir -p /home/admin/t3s-co; cp -r tier3s /home/admin/t3s-co/; chown -R admin:admin /home/admin/t3s-co
+stat -c '%n %a %U:%G' /home/admin/t3s-co/tier3s /home/admin/t3s-co/tier3s/provision-runsc.sh /home/admin/t3s-co/tier3s/probe.sh
+before=$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc $R | sha512sum)
+/home/admin/t3s-co/tier3s/provision-runsc.sh --offline --cache-dir $CACHE > /var/tmp/t3s-o 2> /var/tmp/t3s-e; rc=$?; cat /var/tmp/t3s-o /var/tmp/t3s-e
+expect_rc provision-refused 1 $rc
+is provision-message "$(cat /var/tmp/t3s-e)" 'provision-runsc: FAIL: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/provision-runsc.sh owned by uid 1000 (use a root-owned copy)'
+/home/admin/t3s-co/tier3s/probe.sh --user admin > /var/tmp/t3s-o 2>&1; rc=$?; cat /var/tmp/t3s-o
+expect_rc probe-refused 2 $rc
+is probe-message "$(cat /var/tmp/t3s-o)" 'REFUSE checkout: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/probe.sh owned by uid 1000 (use a root-owned copy)'
+is install-unchanged "$(sha512sum /etc/qdistro/runsc-release /usr/libexec/qdistro/tier3s-runsc $R | sha512sum)" "$before"
+rm -rf /home/admin/t3s-co; probe_tail_pass trusted-checkout; finish
+CMD
+[vm-exec] guest identity pinned (pid 229705 start 369640)
+/home/admin/t3s-co/tier3s 755 admin:admin
+/home/admin/t3s-co/tier3s/provision-runsc.sh 755 admin:admin
+/home/admin/t3s-co/tier3s/probe.sh 755 admin:admin
+provision-runsc: FAIL: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/provision-runsc.sh owned by uid 1000 (use a root-owned copy)
+CHECK provision-refused: OK (rc=1)
+CHECK provision-message: OK (provision-runsc: FAIL: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/provision-runsc.sh owned by uid 1000 (use a root-owned copy))
+REFUSE checkout: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/probe.sh owned by uid 1000 (use a root-owned copy)
+CHECK probe-refused: OK (rc=2)
+CHECK probe-message: OK (REFUSE checkout: refusing to run as root from a checkout another user could modify: /home/admin/t3s-co/tier3s/probe.sh owned by uid 1000 (use a root-owned copy))
+CHECK install-unchanged: OK (6b059d2107edc7af8304423842be6b743a0da490d806da793d4cc4ce75b8b69f42ff547d4900daae1d94933246bf3206b2c43e848bfc5908795ae30ed3d28622  -)
+RESULT PASS: tier 3s prerequisites present
+CHECK trusted-checkout-probe-exit: OK (rc=0)
+CHECK trusted-checkout-probe-pass: OK
+### checks failed: 0
+### exit=0

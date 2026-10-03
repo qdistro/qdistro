@@ -402,6 +402,11 @@ class _FakeOps:
     # as a completed stop (a queued start is indistinguishable from one).
     systemctl_stop_unacknowledged = False
 
+    def tier3s_installed(self) -> bool:
+        # No tier3s launch path on this fake host: startup reconciliation of
+        # tier3s launches is a no-op (test_session_manager_tier3s covers it).
+        return False
+
     def tier2_silo_running(self, name: str) -> bool:
         # Fail-closed verification hook: True means the stop did NOT take
         # effect (unit still active or container survives).
@@ -2901,8 +2906,9 @@ class TestDispContainerRemoveTimeout:
                 # cleanup top: unusable -> cleanup kills nothing, still tries
                 # the rm retry (which we also time out) then exists wins.
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
-                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            if any("container exists" in a for a in argv):
+                return types.SimpleNamespace(returncode=0, stdout="PMRC=1\n",
+                                             stderr="")
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -2919,8 +2925,9 @@ class TestDispContainerRemoveTimeout:
                                              stderr="")
             if "top" in argv:
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
-                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if any("container exists" in a for a in argv):
+                return types.SimpleNamespace(returncode=0, stdout="PMRC=0\n",
+                                             stderr="")
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -2939,7 +2946,7 @@ class TestDispContainerRemoveTimeout:
                                              stderr="")
             if "top" in argv:
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
@@ -2960,11 +2967,12 @@ class TestDispContainerRemoveTimeout:
                                              stderr="")
             if "top" in argv:
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "exists" in argv:
+            if any("container exists" in a for a in argv):
                 exists_n["n"] += 1
                 if exists_n["n"] == 1:
                     raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
-                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+                return types.SimpleNamespace(returncode=0, stdout="PMRC=1\n",
+                                             stderr="")
             if "rm" in argv:
                 raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")

@@ -1,0 +1,111 @@
+### host 2026-10-02T19:09:17Z: vm-exec t3sr3-261002-210307-2819389-18202 <<CMD
+cd /var/tmp/t3s-dl && bash dev-prov.sh
+CMD
+[vm-exec] guest identity pinned (pid 7948 start 35106)
+
+## 0. preconditions (setup ran)
+PASS: probe PASS before the launches (0:1)
+PASS: image present (yes)
+PASS: broker allows the smoke spawn (allow)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo devprova (Created)
+PASS: CreateTier3sSilo devprovb (Created)
+    silos.yaml: devprova argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+    silos.yaml: devprovb argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+PASS: argv set with the manager restarted (yes)
+
+## 1. launch A live
+PASS: launch A 2f8cc07fa7c731ecdce3f0cc013f4e25 recorded running
+PASS: silo A Active (Active)
+
+## 2. systemd-run refuses before exec: never a verdict
+    fake systemd-run: StartTransientUnit refused
+    qdistro-tier3s-cleanup: 2f8cc07fa7c731ecdce3f0cc013f4e25: podman query failed for qdistro-tier3s-devprova; NOT treating it as absent (record preserved)
+PASS: cleanup under a refusing systemd-run: rc (4)
+PASS: cleanup under a refusing systemd-run: not absent (1)
+PASS: sdr-fail: control record preserved (yes)
+PASS: sdr-fail: record still phase=running (running)
+PASS: sdr-fail: scope still active (active)
+PASS: sdr-fail: launch unit still active (active)
+PASS: sdr-fail: container still present (direct podman rc) (0)
+
+## 3. runuser fails before podman: never a verdict
+    mount: /usr/bin/runuser: mount point does not exist.
+           dmesg(1) may have more information after failed mount system call.
+FAIL: cleanup under a failing runuser: rc: got '32', want '4'
+FAIL: cleanup under a failing runuser: not absent: got '0', want '1'
+PASS: ru-fail: control record preserved (yes)
+PASS: ru-fail: record still phase=running (running)
+PASS: ru-fail: scope still active (active)
+PASS: ru-fail: launch unit still active (active)
+PASS: ru-fail: container still present (direct podman rc) (0)
+
+## 4. a PMRC verdict that shares its output is no verdict
+    qdistro-tier3s-cleanup: 2f8cc07fa7c731ecdce3f0cc013f4e25: podman query failed for qdistro-tier3s-devprova; NOT treating it as absent (record preserved)
+PASS: cleanup under a noisy podman: rc (4)
+PASS: cleanup under a noisy podman: query failed (1)
+PASS: noisy: control record preserved (yes)
+PASS: noisy: record still phase=running (running)
+PASS: noisy: scope still active (active)
+PASS: noisy: launch unit still active (active)
+PASS: noisy: container still present (direct podman rc) (0)
+
+## 5. the real chain, container present: full teardown
+    qdistro-tier3s-cleanup: 2f8cc07fa7c731ecdce3f0cc013f4e25: torn down (qdistro-tier3s-devprova)
+PASS: cleanup of live launch A: rc (0)
+PASS: cleanup of live launch A: torn down (1)
+PASS: cleanup-A: all 17 launch processes gone (pid+starttime)
+PASS: cleanup-A: scope qdistro-tier3s-2f8cc07fa7c731ecdce3f0cc013f4e25.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-2f8cc07fa7c731ecdce3f0cc013f4e25.scope absent)
+PASS: cleanup-A: per-launch dir /run/qdistro-tier3s/2f8cc07fa7c731ecdce3f0cc013f4e25 gone
+PASS: cleanup-A: control record /run/qdistro-tier3s-ctl/2f8cc07fa7c731ecdce3f0cc013f4e25 gone
+PASS: cleanup-A: container qdistro-tier3s-devprova gone (podman exists rc=1)
+PASS: cleanup-A: no runsc state for 202ec37f28aa in /run/qdistro-tier3s-runsc/1000
+PASS: launch unit A inactive (inactive)
+
+## 6. genuine absent (PMRC=1): a record whose container never existed
+PASS: synthetic record B passes read_record shape (yes)
+PASS: the runsc root it records exists (yes)
+    qdistro-tier3s-cleanup: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: torn down (qdistro-tier3s-devprovb)
+PASS: absent-container cleanup B: rc (0)
+PASS: absent-container cleanup B: torn down (1)
+PASS: absent-container cleanup B: record removed (no)
+
+## 7. the session manager's PMRC verdict on the real chain
+    present 0
+    absent 1
+    runuser-fails 0 
+    garbage-stdout 0 
+    plain-present 0
+    plain-absent 1
+PASS: manager verdict: present (0)
+PASS: manager verdict: absent (1)
+FAIL: manager verdict: runuser failure is no verdict: got '0', want 'None'
+FAIL: manager verdict: garbage stdout is no verdict: got '0', want 'None'
+PASS: manager verdict (plain runuser leg): present (0)
+PASS: manager verdict (plain runuser leg): absent (1)
+
+## 8. teardown of the fixtures
+FAIL: DeleteSilo devprova: got 'Active', want 'absent'
+PASS: DeleteSilo devprovb (absent)
+PASS: final: control records (0)
+PASS: final: scopes (0)
+PASS: final: labelled containers (0)
+PASS: final: runsc-bundle processes (0)
+PASS: final: state root holds no container state (0)
+PASS: final: no cleanup call scope left (0)
+PASS: final: no cleanup work dir left (0)
+[devprov] 60 passes, 5 failures
+[vm-exec] --- stderr ---
+dev-prov.sh: line 145: /var/tmp/t3s-prov/fakebin/runuser: No such file or directory
+chmod: cannot access '/var/tmp/t3s-prov/fakebin/runuser': No such file or directory
+dev-prov.sh: line 150: /var/tmp/t3s-prov/fakebin2/runuser: No such file or directory
+chmod: cannot access '/var/tmp/t3s-prov/fakebin2/runuser': No such file or directory
+Call failed: silo 'devprova' is Active; stop it first
+[vm-exec] --- end stderr ---
+### exit=1

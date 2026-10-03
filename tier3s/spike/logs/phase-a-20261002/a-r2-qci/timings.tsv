@@ -1,0 +1,4 @@
+gate	subject	provision_s	work_s	total_s	rc	vm
+bats	phase7-tier3s-denied.bats	15	60	75	0	qci-bats-phase7-tier3s-denied-261002-185253-3652628-4369
+bats	phase7-tier3s-headless.bats	15	88	103	0	qci-bats-phase7-tier3s-headless-261002-185253-3652631-25814
+bats	phase7-tier3s-sigkill-cleanup.bats	16	75	91	0	qci-bats-phase7-tier3s-sigkill-cleanup-261002-185253-3652647-31119

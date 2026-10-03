@@ -1,0 +1,311 @@
+1..1
+# [tier3s] tested commit 3d924d7269f4daccd03f014dd92643e4b943f002; runsc 20260928.0 (sha512 ok); image df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+# [vm-exec] guest identity pinned (pid 1289 start 924)
+# 
+# ## 0. guest
+# INFO: profile: QDISTRO_PROFILE=dev 
+# INFO: kernel 7.2.8-1-default; podman version 6.0.2; systemd 261 (261.2); selinux Permissive
+# PASS: o10: worker image (built without QDISTRO_TIER3S=1) carries no tier 3s file
+# 
+# ## 1. stage the tested commit, root-owned
+# PASS: staged src.tar
+# INFO: tested commit 3d924d7269f4daccd03f014dd92643e4b943f002
+# PASS: staged tree has the tier 3s sources (yes)
+# 
+# ## 2. installer WITHOUT QDISTRO_TIER3S (owner O10: installs nothing tier 3s)
+#     install-session-manager: tier 3s not installed (QDISTRO_TIER3S is not 1; paravirt O10)
+# PASS: o10: installer without the flag rc (0)
+# PASS: o10: installer without the flag says so (1)
+# PASS: o10: no tier 3s file after the installer ran without the flag
+# 
+# ## 3. installer WITH QDISTRO_TIER3S=1 from the tested commit
+#     session manager ready on org.qdistro.SessionManager1
+# PASS: installer with QDISTRO_TIER3S=1 rc (0)
+# PASS: installed /usr/lib/qdistro/tier3s/spawn-tier3s.sh = tested commit (b5101a2098b910bea8bab470a2a0b15f4ccb347e56d6b914082d878a2c291cc8)
+# PASS: installed /usr/lib/qdistro/tier3s/spawn-tier3s.sh owner/mode (root:root 755)
+# PASS: installed /usr/lib/qdistro/tier3s/probe.sh = tested commit (a9d5577bb0a9a435e2ab4d104564a5c209ccec0c94a47eb069e9f32bdf04a57a)
+# PASS: installed /usr/lib/qdistro/tier3s/probe.sh owner/mode (root:root 755)
+# PASS: installed /usr/lib/qdistro/tier3s/tier3s-runsc = tested commit (3d55537c56376d12767d8de902ec76f968915f71d2a5433b5d93ab1296c33a85)
+# PASS: installed /usr/lib/qdistro/tier3s/tier3s-runsc owner/mode (root:root 755)
+# PASS: installed /usr/lib/qdistro/tier3s/RUNSC_RELEASE = tested commit (b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3)
+# PASS: installed /usr/lib/qdistro/tier3s/RUNSC_RELEASE owner/mode (root:root 644)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json = tested commit (13c0e63dd2684e4f9a5c30b38d2e71b363ab33fc1bb7f68b4f53b8a8aa29b41d)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json owner/mode (root:root 644)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-scope = tested commit (10fb1a965d97087637f939b979d1c43dbdc4f15fa98f66e961477342434c7e4b)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-scope owner/mode (root:root 755)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-cleanup = tested commit (c94670d0aff06d250e547d1816dbd9d43f5b8027f52e844926dfcb0cd75f61dc)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-cleanup owner/mode (root:root 755)
+# PASS: installed /usr/lib/tmpfiles.d/qdistro-tier3s.conf = tested commit (a1590f9183efcd31dbcbe22717f68e4dc9c516e42511197b20fd519cb34f2716)
+# PASS: installed /usr/lib/tmpfiles.d/qdistro-tier3s.conf owner/mode (root:root 644)
+# PASS: installed /etc/systemd/system/qdistro-tier3s-silo@.service = tested commit (5de1758c990b139e4dbbdc20f7bb7de027ae3e576a8d9c2f631bb70c5704d3fd)
+# PASS: installed /etc/systemd/system/qdistro-tier3s-silo@.service owner/mode (root:root 644)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-silo-launch = tested commit (95ad7076f1ec33145b62ed3afe9be65a29c9ea959f7eea98582f757297e33384)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-silo-launch owner/mode (root:root 755)
+# PASS: installed /usr/libexec/qdistro/qdistro_session_manager.py = tested commit (80ea08342bc8a04c510ed8eac2267158732ec934d22cddc62b8b69d69bbc2e56)
+# PASS: installed /usr/libexec/qdistro/qdistro_session_manager.py owner/mode (root:root 755)
+# PASS: installed broker = tested commit (11a9717242eccca4a59219a9621dc9a0ba0cd93602771dc8276d75ee478a5aa8)
+# PASS: tmpfiles: state root (1000:1000 700)
+# PASS: tmpfiles: control dir (root:root 700)
+# PASS: tmpfiles: per-launch parent (root:root 755)
+# PASS: runsc not installed by the installer (no)
+# PASS: unit loaded from /etc (/etc/systemd/system/qdistro-tier3s-silo@.service)
+# PASS: unit StopPropagatedFrom (O11) (qdistro-session-manager.service)
+# PASS: session manager runs the installed code (pid 2034, serves CreateTier3sSilo)
+# PASS: broker has the rules-only tier3s prefix (1)
+# 
+# ## 4. runsc: offline provision from the staged, pin-checked tarball
+# PASS: runsc tarball sha512 = pin (20260928.0) (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+#     provision-runsc: all 6 pinned files verified
+#     provision-runsc: runsc --version: runsc version release-20260928.0
+#     provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+# PASS: provision-runsc.sh --offline rc (0)
+#     PASS profile: dev (/etc/qdistro/profile)
+#     PASS kernel: >= 5.6 (7.2.8-1-default)
+#     PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+#     PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+#     PASS ptrace_scope: 1 (<= 2)
+#     PASS subuid: admin:100000:65536
+#     PASS subgid: admin:100000:65536
+#     PASS newuidmap: /usr/bin/newuidmap
+#     PASS newgidmap: /usr/bin/newgidmap
+#     PASS pin: /usr/lib/qdistro/tier3s/RUNSC_RELEASE release=20260928.0
+#     PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+#     PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+#     PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+#     PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:52576347)
+#     PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /usr/lib/qdistro/tier3s/tier3s-runsc)
+#     PASS state_root: /run/qdistro-tier3s-runsc/1000 (uid 1000 0700 under /run/qdistro-tier3s-runsc)
+#     PASS podman: 6.0.2 (>= 6)
+#     PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+#     PASS label_disable: accepted (|[label=disable])
+#     INFO kvm: /dev/kvm present (not used: --platform=systrap)
+#     INFO selinux: Permissive
+#     RESULT PASS: tier 3s prerequisites present
+# PASS: installed probe rc (0)
+# PASS: installed probe RESULT (1)
+# PASS: probe state_root (1)
+# 
+# ## 5. workload image from the OCI archive (built once with registry access)
+# PASS: image archive and manifest staged
+#     IMAGE=qdistro/tier3s-headless-smoke:latest
+#     IMAGE_ID=df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+#     IMAGE_DIGEST=sha256:3978fb45594a0b58e47dff41f135d9c45b460c65d80fe40a7a7b13fa74e460fd
+#     IMAGE_SNAPSHOT=20260929
+#     IMAGE_ARCHIVE_SHA256=58ed01634b161b778d2e43df7141126d8bdc69f4a07d0d5b1db63592e4322863
+#     INPUT_KEY=d66dcef63e81843badfb29ff5105e459
+#     BUILT_FROM_COMMIT=7454cac293103362e992451716a97100ef9931dd
+#     BUILD_VM=tier3s-261002-115945-2329209-31246
+#     BUILT_AT=2026-10-02T10:15:30Z
+# PASS: archive sha256 = manifest (58ed01634b161b778d2e43df7141126d8bdc69f4a07d0d5b1db63592e4322863)
+# PASS: manifest snapshot = snapshot.conf pin (20260929)
+# PASS: manifest input key = the tested commit's image inputs (d66dcef63e81843badfb29ff5105e459)
+#     Writing manifest to image destination
+#     Loaded image: localhost/qdistro/tier3s-headless-smoke:latest
+# PASS: podman load (admin) rc (0)
+# PASS: loaded image ID = manifest IMAGE_ID (df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+# PASS: image snapshot label = pin (20260929)
+# IMAGE_ID=df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+# IMAGE_DIGEST=sha256:5423d5b895879d0bab7595942ce762292a29b99322c466e42cd479a8cb09ef9e
+# INFO: the manifest digest changes across the oci-archive round trip (manifest re-serialized; build VM: sha256:3978fb45594a0b58e47dff41f135d9c45b460c65d80fe40a7a7b13fa74e460fd); the asserted identity is the image ID (config digest)
+# 
+# ## 6. broker allow rule for the smoke spawn
+# PASS: broker without a rule (unknown)
+# PASS: broker with the allow rule (allow)
+# PASS: setup: control records (0)
+# PASS: setup: scopes (0)
+# PASS: setup: labelled containers (0)
+# PASS: setup: runsc-bundle processes (0)
+# PASS: setup: state root holds no container state (0)
+# [t3s-setup] 57 passes, 0 failures
+# [tier3s] t3s-setup transcript: /var/tmp/t3s-aiii/qci-runs/bats-20261002T103923Z-2830933/bats/phase7-tier3s-denied.bats.scratch/t3s-setup.log
+# [vm-exec] guest identity pinned (pid 3503 start 1782)
+# 
+# ## 0. preconditions, silos, templated-silo fixture
+# PASS: probe PASS (0)
+# PASS: image present (yes)
+# PASS: profile is dev (dev)
+# PASS: pre: control records (0)
+# PASS: pre: scopes (0)
+# PASS: pre: labelled containers (0)
+# PASS: pre: runsc-bundle processes (0)
+# PASS: pre: state root holds no container state (0)
+# fixture: binding /var/lib/qdistro/bindings/s121t.toml -> sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+# PASS: fixture: s121t resolves as templated (read-only resolution) (0:sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+# PASS: fixture: no activation record yet (yes)
+# PASS: CreateTier3sSilo s121a (Created)
+# PASS: CreateTier3sSilo s121t (Created)
+#     silos.yaml: s121a argv -> []
+#     silos.yaml: s121t argv -> []
+# 
+# ## 1. DONE 5: broker has no rule (rules-only prefix => unknown) => refused
+# PASS: broker answers unknown (unknown)
+# INFO: no-rule/untemplated: start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+#     unit: [resolve-binding] silo 's121a' is untemplated (no binding)
+#     unit: spawn-tier3s: silo s121a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-headless-smoke:latest
+#     unit: spawn-tier3s: REFUSE: broker has no allow rule for headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=unknown)
+#     unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+# PASS: no-rule/untemplated: the spawn refused with the expected message (1)
+# PASS: no-rule/untemplated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: no-rule/untemplated: no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: no-rule/untemplated: systemd never started an owning scope (0)
+# PASS: no-rule/untemplated: no control record, no per-launch dir (0:0)
+# PASS: no-rule/untemplated: no container of any kind (0)
+# PASS: no-rule/untemplated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: no-rule/untemplated: silo state afterwards: Active
+# INFO: no-rule/templated: start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121t (Experimental, dev profile only).
+#     unit: spawn-tier3s: REFUSE: broker has no allow rule for headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=unknown)
+#     unit: qdistro-tier3s-silo@s121t.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121t.service: Failed with result 'exit-code'.
+# PASS: no-rule/templated: the spawn refused with the expected message (1)
+# PASS: no-rule/templated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: no-rule/templated: no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: no-rule/templated: systemd never started an owning scope (0)
+# PASS: no-rule/templated: no control record, no per-launch dir (0:0)
+# PASS: no-rule/templated: no container of any kind (0)
+# PASS: no-rule/templated: no activation record for the templated silo (yes)
+# PASS: no-rule/templated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: no-rule/templated: silo state afterwards: Active
+# 
+# ## 2. DONE 5: explicit deny rule => refused
+# PASS: broker answers deny (deny)
+# INFO: deny/untemplated: start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+#     unit: [resolve-binding] silo 's121a' is untemplated (no binding)
+#     unit: spawn-tier3s: silo s121a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-headless-smoke:latest
+#     unit: spawn-tier3s: REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=deny)
+#     unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+# PASS: deny/untemplated: the spawn refused with the expected message (1)
+# PASS: deny/untemplated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: deny/untemplated: no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: deny/untemplated: systemd never started an owning scope (0)
+# PASS: deny/untemplated: no control record, no per-launch dir (0:0)
+# PASS: deny/untemplated: no container of any kind (0)
+# PASS: deny/untemplated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: deny/untemplated: silo state afterwards: Active
+# INFO: deny/templated: start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121t (Experimental, dev profile only).
+#     unit: spawn-tier3s: REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=deny)
+#     unit: qdistro-tier3s-silo@s121t.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121t.service: Failed with result 'exit-code'.
+# PASS: deny/templated: the spawn refused with the expected message (1)
+# PASS: deny/templated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: deny/templated: no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: deny/templated: systemd never started an owning scope (0)
+# PASS: deny/templated: no control record, no per-launch dir (0:0)
+# PASS: deny/templated: no container of any kind (0)
+# PASS: deny/templated: no activation record for the templated silo (yes)
+# PASS: deny/templated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: deny/templated: silo state afterwards: Active
+# 
+# ## 3. positive control: allow => both oracles see the launch
+# PASS: broker answers allow (allow)
+# PASS: control: StartSilo s121t rc (0)
+#     unit: Started qdistro tier-3s (gVisor) silo s121t (Experimental, dev profile only).
+#     unit: [qdistro-template-audit] template.binding.activated silo=s121t template=t3sfixture generation=sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2 result=activated
+#     unit: [qdistro-template-audit] journal-first: /var/lib/qdistro/audit/template_audit.sqlite not writable from this context (unable to open database file); template lifecycle events are recorded to the journal + on-disk evidence, the authoritative audit sink.
+#     unit: [resolve-binding] binding.activated silo=s121t generation=sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+#     unit: LAUNCH_TOKEN=12079401463921ec0079774cf827a6da
+#     unit: CONTAINER=qdistro-tier3s-s121t
+#     unit: IMAGE=sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+#     unit: SCOPE_UNIT=qdistro-tier3s-12079401463921ec0079774cf827a6da.scope
+#     unit: spawn-tier3s: running: qdistro-tier3s-s121t sentry=6457 conmon=6438 in /system.slice/qdistro-tier3s-12079401463921ec0079774cf827a6da.scope
+#     unit: qdistro-tier3s-cleanup: 12079401463921ec0079774cf827a6da: torn down (qdistro-tier3s-s121t)
+#     unit: qdistro-tier3s-silo@s121t.service: Deactivated successfully.
+#     unit: qdistro-tier3s-silo@s121t.service: Consumed 1.023s CPU time over 2.603s wall clock time.
+# PASS: control: activation status written (generation = fixture) (sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+# PASS: control: activation marker committed (sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+#     podman event: create qdistro-tier3s-s121t
+#     podman event: init qdistro-tier3s-s121t
+#     podman event: start qdistro-tier3s-s121t
+#     podman event: attach qdistro-tier3s-s121t
+#     podman event: died qdistro-tier3s-s121t
+# PASS: control: the same event oracle sees the container start (1)
+# PASS: control: the same scope oracle sees the owning scope start (1)
+# PASS: control: templated launch ran the image by its generation digest (1)
+# PASS: control: the smoke ran to its end under gVisor (yes)
+# PASS: control: launch unit Result (success)
+# PASS: control: StopSilo (Stopped)
+# PASS: control: control records (0)
+# PASS: control: scopes (0)
+# PASS: control: labelled containers (0)
+# PASS: control: runsc-bundle processes (0)
+# PASS: control: state root holds no container state (0)
+# 
+# ## 4. DONE 6: the hardened profiles (release, daily) refuse with a clear message
+# INFO: CreateTier3sSilo on release: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier
+# PASS: release: CreateTier3sSilo refused with the message (1)
+# PASS: release: no silo was created (absent)
+# INFO: StartSilo on release: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier
+# PASS: release: StartSilo refused with the message (1)
+# PASS: release: StartSilo started no launch unit (0)
+# PASS: release: silo state unchanged (Stopped)
+# INFO: release/spawn (direct unit start): start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+#     unit: spawn-tier3s: REFUSE: tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=release); there is no hardened launch path and no fallback tier
+#     unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+# PASS: release/spawn (direct unit start): the spawn refused with the expected message (1)
+# PASS: release/spawn (direct unit start): refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: release/spawn (direct unit start): no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: release/spawn (direct unit start): systemd never started an owning scope (0)
+# PASS: release/spawn (direct unit start): no control record, no per-launch dir (0:0)
+# PASS: release/spawn (direct unit start): no container of any kind (0)
+# PASS: release/spawn (direct unit start): no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: release/spawn (direct unit start): silo state afterwards: Stopped
+# PASS: release: the probe refuses a non-dev profile (rc 2) (2)
+# INFO: CreateTier3sSilo on daily: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=daily); there is no hardened launch path and no fallback tier
+# PASS: daily: CreateTier3sSilo refused with the message (1)
+# PASS: daily: no silo was created (absent)
+# INFO: StartSilo on daily: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=daily); there is no hardened launch path and no fallback tier
+# PASS: daily: StartSilo refused with the message (1)
+# PASS: daily: StartSilo started no launch unit (0)
+# PASS: daily: silo state unchanged (Stopped)
+# INFO: daily/spawn (direct unit start): start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+#     unit: spawn-tier3s: REFUSE: tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=daily); there is no hardened launch path and no fallback tier
+#     unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+# PASS: daily/spawn (direct unit start): the spawn refused with the expected message (1)
+# PASS: daily/spawn (direct unit start): refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: daily/spawn (direct unit start): no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: daily/spawn (direct unit start): systemd never started an owning scope (0)
+# PASS: daily/spawn (direct unit start): no control record, no per-launch dir (0:0)
+# PASS: daily/spawn (direct unit start): no container of any kind (0)
+# PASS: daily/spawn (direct unit start): no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: daily/spawn (direct unit start): silo state afterwards: Stopped
+# PASS: daily: the probe refuses a non-dev profile (rc 2) (2)
+# PASS: profile restored to dev (dev)
+# 
+# ## 5. DONE 6: a probe failure refuses (runtime wrapper missing), no fallback
+# PASS: probe fails with the wrapper missing (1:1)
+# INFO: probe-failure: start rc=0 
+#     unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+#     unit: spawn-tier3s: REFUSE: probe failed (rc=1): RESULT FAIL: first missing prerequisite: wrapper (/usr/libexec/qdistro/tier3s-runsc missing, not root:root 0755, or differs from /usr/lib/qdistro/tier3s/tier3s-runsc)
+#     unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+#     unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+# PASS: probe-failure: the spawn refused with the expected message (1)
+# PASS: probe-failure: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# PASS: probe-failure: no podman run (no container event but the probe's scratch create/remove) (0)
+# PASS: probe-failure: systemd never started an owning scope (0)
+# PASS: probe-failure: no control record, no per-launch dir (0:0)
+# PASS: probe-failure: no container of any kind (0)
+# PASS: probe-failure: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+# INFO: probe-failure: silo state afterwards: Active
+# PASS: probe PASS again with the wrapper restored (0)
+# 
+# ## 6. cleanup
+# PASS: DeleteSilo s121a (absent)
+# PASS: DeleteSilo s121t (absent)
+# PASS: fixture removed (no)
+# PASS: end: control records (0)
+# PASS: end: scopes (0)
+# PASS: end: labelled containers (0)
+# PASS: end: runsc-bundle processes (0)
+# PASS: end: state root holds no container state (0)
+# [s121] 103 passes, 0 failures
+# [tier3s] s121 transcript: /var/tmp/t3s-aiii/qci-runs/bats-20261002T103923Z-2830933/bats/phase7-tier3s-denied.bats.scratch/s121.log
+ok 1 phase7-tier3s-denied: broker denial, non-dev profile and probe failure refuse; no fallback

@@ -1,0 +1,146 @@
+original sha256 a9d5577bb0a9a435e2ab4d104564a5c209ccec0c94a47eb069e9f32bdf04a57a  tier3s/probe.sh
+original sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+original sha256 3d55537c56376d12767d8de902ec76f968915f71d2a5433b5d93ab1296c33a85  tier3s/tier3s-runsc
+original sha256 2803ecd6d865b840356b52c675bc57a43a73ce6da9c3ca8d9db06314411dfd75  tier3s/spawn-tier3s.sh
+original sha256 7747b60b3aa9d25d15fbe1805f5835f6fdbc5fcf7d3cd7b9d16ad7dea4ebfd72  tier3s/qdistro-tier3s-cleanup
+original sha256 10fb1a965d97087637f939b979d1c43dbdc4f15fa98f66e961477342434c7e4b  tier3s/qdistro-tier3s-scope
+original sha256 3ebd1aa48c282e1b48d6c5d6fdcd753dd7e4ff046b83ddeb259b402b85e82163  tier3s/seccomp/make-profiles.py
+BASELINE (no mutation): rc=0 145 passed, 1 skipped in 10.72s
+MUTATION P1 exec gate removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.49s
+    FAILED  test_byte_only_tamper_of_sidecar_hits_the_hash_loop
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P2 fd identity re-check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.59s
+    FAILED  test_swap_between_validation_and_open_is_never_executed
+MUTATION P3 fd sha512 re-check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.58s
+    FAILED  test_in_place_rewrite_between_validation_and_open_is_never_executed
+MUTATION P4 exec by path instead of the verified fd [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.56s
+    FAILED  test_swap_between_verify_and_exec_runs_the_verified_inode
+MUTATION P5 TEST-PASS exits 0 [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_test_root_never_exits_zero
+MUTATION P6 per-file sha512 loop removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 3 failed in 0.55s
+    FAILED  test_byte_only_tamper_of_sidecar_hits_the_hash_loop
+    FAILED  test_byte_only_tamper_of_runsc_is_never_executed
+    FAILED  test_replaced_runsc_with_correct_stamp_is_never_executed
+MUTATION P7 trusted-ancestor check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.51s
+    FAILED  test_symlinked_runsc_dir_is_never_executed
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P8 version rc ignored [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_version_text_with_nonzero_exit_fails
+MUTATION P9 unverified wrapper handed to podman [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_unverified_wrapper_is_not_handed_to_podman
+MUTATION P10 test hooks honoured without the test root [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.41s
+    FAILED  test_pin_hook_refused_without_test_root
+    FAILED  test_test_hooks_refused_without_test_root
+MUTATION P11 exact file-set check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_group_writable_runsc_is_never_executed
+MUTATION P12 content read under an untrusted path [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 20.53s
+    FAILED  test_fifo_swapped_in_under_untrusted_path_does_not_hang
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P13 scratch image built in a temporary directory again [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_scratch_image_import_needs_no_temporary_path
+MUTATION P14 import failure ignored [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.50s
+    FAILED  test_scratch_image_import_failure_is_reported
+MUTATION P15 root runs from an untrusted checkout [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.41s
+    FAILED  test_root_refuses_untrusted_checkout[dir]
+    FAILED  test_root_refuses_untrusted_checkout[pin]
+MUTATION P16 caller PATH used before the pin [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_probe_never_uses_caller_path_tools
+MUTATION V1 provisioning lock not taken [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.65s
+    FAILED  test_concurrent_provisions_are_serialized
+MUTATION V2 --pin guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.41s
+    FAILED  test_pin_override_refused_for_root
+MUTATION V3 prefix-for-root guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_prefix_hook_refused_for_root
+MUTATION V4 test-hook refusal removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.43s
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP]
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP]
+MUTATION V5 version rc ignored [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.48s
+    FAILED  test_version_text_with_nonzero_exit_fails_closed
+MUTATION V6 failed rollback cleans up anyway [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.71s
+    FAILED  test_failed_rollback_preserves_recovery_material
+MUTATION V7 trusted_chain disabled [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.55s
+    FAILED  test_untrusted_lock_dir_is_refused
+    FAILED  test_symlinked_lock_dir_is_refused
+MUTATION V8 download published before verification [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_download_is_verified_before_it_is_published
+MUTATION V9 download into an unchecked cache dir [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.45s
+    FAILED  test_download_refused_into_writable_cache_dir
+    FAILED  test_download_refused_through_symlinked_cache_dir
+MUTATION V10 root runs from an untrusted checkout [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.41s
+    FAILED  test_root_refuses_untrusted_checkout[dir]
+    FAILED  test_root_refuses_untrusted_checkout[pin]
+MUTATION V11 caller PATH used before the pin [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.43s
+    FAILED  test_provision_never_uses_caller_path_tools
+MUTATION W2 wrapper finds env through the caller PATH [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_wrapper_never_uses_caller_path_env
+MUTATION W1 wrapper keeps the caller environment [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.41s
+    FAILED  test_wrapper_scrubs_environment_and_fixes_flags
+MUTATION W3 wrapper creates a missing state root [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 2 failed in 0.44s
+    FAILED  test_wrapper_never_creates_the_state_root
+    FAILED  test_wrapper_refuses_bad_state_root_without_creating_it[root-missing]
+MUTATION W4 wrapper accepts a caller --root [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_wrapper_refuses_caller_root[--root=/run/user/1000/runsc]
+MUTATION W5 wrapper state-root owner/mode check removed [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_wrapper_refuses_bad_state_root_without_creating_it[root-mode]
+MUTATION P17 probe state_root check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.54s
+    FAILED  test_state_root_missing_or_loose_fails[missing]
+    FAILED  test_state_root_missing_or_loose_fails[mode]
+MUTATION A1 broker gate removed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 1.05s
+    FAILED  test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]
+    FAILED  test_gate_order_probe_resolve_gate_record_then_podman
+MUTATION A2 activation recorded before the broker gate [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.77s
+    FAILED  test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]
+    FAILED  test_gate_order_probe_resolve_gate_record_then_podman
+MUTATION A3 podman run before the broker gate [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 1.04s
+    FAILED  test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]
+    FAILED  test_gate_order_probe_resolve_gate_record_then_podman
+MUTATION A4 control record inside the exported per-launch dir [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.50s
+    FAILED  test_plan_control_record_is_outside_the_per_launch_dir
+    FAILED  test_launch_records_then_cleans_up_on_normal_exit
+MUTATION A5 cleanup reads records from the exported parent [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_cleanup_tears_down_a_running_launch
+MUTATION A6 dev-profile gate removed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.73s
+    FAILED  test_hardened_profile_refused[daily-driver]
+MUTATION A7 probe failure ignored [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.74s
+    FAILED  test_probe_failure_refuses_with_its_result
+MUTATION A8 literal tmpfs uid= instead of U [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_plan_podman_command_shape
+MUTATION A9 scope placement check removed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 13.14s
+    FAILED  test_sentry_outside_the_scope_tears_down
+MUTATION A10 failed podman query read as no container [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.23s
+    FAILED  test_cleanup_failed_podman_query_is_not_no_container
+MUTATION A11 cleanup ignores the state root [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 3 failed in 0.57s
+    FAILED  test_cleanup_with_missing_state_root_preserves_record_and_scope
+    FAILED  test_cleanup_with_replaced_state_root_preserves_record[mode]
+    FAILED  test_cleanup_with_replaced_state_root_preserves_record[symlink]
+MUTATION A12 cleanup accepts any recorded runsc root [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_cleanup_with_replaced_state_root_preserves_record[owner-record]
+MUTATION A13 record dropped after a failed stop [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.48s
+    FAILED  test_cleanup_failed_stop_preserves_record_and_scope
+MUTATION A14 escaped-process check removed [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_cleanup_reports_a_recorded_process_alive_outside_the_scope
+MUTATION A15 --unit tears down every record [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.53s
+    FAILED  test_two_launches_tearing_down_one_preserves_the_other
+MUTATION A16 failed label listing read as nothing to reap [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_reap_stale_podman_listing_failure_is_an_error
+MUTATION A17 scope helper delegates the limit files too [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.43s
+    FAILED  test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin
+MUTATION A18 scope helper accepts a foreign scope [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.41s
+    FAILED  test_helper_refuses_bad_invocations[foreign-scope]
+MUTATION A19 scope helper accepts an occupied scope [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_helper_refuses_a_scope_that_already_holds_processes
+MUTATION A20 cleanup does not verify the scope target [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.43s
+    FAILED  test_cleanup_refuses_a_scope_at_another_cgroup
+MUTATION G1 converter-drop guard removed [tier3s/seccomp/make-profiles.py]: CAUGHT; pytest rc=1; 1 failed in 0.39s
+    FAILED  test_seccomp_generator_refuses_an_inert_allow
+MUTATION G2 decision flipped without a re-render [tier3s/seccomp/make-profiles.py]: CAUGHT; pytest rc=1; 1 failed in 0.40s
+    FAILED  test_seccomp_profile_is_rendered_and_decided
+restored OK sha256 a9d5577bb0a9a435e2ab4d104564a5c209ccec0c94a47eb069e9f32bdf04a57a  tier3s/probe.sh
+restored OK sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+restored OK sha256 3d55537c56376d12767d8de902ec76f968915f71d2a5433b5d93ab1296c33a85  tier3s/tier3s-runsc
+restored OK sha256 2803ecd6d865b840356b52c675bc57a43a73ce6da9c3ca8d9db06314411dfd75  tier3s/spawn-tier3s.sh
+restored OK sha256 7747b60b3aa9d25d15fbe1805f5835f6fdbc5fcf7d3cd7b9d16ad7dea4ebfd72  tier3s/qdistro-tier3s-cleanup
+restored OK sha256 10fb1a965d97087637f939b979d1c43dbdc4f15fa98f66e961477342434c7e4b  tier3s/qdistro-tier3s-scope
+restored OK sha256 3ebd1aa48c282e1b48d6c5d6fdcd753dd7e4ff046b83ddeb259b402b85e82163  tier3s/seccomp/make-profiles.py
+AFTER RESTORE: rc=0 145 passed, 1 skipped in 9.77s
+RESULT PASS: 55 mutations, 0 problem(s)

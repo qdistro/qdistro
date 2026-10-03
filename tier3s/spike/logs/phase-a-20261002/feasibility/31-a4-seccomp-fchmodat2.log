@@ -1,0 +1,44 @@
+### host 2026-10-02T09:05:28Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+set -u
+rm -rf /var/tmp/t3sf-dbg; install -d -o admin -g admin -m 0755 /var/tmp/t3sf-dbg
+runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=debug --runtime-flag=debug-log=/var/tmp/t3sf-dbg/ run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/t3sf-hs.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --network=none registry.opensuse.org/opensuse/tumbleweed:20260929 sh -c ': > /tmp/f; chmod 600 /tmp/f; echo "plain chmod rc=$?"; stat -c "mode=%a" /tmp/f; chmod -h 640 /tmp/f; echo "chmod -h rc=$?"; stat -c "mode=%a" /tmp/f; ls -l /tmp; echo "ls -l rc=$?"; dmesg --syslog 2>&1 | head -2; echo "dmesg rc=$?"'
+echo "podman rc=$?"
+echo "--- denials (boot log):"
+grep -h 'denied by seccomp' /var/tmp/t3sf-dbg/*boot* | sed 's/^.*\] //' | sort | uniq -c
+echo "--- rule lines naming 452 / 195 / 103 (syslog) / 268 (fchmodat) in the ordered seccomp rules:"
+grep -hE 'Syscall +(452|195|103|268)[:)]' /var/tmp/t3sf-dbg/*boot* | sed 's/^.*\] //' | sort -u | head
+echo "--- any converter warning about names:"
+grep -hiE 'unknown|not found|skipping|ignor' /var/tmp/t3sf-dbg/*boot* /var/tmp/t3sf-dbg/*create* 2>/dev/null | grep -i sys | sed 's/^.*\] //' | head
+CMD
+[vm-exec] guest identity pinned (pid 29489 start 83809)
+plain chmod rc=0
+mode=600
+chmod -h rc=1
+mode=600
+total 0
+-rw------- 1 admin admin 0 Oct  2 09:05 f
+ls -l rc=0
+[    0.000000] Starting gVisor...
+[    0.411560] Searching for socket adapter...
+dmesg rc=0
+podman rc=0
+--- denials (boot log):
+      1 Syscall 452: denied by seccomp
+--- rule lines naming 452 / 195 / 103 (syslog) / 268 (fchmodat) in the ordered seccomp rules:
+    - Syscall  103: allow
+    - Syscall  195: allow
+    - Syscall  268: allow
+Syscall 452: denied by seccomp
+--- any converter warning about names:
+Args: [runsc-sandbox --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --systemd-cgroup=true --root=/run/qdistro-tier3s-runsc/1000 --debug=true --debug-log=/var/tmp/t3sf-dbg/ --debug-log-fd=3 boot --bundle=/home/admin/.local/share/containers/storage/overlay-containers/2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --apply-caps=true --setup-root --total-host-memory 4103512064 --total-memory 4103512064 --io-fds=4 --io-fds=5 --io-fds=6 --io-fds=7 --io-fds=8 --io-fds=9 --io-fds=10 --dev-io-fd=-1 --mounts-fd=11 --start-sync-fd=12 --pin-ring-fd=13 --controller-fd=14 --spec-fd=15 --stdio-fds=16 --stdio-fds=17 --stdio-fds=18 2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442]
+ignoring unknown filesystem type "mqueue"
+OCI seccomp: ignoring syscall "fchmodat2"
+Unsupported syscall rseq(0x7ec0abaad680,0x20,0x0,0x53053053,0xffffffffffffff40,0x7eefd67c391c). It is likely that you can safely ignore this message and that this is not the cause of any error. Please, refer to https://gvisor.dev/c/linux/amd64/rseq for more information.
+Args: [/usr/libexec/qdistro/runsc/runsc --ignore-cgroups --platform=systrap --oci-seccomp --root=/run/qdistro-tier3s-runsc/1000 --systemd-cgroup --network=none --debug --debug-log=/var/tmp/t3sf-dbg/ create --bundle /home/admin/.local/share/containers/storage/overlay-containers/2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442/userdata --pid-file /tmp/storage-run-1000/containers/overlay-containers/2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442/userdata/pidfile 2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442]
+Starting gofer with command: [runsc-gofer --debug=true --debug-log=/var/tmp/t3sf-dbg/ --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --systemd-cgroup=true --root=/run/qdistro-tier3s-runsc/1000 --debug-log-fd=3 gofer --bundle /home/admin/.local/share/containers/storage/overlay-containers/2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --spec-fd=4 --mounts-fd=5 --rpc-fd=6 --io-fds=7 --io-fds=8 --io-fds=9 --io-fds=10 --io-fds=11 --io-fds=12 --io-fds=13 --sync-chroot-fd=14 2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442]
+Starting gofer: /proc/self/exe [runsc-gofer --debug=true --debug-log=/var/tmp/t3sf-dbg/ --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --systemd-cgroup=true --root=/run/qdistro-tier3s-runsc/1000 --debug-log-fd=3 gofer --bundle /home/admin/.local/share/containers/storage/overlay-containers/2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --spec-fd=4 --mounts-fd=5 --rpc-fd=6 --io-fds=7 --io-fds=8 --io-fds=9 --io-fds=10 --io-fds=11 --io-fds=12 --io-fds=13 --sync-chroot-fd=14 2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442]
+Starting sandbox: /usr/libexec/qdistro/runsc/gvisor-bin/gvisor-sentry-prewarmer [/usr/libexec/qdistro/runsc/gvisor-bin/gvisor-sentry-prewarmer /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry runsc-sandbox --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --systemd-cgroup=true --root=/run/qdistro-tier3s-runsc/1000 --debug=true --debug-log=/var/tmp/t3sf-dbg/ --debug-log-fd=3 boot --bundle=/home/admin/.local/share/containers/storage/overlay-containers/2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --apply-caps=true --setup-root --total-host-memory 4103512064 --total-memory 4103512064 --io-fds=4 --io-fds=5 --io-fds=6 --io-fds=7 --io-fds=8 --io-fds=9 --io-fds=10 --dev-io-fd=-1 --mounts-fd=11 --start-sync-fd=12 --pin-ring-fd=13 --controller-fd=14 --spec-fd=15 --stdio-fds=16 --stdio-fds=17 --stdio-fds=18 2c32d2b3e1a773f032d43810b53610356167d0a6166e42a8e5bef2b0209e7442]
+[vm-exec] --- stderr ---
+chmod: changing permissions of '/tmp/f': Operation not permitted
+[vm-exec] --- end stderr ---
+### exit=0

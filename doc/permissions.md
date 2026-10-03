@@ -169,6 +169,43 @@ The split lets the same policy engine serve both "never-block-the-user"
 callers and "wait-for-admin" callers without surfacing the distinction inside
 the broker's decision logic.
 
+### Rules-only actions
+
+A few action namespaces create a new sandboxed process or move data across a
+sandbox boundary. For these, `CheckPermission` consults **rules only**: an
+approval-cache row or a hook verdict never authorizes them, and with no
+matching rule the answer is `"unknown"`, which every caller treats as a
+refusal. The prefixes are in `broker/qdistro_admin_broker.py`
+(`_decide_check`):
+
+| Prefix | Caller | Action shape |
+|---|---|---|
+| `qdistro.tier1.spawn:` | `qdistro-tier1-spawn` | `<canonical app path>` |
+| `qdistro.tier2.spawn:` | `tier2/spawn-tier2.sh` | `<workload>/<app basename>` |
+| `qdistro.tier3s.spawn:` | `tier3s/spawn-tier3s.sh` (tier 3s, gVisor; Experimental, dev profile only) | `<workload>/<app basename>` |
+| `qdistro.dispose.spawn:` | disposable spawn | `<workload>` |
+| `qdistro.dispose.open:` | open-in-disposable | `<class>` |
+| `qdistro.dispose.export:` | export-back | `<class>` |
+
+So a tier 3s launch needs an explicit rule, for example:
+
+```yaml
+- name: tier3s-headless-smoke
+  decision: allow
+  match:
+    uid: 1000
+    action: "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke"
+```
+
+`spawn-tier3s.sh` asks as the admin uid, after the prerequisite probe and
+before it records an activation or runs the workload (`podman run`);
+anything but `allow` refuses the launch (`tier3s/CONTRACT.md` §5). The probe
+before the gate does run podman as admin on every attempt, refused ones
+included: it imports an empty scratch image and creates and removes a
+never-started `tier3s-probe-<pid>` container to check the runtime. So a
+refused attempt can show those podman events, but never a workload
+container, a `podman run` or an activation record.
+
 ## Revocation as a signal
 
 When admin deletes a cache row via `RevokeApproval(id)` or `RevokeAllForUid

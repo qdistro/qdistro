@@ -1,0 +1,20 @@
+### tier-2 unit + static suites at 1bec207b2c06570fa70eb50222b2a5978d586fd0 2026-10-02T19:15:29Z
+### git diff --stat claude/tier3s..HEAD -- tier2/ (DONE bar 7: must be empty):
+### files under tier2/ changed: 0
+### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
+### UNIT: python3 -m pytest tests/unit/test_tier2_spawn.py tests/unit/test_tier2_snapshot_repos.py tests/unit/test_podapp_launch.py tests/unit/test_podapps_scan.py tests/unit/test_silo_launch.py tests/unit/test_spawn_common.py
+  /usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159: PyGIDeprecationWarning: GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead
+    value = getattr(proxy, attr)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 130 passed, 1 warning in 4.57s ========================
+pytest rc=0
+### STATIC 1: bash -n on every tier2/*.sh
+bash -n rc=0
+### STATIC 2: shellcheck -S warning -e SC1090 tier2/*.sh
+#   documented baseline waiver: SC1090 at tier2/spawn-tier2.sh:800 (pre-existing on claude/tier3s; tier2/ frozen in Phase A)
+shellcheck (waiver) rc=0
+### STATIC 3: shellcheck -S warning of the cleanup and the spawn (the r2 scope)
+shellcheck rc=0
+#   note: probe.sh has PRE-EXISTING SC2209 at line 20 (USER_NAME=admin), identical on the base commit; qdistro-tier3s-scope clean
+scope shellcheck rc=0

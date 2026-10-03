@@ -1,0 +1,110 @@
+#!/bin/bash
+# qdistro-tier3s-silo-launch <silo-name> — ExecStart of
+# qdistro-tier3s-silo@<name>.service (tier3s/CONTRACT.md §1, §6). Root.
+#
+# Reads the launch stanza the session manager wrote to
+# /run/qdistro/silo-launch/<name>.env and execs spawn-tier3s.sh as the ROOT
+# supervisor of this launch with a scrubbed environment (`env -i`) carrying only
+# the stanza's fields. Differences from qdistro-tier2-silo-launch, on purpose:
+#   - the stanza is PARSED (a fixed key set, shell-quoted values decoded by
+#     python3 shlex), never `.`-sourced: nothing in it is executed as root;
+#   - no QDISTRO_PROFILE is passed: spawn-tier3s.sh reads /etc/qdistro/profile
+#     itself and refuses anything but dev (paravirt O4);
+#   - no fallback anywhere: a missing spawn, a bad stanza or a wrong admin uid
+#     exits non-zero and the unit fails visibly (paravirt O6).
+set -euo pipefail
+
+NAME="${1:?usage: qdistro-tier3s-silo-launch <silo-name>}"
+say() { printf 'tier3s-silo-launch: %s\n' "$*" >&2; }
+[[ "$NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { say "invalid silo name '$NAME'"; exit 2; }
+ENV_DIR=/run/qdistro/silo-launch
+SPAWN=/usr/lib/qdistro/tier3s/spawn-tier3s.sh
+# TEST-ONLY overrides, honoured only for a non-root caller (host unit tests
+# cannot write /run or /usr/lib); root always uses the fixed paths above. The
+# trusted-file checks below apply to whatever path is used.
+if [ "$EUID" -ne 0 ]; then
+    ENV_DIR="${QDISTRO_SILO_LAUNCH_ENV_DIR:-$ENV_DIR}"
+    SPAWN="${QDISTRO_TIER3S_SPAWN:-$SPAWN}"
+fi
+ENV_FILE="${ENV_DIR}/${NAME}.env"
+
+# The stanza must be in root's trusted computing base: a regular file (not a
+# symlink) owned by the reading euid (root in production) and not writable by
+# group or other. Copied from qdistro-tier2-silo-launch's require_trusted_env
+# (unify after Phase B), plus the symlink refusal.
+require_trusted_env() {
+    local f="$1" meta owner perms me
+    me="$(id -u)"
+    if [ -L "$f" ] || [ ! -f "$f" ]; then say "launch env $f is not a regular file"; exit 2; fi
+    meta="$(stat -c '%u %a' -- "$f" 2>/dev/null)" || { say "cannot stat launch env $f"; exit 2; }
+    owner="${meta%% *}"; perms="${meta##* }"
+    [ "$owner" = "$me" ] || { say "launch env $f is owned by uid $owner, not $me; refusing"; exit 2; }
+    case "$perms" in *[2367]) say "launch env $f is other-writable (mode $perms); refusing"; exit 2 ;; esac
+    case "$perms" in *[2367]?) say "launch env $f is group-writable (mode $perms); refusing"; exit 2 ;; esac
+}
+[ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ] || { say "no launch env at $ENV_FILE"; exit 2; }
+require_trusted_env "$ENV_FILE"
+
+# Parse: exactly the keys below, each once, one KEY=<shell-quoted value> per
+# line. Output (NUL-separated): silo, binding, workload, network, token, then
+# the argv. The checks here are the stanza's shape; spawn-tier3s.sh validates
+# every value again before using it.
+mapfile -d '' -t F < <(python3 -c '
+import json, re, shlex, sys
+want = ("TIER3S_SILO", "TIER3S_BINDING", "TIER3S_WORKLOAD", "TIER3S_NETWORK",
+        "TIER3S_LAUNCH_TOKEN", "TIER3S_ARGV_JSON")
+kv = {}
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for n, line in enumerate(fh, 1):
+        if not line.strip():
+            continue
+        parts = shlex.split(line, comments=False, posix=True)
+        if len(parts) != 1 or "=" not in parts[0]:
+            sys.exit(f"line {n}: not KEY=VALUE")
+        k, v = parts[0].split("=", 1)
+        if k not in want:
+            sys.exit(f"line {n}: unexpected key {k!r}")
+        if k in kv:
+            sys.exit(f"line {n}: duplicate key {k}")
+        kv[k] = v
+missing = [k for k in want if k not in kv]
+if missing:
+    sys.exit(f"missing {missing}")
+if kv["TIER3S_NETWORK"] != "none":
+    sys.exit("TIER3S_NETWORK must be none")
+if not re.fullmatch(r"[0-9a-f]{32}", kv["TIER3S_LAUNCH_TOKEN"]):
+    sys.exit("TIER3S_LAUNCH_TOKEN must be 32 lowercase hex digits")
+argv = json.loads(kv["TIER3S_ARGV_JSON"])
+if (not isinstance(argv, list) or not argv or not argv[0]
+        or not all(isinstance(a, str) for a in argv)):
+    sys.exit("TIER3S_ARGV_JSON must be a list of strings with a non-empty argv[0]")
+out = [kv[k] for k in want[:5]] + argv
+if any("\0" in x for x in out):
+    sys.exit("NUL in a value")
+sys.stdout.write("".join(x + "\0" for x in out))
+' "$ENV_FILE")
+# The parser is a process substitution: its status is only seen through wait.
+wait "$!" || { say "launch env $ENV_FILE is malformed (see above); refusing"; exit 2; }
+[ "${#F[@]}" -ge 6 ] || { say "launch env $ENV_FILE parsed to nothing; refusing"; exit 2; }
+SILO="${F[0]}" BINDING="${F[1]}" WORKLOAD="${F[2]}" NETWORK="${F[3]}" TOKEN="${F[4]}"
+APP_ARGV=("${F[@]:5}")
+[ "$SILO" = "$NAME" ] || { say "launch env names silo '$SILO', not this unit's '$NAME'; refusing"; exit 2; }
+
+# The fixed admin uid every podman, broker and resolver call drops to.
+ADMIN_UID="$(id -u admin 2>/dev/null || true)"
+[ "$ADMIN_UID" = 1000 ] || { say "admin must be uid 1000 (got '${ADMIN_UID:-missing}'); refusing"; exit 6; }
+[ -x "$SPAWN" ] || { say "spawn-tier3s.sh not installed at $SPAWN (install-session-manager.sh); refusing"; exit 5; }
+
+# NOTIFY_SOCKET is systemd's (the unit is Type=notify): the spawn sends READY=1
+# only once the launch runs, and keeps the socket from everything it starts.
+exec env -i \
+    PATH="/usr/sbin:/usr/bin:/sbin:/bin" \
+    NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" \
+    TIER3S_ROOT_LAUNCHER=1 \
+    TIER3S_ADMIN_UID="$ADMIN_UID" \
+    TIER3S_LAUNCH_UNIT="qdistro-tier3s-silo@${NAME}.service" \
+    TIER3S_LAUNCH_TOKEN="$TOKEN" \
+    TIER3S_SILO="$SILO" \
+    TIER3S_BINDING="$BINDING" \
+    TIER3S_NETWORK="$NETWORK" \
+    "$SPAWN" "$WORKLOAD" -- "${APP_ARGV[@]}"

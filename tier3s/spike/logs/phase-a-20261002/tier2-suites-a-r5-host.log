@@ -1,0 +1,32 @@
+### tier-2 unit + static suites at 69a2cc1164f9923912e8fb74ff11164421b26d50 2026-10-02T20:53:40Z
+### git diff --stat claude/tier3s..HEAD -- tier2/ (DONE bar 7: must be empty):
+### files under tier2/ changed: 0
+### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
+### UNIT: python3 -m pytest -q tests/unit/test_tier2_spawn.py tests/unit/test_tier2_snapshot_repos.py tests/unit/test_podapp_launch.py tests/unit/test_podapps_scan.py tests/unit/test_silo_launch.py tests/unit/test_spawn_common.py
+........................................................................ [ 55%]
+..........................................................               [100%]
+=============================== warnings summary ===============================
+../../../../../usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159
+  /usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159: PyGIDeprecationWarning: GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead
+    value = getattr(proxy, attr)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+130 passed, 1 warning in 3.68s
+pytest rc=0
+### STATIC 1: bash -n on every tier2/*.sh
+bash -n rc=0
+### STATIC 2: shellcheck -S warning -e SC1090 tier2/*.sh
+#   documented baseline waiver: SC1090 at tier2/spawn-tier2.sh:800 (pre-existing on claude/tier3s; tier2/ frozen in Phase A)
+shellcheck (waiver) rc=0
+### STATIC 3: shellcheck -S warning of the r5-changed files (cleanup, spawn, scope helper, probe)
+cleanup+spawn+scope rc=0
+
+In tier3s/probe.sh line 20:
+USER_NAME=admin
+^-------^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2209 -- Use var=$(command) to assign outp...
+probe rc=1 — the one warning is the PRE-EXISTING SC2209 at line 20 (USER_NAME=admin), identical on base claude/tier3s:
+2
+(count of SC2209 lines above)

@@ -1,0 +1,190 @@
+I1001 21:02:00.052045   80461 cli.go:275] **************** gVisor ****************
+I1001 21:02:00.052080   80461 cli.go:276] Version release-20260928.0, go1.26.3, amd64, 4 CPUs, linux, PID 80461, PPID 80460, UID 0, GID 0
+D1001 21:02:00.052086   80461 cli.go:277] Page size: 0x1000 (4096 bytes)
+I1001 21:02:00.052091   80461 cli.go:278] Args: [/usr/libexec/qdistro/runsc/runsc --ignore-cgroups --platform=systrap --oci-seccomp --systemd-cgroup --network=none --root=/run/user/1000/runsc --debug --debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --host-uds=open create --bundle /home/admin/.local/share/containers/storage/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata --pid-file /tmp/storage-run-1000/containers/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata/pidfile 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5]
+I1001 21:02:00.052101   80461 config.go:558] Platform: systrap
+I1001 21:02:00.052104   80461 config.go:559] RootDir: /run/user/1000/runsc
+I1001 21:02:00.052106   80461 config.go:560] FileAccess: exclusive / Directfs: true / Overlay: root:self
+I1001 21:02:00.052109   80461 config.go:561] Network: none
+I1001 21:02:00.052112   80461 config.go:562] UseCPUNums: false
+I1001 21:02:00.052114   80461 config.go:564] Debug: true. Strace: false, max size: 1024, syscalls: 
+W1001 21:02:00.052116   80461 config.go:567] --allow-suid is disabled, SUID/SGID bits on executables will be ignored.
+D1001 21:02:00.052119   80461 config.go:585] Config.RootDir (--root): /run/user/1000/runsc
+D1001 21:02:00.052121   80461 config.go:585] Config.Traceback (--traceback): system
+D1001 21:02:00.052124   80461 config.go:585] Config.Debug (--debug): true
+D1001 21:02:00.052126   80461 config.go:585] Config.LogFilename (--log): (empty)
+D1001 21:02:00.052128   80461 config.go:585] Config.LogFormat (--log-format): text
+D1001 21:02:00.052129   80461 config.go:585] Config.DebugLog (--debug-log): /var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/
+D1001 21:02:00.052131   80461 config.go:585] Config.DebugToUserLog (--debug-to-user-log): false
+D1001 21:02:00.052133   80461 config.go:585] Config.DebugCommand (--debug-command): (empty)
+D1001 21:02:00.052135   80461 config.go:585] Config.PanicLog (--panic-log): (empty)
+D1001 21:02:00.052137   80461 config.go:585] Config.CoverageReport (--coverage-report): (empty)
+D1001 21:02:00.052139   80461 config.go:585] Config.DebugLogFormat (--debug-log-format): text
+D1001 21:02:00.052142   80461 config.go:585] Config.FileAccess (--file-access): exclusive
+D1001 21:02:00.052144   80461 config.go:585] Config.FileAccessMounts (--file-access-mounts): shared
+D1001 21:02:00.052146   80461 config.go:585] Config.Overlay (--overlay): false
+D1001 21:02:00.052148   80461 config.go:585] Config.Overlay2 (--overlay2): root:self
+D1001 21:02:00.052150   80461 config.go:585] Config.FSGoferHostUDS (--fsgofer-host-uds): false
+D1001 21:02:00.052152   80461 config.go:585] Config.HostUDS (--host-uds): open
+D1001 21:02:00.052155   80461 config.go:585] Config.HostFifo (--host-fifo): none
+D1001 21:02:00.052157   80461 config.go:585] Config.CharacterDevicePolicy (--character-device-policy): emulated-only
+D1001 21:02:00.052159   80461 config.go:585] Config.HostSettings (--host-settings): check
+D1001 21:02:00.052162   80461 config.go:585] Config.Network (--network): none
+D1001 21:02:00.052163   80461 config.go:585] Config.GoferNetworkNamespace (--gofer-network-namespace): null
+D1001 21:02:00.052165   80461 config.go:585] Config.EnableRaw (--net-raw): false
+D1001 21:02:00.052167   80461 config.go:585] Config.AllowPacketEndpointWrite (--allow-packet-socket-write): false
+D1001 21:02:00.052169   80461 config.go:585] Config.AllowLiveTCPMigration (--allow-live-tcp-migration): true
+D1001 21:02:00.052171   80461 config.go:585] Config.SignalUnkillablePolicy (--signal-unkillable-policy): none
+D1001 21:02:00.052173   80461 config.go:585] Config.HostGSO (--gso): true
+D1001 21:02:00.052175   80461 config.go:585] Config.GVisorGSO (--software-gso): true
+D1001 21:02:00.052178   80461 config.go:585] Config.GVisorGRO (--gvisor-gro): false
+D1001 21:02:00.052180   80461 config.go:585] Config.TXChecksumOffload (--tx-checksum-offload): false
+D1001 21:02:00.052182   80461 config.go:585] Config.RXChecksumOffload (--rx-checksum-offload): true
+D1001 21:02:00.052184   80461 config.go:585] Config.QDisc (--qdisc): fifo
+D1001 21:02:00.052186   80461 config.go:585] Config.TBFRate (--qdisc-tbf-rate): 0
+D1001 21:02:00.052189   80461 config.go:585] Config.TBFBurst (--qdisc-tbf-burst): 0
+D1001 21:02:00.052190   80461 config.go:585] Config.LogPackets (--log-packets): false
+D1001 21:02:00.052192   80461 config.go:585] Config.PCAP (--pcap-log): (empty)
+D1001 21:02:00.052194   80461 config.go:585] Config.Platform (--platform): systrap
+D1001 21:02:00.052195   80461 config.go:585] Config.PlatformDevicePath (--platform_device_path): (empty)
+D1001 21:02:00.052197   80461 config.go:585] Config.MetricServer (--metric-server): (empty)
+D1001 21:02:00.052199   80461 config.go:585] Config.SidecarReleaseEnforcementPolicy (--sidecar-release-enforcement-policy): IF_RELEASE_BUILD
+D1001 21:02:00.052201   80461 config.go:585] Config.SidecarUsagePolicy (--sidecar-usage-policy): DEFAULT
+D1001 21:02:00.052203   80461 config.go:585] Config.FinalMetricsLog (--final-metrics-log): (empty)
+D1001 21:02:00.052205   80461 config.go:585] Config.ProfilingMetrics (--profiling-metrics): (empty)
+D1001 21:02:00.052207   80461 config.go:585] Config.ProfilingMetricsLog (--profiling-metrics-log): (empty)
+D1001 21:02:00.052209   80461 config.go:585] Config.ProfilingMetricsRate (--profiling-metrics-rate-us): 1000
+D1001 21:02:00.052211   80461 config.go:585] Config.Strace (--strace): false
+D1001 21:02:00.052213   80461 config.go:585] Config.StraceSyscalls (--strace-syscalls): (empty)
+D1001 21:02:00.052215   80461 config.go:585] Config.StraceLogSize (--strace-log-size): 1024
+D1001 21:02:00.052217   80461 config.go:585] Config.StraceEvent (--strace-event): false
+D1001 21:02:00.052218   80461 config.go:587] Config.DisableSeccomp: false
+D1001 21:02:00.052221   80461 config.go:585] Config.EnableCoreTags (--enable-core-tags): false
+D1001 21:02:00.052223   80461 config.go:585] Config.WatchdogAction (--watchdog-action): log
+D1001 21:02:00.052224   80461 config.go:585] Config.PanicSignal (--panic-signal): -1
+D1001 21:02:00.052226   80461 config.go:585] Config.ProfileEnable (--profile): false
+D1001 21:02:00.052228   80461 config.go:585] Config.ProfileBlock (--profile-block): (empty)
+D1001 21:02:00.052229   80461 config.go:585] Config.ProfileCPU (--profile-cpu): (empty)
+D1001 21:02:00.052232   80461 config.go:585] Config.ProfileGCInterval (--profile-gc-interval): 0s
+D1001 21:02:00.052234   80461 config.go:585] Config.ProfileHeap (--profile-heap): (empty)
+D1001 21:02:00.052236   80461 config.go:585] Config.ProfileMutex (--profile-mutex): (empty)
+D1001 21:02:00.052238   80461 config.go:585] Config.TraceFile (--trace): (empty)
+D1001 21:02:00.052240   80461 config.go:585] Config.NumNetworkChannels (--num-network-channels): 1
+D1001 21:02:00.052242   80461 config.go:585] Config.NetworkProcessorsPerChannel (--network-processors-per-channel): 0
+D1001 21:02:00.052244   80461 config.go:585] Config.Rootless (--rootless): false
+D1001 21:02:00.052245   80461 config.go:585] Config.AlsoLogToStderr (--alsologtostderr): false
+D1001 21:02:00.052247   80461 config.go:585] Config.ReferenceLeak (--ref-leak-mode): disabled
+D1001 21:02:00.052249   80461 config.go:585] Config.CPUNumFromQuota (--cpu-num-from-quota): true
+D1001 21:02:00.052251   80461 config.go:585] Config.AllowFlagOverride (--allow-flag-override): false
+D1001 21:02:00.052253   80461 config.go:585] Config.OCISeccomp (--oci-seccomp): true
+D1001 21:02:00.052254   80461 config.go:585] Config.IgnoreCgroups (--ignore-cgroups): true
+D1001 21:02:00.052256   80461 config.go:585] Config.InSandboxCgroup (--in-sandbox-cgroup): v1
+D1001 21:02:00.052258   80461 config.go:585] Config.SystemdCgroup (--systemd-cgroup): true
+D1001 21:02:00.052260   80461 config.go:585] Config.PodInitConfig (--pod-init-config): (empty)
+D1001 21:02:00.052263   80461 config.go:585] Config.XDP (--EXPERIMENTAL-xdp): {0 }
+D1001 21:02:00.052266   80461 config.go:585] Config.AFXDPUseNeedWakeup (--EXPERIMENTAL-xdp-need-wakeup): true
+D1001 21:02:00.052268   80461 config.go:585] Config.FDLimit (--fdlimit): -1
+D1001 21:02:00.052270   80461 config.go:585] Config.DCache (--dcache): -1
+D1001 21:02:00.052271   80461 config.go:585] Config.IOUring (--iouring): false
+D1001 21:02:00.052273   80461 config.go:585] Config.DirectFS (--directfs): true
+D1001 21:02:00.052275   80461 config.go:585] Config.AppHugePages (--app-huge-pages): true
+D1001 21:02:00.052276   80461 config.go:585] Config.NVProxy (--nvproxy): false
+D1001 21:02:00.052278   80461 config.go:585] Config.NVProxyDocker (--nvproxy-docker): false
+D1001 21:02:00.052280   80461 config.go:585] Config.NVProxyDriverVersion (--nvproxy-driver-version): (empty)
+D1001 21:02:00.052282   80461 config.go:585] Config.NVProxyAllowedDriverCapabilities (--nvproxy-allowed-driver-capabilities): utility,compute
+D1001 21:02:00.052283   80461 config.go:585] Config.NVProxyAllowUnsupportedDriver (--nvproxy-allow-unsupported-driver): false
+D1001 21:02:00.052285   80461 config.go:585] Config.TPUProxy (--tpuproxy): false
+D1001 21:02:00.052288   80461 config.go:585] Config.RDMAProxy (--rdmaproxy): false
+D1001 21:02:00.052289   80461 config.go:585] Config.TestOnlyAllowRunAsCurrentUserWithoutChroot (--TESTONLY-unsafe-nonroot): false
+D1001 21:02:00.052291   80461 config.go:585] Config.TestOnlyTestNameEnv (--TESTONLY-test-name-env): (empty)
+D1001 21:02:00.052292   80461 config.go:585] Config.TestOnlyAFSSyscallPanic (--TESTONLY-afs-syscall-panic): false
+D1001 21:02:00.052294   80461 config.go:587] Config.explicitlySet: <map[string]struct {} Value> (unexported)
+D1001 21:02:00.052296   80461 config.go:585] Config.ReproduceNAT (--reproduce-nat): false
+D1001 21:02:00.052298   80461 config.go:585] Config.ReproduceNftables (--reproduce-nftables): false
+D1001 21:02:00.052299   80461 config.go:585] Config.NetDisconnectOk (--net-disconnect-ok): true
+D1001 21:02:00.052301   80461 config.go:585] Config.TestOnlyAutosaveImagePath (--TESTONLY-autosave-image-path): (empty)
+D1001 21:02:00.052303   80461 config.go:585] Config.TestOnlyAutosaveResume (--TESTONLY-autosave-resume): false
+D1001 21:02:00.052305   80461 config.go:585] Config.RestoreSpecValidation (--restore-spec-validation): enforce
+D1001 21:02:00.052307   80461 config.go:585] Config.GVisorMarkerFile (--gvisor-marker-file): false
+D1001 21:02:00.052308   80461 config.go:585] Config.OverrideProcs (--override-procs): (empty)
+D1001 21:02:00.052310   80461 config.go:585] Config.SystrapDisableSyscallPatching (--systrap-disable-syscall-patching): false
+D1001 21:02:00.052312   80461 config.go:585] Config.SystrapDisableFastPath (--systrap-disable-fast-path): false
+D1001 21:02:00.052314   80461 config.go:585] Config.Nftables (--TESTONLY-nftables): false
+D1001 21:02:00.052316   80461 config.go:585] Config.AllowSUID (--allow-suid): false
+D1001 21:02:00.052318   80461 config.go:585] Config.UseCPUNums (--kvm-use-cpu-nums): false
+D1001 21:02:00.052319   80461 config.go:585] Config.PauseExternalNetworking (--pause-external-networking): false
+D1001 21:02:00.052321   80461 config.go:585] Config.AllowConnectedOnSave (--allow-connected-on-save): false
+D1001 21:02:00.052323   80461 config.go:585] Config.AllowRootfsTarAnnotation (--allow-rootfs-tar-annotation): false
+D1001 21:02:00.052325   80461 config.go:585] Config.ControlRPCStopTimeout (--control-rpc-stop-timeout): 15s
+D1001 21:02:00.052327   80461 config.go:585] Config.SharedRootDir (--shared-root): (empty)
+D1001 21:02:00.052330   80461 cli.go:284] runsc process spawned at 21:02:00.050244, Go started execution at 21:02:00.051362. Startup overhead: 1.118291ms
+I1001 21:02:00.052335   80461 cli.go:287] **************** gVisor ****************
+D1001 21:02:00.052343   80461 container.go:212] Create container, cid: 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5, rootDir: "/run/user/1000/runsc"
+D1001 21:02:00.052526   80461 container.go:349] Creating new sandbox for container, cid: 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5
+I1001 21:02:00.052780   80461 namespace.go:201] Mapping host uid 1 to container uid 0 (size=1000)
+I1001 21:02:00.052793   80461 namespace.go:201] Mapping host uid 0 to container uid 1000 (size=1)
+I1001 21:02:00.052795   80461 namespace.go:201] Mapping host uid 1001 to container uid 1001 (size=64536)
+I1001 21:02:00.052797   80461 namespace.go:209] Mapping host gid 1 to container gid 0 (size=1000)
+I1001 21:02:00.052799   80461 namespace.go:209] Mapping host gid 0 to container gid 1000 (size=1)
+I1001 21:02:00.052801   80461 namespace.go:209] Mapping host gid 1001 to container gid 1001 (size=64536)
+I1001 21:02:00.052808   80461 container.go:1736] Starting gofer with command: [runsc-gofer --systemd-cgroup=true --debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --root=/run/user/1000/runsc --debug=true --host-uds=open --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --debug-log-fd=3 gofer --bundle /home/admin/.local/share/containers/storage/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --spec-fd=4 --mounts-fd=5 --rpc-fd=6 --io-fds=7 --io-fds=8 --io-fds=9 --io-fds=10 --io-fds=11 --io-fds=12 --sync-chroot-fd=13 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5]
+D1001 21:02:00.052818   80461 donation.go:31] Donating FD 3: "/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/runsc.log.20261001-210200.050244.gofer.txt"
+D1001 21:02:00.052830   80461 donation.go:31] Donating FD 4: "/home/admin/.local/share/containers/storage/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata/config.json"
+D1001 21:02:00.052832   80461 donation.go:31] Donating FD 5: "|1"
+D1001 21:02:00.052833   80461 donation.go:31] Donating FD 6: "gofer-rpc"
+D1001 21:02:00.052835   80461 donation.go:31] Donating FD 7: "gofer IO FD"
+D1001 21:02:00.052836   80461 donation.go:31] Donating FD 8: "gofer IO FD"
+D1001 21:02:00.052837   80461 donation.go:31] Donating FD 9: "gofer IO FD"
+D1001 21:02:00.052838   80461 donation.go:31] Donating FD 10: "gofer IO FD"
+D1001 21:02:00.052839   80461 donation.go:31] Donating FD 11: "gofer IO FD"
+D1001 21:02:00.052841   80461 donation.go:31] Donating FD 12: "gofer IO FD"
+D1001 21:02:00.052842   80461 donation.go:31] Donating FD 13: "chroot sync gofer FD"
+D1001 21:02:00.052859   80461 container.go:1741] Starting gofer: /proc/self/exe [runsc-gofer --systemd-cgroup=true --debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --root=/run/user/1000/runsc --debug=true --host-uds=open --network=none --platform=systrap --oci-seccomp=true --ignore-cgroups=true --debug-log-fd=3 gofer --bundle /home/admin/.local/share/containers/storage/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --spec-fd=4 --mounts-fd=5 --rpc-fd=6 --io-fds=7 --io-fds=8 --io-fds=9 --io-fds=10 --io-fds=11 --io-fds=12 --sync-chroot-fd=13 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5]
+I1001 21:02:00.052895   80461 namespace.go:111] Applying namespace network at path "/proc/self/fd/28"
+I1001 21:02:00.053724   80461 namespace.go:132] Restoring namespace network
+D1001 21:02:00.053745   80461 namespace.go:160] Block the current system thread due to: error restoring namespace: of type network: operation not permitted
+I1001 21:02:00.053781   80461 container.go:1745] Gofer started, PID: 80468
+I1001 21:02:00.053834   80461 sandbox.go:959] Failed to set RLIMIT_MEMLOCK: operation not permitted
+I1001 21:02:00.053935   80461 sandbox.go:1013] Sidecar "gvisor_sentry" found: booting sandbox with /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+D1001 21:02:00.053942   80461 urpc.go:440] urpc: registering client with FD 13
+I1001 21:02:00.054007   80461 sandbox.go:1039] Sidecar "gvisor-sentry-prewarmer" found: prepending Sentry boot command with /usr/libexec/qdistro/runsc/gvisor-bin/gvisor-sentry-prewarmer
+D1001 21:02:00.054448   80461 sandbox.go:105] Attempting to create socket file "/run/user/1000/runsc/runsc-5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5.sock"
+D1001 21:02:00.054583   80461 sandbox.go:108] Using socket file "/run/user/1000/runsc/runsc-5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5.sock"
+I1001 21:02:00.054588   80461 sandbox.go:1100] Control socket path: "/run/user/1000/runsc/runsc-5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5.sock"
+I1001 21:02:00.054608   80461 sandbox.go:1163] Sandbox will be started in new mount, IPC and UTS namespaces
+I1001 21:02:00.054616   80461 sandbox.go:1188] Sandbox will be started in new network namespace
+I1001 21:02:00.054623   80461 sandbox.go:1205] Sandbox will be started in container's user namespace: {Type:user Path:}
+I1001 21:02:00.054639   80461 namespace.go:201] Mapping host uid 1 to container uid 0 (size=1000)
+I1001 21:02:00.054643   80461 namespace.go:201] Mapping host uid 0 to container uid 1000 (size=1)
+I1001 21:02:00.054645   80461 namespace.go:201] Mapping host uid 1001 to container uid 1001 (size=64536)
+I1001 21:02:00.054646   80461 namespace.go:209] Mapping host gid 1 to container gid 0 (size=1000)
+I1001 21:02:00.054665   80461 namespace.go:209] Mapping host gid 0 to container gid 1000 (size=1)
+I1001 21:02:00.054667   80461 namespace.go:209] Mapping host gid 1001 to container gid 1001 (size=64536)
+I1001 21:02:00.054705   80461 sandbox.go:1247] Sandbox will be started in minimal chroot
+D1001 21:02:00.054716   80461 sandbox.go:2492] Changing "/dev/stdin" ownership to 0/0
+W1001 21:02:00.054727   80461 sandbox.go:2495] can't change an owner of /dev/stdin: chown /dev/stdin: operation not permitted
+D1001 21:02:00.054731   80461 sandbox.go:2492] Changing "/dev/stdout" ownership to 0/0
+D1001 21:02:00.054734   80461 sandbox.go:2492] Changing "/dev/stderr" ownership to 0/0
+D1001 21:02:00.054756   80461 donation.go:31] Donating FD 3: "/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/runsc.log.20261001-210200.050244.boot.txt"
+D1001 21:02:00.054760   80461 donation.go:31] Donating FD 4: "sandbox IO FD"
+D1001 21:02:00.054761   80461 donation.go:31] Donating FD 5: "sandbox IO FD"
+D1001 21:02:00.054763   80461 donation.go:31] Donating FD 6: "sandbox IO FD"
+D1001 21:02:00.054764   80461 donation.go:31] Donating FD 7: "sandbox IO FD"
+D1001 21:02:00.054765   80461 donation.go:31] Donating FD 8: "sandbox IO FD"
+D1001 21:02:00.054767   80461 donation.go:31] Donating FD 9: "sandbox IO FD"
+D1001 21:02:00.054768   80461 donation.go:31] Donating FD 10: "|0"
+D1001 21:02:00.054769   80461 donation.go:31] Donating FD 11: "|1"
+D1001 21:02:00.054770   80461 donation.go:31] Donating FD 12: "pin ring"
+D1001 21:02:00.054772   80461 donation.go:31] Donating FD 13: "control_server_socket"
+D1001 21:02:00.054773   80461 donation.go:31] Donating FD 14: "/home/admin/.local/share/containers/storage/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata/config.json"
+D1001 21:02:00.054777   80461 donation.go:31] Donating FD 15: "/dev/stdin"
+D1001 21:02:00.054778   80461 donation.go:31] Donating FD 16: "/dev/stdout"
+D1001 21:02:00.054780   80461 donation.go:31] Donating FD 17: "/dev/stderr"
+D1001 21:02:00.054781   80461 sandbox.go:1457] Starting sandbox: /usr/libexec/qdistro/runsc/gvisor-bin/gvisor-sentry-prewarmer [/usr/libexec/qdistro/runsc/gvisor-bin/gvisor-sentry-prewarmer /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry runsc-sandbox --ignore-cgroups=true --debug=true --network=none --platform=systrap --oci-seccomp=true --systemd-cgroup=true --root=/run/user/1000/runsc --debug-log=/var/tmp/tier3s-spike/s2-weston-terminal/runsc-debug/ --host-uds=open --debug-log-fd=3 boot --bundle=/home/admin/.local/share/containers/storage/overlay-containers/5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5/userdata --gofer-mount-confs=lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none,lisafs:none --apply-caps=true --setup-root --total-host-memory 4103512064 --total-memory 4103512064 --io-fds=4 --io-fds=5 --io-fds=6 --io-fds=7 --io-fds=8 --io-fds=9 --dev-io-fd=-1 --mounts-fd=10 --start-sync-fd=11 --pin-ring-fd=12 --controller-fd=13 --spec-fd=14 --stdio-fds=15 --stdio-fds=16 --stdio-fds=17 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5]
+D1001 21:02:00.054795   80461 sandbox.go:1458] SysProcAttr: &{Chroot: Credential:0x304532c12270 Ptrace:false Setsid:true Setpgid:false Setctty:false Noctty:false Ctty:0 Foreground:false Pgid:0 Pdeathsig:signal 0 Cloneflags:0 Unshareflags:0 UidMappings:[{ContainerID:0 HostID:1 Size:1000} {ContainerID:1000 HostID:0 Size:1} {ContainerID:1001 HostID:1001 Size:64536}] GidMappings:[{ContainerID:0 HostID:1 Size:1000} {ContainerID:1000 HostID:0 Size:1} {ContainerID:1001 HostID:1001 Size:64536}] GidMappingsEnableSetgroups:false AmbientCaps:[] UseCgroupFD:false CgroupFD:0 PidFD:<nil>}
+I1001 21:02:00.055583   80461 sandbox.go:1486] Sandbox started, PID: 80473
+I1001 21:02:00.055614   80461 gvisorbinaries.go:400] sidecar "runsc-fd-parking": executing /usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking ([])
+I1001 21:02:00.055693   80461 sandbox.go:1521] FD parking sidecar started, PID: 80474
+D1001 21:02:00.058214   80461 urpc.go:453] urpc: unregistering client with FD 13
+D1001 21:02:00.071619   80461 container.go:1330] Save container, cid: 5409d4989ac5e0fede0a4a342b8c8ad02dfdb54670b6a408a9bff4b681b935c5
+I1001 21:02:00.072039   80461 cli.go:317] Exiting with status: 0

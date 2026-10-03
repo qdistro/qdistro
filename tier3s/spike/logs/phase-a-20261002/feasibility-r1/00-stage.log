@@ -1,0 +1,21 @@
+### host: staged commit 69e07eb32bc36ad3cf770bcb92de7f94e7ee292f
+### host 2026-10-02T08:56:52Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+set -e; rm -rf /root/qdistro-src; mkdir -p /root/qdistro-src; cd /root/qdistro-src
+curl -fsS http://10.0.2.2:42941/src.tar | tar -xf -; chown -R root:root /root/qdistro-src; echo "staged commit $(curl -fsS http://10.0.2.2:42941/commit.txt)"
+mkdir -p /var/cache/qdistro/runsc/20260928.0; curl -fsS http://10.0.2.2:42941/gvisor.tar.zstd -o /var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd
+cat /etc/qdistro/profile; uname -r; podman --version; systemctl --version | head -1; getenforce
+tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc
+CMD
+[vm-exec] guest identity pinned (pid 6261 start 32187)
+staged commit 69e07eb32bc36ad3cf770bcb92de7f94e7ee292f
+QDISTRO_PROFILE=dev
+7.2.8-1-default
+podman version 6.0.2
+systemd 261 (261.2)
+Permissive
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+### exit=0

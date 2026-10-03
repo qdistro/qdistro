@@ -1,0 +1,17 @@
+### host 2026-10-02T09:51:35Z: vm-exec tier3s-261002-114938-2289239-8644 <<CMD
+bash /root/qdistro-src/tier3s/spike/phase-a-ii-smoke.sh image
+CMD
+[vm-exec] guest identity pinned (pid 5725 start 9867)
+--> 695808a56a9c
+Successfully tagged localhost/qdistro/tier3s-headless-smoke:latest
+695808a56a9ca1e0542b80a26dc074145a342f731346c0d9a0606db691da2839
+IMAGE=qdistro/tier3s-headless-smoke:latest
+IMAGE_ID=695808a56a9ca1e0542b80a26dc074145a342f731346c0d9a0606db691da2839
+IMAGE_DIGEST=sha256:0c987ffb148ea723d1d3358d2e33e69985fe132fa7815c39935131b8da90f4ff
+IMAGE_SNAPSHOT=20260929
+[build-tier3s] OK: qdistro/tier3s-headless-smoke:latest (695808a56a9ca1e0542b80a26dc074145a342f731346c0d9a0606db691da2839)
+CHECK build-rc: OK (0)
+CHECK image-snapshot-label: OK (20260929)
+IMAGE_ID=695808a56a9ca1e0542b80a26dc074145a342f731346c0d9a0606db691da2839
+### BAD=0
+### exit=0

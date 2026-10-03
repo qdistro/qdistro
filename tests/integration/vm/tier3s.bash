@@ -1,0 +1,113 @@
+# tier3s.bash — HOST-side bats helpers for the tier 3s (gVisor runsc) qci
+# lane: phase7-tier3s-{headless,denied,sigkill-cleanup}.bats. Load after
+# helpers (`load helpers; load tier3s`). todo/paravirt 06 "Provisioning in the
+# qci lane": each bats worker is a fresh VM whose image was built WITHOUT
+# QDISTRO_TIER3S=1 (owner O10). setup_file stages, on the file's private
+# driver-staging HTTP server (stage_vm_driver):
+#   - the tested commit (`git archive HEAD`; a dirty installed tree refuses);
+#   - the pinned runsc tarball from ~/.cache/qdistro/runsc/<release>/, its
+#     sha512 checked against tier3s/RUNSC_RELEASE here AND in the guest;
+#   - the workload image as an OCI archive built once in a VM with registry
+#     access (tier3s/cache-image-archive.sh <vm>), its sha256 checked here
+#     against its manifest and its image ID asserted in the guest;
+# then runs tests/integration/vm/tier3s-guest-setup.sh in the guest
+# (installer with QDISTRO_TIER3S=1 from the tested commit, offline provision,
+# probe PASS, image load, broker allow rule). No podman or runsc runs on the
+# host.
+#
+# Evidence: bats prints a passing test's output nowhere, so every guest
+# transcript is written to the TAP stream (fd 3, `# `-prefixed: it lands in
+# qci's per-file log) and to <scratch>/<name>.log (QCI_SCENARIO_TMPDIR, kept
+# in the qci run directory).
+
+t3s_repo() { git -C "$(dirname "$BATS_TEST_FILENAME")" rev-parse --show-toplevel; }
+
+# t3s_log <name>: keep $output (the last vm_run) as evidence.
+t3s_log() {
+    local dir="${QCI_SCENARIO_TMPDIR:-${BATS_FILE_TMPDIR:-/tmp}}"
+    mkdir -p "$dir"
+    printf '%s\n' "$output" > "$dir/$1.log"
+    printf '%s\n' "$output" | sed 's/^/# /' >&3
+    printf '# [tier3s] %s transcript: %s\n' "$1" "$dir/$1.log" >&3
+}
+
+# t3s_stage <driver>: serve the driver, the guest lib/setup and the inputs.
+t3s_stage() {
+    local repo stage rel want got cdir man arch dirty
+    repo=$(t3s_repo) || fail_loud "cannot find the repo root" || return 1
+    dirty=$(git -C "$repo" status --porcelain -- tier3s session_manager broker templates scripts/install snapshot.conf)
+    if [ -n "$dirty" ]; then
+        fail_loud "uncommitted changes under the installed trees; the worker installs git archive HEAD (the tested commit): $dirty"
+        return 1
+    fi
+    stage_vm_driver tier3s-guest-lib.sh || return 1
+    stage_vm_driver tier3s-guest-setup.sh || return 1
+    stage_vm_driver "$1" || return 1
+    stage="$(_qd_driver_stage_dir)"
+    git -C "$repo" archive --format=tar HEAD > "$stage/src.tar" || { fail_loud "git archive HEAD failed"; return 1; }
+    git -C "$repo" rev-parse HEAD > "$stage/commit.txt"
+    rel=$(sed -n 's/^release=//p' "$repo/tier3s/RUNSC_RELEASE")
+    want=$(sed -n 's/^tarball_sha512=//p' "$repo/tier3s/RUNSC_RELEASE")
+    got=$(sha512sum < "$HOME/.cache/qdistro/runsc/$rel/gvisor.tar.zstd" 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$want" ] || [ "$got" != "$want" ]; then
+        fail_loud "host runsc cache ~/.cache/qdistro/runsc/$rel/gvisor.tar.zstd missing or sha512 != tier3s/RUNSC_RELEASE"
+        return 1
+    fi
+    ln -sf "$HOME/.cache/qdistro/runsc/$rel/gvisor.tar.zstd" "$stage/gvisor.tar.zstd"
+    cdir=$(cd "$repo" && bash tier3s/cache-image-archive.sh --dir)
+    man="$cdir/manifest.txt"; arch="$cdir/tier3s-headless-smoke.oci.tar"
+    if [ ! -s "$man" ] || [ ! -s "$arch" ]; then
+        fail_loud "no workload image archive for this commit's image inputs at $cdir (build it once: tier3s/cache-image-archive.sh <dev-vm>)"
+        return 1
+    fi
+    if [ "$(sha256sum < "$arch" | cut -d' ' -f1)" != "$(sed -n 's/^IMAGE_ARCHIVE_SHA256=//p' "$man")" ]; then
+        fail_loud "image archive sha256 != its manifest ($cdir)"
+        return 1
+    fi
+    ln -sf "$arch" "$stage/tier3s-headless-smoke.oci.tar"
+    ln -sf "$man" "$stage/image-manifest.txt"
+    printf '# [tier3s] tested commit %s; runsc %s (sha512 ok); image %s\n' \
+        "$(cat "$stage/commit.txt")" "$rel" "$(sed -n 's/^IMAGE_ID=//p' "$man")" >&3
+}
+
+# t3s_setup_file <driver>: stage, then provision the fresh worker.
+t3s_setup_file() {
+    t3s_stage "$1" || return 1
+    vm_run "mkdir -p /var/tmp/t3s-dl && cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh tier3s-guest-setup.sh; do curl -fsS -o \$f http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/\$f || exit 97; done && bash tier3s-guest-setup.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT} --expect-fresh"
+    t3s_log t3s-setup
+    assert_success || fail_loud "tier 3s worker setup failed (see the t3s-setup transcript)" || return 1
+    assert_output_contains "[t3s-setup] " || return 1
+    t3s_no_failures t3s-setup || return 1
+    assert_output_contains "PASS: o10: worker image (built without QDISTRO_TIER3S=1) carries no tier 3s file" || return 1
+    assert_output_contains "PASS: o10: no tier 3s file after the installer ran without the flag" || return 1
+    assert_output_contains "PASS: installed probe RESULT" || return 1
+    assert_output_contains "PASS: loaded image ID = manifest IMAGE_ID" || return 1
+}
+
+# t3s_run_driver <driver>: fetch the lib + driver, run it as root.
+t3s_run_driver() {
+    vm_run "cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh $1; do curl -fsS -o \$f http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/\$f || exit 97; done && bash $1"
+}
+
+# t3s_no_failures <tag>: the driver's own summary says 0 failures and no FAIL
+# line was printed (a missing summary = the driver died early = failure).
+t3s_no_failures() {
+    if ! grep -qE "^\[$1\] [0-9]+ passes, 0 failures$" <<<"$output"; then
+        echo "--- [$1] summary missing or failures reported ---" >&2
+        grep -E "^FAIL|^\[$1\]" <<<"$output" >&2
+        return 1
+    fi
+    if grep -q '^FAIL' <<<"$output"; then
+        echo "--- FAIL lines in the [$1] transcript ---" >&2
+        grep '^FAIL' <<<"$output" >&2
+        return 1
+    fi
+}
+
+t3s_teardown_file() {
+    local rc=0
+    reap_vm_drivers || { fail_loud "could not reap the driver-staging http server" || rc=1; }
+    # the worker VM is disposable; drop the test-authored rule anyway
+    vm_run "rm -f /etc/qdistro/rules.d/50-tier3s-qci.yaml"
+    return "$rc"
+}

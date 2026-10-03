@@ -17,6 +17,7 @@ broker's clipboard / handoff gates. Direct clients in tiers 0 and 1 use normal
 | 1. SELinux | LSM restrictions, same Wayland connection | Yes | Shipped |
 | 2. podman | User namespace; container has a nested compositor | Yes | Shipped |
 | 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes | Shipped |
+| 3s. gVisor | Admin keep-id container under the gVisor `runsc` application kernel (systrap) | No (headless only so far) | **Experimental, dev profile only** |
 | 4. VM whole-window| KVM + libvirt + waypipe (nested qdwin) | Yes | **Experimental** |
 | 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes | **Experimental** |
 | 6. Remote machine | Separate physical machine; remote-output | No | Post-v1 |
@@ -272,6 +273,49 @@ the bats drivers.
 Reference: `qdistro/tier3/README.md` for the operator-facing entry
 point; `tests/integration/vm/s{35..41,48}-*.sh` for the 8 bats
 drivers.
+
+## Tier 3s — gVisor application kernel (Experimental, dev profile only)
+
+> **Experimental research tier, dev profile only.** Not part of the v1
+> security guarantee, not selected automatically, and refused on every other
+> profile. Contract: `tier3s/CONTRACT.md`; plan and owner decisions:
+> `todo/paravirt/` (D1–D8, O1–O9).
+
+The app runs in an admin keep-id rootless podman container whose OCI runtime
+is gVisor `runsc` (systrap platform), so its system calls are served by the
+gVisor Sentry rather than the host kernel. It sits beside tier 3 rather than
+in the integer ladder: the integer tiers stay stable in every stored contract
+(paravirt D2). Phase A ships **headless** silos only; the GUI path (a waypipe
+byte-stream bridge, since gVisor blocks `SCM_RIGHTS` to host sockets) is
+Phase B.
+
+- **Launch.** Explicit only (paravirt O6): `SessionManager1.CreateTier3sSilo
+  (name, workload, template_silo, network)` then `StartSilo`, which starts
+  `qdistro-tier3s-silo@<name>.service`. Its root helper execs
+  `spawn-tier3s.sh`, which refuses a non-dev profile, runs the prerequisite
+  probe, asks the broker for `qdistro.tier3s.spawn:<workload>/<app>` (rules
+  only, see [permissions.md](permissions.md)), and runs every podman call as
+  admin. A refusal or failure at any step fails the launch; there is **no
+  fallback** to tier 2 or 3. Tier 3s pod apps are not shipped yet.
+- **Network:** `none` only (paravirt O3), both podman's and runsc's.
+- **Lifecycle.** Each launch has a root-only control record under
+  `/run/qdistro-tier3s-ctl/<token>/`, a root-created owning scope
+  `qdistro-tier3s-<token>.scope` bound to the launch unit, and one teardown
+  path (`qdistro-tier3s-cleanup`) that never acts by uid or process name.
+  `StopSilo` reports Stopped only when the unit, the container and the
+  control record are all gone. Freeze/resume is **unsupported** (refused).
+  A session-manager restart stops every live tier 3s launch and reaps
+  leftovers; wanted silos are relaunched with a fresh token.
+- **Packaging exception (paravirt D1).** `runsc` is not in
+  openSUSE-Tumbleweed-Oss, unlike the Oss-only precedent of tiers 4 and 5.
+  The owner chose a sha512-pinned upstream dated release
+  (`tier3s/RUNSC_RELEASE`), provisioned **on demand** by
+  `tier3s/provision-runsc.sh`. It is not in the base image and not installed
+  by `install-session-manager.sh`, which installs only the launch scripts,
+  units and seccomp profiles. Without `runsc` the probe names the missing
+  prerequisite and every tier 3s launch is refused.
+- **Not claimed:** no KVM comparison (paravirt O5), no enforcement test of the
+  scope's resource limits yet (Phase C), no GUI.
 
 ## Tier 4 — whole-VM windowed
 

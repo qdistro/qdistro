@@ -1,0 +1,58 @@
+### host 2026-10-02T09:13:42Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+set -u
+rm -rf /var/tmp/t3s-img && mkdir -p /var/tmp/t3s-img/src /var/tmp/t3s-img/out && cd /var/tmp/t3s-img/src
+curl -fsS http://10.0.2.2:42951/src.tar | tar -xf - && echo "staged commit $(curl -fsS http://10.0.2.2:42951/commit.txt)"
+chown -R admin:admin /var/tmp/t3s-img
+runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 TMPDIR=/var/tmp   bash tier3s/make-tier3s-image.sh --oci-archive /var/tmp/t3s-img/out headless-smoke > /var/tmp/t3s-img/build.log 2>&1
+rc=$?; tail -25 /var/tmp/t3s-img/build.log; echo build-rc=$rc
+echo '--- smoke under runsc (spawn flag set, manual: no units yet):'
+runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none run --rm --security-opt label=disable --security-opt no-new-privileges --cap-drop=ALL --security-opt seccomp=/var/tmp/t3s-img/src/tier3s/seccomp/headless-smoke.json --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --tmpfs /run/user/1000:rw,U,mode=0700 --tmpfs /home/admin/.cache:rw,U,mode=0700 --network=none --env HOME=/home/admin --env XDG_RUNTIME_DIR=/run/user/1000 --env LANG=C.UTF-8 localhost/qdistro/tier3s-headless-smoke:latest
+echo smoke-rc=$?
+CMD
+[vm-exec] guest identity pinned (pid 33408 start 133236)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+staged commit ef56049eaf7521868240a8097fb4947c8bf1f586
+--> 12189132a31a
+STEP 13/14: WORKDIR /home/admin
+--> b029f6f6d1a0
+STEP 14/14: CMD ["/usr/local/bin/qdistro-tier3s-smoke"]
+COMMIT qdistro/tier3s-headless-smoke:latest
+--> 2e39de4e8c72
+Successfully tagged localhost/qdistro/tier3s-headless-smoke:latest
+2e39de4e8c72b5fb1250581995c2195f10e97d0b985871415497f33055925d42
+IMAGE=qdistro/tier3s-headless-smoke:latest
+IMAGE_ID=2e39de4e8c72b5fb1250581995c2195f10e97d0b985871415497f33055925d42
+IMAGE_DIGEST=sha256:999b0e1ca4eab97c0c559132603bfc366a4980741759c5505762988a9aacead0
+IMAGE_SNAPSHOT=20260929
+Copying blob sha256:33d94d9c185e6f74a1d1088a2a758c22db67c35df18a5778fac9118743b5bbd0
+Copying blob sha256:a62e69bfe63c53c54e1c3e46a1198c9b4ee26a004b42e3311b633b7f2f40c7f5
+Copying blob sha256:3a0b89766cdaef799cec2ae91eb29fe5392fe0bad86d4356bdc172b56d127537
+Copying blob sha256:acebef96214f8a2c40b7ce7b9aabcd7a73a756d1bb447a251d7461512f140601
+Copying blob sha256:dd236ba3fb925eee01e92206d15d399870e7815536c75bd30e28c78ce9bc7a50
+Copying blob sha256:89b87523471b3ca3f2e9e2976c332f72dc87d464299d47f5866ab2d07c2e509c
+Copying blob sha256:39cab12f0c9e99b02d4b750a4499e7d126aa8bf4ca3537cd7bde1a7bb4f9bfbd
+Copying blob sha256:f1f4e88fa92a67d3712009d2d16dca990c08b3bbb11798d9fe13f570a02c4e57
+Copying config sha256:2e39de4e8c72b5fb1250581995c2195f10e97d0b985871415497f33055925d42
+Writing manifest to image destination
+IMAGE_ARCHIVE=/var/tmp/t3s-img/out/tier3s-headless-smoke.oci.tar
+IMAGE_ARCHIVE_SHA256=ab7bf639f6274ea66b5eaf7d8e310d611f83c9e4dad900605406719c95edfd2d
+[build-tier3s] OK: qdistro/tier3s-headless-smoke:latest (2e39de4e8c72b5fb1250581995c2195f10e97d0b985871415497f33055925d42)
+build-rc=0
+--- smoke under runsc (spawn flag set, manual: no units yet):
+SMOKE snapshot=20260929
+SMOKE kernel=Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+SMOKE dmesg=[    0.000000] Starting gVisor...
+SMOKE id=uid=1000(admin) gid=1000(admin) groups=1000(admin)
+SMOKE passwd=admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash
+SMOKE home=/home/admin
+SMOKE lang=C.UTF-8 charmap=UTF-8 utf8_locales=2
+SMOKE mount /run/user/1000=1000:1000 700
+SMOKE mount /home/admin/.cache=1000:1000 700
+SMOKE mount /tmp=0:0 1777
+SMOKE chmod rc=0 mode=600
+SMOKE chmod_nofollow rc=1 mode=600
+SMOKE ls_l rc=0 stderr_bytes=0
+SMOKE routes=2 links=lo,
+SMOKE done
+smoke-rc=0
+### exit=0

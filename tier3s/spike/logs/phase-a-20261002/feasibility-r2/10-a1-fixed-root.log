@@ -1,0 +1,28 @@
+### host 2026-10-02T09:02:26Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh a1
+CMD
+[vm-exec] guest identity pinned (pid 22235 start 65614)
+## D-A1: no --root anywhere; the wrapper derives the root from the host uid
+3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b
+CHECK run-rc: OK (0)
+State.Pid=22271 id=3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b
+CHECK sentry-exe-pin: OK (sidecar_gvisor_sentry_sha512)
+total 16
+drwx------. 2 admin admin   120 Oct  2 09:02 .
+drwxr-xr-x. 3 root  root     60 Oct  2 08:57 ..
+-rw-------. 1 admin admin     0 Oct  2 09:02 3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b_sandbox:3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b.lock
+-rw-r-----. 1 admin admin 14440 Oct  2 09:02 3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b_sandbox:3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b.state
+-r--r--r--. 1 admin admin     0 Oct  2 08:57 null-netns
+srwxr-xr-x. 1 admin admin     0 Oct  2 09:02 runsc-3235d0d1056a5876e01d876e94c7f96d63cbafd2e1ac637760fa5b088fe22a2b.sock
+CHECK state-in-fixed-root: OK
+CHECK runtime: OK (/usr/libexec/qdistro/tier3s-runsc)
+CHECK plain-ps: OK (t3sf-a running)
+t3sf-a
+CHECK plain-stop-rc: OK (0)
+CHECK sentry-gone-after-plain-stop: OK
+t3sf-a
+CHECK plain-rm-rc: OK (0)
+CHECK root-clean-after-rm: OK
+CHECK no-runsc-left: OK (0)
+### BAD=0
+### exit=0

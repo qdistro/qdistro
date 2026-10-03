@@ -183,6 +183,7 @@ class TestCheckPermissionResolution:
     @pytest.mark.parametrize("action", [
         "qdistro.tier1.spawn:/usr/bin/true",
         "qdistro.tier2.spawn:weston-terminal/weston-terminal",
+        "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke",
         "qdistro.dispose.spawn:pdf",
         # open-in-disposable (07-plan P2): the class-level open gate joins the
         # same rules-only / fail-closed set — a cache row must NOT mint an open.
@@ -201,6 +202,7 @@ class TestCheckPermissionResolution:
     @pytest.mark.parametrize("action", [
         "qdistro.tier1.spawn:/usr/bin/true",
         "qdistro.tier2.spawn:weston-terminal/weston-terminal",
+        "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke",
         "qdistro.dispose.spawn:pdf",
         "qdistro.dispose.open:agent-scratch",
         "qdistro.dispose.open:text/plain",
@@ -211,6 +213,33 @@ class TestCheckPermissionResolution:
                     action=action, uid=NON_ADMIN_UID)
         broker.rules.reload()
         broker.set_peer(uid=NON_ADMIN_UID)
+        assert broker.CheckPermission(action, {}) == "allow"
+
+    @pytest.mark.cheat_aware(
+        protects="qdistro.tier3s.spawn:<workload>/<app> is rules-only — a "
+                 "cache row must never mint a tier-3s (gVisor) sandbox",
+        severity="critical",
+        cheats=[
+            "drop qdistro.tier3s.spawn: from the rules-only prefix set",
+            "expect 'allow' instead of 'unknown'",
+        ],
+        consequence="a stale or seeded approval-cache row launches a tier-3s "
+                    "sandbox the admin's rules never allowed",
+    )
+    def test_tier3s_spawn_is_rules_only(self, broker, rules_dir):
+        """tier3s/CONTRACT.md §5 step 8: spawn-tier3s.sh passes only on an
+        explicit allow. A cached allow alone is 'unknown'; a rule decides,
+        deny included."""
+        action = "qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke"
+        broker.cache.store(ADMIN_UID, action, PEER_EXE, "forever", True,
+                           ADMIN_UID)
+        broker.set_peer(uid=ADMIN_UID)
+        assert broker.CheckPermission(action, {}) == "unknown"
+        _write_rule(rules_dir, decision="deny", action=action, uid=ADMIN_UID)
+        broker.rules.reload()
+        assert broker.CheckPermission(action, {}) == "deny"
+        _write_rule(rules_dir, decision="allow", action=action, uid=ADMIN_UID)
+        broker.rules.reload()
         assert broker.CheckPermission(action, {}) == "allow"
 
     def test_dispose_open_no_rule_is_unknown(self, broker):

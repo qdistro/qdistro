@@ -1,0 +1,49 @@
+### host 2026-10-02T06:51:38Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; printf x >> $SIDE/runsc-fd-parking; ln -s /bin/sh $SIDE/extra
+probe_strace; expect_rc probe-exit 1 $PRC
+has names-extra-symlink $PO 'unexpected=[l 777 root:root gvisor-bin/extra,]'
+never_executed tampered
+provision repair-exit 0; has repaired $VO 'PASS: installed runsc'
+is no-leftovers "$(leftovers)" 0; probe_tail_pass repaired; finish
+CMD
+[vm-exec] guest identity pinned (pid 224172 start 363764)
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+FAIL bundle: file set differs: missing=[] unexpected=[l 777 root:root gvisor-bin/extra,]
+FAIL runsc_version: not executed: installation integrity checks failed (see above)
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT FAIL: first missing prerequisite: bundle (file set differs: missing=[] unexpected=[l 777 root:root gvisor-bin/extra,])
+--- runsc-bundle / fd executions seen by strace -f -e trace=execve:
+(none)
+CHECK probe-exit: OK (rc=1)
+CHECK names-extra-symlink: OK
+CHECK tampered-reported-not-executed: OK
+CHECK tampered-strace-runsc-execs: OK (0)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK repair-exit: OK (rc=0)
+CHECK repaired: OK
+CHECK no-leftovers: OK (0)
+RESULT PASS: tier 3s prerequisites present
+CHECK repaired-probe-exit: OK (rc=0)
+CHECK repaired-probe-pass: OK
+### checks failed: 0
+### exit=0

@@ -1,0 +1,8 @@
+### host: vm-exec tier3s-261001-221428-2070491-12685 'cd /root/qdistro-src && QDISTRO_RUNSC_PREFIX=/var/tmp/x tier3s/provision-runsc.sh --offline; echo "### exit=$? (expect 1)"; tier3s/provision-runsc.sh --pin /etc/qdistro/runsc-release --offline; echo "### exit=$? (expect 1)"'
+### exit=1 (expect 1)
+### exit=1 (expect 1)
+### exit=0
+[vm-exec] --- stderr ---
+provision-runsc: FAIL: QDISTRO_RUNSC_PREFIX is a unit-test hook and is refused for root
+provision-runsc: FAIL: --pin is a unit-test option (needs QDISTRO_RUNSC_PREFIX); a real install uses /root/qdistro-src/tier3s/RUNSC_RELEASE
+[vm-exec] --- end stderr ---

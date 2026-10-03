@@ -1,0 +1,63 @@
+rc=1
+3:## 0. preconditions, silos, templated-silo fixture
+18:PASS: oracle self-test: a failing journal query is reported, not counted as no unit (QUERY-FAILED)
+27:## 1. DONE 5: broker has no rule (rules-only prefix => unknown) => refused
+29:INFO: no-rule/untemplated: start rc=1 Call failed: start of tier3s silo 's121a' failed: the launch was refused or failed before it ran: REFUSE: broker has no allow rule for headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=unknown); the silo is Stopped (see journalctl -u qdis
+47:INFO: no-rule/templated: start rc=1 Call failed: start of tier3s silo 's121t' failed: the launch was refused or failed before it ran: REFUSE: broker has no allow rule for headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=unknown); the silo is Stopped (see journalctl -u qdis
+65:## 2. DONE 5: explicit deny rule => refused
+67:INFO: deny/untemplated: start rc=1 Call failed: start of tier3s silo 's121a' failed: the launch was refused or failed before it ran: REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=deny); the silo is Stopped (see journalctl -u qdistro-tier3s-silo@s1
+85:INFO: deny/templated: start rc=1 Call failed: start of tier3s silo 's121t' failed: the launch was refused or failed before it ran: REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=deny); the silo is Stopped (see journalctl -u qdistro-tier3s-silo@s1
+103:## 3. positive control: allow => both oracles see the launch
+120:PASS: control: activation status written (generation = fixture) (sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+121:PASS: control: activation marker committed (sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+128:PASS: control: the same event oracle sees the container start (1)
+129:PASS: control: the same scope oracle sees the owning scope start (1)
+130:PASS: control: templated launch ran the image by its generation digest (1)
+131:PASS: control: the smoke ran to its end under gVisor (yes)
+132:INFO: control: READY=1 came after the launch was recorded running (NotifyAccess=main)
+133:PASS: control: launch unit Result (success)
+134:PASS: control: StopSilo (Stopped)
+135:PASS: control: control records (0)
+136:PASS: control: scopes (0)
+137:PASS: control: labelled containers (0)
+138:PASS: control: runsc-bundle processes (0)
+139:PASS: control: state root holds no container state (0)
+140:PASS: control: no cleanup call scope left (0)
+141:PASS: control: no cleanup work dir left (0)
+143:## 4. DONE 6: the hardened profiles (release, daily) refuse with a clear message
+144:INFO: CreateTier3sSilo on release: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier
+147:INFO: StartSilo on release: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier
+151:INFO: release/spawn (direct unit start): start rc=1 Job for qdistro-tier3s-silo@s121a.service failed because the control process exited with error code. See "systemctl status qdistro-tier3s-silo@s121a.service" and "journalctl -xeu qdistro-tier3s-silo@s121a.service" for details. 
+166:INFO: CreateTier3sSilo on daily: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=daily); there is no hardened launch path and no fallback tier
+169:INFO: StartSilo on daily: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=daily); there is no hardened launch path and no fallback tier
+173:INFO: daily/spawn (direct unit start): start rc=1 Job for qdistro-tier3s-silo@s121a.service failed because the control process exited with error code. See "systemctl status qdistro-tier3s-silo@s121a.service" and "journalctl -xeu qdistro-tier3s-silo@s121a.service" for details. 
+190:## 5. DONE 6: a probe failure refuses (runtime wrapper missing), no fallback
+192:INFO: probe-failure: start rc=1 Call failed: start of tier3s silo 's121a' failed: the launch was refused or failed before it ran: REFUSE: probe failed (rc=1): RESULT FAIL: first missing prerequisite: wrapper (/usr/libexec/qdistro/tier3s-runsc missing, not root:root 0755, or differs from /usr/lib/qdistro/tier3s/tier3s-runsc); the s
+197:    unit: spawn-tier3s: REFUSE: probe failed (rc=1): RESULT FAIL: first missing prerequisite: wrapper (/usr/libexec/qdistro/tier3s-runsc missing, not root:root 0755, or differs from /usr/lib/qdistro/tier3s/tier3s-runsc)
+210:## 6. astra A r2 #4: only the spawn (the unit's main PID) can complete the start
+213:PASS: forged READY/main: the launch unit is starting (the spawn waits on the record lock) (activating)
+214:FAIL: forged READY/main: an admin (uid 1000) process now runs in the launch unit's cgroup: got '0:/system.slice/qemu-guest-agent.service', want '1000:/system.slice/qdistro-tier3s-silo@s121a.service'
+215:INFO: forged READY/main: the admin process sent READY=1 (systemd-notify rc=0)
+216:PASS: forged READY/main: launch unit state after the admin process's READY=1 (activating)
+217:PASS: forged READY/main: then the launch runs on the spawn's own READY=1 (record phase) (running)
+218:PASS: forged READY/main: launch unit active (active)
+219:PASS: forged READY/main: launch unit stopped (yes)
+221:PASS: control: a runtime drop-in sets NotifyAccess=all (all)
+222:PASS: forged READY/control (NotifyAccess=all): the launch unit is starting (the spawn waits on the record lock) (activating)
+223:FAIL: forged READY/control (NotifyAccess=all): an admin (uid 1000) process now runs in the launch unit's cgroup: got '0:/system.slice/qemu-guest-agent.service', want '1000:/system.slice/qdistro-tier3s-silo@s121a.service'
+224:INFO: forged READY/control (NotifyAccess=all): the admin process sent READY=1 (systemd-notify rc=0)
+225:FAIL: forged READY/control (NotifyAccess=all): launch unit state after the admin process's READY=1: got 'activating', want 'active'
+226:PASS: forged READY/control (NotifyAccess=all): then the launch runs on the spawn's own READY=1 (record phase) (running)
+227:PASS: forged READY/control (NotifyAccess=all): launch unit active (active)
+228:PASS: forged READY/control (NotifyAccess=all): launch unit stopped (yes)
+230:PASS: forged-ready: control records (0)
+231:PASS: forged-ready: scopes (0)
+232:PASS: forged-ready: labelled containers (0)
+233:PASS: forged-ready: runsc-bundle processes (0)
+234:PASS: forged-ready: state root holds no container state (0)
+235:PASS: forged-ready: no cleanup call scope left (0)
+236:PASS: forged-ready: no cleanup work dir left (0)
+238:## 7. cleanup
+249:[s121] 152 passes, 3 failures
+
+[exited with code 0]

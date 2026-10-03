@@ -1,0 +1,38 @@
+### host 2026-10-02T06:52:38Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; SH=/var/tmp/t3s-shadow; M=/var/tmp/t3s-SHADOW-RAN; rm -rf $SH $M; mkdir -m 0755 $SH
+for t in dirname basename id stat sed grep find sha512sum cut sort comm tr head tail cat cmp readlink uname env mktemp install mv cp rm flock tar curl runuser podman getenforce seq sleep chmod mkdir ln ls wc zstd; do
+  r=$(command -v $t) || continue; printf '#!/bin/sh\necho "%s $*" >> %s\nexec %s "$@"\n' $t $M $r > $SH/$t; chmod 0755 $SH/$t; done
+echo "shadow tools first on PATH: $(ls $SH | wc -l)"; cat $SH/dirname
+echo '## real probe, idempotent provision and the wrapper, as root, with the shadows first on PATH'
+PATH=$SH:$PATH tier3s/probe.sh --user admin > $PO 2>&1; rc=$?; tail -1 $PO; expect_rc probe-exit 0 $rc
+has probe-pass $PO 'RESULT PASS: tier 3s prerequisites present'
+PATH=$SH:$PATH "${PROVISION[@]}" > /var/tmp/t3s-prov.out 2>&1; rc=$?; cat /var/tmp/t3s-prov.out; expect_rc provision-exit 0 $rc
+has provision-idempotent /var/tmp/t3s-prov.out 'already installed and matching pin 20260928.0; nothing to do'
+PATH=$SH:$PATH /usr/libexec/qdistro/tier3s-runsc --version > /var/tmp/t3s-o 2>&1; rc=$?; head -1 /var/tmp/t3s-o; expect_rc wrapper-version-exit 0 $rc
+has wrapper-ran-pinned-runsc /var/tmp/t3s-o 'runsc version release-20260928.0'
+is no-shadow-tool-ran "$(cat $M 2>/dev/null | wc -l)" 0
+echo '## positive control: a shadow does record when it is used'
+PATH=$SH:$PATH dirname /x/y > /dev/null; is control-shadow-records "$(cat $M | wc -l)" 1
+rm -rf $SH $M; finish
+CMD
+[vm-exec] guest identity pinned (pid 229943 start 369764)
+shadow tools first on PATH: 38
+#!/bin/sh
+echo "dirname $*" >> /var/tmp/t3s-SHADOW-RAN
+exec /usr/bin/dirname "$@"
+## real probe, idempotent provision and the wrapper, as root, with the shadows first on PATH
+RESULT PASS: tier 3s prerequisites present
+CHECK probe-exit: OK (rc=0)
+CHECK probe-pass: OK
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+CHECK provision-exit: OK (rc=0)
+CHECK provision-idempotent: OK
+runsc version release-20260928.0
+CHECK wrapper-version-exit: OK (rc=0)
+CHECK wrapper-ran-pinned-runsc: OK
+CHECK no-shadow-tool-ran: OK (0)
+## positive control: a shadow does record when it is used
+CHECK control-shadow-records: OK (1)
+### checks failed: 0
+### exit=0

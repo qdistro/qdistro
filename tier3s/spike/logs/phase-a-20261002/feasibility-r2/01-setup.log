@@ -1,0 +1,37 @@
+### host 2026-10-02T09:02:24Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh setup
+CMD
+[vm-exec] guest identity pinned (pid 21992 start 65386)
+CHECK tmpfiles-rc: OK (0)
+/run/qdistro-tier3s-runsc 755 root:root
+/run/qdistro-tier3s-runsc/1000 700 admin:admin
+/run/qdistro-tier3s-ctl 700 root:root
+/run/qdistro-tier3s 755 root:root
+CHECK state-root: OK (700 1000:1000)
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:6296454)
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT PASS: tier 3s prerequisites present
+CHECK probe-rc: OK (0)
+df8f6f91d9f4a0fe01bea9990eee6f08b3e75ff5c77969dd1f880595dab46d14
+CHECK pull-rc: OK (0)
+df8f6f91d9f4a0fe01bea9990eee6f08b3e75ff5c77969dd1f880595dab46d14 sha256:c43cdcf7588b98b6b985a00ffa36cb250729f1749f9f5ddb537fd6a69d42c578
+### BAD=0
+### exit=0

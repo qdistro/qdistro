@@ -1,0 +1,69 @@
+### host 2026-10-02T09:03:48Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh a3bkill
+CMD
+[vm-exec] guest identity pinned (pid 27469 start 73800)
+CHECK svc-start: OK (0)
+BindsTo=t3sf-launch-a3bkill.service
+Before=t3sf-launch-a3bkill.service shutdown.target
+ControlGroup=/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope
+Delegate=yes
+MemoryMax=2147483648
+TasksMax=1024
+CHECK scope-active: OK (active)
+CHECK scope-bindsto: OK
+CHECK scope-before: OK
+/sys/fs/cgroup/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope admin 755
+/sys/fs/cgroup/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope/cgroup.procs admin 644
+/sys/fs/cgroup/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope/cgroup.subtree_control admin 644
+/sys/fs/cgroup/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope/cgroup.threads admin 644
+/sys/fs/cgroup/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope/memory.max root 644
+/sys/fs/cgroup/system.slice/qdistro-tier3s-173c81c73dbcd7b65a035e60b8cec6fe.scope/pids.max root 644
+CHECK delegated-dir: OK (1000)
+CHECK limit-memory-root: OK (0)
+CHECK limit-pids-root: OK (0)
+CHECK memory-max: OK (2147483648)
+CHECK admin-cannot-raise-memory: OK
+CHECK admin-cannot-raise-pids: OK
+scope subtree procs:
+  /cgroup.procs 27483 runuser /usr/sbin/runuser
+  /cgroup.procs 27510 podman /usr/bin/podman
+  /cgroup.procs 27523 conmon /usr/bin/conmon
+  /cgroup.procs 27533 exe /usr/libexec/qdistro/runsc/runsc
+  /cgroup.procs 27537 gvisor_sentry /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+  /cgroup.procs 27538 runsc-fd-parkin /usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking
+  /cgroup.procs 27555 gvisor_sentry /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+  /cgroup.procs 27574 gvisor_sentry /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+  /cgroup.procs 27575 gvisor_sentry /usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+CHECK sentry-in-scope: OK (27537)
+CHECK conmon-in-scope: OK (27523)
+runsc-bundle processes on the host: 6
+CHECK runsc-procs-outside-scope: OK (0)
+CHECK class-runsc-gofer-in-scope: OK (1)
+CHECK class-runsc-sandbox-in-scope: OK (1)
+CHECK class-runsc-fd-parking-in-scope: OK (1)
+systrap stubs in scope: 3
+CHECK stubs-in-scope: OK (3)
+CHECK launcher-podman-in-scope: OK (1)
+CHECK launcher-runuser-in-scope: OK (1)
+CHECK launcher-conmon-in-scope: OK (1)
+SIGKILL main pid 27480
+scope inactive after ~2 s
+ExecStopPost: SERVICE_RESULT=signal EXIT_CODE=killed scope=deactivating
+ExecStopPost: scope procs=3
+CHECK scope-alive-during-execstoppost: BAD
+CHECK scope-gone-after-service: OK (inactive)
+CHECK cgroup-gone: OK (0)
+CHECK sentry-gone: OK
+CHECK no-runsc-left: OK (0)
+podman record afterwards (no cleanup ran):
+CHECK podman-rm-f-rc: OK (0)
+CHECK podman-record-gone: OK (0)
+total 0
+drwx------. 2 admin admin 60 Oct  2 09:04 .
+drwxr-xr-x. 3 root  root  60 Oct  2 09:03 ..
+-r--r--r--. 1 admin admin  0 Oct  2 08:57 null-netns
+### BAD=1
+[vm-exec] --- stderr ---
+Running as unit: t3sf-launch-a3bkill.service; invocation ID: f9c853043a464c74bab5e5d86801edff
+[vm-exec] --- end stderr ---
+### exit=1

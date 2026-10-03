@@ -1,0 +1,59 @@
+### host 2026-10-02T06:51:49Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; M=/var/tmp/t3s-MARKER; rm -f $M
+printf '#!/bin/sh\ntouch /var/tmp/t3s-MARKER\necho "runsc version release-20260928.0"\n' > /var/tmp/t3s-fake-runsc
+install -m 0755 -o root -g root /var/tmp/t3s-fake-runsc $R; ls -l $R
+if cmp -s /etc/qdistro/runsc-release tier3s/RUNSC_RELEASE; then ok stamp-intact; else bad stamp-intact; fi
+probe_strace; expect_rc probe-exit 1 $PRC
+has hash-mismatch $PO 'FAIL bundle: sha512:runsc'
+never_executed replaced
+if [ -e $M ]; then bad marker-absent 'the probe executed the fake'; else ok marker-absent; fi
+echo '## positive control: the fake does write the marker when executed directly'
+$R; if [ -e $M ]; then ok control-marker-written; else bad control-marker-written; fi; rm -f $M
+provision repair-exit 0; has repaired $VO 'PASS: installed runsc'; probe_tail_pass repaired; finish
+CMD
+[vm-exec] guest identity pinned (pid 225478 start 364871)
+-rwxr-xr-x. 1 root root 76 Oct  2 06:52 /usr/libexec/qdistro/runsc/runsc
+CHECK stamp-intact: OK
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+FAIL bundle: sha512:runsc
+FAIL runsc_version: not executed: installation integrity checks failed (see above)
+PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /root/qdistro-src/tier3s/tier3s-runsc)
+PASS podman: 6.0.2 (>= 6)
+PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+PASS label_disable: accepted (|[label=disable])
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT FAIL: first missing prerequisite: bundle (sha512:runsc)
+--- runsc-bundle / fd executions seen by strace -f -e trace=execve:
+(none)
+CHECK probe-exit: OK (rc=1)
+CHECK hash-mismatch: OK
+CHECK replaced-reported-not-executed: OK
+CHECK replaced-strace-runsc-execs: OK (0)
+CHECK marker-absent: OK
+## positive control: the fake does write the marker when executed directly
+runsc version release-20260928.0
+CHECK control-marker-written: OK
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: tarball sha512 OK (/var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd, verified private copy)
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+CHECK repair-exit: OK (rc=0)
+CHECK repaired: OK
+RESULT PASS: tier 3s prerequisites present
+CHECK repaired-probe-exit: OK (rc=0)
+CHECK repaired-probe-pass: OK
+### checks failed: 0
+### exit=0

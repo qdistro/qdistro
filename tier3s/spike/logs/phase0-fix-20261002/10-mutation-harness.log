@@ -1,0 +1,114 @@
+### host 2026-10-02T06:52:49Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh
+echo '## as admin: all mutations (copy in /var/tmp/t3s-unit)'
+( cd /var/tmp/t3s-unit && runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin python3 tier3s/spike/mutate-guards.py ); expect_rc harness-admin 0 $?
+echo '## as root: the root guards reached with real euid 0'
+python3 tier3s/spike/mutate-guards.py --only V2,V3,V4; expect_rc harness-root 0 $?
+sha256sum tier3s/probe.sh tier3s/provision-runsc.sh tier3s/tier3s-runsc
+rm -rf /var/tmp/t3s-unit; finish
+CMD
+[vm-exec] guest identity pinned (pid 236530 start 370875)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+## as admin: all mutations (copy in /var/tmp/t3s-unit)
+original sha256 27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+original sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+original sha256 320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+BASELINE (no mutation): rc=0 52 passed, 1 skipped in 4.05s
+MUTATION P1 exec gate removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.12s
+    FAILED  test_byte_only_tamper_of_sidecar_hits_the_hash_loop
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P2 fd identity re-check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.18s
+    FAILED  test_swap_between_validation_and_open_is_never_executed
+MUTATION P3 fd sha512 re-check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.17s
+    FAILED  test_in_place_rewrite_between_validation_and_open_is_never_executed
+MUTATION P4 exec by path instead of the verified fd [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.17s
+    FAILED  test_swap_between_verify_and_exec_runs_the_verified_inode
+MUTATION P5 TEST-PASS exits 0 [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.06s
+    FAILED  test_test_root_never_exits_zero
+MUTATION P6 per-file sha512 loop removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 3 failed in 0.15s
+    FAILED  test_byte_only_tamper_of_sidecar_hits_the_hash_loop
+    FAILED  test_byte_only_tamper_of_runsc_is_never_executed
+    FAILED  test_replaced_runsc_with_correct_stamp_is_never_executed
+MUTATION P7 trusted-ancestor check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.08s
+    FAILED  test_symlinked_runsc_dir_is_never_executed
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P8 version rc ignored [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.06s
+    FAILED  test_version_text_with_nonzero_exit_fails
+MUTATION P9 unverified wrapper handed to podman [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.06s
+    FAILED  test_unverified_wrapper_is_not_handed_to_podman
+MUTATION P10 test hooks honoured without the test root [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 1.49s
+    FAILED  test_pin_hook_refused_without_test_root
+    FAILED  test_test_hooks_refused_without_test_root
+MUTATION P11 exact file-set check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.07s
+    FAILED  test_group_writable_runsc_is_never_executed
+MUTATION P12 content read under an untrusted path [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 20.06s
+    FAILED  test_fifo_swapped_in_under_untrusted_path_does_not_hang
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P13 scratch image built in a temporary directory again [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.10s
+    FAILED  test_scratch_image_import_needs_no_temporary_path
+MUTATION P14 import failure ignored [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.09s
+    FAILED  test_scratch_image_import_failure_is_reported
+MUTATION P15 root runs from an untrusted checkout [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.10s
+    FAILED  test_root_refuses_untrusted_checkout[dir]
+    FAILED  test_root_refuses_untrusted_checkout[pin]
+MUTATION P16 caller PATH used before the pin [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.03s
+    FAILED  test_probe_never_uses_caller_path_tools
+MUTATION V1 provisioning lock not taken [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.26s
+    FAILED  test_concurrent_provisions_are_serialized
+MUTATION V2 --pin guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.03s
+    FAILED  test_pin_override_refused_for_root
+MUTATION V3 prefix-for-root guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.02s
+    FAILED  test_prefix_hook_refused_for_root
+MUTATION V4 test-hook refusal removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.03s
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP]
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP]
+MUTATION V5 version rc ignored [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.08s
+    FAILED  test_version_text_with_nonzero_exit_fails_closed
+MUTATION V6 failed rollback cleans up anyway [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.30s
+    FAILED  test_failed_rollback_preserves_recovery_material
+MUTATION V7 trusted_chain disabled [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.13s
+    FAILED  test_untrusted_lock_dir_is_refused
+    FAILED  test_symlinked_lock_dir_is_refused
+MUTATION V8 download published before verification [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.04s
+    FAILED  test_download_is_verified_before_it_is_published
+MUTATION V9 download into an unchecked cache dir [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.06s
+    FAILED  test_download_refused_into_writable_cache_dir
+    FAILED  test_download_refused_through_symlinked_cache_dir
+MUTATION V10 root runs from an untrusted checkout [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.02s
+    FAILED  test_root_refuses_untrusted_checkout[dir]
+    FAILED  test_root_refuses_untrusted_checkout[pin]
+MUTATION V11 caller PATH used before the pin [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.02s
+    FAILED  test_provision_never_uses_caller_path_tools
+MUTATION W2 wrapper finds env through the caller PATH [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.02s
+    FAILED  test_wrapper_never_uses_caller_path_env
+MUTATION W1 wrapper keeps the caller environment [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.02s
+    FAILED  test_wrapper_scrubs_environment_and_fixes_flags
+restored OK sha256 27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+restored OK sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+restored OK sha256 320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+AFTER RESTORE: rc=0 52 passed, 1 skipped in 3.57s
+RESULT PASS: 29 mutations, 0 problem(s)
+CHECK harness-admin: OK (rc=0)
+## as root: the root guards reached with real euid 0
+original sha256 27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+original sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+original sha256 320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+BASELINE (no mutation): rc=0 34 passed, 19 skipped, 1 warning in 1.89s
+MUTATION V2 --pin guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.06s
+    FAILED  test_pin_override_refused_for_root
+MUTATION V3 prefix-for-root guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.07s
+    FAILED  test_prefix_hook_refused_for_root
+MUTATION V4 test-hook refusal removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.73s
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP]
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP]
+restored OK sha256 27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+restored OK sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+restored OK sha256 320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+AFTER RESTORE: rc=0 34 passed, 19 skipped, 1 warning in 1.84s
+RESULT PASS: 3 mutations, 0 problem(s)
+CHECK harness-root: OK (rc=0)
+27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+### checks failed: 0
+### exit=0

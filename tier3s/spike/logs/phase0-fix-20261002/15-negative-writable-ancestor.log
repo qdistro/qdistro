@@ -1,0 +1,46 @@
+### host 2026-10-02T06:51:59Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+. /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh; chmod 0775 /usr/libexec/qdistro
+probe_strace; expect_rc probe-exit 1 $PRC
+has names-ancestor $PO 'FAIL install_path: untrusted: /usr/libexec/qdistro is group/other-writable (mode 775)'
+has no-content-reads-under-untrusted-path $PO 'FAIL bundle: sha512 not checked: install path untrusted'
+never_executed writable-ancestor
+provision provision-refuses 1; has provision-names-ancestor $VO 'untrusted path: /usr/libexec/qdistro is group/other-writable (mode 775)'
+chmod 0755 /usr/libexec/qdistro; probe_tail_pass restored; finish
+CMD
+[vm-exec] guest identity pinned (pid 227034 start 365871)
+PASS profile: dev (/etc/qdistro/profile)
+PASS kernel: >= 5.6 (7.2.8-1-default)
+PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+PASS ptrace_scope: 1 (<= 2)
+PASS subuid: admin:100000:65536
+PASS subgid: admin:100000:65536
+PASS newuidmap: /usr/bin/newuidmap
+PASS newgidmap: /usr/bin/newgidmap
+PASS pin: /root/qdistro-src/tier3s/RUNSC_RELEASE release=20260928.0
+PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+FAIL install_path: untrusted: /usr/libexec/qdistro is group/other-writable (mode 775)
+FAIL bundle: sha512 not checked: install path untrusted
+FAIL runsc_version: not executed: installation integrity checks failed (see above)
+FAIL wrapper: not checked: install path untrusted (see install_path)
+PASS podman: 6.0.2 (>= 6)
+FAIL podman_runtime: not checked: podman missing or wrapper not verified
+FAIL label_disable: not checked: podman missing or wrapper not verified
+INFO kvm: /dev/kvm present (not used: --platform=systrap)
+INFO selinux: Permissive
+RESULT FAIL: first missing prerequisite: install_path (untrusted: /usr/libexec/qdistro is group/other-writable (mode 775))
+--- runsc-bundle / fd executions seen by strace -f -e trace=execve:
+(none)
+CHECK probe-exit: OK (rc=1)
+CHECK names-ancestor: OK
+CHECK no-content-reads-under-untrusted-path: OK
+CHECK writable-ancestor-reported-not-executed: OK
+CHECK writable-ancestor-strace-runsc-execs: OK (0)
+provision-runsc: FAIL: untrusted path: /usr/libexec/qdistro is group/other-writable (mode 775)
+CHECK provision-refuses: OK (rc=1)
+CHECK provision-names-ancestor: OK
+RESULT PASS: tier 3s prerequisites present
+CHECK restored-probe-exit: OK (rc=0)
+CHECK restored-probe-pass: OK
+### checks failed: 0
+### exit=0

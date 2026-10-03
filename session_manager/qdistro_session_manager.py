@@ -144,7 +144,30 @@ _T_SYSTEMCTL_STOP = 300   # `systemctl stop` is several phases, each with its ow
                       # Used by the StopSilo worker's teardown. (The main loop's
                       # compensating stop uses _T_SYSTEMCTL_CANCEL instead.)
 _T_PODMAN = 30        # matches the disposable sweep/dispose bounds below
+_T_TIER3S_START = 135  # `systemctl start` of a tier3s launch unit. The unit is
+                      # Type=notify and READY=1 comes only once the launch is
+                      # recorded running (spawn-tier3s.sh), so the start job
+                      # spans the probe, the broker gate, the stale reap and
+                      # the sandbox start. Above the unit's TimeoutStartSec=120
+                      # so systemd's timeout fires first (the teardown after it
+                      # may outlast the difference: then unresolved). NB this
+                      # bounds the start CALL only. StartSilo is synchronous
+                      # and holds the main loop (every other D-Bus call and
+                      # callback waits) for the whole start path: this call,
+                      # then on a timeout the compensating stop
+                      # (_T_SYSTEMCTL_CANCEL, 30 s), or on a failed start the
+                      # stop verifier (systemctl is-active _T_SYSTEMCTL +
+                      # podman exists _T_PODMAN) and the best-effort refusal
+                      # lookup (systemctl show + journalctl, _T_SYSTEMCTL
+                      # each): about 165 s and 255 s in the worst case
+                      # (astra A r2 #5). Measured in the VM: seconds.
 _T_DNSMASQ = 15       # forks and daemonizes; the parent returns immediately
+# `podman container exists` verdict relayed through the supervisor chain
+# (astra+fable tier3s A r3 P1): the dropped-privilege command itself prints
+# podman's rc as a PMRC=<rc> line. The chain's own exit status is never the
+# verdict — runuser (or systemd-run upstream of it) can exit 1 without
+# podman ever running, which a bare-rc check would read as "absent".
+_PM_EXISTS_SH = 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"'
 ADMIN_USER_NAME = "admin"
 # qdistro is single-tenant: the admin role is the fixed 'admin' account, which
 # must be uid 1000. Resolve leniently at import (default 1000 when the account
@@ -254,6 +277,32 @@ TIER2_SILO_LAUNCHER_FMT = "qdistro-tier2-silo@{name}.service"
 # tore the container down (the unit going inactive is not sufficient: a
 # rootless container can survive its supervisor).
 TIER2_CONTAINER_FMT = "qdistro-silo-{name}"
+# Tier 3s (gVisor runsc; tier3s/CONTRACT.md §6). Experimental, dev profile
+# only (paravirt O4), explicit launch with no fallback to tier 2/3 (O6),
+# network=none only (O3). Silo <name> -> launch unit
+# qdistro-tier3s-silo@<name>.service -> container qdistro-tier3s-<name>; the
+# unit runs spawn-tier3s.sh as the root supervisor, every podman call runs as
+# admin. Explicit branches, no backend table (paravirt D7).
+TIER3S_SILO_LAUNCHER_FMT = "qdistro-tier3s-silo@{name}.service"
+TIER3S_CONTAINER_FMT = "qdistro-tier3s-{name}"
+# Root-only control records, one dir per launch token (CONTRACT §4). The
+# record's `unit=` line names the launch unit; a record of a stopped silo's
+# unit means its teardown did not complete.
+TIER3S_CTL_DIR = Path("/run/qdistro-tier3s-ctl")
+# The only teardown path (root, verified, preserves the record on failure).
+TIER3S_CLEANUP = Path("/usr/libexec/qdistro/qdistro-tier3s-cleanup")
+# Same constraint spawn-tier3s.sh puts on a workload name (it selects
+# /usr/lib/qdistro/tier3s/seccomp/<workload>.json and the image tag).
+_TIER3S_WORKLOAD_RE = _re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+# The app a workload runs when the launch stanza carries no argv. A workload
+# missing here runs [workload], like tier 2.
+TIER3S_DEFAULT_ARGV = {"headless-smoke": ["qdistro-tier3s-smoke"]}
+# Where the deployment profile lives (scripts/install, image config). Tier 3s
+# refuses every profile but dev (paravirt O4).
+QDISTRO_PROFILE_PATH = Path("/etc/qdistro/profile")
+TIER3S_PROFILE_REFUSAL = (
+    "tier 3s is dev-profile only in this PoC (profile={profile}); there is no "
+    "hardened launch path and no fallback tier")
 
 # Silo kinds (fableplan2 task 04). tier3-user is today's implicit default
 # (a real Linux user, per-uid home/cgroup, tier-3 session launcher);
@@ -261,7 +310,12 @@ TIER2_CONTAINER_FMT = "qdistro-silo-{name}"
 # whose state is the binding's state_path (created by promote, not useradd).
 KIND_TIER3_USER = "tier3-user"
 KIND_TIER2_TEMPLATE = "tier2-template"
-SILO_KINDS = (KIND_TIER3_USER, KIND_TIER2_TEMPLATE)
+# tier3s is a gVisor (runsc) silo: launch-owner admin like tier2-template, its
+# own launch unit, network none only, no freeze/resume.
+KIND_TIER3S = "tier3s"
+SILO_KINDS = (KIND_TIER3_USER, KIND_TIER2_TEMPLATE, KIND_TIER3S)
+# Kinds whose row uid is the admin launch owner, not a fresh silo uid.
+_ADMIN_OWNED_KINDS = (KIND_TIER2_TEMPLATE, KIND_TIER3S)
 # The launch-owner uid a tier2-template row carries: the admin user where
 # rootless podman runs. Not a fresh silo uid (no useradd/home/cgroup
 # semantics). Kept as a distinct name for the tier2 launch schema, but it is
@@ -533,7 +587,14 @@ def validate_silo_uid(uid: int, kind: str) -> int:
     tier2-template silo's uid is the launch-owner admin uid (rootless podman
     runs as admin). A fake/silo uid on a tier2-template row, or admin's uid on
     a tier3-user row, is rejected — the loader must not smuggle the wrong
-    privilege semantics in."""
+    privilege semantics in. A tier3s silo is admin-owned like tier 2 (rootless
+    podman as admin, --userns=keep-id; tier3s/CONTRACT.md §6)."""
+    if kind == KIND_TIER3S:
+        if int(uid) != ADMIN_UID:
+            raise BadArgument(
+                f"tier3s silo uid must be the admin launch-owner "
+                f"({ADMIN_UID}), got {uid}")
+        return ADMIN_UID
     if kind == KIND_TIER2_TEMPLATE:
         if int(uid) != TIER2_LAUNCH_OWNER_UID:
             raise BadArgument(
@@ -563,6 +624,8 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
                 "tier3-user silos carry no launch stanza (the tier-3 session "
                 "launcher owns the payload)")
         return {}
+    if kind == KIND_TIER3S:
+        return _validate_tier3s_launch(launch)
     if not isinstance(launch, dict):
         raise BadArgument("tier2-template launch stanza must be a table")
 
@@ -592,30 +655,70 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
             f"tier2-template launch.network must be one of "
             f"{SILO_NETWORK_MODES} (legacy 'slirp4netns' maps to 'pasta'), "
             f"got {network!r}")
-    argv = launch.get("argv", [])
+    argv = _validate_launch_argv(KIND_TIER2_TEMPLATE, launch.get("argv", []))
+    return {
+        "workload": workload,
+        "template_silo": template_silo,
+        "network": network,
+        "argv": list(argv),
+    }
+
+
+def _validate_launch_argv(kind: str, argv: object) -> list[str]:
+    """The launch stanza's argv, shared by tier2-template and tier3s (the
+    messages name the kind)."""
     # PyYAML parses the rendered `argv: [...]` as a real list; the tolerant
     # fallback parser yields the JSON-array text verbatim — normalise both.
     if isinstance(argv, str):
         try:
             argv = json.loads(argv)
         except json.JSONDecodeError as e:
-            raise BadArgument(f"tier2-template launch.argv not valid JSON: {e}") from e
+            raise BadArgument(f"{kind} launch.argv not valid JSON: {e}") from e
     if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
-        raise BadArgument("tier2-template launch.argv must be a list of strings")
+        raise BadArgument(f"{kind} launch.argv must be a list of strings")
     # NUL is the launcher's argv separator (and cannot appear in a real exec'd
     # argv element anyway), so it must never survive validation — json.loads
     # happily decodes the \u0000 escape into one.
     if any("\0" in a for a in argv):
-        raise BadArgument("tier2-template launch.argv entries must not contain NUL")
+        raise BadArgument(f"{kind} launch.argv entries must not contain NUL")
     # Single-line argv is a stanza policy (the rendered launch stanza is one
     # line per value); the launcher itself transports newlines fine.
     if any(("\n" in a or "\r" in a) for a in argv):
-        raise BadArgument("tier2-template launch.argv entries must be single-line")
+        raise BadArgument(f"{kind} launch.argv entries must be single-line")
+    return list(argv)
+
+
+def _validate_tier3s_launch(launch: object) -> dict[str, Any]:
+    """tier3s launch stanza (tier3s/CONTRACT.md §6): the tier-2 shape with
+    stricter names, because every value crosses into the root launch helper
+    and spawn-tier3s.sh. network is `none` only (paravirt O3): no pasta, no
+    legacy mapping. template_silo is the binding spawn-tier3s resolves
+    (TIER3S_BINDING); a silo without a binding runs untemplated on
+    localhost/qdistro/tier3s-<workload>."""
+    if not isinstance(launch, dict):
+        raise BadArgument("tier3s launch stanza must be a table")
+    workload = launch.get("workload")
+    if not isinstance(workload, str) or not _TIER3S_WORKLOAD_RE.fullmatch(workload):
+        raise BadArgument(
+            f"tier3s launch.workload must match {_TIER3S_WORKLOAD_RE.pattern}, "
+            f"got {workload!r}")
+    template_silo = launch.get("template_silo")
+    if (not isinstance(template_silo, str)
+            or not _VALID_NAME_RE.fullmatch(template_silo)):
+        raise BadArgument(
+            f"tier3s launch.template_silo must be a silo name, got "
+            f"{template_silo!r}")
+    network = launch.get("network", "none")
+    if network != "none":
+        raise BadArgument(
+            f"tier3s launch.network must be 'none' (tier 3s is network=none "
+            f"only), got {network!r}")
+    argv = _validate_launch_argv(KIND_TIER3S, launch.get("argv", []))
     return {
         "workload": workload,
         "template_silo": template_silo,
-        "network": network,
-        "argv": list(argv),
+        "network": "none",
+        "argv": argv,
     }
 
 
@@ -2060,9 +2163,12 @@ class _SystemOps:
 
     def observe_silo(self, name: str, uid: int, kind: str) -> tuple[str, str]:
         """Read runtime evidence only. No observation authorizes a lifecycle op."""
-        unit = (TIER2_SILO_LAUNCHER_FMT.format(name=name)
-                if kind == KIND_TIER2_TEMPLATE else
-                SILO_LAUNCHER_FMT.format(name=name, uid=uid))
+        if kind == KIND_TIER3S:
+            unit = TIER3S_SILO_LAUNCHER_FMT.format(name=name)
+        elif kind == KIND_TIER2_TEMPLATE:
+            unit = TIER2_SILO_LAUNCHER_FMT.format(name=name)
+        else:
+            unit = SILO_LAUNCHER_FMT.format(name=name, uid=uid)
         result = subprocess.run(
             ["systemctl", "show", unit, "--property=LoadState",
              "--property=ActiveState", "--property=Job"],
@@ -2078,12 +2184,30 @@ class _SystemOps:
             return "starting", "launcher is activating"
         if active not in ("active", "inactive", "failed"):
             return "unknown", "launcher state is transitional or unknown"
-        if kind == KIND_TIER2_TEMPLATE:
+        if kind == KIND_TIER3S:
+            # Running iff the unit is active AND podman (as admin) reports the
+            # container running; a failed query is unknown, never stopped
+            # (tier3s/CONTRACT.md §6).
+            container = TIER3S_CONTAINER_FMT.format(name=name)
+            exists = self._tier3s_container_exists(container, timeout=3)
+            if exists == 0:
+                running = self._tier3s_podman(
+                    ["inspect", "--format", "{{.State.Running}}", container],
+                    timeout=3)
+                if (active == "active" and not running.returncode
+                        and running.stdout.strip() == "true"):
+                    return ("launcher-running", "launcher and gVisor sandbox "
+                            "observed running; application health unverified")
+                return "unknown", "container exists; launcher alone does not establish workload status"
+            if exists != 1:
+                return "unknown", "container observation unavailable"
+            if active == "active":
+                return "unknown", "launcher active but container absent"
+        elif kind == KIND_TIER2_TEMPLATE:
             container = TIER2_CONTAINER_FMT.format(name=name)
-            exists = subprocess.run(
-                ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
-                 "container", "exists", container], capture_output=True, timeout=3)
-            if exists.returncode == 0:
+            exists = self._podman_exists_verdict(
+                self._runuser_exists(container, timeout=3))
+            if exists == 0:
                 running = subprocess.run(
                     ["runuser", "-u", ADMIN_USER_NAME, "--", "podman",
                      "inspect", "--format", "{{.State.Running}}", container],
@@ -2091,7 +2215,7 @@ class _SystemOps:
                 if active == "active" and not running.returncode and running.stdout.strip() == "true":
                     return "launcher-running", "launcher and container observed running; application health unverified"
                 return "unknown", "container exists; launcher alone does not establish workload status"
-            if exists.returncode != 1:
+            if exists != 1:
                 return "unknown", "container observation unavailable"
             if active == "active":
                 return "unknown", "launcher active but container absent"
@@ -2137,23 +2261,247 @@ class _SystemOps:
             return True
         container = TIER2_CONTAINER_FMT.format(name=name)
         # `podman container exists` returns 0 when present, 1 when absent; run
-        # it as admin (the rootless owner). rc 0 = still running; rc 1 = gone;
-        # any OTHER rc means the check itself failed to run — fail closed and
+        # it as admin (the rootless owner) under the PMRC verdict protocol so
+        # a bare runuser rc is never read as podman's answer (A r3 P1).
+        # Verdict 0 = still running; verdict 1 = gone; any other verdict or a
+        # missing one means the check itself failed to run — fail closed and
         # treat that as still running, never silently report a clean stop.
         try:
-            proc = subprocess.run(
-                ["runuser", "-u", ADMIN_USER_NAME,
-                 "--", "podman", "container", "exists", container],
-                capture_output=True, timeout=_T_PODMAN)
+            verdict = self._podman_exists_verdict(
+                self._runuser_exists(container, timeout=_T_PODMAN))
         except subprocess.TimeoutExpired:
             # A wedged rootless podman is precisely the case this method has to
             # survive: "the check failed to run" is already fail-closed here
-            # (any rc other than 1), so a timeout gets the same answer.
+            # (any verdict other than 1), so a timeout gets the same answer.
             log.warning("podman container exists %s timed out after %ds; "
                         "reporting the silo as still running",
                         container, _T_PODMAN)
             return True
-        return proc.returncode != 1
+        return verdict != 1
+
+    # ---- tier 3s (tier3s/CONTRACT.md §4, §6) -------------------------------
+
+    def qdistro_profile(self) -> str:
+        """The deployment profile from /etc/qdistro/profile (the last
+        QDISTRO_PROFILE= line), parsed and never sourced. "" when the file is
+        missing, a symlink, not root-owned or group/other-writable: tier 3s
+        then refuses, as it does for every profile but dev."""
+        try:
+            st = os.lstat(QDISTRO_PROFILE_PATH)
+        except OSError:
+            return ""
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0
+                or st.st_mode & 0o022):
+            return ""
+        try:
+            text = QDISTRO_PROFILE_PATH.read_text()
+        except (OSError, UnicodeDecodeError):
+            return ""
+        value = ""
+        for ln in text.splitlines():
+            if ln.startswith("QDISTRO_PROFILE="):
+                value = ln.split("=", 1)[1].strip().strip("'\"")
+        return value
+
+    @staticmethod
+    def _tier3s_admin_cmd(cmd: list[str], *, timeout: int = _T_PODMAN):
+        """Run *cmd* as admin with the same fixed environment spawn-tier3s.sh
+        and qdistro-tier3s-cleanup use, so every call sees admin's rootless
+        store (and, through the container's recorded runtime, the wrapper's
+        runsc state root). Raises subprocess.TimeoutExpired / OSError."""
+        try:
+            home = pwd.getpwnam(ADMIN_USER_NAME).pw_dir
+        except KeyError:
+            home = f"/home/{ADMIN_USER_NAME}"
+        return subprocess.run(
+            ["runuser", "-u", ADMIN_USER_NAME, "--", "env", "-i",
+             "PATH=/usr/bin:/bin", f"HOME={home}", f"USER={ADMIN_USER_NAME}",
+             f"LOGNAME={ADMIN_USER_NAME}",
+             f"XDG_RUNTIME_DIR=/run/user/{ADMIN_UID}", *cmd],
+            capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _tier3s_podman(args: list[str], *, timeout: int = _T_PODMAN):
+        """podman as admin; see _tier3s_admin_cmd for the environment.
+        Raises subprocess.TimeoutExpired / OSError."""
+        return _SystemOps._tier3s_admin_cmd(["podman", *args], timeout=timeout)
+
+    @staticmethod
+    def _podman_exists_verdict(proc) -> int | None:
+        """The podman `container exists` verdict carried by a PMRC-wrapped
+        call: podman's own rc (0 present, 1 absent, any other = the query
+        itself failed), or None when the supervisor chain did not deliver a
+        verdict — a non-zero chain rc, or a PMRC=<rc> line missing or not
+        alone on stdout (astra+fable tier3s A r3 P1)."""
+        if proc.returncode != 0:
+            return None
+        m = _re.fullmatch(r"PMRC=([0-9]+)\n?", proc.stdout or "")
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _runuser_exists(container: str, *, timeout: int = _T_PODMAN):
+        """`podman container exists` as admin under plain runuser, wrapped in
+        the PMRC verdict protocol (read the CompletedProcess with
+        _podman_exists_verdict). Raises subprocess.TimeoutExpired / OSError."""
+        return subprocess.run(
+            ["runuser", "-u", ADMIN_USER_NAME, "--", "sh", "-c",
+             _PM_EXISTS_SH, "sh", container],
+            capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _tier3s_container_exists(container: str, *, timeout: int = _T_PODMAN):
+        """podman's own `container exists` verdict on *container* (0 present,
+        1 absent, any other = the query itself failed), or None when the
+        runuser→env→sh chain delivered none. Raises TimeoutExpired / OSError."""
+        proc = _SystemOps._tier3s_admin_cmd(
+            ["sh", "-c", _PM_EXISTS_SH, "sh", container], timeout=timeout)
+        return _SystemOps._podman_exists_verdict(proc)
+
+    def tier3s_unit_records(self, unit: str) -> list[str]:
+        """Tokens of the control records whose launch unit is *unit*. Raises
+        OSError when the control dir cannot be read (a caller must treat that
+        as "may still be running")."""
+        if not TIER3S_CTL_DIR.exists():
+            return []
+        tokens = []
+        for d in TIER3S_CTL_DIR.iterdir():
+            if not _re.fullmatch(r"[0-9a-f]{32}", d.name):
+                continue
+            state = d / "state"
+            try:
+                text = state.read_text()
+            except FileNotFoundError:
+                # a record dir without its state file is still a record
+                tokens.append(d.name)
+                continue
+            if f"unit={unit}" in text.splitlines():
+                tokens.append(d.name)
+        return tokens
+
+    def tier3s_silo_running(self, name: str) -> bool:
+        """True if a tier3s stop did NOT fully take effect (fail closed, like
+        tier2_silo_running): the launch unit is not definitively inactive or
+        failed, OR admin's podman still has qdistro-tier3s-<name> (a failed or
+        timed-out query counts as present), OR a control record of the unit
+        survives (/run/qdistro-tier3s-ctl/<token>, an unreadable control dir
+        counts as present). The record is the persisted mapping silo -> token
+        (CONTRACT §6), so this also covers a token the manager no longer
+        holds."""
+        unit = TIER3S_SILO_LAUNCHER_FMT.format(name=name)
+        try:
+            active = subprocess.run(
+                ["systemctl", "is-active", unit], capture_output=True,
+                text=True, timeout=_T_SYSTEMCTL).stdout.strip()
+        except subprocess.TimeoutExpired:
+            log.warning("systemctl is-active %s timed out; reporting the "
+                        "tier3s silo as still running", unit)
+            return True
+        if active not in ("inactive", "failed"):
+            return True
+        container = TIER3S_CONTAINER_FMT.format(name=name)
+        try:
+            verdict = self._tier3s_container_exists(container)
+        except subprocess.TimeoutExpired:
+            log.warning("podman container exists %s timed out; reporting "
+                        "the tier3s silo as still running", container)
+            return True
+        if verdict != 1:
+            return True
+        try:
+            left = self.tier3s_unit_records(unit)
+        except OSError as e:
+            log.warning("cannot read %s (%s); reporting the tier3s silo as "
+                        "still running", TIER3S_CTL_DIR, e)
+            return True
+        if left:
+            log.warning("tier3s silo %s: control record(s) %s of %s survive "
+                        "the stop", name, left, unit)
+            return True
+        return False
+
+    def tier3s_cleanup(self, *args: str) -> bool:
+        """Run qdistro-tier3s-cleanup (root; the only teardown path) with
+        *args*. True on exit 0. A missing helper, a timeout or any non-zero
+        exit is False: the helper preserves the record on every failure."""
+        try:
+            r = subprocess.run([str(TIER3S_CLEANUP), *args],
+                               capture_output=True, text=True,
+                               timeout=_T_SYSTEMCTL_STOP)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.error("qdistro-tier3s-cleanup %s did not run: %s",
+                      " ".join(args), e)
+            return False
+        if r.returncode != 0:
+            log.error("qdistro-tier3s-cleanup %s exited %d: %s",
+                      " ".join(args), r.returncode,
+                      (r.stderr or "").strip()[-800:])
+            return False
+        return True
+
+    def tier3s_systemctl_start(self, unit: str) -> None:
+        """`systemctl start` of a tier3s launch unit with the tier3s bound
+        (_T_TIER3S_START): the unit is Type=notify, so the job completes at
+        READY=1 (the launch runs) or fails on any refusal before it. A timeout
+        is an unresolved start, exactly as in systemctl_start."""
+        try:
+            subprocess.run(["systemctl", "start", unit], check=True,
+                           timeout=_T_TIER3S_START)
+            return
+        except subprocess.TimeoutExpired as start_err:
+            log.warning("systemctl start %s timed out after %ds; issuing a "
+                        "best-effort stop and reporting the start as "
+                        "unresolved", unit, _T_TIER3S_START)
+            try:
+                self.systemctl_stop(unit, timeout=_T_SYSTEMCTL_CANCEL)
+            except Exception as stop_err:  # noqa: BLE001
+                log.error("could not issue the compensating stop for %s: %s",
+                          unit, stop_err)
+            raise StartNotCancelled(
+                f"start of {unit} timed out after {_T_TIER3S_START}s; the "
+                f"launch may still be starting and was not verified absent"
+            ) from start_err
+
+    def tier3s_start_refusal(self, unit: str) -> str:
+        """The spawn's last `REFUSE:` line from the unit's latest invocation,
+        or "" (best effort: journald may not have it yet, and any failed or
+        timed-out query is ""). Only ever added to an error message."""
+        try:
+            inv = subprocess.run(
+                ["systemctl", "show", "-p", "InvocationID", "--value", unit],
+                capture_output=True, text=True,
+                timeout=_T_SYSTEMCTL).stdout.strip()
+            if not _re.fullmatch(r"[0-9a-f]{32}", inv):
+                return ""
+            out = subprocess.run(
+                ["journalctl", "--no-pager", "-o", "cat",
+                 f"_SYSTEMD_INVOCATION_ID={inv}"],
+                capture_output=True, text=True, timeout=_T_SYSTEMCTL).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        lines = [ln for ln in out.splitlines()
+                 if ln.startswith("spawn-tier3s: REFUSE: ")]
+        return lines[-1][len("spawn-tier3s: "):][:400] if lines else ""
+
+    def tier3s_installed(self) -> bool:
+        """Whether this host carries the tier3s launch path (installer +
+        tmpfiles). Reconciliation is skipped on a host without it."""
+        return TIER3S_CLEANUP.exists() and TIER3S_CTL_DIR.is_dir()
+
+    def tier3s_live_units(self) -> list[str]:
+        """Every tier3s launch unit systemd reports active, activating,
+        deactivating or reloading. Raises on a failed listing."""
+        r = subprocess.run(
+            ["systemctl", "list-units", "--all", "--plain", "--no-legend",
+             "--no-pager", "qdistro-tier3s-silo@*.service",
+             "qdistro-tier3s-app@*.service"],
+            capture_output=True, text=True, timeout=_T_SYSTEMCTL, check=True)
+        live = []
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[2] in (
+                    "active", "activating", "deactivating", "reloading"):
+                live.append(parts[0])
+        return live
 
     def disp_container_list(self) -> list[str]:
         """Names of containers carrying the disposable label
@@ -2469,10 +2817,7 @@ class _SystemOps:
         last_err: BaseException | None = None
         for attempt in range(2):
             try:
-                proc = subprocess.run(
-                    ["runuser", "-u", ADMIN_USER_NAME,
-                     "--", "podman", "container", "exists", name],
-                    capture_output=True, timeout=10)
+                proc = self._runuser_exists(name, timeout=10)
             except subprocess.TimeoutExpired as e:
                 last_err = e
                 if attempt == 0:
@@ -2487,13 +2832,14 @@ class _SystemOps:
                 log.warning("disp remove: exists check for %r failed: %s",
                             name, e)
                 return False
-            # rc==1 definitively gone; rc==0 present; anything else uncertain.
-            if proc.returncode == 1:
+            # verdict 1 definitively gone; 0 present; anything else uncertain.
+            verdict = self._podman_exists_verdict(proc)
+            if verdict == 1:
                 return True
-            if proc.returncode == 0:
+            if verdict == 0:
                 return False
-            log.warning("disp remove: exists check for %r rc=%d (uncertain)",
-                        name, proc.returncode)
+            log.warning("disp remove: exists check for %r gave no "
+                        "authoritative verdict (uncertain)", name)
             return False
         if last_err is not None:
             log.warning("disp remove: exists check for %r failed: %s",
@@ -3188,7 +3534,9 @@ class _SiloStore:
                 try:
                     validate_name(name)
                     validate_kind(kind)
-                    if (kind == KIND_TIER2_TEMPLATE
+                    # tier3s rows are admin-owned like tier2 rows
+                    # (tier3s/CONTRACT.md §6): same quarantine.
+                    if (kind in _ADMIN_OWNED_KINDS
                             and int(uid) != TIER2_LAUNCH_OWNER_UID):
                         launch = validate_launch(
                             kind, row.get("launch", {}) or {})
@@ -3197,14 +3545,14 @@ class _SiloStore:
                         quarantined["launch"] = launch
                         quarantined["egress"] = egress
                         quarantined["_quarantine_reason"] = (
-                            "tier2-template owner uid "
+                            f"{kind} owner uid "
                             f"{int(uid)} != current admin uid "
                             f"{TIER2_LAUNCH_OWNER_UID}")
                         self._quarantined_silo_rows.append(quarantined)
                         log.error(
-                            "silos.yaml: quarantining tier2-template row "
+                            "silos.yaml: quarantining %s row "
                             "%r: owner uid %s != current admin uid %s",
-                            name, uid, TIER2_LAUNCH_OWNER_UID)
+                            kind, name, uid, TIER2_LAUNCH_OWNER_UID)
                         continue
                     # uid validation depends on kind (tier2-template carries
                     # the admin launch-owner uid, tier3-user a fresh silo uid).
@@ -3550,6 +3898,8 @@ class _SiloStore:
                 raise BadArgument(
                     "egress policy is only valid for tier3-user silos "
                     f"(got kind {kind!r})")
+            if kind == KIND_TIER3S:
+                self._require_tier3s_profile()
             with self._lock:
                 if name in self._silos:
                     raise SiloExists(f"silo {name!r} already exists")
@@ -3888,6 +4238,110 @@ class _SiloStore:
         lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
         self._ops.write_launch_env(silo.name, "\n".join(lines))
 
+    def _require_tier3s_profile(self) -> None:
+        """Tier 3s exists on the dev profile only (paravirt O4). Refuse a
+        create or start on any other (or an unreadable) profile with a clear
+        message, before any state change. spawn-tier3s.sh and probe.sh refuse
+        again on their own; there is no hardened launch path and no fallback
+        to another tier."""
+        profile = self._ops.qdistro_profile()
+        if profile != "dev":
+            raise BadArgument(TIER3S_PROFILE_REFUSAL.format(
+                profile=profile or "<unset>"))
+
+    def _export_tier3s_launch_env(self, silo: Silo) -> str:
+        """Write the per-silo stanza qdistro-tier3s-silo-launch reads (root
+        0600, KEY='VALUE', parsed by the helper, never sourced) and return
+        the launch token. The manager pre-commits a fresh token per start
+        (tier3s/CONTRACT.md §6), so silo, token, container, unit and scope are
+        all derivable; the control record is the persisted mapping."""
+        lc = silo.launch
+        argv = list(lc.get("argv") or []) or list(
+            TIER3S_DEFAULT_ARGV.get(lc["workload"], [lc["workload"]]))
+        token = secrets.token_hex(16)
+        kv = [
+            ("TIER3S_SILO", silo.name),
+            ("TIER3S_BINDING", lc["template_silo"]),
+            ("TIER3S_WORKLOAD", lc["workload"]),
+            ("TIER3S_NETWORK", "none"),
+            ("TIER3S_LAUNCH_TOKEN", token),
+            ("TIER3S_ARGV_JSON", json.dumps(argv)),
+        ]
+        lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
+        self._ops.write_launch_env(silo.name, "\n".join(lines))
+        return token
+
+    def _fail_tier3s_start(self, silo: Silo, err: BaseException) -> None:
+        """A tier3s start that FAILED (not timed out): the spawn refused or
+        the launch died before READY=1. Clear the Active intent only once the
+        launch is verified gone (unit inactive/failed, no container, no
+        control record: tier3s_silo_running, the stop verifier); then record
+        STOPPED/failed and raise the refusal to the caller, so a retry after
+        the cause is fixed is a real start. If the launch cannot be verified
+        gone, keep the conservative unresolved-start answer: Active, not
+        deletable, stop before retrying. Called with the store lock held."""
+        unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
+        try:
+            survived = self._ops.tier3s_silo_running(silo.name)
+        except Exception as check_err:  # noqa: BLE001
+            log.error("tier3s start of %r failed and its teardown could not "
+                      "be verified: %s", silo.name, check_err)
+            survived = True
+        if survived:
+            self._force_state(silo, State.ACTIVE)
+            silo.start_unresolved = True
+            silo.observed_reason = "start failed, teardown unverified; stop before retry"
+            raise StartNotCancelled(
+                f"start of tier3s silo {silo.name!r} failed ({err}) and its "
+                f"launch could not be verified gone; it is left Active. Stop "
+                f"it before starting it again (see journalctl -u {unit})"
+            ) from err
+        refusal = ""
+        try:
+            refusal = self._ops.tier3s_start_refusal(unit)
+        except Exception:  # noqa: BLE001
+            refusal = ""
+        self._force_state(silo, State.STOPPED)
+        silo.observed_status = "failed"
+        silo.observed_reason = (refusal or "launch refused or failed before it ran")[:200]
+        raise SessionError(
+            f"start of tier3s silo {silo.name!r} failed: the launch was "
+            f"refused or failed before it ran"
+            f"{': ' + refusal if refusal else ''}; the silo is Stopped "
+            f"(see journalctl -u {unit})") from err
+
+    def reconcile_tier3s_launches(self) -> list[str]:
+        """Startup reconciliation (tier3s/CONTRACT.md §4): the manager's
+        in-memory view of every tier3s launch is gone (restart or crash), so
+        no tier3s launch survives it. Stop every live tier3s launch unit
+        (ExecStop/ExecStopPost run the verified cleanup), then
+        `qdistro-tier3s-cleanup --reap-stale` reaps records and labelled
+        containers whose unit is not live. The autostart sweep after this
+        relaunches wanted silos with a fresh token. Best-effort and logged: a
+        failure here never blocks the other silos. Returns the units stopped."""
+        if not self._ops.tier3s_installed():
+            return []
+        stopped: list[str] = []
+        try:
+            units = self._ops.tier3s_live_units()
+        except Exception as e:  # noqa: BLE001
+            log.error("tier3s reconciliation: cannot list launch units: %s", e)
+            units = []
+        for unit in units:
+            log.warning("tier3s reconciliation: stopping %s (no launch "
+                        "survives a session-manager restart)", unit)
+            try:
+                if self._ops.systemctl_stop(unit):
+                    stopped.append(unit)
+            except Exception as e:  # noqa: BLE001
+                log.error("tier3s reconciliation: stop of %s failed: %s",
+                          unit, e)
+        if not self._ops.tier3s_cleanup("--reap-stale"):
+            log.error("tier3s reconciliation: --reap-stale reported a "
+                      "failure; records of failed teardowns are preserved "
+                      "under %s", TIER3S_CTL_DIR)
+        return stopped
+
     # ---- pod-app launches (tracker J12 Fix A) -----------------------------
 
     def launch_podapp(self, container: str, workload: str, argv_json: str,
@@ -4012,9 +4466,24 @@ class _SiloStore:
                     # happens while the store lock is held.
                     reason = "already active (idempotent)"
                 else:
+                    if silo.kind == KIND_TIER3S:
+                        # before any state change (paravirt O4)
+                        self._require_tier3s_profile()
                     self._transition(silo, State.ACTIVE)
+                    start_unit = self._ops.systemctl_start
                     try:
-                        if silo.kind == KIND_TIER2_TEMPLATE:
+                        if silo.kind == KIND_TIER3S:
+                            # Tier 3s: its own unit only. No per-silo cgroup
+                            # (the spawn creates the owning scope) and no
+                            # fallback: a failed start rolls back below and
+                            # launches nothing else (paravirt O6). The unit is
+                            # Type=notify, so a launch the spawn refuses fails
+                            # this start (astra/fable A r1).
+                            token = self._export_tier3s_launch_env(silo)
+                            unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo.name)
+                            reason = f"started (tier3s token {token})"
+                            start_unit = self._ops.tier3s_systemctl_start
+                        elif silo.kind == KIND_TIER2_TEMPLATE:
                             # Tier-2 templated silo: launch through its unit,
                             # which runs spawn-tier2 as admin (rootless podman
                             # manages its own cgroup, so no per-silo cgroup
@@ -4069,7 +4538,7 @@ class _SiloStore:
                                     self._force_clear_egress(silo.name, silo.uid)
                             unit = SILO_LAUNCHER_FMT.format(name=silo.name,
                                                             uid=silo.uid)
-                        self._ops.systemctl_start(unit)
+                        start_unit(unit)
                     except Exception as e:  # noqa: BLE001
                         # Roll back state on failure. _force_state emits
                         # SiloChanged so the admin UI / PodApps don't stick
@@ -4104,6 +4573,8 @@ class _SiloStore:
                                 f"is an idempotent no-op from Active and would "
                                 f"report success without launching anything"
                             ) from e
+                        if silo.kind == KIND_TIER3S:
+                            self._fail_tier3s_start(silo, e)
                         if self._is_netns_backed(silo):
                             self._teardown_egress(silo.name, silo.uid,
                                                   silo.egress)
@@ -4182,13 +4653,16 @@ class _SiloStore:
             # logged, not fatal; the in-flight claim above keeps a concurrent
             # freeze() from re-freezing underneath us. Tier-2 templated silos
             # have no per-silo cgroup, so skip them.
-            if silo_kind != KIND_TIER2_TEMPLATE:
+            if silo_kind not in (KIND_TIER2_TEMPLATE, KIND_TIER3S):
                 try:
                     self._ops.cgroup_freeze(silo_name, False)
                 except Exception as e:  # noqa: BLE001
                     log.warning("cgroup_freeze(False) for %r failed during "
                                 "stop pre-thaw: %s — continuing",
                                 silo_name, e)
+            if silo_kind == KIND_TIER3S:
+                self._stop_tier3s(silo, silo_name)
+                return
             if silo_kind == KIND_TIER2_TEMPLATE:
                 # Tier-2 templated silo: stopping its unit (whose ExecStop runs
                 # `podman stop` on the rootless container) is the whole teardown
@@ -4405,6 +4879,57 @@ class _SiloStore:
             with self._lock:
                 self._clear_stop_inflight(silo_name)
 
+    def _stop_tier3s(self, silo: Silo, silo_name: str) -> None:
+        """Phase 2 of a tier3s stop (tier3s/CONTRACT.md §6), lock-free like
+        the tier-2 branch and with the same fail-closed verdict: STOPPED only
+        when the stop completed, the unit is inactive, admin's podman has no
+        qdistro-tier3s-<name> and no control record of the unit survives.
+
+        The unit's ExecStop/ExecStopPost run qdistro-tier3s-cleanup. If that
+        teardown failed (the record is preserved, the unit is now
+        inactive/failed), a retried StopSilo would otherwise be a no-op, so a
+        completed stop that left records runs `cleanup --unit` once more, then
+        re-verifies. Any other outcome forces ACTIVE (honest, retryable, not
+        deletable)."""
+        unit = TIER3S_SILO_LAUNCHER_FMT.format(name=silo_name)
+        try:
+            stop_done = self._ops.systemctl_stop(unit)
+            survived = self._ops.tier3s_silo_running(silo_name)
+            if survived and stop_done:
+                log.warning("tier3s silo %r survived its unit stop; running "
+                            "the verified cleanup for %s", silo_name, unit)
+                self._ops.tier3s_cleanup("--unit", unit)
+                survived = self._ops.tier3s_silo_running(silo_name)
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self._clear_stop_inflight(silo_name)
+                self._force_state(silo, State.ACTIVE)
+            raise SessionError(
+                f"stop of tier3s silo {silo_name!r} failed: {e}") from e
+        if survived or not stop_done:
+            with self._lock:
+                self._clear_stop_inflight(silo_name)
+                self._force_state(silo, State.ACTIVE)
+            if survived:
+                raise SessionError(
+                    f"stop of tier3s silo {silo_name!r} did not take effect: "
+                    f"the launch unit is still active, the container "
+                    f"{TIER3S_CONTAINER_FMT.format(name=silo_name)} survives "
+                    f"or a control record under {TIER3S_CTL_DIR} remains "
+                    f"(see journalctl -u {unit})")
+            raise SessionError(
+                f"stop of tier3s silo {silo_name!r} was not acknowledged "
+                f"(systemctl failed or timed out); the silo stays Active. "
+                f"Retry the stop")
+        try:
+            self._ops.remove_launch_env(silo_name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("remove_launch_env for %r failed after a verified "
+                        "stop: %s — leaving the stale env", silo_name, e)
+        with self._lock:
+            self._clear_stop_inflight(silo_name)
+            self._transition(silo, State.STOPPED)
+
     def _await_inflight_locked(self, name: str) -> Silo:
         """Wait (on _stop_cv, with _lock held) until no lock-free lifecycle
         write is in flight for *name*, then return the current silo.
@@ -4465,6 +4990,12 @@ class _SiloStore:
             #    write leaves the silo cleanly ACTIVE with no rollback needed.
             with self._lock:
                 silo = self._await_inflight_locked(name)
+                if silo.kind == KIND_TIER3S:
+                    # tier3s/CONTRACT.md §6: freezing the owning scope would
+                    # freeze the podman CLI and conmon too, and gVisor-level
+                    # pause is not wired. Refused before any cgroup is touched.
+                    raise BadArgument(
+                        "freeze/resume is unsupported for tier3s silos")
                 if silo.state == State.FROZEN:
                     reason = "already frozen (idempotent)"
                     target = None
@@ -4491,7 +5022,7 @@ class _SiloStore:
                             self._transition(cur, State.FROZEN)
         except Exception as e:  # noqa: BLE001
             decision = "deny" if isinstance(
-                e, (UnknownSilo, BadState)) else "error"
+                e, (UnknownSilo, BadState, BadArgument)) else "error"
             self._audit_record("freeze", str(name), decision=decision,
                                reason=str(e), caller=caller)
             raise
@@ -4507,6 +5038,9 @@ class _SiloStore:
             # success (no rollback needed; a failed unfreeze leaves it FROZEN).
             with self._lock:
                 silo = self._await_inflight_locked(name)
+                if silo.kind == KIND_TIER3S:
+                    raise BadArgument(
+                        "freeze/resume is unsupported for tier3s silos")
                 if silo.state == State.ACTIVE:
                     reason = "already active (idempotent)"
                     target = None
@@ -4530,7 +5064,7 @@ class _SiloStore:
                             self._transition(cur, State.ACTIVE)
         except Exception as e:  # noqa: BLE001
             decision = "deny" if isinstance(
-                e, (UnknownSilo, BadState)) else "error"
+                e, (UnknownSilo, BadState, BadArgument)) else "error"
             self._audit_record("resume", str(name), decision=decision,
                                reason=str(e), caller=caller)
             raise
@@ -5653,6 +6187,12 @@ class _SiloStore:
         # Reap export-back staging orphaned by a disposable that crashed/closed
         # without an import (its payload has no live container to back it).
         self.reap_export_staging()
+        # Tier 3s: no launch survives a manager restart; stop and reap them
+        # BEFORE the sweep below relaunches wanted tier3s silos.
+        try:
+            self.reconcile_tier3s_launches()
+        except Exception as e:  # noqa: BLE001
+            log.error("tier3s reconciliation failed: %s", e)
         started: list[str] = []
         with self._lock:
             for silo in list(self._silos.values()):
@@ -5797,13 +6337,13 @@ def _silos_yaml_render(
         "#       autostart: <bool>    # restart on daemon startup if true",
         "#       created_at: <int>    # epoch seconds",
         "#       last_change: <int>   # epoch seconds of last state change",
-        "#       kind: <tier3-user|tier2-template>",
+        "#       kind: <tier3-user|tier2-template|tier3s>",
         "#       egress: <none|direct|wg:NAME>  # tier3-user netns egress;",
         "#                              # omit/null = legacy host net (no netns)",
-        "#       launch:              # tier2-template only:",
+        "#       launch:              # tier2-template and tier3s only:",
         "#         workload: <str>    #   spawn-tier2 workload (seccomp/image)",
         "#         template_silo: <str>  # TIER2_SILO (binding to resolve)",
-        "#         network: <none|pasta>  # TIER2_NETWORK (legacy slirp4netns→pasta)",
+        "#         network: <none|pasta>  # TIER2_NETWORK (legacy slirp4netns→pasta); tier3s: none only",
         "#         argv: [<str>, ...] #   app argv after `--`",
         "#   quarantined_silos:",
         "#     - reason: <str>        # rows preserved but not loaded",
@@ -6047,6 +6587,34 @@ if dbus is not None:
                             "network": str(network), "argv": []},
                     caller=caller)
                 log.info("CreateTemplateSilo name=%s workload=%s silo=%s",
+                         name, workload, template_silo)
+            except SessionError as e:
+                raise _to_dbus_exception(e) from e
+
+        @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def CreateTier3sSilo(self, name, workload, template_silo, network,
+                             sender=None, conn=None):
+            """Create a tier3s (gVisor runsc) silo (tier3s/CONTRACT.md §6):
+            Experimental, dev profile only, network "none" only, launch-owner
+            admin. Its own method so CreateTemplateSilo keeps its tier-2 kind.
+            argv defaults per workload (TIER3S_DEFAULT_ARGV); a richer argv is
+            set via silos.yaml."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("create", name, caller, e)
+                raise _to_dbus_exception(e) from e
+            try:
+                self.store.create(
+                    str(name), ADMIN_UID, kind=KIND_TIER3S,
+                    launch={"workload": str(workload),
+                            "template_silo": str(template_silo),
+                            "network": str(network), "argv": []},
+                    caller=caller)
+                log.info("CreateTier3sSilo name=%s workload=%s binding=%s",
                          name, workload, template_silo)
             except SessionError as e:
                 raise _to_dbus_exception(e) from e

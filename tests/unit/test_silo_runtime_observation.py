@@ -127,8 +127,9 @@ def test_system_ops_container_and_job_evidence(monkeypatch, job, active, exists,
         assert kwargs['timeout'] == 3
         if cmd[0] == 'systemctl':
             return SimpleNamespace(returncode=0, stdout=f'LoadState=loaded\nActiveState={active}\nJob={job}\n')
-        if 'exists' in cmd:
-            return SimpleNamespace(returncode=exists, stdout='')
+        if any('container exists' in c for c in cmd):
+            # the PMRC verdict: the completed chain relays podman's own rc
+            return SimpleNamespace(returncode=0, stdout=f'PMRC={exists}\n')
         assert 'inspect' in cmd
         return SimpleNamespace(returncode=0, stdout=running)
     monkeypatch.setattr(sm.subprocess, 'run', run)

@@ -1,0 +1,26 @@
+### host 2026-10-02T08:57:07Z: vm-exec tier3s-261002-105112-1722066-19303 <<CMD
+/root/qdistro-src/tier3s/spike/phase-a-feasibility.sh a1neg
+CMD
+[vm-exec] guest identity pinned (pid 7529 start 33710)
+## D-A1 negative: plain stop with the root moved aside / replaced must fail visibly, sandbox stays
+5475a18e27c32ff3bae522df4509e6ab3b5bbeacd91779add7df787d3ce37c19
+CHECK run-rc: OK (0)
+time="2026-10-02T08:57:26Z" level=warning msg="StopSignal SIGTERM failed to stop container t3sf-b in 2 seconds, resorting to SIGKILL"
+Error: given PID did not die within timeout
+CHECK missing-root-stop-fails: OK (rc=125)
+CHECK missing-root-message: BAD
+CHECK sentry-alive-after-failed-stop: OK
+CHECK no-root-minted: OK (0)
+time="2026-10-02T08:57:33Z" level=warning msg="StopSignal SIGTERM failed to stop container t3sf-b in 2 seconds, resorting to SIGKILL"
+Error: given PID did not die within timeout
+CHECK replaced-root-stop-fails: OK (rc=125)
+CHECK sentry-alive-after-replaced-stop: OK
+t3sf-b stopping
+t3sf-b
+CHECK restored-stop-rc: OK (0)
+t3sf-b
+CHECK restored-rm-rc: OK (0)
+CHECK sentry-gone-after-restore: OK
+CHECK no-runsc-left: OK (0)
+### BAD=1
+### exit=1

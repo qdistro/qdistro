@@ -1,0 +1,166 @@
+[vm-exec] guest identity pinned (pid 3190 start 1859)
+
+## 0. preconditions, silos, templated-silo fixture
+PASS: probe PASS (0)
+PASS: image present (yes)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+fixture: binding /var/lib/qdistro/bindings/s121t.toml -> sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+PASS: fixture: s121t resolves as templated (read-only resolution) (0:sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+PASS: fixture: no activation record yet (yes)
+PASS: CreateTier3sSilo s121a (Created)
+PASS: CreateTier3sSilo s121t (Created)
+    silos.yaml: s121a argv -> []
+    silos.yaml: s121t argv -> []
+
+## 1. DONE 5: broker has no rule (rules-only prefix => unknown) => refused
+PASS: broker answers unknown (unknown)
+INFO: no-rule/untemplated: start rc=0 
+    unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+    unit: [resolve-binding] silo 's121a' is untemplated (no binding)
+    unit: spawn-tier3s: silo s121a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-headless-smoke:latest
+    unit: spawn-tier3s: REFUSE: broker has no allow rule for headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=unknown)
+    unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+PASS: no-rule/untemplated: the spawn refused with the expected message (1)
+PASS: no-rule/untemplated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: no-rule/untemplated: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: no-rule/untemplated: systemd never started an owning scope (0)
+PASS: no-rule/untemplated: no control record, no per-launch dir (0:0)
+PASS: no-rule/untemplated: no container of any kind (0)
+PASS: no-rule/untemplated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+INFO: no-rule/untemplated: silo state afterwards: Active
+INFO: no-rule/templated: start rc=0 
+    unit: Started qdistro tier-3s (gVisor) silo s121t (Experimental, dev profile only).
+    unit: spawn-tier3s: REFUSE: broker has no allow rule for headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=unknown)
+    unit: qdistro-tier3s-silo@s121t.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s121t.service: Failed with result 'exit-code'.
+PASS: no-rule/templated: the spawn refused with the expected message (1)
+PASS: no-rule/templated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: no-rule/templated: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: no-rule/templated: systemd never started an owning scope (0)
+PASS: no-rule/templated: no control record, no per-launch dir (0:0)
+PASS: no-rule/templated: no container of any kind (0)
+PASS: no-rule/templated: no activation record for the templated silo (yes)
+PASS: no-rule/templated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+INFO: no-rule/templated: silo state afterwards: Active
+
+## 2. DONE 5: explicit deny rule => refused
+PASS: broker answers deny (deny)
+INFO: deny/untemplated: start rc=0 
+    unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+    unit: [resolve-binding] silo 's121a' is untemplated (no binding)
+    unit: spawn-tier3s: silo s121a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-headless-smoke:latest
+    unit: spawn-tier3s: REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=deny)
+    unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+PASS: deny/untemplated: the spawn refused with the expected message (1)
+PASS: deny/untemplated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: deny/untemplated: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: deny/untemplated: systemd never started an owning scope (0)
+PASS: deny/untemplated: no control record, no per-launch dir (0:0)
+PASS: deny/untemplated: no container of any kind (0)
+PASS: deny/untemplated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+INFO: deny/untemplated: silo state afterwards: Active
+INFO: deny/templated: start rc=0 
+    unit: Started qdistro tier-3s (gVisor) silo s121t (Experimental, dev profile only).
+    unit: spawn-tier3s: REFUSE: broker denied headless-smoke/qdistro-tier3s-smoke (action='qdistro.tier3s.spawn:headless-smoke/qdistro-tier3s-smoke' decision=deny)
+    unit: qdistro-tier3s-silo@s121t.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s121t.service: Failed with result 'exit-code'.
+PASS: deny/templated: the spawn refused with the expected message (1)
+PASS: deny/templated: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: deny/templated: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: deny/templated: systemd never started an owning scope (0)
+PASS: deny/templated: no control record, no per-launch dir (0:0)
+PASS: deny/templated: no container of any kind (0)
+PASS: deny/templated: no activation record for the templated silo (yes)
+PASS: deny/templated: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+INFO: deny/templated: silo state afterwards: Active
+
+## 3. positive control: allow => both oracles see the launch
+PASS: broker answers allow (allow)
+PASS: control: StartSilo s121t rc (0)
+    unit: Started qdistro tier-3s (gVisor) silo s121t (Experimental, dev profile only).
+    unit: [qdistro-template-audit] template.binding.activated silo=s121t template=t3sfixture generation=sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2 result=activated
+    unit: [qdistro-template-audit] journal-first: /var/lib/qdistro/audit/template_audit.sqlite not writable from this context (unable to open database file); template lifecycle events are recorded to the journal + on-disk evidence, the authoritative audit sink.
+    unit: [resolve-binding] binding.activated silo=s121t generation=sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+    unit: LAUNCH_TOKEN=818cab80430c100ecbeae11ea8b95819
+    unit: CONTAINER=qdistro-tier3s-s121t
+    unit: IMAGE=sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2
+    unit: SCOPE_UNIT=qdistro-tier3s-818cab80430c100ecbeae11ea8b95819.scope
+    unit: spawn-tier3s: running: qdistro-tier3s-s121t sentry=5908 conmon=5893 in /system.slice/qdistro-tier3s-818cab80430c100ecbeae11ea8b95819.scope
+    unit: qdistro-tier3s-cleanup: 818cab80430c100ecbeae11ea8b95819: torn down (qdistro-tier3s-s121t)
+    unit: qdistro-tier3s-silo@s121t.service: Deactivated successfully.
+PASS: control: activation status written (generation = fixture) (sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+PASS: control: activation marker committed (sha256:df83d9d8fef586b37b25dd35d54c8bc21f4a6098a27868173536c64d171f00e2)
+    podman event: create qdistro-tier3s-s121t
+    podman event: init qdistro-tier3s-s121t
+    podman event: start qdistro-tier3s-s121t
+    podman event: attach qdistro-tier3s-s121t
+PASS: control: the same event oracle sees the container start (1)
+PASS: control: the same scope oracle sees the owning scope start (1)
+PASS: control: templated launch ran the image by its generation digest (1)
+PASS: control: the smoke ran to its end under gVisor (yes)
+PASS: control: launch unit Result (success)
+PASS: control: StopSilo (Stopped)
+PASS: control: control records (0)
+PASS: control: scopes (0)
+PASS: control: labelled containers (0)
+PASS: control: runsc-bundle processes (0)
+PASS: control: state root holds no container state (0)
+
+## 4. DONE 6: release (hardened config) profile refuses with a clear message
+INFO: CreateTier3sSilo on release: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier
+PASS: release: CreateTier3sSilo refused with the message (1)
+PASS: release: no silo was created (absent)
+INFO: StartSilo on release: rc=1 Call failed: tier 3s is dev-profile only in this PoC (profile=release); there is no hardened launch path and no fallback tier
+PASS: release: StartSilo refused with the message (1)
+PASS: release: StartSilo started no launch unit (0)
+PASS: release: silo state unchanged (Stopped)
+INFO: release/spawn (direct unit start): start rc=0 
+    unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+    unit: spawn-tier3s: REFUSE: tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=release); there is no hardened launch path and no fallback tier
+    unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+PASS: release/spawn (direct unit start): the spawn refused with the expected message (1)
+PASS: release/spawn (direct unit start): refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: release/spawn (direct unit start): no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: release/spawn (direct unit start): systemd never started an owning scope (0)
+PASS: release/spawn (direct unit start): no control record, no per-launch dir (0:0)
+PASS: release/spawn (direct unit start): no container of any kind (0)
+PASS: release/spawn (direct unit start): no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+INFO: release/spawn (direct unit start): silo state afterwards: Stopped
+PASS: release: the probe refuses a non-dev profile (rc 2) (2)
+PASS: profile restored to dev (dev)
+
+## 5. DONE 6: a probe failure refuses (runtime wrapper missing), no fallback
+PASS: probe fails with the wrapper missing (1:1)
+INFO: probe-failure: start rc=0 
+    unit: Started qdistro tier-3s (gVisor) silo s121a (Experimental, dev profile only).
+    unit: spawn-tier3s: REFUSE: probe failed (rc=1): RESULT FAIL: first missing prerequisite: wrapper (/usr/libexec/qdistro/tier3s-runsc missing, not root:root 0755, or differs from /usr/lib/qdistro/tier3s/tier3s-runsc)
+    unit: qdistro-tier3s-silo@s121a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s121a.service: Failed with result 'exit-code'.
+PASS: probe-failure: the spawn refused with the expected message (1)
+PASS: probe-failure: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: probe-failure: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: probe-failure: systemd never started an owning scope (0)
+PASS: probe-failure: no control record, no per-launch dir (0:0)
+PASS: probe-failure: no container of any kind (0)
+PASS: probe-failure: no fallback: no tier-2/podapp/tier-3 session unit was started (0)
+INFO: probe-failure: silo state afterwards: Active
+PASS: probe PASS again with the wrapper restored (0)
+
+## 6. cleanup
+PASS: DeleteSilo s121a (absent)
+PASS: DeleteSilo s121t (absent)
+PASS: fixture removed (no)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+[s121] 90 passes, 0 failures

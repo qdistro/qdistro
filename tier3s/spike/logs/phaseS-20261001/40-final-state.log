@@ -1,0 +1,8 @@
+### host 2026-10-01T21:03:43Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && . tier3s/spike/lib.sh; as_admin podman ps -a; for p in /proc/[0-9]*; do e=$(readlink $p/exe 2>/dev/null) || continue; case $e in /usr/libexec/qdistro/runsc/*|/usr/bin/waypipe|/usr/bin/conmon) echo LEFTOVER ${p#/proc/} $e;; esac; done; echo '(end leftovers)'; systemctl list-units 't3s-*' --all --no-legend; echo '(end units)'
+CMD
+[vm-exec] guest identity pinned (pid 87410 start 293732)
+CONTAINER ID  IMAGE       COMMAND     CREATED     STATUS      PORTS       NAMES
+(end leftovers)
+(end units)
+### exit=0

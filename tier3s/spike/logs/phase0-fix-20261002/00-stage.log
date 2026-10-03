@@ -1,0 +1,63 @@
+### host: staged commit 093f8a987c78a601c1335ca0da83d0294b614ae9; host sha256 of the staged files:
+b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
+27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+6dbfe0817f3c8ca57fe3ff3aa5c694d78333aa88758c40488ad183305470e8a8  tier3s/spike/phase0-fix-lib.sh
+8b11850fb8f2282c5c6f8f0355f1aaf07944323f8ed138783cca4a3b74c136f2  tier3s/spike/mutate-guards.py
+6dbe0adad0c9c7cca90d0dc505607048ad8aad32fe28a5a51b1cd78a1b595e8b  tests/unit/test_tier3s_probe.py
+f47790d380e48fa9e9e01d86b9128752db6486e6a161a86f821ce3b5ac077b75  tests/unit/test_tier3s_provision.py
+### host 2026-10-02T06:51:20Z: vm-exec tier3s-261002-075043-707631-1147 <<CMD
+set -e; cd /root/qdistro-src && curl -fsS http://10.0.2.2:42931/src.tar | tar -xf - && echo "staged commit $(curl -fsS http://10.0.2.2:42931/commit.txt)"
+set +e; . /root/qdistro-src/tier3s/spike/phase0-fix-lib.sh
+echo "checkout dir as left by the VM spin: $(stat -c '%n %a uid=%u gid=%g' /root/qdistro-src)"
+echo 'root-run tier3s scripts refuse a checkout another uid owns (see step 20); the spin preserved the host uid, so:'
+chown root:root /root/qdistro-src; is checkout-dir-root-owned "$(stat -c %u:%g /root/qdistro-src)" 0:0
+stat -c '%n %a %U:%G' /root /root/qdistro-src /root/qdistro-src/tier3s tier3s/provision-runsc.sh tier3s/probe.sh tier3s/RUNSC_RELEASE tier3s/tier3s-runsc
+sha256sum tier3s/RUNSC_RELEASE tier3s/probe.sh tier3s/provision-runsc.sh tier3s/tier3s-runsc tier3s/spike/phase0-fix-lib.sh tier3s/spike/mutate-guards.py tests/unit/test_tier3s_probe.py tests/unit/test_tier3s_provision.py
+mkdir -p $CACHE/20260928.0 && curl -fsS http://10.0.2.2:42931/gvisor.tar.zstd -o $CACHE/20260928.0/gvisor.tar.zstd
+is cache-tarball-sha512 "$(sha512sum < $CACHE/20260928.0/gvisor.tar.zstd | cut -d' ' -f1)" "$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)"
+is profile "$(cat /etc/qdistro/profile)" QDISTRO_PROFILE=dev
+uname -r; podman --version; getenforce
+zypper -n in --no-recommends python313-pytest strace > /var/tmp/t3s-zypper.log 2>&1; expect_rc zypper-pytest-strace 0 $?; tail -3 /var/tmp/t3s-zypper.log
+python3 -m pytest --version; strace -V | head -1
+echo "prior install before reset: $(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc 2>/dev/null | tr '\n' ' ')"
+rm -rf /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc /usr/libexec/t3s-elsewhere /var/tmp/t3s-*
+is no-install-after-reset "$(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc 2>/dev/null | wc -l)" 0
+finish
+CMD
+[vm-exec] guest identity pinned (pid 222227 start 362015)
+staged commit 093f8a987c78a601c1335ca0da83d0294b614ae9
+checkout dir as left by the VM spin: /root/qdistro-src 755 uid=0 gid=0
+root-run tier3s scripts refuse a checkout another uid owns (see step 20); the spin preserved the host uid, so:
+CHECK checkout-dir-root-owned: OK (0:0)
+/root 755 root:root
+/root/qdistro-src 755 root:root
+/root/qdistro-src/tier3s 775 root:root
+tier3s/provision-runsc.sh 775 root:root
+tier3s/probe.sh 775 root:root
+tier3s/RUNSC_RELEASE 664 root:root
+tier3s/tier3s-runsc 775 root:root
+b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3  tier3s/RUNSC_RELEASE
+27f831dc7528e7f59b4d1bcf57a5563469289981c4eb9894b20a33f39f2409f4  tier3s/probe.sh
+f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+320a4bb97e32dbccc2bb739d137d0a613118ff594ebc368d297942e41bff0655  tier3s/tier3s-runsc
+6dbfe0817f3c8ca57fe3ff3aa5c694d78333aa88758c40488ad183305470e8a8  tier3s/spike/phase0-fix-lib.sh
+8b11850fb8f2282c5c6f8f0355f1aaf07944323f8ed138783cca4a3b74c136f2  tier3s/spike/mutate-guards.py
+6dbe0adad0c9c7cca90d0dc505607048ad8aad32fe28a5a51b1cd78a1b595e8b  tests/unit/test_tier3s_probe.py
+f47790d380e48fa9e9e01d86b9128752db6486e6a161a86f821ce3b5ac077b75  tests/unit/test_tier3s_provision.py
+CHECK cache-tarball-sha512: OK (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+CHECK profile: OK (QDISTRO_PROFILE=dev)
+7.2.8-1-default
+podman version 6.0.2
+Permissive
+CHECK zypper-pytest-strace: OK (rc=0)
+No update candidate for 'strace-7.2-2.1.x86_64'. The highest available version is already installed.
+Resolving package dependencies...
+Nothing to do.
+pytest 9.0.3
+strace -- version 7.2
+prior install before reset: /etc/qdistro/runsc-release /run/qdistro-runsc /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc 
+CHECK no-install-after-reset: OK (0)
+### checks failed: 0
+### exit=0

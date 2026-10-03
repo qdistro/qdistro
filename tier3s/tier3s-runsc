@@ -1,0 +1,54 @@
+#!/bin/sh
+# tier3s-runsc — the ONLY runtime path podman is given for tier 3s
+# (podman --runtime /usr/libexec/qdistro/tier3s-runsc). Constant flags;
+# /usr/bin/env -i (absolute: the caller's PATH must not even choose `env`) so
+# no caller environment can flip runsc's release-skew enforcement or any
+# other env-read knob. Per-launch flags (network, host-uds, debug-log)
+# arrive via podman --runtime-flag. No fallback runtime, ever.
+#
+# runsc state root (tier3s/CONTRACT.md "D-A1"): one fixed root per HOST uid,
+# /run/qdistro-tier3s-runsc/<host uid>, so every call podman or conmon makes
+# for a container (create, start, state, kill, delete, the exit command, a
+# plain `podman stop`) reaches the same root without per-call flags. Rootless
+# podman runs this wrapper inside its user namespace (uid 0 there), so the
+# host uid comes from /proc/self/uid_map. The root is created only by
+# provisioning (tmpfiles.d/qdistro-tier3s.conf); this wrapper never creates
+# it: a missing, symlinked, wrong-owner or wrong-mode root, or a
+# caller-supplied --root, fails closed before runsc runs, so a stop against a
+# lost root errors visibly instead of runsc minting an empty one.
+euid=
+while read -r k _ e _; do
+    if [ "$k" = Uid: ]; then euid=$e; break; fi
+done < /proc/self/status
+host=
+case "$euid" in
+    ''|*[!0-9]*) ;;
+    *)  while read -r in out n; do
+            if [ "$euid" -ge "$in" ] && [ "$euid" -lt $((in + n)) ]; then
+                host=$((out + euid - in)); break
+            fi
+        done < /proc/self/uid_map ;;
+esac
+# podman keeps a runtime's stderr out of `podman stop`'s output (it reports
+# only "given PID did not die"), so the refusal also goes to the journal.
+die() {
+    printf 'tier3s-runsc: %s; refusing (no fallback)\n' "$*" >&2
+    /usr/bin/logger -t tier3s-runsc -p user.err -- "$*; refusing (no fallback)" 2>/dev/null
+    exit 125
+}
+case "$host" in ''|*[!0-9]*) die "cannot map uid '$euid' to a host uid" ;; esac
+[ "$host" -ne 0 ] || die "host root has no tier 3s state root"
+base=/run/qdistro-tier3s-runsc
+root=$base/$host
+# runsc puts its control socket at <root>/runsc-<64 hex id>.sock and silently
+# falls back to /var/run, /run, /tmp when that path exceeds sun_path (107).
+[ "${#root}" -le 31 ] || die "state root $root is too long for runsc's control socket"
+if [ -L "$base" ] || [ ! -d "$base" ]; then die "$base is missing or not a directory (provision: systemd-tmpfiles --create qdistro-tier3s.conf)"; fi
+if [ -L "$root" ] || [ ! -d "$root" ]; then die "state root $root is missing or not a directory"; fi
+meta=$(/usr/bin/stat -c '%u %a' -- "$root") || die "cannot stat state root $root"
+[ "$meta" = "$euid 700" ] || die "state root $root is owner/mode '$meta', want '$euid 700' (host uid $host)"
+[ "$(/usr/bin/stat -c '%a' -- "$base")" = 755 ] || die "$base is not mode 755"
+for a in "$@"; do
+    case "$a" in --root|--root=*|-root|-root=*) die "caller-supplied $a" ;; esac
+done
+exec /usr/bin/env -i PATH=/usr/bin:/bin /usr/libexec/qdistro/runsc/runsc --ignore-cgroups --platform=systrap --oci-seccomp "--root=$root" "$@"

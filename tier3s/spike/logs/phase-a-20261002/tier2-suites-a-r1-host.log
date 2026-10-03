@@ -1,0 +1,19 @@
+### tier-2 unit + static suites at bd565f6129cea53b3aac9290ad4056c0275a5275 2026-10-02T15:12:00Z
+### git diff --stat claude/tier3s..HEAD -- tier2/ (DONE bar 7: must be empty):
+### files under tier2/ changed: 0
+### git diff claude/tier3s..HEAD -- tier2 tier3 qdshell qdwin: 0 lines
+### UNIT: python3 -m pytest tests/unit/test_tier2_spawn.py tests/unit/test_tier2_snapshot_repos.py tests/unit/test_podapp_launch.py tests/unit/test_podapps_scan.py tests/unit/test_silo_launch.py tests/unit/test_spawn_common.py
+130 passed, 1 warning in 3.85s
+pytest rc=0
+### STATIC 1: bash -n on every tier2/*.sh
+bash -n rc=0
+### STATIC 2: shellcheck -S warning -e SC1090 tier2/*.sh
+#   documented baseline waiver: SC1090 ("can't follow non-constant source") at tier2/spawn-tier2.sh:800
+#   is pre-existing on claude/tier3s; tier2/ may not be edited in Phase A (06), so it is waived, not fixed
+shellcheck (waiver) rc=0
+### STATIC 3: the waived finding is the only one, identical to the claude/tier3s baseline
+    HEAD: tier2/spawn-tier2.sh:800:3: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]
+identical to baseline, single SC1090: yes
+### tier3s + session-manager + broker host suites (context, not item 7)
+1371 passed, 1 skipped, 1 warning in 45.59s
+### RESULT: PASS

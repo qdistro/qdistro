@@ -1,0 +1,40 @@
+### host 2026-10-01T21:13:02Z: vm-exec tier3s-261001-221428-2070491-12685 <<CMD
+cd /root/qdistro-src && curl -fsS http://10.0.2.2:18931/src.tar | tar -xf - && sha256sum tier3s/spike/s3-cgroups.sh && tier3s/spike/s3-cgroups.sh parent-root
+CMD
+[vm-exec] guest identity pinned (pid 94632 start 349629)
+2064fc9429c62d1cf1c3f1c41a548cd419e38a8b8dedf1b777935f0d7fea6c7e  tier3s/spike/s3-cgroups.sh
+scope argv: systemd-run --scope --unit=t3s-s3-parent-root -p Delegate=yes -p MemoryMax=1G -p TasksMax=512 -- sh -c <chown own cgroup to admin; mkdir sandbox> runuser -u admin -- env -i …  podman --cgroup-manager=cgroupfs --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none --runtime-flag=root=/run/user/1000/runsc run --rm --security-opt label=disable --security-opt no-new-privileges --security-opt seccomp=/var/tmp/tier3s-spike/smoke.json --cap-drop=ALL --userns=keep-id --user 1000:1000 --read-only --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw\,U\,mode=0700 --network=none --name t3s-s3-parent-root --cgroup-parent=/system.slice/t3s-s3-parent-root.scope/sandbox localhost/tier3s-spike/tw-terminals:20260929 sleep 45
+toggles: --cgroup-parent=1 chown-to-admin=1
+--- launch output
+scope cgroup: /sys/fs/cgroup/system.slice/t3s-s3-parent-root.scope controllers=cpuset cpu io memory pids owner=admin sandbox-owner=admin
+inspect: State=running Cgroups=default CgroupParent=/system.slice/t3s-s3-parent-root.scope/sandbox CgroupManager=cgroupfs ConmonPid=94687 Pid=94700
+OCI linux.cgroupsPath = /system.slice/t3s-s3-parent-root.scope/sandbox/libpod-5f268fd0b7f3d74c99d229f9500f5a033cca9b7ee3b07b72028cfd0e282284cd
+--- target cgroup: /system.slice/t3s-s3-parent-root.scope
+controllers: cpuset cpu io memory pids | memory.max=1073741824 pids.max=512 owner=admin
+--- recursive cgroup.procs of the target
+/system.slice/t3s-s3-parent-root.scope	pid=94667 comm=runuser exe=/usr/sbin/runuser
+/system.slice/t3s-s3-parent-root.scope	pid=94676 comm=podman exe=/usr/bin/podman
+/system.slice/t3s-s3-parent-root.scope	pid=94687 comm=conmon exe=/usr/bin/conmon
+/system.slice/t3s-s3-parent-root.scope	pid=94695 comm=exe exe=/usr/libexec/qdistro/runsc/runsc
+/system.slice/t3s-s3-parent-root.scope	pid=94700 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+/system.slice/t3s-s3-parent-root.scope	pid=94701 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking
+/system.slice/t3s-s3-parent-root.scope	pid=94717 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+/system.slice/t3s-s3-parent-root.scope	pid=94733 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+/system.slice/t3s-s3-parent-root.scope	pid=94734 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry
+--- every sandbox process (conmon subtree) classified against the target
+INSIDE pid=94687 ppid=1 uid=1000 comm=conmon exe=/usr/bin/conmon pin=- cgroup=/system.slice/t3s-s3-parent-root.scope
+INSIDE pid=94700 ppid=94687 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/system.slice/t3s-s3-parent-root.scope
+INSIDE pid=94701 ppid=94687 uid=1000 comm=runsc-fd-parkin exe=/usr/libexec/qdistro/runsc/gvisor-bin/runsc-fd-parking pin=sidecar_runsc-fd-parking_sha512 cgroup=/system.slice/t3s-s3-parent-root.scope
+INSIDE pid=94695 ppid=94687 uid=100000 comm=exe exe=/usr/libexec/qdistro/runsc/runsc pin=runsc_sha512 cgroup=/system.slice/t3s-s3-parent-root.scope
+INSIDE pid=94717 ppid=94700 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/system.slice/t3s-s3-parent-root.scope
+INSIDE pid=94733 ppid=94700 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/system.slice/t3s-s3-parent-root.scope
+INSIDE pid=94734 ppid=94733 uid=100000 comm=gvisor_sentry exe=/usr/libexec/qdistro/runsc/gvisor-bin/gvisor_sentry pin=sidecar_gvisor_sentry_sha512 cgroup=/system.slice/t3s-s3-parent-root.scope
+VERDICT shape=parent-root: 7/7 sandbox processes inside /system.slice/t3s-s3-parent-root.scope -> CONTAINS ALL
+--- podman CLI / runuser / systemd-run processes of this launch
+pid=94667 comm=runuser cgroup=/system.slice/t3s-s3-parent-root.scope
+pid=94676 comm=podman cgroup=/system.slice/t3s-s3-parent-root.scope
+pid=94687 comm=conmon cgroup=/system.slice/t3s-s3-parent-root.scope
+--- stop
+(end leftovers)
+target after stop: gone
+### exit=0
