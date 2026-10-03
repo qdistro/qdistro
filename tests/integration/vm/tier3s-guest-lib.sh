@@ -606,11 +606,15 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 # globals if the whole chain app-socket -> waypipe server -> link.sock ->
 # host client -> compositor is live.
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
-    local tok="$1" ctr
+    local tok="$1" ctr sock
     ctr=$(rec "$tok" container)
     [ -n "$ctr" ] || return 1
-    pm exec "$ctr" env XDG_RUNTIME_DIR=/run/user/1000 wayland-info 2>/dev/null \
-        | grep -q "wl_compositor\|xdg_wm_base\|wl_seat"
+    # the waypipe server picks its own wayland-N inside the sandbox — find it.
+    sock=$(pm exec "$ctr" sh -c 'ls /run/user/1000/wayland-* 2>/dev/null | head -1')
+    sock=${sock##*/}
+    [ -n "$sock" ] || return 1
+    pm exec "$ctr" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$sock" \
+        wayland-info 2>/dev/null | grep -q "wl_compositor\|xdg_wm_base\|wl_seat"
 }
 
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
@@ -636,8 +640,9 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     if bridge_stream_live "$tok"; then
         pass "$tag: bridge channel live (in-sandbox wayland-info lists host globals)"
     else
-        pm exec "$(rec "$tok" container)" env XDG_RUNTIME_DIR=/run/user/1000 \
-            wayland-info 2>&1 | sed 's/^/    wayland-info: /' | head -10
+        pm exec "$(rec "$tok" container)" sh -c \
+            'ls -l /run/user/1000/; for s in /run/user/1000/wayland-*; do XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=${s##*/} wayland-info; done' 2>&1 \
+            | sed 's/^/    probe: /' | head -15
         fail "$tag: an in-sandbox wayland client cannot reach the host compositor"
     fi
 }
