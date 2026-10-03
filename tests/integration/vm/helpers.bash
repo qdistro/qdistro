@@ -391,6 +391,28 @@ fail_loud() {
     return 1
 }
 
+# driver_skip_reason — extract the reason text from the first `SKIP:`
+# line in $output (in-VM drivers print `SKIP: <reason>` then exit 0).
+# Fold it into the wrapping fail_loud so the TAP records WHICH
+# precondition the driver reported missing, not just the wrapper's
+# canned summary — a collapsed "tier-N stack ... not available" message
+# hid the actual reason (e.g. a dead qdshell vs a missing package) in
+# the GH-image tiered-isolation failures. Empty-ish fallback when the
+# driver emitted a bare `SKIP:` or none at all.
+driver_skip_reason() {
+    local line reason=""
+    while IFS= read -r line; do
+        if [[ "$line" == *"SKIP: "* ]]; then
+            reason=${line#*SKIP: }
+            break
+        elif [[ "$line" == *"SKIP:"* ]]; then
+            reason=${line#*SKIP:}
+            break
+        fi
+    done <<<"$output"
+    printf '%s' "${reason:-no SKIP: reason emitted by driver}"
+}
+
 # ---------------------------------------------------------------------------
 # VM-driver helper layer
 #

@@ -26,6 +26,14 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+# Diagnostics MUST go to stdout: the bats wrapper runs this driver with
+# `2>/dev/null`, so anything on stderr is silently dropped from the TAP.
+# Captured log content passes through diag_scrub, which rewrites the
+# PASS:/FAIL:/SKIP: prefixes (colon -> " -") so a raw dump can never
+# satisfy or trip the wrapper's substring assertions.
+diag_scrub() { sed -E 's/(PASS|FAIL|SKIP):/\1 -/g'; }
+diag_file() { if [ -f "$1" ]; then diag_scrub <"$1"; fi; }
+
 AUDIT_DB=/var/lib/qdistro/audit/audit.sqlite
 BROKER_CONF=/etc/qdistro/broker.conf
 SPAWN_PID=""
@@ -127,7 +135,7 @@ done
 if [ "$REGISTERED" = "1" ]; then
     pass "spawn-tier3 logged the launch-record registration for silo=user1"
 else
-    cat "$SPAWN_LOG" >&2 || true
+    diag_file "$SPAWN_LOG"
     fail "spawn-tier3 did not register a launch record within 15s"
 fi
 

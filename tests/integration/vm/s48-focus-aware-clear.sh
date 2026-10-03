@@ -32,6 +32,17 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+# Diagnostics MUST go to stdout: the bats wrapper runs this driver with
+# `2>/dev/null`, so anything on stderr is silently dropped from the TAP
+# (this is how the GH-image failures lost every injectFocus reply and
+# failure-path journal excerpt). Captured log/journal content passes
+# through diag_scrub, which rewrites the PASS:/FAIL:/SKIP: prefixes
+# (colon -> " -") so a raw dump can never satisfy or trip the wrapper's
+# substring assertions.
+diag_scrub() { sed -E 's/(PASS|FAIL|SKIP):/\1 -/g'; }
+note() { echo "  $*" | diag_scrub; }
+diag_file() { if [ -f "$1" ]; then diag_scrub <"$1"; fi; }
+
 # EXIT trap — kill admin/silo background processes on operator
 # interrupt or bats timeout. Without this, a Ctrl-C between spawn
 # and end-of-script leaves a tier-3-bridged weston-terminal +
@@ -111,6 +122,20 @@ else
     fail "qdshell (qdshell) not running under admin uid"
 fi
 
+# Fail fast when the shell liveness check already failed: every step
+# below drives qdshell (the tier3focus IPC, the CLIPBOARD_GATE /
+# injectFocus journal lines), so with the shell dead each remaining
+# bounded poll would burn its full deadline (~60-90s) on a result that
+# cannot recover. Print the unit state so the TAP shows WHY the shell
+# is gone, then go straight to the failure summary — the failure is
+# already recorded, and the trap still cleans up on the way out.
+if [ "$FAILCOUNT" -gt 0 ]; then
+    systemctl --user --machine=admin@.host show qdshell.service \
+        -p ActiveState,SubState,Result,NRestarts 2>/dev/null | diag_scrub
+    echo "[s48] $PASSCOUNT passes, $FAILCOUNT failures"
+    exit 1
+fi
+
 # --- 4. qdshell bound qdwin_shell_v1 at version >= 14 ----------------
 # Tier3FocusIPC and the v14 set_keyboard_focus path both depend on
 # the bound shell version. Grep the qdshell journal for the bound-v
@@ -175,7 +200,7 @@ ADMIN_HANDLE=$(echo "$ADMIN_TL_LINE" | grep -oE 'handle=[0-9]+' | grep -oE '[0-9
 if [ -n "$ADMIN_HANDLE" ]; then
     pass "admin toplevel registered handle=$ADMIN_HANDLE"
 else
-    cat "$ADMIN_LOG" >&2 || true
+    diag_file "$ADMIN_LOG"
     fail "no admin toplevel_added log within 3s"
 fi
 
@@ -211,7 +236,7 @@ done
 if [ -n "$OBS" ]; then
     pass "silo toplevel registered silo=user1"
 else
-    cat "$SILO_LOG" >&2 || true
+    diag_file "$SILO_LOG"
     fail "no [tier3] toplevel observed silo=user1 log within 20s"
 fi
 
@@ -230,7 +255,7 @@ else
     # the notifier wiring is what matters). The downstream IPC
     # selection-state probe is the load-bearing alternative.
     pass "admin selection recorded by qdshell"
-    echo "  (note: no CLIPBOARD_GATE log; soft-pass — verifier downstream is IPC selectionState)" >&2
+    note "(note: no CLIPBOARD_GATE log; soft-pass — verifier downstream is IPC selectionState)"
 fi
 
 # --- 8. ctrl selection-state via IPC ---------------------------------
@@ -242,7 +267,7 @@ STATE_PRE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
 # (after the M4 fix that removed the dead _last* writes).
 if echo "$STATE_PRE" | grep -q 'tier3_toplevels='; then
     pass "ctrl selection-state shows admin clipboard source"
-    echo "  (IPC reply: $STATE_PRE)" >&2
+    note "(IPC reply: $STATE_PRE)"
 else
     fail "qs ipc call tier3focus selectionState returned unexpected: '$STATE_PRE'"
 fi
@@ -253,7 +278,7 @@ SILO_HANDLE_REPLY=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
 SILO_HANDLE=$(echo "$SILO_HANDLE_REPLY" | grep -oE 'HANDLE=-?[0-9]+' | head -1 | cut -d= -f2)
 if [ -z "$SILO_HANDLE" ] || [ "$SILO_HANDLE" = "-1" ]; then
     fail "Tier3FocusIPC.findSiloHandle returned: '$SILO_HANDLE_REPLY'"
-    echo "  (silo toplevel may not have been observed by qdshell yet)" >&2
+    note "(silo toplevel may not have been observed by qdshell yet)"
     SILO_HANDLE=""
 fi
 
@@ -264,7 +289,7 @@ INJECT_CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
 if [ -n "$SILO_HANDLE" ]; then
     INJECT_REPLY=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         qs "${QS_IPC_ARGS[@]}" call tier3focus injectFocus "$SILO_HANDLE" default 2>&1 | head -1)
-    echo "  (IPC injectFocus reply: $INJECT_REPLY)" >&2
+    note "(IPC injectFocus reply: $INJECT_REPLY)"
     sleep 2
 fi
 
@@ -277,7 +302,17 @@ inject_journal() {
     fi
 }
 
-INJECT_LINE=$(inject_journal | grep -m1 -E "Qdwin ipc injectFocus handle=$SILO_HANDLE|qdwin: set_keyboard_focus seat=default handle=$SILO_HANDLE" || true)
+# The inject-focus breadcrumb is emitted asynchronously (IPC → binding →
+# qdwin set_keyboard_focus), so poll for it — bounded ~15s — rather than
+# the old sleep 2 + single-shot grep, which raced a slow compositor (or
+# a just-restarting qdshell) into a false failure. Same exact-match regex.
+INJECT_LINE=""
+deadline=$(( $(date +%s) + 15 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    INJECT_LINE=$(inject_journal | grep -m1 -E "Qdwin ipc injectFocus handle=$SILO_HANDLE|qdwin: set_keyboard_focus seat=default handle=$SILO_HANDLE" || true)
+    [ -n "$INJECT_LINE" ] && break
+    sleep 0.5
+done
 if [ -n "$INJECT_LINE" ]; then
     pass "qdshell cleared the admin selection on cross-silo focus"
 else
@@ -288,8 +323,15 @@ fi
 # qdwin's v14 set_keyboard_focus handler unconditionally calls
 # weston_seat_set_selection(seat, NULL, fresh_serial). Log line at
 # qdwin/qdwin.c (search "clear" + "selection"). Match any of the
-# canonical clear-selection log patterns.
-CLEAR_LINE=$(inject_journal | grep -m1 -E "qdwin.*(clear_selection|seat_set_selection.*NULL|selection.*cleared)|qdwin: set_keyboard_focus.*handle=$SILO_HANDLE" || true)
+# canonical clear-selection log patterns. Same bounded poll as above —
+# the follow-up log lands right after the inject line.
+CLEAR_LINE=""
+deadline=$(( $(date +%s) + 15 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    CLEAR_LINE=$(inject_journal | grep -m1 -E "qdwin.*(clear_selection|seat_set_selection.*NULL|selection.*cleared)|qdwin: set_keyboard_focus.*handle=$SILO_HANDLE" || true)
+    [ -n "$CLEAR_LINE" ] && break
+    sleep 0.5
+done
 if [ -n "$CLEAR_LINE" ]; then
     pass "weston processed clear_selection request"
 else
@@ -316,11 +358,15 @@ fi
 # --- 12. selection-state post-inject ---------------------------------
 STATE_POST=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     qs "${QS_IPC_ARGS[@]}" call tier3focus selectionState 2>&1 | head -1)
-if [ -n "$STATE_POST" ]; then
+# Same shape check as the STATE_PRE assertion above: a NON-EMPTY error
+# string (e.g. `qs ipc`'s "No running instances for ..." when qdshell
+# died mid-suite) must not read as success — that's how the GH-image
+# run reported "selection-state cleared" on a dead shell.
+if echo "$STATE_POST" | grep -q 'tier3_toplevels='; then
     pass "ctrl selection-state cleared post-focus-change"
-    echo "  (post-IPC reply: $STATE_POST)" >&2
+    note "(post-IPC reply: $STATE_POST)"
 else
-    fail "qs ipc call tier3focus selectionState (post-inject) returned empty"
+    fail "qs ipc call tier3focus selectionState (post-inject) returned unexpected: '$STATE_POST'"
 fi
 
 # --- cleanup handled by trap above ----------------------------------
