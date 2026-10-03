@@ -49,7 +49,7 @@ function maskCommentsAndStrings(src) {
             i++; continue;
         }
         if (c === "/" && c2 === "/") { inLine = true; out[i] = " "; i++; continue; }
-        if (c === "/" && c2 === "*") { inBlock = true; out[i] = " "; i += 2; continue; }
+        if (c === "/" && c2 === "*") { inBlock = true; out[i] = " "; out[i + 1] = " "; i += 2; continue; }
         if (c === '"' || c === "'" || c === "`") { inStr = true; q = c; out[i] = " "; i++; continue; }
         i++;
     }
