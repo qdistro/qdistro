@@ -19,7 +19,11 @@ R55-R61 are the sol r5 fixes (the verdict and every prop/inspect answer are
 the call's complete output file; a killed NSS lookup's printed prefix is no
 result); R49, R50 and A10 were re-targeted at the r5 verdict code (the old
 A10 swapped the now-dead `1)`/`*)` case arms; the verdict can no longer take
-a value other than 0 or 1).
+a value other than 0 or 1). E1-E16 are the Phase B-i GUI waypipe bridge
+guards: the declaration parser, the host client, the launch record, the
+mandatory RegisterLaunch, the podman mount + host-uds flag, the cleanup's
+bridge kill and the .call-* mtime aging, and the probe's bounded foreign-user
+id lookups.
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -736,6 +740,83 @@ MUTATIONS = [
      '    [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \\\n',
      '    [ -n "$AS_UID" ] && { pw="$(timeout 5 getent passwd "$USER_NAME")" || :; } \\\n',
      [f"{TP}::test_a_stalled_nss_answer_is_not_a_lookup"]),
+    # --- Phase B-i: the GUI waypipe bridge (CONTRACT.md §5 step 12). E = the
+    # bE-side launch path: bridge client, launch record, registration, the
+    # podman mount + host-uds flag, and the declaration parser.
+    ("E1 host-uds=open dropped (the mounted socket cannot pass fds)", SPAWN,
+     '    GUI_RTFLAG=(--runtime-flag=host-uds=open)            # bind-mounted unix sockets into the sandbox',
+     '    GUI_RTFLAG=()',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
+      f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E2 the bridge dir is not mounted into the sandbox", SPAWN,
+     '    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:rw")    # the token bridge dir, holding only link.sock',
+     '    GUI_MOUNT=()',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
+      f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E3 RegisterLaunch is warning-only again (tier-3 style)", SPAWN,
+     '''    [ "$reg" = 1 ] \\
+        || refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"''',
+     '''    [ "$reg" = 1 ] || say "warning: RegisterLaunch failed for bridge client pid $INNER_PID"''',
+     [f"{TS}::test_gui_launch_refuses_when_registration_keeps_failing"]),
+    ("E4 the launch record's token is not checked", SPAWN,
+     '            [ "$INNER_TOK" = "$TOKEN" ] && break', '            break',
+     [f"{TS}::test_gui_launch_refuses_a_record_with_another_token"]),
+    ("E5 the bridge client's launch-unit cgroup is not verified", SPAWN,
+     '''    [ "${bcg##*/}" = "$UNIT" ] \\
+        || refuse "bridge client pid $INNER_PID is not in $UNIT's cgroup (${bcg:-?})"''',
+     '    :',
+     [f"{TS}::test_gui_launch_refuses_a_client_outside_the_launch_unit"]),
+    ("E6 the bridge is never killed in teardown", CLEAN,
+     '    kill_bridge\n', '    :\n',
+     [f"{TS}::test_gui_launch_registers_the_bridge_before_podman",
+      f"{TS}::test_gui_bridge_is_torn_down_when_the_launch_fails_after_it"]),
+    ("E7 the workload declaration is sourced, not parsed", SPAWN,
+     'gui_seen=0\nwhile IFS= read -r line || [ -n "$line" ]; do',
+     'gui_seen=0\n. "$WENV"; GUI="${GUI:-0}"\nwhile IFS= read -r line || [ -n "$line" ]; do',
+     [f"{TS}::test_workload_declarations_are_parsed_not_sourced"]),
+    ("E8 a symlinked declaration is followed (test -f resolves it)", SPAWN,
+     '''{ [ -f "$WENV" ] && [ ! -L "$WENV" ]; } \\
+    || refuse "no workload declaration $WENV (every tier3s workload declares GUI=0|1)"''',
+     '''[ -f "$WENV" ] \\
+    || refuse "no workload declaration $WENV (every tier3s workload declares GUI=0|1)"''',
+     [f"{TS}::test_a_symlinked_workload_declaration_refuses"]),
+    ("E9 the compositor precondition is not checked", SPAWN,
+     '''    [ -S "$XDG_RT/$WL_DISPLAY" ] \\
+        || refuse "GUI workload $WORKLOAD but no admin compositor socket at $XDG_RT/$WL_DISPLAY"''',
+     '    :',
+     [f"{TS}::test_gui_launch_without_compositor_refuses"]),
+    ("E10 the image entrypoint is not prepended for a GUI workload", SPAWN,
+     '[ "$GUI" = 1 ] && PODMAN_ARGV+=(qdistro-tier3s-entrypoint)', ':',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint"]),
+    ("E11 RegisterLaunch is tried only once", SPAWN,
+     '    for _ in 1 2 3 4 5; do', '    for _ in 1; do',
+     [f"{TS}::test_gui_launch_registers_after_bounded_retries",
+      f"{TS}::test_gui_launch_refuses_when_registration_keeps_failing"]),
+    ("E12 a reused pid keeps a stale .call- dir again", CLEAN,
+     '''            st="$(starttime "$p")"; mt="$(stat -c %Y -- "$d" 2>/dev/null || :)"''',
+     '''            st=""; mt=""''',
+     [f"{TS}::test_reap_stale_ages_call_dirs_against_pid_reuse"]),
+    ("E13 the foreign-user id lookups are unbounded again", PROBE,
+     [('if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then\n    fail user',
+       'if ! id "$USER_NAME" >/dev/null 2>&1; then\n    fail user'),
+      ('if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then\n    fail state_root',
+       'if ! id "$USER_NAME" >/dev/null 2>&1; then\n    fail state_root'),
+      ('sr_uid="$(timeout 5 id -u "$USER_NAME")"; SR="$SR_BASE/$sr_uid"',
+       'sr_uid="$(id -u "$USER_NAME")"; SR="$SR_BASE/$sr_uid"'),
+      ('AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)"; puid=""; pw=""',
+       'AS_UID="$(id -u "$USER_NAME" 2>/dev/null)"; puid=""; pw=""')], None,
+     [f"{TP}::test_a_wedged_id_lookup_for_the_foreign_user_is_bounded"]),
+    ("E14 the launch record is left behind after registration", SPAWN,
+     '    rm -f -- "$T$LAUNCH_RECORD"\nfi\n\n# --- 12. scope + podman', 'fi\n\n# --- 12. scope + podman',
+     [f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E15 a never-bound bridge socket does not refuse", SPAWN,
+     '    [ -S "$BRIDGE_SOCK" ] || refuse "bridge client did not bind $BRIDGE_SOCK"', '    :',
+     [f"{TS}::test_gui_launch_refuses_when_the_socket_never_binds"]),
+    ("E16 the bridge is armed for a headless workload too", SPAWN,
+     'if [ "$GUI" = 1 ]; then\n    GUI_RTFLAG=(--runtime-flag=host-uds=open)',
+     'if true; then\n    GUI_RTFLAG=(--runtime-flag=host-uds=open)',
+     [f"{TS}::test_headless_plan_has_no_bridge",
+      f"{TS}::test_headless_launch_never_touches_the_bridge"]),
 ]
 
 

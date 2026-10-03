@@ -15,6 +15,7 @@ ExecStopPost, process placement and teardown on a real system are VM facts
 import json
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -285,8 +286,28 @@ exec /usr/bin/getent "$@"
 
 FAKE_DBUS = r'''#!/bin/bash
 F=@F@
-act=""; for a; do case "$a" in string:*) act="${a#string:}" ;; esac; done
+act=""; method=""; args=""
+for a; do
+    case "$a" in
+        org.qdistro.*.*) method="$a" ;;
+        string:*) act="${a#string:}"; args="$args $a" ;;
+        uint64:*) args="$args $a" ;;
+    esac
+done
 echo "dbus-send $act" >> "$F/calls"
+# the full method+args line, for tests that assert registration arguments
+echo "$method$args" >> "$F/dbus_full"
+if [ "$method" = org.qdistro.AdminBroker1.RegisterLaunch ]; then
+    # reg_fail: every attempt fails — a GUI launch must bound its retries and
+    # refuse BEFORE podman. reg_flaky=<n>: the first n-1 attempts fail.
+    if [ -e "$F/reg_fail" ] || [ -e "$F/reg_flaky" ]; then
+        n=$(cat "$F/reg_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$F/reg_n"
+        if [ ! -e "$F/reg_flaky" ] || [ "$n" -lt "$(cat "$F/reg_flaky")" ]; then
+            echo "Error org.qdistro.AdminBroker1.Error.Failed: injected" >&2; exit 1
+        fi
+    fi
+    echo '   uint32 1'; exit 0
+fi
 case "$(cat "$F/dbus_mode" 2>/dev/null)" in
   allow) echo '   string "allow"' ;;
   deny) echo '   string "deny"' ;;
@@ -345,6 +366,84 @@ else echo "RESULT FAIL: first missing prerequisite: state_root (/run/qdistro-tie
 exit "$rc"
 '''
 
+# The GUI bridge halves (CONTRACT.md §5 step 12). qdistro-secctx-exec:
+# refuses without the trusted-launcher env, forks the payload (the waypipe
+# client) as its inner child, publishes "<inner pid> <token>" at
+# $T$QDISTRO_LAUNCH_RECORD_PATH, and puts its own (the wrapper's) fake /proc
+# entry in place — the spawn records the wrapper's starttime at once. Modes:
+# secctx_no_record (the record never appears), secctx_bad_token (the record
+# carries another launch's token), secctx_dead_pid (the record carries a
+# dead pid).
+FAKE_SECCTX = r'''#!/bin/bash
+F=@F@; T=@T@
+umask 022          # the spawn's bridge subshell is umask 0177; fake /proc dirs need +x
+echo "secctx $*" >> "$F/calls"
+[ -n "${QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER:-}" ] || { echo "secctx: untrusted launcher" >&2; exit 2; }
+eng=""; app=""; inst=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sandbox-engine) eng="$2"; shift 2 ;;
+        --app-id) app="$2"; shift 2 ;;
+        --instance-id) inst="$2"; shift 2 ;;
+        --) shift; break ;;
+        *) shift ;;
+    esac
+done
+echo "secctx-id engine=$eng app=$app inst=$inst" >> "$F/calls"
+unit="$(cat "$F/launch_unit")"
+mkdir -p "$T/proc/$$"
+echo "0::/system.slice/$unit" > "$T/proc/$$/cgroup"
+echo "$$ (qdistro-secctx) S $PPID 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 7770 0 0" > "$T/proc/$$/stat"
+trap 'rm -rf "$T/proc/$$"' EXIT
+"$@" &
+inner=$!
+# secctx_dead_pid: the client dies between publishing the record and the
+# registration check — killed and REAPED, so the record carries a real dead
+# pid (and its stale /proc entry goes with it). The wrapper stays up a
+# moment so the record is polled against a live wrapper.
+if [ -e "$F/secctx_dead_pid" ]; then
+    kill -9 "$inner" 2>/dev/null; wait "$inner" 2>/dev/null; rm -rf "$T/proc/$inner"
+    linger=1
+else linger=""
+fi
+rec="$T$QDISTRO_LAUNCH_RECORD_PATH"; tok="$QDISTRO_LAUNCH_RECORD_TOKEN"
+[ ! -e "$F/secctx_no_record" ] || rec=/dev/null
+[ ! -e "$F/secctx_bad_token" ] || tok=00000000000000000000000000000bad
+printf '%s %s\n' "$inner" "$tok" > "$rec"
+[ -z "$linger" ] || sleep 0.5
+wait $inner
+'''
+
+# The waypipe client half: binds the -s socket (a refusal before podman must
+# still see the client die), puts its own fake /proc entry into the launch
+# unit's cgroup (waypipe_bad_cgroup: a foreign one) and stays until killed.
+FAKE_WAYPIPE = r'''#!/bin/bash
+F=@F@; T=@T@
+umask 022          # the spawn's bridge subshell is umask 0177; fake /proc dirs need +x
+echo "waypipe $*" >> "$F/calls"
+sock=""; prev=""
+for a in "$@"; do [ "$prev" = -s ] && sock="$a"; prev="$a"; done
+unit="$(cat "$F/launch_unit")"
+[ ! -e "$F/waypipe_bad_cgroup" ] || unit=other.service
+mkdir -p "$T/proc/$$"
+echo "0::/system.slice/$unit" > "$T/proc/$$/cgroup"
+echo "$$ (waypipe) S $PPID 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 7771 0 0" > "$T/proc/$$/stat"
+short=""
+if [ -n "$sock" ] && [ ! -e "$F/waypipe_no_sock" ]; then
+    # pytest tmp paths exceed sun_path (108): bind a short alias and link it
+    # (production's /run/qdistro-tier3s/<token>/link.sock is always short)
+    bind="$sock"
+    if [ "${#sock}" -gt 100 ]; then short="/tmp/t3s-wp-$$"; bind="$short"; fi
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$bind" \
+        || { echo "fake waypipe: cannot bind $bind" >&2; exit 1; }
+    [ -z "$short" ] || ln -sf "$short" "$sock"
+fi
+sleep 600 &
+sp=$!
+trap 'kill "$sp" 2>/dev/null; [ -z "$short" ] || rm -f "$short"; rm -rf "$T/proc/$$"' EXIT
+wait "$sp"
+'''
+
 
 def write_exec(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +464,11 @@ class World:
         (self.T / "etc/qdistro/profile").write_text("QDISTRO_PROFILE=dev\n")
         lib = self.T / "usr/lib/qdistro/tier3s"
         (lib / "seccomp").mkdir(parents=True)
-        shutil.copyfile(T3S / "seccomp/headless-smoke.json", lib / "seccomp/headless-smoke.json")
+        (lib / "workloads").mkdir(parents=True)
+        for f in (T3S / "seccomp").glob("*.json"):
+            shutil.copyfile(f, lib / "seccomp" / f.name)
+        for f in (T3S / "workloads").glob("*.env"):
+            shutil.copyfile(f, lib / "workloads" / f.name)
         libexec = self.T / "usr/libexec/qdistro"
         libexec.mkdir(parents=True)
         (libexec / "qdistro-tier3s-scope").symlink_to(HELPER)       # the real helper
@@ -382,11 +485,13 @@ class World:
                            ("dbus-send", FAKE_DBUS), ("qdistro-resolve-binding", FAKE_RESOLVER),
                            ("chown", FAKE_CHOWN), ("systemd-notify", FAKE_NOTIFY),
                            ("getent", FAKE_GETENT),
+                           ("qdistro-secctx-exec", FAKE_SECCTX), ("waypipe", FAKE_WAYPIPE),
                            ("rm", FAKE_RM), ("mv", FAKE_MV)):
             write_exec(self.bin / name, fill(text))
         run = self.T / "run"
         for d, mode in (("qdistro-tier3s-ctl", 0o700), ("qdistro-tier3s", 0o755),
-                        ("qdistro-tier3s-runsc", 0o755), (f"qdistro-tier3s-runsc/{UID}", 0o700)):
+                        ("qdistro-tier3s-runsc", 0o755), (f"qdistro-tier3s-runsc/{UID}", 0o700),
+                        (f"user/{UID}", 0o700)):
             (run / d).mkdir(parents=True, exist_ok=True)
             (run / d).chmod(mode)
         self.ctl = run / "qdistro-tier3s-ctl"
@@ -397,6 +502,23 @@ class World:
         (self.T / "proc/self/cgroup").write_text(f"0::/system.slice/{self.unit}\n")
         self.set_unit(self.unit, "active")
         self.set("dbus_mode", "allow")
+        # the fake bridge halves put their /proc entries in this unit's cgroup
+        self.set("launch_unit", self.unit)
+
+    # -- GUI world pieces (CONTRACT.md §5 step 12) --
+    def compositor(self):
+        """An admin compositor socket at $XDG_RUNTIME_DIR/wayland-1."""
+        import socket as _socket
+        s = _socket.socket(_socket.AF_UNIX)
+        s.bind(str(self.T / f"run/user/{UID}/wayland-1"))
+        s.close()          # the bound socket file stays; the spawn only stat()s it
+
+    def launch_record(self, token=None):
+        return self.T / f"run/user/{UID}/qdistro-tier3s-launchrec-{token or self.token}.pid"
+
+    def dbus_full(self):
+        f = self.F / "dbus_full"
+        return f.read_text().splitlines() if f.exists() else []
 
     # -- fake controls --
     def set(self, name, value=""):
@@ -449,9 +571,11 @@ class World:
         r = self.spawn(TIER3S_PRINT_PLAN="1", **kw)
         assert r.returncode == 0, r.stderr
         lines = r.stdout.splitlines()
-        kv = dict(l.split("=", 1) for l in lines if not l.startswith(("PODMAN_ARG=", "SCOPE_ARG=")))
+        kv = dict(l.split("=", 1) for l in lines
+                  if not l.startswith(("PODMAN_ARG=", "SCOPE_ARG=", "BRIDGE_ARG=")))
         kv["podman"] = [l.split("=", 1)[1] for l in lines if l.startswith("PODMAN_ARG=")]
         kv["scope"] = [l.split("=", 1)[1] for l in lines if l.startswith("SCOPE_ARG=")]
+        kv["bridge"] = [l.split("=", 1)[1] for l in lines if l.startswith("BRIDGE_ARG=")]
         return kv
 
     def state(self, token=None):
@@ -1480,8 +1604,12 @@ esac
     assert r.returncode == 0, r.stderr
     assert seen.read_text().strip() == pin
     assert "--tag\nqdistro/tier3s-headless-smoke:latest" in (tmp_path / "seen.args").read_text()
+    # the context stages every recipe input: all Containerfile.*, the repo
+    # helper, the shared GUI entrypoint, the workload scripts, the pin
     assert sorted((tmp_path / "seen.ctx").read_text().split()) == sorted(
-        ["Containerfile.headless-smoke", "SNAPSHOT", "configure-snapshot-repos.sh", "headless-smoke.sh"])
+        [f.name for f in T3S.glob("Containerfile.*")]
+        + ["SNAPSHOT", "configure-snapshot-repos.sh", "qdistro-tier3s-entrypoint",
+           "headless-smoke.sh"])
     assert "IMAGE_ID=imgid" in r.stdout and f"IMAGE_SNAPSHOT={pin}" in r.stdout
     assert not (T3S / "SNAPSHOT").exists()
 
@@ -2072,6 +2200,51 @@ def test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup(w):
     assert not stale.exists() and live_d.exists()
 
 
+def test_reap_stale_ages_call_dirs_against_pid_reuse(w):
+    """A live pid keeps a .call-<pid>-* dir only while the dir is at least as
+    new as THAT incarnation's start: an older dir is a dead run's leftover
+    (pid reuse, fable A r3 P3-5 tightened in r5)."""
+    live = 4194301
+    d = w.T / f"proc/{live}"; d.mkdir()
+    # field 20 starttime = 50000 ticks; CLK_TCK=100 -> start epoch btime + 500
+    (d / "stat").write_text(
+        f"{live} (cleanup) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 50000 0 0\n")
+    (w.T / "proc/stat").write_text("cpu 0\nbtime 1000000\n")
+    old = w.ctl / f".call-{live}-abcdef"; old.mkdir(); (old / "out").write_text("x")
+    fresh = w.ctl / f".call-{live}-ghijkl"; fresh.mkdir()
+    os.utime(old, (1000400, 1000400))     # older than the live pid's start
+    os.utime(fresh, (1000600, 1000600))   # newer: could be this incarnation's
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 0, r.stderr
+    assert not old.exists() and fresh.exists()
+
+
+def test_cleanup_preserves_the_record_while_a_recorded_bridge_pid_lives(w):
+    """A bridge process outside the launch scope, still live at its recorded
+    starttime, is a teardown failure: the record is preserved (Phase B-i)."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke",
+                  record={"bridge_wrapper_pid": "4194302",
+                          "bridge_wrapper_starttime": "7770"})
+    d = w.T / "proc/4194302"; d.mkdir()
+    (d / "stat").write_text(
+        "4194302 (waypipe) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 7770 0 0\n")
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 7 and "bridge_wrapper 4194302 is alive" in r.stderr, r.stderr
+    assert (w.ctl / TOKEN / "state").exists()
+
+
+def test_cleanup_removes_a_recorded_launch_record(w):
+    """The RegisterLaunch record under the admin XDG_RUNTIME_DIR is swept with
+    the launch (CONTRACT.md B-i cleanup)."""
+    lr = w.T / f"run/user/{UID}/launchrec.pid"; lr.parent.mkdir(exist_ok=True)
+    lr.write_text("1 x")
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke",
+                  record={"launch_record": f"/run/user/{UID}/launchrec.pid"})
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 0, r.stderr
+    assert not lr.exists()
+
+
 # --- astra A r2 #3 / fable A r2 P3-3: deadlines and waits are by the clock
 
 def test_reap_stale_deadline_covers_the_orphan_dirs(w):
@@ -2184,3 +2357,271 @@ def test_unpublished_record_is_removed_under_the_global_lock(w):
     assert not list(w.ctl.glob(".new-*"))
     rms = [c for c in w.calls() if c.startswith("rm .new")]
     assert rms and rms[-1] == "rm .new locked", rms
+
+
+# ================= Phase B-i: the GUI waypipe bridge =========================
+# CONTRACT.md §5 step 12: a workload whose declaration says GUI=1 gets a
+# host-side waypipe client (runuser -> env -> qdistro-secctx-exec -> waypipe
+# client) in the launch unit's cgroup, a launch record, RegisterLaunch before
+# podman, the bridge dir mounted at /run/qdistro/link and host-uds=open.
+
+GUI_ARGV = ["foot", "--", "foot"]
+WT_ARGV = ["weston-terminal", "--", "weston-terminal"]
+
+
+def bridge_call(w):
+    for i, c in enumerate(w.calls()):
+        if "qdistro-secctx-exec" in c:
+            return i, c
+    return None, None
+
+
+def test_gui_plan_adds_bridge_flag_mount_and_entrypoint(w):
+    p = w.plan(argv=GUI_ARGV)
+    pa = p["podman"]
+    assert p["GUI"] == "1"
+    assert "--runtime-flag=host-uds=open" in pa
+    i = pa.index("-v")
+    assert pa[i + 1] == f"{w.launch_parent}/{TOKEN}:/run/qdistro/link:rw"
+    assert pa[-3:] == ["localhost/qdistro/tier3s-foot:latest",
+                       "qdistro-tier3s-entrypoint", "foot"]
+    ba = p["bridge"]
+    assert ba[:4] == ["runuser", "-u", ME, "--"] and ba[4] == "env" and ba[5] == "-i"
+    se = ba.index("qdistro-secctx-exec")
+    assert ba[se:se + 6] == ["qdistro-secctx-exec", "--sandbox-engine", "qdistro.tier3s",
+                             "--app-id", f"qdistro.tier3s.{w.silo}", "--instance-id"]
+    assert ba[se + 6] == TOKEN and ba[se + 7] == "--"
+    assert ba[-8:] == ["waypipe", "-s", f"{w.launch_parent}/{TOKEN}/link.sock",
+                       "-o", "--no-gpu", "--title-prefix", "[3s:smoke] ", "client"]
+    # the launch record env the secctx wrapper publishes to
+    assert any(a.startswith("QDISTRO_LAUNCH_RECORD_PATH=/run/user/") and a.endswith(
+        f"launchrec-{TOKEN}.pid") for a in ba)
+
+
+def test_headless_plan_has_no_bridge(w):
+    p = w.plan()
+    pa = p["podman"]
+    assert p["GUI"] == "0" and p["bridge"] == []
+    assert "--runtime-flag=host-uds=open" not in pa
+    assert not any(a.startswith(f"{w.launch_parent}") or "/run/qdistro/link" in a for a in pa)
+    assert pa[-2:] == ["localhost/qdistro/tier3s-headless-smoke:latest", "qdistro-tier3s-smoke"]
+
+
+def test_gui_launch_registers_the_bridge_before_podman(w):
+    w.compositor()
+    w.set("run_block")
+    p = w.start(argv=GUI_ARGV)
+    try:
+        wait_for(lambda: w.first("systemd-run") is not None, "podman launch", p)
+        calls = w.calls()
+        bi, bc = bridge_call(w)
+        assert bi is not None, calls
+        assert "runuser -u" in bc and "-- waypipe" in bc and "client" in bc
+        reg = w.first("dbus-send tier3s")
+        assert reg is not None and bi < reg < w.first("systemd-run"), calls
+        full = [l for l in w.dbus_full() if "RegisterLaunch" in l]
+        assert len(full) == 1, full
+        f = full[0]
+        assert f"string:{w.silo}" in f and "string:qdistro.tier3s " in f \
+            and f"string:qdistro.tier3s.{w.silo}" in f and f"string:{TOKEN}" in f \
+            and "string:tier3s" in f and "uint64:0" in f, f
+        st = w.state()
+        assert st["gui"] == "1" and st["launch_record"].endswith(f"launchrec-{TOKEN}.pid")
+        assert re.fullmatch(r"[0-9]+", st["bridge_client_pid"])
+        assert re.fullmatch(r"[0-9]+", st["bridge_client_starttime"])
+        assert re.fullmatch(r"[0-9]+", st["bridge_wrapper_pid"])
+        # the registered pid IS the waypipe client pid
+        assert f"uint64:{st['bridge_client_pid']}" in f
+        # the launch record is consumed once registration succeeded
+        assert not w.launch_record().exists()
+        assert (w.T / f"proc/{st['bridge_client_pid']}").exists()
+        # identity: the secctx tag and the title prefix reached the client
+        ident = [c for c in calls if c.startswith("secctx-id")]
+        assert ident and f"app=qdistro.tier3s.{w.silo}" in ident[0] \
+            and f"inst={TOKEN}" in ident[0] and "engine=qdistro.tier3s" in ident[0], ident
+        assert "[3s:smoke]" in bc
+        podman_run = [c for c in calls if c.startswith("podman") and " run " in c]
+        assert podman_run and "--runtime-flag=host-uds=open" in podman_run[0], podman_run
+        ra = (w.F / "run_argv").read_text()
+        assert f"{w.launch_parent}/{TOKEN}:/run/qdistro/link:rw" in ra
+        assert "qdistro-tier3s-entrypoint" in ra
+        w.set("release")
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 0, err
+        assert w.launch_gone(TOKEN)
+        assert not (w.T / "proc" / st["bridge_client_pid"]).exists(), "bridge client left behind"
+        assert not (w.T / "proc" / st["bridge_wrapper_pid"]).exists(), "bridge wrapper left behind"
+        assert not w.launch_record().exists()
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+def test_gui_launch_without_compositor_refuses(w):
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "no admin compositor socket" in r.stderr, r.stderr
+    assert w.first("dbus-send") is None and w.first("systemd-run") is None
+    assert bridge_call(w)[0] is None
+
+
+def test_gui_launch_registers_after_bounded_retries(w):
+    w.compositor()
+    w.set("reg_flaky", "3")          # attempts 1 and 2 fail, 3rd registers
+    w.set("run_block")
+    p = w.start(argv=GUI_ARGV)
+    try:
+        wait_for(lambda: w.first("systemd-run") is not None, "podman launch", p)
+        regs = [l for l in w.dbus_full() if "RegisterLaunch" in l]
+        assert len(regs) == 3, regs
+        w.set("release")
+        p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0
+
+
+def test_gui_launch_refuses_when_registration_keeps_failing(w):
+    w.compositor()
+    w.set("reg_fail")
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "RegisterLaunch failed" in r.stderr, r.stderr
+    regs = [l for l in w.dbus_full() if "RegisterLaunch" in l]
+    assert len(regs) == 5, regs                     # bounded: exactly five tries
+    assert w.first("systemd-run") is None           # refused BEFORE podman run
+    assert w.launch_gone(TOKEN)
+    # the bridge client+wrapper were started, recorded, then torn down
+    assert bridge_call(w)[0] is not None
+    left = [p for p in (w.T / "proc").iterdir() if p.name != "self"]
+    assert left == [], f"bridge leftovers: {[p.name for p in left]}"
+    assert not w.launch_record().exists()
+
+
+def test_gui_launch_refuses_a_record_with_another_token(w):
+    w.compositor()
+    w.set("secctx_bad_token")
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "did not publish a live pid" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None
+    assert w.launch_gone(TOKEN)
+    left = [p for p in (w.T / "proc").iterdir() if p.name != "self"]
+    assert left == [], f"bridge leftovers: {[p.name for p in left]}"
+
+
+def test_gui_launch_refuses_a_record_with_a_dead_pid(w):
+    w.compositor()
+    w.set("secctx_dead_pid")
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "did not publish a live pid" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None and w.launch_gone(TOKEN)
+
+
+def test_gui_launch_refuses_a_record_never_published(w):
+    w.compositor()
+    w.set("secctx_no_record")
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "did not publish a live pid" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None
+    left = [p for p in (w.T / "proc").iterdir() if p.name != "self"]
+    assert left == [], f"bridge leftovers: {[p.name for p in left]}"
+
+
+def test_gui_launch_refuses_a_client_outside_the_launch_unit(w):
+    w.compositor()
+    w.set("waypipe_bad_cgroup")
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "is not in" in r.stderr and "cgroup" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None and w.launch_gone(TOKEN)
+
+
+def test_gui_launch_refuses_when_the_socket_never_binds(w):
+    w.compositor()
+    w.set("waypipe_no_sock")
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "did not bind" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None and w.launch_gone(TOKEN)
+
+
+def test_headless_launch_never_touches_the_bridge(w):
+    w.compositor()
+    w.set("run_block")
+    p = w.start()
+    try:
+        wait_for(lambda: w.first("systemd-run") is not None, "podman launch", p)
+        assert bridge_call(w)[0] is None
+        assert w.first("waypipe") is None
+        assert not [l for l in w.dbus_full() if "RegisterLaunch" in l]
+        ra = (w.F / "run_argv").read_text()
+        assert "host-uds" not in ra and "/run/qdistro/link" not in ra
+        st = w.state()
+        assert "gui" not in st and "bridge_client_pid" not in st
+        w.set("release")
+        p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0
+
+
+@pytest.mark.parametrize("content", [
+    "GUI=2\n",                       # a value other than 0|1
+    "GUI=1\nGUI=0\n",                # duplicate assignment
+    "# only a comment\n",            # no GUI declaration at all
+    "GUI=1; rm -rf /\n",             # parsed, never sourced: trailing junk is malformed
+    "GUI =1\n",                      # whitespace around the key
+])
+def test_malformed_workload_declaration_refuses(w, content):
+    w.compositor()
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    f.write_text(content)
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "declaration" in r.stderr, r.stderr
+    assert w.first("dbus-send") is None and w.first("systemd-run") is None
+    assert bridge_call(w)[0] is None
+
+
+def test_missing_workload_declaration_refuses(w):
+    w.compositor()
+    (w.T / "usr/lib/qdistro/tier3s/workloads/foot.env").unlink()
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "declaration" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None
+
+
+def test_a_symlinked_workload_declaration_refuses(w):
+    w.compositor()
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    target = w.T / "elsewhere.env"; target.write_text("GUI=1\n")
+    f.unlink(); f.symlink_to(target)
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "declaration" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None
+
+
+def test_workload_declarations_are_parsed_not_sourced(w):
+    """A declaration is data: shell syntax in it must never execute."""
+    w.compositor()
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    f.write_text('GUI=1\n$(touch "$T/proof-sourced")\n')
+    r = w.spawn(argv=GUI_ARGV)
+    # the second line is malformed -> refusal; the marker proves nothing ran
+    assert r.returncode == 2
+    assert not list(w.T.glob("proof*")) and not (w.F / "proof-sourced").exists()
+
+
+def test_gui_bridge_is_torn_down_when_the_launch_fails_after_it(w):
+    """The bridge is up before podman; a podman-run failure still kills it."""
+    w.compositor()
+    w.set("run_rc", "3")
+    p = w.start(argv=GUI_ARGV)
+    try:
+        wait_for(lambda: w.first("systemd-run") is not None, "podman launch", p)
+        st = w.state()
+        bpid = st["bridge_client_pid"]
+        out, err = p.communicate(timeout=30)
+        assert p.returncode != 0
+        assert not (w.T / "proc" / bpid).exists(), "bridge client survived a failed launch"
+        assert w.launch_gone(TOKEN)
+    finally:
+        if p.poll() is None:
+            p.kill()

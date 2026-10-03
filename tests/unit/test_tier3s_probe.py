@@ -30,7 +30,7 @@ def sha(p):
     return hashlib.sha512(Path(p).read_bytes()).hexdigest()
 
 
-def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
+def run(root, user=None, pin=None, path_prepend=None, extra_env=None, timeout=None):
     env = dict(os.environ, QDISTRO_PROBE_ROOT=str(root))
     if pin is not None:
         env["QDISTRO_PROBE_PIN"] = str(pin)
@@ -38,7 +38,7 @@ def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
         env["PATH"] = f"{path_prepend}:{env['PATH']}"
     env.update(extra_env or {})
     args = ["bash", str(SCRIPT), "--user", user or ME]
-    return subprocess.run(args, env=env, capture_output=True, text=True)
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
 
 
 def fake_runsc(marker, version=VERSION, rc=0, salt="", text="executed"):
@@ -501,3 +501,23 @@ def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):
     r = run(inst.root, user=other.pw_name, pin=inst.pin, path_prepend=f"{b}:{inst.bin}")
     assert "FAIL nss:" in r.stdout, r.stdout
     assert not marker.exists(), "a killed NSS lookup still reached runuser"
+
+
+def test_a_wedged_id_lookup_for_the_foreign_user_is_bounded(tmp_path):
+    """fable A r3 P3-2, applied to id/id -u: EVERY foreign-user NSS lookup in
+    the probe is bounded — a wedged provider hangs the spawn's probe (and the
+    launch unit's start) otherwise. The fake id wedges only on a name
+    argument, so self-lookups (id -u / id -un) still work."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        "sleep 600\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 45, "a wedged NSS lookup hung the probe"
+    assert "FAIL" in r.stdout, r.stdout
