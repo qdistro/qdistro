@@ -1,0 +1,45 @@
+#!/usr/bin/env bats
+# §Phase-7 tier 3s (gVisor runsc), todo/paravirt Phase B milestone B-iii:
+# compositor security-context chrome (driver s126-tier3s-chrome-secctx.sh).
+# DONE bar items: "per-interface compositor security checks validate the
+# actual tagged peer" — the compositor's toplevel_security_context /
+# toplevel_peer_identity journal lines name the real bridge client's
+# (pid, starttime, uid); qdshell derives the silo and paints the
+# deterministic palette colour; the same secctx tag hides the privileged
+# wl_registry globals (shell/layer-shell/locker/nested-manager/secctx
+# manager/capture) from tier3s-tagged clients while an untagged admin
+# client still sees them.
+
+load helpers
+load tier3s
+
+setup_file() {
+    t3s_setup_file s126-tier3s-chrome-secctx.sh weston-terminal
+}
+
+teardown_file() {
+    t3s_teardown_file
+}
+
+@test "phase7-tier3s-chrome-secctx: tagged-peer metadata, chrome colour, per-interface global gating" {
+    t3s_run_driver s126-tier3s-chrome-secctx.sh
+    t3s_log s126
+    assert_success
+    t3s_no_failures s126
+    assert_output_contains "PASS: launch up ("
+    assert_output_contains "PASS: compositor: toplevel_security_context carries engine/app_id/instance=token"
+    assert_output_contains "PASS: compositor: toplevel_peer_identity names pid+starttime+uid of the real bridge client"
+    assert_output_contains "PASS: qdshell logged the deterministic palette colour for s126a"
+    assert_output_contains "PASS: Tier3FocusIPC rejects a non-tier handle (9999)"
+    assert_output_contains "PASS: audit: register row for s126a"
+    for g in qdwin_shell_v1 zwlr_layer_shell_v1 qdwin_nested_manager_v1 qdwin_locker_v1 \
+             zwp_input_method_manager_v2 zwp_virtual_keyboard_manager_v1; do
+        assert_output_contains "PASS: plain admin sees $g"
+        assert_output_contains "PASS: tier3s-tagged client does NOT see $g"
+    done
+    for g in wp_security_context_manager_v1 weston_capture_v1; do
+        assert_output_contains "PASS: plain admin does NOT see $g (shell-only)"
+        assert_output_contains "PASS: tier3s-tagged client does NOT see $g"
+    done
+    assert_output_contains "PASS: compositor logged the probe's tagged client acceptance"
+}
