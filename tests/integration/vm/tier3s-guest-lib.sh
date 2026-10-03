@@ -600,17 +600,17 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 
 # bridge_stream_live <token> — the waypipe client runs with -o (one shot):
 # it unlinks $LAUNCHES/<token>/link.sock the moment the sandbox's waypipe
-# server attaches, so post-attach the live proof is not the pathname but
-# the established stream itself. The host's /proc/net/unix does NOT show
-# the channel (runsc host-uds=open proxies it through the gofer), so the
-# proof reads the SANDBOX's own unix table: an established socket on
-# /run/qdistro/link/link.sock is the waypipe server's live channel.
+# server attaches, so post-attach the live proof is FUNCTIONAL, not the
+# pathname: run a fresh wayland client inside the sandbox (wayland-info is
+# in every GUI image via wayland-utils) — it only lists the compositor's
+# globals if the whole chain app-socket -> waypipe server -> link.sock ->
+# host client -> compositor is live.
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
     local tok="$1" ctr
     ctr=$(rec "$tok" container)
     [ -n "$ctr" ] || return 1
-    pm exec "$ctr" cat /proc/net/unix 2>/dev/null \
-        | awk '$6=="03" && /link\.sock/ {found=1} END{exit !found}'
+    pm exec "$ctr" env XDG_RUNTIME_DIR=/run/user/1000 wayland-info 2>/dev/null \
+        | grep -q "wl_compositor\|xdg_wm_base\|wl_seat"
 }
 
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
@@ -634,11 +634,11 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     is "$tag: bridge client + wrapper in the launch unit cgroup" \
         "$(for p in "$bp" "$wp"; do sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null; done | grep -c "/${unit}$")" 2
     if bridge_stream_live "$tok"; then
-        pass "$tag: bridge channel live (sandbox-side link.sock stream established)"
+        pass "$tag: bridge channel live (in-sandbox wayland-info lists host globals)"
     else
-        pm exec "$(rec "$tok" container)" cat /proc/net/unix 2>&1 \
-            | sed 's/^/    sandbox-unix: /' | head -20
-        fail "$tag: no established link.sock stream in the sandbox's unix table"
+        pm exec "$(rec "$tok" container)" env XDG_RUNTIME_DIR=/run/user/1000 \
+            wayland-info 2>&1 | sed 's/^/    wayland-info: /' | head -10
+        fail "$tag: an in-sandbox wayland client cannot reach the host compositor"
     fi
 }
 
