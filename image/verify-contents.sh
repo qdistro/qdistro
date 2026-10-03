@@ -542,6 +542,15 @@ check_line "compositor unit loads vendored libweston" \
     '^Environment=LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64'
 check_req "qdshell.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdshell.service
+# The XDG "default" cursor theme must resolve or libXcursor finds nothing
+# and the pointer is invisible (weston: "theme=(default) loaded=0/36").
+# The overlay ships default/index.theme Inherits=Adwaita; neither
+# adwaita-icon-theme nor xcursor-themes provides it (2026-10-03).
+check_req "default cursor theme resolves (index.theme)" \
+    /usr/share/icons/default/index.theme
+# pkexec is a standalone package on Tumbleweed; tier-3/tier-5 launcher
+# entries and the chain-installed polkit actions exec through it.
+check_req "pkexec (tier-3/5 launcher polkit exec)" /usr/bin/pkexec
 check_req "qdlocker.service (admin user unit)" \
     /home/admin/.config/systemd/user/qdlocker.service
 

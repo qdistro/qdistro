@@ -55,6 +55,7 @@ PYLIB="$(printf 'glob echo /usr/lib/python3*\n' | guestfish --ro -a "$RAW" -i \
 PATHS=(
     /etc
     /usr/bin/qdgreeter /usr/bin/qdlocker /usr/bin/qterminator /usr/bin/qfileman
+    /usr/bin/pkexec /usr/share/icons/default
     /usr/libexec/qdistro
     /usr/local
     /usr/lib/qdistro /usr/lib/systemd /usr/lib/os-release

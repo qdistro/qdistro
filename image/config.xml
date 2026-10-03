@@ -226,6 +226,14 @@
     <package name="libXcursor1"/>
     <package name="adwaita-icon-theme"/>
     <package name="xcursor-themes"/>
+    <!-- pkexec is its own package on Tumbleweed (split out of polkit; polkit
+         does not Recommend it). Every tier-3/tier-5 launcher entry invokes
+         the spawn helper through `pkexec`, and the chain installs the
+         polkit actions for it — without the package the launcher entries
+         all die with "binary could not be found". Baseweed test VMs still
+         carry it from before the split, which is why the gap only shows on
+         the shipped image. -->
+    <package name="pkexec"/>
     <package name="python313"/>
     <package name="python313-pip"/>
     <package name="python313-pywayland"/>
