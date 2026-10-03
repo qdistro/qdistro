@@ -39,6 +39,14 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+# Diagnostics MUST go to stdout: the bats wrapper runs this driver with
+# `2>/dev/null`, so anything on stderr is silently dropped from the TAP.
+# Captured log content passes through diag_scrub, which rewrites the
+# PASS:/FAIL:/SKIP: prefixes (colon -> " -") so a raw dump can never
+# satisfy or trip the wrapper's substring assertions.
+diag_scrub() { sed -E 's/(PASS|FAIL|SKIP):/\1 -/g'; }
+diag_file() { if [ -f "$1" ]; then diag_scrub <"$1"; fi; }
+
 # --- Source unpacked by fresh-vm-bootstrap.sh -----------------------------
 SRC=/root/qdistro-src
 # Stage tier2/ scripts under /tmp where the unprivileged admin user can
@@ -127,7 +135,7 @@ for _ in $(seq 1 30); do
     sleep 0.5
 done
 if ! runuser -u admin -- podman ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
-    cat /tmp/s60-spawn.log >&2 || true
+    diag_file /tmp/s60-spawn.log
     fail "container '$CONTAINER' did not start within 15s"
     runuser -u admin -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
     rm -f "$SPAWN_OUT" /tmp/s60-spawn.log 2>/dev/null || true
@@ -147,7 +155,7 @@ if QDISTRO_PODAPPS_AS_USER=admin bash "$TIER2_DIR/podapps-scan.sh" "$CONTAINER" 
         fail "podapps cache empty for '$CONTAINER' ($APPS_JSON)"
     fi
 else
-    cat /tmp/s60-scan.log >&2 || true
+    diag_file /tmp/s60-scan.log
     fail "podapps-scan failed for '$CONTAINER'"
 fi
 

@@ -59,6 +59,17 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+# Diagnostics MUST go to stdout: the bats wrapper runs this driver with
+# `2>/dev/null`, so anything on stderr is silently dropped from the TAP
+# (this is how the GH-image failures lost every injectFocus reply and
+# failure-path journal excerpt). Captured log/journal content passes
+# through diag_scrub, which rewrites the PASS:/FAIL:/SKIP: prefixes
+# (colon -> " -") so a raw dump can never satisfy or trip the wrapper's
+# substring assertions.
+diag_scrub() { sed -E 's/(PASS|FAIL|SKIP):/\1 -/g'; }
+note() { echo "  $*" | diag_scrub; }
+diag_file() { if [ -f "$1" ]; then diag_scrub <"$1"; fi; }
+
 # EXIT trap — kill background source/silo processes on interrupt or bats
 # timeout so a half-finished run can't poison qdwin's secctx state for the
 # next test (same class as the s46-leaked-clipboard-source incident).
@@ -133,6 +144,20 @@ else
     fail "qdshell (qdshell) not running under admin uid"
 fi
 
+# Fail fast when the shell liveness check already failed: every step
+# below drives qdshell (the tier3focus IPC, the CLIPBOARD_FOCUS_GATE
+# journal lines), so with the shell dead each remaining bounded poll
+# would burn its full deadline (~60-90s) on a result that cannot
+# recover. Print the unit state so the TAP shows WHY the shell is
+# gone, then go straight to the failure summary — the failure is
+# already recorded, and the trap still cleans up on the way out.
+if [ "$FAILCOUNT" -gt 0 ]; then
+    systemctl --user --machine=admin@.host show qdshell.service \
+        -p ActiveState,SubState,Result,NRestarts 2>/dev/null | diag_scrub
+    echo "[s49] $PASSCOUNT passes, $FAILCOUNT failures"
+    exit 1
+fi
+
 # --- 4. qdshell bound qdwin_shell_v1 at version >= 14 ----------------
 # v14 carries set_keyboard_focus + seat_focus_changed, which is the event
 # that drives _onSeatFocusChanged. Without it the focus-clear decision never
@@ -204,7 +229,7 @@ CROSS_HANDLE=$(silo_handles user2 | head -1)
 if [ -n "$CROSS_HANDLE" ]; then
     pass "cross-silo (user2) destination toplevel registered handle=$CROSS_HANDLE"
 else
-    cat /tmp/s49-cross.log >&2 || true
+    diag_file /tmp/s49-cross.log
     fail "no [tier3] toplevel observed silo=user2 within 5s"
 fi
 
@@ -224,7 +249,7 @@ SILO_HANDLE_B="${SILO_HANDLES[1]:-}"
 if [ -n "$SILO_HANDLE_A" ]; then
     pass "silo toplevel registered silo=user1 handle=$SILO_HANDLE_A"
 else
-    cat /tmp/s49-silo-a.log >&2 || true
+    diag_file /tmp/s49-silo-a.log
     fail "no [tier3] toplevel observed silo=user1 within 5s"
 fi
 
@@ -258,13 +283,13 @@ SET_LINE=$(journal_after | grep -E 'CLIPBOARD_GATE .*src_silo=' \
     | grep -v 'src_silo=unknown' | tail -1 || true)
 if [ -n "$SET_LINE" ]; then
     pass "qdshell recorded selection with known source silo"
-    echo "  ($SET_LINE)" >&2
+    note "($SET_LINE)"
 else
     # Soft-pass: the wire-sourced silo recording can land without a
     # CLIPBOARD_GATE line if the set-time path short-circuits; the
     # load-bearing assertion is the CLIPBOARD_FOCUS_GATE line in step 8.
     pass "qdshell recorded selection with known source silo"
-    echo "  (note: no non-unknown CLIPBOARD_GATE line seen; relying on focus-gate assertion below)" >&2
+    note "(note: no non-unknown CLIPBOARD_GATE line seen; relying on focus-gate assertion below)"
 fi
 
 # ====================================================================
@@ -273,8 +298,7 @@ fi
 A_CURSOR=$(journal_cursor)
 if [ -n "$CROSS_HANDLE" ]; then
     INJECT_A=$(qs_ipc call tier3focus injectFocus "$CROSS_HANDLE" default)
-    echo "  (injectFocus → user2 reply: $INJECT_A)" >&2
-    sleep 2
+    note "(injectFocus → user2 reply: $INJECT_A)"
 fi
 
 # The qdshell decision: focus crossed user1 → user2 (cross-silo), so
@@ -284,14 +308,26 @@ fi
 # user1→user2 transition fired, not a stray gate event. The trailing space after
 # each silo name is the field separator in the Logger.i line, so it also keeps
 # user1/user2 from prefix-matching a hypothetical user10/user20.
-FOCUS_GATE_LINE=$(journal_after "$A_CURSOR" \
-    | grep -m1 -E 'CLIPBOARD_FOCUS_GATE .*src_silo=user1 .*dst_silo=user2 .*verdict=deny.*reason=focus-cross-silo' \
-    || true)
+#
+# The line is emitted asynchronously (injectFocus → qdwin
+# set_keyboard_focus → seat_focus_changed → _onSeatFocusChanged →
+# _logFocusClear), so poll for it — bounded ~15s — rather than the old
+# sleep 2 + single-shot grep, which raced a slow compositor (or a
+# just-restarting qdshell) into a false failure. Same exact-match regex.
+FOCUS_GATE_LINE=""
+deadline=$(( $(date +%s) + 15 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    FOCUS_GATE_LINE=$(journal_after "$A_CURSOR" \
+        | grep -m1 -E 'CLIPBOARD_FOCUS_GATE .*src_silo=user1 .*dst_silo=user2 .*verdict=deny.*reason=focus-cross-silo' \
+        || true)
+    [ -n "$FOCUS_GATE_LINE" ] && break
+    sleep 0.5
+done
 if [ -n "$FOCUS_GATE_LINE" ]; then
     pass "qdshell logged CLIPBOARD_FOCUS_GATE on cross-silo focus"
-    echo "  ($FOCUS_GATE_LINE)" >&2
+    note "($FOCUS_GATE_LINE)"
 else
-    journal_after "$A_CURSOR" | grep -E 'CLIPBOARD_FOCUS_GATE|injectFocus|set_keyboard_focus' >&2 || true
+    journal_after "$A_CURSOR" | grep -E 'CLIPBOARD_FOCUS_GATE|injectFocus|set_keyboard_focus' | diag_scrub || true
     fail "no CLIPBOARD_FOCUS_GATE deny line after cross-silo focus injection"
 fi
 
@@ -330,7 +366,7 @@ else
     STATE_POST=$(qs_ipc call tier3focus selectionState)
     if [ -n "$STATE_POST" ]; then
         pass "destination paste empty after focus-clear"
-        echo "  (wl-paste absent; IPC selectionState: $STATE_POST)" >&2
+        note "(wl-paste absent; IPC selectionState: $STATE_POST)"
     else
         fail "selectionState empty/unavailable post-clear"
     fi
@@ -352,7 +388,7 @@ if [ -z "$SILO_HANDLE_B" ]; then
     # clear"` would let the lane go green without ever proving same-silo paste
     # survives (strict ≠ clear-on-any-focus-change). The two user1 windows come
     # up reliably (proven on VM), so a missing one is a real failure to surface.
-    cat /tmp/s49-silo-b.log >&2 || true
+    diag_file /tmp/s49-silo-b.log
     fail "same-silo negative control could not run: second user1 toplevel (SILO_HANDLE_B) never observed"
 else
     kill -KILL "$SRC_PID" 2>/dev/null || true; wait "$SRC_PID" 2>/dev/null || true
@@ -367,7 +403,7 @@ else
 
     B_CURSOR=$(journal_cursor)
     INJECT_B=$(qs_ipc call tier3focus injectFocus "$SILO_HANDLE_B" default)
-    echo "  (injectFocus → user1 B reply: $INJECT_B)" >&2
+    note "(injectFocus → user1 B reply: $INJECT_B)"
     sleep 2
 
     SAME_SILO_CLEAR=$(journal_after "$B_CURSOR" \
@@ -375,7 +411,7 @@ else
     if [ -z "$SAME_SILO_CLEAR" ]; then
         pass "same-silo focus change did NOT clear"
     else
-        echo "  (unexpected: $SAME_SILO_CLEAR)" >&2
+        note "(unexpected: $SAME_SILO_CLEAR)"
         fail "same-silo focus change wrongly logged a CLIPBOARD_FOCUS_GATE clear"
     fi
 fi

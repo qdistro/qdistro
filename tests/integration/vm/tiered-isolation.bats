@@ -456,7 +456,7 @@ setup() {
     run_driver_keep_stderr s64 s64-tier2-template-snapshot-e2e.sh
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-2 template stack / mkfs.btrfs / btrfs subvolume support not available on this VM"
+        fail_loud "tier-2 template stack / mkfs.btrfs / btrfs subvolume support not available on this VM — driver reported: $(driver_skip_reason)"
     fi
     assert_output_contains "PASS: silo state created as a btrfs subvolume (mechanism=subvolume)"
     assert_output_contains "PASS: gen2 activation flipped the marker"
@@ -556,7 +556,7 @@ setup() {
     vm_run "curl -fsS -o /tmp/s60.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s60-tier3-lineage-register.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-3 stack (waypipe / weston-terminal / qdistro-secctx-exec / user1 silo / broker audit db) not available on this VM"
+        fail_loud "tier-3 stack (waypipe / weston-terminal / qdistro-secctx-exec / user1 silo / broker audit db) not available on this VM — driver reported: $(driver_skip_reason)"
     fi
     assert_output_contains "PASS: tier3 prerequisites present"
     assert_output_contains "PASS: broker up (enforce posture set)"
@@ -1062,7 +1062,7 @@ setup() {
     vm_run "curl -fsS -o /tmp/s53.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s53-data-offer-receive-v15.sh && chmod +x /tmp/s53.sh && bash /tmp/s53.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "qdistro-test-clipboard-sink absent or v15 binding missing"
+        fail_loud "qdistro-test-clipboard-sink absent or v15 binding missing — driver reported: $(driver_skip_reason)"
     fi
     assert_output_contains "PASS: qdshell bound qdwin_shell_v1 at version >= 15"
     assert_output_contains "PASS: qdwin installed v15 data_source send-shim"

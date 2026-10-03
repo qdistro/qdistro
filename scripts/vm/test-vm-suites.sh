@@ -540,6 +540,18 @@ baseline() {
             for u in $usr; do systemctl --user -M admin@ is-active --quiet "$u" || return 1; done
             test -S /run/user/1000/wayland-1
         }
+        # Per-file unit forensics BEFORE any recovery below: the next
+        # mid-file qdshell death should be self-explaining in this TAP —
+        # ActiveState/SubState/Result/NRestarts/ExecMainStatus show whether
+        # the shell exited clean (Result=success, which Restart= always
+        # now respawns), died on-failure, or hit its start-limit, and
+        # whether the compositor restarted underneath it. Additive
+        # diagnostics only; recovery logic below is unchanged.
+        for u in qdwin-compositor.service qdshell.service; do
+            echo "harness: $u state:"
+            systemctl --user -M admin@ show "$u" \
+                -p ActiveState,SubState,Result,NRestarts,ExecMainStatus 2>&1 || true
+        done
         healthy && exit 0
         for u in $sys; do
             systemctl is-active --quiet "$u" && continue

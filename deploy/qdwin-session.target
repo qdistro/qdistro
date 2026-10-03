@@ -10,7 +10,8 @@ Documentation=https://github.com/qdistro/qdistro
 # may need to retry an unlock, kill a wedged frame, etc. — so
 # qdshell is a Wants= (recoverable) and qdwin is Requires= (the
 # whole target dies if the compositor dies). qdshell.service has
-# Restart=on-failure inside the unit; the target itself stays up.
+# Restart=always inside the unit (clean exits on compositor teardown
+# must respawn too); the target itself stays up.
 Wants=qdshell.service
 # qdlocker is a first-class session member: the screen locker must be
 # running and bound to qdwin_locker_v1 for panel lock actions and
