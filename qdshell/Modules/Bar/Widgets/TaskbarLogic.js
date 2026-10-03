@@ -167,8 +167,8 @@ function applySortMode(entries, sortMode) {
 // for display. The app_id / sandbox_engine prefix encodes the tier (see
 // doc/isolation-tiers.md and the secctx contract): qdistro.disp.<token> = a
 // tier-2 disposable; qdistro.tier4.<vm> = per-app VM; qdistro.tier3.<silo> =
-// waypipe VM app; qdistro.tier2 = rootless container. An empty identity is a
-// native window.
+// waypipe VM app; qdistro.tier3s.<silo> = gVisor sandbox + waypipe bridge;
+// qdistro.tier2 = rootless container. An empty identity is a native window.
 function siloTierKey(secctxAppId, sandboxEngine) {
   var id = (secctxAppId || "") + "";
   var eng = (sandboxEngine || "") + "";
@@ -178,6 +178,12 @@ function siloTierKey(secctxAppId, sandboxEngine) {
     return "tier5";
   if (id.indexOf("qdistro.tier4.") === 0 || eng.indexOf("qdistro.tier4") === 0)
     return "tier4";
+  // paravirt ΔB6: the tier3s check MUST run before the tier3 one —
+  // eng "qdistro.tier3s" satisfies eng.indexOf("qdistro.tier3") === 0
+  // (a real prefix collision), so the narrower tier3s match has to win
+  // first or every tier3s window would misclassify as tier3.
+  if (id.indexOf("qdistro.tier3s.") === 0 || eng.indexOf("qdistro.tier3s") === 0)
+    return "tier3s";
   if (id.indexOf("qdistro.tier3.") === 0 || eng.indexOf("qdistro.tier3") === 0)
     return "tier3";
   if (eng.indexOf("qdistro.tier2") === 0 || id.indexOf("qdistro.tier2") === 0)
@@ -195,6 +201,7 @@ var _TIER_LABELS_EN = {
   "tier5": "tier 5 (VM)",
   "tier4": "tier 4 (VM)",
   "tier3": "tier 3 (VM app)",
+  "tier3s": "tier 3s (gVisor)",
   "tier2": "tier 2 (container)",
   "native": "native (tier 0/1)",
   "sandboxed": "sandboxed",

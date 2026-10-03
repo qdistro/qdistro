@@ -108,6 +108,39 @@ const SC = require("../Services/Qdistro/SiloChrome.js");
   assert.strictEqual(SC.isTier4(null),                   false);
 })();
 
+// ── siloFromSecctxTier3s: correct prefix extraction (paravirt ΔB6) ──
+(function testSiloFromSecctxTier3s() {
+  // ensures: a tier3s (gVisor/waypipe) toplevel's silo is the BARE name —
+  // the canonical clipboard/launch-record key; "tier3s/<silo>" is never built
+  assert.strictEqual(SC.siloFromSecctxTier3s("qdistro.tier3s.smoke"), "smoke");
+  assert.strictEqual(SC.siloFromSecctxTier3s("qdistro.tier3s.user1"), "user1");
+
+  // Non-tier3s app_ids → "" (do not assert tier3s identity on foreign windows)
+  assert.strictEqual(SC.siloFromSecctxTier3s("qdistro.tier3.user1"),  "", "tier3 prefix → empty");
+  assert.strictEqual(SC.siloFromSecctxTier3s("qdistro.tier4.vm-dev"), "", "tier4 prefix → empty");
+  assert.strictEqual(SC.siloFromSecctxTier3s("org.gnome.Files"),       "", "unrelated → empty");
+  assert.strictEqual(SC.siloFromSecctxTier3s(""),                      "", "empty → empty");
+  assert.strictEqual(SC.siloFromSecctxTier3s(null),                    "", "null → empty");
+  assert.strictEqual(SC.siloFromSecctxTier3s(undefined),               "", "undefined → empty");
+
+  // Prefix-only (no silo name after prefix) → ""
+  assert.strictEqual(SC.siloFromSecctxTier3s("qdistro.tier3s."),        "", "bare prefix → empty");
+})();
+
+// ── isTier3s: boolean gate ──
+(function testIsTier3s() {
+  assert.strictEqual(SC.isTier3s("qdistro.tier3s.smoke"), true);
+  assert.strictEqual(SC.isTier3s("qdistro.tier3s."),      true,  "bare prefix is still tier3s-shaped");
+  // ensures: a tier-3 id is never claimed by the tier3s filter and vice
+  // versa — "qdistro.tier3s." vs "qdistro.tier3." is a near-miss pair
+  assert.strictEqual(SC.isTier3s("qdistro.tier3.user1"),  false, "tier3 is not tier3s");
+  assert.strictEqual(SC.isTier3("qdistro.tier3s.smoke"),  false, "tier3s is not tier3");
+  assert.strictEqual(SC.isTier3s("qdistro.tier4.vm"),     false, "tier4 is not tier3s");
+  assert.strictEqual(SC.isTier3s(""),                     false);
+  assert.strictEqual(SC.isTier3s(null),                   false);
+  assert.strictEqual(SC.isTier3s(undefined),              false);
+})();
+
 // ── hexToRgba: correct bit-packing ──
 (function testHexToRgba() {
   // ensures: matches tier4_chrome.hex_to_rgba in Python so border colour is consistent
@@ -153,13 +186,23 @@ const SC = require("../Services/Qdistro/SiloChrome.js");
   });
 })();
 
-// ── tier3/tier4 identity never cross-contaminates ──
+// ── tier3/tier3s/tier4 identity never cross-contaminates ──
 (function testNoCrossContamination() {
   // A tier-4 id must NOT be classified as tier-3 and vice versa.
   assert.ok(!SC.isTier3("qdistro.tier4.vm-dev"), "tier4 id is not tier3");
   assert.ok(!SC.isTier4("qdistro.tier3.user1"),  "tier3 id is not tier4");
   assert.strictEqual(SC.siloFromSecctxTier3("qdistro.tier4.vm-dev"), "", "tier4 id yields no tier3 silo");
   assert.strictEqual(SC.siloFromSecctxTier4("qdistro.tier3.user1"),  "", "tier3 id yields no tier4 silo");
+  // paravirt ΔB6: the tier3s↔tier3 pair is the dangerous near-miss —
+  // "qdistro.tier3s.x" vs "qdistro.tier3.x". ensures: neither filter claims
+  // the other's toplevels and neither derives a silo from the other's id.
+  assert.ok(!SC.isTier3("qdistro.tier3s.smoke"),  "tier3s id is not tier3");
+  assert.ok(!SC.isTier3s("qdistro.tier3.user1"),  "tier3 id is not tier3s");
+  assert.strictEqual(SC.siloFromSecctxTier3("qdistro.tier3s.smoke"),  "", "tier3s id yields no tier3 silo");
+  assert.strictEqual(SC.siloFromSecctxTier3s("qdistro.tier3.user1"),  "", "tier3 id yields no tier3s silo");
+  // tier3s↔tier4 likewise
+  assert.ok(!SC.isTier4("qdistro.tier3s.smoke"),  "tier3s id is not tier4");
+  assert.ok(!SC.isTier3s("qdistro.tier4.vm-dev"), "tier4 id is not tier3s");
 })();
 
 console.log("silo-chrome: all assertions passed");

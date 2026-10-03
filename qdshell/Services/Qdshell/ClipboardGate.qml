@@ -370,7 +370,23 @@ Singleton {
     // are preserved. Mirrors qdistro/tier4-vm/tier4_chrome.py::strip_mimes
     // — Python is the canonical implementation; this is the QML port.
     // (P05a security MS-2 / integration MEDIUM-1.)
+    // paravirt ΔB6: the same allow-list is the tier3s policy — a gVisor
+    // sandbox feeding a waypipe bridge gets the identical strip until a
+    // tier3s-specific MIME policy is designed (03 step 5).
     readonly property var _tier4AllowedMimeBases: ["text/plain", "text/uri-list"]
+
+    // True for a secctx app_id whose OFFERED mimes must pass the strict
+    // allow-list: tier-4 VM windows and tier3s (gVisor/waypipe) windows.
+    // "qdistro.tier3s." must be tested literally — startsWith("qdistro.tier4.")
+    // obviously cannot match it, and "qdistro.tier3." cannot match it either
+    // (the trailing '.' disambiguates).
+    function _isStrictMimeSource(srcAppId) {
+        return srcAppId.startsWith("qdistro.tier4.") || srcAppId.startsWith("qdistro.tier3s.");
+    }
+
+    function _strictMimeTier(srcAppId) {
+        return srcAppId.startsWith("qdistro.tier3s.") ? "tier3s" : "tier4";
+    }
 
     function _stripTier4Mimes(mimes) {
         const seen = {};
@@ -439,16 +455,17 @@ Singleton {
         const dstSilo = (focusedHandle !== 4294967295) ? (root._handleToSilo[focusedHandle] || "unknown") : "unknown";
         let mimeList = (mimeTypesConcat || "").split("\n").filter(s => s.length > 0);
 
-        // Tier-4 source → strict MIME allow-list (text/plain + text/uri-list).
-        // The strip runs BEFORE policy consult so a tier-4 guest advertising
-        // text/html or image/png has those types dropped, not evaluated.
-        // (P05a security MS-2 / integration MEDIUM-1.)
+        // Tier-4 / tier3s source → strict MIME allow-list (text/plain +
+        // text/uri-list). The strip runs BEFORE policy consult so a tier-4
+        // guest or tier3s sandbox advertising text/html or image/png has
+        // those types dropped, not evaluated.
+        // (P05a security MS-2 / integration MEDIUM-1; paravirt ΔB6.)
         const srcAppId = (pending !== null && pending.appId) ? pending.appId : (root._handleToAppId[sourceHandle] || "");
-        if (srcAppId.startsWith("qdistro.tier4.")) {
+        if (root._isStrictMimeSource(srcAppId)) {
             const before = mimeList.length;
             mimeList = root._stripTier4Mimes(mimeList);
             if (mimeList.length !== before) {
-                Logger.i("ClipboardGate", "tier4 mime-strip", "src_app=" + srcAppId, "before=" + before, "after=" + mimeList.length);
+                Logger.i("ClipboardGate", root._strictMimeTier(srcAppId) + " mime-strip", "src_app=" + srcAppId, "before=" + before, "after=" + mimeList.length);
             }
         }
         const mimeCsv = mimeList.join(",");
@@ -480,8 +497,8 @@ Singleton {
         // If after stripping there are no allowed MIMEs, deny without
         // consulting policy. The Python strip_mimes contract is "deny on
         // empty stripped list" — keep that semantics here.
-        if (srcAppId.startsWith("qdistro.tier4.") && mimeList.length === 0) {
-            root._logDecisionAndMaybeClear(decisionEntry, "deny", "tier4-no-allowed-mimes");
+        if (root._isStrictMimeSource(srcAppId) && mimeList.length === 0) {
+            root._logDecisionAndMaybeClear(decisionEntry, "deny", root._strictMimeTier(srcAppId) + "-no-allowed-mimes");
             return;
         }
 
@@ -611,12 +628,13 @@ Singleton {
         const dstSilo = root._handleToSilo[targetHandle] || "unknown";
         const srcAppId = root._handleToAppId[sourceHandle] || "";
 
-        // Tier-4 source → strict MIME allow-list (text/plain + text/uri-list).
-        // A single requested mime that strips to empty → deny.
-        if (srcAppId.startsWith("qdistro.tier4.")) {
+        // Tier-4 / tier3s source → strict MIME allow-list (text/plain +
+        // text/uri-list). A single requested mime that strips to empty →
+        // deny (paravirt ΔB6: same rule for both tiers).
+        if (root._isStrictMimeSource(srcAppId)) {
             const kept = root._stripTier4Mimes([mime]);
             if (kept.length === 0) {
-                root._answerReceive(requestHandle, seat, srcSilo, dstSilo, mime, "deny", "tier4-no-allowed-mimes");
+                root._answerReceive(requestHandle, seat, srcSilo, dstSilo, mime, "deny", root._strictMimeTier(srcAppId) + "-no-allowed-mimes");
                 return;
             }
         }

@@ -25,6 +25,17 @@ function fromSecctx(sandboxEngine, appId, instanceId) {
     if (engine === "qdistro.tier2" && tag.length > 0)
         return "tier2/" + tag.split("/", 1)[0];
 
+    // paravirt ΔB6: tier3s (gVisor + waypipe bridge) maps to the BARE silo,
+    // like tier-3 — never "tier3s/<silo>" (the canonical-silo-key decision:
+    // clipboard, launch records and broker lineage all key on <silo>).
+    // This engine check is exact equality so "qdistro.tier3s" cannot land
+    // here even via the tier3 branch, but the branch is still kept BEFORE
+    // tier3 as a mirror of TaskbarLogic.siloTierKey, where the ordering is
+    // load-bearing (a "qdistro.tier3"-prefix engine compare does collide).
+    tag = tierSuffix(app, "qdistro.tier3s.");
+    if (engine === "qdistro.tier3s" && tag.length > 0)
+        return tag;
+
     tag = tierSuffix(app, "qdistro.tier3.");
     if (engine === "qdistro.tier3" && tag.length > 0)
         return tag;

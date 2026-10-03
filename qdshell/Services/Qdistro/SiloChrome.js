@@ -1,30 +1,34 @@
 // TEST MIRROR — NOT imported by production QML.
 // This file is a hand-kept copy of the security-relevant logic in
-// Services/Qdistro/Tier3Apps.qml and Services/Qdistro/Tier4Apps.qml.
-// Neither QML file imports this module; they contain the logic directly.
+// Services/Qdistro/Tier3Apps.qml, Services/Qdistro/Tier3sApps.qml and
+// Services/Qdistro/Tier4Apps.qml. None of the QML files imports this
+// module; they contain the logic directly.
 // Tests (tests/test_silo_chrome.js) require this file under Node.
 //
-// DRIFT RISK: if the palette, hash, or prefix constants in Tier3Apps.qml or
-// Tier4Apps.qml change, this file must be updated manually AND the journal
-// contract tests (s38 / s107 bats) must be updated in lockstep.
+// DRIFT RISK: if the palette, hash, or prefix constants in Tier3Apps.qml,
+// Tier3sApps.qml or Tier4Apps.qml change, this file must be updated
+// manually AND the journal contract tests (s38 / s107 / s124 bats) must be
+// updated in lockstep.
 // tests/test_drift_guard.js asserts palette byte-identity and prefix string
 // identity between the QML sources and this mirror to catch silent drift.
 //
 // This file is a mirror of the pure silo-chrome logic extracted from
-// Services/Qdistro/Tier3Apps.qml and Services/Qdistro/Tier4Apps.qml so the
+// Services/Qdistro/Tier3Apps.qml, Tier3sApps.qml and Tier4Apps.qml so the
 // security-relevant identity/routing functions can be unit-tested under Node.
 //
-// Both tiers share the same deterministic palette + hash algorithm
+// All tiers share the same deterministic palette + hash algorithm
 // (colourForSilo). Tier4 adds _hexToRgba (packing "#rrggbb" → uint32
 // RRGGBBAA for qdwin_toplevel_border_rgba). The silo-name derivation
 // (siloFromSecctx) is tier-specific because the secctx app_id prefix differs.
 //
 // Security relevance:
 //   * siloFromSecctx is the ONLY trusted source of a silo identity for
-//     tier-3/tier-4 toplevels. The spec (spec/02) says the load-bearing
-//     identity is the wp_security_context_v1 secctxAppId, NOT the window
-//     title. Deriving silo from an incorrect prefix would assign windows
-//     to the wrong silo context.
+//     tier-3/tier-3s/tier-4 toplevels. The spec (spec/02) says the
+//     load-bearing identity is the wp_security_context_v1 secctxAppId,
+//     NOT the window title. Deriving silo from an incorrect prefix would
+//     assign windows to the wrong silo context — and "qdistro.tier3s." is
+//     a near-miss of "qdistro.tier3." that must NEVER resolve through the
+//     tier-3 path (paravirt ΔB6).
 //   * _hexToRgba must handle bad/short input safely; the return value of 0
 //     causes qdwin to use the neutral default border colour (safe fallback).
 //   * colourForSilo must be DETERMINISTIC (same silo → same colour) so
@@ -33,7 +37,7 @@
 "use strict";
 
 // 10 visible hex colours that survive both light and dark themes.
-// Mirrors the palette in Tier3Apps.qml and Tier4Apps.qml.
+// Mirrors the palette in Tier3Apps.qml, Tier3sApps.qml and Tier4Apps.qml.
 var SILO_PALETTE = [
   "#4caf50",  // green
   "#ffb300",  // amber/yellow
@@ -72,8 +76,30 @@ function siloFromSecctxTier3(secctxAppId) {
 }
 
 // Returns true iff the secctx app_id identifies a tier-3 toplevel.
+// "qdistro.tier3s.<silo>" deliberately does NOT match: the trailing '.'
+// in the prefix disambiguates tier3s from tier3 (paravirt ΔB6).
 function isTier3(secctxAppId) {
   return !!secctxAppId && secctxAppId.indexOf(TIER3_PREFIX) === 0;
+}
+
+// Tier-3s secctx prefix: qdistro.tier3s.<silo> (gVisor + waypipe bridge).
+var TIER3S_PREFIX = "qdistro.tier3s.";
+
+// Extracts the silo name from a tier3s secctxAppId — the BARE <silo>, the
+// canonical key for clipboard/launch-record/broker lineage ("tier3s/<silo>"
+// is never invented). Returns "" for non-tier3s or empty app ids.
+// Mirrors Tier3sApps.siloFromSecctx.
+function siloFromSecctxTier3s(secctxAppId) {
+  if (!secctxAppId || secctxAppId.indexOf(TIER3S_PREFIX) !== 0)
+    return "";
+  var tag = secctxAppId.slice(TIER3S_PREFIX.length);
+  if (!tag) return "";
+  return tag;
+}
+
+// Returns true iff the secctx app_id identifies a tier-3s toplevel.
+function isTier3s(secctxAppId) {
+  return !!secctxAppId && secctxAppId.indexOf(TIER3S_PREFIX) === 0;
 }
 
 // Tier-4 secctx prefix: qdistro.tier4.<vm>
@@ -110,10 +136,13 @@ function hexToRgba(hex) {
 var api = {
   SILO_PALETTE: SILO_PALETTE,
   TIER3_PREFIX: TIER3_PREFIX,
+  TIER3S_PREFIX: TIER3S_PREFIX,
   TIER4_PREFIX: TIER4_PREFIX,
   colourForSilo: colourForSilo,
   siloFromSecctxTier3: siloFromSecctxTier3,
   isTier3: isTier3,
+  siloFromSecctxTier3s: siloFromSecctxTier3s,
+  isTier3s: isTier3s,
   siloFromSecctxTier4: siloFromSecctxTier4,
   isTier4: isTier4,
   hexToRgba: hexToRgba,
