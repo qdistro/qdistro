@@ -191,10 +191,12 @@ if [ -n "$GUI_WL" ]; then
     is "admin compositor socket present" "$(yes_no test -S /run/user/1000/wayland-1)" yes
     is "qdshell is up" "$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null)" active
     for t in runuser waypipe qdistro-secctx-exec dbus-send sqlite3 python3; do
-        is "tool $t installed" "$(yes_no command -v "$t")" yes
+        is "tool $t installed" "$(command -v "$t" >/dev/null && echo yes || echo no)" yes
     done
     for t in qs ydotool; do
-        is "admin tool $t installed" "$(yes_no as_admin command -v "$t")" yes
+        # as_admin execs through env(1), which cannot run the `command`
+        # builtin — probe through a shell whose stdout stays silent.
+        is "admin tool $t installed" "$(yes_no as_admin sh -c "command -v $t >/dev/null")" yes
     done
     is "clipboard-source helper installed" \
         "$(command -v qdistro-test-clipboard-source 2>/dev/null)" "/usr/bin/qdistro-test-clipboard-source"
