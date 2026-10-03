@@ -1,4 +1,4 @@
-# tier3s lifecycle contract (Phase A)
+# tier3s lifecycle contract (Phase A + Phase B milestone B-i)
 
 Status: **Experimental, dev profile only** (owner O4), explicit launch, no
 fallback to tier 2/3 (O6), `network=none` only (O3). This file is the
@@ -7,6 +7,16 @@ launch-path code (`spawn-tier3s.sh`, `qdistro-tier3s-scope`,
 `qdistro-tier3s-cleanup`, the wrapper/probe changes, the seccomp profile,
 the image recipe). A-ii (session manager, broker, units, installer) and
 A-iii (VM drivers s120–s122) implement the interfaces named here.
+
+Phase B milestone **B-i** adds the GUI bridge (`todo/paravirt`
+`08-kickoff-phase-B.md`, deltas B1–B4): the waypipe byte-stream path Phase S
+proved (`05-phase-S-results.md` §S2). gVisor cannot pass host-backed
+`SCM_RIGHTS`, so a GUI workload's windows cannot reach the admin compositor
+over a Wayland socket directly; they go through waypipe instead. §1 gains the
+bridge client process class, §5 the bridge half of the spawn, §7 the workload
+declarations and terminal images/profiles. B-ii (manager stanza dir, pod-app
+surface) and B-iii (VM drivers, GUI acceptance) are separate milestones and
+not covered here.
 
 Decisions are numbered after the kickoff deltas (`D-A1` = ΔA1, …). Each cites
 the VM evidence it rests on; the feasibility checks ran in a dev test VM
@@ -26,7 +36,8 @@ SessionManager1.StartSilo(name)                                                 
       env -i … NOTIFY_SOCKET=<systemd's> TIER3S_ROOT_LAUNCHER=1 TIER3S_LAUNCH_UNIT=%n TIER3S_LAUNCH_TOKEN=<t> TIER3S_SILO=<name> …
       exec /usr/lib/qdistro/tier3s/spawn-tier3s.sh <workload> -- <argv…>         (root supervisor)
         probe → read-only binding → token → broker gate → activation record
-        → reap stale → control record (published whole) + per-launch dir → transient scope:
+        → reap stale → control record (published whole) + per-launch dir
+        → [GUI: host waypipe client + launch record + RegisterLaunch] → transient scope:
         systemd-run --scope --unit=qdistro-tier3s-<t>.scope -p Delegate=yes
                     -p BindsTo=<launch unit> -p Before=<launch unit> -p TasksMax= -p MemoryMax=
           -- /usr/libexec/qdistro/qdistro-tier3s-scope enter <t> 1000 -- podman …
@@ -97,6 +108,29 @@ log driver) under the owning **scope** unit, where those processes run, not
 under the launch unit: read it with `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.scope`
 (A-ii smoke r1).
 
+**The GUI bridge (B-i).** For a workload declared `GUI=1` (§7) the spawn
+adds one host-side process class between publishing the record and running
+podman: the **waypipe bridge client**. The root spawn runs it as a direct
+child (in the **launch unit's** cgroup, never in the scope), dropped to
+admin by `runuser -u admin`, wrapped by `qdistro-secctx-exec` with the
+identity triple engine `qdistro.tier3s`, app-id `qdistro.tier3s.<silo>`,
+instance `<token>` — the tag the admin compositor sees on every window the
+sandbox publishes. It binds
+`/run/qdistro-tier3s/<token>/link.sock` (the token-scoped bridge socket,
+admin-owned mode `0600` under the client's `umask 0177`; keep-id means no
+tier-3 group dance) and prefixes titles `[3s:<silo>] `. The podman run then
+bind-mounts the per-launch dir at `/run/qdistro/link` with
+`--runtime-flag=host-uds=open`, and the image-side
+`qdistro-tier3s-entrypoint` runs `waypipe -s /run/qdistro/link/link.sock -o
+--no-gpu server -- <argv>`: the sandbox is the waypipe **server**, the admin
+side the **client** (Phase S topology; `--no-gpu` on both ends, `-o`
+one-shot). The client is a new lifecycle member: recorded
+(`bridge_client_*`, §4), registered with the broker before `podman run`
+(§5), and killed and verified dead by the cleanup (§4). It connects out to
+the admin compositor only (`WAYLAND_DISPLAY=wayland-1`); its peer is the
+sandboxed server through the bind-mounted socket — it never touches the
+control record root, which is never mounted.
+
 Every podman call runs **as admin (uid 1000)**, rootless, `--userns=keep-id`
 (D4 C1). Root does three things only: supervise, create the scope, and tear
 down through the recorded scope. Nothing runs podman or runsc as root.
@@ -114,6 +148,9 @@ the manager skips reconciliation and a tier3s start fails (no unit, no spawn).
 | Path | From |
 |---|---|
 | `/usr/lib/qdistro/tier3s/` | root-owned copy of `tier3s/`: `spawn-tier3s.sh`, `probe.sh`, `RUNSC_RELEASE`, `tier3s-runsc`, `seccomp/<workload>.json` (the probe compares the installed wrapper and pin against this copy) |
+| `/usr/lib/qdistro/tier3s/workloads/<workload>.env` | `tier3s/workloads/`: the per-workload declarations (§7), parsed never sourced |
+| `/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint` | `tier3s/qdistro-tier3s-entrypoint`: the image-side waypipe-server launcher (§7); also the build-context copy |
+| `/usr/lib/qdistro/tier3s/Containerfile.<workload>`, `headless-smoke.sh`, `configure-snapshot-repos.sh`, `SNAPSHOT`, `make-tier3s-image.sh` | `tier3s/`: the image-build context (§7), so an installed tree can rebuild every workload image as admin |
 | `/usr/libexec/qdistro/qdistro-tier3s-scope` | `tier3s/qdistro-tier3s-scope` |
 | `/usr/libexec/qdistro/qdistro-tier3s-cleanup` | `tier3s/qdistro-tier3s-cleanup` |
 | `/usr/lib/tmpfiles.d/qdistro-tier3s.conf` | `tier3s/tmpfiles/qdistro-tier3s.conf`, then `systemd-tmpfiles --create` on it |
@@ -247,7 +284,11 @@ No runsc-bundle process was outside the scope, and admin could not raise
   spawn that died, and is removed.
 - `/run/qdistro-tier3s-ctl/.call-<pid>-*`: a cleanup run's private work dir
   (its calls' output files), removed when the run exits; `--reap-stale`
-  removes those of runs that no longer exist (SIGKILLed).
+  removes those of runs that no longer exist (SIGKILLed). A dir whose pid
+  name is **reused** is stale too: a `.call-<pid>-*` whose mtime predates
+  `/proc/<pid>/stat`'s starttime (converted with `btime` + `CLK_TCK`)
+  belongs to a dead call and is swept; a live call's dir is never older
+  than its own pid.
 - An **incomplete record** (a token dir without `state`, which earlier code
   could leave behind when the spawn died between `mkdir` and its first write)
   has no unit. The cleanup removes it only on positive evidence that nothing
@@ -267,8 +308,10 @@ No runsc-bundle process was outside the scope, and admin could not raise
   the operator's fix is the cause the cleanup names, then
   `qdistro-tier3s-cleanup <token>`.
 - `/run/qdistro-tier3s/<token>/` admin 0700 under a root 0755 parent: the
-  per-launch dir. It is Phase B's bridge socket dir and holds **no control
-  state** (03 step 8). Phase A mounts nothing from it.
+  per-launch dir. Phase B mounts it into a GUI sandbox at
+  `/run/qdistro/link`; it holds `link.sock` (the bridge socket the host
+  waypipe client binds, admin-owned 0600) and **no control state** (03 step
+  8). A headless launch mounts nothing from it.
 
 `state` fields:
 
@@ -287,10 +330,16 @@ No runsc-bundle process was outside the scope, and admin could not raise
 | `scope_cgroup` | start | the scope's `ControlGroup` as systemd reports it |
 | `conmon_pid`, `conmon_starttime` | start | `State.ConmonPid` + `/proc/<pid>/stat` field 22 |
 | `sentry_pid`, `sentry_starttime` | start | `State.Pid` (the Sentry) + field 22 |
+| `gui` | bridge (B-i) | `1` when the workload declared `GUI=1` |
+| `launch_record` | bridge (B-i) | the secctx launch-record path, `/run/user/<admin-uid>/qdistro-tier3s-launchrec-<token>.pid` |
+| `bridge_wrapper_pid`, `bridge_wrapper_starttime` | bridge (B-i) | the supervisor's direct child heading the client chain (`runuser` → `qdistro-secctx-exec`) + field 22 |
+| `bridge_client_pid`, `bridge_client_starttime` | bridge (B-i) | the inner waypipe-client pid the launch record published (the pid `RegisterLaunch` registered) + field 22 |
 
 At start the spawn **verifies** that the conmon and Sentry pids sit inside
 the scope's cgroup before recording them. If they do not, it tears the
-launch down and fails.
+launch down and fails. For a GUI launch the spawn likewise verifies that
+the bridge client pid sits in the **launch unit's** cgroup (it is a child
+of the supervisor, not a scope member) before registering it.
 
 ### Locks and bounds (astra A r1 #5, A r2 #2/#3, fable P3-1/P3-2/P3-7, A r2 P3-1)
 
@@ -446,7 +495,15 @@ record (and the scope, if it is still alive)**:
    either is alive with the same starttime, it escaped the scope: error,
    preserve. It is never killed by pid, uid (100000 is shared by every
    keep-id launch, 05 fact 4) or process name.
-8. Remove `per_launch_dir` (a real directory under the root-owned parent;
+8. **The bridge client (B-i, GUI launches only).** Right after step 3's
+   scope check the teardown SIGTERMs the recorded `bridge_client_pid` and
+   `bridge_wrapper_pid` (each matched by starttime, a zombie already counts
+   as dead), waits a bounded grace, then SIGKILLs what survives — the
+   sandboxed waypipe server's peer goes first. Here at the end, any
+   recorded bridge pid still alive with its recorded starttime (and not a
+   zombie) is an escape: error, preserve. Then the recorded `launch_record`
+   file (shape-checked under `/run/user/<admin-uid>/`) is removed.
+9. Remove `per_launch_dir` (a real directory under the root-owned parent;
    `rm -rf` does not follow symlinks), then the control dir.
 
 A missing control record with a leftover per-launch dir: the dir is removed
@@ -561,6 +618,11 @@ oracle is "no `podman run` and no activation record":
    - the workload name, and its seccomp file
      `/usr/lib/qdistro/tier3s/seccomp/<workload>.json`, which must exist
      (there is no podman-default fallback);
+   - the **workload declaration** `/usr/lib/qdistro/tier3s/workloads/
+     <workload>.env` (B-i): **parsed, never sourced** — blank lines and `#`
+     comments, then `GUI=0` or `GUI=1` at most once; anything else refuses.
+     A missing file means a headless workload (`GUI=0`); a present but
+     malformed one refuses the launch;
    - the image: for a templated silo, `qdistro-resolve-binding <binding>
      --launch-env` **without** `--record` (a digest plus the state path);
      otherwise `localhost/qdistro/tier3s-<workload>:latest`.
@@ -582,7 +644,39 @@ oracle is "no `podman run` and no activation record":
     EXIT/TERM trap's `cleanup <token>`, publish the complete record
     (`.new-<token>` renamed into place) and create the per-launch dir.
 11. `podman image exists` as admin.
-12. `systemd-run --scope …` (D-A3b) in the background. Poll `podman inspect`
+12. **GUI only (B-i): the waypipe bridge client, before `podman run`.**
+    `GUI=0` skips this step entirely and the launch is unchanged from
+    Phase A. For `GUI=1`:
+    - the admin compositor socket `/run/user/<admin-uid>/wayland-1` must
+      exist as a socket, else the launch refuses (checked before the broker
+      gate);
+    - the spawn starts, as its direct child in the launch unit's cgroup,
+      `runuser -u admin -- env -i … XDG_RUNTIME_DIR=/run/user/<uid>
+      WAYLAND_DISPLAY=wayland-1 DBUS_SESSION_BUS_ADDRESS=unix:path=<rt>/bus
+      QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+      QDISTRO_LAUNCH_RECORD_PATH=/run/user/<uid>/qdistro-tier3s-launchrec-<token>.pid
+      QDISTRO_LAUNCH_RECORD_TOKEN=<token>
+      qdistro-secctx-exec --sandbox-engine qdistro.tier3s
+      --app-id qdistro.tier3s.<silo> --instance-id <token>
+      -- waypipe -s /run/qdistro-tier3s/<token>/link.sock -o --no-gpu
+      --title-prefix "[3s:<silo>] " client`, under `umask 0177` so the
+      socket is admin-owned 0600;
+    - it reads the launch record with a bounded retry: the file must
+      contain `<inner pid> <token>` whose token is the one just handed
+      down (a pre-created admin-owned file cannot spoof the registration;
+      `secctx-exec` creates it `O_EXCL|O_NOFOLLOW` 0600 and refuses a path
+      whose parent is not exactly `XDG_RUNTIME_DIR`), the inner pid must be
+      live, in the **launch unit's** cgroup, and its starttime recorded;
+    - `link.sock` must appear as a bound socket within the bound;
+    - `AdminBroker1.RegisterLaunch(silo, "qdistro.tier3s",
+      "qdistro.tier3s.<silo>", <token>, "", <inner pid>, "tier3s", 0)` —
+      **mandatory, as root, with bounded retries**: any failure refuses the
+      launch before `podman run` (B-i is stricter than tier 3's
+      warning-only registration);
+    - `bridge_wrapper_pid`, `bridge_client_pid` (+ starttimes),
+      `launch_record`, `gui=1` go into the control record as soon as they
+      are known, so a refusal after the client started is still torn down.
+13. `systemd-run --scope …` (D-A3b) in the background. Poll `podman inspect`
     until running, within a 60 s **polling budget** by the clock (each
     inspect bounded to 5 s and its answer awaited 7 s at most; fable A r2
     P3-3). The budget is not a strict bound — one iteration may overrun it
@@ -607,6 +701,8 @@ podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none
       --tmpfs /tmp:rw,size=64m,mode=1777
       --tmpfs /run/user/1000:rw,U,mode=0700  # U -> OCI uid=1000,gid=1000 (literal uid= is rejected)
       --tmpfs /home/admin/.cache:rw,U,mode=0700
+      [-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw]   # GUI only (B-i)
+      [--runtime-flag=host-uds=open]        # GUI only (B-i): bind-mounted unix sockets allowed
       [-v <state_path>:/home/admin:rw]      # templated silo only, no recursive chown
       --pids-limit=512                      # parity with tier 2 only; NOT enforced under --ignore-cgroups
       --network=none
@@ -716,7 +812,26 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
 - runsc keeps one shared, empty, read-only `null-netns` file in the state root
   for `network=none`; it is not per-container state and is never removed.
 
-## 7. Workload image and seccomp (D-A4, D-A5)
+## 7. Workloads, images and seccomp (D-A4, D-A5; B-i adds the GUI rows)
+
+### Workload declarations (B-i)
+
+`tier3s/workloads/<workload>.env` declares what a workload needs of the
+launch path. It is **parsed, never sourced**: blank lines and `#` comments,
+then `GUI=0` or `GUI=1` at most once — anything else refuses the launch. A
+missing file means `GUI=0` (headless). `GUI=1` adds the whole §5 step-12
+bridge (compositor check, secctx client, launch record, RegisterLaunch) and
+the two podman additions (`-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw`,
+`--runtime-flag=host-uds=open`); `GUI=0` leaves the launch byte-identical to
+Phase A.
+
+| Workload | `GUI` | What it is |
+|---|---|---|
+| `headless-smoke` | 0 | the Phase A smoke checks (`qdistro-tier3s-smoke`) |
+| `weston-terminal` | 1 | `weston-terminal` through the waypipe bridge |
+| `foot` | 1 | `foot` through the waypipe bridge |
+
+### Images
 
 - `tier3s/Containerfile.headless-smoke` builds from
   `registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}` (the `snapshot.conf`
@@ -727,32 +842,67 @@ no SELinux type; `_ADMIN_HOSTILE_SELINUX_TYPES` is unchanged (Phase D).
   `admin:x:1000:1000::/home/admin:/bin/bash`, and `/home/admin/.cache` exists
   for the tmpfs. Its default command `qdistro-tier3s-smoke` prints the
   checks the A-iii driver asserts.
+- `tier3s/Containerfile.weston-terminal` and `tier3s/Containerfile.foot`
+  (B-i): same base and pin discipline, plus `weston` / `foot`, `waypipe`,
+  `fontconfig`, `dejavu-fonts`, `xkeyboard-config`, `terminfo-base` and
+  `glibc-locale-base` (the Phase S package set: W8 needed the UTF-8 locale;
+  fontconfig's link() behaviour drove the `link` decision below). Both use
+  `ENTRYPOINT ["/usr/local/bin/qdistro-tier3s-entrypoint"]`.
+- `tier3s/qdistro-tier3s-entrypoint` is the image-side half of the bridge
+  (B-i, ΔB3): it waits a bounded time for `/run/qdistro/link/link.sock` (the
+  bind-mounted bridge socket) and execs `waypipe -s /run/qdistro/link/
+  link.sock -o --no-gpu server -- "$@"`, so the workload's Wayland traffic
+  crosses the mount as waypipe's byte stream. No fallback: a missing socket
+  exits non-zero.
 - `tier3s/make-tier3s-image.sh` is copied from `tier2/make-tier2-image.sh`
   (unify later). It tags `qdistro/tier3s-<workload>:latest`, refuses an
   image whose snapshot label differs from the pin, prints `IMAGE_ID=` and
   `IMAGE_DIGEST=`, and with `--oci-archive <dir>` saves
-  `<dir>/tier3s-<workload>.oci.tar` for transfer into a qci worker.
-- Seccomp: `tier3s/seccomp/headless-smoke.json`, rendered by
-  `seccomp/make-profiles.py` from tier 2's profile. Per-workload decisions,
-  with the reasons in the file:
+  `<dir>/tier3s-<workload>.oci.tar` for transfer into a qci worker. With no
+  workload argument it builds every `Containerfile.*`; the staged context is
+  exactly what the recipes COPY (Containerfiles, `SNAPSHOT`,
+  `configure-snapshot-repos.sh`, `headless-smoke.sh`,
+  `qdistro-tier3s-entrypoint`).
+- `tier3s/cache-image-archive.sh` (host side, B-i): builds every workload
+  once in a dev VM and keeps one `tier3s-<workload>.oci.tar` plus
+  `tier3s-<workload>.manifest.txt` per workload under
+  `~/.cache/qdistro/tier3s-images/<input key>/` (`manifest.txt` is the
+  headless-smoke manifest, the name the current consumer reads). The input
+  key covers every Containerfile, the entrypoint, the shared helpers and the
+  snapshot pin.
 
-  | Call | Decision | Why |
-  |---|---|---|
-  | `fchmodat2` | **DENY**, forced by the pin | runsc 20260928.0's converter drops the name (`OCI seccomp: ignoring syscall "fchmodat2"`, `feasibility/31`), so an ALLOW is inert. `chmod -h` / `lchmod` give EPERM; plain `chmod` works |
-  | `llistxattr` | ALLOW | `ls -l` prints EPERM errors otherwise; read-only metadata answered by the Sentry |
-  | `setfsuid`, `setfsgid` | DENY | not used by this workload |
-  | `fadvise64` | DENY | advisory; callers ignore the failure |
-  | `link` | DENY | not used by this workload |
-  | `syslog` | ALLOW | the gVisor `dmesg` banner (corroboration only) |
+### Seccomp
 
-  Every ERRNO, the default included, is EPERM under runsc;
-  `defaultErrnoRet: 38` restores nothing. Terminal profiles are Phase B.
+Per-workload profiles rendered by `seccomp/make-profiles.py` from tier 2's
+`weston-terminal.json`. Each workload decides every call below explicitly;
+the reasons are embedded in the rendered file. Phase S facts: runsc's
+converter drops `fchmodat2` (an ALLOW is inert — the generator refuses one);
+every ERRNO, the default included, becomes EPERM under runsc
+(`defaultErrnoRet: 38` restores nothing); `setfsuid`, `setfsgid`,
+`fadvise64` and `link` were all observed in terminal runs and were
+non-fatal, `link` from fontconfig's cache locking.
+
+| Call | `headless-smoke` | `weston-terminal`, `foot` | Why |
+|---|---|---|---|
+| `fchmodat2` | **DENY** (forced) | **DENY** (forced) | runsc 20260928.0's converter drops the name (`OCI seccomp: ignoring syscall "fchmodat2"`, `feasibility/31`), so an ALLOW is inert. `chmod -h` / `lchmod` give EPERM; plain `chmod` works |
+| `llistxattr` | ALLOW | ALLOW | `ls -l` prints EPERM errors otherwise; read-only metadata answered by the Sentry |
+| `setfsuid`, `setfsgid` | DENY | DENY | observed in Phase S terminal runs, non-fatal (EPERM); no workload needs fsuid switching |
+| `fadvise64` | DENY | DENY | advisory; callers ignore the failure |
+| `link` | DENY | DENY | fontconfig's cache lock link() falls back cleanly on EPERM (Phase S: non-fatal) |
+| `syslog` | ALLOW | DENY | headless only: the gVisor `dmesg` banner corroboration; the terminals never read the kernel log |
+
+Every ERRNO, the default included, is EPERM under runsc.
 
 ## 8. What is not claimed
 
 - A green host unit test proves the launch scripts' logic against fakes, not
   scope delegation, `ExecStopPost`, placement or teardown. Those are VM facts
   (A-iii, through the qci VM lane).
+- The B-i GUI bridge is proven at the argv/record level only (bridge client
+  composition, secctx triple, launch record, RegisterLaunch arguments,
+  mount and `host-uds=open`, refusal ordering). A window actually appearing
+  tagged on the compositor, the `[3s:<silo>] ` title prefix, and cleanup of
+  a live GUI launch are B-iii's VM evidence.
 - The scope limits are set, not yet shown to be enforced (Phase C). Admin
   cannot raise them by writing the files (`feasibility-r3/20`); that is not
   an adversarial containment proof.

@@ -19,8 +19,12 @@
 # where a failed query is an error, never "absent" -> the scope again: wait
 # for it to empty, else systemctl stop it; every cgroup it can have must be
 # positively absent or empty by a complete recursive scan -> the recorded
-# (pid, starttime) of conmon and the Sentry must be dead -> remove the
+# (pid, starttime) of conmon, the Sentry and (Phase B) the GUI waypipe
+# client and its wrapper must be dead -> remove the launch record, the
 # per-launch dir, then the record. Never by uid (100000 is shared) or name.
+# The bridge pair is also SIGTERMed/SIGKILLed right after the first scope
+# check, before podman: it lives in the launch unit's cgroup, not the scope,
+# so only this teardown reaches it.
 #
 # Calls (astra A r1 #5, A r2 #2): every external call (systemctl, podman,
 # python3) goes through `bounded`, in this shell: its stdout and stderr go to
@@ -241,6 +245,72 @@ starttime() {
     local s; { read -r s < "$PROC/$1/stat"; } 2>/dev/null || return 1
     s="${s##*) }"; set -- $s; [ -n "${20:-}" ] && echo "${20}"
 }
+# proc_state <pid> <recorded starttime>: the process's state letter (field 3)
+# iff the pid exists and still has that starttime; nothing otherwise. A pid
+# reuse or a dead/exited process is never "alive" (Phase B bridge clients).
+proc_state() {
+    local s want="$2"; { read -r s < "$PROC/$1/stat"; } 2>/dev/null || return 1
+    s="${s##*) }"; set -- $s        # set -- clobbers $1/$2: use the saved args
+    [ "${20:-}" = "$want" ] || return 1
+    [ -n "${1:-}" ] && echo "${1}"
+}
+# bridge_alive: the recorded GUI bridge pids still alive (starttime match,
+# not a zombie) — the waypipe client and the wrapper heading its chain.
+bridge_alive() {
+    local p st
+    for p in bridge_client bridge_wrapper; do
+        [ -n "${S[${p}_pid]:-}" ] || continue
+        kill -0 "${S[${p}_pid]}" 2>/dev/null || continue
+        st="$(proc_state "${S[${p}_pid]}" "${S[${p}_starttime]:-x}")" || continue
+        [ "$st" = Z ] || echo "${S[${p}_pid]}"
+    done
+}
+# bridge_killset: bridge_alive plus the verified wrapper's direct children.
+# A launch refused while its launch record never carried a valid token can
+# leave an inner waypipe only the wrapper's parenthood still names.
+bridge_killset() {
+    bridge_alive
+    local w="${S[bridge_wrapper_pid]:-}" s pp
+    [ -n "$w" ] || return 0
+    [ "$(starttime "$w")" = "${S[bridge_wrapper_starttime]:-x}" ] || return 0
+    for s in "$PROC"/[0-9]*/stat; do
+        [ -e "$s" ] || continue
+        pp="$(starttime_ppid "$s")"
+        [ "$pp" = "$w" ] || continue
+        echo "${s%/stat}" | grep -oE '[0-9]+$'
+    done
+}
+# starttime_ppid <stat file>: the ppid field (after ')', fields are
+# state ppid ...), nothing on a read failure.
+starttime_ppid() {
+    local s; { read -r s < "$1"; } 2>/dev/null || return 1
+    s="${s##*) }"; set -- $s; [ -n "${2:-}" ] && echo "${2}"
+}
+# kill_bridge (Phase B): the recorded waypipe client + wrapper (and the
+# wrapper's children) get SIGTERM, a bounded grace, then SIGKILL. The client
+# runs in the launch unit's cgroup, not the scope, so the scope teardown
+# does not reach it; it dies here, before the container, so the sandboxed
+# waypipe server's peer goes first. waypipe dies on TERM; a survivor after
+# KILL is caught by the recorded-pid check at the end of teardown.
+kill_bridge() {
+    local left
+    left="$(bridge_killset)"; [ -n "$left" ] || return 0
+    # shellcheck disable=SC2086  # the list is one pid per line, no glob chars possible
+    kill -TERM $left 2>/dev/null
+    until_us 2
+    while [ -n "$(bridge_killset)" ]; do
+        now_us; [ "$NOW_US" -lt "$UNTIL" ] || break
+        sleep "$STEP"
+    done
+    left="$(bridge_killset)"; [ -n "$left" ] || return 0
+    # shellcheck disable=SC2086
+    kill -KILL $left 2>/dev/null
+    until_us 1
+    while [ -n "$(bridge_killset)" ]; do
+        now_us; [ "$NOW_US" -lt "$UNTIL" ] || break
+        sleep "$STEP"
+    done
+}
 # tree_procs <cgroup dir>: every pid in the subtree (recursive cgroup.procs).
 # Returns non-zero when the traversal or ANY cgroup.procs read fails, so an
 # unreadable subtree is never "empty" (astra A r1 #2).
@@ -403,6 +473,11 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
     # the recorded unit at the recorded cgroup (the verified target)
     scope_owned "$tok" "${S[unit]}" "${S[scope_cgroup]:-}" "$dead" || { say "$tok: refusing (record preserved)"; return 6; }
     rel1="$SC_REL"
+    # the GUI bridge (Phase B): the host-side waypipe client + wrapper run in
+    # the launch unit's cgroup, not the scope, so nothing below reaches them;
+    # kill them before the container so the sandboxed waypipe server's peer
+    # goes first. Recorded (pid, starttime) only, like conmon/the Sentry.
+    kill_bridge
     if ! pm_exists "$admin" "$ctr"; then
         say "$tok: podman query failed for $ctr; NOT treating it as absent (record preserved)"; return 4
     fi
@@ -455,12 +530,15 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
         wait_empty "$CGROOT$c" 5 \
             || { say "$tok: cgroup $c of $scope holds processes or cannot be read (record preserved)"; return 6; }
     done
-    for p in sentry conmon; do
+    for p in sentry conmon bridge_client bridge_wrapper; do
         [ -n "${S[${p}_pid]:-}" ] || continue
         if [ "$(starttime "${S[${p}_pid]}")" = "${S[${p}_starttime]:-x}" ]; then
             say "$tok: recorded $p ${S[${p}_pid]} is alive outside the scope (record preserved)"; return 7
         fi
     done
+    # the bridge's launch record under the admin's XDG_RUNTIME_DIR (the spawn
+    # removes it once registered; a refused launch leaves it for here)
+    [ -z "${S[launch_record]:-}" ] || rm -f -- "$T${S[launch_record]}"
     dir="$LAUNCH_PARENT/$tok"
     if [ -e "$dir" ] || [ -L "$dir" ]; then
         { [ -d "$dir" ] && [ ! -L "$dir" ]; } || { say "$tok: $dir is not a directory"; return 8; }
@@ -576,11 +654,26 @@ sweep_unpublished() {
             [[ "${d##*/.new-}" =~ $TOK_RE ]] && [ -d "$d" ] && [ ! -L "$d" ] || { say "unexpected $d; left"; continue; }
             rm -rf -- "$d" && say "removed $d (a spawn died while publishing its record)"
         done
+        # for the .call-* pid-reuse check: a process's start epoch (seconds)
+        # is btime + starttime/CLK_TCK. Anything it cannot tell keeps its dir.
+        CLK_TCK="$(getconf CLK_TCK 2>/dev/null || :)"; CLK_TCK="${CLK_TCK:-100}"
+        BTIME="$(sed -n 's/^btime //p' "$PROC/stat" 2>/dev/null | head -1)"
         for d in "$CTL"/.call-*; do      # work dirs of cleanup runs that were SIGKILLed
             [ -d "$d" ] && [ ! -L "$d" ] && [ "$d" != "$WORKDIR" ] || continue
             p="${d##*/.call-}"; p="${p%%-*}"
-            # stale iff its pid is gone; a reused pid keeps it (cosmetic only)
-            if [[ "$p" =~ ^[0-9]+$ ]] && [ ! -e "$PROC/$p" ]; then rm -rf -- "$d"; fi
+            [[ "$p" =~ ^[0-9]+$ ]] || continue
+            [ -e "$PROC/$p" ] || { rm -rf -- "$d"; continue; }
+            # pid reuse: the live pid keeps the dir only when the dir is at
+            # least as new as THAT incarnation's start. An older dir is a
+            # dead run's leftover the reused pid cannot own; a birth it
+            # cannot compute keeps the dir, never removes it (mtime aging,
+            # never "the pid exists so it is fresh").
+            st="$(starttime "$p")"; mt="$(stat -c %Y -- "$d" 2>/dev/null || :)"
+            if [[ "$st" =~ ^[0-9]+$ ]] && [[ "$mt" =~ ^[0-9]+$ ]] && [[ "$BTIME" =~ ^[0-9]+$ ]] \
+                    && [[ "$CLK_TCK" =~ ^[1-9][0-9]*$ ]] \
+                    && [ "$mt" -lt $((BTIME + st / CLK_TCK)) ]; then
+                rm -rf -- "$d"
+            fi
         done
     ) 9>"$LOCK"
 }

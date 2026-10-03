@@ -32,9 +32,11 @@
 #
 # Order (fail closed, exit 2 on every refusal; the denial oracle is "no podman
 # run and no activation record"): profile -> refused knobs -> root launcher +
-# unit -> probe -> read-only resolution -> token -> [plan] -> broker gate ->
-# activation record -> reap stale -> control record (published atomically) ->
-# image -> scope + podman -> recorded running -> READY=1.
+# unit -> probe -> read-only resolution (+ workload declaration) -> token ->
+# [plan] -> [GUI: compositor] -> broker gate -> activation record -> reap stale
+# -> control record (published atomically)
+# -> image -> [GUI: host waypipe client + launch record + RegisterLaunch] ->
+# scope + podman -> recorded running -> READY=1.
 #
 # Test hook ONLY: TIER3S_TEST_ROOT=<dir> prefixes /etc/qdistro, /usr/lib/qdistro,
 # /usr/libexec/qdistro, /run, /proc (own cgroup: proc/self),
@@ -106,6 +108,7 @@ ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \
     || refuse "no user/home for uid $ADMIN_UID (the NSS lookup failed or timed out)"
 ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
 ADMIN_PUID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f3)"
+ADMIN_GID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f4)"
 ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
 [ -n "$ADMIN_USER" ] && [ "$ADMIN_PUID" = "$ADMIN_UID" ] && [[ "$ADMIN_HOME" == /* ]] \
     && [[ "$ADMIN_PW" != *$'\n'* ]] || refuse "no user/home for uid $ADMIN_UID"
@@ -138,6 +141,30 @@ probe_out="$("$PROBE" --user "$ADMIN_USER" 2>&1)"; probe_rc=$?
 # --- 5. read-only resolution ----------------------------------------------
 SECCOMP="$LIBDIR/seccomp/$WORKLOAD.json"
 [ -f "$SECCOMP" ] && [ ! -L "$SECCOMP" ] || refuse "no seccomp profile $SECCOMP for workload '$WORKLOAD' (tier 3s has no podman-default fallback)"
+# The workload declaration (CONTRACT.md §7): <workload>.env is PARSED, never
+# sourced — blank lines and '#' comments, then exactly one 'GUI=0|1'. Every
+# declared workload carries one; a missing, unreadable, malformed or
+# GUI-less declaration refuses. GUI=1 adds the waypipe bridge (compositor
+# check, host secctx client, launch record, RegisterLaunch) and the podman
+# mount + host-uds flag below; GUI=0 leaves the launch byte-identical to
+# Phase A.
+GUI=0
+WENV="$LIBDIR/workloads/$WORKLOAD.env"
+{ [ -f "$WENV" ] && [ ! -L "$WENV" ]; } \
+    || refuse "no workload declaration $WENV (every tier3s workload declares GUI=0|1)"
+gui_seen=0
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in
+        GUI=0|GUI=1) ;;
+        GUI=*) refuse "workload declaration $WENV: bad GUI value '${line#GUI=}' (want 0 or 1)" ;;
+        *=*)   refuse "workload declaration $WENV: unexpected key '${line%%=*}'" ;;
+        *)     refuse "workload declaration $WENV: malformed line '$line'" ;;
+    esac
+    [ "$gui_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GUI"
+    gui_seen=1; GUI="${line#GUI=}"
+done < "$WENV"
+[ "$gui_seen" = 1 ] || refuse "workload declaration $WENV: no GUI= declaration"
 IMAGE="localhost/qdistro/tier3s-$WORKLOAD:latest"
 STATE_PATH=""; GENERATION=""; RESOLVER=()
 if [ -n "$SILO" ]; then
@@ -191,12 +218,45 @@ LAUNCH_DIR="$LAUNCH_PARENT/$TOKEN"
 RUNSC_ROOT="/run/qdistro-tier3s-runsc/$ADMIN_UID"
 SPAWN_ACTION="qdistro.tier3s.spawn:$WORKLOAD/$APP_BASE"
 
+# --- 6b. GUI bridge (CONTRACT.md §5 step 12) -------------------------------
+# The waypipe client half (Phase S topology): a host-side client in the
+# launch unit's cgroup, runuser-dropped to admin, secctx-tagged with the
+# (engine, app-id, instance) triple the compositor sees on the sandbox's
+# windows. XDG_RT_PROD is the path the record carries (the cleanup prefixes
+# $T itself); XDG_RT is the effective one under the test root.
+XDG_RT_PROD="/run/user/$ADMIN_UID"; XDG_RT="$T$XDG_RT_PROD"
+WL_DISPLAY=wayland-1
+BRIDGE_SOCK="$LAUNCH_DIR/link.sock"
+LAUNCH_RECORD="$XDG_RT_PROD/qdistro-tier3s-launchrec-$TOKEN.pid"
+GUI_RTFLAG=(); GUI_MOUNT=(); BRIDGE_ARGV=()
+if [ "$GUI" = 1 ]; then
+    GUI_RTFLAG=(--runtime-flag=host-uds=open)            # bind-mounted unix sockets into the sandbox
+    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:rw")    # the token bridge dir, holding only link.sock
+    BRIDGE_ARGV=(
+        runuser -u "$ADMIN_USER" -- env -i
+        PATH="$ADMIN_PATH" HOME="$ADMIN_HOME" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER"
+        XDG_RUNTIME_DIR="$XDG_RT"
+        WAYLAND_DISPLAY="$WL_DISPLAY"
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RT/bus"
+        QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        "QDISTRO_LAUNCH_RECORD_PATH=$LAUNCH_RECORD"
+        "QDISTRO_LAUNCH_RECORD_TOKEN=$TOKEN"
+        qdistro-secctx-exec
+            --sandbox-engine qdistro.tier3s
+            --app-id "qdistro.tier3s.$SILO"
+            --instance-id "$TOKEN"
+            -- waypipe -s "$BRIDGE_SOCK" -o --no-gpu
+                --title-prefix "[3s:$SILO] " client
+    )
+fi
+
 # The podman command (CONTRACT.md §5): every flag is load-bearing.
 # shellcheck disable=SC2054  # the commas are tmpfs mount options
 PODMAN_ARGV=(
     --runtime "$WRAPPER"                 # the pinned runsc via the wrapper (D-A1 state root inside)
     --runtime-flag=network=none          # runsc's own network stack off, not just podman's
     "${DEBUG_FLAGS[@]}"
+    "${GUI_RTFLAG[@]}"
     --cgroup-manager=cgroupfs            # with the admin-delegated scope this keeps every process in it (D-A3b)
     run --rm --name "$CONTAINER"
     --label "qdistro_tier3s_token=$TOKEN" --label "qdistro_tier3s_unit=$UNIT"
@@ -209,12 +269,18 @@ PODMAN_ARGV=(
     --tmpfs /tmp:rw,size=64m,mode=1777
     --tmpfs /run/user/1000:rw,U,mode=0700        # U -> OCI uid=1000,gid=1000; gVisor mounts tmpfs as root otherwise
     --tmpfs /home/admin/.cache:rw,U,mode=0700
+    "${GUI_MOUNT[@]}"
     --pids-limit=512                     # parity with tier 2 ONLY: runsc --ignore-cgroups does not enforce it; TasksMax on the scope does
     --network=none
     --env HOME=/home/admin --env XDG_RUNTIME_DIR=/run/user/1000 --env LANG=C.UTF-8
 )
 [ -z "$STATE_PATH" ] || PODMAN_ARGV+=(-v "$STATE_PATH:/home/admin:rw")   # no recursive chown
-PODMAN_ARGV+=("$IMAGE" "${APP_ARGV[@]}")
+PODMAN_ARGV+=("$IMAGE")
+# A GUI workload runs under the image's waypipe server side (CONTRACT.md §5
+# step 12): the entrypoint execs `waypipe ... server -- <workload argv>` over
+# the mounted bridge socket. A headless workload runs its argv directly.
+[ "$GUI" = 1 ] && PODMAN_ARGV+=(qdistro-tier3s-entrypoint)
+PODMAN_ARGV+=("${APP_ARGV[@]}")
 SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
     -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G     # set by root; enforcement is Phase C
     "-p" "BindsTo=$UNIT" "-p" "Before=$UNIT"             # never outlives the launch unit; alive through its ExecStop/ExecStopPost
@@ -222,14 +288,24 @@ SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
 
 # --- 7. plan (test/inspection hook; no side effect yet) --------------------
 if [ "${TIER3S_PRINT_PLAN:-0}" = 1 ]; then
-    printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\n' \
-        "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT"
+    printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\nGUI=%s\n' \
+        "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT" "$GUI"
     printf 'SPAWN_ACTION=%s\nIMAGE=%s\nSTATE=%s\nSECCOMP=%s\nNETWORK=none\nBINDING=%s\n' \
         "$SPAWN_ACTION" "$IMAGE" "${STATE_PATH:-none}" "$SECCOMP" "$BINDING"
     printf 'CTL_DIR=%s\nLAUNCH_DIR=%s\nRUNSC_ROOT=%s\n' "$CTL_DIR" "$LAUNCH_DIR" "$RUNSC_ROOT"
     printf 'SCOPE_ARG=%s\n' "${SCOPE_ARGV[@]}"
     printf 'PODMAN_ARG=%s\n' "${PODMAN_ARGV[@]}"
+    [ "${#BRIDGE_ARGV[@]}" -eq 0 ] || printf 'BRIDGE_ARG=%s\n' "${BRIDGE_ARGV[@]}"
     exit 0
+fi
+
+# --- 7b. GUI precondition: the admin compositor must be reachable ----------
+# (the bridge client connects to it; refuse before the broker gate so a GUI
+# launch on a compositor-less host never asks for authorization it cannot
+# use). Headless workloads do not touch the compositor at all.
+if [ "$GUI" = 1 ]; then
+    [ -S "$XDG_RT/$WL_DISPLAY" ] \
+        || refuse "GUI workload $WORKLOAD but no admin compositor socket at $XDG_RT/$WL_DISPLAY"
 fi
 
 # --- 8. broker gate --------------------------------------------------------
@@ -328,7 +404,9 @@ rm -rf -- "$NEW"; mkdir -m 0700 "$NEW" || refuse "cannot create $NEW"
 printf '%s\n' schema=1 "token=$TOKEN" "container=$CONTAINER" "unit=$UNIT" "scope_unit=$SCOPE_UNIT" \
     "admin_uid=$ADMIN_UID" "runsc_root=$RUNSC_ROOT" "per_launch_dir=/run/qdistro-tier3s/$TOKEN" phase=created \
     | LC_ALL=C sort > "$NEW/state" && mv -T -- "$NEW" "$CTL_DIR" || refuse "cannot write the control record"
-mkdir -m 0700 "$LAUNCH_DIR" && chown "$ADMIN_UID:$(id -g "$ADMIN_USER")" "$LAUNCH_DIR" \
+# the admin gid comes from the same bounded passwd lookup, never a fresh `id`
+# (the same wedged NSS would hang the launch otherwise — fable A r3 P3-2)
+mkdir -m 0700 "$LAUNCH_DIR" && chown "$ADMIN_UID:$ADMIN_GID" "$LAUNCH_DIR" \
     || refuse "cannot create the per-launch dir $LAUNCH_DIR"
 exec 9>&-
 # The start job completes here (Type=notify); a no-op without systemd's socket.
@@ -343,14 +421,6 @@ notify_ready() {
     [ -n "$NOTIFY_SOCK" ] || return 0
     NOTIFY_SOCKET="$NOTIFY_SOCK" systemd-notify --ready --status="tier3s launch $TOKEN running"
 }
-
-# --- 11. image ---------------------------------------------------------------
-pm image exists "$IMAGE" || refuse "image $IMAGE is not in admin's store (tier3s/make-tier3s-image.sh $WORKLOAD)"
-
-# --- 12. scope + podman ----------------------------------------------------
-printf 'LAUNCH_TOKEN=%s\nCONTAINER=%s\nIMAGE=%s\nSCOPE_UNIT=%s\n' "$TOKEN" "$CONTAINER" "$IMAGE" "$SCOPE_UNIT"
-systemd-run "${SCOPE_ARGV[@]}" "${PODMAN_ARGV[@]}" &
-child=$!
 starttime() {   # field 22 of /proc/<pid>/stat
     local s; { read -r s < "$PROC/$1/stat"; } 2>/dev/null || return 1
     s="${s##*) }"; set -- $s; [ -n "${20:-}" ] && echo "${20}"
@@ -359,6 +429,83 @@ in_scope() {   # in_scope <pid> <scope cgroup rel>
     local c; c="$(sed -n 's/^0:://p' "$PROC/$1/cgroup" 2>/dev/null | head -1)"
     [ -n "$c" ] && { [ "$c" = "$2" ] || [[ "$c" == "$2"/* ]]; }
 }
+
+# --- 11. image ---------------------------------------------------------------
+pm image exists "$IMAGE" || refuse "image $IMAGE is not in admin's store (tier3s/make-tier3s-image.sh $WORKLOAD)"
+
+# --- 11b. GUI bridge: the host waypipe client, registered ------------------
+# (CONTRACT.md §5 step 12.) Runs only for GUI=1; a headless launch is
+# unchanged. The client is our direct child in the launch unit's cgroup (the
+# sandbox runs in the scope, the bridge does not). Every failure refuses
+# BEFORE podman run, and the EXIT trap's cleanup tears the client down.
+if [ "$GUI" = 1 ]; then
+    rm -f -- "$T$LAUNCH_RECORD"
+    ( umask 0177; exec "${BRIDGE_ARGV[@]}" ) &           # socket lands admin-owned 0600
+    BRIDGE_PID=$!
+    # record the wrapper at once (bounded retry: the task may still be
+    # materializing): a refusal below still gets torn down
+    bwst=""
+    for _ in $(seq 1 100); do
+        bwst="$(starttime "$BRIDGE_PID")" && break
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    [ -n "$bwst" ] \
+        && state_write "gui=1" "launch_record=$LAUNCH_RECORD" \
+            "bridge_wrapper_pid=$BRIDGE_PID" "bridge_wrapper_starttime=$bwst" \
+        || refuse "cannot record the bridge wrapper"
+    # The launch record: secctx-exec publishes "<inner pid> <token>" (its own
+    # fork child, the waypipe that connects to the compositor). The token
+    # inside must be ours (a pre-created admin file cannot spoof it); the
+    # pid must be live and in this unit's cgroup.
+    INNER_PID=""; INNER_TOK=""; SEEN_PID=""
+    for _ in $(seq 1 100); do
+        if [ -s "$T$LAUNCH_RECORD" ]; then
+            IFS=' ' read -r INNER_PID INNER_TOK _ < "$T$LAUNCH_RECORD"
+            [[ "$INNER_PID" =~ ^[0-9]+$ ]] && SEEN_PID="$INNER_PID"
+            [ "$INNER_TOK" = "$TOKEN" ] && break
+            INNER_PID=""
+        fi
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    # a record whose token never became ours still names an inner pid this
+    # launch spawned: record it so the teardown kills it, then refuse
+    if [ -z "$INNER_PID" ] && [[ "$SEEN_PID" =~ ^[1-9][0-9]*$ ]]; then
+        bwst="$(starttime "$SEEN_PID")" \
+            && state_write "bridge_client_pid=$SEEN_PID" "bridge_client_starttime=$bwst" || :
+    fi
+    [[ "$INNER_PID" =~ ^[1-9][0-9]*$ ]] && kill -0 "$INNER_PID" 2>/dev/null \
+        || refuse "the waypipe bridge client did not publish a live pid (launch record $LAUNCH_RECORD)"
+    bcg="$(sed -n 's/^0:://p' "$PROC/$INNER_PID/cgroup" 2>/dev/null | head -1)"
+    [ "${bcg##*/}" = "$UNIT" ] \
+        || refuse "bridge client pid $INNER_PID is not in $UNIT's cgroup (${bcg:-?})"
+    bcst="$(starttime "$INNER_PID")" || refuse "cannot read bridge client pid $INNER_PID starttime"
+    state_write "bridge_client_pid=$INNER_PID" "bridge_client_starttime=$bcst" \
+        || refuse "cannot record the bridge client"
+    for _ in $(seq 1 100); do [ -S "$BRIDGE_SOCK" ] && break; sleep 0.05; done
+    [ -S "$BRIDGE_SOCK" ] || refuse "bridge client did not bind $BRIDGE_SOCK"
+    # Lineage registration is MANDATORY for a GUI launch (B-i is stricter
+    # than tier 3's warning-only registration): the broker re-verifies
+    # (pid, starttime, uid, exe) itself; target_starttime 0 = trust /proc.
+    reg=0
+    for _ in 1 2 3 4 5; do
+        dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.RegisterLaunch \
+            "string:$SILO" "string:qdistro.tier3s" "string:qdistro.tier3s.$SILO" \
+            "string:$TOKEN" "string:" "uint64:$INNER_PID" "string:tier3s" "uint64:0" \
+            >/dev/null 2>&1 && { reg=1; break; }
+        sleep 0.2
+    done
+    [ "$reg" = 1 ] \
+        || refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"
+    rm -f -- "$T$LAUNCH_RECORD"
+fi
+
+# --- 12. scope + podman ----------------------------------------------------
+printf 'LAUNCH_TOKEN=%s\nCONTAINER=%s\nIMAGE=%s\nSCOPE_UNIT=%s\n' "$TOKEN" "$CONTAINER" "$IMAGE" "$SCOPE_UNIT"
+systemd-run "${SCOPE_ARGV[@]}" "${PODMAN_ARGV[@]}" &
+child=$!
 # The start poll is a POLL_S-second polling BUDGET by the clock, not a strict
 # pre-TimeoutStartSec bound (fable A r2 P3-3, A r3 P3-3): one iteration can
 # overrun the budget by up to its own bounds (the 5 s inspect plus the 7 s
