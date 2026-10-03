@@ -121,6 +121,16 @@ def _run_probe(root: Path, body: str, *, tmp_path: Path,
     of ``python3 /usr/libexec/qdistro/qdistro_user_relay.py``. The
     environment is scrubbed of PYTHONPATH and the cwd is outside the repo,
     so nothing but the install layout can satisfy the import.
+
+    ``QDISTRO_LIBEXEC`` is PINNED to the fake install dir, not scrubbed:
+    scrubbing re-arms the relay's built-in default ``/usr/libexec/qdistro``
+    candidate, which on a real qdistro install (e.g. the CI guest image the
+    suite also runs on) is a genuine directory holding the genuine
+    qdistro_admin_rules.py — the real rules engine then satisfies the import
+    and ``with_broker=False`` probes silently stop simulating the broken
+    layout they exist to prove (observed: ``no-opt-in-rule`` where the test
+    asserts ``rules-import-error``). Pinning keeps every probe inside the
+    DESTDIR regardless of what is installed on the host running pytest.
     """
     dest = root / _LIBEXEC.lstrip("/")
     probe = dest / "_probe_installed_layout.py"
@@ -129,6 +139,7 @@ def _run_probe(root: Path, body: str, *, tmp_path: Path,
     env = {k: v for k, v in os.environ.items()
            if k not in ("PYTHONPATH", "QDISTRO_LIBEXEC", "QDISTRO_RULES_DIR")}
     env["PYTHONNOUSERSITE"] = "1"
+    env["QDISTRO_LIBEXEC"] = str(dest)
     env.update(extra_env or {})
     return subprocess.run([sys.executable, str(probe)],
                           capture_output=True, text=True, env=env,
