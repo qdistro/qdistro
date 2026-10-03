@@ -10,21 +10,8 @@ name: qdistro downloadable VM test image
 #      qdistro bootstrap chain (scripts/vm/test-vm-guest-install.sh): the
 #      QML shell, Python services, greeter and locker. Build tools stay in
 #      the container; this is a test VM, not a release image.
+# Manual lane only: run with `gh workflow run qdistro-test-vm.yml --ref main`.
 on:
-  push:
-    branches: [experiment/github-qdistro-image]
-    # The image, its harness and the guest transport. A change only to product
-    # code or to pytest suites does not trigger a build: run it by hand
-    # (workflow_dispatch).
-    paths:
-      - .github/workflows/qdistro-test-vm.yml
-      - scripts/vm/test-vm-guest-install.sh
-      - scripts/vm/test-vm-consumer-check.sh
-      - scripts/vm/test-vm-suites.sh
-      - scripts/vm/test-vm-suites-summary.py
-      - scripts/vm/vm-exec
-      - tests/integration/vm/**
-      - snapshot.conf
   workflow_dispatch:
 
 permissions:
