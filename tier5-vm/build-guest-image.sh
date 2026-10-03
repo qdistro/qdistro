@@ -249,9 +249,19 @@ virt-sparsify --in-place "$BASE_QCOW" 2>/dev/null || true
 install -d "$(dirname "$DEST")"
 mv "$BASE_QCOW" "$DEST"
 # Base image is sensitive (may contain a baked debug password); keep it
-# non-world-readable (0640 root:root), mirroring the Tier-4 overlay.
+# non-world-readable (0640), mirroring the Tier-4 overlay — but the owner
+# group must include the session-libvirt user, because spawn-tier5.sh
+# hard-checks `runuser -u "$ADMIN_USER" -- test -r "$DISK_BASE"` and every
+# launch fails when plain root:root leaves admin without read. On qdistro
+# systems admin is in `libvirt`; on a dev host without that group fall back
+# to root:root (operator then fixes up manually, same as the qemu:///system
+# note below).
 chmod 0640 "$DEST"
-chown root:root "$DEST"
+if getent group libvirt >/dev/null 2>&1; then
+    chown root:libvirt "$DEST"
+else
+    chown root:root "$DEST"
+fi
 
 # On qemu:///session as the admin user there's no qemu user — the admin
 # uid reads directly. On qemu:///system, add the qemu user to the image's
