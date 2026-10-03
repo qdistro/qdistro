@@ -238,6 +238,24 @@ if ! user_active qdwin-session.target qdwin-compositor.service qdshell.service q
     fail "greeter login did not start the qdwin session"
 fi
 log "session: qdwin-session.target, compositor, qdshell and qdlocker active"
+# Cursor chain, the three things that were all missing on the first shipped
+# artifact (invisible pointer after login): the sprite helper unit, the
+# resolvable "default" theme, and the compositor actually loading shapes.
+vmssh 'test -f /usr/share/icons/default/index.theme' \
+    || fail "default cursor theme missing (libXcursor resolves 0/36)"
+vmssh 'sudo -n journalctl -b --no-pager _COMM=weston | grep -q "cursor-shape theme=.* loaded=[1-9]"' \
+    || fail "compositor loaded no cursor shapes (check index.theme + journal)"
+# The helper is After=qdshell.service: the session-active check above does
+# not guarantee it has started yet, so poll briefly rather than flake a
+# one-shot on a slow TCG boot.
+for _ in $(seq 1 15); do
+    user_active qdistro-cursor-sprites.service && break
+    sleep 2
+done
+user_active qdistro-cursor-sprites.service \
+    || { vmssh 'sudo -n systemctl --user -M admin@ --no-pager status qdistro-cursor-sprites.service' || true; \
+         fail "qdistro-cursor-sprites.service not active in the admin session"; }
+log "cursor: theme resolves, compositor loaded shapes, sprite helper active"
 # qdshell needs a moment to map and paint its layer surfaces; under TCG that
 # can stretch well past a fixed sleep, so poll like the greeter check does.
 desktop=""
