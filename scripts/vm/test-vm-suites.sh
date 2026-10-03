@@ -316,6 +316,14 @@ if [ "${#BATS_FILES[@]}" -gt 0 ]; then
     # (section 4b) and the RDP certificate of the nested probes (4c).
     SSH_CAP=$(cap 900) rootssh 'set -e; Q=/root/qdistro-src; cd "$Q"
         printf "QDISTRO_PROFILE=dev\n" > /etc/qdistro/profile; chmod 0644 /etc/qdistro/profile
+        # The image bakes /home/admin mode 700, but runc init in a rootless
+        # keep-id container is already the subuid-mapped container root when
+        # it remounts the merged dir MS_PRIVATE — traversal of ~admin then
+        # fails EACCES (A/B-verified: o+x fixes it, baseweed test VMs pass
+        # through a different launch path). Overlay-only workaround so the
+        # container suites test what they test; the product-side question
+        # (700 homes vs keep-id) stays open.
+        chmod o+x /home/admin
         for i in "install-media-for-vm.sh $Q/media" \
                  "install-multimachine-for-vm.sh $Q/multimachine" \
                  "install-templates-for-vm.sh $Q"; do
