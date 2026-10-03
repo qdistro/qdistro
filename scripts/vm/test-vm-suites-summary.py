@@ -18,6 +18,7 @@ minimal-image absences (the GitHub test VM omits optional subsystems; see
 EXPECTED_ABSENT). Grouping is reporting only — it never changes a count or
 the exit status.
 """
+import fnmatch
 import pathlib
 import re
 import sys
@@ -34,46 +35,130 @@ incomplete = []
 # ---- what this image deliberately omits --------------------------------------
 # The GitHub test VM is minimal on purpose. test-vm-guest-install.sh is its
 # definition: the SKIP_STEPS default drops optional bootstrap-chain steps,
-# the case filter drops runtime packages, and the pip loop installs only the
-# shell apps. Parse all three so this classification tracks the image: a
-# failure mapped to an omission that stops being omitted reclassifies as an
-# unexpected regression on its own. An unreadable profile classifies
-# nothing — nothing is ever silently "expected".
-install_src = ""
-try:
-    install_src = (pathlib.Path(__file__).parent / "test-vm-guest-install.sh").read_text()
-except OSError:
-    pass
-m = re.search(r"SKIP_STEPS=\$\{QDISTRO_TEST_VM_SKIP_STEPS:-([^}]*)\}", install_src)
-skipped_steps = set(m.group(1).split()) if m else set()
-m = re.search(r'case "\$pkg" in(.*?)esac', install_src, re.S)
-dropped_pkgs = set()
-if m:
-    for alt in re.findall(r"^\s*([\w.*+-]+(?:\|[\w.*+-]+)*\) ;;)", m.group(1), re.M):
-        dropped_pkgs.update(alt[:-4].split("|"))
-m = re.search(r'for dir in ([^;\n]+);\s*do\s*\n\s*tvm_log "pip install', install_src)
-pip_apps = {p.rsplit("/", 1)[-1] for p in m.group(1).split()} if m else set()
+# the case filter drops runtime packages, pkgs+=() adds a few back and the
+# pip loop installs only the shell apps; install-deps.sh holds the runtime
+# package list the filter cuts. Classifying a failure as "expected" needs
+# POSITIVE evidence from this profile, so the parse is all-or-nothing: a
+# missing file or a pattern that fails to match leaves the profile unknown,
+# every failure then classifies as unexpected and the caveat below says so —
+# a half-parsed profile can never produce an "expected" label. (SKIP_STEPS
+# is the script's default: qdistro-test-vm.yml runs the installer with no
+# QDISTRO_TEST_VM_SKIP_STEPS override, so the parsed default is what ran.)
+vm = pathlib.Path(__file__).parent
+profile_err = []          # non-empty => the omissions are unknown
+skipped_steps = set()     # bootstrap-chain steps the guest drops
+drop_alts = []            # package globs the guest's case filter drops
+added_pkgs = set()        # packages the guest adds after that filter
+pip_apps = set()          # app dirs the guest's pip loop installs
+runtime_pkgs = set()      # install-deps.sh's list after its own filter
+
+
+def _profile_read(path):
+    try:
+        return path.read_text()
+    except OSError:
+        profile_err.append(f"{path.name} unreadable")
+        return None
+
+
+def _case_drops(src, var):
+    """Globs of every `alt|alt) ;;` drop arm of `case "$var" in ... esac`."""
+    m = re.search(rf'case "\${var}" in(.*?)esac', src, re.S)
+    if not m:
+        return None
+    return [alt for arm in re.findall(
+        r"^\s*([\w.*+-]+(?:\|[\w.*+-]+)*\) ;;)", m.group(1), re.M)
+        for alt in arm[:-4].split("|")]
+
+
+install_src = _profile_read(vm / "test-vm-guest-install.sh")
+deps_src = _profile_read(vm / "install-deps.sh")
+if install_src is not None:
+    m = re.search(r"SKIP_STEPS=\$\{QDISTRO_TEST_VM_SKIP_STEPS:-([^}]*)\}",
+                  install_src)
+    if m:
+        skipped_steps = set(m.group(1).split())
+    else:
+        profile_err.append("SKIP_STEPS default not found in "
+                           "test-vm-guest-install.sh")
+    alts = _case_drops(install_src, "pkg")
+    if alts:
+        drop_alts = alts
+    else:
+        profile_err.append("runtime-package case filter not found in "
+                           "test-vm-guest-install.sh")
+    # Part of the complete profile, never classification evidence on its
+    # own: the prepared bats lane installs apps outside this loop (the
+    # overlay installs qnotebook), so "not in pip_apps" proves nothing.
+    m = re.search(r'for dir in ([^;\n]+);\s*do\s*\n\s*tvm_log "pip install',
+                  install_src)
+    if m:
+        pip_apps = {p.rsplit("/", 1)[-1] for p in m.group(1).split()}
+    else:
+        profile_err.append("pip install loop not found in "
+                           "test-vm-guest-install.sh")
+    # Anchored at a line start: the case filter's `*) pkgs+=("$pkg") ;;` arm
+    # also spells `pkgs+=(` — matching mid-line would capture shell tokens.
+    m = re.search(r"^\s*pkgs\+=\((.*?)\)\s*$", install_src, re.S | re.M)
+    if m:
+        added_pkgs = set(re.sub(r"#.*", "", m.group(1)).split())
+    else:
+        profile_err.append("pkgs+=() additions not found in "
+                           "test-vm-guest-install.sh")
+if deps_src is not None:
+    m = re.search(r"^QDISTRO_PKGS=\(\n(.*?)^\)", deps_src, re.S | re.M)
+    alts = _case_drops(deps_src, "_pkg")
+    if m and alts:
+        runtime_pkgs = {p for p in re.sub(r"#.*", "", m.group(1)).split()
+                        if not any(fnmatch.fnmatchcase(p, a) for a in alts)}
+    else:
+        profile_err.append("runtime package list not found in "
+                           "install-deps.sh")
+profile_ok = not profile_err
+# The guest's effective package set: the runtime list minus the case-filter
+# drops plus the pkgs+=() additions (qemu-guest-agent is added back — it is
+# the guest-agent transport, not a hypervisor).
+effective_pkgs = ({p for p in runtime_pkgs
+                   if not any(fnmatch.fnmatchcase(p, a) for a in drop_alts)}
+                  | added_pkgs) if profile_ok else set()
 
 
 def feature_absent(feature):
-    """Is FEATURE one of this image's deliberate omissions?"""
-    if feature in skipped_steps or feature in dropped_pkgs:
+    """Is FEATURE positively evidenced as one of this image's omissions?
+
+    With an incomplete profile nothing is absent — unknown or missing
+    profile information can never excuse a failure.
+    """
+    if not profile_ok:
+        return False
+    if feature in skipped_steps:
         return True
     if feature == "browser":            # no bridge, no browser
         return "browser-bridge" in skipped_steps
-    if feature.startswith("app:"):      # the pip loop installs only listed dirs
-        return feature[4:] not in pip_apps
-    if feature == "xwayland":           # Xwayland is not in the runtime set
-        return True
-    if feature == "kiwi-base":          # the runner's virsh stand-in answers
-        return True                     # guest-agent RPCs only: no libvirt,
-    return False                        # no template, no imported kiwi base
+    if (any(fnmatch.fnmatchcase(feature, a) for a in drop_alts)
+            and feature not in added_pkgs):
+        return True                     # filtered out and not added back
+    if feature == "xwayland":           # the effective runtime set provably
+        return not any(p == "xwayland" or p.startswith("xwayland-")
+                       for p in effective_pkgs)     # carries no Xwayland
+    if feature == "kiwi-base":          # clone-baseweed needs libvirt + QEMU;
+        virt = ("libvirt", "virt-install", "libguestfs", "guestfs-tools")
+        return (not any(p == v or p.startswith(v + "-")
+                        for p in effective_pkgs for v in virt)
+                and all(p == "qemu-guest-agent" for p in effective_pkgs
+                        if p.startswith("qemu")))
+    return False
 
 
 # bats file -> [(test-name prefix or None, (features,), note)]. A failed test
-# is an expected absence when ANY listed feature is absent on this image.
-# prefixes are kept as narrow as the failing tests; None means the whole file
-# targets the absent feature. Note names what the test cannot reach.
+# is an expected absence when ANY listed feature is positively evidenced as
+# omitted on this image. Prefixes stay as narrow as the failing tests; None
+# means the whole file targets the absent feature. Note names what the test
+# cannot reach. There is deliberately no app:<name> feature: the prepared
+# bats lane installs apps beyond the image's pip loop (the overlay installs
+# qnotebook before bats runs), so omission from that loop proves nothing —
+# and neither presentation-four-apps (a host-side probe importing the
+# checkout) nor the qnotebook send-to cases map here.
 EXPECTED_ABSENT = {
     # The four 9e desktop-integration daemons install with the bridge.
     "browser-9e-daemons": [
@@ -86,22 +171,12 @@ EXPECTED_ABSENT = {
         ("phase8-snapshots-probe", ("snapshots",), "snapshot/backup surfaces"),
         ("phase8-phone-probe", ("phone",), "phone daemon + CLI")],
     # clone-baseweed checks the libvirt template BEFORE the kiwi base; the
-    # runner's virsh stand-in only answers guest-agent RPCs.
+    # guest's effective package set provably has no libvirt or QEMU.
     "kiwi-ci-base": [
         ("clone-baseweed: --from-kiwi", ("kiwi-base",), "libvirt template VM")],
-    # The offscreen probe boots qfileman, qdterm, qdbrowser and qnotebook
-    # workers; none of the four apps is installed on this image or runner.
-    "presentation-four-apps": [
-        ("four apps follow publish",
-         ("app:qfileman", "app:qdterm", "app:qdbrowser", "app:qnotebook"),
-         "the four first-party apps")],
     # The probe checks print-proxy is active and the Xwayland binary exists.
     "gui-fixes-verify": [
         ("gui-fixes:", ("print", "xwayland"), "print-proxy / Xwayland")],
-    # Both cases drive two real qnotebook instances across silos.
-    "permissions-headless": [
-        ("pg15-realapp-sendto-headless", ("app:qnotebook",), "qnotebook"),
-        ("pg17-realapp-sendto-deny", ("app:qnotebook",), "qnotebook")],
     # Needs /dev/uinput for ydotool's synthetic input: the Minimal-VM cloud
     # kernel is kernel-default-base (no CONFIG_INPUT_UINPUT) and the package
     # filter drops kernel-default.
@@ -279,10 +354,11 @@ if n_unexp or n_exp:
         f"{n_exp} expected on the minimal image (they probe subsystems the "
         "image omits by design; details at the bottom). This grouping is "
         "reporting only — failed tests still count as failed."]
-    if not install_src:
-        triage += ["", "> `scripts/vm/test-vm-guest-install.sh` unreadable — "
-                   "the expected-absence classification is unavailable, so "
-                   "every failure below is listed as unexpected."]
+    if not profile_ok:
+        triage += ["", "> The image-omission profile could not be parsed "
+                   f"({'; '.join(profile_err)}), so the expected-absence "
+                   "classification is unavailable and every failure below "
+                   "is listed as unexpected."]
     triage.append("")
     lines[triage_at:triage_at] = triage
 if unexpected_cases:
@@ -294,10 +370,13 @@ if unexpected_cases:
 if expected_cases:
     lines += ["", f"<details><summary>Expected on the minimal image ({n_exp} failed "
               "tests — subsystems the image omits by design)</summary>", "",
-              "What the image omits is parsed live from "
-              "`scripts/vm/test-vm-guest-install.sh` (SKIP_STEPS, the dropped "
-              "packages, the pip app set); an omission that stops being omitted "
-              "turns its tests back into unexpected regressions.", ""]
+              "What the image omits is derived live: "
+              "`scripts/vm/test-vm-guest-install.sh` (the SKIP_STEPS "
+              "default, the package case filter and additions, the pip app "
+              "set) applied to `scripts/vm/install-deps.sh`'s runtime list — "
+              "positive evidence only, so if any piece fails to parse no "
+              "absence is claimed at all. An omission that stops being "
+              "omitted turns its tests back into unexpected regressions.", ""]
     for name, cases in expected_cases.items():
         lines.append(f"**{name}**")
         lines += [f"- {c}" for c in cases]
