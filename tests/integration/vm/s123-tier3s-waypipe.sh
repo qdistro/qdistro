@@ -103,7 +103,11 @@ is "register row names engine+app" \
 is "register row records the bridge client pid" \
     "$(audit_last_source "qdistro.lineage.register:$SILO" | grep -c "pid=$BP ")" 1
 is "launch record consumed after RegisterLaunch" "$(yes_no test -e "$LR")" no
-is "launch dir holds only link.sock" "$(find "$LAUNCHES/$TOK" -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" "link.sock "
+# waypipe -o unlinks link.sock at accept (single-attach): once the bridge is
+# live the per-launch dir must be EMPTY — any other file there is a leftover.
+is "launch dir empty once the bridge attached" "$(find "$LAUNCHES/$TOK" -mindepth 1 | grep -c .)" 0
+is "single-attach: a second connect to link.sock is refused" \
+    "$(python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$LAUNCHES/$TOK/link.sock" 2>/dev/null && echo accepted || echo refused)" refused
 
 step "6. qdshell observed the tagged toplevel"
 is "qdshell: [tier3s] toplevel observed" \

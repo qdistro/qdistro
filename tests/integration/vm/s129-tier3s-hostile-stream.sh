@@ -3,16 +3,19 @@
 # phase7-tier3s-hostile-stream.bats. Phase B (ΔB9) hostile waypipe stream
 # handling, tier3s/CONTRACT.md §"Security invariants" (blast radius):
 # a malformed or hostile byte stream on EITHER end of a GUI launch's
-# bridge — the per-launch link.sock (the sandbox's side of the waypipe
-# channel, exercised as if the workload inside the sandbox sent it) and
-# the wayland-secctx listener (the client→compositor direction) — must
+# bridge — the in-sandbox wayland socket the waypipe server publishes
+# (the workload-facing end, exercised via podman exec + perl exactly as a
+# hostile workload inside the sandbox could reach it) and the
+# wayland-secctx listener (the client→compositor direction) — must
 # only ever kill THAT connection. The compositor, qdshell and other GUI
-# launches are untouched; no broad teardown, no host crash.
-#   - garbage bytes on $LAUNCHES/<tok>/link.sock;
-#   - a truncated wayland header (valid-looking start, garbage rest);
-#   - a connect/write/close flood on link.sock;
-#   - garbage on the launch's secctx listener socket (the tagged channel
-#     into the compositor);
+# launches are untouched; no broad teardown, no host crash. The -o client
+# unlinks $LAUNCHES/<tok>/link.sock at accept (single-attach), so the
+# channel itself is no longer a connect target post-attach — asserted too.
+#   - a second connect to the consumed link.sock refused;
+#   - garbage bytes + a truncated wayland header + a connect/write/close
+#     flood on the in-sandbox wayland socket;
+#   - garbage + a truncated frame + a flood on the launch's secctx
+#     listener socket (the tagged channel into the compositor);
 #   then: compositor MainPID unchanged + unit active; qdshell active; the
 #   SECOND launch's record/bridge/toplevel all still live; and full
 #   teardown of both launches is clean.
@@ -49,15 +52,40 @@ is "compositor pid captured" "$(yes_no test -n "$CPID_BEFORE")" yes
 LSOCK_A=$(secctx_listener "$TA")
 is "A's secctx listener resolved" "$(yes_no test -n "$LSOCK_A" -a -S "$ADMIN_RT/$LSOCK_A")" yes
 
-# send_garbage <sock> — one connection, 4 KiB of /dev/urandom, close.
-# send_trunc <sock> — a truncated wl_registry-get_registry-shaped frame
-# (syntactically plausible start, garbage tail) — exercises the protocol
-# parser rather than the reconnect path. flood <sock> <n> — n rapid
-# connect/write/close cycles. All three fail OPEN at the caller (the
-# verdicts below decide); each prints its own diagnostic.
-python3 - "$LAUNCHES/$TA/link.sock" "$ADMIN_RT/$LSOCK_A" > "$WORK/hose.log" 2>&1 <<'PY'
+# The -o client unlinks link.sock once the sandbox's waypipe server attaches
+# (single-attach by design): a reconnect attempt must be refused — prove it —
+# and the live post-attach attack surfaces are the TWO waypipe protocol ends:
+# the in-sandbox wayland socket the server publishes (the workload-facing
+# end — exercised via podman exec + perl's IO::Socket::UNIX, exactly what a
+# hostile workload inside the sandbox could send) and A's secctx listener
+# (the client→compositor end, root-reachable on the host).
+is "single-attach: reconnect to A's consumed link.sock is refused" \
+    "$(python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$LAUNCHES/$TA/link.sock" 2>/dev/null && echo accepted || echo refused)" refused
+CTR_A=$(ctr_of "$SA")
+INSOCK_A=$(pm exec "$CTR_A" sh -c 'ls /run/user/1000/wayland-* 2>/dev/null | head -1')
+is "A's in-sandbox wayland socket resolved" "$(yes_no test -n "$INSOCK_A")" yes
+# garbage, a truncated wl_registry-shaped frame (plausible start, garbage
+# tail — exercises the protocol parser) and a connect/write/close flood at
+# the sandbox end; failures to connect mid-test are legitimate outcomes.
+pm exec "$CTR_A" perl -MIO::Socket::UNIX -e '
+    my $sent = 0;
+    sub blast { my $p = IO::Socket::UNIX->new(Type=>SOCK_STREAM(), Peer=>$ARGV[0]) or return;
+                syswrite($p, $_[0]); close $p; $sent++; }
+    blast(join "", map { chr(int(rand(256))) } 1..4096);
+    blast("\x01\x00\x00\x00\x01\x00\x0c\x00\x02\x00\x00\x00" . join "", map { chr(int(rand(256))) } 1..64);
+    blast(join "", map { chr(int(rand(256))) } 1..256) for 1..40;
+    print "sandbox hose done sent=$sent\n";
+' "$INSOCK_A" > "$WORK/hose-sandbox.log" 2>&1 || :
+sed 's/^/    sandbox-hose: /' "$WORK/hose-sandbox.log"
+is "the sandbox hose ran (connections attempted)" \
+    "$(grep -c 'sandbox hose done' "$WORK/hose-sandbox.log")" 1
+
+# the tagged channel into the compositor: garbage + truncated frame + flood
+# on the secctx listener. A refused/absent socket mid-test is legitimate
+# (the connection already died); the verdicts below decide.
+python3 - "$ADMIN_RT/$LSOCK_A" > "$WORK/hose.log" 2>&1 <<'PY'
 import os, socket, sys, time
-link, listener = sys.argv[1], sys.argv[2]
+listener = sys.argv[1]
 
 def blast(path, payload, label):
     try:
@@ -69,25 +97,18 @@ def blast(path, payload, label):
         s.close()
         print(f"{label}: sent {len(payload)} bytes to {path}")
     except OSError as e:
-        # ECONNREFUSED/ENOENT mid-test = the bridge already died; that is
-        # a legitimate "killed the connection" outcome, not a test error.
         print(f"{label}: connect/send failed ({e})")
 
-blast(link, os.urandom(4096), "link-garbage")
-# wl_display opcode + plausible header then noise (truncated frame)
-blast(link, b"\x01\x00\x00\x00\x01\x00\x0c\x00\x02\x00\x00\x00" + os.urandom(64),
-      "link-truncated-frame")
-for i in range(40):
-    blast(link, os.urandom(256), f"link-flood-{i}")
-# the tagged channel into the compositor: garbage on the secctx listener
 blast(listener, os.urandom(4096), "listener-garbage")
+blast(listener, b"\x01\x00\x00\x00\x01\x00\x0c\x00\x02\x00\x00\x00" + os.urandom(64),
+      "listener-truncated-frame")
 for i in range(20):
     blast(listener, os.urandom(128), f"listener-flood-{i}")
 print("hose done")
 PY
 sed 's/^/    hose: /' "$WORK/hose.log"
 wait_for 15 bash -c "grep -q 'hose done' '$WORK/hose.log'"
-is "the hose ran to completion" "$(grep -c 'hose done' "$WORK/hose.log")" 1
+is "the listener hose ran to completion" "$(grep -c 'hose done' "$WORK/hose.log")" 1
 sleep 2   # let any delayed connection teardown land before the verdicts
 
 step "2. blast radius: only the attacked connection may die"
@@ -103,7 +124,7 @@ step "3. A's bridge: either dropped the bad connection or died — both in-contr
 BP_A=$(rec "$TA" bridge_client_pid); BS_A=$(rec "$TA" bridge_client_starttime)
 if [ -n "$BP_A" ] && [ "$(starttime "$BP_A" 2>/dev/null)" = "$BS_A" ]; then
     pass "A's bridge client survived the garbage (waypipe dropped the bad stream)"
-    is "A's link.sock still serving" "$(yes_no test -S "$LAUNCHES/$TA/link.sock")" yes
+    is "A's bridge channel still established" "$(yes_no bridge_stream_live "$TA")" yes
 else
     pass "A's bridge connection died under the hostile stream (pid ${BP_A:-?} gone)"
     is "A's toplevel is gone from qdshell (handle freed with the client)" \
@@ -114,7 +135,7 @@ step "4. B's launch is completely untouched"
 is "B's record still running" "$(rec "$TB" phase)" running
 is "B's bridge client still live (starttime verified)" \
     "$(st=$(rec "$TB" bridge_client_starttime); p=$(rec "$TB" bridge_client_pid); [ -n "$p" ] && [ "$(starttime "$p" 2>/dev/null)" = "$st" ] && echo yes || echo no)" yes
-is "B's link.sock still present" "$(yes_no test -S "$LAUNCHES/$TB/link.sock")" yes
+is "B's bridge channel still established" "$(yes_no bridge_stream_live "$TB")" yes
 is "B's toplevel still in the qdshell model" \
     "$(qs_ipc tier3focus findSiloHandle "$SB" 2>/dev/null | head -1 | grep -cv 'HANDLE=-1')" 1
 is "B's container still running" "$(ctr_status "$(ctr_of "$SB")")" running

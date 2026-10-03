@@ -598,9 +598,21 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
     else fail "$tag: launch record $lr still present"; fi
 }
 
+# bridge_stream_live <token> — the waypipe client runs with -o (one shot):
+# it unlinks $LAUNCHES/<token>/link.sock the moment the sandbox's waypipe
+# server attaches, so post-attach the live proof is not the pathname but the
+# client's ESTABLISHED stream still carrying the bound path in `ss -xp`.
+bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
+    local tok="$1" bp
+    bp=$(rec "$tok" bridge_client_pid)
+    [ -n "$bp" ] || return 1
+    ss -xp 2>/dev/null | grep -F "$LAUNCHES/$tok/link.sock" | grep -q "pid=$bp[),]"
+}
+
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
-# alive with matching starttimes, in the launch unit's cgroup; link.sock a
-# socket; the secctx listener present.
+# alive with matching starttimes, in the launch unit's cgroup; the link.sock
+# stream established (the path is unlinked at accept — see bridge_stream_live);
+# the secctx listener present.
 assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     local tag="$1" tok="$2" bp bs wp ws unit
     unit=$(rec "$tok" unit)
@@ -617,8 +629,9 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     # the bridge is the launch unit's, not the owning scope's (CONTRACT §5.12)
     is "$tag: bridge client + wrapper in the launch unit cgroup" \
         "$(for p in "$bp" "$wp"; do sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null; done | grep -c "/${unit}$")" 2
-    if [ -S "$LAUNCHES/$tok/link.sock" ]; then pass "$tag: bridge socket $LAUNCHES/$tok/link.sock present"
-    else fail "$tag: no bridge socket at $LAUNCHES/$tok/link.sock"; fi
+    if bridge_stream_live "$tok"; then
+        pass "$tag: bridge channel live (client $bp holds the link.sock stream)"
+    else fail "$tag: no established link.sock stream owned by client pid $bp"; fi
 }
 
 # Bring a GUI silo up live: StartSilo -> record phase=running -> the bridge

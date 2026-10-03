@@ -134,7 +134,9 @@ bind-mounts the per-launch dir at `/run/qdistro/link` with
 /run/qdistro/link/link.sock -o --no-gpu server -- <argv>`: the sandbox is
 the waypipe **server**, the admin
 side the **client** (Phase S topology; `--no-gpu` on both ends, `-o`
-one-shot). The client is a new lifecycle member: recorded
+one-shot — the client unlinks `link.sock` at accept, so the channel is
+single-attach and the live bridge is proven by the client's established
+stream, not the pathname). The client is a new lifecycle member: recorded
 (`bridge_client_*`, §4), registered with the broker before `podman run`
 (§5), and killed and verified dead by the cleanup (§4). It connects out to
 the admin compositor only (`WAYLAND_DISPLAY=wayland-1`); its peer is the

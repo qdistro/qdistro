@@ -29,7 +29,7 @@ teardown_file() {
     assert_output_contains "PASS: launch up (token "
     assert_output_contains "PASS: record: bridge client+wrapper pid/starttime recorded"
     assert_output_contains "PASS: bridge: bridge client pid "
-    assert_output_contains "PASS: bridge: bridge socket /run/qdistro-tier3s/"
+    assert_output_contains "PASS: bridge: bridge channel live"
     assert_output_contains "PASS: bridge client connects through secctx listener wayland-secctx-"
     assert_output_contains "PASS: bridge wrapper is root and the waypipe client's ancestor"
     assert_output_contains "PASS: broker wrote qdistro.lineage.register:s123a"

@@ -24,7 +24,7 @@ teardown_file() {
     assert_success
     t3s_no_failures s129
     assert_output_contains "PASS: both GUI launches up"
-    assert_output_contains "PASS: the hose ran to completion"
+    assert_output_contains "PASS: the listener hose ran to completion"
     assert_output_contains "PASS: compositor still the same pid, unit active"
     assert_output_contains "PASS: qdshell still active"
     assert_output_contains "PASS: no compositor/qdshell crash in the journal since the attack"
