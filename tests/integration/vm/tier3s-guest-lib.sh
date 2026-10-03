@@ -600,30 +600,21 @@ assert_bridge_gone() {   # assert_bridge_gone <tag> <token> [secs]
 
 # bridge_stream_live <token> — the waypipe client runs with -o (one shot):
 # it unlinks $LAUNCHES/<token>/link.sock the moment the sandbox's waypipe
-# server attaches, so post-attach the live proof is FUNCTIONAL, not the
-# pathname: run a fresh wayland client inside the sandbox (wayland-info is
-# in every GUI image via wayland-utils) — it only lists the compositor's
-# globals if the whole chain app-socket -> waypipe server -> link.sock ->
-# host client -> compositor is live.
-# in_sandbox_display <container> — the WAYLAND_DISPLAY the workload got from
-# the waypipe server, read from the container processes' own environments
-# (waypipe picks the socket; /run/user/1000 was empty in b9's transcript).
-in_sandbox_display() {   # in_sandbox_display <container>
-    pm exec "$1" sh -c '
-        for e in /proc/[0-9]*/environ; do tr "\0" "\n" < "$e" 2>/dev/null; done \
-            | sed -n "s/^WAYLAND_DISPLAY=//p" | sort -u | head -1' 2>/dev/null
-}
-
+# server attaches, so post-attach there is no pathname to stat. There is
+# also no named app-facing socket to probe with a second client: waypipe
+# server hands the workload its display over fd-passing (the phaseS spike
+# showed /run/user/1000 empty; gVisor names nothing in /proc/net/unix),
+# and the -o client cannot be re-dialed. The sandbox-side observable is
+# the waypipe server — the container's pid 1 — holding >=2 socket fds:
+# the link.sock channel plus the app's wayland connection.
 bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
-    local tok="$1" ctr disp
+    local tok="$1" ctr
     ctr=$(rec "$tok" container)
     [ -n "$ctr" ] || return 1
-    disp=$(in_sandbox_display "$ctr")
-    [ -n "$disp" ] || return 1
-    # libwayland uses an absolute WAYLAND_DISPLAY verbatim; a bare name is
-    # resolved under XDG_RUNTIME_DIR — set both and the client wins either way.
-    pm exec "$ctr" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$disp" \
-        wayland-info 2>/dev/null | grep -q "wl_compositor\|xdg_wm_base\|wl_seat"
+    pm exec "$ctr" sh -c '
+        [ "$(cat /proc/1/comm 2>/dev/null)" = waypipe ] || exit 1
+        n=$(ls -l /proc/1/fd 2>/dev/null | grep -c "socket:")
+        [ "${n:-0}" -ge 2 ]'
 }
 
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair
@@ -647,12 +638,12 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     is "$tag: bridge client + wrapper in the launch unit cgroup" \
         "$(for p in "$bp" "$wp"; do sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null; done | grep -c "/${unit}$")" 2
     if bridge_stream_live "$tok"; then
-        pass "$tag: bridge channel live (in-sandbox wayland-info lists host globals)"
+        pass "$tag: bridge channel live (sandbox waypipe server holds channel + app sockets)"
     else
         pm exec "$(rec "$tok" container)" sh -c \
-            "find /tmp /run /dev/shm -type s 2>/dev/null; XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY='$(in_sandbox_display "$(rec "$tok" container)")' wayland-info" 2>&1 \
+            'cat /proc/1/comm 2>/dev/null; ls -l /proc/1/fd 2>/dev/null; cat /proc/net/unix 2>/dev/null' \
             | sed 's/^/    probe: /' | head -15
-        fail "$tag: an in-sandbox wayland client cannot reach the host compositor"
+        fail "$tag: the sandbox waypipe server is missing its channel or app sockets"
     fi
 }
 
