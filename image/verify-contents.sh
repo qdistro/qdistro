@@ -573,6 +573,14 @@ check_link "qdshell wired into qdwin-session.target.wants" \
     /home/admin/.config/systemd/user/qdwin-session.target.wants/qdshell.service
 check_link "qdlocker wired into qdwin-session.target.wants" \
     /home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service
+# qdistro-cursor-sprites registers the actual wl_shm cursor surfaces;
+# without it every set_shape logs sprite=deferred and the pointer is
+# invisible in the qdshell session (qdistro-tester5). The unit is
+# WantedBy=qdshell.service and ships system-wide under /etc/systemd/user/.
+check_req "cursor-sprites helper unit" \
+    /etc/systemd/user/qdistro-cursor-sprites.service
+check_link "cursor-sprites wired into qdshell.service.wants" \
+    /etc/systemd/user/qdshell.service.wants/qdistro-cursor-sprites.service
 
 echo
 echo "-- SELinux policy modules / files --"
