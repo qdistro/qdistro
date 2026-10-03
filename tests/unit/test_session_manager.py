@@ -128,6 +128,11 @@ class _FakeOps:
         # disp_containers_by_workflow raises it (lookup failure -> fail closed).
         self.disp_workflow_map: dict[str, list[str]] = {}
         self.disp_workflow_lookup_raises: BaseException | None = None
+        # When True, disp_live_tokens reports the live-token query as FAILED
+        # (returns None) — the export-staging sweep must then skip the pass
+        # entirely rather than read a failed query as "no live disposables"
+        # and rmtree every staging dir.
+        self.disp_live_tokens_fails = False
         self._egress_init()
 
     # ---- queries ----------------------------------------------------------
@@ -334,6 +339,19 @@ class _FakeOps:
         # (carrying qdistro_disposable=1) resolve.
         return [n for n in self.disp_workflow_map.get(workflow_id, [])
                 if n in self.disp_containers]
+
+    def disp_live_tokens(self) -> set[str] | None:
+        # The real ops returns the qdistro_tier2_token label of every live
+        # qdistro_disposable=1 container, or None when the podman query fails
+        # (fail-CLOSED: the export-staging sweep deletes every staging dir
+        # whose token is not in this set, so a failed query must never read
+        # as "none live"). The fake derives the set from disp_token_map the
+        # same way disp_containers_by_token does — a token is live iff at
+        # least one container carrying it is still in disp_containers.
+        if self.disp_live_tokens_fails:
+            return None
+        return {tok for tok, names in self.disp_token_map.items()
+                if any(n in self.disp_containers for n in names)}
 
     def make_state_dir(self, name: str, uid: int):
         self.state_dirs[name] = (int(uid), int(uid), 0o700)
