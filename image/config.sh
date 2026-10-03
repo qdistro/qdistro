@@ -272,6 +272,11 @@ done
 echo "[qdistro-image] building + staging vendored libweston (production)..."
 bash "$QD/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"
 
+# The overlay's default-cursor-theme dir must be traversable by non-root
+# (libXcursor reads it as the session user); git does not track directory
+# modes, so pin it rather than trusting checkout umask.
+chmod 0755 /usr/share/icons/default
+
 # install-qdwin-session-for-vm.sh honours the same offline contract
 # (linger marker written directly; user-unit wants-symlinks written
 # directly). QDWIN_SESSION_AUTOSTART=0: in the greeter image
