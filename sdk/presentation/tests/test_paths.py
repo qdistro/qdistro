@@ -53,8 +53,16 @@ def test_override_malformed_does_not_probe_home(monkeypatch):
 
 def test_polkit_ignores_override(monkeypatch, tmp_path: Path):
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "fixture.json"))
-    assert resolve_snapshot_path(role="polkit") is None
-    assert resolve_snapshot_path(role="locker") is None
+    # managed_dir must be absent, not defaulted: the default
+    # /var/lib/qdistro/presentation EXISTS on a real qdistro install (the
+    # image bakes it plus its deployment metadata), where resolving there
+    # is the CORRECT polkit behaviour — the assertion under test is that the
+    # override is ignored, and on an installed system that yields a managed
+    # ResolvedPath, not None. Pinning an absent managed_dir keeps the None
+    # expectation deterministic on installed and uninstalled hosts alike.
+    absent = str(tmp_path / "no-managed-dir")
+    assert resolve_snapshot_path(role="polkit", managed_dir=absent) is None
+    assert resolve_snapshot_path(role="locker", managed_dir=absent) is None
 
 
 def test_override_read_roundtrip(tmp_path: Path):
