@@ -341,7 +341,19 @@ if [ "${#BATS_FILES[@]}" -gt 0 ]; then
         for f in "$d"/*.crt; do [ "$f" = "$d/rdp.crt" ] || mv "$f" "$d/rdp.crt"; done
         for f in "$d"/*.key; do [ "$f" = "$d/rdp.key" ] || mv "$f" "$d/rdp.key"; done
         chown admin:"$g" "$d"/rdp.crt "$d"/rdp.key
-        chmod 0600 "$d/rdp.key"; chmod 0644 "$d/rdp.crt"' > "$OUT/qci-lane-setup.log" 2>&1 \
+        chmod 0600 "$d/rdp.key"; chmod 0644 "$d/rdp.crt"
+        # Real qnotebook for the real-app send-to cases (s125 pg15/pg17):
+        # the qci lane gets the identical install from fresh-vm-bootstrap.sh;
+        # the shipped image, like the kiwi tester, carries no end-user apps.
+        # Deps are already present: PyQt6 is an image package, mistune and
+        # git-core are TEST_PKGS installed above, qdistro_presentation and
+        # qdistro_app are baked chain steps.
+        pysite=$(python3 -c "import sysconfig; print(sysconfig.get_paths()[\"purelib\"].replace(\"/usr/lib/\",\"/usr/local/lib/\",1))")
+        rm -rf "$pysite/qnotebook"
+        install -d -m 0755 "$pysite"
+        cp -a "$Q/qnotebook/qnotebook" "$pysite/qnotebook"
+        printf "%s\n" "#!/bin/sh" "exec python3 -m qnotebook \"\$@\"" > /usr/local/bin/qnotebook
+        chmod 0755 /usr/local/bin/qnotebook' > "$OUT/qci-lane-setup.log" 2>&1 \
         || { tail -30 "$OUT/qci-lane-setup.log"; setup_failed; }
 
     # The guest is headless: nothing ever feeds input, so qdlocker's
