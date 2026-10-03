@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -307,3 +310,88 @@ def test_ui_scale_applied_once_to_app_font(qapp, tmp_path):
     assert ctrl.state.ui_point_size == pytest.approx(11 * 1.1 * 1.1)
     assert ctrl.state.content_ui_point_size == pytest.approx(11 * 1.1)
     ctrl.stop()
+
+
+def test_ui_font_ignores_device_pixel_ratio(qapp, tmp_path, monkeypatch):
+    from qdistro_presentation.model import DEFAULT_DARK_COLORS, normalize_producer
+    from qdistro_presentation.qt import apply_logical_ui_font
+
+    snap = normalize_producer(
+        mode="dark",
+        colors=DEFAULT_DARK_COLORS,
+        settings={"ui": {"fontDefaultScale": 1.0}, "general": {"scaleRatio": 1.2}},
+    )
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setattr(type(qapp), "devicePixelRatio", lambda self: 2.0)
+    monkeypatch.setattr(QWidget, "devicePixelRatio", lambda self: 2.0)
+    if hasattr(QWidget, "devicePixelRatioF"):
+        monkeypatch.setattr(QWidget, "devicePixelRatioF", lambda self: 2.0)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    want = 11 * 1.2
+    assert float(qapp.devicePixelRatio()) == pytest.approx(2.0)
+    assert qapp.font().pointSizeF() == pytest.approx(want)
+    assert qapp.font().pointSizeF() != pytest.approx(want * 2.0)
+    assert qapp.font().pixelSize() == -1
+    apply_logical_ui_font(qapp, ctrl.state, native_family=qapp.font().family())
+    assert qapp.font().pointSizeF() == pytest.approx(want)
+    ctrl.stop()
+
+
+def test_qt_scale_factor_does_not_multiply_point_size(tmp_path):
+    snap_dir = tmp_path / "snap"
+    snap_dir.mkdir()
+    source = r"""
+import os
+import sys
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ["QT_SCALE_FACTOR"] = "2"
+from PyQt6.QtWidgets import QApplication
+from qdistro_presentation.model import DEFAULT_DARK_COLORS, normalize_producer
+from qdistro_presentation.paths import ResolvedPath
+from qdistro_presentation.publish import write_snapshot
+from qdistro_presentation.qt import PresentationController
+
+snap = normalize_producer(
+    mode="dark",
+    colors=DEFAULT_DARK_COLORS,
+    settings={"ui": {"fontDefaultScale": 1.0}, "general": {"scaleRatio": 1.2}},
+)
+write_snapshot(sys.argv[1], snap, require_unwritable_dirs=False)
+app = QApplication(["presentation-device-scale"])
+ctrl = PresentationController(
+    app,
+    theme_mode="system",
+    snapshot_path=ResolvedPath(
+        path=os.path.join(sys.argv[1], "current.json"),
+        kind="override",
+        expected_uid=None,
+        watch=False,
+    ),
+    watch=False,
+)
+size = app.font().pointSizeF()
+dpr = float(app.devicePixelRatio())
+ctrl.stop()
+if abs(size - 13.2) > 0.05:
+    raise SystemExit(f"FAIL size={size} dpr={dpr} want=13.20")
+if abs(size - 13.2 * dpr) <= 0.05 and dpr != 1.0:
+    raise SystemExit(f"FAIL size multiplied by dpr size={size} dpr={dpr}")
+print(f"ok size={size:.2f} dpr={dpr:.2f}")
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get(
+        "PYTHONPATH", ""
+    )
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    proc = subprocess.run(
+        [sys.executable, "-c", source, str(snap_dir)],
+        timeout=20,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("ok size=13.20")

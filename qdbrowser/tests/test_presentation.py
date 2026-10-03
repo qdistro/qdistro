@@ -115,6 +115,36 @@ def test_live_snapshot_restyles_overlay_without_reload(
     assert overlay_palette("auto")["bg"] == snap_b.colors.mSurface
 
 
+def test_live_snapshot_keeps_page_zoom(qapp, tmp_path, monkeypatch, window):
+    from dataclasses import replace
+
+    from qdbrowser.theme import current_controller
+    from qdistro_presentation.model import with_generation
+
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _config("system"))
+    wv = window._active_webview
+    wv.set_zoom(1.7)
+    assert wv.zoom() == pytest.approx(1.7)
+
+    snap_b = with_generation(
+        replace(
+            snap,
+            fonts=replace(snap.fonts, ui_scale=1.25),
+            metrics=replace(snap.metrics, ui_scale=1.2),
+            generation="",
+        )
+    )
+    write_snapshot(str(tmp_path), snap_b, require_unwritable_dirs=False)
+    current_controller()._reload()
+    window.apply_presentation_update()
+    assert wv.zoom() == pytest.approx(1.7)
+    assert window._active_webview is wv
+    assert qapp.font().pointSizeF() == pytest.approx(11 * 1.25 * 1.2)
+
+
 def test_theme_mode_light_updates_desktop_dark(
         qapp, tmp_path, monkeypatch, window):
     from qdbrowser.theme import current_controller, current_resolved_theme
