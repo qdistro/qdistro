@@ -45,14 +45,35 @@ qdwin protocol path against a real client.
 
 ## Running
 
-The scenarios use a shared helper at `qdwin-apps-helpers.sh`. Source it
-once per session:
+The scenarios use a shared helper at `qdwin-apps-helpers.sh`. It is a
+**host-side Bash helper**: source it in the agent's host shell and call its
+functions there. Functions such as `qdwin_apps_session_up`,
+`qdwin_apps_launch`, `qdwin_apps_screenshot`, and `qdwin_apps_log_grep` call
+`vm-exec` themselves where guest work is needed. Never put the `source` or a
+`qdwin_apps_*` call inside `vm-exec` or a guest script. The generated qci
+prompt may give a generic guest-driver recipe for other scenarios; this lane
+uses one host shell to run the blocks below.
+
+Use this exact repository-root form when sourcing the helper:
 
 ```bash
-source ${QDWIN_REPO}/tests/apps/qdwin-apps-helpers.sh
+source "$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh"
 qdwin_apps_set_vm "${VMNAME:-apps-qdwin-...}"
 qdwin_apps_session_up || { echo "FAIL: bystander/weston not healthy"; exit 1; }
 ```
+
+`QDISTRO_REPO` is the monorepo root. If using `QDWIN_REPO` instead, it is
+already the `qdwin/` component directory, so the matching path is
+`$QDWIN_REPO/tests/apps/qdwin-apps-helpers.sh`; never append another `qdwin/`.
+Fresh GUI goldens normally start with qdshell, not the bystander. The
+self-healing `qdwin_apps_session_up` call above performs the shell takeover and
+proves the canonical FIFO is ready; do not replace it with a guest-side FIFO
+check.
+
+For any scenario declaring `qci:visual: required`, save every asserted frame
+inside `$QCI_GUI_ARTIFACT_DIR`, for example
+`qdwin_apps_screenshot "$QCI_GUI_ARTIFACT_DIR/step1.png"`. Captures under
+`/tmp` are not harvested as scenario evidence.
 
 `qdwin_apps_session_up` is **self-healing**: if the bystander/FIFO aren't
 ready (fresh boot still running qdshell, or a bystander whose FIFO defaulted

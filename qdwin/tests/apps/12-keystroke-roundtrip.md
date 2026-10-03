@@ -12,29 +12,35 @@ keymap and Xwayland keyboard hand-off.
 ## Setup
 
 ```bash
-source ${QDWIN_REPO}/tests/apps/qdwin-apps-helpers.sh
+source "$QDISTRO_REPO/qdwin/tests/apps/qdwin-apps-helpers.sh"
 qdwin_apps_set_vm "${VMNAME}"
 qdwin_apps_session_up || { echo "FAIL: bystander/weston not healthy"; exit 1; }
 qdwin_apps_kill_all
+"$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1' || {
+  echo "ERROR: foot, a core test client, is missing from the GUI golden"; exit 2;
+}
 ```
 
 ## Steps
 
-### Step 1 — type into native-Wayland Firefox
+### Step 1 — type into native-Wayland foot
 
 ```bash
-qdwin_apps_launch firefox "firefox --no-remote --new-instance about:blank"
-sleep 12
-# Bystander already called set_keyboard_focus on toplevel_added; the
-# URL bar gets focus by default in a fresh tab.
-qdwin_apps_type "qdwin"
+qdwin_apps_launch foot "foot"
+sleep 4
+# The bystander focuses each new toplevel. Type a command into foot's
+# shell, then execute it so both the input and resulting output are visible.
+qdwin_apps_type "echo qdwin"
+qdwin_apps_send_key KEY_ENTER
 sleep 1
-qdwin_apps_screenshot /tmp/12-step1-firefox-typed.png
+qdwin_apps_screenshot "${QCI_GUI_ARTIFACT_DIR}/12-step1-foot-typed.png"
 ```
 
-**Assert (1.1):** screenshot shows `qdwin` typed into the Firefox URL
-bar. Pre-fix, the held-layer-without-focus path would silently drop
-keystrokes; this is the canary.
+**Assert (1.1):** the screenshot shows `echo qdwin` and its `qdwin`
+output in foot. The bystander log must also show foot's toplevel with
+`xwayland=0`. Pre-fix, the held-layer-without-focus path silently dropped
+keystrokes; foot exercises the native-Wayland keyboard path without relying
+on optional Firefox app dependencies.
 
 ```bash
 qdwin_apps_kill_all
@@ -49,12 +55,13 @@ sleep 4
 qdwin_apps_type "echo qdwin"
 qdwin_apps_send_key KEY_ENTER
 sleep 1
-qdwin_apps_screenshot /tmp/12-step2-xterm-typed.png
+qdwin_apps_screenshot "${QCI_GUI_ARTIFACT_DIR}/12-step2-xterm-typed.png"
 ```
 
 **Assert (2.1):** screenshot shows `echo qdwin` on one line and
 `qdwin` (the shell output) on the next, with the prompt advanced to
 a fresh line.
+The bystander log must show xterm's toplevel with `xwayland=1`.
 
 ## Cleanup
 
@@ -64,15 +71,15 @@ qdwin_apps_kill_all
 
 ## Pass criteria
 
-- Step 1: "qdwin" rendered in Firefox URL bar (Wayland keyboard).
+- Step 1: `echo qdwin` and its output rendered in foot (native-Wayland keyboard).
 - Step 2: command + output rendered in xterm (XWayland keyboard).
+- foot is tagged `xwayland=0`; xterm is tagged `xwayland=1`.
 
 ## Known failure modes
 
-- **Step 1 URL bar empty** — Firefox didn't get keyboard focus. The
-  bystander's `set_keyboard_focus` call at toplevel_added didn't take.
-  Check bystander log for the call; check qdwin log for the
-  `set_keyboard_focus` audit line.
+- **Step 1 command or output missing** — foot did not get keyboard focus
+  or the native-Wayland key path failed. Check the bystander's focus call
+  and qdwin's `set_keyboard_focus` audit line.
 - **Step 2 xterm shows only a blinking prompt** — XWayland's
   keyboard hand-off (xkb keymap forwarding) didn't happen. Check
   qdwin.log for "launching '/usr/bin/Xwayland'" and absence of
