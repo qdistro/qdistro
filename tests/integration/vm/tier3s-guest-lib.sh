@@ -341,5 +341,15 @@ assert_all_clear() {   # assert_all_clear <tag>
     is "$1: state root holds no container state" "$(qry find "$SROOT" -mindepth 1 ! -name null-netns | grep -c .)" 0
     # the cleanup's per-call scopes and work dirs end with each call / run (astra A r2 #2)
     is "$1: no cleanup call scope left" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-t3s-call-*.scope' | grep -c .)" 0
-    is "$1: no cleanup work dir left" "$(qry find "$CTL" -mindepth 1 -maxdepth 1 -name '.call-*' | grep -c .)" 0
+    local call_dirs d pid
+    call_dirs=$(qry find "$CTL" -mindepth 1 -maxdepth 1 -name '.call-*')
+    if [ -n "$call_dirs" ]; then
+        while IFS= read -r d; do
+            pid="${d##*/.call-}"; pid="${pid%%-*}"
+            printf '    cleanup work dir: %s; owner pid %s: ' "$d" "$pid"
+            if [ -e "/proc/$pid/status" ]; then sed -n 's/^State:[[:space:]]*/state=/p' "/proc/$pid/status"
+            else printf 'absent\n'; fi
+        done <<< "$call_dirs"
+    fi
+    is "$1: no cleanup work dir left" "$(printf '%s\n' "$call_dirs" | grep -c .)" 0
 }
