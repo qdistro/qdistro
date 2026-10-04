@@ -484,8 +484,6 @@ static const qdwin_shell_v1_listener kShellListener = {
     .selection_set             = QdwinBindingDispatch::selection_set,
     .selection_set_source_identity =
         QdwinBindingDispatch::selection_set_source_identity,
-    .selection_set_source_peer_identity =
-        QdwinBindingDispatch::selection_set_source_peer_identity,
     .activation_pending        = QdwinBindingDispatch::activation_pending,
     .toplevel_security_context = QdwinBindingDispatch::toplevel_security_context,
     .toplevel_peer_identity    = QdwinBindingDispatch::toplevel_peer_identity,
@@ -503,6 +501,8 @@ static const qdwin_shell_v1_listener kShellListener = {
         QdwinBindingDispatch::remote_output_input_result,
     .remote_output_drain_result =
         QdwinBindingDispatch::remote_output_drain_result,
+    .selection_set_source_peer_identity =
+        QdwinBindingDispatch::selection_set_source_peer_identity,
 };
 
 // -------------------- ext-workspace-v1 client trampolines --------------------

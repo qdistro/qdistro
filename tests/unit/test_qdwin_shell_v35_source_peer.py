@@ -71,6 +71,16 @@ def test_source_peer_identity_event(shell_iface: ET.Element) -> None:
     ]
 
 
+def test_new_event_is_the_last_event(shell_iface: ET.Element) -> None:
+    # ensures: wire compatibility — event opcodes are positional, so a
+    # new-version event MUST be appended after every existing event.
+    # Inserting mid-list renumbers all later opcodes and breaks any
+    # pre-v35 build talking to this compositor (Sol r3 P1).
+    events = shell_iface.findall("./event")
+    assert events, "qdwin_shell_v1 has no events"
+    assert events[-1].attrib["name"] == "selection_set_source_peer_identity"
+
+
 def test_secctx_context_has_consumed_state() -> None:
     # ensures: the single-attach slot cannot be silently deleted — a
     # secctx listener without the consumed flag would accept every

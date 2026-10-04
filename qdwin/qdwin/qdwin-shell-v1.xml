@@ -994,48 +994,6 @@
            summary="from wp_security_context_v1.set_instance_id"/>
     </event>
 
-    <event name="selection_set_source_peer_identity" since="35">
-      <description summary="peer identity of the wl_client behind selection_set">
-        Sidecar to `selection_set`. Fires IMMEDIATELY AFTER the
-        matching `selection_set_source_identity` (and therefore
-        immediately before `selection_set`) whenever the source
-        wl_client carries a `wp_security_context_v1` tag. Where the
-        v23 sidecar carries the attested (engine, app_id, instance)
-        tuple, this event carries the same client's compositor-observed
-        process identity — the same Option-B tuple
-        `toplevel_peer_identity` carries for toplevels.
-
-        This lets the shell relay the actual SELECTION SOURCE's
-        (pid, starttime) to the broker rather than borrowing the
-        focused toplevel's identity under a tag-equality binding.
-        Two consequences:
-
-        - A source that does NOT own the focused toplevel (a
-          background bridge, a cross-silo offer) still relays its own
-          verified identity, so a rule-driven cross-silo transfer can
-          be attested instead of failing closed on pid 0.
-        - The relayed identity can never belong to a DIFFERENT
-          client that happens to share the tag tuple (tag equality
-          alone is not peer equality).
-
-        Same pairing contract as `selection_set_source_identity`: at
-        most one outstanding sidecar pair per resource; the next
-        `selection_set` consumes them. Untagged sources emit neither.
-      </description>
-      <arg name="peer_pid" type="uint"
-           summary="SO_PEERCRED pid of the source wl_client"/>
-      <arg name="peer_starttime" type="uint"
-           summary="/proc/&lt;pid&gt;/stat field 22 (low 32 bits)"/>
-      <arg name="peer_starttime_hi" type="uint"
-           summary="/proc/&lt;pid&gt;/stat field 22 (high 32 bits)"/>
-      <arg name="peer_uid" type="uint"
-           summary="SO_PEERCRED uid of the source wl_client"/>
-      <arg name="peer_exe" type="string"
-           summary="/proc/&lt;pid&gt;/exe resolved at accept time; empty when unreadable"/>
-      <arg name="peer_selinux_label" type="string"
-           summary="SELinux label at accept time; empty when unreadable"/>
-    </event>
-
     <request name="clear_selection" since="11">
       <description summary="reject the most recent selection_set">
         Sent by the shell after a deny verdict from the broker.
@@ -1968,6 +1926,49 @@
       <arg name="output_name" type="string"/>
       <arg name="applied" type="uint"/>
     </event>
+
+    <event name="selection_set_source_peer_identity" since="35">
+      <description summary="peer identity of the wl_client behind selection_set">
+        Sidecar to `selection_set`. Fires IMMEDIATELY AFTER the
+        matching `selection_set_source_identity` (and therefore
+        immediately before `selection_set`) whenever the source
+        wl_client carries a `wp_security_context_v1` tag. Where the
+        v23 sidecar carries the attested (engine, app_id, instance)
+        tuple, this event carries the same client's compositor-observed
+        process identity — the same Option-B tuple
+        `toplevel_peer_identity` carries for toplevels.
+
+        This lets the shell relay the actual SELECTION SOURCE's
+        (pid, starttime) to the broker rather than borrowing the
+        focused toplevel's identity under a tag-equality binding.
+        Two consequences:
+
+        - A source that does NOT own the focused toplevel (a
+          background bridge, a cross-silo offer) still relays its own
+          verified identity, so a rule-driven cross-silo transfer can
+          be attested instead of failing closed on pid 0.
+        - The relayed identity can never belong to a DIFFERENT
+          client that happens to share the tag tuple (tag equality
+          alone is not peer equality).
+
+        Same pairing contract as `selection_set_source_identity`: at
+        most one outstanding sidecar pair per resource; the next
+        `selection_set` consumes them. Untagged sources emit neither.
+      </description>
+      <arg name="peer_pid" type="uint"
+           summary="SO_PEERCRED pid of the source wl_client"/>
+      <arg name="peer_starttime" type="uint"
+           summary="/proc/&lt;pid&gt;/stat field 22 (low 32 bits)"/>
+      <arg name="peer_starttime_hi" type="uint"
+           summary="/proc/&lt;pid&gt;/stat field 22 (high 32 bits)"/>
+      <arg name="peer_uid" type="uint"
+           summary="SO_PEERCRED uid of the source wl_client"/>
+      <arg name="peer_exe" type="string"
+           summary="/proc/&lt;pid&gt;/exe resolved at accept time; empty when unreadable"/>
+      <arg name="peer_selinux_label" type="string"
+           summary="SELinux label at accept time; empty when unreadable"/>
+    </event>
+
   </interface>
 
   <interface name="qdwin_background_v1" version="1">
