@@ -217,7 +217,11 @@ clip_gate_line() {   # clip_gate_line <src_silo> — newest CLIPBOARD_GATE for i
 }
 
 step "2. live tagged selection $SA -> $SB: default deny"
-launch_clip_source "$SA" text/plain "s127-secret-A" "$WORK/clip-src-A.log"
+# --emit-interval keeps A re-offering across transient broker-unavailable
+# denies (busctl --timeout=200ms under load) until a broker-evaluated
+# verdict lands — the same cadence B/C use below.
+launch_clip_source "$SA" text/plain "s127-secret-A" "$WORK/clip-src-A.log" \
+    --emit-interval 400
 register_clip_launch "$SA" \
     && pass "clip source A registered in the launch-record store" \
     || fail "register_clip_source A failed"
@@ -234,6 +238,9 @@ is "default-deny verdict at set-time" \
     "$(printf '%s' "$line" | grep -c 'verdict=deny reason=broker:deny')" 1
 is "text/plain offer reached the broker unfiltered" \
     "$(printf '%s' "$line" | grep -c 'mime_types=text/plain')" 1
+# A's step-2 evidence is captured; stop its re-offers so they cannot emit
+# s127a->s127b ALLOW lines once the step-4 SaveRule lands.
+kill_clip_src "$CLIP_SRC_PID"; CLIP_SRC_PID=""
 
 step "3. strict MIME: image/png-only offer strips to deny"
 # under enforce a pid-less relay hard-denies; relay A's spawn-registered
