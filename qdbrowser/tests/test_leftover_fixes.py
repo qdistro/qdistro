@@ -192,7 +192,7 @@ def test_palette_dict_dark_has_required_keys():
     from qdbrowser.theme import palette_dict
     p = palette_dict("dark")
     for k in ("bg", "bg_mid", "bg_dim", "fg", "fg_dim", "accent",
-              "border", "selection"):
+              "border", "selection", "selection_fg", "hover", "hover_fg"):
         assert k in p
         assert p[k].startswith("#")
 

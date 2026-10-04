@@ -48,20 +48,72 @@ def test_attach_presentation_follows_snapshot(qapp, tmp_path, monkeypatch):
     assert auto["border"] == colors.mOutline
     assert auto["selection"] == colors.mPrimary
     assert auto["selection_fg"] == colors.mOnPrimary
+    assert auto["hover"] == colors.mHover
+    assert auto["hover_fg"] == colors.mOnHover
+
+
+_EXPLICIT_PALETTE_KEYS = (
+    "bg", "bg_mid", "bg_dim", "fg", "fg_dim", "accent", "border",
+    "selection", "selection_fg", "hover", "hover_fg",
+)
 
 
 def test_palette_dict_explicit_dark_stays_content_policy(qapp, tmp_path, monkeypatch):
-    from qdbrowser.theme import ACCENT_LIGHT, BG_DARK, FG, SELECTION
+    from qdbrowser.theme import (
+        ACCENT_LIGHT,
+        BG_DARK,
+        FG,
+        HOVER,
+        HOVER_FG,
+        SELECTION,
+        SELECTION_FG,
+    )
 
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
     attach_presentation(qapp, _config("system"))
+    colors = example_snapshot().colors
     forced = palette_dict("dark")
+    assert set(forced) >= set(_EXPLICIT_PALETTE_KEYS)
     assert forced["bg"] == BG_DARK
     assert forced["fg"] == FG
     assert forced["accent"] == ACCENT_LIGHT
     assert forced["selection"] == SELECTION
-    assert forced["bg"] != example_snapshot().colors.mSurface
+    assert forced["selection_fg"] == SELECTION_FG
+    assert forced["hover"] == HOVER
+    assert forced["hover_fg"] == HOVER_FG
+    assert forced["bg"] != colors.mSurface
+    assert forced["selection_fg"] != colors.mOnPrimary
+    assert forced["hover_fg"] != colors.mOnHover
+
+
+def test_palette_dict_explicit_light_stays_content_policy(qapp, tmp_path, monkeypatch):
+    from qdbrowser.theme import (
+        LT_ACCENT,
+        LT_BG_BASE,
+        LT_FG,
+        LT_HOVER,
+        LT_HOVER_FG,
+        LT_SELECTION,
+        LT_SELECTION_FG,
+    )
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _config("system"))
+    colors = example_snapshot().colors
+    forced = palette_dict("light")
+    assert set(forced) >= set(_EXPLICIT_PALETTE_KEYS)
+    assert forced["bg"] == LT_BG_BASE
+    assert forced["fg"] == LT_FG
+    assert forced["accent"] == LT_ACCENT
+    assert forced["selection"] == LT_SELECTION
+    assert forced["selection_fg"] == LT_SELECTION_FG
+    assert forced["hover"] == LT_HOVER
+    assert forced["hover_fg"] == LT_HOVER_FG
+    assert forced["bg"] != colors.mSurface
+    assert forced["selection_fg"] != colors.mOnPrimary
+    assert forced["hover_fg"] != colors.mOnHover
 
 
 def test_attach_presentation_native_ignores_snapshot(qapp, tmp_path, monkeypatch):
