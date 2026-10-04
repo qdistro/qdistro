@@ -60,11 +60,11 @@ teardown_file() {
 
 @test "no AVC denial names qdistro_presentation_t since boot" {
     # Runs after the probes above (bats keeps file order), so their reads,
-    # watches and publishes have happened under enforcing.
-    vm_run "ausearch -m AVC,USER_AVC -ts boot 2>/dev/null | grep -E 'denied.*qdistro_presentation_t' || true"
-    assert_success
-    if [ -n "$(printf '%s' "$output" | tr -d '[:space:]')" ]; then
-        echo "$output"
-        fail_loud "AVC denials name qdistro_presentation_t under enforcing"
-    fi
+    # watches and publishes have happened under enforcing. avc-denials.sh
+    # fails closed (exit 3) when ausearch or auditd is unusable.
+    stage_vm_driver "probes/avc-denials.sh"
+    vm_run "curl -fsS -o /tmp/avc-denials.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/avc-denials.sh && bash /tmp/avc-denials.sh 'qdistro_presentation_t'"
+    echo "$output"
+    [ "$status" -eq 0 ] || fail_loud "presentation AVC check failed (status=$status)"
+    assert_output_contains "AVC-CLEAN"
 }

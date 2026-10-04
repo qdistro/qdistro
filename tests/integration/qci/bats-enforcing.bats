@@ -84,3 +84,100 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
     [ "$status" -eq 2 ]
     [[ "$output" == *"--enforcing requires --from-run-golden"* ]]
 }
+
+# --- gate-side endpoint check (sol r84 finding 2) ---------------------------
+
+_endpoint_stubs() {
+    qci_assert_vm_exists() { return 0; }
+    collect_vm_artifacts_ssh() { :; }
+    scenario_scratch_dir() { printf '%s/scratch' "$TMP"; }
+    VIRSH=(_fake_virsh)
+    _fake_virsh() {
+        printf "<domain><interface type='user'><portForward proto='tcp' address='127.0.0.1'>\n"
+        printf "        <range start='%s' to='22'/>\n" "${FAKE_FWD_PORT:-}"
+        printf "</portForward></interface></domain>\n"
+    }
+    qci_enforcing_ssh() { printf '%s\r\n' "${FAKE_MODE:-}"; }
+    printf '#!/usr/bin/env bats\n# qci:enforcing\n@test x { touch "%s/ran"; }\n' "$TMP" > "$TMP/e.bats"
+}
+
+@test "explicit VM that answers Permissive is refused before the file runs" {
+    _endpoint_stubs
+    FAKE_FWD_PORT=40001 FAKE_MODE=Permissive run bats_run_one qci-fake "$TMP/e.bats" 40001
+    [ "$status" -eq 35 ]
+    [ ! -e "$TMP/ran" ]
+    grep -q "getenforce=Permissive, not Enforcing" "$TMP/rows"
+}
+
+@test "an SSH port the domain does not forward is refused" {
+    _endpoint_stubs
+    FAKE_FWD_PORT=40002 FAKE_MODE=Enforcing run bats_run_one qci-fake "$TMP/e.bats" 40001
+    [ "$status" -eq 35 ]
+    [ ! -e "$TMP/ran" ]
+    grep -q "SSH port 40001 is not forwarded to guest :22 by domain qci-fake" "$TMP/rows"
+}
+
+@test "a forwarded, Enforcing endpoint runs the marked file with VM_SSH_PORT" {
+    _endpoint_stubs
+    QDISTRO_REPO="$TMP"; QCI_OFFLINE=0
+    printf '#!/usr/bin/env bats\n# qci:enforcing\n@test x { echo "$VM_SSH_PORT" > "%s/ran"; }\n' "$TMP" > "$TMP/e.bats"
+    FAKE_FWD_PORT=40003 FAKE_MODE=Enforcing run bats_run_one qci-fake "$TMP/e.bats" 40003
+    [ "$status" -eq 0 ]
+    [ "$(cat "$TMP/ran")" = 40003 ]
+}
+
+# --- avc-denials.sh fails closed (sol r84 finding 1) ------------------------
+
+_avc_stub() {  # _avc_stub <ausearch-rc> <ausearch-output> [auditd-active=0]
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s"\nexit %s\n' "$2" "$1" > "$TMP/bin/ausearch"
+    printf '#!/bin/sh\nexit %s\n' "${3:-0}" > "$TMP/bin/systemctl"
+    chmod +x "$TMP/bin/ausearch" "$TMP/bin/systemctl"
+}
+
+AVC="tests/integration/vm/probes/avc-denials.sh"
+
+@test "avc-denials: ausearch missing is unusable, not clean" {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/systemctl"; chmod +x "$TMP/bin/systemctl"
+    # PATH is ONLY the stub dir, so no real ausearch can be found.
+    run env PATH="$TMP/bin" "$BASH" "$REPO_ROOT/$AVC" qdistro_presentation_t
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"AVC-UNUSABLE: ausearch not installed"* ]]
+}
+
+@test "avc-denials: ausearch error is unusable, not clean" {
+    _avc_stub 10 "Error opening /var/log/audit/audit.log (Permission denied)"
+    PATH="$TMP/bin:$PATH" run bash "$REPO_ROOT/$AVC" qdistro_presentation_t
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"AVC-UNUSABLE: ausearch rc=10"* ]]
+}
+
+@test "avc-denials: inactive auditd is unusable" {
+    _avc_stub 1 "<no matches>" 3
+    PATH="$TMP/bin:$PATH" run bash "$REPO_ROOT/$AVC" qdistro_presentation_t
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"auditd.service not active"* ]]
+}
+
+@test "avc-denials: no matches is clean; unrelated denial is clean" {
+    _avc_stub 1 "<no matches>"
+    PATH="$TMP/bin:$PATH" run bash "$REPO_ROOT/$AVC" qdistro_presentation_t
+    [ "$status" -eq 0 ] && [ "$output" = AVC-CLEAN ]
+    _avc_stub 0 "type=AVC msg=audit(1.2:3): avc:  denied  { read } for scontext=a tcontext=system_u:object_r:etc_t:s0 tclass=file"
+    PATH="$TMP/bin:$PATH" run bash "$REPO_ROOT/$AVC" qdistro_presentation_t
+    [ "$status" -eq 0 ] && [ "$output" = AVC-CLEAN ]
+}
+
+@test "avc-denials: a matching denial fails and is printed" {
+    _avc_stub 0 "type=AVC msg=audit(1.2:3): avc:  denied  { watch } for scontext=c tcontext=system_u:object_r:qdistro_presentation_t:s0 tclass=file"
+    PATH="$TMP/bin:$PATH" run bash "$REPO_ROOT/$AVC" qdistro_presentation_t
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"denied  { watch }"*"qdistro_presentation_t"* ]]
+}
+
+@test "presentation-enforcing AVC case uses the fail-closed probe" {
+    f="$REPO_ROOT/tests/integration/vm/presentation-enforcing.bats"
+    grep -q 'avc-denials.sh' "$f"
+    ! grep -q 'ausearch .*|| true' "$f"
+}

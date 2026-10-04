@@ -101,9 +101,9 @@ bats_run_one() {
     slug=$(safe_name "$base")
     scratch=$(scenario_scratch_dir bats "$slug")
     mkdir -p "$scratch"
-    if bats_is_enforcing "$file" && [ -z "$ssh_port" ]; then
-        record_result bats "$base" fail "$EXIT_BATS" bats bats "" \
-            "VM=$vm marked # qci:enforcing but no SSH port (explicit --vm needs VM_SSH_PORT)"
+    local why
+    if bats_is_enforcing "$file" && why=$(bats_enforcing_endpoint_problem "$vm" "$ssh_port"); then
+        record_result bats "$base" fail "$EXIT_BATS" bats bats "" "VM=$vm $why"
         return "$EXIT_BATS"
     fi
     if [ -z "$ssh_port" ] && bats_skip_if_sibling_app_missing "$vm" "$file"; then
@@ -186,6 +186,29 @@ bats_is_host_only() {
 # never falls back to a permissive VM.
 bats_is_enforcing() {
     head -n 40 -- "$1" 2>/dev/null | grep -qE '^# qci:enforcing([[:space:]]|$)'
+}
+
+# Echo why <vm>/<ssh_port> is not a usable enforcing endpoint (empty + rc 1
+# when it is): the port must be the one THIS domain forwards to guest :22,
+# and getenforce over that connection must say Enforcing. Checked by the
+# gate for every marked file, so the guarantee does not depend on each file
+# asserting the mode itself (explicit --vm callers included).
+bats_enforcing_endpoint_problem() {
+    local vm=$1 port=$2 mode
+    if [ -z "$port" ]; then
+        printf 'marked # qci:enforcing but no SSH port (explicit --vm needs VM_SSH_PORT)'
+        return 0
+    fi
+    if ! "${VIRSH[@]}" dumpxml "$vm" 2>/dev/null | grep -qE "<range start=.$port. to=.22./>"; then
+        printf 'SSH port %s is not forwarded to guest :22 by domain %s' "$port" "$vm"
+        return 0
+    fi
+    mode=$(qci_enforcing_ssh "$port" getenforce 2>/dev/null | tr -d '\r' | tail -n 1)
+    if [ "$mode" != Enforcing ]; then
+        printf 'guest %s via :%s reports getenforce=%s, not Enforcing' "$vm" "$port" "${mode:-<none>}"
+        return 0
+    fi
+    return 1
 }
 
 # Echo why a host-only-marked file cannot run without a VM (empty + rc 1 when
