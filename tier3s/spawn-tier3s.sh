@@ -256,6 +256,12 @@ if [ "$GUI" = 1 ]; then
         QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
         "QDISTRO_LAUNCH_RECORD_PATH=$LAUNCH_RECORD"
         "QDISTRO_LAUNCH_RECORD_TOKEN=$LR_TOKEN"
+        # umask INSIDE the runuser boundary: runuser's PAM session resets
+        # the caller's umask to the login default, so an outer
+        # ( umask 0177; ) wrap never reaches the waypipe bind() — observed
+        # 755. The one-shot sh sets it in the same uid/domain the bridge
+        # already runs as, and exec replaces it: link.sock lands 0600.
+        sh -c 'umask 0177; exec "$@"' qdistro-tier3s-bridge
         qdistro-secctx-exec
             --sandbox-engine qdistro.tier3s
             --app-id "qdistro.tier3s.$SILO"
@@ -461,7 +467,7 @@ if [ "$GUI" = 1 ]; then
     # must be able to trust the log tail it reports; the cleanup removes the
     # log with the record dir).
     BRIDGE_LOG="$CTL_DIR/waypipe-client.log"
-    ( umask 0177; exec "${BRIDGE_ARGV[@]}" ) >"$BRIDGE_LOG" 2>&1 &   # socket lands admin-owned 0600
+    ( exec "${BRIDGE_ARGV[@]}" ) >"$BRIDGE_LOG" 2>&1 &   # log is 0600 via the script's umask 077; the socket's 0600 is set inside BRIDGE_ARGV
     BRIDGE_PID=$!
     bridge_refuse() {   # a bridge refusal names the cause and the client's log tail
         refuse "$* (client log tail: $(tail -n 5 -- "$BRIDGE_LOG" 2>/dev/null | tr '\n' '|'))"
