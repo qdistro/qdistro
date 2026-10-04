@@ -17,7 +17,7 @@ broker's clipboard / handoff gates. Direct clients in tiers 0 and 1 use normal
 | 1. SELinux | LSM restrictions, same Wayland connection | Yes | Shipped |
 | 2. podman | User namespace; container has a nested compositor | Yes | Shipped |
 | 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes | Shipped |
-| 3s. gVisor | Admin keep-id container under the gVisor `runsc` application kernel (systrap) | No (headless only so far) | **Experimental, dev profile only** |
+| 3s. gVisor | Admin keep-id container under the gVisor `runsc` application kernel (systrap) | Yes — via a waypipe byte-stream bridge (no fd passing) | **Experimental, dev profile only** |
 | 4. VM whole-window| KVM + libvirt + waypipe (nested qdwin) | Yes | **Experimental** |
 | 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes | **Experimental** |
 | 6. Remote machine | Separate physical machine; remote-output | No | Post-v1 |
@@ -285,9 +285,9 @@ The app runs in an admin keep-id rootless podman container whose OCI runtime
 is gVisor `runsc` (systrap platform), so its system calls are served by the
 gVisor Sentry rather than the host kernel. It sits beside tier 3 rather than
 in the integer ladder: the integer tiers stay stable in every stored contract
-(paravirt D2). Phase A ships **headless** silos only; the GUI path (a waypipe
-byte-stream bridge, since gVisor blocks `SCM_RIGHTS` to host sockets) is
-Phase B.
+(paravirt D2). Phase A shipped headless silos; Phase B adds GUI silos through
+a waypipe byte-stream bridge, since gVisor blocks `SCM_RIGHTS` to host
+sockets and direct Wayland fd passing is impossible.
 
 - **Launch.** Explicit only (paravirt O6): `SessionManager1.CreateTier3sSilo
   (name, workload, template_silo, network)` then `StartSilo`, which starts
@@ -306,6 +306,36 @@ Phase B.
   control record are all gone. Freeze/resume is **unsupported** (refused).
   A session-manager restart stops every live tier 3s launch and reaps
   leftovers; wanted silos are relaunched with a fresh token.
+- **GUI bridge.** The sandbox runs `waypipe server`; on the host a
+  `runuser -> qdistro-secctx-exec -> waypipe client` chain (uid 1000 —
+  the admin uid is a trusted parsing surface, see
+  [threat-model.md](threat-model.md)) connects one end to the
+  compositor's `wayland-secctx` listener (tagged `qdistro.tier3s`,
+  `qdistro.tier3s.<silo>`, launch-token instance) and accepts a single
+  connection from the sandbox on `$LAUNCHES/<token>/link.sock` (mode
+  0600). The launch dir is bind-mounted into the sandbox **read-only**
+  at `/run/qdistro/link` — the sandbox only `connect()`s, so it cannot
+  exhaust the host's `/run` tmpfs. The attach is **single-shot: there
+  is no reconnection** — once the client consumes `link.sock` it is
+  unlinked, and a broken bridge means relaunching, not reattaching.
+  inotify-style filesystem watching is likewise **in-sandbox only**:
+  nothing watches a host path. The bridge client is registered with the
+  broker's launch-record store (`RegisterLaunch`, anti-reuse
+  starttime anchor) before `podman run`; the store is in-memory with a
+  TTL, so a broker restart forgets live registrations — affected
+  launches must be restarted to regain attested identity.
+- **GUI seccomp** is per-workload (`weston-terminal`, `foot`): the
+  launch passes `--security-opt seccomp=<profile>` to runsc's OCI
+  converter. Notable decision: `fchmodat2` is forced DENY because the
+  runsc converter silently drops that syscall name from an allow list
+  — an allow entry would be inert, so `chmod -h`-style calls get EPERM.
+- **Resource limits (ΔB7 decision).** The launch unit carries
+  `MemoryMax=1G` and `TasksMax=96`, bounding the *trusted* bridge
+  client (which lives in the unit's cgroup, not the sandbox scope, and
+  mirrors sandbox-controlled shm). The sandbox itself is bounded by its
+  owning scope. Declined: `-c none` for runsc (it already runs without
+  a cgroup manager under `--ignore-cgroups`) and a dedicated cgroup
+  scope for the bridge (the unit cgroup is the boundary).
 - **Packaging exception (paravirt D1).** `runsc` is not in
   openSUSE-Tumbleweed-Oss, unlike the Oss-only precedent of tiers 4 and 5.
   The owner chose a sha512-pinned upstream dated release
@@ -314,8 +344,11 @@ Phase B.
   by `install-session-manager.sh`, which installs only the launch scripts,
   units and seccomp profiles. Without `runsc` the probe names the missing
   prerequisite and every tier 3s launch is refused.
-- **Not claimed:** no KVM comparison (paravirt O5), no enforcement test of the
-  scope's resource limits yet (Phase C), no GUI.
+- **Not claimed:** no KVM comparison (paravirt O5); the resource caps
+  above are configuration, not yet an enforcement-tested boundary
+  (Phase C); no reconnect path; `lineage_enforce` is **opt-in** — the
+  clipboard/identity gates run in shadow mode unless it is enabled (the
+  s127 scenario enables it for the live path); no tier-3s pod apps yet.
 
 ## Tier 4 — whole-VM windowed
 

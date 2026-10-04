@@ -229,7 +229,11 @@ case) and was reproduced once on a dev VM for the record case
   bridge connection, never the compositor or another launch (s129). The
   secctx tag on the bridge client is what marks the windows; a GUI launch
   refuses when the compositor socket, the launch record or `RegisterLaunch`
-  fails — before `podman run` (s125).
+  fails — before `podman run` (s125). The attach is one-shot: the client
+  unlinks `link.sock` at accept, so a dropped bridge has **no reconnect**
+  path — relaunch instead. The token dir mounts into the sandbox
+  **read-only** (the sandbox only `connect()`s), and nothing watches a host
+  path — filesystem notification is in-sandbox only.
 - **Clipboard stays default-deny for tier3s silos.** The secctx tag also
   feeds qdshell's `ClipboardGate` (silo = the `qdistro.tier3s.<silo>` app-id
   suffix) and the broker's `CheckClipboardTransfer`/`CheckClipboardReceive`

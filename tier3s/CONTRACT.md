@@ -945,6 +945,22 @@ Every ERRNO, the default included, is EPERM under runsc.
   compositor sees — a sandbox escape that compromises the *host* waypipe
   client would inherit its silo tag (the tag is honest, not a containment
   claim about the bridge process itself).
+- Bridge topology residuals (ΔB/DONE-10): the `link.sock` attach is
+  **one-shot with no reconnection** — the client unlinks it at accept, so
+  a dropped bridge is a dead launch, not a reattachable channel;
+  filesystem notification is **in-sandbox only** (no component watches a
+  host path — the launch dir is mounted read-only and the sandbox's only
+  use of it is `connect()`); the bridge mount is **templated** — every
+  launch mounts its own `/run/qdistro-tier3s/<token>/` at
+  `/run/qdistro/link`, so no two launches share a mount point; the
+  launch-record store is **in-memory with a TTL** — a broker restart
+  forgets live registrations, and an enforcing broker then resolves the
+  still-live bridge as unverified (deny) until the launch is restarted;
+  and the bridge client runs as the **admin uid inside the launch
+  unit's cgroup** — the admin uid is a trusted parsing surface, not an
+  isolation boundary (a compromise of the host-side waypipe inherits the
+  silo tag; an admin-uid compromise is outside this tier's threat
+  model).
 - The scope limits are set, not yet shown to be enforced (Phase C). Admin
   cannot raise them by writing the files (`feasibility-r3/20`); that is not
   an adversarial containment proof.

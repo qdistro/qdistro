@@ -234,8 +234,9 @@ Do not treat the broker pilot as evidence for those other domains.
   inside the sandbox) with software rendering — no GPU device, no
   `SCM_RIGHTS` escapes gVisor. The claimed security properties, all
   VM-lane evidence (`tests/integration/vm/s123`–`s129`): the bridge client
-  is `RegisterLaunch`-bound (pid+starttime) before `podman run`, so
-  lineage enforcement resolves a real attested subject and a forged or
+  is `RegisterLaunch`-bound (pid+starttime) before `podman run`, so **when
+  `lineage_enforce` is on** — it defaults off (shadow mode) — lineage
+  enforcement resolves a real attested subject and a forged or
   stale source can only deny; the tagged client's wl_registry sees none
   of the privileged globals (shell, layer-shell, locker, nested-manager,
   secctx manager, weston capture, idle notifier, input method, virtual

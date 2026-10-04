@@ -26,6 +26,7 @@ Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
 | `b15-s127/` | `bats-20261003T192421Z-3265587` | `0f09b88a3` | s127 still 3+1 fails; live forensics on the preserved worker overturn the instance-id theory — the real mechanism is libweston's stale-serial guard in `weston_seat_set_selection` (tagged serial=0 offers dropped once `selection_serial` advanced past them via deny/focus clears; tagged+high-serial emits, untagged+serial=0 emits) |
 | `b16-s127-pass/` | `bats-20261004T060910Z-2896733` | `eac49ad16` | s127 PASS — the serial sweep (`qdistro-test-clipboard-source` now tries 0x40000001/0x80000002/0xC0000003 like `qdwin-test-clipboard-emit`) beats the guard |
 | `b17-acceptance/` | `bats-20261004T095918Z-16239` | `eac49ad16` | **RECORD RUN: 10/10 pass** — see below |
+| `b18-s124-s126/` | (run dir TBD — `qci-tier3s-b18`) | `aa2e3afd4` | Sol-r1 remediation rerun: s124 + s126 with the new oracle/seccomp steps |
 
 ## b17 record run (`eac49ad16`) — 10/10 files PASS
 
@@ -66,6 +67,33 @@ VM journals under `b17-acceptance/journals/`:
   honest residuals incl. bridge-compromise tag inheritance).
 - **Astra milestone review** — O13 (2026-10-03): stands; runs after the
   sol end-of-B review of `main..claude/tier3s-b`.
+
+## Sol end-of-B review — r1 REVISE → remediation
+
+`todo/paravirt/reviews/2026-10-04-tier3s-b-end-sol-review.md` (brief +
+run.log alongside): `VERDICT: REVISE`, three evidence gaps:
+
+1. **s126 per-interface oracle** — registry visibility was only half the
+   proof. Fixed in `aa2e3afd4`: s126 step 5 drives the denials through a
+   real tagged peer (secctx wrap, unique instance-id per connection):
+   `zwlr_output_manager_v1` stays enumerable but `qdwin-output-probe
+   --test/--apply --expect-denied` get the interface's protocol error;
+   `qdwin_stream_input_v1` (public by design — the claim() token is the
+   gate) refuses a bogus-token claim `INVALID_TOKEN` via the new
+   installed probe `qdistro-test-stream-claim-probe`. No authorization
+   override is configured anywhere; the denials are the proof.
+2. **GUI seccomp decisions unexercised** — fixed in `aa2e3afd4`: s124
+   step 3 `pm exec`s into each live container, asserts the podman seccomp
+   annotation names the workload's own profile file, and exercises the
+   coreutils-reachable decisions per workload — fchmodat ALLOW, the
+   `chmod -h` (fchmodat2) path EPERM with mode unchanged, link/linkat
+   EPERM, llistxattr ALLOW, NoNewPrivs + `Seccomp: 2`.
+3. **host-side evidence unarchived** — `host-evidence/` (MANIFEST.md
+   lists exact commands + results): unit tests (tier3s-relevant set 1074
+   green; full suite log included — its 30 `test_mm_*` failures are a
+   cross-run port-5556 collision with a concurrent `qci host`, unrelated
+   files), qdshell JS (61 files green), mutation harness (184/184 after
+   the E3 snippet refresh in `5bbcec7b7`).
 
 ## Latent product notes (recorded, not blocking)
 
