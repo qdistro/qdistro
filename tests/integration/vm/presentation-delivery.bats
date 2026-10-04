@@ -10,6 +10,7 @@ setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
     INSTALLER="$REPO/scripts/install/install-presentation-for-vm.sh"
     SRC="$REPO/sdk/presentation/qdistro_presentation"
+    CF="$REPO/tier2/Containerfile.qfileman"
     SPAWN="$REPO/tier2/spawn-tier2.sh"
     SPAWN_TIER1="$REPO/selinux/tier1/spawn-tier1.sh"
     SPAWN_TIER3="$REPO/tier3/spawn-tier3.sh"
@@ -941,6 +942,95 @@ for name, body in (("sdk", sdk), ("installer", inst)):
         raise SystemExit(f"{name} arm does not printf host+bats:\n{body}")
     if "printf 'host\\n'" in body:
         raise SystemExit(f"{name} arm still prints host-only:\n{body}")
+print("ok")
+PY
+}
+
+@test "fixed-admin installer agrees with qfileman deployment metadata" {
+    python3 - "$INSTALLER" "$CF" <<'PY'
+from pathlib import Path
+import sys
+
+installer = Path(sys.argv[1]).read_text(encoding="utf-8")
+containerfile = Path(sys.argv[2]).read_text(encoding="utf-8")
+
+UID_REJECT = 'if [ "$ADMIN_UID" -ne 1000 ]; then'
+UID_MSG = "admin is uid $ADMIN_UID, expected 1000"
+PRINTF = (
+    "printf '%s\\n' '{\"version\":1,\"admin_uid\":1000}' "
+    "> /usr/share/qdistro/presentation/deployment.json"
+)
+
+
+def active_text(src: str) -> str:
+    lines = []
+    buf = []
+    for raw in src.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            continue
+        if not stripped:
+            continue
+        if stripped.endswith("\\"):
+            buf.append(stripped[:-1].rstrip())
+            continue
+        buf.append(stripped)
+        lines.append(" ".join(buf))
+        buf = []
+    if buf:
+        lines.append(" ".join(buf))
+    return "\n".join(lines)
+
+
+def check(inst: str, cf: str) -> None:
+    inst_active = active_text(inst)
+    cf_active = active_text(cf)
+    if UID_REJECT not in inst_active:
+        raise SystemExit("installer missing admin UID 1000 rejection")
+    if UID_MSG not in inst_active:
+        raise SystemExit("installer missing expected-1000 diagnostic")
+    if PRINTF not in cf_active:
+        raise SystemExit("qfileman image missing admin_uid 1000 metadata payload")
+
+
+def expect_fail(inst: str, cf: str, needle: str) -> None:
+    try:
+        check(inst, cf)
+    except SystemExit as exc:
+        msg = str(exc)
+        if needle not in msg:
+            raise SystemExit(f"expected {needle!r} in {msg!r}") from None
+        return
+    raise SystemExit(f"checker accepted a broken contract; wanted {needle!r}")
+
+
+check(installer, containerfile)
+expect_fail(
+    installer.replace(UID_REJECT, 'if [ "$ADMIN_UID" -ne 0 ]; then', 1),
+    containerfile,
+    "installer missing admin UID 1000 rejection",
+)
+expect_fail(
+    installer.replace(UID_REJECT, "", 1),
+    containerfile,
+    "installer missing admin UID 1000 rejection",
+)
+expect_fail(
+    installer.replace(UID_MSG, "admin is uid $ADMIN_UID, expected 0", 1),
+    containerfile,
+    "installer missing expected-1000 diagnostic",
+)
+expect_fail(
+    installer,
+    containerfile.replace('"admin_uid":1000', '"admin_uid":1001', 1),
+    "qfileman image missing admin_uid 1000 metadata payload",
+)
+commented_reject = installer.replace(UID_REJECT, f"# {UID_REJECT}", 1)
+expect_fail(
+    commented_reject,
+    containerfile,
+    "installer missing admin UID 1000 rejection",
+)
 print("ok")
 PY
 }
