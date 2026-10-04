@@ -350,8 +350,18 @@ class MarkdownEditor(QTextEdit):
         on = not bool(cur.charFormat().property(CHAR_CODE))
         fmt.setProperty(CHAR_CODE, on)
         if on:
-            fmt.setFontFamilies(["monospace"])
-            fmt.setBackground(QColor("#f4f4f4"))
+            # Same family/background a presentation restyle gives CHAR_CODE
+            # spans; the light literal is only the no-controller fallback.
+            from .content_style import document_palette
+
+            style = self._content_style
+            fmt.setFontFamilies([style.code_family if style is not None else "monospace"])
+            background = (
+                (style.code_background if style is not None else None)
+                or document_palette().code_background
+                or "#f4f4f4"
+            )
+            fmt.setBackground(QColor(background))
         else:
             fmt.setFontFamilies([self.font().family()])
             fmt.setBackground(QBrush())

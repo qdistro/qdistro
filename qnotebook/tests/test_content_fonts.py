@@ -67,6 +67,40 @@ def test_toggle_code_sets_char_code(qapp, qtbot):
     assert "`" not in ed.markdown()
 
 
+def test_toggle_code_uses_document_code_role(qapp, qtbot, tmp_path, monkeypatch):
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _adapter("system"))
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("hello world\n")
+    ed.apply_content_presentation()
+    cur = ed.textCursor()
+    cur.select(QTextCursor.SelectionType.Document)
+    ed.setTextCursor(cur)
+    ed.toggle_code()
+    c = QTextCursor(ed.document())
+    c.setPosition(1)
+    fmt = c.charFormat()
+    assert bool(fmt.property(CHAR_CODE))
+    assert fmt.background().color().name() == snap.colors.mSurfaceVariant.lower()
+    assert fmt.background().color().name() != "#f4f4f4"
+
+
+def test_toggle_code_without_controller_keeps_legacy_background(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("hello world\n")
+    cur = ed.textCursor()
+    cur.select(QTextCursor.SelectionType.Document)
+    ed.setTextCursor(cur)
+    ed.toggle_code()
+    c = QTextCursor(ed.document())
+    c.setPosition(1)
+    assert c.charFormat().background().color().name() == "#f4f4f4"
+
+
 def test_toggle_bold_in_heading_emits_strong(qapp, qtbot):
     ed = MarkdownEditor()
     qtbot.addWidget(ed)

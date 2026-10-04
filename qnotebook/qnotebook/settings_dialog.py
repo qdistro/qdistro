@@ -516,7 +516,14 @@ class SettingsDialog(QDialog):
         mode = THEME_LABEL_TO_KEY.get(
             self._combo_appearance.currentText(), "system"
         )
-        save_theme_mode(self._settings, mode, update_legacy=(mode != "system"))
+        # Rewrite the legacy dark_mode key only when the mode changes, so an
+        # unrelated Apply does not clobber a value older builds still read.
+        previous_mode = load_theme_mode(self._settings)
+        save_theme_mode(
+            self._settings,
+            mode,
+            update_legacy=(mode != "system" and mode != previous_mode),
+        )
         appearance: dict = {"version": 1}
         if self._chk_desktop_fonts.isChecked():
             pass
