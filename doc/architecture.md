@@ -152,6 +152,9 @@ Design documents for the policy/resource layer:
  and attaches silos and sessions.
 - **qdistro_app SDK** — Python library that first-party apps integrate with
  (see [app-sdk](app-sdk.md)).
+- **qdistro-presentation** — validated public appearance snapshot that
+ first-party Qt apps, the admin app, polkit, and the locker follow
+ (see [presentation.md](presentation.md)).
 - **qdistro-pwd** — secret/vault daemon (see [password-manager](password-manager.md)).
 - **qdistro-browser-bridge** — native-messaging host that connects browser
  extensions to qdistro services (see [browser](browser.md)).
