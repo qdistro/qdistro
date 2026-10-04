@@ -13,12 +13,17 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
+from PyQt6.QtCore import QEvent
 from PyQt6.QtGui import QFont, QPalette
-from PyQt6.QtWidgets import QApplication, QLabel, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QToolButton, QWidget
 from qdistro_presentation.model import example_snapshot, with_generation
 from qdistro_presentation.paths import ResolvedPath
 from qdistro_presentation.publish import write_disabled_envelope, write_snapshot
-from qdistro_presentation.qt import PresentationController, snapshot_palette
+from qdistro_presentation.qt import (
+    PresentationController,
+    is_web_content_tooltip_target,
+    snapshot_palette,
+)
 
 
 @pytest.fixture
@@ -395,3 +400,93 @@ print(f"ok size={size:.2f} dpr={dpr:.2f}")
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("ok size=13.20")
+
+
+class QWebEngineView(QWidget):
+    """Python stand-in whose names match QtWebEngine's view widget."""
+
+
+class RenderWidgetHostViewQtDelegateWidget(QWidget):
+    """Python stand-in for Chromium's tooltip-receiving render widget."""
+
+
+def _tooltip_event() -> QEvent:
+    return QEvent(QEvent.Type.ToolTip)
+
+
+def test_web_content_tooltip_target_walks_engine_and_delegate(qapp):
+    chrome = QLabel("back")
+    assert is_web_content_tooltip_target(chrome) is False
+    assert is_web_content_tooltip_target(None) is False
+
+    view = QWebEngineView()
+    inner = QWidget(view)
+    assert is_web_content_tooltip_target(view) is True
+    assert is_web_content_tooltip_target(inner) is True
+
+    delegate = RenderWidgetHostViewQtDelegateWidget()
+    delegate_child = QWidget(delegate)
+    assert is_web_content_tooltip_target(delegate) is True
+    assert is_web_content_tooltip_target(delegate_child) is True
+
+    host = QWidget()
+    sibling_chrome = QToolButton(host)
+    QWebEngineView(host)
+    assert is_web_content_tooltip_target(sibling_chrome) is False
+    chrome.setParent(None)
+    view.setParent(None)
+    delegate.setParent(None)
+    host.setParent(None)
+
+
+def test_disabled_tooltips_swallow_chrome_keep_web_content(qapp, tmp_path):
+    from qdistro_presentation.model import LocalOverrides
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp,
+        theme_mode="system",
+        local=LocalOverrides(tooltips_enabled=False),
+        snapshot_path=_path(tmp_path),
+        watch=False,
+    )
+    assert ctrl.state.tooltips_enabled is False
+    assert ctrl._tooltip_installed is True
+
+    chrome = QToolButton()
+    chrome.setToolTip("Go back")
+    view = QWebEngineView()
+    inner = QWidget(view)
+    event = _tooltip_event()
+    filt = ctrl._tooltip_filter
+    assert filt.eventFilter(chrome, event) is True
+    assert filt.eventFilter(view, event) is False
+    assert filt.eventFilter(inner, event) is False
+    assert filt.eventFilter(chrome, QEvent(QEvent.Type.MouseMove)) is False
+
+    ctrl.set_local(LocalOverrides(tooltips_enabled=True))
+    assert ctrl.state.tooltips_enabled is True
+    assert ctrl._tooltip_installed is False
+    chrome.setParent(None)
+    view.setParent(None)
+    ctrl.stop()
+
+
+def test_snapshot_tooltips_disabled_installs_chrome_only_filter(qapp, tmp_path):
+    from dataclasses import replace
+
+    disabled = with_generation(replace(example_snapshot(), tooltips_enabled=False))
+    write_snapshot(str(tmp_path), disabled, require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=False
+    )
+    assert ctrl.state.tooltips_enabled is False
+    assert ctrl._tooltip_installed is True
+    chrome = QLabel("omnibox")
+    delegate = RenderWidgetHostViewQtDelegateWidget()
+    event = _tooltip_event()
+    assert ctrl._tooltip_filter.eventFilter(chrome, event) is True
+    assert ctrl._tooltip_filter.eventFilter(delegate, event) is False
+    chrome.setParent(None)
+    delegate.setParent(None)
+    ctrl.stop()

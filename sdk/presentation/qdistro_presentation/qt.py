@@ -172,6 +172,37 @@ def pick_family(requested: str, *, fallback: str, fixed: bool) -> str:
     return fallback
 
 
+_WEB_CONTENT_TOOLTIP_MARKERS = ("WebEngine", "RenderWidgetHostViewQt")
+
+
+def is_web_content_tooltip_target(obj: QObject | None) -> bool:
+    """True when a ToolTip event belongs to a web page, not window chrome.
+
+    QtWebEngine delivers HTML ``title`` tooltips to ``QWebEngineView`` and
+    its internal ``RenderWidgetHostViewQtDelegate*`` widgets. Plan 05 keeps
+    those as page behavior when ``tooltipsEnabled`` is false.
+    """
+    current = obj
+    seen: set[int] = set()
+    while current is not None:
+        ident = id(current)
+        if ident in seen:
+            break
+        seen.add(ident)
+        names = [type(current).__name__]
+        meta = current.metaObject()
+        if meta is not None:
+            names.append(meta.className())
+        if any(
+            marker in name
+            for name in names
+            for marker in _WEB_CONTENT_TOOLTIP_MARKERS
+        ):
+            return True
+        current = current.parent()
+    return False
+
+
 def apply_logical_ui_font(
     app: QApplication,
     resolved: ResolvedPresentation,
@@ -194,9 +225,9 @@ def apply_logical_ui_font(
 
 
 class _TooltipFilter(QObject):
-    def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:  # noqa: ARG002
+    def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
         if event is not None and event.type() == QEvent.Type.ToolTip:
-            return True
+            return not is_web_content_tooltip_target(obj)
         return False
 
 
