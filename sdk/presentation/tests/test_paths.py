@@ -8,18 +8,18 @@ import sys
 from pathlib import Path
 
 import pytest
+import qdistro_presentation.paths as paths_mod
 from qdistro_presentation.model import SnapshotPathError, example_snapshot
 from qdistro_presentation.paths import (
     DEPLOYMENT_META,
     ENV_OVERRIDE,
     DeploymentMeta,
-    load_deployment_meta,
     ResolvedPath,
+    load_deployment_meta,
     read_snapshot_at,
     resolve_snapshot_path,
     walk_open,
 )
-import qdistro_presentation.paths as paths_mod
 from qdistro_presentation.publish import write_snapshot
 
 _PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
