@@ -36,8 +36,11 @@ trap 'rm -rf "$work"' EXIT
 
 # Only visible source files enter the key or the build context. The pin is
 # written into the staged context from snapshot.conf (tier2/ tracks none).
-git -C "$repo" ls-files -z --cached --others --exclude-standard -- tier2 \
-    | LC_ALL=C sort -zu > "$work/source-files.list"
+# qfileman COPYs first-party trees that live outside tier2/; those paths
+# must bust the cache and be present in the extracted context.
+git -C "$repo" ls-files -z --cached --others --exclude-standard -- \
+    tier2 qdfileman sdk/presentation |
+    LC_ALL=C sort -zu > "$work/source-files.list"
 tar -C "$repo" --mtime=@0 --owner=0 --group=0 --numeric-owner \
     --no-recursion --null -T "$work/source-files.list" -cf "$work/source.tar"
 source_sha=$(sha256sum "$work/source.tar" | awk '{print $1}')
@@ -64,17 +67,36 @@ esac
 mkdir -p "$work/context"
 tar -C "$work/context" -xf "$work/source.tar"
 printf '%s\n' "$QDISTRO_SUBSTRATE_SNAPSHOT" > "$work/context/tier2/SNAPSHOT"
-workloads=(weston-terminal text-viewer url-preview)
+# qfileman is the first-party presentation consumer. weston-terminal stays
+# the bats-minimum image; do not fold PyQt6 into it. Per-workload context
+# keeps qdfileman/ and presentation/ out of weston-terminal/text-viewer/
+# url-preview builds.
+workloads=(weston-terminal text-viewer url-preview qfileman)
 tags=()
 for workload in "${workloads[@]}"; do
     tag="qdistro/tier2-$workload:latest"
     echo "[tier2-podman] building $tag against test snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
+    wcontext=$(mktemp -d "$work/wcontext.$workload.XXXXXX")
+    cp -a "$work/context/tier2/." "$wcontext/"
+    rm -rf "$wcontext/consumer"
+    if [ "$workload" = qfileman ]; then
+        if [ ! -d "$work/context/qdfileman" ]; then
+            echo "ERROR: qdfileman sources missing from cache context" >&2
+            exit 2
+        fi
+        if [ ! -d "$work/context/sdk/presentation" ]; then
+            echo "ERROR: presentation sources missing from cache context" >&2
+            exit 2
+        fi
+        cp -a "$work/context/qdfileman" "$wcontext/qdfileman"
+        cp -a "$work/context/sdk/presentation" "$wcontext/presentation"
+    fi
     podman build --pull=never --layers \
-        --file "$work/context/tier2/Containerfile.$workload" \
+        --file "$wcontext/Containerfile.$workload" \
         --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
         --tag "$tag" \
         --label "org.qdistro.test-snapshot=$QDISTRO_SUBSTRATE_SNAPSHOT" \
-        "$work/context/tier2" >&2
+        "$wcontext" >&2
     tags+=("$tag")
 done
 podman save --multi-image-archive --output "$work/images.tar" "${tags[@]}" >&2
