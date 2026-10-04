@@ -4,9 +4,10 @@
 Runs as admin against the session Wayland display. Publishes a snapshot
 whose user scale is not 1.0, attaches the installed Qt controller, and
 asserts the application font stays in points (11 * fonts.uiScale *
-metrics.uiScale) instead of device pixels. presentation-scale.sh runs it
-once per compositor output scale and passes ``--expect-dpr``, so the
-check is made at a real non-100% device scale, not only at 1.0. Also
+metrics.uiScale) instead of device pixels. ``--expect-dpr`` asserts the
+compositor scale a caller set; qdwin lets only the trusted shell change
+output scale, so a non-100% run belongs to a qdshell-driven GUI scenario.
+Also
 imports the four first-party packages (and qterminator's QTermWidget
 binding) so a missing bake shows up as FAIL, not skip.
 

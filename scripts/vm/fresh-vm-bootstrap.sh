@@ -665,14 +665,12 @@ zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
     || { log "  ERROR: zypper install xwayland failed"; exit 3; }
 
 # ---- Core test clients (ALWAYS — not gated by QDWIN_APP_DEPS) -------------
-# Small clients that BLOCKING tests type into or connect with:
+# Three small clients that BLOCKING tests type into or connect with:
 #   foot     native-Wayland terminal: qdlocker/tests/gui/01 (the only live
 #            lock -> unlock test), qdwin/tests/gui/13, qdwin/tests/apps/03, 12,
 #            13, compositor-shell.bats launcher round-trip.
 #   xterm    XWayland client: qdwin/tests/apps/02, 03, 12.
 #   xfreerdp RDP client (package freerdp): qdwin/tests/apps/13.
-#   wlr-randr  wlr-output-management client: presentation-live.bats sets a
-#            non-100% compositor scale to prove the UI font stays in points.
 # They used to come only with the opt-in QDWIN_APP_DEPS set, so on the lean
 # default golden those blocking tests SKIPped. The heavy third-party apps
 # (firefox, chromium, vlc, ...) stay opt-in below (the `gui-apps` lane).
@@ -682,15 +680,13 @@ command -v foot >/dev/null 2>&1 || _core_missing="$_core_missing foot"
 command -v xterm >/dev/null 2>&1 || _core_missing="$_core_missing xterm"
 { command -v xfreerdp3 >/dev/null 2>&1 || command -v xfreerdp >/dev/null 2>&1; } \
     || _core_missing="$_core_missing freerdp"
-command -v wlr-randr >/dev/null 2>&1 || _core_missing="$_core_missing wlr-randr"
 if [ -n "$_core_missing" ]; then
     log "installing core test clients:$_core_missing"
     # shellcheck disable=SC2086 # word-split the package list on purpose
     zypper -n install --no-recommends $_core_missing >/tmp/qdistro-core-clients.log 2>&1 \
         || { log "  ERROR: zypper install of core test clients failed"; tail -80 /tmp/qdistro-core-clients.log; exit 3; }
     if ! command -v foot >/dev/null 2>&1 || ! command -v xterm >/dev/null 2>&1 \
-            || ! { command -v xfreerdp3 >/dev/null 2>&1 || command -v xfreerdp >/dev/null 2>&1; } \
-            || ! command -v wlr-randr >/dev/null 2>&1; then
+            || ! { command -v xfreerdp3 >/dev/null 2>&1 || command -v xfreerdp >/dev/null 2>&1; }; then
         log "  ERROR: core test clients still missing after install"
         exit 3
     fi

@@ -2,8 +2,8 @@
 # Live P7 leftover evidence for the presentation snapshot (09 item 3):
 # both tier-2 home modes with the first-party qfileman image, keep-id
 # owner and managed-source resolution inside the container, live follow
-# of a host publish, compositor device scale 2 and 1 with the UI font in
-# points, and the four installed apps importable. Host-only
+# of a host publish, the UI font in points at the live compositor scale,
+# and the four installed apps importable. Host-only
 # presentation-delivery.bats cannot prove these.
 
 load helpers
@@ -42,23 +42,23 @@ teardown_file() {
     assert_output_contains "PASS: live named and disposable presentation binds held"
 }
 
-@test "live compositor applies user scale once in points at scale 2 and 1" {
+@test "live compositor applies user scale once in points" {
+    # Runs at the session's live output scale. qdwin gates output-scale
+    # mutation to the trusted shell (F8), so scale 2 needs a qdshell-driven
+    # GUI scenario (09 item 5), not a bats-side wlr-randr.
     stage_vm_driver "probes/presentation-scale.py"
-    stage_vm_driver "probes/presentation-scale.sh"
     vm_run "test -S /run/user/1000/wayland-1"
     require "outer compositor not running (wayland-1 missing)"
-    vm_run "curl -fsS -o /tmp/presentation-scale.py http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-scale.py && curl -fsS -o /tmp/presentation-scale.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-scale.sh && chmod +rx /tmp/presentation-scale.py /tmp/presentation-scale.sh && bash /tmp/presentation-scale.sh /tmp/presentation-scale.py"
+    vm_run "curl -fsS -o /tmp/presentation-scale.py http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-scale.py && chmod +rx /tmp/presentation-scale.py && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland PYTHONSAFEPATH=1 python3 /tmp/presentation-scale.py"
     assert_success
-    for scale in 2 1; do
-        assert_output_contains "PASS: compositor output"
-        assert_output_contains "PASS: [scale $scale] devicePixelRatio matches compositor scale $scale"
-        assert_output_contains "PASS: [scale $scale] qt platform=wayland"
-        assert_output_contains "PASS: [scale $scale] installed qdistro_presentation imports without PYTHONPATH"
-        assert_output_contains "PASS: [scale $scale] controller applied the published snapshot"
-        assert_output_contains "PASS: [scale $scale] user scale applied once in points"
-        assert_output_contains "PASS: [scale $scale] UI font was not multiplied by devicePixelRatio"
-    done
+    assert_output_contains "PASS: compositor socket exists:"
+    assert_output_contains "PASS: devicePixelRatio="
+    assert_output_contains "PASS: qt platform=wayland"
+    assert_output_contains "PASS: installed qdistro_presentation imports without PYTHONPATH"
+    assert_output_contains "PASS: controller applied the published snapshot"
+    assert_output_contains "PASS: user scale applied once in points"
+    assert_output_contains "PASS: UI font was not multiplied by devicePixelRatio"
     for mod in qfileman qterminator QTermWidget qdbrowser qnotebook; do
-        assert_output_contains "PASS: [scale 1] import $mod"
+        assert_output_contains "PASS: import $mod"
     done
 }

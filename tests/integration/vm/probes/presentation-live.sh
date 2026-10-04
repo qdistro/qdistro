@@ -227,7 +227,8 @@ check_container() {
         grep -q '^initial ' "$follow_out" && break
         sleep 0.25
     done
-    gen_b=$(publish_palette "#$(printf '%06x' $((RANDOM * 256 + RANDOM % 256)))") || gen_b=""
+    PUBLISH_N=$((PUBLISH_N + 1))
+    gen_b=$(publish_snapshot "$PUBLISH_N") || gen_b=""
     wait "$follow_pid" 2>/dev/null || true
     echo "[presentation-live] $label follow: $(tr '\n' ' ' <"$follow_out")"
     if [ -n "$gen_b" ] && grep -qx "followed $gen_b" "$follow_out"; then
@@ -239,8 +240,10 @@ check_container() {
     GEN_A=$gen_b
 }
 
-# Admin-side publish of a distinct surface color; prints the generation.
-publish_palette() {
+# Admin-side publish; argument N picks a distinct, valid UI font scale
+# (palette edits must keep publisher contrast). Prints the generation.
+PUBLISH_N=0
+publish_snapshot() {
     as_admin env -u QDISTRO_PRESENTATION_FILE PYTHONSAFEPATH=1 python3 - "$1" <<'PY'
 import sys
 from dataclasses import replace
@@ -249,7 +252,8 @@ from qdistro_presentation.model import example_snapshot
 from qdistro_presentation.publish import write_snapshot
 
 snap = example_snapshot()
-snap = replace(snap, colors=replace(snap.colors, mSurface=sys.argv[1]), enabled=True)
+scale = 1.0 + 0.05 * (int(sys.argv[1]) % 8)
+snap = replace(snap, fonts=replace(snap.fonts, ui_scale=scale), enabled=True)
 print(write_snapshot("/var/lib/qdistro/presentation", snap, owner_uid=1000,
                      skip_unchanged=False).generation)
 PY
@@ -286,7 +290,7 @@ print("timeout", ctrl.state.generation, flush=True)
 sys.exit(1)
 '
 
-GEN_A=$(publish_palette "#112233") || die "admin publish of the initial snapshot failed"
+GEN_A=$(publish_snapshot 0) || die "admin publish of the initial snapshot failed"
 [ -n "$GEN_A" ] || die "admin publish printed an empty generation"
 pass "admin published initial snapshot $GEN_A"
 
