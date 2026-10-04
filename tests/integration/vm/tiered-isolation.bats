@@ -388,6 +388,7 @@ setup() {
     assert_output_contains "PASS: presentation bind source is the host public directory"
     assert_output_contains "PASS: presentation bind is read-only"
     assert_output_contains "PASS: presentation bind does not use :Z relabel"
+    assert_output_contains "PASS: presentation dir owner inside container is keep-id admin uid"
     assert_output_contains "PASS: container write into presentation directory denied"
     assert_output_contains "PASS: container /var/lib/qdistro exposes only presentation"
     assert_output_contains "PASS: container does not see host qdshell settings"
