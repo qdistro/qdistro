@@ -489,11 +489,48 @@ class PreferencesDialog(QDialog):
         self._refresh_desktop_status()
         self._update_font_preview()
 
+    def _effective_ui_font(self) -> tuple[str, int]:
+        try:
+            from qterminator.theme import current_controller
+
+            ctrl = current_controller()
+            if ctrl is not None:
+                family = str(ctrl.state.ui_family or "")
+                size = int(ctrl.state.ui_point_size or 11)
+                if family:
+                    return family, size
+        except Exception:
+            pass
+        app = QApplication.instance()
+        if app is not None:
+            font = app.font()
+            return font.family(), int(font.pointSize() or 11)
+        return "Sans Serif", 11
+
+    def _mark_ui_font_family_dirty(self, _value: str) -> None:
+        self._ui_font_family_dirty = True
+
+    def _mark_ui_font_size_dirty(self, _value: int) -> None:
+        self._ui_font_size_dirty = True
+
+    def _on_desktop_fonts_toggled(self, checked: bool) -> None:
+        if not hasattr(self, "_combo_ui_font"):
+            return
+        self._combo_ui_font.setEnabled(not checked)
+        self._spin_ui_font_size.setEnabled(not checked)
+        self._refresh_desktop_status()
+
     def _refresh_desktop_status(self) -> None:
         if not hasattr(self, "lbl_desktop_status"):
             return
-        follow = self._theme_mode.currentText() == "Follow desktop"
-        use_fonts = self._chk_desktop_font.isChecked()
+        follow = (
+            hasattr(self, "_theme_mode")
+            and self._theme_mode.currentText() == "Follow desktop"
+        )
+        use_fonts = (
+            hasattr(self, "_chk_desktop_fonts")
+            and self._chk_desktop_fonts.isChecked()
+        )
         try:
             from qdistro_presentation.model import desktop_status_text
 
@@ -505,7 +542,6 @@ class PreferencesDialog(QDialog):
                 state,
                 follow_desktop=follow,
                 use_desktop_fonts=use_fonts,
-                font_kind="fixed",
             )
         except Exception:
             text = (
@@ -513,6 +549,17 @@ class PreferencesDialog(QDialog):
             )
         self.lbl_desktop_status.setText(text)
         self.lbl_desktop_status.setVisible(bool(text))
+        if use_fonts and hasattr(self, "_combo_ui_font"):
+            family, size = self._effective_ui_font()
+            self._combo_ui_font.blockSignals(True)
+            if family:
+                self._combo_ui_font.setCurrentText(family)
+            self._combo_ui_font.blockSignals(False)
+            self._ui_font_family_dirty = False
+            self._spin_ui_font_size.blockSignals(True)
+            self._spin_ui_font_size.setValue(max(6, min(48, size)))
+            self._spin_ui_font_size.blockSignals(False)
+            self._ui_font_size_dirty = False
 
     def _build_behavior_page(self):
         widget = QWidget()
@@ -547,12 +594,28 @@ class PreferencesDialog(QDialog):
         self._theme_mode = QComboBox()
         self._theme_mode.addItems(["Follow desktop", "Dark", "Light", "Native"])
         win_layout.addRow(tr("Application appearance:"), self._theme_mode)
-        self._theme_mode.currentIndexChanged.connect(self._on_theme_mode_changed)
+
+        self._chk_desktop_fonts = QCheckBox(tr("Use desktop fonts"))
+        win_layout.addRow(self._chk_desktop_fonts)
 
         self.lbl_desktop_status = QLabel("")
         self.lbl_desktop_status.setObjectName("lbl_desktop_status")
         self.lbl_desktop_status.setWordWrap(True)
         win_layout.addRow(self.lbl_desktop_status)
+
+        self._combo_ui_font = QFontComboBox()
+        win_layout.addRow(tr("UI font:"), self._combo_ui_font)
+        self._ui_font_family_dirty = False
+        self._combo_ui_font.currentTextChanged.connect(self._mark_ui_font_family_dirty)
+
+        self._spin_ui_font_size = QSpinBox()
+        self._spin_ui_font_size.setRange(6, 48)
+        win_layout.addRow(tr("UI font size:"), self._spin_ui_font_size)
+        self._ui_font_size_dirty = False
+        self._spin_ui_font_size.valueChanged.connect(self._mark_ui_font_size_dirty)
+
+        self._chk_desktop_fonts.toggled.connect(self._on_desktop_fonts_toggled)
+        self._theme_mode.currentIndexChanged.connect(self._on_theme_mode_changed)
 
         self._confirm_close = QCheckBox(tr("Confirm before closing with running processes"))
         win_layout.addRow(self._confirm_close)
@@ -762,6 +825,30 @@ class PreferencesDialog(QDialog):
         mode_map = {"system": 0, "dark": 1, "light": 2, "native": 3}
         self._theme_mode.setCurrentIndex(mode_map.get(theme_mode, 0))
 
+        appearance = self._config.get("appearance", default={}) or {}
+        has_font_override = bool(
+            appearance.get("ui_font_family") or appearance.get("ui_font_size_pt")
+        )
+        self._chk_desktop_fonts.blockSignals(True)
+        self._chk_desktop_fonts.setChecked(not has_font_override)
+        self._chk_desktop_fonts.blockSignals(False)
+        effective_family, effective_size = self._effective_ui_font()
+        self._combo_ui_font.blockSignals(True)
+        if appearance.get("ui_font_family"):
+            self._combo_ui_font.setCurrentText(str(appearance["ui_font_family"]))
+        else:
+            self._combo_ui_font.setCurrentText(effective_family)
+        self._combo_ui_font.blockSignals(False)
+        self._ui_font_family_dirty = False
+        self._spin_ui_font_size.blockSignals(True)
+        if appearance.get("ui_font_size_pt"):
+            self._spin_ui_font_size.setValue(int(appearance["ui_font_size_pt"]))
+        else:
+            self._spin_ui_font_size.setValue(effective_size)
+        self._spin_ui_font_size.blockSignals(False)
+        self._ui_font_size_dirty = False
+        self._on_desktop_fonts_toggled(self._chk_desktop_fonts.isChecked())
+
         dark_scheme = self._config.get("general", "dark_color_scheme", default="Linux")
         idx = self._dark_color_scheme.findText(dark_scheme)
         if idx >= 0:
@@ -831,6 +918,27 @@ class PreferencesDialog(QDialog):
         show_menubar = self._show_menubar.isChecked()
         self._config.set("general", "show_menubar", show_menubar)
 
+        appearance = dict(self._config.get("appearance", default={}) or {})
+        appearance["version"] = 1
+        if self._chk_desktop_fonts.isChecked():
+            appearance.pop("ui_font_family", None)
+            appearance.pop("ui_font_size_pt", None)
+        else:
+            existing = self._config.get("appearance", default={}) or {}
+            if self._ui_font_family_dirty:
+                appearance["ui_font_family"] = self._combo_ui_font.currentText()
+            elif existing.get("ui_font_family"):
+                appearance["ui_font_family"] = str(existing["ui_font_family"])
+            else:
+                appearance.pop("ui_font_family", None)
+            if self._ui_font_size_dirty:
+                appearance["ui_font_size_pt"] = float(self._spin_ui_font_size.value())
+            elif existing.get("ui_font_size_pt") is not None:
+                appearance["ui_font_size_pt"] = float(existing["ui_font_size_pt"])
+            else:
+                appearance.pop("ui_font_size_pt", None)
+        self._config.set("appearance", appearance)
+
         # Persist shortcut edits and re-bind on the parent window.
         for name in self._shortcut_actions:
             leaf = self._shortcut_leaves.get(name)
@@ -851,7 +959,10 @@ class PreferencesDialog(QDialog):
         if app:
             ctrl = current_controller()
             if ctrl is not None:
+                from qdistro_presentation.model import parse_local_overrides
+
                 ctrl.set_theme_mode(theme_mode)
+                ctrl.set_local(parse_local_overrides(appearance))
                 if ctrl.state.using_shared_palette and ctrl.state.snapshot:
                     resolved = ctrl.state.snapshot.mode
                 elif theme_mode in ("dark", "light"):

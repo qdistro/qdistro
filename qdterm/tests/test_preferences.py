@@ -861,9 +861,10 @@ def test_follow_desktop_without_snapshot_shows_unavailable(window, qtbot):
     dlg = PreferencesDialog(window)
     qtbot.addWidget(dlg)
     assert dlg._theme_mode.currentText() == "Follow desktop"
+    assert dlg._chk_desktop_fonts.isChecked() is True
     assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
     dlg._theme_mode.setCurrentText("Dark")
-    dlg._chk_desktop_font.setChecked(False)
+    dlg._chk_desktop_fonts.setChecked(False)
     assert dlg.lbl_desktop_status.text() == ""
     reset_controller_for_tests()
 
@@ -891,7 +892,7 @@ def test_live_update_replaces_unavailable_with_inherited_size(
     dlg = PreferencesDialog(window)
     qtbot.addWidget(dlg)
     try:
-        dlg._chk_desktop_font.setChecked(True)
+        dlg._chk_desktop_fonts.setChecked(True)
         assert DESKTOP_SETTINGS_UNAVAILABLE in dlg.lbl_desktop_status.text()
         snap = _scaled_snapshot()
         write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
@@ -902,9 +903,192 @@ def test_live_update_replaces_unavailable_with_inherited_size(
         text = dlg.lbl_desktop_status.text()
         assert DESKTOP_SETTINGS_UNAVAILABLE not in text
         assert "13.75" in text
-        assert snap.fonts.fixed_family in text
+        assert snap.fonts.ui_family in text
+        assert snap.fonts.fixed_family not in text
     finally:
         reset_controller_for_tests()
         app.setStyle(original_style)
         app.setPalette(original_pal)
         app.setStyleSheet(original_qss)
+
+
+def test_ui_font_controls_sit_beside_application_appearance(window, qtbot):
+    """Plan 04 UI font inheritance controls live next to Application appearance."""
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    assert dlg._chk_desktop_fonts.text() == "Use desktop fonts"
+    assert dlg._chk_desktop_font.text() == "Use desktop monospace font"
+    assert dlg._chk_desktop_fonts is not dlg._chk_desktop_font
+    assert dlg._combo_ui_font is not dlg._font_combo
+    parent = dlg._theme_mode.parentWidget()
+    assert dlg._chk_desktop_fonts.parentWidget() is parent
+    assert dlg._combo_ui_font.parentWidget() is parent
+    assert dlg._spin_ui_font_size.parentWidget() is parent
+    assert dlg._font_combo.parentWidget() is not parent
+    assert dlg._chk_desktop_fonts.isChecked() is True
+    assert dlg._combo_ui_font.isEnabled() is False
+    assert dlg._spin_ui_font_size.isEnabled() is False
+    dlg._chk_desktop_fonts.setChecked(False)
+    assert dlg._combo_ui_font.isEnabled() is True
+    assert dlg._spin_ui_font_size.isEnabled() is True
+    dlg._chk_desktop_font.setChecked(False)
+    assert dlg._combo_ui_font.isEnabled() is True
+    dlg._chk_desktop_fonts.setChecked(True)
+    assert dlg._combo_ui_font.isEnabled() is False
+
+
+def test_use_desktop_fonts_apply_drops_ui_font_overrides(window, qtbot):
+    cfg = Config()
+    cfg.set(
+        "appearance",
+        {"version": 1, "ui_font_family": "Inter", "ui_font_size_pt": 14.0},
+    )
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    assert dlg._chk_desktop_fonts.isChecked() is False
+    dlg._chk_desktop_fonts.setChecked(True)
+    dlg._apply()
+    appearance = cfg.get("appearance", default={})
+    assert appearance.get("version") == 1
+    assert "ui_font_family" not in appearance
+    assert "ui_font_size_pt" not in appearance
+
+
+def test_ui_font_override_persists_and_reaches_controller(
+    window, qtbot, tmp_path, monkeypatch
+):
+    from PyQt6.QtGui import QFontDatabase
+    from PyQt6.QtWidgets import QApplication
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import (
+        attach_presentation,
+        current_controller,
+        reset_controller_for_tests,
+    )
+
+    families = QFontDatabase.families()
+    assert families
+    family = families[0]
+    app = QApplication.instance()
+    reset_controller_for_tests()
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(app, Config())
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    try:
+        dlg._chk_desktop_fonts.setChecked(False)
+        dlg._combo_ui_font.setCurrentText(family)
+        dlg._spin_ui_font_size.setValue(18)
+        dlg._apply()
+        appearance = Config().get("appearance", default={})
+        assert appearance.get("ui_font_family") == family
+        assert appearance.get("ui_font_size_pt") == 18.0
+        ctrl = current_controller()
+        assert ctrl is not None
+        assert ctrl.state.ui_family == family
+        assert abs(ctrl.state.content_ui_point_size - 18.0) < 0.01
+    finally:
+        reset_controller_for_tests()
+
+
+def test_theme_only_apply_keeps_size_only_ui_font_override(
+    window, qtbot, tmp_path, monkeypatch
+):
+    from PyQt6.QtWidgets import QApplication
+    from qdistro_presentation.model import example_snapshot
+    from qdistro_presentation.paths import ENV_OVERRIDE
+    from qdistro_presentation.publish import write_snapshot
+    from qterminator.theme import (
+        attach_presentation,
+        current_controller,
+        reset_controller_for_tests,
+    )
+
+    cfg = Config()
+    cfg.set("appearance", {"version": 1, "ui_font_size_pt": 14.0})
+    app = QApplication.instance()
+    reset_controller_for_tests()
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(app, cfg)
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    try:
+        assert dlg._chk_desktop_fonts.isChecked() is False
+        dlg._theme_mode.setCurrentText("Dark")
+        dlg._apply()
+        appearance = cfg.get("appearance", default={})
+        assert appearance.get("ui_font_size_pt") == 14.0
+        assert "ui_font_family" not in appearance
+        ctrl = current_controller()
+        assert ctrl is not None
+        assert ctrl.state.theme_mode == "dark"
+        assert ctrl.state.ui_family == example_snapshot().fonts.ui_family
+    finally:
+        reset_controller_for_tests()
+
+
+def test_cancel_does_not_write_inherited_ui_fonts(window, qtbot):
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    dlg._chk_desktop_fonts.setChecked(False)
+    dlg._combo_ui_font.setCurrentText("Serif")
+    dlg._theme_mode.setCurrentText("Dark")
+    dlg.reject()
+    appearance = Config().get("appearance", default={}) or {}
+    assert appearance.get("ui_font_family") is None
+    assert Config().get("general", "theme_mode") == "system"
+
+
+def test_apply_preserves_unrelated_appearance_keys(window, qtbot):
+    cfg = Config()
+    cfg.set(
+        "appearance",
+        {
+            "version": 1,
+            "tooltips_enabled": False,
+            "icon_theme": "Adwaita",
+            "ui_scale": 1.1,
+            "ui_font_family": "Inter",
+        },
+    )
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    assert dlg._chk_desktop_fonts.isChecked() is False
+    dlg._apply()
+    appearance = cfg.get("appearance", default={})
+    assert appearance.get("tooltips_enabled") is False
+    assert appearance.get("icon_theme") == "Adwaita"
+    assert appearance.get("ui_scale") == 1.1
+    assert appearance.get("ui_font_family")
+    assert "ui_font_size_pt" not in appearance
+
+
+def test_explicit_eleven_point_ui_font_size_is_saved(window, qtbot):
+    cfg = Config()
+    cfg.set("appearance", {"version": 1, "ui_font_family": "Inter"})
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    dlg._chk_desktop_fonts.setChecked(False)
+    dlg._spin_ui_font_size.setValue(10)
+    dlg._spin_ui_font_size.setValue(11)
+    dlg._apply()
+    appearance = cfg.get("appearance", default={})
+    assert appearance.get("ui_font_size_pt") == 11.0
+    assert appearance.get("ui_font_family") == "Inter"
+
+
+def test_terminal_desktop_font_checkbox_does_not_control_ui_fonts(window, qtbot):
+    dlg = PreferencesDialog(window)
+    qtbot.addWidget(dlg)
+    dlg._chk_desktop_fonts.setChecked(False)
+    dlg._combo_ui_font.setEnabled(True)
+    dlg._chk_desktop_font.setChecked(True)
+    assert dlg._combo_ui_font.isEnabled() is True
+    assert dlg._spin_ui_font_size.isEnabled() is True
+    dlg._chk_desktop_fonts.setChecked(True)
+    dlg._chk_desktop_font.setChecked(False)
+    assert dlg._combo_ui_font.isEnabled() is False
