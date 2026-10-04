@@ -130,60 +130,117 @@ sleep 1   # let any delayed connection teardown land before the fd attacks
 # No named in-sandbox wayland socket exists (waypipe fd-passes to the
 # workload) and /proc/pid/fd refuses socket opens (ENXIO), so writes go
 # through pidfd_getfd(2) as host root — but ONLY onto fds whose peer is
-# identified: the SENTRY's channel-socket fd (the sandbox end of the
-# waypipe link — the same bytes a hostile sandbox write puts on the wire
-# toward the TRUSTED client parser) and the bridge client's own socket
-# fds (wayland requests at qdwin on the tagged channel + waypipe frames
-# at the sandbox server). Peer mapping: ss -xp gives each socket's peer
-# inode; the peer's owner is found via /proc/*/fd and must be a runsc
-# process (sentry/gofer) or it is not attacked.
+# identified. Topology (verified on this VM): the accepted link.sock
+# channel lives in the runsc GOFER's network namespace — the waypipe
+# client's accepted fd and the SENTRY's sandbox-end fd both appear in
+# `nsenter -t <gofer> -n ss -xp` with `users:` naming their owners.
+# A host-namespace ss does NOT see the channel at all (b19's failure:
+# host-ns peer-mapping resolved nothing). The hose writes:
+#  (a) the SENTRY's channel fd -> malformed waypipe frames travel
+#      sandbox->client at the TRUSTED client parser (the CONTRACT's
+#      flagged surface);
+#  (b) the CLIENT's channel fd -> waypipe frames client->sandbox;
+#  (c) the CLIENT's remaining ESTABLISHED socket -> wayland requests at
+#      qdwin on the secctx-tagged channel.
+# The link.sock LISTEN fd is skipped (unconnected; writing to it is not
+# a stream attack) and NO unattributed socket is touched.
+GP_A=$(gofer_pid_of "$TA")
 BP_A=$(rec "$TA" bridge_client_pid)
+SP_A=$(rec "$TA" sentry_pid)
 is "bridge client pid resolved" "$(yes_no test -n "$BP_A")" yes
-python3 - "$BP_A" "$CPID_BEFORE" > "$WORK/hose-channels.log" 2>&1 <<'PY'
+is "gofer pid resolved" "$(yes_no test -n "$GP_A")" yes
+is "sentry pid resolved for peer attribution" "$(yes_no test -n "$SP_A")" yes
+python3 - "$BP_A" "$GP_A" "$SP_A" > "$WORK/hose-channels.log" 2>&1 <<'PY'
 import ctypes, glob, os, re, subprocess, sys
 libc = ctypes.CDLL(None, use_errno=True)
 client = int(sys.argv[1])
-comp = int(sys.argv[2])
+gofer = int(sys.argv[2])
+sentry_pid = int(sys.argv[3] or 0)
 
-# inode -> owning (pid, exe) for every open socket fd
-owners = {}
-for p in glob.glob("/proc/[0-9]*/fd/*"):
-    pid = int(p.split("/")[2])
-    try: t = os.readlink(p)
-    except OSError: continue
-    m = re.match(r"socket:\[(\d+)\]", t)
-    if not m: continue
-    try: exe = os.readlink("/proc/%d/exe" % pid)
-    except OSError: exe = ""
-    owners[int(m.group(1))] = (pid, int(os.path.basename(p)), exe)
+def nsenter_ss(pid):
+    try:
+        return subprocess.run(["nsenter", "-t", str(pid), "-n", "ss", "-xpH"],
+                              capture_output=True, text=True).stdout
+    except OSError:
+        return ""
 
-# client socket inodes
+def ss_rows(out, state):
+    # rows: (local_inode, peer_inode, [(pid, fd), ...])
+    rows = []
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) < 8 or cols[0] != "u_str" or cols[1] != state:
+            continue
+        try:
+            li, pi = int(cols[5]), int(cols[7])
+        except ValueError:
+            continue
+        users = [(int(a), int(b)) for a, b in
+                 re.findall(r'pid=(\d+),fd=(\d+)', line)]
+        rows.append((li, pi, users))
+    return rows
+
+# The channel pair lives in the gofer's netns: one ESTAB row's users:
+# names the waypipe client (host end); its peer-inode names the sentry's
+# sandbox end.
+grows = ss_rows(nsenter_ss(gofer), "ESTAB")
+chan_local = chan_peer = client_fd = None
+for li, pi, users in grows:
+    for p, f in users:
+        if p == client:
+            chan_local, chan_peer, client_fd = li, pi, f
+            break
+    if chan_local is not None:
+        break
+sentry_fd = None
+if chan_peer is not None:
+    for li, pi, users in grows:
+        if li != chan_peer:
+            continue
+        # the peer row's users: lists every sentry THREAD pid sharing the
+        # channel fd — prefer the launch-record's attested sentry pid,
+        # else any pid whose exe is the runsc sandbox.
+        fallback = None
+        for p, f in users:
+            try:
+                exe = os.readlink("/proc/%d/exe" % p)
+            except OSError:
+                exe = ""
+            if "runsc" not in exe:
+                continue
+            if p == sentry_pid:
+                sentry_fd = (p, f)
+                break
+            fallback = fallback or (p, f)
+        sentry_fd = sentry_fd or fallback
+        break
+
+# Client socket fds in the HOST netns: the listener (unlinked
+# link.sock LISTEN, skipped — an unconnected socket is not a stream
+# target) and the compositor-side wayland connection (the remaining
+# ESTAB socket -> wayland requests at qdwin).
+listen_inodes = set()
+try:
+    lout = subprocess.run(["ss", "-xlH"], capture_output=True, text=True).stdout
+    for line in lout.splitlines():
+        cols = line.split()
+        if len(cols) >= 6 and cols[0] == "u_str" and cols[1] == "LISTEN":
+            try:
+                listen_inodes.add(int(cols[5]))
+            except ValueError:
+                pass
+except OSError:
+    pass
+
 mine = {}
 for l in sorted(glob.glob("/proc/%d/fd/*" % client)):
-    try: t = os.readlink(l)
-    except OSError: continue
-    m = re.match(r"socket:\[(\d+)\]", t)
-    if m: mine[int(os.path.basename(l))] = int(m.group(1))
-
-# peer inode per client socket, from ss -xp. Unix rows are positionally
-# stable: cols 4..7 = "<local> <inode> * <peer-inode>" (local is a path
-# or '*'). Only connected stream sockets interest us.
-peers = {}
-try:
-    out = subprocess.run(["ss", "-xp"], capture_output=True, text=True).stdout
-except OSError:
-    out = ""
-inodes = set(mine.values())
-for line in out.splitlines():
-    cols = line.split()
-    if len(cols) < 8 or cols[0] != "u_str":
-        continue
     try:
-        local_ino, peer_ino = int(cols[5]), int(cols[7])
-    except ValueError:
+        t = os.readlink(l)
+    except OSError:
         continue
-    if local_ino in inodes:
-        peers[local_ino] = peer_ino
+    m = re.match(r"socket:\[(\d+)\]", t)
+    if m:
+        mine[int(os.path.basename(l))] = int(m.group(1))
 
 def hose(pid, fd, label):
     pidfd = libc.syscall(434, pid, 0)          # pidfd_open
@@ -199,22 +256,20 @@ def hose(pid, fd, label):
     return 1
 
 sent = 0
-chan_peer_fd = None
-for fd, ino in mine.items():
-    pino = peers.get(ino)
-    owner = owners.get(pino) if pino else None
-    if owner and "/usr/libexec/qdistro/runsc/" in owner[2]:
-        chan_peer_fd = (owner[0], owner[1])
-        sent += hose(owner[0], owner[1], "sandbox-end")
-    elif owner and owner[0] == comp:
-        sent += hose(client, fd, "client-wayland-end")
-    elif pino is None:
-        sent += hose(client, fd, "client-unresolved-socket")
-    else:
-        print(f"peer inode {pino} owned by non-bridge process {owner}, skipped")
-if chan_peer_fd is None:
+if sentry_fd is not None:
+    sent += hose(sentry_fd[0], sentry_fd[1], "sandbox-end")
+else:
     print("WARN: no sandbox-end channel fd identified")
-print(f"hose done sent={sent} sandbox_end={'yes' if chan_peer_fd else 'no'}")
+for fd, ino in mine.items():
+    if chan_local is not None and ino == chan_local:
+        sent += hose(client, fd, "client-channel")
+    elif ino in listen_inodes:
+        print(f"fd {fd} inode {ino}: the link.sock LISTENER — skipped (unconnected)")
+    elif ino == chan_peer:
+        print(f"fd {fd} inode {ino}: unexpected peer-side fd — skipped")
+    else:
+        sent += hose(client, fd, "client-wayland-end")
+print(f"hose done sent={sent} sandbox_end={'yes' if sentry_fd else 'no'}")
 PY
 sed 's/^/    channel-hose: /' "$WORK/hose-channels.log"
 is "waypipe frames written onto the SANDBOX end of the link (at the trusted client parser)" \

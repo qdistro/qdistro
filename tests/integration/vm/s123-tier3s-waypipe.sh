@@ -37,6 +37,20 @@ is "broker answers allow for the GUI spawn" "$(broker_check "$GUISPAWN")" allow
 step "1. GUI launch brings up the bridge pair"
 reg_before=$(audit_count "qdistro.lineage.register:$SILO")
 cur=$(journal_cursor)
+# link.sock exists only between the waypipe client's bind() (step 11b,
+# before podman run) and the sandbox waypipe server's connect (waypipe -o
+# unlinks at accept — single-attach). Capture its mode+owner in that
+# window; post-attach evidence is the fd/netns topology below.
+: > "$WORK/link-sock-stat"
+( end=$((SECONDS + 120)); while [ "$SECONDS" -lt "$end" ]; do
+      for f in "$LAUNCHES"/*/link.sock; do
+          [ -e "$f" ] || continue
+          stat -c '%a:%u' "$f" > "$WORK/link-sock-stat" 2>/dev/null
+          exit 0
+      done
+      sleep 0.02
+  done ) &
+SOCKPOLL=$!
 TOK=$(up_gui_silo "$SILO")
 if [ -n "$TOK" ]; then pass "launch up (token $TOK)"; else fail "launch did not come up"; fi
 UNIT=$(unit_of "$SILO"); CTR=$(ctr_of "$SILO")
@@ -95,14 +109,23 @@ is "bridge mount is READ-ONLY in the sandbox view (P2-1: a hostile guest must no
     "false"
 is "sandbox write to the bridge dir is refused" \
     "$(pm exec "$CTR" sh -c 'touch /run/qdistro/link/.w 2>/dev/null; printf "rc=%s" "$?"' 2>/dev/null)" "rc=1"
-is "host link.sock is admin-owned 0600 (umask 0177 wrap)" \
-    "$(stat -c '%a:%u' "$LAUNCHES/$TOK/link.sock" 2>/dev/null)" "600:1000"
+wait "$SOCKPOLL" 2>/dev/null || true
+is "host link.sock was admin-owned 0600 at bind (umask 0177 wrap, pre-attach)" \
+    "$(cat "$WORK/link-sock-stat" 2>/dev/null)" "600:1000"
+is "launch dir is admin-owned 0700" \
+    "$(stat -c '%a:%u' "$LAUNCHES/$TOK" 2>/dev/null)" "700:1000"
 is "container NetworkMode is none" \
     "$(pm inspect --format '{{.HostConfig.NetworkMode}}' "$CTR" 2>/dev/null)" none
-# host-uds=open evidence: a host unix socket can only appear as a live
-# socket INSIDE the sandbox when runsc's host-uds flag passes it through.
-is "link.sock is a live socket inside the sandbox (host-uds=open passthrough)" \
-    "$(yes_no pm exec "$CTR" test -S /run/qdistro/link/link.sock)" yes
+# host-uds=open evidence: the accepted channel's host end lives in the
+# runsc GOFER's netns (gVisor moves the accepted socket off the host
+# netns; a host-namespace ss does NOT see it). `nsenter -t <gofer> -n
+# ss` shows the ESTABLISHED unix stream still NAMED link.sock — that is
+# the passthrough: the sandbox's waypipe server could only connect to a
+# host unix socket because runsc's host-uds flag exposed it.
+GP=$(gofer_pid_of "$TOK")
+is "runsc gofer resolved" "$(yes_no test -n "$GP")" yes
+is "link.sock channel is an ESTABLISHED host unix socket through the gofer netns (host-uds=open)" \
+    "$(nsenter -t "$GP" -n ss -xpH 2>/dev/null | grep -c 'ESTAB.*link\.sock\|link\.sock.*ESTAB' | awk '{print ($1>=1)?1:0}')" 1
 # the recorded podman create argv is the exact launch argv: assert the
 # security-critical entries literally, not by pattern family.
 CC=$(pm inspect --format '{{json .Config.CreateCommand}}' "$CTR" 2>/dev/null)
@@ -141,25 +164,36 @@ is "launch record consumed after RegisterLaunch" "$(yes_no test -e "$LR")" no
 # waypipe -o unlinks link.sock at accept (single-attach): once the bridge is
 # live the per-launch dir must be EMPTY — any other file there is a leftover.
 is "launch dir empty once the bridge attached" "$(find "$LAUNCHES/$TOK" -mindepth 1 | grep -c .)" 0
-is "single-attach: a second connect to link.sock is refused" \
-    "$(python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$LAUNCHES/$TOK/link.sock" 2>/dev/null && echo accepted || echo refused)" refused
+# Single-attach is enforced by UNLINK, not by refusing a second connect on
+# a live listener: prove the mechanism — the pathname is gone while the
+# client's -o listener fd still holds a LISTEN socket (unlinked sockets
+# stay visible in /proc/net/unix by path), and a fresh connect fails with
+# ENOENT. A connect failure WITHOUT the live listener would mean the
+# bridge died, not single-attach.
+is "single-attach: the consumed link.sock listener fd still listens (unlinked, not closed)" \
+    "$(ss -xlH 2>/dev/null | grep -c 'link\.sock')" 1
+is "single-attach: a second connect fails — the pathname was consumed at accept" \
+    "$(python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$LAUNCHES/$TOK/link.sock" 2>&1 | grep -c 'No such file')" 1
 
 step "6. qdshell observed the tagged toplevel"
+# every count grep is scoped to $cur (captured just before the launch):
+# on a preserved VM the boot journal still holds a prior run's identical
+# silo/title lines, which would double-count.
 is "qdshell: [tier3s] toplevel observed" \
-    "$(qdshell_log | grep -c "\[tier3s\] toplevel observed silo=$SILO secctx=$APPID color=#...... handle=[0-9]")" 1
+    "$(qdshell_log "$cur" | grep -c "\[tier3s\] toplevel observed silo=$SILO secctx=$APPID color=#...... handle=[0-9]")" 1
 is "qdshell: colour line" \
-    "$(qdshell_log | grep -c "\[tier3s\] silo=$SILO color=#......")" 1
+    "$(qdshell_log "$cur" | grep -c "\[tier3s\] silo=$SILO color=#......")" 1
 # toplevel_added's app_id is the surface's own (the tagged identity lands on
 # toplevel_security_context below); pid= is the waypipe bridge client's.
 is "compositor: toplevel_added names the bridge client pid" \
-    "$(comp_log | grep -c "toplevel_added handle=[0-9]* uid=1000 pid=$BP ")" 1
+    "$(comp_log "$cur" | grep -c "toplevel_added handle=[0-9]* uid=1000 pid=$BP ")" 1
 # waypipe's --title-prefix marks the forwarded windows visibly
 is "compositor: a toplevel carries the [3s:$SILO] title prefix" \
-    "$(comp_log | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SILO\] ")" 1
+    "$(comp_log "$cur" | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SILO\] ")" 1
 is "compositor: toplevel_security_context carries the launch token as instance" \
-    "$(comp_log | grep -c "toplevel_security_context handle=[0-9]* engine=qdistro.tier3s app_id=$APPID instance=$TOK")" 1
+    "$(comp_log "$cur" | grep -c "toplevel_security_context handle=[0-9]* engine=qdistro.tier3s app_id=$APPID instance=$TOK")" 1
 is "compositor: peer identity names the live bridge client" \
-    "$(comp_log | grep -c "toplevel_peer_identity handle=[0-9]* pid=$BP starttime=$BS uid=1000")" 1
+    "$(comp_log "$cur" | grep -c "toplevel_peer_identity handle=[0-9]* pid=$BP starttime=$BS uid=1000")" 1
 
 step "7. teardown reaps the bridge too"
 snapshot_bridge "$TOK"

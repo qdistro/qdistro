@@ -481,14 +481,17 @@ delete_rule() {   # delete_rule <filename.yaml>
         "string:$1" > /dev/null 2>&1
 }
 
-# t3s_clip_source <silo> <mime> <text> — run qdistro-test-clipboard-source
-# as admin under the SAME wrap the waypipe bridge client uses
-# (runuser -> env -i -> QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER ->
-# qdistro-secctx-exec tagged qdistro.tier3s.<silo>). The exec chain
+# t3s_clip_source <silo> <mime> <text> [helper args...] — run
+# qdistro-test-clipboard-source as admin under the SAME wrap the waypipe
+# bridge client uses (runuser -> env -i -> QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER
+# -> qdistro-secctx-exec tagged qdistro.tier3s.<silo>). The exec chain
 # preserves the pid, so the caller's $! IS the tagged source process;
-# kill it to drop the selection. Prints nothing.
+# kill it to drop the selection. Prints the instance-id on stdout so the
+# caller can register exactly the tag it launched. Extra args pass to the
+# helper (--toplevel, --emit-interval, --title).
 t3s_clip_source() {
     local silo="$1" mime="${2:-text/plain}" text="${3:-qdistro-t3s-clip}"
+    shift $(( $# > 3 ? 3 : $# ))
     # A unique instance-id per call is REQUIRED: two live clients tagged
     # with the same instance-id both connect, but the second's
     # set_selection is silently swallowed by the tagged channel
@@ -497,31 +500,53 @@ t3s_clip_source() {
     # $BASHPID, not a counter: callers run this function backgrounded, so
     # a shell-variable increment would stay trapped in the subshell and
     # every call would reuse the same id.
+    local inst="clipsrc-$silo-$BASHPID"
+    printf 'INSTANCE=%s\n' "$inst"
     runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin \
         USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 \
         WAYLAND_DISPLAY=wayland-1 QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
         ${QDISTRO_CLIP_SRC_DELAY_MS:+QDISTRO_CLIP_SRC_DELAY_MS=$QDISTRO_CLIP_SRC_DELAY_MS} \
+        ${QDISTRO_LAUNCH_RECORD_PATH:+QDISTRO_LAUNCH_RECORD_PATH=$QDISTRO_LAUNCH_RECORD_PATH} \
+        ${QDISTRO_LAUNCH_RECORD_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN=$QDISTRO_LAUNCH_RECORD_TOKEN} \
         qdistro-secctx-exec --sandbox-engine qdistro.tier3s \
-            --app-id "qdistro.tier3s.$silo" --instance-id "clipsrc-$silo-$BASHPID" \
-            -- qdistro-test-clipboard-source --mime "$mime" --text "$text"
+            --app-id "qdistro.tier3s.$silo" --instance-id "$inst" \
+            -- qdistro-test-clipboard-source --mime "$mime" --text "$text" "$@"
 }
 
-# register_clip_source <silo> <pid> — the SAME RegisterLaunch call the
-# spawn path makes for the bridge client (root-only, broker re-verifies
-# the live pid+starttime): it binds the tagged source's (pid,starttime)
-# to qdistro.tier3s.<silo> in the launch-record store so the relayed
-# source pid resolves under lineage_enforce. The caller MUST set
-# QDISTRO_CLIP_SRC_DELAY_MS so the registration lands before the source
-# connects and emits (the helper delays inside its own exe, keeping the
-# record's exe axis valid).
+# register_clip_source <silo> <instance> <pid> — the SAME RegisterLaunch
+# call the spawn path makes for the bridge client (root-only, broker
+# re-verifies the live pid+starttime): it binds the tagged source's
+# (pid,starttime) to qdistro.tier3s.<silo> in the launch-record store so
+# the relayed source pid resolves under lineage_enforce. <instance> must
+# be the exact instance-id the source was tagged with (audit
+# correlation; identity assertions key on pid/starttime). The caller
+# MUST set QDISTRO_CLIP_SRC_DELAY_MS so the registration lands before
+# the source connects and emits (the helper delays inside its own exe,
+# keeping the record's exe axis valid).
+# read_launch_record <path> <token> — poll for the pid file qdistro-secctx-exec
+# publishes via QDISTRO_LAUNCH_RECORD_PATH (it fork()s; the wayland client is
+# its child and survives execvp). The file is "<pid> <token>"; the token is
+# verified so a same-uid squatter cannot make us register a wrong pid — the
+# same contract the spawn's RegisterLaunch path uses.
+read_launch_record() {
+    local path="$1" tok="$2" i line=""
+    for i in $(seq 1 100); do
+        line=$(cat "$path" 2>/dev/null) && [ -n "$line" ] && break
+        sleep 0.1
+    done
+    [ -n "$line" ] || return 1
+    [ "${line##* }" = "$tok" ] || return 1
+    printf '%s\n' "${line%% *}"
+}
+
 register_clip_source() {
-    local silo="$1" pid="$2" st out
+    local silo="$1" inst="$2" pid="$3" st out
     st=$(starttime "$pid") || return 1
     [ -n "$st" ] || return 1
     out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.RegisterLaunch \
         "string:$silo" "string:qdistro.tier3s" "string:qdistro.tier3s.$silo" \
-        "string:clipsrc-$silo-$pid" "string:" "uint64:$pid" "string:tier3s" \
+        "string:$inst" "string:" "uint64:$pid" "string:tier3s" \
         "uint64:$st" 2>&1) || return 1
     printf '%s\n' "$out" | grep -qE 'string "[0-9a-f]{32}"'
 }
@@ -647,6 +672,19 @@ bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
         [ "$(cat /proc/1/comm 2>/dev/null)" = waypipe ] || exit 1
         n=$(ls -l /proc/1/fd 2>/dev/null | grep -c "socket:")
         [ "${n:-0}" -ge 2 ]'
+}
+
+# gofer_pid_of <token> — the runsc gofer process serving this launch's
+# container. gVisor's host-uds passthrough moves the host end of the
+# accepted link.sock channel into the GOFER's network namespace (the
+# waypipe client's accepted fd lives there, peered with the sentry's
+# sandbox end), so channel-topology evidence is
+# `nsenter -t <gofer> -n ss -xp`, not a host-namespace ss.
+gofer_pid_of() {   # -> pid or ""
+    local tok="$1" cid
+    cid=$(pm inspect --format '{{.Id}}' "$(rec "$tok" container)" 2>/dev/null) || return 1
+    [ -n "$cid" ] || return 1
+    pgrep -f "runsc-gofer .*${cid}" | head -1
 }
 
 # assert_gui_bridge_up <tag> <token> — the live-side counterpart: bridge pair

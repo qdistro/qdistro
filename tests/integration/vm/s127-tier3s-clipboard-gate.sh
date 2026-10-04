@@ -18,24 +18,40 @@
 #   - strict MIME: an image/png-only offer from a tier3s app_id strips to
 #     empty -> deny reason=tier3s-no-allowed-mimes (ΔB6 shares tier-4's
 #     text/plain + text/uri-list allow-list);
-#   - SaveRule allow on qdistro.clipboard.transfer:sA:sB flips the live
-#     verdict: the broker journal shows `rules reloaded (dbus-saverule)`
-#     and a second real selection gets verdict=allow reason=broker:allow;
+#   - SaveRule allow on qdistro.clipboard.transfer:sA:sB takes effect:
+#     the broker journal shows `rules reloaded (dbus-saverule)` and the
+#     probe flips to allow. (A RULE-driven live cross-silo set-allow is
+#     structurally impossible under enforce: the destination silo is
+#     always the focused toplevel's, and a source whose relayed pid is
+#     trustworthy must BE the focused toplevel's client — the bound case
+#     — so attested live traffic is necessarily same-silo. Cross-silo
+#     policy is exercised by probes; the live attestation chain is
+#     exercised same-silo below.)
+#   - live attested ALLOW: a tagged clip source owning a real xdg_toplevel
+#     in its own silo (s127c) is focused, its v23 sidecar binds to the
+#     toplevel's attested tag, its pid relays to the broker, and the
+#     same-silo path allows ONLY after VerifyClientIdentity + the
+#     launch-record resolution — the full tagged->bound->registered->
+#     attested->allow chain a real tier3s bridge takes.
 #   - focus-aware clear: while silo B holds the recorded selection,
 #     injectFocus onto A's toplevel emits CLIPBOARD_FOCUS_GATE
 #     verdict=deny reason=focus-cross-silo;
 #   - receive-time gate (broker CheckClipboardReceive): default-deny,
 #     then an allow rule with mime_type: text/plain flips text/plain
-#     while image/png stays denied;
+#     while image/png stays denied — under enforce the receive lineage
+#     chokepoint requires resolved silo-security snapshots, so the test
+#     declares [silo.sA]/[silo.sB] in /etc/qdistro/silo-security.toml
+#     (restored exactly afterwards);
 #   - every cross-silo probe lands an audit row.
 # Runs after tier3s-guest-setup.sh --gui. One PASS/FAIL line per check;
 # `[s127] N passes, M failures`; exit 1 on any failure.
 set -u
 T3S_TAG=s127
 . "$(dirname "$0")/tier3s-guest-lib.sh"
-SA=s127a; SB=s127b
+SA=s127a; SB=s127b; SC=s127c
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 CLIP_FILE="99-s127-clip.yaml"
+SILO_SEC=/etc/qdistro/silo-security.toml
 CLIP_SRC_PID=""
 
 # kill_clip_src — TERM the runuser wrapper, then sweep any orphaned
@@ -51,25 +67,90 @@ kill_clip_src() {
     pkill -u admin -f '^qdistro-secctx-exec --sandbox-engine qdistro.tier3s .*clipsrc-' 2>/dev/null || :
 }
 
+# launch_clip_source <silo> <mime> <text> <logfile> [helper args...] —
+# background t3s_clip_source under a per-source QDISTRO_LAUNCH_RECORD_PATH/
+# TOKEN pair. $! is only the runuser subshell; the attested wayland client
+# is secctx-exec's fork child, whose pid it publishes into the record —
+# the same contract spawn's RegisterLaunch path uses.
+launch_clip_source() {
+    local silo="$1" mime="$2" text="$3" log="$4"; shift 4
+    CLIP_LR=$(mktemp -u "$ADMIN_RT/qdistro-tier3s-clipsrcrec-XXXXXXXX.pid")
+    CLIP_LR_TOK=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    QDISTRO_LAUNCH_RECORD_PATH="$CLIP_LR" \
+    QDISTRO_LAUNCH_RECORD_TOKEN="$CLIP_LR_TOK" \
+        t3s_clip_source "$silo" "$mime" "$text" "$@" >"$log" 2>&1 &
+    CLIP_SRC_PID=$!
+    # t3s_clip_source derives the secctx instance-id as
+    # clipsrc-<silo>-$BASHPID of its own subshell — which IS $! here.
+    CLIP_INST="clipsrc-$silo-$CLIP_SRC_PID"
+}
+
+# register_clip_launch <silo> — resolve the real client pid out of the
+# launch record, then RegisterLaunch it exactly like the spawn does.
+register_clip_launch() {
+    local silo="$1" cpid
+    cpid=$(read_launch_record "$CLIP_LR" "$CLIP_LR_TOK") || return 1
+    register_clip_source "$silo" "$CLIP_INST" "$cpid"
+}
+
 BROKER_CONF=/etc/qdistro/broker.conf
 PRIOR_ENFORCE_LINE=$(grep '^lineage_enforce' "$BROKER_CONF" 2>/dev/null || true)
+PRIOR_SILO_SEC_SHA=$(sha256sum "$SILO_SEC" 2>/dev/null | cut -d' ' -f1)
+
+LOCKER_CONF=/etc/qdistro/locker.conf
+PRIOR_LOCKER_CONF_SHA=$(sha256sum "$LOCKER_CONF" 2>/dev/null | cut -d' ' -f1)
 
 # Restore the broker's pre-test lineage_enforce posture EXACTLY (the prior
-# line if any, else its absence) and restart so the running broker matches,
-# even when the driver dies mid-run.
+# line if any, else its absence), restore the silo-security registry to
+# its exact prior bytes, restore the locker's idle timeout, and restart
+# so the running services match — even when the driver dies mid-run.
 T3S_EXIT_HOOK='
     [ -n "${CLIP_SRC_PID:-}" ] && kill_clip_src "${CLIP_SRC_PID}"
     rm -f "/etc/qdistro/rules.d/'"$CLIP_FILE"'" 2>/dev/null
     install -d -m 0755 /etc/qdistro 2>/dev/null
     sed -i "/^lineage_enforce/d" "'"$BROKER_CONF"'" 2>/dev/null
     [ -n "'"$PRIOR_ENFORCE_LINE"'" ] && echo "'"$PRIOR_ENFORCE_LINE"'" >> "'"$BROKER_CONF"'"
+    [ -f "'"$WORK"'/silo-security.toml.bak" ] && cp "'"$WORK"'/silo-security.toml.bak" "'"$SILO_SEC"'" 2>/dev/null
+    if [ -f "'"$WORK"'/locker.conf.bak" ]; then
+        cp "'"$WORK"'/locker.conf.bak" "'"$LOCKER_CONF"'" 2>/dev/null
+    else
+        rm -f "'"$LOCKER_CONF"'" 2>/dev/null
+    fi
     systemctl restart qdistro-admin-broker.service 2>/dev/null || :'
+
+# Journal cursor for this run: every grep below is scoped to lines written
+# AFTER this point, so a preserved VM's prior-run history (old
+# CLIPBOARD_GATE / seat_focus_changed / restart lines) can never satisfy
+# or pollute an assertion.
+J0=$(journal_cursor)
+# wait_for polls conditions through `bash -c` — the log helpers must be
+# exported for the child shell to see them.
+export -f qdshell_log comp_log broker_log
 
 step "0. preconditions, silos"
 is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
 is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
+# injectFocus posts ERROR_LOCKED and is dropped while the compositor is
+# locked. The stock idle_timeout_s is 300s — a multi-minute driver can be
+# locked mid-run even on a fresh worker (reproduced on a preserved VM:
+# the lock fired between poll cycles and every later focus check
+# failed). Widen the locker's idle window for the test duration and
+# restore it afterwards; this changes NO assertion — it keeps the session
+# in the state the focus semantics under test presuppose.
+[ -f "$LOCKER_CONF" ] && cp "$LOCKER_CONF" "$WORK/locker.conf.bak"
+printf 'idle_timeout_s = 7200\n' > "$LOCKER_CONF"
+as_admin systemctl --user restart qdlocker.service > /dev/null 2>&1
+# scoped to the CURRENT compositor invocation — a boot's journal can hold
+# an earlier locked_changed=1 from a previous session.
+comp_since=$(as_admin systemctl --user show qdwin-compositor.service \
+    -p ActiveEnterTimestamp --value 2>/dev/null)
+last_lock=$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service \
+    --no-pager -o cat --since "${comp_since:-1 hour ago}" 2>/dev/null \
+    | sed -n 's/.*locked_changed=\([01]\).*/\1/p' | tail -1)
+is "compositor not locked (focus injection requires an unlocked session)" \
+    "${last_lock:-0}" "0"
 is "clipboard-source helper installed" \
     "$(command -v qdistro-test-clipboard-source 2>/dev/null)" "/usr/bin/qdistro-test-clipboard-source"
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
@@ -88,10 +169,22 @@ is "no test clipboard rule present" "$(yes_no test -e /etc/qdistro/rules.d/$CLIP
 # store — the spawn-created registration the gate then relies on.
 sed -i '/^lineage_enforce/d' "$BROKER_CONF" 2>/dev/null
 echo "lineage_enforce = true" >> "$BROKER_CONF"
+JBR=$(journal_cursor)
 systemctl restart qdistro-admin-broker.service
 wait_for 30 bash -c "busctl --system list --no-pager 2>/dev/null | grep -q '^org\.qdistro\.AdminBroker1 '"
 is "broker restarted under lineage_enforce" \
-    "$(broker_log | grep -c 'lineage_enforce=True')" 1
+    "$(broker_log "$JBR" | grep -c 'lineage_enforce=True')" 1
+# Receive-time lineage requires RESOLVED silo-security snapshots for both
+# endpoints under enforce (the shipped registry intentionally declares no
+# silos — fail-closed). Declare the test silos with empty profiles
+# (resolved-clean, no guards to interfere with the rule verdict) and
+# restore the file byte-exactly at the end. The TOML authority reloads
+# per call — no broker restart needed.
+cp "$SILO_SEC" "$WORK/silo-security.toml.bak"
+printf '\n[silo.%s]\nguards = []\ncompartments = []\nconflict_classes = []\n\n[silo.%s]\nguards = []\ncompartments = []\nconflict_classes = []\n' \
+    "$SA" "$SB" >> "$SILO_SEC"
+is "silo-security registry stays root-owned 0644 after the test entries" \
+    "$(stat -c '%a:%u:%g' "$SILO_SEC")" "644:0:0"
 # the clip sources emit on connect: give each a pre-connect window for
 # register_clip_source (delay lives inside the source's own exe so the
 # launch record's exe axis still matches at resolve time).
@@ -108,28 +201,27 @@ is "A's spawn-registered bridge pid+starttime captured" \
     "$(yes_no test -n "$BP_A" -a -n "$BS_A")" yes
 HA=$(qs_ipc tier3focus findSiloHandle "$SA" | sed -n 's/^HANDLE=//p')
 HB=$(qs_ipc tier3focus findSiloHandle "$SB" | sed -n 's/^HANDLE=//p')
-is "findSiloHandle $SA" "${HA:--1}" "$(t3s_window_handle "$SA")"
-is "findSiloHandle $SB" "${HB:--1}" "$(t3s_window_handle "$SB")"
+is "findSiloHandle $SA" "${HA:--1}" "$(t3s_window_handle "$SA" "$J0")"
+is "findSiloHandle $SB" "${HB:--1}" "$(t3s_window_handle "$SB" "$J0")"
 is "injectFocus onto $SB's toplevel" \
     "$(qs_ipc tier3focus injectFocus "$HB" default | head -1)" "ok handle=$HB seat=default"
 # the gate keys dst_silo off the focused handle — wait until the compositor
 # emitted the seat_focus_changed the shell consumed before offering a
 # selection, so dst_silo=$SB is deterministic.
-wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -q 'seat_focus_changed seat=default handle=$HB'" \
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'seat_focus_changed seat=default handle=$HB'" _ "$J0" \
     && pass "seat focus landed on $SB's toplevel (handle $HB)" \
     || fail "no seat_focus_changed for handle $HB"
 
-clip_gate_line() {   # clip_gate_line <src_silo> — newest CLIPBOARD_GATE for it
-    qdshell_log | grep "CLIPBOARD_GATE .*src_silo=$1 " | tail -1
+clip_gate_line() {   # clip_gate_line <src_silo> — newest CLIPBOARD_GATE for it, this run only
+    qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$1 " | tail -1
 }
 
 step "2. live tagged selection $SA -> $SB: default deny"
-t3s_clip_source "$SA" text/plain "s127-secret-A" > "$WORK/clip-src-A.log" 2>&1 &
-CLIP_SRC_PID=$!
-register_clip_source "$SA" "$CLIP_SRC_PID" \
+launch_clip_source "$SA" text/plain "s127-secret-A" "$WORK/clip-src-A.log"
+register_clip_launch "$SA" \
     && pass "clip source A registered in the launch-record store" \
     || fail "register_clip_source A failed"
-wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q 'CLIPBOARD_GATE .*src_silo=$SA '"
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SA '" _ "$J0"
 line=$(clip_gate_line "$SA"); info "gate: $line"
 is "qdshell gate line names the real tagged source silo" \
     "$(printf '%s' "$line" | grep -c "src_silo=$SA dst_silo=$SB")" 1
@@ -145,19 +237,19 @@ is "broker probe still denies transfer $SA->$SB (attested bridge pid)" \
     "$(broker_check_clip "$SA" "$SB" "qdistro.tier3s.$SA" "$GUI_ENGINE" "$BP_A" "$BS_A")" deny
 is "enforce: an unrecorded pid can only deny" \
     "$(broker_check_clip "$SA" "$SB" "qdistro.tier3s.$SA" "$GUI_ENGINE" 1 "$(starttime 1)")" deny
-t3s_clip_source "$SA" image/png "s127-png" > "$WORK/clip-src-png.log" 2>&1 &
-PNG_PID=$!
-register_clip_source "$SA" "$PNG_PID" \
+launch_clip_source "$SA" image/png "s127-png" "$WORK/clip-src-png.log"
+PNG_PID=$CLIP_SRC_PID
+register_clip_launch "$SA" \
     && pass "png clip source registered in the launch-record store" \
     || fail "register_clip_source png failed"
-wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q 'verdict=deny reason=tier3s-no-allowed-mimes'"
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'verdict=deny reason=tier3s-no-allowed-mimes'" _ "$J0"
 # the source helper sweeps serials to beat weston's stale-serial guard, so one
 # logical offer can emit >1 selection_set; the asserted property is the verdict
 # reason, not the wire-event count.
 is "qdshell denied a png-only tier3s offer before the broker" \
-    "$(qdshell_log | grep -c 'CLIPBOARD_GATE .*verdict=deny reason=tier3s-no-allowed-mimes' | awk '{print ($1>=1)?1:0}')" 1
+    "$(qdshell_log "$J0" | grep -c 'CLIPBOARD_GATE .*verdict=deny reason=tier3s-no-allowed-mimes' | awk '{print ($1>=1)?1:0}')" 1
 is "qdshell logged the tier3s mime-strip" \
-    "$(qdshell_log | grep -c 'tier3s mime-strip' | awk '{print ($1>=1)?1:0}')" 1
+    "$(qdshell_log "$J0" | grep -c 'tier3s mime-strip' | awk '{print ($1>=1)?1:0}')" 1
 kill_clip_src "$PNG_PID"
 
 step "4. SaveRule flips the live verdict to allow"
@@ -168,41 +260,99 @@ RULE_BODY="- name: s127-clip-allow
 is "SaveRule wrote the file" \
     "$(save_rule "$CLIP_FILE" "$RULE_BODY")" "/etc/qdistro/rules.d/$CLIP_FILE"
 is "broker logged the saverule reload" \
-    "$(broker_log | grep -c 'rules reloaded (dbus-saverule)')" 1
+    "$(broker_log "$J0" | grep -c 'rules reloaded (dbus-saverule)')" 1
 wait_for 20 bash -c "[ \"\$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckClipboardTransfer 'string:$SA' 'string:$SB' array:string:'text/plain' 'string:qdistro.tier3s.$SA' 'string:probe-dst' 'string:$GUI_ENGINE' boolean:false 'uint32:$BP_A' 'uint64:$BS_A' 2>/dev/null | grep -oE 'string \"[a-z]+\"' | tail -1)\" = 'string \"allow\"' ]"
 is "broker probe allows transfer $SA->$SB under the rule (attested bridge pid)" \
     "$(broker_check_clip "$SA" "$SB" "qdistro.tier3s.$SA" "$GUI_ENGINE" "$BP_A" "$BS_A")" allow
-is "enforce: forged silo claim over A's registered bridge still resolves attested" \
-    "$(broker_check_clip "forged-silo" "$SB" "qdistro.tier3s.forged" "$GUI_ENGINE" "$BP_A" "$BS_A")" deny
-# the same tagged source re-asserts its offer; the gate re-evaluates
-kill_clip_src "$CLIP_SRC_PID"
-t3s_clip_source "$SA" text/plain "s127-secret-A" > "$WORK/clip-src-A2.log" 2>&1 &
-CLIP_SRC_PID=$!
-register_clip_source "$SA" "$CLIP_SRC_PID" \
-    && pass "re-asserted clip source registered in the launch-record store" \
-    || fail "register_clip_source A2 failed"
-wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q 'CLIPBOARD_GATE .*src_silo=$SA .*verdict=allow'"
-line=$(clip_gate_line "$SA"); info "gate: $line"
-is "live verdict flipped to allow under the rule" \
-    "$(printf '%s' "$line" | grep -c 'verdict=allow reason=broker:allow')" 1
+# Forgery cannot steer the decision: under enforce a VERIFIED relayed pid
+# overrides the claimed (silo, app, engine) with the launcher-attested
+# tuple, so claiming "forged-silo" while relaying A's bridge decides the
+# real A->B action (allow under the rule) and the override is journaled.
+is "enforce: a forged source-silo claim cannot steer — attested s127a decides the real A->B action" \
+    "$(broker_check_clip "forged-silo" "$SB" "qdistro.tier3s.forged" "$GUI_ENGINE" "$BP_A" "$BS_A")" allow
+is "broker journaled the claim-vs-attested override" \
+    "$(broker_log "$J0" | grep -c 'lineage ENFORCE (clipboard.transfer): source pid='"$BP_A"' .*overridden with attested')" 1
+# ...but a forged destination has no rule to satisfy — default-deny holds.
+is "enforce: a forged destination silo still denies (no rule for A->forged)" \
+    "$(broker_check_clip "$SA" "forged-dst" "qdistro.tier3s.$SA" "$GUI_ENGINE" "$BP_A" "$BS_A")" deny
+
+step "4b. live attested allow: bound tagged source -> same-silo"
+# A rule-driven live cross-silo set-allow is structurally impossible
+# under enforce (see the header): dst_silo is always the FOCUSED
+# toplevel's silo, and a relayed source pid is only trustworthy when the
+# source client OWNS that focused toplevel (v23 sidecar == toplevel's
+# attested tag — ΔB10 binding). The strongest live allow that exists is
+# therefore same-silo: a tagged clip source that owns a real xdg_toplevel
+# in its own silo s127c, focused, registered, verified — the exact trust
+# shape a tier3s bridge takes when its own window holds focus.
+QDISTRO_CLIP_SRC_DELAY_MS=800 \
+    launch_clip_source "$SC" text/plain "s127-own-clip" "$WORK/clip-src-C.log" \
+        --toplevel --title "clipsrc-$SC" --emit-interval 400
+register_clip_launch "$SC" \
+    && pass "bound clip source C registered in the launch-record store" \
+    || fail "register_clip_source C failed"
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q '\\[tier3s\\] toplevel observed silo=$SC '" _ "$J0" \
+    && pass "qdshell observed the bound source's toplevel" \
+    || fail "no [tier3s] toplevel observed for $SC"
+HC=$(qs_ipc tier3focus findSiloHandle "$SC" | sed -n 's/^HANDLE=//p')
+is "findSiloHandle $SC" "${HC:--1}" "$(t3s_window_handle "$SC" "$J0")"
+# the handle's attested tag must be complete BEFORE the first bound emit
+# evaluates — wait for the compositor's security_context+peer_identity
+# pair for this handle (the sidecar needs the same tuple to bind).
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'toplevel_security_context handle=$HC engine=qdistro.tier3s app_id=qdistro.tier3s.$SC instance=clipsrc-$SC-$CLIP_SRC_PID'" _ "$J0" \
+    && pass "compositor attested the bound source's tag on its toplevel" \
+    || fail "no toplevel_security_context for handle $HC"
+is "injectFocus onto the bound source's toplevel" \
+    "$(qs_ipc tier3focus injectFocus "$HC" default | head -1)" "ok handle=$HC seat=default"
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'seat_focus_changed seat=default handle=$HC'" _ "$J0" \
+    && pass "seat focus landed on the bound source (handle $HC)" \
+    || fail "no seat_focus_changed for handle $HC"
+# The emit interval re-offers every 400 ms: the first bound offer under
+# a cold VerifyClientIdentity cache still denies (the same-silo shortcut
+# needs identity_verified); the allow can only appear AFTER the broker
+# attested the relayed pid — an allow here is earned, never a default.
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SC .*verdict=allow'" _ "$J0" \
+    || fail "bound tagged source never reached a live attested allow"
+line=$(clip_gate_line "$SC"); info "gate: $line"
+is "live attested allow: bound tagged source -> same-silo (verify + record resolution)" \
+    "$(printf '%s' "$line" | grep -c 'verdict=allow')" 1
+is "cold-verify bound offers denied first (the allow was earned)" \
+    "$(qdshell_log "$J0" | grep -c "CLIPBOARD_GATE .*src_silo=$SC .*verdict=deny" | awk '{print ($1>=1)?1:0}')" 1
+is "live allow carries dst_silo=$SC (bound => focused => same-silo)" \
+    "$(printf '%s' "$line" | grep -c "dst_silo=$SC")" 1
+kill_clip_src "$CLIP_SRC_PID"; CLIP_SRC_PID=""
 
 step "5. focus-aware clear: selection owned by $SB, focus crosses to $SA"
 # Re-focus B and set a B-tagged (denied-but-recorded) selection so
 # _selectionSourceSilo tracks B; then move focus to A's toplevel — the
 # cross-silo transition must clear and journal CLIPBOARD_FOCUS_GATE.
+# J5 scopes every wait/assert below to THIS step's fresh events: an
+# earlier emit while B was focused also records src_silo=$SB, so a
+# J0-scoped gate-line wait can match a stale line and let injectFocus
+# race ahead of B's real offer (leaving the record empty at the focus
+# event — reproduced on the preserved VM).
+J5=$(journal_cursor)
 qs_ipc tier3focus injectFocus "$HB" default > /dev/null
-sleep 1
-t3s_clip_source "$SB" text/plain "s127-secret-B" > "$WORK/clip-src-B.log" 2>&1 &
-BSRC_PID=$!
-register_clip_source "$SB" "$BSRC_PID" \
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'seat_focus_changed seat=default handle=$HB'" _ "$J5" \
+    && pass "seat focus re-landed on $SB's toplevel (handle $HB)" \
+    || fail "no seat_focus_changed for handle $HB"
+# --emit-interval keeps B alive across the set-time deny's clearSelection
+# (cancel->re-offer): the FOCUS_GATE verdict is the act under test —
+# focus crossing while B still holds the selection.
+launch_clip_source "$SB" text/plain "s127-secret-B" "$WORK/clip-src-B.log" \
+    --emit-interval 400
+BSRC_PID=$CLIP_SRC_PID
+register_clip_launch "$SB" \
     && pass "clip source B registered in the launch-record store" \
     || fail "register_clip_source B failed"
-wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q 'CLIPBOARD_GATE .*src_silo=$SB '"
-kill_clip_src "$BSRC_PID"
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SB '" _ "$J5" \
+    && pass "B's tagged offer recorded (_selectionSourceSilo tracks $SB)" \
+    || fail "no post-launch CLIPBOARD_GATE for $SB"
 qs_ipc tier3focus injectFocus "$HA" default > /dev/null
-wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q 'CLIPBOARD_FOCUS_GATE .*src_silo=$SB .*dst_silo=$SA'"
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_FOCUS_GATE .*src_silo=$SB .*dst_silo=$SA'" _ "$J5"
+kill_clip_src "$BSRC_PID"
 is "focus crossing out of the source silo cleared the selection" \
-    "$(qdshell_log | grep -c "CLIPBOARD_FOCUS_GATE .*src_silo=$SB dst_silo=$SA .*verdict=deny reason=focus-cross-silo")" 1
+    "$(qdshell_log "$J5" | grep -c "CLIPBOARD_FOCUS_GATE .*src_silo=$SB dst_silo=$SA .*verdict=deny reason=focus-cross-silo")" 1
 # refocus B so any later checks see a consistent seat state
 qs_ipc tier3focus injectFocus "$HB" default > /dev/null; sleep 1
 
@@ -250,6 +400,21 @@ wait_for 30 bash -c "busctl --system list --no-pager 2>/dev/null | grep -q '^org
 is "lineage_enforce restored (prior: '${PRIOR_ENFORCE_LINE:-absent}')" \
     "$(broker_log | sed -n 's/.*lineage_enforce=\([A-Za-z]*\).*/\1/p' | tail -1)" \
     "$([ -n "$PRIOR_ENFORCE_LINE" ] && echo True || echo False)"
+# restore the registry to its exact prior bytes (the exit hook repeats
+# this harmlessly if the driver dies before reaching it)
+cp "$WORK/silo-security.toml.bak" "$SILO_SEC"
+is "silo-security registry restored byte-exact" \
+    "$(sha256sum "$SILO_SEC" | cut -d' ' -f1)" "$PRIOR_SILO_SEC_SHA"
+if [ -f "$WORK/locker.conf.bak" ]; then
+    cp "$WORK/locker.conf.bak" "$LOCKER_CONF"
+else
+    rm -f "$LOCKER_CONF"
+fi
+# ABSENT sentinel: an empty sha is "nothing to compare" for the assert,
+# so absent->absent must be spelled out rather than falling out as ''.
+is "locker idle-timeout restored" \
+    "$([ -f "$LOCKER_CONF" ] && sha256sum "$LOCKER_CONF" | cut -d' ' -f1 || echo ABSENT)" \
+    "${PRIOR_LOCKER_CONF_SHA:-ABSENT}"
 for s in $SA $SB; do
     sm StopSilo si "$s" 10 > /dev/null
     is "StopSilo $s" "$(silo_state "$s")" Stopped

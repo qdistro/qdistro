@@ -24,6 +24,7 @@ teardown_file() {
     assert_success
     t3s_no_failures s129
     assert_output_contains "PASS: both GUI launches up"
+    assert_output_contains "PASS: single-attach: reconnect to A's consumed link.sock is refused"
     assert_output_contains "PASS: listener attacks DELIVERED while A's listener was live"
     assert_output_contains "PASS: waypipe frames written onto the SANDBOX end of the link"
     assert_output_contains "PASS: hose wrote onto bridge sockets (attributed ends only)"

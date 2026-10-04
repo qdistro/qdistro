@@ -27,6 +27,7 @@ teardown_file() {
     assert_success
     t3s_no_failures s127
     assert_output_contains "PASS: broker restarted under lineage_enforce"
+    assert_output_contains "PASS: silo-security registry stays root-owned 0644"
     assert_output_contains "PASS: clip source A registered in the launch-record store"
     assert_output_contains "PASS: qdshell gate line names the real tagged source silo"
     assert_output_contains "PASS: default-deny verdict at set-time"
@@ -35,7 +36,16 @@ teardown_file() {
     assert_output_contains "PASS: qdshell logged the tier3s mime-strip"
     assert_output_contains "PASS: SaveRule wrote the file"
     assert_output_contains "PASS: broker probe allows transfer s127a->s127b under the rule"
-    assert_output_contains "PASS: live verdict flipped to allow under the rule"
+    assert_output_contains "PASS: enforce: a forged source-silo claim cannot steer"
+    assert_output_contains "PASS: broker journaled the claim-vs-attested override"
+    assert_output_contains "PASS: enforce: a forged destination silo still denies"
+    assert_output_contains "PASS: bound clip source C registered in the launch-record store"
+    assert_output_contains "PASS: compositor attested the bound source's tag on its toplevel"
+    assert_output_contains "PASS: seat focus landed on the bound source"
+    assert_output_contains "PASS: live attested allow: bound tagged source -> same-silo"
+    assert_output_contains "PASS: cold-verify bound offers denied first"
+    assert_output_contains "PASS: seat focus re-landed on s127b's toplevel"
+    assert_output_contains "PASS: B's tagged offer recorded"
     assert_output_contains "PASS: focus crossing out of the source silo cleared the selection"
     assert_output_contains "PASS: receive probe defaults to deny"
     assert_output_contains "PASS: receive probe allows text/plain under the mime rule"
@@ -43,4 +53,5 @@ teardown_file() {
     assert_output_contains "PASS: audit: denied transfer row(s) recorded"
     assert_output_contains "PASS: audit: allowed transfer row(s) recorded"
     assert_output_contains "PASS: lineage_enforce restored"
+    assert_output_contains "PASS: silo-security registry restored byte-exact"
 }
