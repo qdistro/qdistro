@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -32,6 +33,18 @@ _FALLBACK_SECONDARY = "#a9aefe"
 _NEAR_WHITE = {"#ffffff", "#f3edf7", "#dddddd", "#d4d4d4"}
 _NEAR_BLACK = {"#000000", "#0e0e43", "#1e1e1e", "#111111"}
 CHROME_ROLES = frozenset({"activity", "error", "primary", "secondary", "dim"})
+
+
+def group_color_for_name(name: str) -> str:
+    """Map a group name to a cosmetic identity color.
+
+    Uses SHA-256 of the UTF-8 name so the same group keeps the same
+    palette entry across process restarts and PYTHONHASHSEED values.
+    These colors identify a named group; they are not snapshot roles.
+    """
+    digest = hashlib.sha256(name.encode("utf-8")).digest()
+    idx = int.from_bytes(digest[:8], "big") % len(GROUP_COLORS)
+    return GROUP_COLORS[idx]
 
 
 def _css_hex(value: object, fallback: str) -> str:
@@ -217,7 +230,7 @@ class TerminalTitlebar(QFrame):
         )
 
         if self._group_name:
-            color = GROUP_COLORS[hash(self._group_name) % len(GROUP_COLORS)]
+            color = group_color_for_name(self._group_name)
             self._group_label.setStyleSheet(
                 f"background-color: {color}; border-radius: 6px;"
             )

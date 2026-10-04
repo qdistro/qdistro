@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QFont, QTextBlock, QTextCharFormat, QTextCursor
 from .md_to_qdoc import (
     BLOCK_KIND,
     CHAR_CODE,
+    CHAR_IMAGE_LINK,
     CHAR_STRONG,
     CHAR_TAG,
     CHAR_WIKILINK,
@@ -64,6 +65,7 @@ def _inline_runs(text: str) -> list[tuple[int, int, QTextCharFormat]]:
         f = QTextCharFormat()
         if is_image:
             f.setForeground(QColor("#7c3aed"))
+            f.setProperty(CHAR_IMAGE_LINK, True)
         else:
             f.setForeground(QColor("#1a5fb4"))
             f.setFontUnderline(True)

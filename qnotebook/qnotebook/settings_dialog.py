@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QModelIndex, QSettings, Qt
-from PyQt6.QtGui import QAction, QBrush, QColor, QKeySequence
+from PyQt6.QtGui import QAction, QBrush, QColor, QKeySequence, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -53,6 +53,33 @@ from .appearance import (
     save_theme_mode,
     save_use_desktop_document_fonts,
 )
+
+_FALLBACK_ERROR = "#e74c3c"
+_NEAR_WHITE = {"#ffffff", "#f3edf7", "#dddddd", "#d4d4d4"}
+_NEAR_BLACK = {"#000000", "#0e0e43", "#1e1e1e", "#111111"}
+
+
+def _conflict_error_hex(widget) -> str:
+    """Shortcut-conflict foreground from the shared error role."""
+    try:
+        from .theme import current_controller
+
+        ctrl = current_controller()
+        state = getattr(ctrl, "state", None) if ctrl is not None else None
+        snap = getattr(state, "snapshot", None) if state is not None else None
+        if getattr(state, "using_shared_palette", False) and snap is not None:
+            value = str(snap.colors.mError).strip().lower()
+            if value.startswith("#") and len(value) == 7:
+                return value
+    except Exception:  # noqa: BLE001
+        pass
+    pal = widget.palette()
+    bright = pal.color(QPalette.ColorRole.BrightText)
+    if bright.isValid():
+        hex_color = f"#{bright.red():02x}{bright.green():02x}{bright.blue():02x}"
+        if hex_color not in _NEAR_WHITE | _NEAR_BLACK:
+            return hex_color
+    return _FALLBACK_ERROR
 
 
 class _KeySequenceDelegate(QStyledItemDelegate):
@@ -348,7 +375,7 @@ class SettingsDialog(QDialog):
             normalised = QKeySequence(raw).toString()
             by_seq.setdefault(normalised, []).append(r)
 
-        conflict_brush = QBrush(QColor("#cf6679"))
+        conflict_brush = QBrush(QColor(_conflict_error_hex(self)))
         for r in range(rows):
             label_item = self._shortcut_table.item(r, 0)
             shortcut_item = self._shortcut_table.item(r, 1)
@@ -538,6 +565,8 @@ class SettingsDialog(QDialog):
             )
             self._combo_appearance.blockSignals(False)
         self._refresh_desktop_status()
+        if hasattr(self, "_shortcut_table"):
+            self._refresh_shortcut_conflicts()
 
     def _mark_ui_font_size_dirty(self, _value: int) -> None:
         self._ui_font_size_dirty = True

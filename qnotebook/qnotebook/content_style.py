@@ -1,7 +1,7 @@
 """Document (content) presentation, independent of chrome UI fonts.
 
 Semantic identity lives on QTextFormat user properties. This module only
-applies view presentation: family, point size, and readable code/link
+applies view presentation: family, point size, and readable document
 colors. It must not serialize, dirty the document, or push undo commands.
 Export keeps :func:`legacy_content_style` without live palette colors.
 """
@@ -9,7 +9,7 @@ Export keeps :func:`legacy_content_style` without live palette colors.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 
 from PyQt6.QtGui import (
     QColor,
@@ -22,12 +22,42 @@ from PyQt6.QtGui import (
     QTextDocument,
 )
 
-from .md_to_qdoc import BLOCK_KIND, BLOCK_LEVEL, CHAR_CODE
+from .md_to_qdoc import (
+    BLOCK_KIND,
+    BLOCK_LEVEL,
+    BLOCK_TOC_MARKER,
+    BLOCK_TRANSCLUDED_CHILD,
+    BLOCK_TRANSCLUSION,
+    CHAR_CODE,
+    CHAR_FOOTNOTE_REF,
+    CHAR_IMAGE_LINK,
+    CHAR_TAG,
+    CHAR_WIKILINK,
+)
 
 _HEX_COLOR = re.compile(r"^#[0-9a-f]{6}$")
 
 # Legacy heading sizes were 20/17/15/13/12/11 on an 11 pt body.
 _HEADING_RATIO = {1: 20 / 11, 2: 17 / 11, 3: 15 / 11, 4: 13 / 11, 5: 12 / 11, 6: 1.0}
+
+
+@dataclass(frozen=True)
+class DocumentPalette:
+    """Screen document colors. Export leaves every field unset."""
+
+    code_background: str | None = None
+    link_color: str | None = None
+    wiki_link_color: str | None = None
+    tag_color: str | None = None
+    dim_color: str | None = None
+    image_link_color: str | None = None
+    highlight_background: str | None = None
+    highlight_foreground: str | None = None
+    equation_background: str | None = None
+    equation_foreground: str | None = None
+
+    def has_any(self) -> bool:
+        return any(getattr(self, item.name) is not None for item in fields(self))
 
 
 @dataclass(frozen=True)
@@ -39,6 +69,14 @@ class ContentStyle:
     inherit_desktop: bool = False
     code_background: str | None = None
     link_color: str | None = None
+    wiki_link_color: str | None = None
+    tag_color: str | None = None
+    dim_color: str | None = None
+    image_link_color: str | None = None
+    highlight_background: str | None = None
+    highlight_foreground: str | None = None
+    equation_background: str | None = None
+    equation_foreground: str | None = None
 
     def heading_point_size(self, level: int) -> float:
         return round(self.body_point_size * _HEADING_RATIO.get(int(level), 1.0), 2)
@@ -60,8 +98,8 @@ def _hex_color(value: object) -> str | None:
     return None
 
 
-def document_palette_colors() -> tuple[str | None, str | None]:
-    """Code-background and link colors for dark/light readability.
+def document_palette() -> DocumentPalette:
+    """Document roles for dark/light readability.
 
     Independent of the document-font opt-in. A missing controller leaves
     parse-time hardcoded colors in place. Snapshot colors apply when the
@@ -74,35 +112,74 @@ def document_palette_colors() -> tuple[str | None, str | None]:
 
     ctrl = current_controller()
     if ctrl is None:
-        return None, None
+        return DocumentPalette()
     try:
         state = ctrl.state
     except Exception:  # noqa: BLE001
         state = None
     if state is not None and state.colors is not None:
-        bg = _hex_color(state.colors.mSurfaceVariant)
-        link = _hex_color(state.colors.mPrimary)
-        if bg or link:
-            return bg, link
+        colors = state.colors
+        pal = DocumentPalette(
+            code_background=_hex_color(colors.mSurfaceVariant),
+            link_color=_hex_color(colors.mPrimary),
+            wiki_link_color=_hex_color(colors.mSecondary),
+            tag_color=_hex_color(colors.mTertiary),
+            dim_color=_hex_color(colors.mOnSurfaceVariant),
+            image_link_color=_hex_color(colors.mTertiary),
+            highlight_background=_hex_color(colors.mPrimary),
+            highlight_foreground=_hex_color(colors.mOnPrimary),
+            equation_background=_hex_color(colors.mSecondary),
+            equation_foreground=_hex_color(colors.mOnSecondary),
+        )
+        if pal.has_any():
+            return pal
     app = QApplication.instance()
     if app is None:
-        return None, None
-    pal = app.palette()
-    return (
-        _hex_color(pal.color(QPalette.ColorRole.AlternateBase).name()),
-        _hex_color(pal.color(QPalette.ColorRole.Link).name()),
+        return DocumentPalette()
+    qpal = app.palette()
+    return DocumentPalette(
+        code_background=_hex_color(qpal.color(QPalette.ColorRole.AlternateBase).name()),
+        link_color=_hex_color(qpal.color(QPalette.ColorRole.Link).name()),
+        wiki_link_color=_hex_color(qpal.color(QPalette.ColorRole.LinkVisited).name()),
+        tag_color=_hex_color(qpal.color(QPalette.ColorRole.Link).name()),
+        dim_color=_hex_color(qpal.color(QPalette.ColorRole.PlaceholderText).name()),
+        image_link_color=_hex_color(qpal.color(QPalette.ColorRole.LinkVisited).name()),
+        highlight_background=_hex_color(qpal.color(QPalette.ColorRole.Highlight).name()),
+        highlight_foreground=_hex_color(qpal.color(QPalette.ColorRole.HighlightedText).name()),
+        equation_background=_hex_color(qpal.color(QPalette.ColorRole.Midlight).name()),
+        equation_foreground=_hex_color(qpal.color(QPalette.ColorRole.Text).name()),
     )
+
+
+def document_palette_colors() -> tuple[str | None, str | None]:
+    """Code-background and external-link colors (compatibility tuple)."""
+    pal = document_palette()
+    return pal.code_background, pal.link_color
 
 
 def with_document_palette(style: ContentStyle) -> ContentStyle:
-    bg, link = document_palette_colors()
-    if bg is None and link is None:
+    pal = document_palette()
+    if not pal.has_any():
         return style
-    return replace(
-        style,
-        code_background=bg if bg is not None else style.code_background,
-        link_color=link if link is not None else style.link_color,
-    )
+    updates = {}
+    for item in fields(DocumentPalette):
+        value = getattr(pal, item.name)
+        if value is not None:
+            updates[item.name] = value
+    return replace(style, **updates)
+
+
+def search_highlight_format(style: ContentStyle | None = None) -> QTextCharFormat:
+    """Find/search extra-selection with an explicit foreground pair."""
+    fmt = QTextCharFormat()
+    pal = style
+    if pal is None:
+        pal = with_document_palette(legacy_content_style())
+    bg = pal.highlight_background or "#fff48a"
+    fmt.setBackground(QColor(bg))
+    if pal.highlight_foreground:
+        fmt.setForeground(QColor(pal.highlight_foreground))
+    return fmt
 
 
 def legacy_content_style() -> ContentStyle:
@@ -184,8 +261,9 @@ def highlight_block_content(highlighter: QSyntaxHighlighter, text: str, style: C
     from .equations import EQ_LATEX
 
     block = highlighter.currentBlock()
-    kind = str(block.blockFormat().property(BLOCK_KIND) or "p")
-    level = int(block.blockFormat().property(BLOCK_LEVEL) or 1)
+    bfmt = block.blockFormat()
+    kind = str(bfmt.property(BLOCK_KIND) or "p")
+    level = int(bfmt.property(BLOCK_LEVEL) or 1)
     block_pos = block.position()
     # Fragment geometry is UTF-16. Do not clamp with len(text) (Python
     # code points): a supplementary character is one Python char and two
@@ -202,7 +280,9 @@ def highlight_block_content(highlighter: QSyntaxHighlighter, text: str, style: C
                     highlighter.setFormat(
                         rel,
                         length,
-                        _presented_char_format(frag.charFormat(), kind, level, style, EQ_LATEX),
+                        _presented_char_format(
+                            frag.charFormat(), kind, level, style, EQ_LATEX, bfmt
+                        ),
                     )
         it += 1
 
@@ -236,7 +316,9 @@ def apply_document_presentation(doc: QTextDocument, style: ContentStyle) -> None
                         (
                             frag.position(),
                             frag.position() + frag.length(),
-                            _presented_char_format(fmt, kind, level, style, EQ_LATEX),
+                            _presented_char_format(
+                                fmt, kind, level, style, EQ_LATEX, bfmt
+                            ),
                         )
                     )
             it += 1
@@ -264,14 +346,16 @@ def _presented_char_format(
     level: int,
     style: ContentStyle,
     eq_latex_prop,
+    block_fmt: QTextBlockFormat | None = None,
 ) -> QTextCharFormat:
     new = QTextCharFormat(fmt)
-    is_code = bool(fmt.property(CHAR_CODE)) or kind == "code" or bool(fmt.property(eq_latex_prop))
+    is_eq = bool(fmt.property(eq_latex_prop))
+    is_code = bool(fmt.property(CHAR_CODE)) or kind == "code" or is_eq
     if is_code:
         new.setFontFamilies([style.code_family])
         new.setFontPointSize(style.code_point_size)
-        # Equations keep their gold chip; fenced blocks may lack CHAR_CODE.
-        if style.code_background and not fmt.property(eq_latex_prop) and (
+        # Equations keep their gold chip unless the equation pair is set.
+        if style.code_background and not is_eq and (
             bool(fmt.property(CHAR_CODE)) or kind == "code"
         ):
             new.setBackground(QColor(style.code_background))
@@ -281,6 +365,28 @@ def _presented_char_format(
     else:
         new.setFontFamilies([style.body_family])
         new.setFontPointSize(style.body_point_size)
-    if style.link_color and new.isAnchor() and not new.anchorHref().startswith("qnotebook:"):
+    if is_eq:
+        if style.equation_background:
+            new.setBackground(QColor(style.equation_background))
+        if style.equation_foreground:
+            new.setForeground(QColor(style.equation_foreground))
+        return new
+    href = new.anchorHref() if new.isAnchor() else ""
+    is_wiki = bool(fmt.property(CHAR_WIKILINK)) or href.startswith("qnotebook:")
+    is_toc_marker = bool(block_fmt is not None and block_fmt.property(BLOCK_TOC_MARKER))
+    if style.wiki_link_color and (is_wiki or (is_toc_marker and not is_wiki)):
+        new.setForeground(QColor(style.wiki_link_color))
+    elif style.link_color and (
+        (new.isAnchor() and not is_wiki) or bool(fmt.property(CHAR_FOOTNOTE_REF))
+    ):
         new.setForeground(QColor(style.link_color))
+    if style.tag_color and fmt.property(CHAR_TAG):
+        new.setForeground(QColor(style.tag_color))
+    if style.image_link_color and fmt.property(CHAR_IMAGE_LINK):
+        new.setForeground(QColor(style.image_link_color))
+    if style.dim_color and block_fmt is not None:
+        if block_fmt.property(BLOCK_TRANSCLUSION) or (
+            block_fmt.property(BLOCK_TRANSCLUDED_CHILD) and not is_wiki
+        ):
+            new.setForeground(QColor(style.dim_color))
     return new

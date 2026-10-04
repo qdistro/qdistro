@@ -443,6 +443,7 @@ class MainWindow(QMainWindow):
         self.editor.fileDropped.connect(self._on_file_dropped)
         self.editor.autoSaveRequested.connect(self._auto_save)
         self.editor.escapePressed.connect(self._clear_search_highlights)
+        self._search_highlight_needle: str | None = None
         self.editor.textChanged.connect(self._update_status)
         # Debounce toc refresh
         from PyQt6.QtCore import QTimer
@@ -2093,12 +2094,14 @@ class MainWindow(QMainWindow):
             self._highlight_all_occurrences(needle)
 
     def _highlight_all_occurrences(self, needle: str) -> None:
-        from PyQt6.QtGui import QColor, QTextCharFormat
         from PyQt6.QtWidgets import QTextEdit
+
+        from .content_style import resolve_content_style, search_highlight_format
+
+        self._search_highlight_needle = needle
         doc = self.editor.document()
         selections: list[QTextEdit.ExtraSelection] = []
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#fff48a"))
+        fmt = search_highlight_format(resolve_content_style())
         cursor = QTextCursor(doc)
         while True:
             cursor = doc.find(needle, cursor)
@@ -2111,6 +2114,7 @@ class MainWindow(QMainWindow):
         self.editor.setExtraSelections(selections)
 
     def _clear_search_highlights(self) -> None:
+        self._search_highlight_needle = None
         self.editor.setExtraSelections([])
 
     def _jump_to_line(self, line_no: int) -> None:
@@ -2620,6 +2624,9 @@ class MainWindow(QMainWindow):
             editor.setFont(body)
             editor.setStyleSheet(EDITOR_PALETTE_QSS)
             editor.apply_content_presentation()
+        needle = getattr(self, "_search_highlight_needle", None)
+        if needle:
+            self._highlight_all_occurrences(needle)
         from .appearance import load_theme_mode
         from .theme import current_controller
 

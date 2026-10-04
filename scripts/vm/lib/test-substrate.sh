@@ -3,19 +3,41 @@
 # read by image/build.sh). Shared, explicit input for cloud-derived test VMs.
 # Callers may select a different qualified manifest with QDISTRO_TEST_SUBSTRATE=<absolute path>.
 
-qdistro_substrate_snapshot_fresh() {
+# Calendar-valid 20YYMMDD date, not in the future — no age bound. Used for
+# floor manifests, whose pin may legitimately be older than 14 days because
+# floating lanes re-resolve the real substrate before use.
+qdistro_substrate_snapshot_date_valid() {
     local snapshot="$1" today="${2:-$(date -u +%Y%m%d)}" snapshot_epoch today_epoch
     [[ "$snapshot" =~ ^20[0-9]{6}$ && "$today" =~ ^20[0-9]{6}$ ]] || return 1
     snapshot_epoch="$(date -u -d "${snapshot:0:4}-${snapshot:4:2}-${snapshot:6:2}" +%s 2>/dev/null)" || return 1
     today_epoch="$(date -u -d "${today:0:4}-${today:4:2}-${today:6:2}" +%s 2>/dev/null)" || return 1
     [ "$(date -u -d "@$snapshot_epoch" +%Y%m%d)" = "$snapshot" ] || return 1
     [ "$(date -u -d "@$today_epoch" +%Y%m%d)" = "$today" ] || return 1
-    [ "$snapshot_epoch" -le "$today_epoch" ] && [ "$(( (today_epoch - snapshot_epoch) / 86400 ))" -le 14 ]
+    [ "$snapshot_epoch" -le "$today_epoch" ]
 }
 
+qdistro_substrate_snapshot_fresh() {
+    local snapshot="$1" today="${2:-$(date -u +%Y%m%d)}" snapshot_epoch today_epoch
+    qdistro_substrate_snapshot_date_valid "$snapshot" "$today" || return 1
+    snapshot_epoch="$(date -u -d "${snapshot:0:4}-${snapshot:4:2}-${snapshot:6:2}" +%s)"
+    today_epoch="$(date -u -d "${today:0:4}-${today:4:2}-${today:6:2}" +%s)"
+    [ "$(( (today_epoch - snapshot_epoch) / 86400 ))" -le 14 ]
+}
+
+# qdistro_load_test_substrate [floor]
+# With `floor`, the manifest's snapshot need only be a valid non-future date —
+# the 14-day freshness bound is skipped. Floating lanes use this to read the
+# repo pin as a minimum-snapshot floor even after the pin ages out; the
+# manifest they resolve and hand to downstream steps is loaded without `floor`
+# and gets the full freshness check.
 qdistro_load_test_substrate() {
-    local file="${QDISTRO_TEST_SUBSTRATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/snapshot.conf}"
+    local floor='' file="${QDISTRO_TEST_SUBSTRATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/snapshot.conf}"
     local key value schema='' arch='' cloud_url='' cloud_sha256='' snapshot=''
+    case "${1:-}" in
+        '') ;;
+        floor) floor=1 ;;
+        *) echo "ERROR: unknown qdistro_load_test_substrate mode: $1" >&2; return 1 ;;
+    esac
     [ -f "$file" ] || { echo "ERROR: test substrate manifest missing: $file" >&2; return 1; }
     while IFS='=' read -r key value || [ -n "$key" ]; do
         case "$key" in
@@ -30,10 +52,24 @@ qdistro_load_test_substrate() {
         && [[ "$snapshot" =~ ^20[0-9]{6}$ ]] || {
         echo "ERROR: invalid test substrate manifest: $file" >&2; return 1;
     }
-    qdistro_substrate_snapshot_fresh "$snapshot" || {
-        echo "ERROR: Tumbleweed snapshot $snapshot is older than 14 days (or invalid/future); update $file before building or testing" >&2
+    # A dated per-publish cloud file name (...-Snapshot<date>.qcow2) must
+    # name the same snapshot — otherwise the guest's VERSION_ID and the
+    # repo history silently disagree.
+    if [[ "$cloud_url" =~ Snapshot(20[0-9]{6}) && "${BASH_REMATCH[1]}" != "$snapshot" ]]; then
+        echo "ERROR: $file cloud_url pins Snapshot${BASH_REMATCH[1]} but snapshot=$snapshot — bump them together" >&2
         return 1
-    }
+    fi
+    if [ -n "$floor" ]; then
+        qdistro_substrate_snapshot_date_valid "$snapshot" || {
+            echo "ERROR: snapshot floor $snapshot is invalid or in the future; fix $file" >&2
+            return 1
+        }
+    else
+        qdistro_substrate_snapshot_fresh "$snapshot" || {
+            echo "ERROR: Tumbleweed snapshot $snapshot is older than 14 days (or invalid/future); update $file before building or testing" >&2
+            return 1
+        }
+    fi
     QDISTRO_SUBSTRATE_FILE="$file"
     QDISTRO_SUBSTRATE_ARCH="$arch"
     QDISTRO_SUBSTRATE_CLOUD_URL="$cloud_url"

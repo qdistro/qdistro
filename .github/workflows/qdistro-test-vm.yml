@@ -13,6 +13,13 @@ name: qdistro downloadable VM test image
 # Manual lane only: run with `gh workflow run qdistro-test-vm.yml --ref main`.
 on:
   workflow_dispatch:
+    inputs:
+      floating_substrate:
+        description: >-
+          Resolve the newest signed Tumbleweed cloud qcow2 at run time instead
+          of the snapshot.conf pin (the pin still acts as a snapshot floor).
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -52,7 +59,36 @@ jobs:
             echo "LIBGUESTFS_BACKEND_SETTINGS=force_tcg" >> "$GITHUB_ENV"
           fi
           . scripts/vm/lib/test-substrate.sh
-          qdistro_load_test_substrate
+          if [ "${{ inputs.floating_substrate }}" = "true" ]; then
+            # The repo pin is only a snapshot floor here and may be older than
+            # 14 days; the resolved manifest still gets the full freshness check.
+            qdistro_load_test_substrate floor
+          else
+            qdistro_load_test_substrate
+          fi
+          if [ "${{ inputs.floating_substrate }}" = "true" ]; then
+            . scripts/vm/lib/opensuse-cloud-image.sh
+            pin_snap="$QDISTRO_SUBSTRATE_SNAPSHOT"
+            resolved="$(resolve_latest_cloud_image \
+              "${QDISTRO_SUBSTRATE_CLOUD_URL%/*}" \
+              "$(basename "$QDISTRO_SUBSTRATE_CLOUD_URL" | sed 's/-Snapshot20[0-9]*\.qcow2$//; s/\.qcow2$//')")"
+            res_url="${resolved% *}" res_sha="${resolved##* }"
+            res_snap="${res_url##*Snapshot}" res_snap="${res_snap%%.qcow2}"
+            [[ "$res_snap" =~ ^20[0-9]{6}$ ]] \
+              || { echo "ERROR: resolved URL carries no Snapshot date: $res_url" >&2; exit 1; }
+            [ "$res_snap" -ge "$pin_snap" ] \
+              || { echo "ERROR: upstream newest snapshot $res_snap is older than pinned floor $pin_snap" >&2; exit 1; }
+            # Materialize the resolved manifest on the runner; the repo pin is
+            # untouched. The normal loader then re-validates it wholesale
+            # (schema, freshness, URL/snapshot date match).
+            resolved_manifest="$RUNNER_TEMP/qdistro-vm/resolved-substrate.conf"
+            printf 'schema=1\narch=%s\ncloud_url=%s\ncloud_sha256=%s\nsnapshot=%s\n' \
+              "$QDISTRO_SUBSTRATE_ARCH" "$res_url" "$res_sha" "$res_snap" \
+              > "$resolved_manifest"
+            QDISTRO_TEST_SUBSTRATE="$resolved_manifest" qdistro_load_test_substrate
+            echo "QDISTRO_TEST_SUBSTRATE=$resolved_manifest" >> "$GITHUB_ENV"
+            echo "[substrate] floating: resolved $res_url (snapshot $res_snap, floor $pin_snap)"
+          fi
           {
             echo "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT"
             echo "CLOUD_URL=$QDISTRO_SUBSTRATE_CLOUD_URL"
@@ -107,6 +143,15 @@ jobs:
           qdistro_load_test_substrate
           # openSUSE signature, then the snapshot.conf pin.
           download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$CLOUD_SHA256"
+          if [ "${{ inputs.floating_substrate }}" = "true" ]; then
+            # The resolved snapshot came from the dated file name; prove the
+            # image actually carries that VERSION_ID before repos are built
+            # from it.
+            vid="$(guestfish --ro -a "$CLOUD_CACHE" run : mount-ro /dev/sda3 / : cat /etc/os-release \
+                    | sed -n 's/^VERSION_ID="\{0,1\}\([0-9]*\)"\{0,1\}/\1/p')"
+            [ "$vid" = "$SNAPSHOT" ] \
+              || { echo "ERROR: cloud image VERSION_ID=${vid:-<none>} != resolved snapshot $SNAPSHOT" >&2; exit 1; }
+          fi
           qemu-img create -f qcow2 "$VM_IMAGE" 8G
           virt-resize --expand /dev/sda3 "$CLOUD_CACHE" "$VM_IMAGE"
           git archive --format=tar --prefix=qdistro-src/ HEAD > "$VM_DIR/source.tar"

@@ -235,8 +235,20 @@ class TerminalWidget(QWidget):
 
     def _flash_bell(self):
         """Brief visual flash for bell."""
-        self._term.setStyleSheet("background-color: #ffffff;")
-        QTimer.singleShot(80, lambda: self._term.setStyleSheet(""))
+        from qterminator.titlebar import titlebar_roles
+
+        color = titlebar_roles(self)["error"]
+        term = self._term
+        previous = term.styleSheet()
+        term.setStyleSheet(f"background-color: {color};")
+
+        def _restore():
+            try:
+                term.setStyleSheet(previous)
+            except RuntimeError:
+                return
+
+        QTimer.singleShot(80, _restore)
 
     def _on_url_activated(self, url, from_context_menu):
         """Open URL when Ctrl+clicked in terminal."""

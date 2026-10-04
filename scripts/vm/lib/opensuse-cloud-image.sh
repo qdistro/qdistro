@@ -38,6 +38,45 @@ OPENSUSE_TW_FPR="${OPENSUSE_TW_FPR:-AD485664E901B867051AB15F35A2F86E29B700A4}"
 
 _osci_die() { echo "ERROR: $*" >&2; return 1; }
 
+# resolve_latest_cloud_image <dir_url> <name_prefix>
+# Resolve the NEWEST per-publish dated image under <dir_url> (names carry
+# ...-Snapshot<date>.qcow2) and print "<url> <sha256>" after verifying the
+# signed .sha256 sidecar with the pinned openSUSE key. The dated name is
+# content-immutable — unlike the floating basename it cannot be re-rolled
+# under us between listing and download — so the resolved (url, sha) pair
+# is atomic. Use for floating lanes that track "current Tumbleweed"; pinned
+# lanes keep using the manifest URL.
+resolve_latest_cloud_image() {
+    local dir_url="$1" prefix="$2" listing newest url sha_file sig_file sha tmp rc
+    [ -n "$dir_url" ] && [ -n "$prefix" ] \
+        || { _osci_die "resolve_latest_cloud_image: dir_url and name prefix required"; return 1; }
+    _osci_require_tools || return 1
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/qdistro-os-resolve.XXXXXX")" || { _osci_die "mktemp failed"; return 1; }
+    chmod 0700 "$tmp"
+
+    listing="$(wget -qO- "$dir_url/")" || { rm -rf "$tmp"; _osci_die "listing failed: $dir_url/"; return 1; }
+    # The prefix is a literal product name interpolated into an ERE — escape
+    # regex metacharacters (dots in "1.0.0") so similarly spelled names can't
+    # match; the signature + basename binding is the hard bound either way.
+    local ere="${prefix//./\\.}"
+    newest="$(printf '%s\n' "$listing" | grep -oE "${ere}-Snapshot20[0-9]{6}\.qcow2" | sort -u | tail -1)"
+    [ -n "$newest" ] || { rm -rf "$tmp"; _osci_die "no dated ${prefix}-Snapshot*.qcow2 under $dir_url/"; return 1; }
+
+    url="$dir_url/$newest"
+    sha_file="$tmp/$newest.sha256"; sig_file="$sha_file.asc"
+    wget -q -O "$sha_file" "$url.sha256"     || { rm -rf "$tmp"; _osci_die "download failed: $url.sha256"; return 1; }
+    wget -q -O "$sig_file" "$url.sha256.asc" || { rm -rf "$tmp"; _osci_die "download failed: $url.sha256.asc"; return 1; }
+
+    rc=0
+    verify_opensuse_sha256_signature "$sha_file" "$sig_file" || rc=$?
+    [ "$rc" -eq 0 ] || { rm -rf "$tmp"; return "$rc"; }
+    sha="$(_osci_signed_sha256_for "$sha_file" "$newest")"; rc=$?
+    rm -rf "$tmp"
+    [ "$rc" -eq 0 ] || return "$rc"
+    printf '%s %s\n' "$url" "$sha"
+}
+
 _osci_require_tools() {
     local t
     for t in wget gpg gpgv sha256sum awk mktemp basename dirname mv install chmod rm flock; do
@@ -135,6 +174,26 @@ _osci_download_verified_cloud_image() {
 
     if [ -s "$cache" ] && [ -s "$cache.sha256" ] && [ -s "$cache.sha256.asc" ]; then
         echo "[cloud] verifying cached image: $cache"
+        if ! _osci_signed_sha256_for "$cache.sha256" "$base" >/dev/null 2>&1; then
+            # The same image bytes were cached under a different upstream
+            # name (floating vs dated Snapshot name): the cached sidecars
+            # bind the other basename. Refresh just the sidecars — they are
+            # re-verified against the pinned key and the image digest is
+            # re-checked, so the cache still fails closed on anything that
+            # is not a genuine openSUSE-signed artifact for this name.
+            echo "[cloud] cached sidecars do not name $base; refreshing sidecars" >&2
+            local rtmp
+            rtmp="$(mktemp -d "$cache_dir/cloud-sidecar.XXXXXX")" || { _osci_die "mktemp under $cache_dir failed"; return 1; }
+            if ! wget -q -O "$rtmp/$base.sha256" "$url.sha256" \
+                || ! wget -q -O "$rtmp/$base.sha256.asc" "$url.sha256.asc" \
+                || ! verify_opensuse_sha256_signature "$rtmp/$base.sha256" "$rtmp/$base.sha256.asc"; then
+                rm -rf "$rtmp"; _osci_die "sidecar refresh failed for $url"; return 1
+            fi
+            # Verify-before-promote: a half-fetched or unsigned pair can never
+            # poison the cache entry.
+            mv "$rtmp/$base.sha256" "$cache.sha256"; mv "$rtmp/$base.sha256.asc" "$cache.sha256.asc"
+            rm -rf "$rtmp"
+        fi
         verify_cached_cloud_image "$cache" "$cache.sha256" "$cache.sha256.asc" "$base" || return 1
         if [ -n "$expected_pin" ]; then
             actual="$(sha256sum "$cache" | awk '{print $1}')"

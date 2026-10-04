@@ -44,15 +44,21 @@ overridable per uid where it makes sense ([ui.md](ui.md)). The per-user accent
 colour is the deliberate exception: it is the visual cue that tells silos apart,
 so it is *meant* to differ per user.
 
-> **Status: system-wide theming is not implemented.** What ships is per-component
-> configuration. qdshell's settings are per-uid, in `~/.config/qdshell/`.
-> qdgreeter and qdlocker do not read a shared store at all — each carries a
-> *static, hardcoded copy* of qdshell's default dark palette
-> (`qdgreeter/qml/shim/Color.qml`, `qdlocker/qdlocker/qml/shim/Color.qml`, both
-> self-labelled "No dynamic theme loading"). Changing the qdshell theme does not
-> change the greeter or the locker, and there is no theme-propagation path into
-> the desktops inside embedded VMs. Treat every "change it once and everything
-> follows" statement on this page as a design target, not shipped behaviour.
+> **Status: first-party apps follow a published snapshot; the greeter and
+> VM desktops do not.** qdshell remains the settings owner. Its private
+> settings stay per-uid in `~/.config/qdshell/`. First-party Qt Widgets
+> apps (qdterm, qdbrowser, qnotebook, qdfileman), the admin app, and the
+> polkit prompt consume the validated public snapshot described in
+> [presentation.md](presentation.md). The locker freezes a trusted copy of
+> that snapshot at lock entry and keeps built-in dark defaults when the
+> snapshot is missing or untrusted (`qdlocker/qdlocker/presentation.py`,
+> `qdlocker/qdlocker/qml/shim/Color.qml`). The greeter keeps independent
+> installed defaults and does not follow a logged-in user's live settings
+> (`qdgreeter/qdgreeter/qml/shim/Color.qml`). There is no theme-propagation
+> path into desktops inside embedded VMs. Live isolated-app, enforcing-tier,
+> and GUI acceptance of this path is still open. Treat remaining
+> "change it once and everything follows" statements on this page as a
+> design target beyond these consumers.
 
 **Many sessions.** qdistro's model has both coarse session separation and
 Qubes-style mixed desktops. A separate TTY session would have its own
