@@ -28,7 +28,11 @@ Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
 | `b17-acceptance/` | `bats-20261004T095918Z-16239` | `eac49ad16` | **RECORD RUN: 10/10 pass** — see below |
 | `b18-s124-s126/` | (run dir TBD — `qci-tier3s-b18`) | `aa2e3afd4` | Sol-r1 remediation rerun: s124 + s126 with the new oracle/seccomp steps |
 | `b19-fable-remediation/` | `bats-20261004T123605Z-3058184` | `920351f70` | 6/10 — s123/s124/s127/s129 driver+product defects root-caused and closed; preserved-VM replays green (s123 76/0, s124 75/0, s127 94/0, s129 78/0). Remediation commits `36d779097` `7133aee42` `b6523e801` `45f7bda59` `e96442f4a`; see `b19-fable-remediation/MANIFEST.md` |
-| (b20 record attempt) | `qci-tier3s-b20b` running | `e96442f4a` | full 10-file lane on fresh workers with all remediation baked |
+| b20b (aborted) | `bats-20261004T150440Z-3427784` | `77336415f` | env failure, not product: the disposable tree shares the worktree gitdir (`cp -a` of `.git`), so committing the b19 pack mid-run dirtied it — all 10 workers failed `t3s_setup_file` clean-tree check. No test assertions ran |
+| `b20c-second-acceptance/` | `bats-20261004T151608Z-3563706` | `493312a25` | **8/10** — s123 + s129 green on fresh workers. s127 driver 93/1 (snapshot-too-early: transient `broker-unavailable` deny raced the post-restart emit; broker-evaluated `broker:deny` landed on the next emit). s124 driver 75/0 but bats wrapper still expected the pre-`e96442f4a` assertion names. Fixed in `5a494c448` |
+| `b21-third-acceptance/` | `bats-20261004T152921Z-3732618` | `5a494c448` | **9/10** — s127 green on a fresh worker (93/1→driver-complete). s124 74/1: `toplevel_title` event lands ~60ms after `toplevel_added`; the prefix check raced the journal. Fixed in `c1f9ec5e6` (+ mutation E2 snippet refresh) |
+| `b22-fourth-acceptance/` | `bats-20261004T153647Z-3857896` | `c1f9ec5e6` | **9/10** — s124 green on a fresh worker (75/0). s127 91/3: A's one-shot source emitted only while `busctl --timeout=200ms` calls still exceeded budget → `broker-unavailable` (fail-closed), no `broker:deny` ever landed. Fixed in `2e23d02a3` (`--emit-interval` for A + scoped kill) |
+| (b23 record attempt) | `qci-tier3s-b23` running | `2e23d02a3` | full 10-file lane with s127 re-offer fix |
 
 ## b17 record run (`eac49ad16`) — 10/10 files PASS
 

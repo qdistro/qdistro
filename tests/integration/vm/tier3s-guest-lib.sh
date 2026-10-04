@@ -350,6 +350,11 @@ assert_all_clear() {   # assert_all_clear <tag>
     # a cleanup run's private .call-* dir can outlive its triggering call by a
     # beat (the dir is removed at the end of that run, not before the reply)
     wait_for 15 bash -c "[ -z \"\$(find '$CTL' -mindepth 1 -maxdepth 1 -name '.call-*' -print -quit 2>/dev/null)\" ]" || :
+    # a SIGKILLed run's .call-* dir is swept by the NEXT --reap-stale, not by
+    # a clock — invoke the designed sweep so a pending-sweep dir does not
+    # read as a leftover. Dirs surviving it have live/undecidable owners and
+    # still fail the count.
+    "$CLEANUP" --reap-stale >/dev/null 2>&1 || :
     is "$1: no cleanup work dir left" "$(qry find "$CTL" -mindepth 1 -maxdepth 1 -name '.call-*' | grep -c .)" 0
 }
 
