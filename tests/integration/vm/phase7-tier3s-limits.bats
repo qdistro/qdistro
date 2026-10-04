@@ -27,9 +27,9 @@ teardown_file() {
     assert_output_contains "PASS: limits: memory.swap.max = MemorySwapMax=0"
     assert_output_contains "PASS: limits: pids.max = TasksMax=1024"
     assert_output_contains "PASS: limits: cpu.max = CPUQuota=200%"
-    # admin cannot raise any of them
+    # admin cannot raise any of them — EACCES/EPERM observed, not just rc!=0
     for f in memory.max memory.swap.max pids.max cpu.max; do
-        assert_output_contains "PASS: limits: admin write to $f fails (EACCES)"
+        assert_output_contains "PASS: limits: admin write to $f fails with EACCES/EPERM"
     done
     # placement re-proof
     for c in runuser podman-cli conmon runsc-gofer runsc-sandbox runsc-fd-parking systrap-stub; do
@@ -39,9 +39,11 @@ teardown_file() {
     # the three limits enforce
     assert_output_contains "PASS: cpu: nr_throttled grew under a 400%-hungry load"
     assert_output_contains "PASS: tasks: an outside admin process cannot inject itself into the scope"
+    assert_output_contains "PASS: tasks: C's scope really is at TasksMax=1024"
     assert_output_contains "PASS: tasks: host pids.current never exceeded pids.max"
+    assert_output_contains "PASS: tasks: pids.events max grew"
     assert_output_contains "PASS: tasks: the bomb was bounded"
-    assert_output_contains "PASS: memory: scope OOM-killed the 2.6 GiB hog"
+    assert_output_contains "PASS: memory: B's own memory.max triggered the OOM"
     # everything torn down
     assert_output_contains "PASS: tasks: all "
     assert_output_contains "PASS: memory: all "

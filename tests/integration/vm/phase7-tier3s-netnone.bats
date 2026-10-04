@@ -23,9 +23,10 @@ teardown_file() {
     assert_output_contains "PASS: netnone: the only link is lo"
     assert_output_contains "PASS: netnone: no default route"
     assert_output_contains "PASS: netnone: every route is on lo"
-    assert_output_contains "PASS: netnone: route to a public address cannot even be resolved"
-    assert_output_contains "PASS: netnone: TCP connect to a public address fails"
-    assert_output_contains "PASS: netnone: the failure is fast (ENETUNREACH, not a filtered-route timeout)"
+    assert_output_contains "PASS: netnone: route to the non-loopback test address is unreachable"
+    assert_output_contains "PASS: netnone: the connect probe ran and failed"
+    assert_output_contains "PASS: netnone: the failure is ENETUNREACH"
+    assert_output_contains "PASS: netnone: the failure is fast (not a filtered-route timeout)"
     assert_output_contains "PASS: netnone: podman NetworkMode"
     assert_output_contains "PASS: netnone: sentry runs with --network=none"
 }

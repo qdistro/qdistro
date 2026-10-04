@@ -6,9 +6,11 @@
 #   - the sandbox sees exactly one link: lo
 #   - loopback itself is up and addressed (v4 127.0.0.1 + v6 ::1)
 #   - no non-loopback route exists in any table; no default route
-#   - `ip route get <public addr>` fails (no route to get)
-#   - a TCP connect to a public address fails fast — ENETUNREACH, not a
-#     packet-filter timeout (a timeout could hide a routed path)
+#   - `ip route get <non-loopback test addr>` reports unreachable
+#   - a TCP connect to a non-loopback test address fails with an explicit
+#     ENETUNREACH diagnostic, fast — not a packet-filter timeout (a
+#     timeout could hide a routed path); 192.0.2.1 is TEST-NET-1, a
+#     documentation address that is never assigned, not "public"
 #   - host-side corroboration: the container's NetworkMode is `none` and the
 #     runsc cmdline carries --network=none (runsc's own stack off, not just
 #     podman's)
@@ -57,16 +59,24 @@ is "netnone: every route is on lo" \
     "$(printf '%s\n' "$rt" | grep . | grep -vc ' dev lo')" 0
 rg=$(sx ip route get 192.0.2.1 2>&1); rg_rc=$?
 info "ip route get 192.0.2.1: rc=$rg_rc, out: $rg"
-if [ "$rg_rc" -ne 0 ]; then pass "netnone: route to a public address cannot even be resolved (rc=$rg_rc)"
-else fail "netnone: 'ip route get 192.0.2.1' resolved: $rg"; fi
+# rc alone is not the proof — the command must have RUN and reported
+# unreachable, not failed for another reason (sol r1 P3)
+if [ "$rg_rc" -ne 0 ] && printf '%s' "$rg" | grep -qi 'unreachable'; then
+    pass "netnone: route to the non-loopback test address is unreachable (rc=$rg_rc)"
+else
+    fail "netnone: 'ip route get 192.0.2.1' did not report unreachable: rc=$rg_rc, $rg"
+fi
 
-# --- a real connect attempt fails FAST: ENETUNREACH is proof of no path;
-# a timeout would leave "there is a route but it is filtered" open.
+# --- a real connect attempt fails with an explicit ENETUNREACH diagnostic,
+# fast: that is proof of no path. A nonzero rc alone could be a refused
+# connection (a routed path) or the probe not running at all (sol r1 P3).
 t0=$SECONDS
 out2=$(pm exec "$CN" bash -c 'timeout 15 bash -c "exec 3<>/dev/tcp/192.0.2.1/80" 2>&1; echo rc=$?'); dt=$((SECONDS - t0))
 info "connect 192.0.2.1:80: ${dt}s, output: $(printf '%s' "$out2" | tr '\n' '|')"
-is "netnone: TCP connect to a public address fails" "$(printf '%s\n' "$out2" | grep -c 'rc=[1-9]')" 1
-is "netnone: the failure is fast (ENETUNREACH, not a filtered-route timeout)" \
+is "netnone: the connect probe ran and failed" "$(printf '%s\n' "$out2" | grep -c 'rc=[1-9]')" 1
+is "netnone: the failure is ENETUNREACH, not a refusal or a probe error" \
+    "$(printf '%s' "$out2" | grep -icE 'network.{0,10}unreachable|ENETUNREACH|errno.{0,4}101' | sed 's/[1-9][0-9]*/yes/')" yes
+is "netnone: the failure is fast (not a filtered-route timeout)" \
     "$([ "$dt" -lt 14 ] && echo yes || echo "no (${dt}s)")" yes
 
 # --- host-side corroboration: the podman spec and the runsc cmdline agree
