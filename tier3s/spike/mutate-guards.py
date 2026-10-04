@@ -762,7 +762,7 @@ MUTATIONS = [
       f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
     ("E3 RegisterLaunch is warning-only again (tier-3 style)", SPAWN,
      '''    [ "$reg" = 1 ] \\
-        || refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"''',
+        || bridge_refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"''',
      '''    [ "$reg" = 1 ] || say "warning: RegisterLaunch failed for bridge client pid $INNER_PID"''',
      [f"{TS}::test_gui_launch_refuses_when_registration_keeps_failing"]),
     ("E4 the launch record's nonce is not checked", SPAWN,
