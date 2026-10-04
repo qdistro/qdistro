@@ -13,9 +13,9 @@ qdwin session first. Every check prints one `PASS:`/`FAIL:` line; the
 driver exits nonzero on any FAIL and the bats wrapper also requires
 `[sNNN] N passes, 0 failures`.
 
-Tested HEAD: `7ad3518c3` (`claude/tier3s-b`). Record run: **b32** —
-the Sol-r5-ACCEPTED tip. The b17/b24/b29/b30/b31 "record" sections below
-are historical milestones kept for provenance; b32 is the current record.
+Tested HEAD: `119d5c3ed` (`claude/tier3s-b`). Record run: **b34** —
+the post-A1-revert tip. The b17/b24/b29–b32 "record" sections below
+are historical milestones kept for provenance; b34 is the current record.
 
 ## qci runs
 
@@ -43,11 +43,13 @@ are historical milestones kept for provenance; b32 is the current record.
 | `b29-acceptance/` | `bats-20261004T190703Z-1331658` | `4d7629a61` | **10/10** — the first Sol-r2 record run (same counts as b30); Sol r3 then found the opcode-renumber + descendant-leak defects, fixed `b524ac0c8`/`421e0bf75` |
 | `b30-acceptance/` | `bats-20261004T192608Z-1670740` | `421e0bf75` | **10/10 pass** — s120 196/0, s121 155/0, s122 152/0, s123 76/0, s124 75/0, s125 97/0, s126 91/0, s127 99/0, s128 54/0, s129 78/0 |
 | `b31-acceptance/` | `bats-20261004T195521Z-2046457` | `85f6ab26d` | **10/10 pass** — same per-driver counts as b30; the Sol-r4 acceptance (process-group-contained `wait_for_bounded`) |
-| `b32-acceptance/` | `bats-20261004T202011Z-2424301` | `7ad3518c3` | **RECORD RUN: 10/10 pass** — same per-driver counts; the Sol-r5-ACCEPTED tip (success-path group sweep added) |
+| `b32-acceptance/` | `bats-20261004T202011Z-2424301` | `7ad3518c3` | **10/10 pass** — same per-driver counts; the Sol-r5-ACCEPTED tip (success-path group sweep added) |
+| b33 (env fail) | `bats-20261004T204605Z-2672492` | `119d5c3ed` | env failure, not product: the A1 revert deleted `qdistro-tier3s-bootstrap`/`-bridge` from HEAD but their files lingered untracked in the disposable tree — all 10 workers failed the clean-tree guard. Removed the leftovers; relaunched as b34 |
+| `b34-acceptance/` | `bats-20261004T205540Z-2711190` | `119d5c3ed` | **RECORD RUN: 10/10 pass** — same per-driver counts; the post-A1-revert tip (astra remediation) |
 
 ## b17 run (`eac49ad16`) — 10/10 files PASS (historical)
 
-Superseded by b32 (current record). Kept for provenance:
+Superseded by b34 (current record). Kept for provenance:
 
 `b17-acceptance/report.md`, per-file TAP logs under `b17-acceptance/bats/*.bats.log`,
 driver transcripts under `b17-acceptance/bats/*.bats.scratch/{t3s-setup,sNNN}.log`,
@@ -68,7 +70,7 @@ VM journals under `b17-acceptance/journals/`:
 
 ## b24 run (`65a79151c`) — 10/10 files PASS (historical)
 
-Superseded by b29 → b32 (current record). Kept for provenance:
+Superseded by b29 → b34 (current record). Kept for provenance:
 
 Fresh workers;
 `b24-acceptance/report.md`, per-file TAP logs + driver transcripts under
@@ -87,13 +89,34 @@ Fresh workers;
 | s128 lineage | 54/0 | |
 | s129 hostile-stream | 78/0 | gofer-netns fd attribution |
 
-## b32 record run (`7ad3518c3`) — 10/10 files PASS
+## b34 record run (`119d5c3ed`) — 10/10 files PASS
 
-**Current record** — the **Sol-r5-ACCEPTED** tip: `wait_for_bounded` confines
+**Current record** — the post-A1-revert tip (astra remediation: the
+`e820eee40` paravirt-gpu donation groundwork reverted to the trackb
+branch; CONTRACT.md/INDEX P3s fixed). Identical per-driver counts to
+b30–b32, confirming the GUI lane never touched the removed GFX path.
+Fresh workers; `b34-acceptance/report.md`, per-file TAP logs + driver
+transcripts under `b34-acceptance/bats/`:
+
+| Driver | Passes | Notes |
+|---|---|---|
+| s120 headless | 196/0 | |
+| s121 denied | 155/0 | |
+| s122 sigkill-cleanup | 152/0 | |
+| s123 waypipe | 76/0 | |
+| s124 app | 75/0 | |
+| s125 lifecycle | 97/0 | |
+| s126 chrome-secctx | 91/0 | probe-as-workload + 5b single-attach |
+| s127 clipboard-gate | 99/0 | live cross-silo broker:allow + v35 relay |
+| s128 lineage | 54/0 | |
+| s129 hostile-stream | 78/0 | byte-count assertions |
+
+## b32 run (`7ad3518c3`) — 10/10 files PASS (historical)
+
+Superseded by b34 (current record). The **Sol-r5-ACCEPTED** tip: `wait_for_bounded` confines
 each check to its own process group (timeout path, `85f6ab26d`) and sweeps
 strays on the success path too (`7ad3518c3`). Fresh workers;
-`b32-acceptance/report.md`, per-file TAP logs + driver transcripts under
-`b32-acceptance/bats/` — counts identical to b30/b31:
+`b32-acceptance/report.md`, per-file TAP logs + driver transcripts under `b32-acceptance/bats/`:
 
 | Driver | Passes | Notes |
 |---|---|---|
@@ -110,7 +133,7 @@ strays on the success path too (`7ad3518c3`). Fresh workers;
 
 ## b30 run (`421e0bf75`) — 10/10 files PASS
 
-Superseded by b32 (current record). The Sol-r3 remediation acceptance
+Superseded by b34 (current record). The Sol-r3 remediation acceptance
 (opcode-stable v35 + descendant-kill wait_for). Fresh workers;
 `b30-acceptance/report.md`, per-file TAP logs + driver transcripts under
 `b30-acceptance/bats/`:
@@ -130,8 +153,8 @@ Superseded by b32 (current record). The Sol-r3 remediation acceptance
 
 ## DONE bar (`03-implementation-plan.md` Phase B)
 
-- **s123–s129 PASS** — b32 table above (record run at `7ad3518c3`, single
-  commit, one run; earlier green: b31 at `85f6ab26d`, b30, b29, b24, b17).
+- **s123–s129 PASS** — b34 table above (record run at `119d5c3ed`, single
+  commit, one run; earlier green: b32 at `7ad3518c3`, b31, b30, b29, b24, b17).
 - **Screenshots** — `shots/t3s-weston-terminal.png`, `shots/t3s-foot.png`:
   dev VM `t3s-shot-261004-121311-155087-24437` cloned from the b17 golden
   (`qci-golden-bats-261004-115935-17667-18553`), tier3s installed at
