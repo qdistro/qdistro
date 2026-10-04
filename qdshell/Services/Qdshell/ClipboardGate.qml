@@ -94,6 +94,14 @@ Singleton {
         if (binding.selectionSetSourceIdentity !== undefined) {
             binding.selectionSetSourceIdentity.connect(root._onSelectionSetSourceIdentity);
         }
+        // v35 sidecar — selection_set_source_peer_identity. Fires
+        // IMMEDIATELY AFTER the v23 sidecar for the same tagged source,
+        // carrying the SOURCE wl_client's own compositor-observed peer
+        // identity. Older bindings never emit; the relay then falls
+        // back to the bound-handle identity path verbatim.
+        if (binding.selectionSetSourcePeerIdentity !== undefined) {
+            binding.selectionSetSourcePeerIdentity.connect(root._onSelectionSetSourcePeerIdentity);
+        }
         // Receive-time gate (qdwin_shell_v1 v15+). Older bindings never
         // emit; cross-app paste then relies on the set-time gate +
         // focus-aware-clear, and the compositor's own ~2s deny timeout
@@ -152,6 +160,17 @@ Singleton {
     //   { sandboxEngine, appId, instanceId }   (or null)
     property var _pendingSrcIdentity: null
 
+    // v35 sidecar — selection_set_source_peer_identity. Fires right
+    // after the v23 sidecar for the same tagged source; carries the
+    // source wl_client's OWN compositor-observed peer identity. This is
+    // what makes equal-tag binding unnecessary for the pid relay: the
+    // identity below belongs to the very client that issued
+    // set_selection, not to whichever toplevel happens to share the tag
+    // tuple.
+    //   { pid, starttime, uid, exe, label,
+    //     sandboxEngine, appId, instanceId }   (or null)
+    property var _pendingSrcPeer: null
+
     // focus-aware-clear bookkeeping (clipboard.md §"focus-aware-clear").
     // The silo that set the active selection, tracked per selection kind
     // ("0" = regular clipboard, "1" = primary). Recorded on every
@@ -187,6 +206,7 @@ Singleton {
         root._handleToSandboxEngine = ({});
         root._selectionSourceSilo = ({});
         root._pendingSrcIdentity = null;
+        root._pendingSrcPeer = null;
         root._lastDenyClearByKey = ({});
     }
 
@@ -241,7 +261,22 @@ Singleton {
         const id = root._handleToIdentity[handle];
         if (!id || !id.pid)
             return false;
-        const key = root._verifyKey(id);
+        return root._queueVerify(root._verifyKey(id), handle, id);
+    }
+
+    // Same lazy broker re-verification as _ensureVerified, but for an
+    // identity that is not keyed to a toplevel handle — the v35
+    // selection_set_source_peer_identity sidecar. The tuple came off the
+    // wire moments ago and already names the exact source wl_client, so
+    // there is no handle-drift guard; the broker's /proc re-check is the
+    // staleness arbiter.
+    function _ensureVerifiedIdentity(id) {
+        if (!id || !id.pid)
+            return false;
+        return root._queueVerify(root._verifyKey(id), null, id);
+    }
+
+    function _queueVerify(key, handle, id) {
         const cached = root._verifyCache[key];
         if (cached && cached.expires > Date.now())
             return cached.verified;
@@ -251,7 +286,7 @@ Singleton {
         root._verifyInFlight[key] = true;
         root._verifyQueue.push({
             key: key,
-            handle: handle,
+            handle: (handle === null || handle === undefined) ? null : handle,
             identity: Object.assign({}, id),
             generation: root._verifyGeneration
         });
@@ -264,7 +299,11 @@ Singleton {
             return;
         while (root._verifyQueue.length) {
             const entry = root._verifyQueue.shift();
-            const current = root._handleToIdentity[entry.handle];
+            // handle === null → wire-sidecar identity (v35): no handle
+            // map to drift against, the tuple itself is the subject.
+            const current = (entry.handle === null)
+                ? entry.identity
+                : root._handleToIdentity[entry.handle];
             if (!current || root._verifyKey(current) !== entry.key) {
                 delete root._verifyInFlight[entry.key];
                 continue;
@@ -282,7 +321,9 @@ Singleton {
         root._verifyActive = null;
         if (entry && entry.generation === root._verifyGeneration) {
             delete root._verifyInFlight[entry.key];
-            const current = root._handleToIdentity[entry.handle];
+            const current = (entry.handle === null)
+                ? entry.identity
+                : root._handleToIdentity[entry.handle];
             if (current && root._verifyKey(current) === entry.key) {
                 const verified = exitCode === 0 && String(output || "").trim() === "b true";
                 root._verifyCache[entry.key] = {
@@ -350,6 +391,42 @@ Singleton {
             "sandboxEngine": sandboxEngine || "",
             "appId": appId || "",
             "instanceId": instanceId || ""
+        };
+    }
+
+    // Pure relay-selection rule (Node-testable): which (pid, starttime)
+    // tuple may be relayed to the broker as the selection source's
+    // identity. v35 wire-attested peer identity ALWAYS wins — it names
+    // the exact wl_client that issued set_selection, so it is sound
+    // even when no focused toplevel shares the tag (cross-silo offer
+    // from a toplevel-less source). Pre-v35 fallback keeps the old
+    // contract: handle identity only on the v11 path or a bound
+    // sidecar; anything else returns {} so the broker sees 0/0 and
+    // enforce denies rather than resolving an unrelated handle.
+    function _sourceRelayIdentity(pendingPeer, pending, bound, handleIdentity) {
+        if (pendingPeer && pendingPeer.pid) return pendingPeer;
+        if (pending === null || bound) return handleIdentity || {};
+        return {};
+    }
+
+    // v35 sidecar handler. The peer tuple belongs to the very wl_client
+    // that issued set_selection — NOT to whichever focused toplevel
+    // happens to carry the same (engine, appId, instanceId) tag. Merge
+    // the tag fields from _pendingSrcIdentity (which always precedes
+    // this event per the wire contract) so the stashed identity is a
+    // complete verifyKey-shaped tuple; consumed on the next
+    // _onSelectionSet alongside _pendingSrcIdentity.
+    function _onSelectionSetSourcePeerIdentity(peerPid, peerStarttime, peerUid, peerExe, peerSelinuxLabel) {
+        const pending = root._pendingSrcIdentity || {};
+        root._pendingSrcPeer = {
+            "pid": peerPid >>> 0,
+            "starttime": peerStarttime,
+            "uid": peerUid >>> 0,
+            "exe": peerExe || "",
+            "label": peerSelinuxLabel || "",
+            "sandboxEngine": pending.sandboxEngine || "",
+            "appId": pending.appId || "",
+            "instanceId": pending.instanceId || ""
         };
     }
 
@@ -457,6 +534,10 @@ Singleton {
         // focused toplevel). Consume + clear.
         const pending = root._pendingSrcIdentity;
         root._pendingSrcIdentity = null;
+        // v35 wire-attested peer identity of the actual selection-source
+        // wl_client (null on pre-v35 compositors or untagged sources).
+        const pendingPeer = root._pendingSrcPeer;
+        root._pendingSrcPeer = null;
         let srcSilo;
         if (pending !== null) {
             // Tagged source: trust the wire identity, NOT the focus-handle
@@ -537,9 +618,15 @@ Singleton {
         // (the focused toplevel's attested tag IS the source's tag — the
         // single-client bridge case). Unbound: it can name the focused
         // destination/admin toplevel — fail closed.
+        // v35 narrows this further: when the peer-identity sidecar arrived,
+        // it names the exact wl_client that issued set_selection — verify
+        // THAT tuple, not whichever focused handle shares the tag.
         const _bound = root._sourceBoundToHandle(
             pending, root._handleToIdentity[sourceHandle]);
-        const srcVerified = (pending === null || _bound) ? root._ensureVerified(sourceHandle) : false;
+        const _srcPeer = (pendingPeer && pendingPeer.pid) ? pendingPeer : null;
+        const srcVerified = _srcPeer
+            ? root._ensureVerifiedIdentity(_srcPeer)
+            : ((pending === null || _bound) ? root._ensureVerified(sourceHandle) : false);
         const dstVerified = (focusedHandle !== 4294967295) ? root._ensureVerified(focusedHandle) : false;
         const identityVerified = srcVerified && dstVerified;
         if (!ClipboardBroker.hasKnownIdentity(srcSilo, dstSilo)) {
@@ -554,12 +641,12 @@ Singleton {
             return;
         }
         // Relay the source app's kernel-authenticated (pid, starttime) so
-        // the broker can attest the source silo via its launch-record store
-        // (P1-1). Trustworthy on the v11 path (pending === null) or when the
-        // sidecar is bound to this handle (the tagged source owns the focused
-        // toplevel); otherwise pass 0/0 → broker enforce denies rather than
-        // resolving an unrelated handle.
-        const _srcId = (pending === null || _bound) ? (root._handleToIdentity[sourceHandle] || {}) : {};
+        // the broker can attest the source silo via its launch-record
+        // store (P1-1). _sourceRelayIdentity encodes the precedence:
+        // v35 wire-attested source peer > bound/v11 handle identity >
+        // 0/0 fail-closed.
+        const _srcId = root._sourceRelayIdentity(
+            _srcPeer, pending, _bound, root._handleToIdentity[sourceHandle]);
         const brokerResult = root._binding.checkClipboardTransfer(srcSilo, dstSilo, mimeList, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
         const decision = ClipboardBroker.parseCheckClipboardTransferResult(brokerResult.exitCode, brokerResult.stdout || "");
         root._logDecisionAndMaybeClear(decisionEntry, decision.verdict, decision.reason);

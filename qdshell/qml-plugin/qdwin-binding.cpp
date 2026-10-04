@@ -78,7 +78,15 @@ namespace {
 // Versions 31–33 carry mainline app-id updates and framebuffer capture.
 // Version 34 appends remote display identity/input/drain without changing
 // the already shipped request and event opcodes.
-constexpr uint32_t kBindVersion = 34;
+// Bump to 35 to pick up `selection_set_source_peer_identity` — the v35
+// sidecar emitted immediately after `selection_set_source_identity`
+// carrying the SOURCE wl_client's own (pid, starttime, uid, exe, label).
+// ClipboardGate relays that tuple to CheckClipboardTransfer so a
+// rule-driven cross-silo transfer is attested against the actual
+// selection source's peer identity rather than the focused toplevel's
+// (tag equality is not peer equality — qdwin stamps the same secctx
+// tuple on every client accepted through one secctx listener).
+constexpr uint32_t kBindVersion = 35;
 constexpr int kCaptureTimeoutMs = 8000;
 constexpr int kBrokerStartTimeoutMs = 250;
 constexpr int kBrokerGateTimeoutMs = 2000;
@@ -336,6 +344,25 @@ struct QdwinBindingDispatch {
                                            qstr(src_app_id),
                                            qstr(src_instance_id));
     }
+    // v35 sidecar — fires immediately AFTER
+    // `selection_set_source_identity` for the same tagged source.
+    // Carries the source wl_client's OWN compositor-observed peer
+    // identity; ClipboardGate stashes it next to the pending tag tuple
+    // and relays it — not the focused handle's identity — to the
+    // broker, so a source that owns no focused toplevel (cross-silo
+    // bridge emit) still presents an attested pid.
+    static void selection_set_source_peer_identity(
+        void *d, qdwin_shell_v1 *,
+        uint32_t peer_pid, uint32_t peer_starttime_lo,
+        uint32_t peer_starttime_hi, uint32_t peer_uid,
+        const char *peer_exe, const char *peer_selinux_label) {
+        auto *b = static_cast<QdwinBinding *>(d);
+        quint64 st = (static_cast<quint64>(peer_starttime_hi) << 32)
+                     | static_cast<quint64>(peer_starttime_lo);
+        emit b->selectionSetSourcePeerIdentity(peer_pid, st, peer_uid,
+                                               qstr(peer_exe),
+                                               qstr(peer_selinux_label));
+    }
     static void activation_pending(void *d, qdwin_shell_v1 *,
                                    uint32_t handle, uint32_t source_handle,
                                    uint32_t target_handle,
@@ -457,6 +484,8 @@ static const qdwin_shell_v1_listener kShellListener = {
     .selection_set             = QdwinBindingDispatch::selection_set,
     .selection_set_source_identity =
         QdwinBindingDispatch::selection_set_source_identity,
+    .selection_set_source_peer_identity =
+        QdwinBindingDispatch::selection_set_source_peer_identity,
     .activation_pending        = QdwinBindingDispatch::activation_pending,
     .toplevel_security_context = QdwinBindingDispatch::toplevel_security_context,
     .toplevel_peer_identity    = QdwinBindingDispatch::toplevel_peer_identity,

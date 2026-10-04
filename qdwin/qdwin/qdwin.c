@@ -10738,6 +10738,41 @@ qdwin_emit_selection_set(struct qdwin *qdwin, struct weston_seat *seat,
 				   src_engine   ? src_engine   : "",
 				   src_app_id   ? src_app_id   : "",
 				   src_instance ? src_instance : "");
+			/* v35 sidecar (selection_set_source_peer_identity):
+			 * the source wl_client's OWN compositor-observed
+			 * (pid, starttime, uid, exe, label). The shell relays
+			 * this to the broker instead of borrowing the focused
+			 * toplevel's identity under a tag-equality binding —
+			 * tag equality is not peer equality, and a source
+			 * without a toplevel would otherwise relay pid 0 and
+			 * fail a rule-driven cross-silo transfer closed. */
+			if (wl_resource_get_version(qdwin->shell_resource)
+			    >= 35) {
+				uint32_t peer_pid =
+					qdwin_secctx_client_peer_pid(src_sc);
+				uint64_t starttime =
+					qdwin_secctx_client_peer_starttime(src_sc);
+				uint32_t peer_uid =
+					qdwin_secctx_client_peer_uid(src_sc);
+				const char *exe =
+					qdwin_secctx_client_peer_exe(src_sc);
+				const char *label =
+					qdwin_secctx_client_peer_selinux_label(src_sc);
+				uint32_t st_lo =
+					(uint32_t)(starttime & 0xffffffffu);
+				uint32_t st_hi =
+					(uint32_t)((starttime >> 32) & 0xffffffffu);
+				qdwin_shell_v1_send_selection_set_source_peer_identity(
+					qdwin->shell_resource,
+					peer_pid, st_lo, st_hi, peer_uid,
+					exe   ? exe   : "",
+					label ? label : "");
+				weston_log("qdwin: selection_set_source_peer_identity "
+					   "pid=%u starttime=%llu uid=%u exe=%s\n",
+					   peer_pid,
+					   (unsigned long long)starttime,
+					   peer_uid, exe ? exe : "");
+			}
 		}
 	}
 	qdwin_shell_v1_send_selection_set(qdwin->shell_resource,
@@ -22546,6 +22581,15 @@ struct qdwin_secctx {
 	char *app_id;
 	char *instance_id;
 	int committed;
+	/* Single-attach (engine-scoped): once one client has been tagged by
+	 * this context, every later connection on it is refused. The qdshell
+	 * clipboard gate binds a v23 selection sidecar to the focused
+	 * toplevel by (engine, app_id, instance_id) equality and relays the
+	 * toplevel client's verified pid — that binding is only sound when
+	 * one attested tuple identifies exactly one peer. Spec permits
+	 * multi-attach (Flatpak-style); tier3s takes the stricter shape
+	 * because its tag is the broker-verification surface. */
+	int consumed;
 	struct wl_event_source *listen_source;
 	struct wl_event_source *close_source;
 	struct wl_list link;                /* qdwin::secctxs */
@@ -22893,6 +22937,19 @@ qdwin_secctx_listen_cb(int fd, uint32_t mask, void *data)
 				   strerror(errno));
 		return 0;
 	}
+	if (sec->consumed) {
+		/* Accept-and-close (not listener teardown): the wrapper still
+		 * holds its own copy of the listen fd, so the pathname stays
+		 * connectable — a queued connect must get a live refusal
+		 * (EOF on the first read), not a backlog stall. */
+		weston_log("qdwin/secctx: refused extra connection on consumed "
+			   "context engine=%s app_id=%s instance_id=%s\n",
+			   sec->sandbox_engine ? sec->sandbox_engine : "?",
+			   sec->app_id ? sec->app_id : "?",
+			   sec->instance_id ? sec->instance_id : "?");
+		close(client_fd);
+		return 0;
+	}
 	struct wl_client *new_client =
 		wl_client_create(qdwin->compositor->wl_display, client_fd);
 	if (!new_client) {
@@ -22938,6 +22995,11 @@ qdwin_secctx_listen_cb(int fd, uint32_t mask, void *data)
 	wl_client_add_destroy_listener(new_client,
 				       &sc->client_destroy_listener);
 	wl_list_insert(&qdwin->secctx_clients, &sc->link);
+	/* Consume the context for single-attach engines: the tagged tuple
+	 * now provably names exactly this peer. */
+	if (sec->sandbox_engine &&
+	    strcmp(sec->sandbox_engine, "qdistro.tier3s") == 0)
+		sec->consumed = 1;
 	weston_log("qdwin/secctx: client accepted engine=%s app_id=%s "
 		   "instance_id=%s (total tagged: %u)\n",
 		   sec->sandbox_engine ? sec->sandbox_engine : "?",

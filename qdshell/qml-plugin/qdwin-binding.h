@@ -379,6 +379,21 @@ signals:
                                     const QString &srcAppId,
                                     const QString &srcInstanceId);
 
+    // qdwin_shell_v1.selection_set_source_peer_identity (v35) — fires
+    // immediately after the v23 sidecar for the same tagged source.
+    // Carries the SOURCE wl_client's own compositor-observed peer
+    // identity so ClipboardGate relays the actual selection source's
+    // (pid, starttime) to CheckClipboardTransfer instead of the
+    // focused toplevel's: a tagged source that owns no focused
+    // toplevel otherwise relays pid 0 and a rule-driven cross-silo
+    // transfer fails closed, and a second client sharing the tag
+    // tuple could otherwise borrow the focused client's verified pid.
+    void selectionSetSourcePeerIdentity(quint32 peerPid,
+                                        quint64 peerStarttime,
+                                        quint32 peerUid,
+                                        const QString &peerExe,
+                                        const QString &peerSelinuxLabel);
+
     // wp_security_context_v1 tag emitted by qdwin once it resolves
     // the secctx for a toplevel. Fires after toplevelAdded; instanceId
     // is the load-bearing correlation token for cold-start placeholder

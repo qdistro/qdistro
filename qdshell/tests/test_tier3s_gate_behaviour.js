@@ -175,4 +175,103 @@ var mimeTier = QE.compileQmlFunctionWith(cgSrc, "_strictMimeTier", {});
     assert.strictEqual(bound(pending, {}), false);
 })();
 
+// ─── ClipboardGate: v35 source-peer relay (Sol-r2 ΔB10) ───────────────────
+
+(function testSourceRelayIdentity() {
+    var relay = QE.compileQmlFunctionWith(cgSrc, "_sourceRelayIdentity", {});
+    var peer = { pid: 4242, starttime: 999, uid: 1000, exe: "/x",
+                 sandboxEngine: "qdistro.tier3s",
+                 appId: "qdistro.tier3s.a", instanceId: "tok" };
+    var pending = { sandboxEngine: "qdistro.tier3s",
+                    appId: "qdistro.tier3s.a", instanceId: "tok" };
+    var handleId = { pid: 7777, starttime: 1, instanceId: "tok" };
+    // ensures: the wire-attested source peer wins over EVERY handle-based
+    // identity — a source that owns no focused toplevel still relays its
+    // own pid, never the destination's
+    assert.strictEqual(relay(peer, pending, false, handleId), peer);
+    assert.strictEqual(relay(peer, pending, true, handleId), peer);
+    assert.strictEqual(relay(peer, null, false, handleId), peer);
+    // ensures: pre-v35 fallback preserved — v11 source or bound sidecar
+    // still relays the focused handle's identity
+    assert.strictEqual(relay(null, null, false, handleId), handleId);
+    assert.strictEqual(relay(null, pending, true, handleId), handleId);
+    // ensures: a tagged source that is NOT the focused client and carries
+    // no v35 peer sidecar relays nothing (0/0 → enforce deny), the exact
+    // fail-closed posture Sol flagged
+    assert.deepStrictEqual(relay(null, pending, false, handleId), {});
+    assert.deepStrictEqual(relay(null, pending, false, null), {});
+    // ensures: a peer sidecar with pid 0 is not a usable identity
+    assert.strictEqual(
+        relay({ pid: 0, starttime: 5 }, pending, true, handleId),
+        handleId);
+})();
+
+(function testOnSelectionSetSourcePeerIdentity() {
+    var root = {};
+    var handler = QE.compileQmlFunctionWith(
+        cgSrc, "_onSelectionSetSourcePeerIdentity", { root: root });
+    // The v23 tag sidecar lands first per the wire contract; the peer
+    // tuple must merge those tag fields so the stashed identity is a
+    // complete verifyKey-shaped tuple (verify includes the claimed tag).
+    root._pendingSrcIdentity = { sandboxEngine: "qdistro.tier3s",
+                                 appId: "qdistro.tier3s.a",
+                                 instanceId: "tok-1" };
+    handler(4242, 987654321, 1000, "/usr/bin/waypipe", "unconfined");
+    assert.deepStrictEqual(root._pendingSrcPeer, {
+        pid: 4242, starttime: 987654321, uid: 1000,
+        exe: "/usr/bin/waypipe", label: "unconfined",
+        sandboxEngine: "qdistro.tier3s", appId: "qdistro.tier3s.a",
+        instanceId: "tok-1" });
+    // ensures: a peer event without a pending tag still stashes the peer
+    // tuple with empty tag fields (defensive — contract violation by the
+    // compositor must not produce an undefined-tag crash)
+    root._pendingSrcIdentity = null;
+    handler(1, 2, 3, "e", "l");
+    assert.deepStrictEqual(root._pendingSrcPeer, {
+        pid: 1, starttime: 2, uid: 3, exe: "e", label: "l",
+        sandboxEngine: "", appId: "", instanceId: "" });
+})();
+
+(function testEnsureVerifiedIdentity() {
+    // _ensureVerifiedIdentity verifies a handle-less wire identity. Drive
+    // it with the production _verifyKey + a stubbed dispatch so we can
+    // inspect what got queued.
+    var vk = QE.compileQmlFunctionWith(cgSrc, "_verifyKey", { root: {} });
+    var calls = [];
+    var root = {
+        _verifyCache: {},
+        _verifyInFlight: {},
+        _verifyQueue: [],
+        _verifyGeneration: 0,
+        _verifyKey: vk,
+        _startNextVerification: function() { calls.push("start"); },
+        _queueVerify: QE.compileQmlFunctionWith(
+            cgSrc, "_queueVerify", { root: null }),
+    };
+    // _queueVerify references root.* — rebind env to the same object.
+    root._queueVerify = QE.compileQmlFunctionWith(
+        cgSrc, "_queueVerify", { root: root });
+    root._ensureVerifiedIdentity = QE.compileQmlFunctionWith(
+        cgSrc, "_ensureVerifiedIdentity", { root: root });
+    var id = { pid: 4242, starttime: 999, uid: 1000, exe: "/x", label: "",
+               sandboxEngine: "qdistro.tier3s", appId: "qdistro.tier3s.a",
+               instanceId: "tok" };
+    // ensures: a wire-attested source identity is queued for broker
+    // re-verification WITHOUT a handle — the handle map never sees it
+    assert.strictEqual(root._ensureVerifiedIdentity(id), false);
+    assert.strictEqual(root._verifyQueue.length, 1);
+    assert.strictEqual(root._verifyQueue[0].handle, null);
+    assert.deepStrictEqual(root._verifyQueue[0].identity, id);
+    assert.deepStrictEqual(calls, ["start"]);
+    // ensures: a missing/zero-pid identity fails closed without queueing
+    assert.strictEqual(root._ensureVerifiedIdentity(null), false);
+    assert.strictEqual(root._ensureVerifiedIdentity({ pid: 0 }), false);
+    assert.strictEqual(root._verifyQueue.length, 1);
+    // ensures: a cached verified verdict short-circuits synchronously
+    var key = vk(id);
+    root._verifyCache[key] = { verified: true, expires: Date.now() + 60000 };
+    assert.strictEqual(root._ensureVerifiedIdentity(id), true);
+    assert.strictEqual(root._verifyQueue.length, 1);
+})();
+
 console.log("test_tier3s_gate_behaviour: all checks passed");
