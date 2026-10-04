@@ -38,8 +38,9 @@ teardown_file() {
     assert_output_contains "PASS: placement[A]: runsc-bundle processes outside the owning scope"
     # the three limits enforce
     assert_output_contains "PASS: cpu: nr_throttled grew under a 400%-hungry load"
-    assert_output_contains "PASS: tasks: the scope's fork bomb was bounded"
-    assert_output_contains "PASS: tasks: in-guest fork bomb: host scope pids.current never exceeded pids.max"
+    assert_output_contains "PASS: tasks: an outside admin process cannot inject itself into the scope"
+    assert_output_contains "PASS: tasks: host pids.current never exceeded pids.max"
+    assert_output_contains "PASS: tasks: the bomb was bounded"
     assert_output_contains "PASS: memory: scope OOM-killed the 2.6 GiB hog"
     # everything torn down
     assert_output_contains "PASS: tasks: all "

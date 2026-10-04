@@ -8,13 +8,13 @@
 #           never a limit file);
 #   step 2  CPUQuota=200% throttles: 4 busy loops inside the sandbox grow the
 #           scope's cpu.stat nr_throttled and throttled_usec;
-#   step 3  TasksMax=1024 bounds the scope's host task count: an admin helper
-#           that moves ITSELF into the scope (delegated cgroup.procs) and
-#           fork-bombs plateaus at pids.max with fork failures — and a
-#           guest-side fork bomb never pushes the host scope past it
-#           (gVisor runs guest tasks inside the Sentry: a guest fork bomb is
-#           a Sentry memory problem — step 4 — while every host process the
-#           sandbox spawns stays under pids.max);
+#   step 3  TasksMax=1024 bounds the scope's host task count: an outside
+#           admin process cannot inject itself into the scope (the v2
+#           migration rule wants write on the common ancestor's
+#           cgroup.procs, not just the delegated file), and a guest-side
+#           fork bomb pushes the scope's pids.current to the ceiling but
+#           never past it — crossing pids.max is fatal to this sandbox,
+#           not a breach;
 #   step 4  MemoryMax=2G (MemorySwapMax=0) OOM-kills: a guest hog pushes the
 #           scope's memory.current over the cap, memory.events oom_kill
 #           increments, the launch dies and the verified teardown runs;
@@ -124,71 +124,51 @@ fi
 is "cpu: throttled_usec grew" "$([ "${tu1:-0}" -gt "${tu0:-0}" ] && echo yes)" yes
 
 # ---------------------------------------------------------------------------
-step "3. TasksMax=1024 on silo C: fork bomb inside the scope plateaus at pids.max"
+step "3. TasksMax=1024 on silo C: a guest fork bomb plateaus at pids.max"
 TC=$(up_silo $SC); CC=$(ctr_of $SC)
 if [ -n "$TC" ]; then pass "silo C $TC recorded running"; else fail "silo C did not come up"; finish; fi
 cgt="/sys/fs/cgroup$(rec "$TC" scope_cgroup)"
-pids0=$(cat "$cgt/pids.current")
-info "pids.current before the bomb: $pids0 (limit $(cat "$cgt/pids.max"))"
-# An admin helper moves ITSELF into the scope (self-move needs only write
-# access to the destination cgroup.procs — the delegated file — never the
-# ancestor's) and fork-bombs. Pure builtins at the peak: a fork is what we
-# are exhausting, so the counter reads cannot fork.
-bomb() {
-    runuser -u admin -- env -i PATH=/usr/bin:/bin bash -c '
-        cg="'"$cgt"'"
-        echo $$ > "$cg/cgroup.procs" 2>/dev/null || { echo MOVED=no; exit 9; }
-        echo MOVED=yes
-        i=0
-        while [ "$i" -lt 1500 ]; do i=$((i+1)); sleep 20 & done
-        j=0; for p in $(jobs -p); do j=$((j+1)); done
-        read -r PC < "$cg/pids.current"
-        echo "JOBS=$j PIDS=$PC"
-        kill $(jobs -p) 2>/dev/null; wait 2>/dev/null
-        echo BOMB_DONE'
-}
-bomb_out=$(bomb 2>&1); bomb_rc=$?
-printf '%s\n' "$bomb_out" | sed 's/^/    bomb: /'
-info "bomb rc=$bomb_rc (a nonzero rc is the fork failure path ending the run)"
-is "tasks: admin helper moved itself into the scope" "$(printf '%s\n' "$bomb_out" | grep -c '^MOVED=yes')" 1
-jobs_n=$(printf '%s\n' "$bomb_out" | sed -n 's/^JOBS=\([0-9]*\).*/\1/p')
-pids_n=$(printf '%s\n' "$bomb_out" | sed -n 's/^JOBS=.* PIDS=\([0-9]*\)/\1/p')
-if [ -n "$jobs_n" ] && [ "$jobs_n" -lt 1500 ]; then
-    pass "tasks: the scope's fork bomb was bounded ($jobs_n of 1500 children spawned)"
-else
-    fail "tasks: fork bomb spawned all 1500 children — pids.max not enforced"
-fi
-is "tasks: in-scope pids.current stayed at or under pids.max" "$([ "${pids_n:-99999}" -le 1024 ] && echo yes || echo "no:$pids_n")" yes
-is "tasks: guest-visible fork failure on stderr" \
-    "$(printf '%s\n' "$bomb_out" | grep -ci 'cannot fork\|resource temporarily unavailable' | sed 's/[1-9][0-9]*/yes/')" yes
-# the bomb's own children are killed by the helper; pids.current drops back
-wait_for 30 bash -c "[ \"\$(cat '$cgt/pids.current' 2>/dev/null || echo 9999)\" -le $((pids0 + 10)) ]"
-is "tasks: scope pids.current back near baseline after the bomb" \
-    "$([ "$(cat "$cgt/pids.current" 2>/dev/null || echo 9999)" -le $((pids0 + 10)) ] && echo yes || cat "$cgt/pids.current")" yes
-is "tasks: silo C survived the injected bomb" "$(ctr_status "$CC")" running
-# guest-side bomb: whatever gVisor does with guest tasks internally, the
-# host footprint stays under pids.max. Guest "Cannot fork" lines are logged
-# as evidence either way (a gVisor-emulated task table is bounded by the
-# Sentry's memory — step 4 — not by host clone()).
+pids0=$(cat "$cgt/pids.current"); pmax=$(cat "$cgt/pids.max")
+info "pids.current before the bomb: $pids0 (limit $pmax)"
+# cgroup v2 migration rule: moving a task into a cgroup needs write access
+# on the LOWEST COMMON ANCESTOR's cgroup.procs too — for an admin process in
+# user.slice writing into a system.slice scope that ancestor is the root
+# cgroup, which is root's. So the delegated cgroup.procs lets admin move
+# tasks WITHIN the scope subtree (what podman needs) but never inject an
+# outside process into it. Assert that boundary first.
+moved=$(runuser -u admin -- env -i PATH=/usr/bin:/bin bash -c \
+    "echo \$\$ > '$cgt/cgroup.procs' 2>/dev/null && echo MOVED=yes || echo MOVED=no")
+is "tasks: an outside admin process cannot inject itself into the scope" "$moved" MOVED=no
+# 1500 guest tasks map to host tasks inside the Sentry/stubs; pids.max=1024
+# makes the mapping hit the ceiling, and hitting it is fatal to this
+# sandbox (the Sentry cannot survive a failed task create) — bounded
+# either way, never over.
 pm exec "$CC" sh -c '
-    i=0; while [ "$i" -lt 1500 ]; do i=$((i+1)); sleep 15 & done
+    i=0; while [ "$i" -lt 1500 ]; do i=$((i+1)); sleep 20 & done
     j=0; for p in $(jobs -p); do j=$((j+1)); done
     echo "GUEST_JOBS=$j"; wait 2>/dev/null; echo GUEST_BOMB_DONE' > "$WORK/guestbomb.out" 2>&1 &
 GBPID=$!
-gpeak=0; end=$((SECONDS + 40))
+gpeak=0; end=$((SECONDS + 90))
 while [ "$SECONDS" -lt "$end" ] && kill -0 "$GBPID" 2>/dev/null; do
     n=$(cat "$cgt/pids.current" 2>/dev/null || echo 0)
     [ "$n" -gt "$gpeak" ] && gpeak=$n
-    sleep 0.5
+    sleep 0.25
 done
 wait "$GBPID" 2>/dev/null
-printf '%s\n' "$(head -5 "$WORK/guestbomb.out")" | sed 's/^/    guest bomb: /'
-info "guest bomb host-side peak pids.current: $gpeak (limit 1024)"
-is "tasks: in-guest fork bomb: host scope pids.current never exceeded pids.max" \
-    "$(yes_no test "$gpeak" -le 1024)" yes
-info "in-guest bomb outcome: $(grep -o 'GUEST_JOBS=[0-9]*' "$WORK/guestbomb.out" | tail -1) $(grep -ci 'cannot fork\|resource temporarily' "$WORK/guestbomb.out") fork-error lines"
-is "tasks: silo C survived the guest bomb" "$(ctr_status "$CC")" running
-cur=$(journal_cursor)
+head -5 "$WORK/guestbomb.out" | sed 's/^/    guest bomb: /'
+gjobs=$(sed -n 's/^GUEST_JOBS=\([0-9]*\).*/\1/p' "$WORK/guestbomb.out" | tail -1)
+info "guest bomb: host peak pids.current=$gpeak (limit $pmax), guest jobs=${gjobs:-died}, fork-error lines: $(grep -ci 'cannot fork\|resource temporarily' "$WORK/guestbomb.out")"
+is "tasks: host pids.current never exceeded pids.max" "$(yes_no test "$gpeak" -le "$pmax")" yes
+is "tasks: the ceiling was actually reached ($gpeak over baseline $pids0)" \
+    "$(yes_no test "$gpeak" -gt "$pids0")" yes
+# crossing the ceiling kills the sandbox OR the guest saw fork failures —
+# either way all 1500 did not become host tasks and stay that way
+if [ -n "$gjobs" ] && [ "$gjobs" -ge 1500 ] && [ "$(ctr_status "$CC")" = running ]; then
+    fail "tasks: all 1500 guest tasks live and the sandbox is healthy — pids.max did not bite"
+else
+    pass "tasks: the bomb was bounded (guest jobs=${gjobs:-died}, ctr=$(ctr_status "$CC" 2>/dev/null || echo gone))"
+fi
+info "memory.events on C's scope after the bomb: $(tr '\n' ' ' 2>/dev/null < "$cgt/memory.events" || printf 'scope gone')"
 sm StopSilo si $SC 10 > /dev/null; is "tasks teardown: StopSilo C rc" "$?" 0
 assert_launch_gone tasks "$TC" "$CC"
 
@@ -202,8 +182,11 @@ k0=$(okill); k0=${k0:-0}
 kcur=$(journal_cursor)
 info "memory.events before the hog: $(tr '\n' ' ' < "$cgb/memory.events")"
 # ~2.6 GiB in a shell variable (tr avoids bash's NUL stripping): the guest's
-# memory is host memory of the Sentry/stubs inside the scope.
-timeout 240 pm exec "$CB" sh -c 'big=$(head -c 2600M /dev/zero | tr "\0" a); echo SURVIVED ${#big}' \
+# memory is host memory of the Sentry/stubs inside the scope. timeout gets
+# the real runuser argv — it cannot exec the pm() shell function.
+timeout 240 runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin \
+    XDG_RUNTIME_DIR=/run/user/1000 podman exec "$CB" \
+    sh -c 'big=$(head -c 2600M /dev/zero | tr "\0" a); echo SURVIVED ${#big}' \
     > "$WORK/hog.out" 2>&1 &
 HOGPID=$!
 peak_k=0; end=$((SECONDS + 240))
