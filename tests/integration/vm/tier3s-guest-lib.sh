@@ -112,8 +112,21 @@ wait_for_bounded() {   # bound one check call; timeout(1) can't exec a
     ( "$@"; echo $? > "$rc" ) &        # status off an rc file — a wedged
     local pid=$!                       # call leaves the file empty.
     while (( s-- > 0 )) && [ ! -s "$rc" ]; do sleep 0.1; done
-    if [ ! -s "$rc" ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$rc"; return 1; fi
+    if [ ! -s "$rc" ]; then
+        # STOP the subshell first (no new children), then kill the whole
+        # descendant tree — a surviving query child keeps the caller's
+        # capture pipe open and can hang vm-exec/qemu-ga past the bound
+        # (Sol r3 P2).
+        kill -STOP "$pid" 2>/dev/null
+        _wf_descendants "$pid" | xargs -r kill -KILL 2>/dev/null
+        kill -KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null; rm -f "$rc"; return 1
+    fi
     local r; read -r r < "$rc"; rm -f "$rc"; wait "$pid" 2>/dev/null; return "$r"
+}
+_wf_descendants() {   # pids under $1, deepest first
+    local k
+    for k in $(pgrep -P "$1" 2>/dev/null); do _wf_descendants "$k"; echo "$k"; done
 }
 unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
 # a failed `systemctl show` (empty answer) is NOT "down" (sol A-iii r1 P2)
