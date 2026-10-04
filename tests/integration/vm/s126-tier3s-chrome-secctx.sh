@@ -137,7 +137,44 @@ done
 is "compositor logged the probe's tagged client acceptance" \
     "$(comp_log | grep -c 'qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe')" 1
 
-step "5. teardown"
+step "5. per-interface operation denials through a real tagged peer (overrides OFF)"
+# Registry visibility is not the gate for these two interfaces — both are
+# QDWIN_GLOBAL_ORDINARY and deliberately stay enumerable; the denial must
+# happen on the OPERATION. Run each probe under the same secctx wrap the
+# bridge client uses (unique instance-id per connection — duplicate ids
+# silently degrade the tagged channel), and assert the compositor answers
+# with the interface's own protocol error. No authorization override is
+# configured anywhere in this image; the denials below are the proof.
+sctx_tagged() {   # sctx_tagged <iid-suffix> <cmd...> — output on stdout
+    local iid="$1"; shift
+    runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin \
+        LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+        QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+        qdistro-secctx-exec --sandbox-engine qdistro.tier3s \
+            --app-id "qdistro.tier3s.s126probe" --instance-id "$iid" -- "$@"
+}
+# (a) zwlr_output_manager_v1: enumerated (ORDINARY) but test/apply refuse.
+is "tagged peer still enumerates zwlr_output_manager_v1" \
+    "$(grep -cx zwlr_output_manager_v1 < "$WORK/globals.tagged")" 1
+out=$(sctx_tagged "$TOK-a1" qdwin-output-probe --test --expect-denied 2>&1); rc=$?
+is "tagged peer: output-manager test refused (protocol error)" "$rc" 0
+is "tagged peer: test denial carried the protocol error line" \
+    "$(printf '%s' "$out" | grep -c 'denied (protocol error')" 1
+out=$(sctx_tagged "$TOK-a2" qdwin-output-probe --apply --expect-denied 2>&1); rc=$?
+is "tagged peer: output-manager apply refused (protocol error)" "$rc" 0
+is "tagged peer: apply denial carried the protocol error line" \
+    "$(printf '%s' "$out" | grep -c 'denied (protocol error')" 1
+# (b) qdwin_stream_input_v1: enumerated for everyone by design (the token
+# in claim() is the gate); a bogus token must get INVALID_TOKEN.
+is "tagged peer enumerates qdwin_stream_input_v1 (public by design)" \
+    "$(grep -cx qdwin_stream_input_v1 < "$WORK/globals.tagged")" 1
+out=$(sctx_tagged "$TOK-b1" qdistro-test-stream-claim-probe 2>&1); rc=$?
+is "tagged peer: stream-input claim(bogus) -> INVALID_TOKEN" \
+    "$rc:$out" "0:[qdistro-test-stream-claim-probe] claim -> invalid_token (as expected)"
+is "compositor logged INVALID_TOKEN for the tagged claim" \
+    "$(yes_no test "$(comp_log | grep -c 'stream_input claim INVALID_TOKEN')" -ge 1)" yes
+
+step "6. teardown"
 sm StopSilo si "$SILO" 10 > /dev/null; is "StopSilo $SILO" "$(silo_state "$SILO")" Stopped
 wait_for 90 unit_down "$(unit_of "$SILO")"
 assert_launch_gone teardown "$TOK" "$(ctr_of "$SILO")"

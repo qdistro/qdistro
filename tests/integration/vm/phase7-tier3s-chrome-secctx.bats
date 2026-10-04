@@ -42,4 +42,10 @@ teardown_file() {
         assert_output_contains "PASS: tier3s-tagged client does NOT see $g"
     done
     assert_output_contains "PASS: compositor logged the probe's tagged client acceptance"
+    assert_output_contains "PASS: tagged peer still enumerates zwlr_output_manager_v1"
+    assert_output_contains "PASS: tagged peer: output-manager test refused (protocol error)"
+    assert_output_contains "PASS: tagged peer: output-manager apply refused (protocol error)"
+    assert_output_contains "PASS: tagged peer enumerates qdwin_stream_input_v1 (public by design)"
+    assert_output_contains "PASS: tagged peer: stream-input claim(bogus) -> INVALID_TOKEN"
+    assert_output_contains "PASS: compositor logged INVALID_TOKEN for the tagged claim"
 }

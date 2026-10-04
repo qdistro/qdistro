@@ -98,7 +98,32 @@ is "foot toplevel carries the [3s:$SF] title prefix" \
     "$(comp_log | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SF\] ")" 1
 drive_gui "$SF" "foot"
 
-step "3. teardown removes both toplevels"
+step "3. per-workload seccomp profile exercised inside each running container"
+# CONTRACT §7/ΔA4: each workload carries its OWN rendered profile file;
+# the decisions reachable with the in-image toolset (bash + coreutils) are
+# exercised live. fchmodat2 is the interesting one: runsc's converter drops
+# the name so an ALLOW would be inert — the profile denies it and the
+# `chmod -h` path must EPERM while plain chmod (fchmodat) works.
+seccomp_probe() {
+    # $1=silo tag $2=container $3=profile-file-name
+    local s="$1" ctr="$2" prof="$3" out
+    out=$(pm inspect "$ctr" --format '{{index .Annotations "io.podman.annotations.seccomp"}}' 2>/dev/null)
+    is "$s: spec carries the $prof profile" "${out##*/}" "$prof"
+    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-p-$$; : > "$f"; chmod 600 "$f" && printf "chmod_rc=0 mode=%s\n" "$(stat -c %a "$f")" || printf "chmod_rc=%s\n" "$?"' 2>&1)
+    is "$s: fchmodat ALLOW effective (plain chmod)" "$out" "chmod_rc=0 mode=600"
+    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-h-$$; : > "$f"; chmod 600 "$f"; chmod -h 700 "$f" 2>/tmp/t3s-sc-e1-$$; printf "nofollow_rc=%s eperm=%s mode=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e1-$$)" "$(stat -c %a "$f")"' 2>&1)
+    is "$s: fchmodat2 path (chmod -h) EPERM, mode unchanged" "$out" "nofollow_rc=1 eperm=1 mode=600"
+    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-l-$$; : > "$f"; ln "$f" /tmp/t3s-sc-ln-$$ 2>/tmp/t3s-sc-e2-$$; printf "ln_rc=%s eperm=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e2-$$)"' 2>&1)
+    is "$s: link/linkat DENY effective" "$out" "ln_rc=1 eperm=1"
+    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-x-$$; : > "$f"; ls -l "$f" 2>/tmp/t3s-sc-e-$$ >/dev/null; printf "ls_rc=%s stderr_bytes=%s\n" "$?" "$(wc -c < /tmp/t3s-sc-e-$$)"' 2>&1)
+    is "$s: llistxattr ALLOW effective (ls -l clean)" "$out" "ls_rc=0 stderr_bytes=0"
+    out=$(pm exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(grep -c NoNewPrivs /proc/self/status)" "$(awk "/^Seccomp:/{print \$2}" /proc/self/status)"' 2>&1)
+    is "$s: NoNewPrivs + seccomp filter mode inside" "$out" "nnp=1 seccomp=2"
+}
+seccomp_probe "$SW" "$(ctr_of "$SW")" weston-terminal.json
+seccomp_probe "$SF" "$(ctr_of "$SF")" foot.json
+
+step "4. teardown removes both toplevels"
 HW=$(t3s_window_handle "$SW"); HF=$(t3s_window_handle "$SF")
 cur=$(journal_cursor)
 for s in "$SW" "$SF"; do sm StopSilo si "$s" 10 > /dev/null; is "StopSilo $s" "$(silo_state "$s")" Stopped; done
