@@ -105,6 +105,14 @@ ACTIVE_SOCKET=$(qdwin_apps_active_socket)
      grep -q 'hello uid=' /tmp/15-bystander.err" || {
     echo "FAIL: RDP probe did not acquire singleton shell role"; exit 1;
 }
+# The lifecycle assertions below require a client that deliberately retains
+# torn-down stream objects. Check the running probe, not just --help: an agent
+# that drops this flag while copying the launch would otherwise report a false
+# product failure at Step 5.
+"$QDWIN_VM_EXEC" "$VMNAME" \
+    "pgrep -u admin -f -- '^/usr/bin/qdwin-bystander --ignore-torn-down\$' >/dev/null" || {
+    echo "ERROR: RDP probe was launched without --ignore-torn-down"; exit 2;
+}
 
 # Spawn a foot terminal to share.
 qdwin_apps_launch foot "foot sleep 600" || {
