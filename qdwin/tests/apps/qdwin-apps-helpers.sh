@@ -716,11 +716,20 @@ qdwin_apps_send_key() {
             KEY_[0-9]) qcode=${key#KEY_} ;;
             *) echo "qdwin-apps: no qcode for $key" >&2; return 1 ;;
         esac
-        qdwin_apps_qmp_key "$qcode" down || return 1
-        sleep 0.03
-        qdwin_apps_qmp_key "$qcode" up || return 1
+        qdwin_apps_qmp_tap "$qcode" || return 1
         sleep 0.03
     done
+}
+
+# Keep a plain key's press and release in one QMP request. Separate virsh
+# processes can be delayed by host load, leaving the guest key held long enough
+# for keyboard auto-repeat before the release reaches QEMU.
+qdwin_apps_qmp_tap() {
+    qdwin_apps_require_vm || return 1
+    local qcode="$1"
+    $QDWIN_VIRSH qemu-monitor-command "$VMNAME" \
+        "{\"execute\": \"input-send-event\", \"arguments\": {\"events\": [{\"type\": \"key\", \"data\": {\"down\": true, \"key\": {\"type\": \"qcode\", \"data\": \"$qcode\"}}}, {\"type\": \"key\", \"data\": {\"down\": false, \"key\": {\"type\": \"qcode\", \"data\": \"$qcode\"}}}]}}" \
+        >/dev/null
 }
 
 # Emit one atomic key transition.  Unlike `virsh send-key`, this lets a chord
