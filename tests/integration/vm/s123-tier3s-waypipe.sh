@@ -90,6 +90,41 @@ is "container OCIRuntime is the tier3s wrapper" \
 is "container carries the launch-dir bind mount" \
     "$(pm inspect --format '{{range .Mounts}}{{if eq .Destination "/run/qdistro/link"}}{{.Source}}:{{.Destination}}{{end}}{{end}}' "$CTR" 2>/dev/null)" \
     "$LAUNCHES/$TOK:/run/qdistro/link"
+is "bridge mount is READ-ONLY in the sandbox view (P2-1: a hostile guest must not fill host /run)" \
+    "$(pm inspect --format '{{range .Mounts}}{{if eq .Destination "/run/qdistro/link"}}{{.RW}}{{end}}{{end}}' "$CTR" 2>/dev/null)" \
+    "false"
+is "sandbox write to the bridge dir is refused" \
+    "$(pm exec "$CTR" sh -c 'touch /run/qdistro/link/.w 2>/dev/null; printf "rc=%s" "$?"' 2>/dev/null)" "rc=1"
+is "host link.sock is admin-owned 0600 (umask 0177 wrap)" \
+    "$(stat -c '%a:%u' "$LAUNCHES/$TOK/link.sock" 2>/dev/null)" "600:1000"
+is "container NetworkMode is none" \
+    "$(pm inspect --format '{{.HostConfig.NetworkMode}}' "$CTR" 2>/dev/null)" none
+# host-uds=open evidence: a host unix socket can only appear as a live
+# socket INSIDE the sandbox when runsc's host-uds flag passes it through.
+is "link.sock is a live socket inside the sandbox (host-uds=open passthrough)" \
+    "$(yes_no pm exec "$CTR" test -S /run/qdistro/link/link.sock)" yes
+# the recorded podman create argv is the exact launch argv: assert the
+# security-critical entries literally, not by pattern family.
+CC=$(pm inspect --format '{{json .Config.CreateCommand}}' "$CTR" 2>/dev/null)
+is "create argv pins --runtime-flag=host-uds=open" \
+    "$(printf '%s' "$CC" | grep -c 'host-uds=open')" 1
+is "create argv pins --network=none" \
+    "$(printf '%s' "$CC" | grep -c -- '"--network=none"')" 1
+is "create argv pins --cap-drop=ALL and no-new-privileges" \
+    "$(printf '%s' "$CC" | grep -c '"--cap-drop=ALL"')+$(printf '%s' "$CC" | grep -c 'no-new-privileges')" "1+1"
+is "create argv pins the weston-terminal seccomp profile" \
+    "$(printf '%s' "$CC" | grep -c 'seccomp=/usr/lib/qdistro/tier3s/seccomp/weston-terminal.json')" 1
+is "create argv mounts ONLY the launch dir under /run/qdistro (no whole-/run or host-root bind)" \
+    "$(printf '%s' "$CC" | grep -oE '"-v","[^"]+:[^"]+"' | grep -vc "$LAUNCHES/$TOK:/run/qdistro/link")" 0
+is "create argv: no --privileged, no root user, no host userns" \
+    "$(printf '%s' "$CC" | grep -cE '"--privileged"|--userns=host|"--user","?0')+$(printf '%s' "$CC" | grep -c '"--userns=keep-id"')" "0+1"
+# the COMPLETE mount set: every host bind whose source lives outside the
+# launch dir or podman's own per-container userdata dir (hosts/resolv/
+# .containerenv) is a leak — log the full list, assert none.
+MTS=$(pm inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}:{{.Destination}}:{{.RW}} {{end}}{{end}}' "$CTR" 2>/dev/null)
+info "container mounts: $MTS"
+is "no host bind outside the launch dir and podman-internal userdata" \
+    "$(printf '%s\n' $MTS | sed 's/:.*//' | grep -v "^$LAUNCHES/$TOK$" | grep -vc '^/run/containers/')" 0
 is "sentry pid is the runsc bundle" \
     "$(readlink "/proc/$(rec "$TOK" sentry_pid)/exe" 2>/dev/null | grep -c '^/usr/libexec/qdistro/runsc/')" 1
 

@@ -500,9 +500,30 @@ t3s_clip_source() {
     runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin \
         USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 \
         WAYLAND_DISPLAY=wayland-1 QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+        ${QDISTRO_CLIP_SRC_DELAY_MS:+QDISTRO_CLIP_SRC_DELAY_MS=$QDISTRO_CLIP_SRC_DELAY_MS} \
         qdistro-secctx-exec --sandbox-engine qdistro.tier3s \
             --app-id "qdistro.tier3s.$silo" --instance-id "clipsrc-$silo-$BASHPID" \
             -- qdistro-test-clipboard-source --mime "$mime" --text "$text"
+}
+
+# register_clip_source <silo> <pid> — the SAME RegisterLaunch call the
+# spawn path makes for the bridge client (root-only, broker re-verifies
+# the live pid+starttime): it binds the tagged source's (pid,starttime)
+# to qdistro.tier3s.<silo> in the launch-record store so the relayed
+# source pid resolves under lineage_enforce. The caller MUST set
+# QDISTRO_CLIP_SRC_DELAY_MS so the registration lands before the source
+# connects and emits (the helper delays inside its own exe, keeping the
+# record's exe axis valid).
+register_clip_source() {
+    local silo="$1" pid="$2" st out
+    st=$(starttime "$pid") || return 1
+    [ -n "$st" ] || return 1
+    out=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.RegisterLaunch \
+        "string:$silo" "string:qdistro.tier3s" "string:qdistro.tier3s.$silo" \
+        "string:clipsrc-$silo-$pid" "string:" "uint64:$pid" "string:tier3s" \
+        "uint64:$st" 2>&1) || return 1
+    printf '%s\n' "$out" | grep -qE 'string "[0-9a-f]{32}"'
 }
 
 # broker_check_clip <src> <dst> <src_app_id> <engine> [src_pid src_starttime]

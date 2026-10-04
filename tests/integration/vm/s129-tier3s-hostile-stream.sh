@@ -3,23 +3,27 @@
 # phase7-tier3s-hostile-stream.bats. Phase B (ΔB9) hostile waypipe stream
 # handling, tier3s/CONTRACT.md §"Security invariants" (blast radius):
 # a malformed or hostile byte stream on EITHER end of a GUI launch's
-# bridge — the sandbox-side waypipe channel sockets (exercised via
-# pidfd_getfd on the runsc sentry's fds, the same bytes a hostile sandbox
-# write puts on the wire toward the TRUSTED client parser) and the
-# wayland-secctx listener (the client→compositor direction) — must
-# only ever kill THAT connection. The compositor, qdshell and other GUI
-# launches are untouched; no broad teardown, no host crash. The -o client
-# unlinks $LAUNCHES/<tok>/link.sock at accept (single-attach), so the
-# channel itself is no longer a connect target post-attach — asserted too.
+# bridge must only ever kill THAT connection — the compositor, qdshell
+# and other GUI launches are untouched; no broad teardown, no host
+# crash. The -o client unlinks $LAUNCHES/<tok>/link.sock at accept
+# (single-attach), so the channel itself is no longer a connect target
+# post-attach — asserted too.
 #   - a second connect to the consumed link.sock refused;
-#   - garbage onto the sandbox-side sockets (waypipe frames at the client
-#     parser) and onto the bridge client's sockets (wayland requests at
-#     qdwin on the tagged channel), via pidfd_getfd;
-#   - garbage + a truncated frame + a flood on the launch's secctx
-#     listener socket (the tagged channel into the compositor);
-#   then: compositor MainPID unchanged + unit active; qdshell active; the
-#   SECOND launch's record/bridge/toplevel all still live; and full
-#   teardown of both launches is clean.
+#   - garbage + a truncated frame + a 20-connection flood on the launch's
+#     secctx listener, DELIVERED while the launch is alive (the delivery
+#     count is asserted — refused blasts are a dead listener, not an
+#     attack);
+#   - attributed fd attacks via pidfd_getfd: the SANDBOX end of the
+#     waypipe link (the sentry's channel fd, found by ss peer-inode
+#     mapping and verified to belong to a runsc process — the same
+#     bytes a hostile sandbox write puts on the wire toward the TRUSTED
+#     client parser) and the bridge client's own socket fds (wayland
+#     requests at qdwin on the tagged channel, waypipe frames at the
+#     sandbox server);
+#   then: compositor + qdshell MainPIDs UNCHANGED (a qdshell restart
+#   would change its pid) and units active; the SECOND launch's
+#   record/bridge/toplevel all still live; and full teardown of both
+#   launches is clean.
 # Runs after tier3s-guest-setup.sh --gui. One PASS/FAIL line per check;
 # `[s129] N passes, M failures`; exit 1 on any failure.
 set -u
@@ -50,6 +54,8 @@ assert_gui_bridge_up "pre-attack/A" "$TA"
 assert_gui_bridge_up "pre-attack/B" "$TB"
 CPID_BEFORE=$(comp_pid)
 is "compositor pid captured" "$(yes_no test -n "$CPID_BEFORE")" yes
+QS_BEFORE=$(as_admin systemctl --user show qdshell.service -p MainPID --value 2>/dev/null)
+is "qdshell main pid captured (restart would change it)" "$(yes_no test -n "$QS_BEFORE" -a "$QS_BEFORE" != 0)" yes
 LSOCK_A=$(secctx_listener "$TA")
 is "A's secctx listener resolved" "$(yes_no test -n "$LSOCK_A" -a -S "$ADMIN_RT/$LSOCK_A")" yes
 
@@ -70,60 +76,25 @@ is "A's secctx listener resolved" "$(yes_no test -n "$LSOCK_A" -a -S "$ADMIN_RT/
 #      die — the verdicts below decide; only B must stay untouched.
 is "single-attach: reconnect to A's consumed link.sock is refused" \
     "$(python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$LAUNCHES/$TA/link.sock" 2>/dev/null && echo accepted || echo refused)" refused
-CTR_A=$(ctr_of "$SA")
-# runsc systrap: the sandbox's sockets live in the sentry/gofer process,
-# not the stub init — every host process whose cmdline carries the
-# container id (plus the init pid itself) is a sandbox-side fd owner.
-CPID_A=$(pm inspect --format '{{.State.Pid}}' "$CTR_A" 2>/dev/null)
-SANDBOX_PIDS=$( { echo "$CPID_A"; pgrep -f "$CTR_A" 2>/dev/null; } | sort -u | grep -v '^$' )
-BP_A=$(rec "$TA" bridge_client_pid)
-is "attack targets resolved (sandbox host pids, bridge client pid)" \
-    "$(yes_no test -n "$SANDBOX_PIDS" -a -n "$BP_A")" yes
-host_hose() {   # host_hose <log> <pid>... — write garbage onto each pid's socket fds
-    local log="$1"; shift
-    python3 - "$@" > "$log" 2>&1 <<'PY'
-import ctypes, glob, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-sent = 0
-for a in sys.argv[1:]:
-    pid = int(a)
-    pidfd = libc.syscall(434, pid, 0)          # pidfd_open
-    if pidfd < 0: continue
-    for l in sorted(glob.glob("/proc/%d/fd/*" % pid)):
-        try: t = os.readlink(l)
-        except OSError: continue
-        if not t.startswith("socket:"): continue
-        n = libc.syscall(438, pidfd, int(os.path.basename(l)), 0)    # pidfd_getfd
-        if n < 0: continue
-        try: os.write(n, os.urandom(512)); sent += 1
-        except OSError: pass
-        os.close(n)
-print("hose done sent=%d" % sent)
-PY
-}
-# shellcheck disable=SC2086
-host_hose "$WORK/hose-sandbox.log" $SANDBOX_PIDS
-sed 's/^/    sandbox-hose: /' "$WORK/hose-sandbox.log"
-is "sandbox->client hose wrote waypipe frames at the trusted parser" \
-    "$(grep -c 'hose done sent=[1-9]' "$WORK/hose-sandbox.log")" 1
-host_hose "$WORK/hose-client.log" "$BP_A"
-sed 's/^/    client-hose: /' "$WORK/hose-client.log"
-is "client->peer hose wrote onto the tagged bridge streams" \
-    "$(grep -c 'hose done sent=[1-9]' "$WORK/hose-client.log")" 1
 
-# the tagged channel into the compositor: garbage + truncated frame + flood
-# on the secctx listener. A refused/absent socket mid-test is legitimate
-# (the connection already died); the verdicts below decide.
+# Attack 1 — the tagged channel into the compositor, while A is fully
+# alive: garbage + a truncated frame + a 20-connection flood on A's
+# secctx listener. Each blast is a NEW connection offering junk; the
+# established tagged channel must be unaffected (or the tagged client
+# may be disconnected — both are in-contract; B is the control).
 python3 - "$ADMIN_RT/$LSOCK_A" > "$WORK/hose.log" 2>&1 <<'PY'
 import os, socket, sys, time
 listener = sys.argv[1]
+sent = 0
 
 def blast(path, payload, label):
+    global sent
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(3)
         s.connect(path)
         s.sendall(payload)
+        sent += 1
         time.sleep(0.05)
         s.close()
         print(f"{label}: sent {len(payload)} bytes to {path}")
@@ -135,23 +106,134 @@ blast(listener, b"\x01\x00\x00\x00\x01\x00\x0c\x00\x02\x00\x00\x00" + os.urandom
       "listener-truncated-frame")
 for i in range(20):
     blast(listener, os.urandom(128), f"listener-flood-{i}")
-print("hose done")
+print(f"hose done delivered={sent}")
 PY
 sed 's/^/    hose: /' "$WORK/hose.log"
 wait_for 15 bash -c "grep -q 'hose done' '$WORK/hose.log'"
-is "the listener hose ran to completion" "$(grep -c 'hose done' "$WORK/hose.log")" 1
+# Delivery matters, not just completion: ENOENT/ECONNREFUSED blasts are a
+# dead listener, not a delivered attack. Require the majority landed.
+is "listener attacks DELIVERED while A's listener was live (>=20 of 22)" \
+    "$(yes_no test "$(grep -c ': sent ' "$WORK/hose.log")" -ge 20)" yes
+
+step "2. listener blast radius (A still live): only junk connections may die"
+is "compositor still the same pid, unit active after the listener blast" \
+    "$(comp_pid):$(as_admin systemctl --user is-active qdwin-compositor.service 2>/dev/null)" \
+    "$CPID_BEFORE:active"
+is "qdshell still the SAME pid (no restart) and active" \
+    "$(as_admin systemctl --user show qdshell.service -p MainPID --value 2>/dev/null):$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" \
+    "$QS_BEFORE:active"
+is "B's bridge channel still established after A's listener blast" \
+    "$(yes_no bridge_stream_live "$TB")" yes
+sleep 1   # let any delayed connection teardown land before the fd attacks
+
+# Attack 2 — the bridge's two protocol ends, attributed precisely.
+# No named in-sandbox wayland socket exists (waypipe fd-passes to the
+# workload) and /proc/pid/fd refuses socket opens (ENXIO), so writes go
+# through pidfd_getfd(2) as host root — but ONLY onto fds whose peer is
+# identified: the SENTRY's channel-socket fd (the sandbox end of the
+# waypipe link — the same bytes a hostile sandbox write puts on the wire
+# toward the TRUSTED client parser) and the bridge client's own socket
+# fds (wayland requests at qdwin on the tagged channel + waypipe frames
+# at the sandbox server). Peer mapping: ss -xp gives each socket's peer
+# inode; the peer's owner is found via /proc/*/fd and must be a runsc
+# process (sentry/gofer) or it is not attacked.
+BP_A=$(rec "$TA" bridge_client_pid)
+is "bridge client pid resolved" "$(yes_no test -n "$BP_A")" yes
+python3 - "$BP_A" "$CPID_BEFORE" > "$WORK/hose-channels.log" 2>&1 <<'PY'
+import ctypes, glob, os, re, subprocess, sys
+libc = ctypes.CDLL(None, use_errno=True)
+client = int(sys.argv[1])
+comp = int(sys.argv[2])
+
+# inode -> owning (pid, exe) for every open socket fd
+owners = {}
+for p in glob.glob("/proc/[0-9]*/fd/*"):
+    pid = int(p.split("/")[2])
+    try: t = os.readlink(p)
+    except OSError: continue
+    m = re.match(r"socket:\[(\d+)\]", t)
+    if not m: continue
+    try: exe = os.readlink("/proc/%d/exe" % pid)
+    except OSError: exe = ""
+    owners[int(m.group(1))] = (pid, int(os.path.basename(p)), exe)
+
+# client socket inodes
+mine = {}
+for l in sorted(glob.glob("/proc/%d/fd/*" % client)):
+    try: t = os.readlink(l)
+    except OSError: continue
+    m = re.match(r"socket:\[(\d+)\]", t)
+    if m: mine[int(os.path.basename(l))] = int(m.group(1))
+
+# peer inode per client socket, from ss -xp. Unix rows are positionally
+# stable: cols 4..7 = "<local> <inode> * <peer-inode>" (local is a path
+# or '*'). Only connected stream sockets interest us.
+peers = {}
+try:
+    out = subprocess.run(["ss", "-xp"], capture_output=True, text=True).stdout
+except OSError:
+    out = ""
+inodes = set(mine.values())
+for line in out.splitlines():
+    cols = line.split()
+    if len(cols) < 8 or cols[0] != "u_str":
+        continue
+    try:
+        local_ino, peer_ino = int(cols[5]), int(cols[7])
+    except ValueError:
+        continue
+    if local_ino in inodes:
+        peers[local_ino] = peer_ino
+
+def hose(pid, fd, label):
+    pidfd = libc.syscall(434, pid, 0)          # pidfd_open
+    if pidfd < 0:
+        print(f"{label}: pidfd_open({pid}) failed"); return 0
+    n = libc.syscall(438, pidfd, fd, 0)        # pidfd_getfd
+    if n < 0:
+        os.close(pidfd); print(f"{label}: pidfd_getfd({pid},{fd}) failed"); return 0
+    try: os.write(n, os.urandom(512))
+    except OSError: pass
+    os.close(n); os.close(pidfd)
+    print(f"{label}: wrote 512B onto pid {pid} fd {fd}")
+    return 1
+
+sent = 0
+chan_peer_fd = None
+for fd, ino in mine.items():
+    pino = peers.get(ino)
+    owner = owners.get(pino) if pino else None
+    if owner and "/usr/libexec/qdistro/runsc/" in owner[2]:
+        chan_peer_fd = (owner[0], owner[1])
+        sent += hose(owner[0], owner[1], "sandbox-end")
+    elif owner and owner[0] == comp:
+        sent += hose(client, fd, "client-wayland-end")
+    elif pino is None:
+        sent += hose(client, fd, "client-unresolved-socket")
+    else:
+        print(f"peer inode {pino} owned by non-bridge process {owner}, skipped")
+if chan_peer_fd is None:
+    print("WARN: no sandbox-end channel fd identified")
+print(f"hose done sent={sent} sandbox_end={'yes' if chan_peer_fd else 'no'}")
+PY
+sed 's/^/    channel-hose: /' "$WORK/hose-channels.log"
+is "waypipe frames written onto the SANDBOX end of the link (at the trusted client parser)" \
+    "$(grep -c 'sandbox_end=yes' "$WORK/hose-channels.log")" 1
+is "hose wrote onto bridge sockets (attributed ends only)" \
+    "$(yes_no test "$(sed -n 's/^hose done sent=\([0-9]*\).*/\1/p' "$WORK/hose-channels.log")" -ge 2)" yes
 sleep 2   # let any delayed connection teardown land before the verdicts
 
-step "2. blast radius: only the attacked connection may die"
+step "3. blast radius after the channel attacks: only A's bridge may die"
 is "compositor still the same pid, unit active" \
     "$(comp_pid):$(as_admin systemctl --user is-active qdwin-compositor.service 2>/dev/null)" \
     "$CPID_BEFORE:active"
-is "qdshell still active" \
-    "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
+is "qdshell still the SAME pid (no restart) and active" \
+    "$(as_admin systemctl --user show qdshell.service -p MainPID --value 2>/dev/null):$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" \
+    "$QS_BEFORE:active"
 is "no compositor/qdshell crash in the journal since the attack" \
     "$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat --since '-30 sec' 2>/dev/null | grep -ciE 'segfault|panic|fatal|assertion.*failed')" 0
 
-step "3. A's bridge: either dropped the bad connection or died — both in-contract"
+step "4. A's bridge: either dropped the bad connection or died — both in-contract"
 BP_A=$(rec "$TA" bridge_client_pid); BS_A=$(rec "$TA" bridge_client_starttime)
 if [ -n "$BP_A" ] && [ "$(starttime "$BP_A" 2>/dev/null)" = "$BS_A" ]; then
     pass "A's bridge client survived the garbage (waypipe dropped the bad stream)"
@@ -162,7 +244,7 @@ else
         "$(qs_ipc tier3focus findSiloHandle "$SA" 2>/dev/null | head -1)" "HANDLE=-1"
 fi
 
-step "4. B's launch is completely untouched"
+step "5. B's launch is completely untouched"
 is "B's record still running" "$(rec "$TB" phase)" running
 is "B's bridge client still live (starttime verified)" \
     "$(st=$(rec "$TB" bridge_client_starttime); p=$(rec "$TB" bridge_client_pid); [ -n "$p" ] && [ "$(starttime "$p" 2>/dev/null)" = "$st" ] && echo yes || echo no)" yes
@@ -171,7 +253,7 @@ is "B's toplevel still in the qdshell model" \
     "$(qs_ipc tier3focus findSiloHandle "$SB" 2>/dev/null | head -1 | grep -cv 'HANDLE=-1')" 1
 is "B's container still running" "$(ctr_status "$(ctr_of "$SB")")" running
 
-step "5. teardown: both launches come down clean"
+step "6. teardown: both launches come down clean"
 for s in $SA $SB; do
     sm StopSilo si "$s" 10 > /dev/null
     is "StopSilo $s" "$(silo_state "$s")" Stopped

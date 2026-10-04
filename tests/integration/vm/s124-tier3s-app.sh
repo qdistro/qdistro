@@ -117,7 +117,7 @@ seccomp_probe() {
     is "$s: link/linkat DENY effective" "$out" "ln_rc=1 eperm=1"
     out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-x-$$; : > "$f"; ls -l "$f" 2>/tmp/t3s-sc-e-$$ >/dev/null; printf "ls_rc=%s stderr_bytes=%s\n" "$?" "$(wc -c < /tmp/t3s-sc-e-$$)"' 2>&1)
     is "$s: llistxattr ALLOW effective (ls -l clean)" "$out" "ls_rc=0 stderr_bytes=0"
-    out=$(pm exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(grep -c NoNewPrivs /proc/self/status)" "$(awk "/^Seccomp:/{print \$2}" /proc/self/status)"' 2>&1)
+    out=$(pm exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(awk "/^NoNewPrivs:/{print \$2}" /proc/self/status)" "$(awk "/^Seccomp:/{print \$2}" /proc/self/status)"' 2>&1)
     is "$s: NoNewPrivs + seccomp filter mode inside" "$out" "nnp=1 seccomp=2"
 }
 seccomp_probe "$SW" "$(ctr_of "$SW")" weston-terminal.json

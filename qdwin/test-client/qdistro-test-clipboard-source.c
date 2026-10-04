@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -189,6 +190,20 @@ int main(int argc, char **argv)
 
 	struct ctx c = {0};
 	c.mime = mime;
+	/* QDISTRO_CLIP_SRC_DELAY_MS: sleep before connecting so a test can
+	 * register this pid in the broker's launch-record store before the
+	 * offer reaches the gate (lineage_enforce relays the client's
+	 * pid+starttime). The delay is inside the binary itself, so the
+	 * record's exe axis still matches after registration — unlike an
+	 * external `sleep && exec` wrapper, which would register exe=sh. */
+	const char *delay = getenv("QDISTRO_CLIP_SRC_DELAY_MS");
+	if (delay && *delay) {
+		long ms = strtol(delay, NULL, 10);
+		if (ms > 0 && ms <= 60000) {
+			struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+			nanosleep(&ts, NULL);
+		}
+	}
 	c.display = wl_display_connect(NULL);
 	if (!c.display) {
 		fprintf(stderr, "wl_display_connect failed\n");

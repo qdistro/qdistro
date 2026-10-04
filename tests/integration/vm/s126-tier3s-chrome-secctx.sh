@@ -145,22 +145,23 @@ step "5. per-interface operation denials through a real tagged peer (overrides O
 # silently degrade the tagged channel), and assert the compositor answers
 # with the interface's own protocol error. No authorization override is
 # configured anywhere in this image; the denials below are the proof.
-sctx_tagged() {   # sctx_tagged <iid-suffix> <cmd...> — output on stdout
+sctx_tagged() {   # sctx_tagged <iid-suffix> <cmd...> — stdout only (secctx-exec logs its wrap on stderr)
     local iid="$1"; shift
     runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin \
         LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
         QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
         qdistro-secctx-exec --sandbox-engine qdistro.tier3s \
-            --app-id "qdistro.tier3s.s126probe" --instance-id "$iid" -- "$@"
+            --app-id "qdistro.tier3s.s126probe" --instance-id "$iid" -- "$@" \
+            2>>"$WORK/sctx_tagged.err"
 }
 # (a) zwlr_output_manager_v1: enumerated (ORDINARY) but test/apply refuse.
 is "tagged peer still enumerates zwlr_output_manager_v1" \
     "$(grep -cx zwlr_output_manager_v1 < "$WORK/globals.tagged")" 1
-out=$(sctx_tagged "$TOK-a1" qdwin-output-probe --test --expect-denied 2>&1); rc=$?
+out=$(sctx_tagged "$TOK-a1" qdwin-output-probe --test --expect-denied); rc=$?
 is "tagged peer: output-manager test refused (protocol error)" "$rc" 0
 is "tagged peer: test denial carried the protocol error line" \
     "$(printf '%s' "$out" | grep -c 'denied (protocol error')" 1
-out=$(sctx_tagged "$TOK-a2" qdwin-output-probe --apply --expect-denied 2>&1); rc=$?
+out=$(sctx_tagged "$TOK-a2" qdwin-output-probe --apply --expect-denied); rc=$?
 is "tagged peer: output-manager apply refused (protocol error)" "$rc" 0
 is "tagged peer: apply denial carried the protocol error line" \
     "$(printf '%s' "$out" | grep -c 'denied (protocol error')" 1
@@ -168,7 +169,7 @@ is "tagged peer: apply denial carried the protocol error line" \
 # in claim() is the gate); a bogus token must get INVALID_TOKEN.
 is "tagged peer enumerates qdwin_stream_input_v1 (public by design)" \
     "$(grep -cx qdwin_stream_input_v1 < "$WORK/globals.tagged")" 1
-out=$(sctx_tagged "$TOK-b1" qdistro-test-stream-claim-probe 2>&1); rc=$?
+out=$(sctx_tagged "$TOK-b1" qdistro-test-stream-claim-probe); rc=$?
 is "tagged peer: stream-input claim(bogus) -> INVALID_TOKEN" \
     "$rc:$out" "0:[qdistro-test-stream-claim-probe] claim -> invalid_token (as expected)"
 is "compositor logged INVALID_TOKEN for the tagged claim" \

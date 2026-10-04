@@ -26,8 +26,11 @@ teardown_file() {
     t3s_log s127
     assert_success
     t3s_no_failures s127
+    assert_output_contains "PASS: broker restarted under lineage_enforce"
+    assert_output_contains "PASS: clip source A registered in the launch-record store"
     assert_output_contains "PASS: qdshell gate line names the real tagged source silo"
     assert_output_contains "PASS: default-deny verdict at set-time"
+    assert_output_contains "PASS: enforce: an unrecorded pid can only deny"
     assert_output_contains "PASS: qdshell denied a png-only tier3s offer before the broker"
     assert_output_contains "PASS: qdshell logged the tier3s mime-strip"
     assert_output_contains "PASS: SaveRule wrote the file"
@@ -39,4 +42,5 @@ teardown_file() {
     assert_output_contains "PASS: receive probe still denies image/png (mime selector)"
     assert_output_contains "PASS: audit: denied transfer row(s) recorded"
     assert_output_contains "PASS: audit: allowed transfer row(s) recorded"
+    assert_output_contains "PASS: lineage_enforce restored"
 }

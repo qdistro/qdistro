@@ -24,9 +24,11 @@ teardown_file() {
     assert_success
     t3s_no_failures s129
     assert_output_contains "PASS: both GUI launches up"
-    assert_output_contains "PASS: the listener hose ran to completion"
+    assert_output_contains "PASS: listener attacks DELIVERED while A's listener was live"
+    assert_output_contains "PASS: waypipe frames written onto the SANDBOX end of the link"
+    assert_output_contains "PASS: hose wrote onto bridge sockets (attributed ends only)"
     assert_output_contains "PASS: compositor still the same pid, unit active"
-    assert_output_contains "PASS: qdshell still active"
+    assert_output_contains "PASS: qdshell still the SAME pid (no restart) and active"
     assert_output_contains "PASS: no compositor/qdshell crash in the journal since the attack"
     assert_output_contains "PASS: B's record still running"
     assert_output_contains "PASS: B's bridge client still live (starttime verified)"
