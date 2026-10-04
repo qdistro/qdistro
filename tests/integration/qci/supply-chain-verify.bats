@@ -106,6 +106,48 @@ make_local_signed_fixture() {
     [[ "$output" == *"differs from test substrate pin"* ]]
 }
 
+@test "cloud cache refreshes sidecars bound to a different artifact name" {
+    make_local_signed_fixture
+    # The same image bytes published under a second name (dated vs floating):
+    # a cache entry written for name A must refresh its sidecars when the
+    # requested URL names name B — without re-downloading the image.
+    mkdir -p "$WORK/remote" "$WORK/bin" "$WORK/cache"
+    cp "$WORK/image.qcow2" "$WORK/remote/dated.qcow2"
+    ( cd "$WORK/remote" && sha256sum dated.qcow2 > dated.qcow2.sha256 )
+    GNUPGHOME="$WORK/gnupg" gpg --batch --quiet --passphrase '' --pinentry-mode loopback \
+        --detach-sign --armor -o "$WORK/remote/dated.qcow2.sha256.asc" "$WORK/remote/dated.qcow2.sha256"
+    cat > "$WORK/bin/wget" <<WEOF
+#!/bin/sh
+out=""; url=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        -O) out="\$2"; shift 2 ;;
+        -q|--show-progress) shift ;;
+        *) url="\$1"; shift ;;
+    esac
+done
+cp "$WORK/remote/\$(basename "\$url")" "\$out"
+WEOF
+    chmod +x "$WORK/bin/wget"
+    cp "$WORK/image.qcow2" "$WORK/cache/cached.qcow2"
+    cp "$WORK/image.qcow2.sha256" "$WORK/cache/cached.qcow2.sha256"
+    cp "$WORK/image.qcow2.sha256.asc" "$WORK/cache/cached.qcow2.sha256.asc"
+    run env PATH="$WORK/bin:$PATH" OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+        bash -c ". '$LIB'; download_verified_cloud_image 'https://fake.test/dated.qcow2' '$WORK/cache/cached.qcow2'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"do not name dated.qcow2"* ]]
+    grep -q 'dated\.qcow2' "$WORK/cache/cached.qcow2.sha256"
+    # A refresh that cannot produce a valid signed sidecar fails closed —
+    # and verify-before-promote leaves the stale-but-signed pair untouched.
+    cp "$WORK/image.qcow2.sha256" "$WORK/cache/cached.qcow2.sha256"
+    cp "$WORK/image.qcow2.sha256.asc" "$WORK/cache/cached.qcow2.sha256.asc"
+    rm "$WORK/remote/dated.qcow2.sha256.asc"
+    run env PATH="$WORK/bin:$PATH" OPENSUSE_TW_KEY="$WORK/local-key.asc" OPENSUSE_TW_FPR="$LOCAL_FPR" \
+        bash -c ". '$LIB'; download_verified_cloud_image 'https://fake.test/dated.qcow2' '$WORK/cache/cached.qcow2'"
+    [ "$status" -ne 0 ]
+    grep -q 'image\.qcow2' "$WORK/cache/cached.qcow2.sha256"
+}
+
 @test "cloud test substrate stamp rejects old snapshot and modified disk" {
     local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf"
     printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \

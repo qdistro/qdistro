@@ -174,6 +174,26 @@ _osci_download_verified_cloud_image() {
 
     if [ -s "$cache" ] && [ -s "$cache.sha256" ] && [ -s "$cache.sha256.asc" ]; then
         echo "[cloud] verifying cached image: $cache"
+        if ! _osci_signed_sha256_for "$cache.sha256" "$base" >/dev/null 2>&1; then
+            # The same image bytes were cached under a different upstream
+            # name (floating vs dated Snapshot name): the cached sidecars
+            # bind the other basename. Refresh just the sidecars — they are
+            # re-verified against the pinned key and the image digest is
+            # re-checked, so the cache still fails closed on anything that
+            # is not a genuine openSUSE-signed artifact for this name.
+            echo "[cloud] cached sidecars do not name $base; refreshing sidecars" >&2
+            local rtmp
+            rtmp="$(mktemp -d "$cache_dir/cloud-sidecar.XXXXXX")" || { _osci_die "mktemp under $cache_dir failed"; return 1; }
+            if ! wget -q -O "$rtmp/$base.sha256" "$url.sha256" \
+                || ! wget -q -O "$rtmp/$base.sha256.asc" "$url.sha256.asc" \
+                || ! verify_opensuse_sha256_signature "$rtmp/$base.sha256" "$rtmp/$base.sha256.asc"; then
+                rm -rf "$rtmp"; _osci_die "sidecar refresh failed for $url"; return 1
+            fi
+            # Verify-before-promote: a half-fetched or unsigned pair can never
+            # poison the cache entry.
+            mv "$rtmp/$base.sha256" "$cache.sha256"; mv "$rtmp/$base.sha256.asc" "$cache.sha256.asc"
+            rm -rf "$rtmp"
+        fi
         verify_cached_cloud_image "$cache" "$cache.sha256" "$cache.sha256.asc" "$base" || return 1
         if [ -n "$expected_pin" ]; then
             actual="$(sha256sum "$cache" | awk '{print $1}')"
