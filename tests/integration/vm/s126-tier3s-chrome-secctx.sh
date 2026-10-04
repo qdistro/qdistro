@@ -274,7 +274,11 @@ step "5b. single-attach: a consumed tier3s context refuses a second client"
 # connect to the SAME listener path again — the compositor must refuse.
 J5B=$(journal_cursor)
 PRE_SECCTX=$(for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done)
-sctx_tagged "$TOK-hold" qdistro-test-window --title "s126hold" &
+# detach the held client's fds: an orphan outliving this driver would
+# otherwise hold qemu-ga's exec pipes open and hang vm-exec past the
+# driver's own exit (observed on b27 — 40 min of dead time).
+sctx_tagged "$TOK-hold" qdistro-test-window --title "s126hold" \
+    </dev/null >"$WORK/s126hold.out" &
 HOLD_WRAP=$!
 # the launch already holds secctx listeners — wait for the DIFF to grow,
 # not for any socket to exist (that predicate is true from the start).
@@ -332,6 +336,7 @@ probe_ctrs_gone() {
     for c in s126p1 s126p2 s126p3; do
         pm container exists "qdistro-tier3s-$c" 2>/dev/null && return 1
     done
+    return 0   # without this the last probe's absent (rc 1) reads as "still there"
 }
 wait_for 90 probe_ctrs_gone \
     && pass "all three bridge-probe containers exited with their probes" \
