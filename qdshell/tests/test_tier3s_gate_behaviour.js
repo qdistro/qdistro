@@ -127,4 +127,52 @@ var mimeTier = QE.compileQmlFunctionWith(cgSrc, "_strictMimeTier", {});
     assert.strictEqual(find("x".repeat(65)), -1);
 })();
 
+// ─── ClipboardGate: v23 sidecar ↔ handle binding (ΔB10) ───────────────────
+
+(function testSourceBoundToHandle() {
+    var bound = QE.compileQmlFunctionWith(cgSrc, "_sourceBoundToHandle", {});
+    var pending = { sandboxEngine: "qdistro.tier3s",
+                    appId: "qdistro.tier3s.s127a",
+                    instanceId: "token-1" };
+    // ensures: a tagged source that owns the focused toplevel (identical
+    // compositor-emitted tuple) MAY relay its (pid, starttime) — this is
+    // what lets a spawn-registered bridge pass lineage enforce
+    assert.strictEqual(bound(pending, {
+        sandboxEngine: "qdistro.tier3s",
+        appId: "qdistro.tier3s.s127a",
+        instanceId: "token-1",
+        pid: 4242, starttime: 999 }), true);
+    // ensures: an untagged (v11) source never takes the bound path — it
+    // already relays via the focus-handle map
+    assert.strictEqual(bound(null, { instanceId: "token-1" }), false);
+    // ensures: a background tagged source (focused toplevel belongs to a
+    // different launch — different instance) does NOT bind → keeps
+    // relaying 0/0 → enforce deny
+    assert.strictEqual(bound(pending, {
+        sandboxEngine: "qdistro.tier3s",
+        appId: "qdistro.tier3s.s127a",
+        instanceId: "token-2" }), false);
+    // ensures: same instance claim but a different silo/app tag can't bind
+    // (sidecar-forgery of another silo's focused window is refused)
+    assert.strictEqual(bound(pending, {
+        sandboxEngine: "qdistro.tier3s",
+        appId: "qdistro.tier3s.s127b",
+        instanceId: "token-1" }), false);
+    assert.strictEqual(bound(pending, {
+        sandboxEngine: "qdistro.tier2",
+        appId: "qdistro.tier3s.s127a",
+        instanceId: "token-1" }), false);
+    // ensures: an empty instance tag can never bind — two distinct clients
+    // of one app would collide on (engine, appId) alone
+    assert.strictEqual(bound(
+        { sandboxEngine: "qdistro.tier3s", appId: "qdistro.tier3s.s127a",
+          instanceId: "" },
+        { sandboxEngine: "qdistro.tier3s", appId: "qdistro.tier3s.s127a",
+          instanceId: "" }), false);
+    // ensures: a missing/absent handle identity fails closed
+    assert.strictEqual(bound(pending, null), false);
+    assert.strictEqual(bound(pending, undefined), false);
+    assert.strictEqual(bound(pending, {}), false);
+})();
+
 console.log("test_tier3s_gate_behaviour: all checks passed");

@@ -317,6 +317,28 @@ Singleton {
         return ClipboardSilo.fromSecctx(sandboxEngine, appId, instanceId);
     }
 
+    // v23 sidecar ↔ handle binding (paravirt ΔB10): when the sidecar
+    // supplied the source silo, the handle's relayed (pid, starttime) is
+    // trustworthy ONLY if the handle's attested secctx tuple is identical
+    // to the sidecar's — i.e. the tagged source IS the focused toplevel's
+    // client (the waypipe bridge case: one wl_client owns both the window
+    // and the offer). A tagged source that does not own the focused
+    // toplevel — a background helper, a foreign launch — can never match:
+    // its sidecar instance differs from the focused toplevel's, so it
+    // keeps relaying 0/0 (enforce-mode deny at the broker). Both sides
+    // of the comparison are compositor-emitted wp_security_context_v1
+    // tags the client cannot rewrite, so a hostile client cannot pick
+    // the match. instanceId must be non-empty: two distinct clients of
+    // one app would otherwise collide on (engine, appId) alone.
+    function _sourceBoundToHandle(pending, handleIdentity) {
+        if (pending === null || !handleIdentity) return false;
+        const inst = pending.instanceId || "";
+        return inst.length > 0
+            && inst === (handleIdentity.instanceId || "")
+            && (pending.sandboxEngine || "") === (handleIdentity.sandboxEngine || "")
+            && (pending.appId || "") === (handleIdentity.appId || "");
+    }
+
     // v23 sidecar handler. Stash the tuple as "pending"; the very next
     // _onSelectionSet consumes it. Overwrites any previous pending entry
     // — by the qdwin contract there is at most one outstanding sidecar
@@ -511,10 +533,13 @@ Singleton {
         // returns synchronously cached results and fires off an async
         // broker round-trip on first sight.
         // If the v23 wire sidecar supplied the source silo, sourceHandle is
-        // explicitly not trusted for source identity; it can name the focused
-        // destination/admin toplevel. Fail closed unless qdwin grows a peer
-        // identity sidecar for the actual selection source.
-        const srcVerified = (pending === null) ? root._ensureVerified(sourceHandle) : false;
+        // only trusted for source identity when it is bound to the sidecar
+        // (the focused toplevel's attested tag IS the source's tag — the
+        // single-client bridge case). Unbound: it can name the focused
+        // destination/admin toplevel — fail closed.
+        const _bound = root._sourceBoundToHandle(
+            pending, root._handleToIdentity[sourceHandle]);
+        const srcVerified = (pending === null || _bound) ? root._ensureVerified(sourceHandle) : false;
         const dstVerified = (focusedHandle !== 4294967295) ? root._ensureVerified(focusedHandle) : false;
         const identityVerified = srcVerified && dstVerified;
         if (!ClipboardBroker.hasKnownIdentity(srcSilo, dstSilo)) {
@@ -530,10 +555,11 @@ Singleton {
         }
         // Relay the source app's kernel-authenticated (pid, starttime) so
         // the broker can attest the source silo via its launch-record store
-        // (P1-1). Only trustworthy when the v23 sidecar source is honoured
-        // (pending === null); otherwise pass 0/0 → broker enforce denies
-        // cross-silo rather than resolving an unrelated handle.
-        const _srcId = (pending === null) ? (root._handleToIdentity[sourceHandle] || {}) : {};
+        // (P1-1). Trustworthy on the v11 path (pending === null) or when the
+        // sidecar is bound to this handle (the tagged source owns the focused
+        // toplevel); otherwise pass 0/0 → broker enforce denies rather than
+        // resolving an unrelated handle.
+        const _srcId = (pending === null || _bound) ? (root._handleToIdentity[sourceHandle] || {}) : {};
         const brokerResult = root._binding.checkClipboardTransfer(srcSilo, dstSilo, mimeList, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
         const decision = ClipboardBroker.parseCheckClipboardTransferResult(brokerResult.exitCode, brokerResult.stdout || "");
         root._logDecisionAndMaybeClear(decisionEntry, decision.verdict, decision.reason);

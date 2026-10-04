@@ -1044,6 +1044,8 @@ executable('qdwin-popup-probe',
 executable('qdistro-test-clipboard-source',
   sources: [
     'test-client/qdistro-test-clipboard-source.c',
+    xdg_shell_client_header,
+    xdg_shell_protocol_code_test,
   ],
   dependencies: [dep_wayland_client],
   install: true,
