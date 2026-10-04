@@ -91,7 +91,10 @@ step "1. weston-terminal renders through the bridge"
 TW=$(up_gui_silo "$SW")
 [ -n "$TW" ] && pass "$SW launch up (token $TW)" || fail "$SW did not come up"
 # the surface's own app_id is the app's (weston-terminal); the launch's
-# marking lands on the title via waypipe's --title-prefix "[3s:<silo>] "
+# marking lands on the title via waypipe's --title-prefix "[3s:<silo>] " —
+# a separate toplevel_title event ~60ms after toplevel_added (title=""),
+# so wait for it rather than racing the journal.
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'toplevel_\(added\|title\) .*title=\"\[3s:$SW\] '" _ "$J0"
 is "weston toplevel carries the [3s:$SW] title prefix" \
     "$(comp_log "$J0" | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SW\] ")" 1
 drive_gui "$SW" "weston"
@@ -99,6 +102,7 @@ drive_gui "$SW" "weston"
 step "2. foot renders through the bridge"
 TF=$(up_gui_silo "$SF")
 [ -n "$TF" ] && pass "$SF launch up (token $TF)" || fail "$SF did not come up"
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'toplevel_\(added\|title\) .*title=\"\[3s:$SF\] '" _ "$J0"
 is "foot toplevel carries the [3s:$SF] title prefix" \
     "$(comp_log "$J0" | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SF\] ")" 1
 drive_gui "$SF" "foot"

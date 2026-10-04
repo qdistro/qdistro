@@ -756,7 +756,7 @@ MUTATIONS = [
      [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
       f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
     ("E2 the bridge dir is not mounted into the sandbox", SPAWN,
-     '    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:rw")    # the token bridge dir, holding only link.sock',
+     '    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:ro")    # the token bridge dir, holding only link.sock; the sandbox only connect()s — ro keeps a hostile guest off the host /run tmpfs (P2-1)',
      '    GUI_MOUNT=()',
      [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
       f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
