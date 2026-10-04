@@ -20,13 +20,12 @@
 #     text/plain + text/uri-list allow-list);
 #   - SaveRule allow on qdistro.clipboard.transfer:sA:sB takes effect:
 #     the broker journal shows `rules reloaded (dbus-saverule)` and the
-#     probe flips to allow. (A RULE-driven live cross-silo set-allow is
-#     structurally impossible under enforce: the destination silo is
-#     always the focused toplevel's, and a source whose relayed pid is
-#     trustworthy must BE the focused toplevel's client — the bound case
-#     — so attested live traffic is necessarily same-silo. Cross-silo
-#     policy is exercised by probes; the live attestation chain is
-#     exercised same-silo below.)
+#     probe flips to allow — then a LIVE cross-silo allow: a tagged
+#     sA-source emitting while sB holds focus reaches
+#     verdict=allow reason=broker:allow because the v35
+#     selection_set_source_peer_identity sidecar relays the SOURCE
+#     client's own (pid, starttime) — the attestation does not depend on
+#     the source owning the focused toplevel.
 #   - live attested ALLOW: a tagged clip source owning a real xdg_toplevel
 #     in its own silo (s127c) is focused, its v23 sidecar binds to the
 #     toplevel's attested tag, its pid relays to the broker, and the
@@ -288,15 +287,52 @@ is "broker journaled the claim-vs-attested override" \
 is "enforce: a forged destination silo still denies (no rule for A->forged)" \
     "$(broker_check_clip "$SA" "forged-dst" "qdistro.tier3s.$SA" "$GUI_ENGINE" "$BP_A" "$BS_A")" deny
 
+step "4a. live rule-driven allow: cross-silo $SA -> $SB (source-peer relay)"
+# Sol-r2: the v35 selection_set_source_peer_identity sidecar carries the
+# SOURCE wl_client's own compositor-observed (pid, starttime), so the gate
+# relays the real source identity even when the source owns no focused
+# toplevel. With the step-4 rule in place, a tagged A-source emitting
+# while B's toplevel holds focus must reach a LIVE verdict=allow — the
+# rule-driven cross-silo broker:allow the tag-equality relay could never
+# prove (it relayed pid 0/0 for an unbound source and hard-denied).
+J4A=$(journal_cursor)
+qs_ipc tier3focus injectFocus "$HB" default > /dev/null
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'seat_focus_changed seat=default handle=$HB'" _ "$J4A" \
+    && pass "seat focus on $SB's toplevel for the cross-silo offer" \
+    || fail "no seat_focus_changed for handle $HB"
+launch_clip_source "$SA" text/plain "s127-live-xfer" "$WORK/clip-src-X.log" \
+    --emit-interval 400
+XSRC_PID=$CLIP_SRC_PID
+CLIP_CPID=$(read_launch_record "$CLIP_LR" "$CLIP_LR_TOK") \
+    && pass "cross-silo source's real client pid resolved ($CLIP_CPID)" \
+    || fail "no launch record for the cross-silo source"
+register_clip_launch "$SA" \
+    && pass "cross-silo clip source A registered in the launch-record store" \
+    || fail "register_clip_source A failed"
+# v35 evidence: the compositor emitted the SOURCE's own pid on the wire —
+# not the focused toplevel's. This relay is what the allow is built on.
+wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'selection_set_source_peer_identity pid=$CLIP_CPID'" _ "$J4A" \
+    && pass "compositor relayed the source's own pid ($CLIP_CPID)" \
+    || fail "no selection_set_source_peer_identity for pid $CLIP_CPID"
+# The emit interval re-offers every 400 ms, so a transient broker
+# unavailability cannot starve the wait; the allow is still earned —
+# deny lines from the same source may precede it (pre-registration
+# emits), but the asserted property is a real allow ever landing.
+wait_for 40 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SA .*dst_silo=$SB .*verdict=allow'" _ "$J4A" \
+    || fail "no live cross-silo allow for $SA->$SB"
+xline=$(qdshell_log "$J4A" | grep 'CLIPBOARD_GATE .*src_silo='"$SA"' .*dst_silo='"$SB"' .*verdict=allow' | tail -1)
+info "gate: $xline"
+is "live rule-driven allow: cross-silo $SA -> $SB (source-peer relay)" \
+    "$(printf '%s' "$xline" | grep -c 'reason=broker:allow')" 1
+kill_clip_src "$XSRC_PID"; CLIP_SRC_PID=""
+
 step "4b. live attested allow: bound tagged source -> same-silo"
-# A rule-driven live cross-silo set-allow is structurally impossible
-# under enforce (see the header): dst_silo is always the FOCUSED
-# toplevel's silo, and a relayed source pid is only trustworthy when the
-# source client OWNS that focused toplevel (v23 sidecar == toplevel's
-# attested tag — ΔB10 binding). The strongest live allow that exists is
-# therefore same-silo: a tagged clip source that owns a real xdg_toplevel
-# in its own silo s127c, focused, registered, verified — the exact trust
-# shape a tier3s bridge takes when its own window holds focus.
+# Same-silo is the other live allow shape: a tagged clip source that owns
+# a real xdg_toplevel in its own silo s127c, focused, registered,
+# verified — the exact trust shape a tier3s bridge takes when its own
+# window holds focus. The v35 sidecar relays the source's own pid here
+# too (it is the same client as the toplevel's), and VerifyClientIdentity
+# gates the same-silo shortcut.
 QDISTRO_CLIP_SRC_DELAY_MS=800 \
     launch_clip_source "$SC" text/plain "s127-own-clip" "$WORK/clip-src-C.log" \
         --toplevel --title "clipsrc-$SC" --emit-interval 400
