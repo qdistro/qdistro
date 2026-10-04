@@ -234,11 +234,52 @@ def _stat_key(path: str) -> tuple[int, int, int, int] | None:
     return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
 
 
-def _is_mount_point(path: str) -> bool:
+MOUNTINFO = "/proc/self/mountinfo"
+
+
+def _unescape_mountinfo(field: str) -> str:
+    # mountinfo octal-escapes space, tab, newline and backslash.
+    out = []
+    i = 0
+    while i < len(field):
+        if field[i] == "\\" and i + 3 < len(field) and field[i + 1 : i + 4].isdigit():
+            out.append(chr(int(field[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return "".join(out)
+
+
+def mount_points(mountinfo_text: str) -> set[str]:
+    """Mount points (field 5) listed in a /proc/<pid>/mountinfo text."""
+    points: set[str] = set()
+    for line in mountinfo_text.splitlines():
+        fields = line.split(" ")
+        if len(fields) >= 5:
+            points.add(_unescape_mountinfo(fields[4]))
+    return points
+
+
+def _is_mount_point(path: str, *, mountinfo: str | None = None) -> bool:
+    """True when ``path`` is a mount point in this mount namespace.
+
+    Uses mountinfo so a bind mount sourced from the same filesystem (same
+    st_dev as its parent, which ``os.path.ismount`` misses) still counts.
+    """
     try:
-        return os.path.ismount(path)
+        real = os.path.realpath(path)
     except OSError:
         return False
+    try:
+        with open(mountinfo or MOUNTINFO, encoding="utf-8", errors="surrogateescape") as handle:
+            text = handle.read()
+    except OSError:
+        try:
+            return os.path.ismount(real)
+        except OSError:
+            return False
+    return real in mount_points(text)
 
 
 class _TooltipFilter(QObject):

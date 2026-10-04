@@ -492,6 +492,53 @@ def test_snapshot_tooltips_disabled_installs_chrome_only_filter(qapp, tmp_path):
     ctrl.stop()
 
 
+def _fake_mountinfo(monkeypatch, tmp_path, points: list[str]) -> None:
+    import qdistro_presentation.qt as qt_mod
+
+    lines = [
+        f"{20 + i} 1 0:{30 + i} / {p.replace(' ', chr(92) + '040')} rw - ext4 /dev/x rw"
+        for i, p in enumerate(points)
+    ]
+    info = tmp_path.parent / f"{tmp_path.name}.mountinfo"
+    info.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(qt_mod, "MOUNTINFO", str(info))
+
+
+def test_mount_points_parse_escaped_fields():
+    from qdistro_presentation.qt import mount_points
+
+    text = (
+        "36 35 98:0 /mnt1 /mnt/parent rw,noatime master:1 - ext3 /dev/root rw\n"
+        "37 36 98:0 /var/lib/qdistro/presentation /var/lib/qdistro/presentation "
+        "ro,nosuid,nodev,noexec - xfs /dev/vda2 rw\n"
+        "38 36 0:40 / /mnt/with\\040space rw - tmpfs tmpfs rw\n"
+    )
+    points = mount_points(text)
+    assert "/var/lib/qdistro/presentation" in points
+    assert "/mnt/with space" in points
+    assert "/mnt/parent" in points
+    assert "/var/lib/qdistro" not in points
+
+
+def test_is_mount_point_reads_mountinfo_for_same_fs_bind(tmp_path, monkeypatch):
+    from qdistro_presentation.qt import _is_mount_point
+
+    target = tmp_path / "presentation"
+    target.mkdir()
+    assert not os.path.ismount(target)
+    _fake_mountinfo(monkeypatch, tmp_path, ["/", str(target)])
+    assert _is_mount_point(str(target)) is True
+    assert _is_mount_point(str(tmp_path)) is False
+
+
+def test_is_mount_point_falls_back_without_mountinfo(tmp_path, monkeypatch):
+    import qdistro_presentation.qt as qt_mod
+
+    monkeypatch.setattr(qt_mod, "MOUNTINFO", str(tmp_path / "absent"))
+    assert qt_mod._is_mount_point("/") is True
+    assert qt_mod._is_mount_point(str(tmp_path)) is False
+
+
 def _count_parses(monkeypatch) -> list[int]:
     import qdistro_presentation.paths as paths_mod
 
@@ -548,10 +595,11 @@ def test_known_identity_still_runs_trust_walk(tmp_path):
 
 
 def test_mounted_directory_polls_stat_and_recovers(qapp, tmp_path, monkeypatch):
-    import qdistro_presentation.qt as qt_mod
-
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
-    monkeypatch.setattr(qt_mod, "_is_mount_point", lambda path: path == str(tmp_path))
+    # Same-filesystem bind: tmp_path keeps its parent's st_dev, so only
+    # mountinfo (not os.path.ismount) can report it as a mount point.
+    assert not os.path.ismount(tmp_path)
+    _fake_mountinfo(monkeypatch, tmp_path, [str(tmp_path)])
     ctrl = PresentationController(
         qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
     )
@@ -573,7 +621,8 @@ def test_mounted_directory_polls_stat_and_recovers(qapp, tmp_path, monkeypatch):
     assert not ctrl._poll.isActive()
 
 
-def test_unmounted_directory_does_not_poll(qapp, tmp_path):
+def test_unmounted_directory_does_not_poll(qapp, tmp_path, monkeypatch):
+    _fake_mountinfo(monkeypatch, tmp_path, ["/", str(tmp_path.parent)])
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     ctrl = PresentationController(
         qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
@@ -599,10 +648,8 @@ def test_watch_add_failure_falls_back_to_poll(qapp, tmp_path, monkeypatch):
 
 
 def test_polled_deletion_does_not_churn(qapp, tmp_path, monkeypatch):
-    import qdistro_presentation.qt as qt_mod
-
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
-    monkeypatch.setattr(qt_mod, "_is_mount_point", lambda path: True)
+    _fake_mountinfo(monkeypatch, tmp_path, [str(tmp_path)])
     ctrl = PresentationController(
         qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
     )
