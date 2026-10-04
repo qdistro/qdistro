@@ -520,6 +520,24 @@ def test_mount_points_parse_escaped_fields():
     assert "/var/lib/qdistro" not in points
 
 
+def test_mount_points_tolerate_malformed_escapes():
+    from qdistro_presentation.qt import mount_points
+
+    text = (
+        "36 35 98:0 / /mnt/bad\\999 rw - ext4 /dev/root rw\n"
+        "37 35 98:0 / /mnt/short\\04 rw - ext4 /dev/root rw\n"
+        "38 35 98:0 / /mnt/tail\\ rw - ext4 /dev/root rw\n"
+        "garbage\n"
+        "\n"
+        "39 35 98:0 / /mnt/ok\\011tab rw - ext4 /dev/root rw\n"
+    )
+    points = mount_points(text)
+    assert "/mnt/bad\\999" in points
+    assert "/mnt/short\\04" in points
+    assert "/mnt/tail\\" in points
+    assert "/mnt/ok\ttab" in points
+
+
 def test_is_mount_point_reads_mountinfo_for_same_fs_bind(tmp_path, monkeypatch):
     from qdistro_presentation.qt import _is_mount_point
 

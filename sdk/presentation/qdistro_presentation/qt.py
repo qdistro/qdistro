@@ -237,13 +237,18 @@ def _stat_key(path: str) -> tuple[int, int, int, int] | None:
 MOUNTINFO = "/proc/self/mountinfo"
 
 
+_OCTAL = frozenset("01234567")
+
+
 def _unescape_mountinfo(field: str) -> str:
-    # mountinfo octal-escapes space, tab, newline and backslash.
+    # mountinfo octal-escapes space, tab, newline and backslash. Anything
+    # that is not a backslash plus three octal digits stays literal.
     out = []
     i = 0
     while i < len(field):
-        if field[i] == "\\" and i + 3 < len(field) and field[i + 1 : i + 4].isdigit():
-            out.append(chr(int(field[i + 1 : i + 4], 8)))
+        digits = field[i + 1 : i + 4]
+        if field[i] == "\\" and len(digits) == 3 and all(c in _OCTAL for c in digits):
+            out.append(chr(int(digits, 8)))
             i += 4
         else:
             out.append(field[i])
