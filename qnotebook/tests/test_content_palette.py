@@ -6,7 +6,13 @@ from dataclasses import replace
 
 import pytest
 from PyQt6.QtCore import QSettings, Qt
-from PyQt6.QtGui import QPalette, QTextCharFormat, QTextDocument, QTextFormat
+from PyQt6.QtGui import (
+    QPalette,
+    QTextBlockFormat,
+    QTextCharFormat,
+    QTextDocument,
+    QTextFormat,
+)
 from qdistro_presentation.model import contrast_ratio, example_snapshot, with_generation
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
@@ -58,11 +64,19 @@ def _adapter(theme_mode: str = "system"):
 
 
 def _record_formats(doc: QTextDocument, style: ContentStyle) -> list[QTextCharFormat]:
-    recorded: list[QTextCharFormat] = []
+    return [fmt for fmt, _bfmt in _record_presented(doc, style)]
+
+
+def _record_presented(
+    doc: QTextDocument, style: ContentStyle
+) -> list[tuple[QTextCharFormat, QTextBlockFormat]]:
+    recorded: list[tuple[QTextCharFormat, QTextBlockFormat]] = []
 
     class _Recorder(ContentPresentationHighlighter):
         def setFormat(self, start, count, fmt):  # noqa: N802
-            recorded.append(QTextCharFormat(fmt))
+            recorded.append(
+                (QTextCharFormat(fmt), QTextBlockFormat(self.currentBlock().blockFormat()))
+            )
             super().setFormat(start, count, fmt)
 
     hi = _Recorder(doc)
@@ -477,14 +491,22 @@ def test_highlighter_paints_toc_and_transclusion_from_style(qapp):
     )
     assert toc_stored
     assert all(color == "#1a5fb4" for color in toc_stored)
-    toc_recorded = _record_formats(toc, _role_style(wiki_link_color="#a9aefe"))
+    toc_recorded = _record_presented(toc, _role_style(wiki_link_color="#a9aefe"))
     marker_fg = [
         fmt.foreground().color().name()
-        for fmt in toc_recorded
-        if "TOC" in (fmt.anchorHref() or "") or fmt.fontItalic()
+        for fmt, bfmt in toc_recorded
+        if bool(bfmt.property(BLOCK_TOC_MARKER)) and not bool(fmt.property(CHAR_WIKILINK))
     ]
-    assert "#a9aefe" in {fmt.foreground().color().name() for fmt in toc_recorded}
-    assert any(color == "#a9aefe" for color in marker_fg)
+    heading_fg = [
+        fmt.foreground().color().name()
+        for fmt, _bfmt in toc_recorded
+        if bool(fmt.property(CHAR_WIKILINK))
+        or (fmt.isAnchor() and (fmt.anchorHref() or "").startswith("qnotebook:#"))
+    ]
+    assert marker_fg
+    assert heading_fg
+    assert all(color == "#a9aefe" for color in marker_fg)
+    assert all(color == "#a9aefe" for color in heading_fg)
 
     trans = QTextDocument()
     markdown_to_qdoc(
@@ -504,9 +526,21 @@ def test_highlighter_paints_toc_and_transclusion_from_style(qapp):
     assert child_stored
     assert all(color == "#7f7f7f" for color in marker_stored)
     assert all(color == "#4a4a4a" for color in child_stored)
-    trans_recorded = _record_formats(trans, _role_style(dim_color="#7c80b4"))
-    dim_fg = [fmt.foreground().color().name() for fmt in trans_recorded]
-    assert "#7c80b4" in dim_fg
+    trans_recorded = _record_presented(trans, _role_style(dim_color="#7c80b4"))
+    placeholder_fg = [
+        fmt.foreground().color().name()
+        for fmt, bfmt in trans_recorded
+        if bool(bfmt.property(BLOCK_TRANSCLUSION))
+    ]
+    child_fg = [
+        fmt.foreground().color().name()
+        for fmt, bfmt in trans_recorded
+        if bool(bfmt.property(BLOCK_TRANSCLUDED_CHILD))
+    ]
+    assert placeholder_fg
+    assert child_fg
+    assert all(color == "#7c80b4" for color in placeholder_fg)
+    assert all(color == "#7c80b4" for color in child_fg)
     assert all(color == "#7f7f7f" for color in marker_stored)
     assert all(color == "#4a4a4a" for color in child_stored)
 
