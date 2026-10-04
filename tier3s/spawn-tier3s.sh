@@ -67,6 +67,7 @@ LIBDIR="$T/usr/lib/qdistro/tier3s"
 LIBEXEC="$T/usr/libexec/qdistro"
 PROBE="$LIBDIR/probe.sh"
 SCOPE_HELPER="$LIBEXEC/qdistro-tier3s-scope"
+BOOTSTRAP="$LIBEXEC/qdistro-tier3s-bootstrap"
 CLEANUP="$LIBEXEC/qdistro-tier3s-cleanup"
 WRAPPER=/usr/libexec/qdistro/tier3s-runsc          # what podman records; never prefixed
 CTL="$T/run/qdistro-tier3s-ctl"
@@ -153,24 +154,35 @@ SECCOMP="$LIBDIR/seccomp/$WORKLOAD.json"
 # record, RegisterLaunch) and the podman mount + host-uds flag below; GUI=0
 # leaves the launch byte-identical to Phase A.
 GUI=0
+GFX=none
 WENV="$LIBDIR/workloads/$WORKLOAD.env"
 if [ -e "$WENV" ] || [ -L "$WENV" ]; then
     { [ -f "$WENV" ] && [ ! -L "$WENV" ] && [ -r "$WENV" ]; } \
         || refuse "workload declaration $WENV is not a regular readable file"
-    gui_seen=0
+    gui_seen=0; gfx_seen=0
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in ''|'#'*) continue ;; esac
         case "$line" in
             GUI=0|GUI=1) ;;
             GUI=*) refuse "workload declaration $WENV: bad GUI value '${line#GUI=}' (want 0 or 1)" ;;
+            GFX=none|GFX=a1) ;;
+            GFX=*) refuse "workload declaration $WENV: bad GFX value '${line#GFX=}' (want none or a1)" ;;
             *=*)   refuse "workload declaration $WENV: unexpected key '${line%%=*}'" ;;
             *)     refuse "workload declaration $WENV: malformed line '$line'" ;;
         esac
-        [ "$gui_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GUI"
-        gui_seen=1; GUI="${line#GUI=}"
+        case "$line" in
+            GUI=*) [ "$gui_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GUI"
+                   gui_seen=1; GUI="${line#GUI=}" ;;
+            GFX=*) [ "$gfx_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GFX"
+                   gfx_seen=1; GFX="${line#GFX=}" ;;
+        esac
     done < "$WENV"
     [ "$gui_seen" = 1 ] || refuse "workload declaration $WENV: no GUI= declaration"
 fi
+# A1 is the gfx pixel transport (paravirt-gpu doc 11): it replaces the
+# waypipe bridge path, it does not run beside it.
+[ "$GUI" = 1 ] && [ "$GFX" = a1 ] \
+    && refuse "workload declaration $WENV: GUI=1 and GFX=a1 are exclusive pixel transports"
 IMAGE="localhost/qdistro/tier3s-$WORKLOAD:latest"
 STATE_PATH=""; GENERATION=""; RESOLVER=()
 if [ -n "$SILO" ]; then
@@ -272,6 +284,17 @@ if [ "$GUI" = 1 ]; then
 fi
 
 # The podman command (CONTRACT.md §5): every flag is load-bearing.
+# The gfx (A1) launch splits run --rm into create -> init -> start so the
+# bootstrap can authorize the Sentry's export-channel connect before any
+# guest code runs (paravirt-gpu doc 11). The annotation is what the
+# runsc wrapper reads back out of the generated config.json to decide
+# whether this create gets the donation socket injected.
+PODMAN_SUB=(run --rm)
+ANN=()
+if [ "$GFX" = a1 ]; then
+    PODMAN_SUB=(create)
+    ANN=(--annotation "qdistro.tier3s.token=$TOKEN")
+fi
 # shellcheck disable=SC2054  # the commas are tmpfs mount options
 PODMAN_ARGV=(
     --runtime "$WRAPPER"                 # the pinned runsc via the wrapper (D-A1 state root inside)
@@ -279,7 +302,8 @@ PODMAN_ARGV=(
     "${DEBUG_FLAGS[@]}"
     "${GUI_RTFLAG[@]}"
     --cgroup-manager=cgroupfs            # with the admin-delegated scope this keeps every process in it (D-A3b)
-    run --rm --name "$CONTAINER"
+    "${PODMAN_SUB[@]}" --name "$CONTAINER"
+    "${ANN[@]}"
     --label "qdistro_tier3s_token=$TOKEN" --label "qdistro_tier3s_unit=$UNIT"
     --security-opt label=disable         # runsc rejects a non-empty SELinux process label
     --security-opt no-new-privileges
@@ -302,15 +326,22 @@ PODMAN_ARGV+=("$IMAGE")
 # image name — the image's own ENTRYPOINT execs `waypipe ... server -- "$@"`.
 # A headless workload runs its argv directly.
 PODMAN_ARGV+=("${APP_ARGV[@]}")
+SCOPE_ENTRY=("$SCOPE_HELPER" enter "$TOKEN" "$ADMIN_UID" -- podman)
+if [ "$GFX" = a1 ]; then
+    # The bootstrap is the first scope process for gfx launches: it does the
+    # same validation+delegation, then drives create/init/verify/start with
+    # the donation channel authorized before start (doc 11).
+    SCOPE_ENTRY=("$BOOTSTRAP" enter "$TOKEN" "$ADMIN_UID" "$CONTAINER" -- podman)
+fi
 SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
     -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G     # set by root; enforcement is Phase C
     "-p" "BindsTo=$UNIT" "-p" "Before=$UNIT"             # never outlives the launch unit; alive through its ExecStop/ExecStopPost
-    -- "$SCOPE_HELPER" enter "$TOKEN" "$ADMIN_UID" -- podman)
+    -- "${SCOPE_ENTRY[@]}")
 
 # --- 7. plan (test/inspection hook; no side effect yet) --------------------
 if [ "${TIER3S_PRINT_PLAN:-0}" = 1 ]; then
-    printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\nGUI=%s\n' \
-        "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT" "$GUI"
+    printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\nGUI=%s\nGFX=%s\n' \
+        "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT" "$GUI" "$GFX"
     printf 'SPAWN_ACTION=%s\nIMAGE=%s\nSTATE=%s\nSECCOMP=%s\nNETWORK=none\nBINDING=%s\n' \
         "$SPAWN_ACTION" "$IMAGE" "${STATE_PATH:-none}" "$SECCOMP" "$BINDING"
     printf 'CTL_DIR=%s\nLAUNCH_DIR=%s\nRUNSC_ROOT=%s\n' "$CTL_DIR" "$LAUNCH_DIR" "$RUNSC_ROOT"

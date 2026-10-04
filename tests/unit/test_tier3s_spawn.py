@@ -60,6 +60,7 @@ fi
 finish() {   # the container's processes end, --rm removes it, its scope goes away
     local c="$F/c/$1" p rel
     [ -d "$c" ] || return 0
+    for p in $(cat "$c/pids" 2>/dev/null); do kill "$p" 2>/dev/null; done
     rm -f "$c/running"
     # rm_keep: the marker survives — an rm that exits 0 but keeps the
     # container, which only the post-removal verdict can expose (A r3 P1)
@@ -150,6 +151,56 @@ for n in sorted(os.listdir(root)):
 print(json.dumps(out, indent=1))
 PY
     ;;
+create)
+    # the GFX split lifecycle (paravirt-gpu doc 11): configuration only —
+    # the container exists, is not running, and gets a live conmon child.
+    printf '%s\n' "$@" > "$F/create_argv"
+    n=""; while [ $# -gt 0 ]; do [ "$1" = --name ] && { n="$2"; break; }; shift; done
+    c="$F/c/$n"; mkdir -p "$c"; touch "$c/exists"
+    tok="$(sed -n 's/^qdistro_tier3s_token=//p' "$F/create_argv")"
+    echo "$tok" > "$c/label"; sed -n 's/^qdistro_tier3s_unit=//p' "$F/create_argv" > "$c/unit_label"
+    echo "$tok$tok" > "$c/id"
+    rel="$(cat "$F/units/qdistro-tier3s-$tok.scope.cgroup" 2>/dev/null)"; echo "$rel" > "$c/scope"
+    sleep 600 >&- 2>&- <&- & cpid=$!   # detach stdio: the caller reads our pipes to EOF
+    echo "$cpid" > "$c/pids"
+    mkdir -p "$T/proc/$cpid"; echo "0::$rel" > "$T/proc/$cpid/cgroup"
+    echo "$cpid (conmon) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 777001 0 0" > "$T/proc/$cpid/stat"
+    echo "$cpid" >> "$T/sys/fs/cgroup$rel/cgroup.procs"
+    cat "$c/id" ;;
+init)
+    c="$F/c/$name"; tok="$(cat "$c/label")"
+    rel="$(cat "$c/scope")"; srel="$rel"
+    [ ! -e "$F/sentry_cgroup" ] || srel="$(cat "$F/sentry_cgroup")"
+    # the Sentry connects to the donation socket during init, before any
+    # guest code: a real connect so the bridge sees real SO_PEERCRED.
+    if [ ! -e "$F/init_noconnect" ]; then
+        python3 - "$T/run/qdistro-tier3s" "qshm-donate-$tok.sock" >&- 2>&- <<'PY' &
+import os, socket, sys, time
+os.chdir(sys.argv[1])
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.connect(sys.argv[2])   # basename only: sun_path is ~108 bytes
+time.sleep(600)
+PY
+        spid=$!
+    else sleep 600 >&- 2>&- <&- & spid=$!
+    fi
+    echo "$spid" > "$c/sentry_pid"; echo "$spid" >> "$c/pids"
+    mkdir -p "$T/proc/$spid"; echo "0::$srel" > "$T/proc/$spid/cgroup"
+    echo "$spid (gvisor_sentry) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 777002 0 0" > "$T/proc/$spid/stat"
+    echo "$spid" >> "$T/sys/fs/cgroup$rel/cgroup.procs" ;;
+start)
+    c="$F/c/$name"; touch "$c/running"
+    tok="$(cat "$c/label")"
+    echo "running $(cat "$c/sentry_pid") $(head -1 "$c/pids") cid$tok" > "$c/inspect_line" ;;
+wait)
+    c="$F/c/$name"
+    for _ in $(seq 1 3000); do
+        [ -e "$c/running" ] || break
+        [ -e "$F/release" ] && break
+        sleep 0.02
+    done
+    finish "$name"; rm -rf "${F:?}/c/$name"
+    echo 0 ;;
 run)
     printf '%s\n' "$@" > "$F/run_argv"
     while [ $# -gt 0 ]; do [ "$1" = --name ] && { name="$2"; break; }; shift; done
@@ -271,6 +322,26 @@ echo "runuser $*" >> "$F/calls"
 # rc 1 the supervisor produces, not podman's "absent" (A r3 P1)
 [ ! -e "$F/runuser_fail" ] || { echo "runuser: injected setup failure" >&2; exit 1; }
 shift 3; exec "$@"
+'''
+
+FAKE_RUNSC = r'''#!/bin/bash
+F=@F@; T=@T@
+echo "runsc $*" >> "$F/calls"
+while [ $# -gt 0 ]; do case "$1" in --*) shift ;; *) break ;; esac; done
+case "${1:-}" in
+state)
+    id="${2:-}"
+    for c in "$F"/c/*/; do
+        [ "$(cat "$c/id" 2>/dev/null)" = "$id" ] || continue
+        spid="$(cat "$c/sentry_pid" 2>/dev/null)"
+        [ ! -e "$F/runsc_wrong_pid" ] || spid=999999
+        [ ! -e "$F/runsc_no_state" ] || { echo "runsc: no such container" >&2; exit 1; }
+        printf '{"id":"%s","pid":%s}\n' "$id" "${spid:-0}"
+        exit 0
+    done
+    echo "runsc: no such container" >&2; exit 1 ;;
+esac
+exit 0
 '''
 
 FAKE_GETENT = r'''#!/bin/bash
@@ -484,6 +555,8 @@ class World:
         libexec.mkdir(parents=True)
         (libexec / "qdistro-tier3s-scope").symlink_to(HELPER)       # the real helper
         (libexec / "qdistro-tier3s-cleanup").symlink_to(CLEANUP)    # the real cleanup
+        (libexec / "qdistro-tier3s-bootstrap").symlink_to(T3S / "qdistro-tier3s-bootstrap")
+        (libexec / "qdistro-tier3s-bridge").symlink_to(T3S / "qdistro-tier3s-bridge")
         sub = {"@F@": str(self.F), "@T@": str(self.T), "@DIGEST@": DIGEST, "@BBB@": "b" * 64}
 
         def fill(text):
@@ -491,6 +564,8 @@ class World:
                 text = text.replace(k, v)
             return text
         write_exec(lib / "probe.sh", fill(FAKE_PROBE))
+        (libexec / "runsc").mkdir()
+        write_exec(libexec / "runsc" / "runsc", fill(FAKE_RUNSC))
         for name, text in (("podman", FAKE_PODMAN), ("systemd-run", FAKE_SYSTEMD_RUN),
                            ("systemctl", FAKE_SYSTEMCTL), ("runuser", FAKE_RUNUSER),
                            ("dbus-send", FAKE_DBUS), ("qdistro-resolve-binding", FAKE_RESOLVER),
@@ -2737,6 +2812,267 @@ def test_workload_declarations_are_parsed_not_sourced(w):
     # the second line is malformed -> refusal; the marker proves nothing ran
     assert r.returncode == 2
     assert not list(w.T.glob("proof*")) and not (w.F / "proof-sourced").exists()
+
+
+# --- GFX=a1: the A1 donation-channel launch (paravirt-gpu doc 11) -----------
+
+def test_gfx_plan_splits_into_create_and_bootstrap_scope(w):
+    """GFX=a1 replaces `podman run --rm` with `create` + the token
+    annotation, and the scope's first process becomes the bootstrap —
+    which alone drives init/verify/start. No waypipe bridge, no host-uds
+    flag, no link mount: A1 is its own transport."""
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    f.write_text("GUI=0\nGFX=a1\n")
+    p = w.plan(argv=GUI_ARGV)
+    assert p["GUI"] == "0" and p["GFX"] == "a1"
+    pa = p["podman"]
+    assert pa[pa.index("--name") - 1] == "create" and "--rm" not in pa
+    i = pa.index("--annotation")
+    assert pa[i + 1] == f"qdistro.tier3s.token={TOKEN}"
+    assert "--runtime-flag=host-uds=open" not in pa
+    assert not any("/run/qdistro/link" in a for a in pa)
+    sc = p["scope"]
+    bi = sc.index(f"{w.T}/usr/libexec/qdistro/qdistro-tier3s-bootstrap")
+    assert sc[bi + 1:bi + 4] == ["enter", TOKEN, str(UID)]
+    assert sc[bi + 4] == "qdistro-tier3s-smoke"          # CONTAINER
+    assert sc[bi + 5] == "--" and sc[bi + 6] == "podman"
+    assert p["bridge"] == []
+
+
+def test_gfx_default_declaration_takes_the_headless_path(w):
+    """A declaration with only GUI=0 (no GFX key) is byte-identical to the
+    pre-GFX headless path: podman run --rm, no annotation, scope helper."""
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    f.write_text("GUI=0\n")
+    p = w.plan(argv=GUI_ARGV)
+    assert p["GFX"] == "none"
+    pa = p["podman"]
+    assert pa[pa.index("--name") - 1] == "--rm" and "run" in pa
+    assert not any(a == "--annotation" for a in pa)
+    assert f"{w.T}/usr/libexec/qdistro/qdistro-tier3s-scope" in p["scope"]
+    assert not any("bootstrap" in a for a in p["scope"])
+
+
+@pytest.mark.parametrize("content", [
+    "GUI=0\nGFX=foo\n",                 # unknown GFX value
+    "GUI=0\nGFX=a1\nGFX=a1\n",          # duplicate GFX key
+    "GUI=0\nGFX=a1\nGUI=0\n",           # duplicate GUI key still refused
+    "GUI=1\nGFX=a1\n",                  # exclusive pixel transports
+    "GFX=a1\n",                         # GFX without any GUI= declaration
+    "GUI=0\nGFX =a1\n",                 # whitespace around the key
+])
+def test_gfx_workload_declaration_refuses(w, content):
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    f.write_text(content)
+    r = w.spawn(argv=GUI_ARGV)
+    assert r.returncode == 2 and "declaration" in r.stderr, r.stderr
+    assert w.first("systemd-run") is None and w.first("dbus-send") is None
+
+
+def _gfx_launch(w, **env):
+    """A declared GFX launch started in the background; returns the proc."""
+    f = w.T / "usr/lib/qdistro/tier3s/workloads/foot.env"
+    f.write_text("GUI=0\nGFX=a1\n")
+    return w.start(argv=GUI_ARGV, **env)
+
+
+def _call_index(w, needle):
+    for i, c in enumerate(w.calls()):
+        if needle in c:
+            return i
+    return None
+
+
+def test_gfx_launch_orders_start_after_authorization(w):
+    """The whole doc-11 sequence against the real bootstrap+bridge and a
+    real donation socket: create -> init (the fake Sentry connects for
+    real) -> runsc state peer check -> AUTH -> start. The calls log
+    proves no `podman start` could have run before the peer check."""
+    p = _gfx_launch(w)
+    try:
+        wait_for(lambda: _call_index(w, "podman start") is not None,
+                 "podman start", p)
+        i_create = _call_index(w, " create --name ")
+        i_init = _call_index(w, "podman init")
+        i_state = _call_index(w, "runsc --ignore-cgroups")
+        i_start = _call_index(w, "podman start")
+        assert None not in (i_create, i_init, i_state, i_start)
+        assert i_create < i_init < i_state < i_start
+        assert "--annotation" in (w.F / "create_argv").read_text()
+        assert f"qdistro.tier3s.token={TOKEN}" in \
+            (w.F / "create_argv").read_text()
+        # and the launch really reached recorded-running
+        wait_for(lambda: (w.ctl / TOKEN / "state").exists()
+                 and w.state().get("phase") == "running",
+                 "recorded running", p)
+        st = w.state()
+        assert st["container_id"].startswith("cid" + TOKEN)
+        assert st["scope_cgroup"].endswith(f"qdistro-tier3s-{TOKEN}.scope")
+        w.set("release")
+        p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0
+    # the donation socket is gone with the launch
+    sock = w.launch_parent / f"qshm-donate-{TOKEN}.sock"
+    assert not sock.exists()
+
+
+def test_gfx_peer_pid_mismatch_refuses_before_start(w):
+    """runsc state naming a different pid than the connected peer: the
+    launch is refused, `podman start` never runs, the created container
+    is removed."""
+    w.set("runsc_wrong_pid")
+    p = _gfx_launch(w)
+    try:
+        wait_for(lambda: _call_index(w, "podman rm") is not None
+                 or p.poll() is not None,
+                 "refusal cleanup", p)
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 2
+        assert _call_index(w, " create --name ") is not None
+        assert _call_index(w, "podman init") is not None
+        assert _call_index(w, "podman start") is None, \
+            "a mismatched peer still reached podman start"
+        assert _call_index(w, "podman rm") is not None, \
+            "the created container was not removed"
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+def test_gfx_peer_outside_scope_refuses_before_start(w):
+    """A peer that connects from outside the launch scope (a same-named
+    nested cgroup under an attacker scope) is refused at the anchored
+    prefix check — no start, container removed."""
+    w.set("sentry_cgroup",
+          f"/system.slice/evil.scope/qdistro-tier3s-{TOKEN}.scope")
+    p = _gfx_launch(w)
+    try:
+        wait_for(lambda: _call_index(w, "podman rm") is not None
+                 or p.poll() is not None,
+                 "refusal cleanup", p)
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 2
+        assert _call_index(w, "podman start") is None
+        assert _call_index(w, "podman rm") is not None
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+def test_gfx_no_sentry_connect_refuses_before_start(w):
+    """No Sentry ever connects to the donation socket: the bounded accept
+    deadline fires, the channel never authorizes, no start."""
+    w.set("init_noconnect")
+    p = _gfx_launch(w, QSHM_ACCEPT_DEADLINE="3")
+    try:
+        wait_for(lambda: _call_index(w, "podman rm") is not None
+                 or p.poll() is not None,
+                 "refusal cleanup", p, timeout=40)
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 2
+        assert _call_index(w, "podman init") is not None
+        assert _call_index(w, "podman start") is None
+        assert _call_index(w, "podman rm") is not None
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+# --- tier3s-runsc: the annotation-driven donation injection ------------------
+
+WRAPPER = T3S / "tier3s-runsc"
+
+
+def _wrap(w, *argv, cfg=None):
+    """Run the real tier3s-runsc under the test root; the fake runsc at
+    libexec/runsc/runsc records the argv it is exec'd with."""
+    if cfg is not None:
+        bdir = w.tmp / "bundle"; bdir.mkdir(exist_ok=True)
+        (bdir / "config.json").write_text(cfg)
+    return subprocess.run(["sh", str(WRAPPER), *argv], env=w.env(),
+                          capture_output=True, text=True, timeout=15)
+
+
+def _runsc_argv(w):
+    calls = [c for c in w.calls() if c.startswith("runsc ")]
+    assert calls, "the wrapper never reached runsc"
+    return calls[-1]
+
+
+def test_wrapper_injects_donation_socket_for_annotated_create(w):
+    cfg = json.dumps({"annotations": {"qdistro.tier3s.token": TOKEN}})
+    b = str(w.tmp / "bundle")
+    r = _wrap(w, "create", "--bundle", b, "cid123", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    a = _runsc_argv(w)
+    assert "--EXPERIMENTAL-qshm" in a
+    assert f"--qshm-export-sock=/run/qdistro-tier3s/qshm-donate-{TOKEN}.sock" in a
+    # EXPERIMENTAL flag precedes create; the socket flag follows it
+    assert a.index("--EXPERIMENTAL-qshm") < a.index("create") \
+        < a.index("--qshm-export-sock=")
+    assert a.rstrip().endswith("cid123")
+
+
+def test_wrapper_bundle_equals_form(w):
+    cfg = json.dumps({"annotations": {"qdistro.tier3s.token": TOKEN}})
+    b = str(w.tmp / "bundle")
+    r = _wrap(w, "create", f"--bundle={b}", "cid123", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    assert "--qshm-export-sock=" in _runsc_argv(w)
+
+
+def test_wrapper_conmon_style_flags_before_create(w):
+    """Global runsc flags with values must not hide the create token."""
+    cfg = json.dumps({"annotations": {"qdistro.tier3s.token": TOKEN}})
+    b = str(w.tmp / "bundle")
+    r = _wrap(w, "--log-level", "debug", "--console-socket", "/tmp/cs",
+            "create", "--bundle", b, "cid123", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    a = _runsc_argv(w)
+    assert a.index("--EXPERIMENTAL-qshm") < a.index(" create ") \
+        or " create " in a
+    assert "--qshm-export-sock=" in a
+    assert "cid123" in a
+
+
+def test_wrapper_headless_create_passes_through(w):
+    cfg = json.dumps({"annotations": {}})
+    b = str(w.tmp / "bundle")
+    r = _wrap(w, "create", "--bundle", b, "cid123", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    a = _runsc_argv(w)
+    assert "qshm" not in a and "EXPERIMENTAL" not in a
+
+
+def test_wrapper_non_create_subcommand_passes_through(w):
+    r = _wrap(w, "state", "cid123")
+    # the fake runsc answers 'state' on an unknown container with rc 1 —
+    # what matters is the argv arrived untouched
+    a = _runsc_argv(w)
+    assert "qshm" not in a and a.rstrip().endswith("state cid123")
+
+
+def test_wrapper_duplicate_annotation_refuses(w):
+    cfg = ('{"annotations":{"qdistro.tier3s.token":"' + TOKEN +
+           '","qdistro.tier3s.token":"' + TOKEN2 + '"}}')
+    b = str(w.tmp / "bundle")
+    r = _wrap(w, "create", "--bundle", b, "cid123", cfg=cfg)
+    assert r.returncode == 125 and "multiple" in r.stderr, r.stderr
+    assert not any(c.startswith("runsc ") for c in w.calls())
+
+
+def test_wrapper_malformed_token_gives_no_channel(w):
+    """A malformed token does not get a socket — the create goes through
+    headless, and the bootstrap's missing connect refuses the launch on
+    its own authority."""
+    cfg = json.dumps({"annotations": {"qdistro.tier3s.token": "tooshort"}})
+    b = str(w.tmp / "bundle")
+    r = _wrap(w, "create", "--bundle", b, "cid123", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    assert "qshm" not in _runsc_argv(w)
 
 
 def test_gui_bridge_is_torn_down_when_the_launch_fails_after_it(w):
