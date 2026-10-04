@@ -6,6 +6,9 @@ setup() {
     T="$BATS_TEST_TMPDIR"
     mkdir -p "$T/build/bundle" "$T/runs"
     export QCI_RUNS_DIR="$T/runs"
+    # A full run may pin its real image in the environment. Each case below
+    # selects from its own build fixture unless it sets a selector explicitly.
+    unset QDISTRO_IMAGE QDISTRO_IMAGE_SHA256 QDISTRO_IMAGE_SHA256_FILE
 }
 
 skip_identity() {

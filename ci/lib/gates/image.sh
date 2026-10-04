@@ -10,7 +10,7 @@
 # visible and tied to the published artifact identity. Read the sidecar only:
 # hashing or decompressing the xz would defeat this switch's purpose.
 gate_image_developer_skip() {
-    local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+    local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
     local selected="${QDISTRO_IMAGE:-}" requested="${QDISTRO_IMAGE_SHA256:-}"
     local digest=none identity=selected sidecar name rec
     if [ -f "$IMAGE_DIR/lib/select-artifact.sh" ]; then
@@ -203,7 +203,7 @@ gate_image() {
     done
 
     local checker="$IMAGE_DIR/verify-contents.sh"
-    local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+    local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
     kv image_build_dir "$build_dir"
     [ -n "$root" ] && kv image_static_root "$root"
 

@@ -70,7 +70,7 @@ if [ -f "$DEST" ] && [ "$FORCE" -ne 1 ]; then
     exit 0
 fi
 
-for tool in virt-customize virt-resize qemu-img wget virt-sparsify; do
+for tool in virt-customize virt-resize virt-cat qemu-img wget virt-sparsify; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "ERROR: $tool not on PATH (need libguestfs + guestfs-tools)" >&2
         exit 3
@@ -86,6 +86,20 @@ install -d "$(dirname "$CLOUD_CACHE")" "$IMG"
 . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
 download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" "$QDISTRO_SUBSTRATE_CLOUD_SHA256" \
     || { echo "[scratch] ERROR: base cloud image failed openSUSE signature/digest verification; refusing to build on an unverified root image" >&2; exit 4; }
+
+# A rolling cloud URL can move ahead of the pinned history repositories even
+# when only its signed checksum changes. zypper install then cannot add
+# packages such as libvirt's systemd-container without downgrading the newer
+# cloud systemd. Require the cloud release to match the selected snapshot
+# before constructing a base; keep package selection within one snapshot.
+CLOUD_RELEASE="$(virt-cat -a "$CLOUD_CACHE" /etc/os-release \
+    | sed -n 's/^VERSION_ID="\([0-9]\{8\}\)"$/\1/p')" || {
+    echo "[scratch] ERROR: cannot read cloud /etc/os-release" >&2; exit 4;
+}
+if [ "$CLOUD_RELEASE" != "$QDISTRO_SUBSTRATE_SNAPSHOT" ]; then
+    echo "[scratch] ERROR: cloud VERSION_ID ${CLOUD_RELEASE:-<missing>} differs from pinned snapshot $QDISTRO_SUBSTRATE_SNAPSHOT; update snapshot.conf to the cloud release and rebuild" >&2
+    exit 4
+fi
 
 [ "$FORCE" -ne 1 ] || qdistro_substrate_replace_safe "$DEST" || exit 2
 

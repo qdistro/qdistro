@@ -141,6 +141,8 @@ else
 fi
 
 # --- attach SDL freerdp peer so the RDP backend gets its keyboard ----
+# Pin TLS: Weston has no NLA credential database, and the default FreeRDP
+# negotiation can fail before the keyboard seat exists.
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
     nohup timeout 90 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
@@ -150,6 +152,11 @@ for i in 1 2 3 4 5 6 7 8; do
     grep -q "seat '" "$WLOG" 2>/dev/null && break
     sleep 1
 done
+grep -q "seat '" "$WLOG" || {
+    echo "FAIL: RDP peer did not create an input seat"
+    tail -20 /tmp/s28-sdl-freerdp.log
+    exit 3
+}
 
 # Wait for the keyboard-grab install log line — RDP backend adds the
 # keyboard cap AFTER seat creation, so this should fire once peer is up.

@@ -239,8 +239,10 @@ match openSUSE's signed checksum. Changing the manifest or build recipe gives
 the next base a new filename; old disks remain available to preserved workers.
 `QDISTRO_VM_BASE=kiwi` remains available when image parity is the test target.
 
-To rotate the snapshot, choose the newest available history snapshot, verify the
-new cloud checksum signature, edit the manifest's digest and snapshot together,
+To rotate the snapshot, verify the new cloud checksum signature and read the
+cloud image's `/etc/os-release` `VERSION_ID`. Select that same history snapshot
+(both OSS and non-OSS repositories must be available), edit the manifest's
+digest and snapshot together,
 then build with `scripts/vm/build-baseweed-from-scratch.sh` followed by
 `scripts/vm/build-baked-baseweed.sh`. The history service retains snapshots for
 roughly a month; schedule a candidate build about weekly. Cloud base builders

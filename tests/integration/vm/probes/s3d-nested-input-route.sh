@@ -147,6 +147,8 @@ echo "PASS: outer qdwin started (S3d route-test enabled)"
 chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 
 # --- attach a peer so outer has a seat + paints ---------------------
+# Weston has a TLS certificate but no NLA credential database; pin TLS so
+# FreeRDP cannot negotiate NLA and leave this test with no input seat.
 runuser -u admin -- env SDL_VIDEODRIVER=dummy \
     nohup timeout 90 sdl-freerdp /v:127.0.0.1:3389 /sec:tls \
         /cert:ignore /u:probe /p:probe \
@@ -156,6 +158,11 @@ for i in 1 2 3 4 5 6 7 8; do
     grep -q "seat '" "$WLOG" 2>/dev/null && break
     sleep 1
 done
+grep -q "seat '" "$WLOG" || {
+    echo "FAIL: RDP peer did not create an input seat"
+    tail -20 /tmp/s3d-sdl-freerdp.log
+    exit 9
+}
 
 # --- start nested weston (pipewire-only publisher) ------------------
 cat >/home/admin/run-s3d-nested.sh <<EOF
