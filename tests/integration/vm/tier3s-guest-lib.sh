@@ -124,6 +124,13 @@ wait_for_bounded() {   # bound one check call; timeout(1) can't exec a
         (( m )) || set +m; return 1    # sequential-command leak Sol
     fi                                 # r4 P2 found in tree-walking).
     local r; read -r r < "$rc"; rm -f "$rc"; wait "$pid" 2>/dev/null
+    # A check that SUCCEEDS while leaving a backgrounded child behind is a
+    # leak too: the stray stays in the check's process group, holds the
+    # caller's capture pipe, and no caller can see its pid to reap it.
+    # Sweep the group on the success path as well — members that wanted
+    # to outlive the check must setsid-detach (the documented out); an
+    # empty group just fails the kill.
+    kill -KILL -- "-$pid" 2>/dev/null || :
     (( m )) || set +m; return "$r"
 }
 unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
