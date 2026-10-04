@@ -1,0 +1,136 @@
+...........................F...............................FFF.....F.... [ 35%]
+........................................................................ [ 70%]
+............................................................             [100%]
+=================================== FAILURES ===================================
+_____________________ test_launch_unit_must_match_the_silo _____________________
+
+w = <test_tier3s_spawn.World object at 0x7f073200a530>
+
+    def test_launch_unit_must_match_the_silo(w):
+        (w.T / "proc/self/cgroup").write_text("0::/system.slice/qdistro-tier3s-silo@other.service\n")
+        r = w.spawn(TIER3S_LAUNCH_UNIT="qdistro-tier3s-silo@other.service")
+>       assert_refused_early(w, r, "does not match this launch")
+
+tests/unit/test_tier3s_spawn.py:814: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+w = <test_tier3s_spawn.World object at 0x7f073200a530>
+r = CompletedProcess(args=['bash', '/home/play2/qdistro/.worktrees/qdistro-tier3s/tier3s/spawn-tier3s.sh', 'headless-smoke...ST MODE: TIER3S_TEST_ROOT=/tmp/pytest-of-play2/pytest-4770/test_launch_unit_must_match_th0/root (not a real launch)\n')
+needle = 'does not match this launch'
+
+    def assert_refused_early(w, r, needle):
+>       assert r.returncode == 2, (r.stdout, r.stderr)
+E       AssertionError: ('', 'spawn-tier3s: TEST MODE: TIER3S_TEST_ROOT=/tmp/pytest-of-play2/pytest-4770/test_launch_unit_must_match_th0/root (not a real launch)
+E         ')
+E       assert 0 == 2
+E        +  where 0 = CompletedProcess(args=['bash', '/home/play2/qdistro/.worktrees/qdistro-tier3s/tier3s/spawn-tier3s.sh', 'headless-smoke...ST MODE: TIER3S_TEST_ROOT=/tmp/pytest-of-play2/pytest-4770/test_launch_unit_must_match_th0/root (not a real launch)\n').returncode
+
+tests/unit/test_tier3s_spawn.py:772: AssertionError
+__________ test_cleanup_systemd_run_failure_is_not_an_absent_verdict ___________
+
+w = <test_tier3s_spawn.World object at 0x7f07320f8eb0>
+
+    def test_cleanup_systemd_run_failure_is_not_an_absent_verdict(w):
+        """astra+fable A r3 P1: a refused StartTransientUnit exits the
+        timeout→systemd-run→runuser→podman chain with a bare 1 BEFORE podman
+        runs. Without an in-call PMRC verdict there is no "absent": the run
+        fails, the record and the launch survive, and no podman call ever ran."""
+        w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+        (w.F / "sdrun_fail_at").write_text("1")
+        r = w.cleanup(TOKEN)
+>       assert r.returncode == 4, r.stderr
+E       AssertionError: Failed to start transient scope unit: injected failure
+E         qdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: scope qdistro-tier3s-0123456789abcdef0123456789abcdef.scope still holds [4001 4002 ]; stopping the scope
+E         qdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: torn down (qdistro-tier3s-smoke)
+E         
+E       assert 0 == 4
+E        +  where 0 = CompletedProcess(args=['bash', '/home/play2/qdistro/.worktrees/qdistro-tier3s/tier3s/qdistro-tier3s-cleanup', '0123456...2 ]; stopping the scope\nqdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: torn down (qdistro-tier3s-smoke)\n').returncode
+
+tests/unit/test_tier3s_spawn.py:1096: AssertionError
+____________ test_cleanup_runuser_failure_is_not_an_absent_verdict _____________
+
+w = <test_tier3s_spawn.World object at 0x7f07320fa030>
+
+    def test_cleanup_runuser_failure_is_not_an_absent_verdict(w):
+        """A r3 P1: the privilege drop itself failing (the scope came up, podman
+        never ran) is likewise a failed query — never "absent"."""
+        w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+        w.set("runuser_fail")
+        r = w.cleanup(TOKEN)
+>       assert r.returncode == 4, r.stderr
+E       AssertionError: runuser: injected setup failure
+E         qdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: scope qdistro-tier3s-0123456789abcdef0123456789abcdef.scope still holds [4001 4002 ]; stopping the scope
+E         qdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: torn down (qdistro-tier3s-smoke)
+E         
+E       assert 0 == 4
+E        +  where 0 = CompletedProcess(args=['bash', '/home/play2/qdistro/.worktrees/qdistro-tier3s/tier3s/qdistro-tier3s-cleanup', '0123456...2 ]; stopping the scope\nqdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: torn down (qdistro-tier3s-smoke)\n').returncode
+
+tests/unit/test_tier3s_spawn.py:1109: AssertionError
+_____ test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query _____
+
+w = <test_tier3s_spawn.World object at 0x7f07320fa0d0>
+
+    def test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query(w):
+        """The PMRC line counts only when it IS the whole output: junk on the
+        call's stdout (a leaking layer above podman) must never smuggle an
+        "absent" past the verdict check."""
+        w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+        (w.F / "exists_stdout").write_text("garbage from an earlier layer\n")
+        r = w.cleanup(TOKEN)
+>       assert r.returncode == 4 and "torn down" not in r.stderr
+E       AssertionError: assert (0 == 4)
+E        +  where 0 = CompletedProcess(args=['bash', '/home/play2/qdistro/.worktrees/qdistro-tier3s/tier3s/qdistro-tier3s-cleanup', '0123456...de=0, stdout='', stderr='qdistro-tier3s-cleanup: 0123456789abcdef0123456789abcdef: torn down (qdistro-tier3s-smoke)\n').returncode
+
+tests/unit/test_tier3s_spawn.py:1122: AssertionError
+______________ test_an_nss_lookup_is_bounded_under_the_token_lock ______________
+
+w = <test_tier3s_spawn.World object at 0x7f07320f96d0>
+
+    def test_an_nss_lookup_is_bounded_under_the_token_lock(w):
+        """fable A r3 P3-2: the admin NSS lookup holds the token lock, so it must
+        be bounded — a wedged getent is killed at its (deadline-capped) bound and
+        the query fails closed, never waited on for the lock's full allowance."""
+        w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+        w.set("getent_hang")
+        t0 = time.time()
+>       r = w.cleanup(TOKEN, TIER3S_TEST_TMO="3")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_tier3s_spawn.py:1196: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_tier3s_spawn.py:576: in cleanup
+    return subprocess.run(["bash", str(CLEANUP), *args], env=self.env(**kw),
+/usr/lib64/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib64/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib64/python3.13/subprocess.py:2155: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['bash', '/home/play2/qdistro/.worktrees/qdistr...>
+endtime = 402253.919807078, orig_timeout = 60, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['bash', '/home/play2/qdistro/.worktrees/qdistro-tier3s/tier3s/qdistro-tier3s-cleanup', '0123456789abcdef0123456789abcdef']' timed out after 60 seconds
+
+/usr/lib64/python3.13/subprocess.py:1269: TimeoutExpired
+=========================== short test summary info ============================
+FAILED tests/unit/test_tier3s_spawn.py::test_launch_unit_must_match_the_silo
+FAILED tests/unit/test_tier3s_spawn.py::test_cleanup_systemd_run_failure_is_not_an_absent_verdict
+FAILED tests/unit/test_tier3s_spawn.py::test_cleanup_runuser_failure_is_not_an_absent_verdict
+FAILED tests/unit/test_tier3s_spawn.py::test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query
+FAILED tests/unit/test_tier3s_spawn.py::test_an_nss_lookup_is_bounded_under_the_token_lock
+5 failed, 199 passed in 153.24s (0:02:33)

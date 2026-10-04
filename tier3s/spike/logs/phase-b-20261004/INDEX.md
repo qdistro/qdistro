@@ -32,7 +32,8 @@ Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
 | `b20c-second-acceptance/` | `bats-20261004T151608Z-3563706` | `493312a25` | **8/10** — s123 + s129 green on fresh workers. s127 driver 93/1 (snapshot-too-early: transient `broker-unavailable` deny raced the post-restart emit; broker-evaluated `broker:deny` landed on the next emit). s124 driver 75/0 but bats wrapper still expected the pre-`e96442f4a` assertion names. Fixed in `5a494c448` |
 | `b21-third-acceptance/` | `bats-20261004T152921Z-3732618` | `5a494c448` | **9/10** — s127 green on a fresh worker (93/1→driver-complete). s124 74/1: `toplevel_title` event lands ~60ms after `toplevel_added`; the prefix check raced the journal. Fixed in `c1f9ec5e6` (+ mutation E2 snippet refresh) |
 | `b22-fourth-acceptance/` | `bats-20261004T153647Z-3857896` | `c1f9ec5e6` | **9/10** — s124 green on a fresh worker (75/0). s127 91/3: A's one-shot source emitted only while `busctl --timeout=200ms` calls still exceeded budget → `broker-unavailable` (fail-closed), no `broker:deny` ever landed. Fixed in `2e23d02a3` (`--emit-interval` for A + scoped kill) |
-| (b23 record attempt) | `qci-tier3s-b23` running | `2e23d02a3` | full 10-file lane with s127 re-offer fix |
+| `b23-fifth-acceptance/` | `bats-20261004T154612Z-3988839` | `2e23d02a3` | **9/10** — s127 green on a fresh worker (94/0). s122 151/1: a SIGKILLed cleanup run's `.call-*` dir outlived the 15s settle wait — by design such dirs are swept by the NEXT `--reap-stale`, so `assert_all_clear` now invokes the designed sweep before counting (`65a79151c`) |
+| `b24-acceptance/` | `bats-20261004T155536Z-4113067` | `65a79151c` | **RECORD RUN: 10/10 pass** — see below |
 
 ## b17 record run (`eac49ad16`) — 10/10 files PASS
 
@@ -53,9 +54,29 @@ VM journals under `b17-acceptance/journals/`:
 | s128 lineage | 54/0 | `s128.log` — after a broker restart under `lineage_enforce` + re-registration: real pid + drifted starttime → deny; forged claim of another silo → the attested silo wins (deny + journal override) |
 | s129 hostile-stream | 72/0 | `s129.log` — garbage over the runsc sentry's socket fds (malformed waypipe frames at the trusted client parser) and over the bridge client's tagged fd kills only that connection; refused re-dial; secctx-listener flood contained |
 
+## b24 record run (`65a79151c`) — 10/10 files PASS
+
+Current record, supersedes b17 for the remediated tree. Fresh workers;
+`b24-acceptance/report.md`, per-file TAP logs + driver transcripts under
+`b24-acceptance/bats/`:
+
+| Driver | Passes | Notes |
+|---|---|---|
+| s120 headless | 196/0 | |
+| s121 denied | 155/0 | |
+| s122 sigkill-cleanup | 152/0 | incl. the `assert_all_clear` designed-sweep call site |
+| s123 waypipe | 76/0 | 0600 `link.sock` observed pre-attach; gofer-netns channel evidence |
+| s124 app | 75/0 | title-prefix waits; per-workload seccomp argv + live syscall probes |
+| s125 lifecycle | 97/0 | |
+| s126 chrome-secctx | 73/0 | per-interface oracle (output-manager deny, stream-claim INVALID_TOKEN) |
+| s127 clipboard-gate | 94/0 | bound same-silo `verdict=allow` + `identity.verify` audit rows; re-offer cadence covers `busctl --timeout=200ms` transients |
+| s128 lineage | 54/0 | |
+| s129 hostile-stream | 78/0 | gofer-netns fd attribution |
+
 ## DONE bar (`03-implementation-plan.md` Phase B)
 
-- **s123–s129 PASS** — b17 table above (record run, single commit, one run).
+- **s123–s129 PASS** — b24 table above (record run, single commit, one run;
+  earlier green: b17 at `eac49ad16` table above).
 - **Screenshots** — `shots/t3s-weston-terminal.png`, `shots/t3s-foot.png`:
   dev VM `t3s-shot-261004-121311-155087-24437` cloned from the b17 golden
   (`qci-golden-bats-261004-115935-17667-18553`), tier3s installed at

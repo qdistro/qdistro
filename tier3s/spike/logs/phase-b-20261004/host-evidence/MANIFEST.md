@@ -21,6 +21,16 @@ own edit was committed as `5bbcec7b7` before its rerun).
 | `python3 tier3s/spike/mutate-guards.py` (full rerun at `5bbcec7b7`) | `mutate-guards-full.log` | 184/184 CAUGHT, 0 problems, EXIT=0 |
 | `python3 -m pytest tests/unit/test_tier3s_spawn.py -q` at `748a1baa1` | `pytest-tier3s-spawn-final.log` | 204 passed — re-verified after the fable remediation (ro mount, bcst anchor) |
 
+## r2 re-verification — `493312a25` (post-GUI-remediation)
+
+| Command | Log | Result |
+|---|---|---|
+| `pytest` the 12 `test_broker_*` files | `pytest-broker-r2.log` | 209 passed — covers `36d779097` (VerifyClientIdentity gate admission) |
+| `node` over all `qdshell/tests/test_*.js` | `jstest-all-r2.log` | 61 files, 0 failures — covers `b6523e801` (sidecar↔handle binding) |
+| `python3 -m pytest tests/unit/test_tier3s_spawn.py -q` | `pytest-tier3s-spawn-r2.log` | 199 passed, 5 failed — all timing-budget timeouts while the b20c image build + mutation harness + 4 preserved VMs loaded the host; the de-flaked test itself passed |
+| `pytest` the same 5 alone | `pytest-tier3s-spawn-r2-isolated.log` | 5 passed in 3.69s — load flake, not a regression |
+| `python3 tier3s/spike/mutate-guards.py` | `mutate-guards-r2.log` | 184/184 CAUGHT, 0 problems — after the E2 `:rw`→`:ro` snippet refresh in `c1f9ec5e6`; baseline 444 passed |
+
 ## Relevant-set file list (pytest-unit-tier3s-relevant.log)
 
 test_tier3s_probe, test_tier3s_provision, test_tier3s_spawn,

@@ -1,0 +1,10 @@
+........................................................................ [ 34%]
+........................................................................ [ 68%]
+.................................................................        [100%]
+=============================== warnings summary ===============================
+../../../../../usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159
+  /usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159: PyGIDeprecationWarning: GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead
+    value = getattr(proxy, attr)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+209 passed, 1 warning in 1.20s
