@@ -30,6 +30,13 @@ qdistro_load_test_substrate() {
         && [[ "$snapshot" =~ ^20[0-9]{6}$ ]] || {
         echo "ERROR: invalid test substrate manifest: $file" >&2; return 1;
     }
+    # A dated per-publish cloud file name (...-Snapshot<date>.qcow2) must
+    # name the same snapshot — otherwise the guest's VERSION_ID and the
+    # repo history silently disagree.
+    if [[ "$cloud_url" =~ Snapshot(20[0-9]{6}) && "${BASH_REMATCH[1]}" != "$snapshot" ]]; then
+        echo "ERROR: $file cloud_url pins Snapshot${BASH_REMATCH[1]} but snapshot=$snapshot — bump them together" >&2
+        return 1
+    fi
     qdistro_substrate_snapshot_fresh "$snapshot" || {
         echo "ERROR: Tumbleweed snapshot $snapshot is older than 14 days (or invalid/future); update $file before building or testing" >&2
         return 1
