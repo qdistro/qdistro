@@ -1,5 +1,5 @@
 purpose=sol r1 finding verification runs
-commit=e80b9798b (assertion fixes uncommitted at run time — staged driver staged into the VM by setup, see t3s-setup logs)
+repo_state=33b99d7529c214547975c2c0f413f84343d8bbf8 + 4 dirty test files (the r1 assertion fixes, uncommitted at run time; t3s-setup stages drivers from the working tree — see each repo-state.tsv)
 runs:
   bats-20261004T224052Z-3299984 netnone s131 42/0 PASS (enetunreach diagnostics asserted)
   bats-20261004T224248Z-3312990 limits s130 83/0 PASS (pids.events max 0->2, memory.events oom 0->1, EACCES on valid writes)

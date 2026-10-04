@@ -18,9 +18,10 @@
 #           not the bomb's outcome, which is fatal to this sandbox;
 #   step 4  MemoryMax=2G (MemorySwapMax=0) OOM-kills: a guest hog pushes
 #           the scope's memory.current over the cap, and the scope's own
-#           memory.events oom/oom_kill counters increment — the
-#           attributable proof (a global OOM does not move them), not a
-#           journal grep; the launch dies and the verified teardown runs;
+#           memory.events.local oom/oom_kill counters increment — the
+#           attributable proof (a global OOM does not move them); a
+#           reaped-scope fallback requires the kernel's own
+#           CONSTRAINT_MEMCG report naming the scope as oom_memcg;
 #   step 5  a recursive cgroup.procs placement re-proof on the live silo —
 #           a limit that does not apply to a straggler is not containment.
 # Runs after tier3s-guest-setup.sh. Each check prints one PASS/FAIL line;
@@ -138,9 +139,12 @@ if [ -n "$TC" ]; then pass "silo C $TC recorded running"; else fail "silo C did 
 cgt="/sys/fs/cgroup$(rec "$TC" scope_cgroup)"
 pids0=$(cat "$cgt/pids.current"); pmax=$(cat "$cgt/pids.max")
 is "tasks: C's scope really is at TasksMax=1024" "$pmax" 1024
-pev() { sed -n 's/^max //p' "$cgt/pids.events" 2>/dev/null; }
+# pids.events.local (not the hierarchical .events) counts denials at THIS
+# cgroup's own pids.max only — a tighter descendant limit cannot move it,
+# so its delta is exactly attributable (sol r2)
+pev() { sed -n 's/^max //p' "$cgt/pids.events.local" 2>/dev/null; }
 pev0=$(pev); pev0=${pev0:-0}
-info "pids.current before the bomb: $pids0 (limit $pmax), pids.events max=$pev0"
+info "pids.current before the bomb: $pids0 (limit $pmax), pids.events.local max=$pev0"
 # cgroup v2 migration rule: moving a task into a cgroup needs write access
 # on the LOWEST COMMON ANCESTOR's cgroup.procs too — for an admin process in
 # user.slice writing into a system.slice scope that ancestor is the root
@@ -167,16 +171,20 @@ while [ "$SECONDS" -lt "$end" ] && kill -0 "$GBPID" 2>/dev/null; do
     sleep 0.25
 done
 wait "$GBPID" 2>/dev/null
+# last latch before the scope can be reaped — a denial that lands between
+# the final poll and the kill still counts (sol r2)
+e=$(pev); [ -n "$e" ] && [ "$e" -gt "$evpeak" ] && evpeak=$e
 head -5 "$WORK/guestbomb.out" | sed 's/^/    guest bomb: /'
 gjobs=$(sed -n 's/^GUEST_JOBS=\([0-9]*\).*/\1/p' "$WORK/guestbomb.out" | tail -1)
-info "guest bomb: host peak pids.current=$gpeak (limit $pmax), pids.events max $pev0 -> $evpeak, guest jobs=${gjobs:-died}, fork-error lines: $(grep -ci 'cannot fork\|resource temporarily' "$WORK/guestbomb.out")"
+info "guest bomb: host peak pids.current=$gpeak (limit $pmax), pids.events.local max $pev0 -> $evpeak, guest jobs=${gjobs:-died}, fork-error lines: $(grep -ci 'cannot fork\|resource temporarily' "$WORK/guestbomb.out")"
 is "tasks: host pids.current never exceeded pids.max" "$(yes_no test "$gpeak" -le "$pmax")" yes
-# the causal latch: pids.events max counts every fork this scope's pids.max
-# denied — without a delta the bound is a coincidence, not enforcement
+# the causal latch: pids.events.local max counts every fork THIS cgroup's
+# pids.max denied — without a delta the bound is a coincidence, not
+# enforcement
 if [ "$evpeak" -gt "$pev0" ]; then
-    pass "tasks: pids.events max grew — this scope's pids.max denied a fork ($pev0 -> $evpeak)"
+    pass "tasks: pids.events.local max grew — this scope's pids.max denied a fork ($pev0 -> $evpeak)"
 else
-    fail "tasks: pids.events max flat ($pev0) — the bound is not proven to be pids.max enforcement"
+    fail "tasks: pids.events.local max flat ($pev0) — the bound is not proven to be pids.max enforcement"
 fi
 # crossing the ceiling kills the sandbox OR the guest saw fork failures —
 # either way all 1500 did not become host tasks and stay that way
@@ -198,11 +206,14 @@ cgb="/sys/fs/cgroup$(rec "$TB" scope_cgroup)"
 # on B so the OOM below is attributable to THIS scope's cap
 is "memory: B's memory.max = 2G" "$(cat "$cgb/memory.max" 2>/dev/null)" 2147483648
 is "memory: B's memory.swap.max = 0" "$(cat "$cgb/memory.swap.max" 2>/dev/null)" 0
-mev() { sed -n "s/^$1 //p" "$cgb/memory.events" 2>/dev/null; }
+# memory.events.local (not the hierarchical .events) counts OOMs triggered
+# by THIS cgroup's own memory.max — a tighter descendant limit, a global
+# OOM, or another cgroup's OOM cannot move it (sol r2)
+mev() { sed -n "s/^$1 //p" "$cgb/memory.events.local" 2>/dev/null; }
 k0=$(mev oom_kill); k0=${k0:-0}
 o0=$(mev oom); o0=${o0:-0}
 kcur=$(journal_cursor)
-info "memory.events before the hog: $(tr '\n' ' ' < "$cgb/memory.events")"
+info "memory.events.local before the hog: $(tr '\n' ' ' 2>/dev/null < "$cgb/memory.events.local" || printf '?')"
 # ~2.6 GiB in a shell variable (tr avoids bash's NUL stripping): the guest's
 # memory is host memory of the Sentry/stubs inside the scope. timeout gets
 # the real runuser argv — it cannot exec the pm() shell function.
@@ -224,21 +235,27 @@ wait "$HOGPID" 2>/dev/null
 k1=$(mev oom_kill); k1=${k1:-$peak_k}
 o1=$(mev oom);      o1=${o1:-$peak_o}
 printf '    hog: %s\n' "$(tail -3 "$WORK/hog.out" | tr '\n' '|')"
-# memory.events oom counts OOMs where THIS cgroup's own limit was the
-# trigger — a global OOM or another cgroup's OOM does not move it, so its
-# delta is the attributable proof; oom_kill counts the victims (sol r1 P2).
-# The counter can vanish with the scope before a poll latches it, so the
-# fallback is a kernel OOM line naming B's own scope token — scoped, never
-# a bare oom grep (a global OOM would not carry it).
-kj=$(journalctl -k --after-cursor="$kcur" --no-pager -o cat 2>/dev/null \
-    | grep -iE 'oom' | grep -c "$TB")
-printf '    kernel oom lines naming %s: %s\n' "$TB" "$kj"
+# Fallback for the counter vanishing with the scope before a poll latches
+# it — gated on the scope being GONE (a readable flat counter is honest
+# failure, not a fallback trigger). The kernel's own constraint report is
+# the evidence: a memcg-limit OOM prints
+#   oom-kill:constraint=CONSTRAINT_MEMCG,...,oom_memcg=<limiting cgroup>,...
+# while a global/ancestor OOM names the victim in task_memcg — which any
+# token grep would match on B's own scope (sol r2 P1). Require the exact
+# oom_memcg field, never a bare token match.
+kj=""
+if [ ! -d "$cgb" ]; then
+    kj=$(journalctl -k --after-cursor="$kcur" --no-pager -o cat 2>/dev/null \
+        | grep -iE 'oom-kill.*constraint=CONSTRAINT_MEMCG' \
+        | grep -m1 "oom_memcg=${cgb#/sys/fs/cgroup},")
+    printf '    kernel CONSTRAINT_MEMCG oom-kill naming B as oom_memcg: %s\n' "${kj:-none}"
+fi
 if [ "$o1" -gt "$o0" ] || [ "$peak_o" -gt "$o0" ]; then
-    pass "memory: B's own memory.max triggered the OOM (oom $o0 -> $o1, peak $peak_o; oom_kill $k0 -> ${k1:-gone})"
-elif [ "$kj" -gt 0 ]; then
-    pass "memory: scope reaped before the counter latched; kernel OOM lines name B's scope ($kj)"
+    pass "memory: B's own memory.max triggered the OOM (memory.events.local oom $o0 -> $o1, peak $peak_o; oom_kill $k0 -> ${k1:-gone})"
+elif [ -n "$kj" ]; then
+    pass "memory: B's own memory.max triggered the OOM (scope reaped before the counter latched; kernel: ${kj:0:160})"
 else
-    fail "memory: B's memory.events oom stayed $o0 and no kernel OOM names its scope — not proven to be B's memory.max (oom_kill $k0 -> ${k1:-gone})"
+    fail "memory: B's memory.events.local oom stayed $o0 and no CONSTRAINT_MEMCG kernel line names it as oom_memcg — not proven to be B's memory.max (oom_kill $k0 -> ${k1:-gone})"
 fi
 # whichever in-scope process died, the launch cannot survive its Sentry
 wait_for 120 unit_down "$UB"
