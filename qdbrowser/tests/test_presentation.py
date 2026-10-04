@@ -253,6 +253,38 @@ def test_apply_presentation_update_restyles_tab_and_sidebar(window):
     dark.apply.assert_any_call(sidebar)
 
 
+def test_disabled_tooltips_swallow_chrome_not_webengine(
+        qapp, tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QToolButton, QWidget
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from qdbrowser.theme import current_controller
+    from qdistro_presentation.model import with_generation
+
+    disabled = with_generation(replace(example_snapshot(), tooltips_enabled=False))
+    write_snapshot(str(tmp_path), disabled, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, _config("system"))
+    ctrl = current_controller()
+    assert ctrl is not None
+    assert ctrl.state.tooltips_enabled is False
+    assert ctrl._tooltip_installed is True
+
+    host = QWidget()
+    chrome = QToolButton(host)
+    chrome.setToolTip("Go back")
+    view = QWebEngineView(host)
+    event = QEvent(QEvent.Type.ToolTip)
+    filt = ctrl._tooltip_filter
+    assert filt.eventFilter(chrome, event) is True
+    assert filt.eventFilter(view, event) is False
+    for child in view.findChildren(QWidget):
+        assert filt.eventFilter(child, event) is False
+    host.setParent(None)
+
+
 def test_new_window_reads_live_controller_theme(monkeypatch, window):
     from unittest.mock import MagicMock
 
