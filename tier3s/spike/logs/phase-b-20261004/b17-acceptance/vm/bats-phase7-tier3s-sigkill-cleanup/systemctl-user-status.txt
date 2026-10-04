@@ -1,0 +1,93 @@
+● qdwin-compositor.service - qdwin compositor (libweston + qdwin-shell.so)
+     Loaded: loaded (/home/admin/.config/systemd/user/qdwin-compositor.service; static)
+     Active: active (running) since Sun 2026-10-04 10:02:02 UTC; 2min 11s ago
+ Invocation: 5002f09d0c3841ff8de577f3841dd10c
+   Main PID: 926 (weston)
+      Tasks: 11 (limit: 4611)
+        CPU: 9.788s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdwin-compositor.service
+             └─926 /usr/bin/weston --config=/home/admin/weston.ini --socket=wayland-1
+
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.018] qdwin: layer-shell mapped ns=qdshell-osd-pipewire-1 layer=3 at 2871,40 320x72
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.241] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-Virtual-1 layer=0 output=0x5636f62c79e0
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.244] qdwin: layer-shell configure ns=qdshell-wallpaper-Virtual-1 layer=0 box=0,0 1920x1080 serial=17
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.244] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-pipewire-0 layer=0 output=0x5636f62c8ec0
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.244] qdwin: layer-shell configure ns=qdshell-wallpaper-pipewire-0 layer=0 box=1920,0 640x480 serial=18
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.244] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-pipewire-1 layer=0 output=0x5636f62ee670
+Oct 04 10:02:35 baseweed-admin weston[926]: [10:02:35.244] qdwin: layer-shell configure ns=qdshell-wallpaper-pipewire-1 layer=0 box=2560,0 640x480 serial=19
+Oct 04 10:02:36 baseweed-admin weston[926]: [10:02:35.999] qdwin: layer-shell mapped ns=qdshell-wallpaper-Virtual-1 layer=0 at 0,0 1920x1080
+Oct 04 10:02:36 baseweed-admin weston[926]: [10:02:36.778] qdwin: layer-shell mapped ns=qdshell-wallpaper-pipewire-0 layer=0 at 1920,0 640x480
+Oct 04 10:02:37 baseweed-admin weston[926]: [10:02:37.670] qdwin: layer-shell mapped ns=qdshell-wallpaper-pipewire-1 layer=0 at 2560,0 640x480
+
+● qdshell.service - qdshell desktop (Quickshell QML on top of qdwin)
+     Loaded: loaded (/home/admin/.config/systemd/user/qdshell.service; enabled; preset: disabled)
+     Active: active (running) since Sun 2026-10-04 10:02:05 UTC; 2min 9s ago
+ Invocation: 4b2c9a2085d94b2cb571548a2f77661f
+    Process: 930 ExecStartPre=/bin/sh -c i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done (code=exited, status=0/SUCCESS)
+   Main PID: 1037 (dbus-run-sessio)
+      Tasks: 49 (limit: 4611)
+        CPU: 30.681s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service
+             ├─1037 /usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
+             ├─1041 dbus-daemon --nofork --print-address 4 --session
+             ├─1042 /usr/bin/qs -p /usr/share/quickshell/qdshell
+             ├─1078 /usr/bin/sh
+             └─1148 /usr/bin/gdbus wait --session org.qdistro.MultiMachineDisplay1
+
+Oct 04 10:04:03 baseweed-admin dbus-run-session[1042]:   INFO qml: [20261004-100403]        PodApps auto-scan: qdistro-tier3s-s122a transitioned to running
+Oct 04 10:04:04 baseweed-admin dbus-run-session[1042]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:04 baseweed-admin dbus-run-session[1042]:   WARN qml: [20261004-100404]       Location Weather is still fetching
+Oct 04 10:04:04 baseweed-admin dbus-run-session[1042]:  ERROR qml: [20261004-100404]       Location Geocoding error: 0
+Oct 04 10:04:05 baseweed-admin dbus-run-session[1042]:   WARN qml: [20261004-100405]        PodApps scan failed for qdistro-tier3s-s122a (exit 2)
+Oct 04 10:04:06 baseweed-admin dbus-run-session[1042]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:08 baseweed-admin dbus-run-session[1042]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:10 baseweed-admin dbus-run-session[1042]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:12 baseweed-admin dbus-run-session[1042]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:14 baseweed-admin dbus-run-session[1042]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+
+● qdlocker.service - qdistro screen locker (qdlocker)
+     Loaded: loaded (/home/admin/.config/systemd/user/qdlocker.service; enabled; preset: disabled)
+    Drop-In: /etc/systemd/user/qdlocker.service.d
+             └─qdshell-path.conf
+     Active: active (running) since Sun 2026-10-04 10:02:05 UTC; 2min 9s ago
+ Invocation: 3c25669c75a84e2d827a7fcc08c7ef66
+       Docs: https://github.com/qdistro/qdistro/tree/main/qdlocker
+    Process: 929 ExecStartPre=/bin/sh -c i=0; while [ ! -S "$$XDG_RUNTIME_DIR/$$WAYLAND_DISPLAY" ]; do i=$$((i+1)); [ $$i -gt 40 ] && exit 1; sleep 0.25; done (code=exited, status=0/SUCCESS)
+   Main PID: 1040 (qdlocker)
+      Tasks: 8 (limit: 4611)
+        CPU: 1.596s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdlocker.service
+             └─1040 /usr/bin/python3 /usr/local/bin/qdlocker
+
+Oct 04 10:02:05 baseweed-admin systemd[857]: Started qdistro screen locker (qdlocker).
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,493 qdlocker.app INFO using built-in defaults (no trusted config file found)
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,530 qdlocker.auth INFO PAM service from env: qdlocker
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,811 qdlocker.wayland INFO locker connected
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,816 qdlocker.idle INFO idle watcher started; timeout=300000ms
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,819 qdlocker.ctrl INFO ctrl socket at /run/user/1000/qdlocker.sock
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,826 qdlocker.app INFO locker bound; initially_locked=False
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,942 qdlocker.logind INFO logind sleep delay-inhibitor acquired (fd=20)
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,945 qdlocker.logind WARNING cannot identify one owned active Wayland session (0 candidates); session lock unavailable
+Oct 04 10:02:05 baseweed-admin qdlocker[1040]: 2026-10-04 10:02:05,947 qdlocker.logind INFO logind automatic sleep locking ready; session=None
+
+● qdistro-cursor-sprites.service - qdistro cursor sprite supplier for qdwin
+     Loaded: loaded (/etc/systemd/user/qdistro-cursor-sprites.service; enabled; preset: disabled)
+     Active: active (running) since Sun 2026-10-04 10:02:05 UTC; 2min 9s ago
+ Invocation: 8c3c1c07fcc44c88ba14f491d91f3ee3
+       Docs: https://github.com/qdistro/qdistro
+   Main PID: 1039 (qdistro-cursor-)
+      Tasks: 1 (limit: 4611)
+        CPU: 31ms
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-cursor-sprites.service
+             └─1039 /usr/bin/qdistro-cursor-sprites
+
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=29 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=30 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=31 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=32 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=33 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=34 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=35 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registered shape=36 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] theme summary: xcursor=36 synthetic=0
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1039]: [cursor-sprites 1039] registration complete; pausing on signalfd (SIGTERM exits cleanly)

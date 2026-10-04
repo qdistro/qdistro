@@ -1,0 +1,93 @@
+● qdwin-compositor.service - qdwin compositor (libweston + qdwin-shell.so)
+     Loaded: loaded (/home/admin/.config/systemd/user/qdwin-compositor.service; static)
+     Active: active (running) since Sun 2026-10-04 10:02:03 UTC; 2min 5s ago
+ Invocation: e043b957a68c4eca9092d62deb3efbdf
+   Main PID: 938 (weston)
+      Tasks: 11 (limit: 4611)
+        CPU: 10.041s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdwin-compositor.service
+             └─938 /usr/bin/weston --config=/home/admin/weston.ini --socket=wayland-1
+
+Oct 04 10:03:59 baseweed-admin weston[938]: [10:03:59.586] qdwin: holding_released handle=3 via default_toplevel_policy (held → normal)
+Oct 04 10:03:59 baseweed-admin weston[938]: [10:03:59.608] qdwin: toplevel_title handle=3 title="[3s:s125b] Wayland Terminal"
+Oct 04 10:03:59 baseweed-admin weston[938]: [10:03:59.608] qdwin: toplevel_app_id handle=3 app_id="org.freedesktop.weston.wayland-terminal"
+Oct 04 10:03:59 baseweed-admin weston[938]: [10:03:59.608] qdwin: mapped handle=3 size=806x491 pos=0,31 (normal)
+Oct 04 10:03:59 baseweed-admin weston[938]: [10:03:59.608] qdwin: focus handle=3 (was 2) seat=default
+Oct 04 10:03:59 baseweed-admin weston[938]: [10:03:59.608] qdwin: seat_focus_changed seat=default handle=3
+Oct 04 10:04:00 baseweed-admin weston[938]: [10:04:00.633] qdwin: toplevel_removed handle=2
+Oct 04 10:04:03 baseweed-admin weston[938]: [10:04:03.654] qdwin: toplevel_removed handle=3
+Oct 04 10:04:03 baseweed-admin weston[938]: [10:04:03.654] qdwin: focus handle=4294967295 (was 3) seat=default
+Oct 04 10:04:03 baseweed-admin weston[938]: [10:04:03.654] qdwin: seat_focus_changed seat=default handle=4294967295
+
+● qdshell.service - qdshell desktop (Quickshell QML on top of qdwin)
+     Loaded: loaded (/home/admin/.config/systemd/user/qdshell.service; enabled; preset: disabled)
+     Active: active (running) since Sun 2026-10-04 10:02:05 UTC; 2min 3s ago
+ Invocation: e860b9ad93f34dd88804291cd1a352e8
+    Process: 941 ExecStartPre=/bin/sh -c i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done (code=exited, status=0/SUCCESS)
+   Main PID: 1033 (dbus-run-sessio)
+      Tasks: 49 (limit: 4611)
+        CPU: 32.301s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service
+             ├─1033 /usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
+             ├─1035 dbus-daemon --nofork --print-address 4 --session
+             ├─1036 /usr/bin/qs -p /usr/share/quickshell/qdshell
+             ├─1074 /usr/bin/sh
+             └─1133 /usr/bin/gdbus wait --session org.qdistro.MultiMachineDisplay1
+
+Oct 04 10:04:03 baseweed-admin podman[13078]: 2026-10-04 10:04:03.211094249 +0000 UTC m=+0.041852086 container exec_died 759cfe68e58b2d56d1b4ae4b7f3af79abb1a65eae0009d525ed5ee5ee9d5d78e (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s125b, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.version=20260930.37.208, org.qdistro.tier3s.workload=weston-terminal, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.vendor=openSUSE Project, io.buildah.version=1.44.1, execID=15d0e1120e4786ddd9d932a547e397cef2d31f3e3f3631db34aae5ae6d8bd5c3, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.version=20260930.37.208, qdistro_tier3s_unit=qdistro-tier3s-silo@s125b.service, qdistro_tier3s_token=af55d2aa29053bbf30b325baad71c7e0, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.qdistro.snapshot=20260930, org.opensuse.base.url=https://www.opensuse.org)
+Oct 04 10:04:03 baseweed-admin podman[13025]: 2026-10-04 10:04:03.250180191 +0000 UTC m=+0.223414725 container exec_died 759cfe68e58b2d56d1b4ae4b7f3af79abb1a65eae0009d525ed5ee5ee9d5d78e (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s125b, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.vendor=openSUSE Project, qdistro_tier3s_token=af55d2aa29053bbf30b325baad71c7e0, org.qdistro.tier3s.workload=weston-terminal, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.url=https://www.opensuse.org, execID=15d0e1120e4786ddd9d932a547e397cef2d31f3e3f3631db34aae5ae6d8bd5c3, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.version=20260930.37.208, org.qdistro.snapshot=20260930, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, qdistro_tier3s_unit=qdistro-tier3s-silo@s125b.service, io.buildah.version=1.44.1, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime)
+Oct 04 10:04:03 baseweed-admin dbus-run-session[1036]:   INFO qml: [20261004-100403]  Tier3FocusIPC findSiloHandle silo=s125b → HANDLE=3
+Oct 04 10:04:03 baseweed-admin dbus-run-session[1036]:   INFO qml: [20261004-100403]        PodApps cache refresh loaded 0 apps
+Oct 04 10:04:03 baseweed-admin dbus-run-session[1036]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:03 baseweed-admin dbus-run-session[1036]:   WARN qml: [20261004-100403]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:04:04 baseweed-admin dbus-run-session[1036]:   WARN qml: [20261004-100404]       Location Weather is still fetching
+Oct 04 10:04:04 baseweed-admin dbus-run-session[1036]:  ERROR qml: [20261004-100404]       Location Geocoding error: 0
+Oct 04 10:04:05 baseweed-admin dbus-run-session[1036]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:04:07 baseweed-admin dbus-run-session[1036]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+
+● qdlocker.service - qdistro screen locker (qdlocker)
+     Loaded: loaded (/home/admin/.config/systemd/user/qdlocker.service; enabled; preset: disabled)
+    Drop-In: /etc/systemd/user/qdlocker.service.d
+             └─qdshell-path.conf
+     Active: active (running) since Sun 2026-10-04 10:02:05 UTC; 2min 3s ago
+ Invocation: 02dc8d7e406748d5b606bbd06c4401c9
+       Docs: https://github.com/qdistro/qdistro/tree/main/qdlocker
+    Process: 939 ExecStartPre=/bin/sh -c i=0; while [ ! -S "$$XDG_RUNTIME_DIR/$$WAYLAND_DISPLAY" ]; do i=$$((i+1)); [ $$i -gt 40 ] && exit 1; sleep 0.25; done (code=exited, status=0/SUCCESS)
+   Main PID: 1039 (qdlocker)
+      Tasks: 8 (limit: 4611)
+        CPU: 1.392s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdlocker.service
+             └─1039 /usr/bin/python3 /usr/local/bin/qdlocker
+
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,228 qdlocker.app INFO using built-in defaults (no trusted config file found)
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,266 qdlocker.auth INFO PAM service from env: qdlocker
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,594 qdlocker.wayland INFO locker connected
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,599 qdlocker.idle INFO idle watcher started; timeout=300000ms
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,602 qdlocker.ctrl INFO ctrl socket at /run/user/1000/qdlocker.sock
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,606 qdlocker.app INFO locker bound; initially_locked=False
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,701 qdlocker.logind INFO logind sleep delay-inhibitor acquired (fd=20)
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,703 qdlocker.logind WARNING cannot identify one owned active Wayland session (0 candidates); session lock unavailable
+Oct 04 10:02:06 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:06,704 qdlocker.logind INFO logind automatic sleep locking ready; session=None
+Oct 04 10:02:29 baseweed-admin qdlocker[1039]: 2026-10-04 10:02:29,726 qdlocker.logind INFO logind session rebound in place; session=None
+
+● qdistro-cursor-sprites.service - qdistro cursor sprite supplier for qdwin
+     Loaded: loaded (/etc/systemd/user/qdistro-cursor-sprites.service; enabled; preset: disabled)
+     Active: active (running) since Sun 2026-10-04 10:02:05 UTC; 2min 3s ago
+ Invocation: 6a4d40b9a85b4b9989eadacd8f06a04a
+       Docs: https://github.com/qdistro/qdistro
+   Main PID: 1034 (qdistro-cursor-)
+      Tasks: 1 (limit: 4611)
+        CPU: 30ms
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/qdistro-cursor-sprites.service
+             └─1034 /usr/bin/qdistro-cursor-sprites
+
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=29 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=30 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=31 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=32 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=33 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=34 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=35 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registered shape=36 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] theme summary: xcursor=36 synthetic=0
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1034]: [cursor-sprites 1034] registration complete; pausing on signalfd (SIGTERM exits cleanly)

@@ -1,0 +1,200 @@
+[spin-test-vm] stage 1: baseweed-admin.qcow2 already present
+[spin-test-vm] stage 2: baseweed-baked.qcow2 already present
+[spin-test-vm] building/caching native components in rootless Podman...
+[native-podman] cache hit /home/play2/.cache/qdistro/native-podman/20260930/x86_64/3d588db54cbc8b3da03d561b82d983a6e9eb30e0cae6ba263e6bbc062f85a940.tar
+[spin-test-vm] building/caching tier-2 images in rootless Podman...
+[tier2-podman] cache hit /home/play2/.cache/qdistro/tier2-podman/20260930/x86_64/ca3912db7b95d9674f1264b9f6195ec219f9e21d427bc35fc253f820f276d696.tar
+[spin-test-vm] stage 3: cloning a fresh VM from baked...
+[vm-boot-watch] no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD
+[vm-boot-watch] or allow pty fallback); nothing to watch — exiting 0 (no-op)
+[spin-test-vm]     VM = qci-golden-bats-261003-212437-3266451-4396
+[spin-test-vm]     starting + waiting for guest agent...
+VM 'qci-golden-bats-261003-212437-3266451-4396' is already running
+Waiting for QEMU guest agent...
+[vm-boot-watch] no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD
+[vm-boot-watch] or allow pty fallback); nothing to watch — exiting 0 (no-op)
+Guest agent ready after 0s
+[spin-test-vm] stage 4a: tarballing the qdistro monorepo (root + in-tree components)...
+[spin-test-vm] stage 4b: host HTTP server on 0.0.0.0:52285 (pid 3276494)
+[spin-test-vm] stage 5: running fresh-vm-bootstrap.sh in VM...
+[vm-exec] guest identity pinned (pid 1013 start 1960)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+[vm-exec] Waiting... (polls=60s elapsed=61s)
+[vm-exec] Waiting... (polls=90s elapsed=93s)
+[bootstrap] masking jeos-firstboot + greetd (idempotent)...
+[bootstrap] waiting for guest network before zypper (qga-up is not DHCP/DNS)...
+[bootstrap] installing python313-textual for the admin TUI
+[bootstrap] CI extras already present (bats); skipping zypper
+[bootstrap] fetching the monorepo tarball from http://10.0.2.2:52285...
+[bootstrap] fetching Podman-built native stage...
+/tmp/qdistro-native-stage.tar: OK
+[bootstrap] installing qnotebook...
+[bootstrap] installing qdbrowser (+ PyQt6-WebEngine)...
+[bootstrap]   qdbrowser installed (/opt/qdbrowser; WebEngine via python313-PyQt6-WebEngine)
+[bootstrap] installing Python modules...
+[bootstrap]   running install-presentation-for-vm.sh <- /root/qdistro-src/sdk/presentation/qdistro_presentation
+[install-presentation] OK — dir /var/lib/qdistro/presentation (admin:1000) + /usr/local/lib/python3.13/site-packages/qdistro_presentation
+[bootstrap]   running install-sdk-for-vm.sh <- /root/qdistro-src/sdk/qdistro_app
+[install-sdk] OK — qdistro_app installed at /usr/local/lib/python3.13/site-packages/qdistro_app
+[bootstrap]   running install-broker-for-qdwin.sh <- /root/qdistro-src/broker
+broker ready on org.qdistro.AdminBroker1
+[bootstrap]   running install-session-manager.sh <- /root/qdistro-src/session_manager
+install-session-manager: tier 3s not installed (QDISTRO_TIER3S is not 1; paravirt O10)
+session manager ready on org.qdistro.SessionManager1
+[bootstrap]   running install-user-relay-for-vm.sh <- /root/qdistro-src/user_relay
+qdistro-user-relay template installed; start per-uid with: systemctl start qdistro-user-relay@<uid>.service
+[bootstrap]   running install-polkit-agent-for-vm.sh <- /root/qdistro-src/polkit
+[install-polkit-agent] OK — qdistro-polkit-agent installed at /usr/libexec/qdistro
+[bootstrap]   running install-pwd-for-vm.sh <- /root/qdistro-src/pwd
+[install-pwd] OK — qdistro-pwd installed at /usr/libexec/qdistro
+[bootstrap]   running install-qsu-for-vm.sh <- /root/qdistro-src/qsu
+installed prebuilt qsu binary -> /usr/local/bin/qsu
+qsu ready (socket /run/qdistro-root-exec/sock + /usr/local/bin/qsu)
+[bootstrap]   running install-media-for-vm.sh <- /root/qdistro-src/media
+qdistro-media-exec ready (socket /run/qdistro-media-exec/sock)
+[bootstrap]   running install-multimachine-for-vm.sh <- /root/qdistro-src/multimachine
+qdistro multi-machine runtime installed (display dock remains inert until configured)
+[bootstrap]   running install-browser-bridge-for-vm.sh <- /root/qdistro-src/browser_bridge
+[install-browser-bridge] installed Phase-9e browser daemons -> /usr/libexec/qdistro
+[stage-browser-extension] staged gated extension source: chromium
+[stage-browser-extension] staged gated extension source: firefox
+[install-browser-bridge] staged qdbrowser python pkg -> /usr/local/lib/qdistro/qdbrowser
+[install-browser-bridge] OK
+[bootstrap]   running install-portal-backend-for-vm.sh <- /root/qdistro-src
+[install-portal-backend] installed qdistro xdg-desktop-portal backend/frontend core
+[bootstrap]   running install-phone-for-vm.sh <- /root/qdistro-src/phone
+[install-phone] OK
+[bootstrap]   running install-print-proxy-for-vm.sh <- /root/qdistro-src/print
+[install-print] OK — qdistro-print-proxy installed (not started)
+[bootstrap]   running install-snapshots-for-vm.sh <- /root/qdistro-src/snapshots
+[install-snapshots] OK
+[bootstrap]   running install-templates-for-vm.sh <- /root/qdistro-src
+[install-templates] installed template/promotion slice
+[bootstrap]   running install-admin-cli-for-vm.sh <- /root/qdistro-src
+admin approval CLI (qdistro-approvals) and TUI (qdistro-admin-tui) installed
+[bootstrap] staging bats probes from /root/qdistro-src/tests/integration/vm/probes -> /root/
+[bootstrap] generating RDP TLS cert/key (winpr-makecert)...
+[bootstrap] installing SELinux policy modules (permissive)...
+[bootstrap] checking staged native ELF dependencies...
+[bootstrap] installing + enabling seatd (system service)...
+[bootstrap] installing xwayland (Xwayland binary for qdwin's xwayland.so module)...
+[bootstrap] installing core test clients: foot xterm
+[bootstrap] installing baseline desktop fonts (dejavu + liberation)...
+[bootstrap]   fonts: 2 package(s) installed;
+[bootstrap] skipping qdwin app-test deps (QDWIN_APP_DEPS=0)
+[bootstrap] configuring ydotool/uinput for VM GUI tests...
+[bootstrap] installing qdwin session (qdwin-compositor + qdshell user units via qdwin-session.target)...
+tier-2 seccomp profiles installed in /usr/lib/qdistro/seccomp/
+qdistro-tier2-spawn + qdistro-podapps-scan installed in /usr/bin
+/var/lib/qdistro/podapps perms: root:admin 2775
+qdwin session: vendored libweston present — modules mapped to /usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16
+qdwin session: XWayland enabled (xwayland=true) — xwayland.so mapped to /usr/lib64/libweston-16/xwayland.so
+Created symlink '/home/admin/.config/systemd/user/default.target.wants/qdwin-session.target' → '/home/admin/.config/systemd/user/qdwin-session.target'.
+Created symlink '/home/admin/.config/systemd/user/default.target.wants/ydotoold.service' → '/home/admin/.config/systemd/user/ydotoold.service'.
+qdwin session installed (deploy-named units: qdwin-compositor.service + qdshell.service + qdwin-session.target).
+  start now:    runuser -l admin -c 'systemctl --user start qdwin-session.target'
+  start at boot: systemctl --user --machine=admin@ start qdwin-session.target  (after reboot/relogin)
+[bootstrap] installing qdwin cursor sprite helper user unit...
+[bootstrap] installing qdlocker (Python+QML peer locker via qdwin_locker_v1)...
+[bootstrap]   installed /etc/pam.d/qdlocker (dedicated unlock PAM + faillock lockout)
+[bootstrap]   installed qdistro-fprintd-fake test service
+[bootstrap]   installed /usr/local/bin/qdistro-fake-lid-close test helper
+[bootstrap]   qdlocker installed; will start with the user session
+[bootstrap] installing tier-5 launcher symlinks + polkit policy...
+[install-tier5] installed wrapper /usr/local/bin/qdistro-tier5-spawn → /root/qdistro-src/tier5-vm/spawn-tier5.sh
+[install-tier5] installed wrapper /usr/local/bin/qdistro-tier5-cleanup → /root/qdistro-src/tier5-vm/qdistro-tier5-cleanup.sh
+[install-tier5] installed wrapper /usr/local/bin/qdistro-tier5-build-guest-image → /root/qdistro-src/tier5-vm/build-guest-image.sh
+[install-tier5] installed polkit policy at /usr/share/polkit-1/actions/org.qdistro.tier5.policy
+[install-tier5] done.
+[bootstrap] installing tier-3 silo + launcher symlinks + polkit policy...
+[install-tier3] created group qdistro-tier3
+[install-tier3] created silo user user1 (uid=1001, locked password)
+[install-tier3] created silo user user2 (uid=1002, locked password)
+[install-tier3] socket dir /run/qdistro-tier3 (admin:qdistro-tier3 710)
+[install-tier3] tmpfiles entry at /etc/tmpfiles.d/qdistro-tier3.conf
+[install-tier3] added admin to qdistro-tier3
+[install-tier3] linked /usr/local/bin/qdistro-tier3-spawn → /root/qdistro-src/tier3/spawn-tier3.sh
+[install-tier3] linked /usr/local/bin/qdistro-tier3-cleanup → /root/qdistro-src/tier3/qdistro-tier3-cleanup.sh
+[install-tier3] installed polkit policy at /usr/share/polkit-1/actions/org.qdistro.tier3.policy
+[install-tier3] done.
+[bootstrap] starting admin user session...
+[bootstrap]   enabling pipewire user socket...
+[bootstrap]   waiting for /run/user/1000/wayland-1...
+[bootstrap]   waiting for /run/user/1000/qdlocker.sock (best-effort)...
+[bootstrap] fetching cached tier-2 Podman images...
+/tmp/qdistro-tier2-images.tar: OK
+Loaded image: localhost/qdistro/tier2-weston-terminal:latest
+Loaded image: localhost/qdistro/tier2-text-viewer:latest
+Loaded image: localhost/qdistro/tier2-url-preview:latest
+[bootstrap]   tier-2 images pre-built: weston-terminal, text-viewer, url-preview
+[bootstrap] bootstrap complete.
+[bootstrap] session was started by §7d; if it failed, restart with:
+[bootstrap]   runuser -l admin -c 'systemctl --user restart qdwin-session.target'
+[bootstrap]   runuser -l admin -c 'systemctl --user restart qdlocker.service'
+[vm-exec] --- stderr ---
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service' → '/etc/systemd/system/qdistro-dbus-reload.service'.
+Created symlink '/etc/systemd/system/qdistro-admin-broker.service.wants/qdistro-dbus-reload.service' → '/etc/systemd/system/qdistro-dbus-reload.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service' → '/etc/systemd/system/qdistro-admin-broker.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-session-manager.service' → '/etc/systemd/system/qdistro-session-manager.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-pwd.service' → '/etc/systemd/system/qdistro-pwd.service'.
+Created symlink '/etc/systemd/user/qdwin-session.target.wants/qdistro-portal-keys-unlock.service' → '/etc/systemd/user/qdistro-portal-keys-unlock.service'.
+Unit /etc/systemd/user/qdistro-portal-keys-unlock.service is added as a dependency to a non-existent unit qdwin-session.target.
+Created symlink '/etc/systemd/system/sockets.target.wants/qdistro-root-exec.socket' → '/etc/systemd/system/qdistro-root-exec.socket'.
+Created symlink '/etc/systemd/system/sockets.target.wants/qdistro-media-exec.socket' → '/etc/systemd/system/qdistro-media-exec.socket'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-print-proxy.service' → '/etc/systemd/system/qdistro-print-proxy.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/seatd.service' → '/etc/systemd/system/seatd.service'.
+Created symlink '/home/admin/.config/systemd/user/qdshell.service.wants/qdistro-cursor-sprites.service' → '/etc/systemd/user/qdistro-cursor-sprites.service'.
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+Created symlink '/home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service' → '/home/admin/.config/systemd/user/qdlocker.service'.
+Created symlink '/home/admin/.config/systemd/user/sockets.target.wants/pipewire.socket' → '/usr/lib/systemd/user/pipewire.socket'.
+Created symlink '/home/admin/.config/systemd/user/default.target.wants/pipewire.service' → '/usr/lib/systemd/user/pipewire.service'.
+Getting image source signatures
+Copying blob sha256:46769b87f3b0bb507b92e1859914514fcdeb7a06480948a1311a9f56ad52564f
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:f13065ab7f4319dc5222b53640c530d217006d94508beffd77e4c835602adeb8
+Copying blob sha256:a7e923aafcf6be29d7dbb2ca3f27f582badb7a57d418ed95b4681ec47011a28b
+Copying blob sha256:cdc7c506b78f79556f5d1be21b31402ede908aa2071acf8e0bedba4fb4d23d5c
+Copying blob sha256:cdc7c506b78f79556f5d1be21b31402ede908aa2071acf8e0bedba4fb4d23d5c
+Copying config sha256:ccbcca8309c5659e90cb8e3282e7c75280a061cb9c88dbfa884049af1ad6ef29
+Writing manifest to image destination
+Getting image source signatures
+Copying blob sha256:106e553a95bb94638bef297af0269edfa9de822048300b88ca2b7826d2587067
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:02cbd460bc6f3f1518c9a1472adea7dfe3270f5bc044da8fe6f8332b9b235868
+Copying blob sha256:01e5e1325fb37a020a02582063a7844eb331e781f265756cb5d7d7f4510601d5
+Copying blob sha256:f9f03f0767380c98168fe9fbcf7cc5adbe8b24bb69388fae61c4bc6b3137b381
+Copying blob sha256:d3da08eb86e1b85fe02fa12f73cf48d94725df4c7fc0722d5469930fd2d0fa55
+Copying blob sha256:593a59ba300a1e67a44d3d92d4e17425f4f6b87f42ab07f19e66ffea10325e83
+Copying blob sha256:c91df6bf32ef656f5e23fc0d28c588ff1c4f853c077bd14ceaeb14208cd279b0
+Copying blob sha256:b170425d868ba22680b4cd8289e2d623107d61bcf45890c48dcaeec203b8f634
+Copying config sha256:179d3b87f837d72a32f5a32ded252324ffdeef23cd88900ee7f8f4b83ae51155
+Writing manifest to image destination
+Getting image source signatures
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:ae4c824bfe44b58fdb8f3b69a08b2525c887248e4798e1daafbfd6162c504eba
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:800f5a190d459a5c95aea6932a3b55273e6849aa1692e64d74833c8f02031f2d
+Copying blob sha256:5d4e84d6bf4c5d58d89962948480573f134a30ba36715067ae9dc702f4d09bd6
+Copying blob sha256:d4599673295b0b3e517134390e2e255aeadfb5221beff8c5fca62ae4295582d9
+Copying blob sha256:f50b4b9c0ede5d0022f00b09423f4212ccba5499557e7f6f1251299ba7120eec
+Copying blob sha256:67b17678648eb388fba0a43db7532a6d127fde8626693dbfddb4baafbcbabaab
+Copying blob sha256:bc76edf7c22f292ffcc247023fce9f4bbf87d5b0b5a8a82f4eda0fc6b51df320
+Copying blob sha256:377ff3e051e28276bbbb7af998dcf1f9cbd5ce891b2c3cb071c5e56f56a13df7
+Copying config sha256:ee49295100070e28ba8cf87a655e971b41b38cbb37ca239013eeb413efa9aed6
+Writing manifest to image destination
+[vm-exec] --- end stderr ---
+[spin-test-vm] PASS: /run/user/1000/wayland-1 present (compositor up)
+[spin-test-vm] WARN: qdshell ctrl-socket not ready (reply was: error: unknown command 'list')
+[spin-test-vm] PASS: qdlocker.sock present
+[spin-test-vm] ready. VM:
+qci-golden-bats-261003-212437-3266451-4396
+[rpm-cache] exported packages to /home/play2/.cache/qdistro/rpm/20260930/x86_64

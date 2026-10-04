@@ -1,0 +1,10 @@
+qci-bats-phase7-tier3s-waypipe-261004-120147-27035-22446
+qci-bats-phase7-tier3s-denied-261004-120147-26951-13993
+qci-bats-phase7-tier3s-headless-261004-120147-26965-25531
+qci-bats-phase7-tier3s-lifecycle-261004-120147-27005-22896
+qci-bats-phase7-tier3s-hostile-stream-261004-120147-26976-7547
+qci-bats-phase7-tier3s-lineage-261004-120147-27002-31654
+qci-bats-phase7-tier3s-clipboard-gate-261004-120147-26917-30915
+qci-bats-phase7-tier3s-sigkill-cleanup-261004-120147-27014-12962
+qci-bats-phase7-tier3s-app-261004-120147-26911-8339
+qci-bats-phase7-tier3s-chrome-secctx-261004-120147-26935-11251

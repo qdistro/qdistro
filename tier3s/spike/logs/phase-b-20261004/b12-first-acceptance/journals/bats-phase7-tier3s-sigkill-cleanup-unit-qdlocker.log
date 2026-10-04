@@ -1,0 +1,11 @@
+Oct 03 16:42:23 baseweed-admin systemd[857]: Starting qdistro screen locker (qdlocker)...
+Oct 03 16:42:25 baseweed-admin systemd[857]: Started qdistro screen locker (qdlocker).
+Oct 03 16:42:25 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:25,725 qdlocker.app INFO using built-in defaults (no trusted config file found)
+Oct 03 16:42:25 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:25,750 qdlocker.auth INFO PAM service from env: qdlocker
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,130 qdlocker.wayland INFO locker connected
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,135 qdlocker.idle INFO idle watcher started; timeout=300000ms
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,139 qdlocker.ctrl INFO ctrl socket at /run/user/1000/qdlocker.sock
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,144 qdlocker.app INFO locker bound; initially_locked=False
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,272 qdlocker.logind INFO logind sleep delay-inhibitor acquired (fd=20)
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,275 qdlocker.logind WARNING cannot identify one owned active Wayland session (0 candidates); session lock unavailable
+Oct 03 16:42:26 baseweed-admin qdlocker[1018]: 2026-10-03 16:42:26,276 qdlocker.logind INFO logind automatic sleep locking ready; session=None

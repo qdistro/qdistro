@@ -1,0 +1,12 @@
+run_id=bats-20261003T173009Z-2934791
+gate=bats
+started_utc=2026-10-03T17:30:09Z
+host=zbook
+user=play2
+workspace=/var/tmp/t3s-qci-b-4729fce58
+qci=/var/tmp/t3s-qci-b-4729fce58/ci/bin/qci
+command=/var/tmp/t3s-qci-b-4729fce58/ci/bin/qci bats --file tests/integration/vm/phase7-tier3s-app.bats --file tests/integration/vm/phase7-tier3s-clipboard-gate.bats --file tests/integration/vm/phase7-tier3s-hostile-stream.bats --file tests/integration/vm/phase7-tier3s-lifecycle.bats --file tests/integration/vm/phase7-tier3s-lineage.bats
+qci_offline=0
+finished_utc=2026-10-03T17:30:19Z
+exit_code=40
+exit_class=vm_provision

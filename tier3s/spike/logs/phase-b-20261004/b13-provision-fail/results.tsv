@@ -1,0 +1,2 @@
+gate	subject	status	exit_code	exit_class	kind	log	notes	category
+bats	golden-build	fail	40	vm_provision	vm	vm/golden-bats.log	run-golden build failed (rc=3)	vm

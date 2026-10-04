@@ -1,0 +1,3 @@
+## HEAD (no branch)
+
+a1e16e5bb tier3s: prove the bridge via the waypipe server's own socket fds

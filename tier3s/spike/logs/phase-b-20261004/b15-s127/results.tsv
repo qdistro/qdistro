@@ -1,0 +1,3 @@
+gate	subject	status	exit_code	exit_class	kind	log	notes	category
+bats	phase7-tier3s-clipboard-gate.bats	fail	35	bats	bats	bats/phase7-tier3s-clipboard-gate.bats.log	VM=qci-bats-phase7-tier3s-clipboard-gate-261003-212714-3309740-30969 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-clipboard-gate-261003-212714-3309740-30969	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm
