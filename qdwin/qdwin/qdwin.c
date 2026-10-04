@@ -24021,10 +24021,10 @@ wet_shell_init(struct weston_compositor *ec, int *argc, char *argv[])
 	}
 
 	/* Advertise the full interface version so the shell can bind every
-	 * request/event through v34 (remote identity/input/drain). */
+	 * request/event through v35 (selection_set_source_peer_identity). */
 	qdwin->shell_global = wl_global_create(ec->wl_display,
 					       &qdwin_shell_v1_interface,
-					       34, qdwin, bind_qdwin_shell);
+					       35, qdwin, bind_qdwin_shell);
 	if (!qdwin->shell_global) {
 		weston_log("qdwin: wl_global_create failed\n");
 		goto fail;

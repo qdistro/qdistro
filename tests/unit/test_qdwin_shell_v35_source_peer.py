@@ -108,6 +108,20 @@ def test_compositor_emits_source_peer_identity() -> None:
         r"wl_resource_get_version\(qdwin->shell_resource\)\s*>=\s*35", src)
 
 
+def test_compositor_advertises_v35() -> None:
+    # ensures: wl_global_create advertises >= 35 — bumping the XML
+    # without the advertised version leaves the negotiated bind version
+    # below 35 on every resource and silently disables the sidecar
+    # (exactly the b25 failure mode: v35 binary present, zero emits).
+    src = QDWIN_C.read_text()
+    m = re.search(
+        r"wl_global_create\([^;]*qdwin_shell_v1_interface[^;]*\)",
+        src, re.S)
+    assert m, "qdwin_shell_v1 wl_global_create site not found"
+    assert re.search(r",\s*(3[5-9]|[4-9]\d|[1-9]\d{2,})\s*,", m.group(0)), \
+        "qdwin_shell_v1 advertised version must be >= 35"
+
+
 def test_gate_relays_source_peer_identity() -> None:
     # ensures: the QML prefers the wire-attested source peer tuple over
     # the focused-handle identity — borrowing the destination's pid is
