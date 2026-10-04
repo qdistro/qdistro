@@ -186,6 +186,36 @@ def test_resolving_conflict_clears_flag(win, qtbot):
     assert dlg._shortcut_conflicts[label_a] is False
 
 
+def test_conflict_foreground_uses_error_role(win, qtbot, tmp_path, monkeypatch, qapp):
+    from qnotebook.settings_dialog import _conflict_error_hex
+
+    reset_controller_for_tests()
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    dlg._shortcut_table.item(0, 1).setText("Ctrl+Alt+F11")
+    dlg._shortcut_table.item(1, 1).setText("Ctrl+Alt+F11")
+    dlg._refresh_shortcut_conflicts()
+    fallback = _conflict_error_hex(dlg).lower()
+    old = dlg._shortcut_table.item(0, 0).foreground().color().name().lower()
+    assert old == fallback
+    assert old != "#cf6679"
+
+    snap = example_snapshot()
+    write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+    monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+    attach_presentation(qapp, SettingsAdapter())
+    still = dlg._shortcut_table.item(0, 0).foreground().color().name().lower()
+    assert still == old
+
+    dlg.apply_presentation_update()
+    color = dlg._shortcut_table.item(0, 0).foreground().color().name().lower()
+    assert color == snap.colors.mError.lower()
+    assert color != "#cf6679"
+    other = dlg._shortcut_table.item(1, 1).foreground().color().name().lower()
+    assert other == snap.colors.mError.lower()
+    reset_controller_for_tests()
+
+
 def test_appearance_only_apply_does_not_write_nb_settings(win, tmp_notebook, qtbot, monkeypatch):
     from qnotebook import nb_settings
 

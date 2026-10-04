@@ -738,6 +738,43 @@ class TestShortcutConflicts:
         assert dlg._shortcut_conflicts["new_tab"] is False
         assert dlg._shortcut_conflicts["copy"] is False
 
+    def test_conflict_foreground_uses_error_role(
+        self, window, qtbot, tmp_path, monkeypatch
+    ):
+        from PyQt6.QtWidgets import QApplication
+        from qdistro_presentation.model import example_snapshot
+        from qdistro_presentation.paths import ENV_OVERRIDE
+        from qdistro_presentation.publish import write_snapshot
+        from qterminator.config import Config
+        from qterminator.theme import attach_presentation, reset_controller_for_tests
+        from qterminator.titlebar import titlebar_roles
+
+        reset_controller_for_tests()
+        dlg = PreferencesDialog(window)
+        qtbot.addWidget(dlg)
+        dlg._shortcut_leaves["new_tab"].setText(1, "Ctrl+Alt+Z")
+        dlg._shortcut_leaves["copy"].setText(1, "Ctrl+Alt+Z")
+        dlg._refresh_shortcut_conflicts()
+        fallback = titlebar_roles(dlg)["error"].lower()
+        old = dlg._shortcut_leaves["new_tab"].foreground(0).color().name().lower()
+        assert old == fallback
+        assert old != "#cf6679"
+
+        snap = example_snapshot()
+        write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+        monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+        attach_presentation(QApplication.instance(), Config())
+        still = dlg._shortcut_leaves["new_tab"].foreground(0).color().name().lower()
+        assert still == old
+
+        dlg.apply_presentation_update()
+        color = dlg._shortcut_leaves["new_tab"].foreground(0).color().name().lower()
+        assert color == snap.colors.mError.lower()
+        assert color != "#cf6679"
+        copy_color = dlg._shortcut_leaves["copy"].foreground(1).color().name().lower()
+        assert copy_color == snap.colors.mError.lower()
+        reset_controller_for_tests()
+
 
 def _scaled_snapshot():
     from dataclasses import replace

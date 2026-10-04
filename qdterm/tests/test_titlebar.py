@@ -8,6 +8,7 @@ from qterminator.titlebar import (
     GROUP_COLORS,
     TITLE_HEIGHT,
     TerminalTitlebar,
+    group_color_for_name,
     titlebar_roles,
 )
 
@@ -152,22 +153,77 @@ def test_set_group_sets_tooltip(titlebar):
     assert "beta" in titlebar._group_label.toolTip()
 
 
-def test_set_group_color_from_hash(titlebar):
-    """Group indicator color is derived from hash of group name."""
+def test_set_group_color_from_stable_digest(titlebar):
+    """Group indicator color is a SHA-256 identity token, not hash()."""
+    import hashlib
+
     titlebar.set_group("gamma")
-    expected_idx = hash("gamma") % len(GROUP_COLORS)
-    expected_color = GROUP_COLORS[expected_idx]
-    assert expected_color in titlebar._group_label.styleSheet()
+    digest = hashlib.sha256(b"gamma").digest()
+    expected = GROUP_COLORS[int.from_bytes(digest[:8], "big") % len(GROUP_COLORS)]
+    assert group_color_for_name("gamma") == expected
+    assert expected in titlebar._group_label.styleSheet()
 
 
 def test_set_group_different_names_different_colors(titlebar):
     """Different group names can produce different colors."""
     colors = set()
-    # Try several names; at least two should differ
     for name in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]:
-        idx = hash(name) % len(GROUP_COLORS)
-        colors.add(GROUP_COLORS[idx])
+        titlebar.set_group(name)
+        colors.add(group_color_for_name(name))
+        assert group_color_for_name(name) in titlebar._group_label.styleSheet()
     assert len(colors) > 1
+
+
+@pytest.mark.cheat_aware(
+    protects="group identity colors stay the same across process hash seeds",
+    cheats=[
+        "keep hash(name) % len(GROUP_COLORS)",
+        "assert only that a GROUP_COLORS entry is present",
+    ],
+    consequence="the same group looks like a different group after restart",
+)
+def test_group_color_ignores_python_hash(titlebar, monkeypatch):
+    """builtins.hash must not select the cosmetic group color."""
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("python hash() must not pick group colors")
+
+    monkeypatch.setattr("builtins.hash", boom)
+    expected = group_color_for_name("gamma")
+    titlebar.set_group("gamma")
+    assert expected in titlebar._group_label.styleSheet()
+
+
+def test_group_color_stable_across_hash_seeds():
+    """PYTHONHASHSEED must not change the group identity color."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    expected = group_color_for_name("gamma")
+    qdterm_root = Path(__file__).resolve().parents[1]
+    script = (
+        "from qterminator.titlebar import group_color_for_name\n"
+        "print(group_color_for_name('gamma'))\n"
+    )
+    env_base = os.environ.copy()
+    env_base["PYTHONPATH"] = str(qdterm_root) + os.pathsep + env_base.get(
+        "PYTHONPATH", ""
+    )
+    colors = []
+    for seed in ("0", "1", "random"):
+        env = env_base.copy()
+        env["PYTHONHASHSEED"] = seed
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        colors.append(proc.stdout.strip())
+    assert colors == [expected, expected, expected]
 
 
 def test_set_group_then_clear(titlebar):
@@ -402,7 +458,7 @@ def test_snapshot_restyle_uses_semantic_roles(qtbot, qapp, tmp_path, monkeypatch
     old_sheet = titlebar.styleSheet()
     old_ro = titlebar._readonly_label.styleSheet()
     old_activity = titlebar._activity_label.styleSheet()
-    expected_group = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
+    expected_group = group_color_for_name("gamma")
     assert snap.colors.mPrimary not in old_sheet
     assert expected_group in titlebar._group_label.styleSheet()
 
@@ -455,7 +511,7 @@ def test_group_identity_survives_palette_restyle(qtbot, qapp, tmp_path, monkeypa
     qtbot.addWidget(host)
     titlebar = TerminalTitlebar(host)
     titlebar.set_group("gamma")
-    expected = GROUP_COLORS[hash("gamma") % len(GROUP_COLORS)]
+    expected = group_color_for_name("gamma")
     before = titlebar._group_label.styleSheet()
     write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
     monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
