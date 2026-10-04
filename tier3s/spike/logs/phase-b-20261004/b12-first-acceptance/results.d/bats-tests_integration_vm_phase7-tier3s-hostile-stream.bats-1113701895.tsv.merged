@@ -1,0 +1,2 @@
+bats	phase7-tier3s-hostile-stream.bats	fail	35	bats	bats	bats/phase7-tier3s-hostile-stream.bats.log	VM=qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm
