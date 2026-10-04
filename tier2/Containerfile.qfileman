@@ -70,6 +70,12 @@ COPY weston.ini /etc/xdg/weston/weston.ini
 COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
 RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint
 
+# Fixed deployment contract: the VM installer rejects admin UIDs other than 1000.
+RUN install -d -o 0 -g 0 -m 0755 /usr/share/qdistro /usr/share/qdistro/presentation \
+ && printf '%s\n' '{"version":1,"admin_uid":1000}' > /usr/share/qdistro/presentation/deployment.json \
+ && chown 0:0 /usr/share/qdistro/presentation/deployment.json \
+ && chmod 0644 /usr/share/qdistro/presentation/deployment.json
+
 # uid 1000 = admin on the host; --userns=keep-id maps it 1:1.
 USER 1000:1000
 WORKDIR /home/admin

@@ -28,7 +28,7 @@
 
 qdistro_resolve_image() {
     local build_dir img digest
-    build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+    build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
     img="${QDISTRO_IMAGE:-}"
     digest="${QDISTRO_IMAGE_SHA256:-}"
     QDISTRO_RESOLVED_PATH=""
@@ -204,7 +204,7 @@ qdistro_verify_xz_checksum() {
 # Reuse only after comparing every byte with a fresh decompression.
 qdistro_materialize_raw() {
     local build_dir dest tmp unc digest
-    build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
+    build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build-${SUDO_UID:-$(id -u)}}"
     case "${QDISTRO_RESOLVED_KIND:-}" in
         raw|qcow2)
             QDISTRO_RESOLVED_DISK="${QDISTRO_RESOLVED_DISK:-$QDISTRO_RESOLVED_PATH}"

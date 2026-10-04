@@ -33,7 +33,7 @@ verdict() {
 }
 
 artifact_status() {
-    local d="$BATS_TMPDIR/status-artifact"
+    local d="$BATS_TEST_TMPDIR/status-artifact"
     rm -rf "$d"
     mkdir -p "$d"
     printf '%s' "$1" > "$d/status.txt"

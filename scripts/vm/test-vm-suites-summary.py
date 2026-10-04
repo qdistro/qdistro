@@ -27,9 +27,9 @@ import xml.etree.ElementTree as ET
 out = pathlib.Path(sys.argv[1])
 junit = out / "junit"
 expected = (out / "expected").read_text().splitlines() if (out / "expected").exists() else []
-commit = next((l.split(" ", 1)[1] for l in expected if l.startswith("commit ")), "unknown")
-want_pytest = [l.split(" ", 1)[1] for l in expected if l.startswith("pytest ")]
-want_bats = [l.split(" ", 1)[1] for l in expected if l.startswith("bats ")]
+commit = next((line.split(" ", 1)[1] for line in expected if line.startswith("commit ")), "unknown")
+want_pytest = [line.split(" ", 1)[1] for line in expected if line.startswith("pytest ")]
+want_bats = [line.split(" ", 1)[1] for line in expected if line.startswith("bats ")]
 incomplete = []
 
 # ---- what this image deliberately omits --------------------------------------
@@ -195,8 +195,8 @@ def expected_absence(base, name):
     return None
 
 
-phases = next((l.split(" ", 1)[1] for l in expected if l.startswith("phases ")), "")
-bats_filter = next((l.split(" ", 1)[1] for l in expected if l.startswith("bats-filter ")), "")
+phases = next((line.split(" ", 1)[1] for line in expected if line.startswith("phases ")), "")
+bats_filter = next((line.split(" ", 1)[1] for line in expected if line.startswith("bats-filter ")), "")
 lines = [
     "## Test suites in the qdistro test VM", "",
     f"Commit `{commit}`. The shipped image booted through a throwaway overlay.",
@@ -277,23 +277,23 @@ if want_bats:
             incomplete.append(f"bats {base}: did not run")
             continue
         text = tap.read_text(errors="replace").splitlines()
-        plan = next((int(m.group(1)) for l in text for m in [re.match(r"^1\.\.(\d+)", l)] if m), None)
-        results = [m for l in text for m in [re.match(r"^(ok|not ok) (\d+) (.*)$", l)] if m]
+        plan = next((int(m.group(1)) for line in text for m in [re.match(r"^1\.\.(\d+)", line)] if m), None)
+        results = [m for line in text for m in [re.match(r"^(ok|not ok) (\d+) (.*)$", line)] if m]
         setup_failed = any(m.group(1) == "not ok" and m.group(3).startswith("setup_file failed") for m in results)
         teardown_failed = [m for m in results if m.group(1) == "not ok" and m.group(3).startswith("teardown_file failed")]
         tests = [m for m in results if m not in teardown_failed
                  and not (m.group(1) == "not ok" and m.group(3).startswith("setup_file failed"))]
         ok = sum(1 for m in tests if m.group(1) == "ok" and "# skip" not in m.group(3))
         skip = sum(1 for m in tests if m.group(1) == "ok" and "# skip" in m.group(3))
-        bad = [l for l in text if re.match(r"^not ok \d+ ", l)]
-        rc = next((m.group(1) for l in text for m in [re.match(r"^# rc=(\d+)", l)] if m), None)
+        bad = [line for line in text if re.match(r"^not ok \d+ ", line)]
+        rc = next((m.group(1) for line in text for m in [re.match(r"^# rc=(\d+)", line)] if m), None)
         problems = []
         if rc not in ("0", "1"):
             problems.append("never finished" if rc is None else
                             "timed out" if rc in ("124", "137") else f"bats exit {rc}")
         if plan is None:
             problems.append("no TAP plan")
-        if any(l.startswith("Bail out!") for l in text):
+        if any(line.startswith("Bail out!") for line in text):
             problems.append("bailed out")
         if [int(m.group(2)) for m in results] != list(range(1, len(results) + 1)):
             problems.append("results not numbered 1..n")
@@ -314,8 +314,8 @@ if want_bats:
             btot[i] += v
         incomplete += [f"bats {base}: {p}" for p in problems]
         if bad:
-            bats_failed[base] = [re.sub(r"^not ok \d+ ", "", l) for l in bad]
-        n = [l[2:] for l in text if l.startswith("# harness:")]
+            bats_failed[base] = [re.sub(r"^not ok \d+ ", "", line) for line in bad]
+        n = [line[2:] for line in text if line.startswith("# harness:")]
         if n:
             notes.setdefault(base, []).extend(n)
     lines.append(f"| **total** | | {btot[0]} | {btot[1]} | {btot[2]} | {btot[3]} | {btot[4]} | |")
