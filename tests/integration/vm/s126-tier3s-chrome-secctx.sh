@@ -141,11 +141,15 @@ step "5. per-interface operation denials (overrides OFF, real bridge path)"
 # Registry visibility is not the gate for these two interfaces — both are
 # QDWIN_GLOBAL_ORDINARY and deliberately stay enumerable; the denial must
 # happen on the OPERATION. Two paths are exercised:
-#  (i)  THE BRIDGE PATH — the probes run INSIDE the live sandbox on the
-#       waypipe server's display socket: their requests cross the real
-#       byte-stream bridge and reach qdwin on the running launch's tagged
-#       bridge client channel. This is the same peer whose toplevel the
-#       compositor tagged in step 1 — not an extra host-side client.
+#  (i)  THE BRIDGE PATH — the probe IS the workload of its own launch.
+#       waypipe serves the sandbox workload over WAYLAND_SOCKET
+#       fd-inheritance and -o permits exactly one application, so no
+#       in-sandbox display socket exists for a second client to attach
+#       to. The honest bridge path is to make the probe the launch's
+#       workload: the image entrypoint wraps it in the waypipe server,
+#       so every request crosses the real byte stream and reaches qdwin
+#       on THAT launch's tagged bridge channel (waypipe forwards the
+#       registry unfiltered — private interfaces traverse too).
 #  (ii) a host-side tagged peer under the same secctx wrap (unique
 #       instance-id per connection — duplicate ids silently degrade the
 #       tagged channel): supplementary tag-policy evidence.
@@ -165,39 +169,77 @@ sctx_tagged() {   # sctx_tagged <iid-suffix> <cmd...> — stdout only (secctx-ex
 is "running compositor carries NO --qdwin-allowed-uid authorization override" \
     "$(tr '\0' '\n' < /proc/"$(comp_pid)"/cmdline 2>/dev/null | grep -c 'qdwin-allowed-uid')" 0
 
-# --- (i) through the live bridge -----------------------------------------
-CTR=$(ctr_of "$SILO")
-# pm cp is not relied on here (runsc mount semantics): stream the probe
-# binaries in over `exec -i` — they link only libwayland-client, already in
-# the image.
-pm exec -i "$CTR" sh -c 'cat > /tmp/qp; chmod 755 /tmp/qp' \
-        < /usr/bin/qdwin-output-probe \
-    && pm exec -i "$CTR" sh -c 'cat > /tmp/sclaim; chmod 755 /tmp/sclaim' \
-        < /usr/bin/qdistro-test-stream-claim-probe \
-    && pass "probes staged inside the live sandbox" \
-    || fail "probe staging into $CTR failed"
-INWL=$(pm exec "$CTR" sh -c 'for s in /run/user/1000/wayland-*; do [ -S "$s" ] && basename "$s"; done' 2>/dev/null | head -1 | tr -d '[:space:]')
-is "in-sandbox waypipe display socket found" "$(yes_no test -n "$INWL")" yes
-bridge_probe() {  # bridge_probe <in-ctr-cmd...> — runs inside the sandbox on the waypipe display
-    pm exec "$CTR" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$INWL" "$@" 2>&1
+# --- (i) through the live bridge: the probe IS the workload --------------
+# The probes ride into the sandbox image as a local derived layer — pm
+# create/cp/commit are image-level ops and never touch the runsc state of
+# the live launches. The wlprobe workload declaration is a parsed file
+# (GUI=1, same as weston-terminal) and the seccomp profile must exist per
+# workload (no default fallback), so the same client-syscall profile is
+# installed for it.
+WLIMG=localhost/qdistro/tier3s-wlprobe:latest
+pm image exists "$WLIMG" || {
+    pm rm -f wlprobe-b 2>/dev/null
+    pm create --name wlprobe-b localhost/qdistro/tier3s-weston-terminal:latest true > /dev/null \
+    && pm cp /usr/bin/qdwin-output-probe wlprobe-b:/usr/bin/qp \
+    && pm cp /usr/bin/qdistro-test-stream-claim-probe wlprobe-b:/usr/bin/sclaim \
+    && pm commit wlprobe-b "$WLIMG" > /dev/null && pm rm wlprobe-b > /dev/null \
+    && pass "wlprobe image staged (probes baked into a local layer)" \
+    || fail "wlprobe image staging failed"
 }
-# (a) zwlr_output_manager_v1 via the bridge: enumerated but test/apply
-# refuse with an IMPLEMENTATION error (the gate's own denial — the probe
-# now requires that error class, so EPIPE/truncation can't fake it).
-out=$(bridge_probe /tmp/qp --test --expect-denied); rc=$?
-is "bridge path: output-manager test refused (implementation error)" "$rc" 0
-is "bridge path: test denial carried the implementation-error line" \
-    "$(printf '%s' "$out" | grep -c 'denied (implementation error')" 1
-out=$(bridge_probe /tmp/qp --apply --expect-denied); rc=$?
-is "bridge path: output-manager apply refused (implementation error)" "$rc" 0
-is "bridge path: apply denial carried the implementation-error line" \
-    "$(printf '%s' "$out" | grep -c 'denied (implementation error')" 1
+printf 'GUI=1\n' > /usr/lib/qdistro/tier3s/workloads/wlprobe.env
+install -m 0644 /usr/lib/qdistro/tier3s/seccomp/weston-terminal.json \
+    /usr/lib/qdistro/tier3s/seccomp/wlprobe.json
+is "wlprobe workload profile + seccomp installed" \
+    "$(yes_no test -f /usr/lib/qdistro/tier3s/workloads/wlprobe.env -a -f /usr/lib/qdistro/tier3s/seccomp/wlprobe.json)" yes
+set_rules "allow:$GUISPAWN" \
+    "allow:qdistro.tier3s.spawn:wlprobe/qp" \
+    "allow:qdistro.tier3s.spawn:wlprobe/sclaim"
+
+# probe_launch <silo> <argv-json>: a stanza launch whose workload argv IS
+# the probe — each probe needs its own launch because WAYLAND_SOCKET is a
+# single established connection, not a listener. Prints the token; the
+# probe exits quickly, so 'running:' may be outrun — a terminal unit state
+# also proceeds, and the scope-journal verdict greps carry the evidence.
+probe_launch() {
+    local s="$1" tok unit
+    tok=$(write_stanza_workload "$s" wlprobe "$2")
+    unit=$(unit_of "$s")
+    systemctl start "$unit" >/dev/null 2>&1 || :
+    wait_for 120 bash -c "journalctl -u '$unit' --no-pager -o cat | grep -q 'spawn-tier3s: running: ' || [ \"\$(systemctl show -p ActiveState --value '$unit' 2>/dev/null)\" != activating ]" \
+        || { journalctl -u "$unit" --no-pager -o cat | tail -20 >&2; echo ""; return 1; }
+    echo "$tok"
+}
+JPB=$(journal_cursor)
+PTOK1=$(probe_launch s126p1 '["/usr/bin/qp","--test","--expect-denied"]')
+[ -n "$PTOK1" ] && pass "bridge probe launch up (s126p1: output test)" \
+    || fail "bridge probe launch did not come up (s126p1)"
+denied_in_scope() { scope_log "$PTOK1" | grep -q 'denied (implementation error'; }
+wait_for 60 denied_in_scope \
+    && pass "bridge path: output-manager test refused (implementation error)" \
+    || { scope_log "$PTOK1" | tail -15 >&2; fail "bridge path: no implementation denial in s126p1's scope log"; }
+is "bridge path: test denial rode s126p1's tagged channel" \
+    "$(comp_log "$JPB" | grep -c 'client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126p1')" 1
+PTOK2=$(probe_launch s126p2 '["/usr/bin/qp","--apply","--expect-denied"]')
+[ -n "$PTOK2" ] && pass "bridge probe launch up (s126p2: output apply)" \
+    || fail "bridge probe launch did not come up (s126p2)"
+denied_in_scope2() { scope_log "$PTOK2" | grep -q 'denied (implementation error'; }
+wait_for 60 denied_in_scope2 \
+    && pass "bridge path: output-manager apply refused (implementation error)" \
+    || { scope_log "$PTOK2" | tail -15 >&2; fail "bridge path: no implementation denial in s126p2's scope log"; }
+is "bridge path: apply denial rode s126p2's tagged channel" \
+    "$(comp_log "$JPB" | grep -c 'client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126p2')" 1
 # (b) qdwin_stream_input_v1 via the bridge: a bogus-token claim must get
 # INVALID_TOKEN — the interface's own protocol error, reached across the
 # byte stream.
-out=$(bridge_probe /tmp/sclaim); rc=$?
-is "bridge path: stream-input claim(bogus) -> INVALID_TOKEN" \
-    "$rc:$out" "0:[qdistro-test-stream-claim-probe] claim -> invalid_token (as expected)"
+PTOK3=$(probe_launch s126p3 '["/usr/bin/sclaim"]')
+[ -n "$PTOK3" ] && pass "bridge probe launch up (s126p3: stream claim)" \
+    || fail "bridge probe launch did not come up (s126p3)"
+claimed_in_scope() { scope_log "$PTOK3" | grep -q 'claim -> invalid_token (as expected)'; }
+wait_for 60 claimed_in_scope \
+    && pass "bridge path: stream-input claim(bogus) -> INVALID_TOKEN" \
+    || { scope_log "$PTOK3" | tail -15 >&2; fail "bridge path: no INVALID_TOKEN in s126p3's scope log"; }
+is "bridge path: stream claim rode s126p3's tagged channel" \
+    "$(comp_log "$JPB" | grep -c 'client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126p3')" 1
 
 # --- (ii) same-tag host-side peer (supplementary) ------------------------
 # (a) zwlr_output_manager_v1: enumerated (ORDINARY) but test/apply refuse.
@@ -234,11 +276,22 @@ J5B=$(journal_cursor)
 PRE_SECCTX=$(for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done)
 sctx_tagged "$TOK-hold" qdistro-test-window --title "s126hold" &
 HOLD_WRAP=$!
-wait_for 15 bash -c 'for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done | grep -q .'
+# the launch already holds secctx listeners — wait for the DIFF to grow,
+# not for any socket to exist (that predicate is true from the start).
+new_secctx() {
+    for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done \
+        | { [ -n "$PRE_SECCTX" ] && grep -vxF "$PRE_SECCTX" || cat; } | grep -q .
+}
+wait_for 15 new_secctx
 SECPATH=$(for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done \
     | { [ -n "$PRE_SECCTX" ] && grep -vxF "$PRE_SECCTX" || cat; } | tail -1)
 is "secctx listener path for the held tagged client" "$(yes_no test -S "$SECPATH")" yes
-wait_for 20 bash -c "comp_log \"\$1\" | grep -q 'client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe instance_id=$TOK-hold'" _ "$J5B" \
+hold_accepted() {
+    comp_log "$J5B" | grep -q "client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe instance_id=$TOK-hold"
+}
+# wait_for evaluates the command in THIS shell, so comp_log must ride in a
+# function — `bash -c 'comp_log ...'` would not see it.
+wait_for 20 hold_accepted \
     && pass "compositor tagged the held client (context consumed)" \
     || fail "no client-accepted line for the held client"
 # second connect on the SAME consumed listener: accept-and-close gives the
@@ -271,6 +324,22 @@ pkill -u admin -f 'qdistro-test-window --title s126hold' 2>/dev/null || :
 pkill -u admin -f "secctx-exec .*instance-id ${TOK}-hold" 2>/dev/null || :
 
 step "6. teardown"
+# the probe launches self-terminate (the probe exits -> -o drops the
+# server -> podman run --rm ends); wait for all three containers to go
+# before the all-clear sweep, then remove the staged workload surface.
+probe_ctrs_gone() {
+    local c
+    for c in s126p1 s126p2 s126p3; do
+        pm container exists "qdistro-tier3s-$c" 2>/dev/null && return 1
+    done
+}
+wait_for 90 probe_ctrs_gone \
+    && pass "all three bridge-probe containers exited with their probes" \
+    || fail "a bridge-probe container survived its probe's exit"
+rm -f "$STANZA_DIR"/s126p{1,2,3}.env \
+    /usr/lib/qdistro/tier3s/workloads/wlprobe.env \
+    /usr/lib/qdistro/tier3s/seccomp/wlprobe.json
+pm image rm "$WLIMG" > /dev/null 2>&1 || :
 sm StopSilo si "$SILO" 10 > /dev/null; is "StopSilo $SILO" "$(silo_state "$SILO")" Stopped
 wait_for 90 unit_down "$(unit_of "$SILO")"
 assert_launch_gone teardown "$TOK" "$(ctr_of "$SILO")"

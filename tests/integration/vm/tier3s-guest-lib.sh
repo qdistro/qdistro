@@ -100,7 +100,10 @@ else: print("absent")' "$1"
 }
 wait_for() {   # wait_for <secs> <cmd...>
     local n="$1"; shift
-    for _ in $(seq 1 $((n * 4))); do "$@" && return 0; sleep 0.25; done
+    # a wedged probe call (a stalled podman/busctl IPC) must fail the
+    # iteration, not hang the driver past vm-exec's 1800 s bound — every
+    # probe in this lib is a sub-second query, 30 s is generous.
+    for _ in $(seq 1 $((n * 4))); do timeout 30 "$@" && return 0; sleep 0.25; done
     return 1
 }
 unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
@@ -393,7 +396,7 @@ comp_pid() {   # the running compositor's MainPID, or empty
 # unit (qemu-ga logs the guest-exec command TEXT; a whole-journal grep for a
 # marker that appears in a command line would self-match).
 qdshell_log() { journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
-comp_log()    { journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
+comp_log()    { journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service -b --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
 broker_log()  { journalctl -u qdistro-admin-broker.service --no-pager -o cat ${1:+--after-cursor="$1"} 2>/dev/null; }
 
 # qs_ipc <target> <method> [args...] — Quickshell IPC as admin. `qs ipc`

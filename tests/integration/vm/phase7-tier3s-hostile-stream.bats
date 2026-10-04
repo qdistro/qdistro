@@ -27,7 +27,7 @@ teardown_file() {
     assert_output_contains "PASS: single-attach: reconnect to A's consumed link.sock is refused"
     assert_output_contains "PASS: listener attacks DELIVERED while A's listener was live"
     assert_output_contains "PASS: waypipe frames written onto the SANDBOX end of the link"
-    assert_output_contains "PASS: hose wrote onto bridge sockets (attributed ends only)"
+    assert_output_contains "PASS: hose wrote onto at least two attributed bridge sockets"
     assert_output_contains "PASS: compositor still the same pid, unit active"
     assert_output_contains "PASS: qdshell still the SAME pid (no restart) and active"
     assert_output_contains "PASS: no compositor/qdshell crash in the journal since the attack"
