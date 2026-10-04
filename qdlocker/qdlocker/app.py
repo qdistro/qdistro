@@ -20,6 +20,7 @@ from PyQt6.QtCore import (
     QCoreApplication,
     QObject,
     Qt,
+    QTimer,
     QUrl,
     pyqtProperty,
     pyqtSignal,
@@ -378,8 +379,19 @@ class WaylandBridge(QObject):
     def set_presentation(self, presentation: LockerPresentation | None) -> None:
         self._presentation = presentation
 
+    def _schedule_presentation_freeze(self) -> None:
+        """Re-read the trusted snapshot after this event-loop turn.
+
+        set_locked, lock_acknowledged, and compositor confirm use the
+        already-cached snapshot or built-in defaults. A synchronous file
+        read on this turn would delay that path.
+        """
+        if self._presentation is None:
+            return
+        QTimer.singleShot(0, self._freeze_presentation)
+
     def _freeze_presentation(self) -> None:
-        """One-shot trusted snapshot at lock entry. Never blocks locking."""
+        """One-shot trusted snapshot at lock entry. Failures keep last-known-good."""
         pres = self._presentation
         if pres is None:
             return
@@ -435,9 +447,8 @@ class WaylandBridge(QObject):
         # IS a compositor-confirmed locked state — seed the strict flag so a
         # suspend arriving before any fresh locked_changed(1) confirms
         # immediately instead of waiting out the inhibitor timeout.
+        entering = initially_locked and not self._locked
         self._compositor_locked = initially_locked
-        if initially_locked and not self._locked:
-            self._freeze_presentation()
         if self._initially_locked != initially_locked:
             self._initially_locked = initially_locked
             self.initiallyLockedChanged.emit(initially_locked)
@@ -461,6 +472,8 @@ class WaylandBridge(QObject):
                 self._pwd_lifecycle.notify_screen_lock("manual")
             except Exception:
                 log.exception("pwd lifecycle relock notification failed")
+        if entering:
+            self._schedule_presentation_freeze()
 
     @pyqtSlot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
@@ -469,8 +482,6 @@ class WaylandBridge(QObject):
         # separately from the intent mirror `_locked`.
         self._compositor_locked = locked
         entering = locked and not self._locked
-        if entering:
-            self._freeze_presentation()
         if self._locked != locked:
             self._locked = locked
             self.lockedChanged.emit(locked)
@@ -483,6 +494,8 @@ class WaylandBridge(QObject):
                 self._lock_confirmed_cb()
             except Exception:
                 log.exception("lock_confirmed callback raised")
+        if entering:
+            self._schedule_presentation_freeze()
 
     @pyqtSlot(int)
     def _on_lock_requested(self, reason: int) -> None:
@@ -526,13 +539,16 @@ class WaylandBridge(QObject):
         # (compositor + client-side idle racing) gets caught by the
         # `if self._locked` guard above. The compositor will follow
         # up with a locked_changed=true event that confirms it.
-        self._freeze_presentation()
+        # Cached or default appearance is enough for this turn; freeze
+        # the trusted snapshot on the next event-loop turn so a disk
+        # read cannot delay set_locked / lock_acknowledged.
         self._locked = True
         self.lockedChanged.emit(True)
         self.lockedChangedForCtrl.emit(True)
         if self._client:
             self._client.set_locked(True)
             self._client.lock_acknowledged(reason)
+        self._schedule_presentation_freeze()
 
     @pyqtSlot(int, str)
     def _on_overlay_key(self, sym: int, utf8: str) -> None:
