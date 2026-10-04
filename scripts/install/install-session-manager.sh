@@ -226,11 +226,6 @@ if [ "$_qd_t3s" = 1 ]; then
     # teardown path (spawn EXIT trap, unit ExecStop/ExecStopPost, reconciliation).
     install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-scope" "$DEST/qdistro-tier3s-scope"
     install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-cleanup" "$DEST/qdistro-tier3s-cleanup"
-    # The gfx bootstrap (first process of the scope for A1 launches, replacing
-    # the scope helper there) and its per-launch export-channel bridge
-    # (paravirt-gpu doc 11).
-    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-bootstrap" "$DEST/qdistro-tier3s-bootstrap"
-    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-bridge" "$DEST/qdistro-tier3s-bridge"
     # The runsc state root and the control/per-launch parents: tmpfiles is their
     # ONLY creator (CONTRACT §2); create them now, and systemd recreates them at
     # every boot.

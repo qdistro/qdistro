@@ -635,23 +635,7 @@ oracle is "no `podman run` and no activation record":
      comments, then exactly one `GUI=0` or `GUI=1`. An **absent** file means
      a headless workload (`GUI=0`, the Phase A path, unchanged); a **present**
      file that is a symlink, unreadable, malformed, carries an unknown key or
-     has no `GUI=` line refuses the launch. A second optional key `GFX=none`
-     or `GFX=a1` (at most once; `GUI=1` combined with `GFX=a1` refuses — the
-     transports are exclusive) selects the A1 export-channel launch
-     (paravirt-gpu doc 11): `podman run --rm` becomes `podman create` plus a
-     `qdistro.tier3s.token=<token>` annotation, and the scope's first
-     process is `qdistro-tier3s-bootstrap` — the same validation and
-     selective cgroup delegation as the scope helper, then the split
-     `create → init → verify → authorize → start` sequence in which the
-     Sentry's connect to the root-owned donation socket
-     `/run/qdistro-tier3s/qshm-donate-<token>.sock` is authorized (peer ==
-     `runsc state`'s sandbox pid for the exact container id, cgroup under
-     the anchored launch-scope path) **before** `podman start` ever runs.
-     The `tier3s-runsc` wrapper reads the annotation back out of the
-     generated `config.json` and injects `--EXPERIMENTAL-qshm` +
-     `--qshm-export-sock=<that socket>` into the runtime argv; a missing or
-     malformed annotation gets no channel and the bootstrap refuses the
-     launch on its own authority — there is no fallback;
+     has no `GUI=` line refuses the launch;
    - the image: for a templated silo, `qdistro-resolve-binding <binding>
      --launch-env` **without** `--record` (a digest plus the state path);
      otherwise `localhost/qdistro/tier3s-<workload>:latest`.

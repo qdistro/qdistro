@@ -1126,8 +1126,7 @@ def test_installer_installs_exactly_the_contract_paths():
         assert (f"tier3s/{f}", f"/usr/lib/qdistro/tier3s/{f}") in got
     assert re.search(r'for _qd_f in "\$_qd_t3s_src"/seccomp/\*\.json; do\n\s+install -o root -g root '
                      r'-m 0644 "\$_qd_f" "\$_qd_t3s_lib/seccomp/\$\(basename "\$_qd_f"\)"', block)
-    for f in ("qdistro-tier3s-scope", "qdistro-tier3s-cleanup",
-              "qdistro-tier3s-bootstrap", "qdistro-tier3s-bridge"):
+    for f in ("qdistro-tier3s-scope", "qdistro-tier3s-cleanup"):
         assert (f"tier3s/{f}", f"/usr/libexec/qdistro/{f}") in got
     assert ("tier3s/tmpfiles/qdistro-tier3s.conf", "/usr/lib/tmpfiles.d/qdistro-tier3s.conf") in got
     assert ("session_manager/qdistro-tier3s-silo@.service",
@@ -1137,8 +1136,6 @@ def test_installer_installs_exactly_the_contract_paths():
     modes = {d: m for _s, d, m in inst}
     for d in ("/usr/lib/qdistro/tier3s/spawn-tier3s.sh", "/usr/libexec/qdistro/qdistro-tier3s-scope",
               "/usr/libexec/qdistro/qdistro-tier3s-cleanup",
-              "/usr/libexec/qdistro/qdistro-tier3s-bootstrap",
-              "/usr/libexec/qdistro/qdistro-tier3s-bridge",
               "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"):
         assert modes[d] == "0755"
     assert modes["/usr/lib/tmpfiles.d/qdistro-tier3s.conf"] == "0644"
@@ -1216,7 +1213,6 @@ def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
             "/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint", "/usr/lib/qdistro/tier3s/make-tier3s-image.sh",
             "/usr/lib/qdistro/tier3s/headless-smoke.sh", "/usr/lib/qdistro/tier3s/configure-snapshot-repos.sh",
             "/usr/libexec/qdistro/qdistro-tier3s-scope", "/usr/libexec/qdistro/qdistro-tier3s-cleanup",
-            "/usr/libexec/qdistro/qdistro-tier3s-bootstrap", "/usr/libexec/qdistro/qdistro-tier3s-bridge",
             "/usr/lib/tmpfiles.d/qdistro-tier3s.conf", "/etc/systemd/system/qdistro-tier3s-silo@.service",
             "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"} | seccomp | decls | cfiles
     assert dests == want, dests ^ want

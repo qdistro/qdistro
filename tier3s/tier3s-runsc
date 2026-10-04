@@ -36,23 +36,13 @@ die() {
     /usr/bin/logger -t tier3s-runsc -p user.err -- "$*; refusing (no fallback)" 2>/dev/null
     exit 125
 }
-# Test hook ONLY: TIER3S_TEST_ROOT prefixes the state root and the runsc
-# binary, and keeps the caller's PATH (fakes); refused for root.
-T=${TIER3S_TEST_ROOT:-}
-if [ -n "$T" ]; then
-    [ "$(id -u)" -ne 0 ] || die "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"
-    case "$T" in /?*) ;; *) die "TIER3S_TEST_ROOT must be absolute" ;; esac
-    RUNSC=$T/usr/libexec/qdistro/runsc/runsc
-else
-    RUNSC=/usr/libexec/qdistro/runsc/runsc
-fi
 case "$host" in ''|*[!0-9]*) die "cannot map uid '$euid' to a host uid" ;; esac
 [ "$host" -ne 0 ] || die "host root has no tier 3s state root"
-base=$T/run/qdistro-tier3s-runsc
+base=/run/qdistro-tier3s-runsc
 root=$base/$host
 # runsc puts its control socket at <root>/runsc-<64 hex id>.sock and silently
 # falls back to /var/run, /run, /tmp when that path exceeds sun_path (107).
-[ -n "$T" ] || [ "${#root}" -le 31 ] || die "state root $root is too long for runsc's control socket"
+[ "${#root}" -le 31 ] || die "state root $root is too long for runsc's control socket"
 if [ -L "$base" ] || [ ! -d "$base" ]; then die "$base is missing or not a directory (provision: systemd-tmpfiles --create qdistro-tier3s.conf)"; fi
 if [ -L "$root" ] || [ ! -d "$root" ]; then die "state root $root is missing or not a directory"; fi
 meta=$(/usr/bin/stat -c '%u %a' -- "$root") || die "cannot stat state root $root"
@@ -61,79 +51,4 @@ meta=$(/usr/bin/stat -c '%u %a' -- "$root") || die "cannot stat state root $root
 for a in "$@"; do
     case "$a" in --root|--root=*|-root|-root=*) die "caller-supplied $a" ;; esac
 done
-
-# --- gfx donation (paravirt-gpu doc 11) --------------------------------------
-# If this call is `create` for a gfx launch, inject the channel the Sentry
-# connects out to. The launch's bootstrap (a root process in the scope)
-# created /run/qdistro-tier3s/qshm-donate-<token>.sock BEFORE podman ran;
-# the token comes from the bundle's qdistro.tier3s.token annotation, a
-# 32-hex locator only — a forged one can only name a wrong/absent socket,
-# and connect() failing there fails the create closed.
-#
-# Subcommand = first positional arg. podman/conmon may prepend global flags;
-# only flags with separate values can hide the subcommand token, so the skip
-# list below is the exact set podman emits (everything else is --flag=value).
-sub=; bundle=; takes_val=
-for a in "$@"; do
-    if [ -n "$takes_val" ]; then
-        [ "$takes_val" = bundle ] && bundle=$a
-        takes_val=
-        continue
-    fi
-    case "$a" in
-        --log|--log-format|--log-level|--root|-root|--console-socket|--pid-file|--user-log)
-            takes_val=x ;;
-        --bundle) takes_val=bundle ;;
-        --bundle=*) bundle=${a#--bundle=} ;;
-        -*) ;;
-        *) [ -z "$sub" ] && sub=$a ;;
-    esac
-done
-
-sockarg=
-if [ "$sub" = create ]; then
-    cfg=${bundle:-.}/config.json
-    if [ -f "$cfg" ] && [ ! -L "$cfg" ]; then
-        # Exactly one annotation naming a 32-hex token is honored. Count
-        # key occurrences first: a duplicate anywhere in the file is
-        # ambiguous and refused rather than silently choosing.
-        nkeys=$(grep -o '"qdistro\.tier3s\.token"[[:space:]]*:' -- "$cfg" 2>/dev/null | wc -l)
-        [ "$nkeys" -le 1 ] || die "multiple qdistro.tier3s.token annotations in $cfg"
-        tok=$(sed -n 's/.*"qdistro\.tier3s\.token"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{32\}\)".*/\1/p' -- "$cfg" 2>/dev/null)
-        case $tok in
-            '') ;;                        # headless launch (or malformed → no channel)
-            *'
-'*)             die "ambiguous qdistro.tier3s.token annotation in $cfg" ;;
-            *)  sockarg=/run/qdistro-tier3s/qshm-donate-$tok.sock ;;
-        esac
-    fi
-fi
-if [ -n "$sockarg" ]; then
-    # --EXPERIMENTAL-qshm is a global flag and must precede `create`;
-    # --qshm-export-sock is a create flag and follows it. Rotate argv
-    # through a fixed count so appended args are never re-scanned.
-    n=$#; i=0; takes_val=; seen_create=
-    while [ "$i" -lt "$n" ]; do
-        a=$1; i=$((i+1))
-        if [ -n "$takes_val" ]; then
-            takes_val=
-            set -- "$@" "$a"; shift
-            continue
-        fi
-        case "$a" in
-            --log|--log-format|--log-level|--root|-root|--console-socket|--pid-file|--user-log|--bundle)
-                takes_val=1 ;;
-        esac
-        if [ -z "$seen_create" ] && [ "$a" = create ]; then
-            seen_create=1
-            set -- "$@" --EXPERIMENTAL-qshm create "--qshm-export-sock=$sockarg"; shift
-            continue
-        fi
-        set -- "$@" "$a"; shift
-    done
-fi
-
-if [ -n "$T" ]; then
-    exec /usr/bin/env -i "PATH=$PATH" "$RUNSC" --ignore-cgroups --platform=systrap --oci-seccomp "--root=$root" "$@"
-fi
-exec /usr/bin/env -i PATH=/usr/bin:/bin "$RUNSC" --ignore-cgroups --platform=systrap --oci-seccomp "--root=$root" "$@"
+exec /usr/bin/env -i PATH=/usr/bin:/bin /usr/libexec/qdistro/runsc/runsc --ignore-cgroups --platform=systrap --oci-seccomp "--root=$root" "$@"
