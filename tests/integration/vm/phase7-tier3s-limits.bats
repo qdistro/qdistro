@@ -41,7 +41,7 @@ teardown_file() {
     assert_output_contains "PASS: tasks: an outside admin process cannot inject itself into the scope"
     assert_output_contains "PASS: tasks: C's scope really is at TasksMax=1024"
     assert_output_contains "PASS: tasks: host pids.current never exceeded pids.max"
-    assert_output_contains "PASS: tasks: pids.events max grew"
+    assert_output_contains "PASS: tasks: pids.events.local max grew"
     assert_output_contains "PASS: tasks: the bomb was bounded"
     assert_output_contains "PASS: memory: B's own memory.max triggered the OOM"
     # everything torn down
