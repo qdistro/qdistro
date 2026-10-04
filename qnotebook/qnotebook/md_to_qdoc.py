@@ -47,6 +47,7 @@ CHAR_CODE = QTextCharFormat.Property.UserProperty + 11  # bool
 CHAR_IMAGE_ALT = QTextCharFormat.Property.UserProperty + 12  # str alt text for images
 CHAR_TAG = QTextCharFormat.Property.UserProperty + 13  # str tag name (e.g. "todo" for `#todo`)
 CHAR_STRONG = QTextCharFormat.Property.UserProperty + 26  # bool: authored markdown bold
+CHAR_IMAGE_LINK = QTextCharFormat.Property.UserProperty + 27  # bool: live `![alt](src)` markup
 BLOCK_TOC_MARKER = QTextCharFormat.Property.UserProperty + 14
 BLOCK_TRANSCLUSION = QTextCharFormat.Property.UserProperty + 22
 BLOCK_TRANSCLUDED_CHILD = QTextCharFormat.Property.UserProperty + 23
