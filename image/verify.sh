@@ -837,11 +837,16 @@ if [ "$STICK" = 1 ] && [ "${QDISTRO_VERIFY_PARENT:-}" != 1 ] && [ "$KEEP" != 1 ]
     extra_n=0
     run_extra() {
         local name="$1"; shift
+        local child_digest=""
+        # The parent already verified and materialised the xz. Only the dd
+        # child reopens that xz; the other children boot its raw bytes.
+        [ "$name" != dd ] || child_digest="${QDISTRO_IMAGE_SHA256:-}"
         extra_n=$((extra_n + 1))
         log "stick extra: $name $* (port=$((SSH_PORT + extra_n)))"
         if QDISTRO_VERIFY_VM="${VM}-${name}" \
            QDISTRO_VERIFY_PORT=$((SSH_PORT + extra_n)) \
            QDISTRO_VERIFY_LOGIN=0 QDISTRO_VERIFY_PERSIST=0 \
+           QDISTRO_IMAGE_SHA256="$child_digest" \
            bash "$HERE/verify.sh" "$@"; then
             echo "PASS: stick extra $name" | tee -a "$VERIFY_DIR/report.txt"
         else
