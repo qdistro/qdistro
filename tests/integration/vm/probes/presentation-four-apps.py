@@ -362,6 +362,15 @@ def run_worker(
         cmd = read_text(cmd_path) or "idle"
         if cmd == "quit":
             ctrl.stop()
+            if windows is not None:
+                from PyQt6.QtCore import QCoreApplication, QEvent
+
+                # No app.exec() runs in this probe, so drain deferred Qt
+                # deletion before Python unloads qdbrowser's WebEngine types.
+                for widget in reversed(windows):
+                    widget.close()
+                    widget.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             return 0
         if cmd != seen:
             seen = cmd
