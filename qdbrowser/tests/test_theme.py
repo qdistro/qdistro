@@ -1,6 +1,10 @@
 """Theme apply + resolve."""
 
+import re
+
 import pytest
+
+_LITERAL_WHITE_FG = re.compile(r"(?<!background-)color:\s*#ffffff", re.I)
 
 
 def test_resolve_explicit():
@@ -8,6 +12,95 @@ def test_resolve_explicit():
     assert resolve_theme("dark") == "dark"
     assert resolve_theme("light") == "light"
     assert resolve_theme("native") == "native"
+
+
+def test_explicit_dark_selection_uses_named_pair(themed_app):
+    from PyQt6.QtGui import QPalette
+    from qdbrowser.theme import (
+        DARK_QSS,
+        HOVER,
+        HOVER_FG,
+        SELECTION,
+        SELECTION_FG,
+        apply_theme,
+        palette_dict,
+        reset_controller_for_tests,
+    )
+
+    reset_controller_for_tests()
+    apply_theme(themed_app, "dark")
+    pal = themed_app.palette()
+    assert pal.color(QPalette.ColorRole.Highlight).name() == SELECTION
+    assert pal.color(QPalette.ColorRole.HighlightedText).name() == SELECTION_FG
+    assert pal.color(QPalette.ColorRole.HighlightedText).name() != "#ffffff"
+    assert f"color: {SELECTION_FG}" in DARK_QSS
+    assert f"background-color: {SELECTION}" in DARK_QSS
+    assert f"color: {HOVER_FG}" in DARK_QSS
+    assert f"background-color: {HOVER}" in DARK_QSS
+    assert _LITERAL_WHITE_FG.search(DARK_QSS) is None
+    roles = palette_dict("dark")
+    assert roles["selection"] == SELECTION
+    assert roles["selection_fg"] == SELECTION_FG
+    assert roles["hover"] == HOVER
+    assert roles["hover_fg"] == HOVER_FG
+
+
+def test_explicit_light_selection_uses_named_pair(themed_app):
+    from PyQt6.QtGui import QPalette
+    from qdbrowser.theme import (
+        LIGHT_QSS,
+        LT_HOVER,
+        LT_HOVER_FG,
+        LT_SELECTION,
+        LT_SELECTION_FG,
+        apply_theme,
+        palette_dict,
+        reset_controller_for_tests,
+    )
+
+    reset_controller_for_tests()
+    apply_theme(themed_app, "light")
+    pal = themed_app.palette()
+    assert pal.color(QPalette.ColorRole.Highlight).name() == LT_SELECTION
+    assert pal.color(QPalette.ColorRole.HighlightedText).name() == LT_SELECTION_FG
+    assert pal.color(QPalette.ColorRole.HighlightedText).name() != "#ffffff"
+    assert f"color: {LT_SELECTION_FG}" in LIGHT_QSS
+    assert f"background-color: {LT_SELECTION}" in LIGHT_QSS
+    assert f"color: {LT_HOVER_FG}" in LIGHT_QSS
+    assert f"background-color: {LT_HOVER}" in LIGHT_QSS
+    assert _LITERAL_WHITE_FG.search(LIGHT_QSS) is None
+    roles = palette_dict("light")
+    assert roles["selection"] == LT_SELECTION
+    assert roles["selection_fg"] == LT_SELECTION_FG
+    assert roles["hover"] == LT_HOVER
+    assert roles["hover_fg"] == LT_HOVER_FG
+
+
+def test_auto_palette_without_controller_includes_hover_pair(themed_app):
+    from PyQt6.QtGui import QPalette
+    from qdbrowser.theme import (
+        HOVER,
+        HOVER_FG,
+        SELECTION,
+        SELECTION_FG,
+        apply_theme,
+        palette_dict,
+        reset_controller_for_tests,
+    )
+
+    reset_controller_for_tests()
+    apply_theme(themed_app, "dark")
+    auto = palette_dict("auto")
+    pal = themed_app.palette()
+    assert auto["selection"] == pal.color(QPalette.ColorRole.Highlight).name()
+    assert auto["selection_fg"] == pal.color(QPalette.ColorRole.HighlightedText).name()
+    assert auto["hover"] == pal.color(QPalette.ColorRole.Midlight).name()
+    assert auto["hover_fg"] == pal.color(QPalette.ColorRole.Text).name()
+    assert auto["selection"] == SELECTION
+    assert auto["selection_fg"] == SELECTION_FG
+    assert auto["hover"] == HOVER
+    assert auto["hover_fg"] == HOVER_FG
+    assert auto["selection_fg"] != "#ffffff"
 
 
 def test_apply_theme_returns_resolved(themed_app):

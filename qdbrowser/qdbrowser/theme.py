@@ -15,6 +15,9 @@ ACCENT = "#2a6ea8"
 ACCENT_LIGHT = "#3d8fd4"
 BORDER = "#555555"
 SELECTION = "#264f78"
+SELECTION_FG = "#f5f5f5"
+HOVER = BG_LIGHT
+HOVER_FG = FG
 
 LT_BG = "#f0f0f0"
 LT_BG_BASE = "#ffffff"
@@ -24,6 +27,9 @@ LT_FG_DIM = "#808080"
 LT_ACCENT = "#0078d4"
 LT_BORDER = "#c0c0c0"
 LT_SELECTION = "#0078d4"
+LT_SELECTION_FG = "#f5f5f5"
+LT_HOVER = LT_BG_MID
+LT_HOVER_FG = LT_FG
 
 
 def detect_system_theme() -> str:
@@ -143,6 +149,8 @@ def palette_dict(mode: str = "auto") -> dict:
                 "border": pal.color(QPalette.ColorRole.Mid).name(),
                 "selection": pal.color(QPalette.ColorRole.Highlight).name(),
                 "selection_fg": pal.color(QPalette.ColorRole.HighlightedText).name(),
+                "hover": pal.color(QPalette.ColorRole.Midlight).name(),
+                "hover_fg": pal.color(QPalette.ColorRole.Text).name(),
             }
         mode = detect_system_theme()
     if mode == "light":
@@ -155,6 +163,9 @@ def palette_dict(mode: str = "auto") -> dict:
             "accent": LT_ACCENT,
             "border": LT_BORDER,
             "selection": LT_SELECTION,
+            "selection_fg": LT_SELECTION_FG,
+            "hover": LT_HOVER,
+            "hover_fg": LT_HOVER_FG,
         }
     return {
         "bg": BG_DARK,
@@ -165,6 +176,9 @@ def palette_dict(mode: str = "auto") -> dict:
         "accent": ACCENT_LIGHT,
         "border": BORDER,
         "selection": SELECTION,
+        "selection_fg": SELECTION_FG,
+        "hover": HOVER,
+        "hover_fg": HOVER_FG,
     }
 
 
@@ -223,6 +237,7 @@ def _apply_dark(app):
     pal.setColor(QPalette.ColorRole.WindowText, QColor(FG))
     pal.setColor(QPalette.ColorRole.Base, QColor(BG_DARK))
     pal.setColor(QPalette.ColorRole.AlternateBase, QColor(BG_MID))
+    pal.setColor(QPalette.ColorRole.Midlight, QColor(HOVER))
     pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(BG_LIGHT))
     pal.setColor(QPalette.ColorRole.ToolTipText, QColor(FG))
     pal.setColor(QPalette.ColorRole.Text, QColor(FG))
@@ -230,7 +245,7 @@ def _apply_dark(app):
     pal.setColor(QPalette.ColorRole.ButtonText, QColor(FG))
     pal.setColor(QPalette.ColorRole.Link, QColor(ACCENT_LIGHT))
     pal.setColor(QPalette.ColorRole.Highlight, QColor(SELECTION))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(SELECTION_FG))
     pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(FG_DIM))
     pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(FG_DIM))
     pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(FG_DIM))
@@ -244,12 +259,13 @@ def _apply_light(app):
     pal.setColor(QPalette.ColorRole.WindowText, QColor(LT_FG))
     pal.setColor(QPalette.ColorRole.Base, QColor(LT_BG_BASE))
     pal.setColor(QPalette.ColorRole.AlternateBase, QColor(LT_BG))
+    pal.setColor(QPalette.ColorRole.Midlight, QColor(LT_HOVER))
     pal.setColor(QPalette.ColorRole.Text, QColor(LT_FG))
     pal.setColor(QPalette.ColorRole.Button, QColor(LT_BG_MID))
     pal.setColor(QPalette.ColorRole.ButtonText, QColor(LT_FG))
     pal.setColor(QPalette.ColorRole.Link, QColor(LT_ACCENT))
     pal.setColor(QPalette.ColorRole.Highlight, QColor(LT_SELECTION))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(LT_SELECTION_FG))
     app.setPalette(pal)
     app.setStyleSheet(LIGHT_QSS)
 
@@ -260,7 +276,7 @@ QToolBar {{ background-color: {BG_MID}; border: none; padding: 2px;
             spacing: 2px; }}
 QToolButton {{ background: transparent; color: {FG}; border: none;
                padding: 4px 6px; border-radius: 3px; }}
-QToolButton:hover {{ background-color: {BG_LIGHT}; }}
+QToolButton:hover {{ background-color: {HOVER}; color: {HOVER_FG}; }}
 QToolButton:pressed {{ background-color: {ACCENT}; }}
 QLineEdit {{ background-color: {BG_DARK}; color: {FG};
              border: 1px solid {BORDER}; border-radius: 3px;
@@ -270,7 +286,7 @@ QTabBar::tab {{ background-color: {BG_DARK}; color: {FG_DIM};
                 padding: 6px 14px; border: none;
                 border-right: 1px solid {BORDER}; min-width: 100px; }}
 QTabBar::tab:selected {{ background-color: {BG_MID}; color: {FG}; }}
-QTabBar::tab:hover {{ background-color: {BG_LIGHT}; color: {FG}; }}
+QTabBar::tab:hover {{ background-color: {HOVER}; color: {HOVER_FG}; }}
 QTabBar::close-button {{ subcontrol-position: right; padding: 2px; }}
 QTabBar::close-button:hover {{ background-color: {BG_LIGHT};
                                border-radius: 3px; }}
@@ -283,12 +299,12 @@ QListWidget, QTreeWidget, QTextEdit, QPlainTextEdit {{
     background-color: {BG_DARK}; color: {FG};
     border: 1px solid {BORDER}; }}
 QListWidget::item:selected, QTreeWidget::item:selected {{
-    background-color: {SELECTION}; color: #ffffff; }}
+    background-color: {SELECTION}; color: {SELECTION_FG}; }}
 QStatusBar {{ background-color: {BG_DARK}; color: {FG_DIM};
               border-top: 1px solid {BORDER}; }}
 QMenu {{ background-color: {BG_MID}; color: {FG};
          border: 1px solid {BORDER}; }}
-QMenu::item:selected {{ background-color: {SELECTION}; }}
+QMenu::item:selected {{ background-color: {SELECTION}; color: {SELECTION_FG}; }}
 QPushButton {{ background-color: {BG_LIGHT}; color: {FG};
                border: 1px solid {BORDER}; border-radius: 3px;
                padding: 4px 12px; }}
@@ -389,7 +405,7 @@ QMainWindow {{ background-color: {LT_BG}; }}
 QToolBar {{ background-color: {LT_BG}; border: none; padding: 2px; }}
 QToolButton {{ color: {LT_FG}; padding: 4px 6px; border-radius: 3px;
                background: transparent; }}
-QToolButton:hover {{ background-color: {LT_BG_MID}; }}
+QToolButton:hover {{ background-color: {LT_HOVER}; color: {LT_HOVER_FG}; }}
 QLineEdit {{ background-color: {LT_BG_BASE}; color: {LT_FG};
              border: 1px solid {LT_BORDER}; border-radius: 3px;
              padding: 4px 8px; }}
@@ -402,4 +418,6 @@ QSplitter::handle {{ background-color: {LT_BORDER}; }}
 QListWidget, QTreeWidget {{ background-color: {LT_BG_BASE};
                             color: {LT_FG};
                             border: 1px solid {LT_BORDER}; }}
+QListWidget::item:selected, QTreeWidget::item:selected {{
+    background-color: {LT_SELECTION}; color: {LT_SELECTION_FG}; }}
 """
