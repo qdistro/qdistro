@@ -158,13 +158,10 @@ def test_theme_apply_does_not_recolor_profile_terminals(window, qtbot):
     cfg.set("profiles", "default", "color_scheme", "Linux")
     cfg.set("general", "light_color_scheme", "BlackOnWhite")
     window._active_terminal.apply_profile_fields()
-    calls = []
-    window.apply_color_scheme_to_all = lambda scheme: calls.append(scheme)
     dlg = PreferencesDialog(window)
     qtbot.addWidget(dlg)
     dlg._theme_mode.setCurrentIndex(2)  # Light
     dlg._apply()
-    assert calls == []
     assert window._active_terminal._applied_scheme == "Linux"
 
 
@@ -202,10 +199,7 @@ def test_dark_scheme_edit_refreshes_opted_in_not_profile(qtbot, tmp_path, monkey
     idx = dlg._dark_color_scheme.findText("WhiteOnBlack")
     assert idx >= 0
     dlg._dark_color_scheme.setCurrentIndex(idx)
-    calls = []
-    win.apply_color_scheme_to_all = lambda scheme: calls.append(scheme)
     dlg._apply()
-    assert calls == []
     assert opted._applied_scheme == "WhiteOnBlack"
     assert win._active_terminal._applied_scheme == "Linux"
 

@@ -40,8 +40,9 @@ QTermWidget Python bindings: built from source via sip-wheel (see README.md).
 - Terminal content fonts are independent of chrome. `font_source=desktop` uses
   snapshot `fixedFamily` and `content_fixed_point_size` (not UI scale). Zoom is
   a per-terminal delta on that base; reset uses the terminal's own profile.
-- Theme changes must not call `apply_color_scheme_to_all`. `color_source=profile`
-  keeps the profile scheme; `appearance-mode` uses general dark/light schemes.
+- Theme changes must not recolor every terminal with one scheme.
+  `color_source=profile` keeps the profile scheme; `appearance-mode` uses
+  general dark/light schemes.
 - `QTermWidget.zoomIn/zoomOut` are not the live path; they would desync the delta.
 
 ## Test conventions
