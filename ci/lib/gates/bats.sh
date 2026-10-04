@@ -91,7 +91,7 @@ bats_tap_skip_reasons() {
 # artifact dir) is either a single-line O_APPEND or a path unique to this VM.
 bats_run_one() {
     qci_assert_vm_exists "$1" "bats:$(basename "$2")" || return $?
-    local vm=$1 file=$2 base log_path gate_rc slug scratch
+    local vm=$1 file=$2 ssh_port=${3:-} base log_path gate_rc slug scratch
     base=$(basename "$file")
     log_path="$RDIR/bats/$base.log"
     mkdir -p "$(dirname "$log_path")"
@@ -101,21 +101,37 @@ bats_run_one() {
     slug=$(safe_name "$base")
     scratch=$(scenario_scratch_dir bats "$slug")
     mkdir -p "$scratch"
-    if bats_skip_if_sibling_app_missing "$vm" "$file"; then
+    if bats_is_enforcing "$file" && [ -z "$ssh_port" ]; then
+        record_result bats "$base" fail "$EXIT_BATS" bats bats "" \
+            "VM=$vm marked # qci:enforcing but no SSH port (explicit --vm needs VM_SSH_PORT)"
+        return "$EXIT_BATS"
+    fi
+    if [ -z "$ssh_port" ] && bats_skip_if_sibling_app_missing "$vm" "$file"; then
         return 0
     fi
-    log "bats $base on $vm"
+    log "bats $base on $vm${ssh_port:+ (enforcing, ssh :$ssh_port)}"
     (
         cd "$QDISTRO_REPO" || exit 2
         # QDISTRO_PROFILE is the image gate's expected profile, not a bats
         # input: `QDISTRO_PROFILE=dev qci full` (the tester image) leaked it
         # into suites that assert the default profile (13 false failures).
+        # VM_SSH_PORT is set only for enforcing files; unset it otherwise so a
+        # caller's stray value cannot reroute a permissive file.
+        if [ -n "$ssh_port" ]; then
+            export VM_SSH_PORT="$ssh_port"
+        else
+            unset VM_SSH_PORT
+        fi
         VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" \
             QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
             env -u QDISTRO_PROFILE bats "$file"
     ) > "$log_path" 2>&1
     gate_rc=$?
-    collect_vm_artifacts "$vm" "bats-${base%.bats}"
+    if [ -n "$ssh_port" ]; then
+        collect_vm_artifacts_ssh "$vm" "$ssh_port" "bats-${base%.bats}"
+    else
+        collect_vm_artifacts "$vm" "bats-${base%.bats}"
+    fi
     if [ "$gate_rc" -eq 0 ]; then
         # Bats `skip` exits 0, so a file whose cases ALL skipped used to record an
         # indistinguishable `pass` row. The latest full run hid 30 skipped cases
@@ -161,6 +177,15 @@ bats_run_one() {
 # A violation is recorded as a failed row for that file (the file is not run).
 bats_is_host_only() {
     head -n 40 -- "$1" 2>/dev/null | grep -qE '^# qci:host-only([[:space:]]|$)'
+}
+
+# ENFORCING bats files. A header marker line `# qci:enforcing` (first 40
+# lines) runs the file on a clone of the per-run golden booted
+# SELinux=enforcing (clone-baseweed.sh --enforcing), reached over SSH:
+# VM_SSH_PORT is exported, so helpers.bash routes vm_run through ssh. It
+# never falls back to a permissive VM.
+bats_is_enforcing() {
+    head -n 40 -- "$1" 2>/dev/null | grep -qE '^# qci:enforcing([[:space:]]|$)'
 }
 
 # Echo why a host-only-marked file cannot run without a VM (empty + rc 1 when
@@ -238,12 +263,22 @@ bats_run_disposable() {
         record_timing bats "$base" 0 0 "$(( $(date +%s) - t0 ))" skip ""
         return 0
     fi
-    vm=$(acquire_vm "bats-$(safe_name "${base%.bats}")" "") || {
-        record_timing bats "$base" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
-        return "$EXIT_VM_PROVISION"
-    }
+    local ssh_port="" acquired
+    if bats_is_enforcing "$file"; then
+        acquired=$(acquire_enforcing_vm "bats-$(safe_name "${base%.bats}")") || {
+            record_timing bats "$base" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
+            return "$EXIT_VM_PROVISION"
+        }
+        vm=${acquired%% *}
+        ssh_port=${acquired##* }
+    else
+        vm=$(acquire_vm "bats-$(safe_name "${base%.bats}")" "") || {
+            record_timing bats "$base" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
+            return "$EXIT_VM_PROVISION"
+        }
+    fi
     t1=$(date +%s)
-    bats_run_one "$vm" "$file"
+    bats_run_one "$vm" "$file" "$ssh_port"
     frc=$?
     t2=$(date +%s)
     release_vm "$vm" "$frc"
@@ -419,7 +454,11 @@ gate_bats() {
         fi
         validate_vm bats "$explicit" || return "$EXIT_VM_PROVISION"
         for file in "${run_files[@]}"; do
-            bats_run_one "$explicit" "$file"
+            if bats_is_enforcing "$file"; then
+                bats_run_one "$explicit" "$file" "${VM_SSH_PORT:-}"
+            else
+                bats_run_one "$explicit" "$file"
+            fi
             frc=$?
             [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
         done
