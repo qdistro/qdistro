@@ -32,6 +32,12 @@ BOOT_LOOP = "for _w in weston-terminal text-viewer url-preview qfileman; do\n"
 BOOT_LOG = (
     "tier-2 images pre-built: weston-terminal, text-viewer, url-preview, qfileman"
 )
+FETCH = (
+    'wget -nv -O /var/tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \\\n'
+)
+FETCH_DEST = "/var/tmp/qdistro-tier2-images.tar"
+TMP_DEST = " /tmp/qdistro-tier2-images.tar"
+LOAD = "runuser -u admin -- podman load -i /var/tmp/qdistro-tier2-images.tar \\\n"
 
 def check(cache_src: str, boot_src: str) -> None:
     need_cache = (
@@ -51,6 +57,16 @@ def check(cache_src: str, boot_src: str) -> None:
         raise SystemExit(f"bootstrap missing {BOOT_LOOP!r}")
     if BOOT_LOG not in boot_src:
         raise SystemExit(f"bootstrap missing {BOOT_LOG!r}")
+    if FETCH not in boot_src:
+        raise SystemExit(f"bootstrap missing {FETCH!r}")
+    if FETCH_DEST not in boot_src:
+        raise SystemExit(f"bootstrap missing {FETCH_DEST!r}")
+    if LOAD not in boot_src:
+        raise SystemExit(f"bootstrap missing {LOAD!r}")
+    if TMP_DEST in boot_src:
+        raise SystemExit("bootstrap still fetches the tier-2 archive onto guest /tmp")
+    if 'wget -q -O /var/tmp/qdistro-tier2-images.tar' in boot_src:
+        raise SystemExit("quiet wget hides a short write of the tier-2 archive")
     if 'workloads=(weston-terminal text-viewer url-preview)\n' in cache_src:
         raise SystemExit("cache script still builds only the three bats-minimum images")
     if "for _w in weston-terminal text-viewer url-preview; do" in boot_src:
@@ -95,6 +111,8 @@ expect_fail(cache, bootstrap, STRIP, "consumer strip")
 expect_fail(cache, bootstrap, PER_WORKLOAD, "per-workload context copy")
 expect_fail(cache, bootstrap, BOOT_LOOP, "bootstrap qfileman verify loop")
 expect_fail(cache, bootstrap, BOOT_LOG, "bootstrap qfileman log")
+expect_fail(cache, bootstrap, FETCH, "disk-backed tier-2 wget")
+expect_fail(cache, bootstrap, LOAD, "disk-backed podman load")
 expect_replace(
     cache,
     bootstrap,
@@ -116,6 +134,20 @@ expect_replace(
     BOOT_LOOP,
     "for _w in weston-terminal text-viewer url-preview; do\n",
     "qfileman dropped from bootstrap loop",
+)
+expect_replace(
+    cache,
+    bootstrap,
+    FETCH,
+    'wget -q -O /tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \\\n',
+    "tier-2 archive fetched onto guest /tmp",
+)
+expect_replace(
+    cache,
+    bootstrap,
+    FETCH,
+    'wget -q -O /var/tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \\\n',
+    "quiet wget restored on the disk-backed dest",
 )
 print("ok")
 PY

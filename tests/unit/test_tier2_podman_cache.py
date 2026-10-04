@@ -26,6 +26,13 @@ BOOTSTRAP_LOOP = "for _w in weston-terminal text-viewer url-preview qfileman; do
 BOOTSTRAP_LOG = (
     "tier-2 images pre-built: weston-terminal, text-viewer, url-preview, qfileman"
 )
+BOOTSTRAP_FETCH = (
+    'wget -nv -O /var/tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \\'
+)
+BOOTSTRAP_LOAD = (
+    "runuser -u admin -- podman load -i /var/tmp/qdistro-tier2-images.tar \\"
+)
+BOOTSTRAP_TMP_DEST = " /tmp/qdistro-tier2-images.tar"
 
 
 def _write_exec(path: Path, text: str) -> None:
@@ -116,6 +123,10 @@ def test_cache_script_source_pins_qfileman_and_consumer_trees():
     assert STRIP_CONSUMER in text
     assert BOOTSTRAP_LOOP in bootstrap
     assert BOOTSTRAP_LOG in bootstrap
+    assert BOOTSTRAP_FETCH in bootstrap
+    assert BOOTSTRAP_LOAD in bootstrap
+    assert BOOTSTRAP_TMP_DEST not in bootstrap
+    assert "wget -q -O /var/tmp/qdistro-tier2-images.tar" not in bootstrap
 
 
 def test_cache_script_builds_qfileman_context_with_consumer_sources(tmp_path):

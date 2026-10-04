@@ -1112,14 +1112,16 @@ if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
         [[ "$QCI_TIER2_STAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
             || { log 'ERROR: invalid tier-2 archive digest'; exit 3; }
         log 'fetching cached tier-2 Podman images...'
-        wget -q -O /tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \
+        # Guest /tmp is tmpfs (~half of the 4 GiB golden). The four-image
+        # archive is 2.2G and does not fit there; /var/tmp is disk-backed.
+        wget -nv -O /var/tmp/qdistro-tier2-images.tar "$HOST/tier2-images.tar" \
             || { log 'ERROR: tier-2 image archive download failed'; exit 3; }
-        echo "$QCI_TIER2_STAGE_SHA256  /tmp/qdistro-tier2-images.tar" | sha256sum -c - \
+        echo "$QCI_TIER2_STAGE_SHA256  /var/tmp/qdistro-tier2-images.tar" | sha256sum -c - \
             || { log 'ERROR: tier-2 image archive checksum mismatch'; exit 3; }
-        chmod 0644 /tmp/qdistro-tier2-images.tar
-        runuser -u admin -- podman load -i /tmp/qdistro-tier2-images.tar \
+        chmod 0644 /var/tmp/qdistro-tier2-images.tar
+        runuser -u admin -- podman load -i /var/tmp/qdistro-tier2-images.tar \
             || { log 'ERROR: tier-2 image archive load failed'; exit 3; }
-        rm -f /tmp/qdistro-tier2-images.tar
+        rm -f /var/tmp/qdistro-tier2-images.tar
     else
         if [ ! -x "$SRC/tier2/make-tier2-image.sh" ]; then
             log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
