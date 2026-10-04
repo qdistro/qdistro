@@ -164,18 +164,9 @@ def test_failed_reload_keeps_last_good(qgui, monkeypatch):
     assert pres.value("mSurface") == "#112233"
 
 
-def test_lock_request_freezes_before_visibility(qgui, monkeypatch):
-    from dataclasses import replace
-
-    from PyQt6.QtCore import QCoreApplication
-    from qdistro_presentation.model import with_generation
+def _install_snapshot_loader(monkeypatch, current):
     from qdistro_presentation.paths import ResolvedPath
 
-    snap_a = _distinct_snapshot()
-    snap_b = with_generation(
-        replace(snap_a, colors=replace(snap_a.colors, mSurface="#445566"))
-    )
-    current = [snap_a]
     loads: list[str] = []
 
     def load(_resolved):
@@ -188,34 +179,192 @@ def test_lock_request_freezes_before_visibility(qgui, monkeypatch):
         lambda **_k: ResolvedPath(path="/tmp/x", kind="override", expected_uid=None, watch=False),
     )
     monkeypatch.setattr("qdistro_presentation.paths.load_snapshot", load)
-    pres = LockerPresentation()
-    assert pres.has_snapshot is False
+    return loads
+
+
+def _bridge_with_pres(pres):
     controller = MagicMock()
+    client = MagicMock()
     bridge = WaylandBridge(controller)
     bridge.set_presentation(pres)
+    bridge.attach(client)
+    return bridge, controller, client
+
+
+@pytest.mark.cheat_aware(
+    protects="a slow presentation snapshot cannot delay set_locked or lock_acknowledged",
+    severity="high",
+    cheats=[
+        "call freeze_for_lock in _on_lock_requested before lock_acknowledged",
+        "move the read one line after lock_acknowledged in the same slot",
+    ],
+    consequence="a hung /var/lib/qdistro/presentation read delays the lock surface",
+)
+def test_lock_request_acknowledges_before_freeze(qgui, monkeypatch):
+    from dataclasses import replace
+
+    from PyQt6.QtCore import QCoreApplication
+    from qdistro_presentation.model import with_generation
+
+    snap_a = _distinct_snapshot()
+    snap_b = with_generation(
+        replace(snap_a, colors=replace(snap_a.colors, mSurface="#445566"))
+    )
+    current = [snap_a]
+    loads = _install_snapshot_loader(monkeypatch, current)
+    pres = LockerPresentation()
+    assert pres.has_snapshot is False
+    bridge, controller, client = _bridge_with_pres(pres)
     order = []
     bridge.lockedChanged.connect(
         lambda locked: order.append(("visible", locked, pres.value("mSurface")))
     )
-    bridge.inject_lock_requested(3)
+    client.set_locked.side_effect = lambda v: order.append(("set_locked", v))
+    client.lock_acknowledged.side_effect = lambda reason: order.append(
+        ("lock_acknowledged", reason)
+    )
+
+    bridge._on_lock_requested(3)
+    assert order == [
+        ("visible", True, "#070722"),
+        ("set_locked", True),
+        ("lock_acknowledged", 3),
+    ]
+    assert loads == []
+    assert pres.has_snapshot is False
+    assert bridge.locked is True
+    controller.notify_lock_begin.assert_called()
+    client.set_locked.assert_called_once_with(True)
+    client.lock_acknowledged.assert_called_once_with(3)
+
     QCoreApplication.processEvents()
     assert pres.has_snapshot is True
-    assert order[0][0] == "visible"
-    assert order[0][2] == "#112233"
+    assert pres.value("mSurface") == "#112233"
     assert loads == ["#112233"]
-    controller.notify_lock_begin.assert_called()
 
     current[0] = snap_b
     bridge._on_locked_changed(True)
+    QCoreApplication.processEvents()
     assert pres.value("mSurface") == "#112233"
     assert loads == ["#112233"]
 
     bridge._on_unlocked()
     QCoreApplication.processEvents()
-    bridge.inject_lock_requested(3)
+    order.clear()
+    bridge._on_lock_requested(3)
+    assert order[0] == ("visible", True, "#112233")
+    assert ("lock_acknowledged", 3) in order
+    assert loads == ["#112233"]
     QCoreApplication.processEvents()
     assert pres.value("mSurface") == "#445566"
     assert loads == ["#112233", "#445566"]
+
+
+@pytest.mark.cheat_aware(
+    protects="a failing presentation freeze cannot prevent lock acknowledgement",
+    severity="high",
+    cheats=["let freeze_for_lock exceptions escape _on_lock_requested"],
+    consequence="an unreadable snapshot leaves the compositor without lock_acknowledged",
+)
+def test_failing_freeze_does_not_block_lock(qgui, monkeypatch):
+    from PyQt6.QtCore import QCoreApplication
+
+    pres = LockerPresentation()
+    calls = []
+
+    def boom():
+        calls.append("freeze")
+        raise RuntimeError("snapshot hung")
+
+    monkeypatch.setattr(pres, "freeze_for_lock", boom)
+    bridge, controller, client = _bridge_with_pres(pres)
+    bridge._on_lock_requested(3)
+    client.set_locked.assert_called_once_with(True)
+    client.lock_acknowledged.assert_called_once_with(3)
+    assert bridge.locked is True
+    assert calls == []
+    QCoreApplication.processEvents()
+    assert calls == ["freeze"]
+    assert bridge.locked is True
+    controller.notify_lock_begin.assert_called_once_with()
+    client.lock_acknowledged.assert_called_once_with(3)
+
+
+def test_lock_request_keeps_cached_appearance_until_queued_freeze(qgui, monkeypatch):
+    from dataclasses import replace
+
+    from PyQt6.QtCore import QCoreApplication
+    from qdistro_presentation.model import with_generation
+
+    snap_a = _distinct_snapshot()
+    snap_b = with_generation(
+        replace(snap_a, colors=replace(snap_a.colors, mSurface="#445566"))
+    )
+    current = [snap_a]
+    _install_snapshot_loader(monkeypatch, current)
+    pres = LockerPresentation()
+    pres.reload_trusted()
+    assert pres.value("mSurface") == "#112233"
+    current[0] = snap_b
+    bridge, _, client = _bridge_with_pres(pres)
+    first_visible = []
+    bridge.lockedChanged.connect(
+        lambda locked: first_visible.append(pres.value("mSurface"))
+    )
+    bridge._on_lock_requested(3)
+    assert first_visible == ["#112233"]
+    client.lock_acknowledged.assert_called_once_with(3)
+    assert pres.value("mSurface") == "#112233"
+    QCoreApplication.processEvents()
+    assert pres.value("mSurface") == "#445566"
+
+
+@pytest.mark.cheat_aware(
+    protects="compositor lock confirm is not delayed by a presentation freeze",
+    severity="high",
+    cheats=["call freeze_for_lock in _on_locked_changed before lock_confirmed_cb"],
+    consequence="a hung snapshot read holds the logind sleep inhibitor",
+)
+def test_compositor_entry_confirms_before_freeze(qgui, monkeypatch):
+    from PyQt6.QtCore import QCoreApplication
+
+    current = [_distinct_snapshot()]
+    loads = _install_snapshot_loader(monkeypatch, current)
+    pres = LockerPresentation()
+    bridge, _, _ = _bridge_with_pres(pres)
+    confirmed = []
+
+    def on_confirm():
+        confirmed.append((pres.has_snapshot, pres.value("mSurface"), list(loads)))
+
+    bridge.set_lock_confirmed_cb(on_confirm)
+    bridge._on_locked_changed(True)
+    assert confirmed == [(False, "#070722", [])]
+    assert bridge.locked is True
+    assert pres.has_snapshot is False
+    assert loads == []
+    QCoreApplication.processEvents()
+    assert pres.has_snapshot is True
+    assert pres.value("mSurface") == "#112233"
+    assert loads == ["#112233"]
+
+
+def test_initially_locked_ready_schedules_freeze_after_session_begin(qgui, monkeypatch):
+    from PyQt6.QtCore import QCoreApplication
+
+    current = [_distinct_snapshot()]
+    loads = _install_snapshot_loader(monkeypatch, current)
+    pres = LockerPresentation()
+    bridge, controller, _ = _bridge_with_pres(pres)
+    bridge._on_ready(True)
+    controller.notify_lock_begin.assert_called_once_with()
+    assert bridge.locked is True
+    assert pres.has_snapshot is False
+    assert loads == []
+    QCoreApplication.processEvents()
+    assert pres.has_snapshot is True
+    assert pres.value("mSurface") == "#112233"
+    assert loads == ["#112233"]
 
 
 def test_lock_ui_defaults_without_adapter(qgui):
