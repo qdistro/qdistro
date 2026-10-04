@@ -16,6 +16,7 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileIconProvider,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
@@ -35,6 +36,7 @@ from qfileman.file_model import (
 from qfileman.file_model import (
     rename_exclusive as _rename_exclusive,
 )
+from qfileman.icons import file_icon, set_named_icon
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +62,7 @@ class FilePane(QWidget):
         self._history: list[str] = []
         self._history_index: int = -1
         self.current_path: str = ""
+        self._icon_provider = QFileIconProvider()
 
         self._build_ui()
         self._update_path("")
@@ -79,6 +82,7 @@ class FilePane(QWidget):
         home_btn = QPushButton("⌂")
         home_btn.setMaximumWidth(36)
         home_btn.setToolTip("Home")
+        set_named_icon(home_btn, "go-home")
         home_btn.clicked.connect(self._go_home)
         path_layout.addWidget(home_btn)
         layout.addLayout(path_layout)
@@ -158,15 +162,36 @@ class FilePane(QWidget):
         self._load_files()
         self.path_changed.emit(path)
 
+    def set_icon_provider(self, provider: QFileIconProvider) -> None:
+        """Use ``provider`` for later file-icon queries. Listing stays as-is."""
+        self._icon_provider = provider
+
+    def refresh_file_icons(self) -> None:
+        """Re-query file icons after an icon-theme change.
+
+        Directory contents, selection, scroll, sort and icon size stay.
+        """
+        provider = self._icon_provider
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item is None:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole) or {}
+            path = data.get("path")
+            if path:
+                item.setIcon(file_icon(provider, str(path)))
+
     def _load_files(self) -> None:
         """Render the FileModel's files into the list widget."""
         self.file_list.clear()
         for fi in self._model.get_files():
+            path = str(fi.path)
             item = QListWidgetItem(fi.name)
             item.setData(
                 Qt.ItemDataRole.UserRole,
-                {"path": str(fi.path), "is_dir": fi.is_dir},
+                {"path": path, "is_dir": fi.is_dir},
             )
+            item.setIcon(file_icon(self._icon_provider, path))
             self.file_list.addItem(item)
         self.status_changed.emit(f"{self.file_list.count()} items")
 
