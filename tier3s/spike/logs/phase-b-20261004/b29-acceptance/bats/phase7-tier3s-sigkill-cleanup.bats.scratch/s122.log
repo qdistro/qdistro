@@ -1,0 +1,198 @@
+[vm-exec] guest identity pinned (pid 3515 start 6220)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+[vm-exec] Waiting... (polls=60s elapsed=62s)
+[vm-exec] Waiting... (polls=90s elapsed=94s)
+[vm-exec] Waiting... (polls=120s elapsed=125s)
+[vm-exec] Waiting... (polls=150s elapsed=156s)
+
+## 0. preconditions
+PASS: probe PASS (0)
+PASS: broker allows the smoke spawn (allow)
+PASS: launch unit carries StopPropagatedFrom= the manager (O11) (qdistro-session-manager.service)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s122a (Created)
+PASS: CreateTier3sSilo s122b (Created)
+    silos.yaml: s122a argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+    silos.yaml: s122b argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+
+## 1. launcher SIGKILL (service failure), three times (ExecStopPost races the scope stop)
+PASS: sigkill#1: launch b810fe29f3629fc46a5f148d3a71bcbc up
+PASS: sigkill#1: launch unit failed visibly (failed:signal)
+    unit: qdistro-tier3s-silo@s122a.service: Sent signal SIGKILL to main process 4578 (spawn-tier3s.sh) on client request.
+    unit: qdistro-tier3s-silo@s122a.service: Main process exited, code=killed, status=9/KILL
+    unit: qdistro-tier3s-cleanup: b810fe29f3629fc46a5f148d3a71bcbc: torn down (qdistro-tier3s-s122a)
+    unit: qdistro-tier3s-silo@s122a.service: Failed with result 'signal'.
+    unit: qdistro-tier3s-silo@s122a.service: Consumed 1.069s CPU time over 23.880s wall clock time.
+PASS: launcher-sigkill#1: all 19 launch processes gone (pid+starttime)
+PASS: launcher-sigkill#1: scope qdistro-tier3s-b810fe29f3629fc46a5f148d3a71bcbc.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-b810fe29f3629fc46a5f148d3a71bcbc.scope absent)
+PASS: launcher-sigkill#1: per-launch dir /run/qdistro-tier3s/b810fe29f3629fc46a5f148d3a71bcbc gone
+PASS: launcher-sigkill#1: control record /run/qdistro-tier3s-ctl/b810fe29f3629fc46a5f148d3a71bcbc gone
+PASS: launcher-sigkill#1: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: launcher-sigkill#1: no runsc state for 4e28e9389136 in /run/qdistro-tier3s-runsc/1000
+PASS: sigkill#1: StopSilo afterwards reaches Stopped (Stopped)
+PASS: sigkill#2: launch 3a2a27b645ddb6b5ffcac4c2b31d8efc up
+PASS: sigkill#2: launch unit failed visibly (failed:signal)
+    unit: qdistro-tier3s-silo@s122a.service: Sent signal SIGKILL to main process 5897 (spawn-tier3s.sh) on client request.
+    unit: qdistro-tier3s-silo@s122a.service: Main process exited, code=killed, status=9/KILL
+    unit: qdistro-tier3s-cleanup: 3a2a27b645ddb6b5ffcac4c2b31d8efc: torn down (qdistro-tier3s-s122a)
+    unit: qdistro-tier3s-silo@s122a.service: Failed with result 'signal'.
+    unit: qdistro-tier3s-silo@s122a.service: Consumed 1.261s CPU time over 7.772s wall clock time.
+PASS: launcher-sigkill#2: all 23 launch processes gone (pid+starttime)
+PASS: launcher-sigkill#2: scope qdistro-tier3s-3a2a27b645ddb6b5ffcac4c2b31d8efc.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-3a2a27b645ddb6b5ffcac4c2b31d8efc.scope absent)
+PASS: launcher-sigkill#2: per-launch dir /run/qdistro-tier3s/3a2a27b645ddb6b5ffcac4c2b31d8efc gone
+PASS: launcher-sigkill#2: control record /run/qdistro-tier3s-ctl/3a2a27b645ddb6b5ffcac4c2b31d8efc gone
+PASS: launcher-sigkill#2: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: launcher-sigkill#2: no runsc state for 87dfde136c3e in /run/qdistro-tier3s-runsc/1000
+PASS: sigkill#2: StopSilo afterwards reaches Stopped (Stopped)
+PASS: sigkill#3: launch b8fd3b1c59ce1ada5fe2bfa3cae54e5d up
+PASS: sigkill#3: launch unit failed visibly (failed:signal)
+    unit: qdistro-tier3s-silo@s122a.service: Sent signal SIGKILL to main process 6824 (spawn-tier3s.sh) on client request.
+    unit: qdistro-tier3s-silo@s122a.service: Main process exited, code=killed, status=9/KILL
+    unit: qdistro-tier3s-cleanup: b8fd3b1c59ce1ada5fe2bfa3cae54e5d: torn down (qdistro-tier3s-s122a)
+    unit: qdistro-tier3s-silo@s122a.service: Failed with result 'signal'.
+    unit: qdistro-tier3s-silo@s122a.service: Consumed 1.401s CPU time over 9.942s wall clock time.
+PASS: launcher-sigkill#3: all 17 launch processes gone (pid+starttime)
+PASS: launcher-sigkill#3: scope qdistro-tier3s-b8fd3b1c59ce1ada5fe2bfa3cae54e5d.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-b8fd3b1c59ce1ada5fe2bfa3cae54e5d.scope absent)
+PASS: launcher-sigkill#3: per-launch dir /run/qdistro-tier3s/b8fd3b1c59ce1ada5fe2bfa3cae54e5d gone
+PASS: launcher-sigkill#3: control record /run/qdistro-tier3s-ctl/b8fd3b1c59ce1ada5fe2bfa3cae54e5d gone
+PASS: launcher-sigkill#3: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: launcher-sigkill#3: no runsc state for 18a1e61767dd in /run/qdistro-tier3s-runsc/1000
+PASS: sigkill#3: StopSilo afterwards reaches Stopped (Stopped)
+
+## 2. O11: session-manager STOP tears down every live launch
+PASS: manager-stop: two launches up (17208d1a686eca446a3f36d6bbb47777, 2e9486e0b8856a7502bd9e5031e189d7)
+PASS: manager-stop: systemctl stop qdistro-session-manager.service rc (0)
+PASS: manager-stop: manager inactive (inactive)
+PASS: manager-stop: qdistro-tier3s-silo@s122a.service stopped through the verified cleanup (1)
+PASS: manager-stop: qdistro-tier3s-silo@s122a.service stopped before the manager (After= order) (yes)
+PASS: manager-stop/s122a: all 19 launch processes gone (pid+starttime)
+PASS: manager-stop/s122a: scope qdistro-tier3s-17208d1a686eca446a3f36d6bbb47777.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-17208d1a686eca446a3f36d6bbb47777.scope absent)
+PASS: manager-stop/s122a: per-launch dir /run/qdistro-tier3s/17208d1a686eca446a3f36d6bbb47777 gone
+PASS: manager-stop/s122a: control record /run/qdistro-tier3s-ctl/17208d1a686eca446a3f36d6bbb47777 gone
+PASS: manager-stop/s122a: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: manager-stop/s122a: no runsc state for e71cdc2441f6 in /run/qdistro-tier3s-runsc/1000
+PASS: manager-stop: qdistro-tier3s-silo@s122b.service stopped through the verified cleanup (1)
+PASS: manager-stop: qdistro-tier3s-silo@s122b.service stopped before the manager (After= order) (yes)
+PASS: manager-stop/s122b: all 17 launch processes gone (pid+starttime)
+PASS: manager-stop/s122b: scope qdistro-tier3s-2e9486e0b8856a7502bd9e5031e189d7.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-2e9486e0b8856a7502bd9e5031e189d7.scope absent)
+PASS: manager-stop/s122b: per-launch dir /run/qdistro-tier3s/2e9486e0b8856a7502bd9e5031e189d7 gone
+PASS: manager-stop/s122b: control record /run/qdistro-tier3s-ctl/2e9486e0b8856a7502bd9e5031e189d7 gone
+PASS: manager-stop/s122b: container qdistro-tier3s-s122b gone (podman exists rc=1)
+PASS: manager-stop/s122b: no runsc state for 59e34f74470c in /run/qdistro-tier3s-runsc/1000
+PASS: manager-stop: control records (0)
+PASS: manager-stop: scopes (0)
+PASS: manager-stop: labelled containers (0)
+PASS: manager-stop: runsc-bundle processes (0)
+PASS: manager-stop: state root holds no container state (0)
+PASS: manager-stop: no cleanup call scope left (0)
+PASS: manager-stop: no cleanup work dir left (0)
+PASS: manager-stop: manager started again (yes)
+PASS: manager-stop/s122a: relaunched with a fresh token (fce32b1ed8211ab39ae17ac64f460387, was 17208d1a686eca446a3f36d6bbb47777)
+PASS: manager-stop/s122a: the new launch is recorded running (running)
+PASS: manager-stop/s122a: its container runs under the new token (running:fce32b1ed8211ab39ae17ac64f460387)
+PASS: manager-stop/s122a: its owning scope is live (active)
+PASS: manager-stop/s122b: relaunched with a fresh token (0f470f92da97c5016a3d389ae7f2378e, was 2e9486e0b8856a7502bd9e5031e189d7)
+PASS: manager-stop/s122b: the new launch is recorded running (running)
+PASS: manager-stop/s122b: its container runs under the new token (running:0f470f92da97c5016a3d389ae7f2378e)
+PASS: manager-stop/s122b: its owning scope is live (active)
+PASS: manager-stop-after: control records (0)
+PASS: manager-stop-after: scopes (0)
+PASS: manager-stop-after: labelled containers (0)
+PASS: manager-stop-after: runsc-bundle processes (0)
+PASS: manager-stop-after: state root holds no container state (0)
+PASS: manager-stop-after: no cleanup call scope left (0)
+PASS: manager-stop-after: no cleanup work dir left (0)
+
+## 3. session-manager crash (SIGKILL) and restart
+PASS: manager-crash: launch bfa03e4db62bbe4ed041e723a2bc1587 up
+PASS: manager-crash: manager back with a new pid (yes)
+PASS: manager-crash: all 21 launch processes gone (pid+starttime)
+PASS: manager-crash: scope qdistro-tier3s-bfa03e4db62bbe4ed041e723a2bc1587.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-bfa03e4db62bbe4ed041e723a2bc1587.scope absent)
+PASS: manager-crash: per-launch dir /run/qdistro-tier3s/bfa03e4db62bbe4ed041e723a2bc1587 gone
+PASS: manager-crash: control record /run/qdistro-tier3s-ctl/bfa03e4db62bbe4ed041e723a2bc1587 gone
+PASS: manager-crash: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: manager-crash: no runsc state for 1ed784518afb in /run/qdistro-tier3s-runsc/1000
+PASS: manager-crash: relaunched with a fresh token (cffd5ff6c0304d037ed2cebe36b04784, was bfa03e4db62bbe4ed041e723a2bc1587)
+PASS: manager-crash: the new launch is recorded running (running)
+PASS: manager-crash: its container runs under the new token (running:cffd5ff6c0304d037ed2cebe36b04784)
+PASS: manager-crash: its owning scope is live (active)
+    unit: Stopping qdistro tier-3s (gVisor) silo s122a (Experimental, dev profile only)...
+    unit: qdistro-tier3s-cleanup: bfa03e4db62bbe4ed041e723a2bc1587: torn down (qdistro-tier3s-s122a)
+    unit: spawn-tier3s: signal: tearing down bfa03e4db62bbe4ed041e723a2bc1587
+    unit: Stopped qdistro tier-3s (gVisor) silo s122a (Experimental, dev profile only).
+PASS: manager-crash: systemd completed a stop job for the old launch unit (yes)
+PASS: manager-crash: the old launch got the verified cleanup (1)
+PASS: manager-crash: StopSilo (Stopped)
+PASS: manager-restart: launch ed88d2f0a034c5c9dad9e8bd2f66207e up
+PASS: manager-restart: manager back with a new pid (yes)
+PASS: manager-restart: all 17 launch processes gone (pid+starttime)
+PASS: manager-restart: scope qdistro-tier3s-ed88d2f0a034c5c9dad9e8bd2f66207e.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-ed88d2f0a034c5c9dad9e8bd2f66207e.scope absent)
+PASS: manager-restart: per-launch dir /run/qdistro-tier3s/ed88d2f0a034c5c9dad9e8bd2f66207e gone
+PASS: manager-restart: control record /run/qdistro-tier3s-ctl/ed88d2f0a034c5c9dad9e8bd2f66207e gone
+PASS: manager-restart: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: manager-restart: no runsc state for 267785860e19 in /run/qdistro-tier3s-runsc/1000
+PASS: manager-restart: relaunched with a fresh token (8fba1ead7d289c5f085f7c1937f17184, was ed88d2f0a034c5c9dad9e8bd2f66207e)
+PASS: manager-restart: the new launch is recorded running (running)
+PASS: manager-restart: its container runs under the new token (running:8fba1ead7d289c5f085f7c1937f17184)
+PASS: manager-restart: its owning scope is live (active)
+    unit: Stopping qdistro tier-3s (gVisor) silo s122a (Experimental, dev profile only)...
+    unit: qdistro-tier3s-cleanup: ed88d2f0a034c5c9dad9e8bd2f66207e: torn down (qdistro-tier3s-s122a)
+    unit: spawn-tier3s: signal: tearing down ed88d2f0a034c5c9dad9e8bd2f66207e
+    unit: Stopped qdistro tier-3s (gVisor) silo s122a (Experimental, dev profile only).
+PASS: manager-restart: systemd completed a stop job for the old launch unit (yes)
+PASS: manager-restart: the old launch got the verified cleanup (1)
+PASS: manager-restart: StopSilo (Stopped)
+PASS: manager-restarts: control records (0)
+PASS: manager-restarts: scopes (0)
+PASS: manager-restarts: labelled containers (0)
+PASS: manager-restarts: runsc-bundle processes (0)
+PASS: manager-restarts: state root holds no container state (0)
+PASS: manager-restarts: no cleanup call scope left (0)
+PASS: manager-restarts: no cleanup work dir left (0)
+
+## 4. reconciliation: the manager's in-memory state is lost
+PASS: reconcile/recorded: live launch 3117f0b0c1c6c52821b5835f0b7baf22 started while the manager was down
+PASS: reconcile/recorded: the launch is live and labelled (running:3117f0b0c1c6c52821b5835f0b7baf22)
+PASS: reconcile/recorded: the restarted manager stopped the unknown launch unit (1)
+PASS: reconcile/recorded: all 17 launch processes gone (pid+starttime)
+PASS: reconcile/recorded: scope qdistro-tier3s-3117f0b0c1c6c52821b5835f0b7baf22.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-3117f0b0c1c6c52821b5835f0b7baf22.scope absent)
+PASS: reconcile/recorded: per-launch dir /run/qdistro-tier3s/3117f0b0c1c6c52821b5835f0b7baf22 gone
+PASS: reconcile/recorded: control record /run/qdistro-tier3s-ctl/3117f0b0c1c6c52821b5835f0b7baf22 gone
+PASS: reconcile/recorded: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: reconcile/recorded: no runsc state for d2423f642ac4 in /run/qdistro-tier3s-runsc/1000
+PASS: reconcile/recorded: silo not relaunched (it was Stopped) (Stopped)
+PASS: reconcile/unrecorded: live launch 0dd37c7e2ed95a20b0c31da96c83ef7b started while the manager was down
+PASS: reconcile/unrecorded: the launch is live and labelled (running:0dd37c7e2ed95a20b0c31da96c83ef7b)
+PASS: reconcile/unrecorded: control record removed by hand (no)
+PASS: reconcile/unrecorded: the restarted manager stopped the unknown launch unit (1)
+PASS: reconcile/unrecorded: all 19 launch processes gone (pid+starttime)
+PASS: reconcile/unrecorded: scope qdistro-tier3s-0dd37c7e2ed95a20b0c31da96c83ef7b.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-0dd37c7e2ed95a20b0c31da96c83ef7b.scope absent)
+PASS: reconcile/unrecorded: per-launch dir /run/qdistro-tier3s/0dd37c7e2ed95a20b0c31da96c83ef7b gone
+PASS: reconcile/unrecorded: control record /run/qdistro-tier3s-ctl/0dd37c7e2ed95a20b0c31da96c83ef7b gone
+PASS: reconcile/unrecorded: container qdistro-tier3s-s122a gone (podman exists rc=1)
+PASS: reconcile/unrecorded: no runsc state for e2d2d5764c55 in /run/qdistro-tier3s-runsc/1000
+PASS: reconcile/unrecorded: silo not relaunched (it was Stopped) (Stopped)
+
+## 5. reconciliation: a live labelled container with no launch unit at all
+PASS: ghost: labelled container live with no unit and no record (running:no:inactive)
+PASS: ghost: reconciliation reaped the labelled container (podman exists rc) (1)
+PASS: ghost: its sandbox (State.Pid 18850) is gone (no)
+PASS: ghost: the manager reported no reconciliation failure (0)
+
+## 6. cleanup
+PASS: DeleteSilo s122a (absent)
+PASS: DeleteSilo s122b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s122] 152 passes, 0 failures

@@ -1,0 +1,286 @@
+[vm-exec] guest identity pinned (pid 3955 start 13459)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+[vm-exec] Waiting... (polls=60s elapsed=62s)
+[vm-exec] Waiting... (polls=90s elapsed=94s)
+[vm-exec] Waiting... (polls=120s elapsed=125s)
+
+## 0. preconditions (setup ran)
+PASS: probe PASS before the launches (0:1)
+PASS: image present (yes)
+PASS: broker allows the smoke spawn (allow)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s120x (Created)
+PASS: CreateTier3sSilo s120a (Created)
+PASS: CreateTier3sSilo s120b (Created)
+    silos.yaml: s120x argv -> ["qdistro-tier3s-smoke", "--hold", "12"]
+    silos.yaml: s120a argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+    silos.yaml: s120b argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+PASS: argv set with the manager restarted (yes)
+
+## 1. teardown path: normal exit (workload ends by itself after 12 s)
+PASS: normal-exit: launch 5991e31e4af0ecbdc944c4e2d503c40f recorded running
+PASS: normal-exit: unit ended (inactive)
+PASS: normal-exit: unit Result (success)
+PASS: normal-exit: spawn exit status (0)
+PASS: normal-exit: workload ran to its end (no SIGTERM) (yes:0)
+PASS: normal-exit: verified cleanup tore the launch down (1)
+PASS: normal-exit: all 23 launch processes gone (pid+starttime)
+PASS: normal-exit: scope qdistro-tier3s-5991e31e4af0ecbdc944c4e2d503c40f.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-5991e31e4af0ecbdc944c4e2d503c40f.scope absent)
+PASS: normal-exit: per-launch dir /run/qdistro-tier3s/5991e31e4af0ecbdc944c4e2d503c40f gone
+PASS: normal-exit: control record /run/qdistro-tier3s-ctl/5991e31e4af0ecbdc944c4e2d503c40f gone
+PASS: normal-exit: container qdistro-tier3s-s120x gone (podman exists rc=1)
+PASS: normal-exit: no runsc state for b3978f88d527 in /run/qdistro-tier3s-runsc/1000
+PASS: normal-exit: StopSilo afterwards (Stopped)
+
+## 2. live launch A: placement, identity, state root, record, posture
+PASS: launch A 3e37b4e52cb5758f80e9e355ee42f901 recorded running
+PASS: silo A Active (Active)
+PASS: Type=notify: StartSilo returned only once launch A was recorded running (running)
+PASS: placement[A]: runuser x1 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: podman-cli x1 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: conmon x1 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: runsc-gofer x1 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: runsc-sandbox x1 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: runsc-fd-parking x1 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: systrap-stub x15 inside qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope
+PASS: placement[A]: runsc-bundle processes outside the owning scope (of 18 inside) (0)
+PASS: placement[A]: recorded sentry and conmon are in the scope (1:1)
+PASS: placement[A]: every conmon of this launch host-wide is inside the scope (inside:outside) (some:0)
+PASS: placement[A]: every podman of this launch host-wide is inside the scope (inside:outside) (some:0)
+PASS: identity: podman's selected runtime is the tier3s wrapper (/usr/libexec/qdistro/tier3s-runsc)
+PASS: identity: State.Pid is the recorded sentry (6853)
+PASS: identity: State.ConmonPid is the recorded conmon (6833)
+PASS: identity: State.Pid exe sha512 = pin sidecar_gvisor_sentry_sha512 (2e1fe6c155f2b0662f06321813ff0f18df0921c4b02e7d978dec00c606d078ae528eddba40a105e2d11726d1586248e0b6ff2dc96f6a8effe16d4465a1df49c0)
+PASS: identity: gofer exe sha512 = pin runsc_sha512 (7393507f8b2525338ea627fece891939b44566ad70843eec30b6fb7b94e8955da054fa8c5464e019a5af8a295f842ab2e37c77d764a342b590ea987e1bbfc6b9)
+INFO: corroboration only: host processes in the scope named like the workload (sleep/qdistro-tier3s-smoke): 0
+INFO: corroboration only: in-sandbox SMOKE kernel=Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+INFO: corroboration only: in-sandbox SMOKE dmesg=[    0.000000] Starting gVisor...
+PASS: state root: plain podman ps lists A running (running)
+PASS: state root: plain podman ps --sync (runtime state query) rc (0)
+PASS: state root: A still running after the sync (running)
+PASS: state root: runsc state for A is in /run/qdistro-tier3s-runsc/1000 (yes)
+PASS: record: dir and state are root 0700 / 0600 (root 700 / root 600)
+PASS: record: container (qdistro-tier3s-s120a)
+PASS: record: token = container label (3e37b4e52cb5758f80e9e355ee42f901)
+PASS: record: container_id (178c7af46edc7e2fbe4d603b0597abadac49a923c8a498829024792f7e422a4d)
+PASS: record: unit (qdistro-tier3s-silo@s120a.service)
+PASS: record: runsc_root (/run/qdistro-tier3s-runsc/1000)
+PASS: record: scope_cgroup = systemd's cgroup of the scope (/system.slice/qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope)
+PASS: record: sentry (pid, starttime) (6853 20088)
+PASS: record: conmon (pid, starttime) (6833 20087)
+PASS: record: per-launch dir is admin 0700 under the root parent (1000 700)
+    spec: user=1000:1000
+    spec: keepid=True
+    spec: readonly=True
+    spec: selinux_process_label=none
+    spec: label_annotation=disable
+    spec: seccomp_annotation=/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json
+    spec: nnp=True
+    spec: caps_empty=True
+    spec: netns_fresh=True
+    spec: tmpfs/run/user/1000=True
+    spec: tmpfs/home/admin/.cache=True
+    spec: seccomp_default=SCMP_ACT_ERRNO/SCMP_ACT_ERRNO
+    spec: seccomp_allow_equal=True
+    spec: seccomp_allow_diff=[]
+    spec: decision_fchmodat2=DENY:DENY:DENY
+    spec: decision_llistxattr=ALLOW:ALLOW:ALLOW
+    spec: decision_setfsuid=DENY:DENY:DENY
+    spec: decision_setfsgid=DENY:DENY:DENY
+    spec: decision_fadvise64=DENY:DENY:DENY
+    spec: decision_link=DENY:DENY:DENY
+    spec: decision_syslog=ALLOW:ALLOW:ALLOW
+PASS: posture/spec: process user (admin keep-id) (1000:1000)
+PASS: posture/spec: keep-id maps container 1000 to the admin (rootless userns 0) (True)
+PASS: posture/spec: read-only root (True)
+PASS: posture/spec: label=disable (annotation, no process label) (disable:none)
+PASS: posture/spec: no-new-privileges (True)
+PASS: posture/spec: no capabilities in any set (True)
+PASS: posture/spec: podman network mode (none)
+PASS: posture/spec: fresh network namespace (True)
+PASS: posture/runsc: network=none on runsc-gofer (6848) (1)
+PASS: posture/runsc: network=none on runsc-sandbox (6853) (1)
+PASS: posture/spec: selected per-workload seccomp file (/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json)
+PASS: posture/spec: seccomp default action (spec/file) (SCMP_ACT_ERRNO/SCMP_ACT_ERRNO)
+PASS: posture/spec: seccomp allow set = the file's allow set (True)
+PASS: posture/spec: tmpfs /run/user/1000 uid=1000,gid=1000 (True)
+PASS: posture/spec: tmpfs /home/admin/.cache uid=1000,gid=1000 (True)
+PASS: ΔA4 decision fchmodat2 (declared:profile:spec) (DENY:DENY:DENY)
+PASS: ΔA4 decision llistxattr (declared:profile:spec) (ALLOW:ALLOW:ALLOW)
+PASS: ΔA4 decision setfsuid (declared:profile:spec) (DENY:DENY:DENY)
+PASS: ΔA4 decision setfsgid (declared:profile:spec) (DENY:DENY:DENY)
+PASS: ΔA4 decision fadvise64 (declared:profile:spec) (DENY:DENY:DENY)
+PASS: ΔA4 decision link (declared:profile:spec) (DENY:DENY:DENY)
+PASS: ΔA4 decision syslog (declared:profile:spec) (ALLOW:ALLOW:ALLOW)
+    sandbox: Running as unit: qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope; invocation ID: 1b54f9fab11a4376921fd5cbca17fad6
+    sandbox: qdistro-tier3s-scope: /system.slice/qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope delegated to uid 1000 (dir, cgroup.procs, cgroup.subtree_control, cgroup.threads)
+    sandbox: pam_unix(runuser:session): session opened for user admin(uid=1000) by (uid=0)
+    sandbox: 2026-10-04 19:03:39.04969957 +0000 UTC m=+0.021211905 image pull 1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92 localhost/qdistro/tier3s-headless-smoke:latest
+    sandbox: 2026-10-04 19:03:39.599709856 +0000 UTC m=+0.571222181 container create 178c7af46edc7e2fbe4d603b0597abadac49a923c8a498829024792f7e422a4d (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-s120a, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.vendor=openSUSE Project, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.url=https://www.opensuse.org, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.qdistro.snapshot=20260930, qdistro_tier3s_token=3e37b4e52cb5758f80e9e355ee42f901, qdistro_tier3s_unit=qdistro-tier3s-silo@s120a.service, org.qdistro.tier3s.workload=headless-smoke, org.opensuse.base.version=20260930.37.208, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, io.buildah.version=1.44.1, org.opencontainers.image.version=20260930.37.208, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime)
+    sandbox: 2026-10-04 19:03:40.668260507 +0000 UTC m=+1.639772842 container init 178c7af46edc7e2fbe4d603b0597abadac49a923c8a498829024792f7e422a4d (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-s120a, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, qdistro_tier3s_token=3e37b4e52cb5758f80e9e355ee42f901, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, io.buildah.version=1.44.1, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, qdistro_tier3s_unit=qdistro-tier3s-silo@s120a.service, org.opensuse.base.version=20260930.37.208, org.opensuse.base.url=https://www.opensuse.org, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.qdistro.snapshot=20260930, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.version=20260930.37.208, org.qdistro.tier3s.workload=headless-smoke, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime)
+    sandbox: 2026-10-04 19:03:40.688533124 +0000 UTC m=+1.660045449 container start 178c7af46edc7e2fbe4d603b0597abadac49a923c8a498829024792f7e422a4d (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-s120a, org.opencontainers.image.version=20260930.37.208, qdistro_tier3s_unit=qdistro-tier3s-silo@s120a.service, org.opencontainers.image.vendor=openSUSE Project, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.version=20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., io.buildah.version=1.44.1, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.qdistro.tier3s.workload=headless-smoke, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.snapshot=20260930, qdistro_tier3s_token=3e37b4e52cb5758f80e9e355ee42f901, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed.)
+    sandbox: SMOKE snapshot=20260930
+    sandbox: 
+    sandbox: SMOKE kernel=Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+    sandbox: SMOKE dmesg=[    0.000000] Starting gVisor...
+    sandbox: SMOKE id=uid=1000(admin) gid=1000(admin) groups=1000(admin)
+    sandbox: SMOKE passwd=admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash
+    sandbox: SMOKE home=/home/admin
+    sandbox: SMOKE lang=C.UTF-8 charmap=UTF-8 utf8_locales=2
+    sandbox: SMOKE mount /run/user/1000=1000:1000 700
+    sandbox: SMOKE mount /home/admin/.cache=1000:1000 700
+    sandbox: SMOKE mount /tmp=0:0 1777
+    sandbox: SMOKE caps=inh:0000000000000000,prm:0000000000000000,eff:0000000000000000,bnd:0000000000000000,amb:0000000000000000
+    sandbox: SMOKE nnp=1 seccomp=2
+    sandbox: SMOKE rootfs=ro
+    sandbox: SMOKE mountopts /run/user/1000=tmpfs:rw,nosuid,mode=0700,uid=1000,gid=1000
+    sandbox: SMOKE mountopts /home/admin/.cache=tmpfs:rw,nosuid,mode=0700,uid=1000,gid=1000
+    sandbox: SMOKE rootfs_write rc=1 err=touch: cannot touch '/home/admin/.smoke-rw': Read-only file system
+    sandbox: SMOKE chmod rc=0 mode=600
+    sandbox: SMOKE chmod_nofollow rc=1 mode=600
+    sandbox: 2026-10-04 19:03:41.157057403 +0000 UTC m=+2.128569739 container attach 178c7af46edc7e2fbe4d603b0597abadac49a923c8a498829024792f7e422a4d (image=localhost/qdistro/tier3s-headless-smoke:latest, name=qdistro-tier3s-s120a, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.qdistro.tier3s.workload=headless-smoke, org.opencontainers.image.vendor=openSUSE Project, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.version=20260930.37.208, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.title=openSUSE Tumbleweed Base Container, qdistro_tier3s_unit=qdistro-tier3s-silo@s120a.service, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, qdistro_tier3s_token=3e37b4e52cb5758f80e9e355ee42f901, io.buildah.version=1.44.1, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.snapshot=20260930, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime)
+    sandbox: SMOKE ls_l rc=0 stderr_bytes=0
+    sandbox: SMOKE routes=2 links=lo,
+    sandbox: SMOKE route_table=::1 dev lo proto unspec scope link ;127.0.0.0/8 dev lo proto unspec scope link ;
+    sandbox: SMOKE done
+    sandbox: SMOKE holding 600s
+PASS: ΔA5: image snapshot label = snapshot.conf pin (20260930)
+PASS: ΔA5: /etc/qdistro/tier3s-image inside = pin (20260930)
+PASS: ΔA5/sandbox: uid 1000 (keep-id) (uid=1000(admin) gid=1000(admin))
+PASS: ΔA5: passwd entry for uid 1000 (admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash)
+PASS: ΔA5: HOME (/home/admin)
+PASS: ΔA5: UTF-8 locale (C.UTF-8 charmap=UTF-8)
+PASS: ΔA5: /run/user/1000 tmpfs owned 1000:1000 inside (1000:1000 700)
+PASS: ΔA5: /home/admin/.cache tmpfs owned 1000:1000 inside (1000:1000 700)
+PASS: sandbox: gVisor mount options carry uid=1000,gid=1000 (1:1)
+PASS: sandbox: no capabilities (inh:0000000000000000,prm:0000000000000000,eff:0000000000000000,bnd:0000000000000000,amb:0000000000000000)
+PASS: sandbox: NoNewPrivs and seccomp filter mode (1 seccomp=2)
+PASS: sandbox: root filesystem mounted ro (ro)
+PASS: sandbox: write to the (admin-owned) rootfs home fails EROFS (1)
+PASS: ΔA4 fchmodat2 path exercised: plain chmod works (rc=0 mode=600)
+PASS: ΔA4 fchmodat2 path exercised: chmod -h (fchmodat2) is denied, mode unchanged (rc=1 mode=600)
+PASS: ΔA4 llistxattr ALLOW effective: ls -l clean (rc=0 stderr_bytes=0)
+PASS: ΔA4 syslog ALLOW effective: dmesg answers (gVisor banner) (1)
+PASS: sandbox: loopback is the only link (lo,)
+PASS: sandbox: no default route, every route on lo (some:0:0)
+
+## 3. two concurrent launches; StopSilo (session-manager stop) of A preserves B
+PASS: launch B d8f14f9fdba41bd7de24a9f44570b9a5 recorded running while A is live
+PASS: two launches: distinct tokens and scopes (yes)
+PASS: two launches: both running (running:running)
+PASS: placement[B]: runuser x1 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: placement[B]: podman-cli x1 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: placement[B]: conmon x1 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: placement[B]: runsc-gofer x1 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: placement[B]: runsc-sandbox x1 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: placement[B]: runsc-fd-parking x1 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: placement[B]: systrap-stub x15 inside qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope
+PASS: two launches: runsc-bundle processes outside both scopes (0)
+PASS: session-manager stop: StopSilo A rc (0)
+PASS: session-manager stop: silo A Stopped (Stopped)
+PASS: session-manager stop: A ended gracefully (SIGTERM reached the workload) (yes)
+PASS: session-manager stop: verified cleanup tore A down (1)
+PASS: session-manager-stop: all 21 launch processes gone (pid+starttime)
+PASS: session-manager-stop: scope qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-3e37b4e52cb5758f80e9e355ee42f901.scope absent)
+PASS: session-manager-stop: per-launch dir /run/qdistro-tier3s/3e37b4e52cb5758f80e9e355ee42f901 gone
+PASS: session-manager-stop: control record /run/qdistro-tier3s-ctl/3e37b4e52cb5758f80e9e355ee42f901 gone
+PASS: session-manager-stop: container qdistro-tier3s-s120a gone (podman exists rc=1)
+PASS: session-manager-stop: no runsc state for 178c7af46edc in /run/qdistro-tier3s-runsc/1000
+PASS: two launches: every process of B survived A's teardown (21) (21)
+PASS: two launches: B unit, container, record, scope intact (active:running:yes:active)
+PASS: two launches: silo B still Active (Active)
+
+## 4. ΔA1 negatives on live B: plain podman stop with the state root missing, then replaced
+INFO: plain podman stop, root missing: rc=125: Error: given PID did not die within timeout
+PASS: missing root: plain podman stop fails visibly (rc=125)
+PASS: missing root: no root minted by the stop (no)
+PASS: missing root: wrapper refusal in the journal (tier3s-runsc) (yes)
+PASS: missing root (podman stop): sentry still alive (yes)
+PASS: missing root (podman stop): control record preserved (yes)
+PASS: missing root (podman stop): per-launch dir preserved (yes)
+PASS: missing root (podman stop): owning scope preserved (active)
+PASS: missing root (podman stop): podman still has the container (no false absence) (0)
+INFO: plain podman stop, empty replacement root: rc=125: Error: given PID did not die within timeout
+PASS: replaced root: plain podman stop fails visibly (rc=125)
+PASS: replaced root (podman stop): sentry still alive (yes)
+PASS: replaced root (podman stop): control record preserved (yes)
+PASS: replaced root (podman stop): per-launch dir preserved (yes)
+PASS: replaced root (podman stop): owning scope preserved (active)
+PASS: replaced root (podman stop): podman still has the container (no false absence) (0)
+
+## 5. DONE 2: forced runtime failure through the cleanup itself, then recovery
+    cleanup: time="2026-10-04T19:04:22Z" level=warning msg="StopSignal SIGTERM failed to stop container qdistro-tier3s-s120b in 10 seconds, resorting to SIGKILL"
+    cleanup: Error: given PID did not die within timeout
+    cleanup: qdistro-tier3s-cleanup: d8f14f9fdba41bd7de24a9f44570b9a5: podman stop qdistro-tier3s-s120b failed (record preserved)
+PASS: replaced root: cleanup returns an error (rc=5)
+PASS: replaced root: no 'torn down' claimed (0)
+PASS: replaced root (cleanup): sentry still alive (yes)
+PASS: replaced root (cleanup): control record preserved (yes)
+PASS: replaced root (cleanup): per-launch dir preserved (yes)
+PASS: replaced root (cleanup): owning scope preserved (active)
+PASS: replaced root (cleanup): podman still has the container (no false absence) (0)
+    cleanup: qdistro-tier3s-cleanup: d8f14f9fdba41bd7de24a9f44570b9a5: runsc state root /run/qdistro-tier3s-runsc/1000 is missing, replaced or loose; refusing to query or stop qdistro-tier3s-s120b (record and scope preserved)
+PASS: missing root: cleanup returns an error (rc=3)
+PASS: missing root: cleanup refuses to query or stop (1)
+PASS: missing root: no 'torn down' and no 'no container' claimed (0)
+PASS: missing root (cleanup): sentry still alive (yes)
+PASS: missing root (cleanup): control record preserved (yes)
+PASS: missing root (cleanup): per-launch dir preserved (yes)
+PASS: missing root (cleanup): owning scope preserved (active)
+PASS: missing root (cleanup): podman still has the container (no false absence) (0)
+PASS: recovery: original state root restored (1000 700)
+    cleanup: qdistro-tier3s-cleanup: d8f14f9fdba41bd7de24a9f44570b9a5: torn down (qdistro-tier3s-s120b)
+PASS: recovery: cleanup with the correct root rc (0)
+PASS: recovery: cleanup tore B down (1)
+PASS: recovery: all 21 launch processes gone (pid+starttime)
+PASS: recovery: scope qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-d8f14f9fdba41bd7de24a9f44570b9a5.scope absent)
+PASS: recovery: per-launch dir /run/qdistro-tier3s/d8f14f9fdba41bd7de24a9f44570b9a5 gone
+PASS: recovery: control record /run/qdistro-tier3s-ctl/d8f14f9fdba41bd7de24a9f44570b9a5 gone
+PASS: recovery: container qdistro-tier3s-s120b gone (podman exists rc=1)
+PASS: recovery: no runsc state for 75133870353b in /run/qdistro-tier3s-runsc/1000
+PASS: recovery: B's launch unit ended (inactive)
+PASS: recovery: StopSilo B afterwards (Stopped)
+
+## 6. teardown path: plain podman stop (as admin, no flags)
+PASS: podman-stop: launch 00c4cc7578b027e326401cbce763e801 up
+PASS: podman-stop: plain podman stop rc (0)
+PASS: podman-stop: launch unit ended cleanly (inactive:success)
+PASS: podman-stop: the workload got SIGTERM (yes)
+PASS: podman-stop: all 17 launch processes gone (pid+starttime)
+PASS: podman-stop: scope qdistro-tier3s-00c4cc7578b027e326401cbce763e801.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-00c4cc7578b027e326401cbce763e801.scope absent)
+PASS: podman-stop: per-launch dir /run/qdistro-tier3s/00c4cc7578b027e326401cbce763e801 gone
+PASS: podman-stop: control record /run/qdistro-tier3s-ctl/00c4cc7578b027e326401cbce763e801 gone
+PASS: podman-stop: container qdistro-tier3s-s120a gone (podman exists rc=1)
+PASS: podman-stop: no runsc state for e068f1daada8 in /run/qdistro-tier3s-runsc/1000
+PASS: podman-stop: StopSilo afterwards (Stopped)
+
+## 7. teardown path: plain podman rm -f (as admin, no flags)
+PASS: podman-rm: launch 618bfcedae7c6395571604a09e2c638e up
+PASS: podman-rm: plain podman rm -f rc (0)
+PASS: podman-rm: launch unit ended (inactive)
+PASS: podman-rm: all 17 launch processes gone (pid+starttime)
+PASS: podman-rm: scope qdistro-tier3s-618bfcedae7c6395571604a09e2c638e.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-618bfcedae7c6395571604a09e2c638e.scope absent)
+PASS: podman-rm: per-launch dir /run/qdistro-tier3s/618bfcedae7c6395571604a09e2c638e gone
+PASS: podman-rm: control record /run/qdistro-tier3s-ctl/618bfcedae7c6395571604a09e2c638e gone
+PASS: podman-rm: container qdistro-tier3s-s120a gone (podman exists rc=1)
+PASS: podman-rm: no runsc state for 9025bec3ad36 in /run/qdistro-tier3s-runsc/1000
+PASS: podman-rm: StopSilo afterwards (Stopped)
+
+## 8. cleanup
+PASS: DeleteSilo s120x (absent)
+PASS: DeleteSilo s120a (absent)
+PASS: DeleteSilo s120b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s120] 196 passes, 0 failures
