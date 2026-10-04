@@ -43,3 +43,5 @@ tests/integration/vm/phase7-tier3s-chrome-secctx.bats	bats	vm	qdistro-session-ma
 tests/integration/vm/phase7-tier3s-clipboard-gate.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service,qdwin-compositor.service,qdshell.service	loopback	none	tier3s	slow
 tests/integration/vm/phase7-tier3s-lineage.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service,qdwin-compositor.service,qdshell.service	loopback	none	tier3s	slow
 tests/integration/vm/phase7-tier3s-hostile-stream.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service,qdwin-compositor.service,qdshell.service	loopback	none	tier3s	slow
+tests/integration/vm/phase7-tier3s-limits.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service	loopback	none	tier3s	slow
+tests/integration/vm/phase7-tier3s-netnone.bats	bats	vm	qdistro-session-manager.service,qdistro-admin-broker.service	loopback	none	tier3s	slow
