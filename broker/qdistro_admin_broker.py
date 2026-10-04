@@ -225,6 +225,7 @@ _QDSHELL_GATE_METHODS = frozenset((
     "CheckClipboardReceive",
     "CheckClipboardTransfer",
     "CheckHandoffActivation",
+    "VerifyClientIdentity",
 ))
 
 _ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
