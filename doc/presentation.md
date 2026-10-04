@@ -145,5 +145,8 @@ Publication failure is a diagnostic, never fatal to qdshell.
 built-in dark palette when stdin is empty. Consumers then drop the
 inherited shared layer while keeping every other required field. Deletion
 or unreadability still retains last-known-good; only this explicit reset
-clears it. `--owner-uid` is optional and required when the caller must
-assert directory and file ownership.
+clears it. `--owner-uid` is optional on standalone paths. qdshell
+managed publication passes `--owner-uid` from trusted
+`deployment.json` (`--print-owner`); the writer also resolves that
+uid from metadata and refuses a mismatch. Standalone XDG state
+publication does not pass the flag.

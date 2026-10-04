@@ -5,12 +5,15 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import "ColorPalette.js" as ColorPalette
+import "PresentationPublish.js" as PresentationPublish
 
 Singleton {
   id: root
 
   property bool ready: false
   property bool managedDirPresent: false
+  property bool ownerResolved: false
+  property int ownerUid: -1
   property var latestPayload: null
   property var inFlightPayload: null
   property int failCount: 0
@@ -78,6 +81,23 @@ Singleton {
     debounce.restart();
   }
 
+  function startPublish(encoded) {
+    const dest = destinationDir();
+    if (dest === root.managedDir && !root.ownerResolved)
+      return false;
+    const cmd = PresentationPublish.publishArgv(dest, root.managedDir, root.ownerUid);
+    if (!cmd) {
+      root.lastDiagnostic = "managed publish skipped: trusted owner unavailable";
+      Logger.w("AppPresentation", root.lastDiagnostic);
+      return false;
+    }
+    root.inFlightPayload = encoded;
+    root.latestPayload = null;
+    publishProcess.command = cmd;
+    publishProcess.running = true;
+    return true;
+  }
+
   function publishNow() {
     const payload = buildPayload();
     if (!payload)
@@ -87,10 +107,7 @@ Singleton {
       root.latestPayload = encoded;
       return;
     }
-    root.inFlightPayload = encoded;
-    root.latestPayload = null;
-    publishProcess.command = ["qdistro-presentation-publish", "--dir", destinationDir()];
-    publishProcess.running = true;
+    root.startPublish(encoded);
   }
 
   Connections {
@@ -124,9 +141,36 @@ Singleton {
     running: false
     onExited: function (exitCode) {
       root.managedDirPresent = (exitCode === 0);
+      if (root.managedDirPresent) {
+        root.ownerResolved = false;
+        ownerProbe.running = true;
+      } else {
+        root.ownerUid = -1;
+        root.ownerResolved = true;
+      }
       root.ready = true;
       root.invalidate();
     }
+  }
+
+  Process {
+    id: ownerProbe
+    command: ["qdistro-presentation-publish", "--print-owner"]
+    running: false
+    onExited: function (exitCode) {
+      var uid = -1;
+      if (exitCode === 0)
+        uid = PresentationPublish.parseOwnerUid(stdout.text);
+      root.ownerUid = uid;
+      root.ownerResolved = true;
+      if (uid < 0) {
+        Logger.w("AppPresentation", "trusted owner unavailable", stderr.text);
+        root.lastDiagnostic = stderr.text;
+      }
+      root.invalidate();
+    }
+    stdout: StdioCollector {}
+    stderr: StdioCollector {}
   }
 
   Process {
@@ -152,8 +196,8 @@ Singleton {
       if (root.latestPayload) {
         const queued = root.latestPayload;
         root.latestPayload = null;
-        root.inFlightPayload = queued;
-        publishProcess.running = true;
+        if (!root.startPublish(queued))
+          root.inFlightPayload = null;
       }
     }
     stdout: StdioCollector {}

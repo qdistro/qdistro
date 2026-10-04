@@ -117,3 +117,24 @@ def test_cli_reset_empty_writes_disabled(tmp_path: Path, monkeypatch, capsys):
     snap = parse_snapshot_text((tmp_path / "current.json").read_text(encoding="utf-8"))
     assert snap.enabled is False
     assert snap.generation == capsys.readouterr().out.strip()
+
+
+def test_cli_print_owner_prints_trusted_admin_uid(monkeypatch, capsys):
+    from qdistro_presentation.paths import DeploymentMeta
+
+    monkeypatch.setattr(
+        "qdistro_presentation.cli.load_deployment_meta",
+        lambda: DeploymentMeta(version=1, admin_uid=1001),
+    )
+    assert _run(monkeypatch, ["--print-owner"], b"") == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "1001"
+    assert captured.err == ""
+
+
+def test_cli_print_owner_fails_without_metadata(monkeypatch, capsys):
+    monkeypatch.setattr("qdistro_presentation.cli.load_deployment_meta", lambda: None)
+    assert _run(monkeypatch, ["--print-owner"], b"ignored") == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "trusted deployment metadata unavailable" in captured.err
