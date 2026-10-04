@@ -1,0 +1,268 @@
+Oct 03 16:39:58 baseweed-admin systemd[863]: Starting qdshell desktop (Quickshell QML on top of qdwin)...
+Oct 03 16:40:00 baseweed-admin systemd[863]: Started qdshell desktop (Quickshell QML on top of qdwin).
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]: No running instances for "/usr/share/quickshell/qdshell/shell.qml"
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]:   INFO: Launching config: "/usr/share/quickshell/qdshell/shell.qml"
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]:   INFO: Shell ID: "0d0d1ceeb7f0392fec595c8531945b05" Path ID "0d0d1ceeb7f0392fec595c8531945b05"
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]:   INFO: Saving logs to "/run/user/1000/quickshell/by-id/usombcmt/log.qslog"
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: failed to get driver name for fd -1
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: MESA-LOADER: failed to retrieve device information
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: failed to get driver name for fd -1
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]: MESA: error: ZINK: failed to choose pdev
+Oct 03 16:40:00 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: egl: failed to create dri2 screen
+Oct 03 16:40:02 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164002]           I18n Service started
+Oct 03 16:40:02 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164002]           I18n Loading "en" (locale: "en-Latn-US")
+Oct 03 16:40:02 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164002]          Shell ---------------------------
+Oct 03 16:40:02 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164002]          Shell Qdshell Hello!
+Oct 03 16:40:02 baseweed-admin dbus-run-session[1038]:   WARN scene: @Commons/I18n.qml[104:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:02 baseweed-admin dbus-run-session[1038]:   INFO: Configuration Loaded
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: @Commons/I18n.qml[104:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]       Settings Settings loaded
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]           I18n Loaded translations for "en"
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018] PluginRegistry Loaded plugin states from: /home/admin/.config/qdshell/plugins.json
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018] PluginRegistry Scanning plugin folder: /home/admin/.config/qdshell/plugins
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]          Icons Service started
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO: ctrl-server: listening on /run/user/1000/qdshell.sock
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Hardware/BrightnessService.qml[66:3]: Detected function "onEnableDdcSupportChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]     Brightness Service started
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018] DesktopWidgetR Service started
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/BarService.qml[147:3]: Detected function "onDisplayModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/BarService.qml[147:3]: Detected function "onScreenOverridesChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]     BarService Service started
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Networking/NetworkService.qml[73:3]: Detected function "onWifiEnabledChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]        Network Service started
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/System/SystemStatService.qml[320:3]: Detected function "onEnableDgpuMonitoringChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]     SystemStat Service started (polling deferred until a consumer registers).
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[140:3]: Detected function "onWallpaperDownloaded" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onDirectoryChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onEnableMultiMonitorDirectoriesChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onAutomationEnabledChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onRandomIntervalSecChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onWallpaperChangeModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onViewModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onShowHiddenFilesChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onUseSolidColorChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onSolidColorChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onSortOrderChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Background/Background.qml[80:7]: Detected function "onFillModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Background/Background.qml[80:7]: Detected function "onFillModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Background/Background.qml[80:7]: Detected function "onFillModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]          Shell ---------------------------
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]      Wallpaper Service started
+Oct 03 16:40:18 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164018]     ImageCache Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/AppThemeService.qml[30:3]: Detected function "onDarkModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/AppThemeService.qml[30:3]: Detected function "onMonitorForColorsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/AppThemeService.qml[30:3]: Detected function "onGenerationMethodChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] AppThemeServic Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/ColorSchemeService.qml[20:3]: Detected function "onDarkModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]    ColorScheme Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] AppPresentatio Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/DarkModeService.qml[43:3]: Detected function "onSchedulingModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/DarkModeService.qml[28:3]: Detected function "onManualSunriseChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/DarkModeService.qml[28:3]: Detected function "onManualSunsetChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] DarkModeServic Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Location/DarkModeService.qml[29:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Location/DarkModeService.qml[44:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Theming/ColorSchemeService.qml[21:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Theming/AppThemeService.qml[31:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Dock/Dock.qml[46:9]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Dock/Dock.qml[46:9]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Dock/Dock.qml[46:9]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Background/Background.qml[81:9]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Background/Background.qml[81:9]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Background/Background.qml[81:9]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/UI/WallpaperService.qml[62:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/SessionMenu/SessionMenu.qml[152:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/Dock/StaticDockPanel.qml[351:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/SessionMenu/SessionMenu.qml[152:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/Dock/StaticDockPanel.qml[351:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/System/SystemStatService.qml[321:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/SessionMenu/SessionMenu.qml[152:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Networking/NetworkService.qml[74:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/Dock/StaticDockPanel.qml[351:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/UI/BarService.qml[148:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Hardware/BrightnessService.qml[67:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]      Wallpaper Starting scan for Virtual-1 in /home/admin/Pictures/Wallpapers recursive: false
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]      Wallpaper Starting scan for pipewire-0 in /home/admin/Pictures/Wallpapers recursive: false
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]      Wallpaper Starting scan for pipewire-1 in /home/admin/Pictures/Wallpapers recursive: false
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]       Location Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onEnabledChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onForcedChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onNightTempChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onDayTempChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Control/HooksService.qml[16:3]: Detected function "onDarkModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]   HooksService Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN quickshell.dbus.objectmanager: Failed to create DBusObjectManagerInterface for "org.bluez" "/" : QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name is not activatable")
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]      Bluetooth Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  IdleInhibitor Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ qdwin live-apply capabilities: pointer=false xkb=false wm=false output=false workspace=false idleDpms=false keybind=false
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]   PowerService Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] AccessibilityS Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  KeyboardInput Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] PointerInputSe Service started (qdwin live-apply: persist-only until shell binds >= v28)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] WindowManagerS Service started (qdwin v25 live-apply: false, shortcuts: false)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] SessionService started; saved=0 canApplyPlacement=false
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]    HostService Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CustomButtonIP Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]     IPCService Service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]        PodApps service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]         VMApps service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]      Tier3Apps service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]     Tier3sApps service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]      Tier4Apps service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] RemoteMachineW service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  Tier3FocusIPC service started
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN quickshell.dbus: Could not launch service org.freedesktop.UPower.PowerProfiles: QDBusError(org.freedesktop.DBus.Error.ServiceUnknown, The name is not activatable)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN quickshell.service.powerprofiles: Could not start PowerProfilesDaemon. The PowerProfiles service will not work.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]          Qdwin qdwin_shell_v1 bound v34
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  ClipboardGate wired to qdwin_shell_v1; broker default=deny
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] WindowManagerS applied WM policy focus=click placement=smart snap=true/16
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ wmPolicy -> true
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] WindowManagerS registered WM shortcuts (5 active)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ keybindRegistration -> true
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] PointerInputSe applied pointer config accelSpeed=0 profile=0 natural=0 tap=1 scroll=1
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ pointerConfig -> true
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  KeyboardInput applied qdwin key-repeat rate=25 delay=500
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ xkbRepeat -> true
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]   PowerService idle policy armed: inactivity=0ms (nothing), displayOff=0ms, presentation=false
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ idleDpms -> true
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] CapabilityServ outputManagement -> true
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164019]       Location Weather is still fetching
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN quickshell.dbus: Could not launch service org.freedesktop.UPower: QDBusError(org.freedesktop.DBus.Error.ServiceUnknown, The name is not activatable)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN quickshell.service.upower: Could not start UPower. The UPower service will not work.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]    HostService Detected openSUSE Tumbleweed
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]    HostService Looking for logo icon: distributor-logo-Tumbleweed
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]    HostService resolved hostname baseweed-admin
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("udisksctl", "monitor")
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164019]       Location Geocoding error: 0
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[981:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[981:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[981:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] PluginRegistry All plugin manifests loaded. Total plugins: 0
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  PluginService Initializing plugin system
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  PluginService Found 0 enabled plugins: []
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  PluginService No plugins to load
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  PluginService Refreshing available plugins
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164019]     ImageCache ImageMagick not found, using Qt fallback
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164019]      Wallpaper Scan failed for Virtual-1 exit code: 1 (directory might not exist)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164019]      Wallpaper Scan failed for pipewire-0 exit code: 1 (directory might not exist)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164019]      Wallpaper Scan failed for pipewire-1 exit code: 1 (directory might not exist)
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164019]   PowerService Button monitor unavailable (exit 1); releasing key inhibitors, logind will handle power/sleep keys
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]  KeyboardInput applied qdwin key-repeat rate=25 delay=500
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019] PointerInputSe enumerated 3 pointer device(s) via proc
+Oct 03 16:40:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164019]        PodApps cache refresh loaded 0 apps
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN: Could not load icon "user-desktop?fallback=application-x-executable" at size QSize(19, 19) from request
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN: Could not load icon "user-desktop?fallback=application-x-executable" at size QSize(2, 2) from request
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN scene: qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[982:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN scene: qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[982:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN scene: qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[982:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Control/HooksService.qml[17:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Location/NightLightService.qml[97:5]: Unable to assign QJSValue to QObject*
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]    ColorScheme Applying color scheme: Qdshell (default)
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   WARN: ctrl-server: client timed out, closing
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]           Time Time jump detected (21s) - likely system resume
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]        Network System resumed - forcing state poll
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]     SystemStat System resumed - resetting differential state
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022] DarkModeServic System resumed - re-evaluating dark mode
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]     NightLight System resumed - re-applying night light
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]      Bluetooth System resumed - forcing state poll
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164022]           Font Service started
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164022]  PluginService Empty response from Qdshell Plugins
+Oct 03 16:40:22 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164022]  PluginService Failed to fetch registry from Qdshell Plugins - exit code: 1
+Oct 03 16:40:23 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164023]        PodApps cache refresh loaded 0 apps
+Oct 03 16:40:23 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164023]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:40:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164024]           Font Loaded 11 fonts, 3 monospace
+Oct 03 16:40:26 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164026] DarkModeServic Resume retry - re-evaluating dark mode again
+Oct 03 16:40:26 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164026]     NightLight Resume retry - re-applying night light again
+Oct 03 16:40:26 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:27 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164027]     SystemStat No supported temperature sensor found
+Oct 03 16:40:28 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:28 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:30 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:32 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:34 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:36 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:37 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164037]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:40:38 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:39 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164039]       Location Weather is still fetching
+Oct 03 16:40:39 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164039]       Location Geocoding error: 0
+Oct 03 16:40:40 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:42 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:44 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:46 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:48 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:49 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164049]        PodApps cache refresh loaded 0 apps
+Oct 03 16:40:50 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:52 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164052]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:40:52 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:54 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:56 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:58 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:40:59 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164059]       Location Weather is still fetching
+Oct 03 16:40:59 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164059]       Location Geocoding error: 0
+Oct 03 16:41:00 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:02 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:04 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:06 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:07 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164107]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:41:08 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:10 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:12 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:14 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:16 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:18 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164119]       Location Weather is still fetching
+Oct 03 16:41:19 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164119]       Location Geocoding error: 0
+Oct 03 16:41:19 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164119]        PodApps cache refresh loaded 0 apps
+Oct 03 16:41:20 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:22 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164122]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:41:22 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:24 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:26 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:28 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:30 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:32 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:34 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:36 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:37 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164137]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:41:38 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:39 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164139]       Location Weather is still fetching
+Oct 03 16:41:39 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164139]       Location Geocoding error: 0
+Oct 03 16:41:40 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:42 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:44 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:46 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:48 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:49 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164149]        PodApps cache refresh loaded 0 apps
+Oct 03 16:41:50 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:52 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164152]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 03 16:41:52 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:54 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:56 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:58 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:41:59 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164159]       Location Weather is still fetching
+Oct 03 16:41:59 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261003-164159]       Location Geocoding error: 0
+Oct 03 16:42:00 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164200]          Qdwin toplevel_security_context handle=1 engine=qdistro.tier3s app_id=qdistro.tier3s.s126a instance=e9a89b954bb42bf6baff758ae5f9eb68
+Oct 03 16:42:00 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164200]     Tier3sApps [tier3s] toplevel observed silo=s126a secctx=qdistro.tier3s.s126a color=#8bc34a handle=1
+Oct 03 16:42:00 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164200]     Tier3sApps [tier3s] silo=s126a color=#8bc34a
+Oct 03 16:42:00 baseweed-admin dbus-run-session[1038]:   WARN: Could not load icon "org.freedesktop.weston.wayland-terminal?fallback=application-x-executable" at size QSize(19, 19) from request
+Oct 03 16:42:00 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:42:01 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164201]        PodApps auto-scan: qdistro-tier3s-s126a transitioned to running
+Oct 03 16:42:01 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261003-164201]  Tier3FocusIPC findSiloHandle silo=s126a → HANDLE=1
+Oct 03 16:42:01 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164201]  Tier3FocusIPC injectFocus REJECTED — handle=9999 is not a tier-3/tier3s/tier-4 toplevel (see Tier3Apps/Tier3sApps/Tier4Apps models)
+Oct 03 16:42:02 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:42:03 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261003-164203]        PodApps scan failed for qdistro-tier3s-s126a (exit 2)
+Oct 03 16:42:04 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 03 16:42:06 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")

@@ -1009,6 +1009,21 @@ executable('qdwin-stream-claimant',
   install_dir: get_option('bindir'),
 )
 
+# Standalone denial oracle for the same claim() gate: binds the (publicly
+# advertised) stream-input global and asserts claim(bogus token) is refused
+# with the expected protocol error. Used by the tier-3s per-interface
+# oracle (s126) where the claimant's spawned-forward harness does not fit.
+executable('qdistro-test-stream-claim-probe',
+  sources: [
+    'test-client/qdistro-test-stream-claim-probe.c',
+    qdwin_shell_client_header,
+    qdwin_shell_protocol_code,
+  ],
+  dependencies: [dep_wayland_client],
+  install: true,
+  install_dir: get_option('bindir'),
+)
+
 # Direct xdg_popup spoofing probe for the M1 libweston popup clamp: maps a
 # toplevel, creates an xdg_popup with an off-output positioner, and prints
 # the constrained geometry the compositor reports in xdg_popup.configure.
@@ -1029,6 +1044,8 @@ executable('qdwin-popup-probe',
 executable('qdistro-test-clipboard-source',
   sources: [
     'test-client/qdistro-test-clipboard-source.c',
+    xdg_shell_client_header,
+    xdg_shell_protocol_code_test,
   ],
   dependencies: [dep_wayland_client],
   install: true,

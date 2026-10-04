@@ -1,0 +1,19 @@
+Id:             1890
+Name:           qci-bats-phase7-tier3s-app-261003-202913-3009453-4743
+UUID:           2c443a99-15f9-4068-b99f-f486420bf324
+OS Type:        hvm
+State:          running
+CPU(s):         4
+CPU time:       143.1s
+Max memory:     4194304 KiB
+Used memory:    4194304 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: unconfined_u:unconfined_r:svirt_t:s0:c350,c924 (enforcing)
+Messages:       tainted: custom configuration parameters specified
+                tainted: custom guest agent control commands issued
+

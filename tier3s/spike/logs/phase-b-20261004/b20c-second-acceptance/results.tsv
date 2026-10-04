@@ -1,0 +1,13 @@
+gate	subject	status	exit_code	exit_class	kind	log	notes	category
+bats	phase7-tier3s-app.bats	fail	35	bats	bats	bats/phase7-tier3s-app.bats.log	VM=qci-bats-phase7-tier3s-app-261004-171916-3591636-6575 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-app-261004-171916-3591636-6575	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm
+bats	phase7-tier3s-chrome-secctx.bats	pass	0	pass	bats	bats/phase7-tier3s-chrome-secctx.bats.log	VM=qci-bats-phase7-tier3s-chrome-secctx-261004-171916-3591668-11277	integration
+bats	phase7-tier3s-clipboard-gate.bats	fail	35	bats	bats	bats/phase7-tier3s-clipboard-gate.bats.log	VM=qci-bats-phase7-tier3s-clipboard-gate-261004-171916-3591686-27313 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-clipboard-gate-261004-171916-3591686-27313	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm
+bats	phase7-tier3s-denied.bats	pass	0	pass	bats	bats/phase7-tier3s-denied.bats.log	VM=qci-bats-phase7-tier3s-denied-261004-171916-3591614-26133	integration
+bats	phase7-tier3s-headless.bats	pass	0	pass	bats	bats/phase7-tier3s-headless.bats.log	VM=qci-bats-phase7-tier3s-headless-261004-171916-3591583-32600	integration
+bats	phase7-tier3s-hostile-stream.bats	pass	0	pass	bats	bats/phase7-tier3s-hostile-stream.bats.log	VM=qci-bats-phase7-tier3s-hostile-stream-261004-172100-3648143-17409	integration
+bats	phase7-tier3s-lifecycle.bats	pass	0	pass	bats	bats/phase7-tier3s-lifecycle.bats.log	VM=qci-bats-phase7-tier3s-lifecycle-261004-171916-3591658-32542	integration
+bats	phase7-tier3s-lineage.bats	pass	0	pass	bats	bats/phase7-tier3s-lineage.bats.log	VM=qci-bats-phase7-tier3s-lineage-261004-171916-3591695-23068	integration
+bats	phase7-tier3s-sigkill-cleanup.bats	pass	0	pass	bats	bats/phase7-tier3s-sigkill-cleanup.bats.log	VM=qci-bats-phase7-tier3s-sigkill-cleanup-261004-171916-3591610-2475	integration
+bats	phase7-tier3s-waypipe.bats	pass	0	pass	bats	bats/phase7-tier3s-waypipe.bats.log	VM=qci-bats-phase7-tier3s-waypipe-261004-171916-3591641-1761	integration

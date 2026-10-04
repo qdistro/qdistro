@@ -1,0 +1,88 @@
+[vm-exec] guest identity pinned (pid 4041 start 8046)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+
+## 0. preconditions
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: foot image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: ydotoold socket present (input injection path) (yes)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s124w (Created)
+PASS: CreateTier3sSilo s124f (Created)
+PASS: broker answers allow (weston-terminal spawn) (allow)
+PASS: broker answers allow (foot spawn) (allow)
+
+## 1. weston-terminal renders through the bridge
+PASS: s124w launch up (token c1f9b29d266ff5dde769b5b3d33b0c09)
+PASS: weston toplevel carries the [3s:s124w] title prefix (1)
+PASS: weston: findSiloHandle resolves the tier3s toplevel (HANDLE=1)
+PASS: weston: injectFocus accepted for the tier3s handle (ok handle=1 seat=default)
+PASS: weston: compositor reports focus on handle 1 (yes)
+PASS: weston: compositor mapped a committed frame (mapped handle=1) (1)
+PASS: weston: typed command created /tmp/s124-s124w-typed INSIDE the sandbox
+
+## 2. foot renders through the bridge
+PASS: s124f launch up (token 0265f003cbfd9f613dcc3c5f159a4a95)
+PASS: foot toplevel carries the [3s:s124f] title prefix (1)
+PASS: foot: findSiloHandle resolves the tier3s toplevel (HANDLE=2)
+PASS: foot: injectFocus accepted for the tier3s handle (ok handle=2 seat=default)
+PASS: foot: compositor reports focus on handle 2 (yes)
+PASS: foot: compositor mapped a committed frame (mapped handle=2) (1)
+PASS: foot: typed command created /tmp/s124-s124f-typed INSIDE the sandbox
+
+## 3. per-workload seccomp profile exercised inside each running container
+PASS: s124w: launch argv names the weston-terminal.json profile (weston-terminal.json)
+PASS: s124w: fchmodat ALLOW effective (plain chmod) (chmod_rc=0 mode=600)
+PASS: s124w: fchmodat2 path (chmod -h) EPERM, mode unchanged (nofollow_rc=1 eperm=1 mode=600)
+PASS: s124w: link/linkat DENY effective (ln_rc=1 eperm=1)
+PASS: s124w: llistxattr ALLOW effective (ls -l clean) (ls_rc=0 stderr_bytes=0)
+PASS: s124w: NoNewPrivs + seccomp filter mode inside (nnp=1 seccomp=2)
+PASS: s124f: launch argv names the foot.json profile (foot.json)
+PASS: s124f: fchmodat ALLOW effective (plain chmod) (chmod_rc=0 mode=600)
+PASS: s124f: fchmodat2 path (chmod -h) EPERM, mode unchanged (nofollow_rc=1 eperm=1 mode=600)
+PASS: s124f: link/linkat DENY effective (ln_rc=1 eperm=1)
+PASS: s124f: llistxattr ALLOW effective (ls -l clean) (ls_rc=0 stderr_bytes=0)
+PASS: s124f: NoNewPrivs + seccomp filter mode inside (nnp=1 seccomp=2)
+
+## 4. teardown removes both toplevels
+PASS: StopSilo s124w (Stopped)
+PASS: StopSilo s124f (Stopped)
+PASS: teardown/s124w: all 17 launch processes gone (pid+starttime)
+PASS: teardown/s124w: scope qdistro-tier3s-c1f9b29d266ff5dde769b5b3d33b0c09.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-c1f9b29d266ff5dde769b5b3d33b0c09.scope absent)
+PASS: teardown/s124w: per-launch dir /run/qdistro-tier3s/c1f9b29d266ff5dde769b5b3d33b0c09 gone
+PASS: teardown/s124w: control record /run/qdistro-tier3s-ctl/c1f9b29d266ff5dde769b5b3d33b0c09 gone
+PASS: teardown/s124w: container qdistro-tier3s-s124w gone (podman exists rc=1)
+PASS: teardown/s124w: no runsc state for add3e0e07179 in /run/qdistro-tier3s-runsc/1000
+PASS: teardown/s124w: bridge client+wrapper gone (pid+starttime)
+PASS: teardown/s124w: secctx listener wayland-secctx-5074-0 revoked
+PASS: teardown/s124w: launch record /run/user/1000/qdistro-tier3s-launchrec-654d2a4651dba4fbb9d474ebc6879d8e.pid removed
+PASS: s124w: compositor logged toplevel_removed for handle 1 (1)
+PASS: teardown/s124f: all 20 launch processes gone (pid+starttime)
+PASS: teardown/s124f: scope qdistro-tier3s-0265f003cbfd9f613dcc3c5f159a4a95.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-0265f003cbfd9f613dcc3c5f159a4a95.scope absent)
+PASS: teardown/s124f: per-launch dir /run/qdistro-tier3s/0265f003cbfd9f613dcc3c5f159a4a95 gone
+PASS: teardown/s124f: control record /run/qdistro-tier3s-ctl/0265f003cbfd9f613dcc3c5f159a4a95 gone
+PASS: teardown/s124f: container qdistro-tier3s-s124f gone (podman exists rc=1)
+PASS: teardown/s124f: no runsc state for c6b708d5c8af in /run/qdistro-tier3s-runsc/1000
+PASS: teardown/s124f: bridge client+wrapper gone (pid+starttime)
+PASS: teardown/s124f: secctx listener wayland-secctx-6184-0 revoked
+PASS: teardown/s124f: launch record /run/user/1000/qdistro-tier3s-launchrec-afdf99a230f42dc54f06f189860c9276.pid removed
+PASS: s124f: compositor logged toplevel_removed for handle 2 (1)
+PASS: DeleteSilo s124w (absent)
+PASS: DeleteSilo s124f (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s124] 75 passes, 0 failures

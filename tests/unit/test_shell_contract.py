@@ -15,6 +15,9 @@ Anchoring strategy (see the codex review that gated this work):
   - tier3 / tier5 prefixes: no Python runtime constant exists (qdwin emits
     those secctx app_ids in C); the fixture is their anchor, so we only assert
     their shape here.
+  - tier3s prefix (paravirt ΔB6): no Python constant either — the producer
+    literal is tier3s/spawn-tier3s.sh's `--app-id "qdistro.tier3s.$SILO"`;
+    we assert the fixture against that literal.
 
 Deliberately narrow. Do not grow this into a schema/codegen.
 """
@@ -142,10 +145,23 @@ def test_contract_fixture_is_present_and_well_formed(contract):
 
 def test_secctx_prefix_shapes(contract):
     prefixes = contract["secctx_prefixes"]
-    assert set(prefixes) == {"tier3", "tier4", "tier5", "disp"}
+    assert set(prefixes) == {"tier3", "tier3s", "tier4", "tier5", "disp"}
     for key, value in prefixes.items():
         assert value.startswith("qdistro."), value
         assert value.endswith("."), f"{key} prefix must end with '.': {value!r}"
+    # The tier3s/tier3 pair is a near-miss ("qdistro.tier3s." vs
+    # "qdistro.tier3."): pin that tier3s is NOT a prefix-colliding variant —
+    # no id under one prefix may sit under the other (paravirt ΔB6).
+    assert not prefixes["tier3s"].startswith(prefixes["tier3"])
+    assert not prefixes["tier3"].startswith(prefixes["tier3s"])
+
+
+def test_tier3s_prefix_matches_spawn_literal(contract):
+    """paravirt ΔB6: spawn-tier3s.sh plants `--app-id "qdistro.tier3s.$SILO"`;
+    the fixture prefix must be that literal's prefix, not a drifted string."""
+    spawn = (QDISTRO / "tier3s" / "spawn-tier3s.sh").read_text()
+    assert f'--app-id "{contract["secctx_prefixes"]["tier3s"]}$SILO"' in spawn, \
+        "spawn-tier3s.sh must plant the contract's tier3s app_id prefix"
 
 
 def test_tier4_prefix_matches_runtime_constant(contract):

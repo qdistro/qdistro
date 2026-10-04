@@ -36,11 +36,11 @@ import qs.Services.Qdshell
 //   selection unconditionally on every focus injection that crosses
 //   silo boundaries; the bats driver observes that via journal grep.
 //
-//   findSiloHandle scans Tier3Apps.tier3Windows for the first
-//   toplevel matching the given silo and prints its handle on a
-//   single stdout line ("HANDLE=N"). Used by the bats driver to
-//   resolve "silo=user1's current toplevel handle" without grepping
-//   weston logs.
+//   findSiloHandle scans Tier3Apps.tier3Windows (then
+//   Tier3sApps.tier3sWindows) for the first toplevel matching the
+//   given silo and prints its handle on a single stdout line
+//   ("HANDLE=N"). Used by the bats driver to resolve "silo=user1's
+//   current toplevel handle" without grepping weston logs.
 //
 //   selectionState emits a Logger.i log line snapshotting the
 //   current src_silo / dst_silo from ClipboardGate's last gate
@@ -72,11 +72,24 @@ Singleton {
     function _findSiloHandle(silo) {
         if (!silo || typeof silo !== "string") return -1;
         if (silo.length > 64) return -1;   // silo names from useradd are short
-        const wm = Tier3Apps.tier3Windows;
-        if (!wm) return -1;
-        for (let i = 0; i < wm.count; i++) {
-            const row = wm.get(i);
-            if (row.silo === silo) return row.handle;
+        // Tier3 first, then tier3s: a bare silo name could exist in both
+        // tiers at once and the helper's contract is "first match"; the
+        // tier-3 answer preserves the pre-tier3s behaviour. A driver that
+        // specifically needs the tier3s handle can also grep the
+        // "[tier3s] toplevel observed ... handle=N" journal line.
+        let wm = Tier3Apps.tier3Windows;
+        if (wm) {
+            for (let i = 0; i < wm.count; i++) {
+                const row = wm.get(i);
+                if (row.silo === silo) return row.handle;
+            }
+        }
+        wm = Tier3sApps.tier3sWindows;
+        if (wm) {
+            for (let i = 0; i < wm.count; i++) {
+                const row = wm.get(i);
+                if (row.silo === silo) return row.handle;
+            }
         }
         return -1;
     }
@@ -95,6 +108,15 @@ Singleton {
     // visible / admin-owned, so the security boundary is unchanged.
     // The IPC name "tier3focus" is kept for backwards-compat with
     // the s48 driver.
+    //
+    // paravirt ΔB6: also accept tier3s handles. The s127 clipboard-gate
+    // driver needs the same focus injection on a tier3s toplevel. The
+    // boundary is unchanged because tier3s toplevels are admin-visible
+    // and admin-owned exactly like tier-3/4: they are the outer
+    // xdg_toplevels of the ADMIN-side `waypipe client`, not windows
+    // owned by a sandbox uid — the gVisor sandbox only feeds bytes
+    // through the link. Admin-uid IPC reach + admin-owned handle is the
+    // same trust shape this IPC already allows.
     function _isTier3Handle(handle) {
         const wm3 = Tier3Apps.tier3Windows;
         if (wm3) {
@@ -105,6 +127,11 @@ Singleton {
         if (wm4) {
             for (let i = 0; i < wm4.count; i++)
                 if (wm4.get(i).handle === handle) return true;
+        }
+        const wm3s = Tier3sApps.tier3sWindows;
+        if (wm3s) {
+            for (let i = 0; i < wm3s.count; i++)
+                if (wm3s.get(i).handle === handle) return true;
         }
         return false;
     }
@@ -128,7 +155,8 @@ Singleton {
             if (!root._isTier3Handle(handle)) {
                 Logger.w("Tier3FocusIPC",
                          "injectFocus REJECTED — handle=" + handle
-                         + " is not a tier-3 toplevel (use Tier3Apps.tier3Windows)");
+                         + " is not a tier-3/tier3s/tier-4 toplevel"
+                         + " (see Tier3Apps/Tier3sApps/Tier4Apps models)");
                 return "error: handle=" + handle + " is not a tier-3 toplevel";
             }
             Logger.i("Tier3FocusIPC",

@@ -1,0 +1,1158 @@
+Oct 04 10:02:03 baseweed-admin systemd[854]: Queued start job for default target Main User Target.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Created slice User Application Slice.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Created slice User Core Session Slice.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Started Daily Cleanup of User's Temporary Directories.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Reached target Paths.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Reached target Timers.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting D-Bus User Message Bus Socket...
+Oct 04 10:02:03 baseweed-admin systemd[854]: Listening on PipeWire Multimedia System Sockets.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Listening on Query the User Interactively for a Password.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Listening on Disk Image Download Service Socket.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Listening on Virtual Machine and Container Registration Service Socket.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting Create User Files and Directories...
+Oct 04 10:02:03 baseweed-admin systemd[854]: Listening on D-Bus User Message Bus Socket.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Reached target Sockets.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting D-Bus User Message Bus...
+Oct 04 10:02:03 baseweed-admin dbus-broker-launch[903]: Policy to allow eavesdropping in /usr/share/dbus-1/session.conf +31: Eavesdropping is deprecated and ignored
+Oct 04 10:02:03 baseweed-admin systemd[854]: Started D-Bus User Message Bus.
+Oct 04 10:02:03 baseweed-admin dbus-broker-launch[903]: Ready
+Oct 04 10:02:03 baseweed-admin systemd[854]: Finished Create User Files and Directories.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Reached target Basic System.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Reached target Current graphical user session.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Started PipeWire Multimedia Service.
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting qdistro browser screen-lock inhibit daemon (Bridge Phase-9e)...
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting qdistro browser download-notification daemon (Bridge Phase-9e)...
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting qdistro browser MPRIS republisher (Bridge Phase-9e)...
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting qdistro browser web-notification relay (Bridge Phase-9e)...
+Oct 04 10:02:03 baseweed-admin systemd[854]: qdistro-polkit-agent.service: unit configures an IP firewall, but not running as root.
+Oct 04 10:02:03 baseweed-admin systemd[854]: qdistro-polkit-agent.service: (This warning is only shown for the first unit using IP firewalling.)
+Oct 04 10:02:03 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting qdistro pwd XDG portal Secret backend (spec/13 Phase-8.3)...
+Oct 04 10:02:03 baseweed-admin systemd[854]: Started qdwin compositor (libweston + qdwin-shell.so).
+Oct 04 10:02:03 baseweed-admin systemd[854]: Starting qdistro screen locker (qdlocker)...
+Oct 04 10:02:04 baseweed-admin systemd[854]: Starting qdshell desktop (Quickshell QML on top of qdwin)...
+Oct 04 10:02:04 baseweed-admin systemd[854]: Started Multimedia Service Session Manager.
+Oct 04 10:02:04 baseweed-admin systemd[854]: Starting ydotool synthetic input daemon for qdistro VM tests...
+Oct 04 10:02:04 baseweed-admin weston[921]: Date: 2026-10-04 UTC
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.244] weston 16.0.0
+Oct 04 10:02:04 baseweed-admin weston[921]:                https://wayland.freedesktop.org
+Oct 04 10:02:04 baseweed-admin weston[921]:                Bug reports to: https://gitlab.freedesktop.org/wayland/weston/issues/
+Oct 04 10:02:04 baseweed-admin weston[921]:                Build: 16.0.0
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.244] Command line: /usr/bin/weston --config=/home/admin/weston.ini --socket=wayland-1
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.244] OS: Linux, 7.2.8-1-default, #1 SMP PREEMPT_DYNAMIC Sat Sep 26 07:00:58 UTC 2026 (9b36732), x86_64
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.244] Flight recorder: enabled, scopes subscribed: log
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.245] Using config file '/home/admin/weston.ini'
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.245] Output repaint window is 7 ms maximum.
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.246] Loading module '/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so'
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.295] initializing drm backend
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.295] Trying libseat launcher...
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.307] [libseat/libseat.c:73] Seat opened with backend 'seatd'
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.307] [libseat/backend/seatd.c:218] Enabling seat
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.307] libseat: session control granted
+Oct 04 10:02:04 baseweed-admin systemd[854]: Started ydotool synthetic input daemon for qdistro VM tests.
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] using /dev/dri/card0
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] DRM: supports atomic modesetting
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] DRM: supports cursor-plane hotspot (virtualized cursor)
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] DRM: does not support GBM modifiers
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] DRM: does not support Atomic async page flip
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] DRM: supports picture aspect ratio
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.312] DRM: EDID for the following head fails conformity:
+Oct 04 10:02:04 baseweed-admin weston[921]: Block 1, CTA-861 Extension Block:
+Oct 04 10:02:04 baseweed-admin weston[921]:   Padding: Contains non-zero bytes.
+Oct 04 10:02:04 baseweed-admin weston[921]: [10:02:04.313] DRM: head 'Virtual-1' found, connector 40 is connected, EDID make 'Red Hat, Inc.', model 'QEMU Monitor', serial ''
+Oct 04 10:02:04 baseweed-admin weston[921]:                Supported EOTF modes: SDR
+Oct 04 10:02:04 baseweed-admin weston[921]:                Supported colorimetry modes: default
+Oct 04 10:02:04 baseweed-admin weston[921]:                Supported VRR modes: (none),
+Oct 04 10:02:04 baseweed-admin weston[921]:                Supported color formats: AUTO
+Oct 04 10:02:04 baseweed-admin systemd[854]: Started qdistro browser screen-lock inhibit daemon (Bridge Phase-9e).
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.108] Loading module '/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/gl-renderer.so'
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.149] warning: failed to query rendering device from EGL
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.149] EGL version: 1.5
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.149] EGL vendor: Mesa Project
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.149] EGL client APIs: OpenGL OpenGL_ES
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.149] EGL features:
+Oct 04 10:02:05 baseweed-admin weston[921]:                EGL Wayland extension: no
+Oct 04 10:02:05 baseweed-admin weston[921]:                context priority: no
+Oct 04 10:02:05 baseweed-admin weston[921]:                buffer age: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                partial update: no
+Oct 04 10:02:05 baseweed-admin weston[921]:                swap buffers with damage: no
+Oct 04 10:02:05 baseweed-admin weston[921]:                configless context: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                surfaceless context: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                dmabuf support: modifiers
+Oct 04 10:02:05 baseweed-admin weston[921]:                fence sync: yes (wait)
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdistro browser web-notification relay (Bridge Phase-9e).
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdistro browser download-notification daemon (Bridge Phase-9e).
+Oct 04 10:02:05 baseweed-admin podman[912]: 2026-10-04 10:02:05.28501994 +0000 UTC m=+0.926364048 system refresh
+Oct 04 10:02:05 baseweed-admin systemd[854]: selinux: avc:  denied  { start } for auid=n/a uid=1000 gid=1000 cmdline="podman ps -a --filter label=qdistro_disposable=1 --format {{.Names}}" function="method_start_transient_unit" scontext=system_u:system_r:qdistro_sessmgr_t:s0 tcontext=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 tclass=system permissive=1
+Oct 04 10:02:05 baseweed-admin systemd[854]: Created slice Slice /user.
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started podman-912.scope.
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdistro browser MPRIS republisher (Bridge Phase-9e).
+Oct 04 10:02:05 baseweed-admin wireplumber[927]: [0:00:10.826250631] [927]  INFO Camera camera_manager.cpp:340 libcamera v0.7.2
+Oct 04 10:02:05 baseweed-admin wireplumber[927]: [0:00:10.828626074] [988]  WARN IPAManager ipa_manager.cpp:159 No IPA found in '/usr/lib64/libcamera/ipa'
+Oct 04 10:02:05 baseweed-admin wireplumber[927]: [0:00:10.829242780] [988] ERROR DmaBufAllocator dma_buf_allocator.cpp:119 Could not open any dma-buf provider
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started podman-pause-ae9d19de.scope.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.379] GL version: OpenGL ES 3.2 Mesa 26.2.3
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.379] GLSL version: OpenGL ES GLSL ES 3.20
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.379] GL vendor: Mesa
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.379] GL renderer: llvmpipe (LLVM 23.1.1, 256 bits)
+Oct 04 10:02:05 baseweed-admin qdistro_pwd_portal.py[920]: [qdistro-pwd-portal] listening on org.qdistro.PortalSecret /org/freedesktop/portal/desktop
+Oct 04 10:02:05 baseweed-admin qdistro_pwd_portal.py[920]: /usr/libexec/qdistro/qdistro_pwd_portal.py:201: PyGIDeprecationWarning: GLib.unix_signal_add is deprecated; use GLibUnix.signal_add instead
+Oct 04 10:02:05 baseweed-admin qdistro_pwd_portal.py[920]:   GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, _on_term, None)
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdistro pwd XDG portal Secret backend (spec/13 Phase-8.3).
+Oct 04 10:02:05 baseweed-admin qdistro_pwd_portal.py[920]: /usr/libexec/qdistro/qdistro_pwd_portal.py:202: PyGIDeprecationWarning: GLib.unix_signal_add is deprecated; use GLibUnix.signal_add instead
+Oct 04 10:02:05 baseweed-admin qdistro_pwd_portal.py[920]:   GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT,  _on_term, None)
+Oct 04 10:02:05 baseweed-admin systemd[854]: Auto-unlock the qdistro portal-keys vault at login skipped, unmet condition check ConditionPathExists=/var/lib/qdistro/vaults/portal-keys-pin.tpm
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.401] GL ES 3.2 - renderer features:
+Oct 04 10:02:05 baseweed-admin weston[921]:                read-back format: ARGB8888
+Oct 04 10:02:05 baseweed-admin weston[921]:                glReadPixels supports y-flip: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                glReadPixels supports PBO: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                wl_shm 10 bpc formats: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                wl_shm 16 bpc formats: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                wl_shm half-float formats: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                internal R and RG formats: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                OES_EGL_image_external: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                GPU timeline: no
+Oct 04 10:02:05 baseweed-admin weston[921]:                Texture immutability: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                Required precision: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                In-shader blending: yes
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.401] Using GL renderer
+Oct 04 10:02:05 baseweed-admin qdistro-polkit-agent[918]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:05 baseweed-admin python3[918]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started podman-1012.scope.
+Oct 04 10:02:05 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:05 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.580] event3  - QEMU QEMU USB Tablet: is tagged by udev as: Mouse
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.580] event3  - QEMU QEMU USB Tablet: device is a pointer
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.581] event4  - Power Button: is tagged by udev as: Keyboard
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.581] event4  - Power Button: device is a keyboard
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.582] event0  - AT Translated Set 2 keyboard: is tagged by udev as: Keyboard
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.583] event0  - AT Translated Set 2 keyboard: device is a keyboard
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.584] event2  - VirtualPS/2 VMware VMMouse: is tagged by udev as: Mouse
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.584] event2  - VirtualPS/2 VMware VMMouse: emulating high-resolution scroll wheel events.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.585] event2  - VirtualPS/2 VMware VMMouse: device is a pointer
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.586] event1  - VirtualPS/2 VMware VMMouse: is tagged by udev as: Mouse
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.586] event1  - VirtualPS/2 VMware VMMouse: device is a pointer
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.586] event5  - PC Speaker: not tagged as supported input device
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.596] event5  - not using input device '/dev/input/event5'
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.597] event6  - ydotoold virtual device: is tagged by udev as: Keyboard
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.597] event6  - ydotoold virtual device: emulating high-resolution scroll wheel events.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.597] event6  - ydotoold virtual device: device is a keyboard
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.598] libinput: configuring device "QEMU QEMU USB Tablet".
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.598] input device event3 has no enabled output associated (none named), skipping calibration for now.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.606] libinput: configuring device "Power Button".
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] libinput: configuring device "AT Translated Set 2 keyboard".
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] libinput: configuring device "VirtualPS/2 VMware VMMouse".
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] libinput: configuring device "VirtualPS/2 VMware VMMouse".
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] input device event1 has no enabled output associated (none named), skipping calibration for now.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] libinput: configuring device "ydotoold virtual device".
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] Registered plugin API 'weston_drm_output_api_v1' of size 40
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.607] Loading module '/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/pipewire-backend.so'
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.608] Initializing PipeWire backend
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.612] Registered plugin API 'weston_pipewire_output_api_v2' of size 24
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.612] Color manager: no-op
+Oct 04 10:02:05 baseweed-admin weston[921]:                  protocol support: no
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.612] Setting output 'Virtual-1' to color AUTO format
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.612] Output 'Virtual-1' attempts EOTF mode SDR and colorimetry mode default.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.612] Output 'Virtual-1' using color profile: stock sRGB color profile
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.612] Chosen EGL config details: id:  46 rgba: 8 8 8 0 buf: 24 dep:  0 stcl: 0 int: 1-1 type: win val: fix vis_id: XRGB8888 (0x34325258)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] Output Virtual-1 (crtc 39) video modes:
+Oct 04 10:02:05 baseweed-admin weston[921]:                1280x800@75.0, preferred, 107.3 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                5120x2160@50.0 64:27, 742.5 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                4096x2160@50.0 256:135, 594.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                3840x2160@60.0 16:9, 594.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                3840x2160@59.9 16:9, 593.4 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                3840x2160@50.0 16:9, 594.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1920x1440@60.0, 234.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                2560x1080@50.0 64:27, 185.6 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1856x1392@60.0, 218.2 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1792x1344@60.0, 204.8 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                2048x1152@60.0, 162.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1920x1200@59.9, 193.2 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1920x1080@60.0, current, 148.5 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1920x1080@50.0 16:9, 148.5 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1600x1200@60.0, 162.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1680x1050@60.0, 146.2 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1400x1050@60.0, 121.8 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1280x1024@60.0, 108.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1440x900@59.9, 106.5 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1280x960@60.0, 108.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1360x768@60.0, 85.5 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1280x768@59.9, 79.5 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                1024x768@60.0, 65.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                800x600@60.3, 40.0 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                640x480@60.0 4:3, 25.2 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]:                640x480@59.9, 25.2 MHz
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] associating input device event3 with output Virtual-1 (none by udev)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] associating input device event4 with output Virtual-1 (none by udev)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] associating input device event0 with output Virtual-1 (none by udev)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] associating input device event2 with output Virtual-1 (none by udev)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] associating input device event1 with output Virtual-1 (none by udev)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] associating input device event6 with output Virtual-1 (none by udev)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] Output 'Virtual-1' enabled with head(s) Virtual-1
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.613] pipewire_backend_output_configure.. Done
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.614] Output 'pipewire-0' attempts EOTF mode SDR and colorimetry mode default.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.614] Output 'pipewire-0' using color profile: stock sRGB color profile
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.656] Output 'pipewire-0' enabled with head(s) pipewire-0
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.656] pipewire_backend_output_configure.. Done
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.656] Output 'pipewire-1' attempts EOTF mode SDR and colorimetry mode default.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.656] Output 'pipewire-1' using color profile: stock sRGB color profile
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.656] Output 'pipewire-1' enabled with head(s) pipewire-1
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.656] Compositor capabilities:
+Oct 04 10:02:05 baseweed-admin weston[921]:                arbitrary surface rotation: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                screen capture uses y-flip: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                cursor planes: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                arbitrary resolutions: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                view mask clipping: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                explicit sync: no
+Oct 04 10:02:05 baseweed-admin weston[921]:                color operations: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                color representation: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                in-shader blending: yes
+Oct 04 10:02:05 baseweed-admin weston[921]:                presentation clock: CLOCK_MONOTONIC, id 1
+Oct 04 10:02:05 baseweed-admin weston[921]:                presentation clock resolution: 0.000000001 s
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.657] Loading module '/usr/lib64/weston/qdwin-shell.so'
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.658] qdwin: locker bind policy defaulting to entrypoint=/usr/local/bin/qdlocker:/usr/bin/qdlocker (system interpreter + root-owned entrypoint; no explicit policy configured); set --qdwin-allowed-locker-any to override to uid-only
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.658] qdwin: locker bind policy uid=1000 entrypoint=/usr/local/bin/qdlocker:/usr/bin/qdlocker exe=(any) label=(any)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.658] qdwin: ext-idle-notify idle_time=0 internal_mode=1
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin: cursor-shape theme=(default) size=24 loaded=0/36
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin: layer-popup grab handler registered
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin/nested-proxy: default keyboard grab installed on seat 'default'
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin: background curtain 3200x1080 installed
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin: WARNING shell-authorized output capture enabled via QDWIN_ENABLE_SHELL_CAPTURE — dev/test only, do not use in production
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin: retained-frame capture armed on output=Virtual-1
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] qdwin: shell loaded (allowed_uid=1000); desktop + qdwin_shell_v1 ready
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.659] Loading module '/usr/lib64/libweston-16/xwayland.so'
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.661] Registered plugin API 'weston_xwayland_v3' of size 32
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.661] Registered plugin API 'weston_xwayland_surface_v2' of size 24
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.661] xserver listening on display :0
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdistro screen locker (qdlocker).
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdshell desktop (Quickshell QML on top of qdwin).
+Oct 04 10:02:05 baseweed-admin systemd[854]: Reached target qdistro desktop session (qdwin compositor + qdshell).
+Oct 04 10:02:05 baseweed-admin systemd[854]: Reached target Main User Target.
+Oct 04 10:02:05 baseweed-admin systemd[854]: Started qdistro cursor sprite supplier for qdwin.
+Oct 04 10:02:05 baseweed-admin systemd[854]: Startup finished in 2.506s.
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.894] qdwin: bind attempt pid=1036 uid=1000 (allowed_uid=1000)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.895] qdwin: bind accepted for uid=1000, hello sent
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=1 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.895] qdwin: cursor-sprite registered shape=default hotspot=3,1
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.896] qdwin: cursor_retry_install: scheduling first retry in 1000ms
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=2 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.896] qdwin: cursor-sprite registered shape=context-menu hotspot=3,1
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=3 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=4 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.898] qdwin: cursor-sprite registered shape=help hotspot=12,21
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.898] qdwin: cursor-sprite registered shape=pointer hotspot=7,5
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=5 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.904] qdwin: cursor-sprite registered shape=progress hotspot=3,1
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=6 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.911] qdwin: cursor-sprite registered shape=wait hotspot=11,11
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=7 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.911] qdwin: cursor-sprite registered shape=cell hotspot=11,11
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.911] qdwin: cursor-sprite registered shape=crosshair hotspot=11,11
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=8 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=9 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.911] qdwin: cursor-sprite registered shape=text hotspot=11,12
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=10 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.912] qdwin: cursor-sprite registered shape=vertical-text hotspot=12,11
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=11 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.912] qdwin: cursor-sprite registered shape=alias hotspot=18,5
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=12 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=13 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.912] qdwin: cursor-sprite registered shape=copy hotspot=3,1
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.912] qdwin: cursor-sprite registered shape=move hotspot=3,1
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=14 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.913] qdwin: cursor-sprite registered shape=no-drop hotspot=3,1
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=15 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.913] qdwin: cursor-sprite registered shape=not-allowed hotspot=12,12
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=16 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.913] qdwin: cursor-sprite registered shape=grab hotspot=11,2
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=17 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.913] qdwin: cursor-sprite registered shape=grabbing hotspot=9,5
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=18 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=19 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.914] qdwin: cursor-sprite registered shape=e-resize hotspot=19,13
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.914] qdwin: cursor-sprite registered shape=n-resize hotspot=13,6
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=20 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.914] qdwin: cursor-sprite registered shape=ne-resize hotspot=15,10
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=21 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.914] qdwin: cursor-sprite registered shape=nw-resize hotspot=10,10
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=22 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.914] qdwin: cursor-sprite registered shape=s-resize hotspot=13,18
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=23 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.915] qdwin: cursor-sprite registered shape=se-resize hotspot=15,15
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=24 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.915] qdwin: cursor-sprite registered shape=sw-resize hotspot=10,15
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=25 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.915] qdwin: cursor-sprite registered shape=w-resize hotspot=6,13
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=26 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.915] qdwin: cursor-sprite registered shape=ew-resize hotspot=12,12
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=27 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.916] qdwin: cursor-sprite registered shape=ns-resize hotspot=12,13
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=28 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.916] qdwin: cursor-sprite registered shape=nesw-resize hotspot=11,11
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=29 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.916] qdwin: cursor-sprite registered shape=nwse-resize hotspot=11,11
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=30 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.917] qdwin: cursor-sprite registered shape=col-resize hotspot=12,12
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=31 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.917] qdwin: cursor-sprite registered shape=row-resize hotspot=12,13
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=32 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.917] qdwin: cursor-sprite registered shape=all-scroll hotspot=11,11
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=33 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.917] qdwin: cursor-sprite registered shape=zoom-in hotspot=11,10
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=34 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=35 via=xcursor
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.918] qdwin: cursor-sprite registered shape=zoom-out hotspot=11,10
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.918] qdwin: cursor-sprite registered shape=dnd-ask hotspot=3,1
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registered shape=36 via=xcursor
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] theme summary: xcursor=36 synthetic=0
+Oct 04 10:02:05 baseweed-admin qdistro-cursor-sprites[1036]: [cursor-sprites 1036] registration complete; pausing on signalfd (SIGTERM exits cleanly)
+Oct 04 10:02:05 baseweed-admin weston[921]: [10:02:05.918] qdwin: cursor-sprite registered shape=all-resize hotspot=12,11
+Oct 04 10:02:05 baseweed-admin dbus-run-session[1038]: No running instances for "/usr/share/quickshell/qdshell/shell.qml"
+Oct 04 10:02:05 baseweed-admin dbus-run-session[1038]:   INFO: Launching config: "/usr/share/quickshell/qdshell/shell.qml"
+Oct 04 10:02:05 baseweed-admin dbus-run-session[1038]:   INFO: Shell ID: "0d0d1ceeb7f0392fec595c8531945b05" Path ID "0d0d1ceeb7f0392fec595c8531945b05"
+Oct 04 10:02:05 baseweed-admin dbus-run-session[1038]:   INFO: Saving logs to "/run/user/1000/quickshell/by-id/ushvndmt/log.qslog"
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,114 qdlocker.app INFO using built-in defaults (no trusted config file found)
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,148 qdlocker.auth INFO PAM service from env: qdlocker
+Oct 04 10:02:06 baseweed-admin weston[921]: [10:02:06.331] qdwin: locker bind attempt pid=1033 uid=1000 (allowed_locker_uid=1000)
+Oct 04 10:02:06 baseweed-admin weston[921]: [10:02:06.331] qdwin: locker bound pid=1033 uid=1000 (initially_locked=0)
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,331 qdlocker.wayland INFO locker connected
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,336 qdlocker.idle INFO idle watcher started; timeout=300000ms
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,338 qdlocker.ctrl INFO ctrl socket at /run/user/1000/qdlocker.sock
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,343 qdlocker.app INFO locker bound; initially_locked=False
+Oct 04 10:02:06 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: failed to get driver name for fd -1
+Oct 04 10:02:06 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: MESA-LOADER: failed to retrieve device information
+Oct 04 10:02:06 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: failed to get driver name for fd -1
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,462 qdlocker.logind INFO logind sleep delay-inhibitor acquired (fd=20)
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,466 qdlocker.logind WARNING cannot identify one owned active Wayland session (0 candidates); session lock unavailable
+Oct 04 10:02:06 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:06,469 qdlocker.logind INFO logind automatic sleep locking ready; session=None
+Oct 04 10:02:06 baseweed-admin dbus-run-session[1038]: MESA: error: ZINK: failed to choose pdev
+Oct 04 10:02:06 baseweed-admin dbus-run-session[1038]: MESA-EGL: warning: egl: failed to create dri2 screen
+Oct 04 10:02:23 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100223]           I18n Service started
+Oct 04 10:02:23 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100223]           I18n Loading "en" (locale: "en-Latn-US")
+Oct 04 10:02:23 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100223]          Shell ---------------------------
+Oct 04 10:02:23 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100223]          Shell Qdshell Hello!
+Oct 04 10:02:23 baseweed-admin dbus-run-session[1038]:   WARN scene: @Commons/I18n.qml[104:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO: Configuration Loaded
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: @Commons/I18n.qml[104:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]       Settings Settings loaded
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]           I18n Loaded translations for "en"
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224] PluginRegistry Loaded plugin states from: /home/admin/.config/qdshell/plugins.json
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224] PluginRegistry Scanning plugin folder: /home/admin/.config/qdshell/plugins
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]          Icons Service started
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO: ctrl-server: listening on /run/user/1000/qdshell.sock
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Hardware/BrightnessService.qml[66:3]: Detected function "onEnableDdcSupportChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]     Brightness Service started
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224] DesktopWidgetR Service started
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/BarService.qml[147:3]: Detected function "onDisplayModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/BarService.qml[147:3]: Detected function "onScreenOverridesChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]     BarService Service started
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Networking/NetworkService.qml[73:3]: Detected function "onWifiEnabledChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]        Network Service started
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/System/SystemStatService.qml[320:3]: Detected function "onEnableDgpuMonitoringChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]     SystemStat Service started (polling deferred until a consumer registers).
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Panels/Dock/StaticDockPanel.qml[350:3]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[140:3]: Detected function "onWallpaperDownloaded" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onDirectoryChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onEnableMultiMonitorDirectoriesChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onAutomationEnabledChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onRandomIntervalSecChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onWallpaperChangeModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onViewModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onShowHiddenFilesChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onUseSolidColorChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onSolidColorChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/UI/WallpaperService.qml[61:3]: Detected function "onSortOrderChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Background/Background.qml[80:7]: Detected function "onFillModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Background/Background.qml[80:7]: Detected function "onFillModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Background/Background.qml[80:7]: Detected function "onFillModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Modules/Dock/Dock.qml[45:7]: Detected function "onOnlySameOutputChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]          Shell ---------------------------
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]      Wallpaper Service started
+Oct 04 10:02:24 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100224]     ImageCache Service started
+Oct 04 10:02:24 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 1.
+Oct 04 10:02:24 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/AppThemeService.qml[30:3]: Detected function "onDarkModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/AppThemeService.qml[30:3]: Detected function "onMonitorForColorsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/AppThemeService.qml[30:3]: Detected function "onGenerationMethodChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] AppThemeServic Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Theming/ColorSchemeService.qml[20:3]: Detected function "onDarkModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]    ColorScheme Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] AppPresentatio Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/DarkModeService.qml[43:3]: Detected function "onSchedulingModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/DarkModeService.qml[28:3]: Detected function "onManualSunriseChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/DarkModeService.qml[28:3]: Detected function "onManualSunsetChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] DarkModeServic Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Location/DarkModeService.qml[29:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Location/DarkModeService.qml[44:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Theming/ColorSchemeService.qml[21:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Theming/AppThemeService.qml[31:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Dock/Dock.qml[46:9]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Dock/Dock.qml[46:9]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Dock/Dock.qml[46:9]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Background/Background.qml[81:9]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Background/Background.qml[81:9]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Background/Background.qml[81:9]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/UI/WallpaperService.qml[62:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/SessionMenu/SessionMenu.qml[152:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/Dock/StaticDockPanel.qml[351:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/SessionMenu/SessionMenu.qml[152:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/Dock/StaticDockPanel.qml[351:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/System/SystemStatService.qml[321:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/SessionMenu/SessionMenu.qml[152:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Networking/NetworkService.qml[74:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Modules/Panels/Dock/StaticDockPanel.qml[351:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/UI/BarService.qml[148:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Hardware/BrightnessService.qml[67:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]      Wallpaper Starting scan for Virtual-1 in /home/admin/Pictures/Wallpapers recursive: false
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]      Wallpaper Starting scan for pipewire-0 in /home/admin/Pictures/Wallpapers recursive: false
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]      Wallpaper Starting scan for pipewire-1 in /home/admin/Pictures/Wallpapers recursive: false
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]       Location Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onEnabledChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onForcedChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onNightTempChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Location/NightLightService.qml[96:3]: Detected function "onDayTempChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at @Services/Control/HooksService.qml[16:3]: Detected function "onDarkModeChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]   HooksService Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN quickshell.dbus.objectmanager: Failed to create DBusObjectManagerInterface for "org.bluez" "/" : QDBusError("org.freedesktop.DBus.Error.ServiceUnknown", "The name is not activatable")
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]      Bluetooth Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  IdleInhibitor Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ qdwin live-apply capabilities: pointer=false xkb=false wm=false output=false workspace=false idleDpms=false keybind=false
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]   PowerService Service started
+Oct 04 10:02:25 baseweed-admin qdistro-polkit-agent[1080]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:25 baseweed-admin python3[1080]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] AccessibilityS Service started
+Oct 04 10:02:25 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:25 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  KeyboardInput Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] PointerInputSe Service started (qdwin live-apply: persist-only until shell binds >= v28)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] WindowManagerS Service started (qdwin v25 live-apply: false, shortcuts: false)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] SessionService started; saved=0 canApplyPlacement=false
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]    HostService Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CustomButtonIP Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]     IPCService Service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]        PodApps service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]         VMApps service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]      Tier3Apps service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]     Tier3sApps service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]      Tier4Apps service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] RemoteMachineW service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  Tier3FocusIPC service started
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN quickshell.dbus: Could not launch service org.freedesktop.UPower.PowerProfiles: QDBusError(org.freedesktop.DBus.Error.ServiceUnknown, The name is not activatable)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN quickshell.service.powerprofiles: Could not start PowerProfilesDaemon. The PowerProfiles service will not work.
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.479] qdwin: bind attempt pid=1038 uid=1000 (allowed_uid=1000)
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.479] qdwin: bind accepted for uid=1000, hello sent
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.480] qdwin: ext_workspace_manager bound (count=4 active=0)
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.480] qdwin: zwlr_output_manager bound (serial=1)
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.480] qdwin: shell bound (uid=1000 pid=1038); replaying 0 toplevels
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.480] qdwin: seat_focus_changed seat=default handle=4294967295
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]          Qdwin qdwin_shell_v1 bound v34
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  ClipboardGate wired to qdwin_shell_v1; broker default=deny
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.489] qdwin: workspace 0 name="1"
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.489] qdwin: workspace 1 name="2"
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.489] qdwin: workspace 2 name="3"
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.489] qdwin: workspace 3 name="4"
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.491] qdwin: set_wm_policy focus=0 ffm_delay=0 raise_click=1 raise_hover=0 placement=2 snap=1 dist=16
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] WindowManagerS applied WM policy focus=click placement=smart snap=true/16
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ wmPolicy -> true
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.492] qdwin: register_hotkey id=7101 mods=0x2 key=62
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.492] qdwin: register_hotkey id=7102 mods=0x4 key=103
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.492] qdwin: register_hotkey id=7103 mods=0x4 key=33
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] WindowManagerS registered WM shortcuts (5 active)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ keybindRegistration -> true
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] PointerInputSe applied pointer config accelSpeed=0 profile=0 natural=0 tap=1 scroll=1
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.493] qdwin: register_hotkey id=7104 mods=0x4 key=105
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.493] qdwin: register_hotkey id=7105 mods=0x4 key=106
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.493] qdwin: set_pointer_config accel=0 profile=0 natural=0 tap=1 left=0 middle=0 dwt=1 scroll=1 (6 devices)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ pointerConfig -> true
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  KeyboardInput applied qdwin key-repeat rate=25 delay=500
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ xkbRepeat -> true
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.494] qdwin: set_key_repeat rate=25 delay=500
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]   PowerService idle policy armed: inactivity=0ms (nothing), displayOff=0ms, presentation=false
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ idleDpms -> true
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] CapabilityServ outputManagement -> true
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100225]       Location Weather is still fetching
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN quickshell.dbus: Could not launch service org.freedesktop.UPower: QDBusError(org.freedesktop.DBus.Error.ServiceUnknown, The name is not activatable)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN quickshell.service.upower: Could not start UPower. The UPower service will not work.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]    HostService Detected openSUSE Tumbleweed
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]    HostService Looking for logo icon: distributor-logo-Tumbleweed
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]    HostService resolved hostname baseweed-admin
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("udisksctl", "monitor")
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] PluginRegistry All plugin manifests loaded. Total plugins: 0
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  PluginService Initializing plugin system
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  PluginService Found 0 enabled plugins: []
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  PluginService No plugins to load
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  PluginService Refreshing available plugins
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-background-Virtual-1 layer=2 output=0x55b5678cb700
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-background-Virtual-1 layer=2 box=0,0 1920x1080 serial=1
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-bar-content-Virtual-1 layer=2 output=0x55b5678cb700
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-bar-content-Virtual-1 layer=2 box=0,0 1920x31 serial=2
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-bar-exclusion-top-Virtual-1 layer=2 output=0x55b5678cb700
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-bar-exclusion-top-Virtual-1 layer=2 box=0,0 1920x31 serial=3
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-background-pipewire-0 layer=2 output=0x55b5678ccdc0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-background-pipewire-0 layer=2 box=1920,0 640x480 serial=4
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-bar-content-pipewire-0 layer=2 output=0x55b5678ccdc0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-bar-content-pipewire-0 layer=2 box=1920,0 640x31 serial=5
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-bar-exclusion-top-pipewire-0 layer=2 output=0x55b5678ccdc0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-bar-exclusion-top-pipewire-0 layer=2 box=1920,0 640x31 serial=6
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-background-pipewire-1 layer=2 output=0x55b5678f28b0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-background-pipewire-1 layer=2 box=2560,0 640x480 serial=7
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-bar-content-pipewire-1 layer=2 output=0x55b5678f28b0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-bar-content-pipewire-1 layer=2 box=2560,0 640x31 serial=8
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-bar-exclusion-top-pipewire-1 layer=2 output=0x55b5678f28b0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-bar-exclusion-top-pipewire-1 layer=2 box=2560,0 640x31 serial=9
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-dock-peek-Virtual-1 layer=2 output=0x55b5678cb700
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-dock-peek-Virtual-1 layer=2 box=0,1079 1920x1 serial=10
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell get_layer_surface ns=qdshell-dock-peek-pipewire-0 layer=2 output=0x55b5678ccdc0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.759] qdwin: layer-shell configure ns=qdshell-dock-peek-pipewire-0 layer=2 box=1920,479 640x1 serial=11
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.760] qdwin: layer-shell get_layer_surface ns=qdshell-dock-peek-pipewire-1 layer=2 output=0x55b5678f28b0
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.760] qdwin: layer-shell configure ns=qdshell-dock-peek-pipewire-1 layer=2 box=2560,479 640x1 serial=12
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.760] qdwin: layer-shell get_layer_surface ns=qdshell-image-cache-renderer layer=2 output=(nil)
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.760] qdwin: layer-shell configure ns=qdshell-image-cache-renderer layer=2 box=960,540 1x1 serial=13
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100225]       Location Geocoding error: 0
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[981:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[981:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN scene: QML Connections at qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[981:3]: Detected function "onPinnedAppsChanged" in Connections element. This is probably intended to be a signal handler but no signal of the target matches the name.
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN: Could not load icon "user-desktop?fallback=application-x-executable" at size QSize(19, 19) from request
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100225]     ImageCache ImageMagick not found, using Qt fallback
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100225]      Wallpaper Scan failed for Virtual-1 exit code: 1 (directory might not exist)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100225]      Wallpaper Scan failed for pipewire-0 exit code: 1 (directory might not exist)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100225]      Wallpaper Scan failed for pipewire-1 exit code: 1 (directory might not exist)
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100225]   PowerService Button monitor unavailable (exit 1); releasing key inhibitors, logind will handle power/sleep keys
+Oct 04 10:02:25 baseweed-admin weston[921]: [10:02:25.989] qdwin: set_key_repeat rate=25 delay=500
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]  KeyboardInput applied qdwin key-repeat rate=25 delay=500
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225] PointerInputSe enumerated 3 pointer device(s) via proc
+Oct 04 10:02:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100225]        PodApps cache refresh loaded 0 apps
+Oct 04 10:02:27 baseweed-admin weston[921]: [10:02:27.297] qdwin: layer-shell mapped ns=qdshell-background-Virtual-1 layer=2 at 0,0 1920x1080
+Oct 04 10:02:28 baseweed-admin weston[921]: [10:02:28.372] qdwin: layer-shell mapped ns=qdshell-bar-content-Virtual-1 layer=2 at 0,0 1920x31
+Oct 04 10:02:28 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 2.
+Oct 04 10:02:28 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:28 baseweed-admin weston[921]: [10:02:28.856] qdwin: layer-shell mapped ns=qdshell-bar-exclusion-top-Virtual-1 layer=2 at 0,0 1920x31
+Oct 04 10:02:28 baseweed-admin qdistro-polkit-agent[1245]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:28 baseweed-admin python3[1245]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:28 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:28 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:29 baseweed-admin weston[921]: [10:02:29.470] qdwin: layer-shell mapped ns=qdshell-background-pipewire-0 layer=2 at 1920,0 640x480
+Oct 04 10:02:29 baseweed-admin qdlocker[1033]: 2026-10-04 10:02:29,782 qdlocker.logind INFO logind session rebound in place; session=None
+Oct 04 10:02:29 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job immediately on client request, restart counter is at 3.
+Oct 04 10:02:29 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:29 baseweed-admin systemd[854]: Auto-unlock the qdistro portal-keys vault at login skipped, unmet condition check ConditionPathExists=/var/lib/qdistro/vaults/portal-keys-pin.tpm
+Oct 04 10:02:30 baseweed-admin weston[921]: [10:02:30.063] qdwin: layer-shell mapped ns=qdshell-bar-content-pipewire-0 layer=2 at 1920,0 640x31
+Oct 04 10:02:30 baseweed-admin qdistro-polkit-agent[1281]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:30 baseweed-admin python3[1281]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:30 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:30 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:30 baseweed-admin weston[921]: [10:02:30.684] qdwin: layer-shell mapped ns=qdshell-bar-exclusion-top-pipewire-0 layer=2 at 1920,0 640x31
+Oct 04 10:02:31 baseweed-admin weston[921]: [10:02:31.378] qdwin: layer-shell mapped ns=qdshell-background-pipewire-1 layer=2 at 2560,0 640x480
+Oct 04 10:02:31 baseweed-admin weston[921]: [10:02:31.857] qdwin: layer-shell mapped ns=qdshell-bar-content-pipewire-1 layer=2 at 2560,0 640x31
+Oct 04 10:02:32 baseweed-admin weston[921]: [10:02:32.221] qdwin: layer-shell mapped ns=qdshell-bar-exclusion-top-pipewire-1 layer=2 at 2560,0 640x31
+Oct 04 10:02:32 baseweed-admin weston[921]: [10:02:32.642] qdwin: layer-shell mapped ns=qdshell-dock-peek-Virtual-1 layer=2 at 0,1079 1920x1
+Oct 04 10:02:33 baseweed-admin weston[921]: [10:02:33.129] qdwin: layer-shell mapped ns=qdshell-dock-peek-pipewire-0 layer=2 at 1920,479 640x1
+Oct 04 10:02:33 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 4.
+Oct 04 10:02:33 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:33 baseweed-admin weston[921]: [10:02:33.673] qdwin: layer-shell mapped ns=qdshell-dock-peek-pipewire-1 layer=2 at 2560,479 640x1
+Oct 04 10:02:33 baseweed-admin qdistro-polkit-agent[1455]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:33 baseweed-admin python3[1455]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:33 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:33 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.102] qdwin: layer-shell mapped ns=qdshell-image-cache-renderer layer=2 at 960,540 1x1
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]           Time Time jump detected (8s) - likely system resume
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]        Network System resumed - forcing state poll
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]     SystemStat System resumed - resetting differential state
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234] DarkModeServic System resumed - re-evaluating dark mode
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]     NightLight System resumed - re-applying night light
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]      Bluetooth System resumed - forcing state poll
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   WARN scene: qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[982:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   WARN scene: qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[982:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   WARN scene: qs:/usr/share/quickshell/qdshell/Modules/Bar/Widgets/Taskbar.qml[982:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Control/HooksService.qml[17:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   WARN scene: @Services/Location/NightLightService.qml[97:5]: Unable to assign QJSValue to QObject*
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]    ColorScheme Applying color scheme: Qdshell (default)
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100234]           Font Service started
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100234]  PluginService Empty response from Qdshell Plugins
+Oct 04 10:02:34 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100234]  PluginService Failed to fetch registry from Qdshell Plugins - exit code: 1
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.403] qdwin: layer-shell get_layer_surface ns=qdshell-osd-Virtual-1 layer=3 output=0x55b5678cb700
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.403] qdwin: layer-shell configure ns=qdshell-osd-Virtual-1 layer=3 box=1591,40 320x72 serial=14
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.403] qdwin: layer-shell get_layer_surface ns=qdshell-osd-pipewire-0 layer=3 output=0x55b5678ccdc0
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.403] qdwin: layer-shell configure ns=qdshell-osd-pipewire-0 layer=3 box=2231,40 320x72 serial=15
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.403] qdwin: layer-shell get_layer_surface ns=qdshell-osd-pipewire-1 layer=3 output=0x55b5678f28b0
+Oct 04 10:02:34 baseweed-admin weston[921]: [10:02:34.403] qdwin: layer-shell configure ns=qdshell-osd-pipewire-1 layer=3 box=2871,40 320x72 serial=16
+Oct 04 10:02:34 baseweed-admin systemd[854]: Started podman-1595.scope.
+Oct 04 10:02:35 baseweed-admin systemd[854]: Started podman-1631.scope.
+Oct 04 10:02:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100235]        PodApps cache refresh loaded 0 apps
+Oct 04 10:02:35 baseweed-admin weston[921]: [10:02:35.666] qdwin: layer-shell mapped ns=qdshell-osd-Virtual-1 layer=3 at 1591,40 320x72
+Oct 04 10:02:35 baseweed-admin weston[921]: [10:02:35.769] qdwin: layer-shell mapped ns=qdshell-osd-pipewire-0 layer=3 at 2231,40 320x72
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.692] qdwin: layer-shell mapped ns=qdshell-osd-pipewire-1 layer=3 at 2871,40 320x72
+Oct 04 10:02:36 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100236]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:02:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100236]           Font Loaded 11 fonts, 3 monospace
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.970] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-Virtual-1 layer=0 output=0x55b5678cb700
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.970] qdwin: layer-shell configure ns=qdshell-wallpaper-Virtual-1 layer=0 box=0,0 1920x1080 serial=17
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.970] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-pipewire-0 layer=0 output=0x55b5678ccdc0
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.970] qdwin: layer-shell configure ns=qdshell-wallpaper-pipewire-0 layer=0 box=1920,0 640x480 serial=18
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.970] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-pipewire-1 layer=0 output=0x55b5678f28b0
+Oct 04 10:02:36 baseweed-admin weston[921]: [10:02:36.970] qdwin: layer-shell configure ns=qdshell-wallpaper-pipewire-1 layer=0 box=2560,0 640x480 serial=19
+Oct 04 10:02:37 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 5.
+Oct 04 10:02:37 baseweed-admin systemd[854]: Started podman-1880.scope.
+Oct 04 10:02:37 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:37 baseweed-admin qdistro-polkit-agent[1973]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:37 baseweed-admin python3[1973]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:37 baseweed-admin systemd[854]: Started podman-2010.scope.
+Oct 04 10:02:37 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:37 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:37 baseweed-admin weston[921]: [10:02:37.742] qdwin: layer-shell mapped ns=qdshell-wallpaper-Virtual-1 layer=0 at 0,0 1920x1080
+Oct 04 10:02:38 baseweed-admin weston[921]: [10:02:38.418] qdwin: layer-shell mapped ns=qdshell-wallpaper-pipewire-0 layer=0 at 1920,0 640x480
+Oct 04 10:02:38 baseweed-admin systemd[854]: Started podman-2119.scope.
+Oct 04 10:02:38 baseweed-admin systemd[854]: Started podman-2140.scope.
+Oct 04 10:02:39 baseweed-admin weston[921]: [10:02:39.190] qdwin: layer-shell mapped ns=qdshell-wallpaper-pipewire-1 layer=0 at 2560,0 640x480
+Oct 04 10:02:39 baseweed-admin systemd[854]: Started podman-2167.scope.
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239] DarkModeServic Resume retry - re-evaluating dark mode again
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239]     NightLight Resume retry - re-applying night light again
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239]           Time Time jump detected (5s) - likely system resume
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239]        Network System resumed - forcing state poll
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239]     SystemStat System resumed - resetting differential state
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239] DarkModeServic System resumed - re-evaluating dark mode
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239]     NightLight System resumed - re-applying night light
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100239]      Bluetooth System resumed - forcing state poll
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100239]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100239]     SystemStat No supported temperature sensor found
+Oct 04 10:02:39 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:40 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 6.
+Oct 04 10:02:40 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100240] DarkModeServic Resume retry - re-evaluating dark mode again
+Oct 04 10:02:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100240]     NightLight Resume retry - re-applying night light again
+Oct 04 10:02:40 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:41 baseweed-admin qdistro-polkit-agent[2255]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:41 baseweed-admin python3[2255]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:41 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:41 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:41 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:43 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:44 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 7.
+Oct 04 10:02:44 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:44 baseweed-admin qdistro-polkit-agent[2343]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:44 baseweed-admin python3[2343]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:44 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:44 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:45 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:45 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100245]       Location Weather is still fetching
+Oct 04 10:02:45 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100245]       Location Geocoding error: 0
+Oct 04 10:02:47 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:47 baseweed-admin systemd[854]: selinux: avc:  denied  { start } for auid=n/a uid=1000 gid=1000 cmdline="podman image exists localhost/tier3s-probe:empty" function="method_start_transient_unit" scontext=system_u:system_r:virt_qemu_ga_t:s0 tcontext=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 tclass=system permissive=1
+Oct 04 10:02:47 baseweed-admin systemd[854]: Started podman-2619.scope.
+Oct 04 10:02:47 baseweed-admin systemd[854]: Started podman-2632.scope.
+Oct 04 10:02:47 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 8.
+Oct 04 10:02:47 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:48 baseweed-admin qdistro-polkit-agent[2652]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:48 baseweed-admin python3[2652]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:48 baseweed-admin podman[2632]: 2026-10-04 10:02:48.002795228 +0000 UTC m=+0.538891990 image tag afd5c7d58e607398887e89807292eaefb4d840cfd370c4aa4308211020716954 localhost/tier3s-probe:empty
+Oct 04 10:02:48 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:48 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:48 baseweed-admin systemd[854]: Started podman-2656.scope.
+Oct 04 10:02:48 baseweed-admin podman[2656]: 2026-10-04 10:02:48.091393411 +0000 UTC m=+0.025919502 image pull afd5c7d58e607398887e89807292eaefb4d840cfd370c4aa4308211020716954 localhost/tier3s-probe:empty
+Oct 04 10:02:48 baseweed-admin podman[2656]: 2026-10-04 10:02:48.260589159 +0000 UTC m=+0.195115239 container create 72e6d9ce4bf9959a21b48123091ea9e8c7b29b7c9f8fadc5f3c4205bb69e1f4b (image=localhost/tier3s-probe:empty, name=tier3s-probe-2482)
+Oct 04 10:02:48 baseweed-admin systemd[854]: Started podman-2668.scope.
+Oct 04 10:02:48 baseweed-admin systemd[854]: Started podman-2680.scope.
+Oct 04 10:02:48 baseweed-admin systemd[854]: Started podman-2690.scope.
+Oct 04 10:02:48 baseweed-admin podman[2690]: 2026-10-04 10:02:48.620574426 +0000 UTC m=+0.228058908 container remove 72e6d9ce4bf9959a21b48123091ea9e8c7b29b7c9f8fadc5f3c4205bb69e1f4b (image=localhost/tier3s-probe:empty, name=tier3s-probe-2482)
+Oct 04 10:02:49 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100249]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:02:49 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:49 baseweed-admin systemd[854]: Started podman-2770.scope.
+Oct 04 10:02:49 baseweed-admin systemd[854]: Started podman-2781.scope.
+Oct 04 10:02:51 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 9.
+Oct 04 10:02:51 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:51 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:51 baseweed-admin qdistro-polkit-agent[2842]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:51 baseweed-admin python3[2842]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:51 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:51 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:53 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:54 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 10.
+Oct 04 10:02:54 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:54 baseweed-admin qdistro-polkit-agent[2901]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:54 baseweed-admin python3[2901]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:54 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:54 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:55 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:55 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100255]        PodApps cache refresh loaded 0 apps
+Oct 04 10:02:56 baseweed-admin podman[2781]: 2026-10-04 10:02:56.098745928 +0000 UTC m=+6.719358162 image loadfromarchive 1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92 /var/tmp/t3s-img/image.oci.tar
+Oct 04 10:02:56 baseweed-admin systemd[854]: podman-2781.scope: Consumed 4.153s CPU time over 6.680s wall clock time.
+Oct 04 10:02:56 baseweed-admin systemd[854]: Started podman-2958.scope.
+Oct 04 10:02:56 baseweed-admin systemd[854]: Started podman-2970.scope.
+Oct 04 10:02:56 baseweed-admin systemd[854]: Started podman-2981.scope.
+Oct 04 10:02:57 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:02:57 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 11.
+Oct 04 10:02:57 baseweed-admin systemd[854]: Started podman-3002.scope.
+Oct 04 10:02:57 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:02:57 baseweed-admin systemd[854]: Started podman-3015.scope.
+Oct 04 10:02:57 baseweed-admin qdistro-polkit-agent[3011]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:57 baseweed-admin python3[3011]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:02:57 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:02:57 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:02:59 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:00 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 12.
+Oct 04 10:03:00 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:01 baseweed-admin qdistro-polkit-agent[3054]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:01 baseweed-admin python3[3054]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:01 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:01 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:01 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:03 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:04 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 13.
+Oct 04 10:03:04 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:05 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100305]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:03:05 baseweed-admin qdistro-polkit-agent[3106]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:05 baseweed-admin python3[3106]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:05 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:05 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:05 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:05 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100305]       Location Weather is still fetching
+Oct 04 10:03:05 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100305]       Location Geocoding error: 0
+Oct 04 10:03:07 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:08 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 14.
+Oct 04 10:03:08 baseweed-admin qdistro-polkit-agent[3158]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:08 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:09 baseweed-admin python3[3158]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:08 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:08 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:09 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:11 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:11 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 15.
+Oct 04 10:03:11 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:11 baseweed-admin qdistro-polkit-agent[3205]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:11 baseweed-admin python3[3205]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:11 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:11 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:13 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:14 baseweed-admin podman[3015]: 2026-10-04 10:03:14.63655389 +0000 UTC m=+16.940070628 image loadfromarchive c1cfa112ea7171ba1c62d14d9adda09e40b530bd9f5b3e76cfaf4e29ff0b345e /var/tmp/t3s-img/tier3s-weston-terminal.oci.tar
+Oct 04 10:03:14 baseweed-admin systemd[854]: podman-3015.scope: Consumed 14.728s CPU time over 16.912s wall clock time.
+Oct 04 10:03:14 baseweed-admin systemd[854]: Started podman-3272.scope.
+Oct 04 10:03:14 baseweed-admin systemd[854]: Started podman-3284.scope.
+Oct 04 10:03:14 baseweed-admin systemd[854]: Started podman-3295.scope.
+Oct 04 10:03:14 baseweed-admin systemd[854]: selinux: avc:  denied  { status } for auid=n/a uid=1000 gid=1000 path="/home/admin/.config/systemd/user/qdshell.service" cmdline="" function="mac_selinux_filter" scontext=system_u:system_r:virt_qemu_ga_t:s0 tcontext=system_u:object_r:config_home_t:s0 tclass=service permissive=1
+Oct 04 10:03:15 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 16.
+Oct 04 10:03:15 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:15 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:15 baseweed-admin qdistro-polkit-agent[3345]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:15 baseweed-admin python3[3345]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:15 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:15 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:16 baseweed-admin systemd[854]: Started podman-3372.scope.
+Oct 04 10:03:17 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-3943.scope.
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-3955.scope.
+Oct 04 10:03:18 baseweed-admin podman[3955]: 2026-10-04 10:03:18.209596017 +0000 UTC m=+0.028017575 image pull afd5c7d58e607398887e89807292eaefb4d840cfd370c4aa4308211020716954 localhost/tier3s-probe:empty
+Oct 04 10:03:18 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 17.
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:18 baseweed-admin podman[3955]: 2026-10-04 10:03:18.504086783 +0000 UTC m=+0.322508351 container create edd48acb1b0f7af4eba075b3294fddd26deb415f090381cabb3a97ef10615fa4 (image=localhost/tier3s-probe:empty, name=tier3s-probe-3801)
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-3969.scope.
+Oct 04 10:03:18 baseweed-admin qdistro-polkit-agent[3964]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:18 baseweed-admin python3[3964]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-3981.scope.
+Oct 04 10:03:18 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:18 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-3993.scope.
+Oct 04 10:03:18 baseweed-admin podman[3993]: 2026-10-04 10:03:18.765867638 +0000 UTC m=+0.116290969 container remove edd48acb1b0f7af4eba075b3294fddd26deb415f090381cabb3a97ef10615fa4 (image=localhost/tier3s-probe:empty, name=tier3s-probe-3801)
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-4007.scope.
+Oct 04 10:03:18 baseweed-admin systemd[854]: Started podman-4039.scope.
+Oct 04 10:03:19 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100319]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:03:19 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:19 baseweed-admin systemd[854]: Started podman-4469.scope.
+Oct 04 10:03:21 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:21 baseweed-admin systemd[854]: Started podman-4685.scope.
+Oct 04 10:03:21 baseweed-admin systemd[854]: Started podman-4696.scope.
+Oct 04 10:03:21 baseweed-admin podman[4696]: 2026-10-04 10:03:21.465837866 +0000 UTC m=+0.028220706 image pull afd5c7d58e607398887e89807292eaefb4d840cfd370c4aa4308211020716954 localhost/tier3s-probe:empty
+Oct 04 10:03:21 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 18.
+Oct 04 10:03:21 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:21 baseweed-admin podman[4696]: 2026-10-04 10:03:21.717774356 +0000 UTC m=+0.280157186 container create a883c8b360818013aa98cd0107016223fa48c67215cf0d7731eab4a2fba1e28d (image=localhost/tier3s-probe:empty, name=tier3s-probe-4547)
+Oct 04 10:03:21 baseweed-admin systemd[854]: Started podman-4709.scope.
+Oct 04 10:03:21 baseweed-admin systemd[854]: Started podman-4720.scope.
+Oct 04 10:03:21 baseweed-admin qdistro-polkit-agent[4705]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:21 baseweed-admin python3[4705]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:21 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:21 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:21 baseweed-admin systemd[854]: Started podman-4732.scope.
+Oct 04 10:03:22 baseweed-admin podman[4732]: 2026-10-04 10:03:22.227223499 +0000 UTC m=+0.370022153 container remove a883c8b360818013aa98cd0107016223fa48c67215cf0d7731eab4a2fba1e28d (image=localhost/tier3s-probe:empty, name=tier3s-probe-4547)
+Oct 04 10:03:22 baseweed-admin qdistro-tier3s-silo-launch[4746]: [resolve-binding] silo 's127a' is untemplated (no binding)
+Oct 04 10:03:22 baseweed-admin systemd[854]: Started podman-4777.scope.
+Oct 04 10:03:22 baseweed-admin systemd[854]: Started podman-4811.scope.
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.619] qdwin/secctx: helper pid=4838 launcher parent pid=4829 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.620] qdwin/secctx: helper pid=4838 launcher parent pid=4829 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.621] qdwin/secctx: helper pid=4838 launcher parent pid=4829 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.621] qdwin/secctx: helper pid=4838 launcher parent pid=4829 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.621] qdwin/secctx: manager bound by uid=1000 pid=4838 (helper)
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.621] qdwin/secctx: committed engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=2905dba4e2f8ca31f64d49a24563a860 listen_fd=72 close_fd=73
+Oct 04 10:03:22 baseweed-admin weston[921]: [10:03:22.642] qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=2905dba4e2f8ca31f64d49a24563a860 (total tagged: 1)
+Oct 04 10:03:22 baseweed-admin systemd[854]: Started podman-4857.scope.
+Oct 04 10:03:22 baseweed-admin podman[4880]: 2026-10-04 10:03:22.843115089 +0000 UTC m=+0.031747307 image pull c1cfa112ea7171ba1c62d14d9adda09e40b530bd9f5b3e76cfaf4e29ff0b345e localhost/qdistro/tier3s-weston-terminal:latest
+Oct 04 10:03:23 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:24 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 19.
+Oct 04 10:03:24 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:25 baseweed-admin qdistro-polkit-agent[4947]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:25 baseweed-admin python3[4947]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:25 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:25 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:25 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:25 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100325]       Location Weather is still fetching
+Oct 04 10:03:25 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100325]       Location Geocoding error: 0
+Oct 04 10:03:25 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100325]        PodApps cache refresh loaded 0 apps
+Oct 04 10:03:27 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:28 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 20.
+Oct 04 10:03:28 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:28 baseweed-admin qdistro-polkit-agent[4978]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:28 baseweed-admin python3[4978]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:28 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:28 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:29 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:31 baseweed-admin systemd[854]: Started podman-4994.scope.
+Oct 04 10:03:31 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:31 baseweed-admin podman[4880]: 2026-10-04 10:03:31.247175673 +0000 UTC m=+8.435807891 container create 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., io.buildah.version=1.44.1, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.version=20260930.37.208, org.qdistro.snapshot=20260930, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.url=https://www.opensuse.org, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860)
+Oct 04 10:03:31 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 21.
+Oct 04 10:03:31 baseweed-admin podman[4880]: 2026-10-04 10:03:31.431040244 +0000 UTC m=+8.619672472 container init 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.vendor=openSUSE Project, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.version=20260930.37.208, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, io.buildah.version=1.44.1, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.version=20260930.37.208, org.qdistro.snapshot=20260930, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914)
+Oct 04 10:03:31 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:31 baseweed-admin podman[4880]: 2026-10-04 10:03:31.470899887 +0000 UTC m=+8.659532105 container start 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.qdistro.tier3s.workload=weston-terminal, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.qdistro.snapshot=20260930, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.version=20260930.37.208, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.base.version=20260930.37.208, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, io.buildah.version=1.44.1, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z)
+Oct 04 10:03:31 baseweed-admin podman[4880]: 2026-10-04 10:03:31.517149897 +0000 UTC m=+8.705782105 container attach 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, io.buildah.version=1.44.1, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.version=20260930.37.208, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, org.qdistro.snapshot=20260930, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.qdistro.tier3s.workload=weston-terminal, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime)
+Oct 04 10:03:31 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100331]        PodApps auto-scan: qdistro-tier3s-s127a transitioned to running
+Oct 04 10:03:31 baseweed-admin systemd[854]: Started podman-5110.scope.
+Oct 04 10:03:31 baseweed-admin qdistro-polkit-agent[5041]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:31 baseweed-admin python3[5041]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:31 baseweed-admin systemd[854]: Started podman-5142.scope.
+Oct 04 10:03:31 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:31 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:31 baseweed-admin systemd[854]: Started podman-5152.scope.
+Oct 04 10:03:31 baseweed-admin qdistro-tier3s-s127a[5008]: could not load cursor 'dnd-move'
+Oct 04 10:03:31 baseweed-admin qdistro-tier3s-s127a[5008]: could not load cursor 'dnd-copy'
+Oct 04 10:03:31 baseweed-admin qdistro-tier3s-s127a[5008]: could not load cursor 'dnd-none'
+Oct 04 10:03:31 baseweed-admin qdistro-tier3s-silo-launch[4880]: could not load cursor 'dnd-move'
+Oct 04 10:03:31 baseweed-admin qdistro-tier3s-silo-launch[4880]: could not load cursor 'dnd-copy'
+Oct 04 10:03:31 baseweed-admin qdistro-tier3s-silo-launch[4880]: could not load cursor 'dnd-none'
+Oct 04 10:03:31 baseweed-admin systemd[854]: Started podman-5187.scope.
+Oct 04 10:03:31 baseweed-admin weston[921]: [10:03:31.983] qdwin: toplevel_added handle=1 uid=1000 pid=4840 app_id=(null) title=""
+Oct 04 10:03:31 baseweed-admin weston[921]: [10:03:31.983] qdwin: toplevel_security_context handle=1 engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=2905dba4e2f8ca31f64d49a24563a860
+Oct 04 10:03:31 baseweed-admin weston[921]: [10:03:31.983] qdwin: toplevel_peer_identity handle=1 pid=4840 starttime=7172 uid=1000 exe=/usr/bin/waypipe label=system_u:system_r:unconfined_service_t:s0
+Oct 04 10:03:31 baseweed-admin weston[921]: [10:03:31.983] qdwin: holding_released handle=1 via default_toplevel_policy (held → normal)
+Oct 04 10:03:31 baseweed-admin weston[921]: [10:03:31.988] Detected an unmapped surface or view in the layer list, which should not occur.
+Oct 04 10:03:31 baseweed-admin weston[921]:                Warning: the above message will not be printed again.
+Oct 04 10:03:31 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100331]          Qdwin toplevel_security_context handle=1 engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=2905dba4e2f8ca31f64d49a24563a860
+Oct 04 10:03:31 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100331]     Tier3sApps [tier3s] toplevel observed silo=s127a secctx=qdistro.tier3s.s127a color=#ffe54c handle=1
+Oct 04 10:03:31 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100331]     Tier3sApps [tier3s] silo=s127a color=#ffe54c
+Oct 04 10:03:32 baseweed-admin weston[921]: [10:03:32.024] qdwin: toplevel_title handle=1 title="[3s:s127a] Wayland Terminal"
+Oct 04 10:03:32 baseweed-admin weston[921]: [10:03:32.024] qdwin: toplevel_app_id handle=1 app_id="org.freedesktop.weston.wayland-terminal"
+Oct 04 10:03:32 baseweed-admin weston[921]: [10:03:32.024] qdwin: mapped handle=1 size=806x491 pos=557,310 (normal)
+Oct 04 10:03:32 baseweed-admin weston[921]: [10:03:32.024] qdwin: focus handle=1 (was 4294967295) seat=default
+Oct 04 10:03:32 baseweed-admin weston[921]: [10:03:32.024] qdwin: seat_focus_changed seat=default handle=1
+Oct 04 10:03:32 baseweed-admin dbus-run-session[1038]:   WARN: Could not load icon "org.freedesktop.weston.wayland-terminal?fallback=application-x-executable" at size QSize(19, 19) from request
+Oct 04 10:03:33 baseweed-admin systemd[854]: Started podman-5377.scope.
+Oct 04 10:03:33 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:33 baseweed-admin systemd[854]: Started podman-5389.scope.
+Oct 04 10:03:33 baseweed-admin podman[5389]: 2026-10-04 10:03:33.286724553 +0000 UTC m=+0.036948441 image pull afd5c7d58e607398887e89807292eaefb4d840cfd370c4aa4308211020716954 localhost/tier3s-probe:empty
+Oct 04 10:03:33 baseweed-admin podman[5389]: 2026-10-04 10:03:33.403367519 +0000 UTC m=+0.153591387 container create 49a561629ea27055b2dc2a908bd08d71d14aba6c71811e79d1f5387a5ffa8f3a (image=localhost/tier3s-probe:empty, name=tier3s-probe-5240)
+Oct 04 10:03:33 baseweed-admin systemd[854]: Started podman-5401.scope.
+Oct 04 10:03:33 baseweed-admin systemd[854]: Started podman-5412.scope.
+Oct 04 10:03:33 baseweed-admin systemd[854]: Started podman-5422.scope.
+Oct 04 10:03:33 baseweed-admin podman[5422]: 2026-10-04 10:03:33.74150268 +0000 UTC m=+0.158438549 container remove 49a561629ea27055b2dc2a908bd08d71d14aba6c71811e79d1f5387a5ffa8f3a (image=localhost/tier3s-probe:empty, name=tier3s-probe-5240)
+Oct 04 10:03:33 baseweed-admin qdistro-tier3s-silo-launch[5445]: [resolve-binding] silo 's127b' is untemplated (no binding)
+Oct 04 10:03:34 baseweed-admin systemd[854]: Started podman-5516.scope.
+Oct 04 10:03:34 baseweed-admin podman[5463]: 2026-10-04 10:03:34.036422513 +0000 UTC m=+0.194051676 container exec 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.qdistro.tier3s.workload=weston-terminal, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.version=20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, io.buildah.version=1.44.1, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.snapshot=20260930, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed.)
+Oct 04 10:03:34 baseweed-admin conmon[5517]: conmon 17fe78550de3bf3e83ad <nwarn>: Failed to open cgroups file: /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/memory.events
+Oct 04 10:03:34 baseweed-admin podman[5539]: 2026-10-04 10:03:34.130357369 +0000 UTC m=+0.070127783 container exec_died 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.opensuse.base.version=20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.snapshot=20260930, org.qdistro.tier3s.workload=weston-terminal, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.vendor=openSUSE Project, org.opencontainers.image.version=20260930.37.208, io.buildah.version=1.44.1, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, execID=d7a2fe2899b90555a71465df08af01ca51cba29602ce0fc25dab5c052d089555, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.title=openSUSE Tumbleweed Base Container)
+Oct 04 10:03:34 baseweed-admin podman[5463]: 2026-10-04 10:03:34.179173381 +0000 UTC m=+0.336802544 container exec_died 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, execID=d7a2fe2899b90555a71465df08af01ca51cba29602ce0fc25dab5c052d089555, org.opencontainers.image.version=20260930.37.208, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.qdistro.tier3s.workload=weston-terminal, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, io.buildah.version=1.44.1, org.opencontainers.image.url=https://www.opensuse.org, org.qdistro.snapshot=20260930)
+Oct 04 10:03:34 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100334]        Network Connectivity check error: Error: Not authorized to recheck connectivity.
+Oct 04 10:03:34 baseweed-admin systemd[854]: Started podman-5572.scope.
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.453] qdwin/secctx: helper pid=5617 launcher parent pid=5610 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.453] qdwin/secctx: helper pid=5617 launcher parent pid=5610 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.454] qdwin/secctx: helper pid=5617 launcher parent pid=5610 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.454] qdwin/secctx: helper pid=5617 launcher parent pid=5610 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.454] qdwin/secctx: manager bound by uid=1000 pid=5617 (helper)
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.454] qdwin/secctx: committed engine=qdistro.tier3s app_id=qdistro.tier3s.s127b instance_id=b68aa71af3b359041be500e34c4bfb42 listen_fd=80 close_fd=81
+Oct 04 10:03:34 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100334]        PodApps cache refresh loaded 0 apps
+Oct 04 10:03:34 baseweed-admin weston[921]: [10:03:34.457] qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s127b instance_id=b68aa71af3b359041be500e34c4bfb42 (total tagged: 2)
+Oct 04 10:03:34 baseweed-admin systemd[854]: Started podman-5649.scope.
+Oct 04 10:03:34 baseweed-admin podman[5671]: 2026-10-04 10:03:34.741018903 +0000 UTC m=+0.118724639 container create 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.snapshot=20260930, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, io.buildah.version=1.44.1, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container)
+Oct 04 10:03:34 baseweed-admin podman[5671]: 2026-10-04 10:03:34.652954004 +0000 UTC m=+0.030659760 image pull c1cfa112ea7171ba1c62d14d9adda09e40b530bd9f5b3e76cfaf4e29ff0b345e localhost/qdistro/tier3s-weston-terminal:latest
+Oct 04 10:03:34 baseweed-admin podman[5671]: 2026-10-04 10:03:34.888515616 +0000 UTC m=+0.266221372 container init 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, io.buildah.version=1.44.1, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.url=https://www.opensuse.org, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.vendor=openSUSE Project, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.vendor=openSUSE Project, org.qdistro.tier3s.workload=weston-terminal, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.snapshot=20260930, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.version=20260930.37.208)
+Oct 04 10:03:34 baseweed-admin podman[5671]: 2026-10-04 10:03:34.920946815 +0000 UTC m=+0.298652551 container start 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.vendor=openSUSE Project, org.qdistro.snapshot=20260930, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, io.buildah.version=1.44.1, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.url=https://www.opensuse.org, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.version=20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service)
+Oct 04 10:03:34 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 22.
+Oct 04 10:03:34 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:34 baseweed-admin podman[5671]: 2026-10-04 10:03:34.960127219 +0000 UTC m=+0.337832985 container attach 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, io.buildah.version=1.44.1, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.url=https://www.opensuse.org, org.qdistro.snapshot=20260930, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.vendor=openSUSE Project)
+Oct 04 10:03:35 baseweed-admin qdistro-tier3s-s127b[5684]: could not load cursor 'dnd-move'
+Oct 04 10:03:35 baseweed-admin qdistro-tier3s-s127b[5684]: could not load cursor 'dnd-copy'
+Oct 04 10:03:35 baseweed-admin qdistro-tier3s-silo-launch[5671]: could not load cursor 'dnd-move'
+Oct 04 10:03:35 baseweed-admin qdistro-tier3s-silo-launch[5671]: could not load cursor 'dnd-copy'
+Oct 04 10:03:35 baseweed-admin qdistro-tier3s-silo-launch[5671]: could not load cursor 'dnd-none'
+Oct 04 10:03:35 baseweed-admin qdistro-tier3s-s127b[5684]: could not load cursor 'dnd-none'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.105] qdwin: toplevel_added handle=2 uid=1000 pid=5623 app_id=(null) title=""
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.105] qdwin: toplevel_security_context handle=2 engine=qdistro.tier3s app_id=qdistro.tier3s.s127b instance=b68aa71af3b359041be500e34c4bfb42
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.106] qdwin: toplevel_peer_identity handle=2 pid=5623 starttime=8356 uid=1000 exe=/usr/bin/waypipe label=system_u:system_r:unconfined_service_t:s0
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.106] qdwin: holding_released handle=2 via default_toplevel_policy (held → normal)
+Oct 04 10:03:35 baseweed-admin qdistro-polkit-agent[5743]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:35 baseweed-admin python3[5743]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]          Qdwin toplevel_security_context handle=2 engine=qdistro.tier3s app_id=qdistro.tier3s.s127b instance=b68aa71af3b359041be500e34c4bfb42
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]     Tier3sApps [tier3s] toplevel observed silo=s127b secctx=qdistro.tier3s.s127b color=#64b5f6 handle=2
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]     Tier3sApps [tier3s] silo=s127b color=#64b5f6
+Oct 04 10:03:35 baseweed-admin systemd[854]: Started podman-5752.scope.
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.163] qdwin: toplevel_title handle=2 title="[3s:s127b] Wayland Terminal"
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.163] qdwin: toplevel_app_id handle=2 app_id="org.freedesktop.weston.wayland-terminal"
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.164] qdwin: mapped handle=2 size=806x491 pos=0,31 (normal)
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.164] qdwin: focus handle=2 (was 1) seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.164] qdwin: seat_focus_changed seat=default handle=2
+Oct 04 10:03:35 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:35 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:35 baseweed-admin systemd[854]: Started podman-5824.scope.
+Oct 04 10:03:35 baseweed-admin qs[5858]: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+                                         Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+                                         If this causes problems, reconfigure your locale. See the locale(1) manual
+                                         for more information.
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  Tier3FocusIPC findSiloHandle silo=s127a → HANDLE=1
+Oct 04 10:03:35 baseweed-admin qs[5866]: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+                                         Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+                                         If this causes problems, reconfigure your locale. See the locale(1) manual
+                                         for more information.
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  Tier3FocusIPC findSiloHandle silo=s127b → HANDLE=2
+Oct 04 10:03:35 baseweed-admin qs[5886]: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+                                         Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+                                         If this causes problems, reconfigure your locale. See the locale(1) manual
+                                         for more information.
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  Tier3FocusIPC injectFocus handle=2 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.629] qdwin: set_keyboard_focus seat=default handle=2
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.629] qdwin: seat_focus_changed seat=default handle=2
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]          Qdwin ipc injectFocus handle=2 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.670] qdwin/secctx: helper pid=5897 launcher parent pid=5892 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.671] qdwin/secctx: helper pid=5897 launcher parent pid=5892 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.672] qdwin/secctx: helper pid=5897 launcher parent pid=5892 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.672] qdwin/secctx: helper pid=5897 launcher parent pid=5892 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.672] qdwin/secctx: manager bound by uid=1000 pid=5897 (helper)
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.673] qdwin/secctx: committed engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=clipsrc-s127a-5892 listen_fd=88 close_fd=89
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.676] qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=clipsrc-s127a-5892 (total tagged: 3)
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: v15 data_source wrap installed src=0x55b567a51750 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5892
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: v15 data_source wrap installed src=0x55b567edd240 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5892
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: v15 data_source wrap installed src=0x55b567edf620 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5892
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.677] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.749] qdwin: v15 data_source wrap installed src=0x55b567edab90 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.749] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.749] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.749] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.883] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.883] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.883] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.981] qdwin/secctx: helper pid=5936 launcher parent pid=5931 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.982] qdwin/secctx: helper pid=5936 launcher parent pid=5931 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.982] qdwin/secctx: helper pid=5936 launcher parent pid=5931 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.982] qdwin/secctx: helper pid=5936 launcher parent pid=5931 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.982] qdwin/secctx: manager bound by uid=1000 pid=5936 (helper)
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.982] qdwin/secctx: committed engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=clipsrc-s127a-5931 listen_fd=92 close_fd=93
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=clipsrc-s127a-5931 (total tagged: 3)
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin: v15 data_source wrap installed src=0x55b567a51750 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5931
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin: v15 data_source wrap installed src=0x55b567edf620 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5931
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.983] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.984] qdwin: v15 data_source wrap installed src=0x55b567edd240 seat=default
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.984] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5931
+Oct 04 10:03:35 baseweed-admin weston[921]: [10:03:35.984] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:35 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100335]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127a before=1 after=0
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.040] qdwin: v15 data_source wrap installed src=0x55b567edab90 seat=default
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.040] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.040] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.040] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127a before=1 after=0
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127a before=1 after=0
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127b before=1 after=0
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127b before=1 after=0
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.045] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.045] qdwin: selection_set seat=default handle=2 primary=0 mimes='image/png'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.045] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127b before=1 after=0
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate tier3s mime-strip src_app=qdistro.tier3s.s127b before=1 after=0
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types= verdict=deny reason=tier3s-no-allowed-mimes
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.438] qdwin/secctx: helper pid=5986 launcher parent pid=5981 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.438] qdwin/secctx: helper pid=5986 launcher parent pid=5981 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.438] qdwin/secctx: helper pid=5986 launcher parent pid=5981 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.438] qdwin/secctx: helper pid=5986 launcher parent pid=5981 exe unreadable; falling back to verified root-parent + stable-starttime attestation
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.438] qdwin/secctx: manager bound by uid=1000 pid=5986 (helper)
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.438] qdwin/secctx: committed engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=clipsrc-s127a-5981 listen_fd=96 close_fd=97
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance_id=clipsrc-s127a-5981 (total tagged: 3)
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: v15 data_source wrap installed src=0x55b567a51750 seat=default
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5981
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: v15 data_source wrap installed src=0x55b567edd240 seat=default
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5981
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: v15 data_source wrap installed src=0x55b567edf620 seat=default
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: selection_set_source_identity engine=qdistro.tier3s app_id=qdistro.tier3s.s127a instance=clipsrc-s127a-5981
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.440] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=allow reason=broker:allow
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=allow reason=broker:allow
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=allow reason=broker:allow
+Oct 04 10:03:36 baseweed-admin qs[6006]: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+                                         Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+                                         If this causes problems, reconfigure your locale. See the locale(1) manual
+                                         for more information.
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  Tier3FocusIPC injectFocus handle=2 seat=default
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]          Qdwin ipc injectFocus handle=2 seat=default
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.776] qdwin: v15 data_source wrap installed src=0x55b567edab90 seat=default
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.776] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.776] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.776] qdwin: set_keyboard_focus seat=default handle=2
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.776] qdwin: seat_focus_changed seat=default handle=2
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.821] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.821] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:36 baseweed-admin weston[921]: [10:03:36.821] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:36 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100336]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:37 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:37 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100337]        PodApps auto-scan: qdistro-tier3s-s127b transitioned to running
+Oct 04 10:03:38 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 23.
+Oct 04 10:03:38 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:38 baseweed-admin qdistro-polkit-agent[6032]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:38 baseweed-admin python3[6032]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:38 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:38 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:39 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:39 baseweed-admin podman[6063]: 2026-10-04 10:03:39.882637204 +0000 UTC m=+0.167839462 container exec 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, io.buildah.version=1.44.1, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.qdistro.snapshot=20260930, qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service, org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.version=20260930.37.208, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.version=20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.url=https://www.opensuse.org)
+Oct 04 10:03:39 baseweed-admin conmon[6077]: conmon 16407cb950ca026a01a1 <nwarn>: Failed to open cgroups file: /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/qdshell.service/memory.events
+Oct 04 10:03:39 baseweed-admin qs[6094]: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+                                         Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+                                         If this causes problems, reconfigure your locale. See the locale(1) manual
+                                         for more information.
+Oct 04 10:03:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100339]  Tier3FocusIPC injectFocus handle=1 seat=default
+Oct 04 10:03:39 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100339]          Qdwin ipc injectFocus handle=1 seat=default
+Oct 04 10:03:39 baseweed-admin weston[921]: [10:03:39.930] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:39 baseweed-admin weston[921]: [10:03:39.930] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:39 baseweed-admin weston[921]: [10:03:39.930] qdwin: focus handle=1 (was 2) seat=default
+Oct 04 10:03:39 baseweed-admin weston[921]: [10:03:39.930] qdwin: seat_focus_changed seat=default handle=1
+Oct 04 10:03:39 baseweed-admin weston[921]: [10:03:39.930] qdwin: set_keyboard_focus seat=default handle=1
+Oct 04 10:03:39 baseweed-admin weston[921]: [10:03:39.930] qdwin: seat_focus_changed seat=default handle=1
+Oct 04 10:03:39 baseweed-admin podman[6063]: 2026-10-04 10:03:39.974636782 +0000 UTC m=+0.259839271 container exec_died 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.vendor=openSUSE Project, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, io.buildah.version=1.44.1, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.qdistro.tier3s.workload=weston-terminal, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.qdistro.snapshot=20260930, org.opencontainers.image.vendor=openSUSE Project, execID=168fbc60330723b2301218bafb6b39421369e3be1e5ede2bcf9a3b9a16f214c7, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.version=20260930.37.208, qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service)
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.013] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.013] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.013] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_FOCUS_GATE seat=default src_silo=s127b dst_silo=s127a is_primary=0 verdict=deny reason=focus-cross-silo
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.060] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.060] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.060] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.115] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.115] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.115] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:40 baseweed-admin systemd[854]: Started podman-6120.scope.
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin systemd[854]: Started podman-6149.scope.
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin qs[6169]: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+                                         Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+                                         If this causes problems, reconfigure your locale. See the locale(1) manual
+                                         for more information.
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  Tier3FocusIPC injectFocus handle=2 seat=default
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]          Qdwin ipc injectFocus handle=2 seat=default
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.350] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.350] qdwin: selection_set seat=default handle=1 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.350] qdwin: focus handle=2 (was 1) seat=default
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.350] qdwin: seat_focus_changed seat=default handle=2
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.350] qdwin: set_keyboard_focus seat=default handle=2
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.350] qdwin: seat_focus_changed seat=default handle=2
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127a mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_FOCUS_GATE seat=default src_silo=s127a dst_silo=s127b is_primary=0 verdict=deny reason=focus-cross-silo
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.433] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.433] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.433] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]        PodApps cache refresh loaded 0 apps
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.536] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.536] qdwin: selection_set seat=default handle=2 primary=0 mimes='text/plain'
+Oct 04 10:03:40 baseweed-admin weston[921]: [10:03:40.536] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:40 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100340]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=s127b dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+Oct 04 10:03:41 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:41 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 24.
+Oct 04 10:03:41 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:41 baseweed-admin qdistro-polkit-agent[6339]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:41 baseweed-admin python3[6339]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:41 baseweed-admin weston[921]: [10:03:41.817] qdwin: toplevel_removed handle=1
+Oct 04 10:03:41 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:41 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:41 baseweed-admin podman[4880]: 2026-10-04 10:03:41.863827096 +0000 UTC m=+19.052459314 container died 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.qdistro.snapshot=20260930, org.opencontainers.image.vendor=openSUSE Project, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.url=https://www.opensuse.org, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, io.buildah.version=1.44.1, org.opensuse.base.version=20260930.37.208, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.version=20260930.37.208, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.url=https://www.opensuse.org, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker)
+Oct 04 10:03:42 baseweed-admin podman[4880]: 2026-10-04 10:03:42.120885226 +0000 UTC m=+19.309517444 container remove 17fe78550de3bf3e83ad3396f8b03c5257e14892fc66c89d9468bded06f525f1 (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127a, org.opensuse.base.version=20260930.37.208, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.url=https://www.opensuse.org, org.qdistro.tier3s.workload=weston-terminal, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opencontainers.image.version=20260930.37.208, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, qdistro_tier3s_unit=qdistro-tier3s-silo@s127a.service, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.vendor=openSUSE Project, org.qdistro.snapshot=20260930, qdistro_tier3s_token=2905dba4e2f8ca31f64d49a24563a860, io.buildah.version=1.44.1, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.title=openSUSE Tumbleweed Base Container)
+Oct 04 10:03:42 baseweed-admin systemd[854]: Started podman-6833.scope.
+Oct 04 10:03:42 baseweed-admin systemd[854]: Started podman-6882.scope.
+Oct 04 10:03:43 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:43 baseweed-admin systemd[854]: Started podman-7990.scope.
+Oct 04 10:03:44 baseweed-admin systemd[854]: Started podman-8052.scope.
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.381] qdwin: toplevel_removed handle=2
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.381] qdwin: focus handle=4294967295 (was 2) seat=default
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.381] qdwin: seat_focus_changed seat=default handle=4294967295
+Oct 04 10:03:44 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100344]  ClipboardGate CLIPBOARD_FOCUS_GATE seat=default src_silo=s127b dst_silo=unknown is_primary=0 verdict=deny reason=focus-cross-silo
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.387] qdwin: selection_set seat=default handle=4294967295 primary=0 mimes='text/plain'
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.387] qdwin: selection_set seat=default handle=4294967295 primary=0 mimes='text/plain'
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.387] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:44 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100344]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=unknown dst_silo=unknown mime_types=text/plain verdict=deny reason=unknown-identity
+Oct 04 10:03:44 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100344]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=unknown dst_silo=unknown mime_types=text/plain verdict=deny reason=unknown-identity
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.405] qdwin: selection_set seat=default handle=4294967295 primary=0 mimes='text/plain'
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.405] qdwin: selection_set seat=default handle=4294967295 primary=0 mimes='text/plain'
+Oct 04 10:03:44 baseweed-admin weston[921]: [10:03:44.405] qdwin: clear_selection seat=default clipboard cleared
+Oct 04 10:03:44 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100344]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=unknown dst_silo=unknown mime_types=text/plain verdict=deny reason=unknown-identity
+Oct 04 10:03:44 baseweed-admin dbus-run-session[1038]:   INFO qml: [20261004-100344]  ClipboardGate CLIPBOARD_GATE seat=default src_silo=unknown dst_silo=unknown mime_types=text/plain verdict=deny reason=unknown-identity
+Oct 04 10:03:44 baseweed-admin podman[5671]: 2026-10-04 10:03:44.415237802 +0000 UTC m=+9.792943538 container died 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, io.buildah.version=1.44.1, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.opensuse.base.vendor=openSUSE Project, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.version=20260930.37.208, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.snapshot=20260930, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opencontainers.image.url=https://www.opensuse.org, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.qdistro.tier3s.workload=weston-terminal, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.url=https://www.opensuse.org, org.opencontainers.image.version=20260930.37.208)
+Oct 04 10:03:44 baseweed-admin podman[5671]: 2026-10-04 10:03:44.674801727 +0000 UTC m=+10.052507473 container remove 16407cb950ca026a01a145d223958389b62e6210fb84ca4c22830f18a04b1f7f (image=localhost/qdistro/tier3s-weston-terminal:latest, name=qdistro-tier3s-s127b, org.opencontainers.image.vendor=openSUSE Project, org.opensuse.base.url=https://www.opensuse.org, org.opensuse.lifecycle-url=https://en.opensuse.org/Lifetime, org.opencontainers.image.title=openSUSE Tumbleweed Base Container, org.opensuse.base.title=openSUSE Tumbleweed Base Container, org.opencontainers.image.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.qdistro.snapshot=20260930, io.buildah.version=1.44.1, org.opensuse.base.lifecycle-url=https://en.opensuse.org/Lifetime, qdistro_tier3s_unit=qdistro-tier3s-silo@s127b.service, org.opencontainers.image.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.reference=registry.opensuse.org/opensuse/tumbleweed:20260930.37.208, org.openbuildservice.disturl=obs://build.opensuse.org/openSUSE:Factory/images/561f9d4c8e4e1a441f95ad4ec6b5a914-opensuse-tumbleweed-image:docker, org.opensuse.base.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opencontainers.image.version=20260930.37.208, org.opensuse.base.created=2026-09-30T20:05:54.126624488Z, org.opensuse.base.vendor=openSUSE Project, org.opencontainers.image.source=https://build.opensuse.org/package/show/openSUSE:Factory/opensuse-tumbleweed-image?rev=561f9d4c8e4e1a441f95ad4ec6b5a914, org.opensuse.base.description=Image containing a minimal environment for containers based on openSUSE Tumbleweed., org.opensuse.base.version=20260930.37.208, org.qdistro.tier3s.workload=weston-terminal, qdistro_tier3s_token=b68aa71af3b359041be500e34c4bfb42, org.opencontainers.image.url=https://www.opensuse.org)
+Oct 04 10:03:44 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 25.
+Oct 04 10:03:44 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:45 baseweed-admin qdistro-polkit-agent[8853]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:45 baseweed-admin python3[8853]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:45 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:45 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.
+Oct 04 10:03:45 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:45 baseweed-admin dbus-run-session[1038]:   WARN qml: [20261004-100345]       Location Weather is still fetching
+Oct 04 10:03:45 baseweed-admin dbus-run-session[1038]:  ERROR qml: [20261004-100345]       Location Geocoding error: 0
+Oct 04 10:03:46 baseweed-admin systemd[854]: Started podman-9654.scope.
+Oct 04 10:03:46 baseweed-admin systemd[854]: Started podman-9722.scope.
+Oct 04 10:03:46 baseweed-admin systemd[854]: Started podman-9791.scope.
+Oct 04 10:03:46 baseweed-admin systemd[854]: Started podman-9801.scope.
+Oct 04 10:03:46 baseweed-admin systemd[854]: Started podman-9874.scope.
+Oct 04 10:03:46 baseweed-admin systemd[854]: Started podman-9885.scope.
+Oct 04 10:03:47 baseweed-admin systemd[854]: Started podman-9931.scope.
+Oct 04 10:03:47 baseweed-admin dbus-run-session[1038]:   WARN: Process failed to start, likely because the binary could not be found. Command: QList("bluetoothctl", "show")
+Oct 04 10:03:48 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 26.
+Oct 04 10:03:48 baseweed-admin systemd[854]: Started qdistro polkit authentication agent (PAM / fprintd / broker).
+Oct 04 10:03:48 baseweed-admin qdistro-polkit-agent[10435]: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:48 baseweed-admin python3[10435]: qdistro-polkit-agent: registration failed: org.freedesktop.PolicyKit1.Error.Failed: Cannot determine session the caller is in
+Oct 04 10:03:48 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Main process exited, code=exited, status=1/FAILURE
+Oct 04 10:03:48 baseweed-admin systemd[854]: qdistro-polkit-agent.service: Failed with result 'exit-code'.

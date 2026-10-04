@@ -1,0 +1,2 @@
+bats	phase7-tier3s-lineage.bats	fail	35	bats	bats	bats/phase7-tier3s-lineage.bats.log	VM=qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm

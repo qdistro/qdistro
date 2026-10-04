@@ -1,0 +1,2 @@
+gate	subject	attempt	status	agent_rc	classifier	wall_s	vm	log	start_epoch	end_epoch	lane
+bats	golden-build	1	DONE	0		181		vm/golden-bats.log	1791051962	1791052143	golden-bats

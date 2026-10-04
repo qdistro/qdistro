@@ -1,0 +1,89 @@
+[vm-exec] guest identity pinned (pid 3802 start 6928)
+
+## 0. preconditions
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: pywayland available for admin (yes)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s126a (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+
+## 1. live GUI launch; the compositor names the tagged peer
+PASS: launch up (5645119256bf00d548ce7c5553890366)
+PASS: qdshell observed the toplevel (handle 1) (yes)
+PASS: compositor: toplevel_added names uid 1000 + the bridge client pid (1)
+PASS: compositor: toplevel_security_context carries engine/app_id/instance=token (1)
+PASS: compositor: toplevel_peer_identity names pid+starttime+uid of the real bridge client (1)
+
+## 2. qdshell chrome: secctx-derived silo + deterministic colour
+PASS: qdshell logged the deterministic palette colour for s126a (1)
+PASS: observed line carries secctx app_id, colour and handle (1)
+PASS: Tier3FocusIPC resolves the handle from the silo (HANDLE=1)
+PASS: Tier3FocusIPC rejects a non-tier handle (9999) (error: handle=9999 is not a tier-3 toplevel)
+
+## 3. RegisterLaunch bound the real peer (broker audit evidence)
+PASS: audit: register row for s126a (1)
+PASS: audit: register row records engine/app/instance claim (1)
+
+## 4. per-interface: the secctx tag hides the privileged globals
+PASS: registry probe as plain admin ran (0)
+PASS: registry probe under the tier3s secctx tag ran (0)
+PASS: control: wl_compositor visible to the tagged client (1)
+PASS: control: wl_compositor visible to plain admin (1)
+PASS: plain admin sees qdwin_shell_v1 (1)
+PASS: tier3s-tagged client does NOT see qdwin_shell_v1 (0)
+PASS: plain admin sees zwlr_layer_shell_v1 (1)
+PASS: tier3s-tagged client does NOT see zwlr_layer_shell_v1 (0)
+PASS: plain admin sees qdwin_nested_manager_v1 (1)
+PASS: tier3s-tagged client does NOT see qdwin_nested_manager_v1 (0)
+PASS: plain admin sees qdwin_locker_v1 (1)
+PASS: tier3s-tagged client does NOT see qdwin_locker_v1 (0)
+PASS: plain admin sees zwp_input_method_manager_v2 (1)
+PASS: tier3s-tagged client does NOT see zwp_input_method_manager_v2 (0)
+PASS: plain admin sees zwp_virtual_keyboard_manager_v1 (1)
+PASS: tier3s-tagged client does NOT see zwp_virtual_keyboard_manager_v1 (0)
+PASS: plain admin does NOT see wp_security_context_manager_v1 (shell-only) (0)
+PASS: tier3s-tagged client does NOT see wp_security_context_manager_v1 (0)
+PASS: plain admin does NOT see weston_capture_v1 (shell-only) (0)
+PASS: tier3s-tagged client does NOT see weston_capture_v1 (0)
+PASS: compositor logged the probe's tagged client acceptance (1)
+
+## 5. per-interface operation denials through a real tagged peer (overrides OFF)
+PASS: tagged peer still enumerates zwlr_output_manager_v1 (1)
+PASS: tagged peer: output-manager test refused (protocol error) (0)
+PASS: tagged peer: test denial carried the protocol error line (1)
+PASS: tagged peer: output-manager apply refused (protocol error) (0)
+PASS: tagged peer: apply denial carried the protocol error line (1)
+PASS: tagged peer enumerates qdwin_stream_input_v1 (public by design) (1)
+PASS: tagged peer: stream-input claim(bogus) -> INVALID_TOKEN (0:[qdistro-test-stream-claim-probe] claim -> invalid_token (as expected))
+PASS: compositor logged INVALID_TOKEN for the tagged claim (yes)
+
+## 6. teardown
+PASS: StopSilo s126a (Stopped)
+PASS: teardown: all 17 launch processes gone (pid+starttime)
+PASS: teardown: scope qdistro-tier3s-5645119256bf00d548ce7c5553890366.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-5645119256bf00d548ce7c5553890366.scope absent)
+PASS: teardown: per-launch dir /run/qdistro-tier3s/5645119256bf00d548ce7c5553890366 gone
+PASS: teardown: control record /run/qdistro-tier3s-ctl/5645119256bf00d548ce7c5553890366 gone
+PASS: teardown: container qdistro-tier3s-s126a gone (podman exists rc=1)
+PASS: teardown: no runsc state for 3687b6a5d77e in /run/qdistro-tier3s-runsc/1000
+PASS: teardown: bridge client+wrapper gone (pid+starttime)
+PASS: teardown: secctx listener wayland-secctx-4835-0 revoked
+PASS: teardown: launch record /run/user/1000/qdistro-tier3s-launchrec-0b60f707dc93b2af5442f3701bb2e040.pid removed
+PASS: DeleteSilo s126a (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s126] 73 passes, 0 failures

@@ -1,0 +1,1091 @@
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 30%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 33%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 36%]
+........................................................................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+.....................................FFFFFFFFFFFFFFFFFFsssFFFFF......... [ 42%]
+..........sss........................................................... [ 43%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+............................FFFFFFF..................................... [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 49%]
+........................................................................ [ 50%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 55%]
+........................................................................ [ 56%]
+........................................................................ [ 57%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+........................................................................ [ 62%]
+........................................................................ [ 63%]
+........................................................................ [ 64%]
+........................................................................ [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 70%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 73%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+........................................................................ [ 79%]
+........................................................................ [ 80%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+..............................................................s......... [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 92%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+........................................................................ [ 99%]
+...........                                                              [100%]
+=================================== FAILURES ===================================
+_______________ TestInputConfinement.test_confined_input_passes ________________
+
+self = <test_mm_input_confinement.TestInputConfinement object at 0x7f86093ac410>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_confined_input_passes0')
+
+    def test_confined_input_passes(self, tmp_path):
+        be = MockInputBackend(capture_gen=7)
+>       res = run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_input_confinement.py:187: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:720: in run_input_confinement_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc197b10>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_______________ TestInputConfinement.test_leak_to_sentinel_fails _______________
+
+self = <test_mm_input_confinement.TestInputConfinement object at 0x7f86093ac550>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_leak_to_sentinel_fails1')
+
+    def test_leak_to_sentinel_fails(self, tmp_path):
+        # a confinement bug: injected input reaches the local sentinel too.
+        be = MockInputBackend(capture_gen=7, leaky=True)
+>       res = run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_input_confinement.py:199: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:720: in run_input_confinement_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc197bb0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestInputConfinement.test_input_not_delivered_fails ______________
+
+self = <test_mm_input_confinement.TestInputConfinement object at 0x7f86094f63f0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_input_not_delivered_fails0')
+
+    def test_input_not_delivered_fails(self, tmp_path):
+        # input never reaches the exported marker (path broken) → fail.
+        be = MockInputBackend(capture_gen=7, no_deliver=True)
+>       res = run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_input_confinement.py:207: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:720: in run_input_confinement_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c190>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+________________ TestInputConfinement.test_stale_capture_fails _________________
+
+self = <test_mm_input_confinement.TestInputConfinement object at 0x7f86094f6c40>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_stale_capture_fails2')
+
+    def test_stale_capture_fails(self, tmp_path):
+        # the decoded oracle is still a gate: a wrong-generation capture fails.
+        be = MockInputBackend(capture_gen=6)
+>       res = run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_input_confinement.py:215: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:720: in run_input_confinement_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c550>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestInputConfinement.test_dead_sentinel_fails_closed _____________
+
+self = <test_mm_input_confinement.TestInputConfinement object at 0x7f86093bd130>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_dead_sentinel_fails_close1')
+
+    def test_dead_sentinel_fails_closed(self, tmp_path):
+        # codex impl-11: a sentinel that never wrote telemetry must NOT satisfy the
+        # negative-control half for free — sentinel_delta==0 but unproven → FAIL.
+        be = MockInputBackend(capture_gen=7, dead_sentinel=True)
+>       res = run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_input_confinement.py:224: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:720: in run_input_confinement_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c9b0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+____________________ TestInputConfinement.test_cleanup_runs ____________________
+
+self = <test_mm_input_confinement.TestInputConfinement object at 0x7f860936d9d0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_cleanup_runs3')
+
+    def test_cleanup_runs(self, tmp_path):
+        be = MockInputBackend(capture_gen=7)
+>       run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_input_confinement.py:231: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:720: in run_input_confinement_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05cff0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+__________ TestNegativeControl.test_read_only_blocks_injection_passes __________
+
+self = <test_mm_input_confinement.TestNegativeControl object at 0x7f86093ac690>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_read_only_blocks_injectio0')
+
+    def test_read_only_blocks_injection_passes(self, tmp_path):
+        # allow_input=0 → the forward gets no inject channel → BOTH deltas stay 0.
+        be = MockInputBackend(capture_gen=7)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:251: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:243: in _run
+    return run_input_negative_control_slice(
+multimachine/harness/scenario.py:882: in run_input_negative_control_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05d3b0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestNegativeControl.test_permission_bit_broken_fails _____________
+
+self = <test_mm_input_confinement.TestNegativeControl object at 0x7f86093ac7d0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_permission_bit_broken_fai0')
+
+    def test_permission_bit_broken_fails(self, tmp_path):
+        # if injection DID reach the exported window despite allow_input=0, the
+        # permission bit failed to gate it → the negative control must FAIL.
+        be = MockInputBackend(capture_gen=7, permission_bypassed=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:263: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:243: in _run
+    return run_input_negative_control_slice(
+multimachine/harness/scenario.py:882: in run_input_negative_control_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc197bb0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestNegativeControl.test_dead_exported_fails_closed ______________
+
+self = <test_mm_input_confinement.TestNegativeControl object at 0x7f86094f6d70>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_dead_exported_fails_close1')
+
+    def test_dead_exported_fails_closed(self, tmp_path):
+        # a 0 delta is vacuous if the exported marker never ran — fail closed.
+        be = MockInputBackend(capture_gen=7, dead_exported=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:269: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:243: in _run
+    return run_input_negative_control_slice(
+multimachine/harness/scenario.py:882: in run_input_negative_control_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05d4f0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+____________ TestNegativeControl.test_injection_not_attempted_fails ____________
+
+self = <test_mm_input_confinement.TestNegativeControl object at 0x7f86094f6ea0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_injection_not_attempted_f0')
+
+    def test_injection_not_attempted_fails(self, tmp_path):
+        # a 0 delta is only meaningful if the SAME injection was actually driven.
+        be = MockInputBackend(capture_gen=7, inject_raises=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:276: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:243: in _run
+    return run_input_negative_control_slice(
+multimachine/harness/scenario.py:882: in run_input_negative_control_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c370>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_________________ TestNegativeControl.test_stale_capture_fails _________________
+
+self = <test_mm_input_confinement.TestNegativeControl object at 0x7f86093bdfd0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_stale_capture_fails3')
+
+    def test_stale_capture_fails(self, tmp_path):
+        be = MockInputBackend(capture_gen=6)             # wrong generation
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:281: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:243: in _run
+    return run_input_negative_control_slice(
+multimachine/harness/scenario.py:882: in run_input_negative_control_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c0f0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestCoordinateFidelity.test_faithful_identity_passes _____________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f86093ac910>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_faithful_identity_passes0')
+
+    def test_faithful_identity_passes(self, tmp_path):
+        be = MockInputBackend(capture_gen=7)             # identity map
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:297: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05dc70>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+__________ TestCoordinateFidelity.test_uniform_apparatus_scale_passes __________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f86093aca50>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_uniform_apparatus_scale_p0')
+
+    def test_uniform_apparatus_scale_passes(self, tmp_path):
+        # a UNIFORM scale (the ydotool uinput-absolute artifact) is faithful → pass.
+        be = MockInputBackend(capture_gen=7, mock_scale_x=2.0, mock_scale_y=2.0)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:309: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05e0d0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestCoordinateFidelity.test_offset_translation_fails _____________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f86094f7100>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_offset_translation_fails0')
+
+    def test_offset_translation_fails(self, tmp_path):
+        # a coordinate OFFSET (the origin doesn't map faithfully) must FAIL.
+        be = MockInputBackend(capture_gen=7, coord_offset=80)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:316: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05e350>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestCoordinateFidelity.test_anisotropic_scale_fails ______________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f86094f6fd0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_anisotropic_scale_fails0')
+
+    def test_anisotropic_scale_fails(self, tmp_path):
+        # per-axis distortion (x_scale != y_scale) must FAIL.
+        be = MockInputBackend(capture_gen=7, mock_scale_x=1.0, mock_scale_y=2.0)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:322: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c550>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_________________ TestCoordinateFidelity.test_axis_swap_fails __________________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f86093bed50>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_axis_swap_fails0')
+
+    def test_axis_swap_fails(self, tmp_path):
+        # an axis SWAP (x↔y) is invisible on a single diagonal but the axis-aligned
+        # triple catches it: cross shear blows up (and x/y scale degenerate).
+        be = MockInputBackend(capture_gen=7, swap_axes=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:329: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05c410>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+__________ TestCoordinateFidelity.test_no_injected_seat_fails_closed ___________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f860936cf30>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_no_injected_seat_fails_cl0')
+
+    def test_no_injected_seat_fails_closed(self, tmp_path):
+        be = MockInputBackend(capture_gen=7, no_deliver=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:337: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05d810>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_______________ TestCoordinateFidelity.test_stale_capture_fails ________________
+
+self = <test_mm_input_confinement.TestCoordinateFidelity object at 0x7f860936d480>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_stale_capture_fails4')
+
+    def test_stale_capture_fails(self, tmp_path):
+        be = MockInputBackend(capture_gen=6)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_input_confinement.py:342: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_input_confinement.py:291: in _run
+    return run_input_coordinate_fidelity_slice(
+multimachine/harness/scenario.py:1262: in run_input_coordinate_fidelity_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05e710>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+______ TestManagedSliceOrchestration.test_happy_path_managed_gate_passes _______
+
+self = <test_mm_managed_scenario.TestManagedSliceOrchestration object at 0x7f86093ad090>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_happy_path_managed_gate_p0')
+
+    def test_happy_path_managed_gate_passes(self, tmp_path):
+        be = MockManagedBackend(capture_gen=7, capture_out=1)
+>       res = run_managed_toplevel_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            netem_profile="wifi-good", viewer_control_host="127.0.0.1",
+            viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_managed_scenario.py:149: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:258: in run_managed_toplevel_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05f250>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_________ TestManagedSliceOrchestration.test_stale_capture_fails_gate __________
+
+self = <test_mm_managed_scenario.TestManagedSliceOrchestration object at 0x7f86093ad1d0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_stale_capture_fails_gate0')
+
+    def test_stale_capture_fails_gate(self, tmp_path):
+        be = MockManagedBackend(capture_gen=6)            # old generation
+>       res = run_managed_toplevel_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_managed_scenario.py:169: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:258: in run_managed_toplevel_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85cc05e850>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+__________ TestManagedSliceOrchestration.test_source_death_fails_gate __________
+
+self = <test_mm_managed_scenario.TestManagedSliceOrchestration object at 0x7f86094f75c0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_source_death_fails_gate0')
+
+    def test_source_death_fails_gate(self, tmp_path):
+        be = MockManagedBackend(capture_gen=7, source_alive=False)
+>       res = run_managed_toplevel_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_managed_scenario.py:176: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:258: in run_managed_toplevel_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f86068c3750>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_______ TestManagedSliceOrchestration.test_slot_not_released_fails_gate ________
+
+self = <test_mm_managed_scenario.TestManagedSliceOrchestration object at 0x7f86094f76f0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_slot_not_released_fails_g0')
+
+    def test_slot_not_released_fails_gate(self, tmp_path):
+        # a second subscribe that does NOT yield a fresh stream is a valid failure
+        # (the close did not release the slot).
+        be = MockManagedBackend(capture_gen=7, slot_releases=False)
+>       res = run_managed_toplevel_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_managed_scenario.py:185: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:258: in run_managed_toplevel_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f86068c3430>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+______ TestManagedSliceOrchestration.test_cleanup_runs_and_vms_destroyed _______
+
+self = <test_mm_managed_scenario.TestManagedSliceOrchestration object at 0x7f86093be450>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_cleanup_runs_and_vms_dest0')
+
+    def test_cleanup_runs_and_vms_destroyed(self, tmp_path):
+        be = MockManagedBackend(capture_gen=7)
+>       run_managed_toplevel_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+
+tests/unit/test_mm_managed_scenario.py:192: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+multimachine/harness/scenario.py:258: in run_managed_toplevel_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f86068c2df0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+___________ TestSecondViewIsolation.test_isolated_two_exports_passes ___________
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608f32fd0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_isolated_two_exports_pass0')
+
+    def test_isolated_two_exports_passes(self, tmp_path):
+        be = MockSecondViewBackend(capture_gen=7, capture_out=1)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_second_view.py:179: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10a490>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestSecondViewIsolation.test_cross_stream_leak_fails _____________
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608f33110>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_cross_stream_leak_fails0')
+
+    def test_cross_stream_leak_fails(self, tmp_path):
+        # broken per-stream isolation: injecting at viewer-A also presses marker-B.
+        be = MockSecondViewBackend(capture_gen=7, leaky=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_second_view.py:195: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10a7b0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_______ TestSecondViewIsolation.test_dead_b_seat_fails_positive_control ________
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608c05f30>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_dead_b_seat_fails_positiv0')
+
+    def test_dead_b_seat_fails_positive_control(self, tmp_path):
+        # marker-B's seat can't deliver → the 0 isolation delta would be vacuous →
+        # the positive control fails the gate (fail-closed).
+        be = MockSecondViewBackend(capture_gen=7, b_seat_dead=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_second_view.py:202: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10ad50>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+____ TestSecondViewIsolation.test_b_seat_dies_after_isolation_fails_reproof ____
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608c05e00>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_b_seat_dies_after_isolati0')
+
+    def test_b_seat_dies_after_isolation_fails_reproof(self, tmp_path):
+        # B's seat delivered in phase B1 but died during/after isolation → the
+        # phase-B2 re-proof catches it, so the 0 isolation delta is NOT trusted.
+        be = MockSecondViewBackend(capture_gen=7, b_dies_after_iso=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_second_view.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10b390>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_____________ TestSecondViewIsolation.test_marker2_not_live_fails ______________
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608c34050>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_marker2_not_live_fails0')
+
+    def test_marker2_not_live_fails(self, tmp_path):
+        # mm-marker2/mm-relay2 not live through phase A → liveness witness fails.
+        be = MockSecondViewBackend(capture_gen=7, marker2_dead=True)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_second_view.py:216: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10b890>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+_______________ TestSecondViewIsolation.test_stale_capture_fails _______________
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608c657b0>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_stale_capture_fails5')
+
+    def test_stale_capture_fails(self, tmp_path):
+        be = MockSecondViewBackend(capture_gen=6)
+>       res = self._run(be, tmp_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_mm_second_view.py:221: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10b2f0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+__________________ TestSecondViewIsolation.test_cleanup_runs ___________________
+
+self = <test_mm_second_view.TestSecondViewIsolation object at 0x7f8608c66470>
+tmp_path = PosixPath('/tmp/pytest-of-play2/pytest-4159/test_cleanup_runs4')
+
+    def test_cleanup_runs(self, tmp_path):
+        be = MockSecondViewBackend(capture_gen=7)
+>       self._run(be, tmp_path)
+
+tests/unit/test_mm_second_view.py:226: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_mm_second_view.py:173: in _run
+    return run_second_view_isolation_slice(
+multimachine/harness/scenario.py:1809: in run_second_view_isolation_slice
+    control = ControlServer(port=control_port)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <multimachine.harness.control_server.ControlServer object at 0x7f85ac10a8f0>
+port = 5556, host = '127.0.0.1', backlog = 1
+
+    def __init__(self, port: int = 5556, host: str = "127.0.0.1",
+                 backlog: int = 1):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>       self._srv.bind((host, port))
+E       OSError: [Errno 98] Address already in use
+
+multimachine/harness/control_server.py:46: OSError
+=============================== warnings summary ===============================
+../../../../../usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159
+  /usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159: PyGIDeprecationWarning: GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead
+    value = getattr(proxy, attr)
+
+tests/unit/test_tier3s_probe.py::test_a_uid_printed_before_a_stall_is_not_a_lookup
+  /usr/lib/python3.13/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread cgroup-read
+  
+  Traceback (most recent call last):
+    File "/usr/lib64/python3.13/threading.py", line 1044, in _bootstrap_inner
+      self.run()
+      ~~~~~~~~^^
+    File "/usr/lib64/python3.13/threading.py", line 995, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/play2/qdistro/.worktrees/qdistro-tier3s/session_manager/qdistro_session_manager.py", line 2977, in _read
+      with open(f"/proc/{int(pid)}/cgroup") as f:
+           ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/play2/qdistro/.worktrees/qdistro-tier3s/tests/unit/test_session_manager.py", line 3292, in hung_open
+      raise AssertionError("unexpected open")
+  AssertionError: unexpected open
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_mm_input_confinement.py::TestInputConfinement::test_confined_input_passes
+FAILED tests/unit/test_mm_input_confinement.py::TestInputConfinement::test_leak_to_sentinel_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestInputConfinement::test_input_not_delivered_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestInputConfinement::test_stale_capture_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestInputConfinement::test_dead_sentinel_fails_closed
+FAILED tests/unit/test_mm_input_confinement.py::TestInputConfinement::test_cleanup_runs
+FAILED tests/unit/test_mm_input_confinement.py::TestNegativeControl::test_read_only_blocks_injection_passes
+FAILED tests/unit/test_mm_input_confinement.py::TestNegativeControl::test_permission_bit_broken_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestNegativeControl::test_dead_exported_fails_closed
+FAILED tests/unit/test_mm_input_confinement.py::TestNegativeControl::test_injection_not_attempted_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestNegativeControl::test_stale_capture_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_faithful_identity_passes
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_uniform_apparatus_scale_passes
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_offset_translation_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_anisotropic_scale_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_axis_swap_fails
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_no_injected_seat_fails_closed
+FAILED tests/unit/test_mm_input_confinement.py::TestCoordinateFidelity::test_stale_capture_fails
+FAILED tests/unit/test_mm_managed_scenario.py::TestManagedSliceOrchestration::test_happy_path_managed_gate_passes
+FAILED tests/unit/test_mm_managed_scenario.py::TestManagedSliceOrchestration::test_stale_capture_fails_gate
+FAILED tests/unit/test_mm_managed_scenario.py::TestManagedSliceOrchestration::test_source_death_fails_gate
+FAILED tests/unit/test_mm_managed_scenario.py::TestManagedSliceOrchestration::test_slot_not_released_fails_gate
+FAILED tests/unit/test_mm_managed_scenario.py::TestManagedSliceOrchestration::test_cleanup_runs_and_vms_destroyed
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_isolated_two_exports_passes
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_cross_stream_leak_fails/usr/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BusName.__del__ at 0x7f860e0fc360>
+
+Traceback (most recent call last):
+  File "/usr/lib/python3.13/site-packages/dbus/service.py", line 172, in __del__
+    self._bus.release_name(self._name)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/usr/lib/python3.13/site-packages/dbus/bus.py", line 316, in release_name
+    return self.call_blocking(BUS_DAEMON_NAME, BUS_DAEMON_PATH,
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                              BUS_DAEMON_IFACE, 'ReleaseName',
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                              's', (name,))
+                              ^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/site-packages/dbus/connection.py", line 634, in call_blocking
+    reply_message = self.send_message_with_reply_and_block(
+        message, timeout)
+dbus.exceptions.DBusException: org.freedesktop.DBus.Error.Disconnected: Connection is closed
+
+Enable tracemalloc to get traceback where the object was allocated.
+See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+  warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_dead_b_seat_fails_positive_control
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_b_seat_dies_after_isolation_fails_reproof
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_marker2_not_live_fails
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_stale_capture_fails
+FAILED tests/unit/test_mm_second_view.py::TestSecondViewIsolation::test_cleanup_runs
+30 failed, 6886 passed, 8 skipped, 2 warnings in 421.68s (0:07:01)
+EXIT=1

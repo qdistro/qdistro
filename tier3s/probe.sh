@@ -135,7 +135,8 @@ if [ "$ps_scope" = absent ] || [ "$ps_scope" -le 2 ]; then pass ptrace_scope "$p
 else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
 
 # --- launching user's id mapping ------------------------------------------
-if ! id "$USER_NAME" >/dev/null 2>&1; then
+# bounded like every foreign-user NSS lookup below (fable A r3 P3-2)
+if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
     fail user "$USER_NAME does not exist"
     for c in subuid subgid; do fail "$c" "not checked: user $USER_NAME missing"; done
     for t in newuidmap newgidmap; do
@@ -276,14 +277,35 @@ elif [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPP
     WRAPPER_OK=1
 else fail wrapper "$WRAPPER missing, not $EXP_OWN 0755, or differs from $HERE/tier3s-runsc"; fi
 
+# --- workload declarations (tier3s/CONTRACT.md §5) ---------------------------
+# The spawn parses $HERE/workloads/<workload>.env (never sources it) for the
+# GUI declaration that selects the waypipe bridge half of the launch; a
+# missing or loose directory refuses every launch.
+WLD="$HERE/workloads"
+if [ -L "$WLD" ] || [ ! -d "$WLD" ] || [ "$(stat -c '%a %U:%G' "$WLD")" != "755 $EXP_OWN" ] \
+        || ! compgen -G "$WLD/*.env" >/dev/null; then
+    fail workloads "$WLD missing, a symlink, not $EXP_OWN 0755, or empty (install-session-manager.sh QDISTRO_TIER3S=1)"
+else
+    pass workloads "$WLD ($(compgen -G "$WLD/*.env" | wc -l) declaration(s))"
+fi
+
 # --- runsc state root (tier3s/CONTRACT.md D-A1) -----------------------------
 # The wrapper uses /run/qdistro-tier3s-runsc/<host uid> for every runsc call
 # and refuses to create it; provisioning (tmpfiles.d/qdistro-tier3s.conf) does.
 SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
-if ! id "$USER_NAME" >/dev/null 2>&1; then
+# Every NSS lookup for the foreign user is bounded (fable A r3 P3-2): a wedged
+# provider hangs the spawn's probe otherwise, and timeout's nonzero status —
+# never whatever prefix a dying call printed — is the verdict.
+if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
     fail state_root "not checked: user $USER_NAME missing"
+elif ! sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
+        || ! [[ "$sr_uid" =~ ^[0-9]+$ ]]; then
+    # status-gated and shape-checked like the getent calls (sol r5 P3-4,
+    # sol B-i r1): a lookup that prints a uid line and then stalls is killed
+    # at the bound — what it printed is not a result.
+    fail state_root "the uid lookup for $USER_NAME failed or timed out"
 else
-    sr_uid="$(id -u "$USER_NAME")"; SR="$SR_BASE/$sr_uid"
+    SR="$SR_BASE/$sr_uid"
     if [ -L "$SR_BASE" ] || [ ! -d "$SR_BASE" ] || [ "$(stat -c '%u %a' -- "$SR_BASE")" != "$EXP_UID 755" ]; then
         fail state_root "$SR_BASE missing, a symlink or not uid $EXP_UID 0755 (systemd-tmpfiles --create qdistro-tier3s.conf)"
     elif [ -L "$SR" ] || [ ! -d "$SR" ] || [ "$(stat -c '%u %a' -- "$SR")" != "$sr_uid 700" ]; then
@@ -302,7 +324,12 @@ fi
 # spawn that called it, and its printed prefix is not a result.
 AS_UID=""; AS_HOME=""
 if [ "$(id -un)" != "$USER_NAME" ]; then
-    AS_UID="$(id -u "$USER_NAME" 2>/dev/null)"; puid=""; pw=""
+    # The uid lookup is status-gated and shape-checked like the getent
+    # below: rc 0 AND exactly one numeric uid line, or no result at all —
+    # a line printed before the timeout kill is never a uid (sol B-i r1).
+    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
+        && [[ "$AS_UID" =~ ^[0-9]+$ ]] || AS_UID=""
+    puid=""; pw=""
     [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \
         && puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
         && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"

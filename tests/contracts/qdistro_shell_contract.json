@@ -20,6 +20,7 @@
 
   "secctx_prefixes": {
     "tier3": "qdistro.tier3.",
+    "tier3s": "qdistro.tier3s.",
     "tier4": "qdistro.tier4.",
     "tier5": "qdistro.tier5.",
     "disp": "qdistro.disp."

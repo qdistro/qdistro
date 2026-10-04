@@ -1,0 +1,112 @@
+[vm-exec] guest identity pinned (pid 3852 start 5086)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+
+## 0. preconditions, silos
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s129a (Created)
+PASS: CreateTier3sSilo s129b (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+
+## 1. two GUI launches up
+PASS: both GUI launches up (c9e08fe46dbabba55314de010d496262, 8d2809bf33803b5280be8fe0406b1f86)
+PASS: pre-attack/A: bridge client pid 5057 live (starttime verified)
+PASS: pre-attack/A: bridge wrapper pid 5046 live (starttime verified)
+PASS: pre-attack/A: bridge client runs as admin, exec waypipe (1000:waypipe)
+PASS: pre-attack/A: bridge client + wrapper in the launch unit cgroup (2)
+PASS: pre-attack/A: bridge channel live (sandbox waypipe server holds channel + app sockets)
+PASS: pre-attack/B: bridge client pid 5781 live (starttime verified)
+PASS: pre-attack/B: bridge wrapper pid 5770 live (starttime verified)
+PASS: pre-attack/B: bridge client runs as admin, exec waypipe (1000:waypipe)
+PASS: pre-attack/B: bridge client + wrapper in the launch unit cgroup (2)
+PASS: pre-attack/B: bridge channel live (sandbox waypipe server holds channel + app sockets)
+PASS: compositor pid captured (yes)
+PASS: A's secctx listener resolved (yes)
+PASS: single-attach: reconnect to A's consumed link.sock is refused (refused)
+PASS: attack targets resolved (sandbox host pids, bridge client pid) (yes)
+    sandbox-hose: hose done sent=14
+PASS: sandbox->client hose wrote waypipe frames at the trusted parser (1)
+    client-hose: hose done sent=2
+PASS: client->peer hose wrote onto the tagged bridge streams (1)
+    hose: listener-garbage: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-truncated-frame: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-0: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-1: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-2: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-3: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-4: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-5: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-6: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-7: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-8: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-9: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-10: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-11: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-12: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-13: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-14: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-15: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-16: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-17: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-18: connect/send failed ([Errno 2] No such file or directory)
+    hose: listener-flood-19: connect/send failed ([Errno 2] No such file or directory)
+    hose: hose done
+PASS: the listener hose ran to completion (1)
+
+## 2. blast radius: only the attacked connection may die
+PASS: compositor still the same pid, unit active (931:active)
+PASS: qdshell still active (active)
+PASS: no compositor/qdshell crash in the journal since the attack (0)
+
+## 3. A's bridge: either dropped the bad connection or died — both in-contract
+PASS: A's bridge connection died under the hostile stream (pid 5057 gone)
+PASS: A's toplevel is gone from qdshell (handle freed with the client) (HANDLE=-1)
+
+## 4. B's launch is completely untouched
+PASS: B's record still running (running)
+PASS: B's bridge client still live (starttime verified) (yes)
+PASS: B's bridge channel still established (yes)
+PASS: B's toplevel still in the qdshell model (1)
+PASS: B's container still running (running)
+
+## 5. teardown: both launches come down clean
+PASS: StopSilo s129a (Stopped)
+PASS: StopSilo s129b (Stopped)
+PASS: cleanup/A: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/A: secctx listener wayland-secctx-5055-0 revoked
+PASS: cleanup/A: launch record /run/user/1000/qdistro-tier3s-launchrec-5e4f02da9bf8f57dca95b4d2ccb62988.pid removed
+PASS: cleanup/A: all 13 launch processes gone (pid+starttime)
+PASS: cleanup/A: scope qdistro-tier3s-c9e08fe46dbabba55314de010d496262.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-c9e08fe46dbabba55314de010d496262.scope absent)
+PASS: cleanup/A: per-launch dir /run/qdistro-tier3s/c9e08fe46dbabba55314de010d496262 gone
+PASS: cleanup/A: control record /run/qdistro-tier3s-ctl/c9e08fe46dbabba55314de010d496262 gone
+PASS: cleanup/A: container qdistro-tier3s-s129a gone (podman exists rc=1)
+PASS: cleanup/A: no runsc state for 82bbda062b88 in /run/qdistro-tier3s-runsc/1000
+PASS: cleanup/B: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/B: secctx listener wayland-secctx-5778-0 revoked
+PASS: cleanup/B: launch record /run/user/1000/qdistro-tier3s-launchrec-0bcd1eb68332f837666e97b60fba2153.pid removed
+PASS: cleanup/B: all 17 launch processes gone (pid+starttime)
+PASS: cleanup/B: scope qdistro-tier3s-8d2809bf33803b5280be8fe0406b1f86.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-8d2809bf33803b5280be8fe0406b1f86.scope absent)
+PASS: cleanup/B: per-launch dir /run/qdistro-tier3s/8d2809bf33803b5280be8fe0406b1f86 gone
+PASS: cleanup/B: control record /run/qdistro-tier3s-ctl/8d2809bf33803b5280be8fe0406b1f86 gone
+PASS: cleanup/B: container qdistro-tier3s-s129b gone (podman exists rc=1)
+PASS: cleanup/B: no runsc state for 3e14ed937d1b in /run/qdistro-tier3s-runsc/1000
+PASS: DeleteSilo s129a (absent)
+PASS: DeleteSilo s129b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s129] 72 passes, 0 failures

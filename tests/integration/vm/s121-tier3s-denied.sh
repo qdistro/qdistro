@@ -178,7 +178,7 @@ for prof in release daily; do
     # the spawn refuses on its own: a hand-written stanza, the unit started directly
     refused "$prof/spawn (direct unit start)" $SA \
         "tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=$prof); there is no hardened launch path and no fallback tier" start_direct
-    rm -f "/run/qdistro/silo-launch/$SA.env"
+    rm -f "$STANZA_DIR/$SA.env"
     out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
     is "$prof: the probe refuses a non-dev profile (rc 2)" "$rc" 2
 done
@@ -230,7 +230,7 @@ forge_ready() {
     systemctl stop "$U6"; wait_for 60 unit_down "$U6"
     is "$tag: launch unit stopped" "$(yes_no unit_down "$U6")" yes
     systemctl reset-failed "$U6" 2>/dev/null
-    rm -f "/run/qdistro/silo-launch/$SA.env"
+    rm -f "$STANZA_DIR/$SA.env"
 }
 forge_ready "forged READY/main" activating
 journalctl _PID=1 --since "-3min" --no-pager -o cat 2>/dev/null | grep -F "$U6: Got notification message" | tail -3 | sed 's/^/    pid1: /'

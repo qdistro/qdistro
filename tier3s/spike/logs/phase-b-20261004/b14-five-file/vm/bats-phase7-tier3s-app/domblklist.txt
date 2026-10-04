@@ -1,0 +1,4 @@
+ Type   Device   Target   Source
+-------------------------------------------------------------------------------------------------------------------------------
+ file   disk     vda      /home/play2/.local/share/libvirt/images/qci-bats-phase7-tier3s-app-261003-202913-3009453-4743.qcow2
+

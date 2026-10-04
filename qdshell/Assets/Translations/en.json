@@ -281,6 +281,7 @@
         "tier-sandboxed": "sandboxed",
         "tier-tier2": "tier 2 (container)",
         "tier-tier3": "tier 3 (VM app)",
+        "tier-tier3s": "tier 3s (gVisor)",
         "tier-tier4": "tier 4 (VM)",
         "tier-tier5": "tier 5 (VM)"
       },

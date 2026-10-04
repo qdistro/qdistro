@@ -52,6 +52,10 @@ class _FakeOps:
         self.cgroup_freeze_should_fail = False
         self.systemctl_calls: list[tuple[str, str]] = []
         self.launch_envs: dict[str, str] = {}   # name → env file content
+        # tier3s stanzas live in their own dir (paravirt ΔB5) — a separate
+        # fake store, so a test can prove a tier3s stanza never lands in (or
+        # is removed from) the shared tier-2 launch_envs dict.
+        self.tier3s_launch_envs: dict[str, str] = {}  # name → env file content
         self.podapp_launch_envs: dict[str, str] = {}  # token → env content
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
@@ -437,6 +441,14 @@ class _FakeOps:
 
     def remove_launch_env(self, name: str) -> None:
         self.launch_envs.pop(name, None)
+
+    # tier3s launch env (paravirt ΔB5) — dedicated stanza dir, own fake store.
+    def write_tier3s_launch_env(self, name: str, content: str):
+        self.tier3s_launch_envs[name] = content
+        return Path("/run/qdistro/tier3s-launch") / f"{name}.env"
+
+    def remove_tier3s_launch_env(self, name: str) -> None:
+        self.tier3s_launch_envs.pop(name, None)
 
     # pod-app launch env (tracker J12 Fix A) — a separate dir keyed by launch
     # token, so it gets its own fake store rather than sharing launch_envs.

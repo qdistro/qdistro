@@ -291,12 +291,22 @@ TIER3S_CONTAINER_FMT = "qdistro-tier3s-{name}"
 TIER3S_CTL_DIR = Path("/run/qdistro-tier3s-ctl")
 # The only teardown path (root, verified, preserves the record on failure).
 TIER3S_CLEANUP = Path("/usr/libexec/qdistro/qdistro-tier3s-cleanup")
+# The launch stanza's own dir (paravirt ΔB5 / fable r1 P3-3): dedicated, never
+# shared with the tier-2 silo-launch stanzas (TIER2_LAUNCH_ENV_DIR), so a
+# tier3s stanza can never be consumed by the tier-2 helper and no tier3s
+# stanza path stays in the shared dir. tmpfiles creates it root 0700
+# (tier3s/tmpfiles/qdistro-tier3s.conf); _write_launch_env_in's dir_mode
+# re-enforces owner+mode on every write — the plain mkdir default is NOT a
+# substitute.
+TIER3S_LAUNCH_ENV_DIR = Path("/run/qdistro/tier3s-launch")
 # Same constraint spawn-tier3s.sh puts on a workload name (it selects
 # /usr/lib/qdistro/tier3s/seccomp/<workload>.json and the image tag).
 _TIER3S_WORKLOAD_RE = _re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 # The app a workload runs when the launch stanza carries no argv. A workload
 # missing here runs [workload], like tier 2.
-TIER3S_DEFAULT_ARGV = {"headless-smoke": ["qdistro-tier3s-smoke"]}
+TIER3S_DEFAULT_ARGV = {"headless-smoke": ["qdistro-tier3s-smoke"],
+                       "weston-terminal": ["weston-terminal"],
+                       "foot": ["foot"]}
 # Where the deployment profile lives (scripts/install, image config). Tier 3s
 # refuses every profile but dev (paravirt O4).
 QDISTRO_PROFILE_PATH = Path("/etc/qdistro/profile")
@@ -852,6 +862,38 @@ class _TimedOutRun:
     stderr: str
     returncode: int = -1
     stdout: str = ""
+
+
+def _enforce_launch_env_dir(env_dir: Path, mode: int) -> None:
+    """Enforce root-owned *mode* on a launch-stanza dir that tmpfiles already
+    creates correctly — verified, not assumed. The plain ``mkdir`` in
+    _write_launch_env_in would leave a missing dir at the daemon's umask, and
+    a symlinked or foreign-owned dir must REFUSE the write (fail closed like
+    the helpers' own stanza checks), not be written into. Called with the
+    stanza dir before a tier3s stanza write (paravirt ΔB5)."""
+    st = os.lstat(env_dir)
+    if not stat.S_ISDIR(st.st_mode):
+        raise PermissionError(f"{env_dir} is not a real directory "
+                              f"(lstat mode {st.st_mode:o})")
+    # Best-effort like the stanza file's fchown: a non-root caller (unit
+    # tests; the production writer is root) cannot chown, and only the owner
+    # can chmod — each is attempted on its own so a refused chown does not
+    # skip a chmod that would still succeed. The verify below decides.
+    try:
+        os.chown(env_dir, 0, 0)
+    except OSError:
+        pass
+    try:
+        os.chmod(env_dir, mode)
+    except OSError:
+        pass
+    st = os.lstat(env_dir)
+    if stat.S_IMODE(st.st_mode) != mode:
+        raise PermissionError(
+            f"{env_dir} mode is {stat.S_IMODE(st.st_mode):o}, not {mode:o}")
+    if os.geteuid() == 0 and (st.st_uid != 0 or st.st_gid != 0):
+        raise PermissionError(
+            f"{env_dir} is owned by {st.st_uid}:{st.st_gid}, not root:root")
 
 
 class _SystemOps:
@@ -1435,6 +1477,22 @@ class _SystemOps:
     def write_launch_env(self, name: str, content: str) -> Path:
         return self._write_launch_env_in(TIER2_LAUNCH_ENV_DIR, name, content)
 
+    def write_tier3s_launch_env(self, name: str, content: str) -> Path:
+        """Same root-TCB contract as write_launch_env, but a dedicated dir:
+        a tier3s stanza is parsed (never `.`-sourced) by
+        qdistro-tier3s-silo-launch and must never sit in the tier-2 helper's
+        shared dir (paravirt ΔB5). dir_mode enforces root 0700 on the dir —
+        tmpfiles creates it that way, and a drifted or missing dir is fixed
+        or refused, never silently inherited."""
+        return self._write_launch_env_in(TIER3S_LAUNCH_ENV_DIR, name, content,
+                                         dir_mode=0o700)
+
+    def remove_tier3s_launch_env(self, name: str) -> None:
+        try:
+            (TIER3S_LAUNCH_ENV_DIR / f"{name}.env").unlink()
+        except FileNotFoundError:
+            pass
+
     def write_podapp_launch_env(self, token: str, content: str) -> Path:
         """Same root-TCB contract as write_launch_env, different directory:
         pod-app stanzas are per-click and keyed by launch token, so they live
@@ -1448,8 +1506,10 @@ class _SystemOps:
             pass
 
     def _write_launch_env_in(self, env_dir: Path, name: str,
-                             content: str) -> Path:
+                             content: str, *, dir_mode: int | None = None) -> Path:
         env_dir.mkdir(parents=True, exist_ok=True)
+        if dir_mode is not None:
+            _enforce_launch_env_dir(env_dir, dir_mode)
         p = env_dir / f"{name}.env"
         tmp = p.with_suffix(".env.tmp")
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -4268,7 +4328,7 @@ class _SiloStore:
             ("TIER3S_ARGV_JSON", json.dumps(argv)),
         ]
         lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
-        self._ops.write_launch_env(silo.name, "\n".join(lines))
+        self._ops.write_tier3s_launch_env(silo.name, "\n".join(lines))
         return token
 
     def _fail_tier3s_start(self, silo: Silo, err: BaseException) -> None:
@@ -4922,10 +4982,11 @@ class _SiloStore:
                 f"(systemctl failed or timed out); the silo stays Active. "
                 f"Retry the stop")
         try:
-            self._ops.remove_launch_env(silo_name)
+            self._ops.remove_tier3s_launch_env(silo_name)
         except Exception as e:  # noqa: BLE001
-            log.warning("remove_launch_env for %r failed after a verified "
-                        "stop: %s — leaving the stale env", silo_name, e)
+            log.warning("remove_tier3s_launch_env for %r failed after a "
+                        "verified stop: %s — leaving the stale env",
+                        silo_name, e)
         with self._lock:
             self._clear_stop_inflight(silo_name)
             self._transition(silo, State.STOPPED)

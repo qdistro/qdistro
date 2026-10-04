@@ -1,0 +1,3 @@
+## claude/tier3s-b
+
+eac49ad16 tier3s: s127 clipboard offers must beat weston's stale-serial guard

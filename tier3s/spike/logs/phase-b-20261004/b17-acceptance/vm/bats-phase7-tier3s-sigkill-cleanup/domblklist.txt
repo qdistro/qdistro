@@ -1,0 +1,4 @@
+ Type   Device   Target   Source
+------------------------------------------------------------------------------------------------------------------------------------------
+ file   disk     vda      /home/play2/.local/share/libvirt/images/qci-bats-phase7-tier3s-sigkill-cleanup-261004-120147-27014-12962.qcow2
+

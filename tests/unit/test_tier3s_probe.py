@@ -30,7 +30,7 @@ def sha(p):
     return hashlib.sha512(Path(p).read_bytes()).hexdigest()
 
 
-def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
+def run(root, user=None, pin=None, path_prepend=None, extra_env=None, timeout=None):
     env = dict(os.environ, QDISTRO_PROBE_ROOT=str(root))
     if pin is not None:
         env["QDISTRO_PROBE_PIN"] = str(pin)
@@ -38,7 +38,7 @@ def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
         env["PATH"] = f"{path_prepend}:{env['PATH']}"
     env.update(extra_env or {})
     args = ["bash", str(SCRIPT), "--user", user or ME]
-    return subprocess.run(args, env=env, capture_output=True, text=True)
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
 
 
 def fake_runsc(marker, version=VERSION, rc=0, salt="", text="executed"):
@@ -501,3 +501,52 @@ def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):
     r = run(inst.root, user=other.pw_name, pin=inst.pin, path_prepend=f"{b}:{inst.bin}")
     assert "FAIL nss:" in r.stdout, r.stdout
     assert not marker.exists(), "a killed NSS lookup still reached runuser"
+
+
+def test_a_wedged_id_lookup_for_the_foreign_user_is_bounded(tmp_path):
+    """fable A r3 P3-2, applied to id/id -u: EVERY foreign-user NSS lookup in
+    the probe is bounded — a wedged provider hangs the spawn's probe (and the
+    launch unit's start) otherwise. The fake id wedges only on a name
+    argument, so self-lookups (id -u / id -un) still work."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        "sleep 600\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 45, "a wedged NSS lookup hung the probe"
+    assert "FAIL" in r.stdout, r.stdout
+
+
+def test_a_uid_printed_before_a_stall_is_not_a_lookup(tmp_path):
+    """sol B-i r1 P1-3: `timeout 5 id -u <user>` is a valid result only at
+    rc 0 with exactly one numeric uid line. A lookup that PRINTS a complete
+    uid line and then wedges is killed at the bound (rc 124) — what it
+    printed is not a result. Both id -u sites (the state-root uid and
+    as_user's) status-gate, or the probe adopts a uid a dead lookup typed.
+    The fake prints the user's REAL uid, so only the timeout status — not
+    the output shape — can tell the lookup failed."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        # self-lookups (id -u / id -un / bare id) still work
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        # `id -u <name>`: print the real uid, THEN wedge; `id <name>` answers
+        "case \" $* \" in *\" -u \"*) echo %d; sleep 600 ;;"
+        " *) exec /usr/bin/id \"$@\" ;; esac\n" % other.pw_uid)
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 45, "a stalled uid lookup hung the probe"
+    # the state-root site names the failed lookup, not a missing directory
+    assert "the uid lookup for" in r.stdout, r.stdout
+    # and as_user's site never adopts the printed prefix either
+    assert "FAIL nss:" in r.stdout, r.stdout

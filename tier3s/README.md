@@ -14,6 +14,21 @@ demand, D1), and nothing in qdistro selects this tier automatically (O6:
 explicit launch, no fallback). Dev profile only
 (O4); `probe.sh` refuses on any other profile. No KVM claims (O5).
 
+**Phase B** (the GUI bridge, experimental, dev only): milestone B-i adds the
+waypipe byte-stream path — a `GUI=1` workload declaration stands up a
+host-side `waypipe client` (root launch unit → `runuser` →
+`qdistro-secctx-exec` → `waypipe client`, tagged
+`qdistro.tier3s`/`qdistro.tier3s.<silo>`/launch-token, launch record +
+mandatory `RegisterLaunch`) before `podman run`, and the sandbox's
+`waypipe server` feeds the workload's Wayland traffic over the per-launch
+`/run/qdistro-tier3s/<token>/link.sock` (`host-uds=open`, software rendering,
+no GPU). B-ii wires qdshell (`Tier3sApps`, `Tier3FocusIPC`, the clipboard
+silo mapping) and the manager's GUI argv. **B-iii** is the VM acceptance
+lane: `tests/integration/vm/s123`–`s129` on fresh workers via
+`phase7-tier3s-{waypipe,app,lifecycle,chrome-secctx,clipboard-gate,lineage,hostile-stream}.bats`
+(guest provisioning grows `--gui <workloads>` to stage the per-workload OCI
+archives and bring up the admin qdwin session).
+
 **Phase A** (headless launch path), milestone A-i: the lifecycle contract
 **[`CONTRACT.md`](CONTRACT.md)** and the launch-path scripts below, tested on
 the host against fakes (`tests/unit/test_tier3s_spawn.py`) with feasibility
@@ -43,6 +58,7 @@ launch down), and the operator page below.
 | `tmpfiles/qdistro-tier3s.conf` | Creates the runsc state root and the control/per-launch parents |
 | `seccomp/make-profiles.py`, `seccomp/<workload>.json` | Per-workload profiles derived from tier 2, with explicit decisions |
 | `Containerfile.headless-smoke`, `headless-smoke.sh`, `make-tier3s-image.sh`, `configure-snapshot-repos.sh` | The headless smoke workload image on the snapshot pin |
+| `Containerfile.weston-terminal`, `Containerfile.foot`, `qdistro-tier3s-entrypoint`, `workloads/<name>.env` | Phase B GUI workloads: per-workload declarations (`GUI=0|1`, parsed never sourced) and the image-side waypipe-server entrypoint (software rendering, `--no-gpu`) |
 | `cache-image-archive.sh` | Host side: build the workload image once in a dev VM and keep its OCI archive for the qci workers (`--key`, `--dir`) |
 | `spike/` | Throwaway Phase S scripts, the evidence logs (`spike/logs/`), `RESULTS.md` |
 
@@ -138,13 +154,27 @@ runuser -u admin -- busctl --system --timeout=300 call org.qdistro.SessionManage
 The workload's output is in `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.scope`
 (the token is the `LAUNCH_TOKEN=` line in the launch unit's journal).
 
+#### A GUI workload (Phase B, dev only)
+
+A GUI launch additionally needs the admin qdwin session running (the bridge
+client connects to `/run/user/1000/wayland-1` — `loginctl enable-linger
+admin; systemctl --user --machine=admin@.host start qdwin-session.target`)
+and the workload's image in admin's store
+(`make-tier3s-image.sh weston-terminal` / `foot`, or the cached
+`tier3s-<workload>.oci.tar`). The broker rule key names the app, e.g.
+`qdistro.tier3s.spawn:weston-terminal/weston-terminal`. The window appears
+on the admin desktop tagged `[3s:<silo>] `; qdshell logs
+`[tier3s] toplevel observed silo=<silo> secctx=qdistro.tier3s.<silo>
+color=<#hex> handle=<N>`. A refused GUI launch (no compositor socket, no
+launch record, a failed `RegisterLaunch`) never reaches `podman run`.
+
 ### Flags and knobs
 
 | Knob | Where | Effect |
 |---|---|---|
 | `QDISTRO_TIER3S=1` | `install-session-manager.sh` | installs the tier 3s files (CONTRACT §1). Unset/empty/`0`: nothing tier 3s; any other value: exit 2 |
 | `CreateTier3sSilo(name, workload, template_silo, network)` | session manager | `network` must be `none`; `template_silo` names the binding to resolve (none = untemplated, image `localhost/qdistro/tier3s-<workload>:latest`) |
-| silo row `launch.argv` | `/etc/qdistro/silos.yaml` (manager stopped) | the workload argv; empty = the workload default (`headless-smoke` → `qdistro-tier3s-smoke`; `--hold N` keeps it live) |
+| silo row `launch.argv` | `/etc/qdistro/silos.yaml` (manager stopped) | the workload argv; empty = the workload default (`headless-smoke` → `qdistro-tier3s-smoke`; `weston-terminal` → `weston-terminal`; `foot` → `foot`; `--hold N` keeps the smoke live) |
 | `FreezeSilo`/`ResumeSilo` | session manager | refused for tier 3s silos |
 | `TIER3S_DEBUG_LOG_DIR` | spawn env (dev diagnostics) | runsc `--debug --debug-log=<dir>/`, where seccomp denials show. Not reachable through the launch unit: the stanza's key set is fixed and the helper execs the spawn with `env -i` |
 | `TIER3S_SECCOMP_PROFILE`, `TIER3S_ALLOW_PRIVESC`, `TIER3S_KEEP_CAPS`, `TIER3S_RUNTIME`, `TIER3S_CGROUP_PARENT` | spawn env | **refused** (exit 2): posture is not configurable per launch |
@@ -155,9 +185,11 @@ The workload's output is in `journalctl _SYSTEMD_UNIT=qdistro-tier3s-<token>.sco
 ### Lifecycle guarantees that are tested (A-iii, qci VM lane)
 
 `tests/integration/vm/phase7-tier3s-{headless,denied,sigkill-cleanup}.bats`
-run the drivers `s120`–`s122` on fresh workers; the evidence table is
-[`spike/logs/phase-a-20261002/INDEX.md`](spike/logs/phase-a-20261002/INDEX.md)
-("Milestone A-iii"). In short: every runtime process class is in the owning
+run the drivers `s120`–`s122` on fresh workers; Phase B's
+`phase7-tier3s-{waypipe,app,lifecycle,chrome-secctx,clipboard-gate,lineage,hostile-stream}.bats`
+run `s123`–`s129` on workers provisioned with `--gui` (per-workload OCI
+archives staged from `~/.cache/qdistro/tier3s-images/<input key>/`, the
+admin qdwin session started before guest setup). In short: every runtime process class is in the owning
 scope; normal exit, plain `podman stop`/`rm -f`, `StopSilo`, launcher SIGKILL,
 a session-manager stop (O11), crash and restart each leave no process, scope,
 `/run/qdistro-tier3s/<token>` or `/run/qdistro-tier3s-ctl/<token>`; a lost or
@@ -189,9 +221,29 @@ case) and was reproduced once on a dev VM for the record case
   the gVisor `dmesg` banner and `/proc/version` are corroboration only.
 - **`fchmodat2` is denied by the pin**, not by choice: runsc 20260928.0's
   seccomp converter drops the name, so `chmod -h`/`lchmod` get EPERM.
-- **No GUI, no bridge, no pod apps.** Phase B adds the waypipe bridge; the
-  `qdistro-tier3s-app@` unit is not shipped and the spawn refuses a launch
-  without a silo.
+- **The GUI bridge is a byte-stream, not a compositor channel.** A `GUI=1`
+  workload's windows reach the admin compositor only through the waypipe
+  pair (`link.sock` under `host-uds=open`, `--no-gpu`, software rendering).
+  waypipe forwards a fixed protocol envelope — wl_data_device and friends —
+  not arbitrary host fds; a hostile stream from the sandbox can kill its own
+  bridge connection, never the compositor or another launch (s129). The
+  secctx tag on the bridge client is what marks the windows; a GUI launch
+  refuses when the compositor socket, the launch record or `RegisterLaunch`
+  fails — before `podman run` (s125). The attach is one-shot: the client
+  unlinks `link.sock` at accept, so a dropped bridge has **no reconnect**
+  path — relaunch instead. The token dir mounts into the sandbox
+  **read-only** (the sandbox only `connect()`s), and nothing watches a host
+  path — filesystem notification is in-sandbox only.
+- **Clipboard stays default-deny for tier3s silos.** The secctx tag also
+  feeds qdshell's `ClipboardGate` (silo = the `qdistro.tier3s.<silo>` app-id
+  suffix) and the broker's `CheckClipboardTransfer`/`CheckClipboardReceive`
+  gates: cross-silo offers are denied until an admin rule opts in, tier3s
+  app-ids get the tier-4 strict MIME allow-list (`text/plain`,
+  `text/uri-list`), and under `lineage_enforce` the relayed source
+  (pid,starttime) must resolve to the launch record — forged or stale
+  identity can only deny (s127, s128).
+- **No pod apps.** The `qdistro-tier3s-app@` unit is not shipped and the
+  spawn refuses a launch without a silo.
 - **Under SIGKILL of the launch service** teardown is systemd killing the
   scope's cgroup, then verification; it is not a graceful `podman stop`.
 - **A refused launch fails the start.** The launch unit is `Type=notify`
