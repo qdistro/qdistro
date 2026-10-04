@@ -2456,7 +2456,7 @@ def test_gui_plan_adds_bridge_flag_mount_and_entrypoint(w):
     assert p["GUI"] == "1"
     assert "--runtime-flag=host-uds=open" in pa
     i = pa.index("-v")
-    assert pa[i + 1] == f"{w.launch_parent}/{TOKEN}:/run/qdistro/link:rw"
+    assert pa[i + 1] == f"{w.launch_parent}/{TOKEN}:/run/qdistro/link:ro"
     # ΔB3: the image's ENTRYPOINT wraps the argv — the spawn passes ONLY the
     # app argv after the image name, never the entrypoint as a command arg
     assert pa[-2:] == ["localhost/qdistro/tier3s-foot:latest", "foot"]
@@ -2506,7 +2506,7 @@ def test_gui_launch_registers_the_bridge_before_podman(w):
         f = full[0]
         assert f"string:{w.silo}" in f and "string:qdistro.tier3s " in f \
             and f"string:qdistro.tier3s.{w.silo}" in f and f"string:{TOKEN}" in f \
-            and "string:tier3s" in f and "uint64:0" in f, f
+            and "string:tier3s" in f and "uint64:7771" in f, f
         st = w.state()
         m = re.fullmatch(rf"/run/user/{UID}/qdistro-tier3s-launchrec-([0-9a-f]{{32}})\.pid",
                          st["launch_record"])
@@ -2527,7 +2527,7 @@ def test_gui_launch_registers_the_bridge_before_podman(w):
         podman_run = [c for c in calls if c.startswith("podman") and " run " in c]
         assert podman_run and "--runtime-flag=host-uds=open" in podman_run[0], podman_run
         ra = (w.F / "run_argv").read_text()
-        assert f"{w.launch_parent}/{TOKEN}:/run/qdistro/link:rw" in ra
+        assert f"{w.launch_parent}/{TOKEN}:/run/qdistro/link:ro" in ra
         # ΔB3: only the app argv after the image — the image ENTRYPOINT wraps it
         assert "qdistro-tier3s-entrypoint" not in ra
         assert ra.rstrip().endswith("localhost/qdistro/tier3s-foot:latest\nfoot")

@@ -62,5 +62,12 @@ ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
 SuccessExitStatus=143 137
 # No Restart: a tier3s launch is explicit (paravirt O6).
 Restart=no
+# ΔB7/fable P2-6: the trusted bridge client (runuser -> secctx-exec ->
+# waypipe client) lives in THIS unit's cgroup, not the sandbox scope, and
+# the sandbox controls how much shm the host client mirrors. Cap the
+# supervisor unit so a hostile stream cannot make the host parser balloon
+# without bound. The sandbox itself is bounded by the owning scope.
+MemoryMax=1G
+TasksMax=96
 StandardOutput=journal
 StandardError=journal

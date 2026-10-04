@@ -246,7 +246,7 @@ if [ "$GUI" = 1 ]; then
     LR_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
     LAUNCH_RECORD="$XDG_RT_PROD/qdistro-tier3s-launchrec-$LR_FILE_ID.pid"
     GUI_RTFLAG=(--runtime-flag=host-uds=open)            # bind-mounted unix sockets into the sandbox
-    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:rw")    # the token bridge dir, holding only link.sock
+    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:ro")    # the token bridge dir, holding only link.sock; the sandbox only connect()s — ro keeps a hostile guest off the host /run tmpfs (P2-1)
     BRIDGE_ARGV=(
         runuser -u "$ADMIN_USER" -- env -i
         PATH="$ADMIN_PATH" HOME="$ADMIN_HOME" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER"
@@ -519,13 +519,16 @@ if [ "$GUI" = 1 ]; then
     [ -n "$sock_ok" ] || bridge_refuse "bridge client did not bind $BRIDGE_SOCK within ${BRIDGE_WAIT_S} s"
     # Lineage registration is MANDATORY for a GUI launch (B-i is stricter
     # than tier 3's warning-only registration): the broker re-verifies
-    # (pid, starttime, uid, exe) itself; target_starttime 0 = trust /proc.
+    # (pid, starttime, uid, exe) itself. Pass $bcst — the starttime this
+    # same script just read — so a pid-reuse between our read and the
+    # broker's check mismatches instead of silently re-trusting /proc
+    # (target_starttime 0 would mean "trust /proc", fable P3-2).
     reg=0
     for _ in 1 2 3 4 5; do
         dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
             /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.RegisterLaunch \
             "string:$SILO" "string:qdistro.tier3s" "string:qdistro.tier3s.$SILO" \
-            "string:$TOKEN" "string:" "uint64:$INNER_PID" "string:tier3s" "uint64:0" \
+            "string:$TOKEN" "string:" "uint64:$INNER_PID" "string:tier3s" "uint64:$bcst" \
             >/dev/null 2>&1 && { reg=1; break; }
         sleep 0.2
     done
