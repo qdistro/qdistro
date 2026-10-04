@@ -27,6 +27,8 @@ Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
 | `b16-s127-pass/` | `bats-20261004T060910Z-2896733` | `eac49ad16` | s127 PASS — the serial sweep (`qdistro-test-clipboard-source` now tries 0x40000001/0x80000002/0xC0000003 like `qdwin-test-clipboard-emit`) beats the guard |
 | `b17-acceptance/` | `bats-20261004T095918Z-16239` | `eac49ad16` | **RECORD RUN: 10/10 pass** — see below |
 | `b18-s124-s126/` | (run dir TBD — `qci-tier3s-b18`) | `aa2e3afd4` | Sol-r1 remediation rerun: s124 + s126 with the new oracle/seccomp steps |
+| `b19-fable-remediation/` | `bats-20261004T123605Z-3058184` | `920351f70` | 6/10 — s123/s124/s127/s129 driver+product defects root-caused and closed; preserved-VM replays green (s123 76/0, s124 75/0, s127 94/0, s129 78/0). Remediation commits `36d779097` `7133aee42` `b6523e801` `45f7bda59` `e96442f4a`; see `b19-fable-remediation/MANIFEST.md` |
+| (b20 record attempt) | `qci-tier3s-b20b` running | `e96442f4a` | full 10-file lane on fresh workers with all remediation baked |
 
 ## b17 record run (`eac49ad16`) — 10/10 files PASS
 
