@@ -691,10 +691,14 @@ oracle is "no `podman run` and no activation record":
       client never binds; the wait does not run out the bound). Every
       bridge refusal carries the client log's tail;
     - `AdminBroker1.RegisterLaunch(silo, "qdistro.tier3s",
-      "qdistro.tier3s.<silo>", <token>, "", <inner pid>, "tier3s", 0)` —
-      **mandatory, as root, with bounded retries**: any failure refuses the
-      launch before `podman run` (B-i is stricter than tier 3's
-      warning-only registration);
+      "qdistro.tier3s.<silo>", <token>, "", <inner pid>, "tier3s",
+      <observed starttime>)` — **mandatory, as root, with bounded
+      retries**: any failure refuses the launch before `podman run` (B-i is
+      stricter than tier 3's warning-only registration). The starttime is
+      the one the spawn just read from `/proc` — a pid-reuse between that
+      read and the broker's own check mismatches instead of silently
+      re-trusting `/proc` (target_starttime 0 would mean "trust /proc",
+      fable P3-2);
     - `bridge_wrapper_pid`, `bridge_client_pid` (+ starttimes),
       `launch_record`, `gui=1` go into the control record as soon as they
       are known, so a refusal after the client started is still torn down.
@@ -723,7 +727,7 @@ podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none
       --tmpfs /tmp:rw,size=64m,mode=1777
       --tmpfs /run/user/1000:rw,U,mode=0700  # U -> OCI uid=1000,gid=1000 (literal uid= is rejected)
       --tmpfs /home/admin/.cache:rw,U,mode=0700
-      [-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw]   # GUI only (B-i)
+      [-v /run/qdistro-tier3s/<token>:/run/qdistro/link:ro]   # GUI only (B-i)
       [--runtime-flag=host-uds=open]        # GUI only (B-i): bind-mounted unix sockets allowed
       [-v <state_path>:/home/admin:rw]      # templated silo only, no recursive chown
       --pids-limit=512                      # parity with tier 2 only; NOT enforced under --ignore-cgroups
@@ -847,7 +851,7 @@ unknown key or has no `GUI=` line also refuses: a declaration that exists
 must say out loud whether it wants the bridge. `GUI=1` adds the whole §5
 step-12 bridge (compositor check, secctx client, launch record,
 RegisterLaunch) and the two podman additions
-(`-v /run/qdistro-tier3s/<token>:/run/qdistro/link:rw`,
+(`-v /run/qdistro-tier3s/<token>:/run/qdistro/link:ro`,
 `--runtime-flag=host-uds=open`); `GUI=0` leaves the launch byte-identical to
 Phase A.
 

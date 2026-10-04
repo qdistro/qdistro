@@ -13,7 +13,9 @@ qdwin session first. Every check prints one `PASS:`/`FAIL:` line; the
 driver exits nonzero on any FAIL and the bats wrapper also requires
 `[sNNN] N passes, 0 failures`.
 
-Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
+Tested HEAD: `7ad3518c3` (`claude/tier3s-b`). Record run: **b32** —
+the Sol-r5-ACCEPTED tip. The b17/b24/b29/b30/b31 "record" sections below
+are historical milestones kept for provenance; b32 is the current record.
 
 ## qci runs
 
@@ -43,7 +45,9 @@ Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
 | `b31-acceptance/` | `bats-20261004T195521Z-2046457` | `85f6ab26d` | **10/10 pass** — same per-driver counts as b30; the Sol-r4 acceptance (process-group-contained `wait_for_bounded`) |
 | `b32-acceptance/` | `bats-20261004T202011Z-2424301` | `7ad3518c3` | **RECORD RUN: 10/10 pass** — same per-driver counts; the Sol-r5-ACCEPTED tip (success-path group sweep added) |
 
-## b17 record run (`eac49ad16`) — 10/10 files PASS
+## b17 run (`eac49ad16`) — 10/10 files PASS (historical)
+
+Superseded by b32 (current record). Kept for provenance:
 
 `b17-acceptance/report.md`, per-file TAP logs under `b17-acceptance/bats/*.bats.log`,
 driver transcripts under `b17-acceptance/bats/*.bats.scratch/{t3s-setup,sNNN}.log`,
@@ -62,9 +66,11 @@ VM journals under `b17-acceptance/journals/`:
 | s128 lineage | 54/0 | `s128.log` — after a broker restart under `lineage_enforce` + re-registration: real pid + drifted starttime → deny; forged claim of another silo → the attested silo wins (deny + journal override) |
 | s129 hostile-stream | 72/0 | `s129.log` — garbage over the runsc sentry's socket fds (malformed waypipe frames at the trusted client parser) and over the bridge client's tagged fd kills only that connection; refused re-dial; secctx-listener flood contained |
 
-## b24 record run (`65a79151c`) — 10/10 files PASS
+## b24 run (`65a79151c`) — 10/10 files PASS (historical)
 
-Superseded by b29 (Sol-r2 remediation record). Fresh workers;
+Superseded by b29 → b32 (current record). Kept for provenance:
+
+Fresh workers;
 `b24-acceptance/report.md`, per-file TAP logs + driver transcripts under
 `b24-acceptance/bats/`:
 
@@ -104,7 +110,7 @@ strays on the success path too (`7ad3518c3`). Fresh workers;
 
 ## b30 run (`421e0bf75`) — 10/10 files PASS
 
-Superseded by b31 (Sol-r4 record). The Sol-r3 remediation acceptance
+Superseded by b32 (current record). The Sol-r3 remediation acceptance
 (opcode-stable v35 + descendant-kill wait_for). Fresh workers;
 `b30-acceptance/report.md`, per-file TAP logs + driver transcripts under
 `b30-acceptance/bats/`:
