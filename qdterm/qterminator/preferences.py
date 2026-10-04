@@ -482,6 +482,8 @@ class PreferencesDialog(QDialog):
         else:
             self._update_font_preview()
         self._refresh_desktop_status()
+        if hasattr(self, "_shortcut_leaves"):
+            self._refresh_shortcut_conflicts()
 
     def _on_theme_mode_changed(self, *_args) -> None:
         self._refresh_desktop_status()
@@ -678,7 +680,9 @@ class PreferencesDialog(QDialog):
             normalised = QKeySequence(raw).toString()
             by_seq.setdefault(normalised, []).append((name, leaf))
 
-        conflict_brush = QBrush(QColor("#cf6679"))
+        from qterminator.titlebar import titlebar_roles
+
+        conflict_brush = QBrush(QColor(titlebar_roles(self)["error"]))
         for name, leaf in self._shortcut_leaves.items():
             raw = leaf.text(1).strip()
             normalised = QKeySequence(raw).toString() if raw else ""

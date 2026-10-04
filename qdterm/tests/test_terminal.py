@@ -861,6 +861,50 @@ class TestBellBehavior:
         t._on_bell("bell")
         assert len(flashed) == 0
 
+    def test_flash_bell_uses_error_role_not_white(
+        self, qtbot, qapp, tmp_path, monkeypatch, fresh_config
+    ):
+        from types import SimpleNamespace
+
+        from qdistro_presentation.model import example_snapshot
+        from qdistro_presentation.paths import ENV_OVERRIDE
+        from qdistro_presentation.publish import write_snapshot
+        from qterminator.theme import attach_presentation, reset_controller_for_tests
+        from qterminator.titlebar import titlebar_roles
+
+        reset_controller_for_tests()
+        t = _make_terminal(qtbot)
+        fallback = titlebar_roles(t)["error"]
+        previous = t._term.styleSheet()
+        t._flash_bell()
+        fallback_sheet = t._term.styleSheet()
+        assert fallback.lower() in fallback_sheet.lower()
+        assert "background-color: #ffffff" not in fallback_sheet.lower()
+        qtbot.waitUntil(lambda: t._term.styleSheet() == previous, timeout=1000)
+
+        snap = example_snapshot()
+        write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)
+        monkeypatch.setenv(ENV_OVERRIDE, str(tmp_path / "current.json"))
+        attach_presentation(
+            qapp,
+            SimpleNamespace(
+                get=lambda *keys, default=None: (
+                    "system"
+                    if keys[:2] == ("general", "theme_mode")
+                    else {}
+                    if keys == ("appearance",)
+                    else default
+                )
+            ),
+        )
+        assert t._term.styleSheet() == previous
+        t._flash_bell()
+        sheet = t._term.styleSheet()
+        assert snap.colors.mError.lower() in sheet.lower()
+        assert "#ffffff" not in sheet.lower()
+        qtbot.waitUntil(lambda: t._term.styleSheet() == previous, timeout=1000)
+        reset_controller_for_tests()
+
 
 # ===================================================================
 # Monitor signal emission tests
