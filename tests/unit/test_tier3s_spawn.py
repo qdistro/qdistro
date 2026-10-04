@@ -2495,6 +2495,7 @@ def test_gui_launch_registers_the_bridge_before_podman(w):
     p = w.start(argv=GUI_ARGV)
     try:
         wait_for(lambda: w.first("systemd-run") is not None, "podman launch", p)
+        wait_for(lambda: (w.F / "run_argv").exists(), "podman run argv", p)
         calls = w.calls()
         bi, bc = bridge_call(w)
         assert bi is not None, calls
