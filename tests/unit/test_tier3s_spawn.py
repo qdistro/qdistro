@@ -15,6 +15,7 @@ ExecStopPost, process placement and teardown on a real system are VM facts
 import json
 import os
 import pwd
+import signal
 import shutil
 import stat
 import subprocess
@@ -771,6 +772,44 @@ def test_launch_records_then_cleans_up_on_normal_exit(w):
     assert p.returncode == 0, err
     assert f"LAUNCH_TOKEN={TOKEN}" in out
     assert w.launch_gone(TOKEN), err
+
+
+def test_launcher_leaves_unit_stop_teardown_to_execstop(w):
+    w.set("run_block")
+    p = w.start()
+    try:
+        wait_for(lambda: (w.ctl / TOKEN / "state").exists() and w.state().get("phase") == "running",
+                 "phase=running", p)
+        w.set_unit(w.unit, "deactivating")
+        w.set("release")
+        _, err = p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 0, err
+    assert "unit stop owns teardown" in err
+    assert (w.ctl / TOKEN / "state").exists(), "the launcher's EXIT path ran cleanup during a unit stop"
+    r = w.cleanup("--unit", w.unit)
+    assert r.returncode == 0 and w.launch_gone(TOKEN), r.stderr
+
+
+def test_launcher_signal_leaves_teardown_to_execstop(w):
+    w.set("run_block")
+    p = w.start()
+    try:
+        wait_for(lambda: (w.ctl / TOKEN / "state").exists() and w.state().get("phase") == "running",
+                 "phase=running", p)
+        p.send_signal(signal.SIGTERM)
+        w.set("release")
+        _, err = p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 143, err
+    assert "signal: unit stop owns teardown" in err
+    assert (w.ctl / TOKEN / "state").exists(), "the signalled launcher ran cleanup in its cgroup"
+    r = w.cleanup("--unit", w.unit)
+    assert r.returncode == 0 and w.launch_gone(TOKEN), r.stderr
 
 
 def test_podman_failure_propagates_and_cleans(w):

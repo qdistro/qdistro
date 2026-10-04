@@ -299,9 +299,18 @@ state_write() {   # state_write KEY=VALUE...: merge into $CTL_DIR/state atomical
             && mv -f "$CTL_DIR/state.new.$$" "$CTL_DIR/state"
     )
 }
-ARMED=0; CLEANED=0
+ARMED=0; CLEANED=0; SKIP_EXIT_CLEANUP=0
 run_cleanup() {
-    [ "$ARMED" = 1 ] && [ "$CLEANED" = 0 ] || return 0
+    [ "$ARMED" = 1 ] && [ "$CLEANED" = 0 ] && [ "$SKIP_EXIT_CLEANUP" = 0 ] || return 0
+    # During a unit stop, ExecStop and ExecStopPost own teardown. `wait` can
+    # return when they stop the sandbox before Bash runs the TERM trap; an
+    # EXIT cleanup started here can then be killed with the main cgroup.
+    local unit_state
+    if unit_state="$(timeout 2 systemctl show -p ActiveState --value "$UNIT" 2>/dev/null)" \
+        && [ "$unit_state" = deactivating ]; then
+        say "unit stop owns teardown of $TOKEN"
+        return 0
+    fi
     CLEANED=1
     "$CLEANUP" "$TOKEN" || { say "cleanup of $TOKEN FAILED; control record $CTL_DIR preserved"; return 1; }
 }
@@ -316,7 +325,9 @@ on_exit() {
     exit "$rc"
 }
 trap on_exit EXIT
-trap 'say "signal: tearing down $TOKEN"; exit 143' TERM INT HUP
+# A signalled service is always followed by systemd's ExecStopPost cleanup.
+# Skip a second cleanup from the main cgroup if this trap runs before EXIT.
+trap 'SKIP_EXIT_CLEANUP=1; say "signal: unit stop owns teardown of $TOKEN"; exit 143' TERM INT HUP
 exec 9>"$CTL/.lock"
 flock -w 60 9 || refuse "cannot take $CTL/.lock"
 # another launch's token is never armed for teardown here
