@@ -41,31 +41,36 @@ set_rules "allow:$ACT_W" "allow:$ACT_F"
 is "broker answers allow (weston-terminal spawn)" "$(broker_check "$ACT_W")" allow
 is "broker answers allow (foot spawn)" "$(broker_check "$ACT_F")" allow
 
+# Journal cursor for this run: the mapped/seat_focus/title count greps below
+# are scoped to lines written AFTER this point — a preserved VM's prior-run
+# journal holds identical handle/silo lines that would double-count.
+J0=$(journal_cursor)
+
 # qdwin_mapped <handle> — the compositor processed a real frame commit for
 # this toplevel (the `qdwin: mapped handle=N` line is emitted while it
 # processes the client's first buffer).
-qdwin_mapped() { comp_log | grep -q "mapped handle=$1"; }
+qdwin_mapped() { comp_log "$J0" | grep -q "mapped handle=$1"; }
 
 # drive_gui <silo> <tag>: focus + type a marker command, then prove the
 # marker exists INSIDE the container.
 drive_gui() {
     local s="$1" tag="$2" h pid ctr
-    h=$(t3s_window_handle "$s")
+    h=$(t3s_window_handle "$s" "$J0")
     [ -n "$h" ] || { fail "$tag: no qdshell handle for $s"; return; }
     is "$tag: findSiloHandle resolves the tier3s toplevel" \
         "$(qs_ipc tier3focus findSiloHandle "$s" 2>/dev/null)" "HANDLE=$h"
     # the toplevel may already hold a focus event from map-time; the proof
     # is a NEW seat_focus_changed after the inject, not exactly one total.
     local fbefore
-    fbefore=$(comp_log | grep -c "seat_focus_changed seat=default handle=$h")
+    fbefore=$(comp_log "$J0" | grep -c "seat_focus_changed seat=default handle=$h")
     is "$tag: injectFocus accepted for the tier3s handle" \
         "$(qs_ipc tier3focus injectFocus "$h" default 2>/dev/null)" "ok handle=$h seat=default"
-    wait_for 20 bash -c "[ \$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -c 'seat_focus_changed seat=default handle=$h') -gt ${fbefore:-0} ]"
+    wait_for 20 bash -c "[ \$(journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat --after-cursor='$J0' | grep -c 'seat_focus_changed seat=default handle=$h') -gt ${fbefore:-0} ]"
     is "$tag: compositor reports focus on handle $h" \
-        "$(yes_no test "$(( $(comp_log | grep -c "seat_focus_changed seat=default handle=$h") - ${fbefore:-0} ))" -ge 1)" yes
+        "$(yes_no test "$(( $(comp_log "$J0" | grep -c "seat_focus_changed seat=default handle=$h") - ${fbefore:-0} ))" -ge 1)" yes
     wait_for 15 qdwin_mapped "$h"
     is "$tag: compositor mapped a committed frame (mapped handle=$h)" \
-        "$(comp_log | grep -c "mapped handle=$h")" 1
+        "$(comp_log "$J0" | grep -c "mapped handle=$h")" 1
     # the typed command runs in the sandboxed shell; the marker it creates
     # lives in the container's /tmp tmpfs — `podman exec` reads the sandbox's
     # own filesystem, so this is end-to-end input through the bridge.
@@ -88,14 +93,14 @@ TW=$(up_gui_silo "$SW")
 # the surface's own app_id is the app's (weston-terminal); the launch's
 # marking lands on the title via waypipe's --title-prefix "[3s:<silo>] "
 is "weston toplevel carries the [3s:$SW] title prefix" \
-    "$(comp_log | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SW\] ")" 1
+    "$(comp_log "$J0" | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SW\] ")" 1
 drive_gui "$SW" "weston"
 
 step "2. foot renders through the bridge"
 TF=$(up_gui_silo "$SF")
 [ -n "$TF" ] && pass "$SF launch up (token $TF)" || fail "$SF did not come up"
 is "foot toplevel carries the [3s:$SF] title prefix" \
-    "$(comp_log | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SF\] ")" 1
+    "$(comp_log "$J0" | grep -c "toplevel_\(added\|title\) .*title=\"\[3s:$SF\] ")" 1
 drive_gui "$SF" "foot"
 
 step "3. per-workload seccomp profile exercised inside each running container"
@@ -107,8 +112,13 @@ step "3. per-workload seccomp profile exercised inside each running container"
 seccomp_probe() {
     # $1=silo tag $2=container $3=profile-file-name
     local s="$1" ctr="$2" prof="$3" out
-    out=$(pm inspect "$ctr" --format '{{index .Annotations "io.podman.annotations.seccomp"}}' 2>/dev/null)
-    is "$s: spec carries the $prof profile" "${out##*/}" "$prof"
+    # podman inlines the parsed profile into the OCI spec — no seccomp
+    # annotation exists. The launch argv's --security-opt element (from
+    # .Config.CreateCommand) names the per-workload file; the EPERM
+    # exercises below prove a filter actually applies its decisions.
+    out=$(pm inspect "$ctr" --format '{{json .Config.CreateCommand}}' 2>/dev/null \
+        | grep -o 'seccomp=[^,"]*' | head -1)
+    is "$s: launch argv names the $prof profile" "${out##*/}" "$prof"
     out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-p-$$; : > "$f"; chmod 600 "$f" && printf "chmod_rc=0 mode=%s\n" "$(stat -c %a "$f")" || printf "chmod_rc=%s\n" "$?"' 2>&1)
     is "$s: fchmodat ALLOW effective (plain chmod)" "$out" "chmod_rc=0 mode=600"
     out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-h-$$; : > "$f"; chmod 600 "$f"; chmod -h 700 "$f" 2>/tmp/t3s-sc-e1-$$; printf "nofollow_rc=%s eperm=%s mode=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e1-$$)" "$(stat -c %a "$f")"' 2>&1)
@@ -117,7 +127,7 @@ seccomp_probe() {
     is "$s: link/linkat DENY effective" "$out" "ln_rc=1 eperm=1"
     out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-x-$$; : > "$f"; ls -l "$f" 2>/tmp/t3s-sc-e-$$ >/dev/null; printf "ls_rc=%s stderr_bytes=%s\n" "$?" "$(wc -c < /tmp/t3s-sc-e-$$)"' 2>&1)
     is "$s: llistxattr ALLOW effective (ls -l clean)" "$out" "ls_rc=0 stderr_bytes=0"
-    out=$(pm exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(awk "/^NoNewPrivs:/{print \$2}" /proc/self/status)" "$(awk "/^Seccomp:/{print \$2}" /proc/self/status)"' 2>&1)
+    out=$(pm exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(grep "^NoNewPrivs:" /proc/self/status | cut -f2)" "$(grep "^Seccomp:" /proc/self/status | cut -f2)"' 2>&1)
     is "$s: NoNewPrivs + seccomp filter mode inside" "$out" "nnp=1 seccomp=2"
 }
 seccomp_probe "$SW" "$(ctr_of "$SW")" weston-terminal.json
