@@ -36,8 +36,8 @@ teardown_file() {
         assert_output_contains "PASS: $t: typed command created /tmp/s124-s124"
         assert_output_contains "PASS: teardown/s124"
     done
-    assert_output_contains "PASS: s124w: spec carries the weston-terminal.json profile"
-    assert_output_contains "PASS: s124f: spec carries the foot.json profile"
+    assert_output_contains "PASS: s124w: launch argv names the weston-terminal.json profile"
+    assert_output_contains "PASS: s124f: launch argv names the foot.json profile"
     for s in s124w s124f; do
         assert_output_contains "PASS: $s: fchmodat ALLOW effective (plain chmod)"
         assert_output_contains "PASS: $s: fchmodat2 path (chmod -h) EPERM, mode unchanged"

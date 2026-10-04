@@ -221,8 +221,13 @@ launch_clip_source "$SA" text/plain "s127-secret-A" "$WORK/clip-src-A.log"
 register_clip_launch "$SA" \
     && pass "clip source A registered in the launch-record store" \
     || fail "register_clip_source A failed"
-wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SA '" _ "$J0"
-line=$(clip_gate_line "$SA"); info "gate: $line"
+# the emit is periodic; early offers can land while the broker name is still
+# settling after the enforce restart (deny reason=broker-unavailable — still
+# fail-closed). Wait for a broker-EVALUATED deny so the verdict, not the
+# transient transport failure, is what gets asserted.
+wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SA .*verdict=deny reason=broker:deny'" _ "$J0"
+line=$(qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$SA .*verdict=deny reason=broker:deny" | tail -1)
+info "gate: $line"
 is "qdshell gate line names the real tagged source silo" \
     "$(printf '%s' "$line" | grep -c "src_silo=$SA dst_silo=$SB")" 1
 is "default-deny verdict at set-time" \
