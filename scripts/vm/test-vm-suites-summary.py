@@ -195,8 +195,8 @@ def expected_absence(base, name):
     return None
 
 
-phases = next((l.split(" ", 1)[1] for l in expected if l.startswith("phases ")), "")
-bats_filter = next((l.split(" ", 1)[1] for l in expected if l.startswith("bats-filter ")), "")
+phases = next((line.split(" ", 1)[1] for line in expected if line.startswith("phases ")), "")
+bats_filter = next((line.split(" ", 1)[1] for line in expected if line.startswith("bats-filter ")), "")
 lines = [
     "## Test suites in the qdistro test VM", "",
     f"Commit `{commit}`. The shipped image booted through a throwaway overlay.",
