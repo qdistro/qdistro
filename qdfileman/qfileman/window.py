@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileIconProvider,
     QLabel,
     QMainWindow,
     QPushButton,
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from qfileman.icons import invalidate_file_icon_cache, refresh_named_icons, set_named_icon
 from qfileman.pane import FilePane
 from qfileman.split_container import SplitContainer
 
@@ -65,15 +67,22 @@ class FileManagerWindow(QMainWindow):
 
     def apply_presentation_update(self) -> None:
         """Refresh chrome after a shared appearance change. Pane state stays."""
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
+        invalidate_file_icon_cache()
+        refresh_named_icons(self)
+        self._file_icon_provider = QFileIconProvider()
+        self.fs_model.setIconProvider(self._file_icon_provider)
+        self.fs_model.layoutChanged.emit()
         for pane in self.findChildren(FilePane):
+            pane.set_icon_provider(self._file_icon_provider)
+            pane.refresh_file_icons()
             pane.style().unpolish(pane)
             pane.style().polish(pane)
             pane.update()
             if hasattr(pane, "file_list"):
                 pane.file_list.viewport().update()
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     # ---------------------------------------------------------------- UI
     def _init_ui(self) -> None:
@@ -122,21 +131,25 @@ class FileManagerWindow(QMainWindow):
 
         back_btn = QPushButton("←")
         back_btn.setToolTip("Go back")
+        set_named_icon(back_btn, "go-previous")
         back_btn.clicked.connect(self._go_back)
         toolbar.addWidget(back_btn)
 
         forward_btn = QPushButton("→")
         forward_btn.setToolTip("Go forward")
+        set_named_icon(forward_btn, "go-next")
         forward_btn.clicked.connect(self._go_forward)
         toolbar.addWidget(forward_btn)
 
         up_btn = QPushButton("↑")
         up_btn.setToolTip("Go up one level")
+        set_named_icon(up_btn, "go-up")
         up_btn.clicked.connect(self._go_up)
         toolbar.addWidget(up_btn)
 
         refresh_btn = QPushButton("↻")
         refresh_btn.setToolTip("Refresh")
+        set_named_icon(refresh_btn, "view-refresh")
         refresh_btn.clicked.connect(self._refresh)
         toolbar.addWidget(refresh_btn)
 
@@ -331,6 +344,8 @@ class FileManagerWindow(QMainWindow):
 
     def _init_file_system_tree(self) -> None:
         self.fs_model = QFileSystemModel()
+        self._file_icon_provider = QFileIconProvider()
+        self.fs_model.setIconProvider(self._file_icon_provider)
         self.fs_model.setRootPath("")
         self.tree_view.setModel(self.fs_model)
         self.tree_view.setRootIndex(self.fs_model.index(QDir.homePath()))

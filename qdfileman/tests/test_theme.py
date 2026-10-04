@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPalette
+from PyQt6.QtWidgets import QPushButton
+
 from qfileman.theme import _underlying_style_name, apply_theme
 
 
@@ -207,3 +210,157 @@ def test_preferences_dialog_apply_presentation_update_polishes(qapp):
     finally:
         dlg.close()
         dlg.deleteLater()
+
+
+def _item_named(file_list, name: str):
+    for i in range(file_list.count()):
+        item = file_list.item(i)
+        if item is not None and item.text() == name:
+            return item
+    return None
+
+
+def test_toolbar_retains_named_theme_icons(qapp):
+    from qfileman.icons import THEME_ICON_PROPERTY
+    from qfileman.window import FileManagerWindow
+
+    win = FileManagerWindow()
+    try:
+        buttons = {btn.toolTip(): btn for btn in win.findChildren(QPushButton)}
+        assert buttons["Go back"].property(THEME_ICON_PROPERTY) == "go-previous"
+        assert buttons["Go forward"].property(THEME_ICON_PROPERTY) == "go-next"
+        assert buttons["Go up one level"].property(THEME_ICON_PROPERTY) == "go-up"
+        assert buttons["Refresh"].property(THEME_ICON_PROPERTY) == "view-refresh"
+        home = next(b for b in buttons.values() if b.toolTip() == "Home")
+        assert home.property(THEME_ICON_PROPERTY) == "go-home"
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+@pytest.mark.cheat_aware(
+    protects="Live appearance updates re-query named and file icons without rebuilding listings",
+    severity="important",
+    cheats=[
+        "restore apply_presentation_update to only unpolish/polish/update",
+        "call FilePane._load_files from the update path",
+        "drop item-identity or icon_size assertions",
+        "skip QIcon.fromTheme / file_icon / pixmap-cache / provider replacement checks",
+    ],
+    consequence="Icon-theme changes leave stale chrome/file icons or reset selection and view size",
+)
+def test_presentation_update_refreshes_icons_without_rebuilding(qapp, tmp_dir, monkeypatch):
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QIcon, QPixmapCache
+    from PyQt6.QtWidgets import QFileIconProvider
+
+    from qfileman.icons import file_icon as real_file_icon
+    from qfileman.pane import FilePane
+    from qfileman.window import FileManagerWindow
+
+    win = FileManagerWindow()
+    loads = {"n": 0}
+    original_load = FilePane._load_files
+
+    def counting_load(self):
+        loads["n"] += 1
+        return original_load(self)
+
+    monkeypatch.setattr(FilePane, "_load_files", counting_load)
+    try:
+        win._update_path(str(tmp_dir))
+        assert loads["n"] == 1
+        target = _item_named(win.file_list, "file1.txt")
+        assert target is not None
+        win.file_list.setCurrentItem(target)
+        win.file_list.setIconSize(QSize(40, 40))
+        scroll = win.file_list.verticalScrollBar().value()
+        old_provider = win.fs_model.iconProvider()
+        old_pane_provider = win._active_pane._icon_provider
+
+        theme_names: list[str] = []
+        real_from_theme = QIcon.fromTheme
+
+        def tracking_from_theme(name, *args, **kwargs):
+            theme_names.append(str(name))
+            return real_from_theme(name, *args, **kwargs)
+
+        monkeypatch.setattr("qfileman.icons.QIcon.fromTheme", tracking_from_theme)
+
+        queried: list[str] = []
+
+        def tracking_file_icon(provider, path):
+            queried.append(str(path))
+            return real_file_icon(provider, path)
+
+        monkeypatch.setattr("qfileman.pane.file_icon", tracking_file_icon)
+
+        cache_clears: list[bool] = []
+        real_clear = QPixmapCache.clear
+
+        def tracking_clear():
+            cache_clears.append(True)
+            return real_clear()
+
+        monkeypatch.setattr("qfileman.icons.QPixmapCache.clear", tracking_clear)
+
+        win.apply_presentation_update()
+
+        assert loads["n"] == 1
+        assert win.file_list.currentItem() is target
+        assert _item_named(win.file_list, "file1.txt") is target
+        assert win.file_list.iconSize() == QSize(40, 40)
+        assert win.current_path == str(tmp_dir)
+        assert win.file_list.verticalScrollBar().value() == scroll
+        assert cache_clears == [True]
+        assert win.fs_model.iconProvider() is not old_provider
+        assert win._active_pane._icon_provider is not old_pane_provider
+        assert win._active_pane._icon_provider is win._file_icon_provider
+        assert win.fs_model.iconProvider() is win._file_icon_provider
+        assert isinstance(win._file_icon_provider, QFileIconProvider)
+        assert "go-previous" in theme_names
+        assert "go-next" in theme_names
+        assert "go-up" in theme_names
+        assert "view-refresh" in theme_names
+        assert "go-home" in theme_names
+        listed_paths = {
+            (win.file_list.item(i).data(Qt.ItemDataRole.UserRole) or {}).get("path")
+            for i in range(win.file_list.count())
+        }
+        assert str(tmp_dir / "file1.txt") in queried
+        assert str(tmp_dir / "subdir") in queried
+        assert listed_paths <= set(queried)
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_presentation_update_keeps_two_pane_selection(qapp, tmp_dir, tmp_path):
+    from qfileman.window import FileManagerWindow
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "alpha.txt").write_text("a")
+    (other / "beta.txt").write_text("b")
+    win = FileManagerWindow()
+    try:
+        win._update_path(str(tmp_dir))
+        left = _item_named(win.file_list, "file2.txt")
+        assert left is not None
+        win.file_list.setCurrentItem(left)
+        new_pane = win._split_right()
+        new_pane._update_path(str(other))
+        right = _item_named(new_pane.file_list, "beta.txt")
+        assert right is not None
+        new_pane.file_list.setCurrentItem(right)
+        win.apply_presentation_update()
+        panes = {pane.current_path: pane for pane in win._split_root.find_panes()}
+        assert set(panes) == {str(tmp_dir), str(other)}
+        assert panes[str(tmp_dir)].file_list.currentItem() is left
+        assert panes[str(other)].file_list.currentItem() is right
+        assert _item_named(panes[str(tmp_dir)].file_list, "file2.txt") is left
+        assert _item_named(panes[str(other)].file_list, "beta.txt") is right
+    finally:
+        win.close()
+        win.deleteLater()
+

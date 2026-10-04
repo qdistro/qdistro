@@ -67,6 +67,36 @@ def test_pane_change_view_switches_view_mode(pane):
     assert pane.file_list.viewMode() == QListWidget.ViewMode.ListMode
 
 
+def test_refresh_file_icons_keeps_listing_and_requeries_provider(pane, tmp_dir, monkeypatch):
+    from qfileman.icons import file_icon as real_file_icon
+
+    pane._update_path(str(tmp_dir))
+    target = None
+    for i in range(pane.file_list.count()):
+        item = pane.file_list.item(i)
+        if item is not None and item.text() == "file1.txt":
+            target = item
+            break
+    assert target is not None
+    pane.file_list.setCurrentItem(target)
+    names_before = [pane.file_list.item(i).text() for i in range(pane.file_list.count())]
+
+    queried: list[str] = []
+
+    def tracking_file_icon(provider, path):
+        queried.append(str(path))
+        return real_file_icon(provider, path)
+
+    monkeypatch.setattr("qfileman.pane.file_icon", tracking_file_icon)
+    pane.refresh_file_icons()
+
+    names_after = [pane.file_list.item(i).text() for i in range(pane.file_list.count())]
+    assert names_after == names_before
+    assert pane.file_list.currentItem() is target
+    assert str(tmp_dir / "file1.txt") in queried
+    assert len(queried) == pane.file_list.count()
+
+
 def test_pane_change_sort_persists_after_refresh(pane, tmp_path):
     test_dir = tmp_path / "s"
     test_dir.mkdir()
