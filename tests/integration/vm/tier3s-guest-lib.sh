@@ -347,6 +347,9 @@ assert_all_clear() {   # assert_all_clear <tag>
     is "$1: state root holds no container state" "$(qry find "$SROOT" -mindepth 1 ! -name null-netns | grep -c .)" 0
     # the cleanup's per-call scopes and work dirs end with each call / run (astra A r2 #2)
     is "$1: no cleanup call scope left" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-t3s-call-*.scope' | grep -c .)" 0
+    # a cleanup run's private .call-* dir can outlive its triggering call by a
+    # beat (the dir is removed at the end of that run, not before the reply)
+    wait_for 15 bash -c "[ -z \"\$(find '$CTL' -mindepth 1 -maxdepth 1 -name '.call-*' -print -quit 2>/dev/null)\" ]" || :
     is "$1: no cleanup work dir left" "$(qry find "$CTL" -mindepth 1 -maxdepth 1 -name '.call-*' | grep -c .)" 0
 }
 

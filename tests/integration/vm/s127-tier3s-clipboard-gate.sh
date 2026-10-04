@@ -38,7 +38,11 @@ CLIP_SRC_PID=""
 kill_clip_src() {
     [ -n "${1:-}" ] && kill -TERM "$1" 2>/dev/null
     wait "$1" 2>/dev/null || :
-    pkill -u admin -x qdistro-test-clipboard-source 2>/dev/null || :
+    # pkill -x would never match: the helper's comm truncates to
+    # "qdistro-test-cl". Anchor the full cmdline instead; also drop the
+    # secctx-exec parent so no orphan keeps the tagged client alive.
+    pkill -u admin -f '^qdistro-test-clipboard-source' 2>/dev/null || :
+    pkill -u admin -f '^qdistro-secctx-exec --sandbox-engine qdistro.tier3s .*clipsrc-' 2>/dev/null || :
 }
 
 T3S_EXIT_HOOK='
@@ -102,10 +106,13 @@ is "broker probe still denies transfer $SA->$SB" \
 t3s_clip_source "$SA" image/png "s127-png" > "$WORK/clip-src-png.log" 2>&1 &
 PNG_PID=$!
 wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdshell.service --no-pager -o cat | grep -q 'verdict=deny reason=tier3s-no-allowed-mimes'"
+# the source helper sweeps serials to beat weston's stale-serial guard, so one
+# logical offer can emit >1 selection_set; the asserted property is the verdict
+# reason, not the wire-event count.
 is "qdshell denied a png-only tier3s offer before the broker" \
-    "$(qdshell_log | grep -c 'CLIPBOARD_GATE .*verdict=deny reason=tier3s-no-allowed-mimes')" 1
+    "$(qdshell_log | grep -c 'CLIPBOARD_GATE .*verdict=deny reason=tier3s-no-allowed-mimes' | awk '{print ($1>=1)?1:0}')" 1
 is "qdshell logged the tier3s mime-strip" \
-    "$(qdshell_log | grep -c 'tier3s mime-strip')" 1
+    "$(qdshell_log | grep -c 'tier3s mime-strip' | awk '{print ($1>=1)?1:0}')" 1
 kill_clip_src "$PNG_PID"
 
 step "4. SaveRule flips the live verdict to allow"

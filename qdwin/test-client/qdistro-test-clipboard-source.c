@@ -11,10 +11,13 @@
  * This helper skips the focus wait and calls set_selection
  * immediately on the first wl_seat. wl_data_device.set_selection's
  * `serial` field is supposed to be a recent input serial; the spec
- * says the compositor MAY validate, but stock weston doesn't (`FIXME:
- * Store serial and check against incoming serial here`). The helper
- * uses serial 0; the broker / qdshell selection_set listener fires
- * regardless.
+ * says the compositor MAY validate, and vendored libweston DOES
+ * (weston_seat_set_selection rejects a serial older than the seat's
+ * selection_serial while a source holds the seat). Deny/focus clears
+ * bump that serial, so a second serial=0 offer is silently dropped.
+ * The helper therefore sweeps three ascending serials — the same
+ * scheme qdwin-test-clipboard-emit uses — and the payload source goes
+ * last so it owns the selection.
  *
  * Usage:
  *   qdistro-test-clipboard-source [--mime text/plain] [--text "payload"]
@@ -204,7 +207,33 @@ int main(int argc, char **argv)
 	c.source = wl_data_device_manager_create_data_source(c.ddm);
 	wl_data_source_add_listener(c.source, &data_source_listener, &c);
 	wl_data_source_offer(c.source, mime);
-	wl_data_device_set_selection(c.device, c.source, 0);
+	/* Bypass weston's stale-serial guard in weston_seat_set_selection():
+	 *
+	 *   if (seat->selection_data_source &&
+	 *       seat->selection_serial - serial < UINT32_MAX / 2)
+	 *           return;
+	 *
+	 * The guard rejects whenever (selection_serial - serial) lies in
+	 * the lower half of the 32-bit space. The deny/focus-clear paths
+	 * bump selection_serial to a fresh wl_display serial, so a second
+	 * serial=0 offer while any source holds the seat is silently
+	 * dropped — and a set that arrives while the shell cannot receive
+	 * selection_set leaves exactly such a stuck source. The seat's
+	 * serial is not readable client-side, so sweep three strictly-
+	 * ascending serials whose accepting half-rings cover the whole
+	 * 32-bit ring (qdwin-test-clipboard-emit uses the same scheme):
+	 * once any probe wins, later serials are newer by definition and
+	 * also pass; the REAL source goes last so it owns the selection.
+	 */
+	struct wl_data_source *probe1 =
+		wl_data_device_manager_create_data_source(c.ddm);
+	struct wl_data_source *probe2 =
+		wl_data_device_manager_create_data_source(c.ddm);
+	wl_data_source_offer(probe1, mime);
+	wl_data_source_offer(probe2, mime);
+	wl_data_device_set_selection(c.device, probe1, 0x40000001u);
+	wl_data_device_set_selection(c.device, probe2, 0x80000002u);
+	wl_data_device_set_selection(c.device, c.source, 0xC0000003u);
 	wl_display_flush(c.display);
 	fprintf(stderr, "[qdistro-test-clipboard-source] set_selection mime=%s "
 			 "payload_len=%zu\n", mime, payload_len);
