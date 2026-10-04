@@ -249,33 +249,42 @@ def hose(pid, fd, label):
     n = libc.syscall(438, pidfd, fd, 0)        # pidfd_getfd
     if n < 0:
         os.close(pidfd); print(f"{label}: pidfd_getfd({pid},{fd}) failed"); return 0
-    try: os.write(n, os.urandom(512))
-    except OSError: pass
+    try:
+        wrote = os.write(n, os.urandom(512))
+    except OSError as e:
+        print(f"{label}: write onto pid {pid} fd {fd} failed: {e}")
+        wrote = 0
     os.close(n); os.close(pidfd)
-    print(f"{label}: wrote 512B onto pid {pid} fd {fd}")
-    return 1
+    print(f"{label}: wrote {wrote}B onto pid {pid} fd {fd}")
+    return wrote
 
+ends = 0
 sent = 0
+sandbox_bytes = 0
 if sentry_fd is not None:
-    sent += hose(sentry_fd[0], sentry_fd[1], "sandbox-end")
+    sandbox_bytes = hose(sentry_fd[0], sentry_fd[1], "sandbox-end")
+    sent += sandbox_bytes; ends += 1 if sandbox_bytes else 0
 else:
     print("WARN: no sandbox-end channel fd identified")
 for fd, ino in mine.items():
     if chan_local is not None and ino == chan_local:
-        sent += hose(client, fd, "client-channel")
+        w = hose(client, fd, "client-channel")
     elif ino in listen_inodes:
         print(f"fd {fd} inode {ino}: the link.sock LISTENER — skipped (unconnected)")
+        continue
     elif ino == chan_peer:
         print(f"fd {fd} inode {ino}: unexpected peer-side fd — skipped")
+        continue
     else:
-        sent += hose(client, fd, "client-wayland-end")
-print(f"hose done sent={sent} sandbox_end={'yes' if sentry_fd else 'no'}")
+        w = hose(client, fd, "client-wayland-end")
+    sent += w; ends += 1 if w else 0
+print(f"hose done ends={ends} sent={sent} sandbox_end={'yes' if sentry_fd else 'no'} sandbox_bytes={sandbox_bytes}")
 PY
 sed 's/^/    channel-hose: /' "$WORK/hose-channels.log"
 is "waypipe frames written onto the SANDBOX end of the link (at the trusted client parser)" \
-    "$(grep -c 'sandbox_end=yes' "$WORK/hose-channels.log")" 1
-is "hose wrote onto bridge sockets (attributed ends only)" \
-    "$(yes_no test "$(sed -n 's/^hose done sent=\([0-9]*\).*/\1/p' "$WORK/hose-channels.log")" -ge 2)" yes
+    "$(yes_no test "$(sed -n 's/.*sandbox_bytes=\([0-9]*\).*/\1/p' "$WORK/hose-channels.log")" -ge 1)" yes
+is "hose wrote onto at least two attributed bridge sockets" \
+    "$(yes_no test "$(sed -n 's/^hose done ends=\([0-9]*\).*/\1/p' "$WORK/hose-channels.log")" -ge 2)" yes
 sleep 2   # let any delayed connection teardown land before the verdicts
 
 step "3. blast radius after the channel attacks: only A's bridge may die"
