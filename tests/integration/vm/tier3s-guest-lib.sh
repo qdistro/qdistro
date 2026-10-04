@@ -107,26 +107,24 @@ wait_for() {   # wait_for <secs> <cmd...>
     return 1
 }
 wait_for_bounded() {   # bound one check call; timeout(1) can't exec a
-    local s=$(( $1 * 10 )) rc; shift   # shell function, so bound a
+    local s=$(( $1 * 10 )) rc m=0; shift # shell function, so bound a
     rc=$(mktemp) || return 1           # killable subshell and read its
-    ( "$@"; echo $? > "$rc" ) &        # status off an rc file — a wedged
-    local pid=$!                       # call leaves the file empty.
+    case $- in *m*) m=1;; esac         # status off an rc file. Job
+    set -m                             # control gives the subshell its
+    ( "$@"; echo $? > "$rc" ) &        # OWN process group (pgid == pid),
+    local pid=$!                       # so the timeout kill reaches
     while (( s-- > 0 )) && [ ! -s "$rc" ]; do sleep 0.1; done
-    if [ ! -s "$rc" ]; then
-        # STOP the subshell first (no new children), then kill the whole
-        # descendant tree — a surviving query child keeps the caller's
-        # capture pipe open and can hang vm-exec/qemu-ga past the bound
-        # (Sol r3 P2).
-        kill -STOP "$pid" 2>/dev/null
-        _wf_descendants "$pid" | xargs -r kill -KILL 2>/dev/null
-        kill -KILL "$pid" 2>/dev/null
-        wait "$pid" 2>/dev/null; rm -f "$rc"; return 1
-    fi
-    local r; read -r r < "$rc"; rm -f "$rc"; wait "$pid" 2>/dev/null; return "$r"
-}
-_wf_descendants() {   # pids under $1, deepest first
-    local k
-    for k in $(pgrep -P "$1" 2>/dev/null); do _wf_descendants "$k"; echo "$k"; done
+    if [ ! -s "$rc" ]; then            # EVERY member atomically —
+        # -$pid matches a group only if job control made the subshell
+        # its own leader; on failure fall back to the single pid rather
+        # than risking the driver's own group.
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null        # a descendant forked between
+        rm -f "$rc"                    # polls has nowhere to hide (the
+        (( m )) || set +m; return 1    # sequential-command leak Sol
+    fi                                 # r4 P2 found in tree-walking).
+    local r; read -r r < "$rc"; rm -f "$rc"; wait "$pid" 2>/dev/null
+    (( m )) || set +m; return "$r"
 }
 unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
 # a failed `systemctl show` (empty answer) is NOT "down" (sol A-iii r1 P2)
