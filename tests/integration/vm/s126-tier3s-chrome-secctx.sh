@@ -137,14 +137,22 @@ done
 is "compositor logged the probe's tagged client acceptance" \
     "$(comp_log | grep -c 'qdwin/secctx: client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe')" 1
 
-step "5. per-interface operation denials through a real tagged peer (overrides OFF)"
+step "5. per-interface operation denials (overrides OFF, real bridge path)"
 # Registry visibility is not the gate for these two interfaces — both are
 # QDWIN_GLOBAL_ORDINARY and deliberately stay enumerable; the denial must
-# happen on the OPERATION. Run each probe under the same secctx wrap the
-# bridge client uses (unique instance-id per connection — duplicate ids
-# silently degrade the tagged channel), and assert the compositor answers
-# with the interface's own protocol error. No authorization override is
-# configured anywhere in this image; the denials below are the proof.
+# happen on the OPERATION. Two paths are exercised:
+#  (i)  THE BRIDGE PATH — the probes run INSIDE the live sandbox on the
+#       waypipe server's display socket: their requests cross the real
+#       byte-stream bridge and reach qdwin on the running launch's tagged
+#       bridge client channel. This is the same peer whose toplevel the
+#       compositor tagged in step 1 — not an extra host-side client.
+#  (ii) a host-side tagged peer under the same secctx wrap (unique
+#       instance-id per connection — duplicate ids silently degrade the
+#       tagged channel): supplementary tag-policy evidence.
+# Overrides-off evidence is printed, not assumed: the running compositor
+# carries no --qdwin-allowed-uid grant, and the mutation gate denies
+# secctx clients outright (before any uid fallback). The denials below —
+# IMPLEMENTATION errors, not transport failures — are the proof.
 sctx_tagged() {   # sctx_tagged <iid-suffix> <cmd...> — stdout only (secctx-exec logs its wrap on stderr)
     local iid="$1"; shift
     runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin \
@@ -154,17 +162,55 @@ sctx_tagged() {   # sctx_tagged <iid-suffix> <cmd...> — stdout only (secctx-ex
             --app-id "qdistro.tier3s.s126probe" --instance-id "$iid" -- "$@" \
             2>>"$WORK/sctx_tagged.err"
 }
+is "running compositor carries NO --qdwin-allowed-uid authorization override" \
+    "$(tr '\0' '\n' < /proc/"$(comp_pid)"/cmdline 2>/dev/null | grep -c 'qdwin-allowed-uid')" 0
+
+# --- (i) through the live bridge -----------------------------------------
+CTR=$(ctr_of "$SILO")
+# pm cp is not relied on here (runsc mount semantics): stream the probe
+# binaries in over `exec -i` — they link only libwayland-client, already in
+# the image.
+pm exec -i "$CTR" sh -c 'cat > /tmp/qp; chmod 755 /tmp/qp' \
+        < /usr/bin/qdwin-output-probe \
+    && pm exec -i "$CTR" sh -c 'cat > /tmp/sclaim; chmod 755 /tmp/sclaim' \
+        < /usr/bin/qdistro-test-stream-claim-probe \
+    && pass "probes staged inside the live sandbox" \
+    || fail "probe staging into $CTR failed"
+INWL=$(pm exec "$CTR" sh -c 'for s in /run/user/1000/wayland-*; do [ -S "$s" ] && basename "$s"; done' 2>/dev/null | head -1 | tr -d '[:space:]')
+is "in-sandbox waypipe display socket found" "$(yes_no test -n "$INWL")" yes
+bridge_probe() {  # bridge_probe <in-ctr-cmd...> — runs inside the sandbox on the waypipe display
+    pm exec "$CTR" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$INWL" "$@" 2>&1
+}
+# (a) zwlr_output_manager_v1 via the bridge: enumerated but test/apply
+# refuse with an IMPLEMENTATION error (the gate's own denial — the probe
+# now requires that error class, so EPIPE/truncation can't fake it).
+out=$(bridge_probe /tmp/qp --test --expect-denied); rc=$?
+is "bridge path: output-manager test refused (implementation error)" "$rc" 0
+is "bridge path: test denial carried the implementation-error line" \
+    "$(printf '%s' "$out" | grep -c 'denied (implementation error')" 1
+out=$(bridge_probe /tmp/qp --apply --expect-denied); rc=$?
+is "bridge path: output-manager apply refused (implementation error)" "$rc" 0
+is "bridge path: apply denial carried the implementation-error line" \
+    "$(printf '%s' "$out" | grep -c 'denied (implementation error')" 1
+# (b) qdwin_stream_input_v1 via the bridge: a bogus-token claim must get
+# INVALID_TOKEN — the interface's own protocol error, reached across the
+# byte stream.
+out=$(bridge_probe /tmp/sclaim); rc=$?
+is "bridge path: stream-input claim(bogus) -> INVALID_TOKEN" \
+    "$rc:$out" "0:[qdistro-test-stream-claim-probe] claim -> invalid_token (as expected)"
+
+# --- (ii) same-tag host-side peer (supplementary) ------------------------
 # (a) zwlr_output_manager_v1: enumerated (ORDINARY) but test/apply refuse.
 is "tagged peer still enumerates zwlr_output_manager_v1" \
     "$(grep -cx zwlr_output_manager_v1 < "$WORK/globals.tagged")" 1
 out=$(sctx_tagged "$TOK-a1" qdwin-output-probe --test --expect-denied); rc=$?
-is "tagged peer: output-manager test refused (protocol error)" "$rc" 0
-is "tagged peer: test denial carried the protocol error line" \
-    "$(printf '%s' "$out" | grep -c 'denied (protocol error')" 1
+is "tagged peer: output-manager test refused (implementation error)" "$rc" 0
+is "tagged peer: test denial carried the implementation-error line" \
+    "$(printf '%s' "$out" | grep -c 'denied (implementation error')" 1
 out=$(sctx_tagged "$TOK-a2" qdwin-output-probe --apply --expect-denied); rc=$?
-is "tagged peer: output-manager apply refused (protocol error)" "$rc" 0
-is "tagged peer: apply denial carried the protocol error line" \
-    "$(printf '%s' "$out" | grep -c 'denied (protocol error')" 1
+is "tagged peer: output-manager apply refused (implementation error)" "$rc" 0
+is "tagged peer: apply denial carried the implementation-error line" \
+    "$(printf '%s' "$out" | grep -c 'denied (implementation error')" 1
 # (b) qdwin_stream_input_v1: enumerated for everyone by design (the token
 # in claim() is the gate); a bogus token must get INVALID_TOKEN.
 is "tagged peer enumerates qdwin_stream_input_v1 (public by design)" \
@@ -174,6 +220,55 @@ is "tagged peer: stream-input claim(bogus) -> INVALID_TOKEN" \
     "$rc:$out" "0:[qdistro-test-stream-claim-probe] claim -> invalid_token (as expected)"
 is "compositor logged INVALID_TOKEN for the tagged claim" \
     "$(yes_no test "$(comp_log | grep -c 'stream_input claim INVALID_TOKEN')" -ge 1)" yes
+
+step "5b. single-attach: a consumed tier3s context refuses a second client"
+# ΔB10 binding soundness: the qdshell clipboard gate binds a tagged
+# selection source to the focused toplevel by (engine,app_id,instance)
+# equality and relays that toplevel client's verified pid — sound only
+# when one attested tuple names exactly ONE peer. The compositor enforces
+# single-attach on engine qdistro.tier3s: the first client consumes the
+# context; later connections on the same listener get a live refusal.
+# Probe: hold a tagged client under its own secctx-exec listener, then
+# connect to the SAME listener path again — the compositor must refuse.
+J5B=$(journal_cursor)
+PRE_SECCTX=$(for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done)
+sctx_tagged "$TOK-hold" qdistro-test-window --title "s126hold" &
+HOLD_WRAP=$!
+wait_for 15 bash -c 'for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done | grep -q .'
+SECPATH=$(for s in /run/user/1000/wayland-secctx-*; do [ -S "$s" ] && echo "$s"; done \
+    | { [ -n "$PRE_SECCTX" ] && grep -vxF "$PRE_SECCTX" || cat; } | tail -1)
+is "secctx listener path for the held tagged client" "$(yes_no test -S "$SECPATH")" yes
+wait_for 20 bash -c "comp_log \"\$1\" | grep -q 'client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe instance_id=$TOK-hold'" _ "$J5B" \
+    && pass "compositor tagged the held client (context consumed)" \
+    || fail "no client-accepted line for the held client"
+# second connect on the SAME consumed listener: accept-and-close gives the
+# client a live EOF, and the compositor logs the refusal — never a second
+# tagged client for the same tuple.
+second=$(python3 - "$SECPATH" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5)
+try:
+    s.connect(sys.argv[1])
+except OSError as e:
+    print(f"connect_failed:{e}"); sys.exit(0)
+try:
+    data = s.recv(64)
+    print("recv_eof" if data == b"" else f"recv_data:{len(data)}")
+except socket.timeout:
+    print("recv_timeout")
+PY
+)
+is "second connect on the consumed context is refused (live EOF)" \
+    "$second" "recv_eof"
+is "compositor logged the refused extra connection" \
+    "$(comp_log "$J5B" | grep -c 'refused extra connection on consumed context engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe instance_id='"$TOK"'-hold')" 1
+is "the held context still has exactly ONE accepted client (no second tag)" \
+    "$(comp_log "$J5B" | grep -c 'client accepted engine=qdistro.tier3s app_id=qdistro.tier3s.s126probe instance_id='"$TOK"'-hold')" 1
+# same sweep shape as kill_clip_src: TERM the wrapper chain, then orphan-sweep
+# so no tagged client or secctx listener lingers into teardown.
+kill -TERM "$HOLD_WRAP" 2>/dev/null; wait "$HOLD_WRAP" 2>/dev/null || :
+pkill -u admin -f 'qdistro-test-window --title s126hold' 2>/dev/null || :
+pkill -u admin -f "secctx-exec .*instance-id ${TOK}-hold" 2>/dev/null || :
 
 step "6. teardown"
 sm StopSilo si "$SILO" 10 > /dev/null; is "StopSilo $SILO" "$(silo_state "$SILO")" Stopped
