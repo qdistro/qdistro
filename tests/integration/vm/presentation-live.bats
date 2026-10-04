@@ -29,6 +29,7 @@ teardown_file() {
     assert_output_contains "PASS: named: container /var/lib/qdistro exposes only presentation"
     assert_output_contains "PASS: named: first-party qfileman is importable inside the container"
     assert_output_contains "PASS: named: in-container SDK reads the managed snapshot as admin uid 1000"
+    assert_output_contains "PASS: named: in-container inotify watch on the directory and current.json"
     assert_output_contains "PASS: named: running in-container controller followed a host publish"
     assert_output_contains "PASS: disposable container"
     assert_output_contains "PASS: disposable: presentation bind source is the host public directory"
@@ -38,6 +39,7 @@ teardown_file() {
     assert_output_contains "PASS: disposable: container /var/lib/qdistro exposes only presentation"
     assert_output_contains "PASS: disposable: first-party qfileman is importable inside the container"
     assert_output_contains "PASS: disposable: in-container SDK reads the managed snapshot as admin uid 1000"
+    assert_output_contains "PASS: disposable: in-container inotify watch on the directory and current.json"
     assert_output_contains "PASS: disposable: running in-container controller followed a host publish"
     assert_output_contains "PASS: live named and disposable presentation binds held"
 }

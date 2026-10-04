@@ -52,6 +52,7 @@ teardown_file() {
         assert_output_contains "PASS: $label: presentation dir owner inside container is keep-id admin uid"
         assert_output_contains "PASS: $label: container write into presentation directory denied"
         assert_output_contains "PASS: $label: in-container SDK reads the managed snapshot as admin uid 1000"
+        assert_output_contains "PASS: $label: in-container inotify watch on the directory and current.json"
         assert_output_contains "PASS: $label: running in-container controller followed a host publish"
     done
     assert_output_contains "PASS: live named and disposable presentation binds held"
