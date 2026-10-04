@@ -490,3 +490,129 @@ def test_snapshot_tooltips_disabled_installs_chrome_only_filter(qapp, tmp_path):
     chrome.setParent(None)
     delegate.setParent(None)
     ctrl.stop()
+
+
+def _count_parses(monkeypatch) -> list[int]:
+    import qdistro_presentation.paths as paths_mod
+
+    calls: list[int] = []
+    real = paths_mod.parse_snapshot_bytes
+
+    def counting(data):
+        calls.append(len(data))
+        return real(data)
+
+    monkeypatch.setattr(paths_mod, "parse_snapshot_bytes", counting)
+    return calls
+
+
+def test_unchanged_identity_is_not_reparsed(qapp, tmp_path, monkeypatch):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    calls = _count_parses(monkeypatch)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
+    )
+    assert ctrl.state.using_shared_palette is True
+    assert len(calls) == 1  # initial load; the post-watch recheck does not reparse
+    ctrl._reload()
+    ctrl._reload()
+    assert len(calls) == 1
+    second = with_generation(replace(example_snapshot(), mode="light"))
+    write_snapshot(str(tmp_path), second, require_unwritable_dirs=False, skip_unchanged=False)
+    ctrl._reload()
+    assert ctrl.state.generation == second.generation
+    assert len(calls) == 2
+    ctrl.stop()
+
+
+def test_known_identity_still_runs_trust_walk(tmp_path):
+    from qdistro_presentation.model import SnapshotPathError
+    from qdistro_presentation.paths import read_snapshot_at
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    target = str(tmp_path / "current.json")
+    data, identity = read_snapshot_at(target, kind="override", expected_uid=None)
+    assert data
+    again, same = read_snapshot_at(
+        target, kind="override", expected_uid=None, known_identity=identity
+    )
+    assert again is None and same == identity
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    with pytest.raises(SnapshotPathError):
+        read_snapshot_at(str(link), kind="override", expected_uid=None, known_identity=identity)
+    with pytest.raises(SnapshotPathError):
+        read_snapshot_at(
+            target, kind="override", expected_uid=os.geteuid() + 1, known_identity=identity
+        )
+
+
+def test_mounted_directory_polls_stat_and_recovers(qapp, tmp_path, monkeypatch):
+    import qdistro_presentation.qt as qt_mod
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setattr(qt_mod, "_is_mount_point", lambda path: path == str(tmp_path))
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
+    )
+    assert ctrl._poll.isActive()
+    assert ctrl._poll.interval() == 2000
+    # No inotify delivery: drop the watcher so only the poll can notice.
+    ctrl._watcher.blockSignals(True)
+    ctrl._poll_stat()
+    assert not ctrl._coalesce.isActive()  # unchanged stat: nothing scheduled
+    second = with_generation(replace(example_snapshot(), mode="light"))
+    write_snapshot(str(tmp_path), second, require_unwritable_dirs=False, skip_unchanged=False)
+    ctrl._poll_stat()
+    assert ctrl._coalesce.isActive()
+    ctrl._coalesce.stop()
+    ctrl._reload()
+    assert ctrl.state.generation == second.generation
+    assert ctrl._poll.isActive()
+    ctrl.stop()
+    assert not ctrl._poll.isActive()
+
+
+def test_unmounted_directory_does_not_poll(qapp, tmp_path):
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
+    )
+    assert not ctrl._poll.isActive()
+    ctrl.stop()
+
+
+def test_watch_add_failure_falls_back_to_poll(qapp, tmp_path, monkeypatch):
+    import PyQt6.QtCore as qtcore
+
+    class RefusingWatcher(qtcore.QFileSystemWatcher):
+        def addPath(self, path):
+            return False
+
+    monkeypatch.setattr(qtcore, "QFileSystemWatcher", RefusingWatcher)
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
+    )
+    assert ctrl._poll.isActive()
+    ctrl.stop()
+
+
+def test_polled_deletion_does_not_churn(qapp, tmp_path, monkeypatch):
+    import qdistro_presentation.qt as qt_mod
+
+    write_snapshot(str(tmp_path), example_snapshot(), require_unwritable_dirs=False)
+    monkeypatch.setattr(qt_mod, "_is_mount_point", lambda path: True)
+    ctrl = PresentationController(
+        qapp, theme_mode="system", snapshot_path=_path(tmp_path), watch=True
+    )
+    generation = ctrl.state.generation
+    (tmp_path / "current.json").unlink()
+    ctrl._poll_stat()
+    assert ctrl._coalesce.isActive()
+    ctrl._coalesce.stop()
+    ctrl._reload()
+    assert ctrl.state.generation == generation  # last-known-good kept
+    ctrl._poll_stat()
+    assert not ctrl._coalesce.isActive()
+    ctrl.stop()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from typing import Literal
 
@@ -24,7 +25,7 @@ from .model import (
 )
 from .paths import (
     ResolvedPath,
-    load_snapshot,
+    load_snapshot_if_changed,
     nearest_existing_parent,
     resolve_snapshot_path,
 )
@@ -224,6 +225,22 @@ def apply_logical_ui_font(
     return font
 
 
+def _stat_key(path: str) -> tuple[int, int, int, int] | None:
+    """lstat identity used by the stat poll; None when absent."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _is_mount_point(path: str) -> bool:
+    try:
+        return os.path.ismount(path)
+    except OSError:
+        return False
+
+
 class _TooltipFilter(QObject):
     def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
         if event is not None and event.type() == QEvent.Type.ToolTip:
@@ -280,6 +297,12 @@ class PresentationController(QObject):
         self._retry = QTimer(self)
         self._retry.setInterval(2000)
         self._retry.timeout.connect(self._retry_absent)
+        # Stat poll for mounted directories (container binds, network
+        # filesystems) and for paths the inotify watcher could not add.
+        self._poll = QTimer(self)
+        self._poll.setInterval(2000)
+        self._poll.timeout.connect(self._poll_stat)
+        self._polled_stat: tuple[int, int, int, int] | None = None
         self._watched_dir = ""
         self._reload(initial=True)
 
@@ -311,6 +334,7 @@ class PresentationController(QObject):
     def stop(self) -> None:
         self._coalesce.stop()
         self._retry.stop()
+        self._poll.stop()
         if self._watcher is not None:
             self._watcher.deleteLater()
             self._watcher = None
@@ -328,12 +352,14 @@ class PresentationController(QObject):
         if resolved is None:
             self._identity = None
             return None
+        known = self._identity if self._snapshot is not None else None
         try:
-            snapshot, identity = load_snapshot(resolved)
+            snapshot, identity = load_snapshot_if_changed(resolved, known)
         except (OSError, SnapshotError, SnapshotPathError, RecursionError, OverflowError) as exc:
             log.debug("presentation snapshot unread: %s", exc)
             return self._snapshot
-        if self._identity == identity and self._snapshot is not None:
+        if snapshot is None:
+            # Same dev/inode/mtime/size: not reparsed.
             return self._snapshot
         self._identity = identity
         return snapshot
@@ -359,8 +385,6 @@ class PresentationController(QObject):
         resolved = self._resolved_path()
         if resolved is None:
             return
-        import os
-
         if os.path.lexists(resolved.path):
             self._retry.stop()
             self._reload()
@@ -374,8 +398,6 @@ class PresentationController(QObject):
         if resolved is None:
             return
         path = resolved.path
-        import os
-
         watch_dir = os.path.dirname(path)
         if not os.path.isdir(watch_dir):
             watch_dir = nearest_existing_parent(path)
@@ -390,29 +412,46 @@ class PresentationController(QObject):
         current_dirs = set(self._watcher.directories())
         current_files = set(self._watcher.files())
         wanted_dir = watch_dir
+        watch_failed = False
         if wanted_dir not in current_dirs:
             for extra in current_dirs:
                 self._watcher.removePath(extra)
-            if wanted_dir:
-                self._watcher.addPath(wanted_dir)
+            if wanted_dir and not self._watcher.addPath(wanted_dir):
+                watch_failed = True
         if os.path.isfile(path):
             if path not in current_files:
                 for extra in current_files:
                     self._watcher.removePath(extra)
-                self._watcher.addPath(path)
+                if not self._watcher.addPath(path):
+                    watch_failed = True
         else:
             for extra in current_files:
                 self._watcher.removePath(extra)
         self._watched_dir = watch_dir
+        self._polled_stat = _stat_key(path)
+        if watch_failed or _is_mount_point(watch_dir):
+            if not self._poll.isActive():
+                self._poll.start()
+        else:
+            self._poll.stop()
         # Recheck after the read/watch setup race.
         if os.path.isfile(path):
             try:
-                snapshot, identity = load_snapshot(resolved)
+                snapshot, identity = load_snapshot_if_changed(resolved, self._identity)
             except (OSError, SnapshotError, SnapshotPathError, RecursionError, OverflowError):
                 return
-            if identity != self._identity:
+            if snapshot is not None and identity != self._identity:
                 self._identity = identity
                 self._apply_resolved(snapshot, emit=True)
+
+    def _poll_stat(self) -> None:
+        resolved = self._resolved_path()
+        if resolved is None:
+            return
+        current = _stat_key(resolved.path)
+        if current != self._polled_stat:
+            self._polled_stat = current
+            self._coalesce.start()
 
     def _on_fs_event(self, _path: str) -> None:
         self._coalesce.start()
