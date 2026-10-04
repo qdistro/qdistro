@@ -18,11 +18,16 @@ location on a qdistro desktop:
 ```
 
 The directory is created by the installer, owned by the trusted admin
-account, mode 0755; the file is 0644. Isolated applications receive
-read-only access. Tier-2 binds that directory with private propagation
-and does not mount sibling `/var/lib/qdistro` trees. There is no default
-`current.json` at install time: absence means native fallback, not a
-forced dark theme.
+account, mode 0755; the file is 0644. Isolated applications receive a
+read-only bind of that directory. Tier-2 binds it with private
+propagation (`ro,nodev,nosuid,noexec,rprivate`) and does not mount
+sibling `/var/lib/qdistro` trees. A bind of `current.json` is not by
+itself a managed source: ordinary consumers resolve the managed path
+only after loading trusted deployment metadata (below). The qfileman
+image recipe installs that metadata; an image built without it yields
+no managed source even when the snapshot directory is mounted. There is
+no default `current.json` at install time: absence means native
+fallback, not a forced dark theme.
 
 On an ordinary (non-qdistro) desktop, qdshell may publish to
 `${XDG_STATE_HOME:-$HOME/.local/state}/qdistro/presentation/current.json`.
@@ -82,6 +87,34 @@ Unknown versions are rejected. Unknown fields inside v1 are ignored. New
 optional fields may extend v1 with defined defaults; a required behavioral
 change needs v2.
 
+Readers reject a snapshot whose `generation` does not match the SHA-256 of
+the canonical content (UUID-formatted from the digest). `generation` is
+not an independently minted identifier.
+
+## Trust
+
+Managed-path resolution requires
+`/usr/share/qdistro/presentation/deployment.json`. The reader opens that
+file with `O_NOFOLLOW` at every path component, requires root-owned
+ancestors (`usr`, `share`, `qdistro`, `presentation`) and a root-owned
+regular leaf, and rejects group/other-writable metadata. Missing,
+unreadable, or untrusted metadata yields no managed source even when
+`/var/lib/qdistro/presentation` exists. The JSON is
+`{"version":1,"admin_uid":<uid>}`. The VM installer rejects an admin UID
+other than 1000; the qfileman image bakes the same `admin_uid` 1000 value
+before `USER 1000:1000`.
+
+A managed `current.json` walk requires root-owned `/var`, `/var/lib`,
+and `/var/lib/qdistro`, and an admin-owned presentation directory and
+file matching that `admin_uid`. Symlinks are refused. polkit and the
+locker ignore `QDISTRO_PRESENTATION_FILE` and never fall back to the
+developer state path.
+
+SELinux labels `/var/lib/qdistro/presentation` as
+`qdistro_presentation_t` (`selinux/presentation/`). Isolated domains may
+getattr/open/read/search/watch the directory and getattr/open/read the
+file. Writes stay with the producer domains.
+
 ## Consumer behaviour
 
 Apps attach one `PresentationController` per `QApplication` after
@@ -107,3 +140,10 @@ inherited shared layer.
 replaces `current.json` (exclusive temp, fsync, `os.replace`, directory
 fsync). It skips the write when the content hash matches the existing file.
 Publication failure is a diagnostic, never fatal to qdshell.
+
+`--reset` writes an `enabled=false` envelope from stdin JSON, or from the
+built-in dark palette when stdin is empty. Consumers then drop the
+inherited shared layer while keeping every other required field. Deletion
+or unreadability still retains last-known-good; only this explicit reset
+clears it. `--owner-uid` is optional and required when the caller must
+assert directory and file ownership.

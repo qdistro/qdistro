@@ -69,7 +69,8 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
              bootstrap-installer-resume build-guard codex-packaging-fixes \
              edit-guard gen-source-manifest guest-image-perms image-release \
              kiwi-ci-base offline-install presentation-delivery \
-             presentation-four-apps qsu-binary source-manifest-signature \
+             presentation-docs presentation-four-apps qsu-binary \
+             source-manifest-signature \
              spin-test-vm-gui-bootstrap tier5b-ops-hardening; do
         [ -f "$REPO_ROOT/tests/integration/vm/$f.bats" ] || continue
         bats_is_host_only "$REPO_ROOT/tests/integration/vm/$f.bats" \

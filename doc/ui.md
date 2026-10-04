@@ -160,6 +160,9 @@ Right-click is powerful but invisible. Conventions to mitigate:
 - **Dark theme is the default.** Light theme exists and is tested as a
  secondary option.
 - System-wide dark/light toggle; per-user override allowed.
+- First-party apps follow the published snapshot in
+ [presentation.md](presentation.md) rather than reading qdshell's private
+ settings file.
 - **Per-user accent colour** (assigned at account creation) drives:
  - Window border / titlebar tint for windows owned by that user.
  - Selection highlight inside that user's apps.
