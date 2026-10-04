@@ -38,7 +38,8 @@ Tested HEAD: `eac49ad16` (`claude/tier3s-b`). Record run: **b17**.
 | b26 (aborted) | `bats-20261004T181436Z-571884` | `1ffe9467a` | aborted at ~14 min — `timeout 30 <shell-function>` can't exec a function, every wait_for failed on sight; bound moved to a killable subshell + rc-file (`24540c6f0`) |
 | `b27-seventh-acceptance/` | `bats-20261004T183215Z-962731` | `24540c6f0` | **9/10** — s127 99/0 (v35 live cross-silo `broker:allow` + source-pid relay green), s129 78/0. s126 driver **90/1**: ALL bridge-path + single-attach assertions passed (probe-as-workload works); sole FAIL = `probe_ctrs_gone` missing `return 0` (journal: all containers died+removed <1 s). Held-client orphan also held qemu-ga's exec pipes ~40 min — both fixed `6e0c677c3` |
 | `b28-eighth-acceptance/` | `bats-20261004T185713Z-1153353` | `6e0c677c3` | **9/10** — s126 setup flake only (81/1, driver never ran): `busctl list` owned the SessionManager1 name while a single introspect timed out (name registered before the object serves, under load) — serving-wait added in `4d7629a61`. s127+s129 green again |
-| `b29-acceptance/` | `bats-20261004T190703Z-1331658` | `4d7629a61` | **RECORD RUN (Sol-r2 remediation): 10/10 pass** — s120 196/0, s121 155/0, s122 152/0, s123 76/0, s124 75/0, s125 97/0, s126 91/0, s127 99/0, s128 54/0, s129 78/0 |
+| `b29-acceptance/` | `bats-20261004T190703Z-1331658` | `4d7629a61` | **10/10** — the first Sol-r2 record run (same counts as b30); Sol r3 then found the opcode-renumber + descendant-leak defects, fixed `b524ac0c8`/`421e0bf75` |
+| `b30-acceptance/` | `bats-20261004T192608Z-1670740` | `421e0bf75` | **RECORD RUN: 10/10 pass** — s120 196/0, s121 155/0, s122 152/0, s123 76/0, s124 75/0, s125 97/0, s126 91/0, s127 99/0, s128 54/0, s129 78/0 |
 
 ## b17 record run (`eac49ad16`) — 10/10 files PASS
 
@@ -78,11 +79,11 @@ Superseded by b29 (Sol-r2 remediation record). Fresh workers;
 | s128 lineage | 54/0 | |
 | s129 hostile-stream | 78/0 | gofer-netns fd attribution |
 
-## b29 record run (`4d7629a61`) — 10/10 files PASS
+## b30 record run (`421e0bf75`) — 10/10 files PASS
 
-**Current record** — the Sol-r2 remediation acceptance. Fresh workers;
-`b29-acceptance/report.md`, per-file TAP logs + driver transcripts under
-`b29-acceptance/bats/`:
+**Current record** — the Sol-r2 remediation acceptance at the r3-fixed tip (opcode-stable v35 + descendant-kill wait_for). Fresh workers;
+`b30-acceptance/report.md`, per-file TAP logs + driver transcripts under
+`b30-acceptance/bats/`:
 
 | Driver | Passes | Notes |
 |---|---|---|
@@ -99,8 +100,8 @@ Superseded by b29 (Sol-r2 remediation record). Fresh workers;
 
 ## DONE bar (`03-implementation-plan.md` Phase B)
 
-- **s123–s129 PASS** — b29 table above (record run at `4d7629a61`, single
-  commit, one run; earlier green: b24 at `65a79151c`, b17 at `eac49ad16`).
+- **s123–s129 PASS** — b30 table above (record run at `421e0bf75`, single
+  commit, one run; earlier green: b29 at `4d7629a61`, b24, b17).
 - **Screenshots** — `shots/t3s-weston-terminal.png`, `shots/t3s-foot.png`:
   dev VM `t3s-shot-261004-121311-155087-24437` cloned from the b17 golden
   (`qci-golden-bats-261004-115935-17667-18553`), tier3s installed at
