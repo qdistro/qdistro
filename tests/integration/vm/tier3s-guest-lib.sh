@@ -103,8 +103,17 @@ wait_for() {   # wait_for <secs> <cmd...>
     # a wedged probe call (a stalled podman/busctl IPC) must fail the
     # iteration, not hang the driver past vm-exec's 1800 s bound — every
     # probe in this lib is a sub-second query, 30 s is generous.
-    for _ in $(seq 1 $((n * 4))); do timeout 30 "$@" && return 0; sleep 0.25; done
+    for _ in $(seq 1 $((n * 4))); do wait_for_bounded 30 "$@" && return 0; sleep 0.25; done
     return 1
+}
+wait_for_bounded() {   # bound one check call; timeout(1) can't exec a
+    local s=$(( $1 * 10 )) rc; shift   # shell function, so bound a
+    rc=$(mktemp) || return 1           # killable subshell and read its
+    ( "$@"; echo $? > "$rc" ) &        # status off an rc file — a wedged
+    local pid=$!                       # call leaves the file empty.
+    while (( s-- > 0 )) && [ ! -s "$rc" ]; do sleep 0.1; done
+    if [ ! -s "$rc" ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$rc"; return 1; fi
+    local r; read -r r < "$rc"; rm -f "$rc"; wait "$pid" 2>/dev/null; return "$r"
 }
 unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
 # a failed `systemctl show` (empty answer) is NOT "down" (sol A-iii r1 P2)
