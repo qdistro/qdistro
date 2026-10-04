@@ -56,7 +56,11 @@ resolve_latest_cloud_image() {
     chmod 0700 "$tmp"
 
     listing="$(wget -qO- "$dir_url/")" || { rm -rf "$tmp"; _osci_die "listing failed: $dir_url/"; return 1; }
-    newest="$(printf '%s\n' "$listing" | grep -oE "${prefix}-Snapshot20[0-9]{6}\.qcow2" | sort -u | tail -1)"
+    # The prefix is a literal product name interpolated into an ERE — escape
+    # regex metacharacters (dots in "1.0.0") so similarly spelled names can't
+    # match; the signature + basename binding is the hard bound either way.
+    local ere="${prefix//./\\.}"
+    newest="$(printf '%s\n' "$listing" | grep -oE "${ere}-Snapshot20[0-9]{6}\.qcow2" | sort -u | tail -1)"
     [ -n "$newest" ] || { rm -rf "$tmp"; _osci_die "no dated ${prefix}-Snapshot*.qcow2 under $dir_url/"; return 1; }
 
     url="$dir_url/$newest"

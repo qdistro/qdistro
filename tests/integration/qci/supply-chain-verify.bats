@@ -176,6 +176,31 @@ make_local_signed_fixture() {
     [[ "$output" == *"older than 14 days"* ]]
 }
 
+@test "expired-but-valid pin still loads as a floating-lane floor" {
+    local substrate="$REPO_ROOT/scripts/vm/lib/test-substrate.sh" manifest="$WORK/substrate.conf" expired future
+    expired="$(date -u -d '15 days ago' +%Y%m%d)"
+    printf 'schema=1\narch=%s\ncloud_url=https://invalid.example/cloud.qcow2\ncloud_sha256=%064d\nsnapshot=%s\n' \
+        "$(uname -m)" 1 "$expired" > "$manifest"
+    # The floor only bounds the resolved snapshot from below; freshness is
+    # enforced on the resolved manifest, not on the repo pin.
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate floor && qdistro_substrate_base_path admin"
+    [ "$status" -eq 0 ]
+    # floor mode still refuses future and invalid-calendar dates.
+    future="$(date -u -d '30 days' +%Y%m%d)"
+    sed -i "s/snapshot=$expired/snapshot=$future/" "$manifest"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate floor"
+    [ "$status" -ne 0 ]
+    sed -i "s/snapshot=$future/snapshot=20260230/" "$manifest"
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate floor"
+    [ "$status" -ne 0 ]
+    run env QDISTRO_TEST_SUBSTRATE="$manifest" bash -c \
+        ". '$substrate'; qdistro_load_test_substrate bogus"
+    [ "$status" -ne 0 ]
+}
+
 @test "qci refuses an expired cloud pin before starting VM tests" {
     local manifest="$WORK/substrate.conf" expired runs="$WORK/runs"
     expired="$(date -u -d '15 days ago' +%Y%m%d)"

@@ -59,7 +59,13 @@ jobs:
             echo "LIBGUESTFS_BACKEND_SETTINGS=force_tcg" >> "$GITHUB_ENV"
           fi
           . scripts/vm/lib/test-substrate.sh
-          qdistro_load_test_substrate
+          if [ "${{ inputs.floating_substrate }}" = "true" ]; then
+            # The repo pin is only a snapshot floor here and may be older than
+            # 14 days; the resolved manifest still gets the full freshness check.
+            qdistro_load_test_substrate floor
+          else
+            qdistro_load_test_substrate
+          fi
           if [ "${{ inputs.floating_substrate }}" = "true" ]; then
             . scripts/vm/lib/opensuse-cloud-image.sh
             pin_snap="$QDISTRO_SUBSTRATE_SNAPSHOT"
