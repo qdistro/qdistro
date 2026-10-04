@@ -114,8 +114,16 @@ is "unit StopPropagatedFrom (O11)" "$(systemctl show -p StopPropagatedFrom --val
 systemctl restart qdistro-session-manager.service
 wait_for 30 manager_up
 pid=$(systemctl show -p MainPID --value qdistro-session-manager.service)
+# the bus name is owned before the object serves — under load a single
+# introspect can outrun the manager's init (b28 s126: name listed,
+# introspect timed out). Wait for the verb, not just the name.
+serves_tier3s() {
+    busctl introspect org.qdistro.SessionManager1 /org/qdistro/SessionManager1 2>/dev/null \
+        | grep -q '^\.CreateTier3sSilo '
+}
+wait_for 45 serves_tier3s || :
 if [ "${pid:-0}" -gt 0 ] && [ "$(stat -c %Y "/proc/$pid")" -ge "$(stat -c %Y /usr/libexec/qdistro/qdistro_session_manager.py)" ] \
-   && busctl introspect org.qdistro.SessionManager1 /org/qdistro/SessionManager1 | grep -q '^\.CreateTier3sSilo '; then
+   && serves_tier3s; then
     pass "session manager runs the installed code (pid $pid, serves CreateTier3sSilo)"
 else fail "session manager is not running the installed code (pid ${pid:-?})"; fi
 is "broker has the rules-only tier3s prefix" "$(grep -c '"qdistro.tier3s.spawn:",' /usr/libexec/qdistro/qdistro_admin_broker.py)" 1
