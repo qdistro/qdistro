@@ -96,14 +96,15 @@ usermod -a -G "$BRIDGE_GROUP" "$SILO_A" && obs "$SILO_A added to $BRIDGE_GROUP: 
 obs "$SILO_B groups (control, not a member): $(id "$SILO_B")"
 SOCK=$BDIR/bridge.sock
 # A trivial unix listener as admin to stand in for the waypipe endpoint.
-as_admin socat -lfsocat-lt "UNIX-LISTEN:$SOCK,mode=660,group=$BRIDGE_GROUP" OPEN:/dev/null &
+as_admin socat "UNIX-LISTEN:$SOCK,mode=660,group=$BRIDGE_GROUP" SYSTEM:'echo pong' &
 sleep 1
 stat -c 'stat %n %U:%G %a' "$BDIR" "$SOCK" 2>&1
-obs "$SILO_A (member) connect:"; as_silo "$SILO_A" sh -c "echo hi | socat - UNIX-CONNECT:$SOCK" 2>&1; echo "rc=$?"
-obs "$SILO_B (non-member) connect:"; as_silo "$SILO_B" sh -c "echo hi | socat - UNIX-CONNECT:$SOCK" 2>&1; echo "rc=$?"
+obs "$SILO_A (member) connect:"; as_silo "$SILO_A" socat - UNIX-CONNECT:"$SOCK" </dev/null 2>&1; echo "rc=$?"
+obs "$SILO_B (non-member) connect:"; as_silo "$SILO_B" socat - UNIX-CONNECT:"$SOCK" </dev/null 2>&1; echo "rc=$?"
 obs "$SILO_B (non-member) list dir:"; as_silo "$SILO_B" ls "$BDIR" 2>&1; echo "rc=$?"
 obs "$SILO_A (member) list dir:"; as_silo "$SILO_A" ls "$BDIR" 2>&1; echo "rc=$?"
-pkill -f "socat.*UNIX-LISTEN:$SOCK" 2>/dev/null; true
+obs "admin (owner) list dir:"; as_admin ls "$BDIR" 2>&1; echo "rc=$?"
+pkill -f "socat.*UNIX-LISTEN" 2>/dev/null; true
 
 say "4. runtime-dir / state ownership"
 # What does podman-as-silo need for XDG_RUNTIME_DIR, runroot, graphroot?
@@ -126,15 +127,21 @@ fi
 say "5. image store readability for a distinct uid"
 obs "admin home traversal for $SILO_A: $(as_silo "$SILO_A" ls /home/$ADMIN/.local/share/containers 2>&1 | head -1)"
 obs "5a. per-silo store already exercised above: silo pulled + keeps its own images"
-# (b) additionalimagestores: root populates a read-only store at a shared
+# (b) additionalimagestores: admin populates a rootless store at a shared
 #     path; the silo lists it via its own storage.conf. THE mapping
-#     question from `03`: store content created under root's mapping must
+#     question from `03`: store content created under admin's uid map must
 #     be traversable under the silo's distinct uid map.
 SHARED=/var/lib/qdistro-tier3s-store
 rm -rf "$SHARED"; install -d -m 0755 "$SHARED"
-podman --root "$SHARED" pull -q "${IMG##* }" 2>&1 | tail -2 \
-    || podman --root "$SHARED" pull -q registry.opensuse.org/opensuse/busybox:latest 2>&1 | tail -2
-obs "shared store perms:"; find "$SHARED" -maxdepth 2 | head -6; du -sh "$SHARED"
+# Populate as a ROOTLESS store (per-store lock files then have the store
+# owner's ids — a root podman store's lock files are unreadable outright).
+# Variant A: admin-owned store at a shared path — still a distinct uid map
+# for the silo, which is what `03` wants proven.
+as_admin podman --root "$SHARED" pull -q "${IMG:-registry.opensuse.org/opensuse/busybox:latest}" 2>&1 | tail -2
+obs "shared store perms (admin-populated):"; find "$SHARED" -maxdepth 2 | head -6; du -sh "$SHARED"
+chmod -R a+rX "$SHARED" 2>/dev/null   # traversal/read for other uids; locks still owner-only?
+obs "after chmod -R a+rX:"; find "$SHARED/overlay-images" -maxdepth 1 2>/dev/null | head -5
+stat -c '%n %U:%G %a' "$SHARED"/overlay-images/images.lock 2>&1
 install -d -o "$SILO_A" -g "$SILO_A" -m 0700 /home/$SILO_A/.config /home/$SILO_A/.config/containers
 printf '[storage]\ndriver="overlay"\n[storage.options]\nadditionalimagestores=["%s"]\n' "$SHARED" \
     > /home/$SILO_A/.config/containers/storage.conf

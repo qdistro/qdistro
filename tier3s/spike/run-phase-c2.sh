@@ -31,7 +31,7 @@ SRV_PID=$!
 sleep 1
 
 VMLOG "$L/10-stage.log" "$vm" \
-  "mkdir -p /root/t3s-c2 && cd /root/t3s-c2 && curl -fsS http://10.0.2.2:$PORT/spike.tgz | tar xzf - && ls -la tier3s/ && loginctl enable-linger admin && sleep 2 && ls -ld /run/user/1000"
+  "mkdir -p /root/t3s-c2 && cd /root/t3s-c2 && curl -fsS http://10.0.2.2:$PORT/spike.tgz | tar xzf - --no-same-owner && chown -R root:root /root/t3s-c2 && ls -la tier3s/ && loginctl enable-linger admin && sleep 2 && ls -ld /run/user/1000"
 
 VMLOG "$L/15-provision-runsc.log" "$vm" \
   "bash /root/t3s-c2/tier3s/provision-runsc.sh && /usr/libexec/qdistro/runsc/runsc --version | head -2"
