@@ -35,7 +35,8 @@ pm_s() {   # pm_s <podman args...> — podman as the silo account (model A store
     home=$(getent passwd "$ACCT" | cut -d: -f6)
     runuser -u "$ACCT" -- env -i PATH=/usr/bin:/bin HOME="$home" \
         USER="$ACCT" LOGNAME="$ACCT" \
-        XDG_RUNTIME_DIR="/run/qdistro-tier3s-rt/$uid" podman "$@"
+        XDG_RUNTIME_DIR="/run/qdistro-tier3s-rt/$uid" \
+        CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf podman "$@"
 }
 silo_uid() { id -u "$ACCT" 2>/dev/null; }
 
@@ -157,7 +158,11 @@ out=$(pm_s load -i "$d/tier3s-headless-smoke.oci.tar" 2>&1); rc=$?
 printf '%s\n' "$out" | tail -2 | sed 's/^/    /'
 is "podman load into the silo store rc" "$rc" 0
 is "image exists in the silo store" "$(yes_no pm_s image exists "$IMAGE")" yes
-is "image invisible to admin's store" "$(yes_no pm image exists "$IMAGE")" no
+# the build leaves the image in admin's store too — remove it there and the
+# silo's copy must persist (the stores are independent, not a shared view)
+pm rmi -f "$IMAGE" > /dev/null 2>&1
+is "image rmi'd from admin's store" "$(yes_no pm image exists "$IMAGE")" no
+is "image still exists in the silo store" "$(yes_no pm_s image exists "$IMAGE")" yes
 
 step "4. live launch: identity, placement, record"
 TOK=$(up_silo "$SILO")
