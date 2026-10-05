@@ -71,6 +71,11 @@ if [ -n "$IMG" ]; then
     # refused, and a missing per-uid root must refuse (no silent minting).
     obs "A: wrapper refuses caller-supplied --root (silo context):"
     probe as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+        --runtime-flag=root=/tmp/t3s-evil-root \
+        run --rm --security-opt label=disable --userns=keep-id --network=none \
+        "$IMG" true
+    obs "A-bis: same but doubled flag (parser-level rejection, distinct from wrapper refusal):"
+    probe as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         --runtime-flag=--root=/tmp/t3s-evil-root \
         run --rm --security-opt label=disable --userns=keep-id --network=none \
         "$IMG" true
@@ -186,11 +191,17 @@ sbx_connect "control: dir 0711, socket 0666" 0666 "-"
 # the group to be unmappable and the connect denied.
 chmod 0710 "$BDIR"; chown "$ADMIN:$BRIDGE_GROUP" "$BDIR"
 sbx_connect "group dance: dir grp 0710, socket grp 0660 (member silo)" 0660 "$ADMIN:$BRIDGE_GROUP"
-chmod 0711 "$BDIR"; chown "$ADMIN:$ADMIN" "$BDIR"
-sbx_connect "same socket + --group-add keep-groups (group still unmappable?)" 0660 "$ADMIN:$BRIDGE_GROUP" --group-add keep-groups
+chmod 0711 "$BDIR"; chown "$ADMIN:$ADMIN" "$BDIR"   # dir opened: isolate the socket-level check
+sbx_connect "same socket grp 0660 + open dir 0711, --group-add keep-groups" 0660 "$ADMIN:$BRIDGE_GROUP" --group-add keep-groups
 # silo-owned socket — the model the sandbox path actually needs:
 # guest-uid sees host uid 1001 as itself; socket 0600 silo-owned works.
 sbx_connect "silo-owned socket 0600, dir admin 0711" 0600 "$SILO_A:$SILO_A"
+# recorded evidence for the keep-groups failure: what gids does the guest
+# actually hold, and what does the synthesized gid_map look like?
+obs "keep-groups guest-side group set (is $BRIDGE_GROUP mapped in?):"
+probe as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+    run --rm --security-opt label=disable --userns=keep-id --group-add keep-groups \
+    --network=none "$IMG" sh -c 'id'
 
 
 say "4. runtime-dir / state ownership"
