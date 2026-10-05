@@ -52,7 +52,13 @@ DISP_RULE="$RULE_DIR/zz-pres-live-disp-allow.yaml"
 TIER2_ACTION="qdistro.tier2.spawn:${WORKLOAD}/${WORKLOAD}"
 DISP_ACTION="qdistro.dispose.spawn:${WORKLOAD}"
 
-as_admin() { runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" "$@"; }
+# DBUS_SESSION_BUS_ADDRESS sends rootless podman to admin's user systemd for
+# cgroups. Without it, a root SSH login (the enforcing transport) leaves
+# runuser in user-0.slice and podman's cgroupfs fallback is denied.
+as_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "$@"
+}
 
 cleanup() {
     as_admin podman rm -f "$NAMED" >/dev/null 2>&1 || true
@@ -218,6 +224,17 @@ check_container() {
         fail "$label: in-container SDK resolve '$resolved', expected 'managed uid=$ADMIN_UID gen=$GEN_A'"
     fi
 
+    # QFileSystemWatcher puts an inotify watch on current.json itself, not
+    # only on the directory. Under enforcing, container_t needed file
+    # `watch` (qdistro_presentation 0.1.1); 0.1.0 denied it silently.
+    local watched
+    watched=$(as_admin podman exec "$container" env PYTHONSAFEPATH=1 python3 -c "$WATCH_PY" 2>&1 | tail -n1)
+    if [ "$watched" = "dir=True file=True" ]; then
+        pass "$label: in-container inotify watch on the directory and current.json"
+    else
+        fail "$label: in-container inotify watch result '$watched', expected 'dir=True file=True'"
+    fi
+
     local follow_out gen_b follow_pid
     follow_out=$(mktemp)
     as_admin podman exec "$container" env -u QDISTRO_PRESENTATION_FILE PYTHONSAFEPATH=1 QT_QPA_PLATFORM=offscreen \
@@ -268,6 +285,16 @@ if r is None:
 else:
     snap, _ = load_snapshot(r)
     print(f"{r.kind} uid={r.expected_uid} gen={snap.generation}")
+'
+
+# In-container: can this domain add inotify watches on the dir and file?
+WATCH_PY='
+from PyQt6.QtCore import QCoreApplication, QFileSystemWatcher
+app = QCoreApplication(["presentation-live-watch"])
+w = QFileSystemWatcher()
+d = w.addPath("/var/lib/qdistro/presentation")
+f = w.addPath("/var/lib/qdistro/presentation/current.json")
+print(f"dir={d} file={f}")
 '
 
 # In-container: a watching controller must see a host publish within 15 s.

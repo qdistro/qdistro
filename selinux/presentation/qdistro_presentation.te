@@ -2,8 +2,10 @@
 ## <desc>
 ##   Read-only appearance JSON for first-party apps. The trusted admin
 ##   publisher writes it; isolated app domains may only read/search/watch.
+##   File watch is needed too: QFileSystemWatcher adds an inotify watch on
+##   current.json itself, which container_t was silently denied (0.1.0).
 ## </desc>
-policy_module(qdistro_presentation, 0.1.0)
+policy_module(qdistro_presentation, 0.1.1)
 
 require {
 	type unconfined_t;
@@ -15,7 +17,7 @@ files_type(qdistro_presentation_t)
 
 # Traversal of /var/lib/qdistro
 allow unconfined_t qdistro_presentation_t:dir { getattr search open read add_name remove_name write watch };
-allow unconfined_t qdistro_presentation_t:file { getattr open read create write setattr unlink rename };
+allow unconfined_t qdistro_presentation_t:file { getattr open read create write setattr unlink rename watch };
 
 optional_policy(`
 	gen_require(`
@@ -23,7 +25,7 @@ optional_policy(`
 		role staff_r;
 	')
 	allow staff_t qdistro_presentation_t:dir { getattr search open read add_name remove_name write watch };
-	allow staff_t qdistro_presentation_t:file { getattr open read create write setattr unlink rename };
+	allow staff_t qdistro_presentation_t:file { getattr open read create write setattr unlink rename watch };
 ')
 
 optional_policy(`
@@ -31,7 +33,7 @@ optional_policy(`
 		type qdistro_tier1_t;
 	')
 	allow qdistro_tier1_t qdistro_presentation_t:dir { getattr search open read watch };
-	allow qdistro_tier1_t qdistro_presentation_t:file { getattr open read };
+	allow qdistro_tier1_t qdistro_presentation_t:file { getattr open read watch };
 ')
 
 optional_policy(`
@@ -39,7 +41,7 @@ optional_policy(`
 		type container_t;
 	')
 	allow container_t qdistro_presentation_t:dir { getattr search open read watch };
-	allow container_t qdistro_presentation_t:file { getattr open read };
+	allow container_t qdistro_presentation_t:file { getattr open read watch };
 ')
 
 optional_policy(`
@@ -47,5 +49,5 @@ optional_policy(`
 		type qdistro_tier2_t;
 	')
 	allow qdistro_tier2_t qdistro_presentation_t:dir { getattr search open read watch };
-	allow qdistro_tier2_t qdistro_presentation_t:file { getattr open read };
+	allow qdistro_tier2_t qdistro_presentation_t:file { getattr open read watch };
 ')
