@@ -3,8 +3,9 @@
 # limits are enforced, not just set (driver s130-tier3s-limits.sh;
 # tier3s/CONTRACT.md §3 D-A3b). MemoryMax (OOM kill), TasksMax (fork bomb
 # bounded at pids.max), CPUQuota (cpu.stat throttling), plus the
-# selective-delegation proof that admin cannot raise any of them and a
-# recursive cgroup.procs placement re-proof. Headless staging only.
+# selective-delegation proof that neither the owning silo account nor admin
+# can raise any of them, and a recursive cgroup.procs placement re-proof.
+# Headless staging only.
 
 load helpers
 load tier3s
@@ -27,10 +28,15 @@ teardown_file() {
     assert_output_contains "PASS: limits: memory.swap.max = MemorySwapMax=0"
     assert_output_contains "PASS: limits: pids.max = TasksMax=1024"
     assert_output_contains "PASS: limits: cpu.max = CPUQuota=200%"
-    # admin cannot raise any of them — EACCES/EPERM observed, not just rc!=0
+    # model A: the scope is delegated to the silo account — neither the
+    # silo nor admin can raise any limit; EACCES/EPERM observed, not rc!=0
     for f in memory.max memory.swap.max pids.max cpu.max; do
+        assert_output_contains "PASS: limits: qt3s-s130a write to $f fails with EACCES/EPERM"
         assert_output_contains "PASS: limits: admin write to $f fails with EACCES/EPERM"
     done
+    assert_output_contains "PASS: limits: scope dir itself is delegated to the silo uid"
+    assert_output_contains "PASS: limits: cgroup.procs delegated"
+    assert_output_contains "PASS: limits: cgroup.procs NOT admin-writable"
     # placement re-proof
     for c in runuser podman-cli conmon runsc-gofer runsc-sandbox runsc-fd-parking systrap-stub; do
         assert_output_contains "PASS: placement[A]: $c x"
@@ -39,6 +45,7 @@ teardown_file() {
     # the three limits enforce
     assert_output_contains "PASS: cpu: nr_throttled grew under a 400%-hungry load"
     assert_output_contains "PASS: tasks: an outside admin process cannot inject itself into the scope"
+    assert_output_contains "PASS: tasks: an outside silo-C process cannot inject itself into the scope"
     assert_output_contains "PASS: tasks: C's scope really is at TasksMax=1024"
     assert_output_contains "PASS: tasks: host pids.current never exceeded pids.max"
     assert_output_contains "PASS: tasks: pids.events.local max grew"
