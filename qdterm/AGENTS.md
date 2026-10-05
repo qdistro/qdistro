@@ -20,7 +20,7 @@ python3 -m pytest tests/test_config.py tests/test_cli.py tests/test_plugin.py -v
 
 ## Dependencies
 
-System (openSUSE): python313-PyQt6, qtermwidget-devel, libqtermwidget6-2, python313-pytest, python313-pytest-qt
+System (openSUSE): python314-PyQt6, qtermwidget-devel, libqtermwidget6-2, python314-pytest, python314-pytest-qt
 
 QTermWidget Python bindings: built from source via sip-wheel (see README.md).
 

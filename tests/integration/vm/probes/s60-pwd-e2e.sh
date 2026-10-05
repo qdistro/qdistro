@@ -68,7 +68,7 @@ echo "PASS: UnlockVault as admin"
 # Step 3 — admin AddItem with an exe pin. We pin to /usr/bin/dbus-send
 # (a real native binary). Using a Python CLI like qdistro-pwd-get for
 # the pin doesn't work because /proc/<pid>/exe of a python-shebang
-# script is the interpreter (python3.13), not the script path — every
+# script is the interpreter (python3.14), not the script path — every
 # python script would satisfy that pin. dbus-send is a real ELF; pinning
 # to it is a meaningful identity claim. See spec/13 §"App identity
 # verification" + README phase1/pwd/README.md.
@@ -90,7 +90,7 @@ if [ "$ADMIN_VAL" != "topsecret123" ]; then
 fi
 echo "PASS: GetItemAdmin returned the original value"
 
-# Step 5 — non-admin uid with WRONG exe (Python CLI is python3.13) is denied.
+# Step 5 — non-admin uid with WRONG exe (Python CLI is python3.14) is denied.
 DENIED=$(runuser -u pwduser -- bash -c "qdistro-pwd-get '$VAULT' '$ITEM' 2>&1" || true)
 if printf '%s' "$DENIED" | grep -qE "PolicyError|exe mismatch|pin gate refused"; then
     echo "PASS: non-admin uid with wrong exe is denied"

@@ -35,17 +35,17 @@ QDISTRO_PKGS=(
   # unversioned libpng.pc that dependency('libpng') resolves.)
   cairo-devel libpng16-devel libpng16-compat-devel pango-devel
   fontconfig-devel glib2-devel libva-devel
-  python313-pywayland python313-cffi python313-PyQt6
-  qt6-wayland qt6-declarative-imports python313-setuptools
+  python314-pywayland python314-cffi python314-PyQt6
+  qt6-wayland qt6-declarative-imports python314-setuptools
   tesseract-ocr grim
   socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
   Mesa-demo-egl wayland-utils
-  python313-python-pam python313-six fprintd
-  python313-dbus-python python313-gobject python313-gobject-Gdk
-  python313-PyYAML
-  python313-cryptography
+  python314-python-pam python314-six fprintd
+  python314-dbus-python python314-gobject python314-gobject-Gdk
+  python314-PyYAML
+  python314-cryptography
   # Textual admin TUI (qdistro-admin-tui; install-admin-cli-for-vm.sh)
-  python313-textual python313-rich
+  python314-textual python314-rich
   tpm2.0-tools
   sqlite3
   libselinux-devel selinux-policy-devel
@@ -68,8 +68,8 @@ QDISTRO_PKGS=(
   snapper            # btrfs snapshot management
   btrfs-progs        # btrfs subvolume commands
   quickshell         # qdshell runtime
-  python313-dbus_next  # qdlocker runtime dep
-  # NOTE: python313-PyQt6-WebEngine (qdbrowser WebEngine) is intentionally
+  python314-dbus_next  # qdlocker runtime dep
+  # NOTE: python314-PyQt6-WebEngine (qdbrowser WebEngine) is intentionally
   # omitted here because its exact package name is uncertain on Tumbleweed.
   # qdistro-bootstrap.sh tries multiple candidate names with a best-effort
   # (non-fatal) install. To check: zypper search qt6 webengine python

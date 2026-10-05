@@ -13,7 +13,7 @@ Usage:
 MEMBER is the signal name, e.g. ApprovalRevoked or RequestDecided.
 
 Writes one JSON object per captured signal to --out (default stdout):
-    {"member": "ApprovalRevoked", "args": [2000, "test.action", "/usr/bin/python3.13"]}
+    {"member": "ApprovalRevoked", "args": [2000, "test.action", "/usr/bin/python3.14"]}
 Touches --ready AFTER the match rule is installed, so the caller can wait for
 readiness before triggering the emitter (closing the subscribe/emit race).
 Exits 0 once at least one signal is seen, 2 on timeout with none seen.

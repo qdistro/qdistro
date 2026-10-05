@@ -44,7 +44,7 @@ def _broker_list_rules() -> list[dict]:
     try:
         import dbus
     except ImportError:
-        print("dbus-python missing; install python313-dbus-python",
+        print("dbus-python missing; install python314-dbus-python",
               file=sys.stderr)
         sys.exit(2)
     try:

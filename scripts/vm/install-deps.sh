@@ -30,18 +30,18 @@ QDISTRO_PKGS=(
   libdisplay-info-devel libX11-devel libxcb-devel
   cairo-devel libpng16-devel libpng16-compat-devel pango-devel
   fontconfig-devel glib2-devel libva-devel
-  python313-pywayland python313-cffi python313-PyQt6
-  qt6-wayland python313-setuptools
+  python314-pywayland python314-cffi python314-PyQt6
+  qt6-wayland python314-setuptools
   socat dbus-1-daemon Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
   Mesa-demo-egl wayland-utils
-  python313-python-pam python313-six fprintd
-  python313-dbus-python python313-gobject python313-gobject-Gdk
+  python314-python-pam python314-six fprintd
+  python314-dbus-python python314-gobject python314-gobject-Gdk
   # jeepney: pure-Python D-Bus used by qdbrowser/pwd_autofill.py +
   # qdistro/browser_bridge/. Without it, the autofill prompt RPC
   # short-circuits to {"ok": false, "reason": "jeepney_missing"}.
-  python313-jeepney
-  python313-PyYAML
-  python313-cryptography
+  python314-jeepney
+  python314-PyYAML
+  python314-cryptography
   # rage (Rust age impl): the backup CLI (snapshots/qdistro_backup_cli.py)
   # encrypts every blob through `rage -e | ... | rage -d` ($QDISTRO_RAGE,
   # default "rage"). The package is `rage-encryption` (provides /usr/bin/rage

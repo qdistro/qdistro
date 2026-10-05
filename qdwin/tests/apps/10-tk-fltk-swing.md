@@ -97,7 +97,7 @@ fi
 # App-deps gate (opt-in): Tk/FLTK/Swing are heavy toolkit deps that are only
 # baked into the QDWIN_APP_DEPS golden, not the lean GUI golden. Detect each
 # toolkit's build/run prerequisite IN THE VM up front:
-#   - Tk    : `python3 -c 'import tkinter'`   (python313-tk)
+#   - Tk    : `python3 -c 'import tkinter'`   (python314-tk)
 #   - FLTK  : `g++` + the FLTK dev headers    (fltk-devel, pulls gcc-c++)
 #   - Swing : `javac`                          (java-25-openjdk-devel)
 # If NONE are installed this is a lean golden -> clean SKIP (never ERROR/FAIL),
@@ -112,7 +112,7 @@ HAVE_FLTK=0;  "$QDWIN_VM_EXEC" "$VMNAME" 'command -v g++ >/dev/null 2>&1 && test
 HAVE_SWING=0; "$QDWIN_VM_EXEC" "$VMNAME" 'command -v javac >/dev/null 2>&1' && HAVE_SWING=1
 echo "toolkit deps: tk=$HAVE_TK fltk=$HAVE_FLTK swing=$HAVE_SWING"
 if [ "$HAVE_TK" = 0 ] && [ "$HAVE_FLTK" = 0 ] && [ "$HAVE_SWING" = 0 ]; then
-    echo "SKIP: no Tk/FLTK/Swing toolkits installed (python313-tk / fltk-devel / java-25-openjdk-devel); qdwin app deps are opt-in (rerun with QDWIN_APP_DEPS=1)"
+    echo "SKIP: no Tk/FLTK/Swing toolkits installed (python314-tk / fltk-devel / java-25-openjdk-devel); qdwin app deps are opt-in (rerun with QDWIN_APP_DEPS=1)"
     exit 0
 fi
 
@@ -163,7 +163,7 @@ echo "serving $DEMOS_DIR at $DEMOS (pid $DEMOS_HTTP_PID)"
 # Re-detect Tk inline so this guard is correct even if $HAVE_TK from Setup did
 # not persist into this step's shell.
 if ! "$QDWIN_VM_EXEC" "$VMNAME" "python3 -c 'import tkinter' 2>/dev/null"; then
-    echo "SKIP step 1 (Tk): python313-tk not installed; qdwin app deps are opt-in"
+    echo "SKIP step 1 (Tk): python314-tk not installed; qdwin app deps are opt-in"
 else
 TK_LOG_BOUNDARY=$(qdwin_apps_bystander_log_boundary) || exit 1
 # CAPTURE THROUGH A FILE, NOT `... 2>&1 | tee`. A host pipeline hands vm-exec's
@@ -349,9 +349,9 @@ exit "$qdwin_apps_10_status"
 
 ## Known failure modes
 
-- **`python3 -c "import tkinter"` fails** — VM is missing `python313-tk`.
+- **`python3 -c "import tkinter"` fails** — VM is missing `python314-tk`.
   This is an opt-in app dep, so the Setup gate records `HAVE_TK=0` and Step 1
-  reports `SKIP step 1 (Tk)` — it is NOT a FAIL. Install `python313-tk`
+  reports `SKIP step 1 (Tk)` — it is NOT a FAIL. Install `python314-tk`
   (via `QDWIN_APP_DEPS=1`) to exercise it.
 - **`_tkinter.TclError: failed to allocate font`** — the VM template
   has no usable X11 bitmap font, so Tk cannot allocate its default

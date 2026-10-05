@@ -180,14 +180,21 @@ fi
 # Textual. The kiwi image carries it (image/config.xml); the baked cloud base
 # does not yet (adding it to scripts/vm/install-deps.sh changes the baked
 # recipe key and forces a rebake, so it rides the next planned one).
+# python3 → 3.14: the snapshot's python313-base still owns the unversioned
+# symlink while the dep set is python314-* (scripts/install/lib/qdistro-python.sh;
+# $SRC does not exist yet, so this is the same flip inline). Guarded: a base
+# without python314 installed yet flips once §0b's zypper brings it in.
+command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "python3.14" ] \
+    && ln -sf python3.14 /usr/bin/python3 || true
+
 if ! /usr/bin/python3 -c 'import textual, rich' >/dev/null 2>&1; then
     if [ "${QCI_OFFLINE:-0}" = 1 ]; then
-        log "WARN: python313-textual missing and QCI_OFFLINE=1 forbids zypper; the admin TUI will not start in this VM"
+        log "WARN: python314-textual missing and QCI_OFFLINE=1 forbids zypper; the admin TUI will not start in this VM"
     else
-        log "installing python313-textual for the admin TUI"
-        zypper -n install --no-recommends python313-textual python313-rich \
+        log "installing python314-textual for the admin TUI"
+        zypper -n install --no-recommends python314-textual python314-rich \
                 >/tmp/qdistro-textual-install.log 2>&1 \
-            || { log "  WARN: zypper install of python313-textual failed; the admin TUI will not start in this VM (the CLI is unaffected)"; tail -20 /tmp/qdistro-textual-install.log; }
+            || { log "  WARN: zypper install of python314-textual failed; the admin TUI will not start in this VM (the CLI is unaffected)"; tail -20 /tmp/qdistro-textual-install.log; }
     fi
 fi
 
@@ -206,7 +213,7 @@ else
     log "ensuring CI extras (bats/ydotool/...; tester image used as qci base; needs guest egress to the pinned snapshot repos, not the host tarball server)..."
     if ! zypper -n install --no-recommends \
             bats ydotool tesseract-ocr rage-encryption rsync \
-            python313-jeepney python313-six Mesa-demo-egl \
+            python314-jeepney python314-six Mesa-demo-egl \
             wireguard-tools nftables dnsmasq \
             >/tmp/qdistro-ci-extras.log 2>&1; then
         log "  ERROR: zypper install of CI extras failed"
@@ -214,6 +221,11 @@ else
         exit 3
     fi
 fi
+
+# python3.14 exists now at the latest (§0b pulls python314-base); the guarded
+# pin above ran before it landed on unbaked bases.
+command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "python3.14" ] \
+    && ln -sf python3.14 /usr/bin/python3 || true
 
 # GUI scenario drivers use jq inside the guest. The baked base can have bats
 # without jq, so this check must be independent of the CI-extras bats probe.
@@ -822,16 +834,16 @@ fi
 #
 # Package names verified against openSUSE Tumbleweed Minimal-VM Cloud
 # 2026-05-15 during the qdlocker smoke run. The generic `python3-*`
-# names don't exist there; the actual packages are `python313-*`.
+# names don't exist there; the actual packages are `python314-*`.
 # pip install of the locker uses `--no-deps` because letting pip
 # resolve transitive deps reaches for pywayland-0.5+ wheels that
 # fail to build without wayland-devel + gcc — the zypper-shipped
-# python313-pywayland 0.4.x is what we want.
+# python314-pywayland 0.4.x is what we want.
 if [ -d "$SRC/qdlocker/qdlocker" ]; then
     log "installing qdlocker (Python+QML peer locker via qdwin_locker_v1)..."
     zypper -n install --no-recommends \
-        python313-pip python313-PyQt6 python313-python-pam \
-        python313-dbus_next python313-pywayland \
+        python314-pip python314-PyQt6 python314-python-pam \
+        python314-dbus_next python314-pywayland \
         >/dev/null 2>&1 || \
         { log "  ERROR: zypper install of qdlocker deps failed"; exit 3; }
 

@@ -35,8 +35,8 @@ if [ ! -d "$SDK_SRC" ] || [ ! -f "$SDK_SRC/__init__.py" ]; then
 fi
 
 # Find the python3 site-packages dir at runtime — Tumbleweed jumps minor
-# versions across rebases, so /usr/lib/python3.13/site-packages might be
-# /usr/lib/python3.14/... tomorrow.
+# versions across rebases, so /usr/lib/python3.14/site-packages might be
+# /usr/lib/python3.15/... tomorrow.
 PY_SITE=$(/usr/bin/python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 install -d -m 0755 "$PY_SITE/qdistro_app"
 for _sdk_py in "$SDK_SRC"/*.py; do

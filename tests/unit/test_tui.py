@@ -30,7 +30,7 @@ from qdistro_admin_tui import SCOPES, AdminTuiApp, HelpScreen  # noqa: E402
 
 
 def _req(rid: int, uid: int = 2000, action: str = "test.action") -> Request:
-    return Request(id=rid, uid=uid, pid=1234 + rid, exe="/usr/bin/python3.13",
+    return Request(id=rid, uid=uid, pid=1234 + rid, exe="/usr/bin/python3.14",
                    action=action, details={"purpose": "smoke test"})
 
 

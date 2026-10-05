@@ -427,11 +427,15 @@ if [ "$SESSION" = labwc ]; then
 #      - dejavu-fonts noto-sans-fonts (labwc aborts on no fonts)
 zypper -n install labwc lxqt-session lxqt-labwc-session \
     qterminal xdotool xhost xwayland git swaybg grim \
-    python313-rich python313-textual python313-mistune \
+    python314-rich python314-textual python314-mistune \
     dejavu-fonts google-noto-sans-fonts \
     perl-Net-DBus \
     >/dev/null 2>&1 || \
     echo "[gui-spin] WARN: zypper install of GUI stack failed"
+# python3 → 3.14 on unbaked bases (snapshot's python313-base still owns the
+# unversioned symlink; see scripts/install/lib/qdistro-python.sh)
+command -v python3.14 >/dev/null 2>&1 && [ "$(readlink /usr/bin/python3)" != "python3.14" ] \
+    && ln -sf python3.14 /usr/bin/python3 || true
 fc-cache -f >/dev/null 2>&1 || true
 # grim is how vm-gui makes labwc present a fresh frame before each host
 # capture (see labwc_present_frame in scripts/vm/vm-gui); without it every

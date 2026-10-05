@@ -1524,7 +1524,7 @@ TRUSTED_INBOUND_SCRIPTS: frozenset[str] = frozenset({
 # half of the identity so a random ELF named like a script can't pass.
 _TRUSTED_INTERP_BASENAMES: tuple[str, ...] = (
     "python3", "python", "python3.10", "python3.11", "python3.12",
-    "python3.13",
+    "python3.14",
 )
 
 

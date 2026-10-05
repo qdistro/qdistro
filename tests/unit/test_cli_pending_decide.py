@@ -299,7 +299,7 @@ def real(tmp_path, monkeypatch):
     iface = _Iface()
     monkeypatch.setattr(cli, "_broker", lambda: (iface, dbus))
 
-    def as_peer(argv, uid=0, exe="/usr/bin/python3.13"):
+    def as_peer(argv, uid=0, exe="/usr/bin/python3.14"):
         # /proc/<pid>/exe of a Python script is the interpreter, never the
         # script; the broker must bind the CLI through argv.
         broker.set_peer(uid=uid, pid=4321, exe=exe)
@@ -396,7 +396,7 @@ def test_concurrent_decision_is_not_reported_as_ours(real, capsys, verb, other):
     as_peer(argv)
 
     def competing(_rid):
-        broker.set_peer(uid=B.ADMIN_UID, pid=4322, exe="/usr/bin/python3.13")
+        broker.set_peer(uid=B.ADMIN_UID, pid=4322, exe="/usr/bin/python3.14")
         B._read_proc_cmdline = lambda _p: ["/usr/bin/python3",
                                            "/usr/local/bin/qdistro-admin-tui"]
         try:
@@ -463,7 +463,7 @@ def test_restart_reused_id_is_judged_by_this_broker_only(tmp_path, monkeypatch,
     def new_broker():
         b = _StubBroker(str(tmp_path / "cache"), str(tmp_path / "audit"),
                         str(tmp_path / "rules"))
-        b.set_peer(uid=0, pid=4321, exe="/usr/bin/python3.13")
+        b.set_peer(uid=0, pid=4321, exe="/usr/bin/python3.14")
         return b
 
     def enqueue(b):

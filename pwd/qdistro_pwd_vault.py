@@ -38,7 +38,7 @@ Item shape (identical in v1 and v2):
       "created":      <unix epoch>
     }
 
-Crypto choices (PyCA cryptography, packaged as python313-cryptography):
+Crypto choices (PyCA cryptography, packaged as python314-cryptography):
 
 - v1 KEK derived from password via scrypt (memory-hard; resists GPU
   brute force vs PBKDF2). N=32768 r=8 p=1 → ~32MB ram, ~150ms on Zen4.

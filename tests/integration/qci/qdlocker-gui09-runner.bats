@@ -661,7 +661,7 @@ alarm_png() { magick -size 1280x800 'xc:#FD4663' "PNG24:$1"; }
     done
     # python3: the isolated-mode import answers an installed path; the camera
     # probe (reading its program from stdin) reports a camera node
-    printf '#!/bin/bash\ncase "$*" in *" -c "*) echo /usr/lib64/python3.13/site-packages/qdlocker/indicators.py ;; *) cat >/dev/null; echo cam0 ;; esac\n' > "$S/python3"
+    printf '#!/bin/bash\ncase "$*" in *" -c "*) echo /usr/lib64/python3.14/site-packages/qdlocker/indicators.py ;; *) cat >/dev/null; echo cam0 ;; esac\n' > "$S/python3"
     printf '#!/bin/bash\nexit 0\n' > "$S/pw-cli"
     # install -d creates directories only inside the test tree
     printf '#!/bin/bash\necho "install $*" >>"%s/calls"\nd=${@: -1}\ncase "$*" in *-d*) case $d in %s/*) mkdir -p "$d" ;; esac ;; esac\nexit 0\n' "$T" "$T" > "$S/install"

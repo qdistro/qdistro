@@ -38,15 +38,19 @@ RUN zypper --non-interactive install --no-recommends \
         libxkbcommon0 \
         xkeyboard-config \
         coreutils \
-        python313 \
-        python313-pip \
-        python313-setuptools \
-        python313-PyQt6 \
-        python313-tomli-w \
+        python314 \
+        python314-pip \
+        python314-setuptools \
+        python314-PyQt6 \
+        python314-tomli-w \
         qt6-wayland \
         google-noto-sans-fonts \
  && zypper clean --all \
  && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# The snapshot still points /usr/bin/python3 at python313-base; only the
+# python314-* set is installed, so pin the unversioned name at 3.14.
+RUN ln -sf python3.14 /usr/bin/python3
 
 # qdwin-shell.so is installed by the host build and bind-mounted at
 # /usr/lib64/weston/qdwin-shell.so, same as weston-terminal.

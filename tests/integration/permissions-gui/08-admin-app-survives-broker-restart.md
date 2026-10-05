@@ -127,7 +127,7 @@ qdwin_screenshot "$ART/08-s3-pending.png"
 - Screenshot shows one pending row `uid=2000 test.action` in the
  left list, row selected (highlighted).
 - Detail pane shows `uid=2000 pid=<N>`, `Action: test.action`,
- `/usr/bin/python3.13`, `Details: purpose=smoke test`.
+ `/usr/bin/python3.14`, `Details: purpose=smoke test`.
 - If this fails — empty list despite the broker holding the
  request — the signal-subscription fix has regressed.
 

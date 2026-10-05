@@ -273,8 +273,8 @@ def test_qfileman_containerfile_is_a_presentation_consumer_without_webengine():
     text = (TIER2 / "Containerfile.qfileman").read_text()
     assert "COPY qdfileman /usr/src/qdfileman" in text
     assert "COPY presentation /usr/src/presentation" in text
-    assert "python313-PyQt6" in text
-    assert "python313-tomli-w" in text
+    assert "python314-PyQt6" in text
+    assert "python314-tomli-w" in text
     assert "qt6-wayland" in text
     assert "google-noto-sans-fonts" in text
     assert "pip install --no-deps" in text

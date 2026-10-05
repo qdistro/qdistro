@@ -78,7 +78,7 @@ under a common parent; a single `git clone https://github.com/qdistro/qdistro.gi
 
 | Tool / package | Used by (gate_host step) | Required? |
 | --- | --- | --- |
-| `python3` (3.13) | every pytest step, report.py | yes |
+| `python3` (3.14) | every pytest step, report.py | yes |
 | `PyQt6` (+ `pytest`, `pytest-qt`) | qdistro/qnotebook/qterminator/qdbrowser/qdlocker/qfileman unit tests; gate pins `QDISTRO_REQUIRE_PYQT6=1` | yes |
 | `PySide6` | qdgreeter pytest (the gate pins PyQt6 elsewhere *because* PySide6 is present) | for qdgreeter |
 | `pytest-cov` | report-only coverage + the qdistro coverage floor (floor=80, FAILS CLOSED if the JSON is missing) | yes (floor is positive) |
@@ -100,10 +100,10 @@ provisioning list.
 
 ### Recommended base OS
 
-OpenSUSE Tumbleweed with Python 3.13 — the same family the qdistro images and
+OpenSUSE Tumbleweed with Python 3.14 — the same family the qdistro images and
 the qdshell `qdistro-vm` runner target, so the Qt6/meson/weston package names
 and versions match what the project builds against. (`qdshell/.github/workflows/
-integration.yml` documents the same Tumbleweed + Python 3.13 base for its
+integration.yml` documents the same Tumbleweed + Python 3.14 base for its
 runner.) Ubuntu can work for the pure-Python steps but diverges on the
 Qt6/weston/meson package layout that the qdwin/qdshell builds assume; if you use
 Ubuntu, expect to mirror the qdshell *hosted* workflow's apt list and Qt6 path
@@ -117,10 +117,10 @@ A single Forgejo Actions self-hosted runner labelled **`qdistro-host`**
 1. Install the toolchain above on the runner box (Tumbleweed):
 
    ```sh
-   zypper in -y python313 python313-pip meson ninja pkgconf gcc-c++ \
-       nodejs npm git ruff python313-mypy \
+   zypper in -y python314 python314-pip meson ninja pkgconf gcc-c++ \
+       nodejs npm git ruff python314-mypy \
        qt6-declarative-imports qt6-declarative-tools
-   pip3.13 install --user PyQt6 PySide6 pytest pytest-qt pytest-cov
+   pip3.14 install --user PyQt6 PySide6 pytest pytest-qt pytest-cov
    ```
 
    (Plus the qdwin/qdshell Wayland/weston/Qt6 *-devel* packages the meson

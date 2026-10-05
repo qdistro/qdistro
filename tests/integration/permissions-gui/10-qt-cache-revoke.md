@@ -63,7 +63,7 @@ import sys
 sys.path.insert(0, "/usr/libexec/qdistro")
 from qdistro_admin_cache import ApprovalCache
 c = ApprovalCache("/var/lib/qdistro/approvals/approvals.sqlite")
-c.store(2000, "test.action", "/usr/bin/python3.13", "1h", True, 1000)
+c.store(2000, "test.action", "/usr/bin/python3.14", "1h", True, 1000)
 c.store(2000, "curl.net", "/usr/bin/curl", "24h", True, 1000)
 c.store(3000, "net.restart", "", "forever", True, 1000)
 c.store(3000, "edit.hosts", "/usr/bin/vim", "forever_exe", True, 1000)

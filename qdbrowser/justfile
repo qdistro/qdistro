@@ -10,8 +10,8 @@ install-deps:
     #!/usr/bin/env bash
     set -eu
     if command -v zypper >/dev/null; then
-        sudo zypper install -y python313-PyQt6 python313-PyQt6-WebEngine \
-            python313-pytest python313-pytest-qt python313-Pillow just
+        sudo zypper install -y python314-PyQt6 python314-PyQt6-WebEngine \
+            python314-pytest python314-pytest-qt python314-Pillow just
     elif command -v apt >/dev/null; then
         sudo apt install -y python3-pyqt6 python3-pyqt6.qtwebenginewidgets \
             python3-pytest python3-pytest-qt python3-pil just
