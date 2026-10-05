@@ -356,9 +356,16 @@ QD_CAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vm-exec-cap.XXXXXXXX") || {
 # Every other exit -- poll errors, qga's "PID does not exist" (lost bookkeeping
 # is not proof of exit), an unverified signal cleanup -- leaves the entry for
 # the next vm-exec to resolve.
+#
+# QD_ORPHAN_TMP is the record's unpublished staging file (orphan_register
+# writes it, then mv-publishes). It is NEVER a record, so the trap retracts it
+# unconditionally: a deferred signal trap re-raised between the write and the
+# mv otherwise leaves a .new.<pid> file in the registry that the reaper's
+# owner-start glob never matches -- litter that nothing would ever remove.
 QD_ORPHAN_ENTRY=""
+QD_ORPHAN_TMP=""
 QD_ORPHAN_DONE=0
-trap 'rm -rf "$QD_CAP_DIR"; if [ "$QD_ORPHAN_DONE" = 1 ] && [ -n "$QD_ORPHAN_ENTRY" ]; then rm -f "$QD_ORPHAN_ENTRY"; fi' EXIT
+trap 'rm -rf "$QD_CAP_DIR"; if [ -n "$QD_ORPHAN_TMP" ]; then rm -f "$QD_ORPHAN_TMP"; fi; if [ "$QD_ORPHAN_DONE" = 1 ] && [ -n "$QD_ORPHAN_ENTRY" ]; then rm -f "$QD_ORPHAN_ENTRY"; fi' EXIT
 
 # Per-call name parts. READ THIS BEFORE TRUSTING THE COUNTER: every caller runs
 # bounded_run inside a command substitution, i.e. in a SUBSHELL, so the
@@ -1331,14 +1338,20 @@ orphan_register() {
     # moment `mv` returns, so assigning after the rename left a window in which
     # the handler (and then EXIT) saw no record and leaked a published one.
     # Retracting a name that was never published is a harmless `rm -f`.
+    # The same window around the STAGING write is why QD_ORPHAN_TMP exists: a
+    # re-raised signal inside this `if` would otherwise leave `.new.$$` behind,
+    # a file the reaper's owner-start glob never matches. The EXIT trap
+    # retracts it.
     QD_ORPHAN_ENTRY="$QD_ORPHAN_DIR/$$-$me_start"
+    QD_ORPHAN_TMP=$tmp
     if ! printf '%s %s %s %s\n' "$PID" "$GUEST_START_TIME" "$GUEST_BOOT_ID" "$uuid" >"$tmp" 2>/dev/null \
        || ! mv -f "$tmp" "$QD_ORPHAN_ENTRY" 2>/dev/null; then
-        QD_ORPHAN_ENTRY=""
+        QD_ORPHAN_ENTRY="" QD_ORPHAN_TMP=""
         rm -f "$tmp" 2>/dev/null || true
         echo "[vm-exec] WARN: orphan registry: cannot write a record in $QD_ORPHAN_DIR; guest PID $PID is NOT recorded and will not be reaped if this vm-exec is SIGKILLed" >&2
         return 0
     fi
+    QD_ORPHAN_TMP=""
     return 0
 }
 
