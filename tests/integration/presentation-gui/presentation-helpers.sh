@@ -104,7 +104,9 @@ pres_window_handle() {
         | tail -n 1 | sed -nE 's/.*handle=([0-9]+).*/\1/p'
 }
 
-# pres_focus_app <name> — raise and focus the app's newest window.
+# pres_focus_app <name> — FOCUS the app's newest window (qdwin focusWindow).
+# It does not necessarily raise it above other windows; scenarios must not
+# rely on it to bring a covered window to the front.
 pres_focus_app() {
     local handle
     handle=$(pres_window_handle "$1") || return 1

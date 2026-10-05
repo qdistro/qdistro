@@ -9,8 +9,8 @@ while qdshell publishes **dark**, show dark chrome. When the shell switches
 to **light**, every running app — including an open Settings dialog —
 restyles to light **without relaunch** (same PIDs). Killing qdshell does not
 exit, block or restyle any app; the snapshot file keeps the last
-generation. A NEW app window started while the shell is down reads the
-persisted (light) snapshot. When the respawned shell switches back to dark,
+generation. A NEW app started while the shell is stopped reads the
+persisted (light) snapshot. When the restarted shell switches back to dark,
 the running apps follow again.
 
 Machine oracles (exact): `pres_snapshot` generation/mode, `pres_app_pids`.
@@ -120,23 +120,39 @@ rewrite or delete the snapshot).
 **Assert (4.3):** OPEN the Step 4 frame: qfileman is in front with LIGHT
 chrome.
 
-### Step 5 — a new app joins with the persisted snapshot
+### Step 5 — a new app started while qdshell is DOWN reads the persisted snapshot
+
+`systemctl stop` (unlike the Step 4 KILL) does not trigger the unit's
+restart, so the shell stays down while the terminal starts. The snapshot
+file's mtime is recorded before the stop and after the shell is started
+again: if it is unchanged, the restarted shell did not rewrite it, so the
+terminal's appearance can only have come from the persisted file.
 
 ```bash
+MT_BEFORE=$(pres_admin "stat -c %Y.%i /var/lib/qdistro/presentation/current.json"); echo "MT_BEFORE=$MT_BEFORE"
+pres_admin "systemctl --user stop qdshell.service"
 pres_launch qterm2 qterminator
-sleep 7
+sleep 6
+pres_admin "echo shell=\$(systemctl --user show -p ActiveState --value qdshell.service); pgrep -u admin -f -n '[q]terminator' >/dev/null && echo terminal=running || echo terminal=missing"
+pres_admin "systemctl --user start qdshell.service"
+sleep 8
+MT_AFTER=$(pres_admin "stat -c %Y.%i /var/lib/qdistro/presentation/current.json"); echo "MT_AFTER=$MT_AFTER"
 qdwin_screenshot /tmp/pres01-step5-new-terminal.png
 ```
 
-**Assert (5.1):** OPEN the Step 5 frame: the new terminal window is in front
+**Assert (5.1):** the probe printed `shell=inactive` (ActiveState) and `terminal=running`
+(the terminal started while the shell was down).
+**Assert (5.2):** `MT_AFTER` equals `MT_BEFORE` (the snapshot was not
+rewritten across the stop/start).
+**Assert (5.3):** OPEN the Step 5 frame: the new terminal window is in front
 and its chrome is LIGHT.
 
-### Step 6 — the respawned shell switches back to dark; apps follow
+### Step 6 — the restarted shell switches back to dark; apps follow
 
 ```bash
 PIDS_6A=$(pres_app_pids); echo "PIDS_6A=$PIDS_6A"
 pres_qs_ipc darkMode setDark
-SNAP_DARK2=$(pres_wait_mode dark 30) || echo "FAIL: respawned shell did not publish dark"
+SNAP_DARK2=$(pres_wait_mode dark 30) || echo "FAIL: restarted shell did not publish dark"
 echo "SNAP_DARK2=$SNAP_DARK2"
 sleep 3
 PIDS_6=$(pres_app_pids); echo "PIDS_6=$PIDS_6"
@@ -159,7 +175,7 @@ pres_qs_ipc darkMode setDark >/dev/null
 ## Pass criteria
 
 Every assert 1.1 → 6.2 passes. Machine asserts (1.1, 3.1, 3.2, 4.1, 4.2,
-6.1) are decided by the printed values, not by pixels.
+5.1, 5.2, 6.1) are decided by the printed values, not by pixels.
 
 ## Known-broken-if
 

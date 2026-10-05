@@ -7,8 +7,9 @@
 qdlocker reads the managed snapshot when it locks and freezes it for the
 whole lock: a shell dark→light switch while locked does NOT restyle the lock
 screen, and killing qdshell while locked neither unlocks nor restyles it.
-After unlocking, the NEXT lock uses the new (light) appearance. Locking is
-never delayed by appearance work.
+After unlocking, the NEXT lock uses the new (light) appearance. (That
+appearance work never delays locking is covered by qdlocker's unit tests,
+not by this scenario's 5 s lock wait.)
 
 Machine oracles: `qdlocker_ctrl status` (`locked=True/False`),
 `qdlocker_ctrl unlock-result`, `pres_snapshot`. Visual oracle: the lock UI

@@ -20,7 +20,7 @@ Source `presentation-helpers.sh` from this directory (it sources
 | `pres_snapshot` / `pres_wait_mode <mode> [s]` | read / wait for `generation mode` of the snapshot |
 | `pres_launch <tag> <cmd>` | start an app detached in the session (`/tmp/pres-<tag>.log`) |
 | `pres_app_pids` | `qfileman=… qterminator=… qdbrowser=… qnotebook=…` |
-| `pres_focus_app <name>` | raise/focus the app's newest window (qdwin `focusWindow`) |
+| `pres_focus_app <name>` | focus the app's newest window (qdwin `focusWindow`); does NOT reliably raise it — do not use it to reveal a covered window |
 | `pres_output_scale` | integer wl_output scale of Virtual-1 |
 | `pres_kill_apps` | stop everything these scenarios start |
 

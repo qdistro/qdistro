@@ -92,29 +92,32 @@ compositor scale 2.0`, `PASS: user scale applied once in points`, and
 
 ### Step 3 — apps at 200% follow dark → light
 
+No raise is needed: qfileman is the only window when it is captured dark and
+light; qnotebook is started afterwards (newest window on top).
+
 ```bash
 pres_launch qfm qfileman
-pres_launch qnb qnotebook
 sleep 8
-PIDS_3=$(pres_app_pids); echo "PIDS_3=$PIDS_3"
-pres_focus_app qfileman && sleep 1.5
+PID_QFM=$(pres_app_pids); echo "PIDS_3=$PID_QFM"
 qdwin_screenshot /tmp/pres02-step3-qfileman-dark.png
 pres_qs_ipc darkMode setLight
 SNAP_LIGHT=$(pres_wait_mode light 30); echo "SNAP_LIGHT=$SNAP_LIGHT"
 sleep 3
 PIDS_3B=$(pres_app_pids); echo "PIDS_3B=$PIDS_3B"
 qdwin_screenshot /tmp/pres02-step3-qfileman-light.png
-pres_focus_app qnotebook && sleep 1.5
+pres_launch qnb qnotebook
+sleep 8
 qdwin_screenshot /tmp/pres02-step3-qnotebook-light.png
 ```
 
-**Assert (3.1):** `SNAP_LIGHT` mode is `light`; `PIDS_3B` equals `PIDS_3` for
-qfileman and qnotebook.
+**Assert (3.1):** `SNAP_LIGHT` mode is `light`; the `qfileman=` pid in
+`PIDS_3B` equals the one in `PIDS_3`.
 **Assert (3.2):** OPEN the dark qfileman frame, then the light one: the same
-qfileman window went from DARK to LIGHT chrome. Its menu/toolbar text is
-legible and roughly the same visual size as the shell bar's text (not about
-twice it, not about half it).
-**Assert (3.3):** OPEN the qnotebook frame: LIGHT chrome, legible text.
+qfileman window (the only app window) went from DARK to LIGHT chrome. Its
+menu/toolbar text is legible and roughly the same visual size as the shell
+bar's text (not about twice it, not about half it).
+**Assert (3.3):** OPEN the qnotebook frame: the new qnotebook window is in
+front with LIGHT chrome and legible text.
 
 ### Step 4 — restore 100%
 
@@ -132,8 +135,14 @@ echo "scale-restored=$(pres_output_scale)"
 ```bash
 pres_kill_apps
 pres_qs_ipc darkMode setDark >/dev/null
-[ "$(pres_output_scale)" = 1 ] || echo "WARN: output scale left at $(pres_output_scale)"
+echo "scale-cleanup=$(pres_output_scale)"
 ```
+
+If `scale-cleanup` is not `1` (Step 4 did not run or did not stick), restore
+it now exactly as in Step 4 (Settings > Display, `100%`, Apply, Keep
+changes), wait 17 s, and print `pres_output_scale` again. If it is still not
+`1`, record the scenario as ERROR with "cleanup could not restore 100%"
+regardless of the step verdicts: a VM left at 200% must not look clean.
 
 ## Pass criteria
 
