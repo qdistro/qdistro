@@ -181,3 +181,55 @@ AVC="tests/integration/vm/probes/avc-denials.sh"
     grep -q 'avc-denials.sh' "$f"
     ! grep -q 'ausearch .*|| true' "$f"
 }
+
+# --- write-ahead registration around the enforcing clone (sol r85) ----------
+
+_fake_clone_tools() {  # _fake_clone_tools <exit-rc> [print-vm=1]
+    VM_TOOLS="$TMP/tools"; mkdir -p "$VM_TOOLS"
+    cat > "$VM_TOOLS/clone-baseweed.sh" <<SH
+#!/bin/bash
+# Record what the write-ahead dir held WHILE the clone ran.
+cat "$TMP/run/vm/provisioning.d/"*.wa > "$TMP/wa-during" 2>/dev/null || echo none > "$TMP/wa-during"
+if [ "${2:-1}" = 1 ]; then echo "qci-bats-x-261005-000000-1-1"; echo "ssh_port=41234"; fi
+exit $1
+SH
+    chmod +x "$VM_TOOLS/clone-baseweed.sh"
+    RUN_GOLDEN_BATS="$TMP/golden.qcow2"; CREATED_VMS=()
+    vm_list_by_prefix() { :; }
+    reap_new_orphans() { echo "reap $*" >> "$TMP/reaped"; }
+    kv() { :; }
+    qci_enforcing_ssh() { return 0; }
+}
+
+@test "enforcing acquire registers a write-ahead marker while cloning, drops it once tracked" {
+    _fake_clone_tools 0
+    run acquire_enforcing_vm bats-x
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "qci-bats-x-261005-000000-1-1 41234" ]
+    grep -q "^prefix	qci-bats-x-$" "$TMP/wa-during"
+    grep -q "^win_start	[0-9]" "$TMP/wa-during"
+    [ -z "$(ls "$TMP/run/vm/provisioning.d/" 2>/dev/null)" ]
+    grep -qx "qci-bats-x-261005-000000-1-1" "$TMP/run/vm/created-vms.txt"
+}
+
+@test "a failed enforcing clone reaps and drops the marker" {
+    _fake_clone_tools 7 0
+    run acquire_enforcing_vm bats-x
+    [ "$status" -eq "$EXIT_VM_PROVISION" ]
+    grep -q "^prefix	qci-bats-x-$" "$TMP/wa-during"
+    grep -q "^reap qci-bats-x-" "$TMP/reaped"
+    [ -z "$(ls "$TMP/run/vm/provisioning.d/" 2>/dev/null)" ]
+}
+
+@test "an interrupted enforcing worker leaves a marker the end-of-run sweep reaps" {
+    _fake_clone_tools 0
+    # Simulate a kill after the clone but before tracking: the marker the
+    # acquire wrote is still there when finish_run sweeps.
+    mkdir -p "$TMP/run/vm/provisioning.d"
+    printf 'prefix\tqci-bats-x-\nbaseline\t\nwin_start\t%s\n' "$(date +%s)" \
+        > "$TMP/run/vm/provisioning.d/worker-1.wa"
+    run reap_writeahead_orphans
+    [ "$status" -eq 0 ]
+    grep -q "^reap qci-bats-x- " "$TMP/reaped"
+    [ ! -e "$TMP/run/vm/provisioning.d/worker-1.wa" ]
+}

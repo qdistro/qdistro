@@ -259,9 +259,19 @@ acquire_enforcing_vm() {
         return "$EXIT_VM_PROVISION"
     fi
     log "creating disposable ENFORCING VM for $gate"
-    local wa_prefix="qci-$gate-" wa_baseline
+    # Write-ahead, as in acquire_vm: a worker killed after the clone succeeds
+    # but before created-vms.txt records it would otherwise leave an untracked
+    # domain + overlay (clone-baseweed.sh keeps a finished clone). The marker
+    # lets finish_run's reap_writeahead_orphans reclaim it.
+    local wa_prefix="qci-$gate-" wa_baseline wa_file=""
     wa_baseline=$(vm_list_by_prefix "$wa_prefix" | tr '\n' ',')
     t_start=$(date +%s)
+    if mkdir -p "$RDIR/vm/provisioning.d" 2>/dev/null; then
+        wa_file="$RDIR/vm/provisioning.d/${QCI_WORKER_ID:-main}-$$.wa"
+        { printf 'prefix\t%s\n' "$wa_prefix"; printf 'baseline\t%s\n' "$wa_baseline"
+          printf 'win_start\t%s\n' "$t_start"; } \
+            > "$wa_file" 2>/dev/null || wa_file=""
+    fi
     timeout "$prov_timeout" env \
         QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
         bash "$VM_TOOLS/clone-baseweed.sh" "qci-$gate" \
@@ -270,6 +280,7 @@ acquire_enforcing_vm() {
     t_end=$(date +%s)
     if [ "$rc" -ne 0 ]; then
         reap_new_orphans "$wa_prefix" "$wa_baseline" "$t_start" "$t_end"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
         record_result "$gate" clone-baseweed fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" \
             "enforcing clone failed (rc=$rc)"
         return "$EXIT_VM_PROVISION"
@@ -278,12 +289,15 @@ acquire_enforcing_vm() {
     port=$(sed -n 's/^ssh_port=\([0-9]\{1,5\}\)$/\1/p' "$log_path" | tail -n 1)
     if [ -z "$vm" ] || [ -z "$port" ]; then
         reap_new_orphans "$wa_prefix" "$wa_baseline" "$t_start" "$t_end"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
         record_result "$gate" clone-baseweed fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" \
             "enforcing clone printed no VM name / ssh_port"
         return "$EXIT_VM_PROVISION"
     fi
     CREATED_VMS+=("$vm")
     printf '%s\n' "$vm" >> "$RDIR/vm/created-vms.txt"
+    # Exact name now tracked; the write-ahead marker has done its job.
+    [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
     kv "vm_${gate}" "$vm"
     kv "vm_${gate}_ssh_port" "$port"
     # The golden's session units come up after sshd; give the outer
