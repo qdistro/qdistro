@@ -380,7 +380,7 @@ def test_readable_on_color_always_meets_text_contrast():
 
     rng = random.Random(4242)
     for _ in range(5000):
-        bg = "#%06x" % rng.randrange(0x1000000)
+        bg = f"#{rng.randrange(0x1000000):06x}"
         assert contrast_ratio(bg, readable_on_color(bg)) >= 4.5, bg
 
 

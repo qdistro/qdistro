@@ -15,24 +15,9 @@ pytest tests/test_real_qtermwidget_presentation.py``.
 
 from __future__ import annotations
 
-import pytest
-
-QTermWidget = pytest.importorskip(
-    "QTermWidget", reason="real QTermWidget SIP binding not installed"
-)
-
-_widget_cls = getattr(QTermWidget, "QTermWidget", QTermWidget)
-if getattr(QTermWidget, "_QTERMINATOR_FAKE", False) or getattr(
-    _widget_cls, "_QTERMINATOR_FAKE", False
-):
-    pytest.skip(
-        "in-process QTermWidget fake is loaded (real SIP binding absent); "
-        "the presentation lane cannot run against the fake",
-        allow_module_level=True,
-    )
-
 from dataclasses import replace
 
+import pytest
 import qterminator.config as config_mod
 from PyQt6.QtGui import QFont, QPalette
 from PyQt6.QtWidgets import QApplication
@@ -47,6 +32,21 @@ from qterminator.theme import (
     reset_controller_for_tests,
 )
 from qterminator.window import MainWindow
+
+# conftest has already installed either the real binding or its fake.
+QTermWidget = pytest.importorskip(
+    "QTermWidget", reason="real QTermWidget SIP binding not installed"
+)
+
+_widget_cls = getattr(QTermWidget, "QTermWidget", QTermWidget)
+if getattr(QTermWidget, "_QTERMINATOR_FAKE", False) or getattr(
+    _widget_cls, "_QTERMINATOR_FAKE", False
+):
+    pytest.skip(
+        "in-process QTermWidget fake is loaded (real SIP binding absent); "
+        "the presentation lane cannot run against the fake",
+        allow_module_level=True,
+    )
 
 DARK_SCHEME = "Linux"
 LIGHT_SCHEME = "BlackOnWhite"
