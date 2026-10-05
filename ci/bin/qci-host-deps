@@ -127,7 +127,7 @@ py  numpy                    python3-numpy           python3-numpy              
 py  hypothesis               python3-hypothesis      python3-hypothesis          qdistro-pytest
 py  pytest_cov               python3-pytest-cov      python3-pytest-cov          qdistro-coverage-floor
 py  mistune                  python3-mistune         python3-mistune             qnotebook-pytest
-py  PyQt6.QtWebEngineWidgets python3-PyQt6-WebEngine python3-pyqt6.qtwebengine   qdbrowser-pytest
+py  PyQt6.QtWebEngineWidgets python3-PyQt6-WebEngine python3-pyqt6.qtwebenginewidgets qdbrowser-pytest
 pc  xcursor                  libXcursor-devel        libxcursor-dev              qdwin-meson
 pc  Qt6Qml                   qt6-declarative-devel   qt6-declarative-dev         qdshell-local
 pc  Qt6Network               qt6-base-devel          qt6-base-dev                qdshell-local

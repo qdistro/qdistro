@@ -370,7 +370,7 @@ run):
 
 ```bash
 qdistro/ci/bin/qci-host-deps            # report what is missing (no sudo)
-qdistro/ci/bin/qci-host-deps --install  # install via zypper/apt/dnf + pip
+qdistro/ci/bin/qci-host-deps --install  # install via zypper/apt + pip
 ```
 
 The individual deps are:
