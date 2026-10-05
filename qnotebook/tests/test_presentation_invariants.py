@@ -15,7 +15,7 @@ from dataclasses import replace
 
 import pytest
 from PyQt6.QtCore import QSettings
-from PyQt6.QtGui import QTextCursor, QTextDocument
+from PyQt6.QtGui import QTextCharFormat, QTextCursor, QTextDocument
 from qdistro_presentation.model import example_snapshot, with_generation
 from qdistro_presentation.paths import ENV_OVERRIDE
 from qdistro_presentation.publish import write_snapshot
@@ -25,8 +25,8 @@ from qnotebook.appearance import (
     save_use_desktop_document_fonts,
 )
 from qnotebook.content_style import (
-    ContentStyle,
     apply_document_presentation,
+    desktop_content_style,
     legacy_content_style,
 )
 from qnotebook.editor import reset_pinned_body_font_for_tests
@@ -78,11 +78,59 @@ def _attach(qapp, tmp_path, monkeypatch, snap):
     attach_presentation(qapp, SettingsAdapter(s))
 
 
-def _publish(tmp_path, snap):
+def _snap(mode, ui_family, fixed_family, ui_scale):
+    base = example_snapshot()
+    fonts = replace(base.fonts, ui_family=ui_family, fixed_family=fixed_family, ui_scale=ui_scale)
+    return with_generation(replace(base, mode=mode, fonts=fonts))
+
+
+
+
+def _snaps():
+    # Both differ from the legacy content family (DejaVu Serif on this
+    # stack) and from each other, in family, fixed family and size.
+    a = _snap("dark", "DejaVu Sans", "DejaVu Sans Mono", 1.0)
+    b = _snap("light", "Bitstream Vera Serif", "JetBrains Mono", 1.2)
+    return a, b
+
+
+def _body_fragment_format(ed):
+    """Rendered format inside the first plain body paragraph of SAMPLE.
+
+    A live restyle paints through the content highlighter (QTextLayout
+    overlay formats) without touching char formats, so read the overlay
+    covering the position and fall back to the stored char format.
+    """
+    text = ed.document().toPlainText()
+    pos = text.index("Body ") + 1
+    block = ed.document().findBlock(pos)
+    rel = pos - block.position()
+    c = QTextCursor(ed.document())
+    c.setPosition(pos)
+    fmt = QTextCharFormat(c.charFormat())
+    for rng in block.layout().formats():
+        if rng.start <= rel < rng.start + rng.length:
+            fmt.merge(rng.format)
+    return fmt
+
+
+def _publish_and_wait(qtbot, tmp_path, ed, snap):
+    """Publish through the real file watcher and wait until the editor's
+    document shows the new resolved body family and size."""
     write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False, skip_unchanged=False)
     ctrl = current_controller()
     assert ctrl is not None
-    ctrl._reload()  # the file watch is asynchronous; drive it for the test
+    qtbot.waitUntil(lambda: ctrl.state.generation == snap.generation, timeout=5000)
+    want = desktop_content_style()
+    assert want.body_family == snap.fonts.ui_family
+
+    def applied():
+        fmt = _body_fragment_format(ed)
+        fams = list(fmt.fontFamilies() or []) + [fmt.fontFamily()]
+        return want.body_family in fams and abs(fmt.fontPointSize() - want.body_point_size) < 0.05
+
+    qtbot.waitUntil(applied, timeout=5000)
+    return want
 
 
 @pytest.mark.parametrize("body_pt", [9.0, 10.5, 11.4, 11.6, 12.0, 16.0])
@@ -98,15 +146,25 @@ def test_serialization_ignores_body_font_size(qapp, body_pt):
         code_point_size=body_pt,
         inherit_desktop=True,
     )
-    assert isinstance(style, ContentStyle)
     apply_document_presentation(doc, style)
-    assert qdoc_to_markdown(doc) == baseline
+    # The restyle really applied the sizes on both sides of the old 11.5 pt
+    # bold/heading heuristic ...
+    text = doc.toPlainText()
+    c = QTextCursor(doc)
+    c.setPosition(text.index("Body ") + 1)
+    assert abs(c.charFormat().fontPointSize() - body_pt) < 0.05
+    c.setPosition(text.index("Heading") + 1)
+    assert abs(c.charFormat().fontPointSize() - style.heading_point_size(1)) < 0.05
+    # ... and Markdown syntax did not follow them.
+    out = qdoc_to_markdown(doc)
+    assert out == baseline
+    assert out.startswith("# Heading with **bold** and _italic_\n")
+    assert "Body **strong** and _em_" in out
 
 
 def test_undo_redo_across_theme_changes(qapp, tmp_path, tmp_notebook, qtbot, monkeypatch):
-    dark = example_snapshot()
-    light = with_generation(replace(dark, mode="light"))
-    _attach(qapp, tmp_path, monkeypatch, dark)
+    snap_a, snap_b = _snaps()
+    _attach(qapp, tmp_path, monkeypatch, snap_a)
     save_use_desktop_document_fonts(QSettings("qnotebook", "qnotebook"), True)
     win = MainWindow()
     win.open_notebook(str(tmp_notebook))
@@ -118,9 +176,8 @@ def test_undo_redo_across_theme_changes(qapp, tmp_path, tmp_notebook, qtbot, mon
 
     ed.insert_text_at_cursor("EDIT1 ")
     after_one = ed.markdown()
-    for snap in (light, dark, light):
-        _publish(tmp_path, snap)
-        win.apply_presentation_update()
+    for snap in (snap_b, snap_a, snap_b):
+        _publish_and_wait(qtbot, tmp_path, ed, snap)
         assert ed.markdown() == after_one
     # Not adjacent to EDIT1: Qt merges contiguous typing into one undo step.
     cur = ed.textCursor()
@@ -128,17 +185,16 @@ def test_undo_redo_across_theme_changes(qapp, tmp_path, tmp_notebook, qtbot, mon
     ed.setTextCursor(cur)
     ed.insert_text_at_cursor("EDIT2 ")
     after_two = ed.markdown()
-    _publish(tmp_path, dark)
-    win.apply_presentation_update()
+    _publish_and_wait(qtbot, tmp_path, ed, snap_a)
 
     ed.undo()
     assert ed.markdown() == after_one
     ed.undo()
     assert ed.markdown() == authored
     assert not ed.is_dirty()
-    _publish(tmp_path, light)
-    win.apply_presentation_update()
+    _publish_and_wait(qtbot, tmp_path, ed, snap_b)
     assert ed.markdown() == authored
+    assert not ed.is_dirty()
     ed.redo()
     assert ed.markdown() == after_one
     assert ed.is_dirty()
@@ -147,51 +203,66 @@ def test_undo_redo_across_theme_changes(qapp, tmp_path, tmp_notebook, qtbot, mon
     win.close()
 
 
-_STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
+# Only genuinely nondeterministic PDF metadata is normalized; everything else
+# (page tree, boxes, resources, content, fonts, xref offsets) is compared.
+_PDF_NORMALIZE = (
+    (re.compile(rb"uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), b"uuid:" + b"0" * 36),
+    (re.compile(rb"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d"), b"2000-01-01T00:00:00+00:00"),
+    (re.compile(rb"\(D:\d{14}[+-]\d\d'\d\d'\)"), b"(D:20000101000000+00'00')"),
+    # Trailer /ID: hex of a random UUID string; keep the length so xref
+    # offsets still line up.
+    (re.compile(rb"<[0-9a-fA-F]{32,}>"), lambda m: b"<" + b"0" * (len(m.group(0)) - 2) + b">"),
+)
 
 
-def _pdf_body(path) -> list[bytes]:
-    """Page content, font and image streams plus the page count. The XMP
-    metadata stream (random document UUIDs, timestamps) is excluded."""
+def _pdf_normalized(path) -> bytes:
     data = path.read_bytes()
     assert data.startswith(b"%PDF")
-    streams = [m.group(1) for m in _STREAM.finditer(data) if b"x:xmpmeta" not in m.group(1)]
-    pages = len(re.findall(rb"/Type\s*/Page\b", data))
-    return [str(pages).encode()] + streams
+    for pat, repl in _PDF_NORMALIZE:
+        data = pat.sub(repl, data)
+    return data
+
+
+def _export(tmp_notebook, qtbot, out):
+    win = MainWindow()
+    win.open_notebook(str(tmp_notebook))
+    qtbot.addWidget(win)
+    export_page_pdf(win.notebook, win._current_page, out)
+    return win
 
 
 def test_pdf_export_matches_baseline_in_any_live_mode(qapp, tmp_path, tmp_notebook, qtbot, monkeypatch):
     snap_dir = tmp_path / "snap"
     snap_dir.mkdir()
-    dark = example_snapshot()
-    light = with_generation(replace(dark, mode="light"))
-    win = MainWindow()  # no controller: the legacy/native baseline
+    snap_a, snap_b = _snaps()
+    base_pdf = tmp_path / "base.pdf"
+    _export(tmp_notebook, qtbot, base_pdf).close()  # no controller: baseline
+    base = _pdf_normalized(base_pdf)
+
+    _attach(qapp, snap_dir, monkeypatch, snap_a)
+    save_use_desktop_document_fonts(QSettings("qnotebook", "qnotebook"), True)
+    win = MainWindow()
     win.open_notebook(str(tmp_notebook))
     qtbot.addWidget(win)
-    page = win._current_page
-    base_pdf = tmp_path / "base.pdf"
-    export_page_pdf(win.notebook, page, base_pdf)
-    win.close()
-
-    _attach(qapp, snap_dir, monkeypatch, dark)
-    save_use_desktop_document_fonts(QSettings("qnotebook", "qnotebook"), True)
-    outputs = []
-    for name, snap in (("dark", dark), ("light", light)):
-        _publish(snap_dir, snap)
-        win = MainWindow()
-        win.open_notebook(str(tmp_notebook))
-        qtbot.addWidget(win)
-        win.apply_presentation_update()
+    ed = win.editor
+    ed.load_markdown(SAMPLE, page_path=win._current_page)
+    live_families = []
+    for name, snap in (("a", snap_a), ("b", snap_b)):
+        if name == "b":
+            _publish_and_wait(qtbot, snap_dir, ed, snap)
+        # The live document typography is really the snapshot's, not legacy.
+        fmt = _body_fragment_format(ed)
+        fams = list(fmt.fontFamilies() or []) + [fmt.fontFamily()]
+        assert snap.fonts.ui_family in fams
+        live_families.append(snap.fonts.ui_family)
         out = tmp_path / f"{name}.pdf"
         export_page_pdf(win.notebook, win._current_page, out)
-        outputs.append(out)
-        win.close()
-    base = _pdf_body(base_pdf)
-    assert int(base[0]) >= 1 and len(base) > 2
-    for out in outputs:
-        assert _pdf_body(out) == base, out.name
+        assert _pdf_normalized(out) == base, name
+    win.close()
+    # The live document typography really changed between the two exports.
+    assert live_families[0] != live_families[1]
 
-    # Sensitivity: the comparison must see a real content change.
+    # Sensitivity: a real content change is visible to the comparison.
     reset_controller_for_tests()
     win = MainWindow()
     win.open_notebook(str(tmp_notebook))
@@ -201,4 +272,4 @@ def test_pdf_export_matches_baseline_in_any_live_mode(qapp, tmp_path, tmp_notebo
     changed = tmp_path / "changed.pdf"
     export_page_pdf(win.notebook, win._current_page, changed)
     win.close()
-    assert _pdf_body(changed) != base
+    assert _pdf_normalized(changed) != base
