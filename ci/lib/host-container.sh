@@ -25,11 +25,15 @@ host_container_run() {
     # Unit fixtures use their own PID as a development peer, so container_t
     # changes their identity assumptions. Label-disable also avoids relabeling
     # shared Git metadata/cache files; enforcing runtime tests belong in VMs.
+    # Keep PID 1 owned by container root, as on a host, then drop to the
+    # invoking UID before any source command. Otherwise user tests can kill
+    # their own init process and terminate the entire row container.
     podman run --rm --pull=never --init --userns=keep-id --network="$network" \
-        --security-opt label=disable --tz=local \
+        --security-opt label=disable --tz=local --user=0 \
         "${mounts[@]}" "${envs[@]}" --workdir "$QDISTRO_REPO" \
         --env QT_QPA_PLATFORM=offscreen --env HOME=/tmp/qci-home \
-        "$image" bash "$QDISTRO_REPO/ci/containers/enter-host.sh" "$@"
+        "$image" setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
+        bash "$QDISTRO_REPO/ci/containers/enter-host.sh" "$@"
 }
 
 host_container_gate() {

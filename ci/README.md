@@ -436,3 +436,7 @@ qdistro/ci/bin/qci report --latest
 
 Start from the report, then inspect the linked logs, journals, screenshots, and
 the preserved VM name if the failure kept one alive.
+
+The container init runs as container root (still rootless on the host); `setpriv`
+drops to the invoking UID/GID before running any source command. This preserves
+normal PID-1 signal permissions while all build outputs retain user ownership.

@@ -77,6 +77,8 @@ SH
     [ ! -e "$MARKER" ]
     grep -q -- '--init --userns=keep-id --network=none' "$CALLS"
     grep -q -- '--security-opt label=disable --tz=local' "$CALLS"
+    grep -q -- "--user=0" "$CALLS"
+    grep -q -- "setpriv --reuid=$(id -u) --regid=$(id -g) --clear-groups" "$CALLS"
     ! grep -Eq ':r[ow],z' "$CALLS"
     grep -q -- 'QT_QPA_PLATFORM=offscreen' "$CALLS"
     grep -Fq -- "$QDWIN_CACHE_DIR/host-npm:/tmp/qci-npm:rw" "$CALLS"
