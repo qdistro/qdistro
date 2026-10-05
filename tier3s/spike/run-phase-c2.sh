@@ -32,11 +32,23 @@ sleep 1
 
 VMLOG "$L/10-stage.log" "$vm" \
   "mkdir -p /root/t3s-c2 && cd /root/t3s-c2 && curl -fsS http://10.0.2.2:$PORT/spike.tgz | tar xzf - --no-same-owner && chown -R root:root /root/t3s-c2 && ls -la tier3s/ && loginctl enable-linger admin && sleep 2 && ls -ld /run/user/1000"
+[ "$FAILS" -gt 0 ] && { echo "staging failed; aborting before probes"; exit $FAILS; }
 
 VMLOG "$L/15-provision-runsc.log" "$vm" \
   "bash /root/t3s-c2/tier3s/provision-runsc.sh && /usr/libexec/qdistro/runsc/runsc --version | head -2"
+[ "$FAILS" -gt 0 ] && { echo "provision failed; aborting before probes"; exit $FAILS; }
 
 VMLOG "$L/20-c2-silo-uid.log" "$vm" "bash /root/t3s-c2/c2-silo-uid.sh"
+
+{
+  echo "# phase-C2 stage-1 spike evidence ($(basename "$L"))"
+  echo
+  echo "vm=$vm  commit=$(git -C "$repo" rev-parse --short HEAD)  driver-rc/FAILS=$FAILS"
+  echo
+  for f in "$L"/*.log; do
+    echo "- \`$(basename "$f")\` — $(grep -m1 -oP '(?<=### host ).*(?=: vm-exec)' "$f" 2>/dev/null || date -r "$f" -u +%FT%TZ)"
+  done
+} > "$L/INDEX.md"
 
 echo "== done; FAILS=$FAILS; logs in $L"
 exit $FAILS

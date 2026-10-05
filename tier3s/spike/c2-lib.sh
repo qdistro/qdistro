@@ -16,16 +16,20 @@ chmod 0755 "$WORK"
 SMOKE=$WORK/smoke.json
 install -m 0644 "$SPIKE_SRC/smoke.json" "$SMOKE"
 
-# C2 test identities. C2A joins the bridge group; C2B stays out of every
-# group so it is the non-member control for traversal checks.
-SILO_A=t3s-c2a
-SILO_B=t3s-c2b
+# C2 test identities — deleted+recreated each run so useradd/subuid
+# allocation is observed fresh. C2A joins the bridge group; C2B stays out
+# of every group so it is the non-member control for traversal checks.
+SILO_A=${T3S_SILO_A:-t3s-c2a}
+SILO_B=${T3S_SILO_B:-t3s-c2b}
 BRIDGE_GROUP=qdistro-tier3   # reuse tier-3's group if present; else a test group
 
 say() { printf '\n## %s\n' "$*"; }
 obs() { printf 'OBSERVE: %s\n' "$*"; }
 pass() { printf 'PASS: %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*"; }
+FAILS=0
+fail() { FAILS=$((FAILS+1)); printf 'FAIL: %s\n' "$*"; }
+# Capture a probe's full output+rc, print output minus podman session noise.
+probe() { local out rc; out=$("$@" 2>&1); rc=$?; printf '%s\n' "$out" | grep -v 'level=warning'; printf 'rc=%d\n' "$rc"; return "$rc"; }
 
 # Run a command as a silo user with a scrubbed environment. $2 variant:
 # as_silo <user> <cmd...> uses a root-pre-created runtime dir at
