@@ -185,6 +185,26 @@ def test_wheel_partial_and_pixel_deltas_accumulate(qapp, tmp_notebook, qtbot):
     win.close()
 
 
+@pytest.mark.parametrize("first", ["angle", "pixel"])
+def test_wheel_mixed_delta_types_share_one_unit(qapp, tmp_notebook, qtbot, first):
+    win = _window(tmp_notebook, qtbot)
+    vp = win.editor.viewport()
+    half = {
+        "angle": lambda: _wheel(win.editor, 60, CTRL),  # half a notch
+        "pixel": lambda: _wheel(win.editor, 0, CTRL, pixel_dy=30),  # half of 60 px
+    }
+    second = "pixel" if first == "angle" else "angle"
+    QApplication.sendEvent(vp, half[first]())
+    # One more pixel/unit of the other kind is NOT a whole step.
+    tiny = _wheel(win.editor, 0, CTRL, pixel_dy=1) if second == "pixel" else _wheel(win.editor, 1, CTRL)
+    QApplication.sendEvent(vp, tiny)
+    assert load_editor_zoom() == 100
+    # The other half (in the other unit) completes exactly one step.
+    QApplication.sendEvent(vp, half[second]())
+    assert load_editor_zoom() == 110
+    win.close()
+
+
 def test_zoom_repaints_every_open_window(qapp, tmp_notebook, qtbot):
     first = _focused_window(tmp_notebook, qtbot)
     second = _window(tmp_notebook, qtbot)

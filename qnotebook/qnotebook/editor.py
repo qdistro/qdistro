@@ -295,22 +295,23 @@ class MarkdownEditor(QTextEdit):
         # QTextEdit's own Ctrl+wheel zoom changes the widget font only, which
         # explicit fragment sizes ignore; route it to the editor zoom instead.
         # Wheels report angleDelta (120 per notch, less on high-resolution
-        # wheels); touchpads may report only pixelDelta. Accumulate either
-        # and step once per notch-equivalent so neither is lost or too fast.
+        # wheels); touchpads may report only pixelDelta. Both are converted
+        # to fractions of one zoom step before accumulating, so a mix of the
+        # two neither steps early nor late.
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             angle = e.angleDelta().y()
             if angle:
-                delta, threshold = angle, self._WHEEL_NOTCH
+                delta = angle / self._WHEEL_NOTCH
             else:
-                delta, threshold = e.pixelDelta().y(), self._WHEEL_PIXELS
+                delta = e.pixelDelta().y() / self._WHEEL_PIXELS
             if delta:
-                acc = getattr(self, "_zoom_wheel_acc", 0)
+                acc = getattr(self, "_zoom_wheel_acc", 0.0)
                 if (acc > 0) != (delta > 0):
-                    acc = 0  # direction changed
+                    acc = 0.0  # direction changed
                 acc += delta
-                while abs(acc) >= threshold:
+                while abs(acc) >= 1.0:
                     step = 1 if acc > 0 else -1
-                    acc -= step * threshold
+                    acc -= step
                     self.zoomStepRequested.emit(step)
                 self._zoom_wheel_acc = acc
             e.accept()
