@@ -381,14 +381,27 @@ PODMAN_ARGV=(
     --env HOME=/home/admin --env "XDG_RUNTIME_DIR=/run/user/$SILO_UID" --env LANG=C.UTF-8
 )
 if [ -n "$STATE_PATH" ]; then
-    # the silo-owned state dir is the writable guest home; create it silo-owned
-    # (no :U, no recursive chown — ownership must already line up)
+    # the silo-owned state dir is the writable guest home; create it AS THE
+    # SILO — root never creates/chowns through the silo-controlled home path
+    # (a swapped symlink under ~/ would redirect install -d to a foreign
+    # destination; sol model-A r1 P1-1). Verify with lstat semantics BEFORE
+    # the chmod, then again with the mode: real silo-owned 0700 dirs, never
+    # symlinks (no :U, no recursive chown).
     if [ -n "$T" ]; then mkdir -p "$STATE_PATH"; else
-        install -d -m 0700 -o "$SILO_UID" -g "$SILO_GID" "$STATE_PATH" \
+        as_silo mkdir -p "$STATE_PATH" \
             || refuse "cannot create the silo state dir $STATE_PATH"
     fi
-    [ "$(stat -c %u -- "$STATE_PATH")" = "$SILO_UID" ] \
-        || refuse "silo state dir $STATE_PATH is not owned by uid $SILO_UID"
+    for d in "$SILO_STATE" "$STATE_PATH"; do
+        { [ -d "$d" ] && [ ! -L "$d" ] \
+            && [ "$(stat -c %u -- "$d")" = "$SILO_UID" ]; } \
+            || refuse "silo state dir $d is not a silo-owned directory"
+    done
+    if [ -n "$T" ]; then chmod 0700 "$SILO_STATE" "$STATE_PATH"; else
+        as_silo chmod 0700 "$SILO_STATE" "$STATE_PATH" \
+            || refuse "cannot chmod the silo state dir $STATE_PATH"
+    fi
+    [ "$(stat -c %a -- "$STATE_PATH")" = "700" ] \
+        || refuse "silo state dir $STATE_PATH is not mode 0700"
     PODMAN_ARGV+=(-v "$STATE_PATH:/home/admin:rw")
 else
     # no binding: a fresh tmpfs home owned by the guest uid

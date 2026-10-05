@@ -43,7 +43,11 @@ TOKEN="$2"; SILO_UID="$3"; shift 5
 # NSS is resolved once, under a bound (fable A r3 P3-2): a wedged lookup dies
 # the launch rather than wedging the scope's first process. Its status counts
 # (sol r5 P3-4): a line printed before the stall is not a result.
-SILO_PW="$(timeout 5 getent passwd "$SILO_UID")" \
+# (test mode: the fixture's getent fake serves the canned qt3s-* entry only
+# to callers opting in — the spawn's admin lookup keeps real NSS)
+FAKE_NSS=()
+[ -n "$T" ] && FAKE_NSS=(env TIER3S_FAKE_SILO_NSS=1)
+SILO_PW="$(timeout 5 "${FAKE_NSS[@]}" getent passwd "$SILO_UID")" \
     || die "no passwd entry for uid $SILO_UID (the NSS lookup failed or timed out)"
 SILO_USER="$(printf '%s\n' "$SILO_PW" | cut -d: -f1)"
 SILO_PUID="$(printf '%s\n' "$SILO_PW" | cut -d: -f3)"

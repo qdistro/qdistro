@@ -31,6 +31,7 @@ SPAWN = T3S / "spawn-tier3s.sh"
 HELPER = T3S / "qdistro-tier3s-scope"
 CLEANUP = T3S / "qdistro-tier3s-cleanup"
 UID = os.getuid()
+GID = os.getgid()
 ME = pwd.getpwuid(UID).pw_name
 TOKEN = "0123456789abcdef0123456789abcdef"
 TOKEN2 = "fedcba9876543210fedcba9876543210"
@@ -282,6 +283,15 @@ F=@F@
 # getent_hang_after: a complete-looking answer, THEN a wedge — killed at the
 # bound, and what it printed is not a result (sol r5 P3-4)
 if [ -e "$F/getent_hang_after" ]; then /usr/bin/getent "$@"; sleep 600; fi
+# passwd_for_<key>: a canned passwd entry for `getent passwd <key>`, served
+# only to callers that opt in (TIER3S_FAKE_SILO_NSS=1) — the cleanup and the
+# scope helper need a qt3s-* entry under the test seam's silo uid, which real
+# NSS does not have; the spawn's ADMIN lookup must keep seeing real NSS, or
+# the conflated seam uid would turn admin into qt3s-* too (sol model-A r1)
+if [ "${TIER3S_FAKE_SILO_NSS:-}" = 1 ] && [ "${1:-}" = passwd ] && [ -n "${2:-}" ] \
+        && [ "${2##*/}" = "$2" ] && [ -e "$F/passwd_for_$2" ]; then
+    cat -- "$F/passwd_for_$2"; exit 0
+fi
 exec /usr/bin/getent "$@"
 '''
 
@@ -518,6 +528,21 @@ class World:
         self.set("dbus_mode", "allow")
         # the fake bridge halves put their /proc entries in this unit's cgroup
         self.set("launch_unit", self.unit)
+        # the qt3s-<silo> account entry the record↔account binding checks
+        # resolve through the getent fake (the test uid is the silo uid under
+        # the TIER3S_TEST_ROOT seam; model A). Tests overwrite this to pose a
+        # swapped/foreign account.
+        self.silo_acct = f"qt3s-{(silo or 'smoke')[:27]}"
+        self.set_silo_passwd()
+
+    def set_silo_passwd(self, name=None, gecos=None):
+        """The passwd entry NSS returns for the silo uid; defaults to the
+        bound qt3s-<silo> account with this silo's GECOS marker."""
+        silo = self.silo or "smoke"
+        name = self.silo_acct if name is None else name
+        gecos = f"qdistro tier3s silo {silo}" if gecos is None else gecos
+        self.set(f"passwd_for_{UID}",
+                 f"{name}:x:{UID}:{GID}:{gecos}:/home/{name}:/bin/bash\n")
 
     # -- GUI world pieces (CONTRACT.md §5 step 12) --
     def compositor(self):
@@ -604,7 +629,7 @@ class World:
         d = Path(f"{self.T}/sys/fs/cgroup{rel}")
         st = {"schema": "1", "token": token, "container": container, "unit": unit,
               "scope_unit": f"qdistro-tier3s-{token}.scope", "admin_uid": str(UID),
-              "silo_uid": str(UID), "silo_user": f"qt3s-{self.silo or 'smoke'}",
+              "silo_uid": str(UID), "silo_user": self.silo_acct,
               "silo": self.silo or "smoke",
               "runsc_root": f"/run/qdistro-tier3s-runsc/{UID}",
               "per_launch_dir": f"/run/qdistro-tier3s/{token}", "phase": "running",
@@ -739,6 +764,40 @@ def test_templated_silo_mounts_state_and_uses_the_digest(w):
     assert pa[-2] == DIGEST and p["IMAGE"] == DIGEST
     # read-only resolution before the plan: no --record
     assert [c for c in w.calls() if c.startswith("resolver")] == ["resolver smoke --launch-env"]
+
+
+@pytest.mark.parametrize("link", ["state-root", "binding"])
+def test_templated_silo_refuses_a_symlinked_state_component(w, link):
+    """sol model-A r1 P1-1: the silo controls its home; a symlink swapped in
+    at tier3s-state or at the binding dir must refuse — root never creates or
+    chowns through a silo-controlled path, and the planted target is left
+    untouched."""
+    w.set("resolver_mode", "digest")
+    home = w.T / "home/qt3s-smoke"
+    home.mkdir(parents=True)
+    target = w.tmp / "foreign-state"
+    target.mkdir(mode=0o755)
+    if link == "state-root":
+        (home / "tier3s-state").symlink_to(target)
+    else:
+        (home / "tier3s-state").mkdir()
+        (home / "tier3s-state/smoke").symlink_to(target)
+    r = w.spawn(TIER3S_PRINT_PLAN="1")
+    assert r.returncode == 2, r.stderr
+    assert "is not a silo-owned directory" in r.stderr, r.stderr
+    # the refusal preceded podman/bridge work, and the foreign target was
+    # never chmodded or chowned into place
+    assert (target.stat().st_mode & 0o777) == 0o755
+    assert not [c for c in w.calls() if c.startswith(("podman", "systemd-run", "dbus-send"))]
+
+
+def test_templated_silo_refuses_state_not_owned_by_the_silo_uid(w):
+    """sol model-A r1 P1-1, the foreign-destination leg: an existing state dir
+    owned by another uid refuses — TIER3S_TEST_SILO_UID shifts the silo
+    identity, so the caller-created dir is 'foreign' for this launch."""
+    w.set("resolver_mode", "digest")
+    r = w.spawn(TIER3S_PRINT_PLAN="1", TIER3S_TEST_SILO_UID=str(UID + 7))
+    assert r.returncode == 2 and "is not a silo-owned directory" in r.stderr, r.stderr
 
 
 def test_podapp_launch_is_refused_in_phase_a(tmp_path):
@@ -1070,7 +1129,7 @@ def test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin(w):
     assert chowns == [f"chown {UID} -- {d} {d}/cgroup.procs {d}/cgroup.subtree_control {d}/cgroup.threads"]
     assert not any("memory.max" in c or "pids.max" in c for c in chowns)
     ru = [c for c in w.calls() if c.startswith("runuser")]
-    assert len(ru) == 1 and ru[0].startswith(f"runuser -u {ME} -- /usr/bin/env -i PATH=/usr/bin:/bin ")
+    assert len(ru) == 1 and ru[0].startswith(f"runuser -u {w.silo_acct} -- /usr/bin/env -i PATH=/usr/bin:/bin ")
     assert ru[0].endswith(f"{w.bin}/podman version")
     assert f"CONTAINERS_CONF={w.T}/usr/lib/qdistro/tier3s/containers.conf" in ru[0]
     assert w.calls()[-1] == "podman version"
@@ -1123,6 +1182,46 @@ def test_cleanup_tears_down_a_running_launch(w):
                for i, c in enumerate(calls)
                if c.startswith("podman") and "HELD" not in c)
     assert not any("HELD lock fd" in c for c in calls), calls
+
+
+@pytest.mark.parametrize("swap", ["name", "marker", "other-silo", "missing"])
+def test_cleanup_refuses_a_silo_account_that_no_longer_binds(w, swap):
+    """sol model-A r1 P1-2: the recorded silo uid must STILL resolve to the
+    recorded qt3s-<silo> account carrying this silo's GECOS marker — a
+    recreated, swapped or removed account is a different podman store whose
+    'absent' is not this record's verdict. Fails closed BEFORE any store
+    query: record preserved, no podman call at all."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    if swap == "name":
+        w.set_silo_passwd(name="mallory")                    # the uid was reassigned
+    elif swap == "marker":
+        w.set_silo_passwd(gecos="An Ordinary Account")       # foreign marker
+    elif swap == "other-silo":
+        w.set_silo_passwd(gecos="qdistro tier3s silo other") # another silo's account
+    else:
+        (w.F / f"passwd_for_{UID}").unlink()                 # account removed
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4, r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls()), w.calls()
+    if swap != "missing":
+        # restoring the binding lets the very same teardown complete
+        w.set_silo_passwd()
+        r = w.cleanup(TOKEN)
+        assert r.returncode == 0 and w.launch_gone(TOKEN), r.stderr
+
+
+def test_reap_stale_unrecorded_container_on_an_unbound_uid_is_preserved(w):
+    """sol model-A r1 P1-2, the reaper leg: a labelled container listed from
+    a uid that is no longer a bound tier3s silo account is NOT reaped from
+    that store."""
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    w.set_unit("qdistro-tier3s-silo@b.service", "inactive")
+    shutil.rmtree(w.ctl / TOKEN2)                    # the manager lost the record
+    w.set_silo_passwd(gecos="An Ordinary Account")   # the uid is foreign now
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "not a bound tier3s silo account" in r.stderr, r.stderr
+    assert not any(c.startswith("podman rm") for c in w.calls()), w.calls()
 
 
 def test_cleanup_with_missing_state_root_preserves_record_and_scope(w):

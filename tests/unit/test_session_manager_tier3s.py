@@ -549,12 +549,16 @@ def real_ops(monkeypatch, tmp_path):
     ctl.mkdir()
     monkeypatch.setattr(sm, "TIER3S_CTL_DIR", ctl)
     # C2 model A: tier3s podman calls run as the qt3s-<silo> account, which
-    # does not exist on the build host — resolve it to a fake passwd entry.
+    # does not exist on the build host — resolve it to a fake passwd entry
+    # carrying this silo's GECOS marker (the suffix is the silo name for
+    # names that fit the 27-char account truncation; colliding longer names
+    # need their own getpwnam override).
     real_getpwnam = sm.pwd.getpwnam
     def fake_getpwnam(name):
         if name.startswith(sm.TIER3S_SILO_ACCT_PREFIX):
+            silo = name[len(sm.TIER3S_SILO_ACCT_PREFIX):]
             return sm.pwd.struct_passwd(
-                (name, "x", 4242, 4242, "qdistro tier3s silo",
+                (name, "x", 4242, 4242, f"qdistro tier3s silo {silo}",
                  f"/home/{name}", "/bin/bash"))
         return real_getpwnam(name)
     monkeypatch.setattr(sm.pwd, "getpwnam", fake_getpwnam)
@@ -608,6 +612,80 @@ def test_running_true_when_the_query_times_out(real_ops, monkeypatch):
     _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")),
                            (_exists, subprocess.TimeoutExpired("podman", 30))])
     assert real_ops.tier3s_silo_running("smoke") is True
+
+
+def _silo_pw(acct, uid, gecos):
+    return sm.pwd.struct_passwd(
+        (acct, "x", uid, uid, gecos, f"/home/{acct}", "/bin/bash"))
+
+
+@pytest.mark.parametrize("gecos,uid", [
+    ("qdistro tier3s silo other", 4242),   # the marker of ANOTHER silo
+    ("An Ordinary Account", 4242),          # a foreign/recreated account
+    ("qdistro tier3s silo smoke", -1),      # the admin uid (-1: resolved below)
+    ("qdistro tier3s silo smoke", 80),      # a sub-1000 uid
+], ids=["other-silo-marker", "foreign-account", "admin-uid", "low-uid"])
+def test_silo_query_rejects_an_unbound_account(real_ops, monkeypatch, gecos, uid):
+    """sol model-A r1 P2-3: the qt3s-<silo> account must carry THIS silo's
+    GECOS marker on a regular non-admin uid; anything else is not this silo's
+    store — the query never reaches podman and the observation is fail-closed
+    'still running', never 'stopped'."""
+    def fake(name):
+        if name == "qt3s-smoke":
+            return _silo_pw(name, sm.ADMIN_UID if uid < 0 else uid, gecos)
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running("smoke") is True
+    assert len(rec.calls) == 1            # is-active only; podman never ran
+
+
+def test_silo_query_rejects_a_truncation_collision(real_ops, monkeypatch):
+    """sol model-A r1 P2-3: two silo names sharing their first 27 chars map to
+    ONE qt3s- account. The owner is observed through its store; the collider's
+    marker does not match and the query refuses before podman — fail-closed,
+    not 'stopped' on the other's absence."""
+    owner, collider = "a" * 28, "a" * 27 + "b"
+    acct = "qt3s-" + "a" * 27
+    def fake(name):
+        if name == acct:
+            return _silo_pw(acct, 4242, f"qdistro tier3s silo {owner}")
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")),
+                                 (_exists, _verdict(1))])
+    assert real_ops.tier3s_silo_running(owner) is False
+    assert len(rec.calls) == 2
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running(collider) is True
+    assert len(rec.calls) == 1            # refused before podman
+
+
+def test_silo_query_with_no_account_is_unknown(real_ops, monkeypatch):
+    """The qt3s-<silo> account is provisioned lazily at first launch; before
+    that (or after a foreign removal) getpwnam raises, there is no verdict
+    and the silo reads still-running — never 'stopped'."""
+    def fake(name):
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running("smoke") is True
+    assert len(rec.calls) == 1
+
+
+def test_observe_unbound_silo_account_is_unknown(real_ops, monkeypatch):
+    """observation leg: an unbound qt3s-<silo> account yields 'unknown', not
+    'stopped' — the store that was not queried cannot vouch absence."""
+    def fake(name):
+        if name == "qt3s-smoke":
+            return _silo_pw(name, 4242, "qdistro tier3s silo other")
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [
+        (_is("systemctl", "show"),
+         (0, "LoadState=loaded\nActiveState=inactive\nJob=\n"))])
+    status, reason = real_ops.observe_silo("smoke", sm.ADMIN_UID, "tier3s")
+    assert status == "unknown", reason
 
 
 def test_running_true_while_a_control_record_of_the_unit_survives(real_ops, monkeypatch):

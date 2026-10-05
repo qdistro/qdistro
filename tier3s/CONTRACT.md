@@ -523,10 +523,16 @@ record (and the scope, if it is still alive)**:
 1. Validate the token and the record. The record is a real directory, root
    0700, `state` root 0600; the fields are well-formed; `silo_uid` is a
    regular uid other than admin's (the test seam exempts the caller's own
-   uid), `silo_user` resolves to it and `silo` is the silo name the account
-   was provisioned for;
+   uid), `silo_user` matches `qt3s-<silo>` and `silo` is well-formed;
    `runsc_root` equals the root derived for `silo_uid`; `scope_unit`
    matches the token; `per_launch_dir` matches the token.
+   Then **record↔account binding** (model A r1): `silo_uid` must still
+   resolve — via a bounded getent whose whole answer is the one line — to
+   the recorded `silo_user` carrying the exact GECOS `qdistro tier3s silo
+   <silo>`. A deleted-and-recreated or swapped account is a different
+   podman store whose "absent" is not this record's verdict; on any
+   mismatch or a failed lookup the teardown preserves before any store
+   query.
 2. The state root is present, not a symlink, owned by `silo_uid`, 0700. A
    missing or replaced root fails here with "refusing to query or stop", so
    it never produces a false "no container".
@@ -647,7 +653,9 @@ Restart reconciliation (A-ii, as implemented):
   `qdistro_tier3s_unit` names a positively dead unit, and whose token scope
   passes rule 3, is removed by ID (`podman rm -f -t 10 <id>`, re-queried),
   reported as "unrecorded"; its scope and per-launch dir then go through the
-  guarded orphan path.
+  guarded orphan path. Before the rm, the listing uid must still resolve to a
+  `qt3s-*` account carrying the tier3s marker (model A r1: a swapped or
+  recreated uid's store is not ours to reap).
 - Containers carry the labels `qdistro_tier3s_token=<token>` and
   `qdistro_tier3s_unit=<launch unit>`.
 
@@ -823,7 +831,11 @@ podman --runtime /usr/libexec/qdistro/tier3s-runsc --runtime-flag=network=none
       --tmpfs /run/user/<silo-uid>:rw,U,mode=0700  # U -> OCI uid=<silo-uid>,gid=<silo-gid>
       [-v /run/qdistro-tier3s/<token>:/run/qdistro/link:ro]   # GUI only (B-i)
       [--runtime-flag=host-uds=open]        # GUI only (B-i): bind-mounted unix sockets allowed
-      [-v <silo_state>:/home/admin:rw]      # templated silo only; silo-owned, no recursive chown
+      [-v <silo_state>:/home/admin:rw]      # templated silo only; silo-owned, no recursive chown.
+                                           # <silo_state> is ~qt3s-<silo>/tier3s-state/<binding>, created
+                                           # AS THE SILO (mkdir/chmod via runuser — root never follows a
+                                           # silo-controlled home path), then lstat-verified: real dirs,
+                                           # silo-owned 0700, never symlinks (model A r1)
       [--tmpfs /home/admin:rw,U,mode=0700]  # untemplated silo: a fresh tmpfs home owned by the guest uid
       --pids-limit=512                      # parity with tier 2 only; NOT enforced under --ignore-cgroups
       --network=none
@@ -859,8 +871,11 @@ would have to cover the whole contract below before it pays off).
   persisted mapping.
 - **Observe:** `observe_silo` / `tier3s_silo_running`. The silo runs iff its
   unit is active **and** podman (as the `qt3s-<silo>` account — the container
-  lives in its per-silo store) reports the container running. A
-  failed podman query is "unknown", never "stopped".
+  lives in its per-silo store) reports the container running. The account is
+  bound before any store query: it must carry this silo's exact GECOS marker
+  on a regular non-admin uid — a truncation collision or a foreign/recreated
+  account resolves to a different marker and fails closed as "unknown"
+  (model A r1). A failed podman query is "unknown", never "stopped".
 - **Stop:** `systemctl stop qdistro-tier3s-silo@<name>.service` (ExecStop and
   ExecStopPost run the cleanup). The manager then verifies through
   `tier3s_silo_running` and the absence of `/run/qdistro-tier3s-ctl/<token>`.

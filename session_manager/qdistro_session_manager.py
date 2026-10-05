@@ -2386,10 +2386,19 @@ class _SystemOps:
         call sees that account's rootless store (and, through the container's
         recorded runtime, its own runsc state root). A silo has no logind
         session; the per-silo /run/qdistro-tier3s-rt/<uid> dir stands in.
-        Raises KeyError when the account does not resolve, plus
-        subprocess.TimeoutExpired / OSError."""
+        The account must carry this silo's exact GECOS marker on a regular
+        non-admin uid — a truncation collision or a foreign/recreated
+        account resolves to a different marker and raises KeyError (never
+        silently queries another account's store; sol model-A r1 P2-3).
+        Raises KeyError when the account does not resolve or fails the
+        binding checks, plus subprocess.TimeoutExpired / OSError."""
         acct = _SystemOps._tier3s_silo_acct(name)
         pw = pwd.getpwnam(acct)
+        if pw.pw_gecos != f"qdistro tier3s silo {name}" \
+                or pw.pw_uid < 1000 or pw.pw_uid == ADMIN_UID:
+            raise KeyError(
+                f"{acct}: not the bound tier3s silo account for '{name}' "
+                f"(uid {pw.pw_uid}, gecos {pw.pw_gecos!r})")
         return subprocess.run(
             ["runuser", "-u", acct, "--", "env", "-i",
              "PATH=/usr/bin:/bin", f"HOME={pw.pw_dir}", f"USER={acct}",

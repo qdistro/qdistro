@@ -80,6 +80,11 @@ else
     [ "$EUID" -eq 0 ] || { say "must run as root"; exit 2; }
     ADMIN_PATH=/usr/bin:/bin; WANT_ADMIN=1000; STEP=0.25
 fi
+# Test-mode NSS: the fixture has no real qt3s-* accounts; its getent fake
+# serves the canned silo passwd entry only to callers passing this opt-in,
+# so the spawn's admin lookup (same seam uid) keeps seeing real NSS.
+FAKE_NSS=()
+[ -n "$T" ] && FAKE_NSS=(env TIER3S_FAKE_SILO_NSS=1)
 CTL="$T/run/qdistro-tier3s-ctl"
 LAUNCH_PARENT="$T/run/qdistro-tier3s"
 CGROOT="$T/sys/fs/cgroup"
@@ -211,7 +216,7 @@ as_uid() {     # as_uid <seconds> <uid> cmd...: bounded, in its own scope, as th
         # fields are not the ones asked for.
         cap "$GETENT_TMO" || { say "batch deadline reached; cannot resolve uid $uid"; return 125; }
         local pw puid
-        pw="$(timeout "$CAP" getent passwd "$uid" 2>/dev/null)" \
+        pw="$(timeout "$CAP" "${FAKE_NSS[@]}" getent passwd "$uid" 2>/dev/null)" \
             || { say "no user for uid $uid (the NSS lookup failed or timed out)"; return 125; }
         IFS=: read -r A_USER _ puid _ _ A_HOME _ <<< "$pw"
         [ -n "$A_USER" ] && [ "$puid" = "$uid" ] && [[ "$A_HOME" == /* ]] && [[ "$pw" != *$'\n'* ]] \
@@ -241,6 +246,38 @@ silo_uids() {
               sed -n 's/^silo_uid=//p' -- "$d" 2>/dev/null
           done
         } | awk '$0 ~ /^[0-9]+$/ && $0+0 >= 1000' | sort -un)
+}
+# silo_bound <uid> <user> <silo>: the recorded silo uid STILL resolves to the
+# recorded qt3s-<silo> account carrying this silo's exact GECOS marker. A
+# deleted-and-recreated or otherwise swapped account is a different podman
+# store whose "absent" is not this record's verdict — and whose contents are
+# not this record's containers (sol model-A r1 P1-2). Non-zero — the caller
+# preserves, never tears down — on any mismatch or a failed lookup.
+silo_bound() {
+    local name uid gecos
+    if ! bounded "$GETENT_TMO" "${FAKE_NSS[@]}" getent passwd "$1" 2>/dev/null || ! out_line; then
+        say "no user for uid $1 (the NSS lookup failed or timed out)"; return 1
+    fi
+    IFS=: read -r name _ uid _ gecos _ <<< "$OUT"
+    [ "$name" = "$2" ] && [ "$uid" = "$1" ] \
+        && [ "$gecos" = "qdistro tier3s silo $3" ] && return 0
+    say "uid $1 resolves to '${name:-?}' ('${gecos:-?}'), not the bound account $2 of silo $3"
+    return 1
+}
+# silo_uid_ok <uid>: it resolves to a qt3s-* account carrying the tier3s
+# marker — the loose binding for unrecorded labelled containers, whose unit
+# label need not name a silo (app@<token>) so only the account shape can be
+# checked. Non-zero on any mismatch or a failed lookup.
+silo_uid_ok() {
+    local name uid gecos
+    if ! bounded "$GETENT_TMO" "${FAKE_NSS[@]}" getent passwd "$1" 2>/dev/null || ! out_line; then
+        say "no user for uid $1 (the NSS lookup failed or timed out)"; return 1
+    fi
+    IFS=: read -r name _ uid _ gecos _ <<< "$OUT"
+    [ "$uid" = "$1" ] && [[ "$name" == qt3s-* ]] \
+        && [[ "$gecos" == "qdistro tier3s silo "?* ]] && return 0
+    say "uid $1 resolves to '${name:-?}' ('${gecos:-?}'), not a bound tier3s silo account"
+    return 1
 }
 # pm_exists <silo uid> <container>: PM_RC = podman's own verdict on the
 # container (0 present, 1 absent, other = the query itself failed). The
@@ -508,6 +545,12 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
     local tok="$1" dead="${2:-0}" root rc rel1 dir p c out id want
     read_record "$tok" || return 1
     local silo="${S[silo_uid]}" ctr="${S[container]}" scope="${S[scope_unit]}"
+    # record↔account binding before ANY store query: a uid that no longer
+    # resolves to the recorded qt3s- account marked for this silo means the
+    # account was swapped or removed — another account's store answers
+    # "absent" for this record's container
+    silo_bound "$silo" "${S[silo_user]:-}" "${S[silo]:-}" \
+        || { say "$tok: silo uid $silo no longer resolves to ${S[silo_user]:-?} 'qdistro tier3s silo ${S[silo]:-?}' (account swapped or removed); NOT querying its store (record preserved)"; return 4; }
     root="$T${S[runsc_root]}"
     if [ -L "$root" ] || [ ! -d "$root" ] || [ "$(stat -c '%u %a' -- "$root")" != "$silo 700" ]; then
         say "$tok: runsc state root $root is missing, replaced or loose; refusing to query or stop $ctr (record and scope preserved)"
@@ -837,6 +880,10 @@ case "$mode" in
             scope_owned "$tok" "$u" "" "$dead" || { say "$tok: NOT reaping $name"; fails=$((fails + 1)); continue; }
             [ "$dead" = 0 ] && why="is the spawn own unit" || why="not live"
             say "$tok: UNRECORDED labelled container $name (unit $u $why); reaping"
+            # the listing uid must still be a bound tier3s silo account —
+            # a swapped/recreated uid's store is not ours to rm from
+            silo_uid_ok "$suid" \
+                || { say "$tok: uid $suid is not a bound tier3s silo account; NOT reaping $name"; fails=$((fails + 1)); continue; }
             if ! as_uid $((GRACE + PODMAN_TMO)) "$suid" podman rm -f -t "$GRACE" "$id" >/dev/null; then
                 say "$tok: podman rm -f $name failed"; fails=$((fails + 1)); continue; fi
             { pm_exists "$suid" "$id" && [ "$PM_RC" = 1 ]; } \
