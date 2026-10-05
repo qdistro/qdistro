@@ -42,3 +42,6 @@ diffutils
 bzip2
 rsync
 zstd
+podman
+socat
+noctalia-qs

@@ -389,9 +389,20 @@ image, without pulling or rebuilding it.
 The worktree is mounted at its original absolute path with `--userns=keep-id`,
 so generated files retain the invoking user's ownership. Linked-worktree Git
 metadata is mounted read-only. No host home, display socket, D-Bus socket or
-Python package path enters the test container. Shared `:z` relabeling is used
-only on SELinux-enforcing hosts; on this non-enforcing host it is unnecessary
-and would mutate source/cache labels for no benefit.
+Python package path enters the test container. Container SELinux labeling is disabled (`--security-opt label=disable`); it
+never relabels the worktree, shared Git metadata, or RPM/npm caches. The lab
+host currently reports enforcing mode; assigning
+`container_t` breaks unit fixtures that use their own PID as a development
+peer. This does not change host enforcement. SELinux runtime isolation remains
+VM-gated; this toolchain container is for trusted development source.
+
+A private runtime directory and UTF-8 locale support offscreen Qt tools.
+An isolated `dbus-run-session` supplies both test session and system-bus
+addresses; neither connects to host services. `--init` reaps children, and the
+private row entrypoint does not install the outer runner's VM-cleanup traps.
+The container preserves the host timezone (`--tz=local`), matching the previous
+native gate. A known notebook-test limitation remains on UTC hosts: its PDF
+metadata normalizer handles signed offsets but not the UTC `Z` spelling.
 
 A separate preparation container runs `npm ci --prefer-offline` with downloads
 cached in `$QDWIN_CACHE_DIR/host-npm/` (default `~/.cache/qdistro/host-npm/`).

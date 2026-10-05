@@ -75,7 +75,9 @@ SH
     '
     echo "$output"; [ "$status" = 0 ]
     [ ! -e "$MARKER" ]
-    grep -q -- '--userns=keep-id --network=none' "$CALLS"
+    grep -q -- '--init --userns=keep-id --network=none' "$CALLS"
+    grep -q -- '--security-opt label=disable --tz=local' "$CALLS"
+    ! grep -Eq ':r[ow],z' "$CALLS"
     grep -q -- 'QT_QPA_PLATFORM=offscreen' "$CALLS"
     grep -Fq -- "$QDWIN_CACHE_DIR/host-npm:/tmp/qci-npm:rw" "$CALLS"
     run env RUN_RC=42 bash -c '
@@ -163,4 +165,34 @@ host qdfirefox-extension-coverage-floor coverage'
     echo "$output"; [ "$status" = 1 ]
     [[ "$output" = *"MISSING orchestration prerequisite: podman"* ]]
     [[ "$output" != *"unexpected dependency"* ]]
+}
+
+@test "host image hashing pins collation independently of caller locale" {
+    cat > "$BATS_TEST_TMPDIR/bin/sort" <<'SH'
+#!/bin/bash
+printf 'sort locale=%s\n' "${LC_ALL:-unset}" >> "$CALLS"
+exec /usr/bin/sort "$@"
+SH
+    chmod +x "$BATS_TEST_TMPDIR/bin/sort"
+    run env LC_ALL=POSIX "$REPO/ci/bin/qci-host-image"
+    echo "$output"; [ "$status" = 0 ]
+    grep -qx 'sort locale=C' "$CALLS"
+    run env LC_ALL=C "$REPO/ci/bin/qci-host-image"
+    echo "$output"; [ "$status" = 0 ]; [[ "$output" = *'cache hit'* ]]
+    [ "$(grep -c '^build ' "$CALLS")" = 1 ]
+}
+
+@test "host selftests do not require an available GUI agent version command" {
+    for agent in codex claude; do
+        printf '#!/bin/sh\nexit 127\n' > "$BATS_TEST_TMPDIR/bin/$agent"
+        chmod +x "$BATS_TEST_TMPDIR/bin/$agent"
+        run env TEST_AGENT="$agent" bash -eo pipefail -c '
+            . "$SOURCE_ROOT/ci/lib/gates/gui.sh"
+            kv() { printf "%s=%s\n" "$1" "$2"; }
+            QCI_AGENT_CMD="$TEST_AGENT --model fixture-model" record_agent_identity
+        '
+        echo "$output"; [ "$status" = 0 ]
+        [[ "$output" = *"qci_agent_model=fixture-model"* ]]
+        [[ "$output" != *"qci_agent_version="* ]]
+    done
 }

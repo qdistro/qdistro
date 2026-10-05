@@ -2,20 +2,19 @@
 # Shared launcher for acceptance rows and explicit development commands.
 host_container_run() {
     local image=$1 network=$2; shift 2
-    local label='' git_common name run_path npm_cache
-    [ "$(cat /sys/fs/selinux/enforce 2>/dev/null || true)" != 1 ] || label=,z
-    local -a mounts=(--volume "$QDISTRO_REPO:$QDISTRO_REPO:rw$label") envs=()
+    local git_common name run_path npm_cache
+    local -a mounts=(--volume "$QDISTRO_REPO:$QDISTRO_REPO:rw") envs=()
     npm_cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/host-npm
     mkdir -p "$npm_cache" || return
     npm_cache=$(realpath "$npm_cache") || return
-    mounts+=(--volume "$npm_cache:/tmp/qci-npm:rw$label")
+    mounts+=(--volume "$npm_cache:/tmp/qci-npm:rw")
     # Linked-worktree .git files point outside the source mount. Git metadata
     # is read-only: tests may inspect provenance but cannot edit another tree.
     git_common=$(git -C "$QDISTRO_REPO" rev-parse --path-format=absolute --git-common-dir) || return
-    case "$git_common" in "$QDISTRO_REPO"/*) ;; *) mounts+=(--volume "$git_common:$git_common:ro$label");; esac
+    case "$git_common" in "$QDISTRO_REPO"/*) ;; *) mounts+=(--volume "$git_common:$git_common:ro");; esac
     if [ -n "${RDIR:-}" ]; then
         run_path=$(realpath "$RDIR") || return
-        mounts+=(--volume "$run_path:$run_path:rw$label")
+        mounts+=(--volume "$run_path:$run_path:rw")
         envs+=(--env "QCI_HOST_RDIR=$run_path")
     fi
     # Pass documented gate budgets/floors, never the user's display, Python
@@ -23,10 +22,14 @@ host_container_run() {
     for name in QCI_HOST_STEP_TIMEOUT QCI_QDISTRO_PYTEST_TIMEOUT QCI_RELEASE QCI_OFFLINE; do
         [ -z "${!name+x}" ] || envs+=(--env "$name=${!name}")
     done
-    podman run --rm --pull=never --userns=keep-id --network="$network" \
+    # Unit fixtures use their own PID as a development peer, so container_t
+    # changes their identity assumptions. Label-disable also avoids relabeling
+    # shared Git metadata/cache files; enforcing runtime tests belong in VMs.
+    podman run --rm --pull=never --init --userns=keep-id --network="$network" \
+        --security-opt label=disable --tz=local \
         "${mounts[@]}" "${envs[@]}" --workdir "$QDISTRO_REPO" \
         --env QT_QPA_PLATFORM=offscreen --env HOME=/tmp/qci-home \
-        "$image" bash -c 'mkdir -p "$HOME"; exec "$@"' bash "$@"
+        "$image" bash "$QDISTRO_REPO/ci/containers/enter-host.sh" "$@"
 }
 
 host_container_gate() {

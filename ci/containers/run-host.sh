@@ -12,6 +12,9 @@ export QCI_BIN_DIR=$QCI_DIR/bin
 RDIR=${QCI_HOST_RDIR:?}
 . "$QCI_LIB/core.sh"
 . "$QCI_LIB/run.sh"
+# Only the outer qci process owns lifecycle/VM cleanup. In particular a row's
+# timeout must not run abort_run from a subshell in this container.
+trap - INT TERM HUP
 . "$QCI_LIB/affected.sh"
 . "$QCI_LIB/gates/host.sh"
 {
