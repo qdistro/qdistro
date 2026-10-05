@@ -686,7 +686,10 @@ class MarkdownEditor(QTextEdit):
         spans = payload.get("spans")
         if not isinstance(text, str) or not text or not isinstance(spans, list):
             return None
-        length = cls._utf16_len(text)
+        try:
+            length = cls._utf16_len(text)
+        except UnicodeError:
+            return None  # e.g. an escaped lone surrogate; not a real fragment
         out: list[tuple[int, int]] = []
         for span in spans:
             if (not isinstance(span, list) or len(span) != 2

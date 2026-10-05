@@ -157,7 +157,7 @@ def test_malformed_code_span_payloads_never_raise(qapp, qtbot):
     qtbot.addWidget(ed)
     for bad in (b'{"text": 1, "spans": [[0, 1]]}', b'{"text": "ab", "spans": [[0, 1e999]]}',
                 b'{"text": "ab", "spans": [[true, 1]]}', b'[1, 2]', b'{"text": "ab", "spans": "x"}',
-                b'\xff\xfe'):
+                b'\xff\xfe', b'{"text": "\\ud800", "spans": [[0, 1]]}'):
         ed.load_markdown("start\n")
         mime = QMimeData()
         mime.setText("ab")
