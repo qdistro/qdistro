@@ -17,8 +17,27 @@ const src = fs.readFileSync(path.resolve(__dirname,
     "../Modules/Panels/Settings/Tabs/Display/LayoutSubTab.qml"), "utf8");
 const dlg = src.slice(src.indexOf("id: confirmDialog"));
 
-assert.match(dlg, /width: Math\.min\([\s\S]*?Overlay\.overlay\.width[\s\S]*?\)/,
-    "confirm dialog width must be bounded by the overlay width");
+// Evaluate the two width bindings exactly as written, against stubbed
+// Style/Overlay values: always positive, never wider than a usable overlay.
+const availExpr = (dlg.match(/readonly property real overlayAvailable: (.+)\n/) || [])[1];
+const widthExpr = (dlg.match(/\n\s*width: (Math\.min\(.+\))\n/) || [])[1];
+assert.ok(availExpr && widthExpr, "overlayAvailable and width bindings present");
+function dialogWidth(overlayWidth, uiScaleRatio) {
+    const Style = { uiScaleRatio, marginL: Math.round(13 * uiScaleRatio) };
+    const Overlay = { overlay: overlayWidth === null ? null : { width: overlayWidth } };
+    const overlayAvailable = new Function("Style", "Overlay", `return ${availExpr};`)(Style, Overlay);
+    return new Function("Style", "Overlay", "overlayAvailable", `return ${widthExpr};`)(Style, Overlay, overlayAvailable);
+}
+for (const [ow, scale] of [[null, 1], [0, 1], [10, 1], [26, 1], [27, 1], [640, 1], [640, 2], [1280, 1], [2000, 1.5]]) {
+    const w = dialogWidth(ow, scale);
+    assert.ok(w > 0, `width must be positive (overlay=${ow}, scale=${scale}) got ${w}`);
+    if (ow !== null && ow > 2 * Math.round(13 * scale)) {
+        assert.ok(w <= ow - 2 * Math.round(13 * scale),
+            `width ${w} must fit overlay ${ow} minus margins (scale ${scale})`);
+    }
+}
+assert.strictEqual(dialogWidth(640, 1), 480, "640-logical overlay keeps the preferred width");
+assert.strictEqual(dialogWidth(400, 1), 374, "a narrow overlay bounds the width");
 assert.match(dlg, /background: Rectangle \{[\s\S]*?color: Color\.mSurface/,
     "confirm dialog must draw a shell-coloured background");
 const texts = dlg.match(/NText \{[\s\S]*?\n {6}\}/g) || [];

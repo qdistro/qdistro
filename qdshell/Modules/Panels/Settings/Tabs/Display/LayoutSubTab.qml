@@ -415,8 +415,10 @@ ColumnLayout {
     // ran off-screen and "Keep changes" could not be reached; the change
     // always reverted. Shell colours: the stock Controls background was
     // light under the shell's light text, so the body was invisible.
-    width: Math.min(Math.round(480 * Style.uiScaleRatio),
-                    (Overlay.overlay ? Overlay.overlay.width : 480) - 2 * Style.marginL)
+    // Usable overlay width; an overlay that exists before layout (or while
+    // resizing) can report 0, so fall back to the preferred width then.
+    readonly property real overlayAvailable: (Overlay.overlay && Overlay.overlay.width > 2 * Style.marginL) ? Overlay.overlay.width - 2 * Style.marginL : Math.round(480 * Style.uiScaleRatio)
+    width: Math.min(Math.round(480 * Style.uiScaleRatio), overlayAvailable)
     padding: Style.marginXL
     background: Rectangle {
       color: Color.mSurface
