@@ -67,6 +67,121 @@ def test_toggle_code_sets_char_code(qapp, qtbot):
     assert "`" not in ed.markdown()
 
 
+def _select_all(ed):
+    cur = ed.textCursor()
+    cur.select(QTextCursor.SelectionType.Document)
+    ed.setTextCursor(cur)
+
+
+def _paste_at_end(ed, mime):
+    cur = ed.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.End)
+    ed.setTextCursor(cur)
+    ed.insertFromMimeData(mime)
+
+
+def test_copy_paste_keeps_inline_code(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("a `code` b\n")
+    _select_all(ed)
+    mime = ed.createMimeDataFromSelection()
+    assert mime.hasFormat(MarkdownEditor.CODE_SPANS_MIME)
+    _paste_at_end(ed, mime)
+    md = ed.markdown()
+    assert md.count("`code`") == 2, md
+
+
+def test_paste_with_code_is_one_undo_step(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("a `code` b\n")
+    before = ed.markdown()
+    _select_all(ed)
+    mime = ed.createMimeDataFromSelection()
+    _paste_at_end(ed, mime)
+    assert ed.markdown() != before
+    ed.document().undo()
+    assert ed.markdown() == before
+
+
+def test_external_monospace_html_is_not_turned_into_code(qapp, qtbot):
+    from PyQt6.QtCore import QMimeData
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("start\n")
+    mime = QMimeData()
+    mime.setHtml('<span style="font-family:monospace">mono</span>')
+    mime.setText("mono")
+    _paste_at_end(ed, mime)
+    assert "`" not in ed.markdown()
+
+
+def test_mismatched_code_span_payload_is_ignored(qapp, qtbot):
+    from PyQt6.QtCore import QByteArray, QMimeData
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("start\n")
+    mime = QMimeData()
+    mime.setText("plain words")
+    mime.setData(
+        MarkdownEditor.CODE_SPANS_MIME,
+        QByteArray(b'{"text": "other words", "spans": [[0, 5]]}'),
+    )
+    _paste_at_end(ed, mime)
+    assert "`" not in ed.markdown()
+    for bad in (b"not json", b'{"text": "plain words"}', b'{"text": "plain words", "spans": [[3, 99]]}'):
+        ed.load_markdown("start\n")
+        mime.setData(MarkdownEditor.CODE_SPANS_MIME, QByteArray(bad))
+        _paste_at_end(ed, mime)
+        assert "`" not in ed.markdown(), bad
+
+
+def test_copy_paste_keeps_code_with_non_bmp_text(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("\U0001F600 `c\U0001F600de` z\n")
+    _select_all(ed)
+    mime = ed.createMimeDataFromSelection()
+    _paste_at_end(ed, mime)
+    md = ed.markdown()
+    assert md.count("`c\U0001F600de`") == 2, md
+
+
+def test_malformed_code_span_payloads_never_raise(qapp, qtbot):
+    from PyQt6.QtCore import QByteArray, QMimeData
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    for bad in (b'{"text": 1, "spans": [[0, 1]]}', b'{"text": "ab", "spans": [[0, 1e999]]}',
+                b'{"text": "ab", "spans": [[true, 1]]}', b'[1, 2]', b'{"text": "ab", "spans": "x"}',
+                b'\xff\xfe', b'{"text": "\\ud800", "spans": [[0, 1]]}'):
+        ed.load_markdown("start\n")
+        mime = QMimeData()
+        mime.setText("ab")
+        mime.setData(MarkdownEditor.CODE_SPANS_MIME, QByteArray(bad))
+        _paste_at_end(ed, mime)
+        assert "`" not in ed.markdown(), bad
+
+
+def test_payload_without_inserted_text_never_formats_existing_text(qapp, qtbot):
+    from PyQt6.QtCore import QByteArray, QMimeData
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("abc\n")
+    cur = ed.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.Start)
+    ed.setTextCursor(cur)
+    mime = QMimeData()
+    mime.setData(MarkdownEditor.CODE_SPANS_MIME,
+                 QByteArray(b'{"text": "abc", "spans": [[0, 3]]}'))
+    ed.insertFromMimeData(mime)
+    assert "`" not in ed.markdown()
+
+
 def test_toggle_code_uses_document_code_role(qapp, qtbot, tmp_path, monkeypatch):
     snap = example_snapshot()
     write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)

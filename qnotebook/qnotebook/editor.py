@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
-from PyQt6.QtCore import QMimeData, QStringListModel, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QByteArray, QMimeData, QStringListModel, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -344,25 +345,31 @@ class MarkdownEditor(QTextEdit):
         fmt.setFontStrikeOut(not cur.charFormat().fontStrikeOut())
         self._apply_char_format(fmt)
 
+    def _code_char_format(self) -> QTextCharFormat:
+        """CHAR_CODE format with the family/background a presentation restyle
+        gives code spans; the light literal is only the no-controller fallback."""
+        from .content_style import document_palette
+
+        fmt = QTextCharFormat()
+        fmt.setProperty(CHAR_CODE, True)
+        style = self._content_style
+        fmt.setFontFamilies([style.code_family if style is not None else "monospace"])
+        background = (
+            (style.code_background if style is not None else None)
+            or document_palette().code_background
+            or "#f4f4f4"
+        )
+        fmt.setBackground(QColor(background))
+        return fmt
+
     def toggle_code(self) -> None:
         cur = self.textCursor()
-        fmt = QTextCharFormat()
         on = not bool(cur.charFormat().property(CHAR_CODE))
-        fmt.setProperty(CHAR_CODE, on)
         if on:
-            # Same family/background a presentation restyle gives CHAR_CODE
-            # spans; the light literal is only the no-controller fallback.
-            from .content_style import document_palette
-
-            style = self._content_style
-            fmt.setFontFamilies([style.code_family if style is not None else "monospace"])
-            background = (
-                (style.code_background if style is not None else None)
-                or document_palette().code_background
-                or "#f4f4f4"
-            )
-            fmt.setBackground(QColor(background))
+            fmt = self._code_char_format()
         else:
+            fmt = QTextCharFormat()
+            fmt.setProperty(CHAR_CODE, False)
             fmt.setFontFamilies([self.font().family()])
             fmt.setBackground(QBrush())
         self._apply_char_format(fmt)
@@ -623,6 +630,102 @@ class MarkdownEditor(QTextEdit):
         from pathlib import Path as _P
         return _P(p).suffix.lower() in self.IMAGE_EXTS
 
+    # Qt's HTML clipboard drops UserProperty values, so a copied inline-code
+    # span pasted back lost CHAR_CODE: it kept a monospace look but saved as
+    # plain text, not `backticks`. A copy records the selection's code spans
+    # (offsets into its plain text) in this private format; a paste restores
+    # them only when the inserted text is exactly the recorded text.
+    CODE_SPANS_MIME = "application/x-qnotebook-code-spans"
+
+    def createMimeDataFromSelection(self) -> QMimeData:  # noqa: N802 (Qt override)
+        base = super().createMimeDataFromSelection()
+        cur = self.textCursor()
+        if not cur.hasSelection():
+            return base
+        start, end = cur.selectionStart(), cur.selectionEnd()
+        spans: list[list[int]] = []
+        block = self.document().findBlock(start)
+        while block.isValid() and block.position() < end:
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid() and frag.charFormat().property(CHAR_CODE):
+                    s = max(frag.position(), start)
+                    e = min(frag.position() + frag.length(), end)
+                    if s < e:
+                        spans.append([s - start, e - start])
+                it += 1
+            block = block.next()
+        if not spans:
+            return base
+        # Qt returns its internal QTextEditMimeData, whose formats() is a
+        # fixed list: setData() on it is invisible to hasFormat(). Copy every
+        # format it offers into a plain QMimeData, then add the spans.
+        data = QMimeData()
+        for fmt in base.formats():
+            data.setData(fmt, base.data(fmt))
+        text = cur.selection().toPlainText()
+        payload = json.dumps({"text": text, "spans": spans})
+        data.setData(self.CODE_SPANS_MIME, QByteArray(payload.encode("utf-8")))
+        return data
+
+    @staticmethod
+    def _utf16_len(text: str) -> int:
+        # Document positions count UTF-16 code units, not Python characters.
+        return len(text.encode("utf-16-le")) // 2
+
+    @classmethod
+    def _parse_code_spans(cls, raw: bytes) -> tuple[str, list[tuple[int, int]]] | None:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        text = payload.get("text")
+        spans = payload.get("spans")
+        if not isinstance(text, str) or not text or not isinstance(spans, list):
+            return None
+        try:
+            length = cls._utf16_len(text)
+        except UnicodeError:
+            return None  # e.g. an escaped lone surrogate; not a real fragment
+        out: list[tuple[int, int]] = []
+        for span in spans:
+            if (not isinstance(span, list) or len(span) != 2
+                    or not all(type(v) is int for v in span)):
+                return None
+            s, e = span
+            if not 0 <= s < e <= length:
+                return None
+            out.append((s, e))
+        return text, out
+
+    def _restore_code_spans(self, source: QMimeData, insert_pos: int, insert_end: int) -> None:
+        if not source.hasFormat(self.CODE_SPANS_MIME):
+            return
+        parsed = self._parse_code_spans(bytes(source.data(self.CODE_SPANS_MIME)))
+        if parsed is None:
+            return
+        text, spans = parsed
+        # Only the range this paste actually inserted, and only if it is the
+        # recorded fragment: never existing text that happens to match.
+        if insert_end - insert_pos != self._utf16_len(text):
+            return
+        check = QTextCursor(self.document())
+        check.setPosition(insert_pos)
+        check.setPosition(insert_end, QTextCursor.MoveMode.KeepAnchor)
+        if check.selection().toPlainText() != text:
+            return
+        fmt = self._code_char_format()
+        cur = QTextCursor(self.document())
+        cur.joinPreviousEditBlock()  # one undo step with the paste itself
+        for s, e in spans:
+            cur.setPosition(insert_pos + s)
+            cur.setPosition(insert_pos + e, QTextCursor.MoveMode.KeepAnchor)
+            cur.mergeCharFormat(fmt)
+        cur.endEditBlock()
+
     def insertFromMimeData(self, source: QMimeData) -> None:  # noqa: N802 (Qt override)
         if source.hasImage():
             img = source.imageData()
@@ -637,7 +740,11 @@ class MarkdownEditor(QTextEdit):
                     handled = True
             if handled:
                 return
+        insert_pos = self.textCursor().selectionStart()
         super().insertFromMimeData(source)
+        insert_end = self.textCursor().position()
+        if insert_end > insert_pos:
+            self._restore_code_spans(source, insert_pos, insert_end)
 
     # ---- insertions ----
 
