@@ -1,0 +1,3 @@
+purpose=sol r2 finding verification run
+repo_state=39ad0d68c (assertion fixes committed; wrapper literal fixed in the same commit's follow-up)
+run=bats-20261004T225320Z-3365676 limits s130 83/0 driver PASS — pids.events.local max 0->4, memory.events.local oom 0->1; bats exit 35 only on the stale wrapper literal 'pids.events max grew' (fixed to '.local' afterwards; all 26 wrapper strings verified against this transcript)

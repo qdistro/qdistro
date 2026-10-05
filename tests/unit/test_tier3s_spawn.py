@@ -693,7 +693,11 @@ def test_plan_scope_is_delegated_and_bound_to_the_launch_unit(w):
     props = [s[i + 1] for i, a in enumerate(s) if a == "-p"]
     assert "Delegate=yes" in props
     assert f"BindsTo={w.unit}" in props and f"Before={w.unit}" in props
-    assert any(p.startswith("TasksMax=") for p in props) and any(p.startswith("MemoryMax=") for p in props)
+    # the three owning-scope limits (CONTRACT §3): tasks, memory, cpu — set
+    # by root at scope creation; the limit files stay root's under the
+    # helper's selective delegation so admin can never raise them (s130)
+    assert "TasksMax=1024" in props and "MemoryMax=2G" in props \
+        and "MemorySwapMax=0" in props and "CPUQuota=200%" in props
     i = s.index("--")
     assert s[i + 1:] == [f"{w.T}/usr/libexec/qdistro/qdistro-tier3s-scope", "enter", TOKEN, str(UID), "--", "podman"]
 

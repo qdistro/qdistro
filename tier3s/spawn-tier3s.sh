@@ -303,7 +303,7 @@ PODMAN_ARGV+=("$IMAGE")
 # A headless workload runs its argv directly.
 PODMAN_ARGV+=("${APP_ARGV[@]}")
 SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
-    -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G     # set by root; enforcement is Phase C
+    -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G -p MemorySwapMax=0 -p CPUQuota=200%  # root-set at creation; enforced, s130
     "-p" "BindsTo=$UNIT" "-p" "Before=$UNIT"             # never outlives the launch unit; alive through its ExecStop/ExecStopPost
     -- "$SCOPE_HELPER" enter "$TOKEN" "$ADMIN_UID" -- podman)
 

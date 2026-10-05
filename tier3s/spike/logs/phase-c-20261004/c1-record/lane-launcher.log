@@ -1,0 +1,64 @@
+Started tier3s Phase C record lane (12 --vm runs).
+[c1] lane start 2026-10-04T22:05:29Z HEAD=e80b9798b8427b4cd28555b6fac721d22724afb9 dirty=0
+[c1] === phase7-tier3s-headless on qci-c1-record-1 ===
+Domain 'qci-c1-record-1' started
+[c1] qci-c1-record-1 agent up after ~15s
+Domain 'qci-c1-record-1' destroyed
+[c1] === phase7-tier3s-headless done ===
+[c1] === phase7-tier3s-denied on qci-bats-phase7-tier3s-denied-261004-224817-2678831-8696 ===
+Domain 'qci-bats-phase7-tier3s-denied-261004-224817-2678831-8696' started
+[c1] qci-bats-phase7-tier3s-denied-261004-224817-2678831-8696 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-denied-261004-224817-2678831-8696' destroyed
+[c1] === phase7-tier3s-denied done ===
+[c1] === phase7-tier3s-sigkill-cleanup on qci-bats-phase7-tier3s-sigkill-cleanup-261004-224817-2678842-11625 ===
+Domain 'qci-bats-phase7-tier3s-sigkill-cleanup-261004-224817-2678842-11625' started
+[c1] qci-bats-phase7-tier3s-sigkill-cleanup-261004-224817-2678842-11625 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-sigkill-cleanup-261004-224817-2678842-11625' destroyed
+[c1] === phase7-tier3s-sigkill-cleanup done ===
+[c1] === phase7-tier3s-waypipe on qci-c1-record-2 ===
+Domain 'qci-c1-record-2' started
+[c1] qci-c1-record-2 agent up after ~15s
+Domain 'qci-c1-record-2' destroyed
+[c1] === phase7-tier3s-waypipe done ===
+[c1] === phase7-tier3s-app on qci-bats-phase7-tier3s-app-261004-224817-2678874-19276 ===
+Domain 'qci-bats-phase7-tier3s-app-261004-224817-2678874-19276' started
+[c1] qci-bats-phase7-tier3s-app-261004-224817-2678874-19276 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-app-261004-224817-2678874-19276' destroyed
+[c1] === phase7-tier3s-app done ===
+[c1] === phase7-tier3s-lifecycle on qci-c1-record-3 ===
+Domain 'qci-c1-record-3' started
+[c1] qci-c1-record-3 agent up after ~15s
+Domain 'qci-c1-record-3' destroyed
+[c1] === phase7-tier3s-lifecycle done ===
+[c1] === phase7-tier3s-chrome-secctx on qci-bats-phase7-tier3s-chrome-secctx-261004-224817-2678897-25391 ===
+Domain 'qci-bats-phase7-tier3s-chrome-secctx-261004-224817-2678897-25391' started
+[c1] qci-bats-phase7-tier3s-chrome-secctx-261004-224817-2678897-25391 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-chrome-secctx-261004-224817-2678897-25391' destroyed
+[c1] === phase7-tier3s-chrome-secctx done ===
+[c1] === phase7-tier3s-clipboard-gate on qci-bats-phase7-tier3s-clipboard-gate-261004-224817-2678916-18385 ===
+Domain 'qci-bats-phase7-tier3s-clipboard-gate-261004-224817-2678916-18385' started
+[c1] qci-bats-phase7-tier3s-clipboard-gate-261004-224817-2678916-18385 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-clipboard-gate-261004-224817-2678916-18385' destroyed
+[c1] === phase7-tier3s-clipboard-gate done ===
+[c1] === phase7-tier3s-lineage on qci-bats-phase7-tier3s-lineage-261004-224817-2678925-19735 ===
+Domain 'qci-bats-phase7-tier3s-lineage-261004-224817-2678925-19735' started
+[c1] qci-bats-phase7-tier3s-lineage-261004-224817-2678925-19735 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-lineage-261004-224817-2678925-19735' destroyed
+[c1] === phase7-tier3s-lineage done ===
+[c1] === phase7-tier3s-hostile-stream on qci-bats-phase7-tier3s-hostile-stream-261004-224817-2678940-25328 ===
+Domain 'qci-bats-phase7-tier3s-hostile-stream-261004-224817-2678940-25328' started
+[c1] qci-bats-phase7-tier3s-hostile-stream-261004-224817-2678940-25328 agent up after ~15s
+Domain 'qci-bats-phase7-tier3s-hostile-stream-261004-224817-2678940-25328' destroyed
+[c1] === phase7-tier3s-hostile-stream done ===
+[c1] === phase7-tier3s-limits on qci-c1-record-4 ===
+Domain 'qci-c1-record-4' started
+[c1] qci-c1-record-4 agent up after ~15s
+Domain 'qci-c1-record-4' destroyed
+[c1] === phase7-tier3s-limits done ===
+[c1] === phase7-tier3s-netnone on qci-c1-record-5 ===
+Domain 'qci-c1-record-5' started
+[c1] qci-c1-record-5 agent up after ~15s
+Domain 'qci-c1-record-5' destroyed
+[c1] === phase7-tier3s-netnone done ===
+[c1] lane end 2026-10-04T22:26:09Z
+qci-tier3s-c-record.service: Consumed 1min 47.685s CPU time over 20min 40.368s wall clock time.

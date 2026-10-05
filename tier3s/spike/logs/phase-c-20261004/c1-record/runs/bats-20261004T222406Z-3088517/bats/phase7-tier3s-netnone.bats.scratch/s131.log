@@ -1,0 +1,58 @@
+[vm-exec] guest identity pinned (pid 3637 start 4468)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+[vm-exec] Waiting... (polls=60s elapsed=62s)
+
+## 0. preconditions (setup ran)
+PASS: probe PASS before the launch (0:1)
+PASS: image present (yes)
+PASS: broker allows the smoke spawn (allow)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s131n (Created)
+    silos.yaml: s131n argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+PASS: argv set with the manager restarted (yes)
+
+## 1. live silo: network=none inside the sandbox
+PASS: silo s131n b5ae3cf4aa7ac5e00936c4615b32a5db recorded running
+PASS: netnone: the only link is lo (lo,)
+PASS: netnone: lo is UP (1)
+    addr: 1: lo inet 127.0.0.1/8 scope host dynamic lo
+    addr: 1: lo inet6 ::1/128 scope host dynamic lo
+PASS: netnone: v4 loopback address present (1)
+PASS: netnone: v6 loopback address present (1)
+PASS: netnone: no non-loopback v4 address (0)
+PASS: netnone: no non-loopback v6 address (0)
+    route: ::1 dev lo proto unspec scope link 
+    route: 127.0.0.0/8 dev lo proto unspec scope link 
+PASS: netnone: no default route (0)
+PASS: netnone: every route is on lo (0)
+INFO: ip route get 192.0.2.1: rc=2, out: RTNETLINK answers: Network is unreachable
+PASS: netnone: route to a public address cannot even be resolved (rc=2)
+INFO: connect 192.0.2.1:80: 2s, output: timeout: warning: timer_create: Operation not permitted|bash: connect: Network is unreachable|bash: line 1: /dev/tcp/192.0.2.1/80: Network is unreachable|rc=1
+PASS: netnone: TCP connect to a public address fails (1)
+PASS: netnone: the failure is fast (ENETUNREACH, not a filtered-route timeout) (yes)
+PASS: netnone: podman NetworkMode (none)
+PASS: netnone: sentry runs with --network=none (1)
+
+## 2. teardown + all clear
+PASS: StopSilo rc (0)
+PASS: netnone: all 23 launch processes gone (pid+starttime)
+PASS: netnone: scope qdistro-tier3s-b5ae3cf4aa7ac5e00936c4615b32a5db.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-b5ae3cf4aa7ac5e00936c4615b32a5db.scope absent)
+PASS: netnone: per-launch dir /run/qdistro-tier3s/b5ae3cf4aa7ac5e00936c4615b32a5db gone
+PASS: netnone: control record /run/qdistro-tier3s-ctl/b5ae3cf4aa7ac5e00936c4615b32a5db gone
+PASS: netnone: container qdistro-tier3s-s131n gone (podman exists rc=1)
+PASS: netnone: no runsc state for a82564ad5779 in /run/qdistro-tier3s-runsc/1000
+PASS: DeleteSilo (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s131] 41 passes, 0 failures
