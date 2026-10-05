@@ -191,6 +191,7 @@ The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
 | `QDISTRO_VM_EXEC_ORPHAN_REAP` | 1 | `vm-exec` orphan registry. Each call whose guest command is pinned records it (guest pid, start time, guest boot id, domain uuid); the record is removed once the command is known finished. Before launching, `vm-exec` resolves records left by a **SIGKILLed** `vm-exec` (identity- and boot-checked kill in the guest). If an orphan cannot be confirmed gone, or the per-VM lock is not obtained within `QDISTRO_VM_EXEC_REAP_LOCK_WAIT` (default 4 x (`QDISTRO_VM_KILL_VERIFY_TIMEOUT`+grace+1)+10 s), the launch is **refused with exit 75** (retryable, nothing started). Records are also KEPT when a call exits while its command may still run -- a poll error such as `Guest agent not responding`, qga losing its bookkeeping (`PID ... does not exist`), or an unverified signal cleanup -- and the next call on that VM resolves them (normally as `already-gone`) once the agent answers. `0` disables recording and reaping. |
 | `QDISTRO_VM_EXEC_STATE_DIR` | `$XDG_RUNTIME_DIR/qdistro-vm-exec-<uid>` | Where the orphan registry lives (one subdirectory per VM name). When `XDG_RUNTIME_DIR` is unset it falls back to `/tmp/qdistro-vm-exec-<uid>`. Records are only seen by `vm-exec` calls that resolve to the SAME directory, so a caller with `XDG_RUNTIME_DIR` set and one without it do not see each other's orphans. Set this explicitly when mixing such environments. Per-VM directories are never removed automatically; they are tiny, and stale ones may be deleted by hand when no `vm-exec` is running. A malformed or unknown-format record refuses launches (exit 75) until reconciled by hand: if no such driver runs in the guest, `rm` the file the error names. |
 | `QD_VM_START_MAX_WAIT` | 300 | Backstop cap (s) on guest-agent readiness in `vm-start-and-wait` (raised from 120 for parallel boot contention). |
+| `QCI_HOST_BUILD` | *(unset)* | `podman` runs the `host` gate's four native build rows inside the rootless native-builder toolchain image (the GitHub-CI build path) instead of the host toolchain; no host meson/-devel packages needed for those rows. See "Native build rows without host devel packages". |
 | `QCI_HOST_STEP_TIMEOUT` | 600 | Per-step wall budget (s) for the `host` gate. It does **not** cover the `qdistro-pytest` step — see the next row. Raising this alone does not give pytest more time. |
 | `QCI_QDISTRO_PYTEST_TIMEOUT` | 1800 | Wall budget (s) for the `qdistro-pytest` host step **only**, deliberately independent of `QCI_HOST_STEP_TIMEOUT`. The suite's honest cost is ~550s across ten batches, so the shared 600s step budget left no headroom and one slow test killed the gate; 1800s is ~3.3x the honest cost, which keeps the step a wedge detector without being sensitive to normal variance. Set **both** knobs to slow down every host step. |
 | `QCI_EXTRA_BATS_ROOTS` | *(unset)* | Colon-separated extra repo roots to discover `tests/integration/vm/*.bats` under. Discovery otherwise covers only the declared `PROJECTS` checkouts, so an out-of-tree suite is invisible unless opted in here. Non-existent roots are ignored; the file list is de-duplicated. |
@@ -374,6 +375,24 @@ qdistro/ci/bin/qci-host-deps --install  # install via zypper/apt/dnf + pip
 ```
 
 The individual deps are:
+
+### Native build rows without host devel packages
+
+Set `QCI_HOST_BUILD=podman` to run the `host` gate's native build rows
+(`qdwin-vendored-libweston-symbols`, `qdwin-vendored-libweston-inert-relptr`,
+`qdwin-meson`, `qdshell-local`) inside the rootless native-builder toolchain
+image — the same image the GitHub workflow builds via
+`scripts/vm/build-native-podman.sh` — instead of the host toolchain. The
+workspace and `QDWIN_LIBWESTON_PREFIX` are bind-mounted at their real
+absolute paths, so build outputs and `PKG_CONFIG_PATH` are byte-identical on
+both sides; all `QDWIN_*` env vars pass through. The toolchain image is
+content-addressed and shared with `build-native-podman.sh`, so a run after
+one `podman build` is a cache hit. pytest, npm and lint rows still run
+natively — the image carries a toolchain, not the Python test dependencies.
+
+```bash
+QCI_HOST_BUILD=podman ci/bin/qci host
+```
 
 **qdbrowser tests** require `jeepney` (D-Bus bridge client, already a
 runtime dependency in `qdbrowser/pyproject.toml`) and

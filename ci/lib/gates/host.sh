@@ -345,6 +345,54 @@ host_job_qdfileman() {
     run_logged "$gate" qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)"         "${2:-}"
 }
 
+# QCI_HOST_BUILD=podman: run the native build rows below inside the rootless
+# native-builder toolchain image — the same image the GitHub workflow builds
+# via scripts/vm/build-native-podman.sh — instead of the host toolchain. The
+# workspace and the vendored-libweston prefix are bind-mounted at their real
+# absolute paths, so commands, build dirs and PKG_CONFIG_PATH expansions are
+# byte-identical on both sides of the container boundary. Use it on hosts
+# that lack the meson/-devel packages (ci/bin/qci-host-deps); pytest, npm and
+# lint rows still run natively — the image carries a toolchain, not the test
+# dependencies.
+_host_builder_image() {
+    [ -n "${_HOST_BUILDER_IMAGE:-}" ] || {
+        . "$QDISTRO_REPO/scripts/vm/lib/test-substrate.sh"
+        qdistro_load_test_substrate
+        . "$QDISTRO_REPO/scripts/vm/lib/podman-user-bus.sh"
+        qdistro_podman_user_bus
+        . "$QDISTRO_REPO/scripts/vm/lib/native-builder.sh"
+        _HOST_BUILDER_IMAGE=$(qdistro_ensure_native_builder_image) || return $?
+    }
+    printf '%s\n' "$_HOST_BUILDER_IMAGE"
+}
+
+host_build_cmd() {
+    local dir=$1 inner=$2
+    [ "${QCI_HOST_BUILD:-}" = podman ] || { printf '%s\n' "$inner"; return 0; }
+    local img lwp mounts=() envs=() v
+    img=$(_host_builder_image) || {
+        # Fail the row loudly with the loader's own error above, rather than
+        # silently falling back to a host toolchain that is not there.
+        printf 'exit 3\n'
+        return 0
+    }
+    lwp=${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}
+    mounts=("$WORKSPACE" "$lwp")
+    # Honour an explicit inert-relptr prefix outside the workspace too.
+    [ -n "${QDWIN_INERT_RELPTR_PREFIX:-}" ] && mounts+=("$QDWIN_INERT_RELPTR_PREFIX")
+    for v in "${!QDWIN_@}"; do envs+=(--env "$v=${!v}"); done
+    envs+=(--env "QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen}")
+    envs+=(--env HOME=/tmp)
+    # quickshell (qdshell jstest) hangs without a real XDG_RUNTIME_DIR.
+    envs+=(--env XDG_RUNTIME_DIR=/tmp/qci-xrt)
+    local out="mkdir -p $(printf '%q ' "${mounts[@]}")&& podman run --rm --pull=never --userns=keep-id --workdir $(printf '%q' "$dir")"
+    local m
+    for m in "${mounts[@]}"; do out+=" --volume $(printf '%q' "$m"):$(printf '%q' "$m"):rw,z"; done
+    for v in "${envs[@]}"; do out+=" $(printf '%q' "$v")"; done
+    out+=" $(printf '%q' "$img") bash -c $(printf '%q' "mkdir -p /tmp/qci-xrt && $inner")"
+    printf '%s\n' "$out"
+}
+
 gate_host() {
     qci_assert_run_dir || return $?
     qci_assert_repo host || return $?
@@ -529,7 +577,7 @@ fi'
     # independent packaging check. This gate builds that prefix (on demand,
     # cached under QDWIN_LIBWESTON_PREFIX), so qdwin-meson below can configure
     # against it.
-    c="bash libweston-vendored/run-production-symbols-test.sh"
+    c=$(host_build_cmd "$WORKSPACE/qdwin" "bash libweston-vendored/run-production-symbols-test.sh")
     run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -537,7 +585,7 @@ fi'
     # wl_pointer must not SIGSEGV the compositor — the qdwin per-stream-seat
     # crash of gui/22 S2. Headless; builds its own libweston from the current
     # sources (the production prefix above is reused across checkouts).
-    c="bash libweston-vendored/run-inert-relptr-test.sh"
+    c=$(host_build_cmd "$WORKSPACE/qdwin" "bash libweston-vendored/run-inert-relptr-test.sh")
     run_logged host qdwin-vendored-libweston-inert-relptr "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston survives get_relative_pointer on an inert wl_pointer"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -546,7 +594,7 @@ fi'
     # prefix is absent; on that path we deliberately leave PKG_CONFIG_PATH
     # alone so meson.build's own error explains what to build, rather than
     # exporting a bogus entry.
-    c="_lwpc=\$(bash libweston-vendored/pkgconfig-dir.sh) || _lwpc=; export PKG_CONFIG_PATH=\"\${_lwpc:+\$_lwpc:}\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs"
+    c=$(host_build_cmd "$WORKSPACE/qdwin" "_lwpc=\$(bash libweston-vendored/pkgconfig-dir.sh) || _lwpc=; export PKG_CONFIG_PATH=\"\${_lwpc:+\$_lwpc:}\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs")
     run_logged host qdwin-meson "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "qdwin build and meson tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -554,7 +602,7 @@ fi'
     run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    c="export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"
+    c=$(host_build_cmd "$WORKSPACE/qdshell" "export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int")
     run_logged host qdshell-local "$EXIT_HOST" qml "$WORKSPACE/qdshell" "$c" "qdshell build, qmltest, jstest (node), lint, format check"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
