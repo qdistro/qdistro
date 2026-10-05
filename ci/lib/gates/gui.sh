@@ -4185,10 +4185,10 @@ record_agent_identity() {
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then
         ver=$(timeout 10 claude --version 2>/dev/null | head -1)
-        [ -n "$ver" ] && kv qci_agent_version "$ver"
+        if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     elif printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])codex([[:space:]]|$)'; then
         ver=$(timeout 10 codex --version 2>/dev/null | head -1)
-        [ -n "$ver" ] && kv qci_agent_version "$ver"
+        if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     fi
 }
 

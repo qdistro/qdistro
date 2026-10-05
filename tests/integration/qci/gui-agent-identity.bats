@@ -70,6 +70,32 @@ teardown() {
     fi
 }
 
+@test "record_agent_identity: an agent CLI missing from PATH still succeeds" {
+    # A systemd --user unit's PATH omits ~/.local/bin, where codex/claude
+    # usually live; the version probe then finds nothing. That must leave the
+    # version key out, not make the recorder return non-zero.
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    # every tool from /usr/bin except the agent CLIs, wherever this host keeps them
+    local t; for t in /usr/bin/*; do
+        case "${t##*/}" in codex|claude) ;; *) ln -s "$t" "$bin/${t##*/}" ;; esac
+    done
+    for cli in codex claude; do
+        : > "$KV_OUT"
+        run env -i PATH="$bin" KV_OUT="$KV_OUT" "$bin/bash" -c '
+            kv() { printf "%s=%s\n" "$1" "$2" >> "$KV_OUT"; }
+            source "$1"
+            QCI_AGENT_CMD="$2 exec -m gpt-5.6-luna" record_agent_identity' _ \
+            "$REPO_ROOT/ci/lib/gates/gui.sh" "$cli"
+        [ "$status" -eq 0 ] || { echo "$cli: rc=$status $output" >&2; return 1; }
+        grep -q '^qci_agent_model=gpt-5.6-luna' "$KV_OUT"
+        if grep -q '^qci_agent_version=' "$KV_OUT"; then
+            echo "$cli: recorded a version without a CLI" >&2
+            return 1
+        fi
+    done
+}
+
 @test "run_agent_command: relative tool outputs stay in a cleaned temporary cwd" {
     local prompt="$BATS_TEST_TMPDIR/prompt.md"
     local log="$BATS_TEST_TMPDIR/agent.log"
