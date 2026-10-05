@@ -6,7 +6,6 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QPushButton
-
 from qfileman.theme import _underlying_style_name, apply_theme
 
 
@@ -253,7 +252,6 @@ def test_presentation_update_refreshes_icons_without_rebuilding(qapp, tmp_dir, m
     from PyQt6.QtCore import QSize
     from PyQt6.QtGui import QIcon, QPixmapCache
     from PyQt6.QtWidgets import QFileIconProvider
-
     from qfileman.icons import file_icon as real_file_icon
     from qfileman.pane import FilePane
     from qfileman.window import FileManagerWindow
