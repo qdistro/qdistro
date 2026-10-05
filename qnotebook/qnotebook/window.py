@@ -2634,13 +2634,17 @@ class MainWindow(QMainWindow):
         self.set_editor_zoom(load_editor_zoom(self._settings) + direction * ZOOM_STEP_PERCENT)
 
     def set_editor_zoom(self, percent: int) -> int:
-        """Persist the editor zoom and repaint every editor pane (view only)."""
+        """Persist the editor zoom and repaint every editor (view only).
+
+        The value is app-wide, so panes of OTHER open windows repaint too.
+        """
         from .appearance import save_editor_zoom
         from .editor import MarkdownEditor
 
         pct = save_editor_zoom(self._settings, percent)
-        for editor in self.findChildren(MarkdownEditor):
-            editor.apply_content_presentation()
+        for widget in QApplication.allWidgets():
+            if isinstance(widget, MarkdownEditor):
+                widget.apply_content_presentation()
         self.statusBar().showMessage(f"Zoom {pct}%", 2000)
         return pct
 

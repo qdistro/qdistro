@@ -80,6 +80,8 @@ class MarkdownEditor(QTextEdit):
     zoomStepRequested = pyqtSignal(int)  # +1 / -1 (Ctrl+wheel)
 
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+    _WHEEL_NOTCH = 120  # angleDelta units per zoom step
+    _WHEEL_PIXELS = 60  # pixelDelta per zoom step (touchpads)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -292,10 +294,25 @@ class MarkdownEditor(QTextEdit):
     def wheelEvent(self, e) -> None:  # noqa: N802 (Qt override)
         # QTextEdit's own Ctrl+wheel zoom changes the widget font only, which
         # explicit fragment sizes ignore; route it to the editor zoom instead.
+        # Wheels report angleDelta (120 per notch, less on high-resolution
+        # wheels); touchpads may report only pixelDelta. Accumulate either
+        # and step once per notch-equivalent so neither is lost or too fast.
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            dy = e.angleDelta().y()
-            if dy:
-                self.zoomStepRequested.emit(1 if dy > 0 else -1)
+            angle = e.angleDelta().y()
+            if angle:
+                delta, threshold = angle, self._WHEEL_NOTCH
+            else:
+                delta, threshold = e.pixelDelta().y(), self._WHEEL_PIXELS
+            if delta:
+                acc = getattr(self, "_zoom_wheel_acc", 0)
+                if (acc > 0) != (delta > 0):
+                    acc = 0  # direction changed
+                acc += delta
+                while abs(acc) >= threshold:
+                    step = 1 if acc > 0 else -1
+                    acc -= step * threshold
+                    self.zoomStepRequested.emit(step)
+                self._zoom_wheel_acc = acc
             e.accept()
             return
         super().wheelEvent(e)

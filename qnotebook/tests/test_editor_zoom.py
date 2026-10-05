@@ -152,12 +152,55 @@ def test_shortcuts_reach_zoom_from_the_editor(qapp, tmp_notebook, qtbot):
     win.close()
 
 
-def _wheel(widget, dy, modifiers):
+def _wheel(widget, dy, modifiers, pixel_dy=0):
     pos = QPointF(widget.viewport().rect().center())
     return QWheelEvent(
-        pos, QPointF(widget.mapToGlobal(pos.toPoint())), QPoint(0, 0), QPoint(0, dy),
+        pos, QPointF(widget.mapToGlobal(pos.toPoint())), QPoint(0, pixel_dy), QPoint(0, dy),
         Qt.MouseButton.NoButton, modifiers, Qt.ScrollPhase.NoScrollPhase, False,
     )
+
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+
+
+def test_wheel_partial_and_pixel_deltas_accumulate(qapp, tmp_notebook, qtbot):
+    win = _window(tmp_notebook, qtbot)
+    vp = win.editor.viewport()
+    # High-resolution wheel: eight 15-unit events make one notch.
+    for _ in range(7):
+        QApplication.sendEvent(vp, _wheel(win.editor, 15, CTRL))
+    assert load_editor_zoom() == 100
+    QApplication.sendEvent(vp, _wheel(win.editor, 15, CTRL))
+    assert load_editor_zoom() == 110
+    # Touchpad: pixel-only deltas (angleDelta 0) still zoom, 60 px per step.
+    for _ in range(3):
+        QApplication.sendEvent(vp, _wheel(win.editor, 0, CTRL, pixel_dy=25))
+    assert load_editor_zoom() == 120
+    # A direction change discards the leftover instead of cancelling it.
+    QApplication.sendEvent(vp, _wheel(win.editor, 0, CTRL, pixel_dy=-60))
+    assert load_editor_zoom() == 110
+    # One big event can carry several steps.
+    QApplication.sendEvent(vp, _wheel(win.editor, -240, CTRL))
+    assert load_editor_zoom() == 90
+    win.close()
+
+
+def test_zoom_repaints_every_open_window(qapp, tmp_notebook, qtbot):
+    first = _focused_window(tmp_notebook, qtbot)
+    second = _window(tmp_notebook, qtbot)
+    base = _rendered(second.editor, "Body ").fontPointSize()
+    first.activateWindow()
+    first.editor.setFocus()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is first.editor, timeout=2000)
+    qtbot.keyClick(first.editor, Qt.Key.Key_Equal, CTRL)
+    assert load_editor_zoom() == 110
+    for win in (first, second):
+        assert _rendered(win.editor, "Body ").fontPointSize() == pytest.approx(base * 1.1, abs=0.05)
+    QApplication.sendEvent(second.editor.viewport(), _wheel(second.editor, 120, CTRL))
+    for win in (first, second):
+        assert _rendered(win.editor, "Body ").fontPointSize() == pytest.approx(base * 1.2, abs=0.05)
+    first.close()
+    second.close()
 
 
 def test_ctrl_wheel_zooms_every_pane(qapp, tmp_notebook, qtbot):
