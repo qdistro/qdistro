@@ -161,9 +161,19 @@ ensure_silo_image() {
         # the launch wrapper refuses an empty argv before spawn runs; a real
         # argv reaches 3b (account creation) and is still refused later —
         # at the broker gate (unknown/deny) or the missing image (allow).
+        # The manager's startup reconcile stops any live tier3s launch it
+        # did not start (CONTRACT §4) and runs AFTER the bus name claim that
+        # manager_up waits on, so a provisioning launch issued just after a
+        # manager restart can be swept before spawn's step 3b. The sweep
+        # runs once per restart: retry while the account is absent.
         write_stanza_workload "$s" "$w" "[\"$SMOKE_APP\",\"--hold\",\"1\"]" >/dev/null || return 1
-        systemctl start "$(unit_of "$s")" >/dev/null 2>&1 || :
-        systemctl reset-failed "$(unit_of "$s")" 2>/dev/null || :
+        local try
+        for try in 1 2 3; do
+            systemctl start "$(unit_of "$s")" >/dev/null 2>&1 || :
+            timeout 5 id "$acct" >/dev/null 2>&1 && break
+            systemctl reset-failed "$(unit_of "$s")" 2>/dev/null || :
+            sleep 1
+        done
         rm -f "$STANZA_DIR/$s.env"
         timeout 5 id "$acct" >/dev/null 2>&1 \
             || { echo "ensure_silo_image: the provisioning launch did not create $acct" >&2; return 1; }

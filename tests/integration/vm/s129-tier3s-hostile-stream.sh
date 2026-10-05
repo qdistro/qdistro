@@ -247,33 +247,34 @@ for l in sorted(glob.glob("/proc/%d/fd/*" % client)):
     if m:
         mine[int(os.path.basename(l))] = int(m.group(1))
 
-def hose(pid, fd, label):
+# Grab every attributed fd BEFORE writing: pidfd_getfd duplicates the fd
+# into this process, and a dup pins the socket object, so the writes land
+# even after garbage on one end kills an endpoint. Grabbing and writing
+# in the same pass raced that death — the sandbox-end garbage drops the
+# waypipe client, and on a loaded host the client-end pidfd_getfd calls
+# then failed ESRCH (first record lane, s129). Write order is grabs
+# order: it does not matter now that every end is pinned.
+def grab(pid, fd, label):
     pidfd = libc.syscall(434, pid, 0)          # pidfd_open
     if pidfd < 0:
-        print(f"{label}: pidfd_open({pid}) failed"); return 0
+        print(f"{label}: pidfd_open({pid}) failed"); return -1
     n = libc.syscall(438, pidfd, fd, 0)        # pidfd_getfd
+    os.close(pidfd)
     if n < 0:
-        os.close(pidfd); print(f"{label}: pidfd_getfd({pid},{fd}) failed"); return 0
-    try:
-        wrote = os.write(n, os.urandom(512))
-    except OSError as e:
-        print(f"{label}: write onto pid {pid} fd {fd} failed: {e}")
-        wrote = 0
-    os.close(n); os.close(pidfd)
-    print(f"{label}: wrote {wrote}B onto pid {pid} fd {fd}")
-    return wrote
+        print(f"{label}: pidfd_getfd({pid},{fd}) failed"); return -1
+    print(f"{label}: grabbed pid {pid} fd {fd}")
+    return n
 
-ends = 0
-sent = 0
-sandbox_bytes = 0
+grabs = []                                    # [(dupfd, pid, fd, label)]
 if sentry_fd is not None:
-    sandbox_bytes = hose(sentry_fd[0], sentry_fd[1], "sandbox-end")
-    sent += sandbox_bytes; ends += 1 if sandbox_bytes else 0
+    n = grab(sentry_fd[0], sentry_fd[1], "sandbox-end")
+    if n >= 0:
+        grabs.append((n, sentry_fd[0], sentry_fd[1], "sandbox-end"))
 else:
     print("WARN: no sandbox-end channel fd identified")
 for fd, ino in mine.items():
     if chan_local is not None and ino == chan_local:
-        w = hose(client, fd, "client-channel")
+        label = "client-channel"
     elif ino in listen_inodes:
         print(f"fd {fd} inode {ino}: the link.sock LISTENER — skipped (unconnected)")
         continue
@@ -281,8 +282,25 @@ for fd, ino in mine.items():
         print(f"fd {fd} inode {ino}: unexpected peer-side fd — skipped")
         continue
     else:
-        w = hose(client, fd, "client-wayland-end")
-    sent += w; ends += 1 if w else 0
+        label = "client-wayland-end"
+    n = grab(client, fd, label)
+    if n >= 0:
+        grabs.append((n, client, fd, label))
+
+ends = 0
+sent = 0
+sandbox_bytes = 0
+for n, pid, fd, label in grabs:
+    try:
+        wrote = os.write(n, os.urandom(512))
+    except OSError as e:
+        print(f"{label}: write onto pid {pid} fd {fd} failed: {e}")
+        wrote = 0
+    os.close(n)
+    print(f"{label}: wrote {wrote}B onto pid {pid} fd {fd}")
+    sent += wrote; ends += 1 if wrote else 0
+    if label == "sandbox-end":
+        sandbox_bytes = wrote
 print(f"hose done ends={ends} sent={sent} sandbox_end={'yes' if sentry_fd else 'no'} sandbox_bytes={sandbox_bytes}")
 PY
 sed 's/^/    channel-hose: /' "$WORK/hose-channels.log"
