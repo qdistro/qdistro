@@ -50,13 +50,19 @@ read from the frame you just opened:
    `qdwin_mouse_button wheel-down down; qdwin_mouse_button wheel-down up`.
    `qdwin_screenshot` and OPEN it: the **Apply** button is at the bottom
    right of the panel.
-3. `qdwin_click` **Apply**. A "Keep these display settings?" dialog appears
-   and reverts on its own after 15 s (its countdown is shown), so act at once:
-   `qdwin_screenshot /tmp/pres02-step1-confirm.png`, OPEN it, then
-   `qdwin_mouse_move X Y` onto **Keep changes**, `sleep 0.5`, and
-   `qdwin_click X Y` with the same coordinates. The frame is drawn at 200%
-   after Apply; the click coordinates are still the frame's pixel
-   coordinates.
+3. `qdwin_click` **Apply**, then IMMEDIATELY (no capture or look first)
+   run the block below. A "Keep these display settings?" dialog appears and
+   reverts on its own after 15 s, which is too short for a look-then-click
+   round trip, so `pres_click_keep_changes` finds and clicks its **Keep
+   changes** button from one attested frame:
+
+```bash
+sleep 1.5
+pres_click_keep_changes
+```
+
+   It prints `keep-click frame=... at frame-px=X,Y`. If it returns nonzero
+   instead, see Known-broken-if 1.1.
 4. `sleep 17` (past the revert window), then:
 
 ```bash
@@ -121,7 +127,8 @@ front with LIGHT chrome and legible text.
 
 ### Step 4 — restore 100%
 
-Repeat Step 1 choosing `100%` (Apply, then Keep changes within 15 s), then:
+Repeat Step 1 choosing `100%` (Apply, then the `pres_click_keep_changes`
+block at once), then:
 
 ```bash
 sleep 17
@@ -139,8 +146,8 @@ echo "scale-cleanup=$(pres_output_scale)"
 ```
 
 If `scale-cleanup` is not `1` (Step 4 did not run or did not stick), restore
-it now exactly as in Step 4 (Settings > Display, `100%`, Apply, Keep
-changes), wait 17 s, and print `pres_output_scale` again. If it is still not
+it now exactly as in Step 4 (Settings > Display, `100%`, Apply,
+`pres_click_keep_changes`), wait 17 s, and print `pres_output_scale` again. If it is still not
 `1`, record the scenario as ERROR with "cleanup could not restore 100%"
 regardless of the step verdicts: a VM left at 200% must not look clean.
 
@@ -150,14 +157,15 @@ All asserts 0.1 → 4.1 pass.
 
 ## Known-broken-if
 
-- 1.1 reads 1 after Keep: the click missed the dialog button or landed after
-  the 15 s revert. Retry once: re-select `200%`, press Apply, then click
-  **Keep changes** IMMEDIATELY at the coordinates you read from the first
-  confirm frame (the dialog opens in the same place every time) — do not
-  spend the 15 s on a new capture first; capture afterwards. A second miss is
-  ERROR (driver), not FAIL. If the retry's Apply opens NO dialog at all,
-  that is a product FAIL (fixed by `claude/qdshell-apps-shell-follow`
-  `d208302d3`: stale serial, missing ToastService import, dead timer).
+- 1.1 reads 1 after `pres_click_keep_changes`, or it returned nonzero:
+  OPEN the frame it names. If that frame shows no confirm dialog, the click
+  ran before the dialog mapped or Apply missed; if it shows the dialog, the
+  helper did not find the button. Retry Step 1 once (re-select `200%`,
+  Apply, the helper block). A second miss with the dialog visible is ERROR
+  (driver), not FAIL. If Apply opens NO dialog at all (Apply visibly
+  pressed, the scale changes, then reverts with no prompt), that is a
+  product FAIL (fixed by `claude/qdshell-apps-shell-follow` `d208302d3`:
+  stale serial, missing ToastService import, dead timer).
 - 2.1 dpr 1.0 at scale 2: Qt is not receiving the wl_output scale.
 - 2.1 font ≈ 2× expected: a consumer multiplies by devicePixelRatio
   (`apply_logical_ui_font` must not).

@@ -12,6 +12,10 @@
 #   pres_app_pids               "name=pid ..." for the four first-party apps
 #   pres_kill_apps              stop every first-party app this file starts
 #   pres_output_scale           integer wl_output scale of Virtual-1
+#   pres_window_handle <name>   qdwin toplevel handle of an app's window
+#   pres_focus_app <name>       focus (not raise) an app's window
+#   pres_click_keep_changes     click "Keep changes" in the display confirm
+#                               dialog (call right after Apply)
 #
 # Usage (from a scenario's Setup block):
 #   source "${QDISTRO_REPO}/tests/integration/presentation-gui/presentation-helpers.sh"
@@ -112,4 +116,70 @@ pres_focus_app() {
     handle=$(pres_window_handle "$1") || return 1
     [ -n "$handle" ] || { echo "pres_focus_app: no toplevel handle for $1" >&2; return 1; }
     pres_qs_ipc qdwin focusWindow "$handle" >/dev/null
+}
+
+# pres_click_keep_changes — click "Keep changes" in qdshell's display
+# confirm dialog within its 15 s window. A vision driver's look-then-click
+# round trip is too slow for that window, so this takes ONE attested frame,
+# locates the dialog's filled mPrimary button (mPrimary read from the live
+# snapshot; selection rule in the Python below), and clicks its centre
+# through the normal QMP pointer path. Call it right after Apply, with the
+# settings panel scrolled to the bottom (its filled Layout tab scrolled
+# away). Prints the frame path and click point; returns 1 if no
+# button-shaped primary region was found.
+pres_click_keep_changes() {
+    local frame=${TMPDIR:-/tmp}/pres-keep-$$.png primary pt
+    primary=$(qdwin_vmx_merged "jq -r .colors.mPrimary $PRES_SNAPSHOT" | tail -n 1)
+    qdwin_screenshot "$frame" >/dev/null 2>&1 || { echo "pres_click_keep_changes: capture failed" >&2; return 1; }
+    pt=$(python3 - "$frame" "$primary" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGB")
+w, h = im.size
+target = tuple(int(sys.argv[2][i:i + 2], 16) for i in (1, 3, 5))
+px = im.load()
+def close(c):
+    return sum(abs(a - b) for a, b in zip(c, target)) <= 24
+# Every connected primary-coloured region in the central band is
+# flood-filled. The button is the region that is SOLID (>= 60% of its
+# bounding box), WIDE (>= 2.5x as wide as tall; toggles are squat) and
+# big enough to be a control; the dialog's primary border is a hollow
+# frame and fails the solidity test. The largest such region wins.
+x0, x1, y0, y1 = w // 4, w, h // 6, 5 * h // 6
+seen = bytearray(w * h)
+best = None
+for y in range(y0, y1, 2):
+    for x in range(x0, x1, 2):
+        if seen[y * w + x] or not close(px[x, y]):
+            continue
+        stack = [(x, y)]
+        seen[y * w + x] = 1
+        n = 0
+        bx0 = bx1 = x
+        by0 = by1 = y
+        while stack:
+            cx, cy = stack.pop()
+            n += 1
+            bx0, bx1 = min(bx0, cx), max(bx1, cx)
+            by0, by1 = min(by0, cy), max(by1, cy)
+            for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                if x0 <= nx < x1 and y0 <= ny < y1 and not seen[ny * w + nx] and close(px[nx, ny]):
+                    seen[ny * w + nx] = 1
+                    stack.append((nx, ny))
+        bw, bh = bx1 - bx0 + 1, by1 - by0 + 1
+        if bh >= h // 60 and bw >= 2.5 * bh and n >= 0.6 * bw * bh:
+            if best is None or n > best[0]:
+                best = (n, (bx0 + bx1) // 2, (by0 + by1) // 2)
+if best is None:
+    raise SystemExit(1)
+_, cx, cy = best
+# qdwin_click takes coordinates in the 1280x800 helper space.
+print(round(cx * 1280 / w), round(cy * 800 / h), cx, cy)
+PY
+) || { echo "pres_click_keep_changes: no primary button found in $frame" >&2; return 1; }
+    set -- $pt
+    qdwin_mouse_move "$1" "$2" >/dev/null 2>&1
+    sleep 0.3
+    qdwin_click "$1" "$2" >/dev/null 2>&1
+    echo "keep-click frame=$frame at frame-px=$3,$4 helper=$1,$2"
 }
