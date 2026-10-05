@@ -400,8 +400,10 @@ if [ -n "$STATE_PATH" ]; then
         as_silo chmod 0700 "$SILO_STATE" "$STATE_PATH" \
             || refuse "cannot chmod the silo state dir $STATE_PATH"
     fi
-    [ "$(stat -c %a -- "$STATE_PATH")" = "700" ] \
-        || refuse "silo state dir $STATE_PATH is not mode 0700"
+    for d in "$SILO_STATE" "$STATE_PATH"; do
+        [ "$(stat -c %a -- "$d")" = "700" ] \
+            || refuse "silo state dir $d is not mode 0700"
+    done
     PODMAN_ARGV+=(-v "$STATE_PATH:/home/admin:rw")
 else
     # no binding: a fresh tmpfs home owned by the guest uid
