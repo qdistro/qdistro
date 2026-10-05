@@ -50,4 +50,21 @@ assert.ok(!/^\s*title:/m.test(dlg.split("ColumnLayout")[0]),
     "no stock Dialog title (unthemed header)");
 assert.match(dlg, /display\.layout\.keep/, "Keep changes button present");
 
+// The confirm/revert cycle must work more than once (gui scenario 02, run
+// gui-20261005T071039Z-3023221: after one timed-out revert, Apply did nothing).
+assert.match(src, /^import qs\.Services\.UI$/m,
+    "ToastService is used, so qs.Services.UI must be imported (ReferenceError otherwise)");
+// Code only: comments may quote the forbidden assignment.
+const timer = src.slice(src.indexOf("id: confirmTimer"), src.indexOf("onPhaseChanged"))
+    .split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+assert.match(timer, /running: root\.phase === "confirming"/, "timer runs only while confirming");
+assert.ok(!/running\s*=\s*false/.test(timer),
+    "assigning `running` breaks its binding; later confirms never time out");
+const apply = src.slice(src.indexOf("function applyNow"), src.indexOf("function step"));
+assert.match(apply, /baseSerial = Qdwin\.outputSerial;\s*if \(!Qdwin\.applyOutputLayout\(list, baseSerial\)\)/,
+    "apply must use the live output serial");
+const result = src.slice(src.indexOf("function onOutputLayoutResult"));
+assert.match(result, /const wasReverting = root\.phase === "reverting";[\s\S]*?if \(wasReverting && root\.phase === "idle"\)\s*root\.reload\(\);/,
+    "a finished revert must reload the working copy");
+
 console.log("ok - display confirm dialog guard");
