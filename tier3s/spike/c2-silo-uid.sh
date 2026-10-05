@@ -68,13 +68,16 @@ INNER='id; echo uid_map:; cat /proc/self/uid_map; echo gid_map:; cat /proc/self/
 if [ -n "$IMG" ]; then
     obs "B: launch under runsc as $SILO_A, keep-id --user 1000:1000"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-        run --rm --security-opt label=disable --security-opt no-new-privileges \
+        run --security-opt label=disable --security-opt no-new-privileges \
         --security-opt "seccomp=$SMOKE" --cap-drop=ALL \
         --userns=keep-id --user 1000:1000 --read-only \
         --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw,U,mode=0700 \
         --network=none \
         --name t3s-c2-keepid -d "$IMG" sh -c "$INNER" 2>&1
     sleep 5
+    obs "container state (5s after create+start):"
+    as_silo "$SILO_A" podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' \
+        t3s-c2-keepid 2>&1 | head -3
     obs "container processes on the host (uid should be $SUID=$SILO_A, not $ADMIN_UID):"
     for p in $(pgrep -f 't3s-c2-keepid|runsc' 2>/dev/null | head -15); do
         [ -d /proc/$p ] && printf '  pid=%s uid=%s comm=%s exe=%s\n' "$p" \
@@ -157,7 +160,7 @@ obs "and a run from the shared store (the real test — distinct uid map):"
 SIMG=$(as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}} {{.ReadOnly}}' 2>/dev/null | awk '$2=="true"{print $1; exit}')
 obs "readonly image ref picked: ${SIMG:-<none>}"
 [ -n "$SIMG" ] && as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-    run --rm --userns=keep-id --user 1000:1000 --network=none \
+    run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 --network=none \
     "$SIMG" sh -c 'id; echo SHARED-STORE-RUN-OK' 2>&1 | head -8
 
 say "6. summary of open answers"
