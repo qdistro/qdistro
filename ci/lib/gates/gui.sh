@@ -233,6 +233,8 @@ gui_scenario_requires_qdwin() {
         qdwin/tests/apps/[0-9][0-9]-*.md|\
         qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
         tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
+        qdistro/tests/integration/presentation-gui/[0-9][0-9]-*.md|\
+        tests/integration/presentation-gui/[0-9][0-9]-*.md|\
         qdlocker/tests/gui/[0-9][0-9]-*.md|\
         qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
         tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
@@ -291,6 +293,7 @@ agent_scenarios() {
         "$WORKSPACE"/qdwin/tests/apps/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
+        "$QDISTRO_REPO"/tests/integration/presentation-gui/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/workflow-gui/[0-9][0-9]-*.md \
         "$WORKSPACE"/qdlocker/tests/gui/[0-9][0-9]-*.md
     do
