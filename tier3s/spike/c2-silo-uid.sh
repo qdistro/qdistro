@@ -139,15 +139,18 @@ obs "podman info as $SILO_A (storage section):"
 as_silo "$SILO_A" podman info --format '{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Store.GraphDriverName}}' 2>&1 | head -5
 obs "dirs after info:"; find /home/$SILO_A/.local/share/containers -maxdepth 2 2>/dev/null | head -8; \
     stat -c '%n %U:%G %a' /run/qdistro-tier3s-rt/$SUID/* 2>/dev/null | head -5
-# State bind rule check: silo-owned host dir bind-mounted into keep-id
-# container — guest uid 1000 sees it as uid 1000?
-SD=$WORK/state-$SILO_A; rm -rf "$SD"; install -d -o "$SILO_A" -g "$SILO_A" -m 0700 "$SD"
+# State bind rule check: silo-owned host dir bind-mounted into a container.
+# Each variant gets a FRESH silo-owned dir — :U and differing maps mutate
+# host-side ownership, so reuse between variants corrupts the evidence.
+mkstatedir() { rm -rf "$1"; install -d -o "$SILO_A" -g "$SILO_A" -m 0700 "$1"; }
 if [ -n "$IMG" ]; then
+    SD=$WORK/state-keepid1000; mkstatedir "$SD"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 \
         --network=none -v "$SD:/state" "$IMG" \
-        sh -c 'cat /proc/self/uid_map; stat -c "state %u:%g %a" /state; touch /state/x && echo wrote; id -u' 2>&1 | head -10
+        sh -c 'stat -c "state %u:%g %a" /state; touch /state/x && echo wrote; id -u' 2>&1 | head -8
     obs "same bind with :U (podman chowns to container user):"
+    SD=$WORK/state-colonU; mkstatedir "$SD"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 \
         --network=none -v "$SD:/state:U" "$IMG" \
@@ -156,12 +159,14 @@ if [ -n "$IMG" ]; then
     # keep-id keeps the SAME numeric uid: caller 1001 -> guest 1001. So a
     # guest-uid-1000 workload maps to a SUBUID unless an explicit uidmap
     # pins guest-1000 -> intermediate 0 (= the caller).
-    obs "keep-id running AS guest 1001 (same-numeric model):"
+    obs "keep-id running AS guest 1001 (same-numeric model), fresh silo dir:"
+    SD=$WORK/state-keepid1001; mkstatedir "$SD"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         run --rm --security-opt label=disable --userns=keep-id \
         --network=none -v "$SD:/state" "$IMG" \
         sh -c 'id -u; stat -c "state %u:%g %a" /state; touch /state/y && echo wrote' 2>&1 | head -8
-    obs "explicit uidmap guest-1000 -> caller (the 1000-preserving variant):"
+    obs "explicit uidmap guest-1000 -> caller (the 1000-preserving variant), fresh silo dir:"
+    SD=$WORK/state-uidmap; mkstatedir "$SD"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         run --rm --security-opt label=disable \
         --uidmap 0:1:1000 --uidmap 1000:0:1 --uidmap 1001:1001:64535 \
