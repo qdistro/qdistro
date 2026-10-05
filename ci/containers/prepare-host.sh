@@ -10,7 +10,7 @@ for component in qdchrome-extension qdfirefox-extension; do
         fi
         args=(--prefer-offline)
         case "${QCI_OFFLINE:-0}" in 1|true|yes|on) args=(--offline);; esac
-        npm ci "${args[@]}" --cache ../ci/.cache/npm
+        npm ci "${args[@]}" --cache /tmp/qci-npm
         printf '%s\n' "$key" > node_modules/.qci-deps-key
     )
 done

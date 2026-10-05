@@ -2,9 +2,13 @@
 # Shared launcher for acceptance rows and explicit development commands.
 host_container_run() {
     local image=$1 network=$2; shift 2
-    local label='' git_common name run_path
+    local label='' git_common name run_path npm_cache
     [ "$(cat /sys/fs/selinux/enforce 2>/dev/null || true)" != 1 ] || label=,z
     local -a mounts=(--volume "$QDISTRO_REPO:$QDISTRO_REPO:rw$label") envs=()
+    npm_cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/host-npm
+    mkdir -p "$npm_cache" || return
+    npm_cache=$(realpath "$npm_cache") || return
+    mounts+=(--volume "$npm_cache:/tmp/qci-npm:rw$label")
     # Linked-worktree .git files point outside the source mount. Git metadata
     # is read-only: tests may inspect provenance but cannot edit another tree.
     git_common=$(git -C "$QDISTRO_REPO" rev-parse --path-format=absolute --git-common-dir) || return

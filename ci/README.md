@@ -394,7 +394,9 @@ only on SELinux-enforcing hosts; on this non-enforcing host it is unnecessary
 and would mutate source/cache labels for no benefit.
 
 A separate preparation container runs `npm ci --prefer-offline` with downloads
-cached in `ci/.cache/npm`. Each extension's `node_modules` receipt includes both
+cached in `$QDWIN_CACHE_DIR/host-npm/` (default `~/.cache/qdistro/host-npm/`).
+Keeping this cache outside the source tree also keeps it out of selftest Git
+fixtures. Each extension's `node_modules` receipt includes both
 package files, Node version and architecture; matching dependencies are reused.
 Offline preparation uses `npm ci --offline` and no network. All build/test rows
 run with `--network=none`, Qt offscreen, and the existing printer-test exclusion.

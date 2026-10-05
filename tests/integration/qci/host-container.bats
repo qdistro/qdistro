@@ -77,6 +77,7 @@ SH
     [ ! -e "$MARKER" ]
     grep -q -- '--userns=keep-id --network=none' "$CALLS"
     grep -q -- 'QT_QPA_PLATFORM=offscreen' "$CALLS"
+    grep -Fq -- "$QDWIN_CACHE_DIR/host-npm:/tmp/qci-npm:rw" "$CALLS"
     run env RUN_RC=42 bash -c '
         . "$SOURCE_ROOT/ci/lib/host-container.sh"
         QDISTRO_REPO=$REPO
