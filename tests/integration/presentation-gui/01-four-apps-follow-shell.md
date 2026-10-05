@@ -1,7 +1,7 @@
 # 01 — four apps follow the shell's appearance live, survive a shell kill
 
 <!-- qci:visual: required -->
-<!-- qci:visual-captures: 9 -->
+<!-- qci:visual-captures: 13 -->
 
 **Acceptance criterion (pack 07 scenarios 1 and 2, 100% scale):** the four
 first-party apps (qfileman, qterminator, qdbrowser, qnotebook), started
@@ -33,43 +33,44 @@ SNAP_DARK=$(pres_snapshot); echo "SNAP_DARK=$SNAP_DARK"
 
 ## Steps
 
-### Step 1 — start the four apps under the dark snapshot
+Window stacking: qdwin opens these apps maximized, newest on top, and a
+`focusWindow` IPC focuses a window without necessarily RAISING it. The
+steps therefore never rely on raising: each app is captured right after it
+starts (it is on top), and after the mode switch the apps are revealed one
+by one by CLOSING the one above. Every app is still running when the shell
+switches; only the reveal closes them, after their PIDs were checked.
+
+### Step 1 — start the four apps under the dark snapshot, one at a time
 
 ```bash
-pres_launch qfm   qfileman
-pres_launch qterm qterminator
-pres_launch qdb   "python3 -m qdbrowser --no-restore about:blank"
-pres_launch qnb   qnotebook
-sleep 10
-PIDS_1=$(pres_app_pids); echo "PIDS_1=$PIDS_1"
-for app in qfileman qterminator qdbrowser qnotebook; do
-    pres_focus_app "$app" && sleep 1.5
-    qdwin_screenshot "/tmp/pres01-step1-$app.png"
+for spec in "qfm:qfileman" "qterm:qterminator" "qdb:python3 -m qdbrowser --no-restore about:blank" "qnb:qnotebook"; do
+    tag=${spec%%:*}; cmd=${spec#*:}
+    pres_launch "$tag" "$cmd"
+    sleep 7
+    qdwin_screenshot "/tmp/pres01-step1-$tag.png"
 done
+PIDS_1=$(pres_app_pids); echo "PIDS_1=$PIDS_1"
 ```
 
 **Assert (1.1):** `PIDS_1` has a numeric pid for all four apps (no `none`).
-**Assert (1.2):** OPEN each of the four Step 1 frames. In each, the focused
-app (its name is in the bar's window-title chip) is the window in front and
-its chrome is DARK (dark background, light text). If a frame shows a
-different app in front than the bar names, record that in your notes as a
-focus/raise observation and grade only what is visible; a frame whose app
-window is not visible at all is ERROR for that app, not FAIL.
+**Assert (1.2):** OPEN each of the four Step 1 frames. Each shows the app
+just started (qfileman, qterminator, qdbrowser, qnotebook in that order) in
+front, with DARK chrome (dark background, light text). qdbrowser's page area
+(`about:blank`) is content, not chrome.
 
 ### Step 2 — open qnotebook's Settings dialog
 
 ```bash
-pres_focus_app qnotebook; sleep 1
 qdwin_chord ctrl -- comma
 sleep 2
 qdwin_screenshot /tmp/pres01-step2-qnotebook-settings.png
 ```
 
-**Assert (2.1):** the frame shows a qnotebook Settings dialog with dark
-chrome. If no dialog appeared, note it and continue (2.x is then ERROR, not
-FAIL — the shortcut is the only thing under test there).
+**Assert (2.1):** OPEN the frame: a qnotebook Settings dialog with DARK
+chrome is in front. If no dialog appeared, record 2.1 and 3.3 as ERROR (the
+shortcut is all that is under test there) and continue.
 
-### Step 3 — the shell switches to light; running apps follow
+### Step 3 — the shell switches to light; every running app follows
 
 ```bash
 pres_qs_ipc darkMode setLight
@@ -78,22 +79,27 @@ echo "SNAP_LIGHT=$SNAP_LIGHT"
 sleep 3
 PIDS_3=$(pres_app_pids); echo "PIDS_3=$PIDS_3"
 qdwin_screenshot /tmp/pres01-step3-settings-light.png
-for app in qfileman qterminator qdbrowser; do
-    pres_focus_app "$app" && sleep 1.5
-    qdwin_screenshot "/tmp/pres01-step3-$app.png"
-done
+# Reveal each app by closing the one above it.
+qdwin_send_key KEY_ESC; sleep 1.5
+qdwin_screenshot /tmp/pres01-step3-qnotebook.png
+qdwin_vmx_merged "pkill -u admin -f '[q]notebook'"; sleep 2
+qdwin_screenshot /tmp/pres01-step3-qdbrowser.png
+qdwin_vmx_merged "pkill -u admin -f 'python3 -m [q]dbrowser'"; sleep 2
+qdwin_screenshot /tmp/pres01-step3-qterminator.png
+qdwin_vmx_merged "pkill -u admin -f '[q]terminator'"; sleep 2
+qdwin_screenshot /tmp/pres01-step3-qfileman.png
 ```
 
 **Assert (3.1):** `SNAP_LIGHT` mode is `light` and its generation differs
 from `SNAP_DARK`'s.
-**Assert (3.2):** `PIDS_3` equals `PIDS_1` exactly (no app relaunched).
+**Assert (3.2):** `PIDS_3` equals `PIDS_1` exactly (no app relaunched before
+the reveal).
 **Assert (3.3):** OPEN `pres01-step3-settings-light.png`: the still-open
-qnotebook Settings dialog (and the qnotebook window behind it, where
-visible) now has LIGHT chrome.
-**Assert (3.4):** OPEN the three per-app Step 3 frames: each app's chrome is
-LIGHT.
+qnotebook Settings dialog now has LIGHT chrome.
+**Assert (3.4):** OPEN the four reveal frames (qnotebook, qdbrowser,
+qterminator, qfileman): the app in front of each has LIGHT chrome.
 
-### Step 4 — kill qdshell; apps keep running and keep light
+### Step 4 — kill qdshell; qfileman keeps running and keeps light
 
 ```bash
 pres_admin "systemctl --user kill --signal=KILL qdshell.service"
@@ -107,37 +113,41 @@ qdwin_screenshot /tmp/pres01-step4-after-shell-kill.png
 `Restart=on-failure` respawn and may print `WARN: capture-after-shell-restart`
 — expected here.
 
-**Assert (4.1):** `PIDS_4` equals `PIDS_1`.
+**Assert (4.1):** the `qfileman=` pid in `PIDS_4` equals the one in
+`PIDS_1` (the other three were closed by the Step 3 reveal and read `none`).
 **Assert (4.2):** `SNAP_4` equals `SNAP_LIGHT` (a shell crash does not
 rewrite or delete the snapshot).
-**Assert (4.3):** OPEN the Step 4 frame: the app window in front still has
-LIGHT chrome.
+**Assert (4.3):** OPEN the Step 4 frame: qfileman is in front with LIGHT
+chrome.
 
-### Step 5 — a new app window joins with the persisted snapshot
+### Step 5 — a new app joins with the persisted snapshot
 
 ```bash
-pres_launch qterm2 "qterminator --new-window"
-sleep 6
-qdwin_screenshot /tmp/pres01-step5-new-window.png
+pres_launch qterm2 qterminator
+sleep 7
+qdwin_screenshot /tmp/pres01-step5-new-terminal.png
 ```
 
-**Assert (5.1):** OPEN the Step 5 frame: the newly opened terminal window is
-in front and its chrome is LIGHT.
+**Assert (5.1):** OPEN the Step 5 frame: the new terminal window is in front
+and its chrome is LIGHT.
 
 ### Step 6 — the respawned shell switches back to dark; apps follow
 
 ```bash
+PIDS_6A=$(pres_app_pids); echo "PIDS_6A=$PIDS_6A"
 pres_qs_ipc darkMode setDark
 SNAP_DARK2=$(pres_wait_mode dark 30) || echo "FAIL: respawned shell did not publish dark"
 echo "SNAP_DARK2=$SNAP_DARK2"
 sleep 3
 PIDS_6=$(pres_app_pids); echo "PIDS_6=$PIDS_6"
-pres_focus_app qfileman && sleep 1.5
+qdwin_screenshot /tmp/pres01-step6-terminal-dark.png
+qdwin_vmx_merged "pkill -u admin -f '[q]terminator'"; sleep 2
 qdwin_screenshot /tmp/pres01-step6-qfileman-dark.png
 ```
 
-**Assert (6.1):** `SNAP_DARK2` mode is `dark`; `PIDS_6` equals `PIDS_1`.
-**Assert (6.2):** OPEN the Step 6 frame: qfileman's chrome is DARK again.
+**Assert (6.1):** `SNAP_DARK2` mode is `dark`; `PIDS_6` equals `PIDS_6A`.
+**Assert (6.2):** OPEN both Step 6 frames: the terminal, then qfileman, are
+in front with DARK chrome again.
 
 ## Cleanup
 

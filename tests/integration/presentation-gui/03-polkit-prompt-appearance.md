@@ -8,8 +8,14 @@
 snapshot once at start (`role="polkit"`, `watch=False`) and ignores a
 developer `QDISTRO_PRESENTATION_FILE` override. It therefore opens with the
 shell's current appearance and keeps it while open even if the shell
-switches. Escape cancels: exit status 1 and nothing on stdout (stdout carries
+switches. Cancel exits with status 1 and nothing on stdout (stdout carries
 the password on submit).
+
+Keyboard focus: a newly mapped prompt does not currently receive keyboard
+focus on qdwin (recorded in the tracker as a product finding), so an
+Escape key may go to whatever had focus. The steps cancel by CLICKING the
+dialog's **Cancel** button; record in your notes whether the bar's
+focused-window chip named the prompt.
 
 **Scope note (recorded in `09-leftovers-2026-10-04.md`):** CI VMs run the
 admin session under a lingering user manager, not a logind seat session, so
@@ -67,10 +73,12 @@ qdwin_screenshot /tmp/pres03-step2-prompt-still-dark.png
 prompt dialog is still DARK (the trusted prompt reads once and does not
 watch; it never restyles mid-authentication).
 
-### Step 3 — Escape cancels with rc 1 and empty stdout
+### Step 3 — Cancel exits with rc 1 and empty stdout
+
+Click **Cancel** using coordinates read from the Step 2 frame you opened:
+`qdwin_mouse_move X Y`, `sleep 0.5`, then `qdwin_click X Y`. Then:
 
 ```bash
-qdwin_send_key KEY_ESC
 sleep 2
 pres_admin 'echo rc=$(cat /tmp/pk-dark.rc 2>/dev/null); echo stdout_bytes=$(wc -c < /tmp/pk-dark.out 2>/dev/null)'
 ```
@@ -83,7 +91,12 @@ pres_admin 'echo rc=$(cat /tmp/pk-dark.rc 2>/dev/null); echo stdout_bytes=$(wc -
 pres_prompt_start light
 sleep 4
 qdwin_screenshot /tmp/pres03-step4-prompt-light.png
-qdwin_send_key KEY_ESC
+```
+
+OPEN the frame, then click its **Cancel** button the same way (move, sleep
+0.5, click), then:
+
+```bash
 sleep 2
 pres_admin 'echo rc=$(cat /tmp/pk-light.rc 2>/dev/null); echo stdout_bytes=$(wc -c < /tmp/pk-light.out 2>/dev/null)'
 ```
@@ -110,3 +123,5 @@ All asserts 0.1 → 4.2 pass.
   managed snapshot is unreadable to admin.
 - 2.1 dialog restyled: the polkit role is watching (`watch=False` required).
 - 3.1 non-empty stdout on cancel: a password-path leak.
+- 3.1 no rc file / prompt still running: the Cancel click missed; re-open
+  the frame and click again once. A second miss is ERROR (driver).
