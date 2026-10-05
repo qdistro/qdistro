@@ -51,6 +51,6 @@ as_admin() {
 prep_silo_dirs() {
     local u=$1 uid
     uid=$(id -u "$u")
-    install -d -m 0711 -o root -g root /run/qdistro-tier3s-runsc /run/qdistro-tier3s-rt
+    install -d -m 0755 -o root -g root /run/qdistro-tier3s-runsc /run/qdistro-tier3s-rt
     install -d -m 0700 -o "$u" -g "$u" "/run/qdistro-tier3s-runsc/$uid" "/run/qdistro-tier3s-rt/$uid"
 }

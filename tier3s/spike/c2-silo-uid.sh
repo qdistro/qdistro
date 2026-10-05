@@ -19,8 +19,10 @@ obs "admin store images:"; as_admin podman images --format '{{.Repository}}:{{.T
 obs "existing silo/group rows:"; getent group "$BRIDGE_GROUP"; getent passwd user1 user2 2>/dev/null; cat /etc/subuid /etc/subgid 2>/dev/null | head -10
 
 # Idempotent re-runs: drop state a prior run may have left on the guest.
+# Keep $WORK/smoke.json (installed by c2-lib at source time); per-test dirs
+# are rm -rf'd individually where they are created.
 rm -f /home/$SILO_A/.config/containers/storage.conf /home/$SILO_B/.config/containers/storage.conf 2>/dev/null
-rm -rf /var/lib/qdistro-tier3s-store /var/tmp/tier3s-spike
+rm -rf /var/lib/qdistro-tier3s-store
 
 say "1. silo users + subuid/subgid allocation"
 for u in "$SILO_A" "$SILO_B"; do
@@ -154,11 +156,12 @@ chown "$SILO_A:$SILO_A" /home/$SILO_A/.config/containers/storage.conf
 obs "silo podman images WITH additionalimagestores=$SHARED:"
 as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}} {{.ReadOnly}}' 2>&1 | head -6
 obs "and a run from the shared store (the real test — distinct uid map):"
-as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+SIMG=$(as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}} {{.ReadOnly}}' 2>/dev/null | awk '$2=="true"{print $1; exit}')
+obs "readonly image ref picked: ${SIMG:-<none>}"
+[ -n "$SIMG" ] && as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
     --runtime-flag=root=$RROOT \
     run --rm --userns=keep-id --user 1000:1000 --network=none \
-    "$(as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}}' | grep tier3s | head -1)" \
-    sh -c 'id; echo SHARED-STORE-RUN-OK' 2>&1 | head -8
+    "$SIMG" sh -c 'id; echo SHARED-STORE-RUN-OK' 2>&1 | head -8
 
 say "6. summary of open answers"
 echo "See OBSERVE lines above; findings get written into 13-phase-C2-progress.md"
