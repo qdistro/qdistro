@@ -503,6 +503,7 @@ class World:
         run = self.T / "run"
         for d, mode in (("qdistro-tier3s-ctl", 0o700), ("qdistro-tier3s", 0o755),
                         ("qdistro-tier3s-runsc", 0o755), (f"qdistro-tier3s-runsc/{UID}", 0o700),
+                        ("qdistro-tier3s-rt", 0o755), (f"qdistro-tier3s-rt/{UID}", 0o700),
                         (f"user/{UID}", 0o700)):
             (run / d).mkdir(parents=True, exist_ok=True)
             (run / d).chmod(mode)
@@ -602,6 +603,8 @@ class World:
         d = Path(f"{self.T}/sys/fs/cgroup{rel}")
         st = {"schema": "1", "token": token, "container": container, "unit": unit,
               "scope_unit": f"qdistro-tier3s-{token}.scope", "admin_uid": str(UID),
+              "silo_uid": str(UID), "silo_user": f"qt3s-{self.silo or 'smoke'}",
+              "silo": self.silo or "smoke",
               "runsc_root": f"/run/qdistro-tier3s-runsc/{UID}",
               "per_launch_dir": f"/run/qdistro-tier3s/{token}", "phase": "running",
               "container_id": "cid" + token, "scope_cgroup": rel,
@@ -669,15 +672,21 @@ def test_plan_podman_command_shape(w):
     run = pa.index("run")
     assert pa.index("--cgroup-manager=cgroupfs") < run and pa.index("--runtime-flag=network=none") < run
     for pair in (["--security-opt", "label=disable"], ["--security-opt", "no-new-privileges"],
-                 ["--userns=keep-id", "--user"], ["--name", "qdistro-tier3s-smoke"],
+                 ["--name", "qdistro-tier3s-smoke"],
                  ["--label", f"qdistro_tier3s_token={TOKEN}"],
                  ["--label", f"qdistro_tier3s_unit={w.unit}"]):
         assert any(pa[i:i + 2] == pair for i in range(run, len(pa))), pair
+    # Phase C2 model A: keep-id without a guest-1000 retarget — the guest uid
+    # IS the silo's host uid (the test-mode silo is the caller)
+    assert "--userns=keep-id" in pa and f"--user={UID}:{os.getgid()}" in pa
+    assert not any(a == "--user" or a == "--user=1000:1000" for a in pa)
     assert "--cap-drop=ALL" in pa and "--read-only" in pa and "--rm" in pa
     assert "seccomp=/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json" in pa
     assert p["SECCOMP"] == f"{w.T}/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json"
     # tmpfs ownership through podman's U option, never a literal uid= (podman 6.0.2 rejects it)
-    assert "/run/user/1000:rw,U,mode=0700" in pa and "/home/admin/.cache:rw,U,mode=0700" in pa
+    # (the guest runtime dir is the SILO's numeric uid; an unbound launch gets a
+    # fresh tmpfs home)
+    assert f"/run/user/{UID}:rw,U,mode=0700" in pa and "/home/admin:rw,U,mode=0700" in pa
     assert not any("uid=" in a for a in pa)
     # D-A1: no per-call root; D-A3b: no cgroup-parent containment
     assert not any("root=" in a or a == "--root" for a in pa)
@@ -723,7 +732,9 @@ def test_templated_silo_mounts_state_and_uses_the_digest(w):
     p = w.plan()
     pa = p["podman"]
     i = pa.index("-v")
-    assert pa[i + 1] == f"{w.T}/state:/home/admin:rw"
+    # C2 model A: the MOUNTED state dir is the silo-owned one, not the
+    # resolver's admin-side path (which stays bookkeeping only)
+    assert pa[i + 1] == f"{w.T}/home/qt3s-smoke/tier3s-state/smoke:/home/admin:rw"
     assert pa[-2] == DIGEST and p["IMAGE"] == DIGEST
     # read-only resolution before the plan: no --record
     assert [c for c in w.calls() if c.startswith("resolver")] == ["resolver smoke --launch-env"]
@@ -973,15 +984,31 @@ def test_sentry_outside_the_scope_tears_down(w):
 def test_missing_image_refuses_and_cleans(w):
     w.set("image_rc", "1")
     r = w.spawn()
-    assert r.returncode == 2 and "not in admin's store" in r.stderr
+    assert r.returncode == 2 and "not in the silo's podman store" in r.stderr
     assert w.first("systemd-run") is None
     assert w.launch_gone(TOKEN)
 
 
-def test_missing_state_root_refuses_before_any_record(w):
+def test_missing_state_root_is_created_by_the_spawn(w):
+    """C2: silo uids are dynamic, so the per-uid runsc root can no longer be
+    tmpfiles-provisioned — the spawn creates it (silo-owned 0700) when absent."""
     w.state_root.rmdir()
     r = w.spawn()
-    assert r.returncode == 2 and "runsc state root" in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert w.state_root.is_dir() and stat.S_IMODE(w.state_root.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("damage", ["mode", "symlink"])
+def test_tampered_state_root_refuses_before_any_record(w, damage):
+    """An existing-but-wrong runsc root is refused, never chmod/chowned into
+    place (what someone else planted stays planted and the launch dies)."""
+    if damage == "mode":
+        w.state_root.chmod(0o755)
+    else:
+        w.state_root.rename(w.tmp / "real")
+        w.state_root.symlink_to(w.tmp / "real")
+    r = w.spawn()
+    assert r.returncode == 2 and "not a silo-owned 0700" in r.stderr
     assert w.first("systemd-run") is None and list(w.ctl.iterdir()) == []
 
 
@@ -1720,10 +1747,13 @@ def test_gui_images_use_the_bridge_entrypoint_and_the_installer_ships_it():
         assert not re.search(r"^CMD ", cf, re.M), cf
         assert "COPY qdistro-tier3s-entrypoint /usr/lib/qdistro/tier3s-entrypoint" in cf
     ep = (T3S / "qdistro-tier3s-entrypoint").read_text()
-    for v in ("XDG_RUNTIME_DIR=/run/user/1000", "LIBGL_ALWAYS_SOFTWARE=1",
+    # C2 model A: XDG_RUNTIME_DIR is the spawn's per-silo env, with a uid-
+    # derived fallback — never a fixed /run/user/1000
+    for v in ('XDG_RUNTIME_DIR="/run/user/$(id -u)"', "LIBGL_ALWAYS_SOFTWARE=1",
               "QT_QUICK_BACKEND=software", "GDK_BACKEND=wayland",
               "QT_QPA_PLATFORM=wayland"):
         assert v in ep, v
+    assert "XDG_RUNTIME_DIR=/run/user/1000" not in ep
     assert 'exec waypipe -s "$SOCK" -o --no-gpu server -- "$@"' in ep
     inst = (REPO / "scripts/install/install-session-manager.sh").read_text()
     for f in ("qdistro-tier3s-entrypoint", "Containerfile.*",

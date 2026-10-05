@@ -1,6 +1,7 @@
 # tier 3s headless smoke workload (tier3s/CONTRACT.md §7). Built by
 # tier3s/make-tier3s-image.sh as qdistro/tier3s-headless-smoke:latest and run
-# under runsc by spawn-tier3s.sh: read-only root, keep-id uid 1000, no network.
+# under runsc by spawn-tier3s.sh: read-only root, silo keep-id (guest uid == the silo's host
+# uid, Phase C2 model A), no network.
 #
 # The base follows the snapshot.conf pin (make-tier3s-image.sh passes it), so
 # the base layer and the zypper repos come from one snapshot. No default: a

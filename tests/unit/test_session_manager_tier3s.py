@@ -548,6 +548,16 @@ def real_ops(monkeypatch, tmp_path):
     ctl = tmp_path / "ctl"
     ctl.mkdir()
     monkeypatch.setattr(sm, "TIER3S_CTL_DIR", ctl)
+    # C2 model A: tier3s podman calls run as the qt3s-<silo> account, which
+    # does not exist on the build host — resolve it to a fake passwd entry.
+    real_getpwnam = sm.pwd.getpwnam
+    def fake_getpwnam(name):
+        if name.startswith(sm.TIER3S_SILO_ACCT_PREFIX):
+            return sm.pwd.struct_passwd(
+                (name, "x", 4242, 4242, "qdistro tier3s silo",
+                 f"/home/{name}", "/bin/bash"))
+        return real_getpwnam(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake_getpwnam)
     return _SystemOps()
 
 
@@ -562,11 +572,11 @@ def test_running_false_only_when_unit_down_container_gone_and_no_record(real_ops
                                  (_exists, _verdict(1))])
     assert real_ops.tier3s_silo_running("smoke") is False
     pm = [c for c, _ in rec.calls if any("podman" in str(a) for a in c)][0]
-    # podman as admin with the same fixed environment the spawn and cleanup
-    # use, wrapped in the PMRC verdict protocol (A r3 P1): the chain's own rc
-    # is never the verdict.
-    assert pm[:5] == ["runuser", "-u", "admin", "--", "env"]
-    assert "-i" in pm and "XDG_RUNTIME_DIR=/run/user/1000" in pm
+    # podman as the silo account (C2 model A) with the same fixed environment
+    # the spawn and cleanup use, wrapped in the PMRC verdict protocol
+    # (A r3 P1): the chain's own rc is never the verdict.
+    assert pm[:5] == ["runuser", "-u", "qt3s-smoke", "--", "env"]
+    assert "-i" in pm and "XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/4242" in pm
     assert pm[-4:-2] == ["-c", 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"']
     assert pm[-2:] == ["sh", "qdistro-tier3s-smoke"]
 
@@ -1163,8 +1173,9 @@ def test_installed_sources_exist():
 def _t3s_installer_block() -> str:
     """The installer's tier3s section, verbatim: from its header comment up to
     the end marker. The tests below EXECUTE this text (the real installer
-    lines), with `install`, `live_only` and `systemd-tmpfiles` replaced by
-    recorders, so a guard change in the installer changes what they see."""
+    lines), with `install`, `live_only`, `systemd-tmpfiles` and `groupadd`
+    replaced by recorders, so a guard change in the installer changes what
+    they see."""
     text = INSTALLER.read_text()
     start = text.index("# Tier 3s (gVisor runsc; Experimental, dev profile only)")
     end = text.index("# --- end tier 3s ---", start)
@@ -1181,6 +1192,7 @@ def _run_t3s_block(tmp_path, env_value):
         'install() { printf "install %s\\n" "$*" >> "$LOG"; }\n'
         'live_only() { printf "live_only %s\\n" "$1" >> "$LOG"; }\n'
         'systemd-tmpfiles() { printf "tmpfiles %s\\n" "$*" >> "$LOG"; }\n'
+        'groupadd() { printf "groupadd %s\\n" "$*" >> "$LOG"; }\n'
         + _t3s_installer_block()
         + 'echo "BLOCK-END"\n'
     )
@@ -1217,6 +1229,9 @@ def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
             "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"} | seccomp | decls | cfiles
     assert dests == want, dests ^ want
     assert "live_only systemd-tmpfiles --create qdistro-tier3s.conf" in calls
+    # C2 model A: the silo-group marker the spawn requires (accounts are
+    # created at first launch, but the group is an install-time fact)
+    assert "groupadd --force qdistro-tier3s" in calls
     assert "not installed" not in r.stdout
 
 

@@ -4,17 +4,20 @@
 # tier-3s launch's transient scope (tier3s/CONTRACT.md "D-A3b"):
 #
 #   systemd-run --scope --unit=qdistro-tier3s-<token>.scope -p Delegate=yes ... \
-#     -- qdistro-tier3s-scope enter <token> <admin-uid> -- podman <args...>
+#     -- qdistro-tier3s-scope enter <token> <silo-uid> -- podman <args...>
 #
 # It (1) verifies it runs as root as the only process of exactly the cgroup of
-# qdistro-tier3s-<token>.scope; (2) delegates that cgroup to the admin uid
+# qdistro-tier3s-<token>.scope; (2) delegates that cgroup to the SILO uid
 # SELECTIVELY: the directory, cgroup.procs, cgroup.subtree_control and
 # cgroup.threads (what systemd's own Delegate= hands a unit's User=), while
 # every limit and accounting file (memory.max, pids.max, ...) stays root's;
-# (3) execs podman AS ADMIN through runuser with a fixed environment. An
-# admin-writable scope is what keeps rootless podman (cgroupfs manager),
-# conmon and every runsc process inside it (Phase S logs 35/36). It never runs
-# anything as root and accepts no other mode or program.
+# (3) execs podman AS THE SILO through runuser with a fixed environment. The
+# silo uid is the podman/runsc caller (Phase C2 model A: keep-id maps it to
+# the same numeric guest uid); admin's uid is never accepted here — that
+# would silently re-open the C1 shared-identity model. A silo-writable scope
+# is what keeps rootless podman (cgroupfs manager), conmon and every runsc
+# process inside it (Phase S logs 35/36). It never runs anything as root and
+# accepts no other mode or program.
 #
 # Test hook ONLY: TIER3S_TEST_ROOT reads our cgroup from $TIER3S_TEST_ROOT/proc/<pid>/cgroup,
 # prefixes /sys/fs/cgroup and keeps the caller's PATH (fakes); refused for root.
@@ -33,23 +36,26 @@ fi
 CGROOT="$T/sys/fs/cgroup"
 
 [ "$#" -ge 5 ] && [ "$1" = enter ] && [ "$4" = -- ] && [ "$5" = podman ] \
-    || die "usage: qdistro-tier3s-scope enter <token> <admin-uid> -- podman <args...>"
-TOKEN="$2"; ADMIN_UID="$3"; shift 5
+    || die "usage: qdistro-tier3s-scope enter <token> <silo-uid> -- podman <args...>"
+TOKEN="$2"; SILO_UID="$3"; shift 5
 [[ "$TOKEN" =~ ^[0-9a-f]{32}$ ]] || die "token must be 32 lowercase hex digits"
-[[ "$ADMIN_UID" =~ ^[1-9][0-9]*$ ]] || die "admin uid must be a non-root numeric uid"
-if [ -z "$T" ]; then
-    [ "$ADMIN_UID" = 1000 ] || die "qdistro's admin uid is 1000, got $ADMIN_UID"
-fi
+[[ "$SILO_UID" =~ ^[0-9]+$ ]] && [ "$SILO_UID" -ge 1000 ] || die "silo uid must be a non-root numeric uid >= 1000"
 # NSS is resolved once, under a bound (fable A r3 P3-2): a wedged lookup dies
 # the launch rather than wedging the scope's first process. Its status counts
 # (sol r5 P3-4): a line printed before the stall is not a result.
-ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \
-    || die "no passwd entry for uid $ADMIN_UID (the NSS lookup failed or timed out)"
-ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
-ADMIN_PUID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f3)"
-ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
-[ -n "$ADMIN_USER" ] && [ "$ADMIN_PUID" = "$ADMIN_UID" ] && [[ "$ADMIN_HOME" == /* ]] \
-    && [[ "$ADMIN_PW" != *$'\n'* ]] || die "no passwd entry for uid $ADMIN_UID"
+SILO_PW="$(timeout 5 getent passwd "$SILO_UID")" \
+    || die "no passwd entry for uid $SILO_UID (the NSS lookup failed or timed out)"
+SILO_USER="$(printf '%s\n' "$SILO_PW" | cut -d: -f1)"
+SILO_PUID="$(printf '%s\n' "$SILO_PW" | cut -d: -f3)"
+SILO_HOME="$(printf '%s\n' "$SILO_PW" | cut -d: -f6)"
+[ -n "$SILO_USER" ] && [ "$SILO_PUID" = "$SILO_UID" ] && [[ "$SILO_HOME" == /* ]] \
+    && [[ "$SILO_PW" != *$'\n'* ]] || die "no passwd entry for uid $SILO_UID"
+if [ -z "$T" ]; then
+    # the podman caller is a dedicated qt3s-* account (spawn-tier3s.sh §3b);
+    # admin — or any other account — is refused here even though the record's
+    # silo_uid is the launch's own choice.
+    case "$SILO_USER" in qt3s-*) ;; *) die "uid $SILO_UID resolves to '$SILO_USER', not a qt3s-* silo account" ;; esac
+fi
 
 # (1) exactly our scope, and we are its only process
 mapfile -t lines < "$SELF_CGROUP"
@@ -70,12 +76,14 @@ mapfile -t procs < "$DIR/cgroup.procs"
 for f in "$DIR/cgroup.procs" "$DIR/cgroup.subtree_control" "$DIR/cgroup.threads"; do
     [ -f "$f" ] && [ ! -L "$f" ] || die "$f missing"
 done
-chown "$ADMIN_UID" -- "$DIR" "$DIR/cgroup.procs" "$DIR/cgroup.subtree_control" "$DIR/cgroup.threads"
-printf 'qdistro-tier3s-scope: %s delegated to uid %s (dir, cgroup.procs, cgroup.subtree_control, cgroup.threads)\n' "$REL" "$ADMIN_UID" >&2
+chown "$SILO_UID" -- "$DIR" "$DIR/cgroup.procs" "$DIR/cgroup.subtree_control" "$DIR/cgroup.threads"
+printf 'qdistro-tier3s-scope: %s delegated to uid %s (dir, cgroup.procs, cgroup.subtree_control, cgroup.threads)\n' "$REL" "$SILO_UID" >&2
 
-# (3) podman as admin, fixed environment (runuser stays as the PAM parent,
-# inside the scope)
+# (3) podman as the silo, fixed environment (runuser stays as the PAM parent,
+# inside the scope). The silo has no logind session: /run/user/<uid> does not
+# exist, so XDG_RUNTIME_DIR is the per-silo runtime dir the spawn created
+# (silo-owned 0700 under the root-0755 base).
 if [ -n "$T" ]; then PODMAN="$(command -v podman)"; else PODMAN=/usr/bin/podman; fi
-exec runuser -u "$ADMIN_USER" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$ADMIN_HOME" \
-    USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+exec runuser -u "$SILO_USER" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$SILO_HOME" \
+    USER="$SILO_USER" LOGNAME="$SILO_USER" XDG_RUNTIME_DIR="$T/run/qdistro-tier3s-rt/$SILO_UID" \
     "$PODMAN" "$@"

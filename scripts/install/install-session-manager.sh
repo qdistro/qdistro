@@ -189,6 +189,11 @@ if [ "$_qd_t3s" = 1 ]; then
     fi
     install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp" \
         "$_qd_t3s_lib/workloads"
+    # Phase C2 model A: every tier3s silo runs its podman/runsc as a dedicated
+    # qt3s-<silo> account; group qdistro-tier3s is the membership marker the
+    # spawn requires (accounts are created at first launch, never here).
+    groupadd --force qdistro-tier3s \
+        || { echo "ERROR: cannot create group qdistro-tier3s" >&2; exit 2; }
     # The root supervisor and the prerequisite screen. probe.sh compares the
     # provisioned wrapper and pin against the copies beside it, and refuses to run
     # as root unless this directory chain is root-owned.

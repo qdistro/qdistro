@@ -15,7 +15,8 @@
 # record -> require the recorded runsc state root (never "no container" from a
 # lost root) -> the token scope's state and, when live, its owner: BindsTo= must
 # be the recorded unit and ControlGroup the recorded cgroup (sol A-iii r4 P1)
-# -> podman (as the recorded admin) exists/inspect/stop/rm by container id,
+# -> podman (as the recorded SILO uid — Phase C2: containers live in the
+# silo's own store, so every podman query runs as silo_uid) exists/inspect/stop/rm by container id,
 # where a failed query is an error, never "absent" -> the scope again: wait
 # for it to empty, else systemctl stop it; every cgroup it can have must be
 # positively absent or empty by a complete recursive scan -> the recorded
@@ -199,7 +200,7 @@ unit_status() {
     return 0
 }
 A_UID=""; A_USER=""; A_HOME=""
-as_admin() {   # as_admin <seconds> <uid> cmd...: bounded, in its own scope, as the uid
+as_uid() {     # as_uid <seconds> <uid> cmd...: bounded, in its own scope, as the uid
     local t="$1" uid="$2"
     if [ "$uid" != "$A_UID" ]; then
         # NSS can hang while the token lock is held (fable A r3 P3-2): the
@@ -219,9 +220,28 @@ as_admin() {   # as_admin <seconds> <uid> cmd...: bounded, in its own scope, as 
     fi
     shift 2
     bounded --scope "$t" runuser -u "$A_USER" -- env -i PATH="$ADMIN_PATH" HOME="$A_HOME" \
-        USER="$A_USER" LOGNAME="$A_USER" XDG_RUNTIME_DIR="/run/user/$uid" "$@"
+        USER="$A_USER" LOGNAME="$A_USER" XDG_RUNTIME_DIR="$T/run/qdistro-tier3s-rt/$uid" "$@"
 }
-# pm_exists <admin uid> <container>: PM_RC = podman's own verdict on the
+# silo_uids: SILO_UIDS = every uid whose podman store can hold tier3s
+# containers — all qt3s-* accounts, plus the silo_uid recorded in existing
+# records (a record's containers must be reachable even if the account's
+# membership changed). Non-zero when the enumeration itself failed: callers
+# preserve, never sweep blind.
+silo_uids() {
+    SILO_UIDS=()
+    if [ -n "$T" ]; then SILO_UIDS=("$WANT_ADMIN"); return 0; fi
+    bounded "$GETENT_TMO" getent passwd 2>/dev/null \
+        || { say "silo account enumeration failed (NSS)"; return 1; }
+    local d
+    mapfile -t SILO_UIDS < <(
+        { printf '%s\n' "$OUT" | awk -F: '/^qt3s-/ {print $3}'
+          for d in "$CTL"/*/state; do
+              [ -f "$d" ] && [ ! -L "$d" ] || continue
+              sed -n 's/^silo_uid=//p' -- "$d" 2>/dev/null
+          done
+        } | awk '$0 ~ /^[0-9]+$/ && $0+0 >= 1000' | sort -un)
+}
+# pm_exists <silo uid> <container>: PM_RC = podman's own verdict on the
 # container (0 present, 1 absent, other = the query itself failed). The
 # verdict is an in-call PMRC=<rc> line the dropped-privilege command prints
 # after podman ran (astra+fable A r3 P1): the timeout→systemd-run→runuser
@@ -234,7 +254,7 @@ as_admin() {   # as_admin <seconds> <uid> cmd...: bounded, in its own scope, as 
 # content is a failed query. Non-zero return = failed query, never "absent".
 pm_exists() {
     PM_RC=""
-    as_admin "$PODMAN_TMO" "$1" sh -c 'podman container exists "$1"; printf "PMRC=%d\n" "$?"' sh "$2" \
+    as_uid "$PODMAN_TMO" "$1" sh -c 'podman container exists "$1"; printf "PMRC=%d\n" "$?"' sh "$2" \
         || return 1
     if printf 'PMRC=0\n' | cmp -s -- - "$OUTF"; then PM_RC=0
     elif printf 'PMRC=1\n' | cmp -s -- - "$OUTF"; then PM_RC=1
@@ -355,23 +375,30 @@ lock_token() {
 }
 unlock_token() { exec 8<&-; }
 
-vanished() {   # vanished <admin uid> <container>: podman definitively says it is gone now
+vanished() {   # vanished <silo uid> <container>: podman definitively says it is gone now
     pm_exists "$1" "$2" && [ "$PM_RC" = 1 ]
 }
 
-# labelled [token]: admin's containers carrying the token label (one token's
-# with an argument), from `podman ps --format json`, decoded and validated in
-# python3: admin-chosen label bytes are never split by a separator (fable A r1
-# P2-2). Sets L to records of 5 fields "<verdict> <token> <unit> <id> <name>",
-# verdict ok|badtoken|badunit|badid (an invalid field is "-"; the name is
-# display-only, sanitized). Non-zero on a failed listing or bad JSON.
+# labelled [token]: tier3s-labelled containers across every silo's podman
+# store (one token's with an argument), from `podman ps --format json`,
+# decoded and validated in python3: admin-chosen label bytes are never split
+# by a separator (fable A r1 P2-2). Sets L to records of 6 fields
+# "<verdict> <token> <unit> <id> <name> <silo uid>", verdict
+# ok|badtoken|badunit|badid (an invalid field is "-"; the name is
+# display-only, sanitized). Non-zero on a failed listing, a failed
+# enumeration or bad JSON — Phase C2: each silo store is separate, so a
+# store that cannot be listed is a failed query, not an empty one.
 labelled() {
+    local uid i
+    local -a LL
     L=()
-    as_admin "$PODMAN_TMO" "$WANT_ADMIN" podman ps -a --filter "label=qdistro_tier3s_token${1:+=$1}" --format json \
-        || return 1
-    mv -f -- "$OUTF" "$WORKDIR/ps.json" || return 1
-    CALL_IN="$WORKDIR/ps.json"
-    bounded 30 python3 -c '
+    silo_uids || return 1
+    for uid in "${SILO_UIDS[@]}"; do
+        as_uid "$PODMAN_TMO" "$uid" podman ps -a --filter "label=qdistro_tier3s_token${1:+=$1}" --format json \
+            || return 1
+        mv -f -- "$OUTF" "$WORKDIR/ps.json" || return 1
+        CALL_IN="$WORKDIR/ps.json"
+        bounded 30 python3 -c '
 import json, re, sys
 TOK, CID = re.compile(r"[0-9a-f]{32}"), re.compile(r"[0-9a-f]{64}")
 UNIT = re.compile(r"qdistro-tier3s-(silo|app)@[a-z0-9_-]+\.service")
@@ -401,7 +428,11 @@ for c in data:
             cid if ok(CID, cid) else "-", name]
 sys.stdout.write("".join(f + "\0" for f in out))
 ' || return 1
-    mapfile -d '' -t L < "$OUTF"
+        mapfile -d '' -t LL < "$OUTF"
+        for ((i = 0; i + 4 < ${#LL[@]}; i += 5)); do
+            L+=("${LL[@]:i:5}" "$uid")
+        done
+    done
 }
 
 declare -A S
@@ -419,9 +450,21 @@ read_record() {   # read_record <token>: validated fields into S, or return 1
     [ "${S[scope_unit]:-}" = "qdistro-tier3s-$tok.scope" ] || { say "$tok: bad scope_unit '${S[scope_unit]:-}'"; return 1; }
     [ "${S[per_launch_dir]:-}" = "/run/qdistro-tier3s/$tok" ] || { say "$tok: bad per_launch_dir"; return 1; }
     [ "${S[admin_uid]:-}" = "$WANT_ADMIN" ] || { say "$tok: recorded admin uid '${S[admin_uid]:-}' is not $WANT_ADMIN"; return 1; }
-    # D-A1: the root the wrapper derives for the recorded admin; root's own uid would derive another
-    [ "${S[runsc_root]:-}" = "/run/qdistro-tier3s-runsc/${S[admin_uid]}" ] \
-        || { say "$tok: recorded runsc_root '${S[runsc_root]:-}' is not the wrapper's root for uid ${S[admin_uid]}"; return 1; }
+    # C2: the podman caller's uid. Numeric, a regular uid, never admin's —
+    # a record claiming admin's uid would re-open the shared-identity model.
+    # (Test mode's identity seam makes the silo the caller, i.e. WANT_ADMIN.)
+    { [ -n "$T" ] && [ "${S[silo_uid]:-}" = "$WANT_ADMIN" ]; } \
+        || { [[ "${S[silo_uid]:-}" =~ ^[0-9]+$ ]] && [ "${S[silo_uid]}" -ge 1000 ] \
+            && [ "${S[silo_uid]}" != "$WANT_ADMIN" ]; } \
+        || { say "$tok: bad silo_uid '${S[silo_uid]:-}'"; return 1; }
+    [[ "${S[silo_user]:-}" =~ ^qt3s-[a-z0-9_-]+$ ]] || [ -n "$T" ] \
+        || { say "$tok: bad silo_user '${S[silo_user]:-}'"; return 1; }
+    [[ "${S[silo]:-}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || [ -n "$T" ] \
+        || { say "$tok: bad silo name '${S[silo]:-}'"; return 1; }
+    # D-A1: the root the wrapper derives for the recorded silo uid; root's own
+    # uid would derive another
+    [ "${S[runsc_root]:-}" = "/run/qdistro-tier3s-runsc/${S[silo_uid]}" ] \
+        || { say "$tok: recorded runsc_root '${S[runsc_root]:-}' is not the wrapper's root for uid ${S[silo_uid]}"; return 1; }
     [ -z "${S[scope_cgroup]:-}" ] || [[ "${S[scope_cgroup]}" == /*"/qdistro-tier3s-$tok.scope" ]] \
         || { say "$tok: bad scope_cgroup '${S[scope_cgroup]}'"; return 1; }
     return 0
@@ -463,9 +506,9 @@ scope_owned() {
 teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the token's lock)
     local tok="$1" dead="${2:-0}" root rc rel1 dir p c out id want
     read_record "$tok" || return 1
-    local admin="${S[admin_uid]}" ctr="${S[container]}" scope="${S[scope_unit]}"
+    local silo="${S[silo_uid]}" ctr="${S[container]}" scope="${S[scope_unit]}"
     root="$T${S[runsc_root]}"
-    if [ -L "$root" ] || [ ! -d "$root" ] || [ "$(stat -c '%u %a' -- "$root")" != "$admin 700" ]; then
+    if [ -L "$root" ] || [ ! -d "$root" ] || [ "$(stat -c '%u %a' -- "$root")" != "$silo 700" ]; then
         say "$tok: runsc state root $root is missing, replaced or loose; refusing to query or stop $ctr (record and scope preserved)"
         return 3
     fi
@@ -478,7 +521,7 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
     # kill them before the container so the sandboxed waypipe server's peer
     # goes first. Recorded (pid, starttime) only, like conmon/the Sentry.
     kill_bridge
-    if ! pm_exists "$admin" "$ctr"; then
+    if ! pm_exists "$silo" "$ctr"; then
         say "$tok: podman query failed for $ctr; NOT treating it as absent (record preserved)"; return 4
     fi
     case "$PM_RC" in
@@ -488,25 +531,25 @@ teardown() {   # teardown <token> [require a dead owner 0|1] (caller holds the t
             # stop is re-queried; only a definitive "absent" lets the teardown
             # go on. Stop and rm act on the inspected container ID, so a
             # same-named container created meanwhile is never touched.
-            if as_admin "$PODMAN_TMO" "$admin" podman container inspect \
+            if as_uid "$PODMAN_TMO" "$silo" podman container inspect \
                         --format '{{.Id}} {{index .Config.Labels "qdistro_tier3s_token"}}' "$ctr" \
                     && out_line; then
                 out="$OUT"
             else
-                vanished "$admin" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
+                vanished "$silo" "$ctr" || { say "$tok: podman inspect of $ctr failed (record preserved)"; return 4; }
                 say "$tok: $ctr vanished during the teardown (removed concurrently)"; out=""
             fi
             if [ -n "$out" ]; then
                 read -r id want <<< "$out"
                 [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { say "$tok: podman inspect of $ctr gave no container id (record preserved)"; return 4; }
                 [ "$want" = "$tok" ] || { say "$tok: container $ctr carries token '$want', not ours; refusing"; return 4; }
-                if ! as_admin $((GRACE + PODMAN_TMO)) "$admin" podman stop -t "$GRACE" "$id" >/dev/null; then
-                    vanished "$admin" "$id" || { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }
+                if ! as_uid $((GRACE + PODMAN_TMO)) "$silo" podman stop -t "$GRACE" "$id" >/dev/null; then
+                    vanished "$silo" "$id" || { say "$tok: podman stop $ctr failed (record preserved)"; return 5; }
                     say "$tok: $ctr vanished during podman stop (removed concurrently)"
                 fi
-                as_admin "$PODMAN_TMO" "$admin" podman rm -f --ignore "$id" >/dev/null \
+                as_uid "$PODMAN_TMO" "$silo" podman rm -f --ignore "$id" >/dev/null \
                     || { say "$tok: podman rm $ctr failed (record preserved)"; return 5; }
-                { pm_exists "$admin" "$id" && [ "$PM_RC" = 1 ]; } \
+                { pm_exists "$silo" "$id" && [ "$PM_RC" = 1 ]; } \
                     || { say "$tok: $ctr still present or query failed after stop (PMRC=${PM_RC:-none})"; return 5; }
             fi ;;
         1)  ;;
@@ -565,7 +608,7 @@ recover_incomplete() {   # recover_incomplete <token> (caller holds the token's 
     wait_empty "$CGROOT/system.slice/$scope" 1 \
         || { say "$tok: incomplete control record and $scope's cgroup holds processes or cannot be read; preserved"; return 1; }
     labelled "$tok" || { say "$tok: incomplete control record; podman listing failed; preserved"; return 1; }
-    n=$(( ${#L[@]} / 5 ))
+    n=$(( ${#L[@]} / 6 ))
     [ "$n" -eq 0 ] || { say "$tok: incomplete control record but $n container(s) carry its token; preserved"; return 1; }
     if [ -e "$LAUNCH_PARENT/$tok" ] || [ -L "$LAUNCH_PARENT/$tok" ]; then
         { [ -d "$LAUNCH_PARENT/$tok" ] && [ ! -L "$LAUNCH_PARENT/$tok" ]; } || { say "$tok: $LAUNCH_PARENT/$tok is not a directory"; return 8; }
@@ -768,8 +811,8 @@ case "$mode" in
         if past_deadline; then
             say "reap deadline reached; labelled containers and orphan per-launch dirs not processed"; exit 1; fi
         labelled || { say "podman listing of labelled containers FAILED; nothing reaped by label"; exit 1; }
-        for ((i = 0; i + 4 < ${#L[@]}; i += 5)); do
-            v="${L[i]}" tok="${L[i+1]}" u="${L[i+2]}" id="${L[i+3]}" name="${L[i+4]}"
+        for ((i = 0; i + 5 < ${#L[@]}; i += 6)); do
+            v="${L[i]}" tok="${L[i+1]}" u="${L[i+2]}" id="${L[i+3]}" name="${L[i+4]}" suid="${L[i+5]}"
             if [ "$v" = badtoken ]; then
                 say "labelled container $name has no valid qdistro_tier3s_token label; NOT reaping it"; fails=$((fails + 1)); continue; fi
             [ "$tok" != "$EXCEPT_TOK" ] || continue
@@ -793,9 +836,9 @@ case "$mode" in
             scope_owned "$tok" "$u" "" "$dead" || { say "$tok: NOT reaping $name"; fails=$((fails + 1)); continue; }
             [ "$dead" = 0 ] && why="is the spawn own unit" || why="not live"
             say "$tok: UNRECORDED labelled container $name (unit $u $why); reaping"
-            if ! as_admin $((GRACE + PODMAN_TMO)) "$WANT_ADMIN" podman rm -f -t "$GRACE" "$id" >/dev/null; then
+            if ! as_uid $((GRACE + PODMAN_TMO)) "$suid" podman rm -f -t "$GRACE" "$id" >/dev/null; then
                 say "$tok: podman rm -f $name failed"; fails=$((fails + 1)); continue; fi
-            { pm_exists "$WANT_ADMIN" "$id" && [ "$PM_RC" = 1 ]; } \
+            { pm_exists "$suid" "$id" && [ "$PM_RC" = 1 ]; } \
                 || { say "$tok: $name still present or query failed after rm (PMRC=${PM_RC:-none})"; fails=$((fails + 1)); continue; }
             orphan_dir "$tok" || fails=$((fails + 1))
         done

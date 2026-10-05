@@ -20,6 +20,11 @@
 SOCK=/run/qdistro/link/link.sock
 [ "$#" -ge 1 ] || { echo "qdistro-tier3s-entrypoint: no workload argv" >&2; exit 2; }
 [ -S "$SOCK" ] || { echo "qdistro-tier3s-entrypoint: GUI workload but no bridge socket at $SOCK" >&2; exit 2; }
-export XDG_RUNTIME_DIR=/run/user/1000 LIBGL_ALWAYS_SOFTWARE=1 \
+# Phase C2 model A: the guest uid IS the silo's host uid (keep-id, same
+# numeric), never a fixed 1000 — /run/user/<uid> is the tmpfs the spawn
+# mounts and the spawn's env already exports XDG_RUNTIME_DIR for it; only
+# fall back to uid-derived when unset.
+[ -n "${XDG_RUNTIME_DIR:-}" ] || XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR LIBGL_ALWAYS_SOFTWARE=1 \
     QT_QUICK_BACKEND=software GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland
 exec waypipe -s "$SOCK" -o --no-gpu server -- "$@"
