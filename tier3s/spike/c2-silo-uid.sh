@@ -43,25 +43,22 @@ ls -l "$(command -v newuidmap)" "$(command -v newgidmap)" 2>/dev/null
 prep_silo_dirs "$SILO_A"; prep_silo_dirs "$SILO_B"
 obs "podman unshare as $SILO_A (exercises newuidmap against /etc/subuid):"
 as_silo "$SILO_A" podman unshare cat /proc/self/uid_map 2>&1 | head -5
+obs "podman pull as $SILO_A into its OWN store (registry access is host-side):"
+as_silo "$SILO_A" podman pull -q registry.opensuse.org/opensuse/busybox:latest 2>&1 | tail -3 \
+    || as_silo "$SILO_A" podman pull -q docker.io/library/busybox:latest 2>&1 | tail -3
+obs "silo store after pull:"; as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}}' 2>&1 | head -4
 
 say "2. keep-id under a silo podman caller"
-# Does the silo even have a usable podman? unshare worked; now the real launch.
-IMG="$(as_admin podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 tier3s || true)"
-obs "workload image visible to admin: ${IMG:-<none — will need silo-visible store, see step 5>}"
+IMG="$(as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -1)"
+obs "image usable by $SILO_A: ${IMG:-<none — pull above failed>}"
+obs "workload image visible to admin: $(as_admin podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -3 | tr '\n' ' ')"
 # First measure what podman-as-silo does WITHOUT the image: pull failure mode
 # tells us whether the store path itself is reachable.
 SUID=$(id -u "$SILO_A")
 RROOT=/run/qdistro-tier3s-runsc/$SUID
 obs "silo runtime/runsc dirs:"; stat -c '%n %U:%G %a' "/run/qdistro-tier3s-rt/$SUID" "$RROOT"
 obs "silo's /run/user/$SUID exists? $([ -d /run/user/$SUID ] && echo yes || echo no — no logind session)"
-cat > "$WORK/c2-inner.sh" <<'EOF'
-id
-echo uid_map:; cat /proc/self/uid_map
-echo gid_map:; cat /proc/self/gid_map
-stat -c 'stat %n %u:%g %a' /tmp /run/user/1000 2>&1
-touch /run/user/1000/probe 2>&1 && echo "wrote /run/user/1000/probe"
-EOF
-chmod 0644 "$WORK/c2-inner.sh"
+INNER='id; echo uid_map:; cat /proc/self/uid_map; echo gid_map:; cat /proc/self/gid_map; stat -c "stat %n %u:%g %a" /tmp /run/user/1000 2>&1; touch /run/user/1000/probe 2>&1 && echo wrote-probe; sleep 45'
 if [ -n "$IMG" ]; then
     obs "B: launch under runsc as $SILO_A, keep-id --user 1000:1000"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
@@ -71,7 +68,7 @@ if [ -n "$IMG" ]; then
         --userns=keep-id --user 1000:1000 --read-only \
         --tmpfs /tmp:size=64m --tmpfs /run/user/1000:rw,U,mode=0700 \
         --network=none \
-        --name t3s-c2-keepid -d "$IMG" sh "$WORK/c2-inner.sh; sleep 45" 2>&1
+        --name t3s-c2-keepid -d "$IMG" sh -c "$INNER" 2>&1
     sleep 5
     obs "container processes on the host (uid should be $SUID=$SILO_A, not $ADMIN_UID):"
     for p in $(pgrep -f 't3s-c2-keepid|runsc' 2>/dev/null | head -15); do
@@ -128,20 +125,15 @@ fi
 
 say "5. image store readability for a distinct uid"
 obs "admin home traversal for $SILO_A: $(as_silo "$SILO_A" ls /home/$ADMIN/.local/share/containers 2>&1 | head -1)"
-# (a) baseline: per-silo podman load from the OCI archive (always works, costs disk)
-ARCH=$(ls /var/tmp/tier3s-*.oci.tar /root/tier3s-*.oci.tar 2>/dev/null | head -1)
-[ -z "$ARCH" ] && as_admin sh -c 'podman save --format oci-archive -o /var/tmp/t3s-image.oci.tar $(podman images -q --filter reference=*tier3s* | head -1)' 2>&1 | head -3 && ARCH=/var/tmp/t3s-image.oci.tar
-chmod 0644 "$ARCH" 2>/dev/null
-obs "archive: ${ARCH:-none} ($(stat -c %s "$ARCH" 2>/dev/null) bytes)"
-as_silo "$SILO_A" podman load -i "$ARCH" 2>&1 | tail -3
-obs "silo store now:"; as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}}' 2>&1 | head -4
-# (b) additionalimagestores: root builds a read-only store at a shared path,
-#     silo lists it via its own storage.conf. THE mapping question: store
-#     content created under root's/auto mapping must be traversable under
-#     the silo's distinct uid map.
+obs "5a. per-silo store already exercised above: silo pulled + keeps its own images"
+# (b) additionalimagestores: root populates a read-only store at a shared
+#     path; the silo lists it via its own storage.conf. THE mapping
+#     question from `03`: store content created under root's mapping must
+#     be traversable under the silo's distinct uid map.
 SHARED=/var/lib/qdistro-tier3s-store
 rm -rf "$SHARED"; install -d -m 0755 "$SHARED"
-podman --storage-driver=overlay --root "$SHARED" load -i "$ARCH" 2>&1 | tail -2
+podman --root "$SHARED" pull -q "${IMG##* }" 2>&1 | tail -2 \
+    || podman --root "$SHARED" pull -q registry.opensuse.org/opensuse/busybox:latest 2>&1 | tail -2
 obs "shared store perms:"; find "$SHARED" -maxdepth 2 | head -6; du -sh "$SHARED"
 install -d -o "$SILO_A" -g "$SILO_A" -m 0700 /home/$SILO_A/.config /home/$SILO_A/.config/containers
 printf '[storage]\ndriver="overlay"\n[storage.options]\nadditionalimagestores=["%s"]\n' "$SHARED" \
