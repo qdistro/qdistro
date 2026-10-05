@@ -437,6 +437,7 @@ class MainWindow(QMainWindow):
 
         self.editor = MarkdownEditor(self)
         self.editor.linkActivated.connect(self._on_link_activated)
+        self.editor.zoomStepRequested.connect(self._zoom_step)
         self.editor.dirtyChanged.connect(self._on_dirty_changed)
         self.editor.imageDropped.connect(self._on_image_dropped)
         self.editor.imagePasted.connect(self._on_image_pasted)
@@ -827,6 +828,20 @@ class MainWindow(QMainWindow):
         self.act_toggle_spell.setEnabled(HAS_ENCHANT)
         self.act_toggle_spell.triggered.connect(self._toggle_spell_check)
         m_view.addAction(self.act_toggle_spell)
+        m_view.addSeparator()
+        # Editor zoom: view-only document font scale (never saved Markdown).
+        self.act_zoom_in = QAction("Zoom &In", self)
+        self.act_zoom_in.setShortcuts([QKeySequence("Ctrl+="), QKeySequence("Ctrl++")])
+        self.act_zoom_in.triggered.connect(lambda: self._zoom_step(1))
+        self.act_zoom_out = QAction("Zoom &Out", self)
+        self.act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
+        self.act_zoom_out.triggered.connect(lambda: self._zoom_step(-1))
+        self.act_zoom_reset = QAction("&Reset Zoom", self)
+        self.act_zoom_reset.setShortcut(QKeySequence("Ctrl+0"))
+        self.act_zoom_reset.triggered.connect(lambda: self.set_editor_zoom(100))
+        for act in (self.act_zoom_in, self.act_zoom_out, self.act_zoom_reset):
+            act.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            m_view.addAction(act)
         # Persist preference
         spell_pref = self._settings.value("spell_enabled", False, type=bool)
         if HAS_ENCHANT and bool(spell_pref):
@@ -1574,6 +1589,7 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QVBoxLayout
         sec_editor = MarkdownEditor(self)
         sec_editor.linkActivated.connect(self._on_link_activated)
+        sec_editor.zoomStepRequested.connect(self._zoom_step)
         sec_editor.autoSaveRequested.connect(self._auto_save)
         pane = QWidget(self)
         pv = QVBoxLayout(pane)
@@ -2608,6 +2624,22 @@ class MainWindow(QMainWindow):
         mode = load_theme_mode(self._settings)
         self._set_appearance_checks(mode)
         self._apply_appearance(mode, persist=False)
+
+    def _zoom_step(self, direction: int) -> None:
+        from .appearance import ZOOM_STEP_PERCENT, load_editor_zoom
+
+        self.set_editor_zoom(load_editor_zoom(self._settings) + direction * ZOOM_STEP_PERCENT)
+
+    def set_editor_zoom(self, percent: int) -> int:
+        """Persist the editor zoom and repaint every editor pane (view only)."""
+        from .appearance import save_editor_zoom
+        from .editor import MarkdownEditor
+
+        pct = save_editor_zoom(self._settings, percent)
+        for editor in self.findChildren(MarkdownEditor):
+            editor.apply_content_presentation()
+        self.statusBar().showMessage(f"Zoom {pct}%", 2000)
+        return pct
 
     def apply_presentation_update(self) -> None:
         """Refresh chrome after a shared appearance change.

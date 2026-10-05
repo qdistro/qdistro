@@ -442,6 +442,13 @@ No GObject, no GTK, no `pyxdg`.
   Inherited desktop fonts paint via `ContentPresentationHighlighter`
   (merged into `SpellHighlighter` when spell is on). Do not restyle a live
   editor by mutating char formats. Export/print use `legacy_content_style()`.
+- **Editor zoom** (View → Zoom In/Out/Reset, Ctrl+= / Ctrl+- / Ctrl+0,
+  Ctrl+wheel; `QSettings["editor/zoom_percent"]`, 50–300, one value for
+  every pane) is applied only in `MarkdownEditor.apply_content_presentation`
+  via `content_style.zoomed()`. Never put it in `resolve_content_style()`:
+  that also bakes parse-time char formats, so zoom would reach copies and
+  the stored sizes. `wheelEvent` swallows Ctrl+wheel because QTextEdit's
+  built-in zoom changes only the widget font.
 - **Empty paragraphs.** `QTextCursor.insertTable` leaves an empty block
   before the table. The serializer skips any block whose inline
   rendering is empty rather than emitting a stray blank line.

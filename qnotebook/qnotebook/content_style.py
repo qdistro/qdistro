@@ -151,6 +151,18 @@ def document_palette() -> DocumentPalette:
     )
 
 
+def zoomed(style: ContentStyle, percent: int) -> ContentStyle:
+    """Scale body and code sizes for screen only (headings follow the body)."""
+    if percent == 100:
+        return style
+    factor = percent / 100.0
+    return replace(
+        style,
+        body_point_size=round(style.body_point_size * factor, 2),
+        code_point_size=round(style.code_point_size * factor, 2),
+    )
+
+
 def document_palette_colors() -> tuple[str | None, str | None]:
     """Code-background and external-link colors (compatibility tuple)."""
     pal = document_palette()
