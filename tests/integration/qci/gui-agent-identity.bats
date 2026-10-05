@@ -76,9 +76,11 @@ teardown() {
     # version key out, not make the recorder return non-zero.
     local bin="$BATS_TEST_TMPDIR/bin"
     mkdir -p "$bin"
-    # every tool from /usr/bin except the agent CLIs, wherever this host keeps them
-    local t; for t in /usr/bin/*; do
-        case "${t##*/}" in codex|claude) ;; *) ln -s "$t" "$bin/${t##*/}" ;; esac
+    # only the tools sourcing gui.sh and the recorder need, resolved from this
+    # environment; codex and claude are absent by construction
+    local t path; for t in bash dirname grep sed tr head timeout; do
+        path=$(type -P "$t") || { echo "test needs $t on PATH" >&2; return 1; }
+        ln -s "$path" "$bin/$t"
     done
     for cli in codex claude; do
         : > "$KV_OUT"
