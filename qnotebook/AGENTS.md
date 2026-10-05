@@ -443,7 +443,8 @@ No GObject, no GTK, no `pyxdg`.
   (merged into `SpellHighlighter` when spell is on). Do not restyle a live
   editor by mutating char formats. Export/print use `legacy_content_style()`.
 - **Editor zoom** (View → Zoom In/Out/Reset, Ctrl+= / Ctrl+- / Ctrl+0,
-  Ctrl+wheel; `QSettings["editor/zoom_percent"]`, 50–300, one value for
+  Ctrl+wheel; one shortcut per action, see the Settings table note in
+  `window.py`; `QSettings["editor/zoom_percent"]`, 50–300, one value for
   every pane) is applied only in `MarkdownEditor.apply_content_presentation`
   via `content_style.zoomed()`. Never put it in `resolve_content_style()`:
   that also bakes parse-time char formats, so zoom would reach copies and

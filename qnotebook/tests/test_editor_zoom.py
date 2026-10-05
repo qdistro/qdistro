@@ -194,3 +194,77 @@ def test_pdf_export_ignores_zoom(qapp, tmp_path, tmp_notebook, qtbot):
     export_page_pdf(win.notebook, win._current_page, zoomed_pdf)
     win.close()
     assert _pdf_normalized(zoomed_pdf) == _pdf_normalized(base_pdf)
+
+
+def _focused_window(tmp_notebook, qtbot):
+    win = _window(tmp_notebook, qtbot)
+    win.show()
+    qtbot.waitExposed(win)
+    win.editor.setFocus()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is win.editor, timeout=2000)
+    return win
+
+
+def test_zoom_shortcuts_survive_settings_apply_and_override(qapp, tmp_notebook, qtbot):
+    from qnotebook.settings_dialog import SettingsDialog
+
+    win = _focused_window(tmp_notebook, qtbot)
+    # Each zoom action has exactly the one shortcut the Settings table shows.
+    for act in (win.act_zoom_in, win.act_zoom_out, win.act_zoom_reset):
+        assert len(act.shortcuts()) == 1
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    dlg._apply()  # unrelated Apply re-writes every row
+    dlg.close()
+    win.editor.setFocus()
+    qtbot.keyClick(win.editor, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+    assert load_editor_zoom() == 110
+
+    # A custom override replaces the binding and is reachable from the editor.
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    row = next(
+        r for r in range(dlg._shortcut_table.rowCount())
+        if dlg._shortcut_table.item(r, 0).text() == "Zoom In"
+    )
+    assert dlg._shortcut_table.item(row, 1).text() == "Ctrl+="
+    dlg._shortcut_table.item(row, 1).setText("Ctrl+F11")
+    assert dlg._shortcut_conflicts["Zoom In"] is False
+    dlg._apply()
+    dlg.close()
+    win.editor.setFocus()
+    qtbot.keyClick(win.editor, Qt.Key.Key_F11, Qt.KeyboardModifier.ControlModifier)
+    assert load_editor_zoom() == 120
+    qtbot.keyClick(win.editor, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+    assert load_editor_zoom() == 120
+    win.close()
+
+
+def test_zoom_survives_appearance_update(qapp, tmp_path, tmp_notebook, qtbot, monkeypatch):
+    from qdistro_presentation.publish import write_snapshot
+    from qnotebook.content_style import desktop_content_style
+    from qnotebook.theme import current_controller
+
+    snap_a, snap_b = _snaps()
+    _attach(qapp, tmp_path, monkeypatch, snap_a)
+    save_use_desktop_document_fonts(QSettings("qnotebook", "qnotebook"), True)
+    win = _window(tmp_notebook, qtbot)
+    ed = win.editor
+    win.set_editor_zoom(150)
+    authored = ed.markdown()
+
+    # A shared change repaints from the unzoomed base: zoom applied once.
+    write_snapshot(str(tmp_path), snap_b, require_unwritable_dirs=False, skip_unchanged=False)
+    qtbot.waitUntil(lambda: current_controller().state.generation == snap_b.generation, timeout=5000)
+    want = desktop_content_style().body_point_size * 1.5
+    qtbot.waitUntil(
+        lambda: abs(_rendered(ed, "Body ").fontPointSize() - want) < 0.05, timeout=5000
+    )
+    fmt = _rendered(ed, "Body ")
+    assert snap_b.fonts.ui_family in list(fmt.fontFamilies() or []) + [fmt.fontFamily()]
+    # An explicit presentation refresh does not double-apply it.
+    win.apply_presentation_update()
+    assert _rendered(ed, "Body ").fontPointSize() == pytest.approx(want, abs=0.05)
+    assert ed.markdown() == authored
+    assert not ed.is_dirty()
+    win.close()

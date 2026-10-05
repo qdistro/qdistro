@@ -831,7 +831,10 @@ class MainWindow(QMainWindow):
         m_view.addSeparator()
         # Editor zoom: view-only document font scale (never saved Markdown).
         self.act_zoom_in = QAction("Zoom &In", self)
-        self.act_zoom_in.setShortcuts([QKeySequence("Ctrl+="), QKeySequence("Ctrl++")])
+        # One shortcut per action: the Settings shortcut table edits and
+        # re-applies only the primary one, so a second binding would be lost
+        # on any Apply and invisible to its conflict check.
+        self.act_zoom_in.setShortcut(QKeySequence("Ctrl+="))
         self.act_zoom_in.triggered.connect(lambda: self._zoom_step(1))
         self.act_zoom_out = QAction("Zoom &Out", self)
         self.act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
