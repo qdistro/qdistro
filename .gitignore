@@ -77,3 +77,6 @@ tests/integration/s*.sh
 # otherwise stage them as embedded repositories.
 .worktrees/
 .claude/
+
+# Container host-gate npm download cache
+ci/.cache/

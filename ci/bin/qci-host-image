@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Print the content-keyed host toolchain image; all diagnostics go to stderr.
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+. "$repo/scripts/vm/lib/test-substrate.sh"
+qdistro_load_test_substrate
+. "$repo/scripts/vm/lib/podman-user-bus.sh"
+qdistro_podman_user_bus
+command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2; exit 2; }
+[ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || {
+    echo 'ERROR: Podman must run rootless' >&2; exit 2;
+}
+offline() { case "${QCI_OFFLINE:-0}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
+base=${QCI_PODMAN_IMAGE:-registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT}
+if ! podman image exists "$base"; then
+    offline && { echo "ERROR: missing base $base (QCI_OFFLINE=1)" >&2; exit 3; }
+    podman pull "$base" >&2
+fi
+base_id=$(podman image inspect "$base" --format '{{.Id}}')
+cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}
+mkdir -p "$cache/host-podman"
+work=$(mktemp -d "$cache/host-podman/.recipe.XXXXXXXX")
+trap 'rm -rf "$work"' EXIT
+cp "$repo/ci/containers/Containerfile.host" "$repo/ci/containers/install-host-deps.sh" \
+    "$repo/ci/containers/host-packages.txt" "$work/"
+cp "$repo/scripts/vm/container-native-deps.sh" "$repo/qdterm/util/build-sip.sh" "$work/"
+mkdir "$work/qtermwidget-pyqt"
+# Copy source only; local SIP build outputs must never enter the recipe.
+(cd "$repo/qdterm/qtermwidget-pyqt"
+ while IFS= read -r -d '' path; do
+     cp --parents "$path" "$work/qtermwidget-pyqt/"
+ done < <(git ls-files -z --cached --others --exclude-standard))
+recipe=$(cd "$work" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+key=$(printf '%s\n' "$base_id" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$recipe" | sha256sum | cut -d' ' -f1)
+image="localhost/qdistro/host-builder:$key"
+exec 9>"$cache/host-podman/.build.lock"
+flock 9
+if podman image exists "$image"; then
+    echo "[host-podman] image cache hit $image" >&2
+else
+    offline && { echo "ERROR: missing host image $image (QCI_OFFLINE=1)" >&2; exit 3; }
+    rpm_cache="$cache/podman-rpm/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH/packages"
+    mkdir -p "$rpm_cache"
+    # Shared cache: use shared relabel only when SELinux actually enforces.
+    label=''
+    [ "$(cat /sys/fs/selinux/enforce 2>/dev/null || true)" != 1 ] || label=,z
+    echo "[host-podman] image cache miss $image" >&2
+    podman build --pull=never --layers --volume "$rpm_cache:/var/cache/zypp/packages:rw$label" \
+        --build-arg "BASE_IMAGE=$base_id" --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
+        --file "$work/Containerfile.host" --tag "$image" "$work" >&2
+fi
+[ "$(podman image inspect "$image" --format '{{index .Labels "org.qdistro.test-snapshot"}}')" = "$QDISTRO_SUBSTRATE_SNAPSHOT" ] || {
+    echo 'ERROR: host image snapshot mismatch' >&2; exit 3;
+}
+printf '%s\n' "$image"

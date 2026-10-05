@@ -55,21 +55,6 @@ gate_preflight() {
             record_result preflight "$label" skip 0 pass tool "$report" "optional tool missing; related gate will fail or skip"
         fi
     }
-    # Host-test deps are not part of the base install. Surface them up front (as
-    # skip/WARN, never failing preflight) so a missing package is visible at the
-    # start of a run instead of failing deep in the host gate. Install hint
-    # points at qci-host-deps. See README "Host test dependencies".
-    check_host_dep() {
-        local label=$1 cmd=$2
-        if bash -lc "$(qci_login_cmd "$cmd")" >/dev/null 2>&1; then
-            printf 'OK\t%s\n' "$label" >> "$report"
-            record_result preflight "$label" pass 0 pass tool "$report" ""
-        else
-            printf 'WARN\t%s\n' "$label" >> "$report"
-            record_result preflight "$label" skip 0 pass tool "$report" "missing host-test dep; run qdistro/ci/bin/qci-host-deps --install"
-        fi
-    }
-
     # Disk-space floor (H7): record measured free GiB and fail below the floor.
     check_disk_space() {
         local label=$1 free=$2 floor=$3 verdict note
@@ -118,6 +103,7 @@ gate_preflight() {
     fi
     check_required "python3" "command -v python3"
     check_required "git" "command -v git"
+    check_required "podman" "command -v podman"
     check_required "bash" "command -v bash"
     check_required "virsh" "command -v virsh"
     check_required "libvirt session" "virsh -c qemu:///session list >/dev/null"
@@ -186,17 +172,7 @@ gate_preflight() {
     check_disk_space "images volume ($img_dir)" "$(fs_free_gib "$img_ref")" "$min_free"
     check_disk_space "run dir ($RDIR)" "$(fs_free_gib "$RDIR")" "$min_free"
     check_optional "bats" "command -v bats"
-    check_optional "ruff" "command -v ruff"
-    check_optional "mypy" "command -v mypy"
-    check_optional "meson" "command -v meson"
-    check_optional "ninja" "command -v ninja"
-    check_optional "pkg-config" "command -v pkg-config"
-    check_optional "npm" "command -v npm"
     check_optional "QCI_AGENT_CMD" "test -n \"\${QCI_AGENT_CMD:-}\""
-    check_host_dep "host-dep tomli_w (qfileman)" "python3 -c 'import tomli_w'"
-    check_host_dep "host-dep libevdev (qdwin)" "pkg-config --exists libevdev"
-    check_host_dep "host-dep pango/pangocairo (qdwin)" "pkg-config --exists pango pangocairo"
-    check_host_dep "host-dep jeepney (qdbrowser)" "python3 -c 'import jeepney'"
     {
         echo
         echo "## libvirt domains"

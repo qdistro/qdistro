@@ -373,6 +373,18 @@ gate_host() {
     gate_selftest; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
+    host_container_gate; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    RUN_STEP_TIMEOUT="$_saved_step_to"
+    return "$rc"
+}
+
+# Internal row implementation, also callable by contract tests with run_logged
+# stubbed. There is intentionally no public on-host execution switch.
+host_container_rows() {
+    local rc=$EXIT_OK c step_rc
+    local _saved_step_to="${RUN_STEP_TIMEOUT:-0}"
+    RUN_STEP_TIMEOUT="${QCI_HOST_STEP_TIMEOUT:-600}"
     # BLOCKING static lint + narrow type check, before the (slow) test suites so
     # a lint break is reported fast. Both use the shared profiles in ci/ and are
     # calibrated green on current main. Run from $QDISTRO_REPO (the actual

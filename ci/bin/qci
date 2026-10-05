@@ -47,6 +47,7 @@ QCI_LIB="$QCI_DIR/lib"
 . "$QCI_LIB/usage.sh"         # usage()
 . "$QCI_LIB/assert.sh"        # precondition helpers
 . "$QCI_LIB/run.sh"           # init_run/finish_run/abort_run/record_*/run_logged + traps
+. "$QCI_LIB/host-container.sh" # rootless host build/test launcher
 . "$QCI_LIB/vm.sh"            # acquire/release VM, golden disks, artifacts
 . "$QCI_LIB/affected.sh"      # registry + changed-path -> gate selection
 . "$QCI_LIB/edit_guard.sh"    # protected-path edit guard
