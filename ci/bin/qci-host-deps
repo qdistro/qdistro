@@ -56,11 +56,16 @@ manual=()        # deps we can detect but not auto-install on this host
 if have_py tomli_w; then ok+=("tomli_w (qfileman)")
 else missing+=("tomli_w (qfileman) -> pip install tomli_w"); pip_pkgs+=("tomli_w>=1.0"); fi
 
+# openSUSE names Python packages per interpreter (python313-...), as the
+# qdbrowser and VM installers do; target the python3 the host gate runs.
+zyp_py=$(python3 -c 'import sys; print("python%d%d" % sys.version_info[:2])' 2>/dev/null || true)
+
 # --- qdbrowser: jeepney (pure-Python; distro pkg or pip) ---
 if have_py jeepney; then ok+=("jeepney (qdbrowser)")
 else
     case "$PM" in
-        zypper|apt) missing+=("jeepney (qdbrowser) -> $PM python3-jeepney"); distro_pkgs+=("python3-jeepney") ;;
+        zypper)     missing+=("jeepney (qdbrowser) -> zypper ${zyp_py:-python3}-jeepney"); distro_pkgs+=("${zyp_py:-python3}-jeepney") ;;
+        apt)        missing+=("jeepney (qdbrowser) -> apt python3-jeepney"); distro_pkgs+=("python3-jeepney") ;;
         *)          missing+=("jeepney (qdbrowser) -> pip install jeepney"); pip_pkgs+=("jeepney") ;;
     esac
 fi
@@ -108,7 +113,6 @@ have_qt_tool() {
     done
     command -v "$1" >/dev/null 2>&1
 }
-zyp_py=$(python3 -c 'import sys; print("python%d%d" % sys.version_info[:2])' 2>/dev/null || true)
 while read -r kind probe zyp apt who; do
     case "$kind" in
         py)  have_py "${probe//,/, }" && { ok+=("$probe ($who)"); continue; } ;;
@@ -117,8 +121,6 @@ while read -r kind probe zyp apt who; do
         bin) command -v "$probe" >/dev/null 2>&1 && { ok+=("$probe ($who)"); continue; } ;;
         qt)  have_qt_tool "$probe" && { ok+=("$probe ($who)"); continue; } ;;
     esac
-    # openSUSE names Python packages per interpreter (python313-...), as the
-    # qdbrowser and VM installers do; target the python3 the host gate runs.
     [ "$kind" = py ] && [ -n "$zyp_py" ] && zyp="${zyp/#python3-/$zyp_py-}"
     case "$PM" in
         zypper) missing+=("$probe ($who) -> zypper $zyp"); distro_pkgs+=("$zyp") ;;

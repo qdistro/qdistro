@@ -382,8 +382,8 @@ runtime dependency in `qdbrowser/pyproject.toml`):
 # Ubuntu
 sudo apt install python3-jeepney
 
-# openSUSE Tumbleweed
-sudo zypper install python3-jeepney
+# openSUSE Tumbleweed (package named for the python3 in use)
+sudo zypper install python313-jeepney
 ```
 
 **qdshell QML tests** require the `QtQml.WorkerScript` QML module:
