@@ -96,6 +96,35 @@ elif ! command -v pkg-config >/dev/null 2>&1; then
     missing+=("pkg-config (needed to check qdwin deps) -> install pkgconf/pkg-config")
 fi
 
+# --- other host-gate steps: build deps and test imports outside the symbols test ---
+# One row per probe: <kind> <probe> <zypper pkg> <apt pkg> <who needs it>.
+# kind py = `python3 -c "import <probe>"`; pc = pkg-config module; bin = command.
+while read -r kind probe zyp apt who; do
+    case "$kind" in
+        py)  have_py "$probe" && { ok+=("$probe ($who)"); continue; } ;;
+        pc)  command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "$probe" 2>/dev/null \
+                 && { ok+=("$probe devel ($who)"); continue; } ;;
+        bin) command -v "$probe" >/dev/null 2>&1 && { ok+=("$probe ($who)"); continue; } ;;
+    esac
+    case "$PM" in
+        zypper) missing+=("$probe ($who) -> zypper $zyp"); distro_pkgs+=("$zyp") ;;
+        apt)    missing+=("$probe ($who) -> apt $apt");    distro_pkgs+=("$apt") ;;
+        *)      missing+=("$probe ($who) -> install manually"); manual+=("$probe") ;;
+    esac
+done <<'DEPS'
+py  yaml                     python3-PyYAML          python3-yaml                qdistro-pytest
+py  numpy                    python3-numpy           python3-numpy               qdistro-pytest
+py  hypothesis               python3-hypothesis      python3-hypothesis          qdistro-pytest
+py  pytest_cov               python3-pytest-cov      python3-pytest-cov          qdistro-coverage-floor
+py  mistune                  python3-mistune         python3-mistune             qnotebook-pytest
+py  PyQt6.QtWebEngineWidgets python3-PyQt6-WebEngine python3-pyqt6.qtwebengine   qdbrowser-pytest
+pc  xcursor                  libXcursor-devel        libxcursor-dev              qdwin-meson
+pc  Qt6Qml                   qt6-declarative-devel   qt6-declarative-dev         qdshell-local
+pc  Qt6Network               qt6-base-devel          qt6-base-dev                qdshell-local
+pc  Qt6QuickTest             qt6-quicktest-devel     qt6-declarative-dev         qdshell-local
+bin weston                   weston                  weston                      qdwin-vendored-libweston-inert-relptr
+DEPS
+
 # De-duplicate the install lists (pango/pangocairo map to the same package, etc.).
 mapfile -t distro_pkgs < <(printf '%s\n' "${distro_pkgs[@]}" | awk 'NF && !seen[$0]++')
 mapfile -t pip_pkgs    < <(printf '%s\n' "${pip_pkgs[@]}"    | awk 'NF && !seen[$0]++')

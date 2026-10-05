@@ -415,6 +415,12 @@ packaged by most distros):
 pip install tomli_w
 ```
 
+**Other host-gate steps** need test imports and build deps that `qci-host-deps`
+also checks: PyYAML, numpy, hypothesis and pytest-cov (qdistro unit tests and
+coverage floor), mistune (qnotebook), PyQt6-WebEngine (qdbrowser), libXcursor
+devel (qdwin meson build), Qt 6 base/declarative/quicktest devel (qdshell build
+and qmltest), and the `weston` binary (the inert-relptr libweston test).
+
 **qdwin vendored-libweston symbols test** requires the `libevdev` and `pango`
 (incl. `pangocairo`) development packages:
 
