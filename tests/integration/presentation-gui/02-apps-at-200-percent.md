@@ -10,7 +10,8 @@ Display (the only client qdwin lets change output scale), a Qt app's
 × metrics.uiScale`), not multiplied by the device scale. Running apps at
 200% still follow a dark→light switch without relaunch, and their chrome is
 legible (text at a normal visual size relative to the shell bar, not
-doubled and not tiny). The scale is restored to 100% at the end.
+doubled and not tiny). The scale is restored to 100% at the end (by a
+compositor restart, see Step 4).
 
 Machine oracles: `pres_output_scale`, the `presentation-scale.py` PASS lines,
 `pres_snapshot`, `pres_app_pids`. Visual oracle: the frames.
@@ -127,29 +128,41 @@ front with LIGHT chrome and legible text.
 
 ### Step 4 — restore 100%
 
-Repeat Step 1 choosing `100%` (Apply, then the `pres_click_keep_changes`
-block at once), then:
+The restore is NOT driven through Settings: at 200% on this VM's 1280x800
+output the logical screen is 640x400, and the Settings > Display page is
+wider than that (the Scale combos are clipped off the right edge; recorded
+in `09-leftovers-2026-10-04.md`). The Settings path to 200% is already
+covered by Step 1. qdwin does not persist output scale, so restarting the
+compositor (qdshell is `PartOf=` it and follows) brings Virtual-1 back to
+its configured 100%:
 
 ```bash
-sleep 17
+pres_kill_apps
+pres_admin "systemctl --user restart qdwin-compositor.service"
+for i in $(seq 30); do [ "$(pres_output_scale)" = 1 ] && break; sleep 2; done
+sleep 5
 echo "scale-restored=$(pres_output_scale)"
+qdwin_session_healthy && echo session-healthy
 ```
 
-**Assert (4.1):** `scale-restored=1`.
+**Assert (4.1):** `scale-restored=1` and `session-healthy` printed.
 
 ## Cleanup
 
 ```bash
 pres_kill_apps
+if [ "$(pres_output_scale)" != 1 ]; then
+    pres_admin "systemctl --user restart qdwin-compositor.service"
+    for i in $(seq 30); do [ "$(pres_output_scale)" = 1 ] && break; sleep 2; done
+    sleep 5
+fi
 pres_qs_ipc darkMode setDark >/dev/null
 echo "scale-cleanup=$(pres_output_scale)"
 ```
 
-If `scale-cleanup` is not `1` (Step 4 did not run or did not stick), restore
-it now exactly as in Step 4 (Settings > Display, `100%`, Apply,
-`pres_click_keep_changes`), wait 17 s, and print `pres_output_scale` again. If it is still not
-`1`, record the scenario as ERROR with "cleanup could not restore 100%"
-regardless of the step verdicts: a VM left at 200% must not look clean.
+If `scale-cleanup` is not `1`, record the scenario as ERROR with "cleanup
+could not restore 100%" regardless of the step verdicts: a VM left at 200%
+must not look clean.
 
 ## Pass criteria
 
