@@ -77,8 +77,11 @@ class MarkdownEditor(QTextEdit):
     fileDropped = pyqtSignal(str)  # absolute source path (non-image)
     autoSaveRequested = pyqtSignal()
     escapePressed = pyqtSignal()
+    zoomStepRequested = pyqtSignal(int)  # +1 / -1 (Ctrl+wheel)
 
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+    _WHEEL_NOTCH = 120  # angleDelta units per zoom step
+    _WHEEL_PIXELS = 60  # pixelDelta per zoom step (touchpads)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -288,6 +291,33 @@ class MarkdownEditor(QTextEdit):
                 cur.insertText("]]")
         self._completer_mode = None
 
+    def wheelEvent(self, e) -> None:  # noqa: N802 (Qt override)
+        # QTextEdit's own Ctrl+wheel zoom changes the widget font only, which
+        # explicit fragment sizes ignore; route it to the editor zoom instead.
+        # Wheels report angleDelta (120 per notch, less on high-resolution
+        # wheels); touchpads may report only pixelDelta. Both are converted
+        # to fractions of one zoom step before accumulating, so a mix of the
+        # two neither steps early nor late.
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            angle = e.angleDelta().y()
+            if angle:
+                delta = angle / self._WHEEL_NOTCH
+            else:
+                delta = e.pixelDelta().y() / self._WHEEL_PIXELS
+            if delta:
+                acc = getattr(self, "_zoom_wheel_acc", 0.0)
+                if (acc > 0) != (delta > 0):
+                    acc = 0.0  # direction changed
+                acc += delta
+                while abs(acc) >= 1.0:
+                    step = 1 if acc > 0 else -1
+                    acc -= step
+                    self.zoomStepRequested.emit(step)
+                self._zoom_wheel_acc = acc
+            e.accept()
+            return
+        super().wheelEvent(e)
+
     def keyPressEvent(self, e) -> None:  # noqa: N802
         popup_visible = (
             self._completer is not None
@@ -450,11 +480,17 @@ class MarkdownEditor(QTextEdit):
 
     def apply_content_presentation(self) -> None:
         """Paint inherited document fonts without dirtying or touching undo."""
-        from .content_style import resolve_content_style
+        from .appearance import load_editor_zoom
+        from .content_style import resolve_content_style, zoomed
 
-        style = resolve_content_style()
+        percent = load_editor_zoom()
+        base = resolve_content_style()
+        style = zoomed(base, percent)
         self._content_style = style
-        self.setFont(style.body_qfont() if style.inherit_desktop else native_body_font())
+        font = base.body_qfont() if base.inherit_desktop else native_body_font()
+        if percent != 100 and font.pointSizeF() > 0:
+            font.setPointSizeF(round(font.pointSizeF() * percent / 100.0, 2))
+        self.setFont(font)
         spell = getattr(self, "_spell_highlighter", None)
         if spell is not None:
             set_style = getattr(spell, "set_content_style", None)
