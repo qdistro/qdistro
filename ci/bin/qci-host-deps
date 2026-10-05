@@ -108,6 +108,7 @@ have_qt_tool() {
     done
     command -v "$1" >/dev/null 2>&1
 }
+zyp_py=$(python3 -c 'import sys; print("python%d%d" % sys.version_info[:2])' 2>/dev/null || true)
 while read -r kind probe zyp apt who; do
     case "$kind" in
         py)  have_py "${probe//,/, }" && { ok+=("$probe ($who)"); continue; } ;;
@@ -116,6 +117,9 @@ while read -r kind probe zyp apt who; do
         bin) command -v "$probe" >/dev/null 2>&1 && { ok+=("$probe ($who)"); continue; } ;;
         qt)  have_qt_tool "$probe" && { ok+=("$probe ($who)"); continue; } ;;
     esac
+    # openSUSE names Python packages per interpreter (python313-...), as the
+    # qdbrowser and VM installers do; target the python3 the host gate runs.
+    [ "$kind" = py ] && [ -n "$zyp_py" ] && zyp="${zyp/#python3-/$zyp_py-}"
     case "$PM" in
         zypper) missing+=("$probe ($who) -> zypper $zyp"); distro_pkgs+=("$zyp") ;;
         apt)    missing+=("$probe ($who) -> apt $apt");    distro_pkgs+=("$apt") ;;
