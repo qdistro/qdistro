@@ -41,6 +41,11 @@ teardown_file() {
     assert_output_contains "PASS: disposable: in-container SDK reads the managed snapshot as admin uid 1000"
     assert_output_contains "PASS: disposable: in-container inotify watch on the directory and current.json"
     assert_output_contains "PASS: disposable: running in-container controller followed a host publish"
+    for label in named disposable; do
+        assert_output_contains "PASS: $label: inner weston up and qfileman running"
+        assert_output_contains "PASS: $label: inner weston and qfileman still running after checks"
+    done
+    assert_output_contains "PASS: shared host socket, library and presentation labels unchanged"
     assert_output_contains "PASS: live named and disposable presentation binds held"
 }
 

@@ -21,6 +21,8 @@ teardown_file() {
         || fail_loud "VM is not enforcing (getenforce: $output)"
     vm_run "semodule -l | grep -x qdistro_presentation"
     assert_success
+    vm_run "semodule -l | grep -x qdistro_tier2"
+    assert_success
     vm_run "stat -c %C /var/lib/qdistro/presentation"
     assert_success
     assert_output_contains ":qdistro_presentation_t:"
@@ -48,6 +50,7 @@ teardown_file() {
     vm_run "curl -fsS -o /tmp/presentation-live.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-live.sh && chmod +x /tmp/presentation-live.sh && bash /tmp/presentation-live.sh"
     assert_success
     for label in named disposable; do
+        assert_output_contains "PASS: $label: private runtime matches container MCS label"
         assert_output_contains "PASS: $label: presentation bind is read-only"
         assert_output_contains "PASS: $label: presentation dir owner inside container is keep-id admin uid"
         assert_output_contains "PASS: $label: container write into presentation directory denied"
@@ -55,7 +58,30 @@ teardown_file() {
         assert_output_contains "PASS: $label: in-container inotify watch on the directory and current.json"
         assert_output_contains "PASS: $label: running in-container controller followed a host publish"
     done
+    for label in named disposable; do
+        assert_output_contains "PASS: $label: inner weston up and qfileman running"
+        assert_output_contains "PASS: $label: inner weston and qfileman still running after checks"
+    done
+    assert_output_contains "PASS: shared host socket, library and presentation labels unchanged"
+    assert_output_contains "PASS: concurrent containers have distinct private MCS labels"
     assert_output_contains "PASS: live named and disposable presentation binds held"
+}
+
+@test "binding-resolved tier-2 silo runs inner weston and app under enforcing" {
+    # Reuse the production root-launcher + binding-resolver probe. Its secctx
+    # assertions are retained, with readiness/liveness and home-write checks.
+    local probe=/root/tier2-silo-secctx-wiretag-probe.sh
+    vm_run "test -f $probe && bash $probe setup && bash $probe wiretag"
+    local probe_status=$status probe_output=$output
+    vm_run "bash $probe teardown"
+    assert_success
+    [ "$probe_status" -eq 0 ] || fail_loud "enforcing silo probe: $probe_output"
+    output=$probe_output
+    assert_output_contains "PASS: qdwin received the SILO secctx app_id ON THE WIRE"
+    assert_output_contains "PASS: silo inner weston up and weston-terminal running"
+    assert_output_contains "PASS: binding-resolved silo home is writable"
+    assert_output_contains "PASS: silo inner weston and weston-terminal still running after checks"
+    assert_output_contains "PASS: systemctl stop -> admin container gone"
 }
 
 @test "no AVC denial names qdistro_presentation_t since boot" {
@@ -66,5 +92,13 @@ teardown_file() {
     vm_run "curl -fsS -o /tmp/avc-denials.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/avc-denials.sh && bash /tmp/avc-denials.sh 'qdistro_presentation_t'"
     echo "$output"
     [ "$status" -eq 0 ] || fail_loud "presentation AVC check failed (status=$status)"
+    assert_output_contains "AVC-CLEAN"
+}
+
+@test "no AVC denial names the tier-2 workload domain since boot" {
+    stage_vm_driver "probes/avc-denials.sh"
+    vm_run "curl -fsS -o /tmp/avc-denials.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/avc-denials.sh && bash /tmp/avc-denials.sh ':(container_t|qdistro_tier2_t):'"
+    echo "$output"
+    [ "$status" -eq 0 ] || fail_loud "tier-2 AVC check failed (status=$status)"
     assert_output_contains "AVC-CLEAN"
 }

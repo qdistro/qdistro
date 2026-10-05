@@ -281,24 +281,35 @@ built with the base `checkmodule -M -m` + `semodule_package` toolchain
 refpolicy style for symmetry but are not consumed by that build path;
 the whole policy is in the `.te`.
 
-**Engagement is deferred** and needs two things, neither landed:
-(1) `spawn-tier2.sh` must pass
-`--security-opt label=type:qdistro_tier2_t` to podman; and (2) the
-launcher's socket/dir binds (today plain `-v ...:rw`, host-labelled
-`user_tmp_t`) must gain `:z`/`:Z` so they relabel to `container_file_t`
-that the domain can reach — plus a label strategy for the
-`qdwin-shell.so` bind (a `:z` would mutate a host library label). Both
-are launcher changes, capability-gated behind a clean enforcing-mode AVC
-pass on a VM (none was available when the module landed). Until then
-tier-2 keeps running as stock `container_t`, so loading the module is a
-no-op. What is validated today: the module compiles (`make check`), and
-`sesearch` confirms the `neverallow` block can't collide with the joined
-attributes at load time (the net-socket perms come solely from the
-omitted network attributes). What needs the enforcing VM: the bind
-relabel wiring, a zero-new-AVC run of the nested weston under
-`qdistro_tier2_t`, and the load-time `typebounds`/`neverallow`
-resolution (`semodule -i` is not installed on the dev host). See
-`selinux/tier2/README.md` for the full validated-vs-deferred split.
+**Stock `container_t` transport is wired; engaging `qdistro_tier2_t` remains
+deferred.** The launcher gives the per-container runtime tree and the
+binding-resolved silo home private `:Z` labels (including podman's MCS
+categories). The outer Wayland socket, PipeWire sockets, `qdwin-shell.so`,
+and presentation directory are **never relabelled**. In particular,
+Wayland stays `user_tmp_t` for tier-1 clients and presentation stays
+`qdistro_presentation_t` for its read-only consumer policy.
+
+`qdistro_tier2` 0.2.0 adds just two stock-domain transport edges:
+`container_t user_tmp_t:sock_file { getattr write }` and
+`container_t unconfined_t:unix_stream_socket connectto`. Socket-file write
+is the Unix connect permission, not permission to write ordinary host files.
+No host directory/file management, arbitrary `userdomain` connect, label
+disabling, or MCS exemption is added. The target process type is the admin
+session's compositor/secctx listener and PipeWire (`unconfined_t`); other
+server domains are not covered. These rules affect stock containers on the
+host, so the launcher's mount allowlist remains essential: only individual
+transport sockets are exposed, never the host runtime directory or bus/agent
+sockets. The host library keeps its `lib_t` read/execute policy.
+
+Bootstrap and native-stage policy installation now include `qdistro_tier2`
+before presentation. Loading it is no longer a no-op. The narrower
+`qdistro_tier2_t` process type still needs explicit launcher wiring, bounded
+transport permissions, and its own enforcing workload/AVC validation.
+Compile checks do not prove policy loading or live app startup. The
+`presentation-enforcing.bats` lane must show inner-Weston readiness, live
+Qfileman after checks, distinct concurrent MCS labels, unchanged shared host
+labels, and a running binding-resolved silo through the production launcher.
+See `selinux/tier2/README.md` for the validated/deferred split.
 
 ## dbus-broker reload requirement
 

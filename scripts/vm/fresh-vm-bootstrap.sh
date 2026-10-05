@@ -582,7 +582,7 @@ fi
 log "installing SELinux policy modules (permissive)..."
 if [ "$QCI_NATIVE_STAGE" = 1 ]; then
     command -v semodule >/dev/null || { log 'ERROR: semodule missing'; exit 3; }
-    for pol in pwd broker session_manager tier1 presentation; do
+    for pol in pwd broker session_manager tier1 tier2 presentation; do
         policy=/usr/share/qdistro-build/selinux/qdistro_$pol.pp
         [ -s "$policy" ] || { log "ERROR: staged policy missing: $policy"; exit 3; }
         semodule -i "$policy" || { log "ERROR: staged policy failed: $policy"; exit 3; }
@@ -603,7 +603,7 @@ if [ "$QCI_NATIVE_STAGE" = 1 ]; then
         systemctl is-active --quiet "$service" && systemctl restart "$service" || true
     done
 else
-    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/presentation; do
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/tier2 selinux/presentation; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
         fi

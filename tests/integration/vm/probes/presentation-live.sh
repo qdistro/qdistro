@@ -148,9 +148,71 @@ print("rbind=" + ("yes" if "rbind" in tokens else "no"))
 '
 }
 
+# A podman process can be running during the entrypoint's five-second fatal
+# startup window. Require the handoff marker AND a live inner listener before
+# testing anything; recheck the app and listener after the last assertion.
+inner_running() {
+    local container=$1
+    [ "$(as_admin podman inspect "$container" --format '{{.State.Running}}' 2>/dev/null)" = true ] || return 1
+    as_admin podman exec "$container" python3 -c '
+import os, socket
+argv = open("/proc/1/cmdline", "rb").read().split(b"\0")
+# The entrypoint argv also ends in qfileman before exec; require the
+# installed Python console script as PID 1, not just an argv substring.
+assert len(argv) > 1 and os.path.basename(argv[1]) == b"qfileman", argv
+assert os.path.basename(os.readlink("/proc/1/exe")).startswith("python")
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+s.connect(os.environ["XDG_RUNTIME_DIR"] + "/wayland-tier2")
+' >/dev/null 2>&1
+}
+
+wait_inner() {
+    local container=$1
+    for _ in $(seq 1 30); do
+        if as_admin podman logs "$container" 2>&1 | grep -q "inner weston up; exec'ing app:" \
+            && inner_running "$container"; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    as_admin podman logs "$container" >&2 2>&1 || true
+    cat /tmp/pres-live-named.log /tmp/pres-live-disp.log >&2 2>/dev/null || true
+    return 1
+}
+
+shared_labels() {
+    local path
+    for path in "${SHARED_PATHS[@]}"; do
+        stat -c '%n %C' "$path" || return 1
+    done
+}
+
 check_container() {
     local label=$1
     local container=$2
+
+    if ! wait_inner "$container"; then
+        fail "$label: inner weston and qfileman did not become ready"
+        return
+    fi
+    pass "$label: inner weston up and qfileman running"
+
+    if [ "$(getenforce)" = Enforcing ]; then
+        local token mount_label process_label runtime_label
+        token=$(as_admin podman inspect "$container" --format '{{index .Config.Labels "qdistro_tier2_token"}}')
+        mount_label=$(as_admin podman inspect "$container" --format '{{.MountLabel}}')
+        process_label=$(as_admin podman inspect "$container" --format '{{.ProcessLabel}}')
+        runtime_label=$(stat -c %C "$RUNTIME_DIR/qdistro-tier2/$token")
+        if [[ "$process_label" == *:container_t:s0:c* ]] \
+            && [[ "$mount_label" == *:container_file_t:s0:c* ]] \
+            && [ "${process_label#*:*:*:}" = "${mount_label#*:*:*:}" ] \
+            && [ "$runtime_label" = "$mount_label" ]; then
+            pass "$label: private runtime matches container MCS label ($runtime_label)"
+        else
+            fail "$label: labels process=$process_label mount=$mount_label runtime=$runtime_label"
+        fi
+    fi
 
     local json parse owner siblings
     json=$(as_admin podman inspect "$container" --format '{{json .Mounts}}' 2>/dev/null)
@@ -255,6 +317,11 @@ check_container() {
     fi
     rm -f "$follow_out"
     GEN_A=$gen_b
+    if inner_running "$container"; then
+        pass "$label: inner weston and qfileman still running after checks"
+    else
+        fail "$label: inner weston or qfileman died during checks"
+    fi
 }
 
 # Admin-side publish; argument N picks a distinct, valid UI font scale
@@ -343,6 +410,11 @@ wait_disp() {
     return 1
 }
 
+SHARED_PATHS=("$RUNTIME_DIR/wayland-1" /usr/lib64/weston/qdwin-shell.so /var/lib/qdistro/presentation)
+for path in "$RUNTIME_DIR"/pipewire-[0-9]*; do
+    [ -S "$path" ] && SHARED_PATHS+=("$path")
+done
+SHARED_LABELS_BEFORE=$(shared_labels) || die "cannot capture shared host labels"
 as_admin podman rm -f "$NAMED" >/dev/null 2>&1 || true
 SPAWN_OUT=$(mktemp)
 as_admin env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
@@ -356,9 +428,6 @@ else
     fail "named container $NAMED did not start within 15s"
     cat /tmp/pres-live-named.log >&2
 fi
-as_admin podman stop -t 2 "$NAMED" >/dev/null 2>&1 || true
-wait "$NAMED_PID" 2>/dev/null || true
-rm -f "$SPAWN_OUT"
 
 DISP_OUT=$(mktemp)
 as_admin env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
@@ -369,6 +438,16 @@ DISP_NAME=$(wait_disp || true)
 if [ -n "${DISP_NAME:-}" ]; then
     pass "disposable container $DISP_NAME running"
     check_container "disposable" "$DISP_NAME"
+    if [ "$(getenforce)" = Enforcing ]; then
+        named_mcs=$(as_admin podman inspect "$NAMED" --format '{{.MountLabel}}')
+        disp_mcs=$(as_admin podman inspect "$DISP_NAME" --format '{{.MountLabel}}')
+        if inner_running "$NAMED" && [ -n "$named_mcs" ] && [ -n "$disp_mcs" ] \
+            && [ "$named_mcs" != "$disp_mcs" ]; then
+            pass "concurrent containers have distinct private MCS labels"
+        else
+            fail "concurrent MCS isolation: named=$named_mcs disposable=$disp_mcs"
+        fi
+    fi
     as_admin podman stop -t 2 "$DISP_NAME" >/dev/null 2>&1 || true
 else
     fail "disposable container did not start within 15s"
@@ -376,6 +455,15 @@ else
 fi
 wait "$DISP_PID" 2>/dev/null || true
 rm -f "$DISP_OUT"
+as_admin podman stop -t 2 "$NAMED" >/dev/null 2>&1 || true
+wait "$NAMED_PID" 2>/dev/null || true
+rm -f "$SPAWN_OUT"
+SHARED_LABELS_AFTER=$(shared_labels) || die "cannot recheck shared host labels"
+if [ "$SHARED_LABELS_BEFORE" = "$SHARED_LABELS_AFTER" ]; then
+    pass "shared host socket, library and presentation labels unchanged"
+else
+    fail "shared host labels changed: before=$SHARED_LABELS_BEFORE after=$SHARED_LABELS_AFTER"
+fi
 
 if [ "$FAILCOUNT" -eq 0 ]; then
     pass "live named and disposable presentation binds held"

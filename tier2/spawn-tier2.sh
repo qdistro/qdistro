@@ -1261,7 +1261,7 @@ chmod 0600 "$INNER_SOCK"
 # at spawn time.
 PIPEWIRE_BINDS=()
 for pw in "$RUNTIME"/pipewire-[0-9]*; do
-    [ -e "$pw" ] || continue
+    [ -S "$pw" ] || continue
     base=$(basename "$pw")
     stub="$TIER2_PERCONT_DIR/$base"
     : > "$stub"
@@ -1309,8 +1309,10 @@ if [ -d /var/lib/qdistro/presentation ]; then
         -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate
     )
 fi
+# The binding-resolved home belongs exclusively to this silo. Give it the
+# current container MCS label too; a restart receives a fresh category pair.
 if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
-    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
+    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw,Z" )
 elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
     # Disposable home is a WRITABLE tmpfs (07-plan "tmpfs home"): the app can
     # run, but every byte lives in RAM and is discarded on teardown by
@@ -1446,7 +1448,9 @@ PODMAN_ARGS=(
     # per-container dirs still belong to a live container.
     --label "qdistro_tier2_token=$QDWIN_LAUNCH_TOKEN"
     "${PODMAN_HARDENING[@]}"
-    -v "$TIER2_PERCONT_DIR:/run/user/${TIER2_ADMIN_UID_RESOLVED}:rw"
+    # Relabel only this private tree (stubs, not the mounted host sockets).
+    # Shared socket/library/presentation sources must retain their host types.
+    -v "$TIER2_PERCONT_DIR:/run/user/${TIER2_ADMIN_UID_RESOLVED}:rw,Z"
     -v "$OUTER_SOCKET_PATH:/run/user/${TIER2_ADMIN_UID_RESOLVED}/$DISPLAY_NAME:rw"
     "${PIPEWIRE_BINDS[@]}"
     -v "$TIER2_QDWIN_SHELL_SO_RESOLVED:/usr/lib64/weston/qdwin-shell.so:ro"

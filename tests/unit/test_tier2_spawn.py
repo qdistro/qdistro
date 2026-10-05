@@ -128,6 +128,7 @@ def _run_spawn(
     try:
         env = os.environ.copy()
         env.update({
+            "PODMAN_ARGV_FILE": str(tmp_path / "podman-argv"),
             "FAKE_DBUS_MODE": dbus_mode or "",
             "FAKE_EXPECT_ACTION": "qdistro.tier2.spawn:weston-terminal/weston-terminal",
             "HOME": str(tmp_path / "home"),
@@ -224,6 +225,9 @@ def _run_disposable(
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(runtime / "wayland-1"))
     sock.listen(1)
+    pw_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    pw_sock.bind(str(runtime / "pipewire-0"))
+    (runtime / "pipewire-0.lock").write_text("host daemon lock")
     try:
         env = os.environ.copy()
         env.update({
@@ -251,6 +255,7 @@ def _run_disposable(
         )
     finally:
         sock.close()
+        pw_sock.close()
 
 
 def _plan(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
@@ -1028,3 +1033,29 @@ def test_edit_non_edit_capable_class_refused(tmp_path: Path) -> None:
                    "TIER2_DISPOSABLE_CLASSES_TEST": str(reg)})
     assert result.returncode == 2
     assert "not" in result.stderr and "edit-capable" in result.stderr
+
+
+def test_private_runtime_relabel_leaves_shared_binds_alone(tmp_path: Path) -> None:
+    for mode in ("named", "disposable"):
+        case = tmp_path / mode
+        case.mkdir()
+        if mode == "named":
+            result = _run_spawn(case, dbus_mode="allow")
+        else:
+            result = _run_disposable(case, dbus_mode="allow", record_podman=True)
+        assert result.returncode == 0, result.stderr
+        argv = (case / "podman-argv").read_text().split()
+        volumes = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-v"]
+        runtime = [v for v in volumes if "/qdistro-tier2/" in v]
+        assert len(runtime) == 1, volumes
+        assert runtime[0].endswith(":rw,Z"), runtime
+        for volume in volumes:
+            if volume != runtime[0]:
+                assert not {"z", "Z"}.intersection(volume.rsplit(":", 1)[1].split(",")), volume
+        assert any("/wayland-1:" in v for v in volumes), volumes
+        assert any("/qdwin-shell.so:" in v for v in volumes), volumes
+        if mode == "disposable":
+            assert any("/pipewire-0:" in v for v in volumes), volumes
+            assert not any("/pipewire-0.lock:" in v for v in volumes), volumes
+        assert "--privileged" not in argv
+        assert not any("label=disable" in arg or "label=level:" in arg for arg in argv)
