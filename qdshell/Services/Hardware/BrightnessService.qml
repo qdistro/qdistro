@@ -63,16 +63,23 @@ Singleton {
     }
   }
 
+  // Settings.data is a plain object, so a Connections on Settings.data.brightness
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.brightness
-    function onEnableDdcSupportChanged() {
-      if (Settings.data.brightness.enableDdcSupport) {
-        // Re-detect DDC monitors when enabled
-        ddcMonitors = [];
-        ddcProc.running = true;
-      } else {
-        // Clear DDC monitors when disabled
-        ddcMonitors = [];
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.brightness)
+        return;
+      if (key === "enableDdcSupport") {
+        if (Settings.data.brightness.enableDdcSupport) {
+          // Re-detect DDC monitors when enabled
+          ddcMonitors = [];
+          ddcProc.running = true;
+        } else {
+          // Clear DDC monitors when disabled
+          ddcMonitors = [];
+        }
+
       }
     }
   }

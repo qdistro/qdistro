@@ -100,16 +100,23 @@ Singleton {
   }
 
   // Correct language when settings finish loading from disk (or user changes it)
+  // Settings.data is a plain object, so a Connections on Settings.data.general
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.general
-    function onLanguageChanged() {
-      var userLang = Settings.data.general.language;
-      if (userLang !== "" && userLang !== root.langCode && availableLanguages.includes(userLang)) {
-        Logger.i("I18n", `Applying user language preference: "${userLang}"`);
-        setLanguage(userLang);
-      } else if (userLang === "" && root.systemDetectedLangCode !== "" && root.systemDetectedLangCode !== root.langCode) {
-        Logger.i("I18n", `Language reset to default, reverting to system language: "${root.systemDetectedLangCode}"`);
-        setLanguage(root.systemDetectedLangCode);
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.general)
+        return;
+      if (key === "language") {
+        var userLang = Settings.data.general.language;
+        if (userLang !== "" && userLang !== root.langCode && availableLanguages.includes(userLang)) {
+          Logger.i("I18n", `Applying user language preference: "${userLang}"`);
+          setLanguage(userLang);
+        } else if (userLang === "" && root.systemDetectedLangCode !== "" && root.systemDetectedLangCode !== root.langCode) {
+          Logger.i("I18n", `Language reset to default, reverting to system language: "${root.systemDetectedLangCode}"`);
+          setLanguage(root.systemDetectedLangCode);
+        }
+
       }
     }
   }

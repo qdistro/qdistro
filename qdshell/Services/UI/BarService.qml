@@ -144,41 +144,47 @@ Singleton {
   }
 
   // update bar's hidden state when mode changes
+  // Settings.data is a plain object, so a Connections on Settings.data.bar
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.bar
-    function onDisplayModeChanged() {
-      Logger.d("BarService", "Display mode changed to:", Settings.data.bar.displayMode);
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.bar)
+        return;
+      if (key === "displayMode") {
+        Logger.d("BarService", "Display mode changed to:", Settings.data.bar.displayMode);
 
-      // Only affect screens without displayMode overrides
-      for (let screenName in screenAutoHideState) {
-        if (!Settings.hasScreenOverride(screenName, "displayMode")) {
+        // Only affect screens without displayMode overrides
+        for (let screenName in screenAutoHideState) {
+          if (!Settings.hasScreenOverride(screenName, "displayMode")) {
+            var displayMode = Settings.getBarDisplayModeForScreen(screenName);
+            if (displayMode === "auto_hide") {
+              setScreenHidden(screenName, true);
+            } else {
+              if (screenAutoHideState[screenName].hidden) {
+                setScreenHidden(screenName, false);
+              }
+            }
+          }
+        }
+
+      } else if (key === "screenOverrides") {
+        Logger.d("BarService", "Screen overrides changed, re-evaluating auto-hide states");
+
+        // Re-evaluate auto-hide state for all screens
+        for (let screenName in screenAutoHideState) {
           var displayMode = Settings.getBarDisplayModeForScreen(screenName);
           if (displayMode === "auto_hide") {
-            setScreenHidden(screenName, true);
+            if (!screenAutoHideState[screenName].hidden) {
+              setScreenHidden(screenName, true);
+            }
           } else {
             if (screenAutoHideState[screenName].hidden) {
               setScreenHidden(screenName, false);
             }
           }
         }
-      }
-    }
 
-    function onScreenOverridesChanged() {
-      Logger.d("BarService", "Screen overrides changed, re-evaluating auto-hide states");
-
-      // Re-evaluate auto-hide state for all screens
-      for (let screenName in screenAutoHideState) {
-        var displayMode = Settings.getBarDisplayModeForScreen(screenName);
-        if (displayMode === "auto_hide") {
-          if (!screenAutoHideState[screenName].hidden) {
-            setScreenHidden(screenName, true);
-          }
-        } else {
-          if (screenAutoHideState[screenName].hidden) {
-            setScreenHidden(screenName, false);
-          }
-        }
       }
     }
   }
