@@ -11,6 +11,9 @@
 GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../scripts/vm/lib/view-geometry.sh
 . "$GUI_GATE_DIR/../../../scripts/vm/lib/view-geometry.sh"
+# qci_login_cmd for the agent launch; self-tests source this file without core.sh.
+# shellcheck source=../login.sh
+. "$GUI_GATE_DIR/../login.sh"
 # Frame usability/darkness (screenshot_is_usable's thresholds and measures),
 # shared with vm-gui; the F5 darkness diagnostic asks qci_frame_not_dark.
 # shellcheck source=../../../scripts/vm/lib/frame-usable.sh
@@ -3458,9 +3461,9 @@ run_agent_command() {
         if [[ "$cmd" == *"{prompt}"* ]]; then
             expanded=${cmd//\{prompt\}/$prompt}
             if [ "$to" -gt 0 ]; then
-                timeout -k 15 "$to" "${host_sandbox[@]}" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+                timeout -k 15 "$to" "${host_sandbox[@]}" bash -lc "$(qci_login_cmd "$expanded")" < /dev/null > "$log_path" 2>&1
             else
-                "${host_sandbox[@]}" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+                "${host_sandbox[@]}" bash -lc "$(qci_login_cmd "$expanded")" < /dev/null > "$log_path" 2>&1
             fi
         else
             if [ "$to" -gt 0 ]; then

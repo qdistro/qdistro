@@ -386,13 +386,13 @@ gate_host() {
     # shell run_logged uses, so a login-PATH-only install is seen consistently)
     # and record an explicit SKIP row when absent, instead of the run_logged
     # step's in-snippet `exit 0` landing as an indistinguishable PASS.
-    if bash -lc "command -v ruff >/dev/null 2>&1"; then
+    if bash -lc "$(qci_login_cmd "command -v ruff >/dev/null 2>&1")"; then
         run_logged host qdistro-ruff "$EXIT_HOST" lint "$QDISTRO_REPO" "$(host_ruff_cmd)" "shared ruff profile (blocking)"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else
         record_skip host qdistro-ruff lint "ruff not installed; blocking lint skipped"
     fi
-    if bash -lc "command -v mypy >/dev/null 2>&1"; then
+    if bash -lc "$(qci_login_cmd "command -v mypy >/dev/null 2>&1")"; then
         run_logged host qdistro-mypy "$EXIT_HOST" lint "$QDISTRO_REPO" "$(host_mypy_cmd)" "narrow mypy: cli+browser_bridge (blocking)"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else

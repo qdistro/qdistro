@@ -434,9 +434,9 @@ run_logged() {
         # per-step timeout below is the universal backstop for any other wedge.
         export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
         if [ "$step_to" -gt 0 ]; then
-            timeout -k 15 "$step_to" bash -lc "$cmd"
+            timeout -k 15 "$step_to" bash -lc "$(qci_login_cmd "$cmd")"
         else
-            bash -lc "$cmd"
+            bash -lc "$(qci_login_cmd "$cmd")"
         fi
     ) >> "$log_path" 2>&1
     rc=$?
