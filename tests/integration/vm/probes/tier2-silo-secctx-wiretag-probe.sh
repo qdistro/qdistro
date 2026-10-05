@@ -319,6 +319,14 @@ cmd_wiretag() {
     pass "qdwin received the SILO secctx app_id ON THE WIRE (committed engine=qdistro.tier2 app_id=$appid instance_id=$token)"
 
     # ---- no rootful-podman confusion ---------------------------------------
+    # qdistro-secctx-exec commits the listener before podman runs, and
+    # `podman create` can take several seconds (5.4 s in full-20261005T135128Z),
+    # so the container may not exist yet when the commit line appears.
+    local edl=$(( $(date +%s) + 30 ))
+    until as_admin podman container exists "$container" 2>/dev/null \
+            || [ "$(date +%s)" -ge "$edl" ]; do
+        sleep 0.5
+    done
     as_admin podman container exists "$container" 2>/dev/null \
         || { journalctl -u "$unit" --after-cursor="$cursor" | tail -20 >&2; \
              fail wiretag "container '$container' not in admin's rootless podman (did the run drop to admin?)"; }
