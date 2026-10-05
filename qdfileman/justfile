@@ -30,7 +30,7 @@ lint:
 
 # Install the package in development mode
 install:
-    pip install -e .
+    python3 -m pip install -e .
 
 # Format code with ruff
 format:

@@ -402,7 +402,7 @@ not packaged by any distro). Build it from the `qtermwidget-pyqt/` directory
 of the in-tree `qdterm/` component:
 
 ```bash
-cd qdterm/qtermwidget-pyqt && pip install .
+cd qdterm/qtermwidget-pyqt && python3 -m pip install .
 ```
 
 See `qdterm/README.md` for full build prerequisites (qtermwidget-devel,
@@ -412,7 +412,7 @@ sip, pyqt-builder).
 packaged by most distros):
 
 ```bash
-pip install tomli_w
+python3 -m pip install tomli_w
 ```
 
 **qdwin vendored-libweston symbols test** requires the `libevdev` and `pango`
