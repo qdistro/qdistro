@@ -203,24 +203,52 @@ def test_undo_redo_across_theme_changes(qapp, tmp_path, tmp_notebook, qtbot, mon
     win.close()
 
 
-# Only genuinely nondeterministic PDF metadata is normalized; everything else
-# (page tree, boxes, resources, content, fonts, xref offsets) is compared.
+# Only genuinely nondeterministic PDF metadata is normalized, each pattern
+# anchored to its own key; everything else (page tree, boxes, resources,
+# content, fonts, xref offsets, any other hex or date string) is compared.
+_ZERO_FILL = lambda m: m.group(1) + b"0" * len(m.group(2)) + m.group(3)  # noqa: E731
 _PDF_NORMALIZE = (
-    (re.compile(rb"uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), b"uuid:" + b"0" * 36),
-    (re.compile(rb"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d"), b"2000-01-01T00:00:00+00:00"),
-    (re.compile(rb"\(D:\d{14}[+-]\d\d'\d\d'\)"), b"(D:20000101000000+00'00')"),
-    # Trailer /ID: hex of a random UUID string; keep the length so xref
-    # offsets still line up.
-    (re.compile(rb"<[0-9a-fA-F]{32,}>"), lambda m: b"<" + b"0" * (len(m.group(0)) - 2) + b">"),
+    # Trailer /ID [<hex> <hex>]: hex of a random UUID string; keep the length
+    # so xref offsets still line up.
+    (re.compile(rb"(\ntrailer\n<<.*?/ID \[ <)([0-9a-fA-F]+)(> <)", re.S), _ZERO_FILL),
+    (re.compile(rb"(\ntrailer\n<<.*?/ID \[ <[0-9a-fA-F]+> <)([0-9a-fA-F]+)(>)", re.S), _ZERO_FILL),
+    (re.compile(rb'(xmpMM:(?:Document|Instance)ID="uuid:)([0-9a-f-]{36})(")'), _ZERO_FILL),
+    (re.compile(rb'(xmp:(?:Create|Modify|Metadata)Date=")([0-9T:+-]{25})(")'), _ZERO_FILL),
+    (re.compile(rb"(/(?:CreationDate|ModDate) \(D:)(\d{14}[+-]\d\d'\d\d')(\))"), _ZERO_FILL),
 )
+
+
+def _normalize_pdf_bytes(data: bytes) -> bytes:
+    for pat, repl in _PDF_NORMALIZE:
+        data = pat.sub(repl, data)
+    return data
 
 
 def _pdf_normalized(path) -> bytes:
     data = path.read_bytes()
     assert data.startswith(b"%PDF")
-    for pat, repl in _PDF_NORMALIZE:
-        data = pat.sub(repl, data)
-    return data
+    return _normalize_pdf_bytes(data)
+
+
+def test_pdf_normalization_is_scoped_to_volatile_metadata():
+    def pdf(trailer_id: bytes, other_hex: bytes, other_date: bytes, meta_date: bytes) -> bytes:
+        return (
+            b"%PDF-1.4\n1 0 obj\n<<\n/CreationDate (D:" + meta_date + b"+02'00')\n>>\n"
+            b'<x xmp:CreateDate="2026-10-05T10:34:09+02:00" xmpMM:DocumentID="uuid:'
+            + trailer_id[:8] + b'-b04a-4d74-9c30-d29c652323f3"/>\n'
+            b"2 0 obj\n<< /Font <" + other_hex + b"> /Note (D:" + other_date + b"+02'00') >>\n"
+            b"trailer\n<<\n/Size 3 \n/ID [ <" + trailer_id + b"> <" + trailer_id + b"> ]\n>>\n%%EOF\n"
+        )
+
+    base = pdf(b"37" * 36, b"ab" * 20, b"20261005103409", b"20261005103409")
+    norm = _normalize_pdf_bytes(base)
+    # Volatile metadata alone may differ.
+    assert _normalize_pdf_bytes(pdf(b"38" * 36, b"ab" * 20, b"20261005103409", b"20270101000000")) == norm
+    # A long hex string or a date anywhere else is real content.
+    assert _normalize_pdf_bytes(pdf(b"37" * 36, b"ac" * 20, b"20261005103409", b"20261005103409")) != norm
+    assert _normalize_pdf_bytes(pdf(b"37" * 36, b"ab" * 20, b"20270101000000", b"20261005103409")) != norm
+    # Length is preserved, so xref offsets keep lining up.
+    assert len(norm) == len(base)
 
 
 def _export(tmp_notebook, qtbot, out):
