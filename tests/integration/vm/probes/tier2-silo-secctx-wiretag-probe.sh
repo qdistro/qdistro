@@ -349,7 +349,8 @@ cmd_wiretag() {
     [ -n "$ready" ] || { journalctl -u "$unit" --after-cursor="$cursor" | tail -40 >&2;
         fail wiretag "inner weston and weston-terminal did not become ready"; }
     pass "silo inner weston up and weston-terminal running"
-    as_admin podman exec "$container" sh -c 'touch "$HOME/.enforcing-write-probe" && rm "$HOME/.enforcing-write-probe"' \
+    # Not touch(1): the tier-2 seccomp profile answers utimensat with ENOSYS.
+    as_admin podman exec "$container" sh -c 'f="$HOME/.enforcing-write-probe"; printf ok > "$f" && [ "$(cat "$f")" = ok ] && rm "$f"' \
         || fail wiretag "binding-resolved silo home is not writable"
     pass "binding-resolved silo home is writable"
 

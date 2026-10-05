@@ -250,11 +250,15 @@ check_container() {
         fail "$label: presentation dir owner inside container is '$owner', expected $ADMIN_UID:$ADMIN_UID"
     fi
 
-    if as_admin podman exec "$container" \
-            touch /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null; then
+    # A redirect, not touch(1): seccomp answers touch's utimensat with ENOSYS,
+    # so touch exits non-zero even after creating the file. Check the host
+    # side too, so a create that reported failure still counts as a write.
+    as_admin podman exec "$container" \
+        sh -c 'printf x > /var/lib/qdistro/presentation/qdistro-write-probe' 2>/dev/null
+    local wrc=$?
+    if [ "$wrc" -eq 0 ] || [ -e /var/lib/qdistro/presentation/qdistro-write-probe ]; then
         fail "$label: container could write into the presentation directory"
-        as_admin podman exec "$container" \
-            rm -f /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null || true
+        rm -f /var/lib/qdistro/presentation/qdistro-write-probe
     else
         pass "$label: container write into presentation directory denied"
     fi

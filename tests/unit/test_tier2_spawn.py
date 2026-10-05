@@ -51,7 +51,14 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "#!/bin/sh\n"
         "case \"$1 $2\" in\n"
         "  'image exists') exit 0 ;;\n"
-        "  'ps -a') exit 0 ;;\n"
+        # podman 6 semantics: only the `.Label "k"` accessor works; the
+        # `.Labels.k` field form is a template error (rc 125).
+        "  'ps -a')\n"
+        "    [ -n \"$FAKE_PS_RC\" ] && exit \"$FAKE_PS_RC\"\n"
+        "    case \"$4\" in\n"
+        "      *'.Label \"qdistro_tier2_token\"'*) [ -n \"$FAKE_PS_TOKENS\" ] && printf '%s\\n' $FAKE_PS_TOKENS; exit 0 ;;\n"
+        "      *) echo 'Error: template: ps: cannot evaluate field' >&2; exit 125 ;;\n"
+        "    esac ;;\n"
         "  'container exists') exit 1 ;;\n"
         "esac\n"
         "if [ \"$1\" = run ]; then\n"
@@ -116,9 +123,10 @@ def _run_spawn(
     *,
     dbus_mode: str | None,
     trace: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     runtime = tmp_path / "runtime"
-    runtime.mkdir()
+    runtime.mkdir(exist_ok=True)
     qdwin_shell = tmp_path / "qdwin-shell.so"
     qdwin_shell.write_text("stub\n")
 
@@ -139,6 +147,7 @@ def _run_spawn(
             "TIER2_USE_SECCTX": "0",
             "XDG_RUNTIME_DIR": str(runtime),
         })
+        env.update(extra_env or {})
         return subprocess.run(
             [
                 "/bin/bash",
@@ -205,6 +214,44 @@ def test_tier2_spawn_fails_closed_without_dbus_send(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "dbus-send not found" in result.stderr
+
+
+def _percont_dirs(tmp_path: Path, *tokens: str) -> Path:
+    parent = tmp_path / "runtime" / "qdistro-tier2"
+    for token in tokens:
+        (parent / token).mkdir(parents=True)
+        (parent / token / "wayland-tier2").write_text("")
+    return parent
+
+
+def test_tier2_spawn_keeps_runtime_dirs_of_live_siblings(tmp_path: Path) -> None:
+    # Two running tier-2 containers own per-container dirs; a third dir is a
+    # crashed spawn's leftover. A new spawn reaps only the leftover. podman 6
+    # rejected the old `.Labels.k` ps template, so every sibling dir (and the
+    # running apps' inner wayland sockets) was removed.
+    live_a, live_b, stale = "a" * 32, "b" * 32, "c" * 32
+    parent = _percont_dirs(tmp_path, live_a, live_b, stale)
+
+    result = _run_spawn(
+        tmp_path,
+        dbus_mode="allow",
+        extra_env={"FAKE_PS_TOKENS": f"{live_a} <no value> {live_b}"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (parent / live_a / "wayland-tier2").exists()
+    assert (parent / live_b / "wayland-tier2").exists()
+    assert not (parent / stale).exists()
+
+
+def test_tier2_spawn_reaps_nothing_when_podman_ps_fails(tmp_path: Path) -> None:
+    live = "d" * 32
+    parent = _percont_dirs(tmp_path, live)
+
+    result = _run_spawn(tmp_path, dbus_mode="allow", extra_env={"FAKE_PS_RC": "125"})
+
+    assert result.returncode == 0, result.stderr
+    assert (parent / live / "wayland-tier2").exists()
 
 
 # --- disposable (--disposable) variant (07-disposables-plan P1) -----------

@@ -1020,18 +1020,19 @@ PERCONT_DIR="$PARENT_DIR/$LAUNCH_TOKEN"
 # auto-removed yet still count as "live" — we don't want to rm a dir
 # while podman still has a record of the container. Filter the label
 # set to 32-hex-char tokens to ignore podman's "<no value>" sentinel
-# for unlabeled containers.
-if [ -d "$PARENT_DIR" ]; then
-    live_tokens=$(pm ps -a --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
-                    | grep -E '^[0-9a-f]{32}$' \
-                    | sort -u || true)
+# for unlabeled containers. `.Label "k"` is the ps accessor that works across
+# podman versions; podman 6 rejects `.Labels.k` (Labels is a slice there),
+# which used to leave the live set empty and reap every sibling's runtime dir,
+# taking a running tier-2 app's inner wayland socket with it. If the listing
+# fails, reap nothing: a leaked dir is cheaper than a live one removed.
+if [ -d "$PARENT_DIR" ] \
+    && live_tokens=$(pm ps -a --format '{{.Label "qdistro_tier2_token"}}' 2>/dev/null); then
+    live_tokens=$(printf '%s\n' "$live_tokens" | grep -E '^[0-9a-f]{32}$' || true)
     for d in "$PARENT_DIR"/*/; do
         [ -d "$d" ] || continue
         token=$(basename "$d")
-        case " $live_tokens " in
-            *" $token "*) ;;
-            *) rm -rf "$d" 2>/dev/null || true ;;
-        esac
+        printf '%s\n' "$live_tokens" | grep -Fxq -- "$token" \
+            || rm -rf "$d" 2>/dev/null || true
     done
 fi
 
