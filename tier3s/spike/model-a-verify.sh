@@ -112,8 +112,10 @@ info "$ACCT: $pw"
 [ "$SUID" -ge 1000 ] && [ "$SUID" != 1000 ] && pass "silo uid $SUID is a regular non-admin uid" \
     || fail "silo uid '$SUID' is not a regular non-admin uid"
 is "silo GECOS marker" "$(printf '%s' "$pw" | cut -d: -f5)" "qdistro tier3s silo $SILO"
-is "silo primary group" "$(id -gn "$ACCT")" "qdistro-tier3s"
-srow=$(getent subuid "$ACCT" | head -1); grow=$(getent subgid "$ACCT" | head -1)
+id -nG "$ACCT" 2>/dev/null | tr ' ' '\n' | grep -qx qdistro-tier3s \
+    && pass "silo is a qdistro-tier3s member ($(id -nG "$ACCT"))" \
+    || fail "silo is not a qdistro-tier3s member ($(id -nG "$ACCT" 2>/dev/null))"
+srow=$(grep "^$ACCT:" /etc/subuid | head -1); grow=$(grep "^$ACCT:" /etc/subgid | head -1)
 [ -n "$srow" ] && [ -n "$grow" ] && pass "subuid/subgid allocated ($srow / $grow)" \
     || fail "subuid/subgid missing for $ACCT"
 for d in "/run/qdistro-tier3s-rt/$SUID" "/run/qdistro-tier3s-runsc/$SUID"; do
@@ -126,8 +128,12 @@ left=$(records | wc -l)
 is "refused launch left no control records" "$left" 0
 
 step "3. per-silo image delivery (admin builds, silo store loads)"
+# admin cannot traverse /root: give the builder a world-readable copy of just
+# what it reads (tier3s/ + the snapshot.conf pin beside it).
+b=/var/tmp/t3s-build; rm -rf "$b"
+install -d -m 0755 "$b" && cp -a "$SRC/tier3s" "$b/" && cp "$SRC/snapshot.conf" "$b/"
 d=/var/tmp/t3s-img; rm -rf "$d"; install -d -m 0755 "$d"
-out=$(as_admin bash "$SRC/tier3s/make-tier3s-image.sh" --oci-archive "$d" headless-smoke 2>&1); rc=$?
+out=$(as_admin bash "$b/tier3s/make-tier3s-image.sh" --oci-archive "$d" headless-smoke 2>&1); rc=$?
 printf '%s\n' "$out" | tail -6 | sed 's/^/    /'
 is "make-tier3s-image.sh rc" "$rc" 0
 [ -f "$d/tier3s-headless-smoke.oci.tar" ] && chmod 0644 "$d/tier3s-headless-smoke.oci.tar" \

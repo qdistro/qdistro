@@ -577,6 +577,7 @@ def test_running_false_only_when_unit_down_container_gone_and_no_record(real_ops
     # (A r3 P1): the chain's own rc is never the verdict.
     assert pm[:5] == ["runuser", "-u", "qt3s-smoke", "--", "env"]
     assert "-i" in pm and "XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/4242" in pm
+    assert "CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf" in pm
     assert pm[-4:-2] == ["-c", 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"']
     assert pm[-2:] == ["sh", "qdistro-tier3s-smoke"]
 
@@ -1222,6 +1223,7 @@ def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
     cfiles = {f"/usr/lib/qdistro/tier3s/{p.name}" for p in REPO.glob("tier3s/Containerfile.*")}
     want = {"/usr/lib/qdistro/tier3s/spawn-tier3s.sh", "/usr/lib/qdistro/tier3s/probe.sh",
             "/usr/lib/qdistro/tier3s/tier3s-runsc", "/usr/lib/qdistro/tier3s/RUNSC_RELEASE",
+            "/usr/lib/qdistro/tier3s/containers.conf",
             "/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint", "/usr/lib/qdistro/tier3s/make-tier3s-image.sh",
             "/usr/lib/qdistro/tier3s/headless-smoke.sh", "/usr/lib/qdistro/tier3s/configure-snapshot-repos.sh",
             "/usr/libexec/qdistro/qdistro-tier3s-scope", "/usr/libexec/qdistro/qdistro-tier3s-cleanup",

@@ -201,6 +201,10 @@ if [ "$_qd_t3s" = 1 ]; then
     install -o root -g root -m 0755 "$_qd_t3s_src/probe.sh" "$_qd_t3s_lib/probe.sh"
     install -o root -g root -m 0755 "$_qd_t3s_src/tier3s-runsc" "$_qd_t3s_lib/tier3s-runsc"
     install -o root -g root -m 0644 "$_qd_t3s_src/RUNSC_RELEASE" "$_qd_t3s_lib/RUNSC_RELEASE"
+    # The fixed podman-as-silo config (C2 model A): every podman call under a
+    # qt3s-<silo> account runs with CONTAINERS_CONF=<this file>. Root-owned:
+    # the silo must not edit the config its podman trusts.
+    install -o root -g root -m 0644 "$_qd_t3s_src/containers.conf" "$_qd_t3s_lib/containers.conf"
     # Per-workload seccomp profiles (rendered by seccomp/make-profiles.py; the
     # spawn refuses a workload without one, no podman-default fallback).
     for _qd_f in "$_qd_t3s_src"/seccomp/*.json; do

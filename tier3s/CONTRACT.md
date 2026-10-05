@@ -183,7 +183,7 @@ the manager skips reconciliation and a tier3s start fails (no unit, no spawn).
 
 | Path | From |
 |---|---|
-| `/usr/lib/qdistro/tier3s/` | root-owned copy of `tier3s/`: `spawn-tier3s.sh`, `probe.sh`, `RUNSC_RELEASE`, `tier3s-runsc`, `seccomp/<workload>.json` (the probe compares the installed wrapper and pin against this copy) |
+| `/usr/lib/qdistro/tier3s/` | root-owned copy of `tier3s/`: `spawn-tier3s.sh`, `probe.sh`, `RUNSC_RELEASE`, `tier3s-runsc`, `containers.conf` (the podman-as-silo `CONTAINERS_CONF`), `seccomp/<workload>.json` (the probe compares the installed wrapper and pin against this copy) |
 | `/usr/lib/qdistro/tier3s/workloads/<workload>.env` | `tier3s/workloads/`: the per-workload declarations (§7), parsed never sourced |
 | `/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint` | `tier3s/qdistro-tier3s-entrypoint`: the image-side waypipe-server launcher (§7); also the build-context copy |
 | `/usr/lib/qdistro/tier3s/Containerfile.<workload>`, `headless-smoke.sh`, `configure-snapshot-repos.sh`, `make-tier3s-image.sh` | `tier3s/`: the image-build context (§7), so an installed tree can rebuild every workload image as admin (`SNAPSHOT` is generated into the build context by `make-tier3s-image.sh`, not installed; the pin resolves via `/etc/qdistro/release`) |
@@ -274,6 +274,16 @@ process is the installed root-owned helper `qdistro-tier3s-scope enter
    with `XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/<silo uid>` (a silo has no
    logind session). It
    never runs anything as root and accepts no other program.
+
+Every podman-as-silo call — the spawn's, the scope helper's, the cleanup's,
+the probe's and the session manager's — runs with
+`CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf` (root-owned). A
+sessionless account can never satisfy podman's default `systemd` cgroup
+manager: podman only warns before falling back, and the warning contaminates
+`inspect` output. The shipped config pins `cgroupfs` (containment is the
+scope, not podman's manager) and the `file` events logger, deterministically;
+it sets no storage paths, so the rootless store stays the silo's own
+`$HOME/.local/share/containers` — one store per silo.
 
 podman runs with `--cgroup-manager=cgroupfs`. The silo-writable scope is
 what keeps rootless podman from escaping to its own `podman-<pid>.scope`

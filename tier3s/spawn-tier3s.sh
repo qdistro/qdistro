@@ -207,12 +207,13 @@ as_admin() {   # broker / resolver / launch-record calls run as the admin uid
 }
 as_silo() {   # every podman call runs as the silo account (C2 model A)
     runuser -u "$SILO_USER" -- env -i PATH="$ADMIN_PATH" HOME="$SILO_HOME" \
-        USER="$SILO_USER" LOGNAME="$SILO_USER" XDG_RUNTIME_DIR="$RT_BASE/$SILO_UID" "$@"
+        USER="$SILO_USER" LOGNAME="$SILO_USER" XDG_RUNTIME_DIR="$RT_BASE/$SILO_UID" \
+        CONTAINERS_CONF="$LIBDIR/containers.conf" "$@"
 }
 pm() { as_silo podman "$@"; }
 pm_bounded() { local t="$1"; shift; timeout -k 2 "$t" runuser -u "$SILO_USER" -- env -i PATH="$ADMIN_PATH" \
     HOME="$SILO_HOME" USER="$SILO_USER" LOGNAME="$SILO_USER" \
-    XDG_RUNTIME_DIR="$RT_BASE/$SILO_UID" podman "$@"; }
+    XDG_RUNTIME_DIR="$RT_BASE/$SILO_UID" CONTAINERS_CONF="$LIBDIR/containers.conf" podman "$@"; }
 
 # --- 4. prerequisite screen (no fallback) ---------------------------------
 # the probe screens the SILO's id mapping + runsc state root (the podman

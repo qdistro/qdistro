@@ -2394,7 +2394,11 @@ class _SystemOps:
             ["runuser", "-u", acct, "--", "env", "-i",
              "PATH=/usr/bin:/bin", f"HOME={pw.pw_dir}", f"USER={acct}",
              f"LOGNAME={acct}",
-             f"XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/{pw.pw_uid}", *cmd],
+             f"XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/{pw.pw_uid}",
+             # the sessionless account's fixed podman config (cgroupfs; file
+             # events) — same file spawn-tier3s.sh / the cleanup pin
+             "CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf",
+             *cmd],
             capture_output=True, text=True, timeout=timeout)
 
     @staticmethod

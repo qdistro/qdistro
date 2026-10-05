@@ -350,8 +350,12 @@ fi
 as_user() {
     if [ -z "$AS_UID" ]; then [ "$(id -un)" = "$USER_NAME" ] || return 1; "$@"
     else
+        # CONTAINERS_CONF pins cgroupfs for a sessionless account: the
+        # systemd manager would only warn (stderr contaminates the inspect
+        # comparisons) before falling back anyway.
         runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$AS_HOME" \
-            USER="$USER_NAME" XDG_RUNTIME_DIR="$AS_RT" "$@"
+            USER="$USER_NAME" XDG_RUNTIME_DIR="$AS_RT" \
+            CONTAINERS_CONF="$HERE/containers.conf" "$@"
     fi
 }
 # The per-silo runtime dir itself is a prerequisite once the user is a

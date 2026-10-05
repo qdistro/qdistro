@@ -220,7 +220,8 @@ as_uid() {     # as_uid <seconds> <uid> cmd...: bounded, in its own scope, as th
     fi
     shift 2
     bounded --scope "$t" runuser -u "$A_USER" -- env -i PATH="$ADMIN_PATH" HOME="$A_HOME" \
-        USER="$A_USER" LOGNAME="$A_USER" XDG_RUNTIME_DIR="$T/run/qdistro-tier3s-rt/$uid" "$@"
+        USER="$A_USER" LOGNAME="$A_USER" XDG_RUNTIME_DIR="$T/run/qdistro-tier3s-rt/$uid" \
+        CONTAINERS_CONF="$T/usr/lib/qdistro/tier3s/containers.conf" "$@"
 }
 # silo_uids: SILO_UIDS = every uid whose podman store can hold tier3s
 # containers — all qt3s-* accounts, plus the silo_uid recorded in existing

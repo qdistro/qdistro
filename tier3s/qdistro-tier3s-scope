@@ -86,4 +86,5 @@ printf 'qdistro-tier3s-scope: %s delegated to uid %s (dir, cgroup.procs, cgroup.
 if [ -n "$T" ]; then PODMAN="$(command -v podman)"; else PODMAN=/usr/bin/podman; fi
 exec runuser -u "$SILO_USER" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$SILO_HOME" \
     USER="$SILO_USER" LOGNAME="$SILO_USER" XDG_RUNTIME_DIR="$T/run/qdistro-tier3s-rt/$SILO_UID" \
+    CONTAINERS_CONF="$T/usr/lib/qdistro/tier3s/containers.conf" \
     "$PODMAN" "$@"

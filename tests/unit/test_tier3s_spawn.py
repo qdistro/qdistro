@@ -481,6 +481,7 @@ class World:
             shutil.copyfile(f, lib / "seccomp" / f.name)
         for f in (T3S / "workloads").glob("*.env"):
             shutil.copyfile(f, lib / "workloads" / f.name)
+        shutil.copyfile(T3S / "containers.conf", lib / "containers.conf")
         libexec = self.T / "usr/libexec/qdistro"
         libexec.mkdir(parents=True)
         (libexec / "qdistro-tier3s-scope").symlink_to(HELPER)       # the real helper
@@ -881,6 +882,17 @@ def test_gate_order_probe_resolve_gate_record_then_podman(w):
     scope = w.first("systemd-run")
     run = next(i for i, c in enumerate(calls) if c.startswith("podman") and " run --rm " in c)
     assert probe < resolve_ro < gate < record < image < scope < run, calls
+    # every podman call runs dropped to a user (the silo account; the test
+    # seam resolves it to the test user) under the fixed model-A env
+    # (per-silo runtime dir + the root-owned CONTAINERS_CONF pinning cgroupfs;
+    # spawn's $T-prefixed LIBDIR and the cleanup's installed path both end in
+    # tier3s/containers.conf)
+    for i, c in enumerate(calls):
+        if c.startswith("podman") and "HELD" not in c:
+            assert calls[i - 1].startswith("runuser -u "), calls[i - 1]
+            assert "env -i " in calls[i - 1] and "XDG_RUNTIME_DIR=" in calls[i - 1]
+            assert "CONTAINERS_CONF=" in calls[i - 1] \
+                and "tier3s/containers.conf" in calls[i - 1], calls[i - 1]
 
 
 def test_binding_drift_between_resolution_and_activation_refuses(w):
@@ -1060,6 +1072,7 @@ def test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin(w):
     ru = [c for c in w.calls() if c.startswith("runuser")]
     assert len(ru) == 1 and ru[0].startswith(f"runuser -u {ME} -- /usr/bin/env -i PATH=/usr/bin:/bin ")
     assert ru[0].endswith(f"{w.bin}/podman version")
+    assert f"CONTAINERS_CONF={w.T}/usr/lib/qdistro/tier3s/containers.conf" in ru[0]
     assert w.calls()[-1] == "podman version"
 
 
@@ -1101,8 +1114,13 @@ def test_cleanup_tears_down_a_running_launch(w):
     assert f"podman stop -t 10 {TOKEN}{TOKEN}" in calls, calls
     assert f"podman rm -f --ignore {TOKEN}{TOKEN}" in calls, calls
     # podman runs as the recorded admin, never as root, and never holding a
-    # lock fd (a long-lived podman child would keep the lock)
+    # lock fd (a long-lived podman child would keep the lock); each call
+    # carries the silo podman env (runtime dir + pinned CONTAINERS_CONF)
     assert all(calls[i - 1].startswith("runuser -u") for i, c in enumerate(calls)
+               if c.startswith("podman") and "HELD" not in c)
+    assert all("CONTAINERS_CONF=" in calls[i - 1]
+               and f"{w.T}/usr/lib/qdistro/tier3s/containers.conf" in calls[i - 1]
+               for i, c in enumerate(calls)
                if c.startswith("podman") and "HELD" not in c)
     assert not any("HELD lock fd" in c for c in calls), calls
 
