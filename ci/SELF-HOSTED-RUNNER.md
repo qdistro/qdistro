@@ -120,6 +120,9 @@ A single Forgejo Actions self-hosted runner labelled **`qdistro-host`**
    zypper in -y python314 python314-pip meson ninja pkgconf gcc-c++ \
        nodejs npm git ruff python314-mypy \
        qt6-declarative-imports qt6-declarative-tools
+   # The host gate invokes unversioned `python3`; point it at 3.14
+   # (the snapshot's python313-base still owns the symlink).
+   ln -sf python3.14 /usr/bin/python3
    pip3.14 install --user PyQt6 PySide6 pytest pytest-qt pytest-cov
    ```
 

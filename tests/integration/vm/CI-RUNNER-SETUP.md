@@ -26,8 +26,11 @@ sudo loginctl enable-linger admin
 
 # 3. qdistro test venv. --system-site-packages so python314-dbus-
 # python (which has no working pip wheel on rolling Tumbleweed)
-# resolves from /usr/lib/python3.14/site-packages.
-sudo -u admin python3 -m venv --system-site-packages \
+# resolves from /usr/lib/python3.14/site-packages. Create it with
+# python3.14 explicitly: the snapshot's /usr/bin/python3 is still
+# owned by python313-base, and a 3.13 venv cannot see the 3.14
+# system modules.
+sudo -u admin python3.14 -m venv --system-site-packages \
  /home/admin/.local/share/qdistro-test-venv2
 sudo -u admin /home/admin/.local/share/qdistro-test-venv2/bin/pip install \
  pytest pyyaml
