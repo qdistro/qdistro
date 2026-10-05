@@ -56,11 +56,16 @@ manual=()        # deps we can detect but not auto-install on this host
 if have_py tomli_w; then ok+=("tomli_w (qfileman)")
 else missing+=("tomli_w (qfileman) -> pip install tomli_w"); pip_pkgs+=("tomli_w>=1.0"); fi
 
+# openSUSE names Python packages per interpreter (python313-...), as the
+# qdbrowser and VM installers do; target the python3 the host gate runs.
+zyp_py=$(python3 -c 'import sys; print("python%d%d" % sys.version_info[:2])' 2>/dev/null || true)
+
 # --- qdbrowser: jeepney (pure-Python; distro pkg or pip) ---
 if have_py jeepney; then ok+=("jeepney (qdbrowser)")
 else
     case "$PM" in
-        zypper|apt) missing+=("jeepney (qdbrowser) -> $PM python3-jeepney"); distro_pkgs+=("python3-jeepney") ;;
+        zypper)     missing+=("jeepney (qdbrowser) -> zypper ${zyp_py:-python3}-jeepney"); distro_pkgs+=("${zyp_py:-python3}-jeepney") ;;
+        apt)        missing+=("jeepney (qdbrowser) -> apt python3-jeepney"); distro_pkgs+=("python3-jeepney") ;;
         *)          missing+=("jeepney (qdbrowser) -> pip install jeepney"); pip_pkgs+=("jeepney") ;;
     esac
 fi
@@ -95,6 +100,50 @@ elif [ ! -r "$QDWIN_SYMS_TEST" ]; then
 elif ! command -v pkg-config >/dev/null 2>&1; then
     missing+=("pkg-config (needed to check qdwin deps) -> install pkgconf/pkg-config")
 fi
+
+# --- other host-gate steps: build deps and test imports outside the symbols test ---
+# One row per probe: <kind> <probe> <zypper pkg> <apt pkg> <who needs it>.
+# kind py = `python3 -c "import <probe>"` (comma-separated modules allowed);
+# pc = pkg-config module; bin = command; qt = a Qt 6 tool found where
+# qdshell/scripts/ci-local.sh looks (qt6 bin/libexec dirs, then PATH).
+have_qt_tool() {
+    local d
+    for d in /usr/lib64/qt6/bin /usr/lib/qt6/bin /usr/lib64/qt6/libexec /usr/lib/qt6/libexec; do
+        [ -x "$d/$1" ] && return 0
+    done
+    command -v "$1" >/dev/null 2>&1
+}
+while read -r kind probe zyp apt who; do
+    case "$kind" in
+        py)  have_py "${probe//,/, }" && { ok+=("$probe ($who)"); continue; } ;;
+        pc)  command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "$probe" 2>/dev/null \
+                 && { ok+=("$probe devel ($who)"); continue; } ;;
+        bin) command -v "$probe" >/dev/null 2>&1 && { ok+=("$probe ($who)"); continue; } ;;
+        qt)  have_qt_tool "$probe" && { ok+=("$probe ($who)"); continue; } ;;
+    esac
+    [ "$kind" = py ] && [ -n "$zyp_py" ] && zyp="${zyp/#python3-/$zyp_py-}"
+    case "$PM" in
+        zypper) missing+=("$probe ($who) -> zypper $zyp"); distro_pkgs+=("$zyp") ;;
+        apt)    missing+=("$probe ($who) -> apt $apt");    distro_pkgs+=("$apt") ;;
+        *)      missing+=("$probe ($who) -> install manually"); manual+=("$probe") ;;
+    esac
+done <<'DEPS'
+py  yaml                     python3-PyYAML          python3-yaml                qdistro-pytest
+py  numpy                    python3-numpy           python3-numpy               qdistro-pytest
+py  hypothesis               python3-hypothesis      python3-hypothesis          qdistro-pytest
+py  pytest_cov               python3-pytest-cov      python3-pytest-cov          qdistro-coverage-floor
+py  mistune                  python3-mistune         python3-mistune             qnotebook-pytest
+py  PyQt6.QtWebEngineWidgets python3-PyQt6-WebEngine python3-pyqt6.qtwebenginewidgets qdbrowser-pytest
+pc  xcursor                  libXcursor-devel        libxcursor-dev              qdwin-meson
+pc  Qt6Qml                   qt6-declarative-devel   qt6-declarative-dev         qdshell-local
+pc  Qt6Network               qt6-base-devel          qt6-base-dev                qdshell-local
+pc  Qt6QuickTest             qt6-quicktest-devel     qt6-declarative-dev         qdshell-local
+qt  qmltestrunner            qt6-declarative-tools   qt6-declarative-dev-tools   qdshell-local
+qt  qmllint                  qt6-declarative-tools   qt6-declarative-dev-tools   qdshell-local
+qt  qmlformat                qt6-declarative-tools   qt6-declarative-dev-tools   qdshell-local
+bin weston                   weston                  weston                      qdwin-vendored-libweston-inert-relptr
+py  pywayland.protocol.relative_pointer_unstable_v1,pywayland.protocol.tablet_unstable_v2 python3-pywayland python3-pywayland qdwin-vendored-libweston-inert-relptr
+DEPS
 
 # De-duplicate the install lists (pango/pangocairo map to the same package, etc.).
 mapfile -t distro_pkgs < <(printf '%s\n' "${distro_pkgs[@]}" | awk 'NF && !seen[$0]++')
