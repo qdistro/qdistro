@@ -65,6 +65,92 @@ else
     esac
 fi
 
+# --- qdbrowser: PyQt6.QtWebEngineWidgets (declared in qdbrowser/pyproject.toml
+# as PyQt6-WebEngine; conftest imports it at collection time) ---
+if have_py PyQt6.QtWebEngineWidgets; then ok+=("PyQt6-WebEngine (qdbrowser)")
+else
+    case "$PM" in
+        zypper) missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> zypper python313-PyQt6-WebEngine"); distro_pkgs+=("python313-PyQt6-WebEngine") ;;
+        apt)    missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> apt python3-pyqt6.qtwebengine");    distro_pkgs+=("python3-pyqt6.qtwebengine") ;;
+        *)      missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> pip install PyQt6-WebEngine");      pip_pkgs+=("PyQt6-WebEngine") ;;
+    esac
+fi
+
+# --- qnotebook: mistune (declared in qnotebook/pyproject.toml; md_to_qdoc
+# imports it at module load, so every test file errors at collection) ---
+if have_py mistune; then ok+=("mistune (qnotebook)")
+else
+    case "$PM" in
+        zypper) missing+=("mistune (qnotebook) -> zypper python313-mistune"); distro_pkgs+=("python313-mistune") ;;
+        apt)    missing+=("mistune (qnotebook) -> apt python3-mistune");    distro_pkgs+=("python3-mistune") ;;
+        *)      missing+=("mistune (qnotebook) -> pip install mistune");    pip_pkgs+=("mistune>=3.0") ;;
+    esac
+fi
+
+# --- qdistro admin_app tests: PyYAML. Genuinely required, not optional: without
+# it, MainWindow._yaml_is_allow_all returns False on ImportError and the unit
+# tests that expect the allow-all refusal instead reach a REAL modal
+# QMessageBox.information, which blocks forever — this hung host qdistro-pytest
+# for its entire 1800 s timeout (run full-20261004T214015Z-402556). ---
+if have_py yaml; then ok+=("PyYAML (qdistro admin_app)")
+else
+    case "$PM" in
+        zypper) missing+=("PyYAML (qdistro admin_app) -> zypper python313-PyYAML"); distro_pkgs+=("python313-PyYAML") ;;
+        apt)    missing+=("PyYAML (qdistro admin_app) -> apt python3-yaml");    distro_pkgs+=("python3-yaml") ;;
+        *)      missing+=("PyYAML (qdistro admin_app) -> pip install pyyaml");  pip_pkgs+=("pyyaml") ;;
+    esac
+fi
+
+# --- Pillow: qdwin GUI smokes decode shell captures with `from PIL import
+# Image` on the host (qdwin/tests/gui/agent-*-smoke.sh fail loudly without it)
+# and qdshell/tests/test_ui_capture_retry.py imports PIL in the host pytest
+# glob ---
+if have_py PIL; then ok+=("Pillow (qdwin gui smokes / qdshell tests)")
+else
+    case "$PM" in
+        zypper) missing+=("Pillow (qdwin/qdshell) -> zypper python313-Pillow"); distro_pkgs+=("python313-Pillow") ;;
+        apt)    missing+=("Pillow (qdwin/qdshell) -> apt python3-pil");    distro_pkgs+=("python3-pil") ;;
+        *)      missing+=("Pillow (qdwin/qdshell) -> pip install pillow"); pip_pkgs+=("pillow") ;;
+    esac
+fi
+
+# --- qdshell QML plugin meson build: Qt6 devel pkg-config modules ---
+# qdshell/qml-plugin/meson.build requires Qt6Core/Qt6Gui/Qt6Qml/Qt6Network
+# (Qt6QmlIntegration is `required: false`). Its wayland-client /
+# wayland-scanner / wayland-protocols needs are already covered by the qdwin
+# libweston table below (same -devel packages).
+if command -v pkg-config >/dev/null 2>&1; then
+    qdshell_missing_mods=()
+    for _mod in Qt6Core Qt6Gui Qt6Qml Qt6Network; do
+        pkg-config --exists "$_mod" 2>/dev/null || qdshell_missing_mods+=("$_mod")
+    done
+    if [ "${#qdshell_missing_mods[@]}" -eq 0 ]; then
+        ok+=("Qt6 devel (qdshell qml-plugin)")
+    else
+        case "$PM" in
+            zypper)
+                for _mod in "${qdshell_missing_mods[@]}"; do
+                    case "$_mod" in
+                        Qt6Core)    _p=qt6-core-devel ;;
+                        Qt6Gui)     _p=qt6-gui-devel ;;
+                        Qt6Qml)     _p=qt6-qml-devel ;;
+                        Qt6Network) _p=qt6-network-devel ;;
+                    esac
+                    missing+=("$_mod devel (qdshell) -> zypper $_p"); distro_pkgs+=("$_p")
+                done ;;
+            apt)
+                for _mod in "${qdshell_missing_mods[@]}"; do
+                    case "$_mod" in
+                        Qt6Qml) _p=qt6-declarative-dev ;;
+                        *)      _p=qt6-base-dev ;;
+                    esac
+                    missing+=("$_mod devel (qdshell) -> apt $_p"); distro_pkgs+=("$_p")
+                done ;;
+            *)  missing+=("Qt6 devel (qdshell): missing pkg-config modules ${qdshell_missing_mods[*]} -> install manually"); manual+=("Qt6 devel") ;;
+        esac
+    fi
+fi
+
 # --- qdwin vendored-libweston symbols test: reuse qdwin's authoritative table ---
 # Parse rows of the form:  "<pkg-config module> <apt pkg> <zypper pkg> <gate>"
 # and check the genuinely-unconditional ones. gl/x11 rows are intentionally

@@ -197,6 +197,18 @@ gate_preflight() {
     check_host_dep "host-dep libevdev (qdwin)" "pkg-config --exists libevdev"
     check_host_dep "host-dep pango/pangocairo (qdwin)" "pkg-config --exists pango pangocairo"
     check_host_dep "host-dep jeepney (qdbrowser)" "python3 -c 'import jeepney'"
+    # PyYAML: without it the admin-app allow-all guard silently degrades and a
+    # unit test hangs on a real modal QMessageBox (qdistro-pytest 1800s timeout
+    # in run full-20261004T214015Z-402556).
+    check_host_dep "host-dep PyYAML (admin_app)" "python3 -c 'import yaml'"
+    check_host_dep "host-dep PyQt6-WebEngine (qdbrowser)" "python3 -c 'import PyQt6.QtWebEngineWidgets'"
+    check_host_dep "host-dep mistune (qnotebook)" "python3 -c 'import mistune'"
+    check_host_dep "host-dep Pillow (qdwin/qdshell)" "python3 -c 'from PIL import Image'"
+    check_host_dep "host-dep Qt6 devel (qdshell)" "pkg-config --exists Qt6Core Qt6Gui Qt6Qml Qt6Network"
+    # Aggregate: the spot checks above only sample the inventory; this row runs
+    # the full checker so ANY missing host dep (e.g. the rest of qdwin's
+    # libweston 'always' table) still surfaces as a WARN here.
+    check_host_dep "host-dep inventory (qci-host-deps)" "bash '$QCI_DIR/bin/qci-host-deps'"
     {
         echo
         echo "## libvirt domains"

@@ -376,14 +376,64 @@ qdistro/ci/bin/qci-host-deps --install  # install via zypper/apt/dnf + pip
 The individual deps are:
 
 **qdbrowser tests** require `jeepney` (D-Bus bridge client, already a
-runtime dependency in `qdbrowser/pyproject.toml`):
+runtime dependency in `qdbrowser/pyproject.toml`) and
+`PyQt6.QtWebEngineWidgets` (the test conftest imports it; declared as
+`PyQt6-WebEngine` in `qdbrowser/pyproject.toml`):
 
 ```bash
 # Ubuntu
-sudo apt install python3-jeepney
+sudo apt install python3-jeepney python3-pyqt6.qtwebengine
 
 # openSUSE Tumbleweed
-sudo zypper install python3-jeepney
+sudo zypper install python3-jeepney python313-PyQt6-WebEngine
+```
+
+**qnotebook tests** require `mistune` (declared in
+`qnotebook/pyproject.toml`; `qnotebook/md_to_qdoc.py` imports it at module
+load, so a missing install errors every test file at collection):
+
+```bash
+# Ubuntu
+sudo apt install python3-mistune
+
+# openSUSE Tumbleweed
+sudo zypper install python313-mistune
+```
+
+**qdistro admin-app tests** (`tests/unit/test_admin_*.py`) require `PyYAML`.
+Without it `MainWindow._yaml_is_allow_all` degrades on ImportError and a unit
+test reaches a real modal `QMessageBox` that blocks the suite until the
+host-step timeout — this is a hang, not a clean collection error:
+
+```bash
+# Ubuntu
+sudo apt install python3-yaml
+
+# openSUSE Tumbleweed
+sudo zypper install python313-PyYAML
+```
+
+**Pillow** is needed host-side by the qdwin GUI smokes (they decode shell
+captures with `from PIL import Image`; `agent-*-smoke.sh` fail loudly without
+it) and by `qdshell/tests/test_ui_capture_retry.py` in the host pytest glob:
+
+```bash
+# Ubuntu
+sudo apt install python3-pil
+
+# openSUSE Tumbleweed
+sudo zypper install python313-Pillow
+```
+
+**qdshell qml-plugin build** needs the Qt6 development packages
+(`pkg-config` modules `Qt6Core`, `Qt6Gui`, `Qt6Qml`, `Qt6Network`):
+
+```bash
+# Ubuntu
+sudo apt install qt6-base-dev qt6-declarative-dev
+
+# openSUSE Tumbleweed
+sudo zypper install qt6-core-devel qt6-gui-devel qt6-qml-devel qt6-network-devel
 ```
 
 **qdshell QML tests** require the `QtQml.WorkerScript` QML module:
@@ -415,15 +465,20 @@ packaged by most distros):
 pip install tomli_w
 ```
 
-**qdwin vendored-libweston symbols test** requires the `libevdev` and `pango`
-(incl. `pangocairo`) development packages:
+**qdwin vendored-libweston symbols test** needs the development packages for
+the ~20 `always`-gated pkg-config modules in
+`qdwin/libweston-vendored/run-production-symbols-test.sh` (wayland-client,
+wayland-protocols, xkbcommon, pixman, libinput, libevdev, libdrm, gbm,
+libseat, libudev, libdisplay-info, cairo, libpng, pango/pangocairo,
+fontconfig, glib-2.0, libva, lcms2). `qci-host-deps` reads that table
+directly and reports the exact `zypper`/`apt` names, e.g.:
 
 ```bash
-# openSUSE Tumbleweed
-sudo zypper install libevdev-devel pango-devel
+# openSUSE Tumbleweed (representative; run qci-host-deps for the full list)
+sudo zypper install libevdev-devel pango-devel wayland-devel libdrm-devel
 
 # Ubuntu
-sudo apt install libevdev-dev libpango1.0-dev
+sudo apt install libevdev-dev libpango1.0-dev libwayland-dev libdrm-dev
 ```
 
 ## Fast triage
