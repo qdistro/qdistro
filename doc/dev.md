@@ -539,7 +539,7 @@ Language servers (install once on the host):
 
 | Language | Server                 | Install                                            |
 |----------|------------------------|----------------------------------------------------|
-| Python   | `pyright-langserver`   | `npm i -g pyright` (or `pip install basedpyright`)  |
+| Python   | `pyright-langserver`   | `npm i -g pyright` (or `python3 -m pip install basedpyright`)  |
 | Bash     | `bash-language-server` | `npm i -g bash-language-server`                     |
 | C        | `clangd`               | `sudo zypper install clang-tools`                   |
 | QML      | `qmlls6`               | ships with the Qt6 declarative tools               |

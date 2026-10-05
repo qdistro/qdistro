@@ -3,7 +3,7 @@
 #
 # REQUIRES A LIVE VM (qdwin guest with a real browser + the four 9e
 # daemons installed). This file is NOT run in the headless host unit-
-# test pass — `python -m pytest tests/unit/test_browser_daemons_9e.py`
+# test pass — `python3 -m pytest tests/unit/test_browser_daemons_9e.py`
 # covers the pure dispatch logic; this scenario verifies the bus wiring
 # that only a running session bus + browser can exercise:
 #
