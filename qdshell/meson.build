@@ -65,6 +65,7 @@ if node.found()
   # maturity-review #5).
   test('drift-guard', node, args: files('tests/test_drift_guard.js'))
   test('settings-change-signal', node, args: files('tests/test_settings_change_signal.js'))
+  test('display-confirm-dialog', node, args: files('tests/test_display_confirm_dialog.js'))
   # Cross-repo complement to drift-guard: assert qdshell's mirrored qdistro
   # identifiers (tier secctx prefixes, AdminBroker1/SessionManager1 D-Bus names,
   # broker reply fields) match qdistro's contract fixture (the monorepo root's

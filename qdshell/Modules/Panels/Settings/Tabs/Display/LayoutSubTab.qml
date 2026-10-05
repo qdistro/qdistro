@@ -409,14 +409,37 @@ ColumnLayout {
     // centre it on the overlay. Matches the AutostartListSubTab/SessionTab
     // dialog pattern already used across the Settings tabs.
     anchors.centerIn: Overlay.overlay
-    title: I18n.tr("display.layout.confirm-title")
     closePolicy: Popup.NoAutoClose
+    // Bounded width: the word-wrapped body otherwise reports its unwrapped
+    // width, so at 200% on a 1280x800 output (640x400 logical) the dialog
+    // ran off-screen and "Keep changes" could not be reached; the change
+    // always reverted. Shell colours: the stock Controls background was
+    // light under the shell's light text, so the body was invisible.
+    width: Math.min(Math.round(480 * Style.uiScaleRatio),
+                    (Overlay.overlay ? Overlay.overlay.width : 480) - 2 * Style.marginL)
+    padding: Style.marginXL
+    background: Rectangle {
+      color: Color.mSurface
+      radius: Style.iRadiusS
+      border.color: Color.mPrimary
+      border.width: Style.borderM
+    }
 
     ColumnLayout {
+      width: confirmDialog.availableWidth
       spacing: Style.marginL
       NText {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
+        pointSize: Style.fontSizeL
+        font.weight: Style.fontWeightBold
+        color: Color.mOnSurface
+        text: I18n.tr("display.layout.confirm-title")
+      }
+      NText {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: Color.mOnSurface
         text: I18n.tr("display.layout.confirm-body")
               + " (" + root.confirmSecondsLeft + "s)"
       }
