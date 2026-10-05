@@ -131,7 +131,7 @@ pres_click_keep_changes() {
     local frame=${TMPDIR:-/tmp}/pres-keep-$$.png primary pt
     primary=$(qdwin_vmx_merged "jq -r .colors.mPrimary $PRES_SNAPSHOT" | tail -n 1)
     qdwin_screenshot "$frame" >/dev/null 2>&1 || { echo "pres_click_keep_changes: capture failed" >&2; return 1; }
-    pt=$(python3 - "$frame" "$primary" <<'PY'
+    pt=$(python3 - "$frame" "$primary" "${QDWIN_SCREEN_W:-1280}" "${QDWIN_SCREEN_H:-800}" <<'PY'
 import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert("RGB")
@@ -173,8 +173,10 @@ for y in range(y0, y1, 2):
 if best is None:
     raise SystemExit(1)
 _, cx, cy = best
-# qdwin_click takes coordinates in the 1280x800 helper space.
-print(round(cx * 1280 / w), round(cy * 800 / h), cx, cy)
+# qdwin_click takes coordinates in the helper space (QDWIN_SCREEN_W x _H,
+# 1280x800 by default), each axis scaled independently.
+sw, sh = int(sys.argv[3]), int(sys.argv[4])
+print(round(cx * sw / w), round(cy * sh / h), cx, cy)
 PY
 ) || { echo "pres_click_keep_changes: no primary button found in $frame" >&2; return 1; }
     set -- $pt
