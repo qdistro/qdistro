@@ -139,6 +139,49 @@ def test_mismatched_code_span_payload_is_ignored(qapp, qtbot):
         assert "`" not in ed.markdown(), bad
 
 
+def test_copy_paste_keeps_code_with_non_bmp_text(qapp, qtbot):
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("\U0001F600 `c\U0001F600de` z\n")
+    _select_all(ed)
+    mime = ed.createMimeDataFromSelection()
+    _paste_at_end(ed, mime)
+    md = ed.markdown()
+    assert md.count("`c\U0001F600de`") == 2, md
+
+
+def test_malformed_code_span_payloads_never_raise(qapp, qtbot):
+    from PyQt6.QtCore import QByteArray, QMimeData
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    for bad in (b'{"text": 1, "spans": [[0, 1]]}', b'{"text": "ab", "spans": [[0, 1e999]]}',
+                b'{"text": "ab", "spans": [[true, 1]]}', b'[1, 2]', b'{"text": "ab", "spans": "x"}',
+                b'\xff\xfe'):
+        ed.load_markdown("start\n")
+        mime = QMimeData()
+        mime.setText("ab")
+        mime.setData(MarkdownEditor.CODE_SPANS_MIME, QByteArray(bad))
+        _paste_at_end(ed, mime)
+        assert "`" not in ed.markdown(), bad
+
+
+def test_payload_without_inserted_text_never_formats_existing_text(qapp, qtbot):
+    from PyQt6.QtCore import QByteArray, QMimeData
+
+    ed = MarkdownEditor()
+    qtbot.addWidget(ed)
+    ed.load_markdown("abc\n")
+    cur = ed.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.Start)
+    ed.setTextCursor(cur)
+    mime = QMimeData()
+    mime.setData(MarkdownEditor.CODE_SPANS_MIME,
+                 QByteArray(b'{"text": "abc", "spans": [[0, 3]]}'))
+    ed.insertFromMimeData(mime)
+    assert "`" not in ed.markdown()
+
+
 def test_toggle_code_uses_document_code_role(qapp, qtbot, tmp_path, monkeypatch):
     snap = example_snapshot()
     write_snapshot(str(tmp_path), snap, require_unwritable_dirs=False)

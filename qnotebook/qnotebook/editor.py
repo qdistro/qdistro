@@ -669,29 +669,58 @@ class MarkdownEditor(QTextEdit):
         data.setData(self.CODE_SPANS_MIME, QByteArray(payload.encode("utf-8")))
         return data
 
-    def _restore_code_spans(self, source: QMimeData, insert_pos: int) -> None:
+    @staticmethod
+    def _utf16_len(text: str) -> int:
+        # Document positions count UTF-16 code units, not Python characters.
+        return len(text.encode("utf-16-le")) // 2
+
+    @classmethod
+    def _parse_code_spans(cls, raw: bytes) -> tuple[str, list[tuple[int, int]]] | None:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        text = payload.get("text")
+        spans = payload.get("spans")
+        if not isinstance(text, str) or not text or not isinstance(spans, list):
+            return None
+        length = cls._utf16_len(text)
+        out: list[tuple[int, int]] = []
+        for span in spans:
+            if (not isinstance(span, list) or len(span) != 2
+                    or not all(type(v) is int for v in span)):
+                return None
+            s, e = span
+            if not 0 <= s < e <= length:
+                return None
+            out.append((s, e))
+        return text, out
+
+    def _restore_code_spans(self, source: QMimeData, insert_pos: int, insert_end: int) -> None:
         if not source.hasFormat(self.CODE_SPANS_MIME):
             return
-        try:
-            payload = json.loads(bytes(source.data(self.CODE_SPANS_MIME)).decode("utf-8"))
-            text = payload["text"]
-            spans = [(int(s), int(e)) for s, e in payload["spans"]]
-        except (ValueError, KeyError, TypeError):
+        parsed = self._parse_code_spans(bytes(source.data(self.CODE_SPANS_MIME)))
+        if parsed is None:
+            return
+        text, spans = parsed
+        # Only the range this paste actually inserted, and only if it is the
+        # recorded fragment: never existing text that happens to match.
+        if insert_end - insert_pos != self._utf16_len(text):
             return
         check = QTextCursor(self.document())
         check.setPosition(insert_pos)
-        check.setPosition(min(insert_pos + len(text), self.document().characterCount() - 1),
-                          QTextCursor.MoveMode.KeepAnchor)
+        check.setPosition(insert_end, QTextCursor.MoveMode.KeepAnchor)
         if check.selection().toPlainText() != text:
-            return  # not the recorded fragment (external or reshaped paste)
+            return
         fmt = self._code_char_format()
         cur = QTextCursor(self.document())
         cur.joinPreviousEditBlock()  # one undo step with the paste itself
         for s, e in spans:
-            if 0 <= s < e <= len(text):
-                cur.setPosition(insert_pos + s)
-                cur.setPosition(insert_pos + e, QTextCursor.MoveMode.KeepAnchor)
-                cur.mergeCharFormat(fmt)
+            cur.setPosition(insert_pos + s)
+            cur.setPosition(insert_pos + e, QTextCursor.MoveMode.KeepAnchor)
+            cur.mergeCharFormat(fmt)
         cur.endEditBlock()
 
     def insertFromMimeData(self, source: QMimeData) -> None:  # noqa: N802 (Qt override)
@@ -710,7 +739,9 @@ class MarkdownEditor(QTextEdit):
                 return
         insert_pos = self.textCursor().selectionStart()
         super().insertFromMimeData(source)
-        self._restore_code_spans(source, insert_pos)
+        insert_end = self.textCursor().position()
+        if insert_end > insert_pos:
+            self._restore_code_spans(source, insert_pos, insert_end)
 
     # ---- insertions ----
 
