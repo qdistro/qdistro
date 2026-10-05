@@ -34,7 +34,7 @@ if getattr(QTermWidget, "_QTERMINATOR_FAKE", False) or getattr(
 from dataclasses import replace
 
 import qterminator.config as config_mod
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPalette
 from PyQt6.QtWidgets import QApplication
 from qdistro_presentation.model import example_snapshot, with_generation
 from qdistro_presentation.paths import ENV_OVERRIDE
@@ -53,13 +53,19 @@ LIGHT_SCHEME = "BlackOnWhite"
 
 
 @pytest.fixture(autouse=True)
-def fresh_config(tmp_path, monkeypatch):
+def fresh_config(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(config_mod, "CONFIG_FILE", str(tmp_path / "config.toml"))
+    # attach_presentation restyles the process-wide QApplication; put back
+    # what was there so later modules do not inherit this test's look.
+    palette = QPalette(qapp.palette())
+    stylesheet = qapp.styleSheet()
     Config._instance = None
     reset_controller_for_tests()
     yield
     reset_controller_for_tests()
+    qapp.setPalette(palette)
+    qapp.setStyleSheet(stylesheet)
     Config._instance = None
 
 
