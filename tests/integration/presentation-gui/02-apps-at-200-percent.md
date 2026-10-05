@@ -51,7 +51,7 @@ read from the frame you just opened:
    `qdwin_screenshot` and OPEN it: the **Apply** button is at the bottom
    right of the panel.
 3. `qdwin_click` **Apply**. A "Keep these display settings?" dialog appears
-   and reverts on its own after 15 s, so act at once:
+   and reverts on its own after 15 s (its countdown is shown), so act at once:
    `qdwin_screenshot /tmp/pres02-step1-confirm.png`, OPEN it, then
    `qdwin_mouse_move X Y` onto **Keep changes**, `sleep 0.5`, and
    `qdwin_click X Y` with the same coordinates. The frame is drawn at 200%
@@ -142,8 +142,13 @@ All asserts 0.1 → 4.1 pass.
 ## Known-broken-if
 
 - 1.1 reads 1 after Keep: the click missed the dialog button or landed after
-  the 15 s revert. Re-open the confirm frame and retry once; a second miss is
-  ERROR (driver), not FAIL.
+  the 15 s revert. Retry once: re-select `200%`, press Apply, then click
+  **Keep changes** IMMEDIATELY at the coordinates you read from the first
+  confirm frame (the dialog opens in the same place every time) — do not
+  spend the 15 s on a new capture first; capture afterwards. A second miss is
+  ERROR (driver), not FAIL. If the retry's Apply opens NO dialog at all,
+  that is a product FAIL (fixed by `claude/qdshell-apps-shell-follow`
+  `d208302d3`: stale serial, missing ToastService import, dead timer).
 - 2.1 dpr 1.0 at scale 2: Qt is not receiving the wl_output scale.
 - 2.1 font ≈ 2× expected: a consumer multiplies by devicePixelRatio
   (`apply_logical_ui_font` must not).
