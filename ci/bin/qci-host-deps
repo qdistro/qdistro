@@ -98,13 +98,23 @@ fi
 
 # --- other host-gate steps: build deps and test imports outside the symbols test ---
 # One row per probe: <kind> <probe> <zypper pkg> <apt pkg> <who needs it>.
-# kind py = `python3 -c "import <probe>"`; pc = pkg-config module; bin = command.
+# kind py = `python3 -c "import <probe>"` (comma-separated modules allowed);
+# pc = pkg-config module; bin = command; qt = a Qt 6 tool found where
+# qdshell/scripts/ci-local.sh looks (qt6 bin/libexec dirs, then PATH).
+have_qt_tool() {
+    local d
+    for d in /usr/lib64/qt6/bin /usr/lib/qt6/bin /usr/lib64/qt6/libexec /usr/lib/qt6/libexec; do
+        [ -x "$d/$1" ] && return 0
+    done
+    command -v "$1" >/dev/null 2>&1
+}
 while read -r kind probe zyp apt who; do
     case "$kind" in
-        py)  have_py "$probe" && { ok+=("$probe ($who)"); continue; } ;;
+        py)  have_py "${probe//,/, }" && { ok+=("$probe ($who)"); continue; } ;;
         pc)  command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "$probe" 2>/dev/null \
                  && { ok+=("$probe devel ($who)"); continue; } ;;
         bin) command -v "$probe" >/dev/null 2>&1 && { ok+=("$probe ($who)"); continue; } ;;
+        qt)  have_qt_tool "$probe" && { ok+=("$probe ($who)"); continue; } ;;
     esac
     case "$PM" in
         zypper) missing+=("$probe ($who) -> zypper $zyp"); distro_pkgs+=("$zyp") ;;
@@ -122,7 +132,11 @@ pc  xcursor                  libXcursor-devel        libxcursor-dev             
 pc  Qt6Qml                   qt6-declarative-devel   qt6-declarative-dev         qdshell-local
 pc  Qt6Network               qt6-base-devel          qt6-base-dev                qdshell-local
 pc  Qt6QuickTest             qt6-quicktest-devel     qt6-declarative-dev         qdshell-local
+qt  qmltestrunner            qt6-declarative-tools   qt6-declarative-dev-tools   qdshell-local
+qt  qmllint                  qt6-declarative-tools   qt6-declarative-dev-tools   qdshell-local
+qt  qmlformat                qt6-declarative-tools   qt6-declarative-dev-tools   qdshell-local
 bin weston                   weston                  weston                      qdwin-vendored-libweston-inert-relptr
+py  pywayland.protocol.relative_pointer_unstable_v1,pywayland.protocol.tablet_unstable_v2 python3-pywayland python3-pywayland qdwin-vendored-libweston-inert-relptr
 DEPS
 
 # De-duplicate the install lists (pango/pangocairo map to the same package, etc.).

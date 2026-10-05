@@ -419,7 +419,9 @@ pip install tomli_w
 also checks: PyYAML, numpy, hypothesis and pytest-cov (qdistro unit tests and
 coverage floor), mistune (qnotebook), PyQt6-WebEngine (qdbrowser), libXcursor
 devel (qdwin meson build), Qt 6 base/declarative/quicktest devel (qdshell build
-and qmltest), and the `weston` binary (the inert-relptr libweston test).
+and qmltest), the Qt 6 QML tools `qmltestrunner`/`qmllint`/`qmlformat` (qdshell's
+ci-local), and the `weston` binary plus python3 pywayland (the inert-relptr
+libweston test).
 
 **qdwin vendored-libweston symbols test** requires the `libevdev` and `pango`
 (incl. `pangocairo`) development packages:
