@@ -17,9 +17,12 @@ Singleton {
   property string downloadedSchemesDirectory: Settings.configDir + "colorschemes"
   property string colorsJsonFilePath: Settings.configDir + "colors.json"
 
+  // Settings.data is a plain object; react through Settings.settingChanged.
   Connections {
-    target: Settings.data.colorSchemes
-    function onDarkModeChanged() {
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.colorSchemes || key !== "darkMode")
+        return;
       Logger.d("ColorScheme", "Detected dark mode change");
       if (!Settings.data.colorSchemes.useWallpaperColors && Settings.data.colorSchemes.predefinedScheme) {
         // Re-apply current scheme to pick the right variant
