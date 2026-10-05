@@ -76,7 +76,11 @@ Example using qdshell's built-in dark target palette:
 The sixteen color fields are required opaque `#rrggbb` values. Text pairs
 (`mSurface`/`mOnSurface`, primary, secondary, tertiary, error, hover) must
 meet a 4.5:1 contrast ratio; `mSurfaceVariant`/`mOnSurfaceVariant` must meet
-3:1. A failing palette is rejected as a whole.
+3:1. Readers reject a failing palette as a whole. The publisher first replaces
+each failing on-colour with black or white, whichever contrasts more with its
+background (one of the two always reaches 4.5:1), so shell schemes whose accent
+pairs are below WCAG AA (most bundled light variants) still publish and stay
+readable. Backgrounds are never changed.
 
 `tooltipsEnabled` is exported from qdshell `ui.tooltipsEnabled`. Motion
 exports configured reduced motion (`general.animationDisabled` /

@@ -13,10 +13,12 @@ Singleton {
   id: root
 
   // Hook connections for automatic script execution
+  // Settings.data is a plain object; react through Settings.settingChanged.
   Connections {
-    target: Settings.data.colorSchemes
-    function onDarkModeChanged() {
-      executeDarkModeHook(Settings.data.colorSchemes.darkMode);
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner === Settings.data.colorSchemes && key === "darkMode")
+        executeDarkModeHook(Settings.data.colorSchemes.darkMode);
     }
   }
 

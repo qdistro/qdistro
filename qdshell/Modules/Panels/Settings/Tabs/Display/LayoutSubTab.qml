@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Quickshell
 import qs.Commons
 import qs.Services.Qdwin
+import qs.Services.UI
 import qs.Widgets
 import "../../../../../Services/Qdwin/OutputLayout.js" as OutputLayout
 
@@ -96,6 +97,12 @@ ColumnLayout {
     revertBaseline = OutputLayout.layoutFromSnapshots(Qdwin.outputs);
     phase = "applying";
     var list = OutputLayout.toApplyList(working);
+    // Apply against the LIVE serial. While idle, every outputsChanged already
+    // reloads the working copy, so the cached baseSerial added no staleness
+    // protection; it could lag the compositor's serial (notably after a
+    // timed-out revert) and the compositor then rejected the apply as
+    // `cancelled`, so a second Apply silently did nothing.
+    baseSerial = Qdwin.outputSerial;
     if (!Qdwin.applyOutputLayout(list, baseSerial)) {
       phase = "idle";
       ToastService.showWarning(I18n.tr("display.layout.title"),
@@ -138,8 +145,13 @@ ColumnLayout {
     function onOutputLayoutResult(applied, ok, cancelled) {
       if (!applied)
         return;  // a test result; the layout tab only applies
+      const wasReverting = root.phase === "reverting";
       if (ok) {
         root.step("apply-ok");
+        // A finished revert: show the layout that is live now, not the
+        // rejected edit, and pick up the post-revert serial.
+        if (wasReverting && root.phase === "idle")
+          root.reload();
       } else {
         root.step("apply-failed");
         ToastService.showWarning(I18n.tr("display.layout.title"),
@@ -390,10 +402,11 @@ ColumnLayout {
     running: root.phase === "confirming"
     onTriggered: {
       root.confirmSecondsLeft -= 1;
-      if (root.confirmSecondsLeft <= 0) {
-        running = false;
+      // No `running = false` here: assigning it broke the `running:` binding,
+      // so every confirm after the first never counted down or reverted.
+      // step("timeout") leaves "confirming", which stops the timer.
+      if (root.confirmSecondsLeft <= 0)
         root.step("timeout");
-      }
     }
   }
   onPhaseChanged: {
@@ -409,14 +422,39 @@ ColumnLayout {
     // centre it on the overlay. Matches the AutostartListSubTab/SessionTab
     // dialog pattern already used across the Settings tabs.
     anchors.centerIn: Overlay.overlay
-    title: I18n.tr("display.layout.confirm-title")
     closePolicy: Popup.NoAutoClose
+    // Bounded width: the word-wrapped body otherwise reports its unwrapped
+    // width, so at 200% on a 1280x800 output (640x400 logical) the dialog
+    // ran off-screen and "Keep changes" could not be reached; the change
+    // always reverted. Shell colours: the stock Controls background was
+    // light under the shell's light text, so the body was invisible.
+    // Usable overlay width; an overlay that exists before layout (or while
+    // resizing) can report 0, so fall back to the preferred width then.
+    readonly property real overlayAvailable: (Overlay.overlay && Overlay.overlay.width > 2 * Style.marginL) ? Overlay.overlay.width - 2 * Style.marginL : Math.round(480 * Style.uiScaleRatio)
+    width: Math.min(Math.round(480 * Style.uiScaleRatio), overlayAvailable)
+    padding: Style.marginXL
+    background: Rectangle {
+      color: Color.mSurface
+      radius: Style.iRadiusS
+      border.color: Color.mPrimary
+      border.width: Style.borderM
+    }
 
     ColumnLayout {
+      width: confirmDialog.availableWidth
       spacing: Style.marginL
       NText {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
+        pointSize: Style.fontSizeL
+        font.weight: Style.fontWeightBold
+        color: Color.mOnSurface
+        text: I18n.tr("display.layout.confirm-title")
+      }
+      NText {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: Color.mOnSurface
         text: I18n.tr("display.layout.confirm-body")
               + " (" + root.confirmSecondsLeft + "s)"
       }

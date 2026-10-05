@@ -27,21 +27,24 @@ Singleton {
     }
   }
 
+  // Settings.data is a plain object; react through Settings.settingChanged.
   Connections {
-    target: Settings.data.colorSchemes
-    function onDarkModeChanged() {
-      Logger.d("AppThemeService", "Detected dark mode change");
-      generate();
-    }
-    function onMonitorForColorsChanged() {
-      if (Settings.data.colorSchemes.useWallpaperColors) {
-        Logger.d("AppThemeService", "Monitor for colors changed to:", Settings.data.colorSchemes.monitorForColors);
-        generateFromWallpaper();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.colorSchemes)
+        return;
+      if (key === "darkMode") {
+        Logger.d("AppThemeService", "Detected dark mode change");
+        generate();
+      } else if (key === "monitorForColors") {
+        if (Settings.data.colorSchemes.useWallpaperColors) {
+          Logger.d("AppThemeService", "Monitor for colors changed to:", Settings.data.colorSchemes.monitorForColors);
+          generateFromWallpaper();
+        }
+      } else if (key === "generationMethod") {
+        Logger.d("AppThemeService", "Generation method changed to:", Settings.data.colorSchemes.generationMethod);
+        generate();
       }
-    }
-    function onGenerationMethodChanged() {
-      Logger.d("AppThemeService", "Generation method changed to:", Settings.data.colorSchemes.generationMethod);
-      generate();
     }
   }
 
