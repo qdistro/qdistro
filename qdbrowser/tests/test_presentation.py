@@ -258,8 +258,8 @@ def test_disabled_tooltips_swallow_chrome_not_webengine(
     from dataclasses import replace
 
     from PyQt6.QtCore import QEvent
-    from PyQt6.QtWidgets import QToolButton, QWidget
     from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWidgets import QToolButton, QWidget
     from qdbrowser.theme import current_controller
     from qdistro_presentation.model import with_generation
 
