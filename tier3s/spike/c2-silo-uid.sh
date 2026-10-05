@@ -68,7 +68,6 @@ INNER='id; echo uid_map:; cat /proc/self/uid_map; echo gid_map:; cat /proc/self/
 if [ -n "$IMG" ]; then
     obs "B: launch under runsc as $SILO_A, keep-id --user 1000:1000"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-        --runtime-flag=root=$RROOT \
         run --rm --security-opt label=disable --security-opt no-new-privileges \
         --security-opt "seccomp=$SMOKE" --cap-drop=ALL \
         --userns=keep-id --user 1000:1000 --read-only \
@@ -84,9 +83,9 @@ if [ -n "$IMG" ]; then
     done
     obs "container output (guest-side identity):"
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-        --runtime-flag=root=$RROOT logs t3s-c2-keepid 2>&1 | head -15
+        logs t3s-c2-keepid 2>&1 | head -15
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-        --runtime-flag=root=$RROOT rm -f t3s-c2-keepid >/dev/null 2>&1
+        rm -f t3s-c2-keepid >/dev/null 2>&1
 else
     obs "step 2 deferred: no image readable by $SILO_A yet — see step 5 result"
 fi
@@ -125,7 +124,6 @@ obs "dirs after info:"; find /home/$SILO_A/.local/share/containers -maxdepth 2 2
 SD=$WORK/state-$SILO_A; rm -rf "$SD"; install -d -o "$SILO_A" -g "$SILO_A" -m 0700 "$SD"
 if [ -n "$IMG" ]; then
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-        --runtime-flag=root=$RROOT \
         run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 \
         --network=none -v "$SD:/state" "$IMG" \
         sh -c 'stat -c "state %u:%g %a" /state; touch /state/x && echo wrote; id -u' 2>&1 | head -8
@@ -159,7 +157,6 @@ obs "and a run from the shared store (the real test — distinct uid map):"
 SIMG=$(as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}} {{.ReadOnly}}' 2>/dev/null | awk '$2=="true"{print $1; exit}')
 obs "readonly image ref picked: ${SIMG:-<none>}"
 [ -n "$SIMG" ] && as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
-    --runtime-flag=root=$RROOT \
     run --rm --userns=keep-id --user 1000:1000 --network=none \
     "$SIMG" sh -c 'id; echo SHARED-STORE-RUN-OK' 2>&1 | head -8
 
