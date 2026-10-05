@@ -89,6 +89,23 @@ if [ -n "$IMG" ]; then
         logs t3s-c2-keepid 2>&1 | head -15
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         rm -f t3s-c2-keepid >/dev/null 2>&1
+    # Identity evidence needs a LIVE container; the hardened profile above
+    # may itself deny fork — launch a minimal variant to isolate.
+    obs "B2: minimal launch (no seccomp/cap-drop) for identity evidence"
+    as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+        run --security-opt label=disable --userns=keep-id --user 1000:1000 \
+        --network=none --name t3s-c2-ident -d "$IMG" \
+        sh -c 'id; echo uid_map:; cat /proc/self/uid_map; echo gid_map:; cat /proc/self/gid_map; sleep 30' 2>&1 | tail -3
+    sleep 4
+    as_silo "$SILO_A" podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' t3s-c2-ident 2>/dev/null
+    obs "ident container host procs:"
+    for p in $(pgrep -f 't3s-c2-ident|runsc' 2>/dev/null | head -15); do
+        [ -d /proc/$p ] && printf '  pid=%s uid=%s comm=%s exe=%s\n' "$p" \
+            "$(awk '/^Uid:/{print $2}' /proc/$p/status)" "$(cat /proc/$p/comm)" \
+            "$(readlink /proc/$p/exe)"
+    done
+    as_silo "$SILO_A" podman logs t3s-c2-ident 2>&1 | grep -v 'level=warning' | head -10
+    as_silo "$SILO_A" podman rm -f t3s-c2-ident >/dev/null 2>&1
 else
     obs "step 2 deferred: no image readable by $SILO_A yet — see step 5 result"
 fi
@@ -129,6 +146,11 @@ if [ -n "$IMG" ]; then
     as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
         run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 \
         --network=none -v "$SD:/state" "$IMG" \
+        sh -c 'cat /proc/self/uid_map; stat -c "state %u:%g %a" /state; touch /state/x && echo wrote; id -u' 2>&1 | head -10
+    obs "same bind with :U (podman chowns to container user):"
+    as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+        run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 \
+        --network=none -v "$SD:/state:U" "$IMG" \
         sh -c 'stat -c "state %u:%g %a" /state; touch /state/x && echo wrote; id -u' 2>&1 | head -8
 fi
 
@@ -161,7 +183,7 @@ SIMG=$(as_silo "$SILO_A" podman images --format '{{.Repository}}:{{.Tag}} {{.Rea
 obs "readonly image ref picked: ${SIMG:-<none>}"
 [ -n "$SIMG" ] && as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
     run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 --network=none \
-    "$SIMG" sh -c 'id; echo SHARED-STORE-RUN-OK' 2>&1 | head -8
+    "$SIMG" sh -c 'id; echo uid_map:; cat /proc/self/uid_map; echo SHARED-STORE-RUN-OK' 2>&1 | head -10
 
 say "6. summary of open answers"
 echo "See OBSERVE lines above; findings get written into 13-phase-C2-progress.md"
