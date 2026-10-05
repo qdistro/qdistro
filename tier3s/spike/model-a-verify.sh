@@ -80,6 +80,21 @@ wait_for 30 manager_up && pass "session manager owns its bus name" || fail "sess
 wait_for 45 bash -c 'busctl introspect org.qdistro.SessionManager1 /org/qdistro/SessionManager1 2>/dev/null | grep -q "^\.CreateTier3sSilo "' \
     && pass "manager serves CreateTier3sSilo" || fail "manager does not serve CreateTier3sSilo"
 is "resolver on PATH" "$(command -v qdistro-resolve-binding | tr -d ' ' | grep -c .)" 1
+
+# idempotent across reruns: drop a prior run's silo row, account, runtime
+# dirs and state so the lazy-provisioning evidence is honest
+step "0b. reset prior verify state"
+systemctl stop qdistro-session-manager.service 2>/dev/null || true
+if getent passwd "$ACCT" >/dev/null; then
+    olduid=$(silo_uid)
+    userdel -r "$ACCT" 2>/dev/null || { userdel "$ACCT" && rm -rf "/home/$ACCT"; }
+    rm -rf "/run/qdistro-tier3s-rt/$olduid" "/run/qdistro-tier3s-runsc/$olduid"
+fi
+rm -f /etc/qdistro/silos.yaml
+rm -rf "/var/lib/qdistro/silos/$SILO"
+systemctl start qdistro-session-manager.service
+wait_for 30 manager_up || { fail "manager not back after reset"; finish; }
+pass "prior $ACCT state reset"
 # no tier3s anything yet (the account does not exist — assert_ma_clear is
 # only meaningful once it does)
 is "install: control records" "$(records | wc -l)" 0
@@ -132,7 +147,7 @@ step "3. per-silo image delivery (admin builds, silo store loads)"
 # what it reads (tier3s/ + the snapshot.conf pin beside it).
 b=/var/tmp/t3s-build; rm -rf "$b"
 install -d -m 0755 "$b" && cp -a "$SRC/tier3s" "$b/" && cp "$SRC/snapshot.conf" "$b/"
-d=/var/tmp/t3s-img; rm -rf "$d"; install -d -m 0755 "$d"
+d=/var/tmp/t3s-img; rm -rf "$d"; install -d -o admin -m 0755 "$d"
 out=$(as_admin bash "$b/tier3s/make-tier3s-image.sh" --oci-archive "$d" headless-smoke 2>&1); rc=$?
 printf '%s\n' "$out" | tail -6 | sed 's/^/    /'
 is "make-tier3s-image.sh rc" "$rc" 0
