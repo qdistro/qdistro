@@ -1808,6 +1808,10 @@ pip_install_apps() {
         log "skipping pip install of apps (--skip-build)"
         return 0
     fi
+    # The pinned interpreter must carry its own pip — a python313-pip from
+    # before the python3 -> 3.14 flip cannot serve python3.14.
+    python3 -m pip --version >/dev/null 2>&1 \
+        || die "python3 ($($(command -v python3) --version 2>&1)) has no pip module; install python314-pip first"
     if is_dev; then
         log "installing Python apps via pip --prefix=/usr (dev profile)..."
     else

@@ -12,6 +12,13 @@ install-deps:
     if command -v zypper >/dev/null; then
         sudo zypper install -y python314-PyQt6 python314-PyQt6-WebEngine \
             python314-pytest python314-pytest-qt python314-Pillow just
+        # python3 → 3.14: Tumbleweed still ships the unversioned symlink
+        # from python313-base, so `just run`/`just test` (python3 -m
+        # qdbrowser / pytest) would run an interpreter without PyQt6.
+        if command -v python3.14 >/dev/null && \
+           [ "$(readlink /usr/bin/python3 2>/dev/null)" != "python3.14" ]; then
+            sudo ln -sf python3.14 /usr/bin/python3
+        fi
     elif command -v apt >/dev/null; then
         sudo apt install -y python3-pyqt6 python3-pyqt6.qtwebenginewidgets \
             python3-pytest python3-pytest-qt python3-pil just

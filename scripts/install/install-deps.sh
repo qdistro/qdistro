@@ -36,7 +36,7 @@ QDISTRO_PKGS=(
   cairo-devel libpng16-devel libpng16-compat-devel pango-devel
   fontconfig-devel glib2-devel libva-devel
   python314-pywayland python314-cffi python314-PyQt6
-  qt6-wayland qt6-declarative-imports python314-setuptools
+  qt6-wayland qt6-declarative-imports python314-setuptools python314-pip
   tesseract-ocr grim
   socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
   Mesa-demo-egl wayland-utils
@@ -112,4 +112,10 @@ if ! zypper -n "${gpg_flags[@]}" refresh; then
     fi
 fi
 zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
+
+# python3 → 3.14: the snapshot still ships the unversioned symlink from
+# python313-base while the dep set is python314-* (see lib/qdistro-python.sh).
+# shellcheck source=lib/qdistro-python.sh
+. "$_ID_DIR/lib/qdistro-python.sh"
+ensure_python3_314 || { echo "[install-deps] ERROR: cannot pin /usr/bin/python3 to python3.14" >&2; exit 1; }
 echo "[install-deps] DONE"
