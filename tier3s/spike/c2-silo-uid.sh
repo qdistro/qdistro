@@ -152,6 +152,22 @@ if [ -n "$IMG" ]; then
         run --rm --security-opt label=disable --userns=keep-id --user 1000:1000 \
         --network=none -v "$SD:/state:U" "$IMG" \
         sh -c 'stat -c "state %u:%g %a" /state; touch /state/x && echo wrote; id -u' 2>&1 | head -8
+    stat -c 'host-side %n %u:%g %a' "$SD" "$SD/x" 2>&1   # who did :U chown to?
+    # keep-id keeps the SAME numeric uid: caller 1001 -> guest 1001. So a
+    # guest-uid-1000 workload maps to a SUBUID unless an explicit uidmap
+    # pins guest-1000 -> intermediate 0 (= the caller).
+    obs "keep-id running AS guest 1001 (same-numeric model):"
+    as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+        run --rm --security-opt label=disable --userns=keep-id \
+        --network=none -v "$SD:/state" "$IMG" \
+        sh -c 'id -u; stat -c "state %u:%g %a" /state; touch /state/y && echo wrote' 2>&1 | head -8
+    obs "explicit uidmap guest-1000 -> caller (the 1000-preserving variant):"
+    as_silo "$SILO_A" podman --runtime "$WRAPPER" --runtime-flag=network=none \
+        run --rm --security-opt label=disable \
+        --uidmap 0:1:1000 --uidmap 1000:0:1 --uidmap 1001:1001:64535 \
+        --gidmap 0:1:1000 --gidmap 1000:0:1 --gidmap 1001:1001:64535 \
+        --user 1000:1000 --network=none -v "$SD:/state" "$IMG" \
+        sh -c 'id -u; stat -c "state %u:%g %a" /state; touch /state/z && echo wrote' 2>&1 | head -8
 fi
 
 say "5. image store readability for a distinct uid"
