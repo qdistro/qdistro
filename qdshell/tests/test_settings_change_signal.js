@@ -52,4 +52,22 @@ for (const [rel, keys] of Object.entries(consumers)) {
     }
 }
 
+// colors.json writers (the switch now fires, so their races became visible):
+// ColorSchemeService writes the whole document once, and Color.qml writes its
+// adapter once per commit, never once per assigned field.
+const scheme = read("Services/Theming/ColorSchemeService.qml");
+const writer = scheme.slice(scheme.indexOf("function writeColorsToDisk"));
+assert.match(writer, /colorsWriter\.setText\(JSON\.stringify\(doc/,
+    "writeColorsToDisk must write the whole document in one setText");
+assert.ok(!/colorsWriter\.path = ""/.test(scheme),
+    "the path bounce re-reads the old file into the writer");
+assert.ok(!/JsonAdapter\s*\{\s*id:\s*out\b/.test(scheme),
+    "no per-field JsonAdapter writer for colors.json");
+const color = read("Commons/Color.qml");
+assert.match(color, /onAdapterUpdated:\s*\{\s*\/\/[\s\S]*?if \(root\.committingTarget\)\s*return;/,
+    "Color.qml must not write colors.json per field during a commit");
+const commit = color.slice(color.indexOf("function commitTargetPalette"));
+assert.match(commit, /customColorsData\.mOnHover = pal\.mOnHover;\s*customColorsFile\.writeAdapter\(\);\s*root\.committingTarget = false;/,
+    "commitTargetPalette must write once after all sixteen fields");
+
 console.log("ok - settings change signal guard");
