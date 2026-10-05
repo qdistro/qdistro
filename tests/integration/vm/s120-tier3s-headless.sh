@@ -24,9 +24,11 @@ T3S_TAG=s120
 SX=s120x; SA=s120a; SB=s120b
 
 step "0. preconditions (setup ran)"
+# probe --user admin screens the substrate (kernel/runsc/wrapper/profiles);
+# the per-uid runsc dir is a qt3s-* caller prerequisite, not admin's (C2).
 out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
 is "probe PASS before the launches" "$rc:$(printf '%s\n' "$out" | grep -c '^RESULT PASS')" "0:1"
-is "image present" "$(yes_no pm image exists "$IMAGE")" yes
+is "image archive loaded in admin's store" "$(yes_no pm image exists "$IMAGE")" yes
 is "broker allows the smoke spawn" "$(broker_check "$ACTION")" allow
 assert_all_clear pre
 for s in $SX $SA $SB; do
@@ -34,6 +36,16 @@ for s in $SX $SA $SB; do
 done
 set_argv "$SX=12" "$SA=600" "$SB=600" | sed 's/^/    /'
 is "argv set with the manager restarted" "$(yes_no manager_up)" yes
+# Model A: each silo gets a dedicated qt3s-<silo> account (created by a first,
+# refused, launch) and its own podman store carrying the workload image.
+for s in $SX $SA $SB; do
+    ensure_silo_image "$s" headless-smoke \
+        || { fail "ensure_silo_image $s"; continue; }
+    is "$s: qt3s account provisioned" "$(yes_no test -n "$(silo_uid "$s")")" yes
+    is "$s: image present in the silo's own store" "$(yes_no pm_s "$s" image exists "$IMAGE")" yes
+done
+is "$SA: a qt3s caller passes the full probe (incl. per-uid state root)" \
+    "$(/usr/lib/qdistro/tier3s/probe.sh --user "$(silo_acct "$SA")" > /dev/null 2>&1; echo $?)" 0
 
 # ---------------------------------------------------------------------------
 step "1. teardown path: normal exit (workload ends by itself after 12 s)"
@@ -48,7 +60,7 @@ is "normal-exit: workload ran to its end (no SIGTERM)" \
     "$(scope_log "$TX" | grep -c '^SMOKE done' | sed 's/[1-9][0-9]*/yes/'):$(scope_log "$TX" | grep -c '^SMOKE term')" "yes:0"
 is "normal-exit: verified cleanup tore the launch down" \
     "$(journalctl -u "$UX" --no-pager -o cat | grep -c "qdistro-tier3s-cleanup: $TX: torn down (qdistro-tier3s-$SX)")" 1
-assert_launch_gone normal-exit "$TX" "$(ctr_of $SX)"
+assert_launch_gone normal-exit "$TX" "$SX"
 sm StopSilo si $SX 10 > /dev/null; is "normal-exit: StopSilo afterwards" "$(silo_state $SX)" Stopped
 
 # ---------------------------------------------------------------------------
@@ -59,7 +71,8 @@ is "silo A Active" "$(silo_state $SA)" Active
 is "Type=notify: StartSilo returned only once launch A was recorded running" "$(cat "$WORK/up-phase.$SA")" running
 spid=$(rec "$TA" sentry_pid); cpid=$(rec "$TA" conmon_pid)
 cg="/sys/fs/cgroup$(rec "$TA" scope_cgroup)"
-read -r i_pid i_cpid i_id i_rt < <(pm inspect --format '{{.State.Pid}} {{.State.ConmonPid}} {{.Id}} {{.OCIRuntime}}' "$CA")
+SA_UID=$(silo_uid "$SA"); SA_GID=$(silo_gid "$SA"); SROOT_A=$(sroot "$SA")
+read -r i_pid i_cpid i_id i_rt < <(pm_s "$SA" inspect --format '{{.State.Pid}} {{.State.ConmonPid}} {{.Id}} {{.OCIRuntime}}' "$CA")
 
 # --- DONE 1: placement, by recursive cgroup.procs of the recorded scope
 classify() {   # classify <pid> -> class name
@@ -125,34 +138,39 @@ info "corroboration only: host processes in the scope named like the workload (s
 info "corroboration only: in-sandbox $(scope_log "$TA" | grep -m1 '^SMOKE kernel=')"
 info "corroboration only: in-sandbox $(scope_log "$TA" | grep -m1 '^SMOKE dmesg=')"
 
-# --- DONE 4 / ΔA1: plain podman calls reach the sandbox through the wrapper root
-is "state root: plain podman ps lists A running" "$(pm ps --filter "name=^$CA\$" --format '{{.State}}')" running
-pm ps --sync > /dev/null 2>&1; rc=$?
+# --- DONE 4 / ΔA1: plain podman-as-silo calls reach the sandbox through the wrapper root
+is "state root: plain podman ps lists A running" "$(pm_s "$SA" ps --filter "name=^$CA\$" --format '{{.State}}')" running
+pm_s "$SA" ps --sync > /dev/null 2>&1; rc=$?
 is "state root: plain podman ps --sync (runtime state query) rc" "$rc" 0
-is "state root: A still running after the sync" "$(ctr_status "$CA")" running
-is "state root: runsc state for A is in $SROOT" "$(yes_no test -n "$(find "$SROOT" -mindepth 1 -name "*$i_id*" 2>/dev/null)")" yes
+is "state root: A still running after the sync" "$(ctr_status "$SA")" running
+is "state root: runsc state for A is in $SROOT_A" "$(yes_no test -n "$(find "$SROOT_A" -mindepth 1 -name "*$i_id*" 2>/dev/null)")" yes
+is "state root: A's container is invisible to admin's store" "$(pm container exists "$CA" 2>/dev/null; echo $?)" 1
 
 # --- ΔA8: the control record
 is "record: dir and state are root 0700 / 0600" "$(stat -c '%U %a' "$CTL/$TA") / $(stat -c '%U %a' "$CTL/$TA/state")" "root 700 / root 600"
 is "record: container" "$(rec "$TA" container)" "$CA"
-is "record: token = container label" "$(rec "$TA" token)" "$(pm inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$CA")"
+is "record: token = container label" "$(rec "$TA" token)" "$(pm_s "$SA" inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$CA")"
 is "record: container_id" "$(rec "$TA" container_id)" "$i_id"
 is "record: unit" "$(rec "$TA" unit)" "$UA"
-is "record: runsc_root" "$(rec "$TA" runsc_root)" "$SROOT"
+is "record: silo account binding" "$(rec "$TA" silo_user):$(rec "$TA" silo_uid)" "$(silo_acct "$SA"):$SA_UID"
+is "record: admin_uid stays 1000" "$(rec "$TA" admin_uid)" 1000
+is "record: runsc_root" "$(rec "$TA" runsc_root)" "$SROOT_A"
 is "record: scope_cgroup = systemd's cgroup of the scope" "$(rec "$TA" scope_cgroup)" "$(systemctl show -p ControlGroup --value "qdistro-tier3s-$TA.scope")"
 is "record: sentry (pid, starttime)" "$(rec "$TA" sentry_pid) $(rec "$TA" sentry_starttime)" "$i_pid $(starttime "$i_pid")"
 is "record: conmon (pid, starttime)" "$(rec "$TA" conmon_pid) $(rec "$TA" conmon_starttime)" "$i_cpid $(starttime "$i_cpid")"
 is "record: per-launch dir is admin 0700 under the root parent" "$(stat -c '%u %a' "$LAUNCHES/$TA")" "1000 700"
 
-# --- DONE 8: posture from the emitted OCI spec
-spec=$(pm inspect --format '{{.OCIConfigPath}}' "$CA")
-python3 - "$spec" /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json <<'PY' > "$WORK/spec.txt"
+# --- DONE 8: posture from the emitted OCI spec (keep-id to the SILO uid)
+spec=$(pm_s "$SA" inspect --format '{{.OCIConfigPath}}' "$CA")
+python3 - "$spec" /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json "$SA_UID" "$SA_GID" <<'PY' > "$WORK/spec.txt"
 import json, sys
 c = json.load(open(sys.argv[1])); prof = json.load(open(sys.argv[2]))
+suid, sgid = int(sys.argv[3]), int(sys.argv[4])
 p, lx = c["process"], c["linux"]
 def out(k, v): print(f"{k}={v}")
 out("user", f'{p["user"]["uid"]}:{p["user"]["gid"]}')
-out("keepid", any(m["containerID"] == 1000 and m["hostID"] == 0 and m["size"] == 1 for m in lx.get("uidMappings", [])))
+out("keepid", any(m["containerID"] == suid and m["hostID"] == 0 and m["size"] == 1 for m in lx.get("uidMappings", [])))
+out("keepid_gid", any(m["containerID"] == sgid and m["hostID"] == 0 and m["size"] == 1 for m in lx.get("gidMappings", [])))
 out("readonly", c["root"].get("readonly") is True)
 out("selinux_process_label", p.get("selinuxLabel") or "none")
 ann = c.get("annotations", {})
@@ -163,8 +181,8 @@ caps = p.get("capabilities") or {}
 out("caps_empty", all(not v for v in caps.values()))
 out("netns_fresh", any(n["type"] == "network" and not n.get("path") for n in lx["namespaces"]))
 tm = {m["destination"]: m["options"] for m in c["mounts"] if m["type"] == "tmpfs"}
-for d in ("/run/user/1000", "/home/admin/.cache"):
-    out(f"tmpfs{d}", "uid=1000" in tm.get(d, []) and "gid=1000" in tm.get(d, []))
+for d in (f"/run/user/{suid}", "/home/admin"):
+    out(f"tmpfs{d}", f"uid={suid}" in tm.get(d, []) and f"gid={sgid}" in tm.get(d, []))
 s = lx.get("seccomp") or {}
 spec_allow = {n for r in s.get("syscalls", []) if r["action"] == "SCMP_ACT_ALLOW" for n in r["names"]}
 file_allow = {n for r in prof["syscalls"] if r["action"] == "SCMP_ACT_ALLOW" for n in r["names"]}
@@ -179,13 +197,13 @@ for call in ("fchmodat2", "llistxattr", "setfsuid", "setfsgid", "fadvise64", "li
 PY
 sp() { sed -n "s|^$1=||p" "$WORK/spec.txt"; }
 sed 's/^/    spec: /' "$WORK/spec.txt"
-is "posture/spec: process user (admin keep-id)" "$(sp user)" "1000:1000"
-is "posture/spec: keep-id maps container 1000 to the admin (rootless userns 0)" "$(sp keepid)" True
+is "posture/spec: process user (the silo's keep-id uid:gid)" "$(sp user)" "$SA_UID:$SA_GID"
+is "posture/spec: keep-id maps container uid to the silo (rootless userns 0)" "$(sp keepid):$(sp keepid_gid)" "True:True"
 is "posture/spec: read-only root" "$(sp readonly)" True
 is "posture/spec: label=disable (annotation, no process label)" "$(sp label_annotation):$(sp selinux_process_label)" "disable:none"
 is "posture/spec: no-new-privileges" "$(sp nnp)" True
 is "posture/spec: no capabilities in any set" "$(sp caps_empty)" True
-is "posture/spec: podman network mode" "$(pm inspect --format '{{.HostConfig.NetworkMode}}' "$CA")" none
+is "posture/spec: podman network mode" "$(pm_s "$SA" inspect --format '{{.HostConfig.NetworkMode}}' "$CA")" none
 is "posture/spec: fresh network namespace" "$(sp netns_fresh)" True
 for p in "$gofer" "$i_pid"; do
     is "posture/runsc: network=none on $(tr '\0' '\n' < "/proc/$p/cmdline" | head -1) ($p)" \
@@ -194,8 +212,8 @@ done
 is "posture/spec: selected per-workload seccomp file" "$(sp seccomp_annotation)" /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json
 is "posture/spec: seccomp default action (spec/file)" "$(sp seccomp_default)" "SCMP_ACT_ERRNO/SCMP_ACT_ERRNO"
 is "posture/spec: seccomp allow set = the file's allow set" "$(sp seccomp_allow_equal)" True
-is "posture/spec: tmpfs /run/user/1000 uid=1000,gid=1000" "$(sp tmpfs/run/user/1000)" True
-is "posture/spec: tmpfs /home/admin/.cache uid=1000,gid=1000" "$(sp tmpfs/home/admin/.cache)" True
+is "posture/spec: tmpfs /run/user/<silo uid> owned by the silo uid" "$(sp "tmpfs/run/user/$SA_UID")" True
+is "posture/spec: tmpfs /home/admin owned by the silo uid" "$(sp tmpfs/home/admin)" True
 for call in fchmodat2:DENY llistxattr:ALLOW setfsuid:DENY setfsgid:DENY fadvise64:DENY link:DENY syslog:ALLOW; do
     is "ΔA4 decision ${call%%:*} (declared:profile:spec)" "$(sp "decision_${call%%:*}")" "${call##*:}:${call##*:}:${call##*:}"
 done
@@ -204,20 +222,29 @@ done
 sm_line() { scope_log "$TA" | grep -m1 -F "SMOKE $1" | sed "s|^SMOKE $1||"; }
 scope_log "$TA" | awk '!seen[$0]++' | sed 's/^/    sandbox: /'
 pin=$(sed -n 's/^snapshot=\([0-9]\{8\}\)$/\1/p' /root/qdistro-src-t3s/snapshot.conf | head -1)
-is "ΔA5: image snapshot label = snapshot.conf pin" "$(pm image inspect --format '{{index .Labels "org.qdistro.snapshot"}}' "$IMAGE")" "$pin"
+is "ΔA5: image snapshot label = snapshot.conf pin" "$(pm_s "$SA" image inspect --format '{{index .Labels "org.qdistro.snapshot"}}' "$IMAGE")" "$pin"
 is "ΔA5: /etc/qdistro/tier3s-image inside = pin" "$(sm_line snapshot=)" "$pin"
-is "ΔA5/sandbox: uid 1000 (keep-id)" "$(sm_line id= | cut -d' ' -f1-2)" "uid=1000(admin) gid=1000(admin)"
-is "ΔA5: passwd entry for uid 1000" "$(sm_line passwd=)" "admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash"
+# model A: the guest uid IS the silo account's host uid (keep-id); the sandbox
+# passwd entry for it is the synthesized qt3s-<silo> one
+is "ΔA5/sandbox: the workload runs as the silo uid" "$(sm_line id= | cut -d' ' -f1-2)" "uid=$SA_UID($(silo_acct "$SA")) gid=$SA_GID($(silo_acct "$SA"))"
+is "ΔA5/sandbox: the silo uid is NOT admin's" "$(yes_no test "$SA_UID" -ne 1000)" yes
+is "ΔA5: passwd entry for the silo uid (keep-id synthesized)" \
+    "$(sm_line passwd_self= | cut -d: -f1,3,4)" "$(silo_acct "$SA"):$SA_UID:$SA_GID"
+is "ΔA5: the image's baked admin entry is still present" \
+    "$(sm_line passwd_admin=)" "admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash"
 is "ΔA5: HOME" "$(sm_line home=)" /home/admin
 is "ΔA5: UTF-8 locale" "$(sm_line lang= | cut -d' ' -f1-2)" "C.UTF-8 charmap=UTF-8"
-is "ΔA5: /run/user/1000 tmpfs owned 1000:1000 inside" "$(sm_line 'mount /run/user/1000=')" "1000:1000 700"
-is "ΔA5: /home/admin/.cache tmpfs owned 1000:1000 inside" "$(sm_line 'mount /home/admin/.cache=')" "1000:1000 700"
-is "sandbox: gVisor mount options carry uid=1000,gid=1000" \
-    "$(sm_line 'mountopts /run/user/1000=' | grep -c 'uid=1000,gid=1000'):$(sm_line 'mountopts /home/admin/.cache=' | grep -c 'uid=1000,gid=1000')" "1:1"
+is "ΔA5: /run/user/<silo uid> tmpfs owned by the silo uid inside" "$(sm_line "mount /run/user/$SA_UID=")" "$SA_UID:$SA_GID 700"
+is "ΔA5: /home/admin tmpfs owned by the silo uid inside" "$(sm_line 'mount /home/admin=')" "$SA_UID:$SA_GID 700"
+is "sandbox: gVisor mount options carry uid=<silo>,gid=<silo gid>" \
+    "$(sm_line "mountopts /run/user/$SA_UID=" | grep -c "uid=$SA_UID,gid=$SA_GID"):$(sm_line 'mountopts /home/admin=' | grep -c "uid=$SA_UID,gid=$SA_GID")" "1:1"
 is "sandbox: no capabilities" "$(sm_line caps=)" "inh:0000000000000000,prm:0000000000000000,eff:0000000000000000,bnd:0000000000000000,amb:0000000000000000"
 is "sandbox: NoNewPrivs and seccomp filter mode" "$(sm_line nnp=)" "1 seccomp=2"
 is "sandbox: root filesystem mounted ro" "$(sm_line rootfs=)" ro
-is "sandbox: write to the (admin-owned) rootfs home fails EROFS" "$(sm_line 'rootfs_write ' | grep -c 'rc=1 .*Read-only file system')" 1
+# model A keep-id: the guest uid owns nothing on the rootfs, so the write
+# fails EACCES before the ro check — either errno proves non-writability
+# (the mount table's own `ro` flag is asserted above as the ro evidence)
+is "sandbox: write to the read-only rootfs (/etc) fails" "$(sm_line 'rootfs_write ' | grep -c 'rc=1 .*Read-only file system\|rc=1 .*Permission denied\|rc=1 .*Operation not permitted')" 1
 is "ΔA4 fchmodat2 path exercised: plain chmod works" "$(sm_line 'chmod ')" "rc=0 mode=600"
 is "ΔA4 fchmodat2 path exercised: chmod -h (fchmodat2) is denied, mode unchanged" "$(sm_line 'chmod_nofollow ')" "rc=1 mode=600"
 is "ΔA4 llistxattr ALLOW effective: ls -l clean" "$(sm_line 'ls_l ')" "rc=0 stderr_bytes=0"
@@ -231,8 +258,9 @@ step "3. two concurrent launches; StopSilo (session-manager stop) of A preserves
 TB=$(up_silo $SB); CB=$(ctr_of $SB); UB=$(unit_of $SB)
 if [ -n "$TB" ]; then pass "launch B $TB recorded running while A is live"; else fail "launch B did not come up"; finish; fi
 is "two launches: distinct tokens and scopes" "$(yes_no test "$TA" != "$TB")" yes
-is "two launches: both running" "$(ctr_status "$CA"):$(ctr_status "$CB")" "running:running"
-read -r b_pid < <(pm inspect --format '{{.State.Pid}}' "$CB")
+is "two launches: both running" "$(ctr_status "$SA"):$(ctr_status "$SB")" "running:running"
+is "two launches: distinct silo uids" "$(yes_no test "$(silo_uid "$SA")" != "$(silo_uid "$SB")")" yes
+read -r b_pid < <(pm_s "$SB" inspect --format '{{.State.Pid}}' "$CB")
 placement B "$TB" "$b_pid"
 cgb="/sys/fs/cgroup$(rec "$TB" scope_cgroup)"
 outside=0
@@ -244,36 +272,37 @@ is "session-manager stop: StopSilo A rc" "$rc" 0
 is "session-manager stop: silo A Stopped" "$(silo_state $SA)" Stopped
 is "session-manager stop: A ended gracefully (SIGTERM reached the workload)" "$(scope_log "$TA" | grep -c '^SMOKE term' | sed 's/[1-9][0-9]*/yes/')" yes
 is "session-manager stop: verified cleanup tore A down" "$(unit_log "$UA" "$cur" | grep -c "qdistro-tier3s-cleanup: $TA: torn down")" 1
-assert_launch_gone session-manager-stop "$TA" "$CA"
+assert_launch_gone session-manager-stop "$TA" "$SA"
 alive=0; total=0
 while read -r p st; do total=$((total + 1)); [ "$(starttime "$p")" = "$st" ] && alive=$((alive + 1)); done < "$WORK/$TB.procs"
 is "two launches: every process of B survived A's teardown ($total)" "$alive" "$total"
 is "two launches: B unit, container, record, scope intact" \
-    "$(unit_state "$UB"):$(ctr_status "$CB"):$(yes_no test -d "$CTL/$TB"):$(unit_state "qdistro-tier3s-$TB.scope")" "active:running:yes:active"
+    "$(unit_state "$UB"):$(ctr_status "$SB"):$(yes_no test -d "$CTL/$TB"):$(unit_state "qdistro-tier3s-$TB.scope")" "active:running:yes:active"
 is "two launches: silo B still Active" "$(silo_state $SB)" Active
 
 # ---------------------------------------------------------------------------
-step "4. ΔA1 negatives on live B: plain podman stop with the state root missing, then replaced"
+step "4. ΔA1 negatives on live B: plain podman stop (as the silo account) with the state root missing, then replaced"
 bs=$(rec "$TB" sentry_pid); bst=$(rec "$TB" sentry_starttime)
+SROOT_B=$(sroot "$SB")
 b_alive() { [ "$(starttime "$bs")" = "$bst" ]; }
 preserved() {   # preserved <tag>: sandbox, record and scope all still there
     is "$1: sentry still alive" "$(yes_no b_alive)" yes
     is "$1: control record preserved" "$(yes_no test -f "$CTL/$TB/state")" yes
     is "$1: per-launch dir preserved" "$(yes_no test -d "$LAUNCHES/$TB")" yes
     is "$1: owning scope preserved" "$(unit_state "qdistro-tier3s-$TB.scope")" active
-    is "$1: podman still has the container (no false absence)" "$(pm container exists "$CB"; echo $?)" 0
+    is "$1: podman still has the container (no false absence)" "$(pm_s "$SB" container exists "$CB"; echo $?)" 0
 }
 cur=$(journal_cursor)
-mv "$SROOT" "$SROOT.s120-aside"
-out=$(pm stop -t 3 "$CB" 2>&1); rc=$?
+mv "$SROOT_B" "$SROOT_B.s120-aside"
+out=$(pm_s "$SB" stop -t 3 "$CB" 2>&1); rc=$?
 info "plain podman stop, root missing: rc=$rc: $(printf '%s' "$out" | tail -1)"
 if [ "$rc" -ne 0 ]; then pass "missing root: plain podman stop fails visibly (rc=$rc)"; else fail "missing root: plain podman stop succeeded"; fi
-is "missing root: no root minted by the stop" "$(yes_no test -e "$SROOT")" no
+is "missing root: no root minted by the stop" "$(yes_no test -e "$SROOT_B")" no
 is "missing root: wrapper refusal in the journal (tier3s-runsc)" \
-    "$(journalctl -t tier3s-runsc --after-cursor="$cur" --no-pager -o cat | grep -c "state root $SROOT is missing" | sed 's/[1-9][0-9]*/yes/')" yes
+    "$(journalctl -t tier3s-runsc --after-cursor="$cur" --no-pager -o cat | grep -c "state root $SROOT_B is missing" | sed 's/[1-9][0-9]*/yes/')" yes
 preserved "missing root (podman stop)"
-install -d -o 1000 -g 1000 -m 0700 "$SROOT"
-out=$(pm stop -t 3 "$CB" 2>&1); rc=$?
+install -d -o "$(silo_uid "$SB")" -g "$(silo_gid "$SB")" -m 0700 "$SROOT_B"
+out=$(pm_s "$SB" stop -t 3 "$CB" 2>&1); rc=$?
 info "plain podman stop, empty replacement root: rc=$rc: $(printf '%s' "$out" | tail -1)"
 if [ "$rc" -ne 0 ]; then pass "replaced root: plain podman stop fails visibly (rc=$rc)"; else fail "replaced root: plain podman stop succeeded"; fi
 preserved "replaced root (podman stop)"
@@ -284,45 +313,45 @@ printf '%s\n' "$out" | sed 's/^/    cleanup: /'
 if [ "$rc" -ne 0 ]; then pass "replaced root: cleanup returns an error (rc=$rc)"; else fail "replaced root: cleanup returned 0"; fi
 is "replaced root: no 'torn down' claimed" "$(printf '%s\n' "$out" | grep -c 'torn down')" 0
 preserved "replaced root (cleanup)"
-rmdir "$SROOT"
+rmdir "$SROOT_B"
 out=$("$CLEANUP" "$TB" 2>&1); rc=$?
 printf '%s\n' "$out" | sed 's/^/    cleanup: /'
 if [ "$rc" -ne 0 ]; then pass "missing root: cleanup returns an error (rc=$rc)"; else fail "missing root: cleanup returned 0"; fi
 is "missing root: cleanup refuses to query or stop" "$(printf '%s\n' "$out" | grep -c 'refusing to query or stop')" 1
 is "missing root: no 'torn down' and no 'no container' claimed" "$(printf '%s\n' "$out" | grep -ci 'torn down\|no container\|absent')" 0
 preserved "missing root (cleanup)"
-mv "$SROOT.s120-aside" "$SROOT"
-is "recovery: original state root restored" "$(stat -c '%u %a' "$SROOT")" "1000 700"
+mv "$SROOT_B.s120-aside" "$SROOT_B"
+is "recovery: original state root restored" "$(stat -c '%u %a' "$SROOT_B")" "$(silo_uid "$SB") 700"
 cur=$(journal_cursor)
 out=$("$CLEANUP" "$TB" 2>&1); rc=$?
 printf '%s\n' "$out" | sed 's/^/    cleanup: /'
 is "recovery: cleanup with the correct root rc" "$rc" 0
 is "recovery: cleanup tore B down" "$(printf '%s\n' "$out" | grep -c "$TB: torn down ($CB)")" 1
-assert_launch_gone recovery "$TB" "$CB"
+assert_launch_gone recovery "$TB" "$SB"
 wait_for 60 unit_down "$UB"
 is "recovery: B's launch unit ended" "$(unit_state "$UB")" inactive
 sm StopSilo si $SB 10 > /dev/null; is "recovery: StopSilo B afterwards" "$(silo_state $SB)" Stopped
 
 # ---------------------------------------------------------------------------
-step "6. teardown path: plain podman stop (as admin, no flags)"
+step "6. teardown path: plain podman stop (as the silo account, no flags)"
 TA=$(up_silo $SA)
 if [ -n "$TA" ]; then pass "podman-stop: launch $TA up"; else fail "podman-stop: launch did not come up"; fi
-out=$(pm stop -t 10 "$CA" 2>&1); rc=$?
+out=$(pm_s "$SA" stop -t 10 "$CA" 2>&1); rc=$?
 is "podman-stop: plain podman stop rc" "$rc" 0
 wait_for 60 unit_down "$UA"
 is "podman-stop: launch unit ended cleanly" "$(unit_state "$UA"):$(systemctl show -p Result --value "$UA")" "inactive:success"
 is "podman-stop: the workload got SIGTERM" "$(scope_log "$TA" | grep -c '^SMOKE term' | sed 's/[1-9][0-9]*/yes/')" yes
-assert_launch_gone podman-stop "$TA" "$CA"
+assert_launch_gone podman-stop "$TA" "$SA"
 sm StopSilo si $SA 10 > /dev/null; is "podman-stop: StopSilo afterwards" "$(silo_state $SA)" Stopped
 
-step "7. teardown path: plain podman rm -f (as admin, no flags)"
+step "7. teardown path: plain podman rm -f (as the silo account, no flags)"
 TA=$(up_silo $SA)
 if [ -n "$TA" ]; then pass "podman-rm: launch $TA up"; else fail "podman-rm: launch did not come up"; fi
-out=$(pm rm -f -t 10 "$CA" 2>&1); rc=$?
+out=$(pm_s "$SA" rm -f -t 10 "$CA" 2>&1); rc=$?
 is "podman-rm: plain podman rm -f rc" "$rc" 0
 wait_for 60 unit_down "$UA"
 is "podman-rm: launch unit ended" "$(unit_state "$UA")" inactive
-assert_launch_gone podman-rm "$TA" "$CA"
+assert_launch_gone podman-rm "$TA" "$SA"
 sm StopSilo si $SA 10 > /dev/null; is "podman-rm: StopSilo afterwards" "$(silo_state $SA)" Stopped
 
 step "8. cleanup"

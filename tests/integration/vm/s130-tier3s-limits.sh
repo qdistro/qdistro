@@ -34,12 +34,17 @@ SA=s130a; SB=s130b; SC=s130c
 step "0. preconditions (setup ran)"
 out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
 is "probe PASS before the launches" "$rc:$(printf '%s\n' "$out" | grep -c '^RESULT PASS')" "0:1"
-is "image present" "$(yes_no pm image exists "$IMAGE")" yes
+is "image staged in admin's store (archive source)" "$(yes_no pm image exists "$IMAGE")" yes
 is "broker allows the smoke spawn" "$(broker_check "$ACTION")" allow
 assert_all_clear pre
 for s in $SA $SB $SC; do
     sm CreateTier3sSilo ssss "$s" headless-smoke "$s" none > /dev/null
     is "CreateTier3sSilo $s" "$(silo_state "$s")" Created
+done
+# Model A: provision qt3s-<silo> + per-silo image store for all three silos
+for s in $SA $SB $SC; do
+    if ensure_silo_image "$s" headless-smoke; then pass "$s: qt3s-$s provisioned; image in its store"
+    else fail "$s: ensure_silo_image failed"; fi
 done
 set_argv "$SA=600" "$SB=600" "$SC=600" | sed 's/^/    /'
 is "argv set with the manager restarted" "$(yes_no manager_up)" yes
@@ -58,23 +63,32 @@ is "limits: pids.max = TasksMax=1024" "$(cat "$cg/pids.max" 2>/dev/null)" 1024
 is "limits: cpu.max = CPUQuota=200%" "$(cat "$cg/cpu.max" 2>/dev/null)" "200000 100000"
 # a valid higher value for each file — an invalid write would fail EINVAL
 # and tell us nothing about the delegation (sol r1 P4). The errno is the
-# evidence: only EACCES/EPERM proves the selective delegation holds.
+# evidence: only EACCES/EPERM proves the selective delegation holds. Under
+# model A the workload's principal is the SILO account — it owns the
+# delegated dir, so ITS denial is the coverage that matters; admin's is
+# kept on top (sol r5 #2).
+SA_A=$(silo_acct "$SA"); SU_A=$(silo_uid "$SA")
 declare -A RAISE=( [memory.max]=3221225472 [memory.swap.max]=1 [pids.max]=2048 [cpu.max]='300000 100000' )
 for f in memory.max memory.swap.max pids.max cpu.max; do
-    is "limits: $f is root's, not admin's" "$(stat -c %u "$cg/$f" 2>/dev/null)" 0
-    werr=$(runuser -u admin -- bash -c "echo '${RAISE[$f]}' > '$cg/$f'" 2>&1); wrc=$?
-    if [ "$wrc" -eq 0 ]; then
-        fail "limits: admin wrote $f (selective delegation broken)"
-    elif printf '%s' "$werr" | grep -qiE 'permission denied|EACCES|EPERM'; then
-        pass "limits: admin write to $f fails with EACCES/EPERM (rc=$wrc)"
-    else
-        fail "limits: admin write to $f failed but not with a permission error: $werr (rc=$wrc) — the denial is not proven to be the delegation"
-    fi
+    is "limits: $f is root's" "$(stat -c %u "$cg/$f" 2>/dev/null)" 0
+    for who in "$SA_A" admin; do
+        werr=$(runuser -u "$who" -- bash -c "echo '${RAISE[$f]}' > '$cg/$f'" 2>&1); wrc=$?
+        if [ "$wrc" -eq 0 ]; then
+            fail "limits: $who wrote $f (selective delegation broken)"
+        elif printf '%s' "$werr" | grep -qiE 'permission denied|EACCES|EPERM'; then
+            pass "limits: $who write to $f fails with EACCES/EPERM (rc=$wrc)"
+        else
+            fail "limits: $who write to $f failed but not with a permission error: $werr (rc=$wrc) — the denial is not proven to be the delegation"
+        fi
+    done
 done
-# and the delegation pieces that ARE admin's (the launch path depends on it):
-# the dir, cgroup.procs, cgroup.subtree_control, cgroup.threads (D-A3b)
-is "limits: scope dir itself is delegated to admin" "$(stat -c %u "$cg" 2>/dev/null)" 1000
-is "limits: cgroup.procs delegated (admin-writable)" "$(yes_no runuser -u admin -- test -w "$cg/cgroup.procs")" yes
+# and the delegation pieces that ARE the silo's (model A: the podman caller
+# is qt3s-<silo>, so the scope is delegated to the SILO uid — the dir,
+# cgroup.procs, cgroup.subtree_control, cgroup.threads; never to admin):
+is "limits: scope dir itself is delegated to the silo uid" "$(stat -c %u "$cg" 2>/dev/null)" "$SU_A"
+is "limits: cgroup.procs delegated (silo-writable)" "$(yes_no runuser -u "$SA_A" -- test -w "$cg/cgroup.procs")" yes
+is "limits: cgroup.procs NOT admin-writable (admin never runs the workload)" \
+    "$(yes_no runuser -u admin -- test -w "$cg/cgroup.procs")" no
 
 # --- placement re-proof: every class inside, no runsc-bundle process outside
 classify() {   # classify <pid> -> class name (same classes as s120)
@@ -93,7 +107,7 @@ classify() {   # classify <pid> -> class name (same classes as s120)
         *) echo "other:${exe:-?}" ;;
     esac
 }
-IPID=$(pm inspect --format '{{.State.Pid}}' "$CA")
+IPID=$(pm_s "$SA" inspect --format '{{.State.Pid}}' "$CA")
 declare -A n=()
 for p in $(tree_procs "$cg"); do c=$(classify "$p"); n[$c]=$(( ${n[$c]:-0} + 1 )); done
 for c in runuser podman-cli conmon runsc-gofer runsc-sandbox runsc-fd-parking systrap-stub; do
@@ -111,7 +125,7 @@ throttled_us() { sed -n 's/^throttled_usec //p' "$cg/cpu.stat" 2>/dev/null; }
 nt0=$(nr_throttled); tu0=$(throttled_us)
 is "cpu: counters readable before the burn" "$(yes_no test -n "$nt0$tu0")" yes
 # 4 burners wanting ~400% of one core on a 200% cap; self-terminating via jobs
-pm exec "$CA" sh -c '
+pm_s "$SA" exec "$CA" sh -c '
     for i in 1 2 3 4; do ( while :; do :; done ) & done
     sleep 12
     kill $(jobs -p) 2>/dev/null; wait 2>/dev/null
@@ -146,19 +160,28 @@ pev() { sed -n 's/^max //p' "$cgt/pids.events.local" 2>/dev/null; }
 pev0=$(pev); pev0=${pev0:-0}
 info "pids.current before the bomb: $pids0 (limit $pmax), pids.events.local max=$pev0"
 # cgroup v2 migration rule: moving a task into a cgroup needs write access
-# on the LOWEST COMMON ANCESTOR's cgroup.procs too — for an admin process in
-# user.slice writing into a system.slice scope that ancestor is the root
-# cgroup, which is root's. So the delegated cgroup.procs lets admin move
+# on the LOWEST COMMON ANCESTOR's cgroup.procs too — for a process outside
+# the scope writing into a system.slice scope that ancestor is the root
+# cgroup, which is root's. So the delegated cgroup.procs lets the silo move
 # tasks WITHIN the scope subtree (what podman needs) but never inject an
 # outside process into it. Assert that boundary first.
 moved=$(runuser -u admin -- env -i PATH=/usr/bin:/bin bash -c \
     "echo \$\$ > '$cgt/cgroup.procs' 2>/dev/null && echo MOVED=yes || echo MOVED=no")
 is "tasks: an outside admin process cannot inject itself into the scope" "$moved" MOVED=no
+# the principal that matters under model A (sol r5 #3): the silo owns the
+# scope's cgroup.procs, yet an outside process of ITS uid still cannot
+# migrate in — the common-ancestor write is still missing for it too.
+SA_C=$(silo_acct "$SC")
+is "tasks: silo C's account does own the scope's cgroup.procs" \
+    "$(yes_no runuser -u "$SA_C" -- test -w "$cgt/cgroup.procs")" yes
+moved=$(runuser -u "$SA_C" -- env -i PATH=/usr/bin:/bin bash -c \
+    "echo \$\$ > '$cgt/cgroup.procs' 2>/dev/null && echo MOVED=yes || echo MOVED=no")
+is "tasks: an outside silo-C process cannot inject itself into the scope" "$moved" MOVED=no
 # 1500 guest tasks map to host tasks inside the Sentry/stubs; pids.max=1024
 # makes the mapping hit the ceiling, and hitting it is fatal to this
 # sandbox (the Sentry cannot survive a failed task create) — bounded
 # either way, never over.
-pm exec "$CC" sh -c '
+pm_s "$SC" exec "$CC" sh -c '
     i=0; while [ "$i" -lt 1500 ]; do i=$((i+1)); sleep 20 & done
     j=0; for p in $(jobs -p); do j=$((j+1)); done
     echo "GUEST_JOBS=$j"; wait 2>/dev/null; echo GUEST_BOMB_DONE' > "$WORK/guestbomb.out" 2>&1 &
@@ -188,14 +211,14 @@ else
 fi
 # crossing the ceiling kills the sandbox OR the guest saw fork failures —
 # either way all 1500 did not become host tasks and stay that way
-if [ -n "$gjobs" ] && [ "$gjobs" -ge 1500 ] && [ "$(ctr_status "$CC")" = running ]; then
+if [ -n "$gjobs" ] && [ "$gjobs" -ge 1500 ] && [ "$(ctr_status "$SC" "$CC")" = running ]; then
     fail "tasks: all 1500 guest tasks live and the sandbox is healthy — pids.max did not bite"
 else
-    pass "tasks: the bomb was bounded (guest jobs=${gjobs:-died}, ctr=$(ctr_status "$CC" 2>/dev/null || echo gone))"
+    pass "tasks: the bomb was bounded (guest jobs=${gjobs:-died}, ctr=$(ctr_status "$SC" "$CC" 2>/dev/null || echo gone))"
 fi
 info "memory.events on C's scope after the bomb: $(tr '\n' ' ' 2>/dev/null < "$cgt/memory.events" || printf 'scope gone')"
 sm StopSilo si $SC 10 > /dev/null; is "tasks teardown: StopSilo C rc" "$?" 0
-assert_launch_gone tasks "$TC" "$CC"
+assert_launch_gone tasks "$TC" "$SC"
 
 # ---------------------------------------------------------------------------
 step "4. MemoryMax=2G on silo B: a guest hog triggers the scope's OOM kill"
@@ -215,10 +238,10 @@ o0=$(mev oom); o0=${o0:-0}
 kcur=$(journal_cursor)
 info "memory.events.local before the hog: $(tr '\n' ' ' 2>/dev/null < "$cgb/memory.events.local" || printf '?')"
 # ~2.6 GiB in a shell variable (tr avoids bash's NUL stripping): the guest's
-# memory is host memory of the Sentry/stubs inside the scope. timeout gets
-# the real runuser argv — it cannot exec the pm() shell function.
-timeout 240 runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin \
-    XDG_RUNTIME_DIR=/run/user/1000 podman exec "$CB" \
+# memory is host memory of the Sentry/stubs inside the scope. timeout runs
+# INSIDE the silo wrap (as_silo execs it; it cannot exec a shell function
+# either) so it still bounds the podman call.
+as_silo "$SB" timeout 240 podman exec "$CB" \
     sh -c 'big=$(head -c 2600M /dev/zero | tr "\0" a); echo SURVIVED ${#big}' \
     > "$WORK/hog.out" 2>&1 &
 HOGPID=$!
@@ -261,13 +284,13 @@ fi
 wait_for 120 unit_down "$UB"
 if unit_down "$UB"; then pass "memory: the hog's launch unit is down ($(systemctl show -p Result --value "$UB"))"
 else fail "memory: launch unit still $(unit_state "$UB") after the OOM"; fi
-assert_launch_gone memory "$TB" "$CB" 90
+assert_launch_gone memory "$TB" "$SB" 90
 sm StopSilo si $SB 10 > /dev/null; is "memory: StopSilo B afterwards" "$(silo_state $SB)" Stopped
 
 # ---------------------------------------------------------------------------
 step "5. teardown of silo A + all clear"
 sm StopSilo si $SA 10 > /dev/null; is "StopSilo A rc" "$?" 0
-assert_launch_gone cpu "$TA" "$CA"
+assert_launch_gone cpu "$TA" "$SA"
 for s in $SA $SB $SC; do sm DeleteSilo s "$s" > /dev/null; is "DeleteSilo $s" "$(silo_state "$s")" absent; done
 assert_all_clear end
 finish

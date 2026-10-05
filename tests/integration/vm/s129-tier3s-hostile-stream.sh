@@ -33,8 +33,8 @@ SA=s129a; SB=s129b
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 
 step "0. preconditions, silos"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
@@ -45,6 +45,11 @@ for s in $SA $SB; do
 done
 set_rules "allow:$GUISPAWN"
 is "broker answers allow for the GUI spawn" "$(broker_check "$GUISPAWN")" allow
+# Model A: provision qt3s-<silo> + per-silo image store for both silos
+for s in $SA $SB; do
+    if ensure_silo_image "$s" weston-terminal; then pass "$s: qt3s-$s provisioned; image in its store"
+    else fail "$s: ensure_silo_image failed"; fi
+done
 
 step "1. two GUI launches up"
 TA=$(up_gui_silo "$SA"); TB=$(up_gui_silo "$SB")
@@ -315,7 +320,7 @@ is "B's bridge client still live (starttime verified)" \
 is "B's bridge channel still established" "$(yes_no bridge_stream_live "$TB")" yes
 is "B's toplevel still in the qdshell model" \
     "$(qs_ipc tier3focus findSiloHandle "$SB" 2>/dev/null | head -1 | grep -cv 'HANDLE=-1')" 1
-is "B's container still running" "$(ctr_status "$(ctr_of "$SB")")" running
+is "B's container still running" "$(ctr_status "$SB")" running
 
 step "6. teardown: both launches come down clean"
 for s in $SA $SB; do
@@ -323,8 +328,8 @@ for s in $SA $SB; do
     is "StopSilo $s" "$(silo_state "$s")" Stopped
     wait_for 90 unit_down "$(unit_of "$s")"
 done
-assert_bridge_gone "cleanup/A" "$TA"; assert_launch_gone "cleanup/A" "$TA" "$(ctr_of "$SA")"
-assert_bridge_gone "cleanup/B" "$TB"; assert_launch_gone "cleanup/B" "$TB" "$(ctr_of "$SB")"
+assert_bridge_gone "cleanup/A" "$TA"; assert_launch_gone "cleanup/A" "$TA" "$SA"
+assert_bridge_gone "cleanup/B" "$TB"; assert_launch_gone "cleanup/B" "$TB" "$SB"
 for s in $SA $SB; do sm DeleteSilo s "$s" > /dev/null; is "DeleteSilo $s" "$(silo_state "$s")" absent; done
 set_rules none
 assert_all_clear end

@@ -102,7 +102,8 @@ chk_file session_manager/qdistro-tier3s-silo-launch /usr/libexec/qdistro/qdistro
 chk_file session_manager/qdistro_session_manager.py /usr/libexec/qdistro/qdistro_session_manager.py 755
 is "installed broker = tested commit" "$(sha256sum < /usr/libexec/qdistro/qdistro_admin_broker.py | cut -d' ' -f1)" \
     "$(sha256sum < "$SRC/broker/qdistro_admin_broker.py" | cut -d' ' -f1)"
-is "tmpfiles: state root" "$(stat -c '%u:%g %a' "$SROOT" 2>/dev/null)" "1000:1000 700"
+is "tmpfiles: runsc state-root base" "$(stat -c '%U:%G %a' "$RUNSC_BASE" 2>/dev/null)" "root:root 755"
+is "tmpfiles: per-silo runtime base" "$(stat -c '%U:%G %a' "$RT_BASE" 2>/dev/null)" "root:root 755"
 is "tmpfiles: control dir" "$(stat -c '%U:%G %a' "$CTL" 2>/dev/null)" "root:root 700"
 is "tmpfiles: per-launch parent" "$(stat -c '%U:%G %a' "$LAUNCHES" 2>/dev/null)" "root:root 755"
 is "tmpfiles: tier3s stanza dir" "$(stat -c '%U:%G %a' "$STANZA_DIR" 2>/dev/null)" "root:root 700"
@@ -216,5 +217,34 @@ step "6. broker allow rule for the smoke spawn"
 is "broker without a rule" "$(set_rule none; broker_check "$ACTION")" unknown
 set_rule allow
 is "broker with the allow rule" "$(broker_check "$ACTION")" allow
+
+# Model A canary (Phase C2): the workload runs as qt3s-<silo> out of the
+# silo's own podman store — exercise the whole chain once here (account
+# provisioning, per-uid dirs, per-silo image, silo-account probe, live
+# launch, teardown) so a broken substrate fails setup, not a driver's first
+# launch.
+step "6b. Model A canary: silo account + store + probe + one live launch"
+sm CreateTier3sSilo ssss t3setup headless-smoke t3setup none > /dev/null
+is "canary: silo created" "$(silo_state t3setup)" Created
+if ensure_silo_image t3setup headless-smoke; then
+    pass "canary: qt3s-t3setup provisioned; $IMAGE in its own store"
+else fail "canary: ensure_silo_image t3setup failed"; fi
+SU=$(silo_uid t3setup); SG=$(silo_gid t3setup)
+is "canary: silo uid:gid resolved and not admin's" "$(yes_no test -n "$SU" -a "$SU" != 1000)" yes
+is "canary: per-uid runsc root + runtime dir (silo-owned 0700)" \
+    "$(stat -c '%u %a' "$RUNSC_BASE/$SU" "$RT_BASE/$SU" 2>/dev/null | paste -sd' ' -)" "$SU 700 $SU 700"
+out=$(/usr/lib/qdistro/tier3s/probe.sh --user "qt3s-t3setup" 2>&1); rc=$?
+printf '%s\n' "$out" | grep -v '^PASS' | sed 's/^/    /'
+is "canary: probe as the silo account rc" "$rc" 0
+is "canary: admin still holds the staged archive copy" "$(yes_no pm image exists "$IMAGE")" yes
+is "canary: silo store holds the workload image" "$(yes_no pm_s t3setup image exists "$IMAGE")" yes
+set_argv t3setup=120 | sed 's/^/    /'
+tok=$(up_silo t3setup)
+if [ -n "$tok" ]; then pass "canary: launch $tok recorded running"; else fail "canary: launch did not come up"; finish; fi
+is "canary: container runs in the silo store, not admin's" \
+    "$(pm_s t3setup container exists "$(ctr_of t3setup)"; echo $?):$(pm container exists "$(ctr_of t3setup)" 2>/dev/null; echo $?)" "0:1"
+sm StopSilo si t3setup 10 > /dev/null; is "canary: StopSilo" "$(silo_state t3setup)" Stopped
+assert_launch_gone canary "$tok" t3setup
+sm DeleteSilo s t3setup > /dev/null; is "canary: DeleteSilo" "$(silo_state t3setup)" absent
 assert_all_clear setup
 finish

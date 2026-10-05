@@ -291,7 +291,9 @@ fi
 
 # --- runsc state root (tier3s/CONTRACT.md D-A1) -----------------------------
 # The wrapper uses /run/qdistro-tier3s-runsc/<host uid> for every runsc call
-# and refuses to create it; provisioning (tmpfiles.d/qdistro-tier3s.conf) does.
+# and refuses to create it; the spawn creates it per qt3s-* podman caller at
+# launch (C2 model A), so the per-uid dir is a prerequisite only for qt3s-*
+# accounts — a non-caller (e.g. --user admin) has no per-uid dir at all.
 SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
 # Every NSS lookup for the foreign user is bounded (fable A r3 P3-2): a wedged
 # provider hangs the spawn's probe otherwise, and timeout's nonzero status —
@@ -308,8 +310,10 @@ else
     SR="$SR_BASE/$sr_uid"
     if [ -L "$SR_BASE" ] || [ ! -d "$SR_BASE" ] || [ "$(stat -c '%u %a' -- "$SR_BASE")" != "$EXP_UID 755" ]; then
         fail state_root "$SR_BASE missing, a symlink or not uid $EXP_UID 0755 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+    elif [[ "$USER_NAME" != qt3s-* ]]; then
+        pass state_root "$SR_BASE (per-uid dir is a qt3s-* caller prerequisite; $USER_NAME never invokes runsc)"
     elif [ -L "$SR" ] || [ ! -d "$SR" ] || [ "$(stat -c '%u %a' -- "$SR")" != "$sr_uid 700" ]; then
-        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (spawn-tier3s.sh creates it at launch)"
     elif [ -z "$ROOT" ] && [ "${#SR}" -gt 31 ]; then
         fail state_root "$SR is longer than 31 bytes (runsc control socket path)"
     else

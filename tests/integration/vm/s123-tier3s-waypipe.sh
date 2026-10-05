@@ -23,8 +23,8 @@ APPID="qdistro.tier3s.$SILO"
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 
 step "0. preconditions"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
@@ -33,21 +33,33 @@ sm CreateTier3sSilo ssss "$SILO" weston-terminal "$SILO" none > /dev/null
 is "CreateTier3sSilo $SILO" "$(silo_state "$SILO")" Created
 set_rules "allow:$GUISPAWN"
 is "broker answers allow for the GUI spawn" "$(broker_check "$GUISPAWN")" allow
+# Model A: provision qt3s-<silo> and load the workload image into ITS store
+if ensure_silo_image "$SILO" weston-terminal; then pass "qt3s-$SILO provisioned; image in its store"
+else fail "ensure_silo_image $SILO failed"; fi
+SUID=$(silo_uid "$SILO"); SGID=$(silo_gid "$SILO")
+is "silo uid:gid resolved, not admin's" "$(yes_no test -n "$SUID" -a "$SUID" != 1000)" yes
+is "probe PASS as the silo account" \
+    "$(/usr/lib/qdistro/tier3s/probe.sh --user "$(silo_acct "$SILO")" > /dev/null 2>&1; echo $?)" 0
 
 step "1. GUI launch brings up the bridge pair"
 reg_before=$(audit_count "qdistro.lineage.register:$SILO")
 cur=$(journal_cursor)
 # link.sock exists only between the waypipe client's bind() (step 11b,
 # before podman run) and the sandbox waypipe server's connect (waypipe -o
-# unlinks at accept — single-attach). Capture its mode+owner in that
-# window; post-attach evidence is the fd/netns topology below.
+# unlinks at accept — single-attach). The spawn chowns it to the silo after
+# the bind (CONTRACT §5.12), so the interesting stat is the LAST one before
+# the unlink — keep overwriting until the socket is gone.
 : > "$WORK/link-sock-stat"
-( end=$((SECONDS + 120)); while [ "$SECONDS" -lt "$end" ]; do
+( end=$((SECONDS + 120)); seen=0; while [ "$SECONDS" -lt "$end" ]; do
+      found=0
       for f in "$LAUNCHES"/*/link.sock; do
           [ -e "$f" ] || continue
-          stat -c '%a:%u' "$f" > "$WORK/link-sock-stat" 2>/dev/null
-          exit 0
+          found=1
+          stat -c '%a:%u' "$f" > "$WORK/link-sock-stat.new" 2>/dev/null \
+              && mv "$WORK/link-sock-stat.new" "$WORK/link-sock-stat"
       done
+      [ "$seen" = 1 ] && [ "$found" = 0 ] && exit 0   # unlinked at accept: stop
+      [ "$found" = 1 ] && seen=1
       sleep 0.02
   done ) &
 SOCKPOLL=$!
@@ -96,26 +108,29 @@ is "bridge wrapper is root and the waypipe client's ancestor" \
     "$(stat -c %u "/proc/$WP" 2>/dev/null):$anc_ok" "0:yes"
 
 step "4. the sandbox half: container, runsc runtime, bridge mount"
-is "container runs under the token label" \
-    "$(ctr_status "$CTR"):$(pm inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$CTR" 2>/dev/null)" \
+is "container runs under the token label (silo store)" \
+    "$(ctr_status "$SILO" "$CTR"):$(pm_s "$SILO" inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$CTR" 2>/dev/null)" \
     "running:$TOK"
+is "container invisible to admin's store" "$(pm container exists "$CTR" 2>/dev/null; echo $?)" 1
 is "container OCIRuntime is the tier3s wrapper" \
-    "$(pm inspect --format '{{.OCIRuntime}}' "$CTR" 2>/dev/null)" /usr/libexec/qdistro/tier3s-runsc
+    "$(pm_s "$SILO" inspect --format '{{.OCIRuntime}}' "$CTR" 2>/dev/null)" /usr/libexec/qdistro/tier3s-runsc
 is "container carries the launch-dir bind mount" \
-    "$(pm inspect --format '{{range .Mounts}}{{if eq .Destination "/run/qdistro/link"}}{{.Source}}:{{.Destination}}{{end}}{{end}}' "$CTR" 2>/dev/null)" \
+    "$(pm_s "$SILO" inspect --format '{{range .Mounts}}{{if eq .Destination "/run/qdistro/link"}}{{.Source}}:{{.Destination}}{{end}}{{end}}' "$CTR" 2>/dev/null)" \
     "$LAUNCHES/$TOK:/run/qdistro/link"
 is "bridge mount is READ-ONLY in the sandbox view (P2-1: a hostile guest must not fill host /run)" \
-    "$(pm inspect --format '{{range .Mounts}}{{if eq .Destination "/run/qdistro/link"}}{{.RW}}{{end}}{{end}}' "$CTR" 2>/dev/null)" \
+    "$(pm_s "$SILO" inspect --format '{{range .Mounts}}{{if eq .Destination "/run/qdistro/link"}}{{.RW}}{{end}}{{end}}' "$CTR" 2>/dev/null)" \
     "false"
 is "sandbox write to the bridge dir is refused" \
-    "$(pm exec "$CTR" sh -c 'touch /run/qdistro/link/.w 2>/dev/null; printf "rc=%s" "$?"' 2>/dev/null)" "rc=1"
+    "$(pm_s "$SILO" exec "$CTR" sh -c 'touch /run/qdistro/link/.w 2>/dev/null; printf "rc=%s" "$?"' 2>/dev/null)" "rc=1"
 wait "$SOCKPOLL" 2>/dev/null || true
-is "host link.sock was admin-owned 0600 at bind (umask 0177 wrap, pre-attach)" \
-    "$(cat "$WORK/link-sock-stat" 2>/dev/null)" "600:1000"
-is "launch dir is admin-owned 0700" \
-    "$(stat -c '%a:%u' "$LAUNCHES/$TOK" 2>/dev/null)" "700:1000"
+is "host link.sock is silo-owned 0600 (chowned at bind so the sandbox can connect)" \
+    "$(cat "$WORK/link-sock-stat" 2>/dev/null)" "600:$SUID"
+is "launch dir is admin-owned 0711 (traversable by the silo, listable by no one)" \
+    "$(stat -c '%a:%u' "$LAUNCHES/$TOK" 2>/dev/null)" "711:1000"
 is "container NetworkMode is none" \
-    "$(pm inspect --format '{{.HostConfig.NetworkMode}}' "$CTR" 2>/dev/null)" none
+    "$(pm_s "$SILO" inspect --format '{{.HostConfig.NetworkMode}}' "$CTR" 2>/dev/null)" none
+is "sandbox identity is the silo uid (keep-id, model A)" \
+    "$(pm_s "$SILO" exec "$CTR" id -u 2>/dev/null)" "$SUID"
 # host-uds=open evidence: the accepted channel's host end lives in the
 # runsc GOFER's netns (gVisor moves the accepted socket off the host
 # netns; a host-namespace ss does NOT see it). `nsenter -t <gofer> -n
@@ -128,7 +143,7 @@ is "link.sock channel is an ESTABLISHED host unix socket through the gofer netns
     "$(nsenter -t "$GP" -n ss -xpH 2>/dev/null | grep -c 'ESTAB.*link\.sock\|link\.sock.*ESTAB' | awk '{print ($1>=1)?1:0}')" 1
 # the recorded podman create argv is the exact launch argv: assert the
 # security-critical entries literally, not by pattern family.
-CC=$(pm inspect --format '{{json .Config.CreateCommand}}' "$CTR" 2>/dev/null)
+CC=$(pm_s "$SILO" inspect --format '{{json .Config.CreateCommand}}' "$CTR" 2>/dev/null)
 is "create argv pins --runtime-flag=host-uds=open" \
     "$(printf '%s' "$CC" | grep -c 'host-uds=open')" 1
 is "create argv pins --network=none" \
@@ -141,10 +156,12 @@ is "create argv mounts ONLY the launch dir under /run/qdistro (no whole-/run or 
     "$(printf '%s' "$CC" | grep -oE '"-v","[^"]+:[^"]+"' | grep -vc "$LAUNCHES/$TOK:/run/qdistro/link")" 0
 is "create argv: no --privileged, no root user, no host userns" \
     "$(printf '%s' "$CC" | grep -cE '"--privileged"|--userns=host|"--user","?0')+$(printf '%s' "$CC" | grep -c '"--userns=keep-id"')" "0+1"
+is "create argv: keep-id --user is the silo uid:gid (model A)" \
+    "$(printf '%s' "$CC" | grep -c -- "\"--user=$SUID:$SGID\"")" 1
 # the COMPLETE mount set: every host bind whose source lives outside the
 # launch dir or podman's own per-container userdata dir (hosts/resolv/
 # .containerenv) is a leak — log the full list, assert none.
-MTS=$(pm inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}:{{.Destination}}:{{.RW}} {{end}}{{end}}' "$CTR" 2>/dev/null)
+MTS=$(pm_s "$SILO" inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}:{{.Destination}}:{{.RW}} {{end}}{{end}}' "$CTR" 2>/dev/null)
 info "container mounts: $MTS"
 is "no host bind outside the launch dir and podman-internal userdata" \
     "$(printf '%s\n' $MTS | sed 's/:.*//' | grep -v "^$LAUNCHES/$TOK$" | grep -vc '^/run/containers/')" 0
@@ -199,7 +216,7 @@ step "7. teardown reaps the bridge too"
 snapshot_bridge "$TOK"
 sm StopSilo si "$SILO" 10 > /dev/null; is "StopSilo $SILO" "$(silo_state "$SILO")" Stopped
 wait_for 90 unit_down "$UNIT"
-assert_launch_gone teardown "$TOK" "$CTR"
+assert_launch_gone teardown "$TOK" "$SILO"
 assert_bridge_gone teardown "$TOK"
 sm DeleteSilo s "$SILO" > /dev/null; is "DeleteSilo $SILO" "$(silo_state "$SILO")" absent
 set_rules none

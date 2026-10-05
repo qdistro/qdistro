@@ -33,8 +33,8 @@ T3S_EXIT_HOOK='
     [ -S "'"$ADMIN_RT"'/'"$GUI_DISPLAY"'.moved" ] && mv "'"$ADMIN_RT"'/'"$GUI_DISPLAY"'.moved" "'"$ADMIN_RT"'/'"$GUI_DISPLAY"'" || :'
 
 step "0. preconditions, silos"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' /etc/qdistro/profile | tail -1)" dev
@@ -45,6 +45,11 @@ for s in $SA $SB; do
 done
 set_rules "allow:$GUISPAWN"
 is "broker answers allow for the GUI spawn" "$(broker_check "$GUISPAWN")" allow
+# Model A: provision qt3s-<silo> + per-silo image store for both silos
+for s in $SA $SB; do
+    if ensure_silo_image "$s" weston-terminal; then pass "$s: qt3s-$s provisioned; image in its store"
+    else fail "$s: ensure_silo_image failed"; fi
+done
 
 # refused_gui <tag> <silo> <REFUSE substring>: start the launch, expect the
 # named refusal, and prove nothing ran — no podman container event, no
@@ -74,7 +79,7 @@ refused_gui() {
     is "$tag: systemd never started an owning scope" "$(units_started_since "$cur" "$T3S_SCOPE_RE")" 0
     is "$tag: no control record, no per-launch dir" \
         "$(records | grep -c .):$(qry find "$LAUNCHES" -mindepth 1 | grep -c .)" "0:0"
-    is "$tag: no container of any kind" "$(qry pm ps -a --format '{{.Names}}' | grep -c .)" 0
+    is "$tag: no container of any kind in any store" "$(qry pm_each ps -a --format '{{.Names}}' | grep -c .)" 0
     is "$tag: no launch record or link.sock leftover" \
         "$(qry find "$ADMIN_RT" -name 'qdistro-tier3s-launchrec-*' | grep -c .):$(qry find "$LAUNCHES" -name link.sock | grep -c .)" "0:0"
     systemctl reset-failed "$unit" 2>/dev/null
@@ -141,7 +146,7 @@ cur=$(journal_cursor)
 sm StopSilo si "$SA" 10 > /dev/null
 is "lifecycle: StopSilo" "$(silo_state "$SA")" Stopped
 wait_for 90 unit_down "$(unit_of "$SA")"
-assert_launch_gone "lifecycle" "$TA" "$(ctr_of "$SA")"
+assert_launch_gone "lifecycle" "$TA" "$SA"
 assert_bridge_gone "lifecycle" "$TA"
 
 step "5. concurrent launches come up and go down independently"
@@ -166,7 +171,7 @@ systemctl kill -s KILL --kill-whom=main "$(unit_of "$SA")"
 wait_for 90 unit_down "$(unit_of "$SA")"
 is "concurrent: A's launch unit failed visibly (signal)" \
     "$(unit_state "$(unit_of "$SA")"):$(systemctl show -p Result --value "$(unit_of "$SA")")" "failed:signal"
-assert_launch_gone "concurrent/A-killed" "$TA" "$(ctr_of "$SA")"
+assert_launch_gone "concurrent/A-killed" "$TA" "$SA"
 assert_bridge_gone "concurrent/A-killed" "$TA"
 is "concurrent: B's launch still runs" "$(rec "$TB" phase)" running
 is "concurrent: B's bridge client still live" \
@@ -177,7 +182,7 @@ systemctl reset-failed "$(unit_of "$SA")" 2>/dev/null
 sm StopSilo si "$SA" 10 > /dev/null
 sm StopSilo si "$SB" 10 > /dev/null; is "concurrent: StopSilo B" "$(silo_state "$SB")" Stopped
 wait_for 90 unit_down "$(unit_of "$SB")"
-assert_launch_gone "concurrent/B-stopped" "$TB" "$(ctr_of "$SB")"
+assert_launch_gone "concurrent/B-stopped" "$TB" "$SB"
 assert_bridge_gone "concurrent/B-stopped" "$TB"
 
 step "6. cleanup"
