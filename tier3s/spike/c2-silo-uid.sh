@@ -18,6 +18,10 @@ getenforce 2>/dev/null || true
 obs "admin store images:"; as_admin podman images --format '{{.Repository}}:{{.Tag}} {{.Id}}' 2>&1 | head -5
 obs "existing silo/group rows:"; getent group "$BRIDGE_GROUP"; getent passwd user1 user2 2>/dev/null; cat /etc/subuid /etc/subgid 2>/dev/null | head -10
 
+# Idempotent re-runs: drop state a prior run may have left on the guest.
+rm -f /home/$SILO_A/.config/containers/storage.conf /home/$SILO_B/.config/containers/storage.conf 2>/dev/null
+rm -rf /var/lib/qdistro-tier3s-store /var/tmp/tier3s-spike
+
 say "1. silo users + subuid/subgid allocation"
 for u in "$SILO_A" "$SILO_B"; do
     if ! id "$u" >/dev/null 2>&1; then
@@ -96,8 +100,9 @@ usermod -a -G "$BRIDGE_GROUP" "$SILO_A" && obs "$SILO_A added to $BRIDGE_GROUP: 
 obs "$SILO_B groups (control, not a member): $(id "$SILO_B")"
 SOCK=$BDIR/bridge.sock
 # A trivial unix listener as admin to stand in for the waypipe endpoint.
-as_admin socat "UNIX-LISTEN:$SOCK,mode=660,group=$BRIDGE_GROUP" SYSTEM:'echo pong' &
+as_admin socat "UNIX-LISTEN:$SOCK,mode=660" SYSTEM:'echo pong' &
 sleep 1
+chgrp "$BRIDGE_GROUP" "$SOCK" 2>&1   # admin isn't a member; group fixup is a provisioning step
 stat -c 'stat %n %U:%G %a' "$BDIR" "$SOCK" 2>&1
 obs "$SILO_A (member) connect:"; as_silo "$SILO_A" socat - UNIX-CONNECT:"$SOCK" </dev/null 2>&1; echo "rc=$?"
 obs "$SILO_B (non-member) connect:"; as_silo "$SILO_B" socat - UNIX-CONNECT:"$SOCK" </dev/null 2>&1; echo "rc=$?"
@@ -132,7 +137,7 @@ obs "5a. per-silo store already exercised above: silo pulled + keeps its own ima
 #     question from `03`: store content created under admin's uid map must
 #     be traversable under the silo's distinct uid map.
 SHARED=/var/lib/qdistro-tier3s-store
-rm -rf "$SHARED"; install -d -m 0755 "$SHARED"
+rm -rf "$SHARED"; install -d -o "$ADMIN" -g "$ADMIN" -m 0755 "$SHARED"
 # Populate as a ROOTLESS store (per-store lock files then have the store
 # owner's ids — a root podman store's lock files are unreadable outright).
 # Variant A: admin-owned store at a shared path — still a distinct uid map
