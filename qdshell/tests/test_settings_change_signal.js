@@ -70,4 +70,29 @@ const commit = color.slice(color.indexOf("function commitTargetPalette"));
 assert.match(commit, /customColorsData\.mOnHover = pal\.mOnHover;\s*customColorsFile\.writeAdapter\(\);\s*root\.committingTarget = false;/,
     "commitTargetPalette must write once after all sixteen fields");
 
+// No QML file may target a Settings.data section with Connections: it never
+// binds (plain object). Code lines only; comments may mention the pattern.
+function walk(dir, out) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+            if (e.name !== "tests" && e.name !== "node_modules" && !e.name.startsWith("."))
+                walk(p, out);
+        } else if (e.name.endsWith(".qml")) {
+            out.push(p);
+        }
+    }
+    return out;
+}
+const dead = [];
+for (const file of walk(ROOT, [])) {
+    fs.readFileSync(file, "utf8").split("\n").forEach((line, i) => {
+        if (/^\s*\/\//.test(line))
+            return;
+        if (/\btarget:\s*Settings\.data\b/.test(line))
+            dead.push(`${path.relative(ROOT, file)}:${i + 1}`);
+    });
+}
+assert.deepStrictEqual(dead, [], `dead Connections targets on Settings.data: ${dead.join(", ")}`);
+
 console.log("ok - settings change signal guard");

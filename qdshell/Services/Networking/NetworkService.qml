@@ -70,22 +70,29 @@ Singleton {
     }
   }
 
+  // Settings.data is a plain object, so a Connections on Settings.data.network
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.network
-    function onWifiEnabledChanged() {
-      if (Settings.data.network.wifiEnabled) {
-        if (!BluetoothService.airplaneModeToggled) {
-          ToastService.showNotice(I18n.tr("common.wifi"), I18n.tr("common.enabled"), "wifi");
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.network)
+        return;
+      if (key === "wifiEnabled") {
+        if (Settings.data.network.wifiEnabled) {
+          if (!BluetoothService.airplaneModeToggled) {
+            ToastService.showNotice(I18n.tr("common.wifi"), I18n.tr("common.enabled"), "wifi");
+          }
+          // Perform a scan to update the UI
+          delayedScanTimer.interval = 3000;
+          delayedScanTimer.restart();
+        } else {
+          if (!BluetoothService.airplaneModeToggled) {
+            ToastService.showNotice(I18n.tr("common.wifi"), I18n.tr("common.disabled"), "wifi-off");
+          }
+          // Clear networks so the widget icon changes
+          root.networks = ({});
         }
-        // Perform a scan to update the UI
-        delayedScanTimer.interval = 3000;
-        delayedScanTimer.restart();
-      } else {
-        if (!BluetoothService.airplaneModeToggled) {
-          ToastService.showNotice(I18n.tr("common.wifi"), I18n.tr("common.disabled"), "wifi-off");
-        }
-        // Clear networks so the widget icon changes
-        root.networks = ({});
+
       }
     }
   }

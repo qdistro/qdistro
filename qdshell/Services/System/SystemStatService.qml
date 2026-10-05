@@ -317,11 +317,18 @@ Singleton {
   }
 
   // Re-run GPU detection when dGPU opt-in setting changes
+  // Settings.data is a plain object, so a Connections on Settings.data.systemMonitor
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.systemMonitor
-    function onEnableDgpuMonitoringChanged() {
-      Logger.i("SystemStat", "dGPU monitoring opt-in setting changed, re-detecting GPUs");
-      restartGpuDetection();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.systemMonitor)
+        return;
+      if (key === "enableDgpuMonitoring") {
+        Logger.i("SystemStat", "dGPU monitoring opt-in setting changed, re-detecting GPUs");
+        restartGpuDetection();
+
+      }
     }
   }
 

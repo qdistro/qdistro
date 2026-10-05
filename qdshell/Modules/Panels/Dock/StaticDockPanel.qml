@@ -347,13 +347,20 @@ SmartPanel {
   }
 
   // Update dock apps when pinned apps change
+  // Settings.data is a plain object, so a Connections on Settings.data.dock
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.dock
-    function onPinnedAppsChanged() {
-      updateDockApps();
-    }
-    function onOnlySameOutputChanged() {
-      updateDockApps();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.dock)
+        return;
+      if (key === "pinnedApps") {
+        updateDockApps();
+
+      } else if (key === "onlySameOutput") {
+        updateDockApps();
+
+      }
     }
   }
 

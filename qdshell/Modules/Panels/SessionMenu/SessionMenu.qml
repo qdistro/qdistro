@@ -148,10 +148,17 @@ SmartPanel {
     return options;
   }
 
+  // Settings.data is a plain object, so a Connections on Settings.data.sessionMenu
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.sessionMenu
-    function onPowerOptionsChanged() {
-      root._powerOptionsVersion++;
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.sessionMenu)
+        return;
+      if (key === "powerOptions") {
+        root._powerOptionsVersion++;
+
+      }
     }
   }
 

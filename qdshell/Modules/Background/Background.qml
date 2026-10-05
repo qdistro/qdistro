@@ -77,10 +77,17 @@ Variants {
         nextWallpaper.source = "";
       }
 
+      // Settings.data is a plain object, so a Connections on Settings.data.wallpaper
+      // never bound; react through Settings.settingChanged instead.
       Connections {
-        target: Settings.data.wallpaper
-        function onFillModeChanged() {
-          fillMode = WallpaperService.getFillModeUniform();
+        target: Settings
+        function onSettingChanged(owner, key, value) {
+          if (owner !== Settings.data.wallpaper)
+            return;
+          if (key === "fillMode") {
+            fillMode = WallpaperService.getFillModeUniform();
+
+          }
         }
       }
 
