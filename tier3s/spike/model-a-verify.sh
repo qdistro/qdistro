@@ -70,7 +70,9 @@ is "install-templates rc" "$rc" 0; printf '%s\n' "$out" | tail -3 | sed 's/^/   
 out=$(QDISTRO_TIER3S=1 bash "$SRC/scripts/install/install-session-manager.sh" "$SRC/session_manager" 2>&1); rc=$?
 is "install-session-manager (QDISTRO_TIER3S=1) rc" "$rc" 0
 printf '%s\n' "$out" | tail -4 | sed 's/^/    /'
-is "qdistro-tier3s group installed" "$(yes_no getent group qdistro-tier3s)" yes
+# getent prints the group line on success — quiet it so yes_no reads the rc
+is "qdistro-tier3s group installed" \
+    "$(getent group qdistro-tier3s >/dev/null 2>&1 && echo yes || echo no)" yes
 echo 'QDISTRO_PROFILE=dev' > /etc/qdistro/profile
 systemctl daemon-reload
 systemctl enable --now qdistro-admin-broker.service 2>&1 | tail -1 | sed 's/^/    /'
