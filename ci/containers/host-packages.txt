@@ -13,6 +13,7 @@ python3-tomli-w
 python3-jeepney
 python3-PyYAML
 python3-numpy
+python3-Pillow
 python3-hypothesis
 python3-mistune
 python3-pywayland
@@ -39,3 +40,5 @@ procps
 bats
 diffutils
 bzip2
+rsync
+zstd
