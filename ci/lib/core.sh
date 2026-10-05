@@ -9,6 +9,9 @@ now_utc() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 stamp() { date -u +'%Y%m%dT%H%M%SZ'; }
 log() { printf '[qci] %s\n' "$*" >&2; }
 
+# shellcheck source=login.sh
+. "${BASH_SOURCE[0]%/*}/login.sh"   # qci_login_cmd
+
 safe_name() {
     printf '%s' "$1" | tr '/: @' '____' | tr -cd 'A-Za-z0-9._-'
 }

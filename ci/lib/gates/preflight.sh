@@ -36,7 +36,7 @@ gate_preflight() {
     : > "$report"
     check_required() {
         local label=$1 cmd=$2
-        if bash -lc "$cmd" >/dev/null 2>&1; then
+        if bash -lc "$(qci_login_cmd "$cmd")" >/dev/null 2>&1; then
             printf 'OK\t%s\n' "$label" >> "$report"
             record_result preflight "$label" pass 0 pass tool "$report" ""
         else
@@ -47,7 +47,7 @@ gate_preflight() {
     }
     check_optional() {
         local label=$1 cmd=$2
-        if bash -lc "$cmd" >/dev/null 2>&1; then
+        if bash -lc "$(qci_login_cmd "$cmd")" >/dev/null 2>&1; then
             printf 'OK\t%s\n' "$label" >> "$report"
             record_result preflight "$label" pass 0 pass tool "$report" ""
         else
@@ -61,7 +61,7 @@ gate_preflight() {
     # points at qci-host-deps. See README "Host test dependencies".
     check_host_dep() {
         local label=$1 cmd=$2
-        if bash -lc "$cmd" >/dev/null 2>&1; then
+        if bash -lc "$(qci_login_cmd "$cmd")" >/dev/null 2>&1; then
             printf 'OK\t%s\n' "$label" >> "$report"
             record_result preflight "$label" pass 0 pass tool "$report" ""
         else
