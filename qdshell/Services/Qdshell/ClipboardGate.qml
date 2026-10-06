@@ -125,7 +125,9 @@ Singleton {
         // reports it, so a slow broker never blocks the shell's GUI thread
         // and is given 2 s / 1.5 s instead of the synchronous 200 ms
         // (which denied legitimate same-silo pastes under load). Older
-        // plugins without the async API keep the synchronous calls.
+        // plugins without the async API keep the synchronous calls; so
+        // does set time on a compositor without the receive gate (see
+        // _receiveGateShellVersion).
         if (binding.clipboardCheckFinished !== undefined
                 && binding.startCheckClipboardTransfer !== undefined
                 && binding.startCheckClipboardReceive !== undefined) {
@@ -217,6 +219,12 @@ Singleton {
     // logged but must not clear the newer selection (which gets its own
     // verdict). Paste stays gated meanwhile by the receive-time gate.
     property bool _asyncChecks: false
+    // Leaving a selection live while its set-time verdict is pending is
+    // only sound when the compositor runs the receive-time gate
+    // (data_offer_receive_pending, qdwin_shell_v1 v15). Checked per
+    // selection, so a rebind to an older compositor falls back to the
+    // synchronous call, which decides (and clears) before returning.
+    readonly property int _receiveGateShellVersion: 15
     property var _pendingChecks: ({})
     property var _selectionGen: ({ "0": 0, "1": 0 })
 
@@ -234,8 +242,9 @@ Singleton {
         root._pendingSrcIdentity = null;
         root._pendingSrcPeer = null;
         root._lastDenyClearByKey = ({});
-        // Replies for the lost connection's requests are ignored; the
-        // compositor that issued them is gone with its receive requests.
+        // Replies for the lost connection's requests are ignored. qdwin
+        // drops (denies) the pending receives of a destroyed shell
+        // resource, so nothing waits for an answer that will not come.
         root._pendingChecks = ({});
     }
 
@@ -682,7 +691,7 @@ Singleton {
         // 0/0 fail-closed.
         const _srcId = root._sourceRelayIdentity(
             _srcPeer, pending, _bound, root._handleToIdentity[sourceHandle]);
-        if (root._asyncChecks) {
+        if (root._asyncChecks && (root._binding.shellVersion || 0) >= root._receiveGateShellVersion) {
             const requestId = root._binding.startCheckClipboardTransfer(srcSilo, dstSilo, mimeList, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
             root._pendingChecks[requestId] = {
                 "kind": "transfer",

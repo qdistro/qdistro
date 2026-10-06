@@ -20,6 +20,7 @@ function gate({async = true} = {}) {
     let nextId = 0;
     const binding = {
         focusedHandle: DST,
+        shellVersion: 35,
         clearSelection(seat, isPrimary) { clears.push({seat, isPrimary}); },
         sendDataOfferReceiveDecision(handle, allow) { answers.push({handle, allow}); },
         startCheckClipboardTransfer(...args) { started.push({kind: 'transfer', args}); return ++nextId; },
@@ -35,6 +36,7 @@ function gate({async = true} = {}) {
         _verifyProc: {set command(v) {}, set running(v) {}},
         _binding: binding,
         _asyncChecks: async,
+        _receiveGateShellVersion: 15,
         _pendingChecks: {},
         _selectionGen: {'0': 0, '1': 0},
         _handleToSilo: {[SRC]: 'qdistro:alpha', [DST]: 'qdistro:beta'},
@@ -146,6 +148,46 @@ function gate({async = true} = {}) {
     g.c._onClipboardCheckFinished(2, 0, 's "deny"\n', false);
     assert.strictEqual(g.answers.length, 0);
     assert.strictEqual(g.clears.length, 0);
+}
+
+// ensures: every answered request leaves no pending entry behind.
+{
+    const g = gate();
+    g.c._onSelectionSet('default', SRC, 'text/plain', false);
+    g.c._onDataOfferReceivePending(82, 'default', SRC, DST, 'text/plain');
+    assert.strictEqual(Object.keys(g.c._pendingChecks).length, 2);
+    g.c._onClipboardCheckFinished(2, -1, '', false);
+    g.c._onClipboardCheckFinished(1, -1, '', true);
+    assert.strictEqual(Object.keys(g.c._pendingChecks).length, 0);
+    assert.deepStrictEqual(g.answers, [{handle: 82, allow: false}]);
+    assert.strictEqual(g.clears.length, 1);
+}
+
+// ensures: a compositor without the receive gate (shell < v15) never leaves
+// a selection live on a pending verdict: set time decides synchronously,
+// also after a rebind drops the capability, and resumes async once it is back.
+{
+    const g = gate();
+    g.binding.shellVersion = 14;
+    g.c._onSelectionSet('default', SRC, 'text/plain', false);
+    assert.strictEqual(g.started.length, 0);
+    assert.strictEqual(g.syncCalls.length, 1);
+    assert.strictEqual(g.gateLines().length, 1);
+    g.binding.shellVersion = 35;
+    g.c._onSelectionSet('default', SRC, 'text/plain', false);
+    assert.strictEqual(g.started.length, 1);
+    g.c._onBindingLost();   // rebind to an older compositor
+    g.c._handleToSilo = {[SRC]: 'qdistro:alpha', [DST]: 'qdistro:beta'};
+    g.c._handleToAppId = {[SRC]: 'alpha', [DST]: 'beta'};
+    g.c._handleToSandboxEngine = {[SRC]: 'qdistro', [DST]: 'qdistro'};
+    g.binding.shellVersion = 14;
+    g.c._onSelectionSet('default', SRC, 'text/plain', false);
+    assert.strictEqual(g.started.length, 1);
+    assert.strictEqual(g.syncCalls.length, 2);
+    g.binding.shellVersion = undefined;
+    g.c._onSelectionSet('default', SRC, 'text/plain', false);
+    assert.strictEqual(g.started.length, 1);
+    assert.strictEqual(g.syncCalls.length, 3);
 }
 
 // ensures: without the async API the synchronous calls decide in place.

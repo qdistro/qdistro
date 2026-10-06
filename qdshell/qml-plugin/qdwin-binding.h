@@ -32,6 +32,8 @@
 #include <utility>
 #include <vector>
 
+#include "broker-call.h"
+
 class CtrlServer;
 
 struct wl_display;
@@ -293,9 +295,11 @@ public:
     // (same arguments, same broker methods). They never block the GUI
     // thread: each returns a request id (> 0) at once and later emits
     // exactly one clipboardCheckFinished(requestId, ...) from the event
-    // loop, also for rejected input, a busctl that fails to start, a
-    // timeout and the in-flight cap. Every such edge reports exitCode -1,
-    // which ClipboardBroker.parseCheckClipboardTransferResult denies.
+    // loop (never before the call has returned the id), also for rejected
+    // input, a busctl that fails to start, a timeout and the 16-child cap.
+    // Every such edge reports exitCode -1, which
+    // ClipboardBroker.parseCheckClipboardTransferResult denies. See
+    // broker-call.h.
     // Transfer waits up to 2 s (no compositor deadline at set time);
     // receive waits up to 1.5 s so the shell answers before qdwin's 2 s
     // receive timer.
@@ -496,14 +500,9 @@ private slots:
     void onWaylandReadable();
 
 private:
-    // Starts `busctl <args>` without blocking and returns its request id;
-    // an empty args list means the input was rejected (reported as a
-    // failure on the next event-loop turn).
-    int startBrokerCall(const QStringList &args, int timeoutMs);
-    void reportBrokerCall(int requestId, int exitCode, const QString &out,
-                          bool timedOut);
-    int nextBrokerRequestId_ = 0;
-    int brokerCallsInFlight_ = 0;
+    // Runs the async clipboard broker calls (broker-call.h); an empty
+    // args list means the input was rejected and reports as a failure.
+    BrokerCallRunner *brokerCalls_ = nullptr;
 
     void connectAndBind();
     void teardown(const QString &reason);

@@ -37,15 +37,32 @@ reconnection cannot inherit an old result. The verification busctl deadline is
 2 s. These checks remain separate from set-time and focus-clear policy.
 
 The broker policy calls (`CheckClipboardTransfer` at set time,
-`CheckClipboardReceive` per receive) are asynchronous. qdshell starts the
-busctl child and finishes the decision when the binding reports it, so a slow
-broker never blocks the shell. Set time waits up to 2 s. Receive waits up to
-1.5 s, inside qdwin's two-second receive deadline. Each request reports
-exactly once; timeout, start failure, rejected input and the 16-request
-in-flight cap all deny. While a set-time verdict is pending the selection is
-live, but every paste of it still passes the receive-time gate. A set-time
-verdict for a selection that has since been replaced is logged but does not
-clear the newer selection.
+`CheckClipboardReceive` per receive) are asynchronous when the QML plugin
+provides `startCheckClipboard*` and the compositor speaks `qdwin_shell_v1` v15
+or later (the receive-time gate). qdshell starts the busctl child and finishes
+the decision when the binding reports it, so a slow broker never blocks the
+shell. Set time waits up to 2 s. Receive waits up to 1.5 s, which leaves
+nominal margin inside qdwin's two-second receive deadline; that deadline, which
+closes the fd on its own, stays the hard boundary. Each request reports exactly
+once and never before its id has been returned. Timeout, start failure,
+rejected input and the cap of 16 live busctl children (counted until each is
+reaped) all deny. A timed-out child is killed and deleted only after it exits,
+so cleanup never waits on the GUI thread.
+
+While a set-time verdict is pending the selection is live. Every regular
+clipboard receive of it still passes `CheckClipboardReceive`. A **primary**
+receive does not reach the broker: it passes only the compositor's own silo
+check (`qdwin_primary_same_silo`; see "Primary selection vs clipboard"), so
+while a primary verdict is pending a same-silo primary paste can proceed
+without the broker's identity, MIME or lineage policy. A set-time verdict for a
+selection that has since been replaced is logged (`CLIPBOARD_GATE` plus a debug
+`CLIPBOARD_GATE_SUPERSEDED`) but does not clear the newer selection, which gets
+its own verdict. A selection replaced faster than its verdicts arrive can
+therefore stay live, and deny coalescing can skip a clear, so a set-time DENY
+line is not proof that the selection was cleared on the wire.
+
+Older plugins, and compositors before v15, keep the synchronous calls, which
+decide (and clear) before returning and use a 200 ms broker deadline.
 
 ## Handed-off windows — no special case
 

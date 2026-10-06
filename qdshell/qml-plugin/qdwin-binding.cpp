@@ -101,8 +101,8 @@ constexpr auto kClipboardTransferAsyncBusctlTimeout = "--timeout=2s";
 constexpr int kClipboardReceiveAsyncTimeoutMs = 1500;
 constexpr auto kClipboardReceiveAsyncBusctlTimeout = "--timeout=1500ms";
 // A source re-offering in a tight loop must not fork without bound; past
-// this many outstanding busctl children a request fails closed at once.
-constexpr int kBrokerAsyncMaxInFlight = 16;
+// this many live busctl children a request fails closed at once.
+constexpr int kBrokerAsyncMaxLiveChildren = 16;
 
 inline QString qstr(const char *s) {
     return s ? QString::fromUtf8(s) : QString();
@@ -1010,6 +1010,10 @@ static const wl_registry_listener kRegistryListener = {
 // -------------------- QdwinBinding --------------------
 
 QdwinBinding::QdwinBinding(QObject *parent) : QObject(parent) {
+    brokerCalls_ = new BrokerCallRunner(QStringLiteral("busctl"),
+                                        kBrokerAsyncMaxLiveChildren, this);
+    connect(brokerCalls_, &BrokerCallRunner::finished, this,
+            &QdwinBinding::clipboardCheckFinished);
     reconnectTimer_.setSingleShot(true);
     connect(&reconnectTimer_, &QTimer::timeout, this, [this]() {
         if (destroying_) return;
@@ -2715,7 +2719,7 @@ int QdwinBinding::startCheckClipboardTransfer(
     bool identityVerified,
     uint sourcePid,
     qulonglong sourceStarttime) {
-    return startBrokerCall(
+    return brokerCalls_->start(
         clipboardTransferArgs(kClipboardTransferAsyncBusctlTimeout,
                               sourceSilo, destSilo, mimeTypes, sourceAppId,
                               destAppId, sourceSandboxEngine,
@@ -2733,62 +2737,10 @@ int QdwinBinding::startCheckClipboardReceive(
     bool identityVerified,
     uint sourcePid,
     qulonglong sourceStarttime) {
-    return startBrokerCall(
+    return brokerCalls_->start(
         clipboardReceiveArgs(kClipboardReceiveAsyncBusctlTimeout,
                              sourceSilo, destSilo, mimeType, sourceAppId,
                              destAppId, sourceSandboxEngine,
                              identityVerified, sourcePid, sourceStarttime),
         kClipboardReceiveAsyncTimeoutMs);
-}
-
-int QdwinBinding::startBrokerCall(const QStringList &args, int timeoutMs) {
-    if (nextBrokerRequestId_ == std::numeric_limits<int>::max())
-        nextBrokerRequestId_ = 0;
-    const int id = ++nextBrokerRequestId_;
-    // Rejected input or too many children: fail closed, but still answer
-    // asynchronously so the caller always holds the id before the reply.
-    if (args.isEmpty() || brokerCallsInFlight_ >= kBrokerAsyncMaxInFlight) {
-        QMetaObject::invokeMethod(
-            this, [this, id]() { emit clipboardCheckFinished(id, -1, {}, false); },
-            Qt::QueuedConnection);
-        return id;
-    }
-    auto *proc = new QProcess(this);
-    auto *timer = new QTimer(proc);
-    timer->setSingleShot(true);
-    auto done = std::make_shared<bool>(false);
-    ++brokerCallsInFlight_;
-    // Exactly one report per request, whichever of finished / start
-    // failure / timeout comes first.
-    auto finish = [this, proc, id, done](int exitCode, bool timedOut) {
-        if (*done)
-            return;
-        *done = true;
-        --brokerCallsInFlight_;
-        const QString out = QString::fromUtf8(proc->readAllStandardOutput());
-        if (proc->state() != QProcess::NotRunning)
-            proc->kill();
-        proc->deleteLater();
-        reportBrokerCall(id, exitCode, out, timedOut);
-    };
-    connect(proc, &QProcess::finished, this,
-            [finish](int exitCode, QProcess::ExitStatus status) {
-                finish(status == QProcess::NormalExit ? exitCode : -1, false);
-            });
-    connect(proc, &QProcess::errorOccurred, this,
-            [finish](QProcess::ProcessError error) {
-                if (error == QProcess::FailedToStart)
-                    finish(-1, false);
-            });
-    connect(timer, &QTimer::timeout, this, [finish]() { finish(-1, true); });
-    proc->setProgram(QStringLiteral("busctl"));
-    proc->setArguments(args);
-    timer->start(timeoutMs);
-    proc->start();
-    return id;
-}
-
-void QdwinBinding::reportBrokerCall(int requestId, int exitCode,
-                                    const QString &out, bool timedOut) {
-    emit clipboardCheckFinished(requestId, exitCode, out, timedOut);
 }
