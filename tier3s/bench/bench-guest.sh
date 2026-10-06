@@ -102,15 +102,19 @@ provision() {
     step "provision silos (broker allow + images)"
     # admin's user slice delegates only 'pids' by default: the tier-2
     # baseline containers (rootless podman) would get no memory.current /
-    # cpu.stat. Enable the controllers for this bench pass (worker-only).
+    # cpu.stat. Delegate cpu+memory down the whole user@1000.service tree —
+    # leaf writes fail harmlessly (no children); interior failures surface
+    # below as a visible FAIL when the t2 container's cgroup lacks
+    # memory.current.
     local d
     for d in /sys/fs/cgroup/user.slice \
              /sys/fs/cgroup/user.slice/user-1000.slice \
-             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service \
-             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice \
-             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice; do
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service; do
         echo "+cpu +memory" > "$d/cgroup.subtree_control" 2>/dev/null || :
     done
+    find /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service \
+        -mindepth 1 -name cgroup.subtree_control 2>/dev/null \
+        | while read -r d; do echo "+cpu +memory" > "$d" 2>/dev/null || :; done
     mk_silo "$GS" weston-terminal || fail "create $GS"
     mk_silo "$HS" headless-smoke || fail "create $HS"
     mk_silo "$FS" foot || fail "create $FS"
@@ -414,8 +418,8 @@ teardown_one() {
 
 main() {
     case "${1:-all}" in
-        latency-up)   sec_latency_up; exit $? ;;
-        latency-down) sec_latency_down; exit 0 ;;
+        latency-up)   sec_latency_up; T3S_DONE=1; exit $? ;;
+        latency-down) sec_latency_down; T3S_DONE=1; exit 0 ;;
     esac
     local secs="${*:-env cold mem sys io bridge overhead}"
     [ "$secs" = "all" ] && secs="env cold mem sys io bridge overhead"
