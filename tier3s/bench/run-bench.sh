@@ -119,7 +119,7 @@ echo "   setup PASS ($(grep -o '\[t3s-setup\] [0-9]* passes' "$L/setup.log"))"
 for r in $(seq 1 "$RUNS"); do
     echo "== bench pass $r/$RUNS"
     ssh_vm 'cd /var/tmp/t3s-dl && bash bench-guest.sh' > "$L/run-$r.log" 2>&1
-    grep -q '\[bench\] [0-9]* passes' "$L/run-$r.log" \
+    grep -q '\[bench\] [0-9]* passes, 0 failures' "$L/run-$r.log" \
         && echo "   done ($(grep -c '^MEAS' "$L/run-$r.log") measurements)" \
         || { echo "   FAIL (see $L/run-$r.log)"; FAIL=1; }
 done
