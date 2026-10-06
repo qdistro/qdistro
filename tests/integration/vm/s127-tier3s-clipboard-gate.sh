@@ -332,6 +332,7 @@ is "live rule-driven allow: cross-silo $SA -> $SB (source-peer relay)" \
 kill_clip_src "$XSRC_PID"; CLIP_SRC_PID=""
 
 step "4b. live attested allow: bound tagged source -> same-silo"
+AUDIT_MARK_4B=$(sqlite3 "$AUDIT_DB" "SELECT coalesce(max(id),0) FROM audit;" 2>/dev/null)
 # Same-silo is the other live allow shape: a tagged clip source that owns
 # a real xdg_toplevel in its own silo s127c, focused, registered,
 # verified — the exact trust shape a tier3s bridge takes when its own
@@ -373,9 +374,13 @@ same=$(qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$SC dst_silo=$SC ")
 line=$(printf '%s\n' "$same" | grep 'verdict=allow' | head -1); info "gate: $line"
 is "live attested allow: bound tagged source -> same-silo (verify + record resolution)" \
     "$(printf '%s' "$line" | grep -c 'verdict=allow')" 1
-# Order, not just presence: a same-silo deny must precede that first allow.
-is "cold-verify bound offers denied first (the allow was earned)" \
-    "$(printf '%s\n' "$same" | awk '/verdict=allow/ {exit} /verdict=deny/ {n++} END {print (n>=1)?1:0}')" 1
+# The allow is earned only through the broker's verified same-silo path
+# (identity_verified from VerifyClientIdentity AND launch-record lineage of
+# the relayed source pid), which alone writes this audit row. Whether a
+# cold-cache deny comes first depends on whether step 4a already verified
+# the identity, so it is not asserted.
+is "same-silo allow is broker-verified (identity + launch-record lineage audit row)" \
+    "$(sqlite3 "$AUDIT_DB" "SELECT count(*) FROM audit WHERE id > ${AUDIT_MARK_4B:-0} AND action='qdistro.clipboard.transfer:$SC:$SC' AND decision=1 AND source LIKE 'clipboard_same_silo_verified lineage=%';" 2>/dev/null | awk '{print ($1>=1)?"yes":"no"}')" yes
 is "live allow carries dst_silo=$SC (bound => focused => same-silo)" \
     "$(printf '%s' "$line" | grep -c "dst_silo=$SC")" 1
 kill_clip_src "$CLIP_SRC_PID"; CLIP_SRC_PID=""

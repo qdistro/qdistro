@@ -46,7 +46,7 @@ teardown_file() {
     assert_output_contains "PASS: compositor attested the bound source's tag on its toplevel"
     assert_output_contains "PASS: seat focus landed on the bound source"
     assert_output_contains "PASS: live attested allow: bound tagged source -> same-silo"
-    assert_output_contains "PASS: cold-verify bound offers denied first"
+    assert_output_contains "PASS: same-silo allow is broker-verified"
     assert_output_contains "PASS: seat focus re-landed on s127b's toplevel"
     assert_output_contains "PASS: B's tagged offer recorded"
     assert_output_contains "PASS: focus crossing out of the source silo cleared the selection"

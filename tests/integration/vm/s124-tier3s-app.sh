@@ -53,9 +53,20 @@ J0=$(journal_cursor)
 # processes the client's first buffer).
 qdwin_mapped() { comp_log "$J0" | grep -q "mapped handle=$1"; }
 
-# container_has_shell <silo> <ctr>: an sh/bash/dash process runs inside.
+# container_has_shell <silo> <ctr>: a shell other than this probe's own
+# podman-exec sh (and its children) runs inside, i.e. the terminal's.
 container_has_shell() {
-    pm_s "$1" exec "$2" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' | grep -Eqx '(ba|da)?sh'
+    pm_s "$1" exec "$2" sh -c '
+        self=$$
+        for d in /proc/[0-9]*; do
+            p=${d#/proc/}
+            [ "$p" = "$self" ] && continue
+            pp=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
+            [ "$pp" = "$self" ] && continue
+            c=$(cat "$d/comm" 2>/dev/null) || continue
+            case "$c" in sh|bash|dash) echo "$p"; exit 0 ;; esac
+        done
+        exit 1' >/dev/null
 }
 
 # drive_gui <silo> <tag>: focus + type a marker command, then prove the
