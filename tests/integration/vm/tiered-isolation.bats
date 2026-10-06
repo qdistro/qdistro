@@ -379,7 +379,7 @@ setup() {
     assert_output_contains "PASS: NoNewPrivs=1 (no-new-privileges effective)"
     assert_output_contains "PASS: network=none (only lo present)"
     assert_output_contains "PASS: rootfs mounted read-only"
-    assert_output_contains "PASS: touch / blocked by read-only"
+    assert_output_contains "PASS: write / blocked by read-only"
     assert_output_contains "PASS: /run/user/1000/ contains only allowed sockets/logs"
     assert_output_contains "PASS: no host bus/pulse/gnupg/ssh-agent in /run/user/1000/"
     assert_output_contains "PASS: qdistro_tier2_token label set"

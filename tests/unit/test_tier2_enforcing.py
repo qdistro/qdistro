@@ -68,3 +68,40 @@ def test_readiness_rejects_entrypoint_argv(monkeypatch, pid1, ready):
     else:
         with pytest.raises(AssertionError):
             exec(code, {})
+
+
+@pytest.mark.parametrize("target", ["rootfs", "presentation"])
+@pytest.mark.parametrize("created,write_rc", [(False, 1), (True, 0), (True, 1)])
+def test_s40_write_denials_check_creation(tmp_path, target, created, write_rc):
+    source = (ROOT / "tests/integration/vm/s40-tier2-hardening.sh").read_text()
+    if target == "rootfs":
+        block = source[source.index('# Redirect tests creation itself;'):source.index('# --- 5+6.')]
+        expected = "write / blocked by read-only"
+    else:
+        block = source[source.index('PRES_PROBE='):source.index('\nSIBLINGS=')]
+        block = block.replace('/var/lib/qdistro/presentation', str(tmp_path))
+        expected = "container write into presentation directory denied"
+    # Run the real assertion with a fake exec; a false denial (create then
+    # return nonzero) must fail for both the rootfs and host-visible bind.
+    harness = '''
+CONTAINER=fake
+PASSCOUNT=0; FAILCOUNT=0
+pass() { echo "PASS: $*"; }
+fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
+runuser() {
+    case "$*" in
+        *touch*) echo 'obsolete touch probe' >&2; exit 99 ;;
+        *': > '*)
+            if [ "$CREATED" = 1 ] && [ -n "${PRES_PROBE:-}" ]; then : > "$PRES_PROBE"; fi
+            return "$WRITE_RC" ;;
+        *'[ ! -e /no-such-write ]'*) [ "$CREATED" = 0 ] ;;
+        *'rm -f'*) return 0 ;;
+        *) echo "unexpected fake exec: $*" >&2; exit 98 ;;
+    esac
+}
+'''
+    proc = subprocess.run(["bash", "-c", harness + block + '\nexit "$FAILCOUNT"'],
+                          env={**os.environ, "CREATED": str(int(created)), "WRITE_RC": str(write_rc)},
+                          capture_output=True, text=True, timeout=5)
+    assert proc.returncode == int(created), proc.stdout + proc.stderr
+    assert (f"PASS: {expected}" in proc.stdout) == (not created), proc.stdout
