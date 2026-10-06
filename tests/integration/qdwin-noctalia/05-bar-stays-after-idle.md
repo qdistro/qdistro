@@ -273,10 +273,22 @@ noct_screenshot_awake /tmp/05-step1-awake.png
 
 ### Step 2 — wait for DPMS-off
 
-> **Driver note (MUST):** this is a synchronous ~75 s idle wait. Run the block
-> as a single blocking invocation in this turn — do NOT background it, schedule
-> a wakeup, or end the session to "check back later". Inject NO input during the
-> wait (any pointer/key activity resets ext-idle-notify and re-arms the timer).
+> **Driver note (MUST):** the ~75 s idle wait is timed by the GUEST, not by
+> your tool call. `noct_idle_wait_start` launches a detached guest unit that
+> sleeps 75 s, reads the DRM connector and writes `dpms=<state> waited_s=<n>`
+> to a fresh per-attempt path; `noct_idle_wait_poll` reads that record with
+> short vm-exec calls. Inject NO input until the record exists (any pointer/key
+> activity resets ext-idle-notify and re-arms the timer) -- no screenshots,
+> no mouse moves, no vm-gui calls.
+>
+> If your tool call returns before this block prints its `step2:` line, the
+> guest wait is still running: re-run ONLY the last three lines (they re-read
+> the saved result path) until it prints `step2:`. Never start a second wait,
+> and never read `/sys/class/drm/*/dpms` yourself as the verdict.
+> full-20261006T175536Z-3524705 lost this scenario that way: the driver's
+> 75 s call was cut short, it read sysfs ~50 s after its last pointer input --
+> before the 60 s display-off timeout -- and recorded FAIL "dpms stayed On";
+> every replay blanked on time.
 
 ```bash
 # Cursor before the idle wait so Step 4's clean-log + wake-remap checks scope to
@@ -285,20 +297,28 @@ noct_screenshot_awake /tmp/05-step1-awake.png
   "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null\" \
      | sed -n 's/^-- cursor: //p' > /tmp/05-wake.cur"
 # 60s display-off timeout (1-minute minimum) + grace; no input this period.
-sleep 75
 # DPMS verdict comes from sysfs, NOT a screenshot: while the output is
 # DPMS-off the compositor suspends repaint, so the shell-capture path
 # (qdwin_screenshot) cannot service a capture until wake — and the kernel
 # DRM connector state is the ground truth for "display off" anyway.
-"$QDWIN_VM_EXEC" "$VMNAME" 'cat /sys/class/drm/card0-Virtual-1/dpms' \
-    > /tmp/05-step2-dpms.txt
+STEP2_RES=/tmp/qci/${QCI_SCENARIO_SLUG:?}/05-step2-$(date +%s%N).txt
+printf '%s\n' "$STEP2_RES" > "${QCI_SCENARIO_TMPDIR:?}/05-step2.path"
+noct_idle_wait_start "$STEP2_RES" || { echo "FAIL: could not start the guest idle wait"; exit 1; }
+# --- re-run from here if the call above returned early ---
+STEP2_RES=$(cat "${QCI_SCENARIO_TMPDIR:?}/05-step2.path")
+noct_idle_wait_poll "$STEP2_RES" > "$QCI_SCENARIO_TMPDIR/05-step2-dpms.txt" \
+    || { echo "FAIL: no guest idle-wait record at $STEP2_RES"; exit 1; }
+echo "step2: $(cat "$QCI_SCENARIO_TMPDIR/05-step2-dpms.txt")"
 ```
 
-**Assert (2.1):** `/tmp/05-step2-dpms.txt` reads exactly `Off`.
-This confirms DPMS off fired. If it still reads `On`, the idle/DPMS policy
-isn't armed — diagnose `qs ipc call qdwin capabilities` (idleDpms) and the
-qdshell `power.displayOff*` settings, and the user journal for
-`idle policy armed: ... displayOff=60000ms`.
+**Assert (2.1):** `noct_idle_wait_verdict "$(cat "$QCI_SCENARIO_TMPDIR/05-step2-dpms.txt")"`
+returns 0: the guest's DPMS read reads exactly `Off` (`dpms=Off`) and
+`waited_s` is >= 75. This confirms
+DPMS off fired after a full idle wait. A record with `waited_s` < 75 is your
+tooling error (ERROR), not a product result. If it reads `dpms=On` after the
+full wait, the idle/DPMS policy isn't armed — diagnose
+`qs ipc call qdwin capabilities` (idleDpms) and the qdshell `power.displayOff*`
+settings, and the user journal for `idle policy armed: ... displayOff=60000ms`.
 
 ### Step 3 — wake screen, capture wake transition
 
