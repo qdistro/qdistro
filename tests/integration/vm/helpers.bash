@@ -367,6 +367,16 @@ stage_vm_driver() {
     fail_loud "driver stager could not serve $base after 5 free-port attempts"
 }
 
+# shell_held_cmd <guest command> prints a guest command that runs <guest
+# command> while admin's session qdshell is stopped (probes/shell-publisher.sh),
+# so probes that write the managed presentation snapshot are its only writer.
+# Refuses to run the command (exit 96) when the shell cannot be held, and
+# restarts the shell afterwards. Stage the probe before calling this.
+shell_held_cmd() {
+    stage_vm_driver "probes/shell-publisher.sh"
+    printf '%s' "curl -fsS -o /tmp/shell-publisher.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/shell-publisher.sh && { bash /tmp/shell-publisher.sh hold || { bash /tmp/shell-publisher.sh release; exit 96; }; }; ( $1 ); rc=\$?; bash /tmp/shell-publisher.sh release || { [ \$rc -ne 0 ] || rc=95; }; exit \$rc"
+}
+
 # reap_vm_drivers — kill any http.server stage_vm_driver started for this file.
 # Wire into teardown_file. A no-op when nothing was staged.
 reap_vm_drivers() {

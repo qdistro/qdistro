@@ -19,7 +19,7 @@ teardown_file() {
     stage_vm_driver "probes/presentation-isolation.sh"
     # stage_vm_driver serves basename(script) at the HTTP root, matching
     # vt-escape-lockdown.bats and helpers.bash.
-    vm_run "curl -fsS -o /tmp/presentation-isolation.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-isolation.sh && chmod +x /tmp/presentation-isolation.sh && bash /tmp/presentation-isolation.sh"
+    vm_run "$(shell_held_cmd "curl -fsS -o /tmp/presentation-isolation.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-isolation.sh && chmod +x /tmp/presentation-isolation.sh && bash /tmp/presentation-isolation.sh")"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "presentation isolation probe skipped; missing installer or package is a bake failure"
