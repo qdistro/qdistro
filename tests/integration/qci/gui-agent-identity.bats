@@ -158,3 +158,30 @@ teardown() {
     grep -Fxq 'BROWSER=/bin/false' "$env_record"
     grep -Fxq 'QCI_HOST_GUI_ISOLATED=1' "$env_record"
 }
+
+@test "effort parse: -c model_reasoning_effort=medium" {
+    [ "$(gui_agent_effort_from_cmd 'codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}')" = medium ]
+}
+
+@test "effort parse: --config with a quoted value" {
+    [ "$(gui_agent_effort_from_cmd 'codex exec --config model_reasoning_effort="high" -')" = high ]
+}
+
+@test "effort parse: none pinned -> empty" {
+    [ -z "$(gui_agent_effort_from_cmd 'codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}')" ]
+}
+
+@test "record_agent_identity: codex effort recorded, unpinned when absent" {
+    QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium - < {prompt}' \
+        record_agent_identity
+    grep -qx 'qci_agent_reasoning_effort=medium' "$KV_OUT"
+    : > "$KV_OUT"
+    QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna - < {prompt}' record_agent_identity 2>/dev/null
+    grep -qx 'qci_agent_reasoning_effort=unpinned' "$KV_OUT"
+    : > "$KV_OUT"
+    QCI_AGENT_CMD='claude -p x --model sonnet' record_agent_identity
+    if grep -q '^qci_agent_reasoning_effort=' "$KV_OUT"; then
+        echo "recorded a codex effort for a non-codex agent" >&2
+        return 1
+    fi
+}
