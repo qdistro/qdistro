@@ -161,6 +161,13 @@ cd "$SRC/qdshell"
 meson setup build --wipe --prefix=/usr
 meson compile -C build
 
+# qdshell's runtime is the vendored upstream Quickshell build — Tumbleweed's
+# only prebuilt runtime was the archived noctalia-qs fork. Installs
+# /usr/bin/quickshell + the /usr/bin/qs symlink into the image.
+echo "[qdistro-image] building vendored quickshell..."
+DESTDIR= QDSHELL_QS_BUILD_DIR=/tmp/qdistro-quickshell-build \
+    bash "$SRC/qdshell/quickshell-vendored/build-quickshell.sh"
+
 cd "$QD"
 # ---------------------------------------------------------------------------
 # The installer chain: ONE chain, the bootstrap's (todo/iso/14 Phase D).

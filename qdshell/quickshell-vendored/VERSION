@@ -1,0 +1,7 @@
+quickshell 0.3.0
+source: https://github.com/quickshell-mirror/quickshell/archive/refs/tags/v0.3.0.tar.gz
+sha256: 5229069b0f1d375f34b0a04a4e6a69156e2f010995d9ec5a943793424e589b5d
+
+cli11 2.6.1 (single-header, third-party/cli11/include/CLI/CLI11.hpp)
+source: https://github.com/CLIUtils/CLI11/releases/download/v2.6.1/CLI11.hpp
+sha256: 8bad421104bbac1d763be60e3f833768e72c2d9f6fa14a6d19162979ba97c2e9

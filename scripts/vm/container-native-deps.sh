@@ -26,16 +26,25 @@ gpgcheck=1
 EOF
 zypper -n refresh
 zypper -n dup --no-recommends
+# The cmake/spirv/vulkan/private-qt-devel/pam/polkit/jemalloc/cpptrace set
+# below builds the vendored Quickshell (qdshell/quickshell-vendored/
+# build-quickshell.sh), which replaces the archived noctalia-qs package as
+# qdshell's runtime. Qt private headers + the ShaderTools cmake config are
+# required by find_package(Qt6 ...); CLI11 is vendored (no TW package).
 zypper -n install --no-recommends \
     meson ninja gcc gcc-c++ pkgconf-pkg-config git file make \
     selinux-policy-devel selinux-policy-targeted checkpolicy policycoreutils findutils \
     weston weston-devel libweston-16 libweston-16-0 python3-pywayland python3-cffi \
-    python3-pytest python3-Pillow noctalia-qs socat \
+    python3-pytest python3-Pillow socat \
     wayland-devel wayland-protocols-devel libinput-devel libXcursor-devel \
     freerdp-devel winpr-devel pipewire-devel libselinux-devel \
     qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
     qt6-declarative-devel qt6-declarative-tools qt6-svg-devel qt6-shadertools \
     nodejs \
+    cmake spirv-tools vulkan-devel \
+    qt6-shadertools-devel qt6-quick-private-devel qt6-qml-private-devel \
+    qt6-waylandclient-devel qt6-waylandclient-private-devel \
+    pam-devel polkit-devel jemalloc-devel cpptrace-devel \
     libpixman-1-0-devel libxkbcommon-devel libevdev-devel \
     libgbm-devel libdrm-devel seatd-devel \
     Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \

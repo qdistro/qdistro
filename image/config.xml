@@ -203,7 +203,14 @@
     <package name="xz"/>
     <package name="snapper"/>
     <package name="plymouth"/>
-    <package name="noctalia-qs"/>
+    <!-- qdshell runtime: vendored upstream Quickshell (built in-chroot by
+         config.sh — Tumbleweed has no upstream package; the noctalia-qs
+         fork it used to ship is archived). These are the binary's link-time
+         deps. -->
+    <package name="libjemalloc2"/>
+    <package name="libcpptrace1"/>
+    <package name="libpolkit-agent-1-0"/>
+    <package name="libpolkit-gobject-1-0"/>
 
     <!-- qdistro userspace runtime deps (mirrors qdistro/scripts/install/install-deps.sh) -->
     <package name="weston"/>
@@ -333,6 +340,21 @@
     <package name="qt6-qml-devel"/>
     <package name="qt6-quick-devel"/>
     <package name="qt6-declarative-devel"/>
+    <!-- vendored Quickshell build deps (qdshell/quickshell-vendored/;
+         cmake). Qt private headers + the ShaderTools cmake config are
+         required by find_package(Qt6 ...); CLI11 is vendored. -->
+    <package name="cmake"/>
+    <package name="spirv-tools"/>
+    <package name="vulkan-devel"/>
+    <package name="qt6-shadertools-devel"/>
+    <package name="qt6-quick-private-devel"/>
+    <package name="qt6-qml-private-devel"/>
+    <package name="qt6-waylandclient-devel"/>
+    <package name="qt6-waylandclient-private-devel"/>
+    <package name="pam-devel"/>
+    <package name="polkit-devel"/>
+    <package name="jemalloc-devel"/>
+    <package name="cpptrace-devel"/>
   </packages>
 
   <!-- CI extras (Phase G). The tester image already ships gcc/meson (config.sh

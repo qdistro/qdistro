@@ -1610,6 +1610,8 @@ fetch_sources() {
 #   build_qdshell_plugin  -> /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
 #                            /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir
 #                            (QML plugin; reached via QML_IMPORT_PATH=/usr/share/qdistro/qml)
+#   build_quickshell      -> /usr/bin/quickshell + /usr/bin/qs (qdshell's
+#                            QML runtime; vendored upstream build)
 #   pip_install_apps      -> /usr/bin/<app> launchers + Python modules under
 #                            /usr/lib/pythonX.Y/site-packages for:
 #                            qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman
@@ -1678,6 +1680,22 @@ build_qdshell_plugin() {
         || die "qdshell meson compile failed"
     meson install -C build \
         || die "qdshell meson install failed"
+}
+
+# qdshell's runtime is the vendored upstream Quickshell build — no
+# `quickshell` package exists in Tumbleweed and the noctalia-qs fork that
+# used to provide /usr/bin/qs is archived. cmake --install lays down
+# /usr/bin/quickshell + the /usr/bin/qs symlink every call site uses.
+build_quickshell() {
+    if [ -n "$SKIP_BUILD" ]; then
+        log "skipping vendored quickshell build (--skip-build)"
+        return 0
+    fi
+    log "building vendored quickshell (qdshell runtime)..."
+    assert_trusted_tree "$REPO_ROOT/qdshell/quickshell-vendored" "quickshell vendored tree"
+    DESTDIR= QDSHELL_QS_BUILD_DIR=/tmp/qdistro-quickshell-build \
+        bash "$REPO_ROOT/qdshell/quickshell-vendored/build-quickshell.sh" \
+        || die "vendored quickshell build failed"
 }
 
 # Isolated install prefix for source-built Python apps in hardened profiles.
@@ -2780,6 +2798,9 @@ main() {
 
     # Step 12: Build qdshell QML plugin
     build_qdshell_plugin
+
+    # Step 12b: Build the vendored Quickshell runtime qdshell runs on
+    build_quickshell
 
     # Step 13: pip install Python apps
     pip_install_apps
