@@ -741,8 +741,8 @@ install_packages_ubuntu() {
         # btrfs / snapshots (rsync: the backup-service metadata collector +
         # ssh transport in snapshots/qdistro_backup_service.py)
         btrfs-progs snapper rsync
-        # quickshell — typically not in main archive yet; warn if absent
-        quickshell
+        # qdshell's runtime is the vendored upstream Quickshell build
+        # (build_quickshell step below) — no distro package is consumed.
         # python3-dbus-next for qdlocker
         python3-dbus-next
         # extras
@@ -769,7 +769,7 @@ install_packages_ubuntu() {
         warn "the following packages were NOT found in apt and were skipped:"
         for p in "${missing[@]}"; do warn "  - $p"; done
         warn "you may need to build these from source or enable a PPA."
-        warn "common culprits on 26.04: quickshell, libweston-16-dev (if upstream lags on 15)."
+        warn "common culprits on 26.04: libweston-16-dev (if upstream lags on 15)."
     fi
 }
 

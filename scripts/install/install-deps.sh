@@ -121,14 +121,13 @@ if ! zypper -n "${gpg_flags[@]}" refresh; then
         exit 1
     fi
 fi
-zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
-
 # qdshell's runtime is vendored Quickshell (qdshell/quickshell-vendored).
 # noctalia-qs was never a legitimate qdistro dep — qdshell forked Noctalia
-# before that fork existed — so lock it: no recommends/supplements may
-# pull the archived fork back onto the system.
+# before that fork existed — so lock it BEFORE the main transaction: no
+# recommends/supplements may pull the archived fork back onto the system.
 zypper -n addlock noctalia-qs \
     || { echo "[install-deps] ERROR: zypper addlock noctalia-qs failed" >&2; exit 1; }
+zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
 
 # python3 → 3.14: the snapshot still ships the unversioned symlink from
 # python313-base while the dep set is python314-* (see lib/qdistro-python.sh).

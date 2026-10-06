@@ -341,6 +341,11 @@ virt-customize \
     "${LIBGUESTFS_NET_ARGS[@]}" \
     --run-command "$(qdistro_substrate_repo_command)" \
     --run-command 'zypper -n refresh' \
+    `# qdshell's runtime is the vendored Quickshell build staged by the` \
+    `# native builder — the archived noctalia-qs fork was never a real` \
+    `# dep. Lock it before the install transaction AND ship the lock in` \
+    `# the base so later in-guest zypper calls cannot pull it either.` \
+    --run-command 'zypper -n addlock noctalia-qs' \
     --run-command 'rpm -q kernel-default-base >/dev/null 2>&1 && zypper -n remove kernel-default-base || true' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
     `# python3 → 3.14 inside the baked root: the snapshot still ships the` \

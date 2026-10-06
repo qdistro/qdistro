@@ -255,6 +255,12 @@ if rpm -q spice-vdagent >/dev/null 2>&1; then
 fi
 zypper -n addlock spice-vdagent >/dev/null 2>&1 \
     || { log "  ERROR: zypper addlock spice-vdagent failed"; exit 3; }
+# qdshell's runtime is the vendored upstream Quickshell build; the archived
+# noctalia-qs fork was never a real dep. Lock it so no later zypper lane can
+# pull it back (the baked base carries this lock too, but VMs built from an
+# older base may not).
+zypper -n addlock noctalia-qs >/dev/null 2>&1 \
+    || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
 
 # ---- 1. Fetch + unpack the monorepo ---------------------------------------
 # One tarball of the qdistro monorepo: root = qdistro's own content, the
@@ -638,6 +644,12 @@ if [ "$QCI_NATIVE_STAGE" = 0 ]; then
         || { log "  ERROR: qdshell meson compile failed"; exit 3; }
     meson install -C build \
         || { log "  ERROR: qdshell meson install failed"; exit 3; }
+    # The qdshell runtime itself: upstream Quickshell is vendored
+    # (Tumbleweed's only package was the archived noctalia-qs fork).
+    # Without the native stage nothing else provides /usr/bin/qs.
+    log "building vendored Quickshell (qdshell runtime)..."
+    DESTDIR= bash "$SRC/qdshell/quickshell-vendored/build-quickshell.sh" \
+        || { log "  ERROR: vendored Quickshell build failed"; exit 3; }
 else
     log "checking staged native ELF dependencies..."
     while IFS= read -r elf; do

@@ -39,7 +39,12 @@ mkdir "$work/qtermwidget-pyqt"
  while IFS= read -r -d '' path; do
      cp --parents "$path" "$work/qtermwidget-pyqt/"
  done < <(git ls-files -z --cached --others --exclude-standard))
-recipe=$(cd "$work" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+# Symlinks are recipe inputs too (the staged usr/bin/qs link): hash their
+# path -> target mapping; sha256sum on a symlink would hash target content.
+recipe=$(cd "$work" && {
+    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find . -type l -printf '%p -> %l\n' | LC_ALL=C sort
+} | sha256sum | cut -d' ' -f1)
 key=$(printf '%s\n' "$base_id" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$recipe" | sha256sum | cut -d' ' -f1)
 image="localhost/qdistro/host-builder:$key"
 exec 9>"$cache/host-podman/.build.lock"

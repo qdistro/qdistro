@@ -66,6 +66,7 @@ test -s /out/stage/usr/lib64/weston/qdwin-shell.so
 test -s /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
 test -x /out/stage/usr/bin/quickshell
 test -L /out/stage/usr/bin/qs
+[ "$(readlink /out/stage/usr/bin/qs)" = quickshell ]
 test -s /out/stage/usr/bin/qdistro-secctx-exec
 test -s /out/stage/usr/local/bin/qsu
 test -s /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so
