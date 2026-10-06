@@ -5,14 +5,18 @@
 # Exits 0 unless the shell itself breaks. `--hold [SECONDS]` (default 600)
 # then stays up until SIGTERM (exit 0) or the time runs out, so a driver can
 # stop a LIVE launch (podman stop, session-manager stop, SIGKILL).
+smoke_uid=$(id -u)
 echo "SMOKE snapshot=$(cat /etc/qdistro/tier3s-image 2>/dev/null | sed -n 's/^SNAPSHOT=//p')"
 echo "SMOKE kernel=$(cat /proc/version)"
 echo "SMOKE dmesg=$(dmesg --syslog 2>&1 | head -1)"
 echo "SMOKE id=$(id)"
-echo "SMOKE passwd=$(getent passwd 1000)"
+# passwd_self: keep-id synthesizes an entry for the caller's own uid (the
+# silo's host uid — model A); passwd_admin: the image's baked uid-1000 entry
+echo "SMOKE passwd_self=$(getent passwd "$smoke_uid")"
+echo "SMOKE passwd_admin=$(getent passwd 1000)"
 echo "SMOKE home=$HOME"
 echo "SMOKE lang=$LANG charmap=$(locale charmap 2>&1) utf8_locales=$(locale -a 2>/dev/null | grep -ic 'utf-\?8')"
-for d in /run/user/1000 /home/admin/.cache /tmp; do
+for d in "/run/user/$smoke_uid" /home/admin /tmp; do
     echo "SMOKE mount $d=$(stat -c '%u:%g %a' "$d" 2>&1)"
 done
 # posture as the sandboxed process sees it (gVisor's /proc and mount table)
@@ -22,8 +26,12 @@ echo "SMOKE nnp=$(st NoNewPrivs) seccomp=$(st Seccomp)"
 # (no awk in the image: read the mount table with the shell)
 mnt() { while read -r _ mp ty opts _; do [ "$mp" = "$1" ] && { echo "$ty:$opts"; break; }; done < /proc/self/mounts; }
 r=$(mnt /); r=${r#*:}; echo "SMOKE rootfs=${r%%,*}"
-for d in /run/user/1000 /home/admin/.cache; do echo "SMOKE mountopts $d=$(mnt "$d")"; done
-touch /home/admin/.smoke-rw 2>/tmp/smoke-rw.err; echo "SMOKE rootfs_write rc=$? err=$(cat /tmp/smoke-rw.err)"
+for d in "/run/user/$smoke_uid" /home/admin; do echo "SMOKE mountopts $d=$(mnt "$d")"; done
+# /etc sits on the read-only rootfs (unlike $HOME, which is a writable
+# tmpfs). Under keep-id the guest uid owns NOTHING on the rootfs, so the
+# denial surfaces as EACCES — EROFS is only reachable by a uid that owns a
+# rootfs path; either errno proves the write failed.
+touch /etc/.smoke-rw 2>/tmp/smoke-rw.err; echo "SMOKE rootfs_write rc=$? err=$(cat /tmp/smoke-rw.err)"
 f=/tmp/smoke-chmod
 : > "$f"
 chmod 600 "$f" 2>/dev/null; echo "SMOKE chmod rc=$? mode=$(stat -c %a "$f")"

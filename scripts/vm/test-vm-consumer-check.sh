@@ -122,9 +122,19 @@ shot() {  # shot NAME -> prints "<colours> <sha> <WxH>"
 }
 
 vmssh() {
-    ssh -i "$C/key" -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR \
-        admin@127.0.0.1 "$@"
+    local rc i
+    for i in 1 2 3; do
+        ssh -i "$C/key" -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR \
+            admin@127.0.0.1 "$@"
+        rc=$?
+        # 255 is ssh's own transport error (banner exchange, refused, reset)
+        # — transient under TCG load spikes, so retry it. A remote command's
+        # own exit status (<255) is authoritative on the first try.
+        [ "$rc" -ne 255 ] && return "$rc"
+        [ "$i" -lt 3 ] && sleep 10
+    done
+    return 255
 }
 
 # ---- access -----------------------------------------------------------------

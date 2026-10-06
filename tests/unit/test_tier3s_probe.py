@@ -30,7 +30,7 @@ def sha(p):
     return hashlib.sha512(Path(p).read_bytes()).hexdigest()
 
 
-def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
+def run(root, user=None, pin=None, path_prepend=None, extra_env=None, timeout=None):
     env = dict(os.environ, QDISTRO_PROBE_ROOT=str(root))
     if pin is not None:
         env["QDISTRO_PROBE_PIN"] = str(pin)
@@ -38,7 +38,7 @@ def run(root, user=None, pin=None, path_prepend=None, extra_env=None):
         env["PATH"] = f"{path_prepend}:{env['PATH']}"
     env.update(extra_env or {})
     args = ["bash", str(SCRIPT), "--user", user or ME]
-    return subprocess.run(args, env=env, capture_output=True, text=True)
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
 
 
 def fake_runsc(marker, version=VERSION, rc=0, salt="", text="executed"):
@@ -457,11 +457,48 @@ def test_probe_never_uses_caller_path_tools(tmp_path):
 
 
 # --- runsc state root (CONTRACT.md D-A1) ------------------------------------
+# C2 model A: per-uid runsc roots exist only for qt3s-* podman callers (the
+# spawn creates them at launch); probing a non-caller checks only the base.
 
-def test_state_root_passes_when_provisioned(tmp_path):
+def qt3s_bin(tmp_path):
+    """PATH fakes resolving `qt3s-probe` to the caller's own uid, so the
+    probe's qt3s-* per-uid checks run without a real account or NSS writes."""
+    uid = os.getuid()
+    b = tmp_path / "qt3sbin"
+    b.mkdir(exist_ok=True)
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        'case "${last:-}" in -*|"") exec /usr/bin/id "$@" ;; esac\n'
+        'case " $* " in *" -u "*) echo %d; exit 0 ;; esac\n'
+        "echo 'uid=%d(qt3s-probe) gid=100(qt3s-probe)'\n" % (uid, uid))
+    (b / "getent").write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        "  'passwd qt3s-probe') echo 'qt3s-probe:x:%d:100::/home/qt3s-probe:/bin/sh' ;;\n"
+        "esac\nexit 0\n" % uid)
+    for f in ("id", "getent"):
+        (b / f).chmod(0o755)
+    return b
+
+
+def qt3s_probe(inst, tmp_path):
+    return run(inst.root, user="qt3s-probe", pin=inst.pin,
+               path_prepend=f"{qt3s_bin(tmp_path)}:{inst.bin}")
+
+
+def test_state_root_passes_for_a_provisioned_qt3s_caller(tmp_path):
     inst = Install(tmp_path)
-    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    r = qt3s_probe(inst, tmp_path)
     assert f"PASS state_root: {inst.state_root} (uid {os.getuid()} 0700" in r.stdout, r.stdout
+
+
+def test_state_root_is_base_only_for_a_non_caller(tmp_path):
+    """admin (and any non-qt3s user) never invokes runsc: a missing per-uid
+    dir is not a prerequisite — only the root-owned base is."""
+    inst = Install(tmp_path)
+    inst.state_root.rmdir()
+    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    assert f"PASS state_root: {inst.state_root.parent} (per-uid dir is a qt3s-* caller prerequisite" \
+        in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("damage", ["missing", "mode", "symlink", "base-mode"])
@@ -477,10 +514,13 @@ def test_state_root_missing_or_loose_fails(tmp_path, damage):
         inst.state_root.symlink_to(tmp_path / "elsewhere")
     else:
         inst.state_root.parent.chmod(0o775)
-    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    r = qt3s_probe(inst, tmp_path)
     assert r.returncode == 1, r.stdout
     assert "FAIL state_root:" in r.stdout
-    assert "systemd-tmpfiles --create qdistro-tier3s.conf" in r.stdout
+    if damage == "base-mode":
+        assert "systemd-tmpfiles --create qdistro-tier3s.conf" in r.stdout
+    else:
+        assert "spawn-tier3s.sh creates it" in r.stdout
 
 
 def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):
@@ -501,3 +541,52 @@ def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):
     r = run(inst.root, user=other.pw_name, pin=inst.pin, path_prepend=f"{b}:{inst.bin}")
     assert "FAIL nss:" in r.stdout, r.stdout
     assert not marker.exists(), "a killed NSS lookup still reached runuser"
+
+
+def test_a_wedged_id_lookup_for_the_foreign_user_is_bounded(tmp_path):
+    """fable A r3 P3-2, applied to id/id -u: EVERY foreign-user NSS lookup in
+    the probe is bounded — a wedged provider hangs the spawn's probe (and the
+    launch unit's start) otherwise. The fake id wedges only on a name
+    argument, so self-lookups (id -u / id -un) still work."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        "sleep 600\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 45, "a wedged NSS lookup hung the probe"
+    assert "FAIL" in r.stdout, r.stdout
+
+
+def test_a_uid_printed_before_a_stall_is_not_a_lookup(tmp_path):
+    """sol B-i r1 P1-3: `timeout 5 id -u <user>` is a valid result only at
+    rc 0 with exactly one numeric uid line. A lookup that PRINTS a complete
+    uid line and then wedges is killed at the bound (rc 124) — what it
+    printed is not a result. Both id -u sites (the state-root uid and
+    as_user's) status-gate, or the probe adopts a uid a dead lookup typed.
+    The fake prints the user's REAL uid, so only the timeout status — not
+    the output shape — can tell the lookup failed."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        # self-lookups (id -u / id -un / bare id) still work
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        # `id -u <name>`: print the real uid, THEN wedge; `id <name>` answers
+        "case \" $* \" in *\" -u \"*) echo %d; sleep 600 ;;"
+        " *) exec /usr/bin/id \"$@\" ;; esac\n" % other.pw_uid)
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 45, "a stalled uid lookup hung the probe"
+    # the state-root site names the failed lookup, not a missing directory
+    assert "the uid lookup for" in r.stdout, r.stdout
+    # and as_user's site never adopts the printed prefix either
+    assert "FAIL nss:" in r.stdout, r.stdout

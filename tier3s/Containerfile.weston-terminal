@@ -1,0 +1,51 @@
+# tier 3s weston-terminal GUI workload (tier3s/CONTRACT.md §7). Built by
+# tier3s/make-tier3s-image.sh as qdistro/tier3s-weston-terminal:latest and run
+# under runsc by spawn-tier3s.sh: read-only root, keep-id uid 1000, no
+# network, the waypipe bridge at /run/qdistro/link (host-uds=open).
+#
+# The base follows the snapshot.conf pin (make-tier3s-image.sh passes it), so
+# the base layer and the zypper repos come from one snapshot. No default: a
+# build without the pin fails instead of pulling the rolling :latest.
+ARG SNAPSHOT
+FROM registry.opensuse.org/opensuse/tumbleweed:${SNAPSHOT}
+ARG SNAPSHOT
+LABEL org.qdistro.tier3s.workload="weston-terminal" \
+      org.qdistro.snapshot="${SNAPSHOT}"
+
+# Replace the rolling repositories inherited from the base before zypper reads
+# metadata (tier3s-local copy of the tier-2 helper; GPG checks stay on).
+COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier3s/
+RUN /bin/sh /usr/lib/qdistro/tier3s/configure-snapshot-repos.sh /usr/lib/qdistro/tier3s/SNAPSHOT
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive dup --no-recommends
+
+# weston + waypipe: the workload and the sandbox half of the GUI bridge
+# (Phase S package set). dejavu-fonts + fontconfig so text renders;
+# glibc-locale-base for a UTF-8 locale (Phase S W8: its absence broke foot).
+RUN zypper --non-interactive install --no-recommends \
+        bash coreutils weston waypipe wayland-utils \
+        fontconfig dejavu-fonts glibc-locale-base terminfo \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# uid 1000 is the in-image default identity ONLY: the launch overrides it
+# with --user=<silo uid> (--userns=keep-id maps that uid to the silo's host
+# uid 1:1, Phase C2 model A). The passwd entry and HOME are part of the image
+# so a bare podman run still resolves a user and a writable home.
+# .cache exists as the tmpfs mountpoint (the font cache lives there) under
+# the read-only root.
+RUN grep -q '^admin:' /etc/group  || echo 'admin:x:1000:' >> /etc/group \
+ && grep -q '^admin:' /etc/passwd || echo 'admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash' >> /etc/passwd \
+ && install -d -o 1000 -g 1000 -m 0700 /home/admin /home/admin/.cache \
+ && install -d -m 0755 /etc/qdistro \
+ && printf 'SNAPSHOT=%s\nWORKLOAD=weston-terminal\n' "${SNAPSHOT}" > /etc/qdistro/tier3s-image
+
+COPY qdistro-tier3s-entrypoint /usr/lib/qdistro/tier3s-entrypoint
+RUN chmod 0755 /usr/lib/qdistro/tier3s-entrypoint
+
+ENV LANG=C.UTF-8 HOME=/home/admin
+USER 1000:1000
+WORKDIR /home/admin
+# ΔB3: the image's entrypoint wraps the app argv in `waypipe ... server --`;
+# the spawn passes only the workload argv (weston-terminal [args...]).
+ENTRYPOINT ["/usr/lib/qdistro/tier3s-entrypoint"]

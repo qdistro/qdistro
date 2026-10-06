@@ -19,7 +19,14 @@ R55-R61 are the sol r5 fixes (the verdict and every prop/inspect answer are
 the call's complete output file; a killed NSS lookup's printed prefix is no
 result); R49, R50 and A10 were re-targeted at the r5 verdict code (the old
 A10 swapped the now-dead `1)`/`*)` case arms; the verdict can no longer take
-a value other than 0 or 1).
+a value other than 0 or 1). E1-E16 are the Phase B-i GUI waypipe bridge
+guards: the declaration parser, the host client, the launch record, the
+mandatory RegisterLaunch, the podman mount + host-uds flag, the cleanup's
+bridge kill and the .call-* mtime aging, and the probe's bounded foreign-user
+id lookups. E17-E22 are the B-i sol r1 fixes: the timed-out id -u printed
+prefix, the launch-record file-id/token independence, the dead-client socket
+wait, the absent-declaration headless fallback, the once-only shared manifest
+key, and the terminal-workload link denial.
 A baseline run with no mutation must pass first. Run from the repo root:
 
     python3 tier3s/spike/mutate-guards.py [--only ID,ID...]   (ID = P1, V2, ...)
@@ -29,6 +36,7 @@ test, and every file is byte-identical to its original at the end.
 """
 import hashlib
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +49,7 @@ SPAWN = "tier3s/spawn-tier3s.sh"
 CLEAN = "tier3s/qdistro-tier3s-cleanup"
 HELP = "tier3s/qdistro-tier3s-scope"
 MKP = "tier3s/seccomp/make-profiles.py"
+CACHE = "tier3s/cache-image-archive.sh"
 TP = "tests/unit/test_tier3s_probe.py"
 TV = "tests/unit/test_tier3s_provision.py"
 TS = "tests/unit/test_tier3s_spawn.py"
@@ -287,7 +296,8 @@ MUTATIONS = [
      '        assert True or not (verdict == "ALLOW" and name in CONVERTER_DROPS), \\',
      [f"{TS}::test_seccomp_generator_refuses_an_inert_allow"]),
     ("G2 decision flipped without a re-render", MKP,
-     '"llistxattr": ("ALLOW",', '"llistxattr": ("DENY",',
+     '"llistxattr": ("ALLOW", "as weston-terminal (ls -l inside the terminal)."),',
+     '"llistxattr": ("DENY", "as weston-terminal (ls -l inside the terminal)."),',
      [f"{TS}::test_seccomp_profile_is_rendered_and_decided"]),
     # --- A-ii: spawn deltas
     ("A21 pod-app launch no longer refused", SPAWN,
@@ -699,7 +709,8 @@ MUTATIONS = [
       f"{TSM}::test_observe_supervisor_failure_before_podman_is_unknown",
       f"{TSM}::test_running_false_only_when_unit_down_container_gone_and_no_record"]),
     ("R54 the .call-* sweep checks /proc instead of $PROC (fable r3 P3-5)", CLEAN,
-     '[ ! -e "$PROC/$p" ]', '[ ! -e "/proc/$p" ]',
+     '[ -e "$PROC/$p" ] || { rm -rf -- "$d"; continue; }',
+     '[ -e "/proc/$p" ] || { rm -rf -- "$d"; continue; }',
      [f"{TS}::test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup"]),
     # --- sol r5
     ("R55 the verdict is the NUL-truncated prefix again (sol r5 P1)", CLEAN,
@@ -736,6 +747,118 @@ MUTATIONS = [
      '    [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \\\n',
      '    [ -n "$AS_UID" ] && { pw="$(timeout 5 getent passwd "$USER_NAME")" || :; } \\\n',
      [f"{TP}::test_a_stalled_nss_answer_is_not_a_lookup"]),
+    # --- Phase B-i: the GUI waypipe bridge (CONTRACT.md §5 step 12). E = the
+    # bE-side launch path: bridge client, launch record, registration, the
+    # podman mount + host-uds flag, and the declaration parser.
+    ("E1 host-uds=open dropped (the mounted socket cannot pass fds)", SPAWN,
+     '    GUI_RTFLAG=(--runtime-flag=host-uds=open)            # bind-mounted unix sockets into the sandbox',
+     '    GUI_RTFLAG=()',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
+      f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E2 the bridge dir is not mounted into the sandbox", SPAWN,
+     '    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:ro")    # the token bridge dir, holding only link.sock; the sandbox only connect()s — ro keeps a hostile guest off the host /run tmpfs (P2-1)',
+     '    GUI_MOUNT=()',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
+      f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E3 RegisterLaunch is warning-only again (tier-3 style)", SPAWN,
+     '''    [ "$reg" = 1 ] \\
+        || bridge_refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"''',
+     '''    [ "$reg" = 1 ] || say "warning: RegisterLaunch failed for bridge client pid $INNER_PID"''',
+     [f"{TS}::test_gui_launch_refuses_when_registration_keeps_failing"]),
+    ("E4 the launch record's nonce is not checked", SPAWN,
+     '            [ "$INNER_TOK" = "$LR_TOKEN" ] && break', '            break',
+     [f"{TS}::test_gui_launch_refuses_a_record_with_another_token"]),
+    ("E5 the bridge client's launch-unit cgroup is not verified", SPAWN,
+     '''    [ "${bcg##*/}" = "$UNIT" ] \\
+        || bridge_refuse "bridge client pid $INNER_PID is not in $UNIT's cgroup (${bcg:-?})"''',
+     '    :',
+     [f"{TS}::test_gui_launch_refuses_a_client_outside_the_launch_unit"]),
+    ("E6 the bridge is never killed in teardown", CLEAN,
+     '    kill_bridge\n', '    :\n',
+     [f"{TS}::test_gui_launch_registers_the_bridge_before_podman",
+      f"{TS}::test_gui_bridge_is_torn_down_when_the_launch_fails_after_it"]),
+    ("E7 the workload declaration is sourced, not parsed", SPAWN,
+     '    gui_seen=0\n    while IFS= read -r line || [ -n "$line" ]; do',
+     '    gui_seen=0\n    . "$WENV"; GUI="${GUI:-0}"\n    while IFS= read -r line || [ -n "$line" ]; do',
+     [f"{TS}::test_workload_declarations_are_parsed_not_sourced"]),
+    ("E8 a symlinked declaration is followed (test -f resolves it)", SPAWN,
+     '''    { [ -f "$WENV" ] && [ ! -L "$WENV" ] && [ -r "$WENV" ]; } \\
+        || refuse "workload declaration $WENV is not a regular readable file"''',
+     '''    { [ -f "$WENV" ] && [ -r "$WENV" ]; } \\
+        || refuse "workload declaration $WENV is not a regular readable file"''',
+     [f"{TS}::test_a_symlinked_workload_declaration_refuses"]),
+    ("E9 the compositor precondition is not checked", SPAWN,
+     '''    [ -S "$XDG_RT/$WL_DISPLAY" ] \\
+        || refuse "GUI workload $WORKLOAD but no admin compositor socket at $XDG_RT/$WL_DISPLAY"''',
+     '    :',
+     [f"{TS}::test_gui_launch_without_compositor_refuses"]),
+    ("E10 the entrypoint is passed as a podman command argument again", SPAWN,
+     'PODMAN_ARGV+=("${APP_ARGV[@]}")',
+     'PODMAN_ARGV+=(qdistro-tier3s-entrypoint "${APP_ARGV[@]}")',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint"]),
+    ("E11 RegisterLaunch is tried only once", SPAWN,
+     '    for _ in 1 2 3 4 5; do', '    for _ in 1; do',
+     [f"{TS}::test_gui_launch_registers_after_bounded_retries",
+      f"{TS}::test_gui_launch_refuses_when_registration_keeps_failing"]),
+    ("E12 a reused pid keeps a stale .call- dir again", CLEAN,
+     '''            st="$(starttime "$p")"; mt="$(stat -c %Y -- "$d" 2>/dev/null || :)"''',
+     '''            st=""; mt=""''',
+     [f"{TS}::test_reap_stale_ages_call_dirs_against_pid_reuse"]),
+    ("E13 the foreign-user id lookups are unbounded again", PROBE,
+     [('if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then\n    fail user',
+       'if ! id "$USER_NAME" >/dev/null 2>&1; then\n    fail user'),
+      ('if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then\n    fail state_root',
+       'if ! id "$USER_NAME" >/dev/null 2>&1; then\n    fail state_root'),
+      ('elif ! sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \\\n        || ! [[ "$sr_uid" =~ ^[0-9]+$ ]]; then',
+       'elif ! sr_uid="$(id -u "$USER_NAME" 2>/dev/null)"; then'),
+      ('    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \\\n        && [[ "$AS_UID" =~ ^[0-9]+$ ]] || AS_UID=""',
+       '    AS_UID="$(id -u "$USER_NAME" 2>/dev/null)"')], None,
+     [f"{TP}::test_a_wedged_id_lookup_for_the_foreign_user_is_bounded"]),
+    ("E14 the launch record is left behind after registration", SPAWN,
+     '    rm -f -- "$T$LAUNCH_RECORD"\nfi\n\n# --- 12. scope + podman', 'fi\n\n# --- 12. scope + podman',
+     [f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E15 a never-bound bridge socket does not refuse", SPAWN,
+     '    [ -n "$sock_ok" ] || bridge_refuse "bridge client did not bind $BRIDGE_SOCK within ${BRIDGE_WAIT_S} s"',
+     '    :',
+     [f"{TS}::test_gui_launch_refuses_when_the_socket_never_binds"]),
+    ("E16 the bridge is armed for a headless workload too", SPAWN,
+     'if [ "$GUI" = 1 ]; then\n    # TWO independent randoms',
+     'if true; then\n    # TWO independent randoms',
+     [f"{TS}::test_headless_plan_has_no_bridge",
+      f"{TS}::test_headless_launch_never_touches_the_bridge"]),
+    # B-i sol r1 fixes: the timed-out id lookup's printed prefix, the
+    # launch-record independence, the dead-client wait, the headless
+    # fallback, the once-only shared manifest key and the link denial.
+    ("E17 a printed prefix is still a result (timeout status ignored)", PROBE,
+     [('elif ! sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \\\n        || ! [[ "$sr_uid" =~ ^[0-9]+$ ]]; then',
+       'elif sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)"; then'),
+      ('    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \\\n        && [[ "$AS_UID" =~ ^[0-9]+$ ]] || AS_UID=""',
+       '    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)"')], None,
+     [f"{TP}::test_a_uid_printed_before_a_stall_is_not_a_lookup"]),
+    ("E18 the launch record file id is the launch token again", SPAWN,
+     '''    LR_FILE_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"''',
+     '    LR_FILE_ID="$TOKEN"',
+     [f"{TS}::test_gui_plan_adds_bridge_flag_mount_and_entrypoint",
+      f"{TS}::test_gui_launch_registers_the_bridge_before_podman"]),
+    ("E19 a dead bridge client waits out the socket bound", SPAWN,
+     '''        [ -S "$BRIDGE_SOCK" ] && { sock_ok=1; break; }
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break''',
+     '        [ -S "$BRIDGE_SOCK" ] && { sock_ok=1; break; }',
+     [f"{TS}::test_gui_launch_refuses_fast_when_the_client_dies_before_the_socket"]),
+    ("E20 an absent declaration refuses (the headless fallback is lost)", SPAWN,
+     'WENV="$LIBDIR/workloads/$WORKLOAD.env"\nif [ -e "$WENV" ] || [ -L "$WENV" ]; then',
+     'WENV="$LIBDIR/workloads/$WORKLOAD.env"\n[ -e "$WENV" ] || refuse "no workload declaration $WENV"\nif [ -e "$WENV" ] || [ -L "$WENV" ]; then',
+     [f"{TS}::test_absent_workload_declaration_takes_the_headless_path"]),
+    ("E21 the shared snapshot key is emitted once per workload again", CACHE,
+     'else if (L[i] ~ /^IMAGE_SNAPSHOT=/) { if (snap == "") snap = substr(L[i], 16) }',
+     'else if (L[i] ~ /^IMAGE_SNAPSHOT=/) print "IMAGE_SNAPSHOT=" substr(L[i], 16)',
+     [f"{TS}::test_cache_manifest_emits_the_shared_snapshot_key_once"]),
+    ("E22 link is allowed for the terminal workloads again", MKP,
+     '''        "link": ("DENY",
+            "Phase S saw link only from fontconfig's cache lock, denied''',
+     '''        "link": ("ALLOW",
+            "Phase S saw link only from fontconfig's cache lock, denied''',
+     [f"{TS}::test_seccomp_profile_is_rendered_and_decided"]),
 ]
 
 
@@ -744,6 +867,12 @@ def sha(p):
 
 
 def pytest(nodes):
+    # Drop the imported modules' bytecode caches first: two mutations of the
+    # same source that land in the same mtime second with the same byte size
+    # validate a stale .pyc and the mutation is silently invisible (seen as
+    # S6 NOT CAUGHT while the mutated resume() really did fail its test).
+    for d in ("session_manager", "broker"):
+        shutil.rmtree(REPO / d / "__pycache__", ignore_errors=True)
     r = subprocess.run([sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q",
                         "--tb=no", "-rfs", *nodes], cwd=REPO, capture_output=True, text=True)
     failed = set(re.findall(r"^FAILED (\S+)", r.stdout, re.M))
@@ -763,7 +892,7 @@ def main():
         print(f"unknown mutation id in {sorted(only)}")
         return 2
     files = {f: REPO / f for f in (PROBE, PROV, WRAP, SPAWN, CLEAN, HELP, MKP,
-                                   SM, LH, UNITF, BRK, INST)}
+                                   CACHE, SM, LH, UNITF, BRK, INST)}
     orig = {f: p.read_bytes() for f, p in files.items()}
     orig_sha = {f: sha(p) for f, p in files.items()}
     for f in orig_sha:

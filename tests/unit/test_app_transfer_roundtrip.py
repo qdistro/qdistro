@@ -156,6 +156,12 @@ def route(qapp, tmp_path, monkeypatch, request):
     broker = _Broker(str(tmp_path / "cache.sqlite"), str(tmp_path / "audit.sqlite"), str(rules))
     system = _SystemBus(_BrokerProxy(broker), _RelayProxy(relay), uid)
     monkeypatch.setattr(dbus, "SystemBus", lambda: system)
+    # DecideRequest's TOCTOU re-check reads live /proc for the pending
+    # caller's pid; pin the seam to the stubbed peer identity so the fake
+    # pid 201 does not collide with a real host process (CallerGone).
+    identities = {100: ("/usr/bin/admin", 1), 201: ("/usr/bin/qfileman", 2)}
+    monkeypatch.setattr(B, "_read_proc_identity",
+                        lambda pid: identities.get(int(pid), ("?", 0)))
     yield window, broker, system, session, receiver_proxy, uid, service
     dispatcher.shutdown()
     qapp.processEvents()

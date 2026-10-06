@@ -1,0 +1,19 @@
+Id:             1863
+Name:           qci-bats-phase7-tier3s-sigkill-cleanup-261003-184204-2291452-1917
+UUID:           b663f4f7-d6d3-4084-92ff-7eaa47f8ea38
+OS Type:        hvm
+State:          running
+CPU(s):         4
+CPU time:       208.0s
+Max memory:     4194304 KiB
+Used memory:    4194304 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: unconfined_u:unconfined_r:svirt_t:s0:c840,c912 (enforcing)
+Messages:       tainted: custom configuration parameters specified
+                tainted: custom guest agent control commands issued
+

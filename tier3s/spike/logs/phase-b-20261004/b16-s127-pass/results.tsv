@@ -1,0 +1,2 @@
+gate	subject	status	exit_code	exit_class	kind	log	notes	category
+bats	phase7-tier3s-clipboard-gate.bats	pass	0	pass	bats	bats/phase7-tier3s-clipboard-gate.bats.log	VM=qci-bats-phase7-tier3s-clipboard-gate-261004-081211-2917499-8703	integration

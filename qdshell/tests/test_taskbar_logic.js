@@ -262,6 +262,36 @@ function noDuplicateIds(entries) {
     TaskbarLogic.siloTierKey("qdistro.disp.abc", "qdistro.tier2"), "disposable");
 })();
 
+// ── paravirt ΔB6: tier3s must NEVER classify as tier3 ──
+// The engine string "qdistro.tier3s" satisfies a bare
+// eng.indexOf("qdistro.tier3") === 0 compare — a real prefix collision.
+// The tier3s branch in siloTierKey is placed BEFORE the tier3 one;
+// these asserts pin that ordering so a reorder/regression is caught.
+(function testSiloTierKey_tier3s() {
+  // ensures: a tier3s (gVisor/waypipe) window is its own tier, never tier3
+  assert.strictEqual(
+    TaskbarLogic.siloTierKey("qdistro.tier3s.smoke", "qdistro.tier3s"), "tier3s");
+  // engine alone (app_id missing) still classifies as tier3s
+  assert.strictEqual(
+    TaskbarLogic.siloTierKey("", "qdistro.tier3s"), "tier3s");
+  // app_id alone (engine missing) still classifies as tier3s
+  assert.strictEqual(
+    TaskbarLogic.siloTierKey("qdistro.tier3s.smoke", ""), "tier3s");
+  // and the drift guard for the collision itself: under NO mix of the two
+  // signals does "qdistro.tier3s.*" come back as "tier3"
+  assert.notStrictEqual(
+    TaskbarLogic.siloTierKey("qdistro.tier3s.smoke", "qdistro.tier3s"), "tier3");
+  assert.notStrictEqual(
+    TaskbarLogic.siloTierKey("", "qdistro.tier3s"), "tier3");
+  assert.notStrictEqual(
+    TaskbarLogic.siloTierKey("qdistro.tier3s.smoke", ""), "tier3");
+  // and genuine tier-3 ids still classify as tier3 (the reorder didn't
+  // swallow the wrong set either direction)
+  assert.strictEqual(
+    TaskbarLogic.siloTierKey("qdistro.tier3.dev", "qdistro.tier3"), "tier3");
+  assert.strictEqual(TaskbarLogic.siloTierKey("", "qdistro.tier3"), "tier3");
+})();
+
 (function testSnapshotConfigForWindow() {
   // Persistent tier-2: "tier2/<name>" -> Snapper config <name>.
   assert.deepStrictEqual(
@@ -315,6 +345,9 @@ function noDuplicateIds(entries) {
     TaskbarLogic.siloTierLabel("qdistro.tier4.work-vm", ""), "tier 4 (VM)");
   assert.strictEqual(
     TaskbarLogic.siloTierLabel("qdistro.tier3.dev", ""), "tier 3 (VM app)");
+  assert.strictEqual(
+    TaskbarLogic.siloTierLabel("qdistro.tier3s.smoke", "qdistro.tier3s"),
+    "tier 3s (gVisor)");
   assert.strictEqual(
     TaskbarLogic.siloTierLabel("c1/weston-terminal", "qdistro.tier2"),
     "tier 2 (container)");
@@ -434,6 +467,24 @@ function noDuplicateIds(entries) {
   assert.strictEqual(actions.indexOf("qd-snapshot"), -1);
   assert.strictEqual(actions.indexOf("qd-dispose"), -1);
   assert.ok(actions.indexOf("qd-permissions") !== -1);
+})();
+
+(function testBuildIsolationMenu_tier3s() {
+  // paravirt ΔB6: a tier3s window shows its own tier row — NOT "tier 3",
+  // and no snapshot/dispose (not a persistent tier-2 config, not a
+  // disposable). Its silo is the BARE name (clipboard-key convention).
+  const items = TaskbarLogic.buildIsolationMenuItems({
+    secctxAppId: "qdistro.tier3s.smoke", sandboxEngine: "qdistro.tier3s",
+    silo: "smoke", instanceId: "0123456789abcdef"
+  });
+  const actions = items.map(function (i) { return i.action; });
+  assert.strictEqual(actions.indexOf("qd-snapshot"), -1);
+  assert.strictEqual(actions.indexOf("qd-dispose"), -1);
+  assert.ok(actions.indexOf("qd-permissions") !== -1);
+  const tierRow = items.find(function (i) { return i.action === "qd-id-tier"; });
+  // ensures: the menu tier key is "tier3s", never "tier3"
+  assert.strictEqual(tierRow.tierKey, "tier3s");
+  assert.ok(tierRow.label.indexOf("tier 3s") !== -1);
 })();
 
 console.log("taskbar-logic: all assertions passed");

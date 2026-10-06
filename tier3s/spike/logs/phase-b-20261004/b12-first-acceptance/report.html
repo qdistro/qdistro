@@ -1,0 +1,211 @@
+<!doctype html><html><head><meta charset='utf-8'><title>qdistro CI report</title><style>
+body { font-family: system-ui, sans-serif; max-width: 1120px; margin: 32px auto; line-height: 1.45; padding: 0 24px; }
+h1, h2, h3 { line-height: 1.15; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 14px; }
+th, td { border: 1px solid #ccc; padding: 6px 8px; vertical-align: top; }
+th { background: #f2f2f2; text-align: left; }
+pre { background: #111; color: #eee; padding: 12px; overflow-x: auto; border-radius: 6px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+a { color: #0757a8; }
+</style></head><body><h1>qdistro CI report: bats-20261003T163624Z-2151098</h1>
+
+<h2>Summary</h2>
+<p>- **gate**: `bats`</p>
+<p>- **started_utc**: `2026-10-03T16:36:24Z`</p>
+<p>- **finished_utc**: `2026-10-03T16:45:15Z`</p>
+<p>- **exit_code**: `35`</p>
+<p>- **exit_class**: `bats`</p>
+<p>- **workspace**: `/var/tmp/t3s-qci-b-a1e16e5bb`</p>
+<p>- **command**: `/var/tmp/t3s-qci-b-a1e16e5bb/ci/bin/qci bats tests/integration/vm/phase7-tier3s-app.bats tests/integration/vm/phase7-tier3s-chrome-secctx.bats tests/integration/vm/phase7-tier3s-clipboard-gate.bats tests/integration/vm/phase7-tier3s-denied.bats tests/integration/vm/phase7-tier3s-headless.bats tests/integration/vm/phase7-tier3s-hostile-stream.bats tests/integration/vm/phase7-tier3s-lifecycle.bats tests/integration/vm/phase7-tier3s-lineage.bats tests/integration/vm/phase7-tier3s-sigkill-cleanup.bats tests/integration/vm/phase7-tier3s-waypipe.bats`</p>
+<p>- **results**: fail=5, pass=5, skip=5</p>
+<p>- **actionable failures**: 5 (Phase-1 clean-run metric; excludes 0 expected/non-actionable)</p>
+
+<h2>Test categories</h2>
+<p>Per-category result tally. Categories are the shared confidence vocabulary documented in `ci/TAXONOMY.md`; this is reporting only — it gates nothing.</p>
+
+<table><tbody>
+<tr><th>category</th><th>total</th><th>pass</th><th>fail</th><th>blocked</th><th>skip</th></tr>
+<tr><td>integration</td><td>10</td><td>5</td><td>5</td><td>0</td><td>0</td></tr>
+<tr><td>vm</td><td>5</td><td>0</td><td>0</td><td>0</td><td>5</td></tr>
+</tbody></table>
+
+<h2>Failures and blocked work</h2>
+<h3>FAIL: bats / phase7-tier3s-app.bats</h3>
+<p>- exit: `35` class: `bats` kind: `bats`</p>
+<p>- evidence: <a href="bats/phase7-tier3s-app.bats.log">log</a></p>
+<p>- source: <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-app.bats.scratch/t3s-setup.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-app.bats.scratch/t3s-setup.log</a>, <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-app.bats.scratch/s124.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-app.bats.scratch/s124.log</a></p>
+<p>- notes: VM=qci-bats-phase7-tier3s-app-261003-183943-2215538-4199 raw_rc=1</p>
+<p>- recommendation: Rerun the single bats file against the preserved VM before broadening the search.</p>
+
+<pre><code>
+# [t3s-setup] 88 passes, 0 failures
+# FAIL: weston: compositor reports focus on handle 1: got &#x27;2&#x27;, want &#x27;1&#x27;
+# FAIL: foot: compositor reports focus on handle 2: got &#x27;2&#x27;, want &#x27;1&#x27;
+# [s124] 61 passes, 2 failures
+#   `assert_success&#x27; failed
+# --- command failed (exit=1) ---
+# FAIL: weston: compositor reports focus on handle 1: got &#x27;2&#x27;, want &#x27;1&#x27;
+# FAIL: foot: compositor reports focus on handle 2: got &#x27;2&#x27;, want &#x27;1&#x27;
+# [s124] 61 passes, 2 failures
+</code></pre>
+
+<h3>FAIL: bats / phase7-tier3s-clipboard-gate.bats</h3>
+<p>- exit: `35` class: `bats` kind: `bats`</p>
+<p>- evidence: <a href="bats/phase7-tier3s-clipboard-gate.bats.log">log</a></p>
+<p>- source: <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-clipboard-gate.bats.scratch/t3s-setup.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-clipboard-gate.bats.scratch/t3s-setup.log</a>, <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-clipboard-gate.bats.scratch/s127.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-clipboard-gate.bats.scratch/s127.log</a></p>
+<p>- notes: VM=qci-bats-phase7-tier3s-clipboard-gate-261003-183943-2215542-25261 raw_rc=1</p>
+<p>- recommendation: Rerun the single bats file against the preserved VM before broadening the search.</p>
+
+<pre><code>
+# [t3s-setup] 82 passes, 0 failures
+# FAIL: qdshell denied a png-only tier3s offer before the broker: got &#x27;0&#x27;, want &#x27;1&#x27;
+# FAIL: qdshell logged the tier3s mime-strip: got &#x27;0&#x27;, want &#x27;1&#x27;
+# FAIL: live verdict flipped to allow under the rule: got &#x27;0&#x27;, want &#x27;1&#x27;
+# PASS: audit: denied transfer row(s) recorded (2)
+# [s127] 67 passes, 3 failures
+#   `assert_success&#x27; failed
+# --- command failed (exit=1) ---
+# FAIL: qdshell denied a png-only tier3s offer before the broker: got &#x27;0&#x27;, want &#x27;1&#x27;
+# FAIL: qdshell logged the tier3s mime-strip: got &#x27;0&#x27;, want &#x27;1&#x27;
+# FAIL: live verdict flipped to allow under the rule: got &#x27;0&#x27;, want &#x27;1&#x27;
+# PASS: audit: denied transfer row(s) recorded (2)
+# [s127] 67 passes, 3 failures
+</code></pre>
+
+<h3>FAIL: bats / phase7-tier3s-hostile-stream.bats</h3>
+<p>- exit: `35` class: `bats` kind: `bats`</p>
+<p>- evidence: <a href="bats/phase7-tier3s-hostile-stream.bats.log">log</a></p>
+<p>- source: <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-hostile-stream.bats.scratch/t3s-setup.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-hostile-stream.bats.scratch/t3s-setup.log</a>, <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-hostile-stream.bats.scratch/s129.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-hostile-stream.bats.scratch/s129.log</a></p>
+<p>- notes: VM=qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458 raw_rc=1</p>
+<p>- recommendation: Inspect qdwin/qdshell protocol logs first; avoid qdshell workarounds for compositor protocol bugs.</p>
+
+<pre><code>
+# [t3s-setup] 82 passes, 0 failures
+# PASS: single-attach: reconnect to A&#x27;s consumed link.sock is refused (refused)
+# FAIL: A&#x27;s in-sandbox wayland socket resolved: got &#x27;no&#x27;, want &#x27;yes&#x27;
+# [s129] 70 passes, 1 failures
+#   `assert_success&#x27; failed
+# --- command failed (exit=1) ---
+# PASS: single-attach: reconnect to A&#x27;s consumed link.sock is refused (refused)
+# FAIL: A&#x27;s in-sandbox wayland socket resolved: got &#x27;no&#x27;, want &#x27;yes&#x27;
+# [s129] 70 passes, 1 failures
+</code></pre>
+
+<h3>FAIL: bats / phase7-tier3s-lifecycle.bats</h3>
+<p>- exit: `35` class: `bats` kind: `bats`</p>
+<p>- evidence: <a href="bats/phase7-tier3s-lifecycle.bats.log">log</a></p>
+<p>- source: <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lifecycle.bats.scratch/t3s-setup.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lifecycle.bats.scratch/t3s-setup.log</a>, <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lifecycle.bats.scratch/s125.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lifecycle.bats.scratch/s125.log</a></p>
+<p>- notes: VM=qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162 raw_rc=1</p>
+<p>- recommendation: Inspect qdwin/qdshell protocol logs first; avoid qdshell workarounds for compositor protocol bugs.</p>
+
+<pre><code>
+# [t3s-setup] 82 passes, 0 failures
+# INFO: no-compositor: start rc=1 Call failed: start of tier3s silo &#x27;s125a&#x27; failed: the launch was refused or failed before it ran: REFUSE: GUI workload weston-terminal but no admin compositor socket at /run/user/1000/wayland-1; the silo is Stopped (see journalctl -u qdistro-tier3s-silo@s125a.service)
+# PASS: no-compositor: StartSilo fails for the refused launch (rc=1)
+# PASS: no-compositor: the silo reads Stopped right after the refused start (Stopped)
+#     unit: qdistro-tier3s-silo@s125a.service: Failed with result &#x27;exit-code&#x27;.
+#     unit: Failed to start qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only).
+# PASS: no-compositor: the spawn refused with the expected message (1)
+# PASS: no-compositor: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# ## 2. missing launch identity: bridge client never publishes a record
+# INFO: no-launch-record: start rc=1 Call failed: start of tier3s silo &#x27;s125a&#x27; failed: the launch was refused or failed before it ran: REFUSE: the waypipe bridge client did not publish a live pid (launch record /run/user/1000/qdistro-tier3s-launchrec-5009a56a200a85684fe783a6f9366e8c.pid) (client log tail: ); the silo is Stopped (see jo
+# PASS: no-launch-record: StartSilo fails for the refused launch (rc=1)
+# PASS: no-launch-record: the silo reads Stopped right after the refused start (Stopped)
+#     unit: qdistro-tier3s-silo@s125a.service: Failed with result &#x27;exit-code&#x27;.
+#     unit: Failed to start qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only).
+# PASS: no-launch-record: the spawn refused with the expected message (1)
+# PASS: no-launch-record: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+# ## 3. RegisterLaunch failure refuses before podman run
+# PASS: control: direct RegisterLaunch is denied under the drop-in (rc=1)
+# INFO: registerlaunch-denied: start rc=1 Call failed: start of tier3s silo &#x27;s125a&#x27; failed: the launch was refused or failed before it ran: REFUSE: RegisterLaunch failed for bridge client pid 7967; no unregistered GUI launch (client log tail: qdistro-secctx-exec: trusted launcher accepted via root-parent fallback (parent pid=7956 uid=0, exe
+# PASS: registerlaunch-denied: StartSilo fails for the refused launch (rc=1)
+</code></pre>
+
+<h3>FAIL: bats / phase7-tier3s-lineage.bats</h3>
+<p>- exit: `35` class: `bats` kind: `bats`</p>
+<p>- evidence: <a href="bats/phase7-tier3s-lineage.bats.log">log</a></p>
+<p>- source: <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lineage.bats.scratch/t3s-setup.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lineage.bats.scratch/t3s-setup.log</a>, <a href="/var/tmp/t3s-qci-b-a1e16e5bb/ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lineage.bats.scratch/s128.log">ci/runs/bats-20261003T163624Z-2151098/bats/phase7-tier3s-lineage.bats.scratch/s128.log</a></p>
+<p>- notes: VM=qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187 raw_rc=1</p>
+<p>- recommendation: Rerun the single bats file against the preserved VM before broadening the search.</p>
+
+<pre><code>
+# [t3s-setup] 82 passes, 0 failures
+# PASS: RegisterLaunch of a dead pid is refused (1)
+# PASS: RegisterLaunch with a wrong starttime is refused (1)
+# ## 3. enforce mode: unattested/forged source can only be denied
+# FAIL: broker journal shows the override for the forged claim: got &#x27;0&#x27;, want &#x27;1&#x27;
+# FAIL: attested source + allow rule -&gt; allow: got &#x27;deny&#x27;, want &#x27;allow&#x27;
+# [s128] 51 passes, 2 failures
+#   `assert_success&#x27; failed
+# --- command failed (exit=1) ---
+# PASS: RegisterLaunch of a dead pid is refused (1)
+# PASS: RegisterLaunch with a wrong starttime is refused (1)
+# ## 3. enforce mode: unattested/forged source can only be denied
+# FAIL: broker journal shows the override for the forged claim: got &#x27;0&#x27;, want &#x27;1&#x27;
+# FAIL: attested source + allow rule -&gt; allow: got &#x27;deny&#x27;, want &#x27;allow&#x27;
+# [s128] 51 passes, 2 failures
+</code></pre>
+
+<h2>Skips</h2>
+<p>- lifecycle / qci-bats-phase7-tier3s-app-261003-183943-2215538-4199: failed VM powered off (disk preserved) for debugging; virsh start to inspect</p>
+<p>- lifecycle / qci-bats-phase7-tier3s-clipboard-gate-261003-183943-2215542-25261: failed VM powered off (disk preserved) for debugging; virsh start to inspect</p>
+<p>- lifecycle / qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458: failed VM powered off (disk preserved) for debugging; virsh start to inspect</p>
+<p>- lifecycle / qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162: failed VM powered off (disk preserved) for debugging; virsh start to inspect</p>
+<p>- lifecycle / qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187: failed VM powered off (disk preserved) for debugging; virsh start to inspect</p>
+
+<h2>Agent attempts (non-clean)</h2>
+<p>Agent scenario attempts that did not cleanly PASS with rc=0 — the flake-relevant rows (UNKNOWN/timeout/slow). Reporting only.</p>
+
+<table><tbody>
+<tr><td>scenario</td><td>attempt</td><td>status</td><td>agent_rc</td><td>classifier</td><td>wall_s</td></tr>
+<tr><td>golden-build</td><td>1</td><td>DONE</td><td>0</td><td>—</td><td>188</td></tr>
+</tbody></table>
+
+<h2>All Results</h2>
+<table><tbody>
+<tr><th>status</th><th>gate</th><th>subject</th><th>category</th><th>kind</th><th>exit</th><th>log</th><th>notes</th></tr>
+<tr><td>fail</td><td>bats</td><td>phase7-tier3s-app.bats</td><td>integration</td><td>bats</td><td>35</td><td><a href="bats/phase7-tier3s-app.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-app-261003-183943-2215538-4199 raw_rc=1</td></tr>
+<tr><td>skip</td><td>lifecycle</td><td>qci-bats-phase7-tier3s-app-261003-183943-2215538-4199</td><td>vm</td><td>vm</td><td>0</td><td></td><td>failed VM powered off (disk preserved) for debugging; virsh start to inspect</td></tr>
+<tr><td>pass</td><td>bats</td><td>phase7-tier3s-chrome-secctx.bats</td><td>integration</td><td>bats</td><td>0</td><td><a href="bats/phase7-tier3s-chrome-secctx.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-chrome-secctx-261003-183943-2215549-9939</td></tr>
+<tr><td>fail</td><td>bats</td><td>phase7-tier3s-clipboard-gate.bats</td><td>integration</td><td>bats</td><td>35</td><td><a href="bats/phase7-tier3s-clipboard-gate.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-clipboard-gate-261003-183943-2215542-25261 raw_rc=1</td></tr>
+<tr><td>skip</td><td>lifecycle</td><td>qci-bats-phase7-tier3s-clipboard-gate-261003-183943-2215542-25261</td><td>vm</td><td>vm</td><td>0</td><td></td><td>failed VM powered off (disk preserved) for debugging; virsh start to inspect</td></tr>
+<tr><td>pass</td><td>bats</td><td>phase7-tier3s-denied.bats</td><td>integration</td><td>bats</td><td>0</td><td><a href="bats/phase7-tier3s-denied.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-denied-261003-183943-2215565-23150</td></tr>
+<tr><td>pass</td><td>bats</td><td>phase7-tier3s-headless.bats</td><td>integration</td><td>bats</td><td>0</td><td><a href="bats/phase7-tier3s-headless.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-headless-261003-183943-2215581-9330</td></tr>
+<tr><td>fail</td><td>bats</td><td>phase7-tier3s-hostile-stream.bats</td><td>integration</td><td>bats</td><td>35</td><td><a href="bats/phase7-tier3s-hostile-stream.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458 raw_rc=1</td></tr>
+<tr><td>skip</td><td>lifecycle</td><td>qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458</td><td>vm</td><td>vm</td><td>0</td><td></td><td>failed VM powered off (disk preserved) for debugging; virsh start to inspect</td></tr>
+<tr><td>fail</td><td>bats</td><td>phase7-tier3s-lifecycle.bats</td><td>integration</td><td>bats</td><td>35</td><td><a href="bats/phase7-tier3s-lifecycle.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162 raw_rc=1</td></tr>
+<tr><td>skip</td><td>lifecycle</td><td>qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162</td><td>vm</td><td>vm</td><td>0</td><td></td><td>failed VM powered off (disk preserved) for debugging; virsh start to inspect</td></tr>
+<tr><td>fail</td><td>bats</td><td>phase7-tier3s-lineage.bats</td><td>integration</td><td>bats</td><td>35</td><td><a href="bats/phase7-tier3s-lineage.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187 raw_rc=1</td></tr>
+<tr><td>skip</td><td>lifecycle</td><td>qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187</td><td>vm</td><td>vm</td><td>0</td><td></td><td>failed VM powered off (disk preserved) for debugging; virsh start to inspect</td></tr>
+<tr><td>pass</td><td>bats</td><td>phase7-tier3s-sigkill-cleanup.bats</td><td>integration</td><td>bats</td><td>0</td><td><a href="bats/phase7-tier3s-sigkill-cleanup.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-sigkill-cleanup-261003-184204-2291452-1917</td></tr>
+<tr><td>pass</td><td>bats</td><td>phase7-tier3s-waypipe.bats</td><td>integration</td><td>bats</td><td>0</td><td><a href="bats/phase7-tier3s-waypipe.bats.log">log</a></td><td>VM=qci-bats-phase7-tier3s-waypipe-261003-184220-2300038-22186</td></tr>
+</tbody></table>
+
+<h2>Repo State</h2>
+<table><tbody>
+<tr><td>repo</td><td>branch</td><td>head</td><td>dirty</td><td>status</td><td>root</td></tr>
+<tr><td>qdistro</td><td>HEAD</td><td>a1e16e5bb</td><td>0</td><td><a href="repos/qdistro.status.txt">status</a></td><td>`/var/tmp/t3s-qci-b-a1e16e5bb`</td></tr>
+</tbody></table>
+
+<h2>Artifact Index</h2>
+<p>- <a href="agent-notes">agent-notes/</a></p>
+<p>- <a href="bats">bats/</a></p>
+<p>- <a href="exit-code.txt">exit-code.txt</a></p>
+<p>- <a href="flake.tsv">flake.tsv</a></p>
+<p>- <a href="gui">gui/</a></p>
+<p>- <a href="host">host/</a></p>
+<p>- <a href="host-load.tsv">host-load.tsv</a></p>
+<p>- <a href="journals">journals/</a></p>
+<p>- <a href="manifest.txt">manifest.txt</a></p>
+<p>- <a href="preflight">preflight/</a></p>
+<p>- <a href="repo-state.tsv">repo-state.tsv</a></p>
+<p>- <a href="reports">reports/</a></p>
+<p>- <a href="repos">repos/</a></p>
+<p>- <a href="results.d">results.d/</a></p>
+<p>- <a href="results.tsv">results.tsv</a></p>
+<p>- <a href="scenario-attempts.tsv">scenario-attempts.tsv</a></p>
+<p>- <a href="screenshots">screenshots/</a></p>
+<p>- <a href="selftest">selftest/</a></p>
+<p>- <a href="timings.d">timings.d/</a></p>
+<p>- <a href="timings.tsv">timings.tsv</a></p>
+<p>- <a href="vm">vm/</a></p></body></html>

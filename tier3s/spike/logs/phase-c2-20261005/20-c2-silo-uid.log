@@ -1,0 +1,112 @@
+### host 2026-10-05T08:29:46Z: vm-exec t3s-c2-261005-101056-3578230-20792 <<CMD
+bash /root/t3s-c2/c2-silo-uid.sh
+CMD
+[vm-exec] guest identity pinned (pid 1601 start 44340)
+
+## 0. environment
+7.2.8-1-default
+podman version 6.0.2
+runsc version release-20260928.0
+spec: 1.2.1
+Permissive
+OBSERVE: admin store images:
+OBSERVE: existing silo/group rows:
+admin:100000:65536
+t3s-c2a:165536:65536
+t3s-c2b:231072:65536
+admin:100000:65536
+t3s-c2a:165536:65536
+t3s-c2b:231072:65536
+
+## 1. silo users + subuid/subgid allocation
+OBSERVE: t3s-c2a: uid=1001(t3s-c2a) gid=1001(t3s-c2a) groups=1001(t3s-c2a),1003(qdistro-t3s-c2)
+OBSERVE: t3s-c2b: uid=1002(t3s-c2b) gid=1002(t3s-c2b) groups=1002(t3s-c2b)
+OBSERVE: subuid rows after plain useradd:
+/etc/subuid:t3s-c2a:165536:65536
+/etc/subuid:t3s-c2b:231072:65536
+/etc/subgid:t3s-c2a:165536:65536
+/etc/subgid:t3s-c2b:231072:65536
+OBSERVE: subuid rows now:
+/etc/subuid:t3s-c2a:165536:65536
+/etc/subuid:t3s-c2b:231072:65536
+/etc/subgid:t3s-c2a:165536:65536
+/etc/subgid:t3s-c2b:231072:65536
+0: t3s-c2a 165536 65536
+-rwxr-xr-x. 1 root root 45872 Sep 24 06:17 /usr/bin/newgidmap
+-rwxr-xr-x. 1 root root 41776 Sep 24 06:17 /usr/bin/newuidmap
+OBSERVE: podman unshare as t3s-c2a (exercises newuidmap against /etc/subuid):
+Error: configure storage: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: permission denied
+OBSERVE: podman pull as t3s-c2a into its OWN store (registry access is host-side):
+Error: configure storage: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: permission denied
+Error: configure storage: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: permission denied
+OBSERVE: silo store after pull:
+Error: configure storage: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: permission denied
+
+## 2. keep-id under a silo podman caller
+OBSERVE: image usable by t3s-c2a: <none — pull above failed>
+OBSERVE: workload image visible to admin: 
+OBSERVE: silo runtime/runsc dirs:
+/run/qdistro-tier3s-rt/1001 t3s-c2a:t3s-c2a 700
+/run/qdistro-tier3s-runsc/1001 t3s-c2a:t3s-c2a 700
+OBSERVE: silo's /run/user/1001 exists? no — no logind session
+OBSERVE: step 2 deferred: no image readable by t3s-c2a yet — see step 5 result
+
+## 3. bridge-dir traversal (group dance)
+OBSERVE: group qdistro-tier3 absent — creating test group qdistro-t3s-c2
+OBSERVE: t3s-c2a added to qdistro-t3s-c2: uid=1001(t3s-c2a) gid=1001(t3s-c2a) groups=1001(t3s-c2a),1003(qdistro-t3s-c2)
+OBSERVE: t3s-c2b groups (control, not a member): uid=1002(t3s-c2b) gid=1002(t3s-c2b) groups=1002(t3s-c2b)
+stat /var/tmp/tier3s-spike/bridge-dance admin:qdistro-t3s-c2 710
+stat: cannot statx '/var/tmp/tier3s-spike/bridge-dance/bridge.sock': No such file or directory
+OBSERVE: t3s-c2a (member) connect:
+2026/10/05 08:29:47 socat[1760] E connect(, AF=1 "/var/tmp/tier3s-spike/bridge-dance/bridge.sock", 48): No such file or directory
+rc=1
+OBSERVE: t3s-c2b (non-member) connect:
+2026/10/05 08:29:47 socat[1763] E connect(, AF=1 "/var/tmp/tier3s-spike/bridge-dance/bridge.sock", 48): Permission denied
+rc=1
+OBSERVE: t3s-c2b (non-member) list dir:
+ls: cannot open directory '/var/tmp/tier3s-spike/bridge-dance': Permission denied
+rc=2
+OBSERVE: t3s-c2a (member) list dir:
+ls: cannot open directory '/var/tmp/tier3s-spike/bridge-dance': Permission denied
+rc=2
+OBSERVE: admin (owner) list dir:
+rc=0
+
+## 4. runtime-dir / state ownership
+OBSERVE: silo home: /home/t3s-c2a t3s-c2a:t3s-c2a 700
+OBSERVE: podman info as t3s-c2a (storage section):
+Error: configure storage: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: open /var/lib/qdistro-tier3s-store/overlay-images/images.lock: permission denied
+OBSERVE: dirs after info:
+/home/t3s-c2a/.local/share/containers
+/home/t3s-c2a/.local/share/containers/storage
+/home/t3s-c2a/.local/share/containers/storage/libpod
+/home/t3s-c2a/.local/share/containers/storage/volumes
+/home/t3s-c2a/.local/share/containers/storage/db.sql
+/home/t3s-c2a/.local/share/containers/storage/storage.lock
+/home/t3s-c2a/.local/share/containers/storage/userns.lock
+/home/t3s-c2a/.local/share/containers/storage/overlay
+/run/qdistro-tier3s-rt/1001/containers t3s-c2a:t3s-c2a 700
+/run/qdistro-tier3s-rt/1001/libpod t3s-c2a:t3s-c2a 1700
+
+## 5. image store readability for a distinct uid
+OBSERVE: admin home traversal for t3s-c2a: ls: cannot access '/home/admin/.local/share/containers': Permission denied
+OBSERVE: 5a. per-silo store already exercised above: silo pulled + keeps its own images
+Error: creating runtime static files directory "/var/lib/qdistro-tier3s-store/libpod": mkdir /var/lib/qdistro-tier3s-store/libpod: permission denied
+OBSERVE: shared store perms (admin-populated):
+/var/lib/qdistro-tier3s-store
+0	/var/lib/qdistro-tier3s-store
+OBSERVE: after chmod -R a+rX:
+stat: cannot statx '/var/lib/qdistro-tier3s-store/overlay-images/images.lock': No such file or directory
+OBSERVE: silo podman images WITH additionalimagestores=/var/lib/qdistro-tier3s-store:
+Error: configure storage: creating lock file directory: mkdir /var/lib/qdistro-tier3s-store/overlay-images: permission denied
+OBSERVE: and a run from the shared store (the real test — distinct uid map):
+Error: configure storage: creating lock file directory: mkdir /var/lib/qdistro-tier3s-store/overlay-images: permission denied
+
+## 6. summary of open answers
+See OBSERVE lines above; findings get written into 13-phase-C2-progress.md
+and the decided model into tier3s/CONTRACT.md.
+[vm-exec] --- stderr ---
+2026/10/05 08:29:46 socat[1756] E chown("/var/tmp/tier3s-spike/bridge-dance/bridge.sock", -1, 1003): Operation not permitted
+Error: configure storage: creating lock file directory: mkdir /var/lib/qdistro-tier3s-store/overlay-images: permission denied
+[vm-exec] --- end stderr ---
+### exit=0

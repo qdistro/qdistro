@@ -187,7 +187,13 @@ if [ "$_qd_t3s" = 1 ]; then
         echo "ERROR: tier3s source not found at $_qd_t3s_src" >&2
         exit 2
     fi
-    install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp"
+    install -d -o root -g root -m 0755 /usr/lib/qdistro "$_qd_t3s_lib" "$_qd_t3s_lib/seccomp" \
+        "$_qd_t3s_lib/workloads"
+    # Phase C2 model A: every tier3s silo runs its podman/runsc as a dedicated
+    # qt3s-<silo> account; group qdistro-tier3s is the membership marker the
+    # spawn requires (accounts are created at first launch, never here).
+    groupadd --force qdistro-tier3s \
+        || { echo "ERROR: cannot create group qdistro-tier3s" >&2; exit 2; }
     # The root supervisor and the prerequisite screen. probe.sh compares the
     # provisioned wrapper and pin against the copies beside it, and refuses to run
     # as root unless this directory chain is root-owned.
@@ -195,10 +201,35 @@ if [ "$_qd_t3s" = 1 ]; then
     install -o root -g root -m 0755 "$_qd_t3s_src/probe.sh" "$_qd_t3s_lib/probe.sh"
     install -o root -g root -m 0755 "$_qd_t3s_src/tier3s-runsc" "$_qd_t3s_lib/tier3s-runsc"
     install -o root -g root -m 0644 "$_qd_t3s_src/RUNSC_RELEASE" "$_qd_t3s_lib/RUNSC_RELEASE"
+    # The fixed podman-as-silo config (C2 model A): every podman call under a
+    # qt3s-<silo> account runs with CONTAINERS_CONF=<this file>. Root-owned:
+    # the silo must not edit the config its podman trusts.
+    install -o root -g root -m 0644 "$_qd_t3s_src/containers.conf" "$_qd_t3s_lib/containers.conf"
     # Per-workload seccomp profiles (rendered by seccomp/make-profiles.py; the
     # spawn refuses a workload without one, no podman-default fallback).
     for _qd_f in "$_qd_t3s_src"/seccomp/*.json; do
         install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/seccomp/$(basename "$_qd_f")"
+    done
+    # Per-workload declarations (parsed, never sourced): GUI= selects the
+    # waypipe bridge half of the launch (CONTRACT §5 step 12). An absent
+    # declaration means GUI=0 (headless); a present-but-invalid one refuses.
+    for _qd_f in "$_qd_t3s_src"/workloads/*.env; do
+        install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/workloads/$(basename "$_qd_f")"
+    done
+    # The image-side bridge entrypoint and the image-build context
+    # (CONTRACT §1 installed-paths table: Containerfile.<workload>,
+    # headless-smoke.sh, configure-snapshot-repos.sh, make-tier3s-image.sh)
+    # so an installed tree can rebuild every workload image as admin.
+    install -o root -g root -m 0755 "$_qd_t3s_src/qdistro-tier3s-entrypoint" \
+        "$_qd_t3s_lib/qdistro-tier3s-entrypoint"
+    install -o root -g root -m 0755 "$_qd_t3s_src/make-tier3s-image.sh" \
+        "$_qd_t3s_lib/make-tier3s-image.sh"
+    install -o root -g root -m 0755 "$_qd_t3s_src/headless-smoke.sh" \
+        "$_qd_t3s_lib/headless-smoke.sh"
+    install -o root -g root -m 0644 "$_qd_t3s_src/configure-snapshot-repos.sh" \
+        "$_qd_t3s_lib/configure-snapshot-repos.sh"
+    for _qd_f in "$_qd_t3s_src"/Containerfile.*; do
+        install -o root -g root -m 0644 "$_qd_f" "$_qd_t3s_lib/$(basename "$_qd_f")"
     done
     # The root scope helper (first process of the owning scope) and the only
     # teardown path (spawn EXIT trap, unit ExecStop/ExecStopPost, reconciliation).

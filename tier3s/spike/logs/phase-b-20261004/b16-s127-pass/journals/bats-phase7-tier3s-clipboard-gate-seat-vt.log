@@ -1,0 +1,13 @@
+Oct 04 06:12:20 baseweed-admin systemd[1]: Starting User Login Management...
+Oct 04 06:12:21 baseweed-admin systemd-logind[679]: New seat seat0.
+Oct 04 06:12:21 baseweed-admin systemd-logind[679]: Watching system buttons on /dev/input/event4 (Power Button)
+Oct 04 06:12:21 baseweed-admin systemd-logind[679]: Watching system buttons on /dev/input/event0 (AT Translated Set 2 keyboard)
+Oct 04 06:12:21 baseweed-admin systemd[1]: Started User Login Management.
+Oct 04 06:12:21 baseweed-admin systemd[1]: Started Seat management daemon.
+Oct 04 06:12:21 baseweed-admin seatd[872]: 00:00:00.000 [INFO] [seatd/seat.c:48] Created VT-bound seat seat0
+Oct 04 06:12:21 baseweed-admin seatd[872]: 00:00:00.000 [INFO] [seatd/seatd.c:194] seatd started
+Oct 04 06:12:21 baseweed-admin systemd-logind[679]: New session '1' of user 'admin' with class 'manager' and type 'unspecified'.
+Oct 04 06:12:21 baseweed-admin seatd[872]: 00:00:00.195 [INFO] [seatd/server.c:145] New client connected (pid: 957, uid: 1000, gid: 1000)
+Oct 04 06:12:21 baseweed-admin seatd[872]: 00:00:00.196 [INFO] [seatd/seat.c:248] Added client 1 to seat0
+Oct 04 06:12:21 baseweed-admin seatd[872]: 00:00:00.196 [INFO] [seatd/seat.c:584] Opened client 1 on seat0
+Oct 04 06:12:21 baseweed-admin systemd-logind[679]: Watching system buttons on /dev/input/event6 (ydotoold virtual device)

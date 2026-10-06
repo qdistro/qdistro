@@ -1,0 +1,69 @@
+[vm-exec] guest identity pinned (pid 3932 start 6017)
+
+## 0. preconditions, silos
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: audit db present (yes)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s128a (Created)
+PASS: CreateTier3sSilo s128b (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+
+## 1. GUI launch registers the real bridge-client (pid,starttime)
+PASS: launch up (7227bf24ea648d552f3284eb9108ccf0)
+PASS: bridge client pid+starttime recorded (yes)
+PASS: launch reached running (RegisterLaunch succeeded before podman run) (running)
+INFO: register row: register_launch record=4a0640591ffdd8d8d12daebf0304c9fa pid=5110 starttime=6412 uid=1000 engine='qdistro.tier3s' app='qdistro.tier3s.s128a' label='system_u:system_r:unconfined_service_t:s0'
+PASS: audit: register row names the bridge pid+starttime (1)
+PASS: audit: register row carries the tier3s engine/app claim (1)
+
+## 2. RegisterLaunch refuses what it cannot re-verify
+PASS: RegisterLaunch of a dead pid is refused (1)
+PASS: RegisterLaunch with a wrong starttime is refused (1)
+
+## 3. enforce mode: unattested/forged source can only be denied
+PASS: broker restarted under lineage_enforce (1)
+PASS: re-registered A's bridge pid under the enforcing broker (1)
+PASS: enforce: no relayed source pid -> deny (deny)
+PASS: enforce: unrecorded live pid (1) -> deny (deny)
+PASS: enforce: real pid + drifted starttime -> deny (deny)
+PASS: enforce: real pid + forged claim of another silo -> the attested silo wins (deny)
+PASS: enforce: attested source, no rule -> deny (enforce never bypasses rules) (deny)
+PASS: broker journal shows the override for the forged claim (1)
+PASS: audit: source-deny rows recorded under enforce (yes)
+
+## 4. enforce mode: a valid registered source satisfies an allow rule
+PASS: SaveRule wrote the clipboard allow rule (/etc/qdistro/rules.d/99-s128-clip.yaml)
+PASS: attested source + allow rule -> allow (allow)
+PASS: attested source, no rule for s128b->s128a -> deny (deny)
+
+## 5. cleanup: restore posture, stop, delete
+PASS: lineage_enforce restored (prior: 'absent') (False)
+PASS: cleanup/A: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/A: secctx listener wayland-secctx-5107-0 revoked
+PASS: cleanup/A: launch record /run/user/1000/qdistro-tier3s-launchrec-afb248a16f26ba82735543bfbf415820.pid removed
+PASS: cleanup/A: all 13 launch processes gone (pid+starttime)
+PASS: cleanup/A: scope qdistro-tier3s-7227bf24ea648d552f3284eb9108ccf0.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-7227bf24ea648d552f3284eb9108ccf0.scope absent)
+PASS: cleanup/A: per-launch dir /run/qdistro-tier3s/7227bf24ea648d552f3284eb9108ccf0 gone
+PASS: cleanup/A: control record /run/qdistro-tier3s-ctl/7227bf24ea648d552f3284eb9108ccf0 gone
+PASS: cleanup/A: container qdistro-tier3s-s128a gone (podman exists rc=1)
+PASS: cleanup/A: no runsc state for 8c241d116381 in /run/qdistro-tier3s-runsc/1000
+PASS: DeleteSilo s128a (absent)
+PASS: DeleteSilo s128b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s128] 54 passes, 0 failures

@@ -55,6 +55,43 @@ WORKLOADS = {
             "(pkg/sentry/syscalls/linux/sys_syslog.go): the in-sandbox banner the drivers "
             "record as corroboration. It never reaches the host kernel log."),
     },
+    # The GUI terminal workloads (Phase B): the same derived profile, the same
+    # seven decisions — a terminal inside the sandbox is also where the user
+    # runs coreutils, so llistxattr stays ALLOW here too; link does not —
+    # the only observed caller (fontconfig's cache lock) tolerated EPERM.
+    "weston-terminal": {
+        "fchmodat2": ("DENY",
+            "decided by the pin, not by us: runsc 20260928.0's converter drops the name "
+            "('OCI seccomp: ignoring syscall \"fchmodat2\"'), so an ALLOW entry would be "
+            "inert — see the headless-smoke decision for the full effect."),
+        "llistxattr": ("ALLOW",
+            "as headless-smoke: `ls -l` inside the terminal checks ACLs with llistxattr and "
+            "misprints 'Operation not permitted' on EPERM; read-only metadata, Sentry-answered."),
+        "setfsuid": ("DENY",
+            "Phase S saw setfsuid only from the terminal images' startup, non-fatally; the "
+            "workload does not need identity-changing calls and they stay minimal."),
+        "setfsgid": ("DENY", "as setfsuid."),
+        "fadvise64": ("DENY",
+            "advisory only; every Phase S caller (fontconfig, font rasterizers, coreutils) "
+            "ignores its failure. Expect 'Syscall 221: denied by seccomp' in the debug log."),
+        "link": ("DENY",
+            "Phase S saw link only from fontconfig's cache lock, denied (syscall 86) and "
+            "NON-FATAL (spike/logs/phaseS-20261001/attempts/23a-s2-foot-attempt1-image-locale.log) "
+            "— nothing proves the terminals need it, so it stays denied per CONTRACT; revisit "
+            "only on VM evidence (B-iii) that a terminal misbehaves on EPERM."),
+        "syslog": ("DENY",
+            "the GUI workloads have no dmesg banner step; a user typing dmesg in the "
+            "terminal gets EPERM, which is correct posture, not a silent fallback."),
+    },
+    "foot": {
+        "fchmodat2": ("DENY", "as weston-terminal (the pinned converter drops the name)."),
+        "llistxattr": ("ALLOW", "as weston-terminal (ls -l inside the terminal)."),
+        "setfsuid": ("DENY", "as weston-terminal (Phase S terminal startup only, non-fatal)."),
+        "setfsgid": ("DENY", "as setfsuid."),
+        "fadvise64": ("DENY", "as weston-terminal (advisory; callers ignore it)."),
+        "link": ("DENY", "as weston-terminal (fontconfig's cache lock was non-fatal on EPERM)."),
+        "syslog": ("DENY", "as weston-terminal (no dmesg banner step)."),
+    },
 }
 
 

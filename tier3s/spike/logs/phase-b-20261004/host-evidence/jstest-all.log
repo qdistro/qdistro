@@ -1,0 +1,121 @@
+=== qdshell/tests/test_app1apps_nameowner.js
+app1apps-nameowner: all assertions passed
+=== qdshell/tests/test_brightness_policy.js
+brightness-policy: all assertions passed
+=== qdshell/tests/test_broker_gate.js
+=== qdshell/tests/test_capture_binding_invariants.js
+PASS: capture binding startup deferral + authority invariants
+=== qdshell/tests/test_capture_state.js
+capture-state: all assertions passed
+=== qdshell/tests/test_clipboard_actions.js
+clipboard-actions: all assertions passed
+=== qdshell/tests/test_clipboard_broker.js
+=== qdshell/tests/test_clipboard_deny_coalesce.js
+clipboard-deny-coalesce: all assertions passed
+=== qdshell/tests/test_clipboard_focus_clear.js
+clipboard-focus-clear: all assertions passed
+=== qdshell/tests/test_clipboard_id_guard.js
+clipboard-id-guard: all assertions passed
+=== qdshell/tests/test_clipboard_silo.js
+clipboard-silo: all assertions passed
+=== qdshell/tests/test_colorkeys.js
+colorkeys: all assertions passed
+=== qdshell/tests/test_color_palette.js
+test_color_palette.js ok
+=== qdshell/tests/test_desktop_icons.js
+desktop-icons: all assertions passed
+=== qdshell/tests/test_display_primary.js
+display-primary: persistence invariant passed
+=== qdshell/tests/test_drift_guard.js
+drift-guard: all assertions passed
+=== qdshell/tests/test_fork_strip_guard.js
+PASS: fork-strip guard (467 QML/JS files; no wizard/privacy/update modal components)
+=== qdshell/tests/test_fuzzysort.js
+fuzzysort: all assertions passed
+=== qdshell/tests/test_gate_process_queue.js
+gate Process queues: identity correlation, expiry, stale replies, and fail-closed hooks PASS
+=== qdshell/tests/test_gate_process_runtime.js
+real Quickshell Process gates PASS (both verification orders)
+=== qdshell/tests/test_gtk_settings.js
+gtk-settings: all assertions passed
+=== qdshell/tests/test_idle_policy.js
+test_idle_policy: all assertions passed
+=== qdshell/tests/test_keyboard_xkb.js
+keyboard-xkb: all assertions passed
+=== qdshell/tests/test_launcher_items.js
+launcher-items: all assertions passed
+=== qdshell/tests/test_launcher_navigation.js
+launcher-navigation: all assertions passed
+=== qdshell/tests/test_mime_associations.js
+mime-associations: all assertions passed
+=== qdshell/tests/test_nested_pixelfeed_launch.js
+nested-pixelfeed-launch: SHM and tokenized-argv invariants passed
+=== qdshell/tests/test_notification_detail.js
+notification-detail: all assertions passed
+=== qdshell/tests/test_notification_theme.js
+notification-theme: all assertions passed
+=== qdshell/tests/test_output_layout.js
+test_output_layout: ok
+=== qdshell/tests/test_podapps_provider.js
+podapps-provider: async refresh and tier-2 badge invariants passed
+=== qdshell/tests/test_pointer_config.js
+pointer-config: all assertions passed
+=== qdshell/tests/test_pointer_live_scope.js
+pointer-live-scope: all assertions passed
+=== qdshell/tests/test_pointer_overrides.js
+pointer-overrides: all assertions passed
+=== qdshell/tests/test_pointer_parse.js
+pointer-parse: all assertions passed
+=== qdshell/tests/test_presentation_policy.js
+presentation-policy: all assertions passed
+=== qdshell/tests/test_qdistro_contract_drift.js
+qdistro-contract-drift: OK (31 checks against ../tests/contracts/qdistro_shell_contract.json)
+=== qdshell/tests/test_qdwin_only_guard.js
+qdwin-only-guard: all assertions passed (498 source files scanned, no foreign-compositor dispatch/flags/writers)
+=== qdshell/tests/test_r9_input_gate.js
+r9-input-gate: authenticated qdshell compositor gate passed
+=== qdshell/tests/test_r9_position_binding.js
+r9-position-binding: qdshell-owned cross-output move path passed
+=== qdshell/tests/test_remote_display_lease.js
+remote display lease: exact slot delta + fail-closed parsing PASS
+=== qdshell/tests/test_remote_machine_binding.js
+remote-machine-binding: broker-vouched chrome invariants passed
+=== qdshell/tests/test_remote_machine.js
+remote-machine: all assertions passed
+=== qdshell/tests/test_removable_media.js
+removable-media: all assertions passed
+=== qdshell/tests/test_session_model.js
+session-model: all assertions passed
+=== qdshell/tests/test_settings_recovery.js
+settings-recovery: all assertions passed
+=== qdshell/tests/test_settings_tree.js
+settings-tree: all assertions passed
+=== qdshell/tests/test_shortcut_conflicts.js
+shortcut-conflicts: all assertions passed
+=== qdshell/tests/test_silo_chrome.js
+silo-chrome: all assertions passed
+=== qdshell/tests/test_silo_egress.js
+silo-egress: all assertions passed
+=== qdshell/tests/test_system_clock.js
+system-clock: all assertions passed
+=== qdshell/tests/test_taskbar_logic.js
+taskbar-logic: all assertions passed
+=== qdshell/tests/test_taskbar_permissions.js
+taskbar-permissions: all assertions passed
+=== qdshell/tests/test_tier3s_gate_behaviour.js
+test_tier3s_gate_behaviour: all checks passed
+=== qdshell/tests/test_timeformat.js
+timeformat: all assertions passed
+=== qdshell/tests/test_tooltip_text.js
+tooltip-text: all assertions passed
+=== qdshell/tests/test_tray_known_items.js
+tray-known-items: all assertions passed
+=== qdshell/tests/test_widget_helpers.js
+widget-helpers: all assertions passed
+=== qdshell/tests/test_window_manager_policy.js
+window-manager-policy: all assertions passed
+=== qdshell/tests/test_wm_accel.js
+test_wm_accel: all assertions passed
+=== qdshell/tests/test_workspace_names.js
+workspace-names: growth push invariant passed
+EXIT=done

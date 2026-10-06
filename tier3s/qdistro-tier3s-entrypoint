@@ -1,0 +1,30 @@
+#!/bin/sh
+# qdistro-tier3s-entrypoint — the in-image start of every tier 3s GUI
+# workload (tier3s/CONTRACT.md §5 step 12, §7). It is the image's ENTRYPOINT
+# (installed in the image root as /usr/lib/qdistro/tier3s-entrypoint): podman
+# passes it the workload's argv and it execs the waypipe server around it.
+# It never runs for a headless launch (GUI=0 runs its argv directly).
+#
+#   qdistro-tier3s-entrypoint <workload> [args...]
+#
+# The host half — a waypipe client under qdistro-secctx-exec, connected to
+# the admin compositor as engine qdistro.tier3s — listens on link.sock in
+# the launch's per-token directory, bind-mounted at /run/qdistro/link.
+# gVisor cannot carry host SCM_RIGHTS, so the bridge is a byte stream, never
+# a fd-passing socket (the sandbox gets --runtime-flag=host-uds=open).
+# waypipe server publishes a Wayland display for the workload over that
+# socket; it sets WAYLAND_DISPLAY for the workload itself. -o makes the
+# server exit when the client side goes away, so killing the host client
+# ends the workload. Software rendering only (ΔB3): no GPU reaches the
+# sandbox, so GL and Qt are pinned to their software paths.
+SOCK=/run/qdistro/link/link.sock
+[ "$#" -ge 1 ] || { echo "qdistro-tier3s-entrypoint: no workload argv" >&2; exit 2; }
+[ -S "$SOCK" ] || { echo "qdistro-tier3s-entrypoint: GUI workload but no bridge socket at $SOCK" >&2; exit 2; }
+# Phase C2 model A: the guest uid IS the silo's host uid (keep-id, same
+# numeric), never a fixed 1000 — /run/user/<uid> is the tmpfs the spawn
+# mounts and the spawn's env already exports XDG_RUNTIME_DIR for it; only
+# fall back to uid-derived when unset.
+[ -n "${XDG_RUNTIME_DIR:-}" ] || XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR LIBGL_ALWAYS_SOFTWARE=1 \
+    QT_QUICK_BACKEND=software GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland
+exec waypipe -s "$SOCK" -o --no-gpu server -- "$@"

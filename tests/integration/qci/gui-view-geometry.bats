@@ -653,6 +653,11 @@ f4_setup() {
     cat > "$TDIR/bin/fake-driver" <<'DRV'
 #!/usr/bin/env bash
 # One scripted "codex" attempt. Behaviour: line N of $FAKE_PLAN.
+# The gate runs QCI_AGENT_CMD through `bash -lc` inside bwrap, and a login
+# shell rebuilds PATH when PROFILEREAD is unset (e.g. under systemd-run),
+# dropping this test's $TDIR/bin prepend. Re-anchor it so the fake virsh
+# still shadows the real binary.
+export PATH="$(dirname "$0"):$PATH"
 set -u
 n=$(( $(wc -l < "$FAKE_N") + 1 )); echo x >> "$FAKE_N"
 mode=$(sed -n "${n}p" "$FAKE_PLAN")

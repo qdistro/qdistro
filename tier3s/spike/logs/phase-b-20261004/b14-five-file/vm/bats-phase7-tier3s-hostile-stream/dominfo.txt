@@ -1,0 +1,19 @@
+Id:             1892
+Name:           qci-bats-phase7-tier3s-hostile-stream-261003-202913-3009488-8048
+UUID:           cb6020db-215d-483a-a9c5-9c94cdebb78d
+OS Type:        hvm
+State:          running
+CPU(s):         4
+CPU time:       130.8s
+Max memory:     4194304 KiB
+Used memory:    4194304 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: unconfined_u:unconfined_r:svirt_t:s0:c60,c765 (enforcing)
+Messages:       tainted: custom configuration parameters specified
+                tainted: custom guest agent control commands issued
+

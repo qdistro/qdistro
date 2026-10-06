@@ -1,0 +1,68 @@
+.............s.......................................................... [  6%]
+........................................................................ [ 13%]
+........................................................................ [ 20%]
+...............................F.F...................................... [ 26%]
+........................................................................ [ 33%]
+........................................................................ [ 40%]
+........................................................................ [ 46%]
+........................................................................ [ 53%]
+........................................................................ [ 60%]
+........................................................................ [ 66%]
+........................................................................ [ 73%]
+........................................................................ [ 80%]
+........................................................................ [ 86%]
+........................................................................ [ 93%]
+.....................................................................    [100%]
+=================================== FAILURES ===================================
+__________________ test_a_query_is_cut_at_the_batch_deadline ___________________
+
+w = <test_tier3s_spawn.World object at 0x7fb51f8765d0>
+
+    def test_a_query_is_cut_at_the_batch_deadline(w):
+        w.make_launch(TOKEN, "qdistro-tier3s-silo@a.service", "qdistro-tier3s-a", pids=(4001, 4002))
+        (w.F / "units" / "qdistro-tier3s-silo@a.service.hang_before").write_text("")
+        t0 = time.time()
+        r = w.cleanup("--reap-stale", "--deadline", "2")      # real bounds: 10 s query, 5 s kill
+        took = time.time() - t0
+        assert r.returncode == 1 and "cannot tell whether" in r.stderr, r.stderr
+>       assert took < 6, f"the 10 s query was not cut at the 2 s deadline ({took:.1f} s)"
+E       AssertionError: the 10 s query was not cut at the 2 s deadline (10.0 s)
+E       assert 10.022780895233154 < 6
+
+tests/unit/test_tier3s_spawn.py:2346: AssertionError
+____________________ test_the_bindsto_wait_is_by_the_clock _____________________
+
+w = <test_tier3s_spawn.World object at 0x7fb51f877ed0>
+
+    def test_the_bindsto_wait_is_by_the_clock(w):
+        t = TOKEN
+        (w.launch_parent / t).mkdir()
+        rel = f"/system.slice/qdistro-tier3s-{t}.scope"
+        (w.T / f"sys/fs/cgroup{rel}").mkdir(parents=True)
+        (w.F / "units" / f"qdistro-tier3s-{t}.scope.cgroup").write_text(rel + "\n")
+        (w.F / "units" / f"qdistro-tier3s-{t}.scope.bindsto").write_text("qdistro-tier3s-silo@a.service\n")
+        w.set_unit(f"qdistro-tier3s-{t}.scope", "active")
+        w.set_unit("qdistro-tier3s-silo@a.service", "failed")
+        w.set("show_delay", "0.3")
+        t0 = time.time()
+        r = w.cleanup("--reap-stale")
+        took = time.time() - t0
+        assert r.returncode == 0, r.stderr
+        assert f"systemctl stop qdistro-tier3s-{t}.scope" in w.calls()
+        assert not (w.launch_parent / t).exists()
+>       assert took < 8, f"the 20 s (x4% in tests) wait ran by query count ({took:.1f} s)"
+E       AssertionError: the 20 s (x4% in tests) wait ran by query count (27.5 s)
+E       assert 27.488625288009644 < 8
+
+tests/unit/test_tier3s_spawn.py:2386: AssertionError
+=============================== warnings summary ===============================
+../../../../../usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159
+  /usr/lib64/python3.13/site-packages/gi/overrides/__init__.py:159: PyGIDeprecationWarning: GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead
+    value = getattr(proxy, attr)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_tier3s_spawn.py::test_a_query_is_cut_at_the_batch_deadline
+FAILED tests/unit/test_tier3s_spawn.py::test_the_bindsto_wait_is_by_the_clock
+2 failed, 1074 passed, 1 skipped, 1 warning in 168.49s (0:02:48)
+EXIT=1

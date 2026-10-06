@@ -360,10 +360,15 @@ int main(int argc, char *argv[])
 		printf("qdwin-output-probe: cfg succeeded=%d failed=%d cancelled=%d\n",
 		       p.cfg_succeeded, p.cfg_failed, p.cfg_cancelled);
 		if (expect_denied) {
-			/* The mutation gate posts a protocol error and never sends
-			 * succeeded/failed/cancelled. Assert: NO reply arrived AND
-			 * the display went into protocol-error state. */
-			int err = wl_display_get_error(p.display);
+			/* The mutation gate denies via wl_client_post_implementation_
+			 * error — a wl_display.error with code IMPLEMENTATION. Require
+			 * EXACTLY that: a generic protocol error, a transport EPIPE,
+			 * or a truncated read would otherwise fake this PASS. */
+			const struct wl_interface *ei = NULL;
+			uint32_t eid = 0;
+			uint32_t perr = wl_display_get_protocol_error(p.display,
+								    &ei, &eid);
+			int terr = wl_display_get_error(p.display);
 			if (p.cfg_succeeded || p.cfg_failed || p.cfg_cancelled) {
 				fprintf(stderr, "qdwin-output-probe: FAIL unauthorized "
 					"mutation got a reply (s=%d f=%d c=%d) — gate "
@@ -371,14 +376,17 @@ int main(int argc, char *argv[])
 					p.cfg_failed, p.cfg_cancelled);
 				return 1;
 			}
-			if (err == 0) {
-				fprintf(stderr, "qdwin-output-probe: FAIL expected a "
-					"protocol error from the mutation gate, got "
-					"none\n");
+			if (perr != WL_DISPLAY_ERROR_IMPLEMENTATION) {
+				fprintf(stderr, "qdwin-output-probe: FAIL expected "
+					"implementation error from the mutation gate, "
+					"got protocol_error=%u transport=%d — not a "
+					"proven authorization denial\n",
+					perr, terr);
 				return 1;
 			}
-			printf("qdwin-output-probe: denied (protocol error %d) — OK\n",
-			       err);
+			printf("qdwin-output-probe: denied (implementation error "
+			       "on %s#%u) — OK\n",
+			       ei && ei->name ? ei->name : "?", eid);
 			return 0;
 		}
 		if (bad_serial) {
