@@ -93,6 +93,16 @@ constexpr int kBrokerGateTimeoutMs = 2000;
 constexpr int kBrokerDefaultTimeoutMs = 200;
 constexpr auto kBrokerGateBusctlTimeout = "--timeout=2s";
 constexpr auto kBrokerDefaultBusctlTimeout = "--timeout=200ms";
+// Async clipboard gate calls (startCheckClipboard*). Set time has no
+// compositor deadline; receive must beat qdwin's 2000 ms receive timer
+// (qdwin.c qdwin_data_offer_pending timeout), so it stops at 1500 ms.
+constexpr int kClipboardTransferAsyncTimeoutMs = 2000;
+constexpr auto kClipboardTransferAsyncBusctlTimeout = "--timeout=2s";
+constexpr int kClipboardReceiveAsyncTimeoutMs = 1500;
+constexpr auto kClipboardReceiveAsyncBusctlTimeout = "--timeout=1500ms";
+// A source re-offering in a tight loop must not fork without bound; past
+// this many live busctl children a request fails closed at once.
+constexpr int kBrokerAsyncMaxLiveChildren = 16;
 
 inline QString qstr(const char *s) {
     return s ? QString::fromUtf8(s) : QString();
@@ -1000,6 +1010,10 @@ static const wl_registry_listener kRegistryListener = {
 // -------------------- QdwinBinding --------------------
 
 QdwinBinding::QdwinBinding(QObject *parent) : QObject(parent) {
+    brokerCalls_ = new BrokerCallRunner(QStringLiteral("busctl"),
+                                        kBrokerAsyncMaxLiveChildren, this);
+    connect(brokerCalls_, &BrokerCallRunner::finished, this,
+            &QdwinBinding::clipboardCheckFinished);
     reconnectTimer_.setSingleShot(true);
     connect(&reconnectTimer_, &QTimer::timeout, this, [this]() {
         if (destroying_) return;
@@ -2613,4 +2627,120 @@ QVariantMap QdwinBinding::checkClipboardReceive(
          QString::fromUtf8(proc.readAllStandardError())},
         {QStringLiteral("timedOut"), false},
     };
+}
+
+namespace {
+
+QStringList clipboardTransferArgs(const char *busctlTimeout,
+                                  const QString &sourceSilo,
+                                  const QString &destSilo,
+                                  const QStringList &mimeTypes,
+                                  const QString &sourceAppId,
+                                  const QString &destAppId,
+                                  const QString &sourceSandboxEngine,
+                                  bool identityVerified, uint sourcePid,
+                                  qulonglong sourceStarttime) {
+    // F5: same fail-closed input rules as checkClipboardTransfer.
+    if (anyControlChars({&sourceSilo, &destSilo, &sourceAppId, &destAppId,
+                         &sourceSandboxEngine}))
+        return {};
+    for (const QString &mime : mimeTypes)
+        if (hasControlChars(mime))
+            return {};
+    QStringList args = {
+        QStringLiteral("--system"),
+        QStringLiteral("--no-pager"),
+        QString::fromLatin1(busctlTimeout),
+        QStringLiteral("call"),
+        QStringLiteral("org.qdistro.AdminBroker1"),
+        QStringLiteral("/org/qdistro/AdminBroker1"),
+        QStringLiteral("org.qdistro.AdminBroker1"),
+        QStringLiteral("CheckClipboardTransfer"),
+        QStringLiteral("ssassssbut"),
+        sourceSilo,
+        destSilo,
+        QString::number(mimeTypes.size()),
+    };
+    args.append(mimeTypes);
+    args.append(sourceAppId);
+    args.append(destAppId);
+    args.append(sourceSandboxEngine);
+    args.append(identityVerified ? QStringLiteral("true")
+                                 : QStringLiteral("false"));
+    args.append(QString::number(sourcePid));
+    args.append(QString::number(sourceStarttime));
+    return args;
+}
+
+QStringList clipboardReceiveArgs(const char *busctlTimeout,
+                                 const QString &sourceSilo,
+                                 const QString &destSilo,
+                                 const QString &mimeType,
+                                 const QString &sourceAppId,
+                                 const QString &destAppId,
+                                 const QString &sourceSandboxEngine,
+                                 bool identityVerified, uint sourcePid,
+                                 qulonglong sourceStarttime) {
+    // F5: same fail-closed input rules as checkClipboardReceive.
+    if (anyControlChars({&sourceSilo, &destSilo, &mimeType, &sourceAppId,
+                         &destAppId, &sourceSandboxEngine}))
+        return {};
+    return {
+        QStringLiteral("--system"),
+        QStringLiteral("--no-pager"),
+        QString::fromLatin1(busctlTimeout),
+        QStringLiteral("call"),
+        QStringLiteral("org.qdistro.AdminBroker1"),
+        QStringLiteral("/org/qdistro/AdminBroker1"),
+        QStringLiteral("org.qdistro.AdminBroker1"),
+        QStringLiteral("CheckClipboardReceive"),
+        QStringLiteral("ssssssbut"),
+        sourceSilo,
+        destSilo,
+        mimeType,
+        sourceAppId,
+        destAppId,
+        sourceSandboxEngine,
+        identityVerified ? QStringLiteral("true") : QStringLiteral("false"),
+        QString::number(sourcePid),
+        QString::number(sourceStarttime),
+    };
+}
+
+} // namespace
+
+int QdwinBinding::startCheckClipboardTransfer(
+    const QString &sourceSilo,
+    const QString &destSilo,
+    const QStringList &mimeTypes,
+    const QString &sourceAppId,
+    const QString &destAppId,
+    const QString &sourceSandboxEngine,
+    bool identityVerified,
+    uint sourcePid,
+    qulonglong sourceStarttime) {
+    return brokerCalls_->start(
+        clipboardTransferArgs(kClipboardTransferAsyncBusctlTimeout,
+                              sourceSilo, destSilo, mimeTypes, sourceAppId,
+                              destAppId, sourceSandboxEngine,
+                              identityVerified, sourcePid, sourceStarttime),
+        kClipboardTransferAsyncTimeoutMs);
+}
+
+int QdwinBinding::startCheckClipboardReceive(
+    const QString &sourceSilo,
+    const QString &destSilo,
+    const QString &mimeType,
+    const QString &sourceAppId,
+    const QString &destAppId,
+    const QString &sourceSandboxEngine,
+    bool identityVerified,
+    uint sourcePid,
+    qulonglong sourceStarttime) {
+    return brokerCalls_->start(
+        clipboardReceiveArgs(kClipboardReceiveAsyncBusctlTimeout,
+                             sourceSilo, destSilo, mimeType, sourceAppId,
+                             destAppId, sourceSandboxEngine,
+                             identityVerified, sourcePid, sourceStarttime),
+        kClipboardReceiveAsyncTimeoutMs);
 }

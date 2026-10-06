@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # qdshell local CI runner — equivalent to what GitHub Actions / a
 # self-hosted runner would invoke. Five gates:
-#   1. qmltest      — Tests/tst_*.qml under Tests/ (+ node tests/test_*.js
+#   1. qmltest      — Tests/tst_*.qml under Tests/ (+ node tests/test_*.js,
+#                     the meson 'native' C++ suite when a build dir exists,
 #                     and host pytest tests/test_*.py)
 #   2. qmllint      — informational (counts Warning/Error rows)
 #   3. qmlformat    — --files-changed dry-run check
@@ -173,6 +174,33 @@ else
     echo "  $JSTEST_FILES file(s); $JSTEST_PASS passed, $JSTEST_FAIL failed"
 fi
 
+# --- 1b2. native (meson test --suite native) ----------------------
+#
+# C++ unit tests of the QML plugin (qml-plugin/tests/, e.g. the async
+# clipboard broker runner). They need a configured build: qci's qdshell host
+# step builds build-qci before calling this script; set QDSHELL_BUILD_DIR to
+# use another. Without a build dir they are reported as not run; with one,
+# an empty native suite (Qt6Test missing at configure time) is a FAILURE.
+
+NATIVE_RESULT="not run (no build dir)"
+NATIVE_BUILD_DIR="${QDSHELL_BUILD_DIR:-build-qci}"
+
+step "native (meson test --suite native)"
+if [ -f "$NATIVE_BUILD_DIR/build.ninja" ]; then
+    if ! meson test -C "$NATIVE_BUILD_DIR" --list 2>/dev/null | grep -q 'native'; then
+        err "  $NATIVE_BUILD_DIR has no native tests (Qt6Test not found at configure?)"
+        NATIVE_RESULT="fail"
+    elif meson test -C "$NATIVE_BUILD_DIR" --suite native --print-errorlogs; then
+        ok "  native: ok"
+        NATIVE_RESULT="pass"
+    else
+        err "  native: FAIL"
+        NATIVE_RESULT="fail"
+    fi
+else
+    warn "  no $NATIVE_BUILD_DIR/build.ninja — native tests not run"
+fi
+
 # --- 1c. pytest (host-runnable Python tests) -----------------------
 #
 # tests/test_*.py are self-contained host tests (no VM, no compositor),
@@ -333,6 +361,7 @@ printf '  qmltest:     %d passed, %d failed across %d files\n' \
 printf '  jstest:      %d passed, %d failed across %d files\n' \
     "$JSTEST_PASS" "$JSTEST_FAIL" "$JSTEST_FILES"
 printf '  pytest:      %s\n' "$PYTEST_RESULT"
+printf '  native:      %s\n' "$NATIVE_RESULT"
 printf '  qmllint:     %d warnings, %d errors\n' \
     "$LINT_WARN_COUNT" "$LINT_ERR_COUNT"
 printf '  qmlformat:   %d files need reformatting (Services/Qdshell only)\n' \
@@ -351,6 +380,10 @@ if [ "$JSTEST_FAIL" -gt 0 ]; then
 fi
 if [ "$PYTEST_RESULT" = "fail" ]; then
     err "FAIL — pytest"
+    EXIT=1
+fi
+if [ "$NATIVE_RESULT" = "fail" ]; then
+    err "FAIL — native"
     EXIT=1
 fi
 if [ "$INT_RESULT" = "fail" ]; then
