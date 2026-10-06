@@ -149,19 +149,34 @@ if [ "$SAMPLES" -gt 0 ]; then
         fi
         [ -n "$winrect" ] || { echo "   WARN: window rect unknown — falling back to whole-frame diff"; }
         : > "$L/latency.log"
+        # intersects "x0 y0 x1 y1 n" <winrect> — bbox overlap with 8px slack
+        intersects() {
+            read -r _ ix0 iy0 ix1 iy1 _ <<<"$1"
+            read -r _ rx0 ry0 rx1 ry1 _ <<<"$2"
+            [ "$ix1" -ge $((rx0 - 8)) ] && [ "$ix0" -le $((rx1 + 8)) ] \
+                && [ "$iy1" -ge $((ry0 - 8)) ] && [ "$iy0" -le $((ry1 + 8)) ]
+        }
         for i in $(seq 1 "$SAMPLES"); do
-            # ambient-noise control: three baselines spanning ~1.2s must all
-            # be identical — a live cursor blink (~500ms period) or other
-            # animation invalidates the sample instead of impersonating a
-            # key echo
-            local_b0=$(shot "$STAGE/f0.ppm" && sha256sum "$STAGE/f0.ppm" | cut -d' ' -f1)
-            sleep 0.6
-            local_b1=$(shot "$STAGE/f0b.ppm" && sha256sum "$STAGE/f0b.ppm" | cut -d' ' -f1)
-            sleep 0.6
-            local_b2=$(shot "$STAGE/f0c.ppm" && sha256sum "$STAGE/f0c.ppm" | cut -d' ' -f1)
-            if [ -z "$local_b0" ] || [ "$local_b0" != "$local_b1" ] || [ "$local_b1" != "$local_b2" ]; then
-                echo "sample_$i MISS(noise)" >> "$L/latency.log"; sleep 0.5; continue
+            # ambient-noise control: three baselines spanning ~1.2s. Only a
+            # change that intersects the TARGET WINDOW can impersonate a key
+            # echo — panel/clock repaints outside it are ignored
+            shot "$STAGE/f0.ppm"; sleep 0.6
+            shot "$STAGE/f0b.ppm"; sleep 0.6
+            shot "$STAGE/f0c.ppm"
+            d01=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f0b.ppm")
+            d12=$(python3 "$here/ppmdiff.py" "$STAGE/f0b.ppm" "$STAGE/f0c.ppm")
+            case "$d01 $d12" in
+                *error*|*" error"*)
+                    echo "sample_$i MISS(setup)" >> "$L/latency.log"; sleep 0.5; continue;;
+            esac
+            noisy=0
+            if [ -n "$winrect" ]; then
+                [ "${d01%% *}" = diff ] && intersects "$d01" "r $winrect" && noisy=1
+                [ "${d12%% *}" = diff ] && intersects "$d12" "r $winrect" && noisy=1
+            else
+                [ "${d01} ${d12}" = "same same" ] || noisy=1
             fi
+            [ "$noisy" -eq 0 ] || { echo "sample_$i MISS(noise)" >> "$L/latency.log"; sleep 0.5; continue; }
             t0=$(date +%s%N)
             if ! virsh -c qemu:///session send-key "$VM" KEY_A >/dev/null 2>&1; then
                 echo "sample_$i MISS(setup)" >> "$L/latency.log"; sleep 0.5; continue
@@ -171,18 +186,7 @@ if [ "$SAMPLES" -gt 0 ]; then
                 if shot "$STAGE/f1.ppm"; then
                     d=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f1.ppm")
                     if [ "${d%% *}" = diff ]; then
-                        if [ -z "$winrect" ]; then hit=$d; break; fi
-                        read -r _ x0 y0 x1 y1 n <<EOF
-$d
-EOF
-                        read -r wx0 wy0 wx1 wy1 wn <<EOF
-$winrect
-EOF
-                        # accept only if the change bbox lies inside the
-                        # window rect (8px slack) — a key echo in the
-                        # focused window, not e.g. a panel repaint
-                        if [ "$x0" -ge $((wx0 - 8)) ] && [ "$y0" -ge $((wy0 - 8)) ] \
-                           && [ "$x1" -le $((wx1 + 8)) ] && [ "$y1" -le $((wy1 + 8)) ]; then
+                        if [ -z "$winrect" ] || intersects "$d" "r $winrect"; then
                             hit=$d; break
                         fi
                     fi
