@@ -63,6 +63,9 @@ for i in 1 2 3; do
 done
 
 # ---------------------------------------------------------------------------
+# unit_log_has <unit> <cursor> <fixed string>
+unit_log_has() { unit_log "$1" "$2" | grep -qF -- "$3"; }
+
 step "2. O11: session-manager STOP tears down every live launch"
 TA=$(up_silo $SA); TB=$(up_silo $SB)
 if [ -n "$TA" ] && [ -n "$TB" ]; then pass "manager-stop: two launches up ($TA, $TB)"; else fail "manager-stop: launches did not come up"; fi
@@ -72,6 +75,9 @@ is "manager-stop: systemctl stop $MGR rc" "$rc" 0
 is "manager-stop: manager inactive" "$(unit_state "$MGR")" inactive
 for s in $SA $SB; do
     u=$(unit_of "$s"); t=$TA; [ "$s" = "$SB" ] && t=$TB
+    # The line can trail the stop under load: wait for it in this unit's own
+    # journal (the unit's ExecStopPost cleanup, scoped by -u and the token).
+    wait_for 10 unit_log_has "$u" "$cur" "qdistro-tier3s-cleanup: $t: torn down"
     is "manager-stop: $u stopped through the verified cleanup" "$(unit_log "$u" "$cur" | grep -c "qdistro-tier3s-cleanup: $t: torn down")" 1
     is "manager-stop: $u stopped before the manager (After= order)" \
         "$([ "$(systemctl show -p InactiveEnterTimestampMonotonic --value "$u")" -le "$(systemctl show -p InactiveEnterTimestampMonotonic --value "$MGR")" ] && echo yes || echo no)" yes
