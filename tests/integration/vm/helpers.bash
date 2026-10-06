@@ -370,11 +370,18 @@ stage_vm_driver() {
 # shell_held_cmd <guest command> prints a guest command that runs <guest
 # command> while admin's session qdshell is stopped (probes/shell-publisher.sh),
 # so probes that write the managed presentation snapshot are its only writer.
-# Refuses to run the command (exit 96) when the shell cannot be held, and
-# restarts the shell afterwards. Stage the probe before calling this.
+# Refuses to run the command when the helper cannot be fetched (exit 97) or
+# the shell cannot be held (exit 96), and restarts the shell afterwards.
+# Stage the probe before calling this; call shell_hold_note after vm_run.
 shell_held_cmd() {
     stage_vm_driver "probes/shell-publisher.sh"
-    printf '%s' "curl -fsS -o /tmp/shell-publisher.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/shell-publisher.sh && { bash /tmp/shell-publisher.sh hold || { bash /tmp/shell-publisher.sh release; exit 96; }; }; ( $1 ); rc=\$?; bash /tmp/shell-publisher.sh release || { [ \$rc -ne 0 ] || rc=95; }; exit \$rc"
+    printf '%s' "curl -fsS -o /tmp/shell-publisher.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/shell-publisher.sh || exit 97; { bash /tmp/shell-publisher.sh hold || { bash /tmp/shell-publisher.sh release; exit 96; }; }; ( $1 ); rc=\$?; bash /tmp/shell-publisher.sh release || { [ \$rc -ne 0 ] || rc=95; }; exit \$rc"
+}
+
+# shell_hold_note echoes the shell-publisher outcome from the last vm_run
+# $output into the TAP stream, so passing runs record whether a shell was held.
+shell_hold_note() {
+    printf '%s\n' "$output" | tr -d '\r' | grep '^shell-publisher:' | sed 's/^/# /' >&3 || true
 }
 
 # reap_vm_drivers — kill any http.server stage_vm_driver started for this file.
