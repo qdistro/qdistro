@@ -369,11 +369,13 @@ wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$S
 # Assert on the allow the wait saw, not the newest line: the source keeps
 # re-offering every 400 ms and a later offer can still hit a transient
 # broker-unavailable deny (busctl --timeout=200ms under load).
-line=$(qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$SC .*verdict=allow" | head -1); info "gate: $line"
+same=$(qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$SC dst_silo=$SC ")
+line=$(printf '%s\n' "$same" | grep 'verdict=allow' | head -1); info "gate: $line"
 is "live attested allow: bound tagged source -> same-silo (verify + record resolution)" \
     "$(printf '%s' "$line" | grep -c 'verdict=allow')" 1
+# Order, not just presence: a same-silo deny must precede that first allow.
 is "cold-verify bound offers denied first (the allow was earned)" \
-    "$(qdshell_log "$J0" | grep -c "CLIPBOARD_GATE .*src_silo=$SC .*verdict=deny" | awk '{print ($1>=1)?1:0}')" 1
+    "$(printf '%s\n' "$same" | awk '/verdict=allow/ {exit} /verdict=deny/ {n++} END {print (n>=1)?1:0}')" 1
 is "live allow carries dst_silo=$SC (bound => focused => same-silo)" \
     "$(printf '%s' "$line" | grep -c "dst_silo=$SC")" 1
 kill_clip_src "$CLIP_SRC_PID"; CLIP_SRC_PID=""

@@ -53,6 +53,11 @@ J0=$(journal_cursor)
 # processes the client's first buffer).
 qdwin_mapped() { comp_log "$J0" | grep -q "mapped handle=$1"; }
 
+# container_has_shell <silo> <ctr>: an sh/bash/dash process runs inside.
+container_has_shell() {
+    pm_s "$1" exec "$2" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' | grep -Eqx '(ba|da)?sh'
+}
+
 # drive_gui <silo> <tag>: focus + type a marker command, then prove the
 # marker exists INSIDE the container.
 drive_gui() {
@@ -77,15 +82,38 @@ drive_gui() {
     # lives in the container's /tmp tmpfs — `podman exec` reads the sandbox's
     # own filesystem, so this is end-to-end input through the bridge.
     ctr=$(ctr_of "$s")
-    as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
-        ydotool type "touch /tmp/s124-$s-typed" || fail "$tag: ydotool type failed"
-    as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
-        ydotool key 28:1 28:0 || fail "$tag: ydotool enter failed"
-    wait_for 30 pm_s "$s" exec "$ctr" test -f "/tmp/s124-$s-typed"
-    if pm_s "$s" exec "$ctr" test -f "/tmp/s124-$s-typed" 2>/dev/null; then
+    # The terminal's shell must exist before keys can reach it; under load
+    # the toplevel can map before its shell child has started.
+    wait_for 30 container_has_shell "$s" "$ctr" \
+        || fail "$tag: no shell process inside the container for the typed command"
+    # Up to three focus+type attempts; each clears the line first (Ctrl-U)
+    # so a partial earlier attempt cannot corrupt the command. The proof is
+    # still the marker the typed command creates inside the container.
+    local attempt typed=no
+    for attempt in 1 2 3; do
+        if [ "$attempt" -gt 1 ]; then
+            info "$tag: attempt $((attempt - 1)) left no marker; refocusing handle $h"
+            qs_ipc tier3focus injectFocus "$h" default >/dev/null 2>&1
+            sleep 1
+        fi
+        as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+            ydotool key 29:1 22:1 22:0 29:0 || fail "$tag: ydotool ctrl-u failed"
+        as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+            ydotool type "touch /tmp/s124-$s-typed" || fail "$tag: ydotool type failed"
+        as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
+            ydotool key 28:1 28:0 || fail "$tag: ydotool enter failed"
+        if wait_for 15 pm_s "$s" exec "$ctr" test -f "/tmp/s124-$s-typed"; then
+            typed=yes; break
+        fi
+    done
+    if [ "$typed" = yes ] && pm_s "$s" exec "$ctr" test -f "/tmp/s124-$s-typed" 2>/dev/null; then
         pass "$tag: typed command created /tmp/s124-$s-typed INSIDE the sandbox"
+        [ "$attempt" -eq 1 ] || info "$tag: marker appeared on attempt $attempt"
     else
         fail "$tag: typed input never reached the sandboxed shell (no marker in the container)"
+        info "$tag: last focus events: $(comp_log "$J0" | grep -E 'seat_focus_changed|set_keyboard_focus' | tail -4 | tr '\n' ' ')"
+        info "$tag: container processes: $(pm_s "$s" exec "$ctr" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' | sort | uniq -c | tr '\n' ' ')"
+        info "$tag: ydotoold: $(systemctl is-active ydotoold.service 2>/dev/null; ls -l /run/user/1000/ydotool.sock 2>&1)"
     fi
 }
 
