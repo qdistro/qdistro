@@ -8,6 +8,8 @@
 #   ./clone-baseweed.sh <name-prefix> --from-baked          # back from baseweed-baked.qcow2 (skips zypper install-deps)
 #   ./clone-baseweed.sh <name-prefix> --from-kiwi            # back from imported kiwi image (UEFI; iso/14 Phase G)
 #   ./clone-baseweed.sh <name-prefix> --from-enforcing-baked # baseweed-enforcing-baked: SELinux=enforcing config + SSH-bootstrapped
+#   ./clone-baseweed.sh <name-prefix> --from-run-golden=<abs> --enforcing
+#                                                           # per-run golden, booted SELinux=enforcing, root SSH key injected
 #
 # Outputs the new VM name to stdout. With --from-enforcing-baked, the
 # assigned host SSH port is printed to stdout on a second line as
@@ -41,6 +43,7 @@ FROM_BAKED=0
 FROM_KIWI=0
 FROM_ENFORCING=0
 FROM_GOLDEN=""
+ENFORCING_CLONE=0
 EXTRA_NIC_XML=""
 for arg in "$@"; do
     case "$arg" in
@@ -51,6 +54,11 @@ for arg in "$@"; do
         # Per-run golden backing: an already-built qcow2 (compositor built once
         # per run) used as the backing for this clone, skipping fresh-vm-bootstrap.
         --from-run-golden=*)     FROM_GOLDEN="${arg#*=}" ;;
+        # Boot that per-run golden clone with SELinux=enforcing (qci's
+        # enforcing bats lane). qga is denied under enforcing, so the clone
+        # is reached over SSH like --from-enforcing-baked; unlike that frozen
+        # image it always carries the run's own tree.
+        --enforcing)             ENFORCING_CLONE=1 ;;
         # Multi-machine lane ONLY (clone-mmnet.sh): splice one extra
         # <interface> block (read from this file) into the cloned domain BEFORE
         # define, so the clone gets a second NIC on the isolated inter-VM segment
@@ -84,6 +92,10 @@ if [ "$from_count" -gt 1 ]; then
 fi
 if [ -n "$FROM_GOLDEN" ] && [ "$from_count" -gt 0 ]; then
     echo "ERROR: --from-run-golden is mutually exclusive with --from-baked/--from-kiwi/--from-enforcing-baked" >&2
+    exit 2
+fi
+if [ "$ENFORCING_CLONE" = 1 ] && [ -z "$FROM_GOLDEN" ]; then
+    echo "ERROR: --enforcing requires --from-run-golden=<path>" >&2
     exit 2
 fi
 if [ -n "$FROM_GOLDEN" ]; then
@@ -257,8 +269,27 @@ qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
 #    - --from-enforcing-baked: leave SELINUX=enforcing intact; the
 #      build-enforcing-baseweed pipeline already wrote it that way and
 #      the VM is reached via SSH (qga is denied under enforcing).
+# SSH_CLONE: the clone boots enforcing and is reached over SSH, not qga.
+SSH_CLONE=0
+{ [ "$FROM_ENFORCING" = 1 ] || [ "$ENFORCING_CLONE" = 1 ]; } && SSH_CLONE=1
+ENFORCING_KEY="$HOME/.ssh/qdistro_enforcing_id_ed25519"
 if [ "$FROM_ENFORCING" = 1 ]; then
     : # no-op: enforcing config is already baked in
+elif [ "$ENFORCING_CLONE" = 1 ]; then
+    # Same offline edits build-enforcing-baseweed.sh applies, on this clone's
+    # own overlay: root key, sshd enabled, SELINUX=enforcing. virt-customize
+    # relabels the files it writes (its default --selinux-relabel), so sshd
+    # can read authorized_keys under enforcing.
+    if [ ! -f "$ENFORCING_KEY" ]; then
+        mkdir -p "$HOME/.ssh" && chmod 0700 "$HOME/.ssh"
+        ssh-keygen -t ed25519 -f "$ENFORCING_KEY" -N "" \
+            -C "qdistro-enforcing@$(hostname)" >/dev/null
+    fi
+    virt-customize --no-network -a "$IMG/${VM}.qcow2" \
+        --ssh-inject "root:file:${ENFORCING_KEY}.pub" \
+        --run-command 'systemctl enable sshd.service' \
+        --edit '/etc/selinux/config:s/^SELINUX=.*/SELINUX=enforcing/' \
+        >/dev/null
 elif [ -n "$FROM_GOLDEN" ]; then
     : # no-op: the run-golden was built from a permissive base (baked or
       # the tester image). Skip the per-clone libguestfs launch.
@@ -428,7 +459,7 @@ fi
 # guest. Pick a free port between 30000 and 39999 to keep collisions
 # rare across parallel clones; fall back to a random retry up to 8x.
 SSH_PORT=
-if [ "$FROM_ENFORCING" = 1 ]; then
+if [ "$SSH_CLONE" = 1 ]; then
     pick_port() {
         local p
         for _ in 1 2 3 4 5 6 7 8; do
@@ -531,7 +562,7 @@ virsh -c qemu:///session start "$VM" >/dev/null
 #    is short-circuited and the caller is expected to reach the VM via
 #    SSH on the printed port.
 VM_TOOLS="$(cd "$SCRIPT_DIR/../.." && pwd)/scripts/vm"
-if [ "$FROM_ENFORCING" = 1 ]; then
+if [ "$SSH_CLONE" = 1 ]; then
     # Wait for SSH to actually accept. The TCP listener is up
     # immediately (passt forwards regardless of guest state), so a
     # bare `/dev/tcp` probe returns success before sshd has bound the
@@ -540,7 +571,7 @@ if [ "$FROM_ENFORCING" = 1 ]; then
     # round-trip in a loop until either the probe succeeds OR a
     # 180-second deadline elapses (slow first-boot under enforcing
     # can need >90s).
-    KEY="$HOME/.ssh/qdistro_enforcing_id_ed25519"
+    KEY="$ENFORCING_KEY"
     SSH_OPTS=(-i "$KEY"
               -o StrictHostKeyChecking=no
               -o UserKnownHostsFile=/dev/null
@@ -578,7 +609,7 @@ fi
 # broken-pipe echo (caller already gone) under set -e, disarm the cleanup yet
 # leave the caller without the name — leaking exactly the VM this trap reclaims.
 echo "$VM"
-if [ "$FROM_ENFORCING" = 1 ]; then
+if [ "$SSH_CLONE" = 1 ]; then
     echo "ssh_port=$SSH_PORT"
 fi
 CLONE_OK=1

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run a development command in the same offline toolchain as qci host.
+set -euo pipefail
+QDISTRO_REPO=$(cd "$(dirname "$0")/../.." && pwd)
+[ "$#" -gt 0 ] || { echo 'Usage: qci-host-run COMMAND [ARG ...]' >&2; exit 2; }
+. "$QDISTRO_REPO/ci/lib/host-container.sh"
+image=$("$QDISTRO_REPO/ci/bin/qci-host-image")
+host_container_run "$image" none "$@"

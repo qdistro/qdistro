@@ -19,11 +19,23 @@ from qnotebook import qdistro_integration as notebook
 from test_send_to_broker import _StubBroker
 
 
+_CALLER_PID, _CALLER_EXE, _CALLER_START = 201, "/usr/bin/qfileman", 2
+
+
 class _Broker(_StubBroker):
     def _peer_info(self, sender, conn):
         if sender == ":admin":
             return B.ADMIN_UID, 100, "/usr/bin/admin", 1
-        return 2000, 201, "/usr/bin/qfileman", 2
+        return 2000, _CALLER_PID, _CALLER_EXE, _CALLER_START
+
+
+def _stub_proc_identity(pid):
+    # DecideRequest re-reads /proc/<pid> to catch a recycled caller. The
+    # caller here is synthetic, so answer for it; a real pid 201 (a kernel
+    # thread on many-CPU hosts) would otherwise look recycled.
+    if pid == _CALLER_PID:
+        return _CALLER_EXE, _CALLER_START
+    return "", 0
 
 
 class _Receiver(sdk.AppReceiver):
@@ -140,6 +152,7 @@ def route(qapp, tmp_path, monkeypatch, request):
     relay = _Relay(session, uid)
     rules = tmp_path / "rules"
     rules.mkdir()
+    monkeypatch.setattr(B, "_read_proc_identity", _stub_proc_identity)
     broker = _Broker(str(tmp_path / "cache.sqlite"), str(tmp_path / "audit.sqlite"), str(rules))
     system = _SystemBus(_BrokerProxy(broker), _RelayProxy(relay), uid)
     monkeypatch.setattr(dbus, "SystemBus", lambda: system)

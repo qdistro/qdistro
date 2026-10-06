@@ -17,9 +17,12 @@ Singleton {
   property string downloadedSchemesDirectory: Settings.configDir + "colorschemes"
   property string colorsJsonFilePath: Settings.configDir + "colors.json"
 
+  // Settings.data is a plain object; react through Settings.settingChanged.
   Connections {
-    target: Settings.data.colorSchemes
-    function onDarkModeChanged() {
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.colorSchemes || key !== "darkMode")
+        return;
       Logger.d("ColorScheme", "Detected dark mode change");
       if (!Settings.data.colorSchemes.useWallpaperColors && Settings.data.colorSchemes.predefinedScheme) {
         // Re-apply current scheme to pick the right variant
@@ -217,34 +220,16 @@ Singleton {
     return false;
   }
 
-  // Writer to colors.json using a JsonAdapter for safety
+  // Writer to colors.json. The whole document goes out in one setText().
+  // It used to assign each field to a JsonAdapter and then bounce `path` to
+  // force a rewrite, but the bounce re-reads the OLD file into the adapter
+  // asynchronously, so some fields reverted before writeAdapter() ran: a
+  // dark/light switch left colors.json (and the shell) with a mixed palette.
   FileView {
     id: colorsWriter
     path: colorsJsonFilePath
     printErrors: false
-    onSaved:
-
-    // Logger.i("ColorScheme", "Colors saved")
-    {}
-    JsonAdapter {
-      id: out
-      property color mPrimary: "#000000"
-      property color mOnPrimary: "#000000"
-      property color mSecondary: "#000000"
-      property color mOnSecondary: "#000000"
-      property color mTertiary: "#000000"
-      property color mOnTertiary: "#000000"
-      property color mError: "#000000"
-      property color mOnError: "#000000"
-      property color mSurface: "#000000"
-      property color mOnSurface: "#000000"
-      property color mSurfaceVariant: "#000000"
-      property color mOnSurfaceVariant: "#000000"
-      property color mOutline: "#000000"
-      property color mShadow: "#000000"
-      property color mHover: "#000000"
-      property color mOnHover: "#000000"
-    }
+    preload: false
   }
 
   function writeColorsToDisk(obj) {
@@ -255,27 +240,12 @@ Singleton {
     }
     const mode = Settings.data.colorSchemes.darkMode ? "dark" : "light";
     const req = Color.beginRequest(mode);
-    out.mPrimary = pal.mPrimary;
-    out.mOnPrimary = pal.mOnPrimary;
-    out.mSecondary = pal.mSecondary;
-    out.mOnSecondary = pal.mOnSecondary;
-    out.mTertiary = pal.mTertiary;
-    out.mOnTertiary = pal.mOnTertiary;
-    out.mError = pal.mError;
-    out.mOnError = pal.mOnError;
-    out.mSurface = pal.mSurface;
-    out.mOnSurface = pal.mOnSurface;
-    out.mSurfaceVariant = pal.mSurfaceVariant;
-    out.mOnSurfaceVariant = pal.mOnSurfaceVariant;
-    out.mOutline = pal.mOutline;
-    out.mShadow = pal.mShadow;
-    out.mHover = pal.mHover;
-    out.mOnHover = pal.mOnHover;
-
-    // Force a rewrite by updating the path
-    colorsWriter.path = "";
-    colorsWriter.path = colorsJsonFilePath;
-    colorsWriter.writeAdapter();
+    const doc = {};
+    for (let i = 0; i < ColorPalette.COLOR_KEYS.length; i++) {
+      const key = ColorPalette.COLOR_KEYS[i];
+      doc[key] = pal[key];
+    }
+    colorsWriter.setText(JSON.stringify(doc, null, 2) + "\n");
     Color.commitTargetPalette(req, mode, pal);
   }
 }

@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG SNAPSHOT
+COPY container-native-deps.sh /recipe/container-native-deps.sh
+RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" bash /recipe/container-native-deps.sh
+COPY . /recipe/
+RUN QDISTRO_SUBSTRATE_SNAPSHOT="$SNAPSHOT" bash /recipe/install-host-deps.sh
+ENV PATH=/opt/host-python/bin:/usr/local/bin:/usr/bin:/bin
+LABEL org.qdistro.test-snapshot="$SNAPSHOT"

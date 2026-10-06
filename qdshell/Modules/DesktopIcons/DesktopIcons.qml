@@ -207,11 +207,21 @@ Variants {
       }
 
       // Re-arrange when the relevant settings change (no folder reload needed).
+      // Settings.data is a plain object, so a Connections on Settings.data.desktopIcons
+      // never bound; react through Settings.settingChanged instead.
       Connections {
-        target: Settings.data.desktopIcons
-        function onShowHiddenChanged() { window.rebuildEntries(); }
-        function onSortModeChanged() { window.rebuildEntries(); }
-        function onArrangeFoldersFirstChanged() { window.rebuildEntries(); }
+        target: Settings
+        function onSettingChanged(owner, key, value) {
+          if (owner !== Settings.data.desktopIcons)
+            return;
+          if (key === "showHidden") {
+   window.rebuildEntries(); 
+          } else if (key === "sortMode") {
+   window.rebuildEntries(); 
+          } else if (key === "arrangeFoldersFirst") {
+   window.rebuildEntries(); 
+          }
+        }
       }
 
       Component.onCompleted: Qt.callLater(window.rebuildEntries)

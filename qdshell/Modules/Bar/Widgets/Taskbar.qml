@@ -978,10 +978,17 @@ Item {
     }
   }
 
+  // Settings.data is a plain object, so a Connections on Settings.data.dock
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.dock
-    function onPinnedAppsChanged() {
-      updateCombinedModel();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.dock)
+        return;
+      if (key === "pinnedApps") {
+        updateCombinedModel();
+
+      }
     }
   }
 

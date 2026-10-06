@@ -49,7 +49,7 @@ gate_feedback() {
             ! -path '*/__pycache__/*' ! -path '*/.pytest_cache/*' ! -path '*/.git/*' \
             ! -name '*.pyc' -print0 | sort -z | xargs -0 -r sha256sum
         sha256sum ci/lib/gates/host.sh
-        bash -lc 'python3 -c "import sys, importlib.metadata as m; print(sys.executable); print(sys.version); print({p: m.version(p) for p in (\"pytest\", \"PyQt6\", \"pytest-qt\")})"'
+        bash -lc "$(qci_login_cmd '') "'python3 -c "import sys, importlib.metadata as m; print(sys.executable); print(sys.version); print({p: m.version(p) for p in (\"pytest\", \"PyQt6\", \"pytest-qt\")})"'
     ) > "$deps" 2>&1
     kv feedback_dependencies "host/feedback-dependencies.txt"
     log "development feedback only; acceptance still requires: $required"

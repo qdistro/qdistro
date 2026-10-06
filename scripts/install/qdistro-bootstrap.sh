@@ -2498,7 +2498,7 @@ install_selinux_policies() {
     # it unconditionally is the same loaded-but-inert shape as tier2.
     # selinux/broker-rules must follow selinux/broker — it requires the
     # broker module's qdistro_broker_t to already be declared.
-    for pol in selinux/broker selinux/broker-rules selinux/pwd selinux/session_manager selinux/tier1 selinux/tier3s selinux/presentation; do
+    for pol in selinux/broker selinux/broker-rules selinux/pwd selinux/session_manager selinux/tier1 selinux/tier2 selinux/tier3s selinux/presentation; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             log "  -> $pol"
             if ! (cd "$pol" && bash install-policy.sh); then

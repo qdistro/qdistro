@@ -361,14 +361,21 @@ SmartPanel {
                 });
               }
 
+              // Settings.data is a plain object, so a Connections on Settings.data.wallpaper
+              // never bound; react through Settings.settingChanged instead.
               Connections {
-                target: Settings.data.wallpaper
-                function onUseWallhavenChanged() {
-                  // Update text when mode changes
-                  if (Settings.data.wallpaper.useWallhaven) {
-                    searchInput.text = Settings.data.wallpaper.wallhavenQuery || "";
-                  } else {
-                    searchInput.text = panelContent.filterText || "";
+                target: Settings
+                function onSettingChanged(owner, key, value) {
+                  if (owner !== Settings.data.wallpaper)
+                    return;
+                  if (key === "useWallhaven") {
+                    // Update text when mode changes
+                    if (Settings.data.wallpaper.useWallhaven) {
+                      searchInput.text = Settings.data.wallpaper.wallhavenQuery || "";
+                    } else {
+                      searchInput.text = panelContent.filterText || "";
+                    }
+
                   }
                 }
               }

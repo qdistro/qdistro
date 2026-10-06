@@ -408,7 +408,11 @@ ctrl.stop()
 reset_controller_for_tests()
 print("ok")
 PY
-) || QT_OUT="qt-failed:$QT_OUT"
+) || QT_OUT="qt-failed
+$QT_OUT"
+
+echo "$QT_OUT" | grep -qx "qt-failed" \
+    && fail "Qt controller probe exited nonzero: $(echo "$QT_OUT" | tr '\n' ' ')"
 
 echo "$QT_OUT" | grep -qx "last-good-on-delete" \
     && pass "deletion keeps last-known-good appearance" \

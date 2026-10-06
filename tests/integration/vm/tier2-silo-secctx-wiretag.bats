@@ -56,6 +56,9 @@ teardown_file() {
     assert_output_contains "PASS: silo container lives in admin's rootless podman"
     assert_output_contains "PASS: silo container absent from root's podman store"
     assert_output_contains "PASS: systemctl stop -> admin container gone"
+    assert_output_contains "PASS: silo inner weston up and weston-terminal running"
+    assert_output_contains "PASS: binding-resolved silo home is writable"
+    assert_output_contains "PASS: silo inner weston and weston-terminal still running after checks"
     assert_output_contains "PASS: wiretag"
 }
 
