@@ -118,7 +118,8 @@ STAGE="$(mktemp -d -t bake-enforcing-stage.XXXXXX)"
 echo "[bake-enforcing] tarballing the qdistro monorepo into $STAGE..."
 TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
               --exclude='.pytest_cache' --exclude='.git'
-              --exclude='build' --exclude='build-*'
+              --exclude='build' --exclude='build-qci'
+              --exclude='build-host*'
               --exclude='node_modules' --exclude='.worktrees'
               --exclude='./ci/runs' --exclude='./image/root/root'
               --exclude='./image/logs')
