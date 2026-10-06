@@ -30,7 +30,18 @@ if not mask.any():
     sys.exit(0)
 
 mode = sys.argv[3] if len(sys.argv) > 3 else "diff"
-if mode == "rect":
+if mode == "inwin":
+    # restrict the diff mask to a rect: 'inwin x0 y0 x1 y1' — changed
+    # pixels OUTSIDE it do not count (bbox overlap is not membership)
+    x0, y0, x1, y1 = map(int, sys.argv[4:8])
+    mask = mask[y0:y1 + 1, x0:x1 + 1]
+    if not mask.any():
+        print("same")
+        sys.exit(0)
+    ys, xs = np.nonzero(mask)
+    print("diff", x0 + xs.min(), y0 + ys.min(), x0 + xs.max(), y0 + ys.max(),
+          int(mask.sum()))
+elif mode == "rect":
     # bbox of the largest dense block: rows/cols carrying >10% of the
     # diff pixels, so a tiny panel-clock blip can't merge into a window
     # rect

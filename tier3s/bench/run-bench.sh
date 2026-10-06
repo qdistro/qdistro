@@ -155,36 +155,27 @@ if [ "$SAMPLES" -gt 0 ]; then
             winrect=$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/win.ppm" rect)
             case "$winrect" in diff*) winrect=${winrect#diff } ;; *) winrect="" ;; esac
         fi
-        [ -n "$winrect" ] || { echo "   WARN: window rect unknown — falling back to whole-frame diff"; }
         : > "$L/latency.log"
-        # intersects "x0 y0 x1 y1 n" <winrect> — bbox overlap with 8px slack
-        intersects() {
-            read -r _ ix0 iy0 ix1 iy1 _ <<<"$1"
-            read -r _ rx0 ry0 rx1 ry1 _ <<<"$2"
-            [ "$ix1" -ge $((rx0 - 8)) ] && [ "$ix0" -le $((rx1 + 8)) ] \
-                && [ "$iy1" -ge $((ry0 - 8)) ] && [ "$iy0" -le $((ry1 + 8)) ]
-        }
+        if [ -z "$winrect" ]; then
+            echo "   latency: window rect detection failed — cannot scope the oracle" >&2
+            echo "window-rect MISS(setup)" >> "$L/latency.log"; FAIL=1
+        fi
         for i in $(seq 1 "$SAMPLES"); do
+            [ -n "$winrect" ] || break
             # ambient-noise control: three baselines spanning ~1.2s. Only a
-            # change that intersects the TARGET WINDOW can impersonate a key
+            # change inside the TARGET WINDOW mask can impersonate a key
             # echo — panel/clock repaints outside it are ignored
             shot "$STAGE/f0.ppm"; sleep 0.6
             shot "$STAGE/f0b.ppm"; sleep 0.6
             shot "$STAGE/f0c.ppm"
-            d01=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f0b.ppm")
-            d12=$(python3 "$here/ppmdiff.py" "$STAGE/f0b.ppm" "$STAGE/f0c.ppm")
+            d01=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f0b.ppm" inwin $winrect)
+            d12=$(python3 "$here/ppmdiff.py" "$STAGE/f0b.ppm" "$STAGE/f0c.ppm" inwin $winrect)
             case "$d01 $d12" in
                 *error*|*" error"*)
                     echo "sample_$i MISS(setup)" >> "$L/latency.log"; sleep 0.5; continue;;
             esac
-            noisy=0
-            if [ -n "$winrect" ]; then
-                [ "${d01%% *}" = diff ] && intersects "$d01" "r $winrect" && noisy=1
-                [ "${d12%% *}" = diff ] && intersects "$d12" "r $winrect" && noisy=1
-            else
-                [ "${d01} ${d12}" = "same same" ] || noisy=1
-            fi
-            [ "$noisy" -eq 0 ] || { echo "sample_$i MISS(noise)" >> "$L/latency.log"; sleep 0.5; continue; }
+            [ "$d01" = same ] && [ "$d12" = same ] \
+                || { echo "sample_$i MISS(noise) [$d01|$d12]" >> "$L/latency.log"; sleep 0.5; continue; }
             t0=$(date +%s%N)
             if ! virsh -c qemu:///session send-key "$VM" KEY_A >/dev/null 2>&1; then
                 echo "sample_$i MISS(setup)" >> "$L/latency.log"; sleep 0.5; continue
@@ -192,12 +183,8 @@ if [ "$SAMPLES" -gt 0 ]; then
             hit=""
             for _ in $(seq 1 40); do
                 if shot "$STAGE/f1.ppm"; then
-                    d=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f1.ppm")
-                    if [ "${d%% *}" = diff ]; then
-                        if [ -z "$winrect" ] || intersects "$d" "r $winrect"; then
-                            hit=$d; break
-                        fi
-                    fi
+                    d=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f1.ppm" inwin $winrect)
+                    [ "${d%% *}" = diff ] && { hit=$d; break; }
                 fi
                 sleep 0.2
             done

@@ -13,7 +13,7 @@
 #
 # Sections: env cold mem sys io bridge overhead (idle-CPU rides mem, teardown
 # times ride cold). Repeatable on one VM: silo creation is idempotent.
-set -u
+set -uo pipefail
 T3S_TAG=bench
 . "$(dirname "$0")/tier3s-guest-lib.sh"
 
@@ -30,9 +30,13 @@ emit() { echo "MEAS $*"; }
 ts_us() { echo $(( $(date +%s%N) / 1000 )); }
 # pss_kb <pid>: PSS out of smaps_rollup (never RSS: sentry+stubs share backing)
 pss_kb() { sed -n 's/^Pss:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/smaps_rollup" 2>/dev/null; }
-sum_pss_kb() {
-    local t=0 p v
-    for p in "$@"; do v=$(pss_kb "$p"); [ -n "$v" ] && t=$((t + v)); done
+sum_pss_kb() {   # fails on an empty pid list or ANY unreadable smaps —
+    local t=0 n=0 p v                       # a partial sum is not a
+    for p in "$@"; do                       # measurement, it is a fail
+        v=$(pss_kb "$p") && [ -n "$v" ] || return 1
+        t=$((t + v)); n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || return 1
     echo "$t"
 }
 mb_b() { awk -v b="${1:-0}" 'BEGIN{printf "%.1f", b/1048576}'; }   # bytes -> MB, 1 decimal
@@ -420,8 +424,8 @@ sec_io() {
             --tmpfs /bench:size=1g -v "$at:/bench.tar:ro,z" \
             "$IMGW" -c "$t2probe" 2>&1)
         ms=$(tar_ms "$out")
-        [ -n "$ms" ] || fail "t2 io run $i: $(echo "$out" | tail -2)"
-        emit io_tar_t2_ms_$i "${ms:-0}" ms
+        [ -n "$ms" ] || { fail "t2 io run $i: $(echo "$out" | tail -2)"; continue; }
+        emit io_tar_t2_ms_$i "$ms" ms
     done
     rm -f "$at"
     # tier 3s: the tar is a bind-mounted host file → reads go through the
@@ -434,8 +438,8 @@ sec_io() {
             fail "t3s io run $i: $(echo "$out" | tail -2)"; continue
         fi
         ms=$(tar_ms "$out")
-        [ -n "$ms" ] || fail "t3s io run $i: no TAR_MS in $(echo "$out" | tail -2)"
-        emit io_tar_t3s_ms_$i "${ms:-0}" ms
+        [ -n "$ms" ] || { fail "t3s io run $i: no TAR_MS in $(echo "$out" | tail -2)"; continue; }
+        emit io_tar_t3s_ms_$i "$ms" ms
     done
     # directfs toggles the gofer bypass for bind mounts — probe support by
     # running it, emit only on success
@@ -472,9 +476,13 @@ sec_bridge() {
         sleep 0.4
     done
     r1=$(sed -n 's/^rchar: //p' "/proc/$bp/io" 2>/dev/null)
+    [ "$peak" -gt 0 ] || fail "bridge: client proc died or smaps unreadable mid-flood"
+    [ -n "$r0" ] && [ -n "$r1" ] || fail "bridge: rchar unreadable (${r0:-none} -> ${r1:-none})"
+    [ -n "$r0" ] && [ -n "$r1" ] && [ $((r1 - r0)) -gt 0 ] \
+        || fail "bridge: zero socket traffic — flood did not cross the bridge"
     emit bridge_client_pss_start_mb "$(mb_kb "$base")" MB
     emit bridge_client_pss_peak_mb "$(mb_kb "$peak")" MB
-    emit bridge_rchar_delta_kb $(( (${r1:-0} - ${r0:-0}) / 1024 )) KB
+    emit bridge_rchar_delta_kb $(( (r1 - r0) / 1024 )) KB
     teardown_one "$FS"
 }
 
