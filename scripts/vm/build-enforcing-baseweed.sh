@@ -126,6 +126,15 @@ tar "${TAR_EXCLUDES[@]}" --exclude='./qdwin/libweston-vendored/src/build' \
     -czf "$STAGE/qdistro.tar.gz" -C "$REPO_ROOT" .
 cp "$VM_TOOLS/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 
+# The baked cloud base is runtime-only — no compilers (install-deps.sh's
+# runtime set; see build-baked-baseweed.sh). fresh-vm-bootstrap.sh would
+# otherwise hit `meson: command not found` halfway through, so stage the
+# Podman-built native archive the same way spin-test-vm.sh does.
+echo "[bake-enforcing] building/caching native components in rootless Podman..."
+NATIVE_ARCHIVE=$(bash "$SCRIPT_DIR/build-native-podman.sh") || exit 3
+NATIVE_SHA256=$(sha256sum "$NATIVE_ARCHIVE" | awk '{print $1}')
+cp --reflink=auto "$NATIVE_ARCHIVE" "$STAGE/native-stage.tar"
+
 # Detect + reclaim port: a stale http.server from a prior run silently
 # steals it and the in-VM wget then 404s against the wrong tree,
 # surfacing as a confusing rc=8 four steps later.
@@ -153,7 +162,7 @@ echo "[bake-enforcing] running fresh-vm-bootstrap.sh inside $VM (this is the slo
     "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:$HTTP_PORT/fresh-vm-bootstrap.sh && chmod +x /root/fresh-vm-bootstrap.sh"
 
 "$VM_TOOLS/vm-exec" "$VM" \
-    "nohup env QDISTRO_HTTP_HOST=http://10.0.2.2:$HTTP_PORT bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
+    "nohup env QDISTRO_HTTP_HOST=http://10.0.2.2:$HTTP_PORT QCI_NATIVE_STAGE_SHA256=$NATIVE_SHA256 bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
     || true
 
 MAX_WAIT=2400
