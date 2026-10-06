@@ -76,7 +76,7 @@ class TestReadProcLayered:
     def test_self_pid_hash_matches_python_binary(self):
         out = B._read_proc_layered(os.getpid())
         # Re-hash sys.executable directly and compare. /proc/<pid>/exe
-        # may resolve to a versioned name (python3.13) while
+        # may resolve to a versioned name (python3.14) while
         # sys.executable is "python3" — readlink to dereference.
         exe = os.readlink(f"/proc/{os.getpid()}/exe")
         h = hashlib.sha256()
@@ -108,7 +108,7 @@ class TestGetPendingSurfacesLayeredFields:
         # Enqueue a request as a non-admin caller using *our own pid*
         # so /proc reads succeed during _enqueue. Use the resolved
         # /proc/<pid>/exe path (not sys.executable, which may be a
-        # symlink like python3 -> python3.13) so the deferred
+        # symlink like python3 -> python3.14) so the deferred
         # layered-identity checker recognizes the process as unchanged.
         proc_exe = os.readlink(f"/proc/{os.getpid()}/exe")
         broker.set_peer(uid=NON_ADMIN_UID, pid=os.getpid(),

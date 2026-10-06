@@ -71,7 +71,7 @@ is considered usable.
 
 openSUSE prefixes Python packages with `pythonNNN-` matching the
 default Python version. The justfile detects this automatically; for
-manual install, replace `pythonXY` with your default (e.g., `python313`).
+manual install, replace `pythonXY` with your default (e.g., `python314`).
 
 ```bash
 PY="python$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"

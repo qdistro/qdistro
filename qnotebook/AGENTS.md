@@ -37,7 +37,7 @@ Optional tools auto-detected via `shutil.which`:
 
 ## CLI
 
-`qnotebook` (from `[project.scripts]`) + `python -m qnotebook` both dispatch to
+`qnotebook` (from `[project.scripts]`) + `python3 -m qnotebook` both dispatch to
 `qnotebook.cli:run` when any `--flag` is present. Headless commands never
 construct `QApplication`. See `qnotebook/cli.py` for the full surface —
 `--list-pages`, `--search`, `--export`, `--export-all`, `--index-rebuild`,

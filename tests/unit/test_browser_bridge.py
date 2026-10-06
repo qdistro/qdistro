@@ -699,7 +699,7 @@ class TestSubprocessEndToEnd:
 
     def _resolved_python_exe(self):
         # The bridge sees parent_exe via readlink, which chases the
-        # python3 → python3.13 symlink. Match the same form.
+        # python3 → python3.14 symlink. Match the same form.
         return os.readlink("/proc/self/exe")
 
     def _spawn_bridge(self, extra_argv, env_extra):

@@ -49,7 +49,7 @@ escaped. The audit row records `approver_uid` 0 for a CLI decision.
 
 How the broker recognises them, and what that is worth: it reads
 `/proc/<pid>/exe`, which for a Python script is the interpreter
-(`/usr/bin/python3.13`), so for a Python peer it also requires the installed
+(`/usr/bin/python3.14`), so for a Python peer it also requires the installed
 script path somewhere in the process argv. When the kernel runs a script
 through its shebang it puts the path the script was executed by into argv,
 so the installed `qdistro-approvals` and `qdistro-admin-tui` are admitted,

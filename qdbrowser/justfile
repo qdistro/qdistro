@@ -10,8 +10,16 @@ install-deps:
     #!/usr/bin/env bash
     set -eu
     if command -v zypper >/dev/null; then
-        sudo zypper install -y python313-PyQt6 python313-PyQt6-WebEngine \
-            python313-pytest python313-pytest-qt python313-Pillow just
+        sudo zypper install -y python314-PyQt6 python314-PyQt6-WebEngine \
+            python314-pytest python314-pytest-qt python314-Pillow \
+            python314-pip just
+        # python3 → 3.14: Tumbleweed still ships the unversioned symlink
+        # from python313-base, so `just run`/`just test` (python3 -m
+        # qdbrowser / pytest) would run an interpreter without PyQt6.
+        if command -v python3.14 >/dev/null && \
+           [ "$(readlink /usr/bin/python3 2>/dev/null)" != "python3.14" ]; then
+            sudo ln -sf python3.14 /usr/bin/python3
+        fi
     elif command -v apt >/dev/null; then
         sudo apt install -y python3-pyqt6 python3-pyqt6.qtwebenginewidgets \
             python3-pytest python3-pytest-qt python3-pil just
@@ -25,11 +33,11 @@ install-deps:
 
 # Install MCP support for agent-driving (optional).
 install-mcp:
-    pip install --user mcp
+    python3 -m pip install --user mcp
 
 # Install qdbrowser in editable mode.
 install:
-    pip install --user -e .
+    python3 -m pip install --user -e .
 
 # Run qdbrowser.
 run *ARGS:

@@ -106,7 +106,7 @@ to the QML import path, but that is only a hook: nothing uses it today.
 ```bash
 QDLOCKER_NO_WAYLAND=1 \
 QDLOCKER_QDSHELL_PATH=$(pwd)/../qdshell \
-python -m qdlocker
+python3 -m qdlocker
 ```
 
 The UI comes up in a regular Wayland window; useful for iterating on

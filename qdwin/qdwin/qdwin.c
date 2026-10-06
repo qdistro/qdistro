@@ -770,7 +770,7 @@ struct qdwin_view_stream {
  * path. The earlier hardening compared allowed_locker_exe against the exe
  * path and therefore rejected the genuine locker in the default config (it
  * can never match a script path — VM ground truth 2026-06-02:
- * /proc/<pid>/exe -> /usr/bin/python3.13, argv[1] -> /usr/local/bin/qdlocker).
+ * /proc/<pid>/exe -> /usr/bin/python3.14, argv[1] -> /usr/local/bin/qdlocker).
  * The correct identity for a console-script is the launcher's argv: the
  * kernel records the script path the shebang/systemd handed the interpreter
  * as argv[1] in /proc/<pid>/cmdline. So we default to an *entrypoint* policy:

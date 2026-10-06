@@ -6,7 +6,7 @@
 # so removable-media bats can drive the real
 # /run/qdistro-media-exec/sock path.
 #
-# Pre-reqs: python313 + dbus-python (baked into baseweed), udisks2 +
+# Pre-reqs: python314 + dbus-python (baked into baseweed), udisks2 +
 # dosfstools (for the loopback vfat test in s60-removable-media.sh).
 #
 # Sits next to install-qsu-for-vm.sh — the broker MUST be running before

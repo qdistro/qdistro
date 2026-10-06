@@ -33,7 +33,7 @@ if [ -z "${QDWIN_LOCKER_XML:-}" ]; then
 fi
 
 if ! python3 -c "import pywayland" >/dev/null 2>&1; then
-    echo "generate-protocol: pywayland not installed (pip install pywayland)" >&2
+    echo "generate-protocol: pywayland not installed (python3 -m pip install pywayland)" >&2
     exit 2
 fi
 if [ ! -f "$WAYLAND_XML" ]; then

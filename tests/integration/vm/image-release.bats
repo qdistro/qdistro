@@ -273,7 +273,7 @@ make_debris() {
     local r="$1"
     mkdir -p "$r/qdwin/build-foo" "$r/qdwin/build" "$r/qdshell/build-qci" \
              "$r/daemons/__pycache__" "$r/.worktrees/x" "$r/ci/runs/y" \
-             "$r/.mypy_cache/3.13" "$r/.pytest_cache" "$r/qdshell/.venv/bin" \
+             "$r/.mypy_cache/3.14" "$r/.pytest_cache" "$r/qdshell/.venv/bin" \
              "$r/.ruff_cache" "$r/qdterm/.hypothesis" "$r/qdterm/x.egg-info" \
              "$r/qdchrome-extension/node_modules/m" "$r/qdchrome-extension/dist" \
              "$r/image/logs" "$r/image/keys/gnupg" "$r/qdchrome-extension/keys"
@@ -281,10 +281,10 @@ make_debris() {
     echo o   > "$r/qdwin/build-foo/qdwin.o"
     echo n   > "$r/qdwin/build/build.ninja"
     echo so  > "$r/qdshell/build-qci/libplugin.so"
-    echo pyc > "$r/daemons/__pycache__/x.cpython-313.pyc"
+    echo pyc > "$r/daemons/__pycache__/x.cpython-314.pyc"
     echo wt  > "$r/.worktrees/x/file"
     echo run > "$r/ci/runs/y/log"
-    echo c   > "$r/.mypy_cache/3.13/cache.json"
+    echo c   > "$r/.mypy_cache/3.14/cache.json"
     echo c   > "$r/.pytest_cache/README.md"
     echo c   > "$r/.ruff_cache/CACHEDIR.TAG"
     echo c   > "$r/qdterm/.hypothesis/db"
@@ -614,19 +614,19 @@ chain_root() {
     mkdir -p "$T/root/etc/tmpfiles.d" "$T/root/usr/local/bin" "$T/root/usr/local/lib/qdistro" \
         "$T/root/usr/share/polkit-1/actions" "$T/root/usr/share/qdistro/tier4-vm" \
         "$T/root/usr/share/qdistro/tier5" "$T/root/usr/share/qdistro/tier5b" \
-        "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/tier3" \
+        "$T/root/usr/local/lib/python3.14/site-packages/qdistro_app" "$T/root/root/qdistro-src/tier3" \
         "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system" \
         "$T/root/usr/libexec/qdistro" "$T/root/usr/share/applications"
     cp "$REPO/admin_app/qdistro_admin_app.py" "$T/root/usr/local/bin/qdistro-admin-approval-app"
     cp "$REPO/deploy/start-admin-app-wayland.sh" "$T/root/usr/local/bin/qdistro-start-admin-app"
     cp "$REPO/admin_app/qdistro-admin-app.desktop" "$T/root/usr/share/applications/qdistro-admin-app.desktop"
     DESTDIR="$T/root" bash "$REPO/scripts/install/install-admin-cli-for-vm.sh" "$REPO" >/dev/null
-    mkdir -p "$T/root/usr/lib/python3.13/site-packages/textual"; : > "$T/root/usr/lib/python3.13/site-packages/textual/__init__.py"
-    : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
-    mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
-    : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim/qmldir"
-    : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/Main.qml"
-    mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim"; : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim/qmldir"
+    mkdir -p "$T/root/usr/lib/python3.14/site-packages/textual"; : > "$T/root/usr/lib/python3.14/site-packages/textual/__init__.py"
+    : > "$T/root/usr/local/lib/python3.14/site-packages/qdistro_app/__init__.py"
+    mkdir -p "$T/root/usr/lib/python3.14/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.14/site-packages/qdlocker/qml"
+    : > "$T/root/usr/lib/python3.14/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.14/site-packages/qdgreeter/qml/shim/qmldir"
+    : > "$T/root/usr/lib/python3.14/site-packages/qdlocker/qml/Main.qml"
+    mkdir -p "$T/root/usr/lib/python3.14/site-packages/qdlocker/qml/shim"; : > "$T/root/usr/lib/python3.14/site-packages/qdlocker/qml/shim/qmldir"
     mkdir -p "$T/root/usr/share/fonts/truetype"; : > "$T/root/usr/share/fonts/truetype/DejaVuSans.ttf"
     mkdir -p "$T/root/boot/grub2" "$T/root/boot/efi/EFI/BOOT"
     printf 'UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee / btrfs defaults 0 1\nUUID=ffffffff-0000-1111-2222-333333333333 swap swap defaults 0 0\n' > "$T/root/etc/fstab"
@@ -806,11 +806,11 @@ extracted_src() {
     mkdir -p "$s/daemons/x" "$s/qdwin/src" "$s/qdshell/src" "$s/tier3"
     : > "$s/qdwin/src/a.c"; : > "$s/daemons/x/d.py"; : > "$s/tier3/spawn-tier3.sh"
     if [ "${1:-}" = leaky ]; then
-        mkdir -p "$s/qdwin/build-qci/sub" "$s/qdshell/build-qci" "$s/.mypy_cache/3.13" \
+        mkdir -p "$s/qdwin/build-qci/sub" "$s/qdshell/build-qci" "$s/.mypy_cache/3.14" \
                  "$s/qdterm/.pytest_cache/v" "$s/qnotebook/.hypothesis/constants" \
                  "$s/.ruff_cache/0.15" "$s/multimachine/harness/__pycache__"
         : > "$s/qdwin/build-qci/sub/qdwin-shell.so"; : > "$s/qdshell/build-qci/libplugin.so"
-        : > "$s/.mypy_cache/3.13/x.json"; : > "$s/qdterm/.pytest_cache/v/cache"
+        : > "$s/.mypy_cache/3.14/x.json"; : > "$s/qdterm/.pytest_cache/v/cache"
         : > "$s/qnotebook/.hypothesis/constants/c"; : > "$s/.ruff_cache/0.15/r"
         : > "$s/multimachine/harness/__pycache__/m.pyc"
         echo '{}' > "$s/.coverage-report.json"
@@ -1152,7 +1152,7 @@ GF
 
 @test "verify-contents: a qdgreeter package without its QML is a MISS (run 28's crash-looping greeter)" {
     chain_root dev
-    rm "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"
+    rm "$T/root/usr/lib/python3.14/site-packages/qdgreeter/qml/Main.qml"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [ "$status" -ne 0 ]
     [[ "$output" == *"MISS [qdgreeter] QML shipped with the package"* ]]

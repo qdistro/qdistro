@@ -54,19 +54,19 @@ for pkg in "${QDISTRO_RUNTIME_PKGS[@]}"; do
     case "$pkg" in
         libvirt|libvirt-*|virt-install|qemu-*|libguestfs|guestfs-tools) ;;
         tesseract-ocr|ydotool|bats|jq|Mesa-demo-egl|kernel-default) ;;
-        rage-encryption|rsync|python313-jeepney) ;;
+        rage-encryption|rsync|python314-jeepney) ;;
         *) pkgs+=("$pkg") ;;
     esac
 done
 # What image/config.xml adds for a bootable desktop: pip for the source-built
 # apps, fonts for Qt text, the seat daemon, and the pinned SELinux policy the
 # staged modules load into.
-pkgs+=(python313-pip dejavu-fonts google-noto-coloremoji-fonts seatd
+pkgs+=(python314-pip dejavu-fonts google-noto-coloremoji-fonts seatd
        selinux-policy-targeted policycoreutils qemu-guest-agent libpango-1_0-0
        # The admin TUI's modules: install-admin-cli-for-vm.sh fails the
        # strict chain without them, and QDISTRO_PKGS cannot carry them (its
        # list feeds the baked base's recipe digest — a9abd7e15).
-       python313-textual python313-rich
+       python314-textual python314-rich
        # A real terminal on the host desktop: this VM ships no tier-5
        # guest base, so the launcher's VM-app rows cannot start anything;
        # weston-terminal comes with the weston package and foot gives the
@@ -84,6 +84,11 @@ if ! zypper -n install --no-recommends "${pkgs[@]}"; then
     zypper -n refresh
     zypper -n install --no-recommends "${pkgs[@]}"
 fi
+# python3 → 3.14: the snapshot still ships the unversioned symlink from
+# python313-base while the dep set is python314-* (scripts/install/lib/
+# qdistro-python.sh). Pip installs and in-VM python3 calls must resolve 3.14.
+. "$SRC/scripts/install/lib/qdistro-python.sh"
+ensure_python3_314 || tvm_die "cannot pin /usr/bin/python3 to python3.14"
 for tool in meson gcc cc ninja; do
     if command -v "$tool" >/dev/null; then tvm_die "build tool $tool is installed in the runtime guest"; fi
 done

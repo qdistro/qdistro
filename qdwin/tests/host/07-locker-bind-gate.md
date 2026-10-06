@@ -195,7 +195,7 @@ interpreter (`/usr/bin/python3.N`) and the launcher path is `argv[1]`; the
 default therefore requires the peer exe to be a system interpreter AND
 `argv[1]` to realpath to one of the canonical, root-owned entrypoint files
 (`/usr/local/bin/qdlocker` or `/usr/bin/qdlocker`, profile-dependent —
-verified on the daily VM: exe→`/usr/bin/python3.13`,
+verified on the daily VM: exe→`/usr/bin/python3.14`,
 argv[1]→`/usr/local/bin/qdlocker`). Start qdwin WITHOUT the dev/test opt-out
 and confirm the startup log shows the entrypoint default (not
 `[UID-ONLY: INSECURE]`). The probe (a native ELF whose exe is the probe

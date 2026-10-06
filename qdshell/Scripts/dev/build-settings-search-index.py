@@ -8,7 +8,7 @@ Parses settings tab QML files to extract searchable metadata
 Output: Assets/settings-search-index.json
 
 Usage:
-  python Scripts/dev/build-settings-search-index.py
+  python3 Scripts/dev/build-settings-search-index.py
 """
 
 import json

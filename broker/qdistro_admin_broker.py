@@ -171,7 +171,7 @@ _ARGV_REQUIRED_SCOPES = frozenset((
 ))
 
 _PYTHON_EXE_BASENAMES = frozenset((
-    "python", "python3", "python3.11", "python3.12", "python3.13",
+    "python", "python3", "python3.11", "python3.12", "python3.14",
 ))
 
 _ADMIN_CONTROL_DIRECT_EXES = frozenset((

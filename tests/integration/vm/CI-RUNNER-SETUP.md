@@ -15,8 +15,8 @@ the dev workstation).
 sudo zypper install -y \
  libvirt qemu-kvm libvirt-daemon-driver-qemu \
  libvirt-client virt-install bats \
- python313-dbus-python python313-gobject \
- python313-pyyaml python313-pytest
+ python314-dbus-python python314-gobject \
+ python314-pyyaml python314-pytest
 
 # 2. Test user (matches the user "admin" naming that the in-VM tests
 # expect via uid 1000). If your runner already has a service
@@ -24,10 +24,13 @@ sudo zypper install -y \
 sudo useradd -m -u 1000 -G libvirt,kvm -s /bin/bash admin
 sudo loginctl enable-linger admin
 
-# 3. qdistro test venv. --system-site-packages so python313-dbus-
+# 3. qdistro test venv. --system-site-packages so python314-dbus-
 # python (which has no working pip wheel on rolling Tumbleweed)
-# resolves from /usr/lib/python3.13/site-packages.
-sudo -u admin python3 -m venv --system-site-packages \
+# resolves from /usr/lib/python3.14/site-packages. Create it with
+# python3.14 explicitly: the snapshot's /usr/bin/python3 is still
+# owned by python313-base, and a 3.13 venv cannot see the 3.14
+# system modules.
+sudo -u admin python3.14 -m venv --system-site-packages \
  /home/admin/.local/share/qdistro-test-venv2
 sudo -u admin /home/admin/.local/share/qdistro-test-venv2/bin/pip install \
  pytest pyyaml

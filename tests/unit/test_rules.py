@@ -243,11 +243,11 @@ class TestRuleMatches:
                              exe="/x")
 
     def test_exe_glob_python_versions(self):
-        # `/usr/bin/python3*` matches python3, python3.13, python3-foo.
+        # `/usr/bin/python3*` matches python3, python3.14, python3-foo.
         r = Rule(name="x", decision="allow", source_path="/p",
                  exe="/usr/bin/python3*")
         assert r.matches(uid=0, action="a", exe="/usr/bin/python3")
-        assert r.matches(uid=0, action="a", exe="/usr/bin/python3.13")
+        assert r.matches(uid=0, action="a", exe="/usr/bin/python3.14")
         assert r.matches(uid=0, action="a", exe="/usr/bin/python3-foo")
         assert not r.matches(uid=0, action="a", exe="/usr/bin/python")
 
@@ -635,7 +635,7 @@ class TestArgvMatchKinds:
         assert r.matches(uid=0, action="a", exe="/x",
                          argv=["/usr/bin/python3"])
         assert r.matches(uid=0, action="a", exe="/x",
-                         argv=["/usr/bin/python3.13"])
+                         argv=["/usr/bin/python3.14"])
         assert not r.matches(uid=0, action="a", exe="/x",
                              argv=["/usr/bin/python2.7"])
 

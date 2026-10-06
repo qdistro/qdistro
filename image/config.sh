@@ -233,6 +233,11 @@ fi
 # script admits are fixed points of it; the alias forms were refused above).
 resolve_profile || { echo "[qdistro-image] FATAL: bootstrap rejected QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2; exit 1; }
 echo "[qdistro-image] installer chain (bootstrap's, profile=$QDISTRO_PROFILE, strict, offline): $(installer_chain_names | tr '\n' ' ')"
+# Pin /usr/bin/python3 at 3.14 before install_python_modules pip-installs
+# into its site-packages: the snapshot's python313-base still owns the
+# unversioned name (lib/qdistro-python.sh has the rationale).
+. "$QD/scripts/install/lib/qdistro-python.sh"
+ensure_python3_314 || { echo "[qdistro-image] FATAL: cannot pin /usr/bin/python3 to python3.14" >&2; exit 1; }
 # Runs every chain step through run_installer_step (fatal under STRICT) and
 # then chain_completeness_check: the recorded steps must equal the chain
 # minus dev-only steps outside dev, or the build dies.

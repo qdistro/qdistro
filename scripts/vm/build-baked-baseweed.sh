@@ -343,6 +343,11 @@ virt-customize \
     --run-command 'zypper -n refresh' \
     --run-command 'rpm -q kernel-default-base >/dev/null 2>&1 && zypper -n remove kernel-default-base || true' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
+    `# python3 → 3.14 inside the baked root: the snapshot still ships the` \
+    `# unversioned symlink from python313-base while the dep set is` \
+    `# python314-* — pin it at bake time so the disk is correct even when` \
+    `# a later provisioning step would not run the pin itself.` \
+    --run-command 'test -x /usr/bin/python3.14 && ln -sf python3.14 /usr/bin/python3' \
     --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
     --run-command 'systemctl mask greetd.service 2>/dev/null || true' \
     `# qemu-guest-agent 11.x (current Tumbleweed) ships a default` \

@@ -69,7 +69,7 @@ a preflight check; it runs as part of the host test step.)
 
 > On hosts where the distro forbids a system `pip install` of meson (PEP 668),
 > either install the packaged meson (e.g. `meson` 1.x from the distro) or build
-> through a throwaway venv (`python -m venv` then `pip install meson`).
+> through a throwaway venv (`python3 -m venv` then `python3 -m pip install meson`).
 
 Build order (from the repo root):
 
@@ -539,7 +539,7 @@ Language servers (install once on the host):
 
 | Language | Server                 | Install                                            |
 |----------|------------------------|----------------------------------------------------|
-| Python   | `pyright-langserver`   | `npm i -g pyright` (or `pip install basedpyright`)  |
+| Python   | `pyright-langserver`   | `npm i -g pyright` (or `python3 -m pip install basedpyright`)  |
 | Bash     | `bash-language-server` | `npm i -g bash-language-server`                     |
 | C        | `clangd`               | `sudo zypper install clang-tools`                   |
 | QML      | `qmlls6`               | ships with the Qt6 declarative tools               |

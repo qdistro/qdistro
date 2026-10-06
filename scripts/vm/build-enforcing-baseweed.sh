@@ -137,12 +137,12 @@ if ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !fou
     sleep 0.5
 fi
 (cd "$STAGE" && nohup python3 -m http.server "$HTTP_PORT" \
-        --bind 0.0.0.0 ) >/tmp/bake-enforcing-http.log 2>&1 &
+        --bind 0.0.0.0 ) >"/tmp/bake-enforcing-http-$(id -u).log" 2>&1 &
 HTTP_PID=$!
 sleep 1
 if ! ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !found}'; then
-    echo "ERROR: http.server failed to bind $HTTP_PORT (see /tmp/bake-enforcing-http.log)" >&2
-    tail -5 /tmp/bake-enforcing-http.log >&2 || true
+    echo "ERROR: http.server failed to bind $HTTP_PORT (see /tmp/bake-enforcing-http-$(id -u).log)" >&2
+    tail -5 "/tmp/bake-enforcing-http-$(id -u).log" >&2 || true
     exit 6
 fi
 
@@ -151,8 +151,28 @@ echo "[bake-enforcing] running fresh-vm-bootstrap.sh inside $VM (this is the slo
 "$VM_TOOLS/vm-exec" "$VM" \
     "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:$HTTP_PORT/fresh-vm-bootstrap.sh && chmod +x /root/fresh-vm-bootstrap.sh"
 
+# The baked base carries QDISTRO_RUNTIME_PKGS only (no toolchain), but
+# fresh-vm-bootstrap.sh compiles qdwin/daemons/qdshell in-guest. Install
+# the full-vs-runtime delta (compilers + *-devel) first. The deps file
+# only defines arrays when sourced; nothing else runs.
+. "$REPO_ROOT/scripts/vm/install-deps.sh"
+TOOLCHAIN_PKGS=()
+for _pkg in "${QDISTRO_PKGS[@]}"; do
+    case " ${QDISTRO_RUNTIME_PKGS[*]} " in
+        *" $_pkg "*) ;;
+        *) TOOLCHAIN_PKGS+=("$_pkg") ;;
+    esac
+done
+unset _pkg
+# --force-resolution: the Minimal-VM base ships busybox-* stand-ins that
+# conflict with real diffutils (pulled in via gettext-devel); let zypper
+# swap them out rather than abort.
 "$VM_TOOLS/vm-exec" "$VM" \
-    "nohup bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
+    "zypper -n install -y --no-recommends --force-resolution ${TOOLCHAIN_PKGS[*]}" \
+    || { echo "ERROR: toolchain install failed in $VM" >&2; exit 7; }
+
+"$VM_TOOLS/vm-exec" "$VM" \
+    "nohup env QDISTRO_HTTP_HOST=http://10.0.2.2:$HTTP_PORT bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
     || true
 
 MAX_WAIT=2400

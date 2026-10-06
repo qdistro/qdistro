@@ -132,9 +132,10 @@ chmod 0755 "$TMPDIR/qdistro-fprintd-fake"
 # wheels. `--no-deps` on the qdlocker install relies on these being
 # present.
 virt-customize -a "$IMG" \
-    --install python313-pip,python313-PyQt6,python313-python-pam,python313-dbus_next,python313-pywayland \
+    --install python314-pip,python314-PyQt6,python314-python-pam,python314-dbus_next,python314-pywayland \
     --copy-in "$TMPDIR/qdlocker.tgz:/tmp/" \
     --run-command 'tar -C /opt -xzf /tmp/qdlocker.tgz && rm /tmp/qdlocker.tgz' \
+    --run-command 'ln -sf python3.14 /usr/bin/python3' \
     --run-command 'python3 -m pip install --break-system-packages --no-deps /opt/qdlocker' \
     --copy-in "$TMPDIR/qdistro-fprintd-fake:/usr/libexec/" \
     --copy-in "$TMPDIR/qdistro-fprintd-fake.service:/etc/systemd/system/" \

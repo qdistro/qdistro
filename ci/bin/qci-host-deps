@@ -54,14 +54,14 @@ manual=()        # deps we can detect but not auto-install on this host
 
 # --- qdfileman (qfileman): tomli_w (declared in qdfileman/pyproject.toml; pip-only) ---
 if have_py tomli_w; then ok+=("tomli_w (qfileman)")
-else missing+=("tomli_w (qfileman) -> pip install tomli_w"); pip_pkgs+=("tomli_w>=1.0"); fi
+else missing+=("tomli_w (qfileman) -> python3 -m pip install tomli_w"); pip_pkgs+=("tomli_w>=1.0"); fi
 
 # --- qdbrowser: jeepney (pure-Python; distro pkg or pip) ---
 if have_py jeepney; then ok+=("jeepney (qdbrowser)")
 else
     case "$PM" in
         zypper|apt) missing+=("jeepney (qdbrowser) -> $PM python3-jeepney"); distro_pkgs+=("python3-jeepney") ;;
-        *)          missing+=("jeepney (qdbrowser) -> pip install jeepney"); pip_pkgs+=("jeepney") ;;
+        *)          missing+=("jeepney (qdbrowser) -> python3 -m pip install jeepney"); pip_pkgs+=("jeepney") ;;
     esac
 fi
 

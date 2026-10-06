@@ -73,7 +73,7 @@ install -m 0644 "$RECALL_SRC/qdistro-recall@.timer"   "$DEST_SYSD/"
 
 # SDK drop under site-packages. Find the python3 sitepackages dir
 # at runtime — Tumbleweed jumps minor versions across rebases, so
-# /usr/lib/python3.13/site-packages might be /usr/lib/python3.14/...
+# /usr/lib/python3.14/site-packages might be /usr/lib/python3.15/...
 # tomorrow.
 PY_SITE=$(/usr/bin/python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 install -d -m 0755 "$PY_SITE/qdistro_app"

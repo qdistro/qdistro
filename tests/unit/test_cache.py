@@ -301,8 +301,8 @@ class TestArgvAware:
         assert c.lookup(2000, "qdistro.sudo.exec", "/usr/local/bin/python3",
                         argv=["/usr/local/bin/python3", "-c", "print(1)"]) is True
         # Different basename — miss.
-        assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/python3.13",
-                        argv=["/usr/bin/python3.13"]) is None
+        assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/python3.14",
+                        argv=["/usr/bin/python3.14"]) is None
         assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/python3") is None
 
     def test_prefix_matches_argv_prefix(self, cache_db):

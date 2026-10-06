@@ -58,8 +58,8 @@ faillock_valid() {
 DENY=5
 
 # ---- 0. assert the provisioned dedicated PAM file is present --------------
-rpm -q python313-python-pam >/dev/null 2>&1 || \
-    zypper -n install python313-python-pam >/dev/null 2>&1 || true
+rpm -q python314-python-pam >/dev/null 2>&1 || \
+    zypper -n install python314-python-pam >/dev/null 2>&1 || true
 
 [ -f /etc/pam.d/qdlocker ] || {
     echo "FAIL: /etc/pam.d/qdlocker not installed by provisioning"
