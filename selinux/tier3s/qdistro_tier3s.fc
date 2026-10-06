@@ -14,3 +14,8 @@
 
 /run/qdistro-tier3s-runsc(/.*)?				system_u:object_r:qdistro_tier3s_var_run_t:s0
 /run/qdistro-tier3s(/.*)?				system_u:object_r:qdistro_tier3s_var_run_t:s0
+# Caller's lifecycle records + .call-* stdio capture — a distinct type so
+# the domain can write the fds it is handed but cannot mint or destroy
+# records. Note /run/qdistro-tier3s-rt deliberately stays var_run_t:
+# podman's own type_transitions label its container_var_run_t children.
+/run/qdistro-tier3s-ctl(/.*)?				system_u:object_r:qdistro_tier3s_ctl_t:s0

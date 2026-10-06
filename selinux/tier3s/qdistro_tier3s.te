@@ -126,7 +126,7 @@ require {
 	# Classes/perms referenced below.
 	class process { transition fork signal sigkill sigstop signull sigchld getattr setsched execmem ptrace setcap };
 	class file { execute read open getattr map entrypoint execute_no_trans create unlink write lock setattr ioctl append mounton };
-	class dir { search getattr read open write add_name remove_name create mounton setattr };
+	class dir { search getattr read open write add_name remove_name create mounton setattr ioctl };
 	class lnk_file { read getattr create };
 	class sock_file { create unlink write getattr read open };
 	class fifo_file { read write getattr ioctl setattr append };
@@ -163,6 +163,14 @@ typeattribute qdistro_tier3s_exec_t exec_type;
 # Runtime state type: runsc state root + per-launch token dirs.
 type qdistro_tier3s_var_run_t;
 typeattribute qdistro_tier3s_var_run_t file_type;
+
+# Control-record type: /run/qdistro-tier3s-ctl. Caller's files
+# (session-manager lifecycle records, .call-* stdio capture); the domain
+# may append/write through the fds the caller hands it, nothing more —
+# no create/unlink, so a hostile sandbox cannot forge or destroy
+# lifecycle records.
+type qdistro_tier3s_ctl_t;
+typeattribute qdistro_tier3s_ctl_t file_type;
 
 role system_r types qdistro_tier3s_t;
 role unconfined_r types qdistro_tier3s_t;
@@ -205,7 +213,9 @@ allow qdistro_tier3s_t self:unix_stream_socket connectto;
 #
 # Own state: runsc root + per-launch token dir
 #
-allow qdistro_tier3s_t qdistro_tier3s_var_run_t:dir { add_name getattr open read remove_name search write create setattr };
+# mounton: the per-launch token dir is the bind-mount target for
+# /run/qdistro/link inside the sandbox rootfs.
+allow qdistro_tier3s_t qdistro_tier3s_var_run_t:dir { add_name getattr ioctl mounton open read remove_name search write create setattr };
 # mounton: runsc bind-mounts files it created in the state root (the
 # null-netns target is how network=none is realised).
 allow qdistro_tier3s_t qdistro_tier3s_var_run_t:file { create getattr lock mounton open read unlink write setattr };
@@ -213,6 +223,14 @@ allow qdistro_tier3s_t qdistro_tier3s_var_run_t:lnk_file { create read getattr }
 # link.sock: the sentry stats/opens it (host-uds validation) and the
 # gofer writes it for connect(); also covers runsc's own control .sock.
 allow qdistro_tier3s_t qdistro_tier3s_var_run_t:sock_file { create unlink write getattr read open };
+
+# ctl dir: the spawn harness redirects runsc's stdout/stderr into
+# /run/qdistro-tier3s-ctl/.call-*/{out,err} and passes the fds in. Write
+# (plus append/getattr) on the file type is what that needs; no open —
+# the fd is already open — and no dir write so the domain cannot touch
+# the records themselves.
+allow qdistro_tier3s_t qdistro_tier3s_ctl_t:dir { getattr search };
+allow qdistro_tier3s_t qdistro_tier3s_ctl_t:file { append getattr write };
 
 ########################################
 #

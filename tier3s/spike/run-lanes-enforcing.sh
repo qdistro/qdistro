@@ -70,7 +70,9 @@ for f in "${FILES[@]}"; do
     rc=$?
 
     # Harvest tier3s-domain AVCs for the whole window this VM lived.
-    ssh_vm 'ausearch -m avc 2>/dev/null | grep scontext=.*qdistro_tier3s_t | sort -u; echo "--"; getenforce' \
+    # ausearch silently finds nothing on this auditd build (ENRICHED
+    # records); grep the raw log + rotations instead.
+    ssh_vm 'grep -h "type=AVC" /var/log/audit/audit.log* 2>/dev/null | grep "scontext=.*qdistro_tier3s_t" | sort -u; echo "--"; getenforce' \
         >"$L/$base.avc.log" 2>&1
     avc_n=$(grep -c 'denied' "$L/$base.avc.log" || true)
 
