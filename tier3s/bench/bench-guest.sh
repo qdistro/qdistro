@@ -34,6 +34,8 @@ sum_pss_kb() {
     for p in "$@"; do v=$(pss_kb "$p"); [ -n "$v" ] && t=$((t + v)); done
     echo "$t"
 }
+mb_b() { awk -v b="${1:-0}" 'BEGIN{printf "%.1f", b/1048576}'; }   # bytes -> MB, 1 decimal
+mb_kb() { awk -v k="${1:-0}" 'BEGIN{printf "%.1f", k/1024}'; }    # KiB -> MB
 cg_mem() { cat "/sys/fs/cgroup$1/memory.current" 2>/dev/null; }
 cg_usage_us() { sed -n 's/^usage_usec //p' "/sys/fs/cgroup$1/cpu.stat" 2>/dev/null; }
 proc_cg() { sed -n 's/^0:://p' "/proc/$1/cgroup" 2>/dev/null; }
@@ -107,14 +109,17 @@ provision() {
     # below as a visible FAIL when the t2 container's cgroup lacks
     # memory.current.
     local d
+    # ordered top-down: a level only delegates what its parent already has
     for d in /sys/fs/cgroup/user.slice \
              /sys/fs/cgroup/user.slice/user-1000.slice \
-             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service; do
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/session.slice \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/background.slice; do
+        [ -d "$d" ] || continue
         echo "+cpu +memory" > "$d/cgroup.subtree_control" 2>/dev/null || :
     done
-    find /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service \
-        -mindepth 1 -name cgroup.subtree_control 2>/dev/null \
-        | while read -r d; do echo "+cpu +memory" > "$d" 2>/dev/null || :; done
     mk_silo "$GS" weston-terminal || fail "create $GS"
     mk_silo "$HS" headless-smoke || fail "create $HS"
     mk_silo "$FS" foot || fail "create $FS"
@@ -223,6 +228,18 @@ sec_cold() {
     done
 }
 
+# delegate_to <cgroup-rel-path>: enable +cpu +memory on EVERY ancestor of the
+# given cgroup (files propagate to existing children on write), so timing of
+# slice-dir creation can't leave the target controller-less.
+delegate_to() {
+    local p="/sys/fs/cgroup$1"
+    while [ "$p" != /sys/fs/cgroup ] && [ -n "$p" ]; do
+        [ -f "$p/cgroup.subtree_control" ] \
+            && echo "+cpu +memory" > "$p/cgroup.subtree_control" 2>/dev/null || :
+        p="${p%/*}"
+    done
+}
+
 # --- section: idle memory (+ idle CPU riding the open window) ---------------
 sec_mem() {
     step "idle memory"
@@ -236,17 +253,17 @@ sec_mem() {
     scope_cur=$(cg_mem "$scope_cg")
     pss=$(sum_pss_kb $procs)
     bridge_pss=$(pss_kb "$(rec "$tok" bridge_client_pid)")
-    emit t3s_gui_scope_memory_current_mb $(( ${scope_cur:-0} / 1048576 )) MB
-    emit t3s_gui_scope_pss_mb $(( pss / 1024 )) MB
-    emit t3s_gui_bridge_client_pss_mb $(( ${bridge_pss:-0} / 1024 )) MB
+    emit t3s_gui_scope_memory_current_mb "$(mb_b "$scope_cur")" MB
+    emit t3s_gui_scope_pss_mb "$(mb_kb "$pss")" MB
+    emit t3s_gui_bridge_client_pss_mb "$(mb_kb "$bridge_pss")" MB
     emit t3s_gui_scope_procs "$(printf '%s\n' "$procs" | grep -c .)" count
     htok=$(up_silo "$HS")
     if [ -n "$htok" ]; then
         sleep 10
         hcg=$(rec "$htok" scope_cgroup)
         procs=$(tree_procs "/sys/fs/cgroup$hcg")
-        emit t3s_headless_scope_memory_current_mb $(( $(cg_mem "$hcg") / 1048576 )) MB
-        emit t3s_headless_scope_pss_mb $(( $(sum_pss_kb $procs) / 1024 )) MB
+        emit t3s_headless_scope_memory_current_mb "$(mb_b "$(cg_mem "$hcg")")" MB
+        emit t3s_headless_scope_pss_mb "$(mb_kb "$(sum_pss_kb $procs)")" MB
         emit t3s_headless_scope_procs "$(printf '%s\n' "$procs" | grep -c .)" count
     else
         fail "mem: headless launch failed"
@@ -257,12 +274,21 @@ sec_mem() {
     local t2pid t2cg
     t2pid=$(pm inspect --format '{{.State.Pid}}' t2mem 2>/dev/null)
     t2cg=$(proc_cg "$t2pid")
+    [ -n "$t2cg" ] && delegate_to "$t2cg" && sleep 1
     local a0 a1 b0 b1 h0 h1
     if [ -n "$t2cg" ] && [ -n "$(cg_mem "$t2cg")" ]; then
-        emit t2_idle_memory_current_mb $(( $(cg_mem "$t2cg") / 1048576 )) MB
-        emit t2_idle_pss_mb $(( $(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg")) / 1024 )) MB
+        emit t2_idle_memory_current_mb "$(mb_b "$(cg_mem "$t2cg")")" MB
+        local t2pss; t2pss=$(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg"))
+        emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB
     else
-        fail "mem: t2 cgroup has no memory controller (delegation failed?)"
+        # report the delegation chain so a miss is diagnosable from the log
+        local cgpath="/sys/fs/cgroup$t2cg" anc ctl=""
+        while [ "$cgpath" != /sys/fs/cgroup ] && [ -n "$cgpath" ]; do
+            [ -f "$cgpath/cgroup.subtree_control" ] \
+                && ctl="$ctl ${cgpath#/sys/fs/cgroup}=$(cat "$cgpath/cgroup.subtree_control")"
+            cgpath="${cgpath%/*}"
+        done
+        fail "mem: t2 cgroup has no memory controller (cg=${t2cg:-none}$ctl)"
     fi
     # idle CPU over 60s with the window open (plan: repeat under
     # --systrap-disable-fast-path is not wired through the launch path; the
@@ -377,8 +403,8 @@ sec_bridge() {
         sleep 0.4
     done
     r1=$(sed -n 's/^rchar: //p' "/proc/$bp/io" 2>/dev/null)
-    emit bridge_client_pss_start_mb $(( ${base:-0} / 1024 )) MB
-    emit bridge_client_pss_peak_mb $(( peak / 1024 )) MB
+    emit bridge_client_pss_start_mb "$(mb_kb "$base")" MB
+    emit bridge_client_pss_peak_mb "$(mb_kb "$peak")" MB
     emit bridge_rchar_delta_kb $(( (${r1:-0} - ${r0:-0}) / 1024 )) KB
     teardown_one "$FS"
 }
