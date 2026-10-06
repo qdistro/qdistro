@@ -40,11 +40,13 @@ qdistro_native_builder_key() {
     }
 
     image=$(qdistro_native_builder_base_image) || return $?
-    image_id=$(podman image inspect "$image" --format '{{.Id}}')
+    image_id=$(podman image inspect "$image" --format '{{.Id}}') || {
+        echo "ERROR: cannot inspect native base image $image" >&2; return 3;
+    }
 
     # Hash stable relative names: absolute worktree paths must not invalidate
     # a shared toolchain cache when the dependency recipe bytes are identical.
-    deps_sha=$(cd "$here" && sha256sum container-native-deps.sh Containerfile.native-builder | sha256sum | awk '{print $1}')
+    deps_sha=$(cd "$here" && sha256sum container-native-deps.sh Containerfile.native-builder | sha256sum | awk '{print $1}') || return $?
     printf '%s\n' "$image_id" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$deps_sha" | sha256sum | awk '{print $1}'
 }
 

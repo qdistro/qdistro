@@ -354,42 +354,45 @@ host_job_qdfileman() {
 # that lack the meson/-devel packages (ci/bin/qci-host-deps); pytest, npm and
 # lint rows still run natively — the image carries a toolchain, not the test
 # dependencies.
-_host_builder_image() {
-    [ -n "${_HOST_BUILDER_IMAGE:-}" ] || {
-        . "$QDISTRO_REPO/scripts/vm/lib/test-substrate.sh"
-        qdistro_load_test_substrate
-        . "$QDISTRO_REPO/scripts/vm/lib/podman-user-bus.sh"
-        qdistro_podman_user_bus
-        . "$QDISTRO_REPO/scripts/vm/lib/native-builder.sh"
-        _HOST_BUILDER_IMAGE=$(qdistro_ensure_native_builder_image) || return $?
-    }
-    printf '%s\n' "$_HOST_BUILDER_IMAGE"
-}
-
 host_build_cmd() {
     local dir=$1 inner=$2
     [ "${QCI_HOST_BUILD:-}" = podman ] || { printf '%s\n' "$inner"; return 0; }
-    local img lwp mounts=() envs=() v
-    img=$(_host_builder_image) || {
-        # Fail the row loudly with the loader's own error above, rather than
-        # silently falling back to a host toolchain that is not there.
-        printf 'exit 3\n'
-        return 0
-    }
-    lwp=${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}
-    mounts=("$WORKSPACE" "$lwp")
-    # Honour an explicit inert-relptr prefix outside the workspace too.
-    [ -n "${QDWIN_INERT_RELPTR_PREFIX:-}" ] && mounts+=("$QDWIN_INERT_RELPTR_PREFIX")
-    for v in "${!QDWIN_@}"; do envs+=(--env "$v=${!v}"); done
+    local mounts=() envs=() v p
+    mounts=("$WORKSPACE" "${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}")
+    for v in "${!QDWIN_@}"; do
+        envs+=(--env "$v=${!v}")
+        # Every absolute-path QDWIN_* override (LIBWESTON_BUILD_DIR, the
+        # vendored prefix, the cache dir, an inert-relptr prefix ...) must be
+        # mounted at the same path or the forwarded value points at nothing
+        # inside the container.
+        p=${!v}
+        case $p in
+            /*)
+                local dup=0 m2
+                for m2 in "${mounts[@]}"; do [ "$m2" = "$p" ] && { dup=1; break; }; done
+                [ "$dup" = 0 ] && mounts+=("$p");;
+        esac
+    done
     envs+=(--env "QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen}")
     envs+=(--env HOME=/tmp)
     # quickshell (qdshell jstest) hangs without a real XDG_RUNTIME_DIR.
     envs+=(--env XDG_RUNTIME_DIR=/tmp/qci-xrt)
-    local out="mkdir -p $(printf '%q ' "${mounts[@]}")&& podman run --rm --pull=never --userns=keep-id --workdir $(printf '%q' "$dir")"
+    # Provisioning runs INSIDE the row's executed command — under run_logged's
+    # timeout and log, and in the same shell as `podman run` so the repaired
+    # DBUS_SESSION_BUS_ADDRESS from qdistro_podman_user_bus reaches it. Any
+    # substrate/bus/builder failure exits 3 loudly; the row never falls back
+    # to a host toolchain that is not there.
+    local slib=$QDISTRO_REPO/scripts/vm/lib
+    local out="mkdir -p $(printf '%q ' "${mounts[@]}")&& "
+    out+=". $(printf '%q' "$slib/test-substrate.sh") && qdistro_load_test_substrate"
+    out+=" && . $(printf '%q' "$slib/podman-user-bus.sh") && qdistro_podman_user_bus"
+    out+=" && . $(printf '%q' "$slib/native-builder.sh")"
+    out+=" && _img=\$(qdistro_ensure_native_builder_image) || exit 3;"
+    out+=" podman run --rm --pull=never --userns=keep-id --workdir $(printf '%q' "$dir")"
     local m
     for m in "${mounts[@]}"; do out+=" --volume $(printf '%q' "$m"):$(printf '%q' "$m"):rw,z"; done
     for v in "${envs[@]}"; do out+=" $(printf '%q' "$v")"; done
-    out+=" $(printf '%q' "$img") bash -c $(printf '%q' "mkdir -p /tmp/qci-xrt && $inner")"
+    out+=" \"\$_img\" bash -c $(printf '%q' "mkdir -p /tmp/qci-xrt && $inner")"
     printf '%s\n' "$out"
 }
 
