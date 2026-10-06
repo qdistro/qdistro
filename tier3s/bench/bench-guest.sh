@@ -20,6 +20,7 @@ T3S_TAG=bench
 GS=benchgui          # GUI silo (weston-terminal) for cold/mem/cpu/teardown
 HS=benchhead         # headless silo (headless-smoke --hold)
 FS=benchflood        # foot silo for the waypipe bridge-load sample
+LS=benchlat          # foot silo (cursor blink off) for the latency probe
 BW=/var/tmp/t3s-bench
 IMGW=localhost/qdistro/tier3s-weston-terminal:latest
 IMGHEAD=localhost/qdistro/tier3s-headless-smoke:latest
@@ -490,14 +491,18 @@ sec_overhead() {
 
 # --- latency window modes (host run-bench.sh drives virsh send-key/screenshot)
 sec_latency_up() {
-    mk_silo "$GS" weston-terminal || return 1
-    set_rules "allow:qdistro.tier3s.spawn:weston-terminal/weston-terminal"
-    ensure_silo_image "$GS" weston-terminal || return 1
+    # foot with the cursor blink disabled running /bin/cat: the only
+    # in-window pixel change a send-key can produce is the tty echo of
+    # the typed character — an input-specific oracle
+    mk_silo "$LS" foot || return 1
+    set_rules "allow:qdistro.tier3s.spawn:foot/foot"
+    set_argv_json "$LS=[\"foot\",\"-o\",\"cursor.blink=no\",\"-e\",\"/bin/cat\"]"
+    ensure_silo_image "$LS" foot || return 1
     local tok
-    tok=$(up_gui_silo "$GS") || return 1
-    echo "LATENCY-WINDOW-UP token=$tok silo=$GS"
+    tok=$(up_gui_silo "$LS") || return 1
+    echo "LATENCY-WINDOW-UP token=$tok silo=$LS"
 }
-sec_latency_down() { sm StopSilo si "$GS" 10 > /dev/null 2>&1; }
+sec_latency_down() { sm StopSilo si "$LS" 10 > /dev/null 2>&1; }
 
 # teardown_one <silo>: time StopSilo -> scope down, then VERIFY it's down
 teardown_one() {
