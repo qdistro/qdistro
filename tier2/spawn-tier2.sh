@@ -889,6 +889,27 @@ if [ -n "$TIER2_SILO" ]; then
     # the admin-owned binding tree and emits the activation audit. Running it
     # as root would leave root-owned files in an admin-owned 0700 dir and
     # mis-attribute the audit.
+    # Restore coordination: template rollback (--restore-state) takes an
+    # exclusive flock on the directory that holds the binding's state_path
+    # ENTRY (the directory its swap renames in, not a symlink target's parent)
+    # and keeps it through the binding update. Discover that entry with a
+    # side-effect-free read, share-lock its directory on fd 6 for the
+    # launcher's lifetime, and only then make the authoritative --record read,
+    # so a rollback can never land between the binding read and the mount.
+    command -v flock >/dev/null 2>&1 || fail "flock not in PATH"
+    probe_state=""
+    probe_env="$(as_admin_run "${RESOLVER[@]}" "$TIER2_SILO" --launch-env 2>/dev/null)" \
+        && while IFS='=' read -r _k _v; do
+               [ "$_k" = STATE_PATH ] && probe_state="$_v"
+           done <<< "$probe_env"
+    if [ -n "$probe_state" ]; then
+        # Lexical (no symlink resolution), like the swap helper's abspath.
+        state_entry=$(realpath -s -m -- "$probe_state") && [ -n "$state_entry" ] \
+            || fail "cannot resolve state entry $probe_state"
+        state_parent=$(dirname -- "$state_entry")
+        exec 6<"$state_parent" || fail "cannot open state parent $state_parent"
+        flock -sn 6 || fail "state parent $state_parent is already in use by state restore"
+    fi
     launch_env="$(as_admin_run "${RESOLVER[@]}" "$TIER2_SILO" --record --launch-env)"
     resolve_rc=$?
     case "$resolve_rc" in
@@ -912,6 +933,10 @@ if [ -n "$TIER2_SILO" ]; then
             # spawn-tier2 only verifies.
             [ -n "$STATE_PATH" ] \
                 || fail "resolver returned no STATE_PATH for templated silo $TIER2_SILO"
+            # fd 6 guards the entry discovered above; a binding that moved in
+            # between (concurrent promote) is not covered by it.
+            [ "$STATE_PATH" = "$probe_state" ] \
+                || fail "binding for silo $TIER2_SILO changed during launch (state $probe_state -> $STATE_PATH); retry"
             [ -d "$STATE_PATH" ] \
                 || fail "state_path $STATE_PATH for silo $TIER2_SILO is missing or not a directory — refusing to launch a templated silo without its state"
             echo "spawn-tier2: silo $TIER2_SILO resolved to generation $IMAGE (state=$STATE_PATH)" >&2 ;;
@@ -1012,13 +1037,7 @@ fi
 # Kernel locks disappear when their last holder dies, so no stale lock files.
 command -v flock >/dev/null 2>&1 || fail "flock not in PATH"
 if [ -n "$STATE_PATH" ]; then
-    # Shared with other launches, exclusive in template rollback. The parent
-    # survives a restore swap and is never exposed as the container home.
-    # Take it before resolving/opening the mount source; retain it for life.
-    state_resolved=$(readlink -m -- "$STATE_PATH") || fail "cannot resolve state parent"
-    state_parent=$(dirname -- "$state_resolved")
-    exec 6<"$state_parent" || fail "cannot open state parent $state_parent"
-    flock -sn 6 || fail "state parent $state_parent is already in use by state restore"
+    # fd 6 (restore coordination) is already held; see the resolver call.
     STATE_PATH=$(readlink -e -- "$STATE_PATH") || fail "cannot resolve state path"
     exec 9<"$STATE_PATH" || fail "cannot open state directory $STATE_PATH"
     flock -n 9 || fail "state path $STATE_PATH is already in use by another tier-2 launcher"

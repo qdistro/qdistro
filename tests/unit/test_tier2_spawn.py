@@ -43,6 +43,7 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "od",
         "python3",
         "readlink",
+        "realpath",
         "rm",
         "rmdir",
         "setsid",
@@ -1140,7 +1141,9 @@ def locked_launches(tmp_path):
     sock.bind(str(runtime / "wayland-1"))
     sock.listen(1)
     resolver = bindir / "qdistro-resolve-binding"
-    resolver.write_text('#!/bin/sh\nprintf "GENERATION=sha256:%064d\\nSTATE_PATH=%s\\n" 0 "$FAKE_STATE"\n')
+    # The launcher reads the binding twice: a side-effect-free discovery read,
+    # then the authoritative `--record` read under the restore lock.
+    resolver.write_text('#!/usr/bin/python3\nimport os, pathlib, sys, time\nstate = os.environ["FAKE_STATE"]\nif "--record" in sys.argv:\n    base = pathlib.Path(os.environ["FAKE_BASE"])\n    name = os.environ["FAKE_NAME"]\n    if os.environ.get("FAKE_PAUSE_RESOLVE"):\n        (base / (name + ".resolving")).touch()\n        while not (base / (name + ".resume")).exists(): time.sleep(.01)\n    state = os.environ.get("FAKE_STATE_RECORD", state)\nprint("GENERATION=sha256:" + "0" * 64)\nprint("STATE_PATH=" + state)\n')
     resolver.chmod(0o755)
     podman = bindir / "podman"
     podman.write_text('''#!/usr/bin/python3
@@ -1379,7 +1382,10 @@ fi
     pm = source[source.index('if [ "$ROOT_LAUNCHER" = 1 ]; then\n    pm()'):source.index('# as_admin_run:')]
     lock = source[source.index('# A private :Z home'):source.index('# --- per-container runtime dir + cleanup trap')]
     proc = subprocess.run(
-        ["bash", "-c", 'fail() { echo "$*" >&2; exit 2; }; ROOT_LAUNCHER=1; ADMIN_USER=admin; _root_admin_uid=1000\n' + pm + lock],
+        # fd 6 (restore coordination) is taken before the binding read in the
+        # launcher; take it the same way here so its lifetime is still checked.
+        ["bash", "-c", 'fail() { echo "$*" >&2; exit 2; }; ROOT_LAUNCHER=1; ADMIN_USER=admin; _root_admin_uid=1000\n'
+         'exec 6<"$(dirname -- "$STATE_PATH")"; flock -sn 6 || fail parent\n' + pm + lock],
         env={**os.environ, "PATH": f"{bindir}:/usr/bin:/bin", "STATE_PATH": str(state),
              "CALLS": str(tmp_path / "calls")}, capture_output=True, text=True, timeout=5)
     assert proc.returncode == 2 and "in use by a container" in proc.stderr, proc.stderr
@@ -1496,3 +1502,101 @@ def test_final_inode_check_without_inherited_home_fd(tmp_path, replace):
         assert ("registered" in result.stdout) is (not replace), result.stdout
     finally:
         os.close(fd)
+
+
+def _promote_layout(tmp_path, monkeypatch, state_path):
+    import qdistro_templates as qt
+    layout = qt.Layout(var=str(tmp_path / "var"), etc=str(tmp_path / "etc"))
+    binding = Path(layout.binding_file("work"))
+    binding.parent.mkdir(parents=True, exist_ok=True)
+    binding.touch()
+    monkeypatch.setattr(qt, "read_binding", lambda _: {"state_path": str(state_path)})
+    return layout
+
+
+def _symlinked_entry(tmp_path):
+    # Binding state_path is a final-component symlink into ANOTHER parent.
+    silo_dir = tmp_path / "silos" / "work"
+    storage = tmp_path / "storage" / "work-home"
+    silo_dir.mkdir(parents=True)
+    storage.mkdir(parents=True)
+    entry = silo_dir / "state"
+    entry.symlink_to(storage, target_is_directory=True)
+    return entry
+
+
+def test_restore_refuses_while_launch_makes_authoritative_binding_read(
+        locked_launches, tmp_path, monkeypatch):
+    # The launcher holds the restore lock across its --record binding read:
+    # a rollback cannot land between that read and the mount.
+    import qdistro_template_promote as promote
+
+    launch, state, _ = locked_launches
+    first = launch("first", FAKE_PAUSE_RESOLVE="1")
+    _await_file(tmp_path / "first.resolving")
+    layout = _promote_layout(tmp_path, monkeypatch, state)
+    swaps = []
+    monkeypatch.setattr(promote, "_do_rollback", lambda *a, **kw: swaps.append(True) or 0)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) != 0
+    assert swaps == [], "restore swapped state while a launch held its binding read"
+    (tmp_path / "first.resume").touch()
+    assert first.wait(timeout=5) == 0, (tmp_path / "first.err").read_text()
+
+
+def test_launch_refuses_binding_that_moved_after_discovery(locked_launches, tmp_path):
+    launch, _, _ = locked_launches
+    other = tmp_path / "moved"
+    other.mkdir()
+    proc = launch("moved", FAKE_STATE_RECORD=str(other))
+    assert proc.wait(timeout=5) == 2
+    assert "changed during launch" in (tmp_path / "moved.err").read_text()
+    assert not (tmp_path / "moved.ready").exists()
+
+
+def test_symlinked_state_entry_restore_excludes_launch_through_binding_update(
+        locked_launches, tmp_path, monkeypatch):
+    # The swap helper replaces the entry (it does not follow the link), so the
+    # restore lock must be on the entry's directory, the one launches lock.
+    import qdistro_snap_swap as snap_swap
+    import qdistro_template_promote as promote
+
+    launch, _, _ = locked_launches
+    entry = _symlinked_entry(tmp_path)
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+    (snapshot / "restored").write_text("A")
+    layout = _promote_layout(tmp_path, monkeypatch, entry)
+    seen = {}
+
+    def rollback_with_real_swap(*_a, **_kw):
+        snap_swap.restore(str(snapshot), str(entry), mechanism="copy")
+        assert entry.is_dir() and not entry.is_symlink()
+        # After the exchange, before the binding update: a launch on the
+        # restored entry must still be excluded.
+        proc = launch("during", home=entry)
+        seen["rc"] = proc.wait(timeout=5)
+        seen["err"] = (tmp_path / "during.err").read_text()
+        return 0
+
+    monkeypatch.setattr(promote, "_do_rollback", rollback_with_real_swap)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) == 0
+    assert seen["rc"] == 2 and "in use by state restore" in seen["err"], seen
+    assert not (tmp_path / "during.ready").exists()
+    after = launch("after", home=entry)
+    assert after.wait(timeout=5) == 0, (tmp_path / "after.err").read_text()
+
+
+def test_symlinked_state_entry_launch_blocks_restore(locked_launches, tmp_path, monkeypatch):
+    import qdistro_template_promote as promote
+
+    launch, _, _ = locked_launches
+    entry = _symlinked_entry(tmp_path)
+    first = launch("first", home=entry, hold=True)
+    _await_file(tmp_path / "first.ready")
+    layout = _promote_layout(tmp_path, monkeypatch, entry)
+    swaps = []
+    monkeypatch.setattr(promote, "_do_rollback", lambda *a, **kw: swaps.append(True) or 0)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) != 0
+    assert swaps == [], "restore locked the symlink target's parent, not the entry's"
+    (tmp_path / "first.release").touch()
+    assert first.wait(timeout=5) == 0
