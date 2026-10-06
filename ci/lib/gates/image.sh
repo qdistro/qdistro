@@ -393,6 +393,17 @@ gate_image() {
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh and rerun without --root"
         # install-test is inert while installiso=false: no row (not blocked,
         # not skip). A blocked/skip row here is fatal under QCI_RELEASE=1.
+        # Without --root (an explicit static-only developer choice, like
+        # --no-boot) the gate exists to judge a built artifact: no artifact,
+        # or one built from another tree, is not a pass. Exit with the build
+        # class (the same class the blocked verify-contents row carries), so
+        # a standalone `qci image` (or `qci full`) after a teardown-only
+        # build-in-vm.sh is not green. QCI_SKIP_IMAGE=1 is the recorded way
+        # to omit the gate.
+        if [ -z "$root" ] && [ "$rc" -eq 0 ] && { [ -z "$raw" ] || [ -n "$source_block" ]; }; then
+            log "image: no boot verdict (no artifact built from this tree under $build_dir); gate is blocked, not passed"
+            rc=$EXIT_BUILD
+        fi
         return "$rc"
     fi
     local have_virsh=0
@@ -401,6 +412,8 @@ gate_image() {
     if [ "$have_virsh" = 0 ]; then
         local why="needs VM: libvirt session unavailable;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
+        # An artifact that could not be booted has no boot verdict either.
+        [ "$rc" -eq 0 ] && rc=$EXIT_VM_PROVISION
         return "$rc"
     fi
 

@@ -326,3 +326,22 @@ EOF
     [ "$(field 3)" = fail ]
     ! grep -q "image_source_relation" "$T"/runs/*/manifest.txt
 }
+
+@test "image gate: no published artifact and no extracted tree is BLOCKED and exits 20 (build), never pass" {
+    rm -rf "$BUILD/extracted"
+    run "$REPO/ci/bin/qci" image
+    echo "$output" >&2
+    [ "$status" -eq 20 ]
+    [ "$(awk -F'\t' '$1=="image" && $2=="verify-contents" {print $3"/"$5}' "$T"/runs/*/results.tsv)" = blocked/build ]
+    [ "$(awk -F'\t' '$1=="image" && $2=="verify.sh" {print $3}' "$T"/runs/*/results.tsv)" = blocked ]
+    [ "$(cat "$T"/runs/*/exit-code.txt)" = 20 ]
+    [[ "$output" == *"exit=20 class=build"* ]]
+    [[ "$output" != *"class=pass"* ]]
+}
+
+@test "image gate: a non-ancestor bundle without --no-boot is BLOCKED and exits 20, not pass" {
+    stamp "SOURCE qdistro $SIDE clean"
+    run "$REPO/ci/bin/qci" image
+    [ "$status" -eq 20 ]
+    [[ "$output" != *"class=pass"* ]]
+}
