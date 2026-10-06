@@ -20,6 +20,8 @@
 set -u
 T3S_TAG=s124
 . "$(dirname "$0")/tier3s-guest-lib.sh"
+# wait_for runs some checks in a child `bash -c`; it needs comp_log.
+export -f comp_log
 SW=s124w; SF=s124f
 ACT_W="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 ACT_F="qdistro.tier3s.spawn:foot/foot"

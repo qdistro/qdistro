@@ -72,7 +72,11 @@ is "manager-stop: systemctl stop $MGR rc" "$rc" 0
 is "manager-stop: manager inactive" "$(unit_state "$MGR")" inactive
 for s in $SA $SB; do
     u=$(unit_of "$s"); t=$TA; [ "$s" = "$SB" ] && t=$TB
-    is "manager-stop: $u stopped through the verified cleanup" "$(unit_log "$u" "$cur" | grep -c "qdistro-tier3s-cleanup: $t: torn down")" 1
+    # The token names this launch, so match it across the journal: a short-
+    # lived ExecStopPost child can be logged without _SYSTEMD_UNIT, and the
+    # line can trail the stop under load.
+    wait_for 10 bash -c "journalctl --no-pager -o cat --after-cursor=\"\$1\" | grep -q 'qdistro-tier3s-cleanup: $t: torn down'" _ "$cur"
+    is "manager-stop: $u stopped through the verified cleanup" "$(journalctl --no-pager -o cat --after-cursor="$cur" | grep -c "qdistro-tier3s-cleanup: $t: torn down")" 1
     is "manager-stop: $u stopped before the manager (After= order)" \
         "$([ "$(systemctl show -p InactiveEnterTimestampMonotonic --value "$u")" -le "$(systemctl show -p InactiveEnterTimestampMonotonic --value "$MGR")" ] && echo yes || echo no)" yes
     assert_launch_gone "manager-stop/$s" "$t" "$s"

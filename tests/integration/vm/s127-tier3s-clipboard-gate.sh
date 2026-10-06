@@ -366,7 +366,10 @@ wait_for 30 bash -c "comp_log \"\$1\" | grep -q 'seat_focus_changed seat=default
 # attested the relayed pid — an allow here is earned, never a default.
 wait_for 30 bash -c "qdshell_log \"\$1\" | grep -q 'CLIPBOARD_GATE .*src_silo=$SC .*verdict=allow'" _ "$J0" \
     || fail "bound tagged source never reached a live attested allow"
-line=$(clip_gate_line "$SC"); info "gate: $line"
+# Assert on the allow the wait saw, not the newest line: the source keeps
+# re-offering every 400 ms and a later offer can still hit a transient
+# broker-unavailable deny (busctl --timeout=200ms under load).
+line=$(qdshell_log "$J0" | grep "CLIPBOARD_GATE .*src_silo=$SC .*verdict=allow" | head -1); info "gate: $line"
 is "live attested allow: bound tagged source -> same-silo (verify + record resolution)" \
     "$(printf '%s' "$line" | grep -c 'verdict=allow')" 1
 is "cold-verify bound offers denied first (the allow was earned)" \
