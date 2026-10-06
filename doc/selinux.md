@@ -305,13 +305,13 @@ Bootstrap and native-stage policy installation now include `qdistro_tier2`
 before presentation. Loading it is no longer a no-op. The narrower
 `qdistro_tier2_t` process type still needs explicit launcher wiring, bounded
 transport permissions, and its own enforcing workload/AVC validation.
-Live validation passed at `f30a319ff` in
-`ci/runs/bats-20261005T203006Z-1808035`: `presentation-enforcing.bats` 6/6,
-`presentation-live.bats` 2/2, and `tier2-silo-secctx-wiretag.bats` 2/2.
-This includes inner-Weston readiness, Qfileman liveness after checks, distinct
-concurrent MCS labels, unchanged shared host labels, and a writable
-binding-resolved silo through the production launcher. Subsequent launcher
-locking changes require a fresh live regression run.
+Live validation passed at `cddd1c2c2` (including the locking below) in
+`ci/runs/bats-20261006T084046Z-1636059`: `presentation-enforcing.bats` 6/6,
+plus `presentation-live.bats`, `templates-promotion.bats`,
+`templates-state-snapshot.bats`, `tier2-silo-secctx-wiretag.bats` and
+`tiered-isolation.bats`. This includes inner-Weston readiness, Qfileman
+liveness after checks, distinct concurrent MCS labels, unchanged shared host
+labels, and a writable binding-resolved silo through the production launcher.
 
 The launcher holds an exclusive `flock` on the resolved persistent state
 directory inode for the container lifetime (including supervised test detach).
@@ -329,16 +329,21 @@ size. Host file managers, backup processes, and other domains without access
 to that type/range may lose access; stopping the container does not restore
 the previous labels. Do not relabel an active home from the host.
 
-Launchers also hold a shared `flock` on the canonical home's parent directory
-before resolving/opening the home and through teardown. Rollback with
-`--restore-state` requires an exclusive nonblocking lock on that same parent
-through the state swap and binding update, refusing while a launch holds it.
-The parent survives state replacement; read-only directory descriptors work
-for both root and admin without lock-file ownership or stale-file cleanup.
-Homes sharing a parent can launch concurrently, but restoring any one requires
-all such launches to stop. Immediately before Podman runs, the wrapper compares
-the source path's device/inode with the identity captured from locked fd 9;
-a replaced path fails closed even if a writer bypassed the lock protocol.
+Launchers also hold a shared `flock` on the directory that holds the
+binding's `state_path` entry (lexically, not a symlink target's parent: the
+restore swap replaces that entry). They discover the entry with a
+side-effect-free binding read, take the lock, then make the authoritative
+`--record` binding read under it, refusing if the state path moved in between;
+the lock is held through teardown. Rollback with `--restore-state` requires an
+exclusive nonblocking lock on that same directory through the state swap and
+binding update, refusing while a launch holds it. The directory survives state
+replacement; read-only directory descriptors work for both root and admin
+without lock-file ownership or stale-file cleanup. Homes sharing that directory
+can launch concurrently, but restoring any one requires all such launches to
+stop. Immediately before Podman runs, the wrapper compares the source path's
+device/inode with the identity captured from locked fd 9, so a path replaced
+before that check fails closed. This is not atomic against a writer that
+bypasses the lock protocol and replaces the path after the check.
 
 Per-container runtime directories also carry lifetime inode locks. A short
 lock on the admin runtime directory serializes creation/lock acquisition
