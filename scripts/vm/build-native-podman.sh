@@ -10,21 +10,7 @@ qdistro_load_test_substrate
 # Rootless Podman needs the user bus the GUI gate dead-ends for its agents.
 . "$here/lib/podman-user-bus.sh"
 qdistro_podman_user_bus
-
-command -v podman >/dev/null || { echo 'ERROR: rootless Podman is required' >&2; exit 2; }
-[ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ] || {
-    echo 'ERROR: Podman must run rootless' >&2; exit 2;
-}
-# The base is the container build of the pinned snapshot, so the in-container
-# alignment to the snapshot repos is a no-op instead of a rolling delta.
-image=${QCI_PODMAN_IMAGE:-registry.opensuse.org/opensuse/tumbleweed:$QDISTRO_SUBSTRATE_SNAPSHOT}
-if ! podman image exists "$image"; then
-    case "${QCI_OFFLINE:-0}" in
-        1|true|yes|on) echo "ERROR: native base image $image is missing (QCI_OFFLINE=1)" >&2; exit 3 ;;
-    esac
-    podman pull "$image" >&2
-fi
-image_id=$(podman image inspect "$image" --format '{{.Id}}')
+. "$here/lib/native-builder.sh"
 
 cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/native-podman/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH
 mkdir -p "$cache"
@@ -44,10 +30,7 @@ tar -C "$repo" --mtime=@0 --owner=0 --group=0 --numeric-owner \
     --no-recursion --null -T "$work/source-files.list" -cf "$work/source.tar"
 source_sha=$(sha256sum "$work/source.tar" | awk '{print $1}')
 builder_sha=$(sha256sum "$here/build-native-podman.sh" | awk '{print $1}')
-# Hash stable relative names: absolute worktree paths must not invalidate a
-# shared toolchain cache when the dependency recipe bytes are identical.
-deps_sha=$(cd "$here" && sha256sum container-native-deps.sh Containerfile.native-builder | sha256sum | awk '{print $1}')
-builder_key=$(printf '%s\n' "$image_id" "$QDISTRO_SUBSTRATE_SNAPSHOT" "$deps_sha" | sha256sum | awk '{print $1}')
+builder_key=$(qdistro_native_builder_key)
 builder_image="localhost/qdistro/native-builder:$builder_key"
 key=$(printf '%s\n' "$source_sha" "$builder_sha" "$builder_key" \
     "${QDWIN_EXTRA_MESON_OPTS:-}" | sha256sum | awk '{print $1}')
@@ -62,30 +45,7 @@ if [ -s "$archive" ] && [ -s "$receipt" ] \
     exit 0
 fi
 
-rpm_cache=${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}/podman-rpm/$QDISTRO_SUBSTRATE_SNAPSHOT/$QDISTRO_SUBSTRATE_ARCH/packages
-mkdir -p "$rpm_cache"
-if ! podman image exists "$builder_image"; then
-    case "${QCI_OFFLINE:-0}" in
-        1|true|yes|on)
-            echo "ERROR: no cached native builder image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT (QCI_OFFLINE=1)" >&2
-            exit 3
-            ;;
-    esac
-    mkdir -p "$work/builder-context"
-    cp "$here/container-native-deps.sh" "$here/Containerfile.native-builder" "$work/builder-context/"
-    echo "[native-podman] building toolchain image for snapshot $QDISTRO_SUBSTRATE_SNAPSHOT" >&2
-    podman build --pull=never --layers \
-        --volume "$rpm_cache:/var/cache/zypp/packages:rw,Z" \
-        --build-arg "BASE_IMAGE=$image" \
-        --build-arg "SNAPSHOT=$QDISTRO_SUBSTRATE_SNAPSHOT" \
-        --file "$work/builder-context/Containerfile.native-builder" \
-        --tag "$builder_image" "$work/builder-context" >&2
-else
-    echo "[native-podman] toolchain image cache hit $builder_image" >&2
-fi
-[ "$(podman image inspect "$builder_image" --format '{{index .Labels "org.qdistro.test-snapshot"}}')" = "$QDISTRO_SUBSTRATE_SNAPSHOT" ] || {
-    echo 'ERROR: native builder image snapshot mismatch' >&2; exit 3;
-}
+builder_image=$(qdistro_ensure_native_builder_image)
 
 mkdir -p "$work/src" "$work/out/stage"
 tar -C "$work/src" -xf "$work/source.tar"

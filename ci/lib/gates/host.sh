@@ -345,6 +345,57 @@ host_job_qdfileman() {
     run_logged "$gate" qdfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdfileman" "$(host_pytest_cmd all)"         "${2:-}"
 }
 
+# QCI_HOST_BUILD=podman: run the native build rows below inside the rootless
+# native-builder toolchain image — the same image the GitHub workflow builds
+# via scripts/vm/build-native-podman.sh — instead of the host toolchain. The
+# workspace and the vendored-libweston prefix are bind-mounted at their real
+# absolute paths, so commands, build dirs and PKG_CONFIG_PATH expansions are
+# byte-identical on both sides of the container boundary. Use it on hosts
+# that lack the meson/-devel packages (ci/bin/qci-host-deps); pytest, npm and
+# lint rows still run natively — the image carries a toolchain, not the test
+# dependencies.
+host_build_cmd() {
+    local dir=$1 inner=$2
+    [ "${QCI_HOST_BUILD:-}" = podman ] || { printf '%s\n' "$inner"; return 0; }
+    local mounts=() envs=() v p
+    mounts=("$WORKSPACE" "${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}")
+    for v in "${!QDWIN_@}"; do
+        envs+=(--env "$v=${!v}")
+        # Every absolute-path QDWIN_* override (LIBWESTON_BUILD_DIR, the
+        # vendored prefix, the cache dir, an inert-relptr prefix ...) must be
+        # mounted at the same path or the forwarded value points at nothing
+        # inside the container.
+        p=${!v}
+        case $p in
+            /*)
+                local dup=0 m2
+                for m2 in "${mounts[@]}"; do [ "$m2" = "$p" ] && { dup=1; break; }; done
+                [ "$dup" = 0 ] && mounts+=("$p");;
+        esac
+    done
+    envs+=(--env "QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen}")
+    envs+=(--env HOME=/tmp)
+    # quickshell (qdshell jstest) hangs without a real XDG_RUNTIME_DIR.
+    envs+=(--env XDG_RUNTIME_DIR=/tmp/qci-xrt)
+    # Provisioning runs INSIDE the row's executed command — under run_logged's
+    # timeout and log, and in the same shell as `podman run` so the repaired
+    # DBUS_SESSION_BUS_ADDRESS from qdistro_podman_user_bus reaches it. Any
+    # substrate/bus/builder failure exits 3 loudly; the row never falls back
+    # to a host toolchain that is not there.
+    local slib=$QDISTRO_REPO/scripts/vm/lib
+    local out="mkdir -p $(printf '%q ' "${mounts[@]}")&& "
+    out+=". $(printf '%q' "$slib/test-substrate.sh") && qdistro_load_test_substrate"
+    out+=" && . $(printf '%q' "$slib/podman-user-bus.sh") && qdistro_podman_user_bus"
+    out+=" && . $(printf '%q' "$slib/native-builder.sh")"
+    out+=" && _img=\$(qdistro_ensure_native_builder_image) || exit 3;"
+    out+=" podman run --rm --pull=never --userns=keep-id --workdir $(printf '%q' "$dir")"
+    local m
+    for m in "${mounts[@]}"; do out+=" --volume $(printf '%q' "$m"):$(printf '%q' "$m"):rw,z"; done
+    for v in "${envs[@]}"; do out+=" $(printf '%q' "$v")"; done
+    out+=" \"\$_img\" bash -c $(printf '%q' "mkdir -p /tmp/qci-xrt && $inner")"
+    printf '%s\n' "$out"
+}
+
 gate_host() {
     qci_assert_run_dir || return $?
     qci_assert_repo host || return $?
@@ -529,7 +580,7 @@ fi'
     # independent packaging check. This gate builds that prefix (on demand,
     # cached under QDWIN_LIBWESTON_PREFIX), so qdwin-meson below can configure
     # against it.
-    c="bash libweston-vendored/run-production-symbols-test.sh"
+    c=$(host_build_cmd "$WORKSPACE/qdwin" "bash libweston-vendored/run-production-symbols-test.sh")
     run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -537,7 +588,7 @@ fi'
     # wl_pointer must not SIGSEGV the compositor — the qdwin per-stream-seat
     # crash of gui/22 S2. Headless; builds its own libweston from the current
     # sources (the production prefix above is reused across checkouts).
-    c="bash libweston-vendored/run-inert-relptr-test.sh"
+    c=$(host_build_cmd "$WORKSPACE/qdwin" "bash libweston-vendored/run-inert-relptr-test.sh")
     run_logged host qdwin-vendored-libweston-inert-relptr "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston survives get_relative_pointer on an inert wl_pointer"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -546,7 +597,7 @@ fi'
     # prefix is absent; on that path we deliberately leave PKG_CONFIG_PATH
     # alone so meson.build's own error explains what to build, rather than
     # exporting a bogus entry.
-    c="_lwpc=\$(bash libweston-vendored/pkgconfig-dir.sh) || _lwpc=; export PKG_CONFIG_PATH=\"\${_lwpc:+\$_lwpc:}\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs"
+    c=$(host_build_cmd "$WORKSPACE/qdwin" "_lwpc=\$(bash libweston-vendored/pkgconfig-dir.sh) || _lwpc=; export PKG_CONFIG_PATH=\"\${_lwpc:+\$_lwpc:}\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs")
     run_logged host qdwin-meson "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "qdwin build and meson tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -554,7 +605,7 @@ fi'
     run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    c="export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"
+    c=$(host_build_cmd "$WORKSPACE/qdshell" "export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int")
     run_logged host qdshell-local "$EXIT_HOST" qml "$WORKSPACE/qdshell" "$c" "qdshell build, qmltest, jstest (node), lint, format check"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
