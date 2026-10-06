@@ -332,7 +332,10 @@ is "live rule-driven allow: cross-silo $SA -> $SB (source-peer relay)" \
 kill_clip_src "$XSRC_PID"; CLIP_SRC_PID=""
 
 step "4b. live attested allow: bound tagged source -> same-silo"
-AUDIT_MARK_4B=$(sqlite3 "$AUDIT_DB" "SELECT coalesce(max(id),0) FROM audit;" 2>/dev/null)
+AUDIT_MARK_4B=$(sqlite3 "$AUDIT_DB" "SELECT coalesce(max(id),0) FROM audit;")
+case "$AUDIT_MARK_4B" in
+    ""|*[!0-9]*) fail "audit mark for step 4b unreadable (${AUDIT_MARK_4B:-empty})"; AUDIT_MARK_4B="" ;;
+esac
 # Same-silo is the other live allow shape: a tagged clip source that owns
 # a real xdg_toplevel in its own silo s127c, focused, registered,
 # verified — the exact trust shape a tier3s bridge takes when its own
@@ -380,7 +383,7 @@ is "live attested allow: bound tagged source -> same-silo (verify + record resol
 # cold-cache deny comes first depends on whether step 4a already verified
 # the identity, so it is not asserted.
 is "same-silo allow is broker-verified (identity + launch-record lineage audit row)" \
-    "$(sqlite3 "$AUDIT_DB" "SELECT count(*) FROM audit WHERE id > ${AUDIT_MARK_4B:-0} AND action='qdistro.clipboard.transfer:$SC:$SC' AND decision=1 AND source LIKE 'clipboard_same_silo_verified lineage=%';" 2>/dev/null | awk '{print ($1>=1)?"yes":"no"}')" yes
+    "$([ -n "$AUDIT_MARK_4B" ] && sqlite3 "$AUDIT_DB" "SELECT count(*) FROM audit WHERE id > $AUDIT_MARK_4B AND action='qdistro.clipboard.transfer:$SC:$SC' AND decision=1 AND source LIKE 'clipboard_same_silo_verified lineage=%';" 2>/dev/null | awk '{print ($1>=1)?"yes":"no"}')" yes
 is "live allow carries dst_silo=$SC (bound => focused => same-silo)" \
     "$(printf '%s' "$line" | grep -c "dst_silo=$SC")" 1
 kill_clip_src "$CLIP_SRC_PID"; CLIP_SRC_PID=""
