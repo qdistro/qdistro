@@ -7,8 +7,12 @@
 # which can land seconds after boot, in the middle of a probe. `hold` waits
 # until admin's user manager has no queued start jobs (so nothing starts the
 # shell again later), then stops qdshell.service; stopping the unit also
-# kills an in-flight qdistro-presentation-publish. `release` starts the shell
-# again if hold stopped a running or starting one.
+# kills an in-flight qdistro-presentation-publish. Hold records the unit's
+# last activation; `release` fails if the shell was activated again while
+# the probe ran (a compositor or session-target restart re-pulls it through
+# PartOf=), then starts the shell again if hold stopped a running one. The
+# presentation bats lanes run a baked desktop session, so a missing shell
+# unit is a failure, not an empty hold.
 #
 #   shell-publisher.sh hold      exit 0 = no other writer; nonzero = refuse to run
 #   shell-publisher.sh release
@@ -30,8 +34,8 @@ hold() {
     local deadline jobs state
     rm -f "$MARK"
     if ! installed; then
-        echo "shell-publisher: no session shell installed; nothing to hold"
-        return 0
+        echo "shell-publisher: $UNIT is not installed for admin; the session shell is missing" >&2
+        return 1
     fi
     deadline=$((SECONDS + 120))
     while :; do
@@ -43,11 +47,13 @@ hold() {
         }
         sleep 1
     done
+    local restart=no entered
     state=$(uctl show -p ActiveState --value "$UNIT" 2>/dev/null)
     case "$state" in
-        inactive|failed) : >"$MARK" ;;
-        *) echo restart >"$MARK" ;;
+        inactive|failed) ;;
+        *) restart=yes ;;
     esac
+    printf 'restart=%s\nentered=\n' "$restart" >"$MARK"
     uctl stop "$UNIT" || { echo "shell-publisher: stopping $UNIT failed" >&2; return 1; }
     state=$(uctl show -p ActiveState --value "$UNIT" 2>/dev/null)
     case "$state" in
@@ -58,17 +64,32 @@ hold() {
         echo "shell-publisher: a presentation publisher is still running" >&2
         return 1
     fi
-    echo "shell-publisher: held ($UNIT was ${state:-unknown} after stop; restart=$(cat "$MARK" 2>/dev/null))"
+    entered=$(uctl show -p ActiveEnterTimestampMonotonic --value "$UNIT" 2>/dev/null)
+    [ -n "$entered" ] || { echo "shell-publisher: cannot read $UNIT activation time" >&2; return 1; }
+    printf 'restart=%s\nentered=%s\n' "$restart" "$entered" >"$MARK"
+    echo "shell-publisher: held ($UNIT $state after stop; was running: $restart)"
 }
 
 release() {
+    local restart entered now state rc=0
     [ -f "$MARK" ] || return 0
-    if grep -qx restart "$MARK"; then
-        rm -f "$MARK"
-        uctl start "$UNIT" || { echo "shell-publisher: restarting $UNIT failed" >&2; return 1; }
-    else
-        rm -f "$MARK"
+    restart=$(sed -n 's/^restart=//p' "$MARK")
+    entered=$(sed -n 's/^entered=//p' "$MARK")
+    rm -f "$MARK"
+    if [ -n "$entered" ]; then
+        state=$(uctl show -p ActiveState --value "$UNIT" 2>/dev/null)
+        now=$(uctl show -p ActiveEnterTimestampMonotonic --value "$UNIT" 2>/dev/null)
+        if [ "$now" != "$entered" ] || { [ "$state" != inactive ] && [ "$state" != failed ]; }; then
+            echo "shell-publisher: $UNIT was activated while held (state $state, activation $entered -> $now); the probe was not the only writer" >&2
+            rc=1
+        else
+            echo "shell-publisher: $UNIT stayed stopped for the whole probe"
+        fi
     fi
+    if [ "$restart" = yes ]; then
+        uctl start "$UNIT" || { echo "shell-publisher: restarting $UNIT failed" >&2; rc=1; }
+    fi
+    return "$rc"
 }
 
 case "${1:-}" in
