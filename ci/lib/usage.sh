@@ -51,8 +51,9 @@ Notes:
               skip+warn; any failure => EXIT_BATS (35).
   qci image   Static image-content checklist (image/verify-contents.sh) first,
               then boot-verify (image/verify.sh --stick) of the published
-              bundle/*.raw.xz. Boot is recorded as blocked when no built
-              image is present. install-test.sh is inert while
+              bundle/*.raw.xz. With no built image (or one built from
+              another tree) boot is recorded as blocked and the gate exits
+              20 (build), never pass. install-test.sh is inert while
               installiso=false (no row; not a skip). --root inspects an
               extracted tree instead of the built artifact; --no-boot runs
               only the static checklist. Part of `qci full` (todo/iso/14 F).

@@ -70,6 +70,9 @@ vitest tags), and the per-suite relabel action items.
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
 
+A default developer `qci full` now needs a built image (`image/build-in-vm.sh`):
+with no artifact, or one built from another tree, the image gate exits 20
+(`build`) unless `QCI_SKIP_IMAGE=1` is set.
 For a developer full run, `QCI_SKIP_IMAGE=1 ci/bin/qci full` omits the image
 gate and records an explicit skip row. The report Summary names the selected
 published artifact and its `.sha256` sidecar digest (or `none`), without
