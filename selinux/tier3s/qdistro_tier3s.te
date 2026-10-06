@@ -134,7 +134,7 @@ require {
 	class filesystem { mount unmount remount getattr };
 	class unix_stream_socket connectto;
 	class user_namespace create;
-	class cap_userns { chown dac_override dac_read_search setfcap setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
+	class cap_userns { chown dac_override dac_read_search kill setfcap setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
 	class capability sys_module;
 	class anon_inode create;
 	# classes named only by neverallow pins
@@ -206,7 +206,9 @@ allow qdistro_tier3s_t self:unix_stream_socket connectto;
 # Own state: runsc root + per-launch token dir
 #
 allow qdistro_tier3s_t qdistro_tier3s_var_run_t:dir { add_name getattr open read remove_name search write create setattr };
-allow qdistro_tier3s_t qdistro_tier3s_var_run_t:file { create getattr lock open read unlink write setattr };
+# mounton: runsc bind-mounts files it created in the state root (the
+# null-netns target is how network=none is realised).
+allow qdistro_tier3s_t qdistro_tier3s_var_run_t:file { create getattr lock mounton open read unlink write setattr };
 allow qdistro_tier3s_t qdistro_tier3s_var_run_t:lnk_file { create read getattr };
 # link.sock: the sentry stats/opens it (host-uds validation) and the
 # gofer writes it for connect(); also covers runsc's own control .sock.
@@ -252,10 +254,15 @@ allow qdistro_tier3s_t tmpfs_t:sock_file { create getattr unlink };
 allow qdistro_tier3s_t tmpfs_t:filesystem { getattr mount remount unmount };
 allow qdistro_tier3s_t tmp_t:dir mounton;
 allow qdistro_tier3s_t root_t:dir mounton;
-allow qdistro_tier3s_t fs_t:filesystem { getattr unmount };
+# remount: runsc remounts subtree mounts (ro/slave propagation) inside
+# the sandbox's own namespaces.
+allow qdistro_tier3s_t fs_t:filesystem { getattr remount unmount };
 allow qdistro_tier3s_t nsfs_t:file { getattr ioctl open read };
 allow qdistro_tier3s_t nsfs_t:filesystem getattr;
 allow qdistro_tier3s_t cgroup_t:dir { getattr open read search };
+# runsc reads its own cgroup's cpu.max even under --ignore-cgroups (it
+# sizes internal pools off it); read-only.
+allow qdistro_tier3s_t cgroup_t:file { getattr open read };
 allow qdistro_tier3s_t sysctl_t:file { getattr open read };
 allow qdistro_tier3s_t sysctl_vm_t:file { getattr open read };
 allow qdistro_tier3s_t null_device_t:chr_file setattr;
@@ -263,7 +270,7 @@ allow qdistro_tier3s_t null_device_t:chr_file setattr;
 # userns-scoped capabilities (CAP_* against objects owned by the
 # namespace, checked on the cap_userns class — not the host's capability
 # set).
-allow qdistro_tier3s_t self:cap_userns { chown dac_override dac_read_search setfcap setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
+allow qdistro_tier3s_t self:cap_userns { chown dac_override dac_read_search kill setfcap setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
 
 ########################################
 #
