@@ -1,0 +1,111 @@
+[vm-exec] guest identity pinned (pid 3636 start 7596)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+[vm-exec] Waiting... (polls=60s elapsed=62s)
+[vm-exec] Waiting... (polls=90s elapsed=93s)
+[vm-exec] Waiting... (polls=120s elapsed=125s)
+
+## 0. preconditions (setup ran)
+PASS: probe PASS before the launches (0:1)
+PASS: image present (yes)
+PASS: broker allows the smoke spawn (allow)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s130a (Created)
+PASS: CreateTier3sSilo s130b (Created)
+PASS: CreateTier3sSilo s130c (Created)
+    silos.yaml: s130a argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+    silos.yaml: s130b argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+    silos.yaml: s130c argv -> ["qdistro-tier3s-smoke", "--hold", "600"]
+PASS: argv set with the manager restarted (yes)
+
+## 1. live silo A: the scope's limit files, values, ownership; placement
+PASS: silo A 4579f56352aef7968ff7a2dbd2efbbea recorded running
+PASS: limits: memory.max = MemoryMax=2G (2147483648)
+PASS: limits: memory.swap.max = MemorySwapMax=0 (0)
+PASS: limits: pids.max = TasksMax=1024 (1024)
+PASS: limits: cpu.max = CPUQuota=200% (200000 100000)
+PASS: limits: memory.max is root's, not admin's (0)
+PASS: limits: admin write to memory.max fails with EACCES/EPERM (rc=1)
+PASS: limits: memory.swap.max is root's, not admin's (0)
+PASS: limits: admin write to memory.swap.max fails with EACCES/EPERM (rc=1)
+PASS: limits: pids.max is root's, not admin's (0)
+PASS: limits: admin write to pids.max fails with EACCES/EPERM (rc=1)
+PASS: limits: cpu.max is root's, not admin's (0)
+PASS: limits: admin write to cpu.max fails with EACCES/EPERM (rc=1)
+PASS: limits: scope dir itself is delegated to admin (1000)
+PASS: limits: cgroup.procs delegated (admin-writable) (yes)
+PASS: placement[A]: runuser x1 inside the scope
+PASS: placement[A]: podman-cli x1 inside the scope
+PASS: placement[A]: conmon x1 inside the scope
+PASS: placement[A]: runsc-gofer x1 inside the scope
+PASS: placement[A]: runsc-sandbox x1 inside the scope
+PASS: placement[A]: runsc-fd-parking x1 inside the scope
+PASS: placement[A]: systrap-stub x15 inside the scope
+PASS: placement[A]: runsc-bundle processes outside the owning scope (0)
+
+## 2. CPUQuota=200% on silo A: in-sandbox burn grows cpu.stat throttling
+PASS: cpu: counters readable before the burn (yes)
+PASS: cpu: burn ran inside the sandbox (1)
+PASS: cpu: nr_throttled grew under a 400%-hungry load (0 -> 121, peak 119)
+PASS: cpu: throttled_usec grew (yes)
+
+## 3. TasksMax=1024 on silo C: a guest fork bomb plateaus at pids.max
+PASS: silo C cf9c773850f46bfe803e8ff186c86c4e recorded running
+PASS: tasks: C's scope really is at TasksMax=1024 (1024)
+INFO: pids.current before the bomb: 55 (limit 1024), pids.events.local max=0
+PASS: tasks: an outside admin process cannot inject itself into the scope (MOVED=no)
+    guest bomb: sh: line 2: /usr/bin/sleep: Cannot allocate memory
+    guest bomb: waiting on pid 54: waiting on PID 54 in sandbox "9f5de031e52efab29316f32a38e230b7cfa574065abaef90366a3f8afbbbf48c": urpc method "containerManager.WaitPID" failed: EOF
+INFO: guest bomb: host peak pids.current=1024 (limit 1024), pids.events.local max 0 -> 2, guest jobs=died, fork-error lines: 0
+PASS: tasks: host pids.current never exceeded pids.max (yes)
+PASS: tasks: pids.events.local max grew — this scope's pids.max denied a fork (0 -> 2)
+PASS: tasks: the bomb was bounded (guest jobs=died, ctr=gone)
+INFO: memory.events on C's scope after the bomb: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+PASS: tasks teardown: StopSilo C rc (0)
+PASS: tasks: all 23 launch processes gone (pid+starttime)
+PASS: tasks: scope qdistro-tier3s-cf9c773850f46bfe803e8ff186c86c4e.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-cf9c773850f46bfe803e8ff186c86c4e.scope absent)
+PASS: tasks: per-launch dir /run/qdistro-tier3s/cf9c773850f46bfe803e8ff186c86c4e gone
+PASS: tasks: control record /run/qdistro-tier3s-ctl/cf9c773850f46bfe803e8ff186c86c4e gone
+PASS: tasks: container qdistro-tier3s-s130c gone (podman exists rc=1)
+PASS: tasks: no runsc state for 9f5de031e52e in /run/qdistro-tier3s-runsc/1000
+
+## 4. MemoryMax=2G on silo B: a guest hog triggers the scope's OOM kill
+PASS: silo B d64298e31e962690aec7126b745f4d17 recorded running
+PASS: memory: B's memory.max = 2G (2147483648)
+PASS: memory: B's memory.swap.max = 0 (0)
+INFO: memory.events.local before the hog: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+    hog: 
+PASS: memory: B's own memory.max triggered the OOM (memory.events.local oom 0 -> 1, peak 1; oom_kill 0 -> 1)
+PASS: memory: the hog's launch unit is down (success)
+PASS: memory: all 17 launch processes gone (pid+starttime)
+PASS: memory: scope qdistro-tier3s-d64298e31e962690aec7126b745f4d17.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-d64298e31e962690aec7126b745f4d17.scope absent)
+PASS: memory: per-launch dir /run/qdistro-tier3s/d64298e31e962690aec7126b745f4d17 gone
+PASS: memory: control record /run/qdistro-tier3s-ctl/d64298e31e962690aec7126b745f4d17 gone
+PASS: memory: container qdistro-tier3s-s130b gone (podman exists rc=1)
+PASS: memory: no runsc state for da41b58a55c7 in /run/qdistro-tier3s-runsc/1000
+PASS: memory: StopSilo B afterwards (Stopped)
+
+## 5. teardown of silo A + all clear
+PASS: StopSilo A rc (0)
+PASS: cpu: all 19 launch processes gone (pid+starttime)
+PASS: cpu: scope qdistro-tier3s-4579f56352aef7968ff7a2dbd2efbbea.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-4579f56352aef7968ff7a2dbd2efbbea.scope absent)
+PASS: cpu: per-launch dir /run/qdistro-tier3s/4579f56352aef7968ff7a2dbd2efbbea gone
+PASS: cpu: control record /run/qdistro-tier3s-ctl/4579f56352aef7968ff7a2dbd2efbbea gone
+PASS: cpu: container qdistro-tier3s-s130a gone (podman exists rc=1)
+PASS: cpu: no runsc state for 9d47d3d9cdcc in /run/qdistro-tier3s-runsc/1000
+PASS: DeleteSilo s130a (absent)
+PASS: DeleteSilo s130b (absent)
+PASS: DeleteSilo s130c (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s130] 83 passes, 0 failures

@@ -223,8 +223,10 @@ Evidence (feasibility, the shipped wrapper, no root flag on any call):
 **Decision.** Phase S shape (a) without `--cgroup-parent` (log `35`). The
 spawn (root) creates a transient **system** scope
 `qdistro-tier3s-<token>.scope` with `systemd-run --scope -p Delegate=yes`, root-set
-`TasksMax=1024` and `MemoryMax=2G` (set, not yet tested for enforcement:
-Phase C), `--collect`, and its lifetime coupling (below). The scope's first
+`TasksMax=1024`, `MemoryMax=2G`, `MemorySwapMax=0` and `CPUQuota=200%`
+(enforcement proven by s130: OOM kill, fork-bomb bound at `pids.max`,
+`cpu.stat` throttling — all inside the scope, and admin cannot raise any of
+them), `--collect`, and its lifetime coupling (below). The scope's first
 process is the installed root-owned helper `qdistro-tier3s-scope enter
 <token> <admin-uid> -- podman …`, which:
 1. verifies it is root, on a pure cgroup-v2 hierarchy, in exactly the
@@ -701,7 +703,14 @@ oracle is "no `podman run` and no activation record":
       fable P3-2);
     - `bridge_wrapper_pid`, `bridge_client_pid` (+ starttimes),
       `launch_record`, `gui=1` go into the control record as soon as they
-      are known, so a refusal after the client started is still torn down.
+      are known, so a refusal after the client started is still torn down;
+    - the bridge pair deliberately lives in the **launch unit's** cgroup,
+      not the owning scope (Phase C decision, `03` step 1): the unit's own
+      `MemoryMax=1G TasksMax=96` gives the trusted host-side parser a
+      budget separate from the sandbox's — a hostile stream cannot spend
+      the sandbox's memory/pids allowance nor the reverse — and Phase E
+      accounting sums its PSS separately, as the measurement table
+      prescribes for transport processes left outside the owning cgroup.
 13. `systemd-run --scope …` (D-A3b) in the background. Poll `podman inspect`
     until running, within a 60 s **polling budget** by the clock (each
     inspect bounded to 5 s and its answer awaited 7 s at most; fable A r2
@@ -965,9 +974,13 @@ Every ERRNO, the default included, is EPERM under runsc.
   isolation boundary (a compromise of the host-side waypipe inherits the
   silo tag; an admin-uid compromise is outside this tier's threat
   model).
-- The scope limits are set, not yet shown to be enforced (Phase C). Admin
-  cannot raise them by writing the files (`feasibility-r3/20`); that is not
-  an adversarial containment proof.
+- The scope limits are enforced and proven (s130: OOM kill at
+  `memory.max`, fork bound at `pids.max`, throttling under `cpu.max`).
+  Admin cannot raise them — the limit files stay root-owned under the
+  selective delegation (D-A3b). What is not proven: the limits are PoC
+  values (1024 tasks, 2 GiB, two cores), not a tuned budget, and the OOM
+  killer chooses which in-scope process dies — containment, not graceful
+  degradation.
 - Under SIGKILL of the launch service, teardown is systemd killing the
   scope's cgroup, then verification. It is not a graceful `podman stop`.
 - `network=none` only, dev profile only, no KVM claim.
