@@ -1,0 +1,12 @@
+### host 2026-10-05T08:36:06Z: vm-exec t3s-c2-261005-101056-3578230-20792 <<CMD
+mkdir -p /root/t3s-c2 && cd /root/t3s-c2 && curl -fsS http://10.0.2.2:8765/spike.tgz | tar xzf - --no-same-owner && chown -R root:root /root/t3s-c2 && ls -la tier3s/ && loginctl enable-linger admin && sleep 2 && ls -ld /run/user/1000
+CMD
+[vm-exec] guest identity pinned (pid 4186 start 82328)
+total 28
+drwxr-xr-x. 2 root root    73 Oct  5 08:36 .
+drwxr-xr-x. 3 root root    91 Oct  5 08:36 ..
+-rwxr-xr-x. 1 root root 19425 Oct  5 08:36 provision-runsc.sh
+-rw-r--r--. 1 root root  1571 Oct  5 08:36 RUNSC_RELEASE
+-rwxr-xr-x. 1 root root  3066 Oct  5 08:36 tier3s-runsc
+drwx------. 6 admin admin 180 Oct  5 08:26 /run/user/1000
+### exit=0

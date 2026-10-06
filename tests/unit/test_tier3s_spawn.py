@@ -31,6 +31,7 @@ SPAWN = T3S / "spawn-tier3s.sh"
 HELPER = T3S / "qdistro-tier3s-scope"
 CLEANUP = T3S / "qdistro-tier3s-cleanup"
 UID = os.getuid()
+GID = os.getgid()
 ME = pwd.getpwuid(UID).pw_name
 TOKEN = "0123456789abcdef0123456789abcdef"
 TOKEN2 = "fedcba9876543210fedcba9876543210"
@@ -282,6 +283,15 @@ F=@F@
 # getent_hang_after: a complete-looking answer, THEN a wedge — killed at the
 # bound, and what it printed is not a result (sol r5 P3-4)
 if [ -e "$F/getent_hang_after" ]; then /usr/bin/getent "$@"; sleep 600; fi
+# passwd_for_<key>: a canned passwd entry for `getent passwd <key>`, served
+# only to callers that opt in (TIER3S_FAKE_SILO_NSS=1) — the cleanup and the
+# scope helper need a qt3s-* entry under the test seam's silo uid, which real
+# NSS does not have; the spawn's ADMIN lookup must keep seeing real NSS, or
+# the conflated seam uid would turn admin into qt3s-* too (sol model-A r1)
+if [ "${TIER3S_FAKE_SILO_NSS:-}" = 1 ] && [ "${1:-}" = passwd ] && [ -n "${2:-}" ] \
+        && [ "${2##*/}" = "$2" ] && [ -e "$F/passwd_for_$2" ]; then
+    cat -- "$F/passwd_for_$2"; exit 0
+fi
 exec /usr/bin/getent "$@"
 '''
 
@@ -481,6 +491,7 @@ class World:
             shutil.copyfile(f, lib / "seccomp" / f.name)
         for f in (T3S / "workloads").glob("*.env"):
             shutil.copyfile(f, lib / "workloads" / f.name)
+        shutil.copyfile(T3S / "containers.conf", lib / "containers.conf")
         libexec = self.T / "usr/libexec/qdistro"
         libexec.mkdir(parents=True)
         (libexec / "qdistro-tier3s-scope").symlink_to(HELPER)       # the real helper
@@ -503,6 +514,7 @@ class World:
         run = self.T / "run"
         for d, mode in (("qdistro-tier3s-ctl", 0o700), ("qdistro-tier3s", 0o755),
                         ("qdistro-tier3s-runsc", 0o755), (f"qdistro-tier3s-runsc/{UID}", 0o700),
+                        ("qdistro-tier3s-rt", 0o755), (f"qdistro-tier3s-rt/{UID}", 0o700),
                         (f"user/{UID}", 0o700)):
             (run / d).mkdir(parents=True, exist_ok=True)
             (run / d).chmod(mode)
@@ -516,6 +528,21 @@ class World:
         self.set("dbus_mode", "allow")
         # the fake bridge halves put their /proc entries in this unit's cgroup
         self.set("launch_unit", self.unit)
+        # the qt3s-<silo> account entry the record↔account binding checks
+        # resolve through the getent fake (the test uid is the silo uid under
+        # the TIER3S_TEST_ROOT seam; model A). Tests overwrite this to pose a
+        # swapped/foreign account.
+        self.silo_acct = f"qt3s-{(silo or 'smoke')[:27]}"
+        self.set_silo_passwd()
+
+    def set_silo_passwd(self, name=None, gecos=None):
+        """The passwd entry NSS returns for the silo uid; defaults to the
+        bound qt3s-<silo> account with this silo's GECOS marker."""
+        silo = self.silo or "smoke"
+        name = self.silo_acct if name is None else name
+        gecos = f"qdistro tier3s silo {silo}" if gecos is None else gecos
+        self.set(f"passwd_for_{UID}",
+                 f"{name}:x:{UID}:{GID}:{gecos}:/home/{name}:/bin/bash\n")
 
     # -- GUI world pieces (CONTRACT.md §5 step 12) --
     def compositor(self):
@@ -602,6 +629,8 @@ class World:
         d = Path(f"{self.T}/sys/fs/cgroup{rel}")
         st = {"schema": "1", "token": token, "container": container, "unit": unit,
               "scope_unit": f"qdistro-tier3s-{token}.scope", "admin_uid": str(UID),
+              "silo_uid": str(UID), "silo_user": self.silo_acct,
+              "silo": self.silo or "smoke",
               "runsc_root": f"/run/qdistro-tier3s-runsc/{UID}",
               "per_launch_dir": f"/run/qdistro-tier3s/{token}", "phase": "running",
               "container_id": "cid" + token, "scope_cgroup": rel,
@@ -669,15 +698,21 @@ def test_plan_podman_command_shape(w):
     run = pa.index("run")
     assert pa.index("--cgroup-manager=cgroupfs") < run and pa.index("--runtime-flag=network=none") < run
     for pair in (["--security-opt", "label=disable"], ["--security-opt", "no-new-privileges"],
-                 ["--userns=keep-id", "--user"], ["--name", "qdistro-tier3s-smoke"],
+                 ["--name", "qdistro-tier3s-smoke"],
                  ["--label", f"qdistro_tier3s_token={TOKEN}"],
                  ["--label", f"qdistro_tier3s_unit={w.unit}"]):
         assert any(pa[i:i + 2] == pair for i in range(run, len(pa))), pair
+    # Phase C2 model A: keep-id without a guest-1000 retarget — the guest uid
+    # IS the silo's host uid (the test-mode silo is the caller)
+    assert "--userns=keep-id" in pa and f"--user={UID}:{os.getgid()}" in pa
+    assert not any(a == "--user" or a == "--user=1000:1000" for a in pa)
     assert "--cap-drop=ALL" in pa and "--read-only" in pa and "--rm" in pa
     assert "seccomp=/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json" in pa
     assert p["SECCOMP"] == f"{w.T}/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json"
     # tmpfs ownership through podman's U option, never a literal uid= (podman 6.0.2 rejects it)
-    assert "/run/user/1000:rw,U,mode=0700" in pa and "/home/admin/.cache:rw,U,mode=0700" in pa
+    # (the guest runtime dir is the SILO's numeric uid; an unbound launch gets a
+    # fresh tmpfs home)
+    assert f"/run/user/{UID}:rw,U,mode=0700" in pa and "/home/admin:rw,U,mode=0700" in pa
     assert not any("uid=" in a for a in pa)
     # D-A1: no per-call root; D-A3b: no cgroup-parent containment
     assert not any("root=" in a or a == "--root" for a in pa)
@@ -723,10 +758,46 @@ def test_templated_silo_mounts_state_and_uses_the_digest(w):
     p = w.plan()
     pa = p["podman"]
     i = pa.index("-v")
-    assert pa[i + 1] == f"{w.T}/state:/home/admin:rw"
+    # C2 model A: the MOUNTED state dir is the silo-owned one, not the
+    # resolver's admin-side path (which stays bookkeeping only)
+    assert pa[i + 1] == f"{w.T}/home/qt3s-smoke/tier3s-state/smoke:/home/admin:rw"
     assert pa[-2] == DIGEST and p["IMAGE"] == DIGEST
     # read-only resolution before the plan: no --record
     assert [c for c in w.calls() if c.startswith("resolver")] == ["resolver smoke --launch-env"]
+
+
+@pytest.mark.parametrize("link", ["state-root", "binding"])
+def test_templated_silo_refuses_a_symlinked_state_component(w, link):
+    """sol model-A r1 P1-1: the silo controls its home; a symlink swapped in
+    at tier3s-state or at the binding dir must refuse — root never creates or
+    chowns through a silo-controlled path, and the planted target is left
+    untouched."""
+    w.set("resolver_mode", "digest")
+    home = w.T / "home/qt3s-smoke"
+    home.mkdir(parents=True)
+    target = w.tmp / "foreign-state"
+    target.mkdir(mode=0o755)
+    if link == "state-root":
+        (home / "tier3s-state").symlink_to(target)
+    else:
+        (home / "tier3s-state").mkdir()
+        (home / "tier3s-state/smoke").symlink_to(target)
+    r = w.spawn(TIER3S_PRINT_PLAN="1")
+    assert r.returncode == 2, r.stderr
+    assert "is not a silo-owned directory" in r.stderr, r.stderr
+    # the refusal preceded podman/bridge work, and the foreign target was
+    # never chmodded or chowned into place
+    assert (target.stat().st_mode & 0o777) == 0o755
+    assert not [c for c in w.calls() if c.startswith(("podman", "systemd-run", "dbus-send"))]
+
+
+def test_templated_silo_refuses_state_not_owned_by_the_silo_uid(w):
+    """sol model-A r1 P1-1, the foreign-destination leg: an existing state dir
+    owned by another uid refuses — TIER3S_TEST_SILO_UID shifts the silo
+    identity, so the caller-created dir is 'foreign' for this launch."""
+    w.set("resolver_mode", "digest")
+    r = w.spawn(TIER3S_PRINT_PLAN="1", TIER3S_TEST_SILO_UID=str(UID + 7))
+    assert r.returncode == 2 and "is not a silo-owned directory" in r.stderr, r.stderr
 
 
 def test_podapp_launch_is_refused_in_phase_a(tmp_path):
@@ -870,6 +941,17 @@ def test_gate_order_probe_resolve_gate_record_then_podman(w):
     scope = w.first("systemd-run")
     run = next(i for i, c in enumerate(calls) if c.startswith("podman") and " run --rm " in c)
     assert probe < resolve_ro < gate < record < image < scope < run, calls
+    # every podman call runs dropped to a user (the silo account; the test
+    # seam resolves it to the test user) under the fixed model-A env
+    # (per-silo runtime dir + the root-owned CONTAINERS_CONF pinning cgroupfs;
+    # spawn's $T-prefixed LIBDIR and the cleanup's installed path both end in
+    # tier3s/containers.conf)
+    for i, c in enumerate(calls):
+        if c.startswith("podman") and "HELD" not in c:
+            assert calls[i - 1].startswith("runuser -u "), calls[i - 1]
+            assert "env -i " in calls[i - 1] and "XDG_RUNTIME_DIR=" in calls[i - 1]
+            assert "CONTAINERS_CONF=" in calls[i - 1] \
+                and "tier3s/containers.conf" in calls[i - 1], calls[i - 1]
 
 
 def test_binding_drift_between_resolution_and_activation_refuses(w):
@@ -973,15 +1055,31 @@ def test_sentry_outside_the_scope_tears_down(w):
 def test_missing_image_refuses_and_cleans(w):
     w.set("image_rc", "1")
     r = w.spawn()
-    assert r.returncode == 2 and "not in admin's store" in r.stderr
+    assert r.returncode == 2 and "not in the silo's podman store" in r.stderr
     assert w.first("systemd-run") is None
     assert w.launch_gone(TOKEN)
 
 
-def test_missing_state_root_refuses_before_any_record(w):
+def test_missing_state_root_is_created_by_the_spawn(w):
+    """C2: silo uids are dynamic, so the per-uid runsc root can no longer be
+    tmpfiles-provisioned — the spawn creates it (silo-owned 0700) when absent."""
     w.state_root.rmdir()
     r = w.spawn()
-    assert r.returncode == 2 and "runsc state root" in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert w.state_root.is_dir() and stat.S_IMODE(w.state_root.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("damage", ["mode", "symlink"])
+def test_tampered_state_root_refuses_before_any_record(w, damage):
+    """An existing-but-wrong runsc root is refused, never chmod/chowned into
+    place (what someone else planted stays planted and the launch dies)."""
+    if damage == "mode":
+        w.state_root.chmod(0o755)
+    else:
+        w.state_root.rename(w.tmp / "real")
+        w.state_root.symlink_to(w.tmp / "real")
+    r = w.spawn()
+    assert r.returncode == 2 and "not a silo-owned 0700" in r.stderr
     assert w.first("systemd-run") is None and list(w.ctl.iterdir()) == []
 
 
@@ -1031,8 +1129,9 @@ def test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin(w):
     assert chowns == [f"chown {UID} -- {d} {d}/cgroup.procs {d}/cgroup.subtree_control {d}/cgroup.threads"]
     assert not any("memory.max" in c or "pids.max" in c for c in chowns)
     ru = [c for c in w.calls() if c.startswith("runuser")]
-    assert len(ru) == 1 and ru[0].startswith(f"runuser -u {ME} -- /usr/bin/env -i PATH=/usr/bin:/bin ")
+    assert len(ru) == 1 and ru[0].startswith(f"runuser -u {w.silo_acct} -- /usr/bin/env -i PATH=/usr/bin:/bin ")
     assert ru[0].endswith(f"{w.bin}/podman version")
+    assert f"CONTAINERS_CONF={w.T}/usr/lib/qdistro/tier3s/containers.conf" in ru[0]
     assert w.calls()[-1] == "podman version"
 
 
@@ -1074,10 +1173,55 @@ def test_cleanup_tears_down_a_running_launch(w):
     assert f"podman stop -t 10 {TOKEN}{TOKEN}" in calls, calls
     assert f"podman rm -f --ignore {TOKEN}{TOKEN}" in calls, calls
     # podman runs as the recorded admin, never as root, and never holding a
-    # lock fd (a long-lived podman child would keep the lock)
+    # lock fd (a long-lived podman child would keep the lock); each call
+    # carries the silo podman env (runtime dir + pinned CONTAINERS_CONF)
     assert all(calls[i - 1].startswith("runuser -u") for i, c in enumerate(calls)
                if c.startswith("podman") and "HELD" not in c)
+    assert all("CONTAINERS_CONF=" in calls[i - 1]
+               and f"{w.T}/usr/lib/qdistro/tier3s/containers.conf" in calls[i - 1]
+               for i, c in enumerate(calls)
+               if c.startswith("podman") and "HELD" not in c)
     assert not any("HELD lock fd" in c for c in calls), calls
+
+
+@pytest.mark.parametrize("swap", ["name", "marker", "other-silo", "missing"])
+def test_cleanup_refuses_a_silo_account_that_no_longer_binds(w, swap):
+    """sol model-A r1 P1-2: the recorded silo uid must STILL resolve to the
+    recorded qt3s-<silo> account carrying this silo's GECOS marker — a
+    recreated, swapped or removed account is a different podman store whose
+    'absent' is not this record's verdict. Fails closed BEFORE any store
+    query: record preserved, no podman call at all."""
+    w.make_launch(TOKEN, w.unit, "qdistro-tier3s-smoke")
+    if swap == "name":
+        w.set_silo_passwd(name="mallory")                    # the uid was reassigned
+    elif swap == "marker":
+        w.set_silo_passwd(gecos="An Ordinary Account")       # foreign marker
+    elif swap == "other-silo":
+        w.set_silo_passwd(gecos="qdistro tier3s silo other") # another silo's account
+    else:
+        (w.F / f"passwd_for_{UID}").unlink()                 # account removed
+    r = w.cleanup(TOKEN)
+    assert r.returncode == 4, r.stderr
+    assert (w.ctl / TOKEN / "state").exists() and (w.launch_parent / TOKEN).exists()
+    assert not any(c.startswith("podman") for c in w.calls()), w.calls()
+    if swap != "missing":
+        # restoring the binding lets the very same teardown complete
+        w.set_silo_passwd()
+        r = w.cleanup(TOKEN)
+        assert r.returncode == 0 and w.launch_gone(TOKEN), r.stderr
+
+
+def test_reap_stale_unrecorded_container_on_an_unbound_uid_is_preserved(w):
+    """sol model-A r1 P1-2, the reaper leg: a labelled container listed from
+    a uid that is no longer a bound tier3s silo account is NOT reaped from
+    that store."""
+    w.make_launch(TOKEN2, "qdistro-tier3s-silo@b.service", "qdistro-tier3s-b", pids=(5001, 5002))
+    w.set_unit("qdistro-tier3s-silo@b.service", "inactive")
+    shutil.rmtree(w.ctl / TOKEN2)                    # the manager lost the record
+    w.set_silo_passwd(gecos="An Ordinary Account")   # the uid is foreign now
+    r = w.cleanup("--reap-stale")
+    assert r.returncode == 1 and "not a bound tier3s silo account" in r.stderr, r.stderr
+    assert not any(c.startswith("podman rm") for c in w.calls()), w.calls()
 
 
 def test_cleanup_with_missing_state_root_preserves_record_and_scope(w):
@@ -1720,10 +1864,13 @@ def test_gui_images_use_the_bridge_entrypoint_and_the_installer_ships_it():
         assert not re.search(r"^CMD ", cf, re.M), cf
         assert "COPY qdistro-tier3s-entrypoint /usr/lib/qdistro/tier3s-entrypoint" in cf
     ep = (T3S / "qdistro-tier3s-entrypoint").read_text()
-    for v in ("XDG_RUNTIME_DIR=/run/user/1000", "LIBGL_ALWAYS_SOFTWARE=1",
+    # C2 model A: XDG_RUNTIME_DIR is the spawn's per-silo env, with a uid-
+    # derived fallback — never a fixed /run/user/1000
+    for v in ('XDG_RUNTIME_DIR="/run/user/$(id -u)"', "LIBGL_ALWAYS_SOFTWARE=1",
               "QT_QUICK_BACKEND=software", "GDK_BACKEND=wayland",
               "QT_QPA_PLATFORM=wayland"):
         assert v in ep, v
+    assert "XDG_RUNTIME_DIR=/run/user/1000" not in ep
     assert 'exec waypipe -s "$SOCK" -o --no-gpu server -- "$@"' in ep
     inst = (REPO / "scripts/install/install-session-manager.sh").read_text()
     for f in ("qdistro-tier3s-entrypoint", "Containerfile.*",

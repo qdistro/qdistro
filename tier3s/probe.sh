@@ -291,7 +291,9 @@ fi
 
 # --- runsc state root (tier3s/CONTRACT.md D-A1) -----------------------------
 # The wrapper uses /run/qdistro-tier3s-runsc/<host uid> for every runsc call
-# and refuses to create it; provisioning (tmpfiles.d/qdistro-tier3s.conf) does.
+# and refuses to create it; the spawn creates it per qt3s-* podman caller at
+# launch (C2 model A), so the per-uid dir is a prerequisite only for qt3s-*
+# accounts — a non-caller (e.g. --user admin) has no per-uid dir at all.
 SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
 # Every NSS lookup for the foreign user is bounded (fable A r3 P3-2): a wedged
 # provider hangs the spawn's probe otherwise, and timeout's nonzero status —
@@ -308,8 +310,10 @@ else
     SR="$SR_BASE/$sr_uid"
     if [ -L "$SR_BASE" ] || [ ! -d "$SR_BASE" ] || [ "$(stat -c '%u %a' -- "$SR_BASE")" != "$EXP_UID 755" ]; then
         fail state_root "$SR_BASE missing, a symlink or not uid $EXP_UID 0755 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+    elif [[ "$USER_NAME" != qt3s-* ]]; then
+        pass state_root "$SR_BASE (per-uid dir is a qt3s-* caller prerequisite; $USER_NAME never invokes runsc)"
     elif [ -L "$SR" ] || [ ! -d "$SR" ] || [ "$(stat -c '%u %a' -- "$SR")" != "$sr_uid 700" ]; then
-        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (spawn-tier3s.sh creates it at launch)"
     elif [ -z "$ROOT" ] && [ "${#SR}" -gt 31 ]; then
         fail state_root "$SR is longer than 31 bytes (runsc control socket path)"
     else
@@ -337,13 +341,37 @@ if [ "$(id -un)" != "$USER_NAME" ]; then
         && [[ "$pw" != *$'\n'* ]] \
         || { fail nss "no passwd entry for $USER_NAME within the 5 s bound"; AS_UID=""; AS_HOME=""; }
 fi
+# podman's runtime dir for the probed user: a logind session dir when it
+# exists (admin), else the per-silo dir the spawn creates (a silo account has
+# no session; C2 model A keeps podman calls under the silo uid).
+AS_RT=""
+if [ -n "$AS_UID" ]; then
+    if [ -d "/run/user/$AS_UID" ]; then AS_RT="/run/user/$AS_UID"
+    elif [ -d "$ROOT/run/qdistro-tier3s-rt/$AS_UID" ]; then AS_RT="$ROOT/run/qdistro-tier3s-rt/$AS_UID"
+    elif [ -n "$ROOT" ] && [ -d "$ROOT/run/user/$AS_UID" ]; then AS_RT="$ROOT/run/user/$AS_UID"
+    else AS_RT="/run/qdistro-tier3s-rt/$AS_UID"; fi
+fi
 as_user() {
     if [ -z "$AS_UID" ]; then [ "$(id -un)" = "$USER_NAME" ] || return 1; "$@"
     else
+        # CONTAINERS_CONF pins cgroupfs for a sessionless account: the
+        # systemd manager would only warn (stderr contaminates the inspect
+        # comparisons) before falling back anyway.
         runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$AS_HOME" \
-            USER="$USER_NAME" XDG_RUNTIME_DIR="/run/user/$AS_UID" "$@"
+            USER="$USER_NAME" XDG_RUNTIME_DIR="$AS_RT" \
+            CONTAINERS_CONF="$HERE/containers.conf" "$@"
     fi
 }
+# The per-silo runtime dir itself is a prerequisite once the user is a
+# qt3s-* account (no logind session will create /run/user/<uid>).
+if [ -n "$AS_UID" ] && [[ "$USER_NAME" == qt3s-* ]]; then
+    rtdir="$ROOT/run/qdistro-tier3s-rt/$AS_UID"
+    if [ -L "$rtdir" ] || [ ! -d "$rtdir" ] || [ "$(stat -c '%u %a' -- "$rtdir")" != "$AS_UID 700" ]; then
+        fail rt_dir "$rtdir missing, a symlink or not uid $AS_UID 0700 (spawn-tier3s.sh creates it)"
+    else
+        pass rt_dir "$rtdir (uid $AS_UID 0700)"
+    fi
+fi
 pv="$(as_user podman version --format '{{.Client.Version}}' 2>/dev/null)"
 if [ -z "$pv" ]; then fail podman "podman not runnable as $USER_NAME"
 elif [ "${pv%%.*}" -ge 6 ] 2>/dev/null; then pass podman "$pv (>= 6)"

@@ -1,0 +1,163 @@
+### host 2026-10-05T08:30:51Z: vm-exec t3s-c2-261005-101056-3578230-20792 <<CMD
+bash /root/t3s-c2/c2-silo-uid.sh
+CMD
+[vm-exec] guest identity pinned (pid 1961 start 50845)
+
+## 0. environment
+7.2.8-1-default
+podman version 6.0.2
+runsc version release-20260928.0
+spec: 1.2.1
+Permissive
+OBSERVE: admin store images:
+OBSERVE: existing silo/group rows:
+admin:100000:65536
+t3s-c2a:165536:65536
+t3s-c2b:231072:65536
+admin:100000:65536
+t3s-c2a:165536:65536
+t3s-c2b:231072:65536
+
+## 1. silo users + subuid/subgid allocation
+OBSERVE: t3s-c2a: uid=1001(t3s-c2a) gid=1001(t3s-c2a) groups=1001(t3s-c2a),1003(qdistro-t3s-c2)
+OBSERVE: t3s-c2b: uid=1002(t3s-c2b) gid=1002(t3s-c2b) groups=1002(t3s-c2b)
+OBSERVE: subuid rows after plain useradd:
+/etc/subuid:t3s-c2a:165536:65536
+/etc/subuid:t3s-c2b:231072:65536
+/etc/subgid:t3s-c2a:165536:65536
+/etc/subgid:t3s-c2b:231072:65536
+OBSERVE: subuid rows now:
+/etc/subuid:t3s-c2a:165536:65536
+/etc/subuid:t3s-c2b:231072:65536
+/etc/subgid:t3s-c2a:165536:65536
+/etc/subgid:t3s-c2b:231072:65536
+0: t3s-c2a 165536 65536
+-rwxr-xr-x. 1 root root 45872 Sep 24 06:17 /usr/bin/newgidmap
+-rwxr-xr-x. 1 root root 41776 Sep 24 06:17 /usr/bin/newuidmap
+OBSERVE: podman unshare as t3s-c2a (exercises newuidmap against /etc/subuid):
+time="2026-10-05T08:30:51Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:30:51Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:30:51Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:51Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+         0       1001          1
+OBSERVE: podman pull as t3s-c2a into its OWN store (registry access is host-side):
+time="2026-10-05T08:30:51Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:51Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+93311e6d3241920b624c7494d54cb4bf3390b28eba71b514aaae6c6bda653007
+OBSERVE: silo store after pull:
+time="2026-10-05T08:30:52Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:30:52Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:30:52Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:52Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+
+## 2. keep-id under a silo podman caller
+OBSERVE: image usable by t3s-c2a: registry.opensuse.org/opensuse/busybox:latest
+OBSERVE: workload image visible to admin: 
+OBSERVE: silo runtime/runsc dirs:
+/run/qdistro-tier3s-rt/1001 t3s-c2a:t3s-c2a 700
+/run/qdistro-tier3s-runsc/1001 t3s-c2a:t3s-c2a 700
+OBSERVE: silo's /run/user/1001 exists? no — no logind session
+OBSERVE: B: launch under runsc as t3s-c2a, keep-id --user 1000:1000
+time="2026-10-05T08:30:52Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:30:52Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:30:52Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:52Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+Error: opening seccomp profile failed: open /var/tmp/tier3s-spike/smoke.json: no such file or directory
+OBSERVE: container processes on the host (uid should be 1001=t3s-c2a, not 1000):
+OBSERVE: container output (guest-side identity):
+time="2026-10-05T08:30:57Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:30:57Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:30:57Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:57Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+Error: no container with name or ID "t3s-c2-keepid" found: no such container
+
+## 3. bridge-dir traversal (group dance)
+OBSERVE: group qdistro-tier3 absent — creating test group qdistro-t3s-c2
+OBSERVE: t3s-c2a added to qdistro-t3s-c2: uid=1001(t3s-c2a) gid=1001(t3s-c2a) groups=1001(t3s-c2a),1003(qdistro-t3s-c2)
+OBSERVE: t3s-c2b groups (control, not a member): uid=1002(t3s-c2b) gid=1002(t3s-c2b) groups=1002(t3s-c2b)
+stat /var/tmp/tier3s-spike/bridge-dance admin:qdistro-t3s-c2 710
+stat /var/tmp/tier3s-spike/bridge-dance/bridge.sock admin:qdistro-t3s-c2 660
+OBSERVE: t3s-c2a (member) connect:
+pong
+rc=0
+OBSERVE: t3s-c2b (non-member) connect:
+2026/10/05 08:30:58 socat[2162] E connect(, AF=1 "/var/tmp/tier3s-spike/bridge-dance/bridge.sock", 48): Permission denied
+rc=1
+OBSERVE: t3s-c2b (non-member) list dir:
+ls: cannot open directory '/var/tmp/tier3s-spike/bridge-dance': Permission denied
+rc=2
+OBSERVE: t3s-c2a (member) list dir:
+ls: cannot open directory '/var/tmp/tier3s-spike/bridge-dance': Permission denied
+rc=2
+OBSERVE: admin (owner) list dir:
+rc=0
+
+## 4. runtime-dir / state ownership
+OBSERVE: silo home: /home/t3s-c2a t3s-c2a:t3s-c2a 700
+OBSERVE: podman info as t3s-c2a (storage section):
+time="2026-10-05T08:30:58Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:30:58Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:30:58Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:58Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+/home/t3s-c2a/.local/share/containers/storage|/run/qdistro-tier3s-rt/1001/containers|overlay
+OBSERVE: dirs after info:
+/home/t3s-c2a/.local/share/containers
+/home/t3s-c2a/.local/share/containers/storage
+/home/t3s-c2a/.local/share/containers/storage/libpod
+/home/t3s-c2a/.local/share/containers/storage/volumes
+/home/t3s-c2a/.local/share/containers/storage/db.sql
+/home/t3s-c2a/.local/share/containers/storage/storage.lock
+/home/t3s-c2a/.local/share/containers/storage/userns.lock
+/home/t3s-c2a/.local/share/containers/storage/overlay
+/run/qdistro-tier3s-rt/1001/containers t3s-c2a:t3s-c2a 700
+/run/qdistro-tier3s-rt/1001/libpod t3s-c2a:t3s-c2a 1700
+time="2026-10-05T08:30:58Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:30:58Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:30:58Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:30:58Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+tier3s-runsc: /run/qdistro-tier3s-runsc is not mode 755; refusing (no fallback)
+time="2026-10-05T08:30:58Z" level=error msg="Removing container 7d2b633efb45aea767600bb80a90efc241f1c4e0410f22e5d84dd4e410dbd9ad from runtime after creation failed"
+Error: OCI runtime error: /usr/libexec/qdistro/tier3s-runsc: tier3s-runsc: /run/qdistro-tier3s-runsc is not mode 755; refusing (no fallback)
+
+## 5. image store readability for a distinct uid
+OBSERVE: admin home traversal for t3s-c2a: ls: cannot access '/home/admin/.local/share/containers': Permission denied
+OBSERVE: 5a. per-silo store already exercised above: silo pulled + keeps its own images
+93311e6d3241920b624c7494d54cb4bf3390b28eba71b514aaae6c6bda653007
+OBSERVE: shared store perms (admin-populated):
+/var/lib/qdistro-tier3s-store
+/var/lib/qdistro-tier3s-store/libpod
+/var/lib/qdistro-tier3s-store/volumes
+/var/lib/qdistro-tier3s-store/db.sql
+/var/lib/qdistro-tier3s-store/storage.lock
+/var/lib/qdistro-tier3s-store/userns.lock
+14M	/var/lib/qdistro-tier3s-store
+OBSERVE: after chmod -R a+rX:
+/var/lib/qdistro-tier3s-store/overlay-images
+/var/lib/qdistro-tier3s-store/overlay-images/images.lock
+/var/lib/qdistro-tier3s-store/overlay-images/images.json
+/var/lib/qdistro-tier3s-store/overlay-images/93311e6d3241920b624c7494d54cb4bf3390b28eba71b514aaae6c6bda653007
+/var/lib/qdistro-tier3s-store/overlay-images/images.lock admin:admin 644
+OBSERVE: silo podman images WITH additionalimagestores=/var/lib/qdistro-tier3s-store:
+time="2026-10-05T08:31:00Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:31:00Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:31:00Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:31:00Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+registry.opensuse.org/opensuse/busybox:latest false
+registry.opensuse.org/opensuse/busybox:latest true
+OBSERVE: and a run from the shared store (the real test — distinct uid map):
+time="2026-10-05T08:31:00Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:31:00Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:31:00Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:31:00Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+Error: parsing reference "": repository name must have at least one component
+
+## 6. summary of open answers
+See OBSERVE lines above; findings get written into 13-phase-C2-progress.md
+and the decided model into tier3s/CONTRACT.md.
+[vm-exec] --- stderr ---
+time="2026-10-05T08:31:00Z" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-05T08:31:00Z" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-05T08:31:00Z" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1001` (possibly as root)"
+time="2026-10-05T08:31:00Z" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+[vm-exec] --- end stderr ---
+### exit=0

@@ -27,8 +27,8 @@ APPID="qdistro.tier3s.$SILO"
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 
 step "0. preconditions"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
 is "pywayland available for admin" \
@@ -183,7 +183,7 @@ pm image exists "$WLIMG" || {
     && pm cp /usr/bin/qdwin-output-probe wlprobe-b:/usr/bin/qp \
     && pm cp /usr/bin/qdistro-test-stream-claim-probe wlprobe-b:/usr/bin/sclaim \
     && pm commit wlprobe-b "$WLIMG" > /dev/null && pm rm wlprobe-b > /dev/null \
-    && pass "wlprobe image staged (probes baked into a local layer)" \
+    && pass "wlprobe image staged in admin's store (probes baked into a local layer)" \
     || fail "wlprobe image staging failed"
 }
 printf 'GUI=1\n' > /usr/lib/qdistro/tier3s/workloads/wlprobe.env
@@ -202,6 +202,9 @@ set_rules "allow:$GUISPAWN" \
 # also proceeds, and the scope-journal verdict greps carry the evidence.
 probe_launch() {
     local s="$1" tok unit
+    # Model A: the probe silo is stanza-only — provision qt3s-<silo> and get
+    # the wlprobe image into ITS store (copied from the staged admin copy).
+    ensure_silo_image "$s" wlprobe >/dev/null || { echo ""; return 1; }
     tok=$(write_stanza_workload "$s" wlprobe "$2")
     unit=$(unit_of "$s")
     systemctl start "$unit" >/dev/null 2>&1 || :
@@ -334,7 +337,7 @@ step "6. teardown"
 probe_ctrs_gone() {
     local c
     for c in s126p1 s126p2 s126p3; do
-        pm container exists "qdistro-tier3s-$c" 2>/dev/null && return 1
+        pm_s "$c" container exists "qdistro-tier3s-$c" 2>/dev/null && return 1
     done
     return 0   # without this the last probe's absent (rc 1) reads as "still there"
 }
@@ -347,7 +350,7 @@ rm -f "$STANZA_DIR"/s126p{1,2,3}.env \
 pm image rm "$WLIMG" > /dev/null 2>&1 || :
 sm StopSilo si "$SILO" 10 > /dev/null; is "StopSilo $SILO" "$(silo_state "$SILO")" Stopped
 wait_for 90 unit_down "$(unit_of "$SILO")"
-assert_launch_gone teardown "$TOK" "$(ctr_of "$SILO")"
+assert_launch_gone teardown "$TOK" "$SILO"
 assert_bridge_gone teardown "$TOK"
 sm DeleteSilo s "$SILO" > /dev/null; is "DeleteSilo $SILO" "$(silo_state "$SILO")" absent
 set_rules none

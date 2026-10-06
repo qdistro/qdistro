@@ -1,0 +1,9 @@
+### host 2026-10-05T08:34:01Z: vm-exec t3s-c2-261005-101056-3578230-20792 <<CMD
+bash /root/t3s-c2/tier3s/provision-runsc.sh && /usr/libexec/qdistro/runsc/runsc --version | head -2
+CMD
+[vm-exec] guest identity pinned (pid 3509 start 69775)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: already installed and matching pin 20260928.0; nothing to do
+runsc version release-20260928.0
+spec: 1.2.1
+### exit=0

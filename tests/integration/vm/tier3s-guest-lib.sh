@@ -23,7 +23,10 @@ WRAPPER=/usr/libexec/qdistro/tier3s-runsc
 CTL=/run/qdistro-tier3s-ctl
 LAUNCHES=/run/qdistro-tier3s
 STANZA_DIR=/run/qdistro/tier3s-launch
-SROOT=/run/qdistro-tier3s-runsc/1000
+RUNSC_BASE=/run/qdistro-tier3s-runsc
+RT_BASE=/run/qdistro-tier3s-rt
+T3S_CONF=/usr/lib/qdistro/tier3s/containers.conf
+IMG_DIR=/var/tmp/t3s-img
 IMAGE=localhost/qdistro/tier3s-headless-smoke:latest
 SMOKE_APP=qdistro-tier3s-smoke
 ACTION="qdistro.tier3s.spawn:headless-smoke/$SMOKE_APP"
@@ -71,6 +74,129 @@ as_admin() {   # the same scrubbed admin environment the spawn and cleanup use
         XDG_RUNTIME_DIR=/run/user/1000 "$@"
 }
 pm() { as_admin podman "$@"; }   # PLAIN podman: no --runtime, no --root, no runtime flags
+
+# --- Model A silo identity (Phase C2, CONTRACT.md D4) -----------------------
+# Every tier3s silo owns a dedicated host account `qt3s-<silo>` (spawn 3b
+# creates it on the first launch); its uid is the guest workload uid and owns
+# that silo's podman store, runsc state root and runtime dir. Admin (uid
+# 1000) never runs the workload's podman: `pm` above queries ONLY admin's
+# store, which stays useful for image staging and "the workload store is
+# invisible to admin" checks. Everything workload-side goes through pm_s/pm_t.
+silo_acct() { printf 'qt3s-%.27s\n' "$1"; }   # the truncation spawn applies (LOGIN_NAME_MAX)
+silo_uid()  { timeout 5 id -u "$(silo_acct "$1")" 2>/dev/null; }
+silo_gid()  { timeout 5 id -g "$(silo_acct "$1")" 2>/dev/null; }
+sroot()     { local u; u=$(silo_uid "$1") && [ -n "$u" ] && echo "$RUNSC_BASE/$u"; }
+# every qt3s-* account: the same enumeration the cleanup uses
+# An empty list is a valid answer (no silos yet); a FAILED enumeration is
+# rc 1 — consumers must never let it read as "no silo stores" (sol r5 #1)
+tier3s_accts() {
+    local out
+    out=$(getent passwd 2>/dev/null) || return 1
+    printf '%s\n' "$out" | sed -n 's/^\(qt3s-[^:]*\):.*$/\1/p'
+}
+# silo_workload <name> -> the silo row's launch.workload (empty for
+# stanza-only silos that have no row)
+silo_workload() {
+    as_admin busctl --system --timeout=300 --json=short call org.qdistro.SessionManager1 \
+        /org/qdistro/SessionManager1 org.qdistro.SessionManager1 ListSilos | python3 -c '
+import json, sys
+try:
+    rows = json.loads(json.load(sys.stdin)["data"][0])
+except Exception:
+    sys.exit(1)
+for s in rows:
+    if s["name"] == sys.argv[1]:
+        print(s.get("launch", {}).get("workload", "")); break' "$1"
+}
+# as_acct <account> <cmd...> — the scrubbed per-silo environment the spawn
+# uses for podman-as-silo calls (CONTAINERS_CONF pins cgroupfs so a
+# sessionless account never emits the systemd-session warning/fallback).
+# Fails when the account is missing — no silent fallback to admin.
+as_acct() {
+    local a="$1" u h; shift
+    u=$(timeout 5 id -u "$a" 2>/dev/null) && [ -n "$u" ] || return 1
+    h=$(timeout 5 getent passwd "$a" 2>/dev/null | cut -d: -f6)
+    runuser -u "$a" -- env -i PATH=/usr/bin:/bin HOME="${h:-/nonexistent}" \
+        USER="$a" LOGNAME="$a" XDG_RUNTIME_DIR="$RT_BASE/$u" \
+        CONTAINERS_CONF="$T3S_CONF" "$@"
+}
+as_silo() { local s="$1"; shift; as_acct "$(silo_acct "$s")" "$@"; }
+pm_s()    { local s="$1"; shift; as_silo "$s" podman "$@"; }         # podman in qt3s-<silo>'s store
+pm_t()    { local t="$1"; shift; as_acct "$(rec "$t" silo_user)" podman "$@"; }  # the record's silo store
+# pm_each <podman args...> — admin's store plus every qt3s-* store; nonzero if
+# ANY store's query failed (absence oracles wrap it in qry, so a failed store
+# reads QUERY-FAILED, never "absent")
+pm_each() {
+    local a rc=0 accts
+    accts=$(tier3s_accts) || return 1   # a failed enumeration is a failed query
+    pm "$@" || rc=1
+    while IFS= read -r a; do
+        if [ -n "$a" ]; then as_acct "$a" podman "$@" || rc=1; fi
+    done <<< "$accts"
+    return "$rc"
+}
+ctr_absent() { ! pm_s "$1" container exists "$2" 2>/dev/null; }   # ctr_absent <silo> <name>
+# runsc_state_left — leftovers under ANY per-uid runsc state root (the shared
+# read-only null-netns file runsc keeps for network=none is exempt)
+runsc_state_left() {
+    local d n
+    find "$RUNSC_BASE" -mindepth 1 -maxdepth 1 ! -type d 2>/dev/null
+    for d in "$RUNSC_BASE"/*/; do
+        n="${d%/}"; n="${n##*/}"
+        case "$n" in *[!0-9]*) continue ;; esac   # only per-uid dirs
+        find "$d" -mindepth 1 ! -name null-netns
+    done
+}
+# ensure_silo_image <silo> [workload] — under Model A each silo launches from
+# ITS OWN store: the qt3s-<silo> account exists only after a first launch
+# attempt (spawn 3b creates it before any broker/image refusal), and the image
+# check (spawn 11) refuses until the workload image is in that store. A first
+# stanza launch provisions the account (and always refuses on the missing
+# image), then the image archive is loaded. Idempotent.
+ensure_silo_image() {
+    local s="$1" w="${2:-$(silo_workload "$1")}" acct uid gid img arch
+    [ -n "$w" ] || { echo "ensure_silo_image: $s: no workload (no silo row?)" >&2; return 1; }
+    acct=$(silo_acct "$s")
+    if ! timeout 5 id "$acct" >/dev/null 2>&1; then
+        # the launch wrapper refuses an empty argv before spawn runs; a real
+        # argv reaches 3b (account creation) and is still refused later —
+        # at the broker gate (unknown/deny) or the missing image (allow).
+        # The manager's startup reconcile stops any live tier3s launch it
+        # did not start (CONTRACT §4) and runs AFTER the bus name claim that
+        # manager_up waits on, so a provisioning launch issued just after a
+        # manager restart can be swept before spawn's step 3b. The sweep
+        # runs once per restart: retry while the account is absent.
+        write_stanza_workload "$s" "$w" "[\"$SMOKE_APP\",\"--hold\",\"1\"]" >/dev/null || return 1
+        local try
+        for try in 1 2 3; do
+            systemctl start "$(unit_of "$s")" >/dev/null 2>&1 || :
+            timeout 5 id "$acct" >/dev/null 2>&1 && break
+            systemctl reset-failed "$(unit_of "$s")" 2>/dev/null || :
+            sleep 1
+        done
+        rm -f "$STANZA_DIR/$s.env"
+        timeout 5 id "$acct" >/dev/null 2>&1 \
+            || { echo "ensure_silo_image: the provisioning launch did not create $acct" >&2; return 1; }
+    fi
+    uid=$(silo_uid "$s"); gid=$(silo_gid "$s")
+    [ -n "$uid" ] && [ -n "$gid" ] || return 1
+    # per-uid dirs are the spawn's to create each launch; recreate them here
+    # only when missing (an account survives a reboot that wiped /run)
+    for d in "$RT_BASE/$uid" "$RUNSC_BASE/$uid"; do
+        [ -d "$d" ] || install -d -m 0700 -o "$uid" -g "$gid" "$d" || return 1
+    done
+    img="localhost/qdistro/tier3s-$w:latest"
+    pm_s "$s" image exists "$img" 2>/dev/null && return 0
+    arch="$IMG_DIR/tier3s-$w.oci.tar"; [ "$w" = headless-smoke ] && arch="$IMG_DIR/image.oci.tar"
+    if [ -f "$arch" ]; then
+        pm_s "$s" load -q -i "$arch" > /dev/null 2>&1
+    elif pm image exists "$img" 2>/dev/null; then   # no archive: copy out of admin's store (e.g. wlprobe)
+        pm save "$img" 2>/dev/null | pm_s "$s" load -q > /dev/null 2>&1
+    else
+        echo "ensure_silo_image: no archive $arch and admin's store lacks $img" >&2; return 1
+    fi
+    pm_s "$s" image exists "$img" 2>/dev/null
+}
 # StartSilo of a tier3s silo returns only once the launch runs (the unit is
 # Type=notify), so the call gets more than busctl's default 25 s: the start
 # path can hold the manager up to ~255 s in the worst case (CONTRACT §6)
@@ -138,8 +264,10 @@ unit_state() { systemctl show -p ActiveState --value "$1" 2>/dev/null; }
 unit_down() { case "$(unit_state "$1")" in inactive|failed) return 0 ;; esac; return 1; }
 unit_of() { echo "qdistro-tier3s-silo@$1.service"; }
 ctr_of() { echo "qdistro-tier3s-$1"; }
-ctr_status() { pm inspect --format '{{.State.Status}}' "$1" 2>/dev/null; }
-ctr_running() { [ "$(ctr_status "$1")" = running ]; }
+# ctr_status <silo> [container] — the container lives in the SILO's store, so
+# status/existence queries must run as qt3s-<silo> (pm_s), never as admin.
+ctr_status() { pm_s "$1" inspect --format '{{.State.Status}}' "${2:-$(ctr_of "$1")}" 2>/dev/null; }
+ctr_running() { [ "$(ctr_status "$@")" = running ]; }
 manager_up() { busctl --system list --no-pager 2>/dev/null | grep -q '^org\.qdistro\.SessionManager1 '; }
 journal_cursor() { journalctl -n 0 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p'; }
 # Journal of one unit since a cursor; scoped to the unit, never the whole
@@ -172,12 +300,26 @@ print(n)' "$2" "$3"
 T3S_SCOPE_RE='qdistro-tier3s-[0-9a-f]{32}\.scope'
 # no fallback tier: tier-2 silo/podapp units and tier-3 user-silo sessions
 FALLBACK_RE='(qdistro-tier2-.*|qdistro-podapp@.*|qdshell-session.*|qdistro-silo-launch.*)\.(service|scope)'
-# admin's podman container events since a time, minus the probe's own scratch
-# container (probe.sh creates and removes tier3s-probe-<pid> to check the
-# runtime; it is never started)
+# container events since a time across EVERY podman store (admin's plus each
+# qt3s-* silo's — the workload containers live in the silo stores under model
+# A), minus the probe's own scratch container (probe.sh creates and removes
+# tier3s-probe-<pid> to check the runtime; it is never started)
 launch_events_since() {   # launch_events_since <iso time>; a failed query yields a QUERY-FAILED line
-    qry pm events --since "$1" --until "$(date --iso-8601=seconds)" --filter type=container \
-        --format '{{.Status}} {{.Name}}' | grep -vE '^(create|remove) tier3s-probe-[0-9]+$' | grep .
+    local a accts
+    # --stream=false + --since only: with the file events logger (the only one
+    # a sessionless qt3s-* account can use), --until silently drops every
+    # event, and without --stream=false the call tails forever. A FAILED
+    # account enumeration is reported, not read as "no silo stores".
+    { accts=$(tier3s_accts) || echo "QUERY-FAILED($?): tier3s_accts"
+      qry pm events --stream=false --since "$1" --filter type=container \
+          --format '{{.Status}} {{.Name}}'
+      while IFS= read -r a; do
+          if [ -n "$a" ]; then
+              qry as_acct "$a" podman events --stream=false --since "$1" \
+                  --filter type=container --format '{{.Status}} {{.Name}}'
+          fi
+      done <<< "$accts"
+    } | grep -vE '^(create|remove) tier3s-probe-[0-9]+$' | grep .
 }
 # control-record tokens; a failed find yields a QUERY-FAILED line (sol A-iii r2 P2)
 records() { qry find "$CTL" -mindepth 1 -maxdepth 1 -regextype egrep -regex '.*/[0-9a-f]{32}' -printf '%f\n'; }
@@ -275,13 +417,16 @@ snapshot_launch() {   # snapshot_launch <token> -> $WORK/<token>.procs
     for p in $(tree_procs "$cg"); do
         st=$(starttime "$p") && echo "$p $st" >> "$WORK/$1.procs"
     done
-    pm inspect --format '{{.Id}}' "$(rec "$1" container)" > "$WORK/$1.id" 2>/dev/null
+    pm_t "$1" inspect --format '{{.Id}}' "$(rec "$1" container)" > "$WORK/$1.id" 2>/dev/null
 }
 
 # Bring a silo up live (argv must already be --hold) and wait until the spawn
 # recorded it running. up_silo <silo> -> prints the token on success
 up_silo() {
     local s="$1" unit tok cur
+    # Model A: the qt3s-<silo> account and its image store are provisioned by
+    # a first (refused) launch; ensure them before the real StartSilo.
+    ensure_silo_image "$s" || { echo "up_silo: ensure_silo_image $s failed" >&2; echo ""; return 1; }
     unit=$(unit_of "$s"); cur=$(journal_cursor)
     sm StartSilo s "$s" > /dev/null || { echo ""; return 1; }
     # Type=notify: StartSilo returns only once the launch is recorded running
@@ -316,16 +461,19 @@ assert_relaunched() {
     else fail "$tag: no fresh token (record '${t:-none}', old $old)"; return; fi
     is "$tag: the new launch is recorded running" "$(rec "$t" phase)" running
     is "$tag: its container runs under the new token" \
-        "$(ctr_status "$(ctr_of "$s")"):$(pm inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$(ctr_of "$s")" 2>/dev/null)" \
+        "$(ctr_status "$s"):$(pm_s "$s" inspect --format '{{index .Config.Labels "qdistro_tier3s_token"}}' "$(ctr_of "$s")" 2>/dev/null)" \
         "running:$t"
     is "$tag: its owning scope is live" "$(unit_state "qdistro-tier3s-$t.scope")" active
     echo "$t" > "$WORK/relaunched.$s"
 }
 
 # Eventual absence of everything one launch owned (DONE bar 2). Each item is
-# its own PASS/FAIL line. assert_launch_gone <tag> <token> <container> [secs]
+# its own PASS/FAIL line. assert_launch_gone <tag> <token> <silo> [secs] —
+# <silo> is the silo NAME (the container lives in qt3s-<silo>'s store, the
+# runsc state under /run/qdistro-tier3s-runsc/<silo uid>).
 assert_launch_gone() {
-    local tag="$1" tok="$2" ctr="$3" secs="${4:-60}" scope left p st rc id cg
+    local tag="$1" tok="$2" s="$3" secs="${4:-60}" scope left p st rc id cg ctr sr
+    ctr=$(ctr_of "$s"); sr=$(sroot "$s")
     scope="qdistro-tier3s-$tok.scope"
     procs_left() {
         local n=0
@@ -354,27 +502,39 @@ assert_launch_gone() {
     wait_for "$secs" test ! -e "$CTL/$tok"
     if [ ! -e "$CTL/$tok" ]; then pass "$tag: control record $CTL/$tok gone"
     else fail "$tag: control record $CTL/$tok still present: $(tr '\n' ' ' < "$CTL/$tok/state" 2>/dev/null)"; fi
-    wait_for "$secs" bash -c "! runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 podman container exists '$ctr'"
-    pm container exists "$ctr"; rc=$?
+    wait_for "$secs" ctr_absent "$s" "$ctr"
+    pm_s "$s" container exists "$ctr"; rc=$?
     case "$rc" in
-        1) pass "$tag: container $ctr gone (podman exists rc=1)" ;;
-        0) fail "$tag: container $ctr still exists ($(ctr_status "$ctr"))" ;;
+        1) pass "$tag: container $ctr gone (podman exists rc=1 in $s's store)" ;;
+        0) fail "$tag: container $ctr still exists ($(ctr_status "$s" "$ctr"))" ;;
         *) fail "$tag: podman query failed (rc=$rc), absence NOT proven" ;;
+    esac
+    # and it never lived in admin's store either (model A store isolation)
+    pm container exists "$ctr" 2>/dev/null; rc=$?
+    case "$rc" in
+        1) pass "$tag: container $ctr absent from admin's store" ;;
+        0) fail "$tag: container $ctr EXISTS IN ADMIN'S STORE (model A violated)" ;;
+        *) fail "$tag: admin-store podman query failed (rc=$rc), absence NOT proven" ;;
     esac
     id=$(cat "$WORK/$tok.id" 2>/dev/null)
     if [ -z "$id" ]; then fail "$tag: no container id captured for $tok"
-    elif [ -z "$(qry find "$SROOT" -mindepth 1 -name "*$id*")" ]; then pass "$tag: no runsc state for ${id:0:12} in $SROOT"
-    else fail "$tag: runsc state for ${id:0:12} left in $SROOT: $(find "$SROOT" -mindepth 1 -name "*$id*" | tr '\n' ' ')"; fi
+    elif [ -z "$sr" ]; then fail "$tag: no runsc root resolvable for $s (account gone?)"
+    elif [ -z "$(qry find "$sr" -mindepth 1 -name "*$id*")" ]; then pass "$tag: no runsc state for ${id:0:12} in $sr"
+    else fail "$tag: runsc state for ${id:0:12} left in $sr: $(find "$sr" -mindepth 1 -name "*$id*" | tr '\n' ' ')"; fi
 }
 
 # Nothing tier 3s is running at all (end of a driver / between sections).
 assert_all_clear() {   # assert_all_clear <tag>
     is "$1: control records" "$(records | wc -l)" 0
     is "$1: scopes" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-tier3s-*.scope' | grep -c .)" 0
-    is "$1: labelled containers" "$(qry pm ps -a --filter label=qdistro_tier3s_token --format '{{.Names}}' | grep -c .)" 0
+    # labelled containers in EVERY store — admin's plus each qt3s-* silo's
+    # (model A keeps workload containers in the per-silo store)
+    is "$1: labelled containers" \
+        "$(qry pm_each ps -a --filter label=qdistro_tier3s_token --format '{{.Names}}' | grep -c .)" 0
     is "$1: runsc-bundle processes" "$(runsc_pids | wc -l)" 0
-    # runsc keeps one shared, empty, read-only null-netns file for network=none
-    is "$1: state root holds no container state" "$(qry find "$SROOT" -mindepth 1 ! -name null-netns | grep -c .)" 0
+    # runsc keeps one shared, empty, read-only null-netns file for
+    # network=none; each qt3s-* uid has its own state root under the base
+    is "$1: state roots hold no container state" "$(qry runsc_state_left | grep -c .)" 0
     # the cleanup's per-call scopes and work dirs end with each call / run (astra A r2 #2)
     is "$1: no cleanup call scope left" "$(qry systemctl list-units --all --plain --no-legend 'qdistro-t3s-call-*.scope' | grep -c .)" 0
     # a cleanup run's private .call-* dir can outlive its triggering call by a
@@ -713,7 +873,7 @@ bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
     local tok="$1" ctr
     ctr=$(rec "$tok" container)
     [ -n "$ctr" ] || return 1
-    pm exec "$ctr" sh -c '
+    pm_t "$tok" exec "$ctr" sh -c '
         [ "$(cat /proc/1/comm 2>/dev/null)" = waypipe ] || exit 1
         n=$(ls -l /proc/1/fd 2>/dev/null | grep -c "socket:")
         [ "${n:-0}" -ge 2 ]'
@@ -727,7 +887,7 @@ bridge_stream_live() {   # bridge_stream_live <token> -> 0 iff the channel is up
 # `nsenter -t <gofer> -n ss -xp`, not a host-namespace ss.
 gofer_pid_of() {   # -> pid or ""
     local tok="$1" cid
-    cid=$(pm inspect --format '{{.Id}}' "$(rec "$tok" container)" 2>/dev/null) || return 1
+    cid=$(pm_t "$tok" inspect --format '{{.Id}}' "$(rec "$tok" container)" 2>/dev/null) || return 1
     [ -n "$cid" ] || return 1
     pgrep -f "runsc-gofer .*${cid}" | head -1
 }
@@ -755,7 +915,7 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
     if bridge_stream_live "$tok"; then
         pass "$tag: bridge channel live (sandbox waypipe server holds channel + app sockets)"
     else
-        pm exec "$(rec "$tok" container)" sh -c \
+        pm_t "$tok" exec "$(rec "$tok" container)" sh -c \
             'cat /proc/1/comm 2>/dev/null; ls -l /proc/1/fd 2>/dev/null; cat /proc/net/unix 2>/dev/null' \
             | sed 's/^/    probe: /' | head -15
         fail "$tag: the sandbox waypipe server is missing its channel or app sockets"
@@ -767,6 +927,8 @@ assert_gui_bridge_up() {   # assert_gui_bridge_up <tag> <token>
 # up_gui_silo <silo>
 up_gui_silo() {
     local s="$1" unit tok cur h
+    # Model A: provision qt3s-<silo> + load the workload image into its store
+    ensure_silo_image "$s" || { echo "up_gui_silo: ensure_silo_image $s failed" >&2; echo ""; return 1; }
     unit=$(unit_of "$s"); cur=$(journal_cursor)
     sm StartSilo s "$s" > /dev/null || { echo ""; return 1; }
     if ! wait_for 150 bash -c "journalctl -u '$unit' --no-pager -o cat --after-cursor='$cur' | grep -q 'spawn-tier3s: running: '"; then

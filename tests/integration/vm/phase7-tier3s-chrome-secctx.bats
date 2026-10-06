@@ -43,7 +43,7 @@ teardown_file() {
     done
     assert_output_contains "PASS: compositor logged the probe's tagged client acceptance"
     assert_output_contains "PASS: running compositor carries NO --qdwin-allowed-uid authorization override"
-    assert_output_contains "PASS: wlprobe image staged (probes baked into a local layer)"
+    assert_output_contains "PASS: wlprobe image staged in admin's store (probes baked into a local layer)"
     assert_output_contains "PASS: wlprobe workload profile + seccomp installed"
     assert_output_contains "PASS: bridge probe launch up (s126p1: output test)"
     assert_output_contains "PASS: bridge probe launch up (s126p2: output apply)"

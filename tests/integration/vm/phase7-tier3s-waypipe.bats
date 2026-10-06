@@ -39,7 +39,12 @@ teardown_file() {
     assert_output_contains "PASS: compositor: peer identity names the live bridge client"
     assert_output_contains "PASS: bridge mount is READ-ONLY in the sandbox view"
     assert_output_contains "PASS: sandbox write to the bridge dir is refused"
-    assert_output_contains "PASS: host link.sock was admin-owned 0600 at bind"
+    # model A: the bridge socket is chowned silo:silo 0600 after the admin
+    # client's bind (the sandbox connects as the silo uid); the launch dir
+    # is admin-owned 0711 (traversable, not listable)
+    assert_output_contains "PASS: host link.sock is silo-owned 0600"
+    assert_output_contains "PASS: launch dir is admin-owned 0711"
+    assert_output_contains "PASS: sandbox identity is the silo uid (keep-id, model A)"
     assert_output_contains "PASS: container NetworkMode is none"
     assert_output_contains "PASS: link.sock channel is an ESTABLISHED host unix socket through the gofer netns"
     assert_output_contains "PASS: launch dir empty once the bridge attached"

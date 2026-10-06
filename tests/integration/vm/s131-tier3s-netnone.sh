@@ -24,18 +24,21 @@ SN=s131n
 step "0. preconditions (setup ran)"
 out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
 is "probe PASS before the launch" "$rc:$(printf '%s\n' "$out" | grep -c '^RESULT PASS')" "0:1"
-is "image present" "$(yes_no pm image exists "$IMAGE")" yes
+is "image staged in admin's store (archive source)" "$(yes_no pm image exists "$IMAGE")" yes
 is "broker allows the smoke spawn" "$(broker_check "$ACTION")" allow
 assert_all_clear pre
 sm CreateTier3sSilo ssss "$SN" headless-smoke "$SN" none > /dev/null
 is "CreateTier3sSilo $SN" "$(silo_state "$SN")" Created
+# Model A: provision qt3s-<silo> + per-silo image store
+if ensure_silo_image "$SN" headless-smoke; then pass "$SN: qt3s-$SN provisioned; image in its store"
+else fail "$SN: ensure_silo_image failed"; fi
 set_argv "$SN=600" | sed 's/^/    /'
 is "argv set with the manager restarted" "$(yes_no manager_up)" yes
 
 step "1. live silo: network=none inside the sandbox"
 TN=$(up_silo $SN); CN=$(ctr_of $SN)
 if [ -n "$TN" ]; then pass "silo $SN $TN recorded running"; else fail "silo did not come up"; finish; fi
-sx() { pm exec "$CN" "$@"; }   # sx <in-sandbox command...>
+sx() { pm_s "$SN" exec "$CN" "$@"; }   # sx <in-sandbox command...> (the container is in qt3s-$SN's store)
 
 # --- links: lo is the only one
 is "netnone: the only link is lo" \
@@ -71,7 +74,7 @@ fi
 # fast: that is proof of no path. A nonzero rc alone could be a refused
 # connection (a routed path) or the probe not running at all (sol r1 P3).
 t0=$SECONDS
-out2=$(pm exec "$CN" bash -c 'timeout 15 bash -c "exec 3<>/dev/tcp/192.0.2.1/80" 2>&1; echo rc=$?'); dt=$((SECONDS - t0))
+out2=$(pm_s "$SN" exec "$CN" bash -c 'timeout 15 bash -c "exec 3<>/dev/tcp/192.0.2.1/80" 2>&1; echo rc=$?'); dt=$((SECONDS - t0))
 info "connect 192.0.2.1:80: ${dt}s, output: $(printf '%s' "$out2" | tr '\n' '|')"
 is "netnone: the connect probe ran and failed" "$(printf '%s\n' "$out2" | grep -c 'rc=[1-9]')" 1
 is "netnone: the failure is ENETUNREACH, not a refusal or a probe error" \
@@ -80,14 +83,14 @@ is "netnone: the failure is fast (not a filtered-route timeout)" \
     "$([ "$dt" -lt 14 ] && echo yes || echo "no (${dt}s)")" yes
 
 # --- host-side corroboration: the podman spec and the runsc cmdline agree
-is "netnone: podman NetworkMode" "$(pm inspect --format '{{.HostConfig.NetworkMode}}' "$CN")" none
-ipid=$(pm inspect --format '{{.State.Pid}}' "$CN")
+is "netnone: podman NetworkMode" "$(pm_s "$SN" inspect --format '{{.HostConfig.NetworkMode}}' "$CN")" none
+ipid=$(pm_s "$SN" inspect --format '{{.State.Pid}}' "$CN")
 is "netnone: sentry runs with --network=none" \
     "$(tr '\0' '\n' < "/proc/$ipid/cmdline" 2>/dev/null | grep -cx -- '--network=none')" 1
 
 step "2. teardown + all clear"
 sm StopSilo si $SN 10 > /dev/null; is "StopSilo rc" "$?" 0
-assert_launch_gone netnone "$TN" "$CN"
+assert_launch_gone netnone "$TN" "$SN"
 sm DeleteSilo s "$SN" > /dev/null; is "DeleteSilo" "$(silo_state "$SN")" absent
 assert_all_clear end
 finish

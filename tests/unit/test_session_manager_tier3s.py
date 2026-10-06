@@ -548,6 +548,20 @@ def real_ops(monkeypatch, tmp_path):
     ctl = tmp_path / "ctl"
     ctl.mkdir()
     monkeypatch.setattr(sm, "TIER3S_CTL_DIR", ctl)
+    # C2 model A: tier3s podman calls run as the qt3s-<silo> account, which
+    # does not exist on the build host — resolve it to a fake passwd entry
+    # carrying this silo's GECOS marker (the suffix is the silo name for
+    # names that fit the 27-char account truncation; colliding longer names
+    # need their own getpwnam override).
+    real_getpwnam = sm.pwd.getpwnam
+    def fake_getpwnam(name):
+        if name.startswith(sm.TIER3S_SILO_ACCT_PREFIX):
+            silo = name[len(sm.TIER3S_SILO_ACCT_PREFIX):]
+            return sm.pwd.struct_passwd(
+                (name, "x", 4242, 4242, f"qdistro tier3s silo {silo}",
+                 f"/home/{name}", "/bin/bash"))
+        return real_getpwnam(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake_getpwnam)
     return _SystemOps()
 
 
@@ -562,11 +576,12 @@ def test_running_false_only_when_unit_down_container_gone_and_no_record(real_ops
                                  (_exists, _verdict(1))])
     assert real_ops.tier3s_silo_running("smoke") is False
     pm = [c for c, _ in rec.calls if any("podman" in str(a) for a in c)][0]
-    # podman as admin with the same fixed environment the spawn and cleanup
-    # use, wrapped in the PMRC verdict protocol (A r3 P1): the chain's own rc
-    # is never the verdict.
-    assert pm[:5] == ["runuser", "-u", "admin", "--", "env"]
-    assert "-i" in pm and "XDG_RUNTIME_DIR=/run/user/1000" in pm
+    # podman as the silo account (C2 model A) with the same fixed environment
+    # the spawn and cleanup use, wrapped in the PMRC verdict protocol
+    # (A r3 P1): the chain's own rc is never the verdict.
+    assert pm[:5] == ["runuser", "-u", "qt3s-smoke", "--", "env"]
+    assert "-i" in pm and "XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/4242" in pm
+    assert "CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf" in pm
     assert pm[-4:-2] == ["-c", 'podman container exists "$1"; printf "PMRC=%d\\n" "$?"']
     assert pm[-2:] == ["sh", "qdistro-tier3s-smoke"]
 
@@ -597,6 +612,128 @@ def test_running_true_when_the_query_times_out(real_ops, monkeypatch):
     _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")),
                            (_exists, subprocess.TimeoutExpired("podman", 30))])
     assert real_ops.tier3s_silo_running("smoke") is True
+
+
+def _silo_pw(acct, uid, gecos):
+    return sm.pwd.struct_passwd(
+        (acct, "x", uid, uid, gecos, f"/home/{acct}", "/bin/bash"))
+
+
+@pytest.mark.parametrize("gecos,uid", [
+    ("qdistro tier3s silo other", 4242),   # the marker of ANOTHER silo
+    ("An Ordinary Account", 4242),          # a foreign/recreated account
+    ("qdistro tier3s silo smoke", -1),      # the admin uid (-1: resolved below)
+    ("qdistro tier3s silo smoke", 80),      # a sub-1000 uid
+], ids=["other-silo-marker", "foreign-account", "admin-uid", "low-uid"])
+def test_silo_query_rejects_an_unbound_account(real_ops, monkeypatch, gecos, uid):
+    """sol model-A r1 P2-3: the qt3s-<silo> account must carry THIS silo's
+    GECOS marker on a regular non-admin uid; anything else is not this silo's
+    store — the query never reaches podman and the observation is fail-closed
+    'still running', never 'stopped'."""
+    def fake(name):
+        if name == "qt3s-smoke":
+            return _silo_pw(name, sm.ADMIN_UID if uid < 0 else uid, gecos)
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running("smoke") is True
+    assert len(rec.calls) == 1            # is-active only; podman never ran
+
+
+def test_silo_query_rejects_a_truncation_collision(real_ops, monkeypatch):
+    """sol model-A r1 P2-3: two silo names sharing their first 27 chars map to
+    ONE qt3s- account. The owner is observed through its store; the collider's
+    marker does not match and the query refuses before podman — fail-closed,
+    not 'stopped' on the other's absence."""
+    owner, collider = "a" * 28, "a" * 27 + "b"
+    acct = "qt3s-" + "a" * 27
+    def fake(name):
+        if name == acct:
+            return _silo_pw(acct, 4242, f"qdistro tier3s silo {owner}")
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n")),
+                                 (_exists, _verdict(1))])
+    assert real_ops.tier3s_silo_running(owner) is False
+    assert len(rec.calls) == 2
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running(collider) is True
+    assert len(rec.calls) == 1            # refused before podman
+
+
+def test_silo_query_with_no_account_weighs_the_record(real_ops, monkeypatch):
+    """The qt3s-<silo> account is provisioned lazily at first launch. When
+    NOTHING resolves under it the podman query cannot run — but that is not
+    automatically 'running' (astra C2-end P2): the spawn creates the account
+    (step 3b) BEFORE its control record and before the first podman call in
+    its store, so no record + no account is a proven pre-provisioning
+    failure and reads stopped. A record that survives an absent account is
+    the missing-identity-after-provisioning case and stays fail-closed."""
+    def fake(name):
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running("smoke") is False
+    assert len(rec.calls) == 1            # podman is never invoked
+    ctl = sm.TIER3S_CTL_DIR / ("b" * 32)
+    ctl.mkdir()
+    (ctl / "state").write_text(f"schema=1\nunit={UNIT}\n")
+    assert real_ops.tier3s_silo_running("smoke") is True
+
+
+def test_failed_first_start_before_provisioning_recovers(store, ops,
+                                                         monkeypatch,
+                                                         tmp_path):
+    """astra C2-end P2 lifecycle regression: a first launch refused BEFORE
+    the qt3s-* account exists (a transient stanza-write or provisioning
+    failure) must not wedge the silo Active forever — the real account
+    observation proves nothing ran, so the start records Stopped/failed and
+    an ordinary repair + start + stop + delete all work."""
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    monkeypatch.setattr(sm, "TIER3S_CTL_DIR", ctl)
+    ops.tier3s_silo_running = _SystemOps().tier3s_silo_running
+    # the silo account does not resolve: provisioning never ran
+    def no_account(name):
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", no_account)
+    _install(monkeypatch, [(_is("is-active"), (3, "failed\n")),
+                           (_exists, _verdict(1))])
+    ops.start_raises = SessionError("the launch was refused")
+    make(store)
+    with pytest.raises(SessionError, match="refused or failed"):
+        store.start("smoke")
+    silo = store.get("smoke")
+    assert silo.state == State.STOPPED
+    assert not getattr(silo, "start_unresolved", False)
+    # repair: provisioning now yields the bound account; start + stop + delete
+    def bound(name):
+        if name == "qt3s-smoke":
+            return _silo_pw(name, 4242, "qdistro tier3s silo smoke")
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", bound)
+    ops.start_raises = None
+    store.start("smoke")
+    assert store.get("smoke").state == State.ACTIVE
+    store.stop("smoke")
+    assert store.get("smoke").state == State.STOPPED
+    store.delete("smoke")
+    assert store.list_silos() == []
+
+
+def test_observe_unbound_silo_account_is_unknown(real_ops, monkeypatch):
+    """observation leg: an unbound qt3s-<silo> account yields 'unknown', not
+    'stopped' — the store that was not queried cannot vouch absence."""
+    def fake(name):
+        if name == "qt3s-smoke":
+            return _silo_pw(name, 4242, "qdistro tier3s silo other")
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", fake)
+    rec = _install(monkeypatch, [
+        (_is("systemctl", "show"),
+         (0, "LoadState=loaded\nActiveState=inactive\nJob=\n"))])
+    status, reason = real_ops.observe_silo("smoke", sm.ADMIN_UID, "tier3s")
+    assert status == "unknown", reason
 
 
 def test_running_true_while_a_control_record_of_the_unit_survives(real_ops, monkeypatch):
@@ -1163,8 +1300,9 @@ def test_installed_sources_exist():
 def _t3s_installer_block() -> str:
     """The installer's tier3s section, verbatim: from its header comment up to
     the end marker. The tests below EXECUTE this text (the real installer
-    lines), with `install`, `live_only` and `systemd-tmpfiles` replaced by
-    recorders, so a guard change in the installer changes what they see."""
+    lines), with `install`, `live_only`, `systemd-tmpfiles` and `groupadd`
+    replaced by recorders, so a guard change in the installer changes what
+    they see."""
     text = INSTALLER.read_text()
     start = text.index("# Tier 3s (gVisor runsc; Experimental, dev profile only)")
     end = text.index("# --- end tier 3s ---", start)
@@ -1181,6 +1319,7 @@ def _run_t3s_block(tmp_path, env_value):
         'install() { printf "install %s\\n" "$*" >> "$LOG"; }\n'
         'live_only() { printf "live_only %s\\n" "$1" >> "$LOG"; }\n'
         'systemd-tmpfiles() { printf "tmpfiles %s\\n" "$*" >> "$LOG"; }\n'
+        'groupadd() { printf "groupadd %s\\n" "$*" >> "$LOG"; }\n'
         + _t3s_installer_block()
         + 'echo "BLOCK-END"\n'
     )
@@ -1210,6 +1349,7 @@ def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
     cfiles = {f"/usr/lib/qdistro/tier3s/{p.name}" for p in REPO.glob("tier3s/Containerfile.*")}
     want = {"/usr/lib/qdistro/tier3s/spawn-tier3s.sh", "/usr/lib/qdistro/tier3s/probe.sh",
             "/usr/lib/qdistro/tier3s/tier3s-runsc", "/usr/lib/qdistro/tier3s/RUNSC_RELEASE",
+            "/usr/lib/qdistro/tier3s/containers.conf",
             "/usr/lib/qdistro/tier3s/qdistro-tier3s-entrypoint", "/usr/lib/qdistro/tier3s/make-tier3s-image.sh",
             "/usr/lib/qdistro/tier3s/headless-smoke.sh", "/usr/lib/qdistro/tier3s/configure-snapshot-repos.sh",
             "/usr/libexec/qdistro/qdistro-tier3s-scope", "/usr/libexec/qdistro/qdistro-tier3s-cleanup",
@@ -1217,6 +1357,9 @@ def test_installer_installs_the_contract_paths_with_the_flag(tmp_path):
             "/usr/libexec/qdistro/qdistro-tier3s-silo-launch"} | seccomp | decls | cfiles
     assert dests == want, dests ^ want
     assert "live_only systemd-tmpfiles --create qdistro-tier3s.conf" in calls
+    # C2 model A: the silo-group marker the spawn requires (accounts are
+    # created at first launch, but the group is an install-time fact)
+    assert "groupadd --force qdistro-tier3s" in calls
     assert "not installed" not in r.stdout
 
 

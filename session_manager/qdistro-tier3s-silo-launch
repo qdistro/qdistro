@@ -94,7 +94,8 @@ SILO="${F[0]}" BINDING="${F[1]}" WORKLOAD="${F[2]}" NETWORK="${F[3]}" TOKEN="${F
 APP_ARGV=("${F[@]:5}")
 [ "$SILO" = "$NAME" ] || { say "launch env names silo '$SILO', not this unit's '$NAME'; refusing"; exit 2; }
 
-# The fixed admin uid every podman, broker and resolver call drops to.
+# The fixed admin uid the broker/resolver calls drop to (C2 model A: podman
+# itself runs as the qt3s-<silo> account spawn-tier3s.sh resolves).
 ADMIN_UID="$(id -u admin 2>/dev/null || true)"
 [ "$ADMIN_UID" = 1000 ] || { say "admin must be uid 1000 (got '${ADMIN_UID:-missing}'); refusing"; exit 6; }
 [ -x "$SPAWN" ] || { say "spawn-tier3s.sh not installed at $SPAWN (install-session-manager.sh); refusing"; exit 5; }

@@ -457,11 +457,48 @@ def test_probe_never_uses_caller_path_tools(tmp_path):
 
 
 # --- runsc state root (CONTRACT.md D-A1) ------------------------------------
+# C2 model A: per-uid runsc roots exist only for qt3s-* podman callers (the
+# spawn creates them at launch); probing a non-caller checks only the base.
 
-def test_state_root_passes_when_provisioned(tmp_path):
+def qt3s_bin(tmp_path):
+    """PATH fakes resolving `qt3s-probe` to the caller's own uid, so the
+    probe's qt3s-* per-uid checks run without a real account or NSS writes."""
+    uid = os.getuid()
+    b = tmp_path / "qt3sbin"
+    b.mkdir(exist_ok=True)
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        'case "${last:-}" in -*|"") exec /usr/bin/id "$@" ;; esac\n'
+        'case " $* " in *" -u "*) echo %d; exit 0 ;; esac\n'
+        "echo 'uid=%d(qt3s-probe) gid=100(qt3s-probe)'\n" % (uid, uid))
+    (b / "getent").write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        "  'passwd qt3s-probe') echo 'qt3s-probe:x:%d:100::/home/qt3s-probe:/bin/sh' ;;\n"
+        "esac\nexit 0\n" % uid)
+    for f in ("id", "getent"):
+        (b / f).chmod(0o755)
+    return b
+
+
+def qt3s_probe(inst, tmp_path):
+    return run(inst.root, user="qt3s-probe", pin=inst.pin,
+               path_prepend=f"{qt3s_bin(tmp_path)}:{inst.bin}")
+
+
+def test_state_root_passes_for_a_provisioned_qt3s_caller(tmp_path):
     inst = Install(tmp_path)
-    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    r = qt3s_probe(inst, tmp_path)
     assert f"PASS state_root: {inst.state_root} (uid {os.getuid()} 0700" in r.stdout, r.stdout
+
+
+def test_state_root_is_base_only_for_a_non_caller(tmp_path):
+    """admin (and any non-qt3s user) never invokes runsc: a missing per-uid
+    dir is not a prerequisite — only the root-owned base is."""
+    inst = Install(tmp_path)
+    inst.state_root.rmdir()
+    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    assert f"PASS state_root: {inst.state_root.parent} (per-uid dir is a qt3s-* caller prerequisite" \
+        in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("damage", ["missing", "mode", "symlink", "base-mode"])
@@ -477,10 +514,13 @@ def test_state_root_missing_or_loose_fails(tmp_path, damage):
         inst.state_root.symlink_to(tmp_path / "elsewhere")
     else:
         inst.state_root.parent.chmod(0o775)
-    r = run(inst.root, pin=inst.pin, path_prepend=inst.bin)
+    r = qt3s_probe(inst, tmp_path)
     assert r.returncode == 1, r.stdout
     assert "FAIL state_root:" in r.stdout
-    assert "systemd-tmpfiles --create qdistro-tier3s.conf" in r.stdout
+    if damage == "base-mode":
+        assert "systemd-tmpfiles --create qdistro-tier3s.conf" in r.stdout
+    else:
+        assert "spawn-tier3s.sh creates it" in r.stdout
 
 
 def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):

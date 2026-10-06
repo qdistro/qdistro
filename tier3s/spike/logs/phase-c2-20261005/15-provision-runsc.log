@@ -1,0 +1,15 @@
+### host 2026-10-05T08:29:25Z: vm-exec t3s-c2-261005-101056-3578230-20792 <<CMD
+bash /root/t3s-c2/tier3s/provision-runsc.sh && /usr/libexec/qdistro/runsc/runsc --version | head -2
+CMD
+[vm-exec] guest identity pinned (pid 1385 start 42230)
+provision-runsc: holding the provisioning lock /run/qdistro-runsc/provision.lock
+provision-runsc: a download is published only into a trusted cache dir: /var/cache/qdistro/runsc/20260928.0
+provision-runsc: downloading https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64/gvisor.tar.zstd
+provision-runsc: tarball sha512 OK (download)
+provision-runsc: cached /var/cache/qdistro/runsc/20260928.0/gvisor.tar.zstd
+provision-runsc: all 6 pinned files verified
+provision-runsc: runsc --version: runsc version release-20260928.0
+provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+runsc version release-20260928.0
+spec: 1.2.1
+### exit=0

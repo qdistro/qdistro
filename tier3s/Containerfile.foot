@@ -1,6 +1,7 @@
 # tier 3s foot GUI workload (tier3s/CONTRACT.md §7). Built by
 # tier3s/make-tier3s-image.sh as qdistro/tier3s-foot:latest and run under
-# runsc by spawn-tier3s.sh: read-only root, keep-id uid 1000, no network, the
+# runsc by spawn-tier3s.sh: read-only root, silo keep-id (guest uid == the silo's
+# host uid, Phase C2 model A), no network, the
 # waypipe bridge at /run/qdistro/link (host-uds=open).
 #
 # The base follows the snapshot.conf pin (make-tier3s-image.sh passes it), so
@@ -29,10 +30,12 @@ RUN zypper --non-interactive install --no-recommends \
  && zypper clean --all \
  && rm -rf /var/cache/zypp/* /var/log/*.log
 
-# uid 1000 = admin on the host; --userns=keep-id maps it 1:1. The passwd
-# entry and HOME are part of the image, not something podman has to
-# synthesize. .cache exists as the tmpfs mountpoint (the font cache lives
-# there) under the read-only root.
+# uid 1000 is the in-image default identity ONLY: the launch overrides it
+# with --user=<silo uid> (--userns=keep-id maps that uid to the silo's host
+# uid 1:1, Phase C2 model A). The passwd entry and HOME are part of the image
+# so a bare podman run still resolves a user and a writable home.
+# .cache exists as the tmpfs mountpoint (the font cache lives there) under
+# the read-only root.
 RUN grep -q '^admin:' /etc/group  || echo 'admin:x:1000:' >> /etc/group \
  && grep -q '^admin:' /etc/passwd || echo 'admin:x:1000:1000:qdistro admin:/home/admin:/bin/bash' >> /etc/passwd \
  && install -d -o 1000 -g 1000 -m 0700 /home/admin /home/admin/.cache \

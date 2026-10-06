@@ -39,8 +39,8 @@ T3S_EXIT_HOOK='
     systemctl restart qdistro-admin-broker.service 2>/dev/null || :'
 
 step "0. preconditions, silos"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
 is "audit db present" "$(yes_no test -f $AUDIT_DB)" yes
@@ -52,6 +52,11 @@ for s in $SA $SB; do
 done
 set_rules "allow:$GUISPAWN"
 is "broker answers allow for the GUI spawn" "$(broker_check "$GUISPAWN")" allow
+# Model A: provision qt3s-<silo> + per-silo image store for both silos
+for s in $SA $SB; do
+    if ensure_silo_image "$s" weston-terminal; then pass "$s: qt3s-$s provisioned; image in its store"
+    else fail "$s: ensure_silo_image failed"; fi
+done
 
 step "1. GUI launch registers the real bridge-client (pid,starttime)"
 BEFORE=$(audit_count "qdistro.lineage.register:$SA")
@@ -154,7 +159,7 @@ for s in $SA $SB; do
     sm StopSilo si "$s" 10 > /dev/null 2>&1
     wait_for 90 unit_down "$(unit_of "$s")"
 done
-assert_bridge_gone "cleanup/A" "$TA"; assert_launch_gone "cleanup/A" "$TA" "$(ctr_of "$SA")"
+assert_bridge_gone "cleanup/A" "$TA"; assert_launch_gone "cleanup/A" "$TA" "$SA"
 sm DeleteSilo s "$SA" > /dev/null; is "DeleteSilo $SA" "$(silo_state "$SA")" absent
 sm DeleteSilo s "$SB" > /dev/null; is "DeleteSilo $SB" "$(silo_state "$SB")" absent
 set_rules none

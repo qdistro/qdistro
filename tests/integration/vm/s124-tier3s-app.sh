@@ -25,9 +25,9 @@ ACT_W="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 ACT_F="qdistro.tier3s.spawn:foot/foot"
 
 step "0. preconditions"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "weston-terminal image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
-is "foot image loaded" "$(yes_no pm image exists localhost/qdistro/tier3s-foot:latest)" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "weston-terminal image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-weston-terminal:latest)" yes
+is "foot image staged in admin's store" "$(yes_no pm image exists localhost/qdistro/tier3s-foot:latest)" yes
 is "admin compositor socket present" "$(yes_no test -S $ADMIN_RT/$GUI_DISPLAY)" yes
 is "qdshell is up" "$(as_admin systemctl --user is-active qdshell.service 2>/dev/null)" active
 is "ydotoold socket present (input injection path)" "$(yes_no test -S /run/user/1000/ydotool.sock)" yes
@@ -79,8 +79,8 @@ drive_gui() {
         ydotool type "touch /tmp/s124-$s-typed" || fail "$tag: ydotool type failed"
     as_admin env YDOTOOL_SOCKET=/run/user/1000/ydotool.sock \
         ydotool key 28:1 28:0 || fail "$tag: ydotool enter failed"
-    wait_for 30 bash -c "runuser -u admin -- env -i PATH=/usr/bin:/bin HOME=/home/admin USER=admin LOGNAME=admin XDG_RUNTIME_DIR=/run/user/1000 podman exec '$ctr' test -f /tmp/s124-$s-typed"
-    if pm exec "$ctr" test -f "/tmp/s124-$s-typed" 2>/dev/null; then
+    wait_for 30 pm_s "$s" exec "$ctr" test -f "/tmp/s124-$s-typed"
+    if pm_s "$s" exec "$ctr" test -f "/tmp/s124-$s-typed" 2>/dev/null; then
         pass "$tag: typed command created /tmp/s124-$s-typed INSIDE the sandbox"
     else
         fail "$tag: typed input never reached the sandboxed shell (no marker in the container)"
@@ -114,24 +114,25 @@ step "3. per-workload seccomp profile exercised inside each running container"
 # the name so an ALLOW would be inert — the profile denies it and the
 # `chmod -h` path must EPERM while plain chmod (fchmodat) works.
 seccomp_probe() {
-    # $1=silo tag $2=container $3=profile-file-name
+    # $1=silo tag $2=container $3=profile-file-name (model A: the container
+    # lives in qt3s-<silo>'s store — every podman call goes through pm_s)
     local s="$1" ctr="$2" prof="$3" out
     # podman inlines the parsed profile into the OCI spec — no seccomp
     # annotation exists. The launch argv's --security-opt element (from
     # .Config.CreateCommand) names the per-workload file; the EPERM
     # exercises below prove a filter actually applies its decisions.
-    out=$(pm inspect "$ctr" --format '{{json .Config.CreateCommand}}' 2>/dev/null \
+    out=$(pm_s "$s" inspect "$ctr" --format '{{json .Config.CreateCommand}}' 2>/dev/null \
         | grep -o 'seccomp=[^,"]*' | head -1)
     is "$s: launch argv names the $prof profile" "${out##*/}" "$prof"
-    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-p-$$; : > "$f"; chmod 600 "$f" && printf "chmod_rc=0 mode=%s\n" "$(stat -c %a "$f")" || printf "chmod_rc=%s\n" "$?"' 2>&1)
+    out=$(pm_s "$s" exec "$ctr" sh -c 'f=/tmp/t3s-sc-p-$$; : > "$f"; chmod 600 "$f" && printf "chmod_rc=0 mode=%s\n" "$(stat -c %a "$f")" || printf "chmod_rc=%s\n" "$?"' 2>&1)
     is "$s: fchmodat ALLOW effective (plain chmod)" "$out" "chmod_rc=0 mode=600"
-    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-h-$$; : > "$f"; chmod 600 "$f"; chmod -h 700 "$f" 2>/tmp/t3s-sc-e1-$$; printf "nofollow_rc=%s eperm=%s mode=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e1-$$)" "$(stat -c %a "$f")"' 2>&1)
+    out=$(pm_s "$s" exec "$ctr" sh -c 'f=/tmp/t3s-sc-h-$$; : > "$f"; chmod 600 "$f"; chmod -h 700 "$f" 2>/tmp/t3s-sc-e1-$$; printf "nofollow_rc=%s eperm=%s mode=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e1-$$)" "$(stat -c %a "$f")"' 2>&1)
     is "$s: fchmodat2 path (chmod -h) EPERM, mode unchanged" "$out" "nofollow_rc=1 eperm=1 mode=600"
-    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-l-$$; : > "$f"; ln "$f" /tmp/t3s-sc-ln-$$ 2>/tmp/t3s-sc-e2-$$; printf "ln_rc=%s eperm=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e2-$$)"' 2>&1)
+    out=$(pm_s "$s" exec "$ctr" sh -c 'f=/tmp/t3s-sc-l-$$; : > "$f"; ln "$f" /tmp/t3s-sc-ln-$$ 2>/tmp/t3s-sc-e2-$$; printf "ln_rc=%s eperm=%s\n" "$?" "$(grep -c "Operation not permitted" /tmp/t3s-sc-e2-$$)"' 2>&1)
     is "$s: link/linkat DENY effective" "$out" "ln_rc=1 eperm=1"
-    out=$(pm exec "$ctr" sh -c 'f=/tmp/t3s-sc-x-$$; : > "$f"; ls -l "$f" 2>/tmp/t3s-sc-e-$$ >/dev/null; printf "ls_rc=%s stderr_bytes=%s\n" "$?" "$(wc -c < /tmp/t3s-sc-e-$$)"' 2>&1)
+    out=$(pm_s "$s" exec "$ctr" sh -c 'f=/tmp/t3s-sc-x-$$; : > "$f"; ls -l "$f" 2>/tmp/t3s-sc-e-$$ >/dev/null; printf "ls_rc=%s stderr_bytes=%s\n" "$?" "$(wc -c < /tmp/t3s-sc-e-$$)"' 2>&1)
     is "$s: llistxattr ALLOW effective (ls -l clean)" "$out" "ls_rc=0 stderr_bytes=0"
-    out=$(pm exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(grep "^NoNewPrivs:" /proc/self/status | cut -f2)" "$(grep "^Seccomp:" /proc/self/status | cut -f2)"' 2>&1)
+    out=$(pm_s "$s" exec "$ctr" sh -c 'printf "nnp=%s seccomp=%s\n" "$(grep "^NoNewPrivs:" /proc/self/status | cut -f2)" "$(grep "^Seccomp:" /proc/self/status | cut -f2)"' 2>&1)
     is "$s: NoNewPrivs + seccomp filter mode inside" "$out" "nnp=1 seccomp=2"
 }
 seccomp_probe "$SW" "$(ctr_of "$SW")" weston-terminal.json
@@ -144,7 +145,7 @@ for s in "$SW" "$SF"; do sm StopSilo si "$s" 10 > /dev/null; is "StopSilo $s" "$
 for s in "$SW" "$SF"; do
     u=$(unit_of "$s"); t=$TW; h=$HW; [ "$s" = "$SF" ] && { t=$TF; h=$HF; }
     wait_for 90 unit_down "$u"
-    assert_launch_gone "teardown/$s" "$t" "$(ctr_of "$s")"
+    assert_launch_gone "teardown/$s" "$t" "$s"
     assert_bridge_gone "teardown/$s" "$t"
     wait_for 30 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat --after-cursor='$cur' | grep -q 'toplevel_removed handle=$h'"
     is "$s: compositor logged toplevel_removed for handle $h" \
