@@ -47,6 +47,8 @@ if command -v restorecon >/dev/null 2>&1; then
         restorecon -R /run/qdistro-tier3s-runsc
     [ -d /run/qdistro-tier3s ] && \
         restorecon -R /run/qdistro-tier3s
+    [ -d /run/qdistro-tier3s-ctl ] && \
+        restorecon -R /run/qdistro-tier3s-ctl
 fi
 
 echo "[tier3s-install] OK — qdistro_tier3s active"

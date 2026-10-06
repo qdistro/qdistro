@@ -125,7 +125,7 @@ require {
 
 	# Classes/perms referenced below.
 	class process { transition fork signal sigkill sigstop signull sigchld getattr setsched execmem ptrace setcap };
-	class file { execute read open getattr map entrypoint execute_no_trans create unlink write lock setattr ioctl append mounton };
+	class file { execute read open getattr map entrypoint execute_no_trans create unlink write lock setattr ioctl append mounton rename };
 	class dir { search getattr read open write add_name remove_name create mounton setattr ioctl };
 	class lnk_file { read getattr create };
 	class sock_file { create unlink write getattr read open };
@@ -243,8 +243,13 @@ allow qdistro_tier3s_t container_file_t:dir { add_name create getattr mounton op
 allow qdistro_tier3s_t container_file_t:file { create execute getattr mounton open read unlink write setattr };
 allow qdistro_tier3s_t container_file_t:lnk_file { getattr read };
 allow qdistro_tier3s_t container_file_t:filesystem { getattr remount };
-allow qdistro_tier3s_t container_ro_file_t:dir search;
-allow qdistro_tier3s_t container_ro_file_t:file { open read };
+allow qdistro_tier3s_t container_ro_file_t:dir { add_name create getattr read remove_name search write };
+# The userdata/ subtree under overlay-containers is labelled
+# container_ro_file_t by the base policy even though podman's runtime
+# (conmon, runsc exec) writes exec state there — pid-tmp-*/exec_pid
+# create/setattr/rename. These grants are why `podman exec` works; the
+# image layers themselves remain read-only at mount level.
+allow qdistro_tier3s_t container_ro_file_t:file { create getattr open read rename setattr unlink write };
 allow qdistro_tier3s_t container_ro_file_t:lnk_file { getattr read };
 allow qdistro_tier3s_t container_var_run_t:dir { add_name getattr open read search write };
 allow qdistro_tier3s_t container_var_run_t:file { create getattr open read write unlink };
