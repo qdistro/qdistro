@@ -1009,6 +1009,12 @@
 
         `seat_name` MUST match a previously-emitted `seat_created`
         event; unknown seats are silently ignored.
+
+        While the compositor is locked the request is not an error: the
+        shell's verdicts are asynchronous, so a deny can legitimately
+        arrive after the lock. qdwin records it (per seat and kind) and
+        applies it at unlock, never mutating the selection behind the
+        lock screen.
       </description>
       <arg name="seat_name" type="string"/>
       <arg name="is_primary" type="uint" summary="0 clipboard, 1 primary"/>

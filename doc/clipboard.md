@@ -61,6 +61,11 @@ its own verdict. A selection replaced faster than its verdicts arrive can
 therefore stay live, and deny coalescing can skip a clear, so a set-time DENY
 line is not proof that the selection was cleared on the wire.
 
+A deny verdict that arrives while the session is locked (copy, then lock
+within the verdict window) is not an error: qdwin records the
+`clear_selection` per seat and kind and applies it at unlock, so nothing
+changes behind the lock screen and the shell's connection survives.
+
 Older plugins, and compositors before v15, keep the synchronous calls, which
 decide (and clear) before returning and use a 200 ms broker deadline.
 

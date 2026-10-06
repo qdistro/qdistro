@@ -822,6 +822,10 @@ struct qdwin {
 	bool capture_stale_timer_armed;
 	uid_t allowed_uid;
 	int locked;
+	/* clear_selection requests received while locked, applied at unlock
+	 * (struct qdwin_deferred_clear; one entry per seat name, bounded). */
+	struct wl_list deferred_clears;
+	int deferred_clear_count;
 	int shell_bound;
 	pid_t shell_pid;
 	uid_t shell_uid;
@@ -8032,6 +8036,8 @@ qdwin_handle_attach_lock_surface(struct wl_client *client,
 		qdwin_overlay_grab_start(qdwin, /* role=locker */ 2);
 }
 
+static void qdwin_flush_deferred_clears(struct qdwin *qdwin, bool apply);
+
 static void
 qdwin_handle_set_locked(struct wl_client *client,
 			struct wl_resource *resource,
@@ -8065,6 +8071,7 @@ qdwin_handle_set_locked(struct wl_client *client,
 		    qdwin->overlay_grab_role == 2)
 			qdwin_overlay_grab_end(qdwin);
 		qdwin_show_non_lock_layers(qdwin);
+		qdwin_flush_deferred_clears(qdwin, true);
 	}
 	weston_log("qdwin: set_locked=%d (lock_surface=%p)\n",
 		   want, (void*)qdwin->lock_surface);
@@ -8073,6 +8080,78 @@ qdwin_handle_set_locked(struct wl_client *client,
 		qdwin_shell_v1_send_locked_changed(qdwin->shell_resource,
 						   want);
 	weston_compositor_schedule_repaint(qdwin->compositor);
+}
+
+#define QDWIN_DEFERRED_CLEAR_MAX 16
+
+struct qdwin_deferred_clear {
+	struct wl_list link;
+	char *seat_name;
+	bool clipboard;
+	bool primary;
+};
+
+static void qdwin_clear_selection_apply(struct qdwin *qdwin,
+					const char *seat_name,
+					uint32_t is_primary);
+
+/* D6: a deny verdict that arrives while locked must not mutate the seat
+ * selection behind the lock screen, and must not kill the shell either:
+ * qdshell decides clipboard verdicts asynchronously (up to 2 s), so
+ * copy-then-lock legitimately lands a clear_selection after set_locked(1).
+ * Record it (deduplicated per seat and kind) and apply it at unlock. A
+ * clear is fail-safe, so applying it to a selection set later is harmless;
+ * past QDWIN_DEFERRED_CLEAR_MAX distinct seats the request is dropped with
+ * a log line (the receive-time gate still guards the bytes). */
+static void
+qdwin_defer_clear_selection(struct qdwin *qdwin, const char *seat_name,
+			    uint32_t is_primary)
+{
+	struct qdwin_deferred_clear *dc;
+	wl_list_for_each(dc, &qdwin->deferred_clears, link) {
+		if (strcmp(dc->seat_name, seat_name) == 0)
+			goto mark;
+	}
+	if (qdwin->deferred_clear_count >= QDWIN_DEFERRED_CLEAR_MAX) {
+		weston_log("qdwin: clear_selection seat=%s while locked dropped "
+			   "(deferred list full)\n", seat_name);
+		return;
+	}
+	dc = calloc(1, sizeof(*dc));
+	if (dc)
+		dc->seat_name = strdup(seat_name);
+	if (!dc || !dc->seat_name) {
+		free(dc);
+		weston_log("qdwin: clear_selection seat=%s while locked dropped "
+			   "(out of memory)\n", seat_name);
+		return;
+	}
+	wl_list_insert(qdwin->deferred_clears.prev, &dc->link);
+	qdwin->deferred_clear_count++;
+mark:
+	if (is_primary)
+		dc->primary = true;
+	else
+		dc->clipboard = true;
+	weston_log("qdwin: clear_selection seat=%s %s deferred until unlock\n",
+		   seat_name, is_primary ? "primary" : "clipboard");
+}
+
+/* Frees the deferred clears; applies them first when apply is set (unlock). */
+static void
+qdwin_flush_deferred_clears(struct qdwin *qdwin, bool apply)
+{
+	struct qdwin_deferred_clear *dc, *next;
+	wl_list_for_each_safe(dc, next, &qdwin->deferred_clears, link) {
+		if (apply && dc->clipboard)
+			qdwin_clear_selection_apply(qdwin, dc->seat_name, 0);
+		if (apply && dc->primary)
+			qdwin_clear_selection_apply(qdwin, dc->seat_name, 1);
+		wl_list_remove(&dc->link);
+		free(dc->seat_name);
+		free(dc);
+	}
+	qdwin->deferred_clear_count = 0;
 }
 
 /* spec/10: shell rejected the just-fired selection_set. Drop the seat's
@@ -8084,7 +8163,6 @@ qdwin_handle_clear_selection(struct wl_client *client,
 			     uint32_t is_primary)
 {
 	struct qdwin *qdwin = wl_resource_get_user_data(resource);
-	struct weston_seat *seat;
 	(void)client;
 	if (!qdwin || !seat_name)
 		return;
@@ -8095,15 +8173,18 @@ qdwin_handle_clear_selection(struct wl_client *client,
 	 * wipe selections before any shell binds. */
 	if (!qdwin_shell_require_bound(qdwin, resource))
 		return;
-	/* D6: uniform locked gate (same class as fullscreen/tile). A deny
-	 * verdict that arrives while locked is deferred until unlock rather
-	 * than mutating the seat selection behind the lock screen. */
 	if (qdwin->locked) {
-		wl_resource_post_error(resource,
-				       QDWIN_SHELL_V1_ERROR_LOCKED, "locked");
+		qdwin_defer_clear_selection(qdwin, seat_name, is_primary);
 		return;
 	}
-	seat = NULL;
+	qdwin_clear_selection_apply(qdwin, seat_name, is_primary);
+}
+
+static void
+qdwin_clear_selection_apply(struct qdwin *qdwin, const char *seat_name,
+			    uint32_t is_primary)
+{
+	struct weston_seat *seat = NULL;
 	struct weston_seat *s;
 	wl_list_for_each(s, &qdwin->compositor->seat_list, link) {
 		if (s->seat_name && strcmp(s->seat_name, seat_name) == 0) {
@@ -10117,6 +10198,7 @@ qdwin_handle_locker_set_locked(struct wl_client *client,
 		    qdwin->overlay_grab_role == 2)
 			qdwin_overlay_grab_end(qdwin);
 		qdwin_show_non_lock_layers(qdwin);
+	qdwin_flush_deferred_clears(qdwin, true);
 	}
 	weston_log("qdwin: locker set_locked=%d (lock_surface=%p)\n",
 		   want, (void*)qdwin->lock_surface);
@@ -13488,6 +13570,7 @@ qdwin_destroy(struct wl_listener *listener, void *data)
 		weston_shell_utils_curtain_destroy(qdwin->lock_curtain);
 		qdwin->lock_curtain = NULL;
 	}
+	qdwin_flush_deferred_clears(qdwin, false);
 	wl_list_remove(&qdwin->output_created_listener.link);
 	wl_list_remove(&qdwin->output_resized_listener.link);
 	wl_list_remove(&qdwin->output_destroyed_listener.link);
@@ -23993,6 +24076,7 @@ wet_shell_init(struct weston_compositor *ec, int *argc, char *argv[])
 			 WESTON_BACKEND_DRM) ? 1 : 0;
 	wl_list_init(&qdwin->toplevels);
 	wl_list_init(&qdwin->view_streams);
+	wl_list_init(&qdwin->deferred_clears);
 	wl_list_init(&qdwin->seat_trackers);
 	wl_list_init(&qdwin->activation_tokens);
 	wl_list_init(&qdwin->activation_pending);

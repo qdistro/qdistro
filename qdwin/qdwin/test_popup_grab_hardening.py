@@ -9,9 +9,10 @@ them. Each check states the user-visible compositor behavior it protects:
   D6 — the trusted shell's mutating popup / selection / input-config requests
        are refused while the screen is locked, consistent with fullscreen/tile
        (the lock screen owns the display; set_display_power is the exception).
-       Popup/selection refuse FATALLY (post_error); the two input-preference
+       Popups refuse FATALLY (post_error); the two input-preference
        snapshots refuse with a logged non-fatal drop so a shell restarted
-       during a lock is not crash-looped — see D6_DROP_HANDLERS.
+       during a lock is not crash-looped — see D6_DROP_HANDLERS; a deny's
+       clear_selection is deferred to unlock — see D6_DEFER_HANDLERS.
   D7 — qdwin_shell_v1.show_popup requires a valid input grab serial (like an
        xdg_popup grab) before it installs a compositor-wide pointer grab, and
        the protocol advertises this (v29 + serial arg + invalid_grab error).
@@ -102,7 +103,6 @@ def check_d5_primary_mime_cap(source):
 # display state behind the lock screen.
 D6_FATAL_HANDLERS = (
     "qdwin_handle_show_popup",
-    "qdwin_handle_clear_selection",
 )
 
 # Handlers whose locked gate is a logged, NON-fatal DROP. This is a deliberate,
@@ -123,9 +123,57 @@ D6_DROP_HANDLERS = (
     "qdwin_handle_set_key_repeat",
 )
 
+# Handlers whose locked gate DEFERS the request to unlock. clear_selection
+# moved here from D6_FATAL_HANDLERS: qdshell decides clipboard verdicts
+# asynchronously (up to 2 s, ClipboardGate + BrokerCallRunner), so a deny for
+# a copy made just before the lock legitimately arrives after set_locked(1);
+# the fatal error reset the shell's connection on copy-then-lock. The lock
+# invariant is unchanged — nothing mutates the selection behind the lock
+# screen — and the clear is not lost: both unlock paths apply it.
+D6_DEFER_HANDLERS = {
+    "qdwin_handle_clear_selection": "qdwin_defer_clear_selection",
+}
+# Every unlock path (the shell's and the locker's set_locked) must apply the
+# deferred requests.
+D6_UNLOCK_HANDLERS = (
+    "qdwin_handle_set_locked",
+    "qdwin_handle_locker_set_locked",
+)
+D6_UNLOCK_FLUSH = "qdwin_flush_deferred_clears(qdwin, true)"
+
 
 def check_d6_locked_gate(source):
     code = _strip_comments(source)
+    for name, defer_fn in D6_DEFER_HANDLERS.items():
+        body, err = _function_body(code, name + r"\s*\(", name)
+        if err:
+            return fail(err)
+        if "QDWIN_SHELL_V1_ERROR_LOCKED" in body:
+            return fail(f"D6: {name} is a DEFER handler but still posts "
+                        f"ERROR_LOCKED")
+        rb = body.find("qdwin_shell_require_bound")
+        locked_at = body.find("qdwin->locked")
+        if locked_at == -1:
+            return fail(f"D6: {name} missing the locked gate")
+        if rb == -1 or locked_at < rb:
+            return fail(f"D6: {name} locked gate must follow require_bound")
+        gate = body[locked_at:]
+        defer_at = gate.find(defer_fn + "(")
+        ret_at = gate.find("return;")
+        if defer_at == -1 or ret_at == -1 or ret_at < defer_at:
+            return fail(f"D6: {name} must call {defer_fn}() and return "
+                        f"while locked")
+        apply_at = body.find("qdwin_clear_selection_apply(")
+        if apply_at != -1 and apply_at < locked_at:
+            return fail(f"D6: {name} mutates the selection before its "
+                        f"locked gate")
+    for name in D6_UNLOCK_HANDLERS:
+        body, err = _function_body(code, name + r"\s*\(", name)
+        if err:
+            return fail(err)
+        if D6_UNLOCK_FLUSH not in body:
+            return fail(f"D6: unlock path {name} does not apply deferred "
+                        f"requests ({D6_UNLOCK_FLUSH})")
     for name in D6_FATAL_HANDLERS + D6_DROP_HANDLERS:
         body, err = _function_body(code, name + r"\s*\(", name)
         if err:
