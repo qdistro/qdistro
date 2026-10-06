@@ -383,5 +383,13 @@ mv -fT "$WNEW" "$WRAPPER_DEST"
 mv -fT "$SNEW" "$STAMP"
 installed_matches || die "post-install verification failed"
 check_version "$DEST/runsc" || die "post-install version check failed ('$VER_SEEN')"
+# SELinux (selinux/tier3s): the exec transition into qdistro_tier3s_t keys
+# on the qdistro_tier3s_exec_t file label, which is what restorecon applies
+# from the installed module's file contexts. No module loaded (or no
+# restorecon) is not an error — the transition simply does not engage.
+if [ -z "$PREFIX" ] && command -v restorecon >/dev/null 2>&1 \
+    && semodule -l 2>/dev/null | grep -q '^qdistro_tier3s\b'; then
+    restorecon -R "$DEST" || true
+fi
 if [ -n "$PREFIX" ]; then log "PASS (TEST prefix $PREFIX): installed runsc $REL"
 else log "PASS: installed runsc $REL to $DEST"; fi

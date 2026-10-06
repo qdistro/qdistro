@@ -1,0 +1,328 @@
+## <summary>qdistro Tier-3s SELinux confinement for the gVisor runsc control plane.</summary>
+## <desc>
+##   A dedicated domain for the tier-3s runsc host processes: the Sentry
+##   (gVisor's user-space kernel), the gofer (host file server), and the
+##   helper stubs (fd-parking, prewarmer, metric server). These processes
+##   are trusted-to-operate but hostile-INPUT surfaces: the gofer parses
+##   sandbox-generated LISAFS traffic and connects to the per-launch
+##   waypipe link socket, so a compromised sandbox must not be able to
+##   pivot through them into general host state. See tier3s/CONTRACT.md
+##   and doc/threat-model.md.
+##
+##   Why a new domain (and why this matters): the base policy on the
+##   qdistro host has NO existing confinement for this tree at all. A
+##   rootless podman -> conmon -> tier3s-runsc -> runsc chain inherits
+##   the caller's domain wholesale (verified on the dev VM: the unit's
+##   unconfined_service_t flows through runuser, podman and conmon into
+##   the sentry). tier3s also runs podman with label=disable, so no
+##   container_t style process label exists either. Without this module
+##   the sentry+gofer run effectively unconfined; with it they run in
+##   qdistro_tier3s_t.
+##
+##   Domain-construction model:
+##     - qdistro_tier3s_exec_t labels ONLY the runsc ELF and the
+##       gvisor-bin sidecars (see qdistro_tier3s.fc). The tier3s-runsc
+##       wrapper stays bin_t: it is a pure flag-pinning shim whose
+##       checks (stat the state root, refuse --root) are not the attack
+##       surface, and confining it would only add logger/proc noise.
+##     - The type_transition edge fires on the final ELF exec of runsc
+##       (env -> runsc), so EVERY host process that carries sandbox
+##       trust lands in the domain: conmon-driven create/start, and
+##       podman-driven state/kill/delete alike.
+##     - Source domains are the ones the real launch path can carry:
+##       container_runtime_t (the systemd launch-unit chain —
+##       unconfined_service_t execs podman, which the base policy
+##       auto-transitions to container_runtime_t, and conmon execs the
+##       wrapper/runsc from there; verified live on the dev VM) and
+##       unconfined_t (interactive/dev shells). unconfined_service_t is
+##       kept as a transition source too because podman's auto-transition
+##       is base-policy behaviour we do not control — if it is ever
+##       absent or bypassed, runsc still lands in the domain rather than
+##       inheriting an unconfined one.
+##     - runsc re-execs itself and the gvisor-bin sidecars from inside
+##       the domain (all under the same exec_t label) — those execs stay
+##       in-domain with plain execute_no_trans, no extra transitions.
+##     - qdistro_tier3s_var_run_t labels the runsc state root
+##       (/run/qdistro-tier3s-runsc/<uid>) and the per-launch token dirs
+##       (/run/qdistro-tier3s/<token> holding link.sock). New children
+##       inherit the parent dir's label, so per-launch dirs and
+##       link.sock get the type with no per-launch labelling.
+##
+##   What the domain deliberately does NOT have (pinned by neverallow
+##   below): any host network socket create (network=none is a launch
+##   invariant — runsc's own stack is off), kernel module/sysctl writes,
+##   or the ability to signal/ptrace a process in another domain.
+##
+##   Honest limits, also in doc/threat-model.md: the Sentry is a large
+##   trusted surface (it mounts proc/tmpfs and holds userns-scoped caps
+##   by design); SELinux here bounds the HOST-side blast radius of the
+##   control plane, not the guest workload — the guest's
+##   application/kernel boundary is the Sentry itself.
+##
+##   Build note: kernel policy language like tier2 — compiles with
+##   checkmodule/semodule_package, no selinux-policy-devel needed. The
+##   `require {}` block is the kernel-language equivalent of refpolicy's
+##   gen_require(); every name in it was confirmed in the live policy.
+##   The allow set below was derived from permissive-mode AVCs on the
+##   dev VM (silo keep-id launch + host-uds bridge connect), then
+##   tightened by hand — derivation artifacts (qemu-ga fifo writes,
+##   /root output redirects) were mapped to their production targets
+##   (unconfined_service_t) rather than copied.
+## </desc>
+module qdistro_tier3s 0.1.0;
+
+########################################
+#
+# Declarations
+#
+
+require {
+	# Domains that exec the tier3s runtime and must transition.
+	# container_runtime_t: the real source — the launch unit's podman
+	# auto-transitions there (base policy) and conmon execs the
+	# wrapper/runsc from it. unconfined_service_t: belt-and-braces in
+	# case the base-policy podman transition is absent. unconfined_t:
+	# interactive/dev shells.
+	type container_runtime_t;
+	type unconfined_service_t;
+	type unconfined_t;
+
+	# Roles on the caller contexts — an exec transition preserves the
+	# caller's user+role, so the new type must be valid under both
+	# system_r (unit context, system_u) and unconfined_r (login
+	# context, unconfined_u).
+	role system_r;
+	role unconfined_r;
+
+	# Base-policy attributes for the file/exec baseline.
+	attribute domain;
+	attribute file_type;
+	attribute exec_type;
+
+	# Object types the runsc control plane touches (harvested):
+	# the podman container rootfs and its runtime dirs — the gofer
+	# serves them to the sandbox.
+	type container_file_t;
+	type container_ro_file_t;
+	type container_var_run_t;
+	# Path traversal to the silo's rootless store under its $HOME.
+	type user_home_dir_t;
+	type gconf_home_t;	# ~/.local on this policy
+	type data_home_t;	# ~/.local/share on this policy
+	# Namespace/fs plumbing the sentry drives inside its own
+	# namespaces: proc, tmpfs, devpts-free mounts, nsfs fds.
+	type proc_t;
+	type tmpfs_t;
+	type tmp_t;
+	type fs_t;
+	type root_t;
+	type nsfs_t;
+	type cgroup_t;
+	type sysctl_t;
+	type sysctl_vm_t;
+	type null_device_t;
+	type io_uring_t;
+
+	# Classes/perms referenced below.
+	class process { transition fork signal sigkill sigstop signull sigchld getattr setsched execmem ptrace setcap };
+	class file { execute read open getattr map entrypoint execute_no_trans create unlink write lock setattr ioctl append mounton };
+	class dir { search getattr read open write add_name remove_name create mounton setattr };
+	class lnk_file { read getattr create };
+	class sock_file { create unlink write getattr read open };
+	class fifo_file { read write getattr ioctl setattr append };
+	class chr_file setattr;
+	class filesystem { mount unmount remount getattr };
+	class unix_stream_socket connectto;
+	class user_namespace create;
+	class cap_userns { chown dac_override dac_read_search setfcap setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
+	class capability sys_module;
+	class anon_inode create;
+	# classes named only by neverallow pins
+	class tcp_socket create;
+	class udp_socket create;
+	class rawip_socket create;
+	class sctp_socket create;
+	class dccp_socket create;
+	class icmp_socket create;
+	class packet_socket create;
+	class netlink_route_socket create;
+	class netlink_tcpdiag_socket create;
+}
+
+# The tier-3s confinement domain: runsc sentry, gofer, stubs, and the
+# short-lived state/kill/delete invocations.
+type qdistro_tier3s_t;
+typeattribute qdistro_tier3s_t domain;
+
+# Entry-point file type: /usr/libexec/qdistro/runsc/runsc and the
+# gvisor-bin sidecars.
+type qdistro_tier3s_exec_t;
+typeattribute qdistro_tier3s_exec_t file_type;
+typeattribute qdistro_tier3s_exec_t exec_type;
+
+# Runtime state type: runsc state root + per-launch token dirs.
+type qdistro_tier3s_var_run_t;
+typeattribute qdistro_tier3s_var_run_t file_type;
+
+role system_r types qdistro_tier3s_t;
+role unconfined_r types qdistro_tier3s_t;
+
+########################################
+#
+# Exec transitions into the domain
+#
+
+type_transition container_runtime_t qdistro_tier3s_exec_t:process qdistro_tier3s_t;
+type_transition unconfined_service_t qdistro_tier3s_exec_t:process qdistro_tier3s_t;
+type_transition unconfined_t qdistro_tier3s_exec_t:process qdistro_tier3s_t;
+allow container_runtime_t qdistro_tier3s_t:process transition;
+allow unconfined_service_t qdistro_tier3s_t:process transition;
+allow unconfined_t qdistro_tier3s_t:process transition;
+allow container_runtime_t qdistro_tier3s_exec_t:file { execute read open getattr map };
+allow unconfined_service_t qdistro_tier3s_exec_t:file { execute read open getattr map };
+allow unconfined_t qdistro_tier3s_exec_t:file { execute read open getattr map };
+allow qdistro_tier3s_t qdistro_tier3s_exec_t:file { entrypoint execute read open getattr map execute_no_trans };
+
+########################################
+#
+# Process mechanics (systrap)
+#
+# execmem + ptrace on SELF are load-bearing: systrap executes the
+# syscall stubs out of memfd-backed memory and ptraces its own sandbox
+# task processes. This is exactly the self-only set the plan calls for;
+# the neverallow block pins it so no later rule widens ptrace/signal
+# onto foreign domains.
+allow qdistro_tier3s_t self:process { fork signal sigkill sigstop signull sigchld getattr setsched execmem ptrace setcap };
+# user namespaces are the sandbox's own confinement root.
+allow qdistro_tier3s_t self:user_namespace create;
+# io_uring instance (runsc event loops).
+allow qdistro_tier3s_t io_uring_t:anon_inode create;
+# runsc's own control socket (connect to self) — also the pattern a
+# future in-domain gofer<->sentry channel would reuse.
+allow qdistro_tier3s_t self:unix_stream_socket connectto;
+
+########################################
+#
+# Own state: runsc root + per-launch token dir
+#
+allow qdistro_tier3s_t qdistro_tier3s_var_run_t:dir { add_name getattr open read remove_name search write create setattr };
+allow qdistro_tier3s_t qdistro_tier3s_var_run_t:file { create getattr lock open read unlink write setattr };
+allow qdistro_tier3s_t qdistro_tier3s_var_run_t:lnk_file { create read getattr };
+# link.sock: the sentry stats/opens it (host-uds validation) and the
+# gofer writes it for connect(); also covers runsc's own control .sock.
+allow qdistro_tier3s_t qdistro_tier3s_var_run_t:sock_file { create unlink write getattr read open };
+
+########################################
+#
+# Container image surface (gofer): the podman rootfs is container_file_t
+# (overlay) / container_ro_file_t (read-only layers) even under
+# label=disable — podman still mounts labels the storage. The sentry
+# executes guest binaries THROUGH the gofer, hence execute.
+#
+allow qdistro_tier3s_t container_file_t:dir { add_name create getattr mounton open read remove_name search write setattr };
+allow qdistro_tier3s_t container_file_t:file { create execute getattr mounton open read unlink write setattr };
+allow qdistro_tier3s_t container_file_t:lnk_file { getattr read };
+allow qdistro_tier3s_t container_file_t:filesystem { getattr remount };
+allow qdistro_tier3s_t container_ro_file_t:dir search;
+allow qdistro_tier3s_t container_ro_file_t:file { open read };
+allow qdistro_tier3s_t container_ro_file_t:lnk_file { getattr read };
+allow qdistro_tier3s_t container_var_run_t:dir { add_name getattr open read search write };
+allow qdistro_tier3s_t container_var_run_t:file { create getattr open read write unlink };
+
+# Path traversal to the silo store under its home (read/search only —
+# the gofer writes nothing there; container_file_t above carries the
+# store content).
+allow qdistro_tier3s_t user_home_dir_t:dir search;
+allow qdistro_tier3s_t gconf_home_t:dir { getattr search };
+allow qdistro_tier3s_t data_home_t:dir { getattr search };
+
+########################################
+#
+# Namespace/fs plumbing — the sentry mounts proc/tmpfs/sysfs-shaped
+# filesystems INSIDE its own mount+user namespaces; these host-side
+# allows are the price of gVisor providing the guest's kernel surface.
+#
+allow qdistro_tier3s_t proc_t:dir mounton;
+allow qdistro_tier3s_t proc_t:file { getattr open read };
+allow qdistro_tier3s_t proc_t:filesystem { mount unmount };
+allow qdistro_tier3s_t tmpfs_t:dir { create getattr mounton open read search setattr write add_name remove_name };
+allow qdistro_tier3s_t tmpfs_t:file { create execute getattr open read write unlink setattr };
+allow qdistro_tier3s_t tmpfs_t:lnk_file { create getattr read };
+allow qdistro_tier3s_t tmpfs_t:sock_file { create getattr unlink };
+allow qdistro_tier3s_t tmpfs_t:filesystem { getattr mount remount unmount };
+allow qdistro_tier3s_t tmp_t:dir mounton;
+allow qdistro_tier3s_t root_t:dir mounton;
+allow qdistro_tier3s_t fs_t:filesystem { getattr unmount };
+allow qdistro_tier3s_t nsfs_t:file { getattr ioctl open read };
+allow qdistro_tier3s_t nsfs_t:filesystem getattr;
+allow qdistro_tier3s_t cgroup_t:dir { getattr open read search };
+allow qdistro_tier3s_t sysctl_t:file { getattr open read };
+allow qdistro_tier3s_t sysctl_vm_t:file { getattr open read };
+allow qdistro_tier3s_t null_device_t:chr_file setattr;
+
+# userns-scoped capabilities (CAP_* against objects owned by the
+# namespace, checked on the cap_userns class — not the host's capability
+# set).
+allow qdistro_tier3s_t self:cap_userns { chown dac_override dac_read_search setfcap setgid setpcap setuid sys_admin sys_chroot sys_ptrace };
+
+########################################
+#
+# Caller-facing edges
+#
+# stdio: runsc writes the container's stdout/stderr into pipes created
+# by the invoking domain. In production that is container_runtime_t
+# (conmon under the launch unit); the unconfined_* rows cover the case
+# where podman's auto-transition is absent (unconfined_service_t) and
+# dev shells (unconfined_t).
+allow qdistro_tier3s_t container_runtime_t:fifo_file { append getattr ioctl read setattr write };
+allow qdistro_tier3s_t unconfined_service_t:fifo_file { append getattr ioctl read setattr write };
+allow qdistro_tier3s_t unconfined_t:fifo_file { append getattr ioctl read setattr write };
+# sigchld back to the caller (conmon/podman) on sandbox exit.
+allow qdistro_tier3s_t container_runtime_t:process sigchld;
+allow qdistro_tier3s_t unconfined_service_t:process sigchld;
+allow qdistro_tier3s_t unconfined_t:process sigchld;
+# conmon forwards podman stop/kill signals to the sandbox init —
+# direction caller->domain, bounded to signal/sigkill/sigstop/signull.
+allow container_runtime_t qdistro_tier3s_t:process { signal sigkill sigstop signull getattr };
+allow unconfined_service_t qdistro_tier3s_t:process { signal sigkill sigstop signull getattr };
+allow unconfined_t qdistro_tier3s_t:process { signal sigkill sigstop signull getattr };
+# podman inspect/state reads the sentry's /proc entries (labeled with
+# the domain); the unit's spawn/cleanup scripts observe the same way.
+allow container_runtime_t qdistro_tier3s_t:dir { getattr open read search };
+allow container_runtime_t qdistro_tier3s_t:file { getattr open read };
+allow container_runtime_t qdistro_tier3s_t:lnk_file { getattr read };
+allow unconfined_service_t qdistro_tier3s_t:dir { getattr open read search };
+allow unconfined_service_t qdistro_tier3s_t:file { getattr open read };
+allow unconfined_service_t qdistro_tier3s_t:lnk_file { getattr read };
+
+# THE BRIDGE EDGE: the gofer connects to the per-launch link.sock whose
+# listener is the host waypipe client under the launch unit. This is the
+# only cross-domain socket connect the domain gets — scoped to the
+# listener's domain because SELinux cannot express per-path socket
+# policy; the path itself is additionally pinned by
+# qdistro_tier3s_var_run_t sock_file { write } above.
+allow qdistro_tier3s_t unconfined_service_t:unix_stream_socket connectto;
+
+########################################
+#
+# Neverallow pins — the surface this domain must never gain
+#
+
+# network=none is a launch invariant: the domain creates no host
+# network sockets of any transport.
+neverallow qdistro_tier3s_t self:tcp_socket create;
+neverallow qdistro_tier3s_t self:udp_socket create;
+neverallow qdistro_tier3s_t self:rawip_socket create;
+neverallow qdistro_tier3s_t self:sctp_socket create;
+neverallow qdistro_tier3s_t self:dccp_socket create;
+neverallow qdistro_tier3s_t self:icmp_socket create;
+neverallow qdistro_tier3s_t self:packet_socket create;
+neverallow qdistro_tier3s_t self:netlink_route_socket create;
+neverallow qdistro_tier3s_t self:netlink_tcpdiag_socket create;
+
+# No host-kernel surface: module loads, and ptrace/signal against any
+# process outside the domain. (~qdistro_tier3s_t is deliberate: the
+# self-only set above is what systrap needs.)
+neverallow qdistro_tier3s_t self:capability sys_module;
+neverallow qdistro_tier3s_t ~qdistro_tier3s_t:process ptrace;
+neverallow qdistro_tier3s_t ~qdistro_tier3s_t:process signal;

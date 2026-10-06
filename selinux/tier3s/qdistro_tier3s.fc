@@ -1,0 +1,16 @@
+# File-context regexes for tier-3s (raw file_contexts syntax — this file
+# is packaged into the .pp with semodule_package -f, NOT run through the
+# refpolicy m4 layer, so gen_context() macros are not available here).
+#
+# The exec label lands ONLY on the runsc ELF and the gvisor-bin
+# sidecars — the files that carry sandbox trust on the host. The
+# tier3s-runsc wrapper stays bin_t (see the .te header). The runtime
+# state label covers the per-uid runsc roots and the per-launch token
+# dirs; children inherit the parent dir's label, so link.sock gets
+# qdistro_tier3s_var_run_t with no per-launch labelling.
+
+/usr/libexec/qdistro/runsc/runsc			--	system_u:object_r:qdistro_tier3s_exec_t:s0
+/usr/libexec/qdistro/runsc/gvisor-bin(/.*)?		--	system_u:object_r:qdistro_tier3s_exec_t:s0
+
+/run/qdistro-tier3s-runsc(/.*)?				system_u:object_r:qdistro_tier3s_var_run_t:s0
+/run/qdistro-tier3s(/.*)?				system_u:object_r:qdistro_tier3s_var_run_t:s0

@@ -129,6 +129,19 @@ if [ "${pid:-0}" -gt 0 ] && [ "$(stat -c %Y "/proc/$pid")" -ge "$(stat -c %Y /us
 else fail "session manager is not running the installed code (pid ${pid:-?})"; fi
 is "broker has the rules-only tier3s prefix" "$(grep -c '"qdistro.tier3s.spawn:",' /usr/libexec/qdistro/qdistro_admin_broker.py)" 1
 
+step "3c. SELinux: install the tier3s module from the tested commit"
+# The confined domain is part of the tier3s stack (Phase D): the s12x
+# lanes must exercise it under whatever mode the VM runs. Built in-tree
+# (checkmodule is in the image; make is not).
+if command -v checkmodule >/dev/null 2>&1; then
+    out=$(cd "$SRC/selinux/tier3s" && bash install-policy.sh 2>&1); rc=$?
+    printf '%s\n' "$out" | tail -3 | sed 's/^/    /'
+    is "install-policy.sh rc" "$rc" 0
+    is "module loaded" "$(semodule -l | grep -c '^qdistro_tier3s\b')" 1
+else
+    fail "checkmodule absent — the tier3s policy module cannot be built (bake regression)"
+fi
+
 step "4. runsc: offline provision from the staged, pin-checked tarball"
 rel=$(sed -n 's/^release=//p' "$SRC/tier3s/RUNSC_RELEASE")
 want=$(sed -n 's/^tarball_sha512=//p' "$SRC/tier3s/RUNSC_RELEASE")

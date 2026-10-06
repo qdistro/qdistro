@@ -234,6 +234,7 @@ _ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
     "qdistro_tier1_t",
     "qdistro_tier2_t",
     "qdistro_tier3_t",
+    "qdistro_tier3s_t",
     "qsu_child_t",
 ))
 

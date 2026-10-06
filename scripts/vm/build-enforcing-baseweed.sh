@@ -152,7 +152,7 @@ echo "[bake-enforcing] running fresh-vm-bootstrap.sh inside $VM (this is the slo
     "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:$HTTP_PORT/fresh-vm-bootstrap.sh && chmod +x /root/fresh-vm-bootstrap.sh"
 
 "$VM_TOOLS/vm-exec" "$VM" \
-    "nohup bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
+    "nohup env QDISTRO_HTTP_HOST=http://10.0.2.2:$HTTP_PORT bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
     || true
 
 MAX_WAIT=2400
