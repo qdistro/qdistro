@@ -329,6 +329,17 @@ size. Host file managers, backup processes, and other domains without access
 to that type/range may lose access; stopping the container does not restore
 the previous labels. Do not relabel an active home from the host.
 
+Launchers also hold a shared `flock` on the canonical home's parent directory
+before resolving/opening the home and through teardown. Rollback with
+`--restore-state` requires an exclusive nonblocking lock on that same parent
+through the state swap and binding update, refusing while a launch holds it.
+The parent survives state replacement; read-only directory descriptors work
+for both root and admin without lock-file ownership or stale-file cleanup.
+Homes sharing a parent can launch concurrently, but restoring any one requires
+all such launches to stop. Immediately before Podman runs, the wrapper compares
+the source path's device/inode with the identity captured from locked fd 9;
+a replaced path fails closed even if a writer bypassed the lock protocol.
+
 Per-container runtime directories also carry lifetime inode locks. A short
 lock on the admin runtime directory serializes creation/lock acquisition
 with reaping; the reaper requires both an available lifetime lock and absence

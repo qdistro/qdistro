@@ -47,6 +47,7 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "rmdir",
         "setsid",
         "sleep",
+        "stat",
         "tr",
     ):
         _link_tool(bindir, name)
@@ -1148,6 +1149,9 @@ args = sys.argv[1:]
 base = pathlib.Path(os.environ["FAKE_BASE"])
 name = os.environ["FAKE_NAME"]
 if args == ["ps", "-aq"]:
+    if os.environ.get("FAKE_PAUSE_STATE"):
+        (base / (name + ".locked")).touch()
+        while not (base / (name + ".continue")).exists(): time.sleep(.01)
     if os.environ.get("FAKE_LIST_FAIL"): sys.exit(125)
     if os.environ.get("FAKE_EXISTING"): print("old-container")
 elif args and args[0] == "inspect":
@@ -1352,6 +1356,7 @@ printf '%s\\n' "$*" >> "$CALLS"
 [ "$1 $2 $3" = '-u admin --' ] || exit 99
 shift 3
 exec 9<&-
+exec 6<&-
 exec "$@"
 ''')
     runuser.chmod(0o755)
@@ -1361,6 +1366,7 @@ exec "$@"
 if [ "$1" = ps ]; then
     # Child no longer holds fd 9, but the root supervisor still does.
     flock -n "$STATE_PATH" true && exit 99
+    flock -xn "$(dirname -- "$STATE_PATH")" true && exit 99
     echo old
 else
     printf '[{"Mounts":[{"Source":"%s"}]}]\\n' "$STATE_PATH"
@@ -1380,3 +1386,113 @@ fi
     calls = (tmp_path / "calls").read_text().splitlines()
     assert len(calls) == 2 and all(c.startswith("-u admin -- env ") for c in calls), calls
     assert calls[0].endswith("podman ps -aq") and calls[1].endswith("podman inspect old"), calls
+
+
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_replaced_home_refused_before_registration(locked_launches, tmp_path, replacement):
+    launch, state, _ = locked_launches
+    first = launch("first", FAKE_PAUSE_STATE="1")
+    _await_file(tmp_path / "first.locked")
+    displaced = tmp_path / "displaced"
+    state.rename(displaced)
+    if replacement == "directory":
+        state.mkdir()
+    else:
+        other = tmp_path / "replacement"
+        other.mkdir()
+        state.symlink_to(other, target_is_directory=True)
+    (tmp_path / "first.continue").touch()
+    assert first.wait(timeout=5) == 2, (tmp_path / "first.err").read_text()
+    assert "state path changed since locking" in (tmp_path / "first.err").read_text()
+    assert not (tmp_path / "first.ready").exists(), "Podman registered a replaced home"
+
+
+def test_restore_refuses_during_unregistered_launch(locked_launches, tmp_path, monkeypatch):
+    import qdistro_template_promote as promote
+    import qdistro_templates as qt
+
+    launch, state, _ = locked_launches
+    first = launch("first", FAKE_PAUSE_STATE="1")
+    _await_file(tmp_path / "first.locked")
+    assert not (tmp_path / "first.ready").exists()
+    layout = qt.Layout(var=str(tmp_path / "var"), etc=str(tmp_path / "etc"))
+    binding = Path(layout.binding_file("work"))
+    binding.parent.mkdir(parents=True)
+    binding.touch()
+    monkeypatch.setattr(qt, "read_binding", lambda _: {"state_path": str(state)})
+    swaps = []
+    monkeypatch.setattr(promote, "_do_rollback", lambda *a, **kw: swaps.append(True) or 0)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) != 0
+    assert swaps == [], "restore entered the swap while launch had no Podman record"
+    (tmp_path / "first.continue").touch()
+    assert first.wait(timeout=5) == 0, (tmp_path / "first.err").read_text()
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) == 0
+    assert swaps == [True], "coordination lock persisted after normal teardown"
+
+
+def test_launch_refuses_while_restore_holds_parent(locked_launches, tmp_path):
+    launch, state, _ = locked_launches
+    fd = os.open(state.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = launch("blocked")
+        assert proc.wait(timeout=5) == 2
+        assert "in use by state restore" in (tmp_path / "blocked.err").read_text()
+        assert not (tmp_path / "blocked.ready").exists()
+    finally:
+        os.close(fd)
+
+
+def test_coordination_lock_released_after_launch_crash(locked_launches, tmp_path):
+    launch, state, _ = locked_launches
+    proc = launch("crashed", FAKE_PAUSE_STATE="1")
+    _await_file(tmp_path / "crashed.locked")
+    fd = os.open(state.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                assert time.monotonic() < deadline, "crash left a stale coordination lock"
+                time.sleep(.01)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_final_inode_check_without_inherited_home_fd(tmp_path, replace):
+    # The root supervisor can retain fd 9 while runuser/secctx closes the
+    # child's copy. Execute the actual last check and exec boundary that way.
+    state = tmp_path / "state"
+    state.mkdir()
+    fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        st = os.fstat(fd)
+        expected = f"{st.st_dev}:{st.st_ino}"
+        if replace:
+            state.rename(tmp_path / "old")
+            state.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        podman = bindir / "podman"
+        podman.write_text("#!/bin/sh\necho registered\n")
+        podman.chmod(0o755)
+        source = SPAWN.read_text()
+        start = source.index('# Fail closed if anything outside the coordination protocol')
+        end = source.index("\n'", start)
+        result = subprocess.run(
+            ["bash", "-c", source[start:end]], close_fds=True,
+            env={**os.environ, "PATH": f"{bindir}:/usr/bin:/bin",
+                 "TIER2_STATE_PATH_RESOLVED": str(state),
+                 "TIER2_STATE_INODE_RESOLVED": expected},
+            text=True, capture_output=True, timeout=5)
+        assert result.returncode == (2 if replace else 0), result.stderr
+        assert ("registered" in result.stdout) is (not replace), result.stdout
+    finally:
+        os.close(fd)

@@ -1012,9 +1012,19 @@ fi
 # Kernel locks disappear when their last holder dies, so no stale lock files.
 command -v flock >/dev/null 2>&1 || fail "flock not in PATH"
 if [ -n "$STATE_PATH" ]; then
+    # Shared with other launches, exclusive in template rollback. The parent
+    # survives a restore swap and is never exposed as the container home.
+    # Take it before resolving/opening the mount source; retain it for life.
+    state_resolved=$(readlink -m -- "$STATE_PATH") || fail "cannot resolve state parent"
+    state_parent=$(dirname -- "$state_resolved")
+    exec 6<"$state_parent" || fail "cannot open state parent $state_parent"
+    flock -sn 6 || fail "state parent $state_parent is already in use by state restore"
     STATE_PATH=$(readlink -e -- "$STATE_PATH") || fail "cannot resolve state path"
     exec 9<"$STATE_PATH" || fail "cannot open state directory $STATE_PATH"
     flock -n 9 || fail "state path $STATE_PATH is already in use by another tier-2 launcher"
+    # Capture from fd 9, not the pathname. runuser/secctx may close inherited
+    # fds, but the supervisor retains the lock and this immutable identity.
+    STATE_INODE=$(stat -Lc '%d:%i' /proc/self/fd/9) || fail "cannot stat locked state"
     # A killed supervisor can leave a container behind (or it can predate
     # locking). Under the lock, inspect ALL records, including Created and
     # Stopping, before allowing podman to relabel. Listing/inspection errors
@@ -1203,6 +1213,7 @@ export TIER2_LEASE_PROCTREE_GRACE_RESOLVED="${DISP_LEASE_PROCTREE_GRACE:-}"
 export TIER2_LEASE_WORKFLOW_RESOLVED="${DISP_LEASE_WORKFLOW:-}"
 export TIER2_QDWIN_SHELL_SO_RESOLVED="$QDWIN_SHELL_SO"
 export TIER2_STATE_PATH_RESOLVED="$STATE_PATH"
+export TIER2_STATE_INODE_RESOLVED="${STATE_INODE:-}"
 export TIER2_NETWORK_RESOLVED="$TIER2_NETWORK_VAL"
 export TIER2_PIDS_LIMIT_RESOLVED="$TIER2_PIDS_LIMIT_VAL"
 export TIER2_MEMORY_RESOLVED="$TIER2_MEMORY_VAL"
@@ -1258,6 +1269,7 @@ SECCTX_ENV_PASS=(
     "TIER2_LEASE_WORKFLOW_RESOLVED=$TIER2_LEASE_WORKFLOW_RESOLVED"
     "TIER2_QDWIN_SHELL_SO_RESOLVED=$TIER2_QDWIN_SHELL_SO_RESOLVED"
     "TIER2_STATE_PATH_RESOLVED=$TIER2_STATE_PATH_RESOLVED"
+    "TIER2_STATE_INODE_RESOLVED=$TIER2_STATE_INODE_RESOLVED"
     "TIER2_NETWORK_RESOLVED=$TIER2_NETWORK_RESOLVED"
     "TIER2_PIDS_LIMIT_RESOLVED=$TIER2_PIDS_LIMIT_RESOLVED"
     "TIER2_MEMORY_RESOLVED=$TIER2_MEMORY_RESOLVED"
@@ -1527,6 +1539,16 @@ eval "set -- $TIER2_APP_ARGV_JOINED"
 
 # Isolated consumers use the bound public directory. Do not pass a host
 # QDISTRO_PRESENTATION_FILE into the container (no -e / --env-host).
+# Fail closed if anything outside the coordination protocol replaced the
+# source since fd 9 was locked. The parent lock excludes legitimate swaps
+# throughout this check and Podman registration (and the container lifetime).
+if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
+    current_inode=$(stat -Lc "%d:%i" -- "$TIER2_STATE_PATH_RESOLVED") || exit 2
+    if [ "$current_inode" != "$TIER2_STATE_INODE_RESOLVED" ]; then
+        echo "spawn-tier2-wrapper: state path changed since locking; refusing mount" >&2
+        exit 2
+    fi
+fi
 exec env -u QDISTRO_PRESENTATION_FILE podman "${PODMAN_ARGS[@]}" "$@"
 '
 

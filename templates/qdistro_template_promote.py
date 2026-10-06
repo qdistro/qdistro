@@ -19,6 +19,7 @@ silo's next restart.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import shlex
 import subprocess
@@ -359,10 +360,28 @@ def promote(silo: str, run_id: str | None = None, *,
     existing = qt.read_binding(binding_path) if os.path.isfile(binding_path) else None
 
     if rollback is not None:
-        return _do_rollback(layout, silo, rollback, existing, resolver, now,
-                            image_exists, restore_state=restore_state,
-                            restore_snapshot=restore_snapshot,
-                            keep_state=keep_state, running_check=running_check)
+        # Launchers share-lock the stable state parent before opening the home
+        # and retain it through teardown. A restore needs exclusive access;
+        # directory fds work for both root launchers and the admin tool without
+        # ownership-sensitive lock files or stale-lock recovery.
+        parent_fd = None
+        try:
+            if restore_state and existing is not None:
+                parent = os.path.dirname(os.path.realpath(existing["state_path"]))
+                try:
+                    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                    fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    return _refuse(layout, f"state parent is in use or cannot be "
+                                   f"locked for restore: {exc}", silo=silo,
+                                   generation=rollback)
+            return _do_rollback(layout, silo, rollback, existing, resolver, now,
+                                image_exists, restore_state=restore_state,
+                                restore_snapshot=restore_snapshot,
+                                keep_state=keep_state, running_check=running_check)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
 
     # --- promote a validated candidate ---------------------------------
     found = _find_candidate(layout, run_id)
