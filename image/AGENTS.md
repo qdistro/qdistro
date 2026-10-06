@@ -263,6 +263,10 @@ the host. Green means:
 3. **Boot-verify.** `verify.sh` boots the raw and prints `pass: N / M`.
    The first image to reach that summary was run 28 (Phase D); before it,
    every run died at the sshd-start baseline on the vendor RPC filter.
+   The start goes through `qga_root` and is retried from the SSH wait
+   loop while `sshd.service` is not active; each refused start leaves
+   systemctl's message, unit state and journal in
+   `logs/verify-*/journal/sshd-start-<tag>.log`.
    Known benign: `RDSEED32 is broken. Disabling the corresponding CPUID
    bit` trips the priority-0/1 journal check under kvm.
 

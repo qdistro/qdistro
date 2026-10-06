@@ -363,19 +363,40 @@ if [ "$POWEROFF" = 1 ]; then
     QGA_T=$(( $(date +%s) - BOOT_T0 ))
     log "guest agent up after power-off in ${QGA_T}s"
 fi
+# start_sshd <tag> — start sshd.service through the root agent channel and
+# return systemctl's exit code. The image never enables sshd, so this one
+# call is the only thing that brings it up; a refusal used to be logged as
+# a bare "exitcode=4" and then nothing ever retried, so the SSH wait below
+# burned its whole 600 s budget against a guest that had already refused
+# the only start request (image run image-20261006T202319Z-14113). Each
+# failure keeps systemctl's own message, the unit state and the relevant
+# journal in journal/sshd-start-<tag>.log, so the next refusal is diagnosed
+# rather than inferred from the exit code (4 = EXIT_NOPERMISSION: access
+# denied, refused/destructive transaction; 5 = no such unit).
+SSHD_START_FAILS=0
+start_sshd() {
+    local tag="$1" out rc
+    rc=0; out=$(qga_root 'systemctl start sshd.service' 2>&1) || rc=$?
+    [ "$rc" = 0 ] && return 0
+    SSHD_START_FAILS=$((SSHD_START_FAILS + 1))
+    warn "systemctl start sshd.service ($tag) returned exitcode=$rc: ${out:-<no output>}"
+    mkdir -p "$VERIFY_DIR/journal"
+    {
+        printf 'exitcode=%s\n%s\n--- diagnostics ---\n' "$rc" "$out"
+        qga_root 'cat /proc/uptime; getenforce; systemctl is-system-running; systemctl list-jobs --no-pager; systemctl status --no-pager sshd.service sshd.socket; systemctl list-unit-files --no-pager "ssh*"; journalctl -b --no-pager -o short-monotonic -u sshd.service -u qemu-guest-agent.service | tail -n 80; journalctl -b --no-pager -o short-monotonic -g "avc:|destructive|denied|sshd" | tail -n 80' 2>&1
+    } > "$VERIFY_DIR/journal/sshd-start-$tag.log" 2>&1 || true
+    log "sshd start diagnostics: $VERIFY_DIR/journal/sshd-start-$tag.log"
+    return "$rc"
+}
+# ensure_sshd <tag> — (re)start sshd only if the unit is not active; used by
+# the SSH wait loops so a refused or lost start is retried, bounded by the
+# loop's own deadline.
+ensure_sshd() {
+    qga_root 'systemctl is-active --quiet sshd.service' >/dev/null 2>&1 && return 0
+    start_sshd "$1"
+}
 log "guest agent up; starting sshd over the agent channel"
-exec_out=$(qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}')
-qga_pid=$(printf '%s' "$exec_out" | grep -oE '"pid":[0-9]+' | grep -oE '[0-9]+' | head -1)
-[ -n "$qga_pid" ] || { shoot 99-qga-exec; die "guest-exec to start sshd failed: $exec_out"; }
-# Poll guest-exec-status until the systemctl call exits (bounded).
-st_deadline=$(( $(date +%s) + 60 ))
-while [ "$(date +%s)" -lt "$st_deadline" ]; do
-    st=$(qga "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$qga_pid}}")
-    printf '%s' "$st" | grep -q '"exited":true' && break
-    sleep 2
-done
-ec=$(printf '%s' "$st" | grep -oE '"exitcode":[0-9]+' | grep -oE '[0-9]+' | head -1)
-[ "${ec:-0}" = 0 ] || warn "systemctl start sshd returned exitcode=$ec (continuing; SSH wait loop will confirm)"
+start_sshd boot-1 || warn "sshd not started yet (continuing; the SSH wait loop retries the start)"
 
 #-- 6. SSH wrapper + wait for auth to actually succeed -----------------------
 # First-boot resize + greetd autologin together take ~2-5 min; we poll
@@ -390,13 +411,18 @@ remote() {
 log "waiting for sshd to accept auth (max 600s)..."
 deadline=$(( $(date +%s) + 600 ))
 ready=0
+ssh_poll_n=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if remote 'true' 2>/dev/null; then
         ready=1; break
     fi
+    # Every ~20 s, make sure sshd is actually up; retry a refused start.
+    ssh_poll_n=$((ssh_poll_n + 1))
+    [ $((ssh_poll_n % 4)) = 0 ] && ensure_sshd "boot-retry-$ssh_poll_n" || true
     sleep 5
 done
-[ "$ready" = 1 ] || { shoot 99-ssh-timeout; die "SSH never came up; see $VERIFY_DIR/screenshots/99-ssh-timeout.png"; }
+[ "$ready" = 1 ] || { shoot 99-ssh-timeout; die "SSH never came up (sshd start failures: $SSHD_START_FAILS, see $VERIFY_DIR/journal/sshd-start-*.log); see $VERIFY_DIR/screenshots/99-ssh-timeout.png"; }
+[ "$SSHD_START_FAILS" = 0 ] || log "sshd came up after $SSHD_START_FAILS refused start(s); evidence in $VERIFY_DIR/journal/sshd-start-*.log"
 shoot 01-ssh-ready
 
 # admin's user systemd manager comes up under linger right after boot and
@@ -786,10 +812,13 @@ if [ "$DO_PERSIST" = 1 ]; then
         sleep 3
     done
     [ "$qga_up" = 1 ] || { shoot 99-qga-timeout-reboot; die "guest agent never came back after reboot"; }
-    qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}' >/dev/null || true
+    start_sshd reboot-1 || true
     ssh_deadline=$(( $(date +%s) + 180 ))
+    ssh_poll_n=0
     while [ "$(date +%s)" -lt "$ssh_deadline" ]; do
         remote 'true' 2>/dev/null && break
+        ssh_poll_n=$((ssh_poll_n + 1))
+        [ $((ssh_poll_n % 5)) = 0 ] && ensure_sshd "reboot-retry-$ssh_poll_n" || true
         sleep 4
     done
     expect "persist marker survived reboot" \
