@@ -198,3 +198,27 @@ SH
         [[ "$output" != *"qci_agent_version="* ]]
     done
 }
+
+@test "a podman failure after the rows finished still records a failing row" {
+    # inner marker | podman rc | expected gate rc | container-run row?
+    local case_
+    for case_ in "0 0 0 no" "30 30 30 no" "0 125 30 yes" "30 125 30 yes" "- 125 30 yes" "junk 0 30 yes"; do
+        set -- $case_
+        run env MARK="$1" PRC="$2" bash -c '
+            . "$SOURCE_ROOT/ci/lib/host-container.sh"
+            EXIT_BUILD=20 EXIT_HOST=30 RDIR="$BATS_TEST_TMPDIR/run" QDISTRO_REPO="$BATS_TEST_TMPDIR/q"
+            mkdir -p "$QDISTRO_REPO/ci/bin" "$RDIR/host"
+            printf "#!/bin/sh\necho img\n" > "$QDISTRO_REPO/ci/bin/qci-host-image"; chmod +x "$QDISTRO_REPO/ci/bin/qci-host-image"
+            record_result() { echo "ROW $2 $3 $4 ${9:-}"; }
+            host_container_run() {
+                case "$*" in *prepare-host.sh*) return 0;; esac
+                [ "$MARK" = - ] || printf "%s\n" "$MARK" > "$RDIR/host/container-complete"
+                return "$PRC"
+            }
+            host_container_gate
+        '
+        echo "case [$case_]: status=$status output=$output"
+        [ "$status" = "$3" ]
+        if [ "$4" = yes ]; then [[ "$output" = *"ROW container-run fail 30"* ]]; else [[ "$output" != *ROW* ]]; fi
+    done
+}

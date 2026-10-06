@@ -55,8 +55,19 @@ host_container_gate() {
     host_container_run "$image" none bash "$QDISTRO_REPO/ci/containers/run-host.sh" \
         >"$RDIR/host/container.log" 2>&1
     rc=$?
-    if [ ! -f "$RDIR/host/container-complete" ]; then
-        record_result host container-run fail "$EXIT_HOST" host build "$RDIR/host/container.log" "container did not complete (rc=$rc)"
+    local inner=
+    [ -f "$RDIR/host/container-complete" ] && inner=$(cat "$RDIR/host/container-complete")
+    case "$inner" in
+        ''|*[!0-9]*)
+            record_result host container-run fail "$EXIT_HOST" host build "$RDIR/host/container.log" "container did not complete (rc=$rc)"
+            return "$EXIT_HOST" ;;
+    esac
+    # The rows recorded their own results and the marker holds their status.
+    # Podman failing after that (runtime/cleanup error) has no row yet: all
+    # rows may say pass while the gate fails.
+    if [ "$rc" != "$inner" ]; then
+        record_result host container-run fail "$EXIT_HOST" host build "$RDIR/host/container.log" "podman exited rc=$rc after the rows finished with rc=$inner"
+        [ "$inner" != 0 ] && return "$inner"
         return "$EXIT_HOST"
     fi
     return "$rc"
