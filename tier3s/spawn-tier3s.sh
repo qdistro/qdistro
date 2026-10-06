@@ -9,7 +9,8 @@
 # Env (set by the root launch helper from the root-owned launch stanza):
 #   TIER3S_ROOT_LAUNCHER=1   required; there is no direct-admin lane
 #   TIER3S_LAUNCH_UNIT       the unit this runs in (verified against our cgroup)
-#   TIER3S_ADMIN_UID         admin uid, default 1000 (must be 1000)
+#   TIER3S_ADMIN_UID         admin uid, default 1000 (must be 1000); the bridge
+#                            client + broker/resolver still run as admin
 #   TIER3S_SILO              silo name (container qdistro-tier3s-<silo>); required:
 #                            podapps (qdistro-tier3s-app@<token>) are refused in
 #                            Phase A (CONTRACT.md §1)
@@ -32,9 +33,11 @@
 #
 # Order (fail closed, exit 2 on every refusal; the denial oracle is "no podman
 # run and no activation record"): profile -> refused knobs -> root launcher +
-# unit -> probe -> read-only resolution -> token -> [plan] -> broker gate ->
-# activation record -> reap stale -> control record (published atomically) ->
-# image -> scope + podman -> recorded running -> READY=1.
+# unit -> probe -> read-only resolution (+ workload declaration) -> token ->
+# [plan] -> [GUI: compositor] -> broker gate -> activation record -> reap stale
+# -> control record (published atomically)
+# -> image -> [GUI: host waypipe client + launch record + RegisterLaunch] ->
+# scope + podman -> recorded running -> READY=1.
 #
 # Test hook ONLY: TIER3S_TEST_ROOT=<dir> prefixes /etc/qdistro, /usr/lib/qdistro,
 # /usr/libexec/qdistro, /run, /proc (own cgroup: proc/self),
@@ -49,12 +52,15 @@ refuse() { say "REFUSE: $*"; exit 2; }
 
 T="${TIER3S_TEST_ROOT:-}"
 POLL_S=60        # the start poll: wall-clock seconds for the launch to reach running
+BRIDGE_WAIT_S=15 # the GUI bridge's link.sock wait (well under TimeoutStartSec)
 if [ -n "$T" ]; then
     [ "$EUID" -ne 0 ] || refuse "TIER3S_TEST_ROOT is a unit-test hook and is refused for root"
     case "$T" in /?*) ;; *) refuse "TIER3S_TEST_ROOT must be absolute" ;; esac
     say "TEST MODE: TIER3S_TEST_ROOT=$T (not a real launch)"
     ADMIN_PATH="$PATH"
+    BRIDGE_WAIT_S=5
     [[ "${TIER3S_TEST_POLL_S:-}" =~ ^[1-9][0-9]?$ ]] && POLL_S="$TIER3S_TEST_POLL_S"
+    [[ "${TIER3S_TEST_BRIDGE_S:-}" =~ ^[1-9][0-9]?$ ]] && BRIDGE_WAIT_S="$TIER3S_TEST_BRIDGE_S"
 else
     ADMIN_PATH=/usr/bin:/bin
 fi
@@ -106,6 +112,7 @@ ADMIN_PW="$(timeout 5 getent passwd "$ADMIN_UID")" \
     || refuse "no user/home for uid $ADMIN_UID (the NSS lookup failed or timed out)"
 ADMIN_USER="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f1)"
 ADMIN_PUID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f3)"
+ADMIN_GID="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f4)"
 ADMIN_HOME="$(printf '%s\n' "$ADMIN_PW" | cut -d: -f6)"
 [ -n "$ADMIN_USER" ] && [ "$ADMIN_PUID" = "$ADMIN_UID" ] && [[ "$ADMIN_HOME" == /* ]] \
     && [[ "$ADMIN_PW" != *$'\n'* ]] || refuse "no user/home for uid $ADMIN_UID"
@@ -122,22 +129,128 @@ UNIT="${TIER3S_LAUNCH_UNIT:-}"
 own="$(sed -n 's/^0:://p' "$PROC/self/cgroup" 2>/dev/null | head -1)"
 [ "${own##*/}" = "$UNIT" ] || refuse "not running in $UNIT (own cgroup: ${own:-?})"
 
-as_admin() {   # every podman / broker / resolver call runs as the admin uid
+# --- 3b. the silo account (Phase C2, D4 model A: same-numeric keep-id) ------
+# The podman/runsc caller is a dedicated account `qt3s-<silo>` per tier3s
+# silo. keep-id maps it to the SAME numeric guest uid, so host uid == guest
+# uid and silo-owned host state stays silo-owned (no :U, no subuid state).
+# The account name truncates to LOGIN_NAME_MAX (32); its GECOS carries the
+# full silo name, so a truncation collision resolves to a foreign marker and
+# refuses — never a silently shared identity. First launch creates the
+# account (this snapshot's useradd allocates its /etc/sub{u,g}id rows); every
+# launch validates marker + group + uid before anything podman runs.
+T3S_GROUP=qdistro-tier3s
+SILO_ACCT="qt3s-${SILO:0:27}"
+if [ -n "$T" ]; then
+    # unit-test seam: no NSS writes; the silo identity is the caller
+    SILO_UID="${TIER3S_TEST_SILO_UID:-$EUID}"; SILO_GID="$(id -g)"
+    SILO_USER="$SILO_ACCT"; SILO_HOME="$T/home/$SILO_ACCT"
+    mkdir -p "$SILO_HOME"
+else
+    timeout 5 getent group "$T3S_GROUP" >/dev/null 2>&1 \
+        || refuse "group $T3S_GROUP does not exist (install-session-manager.sh QDISTRO_TIER3S=1)"
+    SILO_PW="$(timeout 5 getent passwd "$SILO_ACCT" 2>/dev/null || true)"
+    if [ -z "$SILO_PW" ]; then
+        useradd -m -s /bin/bash -G "$T3S_GROUP" -c "qdistro tier3s silo $SILO" "$SILO_ACCT" \
+            && passwd -l "$SILO_ACCT" >/dev/null \
+            || refuse "cannot provision the silo account $SILO_ACCT"
+        SILO_PW="$(timeout 5 getent passwd "$SILO_ACCT")" \
+            || refuse "silo account $SILO_ACCT was created but does not resolve"
+        say "provisioned silo account $SILO_ACCT for silo $SILO"
+    fi
+    [[ "$SILO_PW" != *$'\n'* ]] || refuse "NSS returned several entries for $SILO_ACCT"
+    SILO_UID="$(printf '%s\n' "$SILO_PW" | cut -d: -f3)"
+    SILO_GID="$(printf '%s\n' "$SILO_PW" | cut -d: -f4)"
+    SILO_HOME="$(printf '%s\n' "$SILO_PW" | cut -d: -f6)"
+    SILO_GECOS="$(printf '%s\n' "$SILO_PW" | cut -d: -f5)"
+    [ "$SILO_GECOS" = "qdistro tier3s silo $SILO" ] \
+        || refuse "$SILO_ACCT exists but is not the tier3s silo account for '$SILO' (GECOS: '${SILO_GECOS}'); refusing to co-opt it"
+    [[ "$SILO_UID" =~ ^[0-9]+$ ]] && [ "$SILO_UID" -ge 1000 ] && [ "$SILO_UID" != "$ADMIN_UID" ] \
+        || refuse "silo account $SILO_ACCT has uid '${SILO_UID:-?}'; want a regular uid other than admin's $ADMIN_UID"
+    id -nG "$SILO_ACCT" 2>/dev/null | tr ' ' '\n' | grep -qx "$T3S_GROUP" \
+        || refuse "silo account $SILO_ACCT is not in group $T3S_GROUP"
+    grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subuid \
+        && grep -q "^$SILO_ACCT:[0-9]*:[1-9][0-9]*$" /etc/subgid \
+        || refuse "silo account $SILO_ACCT has no subuid/subgid rows"
+    SILO_USER="$SILO_ACCT"
+    { [ -d "$SILO_HOME" ] && [ ! -L "$SILO_HOME" ] \
+        && [ "$(stat -c %u -- "$SILO_HOME")" = "$SILO_UID" ]; } \
+        || refuse "silo home $SILO_HOME is missing or not owned by uid $SILO_UID"
+fi
+SILO_STATE="$SILO_HOME/tier3s-state"   # per-silo persistent state root (C2)
+# Per-silo runtime dirs (no logind session exists for a silo): the rt dir
+# stands in for /run/user/<uid> as podman's XDG_RUNTIME_DIR, the runsc dir is
+# the state root the wrapper derives from the host uid (D-A1). The BASE dirs
+# are tmpfiles' (root 0755); the per-uid dirs are this spawn's to create.
+RT_BASE="$T/run/qdistro-tier3s-rt"
+[ -n "$T" ] || { { [ -d "$RT_BASE" ] && [ "$(stat -c '%u %a' -- "$RT_BASE")" = "0 755" ]; } \
+    || refuse "$RT_BASE is not a root 0755 directory (systemd-tmpfiles --create qdistro-tier3s.conf)"; }
+[ -n "$T" ] || { { [ -d "$RUNSC_BASE" ] && [ "$(stat -c '%u %a' -- "$RUNSC_BASE")" = "0 755" ]; } \
+    || refuse "$RUNSC_BASE is not a root 0755 directory (systemd-tmpfiles --create qdistro-tier3s.conf)"; }
+for d in "$RT_BASE/$SILO_UID" "$RUNSC_BASE/$SILO_UID"; do
+    if [ -e "$d" ] || [ -L "$d" ]; then
+        # exists: refuse anything that is not already a silo-owned 0700 dir —
+        # never chmod/chown into place what someone else planted
+        { [ -d "$d" ] && [ ! -L "$d" ] \
+            && [ "$(stat -c '%u %a' -- "$d")" = "$SILO_UID 700" ]; } \
+            || refuse "$d exists but is not a silo-owned 0700 directory"
+    elif [ -n "$T" ]; then
+        mkdir -p "$d" && chmod 0700 "$d" || refuse "cannot create $d"
+    else
+        install -d -m 0700 -o "$SILO_UID" -g "$SILO_GID" "$d" \
+            || refuse "cannot create the per-silo dir $d"
+    fi
+done
+
+as_admin() {   # broker / resolver / launch-record calls run as the admin uid
     runuser -u "$ADMIN_USER" -- env -i PATH="$ADMIN_PATH" HOME="$ADMIN_HOME" \
         USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" "$@"
 }
-pm() { as_admin podman "$@"; }
-pm_bounded() { local t="$1"; shift; timeout -k 2 "$t" runuser -u "$ADMIN_USER" -- env -i PATH="$ADMIN_PATH" \
-    HOME="$ADMIN_HOME" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER" \
-    XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" podman "$@"; }
+as_silo() {   # every podman call runs as the silo account (C2 model A)
+    runuser -u "$SILO_USER" -- env -i PATH="$ADMIN_PATH" HOME="$SILO_HOME" \
+        USER="$SILO_USER" LOGNAME="$SILO_USER" XDG_RUNTIME_DIR="$RT_BASE/$SILO_UID" \
+        CONTAINERS_CONF="$LIBDIR/containers.conf" "$@"
+}
+pm() { as_silo podman "$@"; }
+pm_bounded() { local t="$1"; shift; timeout -k 2 "$t" runuser -u "$SILO_USER" -- env -i PATH="$ADMIN_PATH" \
+    HOME="$SILO_HOME" USER="$SILO_USER" LOGNAME="$SILO_USER" \
+    XDG_RUNTIME_DIR="$RT_BASE/$SILO_UID" CONTAINERS_CONF="$LIBDIR/containers.conf" podman "$@"; }
 
 # --- 4. prerequisite screen (no fallback) ---------------------------------
-probe_out="$("$PROBE" --user "$ADMIN_USER" 2>&1)"; probe_rc=$?
+# the probe screens the SILO's id mapping + runsc state root (the podman
+# caller under model A), not admin's
+probe_out="$("$PROBE" --user "$SILO_USER" 2>&1)"; probe_rc=$?
 [ "$probe_rc" -eq 0 ] || refuse "probe failed (rc=$probe_rc): $(printf '%s\n' "$probe_out" | grep '^RESULT\|^REFUSE' | tail -1)"
 
 # --- 5. read-only resolution ----------------------------------------------
 SECCOMP="$LIBDIR/seccomp/$WORKLOAD.json"
 [ -f "$SECCOMP" ] && [ ! -L "$SECCOMP" ] || refuse "no seccomp profile $SECCOMP for workload '$WORKLOAD' (tier 3s has no podman-default fallback)"
+# The workload declaration (CONTRACT.md §7): <workload>.env is PARSED, never
+# sourced — blank lines and '#' comments, then exactly one 'GUI=0|1'. An
+# ABSENT file means GUI=0: the Phase A headless path, unchanged (ΔB1). A
+# PRESENT file must say out loud what it wants — a symlink, an unreadable or
+# malformed file, an unknown key or a missing GUI= line all refuse. GUI=1
+# adds the waypipe bridge (compositor check, host secctx client, launch
+# record, RegisterLaunch) and the podman mount + host-uds flag below; GUI=0
+# leaves the launch byte-identical to Phase A.
+GUI=0
+WENV="$LIBDIR/workloads/$WORKLOAD.env"
+if [ -e "$WENV" ] || [ -L "$WENV" ]; then
+    { [ -f "$WENV" ] && [ ! -L "$WENV" ] && [ -r "$WENV" ]; } \
+        || refuse "workload declaration $WENV is not a regular readable file"
+    gui_seen=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in
+            GUI=0|GUI=1) ;;
+            GUI=*) refuse "workload declaration $WENV: bad GUI value '${line#GUI=}' (want 0 or 1)" ;;
+            *=*)   refuse "workload declaration $WENV: unexpected key '${line%%=*}'" ;;
+            *)     refuse "workload declaration $WENV: malformed line '$line'" ;;
+        esac
+        [ "$gui_seen" = 0 ] || refuse "workload declaration $WENV: duplicate key GUI"
+        gui_seen=1; GUI="${line#GUI=}"
+    done < "$WENV"
+    [ "$gui_seen" = 1 ] || refuse "workload declaration $WENV: no GUI= declaration"
+fi
 IMAGE="localhost/qdistro/tier3s-$WORKLOAD:latest"
 STATE_PATH=""; GENERATION=""; RESOLVER=()
 if [ -n "$SILO" ]; then
@@ -158,7 +271,13 @@ if [ -n "$SILO" ]; then
         0)  [[ "$RB_GEN" =~ ^sha256:[0-9a-f]{64}$ ]] || refuse "resolver returned a non-digest for $SILO: '$RB_GEN'"
             [ -n "$RB_STATE" ] && [ -d "$RB_STATE" ] && [ ! -L "$RB_STATE" ] \
                 || refuse "state_path '$RB_STATE' for silo $SILO is missing or not a directory"
-            GENERATION="$RB_GEN"; IMAGE="$RB_GEN"; STATE_PATH="$RB_STATE" ;;
+            GENERATION="$RB_GEN"; IMAGE="$RB_GEN"; RES_STATE="$RB_STATE"
+            # C2: the resolver's state_path stays admin-side bookkeeping (the
+            # activation record, drift detection); what gets MOUNTED is the
+            # silo-owned state dir — the workload runs as the silo uid and can
+            # only write silo-owned paths (model A; the admin path is
+            # unreachable inside the userns).
+            STATE_PATH="$SILO_STATE/$BINDING" ;;
         3)  say "silo $SILO runs UNTEMPLATED (no binding); image $IMAGE" ;;
         *)  refuse "binding resolution failed for silo $SILO (rc=$rc); no tag fallback" ;;
     esac
@@ -188,8 +307,55 @@ fi
 SCOPE_UNIT="qdistro-tier3s-$TOKEN.scope"
 CTL_DIR="$CTL/$TOKEN"
 LAUNCH_DIR="$LAUNCH_PARENT/$TOKEN"
-RUNSC_ROOT="/run/qdistro-tier3s-runsc/$ADMIN_UID"
+RUNSC_ROOT="/run/qdistro-tier3s-runsc/$SILO_UID"
 SPAWN_ACTION="qdistro.tier3s.spawn:$WORKLOAD/$APP_BASE"
+
+# --- 6b. GUI bridge (CONTRACT.md §5 step 12) -------------------------------
+# The waypipe client half (Phase S topology): a host-side client in the
+# launch unit's cgroup, runuser-dropped to admin, secctx-tagged with the
+# (engine, app-id, instance) triple the compositor sees on the sandbox's
+# windows. XDG_RT_PROD is the path the record carries (the cleanup prefixes
+# $T itself); XDG_RT is the effective one under the test root.
+XDG_RT_PROD="/run/user/$ADMIN_UID"; XDG_RT="$T$XDG_RT_PROD"
+WL_DISPLAY=wayland-1
+BRIDGE_SOCK="$LAUNCH_DIR/link.sock"
+GUI_RTFLAG=(); GUI_MOUNT=(); BRIDGE_ARGV=(); LAUNCH_RECORD=""; LR_TOKEN=""
+if [ "$GUI" = 1 ]; then
+    # TWO independent randoms (ΔB2; tier3/spawn-tier3.sh does the same): the
+    # launch record's FILE id is not the launch token — $TOKEN is observable
+    # (podman labels, the container name suffix), and secctx-exec creates the
+    # file O_EXCL, so a same-uid process could otherwise pre-create it and
+    # block publication or force the read of its own file. The nonce verified
+    # INSIDE the file is likewise its own random: a record at a guessed path
+    # still cannot spoof the registration.
+    LR_FILE_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    LR_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    LAUNCH_RECORD="$XDG_RT_PROD/qdistro-tier3s-launchrec-$LR_FILE_ID.pid"
+    GUI_RTFLAG=(--runtime-flag=host-uds=open)            # bind-mounted unix sockets into the sandbox
+    GUI_MOUNT=(-v "$LAUNCH_DIR:/run/qdistro/link:ro")    # the token bridge dir, holding only link.sock; the sandbox only connect()s — ro keeps a hostile guest off the host /run tmpfs (P2-1)
+    BRIDGE_ARGV=(
+        runuser -u "$ADMIN_USER" -- env -i
+        PATH="$ADMIN_PATH" HOME="$ADMIN_HOME" USER="$ADMIN_USER" LOGNAME="$ADMIN_USER"
+        XDG_RUNTIME_DIR="$XDG_RT"
+        WAYLAND_DISPLAY="$WL_DISPLAY"
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RT/bus"
+        QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        "QDISTRO_LAUNCH_RECORD_PATH=$LAUNCH_RECORD"
+        "QDISTRO_LAUNCH_RECORD_TOKEN=$LR_TOKEN"
+        # umask INSIDE the runuser boundary: runuser's PAM session resets
+        # the caller's umask to the login default, so an outer
+        # ( umask 0177; ) wrap never reaches the waypipe bind() — observed
+        # 755. The one-shot sh sets it in the same uid/domain the bridge
+        # already runs as, and exec replaces it: link.sock lands 0600.
+        sh -c 'umask 0177; exec "$@"' qdistro-tier3s-bridge
+        qdistro-secctx-exec
+            --sandbox-engine qdistro.tier3s
+            --app-id "qdistro.tier3s.$SILO"
+            --instance-id "$TOKEN"
+            -- waypipe -s "$BRIDGE_SOCK" -o --no-gpu
+                --title-prefix "[3s:$SILO] " client
+    )
+fi
 
 # The podman command (CONTRACT.md §5): every flag is load-bearing.
 # shellcheck disable=SC2054  # the commas are tmpfs mount options
@@ -197,6 +363,7 @@ PODMAN_ARGV=(
     --runtime "$WRAPPER"                 # the pinned runsc via the wrapper (D-A1 state root inside)
     --runtime-flag=network=none          # runsc's own network stack off, not just podman's
     "${DEBUG_FLAGS[@]}"
+    "${GUI_RTFLAG[@]}"
     --cgroup-manager=cgroupfs            # with the admin-delegated scope this keeps every process in it (D-A3b)
     run --rm --name "$CONTAINER"
     --label "qdistro_tier3s_token=$TOKEN" --label "qdistro_tier3s_unit=$UNIT"
@@ -204,32 +371,75 @@ PODMAN_ARGV=(
     --security-opt no-new-privileges
     --cap-drop=ALL
     --security-opt "seccomp=/usr/lib/qdistro/tier3s/seccomp/$WORKLOAD.json"
-    --userns=keep-id --user 1000:1000    # admin keep-id (D4 C1)
+    --userns=keep-id "--user=$SILO_UID:$SILO_GID"   # silo keep-id (D4 C2 model A): guest uid == the silo's host uid
     --read-only
     --tmpfs /tmp:rw,size=64m,mode=1777
-    --tmpfs /run/user/1000:rw,U,mode=0700        # U -> OCI uid=1000,gid=1000; gVisor mounts tmpfs as root otherwise
-    --tmpfs /home/admin/.cache:rw,U,mode=0700
+    --tmpfs "/run/user/$SILO_UID:rw,U,mode=0700"    # U -> the container user (guest uid == silo uid); gVisor mounts tmpfs as root otherwise
+    "${GUI_MOUNT[@]}"
     --pids-limit=512                     # parity with tier 2 ONLY: runsc --ignore-cgroups does not enforce it; TasksMax on the scope does
     --network=none
-    --env HOME=/home/admin --env XDG_RUNTIME_DIR=/run/user/1000 --env LANG=C.UTF-8
+    --env HOME=/home/admin --env "XDG_RUNTIME_DIR=/run/user/$SILO_UID" --env LANG=C.UTF-8
 )
-[ -z "$STATE_PATH" ] || PODMAN_ARGV+=(-v "$STATE_PATH:/home/admin:rw")   # no recursive chown
-PODMAN_ARGV+=("$IMAGE" "${APP_ARGV[@]}")
+if [ -n "$STATE_PATH" ]; then
+    # the silo-owned state dir is the writable guest home; create it AS THE
+    # SILO — root never creates/chowns through the silo-controlled home path
+    # (a swapped symlink under ~/ would redirect install -d to a foreign
+    # destination; sol model-A r1 P1-1). Verify with lstat semantics BEFORE
+    # the chmod, then again with the mode: real silo-owned 0700 dirs, never
+    # symlinks (no :U, no recursive chown).
+    if [ -n "$T" ]; then mkdir -p "$STATE_PATH"; else
+        as_silo mkdir -p "$STATE_PATH" \
+            || refuse "cannot create the silo state dir $STATE_PATH"
+    fi
+    for d in "$SILO_STATE" "$STATE_PATH"; do
+        { [ -d "$d" ] && [ ! -L "$d" ] \
+            && [ "$(stat -c %u -- "$d")" = "$SILO_UID" ]; } \
+            || refuse "silo state dir $d is not a silo-owned directory"
+    done
+    if [ -n "$T" ]; then chmod 0700 "$SILO_STATE" "$STATE_PATH"; else
+        as_silo chmod 0700 "$SILO_STATE" "$STATE_PATH" \
+            || refuse "cannot chmod the silo state dir $STATE_PATH"
+    fi
+    for d in "$SILO_STATE" "$STATE_PATH"; do
+        [ "$(stat -c %a -- "$d")" = "700" ] \
+            || refuse "silo state dir $d is not mode 0700"
+    done
+    PODMAN_ARGV+=(-v "$STATE_PATH:/home/admin:rw")
+else
+    # no binding: a fresh tmpfs home owned by the guest uid
+    PODMAN_ARGV+=(--tmpfs /home/admin:rw,U,mode=0700)
+fi
+PODMAN_ARGV+=("$IMAGE")
+# A GUI image's ENTRYPOINT wraps the app argv in the waypipe server side
+# (CONTRACT.md §5 step 12, §7): the spawn passes ONLY the app argv after the
+# image name — the image's own ENTRYPOINT execs `waypipe ... server -- "$@"`.
+# A headless workload runs its argv directly.
+PODMAN_ARGV+=("${APP_ARGV[@]}")
 SCOPE_ARGV=(--scope "--unit=$SCOPE_UNIT" --collect
-    -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G     # set by root; enforcement is Phase C
+    -p Delegate=yes -p TasksMax=1024 -p MemoryMax=2G -p MemorySwapMax=0 -p CPUQuota=200%  # root-set at creation; enforced, s130
     "-p" "BindsTo=$UNIT" "-p" "Before=$UNIT"             # never outlives the launch unit; alive through its ExecStop/ExecStopPost
-    -- "$SCOPE_HELPER" enter "$TOKEN" "$ADMIN_UID" -- podman)
+    -- "$SCOPE_HELPER" enter "$TOKEN" "$SILO_UID" -- podman)
 
 # --- 7. plan (test/inspection hook; no side effect yet) --------------------
 if [ "${TIER3S_PRINT_PLAN:-0}" = 1 ]; then
-    printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\n' \
-        "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT"
+    printf 'ENGINE=qdistro.tier3s\nWORKLOAD=%s\nCONTAINER=%s\nTOKEN=%s\nUNIT=%s\nSCOPE_UNIT=%s\nGUI=%s\n' \
+        "$WORKLOAD" "$CONTAINER" "$TOKEN" "$UNIT" "$SCOPE_UNIT" "$GUI"
     printf 'SPAWN_ACTION=%s\nIMAGE=%s\nSTATE=%s\nSECCOMP=%s\nNETWORK=none\nBINDING=%s\n' \
         "$SPAWN_ACTION" "$IMAGE" "${STATE_PATH:-none}" "$SECCOMP" "$BINDING"
     printf 'CTL_DIR=%s\nLAUNCH_DIR=%s\nRUNSC_ROOT=%s\n' "$CTL_DIR" "$LAUNCH_DIR" "$RUNSC_ROOT"
     printf 'SCOPE_ARG=%s\n' "${SCOPE_ARGV[@]}"
     printf 'PODMAN_ARG=%s\n' "${PODMAN_ARGV[@]}"
+    [ "${#BRIDGE_ARGV[@]}" -eq 0 ] || printf 'BRIDGE_ARG=%s\n' "${BRIDGE_ARGV[@]}"
     exit 0
+fi
+
+# --- 7b. GUI precondition: the admin compositor must be reachable ----------
+# (the bridge client connects to it; refuse before the broker gate so a GUI
+# launch on a compositor-less host never asks for authorization it cannot
+# use). Headless workloads do not touch the compositor at all.
+if [ "$GUI" = 1 ]; then
+    [ -S "$XDG_RT/$WL_DISPLAY" ] \
+        || refuse "GUI workload $WORKLOAD but no admin compositor socket at $XDG_RT/$WL_DISPLAY"
 fi
 
 # --- 8. broker gate --------------------------------------------------------
@@ -265,7 +475,7 @@ broker_gate "$SPAWN_ACTION" "$WORKLOAD/$APP_BASE"
 if [ -n "$GENERATION" ]; then
     read_binding --record; rc=$?
     [ "$rc" -eq 0 ] || refuse "activation recording failed for silo $SILO (rc=$rc)"
-    [ "$RB_GEN" = "$GENERATION" ] && [ "$RB_STATE" = "$STATE_PATH" ] \
+    [ "$RB_GEN" = "$GENERATION" ] && [ "$RB_STATE" = "$RES_STATE" ] \
         || refuse "binding for silo $SILO changed between resolution and activation ($GENERATION -> $RB_GEN)"
 fi
 
@@ -275,8 +485,9 @@ trusted_dir() {   # trusted_dir <dir> <mode>: real dir, ours, exact mode
 }
 trusted_dir "$CTL" 700 || refuse "$CTL is not a root 0700 directory (systemd-tmpfiles --create qdistro-tier3s.conf)"
 trusted_dir "$LAUNCH_PARENT" 755 || refuse "$LAUNCH_PARENT is not a root 0755 directory (tmpfiles)"
-[ -d "$RUNSC_BASE/$ADMIN_UID" ] && [ ! -L "$RUNSC_BASE/$ADMIN_UID" ] \
-    || refuse "runsc state root $RUNSC_BASE/$ADMIN_UID is missing (tmpfiles; the probe checks it)"
+{ [ -d "$RUNSC_BASE/$SILO_UID" ] && [ ! -L "$RUNSC_BASE/$SILO_UID" ] \
+    && [ "$(stat -c '%u %a' -- "$RUNSC_BASE/$SILO_UID")" = "$SILO_UID 700" ]; } \
+    || refuse "runsc state root $RUNSC_BASE/$SILO_UID is missing or not silo-owned 0700"
 # the reaper never waits on a token another teardown holds, and stops starting
 # new teardowns after 30 s, so a wedged stale launch cannot stall this start
 "$CLEANUP" --reap-stale --except-unit "$UNIT" --token "$TOKEN" --deadline 30 \
@@ -337,9 +548,15 @@ ARMED=1
 NEW="$CTL/.new-$TOKEN"
 rm -rf -- "$NEW"; mkdir -m 0700 "$NEW" || refuse "cannot create $NEW"
 printf '%s\n' schema=1 "token=$TOKEN" "container=$CONTAINER" "unit=$UNIT" "scope_unit=$SCOPE_UNIT" \
-    "admin_uid=$ADMIN_UID" "runsc_root=$RUNSC_ROOT" "per_launch_dir=/run/qdistro-tier3s/$TOKEN" phase=created \
+    "admin_uid=$ADMIN_UID" "silo_uid=$SILO_UID" "silo_user=$SILO_USER" "silo=$SILO" \
+    "runsc_root=$RUNSC_ROOT" "per_launch_dir=/run/qdistro-tier3s/$TOKEN" phase=created \
     | LC_ALL=C sort > "$NEW/state" && mv -T -- "$NEW" "$CTL_DIR" || refuse "cannot write the control record"
-mkdir -m 0700 "$LAUNCH_DIR" && chown "$ADMIN_UID:$(id -g "$ADMIN_USER")" "$LAUNCH_DIR" \
+# the launch dir is admin-owned (the bridge client runs as admin); GUI needs
+# 0711 so the SANDBOX can traverse to link.sock — gVisor's guest-space DAC
+# does not honour host-side group membership (spike §3); the socket inside is
+# chowned to the silo 0600 after the client binds it.
+if [ "$GUI" = 1 ]; then lm=0711; else lm=0700; fi
+mkdir -m "$lm" "$LAUNCH_DIR" && chown "$ADMIN_UID:$ADMIN_GID" "$LAUNCH_DIR" \
     || refuse "cannot create the per-launch dir $LAUNCH_DIR"
 exec 9>&-
 # The start job completes here (Type=notify); a no-op without systemd's socket.
@@ -354,14 +571,6 @@ notify_ready() {
     [ -n "$NOTIFY_SOCK" ] || return 0
     NOTIFY_SOCKET="$NOTIFY_SOCK" systemd-notify --ready --status="tier3s launch $TOKEN running"
 }
-
-# --- 11. image ---------------------------------------------------------------
-pm image exists "$IMAGE" || refuse "image $IMAGE is not in admin's store (tier3s/make-tier3s-image.sh $WORKLOAD)"
-
-# --- 12. scope + podman ----------------------------------------------------
-printf 'LAUNCH_TOKEN=%s\nCONTAINER=%s\nIMAGE=%s\nSCOPE_UNIT=%s\n' "$TOKEN" "$CONTAINER" "$IMAGE" "$SCOPE_UNIT"
-systemd-run "${SCOPE_ARGV[@]}" "${PODMAN_ARGV[@]}" &
-child=$!
 starttime() {   # field 22 of /proc/<pid>/stat
     local s; { read -r s < "$PROC/$1/stat"; } 2>/dev/null || return 1
     s="${s##*) }"; set -- $s; [ -n "${20:-}" ] && echo "${20}"
@@ -370,6 +579,108 @@ in_scope() {   # in_scope <pid> <scope cgroup rel>
     local c; c="$(sed -n 's/^0:://p' "$PROC/$1/cgroup" 2>/dev/null | head -1)"
     [ -n "$c" ] && { [ "$c" = "$2" ] || [[ "$c" == "$2"/* ]]; }
 }
+
+# --- 11. image ---------------------------------------------------------------
+pm image exists "$IMAGE" || refuse "image $IMAGE is not in the silo's podman store (tier3s/make-tier3s-image.sh $WORKLOAD; the silo store is provisioned separately — CONTRACT.md §6)"
+
+# --- 11b. GUI bridge: the host waypipe client, registered ------------------
+# (CONTRACT.md §5 step 12.) Runs only for GUI=1; a headless launch is
+# unchanged. The client is our direct child in the launch unit's cgroup (the
+# sandbox runs in the scope, the bridge does not). Every failure refuses
+# BEFORE podman run, and the EXIT trap's cleanup tears the client down.
+if [ "$GUI" = 1 ]; then
+    rm -f -- "$T$LAUNCH_RECORD"
+    # The client's stdout/stderr go to a log inside the root-0700 control
+    # record dir — never into $LAUNCH_DIR, which becomes admin-owned the
+    # moment it exists and where an admin could pre-plant a file (a refusal
+    # must be able to trust the log tail it reports; the cleanup removes the
+    # log with the record dir).
+    BRIDGE_LOG="$CTL_DIR/waypipe-client.log"
+    ( exec "${BRIDGE_ARGV[@]}" ) >"$BRIDGE_LOG" 2>&1 &   # log is 0600 via the script's umask 077; the socket's 0600 is set inside BRIDGE_ARGV
+    BRIDGE_PID=$!
+    bridge_refuse() {   # a bridge refusal names the cause and the client's log tail
+        refuse "$* (client log tail: $(tail -n 5 -- "$BRIDGE_LOG" 2>/dev/null | tr '\n' '|'))"
+    }
+    # record the wrapper at once (bounded retry: the task may still be
+    # materializing): a refusal below still gets torn down
+    bwst=""
+    for _ in $(seq 1 100); do
+        bwst="$(starttime "$BRIDGE_PID")" && break
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    [ -n "$bwst" ] \
+        && state_write "gui=1" "launch_record=$LAUNCH_RECORD" \
+            "bridge_wrapper_pid=$BRIDGE_PID" "bridge_wrapper_starttime=$bwst" \
+        || bridge_refuse "cannot record the bridge wrapper"
+    # The launch record: secctx-exec publishes "<inner pid> <nonce>" (its own
+    # fork child, the waypipe that connects to the compositor). The nonce
+    # inside must be ours (a pre-created admin file cannot spoof it); the
+    # pid must be live and in this unit's cgroup.
+    INNER_PID=""; INNER_TOK=""; SEEN_PID=""
+    for _ in $(seq 1 100); do
+        if [ -s "$T$LAUNCH_RECORD" ]; then
+            IFS=' ' read -r INNER_PID INNER_TOK _ < "$T$LAUNCH_RECORD"
+            [[ "$INNER_PID" =~ ^[0-9]+$ ]] && SEEN_PID="$INNER_PID"
+            [ "$INNER_TOK" = "$LR_TOKEN" ] && break
+            INNER_PID=""
+        fi
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    # a record whose nonce never became ours still names an inner pid this
+    # launch spawned: record it so the teardown kills it, then refuse
+    if [ -z "$INNER_PID" ] && [[ "$SEEN_PID" =~ ^[1-9][0-9]*$ ]]; then
+        bwst="$(starttime "$SEEN_PID")" \
+            && state_write "bridge_client_pid=$SEEN_PID" "bridge_client_starttime=$bwst" || :
+    fi
+    [[ "$INNER_PID" =~ ^[1-9][0-9]*$ ]] && kill -0 "$INNER_PID" 2>/dev/null \
+        || bridge_refuse "the waypipe bridge client did not publish a live pid (launch record $LAUNCH_RECORD)"
+    bcg="$(sed -n 's/^0:://p' "$PROC/$INNER_PID/cgroup" 2>/dev/null | head -1)"
+    [ "${bcg##*/}" = "$UNIT" ] \
+        || bridge_refuse "bridge client pid $INNER_PID is not in $UNIT's cgroup (${bcg:-?})"
+    bcst="$(starttime "$INNER_PID")" || bridge_refuse "cannot read bridge client pid $INNER_PID starttime"
+    state_write "bridge_client_pid=$INNER_PID" "bridge_client_starttime=$bcst" \
+        || bridge_refuse "cannot record the bridge client"
+    # link.sock by the clock (ΔB2), or the client's death — whichever first:
+    # a dead client never binds, and waiting out the bound only delays the
+    # refusal (which then names the death and the log tail).
+    sock_end=$((SECONDS + BRIDGE_WAIT_S)); sock_ok=""
+    while [ "$SECONDS" -lt "$sock_end" ]; do
+        [ -S "$BRIDGE_SOCK" ] && { sock_ok=1; break; }
+        kill -0 "$BRIDGE_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+    [ -n "$sock_ok" ] || bridge_refuse "bridge client did not bind $BRIDGE_SOCK within ${BRIDGE_WAIT_S} s"
+    # the sandbox connects as the silo's mapped uid; gVisor's guest-space DAC
+    # ignores host group membership and per-uid ACLs (spike §3) — the socket
+    # must be owned by the silo itself. chmod keeps the socket connect-only.
+    chown "$SILO_UID:$SILO_GID" "$BRIDGE_SOCK" && chmod 0600 "$BRIDGE_SOCK" \
+        || bridge_refuse "cannot chown the bridge socket to the silo"
+    # Lineage registration is MANDATORY for a GUI launch (B-i is stricter
+    # than tier 3's warning-only registration): the broker re-verifies
+    # (pid, starttime, uid, exe) itself. Pass $bcst — the starttime this
+    # same script just read — so a pid-reuse between our read and the
+    # broker's check mismatches instead of silently re-trusting /proc
+    # (target_starttime 0 would mean "trust /proc", fable P3-2).
+    reg=0
+    for _ in 1 2 3 4 5; do
+        dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.RegisterLaunch \
+            "string:$SILO" "string:qdistro.tier3s" "string:qdistro.tier3s.$SILO" \
+            "string:$TOKEN" "string:" "uint64:$INNER_PID" "string:tier3s" "uint64:$bcst" \
+            >/dev/null 2>&1 && { reg=1; break; }
+        sleep 0.2
+    done
+    [ "$reg" = 1 ] \
+        || bridge_refuse "RegisterLaunch failed for bridge client pid $INNER_PID; no unregistered GUI launch"
+    rm -f -- "$T$LAUNCH_RECORD"
+fi
+
+# --- 12. scope + podman ----------------------------------------------------
+printf 'LAUNCH_TOKEN=%s\nCONTAINER=%s\nIMAGE=%s\nSCOPE_UNIT=%s\n' "$TOKEN" "$CONTAINER" "$IMAGE" "$SCOPE_UNIT"
+systemd-run "${SCOPE_ARGV[@]}" "${PODMAN_ARGV[@]}" &
+child=$!
 # The start poll is a POLL_S-second polling BUDGET by the clock, not a strict
 # pre-TimeoutStartSec bound (fable A r2 P3-3, A r3 P3-3): one iteration can
 # overrun the budget by up to its own bounds (the 5 s inspect plus the 7 s

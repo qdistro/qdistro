@@ -1,0 +1,1491 @@
+[spin-test-vm] stage 1: baseweed-admin.qcow2 already present
+[spin-test-vm] stage 2: baseweed-baked.qcow2 already present
+[spin-test-vm] building/caching native components in rootless Podman...
+[native-podman] toolchain image cache hit localhost/qdistro/native-builder:2aa7f7129a872a03c94ea8b54f2249bedb4573c9a01bce2b058bb48a967c9609
+[native-podman] building 11e6cd3611c154d2618412d24992b6527db567f02c6319538810a2311b1a06ca against snapshot 20260930 (2aa7f7129a872a03c94ea8b54f2249bedb4573c9a01bce2b058bb48a967c9609)
+The Meson build system
+Version: 1.12.1
+Source dir: /src/qdwin/libweston-vendored/src
+Build dir: /src/qdwin/libweston-vendored/src/build-prod
+Build type: native build
+Project name: weston
+Project version: 16.0.0
+C compiler for the host machine: cc (gcc 16.2.0 "cc (SUSE Linux) 16.2.0")
+C linker for the host machine: cc ld.bfd 2.47.0.20260921-1
+C++ compiler for the host machine: c++ (gcc 16.2.0 "c++ (SUSE Linux) 16.2.0")
+C++ linker for the host machine: c++ ld.bfd 2.47.0.20260921-1
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Compiler for C supports arguments -Wmissing-prototypes: YES 
+Compiler for C supports arguments -Wno-unused-parameter: YES 
+Compiler for C supports arguments -Wno-shift-negative-value: YES 
+Compiler for C supports arguments -Wno-missing-field-initializers: YES 
+Compiler for C supports arguments -Wno-pedantic: YES 
+Compiler for C supports arguments -Wundef: YES 
+Compiler for C supports arguments -fvisibility=hidden: YES 
+Header "sys/sysmacros.h" has symbol "major" : YES 
+Compiler for C++ supports arguments -Wno-unused-parameter: YES 
+Checking for function "mkostemp" : YES 
+Checking for function "strchrnul" : YES 
+Checking for function "initgroups" : YES 
+Checking for function "posix_fallocate" : YES 
+Checking for function "memfd_create" : YES 
+Checking for function "unreachable" : YES 
+Has header "linux/sync_file.h" : YES 
+Checking if "builtin_clz" links: YES 
+Checking if "builtin_bswap32" links: YES 
+Checking if "builtin_popcount" links: YES 
+Message: The default backend is drm
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Run-time dependency wayland-server found: YES 1.26.0
+Run-time dependency wayland-client found: YES 1.26.0
+Run-time dependency pixman-1 found: YES 0.46.4
+Run-time dependency xkbcommon found: YES 1.13.2
+Run-time dependency libinput found: YES 1.32.0
+Run-time dependency libevdev found: YES 1.13.7
+Library m found: YES
+Library dl found: YES
+Run-time dependency libdrm found: YES 2.4.134
+Run-time dependency threads found: YES
+Run-time dependency lcms2 found: YES 2.19
+Run-time dependency libdisplay-info found: YES 0.3.0
+Program python3 found: YES (/usr/bin/python3)
+Run-time dependency egl found: YES 1.5
+Program  found: NO
+Configuring version.h using configuration
+Run-time dependency wayland-scanner found: YES 1.26.0
+Program /usr/bin/wayland-scanner found: YES (/usr/bin/wayland-scanner)
+Run-time dependency wayland-protocols found: YES 1.49
+Run-time dependency xcb found: YES 1.17.0
+Run-time dependency cairo found: YES 1.18.6
+Run-time dependency libpng found: YES 1.6.58
+Run-time dependency pango found: YES 1.58.2
+Run-time dependency pangocairo found: YES 1.58.2
+Run-time dependency fontconfig found: YES 2.18.1
+Run-time dependency glib-2.0 found: YES 2.88.3
+Run-time dependency gbm found: YES 26.2.3
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Run-time dependency libseat found: YES 0.9.3
+Run-time dependency libudev found: YES 261
+Checking for function "cmsGetToneCurveSegment" with dependency lcms2: YES 
+Dependency egl for host machine found: YES 1.5 (cached)
+Run-time dependency glesv2 found: YES 3.2
+Dependency libudev for host machine found: YES 261 (cached)
+Dependency libudev for host machine found: YES 261 (cached)
+Run-time dependency libpipewire-0.3 found: YES 1.6.9
+Run-time dependency libspa-0.2 found: YES 0.2
+Run-time dependency freerdp3 found: YES 3.32.1
+Found CMake: /usr/bin/cmake (4.4.3)
+Run-time dependency freerdp2 found: NO  (tried pkg-config and cmake)
+Run-time dependency freerdp-server3 found: YES 3.32.1
+Run-time dependency winpr3 found: YES 3.32.1
+Message: Using FreeRDP 3.x for RDP backend
+Dependency wayland-client for host machine found: YES 1.26.0 (cached)
+Run-time dependency wayland-cursor found: YES 1.26.0
+Run-time dependency wayland-egl found: YES 18.1.0
+Dependency xcb for host machine found: YES 1.17.0 (cached)
+Run-time dependency xcb-shm found: YES 1.17.0
+Run-time dependency x11 found: YES 1.8.13
+Run-time dependency x11-xcb found: YES 1.8.13
+Run-time dependency xcb-xkb found: YES 1.17.0
+Configuring config.h using configuration
+Message: Documentation will not be built. Use -Ddoc to build it.
+Build targets in project: 115
+
+weston 16.0.0
+
+  User defined options
+    backend-default      : drm
+    backend-drm          : true
+    backend-headless     : true
+    backend-pipewire     : true
+    backend-rdp          : true
+    backend-vnc          : false
+    backend-wayland      : true
+    backend-x11          : true
+    color-management-lcms: true
+    demo-clients         : false
+    doc                  : false
+    image-jpeg           : false
+    image-webp           : false
+    prefix               : /tmp/qdwin-libweston-prod-prefix
+    renderer-gl          : true
+    renderer-vulkan      : false
+    shell-desktop        : false
+    shell-ivi            : false
+    shell-kiosk          : false
+    shell-lua            : false
+    simple-clients       : 
+    systemd              : false
+    tests                : false
+    tools                : 
+    xwayland             : true
+
+Found ninja-1.13.2 at /usr/bin/ninja
+ninja: Entering directory `/src/qdwin/libweston-vendored/src/build-prod'
+[1/187] Generating protocol/alpha-modifier-v1 server-header with a custom command
+[2/187] Generating protocol/alpha-modifier-v1 private-code with a custom command
+[3/187] Generating protocol/color-management-v1 server-header with a custom command
+[4/187] Generating protocol/color-management-v1 private-code with a custom command
+[5/187] Generating protocol/color-representation-v1 server-header with a custom command
+[6/187] Generating protocol/color-representation-v1 private-code with a custom command
+[7/187] Generating protocol/commit-timing-v1 server-header with a custom command
+[8/187] Generating protocol/commit-timing-v1 private-code with a custom command
+[9/187] Generating protocol/fifo-v1 server-header with a custom command
+[10/187] Generating protocol/fifo-v1 private-code with a custom command
+[11/187] Generating protocol/input-method-unstable-v1 server-header with a custom command
+[12/187] Generating protocol/input-method-unstable-v1 private-code with a custom command
+[13/187] Generating protocol/input-timestamps-unstable-v1 server-header with a custom command
+[14/187] Generating protocol/input-timestamps-unstable-v1 private-code with a custom command
+[15/187] Generating protocol/linux-explicit-synchronization-unstable-v1 server-header with a custom command
+[16/187] Generating protocol/linux-explicit-synchronization-unstable-v1 private-code with a custom command
+[17/187] Generating protocol/linux-dmabuf-unstable-v1 server-header with a custom command
+[18/187] Generating protocol/linux-dmabuf-unstable-v1 private-code with a custom command
+[19/187] Generating protocol/presentation-time server-header with a custom command
+[20/187] Generating protocol/presentation-time private-code with a custom command
+[21/187] Generating protocol/pointer-constraints-unstable-v1 server-header with a custom command
+[22/187] Generating protocol/pointer-constraints-unstable-v1 private-code with a custom command
+[23/187] Generating protocol/relative-pointer-unstable-v1 server-header with a custom command
+[24/187] Generating protocol/relative-pointer-unstable-v1 private-code with a custom command
+[25/187] Generating protocol/single-pixel-buffer-v1 server-header with a custom command
+[26/187] Generating protocol/single-pixel-buffer-v1 private-code with a custom command
+[27/187] Generating protocol/tablet-unstable-v2 server-header with a custom command
+[28/187] Generating protocol/tablet-unstable-v2 private-code with a custom command
+[29/187] Generating protocol/tearing-control-v1 server-header with a custom command
+[30/187] Generating protocol/tearing-control-v1 private-code with a custom command
+[31/187] Generating protocol/text-cursor-position server-header with a custom command
+[32/187] Generating protocol/text-cursor-position private-code with a custom command
+[33/187] Generating protocol/text-input-unstable-v1 server-header with a custom command
+[34/187] Generating protocol/text-input-unstable-v1 private-code with a custom command
+[35/187] Generating protocol/viewporter server-header with a custom command
+[36/187] Generating protocol/viewporter private-code with a custom command
+[37/187] Generating protocol/weston-debug server-header with a custom command
+[38/187] Generating protocol/weston-debug private-code with a custom command
+[39/187] Generating protocol/weston-output-capture server-header with a custom command
+[40/187] Generating protocol/weston-output-capture private-code with a custom command
+[41/187] Generating protocol/weston-content-protection server-header with a custom command
+[42/187] Generating protocol/weston-content-protection private-code with a custom command
+[43/187] Generating protocol/weston-touch-calibration server-header with a custom command
+[44/187] Generating protocol/weston-touch-calibration private-code with a custom command
+[45/187] Generating protocol/weston-direct-display server-header with a custom command
+[46/187] Generating protocol/weston-direct-display private-code with a custom command
+[47/187] Generating protocol/xdg-output-unstable-v1 server-header with a custom command
+[48/187] Generating protocol/xdg-output-unstable-v1 private-code with a custom command
+[49/187] Generating protocol/xdg-shell server-header with a custom command
+[50/187] Generating protocol/xdg-shell private-code with a custom command
+[51/187] Generating protocol/xdg-shell client-header with a custom command
+[52/187] Compiling C object libweston/backend-drm/drm-backend.so.p/meson-generated_.._.._.._protocol_linux-dmabuf-unstable-v1-protocol.c.o
+[53/187] Generating libweston/renderer-gl/vertex-shader.h with a custom command
+[54/187] Compiling C object shared/libshared.a.p/hash.c.o
+[55/187] Generating libweston/renderer-gl/fragment-shader.h with a custom command
+[56/187] Compiling C object shared/libshared.a.p/file-util.c.o
+[57/187] Generating git-version.h with a custom command
+[58/187] Compiling C object shared/libshared.a.p/os-compatibility.c.o
+[59/187] Compiling C object shared/libcairo-shared.a.p/image-loader.c.o
+[60/187] Compiling C object libweston/backend-drm/libbacklight.a.p/libbacklight.c.o
+[61/187] Compiling C object shared/libshared.a.p/process-util.c.o
+[62/187] Compiling C object shared/libshared.a.p/option-parser.c.o
+[63/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_alpha-modifier-v1-protocol.c.o
+[64/187] Compiling C object libweston/libsession-helper.a.p/launcher-util.c.o
+[65/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/meson-generated_.._.._.._protocol_linux-dmabuf-unstable-v1-protocol.c.o
+[66/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_commit-timing-v1-protocol.c.o
+[67/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_color-management-v1-protocol.c.o
+[68/187] Compiling C object libweston/libsession-helper.a.p/launcher-libseat.c.o
+[69/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_color-representation-v1-protocol.c.o
+[70/187] Compiling C object shared/libshared.a.p/config-parser.c.o
+[71/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_linux-explicit-synchronization-unstable-v1-protocol.c.o
+[72/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_input-timestamps-unstable-v1-protocol.c.o
+[73/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_fifo-v1-protocol.c.o
+[74/187] Compiling C object libweston/color-lcms/color-lcms.so.p/color-transformer.c.o
+[75/187] Compiling C object libweston/backend-drm/drm-backend.so.p/kms-color.c.o
+[76/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_linux-dmabuf-unstable-v1-protocol.c.o
+[77/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_input-method-unstable-v1-protocol.c.o
+[78/187] Linking static target shared/libshared.a
+[79/187] Compiling C object libweston/liblibinput-backend.a.p/libinput-seat.c.o
+[80/187] Compiling C object libweston/color-lcms/color-lcms.so.p/color-curve-segments.c.o
+[81/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_presentation-time-protocol.c.o
+[82/187] Compiling C object libweston/backend-drm/drm-backend.so.p/state-helpers.c.o
+[83/187] Compiling C object libweston/color-lcms/color-lcms.so.p/color-profile.c.o
+[84/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_pointer-constraints-unstable-v1-protocol.c.o
+[85/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_single-pixel-buffer-v1-protocol.c.o
+[86/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_relative-pointer-unstable-v1-protocol.c.o
+[87/187] Compiling C object libweston/liblibinput-backend.a.p/libinput-device.c.o
+[88/187] Compiling C object libweston/color-lcms/color-lcms.so.p/color-lcms.c.o
+[89/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_tearing-control-v1-protocol.c.o
+[90/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_text-input-unstable-v1-protocol.c.o
+[91/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_xdg-output-unstable-v1-protocol.c.o
+[92/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_text-cursor-position-protocol.c.o
+[93/187] Compiling C object libweston/backend-drm/drm-backend.so.p/modes.c.o
+[94/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_weston-touch-calibration-protocol.c.o
+[95/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_weston-content-protection-protocol.c.o
+[96/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_weston-debug-protocol.c.o
+[97/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_weston-direct-display-protocol.c.o
+[98/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_xdg-shell-protocol.c.o
+[99/187] Compiling C object libweston/backend-drm/drm-backend.so.p/fb.c.o
+[100/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_viewporter-protocol.c.o
+[101/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_weston-output-capture-protocol.c.o
+[102/187] Compiling C object libweston/libweston-16.so.0.0.0.p/meson-generated_.._.._protocol_tablet-unstable-v2-protocol.c.o
+[103/187] Compiling C object shared/libcairo-shared.a.p/cairo-util.c.o
+[104/187] Compiling C object libweston/backend-drm/drm-backend.so.p/colorops.c.o
+[105/187] Compiling C object libweston/backend-drm/drm-backend.so.p/drm-gbm.c.o
+[106/187] Compiling C object libweston/librenderer-borders.a.p/renderer-borders.c.o
+[107/187] Compiling C object libweston/backend-drm/drm-backend.so.p/state-propose.c.o
+[108/187] Compiling C object shared/libcairo-shared.a.p/frame.c.o
+[109/187] Compiling C object libweston/libweston-16.so.0.0.0.p/auth.c.o
+[110/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/egl-glue.c.o
+[111/187] Compiling C object libweston/color-lcms/color-lcms.so.p/color-transform.c.o
+[112/187] Compiling C object libweston/backend-drm/drm-backend.so.p/kms.c.o
+[113/187] Compiling C object libweston/libweston-16.so.0.0.0.p/alpha-modifier.c.o
+[114/187] Compiling C object libweston/backend-headless/headless-backend.so.p/headless.c.o
+[115/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color-noop.c.o
+[116/187] Compiling C object libweston/libweston-16.so.0.0.0.p/animation.c.o
+[117/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color-properties.c.o
+[118/187] Compiling C object libweston/libweston-16.so.0.0.0.p/clipboard.c.o
+[119/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color-operations.c.o
+[120/187] Compiling C object libweston/libweston-16.so.0.0.0.p/id-number-allocator.c.o
+[121/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color-representation.c.o
+[122/187] Compiling C object libweston/libweston-16.so.0.0.0.p/bindings.c.o
+[123/187] Compiling C object libweston/libweston-16.so.0.0.0.p/drm-formats.c.o
+[124/187] Compiling C object libweston/libweston-16.so.0.0.0.p/linux-sync-file.c.o
+[125/187] Compiling C object libweston/libweston-16.so.0.0.0.p/content-protection.c.o
+[126/187] Compiling C object libweston/libweston-16.so.0.0.0.p/commit-timing.c.o
+[127/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color-profile-param-builder.c.o
+[128/187] Compiling C object libweston/libweston-16.so.0.0.0.p/fifo.c.o
+[129/187] Compiling C object libweston/libweston-16.so.0.0.0.p/linux-explicit-synchronization.c.o
+[130/187] Linking static target shared/libcairo-shared.a
+[131/187] Linking static target libweston/libsession-helper.a
+[132/187] Compiling C object libweston/libweston-16.so.0.0.0.p/log.c.o
+[133/187] Linking static target libweston/liblibinput-backend.a
+[134/187] Linking static target libweston/librenderer-borders.a
+[135/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color.c.o
+[136/187] Compiling C object libweston/backend-drm/drm-backend.so.p/drm.c.o
+[137/187] Compiling C object libweston/libweston-16.so.0.0.0.p/plugin-registry.c.o
+[138/187] Compiling C object libweston/libweston-16.so.0.0.0.p/data-device.c.o
+[139/187] Compiling C object libweston/backend-rdp/rdp-backend.so.p/rdpclip.c.o
+In file included from /usr/lib64/pkgconfig/../../include/winpr3/winpr/winpr.h:22,
+                 from /usr/lib64/pkgconfig/../../include/winpr3/winpr/stream.h:26,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:25,
+                 from ../libweston/backend-rdp/rdp.h:32,
+                 from ../libweston/backend-rdp/rdpclip.c:38:
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_NTLM_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:917:62: note: declared here
+  917 |     "[since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2", typedef struct {
+      |                                                              ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_KERBEROS_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:925:66: note: declared here
+  925 |     "[since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2", typedef struct {
+      |                                                                  ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+[140/187] Compiling C object libweston/libweston-16.so.0.0.0.p/noop-renderer.c.o
+[141/187] Compiling C object libweston/libweston-16.so.0.0.0.p/weston-log-file.c.o
+[142/187] Compiling C object libweston/libweston-16.so.0.0.0.p/linux-dmabuf.c.o
+[143/187] Linking static target libweston/backend-drm/libbacklight.a
+[144/187] Compiling C object libweston/libweston-16.so.0.0.0.p/color-management.c.o
+[145/187] Compiling C object libweston/libweston-16.so.0.0.0.p/weston-log-flight-rec.c.o
+[146/187] Compiling C object libweston/libweston-16.so.0.0.0.p/weston-log-wayland.c.o
+[147/187] Compiling C object libweston/libweston-16.so.0.0.0.p/timeline.c.o
+[148/187] Compiling C object libweston/libweston-16.so.0.0.0.p/output-capture.c.o
+[149/187] Compiling C object libweston/libweston-16.so.0.0.0.p/weston-direct-display.c.o
+[150/187] Compiling C object libweston/backend-wayland/wayland-backend.so.p/meson-generated_.._.._.._protocol_presentation-time-protocol.c.o
+[151/187] Compiling C object libweston/libweston-16.so.0.0.0.p/pixel-formats.c.o
+[152/187] Compiling C object libweston/libweston-16.so.0.0.0.p/touch-calibration.c.o
+[153/187] Compiling C object libweston/libweston-16.so.0.0.0.p/shell-utils_shell-utils.c.o
+[154/187] Compiling C object libweston/libweston-16.so.0.0.0.p/desktop_libweston-desktop.c.o
+[155/187] Compiling C object libweston/backend-wayland/wayland-backend.so.p/meson-generated_.._.._.._protocol_xdg-shell-protocol.c.o
+[156/187] Compiling C object libweston/libweston-16.so.0.0.0.p/desktop_client.c.o
+[157/187] Compiling C object libweston/libweston-16.so.0.0.0.p/weston-log.c.o
+[158/187] Compiling C object libweston/libweston-16.so.0.0.0.p/desktop_xwayland.c.o
+[159/187] Compiling C object libweston/backend-rdp/rdp-backend.so.p/rdp.c.o
+In file included from /usr/lib64/pkgconfig/../../include/winpr3/winpr/winpr.h:22,
+                 from /usr/lib64/pkgconfig/../../include/winpr3/winpr/stream.h:26,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:25,
+                 from ../libweston/backend-rdp/rdp.h:32,
+                 from ../libweston/backend-rdp/rdp.c:38:
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_NTLM_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:917:62: note: declared here
+  917 |     "[since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2", typedef struct {
+      |                                                              ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_KERBEROS_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:925:66: note: declared here
+  925 |     "[since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2", typedef struct {
+      |                                                                  ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+[160/187] Compiling C object libweston/libweston-16.so.0.0.0.p/surface-state.c.o
+[161/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/.._vertex-clipping.c.o
+[162/187] Compiling C object libweston/libweston-16.so.0.0.0.p/.._shared_matrix.c.o
+[163/187] Compiling C object libweston/libweston-16.so.0.0.0.p/desktop_surface.c.o
+[164/187] Compiling C object libweston/libweston-16.so.0.0.0.p/desktop_seat.c.o
+[165/187] Compiling C object libweston/backend-pipewire/pipewire-backend.so.p/pipewire.c.o
+[166/187] Compiling C object libweston/libweston-16.so.0.0.0.p/pixman-renderer.c.o
+[167/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/gl-utils.c.o
+[168/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/gl-shader-config-color-transformation.c.o
+[169/187] Compiling C object libweston/libweston-16.so.0.0.0.p/desktop_xdg-shell.c.o
+[170/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/gl-shaders.c.o
+[171/187] Compiling C object libweston/backend-rdp/rdp-backend.so.p/rdpdisp.c.o
+In file included from /usr/lib64/pkgconfig/../../include/winpr3/winpr/winpr.h:22,
+                 from /usr/lib64/pkgconfig/../../include/winpr3/winpr/stream.h:26,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:25,
+                 from ../libweston/backend-rdp/rdp.h:32,
+                 from ../libweston/backend-rdp/rdpdisp.c:40:
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_NTLM_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:917:62: note: declared here
+  917 |     "[since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2", typedef struct {
+      |                                                              ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_KERBEROS_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:925:66: note: declared here
+  925 |     "[since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2", typedef struct {
+      |                                                                  ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+[172/187] Compiling C object libweston/backend-rdp/rdp-backend.so.p/rdputil.c.o
+In file included from /usr/lib64/pkgconfig/../../include/winpr3/winpr/winpr.h:22,
+                 from /usr/lib64/pkgconfig/../../include/winpr3/winpr/stream.h:26,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:25,
+                 from ../libweston/backend-rdp/rdp.h:32,
+                 from ../libweston/backend-rdp/rdputil.c:42:
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_NTLM_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:917:62: note: declared here
+  917 |     "[since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2", typedef struct {
+      |                                                              ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: 'SEC_WINPR_KERBEROS_SETTINGS' is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:925:66: note: declared here
+  925 |     "[since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2", typedef struct {
+      |                                                                  ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro 'WINPR_DEPRECATED_VAR'
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+[173/187] Compiling C object libweston/backend-x11/x11-backend.so.p/x11.c.o
+[174/187] Compiling C object libweston/libweston-16.so.0.0.0.p/input.c.o
+[175/187] Compiling C object libweston/backend-wayland/wayland-backend.so.p/wayland.c.o
+[176/187] Compiling C object libweston/renderer-gl/gl-renderer.so.p/gl-renderer.c.o
+[177/187] Compiling C object libweston/libweston-16.so.0.0.0.p/compositor.c.o
+[178/187] Linking target libweston/libweston-16.so.0.0.0
+[179/187] Generating symbol file libweston/libweston-16.so.0.0.0.p/libweston-16.so.0.0.0.symbols
+[180/187] Linking target libweston/backend-pipewire/pipewire-backend.so
+[181/187] Linking target libweston/color-lcms/color-lcms.so
+[182/187] Linking target libweston/backend-rdp/rdp-backend.so
+[183/187] Linking target libweston/renderer-gl/gl-renderer.so
+[184/187] Linking target libweston/backend-x11/x11-backend.so
+[185/187] Linking target libweston/backend-headless/headless-backend.so
+[186/187] Linking target libweston/backend-drm/drm-backend.so
+[187/187] Linking target libweston/backend-wayland/wayland-backend.so
+
+Profile:         production
+Built libweston: /src/qdwin/libweston-vendored/src/build-prod/libweston/libweston-16.so.0.0.0
+Installed under: /tmp/qdwin-libweston-prod-prefix (libdir: lib64)
+lrwxrwxrwx. 1 root root      17 Oct  3 18:26 /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16.so -> libweston-16.so.0
+lrwxrwxrwx. 1 root root      21 Oct  3 18:26 /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16.so.0 -> libweston-16.so.0.0.0
+-rwxr-xr-x. 1 root root 2058872 Oct  3 18:26 /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16.so.0.0.0
+Backends:
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/color-lcms.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/drm-backend.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/gl-renderer.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/headless-backend.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/pipewire-backend.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/rdp-backend.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/wayland-backend.so
+  /tmp/qdwin-libweston-prod-prefix/lib64/libweston-16/x11-backend.so
+
+Stage into a VM/image with:
+  QDWIN_LIBWESTON_PREFIX=/tmp/qdwin-libweston-prod-prefix \
+    qdistro/scripts/install/install-vendored-libweston.sh
+vendored libweston installed under /out/stage/usr/libexec/qdistro/qdwin-libweston
+  core:     /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16.so.0.0.0
+  backends: 8 module(s)
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/color-lcms.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/gl-renderer.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/headless-backend.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/pipewire-backend.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/rdp-backend.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/wayland-backend.so
+    /out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/x11-backend.so
+
+The qdwin systemd unit must point at this tree:
+  Environment=LD_LIBRARY_PATH=/out/stage/usr/libexec/qdistro/qdwin-libweston/lib64
+  Environment=WESTON_MODULE_MAP=drm-backend.so=/out/stage/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so;...
+install-qdwin-session-for-vm.sh writes both from $DEST. Verify after start:
+  pmap $(pgrep -x weston) | grep libweston-16.so   # path must be under qdistro/
+The Meson build system
+Version: 1.12.1
+Source dir: /src/qdwin
+Build dir: /out/build-qdwin
+Build type: native build
+WARNING: Project does not target a minimum version but uses feature introduced in '1.1': meson.options file. Use meson_options.txt instead
+Project name: qdwin
+Project version: 0.1.0
+C compiler for the host machine: cc (gcc 16.2.0 "cc (SUSE Linux) 16.2.0")
+C linker for the host machine: cc ld.bfd 2.47.0.20260921-1
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Run-time dependency libweston-16 found: YES 16.0.0
+Run-time dependency wayland-server found: YES 1.26.0
+Run-time dependency wayland-scanner found: YES 1.26.0
+Run-time dependency libinput found: YES 1.32.0
+Program /usr/bin/wayland-scanner found: YES (/usr/bin/wayland-scanner)
+Run-time dependency wayland-protocols found: YES 1.49
+Run-time dependency xcursor found: YES 1.2.3
+Run-time dependency wayland-client found: YES 1.26.0
+Program python3 found: YES (/usr/bin/python3)
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Program tests/protocol/run-layer-shell-protocol-test.sh found: YES (/src/qdwin/tests/protocol/run-layer-shell-protocol-test.sh)
+Build targets in project: 83
+WARNING: Project specifies no minimum version but uses features which were added in versions:
+ * 1.1: {'meson.options file'}
+
+qdwin 0.1.0
+
+  User defined options
+    prefix: /usr
+
+Found ninja-1.13.2 at /usr/bin/ninja
+ninja: Entering directory `/out/build-qdwin'
+[1/161] Generating qdwin-locker-v1-server-header with a custom command
+[2/161] Generating qdwin-locker-v1-client-header with a custom command
+[3/161] Generating qdwin-locker-v1-private-code with a custom command
+[4/161] Generating xdg-activation-v1-server-header with a custom command
+[5/161] Generating xdg-activation-v1-private-code with a custom command
+[6/161] Generating xdg-activation-v1-client-header with a custom command
+[7/161] Generating ext-idle-notify-v1-server-header with a custom command
+[8/161] Generating ext-idle-notify-v1-private-code with a custom command
+[9/161] Generating idle-inhibit-v1-private-code with a custom command
+[10/161] Generating cursor-shape-v1-server-header with a custom command
+[11/161] Generating cursor-shape-v1-private-code with a custom command
+[12/161] Generating qdwin-shell-v1-server-header with a custom command
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[13/161] Generating qdwin-shell-v1-client-header with a custom command
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[14/161] Generating qdwin-shell-v1-private-code with a custom command
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+../../src/qdwin/qdwin/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[15/161] Generating idle-inhibit-v1-server-header with a custom command
+[16/161] Generating tablet-v2-server-header with a custom command
+[17/161] Generating tablet-v2-private-code with a custom command
+[18/161] Generating fractional-scale-v1-server-header with a custom command
+[19/161] Generating fractional-scale-v1-private-code with a custom command
+[20/161] Generating text-input-v3-server-header with a custom command
+[21/161] Generating input-method-unstable-v2-server-header with a custom command
+[22/161] Generating input-method-unstable-v2-private-code with a custom command
+[23/161] Generating virtual-keyboard-unstable-v1-server-header with a custom command
+[24/161] Generating ext-workspace-v1-server-header with a custom command
+[25/161] Generating ext-workspace-v1-private-code with a custom command
+[26/161] Generating text-input-v3-private-code with a custom command
+[27/161] Generating virtual-keyboard-unstable-v1-private-code with a custom command
+[28/161] Generating ext-workspace-v1-client-header with a custom command
+[29/161] Generating wlr-output-management-v1-server-header with a custom command
+[30/161] Generating wlr-output-management-v1-private-code with a custom command
+[31/161] Generating wlr-output-management-v1-client-header with a custom command
+[32/161] Generating security-context-v1-server-header with a custom command
+[33/161] Generating security-context-v1-private-code with a custom command
+[34/161] Generating security-context-v1-client-header with a custom command
+[35/161] Generating primary-selection-unstable-v1-server-header with a custom command
+[36/161] Generating primary-selection-unstable-v1-private-code with a custom command
+[37/161] Generating primary-selection-unstable-v1-client-header with a custom command
+[38/161] Generating wlr-layer-shell-unstable-v1-private-code with a custom command
+[39/161] Generating xdg-decoration-unstable-v1-server-header with a custom command
+[40/161] Generating xdg-decoration-unstable-v1-private-code with a custom command
+[41/161] Generating wlr-layer-shell-unstable-v1-server-header with a custom command
+[42/161] Generating xdg-shell-server-header-plugin with a custom command
+[43/161] Generating xdg-shell-private-code-plugin with a custom command
+[44/161] Generating qdwin-nested-v1-server-header with a custom command
+[45/161] Generating qdwin-nested-v1-private-code with a custom command
+[46/161] Generating qdwin-nested-v1-client-header with a custom command
+[47/161] Generating cursor-shape-v1-client-header with a custom command
+[48/161] Generating tablet-v2-client-private-code with a custom command
+[49/161] Generating cursor-shape-v1-client-private-code with a custom command
+[50/161] Generating fractional-scale-v1-client-header with a custom command
+[51/161] Generating fractional-scale-v1-client-private-code with a custom command
+[52/161] Generating text-input-v3-client-header with a custom command
+[53/161] Generating input-method-unstable-v2-client-header with a custom command
+[54/161] Generating xdg-shell-client-header with a custom command
+[55/161] Generating xdg-shell-private-code-test with a custom command
+[56/161] Generating virtual-keyboard-unstable-v1-client-header with a custom command
+[57/161] Compiling C object qdwin-secctx-probe.p/meson-generated_.._security-context-v1-protocol.c.o
+[58/161] Compiling C object qdwin-workspace-probe.p/meson-generated_.._ext-workspace-v1-protocol.c.o
+[59/161] Compiling C object qdwin-primary-selection-probe.p/meson-generated_.._primary-selection-unstable-v1-protocol.c.o
+[60/161] Compiling C object qdwin-shell.so.p/meson-generated_.._xdg-activation-v1-protocol.c.o
+[61/161] Compiling C object qdwin-probe.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[62/161] Compiling C object qdwin-locker-probe.p/meson-generated_.._qdwin-locker-v1-protocol.c.o
+[63/161] Compiling C object qdwin-wsname-probe.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[64/161] Compiling C object qdwin-activation-probe.p/meson-generated_.._xdg-activation-v1-protocol.c.o
+[65/161] Compiling C object qdwin-shell.so.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[66/161] Compiling C object qdwin-shell.so.p/meson-generated_.._qdwin-locker-v1-protocol.c.o
+[67/161] Compiling C object qdwin-shell.so.p/meson-generated_.._ext-idle-notify-v1-protocol.c.o
+[68/161] Compiling C object qdwin-shell.so.p/meson-generated_.._idle-inhibit-unstable-v1-protocol.c.o
+[69/161] Compiling C object qdwin-shell.so.p/meson-generated_.._tablet-v2-protocol.c.o
+[70/161] Compiling C object qdwin-shell.so.p/meson-generated_.._text-input-unstable-v3-protocol.c.o
+[71/161] Compiling C object qdwin-shell.so.p/meson-generated_.._input-method-unstable-v2-protocol.c.o
+[72/161] Compiling C object qdwin-input-probe.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[73/161] Compiling C object qdwin-wsname-probe.p/meson-generated_.._ext-workspace-v1-protocol.c.o
+[74/161] Compiling C object qdwin-output-probe.p/meson-generated_.._wlr-output-management-unstable-v1-protocol.c.o
+[75/161] Compiling C object qdwin-hotkey-probe.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[76/161] Compiling C object qdwin-shell.so.p/meson-generated_.._cursor-shape-v1-protocol.c.o
+[77/161] Compiling C object qdwin-shell.so.p/meson-generated_.._fractional-scale-v1-protocol.c.o
+[78/161] Compiling C object qdwin-shell.so.p/meson-generated_.._virtual-keyboard-unstable-v1-protocol.c.o
+[79/161] Compiling C object qdwin-secctx-probe.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[80/161] Compiling C object qdwin-stream-claimant.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[81/161] Compiling C object qdwin-input-probe.p/test-client_qdwin-input-probe.c.o
+[82/161] Compiling C object qdwin-shell.so.p/meson-generated_.._qdwin-nested-v1-protocol.c.o
+[83/161] Compiling C object qdwin-nested-probe.p/meson-generated_.._qdwin-nested-v1-protocol.c.o
+[84/161] Compiling C object qdwin-shell.so.p/meson-generated_.._wlr-output-management-unstable-v1-protocol.c.o
+[85/161] Compiling C object qdwin-shell.so.p/meson-generated_.._xdg-shell-plugin-protocol.c.o
+[86/161] Compiling C object qdwin-shell.so.p/meson-generated_.._xdg-decoration-unstable-v1-protocol.c.o
+[87/161] Compiling C object qdwin-wsname-probe.p/test-client_qdwin-wsname-probe.c.o
+[88/161] Compiling C object qdwin-shell.so.p/meson-generated_.._primary-selection-unstable-v1-protocol.c.o
+[89/161] Compiling C object qdwin-shell.so.p/meson-generated_.._security-context-v1-protocol.c.o
+[90/161] Compiling C object qdwin-shell.so.p/meson-generated_.._wlr-layer-shell-unstable-v1-protocol.c.o
+[91/161] Compiling C object qdwin-nested-probe.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[92/161] Compiling C object qdwin-cursor-probe.p/meson-generated_.._cursor-shape-v1-client-protocol.c.o
+[93/161] Compiling C object qdwin-cursor-probe.p/meson-generated_.._tablet-v2-client-protocol.c.o
+[94/161] Compiling C object qdwin-fractional-probe.p/meson-generated_.._fractional-scale-v1-client-protocol.c.o
+[95/161] Compiling C object qdwin-primary-selection-probe.p/test-client_qdwin-primary-selection-probe.c.o
+[96/161] Compiling C object qdwin-shell.so.p/meson-generated_.._ext-workspace-v1-protocol.c.o
+[97/161] Compiling C object qdwin-nested-identity-probe.p/meson-generated_.._qdwin-nested-v1-protocol.c.o
+[98/161] Compiling C object qdwin-bystander.p/meson-generated_.._xdg-shell-protocol.c.o
+[99/161] Compiling C object qdwin-bystander.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[100/161] Compiling C object qdwin-shell.so.p/qdwin_qdwin-logic.c.o
+[101/161] Compiling C object qdwin-activation-probe.p/test-client_qdwin-activation-probe.c.o
+[102/161] Compiling C object qdwin-vkbd-probe.p/meson-generated_.._virtual-keyboard-unstable-v1-protocol.c.o
+[103/161] Compiling C object qdwin-imethod-probe.p/meson-generated_.._input-method-unstable-v2-protocol.c.o
+[104/161] Compiling C object qdwin-textinput-probe.p/meson-generated_.._text-input-unstable-v3-protocol.c.o
+[105/161] Compiling C object qdwin-textinput-probe.p/meson-generated_.._xdg-shell-protocol.c.o
+[106/161] Compiling C object qdwin-secctx-probe.p/test-client_qdwin-secctx-probe.c.o
+[107/161] Compiling C object qdistro-test-window.p/meson-generated_.._xdg-shell-protocol.c.o
+[108/161] Compiling C object qdwin-workspace-probe.p/test-client_qdwin-workspace-probe.c.o
+[109/161] Compiling C object qdwin-hotkey-probe.p/test-client_qdwin-hotkey-probe.c.o
+[110/161] Compiling C object qdwin-marker-client.p/meson-generated_.._xdg-shell-protocol.c.o
+[111/161] Compiling C object qdwin-output-probe.p/test-client_qdwin-output-probe.c.o
+[112/161] Compiling C object qdwin-locker-probe.p/test-client_qdwin-locker-probe.c.o
+[113/161] Compiling C object qdwin-probe.p/test-client_qdwin-probe.c.o
+[114/161] Compiling C object qdistro-test-clipboard-sink.p/meson-generated_.._xdg-shell-protocol.c.o
+[115/161] Compiling C object qdwin-popup-probe.p/meson-generated_.._xdg-shell-protocol.c.o
+[116/161] Compiling C object qdwin-cursor-probe.p/test-client_qdwin-cursor-probe.c.o
+[117/161] Compiling C object qdwin-nested-identity-probe.p/test-client_qdwin-nested-identity-probe.c.o
+[118/161] Linking target qdwin-input-probe
+[119/161] Linking target qdwin-wsname-probe
+[120/161] Linking target qdwin-activation-probe
+[121/161] Linking target qdwin-primary-selection-probe
+[122/161] Linking target qdwin-hotkey-probe
+[123/161] Linking target qdwin-locker-probe
+[124/161] Linking target qdwin-secctx-probe
+[125/161] Linking target qdwin-workspace-probe
+[126/161] Linking target qdwin-output-probe
+[127/161] Compiling C object qdwin-imethod-probe.p/test-client_qdwin-imethod-probe.c.o
+[128/161] Compiling C object qdwin-fractional-probe.p/test-client_qdwin-fractional-probe.c.o
+[129/161] Linking target qdwin-probe
+[130/161] Linking target qdwin-cursor-probe
+[131/161] Linking target qdwin-nested-identity-probe
+[132/161] Compiling C object qdwin-vkbd-probe.p/test-client_qdwin-vkbd-probe.c.o
+[133/161] Compiling C object qdwin-shell.so.p/qdwin_qdwin-nested-client.c.o
+[134/161] Compiling C object test-qdwin-logic.p/qdwin_qdwin-logic.c.o
+[135/161] Compiling C object qdistro-test-clipboard-source.p/test-client_qdistro-test-clipboard-source.c.o
+[136/161] Compiling C object qdistro-test-window.p/test-client_qdistro-test-window.c.o
+[137/161] Compiling C object qdwin-stream-claimant.p/test-client_qdwin-stream-claimant.c.o
+[138/161] Linking target qdwin-imethod-probe
+[139/161] Linking target qdwin-fractional-probe
+[140/161] Linking target qdwin-vkbd-probe
+[141/161] Compiling C object qdwin-textinput-probe.p/test-client_qdwin-textinput-probe.c.o
+[142/161] Compiling C object qdwin-popup-probe.p/test-client_qdwin-popup-probe.c.o
+[143/161] Compiling C object qdwin-test-clipboard-emit.p/test-client_qdwin-test-clipboard-emit.c.o
+../../src/qdwin/test-client/qdwin-test-clipboard-emit.c:289:13: warning: ‘ms_sleep’ defined but not used [-Wunused-function]
+  289 | static void ms_sleep(int ms)
+      |             ^~~~~~~~
+[144/161] Compiling C object qdistro-test-clipboard-sink.p/test-client_qdistro-test-clipboard-sink.c.o
+[145/161] Linking target qdistro-test-clipboard-source
+[146/161] Linking target qdistro-test-window
+[147/161] Linking target qdwin-stream-claimant
+[148/161] Linking target qdwin-textinput-probe
+[149/161] Compiling C object qdwin-nested-probe.p/test-client_qdwin-nested-probe.c.o
+[150/161] Linking target qdwin-popup-probe
+[151/161] Linking target qdwin-test-clipboard-emit
+[152/161] Compiling C object qdwin-bystander.p/test-client_qdwin-bystander.c.o
+[153/161] Linking target qdistro-test-clipboard-sink
+[154/161] Compiling C object test-qdwin-logic.p/tests_unit_test-qdwin-logic.c.o
+[155/161] Compiling C object qdwin-marker-client.p/test-client_qdwin-marker-client.c.o
+[156/161] Linking target qdwin-nested-probe
+[157/161] Linking target test-qdwin-logic
+[158/161] Linking target qdwin-bystander
+[159/161] Linking target qdwin-marker-client
+[160/161] Compiling C object qdwin-shell.so.p/qdwin_qdwin.c.o
+[161/161] Linking target qdwin-shell.so
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /out/build-qdwin
+ninja: Entering directory `/out/build-qdwin'
+ninja: no work to do.
+Installing qdwin-shell.so to /usr/lib64/weston
+Installing qdwin-probe to /usr/bin
+Installing qdwin-secctx-probe to /usr/bin
+Installing qdwin-locker-probe to /usr/bin
+Installing qdwin-workspace-probe to /usr/bin
+Installing qdwin-wsname-probe to /usr/bin
+Installing qdwin-input-probe to /usr/bin
+Installing qdwin-output-probe to /usr/bin
+Installing qdwin-nested-probe to /usr/bin
+Installing qdwin-nested-identity-probe to /usr/bin
+Installing qdwin-cursor-probe to /usr/bin
+Installing qdwin-hotkey-probe to /usr/bin
+Installing qdwin-primary-selection-probe to /usr/bin
+Installing qdwin-fractional-probe to /usr/bin
+Installing qdwin-activation-probe to /usr/bin
+Installing qdwin-bystander to /usr/bin
+Installing qdwin-textinput-probe to /usr/bin
+Installing qdwin-imethod-probe to /usr/bin
+Installing qdwin-vkbd-probe to /usr/bin
+Installing qdistro-test-window to /usr/bin
+Installing qdwin-marker-client to /usr/bin
+Installing qdwin-stream-claimant to /usr/bin
+Installing qdwin-popup-probe to /usr/bin
+Installing qdistro-test-clipboard-source to /usr/bin
+Installing qdistro-test-clipboard-sink to /usr/bin
+Installing qdwin-test-clipboard-emit to /usr/bin
+Installing /src/qdwin/qdwin/qdwin-shell-v1.xml to /usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/qdwin-locker-v1.xml to /usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/qdwin-nested-v1.xml to /usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/wlr-layer-shell-unstable-v1.xml to /usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/wlr-output-management-unstable-v1.xml to /usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/input-method-unstable-v2.xml to /usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/virtual-keyboard-unstable-v1.xml to /usr/share/qdistro/protocols
+Installing /out/build-qdwin/meson-private/qdistro-protocols.pc to /usr/lib64/pkgconfig
+ninja: Entering directory `/out/build-qdwin'
+ninja: no work to do.
+Installing qdwin-shell.so to /out/stage/usr/lib64/weston
+Installing qdwin-probe to /out/stage/usr/bin
+Installing qdwin-secctx-probe to /out/stage/usr/bin
+Installing qdwin-locker-probe to /out/stage/usr/bin
+Installing qdwin-workspace-probe to /out/stage/usr/bin
+Installing qdwin-wsname-probe to /out/stage/usr/bin
+Installing qdwin-input-probe to /out/stage/usr/bin
+Installing qdwin-output-probe to /out/stage/usr/bin
+Installing qdwin-nested-probe to /out/stage/usr/bin
+Installing qdwin-nested-identity-probe to /out/stage/usr/bin
+Installing qdwin-cursor-probe to /out/stage/usr/bin
+Installing qdwin-hotkey-probe to /out/stage/usr/bin
+Installing qdwin-primary-selection-probe to /out/stage/usr/bin
+Installing qdwin-fractional-probe to /out/stage/usr/bin
+Installing qdwin-activation-probe to /out/stage/usr/bin
+Installing qdwin-bystander to /out/stage/usr/bin
+Installing qdwin-textinput-probe to /out/stage/usr/bin
+Installing qdwin-imethod-probe to /out/stage/usr/bin
+Installing qdwin-vkbd-probe to /out/stage/usr/bin
+Installing qdistro-test-window to /out/stage/usr/bin
+Installing qdwin-marker-client to /out/stage/usr/bin
+Installing qdwin-stream-claimant to /out/stage/usr/bin
+Installing qdwin-popup-probe to /out/stage/usr/bin
+Installing qdistro-test-clipboard-source to /out/stage/usr/bin
+Installing qdistro-test-clipboard-sink to /out/stage/usr/bin
+Installing qdwin-test-clipboard-emit to /out/stage/usr/bin
+Installing /src/qdwin/qdwin/qdwin-shell-v1.xml to /out/stage/usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/qdwin-locker-v1.xml to /out/stage/usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/qdwin-nested-v1.xml to /out/stage/usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/wlr-layer-shell-unstable-v1.xml to /out/stage/usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/wlr-output-management-unstable-v1.xml to /out/stage/usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/input-method-unstable-v2.xml to /out/stage/usr/share/qdistro/protocols
+Installing /src/qdwin/qdwin/virtual-keyboard-unstable-v1.xml to /out/stage/usr/share/qdistro/protocols
+Installing /out/build-qdwin/meson-private/qdistro-protocols.pc to /out/stage/usr/lib64/pkgconfig
+The Meson build system
+Version: 1.12.1
+Source dir: /src/daemons
+Build dir: /out/build-daemons
+Build type: native build
+Project name: qdistro-daemons
+Project version: 0.1.0
+C compiler for the host machine: cc (gcc 16.2.0 "cc (SUSE Linux) 16.2.0")
+C linker for the host machine: cc ld.bfd 2.47.0.20260921-1
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Run-time dependency wayland-client found: YES 1.26.0
+Run-time dependency wayland-scanner found: YES 1.26.0
+Run-time dependency wayland-protocols found: YES 1.49
+Run-time dependency qdistro-protocols found: YES 0.1.0
+Program /usr/bin/wayland-scanner found: YES (/usr/bin/wayland-scanner)
+Run-time dependency freerdp-shadow3 found: YES 3.32.1
+Run-time dependency freerdp3 found: YES 3.32.1
+Run-time dependency winpr3 found: YES 3.32.1
+Run-time dependency libpipewire-0.3 found: YES 1.6.9
+Run-time dependency threads found: YES
+Run-time dependency libselinux found: YES 3.11
+Run-time dependency xcursor found: YES 1.2.3
+Build targets in project: 20
+
+qdistro-daemons 0.1.0
+
+  User defined options
+    prefix: /usr
+
+Found ninja-1.13.2 at /usr/bin/ninja
+ninja: Entering directory `/out/build-daemons'
+[1/39] Generating qdwin-nested-v1-private-code with a custom command
+[2/39] Generating security-context-v1-private-code with a custom command
+[3/39] Generating security-context-v1-client-header with a custom command
+[4/39] Generating qdwin-nested-v1-client-header with a custom command
+[5/39] Generating linux-dmabuf-v1-client-header with a custom command
+[6/39] Generating linux-dmabuf-v1-private-code with a custom command
+[7/39] Generating qdwin-shell-v1-private-code with a custom command
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[8/39] Generating qdwin-shell-v1-client-header with a custom command
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[9/39] Compiling C object qdistro-mm-remote-viewer-helper.p/meson-generated_.._qdwin-nested-v1-protocol.c.o
+[10/39] Compiling C object qdistro-mm-remote-pixelfeed.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[11/39] Compiling C object qdistro-nested-pixelfeed.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[12/39] Compiling C object qdistro-secctx-exec.p/meson-generated_.._security-context-v1-protocol.c.o
+[13/39] Compiling C object libqdistro-pw-target-resolver.a.p/nested-pixelfeed_pw-target-resolver.c.o
+[14/39] Compiling C object qdistro-nested-pixelfeed.p/meson-generated_.._linux-dmabuf-unstable-v1-protocol.c.o
+[15/39] Compiling C object test-pw-target-resolver.p/nested-pixelfeed_test-pw-target-resolver.c.o
+[16/39] Compiling C object qdistro-cursor-sprites.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[17/39] Linking static target libqdistro-pw-target-resolver.a
+[18/39] Compiling C object qdistro-forward.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[19/39] Compiling C object qdistro-tier1-exec.p/tier1-exec_qdistro-tier1-exec.c.o
+[20/39] Compiling C object test-mm-remote-frame-protocol.p/nested-pixelfeed_test-mm-remote-frame.c.o
+[21/39] Linking target test-pw-target-resolver
+[22/39] Linking target qdistro-tier1-exec
+[23/39] Compiling C object libqdistro-mm-remote-frame-protocol.a.p/nested-pixelfeed_mm-remote-frame.c.o
+[24/39] Linking static target libqdistro-mm-remote-frame-protocol.a
+[25/39] Compiling C object qdistro-cursor-sprites.p/cursor-sprites_qdistro-cursor-sprites.c.o
+[26/39] Compiling C object qdistro-secctx-exec.p/secctx-exec_qdistro-secctx-exec.c.o
+[27/39] Linking target test-mm-remote-frame-protocol
+[28/39] Compiling C object qdistro-mm-remote-pixelfeed.p/nested-pixelfeed_qdistro-mm-remote-pixelfeed.c.o
+[29/39] Compiling C object qdistro-mm-remote-viewer-helper.p/nested-pixelfeed_qdistro-mm-remote-viewer-helper.c.o
+[30/39] Linking target qdistro-cursor-sprites
+[31/39] Linking target qdistro-secctx-exec
+[32/39] Linking target qdistro-mm-remote-pixelfeed
+[33/39] Linking target qdistro-mm-remote-viewer-helper
+[34/39] Compiling C object qdistro-mm-remote-source-helper.p/nested-pixelfeed_qdistro-mm-remote-source-helper.c.o
+[35/39] Compiling C object qdistro-nested-pixelfeed.p/nested-pixelfeed_qdistro-nested-pixelfeed.c.o
+[36/39] Linking target qdistro-mm-remote-source-helper
+[37/39] Linking target qdistro-nested-pixelfeed
+[38/39] Compiling C object qdistro-forward.p/forward_qdistro-forward.c.o
+In file included from /usr/lib64/pkgconfig/../../include/winpr3/winpr/winpr.h:22,
+                 from /usr/lib64/pkgconfig/../../include/winpr3/winpr/stream.h:26,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:25,
+                 from ../../src/daemons/forward/qdistro-forward.c:53:
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: ‘SEC_WINPR_NTLM_SETTINGS’ is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro ‘WINPR_DEPRECATED_VAR’
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:917:62: note: declared here
+  917 |     "[since 3.31.0] use SEC_WINPR_NTLM_SETTINGS_V2", typedef struct {
+      |                                                              ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro ‘WINPR_DEPRECATED_VAR’
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:940:75: warning: ‘SEC_WINPR_KERBEROS_SETTINGS’ is deprecated: [deprecated] [since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2 [-Wdeprecated-declarations]
+  940 |     "[since 3.31.0] use SEC_WINNT_AUTH_IDENTITY_WINPR_V2", typedef struct {
+      |                                                                           ^
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro ‘WINPR_DEPRECATED_VAR’
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/sspi.h:925:66: note: declared here
+  925 |     "[since 3.31.0] use SEC_WINPR_KERBEROS_SETTINGS_V2", typedef struct {
+      |                                                                  ^~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro ‘WINPR_DEPRECATED_VAR’
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+In file included from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/client/rdpgfx.h:28,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/gdi/gdi.h:34,
+                 from /usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:35:
+/usr/lib64/pkgconfig/../../include/freerdp3/freerdp/codecs.h:104:9: warning: ‘codecs_free’ is deprecated: [deprecated] [since 3.6.0] Use freerdp_client_codecs_free [-Wdeprecated-declarations]
+  104 |         WINPR_DEPRECATED_VAR(
+      |         ^~~~~~~~~~~~~~~~~~~~
+/usr/lib64/pkgconfig/../../include/freerdp3/freerdp/codecs.h:102:47: note: declared here
+  102 |                              FREERDP_API void codecs_free(rdpCodecs* codecs));
+      |                                               ^~~~~~~~~~~
+/usr/lib64/pkgconfig/../../include/winpr3/winpr/platform.h:607:41: note: in definition of macro ‘WINPR_DEPRECATED_VAR’
+  607 | #define WINPR_DEPRECATED_VAR(text, obj) obj __attribute__((deprecated("[deprecated] " text)))
+      |                                         ^~~
+/usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:517:17: warning: ‘pVerifyCertificate’ is deprecated: [deprecated] Use pVerifyCertificateEx [-Wdeprecated-declarations]
+  517 |                 WINPR_DEPRECATED_VAR("Use VerifyCertificateEx or VerifyX509Certificate  instead",
+      |                 ^~~~~~~~~~~~~~~~~~~~
+/usr/lib64/pkgconfig/../../include/freerdp3/freerdp/freerdp.h:520:17: warning: ‘pVerifyChangedCertificate’ is deprecated: [deprecated] Use pVerifyChangedCertificateEx [-Wdeprecated-declarations]
+  520 |                 WINPR_DEPRECATED_VAR("Use VerifyChangedCertificateEx or VerifyX509Certificate  instead",
+      |                 ^~~~~~~~~~~~~~~~~~~~
+../../src/daemons/forward/qdistro-forward.c: In function ‘qfwd_dump_surface_ppm’:
+../../src/daemons/forward/qdistro-forward.c:1382:46: warning: comparison is always true due to limited range of data type [-Wtype-limits]
+ 1382 |                       h <= SIZE_MAX / s && w <= SIZE_MAX / 3;
+      |                                              ^~
+[39/39] Linking target qdistro-forward
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /out/build-daemons
+ninja: Entering directory `/out/build-daemons'
+ninja: no work to do.
+Installing qdistro-forward to /usr/bin
+Installing qdistro-nested-pixelfeed to /usr/bin
+Installing qdistro-mm-remote-source-helper to /usr/bin
+Installing qdistro-mm-remote-pixelfeed to /usr/bin
+Installing qdistro-mm-remote-viewer-helper to /usr/bin
+Installing qdistro-secctx-exec to /usr/bin
+Installing qdistro-tier1-exec to /usr/libexec
+Installing qdistro-cursor-sprites to /usr/bin
+ninja: Entering directory `/out/build-daemons'
+ninja: no work to do.
+Installing qdistro-forward to /out/stage/usr/bin
+Installing qdistro-nested-pixelfeed to /out/stage/usr/bin
+Installing qdistro-mm-remote-source-helper to /out/stage/usr/bin
+Installing qdistro-mm-remote-pixelfeed to /out/stage/usr/bin
+Installing qdistro-mm-remote-viewer-helper to /out/stage/usr/bin
+Installing qdistro-secctx-exec to /out/stage/usr/bin
+Installing qdistro-tier1-exec to /out/stage/usr/libexec
+Installing qdistro-cursor-sprites to /out/stage/usr/bin
+The Meson build system
+Version: 1.12.1
+Source dir: /src/qdshell
+Build dir: /out/build-qdshell
+Build type: native build
+Project name: qdshell
+Project version: 0.1.0
+C compiler for the host machine: cc (gcc 16.2.0 "cc (SUSE Linux) 16.2.0")
+C linker for the host machine: cc ld.bfd 2.47.0.20260921-1
+C++ compiler for the host machine: c++ (gcc 16.2.0 "c++ (SUSE Linux) 16.2.0")
+C++ linker for the host machine: c++ ld.bfd 2.47.0.20260921-1
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Run-time dependency qt6core found: YES 6.11.2
+Run-time dependency qt6gui found: YES 6.11.2
+Run-time dependency qt6qml found: YES 6.11.2
+Run-time dependency qt6qmlintegration found: YES 6.11.2
+Run-time dependency wayland-client found: YES 1.26.0
+Run-time dependency wayland-scanner found: YES 1.26.0
+Program /usr/bin/wayland-scanner found: YES (/usr/bin/wayland-scanner)
+Run-time dependency qdistro-protocols found: YES 0.1.0
+Run-time dependency wayland-protocols found: YES 1.49
+Run-time dependency qt6network found: YES 6.11.2
+Detecting Qt6 tools
+Run-time dependency qt6 (modules: Core) found: YES 6.11.2 (pkg-config)
+Program /usr/lib64/qt6/bin/moc found: NO
+Program /usr/libexec/qt6/moc found: YES 6.11.2 6.11.2 (/usr/libexec/qt6/moc)
+Program /usr/lib64/qt6/bin/qmlcachegen found: NO
+Program /usr/libexec/qt6/qmlcachegen found: YES 6.11.2 6.11.2 (/usr/libexec/qt6/qmlcachegen)
+Program /usr/lib64/qt6/bin/lrelease found: NO
+Program /usr/libexec/qt6/lrelease found: NO
+Program lrelease6 found: NO
+Program lrelease-qt6 found: NO
+Program lrelease found: NO
+Program /usr/lib64/qt6/bin/rcc found: NO
+Program /usr/libexec/qt6/rcc found: YES 6.11.2 6.11.2 (/usr/libexec/qt6/rcc)
+Program /usr/lib64/qt6/bin/uic found: NO
+Program /usr/libexec/qt6/uic found: YES 6.11.2 6.11.2 (/usr/libexec/qt6/uic)
+Program /usr/lib64/qt6/bin/qmltyperegistrar found: NO
+Program /usr/libexec/qt6/qmltyperegistrar found: YES 6.11.2 6.11.2 (/usr/libexec/qt6/qmltyperegistrar)
+Program node found: NO
+Build targets in project: 11
+
+qdshell 0.1.0
+
+  User defined options
+    prefix: /usr
+
+Found ninja-1.13.2 at /usr/bin/ninja
+ninja: Entering directory `/out/build-qdshell'
+[1/24] Generating qml-plugin/ext-workspace-v1-private-code with a custom command
+[2/24] Generating qml-plugin/weston-output-capture-client-header with a custom command
+[3/24] Generating qml-plugin/weston-output-capture-private-code with a custom command
+[4/24] Generating qml-plugin/ext-workspace-v1-client-header with a custom command
+[5/24] Generating qml-plugin/wlr-output-management-v1-private-code with a custom command
+[6/24] Generating qml-plugin/qdwin-shell-v1-client-header with a custom command
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[7/24] Generating qml-plugin/wlr-output-management-v1-client-header with a custom command
+[8/24] Generating qml-plugin/ext-idle-notify-v1-client-header with a custom command
+[9/24] Generating qml-plugin/ext-idle-notify-v1-private-code with a custom command
+[10/24] Generating qml-plugin/qdwin-shell-v1-private-code with a custom command
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:757: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:997: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1139: warning: since version not increasing
+
+/usr/share/qdistro/protocols/qdwin-shell-v1.xml:1837: warning: since version not increasing
+
+[11/24] Generating 'qml-plugin/libqdistro-qdwin.so.p/moc_ctrl-server.cpp'
+[12/24] Generating 'qml-plugin/libqdistro-qdwin.so.p/moc_qdwin-binding.cpp'
+[13/24] Generating 'qml-plugin/libqdistro-qdwin.so.p/qdistro-qdwin-plugin.moc'
+[14/24] Compiling C object qml-plugin/libqdistro-qdwin.so.p/meson-generated_.._weston-output-capture-protocol.c.o
+[15/24] Compiling C object qml-plugin/libqdistro-qdwin.so.p/meson-generated_.._ext-idle-notify-v1-protocol.c.o
+[16/24] Compiling C object qml-plugin/libqdistro-qdwin.so.p/meson-generated_.._ext-workspace-v1-protocol.c.o
+[17/24] Compiling C object qml-plugin/libqdistro-qdwin.so.p/meson-generated_.._wlr-output-management-unstable-v1-protocol.c.o
+[18/24] Compiling C object qml-plugin/libqdistro-qdwin.so.p/meson-generated_.._qdwin-shell-v1-protocol.c.o
+[19/24] Compiling C++ object qml-plugin/libqdistro-qdwin.so.p/meson-generated_moc_ctrl-server.cpp.o
+[20/24] Compiling C++ object qml-plugin/libqdistro-qdwin.so.p/meson-generated_moc_qdwin-binding.cpp.o
+[21/24] Compiling C++ object qml-plugin/libqdistro-qdwin.so.p/ctrl-server.cpp.o
+[22/24] Compiling C++ object qml-plugin/libqdistro-qdwin.so.p/qdistro-qdwin-plugin.cpp.o
+In file included from /usr/include/qt6/QtCore/qstring.h:15,
+                 from /usr/include/qt6/QtCore/qurl.h:12,
+                 from /usr/include/qt6/QtQml/qqmlengine.h:8,
+                 from /usr/include/qt6/QtQml/QQmlEngine:1,
+                 from ../../src/qdshell/qml-plugin/qdistro-qdwin-plugin.cpp:5:
+/usr/include/qt6/QtCore/qchar.h:48:31: warning: defining ‘QChar’, which previously failed to be complete in a SFINAE context [-Wsfinae-incomplete=]
+   48 | class QT6_ONLY(Q_CORE_EXPORT) QChar {
+      |                               ^~~~~
+In file included from /usr/include/c++/16/unordered_map:44,
+                 from /usr/include/c++/16/functional:80,
+                 from /usr/include/qt6/QtCore/qcomparehelpers.h:29,
+                 from /usr/include/qt6/QtCore/qcompare.h:661,
+                 from /usr/include/qt6/QtCore/qnamespace.h:14,
+                 from /usr/include/qt6/QtCore/qbytearray.h:10,
+                 from /usr/include/qt6/QtCore/qurl.h:9:
+/usr/include/c++/16/bits/range_access.h:325:24: note: here.  Use ‘-Wsfinae-incomplete=2’ for a diagnostic at that point
+  325 |     -> decltype(__cont.data())
+      |                 ~~~~~~~^~~~
+[23/24] Compiling C++ object qml-plugin/libqdistro-qdwin.so.p/qdwin-binding.cpp.o
+[24/24] Linking target qml-plugin/libqdistro-qdwin.so
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /out/build-qdshell
+ninja: Entering directory `/out/build-qdshell'
+ninja: no work to do.
+Installing qml-plugin/libqdistro-qdwin.so to /usr/share/qdistro/qml/Qdistro/Qdwin
+Installing /src/qdshell/qml-plugin/qmldir to /usr/share/qdistro/qml/Qdistro/Qdwin
+ninja: Entering directory `/out/build-qdshell'
+ninja: no work to do.
+Installing qml-plugin/libqdistro-qdwin.so to /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin
+Installing /src/qdshell/qml-plugin/qmldir to /out/stage/usr/share/qdistro/qml/Qdistro/Qdwin
+make: Entering directory '/src/selinux/pwd'
+make -f /usr/share/selinux/devel/Makefile qdistro_pwd.pp
+make[1]: Entering directory '/src/selinux/pwd'
+qdistro_pwd.if:13: Warning: duplicate definition of qdistro_pwd_dbus_chat(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_pwd.if:13.
+qdistro_pwd.if:34: Warning: duplicate definition of qdistro_pwd_read_audit(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_pwd.if:34.
+Compiling targeted qdistro_pwd module
+Creating targeted qdistro_pwd.pp policy package
+rm tmp/qdistro_pwd.mod tmp/qdistro_pwd.mod.fc
+make[1]: Leaving directory '/src/selinux/pwd'
+make: Leaving directory '/src/selinux/pwd'
+make: Entering directory '/src/selinux/broker'
+make -f /usr/share/selinux/devel/Makefile qdistro_broker.pp
+make[1]: Entering directory '/src/selinux/broker'
+qdistro_broker.if:19: Warning: duplicate definition of qdistro_broker_dbus_chat(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_broker.if:19.
+qdistro_broker.if:59: Warning: duplicate definition of qdistro_broker_read_runtime(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_broker.if:59.
+Compiling targeted qdistro_broker module
+Creating targeted qdistro_broker.pp policy package
+rm tmp/qdistro_broker.mod tmp/qdistro_broker.mod.fc
+make[1]: Leaving directory '/src/selinux/broker'
+make: Leaving directory '/src/selinux/broker'
+make: Entering directory '/src/selinux/session_manager'
+make -f /usr/share/selinux/devel/Makefile qdistro_session_manager.pp
+make[1]: Entering directory '/src/selinux/session_manager'
+qdistro_session_manager.if:18: Warning: duplicate definition of qdistro_sessmgr_dbus_chat(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_session_manager.if:18.
+qdistro_session_manager.if:46: Warning: duplicate definition of qdistro_sessmgr_dbus_client(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_session_manager.if:46.
+Compiling targeted qdistro_session_manager module
+Creating targeted qdistro_session_manager.pp policy package
+rm tmp/qdistro_session_manager.mod.fc tmp/qdistro_session_manager.mod
+make[1]: Leaving directory '/src/selinux/session_manager'
+make: Leaving directory '/src/selinux/session_manager'
+make: Entering directory '/src/selinux/tier1'
+rm -rf "/src/selinux/tier1/tmp/selinux-devel"
+mkdir -p "/src/selinux/tier1/tmp/selinux-devel/devel"
+cp -a "/usr/share/selinux/devel/include" "/src/selinux/tier1/tmp/selinux-devel/devel/"
+install -m 0644 ../broker/qdistro_broker.if "/src/selinux/tier1/tmp/selinux-devel/devel/include/contrib/qdistro_broker.if"
+make -f /usr/share/selinux/devel/Makefile SHAREDIR="/src/selinux/tier1/tmp/selinux-devel" qdistro_tier1.pp
+make[1]: Entering directory '/src/selinux/tier1'
+qdistro_tier1.if:11: Warning: duplicate definition of qdistro_tier1_domtrans(). Original definition on /src/selinux/tier1/tmp/selinux-devel/devel/include/contrib/qdistro_tier1.if:11.
+qdistro_tier1.if:31: Warning: duplicate definition of qdistro_tier1_run(). Original definition on /src/selinux/tier1/tmp/selinux-devel/devel/include/contrib/qdistro_tier1.if:31.
+qdistro_tier1.if:48: Warning: duplicate definition of qdistro_tier1_read_config(). Original definition on /src/selinux/tier1/tmp/selinux-devel/devel/include/contrib/qdistro_tier1.if:48.
+Compiling targeted qdistro_tier1 module
+Creating targeted qdistro_tier1.pp policy package
+rm tmp/qdistro_tier1.mod tmp/qdistro_tier1.mod.fc
+make[1]: Leaving directory '/src/selinux/tier1'
+make: Leaving directory '/src/selinux/tier1'
+make: Entering directory '/src/selinux/presentation'
+make -f /usr/share/selinux/devel/Makefile qdistro_presentation.pp
+make[1]: Entering directory '/src/selinux/presentation'
+qdistro_presentation.if:11: Warning: duplicate definition of qdistro_presentation_read(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_presentation.if:11.
+Compiling targeted qdistro_presentation module
+Creating targeted qdistro_presentation.pp policy package
+rm tmp/qdistro_presentation.mod.fc tmp/qdistro_presentation.mod
+make[1]: Leaving directory '/src/selinux/presentation'
+make: Leaving directory '/src/selinux/presentation'
+libsemanage.semanage_rename: WARNING: rename(/etc/selinux/targeted/active, /etc/selinux/targeted/previous) failed: Invalid cross-device link, fall back to non-atomic semanage_copy_dir_flags()
+qdistro_broker.if:19: Warning: duplicate definition of qdistro_broker_dbus_chat(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_broker.if:19.
+qdistro_broker.if:59: Warning: duplicate definition of qdistro_broker_read_runtime(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_broker.if:59.
+Compiling targeted qdistro_broker module
+Creating targeted qdistro_broker.pp policy package
+qdistro_broker.if:19: Warning: duplicate definition of qdistro_broker_dbus_chat(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_broker.if:19.
+qdistro_broker.if:59: Warning: duplicate definition of qdistro_broker_read_runtime(). Original definition on /usr/share/selinux/devel/include/contrib/qdistro_broker.if:59.
+Compiling targeted qdistro_broker module
+Creating targeted qdistro_broker.pp policy package
+[native-podman] broker SELinux ratchet: injected rule rejected; clean broker has 0 violations
+[native-podman] staged 45 dynamic ELFs
+[native-podman] cached /home/play2/.cache/qdistro/native-podman/20260930/x86_64/3d588db54cbc8b3da03d561b82d983a6e9eb30e0cae6ba263e6bbc062f85a940.tar
+[spin-test-vm] building/caching tier-2 images in rootless Podman...
+[tier2-podman] building qdistro/tier2-weston-terminal:latest against test snapshot 20260930
+STEP 1/14: FROM registry.opensuse.org/opensuse/tumbleweed:20260930
+STEP 2/14: COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+--> Using cache c5a1bec96130296467d139f188da605fb66f268bd24984d187a99189f87955ce
+--> c5a1bec96130
+STEP 3/14: RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+--> Using cache e5b13bf92c56cd3292230b472cc19a9534cf80a3a6ca7843fc907be8e6cfeab1
+--> e5b13bf92c56
+STEP 4/14: RUN zypper --non-interactive --gpg-auto-import-keys refresh  && zypper --non-interactive dup --no-recommends
+--> Using cache 97c0328ebaa607c36dfb7e52bc5da85322e39ffb82cae3b93dbdf637c6a9a80c
+--> 97c0328ebaa6
+STEP 5/14: RUN zypper --non-interactive install --no-recommends         weston         libweston-16         libpipewire-0_3-0         libwayland-client0         libwayland-server0         Mesa-libGL1         Mesa-libEGL1         libxkbcommon0         xkeyboard-config         coreutils  && zypper clean --all  && rm -rf /var/cache/zypp/* /var/log/*.log
+--> Using cache 95beeec0cd6cb47eb579ca13ed5ddc4fe44a1d0df27a03be0e3719fee3bcc2fb
+--> 95beeec0cd6c
+STEP 6/14: RUN install -d -o root -g root -m 0755 /usr/share/applications  && cat > /usr/share/applications/weston-terminal.desktop <<'DESK'  && chmod 0644 /usr/share/applications/weston-terminal.desktop ([Desktop Entry]...)
+--> Using cache f7e56ebc0e32bdd321f9648a6d80535a41fd6977e0c6533d83de3d71f70bcf9b
+--> f7e56ebc0e32
+STEP 7/14: COPY weston.ini /etc/xdg/weston/weston.ini
+--> Using cache 4d23023a611745727cb740e3b3ce316889c35339d5eacb198491af4594912a51
+--> 4d23023a6117
+STEP 8/14: COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+--> Using cache 57fada758622e8d4aef3cb4335861cbd24d56b35241ccd450e0a79fa4b1deed3
+--> 57fada758622
+STEP 9/14: RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint
+--> Using cache 7bb97bcc69435be3d126afbcee5f009befd83bd42ce462c09891529b57e7c228
+--> 7bb97bcc6943
+STEP 10/14: USER 1000:1000
+--> Using cache c40abd913babd196f4dd086aad32f19a00f03877addbfbbe7d7e3a1b2c51dcd6
+--> c40abd913bab
+STEP 11/14: WORKDIR /home/admin
+--> Using cache 67de152538aa2c4c070993c46549fb6b5fd9b00a4585785e3d0f2de42781b7da
+--> 67de152538aa
+STEP 12/14: ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+--> Using cache 04ff1a1edb2736dd7c329c15886c16c1774f9786f51700ae0356e43514361d73
+--> 04ff1a1edb27
+STEP 13/14: CMD ["weston-terminal"]
+--> Using cache 1b8edc7806436108e1347b20acb9aec9d6f876ff5bf128edfd103fa5e221f037
+--> 1b8edc780643
+STEP 14/14: LABEL "org.qdistro.test-snapshot"="20260930"
+--> Using cache ccbcca8309c5659e90cb8e3282e7c75280a061cb9c88dbfa884049af1ad6ef29
+COMMIT qdistro/tier2-weston-terminal:latest
+--> ccbcca8309c5
+Successfully tagged localhost/qdistro/tier2-weston-terminal:latest
+ccbcca8309c5659e90cb8e3282e7c75280a061cb9c88dbfa884049af1ad6ef29
+[tier2-podman] building qdistro/tier2-text-viewer:latest against test snapshot 20260930
+STEP 1/17: FROM registry.opensuse.org/opensuse/tumbleweed:20260930
+STEP 2/17: COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+--> Using cache c5a1bec96130296467d139f188da605fb66f268bd24984d187a99189f87955ce
+--> c5a1bec96130
+STEP 3/17: RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+--> Using cache e5b13bf92c56cd3292230b472cc19a9534cf80a3a6ca7843fc907be8e6cfeab1
+--> e5b13bf92c56
+STEP 4/17: RUN zypper --non-interactive --gpg-auto-import-keys refresh  && zypper --non-interactive dup --no-recommends
+--> Using cache 97c0328ebaa607c36dfb7e52bc5da85322e39ffb82cae3b93dbdf637c6a9a80c
+--> 97c0328ebaa6
+STEP 5/17: RUN zypper --non-interactive install --no-recommends         weston         libweston-16         libpipewire-0_3-0         libwayland-client0         libwayland-server0         Mesa-libGL1         Mesa-libEGL1         libxkbcommon0         xkeyboard-config         coreutils         less  && zypper clean --all  && rm -rf /var/cache/zypp/* /var/log/*.log
+--> Using cache 8a900beff5431335a3f4f51eec1124b0794845df019a31d5d6c4bda3b22ffffd
+--> 8a900beff543
+STEP 6/17: RUN found="$(find / -xdev -type f -perm /6000 2>/dev/null || true)";     if [ -n "$found" ]; then         echo "stripping setuid/setgid bits from:"; echo "$found";         echo "$found" | xargs -r chmod a-s;     fi;     remain="$(find / -xdev -type f -perm /6000 2>/dev/null || true)";     if [ -n "$remain" ]; then echo "FATAL: setuid/setgid bits remain: $remain" >&2; exit 1; fi
+--> Using cache ad24a59ef3ada84e7bb4f3c0ed1f0ab8cbac2b8f7d24b2e560adcedd62841eee
+--> ad24a59ef3ad
+STEP 7/17: RUN install -d -o root -g root -m 0755 /usr/share/applications  && cat > /usr/share/applications/text-viewer.desktop <<'DESK'  && chmod 0644 /usr/share/applications/text-viewer.desktop ([Desktop Entry]...)
+--> Using cache 16d5db1629a0e37250dcd574c52695d8a922aafa9848c423ffecb3b107251633
+--> 16d5db1629a0
+STEP 8/17: COPY weston.ini /etc/xdg/weston/weston.ini
+--> Using cache a3dfe076b83eadce517973210766623fed751e18c1844f305abe6285ca453208
+--> a3dfe076b83e
+STEP 9/17: COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+--> Using cache bb850d602d56e102f06a07d78f11584d5acc58b48d33ff3b36f2912c4e3e5686
+--> bb850d602d56
+STEP 10/17: COPY workload/text-viewer /usr/local/bin/text-viewer
+--> Using cache 74e59e45f8ff0c49f1c4638014d34b5bd72ee0c312b94fae99a1df0b89be8109
+--> 74e59e45f8ff
+STEP 11/17: COPY workload/text-viewer-pager /usr/local/bin/text-viewer-pager
+--> Using cache 96f9e3d6e7936568635d5e5155dffcf5bf1e4b7a9c2c6156b33f2b9950e75530
+--> 96f9e3d6e793
+STEP 12/17: RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint                 /usr/local/bin/text-viewer                 /usr/local/bin/text-viewer-pager
+--> Using cache 48328e1cb65218b0c42f584794fe707a2eb69161c762170877dcf0a00a1d3544
+--> 48328e1cb652
+STEP 13/17: USER 1000:1000
+--> Using cache de9b15675e4d90088147953096fd7f92e123024348e988da58b2739ee92ca886
+--> de9b15675e4d
+STEP 14/17: WORKDIR /home/admin
+--> Using cache 9c840e7662dc1c4455042eb5d376e94f70500c202f7e357f3683901d8db70421
+--> 9c840e7662dc
+STEP 15/17: ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+--> Using cache 86542e6ff405023b4c6d52175216740fcaa4ce461c1c4ab39053d24fc6ff0d31
+--> 86542e6ff405
+STEP 16/17: CMD ["text-viewer"]
+--> Using cache 9ce942af58e96f599f4d77711c5079634fb36a5d9bca44427df42359d5d21f29
+--> 9ce942af58e9
+STEP 17/17: LABEL "org.qdistro.test-snapshot"="20260930"
+--> Using cache 179d3b87f837d72a32f5a32ded252324ffdeef23cd88900ee7f8f4b83ae51155
+COMMIT qdistro/tier2-text-viewer:latest
+--> 179d3b87f837
+Successfully tagged localhost/qdistro/tier2-text-viewer:latest
+179d3b87f837d72a32f5a32ded252324ffdeef23cd88900ee7f8f4b83ae51155
+[tier2-podman] building qdistro/tier2-url-preview:latest against test snapshot 20260930
+STEP 1/17: FROM registry.opensuse.org/opensuse/tumbleweed:20260930
+STEP 2/17: COPY SNAPSHOT configure-snapshot-repos.sh /usr/lib/qdistro/tier2/
+--> Using cache c5a1bec96130296467d139f188da605fb66f268bd24984d187a99189f87955ce
+--> c5a1bec96130
+STEP 3/17: RUN /bin/sh /usr/lib/qdistro/tier2/configure-snapshot-repos.sh
+--> Using cache e5b13bf92c56cd3292230b472cc19a9534cf80a3a6ca7843fc907be8e6cfeab1
+--> e5b13bf92c56
+STEP 4/17: RUN zypper --non-interactive --gpg-auto-import-keys refresh  && zypper --non-interactive dup --no-recommends
+--> Using cache 97c0328ebaa607c36dfb7e52bc5da85322e39ffb82cae3b93dbdf637c6a9a80c
+--> 97c0328ebaa6
+STEP 5/17: RUN zypper --non-interactive install --no-recommends         weston         libweston-16         libpipewire-0_3-0         libwayland-client0         libwayland-server0         Mesa-libGL1         Mesa-libEGL1         libxkbcommon0         xkeyboard-config         coreutils         less         curl         ca-certificates  && { update-ca-certificates 2>/dev/null || true; }  && zypper clean --all  && rm -rf /var/cache/zypp/* /var/log/*.log
+--> Using cache 190b7d6ae5641fb957bb22d9b8e02d210cdbdf427a9ffbb3a13a9aa700e1db80
+--> 190b7d6ae564
+STEP 6/17: RUN found="$(find / -xdev -type f -perm /6000 2>/dev/null || true)";     if [ -n "$found" ]; then         echo "stripping setuid/setgid bits from:"; echo "$found";         echo "$found" | xargs -r chmod a-s;     fi;     remain="$(find / -xdev -type f -perm /6000 2>/dev/null || true)";     if [ -n "$remain" ]; then echo "FATAL: setuid/setgid bits remain: $remain" >&2; exit 1; fi
+--> Using cache c93c93421f965b72c09e95eb5cfc8d8078d0cf98e99f578663c74477f9d7a3d2
+--> c93c93421f96
+STEP 7/17: RUN install -d -o root -g root -m 0755 /usr/share/applications  && cat > /usr/share/applications/url-preview.desktop <<'DESK'  && chmod 0644 /usr/share/applications/url-preview.desktop ([Desktop Entry]...)
+--> Using cache a486f1c59186d1ece43f4fd1a69e840733fea4e31f15a053c0599250fd182148
+--> a486f1c59186
+STEP 8/17: COPY weston.ini /etc/xdg/weston/weston.ini
+--> Using cache d0eadcf3d3da4ad9a4712b4436a1dbc861e317b330f3b10a37226b1d2ddf29bf
+--> d0eadcf3d3da
+STEP 9/17: COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+--> Using cache 8b2a6b41fa45a152d4f7a30311fc1b7d6b3ff43df981ae70095b2d1333efde9c
+--> 8b2a6b41fa45
+STEP 10/17: COPY workload/url-preview /usr/local/bin/url-preview
+--> Using cache d45adcf06c7c36bb425c1af74e8b64c586aec914b48d695c0c115f33300e44ec
+--> d45adcf06c7c
+STEP 11/17: COPY workload/text-viewer-pager /usr/local/bin/text-viewer-pager
+--> Using cache 1fe0d963e382b44d738c474cca6fbf530baea74fe7246a90d372e97980569f7f
+--> 1fe0d963e382
+STEP 12/17: RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint                 /usr/local/bin/url-preview                 /usr/local/bin/text-viewer-pager
+--> Using cache 048a105035b66578cda2ee11d2f4c087b17f3352770faae65d39f3f8e0228245
+--> 048a105035b6
+STEP 13/17: USER 1000:1000
+--> Using cache bb81a50eef0d6f2ea53e41740efa17c4b78e16e7f47111d8887737be03581936
+--> bb81a50eef0d
+STEP 14/17: WORKDIR /home/admin
+--> Using cache a10ef1d6ce59168c36296fe232aa8d9d342b4233fe59840c916731c3fb128f04
+--> a10ef1d6ce59
+STEP 15/17: ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+--> Using cache 43a2c1e43fd79eaef3db9a2c11e37058c6c2407ed7e0e0af590824553d14d591
+--> 43a2c1e43fd7
+STEP 16/17: CMD ["url-preview"]
+--> Using cache a2451055a3a24402194ae53400aefdb74c6115120812f952e36891756f22f880
+--> a2451055a3a2
+STEP 17/17: LABEL "org.qdistro.test-snapshot"="20260930"
+--> Using cache ee49295100070e28ba8cf87a655e971b41b38cbb37ca239013eeb413efa9aed6
+COMMIT qdistro/tier2-url-preview:latest
+--> ee4929510007
+Successfully tagged localhost/qdistro/tier2-url-preview:latest
+ee49295100070e28ba8cf87a655e971b41b38cbb37ca239013eeb413efa9aed6
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:f13065ab7f4319dc5222b53640c530d217006d94508beffd77e4c835602adeb8
+Copying blob sha256:46769b87f3b0bb507b92e1859914514fcdeb7a06480948a1311a9f56ad52564f
+Copying blob sha256:a7e923aafcf6be29d7dbb2ca3f27f582badb7a57d418ed95b4681ec47011a28b
+Copying blob sha256:cdc7c506b78f79556f5d1be21b31402ede908aa2071acf8e0bedba4fb4d23d5c
+Copying blob sha256:cdc7c506b78f79556f5d1be21b31402ede908aa2071acf8e0bedba4fb4d23d5c
+Copying config sha256:ccbcca8309c5659e90cb8e3282e7c75280a061cb9c88dbfa884049af1ad6ef29
+Writing manifest to image destination
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:02cbd460bc6f3f1518c9a1472adea7dfe3270f5bc044da8fe6f8332b9b235868
+Copying blob sha256:106e553a95bb94638bef297af0269edfa9de822048300b88ca2b7826d2587067
+Copying blob sha256:01e5e1325fb37a020a02582063a7844eb331e781f265756cb5d7d7f4510601d5
+Copying blob sha256:f9f03f0767380c98168fe9fbcf7cc5adbe8b24bb69388fae61c4bc6b3137b381
+Copying blob sha256:d3da08eb86e1b85fe02fa12f73cf48d94725df4c7fc0722d5469930fd2d0fa55
+Copying blob sha256:593a59ba300a1e67a44d3d92d4e17425f4f6b87f42ab07f19e66ffea10325e83
+Copying blob sha256:c91df6bf32ef656f5e23fc0d28c588ff1c4f853c077bd14ceaeb14208cd279b0
+Copying blob sha256:b170425d868ba22680b4cd8289e2d623107d61bcf45890c48dcaeec203b8f634
+Copying config sha256:179d3b87f837d72a32f5a32ded252324ffdeef23cd88900ee7f8f4b83ae51155
+Writing manifest to image destination
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:ae4c824bfe44b58fdb8f3b69a08b2525c887248e4798e1daafbfd6162c504eba
+Copying blob sha256:800f5a190d459a5c95aea6932a3b55273e6849aa1692e64d74833c8f02031f2d
+Copying blob sha256:5d4e84d6bf4c5d58d89962948480573f134a30ba36715067ae9dc702f4d09bd6
+Copying blob sha256:d4599673295b0b3e517134390e2e255aeadfb5221beff8c5fca62ae4295582d9
+Copying blob sha256:f50b4b9c0ede5d0022f00b09423f4212ccba5499557e7f6f1251299ba7120eec
+Copying blob sha256:67b17678648eb388fba0a43db7532a6d127fde8626693dbfddb4baafbcbabaab
+Copying blob sha256:bc76edf7c22f292ffcc247023fce9f4bbf87d5b0b5a8a82f4eda0fc6b51df320
+Copying blob sha256:377ff3e051e28276bbbb7af998dcf1f9cbd5ce891b2c3cb071c5e56f56a13df7
+Copying config sha256:ee49295100070e28ba8cf87a655e971b41b38cbb37ca239013eeb413efa9aed6
+Writing manifest to image destination
+[tier2-podman] cached /home/play2/.cache/qdistro/tier2-podman/20260930/x86_64/ca3912db7b95d9674f1264b9f6195ec219f9e21d427bc35fc253f820f276d696.tar
+[spin-test-vm] stage 3: cloning a fresh VM from baked...
+[vm-boot-watch] no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD
+[vm-boot-watch] or allow pty fallback); nothing to watch — exiting 0 (no-op)
+[spin-test-vm]     VM = qci-golden-bats-261003-202658-3003700-9593
+[spin-test-vm]     starting + waiting for guest agent...
+VM 'qci-golden-bats-261003-202658-3003700-9593' is already running
+Waiting for QEMU guest agent...
+[vm-boot-watch] no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD
+[vm-boot-watch] or allow pty fallback); nothing to watch — exiting 0 (no-op)
+Guest agent ready after 0s
+[spin-test-vm] stage 4a: tarballing the qdistro monorepo (root + in-tree components)...
+[spin-test-vm] stage 4b: host HTTP server on 0.0.0.0:37365 (pid 3004594)
+[spin-test-vm] stage 5: running fresh-vm-bootstrap.sh in VM...
+[vm-exec] guest identity pinned (pid 1014 start 1712)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+[vm-exec] Waiting... (polls=60s elapsed=61s)
+[bootstrap] masking jeos-firstboot + greetd (idempotent)...
+[bootstrap] waiting for guest network before zypper (qga-up is not DHCP/DNS)...
+[bootstrap] installing python313-textual for the admin TUI
+[bootstrap] CI extras already present (bats); skipping zypper
+[bootstrap] fetching the monorepo tarball from http://10.0.2.2:37365...
+[bootstrap] fetching Podman-built native stage...
+/tmp/qdistro-native-stage.tar: OK
+[bootstrap] installing qnotebook...
+[bootstrap] installing qdbrowser (+ PyQt6-WebEngine)...
+[bootstrap]   qdbrowser installed (/opt/qdbrowser; WebEngine via python313-PyQt6-WebEngine)
+[bootstrap] installing Python modules...
+[bootstrap]   running install-presentation-for-vm.sh <- /root/qdistro-src/sdk/presentation/qdistro_presentation
+[install-presentation] OK — dir /var/lib/qdistro/presentation (admin:1000) + /usr/local/lib/python3.13/site-packages/qdistro_presentation
+[bootstrap]   running install-sdk-for-vm.sh <- /root/qdistro-src/sdk/qdistro_app
+[install-sdk] OK — qdistro_app installed at /usr/local/lib/python3.13/site-packages/qdistro_app
+[bootstrap]   running install-broker-for-qdwin.sh <- /root/qdistro-src/broker
+broker ready on org.qdistro.AdminBroker1
+[bootstrap]   running install-session-manager.sh <- /root/qdistro-src/session_manager
+install-session-manager: tier 3s not installed (QDISTRO_TIER3S is not 1; paravirt O10)
+session manager ready on org.qdistro.SessionManager1
+[bootstrap]   running install-user-relay-for-vm.sh <- /root/qdistro-src/user_relay
+qdistro-user-relay template installed; start per-uid with: systemctl start qdistro-user-relay@<uid>.service
+[bootstrap]   running install-polkit-agent-for-vm.sh <- /root/qdistro-src/polkit
+[install-polkit-agent] OK — qdistro-polkit-agent installed at /usr/libexec/qdistro
+[bootstrap]   running install-pwd-for-vm.sh <- /root/qdistro-src/pwd
+[install-pwd] OK — qdistro-pwd installed at /usr/libexec/qdistro
+[bootstrap]   running install-qsu-for-vm.sh <- /root/qdistro-src/qsu
+installed prebuilt qsu binary -> /usr/local/bin/qsu
+qsu ready (socket /run/qdistro-root-exec/sock + /usr/local/bin/qsu)
+[bootstrap]   running install-media-for-vm.sh <- /root/qdistro-src/media
+qdistro-media-exec ready (socket /run/qdistro-media-exec/sock)
+[bootstrap]   running install-multimachine-for-vm.sh <- /root/qdistro-src/multimachine
+qdistro multi-machine runtime installed (display dock remains inert until configured)
+[bootstrap]   running install-browser-bridge-for-vm.sh <- /root/qdistro-src/browser_bridge
+[install-browser-bridge] installed Phase-9e browser daemons -> /usr/libexec/qdistro
+[stage-browser-extension] staged gated extension source: chromium
+[stage-browser-extension] staged gated extension source: firefox
+[install-browser-bridge] staged qdbrowser python pkg -> /usr/local/lib/qdistro/qdbrowser
+[install-browser-bridge] OK
+[bootstrap]   running install-portal-backend-for-vm.sh <- /root/qdistro-src
+[install-portal-backend] installed qdistro xdg-desktop-portal backend/frontend core
+[bootstrap]   running install-phone-for-vm.sh <- /root/qdistro-src/phone
+[install-phone] OK
+[bootstrap]   running install-print-proxy-for-vm.sh <- /root/qdistro-src/print
+[install-print] OK — qdistro-print-proxy installed (not started)
+[bootstrap]   running install-snapshots-for-vm.sh <- /root/qdistro-src/snapshots
+[install-snapshots] OK
+[bootstrap]   running install-templates-for-vm.sh <- /root/qdistro-src
+[install-templates] installed template/promotion slice
+[bootstrap]   running install-admin-cli-for-vm.sh <- /root/qdistro-src
+admin approval CLI (qdistro-approvals) and TUI (qdistro-admin-tui) installed
+[bootstrap] staging bats probes from /root/qdistro-src/tests/integration/vm/probes -> /root/
+[bootstrap] generating RDP TLS cert/key (winpr-makecert)...
+[bootstrap] installing SELinux policy modules (permissive)...
+[bootstrap] checking staged native ELF dependencies...
+[bootstrap] installing + enabling seatd (system service)...
+[bootstrap] installing xwayland (Xwayland binary for qdwin's xwayland.so module)...
+[bootstrap] installing core test clients: foot xterm
+[bootstrap] installing baseline desktop fonts (dejavu + liberation)...
+[bootstrap]   fonts: 2 package(s) installed;
+[bootstrap] skipping qdwin app-test deps (QDWIN_APP_DEPS=0)
+[bootstrap] configuring ydotool/uinput for VM GUI tests...
+[bootstrap] installing qdwin session (qdwin-compositor + qdshell user units via qdwin-session.target)...
+tier-2 seccomp profiles installed in /usr/lib/qdistro/seccomp/
+qdistro-tier2-spawn + qdistro-podapps-scan installed in /usr/bin
+/var/lib/qdistro/podapps perms: root:admin 2775
+qdwin session: vendored libweston present — modules mapped to /usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16
+qdwin session: XWayland enabled (xwayland=true) — xwayland.so mapped to /usr/lib64/libweston-16/xwayland.so
+Created symlink '/home/admin/.config/systemd/user/default.target.wants/qdwin-session.target' → '/home/admin/.config/systemd/user/qdwin-session.target'.
+Created symlink '/home/admin/.config/systemd/user/default.target.wants/ydotoold.service' → '/home/admin/.config/systemd/user/ydotoold.service'.
+qdwin session installed (deploy-named units: qdwin-compositor.service + qdshell.service + qdwin-session.target).
+  start now:    runuser -l admin -c 'systemctl --user start qdwin-session.target'
+  start at boot: systemctl --user --machine=admin@ start qdwin-session.target  (after reboot/relogin)
+[bootstrap] installing qdwin cursor sprite helper user unit...
+[bootstrap] installing qdlocker (Python+QML peer locker via qdwin_locker_v1)...
+[bootstrap]   installed /etc/pam.d/qdlocker (dedicated unlock PAM + faillock lockout)
+[bootstrap]   installed qdistro-fprintd-fake test service
+[bootstrap]   installed /usr/local/bin/qdistro-fake-lid-close test helper
+[bootstrap]   qdlocker installed; will start with the user session
+[bootstrap] installing tier-5 launcher symlinks + polkit policy...
+[install-tier5] installed wrapper /usr/local/bin/qdistro-tier5-spawn → /root/qdistro-src/tier5-vm/spawn-tier5.sh
+[install-tier5] installed wrapper /usr/local/bin/qdistro-tier5-cleanup → /root/qdistro-src/tier5-vm/qdistro-tier5-cleanup.sh
+[install-tier5] installed wrapper /usr/local/bin/qdistro-tier5-build-guest-image → /root/qdistro-src/tier5-vm/build-guest-image.sh
+[install-tier5] installed polkit policy at /usr/share/polkit-1/actions/org.qdistro.tier5.policy
+[install-tier5] done.
+[bootstrap] installing tier-3 silo + launcher symlinks + polkit policy...
+[install-tier3] created group qdistro-tier3
+[install-tier3] created silo user user1 (uid=1001, locked password)
+[install-tier3] created silo user user2 (uid=1002, locked password)
+[install-tier3] socket dir /run/qdistro-tier3 (admin:qdistro-tier3 710)
+[install-tier3] tmpfiles entry at /etc/tmpfiles.d/qdistro-tier3.conf
+[install-tier3] added admin to qdistro-tier3
+[install-tier3] linked /usr/local/bin/qdistro-tier3-spawn → /root/qdistro-src/tier3/spawn-tier3.sh
+[install-tier3] linked /usr/local/bin/qdistro-tier3-cleanup → /root/qdistro-src/tier3/qdistro-tier3-cleanup.sh
+[install-tier3] installed polkit policy at /usr/share/polkit-1/actions/org.qdistro.tier3.policy
+[install-tier3] done.
+[bootstrap] starting admin user session...
+[bootstrap]   enabling pipewire user socket...
+[bootstrap]   waiting for /run/user/1000/wayland-1...
+[bootstrap]   waiting for /run/user/1000/qdlocker.sock (best-effort)...
+[bootstrap] fetching cached tier-2 Podman images...
+/tmp/qdistro-tier2-images.tar: OK
+Loaded image: localhost/qdistro/tier2-weston-terminal:latest
+Loaded image: localhost/qdistro/tier2-text-viewer:latest
+Loaded image: localhost/qdistro/tier2-url-preview:latest
+[bootstrap]   tier-2 images pre-built: weston-terminal, text-viewer, url-preview
+[bootstrap] bootstrap complete.
+[bootstrap] session was started by §7d; if it failed, restart with:
+[bootstrap]   runuser -l admin -c 'systemctl --user restart qdwin-session.target'
+[bootstrap]   runuser -l admin -c 'systemctl --user restart qdlocker.service'
+[vm-exec] --- stderr ---
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service' → '/etc/systemd/system/qdistro-dbus-reload.service'.
+Created symlink '/etc/systemd/system/qdistro-admin-broker.service.wants/qdistro-dbus-reload.service' → '/etc/systemd/system/qdistro-dbus-reload.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service' → '/etc/systemd/system/qdistro-admin-broker.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-session-manager.service' → '/etc/systemd/system/qdistro-session-manager.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-pwd.service' → '/etc/systemd/system/qdistro-pwd.service'.
+Created symlink '/etc/systemd/user/qdwin-session.target.wants/qdistro-portal-keys-unlock.service' → '/etc/systemd/user/qdistro-portal-keys-unlock.service'.
+Unit /etc/systemd/user/qdistro-portal-keys-unlock.service is added as a dependency to a non-existent unit qdwin-session.target.
+Created symlink '/etc/systemd/system/sockets.target.wants/qdistro-root-exec.socket' → '/etc/systemd/system/qdistro-root-exec.socket'.
+Created symlink '/etc/systemd/system/sockets.target.wants/qdistro-media-exec.socket' → '/etc/systemd/system/qdistro-media-exec.socket'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/qdistro-print-proxy.service' → '/etc/systemd/system/qdistro-print-proxy.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/seatd.service' → '/etc/systemd/system/seatd.service'.
+Created symlink '/home/admin/.config/systemd/user/qdshell.service.wants/qdistro-cursor-sprites.service' → '/etc/systemd/user/qdistro-cursor-sprites.service'.
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+Created symlink '/home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service' → '/home/admin/.config/systemd/user/qdlocker.service'.
+Created symlink '/home/admin/.config/systemd/user/sockets.target.wants/pipewire.socket' → '/usr/lib/systemd/user/pipewire.socket'.
+Created symlink '/home/admin/.config/systemd/user/default.target.wants/pipewire.service' → '/usr/lib/systemd/user/pipewire.service'.
+Getting image source signatures
+Copying blob sha256:46769b87f3b0bb507b92e1859914514fcdeb7a06480948a1311a9f56ad52564f
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:f13065ab7f4319dc5222b53640c530d217006d94508beffd77e4c835602adeb8
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:a7e923aafcf6be29d7dbb2ca3f27f582badb7a57d418ed95b4681ec47011a28b
+Copying blob sha256:cdc7c506b78f79556f5d1be21b31402ede908aa2071acf8e0bedba4fb4d23d5c
+Copying blob sha256:cdc7c506b78f79556f5d1be21b31402ede908aa2071acf8e0bedba4fb4d23d5c
+Copying config sha256:ccbcca8309c5659e90cb8e3282e7c75280a061cb9c88dbfa884049af1ad6ef29
+Writing manifest to image destination
+Getting image source signatures
+Copying blob sha256:106e553a95bb94638bef297af0269edfa9de822048300b88ca2b7826d2587067
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:02cbd460bc6f3f1518c9a1472adea7dfe3270f5bc044da8fe6f8332b9b235868
+Copying blob sha256:01e5e1325fb37a020a02582063a7844eb331e781f265756cb5d7d7f4510601d5
+Copying blob sha256:f9f03f0767380c98168fe9fbcf7cc5adbe8b24bb69388fae61c4bc6b3137b381
+Copying blob sha256:d3da08eb86e1b85fe02fa12f73cf48d94725df4c7fc0722d5469930fd2d0fa55
+Copying blob sha256:593a59ba300a1e67a44d3d92d4e17425f4f6b87f42ab07f19e66ffea10325e83
+Copying blob sha256:c91df6bf32ef656f5e23fc0d28c588ff1c4f853c077bd14ceaeb14208cd279b0
+Copying blob sha256:b170425d868ba22680b4cd8289e2d623107d61bcf45890c48dcaeec203b8f634
+Copying config sha256:179d3b87f837d72a32f5a32ded252324ffdeef23cd88900ee7f8f4b83ae51155
+Writing manifest to image destination
+Getting image source signatures
+Copying blob sha256:800f5a190d459a5c95aea6932a3b55273e6849aa1692e64d74833c8f02031f2d
+Copying blob sha256:92d88fc1926ef312968d109b4f23670f4415454e0e2e21ec623e5f774371a09f
+Copying blob sha256:9ad1ee8121d76c2022c818c9c9274312fdf2bc94cac96277a5590a6abea7ac35
+Copying blob sha256:df9b6d80f2bce9829a786ef4458f11d47104cf31f46327d5778333fb5593bb5e
+Copying blob sha256:ae4c824bfe44b58fdb8f3b69a08b2525c887248e4798e1daafbfd6162c504eba
+Copying blob sha256:fae8d7ca7a9927b56094ee7d0d83456e4f4145ba463e801af49758f8d12e286b
+Copying blob sha256:5d4e84d6bf4c5d58d89962948480573f134a30ba36715067ae9dc702f4d09bd6
+Copying blob sha256:d4599673295b0b3e517134390e2e255aeadfb5221beff8c5fca62ae4295582d9
+Copying blob sha256:f50b4b9c0ede5d0022f00b09423f4212ccba5499557e7f6f1251299ba7120eec
+Copying blob sha256:67b17678648eb388fba0a43db7532a6d127fde8626693dbfddb4baafbcbabaab
+Copying blob sha256:bc76edf7c22f292ffcc247023fce9f4bbf87d5b0b5a8a82f4eda0fc6b51df320
+Copying blob sha256:377ff3e051e28276bbbb7af998dcf1f9cbd5ce891b2c3cb071c5e56f56a13df7
+Copying config sha256:ee49295100070e28ba8cf87a655e971b41b38cbb37ca239013eeb413efa9aed6
+Writing manifest to image destination
+[vm-exec] --- end stderr ---
+[spin-test-vm] PASS: /run/user/1000/wayland-1 present (compositor up)
+[spin-test-vm] WARN: qdshell ctrl-socket not ready (reply was: error: unknown command 'list')
+[spin-test-vm] PASS: qdlocker.sock present
+[spin-test-vm] ready. VM:
+qci-golden-bats-261003-202658-3003700-9593
+[rpm-cache] exported packages to /home/play2/.cache/qdistro/rpm/20260930/x86_64

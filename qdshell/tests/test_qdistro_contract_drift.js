@@ -115,18 +115,29 @@ function present(src, needle, what) {
 // ── 1. tier/secctx prefixes (security boundary) ──────────────────────────────
 const px = contract.secctx_prefixes;
 const tier3 = read("Services/Qdistro/Tier3Apps.qml");
+const tier3s = read("Services/Qdistro/Tier3sApps.qml");
 const tier4 = read("Services/Qdistro/Tier4Apps.qml");
 const tier5 = read("Services/Qdistro/VMApps.qml");
 const silo = read("Services/Qdistro/SiloChrome.js");
 const taskbar = read("Modules/Bar/Widgets/TaskbarLogic.js");
 
 eq(literalFor(tier3, "tier3Prefix"), px.tier3, "Tier3Apps.qml tier3Prefix");
+eq(literalFor(tier3s, "tier3sPrefix"), px.tier3s, "Tier3sApps.qml tier3sPrefix");
 eq(literalFor(tier4, "tier4Prefix"), px.tier4, "Tier4Apps.qml tier4Prefix");
 eq(literalFor(tier5, "tier5Prefix"), px.tier5, "VMApps.qml tier5Prefix");
 eq(literalFor(silo, "TIER3_PREFIX"), px.tier3, "SiloChrome.js TIER3_PREFIX");
+eq(literalFor(silo, "TIER3S_PREFIX"), px.tier3s, "SiloChrome.js TIER3S_PREFIX");
 eq(literalFor(silo, "TIER4_PREFIX"), px.tier4, "SiloChrome.js TIER4_PREFIX");
 // disp prefix is used inline in TaskbarLogic.js (id.indexOf("qdistro.disp."))
 present(taskbar, '"' + px.disp + '"', "TaskbarLogic.js disp prefix");
+// paravirt ΔB6: the tier3s app-id prefix is used inline in TaskbarLogic.js
+// (id.indexOf("qdistro.tier3s.")) and must be checked BEFORE the tier3 one —
+// assert both the literal's presence and that its check precedes tier3's.
+present(taskbar, '"' + px.tier3s + '"', "TaskbarLogic.js tier3s prefix");
+assert.ok(taskbar.indexOf('"' + px.tier3s + '"') < taskbar.indexOf('"' + px.tier3 + '"'),
+    "TaskbarLogic.js: the qdistro.tier3s. check must precede the qdistro.tier3. " +
+    "check (eng.indexOf('qdistro.tier3') === 0 also matches 'qdistro.tier3s*')");
+checks++;
 
 // ── 2. D-Bus bus names + object paths ────────────────────────────────────────
 const app1 = read("Services/Qdistro/App1Apps.qml");

@@ -135,7 +135,8 @@ if [ "$ps_scope" = absent ] || [ "$ps_scope" -le 2 ]; then pass ptrace_scope "$p
 else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
 
 # --- launching user's id mapping ------------------------------------------
-if ! id "$USER_NAME" >/dev/null 2>&1; then
+# bounded like every foreign-user NSS lookup below (fable A r3 P3-2)
+if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
     fail user "$USER_NAME does not exist"
     for c in subuid subgid; do fail "$c" "not checked: user $USER_NAME missing"; done
     for t in newuidmap newgidmap; do
@@ -276,18 +277,43 @@ elif [ -f "$WRAPPER" ] && [ ! -L "$WRAPPER" ] && [ "$(stat -c '%a %U:%G' "$WRAPP
     WRAPPER_OK=1
 else fail wrapper "$WRAPPER missing, not $EXP_OWN 0755, or differs from $HERE/tier3s-runsc"; fi
 
+# --- workload declarations (tier3s/CONTRACT.md §5) ---------------------------
+# The spawn parses $HERE/workloads/<workload>.env (never sources it) for the
+# GUI declaration that selects the waypipe bridge half of the launch; a
+# missing or loose directory refuses every launch.
+WLD="$HERE/workloads"
+if [ -L "$WLD" ] || [ ! -d "$WLD" ] || [ "$(stat -c '%a %U:%G' "$WLD")" != "755 $EXP_OWN" ] \
+        || ! compgen -G "$WLD/*.env" >/dev/null; then
+    fail workloads "$WLD missing, a symlink, not $EXP_OWN 0755, or empty (install-session-manager.sh QDISTRO_TIER3S=1)"
+else
+    pass workloads "$WLD ($(compgen -G "$WLD/*.env" | wc -l) declaration(s))"
+fi
+
 # --- runsc state root (tier3s/CONTRACT.md D-A1) -----------------------------
 # The wrapper uses /run/qdistro-tier3s-runsc/<host uid> for every runsc call
-# and refuses to create it; provisioning (tmpfiles.d/qdistro-tier3s.conf) does.
+# and refuses to create it; the spawn creates it per qt3s-* podman caller at
+# launch (C2 model A), so the per-uid dir is a prerequisite only for qt3s-*
+# accounts — a non-caller (e.g. --user admin) has no per-uid dir at all.
 SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
-if ! id "$USER_NAME" >/dev/null 2>&1; then
+# Every NSS lookup for the foreign user is bounded (fable A r3 P3-2): a wedged
+# provider hangs the spawn's probe otherwise, and timeout's nonzero status —
+# never whatever prefix a dying call printed — is the verdict.
+if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
     fail state_root "not checked: user $USER_NAME missing"
+elif ! sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
+        || ! [[ "$sr_uid" =~ ^[0-9]+$ ]]; then
+    # status-gated and shape-checked like the getent calls (sol r5 P3-4,
+    # sol B-i r1): a lookup that prints a uid line and then stalls is killed
+    # at the bound — what it printed is not a result.
+    fail state_root "the uid lookup for $USER_NAME failed or timed out"
 else
-    sr_uid="$(id -u "$USER_NAME")"; SR="$SR_BASE/$sr_uid"
+    SR="$SR_BASE/$sr_uid"
     if [ -L "$SR_BASE" ] || [ ! -d "$SR_BASE" ] || [ "$(stat -c '%u %a' -- "$SR_BASE")" != "$EXP_UID 755" ]; then
         fail state_root "$SR_BASE missing, a symlink or not uid $EXP_UID 0755 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+    elif [[ "$USER_NAME" != qt3s-* ]]; then
+        pass state_root "$SR_BASE (per-uid dir is a qt3s-* caller prerequisite; $USER_NAME never invokes runsc)"
     elif [ -L "$SR" ] || [ ! -d "$SR" ] || [ "$(stat -c '%u %a' -- "$SR")" != "$sr_uid 700" ]; then
-        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (systemd-tmpfiles --create qdistro-tier3s.conf)"
+        fail state_root "$SR missing, a symlink or not uid $sr_uid 0700 (spawn-tier3s.sh creates it at launch)"
     elif [ -z "$ROOT" ] && [ "${#SR}" -gt 31 ]; then
         fail state_root "$SR is longer than 31 bytes (runsc control socket path)"
     else
@@ -302,7 +328,12 @@ fi
 # spawn that called it, and its printed prefix is not a result.
 AS_UID=""; AS_HOME=""
 if [ "$(id -un)" != "$USER_NAME" ]; then
-    AS_UID="$(id -u "$USER_NAME" 2>/dev/null)"; puid=""; pw=""
+    # The uid lookup is status-gated and shape-checked like the getent
+    # below: rc 0 AND exactly one numeric uid line, or no result at all —
+    # a line printed before the timeout kill is never a uid (sol B-i r1).
+    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
+        && [[ "$AS_UID" =~ ^[0-9]+$ ]] || AS_UID=""
+    puid=""; pw=""
     [ -n "$AS_UID" ] && pw="$(timeout 5 getent passwd "$USER_NAME")" \
         && puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
         && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
@@ -310,13 +341,37 @@ if [ "$(id -un)" != "$USER_NAME" ]; then
         && [[ "$pw" != *$'\n'* ]] \
         || { fail nss "no passwd entry for $USER_NAME within the 5 s bound"; AS_UID=""; AS_HOME=""; }
 fi
+# podman's runtime dir for the probed user: a logind session dir when it
+# exists (admin), else the per-silo dir the spawn creates (a silo account has
+# no session; C2 model A keeps podman calls under the silo uid).
+AS_RT=""
+if [ -n "$AS_UID" ]; then
+    if [ -d "/run/user/$AS_UID" ]; then AS_RT="/run/user/$AS_UID"
+    elif [ -d "$ROOT/run/qdistro-tier3s-rt/$AS_UID" ]; then AS_RT="$ROOT/run/qdistro-tier3s-rt/$AS_UID"
+    elif [ -n "$ROOT" ] && [ -d "$ROOT/run/user/$AS_UID" ]; then AS_RT="$ROOT/run/user/$AS_UID"
+    else AS_RT="/run/qdistro-tier3s-rt/$AS_UID"; fi
+fi
 as_user() {
     if [ -z "$AS_UID" ]; then [ "$(id -un)" = "$USER_NAME" ] || return 1; "$@"
     else
+        # CONTAINERS_CONF pins cgroupfs for a sessionless account: the
+        # systemd manager would only warn (stderr contaminates the inspect
+        # comparisons) before falling back anyway.
         runuser -u "$USER_NAME" -- env -i PATH=/usr/bin:/bin HOME="$AS_HOME" \
-            USER="$USER_NAME" XDG_RUNTIME_DIR="/run/user/$AS_UID" "$@"
+            USER="$USER_NAME" XDG_RUNTIME_DIR="$AS_RT" \
+            CONTAINERS_CONF="$HERE/containers.conf" "$@"
     fi
 }
+# The per-silo runtime dir itself is a prerequisite once the user is a
+# qt3s-* account (no logind session will create /run/user/<uid>).
+if [ -n "$AS_UID" ] && [[ "$USER_NAME" == qt3s-* ]]; then
+    rtdir="$ROOT/run/qdistro-tier3s-rt/$AS_UID"
+    if [ -L "$rtdir" ] || [ ! -d "$rtdir" ] || [ "$(stat -c '%u %a' -- "$rtdir")" != "$AS_UID 700" ]; then
+        fail rt_dir "$rtdir missing, a symlink or not uid $AS_UID 0700 (spawn-tier3s.sh creates it)"
+    else
+        pass rt_dir "$rtdir (uid $AS_UID 0700)"
+    fi
+fi
 pv="$(as_user podman version --format '{{.Client.Version}}' 2>/dev/null)"
 if [ -z "$pv" ]; then fail podman "podman not runnable as $USER_NAME"
 elif [ "${pv%%.*}" -ge 6 ] 2>/dev/null; then pass podman "$pv (>= 6)"

@@ -1,0 +1,16 @@
+[spin-test-vm] stage 1/2: skipped (kiwi base or run-golden; no baseweed-baked needed)
+[spin-test-vm] stage 3: cloning a fresh VM from run-golden (/home/play2/.local/share/libvirt/images/qci-golden-bats-261003-202658-3003700-9593.qcow2)...
+[vm-boot-watch] no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD
+[vm-boot-watch] or allow pty fallback); nothing to watch — exiting 0 (no-op)
+[spin-test-vm]     VM = qci-bats-phase7-tier3s-app-261003-202913-3009453-4743
+[spin-test-vm]     starting + waiting for guest agent...
+VM 'qci-bats-phase7-tier3s-app-261003-202913-3009453-4743' is already running
+Waiting for QEMU guest agent...
+[vm-boot-watch] no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD
+[vm-boot-watch] or allow pty fallback); nothing to watch — exiting 0 (no-op)
+Guest agent ready after 0s
+[spin-test-vm] PASS: /run/user/1000/wayland-1 present (compositor up)
+[spin-test-vm] WARN: qdshell ctrl-socket not ready (reply was: empty)
+[spin-test-vm] PASS: qdlocker.sock present
+[spin-test-vm] ready. VM:
+qci-bats-phase7-tier3s-app-261003-202913-3009453-4743

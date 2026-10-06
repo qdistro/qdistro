@@ -1,0 +1,125 @@
+[vm-exec] guest identity pinned (pid 4176 start 12936)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+[vm-exec] Waiting... (polls=60s elapsed=62s)
+[vm-exec] Waiting... (polls=90s elapsed=94s)
+
+## 0. preconditions, silos
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s129a (Created)
+PASS: CreateTier3sSilo s129b (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+
+## 1. two GUI launches up
+PASS: both GUI launches up (00e99a98df5b781c2da1f03dd90a3234, 9109d1d300241675849b23d1d5f976ce)
+PASS: pre-attack/A: bridge client pid 5278 live (starttime verified)
+PASS: pre-attack/A: bridge wrapper pid 5267 live (starttime verified)
+PASS: pre-attack/A: bridge client runs as admin, exec waypipe (1000:waypipe)
+PASS: pre-attack/A: bridge client + wrapper in the launch unit cgroup (2)
+PASS: pre-attack/A: bridge channel live (sandbox waypipe server holds channel + app sockets)
+PASS: pre-attack/B: bridge client pid 6549 live (starttime verified)
+PASS: pre-attack/B: bridge wrapper pid 6538 live (starttime verified)
+PASS: pre-attack/B: bridge client runs as admin, exec waypipe (1000:waypipe)
+PASS: pre-attack/B: bridge client + wrapper in the launch unit cgroup (2)
+PASS: pre-attack/B: bridge channel live (sandbox waypipe server holds channel + app sockets)
+PASS: compositor pid captured (yes)
+PASS: qdshell main pid captured (restart would change it) (yes)
+PASS: A's secctx listener resolved (yes)
+PASS: single-attach: reconnect to A's consumed link.sock is refused (refused)
+    hose: listener-garbage: sent 4096 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-truncated-frame: sent 76 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-0: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-1: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-2: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-3: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-4: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-5: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-6: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-7: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-8: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-9: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-10: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-11: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-12: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-13: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-14: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-15: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-16: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-17: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-18: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: listener-flood-19: sent 128 bytes to /run/user/1000/wayland-secctx-5277-0
+    hose: hose done delivered=22
+PASS: listener attacks DELIVERED while A's listener was live (>=20 of 22) (yes)
+
+## 2. listener blast radius (A still live): only junk connections may die
+PASS: compositor still the same pid, unit active after the listener blast (917:active)
+PASS: qdshell still the SAME pid (no restart) and active (1038:active)
+PASS: B's bridge channel still established after A's listener blast (yes)
+PASS: bridge client pid resolved (yes)
+PASS: gofer pid resolved (yes)
+PASS: sentry pid resolved for peer attribution (yes)
+    channel-hose: sandbox-end: wrote 512B onto pid 5648 fd 136
+    channel-hose: client-wayland-end: wrote 512B onto pid 5278 fd 4
+    channel-hose: fd 5 inode 23440: the link.sock LISTENER — skipped (unconnected)
+    channel-hose: client-channel: wrote 512B onto pid 5278 fd 7
+    channel-hose: hose done ends=3 sent=1536 sandbox_end=yes sandbox_bytes=512
+PASS: waypipe frames written onto the SANDBOX end of the link (at the trusted client parser) (yes)
+PASS: hose wrote onto at least two attributed bridge sockets (yes)
+
+## 3. blast radius after the channel attacks: only A's bridge may die
+PASS: compositor still the same pid, unit active (917:active)
+PASS: qdshell still the SAME pid (no restart) and active (1038:active)
+PASS: no compositor/qdshell crash in the journal since the attack (0)
+
+## 4. A's bridge: either dropped the bad connection or died — both in-contract
+PASS: A's bridge connection died under the hostile stream (pid ? gone)
+PASS: A's toplevel is gone from qdshell (handle freed with the client) (HANDLE=-1)
+
+## 5. B's launch is completely untouched
+PASS: B's record still running (running)
+PASS: B's bridge client still live (starttime verified) (yes)
+PASS: B's bridge channel still established (yes)
+PASS: B's toplevel still in the qdshell model (1)
+PASS: B's container still running (running)
+
+## 6. teardown: both launches come down clean
+PASS: StopSilo s129a (Stopped)
+PASS: StopSilo s129b (Stopped)
+PASS: cleanup/A: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/A: secctx listener wayland-secctx-5277-0 revoked
+PASS: cleanup/A: launch record /run/user/1000/qdistro-tier3s-launchrec-3b486e936e94995a55e7c8eef3b02f48.pid removed
+PASS: cleanup/A: all 17 launch processes gone (pid+starttime)
+PASS: cleanup/A: scope qdistro-tier3s-00e99a98df5b781c2da1f03dd90a3234.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-00e99a98df5b781c2da1f03dd90a3234.scope absent)
+PASS: cleanup/A: per-launch dir /run/qdistro-tier3s/00e99a98df5b781c2da1f03dd90a3234 gone
+PASS: cleanup/A: control record /run/qdistro-tier3s-ctl/00e99a98df5b781c2da1f03dd90a3234 gone
+PASS: cleanup/A: container qdistro-tier3s-s129a gone (podman exists rc=1)
+PASS: cleanup/A: no runsc state for 144c949f3233 in /run/qdistro-tier3s-runsc/1000
+PASS: cleanup/B: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/B: secctx listener wayland-secctx-6548-0 revoked
+PASS: cleanup/B: launch record /run/user/1000/qdistro-tier3s-launchrec-bc911cf950f3d0e0ac9bad150588def5.pid removed
+PASS: cleanup/B: all 17 launch processes gone (pid+starttime)
+PASS: cleanup/B: scope qdistro-tier3s-9109d1d300241675849b23d1d5f976ce.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-9109d1d300241675849b23d1d5f976ce.scope absent)
+PASS: cleanup/B: per-launch dir /run/qdistro-tier3s/9109d1d300241675849b23d1d5f976ce gone
+PASS: cleanup/B: control record /run/qdistro-tier3s-ctl/9109d1d300241675849b23d1d5f976ce gone
+PASS: cleanup/B: container qdistro-tier3s-s129b gone (podman exists rc=1)
+PASS: cleanup/B: no runsc state for d448d2a4aba4 in /run/qdistro-tier3s-runsc/1000
+PASS: DeleteSilo s129a (absent)
+PASS: DeleteSilo s129b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s129] 78 passes, 0 failures

@@ -1,0 +1,142 @@
+[vm-exec] guest identity pinned (pid 3691 start 4985)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+
+## 0. preconditions, silos
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s125a (Created)
+PASS: CreateTier3sSilo s125b (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+
+## 1. GUI launch refuses when the admin compositor socket is gone
+PASS: compositor socket moved aside (no)
+INFO: no-compositor: start rc=1 Call failed: start of tier3s silo 's125a' failed: the launch was refused or failed before it ran: REFUSE: GUI workload weston-terminal but no admin compositor socket at /run/user/1000/wayland-1; the silo is Stopped (see journalctl -u qdistro-tier3s-silo@s125a.service) 
+PASS: no-compositor: StartSilo fails for the refused launch (rc=1)
+PASS: no-compositor: StartSilo reports the refusal (1)
+PASS: no-compositor: the silo reads Stopped right after the refused start (Stopped)
+    unit: Starting qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only)...
+    unit: [resolve-binding] silo 's125a' is untemplated (no binding)
+    unit: spawn-tier3s: silo s125a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-weston-terminal:latest
+    unit: spawn-tier3s: REFUSE: GUI workload weston-terminal but no admin compositor socket at /run/user/1000/wayland-1
+    unit: qdistro-tier3s-silo@s125a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s125a.service: Failed with result 'exit-code'.
+    unit: Failed to start qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only).
+PASS: no-compositor: the spawn refused with the expected message (1)
+PASS: no-compositor: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: no-compositor: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: no-compositor: systemd never started an owning scope (0)
+PASS: no-compositor: no control record, no per-launch dir (0:0)
+PASS: no-compositor: no container of any kind (0)
+PASS: no-compositor: no launch record or link.sock leftover (0:0)
+PASS: compositor socket restored (yes)
+
+## 2. missing launch identity: bridge client never publishes a record
+INFO: no-launch-record: start rc=1 Call failed: start of tier3s silo 's125a' failed: the launch was refused or failed before it ran: REFUSE: the waypipe bridge client did not publish a live pid (launch record /run/user/1000/qdistro-tier3s-launchrec-0dc6d5629e3fb7e638eb0247d74dd4f3.pid) (client log tail: ); the silo is Stopped (see jo
+PASS: no-launch-record: StartSilo fails for the refused launch (rc=1)
+PASS: no-launch-record: StartSilo reports the refusal (1)
+PASS: no-launch-record: the silo reads Stopped right after the refused start (Stopped)
+    unit: Starting qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only)...
+    unit: [resolve-binding] silo 's125a' is untemplated (no binding)
+    unit: spawn-tier3s: silo s125a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-weston-terminal:latest
+    unit: spawn-tier3s: REFUSE: the waypipe bridge client did not publish a live pid (launch record /run/user/1000/qdistro-tier3s-launchrec-0dc6d5629e3fb7e638eb0247d74dd4f3.pid) (client log tail: )
+    unit: qdistro-tier3s-cleanup: 4e0688ac602e63a867076dc28ad9f834: torn down (qdistro-tier3s-s125a)
+    unit: qdistro-tier3s-silo@s125a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s125a.service: Failed with result 'exit-code'.
+    unit: Failed to start qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only).
+    unit: qdistro-tier3s-silo@s125a.service: Consumed 1.706s CPU time over 13.863s wall clock time.
+PASS: no-launch-record: the spawn refused with the expected message (1)
+PASS: no-launch-record: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: no-launch-record: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: no-launch-record: systemd never started an owning scope (0)
+PASS: no-launch-record: no control record, no per-launch dir (0:0)
+PASS: no-launch-record: no container of any kind (0)
+PASS: no-launch-record: no launch record or link.sock leftover (0:0)
+PASS: secctx helper restored (yes)
+
+## 3. RegisterLaunch failure refuses before podman run
+PASS: control: direct RegisterLaunch is denied under the drop-in (rc=1)
+INFO: registerlaunch-denied: start rc=1 Call failed: start of tier3s silo 's125a' failed: the launch was refused or failed before it ran: REFUSE: RegisterLaunch failed for bridge client pid 7697; no unregistered GUI launch (client log tail: qdistro-secctx-exec: trusted launcher accepted via root-parent fallback (parent pid=7686 uid=0, exe
+PASS: registerlaunch-denied: StartSilo fails for the refused launch (rc=1)
+PASS: registerlaunch-denied: StartSilo reports the refusal (1)
+PASS: registerlaunch-denied: the silo reads Stopped right after the refused start (Stopped)
+    unit: Starting qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only)...
+    unit: [resolve-binding] silo 's125a' is untemplated (no binding)
+    unit: spawn-tier3s: silo s125a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-weston-terminal:latest
+    unit: spawn-tier3s: REFUSE: RegisterLaunch failed for bridge client pid 7697; no unregistered GUI launch (client log tail: qdistro-secctx-exec: trusted launcher accepted via root-parent fallback (parent pid=7686 uid=0, exe unreadable; stable starttime)|)
+    unit: qdistro-tier3s-cleanup: 97b3ba9e72ac0494c22fe2719f399750: torn down (qdistro-tier3s-s125a)
+    unit: qdistro-tier3s-silo@s125a.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+    unit: qdistro-tier3s-silo@s125a.service: Failed with result 'exit-code'.
+    unit: Failed to start qdistro tier-3s (gVisor) silo s125a (Experimental, dev profile only).
+    unit: qdistro-tier3s-silo@s125a.service: Consumed 1.251s CPU time over 2.997s wall clock time.
+PASS: registerlaunch-denied: the spawn refused with the expected message (1)
+PASS: registerlaunch-denied: refusal fails the launch unit visibly (exit 2) (exit-code:2)
+PASS: registerlaunch-denied: no podman run (no container event but the probe's scratch create/remove) (0)
+PASS: registerlaunch-denied: systemd never started an owning scope (0)
+PASS: registerlaunch-denied: no control record, no per-launch dir (0:0)
+PASS: registerlaunch-denied: no container of any kind (0)
+PASS: registerlaunch-denied: no launch record or link.sock leftover (0:0)
+
+## 4. normal GUI lifecycle: up, toplevel observed, StopSilo, all clear
+PASS: lifecycle: launch up (3d0400e84c9c753d9d3bd2fb8668ba40)
+PASS: lifecycle: qdshell observed the toplevel (1)
+PASS: lifecycle: StopSilo (Stopped)
+PASS: lifecycle: all 17 launch processes gone (pid+starttime)
+PASS: lifecycle: scope qdistro-tier3s-3d0400e84c9c753d9d3bd2fb8668ba40.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-3d0400e84c9c753d9d3bd2fb8668ba40.scope absent)
+PASS: lifecycle: per-launch dir /run/qdistro-tier3s/3d0400e84c9c753d9d3bd2fb8668ba40 gone
+PASS: lifecycle: control record /run/qdistro-tier3s-ctl/3d0400e84c9c753d9d3bd2fb8668ba40 gone
+PASS: lifecycle: container qdistro-tier3s-s125a gone (podman exists rc=1)
+PASS: lifecycle: no runsc state for de1d69c837f4 in /run/qdistro-tier3s-runsc/1000
+PASS: lifecycle: bridge client+wrapper gone (pid+starttime)
+PASS: lifecycle: secctx listener wayland-secctx-8666-0 revoked
+PASS: lifecycle: launch record /run/user/1000/qdistro-tier3s-launchrec-add8a825835e9e6fe66307d2d433f53e.pid removed
+
+## 5. concurrent launches come up and go down independently
+PASS: concurrent: two launches up with distinct tokens (0fc972e705ed7eb973c18598bd261dac, 787a9a65d3cd4884104eefdfe647243e)
+PASS: concurrent: bridge client pids differ (11987 vs 12528)
+PASS: concurrent: both bridge channels live (distinct link.sock streams) (yes)
+PASS: concurrent: qdshell observed both toplevels (2)
+PASS: concurrent: A's launch unit failed visibly (signal) (failed:signal)
+PASS: concurrent/A-killed: all 17 launch processes gone (pid+starttime)
+PASS: concurrent/A-killed: scope qdistro-tier3s-0fc972e705ed7eb973c18598bd261dac.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-0fc972e705ed7eb973c18598bd261dac.scope absent)
+PASS: concurrent/A-killed: per-launch dir /run/qdistro-tier3s/0fc972e705ed7eb973c18598bd261dac gone
+PASS: concurrent/A-killed: control record /run/qdistro-tier3s-ctl/0fc972e705ed7eb973c18598bd261dac gone
+PASS: concurrent/A-killed: container qdistro-tier3s-s125a gone (podman exists rc=1)
+PASS: concurrent/A-killed: no runsc state for 4412063e0981 in /run/qdistro-tier3s-runsc/1000
+PASS: concurrent/A-killed: bridge client+wrapper gone (pid+starttime)
+PASS: concurrent/A-killed: secctx listener wayland-secctx-11984-0 revoked
+PASS: concurrent/A-killed: launch record /run/user/1000/qdistro-tier3s-launchrec-9a4867a503be8db786a98998c4fa2c02.pid removed
+PASS: concurrent: B's launch still runs (running)
+PASS: concurrent: B's bridge client still live (yes)
+PASS: concurrent: B's toplevel still in the qdshell model (1)
+PASS: concurrent: StopSilo B (Stopped)
+PASS: concurrent/B-stopped: all 17 launch processes gone (pid+starttime)
+PASS: concurrent/B-stopped: scope qdistro-tier3s-787a9a65d3cd4884104eefdfe647243e.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-787a9a65d3cd4884104eefdfe647243e.scope absent)
+PASS: concurrent/B-stopped: per-launch dir /run/qdistro-tier3s/787a9a65d3cd4884104eefdfe647243e gone
+PASS: concurrent/B-stopped: control record /run/qdistro-tier3s-ctl/787a9a65d3cd4884104eefdfe647243e gone
+PASS: concurrent/B-stopped: container qdistro-tier3s-s125b gone (podman exists rc=1)
+PASS: concurrent/B-stopped: no runsc state for 77b62f96cf44 in /run/qdistro-tier3s-runsc/1000
+PASS: concurrent/B-stopped: bridge client+wrapper gone (pid+starttime)
+PASS: concurrent/B-stopped: secctx listener wayland-secctx-12525-0 revoked
+PASS: concurrent/B-stopped: launch record /run/user/1000/qdistro-tier3s-launchrec-2caa8a38fc3b823eca0c1c3a9e62cea0.pid removed
+
+## 6. cleanup
+PASS: DeleteSilo s125a (absent)
+PASS: DeleteSilo s125b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s125] 97 passes, 0 failures

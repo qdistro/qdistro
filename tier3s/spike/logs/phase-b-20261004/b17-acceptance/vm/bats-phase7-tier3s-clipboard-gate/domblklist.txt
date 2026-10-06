@@ -1,0 +1,4 @@
+ Type   Device   Target   Source
+-----------------------------------------------------------------------------------------------------------------------------------------
+ file   disk     vda      /home/play2/.local/share/libvirt/images/qci-bats-phase7-tier3s-clipboard-gate-261004-120147-26917-30915.qcow2
+

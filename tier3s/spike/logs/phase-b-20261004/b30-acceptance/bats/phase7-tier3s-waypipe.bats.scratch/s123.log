@@ -1,0 +1,105 @@
+[vm-exec] guest identity pinned (pid 4240 start 9952)
+[vm-exec] Waiting... (polls=30s elapsed=31s)
+
+## 0. preconditions
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s123a (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+
+## 1. GUI launch brings up the bridge pair
+PASS: launch up (token fabcb864c73d088c4f83794c8907359b)
+    unit: Starting qdistro tier-3s (gVisor) silo s123a (Experimental, dev profile only)...
+    unit: [resolve-binding] silo 's123a' is untemplated (no binding)
+    unit: spawn-tier3s: silo s123a runs UNTEMPLATED (no binding); image localhost/qdistro/tier3s-weston-terminal:latest
+    unit: LAUNCH_TOKEN=fabcb864c73d088c4f83794c8907359b
+    unit: CONTAINER=qdistro-tier3s-s123a
+    unit: IMAGE=localhost/qdistro/tier3s-weston-terminal:latest
+    unit: SCOPE_UNIT=qdistro-tier3s-fabcb864c73d088c4f83794c8907359b.scope
+    unit: spawn-tier3s: running: qdistro-tier3s-s123a sentry=5786 conmon=5766 in /system.slice/qdistro-tier3s-fabcb864c73d088c4f83794c8907359b.scope
+    unit: Started qdistro tier-3s (gVisor) silo s123a (Experimental, dev profile only).
+
+## 2. control record carries the bridge identity
+PASS: record: gui flag (1)
+PASS: record: phase (running)
+PASS: record: bridge client+wrapper pid/starttime recorded (5577/5566)
+PASS: record: launch_record path under admin runtime (/run/user/1000/qdistro-tier3s-launchrec-a8e278f72e0dd3f87ec4eb0f6426959e.pid)
+PASS: bridge: bridge client pid 5577 live (starttime verified)
+PASS: bridge: bridge wrapper pid 5566 live (starttime verified)
+PASS: bridge: bridge client runs as admin, exec waypipe (1000:waypipe)
+PASS: bridge: bridge client + wrapper in the launch unit cgroup (2)
+PASS: bridge: bridge channel live (sandbox waypipe server holds channel + app sockets)
+
+## 3. bridge client is the secctx-tagged waypipe client
+PASS: bridge client argv (waypipe -s /run/qdistro-tier3s/fabcb864c73d088c4f83794c8907359b/link.sock -o --no-gpu --title-prefix [3s:s123a]  client)
+PASS: bridge client connects through secctx listener wayland-secctx-5573-0
+PASS: bridge wrapper is root and the waypipe client's ancestor (0:yes)
+
+## 4. the sandbox half: container, runsc runtime, bridge mount
+PASS: container runs under the token label (running:fabcb864c73d088c4f83794c8907359b)
+PASS: container OCIRuntime is the tier3s wrapper (/usr/libexec/qdistro/tier3s-runsc)
+PASS: container carries the launch-dir bind mount (/run/qdistro-tier3s/fabcb864c73d088c4f83794c8907359b:/run/qdistro/link)
+PASS: bridge mount is READ-ONLY in the sandbox view (P2-1: a hostile guest must not fill host /run) (false)
+PASS: sandbox write to the bridge dir is refused (rc=1)
+PASS: host link.sock was admin-owned 0600 at bind (umask 0177 wrap, pre-attach) (600:1000)
+PASS: launch dir is admin-owned 0700 (700:1000)
+PASS: container NetworkMode is none (none)
+PASS: runsc gofer resolved (yes)
+PASS: link.sock channel is an ESTABLISHED host unix socket through the gofer netns (host-uds=open) (1)
+PASS: create argv pins --runtime-flag=host-uds=open (1)
+PASS: create argv pins --network=none (1)
+PASS: create argv pins --cap-drop=ALL and no-new-privileges (1+1)
+PASS: create argv pins the weston-terminal seccomp profile (1)
+PASS: create argv mounts ONLY the launch dir under /run/qdistro (no whole-/run or host-root bind) (0)
+PASS: create argv: no --privileged, no root user, no host userns (0+1)
+INFO: container mounts: /run/qdistro-tier3s/fabcb864c73d088c4f83794c8907359b:/run/qdistro/link:false 
+PASS: no host bind outside the launch dir and podman-internal userdata (0)
+PASS: sentry pid is the runsc bundle (1)
+
+## 5. RegisterLaunch audit row + consumed launch record
+PASS: broker wrote qdistro.lineage.register:s123a (before=0 after=1)
+PASS: register row names engine+app (1)
+PASS: register row records the bridge client pid (1)
+PASS: launch record consumed after RegisterLaunch (no)
+PASS: launch dir empty once the bridge attached (0)
+PASS: single-attach: the consumed link.sock listener fd still listens (unlinked, not closed) (1)
+PASS: single-attach: a second connect fails — the pathname was consumed at accept (1)
+
+## 6. qdshell observed the tagged toplevel
+PASS: qdshell: [tier3s] toplevel observed (1)
+PASS: qdshell: colour line (1)
+PASS: compositor: toplevel_added names the bridge client pid (1)
+PASS: compositor: a toplevel carries the [3s:s123a] title prefix (1)
+PASS: compositor: toplevel_security_context carries the launch token as instance (1)
+PASS: compositor: peer identity names the live bridge client (1)
+
+## 7. teardown reaps the bridge too
+PASS: StopSilo s123a (Stopped)
+PASS: teardown: all 17 launch processes gone (pid+starttime)
+PASS: teardown: scope qdistro-tier3s-fabcb864c73d088c4f83794c8907359b.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-fabcb864c73d088c4f83794c8907359b.scope absent)
+PASS: teardown: per-launch dir /run/qdistro-tier3s/fabcb864c73d088c4f83794c8907359b gone
+PASS: teardown: control record /run/qdistro-tier3s-ctl/fabcb864c73d088c4f83794c8907359b gone
+PASS: teardown: container qdistro-tier3s-s123a gone (podman exists rc=1)
+PASS: teardown: no runsc state for d65d09f7f762 in /run/qdistro-tier3s-runsc/1000
+PASS: teardown: bridge client+wrapper gone (pid+starttime)
+PASS: teardown: secctx listener wayland-secctx-5573-0 revoked
+PASS: teardown: launch record /run/user/1000/qdistro-tier3s-launchrec-a8e278f72e0dd3f87ec4eb0f6426959e.pid removed
+PASS: DeleteSilo s123a (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s123] 76 passes, 0 failures

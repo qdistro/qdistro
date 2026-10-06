@@ -34,10 +34,12 @@ MARKER=/var/lib/qdistro/bindings/$ST.activated
 PROFILE=/etc/qdistro/profile
 
 step "0. preconditions, silos, templated-silo fixture"
-is "probe PASS" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
-is "image present" "$(yes_no pm image exists "$IMAGE")" yes
+is "probe PASS (admin substrate)" "$(/usr/lib/qdistro/tier3s/probe.sh --user admin > /dev/null 2>&1; echo $?)" 0
+is "image staged in admin's store (archive source)" "$(yes_no pm image exists "$IMAGE")" yes
 is "profile is dev" "$(sed -n 's/^QDISTRO_PROFILE=//p' "$PROFILE" | tail -1)" dev
 assert_all_clear pre
+set_rule none > /dev/null   # no allow rule while provisioning launches run: a
+# templated silo refused at the broker gate never writes an activation record
 GEN="sha256:$(pm image inspect --format '{{.Id}}' "$IMAGE")"
 install -d -m 0755 "$FIX_STATE_PARENT"
 install -d -o 1000 -g 1000 -m 0700 "$FIX_STATE_PARENT/state" "$FIX_STATE_PARENT/state/.cache"
@@ -66,19 +68,36 @@ no_activation() { [ ! -e "$GEN_STATUS" ] && [ ! -e "$MARKER" ]; }
 is "fixture: no activation record yet" "$(yes_no no_activation)" yes
 # the absence oracles must not read a FAILED query as "nothing happened"
 # (sol A-iii r1 P2): inject a failing producer into each
-is "oracle self-test: a failing podman event query is reported, not counted as no event" \
-    "$(launch_events_since not-a-time | grep -c '^QUERY-FAILED')" 1
+# launch_events_since queries admin's store plus every qt3s-* store — a
+# bogus --since fails in EACH, so QUERY-FAILED lines = number of stores.
+# Enumeration itself must work or the expected count is fiction (sol r5 #1).
+enr=$(tier3s_accts); enr_rc=$?
+is "oracle self-test: silo-account enumeration works" "$enr_rc" 0
+nstores=$((1 + $(printf '%s\n' "$enr" | grep -c .)))
+is "oracle self-test: a failing podman event query is reported, not counted as no event (one per store)" \
+    "$(launch_events_since not-a-time | grep -c '^QUERY-FAILED')" "$nstores"
 is "oracle self-test: a failing journal query is reported, not counted as no unit" \
     "$(units_started_since not-a-cursor "$T3S_SCOPE_RE")" QUERY-FAILED
 is "oracle self-test: a failing control-record listing is reported, not counted as no record" \
     "$(CTL=/nonexistent-t3s-ctl records | grep -c '^QUERY-FAILED')" 1
 is "oracle self-test: a failing per-launch dir listing is reported, not counted as no dir" \
     "$(qry find /nonexistent-t3s-launches -mindepth 1 | grep -c '^QUERY-FAILED')" 1
-is "oracle self-test: a failing podman ps is reported, not counted as no container" \
-    "$(qry pm ps -a --format '{{.Names}}' --filter bogus=1 | grep -c '^QUERY-FAILED')" 1
+is "oracle self-test: a failing podman ps across the stores is reported, not counted as no container" \
+    "$(qry pm_each ps -a --format '{{.Names}}' --filter bogus=1 | grep -c '^QUERY-FAILED')" 1
 for s in $SA $ST; do
     sm CreateTier3sSilo ssss "$s" headless-smoke "$s" none > /dev/null; is "CreateTier3sSilo $s" "$(silo_state "$s")" Created
 done
+# Model A: each silo owns a qt3s-<silo> account and its own podman store. The
+# account is created by a first (broker-refused) launch; the image is then
+# loaded into the silo's store — never silently from admin's.
+for s in $SA $ST; do
+    if ensure_silo_image "$s" headless-smoke; then pass "$s: qt3s-$s provisioned; image in its store"
+    else fail "$s: ensure_silo_image failed"; fi
+    is "$s: workload image in the silo store, not admin-visible as the workload" \
+        "$(yes_no pm_s "$s" image exists "$IMAGE")" yes
+done
+is "probe PASS as a silo account" \
+    "$(/usr/lib/qdistro/tier3s/probe.sh --user "$(silo_acct $SA)" > /dev/null 2>&1; echo $?)" 0
 set_argv "$SA=default" "$ST=default" | sed 's/^/    /'
 
 # One refused launch and every "nothing happened" oracle. refused <tag> <silo>
@@ -112,7 +131,7 @@ refused() {
     is "$tag: no podman run (no container event but the probe's scratch create/remove)" "$(launch_events_since "$t0" | grep -c .)" 0
     is "$tag: systemd never started an owning scope" "$(units_started_since "$cur" "$T3S_SCOPE_RE")" 0
     is "$tag: no control record, no per-launch dir" "$(records | grep -c .):$(qry find "$LAUNCHES" -mindepth 1 | grep -c .)" "0:0"
-    is "$tag: no container of any kind" "$(qry pm ps -a --format '{{.Names}}' | grep -c .)" 0
+    is "$tag: no container of any kind in any store" "$(qry pm_each ps -a --format '{{.Names}}' | grep -c .)" 0
     if [ "$silo" = "$ST" ]; then
         is "$tag: no activation record for the templated silo" "$(yes_no no_activation)" yes
     fi
@@ -178,7 +197,7 @@ for prof in release daily; do
     # the spawn refuses on its own: a hand-written stanza, the unit started directly
     refused "$prof/spawn (direct unit start)" $SA \
         "tier 3s is dev-profile only in this PoC (QDISTRO_PROFILE=$prof); there is no hardened launch path and no fallback tier" start_direct
-    rm -f "/run/qdistro/silo-launch/$SA.env"
+    rm -f "$STANZA_DIR/$SA.env"
     out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
     is "$prof: the probe refuses a non-dev profile (rc 2)" "$rc" 2
 done
@@ -230,7 +249,7 @@ forge_ready() {
     systemctl stop "$U6"; wait_for 60 unit_down "$U6"
     is "$tag: launch unit stopped" "$(yes_no unit_down "$U6")" yes
     systemctl reset-failed "$U6" 2>/dev/null
-    rm -f "/run/qdistro/silo-launch/$SA.env"
+    rm -f "$STANZA_DIR/$SA.env"
 }
 forge_ready "forged READY/main" activating
 journalctl _PID=1 --since "-3min" --no-pager -o cat 2>/dev/null | grep -F "$U6: Got notification message" | tail -3 | sed 's/^/    pid1: /'

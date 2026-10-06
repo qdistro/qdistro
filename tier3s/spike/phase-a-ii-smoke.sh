@@ -175,10 +175,10 @@ smoke-exit)
     is smoke-done "$(scope_log "$tok" | grep -q '^SMOKE done' && echo yes || echo no)" yes
     is smoke-gvisor-kernel "$(scope_log "$tok" | grep '^SMOKE dmesg=' | grep -q gVisor && echo yes || echo no)" yes
     is torn-down "$(unit_log | grep -c "qdistro-tier3s-cleanup: [0-9a-f]\{32\}: torn down ($CTR)")" 1
-    is stanza-token-in-record-line "$(unit_log | grep -c "LAUNCH_TOKEN=$(sed -n "s/^TIER3S_LAUNCH_TOKEN='\{0,1\}\([0-9a-f]\{32\}\).*/\1/p" /run/qdistro/silo-launch/smoke.env)")" 1
+    is stanza-token-in-record-line "$(unit_log | grep -c "LAUNCH_TOKEN=$(sed -n "s/^TIER3S_LAUNCH_TOKEN='\{0,1\}\([0-9a-f]\{32\}\).*/\1/p" /run/qdistro/tier3s-launch/smoke.env)")" 1
     sm StopSilo si smoke 10; is stop-rc $? 0
     is silo-stopped "$(silo_state)" Stopped
-    is stanza-removed "$(test -e /run/qdistro/silo-launch/smoke.env && echo present || echo absent)" absent
+    is stanza-removed "$(test -e /run/qdistro/tier3s-launch/smoke.env && echo present || echo absent)" absent
     assert_gone after-exit
     finish ;;
 smoke-live)

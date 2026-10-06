@@ -1,0 +1,19 @@
+Id:             1976
+Name:           qci-bats-phase7-tier3s-clipboard-gate-261004-081211-2917499-8703
+UUID:           54388aad-e76a-4b04-9cb3-939411300b08
+OS Type:        hvm
+State:          running
+CPU(s):         4
+CPU time:       93.6s
+Max memory:     4194304 KiB
+Used memory:    4194304 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: unconfined_u:unconfined_r:svirt_t:s0:c565,c789 (enforcing)
+Messages:       tainted: custom configuration parameters specified
+                tainted: custom guest agent control commands issued
+

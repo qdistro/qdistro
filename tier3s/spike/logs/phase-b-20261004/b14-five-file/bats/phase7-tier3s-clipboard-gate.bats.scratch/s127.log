@@ -1,0 +1,96 @@
+[vm-exec] guest identity pinned (pid 3789 start 5087)
+[vm-exec] Waiting... (polls=30s elapsed=30s)
+[vm-exec] Waiting... (polls=60s elapsed=61s)
+[vm-exec] Waiting... (polls=90s elapsed=93s)
+
+## 0. preconditions, silos
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: clipboard-source helper installed (/usr/bin/qdistro-test-clipboard-source)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s127a (Created)
+PASS: CreateTier3sSilo s127b (Created)
+PASS: broker answers allow for the GUI spawn (allow)
+PASS: no test clipboard rule present (no)
+
+## 1. two GUI silos up; focus B's toplevel
+PASS: both GUI launches up (9163669cb1477e61befed52ef9a0fc74, 0559f668cbfa80cba19cc1aea073ea77)
+PASS: findSiloHandle s127a (1)
+PASS: findSiloHandle s127b (2)
+PASS: injectFocus onto s127b's toplevel (ok handle=2 seat=default)
+PASS: seat focus landed on s127b's toplevel (handle 2)
+
+## 2. live tagged selection s127a -> s127b: default deny
+INFO: gate: [32m  INFO[97m qml[0m: [36m[20261003-183056][0m [35m ClipboardGate[0m CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+PASS: qdshell gate line names the real tagged source silo (1)
+PASS: default-deny verdict at set-time (1)
+PASS: text/plain offer reached the broker unfiltered (1)
+
+## 3. strict MIME: image/png-only offer strips to deny
+PASS: broker probe still denies transfer s127a->s127b (deny)
+FAIL: qdshell denied a png-only tier3s offer before the broker: got '0', want '1'
+FAIL: qdshell logged the tier3s mime-strip: got '0', want '1'
+
+## 4. SaveRule flips the live verdict to allow
+PASS: SaveRule wrote the file (/etc/qdistro/rules.d/99-s127-clip.yaml)
+PASS: broker logged the saverule reload (1)
+PASS: broker probe allows transfer s127a->s127b under the rule (allow)
+INFO: gate: [32m  INFO[97m qml[0m: [36m[20261003-183056][0m [35m ClipboardGate[0m CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+FAIL: live verdict flipped to allow under the rule: got '0', want '1'
+
+## 5. focus-aware clear: selection owned by s127b, focus crosses to s127a
+PASS: focus crossing out of the source silo cleared the selection (1)
+
+## 6. receive-time gate: default deny, then per-mime allow
+PASS: receive probe defaults to deny (deny)
+PASS: SaveRule wrote the receive rule (/etc/qdistro/rules.d/98-s127-recv.yaml)
+PASS: receive probe allows text/plain under the mime rule (allow)
+PASS: receive probe still denies image/png (mime selector) (deny)
+
+## 7. audit evidence
+INFO: audit rows: transfer deny=2 allow=2 recv=4
+PASS: audit: denied transfer row(s) recorded (2)
+PASS: audit: allowed transfer row(s) recorded (2)
+PASS: audit: receive probe row(s) recorded (4)
+PASS: audit: deny row names the default-deny path (yes)
+
+## 8. cleanup
+PASS: StopSilo s127a (Stopped)
+PASS: StopSilo s127b (Stopped)
+PASS: cleanup/A: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/A: secctx listener wayland-secctx-4995-0 revoked
+PASS: cleanup/A: launch record /run/user/1000/qdistro-tier3s-launchrec-e7e877a8a19a9d4de7f1b45c7fff83a9.pid removed
+PASS: cleanup/A: all 12 launch processes gone (pid+starttime)
+PASS: cleanup/A: scope qdistro-tier3s-9163669cb1477e61befed52ef9a0fc74.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-9163669cb1477e61befed52ef9a0fc74.scope absent)
+PASS: cleanup/A: per-launch dir /run/qdistro-tier3s/9163669cb1477e61befed52ef9a0fc74 gone
+PASS: cleanup/A: control record /run/qdistro-tier3s-ctl/9163669cb1477e61befed52ef9a0fc74 gone
+PASS: cleanup/A: container qdistro-tier3s-s127a gone (podman exists rc=1)
+PASS: cleanup/A: no runsc state for 83839df22309 in /run/qdistro-tier3s-runsc/1000
+PASS: cleanup/B: bridge client+wrapper gone (pid+starttime)
+PASS: cleanup/B: secctx listener wayland-secctx-5780-0 revoked
+PASS: cleanup/B: launch record /run/user/1000/qdistro-tier3s-launchrec-c9d2618be3b4f40fd4a58078e13ec9b6.pid removed
+PASS: cleanup/B: all 17 launch processes gone (pid+starttime)
+PASS: cleanup/B: scope qdistro-tier3s-0559f668cbfa80cba19cc1aea073ea77.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-0559f668cbfa80cba19cc1aea073ea77.scope absent)
+PASS: cleanup/B: per-launch dir /run/qdistro-tier3s/0559f668cbfa80cba19cc1aea073ea77 gone
+PASS: cleanup/B: control record /run/qdistro-tier3s-ctl/0559f668cbfa80cba19cc1aea073ea77 gone
+PASS: cleanup/B: container qdistro-tier3s-s127b gone (podman exists rc=1)
+PASS: cleanup/B: no runsc state for 98ed87812897 in /run/qdistro-tier3s-runsc/1000
+PASS: DeleteSilo s127a (absent)
+PASS: DeleteSilo s127b (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s127] 67 passes, 3 failures

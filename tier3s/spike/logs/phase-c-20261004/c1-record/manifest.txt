@@ -1,0 +1,9 @@
+lane=c1-record
+date_utc=2026-10-04
+branch=claude/tier3s-c
+commit=e80b9798b8427b4cd28555b6fac721d22724afb9
+dirty_files=0
+format=12 sequential 'qci bats --vm' invocations, one fresh worker each
+substrate_note=snapshot.conf dated Snapshot20261002 sidecar 404'd upstream before the lane (designed bump signal); provisioned-lane path therefore blocked. Each worker is a fresh overlay on the b33-lane golden qci-golden-bats-261004-224621-2673290-30483.qcow2 (same 1002 substrate every prior lane used); guest-setup installs the tested commit inside exactly as a provisioned worker would.
+driver_tally=s120:196/0 s121:155/0 s122:152/0 s123:76/0 s124:75/0 s125:97/0 s126:91/0 s127:99/0 s128:54/0 s129:78/0 s130:80/0 s131:41/0 = 1194/0
+launcher=systemd-run --user --unit=qci-tier3s-c-record /tmp/c1-record-lane.sh

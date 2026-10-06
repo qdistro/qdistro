@@ -1,0 +1,2 @@
+bats	phase7-tier3s-lifecycle.bats	fail	35	bats	bats	bats/phase7-tier3s-lifecycle.bats.log	VM=qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162 raw_rc=1	integration
+lifecycle	qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162	skip	0	pass	vm		failed VM powered off (disk preserved) for debugging; virsh start to inspect	vm

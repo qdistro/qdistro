@@ -282,21 +282,37 @@ TIER2_CONTAINER_FMT = "qdistro-silo-{name}"
 # network=none only (O3). Silo <name> -> launch unit
 # qdistro-tier3s-silo@<name>.service -> container qdistro-tier3s-<name>; the
 # unit runs spawn-tier3s.sh as the root supervisor, every podman call runs as
-# admin. Explicit branches, no backend table (paravirt D7).
+# the silo's dedicated account (C2 model A). Explicit branches, no backend
+# table (paravirt D7).
 TIER3S_SILO_LAUNCHER_FMT = "qdistro-tier3s-silo@{name}.service"
 TIER3S_CONTAINER_FMT = "qdistro-tier3s-{name}"
+# C2 model A: each tier3s silo gets a dedicated host account qt3s-<silo>
+# (truncated to LOGIN_NAME_MAX exactly like spawn-tier3s.sh's qt3s-${S:0:27});
+# rootless podman and runsc run under it, so its podman store — not admin's —
+# holds the containers.
+TIER3S_SILO_ACCT_PREFIX = "qt3s-"
 # Root-only control records, one dir per launch token (CONTRACT §4). The
 # record's `unit=` line names the launch unit; a record of a stopped silo's
 # unit means its teardown did not complete.
 TIER3S_CTL_DIR = Path("/run/qdistro-tier3s-ctl")
 # The only teardown path (root, verified, preserves the record on failure).
 TIER3S_CLEANUP = Path("/usr/libexec/qdistro/qdistro-tier3s-cleanup")
+# The launch stanza's own dir (paravirt ΔB5 / fable r1 P3-3): dedicated, never
+# shared with the tier-2 silo-launch stanzas (TIER2_LAUNCH_ENV_DIR), so a
+# tier3s stanza can never be consumed by the tier-2 helper and no tier3s
+# stanza path stays in the shared dir. tmpfiles creates it root 0700
+# (tier3s/tmpfiles/qdistro-tier3s.conf); _write_launch_env_in's dir_mode
+# re-enforces owner+mode on every write — the plain mkdir default is NOT a
+# substitute.
+TIER3S_LAUNCH_ENV_DIR = Path("/run/qdistro/tier3s-launch")
 # Same constraint spawn-tier3s.sh puts on a workload name (it selects
 # /usr/lib/qdistro/tier3s/seccomp/<workload>.json and the image tag).
 _TIER3S_WORKLOAD_RE = _re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 # The app a workload runs when the launch stanza carries no argv. A workload
 # missing here runs [workload], like tier 2.
-TIER3S_DEFAULT_ARGV = {"headless-smoke": ["qdistro-tier3s-smoke"]}
+TIER3S_DEFAULT_ARGV = {"headless-smoke": ["qdistro-tier3s-smoke"],
+                       "weston-terminal": ["weston-terminal"],
+                       "foot": ["foot"]}
 # Where the deployment profile lives (scripts/install, image config). Tier 3s
 # refuses every profile but dev (paravirt O4).
 QDISTRO_PROFILE_PATH = Path("/etc/qdistro/profile")
@@ -852,6 +868,47 @@ class _TimedOutRun:
     stderr: str
     returncode: int = -1
     stdout: str = ""
+
+
+def _enforce_launch_env_dir(env_dir: Path, mode: int) -> None:
+    """Enforce root-owned *mode* on a launch-stanza dir that tmpfiles already
+    creates correctly — verified, not assumed. The plain ``mkdir`` in
+    _write_launch_env_in would leave a missing dir at the daemon's umask, and
+    a symlinked or foreign-owned dir must REFUSE the write (fail closed like
+    the helpers' own stanza checks), not be written into. Called with the
+    stanza dir before a tier3s stanza write (paravirt ΔB5)."""
+    st = os.lstat(env_dir)
+    if not stat.S_ISDIR(st.st_mode):
+        raise PermissionError(f"{env_dir} is not a real directory "
+                              f"(lstat mode {st.st_mode:o})")
+    # Best-effort like the stanza file's fchown: a non-root caller (unit
+    # tests; the production writer is root) cannot chown, and only the owner
+    # can chmod — each is attempted on its own so a refused chown does not
+    # skip a chmod that would still succeed. The verify below decides.
+    try:
+        os.chown(env_dir, 0, 0)
+    except OSError:
+        pass
+    try:
+        os.chmod(env_dir, mode)
+    except OSError:
+        pass
+    st = os.lstat(env_dir)
+    if stat.S_IMODE(st.st_mode) != mode:
+        raise PermissionError(
+            f"{env_dir} mode is {stat.S_IMODE(st.st_mode):o}, not {mode:o}")
+    if os.geteuid() == 0 and (st.st_uid != 0 or st.st_gid != 0):
+        raise PermissionError(
+            f"{env_dir} is owned by {st.st_uid}:{st.st_gid}, not root:root")
+
+
+class _ForeignSiloAccount(KeyError):
+    """qt3s-<silo> resolves but is NOT that silo's bound identity (foreign or
+    deleted-and-recreated account: wrong GECOS marker, sub-1000 or admin uid).
+    A subclass of KeyError so `except KeyError` still covers both kinds of
+    "the silo account cannot be used", while callers that must distinguish
+    "nothing resolves under this name" (plain KeyError from getpwnam) from
+    "something foreign resolves" (this) can (astra C2-end P2)."""
 
 
 class _SystemOps:
@@ -1435,6 +1492,22 @@ class _SystemOps:
     def write_launch_env(self, name: str, content: str) -> Path:
         return self._write_launch_env_in(TIER2_LAUNCH_ENV_DIR, name, content)
 
+    def write_tier3s_launch_env(self, name: str, content: str) -> Path:
+        """Same root-TCB contract as write_launch_env, but a dedicated dir:
+        a tier3s stanza is parsed (never `.`-sourced) by
+        qdistro-tier3s-silo-launch and must never sit in the tier-2 helper's
+        shared dir (paravirt ΔB5). dir_mode enforces root 0700 on the dir —
+        tmpfiles creates it that way, and a drifted or missing dir is fixed
+        or refused, never silently inherited."""
+        return self._write_launch_env_in(TIER3S_LAUNCH_ENV_DIR, name, content,
+                                         dir_mode=0o700)
+
+    def remove_tier3s_launch_env(self, name: str) -> None:
+        try:
+            (TIER3S_LAUNCH_ENV_DIR / f"{name}.env").unlink()
+        except FileNotFoundError:
+            pass
+
     def write_podapp_launch_env(self, token: str, content: str) -> Path:
         """Same root-TCB contract as write_launch_env, different directory:
         pod-app stanzas are per-click and keyed by launch token, so they live
@@ -1448,8 +1521,10 @@ class _SystemOps:
             pass
 
     def _write_launch_env_in(self, env_dir: Path, name: str,
-                             content: str) -> Path:
+                             content: str, *, dir_mode: int | None = None) -> Path:
         env_dir.mkdir(parents=True, exist_ok=True)
+        if dir_mode is not None:
+            _enforce_launch_env_dir(env_dir, dir_mode)
         p = env_dir / f"{name}.env"
         tmp = p.with_suffix(".env.tmp")
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -2185,15 +2260,26 @@ class _SystemOps:
         if active not in ("active", "inactive", "failed"):
             return "unknown", "launcher state is transitional or unknown"
         if kind == KIND_TIER3S:
-            # Running iff the unit is active AND podman (as admin) reports the
-            # container running; a failed query is unknown, never stopped
-            # (tier3s/CONTRACT.md §6).
+            # Running iff the unit is active AND podman (as the silo account)
+            # reports the container running; a failed query is unknown, never
+            # stopped (tier3s/CONTRACT.md §6).
             container = TIER3S_CONTAINER_FMT.format(name=name)
-            exists = self._tier3s_container_exists(container, timeout=3)
+            try:
+                exists = self._tier3s_container_exists(name, container,
+                                                       timeout=3)
+            except KeyError:
+                # No qt3s-<name> account resolves: the store cannot be
+                # queried at all, so the container's absence is not
+                # established — unknown, not "stopped".
+                exists = None
             if exists == 0:
-                running = self._tier3s_podman(
-                    ["inspect", "--format", "{{.State.Running}}", container],
-                    timeout=3)
+                try:
+                    running = self._tier3s_podman(
+                        name,
+                        ["inspect", "--format", "{{.State.Running}}",
+                         container], timeout=3)
+                except KeyError:
+                    return "unknown", "container observation unavailable"
                 if (active == "active" and not running.returncode
                         and running.stdout.strip() == "true"):
                     return ("launcher-running", "launcher and gVisor sandbox "
@@ -2304,27 +2390,49 @@ class _SystemOps:
         return value
 
     @staticmethod
-    def _tier3s_admin_cmd(cmd: list[str], *, timeout: int = _T_PODMAN):
-        """Run *cmd* as admin with the same fixed environment spawn-tier3s.sh
-        and qdistro-tier3s-cleanup use, so every call sees admin's rootless
-        store (and, through the container's recorded runtime, the wrapper's
-        runsc state root). Raises subprocess.TimeoutExpired / OSError."""
-        try:
-            home = pwd.getpwnam(ADMIN_USER_NAME).pw_dir
-        except KeyError:
-            home = f"/home/{ADMIN_USER_NAME}"
+    def _tier3s_silo_acct(name: str) -> str:
+        """The dedicated account a tier3s silo's podman/runsc runs under
+        (C2 model A): the same qt3s-<silo> truncation spawn-tier3s.sh uses."""
+        return f"{TIER3S_SILO_ACCT_PREFIX}{name[:27]}"
+
+    @staticmethod
+    def _tier3s_silo_cmd(name: str, cmd: list[str], *, timeout: int = _T_PODMAN):
+        """Run *cmd* as the silo's qt3s-* account with the same fixed
+        environment spawn-tier3s.sh and qdistro-tier3s-cleanup use, so every
+        call sees that account's rootless store (and, through the container's
+        recorded runtime, its own runsc state root). A silo has no logind
+        session; the per-silo /run/qdistro-tier3s-rt/<uid> dir stands in.
+        The account must carry this silo's exact GECOS marker on a regular
+        non-admin uid — a truncation collision or a foreign/recreated
+        account resolves to a different marker and raises
+        _ForeignSiloAccount (never silently queries another account's
+        store; sol model-A r1 P2-3). Raises KeyError when nothing resolves
+        under the account name, _ForeignSiloAccount when a foreign account
+        does, plus subprocess.TimeoutExpired / OSError."""
+        acct = _SystemOps._tier3s_silo_acct(name)
+        pw = pwd.getpwnam(acct)
+        if pw.pw_gecos != f"qdistro tier3s silo {name}" \
+                or pw.pw_uid < 1000 or pw.pw_uid == ADMIN_UID:
+            raise _ForeignSiloAccount(
+                f"{acct}: not the bound tier3s silo account for '{name}' "
+                f"(uid {pw.pw_uid}, gecos {pw.pw_gecos!r})")
         return subprocess.run(
-            ["runuser", "-u", ADMIN_USER_NAME, "--", "env", "-i",
-             "PATH=/usr/bin:/bin", f"HOME={home}", f"USER={ADMIN_USER_NAME}",
-             f"LOGNAME={ADMIN_USER_NAME}",
-             f"XDG_RUNTIME_DIR=/run/user/{ADMIN_UID}", *cmd],
+            ["runuser", "-u", acct, "--", "env", "-i",
+             "PATH=/usr/bin:/bin", f"HOME={pw.pw_dir}", f"USER={acct}",
+             f"LOGNAME={acct}",
+             f"XDG_RUNTIME_DIR=/run/qdistro-tier3s-rt/{pw.pw_uid}",
+             # the sessionless account's fixed podman config (cgroupfs; file
+             # events) — same file spawn-tier3s.sh / the cleanup pin
+             "CONTAINERS_CONF=/usr/lib/qdistro/tier3s/containers.conf",
+             *cmd],
             capture_output=True, text=True, timeout=timeout)
 
     @staticmethod
-    def _tier3s_podman(args: list[str], *, timeout: int = _T_PODMAN):
-        """podman as admin; see _tier3s_admin_cmd for the environment.
-        Raises subprocess.TimeoutExpired / OSError."""
-        return _SystemOps._tier3s_admin_cmd(["podman", *args], timeout=timeout)
+    def _tier3s_podman(name: str, args: list[str], *, timeout: int = _T_PODMAN):
+        """podman as the silo account; see _tier3s_silo_cmd. Raises KeyError /
+        TimeoutExpired / OSError."""
+        return _SystemOps._tier3s_silo_cmd(name, ["podman", *args],
+                                           timeout=timeout)
 
     @staticmethod
     def _podman_exists_verdict(proc) -> int | None:
@@ -2349,12 +2457,24 @@ class _SystemOps:
             capture_output=True, text=True, timeout=timeout)
 
     @staticmethod
-    def _tier3s_container_exists(container: str, *, timeout: int = _T_PODMAN):
-        """podman's own `container exists` verdict on *container* (0 present,
-        1 absent, any other = the query itself failed), or None when the
-        runuser→env→sh chain delivered none. Raises TimeoutExpired / OSError."""
-        proc = _SystemOps._tier3s_admin_cmd(
-            ["sh", "-c", _PM_EXISTS_SH, "sh", container], timeout=timeout)
+    def _tier3s_container_exists(name: str, container: str,
+                                 *, timeout: int = _T_PODMAN):
+        """podman's own `container exists` verdict on *container* in the
+        qt3s-<name> store (0 present, 1 absent, any other = the query itself
+        failed), or None when the runuser→env→sh chain delivered none or the
+        resolved account is not this silo's (a foreign identity is never a
+        verdict — it must not answer for this silo). Raises KeyError when NO
+        account resolves under qt3s-<name> at all — a provably different
+        situation: the spawn provisions the account (step 3b) BEFORE writing
+        its control record and before any podman call in that store, so the
+        caller can weigh it against surviving control records (astra C2-end
+        P2). Raises TimeoutExpired / OSError."""
+        try:
+            proc = _SystemOps._tier3s_silo_cmd(
+                name, ["sh", "-c", _PM_EXISTS_SH, "sh", container],
+                timeout=timeout)
+        except _ForeignSiloAccount:
+            return None    # a foreign identity cannot vouch for this store
         return _SystemOps._podman_exists_verdict(proc)
 
     def tier3s_unit_records(self, unit: str) -> list[str]:
@@ -2381,12 +2501,19 @@ class _SystemOps:
     def tier3s_silo_running(self, name: str) -> bool:
         """True if a tier3s stop did NOT fully take effect (fail closed, like
         tier2_silo_running): the launch unit is not definitively inactive or
-        failed, OR admin's podman still has qdistro-tier3s-<name> (a failed or
-        timed-out query counts as present), OR a control record of the unit
+        failed, OR the silo account's podman still has qdistro-tier3s-<name>
+        (a failed or timed-out query counts as present, and a resolved but
+        FOREIGN qt3s-<name> account counts as unknown rather than absent),
+        OR a control record of the unit
         survives (/run/qdistro-tier3s-ctl/<token>, an unreadable control dir
         counts as present). The record is the persisted mapping silo -> token
         (CONTRACT §6), so this also covers a token the manager no longer
-        holds."""
+        holds. When NO qt3s-<name> account resolves at all the store query
+        cannot run — but the spawn provisions the account before its control
+        record and before any podman call in that store, so absence only
+        reads as gone once the record check below also comes back empty; a
+        surviving record keeps the missing-after-provisioning case closed
+        (astra C2-end P2)."""
         unit = TIER3S_SILO_LAUNCHER_FMT.format(name=name)
         try:
             active = subprocess.run(
@@ -2400,11 +2527,21 @@ class _SystemOps:
             return True
         container = TIER3S_CONTAINER_FMT.format(name=name)
         try:
-            verdict = self._tier3s_container_exists(container)
+            verdict = self._tier3s_container_exists(name, container)
         except subprocess.TimeoutExpired:
             log.warning("podman container exists %s timed out; reporting "
                         "the tier3s silo as still running", container)
             return True
+        except KeyError:
+            # No qt3s-<name> account resolves at all. The spawn provisions it
+            # (step 3b) BEFORE writing the control record and before the first
+            # podman call in its store, so a container can only exist behind
+            # a surviving record — fall through to the record check, which
+            # stays fail-closed for a missing/replaced identity AFTER
+            # provisioning. With no record this is a proven pre-provisioning
+            # failure: nothing ran as that uid, and the silo must be
+            # recoverable by an ordinary stop/retry (astra C2-end P2).
+            verdict = 1
         if verdict != 1:
             return True
         try:
@@ -4268,7 +4405,7 @@ class _SiloStore:
             ("TIER3S_ARGV_JSON", json.dumps(argv)),
         ]
         lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
-        self._ops.write_launch_env(silo.name, "\n".join(lines))
+        self._ops.write_tier3s_launch_env(silo.name, "\n".join(lines))
         return token
 
     def _fail_tier3s_start(self, silo: Silo, err: BaseException) -> None:
@@ -4922,10 +5059,11 @@ class _SiloStore:
                 f"(systemctl failed or timed out); the silo stays Active. "
                 f"Retry the stop")
         try:
-            self._ops.remove_launch_env(silo_name)
+            self._ops.remove_tier3s_launch_env(silo_name)
         except Exception as e:  # noqa: BLE001
-            log.warning("remove_launch_env for %r failed after a verified "
-                        "stop: %s — leaving the stale env", silo_name, e)
+            log.warning("remove_tier3s_launch_env for %r failed after a "
+                        "verified stop: %s — leaving the stale env",
+                        silo_name, e)
         with self._lock:
             self._clear_stop_inflight(silo_name)
             self._transition(silo, State.STOPPED)

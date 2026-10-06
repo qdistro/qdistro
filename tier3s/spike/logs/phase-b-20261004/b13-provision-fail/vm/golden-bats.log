@@ -1,0 +1,5 @@
+[spin-test-vm] stage 1: baseweed-admin.qcow2 already present
+[spin-test-vm] stage 2: baseweed-baked.qcow2 already present
+[spin-test-vm] building/caching native components in rootless Podman...
+fatal: not a git repository (or any parent up to mount point /)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).

@@ -78,9 +78,13 @@ t3s_prepare_inputs() {
     ) 9>"$lock" || { fail_loud "tier 3s host inputs could not be prepared (see cache diagnostics above)"; return 1; }
 }
 
-# t3s_stage <driver>: serve the driver, the guest lib/setup and the inputs.
+# t3s_stage <driver> [gui-workloads]: serve the driver, the guest lib/setup
+# and the inputs. <gui-workloads> is a comma list of GUI workload names
+# (weston-terminal,foot) whose OCI archives are staged alongside headless
+# (Phase B, s123-s129); their per-workload manifest keys
+# IMAGE_ARCHIVE_SHA256_<WORKLOAD> are checked here.
 t3s_stage() {
-    local repo stage rel want got cdir man arch dirty
+    local repo stage rel want got cdir man arch dirty w W gui="${2:-}"
     repo=$(t3s_repo) || fail_loud "cannot find the repo root" || return 1
     dirty=$(git -C "$repo" status --porcelain -- tier3s session_manager broker templates scripts/install snapshot.conf)
     if [ -n "$dirty" ]; then
@@ -116,12 +120,36 @@ t3s_stage() {
     ln -sf "$man" "$stage/image-manifest.txt"
     printf '# [tier3s] tested commit %s; runsc %s (sha512 ok); image %s\n' \
         "$(cat "$stage/commit.txt")" "$rel" "$(sed -n 's/^IMAGE_ID=//p' "$man")" >&3
+    for w in ${gui//,/ }; do
+        W=$(printf '%s' "$w" | tr 'a-z-' 'A-Z_')
+        arch="$cdir/tier3s-$w.oci.tar"
+        if [ ! -s "$arch" ]; then
+            fail_loud "no $w image archive for this commit's image inputs at $cdir (rebuild: tier3s/cache-image-archive.sh <dev-vm>)"
+            return 1
+        fi
+        if [ "$(sha256sum < "$arch" | cut -d' ' -f1)" != "$(sed -n "s/^IMAGE_ARCHIVE_SHA256_${W}=//p" "$man")" ]; then
+            fail_loud "image archive tier3s-$w.oci.tar sha256 != its manifest ($cdir)"
+            return 1
+        fi
+        ln -sf "$arch" "$stage/tier3s-$w.oci.tar"
+        printf '# [tier3s] staged GUI image %s (%s)\n' "$w" "$(sed -n "s/^IMAGE_ID_${W}=//p" "$man")" >&3
+    done
 }
 
-# t3s_setup_file <driver>: stage, then provision the fresh worker.
+# t3s_setup_file <driver> [gui-workloads]: stage, then provision the fresh
+# worker. With a non-empty <gui-workloads> the worker is brought to a live
+# admin qdwin session (the GUI bridge needs the compositor + qdshell) and the
+# guest setup loads each named GUI image archive.
 t3s_setup_file() {
-    t3s_stage "$1" || return 1
-    vm_run "mkdir -p /var/tmp/t3s-dl && cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh tier3s-guest-setup.sh; do curl -fsS -o \$f http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/\$f || exit 97; done && bash tier3s-guest-setup.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT} --expect-fresh"
+    t3s_stage "$@" || return 1
+    local guiarg=""
+    [ -n "${2:-}" ] && guiarg=" --gui $2"
+    if [ -n "${2:-}" ]; then
+        # the waypipe bridge needs the real compositor session up BEFORE the
+        # guest-side checks (wayland-1 socket, qdshell) run
+        start_user_session || fail_loud "admin user session (qdwin/qdshell) did not come up" || return 1
+    fi
+    vm_run "mkdir -p /var/tmp/t3s-dl && cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh tier3s-guest-setup.sh; do curl -fsS -o \$f http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/\$f || exit 97; done && bash tier3s-guest-setup.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT} --expect-fresh$guiarg"
     t3s_log t3s-setup
     assert_success || fail_loud "tier 3s worker setup failed (see the t3s-setup transcript)" || return 1
     assert_output_contains "[t3s-setup] " || return 1
@@ -130,6 +158,14 @@ t3s_setup_file() {
     assert_output_contains "PASS: o10: no tier 3s file after the installer ran without the flag" || return 1
     assert_output_contains "PASS: installed probe RESULT" || return 1
     assert_output_contains "PASS: loaded image ID = manifest IMAGE_ID" || return 1
+    if [ -n "${2:-}" ]; then
+        local w
+        for w in ${2//,/ }; do
+            assert_output_contains "PASS: loaded $w image ID = manifest" || return 1
+        done
+        assert_output_contains "PASS: admin compositor socket present" || return 1
+        assert_output_contains "PASS: qdshell is up" || return 1
+    fi
 }
 
 # t3s_run_driver <driver>: fetch the lib + driver, run it as root.

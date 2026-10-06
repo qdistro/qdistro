@@ -1,0 +1,11 @@
+gate	subject	provision_s	work_s	total_s	rc	vm
+bats	phase7-tier3s-app.bats	23	133	156	35	qci-bats-phase7-tier3s-app-261003-183943-2215538-4199
+bats	phase7-tier3s-chrome-secctx.bats	23	107	130	0	qci-bats-phase7-tier3s-chrome-secctx-261003-183943-2215549-9939
+bats	phase7-tier3s-clipboard-gate.bats	20	215	235	35	qci-bats-phase7-tier3s-clipboard-gate-261003-183943-2215542-25261
+bats	phase7-tier3s-denied.bats	18	122	140	0	qci-bats-phase7-tier3s-denied-261003-183943-2215565-23150
+bats	phase7-tier3s-headless.bats	19	155	174	0	qci-bats-phase7-tier3s-headless-261003-183943-2215581-9330
+bats	phase7-tier3s-hostile-stream.bats	19	118	137	35	qci-bats-phase7-tier3s-hostile-stream-261003-183943-2215592-9458
+bats	phase7-tier3s-lifecycle.bats	18	125	143	35	qci-bats-phase7-tier3s-lifecycle-261003-184154-2284100-18162
+bats	phase7-tier3s-lineage.bats	18	122	140	35	qci-bats-phase7-tier3s-lineage-261003-184201-2288949-22187
+bats	phase7-tier3s-sigkill-cleanup.bats	26	164	190	0	qci-bats-phase7-tier3s-sigkill-cleanup-261003-184204-2291452-1917
+bats	phase7-tier3s-waypipe.bats	23	85	108	0	qci-bats-phase7-tier3s-waypipe-261003-184220-2300038-22186

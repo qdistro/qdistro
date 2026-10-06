@@ -1,0 +1,13 @@
+Full 184-mutation run at aa2e3afd4 reported "RESULT FAIL: 184 mutations,
+1 problem(s)" — the one problem was MUTATION E3 HARNESS ERROR (stale
+snippet: the RegisterLaunch guard moved from refuse to bridge_refuse in
+B-i fixes). mutate-guards.py E3 was updated to the current snippet and
+re-run with --only E3:
+
+MUTATION E3 RegisterLaunch is warning-only again (tier-3 style)
+  [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1
+    FAILED  test_gui_launch_refuses_when_registration_keeps_failing
+AFTER RESTORE: rc=0 444 passed, 1 skipped
+RESULT PASS: 1 mutations, 0 problem(s)
+
+Net: 184/184 applicable mutations caught.

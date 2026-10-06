@@ -1,0 +1,2 @@
+repo	branch	head	dirty_files	status_log	head_full	root
+qdistro	claude/tier3s-b	4729fce58	0	repos/qdistro.status.txt	4729fce58c392b8cfc60f6905386510827753628	/var/tmp/t3s-qci-b-4729fce58

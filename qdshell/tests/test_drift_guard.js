@@ -9,168 +9,51 @@
 //   Services/Commons/ColorKeys.js     ← Commons/Color.qml switch tables
 //   Services/Commons/TimeFormat.js    ← Commons/Time.qml function bodies
 //   Services/Commons/FuzzySort.js     ← Commons/FuzzySort.qml (sampled)
-//   Services/Qdistro/SiloChrome.js    ← Tier3Apps.qml + Tier4Apps.qml
+//   Services/Qdistro/SiloChrome.js    ← Tier3Apps.qml + Tier3sApps.qml +
+//                                        Tier4Apps.qml
 //                                        (palette array + prefix strings)
 //
 // For SiloChrome the guard is EXACT BYTE COMPARISON of:
-//   • the 10-entry siloPalette arrays in both Tier3Apps.qml and Tier4Apps.qml
-//   • the tier3Prefix and tier4Prefix string values
+//   • the 10-entry siloPalette arrays in Tier3Apps.qml, Tier3sApps.qml and
+//     Tier4Apps.qml
+//   • the tier3Prefix, tier3sPrefix and tier4Prefix string values
 // This is the security-critical check: wrong prefix → wrong silo identity.
 
 "use strict";
 
 const assert = require("assert");
-const fs = require("fs");
-const path = require("path");
 
-var ROOT = path.resolve(__dirname, "..");
-
-function read(rel) {
-    return fs.readFileSync(path.join(ROOT, rel), "utf8");
-}
-
-// ─── helper: mask comments + string/template literals (offset-preserving) ────
-// Replaces the CONTENT of //-lines, block comments, and '...' / "..." / `...`
-// literals with spaces, keeping every character offset (and newlines) identical
-// to the original. Used so the function scanner below cannot match `function
-// name(` inside a comment or string, and so brace/paren balancing never counts
-// a brace that lives inside a string or comment.
-function maskCommentsAndStrings(src) {
-    var out = src.split("");
-    var i = 0, n = src.length;
-    var inLine = false, inBlock = false, inStr = false, q = "";
-    while (i < n) {
-        var c = src[i], c2 = i + 1 < n ? src[i + 1] : "";
-        if (inLine) {
-            if (c === "\n") inLine = false; else out[i] = " ";
-            i++; continue;
-        }
-        if (inBlock) {
-            if (c === "*" && c2 === "/") { out[i] = " "; out[i + 1] = " "; i += 2; inBlock = false; continue; }
-            if (c !== "\n") out[i] = " ";
-            i++; continue;
-        }
-        if (inStr) {
-            if (c === "\\") { out[i] = " "; if (i + 1 < n && src[i + 1] !== "\n") out[i + 1] = " "; i += 2; continue; }
-            if (c === q) { inStr = false; out[i] = " "; i++; continue; }
-            if (c !== "\n") out[i] = " ";
-            i++; continue;
-        }
-        if (c === "/" && c2 === "/") { inLine = true; out[i] = " "; i++; continue; }
-        if (c === "/" && c2 === "*") { inBlock = true; out[i] = " "; out[i + 1] = " "; i += 2; continue; }
-        if (c === '"' || c === "'" || c === "`") { inStr = true; q = c; out[i] = " "; i++; continue; }
-        i++;
-    }
-    return out.join("");
-}
-
-// ─── helper: extract a whole `function name(...) { ... }` (brace-balanced) ────
-// QML function bodies are plain ECMAScript, so the extracted text is directly
-// compilable under Node. Lexically robust: it scans a comment/string-MASKED
-// copy (so a commented-out or quoted `function name(` cannot be matched, and
-// braces inside strings/comments are never counted) and asserts there is
-// EXACTLY ONE real declaration, then slices the executable text from the
-// original source. Returns the source slice, or null if not found.
-// Caveat: the masker is a pragmatic scanner, not a full JS lexer — it does NOT
-// model regex literals or `${...}` template interpolation. The five targeted
-// functions use only plain strings + comments; if a future target uses those
-// constructs, extend maskCommentsAndStrings first.
-function extractFunction(source, name) {
-    var masked = maskCommentsAndStrings(source);
-    var re = new RegExp("function\\s+" + name + "\\s*\\(", "g");
-    var starts = [], m;
-    while ((m = re.exec(masked)) !== null) starts.push(m.index);
-    assert.strictEqual(starts.length, 1,
-        "expected exactly one real declaration of function " + name +
-        " in source; found " + starts.length +
-        " (a stale/duplicate copy would let the guard execute the wrong body)");
-    var start = starts[0];
-    var paren = masked.indexOf("(", start);
-    var depth = 0, i, close = -1;
-    for (i = paren; i < masked.length; i++) {
-        if (masked[i] === "(") depth++;
-        else if (masked[i] === ")") { depth--; if (depth === 0) { close = i; break; } }
-    }
-    if (close === -1) return null;
-    var brace = masked.indexOf("{", close);
-    if (brace === -1) return null;
-    depth = 0;
-    for (i = brace; i < masked.length; i++) {
-        if (masked[i] === "{") depth++;
-        else if (masked[i] === "}") { depth--; if (depth === 0) return source.slice(start, i + 1); }
-    }
-    return null;
-}
-
-// Compile a QML function into a callable, injecting a `root` object to satisfy
-// its `root.<prop>` member references (siloPalette / tierNPrefix). This lets
-// the guard execute the ACTUAL QML logic, not a re-typed copy — so a drift in
-// the algorithm (hash, slice offset, packing), not just the constants, fails.
-function compileQmlFunction(source, name, root) {
-    var text = extractFunction(source, name);
-    assert.ok(text, "QML function " + name + " not found in source");
-    return new Function("root", "return (" + text + ");")(root);
-}
-
-// ─── helper: extract a quoted string value ───────────────────────────────────
-// Finds `propertyName: "value"` or `property string foo: "value"` and returns
-// the value.
-function extractStringProp(source, propertyName) {
-    // Match patterns like:
-    //   readonly property string tier3Prefix: "qdistro.tier3."
-    //   var TIER3_PREFIX = "qdistro.tier3.";
-    var patterns = [
-        new RegExp('property\\s+string\\s+' + propertyName + '\\s*:\\s*"([^"]*)"'),
-        new RegExp('var\\s+' + propertyName + '\\s*=\\s*"([^"]*)"'),
-    ];
-    for (var i = 0; i < patterns.length; i++) {
-        var m = source.match(patterns[i]);
-        if (m) return m[1];
-    }
-    return null;
-}
-
-// ─── helper: extract a palette array ─────────────────────────────────────────
-// Extracts the comma-separated hex colour strings from a QML/JS array literal
-// whose property is named `propertyName` (e.g. siloPalette / SILO_PALETTE).
-function extractPalette(source, propertyName) {
-    // Find the block after `propertyName: [` or `var propertyName = [`
-    var patterns = [
-        new RegExp(propertyName + '\\s*(?::\\s*|=\\s*)\\[([^\\]]+)\\]', 's'),
-    ];
-    for (var i = 0; i < patterns.length; i++) {
-        var m = source.match(patterns[i]);
-        if (m) {
-            // Extract all "#rrggbb" strings from the block
-            var block = m[1];
-            var colours = [];
-            var re = /"(#[0-9a-fA-F]{6})"/g;
-            var cm;
-            while ((cm = re.exec(block)) !== null) {
-                colours.push(cm[1]);
-            }
-            return colours;
-        }
-    }
-    return null;
-}
+// The extraction/exec machinery lives in tests/lib/qmlextract.js so the
+// behavioural tests (test_tier3s_gate_behaviour.js) share the SAME
+// comment/string masker and function slicer — there must be exactly one
+// copy of the scanner that decides which QML body a test runs.
+const QE = require("./lib/qmlextract.js");
+var read = QE.read;
+var extractFunction = QE.extractFunction;
+var compileQmlFunction = QE.compileQmlFunction;
+var extractStringProp = QE.extractStringProp;
+var extractPalette = QE.extractPalette;
 
 // ─── 1. SiloChrome: palette byte-identity ────────────────────────────────────
-// The palette in Tier3Apps.qml, Tier4Apps.qml, and SiloChrome.js must all be
-// identical. A QML change that isn't mirrored will break journal-based bats
-// tests that grep for specific colour values.
+// The palette in Tier3Apps.qml, Tier3sApps.qml, Tier4Apps.qml, and
+// SiloChrome.js must all be identical. A QML change that isn't mirrored will
+// break journal-based bats tests that grep for specific colour values.
 
 (function testSiloChromePaletteDrift() {
     var tier3Src  = read("Services/Qdistro/Tier3Apps.qml");
+    var tier3sSrc = read("Services/Qdistro/Tier3sApps.qml");
     var tier4Src  = read("Services/Qdistro/Tier4Apps.qml");
     var jsSrc     = read("Services/Qdistro/SiloChrome.js");
 
     var tier3Pal  = extractPalette(tier3Src, "siloPalette");
+    var tier3sPal = extractPalette(tier3sSrc, "siloPalette");
     var tier4Pal  = extractPalette(tier4Src, "siloPalette");
     var jsPal     = extractPalette(jsSrc,    "SILO_PALETTE");
 
     assert.ok(tier3Pal && tier3Pal.length === 10,
         "Tier3Apps.qml: siloPalette must have 10 entries; got: " + (tier3Pal ? tier3Pal.length : "null"));
+    assert.ok(tier3sPal && tier3sPal.length === 10,
+        "Tier3sApps.qml: siloPalette must have 10 entries; got: " + (tier3sPal ? tier3sPal.length : "null"));
     assert.ok(tier4Pal && tier4Pal.length === 10,
         "Tier4Apps.qml: siloPalette must have 10 entries; got: " + (tier4Pal ? tier4Pal.length : "null"));
     assert.ok(jsPal && jsPal.length === 10,
@@ -179,6 +62,11 @@ function extractPalette(source, propertyName) {
     assert.deepStrictEqual(tier3Pal, jsPal,
         "DRIFT: Tier3Apps.qml siloPalette does not match SiloChrome.js SILO_PALETTE.\n" +
         "  QML:  " + JSON.stringify(tier3Pal) + "\n" +
+        "  JS:   " + JSON.stringify(jsPal));
+
+    assert.deepStrictEqual(tier3sPal, jsPal,
+        "DRIFT: Tier3sApps.qml siloPalette does not match SiloChrome.js SILO_PALETTE.\n" +
+        "  QML:  " + JSON.stringify(tier3sPal) + "\n" +
         "  JS:   " + JSON.stringify(jsPal));
 
     assert.deepStrictEqual(tier4Pal, jsPal,
@@ -197,23 +85,34 @@ function extractPalette(source, propertyName) {
 // These must match exactly.
 
 (function testSiloChromePrefixDrift() {
-    var tier3Src = read("Services/Qdistro/Tier3Apps.qml");
-    var tier4Src = read("Services/Qdistro/Tier4Apps.qml");
-    var jsSrc    = read("Services/Qdistro/SiloChrome.js");
+    var tier3Src  = read("Services/Qdistro/Tier3Apps.qml");
+    var tier3sSrc = read("Services/Qdistro/Tier3sApps.qml");
+    var tier4Src  = read("Services/Qdistro/Tier4Apps.qml");
+    var jsSrc     = read("Services/Qdistro/SiloChrome.js");
 
-    var qml3Prefix = extractStringProp(tier3Src, "tier3Prefix");
-    var qml4Prefix = extractStringProp(tier4Src, "tier4Prefix");
-    var js3Prefix  = extractStringProp(jsSrc,    "TIER3_PREFIX");
-    var js4Prefix  = extractStringProp(jsSrc,    "TIER4_PREFIX");
+    var qml3Prefix  = extractStringProp(tier3Src,  "tier3Prefix");
+    var qml3sPrefix = extractStringProp(tier3sSrc, "tier3sPrefix");
+    var qml4Prefix  = extractStringProp(tier4Src,  "tier4Prefix");
+    var js3Prefix   = extractStringProp(jsSrc,     "TIER3_PREFIX");
+    var js3sPrefix  = extractStringProp(jsSrc,     "TIER3S_PREFIX");
+    var js4Prefix   = extractStringProp(jsSrc,     "TIER4_PREFIX");
 
-    assert.ok(qml3Prefix, "Tier3Apps.qml: tier3Prefix not found");
-    assert.ok(qml4Prefix, "Tier4Apps.qml: tier4Prefix not found");
-    assert.ok(js3Prefix,  "SiloChrome.js: TIER3_PREFIX not found");
-    assert.ok(js4Prefix,  "SiloChrome.js: TIER4_PREFIX not found");
+    assert.ok(qml3Prefix,  "Tier3Apps.qml: tier3Prefix not found");
+    assert.ok(qml3sPrefix, "Tier3sApps.qml: tier3sPrefix not found");
+    assert.ok(qml4Prefix,  "Tier4Apps.qml: tier4Prefix not found");
+    assert.ok(js3Prefix,   "SiloChrome.js: TIER3_PREFIX not found");
+    assert.ok(js3sPrefix,  "SiloChrome.js: TIER3S_PREFIX not found");
+    assert.ok(js4Prefix,   "SiloChrome.js: TIER4_PREFIX not found");
 
     assert.strictEqual(qml3Prefix, js3Prefix,
         "DRIFT: tier3Prefix in Tier3Apps.qml ('" + qml3Prefix + "') " +
         "!= TIER3_PREFIX in SiloChrome.js ('" + js3Prefix + "')");
+
+    // paravirt ΔB6: the tier3s↔tier3 prefixes are a near-miss pair
+    // ("qdistro.tier3s." vs "qdistro.tier3.") — pin both identities.
+    assert.strictEqual(qml3sPrefix, js3sPrefix,
+        "DRIFT: tier3sPrefix in Tier3sApps.qml ('" + qml3sPrefix + "') " +
+        "!= TIER3S_PREFIX in SiloChrome.js ('" + js3sPrefix + "')");
 
     assert.strictEqual(qml4Prefix, js4Prefix,
         "DRIFT: tier4Prefix in Tier4Apps.qml ('" + qml4Prefix + "') " +
@@ -401,29 +300,37 @@ function extractPalette(source, propertyName) {
 // algorithm drift, not just constant drift (04/F6, maturity-review #5).
 
 (function testSiloChromeBehaviouralDrift() {
-    var tier3Src = read("Services/Qdistro/Tier3Apps.qml");
-    var tier4Src = read("Services/Qdistro/Tier4Apps.qml");
+    var tier3Src  = read("Services/Qdistro/Tier3Apps.qml");
+    var tier3sSrc = read("Services/Qdistro/Tier3sApps.qml");
+    var tier4Src  = read("Services/Qdistro/Tier4Apps.qml");
     var SC = require("../Services/Qdistro/SiloChrome.js");
 
     // `root` stand-ins providing exactly the members each function reads. We
     // feed the MIRROR's constants in; sections 1–2 already proved those equal
     // the QML constants, so any failure here is a genuine ALGORITHM drift.
-    var root3 = { siloPalette: SC.SILO_PALETTE, tier3Prefix: SC.TIER3_PREFIX };
-    var root4 = { siloPalette: SC.SILO_PALETTE, tier4Prefix: SC.TIER4_PREFIX };
+    var root3  = { siloPalette: SC.SILO_PALETTE, tier3Prefix:  SC.TIER3_PREFIX };
+    var root3s = { siloPalette: SC.SILO_PALETTE, tier3sPrefix: SC.TIER3S_PREFIX };
+    var root4  = { siloPalette: SC.SILO_PALETTE, tier4Prefix:  SC.TIER4_PREFIX };
 
-    var qml3Colour = compileQmlFunction(tier3Src, "colourForSilo", root3);
-    var qml3Silo   = compileQmlFunction(tier3Src, "siloFromSecctx", root3);
-    var qml3IsT3   = compileQmlFunction(tier3Src, "isTier3", root3);
-    var qml4Colour = compileQmlFunction(tier4Src, "colourForSilo", root4);
-    var qml4Silo   = compileQmlFunction(tier4Src, "siloFromSecctx", root4);
-    var qml4IsT4   = compileQmlFunction(tier4Src, "isTier4", root4);
-    var qml4Hex    = compileQmlFunction(tier4Src, "_hexToRgba", root4);
+    var qml3Colour  = compileQmlFunction(tier3Src,  "colourForSilo",  root3);
+    var qml3Silo    = compileQmlFunction(tier3Src,  "siloFromSecctx", root3);
+    var qml3IsT3    = compileQmlFunction(tier3Src,  "isTier3",        root3);
+    var qml3sColour = compileQmlFunction(tier3sSrc, "colourForSilo",  root3s);
+    var qml3sSilo   = compileQmlFunction(tier3sSrc, "siloFromSecctx", root3s);
+    var qml3sIsT3s  = compileQmlFunction(tier3sSrc, "isTier3s",       root3s);
+    var qml4Colour  = compileQmlFunction(tier4Src,  "colourForSilo",  root4);
+    var qml4Silo    = compileQmlFunction(tier4Src,  "siloFromSecctx", root4);
+    var qml4IsT4    = compileQmlFunction(tier4Src,  "isTier4",        root4);
+    var qml4Hex     = compileQmlFunction(tier4Src,  "_hexToRgba",     root4);
 
     var siloNames = ["", "user1", "user2", "user10", "a", "ab", "abc",
                      "vm-work", "vm_work", "USER1", "user-1.evil", "Bsafe",
-                     "0", "9", "silo with space", "..", "tier3", "tier4"];
+                     "0", "9", "silo with space", "..", "tier3", "tier4",
+                     "tier3s", "smoke"];
     // secctx app-ids spanning: matching prefix, wrong tier prefix, exact prefix
-    // with empty tag, prefix-not-at-start, case variants, multi-dot tails.
+    // with empty tag, prefix-not-at-start, case variants, multi-dot tails —
+    // and the paravirt ΔB6 near-miss pair "qdistro.tier3s.*" vs
+    // "qdistro.tier3.*" (each tier's isTierN must refuse the other's ids).
     var secctxIds = [
         null, "", "qdistro.tier3.user1", "qdistro.tier4.vm1",
         "qdistro.tier3.", "qdistro.tier4.", "qdistro.tier3", "qdistro.tier4",
@@ -431,6 +338,8 @@ function extractPalette(source, propertyName) {
         "x.qdistro.tier3.user1", "x.qdistro.tier4.vm1",
         "QDISTRO.TIER3.user1", "QDISTRO.TIER4.vm1",
         "qdistro.tier30.user1", "qdistro.tier3.user1 ",
+        "qdistro.tier3s.smoke", "qdistro.tier3s.", "qdistro.tier3s",
+        "x.qdistro.tier3s.smoke", "QDISTRO.TIER3S.smoke",
     ];
     var hexes = ["#4caf50", "#FFFFFF", "#000000", "#ffb300", "#80deea",
                  null, "", "#fff", "#4caf5", "#4caf500", "4caf50",
@@ -447,20 +356,26 @@ function extractPalette(source, propertyName) {
         });
     }
 
-    eq("Tier3.colourForSilo",  qml3Colour, SC.colourForSilo,        siloNames);
-    eq("Tier4.colourForSilo",  qml4Colour, SC.colourForSilo,        siloNames);
-    eq("Tier3.siloFromSecctx", qml3Silo,   SC.siloFromSecctxTier3,  secctxIds);
-    eq("Tier4.siloFromSecctx", qml4Silo,   SC.siloFromSecctxTier4,  secctxIds);
-    eq("Tier3.isTier3",        qml3IsT3,   SC.isTier3,              secctxIds);
-    eq("Tier4.isTier4",        qml4IsT4,   SC.isTier4,              secctxIds);
-    eq("Tier4._hexToRgba",     qml4Hex,    SC.hexToRgba,            hexes);
+    eq("Tier3.colourForSilo",   qml3Colour,  SC.colourForSilo,         siloNames);
+    eq("Tier3s.colourForSilo",  qml3sColour, SC.colourForSilo,         siloNames);
+    eq("Tier4.colourForSilo",   qml4Colour,  SC.colourForSilo,         siloNames);
+    eq("Tier3.siloFromSecctx",  qml3Silo,    SC.siloFromSecctxTier3,   secctxIds);
+    eq("Tier3s.siloFromSecctx", qml3sSilo,   SC.siloFromSecctxTier3s,  secctxIds);
+    eq("Tier4.siloFromSecctx",  qml4Silo,    SC.siloFromSecctxTier4,   secctxIds);
+    eq("Tier3.isTier3",         qml3IsT3,    SC.isTier3,               secctxIds);
+    eq("Tier3s.isTier3s",       qml3sIsT3s,  SC.isTier3s,              secctxIds);
+    eq("Tier4.isTier4",         qml4IsT4,    SC.isTier4,               secctxIds);
+    eq("Tier4._hexToRgba",      qml4Hex,     SC.hexToRgba,             hexes);
 
-    // Cross-tier: both QML colour hashes share the palette + algorithm, so a
+    // Cross-tier: all QML colour hashes share the palette + algorithm, so a
     // silo must get the SAME border colour regardless of tier (the bats
     // journal-grep contract depends on this determinism).
     siloNames.forEach(function(s) {
         assert.strictEqual(qml4Colour(s), qml3Colour(s),
             "Tier3 and Tier4 colourForSilo disagree for silo " +
+            JSON.stringify(s));
+        assert.strictEqual(qml3sColour(s), qml3Colour(s),
+            "Tier3 and Tier3s colourForSilo disagree for silo " +
             JSON.stringify(s));
     });
 })();

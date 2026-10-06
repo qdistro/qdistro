@@ -1,0 +1,11 @@
+gate	subject	status	exit_code	exit_class	kind	log	notes	category
+bats	phase7-tier3s-app.bats	pass	0	pass	bats	bats/phase7-tier3s-app.bats.log	VM=qci-bats-phase7-tier3s-app-261004-222244-2473750-16863	integration
+bats	phase7-tier3s-chrome-secctx.bats	pass	0	pass	bats	bats/phase7-tier3s-chrome-secctx.bats.log	VM=qci-bats-phase7-tier3s-chrome-secctx-261004-222244-2473773-10494	integration
+bats	phase7-tier3s-clipboard-gate.bats	pass	0	pass	bats	bats/phase7-tier3s-clipboard-gate.bats.log	VM=qci-bats-phase7-tier3s-clipboard-gate-261004-222244-2473789-4437	integration
+bats	phase7-tier3s-denied.bats	pass	0	pass	bats	bats/phase7-tier3s-denied.bats.log	VM=qci-bats-phase7-tier3s-denied-261004-222244-2473717-30743	integration
+bats	phase7-tier3s-headless.bats	pass	0	pass	bats	bats/phase7-tier3s-headless.bats.log	VM=qci-bats-phase7-tier3s-headless-261004-222244-2473697-21750	integration
+bats	phase7-tier3s-hostile-stream.bats	pass	0	pass	bats	bats/phase7-tier3s-hostile-stream.bats.log	VM=qci-bats-phase7-tier3s-hostile-stream-261004-222244-2473826-6995	integration
+bats	phase7-tier3s-lifecycle.bats	pass	0	pass	bats	bats/phase7-tier3s-lifecycle.bats.log	VM=qci-bats-phase7-tier3s-lifecycle-261004-222244-2473785-9090	integration
+bats	phase7-tier3s-lineage.bats	pass	0	pass	bats	bats/phase7-tier3s-lineage.bats.log	VM=qci-bats-phase7-tier3s-lineage-261004-222244-2473811-26276	integration
+bats	phase7-tier3s-sigkill-cleanup.bats	pass	0	pass	bats	bats/phase7-tier3s-sigkill-cleanup.bats.log	VM=qci-bats-phase7-tier3s-sigkill-cleanup-261004-222244-2473721-9428	integration
+bats	phase7-tier3s-waypipe.bats	pass	0	pass	bats	bats/phase7-tier3s-waypipe.bats.log	VM=qci-bats-phase7-tier3s-waypipe-261004-222244-2473753-27005	integration

@@ -1,0 +1,19 @@
+Id:             1989
+Name:           qci-bats-phase7-tier3s-waypipe-261004-120147-27035-22446
+UUID:           75dc7152-6e03-4d7d-a219-46bed877f411
+OS Type:        hvm
+State:          running
+CPU(s):         4
+CPU time:       149.5s
+Max memory:     4194304 KiB
+Used memory:    4194304 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: unconfined_u:unconfined_r:svirt_t:s0:c420,c552 (enforcing)
+Messages:       tainted: custom configuration parameters specified
+                tainted: custom guest agent control commands issued
+

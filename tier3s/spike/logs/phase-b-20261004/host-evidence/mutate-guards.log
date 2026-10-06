@@ -1,0 +1,458 @@
+original sha256 ab33f366968738fdb5db3e93a9f19308dc8d19bb022815154109f149e73bb1ba  tier3s/probe.sh
+original sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+original sha256 3d55537c56376d12767d8de902ec76f968915f71d2a5433b5d93ab1296c33a85  tier3s/tier3s-runsc
+original sha256 d64f11dc892b758e34d1777a90b8c0045c7c8e5e2c4e5d7ee0c21ee703d8c14e  tier3s/spawn-tier3s.sh
+original sha256 99cc7d01197fb87e7331e81482407807f2e480470cf7525d4773bbe8f0a9d26d  tier3s/qdistro-tier3s-cleanup
+original sha256 ed58ac1beb23dd8bc66d39db6a23c33cc2c80dfe3953ebc835d6275297aec25b  tier3s/qdistro-tier3s-scope
+original sha256 16bbb5403ba98789d9ec182dcdbc15c2a6285924559816133a78271289ed8f28  tier3s/seccomp/make-profiles.py
+original sha256 8753d09c3eaac68d8065aa815ff18a96af21caba507f1a8c81fe1bc199e2fdb3  tier3s/cache-image-archive.sh
+original sha256 e392b9c2f396e8a49b32d34d845732879b630d15a1a145dab60334696692aae9  session_manager/qdistro_session_manager.py
+original sha256 47778f48cb4735f7abc0882d51fbda407fa6488476d5c1ef0e04a59d928a1692  session_manager/qdistro-tier3s-silo-launch
+original sha256 2908ac87fd311d4cb0f0b307ecb56906ca3233c1190a2f18d058dc8d5458bb3f  session_manager/qdistro-tier3s-silo@.service
+original sha256 70615cd8ad6eb6f3752c7860032969f593019dbbe5c06e77eb8b10e64be65847  broker/qdistro_admin_broker.py
+original sha256 54b26d1910e475013d411418d0a5fb57e1a40ac0935e6e04c822b6191ecfc924  scripts/install/install-session-manager.sh
+BASELINE (no mutation): rc=0 444 passed, 1 skipped, 1 warning in 128.18s (0:02:08)
+MUTATION P1 exec gate removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.53s
+    FAILED  test_byte_only_tamper_of_sidecar_hits_the_hash_loop
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P2 fd identity re-check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.59s
+    FAILED  test_swap_between_validation_and_open_is_never_executed
+MUTATION P3 fd sha512 re-check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.59s
+    FAILED  test_in_place_rewrite_between_validation_and_open_is_never_executed
+MUTATION P4 exec by path instead of the verified fd [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.67s
+    FAILED  test_swap_between_verify_and_exec_runs_the_verified_inode
+MUTATION P5 TEST-PASS exits 0 [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.48s
+    FAILED  test_test_root_never_exits_zero
+MUTATION P6 per-file sha512 loop removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 3 failed in 0.60s
+    FAILED  test_byte_only_tamper_of_sidecar_hits_the_hash_loop
+    FAILED  test_byte_only_tamper_of_runsc_is_never_executed
+    FAILED  test_replaced_runsc_with_correct_stamp_is_never_executed
+MUTATION P7 trusted-ancestor check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.53s
+    FAILED  test_symlinked_runsc_dir_is_never_executed
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P8 version rc ignored [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.50s
+    FAILED  test_version_text_with_nonzero_exit_fails
+MUTATION P9 unverified wrapper handed to podman [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_unverified_wrapper_is_not_handed_to_podman
+MUTATION P10 test hooks honoured without the test root [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.41s
+    FAILED  test_pin_hook_refused_without_test_root
+    FAILED  test_test_hooks_refused_without_test_root
+MUTATION P11 exact file-set check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_group_writable_runsc_is_never_executed
+MUTATION P12 content read under an untrusted path [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 20.50s
+    FAILED  test_fifo_swapped_in_under_untrusted_path_does_not_hang
+    FAILED  test_writable_ancestor_is_never_executed
+MUTATION P13 scratch image built in a temporary directory again [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.52s
+    FAILED  test_scratch_image_import_needs_no_temporary_path
+MUTATION P14 import failure ignored [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.60s
+    FAILED  test_scratch_image_import_failure_is_reported
+MUTATION P15 root runs from an untrusted checkout [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.46s
+    FAILED  test_root_refuses_untrusted_checkout[dir]
+    FAILED  test_root_refuses_untrusted_checkout[pin]
+MUTATION P16 caller PATH used before the pin [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_probe_never_uses_caller_path_tools
+MUTATION V1 provisioning lock not taken [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.69s
+    FAILED  test_concurrent_provisions_are_serialized
+MUTATION V2 --pin guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_pin_override_refused_for_root
+MUTATION V3 prefix-for-root guard removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_prefix_hook_refused_for_root
+MUTATION V4 test-hook refusal removed [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.46s
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_FAIL_AFTER_SWAP]
+    FAILED  test_test_hooks_refused_for_root[QDISTRO_RUNSC_PAUSE_AFTER_SWAP]
+MUTATION V5 version rc ignored [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.51s
+    FAILED  test_version_text_with_nonzero_exit_fails_closed
+MUTATION V6 failed rollback cleans up anyway [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.74s
+    FAILED  test_failed_rollback_preserves_recovery_material
+MUTATION V7 trusted_chain disabled [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.56s
+    FAILED  test_untrusted_lock_dir_is_refused
+    FAILED  test_symlinked_lock_dir_is_refused
+MUTATION V8 download published before verification [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_download_is_verified_before_it_is_published
+MUTATION V9 download into an unchecked cache dir [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.50s
+    FAILED  test_download_refused_into_writable_cache_dir
+    FAILED  test_download_refused_through_symlinked_cache_dir
+MUTATION V10 root runs from an untrusted checkout [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 2 failed in 0.43s
+    FAILED  test_root_refuses_untrusted_checkout[dir]
+    FAILED  test_root_refuses_untrusted_checkout[pin]
+MUTATION V11 caller PATH used before the pin [tier3s/provision-runsc.sh]: CAUGHT; pytest rc=1; 1 failed in 0.50s
+    FAILED  test_provision_never_uses_caller_path_tools
+MUTATION W2 wrapper finds env through the caller PATH [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_wrapper_never_uses_caller_path_env
+MUTATION W1 wrapper keeps the caller environment [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_wrapper_scrubs_environment_and_fixes_flags
+MUTATION W3 wrapper creates a missing state root [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 2 failed in 0.46s
+    FAILED  test_wrapper_never_creates_the_state_root
+    FAILED  test_wrapper_refuses_bad_state_root_without_creating_it[root-missing]
+MUTATION W4 wrapper accepts a caller --root [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_wrapper_refuses_caller_root[--root=/run/user/1000/runsc]
+MUTATION W5 wrapper state-root owner/mode check removed [tier3s/tier3s-runsc]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_wrapper_refuses_bad_state_root_without_creating_it[root-mode]
+MUTATION P17 probe state_root check removed [tier3s/probe.sh]: CAUGHT; pytest rc=1; 2 failed in 0.54s
+    FAILED  test_state_root_missing_or_loose_fails[missing]
+    FAILED  test_state_root_missing_or_loose_fails[mode]
+MUTATION A1 broker gate removed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 1.27s
+    FAILED  test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]
+    FAILED  test_gate_order_probe_resolve_gate_record_then_podman
+MUTATION A2 activation recorded before the broker gate [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.87s
+    FAILED  test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]
+    FAILED  test_gate_order_probe_resolve_gate_record_then_podman
+MUTATION A3 podman run before the broker gate [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 1.27s
+    FAILED  test_every_non_allow_reply_refuses_before_activation_and_podman[deny-decision=deny]
+    FAILED  test_gate_order_probe_resolve_gate_record_then_podman
+MUTATION A4 control record inside the exported per-launch dir [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.61s
+    FAILED  test_plan_control_record_is_outside_the_per_launch_dir
+    FAILED  test_launch_records_then_cleans_up_on_normal_exit
+MUTATION A5 cleanup reads records from the exported parent [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_cleanup_tears_down_a_running_launch
+MUTATION A6 dev-profile gate removed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.87s
+    FAILED  test_hardened_profile_refused[daily-driver]
+MUTATION A7 probe failure ignored [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.85s
+    FAILED  test_probe_failure_refuses_with_its_result
+MUTATION A8 literal tmpfs uid= instead of U [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_plan_podman_command_shape
+MUTATION A9 scope placement check removed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 13.06s
+    FAILED  test_sentry_outside_the_scope_tears_down
+MUTATION A10 failed podman query read as no container [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 1.82s
+    FAILED  test_cleanup_failed_podman_query_is_not_no_container
+    FAILED  test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query
+MUTATION A11 cleanup ignores the state root [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 3 failed in 0.83s
+    FAILED  test_cleanup_with_missing_state_root_preserves_record_and_scope
+    FAILED  test_cleanup_with_replaced_state_root_preserves_record[mode]
+    FAILED  test_cleanup_with_replaced_state_root_preserves_record[symlink]
+MUTATION A12 cleanup accepts any recorded runsc root [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_cleanup_with_replaced_state_root_preserves_record[owner-record]
+MUTATION A13 record dropped after a failed stop [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.57s
+    FAILED  test_cleanup_failed_stop_preserves_record_and_scope
+MUTATION A14 escaped-process check removed [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.58s
+    FAILED  test_cleanup_reports_a_recorded_process_alive_outside_the_scope
+MUTATION A15 --unit tears down every record [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.69s
+    FAILED  test_two_launches_tearing_down_one_preserves_the_other
+MUTATION A16 failed label listing read as nothing to reap [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_reap_stale_podman_listing_failure_is_an_error
+MUTATION A17 scope helper delegates the limit files too [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.42s
+    FAILED  test_helper_delegates_exactly_four_paths_and_runs_podman_as_admin
+MUTATION A18 scope helper accepts a foreign scope [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_helper_refuses_bad_invocations[foreign-scope]
+MUTATION A19 scope helper accepts an occupied scope [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_helper_refuses_a_scope_that_already_holds_processes
+MUTATION A20 cleanup does not verify the scope target [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.59s
+    FAILED  test_cleanup_refuses_a_scope_at_another_cgroup
+MUTATION G1 converter-drop guard removed [tier3s/seccomp/make-profiles.py]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_seccomp_generator_refuses_an_inert_allow
+MUTATION G2 decision flipped without a re-render [tier3s/seccomp/make-profiles.py]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_seccomp_profile_is_rendered_and_decided
+MUTATION A21 pod-app launch no longer refused [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_podapp_launch_is_refused_in_phase_a
+MUTATION A22 silo name resolved instead of the row's binding [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_template_binding_is_resolved_instead_of_the_silo_name
+MUTATION S1 tier3s start branch removed (falls back to the tier-3 launcher) [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.49s
+    FAILED  test_start_exports_the_stanza_and_starts_only_the_tier3s_unit
+    FAILED  test_failed_start_rolls_back_and_falls_back_to_nothing
+MUTATION S2 start no longer refuses a non-dev profile [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_start_on_a_non_dev_profile_is_refused_before_any_state_change
+MUTATION S3 create no longer refuses a non-dev profile [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.50s
+    FAILED  test_create_refused_on_a_non_dev_profile[daily-driver]
+    FAILED  test_create_refused_on_a_non_dev_profile[release]
+MUTATION S4 profile gate accepts any profile [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.48s
+    FAILED  test_create_refused_on_a_non_dev_profile[release]
+    FAILED  test_start_on_a_non_dev_profile_is_refused_before_any_state_change
+MUTATION S5 freeze refusal removed [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_freeze_and_resume_are_unsupported[freeze]
+MUTATION S6 resume refusal removed [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.51s
+    FAILED  test_freeze_and_resume_are_unsupported[resume]
+MUTATION S7 stop reports STOPPED over a surviving launch [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.49s
+    FAILED  test_stop_fails_closed_when_the_launch_survives
+MUTATION S8 failed podman query read as stopped [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_running_true_when_the_container_exists_or_the_query_fails[125]
+MUTATION S9 surviving control record ignored [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_running_true_while_a_control_record_of_the_unit_survives
+MUTATION S10 startup reconciliation removed [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.49s
+    FAILED  test_restart_reconciles_before_relaunching_with_a_fresh_token
+MUTATION S11 tier3s uid not checked [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.45s
+    FAILED  test_uid_must_be_the_admin_launch_owner
+MUTATION S12 tier3s network other than none accepted [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.46s
+    FAILED  test_launch_network_is_none_only[pasta]
+MUTATION L1 trusted-stanza check removed [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.50s
+    FAILED  test_helper_refuses_a_writable_stanza[g+w]
+    FAILED  test_helper_refuses_a_symlinked_stanza
+MUTATION L2 ambient environment reaches the spawn [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.58s
+    FAILED  test_helper_execs_the_spawn_with_exactly_the_stanza
+MUTATION L3 stanza of another silo accepted [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.51s
+    FAILED  test_helper_refuses_a_bad_stanza[silo-mismatch]
+MUTATION L4 unknown stanza key accepted [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.49s
+    FAILED  test_helper_refuses_a_bad_stanza[unknown-key]
+MUTATION L5 test overrides honoured for root [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.46s
+    FAILED  test_helper_test_overrides_are_ignored_for_root
+MUTATION B1 tier3s spawn prefix dropped from the rules-only set [broker/qdistro_admin_broker.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.50s
+    FAILED  TestCheckPermissionResolution
+    FAILED  TestCheckPermissionResolution
+MUTATION I1 installer drops the cleanup helper [scripts/install/install-session-manager.sh]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.46s
+    FAILED  test_installer_installs_exactly_the_contract_paths
+MUTATION I2 installer skips the tmpfiles creation [scripts/install/install-session-manager.sh]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_installer_installs_exactly_the_contract_paths
+MUTATION U1 unit loses its ExecStopPost cleanup [session_manager/qdistro-tier3s-silo@.service]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.51s
+    FAILED  test_unit_file_shape
+MUTATION I3 installer gate removed (tier3s installed without the flag) [scripts/install/install-session-manager.sh]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.53s
+    FAILED  test_installer_installs_nothing_tier3s_without_the_flag[None]
+    FAILED  test_installer_installs_nothing_tier3s_without_the_flag[0]
+MUTATION I4 unset flag treated as opt-in [scripts/install/install-session-manager.sh]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.47s
+    FAILED  test_installer_installs_nothing_tier3s_without_the_flag[None]
+MUTATION I5 unrecognised flag value silently skips [scripts/install/install-session-manager.sh]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.45s
+    FAILED  test_installer_refuses_an_unrecognised_flag_value[yes]
+MUTATION U2 manager stop no longer stops the launch unit [session_manager/qdistro-tier3s-silo@.service]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.46s
+    FAILED  test_unit_file_shape
+MUTATION R1 reaper lists labels with a template instead of podman JSON [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.43s
+    FAILED  test_reap_stale_reaps_an_unrecorded_labelled_container[False]
+MUTATION R2 reaper never stops a stale scope (orphan per-launch dir left) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.36s
+    FAILED  test_reap_stale_stops_a_stale_scope_then_removes_the_orphan_dir
+MUTATION R3 reaper ignores the scope's live launch unit [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.51s
+    FAILED  test_reap_stale_leaves_an_orphan_dir_whose_scope_serves_a_live_unit
+MUTATION R4 a container removed during inspect fails the teardown [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.49s
+    FAILED  test_cleanup_container_removed_concurrently_is_torn_down[inspect_vanish]
+MUTATION R5 a container removed during stop fails the teardown [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.52s
+    FAILED  test_cleanup_container_removed_concurrently_is_torn_down[stop_vanish]
+MUTATION R6 reaper trusts an unknown/empty BindsTo (sol r1 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 2.27s
+    FAILED  test_reap_stale_preserves_a_live_scope_whose_owner_is_unknown[no-bindsto]
+    FAILED  test_reap_stale_preserves_a_live_scope_whose_owner_is_unknown[foreign-bindsto]
+MUTATION R7 reaper does not recheck the launch unit before the stop (sol r1 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.36s
+    FAILED  test_reap_stale_rechecks_the_launch_unit_before_stopping_the_scope
+MUTATION R8 a failed unit-state query reads as 'dead' (sol r2 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 4 failed in 1.76s
+    FAILED  test_reap_stale_unknown_unit_state_preserves_a_recorded_launch
+    FAILED  test_reap_stale_unknown_unit_state_preserves_an_unrecorded_container
+    FAILED  test_reap_stale_unknown_state_preserves_an_orphan_scope[scope]
+    FAILED  test_reap_stale_unknown_state_preserves_an_orphan_scope[bound-unit]
+MUTATION R9 a container without a valid unit label is reaped (sol r3 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 0.68s
+    FAILED  test_reap_stale_preserves_a_scopeless_container_without_a_valid_unit_label[]
+    FAILED  test_reap_stale_preserves_a_scopeless_container_without_a_valid_unit_label[sshd.service\n]
+MUTATION R10 a live scope's owner is not matched to the record/label unit (sol r4 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 0.79s
+    FAILED  test_reap_stale_refuses_a_stale_unit_name_on_a_live_scope_owned_by_another_unit[record]
+    FAILED  test_reap_stale_refuses_a_stale_unit_name_on_a_live_scope_owned_by_another_unit[label]
+MUTATION R11 the reaper does not recheck that the owner is dead before any stop [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.69s
+    FAILED  test_reap_stale_rechecks_the_owner_before_any_stop
+MUTATION R12 the spawn's own NEW token is a reap candidate [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.72s
+    FAILED  test_reap_stale_except_unit_reaps_only_an_older_token_of_the_spawn_unit
+MUTATION R13 --except-unit accepted without a valid --token [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 3 failed in 0.61s
+    FAILED  test_reap_stale_option_validation[args0]
+    FAILED  test_reap_stale_option_validation[args1]
+    FAILED  test_reap_stale_option_validation[args2]
+MUTATION R14 the record dir is published before the lock (astra 1) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 2.00s
+    FAILED  test_spawn_killed_before_publication_leaves_no_record
+MUTATION R15 --unit ignores incomplete records (astra 1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_an_incomplete_record_is_recovered_when_nothing_ran_under_it[how1]
+MUTATION R16 an incomplete record is removed while its scope is not dead [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 0.60s
+    FAILED  test_an_incomplete_record_is_preserved_without_positive_evidence[scope-live]
+    FAILED  test_an_incomplete_record_is_preserved_without_positive_evidence[scope-unknown]
+MUTATION R17 an incomplete record is removed while a container carries its token [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.49s
+    FAILED  test_an_incomplete_record_is_preserved_without_positive_evidence[container]
+MUTATION R18 an incomplete record is removed on a failed podman listing [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_an_incomplete_record_is_preserved_without_positive_evidence[listing-fails]
+MUTATION R19 a dead spawn's unpublished record is never swept [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.49s
+    FAILED  test_reap_stale_removes_a_dead_spawns_unpublished_record
+MUTATION R20 a failed ControlGroup query reads as 'no scope' (astra 2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 0.85s
+    FAILED  test_cleanup_a_failed_controlgroup_query_preserves[show_cg_fail]
+    FAILED  test_cleanup_a_failed_controlgroup_query_preserves[show_cg_fail_after_stop]
+MUTATION R21 a failed recursive find reads as empty (astra 2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.56s
+    FAILED  test_cleanup_a_failed_recursive_scan_is_not_empty[unreadable-dir]
+MUTATION R22 a failed cgroup.procs read reads as empty (astra 2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.56s
+    FAILED  test_cleanup_a_failed_recursive_scan_is_not_empty[unreadable-procs]
+MUTATION R23 a dead scope's populated cgroup is not checked [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.58s
+    FAILED  test_cleanup_a_dead_scope_with_a_populated_cgroup_preserves
+MUTATION R24 external calls are unbounded (astra 5) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 30.66s
+    FAILED  test_a_wedged_podman_call_is_bounded_and_blocks_no_other_launch
+MUTATION R25 one lock for every token (astra 5 / fable P3-1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 3.64s
+    FAILED  test_a_wedged_podman_call_is_bounded_and_blocks_no_other_launch
+MUTATION R26 children inherit the lock fds [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.60s
+    FAILED  test_cleanup_tears_down_a_running_launch
+MUTATION R27 the reaper waits on a busy token [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 5.50s
+    FAILED  test_reap_stale_skips_a_token_another_teardown_holds
+MUTATION R28 the batch deadline is ignored [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.45s
+    FAILED  test_reap_stale_deadline_preserves_what_it_did_not_reach
+MUTATION R29 stop by container name instead of the inspected ID [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.56s
+    FAILED  test_cleanup_tears_down_a_running_launch
+MUTATION R30 READY=1 before the broker gate (fable P2-1) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_a_refused_or_failed_launch_never_sends_ready[deny]
+MUTATION R31 a failed short workload sends READY=1 [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.84s
+    FAILED  test_a_refused_or_failed_launch_never_sends_ready[podman-fails]
+MUTATION R32 systemd's notify socket leaks to the probe and the scope [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.85s
+    FAILED  test_spawn_sends_ready_once_recorded_running_and_hides_the_socket
+MUTATION R33 a failed READY=1 keeps the launch [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 13.07s
+    FAILED  test_a_failed_ready_tears_the_launch_down
+MUTATION R34 the label decoder passes any unit string (fable P2-2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.58s
+    FAILED  test_reap_stale_label_bytes_cannot_inject_or_shift_fields
+MUTATION R35 garbage listing JSON reads as no containers [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_reap_stale_bad_listing_json_is_an_error
+MUTATION A23 the spawn's own-cgroup unit check removed (fable P3-6) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.84s
+    FAILED  test_launch_unit_must_be_our_own_cgroup
+MUTATION A24 the cleanup ignores a container's foreign token label (fable P3-6) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.57s
+    FAILED  test_cleanup_refuses_a_container_with_another_token
+MUTATION A25 --except-unit does not reap the spawn unit's older token (fable P3-6) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.54s
+    FAILED  test_reap_stale_except_unit_reaps_only_an_older_token_of_the_spawn_unit
+MUTATION A26 the scope helper accepts a scope with child cgroups (fable P3-6) [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_helper_refuses_a_scope_with_child_cgroups
+MUTATION L6 the launch helper accepts a malformed token (fable P3-6) [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.52s
+    FAILED  test_helper_refuses_a_bad_stanza[token]
+MUTATION L7 the launch helper passes a NUL through (fable P3-6) [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.53s
+    FAILED  test_helper_refuses_a_bad_stanza[nul]
+MUTATION L8 the launch helper drops systemd's notify socket [session_manager/qdistro-tier3s-silo-launch]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.51s
+    FAILED  test_helper_execs_the_spawn_with_exactly_the_stanza
+MUTATION S13 tier3s start through the generic 30 s start (no notify bound) [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_start_exports_the_stanza_and_starts_only_the_tier3s_unit
+MUTATION S14 a failed tier3s start is recorded Stopped without verifying the launch gone [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.48s
+    FAILED  test_a_failed_start_whose_launch_is_not_verified_gone_stays_active
+    FAILED  test_a_refused_launch_fails_start_leaves_stopped_and_a_retry_starts
+MUTATION S15 the refused-start path of tier3s removed [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.51s
+    FAILED  test_a_refused_launch_fails_start_leaves_stopped_and_a_retry_starts
+    FAILED  test_a_failed_start_whose_launch_is_not_verified_gone_stays_active
+MUTATION S16 the tier3s start bound below the unit's TimeoutStartSec [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.49s
+    FAILED  test_tier3s_start_uses_the_notify_bound
+MUTATION S17 reconciliation runs on a host without the tier3s install (fable P3-6) [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.48s
+    FAILED  test_reconciliation_is_skipped_without_the_tier3s_install
+MUTATION S18 a record dir without its state no longer counts (fable P3-6) [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 2 failed, 1 warning in 0.48s
+    FAILED  test_running_true_while_a_control_record_of_the_unit_survives
+    FAILED  test_an_incomplete_record_blocks_no_unrelated_stop
+MUTATION U4 the launch unit acknowledges before the launch runs (Type=simple) [session_manager/qdistro-tier3s-silo@.service]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.49s
+    FAILED  test_unit_file_shape
+MUTATION U3 stop propagation replaced by PartOf (restart would relaunch) [session_manager/qdistro-tier3s-silo@.service]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.47s
+    FAILED  test_unit_file_shape
+MUTATION R36 a state printed by a query that timed out or failed is evidence (astra r2 #1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 8 failed in 8.80s
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[record-hang_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[record-fail_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[label-hang_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[label-fail_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[incomplete-hang_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[incomplete-fail_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[scope-hang_after]
+    FAILED  test_a_state_printed_before_a_timeout_or_error_is_no_evidence[scope-fail_after]
+MUTATION R37 a call's process group is not killed after the call (astra r2 #2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 6.49s
+    FAILED  test_a_term_ignoring_helper_of_a_timed_out_call_is_killed
+MUTATION R38 a call's output is captured through a pipe a leftover can hold (astra r2 #2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 20.44s
+    FAILED  test_a_helper_holding_the_output_open_blocks_nothing
+MUTATION R39 a TERM to the cleanup leaves its call in flight running (astra r2 #2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.50s
+    FAILED  test_a_term_to_the_cleanup_kills_its_call_in_flight
+MUTATION R40 a call scope's cgroup is not killed after the call (astra r2 #2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.57s
+    FAILED  test_admin_calls_run_in_their_own_scope_killed_after_the_call
+MUTATION R41 admin calls run without their own scope (astra r2 #2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.54s
+    FAILED  test_admin_calls_run_in_their_own_scope_killed_after_the_call
+MUTATION R42 a call scope that does not empty is ignored (astra r2 #2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.61s
+    FAILED  test_a_call_scope_that_does_not_empty_is_a_failed_query
+MUTATION R43 the orphan-dir loop ignores the deadline (astra r2 #3) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.45s
+    FAILED  test_reap_stale_deadline_covers_the_orphan_dirs
+MUTATION R44 calls are not capped by the batch deadline (astra r2 #3) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 25.46s
+    FAILED  test_a_query_is_cut_at_the_batch_deadline
+    FAILED  test_the_unit_lock_wait_is_capped_by_the_deadline
+MUTATION R45 systemd's BindsTo stop is waited for by query count (astra r2 #3) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 27.85s
+    FAILED  test_the_bindsto_wait_is_by_the_clock
+MUTATION R46 the token lock wait is not capped by the deadline (astra r2 #3) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 15.43s
+    FAILED  test_the_unit_lock_wait_is_capped_by_the_deadline
+MUTATION R47 a killed cleanup's work dir is never swept [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.48s
+    FAILED  test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup
+MUTATION R48 the label listing starts after the deadline (astra r2 #3) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.45s
+    FAILED  test_reap_stale_deadline_preserves_what_it_did_not_reach
+MUTATION A27 the start poll is bounded by a query count (fable r2 P3-3) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 13.49s
+    FAILED  test_the_start_poll_is_bounded_by_the_clock
+MUTATION A28 READY=1 sent by a child of the spawn, not the spawn's own PID (astra r2 #4) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.83s
+    FAILED  test_ready_is_sent_by_the_spawn_process_itself
+MUTATION A29 .new-<token> removed after the global lock is released (fable r2 P3-6) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.50s
+    FAILED  test_unpublished_record_is_removed_under_the_global_lock
+MUTATION U5 any process in the launch unit's cgroup may send READY=1 (astra r2 #4) [session_manager/qdistro-tier3s-silo@.service]: CAUGHT; pytest rc=1; 1 failed, 1 warning in 0.47s
+    FAILED  test_unit_file_shape
+MUTATION R49 the exists verdict is the chain's own rc again (A r3 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 6 failed in 2.87s
+    FAILED  test_cleanup_systemd_run_failure_is_not_an_absent_verdict
+    FAILED  test_cleanup_runuser_failure_is_not_an_absent_verdict
+    FAILED  test_cleanup_failed_vanish_recheck_preserves
+    FAILED  test_cleanup_post_rm_check_with_a_failed_chain_preserves
+    FAILED  test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query
+    FAILED  test_reap_stale_labelled_recheck_with_a_failed_chain_preserves
+MUTATION R50 the verdict line need not be the call's whole output (A r3 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 1.27s
+    FAILED  test_cleanup_exists_verdict_that_shares_its_output_is_a_failed_query
+    FAILED  test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query
+MUTATION R51 the NSS lookup under the token lock is unbounded again (fable r3 P3-2) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 60.47s (0:01:00)
+    FAILED  test_an_nss_lookup_is_bounded_under_the_token_lock
+MUTATION R52 a call's output at the cap is not a failed query (fable r3 P3-4) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 7.78s
+    FAILED  test_a_call_that_overflows_its_output_file_is_a_failed_query
+MUTATION R53 the manager's exists verdict is the chain's rc again (A r3 P1) [session_manager/qdistro_session_manager.py]: CAUGHT; pytest rc=1; 3 failed, 1 warning in 0.49s
+    FAILED  test_running_true_when_the_supervisor_fails_before_podman
+    FAILED  test_observe_supervisor_failure_before_podman_is_unknown
+    FAILED  test_running_false_only_when_unit_down_container_gone_and_no_record
+MUTATION R54 the .call-* sweep checks /proc instead of $PROC (fable r3 P3-5) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.50s
+    FAILED  test_reap_stale_sweeps_the_work_dir_of_a_killed_cleanup
+MUTATION R55 the verdict is the NUL-truncated prefix again (sol r5 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 1.13s
+    FAILED  test_cleanup_an_exists_answer_with_a_nul_prefix_is_a_failed_query
+MUTATION R56 a prop answer need not be the call's whole output (sol r5 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.59s
+    FAILED  test_cleanup_a_nul_poisoned_unit_state_is_unknown
+MUTATION R57 the inspect answer need not be the call's whole output (sol r5 P1) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.57s
+    FAILED  test_cleanup_an_inspect_answer_with_extra_bytes_is_a_failed_query
+MUTATION R58 a killed NSS lookup's printed line is a result again (sol r5 P3-4) [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 3.59s
+    FAILED  test_a_complete_nss_line_printed_before_a_stall_is_not_a_lookup
+MUTATION R59 the same in the spawn (sol r5 P3-4) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 20.68s
+    FAILED  test_spawn_a_stalled_nss_answer_is_not_a_lookup
+MUTATION R60 the same in the scope helper (sol r5 P3-4) [tier3s/qdistro-tier3s-scope]: CAUGHT; pytest rc=1; 1 failed in 5.42s
+    FAILED  test_helper_a_stalled_nss_answer_is_not_a_lookup
+MUTATION R61 the same in the probe (sol r5 P3-4) [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 5.47s
+    FAILED  test_a_stalled_nss_answer_is_not_a_lookup
+MUTATION E1 host-uds=open dropped (the mounted socket cannot pass fds) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.68s
+    FAILED  test_gui_plan_adds_bridge_flag_mount_and_entrypoint
+    FAILED  test_gui_launch_registers_the_bridge_before_podman
+MUTATION E2 the bridge dir is not mounted into the sandbox [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.66s
+    FAILED  test_gui_plan_adds_bridge_flag_mount_and_entrypoint
+    FAILED  test_gui_launch_registers_the_bridge_before_podman
+MUTATION E3 RegisterLaunch is warning-only again (tier-3 style): snippet occurs 0 times in tier3s/spawn-tier3s.sh -> HARNESS ERROR
+MUTATION E4 the launch record's nonce is not checked [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.93s
+    FAILED  test_gui_launch_refuses_a_record_with_another_token
+MUTATION E5 the bridge client's launch-unit cgroup is not verified [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.94s
+    FAILED  test_gui_launch_refuses_a_client_outside_the_launch_unit
+MUTATION E6 the bridge is never killed in teardown [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 2 failed in 1.39s
+    FAILED  test_gui_launch_registers_the_bridge_before_podman
+    FAILED  test_gui_bridge_is_torn_down_when_the_launch_fails_after_it
+MUTATION E7 the workload declaration is sourced, not parsed [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.43s
+    FAILED  test_workload_declarations_are_parsed_not_sourced
+MUTATION E8 a symlinked declaration is followed (test -f resolves it) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.95s
+    FAILED  test_a_symlinked_workload_declaration_refuses
+MUTATION E9 the compositor precondition is not checked [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.94s
+    FAILED  test_gui_launch_without_compositor_refuses
+MUTATION E10 the entrypoint is passed as a podman command argument again [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_gui_plan_adds_bridge_flag_mount_and_entrypoint
+MUTATION E11 RegisterLaunch is tried only once [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 1.32s
+    FAILED  test_gui_launch_registers_after_bounded_retries
+    FAILED  test_gui_launch_refuses_when_registration_keeps_failing
+MUTATION E12 a reused pid keeps a stale .call- dir again [tier3s/qdistro-tier3s-cleanup]: CAUGHT; pytest rc=1; 1 failed in 0.47s
+    FAILED  test_reap_stale_ages_call_dirs_against_pid_reuse
+MUTATION E13 the foreign-user id lookups are unbounded again [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 60.48s (0:01:00)
+    FAILED  test_a_wedged_id_lookup_for_the_foreign_user_is_bounded
+MUTATION E14 the launch record is left behind after registration [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.64s
+    FAILED  test_gui_launch_registers_the_bridge_before_podman
+MUTATION E15 a never-bound bridge socket does not refuse [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 5.02s
+    FAILED  test_gui_launch_refuses_when_the_socket_never_binds
+MUTATION E16 the bridge is armed for a headless workload too [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.62s
+    FAILED  test_headless_plan_has_no_bridge
+    FAILED  test_headless_launch_never_touches_the_bridge
+MUTATION E17 a printed prefix is still a result (timeout status ignored) [tier3s/probe.sh]: CAUGHT; pytest rc=1; 1 failed in 10.49s
+    FAILED  test_a_uid_printed_before_a_stall_is_not_a_lookup
+MUTATION E18 the launch record file id is the launch token again [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 2 failed in 0.66s
+    FAILED  test_gui_plan_adds_bridge_flag_mount_and_entrypoint
+    FAILED  test_gui_launch_registers_the_bridge_before_podman
+MUTATION E19 a dead bridge client waits out the socket bound [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 4.97s
+    FAILED  test_gui_launch_refuses_fast_when_the_client_dies_before_the_socket
+MUTATION E20 an absent declaration refuses (the headless fallback is lost) [tier3s/spawn-tier3s.sh]: CAUGHT; pytest rc=1; 1 failed in 0.45s
+    FAILED  test_absent_workload_declaration_takes_the_headless_path
+MUTATION E21 the shared snapshot key is emitted once per workload again [tier3s/cache-image-archive.sh]: CAUGHT; pytest rc=1; 1 failed in 0.44s
+    FAILED  test_cache_manifest_emits_the_shared_snapshot_key_once
+MUTATION E22 link is allowed for the terminal workloads again [tier3s/seccomp/make-profiles.py]: CAUGHT; pytest rc=1; 1 failed in 0.46s
+    FAILED  test_seccomp_profile_is_rendered_and_decided
+restored OK sha256 ab33f366968738fdb5db3e93a9f19308dc8d19bb022815154109f149e73bb1ba  tier3s/probe.sh
+restored OK sha256 f6b6694625635a43ef1cab9951acd8848932f7e15572d504675096b9b672bbce  tier3s/provision-runsc.sh
+restored OK sha256 3d55537c56376d12767d8de902ec76f968915f71d2a5433b5d93ab1296c33a85  tier3s/tier3s-runsc
+restored OK sha256 d64f11dc892b758e34d1777a90b8c0045c7c8e5e2c4e5d7ee0c21ee703d8c14e  tier3s/spawn-tier3s.sh
+restored OK sha256 99cc7d01197fb87e7331e81482407807f2e480470cf7525d4773bbe8f0a9d26d  tier3s/qdistro-tier3s-cleanup
+restored OK sha256 ed58ac1beb23dd8bc66d39db6a23c33cc2c80dfe3953ebc835d6275297aec25b  tier3s/qdistro-tier3s-scope
+restored OK sha256 16bbb5403ba98789d9ec182dcdbc15c2a6285924559816133a78271289ed8f28  tier3s/seccomp/make-profiles.py
+restored OK sha256 8753d09c3eaac68d8065aa815ff18a96af21caba507f1a8c81fe1bc199e2fdb3  tier3s/cache-image-archive.sh
+restored OK sha256 e392b9c2f396e8a49b32d34d845732879b630d15a1a145dab60334696692aae9  session_manager/qdistro_session_manager.py
+restored OK sha256 47778f48cb4735f7abc0882d51fbda407fa6488476d5c1ef0e04a59d928a1692  session_manager/qdistro-tier3s-silo-launch
+restored OK sha256 2908ac87fd311d4cb0f0b307ecb56906ca3233c1190a2f18d058dc8d5458bb3f  session_manager/qdistro-tier3s-silo@.service
+restored OK sha256 70615cd8ad6eb6f3752c7860032969f593019dbbe5c06e77eb8b10e64be65847  broker/qdistro_admin_broker.py
+restored OK sha256 54b26d1910e475013d411418d0a5fb57e1a40ac0935e6e04c822b6191ecfc924  scripts/install/install-session-manager.sh
+AFTER RESTORE: rc=0 444 passed, 1 skipped, 1 warning in 117.37s (0:01:57)
+RESULT FAIL: 184 mutations, 1 problem(s)
+EXIT=1

@@ -177,6 +177,12 @@ ShellRoot {
           // observed after qdshell start doesn't slip past the filter.
           void Tier3Apps.tier3Prefix;
 
+          // Same trick for Tier3sApps — the gVisor/waypipe tier
+          // (paravirt Phase B): force Connections active so the first
+          // qdistro.tier3s.<silo> toplevel gets its [tier3s] journal
+          // lines + silo colour instead of slipping past the filter.
+          void Tier3sApps.tier3sPrefix;
+
           // Same trick for Tier4Apps — force Connections active so the
           // first tier-4 SPICE virt-viewer toplevel (qdistro.tier4.*)
           // doesn't slip past the silo-colour filter before any panel

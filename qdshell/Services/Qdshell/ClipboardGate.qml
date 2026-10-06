@@ -94,6 +94,14 @@ Singleton {
         if (binding.selectionSetSourceIdentity !== undefined) {
             binding.selectionSetSourceIdentity.connect(root._onSelectionSetSourceIdentity);
         }
+        // v35 sidecar — selection_set_source_peer_identity. Fires
+        // IMMEDIATELY AFTER the v23 sidecar for the same tagged source,
+        // carrying the SOURCE wl_client's own compositor-observed peer
+        // identity. Older bindings never emit; the relay then falls
+        // back to the bound-handle identity path verbatim.
+        if (binding.selectionSetSourcePeerIdentity !== undefined) {
+            binding.selectionSetSourcePeerIdentity.connect(root._onSelectionSetSourcePeerIdentity);
+        }
         // Receive-time gate (qdwin_shell_v1 v15+). Older bindings never
         // emit; cross-app paste then relies on the set-time gate +
         // focus-aware-clear, and the compositor's own ~2s deny timeout
@@ -152,6 +160,17 @@ Singleton {
     //   { sandboxEngine, appId, instanceId }   (or null)
     property var _pendingSrcIdentity: null
 
+    // v35 sidecar — selection_set_source_peer_identity. Fires right
+    // after the v23 sidecar for the same tagged source; carries the
+    // source wl_client's OWN compositor-observed peer identity. This is
+    // what makes equal-tag binding unnecessary for the pid relay: the
+    // identity below belongs to the very client that issued
+    // set_selection, not to whichever toplevel happens to share the tag
+    // tuple.
+    //   { pid, starttime, uid, exe, label,
+    //     sandboxEngine, appId, instanceId }   (or null)
+    property var _pendingSrcPeer: null
+
     // focus-aware-clear bookkeeping (clipboard.md §"focus-aware-clear").
     // The silo that set the active selection, tracked per selection kind
     // ("0" = regular clipboard, "1" = primary). Recorded on every
@@ -187,6 +206,7 @@ Singleton {
         root._handleToSandboxEngine = ({});
         root._selectionSourceSilo = ({});
         root._pendingSrcIdentity = null;
+        root._pendingSrcPeer = null;
         root._lastDenyClearByKey = ({});
     }
 
@@ -241,7 +261,22 @@ Singleton {
         const id = root._handleToIdentity[handle];
         if (!id || !id.pid)
             return false;
-        const key = root._verifyKey(id);
+        return root._queueVerify(root._verifyKey(id), handle, id);
+    }
+
+    // Same lazy broker re-verification as _ensureVerified, but for an
+    // identity that is not keyed to a toplevel handle — the v35
+    // selection_set_source_peer_identity sidecar. The tuple came off the
+    // wire moments ago and already names the exact source wl_client, so
+    // there is no handle-drift guard; the broker's /proc re-check is the
+    // staleness arbiter.
+    function _ensureVerifiedIdentity(id) {
+        if (!id || !id.pid)
+            return false;
+        return root._queueVerify(root._verifyKey(id), null, id);
+    }
+
+    function _queueVerify(key, handle, id) {
         const cached = root._verifyCache[key];
         if (cached && cached.expires > Date.now())
             return cached.verified;
@@ -251,7 +286,7 @@ Singleton {
         root._verifyInFlight[key] = true;
         root._verifyQueue.push({
             key: key,
-            handle: handle,
+            handle: (handle === null || handle === undefined) ? null : handle,
             identity: Object.assign({}, id),
             generation: root._verifyGeneration
         });
@@ -264,7 +299,11 @@ Singleton {
             return;
         while (root._verifyQueue.length) {
             const entry = root._verifyQueue.shift();
-            const current = root._handleToIdentity[entry.handle];
+            // handle === null → wire-sidecar identity (v35): no handle
+            // map to drift against, the tuple itself is the subject.
+            const current = (entry.handle === null)
+                ? entry.identity
+                : root._handleToIdentity[entry.handle];
             if (!current || root._verifyKey(current) !== entry.key) {
                 delete root._verifyInFlight[entry.key];
                 continue;
@@ -282,7 +321,9 @@ Singleton {
         root._verifyActive = null;
         if (entry && entry.generation === root._verifyGeneration) {
             delete root._verifyInFlight[entry.key];
-            const current = root._handleToIdentity[entry.handle];
+            const current = (entry.handle === null)
+                ? entry.identity
+                : root._handleToIdentity[entry.handle];
             if (current && root._verifyKey(current) === entry.key) {
                 const verified = exitCode === 0 && String(output || "").trim() === "b true";
                 root._verifyCache[entry.key] = {
@@ -317,6 +358,28 @@ Singleton {
         return ClipboardSilo.fromSecctx(sandboxEngine, appId, instanceId);
     }
 
+    // v23 sidecar ↔ handle binding (paravirt ΔB10): when the sidecar
+    // supplied the source silo, the handle's relayed (pid, starttime) is
+    // trustworthy ONLY if the handle's attested secctx tuple is identical
+    // to the sidecar's — i.e. the tagged source IS the focused toplevel's
+    // client (the waypipe bridge case: one wl_client owns both the window
+    // and the offer). A tagged source that does not own the focused
+    // toplevel — a background helper, a foreign launch — can never match:
+    // its sidecar instance differs from the focused toplevel's, so it
+    // keeps relaying 0/0 (enforce-mode deny at the broker). Both sides
+    // of the comparison are compositor-emitted wp_security_context_v1
+    // tags the client cannot rewrite, so a hostile client cannot pick
+    // the match. instanceId must be non-empty: two distinct clients of
+    // one app would otherwise collide on (engine, appId) alone.
+    function _sourceBoundToHandle(pending, handleIdentity) {
+        if (pending === null || !handleIdentity) return false;
+        const inst = pending.instanceId || "";
+        return inst.length > 0
+            && inst === (handleIdentity.instanceId || "")
+            && (pending.sandboxEngine || "") === (handleIdentity.sandboxEngine || "")
+            && (pending.appId || "") === (handleIdentity.appId || "");
+    }
+
     // v23 sidecar handler. Stash the tuple as "pending"; the very next
     // _onSelectionSet consumes it. Overwrites any previous pending entry
     // — by the qdwin contract there is at most one outstanding sidecar
@@ -328,6 +391,42 @@ Singleton {
             "sandboxEngine": sandboxEngine || "",
             "appId": appId || "",
             "instanceId": instanceId || ""
+        };
+    }
+
+    // Pure relay-selection rule (Node-testable): which (pid, starttime)
+    // tuple may be relayed to the broker as the selection source's
+    // identity. v35 wire-attested peer identity ALWAYS wins — it names
+    // the exact wl_client that issued set_selection, so it is sound
+    // even when no focused toplevel shares the tag (cross-silo offer
+    // from a toplevel-less source). Pre-v35 fallback keeps the old
+    // contract: handle identity only on the v11 path or a bound
+    // sidecar; anything else returns {} so the broker sees 0/0 and
+    // enforce denies rather than resolving an unrelated handle.
+    function _sourceRelayIdentity(pendingPeer, pending, bound, handleIdentity) {
+        if (pendingPeer && pendingPeer.pid) return pendingPeer;
+        if (pending === null || bound) return handleIdentity || {};
+        return {};
+    }
+
+    // v35 sidecar handler. The peer tuple belongs to the very wl_client
+    // that issued set_selection — NOT to whichever focused toplevel
+    // happens to carry the same (engine, appId, instanceId) tag. Merge
+    // the tag fields from _pendingSrcIdentity (which always precedes
+    // this event per the wire contract) so the stashed identity is a
+    // complete verifyKey-shaped tuple; consumed on the next
+    // _onSelectionSet alongside _pendingSrcIdentity.
+    function _onSelectionSetSourcePeerIdentity(peerPid, peerStarttime, peerUid, peerExe, peerSelinuxLabel) {
+        const pending = root._pendingSrcIdentity || {};
+        root._pendingSrcPeer = {
+            "pid": peerPid >>> 0,
+            "starttime": peerStarttime,
+            "uid": peerUid >>> 0,
+            "exe": peerExe || "",
+            "label": peerSelinuxLabel || "",
+            "sandboxEngine": pending.sandboxEngine || "",
+            "appId": pending.appId || "",
+            "instanceId": pending.instanceId || ""
         };
     }
 
@@ -370,7 +469,23 @@ Singleton {
     // are preserved. Mirrors qdistro/tier4-vm/tier4_chrome.py::strip_mimes
     // — Python is the canonical implementation; this is the QML port.
     // (P05a security MS-2 / integration MEDIUM-1.)
+    // paravirt ΔB6: the same allow-list is the tier3s policy — a gVisor
+    // sandbox feeding a waypipe bridge gets the identical strip until a
+    // tier3s-specific MIME policy is designed (03 step 5).
     readonly property var _tier4AllowedMimeBases: ["text/plain", "text/uri-list"]
+
+    // True for a secctx app_id whose OFFERED mimes must pass the strict
+    // allow-list: tier-4 VM windows and tier3s (gVisor/waypipe) windows.
+    // "qdistro.tier3s." must be tested literally — startsWith("qdistro.tier4.")
+    // obviously cannot match it, and "qdistro.tier3." cannot match it either
+    // (the trailing '.' disambiguates).
+    function _isStrictMimeSource(srcAppId) {
+        return srcAppId.startsWith("qdistro.tier4.") || srcAppId.startsWith("qdistro.tier3s.");
+    }
+
+    function _strictMimeTier(srcAppId) {
+        return srcAppId.startsWith("qdistro.tier3s.") ? "tier3s" : "tier4";
+    }
 
     function _stripTier4Mimes(mimes) {
         const seen = {};
@@ -419,6 +534,10 @@ Singleton {
         // focused toplevel). Consume + clear.
         const pending = root._pendingSrcIdentity;
         root._pendingSrcIdentity = null;
+        // v35 wire-attested peer identity of the actual selection-source
+        // wl_client (null on pre-v35 compositors or untagged sources).
+        const pendingPeer = root._pendingSrcPeer;
+        root._pendingSrcPeer = null;
         let srcSilo;
         if (pending !== null) {
             // Tagged source: trust the wire identity, NOT the focus-handle
@@ -439,16 +558,17 @@ Singleton {
         const dstSilo = (focusedHandle !== 4294967295) ? (root._handleToSilo[focusedHandle] || "unknown") : "unknown";
         let mimeList = (mimeTypesConcat || "").split("\n").filter(s => s.length > 0);
 
-        // Tier-4 source → strict MIME allow-list (text/plain + text/uri-list).
-        // The strip runs BEFORE policy consult so a tier-4 guest advertising
-        // text/html or image/png has those types dropped, not evaluated.
-        // (P05a security MS-2 / integration MEDIUM-1.)
+        // Tier-4 / tier3s source → strict MIME allow-list (text/plain +
+        // text/uri-list). The strip runs BEFORE policy consult so a tier-4
+        // guest or tier3s sandbox advertising text/html or image/png has
+        // those types dropped, not evaluated.
+        // (P05a security MS-2 / integration MEDIUM-1; paravirt ΔB6.)
         const srcAppId = (pending !== null && pending.appId) ? pending.appId : (root._handleToAppId[sourceHandle] || "");
-        if (srcAppId.startsWith("qdistro.tier4.")) {
+        if (root._isStrictMimeSource(srcAppId)) {
             const before = mimeList.length;
             mimeList = root._stripTier4Mimes(mimeList);
             if (mimeList.length !== before) {
-                Logger.i("ClipboardGate", "tier4 mime-strip", "src_app=" + srcAppId, "before=" + before, "after=" + mimeList.length);
+                Logger.i("ClipboardGate", root._strictMimeTier(srcAppId) + " mime-strip", "src_app=" + srcAppId, "before=" + before, "after=" + mimeList.length);
             }
         }
         const mimeCsv = mimeList.join(",");
@@ -480,8 +600,8 @@ Singleton {
         // If after stripping there are no allowed MIMEs, deny without
         // consulting policy. The Python strip_mimes contract is "deny on
         // empty stripped list" — keep that semantics here.
-        if (srcAppId.startsWith("qdistro.tier4.") && mimeList.length === 0) {
-            root._logDecisionAndMaybeClear(decisionEntry, "deny", "tier4-no-allowed-mimes");
+        if (root._isStrictMimeSource(srcAppId) && mimeList.length === 0) {
+            root._logDecisionAndMaybeClear(decisionEntry, "deny", root._strictMimeTier(srcAppId) + "-no-allowed-mimes");
             return;
         }
 
@@ -494,10 +614,19 @@ Singleton {
         // returns synchronously cached results and fires off an async
         // broker round-trip on first sight.
         // If the v23 wire sidecar supplied the source silo, sourceHandle is
-        // explicitly not trusted for source identity; it can name the focused
-        // destination/admin toplevel. Fail closed unless qdwin grows a peer
-        // identity sidecar for the actual selection source.
-        const srcVerified = (pending === null) ? root._ensureVerified(sourceHandle) : false;
+        // only trusted for source identity when it is bound to the sidecar
+        // (the focused toplevel's attested tag IS the source's tag — the
+        // single-client bridge case). Unbound: it can name the focused
+        // destination/admin toplevel — fail closed.
+        // v35 narrows this further: when the peer-identity sidecar arrived,
+        // it names the exact wl_client that issued set_selection — verify
+        // THAT tuple, not whichever focused handle shares the tag.
+        const _bound = root._sourceBoundToHandle(
+            pending, root._handleToIdentity[sourceHandle]);
+        const _srcPeer = (pendingPeer && pendingPeer.pid) ? pendingPeer : null;
+        const srcVerified = _srcPeer
+            ? root._ensureVerifiedIdentity(_srcPeer)
+            : ((pending === null || _bound) ? root._ensureVerified(sourceHandle) : false);
         const dstVerified = (focusedHandle !== 4294967295) ? root._ensureVerified(focusedHandle) : false;
         const identityVerified = srcVerified && dstVerified;
         if (!ClipboardBroker.hasKnownIdentity(srcSilo, dstSilo)) {
@@ -512,11 +641,12 @@ Singleton {
             return;
         }
         // Relay the source app's kernel-authenticated (pid, starttime) so
-        // the broker can attest the source silo via its launch-record store
-        // (P1-1). Only trustworthy when the v23 sidecar source is honoured
-        // (pending === null); otherwise pass 0/0 → broker enforce denies
-        // cross-silo rather than resolving an unrelated handle.
-        const _srcId = (pending === null) ? (root._handleToIdentity[sourceHandle] || {}) : {};
+        // the broker can attest the source silo via its launch-record
+        // store (P1-1). _sourceRelayIdentity encodes the precedence:
+        // v35 wire-attested source peer > bound/v11 handle identity >
+        // 0/0 fail-closed.
+        const _srcId = root._sourceRelayIdentity(
+            _srcPeer, pending, _bound, root._handleToIdentity[sourceHandle]);
         const brokerResult = root._binding.checkClipboardTransfer(srcSilo, dstSilo, mimeList, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
         const decision = ClipboardBroker.parseCheckClipboardTransferResult(brokerResult.exitCode, brokerResult.stdout || "");
         root._logDecisionAndMaybeClear(decisionEntry, decision.verdict, decision.reason);
@@ -611,12 +741,13 @@ Singleton {
         const dstSilo = root._handleToSilo[targetHandle] || "unknown";
         const srcAppId = root._handleToAppId[sourceHandle] || "";
 
-        // Tier-4 source → strict MIME allow-list (text/plain + text/uri-list).
-        // A single requested mime that strips to empty → deny.
-        if (srcAppId.startsWith("qdistro.tier4.")) {
+        // Tier-4 / tier3s source → strict MIME allow-list (text/plain +
+        // text/uri-list). A single requested mime that strips to empty →
+        // deny (paravirt ΔB6: same rule for both tiers).
+        if (root._isStrictMimeSource(srcAppId)) {
             const kept = root._stripTier4Mimes([mime]);
             if (kept.length === 0) {
-                root._answerReceive(requestHandle, seat, srcSilo, dstSilo, mime, "deny", "tier4-no-allowed-mimes");
+                root._answerReceive(requestHandle, seat, srcSilo, dstSilo, mime, "deny", root._strictMimeTier(srcAppId) + "-no-allowed-mimes");
                 return;
             }
         }

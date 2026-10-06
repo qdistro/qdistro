@@ -62,10 +62,12 @@ if [ -z "$snapshot" ]; then
     exit 2
 fi
 
-# Stage only what the recipes COPY, plus the pin.
+# Stage only what the recipes COPY, plus the pin: every Containerfile.*, the
+# repo helper, the shared GUI entrypoint, and every workload script.
 context="$(mktemp -d "${TMPDIR:-/var/tmp}/tier3s-context.XXXXXX")"
 trap 'rm -rf "$context"' EXIT
-cp -a Containerfile.* configure-snapshot-repos.sh headless-smoke.sh "$context/"
+cp -a Containerfile.* configure-snapshot-repos.sh qdistro-tier3s-entrypoint \
+    headless-smoke.sh "$context/"
 printf '%s\n' "$snapshot" > "$context/SNAPSHOT"
 log "tier-3s workloads pinned to Tumbleweed snapshot $snapshot"
 

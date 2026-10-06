@@ -46,6 +46,62 @@ sameStableSilo(
     "user1"
 );
 
+// paravirt ΔB6: tier3s (gVisor + waypipe bridge) derives the BARE silo,
+// the same shape tier-3 uses — the canonical key for clipboard rules,
+// launch records and broker lineage is <silo>, never "tier3s/<silo>".
+// ensures: a tier3s toplevel's clipboard identity is its bare silo name
+sameStableSilo(
+    {
+        sandboxEngine: "qdistro.tier3s",
+        appId: "qdistro.tier3s.smoke",
+        instanceId: "launch-token-a",
+    },
+    {
+        sandboxEngine: "qdistro.tier3s",
+        appId: "qdistro.tier3s.smoke",
+        instanceId: "launch-token-b",
+    },
+    "smoke"
+);
+
+// ensures: the tier3s launch token (instance_id) never enters the silo key
+assert.strictEqual(
+    ClipboardSilo.fromSecctx("qdistro.tier3s", "qdistro.tier3s.smoke", "0123456789abcdef"),
+    ClipboardSilo.fromSecctx("qdistro.tier3s", "qdistro.tier3s.smoke", "fedcba9876543210")
+);
+
+// ensures: "qdistro.tier3s" engine is NOT claimed by the tier3 prefix branch
+// (its result would be identical here, so prove it via the inverse: a tier3s
+// engine carrying a NON-tier3s-shaped app_id falls through to the generic
+// engine:app_id pair, never to a bare-silo shape)
+assert.strictEqual(
+    ClipboardSilo.fromSecctx("qdistro.tier3s", "not-a-tier3s-appid", "instance-a"),
+    "qdistro.tier3s:not-a-tier3s-appid"
+);
+// ensures: a tier3 engine carrying a tier3s-SHAPED app_id is NOT a tier3s
+// silo — the app_id "qdistro.tier3s.evil" does not start with
+// "qdistro.tier3." (the 's' breaks the prefix) and the engine is not
+// "qdistro.tier3s", so the generic namespaced engine:app_id pair applies.
+assert.strictEqual(
+    ClipboardSilo.fromSecctx("qdistro.tier3", "qdistro.tier3s.evil", "instance-a"),
+    "qdistro.tier3:qdistro.tier3s.evil"
+);
+// ensures: a tier3s engine with a MISSING app_id fails safe to "" — no
+// engine-only bucket, and the tier3s MIME strip is never dodged by an
+// empty app_id collapsing into a shared identity.
+assert.strictEqual(
+    ClipboardSilo.fromSecctx("qdistro.tier3s", "", "instance-a"),
+    ""
+);
+// ensures: a tier3s silo and a same-named tier-3 silo stay distinct is NOT
+// guaranteed — they share the bare-silo namespace BY DESIGN (canonical key
+// is <silo> on both tiers), so prove at least that a tier3s silo never
+// collapses into the tier2/tier5 shapes.
+assert.notStrictEqual(
+    ClipboardSilo.fromSecctx("qdistro.tier3s", "qdistro.tier3s.smoke", "tok"),
+    ClipboardSilo.fromSecctx("qdistro.tier5", "qdistro.tier5.smoke", "tok")
+);
+
 sameStableSilo(
     {
         sandboxEngine: "qdistro.tier5",

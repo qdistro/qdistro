@@ -1,0 +1,73 @@
+[vm-exec] guest identity pinned (pid 4398 start 7285)
+
+## 0. preconditions
+PASS: probe PASS (0)
+PASS: weston-terminal image loaded (yes)
+PASS: foot image loaded (yes)
+PASS: admin compositor socket present (yes)
+PASS: qdshell is up (active)
+PASS: ydotoold socket present (input injection path) (yes)
+PASS: profile is dev (dev)
+PASS: pre: control records (0)
+PASS: pre: scopes (0)
+PASS: pre: labelled containers (0)
+PASS: pre: runsc-bundle processes (0)
+PASS: pre: state root holds no container state (0)
+PASS: pre: no cleanup call scope left (0)
+PASS: pre: no cleanup work dir left (0)
+PASS: CreateTier3sSilo s124w (Created)
+PASS: CreateTier3sSilo s124f (Created)
+PASS: broker answers allow (weston-terminal spawn) (allow)
+PASS: broker answers allow (foot spawn) (allow)
+
+## 1. weston-terminal renders through the bridge
+PASS: s124w launch up (token 3acff854d60a53d5905f8d8430d4e644)
+PASS: weston toplevel carries the [3s:s124w] title prefix (1)
+PASS: weston: findSiloHandle resolves the tier3s toplevel (HANDLE=1)
+PASS: weston: injectFocus accepted for the tier3s handle (ok handle=1 seat=default)
+PASS: weston: compositor reports focus on handle 1 (yes)
+PASS: weston: compositor mapped a committed frame (mapped handle=1) (1)
+PASS: weston: typed command created /tmp/s124-s124w-typed INSIDE the sandbox
+
+## 2. foot renders through the bridge
+PASS: s124f launch up (token 5a7e17ae8eb3c2156b3a9d072f888cf3)
+PASS: foot toplevel carries the [3s:s124f] title prefix (1)
+PASS: foot: findSiloHandle resolves the tier3s toplevel (HANDLE=2)
+PASS: foot: injectFocus accepted for the tier3s handle (ok handle=2 seat=default)
+PASS: foot: compositor reports focus on handle 2 (yes)
+PASS: foot: compositor mapped a committed frame (mapped handle=2) (1)
+PASS: foot: typed command created /tmp/s124-s124f-typed INSIDE the sandbox
+
+## 3. teardown removes both toplevels
+PASS: StopSilo s124w (Stopped)
+PASS: StopSilo s124f (Stopped)
+PASS: teardown/s124w: all 17 launch processes gone (pid+starttime)
+PASS: teardown/s124w: scope qdistro-tier3s-3acff854d60a53d5905f8d8430d4e644.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-3acff854d60a53d5905f8d8430d4e644.scope absent)
+PASS: teardown/s124w: per-launch dir /run/qdistro-tier3s/3acff854d60a53d5905f8d8430d4e644 gone
+PASS: teardown/s124w: control record /run/qdistro-tier3s-ctl/3acff854d60a53d5905f8d8430d4e644 gone
+PASS: teardown/s124w: container qdistro-tier3s-s124w gone (podman exists rc=1)
+PASS: teardown/s124w: no runsc state for 713e9232f31d in /run/qdistro-tier3s-runsc/1000
+PASS: teardown/s124w: bridge client+wrapper gone (pid+starttime)
+PASS: teardown/s124w: secctx listener wayland-secctx-5773-0 revoked
+PASS: teardown/s124w: launch record /run/user/1000/qdistro-tier3s-launchrec-00e08ccb537594e72e2af499094645be.pid removed
+PASS: s124w: compositor logged toplevel_removed for handle 1 (1)
+PASS: teardown/s124f: all 12 launch processes gone (pid+starttime)
+PASS: teardown/s124f: scope qdistro-tier3s-5a7e17ae8eb3c2156b3a9d072f888cf3.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-5a7e17ae8eb3c2156b3a9d072f888cf3.scope absent)
+PASS: teardown/s124f: per-launch dir /run/qdistro-tier3s/5a7e17ae8eb3c2156b3a9d072f888cf3 gone
+PASS: teardown/s124f: control record /run/qdistro-tier3s-ctl/5a7e17ae8eb3c2156b3a9d072f888cf3 gone
+PASS: teardown/s124f: container qdistro-tier3s-s124f gone (podman exists rc=1)
+PASS: teardown/s124f: no runsc state for 1d4d9afb8a98 in /run/qdistro-tier3s-runsc/1000
+PASS: teardown/s124f: bridge client+wrapper gone (pid+starttime)
+PASS: teardown/s124f: secctx listener wayland-secctx-6630-0 revoked
+PASS: teardown/s124f: launch record /run/user/1000/qdistro-tier3s-launchrec-25a449aecccf768e72edc90a7050386c.pid removed
+PASS: s124f: compositor logged toplevel_removed for handle 2 (1)
+PASS: DeleteSilo s124w (absent)
+PASS: DeleteSilo s124f (absent)
+PASS: end: control records (0)
+PASS: end: scopes (0)
+PASS: end: labelled containers (0)
+PASS: end: runsc-bundle processes (0)
+PASS: end: state root holds no container state (0)
+PASS: end: no cleanup call scope left (0)
+PASS: end: no cleanup work dir left (0)
+[s124] 63 passes, 0 failures

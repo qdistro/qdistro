@@ -17,7 +17,8 @@ const executor = fs.readFileSync(
   path.join(root, "Services/Qdwin/RemoteDisplayLease.qml"), "utf8");
 
 assert.ok(header.includes("setRemoteOutputInput(const QString &outputName"));
-assert.ok(source.includes("constexpr uint32_t kBindVersion = 34;"));
+assert.ok(/constexpr uint32_t kBindVersion = ([3-9][4-9]|[4-9][0-9]|[1-9][0-9]{2,});/.test(source),
+  "remote-output-input requires kBindVersion >= 34");
 assert.ok(source.includes("qdwin_shell_v1_set_remote_output_input("));
 assert.ok(source.includes("shellVersion_ < 34"));
 assert.ok(source.includes("remote_output_input_result"));

@@ -1,0 +1,432 @@
+1..1
+# [tier3s] tested commit bb0b25c6b323d7f688d7f34e8dcf4ac522594de5; runsc 20260928.0 (sha512 ok); image 1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92
+# [tier3s] staged GUI image weston-terminal (c1cfa112ea7171ba1c62d14d9adda09e40b530bd9f5b3e76cfaf4e29ff0b345e)
+# [vm-exec] guest identity pinned (pid 1251 start 1418)
+# [vm-exec] Waiting... (polls=30s elapsed=32s)
+# 
+# ## 0. guest
+# INFO: profile: QDISTRO_PROFILE=dev 
+# INFO: kernel 7.2.8-1-default; podman version 6.0.2; systemd 261 (261.2); selinux Permissive
+# PASS: o10: worker image (built without QDISTRO_TIER3S=1) carries no tier 3s file
+# 
+# ## 1. stage the tested commit, root-owned
+# PASS: staged src.tar
+# INFO: tested commit bb0b25c6b323d7f688d7f34e8dcf4ac522594de5
+# PASS: staged tree has the tier 3s sources (yes)
+# 
+# ## 2. installer WITHOUT QDISTRO_TIER3S (owner O10: installs nothing tier 3s)
+#     install-session-manager: tier 3s not installed (QDISTRO_TIER3S is not 1; paravirt O10)
+# PASS: o10: installer without the flag rc (0)
+# PASS: o10: installer without the flag says so (1)
+# PASS: o10: no tier 3s file after the installer ran without the flag
+# 
+# ## 3. installer WITH QDISTRO_TIER3S=1 from the tested commit
+#     session manager ready on org.qdistro.SessionManager1
+# PASS: installer with QDISTRO_TIER3S=1 rc (0)
+# PASS: installed /usr/lib/qdistro/tier3s/spawn-tier3s.sh = tested commit (0fd8c55c2c72d567e5898c54f6877567b558f14436aa159f02104c0c4a4f2035)
+# PASS: installed /usr/lib/qdistro/tier3s/spawn-tier3s.sh owner/mode (root:root 755)
+# PASS: installed /usr/lib/qdistro/tier3s/probe.sh = tested commit (ab33f366968738fdb5db3e93a9f19308dc8d19bb022815154109f149e73bb1ba)
+# PASS: installed /usr/lib/qdistro/tier3s/probe.sh owner/mode (root:root 755)
+# PASS: installed /usr/lib/qdistro/tier3s/tier3s-runsc = tested commit (2fb499ed49e8e866a20eea62d85de39653e236a9e4d14db9b608aa76417d4fce)
+# PASS: installed /usr/lib/qdistro/tier3s/tier3s-runsc owner/mode (root:root 755)
+# PASS: installed /usr/lib/qdistro/tier3s/RUNSC_RELEASE = tested commit (b0b60c5230d11c46eb52588e308ef93eba3cbff4ce5871d929059c8fa969b3a3)
+# PASS: installed /usr/lib/qdistro/tier3s/RUNSC_RELEASE owner/mode (root:root 644)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/foot.json = tested commit (f7b8c94fcc26455cb986e3eb1bbd37785cb1bfd3d54f233a17e6f0ba3c7459f6)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/foot.json owner/mode (root:root 644)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json = tested commit (13c0e63dd2684e4f9a5c30b38d2e71b363ab33fc1bb7f68b4f53b8a8aa29b41d)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/headless-smoke.json owner/mode (root:root 644)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/weston-terminal.json = tested commit (0384b8f78a14e515046bc484c87755e5568e2db5a6e7494e44a68180814e981d)
+# PASS: installed /usr/lib/qdistro/tier3s/seccomp/weston-terminal.json owner/mode (root:root 644)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-scope = tested commit (ed58ac1beb23dd8bc66d39db6a23c33cc2c80dfe3953ebc835d6275297aec25b)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-scope owner/mode (root:root 755)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-cleanup = tested commit (99cc7d01197fb87e7331e81482407807f2e480470cf7525d4773bbe8f0a9d26d)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-cleanup owner/mode (root:root 755)
+# PASS: installed /usr/lib/tmpfiles.d/qdistro-tier3s.conf = tested commit (a4896cb3d4ac70444da2a1a520ec7e9caf2a9232602a70372d38cbded39ee6ca)
+# PASS: installed /usr/lib/tmpfiles.d/qdistro-tier3s.conf owner/mode (root:root 644)
+# PASS: installed /etc/systemd/system/qdistro-tier3s-silo@.service = tested commit (fb081df29bd074601e35eddd142beb9cdb49c13d85640c8252ee39c19de4d1ff)
+# PASS: installed /etc/systemd/system/qdistro-tier3s-silo@.service owner/mode (root:root 644)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-silo-launch = tested commit (47778f48cb4735f7abc0882d51fbda407fa6488476d5c1ef0e04a59d928a1692)
+# PASS: installed /usr/libexec/qdistro/qdistro-tier3s-silo-launch owner/mode (root:root 755)
+# PASS: installed /usr/libexec/qdistro/qdistro_session_manager.py = tested commit (e392b9c2f396e8a49b32d34d845732879b630d15a1a145dab60334696692aae9)
+# PASS: installed /usr/libexec/qdistro/qdistro_session_manager.py owner/mode (root:root 755)
+# PASS: installed broker = tested commit (795a4606e292760d93968d36f67abacf6c39e54ede90763f2e4a7a0e5e58cc1a)
+# PASS: tmpfiles: state root (1000:1000 700)
+# PASS: tmpfiles: control dir (root:root 700)
+# PASS: tmpfiles: per-launch parent (root:root 755)
+# PASS: tmpfiles: tier3s stanza dir (root:root 700)
+# PASS: runsc not installed by the installer (no)
+# PASS: unit loaded from /etc (/etc/systemd/system/qdistro-tier3s-silo@.service)
+# PASS: unit StopPropagatedFrom (O11) (qdistro-session-manager.service)
+# PASS: session manager runs the installed code (pid 2089, serves CreateTier3sSilo)
+# PASS: broker has the rules-only tier3s prefix (1)
+# 
+# ## 4. runsc: offline provision from the staged, pin-checked tarball
+# PASS: runsc tarball sha512 = pin (20260928.0) (4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b)
+#     provision-runsc: all 6 pinned files verified
+#     provision-runsc: runsc --version: runsc version release-20260928.0
+#     provision-runsc: PASS: installed runsc 20260928.0 to /usr/libexec/qdistro/runsc
+# PASS: provision-runsc.sh --offline rc (0)
+#     PASS profile: dev (/etc/qdistro/profile)
+#     PASS kernel: >= 5.6 (7.2.8-1-default)
+#     PASS seccomp: /proc/sys/kernel/seccomp present (actions: kill_process kill_thread trap errno user_notif trace log allow)
+#     PASS userns: max_user_namespaces=15373 (minimum, not capacity)
+#     PASS ptrace_scope: 1 (<= 2)
+#     PASS subuid: admin:100000:65536
+#     PASS subgid: admin:100000:65536
+#     PASS newuidmap: /usr/bin/newuidmap
+#     PASS newgidmap: /usr/bin/newgidmap
+#     PASS pin: /usr/lib/qdistro/tier3s/RUNSC_RELEASE release=20260928.0
+#     PASS runsc: release stamp matches pin; /usr/libexec/qdistro/runsc/runsc present (not yet executed)
+#     PASS install_path: /usr/libexec/qdistro/runsc and ancestors up to /: real dirs, uid 0, not group/other-writable
+#     PASS bundle: /usr/libexec/qdistro/runsc: 6 files, exact set, sha512 match pin
+#     PASS runsc_version: runsc version release-20260928.0 (matches pin, rc=0; executed the verified inode 65027:66093887)
+#     PASS wrapper: /usr/libexec/qdistro/tier3s-runsc (identical to /usr/lib/qdistro/tier3s/tier3s-runsc)
+#     PASS workloads: /usr/lib/qdistro/tier3s/workloads (3 declaration(s))
+#     PASS state_root: /run/qdistro-tier3s-runsc/1000 (uid 1000 0700 under /run/qdistro-tier3s-runsc)
+#     PASS podman: 6.0.2 (>= 6)
+#     PASS podman_runtime: --runtime /usr/libexec/qdistro/tier3s-runsc recorded
+#     PASS label_disable: accepted (|[label=disable])
+#     INFO kvm: /dev/kvm present (not used: --platform=systrap)
+#     INFO selinux: Permissive
+#     RESULT PASS: tier 3s prerequisites present
+# PASS: installed probe rc (0)
+# PASS: installed probe RESULT (1)
+# PASS: probe state_root (1)
+# 
+# ## 5. workload image from the OCI archive (built once with registry access)
+# PASS: image archive and manifest staged
+#     IMAGE_FOOT=qdistro/tier3s-foot:latest
+#     IMAGE_ID_FOOT=4149fd5f34546cf0b73329384de250e6397b2ff8b52783c1aea6faacefa62237
+#     IMAGE_DIGEST_FOOT=sha256:a12fd56776fbf601f6deea509f210e38d9938bde4c64f1ae1f2b55ea78b72e1a
+#     IMAGE_HEADLESS_SMOKE=qdistro/tier3s-headless-smoke:latest
+#     IMAGE_ID_HEADLESS_SMOKE=1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92
+#     IMAGE_DIGEST_HEADLESS_SMOKE=sha256:784f5445a0f6471a43ecced8d10e78378b1f06e2319f85d24682e546d013aa6f
+#     IMAGE_WESTON_TERMINAL=qdistro/tier3s-weston-terminal:latest
+#     IMAGE_ID_WESTON_TERMINAL=c1cfa112ea7171ba1c62d14d9adda09e40b530bd9f5b3e76cfaf4e29ff0b345e
+#     IMAGE_DIGEST_WESTON_TERMINAL=sha256:b0e653ce4cff2ba0dd66c184eb8a442f1faa75f92ec98141162b47ce300ff64f
+#     IMAGE_SNAPSHOT=20260930
+#     IMAGE_ARCHIVE_SHA256_FOOT=5c39ff8f01a7e7fa827dbf281a512609ffa2cd80bb663ede2ae153df70e76695
+#     IMAGE_ARCHIVE_SHA256_HEADLESS_SMOKE=6c4d8e6efd1c50fe4e0c664cbc99e2edf62f0eb9ac73e781822c238da1852437
+#     IMAGE_ARCHIVE_SHA256_WESTON_TERMINAL=7affcd190a15508bd2d2f9e99cd8050487906d70b13bb3a15c962c05fc425056
+#     INPUT_KEY=7a3aa746fecb90fbff03f540eceeb495
+#     BUILT_FROM_COMMIT=7517e36e3e3b017cbf4f4607c18a9a7e6c86f4a8
+#     BUILD_VM=qdistro-tester5
+#     BUILT_AT=2026-10-03T11:00:41Z
+#     IMAGE=qdistro/tier3s-headless-smoke:latest
+#     IMAGE_ID=1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92
+#     IMAGE_DIGEST=sha256:784f5445a0f6471a43ecced8d10e78378b1f06e2319f85d24682e546d013aa6f
+#     IMAGE_ARCHIVE_SHA256=6c4d8e6efd1c50fe4e0c664cbc99e2edf62f0eb9ac73e781822c238da1852437
+# PASS: archive sha256 = manifest (6c4d8e6efd1c50fe4e0c664cbc99e2edf62f0eb9ac73e781822c238da1852437)
+# PASS: manifest snapshot = snapshot.conf pin (20260930)
+# PASS: manifest input key = the tested commit's image inputs (7a3aa746fecb90fbff03f540eceeb495)
+#     Writing manifest to image destination
+#     Loaded image: localhost/qdistro/tier3s-headless-smoke:latest
+# PASS: podman load (admin) rc (0)
+# PASS: loaded image ID = manifest IMAGE_ID (1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92)
+# PASS: image snapshot label = pin (20260930)
+# IMAGE_ID=1eee52a21ad86f065d227988b4ff8e279fe838e4ed84ee77f2aed0d372deae92
+# IMAGE_DIGEST=sha256:87045662a7f6622895173c482f57ea425abf915facafffd854950d5b5f05d69e
+# INFO: the manifest digest changes across the oci-archive round trip (manifest re-serialized; build VM: sha256:784f5445a0f6471a43ecced8d10e78378b1f06e2319f85d24682e546d013aa6f); the asserted identity is the image ID (config digest)
+# 
+# ## 5b. Phase B: per-workload GUI image archives (weston-terminal)
+# PASS: weston-terminal archive sha256 = manifest (7affcd190a15508bd2d2f9e99cd8050487906d70b13bb3a15c962c05fc425056)
+#     Writing manifest to image destination
+#     Loaded image: localhost/qdistro/tier3s-weston-terminal:latest
+# PASS: podman load weston-terminal (admin) rc (0)
+# PASS: loaded weston-terminal image ID = manifest (c1cfa112ea7171ba1c62d14d9adda09e40b530bd9f5b3e76cfaf4e29ff0b345e)
+# PASS: weston-terminal image snapshot label = pin (20260930)
+# PASS: weston-terminal image workload label (weston-terminal)
+# PASS: weston-terminal workload declaration installed (GUI=1) (1)
+# PASS: admin compositor socket present (yes)
+# PASS: qdshell is up (active)
+# PASS: tool runuser installed (yes)
+# PASS: tool waypipe installed (yes)
+# PASS: tool qdistro-secctx-exec installed (yes)
+# PASS: tool dbus-send installed (yes)
+# PASS: tool sqlite3 installed (yes)
+# PASS: tool python3 installed (yes)
+# PASS: admin tool qs installed (yes)
+# PASS: admin tool ydotool installed (yes)
+# PASS: clipboard-source helper installed (/usr/bin/qdistro-test-clipboard-source)
+# PASS: pywayland importable as admin (yes)
+# 
+# ## 6. broker allow rule for the smoke spawn
+# PASS: broker without a rule (unknown)
+# PASS: broker with the allow rule (allow)
+# PASS: setup: control records (0)
+# PASS: setup: scopes (0)
+# PASS: setup: labelled containers (0)
+# PASS: setup: runsc-bundle processes (0)
+# PASS: setup: state root holds no container state (0)
+# PASS: setup: no cleanup call scope left (0)
+# PASS: setup: no cleanup work dir left (0)
+# [t3s-setup] 82 passes, 0 failures
+# [tier3s] t3s-setup transcript: /var/tmp/t3s-qci-b-4729fce58/ci/runs/bats-20261004T171430Z-298415/bats/phase7-tier3s-clipboard-gate.bats.scratch/t3s-setup.log
+# [vm-exec] guest identity pinned (pid 3783 start 6112)
+# [vm-exec] Waiting... (polls=30s elapsed=30s)
+# [vm-exec] Waiting... (polls=60s elapsed=62s)
+# [vm-exec] Waiting... (polls=90s elapsed=93s)
+# 
+# ## 0. preconditions, silos
+# PASS: probe PASS (0)
+# PASS: weston-terminal image loaded (yes)
+# PASS: admin compositor socket present (yes)
+# PASS: qdshell is up (active)
+# PASS: compositor not locked (focus injection requires an unlocked session) (0)
+# PASS: clipboard-source helper installed (/usr/bin/qdistro-test-clipboard-source)
+# PASS: profile is dev (dev)
+# PASS: pre: control records (0)
+# PASS: pre: scopes (0)
+# PASS: pre: labelled containers (0)
+# PASS: pre: runsc-bundle processes (0)
+# PASS: pre: state root holds no container state (0)
+# PASS: pre: no cleanup call scope left (0)
+# PASS: pre: no cleanup work dir left (0)
+# PASS: CreateTier3sSilo s127a (Created)
+# PASS: CreateTier3sSilo s127b (Created)
+# PASS: broker answers allow for the GUI spawn (allow)
+# PASS: no test clipboard rule present (no)
+# PASS: broker restarted under lineage_enforce (1)
+# PASS: silo-security registry stays root-owned 0644 after the test entries (644:0:0)
+# 
+# ## 1. two GUI silos up; focus B's toplevel
+# PASS: both GUI launches up (f7d9455cddf130d3e5dacd41f96b730e, 91b8b0699d4008210a18d8b19d7ea593)
+# PASS: A's spawn-registered bridge pid+starttime captured (yes)
+# PASS: findSiloHandle s127a (1)
+# PASS: findSiloHandle s127b (2)
+# PASS: injectFocus onto s127b's toplevel (ok handle=2 seat=default)
+# PASS: seat focus landed on s127b's toplevel (handle 2)
+# 
+# ## 2. live tagged selection s127a -> s127b: default deny
+# PASS: clip source A registered in the launch-record store
+# INFO: gate: [32m  INFO[97m qml[0m: [36m[20261004-171851][0m [35m ClipboardGate[0m CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+# PASS: qdshell gate line names the real tagged source silo (1)
+# PASS: default-deny verdict at set-time (1)
+# PASS: text/plain offer reached the broker unfiltered (1)
+# 
+# ## 3. strict MIME: image/png-only offer strips to deny
+# PASS: broker probe still denies transfer s127a->s127b (attested bridge pid) (deny)
+# PASS: enforce: an unrecorded pid can only deny (deny)
+# PASS: png clip source registered in the launch-record store
+# PASS: qdshell denied a png-only tier3s offer before the broker (1)
+# PASS: qdshell logged the tier3s mime-strip (1)
+# 
+# ## 4. SaveRule flips the live verdict to allow
+# PASS: SaveRule wrote the file (/etc/qdistro/rules.d/99-s127-clip.yaml)
+# PASS: broker logged the saverule reload (1)
+# PASS: broker probe allows transfer s127a->s127b under the rule (attested bridge pid) (allow)
+# PASS: enforce: a forged source-silo claim cannot steer — attested s127a decides the real A->B action (allow)
+# PASS: broker journaled the claim-vs-attested override (1)
+# PASS: enforce: a forged destination silo still denies (no rule for A->forged) (deny)
+# 
+# ## 4a. live rule-driven allow: cross-silo s127a -> s127b (source-peer relay)
+# PASS: seat focus on s127b's toplevel for the cross-silo offer
+# PASS: cross-silo source's real client pid resolved (6201)
+# PASS: cross-silo clip source A registered in the launch-record store
+# FAIL: no selection_set_source_peer_identity for pid 6201
+# FAIL: no live cross-silo allow for s127a->s127b
+# INFO: gate: 
+# FAIL: live rule-driven allow: cross-silo s127a -> s127b (source-peer relay): got '0', want '1'
+# 
+# ## 4b. live attested allow: bound tagged source -> same-silo
+# PASS: bound clip source C registered in the launch-record store
+# PASS: qdshell observed the bound source's toplevel
+# PASS: findSiloHandle s127c (3)
+# PASS: compositor attested the bound source's tag on its toplevel
+# PASS: injectFocus onto the bound source's toplevel (ok handle=3 seat=default)
+# PASS: seat focus landed on the bound source (handle 3)
+# INFO: gate: [32m  INFO[97m qml[0m: [36m[20261004-172011][0m [35m ClipboardGate[0m CLIPBOARD_GATE seat=default src_silo=s127c dst_silo=s127c mime_types=text/plain verdict=allow reason=broker:allow
+# PASS: live attested allow: bound tagged source -> same-silo (verify + record resolution) (1)
+# PASS: cold-verify bound offers denied first (the allow was earned) (1)
+# PASS: live allow carries dst_silo=s127c (bound => focused => same-silo) (1)
+# 
+# ## 5. focus-aware clear: selection owned by s127b, focus crosses to s127a
+# PASS: seat focus re-landed on s127b's toplevel (handle 2)
+# PASS: clip source B registered in the launch-record store
+# PASS: B's tagged offer recorded (_selectionSourceSilo tracks s127b)
+# PASS: focus crossing out of the source silo cleared the selection (1)
+# 
+# ## 6. receive-time gate: default deny, then per-mime allow
+# PASS: receive probe defaults to deny (deny)
+# PASS: SaveRule wrote the receive rule (/etc/qdistro/rules.d/98-s127-recv.yaml)
+# PASS: receive probe allows text/plain under the mime rule (attested bridge pid) (allow)
+# PASS: receive probe still denies image/png (mime selector) (deny)
+# 
+# ## 7. audit evidence
+# INFO: audit rows: transfer deny=1 allow=3 recv=3
+# PASS: audit: denied transfer row(s) recorded (1)
+# PASS: audit: allowed transfer row(s) recorded (3)
+# PASS: audit: receive probe row(s) recorded (3)
+# PASS: audit: deny row names the default-deny path (yes)
+# 
+# ## 8. cleanup
+# PASS: lineage_enforce restored (prior: 'absent') (False)
+# PASS: silo-security registry restored byte-exact (86261b736f482e7b328006cb89d64b7b740221a8880d5a5daf97e3721c238b52)
+# PASS: locker idle-timeout restored (ABSENT)
+# PASS: StopSilo s127a (Stopped)
+# PASS: StopSilo s127b (Stopped)
+# PASS: cleanup/A: bridge client+wrapper gone (pid+starttime)
+# PASS: cleanup/A: secctx listener wayland-secctx-4882-0 revoked
+# PASS: cleanup/A: launch record /run/user/1000/qdistro-tier3s-launchrec-11c6ac0827a4ccb46d09e78a81bb7ece.pid removed
+# PASS: cleanup/A: all 13 launch processes gone (pid+starttime)
+# PASS: cleanup/A: scope qdistro-tier3s-f7d9455cddf130d3e5dacd41f96b730e.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-f7d9455cddf130d3e5dacd41f96b730e.scope absent)
+# PASS: cleanup/A: per-launch dir /run/qdistro-tier3s/f7d9455cddf130d3e5dacd41f96b730e gone
+# PASS: cleanup/A: control record /run/qdistro-tier3s-ctl/f7d9455cddf130d3e5dacd41f96b730e gone
+# PASS: cleanup/A: container qdistro-tier3s-s127a gone (podman exists rc=1)
+# PASS: cleanup/A: no runsc state for 657811086b82 in /run/qdistro-tier3s-runsc/1000
+# PASS: cleanup/B: bridge client+wrapper gone (pid+starttime)
+# PASS: cleanup/B: secctx listener wayland-secctx-5577-0 revoked
+# PASS: cleanup/B: launch record /run/user/1000/qdistro-tier3s-launchrec-e180265603a72f86e9302a20ae99cc2e.pid removed
+# PASS: cleanup/B: all 17 launch processes gone (pid+starttime)
+# PASS: cleanup/B: scope qdistro-tier3s-91b8b0699d4008210a18d8b19d7ea593.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-91b8b0699d4008210a18d8b19d7ea593.scope absent)
+# PASS: cleanup/B: per-launch dir /run/qdistro-tier3s/91b8b0699d4008210a18d8b19d7ea593 gone
+# PASS: cleanup/B: control record /run/qdistro-tier3s-ctl/91b8b0699d4008210a18d8b19d7ea593 gone
+# PASS: cleanup/B: container qdistro-tier3s-s127b gone (podman exists rc=1)
+# PASS: cleanup/B: no runsc state for b0392a26018b in /run/qdistro-tier3s-runsc/1000
+# PASS: DeleteSilo s127a (absent)
+# PASS: DeleteSilo s127b (absent)
+# PASS: end: control records (0)
+# PASS: end: scopes (0)
+# PASS: end: labelled containers (0)
+# PASS: end: runsc-bundle processes (0)
+# PASS: end: state root holds no container state (0)
+# PASS: end: no cleanup call scope left (0)
+# PASS: end: no cleanup work dir left (0)
+# [s127] 97 passes, 3 failures
+# [tier3s] s127 transcript: /var/tmp/t3s-qci-b-4729fce58/ci/runs/bats-20261004T171430Z-298415/bats/phase7-tier3s-clipboard-gate.bats.scratch/s127.log
+not ok 1 phase7-tier3s-clipboard-gate: default-deny, SaveRule allow, strict MIME, focus clear, receive gate
+# (from function `assert_success' in file tests/integration/vm/helpers.bash, line 245,
+#  in test file tests/integration/vm/phase7-tier3s-clipboard-gate.bats, line 27)
+#   `assert_success' failed
+# --- command failed (exit=1) ---
+# [vm-exec] guest identity pinned (pid 3783 start 6112)
+# [vm-exec] Waiting... (polls=30s elapsed=30s)
+# [vm-exec] Waiting... (polls=60s elapsed=62s)
+# [vm-exec] Waiting... (polls=90s elapsed=93s)
+#
+# ## 0. preconditions, silos
+# PASS: probe PASS (0)
+# PASS: weston-terminal image loaded (yes)
+# PASS: admin compositor socket present (yes)
+# PASS: qdshell is up (active)
+# PASS: compositor not locked (focus injection requires an unlocked session) (0)
+# PASS: clipboard-source helper installed (/usr/bin/qdistro-test-clipboard-source)
+# PASS: profile is dev (dev)
+# PASS: pre: control records (0)
+# PASS: pre: scopes (0)
+# PASS: pre: labelled containers (0)
+# PASS: pre: runsc-bundle processes (0)
+# PASS: pre: state root holds no container state (0)
+# PASS: pre: no cleanup call scope left (0)
+# PASS: pre: no cleanup work dir left (0)
+# PASS: CreateTier3sSilo s127a (Created)
+# PASS: CreateTier3sSilo s127b (Created)
+# PASS: broker answers allow for the GUI spawn (allow)
+# PASS: no test clipboard rule present (no)
+# PASS: broker restarted under lineage_enforce (1)
+# PASS: silo-security registry stays root-owned 0644 after the test entries (644:0:0)
+#
+# ## 1. two GUI silos up; focus B's toplevel
+# PASS: both GUI launches up (f7d9455cddf130d3e5dacd41f96b730e, 91b8b0699d4008210a18d8b19d7ea593)
+# PASS: A's spawn-registered bridge pid+starttime captured (yes)
+# PASS: findSiloHandle s127a (1)
+# PASS: findSiloHandle s127b (2)
+# PASS: injectFocus onto s127b's toplevel (ok handle=2 seat=default)
+# PASS: seat focus landed on s127b's toplevel (handle 2)
+#
+# ## 2. live tagged selection s127a -> s127b: default deny
+# PASS: clip source A registered in the launch-record store
+# INFO: gate: [32m  INFO[97m qml[0m: [36m[20261004-171851][0m [35m ClipboardGate[0m CLIPBOARD_GATE seat=default src_silo=s127a dst_silo=s127b mime_types=text/plain verdict=deny reason=broker:deny
+# PASS: qdshell gate line names the real tagged source silo (1)
+# PASS: default-deny verdict at set-time (1)
+# PASS: text/plain offer reached the broker unfiltered (1)
+#
+# ## 3. strict MIME: image/png-only offer strips to deny
+# PASS: broker probe still denies transfer s127a->s127b (attested bridge pid) (deny)
+# PASS: enforce: an unrecorded pid can only deny (deny)
+# PASS: png clip source registered in the launch-record store
+# PASS: qdshell denied a png-only tier3s offer before the broker (1)
+# PASS: qdshell logged the tier3s mime-strip (1)
+#
+# ## 4. SaveRule flips the live verdict to allow
+# PASS: SaveRule wrote the file (/etc/qdistro/rules.d/99-s127-clip.yaml)
+# PASS: broker logged the saverule reload (1)
+# PASS: broker probe allows transfer s127a->s127b under the rule (attested bridge pid) (allow)
+# PASS: enforce: a forged source-silo claim cannot steer — attested s127a decides the real A->B action (allow)
+# PASS: broker journaled the claim-vs-attested override (1)
+# PASS: enforce: a forged destination silo still denies (no rule for A->forged) (deny)
+#
+# ## 4a. live rule-driven allow: cross-silo s127a -> s127b (source-peer relay)
+# PASS: seat focus on s127b's toplevel for the cross-silo offer
+# PASS: cross-silo source's real client pid resolved (6201)
+# PASS: cross-silo clip source A registered in the launch-record store
+# FAIL: no selection_set_source_peer_identity for pid 6201
+# FAIL: no live cross-silo allow for s127a->s127b
+# INFO: gate:
+# FAIL: live rule-driven allow: cross-silo s127a -> s127b (source-peer relay): got '0', want '1'
+#
+# ## 4b. live attested allow: bound tagged source -> same-silo
+# PASS: bound clip source C registered in the launch-record store
+# PASS: qdshell observed the bound source's toplevel
+# PASS: findSiloHandle s127c (3)
+# PASS: compositor attested the bound source's tag on its toplevel
+# PASS: injectFocus onto the bound source's toplevel (ok handle=3 seat=default)
+# PASS: seat focus landed on the bound source (handle 3)
+# INFO: gate: [32m  INFO[97m qml[0m: [36m[20261004-172011][0m [35m ClipboardGate[0m CLIPBOARD_GATE seat=default src_silo=s127c dst_silo=s127c mime_types=text/plain verdict=allow reason=broker:allow
+# PASS: live attested allow: bound tagged source -> same-silo (verify + record resolution) (1)
+# PASS: cold-verify bound offers denied first (the allow was earned) (1)
+# PASS: live allow carries dst_silo=s127c (bound => focused => same-silo) (1)
+#
+# ## 5. focus-aware clear: selection owned by s127b, focus crosses to s127a
+# PASS: seat focus re-landed on s127b's toplevel (handle 2)
+# PASS: clip source B registered in the launch-record store
+# PASS: B's tagged offer recorded (_selectionSourceSilo tracks s127b)
+# PASS: focus crossing out of the source silo cleared the selection (1)
+#
+# ## 6. receive-time gate: default deny, then per-mime allow
+# PASS: receive probe defaults to deny (deny)
+# PASS: SaveRule wrote the receive rule (/etc/qdistro/rules.d/98-s127-recv.yaml)
+# PASS: receive probe allows text/plain under the mime rule (attested bridge pid) (allow)
+# PASS: receive probe still denies image/png (mime selector) (deny)
+#
+# ## 7. audit evidence
+# INFO: audit rows: transfer deny=1 allow=3 recv=3
+# PASS: audit: denied transfer row(s) recorded (1)
+# PASS: audit: allowed transfer row(s) recorded (3)
+# PASS: audit: receive probe row(s) recorded (3)
+# PASS: audit: deny row names the default-deny path (yes)
+#
+# ## 8. cleanup
+# PASS: lineage_enforce restored (prior: 'absent') (False)
+# PASS: silo-security registry restored byte-exact (86261b736f482e7b328006cb89d64b7b740221a8880d5a5daf97e3721c238b52)
+# PASS: locker idle-timeout restored (ABSENT)
+# PASS: StopSilo s127a (Stopped)
+# PASS: StopSilo s127b (Stopped)
+# PASS: cleanup/A: bridge client+wrapper gone (pid+starttime)
+# PASS: cleanup/A: secctx listener wayland-secctx-4882-0 revoked
+# PASS: cleanup/A: launch record /run/user/1000/qdistro-tier3s-launchrec-11c6ac0827a4ccb46d09e78a81bb7ece.pid removed
+# PASS: cleanup/A: all 13 launch processes gone (pid+starttime)
+# PASS: cleanup/A: scope qdistro-tier3s-f7d9455cddf130d3e5dacd41f96b730e.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-f7d9455cddf130d3e5dacd41f96b730e.scope absent)
+# PASS: cleanup/A: per-launch dir /run/qdistro-tier3s/f7d9455cddf130d3e5dacd41f96b730e gone
+# PASS: cleanup/A: control record /run/qdistro-tier3s-ctl/f7d9455cddf130d3e5dacd41f96b730e gone
+# PASS: cleanup/A: container qdistro-tier3s-s127a gone (podman exists rc=1)
+# PASS: cleanup/A: no runsc state for 657811086b82 in /run/qdistro-tier3s-runsc/1000
+# PASS: cleanup/B: bridge client+wrapper gone (pid+starttime)
+# PASS: cleanup/B: secctx listener wayland-secctx-5577-0 revoked
+# PASS: cleanup/B: launch record /run/user/1000/qdistro-tier3s-launchrec-e180265603a72f86e9302a20ae99cc2e.pid removed
+# PASS: cleanup/B: all 17 launch processes gone (pid+starttime)
+# PASS: cleanup/B: scope qdistro-tier3s-91b8b0699d4008210a18d8b19d7ea593.scope gone (unit down, /sys/fs/cgroup/system.slice/qdistro-tier3s-91b8b0699d4008210a18d8b19d7ea593.scope absent)
+# PASS: cleanup/B: per-launch dir /run/qdistro-tier3s/91b8b0699d4008210a18d8b19d7ea593 gone
+# PASS: cleanup/B: control record /run/qdistro-tier3s-ctl/91b8b0699d4008210a18d8b19d7ea593 gone
+# PASS: cleanup/B: container qdistro-tier3s-s127b gone (podman exists rc=1)
+# PASS: cleanup/B: no runsc state for b0392a26018b in /run/qdistro-tier3s-runsc/1000
+# PASS: DeleteSilo s127a (absent)
+# PASS: DeleteSilo s127b (absent)
+# PASS: end: control records (0)
+# PASS: end: scopes (0)
+# PASS: end: labelled containers (0)
+# PASS: end: runsc-bundle processes (0)
+# PASS: end: state root holds no container state (0)
+# PASS: end: no cleanup call scope left (0)
+# PASS: end: no cleanup work dir left (0)
+# [s127] 97 passes, 3 failures

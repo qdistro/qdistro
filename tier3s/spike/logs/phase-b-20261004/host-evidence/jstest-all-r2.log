@@ -1,0 +1,59 @@
+app1apps-nameowner: all assertions passed
+brightness-policy: all assertions passed
+PASS: capture binding startup deferral + authority invariants
+capture-state: all assertions passed
+clipboard-actions: all assertions passed
+clipboard-deny-coalesce: all assertions passed
+clipboard-focus-clear: all assertions passed
+clipboard-id-guard: all assertions passed
+clipboard-silo: all assertions passed
+colorkeys: all assertions passed
+test_color_palette.js ok
+desktop-icons: all assertions passed
+display-primary: persistence invariant passed
+drift-guard: all assertions passed
+PASS: fork-strip guard (467 QML/JS files; no wizard/privacy/update modal components)
+fuzzysort: all assertions passed
+gate Process queues: identity correlation, expiry, stale replies, and fail-closed hooks PASS
+real Quickshell Process gates PASS (both verification orders)
+gtk-settings: all assertions passed
+test_idle_policy: all assertions passed
+keyboard-xkb: all assertions passed
+launcher-items: all assertions passed
+launcher-navigation: all assertions passed
+mime-associations: all assertions passed
+nested-pixelfeed-launch: SHM and tokenized-argv invariants passed
+notification-detail: all assertions passed
+notification-theme: all assertions passed
+test_output_layout: ok
+podapps-provider: async refresh and tier-2 badge invariants passed
+pointer-config: all assertions passed
+pointer-live-scope: all assertions passed
+pointer-overrides: all assertions passed
+pointer-parse: all assertions passed
+presentation-policy: all assertions passed
+qdistro-contract-drift: OK (31 checks against ../tests/contracts/qdistro_shell_contract.json)
+qdwin-only-guard: all assertions passed (498 source files scanned, no foreign-compositor dispatch/flags/writers)
+r9-input-gate: authenticated qdshell compositor gate passed
+r9-position-binding: qdshell-owned cross-output move path passed
+remote display lease: exact slot delta + fail-closed parsing PASS
+remote-machine-binding: broker-vouched chrome invariants passed
+remote-machine: all assertions passed
+removable-media: all assertions passed
+session-model: all assertions passed
+settings-recovery: all assertions passed
+settings-tree: all assertions passed
+shortcut-conflicts: all assertions passed
+silo-chrome: all assertions passed
+silo-egress: all assertions passed
+system-clock: all assertions passed
+taskbar-logic: all assertions passed
+taskbar-permissions: all assertions passed
+test_tier3s_gate_behaviour: all checks passed
+timeformat: all assertions passed
+tooltip-text: all assertions passed
+tray-known-items: all assertions passed
+widget-helpers: all assertions passed
+window-manager-policy: all assertions passed
+test_wm_accel: all assertions passed
+workspace-names: growth push invariant passed

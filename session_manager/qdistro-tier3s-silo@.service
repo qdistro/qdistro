@@ -2,8 +2,10 @@
 Description=qdistro tier-3s (gVisor) silo %i (Experimental, dev profile only)
 # Referenced by qdistro_session_manager.TIER3S_SILO_LAUNCHER_FMT
 # (qdistro-tier3s-silo@<name>.service); tier3s/CONTRACT.md §1 and §6. The
-# session manager (root) writes /run/qdistro/silo-launch/<name>.env (root 0600,
-# with a fresh launch token per start), then `systemctl start`s this unit.
+# session manager (root) writes /run/qdistro/tier3s-launch/<name>.env (root
+# 0600 in a dedicated root-0700 dir — never the shared tier-2 silo-launch
+# dir, paravirt ΔB5 — with a fresh launch token per start), then
+# `systemctl start`s this unit.
 #
 # A manager STOP stops this unit (paravirt O11: no sandbox outlives its
 # supervisor): StopPropagatedFrom= propagates the stop job, and After= orders
@@ -60,5 +62,12 @@ ExecStopPost=/usr/libexec/qdistro/qdistro-tier3s-cleanup --unit %n
 SuccessExitStatus=143 137
 # No Restart: a tier3s launch is explicit (paravirt O6).
 Restart=no
+# ΔB7/fable P2-6: the trusted bridge client (runuser -> secctx-exec ->
+# waypipe client) lives in THIS unit's cgroup, not the sandbox scope, and
+# the sandbox controls how much shm the host client mirrors. Cap the
+# supervisor unit so a hostile stream cannot make the host parser balloon
+# without bound. The sandbox itself is bounded by the owning scope.
+MemoryMax=1G
+TasksMax=96
 StandardOutput=journal
 StandardError=journal

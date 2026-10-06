@@ -1,0 +1,284 @@
+Oct 03 16:39:57 baseweed-admin systemd[837]: Started qdwin compositor (libweston + qdwin-shell.so).
+Oct 03 16:39:57 baseweed-admin weston[934]: Date: 2026-10-03 UTC
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.647] weston 16.0.0
+Oct 03 16:39:57 baseweed-admin weston[934]:                https://wayland.freedesktop.org
+Oct 03 16:39:57 baseweed-admin weston[934]:                Bug reports to: https://gitlab.freedesktop.org/wayland/weston/issues/
+Oct 03 16:39:57 baseweed-admin weston[934]:                Build: 16.0.0
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.649] Command line: /usr/bin/weston --config=/home/admin/weston.ini --socket=wayland-1
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.650] OS: Linux, 7.2.8-1-default, #1 SMP PREEMPT_DYNAMIC Sat Sep 26 07:00:58 UTC 2026 (9b36732), x86_64
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.650] Flight recorder: enabled, scopes subscribed: log
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.654] Using config file '/home/admin/weston.ini'
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.655] Output repaint window is 7 ms maximum.
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.657] Loading module '/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so'
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.666] initializing drm backend
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.666] Trying libseat launcher...
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.678] [libseat/libseat.c:73] Seat opened with backend 'seatd'
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.678] [libseat/backend/seatd.c:218] Enabling seat
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.678] libseat: session control granted
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.762] using /dev/dri/card0
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.762] DRM: supports atomic modesetting
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.762] DRM: supports cursor-plane hotspot (virtualized cursor)
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.762] DRM: does not support GBM modifiers
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.762] DRM: does not support Atomic async page flip
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.762] DRM: supports picture aspect ratio
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.797] DRM: EDID for the following head fails conformity:
+Oct 03 16:39:57 baseweed-admin weston[934]: Block 1, CTA-861 Extension Block:
+Oct 03 16:39:57 baseweed-admin weston[934]:   Padding: Contains non-zero bytes.
+Oct 03 16:39:57 baseweed-admin weston[934]: [16:39:57.798] DRM: head 'Virtual-1' found, connector 40 is connected, EDID make 'Red Hat, Inc.', model 'QEMU Monitor', serial ''
+Oct 03 16:39:57 baseweed-admin weston[934]:                Supported EOTF modes: SDR
+Oct 03 16:39:57 baseweed-admin weston[934]:                Supported colorimetry modes: default
+Oct 03 16:39:57 baseweed-admin weston[934]:                Supported VRR modes: (none),
+Oct 03 16:39:57 baseweed-admin weston[934]:                Supported color formats: AUTO
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.598] Loading module '/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/gl-renderer.so'
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.616] warning: failed to query rendering device from EGL
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.616] EGL version: 1.5
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.616] EGL vendor: Mesa Project
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.616] EGL client APIs: OpenGL OpenGL_ES
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.616] EGL features:
+Oct 03 16:39:58 baseweed-admin weston[934]:                EGL Wayland extension: no
+Oct 03 16:39:58 baseweed-admin weston[934]:                context priority: no
+Oct 03 16:39:58 baseweed-admin weston[934]:                buffer age: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                partial update: no
+Oct 03 16:39:58 baseweed-admin weston[934]:                swap buffers with damage: no
+Oct 03 16:39:58 baseweed-admin weston[934]:                configless context: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                surfaceless context: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                dmabuf support: modifiers
+Oct 03 16:39:58 baseweed-admin weston[934]:                fence sync: yes (wait)
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.812] GL version: OpenGL ES 3.2 Mesa 26.2.3
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.812] GLSL version: OpenGL ES GLSL ES 3.20
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.813] GL vendor: Mesa
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.813] GL renderer: llvmpipe (LLVM 23.1.1, 256 bits)
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.836] GL ES 3.2 - renderer features:
+Oct 03 16:39:58 baseweed-admin weston[934]:                read-back format: ARGB8888
+Oct 03 16:39:58 baseweed-admin weston[934]:                glReadPixels supports y-flip: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                glReadPixels supports PBO: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                wl_shm 10 bpc formats: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                wl_shm 16 bpc formats: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                wl_shm half-float formats: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                internal R and RG formats: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                OES_EGL_image_external: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                GPU timeline: no
+Oct 03 16:39:58 baseweed-admin weston[934]:                Texture immutability: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                Required precision: yes
+Oct 03 16:39:58 baseweed-admin weston[934]:                In-shader blending: yes
+Oct 03 16:39:58 baseweed-admin weston[934]: [16:39:58.836] Using GL renderer
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.024] event3  - QEMU QEMU USB Tablet: is tagged by udev as: Mouse
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.024] event3  - QEMU QEMU USB Tablet: device is a pointer
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.028] event4  - Power Button: is tagged by udev as: Keyboard
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.028] event4  - Power Button: device is a keyboard
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.029] event0  - AT Translated Set 2 keyboard: is tagged by udev as: Keyboard
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.029] event0  - AT Translated Set 2 keyboard: device is a keyboard
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.031] event2  - VirtualPS/2 VMware VMMouse: is tagged by udev as: Mouse
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.031] event2  - VirtualPS/2 VMware VMMouse: emulating high-resolution scroll wheel events.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.031] event2  - VirtualPS/2 VMware VMMouse: device is a pointer
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.032] event1  - VirtualPS/2 VMware VMMouse: is tagged by udev as: Mouse
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.032] event1  - VirtualPS/2 VMware VMMouse: device is a pointer
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.034] event5  - PC Speaker: not tagged as supported input device
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.048] event5  - not using input device '/dev/input/event5'
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.050] event6  - ydotoold virtual device: is tagged by udev as: Keyboard
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.050] event6  - ydotoold virtual device: emulating high-resolution scroll wheel events.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.050] event6  - ydotoold virtual device: device is a keyboard
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.050] libinput: configuring device "QEMU QEMU USB Tablet".
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.050] input device event3 has no enabled output associated (none named), skipping calibration for now.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.078] libinput: configuring device "Power Button".
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.078] libinput: configuring device "AT Translated Set 2 keyboard".
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.078] libinput: configuring device "VirtualPS/2 VMware VMMouse".
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.078] libinput: configuring device "VirtualPS/2 VMware VMMouse".
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.078] input device event1 has no enabled output associated (none named), skipping calibration for now.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.078] libinput: configuring device "ydotoold virtual device".
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.079] Registered plugin API 'weston_drm_output_api_v1' of size 40
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.079] Loading module '/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/pipewire-backend.so'
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.082] Initializing PipeWire backend
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.090] Registered plugin API 'weston_pipewire_output_api_v2' of size 24
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.090] Color manager: no-op
+Oct 03 16:39:59 baseweed-admin weston[934]:                  protocol support: no
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.090] Setting output 'Virtual-1' to color AUTO format
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.090] Output 'Virtual-1' attempts EOTF mode SDR and colorimetry mode default.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.090] Output 'Virtual-1' using color profile: stock sRGB color profile
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.090] Chosen EGL config details: id:  46 rgba: 8 8 8 0 buf: 24 dep:  0 stcl: 0 int: 1-1 type: win val: fix vis_id: XRGB8888 (0x34325258)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.091] Output Virtual-1 (crtc 39) video modes:
+Oct 03 16:39:59 baseweed-admin weston[934]:                1280x800@75.0, preferred, 107.3 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                5120x2160@50.0 64:27, 742.5 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                4096x2160@50.0 256:135, 594.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                3840x2160@60.0 16:9, 594.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                3840x2160@59.9 16:9, 593.4 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                3840x2160@50.0 16:9, 594.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1920x1440@60.0, 234.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                2560x1080@50.0 64:27, 185.6 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1856x1392@60.0, 218.2 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1792x1344@60.0, 204.8 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                2048x1152@60.0, 162.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1920x1200@59.9, 193.2 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1920x1080@60.0, current, 148.5 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1920x1080@50.0 16:9, 148.5 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1600x1200@60.0, 162.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1680x1050@60.0, 146.2 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1400x1050@60.0, 121.8 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1280x1024@60.0, 108.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1440x900@59.9, 106.5 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1280x960@60.0, 108.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1360x768@60.0, 85.5 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1280x768@59.9, 79.5 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                1024x768@60.0, 65.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                800x600@60.3, 40.0 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                640x480@60.0 4:3, 25.2 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]:                640x480@59.9, 25.2 MHz
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.091] associating input device event3 with output Virtual-1 (none by udev)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.091] associating input device event4 with output Virtual-1 (none by udev)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.091] associating input device event0 with output Virtual-1 (none by udev)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.091] associating input device event2 with output Virtual-1 (none by udev)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.091] associating input device event1 with output Virtual-1 (none by udev)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.092] associating input device event6 with output Virtual-1 (none by udev)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.092] Output 'Virtual-1' enabled with head(s) Virtual-1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.092] pipewire_backend_output_configure.. Done
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.092] Output 'pipewire-0' attempts EOTF mode SDR and colorimetry mode default.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.092] Output 'pipewire-0' using color profile: stock sRGB color profile
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.231] Output 'pipewire-0' enabled with head(s) pipewire-0
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.231] pipewire_backend_output_configure.. Done
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.231] Output 'pipewire-1' attempts EOTF mode SDR and colorimetry mode default.
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.231] Output 'pipewire-1' using color profile: stock sRGB color profile
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.232] Output 'pipewire-1' enabled with head(s) pipewire-1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.232] Compositor capabilities:
+Oct 03 16:39:59 baseweed-admin weston[934]:                arbitrary surface rotation: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                screen capture uses y-flip: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                cursor planes: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                arbitrary resolutions: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                view mask clipping: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                explicit sync: no
+Oct 03 16:39:59 baseweed-admin weston[934]:                color operations: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                color representation: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                in-shader blending: yes
+Oct 03 16:39:59 baseweed-admin weston[934]:                presentation clock: CLOCK_MONOTONIC, id 1
+Oct 03 16:39:59 baseweed-admin weston[934]:                presentation clock resolution: 0.000000001 s
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.232] Loading module '/usr/lib64/weston/qdwin-shell.so'
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.235] qdwin: locker bind policy defaulting to entrypoint=/usr/local/bin/qdlocker:/usr/bin/qdlocker (system interpreter + root-owned entrypoint; no explicit policy configured); set --qdwin-allowed-locker-any to override to uid-only
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.235] qdwin: locker bind policy uid=1000 entrypoint=/usr/local/bin/qdlocker:/usr/bin/qdlocker exe=(any) label=(any)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.235] qdwin: ext-idle-notify idle_time=0 internal_mode=1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin: cursor-shape theme=(default) size=24 loaded=0/36
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin: layer-popup grab handler registered
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin/nested-proxy: default keyboard grab installed on seat 'default'
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin: background curtain 3200x1080 installed
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin: WARNING shell-authorized output capture enabled via QDWIN_ENABLE_SHELL_CAPTURE — dev/test only, do not use in production
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin: retained-frame capture armed on output=Virtual-1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.236] qdwin: shell loaded (allowed_uid=1000); desktop + qdwin_shell_v1 ready
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.237] Loading module '/usr/lib64/libweston-16/xwayland.so'
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.239] Registered plugin API 'weston_xwayland_v3' of size 32
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.239] Registered plugin API 'weston_xwayland_surface_v2' of size 24
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.239] xserver listening on display :0
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.309] qdwin: bind attempt pid=1025 uid=1000 (allowed_uid=1000)
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.309] qdwin: bind accepted for uid=1000, hello sent
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.312] qdwin: cursor-sprite registered shape=default hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.312] qdwin: cursor_retry_install: scheduling first retry in 1000ms
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.315] qdwin: cursor-sprite registered shape=context-menu hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.316] qdwin: cursor-sprite registered shape=help hotspot=12,21
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.342] qdwin: cursor-sprite registered shape=pointer hotspot=7,5
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.433] qdwin: cursor-sprite registered shape=progress hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.472] qdwin: cursor-sprite registered shape=wait hotspot=11,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.473] qdwin: cursor-sprite registered shape=cell hotspot=11,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.474] qdwin: cursor-sprite registered shape=crosshair hotspot=11,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.478] qdwin: cursor-sprite registered shape=text hotspot=11,12
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.482] qdwin: cursor-sprite registered shape=vertical-text hotspot=12,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.482] qdwin: cursor-sprite registered shape=alias hotspot=18,5
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.483] qdwin: cursor-sprite registered shape=copy hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.483] qdwin: cursor-sprite registered shape=move hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.488] qdwin: cursor-sprite registered shape=no-drop hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.488] qdwin: cursor-sprite registered shape=not-allowed hotspot=12,12
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.492] qdwin: cursor-sprite registered shape=grab hotspot=11,2
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.495] qdwin: cursor-sprite registered shape=grabbing hotspot=9,5
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.495] qdwin: cursor-sprite registered shape=e-resize hotspot=19,13
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.495] qdwin: cursor-sprite registered shape=n-resize hotspot=13,6
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.496] qdwin: cursor-sprite registered shape=ne-resize hotspot=15,10
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.497] qdwin: cursor-sprite registered shape=nw-resize hotspot=10,10
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.497] qdwin: cursor-sprite registered shape=s-resize hotspot=13,18
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.498] qdwin: cursor-sprite registered shape=se-resize hotspot=15,15
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.499] qdwin: cursor-sprite registered shape=sw-resize hotspot=10,15
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.499] qdwin: cursor-sprite registered shape=w-resize hotspot=6,13
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.499] qdwin: cursor-sprite registered shape=ew-resize hotspot=12,12
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.499] qdwin: cursor-sprite registered shape=ns-resize hotspot=12,13
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.499] qdwin: cursor-sprite registered shape=nesw-resize hotspot=11,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.500] qdwin: cursor-sprite registered shape=nwse-resize hotspot=11,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.500] qdwin: cursor-sprite registered shape=col-resize hotspot=12,12
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.500] qdwin: cursor-sprite registered shape=row-resize hotspot=12,13
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.500] qdwin: cursor-sprite registered shape=all-scroll hotspot=11,11
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.501] qdwin: cursor-sprite registered shape=zoom-in hotspot=11,10
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.501] qdwin: cursor-sprite registered shape=zoom-out hotspot=11,10
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.502] qdwin: cursor-sprite registered shape=dnd-ask hotspot=3,1
+Oct 03 16:39:59 baseweed-admin weston[934]: [16:39:59.502] qdwin: cursor-sprite registered shape=all-resize hotspot=12,11
+Oct 03 16:40:00 baseweed-admin weston[934]: [16:40:00.165] qdwin: locker bind attempt pid=1029 uid=1000 (allowed_locker_uid=1000)
+Oct 03 16:40:00 baseweed-admin weston[934]: [16:40:00.165] qdwin: locker bound pid=1029 uid=1000 (initially_locked=0)
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.097] qdwin: bind attempt pid=1028 uid=1000 (allowed_uid=1000)
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.097] qdwin: bind accepted for uid=1000, hello sent
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.097] qdwin: ext_workspace_manager bound (count=4 active=0)
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.097] qdwin: zwlr_output_manager bound (serial=1)
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.097] qdwin: shell bound (uid=1000 pid=1028); replaying 0 toplevels
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.097] qdwin: seat_focus_changed seat=default handle=4294967295
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.099] qdwin: workspace 0 name="1"
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.099] qdwin: workspace 1 name="2"
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.099] qdwin: workspace 2 name="3"
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.099] qdwin: workspace 3 name="4"
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.100] qdwin: set_wm_policy focus=0 ffm_delay=0 raise_click=1 raise_hover=0 placement=2 snap=1 dist=16
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.100] qdwin: register_hotkey id=7101 mods=0x2 key=62
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.100] qdwin: register_hotkey id=7102 mods=0x4 key=103
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.100] qdwin: register_hotkey id=7103 mods=0x4 key=33
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.100] qdwin: register_hotkey id=7104 mods=0x4 key=105
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.100] qdwin: register_hotkey id=7105 mods=0x4 key=106
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.101] qdwin: set_pointer_config accel=0 profile=0 natural=0 tap=1 left=0 middle=0 dwt=1 scroll=1 (6 devices)
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.102] qdwin: set_key_repeat rate=25 delay=500
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell get_layer_surface ns=qdshell-background-Virtual-1 layer=2 output=0x55ee908e6c50
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell configure ns=qdshell-background-Virtual-1 layer=2 box=0,0 1920x1080 serial=1
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell get_layer_surface ns=qdshell-bar-content-Virtual-1 layer=2 output=0x55ee908e6c50
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell configure ns=qdshell-bar-content-Virtual-1 layer=2 box=0,0 1920x31 serial=2
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell get_layer_surface ns=qdshell-bar-exclusion-top-Virtual-1 layer=2 output=0x55ee908e6c50
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell configure ns=qdshell-bar-exclusion-top-Virtual-1 layer=2 box=0,0 1920x31 serial=3
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell get_layer_surface ns=qdshell-background-pipewire-0 layer=2 output=0x55ee908e81b0
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell configure ns=qdshell-background-pipewire-0 layer=2 box=1920,0 640x480 serial=4
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell get_layer_surface ns=qdshell-bar-content-pipewire-0 layer=2 output=0x55ee908e81b0
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell configure ns=qdshell-bar-content-pipewire-0 layer=2 box=1920,0 640x31 serial=5
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell get_layer_surface ns=qdshell-bar-exclusion-top-pipewire-0 layer=2 output=0x55ee908e81b0
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.124] qdwin: layer-shell configure ns=qdshell-bar-exclusion-top-pipewire-0 layer=2 box=1920,0 640x31 serial=6
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-background-pipewire-1 layer=2 output=0x55ee9090d810
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-background-pipewire-1 layer=2 box=2560,0 640x480 serial=7
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-bar-content-pipewire-1 layer=2 output=0x55ee9090d810
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-bar-content-pipewire-1 layer=2 box=2560,0 640x31 serial=8
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-bar-exclusion-top-pipewire-1 layer=2 output=0x55ee9090d810
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-bar-exclusion-top-pipewire-1 layer=2 box=2560,0 640x31 serial=9
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-dock-peek-Virtual-1 layer=2 output=0x55ee908e6c50
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-dock-peek-Virtual-1 layer=2 box=0,1079 1920x1 serial=10
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-dock-peek-pipewire-0 layer=2 output=0x55ee908e81b0
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-dock-peek-pipewire-0 layer=2 box=1920,479 640x1 serial=11
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-dock-peek-pipewire-1 layer=2 output=0x55ee9090d810
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-dock-peek-pipewire-1 layer=2 box=2560,479 640x1 serial=12
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell get_layer_surface ns=qdshell-image-cache-renderer layer=2 output=(nil)
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.125] qdwin: layer-shell configure ns=qdshell-image-cache-renderer layer=2 box=960,540 1x1 serial=13
+Oct 03 16:40:19 baseweed-admin weston[934]: [16:40:19.924] qdwin: layer-shell mapped ns=qdshell-background-Virtual-1 layer=2 at 0,0 1920x1080
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.011] qdwin: layer-shell mapped ns=qdshell-bar-content-Virtual-1 layer=2 at 0,0 1920x31
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.078] qdwin: layer-shell mapped ns=qdshell-bar-exclusion-top-Virtual-1 layer=2 at 0,0 1920x31
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.143] qdwin: layer-shell mapped ns=qdshell-background-pipewire-0 layer=2 at 1920,0 640x480
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.198] qdwin: layer-shell mapped ns=qdshell-bar-content-pipewire-0 layer=2 at 1920,0 640x31
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.252] qdwin: layer-shell mapped ns=qdshell-bar-exclusion-top-pipewire-0 layer=2 at 1920,0 640x31
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.321] qdwin: layer-shell mapped ns=qdshell-background-pipewire-1 layer=2 at 2560,0 640x480
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.553] qdwin: layer-shell mapped ns=qdshell-bar-content-pipewire-1 layer=2 at 2560,0 640x31
+Oct 03 16:40:20 baseweed-admin weston[934]: [16:40:20.958] qdwin: layer-shell mapped ns=qdshell-bar-exclusion-top-pipewire-1 layer=2 at 2560,0 640x31
+Oct 03 16:40:21 baseweed-admin weston[934]: [16:40:21.338] qdwin: layer-shell mapped ns=qdshell-dock-peek-Virtual-1 layer=2 at 0,1079 1920x1
+Oct 03 16:40:21 baseweed-admin weston[934]: [16:40:21.667] qdwin: layer-shell mapped ns=qdshell-dock-peek-pipewire-0 layer=2 at 1920,479 640x1
+Oct 03 16:40:22 baseweed-admin weston[934]: [16:40:22.044] qdwin: layer-shell mapped ns=qdshell-dock-peek-pipewire-1 layer=2 at 2560,479 640x1
+Oct 03 16:40:22 baseweed-admin weston[934]: [16:40:22.353] qdwin: layer-shell mapped ns=qdshell-image-cache-renderer layer=2 at 960,540 1x1
+Oct 03 16:40:22 baseweed-admin weston[934]: [16:40:22.734] qdwin: set_key_repeat rate=25 delay=500
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.086] qdwin: layer-shell get_layer_surface ns=qdshell-osd-Virtual-1 layer=3 output=0x55ee908e6c50
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.086] qdwin: layer-shell configure ns=qdshell-osd-Virtual-1 layer=3 box=1591,40 320x72 serial=14
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.086] qdwin: layer-shell get_layer_surface ns=qdshell-osd-pipewire-0 layer=3 output=0x55ee908e81b0
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.086] qdwin: layer-shell configure ns=qdshell-osd-pipewire-0 layer=3 box=2231,40 320x72 serial=15
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.086] qdwin: layer-shell get_layer_surface ns=qdshell-osd-pipewire-1 layer=3 output=0x55ee9090d810
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.086] qdwin: layer-shell configure ns=qdshell-osd-pipewire-1 layer=3 box=2871,40 320x72 serial=16
+Oct 03 16:40:23 baseweed-admin weston[934]: [16:40:23.768] qdwin: layer-shell mapped ns=qdshell-osd-Virtual-1 layer=3 at 1591,40 320x72
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.218] qdwin: layer-shell mapped ns=qdshell-osd-pipewire-0 layer=3 at 2231,40 320x72
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.286] qdwin: layer-shell mapped ns=qdshell-osd-pipewire-1 layer=3 at 2871,40 320x72
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.424] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-Virtual-1 layer=0 output=0x55ee908e6c50
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.424] qdwin: layer-shell configure ns=qdshell-wallpaper-Virtual-1 layer=0 box=0,0 1920x1080 serial=17
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.424] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-pipewire-0 layer=0 output=0x55ee908e81b0
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.424] qdwin: layer-shell configure ns=qdshell-wallpaper-pipewire-0 layer=0 box=1920,0 640x480 serial=18
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.424] qdwin: layer-shell get_layer_surface ns=qdshell-wallpaper-pipewire-1 layer=0 output=0x55ee9090d810
+Oct 03 16:40:24 baseweed-admin weston[934]: [16:40:24.424] qdwin: layer-shell configure ns=qdshell-wallpaper-pipewire-1 layer=0 box=2560,0 640x480 serial=19
+Oct 03 16:40:25 baseweed-admin weston[934]: [16:40:25.717] qdwin: layer-shell mapped ns=qdshell-wallpaper-Virtual-1 layer=0 at 0,0 1920x1080
+Oct 03 16:40:26 baseweed-admin weston[934]: [16:40:26.228] qdwin: layer-shell mapped ns=qdshell-wallpaper-pipewire-0 layer=0 at 1920,0 640x480
+Oct 03 16:40:26 baseweed-admin weston[934]: [16:40:26.759] qdwin: layer-shell mapped ns=qdshell-wallpaper-pipewire-1 layer=0 at 2560,0 640x480

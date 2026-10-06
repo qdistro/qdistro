@@ -29,11 +29,13 @@ zypper -n dup --no-recommends
 zypper -n install --no-recommends \
     meson ninja gcc gcc-c++ pkgconf-pkg-config git file make \
     selinux-policy-devel selinux-policy-targeted checkpolicy policycoreutils findutils \
-    weston-devel libweston-16 libweston-16-0 \
+    weston weston-devel libweston-16 libweston-16-0 python3-pywayland python3-cffi \
+    python3-pytest python3-Pillow noctalia-qs socat \
     wayland-devel wayland-protocols-devel libinput-devel libXcursor-devel \
     freerdp-devel winpr-devel pipewire-devel libselinux-devel \
     qt6-base-devel qt6-core-devel qt6-qml-devel qt6-quick-devel \
-    qt6-declarative-devel qt6-svg-devel qt6-shadertools \
+    qt6-declarative-devel qt6-declarative-tools qt6-svg-devel qt6-shadertools \
+    nodejs \
     libpixman-1-0-devel libxkbcommon-devel libevdev-devel \
     libgbm-devel libdrm-devel seatd-devel \
     Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \
