@@ -136,13 +136,14 @@ if ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !fou
     [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
     sleep 0.5
 fi
+HTTP_LOG="/tmp/bake-enforcing-http-$(id -u).log"
 (cd "$STAGE" && nohup python3 -m http.server "$HTTP_PORT" \
-        --bind 0.0.0.0 ) >/tmp/bake-enforcing-http.log 2>&1 &
+        --bind 0.0.0.0 ) >"$HTTP_LOG" 2>&1 &
 HTTP_PID=$!
 sleep 1
 if ! ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !found}'; then
-    echo "ERROR: http.server failed to bind $HTTP_PORT (see /tmp/bake-enforcing-http.log)" >&2
-    tail -5 /tmp/bake-enforcing-http.log >&2 || true
+    echo "ERROR: http.server failed to bind $HTTP_PORT (log: $HTTP_LOG)" >&2
+    tail -5 "$HTTP_LOG" >&2 || true
     exit 6
 fi
 
