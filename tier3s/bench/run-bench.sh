@@ -8,8 +8,10 @@
 # as the enforcing lanes do (src.tar + pinned runsc + checked OCI archives
 # over a private http server), brings up the admin GUI session, then runs
 # tier3s/bench/bench-guest.sh <runs> times and the interactive-latency probe
-# (virsh send-key -> first-differing virsh screenshot, <latency-samples>
-# median). Raw guest transcripts land in <logdir>/run-N.log; the lane-style
+# (virsh send-key -> first pixel change inside the target window's rect,
+# verified by ppmdiff.py against baselines taken with no input;
+# <latency-samples> median). Raw guest transcripts land in
+# <logdir>/run-N.log; the lane-style
 # AVC harvest lands in avc.log. The worker is destroyed on success and
 # preserved for triage on failure.
 set -uo pipefail
@@ -132,28 +134,63 @@ done
 
 # --- interactive latency: send-key -> first differing screenshot ------------
 if [ "$SAMPLES" -gt 0 ]; then
-    echo "== interactive latency ($SAMPLES samples: send-key -> frame sha change)"
+    echo "== interactive latency ($SAMPLES samples: send-key -> in-window pixel change)"
+    # desktop frame before the window maps -> diff with the windowed frame
+    # gives the target window's rect, so a post-key change can be verified
+    # to land INSIDE the focused window rather than anywhere on screen
+    shot() { virsh -c qemu:///session screenshot "$VM" "$1" >/dev/null 2>&1 && [ -s "$1" ]; }
+    shot "$STAGE/desk.ppm" || true
     if ssh_vm 'cd /var/tmp/t3s-dl && bash bench-guest.sh latency-up' | tee "$L/latency-up.log" | grep -q LATENCY-WINDOW-UP; then
         sleep 3
-        shot() { virsh -c qemu:///session screenshot "$VM" "$1" >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1; }
+        winrect=""
+        if shot "$STAGE/win.ppm" && [ -s "$STAGE/desk.ppm" ]; then
+            winrect=$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/win.ppm")
+            case "$winrect" in diff*) winrect=${winrect#diff } ;; *) winrect="" ;; esac
+        fi
+        [ -n "$winrect" ] || { echo "   WARN: window rect unknown — falling back to whole-frame diff"; }
         : > "$L/latency.log"
         for i in $(seq 1 "$SAMPLES"); do
-            # two baselines 0.3s apart: a diff is only counted when it
-            # differs from BOTH, so a blinking cursor/animation can't pose
-            # as key delivery
-            local_b0=$(shot "$STAGE/f0.ppm"); sleep 0.3; local_b1=$(shot "$STAGE/f0b.ppm")
+            # ambient-noise control: three baselines spanning ~1.2s must all
+            # be identical — a live cursor blink (~500ms period) or other
+            # animation invalidates the sample instead of impersonating a
+            # key echo
+            local_b0=$(shot "$STAGE/f0.ppm" && sha256sum "$STAGE/f0.ppm" | cut -d' ' -f1)
+            sleep 0.6
+            local_b1=$(shot "$STAGE/f0b.ppm" && sha256sum "$STAGE/f0b.ppm" | cut -d' ' -f1)
+            sleep 0.6
+            local_b2=$(shot "$STAGE/f0c.ppm" && sha256sum "$STAGE/f0c.ppm" | cut -d' ' -f1)
+            if [ -z "$local_b0" ] || [ "$local_b0" != "$local_b1" ] || [ "$local_b1" != "$local_b2" ]; then
+                echo "sample_$i MISS(noise)" >> "$L/latency.log"; sleep 0.5; continue
+            fi
             t0=$(date +%s%N)
-            if ! virsh -c qemu:///session send-key "$VM" KEY_A >/dev/null 2>&1 \
-                    || [ -z "$local_b0" ] || [ -z "$local_b1" ]; then
+            if ! virsh -c qemu:///session send-key "$VM" KEY_A >/dev/null 2>&1; then
                 echo "sample_$i MISS(setup)" >> "$L/latency.log"; sleep 0.5; continue
             fi
+            hit=""
             for _ in $(seq 1 40); do
-                now=$(shot "$STAGE/f1.ppm")
-                [ -n "$now" ] && [ "$now" != "$local_b0" ] && [ "$now" != "$local_b1" ] && break
+                if shot "$STAGE/f1.ppm"; then
+                    d=$(python3 "$here/ppmdiff.py" "$STAGE/f0.ppm" "$STAGE/f1.ppm")
+                    if [ "${d%% *}" = diff ]; then
+                        if [ -z "$winrect" ]; then hit=$d; break; fi
+                        read -r _ x0 y0 x1 y1 n <<EOF
+$d
+EOF
+                        read -r wx0 wy0 wx1 wy1 wn <<EOF
+$winrect
+EOF
+                        # accept only if the change bbox lies inside the
+                        # window rect (8px slack) — a key echo in the
+                        # focused window, not e.g. a panel repaint
+                        if [ "$x0" -ge $((wx0 - 8)) ] && [ "$y0" -ge $((wy0 - 8)) ] \
+                           && [ "$x1" -le $((wx1 + 8)) ] && [ "$y1" -le $((wy1 + 8)) ]; then
+                            hit=$d; break
+                        fi
+                    fi
+                fi
                 sleep 0.2
             done
             t1=$(date +%s%N)
-            if [ -n "${now:-}" ] && [ "$now" != "$local_b0" ] && [ "$now" != "$local_b1" ]; then
+            if [ -n "$hit" ]; then
                 echo "sample_$i $(( (t1 - t0) / 1000000 ))" >> "$L/latency.log"
             else
                 echo "sample_$i MISS" >> "$L/latency.log"
@@ -191,16 +228,25 @@ grep -q HARVEST-FAIL "$L/avc.log" && { echo "FAIL: audit harvest empty"; FAIL=1;
 } > "$L/INDEX.md"
 
 if [ "$FAIL" -eq 0 ] && [ "$avc_n" -eq 0 ]; then
-    virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
+    virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1
     virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
-        || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
-    if virsh -c qemu:///session dominfo "$VM" >/dev/null 2>&1; then
+        || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1
+    # unlink the overlay only when a SUCCESSFUL query proves the domain
+    # is gone — a failed `virsh list` (daemon down, conn error) is
+    # indeterminate and must preserve the disk
+    local_doms=$(virsh -c qemu:///session list --all --name 2>/dev/null); lrc=$?
+    if [ "$lrc" -ne 0 ]; then
+        echo "WARN: libvirt query failed — VM $VM state unknown, overlay preserved" >&2
+        FAIL=1
+    elif printf '%s\n' "$local_doms" | grep -qx "$VM"; then
         echo "WARN: VM $VM still defined — preserving, disk kept" >&2
+        FAIL=1
     else
         rm -f "$IMG/${VM}.qcow2"
         echo "== DONE: $L (VM removed)"
     fi
-else
+fi
+[ "$FAIL" -eq 0 ] && [ "$avc_n" -eq 0 ] || {
     echo "== DONE WITH FAILURES: $L — VM $VM preserved (avc=$avc_n fail=$FAIL)"
     exit 1
-fi
+}

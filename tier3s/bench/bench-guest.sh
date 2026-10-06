@@ -268,18 +268,29 @@ sec_mem() {
     scope_cur=$(cg_mem "$scope_cg")
     pss=$(sum_pss_kb $procs)
     bridge_pss=$(pss_kb "$(rec "$tok" bridge_client_pid)")
-    emit t3s_gui_scope_memory_current_mb "$(mb_b "$scope_cur")" MB
-    emit t3s_gui_scope_pss_mb "$(mb_kb "$pss")" MB
-    emit t3s_gui_bridge_client_pss_mb "$(mb_kb "$bridge_pss")" MB
-    emit t3s_gui_scope_procs "$(printf '%s\n' "$procs" | grep -c .)" count
+    if [ -n "$scope_cg" ] && [ -n "$scope_cur" ] && [ -n "$pss" ] \
+            && [ -n "$bridge_pss" ] && [ -n "$procs" ]; then
+        emit t3s_gui_scope_memory_current_mb "$(mb_b "$scope_cur")" MB
+        emit t3s_gui_scope_pss_mb "$(mb_kb "$pss")" MB
+        emit t3s_gui_bridge_client_pss_mb "$(mb_kb "$bridge_pss")" MB
+        emit t3s_gui_scope_procs "$(printf '%s\n' "$procs" | grep -c .)" count
+    else
+        fail "mem: GUI scope stats unreadable (cg=${scope_cg:-none} cur=${scope_cur:-none} pss=${pss:-none} bridge=${bridge_pss:-none})"
+    fi
     htok=$(up_silo "$HS")
     if [ -n "$htok" ]; then
         sleep 10
         hcg=$(rec "$htok" scope_cgroup)
         procs=$(tree_procs "/sys/fs/cgroup$hcg")
-        emit t3s_headless_scope_memory_current_mb "$(mb_b "$(cg_mem "$hcg")")" MB
-        emit t3s_headless_scope_pss_mb "$(mb_kb "$(sum_pss_kb $procs)")" MB
-        emit t3s_headless_scope_procs "$(printf '%s\n' "$procs" | grep -c .)" count
+        local hcur hpss
+        hcur=$(cg_mem "$hcg"); hpss=$(sum_pss_kb $procs)
+        if [ -n "$hcg" ] && [ -n "$hcur" ] && [ -n "$hpss" ] && [ -n "$procs" ]; then
+            emit t3s_headless_scope_memory_current_mb "$(mb_b "$hcur")" MB
+            emit t3s_headless_scope_pss_mb "$(mb_kb "$hpss")" MB
+            emit t3s_headless_scope_procs "$(printf '%s\n' "$procs" | grep -c .)" count
+        else
+            fail "mem: headless scope stats unreadable (cg=${hcg:-none} cur=${hcur:-none} pss=${hpss:-none})"
+        fi
     else
         fail "mem: headless launch failed"
     fi
@@ -294,6 +305,7 @@ sec_mem() {
     if [ -n "$t2cg" ] && [ -n "$(cg_mem "$t2cg")" ]; then
         emit t2_idle_memory_current_mb "$(mb_b "$(cg_mem "$t2cg")")" MB
         local t2pss; t2pss=$(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg"))
+        [ -n "$t2pss" ] || fail "mem: t2 PSS sum failed"
         emit t2_idle_pss_mb "$(mb_kb "$t2pss")" MB
     else
         # report the delegation chain so a miss is diagnosable from the log
@@ -311,9 +323,18 @@ sec_mem() {
     a0=$(cg_usage_us "$scope_cg"); b0=$(cg_usage_us "$t2cg"); h0=$(cg_usage_us "$hcg")
     sleep 60
     a1=$(cg_usage_us "$scope_cg"); b1=$(cg_usage_us "$t2cg"); h1=$(cg_usage_us "$hcg")
-    emit t3s_gui_idle_cpu_pct "$(python3 -c "print(f'{($a1-$a0)/60e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
-    emit t3s_headless_idle_cpu_pct "$(python3 -c "print(f'{($h1-$h0)/60e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
-    emit t2_idle_cpu_pct "$(python3 -c "print(f'{($b1-$b0)/60e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
+    cpu_pct() { # cpu_pct <meas> <us_before> <us_after> — fail, don't emit, on missing data
+        if [ -n "$2" ] && [ -n "$3" ]; then
+            local v; v=$(python3 -c "print(f'{($3-$2)/60e6*100:.2f}')" 2>/dev/null)
+            [ -n "$v" ] || { fail "cpu $1: calc failed"; return; }
+            emit "$1" "$v" pct_core
+        else
+            fail "cpu $1: usage_usec missing (${2:-unset} -> ${3:-unset})"
+        fi
+    }
+    cpu_pct t3s_gui_idle_cpu_pct "$a0" "$a1"
+    cpu_pct t3s_headless_idle_cpu_pct "$h0" "$h1"
+    cpu_pct t2_idle_cpu_pct "$b0" "$b1"
     pm rm -f t2mem > /dev/null 2>&1
     sm StopSilo si "$HS" 10 > /dev/null 2>&1
     teardown_one "$GS"
@@ -326,31 +347,39 @@ sec_mem() {
 # internals are the same ones the launch path gets through the wrapper).
 # syscost emits exactly one line of k=v fields; anything else is a probe
 # failure and must not reach the MEAS stream.
-valid_sysrow() { [ "${1##*getpid_ms_per_100k=}" != "$1" ]; }
+valid_sysrow() {   # one line carrying all three k=v fields
+    case "$1" in
+        *getpid_ms_per_100k=*\ openclose_ms_per_20k=*\ forkexec_ms_per_1k=*) return 0;;
+    esac
+    return 1
+}
 sec_sys() {
     step "syscall cost (syscost binary, self-timed)"
-    local out
+    local out rc=0
     emit t2_runtime "$(pm info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" -
-    out=$("$BW/syscost" 2>&1 | tr '\n' ' ')
-    valid_sysrow "$out" || fail "sys host probe: $out"
+    out=$("$BW/syscost" 2>&1 | tr '\n' ' ') || rc=$?
+    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys host probe (rc=$rc): $out"
     emit sys_host "$out" -
     # tier 2: the binary must be owned by admin so rootless podman's :z
     # relabel can lsetxattr it (root-owned files fail under enforcing)
     local ap=/home/admin/t3s-syscost
     install -m 0755 -o admin -g admin "$BW/syscost" "$ap"
+    rc=0
     out=$(pm run --rm --name t2sys --network none \
         --security-opt label=disable \
         -v "$ap:/bench/syscost:ro,z" --entrypoint /bench/syscost "$IMGW" 2>&1 \
-        | tr '\n' ' ')
+        | tr '\n' ' ') || rc=$?
     rm -f "$ap"
-    valid_sysrow "$out" || fail "sys t2 probe: $out"
+    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys t2 probe (rc=$rc): $out"
     emit sys_t2_runc "$out" -
-    out=$(t3s_run t3sys '["/bench/syscost"]' | tr '\n' ' ')
-    valid_sysrow "$out" || fail "sys t3s probe: $out"
+    rc=0
+    out=$(t3s_run t3sys '["/bench/syscost"]' 2>&1 | tr '\n' ' ') || rc=$?
+    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys t3s probe (rc=$rc): $out"
     emit sys_t3s_systrap "$out" -
     # fast-path off shows the un-amortised trap cost (plan hypothesis)
-    out=$(t3s_run t3sysnf '["/bench/syscost"]' --systrap-disable-fast-path | tr '\n' ' ')
-    valid_sysrow "$out" || fail "sys t3s-nofastpath probe: $out"
+    rc=0
+    out=$(t3s_run t3sysnf '["/bench/syscost"]' --systrap-disable-fast-path 2>&1 | tr '\n' ' ') || rc=$?
+    valid_sysrow "$out" && [ "$rc" -eq 0 ] || fail "sys t3s-nofastpath probe (rc=$rc): $out"
     emit sys_t3s_systrap_nofastpath "$out" -
     t3s_run t3sys '["/bin/true"]' > /dev/null 2>&1 \
         || fail "direct runsc probe unhealthy — t3s columns above may be errors"
@@ -472,17 +501,25 @@ sec_latency_down() { sm StopSilo si "$GS" 10 > /dev/null 2>&1; }
 
 # teardown_one <silo>: time StopSilo -> scope down, then VERIFY it's down
 teardown_one() {
-    local s="$1" tok u t0 scg
+    local s="$1" tok u t0 scg st
     u=$(unit_of "$s"); tok=$(token_of_unit "$u" | head -1)
+    if [ -z "$tok" ]; then
+        fail "teardown $s: no launch token recorded — cannot verify scope teardown"
+        sm StopSilo si "$s" 10 > /dev/null 2>&1
+        return
+    fi
     scg=$(rec "$tok" scope_cgroup)
+    [ -n "$scg" ] || fail "teardown $s: scope_cgroup never recorded"
     t0=$(ts_us)
     sm StopSilo si "$s" 10 > /dev/null 2>&1
-    [ -n "$tok" ] && wait_for 60 unit_down "qdistro-tier3s-$tok.scope"
+    wait_for 60 unit_down "qdistro-tier3s-$tok.scope" \
+        || fail "teardown $s: scope qdistro-tier3s-$tok.scope still up after StopSilo"
     emit "teardown_${s}_ms" $(( ($(ts_us) - t0) / 1000 )) ms
-    [ -n "$scg" ] && [ -d "/sys/fs/cgroup$scg" ] \
-        && fail "teardown $s: scope cgroup $scg still present" || :
-    case "$(silo_state "$s")" in Active) fail "teardown $s: still Active" ;; esac
-    [ -n "$tok" ] && rm -f "$WORK/$tok".{procs,cg,id}
+    [ -d "/sys/fs/cgroup$scg" ] && fail "teardown $s: scope cgroup $scg still present" || :
+    st=$(silo_state "$s")
+    [ "$st" = QUERY-FAILED ] && fail "teardown $s: ListSilos query failed"
+    [ "$st" = Active ] && fail "teardown $s: still Active"
+    rm -f "$WORK/$tok".{procs,cg,id}
 }
 
 main() {
