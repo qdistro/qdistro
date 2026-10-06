@@ -30,7 +30,8 @@ teardown_file() {
 
 @test "presentation isolation holds under enforcing" {
     stage_vm_driver "probes/presentation-isolation.sh"
-    vm_run "curl -fsS -o /tmp/presentation-isolation.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-isolation.sh && chmod +x /tmp/presentation-isolation.sh && bash /tmp/presentation-isolation.sh"
+    vm_run "$(shell_held_cmd "curl -fsS -o /tmp/presentation-isolation.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-isolation.sh && chmod +x /tmp/presentation-isolation.sh && bash /tmp/presentation-isolation.sh")"
+    shell_hold_note
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "presentation isolation probe skipped under enforcing: $(driver_skip_reason)"
@@ -47,7 +48,8 @@ teardown_file() {
 
 @test "tier-2 qfileman homes read and follow the snapshot under enforcing" {
     stage_vm_driver "probes/presentation-live.sh"
-    vm_run "curl -fsS -o /tmp/presentation-live.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-live.sh && chmod +x /tmp/presentation-live.sh && bash /tmp/presentation-live.sh"
+    vm_run "$(shell_held_cmd "curl -fsS -o /tmp/presentation-live.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-live.sh && chmod +x /tmp/presentation-live.sh && bash /tmp/presentation-live.sh")"
+    shell_hold_note
     assert_success
     for label in named disposable; do
         assert_output_contains "PASS: $label: private runtime matches container MCS label"

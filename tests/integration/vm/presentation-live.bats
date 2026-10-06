@@ -14,7 +14,8 @@ teardown_file() {
 
 @test "live named and disposable tier-2 homes bind presentation with keep-id owner" {
     stage_vm_driver "probes/presentation-live.sh"
-    vm_run "curl -fsS -o /tmp/presentation-live.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-live.sh && chmod +x /tmp/presentation-live.sh && bash /tmp/presentation-live.sh"
+    vm_run "$(shell_held_cmd "curl -fsS -o /tmp/presentation-live.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-live.sh && chmod +x /tmp/presentation-live.sh && bash /tmp/presentation-live.sh")"
+    shell_hold_note
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "presentation live probe skipped; missing installer, image, or compositor is a bake failure"
@@ -56,7 +57,8 @@ teardown_file() {
     stage_vm_driver "probes/presentation-scale.py"
     vm_run "test -S /run/user/1000/wayland-1"
     require "outer compositor not running (wayland-1 missing)"
-    vm_run "curl -fsS -o /tmp/presentation-scale.py http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-scale.py && chmod +rx /tmp/presentation-scale.py && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland PYTHONSAFEPATH=1 python3 /tmp/presentation-scale.py"
+    vm_run "$(shell_held_cmd "curl -fsS -o /tmp/presentation-scale.py http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/presentation-scale.py && chmod +rx /tmp/presentation-scale.py && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland PYTHONSAFEPATH=1 python3 /tmp/presentation-scale.py")"
+    shell_hold_note
     assert_success
     assert_output_contains "PASS: compositor socket exists:"
     assert_output_contains "PASS: devicePixelRatio="
