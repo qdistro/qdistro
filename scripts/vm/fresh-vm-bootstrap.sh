@@ -176,6 +176,18 @@ if [ "$_net_ok" != 1 ]; then
     log "  WARN: download.opensuse.org did not resolve in 60s; zypper will fail closed if the snapshot repos are unreachable"
 fi
 
+# qdshell's runtime is the vendored upstream Quickshell build; the archived
+# noctalia-qs fork was never a real dep. Bases baked before this change had
+# it installed and locked-in supplements can pull it — remove it if present,
+# then lock it before ANY zypper transaction below can resolve it back in.
+if rpm -q noctalia-qs >/dev/null 2>&1; then
+    log "removing noctalia-qs (superseded by vendored Quickshell)..."
+    zypper -n rm noctalia-qs >/dev/null 2>&1 \
+        || { log "  ERROR: zypper rm noctalia-qs failed"; exit 3; }
+fi
+zypper -n addlock noctalia-qs >/dev/null 2>&1 \
+    || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
+
 # The admin TUI (installed below by install-admin-cli-for-vm.sh) needs
 # Textual. The kiwi image carries it (image/config.xml); the baked cloud base
 # does not yet (adding it to scripts/vm/install-deps.sh changes the baked
@@ -255,12 +267,6 @@ if rpm -q spice-vdagent >/dev/null 2>&1; then
 fi
 zypper -n addlock spice-vdagent >/dev/null 2>&1 \
     || { log "  ERROR: zypper addlock spice-vdagent failed"; exit 3; }
-# qdshell's runtime is the vendored upstream Quickshell build; the archived
-# noctalia-qs fork was never a real dep. Lock it so no later zypper lane can
-# pull it back (the baked base carries this lock too, but VMs built from an
-# older base may not).
-zypper -n addlock noctalia-qs >/dev/null 2>&1 \
-    || { log "  ERROR: zypper addlock noctalia-qs failed"; exit 3; }
 
 # ---- 1. Fetch + unpack the monorepo ---------------------------------------
 # One tarball of the qdistro monorepo: root = qdistro's own content, the
