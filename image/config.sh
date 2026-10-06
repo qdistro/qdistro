@@ -86,6 +86,13 @@ fi
 echo "[qdistro-image] snapshot zypper repos:"
 sed 's/^/[qdistro-image]   /' /etc/zypp/repos.d/qdistro-snapshot-oss.repo /etc/zypp/repos.d/qdistro-snapshot-nonoss.repo
 
+# qdshell's runtime is vendored Quickshell (built in-chroot by config.sh);
+# noctalia-qs was never a legitimate qdistro dep — qdshell forked Noctalia
+# before that fork existed. Lock it so no recommends/supplements can pull
+# the archived fork into an installed image later.
+zypper -n addlock noctalia-qs \
+    || { echo "[qdistro-image] FATAL: zypper addlock noctalia-qs failed. Aborting build." >&2; exit 1; }
+
 # jeos-firstboot fights us for tty1 and blocks multi-user.target on
 # openSUSE JeOS-derived images. Mask before greetd takes over.
 systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true
