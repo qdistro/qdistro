@@ -12,6 +12,30 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 die() { fail "$*"; echo "[presentation-isolation] $PASSCOUNT passes, $FAILCOUNT failures"; exit 1; }
 
+# The session's qdshell republishes current.json when it loads settings and
+# applies its colour scheme, which can land seconds after boot, inside this
+# probe. Wait until it has applied a scheme and the file has been quiet for
+# 3 s, so the probe's own publishes are the only writer. No session shell
+# (headless lanes) means nothing to wait for.
+wait_shell_publisher_quiet() {
+    local file=/var/lib/qdistro/presentation/current.json deadline last="" now quiet=0
+    systemctl --user -M admin@ is-active -q qdshell.service 2>/dev/null || return 0
+    deadline=$((SECONDS + 90))
+    until journalctl -b --no-pager -o cat _SYSTEMD_USER_UNIT=qdshell.service 2>/dev/null \
+            | grep -q 'ColorScheme Applying color scheme:'; do
+        [ "$SECONDS" -lt "$deadline" ] || { echo "INFO: qdshell applied no colour scheme within 90 s"; return 0; }
+        sleep 1
+    done
+    deadline=$((SECONDS + 30))
+    while [ "$quiet" -lt 3 ] && [ "$SECONDS" -lt "$deadline" ]; do
+        now=$(stat -c '%i %y %s' "$file" 2>/dev/null || echo absent)
+        if [ "$now" = "$last" ]; then quiet=$((quiet + 1)); else quiet=0; last=$now; fi
+        sleep 1
+    done
+    [ "$quiet" -ge 3 ] || echo "INFO: current.json still changing after 30 s"
+}
+wait_shell_publisher_quiet
+
 # Snapshot restoration state:
 #   untouched     — original current.json has not been captured; cleanup is a no-op
 #   had_original  — capture copied the pre-test file; cleanup restores it
@@ -408,7 +432,8 @@ ctrl.stop()
 reset_controller_for_tests()
 print("ok")
 PY
-) || QT_OUT="qt-failed:$QT_OUT"
+) || QT_OUT="qt-failed
+$QT_OUT"
 
 echo "$QT_OUT" | grep -qx "last-good-on-delete" \
     && pass "deletion keeps last-known-good appearance" \

@@ -26,6 +26,30 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 die() { fail "$*"; echo "[presentation-live] $PASSCOUNT passes, $FAILCOUNT failures"; exit 1; }
 
+# The session's qdshell republishes current.json when it loads settings and
+# applies its colour scheme, which can land seconds after boot, inside this
+# probe. Wait until it has applied a scheme and the file has been quiet for
+# 3 s, so the probe's own publishes are the only writer. No session shell
+# (headless lanes) means nothing to wait for.
+wait_shell_publisher_quiet() {
+    local file=/var/lib/qdistro/presentation/current.json deadline last="" now quiet=0
+    systemctl --user -M admin@ is-active -q qdshell.service 2>/dev/null || return 0
+    deadline=$((SECONDS + 90))
+    until journalctl -b --no-pager -o cat _SYSTEMD_USER_UNIT=qdshell.service 2>/dev/null \
+            | grep -q 'ColorScheme Applying color scheme:'; do
+        [ "$SECONDS" -lt "$deadline" ] || { echo "INFO: qdshell applied no colour scheme within 90 s"; return 0; }
+        sleep 1
+    done
+    deadline=$((SECONDS + 30))
+    while [ "$quiet" -lt 3 ] && [ "$SECONDS" -lt "$deadline" ]; do
+        now=$(stat -c '%i %y %s' "$file" 2>/dev/null || echo absent)
+        if [ "$now" = "$last" ]; then quiet=$((quiet + 1)); else quiet=0; last=$now; fi
+        sleep 1
+    done
+    [ "$quiet" -ge 3 ] || echo "INFO: current.json still changing after 30 s"
+}
+wait_shell_publisher_quiet
+
 SRC=/root/qdistro-src
 TIER2_DIR=/tmp/qdistro-tier2
 COMMON_LIB_DIR=/tmp/lib
