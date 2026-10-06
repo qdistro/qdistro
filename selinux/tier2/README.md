@@ -172,15 +172,16 @@ install` / `semodule -i` was **not** runnable on the dev host
   attributes are themselves subsets of `container_t`'s attribute set, so
   the bound holds by construction.
 
-**Validated in the live VM at `f30a319ff`:**
+**Validated in the live VM at `cddd1c2c2`:**
 
-`ci/runs/bats-20261005T203006Z-1808035` passed `presentation-enforcing.bats`
-6/6, `presentation-live.bats` 2/2, and `tier2-silo-secctx-wiretag.bats` 2/2.
-The target policy loaded the module (including its `typebounds`/`neverallow`
-checks). Named/disposable Qfileman remained alive with distinct runtime MCS
-labels and unchanged shared labels; the binding-resolved silo ran Weston +
-weston-terminal and wrote its home. The new lifetime locks need a fresh live
-regression run; these results predate them.
+`ci/runs/bats-20261006T084046Z-1636059` passed `presentation-enforcing.bats`
+6/6 (enforcing), `presentation-live.bats`, `templates-promotion.bats`,
+`templates-state-snapshot.bats`, `tier2-silo-secctx-wiretag.bats` and
+`tiered-isolation.bats`, with the lifetime and restore-coordination locks in
+place. The target policy loaded the module (including its
+`typebounds`/`neverallow` checks). Named/disposable Qfileman remained alive
+with distinct runtime MCS labels and unchanged shared labels; the
+binding-resolved silo ran Weston + weston-terminal and wrote its home.
 
 The launcher exclusively locks the persistent state directory inode before
 `:Z`, independent of container name and path aliases. The supervisor retains
