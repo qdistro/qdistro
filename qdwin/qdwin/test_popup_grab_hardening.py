@@ -142,6 +142,28 @@ D6_UNLOCK_HANDLERS = (
 D6_UNLOCK_FLUSH = "qdwin_flush_deferred_clears(qdwin, true)"
 
 
+def _else_branch_of(body, if_regex):
+    """(start, end) of the `else { ... }` block of the first if matching
+    if_regex (which must end at its opening brace), or None."""
+    m = re.search(if_regex, body)
+    if not m:
+        return None
+
+    def close(i):
+        depth = 1
+        while i < len(body) and depth:
+            depth += {"{": 1, "}": -1}.get(body[i], 0)
+            i += 1
+        return i
+
+    after = close(m.end())
+    e = re.match(r"\s*else\s*\{", body[after:])
+    if not e:
+        return None
+    start = after + e.end()
+    return start, close(start)
+
+
 def check_d6_locked_gate(source):
     code = _strip_comments(source)
     for name, defer_fn in D6_DEFER_HANDLERS.items():
@@ -157,23 +179,33 @@ def check_d6_locked_gate(source):
             return fail(f"D6: {name} missing the locked gate")
         if rb == -1 or locked_at < rb:
             return fail(f"D6: {name} locked gate must follow require_bound")
-        gate = body[locked_at:]
-        defer_at = gate.find(defer_fn + "(")
-        ret_at = gate.find("return;")
-        if defer_at == -1 or ret_at == -1 or ret_at < defer_at:
-            return fail(f"D6: {name} must call {defer_fn}() and return "
-                        f"while locked")
-        apply_at = body.find("qdwin_clear_selection_apply(")
-        if apply_at != -1 and apply_at < locked_at:
-            return fail(f"D6: {name} mutates the selection before its "
-                        f"locked gate")
+        # The lock branch is exactly "defer, then return": not negated, no
+        # apply inside it, and the one apply call follows the branch.
+        branch = re.search(
+            r"if\s*\(\s*qdwin->locked\s*\)\s*\{\s*"
+            + re.escape(defer_fn) + r"\s*\([^;]*\)\s*;\s*return\s*;\s*\}",
+            body)
+        if not branch:
+            return fail(f"D6: {name} lock branch must be exactly "
+                        f"'if (qdwin->locked) {{ {defer_fn}(...); return; }}'")
+        applies = [m.start() for m in
+                   re.finditer(r"qdwin_clear_selection_apply\s*\(", body)]
+        if len(applies) != 1 or applies[0] < branch.end():
+            return fail(f"D6: {name} must apply the clear exactly once, "
+                        f"after its locked branch")
     for name in D6_UNLOCK_HANDLERS:
         body, err = _function_body(code, name + r"\s*\(", name)
         if err:
             return fail(err)
-        if D6_UNLOCK_FLUSH not in body:
-            return fail(f"D6: unlock path {name} does not apply deferred "
-                        f"requests ({D6_UNLOCK_FLUSH})")
+        # The flush belongs to the unlock (else) branch of `if (want)`.
+        span = _else_branch_of(body, r"if\s*\(\s*want\s*\)\s*\{")
+        flushes = [k.start() for k in
+                   re.finditer(re.escape(D6_UNLOCK_FLUSH), body)]
+        if span is None or len(flushes) != 1 \
+                or not span[0] <= flushes[0] < span[1]:
+            return fail(f"D6: unlock path {name} must apply deferred requests "
+                        f"once, in its unlock (else) branch "
+                        f"({D6_UNLOCK_FLUSH})")
     for name in D6_FATAL_HANDLERS + D6_DROP_HANDLERS:
         body, err = _function_body(code, name + r"\s*\(", name)
         if err:

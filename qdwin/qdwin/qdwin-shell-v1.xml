@@ -1012,9 +1012,13 @@
 
         While the compositor is locked the request is not an error: the
         shell's verdicts are asynchronous, so a deny can legitimately
-        arrive after the lock. qdwin records it (per seat and kind) and
-        applies it at unlock, never mutating the selection behind the
-        lock screen.
+        arrive after the lock. qdwin records it (per known seat and
+        kind) and applies it at unlock to the then-current selection,
+        never mutating the selection behind the lock screen. This is
+        best effort: past 16 distinct seats or on allocation failure the
+        request is dropped and logged. Compositors before this change
+        raise the `locked` error instead; the version does not tell them
+        apart.
       </description>
       <arg name="seat_name" type="string"/>
       <arg name="is_primary" type="uint" summary="0 clipboard, 1 primary"/>

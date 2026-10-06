@@ -63,8 +63,11 @@ line is not proof that the selection was cleared on the wire.
 
 A deny verdict that arrives while the session is locked (copy, then lock
 within the verdict window) is not an error: qdwin records the
-`clear_selection` per seat and kind and applies it at unlock, so nothing
-changes behind the lock screen and the shell's connection survives.
+`clear_selection` per seat and kind and applies it at unlock to the
+then-current selection, so nothing changes behind the lock screen and the
+shell's connection survives. The deferral is best effort (16 seats; dropped
+and logged on allocation failure), and older qdwin builds still raise the
+fatal `locked` error.
 
 Older plugins, and compositors before v15, keep the synchronous calls, which
 decide (and clear) before returning and use a 200 ms broker deadline.

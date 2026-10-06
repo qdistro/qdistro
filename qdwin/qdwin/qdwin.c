@@ -8099,15 +8099,31 @@ static void qdwin_clear_selection_apply(struct qdwin *qdwin,
  * selection behind the lock screen, and must not kill the shell either:
  * qdshell decides clipboard verdicts asynchronously (up to 2 s), so
  * copy-then-lock legitimately lands a clear_selection after set_locked(1).
- * Record it (deduplicated per seat and kind) and apply it at unlock. A
- * clear is fail-safe, so applying it to a selection set later is harmless;
- * past QDWIN_DEFERRED_CLEAR_MAX distinct seats the request is dropped with
- * a log line (the receive-time gate still guards the bytes). */
+ * Record it (deduplicated per known seat and kind) and apply it at unlock,
+ * where it clears the then-current selection: a clear is fail-safe, so
+ * hitting a selection set later is an availability cost, not a bypass.
+ * Best effort: past QDWIN_DEFERRED_CLEAR_MAX distinct seats, or on
+ * allocation failure, the request is dropped with a log line (the
+ * receive-time gate still guards the bytes). */
 static void
 qdwin_defer_clear_selection(struct qdwin *qdwin, const char *seat_name,
 			    uint32_t is_primary)
 {
 	struct qdwin_deferred_clear *dc;
+	struct weston_seat *s;
+	bool known = false;
+	/* Same unknown-seat semantics as an unlocked clear: ignored, and it
+	 * must not take a slot (or match a seat created before unlock). */
+	wl_list_for_each(s, &qdwin->compositor->seat_list, link) {
+		if (s->seat_name && strcmp(s->seat_name, seat_name) == 0) {
+			known = true;
+			break;
+		}
+	}
+	if (!known) {
+		weston_log("qdwin: clear_selection unknown seat=%s\n", seat_name);
+		return;
+	}
 	wl_list_for_each(dc, &qdwin->deferred_clears, link) {
 		if (strcmp(dc->seat_name, seat_name) == 0)
 			goto mark;
