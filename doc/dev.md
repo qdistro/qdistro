@@ -89,10 +89,19 @@ mechanical markdown scenarios. Run it non-interactively and let qci place each
 attempt in its own temporary working directory:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
+
+Keep `-c model_reasoning_effort=medium`: without it codex uses the host's own
+default, which is not the same on every host (lab1's codex runs Luna at
+`reasoning effort: none`, visible in the header of each `gui/*.agent.log`).
+The validated runs used `medium`; full-20261006T175536Z-3524705 ran all 40
+scenarios at `none`, and one driver retyped its scenario path with a character
+missing and recorded ERROR without running the scenario. The manifest records
+the pinned value as `qci_agent_reasoning_effort` (`unpinned` when the template
+names none).
 
 Do not add `--ephemeral`: the gate reads each attempt's codex rollout to see
 which frames the driver actually opened, and records a pixel-dependent verdict
@@ -113,7 +122,7 @@ blocked run, not a substitute model. A runner that cannot open an image must
 record `ERROR` rather than a verdict. To retry a single scenario on a fresh VM:
 
 ```sh
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
 QCI_GUI_RETRY=1 \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
@@ -131,7 +140,7 @@ workers. A normal `qci full` leaves the lane off; do not export
 
 ```sh
 QCI_GUI_JOBS=8 QCI_GUI_APPS=1 \
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
