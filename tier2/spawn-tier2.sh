@@ -1005,6 +1005,41 @@ if [ "$EXPORT_ENABLED" = 1 ]; then
     broker_gate "$EXPORT_GATE_ACTION" "export-class ${OPEN_CLASS}"
 fi
 
+# A private :Z home may have only one owner, even under different container
+# names or symlink aliases. Lock the directory inode itself: no lock file in
+# the writable home can be unlinked/replaced by the workload. Root and admin
+# open the same inode; the supervisor keeps fd 9 (also across test detach).
+# Kernel locks disappear when their last holder dies, so no stale lock files.
+command -v flock >/dev/null 2>&1 || fail "flock not in PATH"
+if [ -n "$STATE_PATH" ]; then
+    STATE_PATH=$(readlink -e -- "$STATE_PATH") || fail "cannot resolve state path"
+    exec 9<"$STATE_PATH" || fail "cannot open state directory $STATE_PATH"
+    flock -n 9 || fail "state path $STATE_PATH is already in use by another tier-2 launcher"
+    # A killed supervisor can leave a container behind (or it can predate
+    # locking). Under the lock, inspect ALL records, including Created and
+    # Stopping, before allowing podman to relabel. Listing/inspection errors
+    # fail closed; retry after teardown if a record disappeared mid-inspect.
+    state_ids=$(pm ps -aq) || fail "cannot list containers using state $STATE_PATH"
+    if [ -n "$state_ids" ]; then
+        mapfile -t state_ids_array <<< "$state_ids"
+        state_mounts=$(pm inspect "${state_ids_array[@]}") \
+            || fail "cannot inspect containers using state $STATE_PATH"
+        if ! python3 -c '
+import json, os, sys
+records = json.load(sys.stdin)
+if not isinstance(records, list) or not records:
+    raise ValueError("expected container inspection records")
+for record in records:
+    for mount in record["Mounts"]:
+        source = mount.get("Source")
+        if source and os.path.realpath(source) == sys.argv[1]:
+            sys.exit(1)
+' "$STATE_PATH" <<< "$state_mounts"; then
+            fail "state path $STATE_PATH is in use by a container or its usage could not be verified"
+        fi
+    fi
+fi
+
 # --- per-container runtime dir + cleanup trap ----------------------------
 # This is the load-bearing isolation step: the container only sees an
 # initially-empty /run/user/<uid>, so dbus, pulse, gpg-agent, ssh-agent
@@ -1013,6 +1048,11 @@ fi
 # wrapper below.
 PARENT_DIR="$RUNTIME_DIR/qdistro-tier2"
 PERCONT_DIR="$PARENT_DIR/$LAUNCH_TOKEN"
+
+# Serialize mkdir + acquisition of the lifetime lock with all reapers.
+# Lock the existing runtime inode, not PARENT_DIR (cleanup may remove that).
+exec 7<"$RUNTIME_DIR" || fail "cannot open runtime directory for locking"
+flock 7 || fail "cannot lock runtime directory"
 
 # Reap orphan per-container dirs from prior spawns that died without
 # running their EXIT trap (segfault, kill -9, host crash). Use `podman
@@ -1031,8 +1071,14 @@ if [ -d "$PARENT_DIR" ] \
     for d in "$PARENT_DIR"/*/; do
         [ -d "$d" ] || continue
         token=$(basename "$d")
-        printf '%s\n' "$live_tokens" | grep -Fxq -- "$token" \
-            || rm -rf "$d" 2>/dev/null || true
+        # A launcher may not have reached podman registration yet. Its
+        # directory lock is authoritative even when absent from this snapshot.
+        (
+            exec 8<"$d" || exit 0
+            flock -n 8 || exit 0
+            printf '%s\n' "$live_tokens" | grep -Fxq -- "$token" \
+                || rm -rf "$d" 2>/dev/null || true
+        )
     done
 fi
 
@@ -1045,9 +1091,13 @@ if [ "$ROOT_LAUNCHER" = 1 ]; then
     runuser -u "$ADMIN_USER" -- mkdir -p -m 0700 "$PERCONT_DIR" \
         || fail "could not create admin-owned per-container dir $PERCONT_DIR"
 else
-    mkdir -p "$PERCONT_DIR"
-    chmod 0700 "$PERCONT_DIR"
+    mkdir -p "$PERCONT_DIR" && chmod 0700 "$PERCONT_DIR" \
+        || fail "could not create per-container dir $PERCONT_DIR"
 fi
+exec 8<"$PERCONT_DIR" || fail "cannot open per-container dir for locking"
+flock -n 8 || fail "per-container dir $PERCONT_DIR is already in use"
+flock -u 7
+exec 7<&-
 
 # Cleanup runs from both the EXIT trap (covers pre-flight `fail`s and
 # the explicit call after the wrapper returns below) and the orphan-

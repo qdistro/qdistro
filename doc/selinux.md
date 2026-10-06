@@ -305,10 +305,36 @@ Bootstrap and native-stage policy installation now include `qdistro_tier2`
 before presentation. Loading it is no longer a no-op. The narrower
 `qdistro_tier2_t` process type still needs explicit launcher wiring, bounded
 transport permissions, and its own enforcing workload/AVC validation.
-Compile checks do not prove policy loading or live app startup. The
-`presentation-enforcing.bats` lane must show inner-Weston readiness, live
-Qfileman after checks, distinct concurrent MCS labels, unchanged shared host
-labels, and a running binding-resolved silo through the production launcher.
+Live validation passed at `f30a319ff` in
+`ci/runs/bats-20261005T203006Z-1808035`: `presentation-enforcing.bats` 6/6,
+`presentation-live.bats` 2/2, and `tier2-silo-secctx-wiretag.bats` 2/2.
+This includes inner-Weston readiness, Qfileman liveness after checks, distinct
+concurrent MCS labels, unchanged shared host labels, and a writable
+binding-resolved silo through the production launcher. Subsequent launcher
+locking changes require a fresh live regression run.
+
+The launcher holds an exclusive `flock` on the resolved persistent state
+directory inode for the container lifetime (including supervised test detach).
+A second launch against the same home fails before Podman can relabel it,
+even with a different container name or a symlink alias. Root-launcher mode
+holds the lock in the root supervisor while querying/running Podman as admin.
+An additional inspection of all container mounts refuses homes still used by
+containers left after a launcher crash; listing or inspection failures also
+refuse launch. Locks release when their last holder exits, so a stopped,
+removed container can be restarted without deleting a lock file.
+
+Podman's `:Z` recursively relabels the persistent home to `container_file_t`
+with the new container's MCS categories. Startup cost grows with the home
+size. Host file managers, backup processes, and other domains without access
+to that type/range may lose access; stopping the container does not restore
+the previous labels. Do not relabel an active home from the host.
+
+Per-container runtime directories also carry lifetime inode locks. A short
+lock on the admin runtime directory serializes creation/lock acquisition
+with reaping; the reaper requires both an available lifetime lock and absence
+from Podman's token labels before deleting a directory. This protects a
+launch that has not yet registered a container.
+
 See `selinux/tier2/README.md` for the validated/deferred split.
 
 ## dbus-broker reload requirement

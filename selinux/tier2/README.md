@@ -1,7 +1,7 @@
 # Tier-2 — SELinux container confinement
 
-> **Status: stock `container_t` desktop transport wired; live enforcing
-> validation pending.** Version 0.2.0 adds narrow host socket connection rules
+> **Status: stock `container_t` desktop transport validated under enforcing.**
+> Version 0.2.0 adds narrow host socket connection rules
 > and is installed by bootstrap and the native-stage VM path. The optional
 > `qdistro_tier2_t` narrowing remains disengaged. See
 > [`doc/selinux.md`](../../doc/selinux.md).
@@ -172,16 +172,31 @@ install` / `semodule -i` was **not** runnable on the dev host
   attributes are themselves subsets of `container_t`'s attribute set, so
   the bound holds by construction.
 
-**NOT yet validated — requires an enforcing-mode VM pass:**
+**Validated in the live VM at `f30a319ff`:**
 
-- **Stock-domain transport and label wiring.** Run
-  `tests/integration/vm/presentation-enforcing.bats`: named/disposable
-  Qfileman must be ready and remain alive, concurrent runtimes must have
-  distinct MCS labels, shared labels must remain unchanged, and the
-  binding-resolved silo must run Weston + weston-terminal and write its home.
-- **Load-time `typebounds`/`neverallow` resolution** against the target policy.
-- **Optional narrowed domain.** A zero-new-AVC workload run under
-  `qdistro_tier2_t` remains deferred alongside its launcher wiring.
+`ci/runs/bats-20261005T203006Z-1808035` passed `presentation-enforcing.bats`
+6/6, `presentation-live.bats` 2/2, and `tier2-silo-secctx-wiretag.bats` 2/2.
+The target policy loaded the module (including its `typebounds`/`neverallow`
+checks). Named/disposable Qfileman remained alive with distinct runtime MCS
+labels and unchanged shared labels; the binding-resolved silo ran Weston +
+weston-terminal and wrote its home. The new lifetime locks need a fresh live
+regression run; these results predate them.
+
+The launcher exclusively locks the persistent state directory inode before
+`:Z`, independent of container name and path aliases. The supervisor retains
+the lock through teardown/detach, including root-launcher mode; a mount
+inspection also refuses a home used by a container surviving its launcher.
+Errors fail closed. Dead processes leave no stale lock files. Runtime-dir
+locks and serialized creation/reaping protect launches before registration.
+
+`:Z` walks the persistent home recursively, so large homes cost more startup
+time. It leaves `container_file_t` and private MCS categories on host files
+after stop: host processes in domains that cannot read that type/range (for
+example a confined backup or file-manager process) can lose access. Never
+restore host labels while the container is using the home.
+
+**Still deferred:** a zero-new-AVC workload run under the optional
+`qdistro_tier2_t` domain, alongside its launcher wiring.
 
 For a future narrowed-domain AVC, confirm `container_t` already allows the
 operation, then add only the required bounded permission; do not join a broad
