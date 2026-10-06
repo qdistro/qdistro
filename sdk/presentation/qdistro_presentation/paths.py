@@ -272,8 +272,14 @@ def read_snapshot_at(
     *,
     kind: Literal["managed", "state", "override"],
     expected_uid: int | None,
-) -> tuple[bytes, tuple[int, int, int, int]]:
-    """Read at most 64 KiB from a non-symlink regular file."""
+    known_identity: tuple[int, int, int, int] | None = None,
+) -> tuple[bytes | None, tuple[int, int, int, int]]:
+    """Read at most 64 KiB from a non-symlink regular file.
+
+    The trust walk and mode checks always run. When the opened file's
+    identity equals ``known_identity`` the bytes are not read and ``None``
+    is returned in their place, so callers can skip an unchanged reparse.
+    """
     if kind == "managed":
         if expected_uid is None:
             raise SnapshotPathError("managed snapshot requires deployment admin uid")
@@ -302,8 +308,10 @@ def read_snapshot_at(
         mode = stat.S_IMODE(info.st_mode)
         if kind == "managed" and _group_or_other_writable(mode):
             raise SnapshotPathError("managed snapshot is group/other-writable")
-        data = read_regular_fd(fd)
         identity = file_identity(fd)
+        if known_identity is not None and identity == known_identity:
+            return None, identity
+        data = read_regular_fd(fd)
         return data, identity
     finally:
         _close_quietly(fd)
@@ -315,6 +323,24 @@ def load_snapshot(
     data, identity = read_snapshot_at(
         resolved.path, kind=resolved.kind, expected_uid=resolved.expected_uid
     )
+    assert data is not None
+    return parse_snapshot_bytes(data), identity
+
+
+def load_snapshot_if_changed(
+    resolved: ResolvedPath,
+    known_identity: tuple[int, int, int, int] | None,
+) -> tuple[PresentationSnapshot | None, tuple[int, int, int, int]]:
+    """Like ``load_snapshot`` but return ``None`` without parsing when the
+    file identity (dev, inode, mtime_ns, size) equals ``known_identity``."""
+    data, identity = read_snapshot_at(
+        resolved.path,
+        kind=resolved.kind,
+        expected_uid=resolved.expected_uid,
+        known_identity=known_identity,
+    )
+    if data is None:
+        return None, identity
     return parse_snapshot_bytes(data), identity
 
 

@@ -68,7 +68,7 @@ TOKEN_RE='^[0-9a-f]{32}$'
 
 fail() { printf 'FAIL: %s — %s\n' "$1" "${2:-}" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$1"; }
-as_admin() { runuser -u "$ADMIN" -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" "$@"; }
+as_admin() { runuser -u "$ADMIN" -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "$@"; }
 
 broker_check_admin() {
     as_admin dbus-send --system --print-reply=literal \
@@ -227,6 +227,23 @@ EOF
     pass setup
 }
 
+silo_inner_running() {
+    local container=$1
+    [ "$(as_admin podman inspect "$container" --format '{{.State.Running}}' 2>/dev/null)" = true ] || return 1
+    as_admin podman exec "$container" sh -c '
+        read -r app < /proc/1/comm
+        [ "$app" = weston-terminal ] || exit 1
+        [ -S "$XDG_RUNTIME_DIR/wayland-tier2" ] || exit 1
+        for proc in /proc/[0-9]*; do
+            read -r name < "$proc/comm" 2>/dev/null || continue
+            [ "$name" = weston ] || continue
+            read -r pid comm state rest < "$proc/stat" || continue
+            [ "$state" != Z ] && exit 0
+        done
+        exit 1
+    ' 2>/dev/null
+}
+
 cmd_wiretag() {
     clean_silo
     local unit="${LAUNCH_UNIT_TMPL}${SILO}.service"
@@ -318,7 +335,34 @@ cmd_wiretag() {
     echo "$commit" >&2
     pass "qdwin received the SILO secctx app_id ON THE WIRE (committed engine=qdistro.tier2 app_id=$appid instance_id=$token)"
 
+    # The secctx commit precedes app startup. It alone cannot prove the
+    # container survived the entrypoint's fatal startup window.
+    local ready=""
+    for _ in $(seq 1 30); do
+        if as_admin podman logs "$container" 2>&1 | grep -q "inner weston up; exec'ing app:" \
+            && silo_inner_running "$container"; then
+            ready=1
+            break
+        fi
+        sleep 0.5
+    done
+    [ -n "$ready" ] || { journalctl -u "$unit" --after-cursor="$cursor" | tail -40 >&2;
+        fail wiretag "inner weston and weston-terminal did not become ready"; }
+    pass "silo inner weston up and weston-terminal running"
+    # Not touch(1): the tier-2 seccomp profile answers utimensat with ENOSYS.
+    as_admin podman exec "$container" sh -c 'f="$HOME/.enforcing-write-probe"; printf ok > "$f" && [ "$(cat "$f")" = ok ] && rm "$f"' \
+        || fail wiretag "binding-resolved silo home is not writable"
+    pass "binding-resolved silo home is writable"
+
     # ---- no rootful-podman confusion ---------------------------------------
+    # qdistro-secctx-exec commits the listener before podman runs, and
+    # `podman create` can take several seconds (5.4 s in full-20261005T135128Z),
+    # so the container may not exist yet when the commit line appears.
+    local edl=$(( $(date +%s) + 30 ))
+    until as_admin podman container exists "$container" 2>/dev/null \
+            || [ "$(date +%s)" -ge "$edl" ]; do
+        sleep 0.5
+    done
     as_admin podman container exists "$container" 2>/dev/null \
         || { journalctl -u "$unit" --after-cursor="$cursor" | tail -20 >&2; \
              fail wiretag "container '$container' not in admin's rootless podman (did the run drop to admin?)"; }
@@ -327,6 +371,9 @@ cmd_wiretag() {
         fail wiretag "container '$container' ALSO exists in ROOT's podman store — rootful confusion"
     fi
     pass "silo container absent from root's podman store (rootless drop confirmed)"
+
+    silo_inner_running "$container" || fail wiretag "silo app or inner weston died during checks"
+    pass "silo inner weston and weston-terminal still running after checks"
 
     # ---- ExecStop (now admin-dropped) tears the admin container down --------
     systemctl stop "$unit" >/dev/null 2>&1 || true

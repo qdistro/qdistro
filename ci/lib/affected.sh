@@ -109,6 +109,7 @@ affected_gates_for_path() {
         # GUI markdown / agent scenarios.
         tests/integration/permissions-gui/*|\
         tests/integration/qdwin-noctalia/*|\
+        tests/integration/presentation-gui/*|\
         tests/integration/workflow-gui/*)
             printf 'gui\n' ;;
         # Pure host unit tests.

@@ -25,25 +25,21 @@ Singleton {
     }
   }
 
+  // Settings.data is a plain object, so neither a Connections target nor an
+  // `enabled:` binding on it updates; filter in the handler instead.
   Connections {
-    target: Settings.data.colorSchemes
-    enabled: Settings.data.colorSchemes.schedulingMode == "manual"
-    function onManualSunriseChanged() {
-      const changes = root.collectManualChanges();
-      root.applyCurrentMode(changes);
-      root.scheduleNextMode(changes);
-    }
-    function onManualSunsetChanged() {
-      const changes = root.collectManualChanges();
-      root.applyCurrentMode(changes);
-      root.scheduleNextMode(changes);
-    }
-  }
-
-  Connections {
-    target: Settings.data.colorSchemes
-    function onSchedulingModeChanged() {
-      root.update();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.colorSchemes)
+        return;
+      if (key === "schedulingMode") {
+        root.update();
+      } else if ((key === "manualSunrise" || key === "manualSunset")
+                 && Settings.data.colorSchemes.schedulingMode == "manual") {
+        const changes = root.collectManualChanges();
+        root.applyCurrentMode(changes);
+        root.scheduleNextMode(changes);
+      }
     }
   }
 

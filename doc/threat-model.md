@@ -232,7 +232,18 @@ Do not treat the broker pilot as evidence for those other domains.
   sandbox's waypipe server talks to that client over one bind-mounted
   `link.sock` under runsc `host-uds=open` (the only host socket reachable
   inside the sandbox) with software rendering — no GPU device, no
-  `SCM_RIGHTS` escapes gVisor. The claimed security properties, all
+  `SCM_RIGHTS` escapes gVisor. Phase D adds a dedicated
+  `qdistro_tier3s_t` SELinux domain for the host-side gVisor control
+  plane — the Sentry, the gofer (which makes the link.sock `connect()`)
+  and the stubs — entered by an exec transition off the labelled `runsc`
+  ELF (see `selinux/tier3s/README.md`): no host network sockets, no
+  cross-domain ptrace/signal, one cross-domain socket edge (the
+  link.sock listener's domain). The domain bounds the *host* blast
+  radius of that control plane; podman/conmon and the waypipe client
+  remain trusted-to-operate surfaces by contract. The domain is
+  enforcing-qualified: s123–s129 all pass on enforcing workers with
+  zero residual domain AVCs. The claimed security
+  properties, all
   VM-lane evidence (`tests/integration/vm/s123`–`s129`): the bridge client
   is `RegisterLaunch`-bound (pid+starttime) before `podman run`, so **when
   `lineage_enforce` is on** — it defaults off (shadow mode) — lineage

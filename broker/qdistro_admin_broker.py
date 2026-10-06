@@ -234,6 +234,7 @@ _ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
     "qdistro_tier1_t",
     "qdistro_tier2_t",
     "qdistro_tier3_t",
+    "qdistro_tier3s_t",
     "qsu_child_t",
 ))
 
@@ -4713,9 +4714,21 @@ class Broker(dbus.service.Object):
                         "least one non-empty match selector",
                         name=BUS_NAME + ".RulesEngineRefused",
                     )
+        # Write to whichever directory this broker's RulesEngine
+        # watches — not always /etc/qdistro/rules.d (tests substitute a
+        # tmp_path-backed RulesEngine; production wires it to the
+        # standard path via Broker.__init__).
+        target_dir = self.rules._dir
+        os.makedirs(target_dir, mode=0o755, exist_ok=True)
         # Validate via a tempfile load through the same rules engine.
+        # The tempdir lives INSIDE target_dir on purpose: the broker's
+        # SELinux domain manages qdistro_broker_rules_t (rules.d) but is
+        # deliberately denied tmp_t, so a default /tmp tempdir would fail
+        # under enforcing. A transient subdir never matches the engine's
+        # *.yaml glob, so the inotify watcher ignores it.
         from qdistro_admin_rules import RulesEngine  # type: ignore
-        with tempfile.TemporaryDirectory(prefix="qd-rules-validate-") as td:
+        with tempfile.TemporaryDirectory(
+                prefix="qd-rules-validate-", dir=target_dir) as td:
             tmp = os.path.join(td, filename)
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(yaml_body)
@@ -4726,12 +4739,6 @@ class Broker(dbus.service.Object):
                     "SaveRule: rule validation failed: " + "; ".join(errs),
                     name=BUS_NAME + ".RulesEngineRefused",
                 )
-        # Write to whichever directory this broker's RulesEngine
-        # watches — not always /etc/qdistro/rules.d (tests substitute a
-        # tmp_path-backed RulesEngine; production wires it to the
-        # standard path via Broker.__init__).
-        target_dir = self.rules._dir
-        os.makedirs(target_dir, mode=0o755, exist_ok=True)
         target = os.path.join(target_dir, filename)
         # Atomic replace via tempfile in the same dir.
         with tempfile.NamedTemporaryFile(

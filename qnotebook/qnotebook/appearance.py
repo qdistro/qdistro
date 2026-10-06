@@ -103,6 +103,37 @@ def load_use_desktop_document_fonts(settings: QSettings | None = None) -> bool:
     return bool(settings.value("appearance/use_desktop_document_fonts", False, type=bool))
 
 
+# Editor zoom: a view-only percentage over the resolved document fonts
+# (shared or native). It never reaches Markdown, char formats, undo or
+# export; it is one per-app setting shared by every editor pane.
+ZOOM_MIN_PERCENT = 50
+ZOOM_MAX_PERCENT = 300
+ZOOM_STEP_PERCENT = 10
+
+
+def clamp_zoom_percent(value: object) -> int:
+    try:
+        pct = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 100
+    return max(ZOOM_MIN_PERCENT, min(ZOOM_MAX_PERCENT, pct))
+
+
+def load_editor_zoom(settings: QSettings | None = None) -> int:
+    settings = settings or default_settings()
+    return clamp_zoom_percent(settings.value("editor/zoom_percent", 100))
+
+
+def save_editor_zoom(settings: QSettings, percent: int) -> int:
+    pct = clamp_zoom_percent(percent)
+    if pct == 100:
+        settings.remove("editor/zoom_percent")
+    else:
+        settings.setValue("editor/zoom_percent", pct)
+    settings.sync()
+    return pct
+
+
 def save_use_desktop_document_fonts(settings: QSettings, enabled: bool) -> None:
     settings.setValue("appearance/version", APPEARANCE_VERSION)
     settings.setValue("appearance/use_desktop_document_fonts", bool(enabled))

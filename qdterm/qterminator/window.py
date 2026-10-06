@@ -1110,11 +1110,6 @@ class MainWindow(QMainWindow):
                 continue
             term.apply_profile_fields()
 
-    def apply_color_scheme_to_all(self, scheme_name):
-        """Set the color scheme on every terminal in every tab."""
-        for term in self.iter_terminals():
-            term.set_color_scheme(scheme_name)
-
     # -- Preferences --
 
     def _open_preferences(self):

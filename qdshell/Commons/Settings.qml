@@ -50,6 +50,13 @@ Singleton {
   // Signal emitted when settings are loaded after startupcale changes
   signal settingsLoaded
   signal settingsSaved
+  // `data` is a plain JS object, so `Connections { target: Settings.data.x }`
+  // never binds (QML logs "Unable to assign QJSValue to QObject*" and
+  // "no signal of the target matches"). Every assignment through an observable
+  // setting emits this instead: `owner` is the section object (compare with
+  // `Settings.data.<section>`), `key` the property name. Not emitted while
+  // loading, nor when a scalar is reassigned the value it already has.
+  signal settingChanged(var owner, string key, var value)
 
   // -----------------------------------------------------
   // -----------------------------------------------------
@@ -216,8 +223,12 @@ Singleton {
         return stored;
       },
       set: function (newValue) {
+        var changed = newValue !== stored || isPlainObject(newValue) || Array.isArray(newValue);
         stored = makeObservableSettings(newValue);
         root.queueSettingsSave();
+        if (changed && !root.loadingSettingsData) {
+          root.settingChanged(target, key, stored);
+        }
       }
     });
   }

@@ -81,10 +81,10 @@ echo "Built: $WHL"
 # Install destination: venv if active, else --user, else --break-system-packages
 # for PEP 668 distro Pythons.
 if [ -n "${VIRTUAL_ENV:-}" ]; then
-    pip install --no-deps --force-reinstall "$WHL"
+    python3 -m pip install --no-deps --force-reinstall "$WHL"
 else
-    pip install --no-deps --user --force-reinstall "$WHL" 2>&1 || \
-        pip install --no-deps --break-system-packages --force-reinstall "$WHL"
+    python3 -m pip install --no-deps --user --force-reinstall "$WHL" 2>&1 || \
+        python3 -m pip install --no-deps --break-system-packages --force-reinstall "$WHL"
 fi
 
 rm -rf "$BUILD_DIR"

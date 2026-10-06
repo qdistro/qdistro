@@ -465,6 +465,65 @@ for entry in "${INSTALLERS[@]}"; do
     bash "$installer" "$src_dir" || { echo "[bootstrap] $installer failed"; exit 3; }
 done
 
+# ---- 4a. Install qfileman + qterminator (+ QTermWidget binding) ----------
+# Pack 07 needs all four first-party presentation consumers on the test VM;
+# qnotebook and qdbrowser are installed above. Without these two the live
+# four-app import probe failed (full-20261003T113809Z-1979901). Runs after
+# step 4 so qdistro_presentation, a runtime dep of both, is importable.
+#
+# qterminator needs the QTermWidget SIP binding, which the snapshot does
+# not ship; qdterm/util/build-sip.sh builds it against qtermwidget-devel.
+# python313-PyQt6-devel (the PyQt6 .sip files) pulls rpm-build, which needs
+# GNU bzip2/diffutils where the base has busybox-* shims. --force-resolution
+# swaps them, but only after a dry run shows every removal is a busybox-*
+# package; anything else fails the bootstrap closed.
+if [ -f "$SRC/qdfileman/pyproject.toml" ] || [ -f "$SRC/qdterm/pyproject.toml" ]; then
+    log "installing qfileman + qterminator..."
+    QDA_PY_PREFIX=$(python3 -c 'import sys; print(f"python{sys.version_info.major}{sys.version_info.minor}")')
+    QDA_ZYPPER_LOG=/tmp/qdapps-zypper-install.log
+    QDA_PKGS=(
+        "$QDA_PY_PREFIX-PyQt6" "$QDA_PY_PREFIX-tomli-w" "$QDA_PY_PREFIX-pip"
+        "$QDA_PY_PREFIX-PyQt6-devel" "$QDA_PY_PREFIX-pyqt-builder" "$QDA_PY_PREFIX-sip6-devel"
+        qtermwidget-devel qt6-base-common-devel gcc-c++ make
+    )
+    if ! zypper -n install --dry-run --no-recommends --force-resolution "${QDA_PKGS[@]}" \
+            >"$QDA_ZYPPER_LOG" 2>&1; then
+        log "  ERROR: zypper dry run for qfileman/qterminator deps failed"
+        tail -80 "$QDA_ZYPPER_LOG" | sed 's/^/[bootstrap]   zypper: /'
+        exit 3
+    fi
+    QDA_REMOVALS=$(sed -n '/going to be REMOVED:/,/^$/{/REMOVED:/d;p}' "$QDA_ZYPPER_LOG" | tr -s ' \t' '\n' | sed '/^$/d')
+    for _pkg in $QDA_REMOVALS; do
+        case "$_pkg" in
+            busybox-*) ;;
+            *) log "  ERROR: qfileman/qterminator deps would remove non-busybox package $_pkg"; exit 3 ;;
+        esac
+    done
+    [ -z "$QDA_REMOVALS" ] || log "  replacing busybox shims: $(echo $QDA_REMOVALS)"
+    if ! zypper -n install --no-recommends --force-resolution "${QDA_PKGS[@]}" \
+            >>"$QDA_ZYPPER_LOG" 2>&1; then
+        log "  ERROR: zypper install of qfileman/qterminator deps failed"
+        tail -80 "$QDA_ZYPPER_LOG" | sed 's/^/[bootstrap]   zypper: /'
+        exit 3
+    fi
+    if ! bash "$SRC/qdterm/util/build-sip.sh" >/tmp/qtermwidget-sip.log 2>&1; then
+        log "  ERROR: QTermWidget SIP binding build failed"
+        tail -40 /tmp/qtermwidget-sip.log | sed 's/^/[bootstrap]   sip: /'
+        exit 3
+    fi
+    python3 -m pip install --break-system-packages --no-index --no-build-isolation --no-deps --quiet \
+            "$SRC/qdfileman" "$SRC/qdterm" \
+        || { log "  ERROR: pip install qfileman/qterminator failed"; exit 3; }
+    # Import as admin from a neutral cwd: a root-only --user install or a
+    # source-tree import would hide a broken system install.
+    for _mod in "QTermWidget" "qfileman.window" "qterminator.window"; do
+        (cd / && runuser -u admin -- env PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 QT_QPA_PLATFORM=offscreen \
+            python3 -c "import $_mod") \
+            || { log "  ERROR: $_mod not importable by admin after install"; exit 3; }
+    done
+    log "  qfileman + qterminator installed (QTermWidget binding built from qdterm/qtermwidget-pyqt)"
+fi
+
 # ---- 4b. Stage bats in-VM probes at /root/ ------------------------------
 # Bats tests in tests/integration/vm/*.bats run `bash
 # /root/sNN-foo-probe.sh` to drive end-to-end checks inside the VM.
@@ -523,7 +582,7 @@ fi
 log "installing SELinux policy modules (permissive)..."
 if [ "$QCI_NATIVE_STAGE" = 1 ]; then
     command -v semodule >/dev/null || { log 'ERROR: semodule missing'; exit 3; }
-    for pol in pwd broker session_manager tier1 presentation; do
+    for pol in pwd broker session_manager tier1 tier2 presentation; do
         policy=/usr/share/qdistro-build/selinux/qdistro_$pol.pp
         [ -s "$policy" ] || { log "ERROR: staged policy missing: $policy"; exit 3; }
         semodule -i "$policy" || { log "ERROR: staged policy failed: $policy"; exit 3; }
@@ -544,7 +603,7 @@ if [ "$QCI_NATIVE_STAGE" = 1 ]; then
         systemctl is-active --quiet "$service" && systemctl restart "$service" || true
     done
 else
-    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/presentation; do
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/tier2 selinux/presentation; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
         fi

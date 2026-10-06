@@ -356,23 +356,30 @@ Item {
     availableCategories = getAvailableCategories();
   }
 
+  // Settings.data is a plain object, so a Connections on Settings.data.appLauncher
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.appLauncher
-    function onPinnedAppsChanged() {
-      const wasViewingPinned = selectedCategory === "Pinned";
-      updateAvailableCategories();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.appLauncher)
+        return;
+      if (key === "pinnedApps") {
+        const wasViewingPinned = selectedCategory === "Pinned";
+        updateAvailableCategories();
 
-      // If we were viewing Pinned category and it's no longer available, switch to "all"
-      if (wasViewingPinned && !availableCategories.includes("Pinned")) {
-        selectedCategory = "all";
-      }
+        // If we were viewing Pinned category and it's no longer available, switch to "all"
+        if (wasViewingPinned && !availableCategories.includes("Pinned")) {
+          selectedCategory = "all";
+        }
 
-      // Update results if we're currently viewing the Pinned category
-      if (selectedCategory === "Pinned" && launcher) {
-        launcher.updateResults();
-      } else if (wasViewingPinned && selectedCategory === "all" && launcher) {
-        // Also update results when switching to "all"
-        launcher.updateResults();
+        // Update results if we're currently viewing the Pinned category
+        if (selectedCategory === "Pinned" && launcher) {
+          launcher.updateResults();
+        } else if (wasViewingPinned && selectedCategory === "all" && launcher) {
+          // Also update results when switching to "all"
+          launcher.updateResults();
+        }
+
       }
     }
   }

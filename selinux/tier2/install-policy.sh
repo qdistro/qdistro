@@ -27,7 +27,7 @@ if ! command -v semodule >/dev/null 2>&1; then
 fi
 
 # Dependency check: qdistro_tier2.te requires container_t /
-# container_file_t / container_use_dri_devices from container-selinux. If
+# container_domain / svirt_sandbox_domain from container-selinux. If
 # those aren't in the active policy, `semodule -i` fails to resolve the
 # typeattributeset / typebounds. We can detect this with `seinfo` when
 # available; otherwise we proceed and let semodule report the resolution
@@ -54,6 +54,7 @@ if ! semodule -l | grep -q '^qdistro_tier2\b'; then
 fi
 
 echo "[tier2-install] OK — qdistro_tier2 active"
-echo "[tier2-install] NOTE: the domain is inert until spawn-tier2.sh"
+echo "[tier2-install] stock container_t desktop socket access is active"
+echo "[tier2-install] NOTE: qdistro_tier2_t stays inert until spawn-tier2.sh"
 echo "[tier2-install]       passes --security-opt label=type:qdistro_tier2_t"
-echo "[tier2-install]       (see selinux/tier2/README.md 'Engaging the domain')."
+echo "[tier2-install]       (see selinux/tier2/README.md)."

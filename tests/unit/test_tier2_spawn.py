@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +35,7 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "date",
         "dirname",
         "env",
+        "flock",
         "grep",
         "head",
         "id",
@@ -37,7 +43,12 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "od",
         "python3",
         "readlink",
+        "realpath",
         "rm",
+        "rmdir",
+        "setsid",
+        "sleep",
+        "stat",
         "tr",
     ):
         _link_tool(bindir, name)
@@ -51,7 +62,14 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "#!/bin/sh\n"
         "case \"$1 $2\" in\n"
         "  'image exists') exit 0 ;;\n"
-        "  'ps -a') exit 0 ;;\n"
+        # podman 6 semantics: only the `.Label "k"` accessor works; the
+        # `.Labels.k` field form is a template error (rc 125).
+        "  'ps -a')\n"
+        "    [ -n \"$FAKE_PS_RC\" ] && exit \"$FAKE_PS_RC\"\n"
+        "    case \"$4\" in\n"
+        "      *'.Label \"qdistro_tier2_token\"'*) [ -n \"$FAKE_PS_TOKENS\" ] && printf '%s\\n' $FAKE_PS_TOKENS; exit 0 ;;\n"
+        "      *) echo 'Error: template: ps: cannot evaluate field' >&2; exit 125 ;;\n"
+        "    esac ;;\n"
         "  'container exists') exit 1 ;;\n"
         "esac\n"
         "if [ \"$1\" = run ]; then\n"
@@ -116,9 +134,10 @@ def _run_spawn(
     *,
     dbus_mode: str | None,
     trace: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     runtime = tmp_path / "runtime"
-    runtime.mkdir()
+    runtime.mkdir(exist_ok=True)
     qdwin_shell = tmp_path / "qdwin-shell.so"
     qdwin_shell.write_text("stub\n")
 
@@ -128,6 +147,7 @@ def _run_spawn(
     try:
         env = os.environ.copy()
         env.update({
+            "PODMAN_ARGV_FILE": str(tmp_path / "podman-argv"),
             "FAKE_DBUS_MODE": dbus_mode or "",
             "FAKE_EXPECT_ACTION": "qdistro.tier2.spawn:weston-terminal/weston-terminal",
             "HOME": str(tmp_path / "home"),
@@ -138,6 +158,7 @@ def _run_spawn(
             "TIER2_USE_SECCTX": "0",
             "XDG_RUNTIME_DIR": str(runtime),
         })
+        env.update(extra_env or {})
         return subprocess.run(
             [
                 "/bin/bash",
@@ -206,6 +227,44 @@ def test_tier2_spawn_fails_closed_without_dbus_send(tmp_path: Path) -> None:
     assert "dbus-send not found" in result.stderr
 
 
+def _percont_dirs(tmp_path: Path, *tokens: str) -> Path:
+    parent = tmp_path / "runtime" / "qdistro-tier2"
+    for token in tokens:
+        (parent / token).mkdir(parents=True)
+        (parent / token / "wayland-tier2").write_text("")
+    return parent
+
+
+def test_tier2_spawn_keeps_runtime_dirs_of_live_siblings(tmp_path: Path) -> None:
+    # Two running tier-2 containers own per-container dirs; a third dir is a
+    # crashed spawn's leftover. A new spawn reaps only the leftover. podman 6
+    # rejected the old `.Labels.k` ps template, so every sibling dir (and the
+    # running apps' inner wayland sockets) was removed.
+    live_a, live_b, stale = "a" * 32, "b" * 32, "c" * 32
+    parent = _percont_dirs(tmp_path, live_a, live_b, stale)
+
+    result = _run_spawn(
+        tmp_path,
+        dbus_mode="allow",
+        extra_env={"FAKE_PS_TOKENS": f"{live_a} <no value> {live_b}"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (parent / live_a / "wayland-tier2").exists()
+    assert (parent / live_b / "wayland-tier2").exists()
+    assert not (parent / stale).exists()
+
+
+def test_tier2_spawn_reaps_nothing_when_podman_ps_fails(tmp_path: Path) -> None:
+    live = "d" * 32
+    parent = _percont_dirs(tmp_path, live)
+
+    result = _run_spawn(tmp_path, dbus_mode="allow", extra_env={"FAKE_PS_RC": "125"})
+
+    assert result.returncode == 0, result.stderr
+    assert (parent / live / "wayland-tier2").exists()
+
+
 # --- disposable (--disposable) variant (07-disposables-plan P1) -----------
 
 def _run_disposable(
@@ -224,6 +283,9 @@ def _run_disposable(
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(runtime / "wayland-1"))
     sock.listen(1)
+    pw_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    pw_sock.bind(str(runtime / "pipewire-0"))
+    (runtime / "pipewire-0.lock").write_text("host daemon lock")
     try:
         env = os.environ.copy()
         env.update({
@@ -251,6 +313,7 @@ def _run_disposable(
         )
     finally:
         sock.close()
+        pw_sock.close()
 
 
 def _plan(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
@@ -1028,3 +1091,512 @@ def test_edit_non_edit_capable_class_refused(tmp_path: Path) -> None:
                    "TIER2_DISPOSABLE_CLASSES_TEST": str(reg)})
     assert result.returncode == 2
     assert "not" in result.stderr and "edit-capable" in result.stderr
+
+
+def test_private_runtime_relabel_leaves_shared_binds_alone(tmp_path: Path) -> None:
+    for mode in ("named", "disposable"):
+        case = tmp_path / mode
+        case.mkdir()
+        if mode == "named":
+            result = _run_spawn(case, dbus_mode="allow")
+        else:
+            result = _run_disposable(case, dbus_mode="allow", record_podman=True)
+        assert result.returncode == 0, result.stderr
+        argv = (case / "podman-argv").read_text().split()
+        volumes = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-v"]
+        runtime = [v for v in volumes if "/qdistro-tier2/" in v]
+        assert len(runtime) == 1, volumes
+        assert runtime[0].endswith(":rw,Z"), runtime
+        for volume in volumes:
+            if volume != runtime[0]:
+                assert not {"z", "Z"}.intersection(volume.rsplit(":", 1)[1].split(",")), volume
+        assert any("/wayland-1:" in v for v in volumes), volumes
+        assert any("/qdwin-shell.so:" in v for v in volumes), volumes
+        if mode == "disposable":
+            assert any("/pipewire-0:" in v for v in volumes), volumes
+            assert not any("/pipewire-0.lock:" in v for v in volumes), volumes
+        assert "--privileged" not in argv
+        assert not any("label=disable" in arg or "label=level:" in arg for arg in argv)
+
+
+# Real flock + full launcher, with only Podman/the resolver/broker faked.
+# Readiness is signalled by files; no fixed sleeps order the launches.
+def _await_file(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        assert time.monotonic() < deadline, f"timed out waiting for {path}"
+        time.sleep(0.01)
+
+
+@pytest.fixture
+def locked_launches(tmp_path):
+    bindir = Path(_tool_path(tmp_path, dbus_mode="allow"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    lib = tmp_path / "shell.so"
+    lib.write_text("")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(runtime / "wayland-1"))
+    sock.listen(1)
+    resolver = bindir / "qdistro-resolve-binding"
+    # The launcher reads the binding twice: a side-effect-free discovery read,
+    # then the authoritative `--record` read under the restore lock.
+    resolver.write_text('#!/usr/bin/python3\nimport os, pathlib, sys, time\nstate = os.environ["FAKE_STATE"]\nif "--record" in sys.argv:\n    base = pathlib.Path(os.environ["FAKE_BASE"])\n    name = os.environ["FAKE_NAME"]\n    if os.environ.get("FAKE_PAUSE_RESOLVE"):\n        (base / (name + ".resolving")).touch()\n        while not (base / (name + ".resume")).exists(): time.sleep(.01)\n    state = os.environ.get("FAKE_STATE_RECORD", state)\nprint("GENERATION=sha256:" + "0" * 64)\nprint("STATE_PATH=" + state)\n')
+    resolver.chmod(0o755)
+    podman = bindir / "podman"
+    podman.write_text('''#!/usr/bin/python3
+import json, os, pathlib, sys, time
+args = sys.argv[1:]
+base = pathlib.Path(os.environ["FAKE_BASE"])
+name = os.environ["FAKE_NAME"]
+if args == ["ps", "-aq"]:
+    if os.environ.get("FAKE_PAUSE_STATE"):
+        (base / (name + ".locked")).touch()
+        while not (base / (name + ".continue")).exists(): time.sleep(.01)
+    if os.environ.get("FAKE_LIST_FAIL"): sys.exit(125)
+    if os.environ.get("FAKE_EXISTING"): print("old-container")
+elif args and args[0] == "inspect":
+    if os.environ.get("FAKE_INSPECT_FAIL"): sys.exit(125)
+    print(json.dumps([{"Mounts": [{"Source": os.environ["FAKE_EXISTING"]}]}]))
+elif args and args[0] == "run":
+    (base / (name + ".ready")).write_text(json.dumps(args))
+    if os.environ.get("FAKE_HOLD"):
+        while not (base / (name + ".release")).exists(): time.sleep(.01)
+elif args[:2] == ["container", "exists"]:
+    sys.exit(1)
+''')
+    podman.chmod(0o755)
+    processes = []
+    handles = []
+
+    def launch(name, *, home=state, hold=False, **extra):
+        env = {**os.environ, "PATH": str(bindir), "HOME": str(tmp_path),
+               "FAKE_BASE": str(tmp_path), "FAKE_NAME": name,
+               "FAKE_DBUS_MODE": "allow", "FAKE_EXPECT_ACTION": "",
+               "QDISTRO_PROFILE": "dev", "TIER2_USE_SECCTX": "0",
+               "TIER2_OUTER_DISPLAY": "wayland-1", "XDG_RUNTIME_DIR": str(runtime),
+               "TIER2_QDWIN_SHELL_SO": str(lib), "FAKE_STATE": str(home),
+               "TIER2_SILO": "work" if home else "", **extra}
+        if hold:
+            env["FAKE_HOLD"] = "1"
+        out = (tmp_path / (name + ".out")).open("w+")
+        err = (tmp_path / (name + ".err")).open("w+")
+        handles.extend([out, err])
+        proc = subprocess.Popen(
+            ["bash", str(SPAWN), name, "weston-terminal", "--", "weston-terminal"],
+            env=env, stdout=out, stderr=err, start_new_session=True)
+        processes.append(proc)
+        return proc
+
+    yield launch, state, runtime
+    for proc in processes:
+        # Kill descendants too, even when testing a killed supervisor.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=5)
+    for handle in handles:
+        handle.close()
+    sock.close()
+
+
+def test_state_home_exclusive_across_names_and_aliases(locked_launches, tmp_path):
+    launch, state, _ = locked_launches
+    first = launch("first", hold=True)
+    _await_file(tmp_path / "first.ready")
+    alias = tmp_path / "alias"
+    alias.symlink_to(state, target_is_directory=True)
+    second = launch("second", home=alias)
+    assert second.wait(timeout=5) == 2
+    assert "already in use" in (tmp_path / "second.err").read_text()
+    assert not (tmp_path / "second.ready").exists(), "second reached podman run/relabel"
+    (tmp_path / "first.release").touch()
+    assert first.wait(timeout=5) == 0
+    restart = launch("restart", home=alias)
+    assert restart.wait(timeout=5) == 0, (tmp_path / "restart.err").read_text()
+    assert (tmp_path / "restart.ready").exists()
+
+
+def test_different_homes_launch_concurrently(locked_launches, tmp_path):
+    launch, _, _ = locked_launches
+    first = launch("first", hold=True)
+    _await_file(tmp_path / "first.ready")
+    other = tmp_path / "other"
+    other.mkdir()
+    second = launch("second", home=other)
+    assert second.wait(timeout=5) == 0, (tmp_path / "second.err").read_text()
+    assert first.poll() is None
+
+
+@pytest.mark.parametrize("failure", ["existing", "list", "inspect", "unrelated"])
+def test_state_mount_check_after_lost_launcher(locked_launches, tmp_path, failure):
+    launch, state, _ = locked_launches
+    env = {}
+    if failure != "list":
+        env["FAKE_EXISTING"] = str(state if failure != "unrelated" else tmp_path / "other")
+    if failure in ("list", "inspect"):
+        env["FAKE_" + failure.upper() + "_FAIL"] = "1"
+    proc = launch("probe", **env)
+    expected = 0 if failure == "unrelated" else 2
+    assert proc.wait(timeout=5) == expected, (tmp_path / "probe.err").read_text()
+    assert (tmp_path / "probe.ready").exists() == (expected == 0)
+
+
+def test_crashed_launch_releases_home_lock(locked_launches, tmp_path):
+    launch, _, _ = locked_launches
+    first = launch("first", hold=True)
+    _await_file(tmp_path / "first.ready")
+    os.killpg(first.pid, signal.SIGKILL)
+    first.wait(timeout=5)
+    restart = launch("restart")
+    assert restart.wait(timeout=5) == 0, (tmp_path / "restart.err").read_text()
+
+
+def test_reaper_keeps_unregistered_launcher_directory(locked_launches, tmp_path):
+    launch, _, runtime = locked_launches
+    first = launch("first", home=None, hold=True)
+    _await_file(tmp_path / "first.ready")
+    # Fake podman ps reports NO labels: the first launch has not registered.
+    first_dir = next((runtime / "qdistro-tier2").iterdir())
+    marker = first_dir / "wayland-tier2"
+    marker.touch()
+    second = launch("second", home=None)
+    assert second.wait(timeout=5) == 0, (tmp_path / "second.err").read_text()
+    assert marker.exists(), "reaper removed a launch before podman registration"
+    os.killpg(first.pid, signal.SIGKILL)
+    first.wait(timeout=5)
+    third = launch("third", home=None)
+    assert third.wait(timeout=5) == 0, (tmp_path / "third.err").read_text()
+    assert not first_dir.exists(), "dead launcher wedged orphan reaping"
+
+
+def test_runtime_creation_is_locked_before_directory_exists(locked_launches, tmp_path):
+    launch, _, runtime = locked_launches
+    mkdir = tmp_path / "bin" / "mkdir"
+    mkdir.unlink()
+    mkdir.write_text('''#!/usr/bin/python3
+import os, pathlib, subprocess, sys, time
+if os.environ["FAKE_NAME"] == "first" and any("qdistro-tier2/" in a for a in sys.argv[1:]):
+    base = pathlib.Path(os.environ["FAKE_BASE"])
+    subprocess.run(["/usr/bin/mkdir", *sys.argv[1:]], check=True)
+    (base / "mkdir.ready").touch()
+    while not (base / "mkdir.release").exists(): time.sleep(.01)
+else:
+    os.execv("/usr/bin/mkdir", ["mkdir", *sys.argv[1:]])
+''')
+    mkdir.chmod(0o755)
+    first = launch("first", home=None, hold=True)
+    _await_file(tmp_path / "mkdir.ready")
+    fd = os.open(runtime, os.O_RDONLY)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+    first_dir = next((runtime / "qdistro-tier2").iterdir())
+    second = launch("second", home=None)
+    (tmp_path / "mkdir.release").touch()
+    _await_file(tmp_path / "first.ready")
+    assert second.wait(timeout=5) == 0, (tmp_path / "second.err").read_text()
+    assert first.poll() is None and first_dir.is_dir()
+
+
+def test_detached_supervisor_holds_home_until_container_exit(locked_launches, tmp_path):
+    launch, state, _ = locked_launches
+    # Record the detached supervisor so a failing test cannot leak it.
+    setsid = tmp_path / "bin" / "setsid"
+    setsid.unlink()
+    setsid.write_text('''#!/usr/bin/python3
+import os, pathlib, sys
+(pathlib.Path(os.environ["FAKE_BASE"]) / "supervisor.pid").write_text(str(os.getpid()))
+os.execv("/usr/bin/setsid", ["setsid", *sys.argv[1:]])
+''')
+    setsid.chmod(0o755)
+    first = launch("first", hold=True, TIER2_DETACH="1")
+    supervisor = None
+    try:
+        _await_file(tmp_path / "supervisor.pid")
+        supervisor = int((tmp_path / "supervisor.pid").read_text())
+        _await_file(tmp_path / "first.ready")
+        assert first.wait(timeout=5) == 0
+        second = launch("second")
+        assert second.wait(timeout=5) == 2
+        assert "already in use" in (tmp_path / "second.err").read_text()
+        (tmp_path / "first.release").touch()
+        fd = os.open(state, os.O_RDONLY)
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline, "detached supervisor kept stale home lock"
+                    time.sleep(.01)
+        finally:
+            os.close(fd)
+        restart = launch("restart")
+        assert restart.wait(timeout=5) == 0, (tmp_path / "restart.err").read_text()
+    finally:
+        if supervisor:
+            try:
+                os.killpg(supervisor, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_root_supervisor_uses_admin_podman_for_home_check(tmp_path):
+    # Exercise the real pm routing and lock block without privileges/VM state.
+    # The shim models runuser closing inherited fds: root keeps the lock.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    runuser = bindir / "runuser"
+    runuser.write_text('''#!/bin/bash
+printf '%s\\n' "$*" >> "$CALLS"
+[ "$1 $2 $3" = '-u admin --' ] || exit 99
+shift 3
+exec 9<&-
+exec 6<&-
+exec "$@"
+''')
+    runuser.chmod(0o755)
+    podman = bindir / "podman"
+    podman.write_text('''#!/bin/bash
+[ "$XDG_RUNTIME_DIR" = /run/user/1000 ] || exit 99
+if [ "$1" = ps ]; then
+    # Child no longer holds fd 9, but the root supervisor still does.
+    flock -n "$STATE_PATH" true && exit 99
+    flock -xn "$(dirname -- "$STATE_PATH")" true && exit 99
+    echo old
+else
+    printf '[{"Mounts":[{"Source":"%s"}]}]\\n' "$STATE_PATH"
+fi
+''')
+    podman.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+    source = SPAWN.read_text()
+    pm = source[source.index('if [ "$ROOT_LAUNCHER" = 1 ]; then\n    pm()'):source.index('# as_admin_run:')]
+    lock = source[source.index('# A private :Z home'):source.index('# --- per-container runtime dir + cleanup trap')]
+    proc = subprocess.run(
+        # fd 6 (restore coordination) is taken before the binding read in the
+        # launcher; take it the same way here so its lifetime is still checked.
+        ["bash", "-c", 'fail() { echo "$*" >&2; exit 2; }; ROOT_LAUNCHER=1; ADMIN_USER=admin; _root_admin_uid=1000\n'
+         'exec 6<"$(dirname -- "$STATE_PATH")"; flock -sn 6 || fail parent\n' + pm + lock],
+        env={**os.environ, "PATH": f"{bindir}:/usr/bin:/bin", "STATE_PATH": str(state),
+             "CALLS": str(tmp_path / "calls")}, capture_output=True, text=True, timeout=5)
+    assert proc.returncode == 2 and "in use by a container" in proc.stderr, proc.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert len(calls) == 2 and all(c.startswith("-u admin -- env ") for c in calls), calls
+    assert calls[0].endswith("podman ps -aq") and calls[1].endswith("podman inspect old"), calls
+
+
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_replaced_home_refused_before_registration(locked_launches, tmp_path, replacement):
+    launch, state, _ = locked_launches
+    first = launch("first", FAKE_PAUSE_STATE="1")
+    _await_file(tmp_path / "first.locked")
+    displaced = tmp_path / "displaced"
+    state.rename(displaced)
+    if replacement == "directory":
+        state.mkdir()
+    else:
+        other = tmp_path / "replacement"
+        other.mkdir()
+        state.symlink_to(other, target_is_directory=True)
+    (tmp_path / "first.continue").touch()
+    assert first.wait(timeout=5) == 2, (tmp_path / "first.err").read_text()
+    assert "state path changed since locking" in (tmp_path / "first.err").read_text()
+    assert not (tmp_path / "first.ready").exists(), "Podman registered a replaced home"
+
+
+def test_restore_refuses_during_unregistered_launch(locked_launches, tmp_path, monkeypatch):
+    import qdistro_template_promote as promote
+    import qdistro_templates as qt
+
+    launch, state, _ = locked_launches
+    first = launch("first", FAKE_PAUSE_STATE="1")
+    _await_file(tmp_path / "first.locked")
+    assert not (tmp_path / "first.ready").exists()
+    layout = qt.Layout(var=str(tmp_path / "var"), etc=str(tmp_path / "etc"))
+    binding = Path(layout.binding_file("work"))
+    binding.parent.mkdir(parents=True)
+    binding.touch()
+    monkeypatch.setattr(qt, "read_binding", lambda _: {"state_path": str(state)})
+    swaps = []
+    monkeypatch.setattr(promote, "_do_rollback", lambda *a, **kw: swaps.append(True) or 0)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) != 0
+    assert swaps == [], "restore entered the swap while launch had no Podman record"
+    (tmp_path / "first.continue").touch()
+    assert first.wait(timeout=5) == 0, (tmp_path / "first.err").read_text()
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) == 0
+    assert swaps == [True], "coordination lock persisted after normal teardown"
+
+
+def test_launch_refuses_while_restore_holds_parent(locked_launches, tmp_path):
+    launch, state, _ = locked_launches
+    fd = os.open(state.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = launch("blocked")
+        assert proc.wait(timeout=5) == 2
+        assert "in use by state restore" in (tmp_path / "blocked.err").read_text()
+        assert not (tmp_path / "blocked.ready").exists()
+    finally:
+        os.close(fd)
+
+
+def test_coordination_lock_released_after_launch_crash(locked_launches, tmp_path):
+    launch, state, _ = locked_launches
+    proc = launch("crashed", FAKE_PAUSE_STATE="1")
+    _await_file(tmp_path / "crashed.locked")
+    fd = os.open(state.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                assert time.monotonic() < deadline, "crash left a stale coordination lock"
+                time.sleep(.01)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_final_inode_check_without_inherited_home_fd(tmp_path, replace):
+    # The root supervisor can retain fd 9 while runuser/secctx closes the
+    # child's copy. Execute the actual last check and exec boundary that way.
+    state = tmp_path / "state"
+    state.mkdir()
+    fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        st = os.fstat(fd)
+        expected = f"{st.st_dev}:{st.st_ino}"
+        if replace:
+            state.rename(tmp_path / "old")
+            state.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        podman = bindir / "podman"
+        podman.write_text("#!/bin/sh\necho registered\n")
+        podman.chmod(0o755)
+        source = SPAWN.read_text()
+        start = source.index('# Fail closed if anything outside the coordination protocol')
+        end = source.index("\n'", start)
+        result = subprocess.run(
+            ["bash", "-c", source[start:end]], close_fds=True,
+            env={**os.environ, "PATH": f"{bindir}:/usr/bin:/bin",
+                 "TIER2_STATE_PATH_RESOLVED": str(state),
+                 "TIER2_STATE_INODE_RESOLVED": expected},
+            text=True, capture_output=True, timeout=5)
+        assert result.returncode == (2 if replace else 0), result.stderr
+        assert ("registered" in result.stdout) is (not replace), result.stdout
+    finally:
+        os.close(fd)
+
+
+def _promote_layout(tmp_path, monkeypatch, state_path):
+    import qdistro_templates as qt
+    layout = qt.Layout(var=str(tmp_path / "var"), etc=str(tmp_path / "etc"))
+    binding = Path(layout.binding_file("work"))
+    binding.parent.mkdir(parents=True, exist_ok=True)
+    binding.touch()
+    monkeypatch.setattr(qt, "read_binding", lambda _: {"state_path": str(state_path)})
+    return layout
+
+
+def _symlinked_entry(tmp_path):
+    # Binding state_path is a final-component symlink into ANOTHER parent.
+    silo_dir = tmp_path / "silos" / "work"
+    storage = tmp_path / "storage" / "work-home"
+    silo_dir.mkdir(parents=True)
+    storage.mkdir(parents=True)
+    entry = silo_dir / "state"
+    entry.symlink_to(storage, target_is_directory=True)
+    return entry
+
+
+def test_restore_refuses_while_launch_makes_authoritative_binding_read(
+        locked_launches, tmp_path, monkeypatch):
+    # The launcher holds the restore lock across its --record binding read:
+    # a rollback cannot land between that read and the mount.
+    import qdistro_template_promote as promote
+
+    launch, state, _ = locked_launches
+    first = launch("first", FAKE_PAUSE_RESOLVE="1")
+    _await_file(tmp_path / "first.resolving")
+    layout = _promote_layout(tmp_path, monkeypatch, state)
+    swaps = []
+    monkeypatch.setattr(promote, "_do_rollback", lambda *a, **kw: swaps.append(True) or 0)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) != 0
+    assert swaps == [], "restore swapped state while a launch held its binding read"
+    (tmp_path / "first.resume").touch()
+    assert first.wait(timeout=5) == 0, (tmp_path / "first.err").read_text()
+
+
+def test_launch_refuses_binding_that_moved_after_discovery(locked_launches, tmp_path):
+    launch, _, _ = locked_launches
+    other = tmp_path / "moved"
+    other.mkdir()
+    proc = launch("moved", FAKE_STATE_RECORD=str(other))
+    assert proc.wait(timeout=5) == 2
+    assert "changed during launch" in (tmp_path / "moved.err").read_text()
+    assert not (tmp_path / "moved.ready").exists()
+
+
+def test_symlinked_state_entry_restore_excludes_launch_through_binding_update(
+        locked_launches, tmp_path, monkeypatch):
+    # The swap helper replaces the entry (it does not follow the link), so the
+    # restore lock must be on the entry's directory, the one launches lock.
+    import qdistro_snap_swap as snap_swap
+    import qdistro_template_promote as promote
+
+    launch, _, _ = locked_launches
+    entry = _symlinked_entry(tmp_path)
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+    (snapshot / "restored").write_text("A")
+    layout = _promote_layout(tmp_path, monkeypatch, entry)
+    seen = {}
+
+    def rollback_with_real_swap(*_a, **_kw):
+        snap_swap.restore(str(snapshot), str(entry), mechanism="copy")
+        assert entry.is_dir() and not entry.is_symlink()
+        # After the exchange, before the binding update: a launch on the
+        # restored entry must still be excluded.
+        proc = launch("during", home=entry)
+        seen["rc"] = proc.wait(timeout=5)
+        seen["err"] = (tmp_path / "during.err").read_text()
+        return 0
+
+    monkeypatch.setattr(promote, "_do_rollback", rollback_with_real_swap)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) == 0
+    assert seen["rc"] == 2 and "in use by state restore" in seen["err"], seen
+    assert not (tmp_path / "during.ready").exists()
+    after = launch("after", home=entry)
+    assert after.wait(timeout=5) == 0, (tmp_path / "after.err").read_text()
+
+
+def test_symlinked_state_entry_launch_blocks_restore(locked_launches, tmp_path, monkeypatch):
+    import qdistro_template_promote as promote
+
+    launch, _, _ = locked_launches
+    entry = _symlinked_entry(tmp_path)
+    first = launch("first", home=entry, hold=True)
+    _await_file(tmp_path / "first.ready")
+    layout = _promote_layout(tmp_path, monkeypatch, entry)
+    swaps = []
+    monkeypatch.setattr(promote, "_do_rollback", lambda *a, **kw: swaps.append(True) or 0)
+    assert promote.promote("work", rollback="target", layout=layout, restore_state=True) != 0
+    assert swaps == [], "restore locked the symlink target's parent, not the entry's"
+    (tmp_path / "first.release").touch()
+    assert first.wait(timeout=5) == 0

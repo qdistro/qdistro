@@ -1,0 +1,12 @@
+# File-context regex for the broker rules dir (raw file_contexts
+# syntax — packaged into the .pp with semodule_package -f, NOT run
+# through the refpolicy m4 layer, so gen_context() macros are not
+# available here).
+#
+# Only the rules.d subtree is labelled; /etc/qdistro itself stays
+# etc_t (silos.yaml and friends are read by other domains via the
+# generic etc_t read path). New files created inside rules.d inherit
+# the dir's type, so admin-shipped rules are broker-readable without
+# any per-file labelling.
+
+/etc/qdistro/rules\.d(/.*)?			system_u:object_r:qdistro_broker_rules_t:s0

@@ -523,10 +523,17 @@ Singleton {
   }
 
   // React to live changes of the PRIMARY-capture toggle.
+  // Settings.data is a plain object, so a Connections on Settings.data.appLauncher
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.appLauncher
-    function onClipboardWatchPrimaryChanged() {
-      root._syncPrimaryWatcher();
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.appLauncher)
+        return;
+      if (key === "clipboardWatchPrimary") {
+        root._syncPrimaryWatcher();
+
+      }
     }
   }
 

@@ -37,7 +37,7 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-# Run the actual host and feedback gates while recording each job instead of
+# Run the actual host row implementation and feedback gate while recording each job instead of
 # executing native builds. Their shared job must supply exactly the same command,
 # working directory and classification; a nonzero result must survive both gates.
 @test "feedback: host and development gate share the job and propagate its failure" {
@@ -64,7 +64,7 @@ setup() {
             fi
             return 0
         }
-        gate_host; host_rc=$?
+        host_container_rows; host_rc=$?
         gate_feedback qdfileman qdfileman/qfileman/window.py; feedback_rc=$?
         [ "$host_rc" = "$EXIT_HOST" ] && [ "$feedback_rc" = "$EXIT_HOST" ] || exit 1
         diff "$RDIR/host-command" "$RDIR/feedback-command" || exit 1

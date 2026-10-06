@@ -997,6 +997,7 @@ def qdistro_owned_roots(repo: Path) -> list[Path]:
     return [
         repo / "tests/integration/permissions-gui",
         repo / "tests/integration/qdwin-noctalia",
+        repo / "tests/integration/presentation-gui",
         repo / "tests/integration/workflow-gui",
     ]
 

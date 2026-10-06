@@ -194,6 +194,44 @@ def blend_hex(foreground: str, background: str, fg_weight: float = 0.6) -> str:
     return f"#{mix(0):02x}{mix(2):02x}{mix(4):02x}"
 
 
+_BLACK = "#000000"
+_WHITE = "#ffffff"
+
+
+def readable_on_color(background: str) -> str:
+    """Black or white, whichever contrasts more with ``background``.
+
+    One of the two always reaches at least ~4.58:1 for any sRGB colour.
+    """
+    if contrast_ratio(background, _BLACK) >= contrast_ratio(background, _WHITE):
+        return _BLACK
+    return _WHITE
+
+
+def readable_producer_palette(
+    colors: Mapping[str, str],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Replace each on-colour that misses its contrast floor with black/white.
+
+    Shell schemes (most bundled light variants included) carry accent pairs
+    below WCAG AA. Rejecting them stopped the snapshot from following the
+    shell at all, so the publisher corrects only the failing on-colour and
+    keeps every background. Readers still validate strictly. Returns the
+    corrected palette and the names of the keys that were replaced.
+    """
+    fixed = dict(colors)
+    changed: list[str] = []
+    for pairs, floor in (
+        (CONTRAST_PAIRS_TEXT, CONTRAST_TEXT),
+        (CONTRAST_PAIRS_SECONDARY, CONTRAST_SECONDARY),
+    ):
+        for background, foreground in pairs:
+            if contrast_ratio(fixed[background], fixed[foreground]) < floor:
+                fixed[foreground] = readable_on_color(fixed[background])
+                changed.append(foreground)
+    return fixed, tuple(changed)
+
+
 def _validate_palette(colors: Mapping[str, str]) -> None:
     missing = [key for key in COLOR_KEYS if key not in colors]
     if missing:
@@ -562,6 +600,7 @@ def _producer_colors(raw: Any) -> dict[str, str]:
         if key not in raw:
             raise SnapshotError(f"producer palette missing {key}")
         parsed[key] = parse_hex_color(raw[key], field=f"colors.{key}")
+    parsed, _changed = readable_producer_palette(parsed)
     _validate_palette(parsed)
     return parsed
 
