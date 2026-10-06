@@ -4184,10 +4184,10 @@ record_agent_identity() {
     # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then
-        ver=$(timeout 10 claude --version 2>/dev/null | head -1)
+        ver=$(timeout 10 claude --version 2>/dev/null | head -1) || true
         if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     elif printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])codex([[:space:]]|$)'; then
-        ver=$(timeout 10 codex --version 2>/dev/null | head -1)
+        ver=$(timeout 10 codex --version 2>/dev/null | head -1) || true
         if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     fi
 }

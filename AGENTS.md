@@ -34,32 +34,22 @@ Subdirectory agent docs (read the nearest one before editing there):
 
 ## Building
 
-Build order: `qdwin` first (the root daemons and the qdshell QML plugin compile
-against its protocol XML), then the root daemons, then qdshell. From the repo
-root:
+Builds and headless unit tests run inside rootless Podman, using the same
+`snapshot.conf` pin as the VM native builder. The host needs orchestration
+tools only; check them with `ci/bin/qci-host-deps --check`.
 
 ```sh
-(cd qdwin && meson setup build && meson compile -C build)
-# the daemons and qdshell find qdwin's protocol XML via its uninstalled .pc
-export PKG_CONFIG_PATH="$PWD/qdwin/build/meson-uninstalled${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-(cd daemons && meson setup build && meson compile -C build)
-(cd qdshell && meson setup build && meson compile -C build)
-python3 -m pytest            # root unit tests (tests/unit)
+ci/bin/qci host           # all build/test rows in the pinned container
+# Development commands use the same image (network disabled):
+ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
 ```
 
-`qdistro-forward` and `qdistro-nested-pixelfeed` are optional: meson skips them
-(with a `message`) when the FreeRDP 3 / PipeWire development packages are
-missing, and the build still exits 0. See [doc/dev.md](doc/dev.md).
-
-The `host` gate installs the two WebExtensions' npm dependencies itself when
-`node_modules/.bin/vitest` is absent (`npm ci --prefer-offline`; npm is a
-prerequisite, and a cold npm cache needs network). It reuses an existing
-`node_modules`, so after a `package-lock.json` change refresh it by hand:
-
-```sh
-(cd qdchrome-extension && npm ci)
-(cd qdfirefox-extension && npm ci)
-```
+The host gate builds qdwin's vendored, patched libweston from current source
+before qdwin and qdshell. Image dependencies are cached by recipe, snapshot,
+and base image ID. npm dependencies are prepared in a separate networked
+container and invalidated when either extension's package files change;
+all test rows run with networking disabled. `QCI_OFFLINE=1` requires a cached
+image and npm dependencies or cached npm downloads.
 
 Host prerequisites and the VM path: [doc/dev.md](doc/dev.md).
 
@@ -93,16 +83,14 @@ sanctioned visual driver pinned explicitly in `QCI_AGENT_CMD`; see
   feedback while developing, run single scenarios
   (`ci/bin/qci gui --scenario <abs path>`); the selected gates are the
   acceptance bar.
-- **Cheap per-component host checks** (development feedback only; they do
-  **not** satisfy a selected `host` gate). `qci host` has no component
-  selector; these are three of its rows (`ci/lib/gates/host.sh:537-541`). Run each
-  independently from the repository root (the host's Python/Qt test
-  dependencies must be installed); each takes seconds:
+- **Cheap per-component checks** (development feedback only; they do
+  **not** satisfy a selected `host` gate). Run individual suites in the same
+  container toolchain; the first invocation may build the image:
 
   ```sh
-  (cd qdlocker && python3 -m pytest -q tests/unit)
-  (cd qdgreeter && python3 -m pytest -q tests)
-  (cd qdfileman && python3 -m pytest -q)
+  ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
+  ci/bin/qci-host-run bash -c 'cd qdgreeter && python3 -m pytest -q tests'
+  ci/bin/qci-host-run bash -c 'cd qdfileman && python3 -m pytest -q'
   ```
 - **Review before merge.** Get the change reviewed (diff + gate evidence)
   before it lands on `main`.

@@ -363,76 +363,68 @@ cannot be located. It does not guess paths outside libvirt metadata.
 
 ## Host test dependencies
 
-The `host` gate runs tests across all in-tree components. Several components need
-dependencies that are not part of the base qdistro install. Check or install
-them in one shot (preflight also flags missing ones as WARN at the start of a
-run):
+`qci host` builds and tests every component in rootless Podman. Host prerequisites
+are Podman, Bash, Git, Python 3 (stdlib), Bats, and the libvirt/VM tooling for VM
+gates. `ci/bin/qci-host-deps --check` checks orchestration commands; it never
+installs host packages. Preflight requires Podman. The edit guard and runner
+selftests remain host orchestration; component builds and tests run only in the
+container. There is no public native-host fallback flag.
 
-```bash
-qdistro/ci/bin/qci-host-deps            # report what is missing (no sudo)
-qdistro/ci/bin/qci-host-deps --install  # install via zypper/apt + pip
+The image uses `QCI_PODMAN_IMAGE` (default: the `snapshot.conf` Tumbleweed pin),
+aligns packages with the native builder's `container-native-deps.sh`, and adds
+[`containers/host-packages.txt`](containers/host-packages.txt). This replaces the
+old host-dependency probe table as the single host-test dependency list. Qt,
+Python test modules, npm, Weston, and development headers live in the image.
+The QTermWidget binding is built from the vendored SIP source into the image.
+The patched libweston itself is built from current source during the gate,
+including the inert-seat regression, before qdwin is compiled against it.
+
+`ci/bin/qci-host-image` prints the resolved image name. Its cache key includes
+the dependency recipe and SIP source, snapshot, and resolved base image ID.
+Source-only changes reuse the image. RPM downloads share the native builder's
+`$QDWIN_CACHE_DIR/podman-rpm/<snapshot>/<arch>/packages/` cache. The default cache
+root is `~/.cache/qdistro`. `QCI_OFFLINE=1` refuses a missing base or toolchain
+image, without pulling or rebuilding it.
+
+The worktree is mounted at its original absolute path with `--userns=keep-id`,
+so generated files retain the invoking user's ownership. Linked-worktree Git
+metadata is mounted read-only. No host home, display socket, D-Bus socket or
+Python package path enters the test container. Container SELinux labeling is disabled (`--security-opt label=disable`); it
+never relabels the worktree, shared Git metadata, or RPM/npm caches. The lab
+host currently reports enforcing mode; assigning
+`container_t` breaks unit fixtures that use their own PID as a development
+peer. This does not change host enforcement. SELinux runtime isolation remains
+VM-gated; this toolchain container is for trusted development source.
+
+A private runtime directory and UTF-8 locale support offscreen Qt tools.
+An isolated `dbus-run-session` supplies both test session and system-bus
+addresses; neither connects to host services. `--init` reaps children, and the
+private row entrypoint does not install the outer runner's VM-cleanup traps.
+The container preserves the host timezone (`--tz=local`), matching the previous
+native gate. A known notebook-test limitation remains on UTC hosts: its PDF
+metadata normalizer handles signed offsets but not the UTC `Z` spelling.
+
+A separate preparation container runs `npm ci --prefer-offline` with downloads
+cached in `$QDWIN_CACHE_DIR/host-npm/` (default `~/.cache/qdistro/host-npm/`).
+Keeping this cache outside the source tree also keeps it out of selftest Git
+fixtures. Each extension's `node_modules` receipt includes both
+package files, Node version and architecture; matching dependencies are reused.
+Offline preparation uses `npm ci --offline` and no network. All build/test rows
+run with `--network=none`, Qt offscreen, and the existing printer-test exclusion.
+The existing row names, classifications, logs under `ci/runs/<run>/host/`, and
+`results.tsv` format are unchanged. Image/preparation diagnostics are saved in
+that directory too; infrastructure failures add an explicit failing row.
+
+For short development checks, use the same image without acceptance overhead:
+
+```sh
+ci/bin/qci-host-run bash -c 'cd qdfileman && python3 -m pytest -q'
 ```
 
-The individual deps are:
-
-**qdbrowser tests** require `jeepney` (D-Bus bridge client, already a
-runtime dependency in `qdbrowser/pyproject.toml`):
-
-```bash
-# Ubuntu
-sudo apt install python3-jeepney
-
-# openSUSE Tumbleweed (package named for the python3 in use)
-sudo zypper install python313-jeepney
-```
-
-**qdshell QML tests** require the `QtQml.WorkerScript` QML module:
-
-```bash
-# Ubuntu
-sudo apt install qml6-module-qtqml-workerscript
-
-# openSUSE Tumbleweed
-sudo zypper install qt6-declarative-imports
-```
-
-**qdterm tests** (the `qterminator` package) require the `QTermWidget` Python
-binding, which is built from source as part of the qterminator install (it is
-not packaged by any distro). Build it from the `qtermwidget-pyqt/` directory
-of the in-tree `qdterm/` component:
-
-```bash
-cd qdterm/qtermwidget-pyqt && pip install .
-```
-
-See `qdterm/README.md` for full build prerequisites (qtermwidget-devel,
-sip, pyqt-builder).
-
-**qdfileman tests** (the `qfileman` package) require `tomli_w` (declared in `qdfileman/pyproject.toml`; not
-packaged by most distros):
-
-```bash
-pip install tomli_w
-```
-
-**Other host-gate steps** need test imports and build deps that `qci-host-deps`
-also checks: PyYAML, numpy, hypothesis and pytest-cov (qdistro unit tests and
-coverage floor), mistune (qnotebook), PyQt6-WebEngine (qdbrowser), libXcursor
-devel (qdwin meson build), Qt 6 base/declarative/quicktest devel (qdshell build
-and qmltest), the Qt 6 QML tools `qmltestrunner`/`qmllint`/`qmlformat` (qdshell's
-ci-local), and the `weston` binary plus python3 pywayland (the inert-relptr
-libweston test).
-
-**qdwin vendored-libweston symbols test** requires the `libevdev` and `pango`
-(incl. `pangocairo`) development packages:
-
-```bash
-# openSUSE Tumbleweed
-sudo zypper install libevdev-devel pango-devel
-
-# Ubuntu
-sudo apt install libevdev-dev libpango1.0-dev
-```
+This helper runs an explicit command with networking disabled and does not
+produce acceptance evidence. Runtime and visual integration testing remains
+in VMs. The older `qci feedback qdfileman` developer lane still uses its native
+host environment; prefer `qci-host-run` on hosts without Python/Qt dependencies.
 
 ## Fast triage
 
@@ -444,3 +436,7 @@ qdistro/ci/bin/qci report --latest
 
 Start from the report, then inspect the linked logs, journals, screenshots, and
 the preserved VM name if the failure kept one alive.
+
+The container init runs as container root (still rootless on the host); `setpriv`
+drops to the invoking UID/GID before running any source command. This preserves
+normal PID-1 signal permissions while all build outputs retain user ownership.
