@@ -32,11 +32,9 @@
 ##     bottom pins it so a future allow can't quietly add the surface
 ##     back.
 ##
-##   Engagement: the domain is inert until spawn-tier2.sh passes
-##   `--security-opt label=type:qdistro_tier2_t` to podman AND the host
-##   binds are made reachable to it (see README "Engaging the domain"
-##   and the bind-relabel TODO below). Until then the workload keeps
-##   running as stock container_t, so loading this module is a no-op.
+##   The launcher still uses stock container_t. This module also grants
+##   that domain the narrow host socket connection edges below; loading it
+##   is therefore required even while qdistro_tier2_t stays disengaged.
 ##
 ##   Build note: unlike the Tier-1 module (refpolicy m4, built through
 ##   /usr/share/selinux/devel/Makefile), this module is kernel policy
@@ -52,7 +50,7 @@
 ##   See doc/selinux.md for the full architectural rationale and
 ##   selinux/tier2/README.md for the validated-vs-deferred split.
 ## </desc>
-module qdistro_tier2 0.1.0;
+module qdistro_tier2 0.2.0;
 
 ########################################
 #
@@ -156,44 +154,26 @@ neverallow qdistro_tier2_t self:netlink_tcpdiag_socket create;
 neverallow qdistro_tier2_t self:packet_socket create;
 
 ########################################
+# Desktop transport for the shipped stock-container_t launcher.
 #
-# PERMISSIVE-PENDING / live-AVC + launcher-wiring TODO
-#
-# The domain above is functional-by-attribute and bounded, and the
-# narrowing is pinned. What is NOT yet done, and gates making this the
-# default for Tier-2 (needs an enforcing-mode VM — none was available
-# when this module landed):
-#
-#   1. Bind reachability. spawn-tier2.sh mounts the per-container
-#      /run/user dir, the outer wayland socket, the pipewire-N sockets,
-#      and qdwin-shell.so into the container WITHOUT :z/:Z, so podman
-#      does NOT relabel them — they keep their host labels (user_tmp_t
-#      for the runtime/sockets, lib_t/usr_t for qdwin-shell.so). Stock
-#      container_t can't reach those either, which is exactly why the
-#      current default container_t Tier-2 path works only because the
-#      binds happen to be readable under the container's MCS category
-#      via the volume mount semantics. Before qdistro_tier2_t can be
-#      engaged, the launcher must add :z (shared) or :Z (private) to the
-#      socket/dir binds so they become container_file_t, and a
-#      deliberate strategy is needed for qdwin-shell.so (a :z would
-#      mutate a host library label — prefer a dedicated read interface
-#      or a copy-in). This is a LAUNCHER change, tracked in the README;
-#      adding allow rules here before the binds are relabelled would be
-#      cargo-culting against the wrong labels.
-#
-#   2. Workload AVC pass. Once #1 lands and the domain is engaged, run
-#      tests/integration/vm/s32-tier2-podman.sh + s40-tier2-hardening.sh
-#      enforcing and confirm ZERO new AVCs for the nested weston + guest
-#      app. The expectation is zero (the container_domain/svirt_sandbox
-#      attributes give the same file/exec surface the working
-#      container_t path uses), but it is asserted, not proven, until the
-#      VM run. For each AVC the VM surfaces:
-#        a. confirm container_t already allows it
-#           (`sesearch -A -s container_t ...`) so the typebounds holds,
-#        b. add the narrowest allow that closes it — to qdistro_tier2_t
-#           directly, NOT by joining another broad attribute.
-#
-#   3. container_runtime_t (podman/conmon) is intentionally OUT OF
-#      SCOPE: confining the runtime touches every podman invocation on
-#      the host, not just Tier-2. This module confines only the
-#      container (workload) side.
+# The runtime tree and silo home use :Z, but the outer Wayland and
+# PipeWire socket inodes are shared with host clients (including tier1).
+# Never relabel them. Only the explicitly bound sockets are reachable in
+# the container mount namespace: no host runtime directory is exposed.
+# sock_file write authorizes connect(2), NOT regular-file writes. Do not
+# add user_tmp_t file/dir management or a broad userdomain connect rule.
+# Tumbleweed runs the admin compositor/secctx listener and user PipeWire
+# in unconfined_t. Other server domains require a separate reviewed rule.
+require {
+    type user_tmp_t;
+    type unconfined_t;
+    class sock_file { getattr write };
+    class unix_stream_socket connectto;
+}
+allow container_t user_tmp_t:sock_file { getattr write };
+allow container_t unconfined_t:unix_stream_socket connectto;
+
+# qdistro_tier2_t remains deferred: it needs explicit process-label wiring,
+# these transport permissions bounded by container_t, and an enforcing
+# workload/AVC pass. Do not engage it merely because this module loads.
+# container_runtime_t (podman/conmon) remains outside this module's scope.

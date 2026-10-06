@@ -889,6 +889,27 @@ if [ -n "$TIER2_SILO" ]; then
     # the admin-owned binding tree and emits the activation audit. Running it
     # as root would leave root-owned files in an admin-owned 0700 dir and
     # mis-attribute the audit.
+    # Restore coordination: template rollback (--restore-state) takes an
+    # exclusive flock on the directory that holds the binding's state_path
+    # ENTRY (the directory its swap renames in, not a symlink target's parent)
+    # and keeps it through the binding update. Discover that entry with a
+    # side-effect-free read, share-lock its directory on fd 6 for the
+    # launcher's lifetime, and only then make the authoritative --record read,
+    # so a rollback can never land between the binding read and the mount.
+    command -v flock >/dev/null 2>&1 || fail "flock not in PATH"
+    probe_state=""
+    probe_env="$(as_admin_run "${RESOLVER[@]}" "$TIER2_SILO" --launch-env 2>/dev/null)" \
+        && while IFS='=' read -r _k _v; do
+               [ "$_k" = STATE_PATH ] && probe_state="$_v"
+           done <<< "$probe_env"
+    if [ -n "$probe_state" ]; then
+        # Lexical (no symlink resolution), like the swap helper's abspath.
+        state_entry=$(realpath -s -m -- "$probe_state") && [ -n "$state_entry" ] \
+            || fail "cannot resolve state entry $probe_state"
+        state_parent=$(dirname -- "$state_entry")
+        exec 6<"$state_parent" || fail "cannot open state parent $state_parent"
+        flock -sn 6 || fail "state parent $state_parent is already in use by state restore"
+    fi
     launch_env="$(as_admin_run "${RESOLVER[@]}" "$TIER2_SILO" --record --launch-env)"
     resolve_rc=$?
     case "$resolve_rc" in
@@ -912,6 +933,10 @@ if [ -n "$TIER2_SILO" ]; then
             # spawn-tier2 only verifies.
             [ -n "$STATE_PATH" ] \
                 || fail "resolver returned no STATE_PATH for templated silo $TIER2_SILO"
+            # fd 6 guards the entry discovered above; a binding that moved in
+            # between (concurrent promote) is not covered by it.
+            [ "$STATE_PATH" = "$probe_state" ] \
+                || fail "binding for silo $TIER2_SILO changed during launch (state $probe_state -> $STATE_PATH); retry"
             [ -d "$STATE_PATH" ] \
                 || fail "state_path $STATE_PATH for silo $TIER2_SILO is missing or not a directory — refusing to launch a templated silo without its state"
             echo "spawn-tier2: silo $TIER2_SILO resolved to generation $IMAGE (state=$STATE_PATH)" >&2 ;;
@@ -1005,6 +1030,45 @@ if [ "$EXPORT_ENABLED" = 1 ]; then
     broker_gate "$EXPORT_GATE_ACTION" "export-class ${OPEN_CLASS}"
 fi
 
+# A private :Z home may have only one owner, even under different container
+# names or symlink aliases. Lock the directory inode itself: no lock file in
+# the writable home can be unlinked/replaced by the workload. Root and admin
+# open the same inode; the supervisor keeps fd 9 (also across test detach).
+# Kernel locks disappear when their last holder dies, so no stale lock files.
+command -v flock >/dev/null 2>&1 || fail "flock not in PATH"
+if [ -n "$STATE_PATH" ]; then
+    # fd 6 (restore coordination) is already held; see the resolver call.
+    STATE_PATH=$(readlink -e -- "$STATE_PATH") || fail "cannot resolve state path"
+    exec 9<"$STATE_PATH" || fail "cannot open state directory $STATE_PATH"
+    flock -n 9 || fail "state path $STATE_PATH is already in use by another tier-2 launcher"
+    # Capture from fd 9, not the pathname. runuser/secctx may close inherited
+    # fds, but the supervisor retains the lock and this immutable identity.
+    STATE_INODE=$(stat -Lc '%d:%i' /proc/self/fd/9) || fail "cannot stat locked state"
+    # A killed supervisor can leave a container behind (or it can predate
+    # locking). Under the lock, inspect ALL records, including Created and
+    # Stopping, before allowing podman to relabel. Listing/inspection errors
+    # fail closed; retry after teardown if a record disappeared mid-inspect.
+    state_ids=$(pm ps -aq) || fail "cannot list containers using state $STATE_PATH"
+    if [ -n "$state_ids" ]; then
+        mapfile -t state_ids_array <<< "$state_ids"
+        state_mounts=$(pm inspect "${state_ids_array[@]}") \
+            || fail "cannot inspect containers using state $STATE_PATH"
+        if ! python3 -c '
+import json, os, sys
+records = json.load(sys.stdin)
+if not isinstance(records, list) or not records:
+    raise ValueError("expected container inspection records")
+for record in records:
+    for mount in record["Mounts"]:
+        source = mount.get("Source")
+        if source and os.path.realpath(source) == sys.argv[1]:
+            sys.exit(1)
+' "$STATE_PATH" <<< "$state_mounts"; then
+            fail "state path $STATE_PATH is in use by a container or its usage could not be verified"
+        fi
+    fi
+fi
+
 # --- per-container runtime dir + cleanup trap ----------------------------
 # This is the load-bearing isolation step: the container only sees an
 # initially-empty /run/user/<uid>, so dbus, pulse, gpg-agent, ssh-agent
@@ -1014,24 +1078,36 @@ fi
 PARENT_DIR="$RUNTIME_DIR/qdistro-tier2"
 PERCONT_DIR="$PARENT_DIR/$LAUNCH_TOKEN"
 
+# Serialize mkdir + acquisition of the lifetime lock with all reapers.
+# Lock the existing runtime inode, not PARENT_DIR (cleanup may remove that).
+exec 7<"$RUNTIME_DIR" || fail "cannot open runtime directory for locking"
+flock 7 || fail "cannot lock runtime directory"
+
 # Reap orphan per-container dirs from prior spawns that died without
 # running their EXIT trap (segfault, kill -9, host crash). Use `podman
 # ps -a` so containers in Exited / Created / Stopping that haven't been
 # auto-removed yet still count as "live" — we don't want to rm a dir
 # while podman still has a record of the container. Filter the label
 # set to 32-hex-char tokens to ignore podman's "<no value>" sentinel
-# for unlabeled containers.
-if [ -d "$PARENT_DIR" ]; then
-    live_tokens=$(pm ps -a --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
-                    | grep -E '^[0-9a-f]{32}$' \
-                    | sort -u || true)
+# for unlabeled containers. `.Label "k"` is the ps accessor that works across
+# podman versions; podman 6 rejects `.Labels.k` (Labels is a slice there),
+# which used to leave the live set empty and reap every sibling's runtime dir,
+# taking a running tier-2 app's inner wayland socket with it. If the listing
+# fails, reap nothing: a leaked dir is cheaper than a live one removed.
+if [ -d "$PARENT_DIR" ] \
+    && live_tokens=$(pm ps -a --format '{{.Label "qdistro_tier2_token"}}' 2>/dev/null); then
+    live_tokens=$(printf '%s\n' "$live_tokens" | grep -E '^[0-9a-f]{32}$' || true)
     for d in "$PARENT_DIR"/*/; do
         [ -d "$d" ] || continue
         token=$(basename "$d")
-        case " $live_tokens " in
-            *" $token "*) ;;
-            *) rm -rf "$d" 2>/dev/null || true ;;
-        esac
+        # A launcher may not have reached podman registration yet. Its
+        # directory lock is authoritative even when absent from this snapshot.
+        (
+            exec 8<"$d" || exit 0
+            flock -n 8 || exit 0
+            printf '%s\n' "$live_tokens" | grep -Fxq -- "$token" \
+                || rm -rf "$d" 2>/dev/null || true
+        )
     done
 fi
 
@@ -1044,9 +1120,13 @@ if [ "$ROOT_LAUNCHER" = 1 ]; then
     runuser -u "$ADMIN_USER" -- mkdir -p -m 0700 "$PERCONT_DIR" \
         || fail "could not create admin-owned per-container dir $PERCONT_DIR"
 else
-    mkdir -p "$PERCONT_DIR"
-    chmod 0700 "$PERCONT_DIR"
+    mkdir -p "$PERCONT_DIR" && chmod 0700 "$PERCONT_DIR" \
+        || fail "could not create per-container dir $PERCONT_DIR"
 fi
+exec 8<"$PERCONT_DIR" || fail "cannot open per-container dir for locking"
+flock -n 8 || fail "per-container dir $PERCONT_DIR is already in use"
+flock -u 7
+exec 7<&-
 
 # Cleanup runs from both the EXIT trap (covers pre-flight `fail`s and
 # the explicit call after the wrapper returns below) and the orphan-
@@ -1152,6 +1232,7 @@ export TIER2_LEASE_PROCTREE_GRACE_RESOLVED="${DISP_LEASE_PROCTREE_GRACE:-}"
 export TIER2_LEASE_WORKFLOW_RESOLVED="${DISP_LEASE_WORKFLOW:-}"
 export TIER2_QDWIN_SHELL_SO_RESOLVED="$QDWIN_SHELL_SO"
 export TIER2_STATE_PATH_RESOLVED="$STATE_PATH"
+export TIER2_STATE_INODE_RESOLVED="${STATE_INODE:-}"
 export TIER2_NETWORK_RESOLVED="$TIER2_NETWORK_VAL"
 export TIER2_PIDS_LIMIT_RESOLVED="$TIER2_PIDS_LIMIT_VAL"
 export TIER2_MEMORY_RESOLVED="$TIER2_MEMORY_VAL"
@@ -1207,6 +1288,7 @@ SECCTX_ENV_PASS=(
     "TIER2_LEASE_WORKFLOW_RESOLVED=$TIER2_LEASE_WORKFLOW_RESOLVED"
     "TIER2_QDWIN_SHELL_SO_RESOLVED=$TIER2_QDWIN_SHELL_SO_RESOLVED"
     "TIER2_STATE_PATH_RESOLVED=$TIER2_STATE_PATH_RESOLVED"
+    "TIER2_STATE_INODE_RESOLVED=$TIER2_STATE_INODE_RESOLVED"
     "TIER2_NETWORK_RESOLVED=$TIER2_NETWORK_RESOLVED"
     "TIER2_PIDS_LIMIT_RESOLVED=$TIER2_PIDS_LIMIT_RESOLVED"
     "TIER2_MEMORY_RESOLVED=$TIER2_MEMORY_RESOLVED"
@@ -1261,7 +1343,7 @@ chmod 0600 "$INNER_SOCK"
 # at spawn time.
 PIPEWIRE_BINDS=()
 for pw in "$RUNTIME"/pipewire-[0-9]*; do
-    [ -e "$pw" ] || continue
+    [ -S "$pw" ] || continue
     base=$(basename "$pw")
     stub="$TIER2_PERCONT_DIR/$base"
     : > "$stub"
@@ -1309,8 +1391,10 @@ if [ -d /var/lib/qdistro/presentation ]; then
         -v /var/lib/qdistro/presentation:/var/lib/qdistro/presentation:ro,nodev,nosuid,noexec,rprivate
     )
 fi
+# The binding-resolved home belongs exclusively to this silo. Give it the
+# current container MCS label too; a restart receives a fresh category pair.
 if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
-    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
+    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw,Z" )
 elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
     # Disposable home is a WRITABLE tmpfs (07-plan "tmpfs home"): the app can
     # run, but every byte lives in RAM and is discarded on teardown by
@@ -1446,7 +1530,9 @@ PODMAN_ARGS=(
     # per-container dirs still belong to a live container.
     --label "qdistro_tier2_token=$QDWIN_LAUNCH_TOKEN"
     "${PODMAN_HARDENING[@]}"
-    -v "$TIER2_PERCONT_DIR:/run/user/${TIER2_ADMIN_UID_RESOLVED}:rw"
+    # Relabel only this private tree (stubs, not the mounted host sockets).
+    # Shared socket/library/presentation sources must retain their host types.
+    -v "$TIER2_PERCONT_DIR:/run/user/${TIER2_ADMIN_UID_RESOLVED}:rw,Z"
     -v "$OUTER_SOCKET_PATH:/run/user/${TIER2_ADMIN_UID_RESOLVED}/$DISPLAY_NAME:rw"
     "${PIPEWIRE_BINDS[@]}"
     -v "$TIER2_QDWIN_SHELL_SO_RESOLVED:/usr/lib64/weston/qdwin-shell.so:ro"
@@ -1472,6 +1558,16 @@ eval "set -- $TIER2_APP_ARGV_JOINED"
 
 # Isolated consumers use the bound public directory. Do not pass a host
 # QDISTRO_PRESENTATION_FILE into the container (no -e / --env-host).
+# Fail closed if anything outside the coordination protocol replaced the
+# source since fd 9 was locked. The parent lock excludes legitimate swaps
+# throughout this check and Podman registration (and the container lifetime).
+if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
+    current_inode=$(stat -Lc "%d:%i" -- "$TIER2_STATE_PATH_RESOLVED") || exit 2
+    if [ "$current_inode" != "$TIER2_STATE_INODE_RESOLVED" ]; then
+        echo "spawn-tier2-wrapper: state path changed since locking; refusing mount" >&2
+        exit 2
+    fi
+fi
 exec env -u QDISTRO_PRESENTATION_FILE podman "${PODMAN_ARGS[@]}" "$@"
 '
 

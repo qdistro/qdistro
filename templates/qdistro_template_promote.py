@@ -19,6 +19,7 @@ silo's next restart.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import shlex
 import subprocess
@@ -346,6 +347,12 @@ def _silo_running(silo: str) -> bool:
     return container in proc.stdout.split()
 
 
+def state_entry_parent(state_path: str) -> str:
+    """Directory whose entry a state restore replaces (the swap helper's
+    ``dirname(abspath(state_path))``); the launcher locks the same one."""
+    return os.path.dirname(os.path.abspath(state_path))
+
+
 def promote(silo: str, run_id: str | None = None, *,
             rollback: str | None = None, layout: qt.Layout | None = None,
             resolver=resolve_selector, state_path: str | None = None,
@@ -359,10 +366,31 @@ def promote(silo: str, run_id: str | None = None, *,
     existing = qt.read_binding(binding_path) if os.path.isfile(binding_path) else None
 
     if rollback is not None:
-        return _do_rollback(layout, silo, rollback, existing, resolver, now,
-                            image_exists, restore_state=restore_state,
-                            restore_snapshot=restore_snapshot,
-                            keep_state=keep_state, running_check=running_check)
+        # Launchers share-lock the directory holding the state_path ENTRY before
+        # their authoritative binding read and retain it through teardown. A
+        # restore needs exclusive access to that same directory: the swap
+        # helper renames the entry there (abspath, a final-component symlink is
+        # replaced, not followed), so it must not be the symlink target's
+        # parent. Directory fds work for both root launchers and the admin
+        # tool without ownership-sensitive lock files or stale-lock recovery.
+        parent_fd = None
+        try:
+            if restore_state and existing is not None:
+                parent = state_entry_parent(existing["state_path"])
+                try:
+                    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                    fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    return _refuse(layout, f"state parent is in use or cannot be "
+                                   f"locked for restore: {exc}", silo=silo,
+                                   generation=rollback)
+            return _do_rollback(layout, silo, rollback, existing, resolver, now,
+                                image_exists, restore_state=restore_state,
+                                restore_snapshot=restore_snapshot,
+                                keep_state=keep_state, running_check=running_check)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
 
     # --- promote a validated candidate ---------------------------------
     found = _find_candidate(layout, run_id)

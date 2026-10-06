@@ -508,3 +508,39 @@ def test_gc_keeps_unexpired_snapshot(tmp_path):
     assert [d for d in deletions if d["kind"] == "state-snapshot"] == []
     assert os.path.isdir(r["path"])
     assert ss.find_restore_snapshot(layout, silo, GEN_A) is not None
+
+
+def test_restore_parent_lock_covers_swap_and_binding(tmp_path, monkeypatch):
+    import fcntl
+
+    layout, silo = _promote_setup(tmp_path)
+    sp = layout.default_state_path(silo)
+    ss.take_pre_activation_snapshot(
+        layout, silo, incoming_generation=GEN_B, outgoing_generation=GEN_A,
+        template=TEMPLATE, state_path=sp, policy="availability", now=1.0)
+    real_restore = ss.restore_snapshot
+    real_write = qt.write_binding
+    checked = []
+
+    def assert_locked(stage):
+        fd = os.open(os.path.dirname(sp), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            checked.append(stage)
+        finally:
+            os.close(fd)
+
+    def restore(*args, **kwargs):
+        assert_locked("swap")
+        return real_restore(*args, **kwargs)
+
+    def write(*args, **kwargs):
+        assert_locked("binding")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(ss, "restore_snapshot", restore)
+    monkeypatch.setattr(qt, "write_binding", write)
+    assert promote.promote(silo, rollback=GEN_A, layout=layout, restore_state=True,
+                           image_exists=lambda d: True, running_check=lambda s: False) == 0
+    assert checked == ["swap", "binding"]

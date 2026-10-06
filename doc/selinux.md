@@ -281,24 +281,72 @@ built with the base `checkmodule -M -m` + `semodule_package` toolchain
 refpolicy style for symmetry but are not consumed by that build path;
 the whole policy is in the `.te`.
 
-**Engagement is deferred** and needs two things, neither landed:
-(1) `spawn-tier2.sh` must pass
-`--security-opt label=type:qdistro_tier2_t` to podman; and (2) the
-launcher's socket/dir binds (today plain `-v ...:rw`, host-labelled
-`user_tmp_t`) must gain `:z`/`:Z` so they relabel to `container_file_t`
-that the domain can reach — plus a label strategy for the
-`qdwin-shell.so` bind (a `:z` would mutate a host library label). Both
-are launcher changes, capability-gated behind a clean enforcing-mode AVC
-pass on a VM (none was available when the module landed). Until then
-tier-2 keeps running as stock `container_t`, so loading the module is a
-no-op. What is validated today: the module compiles (`make check`), and
-`sesearch` confirms the `neverallow` block can't collide with the joined
-attributes at load time (the net-socket perms come solely from the
-omitted network attributes). What needs the enforcing VM: the bind
-relabel wiring, a zero-new-AVC run of the nested weston under
-`qdistro_tier2_t`, and the load-time `typebounds`/`neverallow`
-resolution (`semodule -i` is not installed on the dev host). See
-`selinux/tier2/README.md` for the full validated-vs-deferred split.
+**Stock `container_t` transport is wired; engaging `qdistro_tier2_t` remains
+deferred.** The launcher gives the per-container runtime tree and the
+binding-resolved silo home private `:Z` labels (including podman's MCS
+categories). The outer Wayland socket, PipeWire sockets, `qdwin-shell.so`,
+and presentation directory are **never relabelled**. In particular,
+Wayland stays `user_tmp_t` for tier-1 clients and presentation stays
+`qdistro_presentation_t` for its read-only consumer policy.
+
+`qdistro_tier2` 0.2.0 adds just two stock-domain transport edges:
+`container_t user_tmp_t:sock_file { getattr write }` and
+`container_t unconfined_t:unix_stream_socket connectto`. Socket-file write
+is the Unix connect permission, not permission to write ordinary host files.
+No host directory/file management, arbitrary `userdomain` connect, label
+disabling, or MCS exemption is added. The target process type is the admin
+session's compositor/secctx listener and PipeWire (`unconfined_t`); other
+server domains are not covered. These rules affect stock containers on the
+host, so the launcher's mount allowlist remains essential: only individual
+transport sockets are exposed, never the host runtime directory or bus/agent
+sockets. The host library keeps its `lib_t` read/execute policy.
+
+Bootstrap and native-stage policy installation now include `qdistro_tier2`
+before presentation. Loading it is no longer a no-op. The narrower
+`qdistro_tier2_t` process type still needs explicit launcher wiring, bounded
+transport permissions, and its own enforcing workload/AVC validation.
+Live validation passed at `f30a319ff` in
+`ci/runs/bats-20261005T203006Z-1808035`: `presentation-enforcing.bats` 6/6,
+`presentation-live.bats` 2/2, and `tier2-silo-secctx-wiretag.bats` 2/2.
+This includes inner-Weston readiness, Qfileman liveness after checks, distinct
+concurrent MCS labels, unchanged shared host labels, and a writable
+binding-resolved silo through the production launcher. Subsequent launcher
+locking changes require a fresh live regression run.
+
+The launcher holds an exclusive `flock` on the resolved persistent state
+directory inode for the container lifetime (including supervised test detach).
+A second launch against the same home fails before Podman can relabel it,
+even with a different container name or a symlink alias. Root-launcher mode
+holds the lock in the root supervisor while querying/running Podman as admin.
+An additional inspection of all container mounts refuses homes still used by
+containers left after a launcher crash; listing or inspection failures also
+refuse launch. Locks release when their last holder exits, so a stopped,
+removed container can be restarted without deleting a lock file.
+
+Podman's `:Z` recursively relabels the persistent home to `container_file_t`
+with the new container's MCS categories. Startup cost grows with the home
+size. Host file managers, backup processes, and other domains without access
+to that type/range may lose access; stopping the container does not restore
+the previous labels. Do not relabel an active home from the host.
+
+Launchers also hold a shared `flock` on the canonical home's parent directory
+before resolving/opening the home and through teardown. Rollback with
+`--restore-state` requires an exclusive nonblocking lock on that same parent
+through the state swap and binding update, refusing while a launch holds it.
+The parent survives state replacement; read-only directory descriptors work
+for both root and admin without lock-file ownership or stale-file cleanup.
+Homes sharing a parent can launch concurrently, but restoring any one requires
+all such launches to stop. Immediately before Podman runs, the wrapper compares
+the source path's device/inode with the identity captured from locked fd 9;
+a replaced path fails closed even if a writer bypassed the lock protocol.
+
+Per-container runtime directories also carry lifetime inode locks. A short
+lock on the admin runtime directory serializes creation/lock acquisition
+with reaping; the reaper requires both an available lifetime lock and absence
+from Podman's token labels before deleting a directory. This protects a
+launch that has not yet registered a container.
+
+See `selinux/tier2/README.md` for the validated/deferred split.
 
 ## dbus-broker reload requirement
 

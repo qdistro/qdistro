@@ -185,12 +185,15 @@ case "$ROOT_MOUNT_OPTS" in
         ;;
 esac
 
-# Cross-check by trying a write.
-if runuser -u admin -- podman exec "$CONTAINER" touch /no-such-write 2>/dev/null; then
-    fail "touch / succeeded — read-only not enforced!"
+# Redirect tests creation itself; touch can create then fail on seccomp's
+# utimensat ENOSYS. Also verify absence with a successful in-container test.
+if runuser -u admin -- podman exec "$CONTAINER" sh -c ': > /no-such-write' 2>/dev/null; then
+    fail "write / succeeded — read-only not enforced!"
     runuser -u admin -- podman exec "$CONTAINER" rm -f /no-such-write 2>/dev/null || true
+elif runuser -u admin -- podman exec "$CONTAINER" sh -c '[ ! -e /no-such-write ]'; then
+    pass "write / blocked by read-only"
 else
-    pass "touch / blocked by read-only"
+    fail "rootfs write probe exists or absence could not be verified"
 fi
 
 # --- 5+6. Runtime dir contains only allowed file types ---
@@ -294,14 +297,16 @@ else
     fail "presentation dir owner inside container is '$PRES_OWNER', expected $ADMIN_UID:$ADMIN_UID"
 fi
 
+PRES_PROBE="/var/lib/qdistro/presentation/qdistro-write-probe-$$"
 if runuser -u admin -- podman exec "$CONTAINER" \
-        touch /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null; then
+        sh -c ': > "$1"' sh "$PRES_PROBE" 2>/dev/null; then
     fail "container could write into the presentation directory"
-    runuser -u admin -- podman exec "$CONTAINER" \
-        rm -f /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null || true
+elif [ -e "$PRES_PROBE" ] || [ -L "$PRES_PROBE" ]; then
+    fail "container created presentation probe despite nonzero write status"
 else
     pass "container write into presentation directory denied"
 fi
+rm -f "$PRES_PROBE"
 
 SIBLINGS=$(runuser -u admin -- podman exec "$CONTAINER" \
     ls /var/lib/qdistro 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
