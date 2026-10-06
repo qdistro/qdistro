@@ -4188,7 +4188,7 @@ gui_agent_effort_from_cmd() {
     local cmd=$1
     printf '%s' "$cmd" \
         | grep -oE -- '(^|[[:space:]])(-c|--config)[= ]+["'"'"']?model_reasoning_effort=["'"'"']?[A-Za-z]+' \
-        | head -1 | sed -E 's/.*model_reasoning_effort=["'"'"']?//'
+        | head -1 | sed -E 's/.*model_reasoning_effort=["'"'"']?//' || true
 }
 
 record_agent_identity() {
@@ -4211,7 +4211,7 @@ record_agent_identity() {
     # Codex only: the pinned reasoning effort, or `unpinned` (host-dependent;
     # the header of each attempt's agent log shows what it actually ran with).
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])codex([[:space:]]|$)'; then
-        effort=$(gui_agent_effort_from_cmd "$cmd")
+        effort=$(gui_agent_effort_from_cmd "$cmd") || effort=""
         kv qci_agent_reasoning_effort "${effort:-unpinned}"
         if [ -z "$effort" ]; then
             printf '[qci] %s\n' "gui: QCI_AGENT_CMD pins no codex reasoning effort; the host default applies (pin -c model_reasoning_effort=medium, see doc/dev.md)" >&2
