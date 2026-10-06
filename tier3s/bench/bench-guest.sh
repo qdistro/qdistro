@@ -374,15 +374,16 @@ sec_io() {
     }
     local out ms i
     mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io
+    local TARX="tar xf --no-same-permissions --touch"
     local t0 t1
-    t0=$(ts_us); tar xf "$tar" -C /mnt/t3s-io; t1=$(ts_us)
+    t0=$(ts_us); $TARX "$tar" -C /mnt/t3s-io; t1=$(ts_us)
     emit io_tar_host_ms $(( (t1 - t0) / 1000 )) ms
     umount /mnt/t3s-io
     # tier 2: admin-owned bind-mount so :z can relabel; the shell inside the
     # container prints TAR_MS for just the extraction
     local at=/home/admin/t3s-bench.tar t2probe
     install -m 0644 -o admin -g admin "$tar" "$at"
-    t2probe='S=$(date +%s%3N); tar xf /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
+    t2probe='S=$(date +%s%3N); tar xf --no-same-permissions --touch /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
         out=$(pm run --rm --name t2io$i --network none --entrypoint /bin/sh \
             --security-opt label=disable \
@@ -397,7 +398,7 @@ sec_io() {
     # gofer (gofs); extraction writes the sandbox's tmpfs. Second variant
     # turns directfs off where the pin supports it.
     cp "$tar" "$RSHARE/bench.tar" && chmod 644 "$RSHARE/bench.tar"
-    local t3probe='S=$(date +%s%3N); tar xf /bench/bench.tar -C /w && echo TAR_MS=$(( $(date +%s%3N) - S ))'
+    local t3probe='S=$(date +%s%3N); tar xf --no-same-permissions --touch /bench/bench.tar -C /w && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
         if ! out=$(t3s_run t3io$i "[\"/bin/sh\",\"-c\",\"$t3probe\"]" 2>&1); then
             fail "t3s io run $i: $(echo "$out" | tail -2)"; continue
