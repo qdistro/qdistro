@@ -240,9 +240,9 @@ Do not treat the broker pilot as evidence for those other domains.
   cross-domain ptrace/signal, one cross-domain socket edge (the
   link.sock listener's domain). The domain bounds the *host* blast
   radius of that control plane; podman/conmon and the waypipe client
-  remain trusted-to-operate surfaces by contract. Enforcing-mode
-  qualification of that domain is the phase-D gate and is stated only
-  once s123–s129 have run under enforcing. The claimed security
+  remain trusted-to-operate surfaces by contract. The domain is
+  enforcing-qualified: s123–s129 all pass on enforcing workers with
+  zero residual domain AVCs. The claimed security
   properties, all
   VM-lane evidence (`tests/integration/vm/s123`–`s129`): the bridge client
   is `RegisterLaunch`-bound (pid+starttime) before `podman run`, so **when

@@ -1,10 +1,10 @@
 # Tier-3s — SELinux confinement for the runsc control plane
 
-> **Status: enforcing-qualified pending.** The module compiles, loads, and
-> covers the full launch lifecycle (create/start/state/kill/delete plus the
-> host-uds bridge connect) with zero residual AVCs on the permissive dev
-> VM. Enforcing-mode qualification (s123–s129) is the phase-D acceptance
-> gate — see `todo/paravirt/03-implementation-plan.md`.
+> **Status: enforcing-qualified.** All seven s123–s129 GUI lanes pass on
+> fresh enforcing workers with zero residual `qdistro_tier3s_t` AVCs
+> (596 assertions across the suite; run
+> `ci/runs/t3s-enforcing-final-20261006T143000Z`). Permissive-mode use is
+> unchanged.
 
 ## What this constrains
 
