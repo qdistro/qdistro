@@ -225,7 +225,34 @@ check_version() {  # $1 = runsc path; exit 0 AND exact first line required
     VER_SEEN="$(printf '%s\n' "$out" | head -1)"
     [ "$rc" -eq 0 ] && [ "$VER_SEEN" = "${P[version_string]}" ]
 }
+# SELinux (selinux/tier3s): the exec transition into qdistro_tier3s_t keys
+# on the qdistro_tier3s_exec_t file label, which restorecon applies from
+# the installed module's file contexts. With the module loaded this is
+# REQUIRED and verified — a provision that reports PASS with unlabelled
+# binaries silently runs every launch unconfined (astra P1). Module
+# absent (or TEST prefix) is not an error: the transition simply does
+# not engage.
+tier3s_module_loaded() {
+    [ -z "$PREFIX" ] && command -v semodule >/dev/null 2>&1 \
+        && semodule -l 2>/dev/null | grep -q '^qdistro_tier3s\b'
+}
+apply_tier3s_labels() {
+    tier3s_module_loaded || return 0
+    command -v restorecon >/dev/null 2>&1 \
+        || die "qdistro_tier3s module loaded but restorecon is not installed"
+    restorecon -R "$DEST" \
+        || die "restorecon -R $DEST failed — runsc would keep the wrong label"
+    local f ctx
+    for f in "$DEST/runsc" "$DEST"/gvisor-bin/*; do
+        ctx="$(stat -c %C "$f")" || die "stat -C $f failed"
+        case "$ctx" in
+            *:qdistro_tier3s_exec_t:*) ;;
+            *) die "$f labelled $ctx, want qdistro_tier3s_exec_t — the tier3s exec transition would not engage" ;;
+        esac
+    done
+}
 if installed_matches; then
+    apply_tier3s_labels   # re-verify (and repair) labels under the lock
     log "already installed and matching pin $REL; nothing to do"
     exit 0
 fi
@@ -383,13 +410,6 @@ mv -fT "$WNEW" "$WRAPPER_DEST"
 mv -fT "$SNEW" "$STAMP"
 installed_matches || die "post-install verification failed"
 check_version "$DEST/runsc" || die "post-install version check failed ('$VER_SEEN')"
-# SELinux (selinux/tier3s): the exec transition into qdistro_tier3s_t keys
-# on the qdistro_tier3s_exec_t file label, which is what restorecon applies
-# from the installed module's file contexts. No module loaded (or no
-# restorecon) is not an error — the transition simply does not engage.
-if [ -z "$PREFIX" ] && command -v restorecon >/dev/null 2>&1 \
-    && semodule -l 2>/dev/null | grep -q '^qdistro_tier3s\b'; then
-    restorecon -R "$DEST" || true
-fi
+apply_tier3s_labels
 if [ -n "$PREFIX" ]; then log "PASS (TEST prefix $PREFIX): installed runsc $REL"
 else log "PASS: installed runsc $REL to $DEST"; fi

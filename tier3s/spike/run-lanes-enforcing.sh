@@ -59,34 +59,64 @@ for f in "${FILES[@]}"; do
     fi
     # sshd needs a few seconds after clone returns.
     for i in $(seq 1 30); do ssh_vm 'true' 2>/dev/null && break; sleep 5; done
+    mode=$(ssh_vm 'getenforce' 2>/dev/null || echo unknown)
     {
         printf '### VM=%s ssh_port=%s\n' "$VM" "$SSH_PORT"
-        ssh_vm 'getenforce; grep ^SELINUX= /etc/selinux/config'
+        printf 'getenforce=%s\n' "$mode"
+        ssh_vm 'grep ^SELINUX= /etc/selinux/config'
     } | tee "$L/$base.environ.log"
+    if [ "$mode" != "Enforcing" ]; then
+        # Qualification is meaningless off Enforcing — fail, don't pass.
+        VERDICT[$f]="fail not-enforcing($mode)"
+        FAILS=$((FAILS+1))
+        echo "   FAIL: worker is $mode, not Enforcing — VM $VM preserved"
+        continue
+    fi
 
     echo "== $f: bats on $VM (ssh :$SSH_PORT)"
+    # Positive-confinement probe (astra P1): poll the guest for live
+    # processes in qdistro_tier3s_t for the whole bats window. Every lane
+    # launches sandboxes, so zero sightings means the exec transition
+    # never engaged (missing/wrong labels) and "0 AVCs" is vacuous.
+    : > "$L/$base.domain.log"
+    ( while :; do
+          if ssh_vm 'ps -eZ' 2>/dev/null \
+               | grep 'qdistro_tier3s_t' >>"$L/$base.domain.log"; then
+              exit 0
+          fi
+          sleep 2
+      done ) & poller=$!
     ( cd "$VM_DIR" && VM_NAME="$VM" VM_SSH_PORT="$SSH_PORT" \
         bats --timing "$f" ) >"$L/$base.bats.log" 2>&1
     rc=$?
+    kill "$poller" 2>/dev/null
+    if wait "$poller" 2>/dev/null; then dom=1; else dom=0; fi
 
     # Harvest tier3s-domain AVCs for the whole window this VM lived.
     # ausearch silently finds nothing on this auditd build (ENRICHED
-    # records); grep the raw log + rotations instead.
-    ssh_vm 'grep -h "type=AVC" /var/log/audit/audit.log* 2>/dev/null | grep "scontext=.*qdistro_tier3s_t" | sort -u; echo "--"; getenforce' \
-        >"$L/$base.avc.log" 2>&1
+    # records); grep the raw log + rotations instead. Fail closed: the
+    # harvest itself must succeed AND land Enforcing in the trailer, or
+    # "0 denials" proves nothing.
+    harvest_ok=0
+    if ssh_vm 'if out=$(grep -h "type=AVC" /var/log/audit/audit.log* 2>/dev/null) && [ -n "$out" ]; then printf "%s\n" "$out" | grep "scontext=.*qdistro_tier3s_t" | sort -u; else echo "HARVEST-FAIL: no AVC records collected"; fi; echo "--"; getenforce' \
+        >"$L/$base.avc.log" 2>&1 \
+        && [ "$(tail -1 "$L/$base.avc.log")" = "Enforcing" ] \
+        && ! grep -q HARVEST-FAIL "$L/$base.avc.log"; then
+        harvest_ok=1
+    fi
     avc_n=$(grep -c 'denied' "$L/$base.avc.log" || true)
 
-    if [ "$rc" -eq 0 ] && [ "$avc_n" -eq 0 ]; then
+    if [ "$rc" -eq 0 ] && [ "$avc_n" -eq 0 ] && [ "$dom" -eq 1 ] && [ "$harvest_ok" -eq 1 ]; then
         VERDICT[$f]="pass"
         virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
         virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
             || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
         rm -f "$IMG/${VM}.qcow2"
-        echo "   PASS (bats rc=0, tier3s AVCs=0) — VM removed"
+        echo "   PASS (bats rc=0, tier3s AVCs=0, domain procs seen) — VM removed"
     else
-        VERDICT[$f]="fail rc=$rc avc=$avc_n"
+        VERDICT[$f]="fail rc=$rc avc=$avc_n dom=$dom harvest=$harvest_ok"
         FAILS=$((FAILS+1))
-        echo "   FAIL rc=$rc tier3s-AVCs=$avc_n — VM $VM preserved"
+        echo "   FAIL rc=$rc tier3s-AVCs=$avc_n domain-procs=$dom harvest-ok=$harvest_ok — VM $VM preserved"
     fi
 done
 

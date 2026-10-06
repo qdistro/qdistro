@@ -381,8 +381,9 @@ creates the scope and tears down — nothing runs podman or runsc as root).
 - **Not claimed:** no KVM comparison (paravirt O5); the gVisor boundary
   is not a VM-equivalent claim — the Sentry and gofer remain trusted
   host processes, side channels are out of scope, and DoS is bounded
-  only by the owning scope's limits; no reconnect path; no SELinux
-  confinement of the runsc processes yet (Phase D);
+  only by the owning scope's limits; no reconnect path; runsc
+  confinement is the `qdistro_tier3s_t` SELinux domain
+  (`selinux/tier3s/`, enforcing-qualified — Phase D);
   `lineage_enforce` is **opt-in** — the
   clipboard/identity gates run in shadow mode unless it is enabled (the
   s127 scenario enables it for the live path); no tier-3s pod apps yet.

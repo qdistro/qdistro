@@ -158,6 +158,14 @@ is "runsc tarball sha512 = pin ($rel)" "$(sha512sum < "/var/cache/qdistro/runsc/
 out=$(cd "$SRC" && tier3s/provision-runsc.sh --offline --cache-dir /var/cache/qdistro/runsc 2>&1); rc=$?
 printf '%s\n' "$out" | tail -3 | sed 's/^/    /'
 is "provision-runsc.sh --offline rc" "$rc" 0
+# The exec transition into qdistro_tier3s_t keys on this label — module
+# loaded but binaries unlabelled would run every launch unconfined while
+# looking identical to a confined one (astra P1).
+is "runsc ELF carries qdistro_tier3s_exec_t" \
+    "$(stat -c %C /usr/libexec/qdistro/runsc/runsc | grep -c ':qdistro_tier3s_exec_t:')" 1
+is "all gvisor-bin sidecars carry qdistro_tier3s_exec_t" \
+    "$(stat -c %C /usr/libexec/qdistro/runsc/gvisor-bin/* | grep -c ':qdistro_tier3s_exec_t:')" \
+    "$(find /usr/libexec/qdistro/runsc/gvisor-bin -type f | wc -l)"
 out=$(/usr/lib/qdistro/tier3s/probe.sh --user admin 2>&1); rc=$?
 printf '%s\n' "$out" | sed 's/^/    /'
 is "installed probe rc" "$rc" 0
@@ -261,6 +269,11 @@ is "canary: silo store holds the workload image" "$(yes_no pm_s t3setup image ex
 set_argv t3setup=120 | sed 's/^/    /'
 tok=$(up_silo t3setup)
 if [ -n "$tok" ]; then pass "canary: launch $tok recorded running"; else fail "canary: launch did not come up"; finish; fi
+# Live confinement proof: with the sandbox up, its sentry/gofer must be
+# running inside qdistro_tier3s_t — module loaded + labels applied says
+# only that the transition CAN engage, not that it DID (astra P1).
+is "canary: sandbox processes confined to qdistro_tier3s_t" \
+    "$(yes_no test "$(ps -eZ | grep -c ':qdistro_tier3s_t:')" -gt 0)" yes
 is "canary: container runs in the silo store, not admin's" \
     "$(pm_s t3setup container exists "$(ctr_of t3setup)"; echo $?):$(pm container exists "$(ctr_of t3setup)" 2>/dev/null; echo $?)" "0:1"
 sm StopSilo si t3setup 10 > /dev/null; is "canary: StopSilo" "$(silo_state t3setup)" Stopped
