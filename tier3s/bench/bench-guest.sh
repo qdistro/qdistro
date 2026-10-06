@@ -54,20 +54,29 @@ ROOTFS=$BW/rootfs
 RSHARE=$BW/share
 HSACCT=; HSUID=
 
-# t3s_spec <args-json> — regenerate the OCI spec
+# t3s_spec <args-json> — regenerate the OCI spec. The seccomp object is the
+# workload's PRODUCTION profile (podman would feed the same file via
+# --security-opt), so the t3s numbers below are filtered-systrap, not the
+# runsc default.
+SECCOMP_JSON=/usr/lib/qdistro/tier3s/seccomp/headless-smoke.json
 t3s_spec() {
-    cat > "$BUNDLE/config.json" <<JSON
-{"ociVersion":"1.0.0",
- "process":{"terminal":false,"user":{"uid":0,"gid":0},
-   "args":$1,"env":["PATH=/usr/local/bin:/usr/bin:/bin"],"cwd":"/"},
- "root":{"path":"$ROOTFS","readonly":true},
- "hostname":"t3sbench",
- "mounts":[
-   {"destination":"/proc","type":"proc","source":"proc"},
-   {"destination":"/bench","type":"bind","source":"$RSHARE","options":["rbind","ro"]},
-   {"destination":"/w","type":"tmpfs","source":"tmpfs","options":["nosuid","nodev","size=768m"]}],
- "linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]}}
-JSON
+    python3 - "$1" "$BUNDLE/config.json" "$SECCOMP_JSON" "$ROOTFS" "$RSHARE" <<'PY'
+import json, sys
+args, cfg, prof, rootfs, rshare = sys.argv[1:6]
+p = json.load(open(prof))
+spec = {"ociVersion": "1.0.0",
+ "process": {"terminal": False, "user": {"uid": 0, "gid": 0},
+   "args": json.loads(args), "env": ["PATH=/usr/local/bin:/usr/bin:/bin"], "cwd": "/"},
+ "root": {"path": rootfs, "readonly": True},
+ "hostname": "t3sbench",
+ "mounts": [
+   {"destination": "/proc", "type": "proc", "source": "proc"},
+   {"destination": "/bench", "type": "bind", "source": rshare, "options": ["rbind", "ro"]},
+   {"destination": "/w", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "size=768m"]}],
+ "linux": {"namespaces": [{"type": t} for t in ("pid", "mount", "ipc", "uts")],
+   "seccomp": {k: p[k] for k in ("defaultAction", "defaultErrnoRet", "archMap", "architectures", "syscalls") if k in p}}}
+json.dump(spec, open(cfg, "w"))
+PY
 }
 
 # t3s_run <id> <args-json> [extra runsc flags...]
@@ -302,9 +311,9 @@ sec_mem() {
     a0=$(cg_usage_us "$scope_cg"); b0=$(cg_usage_us "$t2cg"); h0=$(cg_usage_us "$hcg")
     sleep 60
     a1=$(cg_usage_us "$scope_cg"); b1=$(cg_usage_us "$t2cg"); h1=$(cg_usage_us "$hcg")
-    emit t3s_gui_idle_cpu_pct "$(python3 -c "print(f'{($a1-$a0)/6e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
-    emit t3s_headless_idle_cpu_pct "$(python3 -c "print(f'{($h1-$h0)/6e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
-    emit t2_idle_cpu_pct "$(python3 -c "print(f'{($b1-$b0)/6e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
+    emit t3s_gui_idle_cpu_pct "$(python3 -c "print(f'{($a1-$a0)/60e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
+    emit t3s_headless_idle_cpu_pct "$(python3 -c "print(f'{($h1-$h0)/60e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
+    emit t2_idle_cpu_pct "$(python3 -c "print(f'{($b1-$b0)/60e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
     pm rm -f t2mem > /dev/null 2>&1
     sm StopSilo si "$HS" 10 > /dev/null 2>&1
     teardown_one "$GS"
@@ -315,24 +324,36 @@ sec_mem() {
 # container (bind-mounted into admin's podman), and direct runsc on the
 # exported image rootfs (systrap, oci-seccomp, network=none — the sandbox
 # internals are the same ones the launch path gets through the wrapper).
+# syscost emits exactly one line of k=v fields; anything else is a probe
+# failure and must not reach the MEAS stream.
+valid_sysrow() { [ "${1##*getpid_ms_per_100k=}" != "$1" ]; }
 sec_sys() {
     step "syscall cost (syscost binary, self-timed)"
-    emit sys_host "$("$BW/syscost" 2>&1 | tr '\n' ' ')" -
+    local out
+    emit t2_runtime "$(pm info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)" -
+    out=$("$BW/syscost" 2>&1 | tr '\n' ' ')
+    valid_sysrow "$out" || fail "sys host probe: $out"
+    emit sys_host "$out" -
     # tier 2: the binary must be owned by admin so rootless podman's :z
     # relabel can lsetxattr it (root-owned files fail under enforcing)
     local ap=/home/admin/t3s-syscost
     install -m 0755 -o admin -g admin "$BW/syscost" "$ap"
-    emit sys_t2_runc "$(pm run --rm --name t2sys --network none \
+    out=$(pm run --rm --name t2sys --network none \
         --security-opt label=disable \
         -v "$ap:/bench/syscost:ro,z" --entrypoint /bench/syscost "$IMGW" 2>&1 \
-        | tr '\n' ' ')" -
+        | tr '\n' ' ')
     rm -f "$ap"
-    emit sys_t3s_systrap "$(t3s_run t3sys '["/bench/syscost"]' | tr '\n' ' ')" -
+    valid_sysrow "$out" || fail "sys t2 probe: $out"
+    emit sys_t2_runc "$out" -
+    out=$(t3s_run t3sys '["/bench/syscost"]' | tr '\n' ' ')
+    valid_sysrow "$out" || fail "sys t3s probe: $out"
+    emit sys_t3s_systrap "$out" -
     # fast-path off shows the un-amortised trap cost (plan hypothesis)
-    emit sys_t3s_systrap_nofastpath \
-        "$(t3s_run t3sysnf '["/bench/syscost"]' --systrap-disable-fast-path | tr '\n' ' ')" -
+    out=$(t3s_run t3sysnf '["/bench/syscost"]' --systrap-disable-fast-path | tr '\n' ' ')
+    valid_sysrow "$out" || fail "sys t3s-nofastpath probe: $out"
+    emit sys_t3s_systrap_nofastpath "$out" -
     t3s_run t3sys '["/bin/true"]' > /dev/null 2>&1 \
-        || info "direct runsc probe unhealthy — t3s columns above may be errors"
+        || fail "direct runsc probe unhealthy — t3s columns above may be errors"
 }
 
 # --- section: file I/O -------------------------------------------------------
@@ -344,43 +365,52 @@ sec_io() {
     tar cf "$tar" -C "$tree" .
     chmod 0644 "$tar"   # rootless podman binds it read-only into the container
     emit io_tree_mb $(( $(stat -c %s "$tar") / 1048576 )) MB
+    # Same measurement boundary on all three paths: the workload itself
+    # reports TAR_MS (extraction only, in-container clock) — container start /
+    # spec-gen / teardown overhead is excluded everywhere. The host column is
+    # timed the same way around a bare tar.
+    tar_ms() {   # tar_ms <command-output> -> extraction ms or empty
+        echo "$1" | sed -n 's/.*TAR_MS=\([0-9]*\).*/\1/p'
+    }
+    local out ms i
     mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io
-    local t0 t1 i
+    local t0 t1
     t0=$(ts_us); tar xf "$tar" -C /mnt/t3s-io; t1=$(ts_us)
     emit io_tar_host_ms $(( (t1 - t0) / 1000 )) ms
     umount /mnt/t3s-io
-    # tier 2: admin-owned bind-mount so :z can relabel; argv reads the file
-    # path (same read pattern the runsc gofer column exercises)
-    local at=/home/admin/t3s-bench.tar
+    # tier 2: admin-owned bind-mount so :z can relabel; the shell inside the
+    # container prints TAR_MS for just the extraction
+    local at=/home/admin/t3s-bench.tar t2probe
     install -m 0644 -o admin -g admin "$tar" "$at"
+    t2probe='S=$(date +%s%3N); tar xf /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
-        t0=$(ts_us)
-        pm run --rm --name t2io --network none --entrypoint tar \
+        out=$(pm run --rm --name t2io$i --network none --entrypoint /bin/sh \
             --security-opt label=disable \
             --tmpfs /bench:size=1g -v "$at:/bench.tar:ro,z" \
-            "$IMGW" xf /bench.tar -C /bench > /dev/null 2>&1
-        t1=$(ts_us)
-        emit io_tar_t2_ms_$i $(( (t1 - t0) / 1000 )) ms
+            "$IMGW" -c "$t2probe" 2>&1)
+        ms=$(tar_ms "$out")
+        [ -n "$ms" ] || fail "t2 io run $i: $(echo "$out" | tail -2)"
+        emit io_tar_t2_ms_$i "${ms:-0}" ms
     done
     rm -f "$at"
     # tier 3s: the tar is a bind-mounted host file → reads go through the
     # gofer (gofs); extraction writes the sandbox's tmpfs. Second variant
     # turns directfs off where the pin supports it.
     cp "$tar" "$RSHARE/bench.tar" && chmod 644 "$RSHARE/bench.tar"
+    local t3probe='S=$(date +%s%3N); tar xf /bench/bench.tar -C /w && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
-        t0=$(ts_us)
-        if ! out=$(t3s_run t3io$i '["/bin/tar","xf","/bench/bench.tar","-C","/w"]' 2>&1); then
-            t1=$(ts_us); info "t3s io run $i failed: $(echo "$out" | tail -2)"; continue
+        if ! out=$(t3s_run t3io$i "[\"/bin/sh\",\"-c\",\"$t3probe\"]" 2>&1); then
+            fail "t3s io run $i: $(echo "$out" | tail -2)"; continue
         fi
-        t1=$(ts_us)
-        emit io_tar_t3s_ms_$i $(( (t1 - t0) / 1000 )) ms
+        ms=$(tar_ms "$out")
+        [ -n "$ms" ] || fail "t3s io run $i: no TAR_MS in $(echo "$out" | tail -2)"
+        emit io_tar_t3s_ms_$i "${ms:-0}" ms
     done
     # directfs toggles the gofer bypass for bind mounts — probe support by
     # running it, emit only on success
-    t0=$(ts_us)
-    if out=$(t3s_run t3iodf '["/bin/tar","xf","/bench/bench.tar","-C","/w"]' --directfs=false 2>&1); then
-        t1=$(ts_us)
-        emit io_tar_t3s_directfs_off_ms $(( (t1 - t0) / 1000 )) ms
+    if out=$(t3s_run t3iodf "[\"/bin/sh\",\"-c\",\"$t3probe\"]" --directfs=false 2>&1) \
+            && ms=$(tar_ms "$out") && [ -n "$ms" ]; then
+        emit io_tar_t3s_directfs_off_ms "$ms" ms
     else
         info "runsc --directfs unsupported or refused: $(echo "$out" | tail -1)"
     fi
@@ -396,6 +426,8 @@ sec_bridge() {
     [ -n "$tok" ] || { fail "bridge: launch"; return; }
     bp=$(rec "$tok" bridge_client_pid)
     base=$(pss_kb "$bp")
+    [ -n "$bp" ] && [ -n "$base" ] \
+        || { fail "bridge: no client pid/PSS (bp=${bp:-none})"; return; }
     # rchar corroborates the flood crossed the bridge: the client's reads
     # on the waypipe socket are the (compressed) frame stream the in-sandbox
     # server pumps. Pixel bulk travels via the client's mmap'd shm rebuild,
@@ -437,14 +469,18 @@ sec_latency_up() {
 }
 sec_latency_down() { sm StopSilo si "$GS" 10 > /dev/null 2>&1; }
 
-# teardown_one <silo>: time StopSilo -> scope down
+# teardown_one <silo>: time StopSilo -> scope down, then VERIFY it's down
 teardown_one() {
-    local s="$1" tok u t0
+    local s="$1" tok u t0 scg
     u=$(unit_of "$s"); tok=$(token_of_unit "$u" | head -1)
+    scg=$(rec "$tok" scope_cgroup)
     t0=$(ts_us)
     sm StopSilo si "$s" 10 > /dev/null 2>&1
     [ -n "$tok" ] && wait_for 60 unit_down "qdistro-tier3s-$tok.scope"
     emit "teardown_${s}_ms" $(( ($(ts_us) - t0) / 1000 )) ms
+    [ -n "$scg" ] && [ -d "/sys/fs/cgroup$scg" ] \
+        && fail "teardown $s: scope cgroup $scg still present" || :
+    case "$(silo_state "$s")" in Active) fail "teardown $s: still Active" ;; esac
     [ -n "$tok" ] && rm -f "$WORK/$tok".{procs,cg,id}
 }
 

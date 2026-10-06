@@ -40,6 +40,9 @@ ssh_vm() {
 
 # --- stage dir: the same inputs the bats t3s_stage serves -------------------
 STAGE=$(mktemp -d /tmp/t3s-bench-stage.XXXXXX)
+# cleanup must cover early staging failures too — trap before any exit path
+HTTP_PID=
+trap '[ -n "$HTTP_PID" ] && kill $HTTP_PID 2>/dev/null; rm -rf "$STAGE"' EXIT
 git -C "$repo" archive --format=tar HEAD > "$STAGE/src.tar"
 git -C "$repo" rev-parse HEAD > "$STAGE/commit.txt"
 cp "$VM_DIR/tier3s-guest-lib.sh" "$VM_DIR/tier3s-guest-setup.sh" "$STAGE/"
@@ -73,11 +76,6 @@ for name, key in [("tier3s-headless-smoke", "IMAGE_ARCHIVE_SHA256"),
 print("archive sha256s match manifest")
 PY
 
-PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-(cd "$STAGE" && exec python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1) &
-HTTP_PID=$!
-trap 'kill $HTTP_PID 2>/dev/null' EXIT
-
 echo "== cloning enforcing worker (commit $(cat "$STAGE/commit.txt" | cut -c1-9))"
 out=$("$repo/scripts/vm/clone-baseweed.sh" "t3s-bench" --from-enforcing-baked 2>&1)
 VM=$(printf '%s\n' "$out" | sed -n '1p')
@@ -93,6 +91,14 @@ echo "   getenforce=$mode"
 # guest's default-route gateway (same discovery as vm_host_ip in helpers).
 HOST_IP=$(ssh_vm 'ip route | awk "/^default/ {print \$3; exit}"')
 [ -n "$HOST_IP" ] || { echo "FAIL: could not discover guest->host gateway"; exit 1; }
+
+# bind the staging server to the guest-facing address only when it is one of
+# ours; otherwise 0.0.0.0 (it serves just this staging dir for the run's life)
+PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+BIND=$(ip -o -4 addr show | awk -v ip="$HOST_IP" '$4 ~ "^"ip"/" {print ip; exit}')
+(cd "$STAGE" && exec python3 -m http.server "$PORT" --bind "${BIND:-0.0.0.0}" >/dev/null 2>&1) &
+HTTP_PID=$!
+sleep 0.5; kill -0 $HTTP_PID || { echo "FAIL: staging http server did not start"; exit 1; }
 U="http://$HOST_IP:$PORT"
 
 FAIL=0
@@ -132,16 +138,22 @@ if [ "$SAMPLES" -gt 0 ]; then
         shot() { virsh -c qemu:///session screenshot "$VM" "$1" >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1; }
         : > "$L/latency.log"
         for i in $(seq 1 "$SAMPLES"); do
-            base=$(shot "$STAGE/f0.ppm")
+            # two baselines 0.3s apart: a diff is only counted when it
+            # differs from BOTH, so a blinking cursor/animation can't pose
+            # as key delivery
+            local_b0=$(shot "$STAGE/f0.ppm"); sleep 0.3; local_b1=$(shot "$STAGE/f0b.ppm")
             t0=$(date +%s%N)
-            virsh -c qemu:///session send-key "$VM" KEY_A >/dev/null 2>&1
+            if ! virsh -c qemu:///session send-key "$VM" KEY_A >/dev/null 2>&1 \
+                    || [ -z "$local_b0" ] || [ -z "$local_b1" ]; then
+                echo "sample_$i MISS(setup)" >> "$L/latency.log"; sleep 0.5; continue
+            fi
             for _ in $(seq 1 40); do
                 now=$(shot "$STAGE/f1.ppm")
-                [ -n "$now" ] && [ "$now" != "$base" ] && break
+                [ -n "$now" ] && [ "$now" != "$local_b0" ] && [ "$now" != "$local_b1" ] && break
                 sleep 0.2
             done
             t1=$(date +%s%N)
-            if [ -n "${now:-}" ] && [ "$now" != "$base" ]; then
+            if [ -n "${now:-}" ] && [ "$now" != "$local_b0" ] && [ "$now" != "$local_b1" ]; then
                 echo "sample_$i $(( (t1 - t0) / 1000000 ))" >> "$L/latency.log"
             else
                 echo "sample_$i MISS" >> "$L/latency.log"
@@ -149,7 +161,9 @@ if [ "$SAMPLES" -gt 0 ]; then
             sleep 0.5
         done
         med=$(awk '$2 ~ /^[0-9]+$/{print $2}' "$L/latency.log" | sort -n | awk '{a[NR]=$1} END{print (NR%2)?a[(NR+1)/2]:int((a[NR/2]+a[NR/2+1])/2)}')
-        echo "   median=${med}ms ($(grep -c MISS "$L/latency.log" || true) misses) — includes screenshot-poll granularity (~200-400ms)"
+        miss=$(grep -c MISS "$L/latency.log" || true)
+        echo "   median=${med}ms ($miss misses) — includes screenshot-poll granularity (~200-400ms)"
+        [ "$miss" -eq 0 ] || FAIL=1
         ssh_vm 'cd /var/tmp/t3s-dl && bash bench-guest.sh latency-down' > /dev/null 2>&1
     else
         echo "   latency window did not come up (see $L/latency-up.log)"
@@ -158,14 +172,20 @@ if [ "$SAMPLES" -gt 0 ]; then
 fi
 
 # --- AVC harvest (same contract as run-lanes-enforcing.sh) -------------------
+# The harvest must PROVE it ran: a failed ssh/harvest yields an empty or
+# HARVEST-FAIL log — never let that count as zero denials, and the worker
+# must still be Enforcing at the end.
 ssh_vm 'if out=$(grep -h "type=AVC" /var/log/audit/audit.log* 2>/dev/null) && [ -n "$out" ]; then printf "%s\n" "$out" | grep "scontext=.*qdistro_tier3s_t" | sort -u; else echo "HARVEST-FAIL: no AVC records collected"; fi; echo "--"; getenforce' \
-    > "$L/avc.log" 2>&1
+    > "$L/avc.log" 2>&1 || FAIL=1
 avc_n=$(grep -c denied "$L/avc.log" || true)
+tail -1 "$L/avc.log" | grep -qx 'Enforcing' \
+    || { echo "FAIL: audit harvest incomplete (see $L/avc.log)"; FAIL=1; }
+grep -q HARVEST-FAIL "$L/avc.log" && { echo "FAIL: audit harvest empty"; FAIL=1; }
 
 {
     echo "# tier3s Phase E bench ($(basename "$L"))"
     echo
-    echo "commit=$(cat "$STAGE/commit.txt")  vm=$VM  enforcing=$mode  tier3s-avcs=$avc_n"
+    echo "commit=$(cat "$STAGE/commit.txt")  vm=$VM  enforcing=$mode  tier3s-domain-avcs=$avc_n"
     echo "runs=$RUNS samples=$SAMPLES  fail=$FAIL"
     for r in $(seq 1 "$RUNS"); do echo "- run-$r.log"; done
 } > "$L/INDEX.md"
@@ -174,9 +194,13 @@ if [ "$FAIL" -eq 0 ] && [ "$avc_n" -eq 0 ]; then
     virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
     virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
         || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
-    rm -f "$IMG/${VM}.qcow2"
-    echo "== DONE: $L (VM removed)"
+    if virsh -c qemu:///session dominfo "$VM" >/dev/null 2>&1; then
+        echo "WARN: VM $VM still defined — preserving, disk kept" >&2
+    else
+        rm -f "$IMG/${VM}.qcow2"
+        echo "== DONE: $L (VM removed)"
+    fi
 else
     echo "== DONE WITH FAILURES: $L — VM $VM preserved (avc=$avc_n fail=$FAIL)"
+    exit 1
 fi
-rm -rf "$STAGE"

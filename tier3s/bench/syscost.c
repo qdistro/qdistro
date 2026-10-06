@@ -42,6 +42,7 @@ int main(void)
 
     t0 = now_us();
     for (i = 0; i < 1000; i++) {
+        int st;
         pid_t p = fork();
         if (p < 0) { perror("fork"); return 1; }
         if (p == 0) {
@@ -49,7 +50,12 @@ int main(void)
             execv("/bin/true", av);
             _exit(127);
         }
-        if (waitpid(p, NULL, 0) < 0) { perror("waitpid"); return 1; }
+        if (waitpid(p, &st, 0) < 0) { perror("waitpid"); return 1; }
+        /* a failed exec exits 127 — count it as a broken iteration, not work */
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            fprintf(stderr, "forkexec child failed at iter %d (st=%d)\n", i, st);
+            return 1;
+        }
     }
     t1 = now_us();
     c = (double)(t1 - t0) / 1000.0;
