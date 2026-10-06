@@ -485,7 +485,7 @@ done
 #
 # qterminator needs the QTermWidget SIP binding, which the snapshot does
 # not ship; qdterm/util/build-sip.sh builds it against qtermwidget-devel.
-# python313-PyQt6-devel (the PyQt6 .sip files) pulls rpm-build, which needs
+# python314-PyQt6-devel (the PyQt6 .sip files) pulls rpm-build, which needs
 # GNU bzip2/diffutils where the base has busybox-* shims. --force-resolution
 # swaps them, but only after a dry run shows every removal is a busybox-*
 # package; anything else fails the bootstrap closed.
