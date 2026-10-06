@@ -138,6 +138,13 @@ if command -v checkmodule >/dev/null 2>&1; then
     printf '%s\n' "$out" | tail -3 | sed 's/^/    /'
     is "install-policy.sh rc" "$rc" 0
     is "module loaded" "$(semodule -l | grep -c '^qdistro_tier3s\b')" 1
+    # The SaveRule lanes need the broker rules.d write surface; on the
+    # runtime-only bases (no selinux-policy-devel) the baked broker
+    # module cannot be rebuilt, so the companion raw module carries it.
+    out=$(cd "$SRC/selinux/broker-rules" && bash install-policy.sh 2>&1); rc=$?
+    printf '%s\n' "$out" | tail -3 | sed 's/^/    /'
+    is "broker-rules install-policy.sh rc" "$rc" 0
+    is "broker-rules module loaded" "$(semodule -l | grep -c '^qdistro_broker_rules\b')" 1
 else
     fail "checkmodule absent — the tier3s policy module cannot be built (bake regression)"
 fi
