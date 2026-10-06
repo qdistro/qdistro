@@ -110,7 +110,8 @@ provision() {
     # memory.current.
     local d
     # ordered top-down: a level only delegates what its parent already has
-    for d in /sys/fs/cgroup/user.slice \
+    for d in /sys/fs/cgroup \
+             /sys/fs/cgroup/user.slice \
              /sys/fs/cgroup/user.slice/user-1000.slice \
              /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service \
              /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice \
@@ -228,15 +229,20 @@ sec_cold() {
     done
 }
 
-# delegate_to <cgroup-rel-path>: enable +cpu +memory on EVERY ancestor of the
-# given cgroup (files propagate to existing children on write), so timing of
-# slice-dir creation can't leave the target controller-less.
+# delegate_to <cgroup-rel-path>: enable +cpu +memory on the target cgroup's
+# WHOLE ancestry, root first. Bottom-up can't work (a level only delegates
+# what its parent already exposes) and PID1 rewrites subtree_control on unit
+# events (transient-scope teardown can reset the root to 'pids'), so this is
+# re-applied right before the t2 stats are read, not once at provision.
 delegate_to() {
-    local p="/sys/fs/cgroup$1"
-    while [ "$p" != /sys/fs/cgroup ] && [ -n "$p" ]; do
+    local p="/sys/fs/cgroup$1" chain=()
+    while [ -n "$p" ] && [ "$p" != /sys/fs ]; do
+        chain=("$p" "${chain[@]}")
+        p="${p%/*}"
+    done
+    for p in "${chain[@]}"; do
         [ -f "$p/cgroup.subtree_control" ] \
             && echo "+cpu +memory" > "$p/cgroup.subtree_control" 2>/dev/null || :
-        p="${p%/*}"
     done
 }
 
