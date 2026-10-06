@@ -404,7 +404,7 @@ runtime dependency in `qdbrowser/pyproject.toml`) and
 sudo apt install python3-jeepney python3-pyqt6.qtwebengine
 
 # openSUSE Tumbleweed
-sudo zypper install python3-jeepney python313-PyQt6-WebEngine
+sudo zypper install python3-jeepney python314-PyQt6-WebEngine
 ```
 
 **qnotebook tests** require `mistune` (declared in
@@ -416,7 +416,7 @@ load, so a missing install errors every test file at collection):
 sudo apt install python3-mistune
 
 # openSUSE Tumbleweed
-sudo zypper install python313-mistune
+sudo zypper install python314-mistune
 ```
 
 **qdistro admin-app tests** (`tests/unit/test_admin_*.py`) require `PyYAML`.
@@ -429,7 +429,7 @@ host-step timeout — this is a hang, not a clean collection error:
 sudo apt install python3-yaml
 
 # openSUSE Tumbleweed
-sudo zypper install python313-PyYAML
+sudo zypper install python314-PyYAML
 ```
 
 **Pillow** is needed host-side by the qdwin GUI smokes (they decode shell
@@ -441,7 +441,7 @@ it) and by `qdshell/tests/test_ui_capture_retry.py` in the host pytest glob:
 sudo apt install python3-pil
 
 # openSUSE Tumbleweed
-sudo zypper install python313-Pillow
+sudo zypper install python314-Pillow
 ```
 
 **qdshell qml-plugin build** needs the Qt6 development packages

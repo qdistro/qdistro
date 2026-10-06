@@ -70,9 +70,9 @@ fi
 if have_py PyQt6.QtWebEngineWidgets; then ok+=("PyQt6-WebEngine (qdbrowser)")
 else
     case "$PM" in
-        zypper) missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> zypper python313-PyQt6-WebEngine"); distro_pkgs+=("python313-PyQt6-WebEngine") ;;
+        zypper) missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> zypper python314-PyQt6-WebEngine"); distro_pkgs+=("python314-PyQt6-WebEngine") ;;
         apt)    missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> apt python3-pyqt6.qtwebengine");    distro_pkgs+=("python3-pyqt6.qtwebengine") ;;
-        *)      missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> pip install PyQt6-WebEngine");      pip_pkgs+=("PyQt6-WebEngine") ;;
+        *)      missing+=("PyQt6.QtWebEngineWidgets (qdbrowser) -> python3 -m pip install PyQt6-WebEngine");      pip_pkgs+=("PyQt6-WebEngine") ;;
     esac
 fi
 
@@ -81,9 +81,9 @@ fi
 if have_py mistune; then ok+=("mistune (qnotebook)")
 else
     case "$PM" in
-        zypper) missing+=("mistune (qnotebook) -> zypper python313-mistune"); distro_pkgs+=("python313-mistune") ;;
+        zypper) missing+=("mistune (qnotebook) -> zypper python314-mistune"); distro_pkgs+=("python314-mistune") ;;
         apt)    missing+=("mistune (qnotebook) -> apt python3-mistune");    distro_pkgs+=("python3-mistune") ;;
-        *)      missing+=("mistune (qnotebook) -> pip install mistune");    pip_pkgs+=("mistune>=3.0") ;;
+        *)      missing+=("mistune (qnotebook) -> python3 -m pip install mistune");    pip_pkgs+=("mistune>=3.0") ;;
     esac
 fi
 
@@ -95,9 +95,9 @@ fi
 if have_py yaml; then ok+=("PyYAML (qdistro admin_app)")
 else
     case "$PM" in
-        zypper) missing+=("PyYAML (qdistro admin_app) -> zypper python313-PyYAML"); distro_pkgs+=("python313-PyYAML") ;;
+        zypper) missing+=("PyYAML (qdistro admin_app) -> zypper python314-PyYAML"); distro_pkgs+=("python314-PyYAML") ;;
         apt)    missing+=("PyYAML (qdistro admin_app) -> apt python3-yaml");    distro_pkgs+=("python3-yaml") ;;
-        *)      missing+=("PyYAML (qdistro admin_app) -> pip install pyyaml");  pip_pkgs+=("pyyaml") ;;
+        *)      missing+=("PyYAML (qdistro admin_app) -> python3 -m pip install pyyaml");  pip_pkgs+=("pyyaml") ;;
     esac
 fi
 
@@ -108,9 +108,9 @@ fi
 if have_py PIL; then ok+=("Pillow (qdwin gui smokes / qdshell tests)")
 else
     case "$PM" in
-        zypper) missing+=("Pillow (qdwin/qdshell) -> zypper python313-Pillow"); distro_pkgs+=("python313-Pillow") ;;
+        zypper) missing+=("Pillow (qdwin/qdshell) -> zypper python314-Pillow"); distro_pkgs+=("python314-Pillow") ;;
         apt)    missing+=("Pillow (qdwin/qdshell) -> apt python3-pil");    distro_pkgs+=("python3-pil") ;;
-        *)      missing+=("Pillow (qdwin/qdshell) -> pip install pillow"); pip_pkgs+=("pillow") ;;
+        *)      missing+=("Pillow (qdwin/qdshell) -> python3 -m pip install pillow"); pip_pkgs+=("pillow") ;;
     esac
 fi
 
