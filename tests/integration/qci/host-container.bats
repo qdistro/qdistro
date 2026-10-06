@@ -8,6 +8,23 @@ setup() {
     cp "$SOURCE_ROOT/ci/containers/"* "$REPO/ci/containers/"
     cp "$SOURCE_ROOT/scripts/vm/container-native-deps.sh" "$REPO/scripts/vm/"
     cp "$SOURCE_ROOT/qdterm/util/build-sip.sh" "$REPO/qdterm/util/"
+    # qci-host-image consumes the podman native stage for the quickshell
+    # binaries; stub the stage builder so the recipe gets canned content
+    # and the call is auditable in $CALLS.
+    cat > "$REPO/scripts/vm/build-native-podman.sh" <<'SH'
+#!/bin/bash
+printf 'native-stage\n' >> "$CALLS"
+t=$(mktemp --suffix=.tar)
+d=$(mktemp -d)
+mkdir -p "$d/usr/bin"
+echo stub-quickshell > "$d/usr/bin/quickshell"
+chmod +x "$d/usr/bin/quickshell"
+ln -s quickshell "$d/usr/bin/qs"
+tar -C "$d" -cf "$t" ./usr/bin/quickshell ./usr/bin/qs
+rm -rf "$d"
+printf '%s\n' "$t"
+SH
+    chmod +x "$REPO/scripts/vm/build-native-podman.sh"
     echo binding > "$REPO/qdterm/qtermwidget-pyqt/source.sip"
     cat > "$REPO/scripts/vm/lib/test-substrate.sh" <<'SH'
 qdistro_load_test_substrate() { QDISTRO_SUBSTRATE_SNAPSHOT=${TEST_SNAPSHOT:-20261003}; QDISTRO_SUBSTRATE_ARCH=x86_64; }
@@ -41,6 +58,7 @@ SH
 @test "host image cache keys recipe, snapshot and resolved base ID" {
     run "$REPO/ci/bin/qci-host-image"
     echo "$output"; [ "$status" = 0 ]
+    grep -q '^native-stage$' "$CALLS"   # quickshell binaries come from the podman native stage
     run "$REPO/ci/bin/qci-host-image"
     echo "$output"; [ "$status" = 0 ]; [[ "$output" = *'cache hit'* ]]
     [ "$(grep -c '^build ' "$CALLS")" = 1 ]
