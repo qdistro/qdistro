@@ -21,6 +21,8 @@ Module map (all sourced into the one process; functions resolve at call time):
 
 - `lib/bootstrap.sh` — exit-class table, `PROJECTS`, run-state vars, env knobs.
 - `lib/core.sh` — primitives (`log`/`stamp`/`safe_name`/`exit_class_name`/`map_rc`/`rel_path`/`kv`).
+- `lib/login.sh` — `qci_login_cmd`: every host `bash -lc` goes through it so the
+  caller's PATH survives `/etc/profile` (sourced by `core.sh` and `gates/gui.sh`).
 - `lib/usage.sh` — `usage()`.
 - `lib/assert.sh` — `qci_assert_*` precondition helpers; each gate calls them at
   the top to verify its assumptions (run dir initialized, VM exists, ...) and

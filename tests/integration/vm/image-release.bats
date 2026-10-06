@@ -175,8 +175,8 @@ PY
 
 @test "build.sh: --snapshot-id refuses a stale, malformed or missing pin" {
     local old; old="$(date -u -d '-20 days' +%Y%m%d)"
-    # keep cloud_url in step with snapshot= so the stale pin reaches the
-    # age check, not the URL/snapshot drift guard
+    # cloud_url names the same dated snapshot; moving only snapshot= trips the
+    # drift check first and never reaches the age check this case is about
     sed -e "s/^snapshot=.*/snapshot=$old/" -e "s/Snapshot20[0-9]\{6\}/Snapshot$old/" \
         "$REPO/snapshot.conf" > "$T/stale.conf"
     fake_tree "$IMAGE/config.xml" "$T/stale.conf"

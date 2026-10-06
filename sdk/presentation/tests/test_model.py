@@ -371,3 +371,59 @@ def test_desktop_status_inherited_fixed_content_size():
     )
     assert "13.75" in text
     assert resolved.fixed_family in text
+
+
+def test_readable_on_color_always_meets_text_contrast():
+    import random
+
+    from qdistro_presentation.model import readable_on_color
+
+    rng = random.Random(4242)
+    for _ in range(5000):
+        bg = f"#{rng.randrange(0x1000000):06x}"
+        assert contrast_ratio(bg, readable_on_color(bg)) >= 4.5, bg
+
+
+def test_producer_corrects_only_failing_on_colors():
+    from qdistro_presentation.model import COLOR_KEYS, normalize_producer
+
+    weak = example_snapshot().colors.as_dict()
+    weak["mPrimary"] = "#f5d76e"      # light yellow
+    weak["mOnPrimary"] = "#ffffff"    # ~1.4:1 on it
+    weak["mSecondary"] = "#8a8a8a"
+    weak["mOnSecondary"] = "#9a9a9a"  # ~1.2:1
+    with pytest.raises(SnapshotError, match="contrast"):
+        parse_snapshot({**example_snapshot().to_dict(), "colors": weak})
+    snap = normalize_producer(mode="light", colors=weak)
+    out = snap.colors.as_dict()
+    assert out["mOnPrimary"] == "#000000"
+    assert out["mOnSecondary"] in ("#000000", "#ffffff")
+    for key in COLOR_KEYS:
+        if key not in ("mOnPrimary", "mOnSecondary"):
+            assert out[key] == weak[key], key
+    # The published document is readable by the strict reader.
+    assert parse_snapshot(snap.to_dict()).colors == snap.colors
+
+
+def test_every_bundled_qdshell_scheme_publishes():
+    import json
+    from pathlib import Path
+
+    from qdistro_presentation.model import COLOR_KEYS, normalize_producer
+
+    root = Path(__file__).resolve().parents[3] / "qdshell" / "Assets" / "ColorScheme"
+    schemes = sorted(root.glob("*/*.json"))
+    if not schemes:
+        pytest.skip("qdshell color schemes not in this tree")
+    for path in schemes:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for mode in ("dark", "light"):
+            colors = data.get(mode)
+            if not isinstance(colors, dict) or not all(k in colors for k in COLOR_KEYS):
+                continue
+            palette = {k: colors[k].lower() for k in COLOR_KEYS}
+            snap = normalize_producer(mode=mode, colors=palette)
+            out = snap.colors.as_dict()
+            for key in COLOR_KEYS:
+                if not key.startswith("mOn"):
+                    assert out[key] == palette[key], (path.name, mode, key)

@@ -1,11 +1,10 @@
 # Tier-2 — SELinux container confinement
 
-> **Status: compiling, not yet engaged or enforced.** The module builds
-> cleanly on the qdistro host (see "Build contract") and is a functional
-> container domain narrowed below podman's default `container_t`, but it
-> is **not** wired into `spawn-tier2.sh` and has **not** been exercised
-> in an enforcing-mode VM. See [`doc/selinux.md`](../../../doc/selinux.md)
-> for the design and threat-model context.
+> **Status: stock `container_t` desktop transport validated under enforcing.**
+> Version 0.2.0 adds narrow host socket connection rules
+> and is installed by bootstrap and the native-stage VM path. The optional
+> `qdistro_tier2_t` narrowing remains disengaged. See
+> [`doc/selinux.md`](../../doc/selinux.md).
 
 ## What this constrains (and why it's not just container_t)
 
@@ -90,32 +89,28 @@ domain reads/execs it via the `container_domain` attribute exactly as
 exist at spawn time are bound in (no dbus/pulse/gpg/ssh-agent — they
 are simply not bound, so they stay unreachable).
 
-## Engaging the domain
+## Shipped transport and deferred domain engagement
 
-The module is **inert** after `semodule -i`. Two things must happen to
-engage it, neither yet done — both deferred until an enforcing-VM pass:
+The launcher still runs stock `container_t`. It uses `:Z` only on the private
+runtime tree and binding-resolved silo home, preserving per-container MCS
+separation. The runtime tree contains regular stub files before podman mounts
+the shared socket inodes over them; relabelling the tree does not relabel the
+host sockets. PipeWire lock files are not sockets and are not bound.
 
-1. **Process label.** `spawn-tier2.sh` must pass
-   `--security-opt label=type:qdistro_tier2_t` to podman. Today it sets
-   no process label, so the container runs as stock `container_t`.
+Shared Wayland/PipeWire sockets, the host library and presentation directory
+retain their host labels. Two narrow rules let `container_t` stat/connect to
+`user_tmp_t` socket inodes and connect to the `unconfined_t` admin servers.
+There are no new regular-file writes or directory-management rules against
+`user_tmp_t`. The socket permissions apply to stock containers generally;
+the mount namespace allowlist is what limits a tier-2 app to the selected
+Wayland/PipeWire endpoints. No host runtime directory or bus/agent is mounted.
+The library remains `lib_t` (stock read/execute), and presentation retains
+`qdistro_presentation_t` (its separate read/watch-only policy).
 
-2. **Bind reachability.** The launcher mounts the per-container
-   `/run/user` dir, the outer wayland socket, the `pipewire-N` sockets,
-   and `qdwin-shell.so` with plain `-v ...:rw`/`:ro` — **no `:z`/`:Z`**,
-   so podman does not relabel them; they keep their host labels
-   (`user_tmp_t` for the runtime/sockets, `lib_t`/`usr_t` for the
-   shared object). For `qdistro_tier2_t` to reach the sockets the
-   socket/dir binds need `:z` (shared) or `:Z` (private) so they become
-   `container_file_t`. `qdwin-shell.so` needs a deliberate strategy — a
-   `:z` would mutate a host library label, so prefer a copy-in or a
-   dedicated read interface. **This is a launcher change, not a policy
-   change**, which is why the policy ships no allow rules against the
-   raw host labels (that would cargo-cult against the wrong types).
-
-The wiring should be capability-gated (module loaded *and* a clean
-enforcing dry-run) — mirroring the persist-only + capability-gate
-posture used elsewhere in qdshell. Tracked in `doc/selinux.md` and in
-the TODO block at the bottom of `qdistro_tier2.te`.
+To engage `qdistro_tier2_t` later, wire the process label explicitly, supply
+its bounded transport permissions, and validate the whole workload under
+enforcing. Loading the module alone enables stock-domain transport; it does
+not activate this optional narrower domain.
 
 ## Build contract (reproducible, validated on this host)
 
@@ -177,22 +172,33 @@ install` / `semodule -i` was **not** runnable on the dev host
   attributes are themselves subsets of `container_t`'s attribute set, so
   the bound holds by construction.
 
-**NOT yet validated — requires an enforcing-mode VM pass:**
+**Validated in the live VM at `cddd1c2c2`:**
 
-- **Bind relabel + label wiring (launcher change).** Until the binds
-  carry `:z`/`:Z` and `qdwin-shell.so` has a label strategy, engaging
-  the domain would break socket/plugin access. See "Engaging the
-  domain".
-- **Zero-new-AVC workload run.** That the nested weston +
-  qdwin-shell.so + guest app run cleanly under `qdistro_tier2_t`.
-  Expected (same file/exec surface as the working `container_t` path via
-  the shared attributes), but *asserted, not proven*, until
-  `tests/integration/vm/s32-tier2-podman.sh` +
-  `s40-tier2-hardening.sh` run enforcing with the domain engaged.
-- **Load-time `typebounds`/`neverallow` resolution** against the active
-  policy (needs `semodule -i` on a policycoreutils host).
+`ci/runs/bats-20261006T084046Z-1636059` passed `presentation-enforcing.bats`
+6/6 (enforcing), `presentation-live.bats`, `templates-promotion.bats`,
+`templates-state-snapshot.bats`, `tier2-silo-secctx-wiretag.bats` and
+`tiered-isolation.bats`, with the lifetime and restore-coordination locks in
+place. The target policy loaded the module (including its
+`typebounds`/`neverallow` checks). Named/disposable Qfileman remained alive
+with distinct runtime MCS labels and unchanged shared labels; the
+binding-resolved silo ran Weston + weston-terminal and wrote its home.
 
-The iteration loop (capture AVC → confirm `container_t` allows it →
-add the narrowest allow to `qdistro_tier2_t` directly, never by joining
-another broad attribute) is in the TODO block at the bottom of
-`qdistro_tier2.te`.
+The launcher exclusively locks the persistent state directory inode before
+`:Z`, independent of container name and path aliases. The supervisor retains
+the lock through teardown/detach, including root-launcher mode; a mount
+inspection also refuses a home used by a container surviving its launcher.
+Errors fail closed. Dead processes leave no stale lock files. Runtime-dir
+locks and serialized creation/reaping protect launches before registration.
+
+`:Z` walks the persistent home recursively, so large homes cost more startup
+time. It leaves `container_file_t` and private MCS categories on host files
+after stop: host processes in domains that cannot read that type/range (for
+example a confined backup or file-manager process) can lose access. Never
+restore host labels while the container is using the home.
+
+**Still deferred:** a zero-new-AVC workload run under the optional
+`qdistro_tier2_t` domain, alongside its launcher wiring.
+
+For a future narrowed-domain AVC, confirm `container_t` already allows the
+operation, then add only the required bounded permission; do not join a broad
+network/kernel attribute to make a workload pass.

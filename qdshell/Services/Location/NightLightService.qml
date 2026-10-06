@@ -93,25 +93,32 @@ Singleton {
   }
 
   // Observe setting changes and location readiness
+  // Settings.data is a plain object, so a Connections on Settings.data.nightLight
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.nightLight
-    function onEnabledChanged() {
-      apply();
-      // Toast: night light toggled
-      const enabled = !!Settings.data.nightLight.enabled;
-      ToastService.showNotice(I18n.tr("common.night-light"), enabled ? I18n.tr("common.enabled") : I18n.tr("common.disabled"), enabled ? "nightlight-on" : "nightlight-off");
-    }
-    function onForcedChanged() {
-      apply();
-      if (Settings.data.nightLight.enabled) {
-        ToastService.showNotice(I18n.tr("common.night-light"), Settings.data.nightLight.forced ? I18n.tr("toast.night-light.forced") : I18n.tr("toast.night-light.normal"), Settings.data.nightLight.forced ? "nightlight-forced" : "nightlight-on");
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.nightLight)
+        return;
+      if (key === "enabled") {
+        apply();
+        // Toast: night light toggled
+        const enabled = !!Settings.data.nightLight.enabled;
+        ToastService.showNotice(I18n.tr("common.night-light"), enabled ? I18n.tr("common.enabled") : I18n.tr("common.disabled"), enabled ? "nightlight-on" : "nightlight-off");
+
+      } else if (key === "forced") {
+        apply();
+        if (Settings.data.nightLight.enabled) {
+          ToastService.showNotice(I18n.tr("common.night-light"), Settings.data.nightLight.forced ? I18n.tr("toast.night-light.forced") : I18n.tr("toast.night-light.normal"), Settings.data.nightLight.forced ? "nightlight-forced" : "nightlight-on");
+        }
+
+      } else if (key === "nightTemp") {
+        apply();
+
+      } else if (key === "dayTemp") {
+        apply();
+
       }
-    }
-    function onNightTempChanged() {
-      apply();
-    }
-    function onDayTempChanged() {
-      apply();
     }
   }
 

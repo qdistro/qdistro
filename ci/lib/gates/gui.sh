@@ -11,6 +11,9 @@
 GUI_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../scripts/vm/lib/view-geometry.sh
 . "$GUI_GATE_DIR/../../../scripts/vm/lib/view-geometry.sh"
+# qci_login_cmd for the agent launch; self-tests source this file without core.sh.
+# shellcheck source=../login.sh
+. "$GUI_GATE_DIR/../login.sh"
 # Frame usability/darkness (screenshot_is_usable's thresholds and measures),
 # shared with vm-gui; the F5 darkness diagnostic asks qci_frame_not_dark.
 # shellcheck source=../../../scripts/vm/lib/frame-usable.sh
@@ -233,6 +236,8 @@ gui_scenario_requires_qdwin() {
         qdwin/tests/apps/[0-9][0-9]-*.md|\
         qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
         tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
+        qdistro/tests/integration/presentation-gui/[0-9][0-9]-*.md|\
+        tests/integration/presentation-gui/[0-9][0-9]-*.md|\
         qdlocker/tests/gui/[0-9][0-9]-*.md|\
         qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
         tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
@@ -291,6 +296,7 @@ agent_scenarios() {
         "$WORKSPACE"/qdwin/tests/apps/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/permissions-gui/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
+        "$QDISTRO_REPO"/tests/integration/presentation-gui/[0-9][0-9]-*.md \
         "$QDISTRO_REPO"/tests/integration/workflow-gui/[0-9][0-9]-*.md \
         "$WORKSPACE"/qdlocker/tests/gui/[0-9][0-9]-*.md
     do
@@ -3455,9 +3461,9 @@ run_agent_command() {
         if [[ "$cmd" == *"{prompt}"* ]]; then
             expanded=${cmd//\{prompt\}/$prompt}
             if [ "$to" -gt 0 ]; then
-                timeout -k 15 "$to" "${host_sandbox[@]}" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+                timeout -k 15 "$to" "${host_sandbox[@]}" bash -lc "$(qci_login_cmd "$expanded")" < /dev/null > "$log_path" 2>&1
             else
-                "${host_sandbox[@]}" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+                "${host_sandbox[@]}" bash -lc "$(qci_login_cmd "$expanded")" < /dev/null > "$log_path" 2>&1
             fi
         else
             if [ "$to" -gt 0 ]; then
@@ -4178,11 +4184,11 @@ record_agent_identity() {
     # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then
-        ver=$(timeout 10 claude --version 2>/dev/null | head -1)
-        [ -n "$ver" ] && kv qci_agent_version "$ver"
+        ver=$(timeout 10 claude --version 2>/dev/null | head -1) || true
+        if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     elif printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])codex([[:space:]]|$)'; then
-        ver=$(timeout 10 codex --version 2>/dev/null | head -1)
-        [ -n "$ver" ] && kv qci_agent_version "$ver"
+        ver=$(timeout 10 codex --version 2>/dev/null | head -1) || true
+        if [ -n "$ver" ]; then kv qci_agent_version "$ver"; fi
     fi
 }
 

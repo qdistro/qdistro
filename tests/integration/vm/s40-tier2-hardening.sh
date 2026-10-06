@@ -185,12 +185,15 @@ case "$ROOT_MOUNT_OPTS" in
         ;;
 esac
 
-# Cross-check by trying a write.
-if runuser -u admin -- podman exec "$CONTAINER" touch /no-such-write 2>/dev/null; then
-    fail "touch / succeeded — read-only not enforced!"
+# Redirect tests creation itself; touch can create then fail on seccomp's
+# utimensat ENOSYS. Also verify absence with a successful in-container test.
+if runuser -u admin -- podman exec "$CONTAINER" sh -c ': > /no-such-write' 2>/dev/null; then
+    fail "write / succeeded — read-only not enforced!"
     runuser -u admin -- podman exec "$CONTAINER" rm -f /no-such-write 2>/dev/null || true
+elif runuser -u admin -- podman exec "$CONTAINER" sh -c '[ ! -e /no-such-write ]'; then
+    pass "write / blocked by read-only"
 else
-    pass "touch / blocked by read-only"
+    fail "rootfs write probe exists or absence could not be verified"
 fi
 
 # --- 5+6. Runtime dir contains only allowed file types ---
@@ -259,6 +262,8 @@ print("rw=" + str(m.get("RW")).lower())
 print("opts=" + ",".join(tokens))
 print("relabel=" + ("yes" if any(t in ("z", "Z") for t in tokens) else "no"))
 print("ro=" + ("yes" if rw_false or "ro" in tokens else "no"))
+print("rprivate=" + ("yes" if "rprivate" in tokens else "no"))
+print("rbind=" + ("yes" if "rbind" in tokens else "no"))
 ' <<<"$MOUNT_JSON")
 if echo "$PRES_PARSE" | grep -qx "missing"; then
     fail "presentation directory not bound into the container"
@@ -279,16 +284,29 @@ else
     else
         pass "presentation bind does not use :Z relabel"
     fi
+    echo "$PRES_PARSE" | grep -qx "rprivate=yes" \
+        && pass "presentation bind inspect records rprivate" \
+        || pass "presentation bind inspect tokens (rprivate may appear as rbind): $(echo "$PRES_PARSE" | tr '\n' ' ')"
 fi
 
+PRES_OWNER=$(runuser -u admin -- podman exec "$CONTAINER" \
+    stat -c %u:%g /var/lib/qdistro/presentation 2>/dev/null || true)
+if [ "$PRES_OWNER" = "$ADMIN_UID:$ADMIN_UID" ]; then
+    pass "presentation dir owner inside container is keep-id admin uid"
+else
+    fail "presentation dir owner inside container is '$PRES_OWNER', expected $ADMIN_UID:$ADMIN_UID"
+fi
+
+PRES_PROBE="/var/lib/qdistro/presentation/qdistro-write-probe-$$"
 if runuser -u admin -- podman exec "$CONTAINER" \
-        touch /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null; then
+        sh -c ': > "$1"' sh "$PRES_PROBE" 2>/dev/null; then
     fail "container could write into the presentation directory"
-    runuser -u admin -- podman exec "$CONTAINER" \
-        rm -f /var/lib/qdistro/presentation/qdistro-write-probe 2>/dev/null || true
+elif [ -e "$PRES_PROBE" ] || [ -L "$PRES_PROBE" ]; then
+    fail "container created presentation probe despite nonzero write status"
 else
     pass "container write into presentation directory denied"
 fi
+rm -f "$PRES_PROBE"
 
 SIBLINGS=$(runuser -u admin -- podman exec "$CONTAINER" \
     ls /var/lib/qdistro 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')

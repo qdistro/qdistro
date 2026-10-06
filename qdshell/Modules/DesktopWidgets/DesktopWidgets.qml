@@ -241,11 +241,18 @@ Variants {
               requestPaint();
             }
 
+            // Settings.data is a plain object, so a Connections on Settings.data.desktopWidgets
+            // never bound; react through Settings.settingChanged instead.
             Connections {
-              target: Settings.data.desktopWidgets
-              function onGridSnapChanged() {
-                if (gridOverlayLoader.active) {
-                  gridOverlay.requestPaint();
+              target: Settings
+              function onSettingChanged(owner, key, value) {
+                if (owner !== Settings.data.desktopWidgets)
+                  return;
+                if (key === "gridSnap") {
+                  if (gridOverlayLoader.active) {
+                    gridOverlay.requestPaint();
+                  }
+
                 }
               }
             }
@@ -334,11 +341,18 @@ Variants {
           }
 
           // Reset position when bar position changes
+          // Settings.data is a plain object, so a Connections on Settings.data.bar
+          // never bound; react through Settings.settingChanged instead.
           Connections {
-            target: Settings.data.bar
-            function onPositionChanged() {
-              panelInternal.baseX = widgetsContainer.width - editModeControlsPanel.width - editModeControlsPanel.barOffsetRight;
-              panelInternal.baseY = editModeControlsPanel.barOffsetTop;
+            target: Settings
+            function onSettingChanged(owner, key, value) {
+              if (owner !== Settings.data.bar)
+                return;
+              if (key === "position") {
+                panelInternal.baseX = widgetsContainer.width - editModeControlsPanel.width - editModeControlsPanel.barOffsetRight;
+                panelInternal.baseY = editModeControlsPanel.barOffsetTop;
+
+              }
             }
           }
 

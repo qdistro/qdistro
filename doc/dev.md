@@ -21,82 +21,35 @@ cd qdistro
 For parallel work, use one git worktree per task
 (`git worktree add .worktrees/<topic> -b <branch>`); a worktree is a complete
 tree and needs nothing linked next to it. See [../AGENTS.md](../AGENTS.md)
-for the working workflow. (The build *toolchain* below still has to be on the
-host.)
+for the working workflow.
 
-### Host build prerequisites
+### Container build prerequisites
 
-The build steps assume these tools are on `PATH`:
-
-- **meson** + **ninja** + **pkg-config** — build the qdwin compositor and the C
-  daemons.
-- **Python 3** + **pytest** — headless unit tests.
-- **npm** — WebExtension tests/builds. `qci host` runs
-  `npm ci --prefer-offline` in each extension when `node_modules/.bin/vitest`
-  is absent (a cold npm cache needs network). It reuses an existing
-  `node_modules`; after a `package-lock.json` change refresh it with
-  `(cd qdchrome-extension && npm ci)` and `(cd qdfirefox-extension && npm ci)`.
-- **Optional:** FreeRDP 3 (`freerdp3`, `freerdp-shadow3`, `winpr3`) and
-  PipeWire (`libpipewire-0.3`) development packages. Without them meson skips
-  `qdistro-forward` (and, without PipeWire, `qdistro-nested-pixelfeed`) and
-  still exits 0.
-- **SELinux policy build tools** — needed when compiling qdistro `.te` modules
-  locally. On Tumbleweed:
-
-  ```sh
-  sudo zypper install selinux-policy-devel checkpolicy policycoreutils policycoreutils-devel policycoreutils-python-utils
-  ```
-
-  The qdistro SELinux module `Makefile`s call
-  `/usr/share/selinux/devel/Makefile`, which is provided by
-  `selinux-policy-devel`. If policy builds fail with that file missing, first
-  confirm the package is installed and the path exists:
-
-  ```sh
-  rpm -q selinux-policy-devel checkpolicy policycoreutils-devel
-  test -f /usr/share/selinux/devel/Makefile
-  ```
-
-  If the devel `Makefile` exists, the host has the policy build toolchain; later
-  `checkmodule` errors are policy/source issues, not missing host packages.
-
-`ci/bin/qci preflight` checks the build/lint tools it can (meson, ninja,
-pkg-config, npm, ruff, mypy) plus virsh/KVM/VM tooling, and reports any that are
-missing. It records optional tools (meson included) as skip/warn rather than
-failing — the hard failure surfaces later in `qci host`, where the qdwin/qdshell
-`meson setup && compile` rows error out if meson isn't installed. (pytest is not
-a preflight check; it runs as part of the host test step.)
-
-> On hosts where the distro forbids a system `pip install` of meson (PEP 668),
-> either install the packaged meson (e.g. `meson` 1.x from the distro) or build
-> through a throwaway venv (`python3 -m venv` then `python3 -m pip install meson`).
-
-Build order (from the repo root):
+Install rootless Podman and the orchestration commands Bash, Git, Python 3
+(stdlib), and Bats. Libvirt/QEMU are needed for the VM gates. Check command
+availability with `ci/bin/qci-host-deps --check`; `qci preflight` also checks
+Podman and the VM environment. Build dependencies are installed in the pinned
+container image, not on the workstation.
 
 ```sh
-# 1. Build qdwin — the compositor.
-(cd qdwin && meson setup build && meson compile -C build)
-
-# 2. Build the root C daemons against qdwin's XML (found through qdwin's
-#    uninstalled pkg-config file).
-export PKG_CONFIG_PATH="$PWD/qdwin/build/meson-uninstalled${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-(cd daemons && meson setup build && meson compile -C build)
-
-# 3. Headless unit tests.
-pytest
-
-# 4. Bake a test VM (one-time, ~5-10 min for baseweed, ~10-25 min
-#    for the dependency-baked overlay).
-scripts/vm/build-baseweed-from-scratch.sh
-scripts/vm/build-baked-baseweed.sh
-
-# 5. Spin a fresh test VM + run the integration suite. The whole repo
-#    is staged into the VM as /root/qdistro-src.
-#    The fixed qdistro test VM password is Pa_ssw0rd45. QDWIN_VM_TEMPLATE is
-#    optional — spin-test-vm.sh auto-creates a "qdistro-template"
-#    libvirt domain on first run.
-scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
+ci/bin/qci host
+# Quick development feedback in the same image:
+ci/bin/qci-host-run bash -c 'cd qdlocker && python3 -m pytest -q tests/unit'
 ```
+
+The gate builds qdwin's vendored patched libweston, qdwin, and qdshell in order.
+Qt tests run offscreen, without host desktop sockets. The worktree stays owned
+by your uid. The image caches the compiler, Qt/QML tools, Python dependencies,
+and QTermWidget binding; npm preparation caches each extension's dependencies
+and downloads. Test rows have no external network. `QCI_OFFLINE=1` requires the
+image and dependency caches to be ready; it never silently contacts a registry
+or package index. See [../ci/README.md](../ci/README.md#host-test-dependencies)
+for cache keys, package lists, and logs.
+
+For manual builds of the root daemons, use `ci/bin/qci-host-run` and point
+`PKG_CONFIG_PATH` at `qdwin/build-qci/meson-uninstalled` after a host gate run.
+FreeRDP/PipeWire development packages and SELinux policy build tools are in the
+container's native dependency recipe. They need not be installed on the host.
 
 The qci VM base defaults to the cloud-derived, dependency-baked image. It has
 runtime and test packages but no native compiler toolchain. Rootless Podman

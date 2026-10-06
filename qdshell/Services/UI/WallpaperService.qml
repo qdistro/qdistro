@@ -58,82 +58,89 @@ Singleton {
   // Signal emitted when browse path changes for a screen
   signal browsePathChanged(string screenName, string path)
 
+  // Settings.data is a plain object, so a Connections on Settings.data.wallpaper
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.wallpaper
-    function onDirectoryChanged() {
-      root.usedRandomWallpapers = {};
-      root.refreshWallpapersList();
-      // Emit directory change signals for monitors using the default directory
-      if (!Settings.data.wallpaper.enableMultiMonitorDirectories) {
-        // All monitors use the main directory
-        for (var i = 0; i < Quickshell.screens.length; i++) {
-          root.wallpaperDirectoryChanged(Quickshell.screens[i].name, root.defaultDirectory);
-        }
-      } else {
-        // Only monitors without custom directories are affected
-        for (var i = 0; i < Quickshell.screens.length; i++) {
-          var screenName = Quickshell.screens[i].name;
-          var monitor = root.getMonitorConfig(screenName);
-          if (!monitor || !monitor.directory) {
-            root.wallpaperDirectoryChanged(screenName, root.defaultDirectory);
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.wallpaper)
+        return;
+      if (key === "directory") {
+        root.usedRandomWallpapers = {};
+        root.refreshWallpapersList();
+        // Emit directory change signals for monitors using the default directory
+        if (!Settings.data.wallpaper.enableMultiMonitorDirectories) {
+          // All monitors use the main directory
+          for (var i = 0; i < Quickshell.screens.length; i++) {
+            root.wallpaperDirectoryChanged(Quickshell.screens[i].name, root.defaultDirectory);
+          }
+        } else {
+          // Only monitors without custom directories are affected
+          for (var i = 0; i < Quickshell.screens.length; i++) {
+            var screenName = Quickshell.screens[i].name;
+            var monitor = root.getMonitorConfig(screenName);
+            if (!monitor || !monitor.directory) {
+              root.wallpaperDirectoryChanged(screenName, root.defaultDirectory);
+            }
           }
         }
-      }
-    }
-    function onEnableMultiMonitorDirectoriesChanged() {
-      root.usedRandomWallpapers = {};
-      root.refreshWallpapersList();
-      // Notify all monitors about potential directory changes
-      for (var i = 0; i < Quickshell.screens.length; i++) {
-        var screenName = Quickshell.screens[i].name;
-        root.wallpaperDirectoryChanged(screenName, root.getMonitorDirectory(screenName));
-      }
-    }
-    function onAutomationEnabledChanged() {
-      root.toggleRandomWallpaper();
-    }
-    function onRandomIntervalSecChanged() {
-      root.restartRandomWallpaperTimer();
-    }
-    function onWallpaperChangeModeChanged() {
-      // Reset alphabetical indices when mode changes
-      root.alphabeticalIndices = {};
-      if (Settings.data.wallpaper.automationEnabled) {
-        root.restartRandomWallpaperTimer();
-        root.setNextWallpaper();
-      }
-    }
-    function onViewModeChanged() {
-      // Reset browse paths to root when mode changes
-      root.currentBrowsePaths = {};
-      root.refreshWallpapersList();
-    }
-    function onShowHiddenFilesChanged() {
-      root.refreshWallpapersList();
-    }
-    function onUseSolidColorChanged() {
-      if (Settings.data.wallpaper.useSolidColor) {
-        var solidPath = root.createSolidColorPath(Settings.data.wallpaper.solidColor.toString());
-        for (var i = 0; i < Quickshell.screens.length; i++) {
-          root.wallpaperChanged(Quickshell.screens[i].name, solidPath);
-        }
-      } else {
+
+      } else if (key === "enableMultiMonitorDirectories") {
+        root.usedRandomWallpapers = {};
+        root.refreshWallpapersList();
+        // Notify all monitors about potential directory changes
         for (var i = 0; i < Quickshell.screens.length; i++) {
           var screenName = Quickshell.screens[i].name;
-          root.wallpaperChanged(screenName, currentWallpapers[screenName] || root.defaultWallpaper);
+          root.wallpaperDirectoryChanged(screenName, root.getMonitorDirectory(screenName));
         }
-      }
-    }
-    function onSolidColorChanged() {
-      if (Settings.data.wallpaper.useSolidColor) {
-        var solidPath = root.createSolidColorPath(Settings.data.wallpaper.solidColor.toString());
-        for (var i = 0; i < Quickshell.screens.length; i++) {
-          root.wallpaperChanged(Quickshell.screens[i].name, solidPath);
+
+      } else if (key === "automationEnabled") {
+        root.toggleRandomWallpaper();
+
+      } else if (key === "randomIntervalSec") {
+        root.restartRandomWallpaperTimer();
+
+      } else if (key === "wallpaperChangeMode") {
+        // Reset alphabetical indices when mode changes
+        root.alphabeticalIndices = {};
+        if (Settings.data.wallpaper.automationEnabled) {
+          root.restartRandomWallpaperTimer();
+          root.setNextWallpaper();
         }
+
+      } else if (key === "viewMode") {
+        // Reset browse paths to root when mode changes
+        root.currentBrowsePaths = {};
+        root.refreshWallpapersList();
+
+      } else if (key === "showHiddenFiles") {
+        root.refreshWallpapersList();
+
+      } else if (key === "useSolidColor") {
+        if (Settings.data.wallpaper.useSolidColor) {
+          var solidPath = root.createSolidColorPath(Settings.data.wallpaper.solidColor.toString());
+          for (var i = 0; i < Quickshell.screens.length; i++) {
+            root.wallpaperChanged(Quickshell.screens[i].name, solidPath);
+          }
+        } else {
+          for (var i = 0; i < Quickshell.screens.length; i++) {
+            var screenName = Quickshell.screens[i].name;
+            root.wallpaperChanged(screenName, currentWallpapers[screenName] || root.defaultWallpaper);
+          }
+        }
+
+      } else if (key === "solidColor") {
+        if (Settings.data.wallpaper.useSolidColor) {
+          var solidPath = root.createSolidColorPath(Settings.data.wallpaper.solidColor.toString());
+          for (var i = 0; i < Quickshell.screens.length; i++) {
+            root.wallpaperChanged(Quickshell.screens[i].name, solidPath);
+          }
+        }
+
+      } else if (key === "sortOrder") {
+        root.refreshWallpapersList();
+
       }
-    }
-    function onSortOrderChanged() {
-      root.refreshWallpapersList();
     }
   }
 

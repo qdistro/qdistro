@@ -27,6 +27,7 @@ GUI_DIRS = {
     "gui-qdwin": "qdwin/tests/gui",
     "gui-apps": "qdwin/tests/apps",
     "gui-workflow": "tests/integration/workflow-gui",
+    "gui-presentation": "tests/integration/presentation-gui",
 }
 LANES = ("bats-fast", "bats-slow", *GUI_DIRS)
 

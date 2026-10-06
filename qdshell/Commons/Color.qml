@@ -439,6 +439,7 @@ Singleton {
     customColorsData.mShadow = pal.mShadow;
     customColorsData.mHover = pal.mHover;
     customColorsData.mOnHover = pal.mOnHover;
+    customColorsFile.writeAdapter();
     root.committingTarget = false;
     if (!root.skipTransition)
       startTransition();
@@ -521,6 +522,12 @@ Singleton {
       reload();
     }
     onAdapterUpdated: {
+      // commitTargetPalette assigns sixteen fields and writes once at the
+      // end. Writing per field put intermediate half-old palettes on disk;
+      // the file watch then reloaded one of them over the adapter, leaving
+      // the shell with a mixed dark/light palette after a mode switch.
+      if (root.committingTarget)
+        return;
       Logger.d("Color", "Writing colors to disk");
       writeAdapter();
     }

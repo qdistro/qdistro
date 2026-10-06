@@ -234,6 +234,103 @@ acquire_vm() {
     printf '%s\n' "$vm"
 }
 
+# SSH options for an enforcing clone (qga is denied under enforcing; the clone
+# forwards guest :22 to 127.0.0.1:<port> and carries the host's enforcing key).
+qci_enforcing_ssh() {
+    local port=$1; shift
+    ssh -p "$port" -i "$HOME/.ssh/qdistro_enforcing_id_ed25519" \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=8 -o BatchMode=yes \
+        root@127.0.0.1 "$@"
+}
+
+# acquire_enforcing_vm <gate> — clone the per-run bats golden booted
+# SELinux=enforcing (clone-baseweed.sh --enforcing) for a `# qci:enforcing`
+# bats file. Echoes "<vm> <ssh_port>". Same failure rows, orphan reaping and
+# CREATED_VMS bookkeeping as acquire_vm. There is no permissive fallback: a
+# file that asked for enforcing never runs on a permissive VM.
+acquire_enforcing_vm() {
+    local gate=$1 log_path vm port rc t_start t_end waited
+    local prov_timeout=${QCI_VM_PROVISION_TIMEOUT_S:-1800}
+    log_path="$RDIR/vm/spin-$gate.log"
+    if [ -z "${RUN_GOLDEN_BATS:-}" ]; then
+        record_result "$gate" clone-baseweed fail "$EXIT_VM_PROVISION" vm_provision vm "" \
+            "qci:enforcing needs the per-run bats golden (QCI_NO_GOLDEN=1 is unsupported for enforcing files)"
+        return "$EXIT_VM_PROVISION"
+    fi
+    log "creating disposable ENFORCING VM for $gate"
+    # Write-ahead, as in acquire_vm: a worker killed after the clone succeeds
+    # but before created-vms.txt records it would otherwise leave an untracked
+    # domain + overlay (clone-baseweed.sh keeps a finished clone). The marker
+    # lets finish_run's reap_writeahead_orphans reclaim it.
+    local wa_prefix="qci-$gate-" wa_baseline wa_file=""
+    wa_baseline=$(vm_list_by_prefix "$wa_prefix" | tr '\n' ',')
+    t_start=$(date +%s)
+    if mkdir -p "$RDIR/vm/provisioning.d" 2>/dev/null; then
+        wa_file="$RDIR/vm/provisioning.d/${QCI_WORKER_ID:-main}-$$.wa"
+        { printf 'prefix\t%s\n' "$wa_prefix"; printf 'baseline\t%s\n' "$wa_baseline"
+          printf 'win_start\t%s\n' "$t_start"; } \
+            > "$wa_file" 2>/dev/null || wa_file=""
+    fi
+    timeout "$prov_timeout" env \
+        QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+        bash "$VM_TOOLS/clone-baseweed.sh" "qci-$gate" \
+            --from-run-golden="$RUN_GOLDEN_BATS" --enforcing > "$log_path" 2>&1
+    rc=$?
+    t_end=$(date +%s)
+    if [ "$rc" -ne 0 ]; then
+        reap_new_orphans "$wa_prefix" "$wa_baseline" "$t_start" "$t_end"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
+        record_result "$gate" clone-baseweed fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" \
+            "enforcing clone failed (rc=$rc)"
+        return "$EXIT_VM_PROVISION"
+    fi
+    vm=$(grep -E "^qci-[A-Za-z0-9._-]+$" "$log_path" | tail -n 1)
+    port=$(sed -n 's/^ssh_port=\([0-9]\{1,5\}\)$/\1/p' "$log_path" | tail -n 1)
+    if [ -z "$vm" ] || [ -z "$port" ]; then
+        reap_new_orphans "$wa_prefix" "$wa_baseline" "$t_start" "$t_end"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
+        record_result "$gate" clone-baseweed fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" \
+            "enforcing clone printed no VM name / ssh_port"
+        return "$EXIT_VM_PROVISION"
+    fi
+    CREATED_VMS+=("$vm")
+    printf '%s\n' "$vm" >> "$RDIR/vm/created-vms.txt"
+    # Exact name now tracked; the write-ahead marker has done its job.
+    [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
+    kv "vm_${gate}" "$vm"
+    kv "vm_${gate}_ssh_port" "$port"
+    # The golden's session units come up after sshd; give the outer
+    # compositor the same budget spin-test-vm.sh gives a permissive clone.
+    # Not fatal here: the bats file asserts what it needs and its log then
+    # carries the evidence.
+    waited=0
+    until qci_enforcing_ssh "$port" 'test -S /run/user/1000/wayland-1' 2>/dev/null; do
+        [ "$waited" -ge "${QCI_SPIN_WAYLAND_TIMEOUT:-120}" ] && {
+            log "enforcing $vm: wayland-1 absent after ${waited}s"; break; }
+        sleep 3; waited=$((waited + 3))
+    done
+    printf '%s %s\n' "$vm" "$port"
+}
+
+# collect_vm_artifacts_ssh <vm> <ssh_port> <label> — collect_vm_artifacts for an
+# enforcing clone: virsh metadata plus journals and the AVC log over SSH.
+collect_vm_artifacts_ssh() {
+    local vm=$1 port=$2 label=${3:-vm} outdir
+    [ -n "$vm" ] && [ -n "$port" ] || return 0
+    outdir="$RDIR/vm/$label"
+    mkdir -p "$outdir" "$RDIR/journals" "$RDIR/screenshots"
+    "${VIRSH[@]}" dumpxml "$vm" > "$outdir/domain.xml" 2>&1 || true
+    "${VIRSH[@]}" dominfo "$vm" > "$outdir/dominfo.txt" 2>&1 || true
+    "${VIRSH[@]}" screenshot "$vm" "$RDIR/screenshots/$label-final.ppm" >/dev/null 2>&1 || true
+    qci_enforcing_ssh "$port" 'getenforce; journalctl -b --no-pager 2>/dev/null | tail -8000' \
+        > "$RDIR/journals/$label-system.log" 2>&1 || true
+    qci_enforcing_ssh "$port" 'journalctl _UID=1000 -b --no-pager 2>/dev/null | tail -8000' \
+        > "$RDIR/journals/$label-user-1000.log" 2>&1 || true
+    qci_enforcing_ssh "$port" 'ausearch -m AVC,USER_AVC,SELINUX_ERR -ts boot 2>/dev/null' \
+        > "$RDIR/journals/$label-avc.log" 2>&1 || true
+}
+
 release_vm() {
     local vm=$1 rc=$2
     [ -n "$vm" ] || return 0

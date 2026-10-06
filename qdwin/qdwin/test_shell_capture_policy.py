@@ -42,8 +42,8 @@ def main() -> int:
     source = Path(sys.argv[1]).read_text()
     protocol = Path(sys.argv[2]).read_text()
 
-    if not re.search(r'<interface name="qdwin_shell_v1" version="34">', protocol):
-        return fail("qdwin_shell_v1 must advertise protocol version 34")
+    if not re.search(r'<interface name="qdwin_shell_v1" version="35">', protocol):
+        return fail("qdwin_shell_v1 must advertise protocol version 35")
     if not re.search(
         r'<request name="prepare_output_capture" since="32">.*?'
         r'<arg name="output_name" type="string"', protocol, re.S
@@ -56,9 +56,9 @@ def main() -> int:
         return fail("v33 capture_served_stale(age_ms) event is missing")
     if not re.search(
         r"wl_global_create\s*\(\s*ec->wl_display\s*,\s*"
-        r"&qdwin_shell_v1_interface\s*,\s*34\s*,", source, re.S
+        r"&qdwin_shell_v1_interface\s*,\s*35\s*,", source, re.S
     ):
-        return fail("qdwin_shell_v1 wl_global_create version is not 34")
+        return fail("qdwin_shell_v1 wl_global_create version is not 35")
 
     handler = function_body(source, "qdwin_handle_prepare_output_capture")
     if handler is None:

@@ -2503,7 +2503,7 @@ install_selinux_policies() {
     fi
 
     cd "$REPO_ROOT"
-    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/presentation; do
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1 selinux/tier2 selinux/presentation; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             log "  -> $pol"
             if ! (cd "$pol" && bash install-policy.sh); then

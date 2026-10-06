@@ -36,7 +36,7 @@ gate_preflight() {
     : > "$report"
     check_required() {
         local label=$1 cmd=$2
-        if bash -lc "$cmd" >/dev/null 2>&1; then
+        if bash -lc "$(qci_login_cmd "$cmd")" >/dev/null 2>&1; then
             printf 'OK\t%s\n' "$label" >> "$report"
             record_result preflight "$label" pass 0 pass tool "$report" ""
         else
@@ -47,7 +47,7 @@ gate_preflight() {
     }
     check_optional() {
         local label=$1 cmd=$2
-        if bash -lc "$cmd" >/dev/null 2>&1; then
+        if bash -lc "$(qci_login_cmd "$cmd")" >/dev/null 2>&1; then
             printf 'OK\t%s\n' "$label" >> "$report"
             record_result preflight "$label" pass 0 pass tool "$report" ""
         else
@@ -55,21 +55,6 @@ gate_preflight() {
             record_result preflight "$label" skip 0 pass tool "$report" "optional tool missing; related gate will fail or skip"
         fi
     }
-    # Host-test deps are not part of the base install. Surface them up front (as
-    # skip/WARN, never failing preflight) so a missing package is visible at the
-    # start of a run instead of failing deep in the host gate. Install hint
-    # points at qci-host-deps. See README "Host test dependencies".
-    check_host_dep() {
-        local label=$1 cmd=$2
-        if bash -lc "$cmd" >/dev/null 2>&1; then
-            printf 'OK\t%s\n' "$label" >> "$report"
-            record_result preflight "$label" pass 0 pass tool "$report" ""
-        else
-            printf 'WARN\t%s\n' "$label" >> "$report"
-            record_result preflight "$label" skip 0 pass tool "$report" "missing host-test dep; run qdistro/ci/bin/qci-host-deps --install"
-        fi
-    }
-
     # Disk-space floor (H7): record measured free GiB and fail below the floor.
     check_disk_space() {
         local label=$1 free=$2 floor=$3 verdict note
@@ -118,6 +103,7 @@ gate_preflight() {
     fi
     check_required "python3" "command -v python3"
     check_required "git" "command -v git"
+    check_required "podman" "command -v podman"
     check_required "bash" "command -v bash"
     check_required "virsh" "command -v virsh"
     check_required "libvirt session" "virsh -c qemu:///session list >/dev/null"
@@ -186,29 +172,7 @@ gate_preflight() {
     check_disk_space "images volume ($img_dir)" "$(fs_free_gib "$img_ref")" "$min_free"
     check_disk_space "run dir ($RDIR)" "$(fs_free_gib "$RDIR")" "$min_free"
     check_optional "bats" "command -v bats"
-    check_optional "ruff" "command -v ruff"
-    check_optional "mypy" "command -v mypy"
-    check_optional "meson" "command -v meson"
-    check_optional "ninja" "command -v ninja"
-    check_optional "pkg-config" "command -v pkg-config"
-    check_optional "npm" "command -v npm"
     check_optional "QCI_AGENT_CMD" "test -n \"\${QCI_AGENT_CMD:-}\""
-    check_host_dep "host-dep tomli_w (qfileman)" "python3 -c 'import tomli_w'"
-    check_host_dep "host-dep libevdev (qdwin)" "pkg-config --exists libevdev"
-    check_host_dep "host-dep pango/pangocairo (qdwin)" "pkg-config --exists pango pangocairo"
-    check_host_dep "host-dep jeepney (qdbrowser)" "python3 -c 'import jeepney'"
-    # PyYAML: without it the admin-app allow-all guard silently degrades and a
-    # unit test hangs on a real modal QMessageBox (qdistro-pytest 1800s timeout
-    # in run full-20261004T214015Z-402556).
-    check_host_dep "host-dep PyYAML (admin_app)" "python3 -c 'import yaml'"
-    check_host_dep "host-dep PyQt6-WebEngine (qdbrowser)" "python3 -c 'import PyQt6.QtWebEngineWidgets'"
-    check_host_dep "host-dep mistune (qnotebook)" "python3 -c 'import mistune'"
-    check_host_dep "host-dep Pillow (qdwin/qdshell)" "python3 -c 'from PIL import Image'"
-    check_host_dep "host-dep Qt6 devel (qdshell)" "pkg-config --exists Qt6Core Qt6Gui Qt6Qml Qt6Network"
-    # Aggregate: the spot checks above only sample the inventory; this row runs
-    # the full checker so ANY missing host dep (e.g. the rest of qdwin's
-    # libweston 'always' table) still surfaces as a WARN here.
-    check_host_dep "host-dep inventory (qci-host-deps)" "bash '$QCI_DIR/bin/qci-host-deps'"
     {
         echo
         echo "## libvirt domains"

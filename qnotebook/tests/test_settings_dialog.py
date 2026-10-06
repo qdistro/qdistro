@@ -397,3 +397,25 @@ def test_live_update_replaces_unavailable_with_inherited_size(
         qapp.setStyle(original_style)
         qapp.setPalette(original_pal)
         qapp.setStyleSheet(original_qss)
+
+
+def test_unchanged_mode_apply_keeps_legacy_key(win, qtbot):
+    s = QSettings("qnotebook", "qnotebook")
+    s.setValue("appearance/version", 1)
+    s.setValue("appearance/theme_mode", "dark")
+    s.remove("dark_mode")
+    s.sync()
+    dlg = SettingsDialog(win)
+    qtbot.addWidget(dlg)
+    dlg._combo_appearance.setCurrentText("Dark")
+    dlg._spin_autosave_secs.setValue(30)
+    dlg._apply()
+    s.sync()
+    assert s.value("appearance/theme_mode") == "dark"
+    assert s.contains("dark_mode") is False
+
+    dlg._combo_appearance.setCurrentText("Light")
+    dlg._apply()
+    s.sync()
+    assert s.value("appearance/theme_mode") == "light"
+    assert s.value("dark_mode", type=bool) is False

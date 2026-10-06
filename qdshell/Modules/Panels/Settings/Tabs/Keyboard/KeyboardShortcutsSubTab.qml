@@ -122,10 +122,17 @@ ColumnLayout {
 
   // Keep customList (and thus conflicts) in sync if the persisted list changes
   // from elsewhere.
+  // Settings.data is a plain object, so a Connections on Settings.data.general.keybinds
+  // never bound; react through Settings.settingChanged instead.
   Connections {
-    target: Settings.data.general.keybinds
-    function onCustomShortcutsChanged() {
-      root.customList = Settings.data.general.keybinds.customShortcuts || [];
+    target: Settings
+    function onSettingChanged(owner, key, value) {
+      if (owner !== Settings.data.general.keybinds)
+        return;
+      if (key === "customShortcuts") {
+        root.customList = Settings.data.general.keybinds.customShortcuts || [];
+
+      }
     }
   }
 

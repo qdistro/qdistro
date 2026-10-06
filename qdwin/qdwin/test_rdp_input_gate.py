@@ -87,8 +87,8 @@ def main() -> int:
         return fail("qdwin shell protocol lacks the authoritative input result")
     if "send_remote_output_input_result" not in shell_gate:
         return fail("qdwin does not acknowledge the backend input transition")
-    if 'interface name="qdwin_shell_v1" version="34"' not in protocol:
-        return fail("qdwin shell protocol was not bumped for safety drain")
+    if 'interface name="qdwin_shell_v1" version="35"' not in protocol:
+        return fail("qdwin shell protocol must retain v35 alongside the v34 safety drain")
     if 'request name="drain_remote_output_state" since="34"' not in protocol:
         return fail("qdwin shell protocol lacks the safety drain request")
     for token in (
@@ -115,12 +115,15 @@ def main() -> int:
                     38: "set_remote_output_input", 39: "drain_remote_output_state"},
         "event": {30: "toplevel_app_id", 31: "capture_served_stale",
                   32: "nested_proxy_remote_identity", 33: "remote_output_input_result",
-                  34: "remote_output_drain_result"},
+                  34: "remote_output_drain_result",
+                  35: "selection_set_source_peer_identity"},
     }.items():
         entries = iface.findall(kind)
         for opcode, name in expected.items():
             if entries[opcode].get("name") != name:
                 return fail(f"{kind} opcode {opcode} must remain {name}")
+    if 'event name="selection_set_source_peer_identity" since="35"' not in protocol:
+        return fail("source peer identity event must remain gated at v35")
     for handler in (shell_gate, drain):
         if "wl_resource_get_version(resource) < 34" not in handler:
             return fail("remote requests must reject callers bound below v34")
