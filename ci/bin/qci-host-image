@@ -24,13 +24,15 @@ trap 'rm -rf "$work"' EXIT
 cp "$repo/ci/containers/Containerfile.host" "$repo/ci/containers/install-host-deps.sh" \
     "$repo/ci/containers/host-packages.txt" "$work/"
 cp "$repo/scripts/vm/container-native-deps.sh" "$repo/qdterm/util/build-sip.sh" "$work/"
-# The vendored Quickshell source is compiled into the host image by
-# install-host-deps.sh (no upstream TW package exists).
-mkdir "$work/qdshell"
-(cd "$repo/qdshell"
- while IFS= read -r -d '' path; do
-     cp --parents "$path" "$work/qdshell/"
- done < <(git ls-files -z --cached --others --exclude-standard -- quickshell-vendored))
+# qdshell's runtime: reuse the binaries the shared podman native-stage
+# builder (scripts/vm/build-native-podman.sh) already produces from the
+# vendored Quickshell source — same snapshot, one compile, no second copy
+# inside this recipe.
+native_stage=$(bash "$repo/scripts/vm/build-native-podman.sh") || {
+    echo 'ERROR: native stage build failed' >&2; exit 3;
+}
+mkdir "$work/quickshell-bin"
+tar -C "$work/quickshell-bin" -xf "$native_stage" ./usr/bin/quickshell ./usr/bin/qs
 mkdir "$work/qtermwidget-pyqt"
 # Copy source only; local SIP build outputs must never enter the recipe.
 (cd "$repo/qdterm/qtermwidget-pyqt"
