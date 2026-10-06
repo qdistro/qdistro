@@ -10,6 +10,7 @@
 #   QDSHELL_QS_PREFIX      install prefix (default: /usr — produces
 #                          /usr/bin/quickshell + the /usr/bin/qs symlink)
 #   QDSHELL_QS_EXTRA_CMAKE extra -D/-U args split on whitespace
+#   QDSHELL_QS_BUILD_JOBS  ninja parallelism (default: nproc, capped by RAM)
 #
 # Not wired into qdshell's meson.build for the same reason the vendored
 # libweston is not wired into qdwin's: it is a different pinned-version
@@ -36,14 +37,29 @@ if [[ -f "$BUILD/CMakeCache.txt" ]] \
     rm -rf "$BUILD"
 fi
 
+# A Qt6 cc1plus step — above all the per-module PCH compiles — needs well
+# over a GiB; in the 4 GiB test VMs full nproc parallelism gets cc1plus
+# OOM-killed. Cap jobs to ~1.5 GiB each, and under ~6 GiB also drop the PCH
+# sets (each pchset gch recompiles Qt6 headers once per module).
+JOBS="${QDSHELL_QS_BUILD_JOBS:-$(nproc)}"
+MEM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+MEM_JOBS=$(( MEM_KB / 1500000 ))
+[ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
+[ "$MEM_JOBS" -lt "$JOBS" ] && JOBS=$MEM_JOBS
+PCH=()
+if [ "$MEM_KB" -lt 6291456 ]; then
+    PCH=(-DNO_PCH=ON)
+fi
+
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_PREFIX_PATH="$HERE/cmake" \
     -DDISTRIBUTOR=qdistro \
+    ${PCH[@]+"${PCH[@]}"} \
     ${QDSHELL_QS_EXTRA_CMAKE:-}
 
-cmake --build "$BUILD"
+cmake --build "$BUILD" --parallel "$JOBS"
 
 if [ -n "${DESTDIR+x}" ]; then
     DESTDIR="$DESTDIR" cmake --install "$BUILD"

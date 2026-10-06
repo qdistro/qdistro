@@ -213,12 +213,20 @@ log "stage 4a: tarballing the qdistro monorepo (root + in-tree components)..."
 # extension repos' node_modules.
 # ONE tarball: the guest unpacks it as /root/qdistro-src (fresh-vm-bootstrap.sh),
 # the same layout as the image and a developer checkout.
-tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-host*' \
-    --exclude='node_modules' --exclude='.worktrees' \
-    --exclude='./ci/runs' --exclude='./image/root/root' --exclude='./image/logs' \
-    --exclude='./qdwin/libweston-vendored/src/build' \
-    -czf "$STAGE/qdistro.tar.gz" -C "$REPO" .
+# Exclude build *output* dirs by anchored path (./build*, ./*/build*): a bare
+# 'build' basename would also drop source dirs the build requires, e.g.
+# qdshell/quickshell-vendored/src/src/build (add_subdirectory(build)).
+TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
+              --exclude='.pytest_cache' --exclude='.git'
+              --exclude='node_modules' --exclude='.worktrees'
+              --exclude='./ci/runs' --exclude='./image/root/root'
+              --exclude='./image/logs'
+              --exclude='./qdwin/libweston-vendored/src/build')
+while IFS= read -r _d; do
+    TAR_EXCLUDES+=("--exclude=$_d")
+done < <(find "$REPO" -mindepth 1 -maxdepth 2 -type d -name 'build*' \
+        -printf './%P\n')
+tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdistro.tar.gz" -C "$REPO" .
 
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.
