@@ -540,6 +540,9 @@ def test_a_stalled_nss_answer_is_not_a_lookup(tmp_path):
         (b / f).chmod(0o755)
     r = run(inst.root, user=other.pw_name, pin=inst.pin, path_prepend=f"{b}:{inst.bin}")
     assert "FAIL nss:" in r.stdout, r.stdout
+    # the verdict names the lookup and its status: a kill at the bound
+    # (timeout's 124) is told apart from a missing entry (getent's 2)
+    assert "(getent passwd rc=124; " in r.stdout, r.stdout
     assert not marker.exists(), "a killed NSS lookup still reached runuser"
 
 
@@ -590,3 +593,4 @@ def test_a_uid_printed_before_a_stall_is_not_a_lookup(tmp_path):
     assert "the uid lookup for" in r.stdout, r.stdout
     # and as_user's site never adopts the printed prefix either
     assert "FAIL nss:" in r.stdout, r.stdout
+    assert "(id -u rc=124; " in r.stdout, r.stdout
