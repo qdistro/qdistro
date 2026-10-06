@@ -902,6 +902,15 @@ def _enforce_launch_env_dir(env_dir: Path, mode: int) -> None:
             f"{env_dir} is owned by {st.st_uid}:{st.st_gid}, not root:root")
 
 
+class _ForeignSiloAccount(KeyError):
+    """qt3s-<silo> resolves but is NOT that silo's bound identity (foreign or
+    deleted-and-recreated account: wrong GECOS marker, sub-1000 or admin uid).
+    A subclass of KeyError so `except KeyError` still covers both kinds of
+    "the silo account cannot be used", while callers that must distinguish
+    "nothing resolves under this name" (plain KeyError from getpwnam) from
+    "something foreign resolves" (this) can (astra C2-end P2)."""
+
+
 class _SystemOps:
     """Real implementation of the side-effecting ops (useradd,
     userdel, cgroup writes, systemctl). Tests substitute a fake
@@ -2255,7 +2264,14 @@ class _SystemOps:
             # reports the container running; a failed query is unknown, never
             # stopped (tier3s/CONTRACT.md §6).
             container = TIER3S_CONTAINER_FMT.format(name=name)
-            exists = self._tier3s_container_exists(name, container, timeout=3)
+            try:
+                exists = self._tier3s_container_exists(name, container,
+                                                       timeout=3)
+            except KeyError:
+                # No qt3s-<name> account resolves: the store cannot be
+                # queried at all, so the container's absence is not
+                # established — unknown, not "stopped".
+                exists = None
             if exists == 0:
                 try:
                     running = self._tier3s_podman(
@@ -2388,15 +2404,16 @@ class _SystemOps:
         session; the per-silo /run/qdistro-tier3s-rt/<uid> dir stands in.
         The account must carry this silo's exact GECOS marker on a regular
         non-admin uid — a truncation collision or a foreign/recreated
-        account resolves to a different marker and raises KeyError (never
-        silently queries another account's store; sol model-A r1 P2-3).
-        Raises KeyError when the account does not resolve or fails the
-        binding checks, plus subprocess.TimeoutExpired / OSError."""
+        account resolves to a different marker and raises
+        _ForeignSiloAccount (never silently queries another account's
+        store; sol model-A r1 P2-3). Raises KeyError when nothing resolves
+        under the account name, _ForeignSiloAccount when a foreign account
+        does, plus subprocess.TimeoutExpired / OSError."""
         acct = _SystemOps._tier3s_silo_acct(name)
         pw = pwd.getpwnam(acct)
         if pw.pw_gecos != f"qdistro tier3s silo {name}" \
                 or pw.pw_uid < 1000 or pw.pw_uid == ADMIN_UID:
-            raise KeyError(
+            raise _ForeignSiloAccount(
                 f"{acct}: not the bound tier3s silo account for '{name}' "
                 f"(uid {pw.pw_uid}, gecos {pw.pw_gecos!r})")
         return subprocess.run(
@@ -2445,13 +2462,19 @@ class _SystemOps:
         """podman's own `container exists` verdict on *container* in the
         qt3s-<name> store (0 present, 1 absent, any other = the query itself
         failed), or None when the runuser→env→sh chain delivered none or the
-        account does not resolve. Raises TimeoutExpired / OSError."""
+        resolved account is not this silo's (a foreign identity is never a
+        verdict — it must not answer for this silo). Raises KeyError when NO
+        account resolves under qt3s-<name> at all — a provably different
+        situation: the spawn provisions the account (step 3b) BEFORE writing
+        its control record and before any podman call in that store, so the
+        caller can weigh it against surviving control records (astra C2-end
+        P2). Raises TimeoutExpired / OSError."""
         try:
             proc = _SystemOps._tier3s_silo_cmd(
                 name, ["sh", "-c", _PM_EXISTS_SH, "sh", container],
                 timeout=timeout)
-        except KeyError:
-            return None    # no silo account: the query could not run
+        except _ForeignSiloAccount:
+            return None    # a foreign identity cannot vouch for this store
         return _SystemOps._podman_exists_verdict(proc)
 
     def tier3s_unit_records(self, unit: str) -> list[str]:
@@ -2479,12 +2502,18 @@ class _SystemOps:
         """True if a tier3s stop did NOT fully take effect (fail closed, like
         tier2_silo_running): the launch unit is not definitively inactive or
         failed, OR the silo account's podman still has qdistro-tier3s-<name>
-        (a failed or timed-out query counts as present), OR a control record
-        of the unit
+        (a failed or timed-out query counts as present, and a resolved but
+        FOREIGN qt3s-<name> account counts as unknown rather than absent),
+        OR a control record of the unit
         survives (/run/qdistro-tier3s-ctl/<token>, an unreadable control dir
         counts as present). The record is the persisted mapping silo -> token
         (CONTRACT §6), so this also covers a token the manager no longer
-        holds."""
+        holds. When NO qt3s-<name> account resolves at all the store query
+        cannot run — but the spawn provisions the account before its control
+        record and before any podman call in that store, so absence only
+        reads as gone once the record check below also comes back empty; a
+        surviving record keeps the missing-after-provisioning case closed
+        (astra C2-end P2)."""
         unit = TIER3S_SILO_LAUNCHER_FMT.format(name=name)
         try:
             active = subprocess.run(
@@ -2503,6 +2532,16 @@ class _SystemOps:
             log.warning("podman container exists %s timed out; reporting "
                         "the tier3s silo as still running", container)
             return True
+        except KeyError:
+            # No qt3s-<name> account resolves at all. The spawn provisions it
+            # (step 3b) BEFORE writing the control record and before the first
+            # podman call in its store, so a container can only exist behind
+            # a surviving record — fall through to the record check, which
+            # stays fail-closed for a missing/replaced identity AFTER
+            # provisioning. With no record this is a proven pre-provisioning
+            # failure: nothing ran as that uid, and the silo must be
+            # recoverable by an ordinary stop/retry (astra C2-end P2).
+            verdict = 1
         if verdict != 1:
             return True
         try:

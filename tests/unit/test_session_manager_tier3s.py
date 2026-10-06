@@ -661,16 +661,64 @@ def test_silo_query_rejects_a_truncation_collision(real_ops, monkeypatch):
     assert len(rec.calls) == 1            # refused before podman
 
 
-def test_silo_query_with_no_account_is_unknown(real_ops, monkeypatch):
-    """The qt3s-<silo> account is provisioned lazily at first launch; before
-    that (or after a foreign removal) getpwnam raises, there is no verdict
-    and the silo reads still-running — never 'stopped'."""
+def test_silo_query_with_no_account_weighs_the_record(real_ops, monkeypatch):
+    """The qt3s-<silo> account is provisioned lazily at first launch. When
+    NOTHING resolves under it the podman query cannot run — but that is not
+    automatically 'running' (astra C2-end P2): the spawn creates the account
+    (step 3b) BEFORE its control record and before the first podman call in
+    its store, so no record + no account is a proven pre-provisioning
+    failure and reads stopped. A record that survives an absent account is
+    the missing-identity-after-provisioning case and stays fail-closed."""
     def fake(name):
         raise KeyError(name)
     monkeypatch.setattr(sm.pwd, "getpwnam", fake)
     rec = _install(monkeypatch, [(_is("is-active"), (3, "inactive\n"))])
+    assert real_ops.tier3s_silo_running("smoke") is False
+    assert len(rec.calls) == 1            # podman is never invoked
+    ctl = sm.TIER3S_CTL_DIR / ("b" * 32)
+    ctl.mkdir()
+    (ctl / "state").write_text(f"schema=1\nunit={UNIT}\n")
     assert real_ops.tier3s_silo_running("smoke") is True
-    assert len(rec.calls) == 1
+
+
+def test_failed_first_start_before_provisioning_recovers(store, ops,
+                                                         monkeypatch,
+                                                         tmp_path):
+    """astra C2-end P2 lifecycle regression: a first launch refused BEFORE
+    the qt3s-* account exists (a transient stanza-write or provisioning
+    failure) must not wedge the silo Active forever — the real account
+    observation proves nothing ran, so the start records Stopped/failed and
+    an ordinary repair + start + stop + delete all work."""
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    monkeypatch.setattr(sm, "TIER3S_CTL_DIR", ctl)
+    ops.tier3s_silo_running = _SystemOps().tier3s_silo_running
+    # the silo account does not resolve: provisioning never ran
+    def no_account(name):
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", no_account)
+    _install(monkeypatch, [(_is("is-active"), (3, "failed\n")),
+                           (_exists, _verdict(1))])
+    ops.start_raises = SessionError("the launch was refused")
+    make(store)
+    with pytest.raises(SessionError, match="refused or failed"):
+        store.start("smoke")
+    silo = store.get("smoke")
+    assert silo.state == State.STOPPED
+    assert not getattr(silo, "start_unresolved", False)
+    # repair: provisioning now yields the bound account; start + stop + delete
+    def bound(name):
+        if name == "qt3s-smoke":
+            return _silo_pw(name, 4242, "qdistro tier3s silo smoke")
+        raise KeyError(name)
+    monkeypatch.setattr(sm.pwd, "getpwnam", bound)
+    ops.start_raises = None
+    store.start("smoke")
+    assert store.get("smoke").state == State.ACTIVE
+    store.stop("smoke")
+    assert store.get("smoke").state == State.STOPPED
+    store.delete("smoke")
+    assert store.list_silos() == []
 
 
 def test_observe_unbound_silo_account_is_unknown(real_ops, monkeypatch):
