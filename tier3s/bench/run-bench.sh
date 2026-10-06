@@ -139,12 +139,20 @@ if [ "$SAMPLES" -gt 0 ]; then
     # gives the target window's rect, so a post-key change can be verified
     # to land INSIDE the focused window rather than anywhere on screen
     shot() { virsh -c qemu:///session screenshot "$VM" "$1" >/dev/null 2>&1 && [ -s "$1" ]; }
-    shot "$STAGE/desk.ppm" || true
+    # settle the desk frame: teardown animations from the last pass must be
+    # finished or the desk->win diff (the window rect) picks them up
+    for _ in $(seq 1 10); do
+        shot "$STAGE/desk.ppm" && sleep 1 && shot "$STAGE/desk2.ppm" \
+            && [ "$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/desk2.ppm")" = same ] && break
+        sleep 1
+    done
     if ssh_vm 'cd /var/tmp/t3s-dl && bash bench-guest.sh latency-up' | tee "$L/latency-up.log" | grep -q LATENCY-WINDOW-UP; then
         sleep 3
         winrect=""
         if shot "$STAGE/win.ppm" && [ -s "$STAGE/desk.ppm" ]; then
-            winrect=$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/win.ppm")
+            # dense-region bbox: the window body — a panel-clock tick or
+            # icon repaint in the same frame can't widen the rect
+            winrect=$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/win.ppm" rect)
             case "$winrect" in diff*) winrect=${winrect#diff } ;; *) winrect="" ;; esac
         fi
         [ -n "$winrect" ] || { echo "   WARN: window rect unknown — falling back to whole-frame diff"; }
