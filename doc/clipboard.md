@@ -34,7 +34,18 @@ active request. Its cache key includes the complete peer/security tuple, not
 just PID; successful attestations expire after 30 seconds, unsuccessful ones
 retry after one second. Context changes, destroyed handles, and compositor
 reconnection cannot inherit an old result. The verification busctl deadline is
-200 ms. These checks remain separate from set-time and focus-clear policy.
+2 s. These checks remain separate from set-time and focus-clear policy.
+
+The broker policy calls (`CheckClipboardTransfer` at set time,
+`CheckClipboardReceive` per receive) are asynchronous. qdshell starts the
+busctl child and finishes the decision when the binding reports it, so a slow
+broker never blocks the shell. Set time waits up to 2 s. Receive waits up to
+1.5 s, inside qdwin's two-second receive deadline. Each request reports
+exactly once; timeout, start failure, rejected input and the 16-request
+in-flight cap all deny. While a set-time verdict is pending the selection is
+live, but every paste of it still passes the receive-time gate. A set-time
+verdict for a selection that has since been replaced is logged but does not
+clear the newer selection.
 
 ## Handed-off windows — no special case
 

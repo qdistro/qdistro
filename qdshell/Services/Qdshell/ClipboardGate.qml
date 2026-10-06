@@ -19,7 +19,9 @@ import "ClipboardDenyCoalesce.js" as ClipboardDenyCoalesce
 //   - On `selectionSet(seat, sourceHandle, mimeTypesConcat, isPrimary)`,
 //     we look up the source silo from the map, the destination silo
 //     from the currently-focused toplevel, and decide allow/deny
-//     by asking the qdistro broker's CheckClipboardTransfer method.
+//     by asking the qdistro broker's CheckClipboardTransfer method
+//     (asynchronously: the verdict lands when the broker answers, up to 2 s
+//     later; a newer selection makes an older verdict non-clearing).
 //   - On deny, we call `QdwinBinding.clearSelection(seat, isPrimary)`.
 // Decision audit: every verdict emits a journal line of the form
 //   CLIPBOARD_GATE seat=<s> src_silo=<s> dst_silo=<s> mime_types=<csv>
@@ -118,6 +120,18 @@ Singleton {
         if (binding.seatFocusChanged !== undefined) {
             binding.seatFocusChanged.connect(root._onSeatFocusChanged);
         }
+        // Asynchronous broker checks: the set-time and receive-time gates
+        // start a busctl call and finish the decision when the binding
+        // reports it, so a slow broker never blocks the shell's GUI thread
+        // and is given 2 s / 1.5 s instead of the synchronous 200 ms
+        // (which denied legitimate same-silo pastes under load). Older
+        // plugins without the async API keep the synchronous calls.
+        if (binding.clipboardCheckFinished !== undefined
+                && binding.startCheckClipboardTransfer !== undefined
+                && binding.startCheckClipboardReceive !== undefined) {
+            binding.clipboardCheckFinished.connect(root._onClipboardCheckFinished);
+            root._asyncChecks = true;
+        }
         binding.boundChanged.connect(() => {
             if (!binding.bound)
                 root._onBindingLost();
@@ -194,6 +208,18 @@ Singleton {
     property var _lastDenyClearByKey: ({})
     property int _denyClearCoalesceMs: 500
 
+    // Asynchronous broker checks in flight, keyed by the binding's request
+    // id: { kind: "transfer", entry, selKind, gen } for a set-time check,
+    // { kind: "receive", requestHandle, seat, srcSilo, dstSilo, mime } for a
+    // receive. _selectionGen counts selection_set events per kind ("0"
+    // regular, "1" primary); a set-time verdict whose gen is no longer
+    // current describes a selection that has since been replaced, so it is
+    // logged but must not clear the newer selection (which gets its own
+    // verdict). Paste stays gated meanwhile by the receive-time gate.
+    property bool _asyncChecks: false
+    property var _pendingChecks: ({})
+    property var _selectionGen: ({ "0": 0, "1": 0 })
+
     // -- handle/silo tracking -------------------------------------------
     function _onBindingLost() {
         root._verifyGeneration++;
@@ -208,6 +234,9 @@ Singleton {
         root._pendingSrcIdentity = null;
         root._pendingSrcPeer = null;
         root._lastDenyClearByKey = ({});
+        // Replies for the lost connection's requests are ignored; the
+        // compositor that issued them is gone with its receive requests.
+        root._pendingChecks = ({});
     }
 
     function _onToplevelAdded(handle, ownerUid, appId, title, isXwayland) {
@@ -310,7 +339,7 @@ Singleton {
             }
             const id = entry.identity;
             root._verifyActive = entry;
-            _verifyProc.command = ["busctl", "--system", "--no-pager", "--timeout=200ms", "call", "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1", "org.qdistro.AdminBroker1", "VerifyClientIdentity", "utusssss", String(id.pid >>> 0), String(id.starttime), String(id.uid >>> 0), String(id.exe || ""), String(id.label || ""), String(id.sandboxEngine || ""), String(id.appId || ""), String(id.instanceId || "")];
+            _verifyProc.command = ["busctl", "--system", "--no-pager", "--timeout=2s", "call", "org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1", "org.qdistro.AdminBroker1", "VerifyClientIdentity", "utusssss", String(id.pid >>> 0), String(id.starttime), String(id.uid >>> 0), String(id.exe || ""), String(id.label || ""), String(id.sandboxEngine || ""), String(id.appId || ""), String(id.instanceId || "")];
             _verifyProc.running = true;
             return;
         }
@@ -505,8 +534,12 @@ Singleton {
         return out;
     }
 
-    function _logDecisionAndMaybeClear(entry, verdict, reason) {
+    function _logDecision(entry, verdict, reason) {
         Logger.i("ClipboardGate", "CLIPBOARD_GATE", "seat=" + (entry.seat || "default"), "src_silo=" + entry.srcSilo, "dst_silo=" + entry.dstSilo, "mime_types=" + entry.mimeCsv, "verdict=" + verdict, "reason=" + reason);
+    }
+
+    function _logDecisionAndMaybeClear(entry, verdict, reason) {
+        root._logDecision(entry, verdict, reason);
         if (verdict === "deny" && root._binding) {
             // Deny-storm coalescer: the FIRST deny for this offer identity
             // always clears (fail-closed); identical repeats inside the window
@@ -591,6 +624,8 @@ Singleton {
         // every subsequent focus change (default-deny is enforced at
         // set/receive time instead).
         const _selKind = isPrimary ? "1" : "0";
+        root._selectionGen[_selKind] = (root._selectionGen[_selKind] || 0) + 1;
+        const _selGen = root._selectionGen[_selKind];
         if (srcSilo !== "unknown") {
             root._selectionSourceSilo[_selKind] = srcSilo;
         } else {
@@ -647,9 +682,42 @@ Singleton {
         // 0/0 fail-closed.
         const _srcId = root._sourceRelayIdentity(
             _srcPeer, pending, _bound, root._handleToIdentity[sourceHandle]);
+        if (root._asyncChecks) {
+            const requestId = root._binding.startCheckClipboardTransfer(srcSilo, dstSilo, mimeList, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
+            root._pendingChecks[requestId] = {
+                "kind": "transfer",
+                "entry": decisionEntry,
+                "selKind": _selKind,
+                "gen": _selGen
+            };
+            return;
+        }
         const brokerResult = root._binding.checkClipboardTransfer(srcSilo, dstSilo, mimeList, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
         const decision = ClipboardBroker.parseCheckClipboardTransferResult(brokerResult.exitCode, brokerResult.stdout || "");
         root._logDecisionAndMaybeClear(decisionEntry, decision.verdict, decision.reason);
+    }
+
+    // Completion of a startCheckClipboard* request. Unknown ids (a lost
+    // connection's requests, or a duplicate report) are ignored. The broker
+    // reply format and its fail-closed parsing are the synchronous path's.
+    function _onClipboardCheckFinished(requestId, exitCode, stdoutText, timedOut) {
+        const check = root._pendingChecks[requestId];
+        if (!check)
+            return;
+        delete root._pendingChecks[requestId];
+        const decision = ClipboardBroker.parseCheckClipboardTransferResult(exitCode, stdoutText || "");
+        if (check.kind === "receive") {
+            root._answerReceive(check.requestHandle, check.seat, check.srcSilo, check.dstSilo, check.mime, decision.verdict, decision.reason);
+            return;
+        }
+        if (root._selectionGen[check.selKind] !== check.gen) {
+            // Superseded: record the verdict, but a deny here must not clear
+            // the selection that replaced this one.
+            root._logDecision(check.entry, decision.verdict, decision.reason);
+            Logger.d("ClipboardGate", "CLIPBOARD_GATE_SUPERSEDED", "seat=" + (check.entry.seat || "default"), "src_silo=" + check.entry.srcSilo, "is_primary=" + check.entry.isPrimary);
+            return;
+        }
+        root._logDecisionAndMaybeClear(check.entry, decision.verdict, decision.reason);
     }
 
     // -- focus-aware-clear (qdwin_shell_v1 seat_focus_changed) ----------
@@ -702,11 +770,12 @@ Singleton {
     }
 
     // -- receive-time gate (qdwin_shell_v1 v15+) ------------------------
-    // Mirrors _onSelectionSet but for a SINGLE requested mime and answers
-    // the compositor SYNCHRONOUSLY: qdwin blocks the destination fd for
-    // ~2s awaiting sendDataOfferReceiveDecision(requestHandle, allow). We
-    // MUST send exactly once on every path — every error/fallback denies
-    // (fail-closed) rather than letting the compositor time out.
+    // Mirrors _onSelectionSet but for a SINGLE requested mime: qdwin blocks
+    // the destination fd for ~2s awaiting sendDataOfferReceiveDecision(
+    // requestHandle, allow). The broker step is asynchronous (answered from
+    // _onClipboardCheckFinished within 1.5 s); every local deny answers at
+    // once. We MUST send exactly once on every path — every error/fallback
+    // denies (fail-closed) rather than letting the compositor time out.
     function _logReceiveDecision(seat, srcSilo, dstSilo, mimeType, verdict, reason) {
         Logger.i("ClipboardGate", "CLIPBOARD_RECEIVE_GATE", "seat=" + (seat || "default"), "src_silo=" + srcSilo, "dst_silo=" + dstSilo, "mime=" + mimeType, "verdict=" + verdict, "reason=" + reason);
     }
@@ -775,6 +844,20 @@ Singleton {
         // Relay the source app's authenticated (pid, starttime) for
         // launch-record attestation of the source silo (P1-1).
         const _srcId = root._handleToIdentity[sourceHandle] || {};
+        if (root._asyncChecks) {
+            // Answered from _onClipboardCheckFinished; the binding reports
+            // every request within 1.5 s, inside qdwin's 2 s receive timer.
+            const requestId = root._binding.startCheckClipboardReceive(srcSilo, dstSilo, mime, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
+            root._pendingChecks[requestId] = {
+                "kind": "receive",
+                "requestHandle": requestHandle,
+                "seat": seat,
+                "srcSilo": srcSilo,
+                "dstSilo": dstSilo,
+                "mime": mime
+            };
+            return;
+        }
         const brokerResult = root._binding.checkClipboardReceive(srcSilo, dstSilo, mime, srcAppId, dstAppId, sourceSandboxEngine, identityVerified, (_srcId.pid >>> 0) || 0, _srcId.starttime || 0);
         // The broker returns a bare "allow"/"deny" string (busctl prints
         // `s "allow"`). Reuse the set-time parser — same wire format,
