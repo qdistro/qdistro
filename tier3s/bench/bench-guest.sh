@@ -362,7 +362,7 @@ sec_io() {
     local tree=/var/tmp/t3s-bench-tree tar=/var/tmp/t3s-bench-tree.tar
     rm -rf "$tree"; mkdir -p "$tree"
     for i in $(seq 1 200); do dd if=/dev/zero bs=1M count=1 of="$tree/f$i" 2>/dev/null; done
-    tar cf "$tar" -C "$tree" .
+    (cd "$tree" && tar cf "$tar" ./*)
     chmod 0644 "$tar"   # rootless podman binds it read-only into the container
     emit io_tree_mb $(( $(stat -c %s "$tar") / 1048576 )) MB
     # Same measurement boundary on all three paths: the workload itself
@@ -374,16 +374,16 @@ sec_io() {
     }
     local out ms i
     mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io
-    local TARX="tar xf --no-same-permissions --touch"
+    local TARX="tar --no-same-permissions --touch -xf"
     local t0 t1
-    t0=$(ts_us); $TARX "$tar" -C /mnt/t3s-io; t1=$(ts_us)
+    t0=$(ts_us); $TARX "$tar" -C /mnt/t3s-io || fail "host io: tar failed"; t1=$(ts_us)
     emit io_tar_host_ms $(( (t1 - t0) / 1000 )) ms
     umount /mnt/t3s-io
     # tier 2: admin-owned bind-mount so :z can relabel; the shell inside the
     # container prints TAR_MS for just the extraction
     local at=/home/admin/t3s-bench.tar t2probe
     install -m 0644 -o admin -g admin "$tar" "$at"
-    t2probe='S=$(date +%s%3N); tar xf --no-same-permissions --touch /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
+    t2probe='S=$(date +%s%3N); tar --no-same-permissions --touch -xf /bench.tar -C /bench && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
         out=$(pm run --rm --name t2io$i --network none --entrypoint /bin/sh \
             --security-opt label=disable \
@@ -398,7 +398,7 @@ sec_io() {
     # gofer (gofs); extraction writes the sandbox's tmpfs. Second variant
     # turns directfs off where the pin supports it.
     cp "$tar" "$RSHARE/bench.tar" && chmod 644 "$RSHARE/bench.tar"
-    local t3probe='S=$(date +%s%3N); tar xf --no-same-permissions --touch /bench/bench.tar -C /w && echo TAR_MS=$(( $(date +%s%3N) - S ))'
+    local t3probe='S=$(date +%s%3N); tar --no-same-permissions --touch -xf /bench/bench.tar -C /w && echo TAR_MS=$(( $(date +%s%3N) - S ))'
     for i in 1 2; do
         if ! out=$(t3s_run t3io$i "[\"/bin/sh\",\"-c\",\"$t3probe\"]" 2>&1); then
             fail "t3s io run $i: $(echo "$out" | tail -2)"; continue
