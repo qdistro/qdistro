@@ -17,7 +17,7 @@ broker's clipboard / handoff gates. Direct clients in tiers 0 and 1 use normal
 | 1. SELinux | LSM restrictions, same Wayland connection | Yes | Shipped |
 | 2. podman | User namespace; container has a nested compositor | Yes | Shipped |
 | 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes | Shipped |
-| 3s. gVisor | Admin keep-id container under the gVisor `runsc` application kernel (systrap) | Yes — via a waypipe byte-stream bridge (no fd passing) | **Experimental, dev profile only** |
+| 3s. gVisor | Per-silo uid (`qt3s-*` account) rootless container under the gVisor `runsc` application kernel (systrap) | Yes — via a waypipe byte-stream bridge (no fd passing) | **Experimental, dev profile only** |
 | 4. VM whole-window| KVM + libvirt + waypipe (nested qdwin) | Yes | **Experimental** |
 | 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes | **Experimental** |
 | 6. Remote machine | Separate physical machine; remote-output | No | Post-v1 |
@@ -242,9 +242,13 @@ uid (which connects to the same socket and exposes a synthetic
 `wayland-tier3-<silo>-<pid>` display for the app).
 
 Cross-uid socket access is gated by the `qdistro-tier3` group — the
-silo can't reach `wayland-1` directly (qdwin's `QDWIN_ALLOWED_UID`
-rejects via `SO_PEERCRED`), but waypipe-client on the admin side
-passes the gate and re-marshals the protocol. Default `--no-gpu`
+silo can't reach `wayland-1` directly because `/run/user/1000`'s file
+permissions keep other uids off the socket (`QDWIN_ALLOWED_UID` is a
+*connected-client* gate: it limits which uid may bind the privileged
+globals — shell, nested manager, layer-shell, IME, secctx manager —
+not a connect-time `SO_PEERCRED` filter; every peer qdwin sees from
+tiers 0–3 is the admin uid anyway). waypipe-client on the admin side
+re-marshals the protocol for the silo. Default `--no-gpu`
 (SHM-only, VM-safe; flip on accel3d clones); `--oneshot` per bridge
 so each silo lifecycle is independent.
 
@@ -281,22 +285,41 @@ drivers.
 > profile. Contract: `tier3s/CONTRACT.md`; plan and owner decisions:
 > `todo/paravirt/` (D1–D8, O1–O9).
 
-The app runs in an admin keep-id rootless podman container whose OCI runtime
-is gVisor `runsc` (systrap platform), so its system calls are served by the
-gVisor Sentry rather than the host kernel. It sits beside tier 3 rather than
-in the integer ladder: the integer tiers stay stable in every stored contract
-(paravirt D2). Phase A shipped headless silos; Phase B adds GUI silos through
-a waypipe byte-stream bridge, since gVisor blocks `SCM_RIGHTS` to host
-sockets and direct Wayland fd passing is impossible.
+The app runs in a rootless podman container owned by a **dedicated per-silo
+host account `qt3s-<silo>`** (provisioned lazily at first launch, validated
+on every launch; paravirt D4 model A). `--userns=keep-id` maps the caller to
+the same numeric guest uid, so the workload runs as the silo uid on both
+sides of the gVisor boundary and silo-owned host state stays silo-owned
+inside. The OCI runtime is gVisor `runsc` (systrap platform), so its system
+calls are served by the gVisor Sentry rather than the host kernel. Tier 3s
+sits beside tier 3 rather than in the integer ladder: the integer tiers stay
+stable in every stored contract (paravirt D2). Phase A shipped headless
+silos; Phase B added GUI silos through a waypipe byte-stream bridge, since
+gVisor blocks `SCM_RIGHTS` to host sockets and direct Wayland fd passing is
+impossible; Phase C put the launches under an owning cgroup scope and Phase
+C2 moved every podman/runsc call to the silo account (admin keeps only the
+host-side bridge client and the broker/resolver calls; root supervises,
+creates the scope and tears down — nothing runs podman or runsc as root).
 
+- **Identity.** `qt3s-<silo>` is a real host account in the
+  `qdistro-tier3s` group with an automatic `/etc/subuid` + `/etc/subgid`
+  range; the launch refuses a pre-existing or foreign account (marker
+  GECOS, uid ≥ 1000, not the admin uid). Runtime state keys off the silo
+  uid: `/run/qdistro-tier3s-rt/<uid>` (the podman runtime dir — a silo has
+  no logind session) and `/run/qdistro-tier3s-runsc/<uid>` (the per-uid
+  runsc state root the wrapper enforces). Each silo keeps its **own**
+  podman image store — a shared `additionalimagestores` listing works but
+  cannot *run* under a foreign uid map, so images are pulled or `podman
+  load`ed as the silo account.
 - **Launch.** Explicit only (paravirt O6): `SessionManager1.CreateTier3sSilo
   (name, workload, template_silo, network)` then `StartSilo`, which starts
   `qdistro-tier3s-silo@<name>.service`. Its root helper execs
   `spawn-tier3s.sh`, which refuses a non-dev profile, runs the prerequisite
-  probe, asks the broker for `qdistro.tier3s.spawn:<workload>/<app>` (rules
+  probe as `qt3s-<silo>`, asks the broker for
+  `qdistro.tier3s.spawn:<workload>/<app>` (rules
   only, see [permissions.md](permissions.md)), and runs every podman call as
-  admin. A refusal or failure at any step fails the launch; there is **no
-  fallback** to tier 2 or 3. Tier 3s pod apps are not shipped yet.
+  the silo account. A refusal or failure at any step fails the launch; there
+  is **no fallback** to tier 2 or 3. Tier 3s pod apps are not shipped yet.
 - **Network:** `none` only (paravirt O3), both podman's and runsc's.
 - **Lifecycle.** Each launch has a root-only control record under
   `/run/qdistro-tier3s-ctl/<token>/`, a root-created owning scope
@@ -312,8 +335,12 @@ sockets and direct Wayland fd passing is impossible.
   [threat-model.md](threat-model.md)) connects one end to the
   compositor's `wayland-secctx` listener (tagged `qdistro.tier3s`,
   `qdistro.tier3s.<silo>`, launch-token instance) and accepts a single
-  connection from the sandbox on `$LAUNCHES/<token>/link.sock` (mode
-  0600). The launch dir is bind-mounted into the sandbox **read-only**
+  connection from the sandbox on `$LAUNCHES/<token>/link.sock`. The
+  client binds the socket admin-owned, then the root spawn chowns it to
+  the silo account `0600` — gVisor's DAC check on `connect()` runs in
+  guest uid space, so host groups and ACLs cannot authorize the sandbox —
+  under a `0711` per-launch dir (the gofer resolves the path for the
+  guest). The launch dir is bind-mounted into the sandbox **read-only**
   at `/run/qdistro/link` — the sandbox only `connect()`s, so it cannot
   exhaust the host's `/run` tmpfs. The attach is **single-shot: there
   is no reconnection** — once the client consumes `link.sock` it is
@@ -333,9 +360,16 @@ sockets and direct Wayland fd passing is impossible.
   `MemoryMax=1G` and `TasksMax=96`, bounding the *trusted* bridge
   client (which lives in the unit's cgroup, not the sandbox scope, and
   mirrors sandbox-controlled shm). The sandbox itself is bounded by its
-  owning scope. Declined: `-c none` for runsc (it already runs without
-  a cgroup manager under `--ignore-cgroups`) and a dedicated cgroup
-  scope for the bridge (the unit cgroup is the boundary).
+  owning scope, which is created root-owned with `TasksMax=1024`,
+  `MemoryMax=2G`, `MemorySwapMax=0` and `CPUQuota=200%`; only the scope's
+  `cgroup.procs`/`subtree_control`/`threads` are delegated to the silo
+  uid — every limit file stays root-owned, so the silo can move
+  processes into its scope but cannot raise any bound (s130 proves the
+  delegation split plus in-scope OOM kill, `pids.max` fork-bomb bound
+  and `cpu.stat` throttling). Declined: `-c none` for runsc (it already
+  runs without a cgroup manager under `--ignore-cgroups`) and a
+  dedicated cgroup scope for the bridge (the unit cgroup is the
+  boundary).
 - **Packaging exception (paravirt D1).** `runsc` is not in
   openSUSE-Tumbleweed-Oss, unlike the Oss-only precedent of tiers 4 and 5.
   The owner chose a sha512-pinned upstream dated release
@@ -344,9 +378,12 @@ sockets and direct Wayland fd passing is impossible.
   by `install-session-manager.sh`, which installs only the launch scripts,
   units and seccomp profiles. Without `runsc` the probe names the missing
   prerequisite and every tier 3s launch is refused.
-- **Not claimed:** no KVM comparison (paravirt O5); the resource caps
-  above are configuration, not yet an enforcement-tested boundary
-  (Phase C); no reconnect path; `lineage_enforce` is **opt-in** — the
+- **Not claimed:** no KVM comparison (paravirt O5); the gVisor boundary
+  is not a VM-equivalent claim — the Sentry and gofer remain trusted
+  host processes, side channels are out of scope, and DoS is bounded
+  only by the owning scope's limits; no reconnect path; no SELinux
+  confinement of the runsc processes yet (Phase D);
+  `lineage_enforce` is **opt-in** — the
   clipboard/identity gates run in shadow mode unless it is enabled (the
   s127 scenario enables it for the live path); no tier-3s pod apps yet.
 
@@ -368,8 +405,10 @@ mirroring tier 2's container pattern.
 Stack:
 
 - libvirt driving QEMU. Both packaged on Tumbleweed.
-- Display: waypipe server in guest → host waypipe-client over AF_VSOCK as a
- Wayland toplevel. The host wraps the waypipe client with
+- Display: waypipe over AF_VSOCK as a Wayland toplevel. The host runs
+ `waypipe --vsock client` (the vsock **listener**); the guest's
+ `qdistro-tier4-publisher` runs `waypipe --vsock server`, which
+ **connects out** to the host. The host wraps the waypipe client with
  `qdistro-secctx-exec` so the compositor sees the VM silo tag.
 - The outer wraps the viewer toplevel via `qdwin_nested_manager_v1`
  exactly like tier 2 today.
@@ -405,9 +444,10 @@ runtime policy.
 
 > **Experimental in v1 (D3).** Not part of the v1 security guarantee and not
 > exercised by the release test battery.
-> **Prerequisites:** the tier-4 stack plus an in-guest `qdistro-tier5-publisher`
-> listening on `AF_VSOCK` and a host `waypipe client --socket vsock://…` per
-> app launch. **Unsupported failure modes (no recovery path in v1):** vsock
+> **Prerequisites:** the tier-4 stack plus a host `waypipe --vsock client`
+> listener per app launch and the in-guest `qdistro-tier5-publisher`, which
+> **connects out** to it (`waypipe --vsock -s "2:<port>" server`).
+> **Unsupported failure modes (no recovery path in v1):** vsock
 > port exhaustion / collision across many per-app launches; publisher crash
 > orphaning host waypipe clients; secctx tag missing if not applied at
 > vsock-accept; per-app audio/input multiplex stalls. Treat tier-5 silos as
@@ -416,16 +456,20 @@ runtime policy.
 **waypipe over `AF_VSOCK`.** A plumbing-only extension of the existing
 tier-3 wrapper.
 
-- The VM runs a tiny `qdistro-tier5-publisher` process that listens on
- `AF_VSOCK` (port allocated per VM) and is the inner waypipe endpoint.
- Inside the guest, user apps are ordinary Wayland clients of the
- publisher's synthesized display.
-- The host runs `waypipe client --socket vsock://...` per app launch,
- mirroring tier 3's UNIX-socket bridge but across the VM boundary.
+- The host runs `waypipe --vsock client -s "<host cid>:<port>"` per app
+  launch — the **listener** end — mirroring tier 3's UNIX-socket bridge
+  but across the VM boundary.
+- The VM runs a tiny `qdistro-tier5-publisher` process that **connects
+  out** to that listener (`waypipe --vsock -s "2:<port>" server`) and is
+  the inner waypipe endpoint. Inside the guest, user apps are ordinary
+  Wayland clients of the publisher's synthesized display.
 - Outer-side: each app shows up as a regular `xdg_toplevel` from the
- waypipe-client `wl_client`; gets the standard
- `qdwin_nested_manager_v1` + secctx + chrome treatment.
-- PipeWire pixels and QDNI input ride separate vsock multiplexes.
+  waypipe-client `wl_client`; gets the standard
+  `qdwin_nested_manager_v1` + secctx + chrome treatment.
+- Pixels, input and clipboard all ride the single waypipe byte stream —
+  there are no separate vsock multiplexes (AF_VSOCK does not implement
+  `SCM_RIGHTS`, which is also why the secctx tag is stamped host-side on
+  the client, not guest-side on the publisher).
 - Audio: `qemu -audiodev pipewire` with an in-guest virtio/HDA codec. The
  guest's audio backend talks to QEMU on the host; QEMU streams to the
  admin uid's PipeWire daemon via the existing per-uid socket. No vsock
