@@ -44,6 +44,11 @@ git -C "$repo" archive --format=tar HEAD > "$STAGE/src.tar"
 git -C "$repo" rev-parse HEAD > "$STAGE/commit.txt"
 cp "$VM_DIR/tier3s-guest-lib.sh" "$VM_DIR/tier3s-guest-setup.sh" "$STAGE/"
 cp "$here/bench-guest.sh" "$STAGE/"
+# the syscall probe: compiled here (no toolchain on the worker); dynamic —
+# the exported image rootfs ships glibc + ld-linux, and it also runs bare on
+# the guest and bind-mounted into the tier-2 image
+gcc -O2 -o "$STAGE/syscost" "$here/syscost.c" \
+    || { echo "ERROR: gcc required to build the syscost probe" >&2; exit 2; }
 rel=$(sed -n 's/^release=//p' "$repo/tier3s/RUNSC_RELEASE")
 want=$(sed -n 's/^tarball_sha512=//p' "$repo/tier3s/RUNSC_RELEASE")
 tar="$HOME/.cache/qdistro/runsc/$rel/gvisor.tar.zstd"
@@ -84,20 +89,26 @@ mode=$(ssh_vm 'getenforce' 2>/dev/null || echo unknown)
 echo "   getenforce=$mode"
 [ "$mode" = "Enforcing" ] || { echo "FAIL: worker is $mode, not Enforcing — VM $VM preserved"; exit 1; }
 
+# passt shared-network clones have no slirp 10.0.2.2: the host is the
+# guest's default-route gateway (same discovery as vm_host_ip in helpers).
+HOST_IP=$(ssh_vm 'ip route | awk "/^default/ {print \$3; exit}"')
+[ -n "$HOST_IP" ] || { echo "FAIL: could not discover guest->host gateway"; exit 1; }
+U="http://$HOST_IP:$PORT"
+
 FAIL=0
 echo "== guest-setup (install HEAD + provision runsc + load images)"
-ssh_vm "mkdir -p /var/tmp/t3s-dl && cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh tier3s-guest-setup.sh commit.txt; do curl -fsS -o \$f http://10.0.2.2:$PORT/\$f || exit 97; done" \
+ssh_vm "mkdir -p /var/tmp/t3s-dl /var/tmp/t3s-bench && cd /var/tmp/t3s-dl && for f in tier3s-guest-lib.sh tier3s-guest-setup.sh commit.txt; do curl -fsS -o \$f $U/\$f || exit 97; done && curl -fsS -o /var/tmp/t3s-bench/syscost $U/syscost && chmod 755 /var/tmp/t3s-bench/syscost" \
     || { echo "FAIL: fetch"; exit 1; }
 # admin GUI session up first (the waypipe bridge needs compositor + qdshell)
 ssh_vm 'loginctl enable-linger admin >/dev/null 2>&1; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start qdwin-session.target'
 for i in $(seq 1 60); do ssh_vm 'test -S /run/user/1000/wayland-1' && break; sleep 1; done
 ssh_vm 'test -S /run/user/1000/wayland-1' || { echo "FAIL: wayland-1 never appeared — VM $VM preserved"; exit 1; }
-ssh_vm "cd /var/tmp/t3s-dl && bash tier3s-guest-setup.sh http://10.0.2.2:$PORT --expect-fresh --gui weston-terminal,foot" \
+ssh_vm "cd /var/tmp/t3s-dl && bash tier3s-guest-setup.sh $U --expect-fresh --gui weston-terminal,foot" \
     > "$L/setup.log" 2>&1
 if ! grep -q '\[t3s-setup\] [0-9]* passes, 0 failures' "$L/setup.log"; then
     echo "FAIL: guest-setup — see $L/setup.log; VM $VM preserved"; exit 1
 fi
-ssh_vm "cd /var/tmp/t3s-dl && curl -fsS -o bench-guest.sh http://10.0.2.2:$PORT/bench-guest.sh" || exit 1
+ssh_vm "cd /var/tmp/t3s-dl && curl -fsS -o bench-guest.sh $U/bench-guest.sh" || exit 1
 echo "   setup PASS ($(grep -o '\[t3s-setup\] [0-9]* passes' "$L/setup.log"))"
 
 for r in $(seq 1 "$RUNS"); do

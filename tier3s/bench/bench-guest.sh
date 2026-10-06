@@ -22,6 +22,7 @@ HS=benchhead         # headless silo (headless-smoke --hold)
 FS=benchflood        # foot silo for the waypipe bridge-load sample
 BW=/var/tmp/t3s-bench
 IMGW=localhost/qdistro/tier3s-weston-terminal:latest
+IMGHEAD=localhost/qdistro/tier3s-headless-smoke:latest
 mkdir -p "$BW"
 
 emit() { echo "MEAS $*"; }
@@ -37,20 +38,44 @@ cg_mem() { cat "/sys/fs/cgroup$1/memory.current" 2>/dev/null; }
 cg_usage_us() { sed -n 's/^usage_usec //p' "/sys/fs/cgroup$1/cpu.stat" 2>/dev/null; }
 proc_cg() { sed -n 's/^0:://p' "/proc/$1/cgroup" 2>/dev/null; }
 
-# The perl microbench (perl is in the workload images; no gcc on-VM and no
-# static libc on the host, so a C bench can't be staged). Every probe times
-# ITSELF with Time::HiRes, so podman-exec/attach latency never pollutes it.
-write_syscost() {
-    cat > "$BW/syscost.pl" <<'PL'
-use Time::HiRes qw(time);
-my ($s, $f);
-$s = time; syscall(39) for 1..100000;                       # getpid
-printf "getpid_ms_per_100k=%.3f\n", (time - $s) * 1000;
-$s = time; for (1..20000) { open $f, '<', '/dev/null' or die "open"; close $f }
-printf "openclose_ms_per_20k=%.3f\n", (time - $s) * 1000;
-$s = time; for (1..1000) { system('/bin/true') == 0 or die "forkexec" }
-printf "forkexec_ms_per_1k=%.3f\n", (time - $s) * 1000;
-PL
+# Direct-runsc bench path. podman+runsc cannot exec into a live container
+# (conmon exec is unsupported here) and a bare `podman run` dies at the gofer
+# filestore outside the launch path, so the runsc column uses runsc directly
+# on an OCI bundle built from an exported image rootfs. The pinned binary is
+# labeled qdistro_tier3s_exec_t — exec'ing it transitions into
+# qdistro_tier3s_t, which cannot read bench inputs. The bench copy is
+# relabeled bin_t so it stays unconfined; the in-sandbox syscall path the
+# measurement covers is identical (same pinned build, --platform=systrap).
+RPLAIN=/var/tmp/runsc-plain/runsc
+BUNDLE=$BW/bundle
+ROOTFS=$BW/rootfs
+RSHARE=$BW/share
+HSACCT=; HSUID=
+
+# t3s_spec <args-json> — regenerate the OCI spec
+t3s_spec() {
+    cat > "$BUNDLE/config.json" <<JSON
+{"ociVersion":"1.0.0",
+ "process":{"terminal":false,"user":{"uid":0,"gid":0},
+   "args":$1,"env":["PATH=/usr/local/bin:/usr/bin:/bin"],"cwd":"/"},
+ "root":{"path":"$ROOTFS","readonly":true},
+ "hostname":"t3sbench",
+ "mounts":[
+   {"destination":"/proc","type":"proc","source":"proc"},
+   {"destination":"/bench","type":"bind","source":"$RSHARE","options":["rbind","ro"]},
+   {"destination":"/w","type":"tmpfs","source":"tmpfs","options":["nosuid","nodev","size=768m"]}],
+ "linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]}}
+JSON
+}
+
+# t3s_run <id> <args-json> [extra runsc flags...]
+t3s_run() {
+    local id=$1 args=$2; shift 2
+    t3s_spec "$args"
+    runuser -u "$HSACCT" -- env -i PATH=/usr/bin:/bin \
+        "$RPLAIN" "--root=$RUNSC_BASE/$HSUID" --ignore-cgroups \
+        --platform=systrap --oci-seccomp --network=none --rootless "$@" \
+        run --bundle "$BUNDLE" "$id" 2>&1
 }
 
 # --- section: environment ---------------------------------------------------
@@ -75,6 +100,17 @@ mk_silo() {   # mk_silo <name> <workload>
 }
 provision() {
     step "provision silos (broker allow + images)"
+    # admin's user slice delegates only 'pids' by default: the tier-2
+    # baseline containers (rootless podman) would get no memory.current /
+    # cpu.stat. Enable the controllers for this bench pass (worker-only).
+    local d
+    for d in /sys/fs/cgroup/user.slice \
+             /sys/fs/cgroup/user.slice/user-1000.slice \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice \
+             /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice; do
+        echo "+cpu +memory" > "$d/cgroup.subtree_control" 2>/dev/null || :
+    done
     mk_silo "$GS" weston-terminal || fail "create $GS"
     mk_silo "$HS" headless-smoke || fail "create $HS"
     mk_silo "$FS" foot || fail "create $FS"
@@ -82,10 +118,56 @@ provision() {
               "allow:qdistro.tier3s.spawn:headless-smoke/$SMOKE_APP" \
               "allow:qdistro.tier3s.spawn:foot/foot"
     set_argv_json "$HS=[\"qdistro-tier3s-smoke\",\"--hold\",\"900\"]" \
-                  "$FS=[\"foot\",\"-e\",\"/bin/sh\",\"-c\",\"head -c 52428800 /dev/urandom | base64; sleep 30\"]"
+                  "$FS=[\"foot\",\"-e\",\"/bin/sh\",\"-c\",\"while true; do head -c 2097152 /dev/urandom | base64; done\"]"
     ensure_silo_image "$GS" weston-terminal || fail "ensure_silo_image $GS"
     ensure_silo_image "$HS" headless-smoke || fail "ensure_silo_image $HS"
     ensure_silo_image "$FS" foot || fail "ensure_silo_image $FS"
+    # --- direct-runsc bench scaffolding (see RPLAIN comment) ---------------
+    HSACCT=$(silo_acct "$HS"); HSUID=$(silo_uid "$HS")
+    [ -n "$HSACCT" ] && [ -n "$HSUID" ] || fail "no acct/uid for $HS"
+    if [ ! -x "$RPLAIN" ]; then
+        rm -rf /var/tmp/runsc-plain
+        mkdir -p /var/tmp/runsc-plain/gvisor-bin
+        cp /usr/libexec/qdistro/runsc/runsc /var/tmp/runsc-plain/runsc \
+            || fail "runsc copy"
+        cp /usr/libexec/qdistro/runsc/gvisor-bin/* /var/tmp/runsc-plain/gvisor-bin/ \
+            || fail "gvisor-bin copy"
+        chcon -R -t bin_t /var/tmp/runsc-plain 2>/dev/null \
+            || info "chcon bin_t failed (permissive worker still runs it)"
+        chmod -R a+rX /var/tmp/runsc-plain
+    fi
+    # the syscall probe binary is compiled on the host and staged into $BW
+    [ -x "$BW/syscost" ] || fail "syscost binary missing from $BW (run-bench.sh builds it)"
+    mkdir -p "$RSHARE" "$BUNDLE" && chmod 755 "$RSHARE" "$BUNDLE"
+    cp "$BW/syscost" "$RSHARE/syscost" && chmod 755 "$RSHARE/syscost"
+    # the gofer drops .gvisor.filestore.* next to what it serves — every dir
+    # it can reach must be writable by the uid runsc runs as (the silo)
+    chown "$HSACCT:$HSACCT" "$RSHARE"
+    if [ ! -d "$ROOTFS/usr" ]; then
+        # export runs AS the silo uid — it cannot write into root's $BW, so
+        # it lands in the silo rt dir; extraction runs as the silo too so the
+        # whole tree is silo-owned (root-owned trees break the filestore)
+        local rt="$RT_BASE/$HSUID"
+        rm -f "$rt/bench-rootfs.tar"
+        pm_s "$HS" rm -f benchrootfs > /dev/null 2>&1
+        pm_s "$HS" create --name benchrootfs "$IMGHEAD" > /dev/null \
+            || fail "rootfs create"
+        pm_s "$HS" export benchrootfs -o "$rt/bench-rootfs.tar" \
+            || fail "rootfs export"
+        pm_s "$HS" rm benchrootfs > /dev/null 2>&1
+        mkdir -p "$ROOTFS" && chown "$HSACCT:$HSACCT" "$ROOTFS" \
+            && runuser -u "$HSACCT" -- tar xf "$rt/bench-rootfs.tar" -C "$ROOTFS" \
+            || fail "rootfs extract"
+        rm -f "$rt/bench-rootfs.tar"
+    fi
+    chmod 755 "$BW" "$ROOTFS"
+}
+
+# stop an Active silo left over from a crashed earlier pass (idempotent)
+stop_quiet() {
+    case "$(silo_state "$1")" in
+        Active) sm StopSilo si "$1" 10 > /dev/null 2>&1; sleep 2 ;;
+    esac
 }
 
 # --- section: cold start to window ------------------------------------------
@@ -94,6 +176,7 @@ provision() {
 # StartSilo call-return time (Type=notify: returns once phase=running).
 sec_cold() {
     step "cold start to window (tier3s GUI launch)"
+    stop_quiet "$GS"
     local i cur t0 tc mus
     for i in 1 2 3; do
         cur=$(journal_cursor)
@@ -101,14 +184,14 @@ sec_cold() {
         sm StartSilo s "$GS" > /dev/null || { fail "cold: StartSilo $i"; continue; }
         tc=$(ts_us)
         mus=""
-        for _ in $(seq 1 480); do
-            mus=$(journalctl _SYSTEMD_USER_UNIT=qdshell.service -o json \
-                  --after-cursor="$cur" --no-pager 2>/dev/null | python3 -c '
-import json, sys
-for line in sys.stdin:
-    j = json.loads(line)
-    if "[tier3s] toplevel observed" in j.get("MESSAGE", ""):
-        print(j["__REALTIME_TIMESTAMP"]); break')
+        for _ in $(seq 1 960); do
+            # -o short-unix: the marker's journal line carries ANSI colours,
+            # which makes journald emit MESSAGE as a byte ARRAY in -o json
+            # (unmatched); the unix format keeps epoch + text readable.
+            mus=$(journalctl _SYSTEMD_USER_UNIT=qdshell.service -o short-unix \
+                  --after-cursor="$cur" --no-pager 2>/dev/null \
+                  | grep -a "toplevel observed" | head -1 \
+                  | awk '{printf "%d", $1 * 1e6}')
             [ -n "$mus" ] && break
             sleep 0.25
         done
@@ -139,6 +222,7 @@ for line in sys.stdin:
 # --- section: idle memory (+ idle CPU riding the open window) ---------------
 sec_mem() {
     step "idle memory"
+    stop_quiet "$GS"; stop_quiet "$HS"
     local tok scope_cg procs scope_cur pss bridge_pss htok hcg
     tok=$(up_gui_silo "$GS")
     [ -n "$tok" ] || { fail "mem: GUI launch failed"; return; }
@@ -169,48 +253,50 @@ sec_mem() {
     local t2pid t2cg
     t2pid=$(pm inspect --format '{{.State.Pid}}' t2mem 2>/dev/null)
     t2cg=$(proc_cg "$t2pid")
-    if [ -n "$t2cg" ]; then
+    local a0 a1 b0 b1 h0 h1
+    if [ -n "$t2cg" ] && [ -n "$(cg_mem "$t2cg")" ]; then
         emit t2_idle_memory_current_mb $(( $(cg_mem "$t2cg") / 1048576 )) MB
         emit t2_idle_pss_mb $(( $(sum_pss_kb $(tree_procs "/sys/fs/cgroup$t2cg")) / 1024 )) MB
     else
-        fail "mem: t2 cgroup unresolved"
+        fail "mem: t2 cgroup has no memory controller (delegation failed?)"
     fi
     # idle CPU over 60s with the window open (plan: repeat under
     # --systrap-disable-fast-path is not wired through the launch path; the
     # syscall section shows the per-syscall cost it would amortise)
-    local a0 a1 b0 b1 h0 h1
     a0=$(cg_usage_us "$scope_cg"); b0=$(cg_usage_us "$t2cg"); h0=$(cg_usage_us "$hcg")
     sleep 60
     a1=$(cg_usage_us "$scope_cg"); b1=$(cg_usage_us "$t2cg"); h1=$(cg_usage_us "$hcg")
-    emit t3s_gui_idle_cpu_pct "$(python3 -c "print(f'{($a1-$a0)/6e6*100:.2f}')")" pct_core
-    emit t3s_headless_idle_cpu_pct "$(python3 -c "print(f'{($h1-$h0)/6e6*100:.2f}')")" pct_core
-    emit t2_idle_cpu_pct "$(python3 -c "print(f'{($b1-$b0)/6e6*100:.2f}')")" pct_core
+    emit t3s_gui_idle_cpu_pct "$(python3 -c "print(f'{($a1-$a0)/6e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
+    emit t3s_headless_idle_cpu_pct "$(python3 -c "print(f'{($h1-$h0)/6e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
+    emit t2_idle_cpu_pct "$(python3 -c "print(f'{($b1-$b0)/6e6*100:.2f}')" 2>/dev/null || echo ERR)" pct_core
     pm rm -f t2mem > /dev/null 2>&1
     sm StopSilo si "$HS" 10 > /dev/null 2>&1
     teardown_one "$GS"
 }
 
 # --- section: syscall cost ---------------------------------------------------
-# Dedicated containers on each runtime (the syscall path is runsc vs runc,
-# not the launch machinery). Both run the same weston-terminal image for
-# perl; the t3s one runs it through /usr/libexec/qdistro/tier3s-runsc from
-# the GUI silo's own store (bench containers must not pollute silo state).
+# Same self-timed binary on all three paths: bare host, tier-2 runc
+# container (bind-mounted into admin's podman), and direct runsc on the
+# exported image rootfs (systrap, oci-seccomp, network=none — the sandbox
+# internals are the same ones the launch path gets through the wrapper).
 sec_sys() {
-    step "syscall cost (perl self-timed loops)"
-    write_syscost
-    emit sys_host "$(perl "$BW/syscost.pl" | tr '\n' ' ')" -
-    pm rm -f t2sys >/dev/null 2>&1
-    pm run -d --name t2sys --network none --entrypoint sleep \
-        -v "$BW:/bench:ro" "$IMGW" 600 > /dev/null
-    emit sys_t2_runc "$(pm exec t2sys perl /bench/syscost.pl 2>/dev/null | tr '\n' ' ')" -
-    pm rm -f t2sys > /dev/null 2>&1
-    pm_s "$GS" rm -f sbcsys >/dev/null 2>&1
-    pm_s "$GS" run -d --name sbcsys --network none --entrypoint sleep \
-        --runtime /usr/libexec/qdistro/tier3s-runsc \
-        --runtime-flag=host-uds=open \
-        -v "$BW:/bench:ro" "$IMGW" 600 > /dev/null
-    emit sys_t3s_systrap "$(pm_s "$GS" exec sbcsys perl /bench/syscost.pl 2>/dev/null | tr '\n' ' ')" -
-    pm_s "$GS" rm -f sbcsys > /dev/null 2>&1
+    step "syscall cost (syscost binary, self-timed)"
+    emit sys_host "$("$BW/syscost" 2>&1 | tr '\n' ' ')" -
+    # tier 2: the binary must be owned by admin so rootless podman's :z
+    # relabel can lsetxattr it (root-owned files fail under enforcing)
+    local ap=/home/admin/t3s-syscost
+    install -m 0755 -o admin -g admin "$BW/syscost" "$ap"
+    emit sys_t2_runc "$(pm run --rm --name t2sys --network none \
+        --security-opt label=disable \
+        -v "$ap:/bench/syscost:ro,z" --entrypoint /bench/syscost "$IMGW" 2>&1 \
+        | tr '\n' ' ')" -
+    rm -f "$ap"
+    emit sys_t3s_systrap "$(t3s_run t3sys '["/bench/syscost"]' | tr '\n' ' ')" -
+    # fast-path off shows the un-amortised trap cost (plan hypothesis)
+    emit sys_t3s_systrap_nofastpath \
+        "$(t3s_run t3sysnf '["/bench/syscost"]' --systrap-disable-fast-path | tr '\n' ' ')" -
+    t3s_run t3sys '["/bin/true"]' > /dev/null 2>&1 \
+        || info "direct runsc probe unhealthy — t3s columns above may be errors"
 }
 
 # --- section: file I/O -------------------------------------------------------
@@ -220,48 +306,76 @@ sec_io() {
     rm -rf "$tree"; mkdir -p "$tree"
     for i in $(seq 1 200); do dd if=/dev/zero bs=1M count=1 of="$tree/f$i" 2>/dev/null; done
     tar cf "$tar" -C "$tree" .
+    chmod 0644 "$tar"   # rootless podman binds it read-only into the container
     emit io_tree_mb $(( $(stat -c %s "$tar") / 1048576 )) MB
     mkdir -p /mnt/t3s-io && mount -t tmpfs -o size=1g none /mnt/t3s-io
     local t0 t1 i
     t0=$(ts_us); tar xf "$tar" -C /mnt/t3s-io; t1=$(ts_us)
     emit io_tar_host_ms $(( (t1 - t0) / 1000 )) ms
     umount /mnt/t3s-io
+    # tier 2: admin-owned bind-mount so :z can relabel; argv reads the file
+    # path (same read pattern the runsc gofer column exercises)
+    local at=/home/admin/t3s-bench.tar
+    install -m 0644 -o admin -g admin "$tar" "$at"
     for i in 1 2; do
         t0=$(ts_us)
         pm run --rm --name t2io --network none --entrypoint tar \
-            --tmpfs /bench:size=1g -v "$tar:/bench.tar:ro" \
-            "$IMGW" xf /bench.tar -C /bench > /dev/null
+            --security-opt label=disable \
+            --tmpfs /bench:size=1g -v "$at:/bench.tar:ro,z" \
+            "$IMGW" xf /bench.tar -C /bench > /dev/null 2>&1
         t1=$(ts_us)
         emit io_tar_t2_ms_$i $(( (t1 - t0) / 1000 )) ms
     done
+    rm -f "$at"
+    # tier 3s: the tar is a bind-mounted host file → reads go through the
+    # gofer (gofs); extraction writes the sandbox's tmpfs. Second variant
+    # turns directfs off where the pin supports it.
+    cp "$tar" "$RSHARE/bench.tar" && chmod 644 "$RSHARE/bench.tar"
     for i in 1 2; do
         t0=$(ts_us)
-        pm_s "$GS" run --rm --name sbcio$i --network none --entrypoint tar \
-            --runtime /usr/libexec/qdistro/tier3s-runsc \
-            --tmpfs /bench:size=1g -v "$tar:/bench.tar:ro" \
-            "$IMGW" xf /bench.tar -C /bench > /dev/null 2>&1
+        if ! out=$(t3s_run t3io$i '["/bin/tar","xf","/bench/bench.tar","-C","/w"]' 2>&1); then
+            t1=$(ts_us); info "t3s io run $i failed: $(echo "$out" | tail -2)"; continue
+        fi
         t1=$(ts_us)
-        pm_s "$GS" rm -f sbcio$i > /dev/null 2>&1
         emit io_tar_t3s_ms_$i $(( (t1 - t0) / 1000 )) ms
     done
-    rm -rf "$tree" "$tar"
+    # directfs toggles the gofer bypass for bind mounts — probe support by
+    # running it, emit only on success
+    t0=$(ts_us)
+    if out=$(t3s_run t3iodf '["/bin/tar","xf","/bench/bench.tar","-C","/w"]' --directfs=false 2>&1); then
+        t1=$(ts_us)
+        emit io_tar_t3s_directfs_off_ms $(( (t1 - t0) / 1000 )) ms
+    else
+        info "runsc --directfs unsupported or refused: $(echo "$out" | tail -1)"
+    fi
+    rm -f "$RSHARE/bench.tar"; rm -rf "$tree" "$tar"
 }
 
 # --- section: bridge memory under load ---------------------------------------
 sec_bridge() {
     step "waypipe bridge PSS under shm load (foot flood)"
+    stop_quiet "$FS"
     local tok bp base=0 peak=0 v i
     tok=$(up_gui_silo "$FS")
     [ -n "$tok" ] || { fail "bridge: launch"; return; }
     bp=$(rec "$tok" bridge_client_pid)
     base=$(pss_kb "$bp")
+    # rchar corroborates the flood crossed the bridge: the client's reads
+    # on the waypipe socket are the (compressed) frame stream the in-sandbox
+    # server pumps. Pixel bulk travels via the client's mmap'd shm rebuild,
+    # not socket writes, so wchar stays small by design. PSS should stay
+    # flat — waypipe streams damage, it does not buffer the file.
+    local r0 r1
+    r0=$(sed -n 's/^rchar: //p' "/proc/$bp/io" 2>/dev/null)
     for i in $(seq 1 30); do
         v=$(pss_kb "$bp" 2>/dev/null) || break
         [ -n "$v" ] && [ "$v" -gt "$peak" ] && peak=$v
         sleep 0.4
     done
+    r1=$(sed -n 's/^rchar: //p' "/proc/$bp/io" 2>/dev/null)
     emit bridge_client_pss_start_mb $(( ${base:-0} / 1024 )) MB
     emit bridge_client_pss_peak_mb $(( peak / 1024 )) MB
+    emit bridge_rchar_delta_kb $(( (${r1:-0} - ${r0:-0}) / 1024 )) KB
     teardown_one "$FS"
 }
 
