@@ -854,7 +854,7 @@ class TestTableTabKeyNavigation:
         broker = _make_stub_broker()
         broker.list_cache.return_value = [{
             "id": 1, "caller_uid": 2000, "action": "test.action",
-            "scope": "forever_exe", "match_value": "/usr/bin/python3.13",
+            "scope": "forever_exe", "match_value": "/usr/bin/python3.14",
             "expires_at": 0,
         }]
         tab = CacheTab(broker)

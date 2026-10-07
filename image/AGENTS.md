@@ -148,6 +148,7 @@ its presence.
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
 | `lib/profile-proof.sh` | reads `/etc/qdistro/release` back OUT of the finished raw and fails the build when the baked `PROFILE` is not the `QDISTRO_PROFILE` that was requested. `build-in-vm.sh` runs it beside the release proof. The release proof checks the artifact's name, checksum, integrity and size — everything except *which product it is*; profile is not in the filename, so this is the only place a mis-profiled image can be caught. |
+| `lib/sshd-wait.sh` | `wait_for_ssh`/`start_sshd`/`ensure_sshd`: start sshd over the guest agent and wait for SSH auth inside one absolute deadline (every agent step bounded by the time left; diagnostics separately bounded by `QDV_DIAG_TIMEOUT`). Sourced by `verify.sh`. |
 | `lib/select-artifact.sh` | resolve the published artifact (explicit path, 64-hex digest, or unique `bundle/*.raw.xz`); `sha256sum -c` + `xz -t` + decompress to `$BUILD_DIR/published/from-xz-<digest>.raw`; reuse requires a full byte comparison against fresh decompression, with unique temporary files and atomic publication. Sourced by `verify.sh` and the image gate. Never `find \| head -1`. |
 | `verify.sh` | boots the resolved disk rootlessly (`qemu:///session`, 64 GiB qcow2 overlay so first-boot repart grows the 28 GiB raw), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Default also: UUID identity, EFI/BOOT, persist marker + btrfs snapshot across a reboot, greeter login (locker session-up). Snapper is packaged but has no root config. `--stick` adds USB / second-disk / hub / Secure Boot / nested-KVM / first-boot power-off / `xzcat \| dd`. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` is a path or the xz digest. |
 | `hardware-run.md` | template for the maintainer's real-stick run (Secure Boot, WPA2/WPA3, silos). Fill in and copy the filled note to `logs/`. |
@@ -263,6 +264,13 @@ the host. Green means:
 3. **Boot-verify.** `verify.sh` boots the raw and prints `pass: N / M`.
    The first image to reach that summary was run 28 (Phase D); before it,
    every run died at the sshd-start baseline on the vendor RPC filter.
+   The start and the SSH wait live in `lib/sshd-wait.sh`: one absolute
+   deadline per wait (600 s first boot, 180 s after the persistence
+   reboot) bounds every agent step, the start is retried while
+   `sshd.service` is not active, and SSH that never authenticates is
+   fatal in both phases. Each refused start leaves systemctl's message,
+   unit state and journal in `logs/verify-*/journal/sshd-start-<tag>.log`
+   (hermetic test: `tests/integration/vm/image-sshd-wait.bats`).
    Known benign: `RDSEED32 is broken. Disabling the corresponding CPUID
    bit` trips the priority-0/1 journal check under kvm.
 

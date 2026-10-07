@@ -133,12 +133,12 @@ qdwin_screenshot "$ART/43-s3-afterapprove.png"
 ### S4 — once-scope does NOT persist a cache row
 
 ```bash
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT COUNT(*), GROUP_CONCAT(match_kind || '/' || scope, ', ')
-  FROM approvals WHERE action LIKE 'qsu.exec:%';
-SQL_EOF
+SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite approvals "SELECT COUNT(*), GROUP_CONCAT(match_kind || '/' || scope, ', ') FROM approvals WHERE action LIKE 'qsu.exec:%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 ```
 
 **Assert**: count is `0` and the GROUP_CONCAT is empty/NULL.

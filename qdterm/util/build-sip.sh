@@ -62,7 +62,7 @@ if ! grep -q "$QT_INCLUDE" project.py; then
     sed -i "s|self.libraries.append('qtermwidget6')|self.libraries.append('qtermwidget6')\n        self.include_dirs.append('$QT_INCLUDE')|" project.py
 fi
 
-sip-wheel --qmake "$QMAKE"
+python3 -m sipbuild.tools.wheel --qmake "$QMAKE"
 
 # sip-wheel emits {project-name}-*.whl. The pyproject "name" has varied between
 # vendor versions (QTermWidget / qtermwidget), so match case-insensitively.

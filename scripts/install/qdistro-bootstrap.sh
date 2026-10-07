@@ -666,9 +666,15 @@ install_packages_tumbleweed() {
     zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" "${extra[@]}" \
         || die "package install failed (zypper -n install); cannot continue"
 
+    # python3 → 3.14: the snapshot still ships the unversioned symlink from
+    # python313-base while the dep set is python314-* (see lib/qdistro-python.sh).
+    # shellcheck source=lib/qdistro-python.sh
+    . "$SCRIPT_DIR/lib/qdistro-python.sh"
+    ensure_python3_314 || die "cannot pin /usr/bin/python3 to python3.14"
+
     # qdbrowser WebEngine — best-effort; pdf/video degrades without it.
     # Try both known package names and warn (not die) on failure.
-    local webengine_pkgs=( python313-qt6-webengine python313-PyQt6-WebEngine )
+    local webengine_pkgs=( python314-qt6-webengine python314-PyQt6-WebEngine )
     local found_webengine=0
     for wpkg in "${webengine_pkgs[@]}"; do
         if zypper -n install --no-recommends "$wpkg" >/dev/null 2>&1; then
@@ -1802,6 +1808,10 @@ pip_install_apps() {
         log "skipping pip install of apps (--skip-build)"
         return 0
     fi
+    # The pinned interpreter must carry its own pip — a python313-pip from
+    # before the python3 -> 3.14 flip cannot serve python3.14.
+    python3 -m pip --version >/dev/null 2>&1 \
+        || die "python3 ($($(command -v python3) --version 2>&1)) has no pip module; install python314-pip first"
     if is_dev; then
         log "installing Python apps via pip --prefix=/usr (dev profile)..."
     else

@@ -70,6 +70,9 @@ vitest tags), and the per-suite relabel action items.
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
 
+A default developer `qci full` now needs a built image (`image/build-in-vm.sh`):
+with no artifact, or one built from another tree, the image gate exits 20
+(`build`) unless `QCI_SKIP_IMAGE=1` is set.
 For a developer full run, `QCI_SKIP_IMAGE=1 ci/bin/qci full` omits the image
 gate and records an explicit skip row. The report Summary names the selected
 published artifact and its `.sha256` sidecar digest (or `none`), without
@@ -301,10 +304,15 @@ runner takes. The supported runner is Codex with `gpt-5.6-luna`, which reads the
 prompt on stdin:
 
 ```bash
-QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check - < {prompt}' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna -c model_reasoning_effort=medium --skip-git-repo-check - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
+
+`-c model_reasoning_effort=medium` pins the effort the visual bar was
+validated at; without it the host's codex default applies, and on some hosts
+that is `none` (see doc/dev.md). The manifest records it as
+`qci_agent_reasoning_effort`.
 
 `--yolo` is required because the agent must run `vm-exec`/`virsh` and write its
 `status.txt` without interactive approval. Do NOT add `--ephemeral`: the gate

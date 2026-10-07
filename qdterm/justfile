@@ -124,7 +124,7 @@ icon:
 
 # Install QTerminator system-wide (Linux)
 install:
-    pip install --user .
+    python3 -m pip install --user .
     install -Dm644 doc/qterminator.1 ~/.local/share/man/man1/qterminator.1
     install -Dm644 doc/qterminator-config.5 ~/.local/share/man/man5/qterminator-config.5
     install -Dm644 qterminator.desktop ~/.local/share/applications/qterminator.desktop
@@ -138,7 +138,7 @@ install:
 
 # Uninstall the user installation
 uninstall:
-    pip uninstall -y qterminator
+    python3 -m pip uninstall -y qterminator
     rm -f ~/.local/share/man/man1/qterminator.1
     rm -f ~/.local/share/man/man5/qterminator-config.5
     rm -f ~/.local/share/applications/qterminator.desktop

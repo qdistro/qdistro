@@ -177,12 +177,16 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  /org/qdistro/App1 \
  org.qdistro.App1.GetDocument'
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT decision, scope FROM audit
- WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;
-SQL_EOF
+# Latest send-to audit row. In a single guest driver, copy the qci_sqlite
+# line VERBATIM (see AGENTS.md "Audit / approvals SQL"); never rebuild it
+# with printf, which reads the `%'` in the LIKE pattern as a format directive
+# (full-20261006T224555Z-2478214: the query never ran, ERROR).
+AUDIT_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "SELECT decision, scope FROM audit WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_B64 | base64 -d | bash"
 ```
 
 **Assert**:

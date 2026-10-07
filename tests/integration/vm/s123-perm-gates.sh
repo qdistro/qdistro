@@ -93,7 +93,7 @@ pg38() {
     cat >"$RULES_DIR/38a-narrow.yaml" <<'YAML'
 - name: narrow-py
   decision: allow
-  match: {uid: 2000, action: scenario38.narrow, exe: /usr/bin/python3.13}
+  match: {uid: 2000, action: scenario38.narrow, exe: /usr/bin/python3.14}
   rationale: narrow rule — all selectors set
 YAML
     cat >"$RULES_DIR/38b-action-only.yaml" <<'YAML'
@@ -116,7 +116,7 @@ import json, sys
 rows = json.load(sys.stdin)
 want = [
   dict(name="narrow-py", decision="allow", action="scenario38.narrow",
-       exe="/usr/bin/python3.13", uid=2000, f="38a-narrow.yaml",
+       exe="/usr/bin/python3.14", uid=2000, f="38a-narrow.yaml",
        rationale="narrow rule — all selectors set"),
   dict(name="action-only", decision="deny", action="scenario38.action-only",
        exe="", uid=-1, f="38b-action-only.yaml",

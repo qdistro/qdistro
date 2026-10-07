@@ -40,8 +40,8 @@ install -d -m 0755 "$DEST_LIB" "$DEST_BIN" "$DEST_USER_SYSD" "$DEST_ETC"
 # (PAM auth fails closed with a clear message) but pretty much every
 # real flow needs PAM.
 if ! python3 -c "import pam" 2>/dev/null; then
-    echo "[install-polkit-agent] zypper installing python313-python-pam..."
-    zypper -n install python313-python-pam >/dev/null 2>&1 \
+    echo "[install-polkit-agent] zypper installing python314-python-pam..."
+    zypper -n install python314-python-pam >/dev/null 2>&1 \
         || echo "[install-polkit-agent] WARN: python-pam install failed (PAM auth degrades)" >&2
 fi
 

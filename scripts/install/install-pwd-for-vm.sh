@@ -97,8 +97,8 @@ done
 # may pre-date the install-deps.sh entry; idempotent no-op when
 # already installed.
 if ! python3 -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM" 2>/dev/null; then
-    echo "[install-pwd] zypper installing python313-cryptography..."
-    zypper -n install python313-cryptography >/dev/null 2>&1 \
+    echo "[install-pwd] zypper installing python314-cryptography..."
+    zypper -n install python314-cryptography >/dev/null 2>&1 \
         || echo "[install-pwd] WARN: cryptography install failed; daemon will fail at boot" >&2
 fi
 

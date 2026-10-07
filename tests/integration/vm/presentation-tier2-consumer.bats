@@ -30,8 +30,8 @@ PIP_BLOCK = (
 NEED = (
     "COPY qdfileman /usr/src/qdfileman",
     "COPY presentation /usr/src/presentation",
-    "python313-PyQt6",
-    "python313-tomli-w",
+    "python314-PyQt6",
+    "python314-tomli-w",
     "qt6-wayland",
     "google-noto-sans-fonts",
     PIP_BLOCK,
@@ -42,7 +42,7 @@ for needle in NEED:
     if needle not in text:
         raise SystemExit(f"Containerfile.qfileman missing {needle!r}")
 
-FORBID = ("WebEngine", "qdbrowser", "qterminator", "qnotebook", "python313-PyQt6-WebEngine")
+FORBID = ("WebEngine", "qdbrowser", "qterminator", "qnotebook", "python314-PyQt6-WebEngine")
 for needle in FORBID:
     if needle in text:
         raise SystemExit(f"Containerfile.qfileman contains forbidden {needle!r}")
@@ -99,11 +99,11 @@ expect_fail(text, "COPY qdfileman /usr/src/qdfileman\n", "COPY qdfileman")
 expect_fail(text, "COPY presentation /usr/src/presentation\n", "COPY presentation")
 expect_fail(text, "        /usr/src/presentation \\\n", "pip operand presentation")
 expect_fail(text, "        /usr/src/qdfileman \\\n", "pip operand qdfileman")
-expect_fail(text, "python313-PyQt6 \\\n", "python313-PyQt6")
+expect_fail(text, "python314-PyQt6 \\\n", "python314-PyQt6")
 expect_fail(text, 'CMD ["qfileman"]\n', "CMD qfileman")
 expect_fail(text, "import qdistro_presentation, qfileman", "import smoke")
 
-webengine = text.replace("python313-PyQt6 \\\n", "python313-PyQt6 \\\n        python313-PyQt6-WebEngine \\\n")
+webengine = text.replace("python314-PyQt6 \\\n", "python314-PyQt6 \\\n        python314-PyQt6-WebEngine \\\n")
 try:
     check(webengine, make, seccomp_path)
 except SystemExit as exc:

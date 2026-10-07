@@ -167,7 +167,7 @@ Pre-conditions for app-deps runs:
   `gedit`, `evince`, `inkscape` all installed (one-shot
   `zypper -n install` from the matrix run on 2026-05-05; bake into a
   fresh image when the matrix is stable).
-- For the Tk/FLTK/Swing scenarios: `python313-tk`, `libfltk1_3`,
+- For the Tk/FLTK/Swing scenarios: `python314-tk`, `libfltk1_3`,
   `fltk-devel`, `java-25-openjdk-devel`, and an X11 bitmap font package
   (`xorg-x11-fonts` / `xorg-x11-fonts-core`, needed or Tk fails with
   `failed to allocate font`) installed; demo source files live under

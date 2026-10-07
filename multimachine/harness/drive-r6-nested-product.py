@@ -182,8 +182,11 @@ def stage_product(backend: QciVMBackend, vm: str, role: str,
     # rebuild that binding as part of the same exact-source closure; copying
     # QML alone would leave either live shell bound at v28 and make the new
     # signal handler a QML load error.
+    backend._vmexec(vm, "mkdir -p /root/qdistro-src/qdshell/qml-plugin/tests")
     for relative in (
         "qml-plugin/qdwin-binding.cpp", "qml-plugin/qdwin-binding.h",
+        "qml-plugin/broker-call.cpp", "qml-plugin/broker-call.h",
+        "qml-plugin/tests/tst_broker_call.cpp", "qml-plugin/meson.build",
     ):
         backend._push_large(
             vm, qdshell / relative,

@@ -80,7 +80,7 @@ when a receiver advertises a higher limit.
 ## Installation
 
 ```bash
-pip install -e .
+python3 -m pip install -e .
 ```
 
 ## Usage
@@ -119,7 +119,7 @@ A `justfile` wraps the common tasks:
 Install the test extras once, then use the `justfile`:
 
 ```bash
-pip install -e ".[test]"
+python3 -m pip install -e ".[test]"
 
 just test    # QT_QPA_PLATFORM=offscreen pytest tests/ (verbose)
 just lint    # report-only ruff check over the package and tests

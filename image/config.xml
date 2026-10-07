@@ -234,23 +234,23 @@
          carry it from before the split, which is why the gap only shows on
          the shipped image. -->
     <package name="pkexec"/>
-    <package name="python313"/>
-    <package name="python313-pip"/>
-    <package name="python313-pywayland"/>
-    <package name="python313-cffi"/>
-    <package name="python313-PyQt6"/>
+    <package name="python314"/>
+    <package name="python314-pip"/>
+    <package name="python314-pywayland"/>
+    <package name="python314-cffi"/>
+    <package name="python314-PyQt6"/>
     <package name="qt6-wayland"/>
-    <package name="python313-setuptools"/>
-    <package name="python313-python-pam"/>
-    <package name="python313-dbus-python"/>
-    <package name="python313-dbus_next"/>
-    <package name="python313-gobject"/>
-    <package name="python313-gobject-Gdk"/>
-    <package name="python313-PyYAML"/>
-    <package name="python313-cryptography"/>
+    <package name="python314-setuptools"/>
+    <package name="python314-python-pam"/>
+    <package name="python314-dbus-python"/>
+    <package name="python314-dbus_next"/>
+    <package name="python314-gobject"/>
+    <package name="python314-gobject-Gdk"/>
+    <package name="python314-PyYAML"/>
+    <package name="python314-cryptography"/>
     <!-- admin TUI (qdistro-admin-tui, installed by the admin-app chain step) -->
-    <package name="python313-textual"/>
-    <package name="python313-rich"/>
+    <package name="python314-textual"/>
+    <package name="python314-rich"/>
     <package name="Mesa"/>
     <package name="Mesa-libEGL1"/>
     <package name="Mesa-libGL1"/>
@@ -345,11 +345,11 @@
     <package name="tesseract-ocr"/>
     <package name="rage-encryption"/>
     <package name="rsync"/>
-    <package name="python313-jeepney"/>
-    <package name="python313-six"/>
+    <package name="python314-jeepney"/>
+    <package name="python314-six"/>
     <!-- qdbrowser's VM bats (fresh-vm-bootstrap.sh §1c); also zyppered there
          so tester-profile bases work until a ci base is re-imported. -->
-    <package name="python313-PyQt6-WebEngine"/>
+    <package name="python314-PyQt6-WebEngine"/>
     <package name="Mesa-demo-egl"/>
     <package name="wireguard-tools"/>
     <package name="nftables"/>

@@ -743,6 +743,17 @@ Run this scenario against VM \`$vm\` and write a PASS/FAIL/ERROR report.
 Scenario file:
 \`$scenario\`
 
+- Environment: \`QCI_SCENARIO_FILE=$scenario\` (already set for this process).
+  Read the scenario as \`"\$QCI_SCENARIO_FILE"\` and its directory as
+  \`"\$(dirname "\$QCI_SCENARIO_FILE")"\`; never retype this path. A retyped
+  path that drops one character of a worktree name points at a directory that
+  does not exist (permissions-gui/04, full-20261006T175536Z-3524705: the driver
+  read \`.worktrees/verify-3791ee5a/...\` for \`verify-3791ee5a8\` and recorded
+  ERROR "scenario file missing" without running anything).
+- If a read of the scenario file or its AGENTS.md fails, that is YOUR path
+  error, not a missing scenario: re-read it through \`"\$QCI_SCENARIO_FILE"\`.
+  The harness checked that the file exists before launching you.
+
 ## REQUIRED artifact directory (copy this path EXACTLY — do not invent, shorten, or drop path segments)
 
 \`$artifact_dir\`
@@ -1192,8 +1203,8 @@ Rules:
     returned a valid response or a failure code proving it reached that layer.
 
 Start by reading:
-- \`$scenario\`
-- \`$(dirname "$scenario")/AGENTS.md\` if present, otherwise the closest parent AGENTS.md.
+- \`"\$QCI_SCENARIO_FILE"\` (= \`$scenario\`)
+- \`"\$(dirname "\$QCI_SCENARIO_FILE")/AGENTS.md"\` (= \`$(dirname "$scenario")/AGENTS.md\`) if present, otherwise the closest parent AGENTS.md.
 EOF
     # Optional verbose-debug appendix (QCI_GUI_DEBUG=1). Triage aid: have the
     # agent capture the exact command/stderr at the point of any failure and a
@@ -3639,6 +3650,7 @@ gui_run_scenario() {
     # full-20261001T124446Z: luna ran `qci gui` on its own VM, hit the run
     # lock, then waited 8 min on its own codex pid as a "parent agent").
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+        QCI_SCENARIO_FILE="$scenario" \
         QCI_GUI_SCENARIO_AGENT="$slug" \
         QCI_GUI_ARTIFACT_DIR="$art_alias" QCI_GUI_CAPTURE_LOG="$caplog" \
         QCI_GUI_VIEW_STATE="$viewstate" QCI_VM_GUI_SESSION="$vm_gui_session" \
@@ -3811,6 +3823,7 @@ gui_run_scenario() {
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
+                    QCI_SCENARIO_FILE="$scenario" \
                     QCI_GUI_SCENARIO_AGENT="$slug" \
                     QCI_GUI_ARTIFACT_DIR="$art_aliasN" QCI_GUI_CAPTURE_LOG="$caplogN" \
                     QCI_GUI_VIEW_STATE="$viewstateN" \
@@ -4178,8 +4191,22 @@ gui_agent_model_from_cmd() {
     printf '%s' "$model"
 }
 
+# The codex reasoning effort a template pins with `-c model_reasoning_effort=X`
+# (also `--config`, `=`/space forms). Empty when the template pins none: the
+# effective effort is then whatever the host's codex config or the account
+# default says, and that differs per host. full-20261006T175536Z-3524705 ran
+# every scenario at `reasoning effort: none` (the lab1 codex default) where the
+# validated runs had `medium`; the driver then retyped the scenario path with
+# one character missing and recorded ERROR without running permissions-gui/04.
+gui_agent_effort_from_cmd() {
+    local cmd=$1
+    printf '%s' "$cmd" \
+        | grep -oE -- '(^|[[:space:]])(-c|--config)[= ]+["'"'"']?model_reasoning_effort=["'"'"']?[A-Za-z]+' \
+        | head -1 | sed -E 's/.*model_reasoning_effort=["'"'"']?//' || true
+}
+
 record_agent_identity() {
-    local cmd=${QCI_AGENT_CMD:-} model="" ver=""
+    local cmd=${QCI_AGENT_CMD:-} model="" ver="" effort=""
     [ -n "$cmd" ] || return 0
     # Scrub tabs/newlines so the value stays a single manifest line.
     kv qci_agent_cmd "$(printf '%s' "$cmd" | tr '\t\n' '  ')"
@@ -4195,6 +4222,15 @@ record_agent_identity() {
     # rerun with a different model indistinguishable from a CI row in exactly
     # the comparison this key exists to support.
     kv qci_agent_model "${model:-unknown}"
+    # Codex only: the pinned reasoning effort, or `unpinned` (host-dependent;
+    # the header of each attempt's agent log shows what it actually ran with).
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])codex([[:space:]]|$)'; then
+        effort=$(gui_agent_effort_from_cmd "$cmd") || effort=""
+        kv qci_agent_reasoning_effort "${effort:-unpinned}"
+        if [ -z "$effort" ]; then
+            printf '[qci] %s\n' "gui: QCI_AGENT_CMD pins no codex reasoning effort; the host default applies (pin -c model_reasoning_effort=medium, see doc/dev.md)" >&2
+        fi
+    fi
     # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then

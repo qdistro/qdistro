@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=registry.opensuse.org/opensuse/tumbleweed:latest
+FROM ${BASE_IMAGE}
+
+# Tooling for build-custom-iso.sh: squashfs repack + xorriso ISO surgery.
+RUN zypper -n --gpg-auto-import-keys refresh \
+ && zypper -n install -y --no-recommends squashfs xorriso \
+ && zypper clean -a
+
+# Build once:
+#   podman build -f packaging/agama/Containerfile.iso-tool -t localhost/qdistro-iso-tool:latest packaging/agama

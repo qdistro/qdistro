@@ -78,11 +78,12 @@ if pending:
 PYEOF
 )
 $VMEXEC "$VM" "echo $PENDING_B64 | base64 -d | runuser -u admin -- python3 -"
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'app.send-to:%';
-SQL_EOF
+SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite approvals "DELETE FROM approvals WHERE action LIKE 'app.send-to:%';" 2>/dev/null || true
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
+$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 # The shipped launcher, first-paint mode: returns only after the window has
 # painted and the compositor holds the frame. A nonzero exit is a Setup ERROR.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && qdwin_start_admin_app'
@@ -220,17 +221,18 @@ printf '%s\n' "$GETDOC" > "$ART/12-s4-getdocument.log"
 NOTEPAD_PID_AFTER=$($VMEXEC "$VM" \
  'systemctl --machine=work2@.host --user show qstub-notepad.service -p MainPID --value')
 
-SQL_AUDIT_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT caller_uid, action, decision, scope, source, approver_uid
- FROM audit ORDER BY id DESC LIMIT 1;
-SQL_EOF
+SQL_AUDIT_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "SELECT caller_uid, action, decision, scope, source, approver_uid FROM audit ORDER BY id DESC LIMIT 1;"
+EOF
 )
-SQL_COUNT_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%';
-SQL_EOF
+SQL_COUNT_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite approvals "SELECT count(*) FROM approvals WHERE action LIKE 'app.send-to:%';"
+EOF
 )
-AUDIT_ROW=$($VMEXEC "$VM" "echo $SQL_AUDIT_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite")
-APPROVAL_COUNT=$($VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite")
+AUDIT_ROW=$($VMEXEC "$VM" "echo $SQL_AUDIT_B64 | base64 -d | bash")
+APPROVAL_COUNT=$($VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | bash")
 printf '%s\n' "$AUDIT_ROW" > "$ART/12-s4-audit-row.txt"
 printf '%s\n' "$APPROVAL_COUNT" > "$ART/12-s4-approval-count.txt"
 printf '%s\n' "$NOTEPAD_PID_BEFORE" "$NOTEPAD_PID_AFTER" > "$ART/12-s4-notepad-pid.txt"

@@ -56,7 +56,7 @@ mkdir -p \$CACHE/$rel && curl -fsS $U/gvisor.tar.zstd -o \$CACHE/$rel/gvisor.tar
 is cache-tarball-sha512 \"\$(sha512sum < \$CACHE/$rel/gvisor.tar.zstd | cut -d' ' -f1)\" \"\$(sed -n 's/^tarball_sha512=//p' tier3s/RUNSC_RELEASE)\"
 is profile \"\$(cat /etc/qdistro/profile)\" QDISTRO_PROFILE=dev
 uname -r; podman --version; getenforce
-zypper -n in --no-recommends python313-pytest strace > /var/tmp/t3s-zypper.log 2>&1; expect_rc zypper-pytest-strace 0 \$?; tail -3 /var/tmp/t3s-zypper.log
+zypper -n in --no-recommends python314-pytest strace > /var/tmp/t3s-zypper.log 2>&1; expect_rc zypper-pytest-strace 0 \$?; tail -3 /var/tmp/t3s-zypper.log
 python3 -m pytest --version; strace -V | head -1
 echo \"prior install before reset: \$(ls -d /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc 2>/dev/null | tr '\\n' ' ')\"
 rm -rf /usr/libexec/qdistro/runsc /usr/libexec/qdistro/tier3s-runsc /etc/qdistro/runsc-release /run/qdistro-runsc /usr/libexec/t3s-elsewhere /var/tmp/t3s-*

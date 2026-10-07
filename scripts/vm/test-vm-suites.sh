@@ -59,13 +59,13 @@ QCI_PASSWORD=Pa_ssw0rd45
 # cloud test base installs for tests (install-deps.sh) that the image omits,
 # including what the backup probes need for their own btrfs loopback
 # filesystems and the RDP tools of the nested probes.
-TEST_PKGS=(python313-pytest python313-pytest-qt python313-pytest-timeout
-    python313-hypothesis python313-numpy python313-Pillow python313-textual
-    python313-rich python313-jeepney python313-mistune python313-tomli-w
-    python313-tomli python313-pyte python313-pyenchant python313-matplotlib
-    python313-networkx python313-qrcode python313-setproctitle
-    python313-Pygments python313-mcp python313-dbus_next
-    python313-pytest-asyncio bzip2 myspell-en_US
+TEST_PKGS=(python314-pytest python314-pytest-qt python314-pytest-timeout
+    python314-hypothesis python314-numpy python314-Pillow python314-textual
+    python314-rich python314-jeepney python314-mistune python314-tomli-w
+    python314-tomli python314-pyte python314-pyenchant python314-matplotlib
+    python314-networkx python314-qrcode python314-setproctitle
+    python314-Pygments python314-mcp python314-dbus_next
+    python314-pytest-asyncio bzip2 myspell-en_US
     bats jq tesseract-ocr ydotool Mesa-demo-egl rsync git-core
     rage-encryption btrfsprogs freerdp freerdp-server)
 

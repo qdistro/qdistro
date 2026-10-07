@@ -92,12 +92,27 @@ affected_gates_for_path() {
         scripts/install/gen-source-manifest.sh|\
         scripts/install/verify-source-manifest.sh)
             printf 'release-manifest\n' ;;
+        # .gitignore changes what git (and therefore image/build.sh's shipped
+        # tree and the source manifest) sees — release-manifest catches an
+        # accidental untrack, lint the rest.
+        .gitignore)
+            printf 'lint\nrelease-manifest\n' ;;
         # The bootstrap installer + its profile lib -> the host-only release
         # bootstrap-profile gate (and release-manifest, since the manifest
         # parser/verify-before-build wiring lives in the bootstrap).
         scripts/install/qdistro-bootstrap.sh|\
         scripts/install/lib/qdistro-profile.sh)
             printf 'bootstrap-release-profile\nrelease-manifest\n' ;;
+        # RPM/Agama packaging subtree. No existing gate exercises it (a
+        # dedicated packaging gate is future work); lint covers its shell,
+        # spec and Containerfile inputs.
+        packaging/*)
+            printf 'lint\n' ;;
+        # Install-time session provisioner shipped by the qdistro-session
+        # RPM. Only the Agama post path / manual runs invoke it; the VM
+        # lanes do not.
+        scripts/install/qdistro-session-provision.sh)
+            printf 'lint\n' ;;
         # Bootstrap release-contract bats -> the host-only bootstrap-profile gate.
         tests/integration/vm/bootstrap-hardening.bats|\
         tests/integration/vm/source-manifest-signature.bats|\

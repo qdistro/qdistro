@@ -570,6 +570,32 @@ broker_pending_count() {
     fi
     printf '%s\n' "$n"
 }
+# qci_sqlite <audit|approvals|/abs/path.sqlite> <sql>
+# Run ONE SQL text against a broker database and print sqlite3's output. The
+# SQL travels as a single argv word straight to sqlite3: it is never a printf
+# format, never echoed, never re-expanded. Scenarios write it single-quoted
+# in the guest, e.g.
+#   qci_sqlite audit "SELECT decision, scope FROM audit WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;"
+# and the guest driver copies that line VERBATIM. Rewriting it as
+# `printf "...LIKE 'x:%'..." | sqlite3` made `%'` a printf directive, so the
+# query never ran and a correct product run went ERROR
+# (permissions-gui/14, full-20261006T224555Z-2478214). The exit status is
+# sqlite3's; a missing argument or unknown alias returns 2.
+qci_sqlite() {
+    local db=${1-} sql=${2-}
+    case $db in
+        audit) db=/var/lib/qdistro/audit/audit.sqlite ;;
+        approvals) db=/var/lib/qdistro/approvals/approvals.sqlite ;;
+        /*) ;;
+        *) printf 'ERROR: qci_sqlite: unknown database %s (audit|approvals|/abs/path)\n' "$db" >&2
+           return 2 ;;
+    esac
+    if [ "$#" -ne 2 ] || [ -z "$sql" ]; then
+        printf 'ERROR: qci_sqlite: usage: qci_sqlite <audit|approvals|/abs/path> <sql>\n' >&2
+        return 2
+    fi
+    sqlite3 -batch "$db" "$sql"
+}
 # await_x11_window_title <user> <title-ere> [timeout] [interval]
 # Wait until an XWayland window owned by <user>'s display :0 carries a title
 # that matches <title-ere> as a WHOLE line (grep -Ex). Use it where the app

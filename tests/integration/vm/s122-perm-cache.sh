@@ -27,11 +27,11 @@ from qdistro_admin_cache import ApprovalCache
 from qdistro_admin_audit import AuditLog
 a1, a2, a3 = sys.argv[1:4]
 c = ApprovalCache("/var/lib/qdistro/approvals/approvals.sqlite")
-assert c.store(2000, a1, "/usr/bin/python3.13", "1h", True, 1000)
+assert c.store(2000, a1, "/usr/bin/python3.14", "1h", True, 1000)
 assert c.store(2000, a2, "/usr/bin/curl", "24h", True, 1000)
 assert c.store(3000, a3, "", "forever", True, 1000)
 a = AuditLog("/var/lib/qdistro/audit/audit.sqlite")
-a.log(caller_uid=2000, caller_pid=111, caller_exe="/usr/bin/python3.13",
+a.log(caller_uid=2000, caller_pid=111, caller_exe="/usr/bin/python3.14",
       action=a1, decision=True, scope="1h", source="prompt", approver_uid=1000)
 a.log(caller_uid=3000, caller_pid=222, caller_exe="/usr/bin/sudo",
       action=a3, decision=False, scope=None, source="prompt", approver_uid=1000)
@@ -99,7 +99,7 @@ sys.path.insert(0, "/usr/libexec/qdistro")
 from qdistro_admin_cache import ApprovalCache
 u1, u2, t = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 c = ApprovalCache("/var/lib/qdistro/approvals/approvals.sqlite")
-assert c.store(u1, f"act.a.{t}", "/usr/bin/python3.13", "forever_exe", True, 1000)
+assert c.store(u1, f"act.a.{t}", "/usr/bin/python3.14", "forever_exe", True, 1000)
 assert c.store(u1, f"act.b.{t}", "/usr/bin/curl", "24h", True, 1000)
 assert c.store(u1, f"act.c.{t}", "", "forever", True, 1000)
 assert c.store(u2, f"act.x.{t}", "/usr/bin/vim", "forever_exe", True, 1000)

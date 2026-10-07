@@ -235,12 +235,12 @@ cat "${QCI_SCENARIO_TMPDIR:-/tmp}/13-doc.out"
 $VMEXEC "$VM" 'cat /tmp/13-relay.out'
 
 # Audit row exists with decision=0.
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT caller_uid, action, decision, scope, source FROM audit
- WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;
-SQL_EOF
+SQL_B64=$(base64 -w0 <<'EOF'
+source /tmp/qci-gui-waiters.sh || exit 2
+qci_sqlite audit "SELECT caller_uid, action, decision, scope, source FROM audit WHERE action LIKE 'app.send-to:%' ORDER BY id DESC LIMIT 1;"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | bash"
 
 # Product-FAIL vs harness-ERROR, decided mechanically. Three facts, all
 # read in the guest, on the guest's own clock:

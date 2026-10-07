@@ -1,0 +1,63 @@
+#!/bin/bash
+# qdistro post-install convergence: the RPM set is already installed by
+# Agama; this wires the session/product state that can't live in %post.
+# Rendered by render-profile.sh — placeholder values come from
+# packaging/env.sh.
+set -euxo pipefail
+
+# second baked user (uid 1001, matches image/config.xml)
+id user 2>/dev/null || useradd -m -u 1001 -s /bin/bash user
+
+# full session provisioning: _greeter, seat groups, linger, weston.ini,
+# greetd/seatd/graphical.target enablement, compositor-VT hardening.
+# Runs its --offline path since /run/systemd/system is absent in the chroot.
+/usr/libexec/qdistro/qdistro-session-provision
+
+# provenance manifest (image/lib/release-stamp.sh equivalent)
+mkdir -p /etc/qdistro
+{
+  echo 'VERSION=@QDISTRO_VERSION@'
+  echo "PROFILE=dev"
+  echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "ARTIFACT=agama-inst.auto"
+  echo "REPO_MODE=floating"
+  if [ -n '@QDISTRO_SNAPSHOT_LABEL@' ]; then
+    echo 'SNAPSHOT=@QDISTRO_SNAPSHOT_LABEL@'
+  fi
+  echo 'SOURCE qdistro @QDISTRO_SOURCE_SHA@ @QDISTRO_SOURCE_STATE@'
+} > /etc/qdistro/release
+
+# Agama strips the agama-N installation repos from the target (zypp_server
+# remove_installation_only_repos), so persist the product repositories the
+# same way image/lib/snapshot-repos.sh does for the kiwi image. Target repo
+# URLs come from QDISTRO_TARGET_*_URL — floating upstream by default so an
+# install mirror does not silently become the system's update source.
+# Quoted heredocs: configured URLs may legitimately contain '$releasever' or
+# other zypper variables — they must reach the .repo files literally, not be
+# expanded by this script's shell.
+cat > /etc/zypp/repos.d/qdistro-tw-oss.repo <<'EOF'
+[qdistro-tw-oss]
+name=qdistro Tumbleweed OSS
+enabled=1
+autorefresh=0
+baseurl=@QDISTRO_TARGET_OSS_URL@
+gpgcheck=1
+EOF
+cat > /etc/zypp/repos.d/qdistro-tw-nonoss.repo <<'EOF'
+[qdistro-tw-nonoss]
+name=qdistro Tumbleweed NonOSS
+enabled=1
+autorefresh=0
+baseurl=@QDISTRO_TARGET_NONOSS_URL@
+gpgcheck=1
+EOF
+cat > /etc/zypp/repos.d/qdistro.repo <<'EOF'
+[qdistro]
+name=qdistro RPM repository
+enabled=1
+autorefresh=1
+baseurl=@QDISTRO_TARGET_RPM_REPO_URL@
+gpgcheck=1
+EOF
+
+echo 'qdistro post-install: done'

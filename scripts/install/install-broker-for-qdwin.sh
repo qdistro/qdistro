@@ -15,8 +15,8 @@
 # untars the umbrella repo to /root/qdistro-src/ and invokes
 # this script with that path's broker/ subdir.
 #
-# Pre-reqs already baked into baseweed: python313-dbus-python,
-# python313-gobject (Gdk/GLib), user `admin` (uid 1000).
+# Pre-reqs already baked into baseweed: python314-dbus-python,
+# python314-gobject (Gdk/GLib), user `admin` (uid 1000).
 set -eu
 
 # Offline-install contract (todo/iso/14 Phase B): file drops always run;

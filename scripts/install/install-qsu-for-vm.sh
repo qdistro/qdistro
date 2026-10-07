@@ -5,7 +5,7 @@
 # and enables the socket-activated service so end-to-end qsu tests
 # can drive the real /run/qdistro-root-exec/sock path.
 #
-# Pre-reqs: python313 + dbus-python (already baked into baseweed).
+# Pre-reqs: python314 + dbus-python (already baked into baseweed).
 #
 # This sits next to install-broker-for-qdwin.sh — the broker MUST be
 # running before the root-exec service can issue RequestPermissionAs,

@@ -40,8 +40,8 @@ sleep 1
 
 # Ensure PAM python + fprintd are present. Failing install → the
 # scenario warns but doesn't hard-fail so bats output is readable.
-rpm -q python313-python-pam >/dev/null 2>&1 || \
-    zypper -n install python313-python-pam >/dev/null 2>&1 || true
+rpm -q python314-python-pam >/dev/null 2>&1 || \
+    zypper -n install python314-python-pam >/dev/null 2>&1 || true
 rpm -q fprintd >/dev/null 2>&1 || \
     zypper -n install fprintd >/dev/null 2>&1 || true
 

@@ -95,7 +95,7 @@ Vision backend:
 
 ```bash
 # Make sure pytest is installed and codex is on PATH.
-pip install --user pytest
+python3 -m pip install --user pytest
 
 # Run the suite (set the env flag — the suite is opt-in so it does
 # not fire in the default qmltest CI workflow that uses
