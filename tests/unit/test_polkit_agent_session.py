@@ -62,8 +62,10 @@ class _Logind:
         self.owner_error: Exception | None = None
         self.signals: list[str] = []
         # Unique-name owner of polkitd's well-known name. A restart mints a
-        # new one; the name is never owned by two different daemons.
+        # new one; the name is never owned by two different daemons. None
+        # means polkitd is absent but activatable (it is dbus-activated).
         self.polkit_owner = ":1.40"
+        self.polkit_activatable = True
 
     # -- shared-connection surface (logind queries, signal watches) --
     # dbus.Interface(obj, iface) wraps whatever get_object returns; return
@@ -82,6 +84,21 @@ class _Logind:
         raise dbus.DBusException(
             "name has no owner",
             name="org.freedesktop.DBus.Error.NameHasNoOwner")
+
+    def activate_name_owner(self, name):
+        """StartServiceByName: an absent polkitd is activatable, so this
+        mints it an owner rather than reporting none."""
+        if self.owner_error is not None:
+            raise self.owner_error
+        if str(name) == agent_mod.POLKIT_BUS:
+            if self.polkit_owner is None:
+                if not self.polkit_activatable:
+                    raise dbus.DBusException(
+                        "cannot activate",
+                        name="org.freedesktop.DBus.Error.ServiceUnknown")
+                self.polkit_owner = ":1.activated"
+            return self.polkit_owner
+        return self.get_name_owner(name)
 
     def get_is_connected(self):
         return True
@@ -129,6 +146,9 @@ class _Conn:
 
     def get_name_owner(self, name):
         return self.world.get_name_owner(name)
+
+    def activate_name_owner(self, name):
+        return self.world.activate_name_owner(name)
 
     def get_is_connected(self):
         return not self.closed
@@ -519,18 +539,32 @@ class TestRegistrar:
         assert reg.session_id == "6"
         assert _held(fake) == ["6"]
 
-    def test_absent_polkitd_retries_on_the_same_connection(self, fake):
-        """NameHasNoOwner proves nothing was registered, so the private
-        connection survives and the next reconcile registers on it."""
+    def test_absent_polkitd_is_activated_then_registered(self, fake):
+        """polkitd is dbus-activated, so a reconcile that finds it absent
+        must start it itself (astra r156: get_name_owner alone would wait
+        forever for another client to do it)."""
         _login(fake, "6")
         fake.polkit_owner = None
+        reg = _registrar(fake)
+        reg.reconcile()
+        assert reg.session_id == "6"
+        assert _held(fake) == ["6"]
+        assert reg._polkit_owner == ":1.activated"
+
+    def test_unactivatable_polkitd_retries_on_the_same_connection(self, fake):
+        """Activation failing with ServiceUnknown proves nothing was
+        registered, so the private connection survives and the next
+        reconcile registers on it."""
+        _login(fake, "6")
+        fake.polkit_owner = None
+        fake.polkit_activatable = False
         reg = _registrar(fake)
         reg.reconcile()
         assert reg.session_id is None
         assert _held(fake) == []
         conn = reg._conn
         assert conn is not None and not conn.closed
-        fake.polkit_owner = ":1.40"
+        fake.polkit_activatable = True
         reg.reconcile()
         assert reg.session_id == "6"
         assert reg._conn is conn

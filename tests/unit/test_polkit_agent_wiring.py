@@ -62,6 +62,9 @@ class _FakeBus:
     def get_name_owner(self, name):
         return ":1.fake"
 
+    def activate_name_owner(self, name):
+        return ":1.fake"
+
     def get_is_connected(self):
         return not self.closed
 
@@ -321,6 +324,9 @@ class _BrokerWorld:
         self.generation += 1
 
     def get_name_owner(self, name):
+        return self.owner
+
+    def activate_name_owner(self, name):
         return self.owner
 
     def get_object(self, bus_name, path):

@@ -423,7 +423,9 @@ class QdistroPolkitAgent(dbus.service.Object):
             # -- and consume an unrelated request's decision (astra
             # r153). A unique-name proxy dies with its owner: the wait
             # fails with a D-Bus error and the auth denies, fail-closed.
-            owner = str(self._sysbus.get_name_owner(QDISTRO_BROKER_BUS))
+            # activate_name_owner also starts an activatable broker, as
+            # the previous get_object-on-well-known-name did.
+            owner = str(self._sysbus.activate_name_owner(QDISTRO_BROKER_BUS))
             obj = self._sysbus.get_object(owner, QDISTRO_BROKER_OBJ)
             self._broker = dbus.Interface(obj, QDISTRO_BROKER_BUS)
         return self._broker
@@ -730,7 +732,12 @@ def _register(bus, agent_path: str) -> tuple[str | None, str | None]:
     sid = _session_id(bus)
     if sid is None:
         return None, None
-    owner = str(bus.get_name_owner(POLKIT_BUS))
+    # activate_name_owner, not get_name_owner: polkitd is dbus-activated,
+    # and a bare owner lookup on an absent daemon would leave
+    # registration waiting for some other client to start it (astra
+    # r156). The call both activates and returns the unique owner to
+    # pin the registration to.
+    owner = str(bus.activate_name_owner(POLKIT_BUS))
     authority = dbus.Interface(
         bus.get_object(owner, POLKIT_OBJ), POLKIT_IFACE_AUTHORITY)
     authority.RegisterAuthenticationAgent(
