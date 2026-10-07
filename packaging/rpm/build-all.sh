@@ -9,6 +9,10 @@ builder=$QDISTRO_RPM_BUILDER
 
 bash "$here/make-sources.sh" "$(cd "$here/../.." && pwd)"
 
+# Podman refuses to bind-mount directories that do not exist — create the
+# output trees up front (both are gitignored).
+mkdir -p "$here/repo" "$here/rpmbuild/SOURCES"
+
 # qdwin first (qdistro-protocols.pc), then the vendored libweston tree and
 # the shell that build against it; leaf packages last, metapackage at the end.
 order=(qdwin qdistro-libweston-vendored qdistro-daemons qdshell

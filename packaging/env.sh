@@ -17,10 +17,12 @@
 : "${QDISTRO_TW_NONOSS_URL:=https://download.opensuse.org/tumbleweed/repo/non-oss/}"
 
 # --- repositories written into the INSTALLED system -----------------------
-# These land in /etc/zypp/repos.d/ on the target. Default: same as install.
-# Point at a local mirror for air-gapped/mirror-backed deployments.
-: "${QDISTRO_TARGET_OSS_URL:=$QDISTRO_TW_OSS_URL}"
-: "${QDISTRO_TARGET_NONOSS_URL:=$QDISTRO_TW_NONOSS_URL}"
+# These land in /etc/zypp/repos.d/ on the target and default to upstream
+# Tumbleweed INDEPENDENTLY of the install-time URLs — a temporary install
+# mirror or snapshot must not silently become the system's update source.
+# Set these explicitly to persist a mirror onto installed systems.
+: "${QDISTRO_TARGET_OSS_URL:=https://download.opensuse.org/tumbleweed/repo/oss/}"
+: "${QDISTRO_TARGET_NONOSS_URL:=https://download.opensuse.org/tumbleweed/repo/non-oss/}"
 
 # --- qdistro RPM repository -----------------------------------------------
 # URL the installer pulls qdistro-* packages from, and the repo file left on

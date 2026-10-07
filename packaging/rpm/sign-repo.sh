@@ -4,6 +4,8 @@
 # Uses the keyring in keys/gnupg/ (gitignored — see keys/README.md).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=../env.sh
+. "$here/../env.sh"
 repo=$here/repo
 gnupg=$here/keys/gnupg
 
@@ -16,14 +18,23 @@ command -v rpmsign >/dev/null || { echo "needs rpmsign (rpm-sign)" >&2; exit 1; 
 
 for rpm in "$repo"/*.rpm; do
     [ -e "$rpm" ] || { echo "no RPMs in $repo — run build-all.sh first" >&2; exit 1; }
-    if ! rpm -K --nosignature "$rpm" >/dev/null 2>&1 || \
-       ! rpmsign --checksign "$rpm" 2>/dev/null | grep -qi 'signatures OK'; then
+    if ! rpmsign --checksign "$rpm" 2>/dev/null | grep -qi 'signatures OK'; then
         GNUPGHOME=$gnupg rpmsign --addsign --key-id="$keyid" "$rpm" >/dev/null
         echo "signed $(basename "$rpm")"
     else
         echo "already signed: $(basename "$rpm")"
     fi
 done
+
+# Signing rewrote the RPM payloads — repomd checksums are stale now.
+# Regenerate metadata BEFORE signing repomd, or zypper/Agama reject the
+# packages on checksum mismatch.
+if command -v createrepo_c >/dev/null; then
+    createrepo_c --quiet "$repo"
+else
+    podman run --rm -v "$repo":/repo:rw,Z "$QDISTRO_RPM_BUILDER" \
+        createrepo_c --quiet /repo
+fi
 
 # repomd signature (detached) + public key next to the metadata
 GNUPGHOME=$gnupg gpg --batch -a --export "$keyid" > "$repo/repodata/repomd.xml.key"
