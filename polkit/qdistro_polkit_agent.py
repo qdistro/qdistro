@@ -30,7 +30,10 @@ from uid 0 only, and this agent runs as ADMIN_UID — so it never calls
 polkitd back directly. The privileged broker delivers the response:
 for ``broker``-method requests it does so when the filed request is
 allowed, and for ``pam``/``fprint`` verdicts the agent relays through
-``RespondPolkitAuth``. The response identity is picked from the list
+``RespondPolkitAuth``. Every BeginAuthentication first binds the cookie
+to this connection's unique bus name via ``AnnouncePolkitAuth`` — the
+cookie is the bearer secret, and the broker answers/cancels it only for
+its declaring sender. The response identity is picked from the list
 polkitd itself offered in BeginAuthentication. On failure the agent
 just completes the BeginAuthentication call (polkit treats no
 response as deny).
@@ -584,9 +587,27 @@ class QdistroPolkitAgent(dbus.service.Object):
         det = _sanitize_polkit_details(details)
         det["polkit_action_id"] = _scrub_value(action)
         det["polkit_message"]   = _scrub_value(msg)
-        det["polkit_cookie"]    = _scrub_value(str(cookie))
+        # The cookie is NOT filed in details: GetPending renders details
+        # to every trusted admin-control peer, and the cookie is the
+        # bearer secret that owns the auth session — leaking it would
+        # let any holder drive RespondPolkitAuth (sol r164).
 
         def _drive() -> bool:
+            # Bind the cookie to this connection's unique bus name so
+            # the broker can tell a RespondPolkitAuth/CancelPolkitAuth
+            # from the real agent apart from a process that merely
+            # learned the cookie. The pam/fprint path never files a
+            # request, so this announce is its only binding.
+            if not self._is_cancelled(str(cookie)):
+                try:
+                    self._broker_iface().AnnouncePolkitAuth(
+                        str(cookie), timeout=_REQUEST_TIMEOUT_S)
+                except Exception as e:  # noqa: BLE001
+                    syslog.syslog(
+                        syslog.LOG_WARNING,
+                        f"could not announce polkit cookie to the "
+                        f"broker: {e}; a local verdict's relay will be "
+                        f"refused")
             try:
                 allowed, reason = self._authenticate(
                     action, msg, det, method, str(cookie), identities)

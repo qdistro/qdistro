@@ -59,6 +59,7 @@ class _StubBroker(Broker):
         self._next_id = 1
         self._pending: dict = {}
         self._cancelled_polkit_cookies: dict = {}
+        self._announced_polkit: dict = {}
         self.cache = ApprovalCache(cache_db)
         self.audit = AuditLog(audit_db)
         self.rules = RulesEngine(rules_dir)
@@ -255,6 +256,7 @@ class TestRequestPolkitAuth:
 class TestRespondPolkitAuth:
 
     def test_relays_the_verdict_to_polkitd(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9")
         broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
         assert broker.polkit_responded == [
             (ADMIN_UID, "cookie-9", ("unix-user", {"uid": dbus.UInt32(0)}))]
@@ -265,9 +267,79 @@ class TestRespondPolkitAuth:
             broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT])
 
     def test_empty_identities_fail_closed(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9")
         with pytest.raises(dbus.DBusException):
             broker.RespondPolkitAuth("cookie-9", [])
         assert broker.polkit_responded == []
+
+    def test_an_unannounced_cookie_cannot_be_responded(self, broker):
+        """A cookie is a bearer secret: a peer that never announced or
+        filed it cannot drive the relay (sol r164 — the secret may have
+        been learned, but the unique bus name can't be forged)."""
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("stray-cookie", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+    def test_respond_is_bound_to_the_announcing_sender(self, broker):
+        """The same unique bus name must announce and respond — a
+        second connection knowing the cookie is refused."""
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                     sender=":1.10")
+        assert broker.polkit_responded == []
+        broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                 sender=":1.9")
+        assert len(broker.polkit_responded) == 1
+
+    def test_respond_releases_a_pending_filed_request(self, broker):
+        """A local verdict on a filed cookie resolves the queued
+        request too — the prompt is moot and waiters release."""
+        rid = _file_polkit(broker, "cookie-x", [IDENT_ROOT])
+        replies = []
+        broker._pending[rid].waiters.append(
+            (replies.append, lambda e: None))
+        broker.RespondPolkitAuth("cookie-x", [IDENT_ROOT])
+        assert broker._pending[rid].decision is True
+        assert replies == [True]
+        assert (rid, "allow") in broker.decided_signals
+        assert len(broker.polkit_responded) == 1
+
+    def test_respond_for_a_denied_request_is_refused(self, broker):
+        rid = _file_polkit(broker, "cookie-y", [IDENT_ROOT])
+        broker.DecideRequest(rid, "deny", "once")
+        broker.RespondPolkitAuth("cookie-y", [IDENT_ROOT])
+        assert broker.polkit_responded == []
+
+
+class TestAnnouncePolkitAuth:
+
+    def test_a_second_sender_cannot_steal_the_binding(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        with pytest.raises(dbus.DBusException):
+            broker.AnnouncePolkitAuth("cookie-9", sender=":1.10")
+        # The original binding still stands.
+        broker.RespondPolkitAuth("cookie-9", [IDENT_ROOT],
+                                 sender=":1.9")
+        assert len(broker.polkit_responded) == 1
+
+    def test_reannounce_by_the_same_sender_is_a_no_op(self, broker):
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+        broker.AnnouncePolkitAuth("cookie-9", sender=":1.9")
+
+    def test_announcing_an_own_cancelled_cookie_keeps_it_dead(
+            self, broker, capsys):
+        """Cancel-before-announce from the same sender: the cookie must
+        stay dead — a respond for it is refused."""
+        broker.CancelPolkitAuth("dead", sender=":1.9")
+        broker.AnnouncePolkitAuth("dead", sender=":1.9")
+        broker.RespondPolkitAuth("dead", [IDENT_ROOT], sender=":1.9")
+        assert broker.polkit_responded == []
+        assert "already cancelled" in capsys.readouterr().out
+
+    def test_an_empty_cookie_is_a_no_op(self, broker):
+        broker.AnnouncePolkitAuth("")
+        assert broker._announced_polkit == {}
 
 
 class TestCancelPolkitAuth:
@@ -325,10 +397,31 @@ class TestCancelPolkitAuth:
             self, broker, capsys):
         """PAM/fprint can finish just as polkitd cancels — the relay
         must not answer a dead cookie."""
+        broker.AnnouncePolkitAuth("dead")
         broker.CancelPolkitAuth("dead")
         broker.RespondPolkitAuth("dead", [IDENT_ROOT])
         assert broker.polkit_responded == []
         assert "already cancelled" in capsys.readouterr().out
+
+    def test_a_foreign_cancel_does_not_kill_the_filing(self, broker):
+        """A cancel from a different unique name must not pre-deny the
+        cookie owner's filing — only the owner's own cancel does."""
+        broker.CancelPolkitAuth("ghost", sender=":1.10")
+        rid = _file_polkit(broker, "ghost", [IDENT_ROOT])
+        assert broker._pending[rid].decision is None
+        # ...while the owner's own cancel still wins the race.
+        broker.CancelPolkitAuth("ghost2", sender=":1.9")
+        rid2 = broker.RequestPolkitAuth(
+            "qdistro.test.action", {}, "ghost2", [IDENT_ROOT],
+            sender=":1.9")
+        assert broker._pending[rid2].decision is False
+
+    def test_a_foreign_cancel_leaves_the_pending_request_alive(
+            self, broker):
+        rid = _file_polkit(broker, "cookie-abc", [IDENT_ROOT])
+        broker.CancelPolkitAuth("cookie-abc", sender=":1.10")
+        assert broker._pending[rid].decision is None
+        assert (rid, "deny") not in broker.decided_signals
 
     def test_an_empty_cookie_never_matches_ordinary_requests(
             self, broker):

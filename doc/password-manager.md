@@ -256,7 +256,9 @@ polkitd directly. The privileged broker (uid 0) delivers the response:
   so denial logging and audit correlation stay unchanged.
 - **pam / fprint methods** — the verdict is verified locally by the
   agent, then relayed: `RespondPolkitAuth(cookie, identities)` asks the
-  broker to make the uid-0 call.
+  broker to make the uid-0 call. Since these paths never file a
+  request, the agent first binds the cookie to its connection via
+  `AnnouncePolkitAuth(cookie)`.
 - **cancellation** — polkitd's `CancelAuthentication` forwards to
   `CancelPolkitAuth(cookie)`, which decides the matching queued request
   deny so a dead prompt does not linger in the admin queue and the
@@ -264,10 +266,12 @@ polkitd directly. The privileged broker (uid 0) delivers the response:
 
 Two invariants make this safe:
 
-- **The cookie is the correlation secret.** Only polkitd's registered
-  agent ever sees it; a response naming a cookie polkitd is not waiting
-  on is a silent no-op, so a stale, cancelled, or attacker-guessed
-  cookie grants nothing.
+- **The cookie is the correlation secret, and it stays secret.** Only
+  polkitd's registered agent ever sees it — the agent does not file it
+  in request details (GetPending renders those to admin-control peers),
+  and it is never logged. A response naming a cookie polkitd is not
+  waiting on is a silent no-op, so a stale, cancelled, or
+  attacker-guessed cookie grants nothing.
 - **The response identity comes from polkit's own list.** On this image
   `/usr/share/polkit-1/rules.d/50-default.rules` sets
   `polkit._suse_admin_groups = []`, so `identities` is
@@ -277,9 +281,16 @@ Two invariants make this safe:
   `unix-user` entry for the requesting uid, else the first `unix-user`,
   else the first entry) rather than asserting one.
 
-All three broker methods are restricted to the admin uid server-side
-and denied to non-admin callers in the `org.qdistro.AdminBroker1`
-system-bus policy.
+The four broker methods are bound server-side to the session agent —
+the caller must be python running the agent's installed script inside
+its `qdistro-polkit-agent.service` unit cgroup — and denied to
+non-admin callers in the `org.qdistro.AdminBroker1` system-bus policy.
+Because exe, argv, and cgroup membership are all forgeable by a
+sufficiently motivated same-uid process, the relay additionally binds
+each cookie to its declaring connection's **unique D-Bus name**:
+`RespondPolkitAuth` and `CancelPolkitAuth` act only for the sender that
+announced or filed the cookie, and a cancel recorded for one sender
+cannot pre-deny another's filing.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-
