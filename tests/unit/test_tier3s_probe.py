@@ -594,3 +594,74 @@ def test_a_uid_printed_before_a_stall_is_not_a_lookup(tmp_path):
     # and as_user's site never adopts the printed prefix either
     assert "FAIL nss:" in r.stdout, r.stdout
     assert "(id -u rc=124; " in r.stdout, r.stdout
+
+
+# --- NSS retry semantics (nss_q) --------------------------------------------
+# A lookup killed at the bound (rc 124) is retried, at most NSS_TRIES times:
+# on a saturated VM disk a cold page-in of the lookup's binary/modules/passwd
+# file outlasted one 5 s bound (full-20261006T175536Z-3524705). A missing
+# entry is final at once, and a wedged provider is paid for once per probe.
+
+def counting_getent(b, other, stall_first, rc_after=0):
+    """getent that wedges on its first `stall_first` passwd calls for
+    `other`, then answers with rc_after (0: the real entry). Each call is
+    counted in b/getent.calls."""
+    calls = b / "getent.calls"
+    line = (f"{other.pw_name}:x:{other.pw_uid}:{other.pw_gid}"
+            f"::{other.pw_dir or '/nonexistent'}:{other.pw_shell or '/sbin/nologin'}")
+    (b / "getent").write_text(
+        "#!/bin/sh\n"
+        f"echo x >> '{calls}'\n"
+        f"n=$(wc -l < '{calls}')\n"
+        f"if [ \"$n\" -le {stall_first} ]; then sleep 60; fi\n"
+        + (f"printf '%s\\n' '{line}'\n" if rc_after == 0 else "")
+        + f"exit {rc_after}\n")
+    (b / "getent").chmod(0o755)
+    return calls
+
+
+def test_a_lookup_killed_once_at_the_bound_is_retried(tmp_path):
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "nssbin"; b.mkdir()
+    calls = counting_getent(b, other, stall_first=1)
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert "FAIL nss:" not in r.stdout, r.stdout
+    assert len(calls.read_text().splitlines()) == 2, "one kill, one retry"
+
+
+def test_a_missing_entry_is_final_without_retry(tmp_path):
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "nssbin"; b.mkdir()
+    calls = counting_getent(b, other, stall_first=0, rc_after=2)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    assert time.time() - t0 < 30, "a missing entry was waited on"
+    assert "FAIL nss:" in r.stdout and "(getent passwd rc=2; 1 tries; " in r.stdout, r.stdout
+    assert len(calls.read_text().splitlines()) == 1, "a missing entry was retried"
+
+
+def test_a_wedged_provider_costs_one_retry_budget_per_probe(tmp_path):
+    """Every attempt wedges: the lookup fails after NSS_TRIES (3) bounds, and
+    every later NSS lookup in the same probe fails at once instead of paying
+    the budget again (the spawn waits on the probe under its token lock)."""
+    inst = Install(tmp_path)
+    other = next(p for p in pwd.getpwall() if p.pw_name != ME)
+    b = tmp_path / "idbin"; b.mkdir()
+    calls = b / "id.calls"
+    (b / "id").write_text(
+        "#!/bin/sh\nfor a; do last=\"$a\"; done\n"
+        "case \"${last:-}\" in -*|\"\") exec /usr/bin/id \"$@\" ;; esac\n"
+        f"echo x >> '{calls}'\nsleep 600\n")
+    (b / "id").chmod(0o755)
+    t0 = time.time()
+    r = run(inst.root, user=other.pw_name, pin=inst.pin,
+            path_prepend=f"{b}:{inst.bin}", timeout=60)
+    took = time.time() - t0
+    assert len(calls.read_text().splitlines()) == 3, calls.read_text()
+    assert took < 30, f"a wedged provider was waited on per lookup site ({took:.0f} s)"
+    assert "FAIL user: the NSS lookup for" in r.stdout and "timed out (3 x 5 s)" in r.stdout, r.stdout
+    assert "FAIL nss:" in r.stdout and "(id -u rc=124; 0 tries; " in r.stdout, r.stdout

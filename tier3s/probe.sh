@@ -107,6 +107,40 @@ pass() { printf 'PASS %s: %s\n' "$1" "$2"; }
 info() { printf 'INFO %s: %s\n' "$1" "$2"; }
 fail() { printf 'FAIL %s: %s\n' "$1" "$2"; [ -n "$FIRST_FAIL" ] || FIRST_FAIL="$1 ($2)"; }
 
+# --- bounded NSS lookups for the probed user ---------------------------------
+# nss_q <cmd...>: run one NSS lookup under `timeout NSS_BOUND`; NSS_OUT is its
+# stdout, NSS_RC its status, NSS_N the attempts made. The status is the verdict
+# (fable A r3 P3-2, sol r5 P3-4): what a killed lookup printed is never used.
+#
+# Only a kill AT THE BOUND (rc 124) is retried, at most NSS_TRIES attempts.
+# The bound counts wall time, and that includes the time the lookup spends
+# blocked paging in its binary, libc's NSS modules and /etc/passwd: on a dev
+# VM whose disk is saturated (provision-runsc just wrote the runsc bundle,
+# and in qci a dozen sibling VMs boot and load OCI archives) one such page-in
+# was observed to outlast 5 s while the same lookup had answered in ms
+# seconds before (full-20261006T175536Z-3524705, phase7-tier3s-hostile-stream).
+# The killed attempt's page-ins still complete, so a retry runs warm. A
+# genuinely broken NSS still fails: a missing entry (id 1, getent 2) is final
+# on the first attempt, and a wedged provider fails after NSS_TRIES bounds —
+# after which every later lookup in this probe fails at once (NSS_WEDGED), so
+# a wedged provider costs the caller (spawn-tier3s.sh, under its token lock)
+# one NSS_TRIES x NSS_BOUND budget, not one per lookup site (such a skipped
+# lookup reports rc 124 with 0 tries).
+NSS_BOUND=5; NSS_TRIES=3; NSS_WEDGED=0
+NSS_OUT=""; NSS_RC=0; NSS_N=0
+nss_q() {
+    NSS_OUT=""; NSS_N=0
+    if [ "$NSS_WEDGED" = 1 ]; then NSS_RC=124; return 124; fi
+    while :; do
+        NSS_N=$((NSS_N + 1))
+        NSS_OUT="$(timeout "$NSS_BOUND" "$@" 2>/dev/null)"; NSS_RC=$?
+        [ "$NSS_RC" -eq 124 ] && [ "$NSS_N" -lt "$NSS_TRIES" ] || break
+    done
+    if [ "$NSS_RC" -eq 124 ]; then NSS_WEDGED=1; NSS_OUT=""; fi
+    [ "$NSS_RC" -eq 0 ] || NSS_OUT=""
+    return "$NSS_RC"
+}
+
 # --- profile gate (refuse, do not screen) ---------------------------------
 profile=""
 [ -r "$PROFILE_FILE" ] && profile="$(sed -n 's/^QDISTRO_PROFILE=//p' "$PROFILE_FILE" | tail -1)"
@@ -135,9 +169,11 @@ if [ "$ps_scope" = absent ] || [ "$ps_scope" -le 2 ]; then pass ptrace_scope "$p
 else fail ptrace_scope "$ps_scope > 2 (systrap needs ptrace)"; fi
 
 # --- launching user's id mapping ------------------------------------------
-# bounded like every foreign-user NSS lookup below (fable A r3 P3-2)
-if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
-    fail user "$USER_NAME does not exist"
+# bounded like every foreign-user NSS lookup below (fable A r3 P3-2; nss_q)
+if ! nss_q id "$USER_NAME"; then
+    if [ "$NSS_RC" -eq 124 ]; then
+        fail user "the NSS lookup for $USER_NAME timed out ($NSS_TRIES x $NSS_BOUND s)"
+    else fail user "$USER_NAME does not exist"; fi
     for c in subuid subgid; do fail "$c" "not checked: user $USER_NAME missing"; done
     for t in newuidmap newgidmap; do
         p="$(command -v "$t" 2>/dev/null)"
@@ -297,10 +333,11 @@ fi
 SR_BASE="$ROOT/run/qdistro-tier3s-runsc"
 # Every NSS lookup for the foreign user is bounded (fable A r3 P3-2): a wedged
 # provider hangs the spawn's probe otherwise, and timeout's nonzero status —
-# never whatever prefix a dying call printed — is the verdict.
-if ! timeout 5 id "$USER_NAME" >/dev/null 2>&1; then
-    fail state_root "not checked: user $USER_NAME missing"
-elif ! sr_uid="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)" \
+# never whatever prefix a dying call printed — is the verdict (nss_q).
+sr_uid=""
+if ! nss_q id "$USER_NAME"; then
+    fail state_root "not checked: user $USER_NAME missing or its lookup timed out"
+elif ! nss_q id -u "$USER_NAME" || ! sr_uid="$NSS_OUT" \
         || ! [[ "$sr_uid" =~ ^[0-9]+$ ]]; then
     # status-gated and shape-checked like the getent calls (sol r5 P3-4,
     # sol B-i r1): a lookup that prints a uid line and then stalls is killed
@@ -336,20 +373,20 @@ if [ "$(id -un)" != "$USER_NAME" ]; then
     # rc 2) are otherwise indistinguishable in the verdict line. They never
     # change it.
     nss_why=""; nss_t0="$(date +%s%N)"
-    AS_UID="$(timeout 5 id -u "$USER_NAME" 2>/dev/null)"; nss_rc=$?
-    [ "$nss_rc" -eq 0 ] && [[ "$AS_UID" =~ ^[0-9]+$ ]] \
-        || { nss_why="id -u rc=$nss_rc"; AS_UID=""; }
+    nss_q id -u "$USER_NAME"; AS_UID="$NSS_OUT"
+    [ "$NSS_RC" -eq 0 ] && [[ "$AS_UID" =~ ^[0-9]+$ ]] \
+        || { nss_why="id -u rc=$NSS_RC; $NSS_N tries"; AS_UID=""; }
     puid=""; pw=""
     if [ -n "$AS_UID" ]; then
-        pw="$(timeout 5 getent passwd "$USER_NAME")"; nss_rc=$?
-        if [ "$nss_rc" -eq 0 ]; then
+        if nss_q getent passwd "$USER_NAME"; then
+            pw="$NSS_OUT"
             puid="$(printf '%s\n' "$pw" | cut -d: -f3)" \
                 && AS_HOME="$(printf '%s\n' "$pw" | cut -d: -f6)"
-        else nss_why="getent passwd rc=$nss_rc"; fi
+        else nss_why="getent passwd rc=$NSS_RC; $NSS_N tries"; fi
     fi
     [ -n "$AS_UID" ] && [ "$puid" = "$AS_UID" ] && [ "${AS_HOME#/}" != "$AS_HOME" ] \
         && [[ "$pw" != *$'\n'* ]] \
-        || { fail nss "no passwd entry for $USER_NAME within the 5 s bound (${nss_why:-entry shape: uid/home/line count}; $(( ($(date +%s%N) - nss_t0) / 1000000 )) ms)"
+        || { fail nss "no passwd entry for $USER_NAME within the NSS bound ($NSS_TRIES x $NSS_BOUND s) (${nss_why:-entry shape: uid/home/line count}; $(( ($(date +%s%N) - nss_t0) / 1000000 )) ms)"
              AS_UID=""; AS_HOME=""; }
 fi
 # podman's runtime dir for the probed user: a logind session dir when it
