@@ -12,7 +12,7 @@ methods depending on configuration:
                 Same prompt subprocess but it kicks the verify and
                 waits for the VerifyStatus signal.
 - ``broker``  — delegate to the qdistro admin broker's
-                RequestPermission / WaitForDecision flow. Approval
+                RequestPolkitAuth / WaitForDecision flow. Approval
                 is a yes/no admin decision rendered by the
                 admin-approval-app (spec/25).
 
@@ -24,9 +24,14 @@ Method selection (highest priority first):
   3. /etc/qdistro/polkit-agent.conf  — fnmatch glob → method.
   4. default ``broker``.
 
-On success the agent calls
+polkitd accepts
 ``org.freedesktop.PolicyKit1.Authority.AuthenticationAgentResponse2``
-with the unix-user identity for ADMIN_UID. On failure the agent
+from uid 0 only, and this agent runs as ADMIN_UID — so it never calls
+polkitd back directly. The privileged broker delivers the response:
+for ``broker``-method requests it does so when the filed request is
+allowed, and for ``pam``/``fprint`` verdicts the agent relays through
+``RespondPolkitAuth``. The response identity is picked from the list
+polkitd itself offered in BeginAuthentication. On failure the agent
 just completes the BeginAuthentication call (polkit treats no
 response as deny).
 
@@ -410,6 +415,25 @@ class QdistroPolkitAgent(dbus.service.Object):
         self._broker = None
         self._config = list(config) if config is not None \
             else load_method_config_layered()
+        # Cookies polkitd cancelled (CancelAuthentication), remembered
+        # locally as well as relayed: cancel lands on the mainloop while
+        # the auth worker may still be filing or waiting, so a worker
+        # that wakes with a dead cookie must neither file a prompt nor
+        # relay a response. Bounded — cookies are single-use nonces.
+        self._cancel_lock = threading.Lock()
+        self._cancelled_cookies: dict[str, None] = {}
+
+    def _note_cancelled(self, cookie: str) -> None:
+        with self._cancel_lock:
+            self._cancelled_cookies.pop(cookie, None)
+            while len(self._cancelled_cookies) >= 256:
+                self._cancelled_cookies.pop(
+                    next(iter(self._cancelled_cookies)))
+            self._cancelled_cookies[cookie] = None
+
+    def _is_cancelled(self, cookie: str) -> bool:
+        with self._cancel_lock:
+            return cookie in self._cancelled_cookies
 
     # -- broker delegation (the v1 path) ----------------------------------
 
@@ -430,8 +454,9 @@ class QdistroPolkitAgent(dbus.service.Object):
             self._broker = dbus.Interface(obj, QDISTRO_BROKER_BUS)
         return self._broker
 
-    def _file_request(self, qdistro_action: str, details: dict):
-        """File one permission request; return (broker proxy, request id).
+    def _file_request(self, qdistro_action: str, details: dict,
+                      cookie: str, identities):
+        """File one polkit auth request; return (broker proxy, request id).
 
         The caller must wait on the SAME proxy the request was filed
         through: request ids mean something only to the broker instance
@@ -443,11 +468,17 @@ class QdistroPolkitAgent(dbus.service.Object):
         prompt twice and answering one left the other stranded. ServiceUnknown
         and NameHasNoOwner are the only ones that positively mean nothing was
         filed, because the name had no owner to receive the call.
+
+        The request is filed as RequestPolkitAuth carrying polkit's cookie
+        and offered identity list: on an allow the broker answers polkitd
+        with AuthenticationAgentResponse2 itself — that call is uid-0-only
+        and this process is not uid 0.
         """
         iface = self._broker_iface()
         try:
-            return iface, int(iface.RequestPermission(
-                qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
+            return iface, int(iface.RequestPolkitAuth(
+                qdistro_action, details, str(cookie), identities,
+                timeout=_REQUEST_TIMEOUT_S))
         except dbus.DBusException as e:
             if e.get_dbus_name() not in (
                     "org.freedesktop.DBus.Error.ServiceUnknown",
@@ -458,17 +489,62 @@ class QdistroPolkitAgent(dbus.service.Object):
             # is being restarted underneath us.
             self._broker = None
             iface = self._broker_iface()
-            return iface, int(iface.RequestPermission(
-                qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
+            return iface, int(iface.RequestPolkitAuth(
+                qdistro_action, details, str(cookie), identities,
+                timeout=_REQUEST_TIMEOUT_S))
 
-    def _ask_broker(self, qdistro_action: str, details: dict) -> bool:
+    def _retire_request(self, iface, cookie: str) -> None:
+        """Best-effort deny of the cookie's queued broker request.
+
+        When this agent gives up on an auth (file/wait failure, or a
+        crash between filing and waiting) the request could otherwise
+        stay pending: a late admin click would make the broker respond
+        into a session polkitd already tore down, and for a cached
+        scope would even store a grant nobody asked for. Cancelling by
+        cookie retires it wherever it lives. `iface` is the proxy that
+        filed (pinned to the broker instance holding the rid); a fresh
+        lookup is the fallback for a dead proxy, and also covers the
+        uncertain-filed case where no rid came back. The cached proxy
+        is dropped first — it IS the suspect proxy on the file path and
+        the failed one on the wait path.
+        """
+        self._broker = None
+        last: Exception | None = None
+        for candidate in (iface, None):
+            try:
+                target = candidate or self._broker_iface()
+                target.CancelPolkitAuth(str(cookie),
+                                        timeout=_REQUEST_TIMEOUT_S)
+                return
+            except Exception as e:  # noqa: BLE001
+                last = e
+                # A failed fallback lookup leaves the just-tried proxy
+                # cached in _broker — drop it so the retry re-resolves
+                # the owner instead of hitting the same dead endpoint.
+                self._broker = None
+        syslog.syslog(
+            syslog.LOG_WARNING,
+            f"could not retire broker request for cookie "
+            f"{_scrub_value(str(cookie))}: {last}")
+
+    def _ask_broker(self, qdistro_action: str, details: dict,
+                    cookie: str, identities) -> bool:
+        if self._is_cancelled(str(cookie)):
+            # polkitd cancelled the session while the worker was queued
+            # — filing now would create a prompt for a dead auth.
+            return False
         try:
-            iface, rid = self._file_request(qdistro_action, details)
+            iface, rid = self._file_request(qdistro_action, details,
+                                            cookie, identities)
         except dbus.DBusException as e:
             self._broker = None
             syslog.syslog(syslog.LOG_ERR,
                           f"could not file a broker request: {e}; "
                           f"denying polkit request")
+            # The file may still have landed (a lost reply is
+            # unknowable); retire by cookie so it cannot be decided
+            # against a session this agent already abandoned.
+            self._retire_request(None, cookie)
             return False
         try:
             # An admin has to read the prompt and decide, so this blocks on
@@ -484,9 +560,10 @@ class QdistroPolkitAgent(dbus.service.Object):
             syslog.syslog(
                 syslog.LOG_ERR,
                 f"no decision for broker request {rid}: {e}; denying polkit "
-                f"request. The request may still be pending in the broker — "
-                f"it is NOT re-filed here, because a second copy of the same "
-                f"prompt is worse than one that goes unanswered.")
+                f"request and retiring the queued request — it is NOT "
+                f"re-filed, because a second copy of the same prompt is "
+                f"worse than one that goes unanswered.")
+            self._retire_request(iface, cookie)
             return False
 
     # -- BeginAuthentication ---------------------------------------------
@@ -511,7 +588,8 @@ class QdistroPolkitAgent(dbus.service.Object):
 
         def _drive() -> bool:
             try:
-                allowed, reason = self._authenticate(action, msg, det, method)
+                allowed, reason = self._authenticate(
+                    action, msg, det, method, str(cookie), identities)
             except Exception as e:  # noqa: BLE001
                 syslog.syslog(syslog.LOG_ERR,
                               f"polkit-agent auth crashed: {e}")
@@ -519,9 +597,18 @@ class QdistroPolkitAgent(dbus.service.Object):
                     f"qdistro polkit-agent crashed: {e}",
                     name="org.freedesktop.PolicyKit1.Error.Failed"))
                 return False
-            if allowed:
+            # A cancel that raced the verdict (e.g. the PAM prompt was
+            # still open when polkitd gave up) deadens the cookie: no
+            # response may be relayed for it.
+            if allowed and self._is_cancelled(str(cookie)):
+                allowed, reason = False, f"{reason}+cancelled"
+            # The broker method answers polkitd itself on an allow — the
+            # response call is uid-0-only, so the uid-1000 agent cannot
+            # (and must not try to) deliver it. pam/fprint verdicts are
+            # local, so those go through the broker's relay.
+            if allowed and method != "broker":
                 try:
-                    self._respond(cookie)
+                    self._respond(str(cookie), identities)
                 except Exception as e:  # noqa: BLE001
                     syslog.syslog(syslog.LOG_ERR,
                                   f"AuthenticationAgentResponse2 failed: {e}")
@@ -547,14 +634,15 @@ class QdistroPolkitAgent(dbus.service.Object):
     # -- method dispatch ---------------------------------------------------
 
     def _authenticate(self, action_id: str, message: str,
-                      details: dict, method: str) -> tuple[bool, str]:
+                      details: dict, method: str, cookie: str,
+                      identities) -> tuple[bool, str]:
         if method == "pam":
             return self._auth_pam(action_id, message)
         if method == "fprint":
             return self._auth_fprint()
         # broker (default fallback)
         qd_action = action_to_qdistro(action_id)
-        ok = self._ask_broker(qd_action, details)
+        ok = self._ask_broker(qd_action, details, cookie, identities)
         return ok, ("broker-allow" if ok else "broker-deny")
 
     def _auth_pam(self, action_id: str,
@@ -582,18 +670,36 @@ class QdistroPolkitAgent(dbus.service.Object):
     @dbus.service.method(POLKIT_IFACE_AGENT,
                          in_signature="s", out_signature="")
     def CancelAuthentication(self, cookie):
-        # v1: no-op. If admin takes forever we just keep the broker
-        # request open; polkit will eventually time out upstream.
+        # Remember locally first: a worker still in RequestPolkitAuth
+        # must not file a prompt (or relay a response) for a session
+        # polkitd already abandoned — and the local mark survives even
+        # if the broker relay below fails.
+        self._note_cancelled(str(cookie))
+        # Forward the cancel to the broker: it decides the matching
+        # queued request deny so the admin prompt does not linger and
+        # this auth's WaitForDecision waiter releases.
         syslog.syslog(syslog.LOG_INFO, f"polkit cancel: {cookie}")
+        try:
+            self._broker_iface().CancelPolkitAuth(
+                str(cookie), timeout=_REQUEST_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            syslog.syslog(
+                syslog.LOG_WARNING,
+                f"could not forward polkit cancel to the broker: {e}; "
+                f"the queued request stays until decided or reaped")
 
     # -- polkit reply --
-    def _respond(self, cookie: str) -> None:
-        polkitd = self._sysbus.get_object(POLKIT_BUS, POLKIT_OBJ)
-        authority = dbus.Interface(polkitd, POLKIT_IFACE_AUTHORITY)
-        identity = ("unix-user", {"uid": dbus.UInt32(ADMIN_UID)})
-        authority.AuthenticationAgentResponse2(
-            dbus.UInt32(os.getuid()), str(cookie), identity,
-        )
+    def _respond(self, cookie: str, identities) -> None:
+        """Relay a positive pam/fprint verdict through the broker.
+
+        polkitd accepts AuthenticationAgentResponse2 from uid 0 only and
+        the agent runs as the admin uid, so the privileged broker makes
+        the call. The identity is picked FROM polkit's offered list —
+        on this image [unix-user uid=0], not the session uid — because
+        polkitd rejects a response naming an identity it did not offer.
+        """
+        self._broker_iface().RespondPolkitAuth(
+            str(cookie), identities, timeout=_REQUEST_TIMEOUT_S)
 
 
 # -- Registration with polkitd -------------------------------------------
