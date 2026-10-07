@@ -245,6 +245,34 @@ _QDSHELL_GATE_METHODS = frozenset((
     "VerifyClientIdentity",
 ))
 
+# The session polkit agent's installed interpreter target. The polkit
+# relay methods (RequestPolkitAuth / RespondPolkitAuth /
+# CancelPolkitAuth) move real polkitd authorizations, so the caller must
+# be the agent itself — ADMIN_UID alone is not sufficient: any admin-uid
+# process holding a live cookie could otherwise approve a polkit prompt
+# nobody verified (astra r159 P1).
+_POLKIT_AGENT_SCRIPT_PATHS = frozenset((
+    "/usr/libexec/qdistro/qdistro_polkit_agent.py",
+    "/usr/local/lib/qdistro/qdistro_polkit_agent.py",
+    "/usr/lib/qdistro/qdistro_polkit_agent.py",
+))
+
+# The agent's user unit, as an exact cgroup path. argv alone cannot
+# establish that the caller runs the agent's code — PYTHONPATH/
+# usercustomize inject attacker code into a process that still presents
+# the accepted argv (sol r162) — and the cgroup's last component is not
+# enough either: a child cgroup named `qdistro-polkit-agent.service`
+# under a delegated scope passes a suffix check while the real unit
+# still runs (sol r163). The expected path is anchored at
+# `user@<uid>.service/{app,session}.slice/` — directories an
+# unprivileged user cannot write into — so the match is exact, not a
+# suffix.
+_POLKIT_AGENT_UNIT = "qdistro-polkit-agent.service"
+_POLKIT_AGENT_CGROUPS = frozenset(
+    f"user.slice/user-{ADMIN_UID}.slice/user@{ADMIN_UID}.service/"
+    f"{slice_}/{_POLKIT_AGENT_UNIT}"
+    for slice_ in ("app.slice", "session.slice"))
+
 _ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
     "container_t",
     "svirt_lxc_net_t",
@@ -1570,6 +1598,9 @@ class Broker(dbus.service.Object):
         label = _read_proc_selinux_label(pid)
         return label, _selinux_type(label)
 
+    def _peer_cgroup(self, pid: int) -> str:
+        return _pi.read_cgroup(pid)
+
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
                                     exe: str, method: str = ""
                                     ) -> tuple[bool, str]:
@@ -1648,6 +1679,55 @@ class Broker(dbus.service.Object):
             raise dbus.DBusException(
                 f"{method} restricted to trusted admin control-plane "
                 f"peers; {reason}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        return uid, pid, exe, st
+
+    def _peer_matches_polkit_agent(self, *, uid: int, pid: int,
+                                   exe: str) -> tuple[bool, str]:
+        """Trusted session-polkit-agent peer predicate (astra r159 P1).
+
+        The relay methods answer or cancel real polkitd
+        authentications. The agent is python3 running its installed
+        script inside its user unit, so the peer must satisfy all of:
+        python exe basename, the script at argv[1] (the position the
+        interpreter executes — `python3 -c '…' <script>` passes the path
+        as a mere argument; sol r161), and an exact match on the agent
+        unit's systemd cgroup path — the part that survives PYTHONPATH/
+        usercustomize injection (sol r162) and forged same-named child
+        cgroups under delegated scopes (sol r163). uid 0 needs no
+        relay: it may answer polkitd itself.
+        """
+        if int(uid) not in (0, ADMIN_UID):
+            return False, (f"uid {uid} is neither root nor admin uid "
+                           f"{ADMIN_UID}")
+        _label, typ = self._peer_label_type(pid)
+        if typ in _ADMIN_HOSTILE_SELINUX_TYPES:
+            return False, f"SELinux type {typ!r} is not the polkit agent"
+        if int(uid) == 0:
+            return True, "root peer needs no relay"
+        exe_s = str(exe or "")
+        argv = self._peer_cmdline(pid)
+        if not (os.path.basename(exe_s) in _PYTHON_EXE_BASENAMES
+                and len(argv) > 1
+                and argv[1] in _POLKIT_AGENT_SCRIPT_PATHS):
+            return False, (f"admin peer exe={exe_s!r} is not the "
+                           f"installed polkit agent")
+        cgroup = self._peer_cgroup(pid)
+        if cgroup not in _POLKIT_AGENT_CGROUPS:
+            return False, (f"peer cgroup {cgroup!r} is not the "
+                           f"{_POLKIT_AGENT_UNIT} unit")
+        return True, "session polkit agent unit"
+
+    def _require_polkit_agent_peer(self, sender, conn, method: str
+                                   ) -> tuple[int, int, str, int]:
+        uid, pid, exe, st = self._peer_info(sender, conn)
+        ok, reason = self._peer_matches_polkit_agent(
+            uid=uid, pid=pid, exe=exe)
+        if not ok:
+            raise dbus.DBusException(
+                f"{method} restricted to the session polkit agent; "
+                f"{reason}",
                 name=BUS_NAME + ".AccessDenied",
             )
         return uid, pid, exe, st
@@ -2709,14 +2789,12 @@ class Broker(dbus.service.Object):
         admin prompt — but an allow additionally answers polkitd with
         AuthenticationAgentResponse2(uid, cookie, identity) where
         identity is picked from the list polkit itself offered.
-        Restricted to the admin uid (the agent's uid).
+        Restricted to the session polkit agent: ADMIN_UID alone would
+        let any admin-uid process holding a live cookie file or steer
+        a prompt it never verified (astra r159 P1).
         """
-        uid, pid, exe, start_time = self._peer_info(sender, conn)
-        if int(uid) != ADMIN_UID:
-            raise dbus.DBusException(
-                f"RequestPolkitAuth is restricted to the session polkit "
-                f"agent (uid {ADMIN_UID})",
-                name=BUS_NAME + ".AccessDenied")
+        uid, pid, exe, start_time = self._require_polkit_agent_peer(
+            sender, conn, "RequestPolkitAuth")
         return self._enqueue(
             uid, pid, exe, start_time, str(action), details,
             delegated=False,
@@ -2731,13 +2809,11 @@ class Broker(dbus.service.Object):
         auth. The agent calls this after a pam/fprint verification the
         broker never queued — polkitd only accepts the response from
         uid 0, so the privileged broker relays it. Restricted to the
-        admin uid."""
-        uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if int(uid) != ADMIN_UID:
-            raise dbus.DBusException(
-                f"RespondPolkitAuth is restricted to the session polkit "
-                f"agent (uid {ADMIN_UID})",
-                name=BUS_NAME + ".AccessDenied")
+        session polkit agent (bound to its installed script): an
+        untrusted admin-uid caller holding a live cookie must not be
+        able to approve a polkit prompt nobody verified."""
+        uid, _pid, _exe, _st = self._require_polkit_agent_peer(
+            sender, conn, "RespondPolkitAuth")
         cookie_s = str(cookie)
         if self._polkit_cookie_cancelled(cookie_s):
             # polkitd already abandoned this auth session — the response
@@ -2763,13 +2839,9 @@ class Broker(dbus.service.Object):
         the agent relays cancel from its mainloop while the filing ran
         on a worker thread, so the cancel can beat the file — a later
         RequestPolkitAuth with this cookie comes back decided deny.
-        Restricted to the admin uid."""
-        uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if int(uid) != ADMIN_UID:
-            raise dbus.DBusException(
-                f"CancelPolkitAuth is restricted to the session polkit "
-                f"agent (uid {ADMIN_UID})",
-                name=BUS_NAME + ".AccessDenied")
+        Restricted to the session polkit agent."""
+        _uid, _pid, _exe, _st = self._require_polkit_agent_peer(
+            sender, conn, "CancelPolkitAuth")
         cookie_s = str(cookie)
         self._note_polkit_cancelled(cookie_s)
         with self._lock:
