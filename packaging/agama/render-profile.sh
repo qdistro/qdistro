@@ -70,6 +70,7 @@ for t in files:
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, base)
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)   # enforce on existing files too — rendered profiles embed credentials
     with os.fdopen(fd, 'w') as f:
         f.write(doc)
     print('rendered', dest)
