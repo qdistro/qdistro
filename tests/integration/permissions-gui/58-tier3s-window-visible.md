@@ -78,18 +78,19 @@ helpers the bats lanes use. The silo is named `t3sgui`, workload
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
+D=/tmp/t3s-58.d; mkdir -p "$D"
 SILO=t3sgui
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 sm CreateTier3sSilo ssss "$SILO" weston-terminal "$SILO" none >/dev/null
 [ "$(silo_state "$SILO")" = Created ] || { echo "FAIL: silo not Created"; exit 1; }
 set_rules "allow:$GUISPAWN"
 [ "$(broker_check "$GUISPAWN")" = allow ] || { echo "FAIL: broker did not allow"; exit 1; }
-journal_cursor > /tmp/s58-journal.cur
+journal_cursor > "$D/journal.cur"
 TOK=$(up_gui_silo "$SILO")
 [ -n "$TOK" ] || { echo "FAIL: launch did not come up"; exit 1; }
-echo "TOK=$TOK" > /tmp/s58-tok
-t3s_window_handle "$SILO" > /tmp/s58-handle
-echo "silo up: token=$TOK handle=$(cat /tmp/s58-handle) uid=$(silo_uid "$SILO")"
+echo "TOK=$TOK" > "$D/tok"
+t3s_window_handle "$SILO" > "$D/handle"
+echo "silo up: token=$TOK handle=$(cat "$D/handle") uid=$(silo_uid "$SILO")"
 finish
 EOF
 )
@@ -109,7 +110,8 @@ Scope every grep to the cursor captured just before the launch.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
-cur=$(cat /tmp/s58-journal.cur); TOK=$(sed -n 's/^TOK=//p' /tmp/s58-tok)
+D=/tmp/t3s-58.d
+cur=$(cat "$D/journal.cur"); TOK=$(sed -n 's/^TOK=//p' "$D/tok")
 SILO=t3sgui; APPID="qdistro.tier3s.$SILO"
 [ "$(qdshell_log "$cur" | grep -c "\[tier3s\] toplevel observed silo=$SILO secctx=$APPID color=#...... handle=[0-9]")" = 1 ] \
     || { echo "FAIL: no tier3s toplevel-observed line"; qdshell_log "$cur" | tail -20; exit 1; }
@@ -224,8 +226,9 @@ else, then prints `none`.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
-SILO=t3sgui; TOK=$(sed -n 's/^TOK=//p' /tmp/s58-tok); UNIT=$(unit_of "$SILO")
-H=$(cat /tmp/s58-handle)
+D=/tmp/t3s-58.d
+SILO=t3sgui; TOK=$(sed -n 's/^TOK=//p' "$D/tok"); UNIT=$(unit_of "$SILO")
+H=$(cat "$D/handle")
 [ -n "$H" ] || { echo "FAIL: no handle recorded in S1"; exit 1; }
 cur=$(journal_cursor)
 sm StopSilo si "$SILO" 10 >/dev/null

@@ -67,18 +67,19 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
+D=/tmp/t3s-59.d; mkdir -p "$D"
 SILO=t3scls
 GUISPAWN="qdistro.tier3s.spawn:weston-terminal/weston-terminal"
 sm CreateTier3sSilo ssss "$SILO" weston-terminal "$SILO" none >/dev/null
 [ "$(silo_state "$SILO")" = Created ] || { echo "FAIL: silo not Created"; exit 1; }
 set_rules "allow:$GUISPAWN"
-journal_cursor > /tmp/s59-journal.cur
+journal_cursor > "$D/journal.cur"
 TOK=$(up_gui_silo "$SILO")
 [ -n "$TOK" ] || { echo "FAIL: launch did not come up"; exit 1; }
-echo "TOK=$TOK" > /tmp/s59-tok
-t3s_window_handle "$SILO" > /tmp/s59-handle
+echo "TOK=$TOK" > "$D/tok"
+t3s_window_handle "$SILO" > "$D/handle"
 snapshot_launch "$TOK"; snapshot_bridge "$TOK"
-echo "silo up: token=$TOK handle=$(cat /tmp/s59-handle)"
+echo "silo up: token=$TOK handle=$(cat "$D/handle")"
 finish
 EOF
 )
@@ -119,8 +120,9 @@ gone.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
+D=/tmp/t3s-59.d
 SILO=t3scls; UNIT=$(unit_of "$SILO")
-TOK=$(sed -n 's/^TOK=//p' /tmp/s59-tok); H=$(cat /tmp/s59-handle)
+TOK=$(sed -n 's/^TOK=//p' "$D/tok"); H=$(cat "$D/handle")
 [ -n "$TOK" ] && [ -n "$H" ] || { echo "FAIL: missing token/handle from S1"; exit 1; }
 # the app exiting must drop its toplevel without an explicit StopSilo
 wait_for 60 bash -c "journalctl _SYSTEMD_USER_UNIT=qdwin-compositor.service --no-pager -o cat | grep -q 'toplevel_removed handle=$H'" \
@@ -166,15 +168,18 @@ the documented path: `StopSilo`, then `StartSilo` for real.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
+D=/tmp/t3s-59.d
 SILO=t3scls; UNIT=$(unit_of "$SILO")
-TOK1=$(sed -n 's/^TOK=//p' /tmp/s59-tok)
+TOK1=$(sed -n 's/^TOK=//p' "$D/tok")
 # Contract check: StartSilo while state=Active returns success yet must
-# NOT start the unit (idempotent no-op, not a hidden relaunch).
+# NOT start the unit (idempotent no-op, not a hidden relaunch). Poll a
+# bounded window for the unit leaving inactive — if it ever does, the
+# no-op contract changed and this scenario must be revisited.
 sm StartSilo s "$SILO" >/dev/null \
     || { echo "FAIL: StartSilo on Active silo errored"; exit 1; }
-sleep 5
-[ "$(unit_state "$UNIT")" = inactive ] \
-    || { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "" | tail -10; exit 1; }
+unit_came_up() { [ "$(unit_state "$UNIT")" != inactive ]; }
+wait_for 10 unit_came_up \
+    && { echo "FAIL: bare StartSilo relaunched the unit — the no-op contract changed; update this scenario"; unit_log "$UNIT" "" | tail -10; exit 1; }
 obs_stopped() { silo_observed "$1" | grep -q '^stopped'; }
 obs_stopped "$SILO" \
     || { echo "FAIL: observed status drifted: $(silo_observed "$SILO")"; exit 1; }
@@ -184,9 +189,9 @@ sm StopSilo si "$SILO" 10 >/dev/null
 TOK2=$(up_gui_silo "$SILO")
 [ -n "$TOK2" ] || { echo "FAIL: relaunch did not come up"; exit 1; }
 [ "$TOK2" != "$TOK1" ] || { echo "FAIL: relaunch reused token $TOK1"; exit 1; }
-echo "TOK=$TOK2" > /tmp/s59-tok2
-t3s_window_handle "$SILO" > /tmp/s59-handle2
-echo "relaunch up: token=$TOK2 handle=$(cat /tmp/s59-handle2)"
+echo "TOK=$TOK2" > "$D/tok2"
+t3s_window_handle "$SILO" > "$D/handle2"
+echo "relaunch up: token=$TOK2 handle=$(cat "$D/handle2")"
 finish
 EOF
 )
@@ -202,8 +207,9 @@ shows the `[3s:t3scls]` window back on the desktop.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 source /var/tmp/t3s-dl/tier3s-guest-lib.sh
+D=/tmp/t3s-59.d
 SILO=t3scls; UNIT=$(unit_of "$SILO")
-TOK=$(sed -n 's/^TOK=//p' /tmp/s59-tok2); H=$(cat /tmp/s59-handle2)
+TOK=$(sed -n 's/^TOK=//p' "$D/tok2"); H=$(cat "$D/handle2")
 cur=$(journal_cursor)
 sm StopSilo si "$SILO" 10 >/dev/null
 [ "$(silo_state "$SILO")" = Stopped ] || { echo "FAIL: silo not Stopped"; exit 1; }
