@@ -8,12 +8,14 @@
 #     caller is in
 #   qdistro-polkit-agent.service: Scheduled restart job, restart counter is at 55.
 #
-# The user unit starts with admin's lingering user manager, before (or
-# without) any login. polkitd only accepts a registration for the caller's
-# session, which for a user@.service process is the user's DISPLAY session;
-# with only logind's class=manager session there is none. The agent must wait
-# for a login instead of exiting, register once a login session appears, and
-# still route a real authorization through itself to the broker.
+# The agent is a SYSTEM service (User=admin) — its environment and cgroup
+# must be root-owned so a same-uid process cannot inject code into the
+# process the broker's relay trusts (sol r169). It starts at boot, before
+# (or without) any login. polkitd only accepts a registration for the
+# caller's session, and with only logind's class=manager session there is
+# none. The agent must wait for a login instead of exiting, register once
+# a login session appears, and still route a real authorization through
+# itself to the broker.
 load helpers
 
 setup_file() {
@@ -34,7 +36,7 @@ _guest_value() {
 }
 
 _agent_restarts() {
-    vm_run_admin "systemctl --user show -p NRestarts --value qdistro-polkit-agent.service"
+    vm_run "systemctl show -p NRestarts --value qdistro-polkit-agent.service"
     output="$(_guest_value)"
 }
 
@@ -42,8 +44,8 @@ _agent_restarts() {
     ensures "the admin polkit agent stays up without a login session and registers for the admin's login session when one appears"
 
     step "precondition: the agent unit is installed and admin has no login session"
-    vm_run "test -f /etc/systemd/user/qdistro-polkit-agent.service"
-    require "qdistro-polkit-agent.service installed in /etc/systemd/user"
+    vm_run "test -f /etc/systemd/system/qdistro-polkit-agent.service"
+    require "qdistro-polkit-agent.service installed in /etc/systemd/system"
     vm_run "loginctl list-sessions --no-legend -o json 2>/dev/null; echo; \
             for s in \$(loginctl list-sessions --no-legend | awk '\$3==\"admin\"{print \$1}'); do \
               loginctl show-session \"\$s\" -p Id -p Class -p Type -p State; done"
@@ -53,12 +55,12 @@ _agent_restarts() {
     fi
 
     step "with only the manager session, the agent stays active and does not restart"
-    wait_for_unit qdistro-polkit-agent.service 30 --user \
+    wait_for_unit qdistro-polkit-agent.service 30 \
         || fail_loud "qdistro-polkit-agent.service never went active"
     vm_run "sleep 10"
     _agent_restarts
     assert_eq_evidence "0" "$output" "agent NRestarts with no login session"
-    vm_run_admin "systemctl --user is-active qdistro-polkit-agent.service"
+    vm_run "systemctl is-active qdistro-polkit-agent.service"
     assert_eq_evidence "active" "$(_guest_value)" "agent state with no login session"
     vm_run "journalctl -b --no-pager -o cat -t qdistro-polkit-agent"
     echo "$output" >&2
@@ -236,6 +238,6 @@ POL"
         || fail_loud "agent did not notice session $sid_a ending"
     _agent_restarts
     assert_eq_evidence "0" "$output" "agent NRestarts after logout"
-    vm_run_admin "systemctl --user is-active qdistro-polkit-agent.service"
+    vm_run "systemctl is-active qdistro-polkit-agent.service"
     assert_eq_evidence "active" "$(_guest_value)" "agent state after logout"
 }

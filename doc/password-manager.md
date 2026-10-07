@@ -283,9 +283,9 @@ Two invariants make this safe:
 
 The four broker methods are bound server-side to the session agent —
 the caller must be python running the agent's installed script inside
-its `qdistro-polkit-agent.service` unit cgroup — and denied to
-non-admin callers in the `org.qdistro.AdminBroker1` system-bus policy.
-Because exe, argv, and cgroup membership are all forgeable by a
+its `qdistro-polkit-agent.service` **system**-slice cgroup — and denied
+to non-admin callers in the `org.qdistro.AdminBroker1` system-bus
+policy. Because exe, argv, and cgroup membership are all forgeable by a
 sufficiently motivated same-uid process, the relay additionally binds
 each cookie to its declaring connection's **unique D-Bus name**:
 `RespondPolkitAuth` and `CancelPolkitAuth` act only for the sender that
@@ -293,39 +293,43 @@ announced or filed the cookie, a cancel recorded for one sender cannot
 pre-deny another's filing, and the first declaration wins — a foreign
 sender cannot rebind a cookie by filing or announcing it later.
 
+The agent is a **system service** (`User=admin`), not a user unit. A
+user unit cannot seal its own launch environment: every same-uid
+process can push manager variables (`systemctl --user set-environment`
++ restart) or write drop-ins — including an *empty* drop-in
+`UnsetEnvironment=` that resets the denylist outright — so injected
+loader code could run before `python3 -I` took effect and scrub its own
+`/proc/<pid>/environ` entries before the broker ever read them. As a
+system unit the unit file, drop-in dirs, manager environment and the
+`system.slice` cgroup's `cgroup.procs` are all root-owned: uid 1000 can
+neither inject into the agent's environment or argv nor migrate a
+foreign process into its cgroup.
+
 The remaining hardenings keep attacker code off the trusted
-connection, and — because `/proc` attributes are read only after any
-injected code has already run — the load-bearing controls are
-structural:
+connection:
 
 - The unit launches `python3 -I`, ignoring `PYTHONPATH`/
   `PYTHONHOME`/`sitecustomize`/`usercustomize`, and the broker
   *requires* `-I` in the peer argv — without it, even
   `python3 <script>` loads attacker-writable user-site
   `sitecustomize`/`.pth` code with no env var at all.
-- The unit's `UnsetEnvironment=` denylist (`LD_*`, `GLIBC_TUNABLES`,
-  `PYTHON*`, `BASH_ENV`, `QDISTRO_POLKIT_NONINTERACTIVE`, …) applies
-  **last**, over same-uid drop-ins and the user manager's writable
-  environment — a loader preload could otherwise execute before `-I`
-  and scrub its own environ entries, making post-exec
-  `/proc/<pid>/environ` reads worthless as attestation.
-- The peer's parent must be the admin's **user manager** (`ppid` ∈
-  `user@UID.service` `cgroup.procs`). Foreign processes can migrate
-  into the uid-writable unit cgroup, but they keep their own parent —
-  only a process systemd actually spawned into the unit satisfies the
-  pin.
+- The peer's parent must be **init** (`ppid == 1`): only systemd itself
+  spawns a system service's main process, and a foreign process keeps
+  its own parent. Orphans reparented to PID 1 still fail the exact
+  `system.slice/qdistro-polkit-agent.service` cgroup match.
 - Defence-in-depth (checked anyway): exe resolves to a python under a
   root-owned system dir (an attacker binary merely *named* `python3`
   ignores argv), only no-argument isolation flags precede the script,
-  environ is read untruncated and fail-closed, the SELinux type is not
+  environ is read untruncated and fail-closed against the injection
+  denylist (`LD_*`, `GLIBC_TUNABLES`, `PYTHON*`, `BASH_ENV`,
+  `QDISTRO_POLKIT_*` test seams — now honestly attestable because the
+  system unit's environment is root-fixed), the SELinux type is not
   hostile, and the cgroup path matches the unit exactly.
 
-Residual: a same-uid drop-in can still rewrite the unit entirely —
-but every surviving ExecStart shape is a system `python3 -I
-<installed script>` with a scrubbed environ, i.e. genuine agent code;
-the worst outcome is a denial of service, not a forged approval.
-ptrace injection into the live agent is outside this boundary's
-reach.
+Residual: uid 0 remains able to rewrite or restart the system unit —
+but root needs no relay (it answers polkitd itself), so tampering
+yields at most a denial of service, never a forged approval. ptrace
+injection into the live agent is outside this boundary's reach.
 
 History: before this responder existed the agent was verified end-to-end
 on a real seat session (registration, dispatch, broker delegation, fail-

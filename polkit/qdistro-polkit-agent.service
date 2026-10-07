@@ -1,60 +1,54 @@
 [Unit]
 Description=qdistro polkit authentication agent (PAM / fprintd / broker)
 Documentation=https://qdistro.invalid/spec/13
-# Runs in the admin's user session so it can register with polkitd
-# scoped to that session. Needs the user session bus + the qdistro
-# admin broker (broker delegation method).
-After=graphical-session-pre.target xdg-desktop-portal.service
+# System service running as the admin uid — deliberately NOT a user
+# unit. A user unit cannot seal its own launch environment: every
+# same-uid process can push manager variables (`systemctl --user
+# set-environment` + restart) or write drop-ins, and an empty drop-in
+# `UnsetEnvironment=` RESETS this unit's denylist outright
+# (systemd.exec(5)) — sol r169. As a system unit the unit file, its
+# drop-in dirs, the manager environment and the unit's cgroup under
+# system.slice are all root-owned; uid 1000 cannot inject into the
+# agent's environment or argv at all. The agent registers with polkitd
+# scoped to the admin's login session.
+After=user@1000.service qdistro-admin-broker.service
 Wants=qdistro-admin-broker.service
-# qdwin-session.target, not graphical-session.target: nothing in a
-# qdistro install ever reaches graphical-session.target (see
-# deploy/qdwin-session.target), so both directives were inert. The
-# installer's `systemctl --user enable --now` masked this — the agent
-# started at install time and then never came back after a reboot,
-# because the .wants symlink hung off a target nothing activates.
-PartOf=qdwin-session.target
 
 [Service]
 Type=simple
+User=admin
 # -I isolates interpreter startup: PYTHONPATH/PYTHONHOME/
 # sitecustomize/usercustomize are ignored and the script dir is not
-# added to sys.path. The user manager's environment is writable by any
-# same-uid process (`systemctl --user set-environment` + restart), and
-# injected startup code would share the agent's D-Bus connection — the
-# connection the broker's cookie ownership binding trusts (sol r165).
-# The broker additionally rejects peers whose environ carries
-# injection-capable variables.
+# added to sys.path. The broker additionally verifies exe/argv, the
+# system.slice cgroup and PPID=1 (sol r161/r162/r164/r167/r169).
 ExecStart=/usr/bin/python3 -I /usr/libexec/qdistro/qdistro_polkit_agent.py
-# The agent no longer exits when the admin has no login session yet (the
-# lingering user manager starts it at boot, before greetd's login): it waits
-# for logind and registers then. on-failure is for real crashes only.
+# The agent does not exit when the admin has no login session yet: it
+# waits for logind and registers then. on-failure is for real crashes
+# (and for the session bus being briefly unavailable at early boot).
 Restart=on-failure
 RestartSec=3
+# Session plumbing the user-unit form used to inherit from the manager
+# environment. The session-bus connection is only the per-session
+# singleton guard; XDG_RUNTIME_DIR/WAYLAND_DISPLAY let the Qt prompt
+# subprocess reach the admin compositor. Linger keeps user@1000 (and
+# /run/user/1000) up from early boot.
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-0
 # Subprocess prompt path — agent spawns this on PAM auth.
 Environment=QDISTRO_POLKIT_PROMPT_BIN=/usr/local/bin/qdistro-polkit-prompt
-# The agent honours QDISTRO_POLKIT_NONINTERACTIVE=allow as a test seam.
-# The user manager environment is writable by any same-UID process
-# (`systemctl --user set-environment` + restart), so never inherit it
-# into the production unit (iso2 `17` E9).
-#
-# UnsetEnvironment= applies AFTER all Environment=/EnvironmentFile=
-# assignments — including same-uid drop-ins — per systemd.exec(5), so
-# this list is also the env-injection denylist: loader preloads
-# (LD_*/GLIBC_TUNABLES) would run attacker code in the agent process
-# before -I takes effect, and their entries could be scrubbed from
-# /proc/<pid>/environ before the broker ever reads it (sol r168).
-UnsetEnvironment=QDISTRO_POLKIT_NONINTERACTIVE LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PROFILE LD_USE_LOAD_BIAS LD_DYNAMIC_WEAK LD_DEBUG_OUTPUT LD_HWCAP_MASK GLIBC_TUNABLES PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONEXECUTABLE PYTHONUSERBASE PYTHONWARNINGS BASH_ENV ENV CDPATH IFS
+# Denylist kept as defence-in-depth: on a system unit no same-uid
+# process can inject these, but the belt-and-suspenders unset also
+# neutralises a future mis-edit of this file. The agent honours
+# QDISTRO_POLKIT_NONINTERACTIVE=allow as a test seam — it must never be
+# set in production (iso2 `17` E9).
+UnsetEnvironment=QDISTRO_POLKIT_NONINTERACTIVE QDISTRO_POLKIT_METHOD QDISTRO_POLKIT_SESSION_ID LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PROFILE LD_USE_LOAD_BIAS LD_DYNAMIC_WEAK LD_DEBUG_OUTPUT LD_HWCAP_MASK GLIBC_TUNABLES PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONEXECUTABLE PYTHONUSERBASE PYTHONWARNINGS BASH_ENV ENV CDPATH IFS
 
 # TCB no-network discipline. The agent talks to polkitd, qdistro-broker,
 # fprintd/PAM, and its local prompt over AF_UNIX/system facilities only;
 # it has no legitimate IP/vsock egress path.
-#
-# No IPAddressDeny=: this is a USER unit, and IP firewalling needs the
-# system manager (BPF); the user manager only logs "unit configures an IP
-# firewall, but not running as root" and applies nothing. The private
-# network namespace plus the address-family allowlist are what enforce it.
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 
 [Install]
-WantedBy=qdwin-session.target
+WantedBy=multi-user.target

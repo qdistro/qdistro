@@ -42,9 +42,7 @@ PEER_EXE = "/usr/bin/test-app"
 AGENT_EXE = "/usr/bin/python3"
 AGENT_ARGV = ["/usr/bin/python3", "-I",
               "/usr/libexec/qdistro/qdistro_polkit_agent.py"]
-AGENT_CGROUP = (f"user.slice/user-{ADMIN_UID}.slice/"
-                f"user@{ADMIN_UID}.service/"
-                "app.slice/qdistro-polkit-agent.service")
+AGENT_CGROUP = "system.slice/qdistro-polkit-agent.service"
 
 IDENT_ROOT = ("unix-user", {"uid": dbus.UInt32(0)})
 IDENT_ADMIN = ("unix-user", {"uid": dbus.UInt32(ADMIN_UID)})
@@ -79,11 +77,10 @@ class _StubBroker(Broker):
                             "unconfined_t")
         self._peer_cgroup_val = AGENT_CGROUP
         self._peer_env_names: set | None = set()
-        # The peer must be spawned by the admin's user manager — a
-        # foreign process migrated into the unit cgroup keeps its own
-        # parent (sol r168).
-        self._manager_pids = {4242}
-        self._peer_ppid_val: int | None = 4242
+        # The agent is a system service, so the peer must be spawned by
+        # init itself — a foreign process migrated into the unit cgroup
+        # keeps its own parent (sol r168/r169).
+        self._peer_ppid_val: int | None = 1
         self.pending_signals: list[int] = []
         self.decided_signals: list[tuple[int, str]] = []
         # Captured (uid, cookie, identity) tuples from _respond_polkit.
@@ -120,9 +117,6 @@ class _StubBroker(Broker):
 
     def _peer_ppid(self, pid):
         return self._peer_ppid_val
-
-    def _admin_user_manager_pids(self):
-        return set(self._manager_pids)
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
                                     exe: str, method: str = ""
@@ -678,7 +672,14 @@ class TestPolkitAgentPeerBinding:
         for forged in (
                 f"{base}/app.slice/run-u7.scope/qdistro-polkit-agent.service",
                 f"{base}/evil.slice/qdistro-polkit-agent.service",
-                f"{base}/app.slice/nested/qdistro-polkit-agent.service"):
+                f"{base}/app.slice/nested/qdistro-polkit-agent.service",
+                # The pre-r169 USER-unit path is no longer the agent —
+                # the agent runs under root-owned system.slice now.
+                f"{base}/app.slice/qdistro-polkit-agent.service",
+                f"{base}/session.slice/qdistro-polkit-agent.service",
+                # Same unit name under a system scope is not the unit.
+                "system.slice/run-ra9.scope/qdistro-polkit-agent.service",
+                "system.slice/qdistro-polkit-agent.service/extra"):
             broker._peer_cgroup_val = forged
             with pytest.raises(dbus.DBusException):
                 _file_polkit(broker)
@@ -690,14 +691,15 @@ class TestPolkitAgentPeerBinding:
             _file_polkit(broker)
         assert broker._pending == {}
 
-    def test_a_process_not_spawned_by_the_user_manager_is_rejected(
+    def test_a_process_not_spawned_by_init_is_rejected(
             self, broker):
-        """The unit's cgroup.procs is uid-writable — a foreign process
-        can migrate into the agent's real cgroup (sol r164), present
-        perfect exe/argv/env, and would pass every attribute check.
-        Its PPID stays its own launcher, never the user manager —
-        only systemd-spawned unit children are the agent (sol r168)."""
-        # Foreign parent (a shell, systemd-run --scope, …)
+        """Only init spawns a system service's main process. A foreign
+        process presenting the perfect exe/argv/env — whether it somehow
+        reached the unit cgroup or simply lies about its attributes —
+        keeps its own parent pid, so only PPID=1 peers pass (sol
+        r168/r169)."""
+        # Foreign parent (a shell, systemd-run --scope, a migrated
+        # cgroup squatter, …)
         broker._peer_ppid_val = 9999
         with pytest.raises(dbus.DBusException):
             _file_polkit(broker)
@@ -705,14 +707,9 @@ class TestPolkitAgentPeerBinding:
         broker._peer_ppid_val = None
         with pytest.raises(dbus.DBusException):
             _file_polkit(broker)
-        broker._peer_ppid_val = 4242
-        # No user manager (not running / lingering off) fails closed.
-        broker._manager_pids = set()
-        with pytest.raises(dbus.DBusException):
-            _file_polkit(broker)
-        broker._manager_pids = {4242}
         assert broker._pending == {}
-        # And the manager-spawned shape still admits the real agent.
+        # And the init-spawned shape still admits the real agent.
+        broker._peer_ppid_val = 1
         rid = _file_polkit(broker, "cookie-ok", [IDENT_ROOT])
         assert rid in broker._pending
 

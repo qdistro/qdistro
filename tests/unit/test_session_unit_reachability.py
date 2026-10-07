@@ -431,17 +431,23 @@ def test_polkit_agent_enable_cannot_fail_silently():
     a ``| tail -5 || true``, and the script printed OK regardless. The agent
     was disabled and had never run — VM-verified 2026-07-26.
 
-    Two properties, both needed: the enable is ``--global`` (no user manager
-    required), and its failure is fatal rather than swallowed.
+    The agent is now a SYSTEM unit (User=admin; sol r169 — a user unit's
+    environment and drop-ins are same-uid writable, so its launch env could
+    not be sealed). Two properties, both needed: the enable goes through the
+    system manager (``systemctl enable`` — a pure symlink write, no running
+    manager required), and its failure is fatal rather than swallowed.
     """
     text = (_INSTALL_DIR / "install-polkit-agent-for-vm.sh").read_text()
-    assert re.search(
-        r"systemctl\s+--global\s+enable[^\n]*qdistro-polkit-agent\.service",
-        text), "the polkit agent is no longer enabled with --global"
     assert not re.search(
         r"systemctl\s+--user\s+enable[^\n]*qdistro-polkit-agent", text), (
         "back to a per-user enable, which cannot work at this chain position")
-    enable_line = next(ln for ln in text.replace("\\\n", " ").splitlines()
-                       if re.search(r"--global\s+enable.*polkit-agent", ln))
+    assert not re.search(
+        r"systemctl\s+--global\s+enable[^\n]*qdistro-polkit-agent", text), (
+        "a --global user-manager enable no longer applies — the agent is "
+        "a system unit now and needs a system-manager enable")
+    enable_line = next((ln for ln in text.replace("\\\n", " ").splitlines()
+                        if re.search(r"systemctl\s+enable[^\n]*"
+                                     r"qdistro-polkit-agent", ln)), "")
+    assert enable_line, "nothing enables qdistro-polkit-agent.service"
     assert "|| true" not in enable_line, (
         "the polkit agent enable swallows its own failure again")

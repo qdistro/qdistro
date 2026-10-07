@@ -1169,14 +1169,26 @@ def main() -> int:
     # needs its thread support initialised before connections are shared
     # across threads.
     dbus.mainloop.glib.threads_init()
-    bus = dbus.SessionBus()
     try:
-        bus.request_name(AGENT_BUS, dbus.bus.NAME_FLAG_DO_NOT_QUEUE)
+        bus = dbus.SessionBus()
     except dbus.DBusException as e:
-        syslog.syslog(syslog.LOG_ERR, f"request_name failed: {e}")
-        print(f"qdistro-polkit-agent: cannot claim {AGENT_BUS}: {e}",
-              file=sys.stderr)
-        return 1
+        # The agent is a system service now, so systemd already runs
+        # exactly one instance — the session-bus name was only ever the
+        # per-session singleton guard for the old user-unit form. A
+        # missing session bus (user manager not up yet) must not
+        # crash-loop the service.
+        syslog.syslog(syslog.LOG_WARNING,
+                      f"session bus unavailable ({e}); continuing "
+                      "without the singleton guard")
+        bus = None
+    else:
+        try:
+            bus.request_name(AGENT_BUS, dbus.bus.NAME_FLAG_DO_NOT_QUEUE)
+        except dbus.DBusException as e:
+            syslog.syslog(syslog.LOG_ERR, f"request_name failed: {e}")
+            print(f"qdistro-polkit-agent: cannot claim {AGENT_BUS}: {e}",
+                  file=sys.stderr)
+            return 1
     # The session-bus name above is only the per-session singleton guard: it
     # stops two agents racing in one login. The AGENT OBJECT must live on the
     # SYSTEM bus, on the same connection we register from.
