@@ -138,7 +138,16 @@ if [ "$SAMPLES" -gt 0 ]; then
     # desktop frame before the window maps -> diff with the windowed frame
     # gives the target window's rect, so a post-key change can be verified
     # to land INSIDE the focused window rather than anywhere on screen
-    shot() { virsh -c qemu:///session screenshot "$VM" "$1" >/dev/null 2>&1 && [ -s "$1" ]; }
+    # screendump can flake on a contended host — retry a few times
+    shot() {
+        local i
+        for i in 1 2 3; do
+            virsh -c qemu:///session screenshot "$VM" "$1" >/dev/null 2>&1 \
+                && [ -s "$1" ] && return 0
+            sleep 1
+        done
+        return 1
+    }
     # settle the desk frame: teardown animations from the last pass must be
     # finished or the desk->win diff (the window rect) picks them up
     for _ in $(seq 1 10); do
@@ -149,12 +158,18 @@ if [ "$SAMPLES" -gt 0 ]; then
     if ssh_vm 'cd /var/tmp/t3s-dl && bash bench-guest.sh latency-up' | tee "$L/latency-up.log" | grep -q LATENCY-WINDOW-UP; then
         sleep 3
         winrect=""
-        if shot "$STAGE/win.ppm" && [ -s "$STAGE/desk.ppm" ]; then
-            # dense-region bbox: the window body — a panel-clock tick or
-            # icon repaint in the same frame can't widen the rect
-            winrect=$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/win.ppm" rect)
-            case "$winrect" in diff*) winrect=${winrect#diff } ;; *) winrect="" ;; esac
-        fi
+        # localization is mandatory but a single frame can lag/flake —
+        # retry the windowed shot; if the rect never resolves the run fails
+        for _ in $(seq 1 10); do
+            if shot "$STAGE/win.ppm" && [ -s "$STAGE/desk.ppm" ]; then
+                # dense-region bbox: the window body — a panel-clock tick or
+                # icon repaint in the same frame can't widen the rect
+                winrect=$(python3 "$here/ppmdiff.py" "$STAGE/desk.ppm" "$STAGE/win.ppm" rect)
+                case "$winrect" in diff*) winrect=${winrect#diff } ;; *) winrect="" ;; esac
+            fi
+            [ -n "$winrect" ] && break
+            sleep 2
+        done
         : > "$L/latency.log"
         if [ -z "$winrect" ]; then
             echo "   latency: window rect detection failed — cannot scope the oracle" >&2
